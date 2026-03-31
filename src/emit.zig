@@ -18,18 +18,18 @@ pub fn emitResolved(allocator: std.mem.Allocator, block: *const DesignBlock) ![]
 
     // Instances (flattened)
     try w.writeAll("\n\n  (instances");
-    try emitInstances(w, block, "");
+    try emitInstances(allocator, w, block, "");
     try w.writeByte(')');
 
     // Nets (flattened)
     try w.writeAll("\n\n  (nets");
-    try emitNets(w, block, "");
+    try emitNets(allocator, w, block, "");
     try w.writeByte(')');
 
     // Ports (flattened)
     if (block.ports.len > 0 or block.sub_blocks.len > 0) {
         try w.writeAll("\n\n  (ports");
-        try emitPorts(w, block, "");
+        try emitPorts(allocator, w, block, "");
         try w.writeByte(')');
     }
 
@@ -43,7 +43,7 @@ pub fn emitResolved(allocator: std.mem.Allocator, block: *const DesignBlock) ![]
     // Notes (flattened)
     if (hasNotes(block)) {
         try w.writeAll("\n\n  (notes");
-        try emitNotes(w, block, "");
+        try emitNotes(allocator, w, block, "");
         try w.writeByte(')');
     }
 
@@ -51,7 +51,7 @@ pub fn emitResolved(allocator: std.mem.Allocator, block: *const DesignBlock) ![]
     return buf.toOwnedSlice(allocator);
 }
 
-fn emitInstances(w: anytype, block: *const DesignBlock, prefix: []const u8) !void {
+fn emitInstances(allocator: std.mem.Allocator, w: anytype, block: *const DesignBlock, prefix: []const u8) !void {
     for (block.instances) |inst| {
         try w.writeAll("\n    (instance ");
         try writePrefixedString(w, prefix, inst.ref_des);
@@ -63,30 +63,48 @@ fn emitInstances(w: anytype, block: *const DesignBlock, prefix: []const u8) !voi
         try writeString(w, inst.footprint);
         try w.writeAll(")\n      (symbol ");
         try writeString(w, inst.symbol);
-        try w.writeAll("))");
+        try w.writeByte(')');
+        if (inst.attrs.len > 0) {
+            try w.writeAll("\n      (attrs");
+            for (inst.attrs) |attr| {
+                try w.writeByte(' ');
+                try w.writeAll(attr);
+            }
+            try w.writeByte(')');
+        }
+        if (inst.uuid.len > 0) {
+            try w.writeAll("\n      (uuid ");
+            try writeString(w, inst.uuid);
+            try w.writeByte(')');
+        }
+        try w.writeByte(')');
     }
     for (block.sub_blocks) |sb| {
-        try emitInstances(w, sb.block, try prefixStr(w, prefix, sb.name));
+        const child_prefix = try buildPrefix(allocator, prefix, sb.name);
+        defer if (prefix.len > 0) allocator.free(child_prefix);
+        try emitInstances(allocator, w, sb.block, child_prefix);
     }
 }
 
-fn emitNets(w: anytype, block: *const DesignBlock, prefix: []const u8) !void {
+fn emitNets(allocator: std.mem.Allocator, w: anytype, block: *const DesignBlock, prefix: []const u8) !void {
     for (block.nets) |net| {
         try w.writeAll("\n    (net ");
         try writePrefixedString(w, prefix, net.name);
         for (net.pins) |pin| {
             try w.writeAll("\n      (pin ");
             try writePrefixedString(w, prefix, pin.ref_des);
-            try w.print(" {d})", .{pin.pin});
+            try w.print(" {s})", .{pin.pin});
         }
         try w.writeByte(')');
     }
     for (block.sub_blocks) |sb| {
-        try emitNets(w, sb.block, try prefixStr(w, prefix, sb.name));
+        const child_prefix = try buildPrefix(allocator, prefix, sb.name);
+        defer if (prefix.len > 0) allocator.free(child_prefix);
+        try emitNets(allocator, w, sb.block, child_prefix);
     }
 }
 
-fn emitPorts(w: anytype, block: *const DesignBlock, prefix: []const u8) !void {
+fn emitPorts(allocator: std.mem.Allocator, w: anytype, block: *const DesignBlock, prefix: []const u8) !void {
     for (block.ports) |port| {
         try w.writeAll("\n    (port ");
         try writePrefixedString(w, prefix, port.name);
@@ -99,7 +117,9 @@ fn emitPorts(w: anytype, block: *const DesignBlock, prefix: []const u8) !void {
         try w.writeByte(')');
     }
     for (block.sub_blocks) |sb| {
-        try emitPorts(w, sb.block, try prefixStr(w, prefix, sb.name));
+        const child_prefix = try buildPrefix(allocator, prefix, sb.name);
+        defer if (prefix.len > 0) allocator.free(child_prefix);
+        try emitPorts(allocator, w, sb.block, child_prefix);
     }
 }
 
@@ -132,7 +152,7 @@ fn emitHierarchy(w: anytype, block: *const DesignBlock) !void {
     }
 }
 
-fn emitNotes(w: anytype, block: *const DesignBlock, prefix: []const u8) !void {
+fn emitNotes(allocator: std.mem.Allocator, w: anytype, block: *const DesignBlock, prefix: []const u8) !void {
     for (block.notes) |note| {
         try w.writeAll("\n    (note ");
         try writePrefixedString(w, prefix, note.ref_des);
@@ -141,7 +161,9 @@ fn emitNotes(w: anytype, block: *const DesignBlock, prefix: []const u8) !void {
         try w.writeByte(')');
     }
     for (block.sub_blocks) |sb| {
-        try emitNotes(w, sb.block, try prefixStr(w, prefix, sb.name));
+        const child_prefix = try buildPrefix(allocator, prefix, sb.name);
+        defer if (prefix.len > 0) allocator.free(child_prefix);
+        try emitNotes(allocator, w, sb.block, child_prefix);
     }
 }
 
@@ -171,18 +193,11 @@ fn writePrefixedString(w: anytype, prefix: []const u8, name: []const u8) !void {
     try w.writeByte('"');
 }
 
-/// Build a prefix string. We use a simple static buffer approach since
-/// this is only for output emission.
-var prefix_buf: [256]u8 = undefined;
-
-fn prefixStr(_: anytype, prefix: []const u8, name: []const u8) ![]const u8 {
+/// Build a hierarchical prefix string. Returns `name` when prefix is empty
+/// (no allocation), or an allocated "prefix/name" string otherwise.
+fn buildPrefix(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8) ![]const u8 {
     if (prefix.len == 0) return name;
-    const total = prefix.len + 1 + name.len;
-    if (total > prefix_buf.len) return error.OutOfMemory;
-    @memcpy(prefix_buf[0..prefix.len], prefix);
-    prefix_buf[prefix.len] = '/';
-    @memcpy(prefix_buf[prefix.len + 1 ..][0..name.len], name);
-    return prefix_buf[0..total];
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name });
 }
 
 // Tests

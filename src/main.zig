@@ -6,6 +6,9 @@ const emit = @import("emit.zig");
 const footprint_conv = @import("convert/footprint.zig");
 const symbol_conv = @import("convert/symbol.zig");
 const serve_mod = @import("serve.zig");
+const export_kicad = @import("export_kicad.zig");
+const bom = @import("bom.zig");
+const render_block = @import("render_block.zig");
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
@@ -50,9 +53,41 @@ pub fn main() !void {
             }
         }
         try cmdConvertSymbol(allocator, args[2], filter);
+    } else if (std.mem.eql(u8, command, "convert-package")) {
+        // (convert-package <symbol.kicad_sym> <footprint.kicad_mod> [--name <n>] [--filter <f>])
+        if (args.len < 4) {
+            std.debug.print("Usage: eda convert-package <file.kicad_sym> <file.kicad_mod> [--name <n>] [--filter <f>]\n", .{});
+            std.process.exit(1);
+        }
+        var pkg_name: ?[]const u8 = null;
+        var filter: ?[]const u8 = null;
+        var i: usize = 4;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--name") and i + 1 < args.len) { pkg_name = args[i + 1]; i += 1; }
+            if (std.mem.eql(u8, args[i], "--filter") and i + 1 < args.len) { filter = args[i + 1]; i += 1; }
+        }
+        try cmdConvertPackage(allocator, args[2], args[3], pkg_name orelse "package", filter);
+    } else if (std.mem.eql(u8, command, "convert-pinout")) {
+        if (args.len < 3) {
+            std.debug.print("Usage: eda convert-pinout <file.kicad_sym> [--filter <name>]\n", .{});
+            std.process.exit(1);
+        }
+        var filter: ?[]const u8 = null;
+        var i: usize = 3;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--filter") and i + 1 < args.len) {
+                filter = args[i + 1];
+                i += 1;
+            }
+        }
+        try cmdConvertPinout(allocator, args[2], filter);
+    } else if (std.mem.eql(u8, command, "block-diagram")) {
+        try cmdBlockDiagram(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "export-kicad")) {
+        try cmdExportKicad(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "serve")) {
         var project_dir: []const u8 = ".";
-        var port: u16 = 7040;
+        var port: u16 = 7050;
         var si: usize = 2;
         while (si < args.len) : (si += 1) {
             if (std.mem.eql(u8, args[si], "--project-dir") and si + 1 < args.len) {
@@ -126,6 +161,56 @@ fn cmdRender(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 }
 
+fn cmdBlockDiagram(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var project_dir: []const u8 = ".";
+    var design_file: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--project-dir") and i + 1 < args.len) {
+            project_dir = args[i + 1];
+            i += 1;
+        } else {
+            design_file = args[i];
+        }
+    }
+
+    const board_path = if (design_file) |f|
+        std.fmt.allocPrint(allocator, "{s}/src/{s}", .{ project_dir, f }) catch {
+            std.debug.print("Out of memory\n", .{});
+            std.process.exit(1);
+        }
+    else
+        std.fmt.allocPrint(allocator, "{s}/src/board.sexp", .{project_dir}) catch {
+            std.debug.print("Out of memory\n", .{});
+            std.process.exit(1);
+        };
+    defer allocator.free(board_path);
+
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+
+    const result = eval.evalFile(board_path) catch |err| {
+        std.debug.print("Build error: {}\n", .{err});
+        std.process.exit(1);
+    };
+
+    switch (result) {
+        .design_block => |block| {
+            const svg = render_block.renderBlockDiagram(allocator, block) catch {
+                std.debug.print("Render error\n", .{});
+                std.process.exit(1);
+            };
+            defer allocator.free(svg);
+            const file = std.fs.File.stdout();
+            try file.writeAll(svg);
+        },
+        else => {
+            std.debug.print("Build did not produce a design block\n", .{});
+            std.process.exit(1);
+        },
+    }
+}
+
 fn cmdParse(allocator: std.mem.Allocator, path: []const u8) !void {
     const source = std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
         std.debug.print("Error reading {s}: {}\n", .{ path, err });
@@ -151,7 +236,7 @@ fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var project_dir: []const u8 = ".";
     var push_name: ?[]const u8 = null;
     var output_dir: ?[]const u8 = null;
-    var server_url: []const u8 = "http://localhost:9000";
+    var server_url: []const u8 = "http://localhost:7050";
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--project-dir") and i + 1 < args.len) {
@@ -210,6 +295,18 @@ fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     switch (result) {
         .design_block => |block| {
+            // Resolve stable UUIDs for PCB identity tracking
+            const design_name = push_name orelse "board";
+            const ids_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, design_name }) catch {
+                std.debug.print("Out of memory\n", .{});
+                std.process.exit(1);
+            };
+            defer allocator.free(ids_path);
+            bom.resolveIdentities(allocator, block, ids_path, project_dir) catch |err| {
+                std.debug.print("Identity resolution error: {}\n", .{err});
+                std.process.exit(1);
+            };
+
             const output = emit.emitResolved(allocator, block) catch {
                 std.debug.print("Emit error\n", .{});
                 std.process.exit(1);
@@ -264,6 +361,87 @@ fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 }
 
+fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var project_dir: []const u8 = ".";
+    var output_dir: ?[]const u8 = null;
+    var design_name: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--project-dir") and i + 1 < args.len) {
+            project_dir = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--output-dir") and i + 1 < args.len) {
+            output_dir = args[i + 1];
+            i += 1;
+        } else {
+            design_name = args[i];
+        }
+    }
+
+    const name = design_name orelse {
+        std.debug.print("Usage: eda export-kicad --project-dir <d> --output-dir <out> <design-name>\n", .{});
+        std.process.exit(1);
+    };
+    const out = output_dir orelse {
+        std.debug.print("Usage: eda export-kicad --project-dir <d> --output-dir <out> <design-name>\n", .{});
+        std.process.exit(1);
+    };
+
+    const board_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name }) catch {
+        std.debug.print("Out of memory\n", .{});
+        std.process.exit(1);
+    };
+    defer allocator.free(board_path);
+
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+
+    const result = eval.evalFile(board_path) catch |err| {
+        std.debug.print("Build error: {}\n", .{err});
+        std.process.exit(1);
+    };
+
+    var has_failure = false;
+    for (eval.assertions.items) |assertion| {
+        if (assertion.passed) {
+            std.debug.print("PASS: {s}\n", .{assertion.message});
+        } else {
+            std.debug.print("FAIL: {s}\n", .{assertion.message});
+            has_failure = true;
+        }
+    }
+
+    if (has_failure) {
+        std.debug.print("Build failed: assertion violations\n", .{});
+        std.process.exit(1);
+    }
+
+    switch (result) {
+        .design_block => |block| {
+            // Resolve stable UUIDs for PCB identity tracking
+            const ids_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name }) catch {
+                std.debug.print("Out of memory\n", .{});
+                std.process.exit(1);
+            };
+            defer allocator.free(ids_path);
+            bom.resolveIdentities(allocator, block, ids_path, project_dir) catch |err| {
+                std.debug.print("Identity resolution error: {}\n", .{err});
+                std.process.exit(1);
+            };
+
+            export_kicad.exportKicad(allocator, block, project_dir, out, name) catch |err| {
+                std.debug.print("Export error: {}\n", .{err});
+                std.process.exit(1);
+            };
+            std.debug.print("KiCad export complete: {s}/\n", .{out});
+        },
+        else => {
+            std.debug.print("Build did not produce a design block\n", .{});
+            std.process.exit(1);
+        },
+    }
+}
+
 fn cmdConvertFootprint(allocator: std.mem.Allocator, path: []const u8) !void {
     const source = std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
         std.debug.print("Error reading {s}: {}\n", .{ path, err });
@@ -272,6 +450,45 @@ fn cmdConvertFootprint(allocator: std.mem.Allocator, path: []const u8) !void {
     defer allocator.free(source);
 
     const output = footprint_conv.convertFootprint(allocator, source) catch |err| {
+        std.debug.print("Convert error: {}\n", .{err});
+        std.process.exit(1);
+    };
+    defer allocator.free(output);
+
+    const file = std.fs.File.stdout();
+    try file.writeAll(output);
+}
+
+fn cmdConvertPackage(allocator: std.mem.Allocator, sym_path: []const u8, fp_path: []const u8, name: []const u8, filter: ?[]const u8) !void {
+    const sym_source = std.fs.cwd().readFileAlloc(allocator, sym_path, 10 * 1024 * 1024) catch |err| {
+        std.debug.print("Error reading {s}: {}\n", .{ sym_path, err });
+        std.process.exit(1);
+    };
+    defer allocator.free(sym_source);
+    const fp_source = std.fs.cwd().readFileAlloc(allocator, fp_path, 10 * 1024 * 1024) catch |err| {
+        std.debug.print("Error reading {s}: {}\n", .{ fp_path, err });
+        std.process.exit(1);
+    };
+    defer allocator.free(fp_source);
+
+    const output = symbol_conv.generatePackage(allocator, sym_source, fp_source, name, filter) catch |err| {
+        std.debug.print("Convert error: {}\n", .{err});
+        std.process.exit(1);
+    };
+    defer allocator.free(output);
+
+    const file = std.fs.File.stdout();
+    try file.writeAll(output);
+}
+
+fn cmdConvertPinout(allocator: std.mem.Allocator, path: []const u8, filter: ?[]const u8) !void {
+    const source = std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
+        std.debug.print("Error reading {s}: {}\n", .{ path, err });
+        std.process.exit(1);
+    };
+    defer allocator.free(source);
+
+    const output = symbol_conv.generatePinout(allocator, source, filter) catch |err| {
         std.debug.print("Convert error: {}\n", .{err});
         std.process.exit(1);
     };
@@ -300,7 +517,7 @@ fn cmdConvertSymbol(allocator: std.mem.Allocator, path: []const u8, filter: ?[]c
 
 fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var project_dir: []const u8 = ".";
-    var server_url: []const u8 = "http://localhost:9000";
+    var server_url: []const u8 = "http://localhost:7050";
     var slug: []const u8 = "live";
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -446,8 +663,10 @@ fn printUsage() !void {
         \\  eda parse <file>                   Parse and pretty-print an S-expression file
         \\  eda build [--project-dir <d>]       Evaluate and emit resolved design
         \\  eda serve [--project-dir <d>] [--port <n>]  Start web server (default port 7040)
+        \\  eda export-kicad --project-dir <d> --output-dir <out> <name>  Export KiCad netlist + footprints
         \\  eda convert-footprint <file>        Convert KiCad .kicad_mod to .sexp
         \\  eda convert-symbol <file> [--filter <name>]  Convert KiCad .kicad_sym to .sexp
+        \\  eda convert-pinout <file> [--filter <name>]  Generate pinout from KiCad .kicad_sym
         \\  eda help                            Show this help
         \\
     );
@@ -466,6 +685,7 @@ test {
     _ = @import("emit.zig");
     _ = @import("convert/footprint.zig");
     _ = @import("convert/symbol.zig");
+    _ = @import("export_kicad.zig");
     _ = @import("serve.zig");
     _ = @import("render_svg.zig");
 }

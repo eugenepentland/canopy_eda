@@ -31,8 +31,6 @@ const FlatInst = struct {
     value: []const u8,
     symbol: []const u8,
     parts: []const env_mod.Part = &.{},
-    row: i32 = 0,
-    col: i32 = 0,
 };
 
 const FlatNet = struct {
@@ -45,12 +43,12 @@ const Side = enum { left, right };
 /// An endpoint in the adjacency list — either a named net or a pin on another component.
 const Endpoint = union(enum) {
     net: []const u8,
-    pin: struct { ref_des: []const u8, pin: i64 },
+    pin: struct { ref_des: []const u8, pin: []const u8 },
 };
 
-/// A connection entry: (pin_number, endpoint).
+/// A connection entry: (pin_id, endpoint).
 const AdjEntry = struct {
-    pin: i64,
+    pin: []const u8,
     endpoint: Endpoint,
 };
 
@@ -74,6 +72,13 @@ pub fn renderSchematic(allocator: Allocator, block: *const DesignBlock) ![]const
     // Flatten hierarchy
     try ctx.collectFlat(block, "");
 
+    // Build section membership map (ref_des → section index)
+    for (block.sections, 0..) |sec, si| {
+        for (sec.instances) |inst| {
+            try ctx.section_map.put(allocator, inst.ref_des, si);
+        }
+    }
+
     // Build pin→net lookup
     try ctx.buildPinNetMap();
 
@@ -95,101 +100,149 @@ pub fn renderSchematic(allocator: Allocator, block: *const DesignBlock) ![]const
     // Build canonical net for each hub pin
     try ctx.buildPinCanonicalNets();
 
+    // Validate net consistency
+    try ctx.validateNetConsistency();
+
     // Render
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
 
-    // Collect grid cells: each is a (hub, optional part, row, col)
+    // Build grid cells from sections (auto grid layout).
+    // Each section = one grid cell. Hubs not in any section go into an implicit cell.
     const GridCell = struct {
         hub: FlatInst,
         part: ?env_mod.Part,
-        row: i32,
-        col: i32,
+        section_idx: usize, // index into section_grid
     };
+
+    // Build section membership: ref_des → section index
+    const SectionInfo = struct {
+        name: []const u8,
+        description: []const u8,
+        notes: []const []const u8,
+        cell_indices: std.ArrayListUnmanaged(usize),
+    };
+    var section_grid: std.ArrayListUnmanaged(SectionInfo) = .empty;
+    var ref_to_section = std.StringHashMap(usize).init(allocator);
+
+    for (block.sections) |sec| {
+        const sec_idx = section_grid.items.len;
+        try section_grid.append(allocator, .{ .name = sec.name, .description = sec.description, .notes = sec.notes, .cell_indices = .empty });
+        // Register instances declared in this section
+        for (sec.instances) |inst| {
+            try ref_to_section.put(inst.ref_des, sec_idx);
+        }
+        // Register pin_group refs (the multi-section instance parts)
+        // pin_groups create Part entries on instances, matched by section name below
+    }
+
     var cells: std.ArrayListUnmanaged(GridCell) = .empty;
 
     for (ctx.hub_order.items) |hub_ref| {
         const hub = ctx.inst_map.get(hub_ref) orelse continue;
         if (hub.parts.len > 0) {
+            // Multi-part: each part goes to the section with matching name
             for (hub.parts) |part| {
-                try cells.append(allocator, .{ .hub = hub, .part = part, .row = part.row, .col = part.col });
+                var sec_idx: usize = 0;
+                for (section_grid.items, 0..) |sg, si| {
+                    if (std.mem.eql(u8, sg.name, part.name)) {
+                        sec_idx = si;
+                        break;
+                    }
+                }
+                const ci = cells.items.len;
+                try cells.append(allocator, .{ .hub = hub, .part = part, .section_idx = sec_idx });
+                try section_grid.items[sec_idx].cell_indices.append(allocator, ci);
             }
         } else {
-            try cells.append(allocator, .{ .hub = hub, .part = null, .row = hub.row, .col = hub.col });
+            // Simple instance: find section by ref_des
+            const sec_idx = ref_to_section.get(hub.ref_des) orelse blk: {
+                // No section — create or reuse an implicit "Other" section
+                for (section_grid.items, 0..) |sg, si| {
+                    if (std.mem.eql(u8, sg.name, hub.component)) break :blk si;
+                }
+                const si = section_grid.items.len;
+                try section_grid.append(allocator, .{ .name = hub.component, .description = "", .notes = &.{}, .cell_indices = .empty });
+                break :blk si;
+            };
+            const ci = cells.items.len;
+            try cells.append(allocator, .{ .hub = hub, .part = null, .section_idx = sec_idx });
+            try section_grid.items[sec_idx].cell_indices.append(allocator, ci);
         }
     }
 
-    // Find grid dimensions
-    var max_row: i32 = 0;
-    var max_col: i32 = 0;
-    for (cells.items) |cell| {
-        if (cell.row > max_row) max_row = cell.row;
-        if (cell.col > max_col) max_col = cell.col;
-    }
-    const n_cols: usize = @intCast(max_col + 1);
+    // Auto grid dimensions: aim for roughly square
+    const n_sections = section_grid.items.len;
+    const n_cols: usize = if (n_sections == 0) 1 else blk: {
+        var c: usize = 1;
+        while (c * c < n_sections) : (c += 1) {}
+        break :blk c;
+    };
+    const n_rows: usize = if (n_sections == 0) 1 else (n_sections + n_cols - 1) / n_cols;
 
     // Grid layout constants
     const cell_width: f64 = 850.0;
     const cell_gap_y: f64 = 30.0;
     const cell_gap_x: f64 = 40.0;
-    const section_pad: f64 = 30.0; // padding inside section box
-    const title_height: f64 = 24.0; // space for section title
+    const section_pad: f64 = 30.0;
+    const title_font_size: f64 = 24.0;
+    const desc_font_size: f64 = 15.0;
+    const note_font_size: f64 = 11.0;
+    const note_line_height: f64 = 15.0;
 
-    // Pass 1: Measure cell heights by rendering to a throwaway buffer
+    // Compute per-section header height (title + optional description)
+    var section_header_heights = try allocator.alloc(f64, section_grid.items.len);
+    defer allocator.free(section_header_heights);
+    for (section_grid.items, 0..) |sg, si| {
+        var h: f64 = title_font_size + 12.0; // title + padding
+        if (sg.description.len > 0) h += desc_font_size + 6.0;
+        section_header_heights[si] = h;
+    }
+
+    // Compute per-section footer height (notes)
+    var section_footer_heights = try allocator.alloc(f64, section_grid.items.len);
+    defer allocator.free(section_footer_heights);
+    for (section_grid.items, 0..) |sg, si| {
+        if (sg.notes.len > 0) {
+            section_footer_heights[si] = @as(f64, @floatFromInt(sg.notes.len)) * note_line_height + 16.0;
+        } else {
+            section_footer_heights[si] = 0;
+        }
+    }
+
+    // Pass 1: Measure cell heights
     var cell_heights = try allocator.alloc(f64, cells.items.len);
     defer allocator.free(cell_heights);
 
     for (cells.items, 0..) |cell, ci| {
         var measure_buf: std.ArrayListUnmanaged(u8) = .empty;
         const mw = measure_buf.writer(allocator);
-
-        // Reset rendered_spokes for measurement pass
-        // (we'll re-render for real in pass 2)
         cell_heights[ci] = if (cell.part) |part|
             try ctx.renderHubPart(mw, cell.hub, part, 0)
         else
             try ctx.renderHub(mw, cell.hub, 0);
-
         measure_buf.deinit(allocator);
     }
 
-    // Reset rendered_spokes after measurement
     ctx.rendered_spokes.clearRetainingCapacity();
 
-    // Compute row heights — for each (row, col) position, sum heights of
-    // stacked cells, then take the max across columns per row
-    var row_heights = try allocator.alloc(f64, @intCast(max_row + 1));
+    // Compute row heights from section grid positions
+    var row_heights = try allocator.alloc(f64, n_rows);
     defer allocator.free(row_heights);
     for (row_heights) |*rh| rh.* = 0;
 
-    // First, compute per-position accumulated heights
-    const PositionKey = struct { row: i32, col: i32 };
-    var pos_heights: std.ArrayListUnmanaged(struct { key: PositionKey, height: f64 }) = .empty;
-
-    for (cells.items, 0..) |cell, ci| {
-        const h = cell_heights[ci] + 40.0; // 40px gap between stacked hubs
-        var found_pos = false;
-        for (pos_heights.items) |*ph| {
-            if (ph.key.row == cell.row and ph.key.col == cell.col) {
-                ph.height += h;
-                found_pos = true;
-                break;
-            }
+    for (section_grid.items, 0..) |sg, si| {
+        const grid_row = si / n_cols;
+        var sec_height: f64 = 0;
+        for (sg.cell_indices.items) |ci| {
+            sec_height += cell_heights[ci] + 40.0;
         }
-        if (!found_pos) {
-            try pos_heights.append(allocator, .{ .key = .{ .row = cell.row, .col = cell.col }, .height = h });
-        }
-    }
-
-    // Row height = max position height across all columns in that row
-    for (pos_heights.items) |ph| {
-        const ri: usize = @intCast(ph.key.row);
-        const total = ph.height + section_pad * 2 + title_height;
-        if (total > row_heights[ri]) row_heights[ri] = total;
+        const total = sec_height + section_pad * 2 + section_header_heights[si] + section_footer_heights[si];
+        if (total > row_heights[grid_row]) row_heights[grid_row] = total;
     }
 
     // Compute row y-positions
-    const row_y_positions = try allocator.alloc(f64, @intCast(max_row + 1));
+    const row_y_positions = try allocator.alloc(f64, n_rows);
     defer allocator.free(row_y_positions);
     var y: f64 = top_margin;
     for (row_y_positions, 0..) |*ry, i| {
@@ -202,63 +255,51 @@ pub fn renderSchematic(allocator: Allocator, block: *const DesignBlock) ![]const
         total_width = @as(f64, @floatFromInt(n_cols)) * cell_width + @as(f64, @floatFromInt(n_cols - 1)) * cell_gap_x;
     }
 
-    // Pass 2: Group cells by (row, col) and render each group as one section
-    const CellKey = struct { row: i32, col: i32 };
-    var cell_groups: std.ArrayListUnmanaged(struct { key: CellKey, items: std.ArrayListUnmanaged(usize) }) = .empty;
+    // Pass 2: Render each section as a grid cell
+    for (section_grid.items, 0..) |sg, si| {
+        if (sg.cell_indices.items.len == 0) continue;
+        const grid_row = si / n_cols;
+        const grid_col = si % n_cols;
+        const x_offset = @as(f64, @floatFromInt(grid_col)) * (cell_width + cell_gap_x);
+        const cell_y = row_y_positions[grid_row];
+        const section_h = row_heights[grid_row];
+        const section_name = sg.name;
+        const box_x = x_offset + 8.0;
+        const box_w = cell_width - 16.0;
+        const center_x = x_offset + cell_width / 2.0;
+        const header_h = section_header_heights[si];
 
-    for (cells.items, 0..) |cell, ci| {
-        // Find or create group for this (row, col)
-        var found = false;
-        for (cell_groups.items) |*grp| {
-            if (grp.key.row == cell.row and grp.key.col == cell.col) {
-                try grp.items.append(allocator, ci);
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            var new_items: std.ArrayListUnmanaged(usize) = .empty;
-            try new_items.append(allocator, ci);
-            try cell_groups.append(allocator, .{ .key = .{ .row = cell.row, .col = cell.col }, .items = new_items });
-        }
-    }
-
-    for (cell_groups.items) |grp| {
-        const ri: usize = @intCast(grp.key.row);
-        const col_idx: usize = @intCast(grp.key.col);
-        const x_offset = @as(f64, @floatFromInt(col_idx)) * (cell_width + cell_gap_x);
-        const cell_y = row_y_positions[ri];
-        const section_h = row_heights[ri];
-
-        // Section title: use (section) name if defined, otherwise first cell's name
-        var section_name: []const u8 = "";
-        for (block.sections) |sec| {
-            if (sec.row == grp.key.row and sec.col == grp.key.col) {
-                section_name = sec.name;
-                break;
-            }
-        }
-        if (section_name.len == 0) {
-            const first_cell = cells.items[grp.items.items[0]];
-            section_name = if (first_cell.part) |part| part.name else first_cell.hub.component;
-        }
+        // Section wrapper
+        try w.writeAll("<g class=\"section\" data-section=\"");
+        try w.writeAll(section_name);
+        try w.writeAll("\">\n");
 
         // Draw section box
-        if (cells.items.len > 1) {
+        if (section_grid.items.len > 1 or sg.cell_indices.items.len > 0) {
             try w.print(
                 \\<rect x="{d:.1}" y="{d:.1}" width="{d:.0}" height="{d:.1}" rx="8" fill="#0d1117" stroke="#21262d" stroke-width="1.5" pointer-events="none"/>
-                \\<text x="{d:.1}" y="{d:.1}" font-size="13" font-weight="bold" fill="#8b949e" pointer-events="none">{s}</text>
                 \\
-            , .{
-                x_offset + 8.0, cell_y, cell_width - 16.0, section_h,
-                x_offset + 20.0, cell_y + 18.0, section_name,
-            });
+            , .{ box_x, cell_y, box_w, section_h });
+
+            // Centered title
+            try w.print(
+                \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="{d:.0}" font-weight="bold" fill="#8b949e" pointer-events="none">{s}</text>
+                \\
+            , .{ center_x, cell_y + title_font_size + 6.0, title_font_size, section_name });
+
+            // Optional description under title
+            if (sg.description.len > 0) {
+                try w.print(
+                    \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="{d:.0}" fill="#6e7681" font-style="italic" pointer-events="none">{s}</text>
+                    \\
+                , .{ center_x, cell_y + title_font_size + 6.0 + desc_font_size + 6.0, desc_font_size, sg.description });
+            }
         }
 
-        // Render all hubs/parts in this group stacked vertically
+        // Render all hubs/parts in this section stacked vertically
         try w.print("<g transform=\"translate({d:.0},0)\">\n", .{x_offset});
-        var content_y = cell_y + title_height + section_pad;
-        for (grp.items.items) |ci| {
+        var content_y = cell_y + header_h + section_pad;
+        for (sg.cell_indices.items) |ci| {
             const cell = cells.items[ci];
             const h = if (cell.part) |part|
                 try ctx.renderHubPart(w, cell.hub, part, content_y)
@@ -266,6 +307,26 @@ pub fn renderSchematic(allocator: Allocator, block: *const DesignBlock) ![]const
                 try ctx.renderHub(w, cell.hub, content_y);
             content_y += h + 40.0;
         }
+        try w.writeAll("</g>\n");
+
+        // Notes at the bottom of the section
+        if (sg.notes.len > 0) {
+            const notes_y = cell_y + section_h - section_footer_heights[si] + 8.0;
+            // Separator line
+            try w.print(
+                \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#21262d" stroke-width="1" pointer-events="none"/>
+                \\
+            , .{ box_x + 12.0, notes_y, box_x + box_w - 12.0, notes_y });
+            var note_y = notes_y + note_line_height;
+            for (sg.notes) |note_text| {
+                try w.print(
+                    \\<text x="{d:.1}" y="{d:.1}" font-size="{d:.0}" fill="#6e7681" font-style="italic" pointer-events="none">{s}</text>
+                    \\
+                , .{ box_x + 16.0, note_y, note_font_size, note_text });
+                note_y += note_line_height;
+            }
+        }
+
         try w.writeAll("</g>\n");
     }
 
@@ -302,6 +363,274 @@ pub fn renderSchematic(allocator: Allocator, block: *const DesignBlock) ![]const
     return out.toOwnedSlice(allocator);
 }
 
+// ── BOM Table ──────────────────────────────────────────────────────────
+
+fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBlock, y_start: f64, table_width: f64) !f64 {
+    // Collect all instances (recursively through sub-blocks)
+    var all_instances: std.ArrayListUnmanaged(env_mod.Instance) = .empty;
+    defer all_instances.deinit(allocator);
+    try collectAllInstances(allocator, block, &all_instances);
+
+    if (all_instances.items.len == 0) return 0;
+
+    // Group by (component, value, footprint, attrs_key)
+    const BomKey = struct {
+        component: []const u8,
+        value: []const u8,
+        footprint: []const u8,
+        attrs_key: []const u8,
+    };
+    const BomEntry = struct {
+        key: BomKey,
+        count: u32,
+        ref_des_list: std.ArrayListUnmanaged([]const u8),
+        mpn: []const u8,
+        manufacturer: []const u8,
+    };
+
+    var entries: std.ArrayListUnmanaged(BomEntry) = .empty;
+    defer {
+        for (entries.items) |*e| e.ref_des_list.deinit(allocator);
+        entries.deinit(allocator);
+    }
+
+    for (all_instances.items) |inst| {
+        // Build attrs key string
+        const attrs_key = if (inst.attrs.len > 0) blk: {
+            var ab: std.ArrayListUnmanaged(u8) = .empty;
+            for (inst.attrs, 0..) |attr, ai| {
+                if (ai > 0) ab.append(allocator, ' ') catch {};
+                ab.appendSlice(allocator, attr) catch {};
+            }
+            break :blk ab.toOwnedSlice(allocator) catch "";
+        } else "";
+
+        // Find existing entry
+        var found = false;
+        for (entries.items) |*entry| {
+            if (std.mem.eql(u8, entry.key.component, inst.component) and
+                std.mem.eql(u8, entry.key.value, inst.value) and
+                std.mem.eql(u8, entry.key.footprint, inst.footprint) and
+                std.mem.eql(u8, entry.key.attrs_key, attrs_key))
+            {
+                entry.count += 1;
+                entry.ref_des_list.append(allocator, inst.ref_des) catch {};
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            // Extract MPN and manufacturer from properties
+            var mpn: []const u8 = "";
+            var manufacturer: []const u8 = "";
+            for (inst.properties) |prop| {
+                if (std.mem.eql(u8, prop.key, "mpn")) mpn = prop.value;
+                if (std.mem.eql(u8, prop.key, "manufacturer")) manufacturer = prop.value;
+            }
+            var ref_list: std.ArrayListUnmanaged([]const u8) = .empty;
+            ref_list.append(allocator, inst.ref_des) catch {};
+            entries.append(allocator, .{
+                .key = .{
+                    .component = inst.component,
+                    .value = inst.value,
+                    .footprint = inst.footprint,
+                    .attrs_key = attrs_key,
+                },
+                .count = 1,
+                .ref_des_list = ref_list,
+                .mpn = mpn,
+                .manufacturer = manufacturer,
+            }) catch {};
+        }
+    }
+
+    if (entries.items.len == 0) return 0;
+
+    // Sort by component name, then value
+    std.mem.sortUnstable(BomEntry, entries.items, {}, struct {
+        fn lt(_: void, a: BomEntry, b: BomEntry) bool {
+            const cmp = std.mem.order(u8, a.key.component, b.key.component);
+            if (cmp == .lt) return true;
+            if (cmp == .gt) return false;
+            return std.mem.order(u8, a.key.value, b.key.value) == .lt;
+        }
+    }.lt);
+
+    // Layout constants
+    const row_height: f64 = 20.0;
+    const header_height: f64 = 28.0;
+    const title_height: f64 = 30.0;
+    const pad_x: f64 = 12.0;
+    const font_size: f64 = 11.0;
+    const header_font: f64 = 11.0;
+    const x = 8.0;
+    const w_total = @min(table_width - 16.0, 1600.0);
+
+    // Column widths (proportional)
+    const col_qty: f64 = 40.0;
+    const col_refs: f64 = 160.0;
+    const col_value: f64 = 80.0;
+    const col_footprint: f64 = 120.0;
+    const col_attrs: f64 = 80.0;
+    const col_mpn: f64 = 200.0;
+    const col_mfr: f64 = 160.0;
+    const col_desc: f64 = w_total - col_qty - col_refs - col_value - col_footprint - col_attrs - col_mpn - col_mfr;
+
+    const cols = [_]struct { label: []const u8, width: f64 }{
+        .{ .label = "Qty", .width = col_qty },
+        .{ .label = "Ref Des", .width = col_refs },
+        .{ .label = "Value", .width = col_value },
+        .{ .label = "Package", .width = col_footprint },
+        .{ .label = "Type", .width = col_attrs },
+        .{ .label = "MPN", .width = col_mpn },
+        .{ .label = "Manufacturer", .width = col_mfr },
+        .{ .label = "Component", .width = col_desc },
+    };
+
+    const total_rows = entries.items.len;
+    const table_h = title_height + header_height + @as(f64, @floatFromInt(total_rows)) * row_height + 8.0;
+
+    // Background box
+    try w.print(
+        \\<g class="bom-table">
+        \\<rect x="{d:.1}" y="{d:.1}" width="{d:.0}" height="{d:.1}" rx="8" fill="#0d1117" stroke="#21262d" stroke-width="1.5" pointer-events="none"/>
+        \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="18" font-weight="bold" fill="#8b949e" pointer-events="none">Bill of Materials</text>
+        \\
+    , .{
+        x, y_start, w_total, table_h,
+        x + w_total / 2.0, y_start + 22.0,
+    });
+
+    // Header row
+    const header_y = y_start + title_height;
+    try w.print(
+        \\<rect x="{d:.1}" y="{d:.1}" width="{d:.0}" height="{d:.0}" fill="#161b22" pointer-events="none"/>
+        \\
+    , .{ x, header_y, w_total, header_height });
+
+    var cx: f64 = x;
+    for (cols) |col| {
+        try w.print(
+            \\<text x="{d:.1}" y="{d:.1}" font-size="{d:.0}" font-weight="bold" fill="#8b949e" pointer-events="none">{s}</text>
+            \\
+        , .{ cx + pad_x, header_y + 18.0, header_font, col.label });
+        cx += col.width;
+    }
+
+    // Header separator
+    try w.print(
+        \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#21262d" stroke-width="1" pointer-events="none"/>
+        \\
+    , .{ x, header_y + header_height, x + w_total, header_y + header_height });
+
+    // Data rows
+    var ry = header_y + header_height;
+    for (entries.items, 0..) |entry, ri| {
+        // Alternate row background
+        if (ri % 2 == 1) {
+            try w.print(
+                \\<rect x="{d:.1}" y="{d:.1}" width="{d:.0}" height="{d:.0}" fill="#0d1117" pointer-events="none"/>
+                \\
+            , .{ x, ry, w_total, row_height });
+        }
+
+        // Build ref-des string
+        var ref_buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer ref_buf.deinit(allocator);
+        for (entry.ref_des_list.items, 0..) |rd, rdi| {
+            if (rdi > 0) ref_buf.appendSlice(allocator, ", ") catch {};
+            ref_buf.appendSlice(allocator, rd) catch {};
+        }
+        const refs_str = ref_buf.items;
+
+        const text_y = ry + 14.0;
+        cx = x;
+
+        // Qty
+        try w.print(
+            \\<text x="{d:.1}" y="{d:.1}" font-size="{d:.0}" fill="#e0e0e0" pointer-events="none">{d}</text>
+            \\
+        , .{ cx + pad_x, text_y, font_size, entry.count });
+        cx += col_qty;
+
+        // Ref Des
+        try w.print(
+            \\<text x="{d:.1}" y="{d:.1}" font-size="{d:.0}" fill="#79c0ff" pointer-events="none">{s}</text>
+            \\
+        , .{ cx + pad_x, text_y, font_size, refs_str });
+        cx += col_refs;
+
+        // Value
+        try w.print(
+            \\<text x="{d:.1}" y="{d:.1}" font-size="{d:.0}" fill="#e0e0e0" pointer-events="none">{s}</text>
+            \\
+        , .{ cx + pad_x, text_y, font_size, entry.key.value });
+        cx += col_value;
+
+        // Package
+        try w.print(
+            \\<text x="{d:.1}" y="{d:.1}" font-size="{d:.0}" fill="#8b949e" pointer-events="none">{s}</text>
+            \\
+        , .{ cx + pad_x, text_y, font_size, entry.key.footprint });
+        cx += col_footprint;
+
+        // Type/attrs
+        if (entry.key.attrs_key.len > 0) {
+            try w.print(
+                \\<text x="{d:.1}" y="{d:.1}" font-size="{d:.0}" fill="#d2a8ff" pointer-events="none">{s}</text>
+                \\
+            , .{ cx + pad_x, text_y, font_size, entry.key.attrs_key });
+        }
+        cx += col_attrs;
+
+        // MPN
+        if (entry.mpn.len > 0) {
+            try w.print(
+                \\<text x="{d:.1}" y="{d:.1}" font-size="{d:.0}" fill="#e0e0e0" pointer-events="none">{s}</text>
+                \\
+            , .{ cx + pad_x, text_y, font_size, entry.mpn });
+        }
+        cx += col_mpn;
+
+        // Manufacturer
+        if (entry.manufacturer.len > 0) {
+            try w.print(
+                \\<text x="{d:.1}" y="{d:.1}" font-size="{d:.0}" fill="#8b949e" pointer-events="none">{s}</text>
+                \\
+            , .{ cx + pad_x, text_y, font_size, entry.manufacturer });
+        }
+        cx += col_mfr;
+
+        // Component
+        try w.print(
+            \\<text x="{d:.1}" y="{d:.1}" font-size="{d:.0}" fill="#8b949e" pointer-events="none">{s}</text>
+            \\
+        , .{ cx + pad_x, text_y, font_size, entry.key.component });
+
+        ry += row_height;
+    }
+
+    // Total count
+    var total_parts: u32 = 0;
+    for (entries.items) |entry| total_parts += entry.count;
+    try w.print(
+        \\<text x="{d:.1}" y="{d:.1}" font-size="11" fill="#6e7681" pointer-events="none">{d} unique lines, {d} total parts</text>
+        \\
+    , .{ x + pad_x, ry + 16.0, entries.items.len, total_parts });
+
+    try w.writeAll("</g>\n");
+    return table_h + 20.0;
+}
+
+fn collectAllInstances(allocator: Allocator, block: *const DesignBlock, out: *std.ArrayListUnmanaged(env_mod.Instance)) !void {
+    for (block.instances) |inst| {
+        try out.append(allocator, inst);
+    }
+    for (block.sub_blocks) |sb| {
+        try collectAllInstances(allocator, sb.block, out);
+    }
+}
+
 // ── Render Context ─────────────────────────────────────────────────────
 
 const RenderCtx = struct {
@@ -321,6 +650,8 @@ const RenderCtx = struct {
     port_nets: std.StringHashMapUnmanaged(void),
     pin_canonical_nets: std.StringHashMapUnmanaged([]const u8),
     rendered_spokes: std.StringHashMapUnmanaged(void),
+    /// ref_des → section index (for section-aware spoke connections)
+    section_map: std.StringHashMapUnmanaged(usize),
 
     fn init(allocator: Allocator) RenderCtx {
         return .{
@@ -337,6 +668,7 @@ const RenderCtx = struct {
             .port_nets = .empty,
             .pin_canonical_nets = .empty,
             .rendered_spokes = .empty,
+            .section_map = .empty,
         };
     }
 
@@ -354,8 +686,6 @@ const RenderCtx = struct {
                 .value = inst.value,
                 .symbol = inst.symbol,
                 .parts = inst.parts,
-                .row = inst.row,
-                .col = inst.col,
             };
             try self.instances.append(self.allocator, flat);
             try self.inst_map.put(self.allocator, rd, flat);
@@ -390,7 +720,7 @@ const RenderCtx = struct {
     fn buildPinNetMap(self: *RenderCtx) !void {
         for (self.nets.items) |net| {
             for (net.pins) |pin| {
-                const key = try std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ pin.ref_des, pin.pin });
+                const key = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ pin.ref_des, pin.pin });
                 try self.pin_net.put(self.allocator, key, net.name);
             }
         }
@@ -425,10 +755,21 @@ const RenderCtx = struct {
 
     /// Synthesize spoke connections: for passives on named nets shared with hubs,
     /// create virtual pin-to-pin adjacency entries.
+    /// Supports "REF.NET" dot notation: a spoke on net "U4.VDD" only connects to hub U4.
     fn synthesizeSpokeConnections(self: *RenderCtx) !void {
         for (self.nets.items) |net| {
             const bn = baseNetName(net.name);
             if (isGroundNet(bn)) continue;
+
+            // Check if this net uses NET.REF.PIN dot notation for hub targeting
+            // e.g. "VDD.U1.J14" → hub_target = "U1"
+            const short = shortNetName(net.name);
+            const hub_target: ?[]const u8 = blk: {
+                const first_dot = std.mem.indexOfScalar(u8, short, '.') orelse break :blk null;
+                const rest = short[first_dot + 1 ..];
+                const second_dot = std.mem.indexOfScalar(u8, rest, '.') orelse break :blk null;
+                break :blk rest[0..second_dot];
+            };
 
             // Find hub pins and spoke pins on this net
             var hub_pins_buf: [64]PinRef = undefined;
@@ -455,9 +796,43 @@ const RenderCtx = struct {
                 }
             }
 
-            // For each spoke pin, connect it to all hub pins on this net
+            // If dot notation targets a hub but no hub pins are on this net,
+            // find hub pins on the base net name from other nets
+            if (hub_target != null and hub_count == 0) {
+                for (self.nets.items) |other_net| {
+                    if (std.mem.eql(u8, other_net.name, net.name)) continue;
+                    if (!std.mem.eql(u8, baseNetName(other_net.name), bn)) continue;
+                    for (other_net.pins) |pin| {
+                        if (!self.spoke_set.contains(pin.ref_des) and
+                            std.mem.eql(u8, pin.ref_des, hub_target.?))
+                        {
+                            if (hub_count < hub_pins_buf.len) {
+                                hub_pins_buf[hub_count] = pin;
+                                hub_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // For each spoke pin, connect it to matching hub pins
             for (spoke_pins_buf[0..spoke_count]) |sp| {
+                // Section-aware filtering: if spoke belongs to a section,
+                // only connect to hubs in the same section
+                const spoke_section = self.section_map.get(sp.ref_des);
+
                 for (hub_pins_buf[0..hub_count]) |hp| {
+                    // If hub target specified (dot notation), only connect to that hub
+                    if (hub_target) |target| {
+                        if (!std.mem.eql(u8, hp.ref_des, target)) continue;
+                    }
+                    // If spoke has a section, only connect to hubs in the same section
+                    if (spoke_section) |ss| {
+                        const hub_section = self.section_map.get(hp.ref_des);
+                        if (hub_section) |hs| {
+                            if (ss != hs) continue;
+                        }
+                    }
                     try self.adjAppend(hp.ref_des, .{
                         .pin = hp.pin,
                         .endpoint = .{ .pin = .{ .ref_des = sp.ref_des, .pin = sp.pin } },
@@ -472,11 +847,11 @@ const RenderCtx = struct {
     }
 
     /// Check if a spoke has its other pin connected to a ground net.
-    fn isSpokeGroundPin(self: *RenderCtx, ref_des: []const u8, pin_num: i64) bool {
+    fn isSpokeGroundPin(self: *RenderCtx, ref_des: []const u8, pin_id: []const u8) bool {
         // Find all nets this ref_des is on
         for (self.nets.items) |net| {
             for (net.pins) |p| {
-                if (std.mem.eql(u8, p.ref_des, ref_des) and p.pin != pin_num) {
+                if (std.mem.eql(u8, p.ref_des, ref_des) and !std.mem.eql(u8, p.pin, pin_id)) {
                     // Check if THAT net is ground
                     if (isGroundNet(baseNetName(net.name))) return false; // This pin is the signal pin
                 }
@@ -485,7 +860,7 @@ const RenderCtx = struct {
         // If this pin's net is ground, then yes it's a ground pin
         for (self.nets.items) |net| {
             for (net.pins) |p| {
-                if (std.mem.eql(u8, p.ref_des, ref_des) and p.pin == pin_num) {
+                if (std.mem.eql(u8, p.ref_des, ref_des) and std.mem.eql(u8, p.pin, pin_id)) {
                     if (isGroundNet(baseNetName(net.name))) return true;
                 }
             }
@@ -546,9 +921,73 @@ const RenderCtx = struct {
             const bn = baseNetName(net.name);
             for (net.pins) |pin| {
                 if (!self.spoke_set.contains(pin.ref_des)) {
-                    const key = try std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ pin.ref_des, pin.pin });
+                    const key = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ pin.ref_des, pin.pin });
                     try self.pin_canonical_nets.put(self.allocator, key, bn);
                 }
+            }
+        }
+    }
+
+    fn validateNetConsistency(self: *RenderCtx) !void {
+        // Check 1: Hub pin ↔ net endpoint consistency
+        var adj_it = self.adjacency.iterator();
+        while (adj_it.next()) |kv| {
+            const ref_des = kv.key_ptr.*;
+            if (self.spoke_set.contains(ref_des)) continue;
+            for (kv.value_ptr.items) |entry| {
+                switch (entry.endpoint) {
+                    .net => |endpoint_net| {
+                        if (isGroundNet(endpoint_net)) continue;
+                        const key = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ ref_des, entry.pin });
+                        const pin_net_name = self.pin_net.get(key) orelse continue;
+                        const pin_bn = baseNetName(pin_net_name);
+                        const ep_bn = baseNetName(endpoint_net);
+                        if (!std.mem.eql(u8, pin_bn, ep_bn)) {
+                            std.debug.print("NET VALIDATE: {s} pin {s}: pin_net=\"{s}\" but adjacency endpoint=\"{s}\"\n", .{ ref_des, entry.pin, pin_bn, ep_bn });
+                        }
+                    },
+                    .pin => {},
+                }
+            }
+        }
+
+        // Check 2: Spoke synthesized connection consistency
+        var adj_it2 = self.adjacency.iterator();
+        while (adj_it2.next()) |kv| {
+            const ref_des = kv.key_ptr.*;
+            if (!self.spoke_set.contains(ref_des)) continue;
+            for (kv.value_ptr.items) |entry| {
+                switch (entry.endpoint) {
+                    .pin => |p| {
+                        // Only report once per pair (alphabetical order)
+                        if (std.mem.order(u8, ref_des, p.ref_des) == .gt) continue;
+                        const key_a = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ ref_des, entry.pin });
+                        const key_b = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ p.ref_des, p.pin });
+                        const net_a = self.pin_net.get(key_a) orelse continue;
+                        const net_b = self.pin_net.get(key_b) orelse continue;
+                        const bn_a = baseNetName(net_a);
+                        const bn_b = baseNetName(net_b);
+                        if (isGroundNet(bn_a) or isGroundNet(bn_b)) continue;
+                        if (!std.mem.eql(u8, bn_a, bn_b)) {
+                            std.debug.print("NET VALIDATE: spoke {s} pin {s} (net=\"{s}\") <-> {s} pin {s} (net=\"{s}\") — mismatch\n", .{ ref_des, entry.pin, bn_a, p.ref_des, p.pin, bn_b });
+                        }
+                    },
+                    .net => {},
+                }
+            }
+        }
+
+        // Check 3: pin_net vs pin_canonical_nets consistency
+        var pcn_it = self.pin_canonical_nets.iterator();
+        while (pcn_it.next()) |kv| {
+            const key = kv.key_ptr.*;
+            const canonical = kv.value_ptr.*;
+            const raw = self.pin_net.get(key) orelse continue;
+            const canon_bn = baseNetName(canonical);
+            const raw_bn = baseNetName(raw);
+            if (isGroundNet(canon_bn) or isGroundNet(raw_bn)) continue;
+            if (!std.mem.eql(u8, canon_bn, raw_bn)) {
+                std.debug.print("NET VALIDATE: {s}: pin_net=\"{s}\" but canonical=\"{s}\"\n", .{ key, raw_bn, canon_bn });
             }
         }
     }
@@ -563,10 +1002,10 @@ const RenderCtx = struct {
 
     /// Render a single part of a multi-part instance as its own hub box.
     fn renderHubPart(self: *RenderCtx, w: anytype, hub: FlatInst, part: env_mod.Part, y_start: f64) !f64 {
-        // Collect unique pin numbers from part, sorted
-        var all_pins: std.ArrayListUnmanaged(i64) = .empty;
+        // Collect unique pin IDs from part, sorted
+        var all_pins: std.ArrayListUnmanaged([]const u8) = .empty;
         defer all_pins.deinit(self.allocator);
-        var seen: std.AutoHashMapUnmanaged(i64, void) = .empty;
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
         defer seen.deinit(self.allocator);
         for (part.pins) |pp| {
             if (!seen.contains(pp.pin)) {
@@ -574,15 +1013,19 @@ const RenderCtx = struct {
                 try all_pins.append(self.allocator, pp.pin);
             }
         }
-        std.mem.sortUnstable(i64, all_pins.items, {}, struct {
-            fn lt(_: void, a: i64, b: i64) bool { return a < b; }
+        std.mem.sortUnstable([]const u8, all_pins.items, {}, struct {
+            fn lt(_: void, a: []const u8, b: []const u8) bool { return pinOrder(a, b); }
         }.lt);
 
         // Get adjacency for this hub
         const adj_entries = if (self.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
 
+        // Build pin name map from part pins
+        var pn_map = self.buildPinNameMap(&[_]env_mod.Part{part});
+        defer pn_map.deinit(self.allocator);
+
         // Group ALL pins by net first, then split groups left/right
-        const all_groups = try self.groupHubPins(all_pins.items, adj_entries);
+        const all_groups = try self.groupHubPins(all_pins.items, adj_entries, &pn_map);
 
         // Distribute groups to left/right for visual balance
         var left_groups_list: std.ArrayListUnmanaged(PinGroup) = .empty;
@@ -621,11 +1064,11 @@ const RenderCtx = struct {
         const label = try std.fmt.allocPrint(self.allocator, "{s} \xe2\x80\x94 {s}", .{ shortRef(hub.ref_des), part.name });
         try w.print(
             \\<g class="hub-group" data-ref="{s}" transform="translate(0,0)">
-            \\<g data-ref="{s}" class="component" style="cursor:pointer"><rect x="{d:.1}" y="{d:.1}" width="{d:.0}" height="{d:.1}" fill="#16213e" stroke="#4a9eff" stroke-width="2" rx="6"/>
+            \\<g data-ref="{s}" data-part="{s}" class="component" style="cursor:pointer"><rect x="{d:.1}" y="{d:.1}" width="{d:.0}" height="{d:.1}" fill="#16213e" stroke="#4a9eff" stroke-width="2" rx="6"/>
             \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="12" font-weight="bold" fill="#4a9eff">{s}</text></g>
             \\
         , .{
-            hub.ref_des, hub.ref_des,
+            hub.ref_des, hub.ref_des, part.name,
             hub_x, box_y, hub_width, hub_height,
             hub_x + hub_width / 2.0, box_y + 18.0, label,
         });
@@ -654,7 +1097,7 @@ const RenderCtx = struct {
 
     fn renderHub(self: *RenderCtx, w: anytype, hub: FlatInst, y_start: f64) !f64 {
         // Find all pins for this hub from nets
-        var pin_nets_map: std.AutoArrayHashMapUnmanaged(i64, []const u8) = .empty;
+        var pin_nets_map: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
         defer pin_nets_map.deinit(self.allocator);
 
         for (self.nets.items) |net| {
@@ -665,21 +1108,25 @@ const RenderCtx = struct {
             }
         }
 
-        // Sort pins, split left/right (heuristic: first half left, second half right)
-        var all_pins = try self.allocator.alloc(i64, pin_nets_map.count());
+        // Sort pins
+        var all_pins = try self.allocator.alloc([]const u8, pin_nets_map.count());
         defer self.allocator.free(all_pins);
         for (pin_nets_map.keys(), 0..) |k, i| all_pins[i] = k;
-        std.mem.sortUnstable(i64, all_pins, {}, struct {
-            fn lt(_: void, a: i64, b: i64) bool {
-                return a < b;
+        std.mem.sortUnstable([]const u8, all_pins, {}, struct {
+            fn lt(_: void, a: []const u8, b: []const u8) bool {
+                return pinOrder(a, b);
             }
         }.lt);
 
         // Get adjacency for this hub
         const adj_entries = if (self.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
 
+        // Build pin name map from instance parts
+        var pn_map = self.buildPinNameMap(hub.parts);
+        defer pn_map.deinit(self.allocator);
+
         // Group ALL pins by net, then split groups left/right
-        const all_groups = try self.groupHubPins(all_pins, adj_entries);
+        const all_groups = try self.groupHubPins(all_pins, adj_entries, &pn_map);
         var left_groups_list: std.ArrayListUnmanaged(PinGroup) = .empty;
         var right_groups_list: std.ArrayListUnmanaged(PinGroup) = .empty;
         var left_pc: usize = 0;
@@ -759,48 +1206,61 @@ const RenderCtx = struct {
         conns: []const AdjEntry,
     };
 
+    /// Build a pin_id → pin_name map from PartPin data.
+    fn buildPinNameMap(self: *RenderCtx, parts: []const env_mod.Part) std.StringHashMapUnmanaged([]const u8) {
+        var map: std.StringHashMapUnmanaged([]const u8) = .empty;
+        for (parts) |part| {
+            for (part.pins) |pp| {
+                if (pp.pin_name.len > 0) {
+                    map.put(self.allocator, pp.pin, pp.pin_name) catch {};
+                }
+            }
+        }
+        return map;
+    }
+
     /// Group hub pins: consecutive pins sharing the same net get merged.
-    fn groupHubPins(self: *RenderCtx, pins: []const i64, adj_entries: []const AdjEntry) ![]const PinGroup {
+    fn groupHubPins(self: *RenderCtx, pins: []const []const u8, adj_entries: []const AdjEntry, pin_names: *const std.StringHashMapUnmanaged([]const u8)) ![]const PinGroup {
         if (pins.len == 0) return &[_]PinGroup{};
 
         // Build pin→net mapping
-        const PinInfo = struct { pin: i64, net: []const u8 };
+        const PinInfo = struct { pin: []const u8, net: []const u8 };
         var pin_infos: std.ArrayListUnmanaged(PinInfo) = .empty;
-        for (pins) |pin_num| {
+        for (pins) |pin_id| {
             var pin_net: []const u8 = "";
             for (adj_entries) |ae| {
-                if (ae.pin == pin_num) {
+                if (std.mem.eql(u8, ae.pin, pin_id)) {
                     switch (ae.endpoint) {
                         .net => |n| { pin_net = n; break; },
                         .pin => {},
                     }
                 }
             }
-            try pin_infos.append(self.allocator, .{ .pin = pin_num, .net = pin_net });
+            try pin_infos.append(self.allocator, .{ .pin = pin_id, .net = pin_net });
         }
 
-        // Sort by net name (so same-net pins are adjacent), then by pin number
+        // Sort by net name (so same-net pins are adjacent), then by pin id
         std.mem.sortUnstable(PinInfo, pin_infos.items, {}, struct {
             fn lt(_: void, a: PinInfo, b: PinInfo) bool {
                 const cmp = std.mem.order(u8, a.net, b.net);
-                if (cmp == .eq) return a.pin < b.pin;
+                if (cmp == .eq) return pinOrder(a.pin, b.pin);
                 return cmp == .lt;
             }
         }.lt);
 
         // Group consecutive pins with same net
         var groups: std.ArrayListUnmanaged(PinGroup) = .empty;
-        var current_pins: std.ArrayListUnmanaged(i64) = .empty;
+        var current_pins: std.ArrayListUnmanaged([]const u8) = .empty;
         var current_net: ?[]const u8 = null;
         var current_conns: std.ArrayListUnmanaged(AdjEntry) = .empty;
 
         for (pin_infos.items) |pi| {
-            const pin_num = pi.pin;
+            const pin_id = pi.pin;
 
             // Get all connections for this pin
             var pin_conns: std.ArrayListUnmanaged(AdjEntry) = .empty;
             for (adj_entries) |ae| {
-                if (ae.pin == pin_num) {
+                if (std.mem.eql(u8, ae.pin, pin_id)) {
                     try pin_conns.append(self.allocator, ae);
                 }
             }
@@ -817,18 +1277,18 @@ const RenderCtx = struct {
             };
 
             if (should_merge) {
-                try current_pins.append(self.allocator, pin_num);
+                try current_pins.append(self.allocator, pin_id);
                 for (pin_conns.items) |c| {
                     try current_conns.append(self.allocator, c);
                 }
             } else {
                 // Flush previous group
                 if (current_pins.items.len > 0) {
-                    try groups.append(self.allocator, try self.finishGroup(&current_pins, &current_conns));
+                    try groups.append(self.allocator, try self.finishGroup(&current_pins, &current_conns, pin_names));
                 }
                 current_pins = .empty;
                 current_conns = .empty;
-                try current_pins.append(self.allocator, pin_num);
+                try current_pins.append(self.allocator, pin_id);
                 current_net = if (pi.net.len > 0) pi.net else null;
                 for (pin_conns.items) |c| {
                     try current_conns.append(self.allocator, c);
@@ -838,33 +1298,44 @@ const RenderCtx = struct {
 
         // Flush last group
         if (current_pins.items.len > 0) {
-            try groups.append(self.allocator, try self.finishGroup(&current_pins, &current_conns));
+            try groups.append(self.allocator, try self.finishGroup(&current_pins, &current_conns, pin_names));
         }
 
         return groups.toOwnedSlice(self.allocator);
     }
 
-    fn finishGroup(self: *RenderCtx, pins: *std.ArrayListUnmanaged(i64), conns: *std.ArrayListUnmanaged(AdjEntry)) !PinGroup {
-        // Build display name from net or pin number
+    fn finishGroup(self: *RenderCtx, pins: *std.ArrayListUnmanaged([]const u8), conns: *std.ArrayListUnmanaged(AdjEntry), pin_names: *const std.StringHashMapUnmanaged([]const u8)) !PinGroup {
+        // Build display name: prefer pin function name from pinout, fall back to net name
         var display_name: []const u8 = "~";
-        // Find pin name: look for net endpoints in conns
-        for (conns.items) |ae| {
-            switch (ae.endpoint) {
-                .net => |n| {
-                    if (!isGroundNet(n)) {
-                        display_name = n;
-                        break;
-                    } else {
-                        display_name = n;
-                    }
-                },
-                .pin => {},
+
+        // First try pin function name from pinout (use the first pin in the group)
+        if (pins.items.len > 0) {
+            if (pin_names.get(pins.items[0])) |func_name| {
+                display_name = func_name;
             }
         }
-        // If no net, use pin number
+
+        // Fall back to net name if no pinout name
+        if (std.mem.eql(u8, display_name, "~")) {
+            for (conns.items) |ae| {
+                switch (ae.endpoint) {
+                    .net => |n| {
+                        if (!isGroundNet(n)) {
+                            display_name = n;
+                            break;
+                        } else {
+                            display_name = n;
+                        }
+                    },
+                    .pin => {},
+                }
+            }
+        }
+
+        // If still nothing, use pin id
         if (std.mem.eql(u8, display_name, "~")) {
             if (pins.items.len == 1) {
-                display_name = try std.fmt.allocPrint(self.allocator, "{d}", .{pins.items[0]});
+                display_name = pins.items[0];
             }
         }
 
@@ -872,8 +1343,7 @@ const RenderCtx = struct {
         var num_buf: std.ArrayListUnmanaged(u8) = .empty;
         for (pins.items, 0..) |pn, i| {
             if (i > 0) try num_buf.append(self.allocator, ',');
-            const s = try std.fmt.allocPrint(self.allocator, "{d}", .{pn});
-            try num_buf.appendSlice(self.allocator, s);
+            try num_buf.appendSlice(self.allocator, pn);
         }
 
         // Deduplicate connections
@@ -893,7 +1363,7 @@ const RenderCtx = struct {
         for (conns) |ae| {
             const key = switch (ae.endpoint) {
                 .net => |n| try std.fmt.allocPrint(self.allocator, "net:{s}", .{n}),
-                .pin => |p| try std.fmt.allocPrint(self.allocator, "pin:{s}.{d}", .{ p.ref_des, p.pin }),
+                .pin => |p| try std.fmt.allocPrint(self.allocator, "pin:{s}.{s}", .{ p.ref_des, p.pin }),
             };
             if (!seen.contains(key)) {
                 try seen.put(self.allocator, key, {});
@@ -937,7 +1407,7 @@ const RenderCtx = struct {
     fn estimateBranchCount(self: *RenderCtx, spoke_rd: []const u8, hub_ref: []const u8) u32 {
         // Find which pin of the spoke connects to the hub
         const adj_list = self.adjacency.get(spoke_rd) orelse return 1;
-        var hub_pin: ?i64 = null;
+        var hub_pin: ?[]const u8 = null;
         for (adj_list.items) |ae| {
             switch (ae.endpoint) {
                 .pin => |p| {
@@ -952,7 +1422,7 @@ const RenderCtx = struct {
 
         // Find the OTHER pin's net (the one that doesn't connect back to hub)
         for (adj_list.items) |ae| {
-            if (hub_pin != null and ae.pin == hub_pin.?) continue; // skip the hub-side pin
+            if (hub_pin != null and std.mem.eql(u8, ae.pin, hub_pin.?)) continue; // skip the hub-side pin
             switch (ae.endpoint) {
                 .net => |net| {
                     if (isGroundNet(baseNetName(net))) return 1;
@@ -1049,12 +1519,12 @@ const RenderCtx = struct {
         }
 
         // Get the pin's canonical net name early (needed for filtering)
-        var first_pin_num: i64 = 0;
+        var first_pin_id: []const u8 = "";
         for (group.conns) |c| {
-            first_pin_num = c.pin;
+            first_pin_id = c.pin;
             break;
         }
-        const canon_key = try std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ hub_ref, first_pin_num });
+        const canon_key = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ hub_ref, first_pin_id });
         const pin_net_name = self.pin_canonical_nets.get(canon_key) orelse "";
 
         // Classify each connection's terminal
@@ -1279,7 +1749,7 @@ const RenderCtx = struct {
     }
 
     /// Get the terminal net name for a connection endpoint.
-    fn getConnTerminal(self: *RenderCtx, endpoint: Endpoint, hub_ref: []const u8, from_pin: i64) ![]const u8 {
+    fn getConnTerminal(self: *RenderCtx, endpoint: Endpoint, hub_ref: []const u8, from_pin: []const u8) ![]const u8 {
         switch (endpoint) {
             .net => |net| return net,
             .pin => |p| {
@@ -1293,7 +1763,7 @@ const RenderCtx = struct {
                     // Hub pin — find its net name
                     if (self.adjacency.get(p.ref_des)) |adj_list| {
                         for (adj_list.items) |ae| {
-                            if (ae.pin == p.pin) {
+                            if (std.mem.eql(u8, ae.pin, p.pin)) {
                                 switch (ae.endpoint) {
                                     .net => |n| return n,
                                     .pin => {},
@@ -1301,7 +1771,7 @@ const RenderCtx = struct {
                             }
                         }
                     }
-                    return try std.fmt.allocPrint(self.allocator, "{s}_pin{d}", .{ p.ref_des, p.pin });
+                    return try std.fmt.allocPrint(self.allocator, "{s}_pin{s}", .{ p.ref_des, p.pin });
                 }
             },
         }
@@ -1319,7 +1789,7 @@ const RenderCtx = struct {
         const adj_list = self.adjacency.get(ref_des) orelse return .{ .chain = &.{}, .terminal = "?", .branches = &.{} };
 
         // Find which pins came_from connects to
-        var from_pins: std.ArrayListUnmanaged(i64) = .empty;
+        var from_pins: std.ArrayListUnmanaged([]const u8) = .empty;
         for (adj_list.items) |ae| {
             if (endpointEql(ae.endpoint, came_from)) {
                 try from_pins.append(self.allocator, ae.pin);
@@ -1331,7 +1801,7 @@ const RenderCtx = struct {
         for (adj_list.items) |ae| {
             var is_from_pin = false;
             for (from_pins.items) |fp| {
-                if (ae.pin == fp) {
+                if (std.mem.eql(u8, ae.pin, fp)) {
                     is_from_pin = true;
                     break;
                 }
@@ -1438,7 +1908,7 @@ const RenderCtx = struct {
                     // Hub pin — find its net name
                     if (self.adjacency.get(p.ref_des)) |adj_list| {
                         for (adj_list.items) |adj_ae| {
-                            if (adj_ae.pin == p.pin) {
+                            if (std.mem.eql(u8, adj_ae.pin, p.pin)) {
                                 switch (adj_ae.endpoint) {
                                     .net => |n| return .{ .chain = &.{}, .terminal = n, .branches = &.{} },
                                     .pin => {},
@@ -1446,7 +1916,7 @@ const RenderCtx = struct {
                             }
                         }
                     }
-                    return .{ .chain = &.{}, .terminal = try std.fmt.allocPrint(self.allocator, "{s}_pin{d}", .{ p.ref_des, p.pin }), .branches = &.{} };
+                    return .{ .chain = &.{}, .terminal = try std.fmt.allocPrint(self.allocator, "{s}_pin{s}", .{ p.ref_des, p.pin }), .branches = &.{} };
                 }
             },
         }
@@ -1454,7 +1924,7 @@ const RenderCtx = struct {
 
     /// Render the body of a connection (wire + passive chain or branch tree).
     /// Returns end_x position.
-    fn renderConnBody(self: *RenderCtx, w: anytype, endpoint: Endpoint, hub_ref: []const u8, from_pin: i64, stub_x: f64, stub_y: f64, cy: f64, side: Side, net_name: []const u8) !f64 {
+    fn renderConnBody(self: *RenderCtx, w: anytype, endpoint: Endpoint, hub_ref: []const u8, from_pin: []const u8, stub_x: f64, stub_y: f64, cy: f64, side: Side, net_name: []const u8) !f64 {
         switch (endpoint) {
             .net => {
                 const end_x: f64 = switch (side) {
@@ -2171,7 +2641,7 @@ fn isHub(inst: FlatInst) bool {
 
 fn isGroundNet(name: []const u8) bool {
     return std.mem.eql(u8, name, "GND") or std.mem.eql(u8, name, "AGND") or
-        std.mem.eql(u8, name, "DGND") or std.mem.eql(u8, name, "VSS");
+        std.mem.eql(u8, name, "DGND") or std.mem.startsWith(u8, name, "VSS");
 }
 
 fn shortRef(ref_des: []const u8) []const u8 {
@@ -2211,7 +2681,7 @@ fn endpointEql(a: Endpoint, b: Endpoint) bool {
         },
         .pin => |ap| {
             switch (b) {
-                .pin => |bp| return std.mem.eql(u8, ap.ref_des, bp.ref_des) and ap.pin == bp.pin,
+                .pin => |bp| return std.mem.eql(u8, ap.ref_des, bp.ref_des) and std.mem.eql(u8, ap.pin, bp.pin),
                 .net => return false,
             }
         },
@@ -2255,6 +2725,16 @@ fn containsCI(haystack: []const u8, needle: []const u8) bool {
         if (match) return true;
     }
     return false;
+}
+
+/// Compare pin IDs for sorting: try numeric, fall back to string.
+fn pinOrder(a: []const u8, b: []const u8) bool {
+    const a_num = std.fmt.parseInt(i64, a, 10) catch null;
+    const b_num = std.fmt.parseInt(i64, b, 10) catch null;
+    if (a_num != null and b_num != null) return a_num.? < b_num.?;
+    if (a_num != null) return true; // numbers before alpha
+    if (b_num != null) return false;
+    return std.mem.order(u8, a, b) == .lt;
 }
 
 /// Escape HTML entities in text content.

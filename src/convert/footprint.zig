@@ -12,7 +12,7 @@ pub fn convertFootprint(allocator: std.mem.Allocator, source: []const u8) ![]con
 
     if (nodes.len == 0) return error.InvalidFormat;
     const root = nodes[0];
-    if (!root.isForm("footprint")) return error.InvalidFormat;
+    if (!root.isForm("footprint") and !root.isForm("module")) return error.InvalidFormat;
 
     const children = root.asList() orelse return error.InvalidFormat;
     if (children.len < 2) return error.InvalidFormat;
@@ -67,7 +67,14 @@ fn emitPad(w: anytype, node: Node) !void {
     if (children.len < 4) return;
 
     // (pad "1" smd roundrect (at X Y [R]) (size W H) (layers ...) ...)
-    const num_str = children[1].asAtom() orelse children[1].asString() orelse return;
+    const num_str = children[1].asAtom() orelse children[1].asString() orelse blk: {
+        if (children[1].asNumber()) |n| {
+            const i: i64 = @intFromFloat(n);
+            var num_buf: [32]u8 = undefined;
+            break :blk std.fmt.bufPrint(&num_buf, "{d}", .{i}) catch return;
+        }
+        return;
+    };
     const pad_type = children[2].asAtom() orelse return;
     const shape = children[3].asAtom() orelse return;
 
@@ -75,11 +82,16 @@ fn emitPad(w: anytype, node: Node) !void {
     const out_type = mapPadType(pad_type);
     const out_shape = mapPadShape(shape);
 
-    // Extract position and size
+    // Extract position, size, and drill
     var x: f64 = 0;
     var y: f64 = 0;
+    var rotation: f64 = 0;
     var sx: f64 = 0;
     var sy: f64 = 0;
+    var drill_x: f64 = 0;
+    var drill_y: f64 = 0;
+    var has_drill = false;
+    var is_oval_drill = false;
 
     for (children[4..]) |child| {
         if (child.isForm("at")) {
@@ -87,6 +99,7 @@ fn emitPad(w: anytype, node: Node) !void {
             if (cl.len >= 3) {
                 x = cl[1].asNumber() orelse 0;
                 y = cl[2].asNumber() orelse 0;
+                if (cl.len >= 4) rotation = cl[3].asNumber() orelse 0;
             }
         }
         if (child.isForm("size")) {
@@ -96,11 +109,42 @@ fn emitPad(w: anytype, node: Node) !void {
                 sy = cl[2].asNumber() orelse 0;
             }
         }
+        if (child.isForm("drill")) {
+            const cl = child.asList().?;
+            has_drill = true;
+            // (drill D) or (drill oval DX DY)
+            if (cl.len >= 2) {
+                if (cl[1].asAtom()) |a| {
+                    if (std.mem.eql(u8, a, "oval") and cl.len >= 4) {
+                        is_oval_drill = true;
+                        drill_x = cl[2].asNumber() orelse 0;
+                        drill_y = cl[3].asNumber() orelse 0;
+                    }
+                } else {
+                    drill_x = cl[1].asNumber() orelse 0;
+                    drill_y = drill_x;
+                }
+            }
+        }
     }
 
-    try w.print("  (pad {s} {s} {s} (pos {d:.2} {d:.2}) (size {d:.2} {d:.2}))\n", .{
-        num_str, out_type, out_shape, x, y, sx, sy,
+    // Apply pad rotation: 90° or 270° swaps width and height
+    const rot_mod = @mod(rotation, 360.0);
+    const is_rotated = (rot_mod > 45.0 and rot_mod < 135.0) or (rot_mod > 225.0 and rot_mod < 315.0);
+    const out_sx = if (is_rotated) sy else sx;
+    const out_sy = if (is_rotated) sx else sy;
+
+    try w.print("  (pad {s} {s} {s} (pos {d:.2} {d:.2}) (size {d:.2} {d:.2})", .{
+        num_str, out_type, out_shape, x, y, out_sx, out_sy,
     });
+    if (has_drill) {
+        if (is_oval_drill) {
+            try w.print(" (drill oval {d:.2} {d:.2})", .{ drill_x, drill_y });
+        } else {
+            try w.print(" (drill {d:.2})", .{drill_x});
+        }
+    }
+    try w.writeAll(")\n");
 }
 
 fn emitCourtyard(w: anytype, children: []const Node) !void {
@@ -140,6 +184,40 @@ fn emitCourtyard(w: anytype, children: []const Node) !void {
                 return;
             }
         }
+    }
+
+    // Fallback: derive courtyard bounding box from fp_line on F.CrtYd
+    var min_x: f64 = std.math.inf(f64);
+    var min_y: f64 = std.math.inf(f64);
+    var max_x: f64 = -std.math.inf(f64);
+    var max_y: f64 = -std.math.inf(f64);
+    var found = false;
+
+    for (children) |child| {
+        if (child.isForm("fp_line")) {
+            const cl = child.asList() orelse continue;
+            const layer = getLayer(cl[1..]);
+            if (std.mem.eql(u8, layer, "F.CrtYd")) {
+                found = true;
+                for (cl[1..]) |sub| {
+                    if (sub.isForm("start") or sub.isForm("end")) {
+                        const sl = sub.asList().?;
+                        if (sl.len >= 3) {
+                            const px = sl[1].asNumber() orelse continue;
+                            const py = sl[2].asNumber() orelse continue;
+                            if (px < min_x) min_x = px;
+                            if (py < min_y) min_y = py;
+                            if (px > max_x) max_x = px;
+                            if (py > max_y) max_y = py;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (found) {
+        try w.print("  (courtyard (rect {d:.3} {d:.3} {d:.3} {d:.3}))\n", .{ min_x, min_y, max_x, max_y });
     }
 }
 
@@ -235,14 +313,14 @@ fn stripLibPrefix(name: []const u8) []const u8 {
     return name;
 }
 
-fn mapPadType(kicad: []const u8) []const u8 {
+pub fn mapPadType(kicad: []const u8) []const u8 {
     if (std.mem.eql(u8, kicad, "smd")) return "smd";
     if (std.mem.eql(u8, kicad, "thru_hole")) return "thru";
     if (std.mem.eql(u8, kicad, "np_thru_hole")) return "npth";
     return "smd";
 }
 
-fn mapPadShape(kicad: []const u8) []const u8 {
+pub fn mapPadShape(kicad: []const u8) []const u8 {
     if (std.mem.eql(u8, kicad, "roundrect")) return "roundrect";
     if (std.mem.eql(u8, kicad, "circle")) return "circle";
     if (std.mem.eql(u8, kicad, "oval")) return "oval";
