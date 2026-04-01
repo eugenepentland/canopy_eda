@@ -63,6 +63,7 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     router.post("/api/upload-zip", uploadZipApi, .{});
     router.get("/api/export-kicad/:name", exportKicadApi, .{});
     router.get("/api/export-netlist/:name", exportNetlistApi, .{});
+    router.post("/api/update-pcb/:name", updatePcbApi, .{});
     router.get("/api/block-diagram/:name", blockDiagramApi, .{});
 
     std.debug.print("Listening on http://localhost:{d}\n", .{port});
@@ -161,8 +162,7 @@ fn designPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     try w.writeAll("<button class=\"canvas-btn\" id=\"nodes-toggle\">Nodes</button>");
     try w.writeAll("<button class=\"canvas-btn\" id=\"rebuild-btn\">Rebuild</button>");
     try w.writeAll("<button class=\"canvas-btn\" id=\"block-diagram-btn\">Block Diagram</button>");
-    try w.writeAll("<button class=\"canvas-btn\" id=\"export-kicad\">Export KiCad</button>");
-    try w.writeAll("<button class=\"canvas-btn\" id=\"export-netlist\">Netlist</button>");
+    try w.writeAll("<button class=\"canvas-btn\" id=\"update-pcb\">Update PCB</button>");
     try w.writeAll("</div>");
     try w.writeAll(svg);
     try w.writeAll("</div></div>");
@@ -179,7 +179,6 @@ fn designPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
         }
         try w.writeAll("</div>");
     }
-
 
     // Library warnings: missing footprints and 3D models
     {
@@ -387,7 +386,11 @@ fn exportKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
         },
     };
 
-    bom.applyBomUuids(ctx.allocator, block, ctx.project_dir, name) catch {};
+    const bom_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name }) catch {
+        res.status = 500;
+        return;
+    };
+    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
 
     const zip_data = export_kicad.exportKicadZip(ctx.allocator, block, ctx.project_dir, name) catch {
         res.status = 500;
@@ -432,8 +435,11 @@ fn exportNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
         },
     };
 
-    // UUIDs come from .bom file — run `eda build --push <name>` first to populate
-    bom.applyBomUuids(ctx.allocator, block, ctx.project_dir, name) catch {};
+    const bom_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name }) catch {
+        res.status = 500;
+        return;
+    };
+    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
 
     const netlist = export_kicad.exportNetlistOnly(ctx.allocator, block, ctx.project_dir, name) catch {
         res.status = 500;
@@ -449,6 +455,110 @@ fn exportNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     res.header("Content-Type", "text/plain");
     res.header("Content-Disposition", disposition);
     res.body = netlist;
+}
+
+fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    _ = req;
+    // Export netlist to a temp file, then run pcb_update.py
+    const name = "stm32n6"; // TODO: parameterize
+
+    // Build the design
+    const board_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name }) catch {
+        res.status = 500;
+        return;
+    };
+    defer ctx.allocator.free(board_path);
+
+    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+
+    const result = eval.evalFile(board_path) catch {
+        res.status = 500;
+        res.body = "{\"ok\":false,\"error\":\"Build error\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    const block = switch (result) {
+        .design_block => |b| b,
+        else => {
+            res.status = 500;
+            return;
+        },
+    };
+
+    // Resolve identities (assigns stable UUIDs from IDs)
+    const bom_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name }) catch {
+        res.status = 500;
+        return;
+    };
+    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
+
+    // Export netlist
+    const netlist = export_kicad.exportNetlistOnly(ctx.allocator, block, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = "{\"ok\":false,\"error\":\"Export error\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    // Export section layout for grid-based placement
+    const sections_json = export_kicad.exportSectionLayout(ctx.allocator, block) catch "";
+    const sections_path = "/mnt/nas/Cyclops/Cyclops Digital/stm32n6.sections.json";
+
+    // Write netlist to the PCB project directory
+    const net_path = "/mnt/nas/Cyclops/Cyclops Digital/stm32n6.net";
+    {
+        const f = std.fs.cwd().createFile(net_path, .{}) catch {
+            res.status = 500;
+            res.body = "{\"ok\":false,\"error\":\"Cannot write netlist\"}";
+            res.content_type = .JSON;
+            return;
+        };
+        defer f.close();
+        f.writeAll(netlist) catch {
+            res.status = 500;
+            return;
+        };
+    }
+
+    // Write section layout sidecar
+    if (sections_json.len > 0) {
+        const sf = std.fs.cwd().createFile(sections_path, .{}) catch null;
+        if (sf) |f| {
+            defer f.close();
+            f.writeAll(sections_json) catch {};
+        }
+    }
+
+    // Run pcb_update.py
+    const py_result = std.process.Child.run(.{
+        .allocator = ctx.allocator,
+        .argv = &.{
+            "python3",
+            "src/pcb_update.py",
+            net_path,
+            "/mnt/nas/Cyclops/Cyclops Digital/footprints.pretty",
+            "/mnt/nas/Cyclops/Cyclops Digital/Cyclops Digital.kicad_pcb",
+            sections_path,
+        },
+    }) catch {
+        res.status = 500;
+        res.body = "{\"ok\":false,\"error\":\"Failed to run pcb_update.py\"}";
+        res.content_type = .JSON;
+        return;
+    };
+    defer ctx.allocator.free(py_result.stdout);
+    defer ctx.allocator.free(py_result.stderr);
+
+    if (py_result.term.Exited != 0) {
+        res.body = "{\"ok\":false,\"error\":\"PCB update script failed\"}";
+        res.content_type = .JSON;
+        return;
+    }
+
+    res.body = "{\"ok\":true}";
+    res.content_type = .JSON;
 }
 
 fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
@@ -1146,10 +1256,19 @@ fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void 
 
     // Write pinout
     {
-        const dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/pinouts", .{ctx.project_dir}) catch { res.status = 500; return; };
+        const dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/pinouts", .{ctx.project_dir}) catch {
+            res.status = 500;
+            return;
+        };
         std.fs.cwd().makePath(dir) catch {};
-        const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, safe_name.items }) catch { res.status = 500; return; };
-        const f = std.fs.cwd().createFile(path, .{}) catch { res.status = 500; return; };
+        const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, safe_name.items }) catch {
+            res.status = 500;
+            return;
+        };
+        const f = std.fs.cwd().createFile(path, .{}) catch {
+            res.status = 500;
+            return;
+        };
         defer f.close();
         f.writeAll(pinout) catch {};
     }
@@ -1161,16 +1280,29 @@ fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void 
             const ns = idx + 12;
             if (std.mem.indexOfPos(u8, footprint, ns, "\"")) |ne| {
                 for (footprint[ns..ne]) |fc| {
-                    const fsc: u8 = switch (fc) { 'A'...'Z' => fc + 32, ' ', '.', '_' => '-', else => fc };
+                    const fsc: u8 = switch (fc) {
+                        'A'...'Z' => fc + 32,
+                        ' ', '.', '_' => '-',
+                        else => fc,
+                    };
                     fp_safe.append(ctx.allocator, fsc) catch continue;
                 }
             }
         }
         const fp_name = if (fp_safe.items.len > 0) fp_safe.items else safe_name.items;
-        const dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints", .{ctx.project_dir}) catch { res.status = 500; return; };
+        const dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints", .{ctx.project_dir}) catch {
+            res.status = 500;
+            return;
+        };
         std.fs.cwd().makePath(dir) catch {};
-        const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, fp_name }) catch { res.status = 500; return; };
-        const f = std.fs.cwd().createFile(path, .{}) catch { res.status = 500; return; };
+        const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, fp_name }) catch {
+            res.status = 500;
+            return;
+        };
+        const f = std.fs.cwd().createFile(path, .{}) catch {
+            res.status = 500;
+            return;
+        };
         defer f.close();
         f.writeAll(footprint) catch {};
     }
@@ -1183,7 +1315,10 @@ fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void 
             const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.step", .{ dir, safe_name.items }) catch "";
             if (path.len > 0) {
                 const f = std.fs.cwd().createFile(path, .{}) catch null;
-                if (f) |file| { defer file.close(); file.writeAll(sd) catch {}; }
+                if (f) |file| {
+                    defer file.close();
+                    file.writeAll(sd) catch {};
+                }
             }
         }
     }
@@ -1261,11 +1396,17 @@ fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
             for (cl[4..]) |sub| {
                 if (sub.isForm("pos")) {
                     const sl = sub.asList().?;
-                    if (sl.len >= 3) { px = sl[1].asNumber() orelse 0; py = sl[2].asNumber() orelse 0; }
+                    if (sl.len >= 3) {
+                        px = sl[1].asNumber() orelse 0;
+                        py = sl[2].asNumber() orelse 0;
+                    }
                 }
                 if (sub.isForm("size")) {
                     const sl = sub.asList().?;
-                    if (sl.len >= 3) { pw = sl[1].asNumber() orelse 0; ph = sl[2].asNumber() orelse 0; }
+                    if (sl.len >= 3) {
+                        pw = sl[1].asNumber() orelse 0;
+                        ph = sl[2].asNumber() orelse 0;
+                    }
                 }
             }
             pads.append(ctx.allocator, .{ .id = pid_val, .x = px, .y = py, .w = pw, .h = ph, .shape = shape }) catch {};
@@ -1430,11 +1571,17 @@ fn footprintPadBounds(allocator: std.mem.Allocator, content: []const u8) ?struct
             for (cl[4..]) |sub| {
                 if (sub.isForm("pos")) {
                     const sl = sub.asList().?;
-                    if (sl.len >= 3) { px = sl[1].asNumber() orelse 0; py = sl[2].asNumber() orelse 0; }
+                    if (sl.len >= 3) {
+                        px = sl[1].asNumber() orelse 0;
+                        py = sl[2].asNumber() orelse 0;
+                    }
                 }
                 if (sub.isForm("size")) {
                     const sl = sub.asList().?;
-                    if (sl.len >= 3) { pw = sl[1].asNumber() orelse 0; ph = sl[2].asNumber() orelse 0; }
+                    if (sl.len >= 3) {
+                        pw = sl[1].asNumber() orelse 0;
+                        ph = sl[2].asNumber() orelse 0;
+                    }
                 }
             }
             const lx = px - pw / 2;
@@ -1618,14 +1765,27 @@ fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
 
     // Write pinout to lib/pinouts/
     {
-        const dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/pinouts", .{ctx.project_dir}) catch { res.status = 500; return; };
+        const dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/pinouts", .{ctx.project_dir}) catch {
+            res.status = 500;
+            return;
+        };
         defer ctx.allocator.free(dir);
         std.fs.cwd().makePath(dir) catch {};
-        const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, safe_name.items }) catch { res.status = 500; return; };
+        const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, safe_name.items }) catch {
+            res.status = 500;
+            return;
+        };
         defer ctx.allocator.free(path);
-        const f = std.fs.cwd().createFile(path, .{}) catch { res.status = 500; res.body = "Cannot write pinout"; return; };
+        const f = std.fs.cwd().createFile(path, .{}) catch {
+            res.status = 500;
+            res.body = "Cannot write pinout";
+            return;
+        };
         defer f.close();
-        f.writeAll(pinout) catch { res.status = 500; return; };
+        f.writeAll(pinout) catch {
+            res.status = 500;
+            return;
+        };
     }
 
     // Write footprint to lib/footprints/
@@ -1648,14 +1808,27 @@ fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
                 if (fp_safe.items.len > 0) fp_name = fp_safe.items;
             }
         }
-        const dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints", .{ctx.project_dir}) catch { res.status = 500; return; };
+        const dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints", .{ctx.project_dir}) catch {
+            res.status = 500;
+            return;
+        };
         defer ctx.allocator.free(dir);
         std.fs.cwd().makePath(dir) catch {};
-        const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, fp_name }) catch { res.status = 500; return; };
+        const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, fp_name }) catch {
+            res.status = 500;
+            return;
+        };
         defer ctx.allocator.free(path);
-        const f = std.fs.cwd().createFile(path, .{}) catch { res.status = 500; res.body = "Cannot write footprint"; return; };
+        const f = std.fs.cwd().createFile(path, .{}) catch {
+            res.status = 500;
+            res.body = "Cannot write footprint";
+            return;
+        };
         defer f.close();
-        f.writeAll(footprint) catch { res.status = 500; return; };
+        f.writeAll(footprint) catch {
+            res.status = 500;
+            return;
+        };
     }
 
     // Save STEP model to lib/models/ if provided
@@ -2774,37 +2947,18 @@ const INTERACTION_JS_PART2 =
     \\  });
     \\});
     \\
-    \\/* Export KiCad */
-    \\var exportBtn=document.getElementById('export-kicad');
-    \\var netlistBtn=document.getElementById('export-netlist');
-    \\netlistBtn.addEventListener('click',function(){
-    \\  netlistBtn.textContent='Exporting...';netlistBtn.disabled=true;
-    \\  fetch('/api/export-netlist/'+SCHEMATIC_SLUG).then(function(r){
-    \\    if(!r.ok)throw new Error('Export failed');
-    \\    return r.blob();
-    \\  }).then(function(blob){
-    \\    var a=document.createElement('a');a.href=URL.createObjectURL(blob);
-    \\    a.download=SCHEMATIC_SLUG+'.net';a.click();
-    \\    URL.revokeObjectURL(a.href);
-    \\    netlistBtn.textContent='Netlist';netlistBtn.disabled=false;
+    \\/* Update PCB */
+    \\var pcbBtn=document.getElementById('update-pcb');
+    \\pcbBtn.addEventListener('click',function(){
+    \\  pcbBtn.textContent='Updating...';pcbBtn.disabled=true;
+    \\  fetch('/api/update-pcb/'+SCHEMATIC_SLUG,{method:'POST'}).then(function(r){
+    \\    return r.json();
+    \\  }).then(function(d){
+    \\    if(d.ok){pcbBtn.textContent='PCB Updated';pcbBtn.style.color='#3fb950';setTimeout(function(){pcbBtn.textContent='Update PCB';pcbBtn.style.color='';pcbBtn.disabled=false;},2000);}
+    \\    else{pcbBtn.textContent='Update PCB';pcbBtn.disabled=false;alert('PCB update failed: '+(d.error||'unknown'));}
     \\  }).catch(function(e){
-    \\    alert('Export failed: '+e.message);
-    \\    netlistBtn.textContent='Netlist';netlistBtn.disabled=false;
-    \\  });
-    \\});
-    \\exportBtn.addEventListener('click',function(){
-    \\  exportBtn.textContent='Exporting...';exportBtn.disabled=true;
-    \\  fetch('/api/export-kicad/'+SCHEMATIC_SLUG).then(function(r){
-    \\    if(!r.ok)throw new Error('Export failed');
-    \\    return r.blob();
-    \\  }).then(function(blob){
-    \\    var a=document.createElement('a');a.href=URL.createObjectURL(blob);
-    \\    a.download=SCHEMATIC_SLUG+'-kicad.zip';a.click();
-    \\    URL.revokeObjectURL(a.href);
-    \\    exportBtn.textContent='Export KiCad';exportBtn.disabled=false;
-    \\  }).catch(function(e){
-    \\    alert('Export failed: '+e.message);
-    \\    exportBtn.textContent='Export KiCad';exportBtn.disabled=false;
+    \\    pcbBtn.textContent='Update PCB';pcbBtn.disabled=false;
+    \\    alert('PCB update failed: '+e.message);
     \\  });
     \\});
     \\
@@ -2885,7 +3039,7 @@ const INTERACTION_JS_PART2 =
     \\  vb.x=cx-nw/2;vb.y=cy-nh/2;vb.width=nw;vb.height=nh;
     \\}
     \\function selectSearchResult(r){
-    \\  searchResults.classList.remove('open');searchInput.value='';clearActive();
+    \\  searchResults.classList.remove('open');searchInput.value='';clearActive();didPan=false;
     \\  var svg=getSvg();if(!svg)return;
     \\  if(r.type==='section'){
     \\    var el=svg.querySelector('.section[data-section="'+r.name+'"]');

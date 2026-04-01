@@ -98,6 +98,7 @@ pub const Node = struct {
     }
 };
 
+// spec: sexpr/ast - Constructs typed AST nodes for list, atom, string, int, float, and unit values
 test "node constructors" {
     const n = Node.atom(Span.zero, "hello");
     try std.testing.expectEqualStrings("hello", n.asAtom().?);

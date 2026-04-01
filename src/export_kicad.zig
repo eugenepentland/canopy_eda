@@ -6,7 +6,37 @@ const Instance = env_mod.Instance;
 const Net = env_mod.Net;
 const Property = env_mod.Property;
 
-const FlatInstance = struct {
+const netlist_mod = @import("export_kicad_netlist.zig");
+const footprint_mod = @import("export_kicad_footprint.zig");
+
+const writeNetlist = netlist_mod.writeNetlist;
+const extractPadNames = netlist_mod.extractPadNames;
+const extractFootprintName = netlist_mod.extractFootprintName;
+const exportFootprintMod = footprint_mod.exportFootprintMod;
+const findModelFile = footprint_mod.findModelFile;
+const buildZip = footprint_mod.buildZip;
+const ZipEntry = footprint_mod.ZipEntry;
+
+/// Derive a full UUID (36-char) from an 8-char hex ID by hashing it.
+pub fn uuidFromId(allocator: std.mem.Allocator, id: []const u8) ![]const u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update("canopy:");
+    hasher.update(id);
+    const hash = hasher.finalResult();
+    // Format as UUID v5 style: xxxxxxxx-xxxx-5xxx-yxxx-xxxxxxxxxxxx
+    var bytes: [16]u8 = undefined;
+    @memcpy(&bytes, hash[0..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50; // version 5
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
+    return std.fmt.allocPrint(allocator, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
+        bytes[0],  bytes[1],  bytes[2],  bytes[3],
+        bytes[4],  bytes[5],  bytes[6],  bytes[7],
+        bytes[8],  bytes[9],  bytes[10], bytes[11],
+        bytes[12], bytes[13], bytes[14], bytes[15],
+    });
+}
+
+pub const FlatInstance = struct {
     ref_des: []const u8,
     component: []const u8,
     value: []const u8,
@@ -15,12 +45,12 @@ const FlatInstance = struct {
     uuid: []const u8,
 };
 
-const FlatNet = struct {
+pub const FlatNet = struct {
     name: []const u8,
     pins: []const FlatPin,
 };
 
-const FlatPin = struct {
+pub const FlatPin = struct {
     ref_des: []const u8,
     pin: []const u8,
 };
@@ -152,7 +182,6 @@ pub fn exportKicad(
     std.debug.print("  Wrote {s}\n", .{net_path});
 }
 
-/// Export a resolved design as an in-memory zip file containing netlist + footprints + models.
 /// Export just the KiCad netlist as a string.
 pub fn exportNetlistOnly(
     allocator: std.mem.Allocator,
@@ -289,577 +318,101 @@ pub fn exportKicadZip(
     return buildZip(allocator, zip_files.items);
 }
 
-const ZipEntry = struct {
-    name: []const u8,
-    data: []const u8,
-};
-
-/// Build a ZIP file in memory using store (no compression).
-fn buildZip(allocator: std.mem.Allocator, entries: []const ZipEntry) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    // Track offsets for central directory
-    var offsets = try allocator.alloc(u32, entries.len);
-    defer allocator.free(offsets);
-
-    // Write local file headers + data
-    for (entries, 0..) |entry, i| {
-        offsets[i] = @intCast(buf.items.len);
-        // Local file header
-        try buf.appendSlice(allocator, &[_]u8{ 'P', 'K', 3, 4 }); // signature
-        try appendU16(&buf, allocator, 20); // version needed
-        try appendU16(&buf, allocator, 0); // flags
-        try appendU16(&buf, allocator, 0); // compression: store
-        try appendU16(&buf, allocator, 0); // mod time
-        try appendU16(&buf, allocator, 0); // mod date
-        try appendU32(&buf, allocator, crc32(entry.data)); // crc32
-        try appendU32(&buf, allocator, @intCast(entry.data.len)); // compressed size
-        try appendU32(&buf, allocator, @intCast(entry.data.len)); // uncompressed size
-        try appendU16(&buf, allocator, @intCast(entry.name.len)); // filename len
-        try appendU16(&buf, allocator, 0); // extra field len
-        try buf.appendSlice(allocator, entry.name);
-        try buf.appendSlice(allocator, entry.data);
-    }
-
-    // Central directory
-    const cd_start: u32 = @intCast(buf.items.len);
-    for (entries, 0..) |entry, i| {
-        try buf.appendSlice(allocator, &[_]u8{ 'P', 'K', 1, 2 }); // signature
-        try appendU16(&buf, allocator, 20); // version made by
-        try appendU16(&buf, allocator, 20); // version needed
-        try appendU16(&buf, allocator, 0); // flags
-        try appendU16(&buf, allocator, 0); // compression: store
-        try appendU16(&buf, allocator, 0); // mod time
-        try appendU16(&buf, allocator, 0); // mod date
-        try appendU32(&buf, allocator, crc32(entry.data)); // crc32
-        try appendU32(&buf, allocator, @intCast(entry.data.len)); // compressed size
-        try appendU32(&buf, allocator, @intCast(entry.data.len)); // uncompressed size
-        try appendU16(&buf, allocator, @intCast(entry.name.len)); // filename len
-        try appendU16(&buf, allocator, 0); // extra field len
-        try appendU16(&buf, allocator, 0); // comment len
-        try appendU16(&buf, allocator, 0); // disk number start
-        try appendU16(&buf, allocator, 0); // internal attrs
-        try appendU32(&buf, allocator, 0); // external attrs
-        try appendU32(&buf, allocator, offsets[i]); // local header offset
-        try buf.appendSlice(allocator, entry.name);
-    }
-    const cd_size: u32 = @intCast(buf.items.len - cd_start);
-
-    // End of central directory
-    try buf.appendSlice(allocator, &[_]u8{ 'P', 'K', 5, 6 }); // signature
-    try appendU16(&buf, allocator, 0); // disk number
-    try appendU16(&buf, allocator, 0); // disk with CD
-    try appendU16(&buf, allocator, @intCast(entries.len)); // entries on disk
-    try appendU16(&buf, allocator, @intCast(entries.len)); // total entries
-    try appendU32(&buf, allocator, cd_size); // CD size
-    try appendU32(&buf, allocator, cd_start); // CD offset
-    try appendU16(&buf, allocator, 0); // comment len
-
-    return buf.toOwnedSlice(allocator);
-}
-
-fn appendU16(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, val: u16) !void {
-    try buf.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToLittle(u16, val)));
-}
-
-fn appendU32(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, val: u32) !void {
-    try buf.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToLittle(u32, val)));
-}
-
-fn crc32(data: []const u8) u32 {
-    var crc: u32 = 0xFFFFFFFF;
-    for (data) |byte| {
-        crc = crc ^ @as(u32, byte);
-        for (0..8) |_| {
-            const mask: u32 = if (crc & 1 != 0) 0xEDB88320 else 0;
-            crc = (crc >> 1) ^ mask;
-        }
-    }
-    return crc ^ 0xFFFFFFFF;
-}
-
-// --- Hierarchy flattening ---
-
-fn collectInstances(
+/// Export section layout as JSON for PCB placement.
+/// Maps each instance ref_des to its section grid cell.
+pub fn exportSectionLayout(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
-    prefix: []const u8,
-    list: *std.ArrayListUnmanaged(FlatInstance),
-) !void {
-    for (block.instances) |inst| {
-        const ref = if (prefix.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, inst.ref_des })
-        else
-            try allocator.dupe(u8, inst.ref_des);
-
-        try list.append(allocator, .{
-            .ref_des = ref,
-            .component = inst.component,
-            .value = inst.value,
-            .footprint = inst.footprint,
-            .properties = inst.properties,
-            .uuid = inst.uuid,
-        });
-    }
-    for (block.sub_blocks) |sb| {
-        const sub_prefix = if (prefix.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, sb.name })
-        else
-            try allocator.dupe(u8, sb.name);
-        try collectInstances(allocator, sb.block, sub_prefix, list);
-    }
-}
-
-fn collectNets(
-    allocator: std.mem.Allocator,
-    block: *const DesignBlock,
-    prefix: []const u8,
-    list: *std.ArrayListUnmanaged(FlatNet),
-) !void {
-    for (block.nets) |net| {
-        const net_name = if (prefix.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, net.name })
-        else
-            try allocator.dupe(u8, net.name);
-
-        var pins = try allocator.alloc(FlatPin, net.pins.len);
-        for (net.pins, 0..) |pin, i| {
-            pins[i] = .{
-                .ref_des = if (prefix.len > 0)
-                    try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, pin.ref_des })
-                else
-                    try allocator.dupe(u8, pin.ref_des),
-                .pin = pin.pin,
-            };
-        }
-
-        try list.append(allocator, .{
-            .name = net_name,
-            .pins = pins,
-        });
-    }
-    for (block.sub_blocks) |sb| {
-        const sub_prefix = if (prefix.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, sb.name })
-        else
-            try allocator.dupe(u8, sb.name);
-        try collectNets(allocator, sb.block, sub_prefix, list);
-    }
-}
-
-// --- Netlist writer ---
-
-fn writeNetlist(
-    allocator: std.mem.Allocator,
-    design_name: []const u8,
-    instances: []const FlatInstance,
-    nets: []const FlatNet,
-    fp_name_map: *const std.StringHashMap([]const u8),
-    fp_pad_map: *const std.StringHashMap([]const []const u8),
 ) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    // Flatten sections + sub-sections into a flat list
+    var flat_sections: std.ArrayListUnmanaged(struct { name: []const u8, instances: []const Instance, pin_groups: []const env_mod.PinGroup }) = .empty;
+    defer flat_sections.deinit(allocator);
 
-    try w.writeAll("(export (version \"E\")\n");
-    try w.writeAll("  (design\n");
-    try w.print("    (source \"{s}\")\n", .{design_name});
-    try w.writeAll("    (tool \"canopy-eda\"))\n");
-
-    // Components
-    try w.writeAll("  (components\n");
-    for (instances) |inst| {
-        try w.print("    (comp (ref \"{s}\")\n", .{inst.ref_des});
-        try w.print("      (value \"{s}\")\n", .{inst.value});
-        const kicad_fp = fp_name_map.get(inst.footprint) orelse inst.footprint;
-        try w.print("      (footprint \"footprints:{s}\")\n", .{kicad_fp});
-        // Sheetpath + tstamp for KiCad PCB ↔ netlist matching.
-        // KiCad constructs: FindFootprintByPath(sheetpath_tstamps / component_tstamp)
-        try w.writeAll("      (sheetpath (names /) (tstamps /))\n");
-        if (inst.uuid.len > 0) {
-            try w.print("      (tstamp {s})\n", .{inst.uuid});
-        }
-        // Properties
-        for (inst.properties) |prop| {
-            try w.print("      (property (name \"{s}\") (value \"{s}\"))\n", .{ prop.key, prop.value });
-        }
-        try w.writeAll("    )\n");
-    }
-    try w.writeAll("  )\n");
-
-    // Build set of connected pins per component: "REF\x00PIN" -> true
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const tmp = arena.allocator();
-    var connected_pins = std.StringHashMap(void).init(tmp);
-    for (nets) |net| {
-        for (net.pins) |pin| {
-            const key = try std.fmt.allocPrint(tmp, "{s}\x00{s}", .{ pin.ref_des, pin.pin });
-            try connected_pins.put(key, {});
-        }
-    }
-
-    // Nets
-    try w.writeAll("  (nets\n");
-    // Unconnected net with NC pad nodes
-    try w.writeAll("    (net (code \"0\") (name \"\")\n");
-    for (instances) |inst| {
-        const pads = fp_pad_map.get(inst.footprint) orelse continue;
-        for (pads) |pad_name| {
-            const key = try std.fmt.allocPrint(tmp, "{s}\x00{s}", .{ inst.ref_des, pad_name });
-            if (!connected_pins.contains(key)) {
-                try w.print("      (node (ref \"{s}\") (pin \"{s}\"))\n", .{ inst.ref_des, pad_name });
-            }
-        }
-    }
-    try w.writeAll("    )\n");
-    for (nets, 0..) |net, i| {
-        if (net.pins.len == 0) continue;
-        try w.print("    (net (code \"{d}\") (name \"{s}\")\n", .{ i + 1, net.name });
-        for (net.pins) |pin| {
-            try w.print("      (node (ref \"{s}\") (pin \"{s}\"))\n", .{ pin.ref_des, pin.pin });
-        }
-        try w.writeAll("    )\n");
-    }
-    try w.writeAll("  )\n");
-
-    try w.writeAll(")\n");
-    return buf.toOwnedSlice(allocator);
-}
-
-// --- Footprint pad extraction ---
-
-fn extractPadNames(allocator: std.mem.Allocator, source: []const u8) ![]const []const u8 {
-    const nodes = try parser_mod.parse(allocator, source);
-    defer parser_mod.freeNodes(allocator, nodes);
-
-    if (nodes.len == 0) return error.InvalidFormat;
-    const root = nodes[0];
-    if (!root.isForm("footprint")) return error.InvalidFormat;
-    const children = root.asList() orelse return error.InvalidFormat;
-
-    var pads: std.ArrayListUnmanaged([]const u8) = .empty;
-    for (children[2..]) |child| {
-        if (child.isForm("pad")) {
-            const cl = child.asList() orelse continue;
-            if (cl.len < 2) continue;
-            const name = cl[1].asAtom() orelse cl[1].asString() orelse continue;
-            try pads.append(allocator, try allocator.dupe(u8, name));
-        }
-    }
-    return pads.toOwnedSlice(allocator);
-}
-
-// --- Footprint name extraction ---
-
-fn extractFootprintName(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
-    const nodes = try parser_mod.parse(allocator, source);
-    defer parser_mod.freeNodes(allocator, nodes);
-
-    if (nodes.len == 0) return error.InvalidFormat;
-    const root = nodes[0];
-    if (!root.isForm("footprint")) return error.InvalidFormat;
-    const children = root.asList() orelse return error.InvalidFormat;
-    if (children.len < 2) return error.InvalidFormat;
-
-    const name = children[1].asAtom() orelse children[1].asString() orelse return error.InvalidFormat;
-    return try allocator.dupe(u8, name);
-}
-
-// --- Footprint .sexp -> .kicad_mod ---
-
-fn exportFootprintMod(allocator: std.mem.Allocator, source: []const u8, model_name: ?[]const u8) ![]const u8 {
-    const nodes = try parser_mod.parse(allocator, source);
-    defer parser_mod.freeNodes(allocator, nodes);
-
-    if (nodes.len == 0) return error.InvalidFormat;
-    const root = nodes[0];
-    if (!root.isForm("footprint")) return error.InvalidFormat;
-    const children = root.asList() orelse return error.InvalidFormat;
-    if (children.len < 2) return error.InvalidFormat;
-
-    const name = children[1].asAtom() orelse children[1].asString() orelse return error.InvalidFormat;
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-
-    try w.writeAll("(footprint \"");
-    try w.writeAll(name);
-    try w.writeAll("\"\n");
-    try w.writeAll("  (version 20240108)\n");
-    try w.writeAll("  (generator \"canopy-eda\")\n");
-    try w.writeAll("  (layer \"F.Cu\")\n");
-
-    // Description
-    for (children[2..]) |child| {
-        if (child.isForm("description")) {
-            const cl = child.asList().?;
-            if (cl.len >= 2) {
-                const desc = cl[1].asAtom() orelse cl[1].asString() orelse "";
-                try w.print("  (descr \"{s}\")\n", .{desc});
-            }
-        }
-    }
-
-    // Pads
-    for (children[2..]) |child| {
-        if (child.isForm("pad")) {
-            try emitKicadPad(w, child);
-        }
-    }
-
-    // Courtyard
-    for (children[2..]) |child| {
-        if (child.isForm("courtyard")) {
-            try emitKicadCourtyard(w, child);
-        }
-    }
-
-    // Silkscreen
-    for (children[2..]) |child| {
-        if (child.isForm("silkscreen")) {
-            try emitKicadSilkscreen(w, child);
-        }
-    }
-
-    // 3D model reference
-    if (model_name) |mname| {
-        try w.writeAll("  (model \"${KIPRJMOD}/models/");
-        try w.writeAll(mname);
-        try w.writeAll("\"\n");
-        try w.writeAll("    (offset (xyz 0 0 0))\n");
-        try w.writeAll("    (scale (xyz 1 1 1))\n");
-        try w.writeAll("    (rotate (xyz 0 0 0))\n");
-        try w.writeAll("  )\n");
-    }
-
-    try w.writeAll(")\n");
-    return buf.toOwnedSlice(allocator);
-}
-
-fn emitKicadPad(w: anytype, node: @import("sexpr/ast.zig").Node) !void {
-    const children = node.asList() orelse return;
-    if (children.len < 5) return;
-
-    // (pad NAME TYPE SHAPE (pos X Y) (size W H))
-    const pad_type_internal = children[2].asAtom() orelse return;
-    const pad_shape_internal = children[3].asAtom() orelse return;
-
-    // Reverse map types
-    const kicad_type = reverseMapPadType(pad_type_internal);
-    const kicad_shape = pad_shape_internal; // shapes are same names
-
-    var x: f64 = 0;
-    var y: f64 = 0;
-    var sx: f64 = 0;
-    var sy: f64 = 0;
-    var drill_x: f64 = 0;
-    var drill_y: f64 = 0;
-    var has_drill = false;
-    var is_oval_drill = false;
-
-    for (children[4..]) |child| {
-        if (child.isForm("pos")) {
-            const cl = child.asList().?;
-            if (cl.len >= 3) {
-                x = cl[1].asNumber() orelse 0;
-                y = cl[2].asNumber() orelse 0;
-            }
-        }
-        if (child.isForm("size")) {
-            const cl = child.asList().?;
-            if (cl.len >= 3) {
-                sx = cl[1].asNumber() orelse 0;
-                sy = cl[2].asNumber() orelse 0;
-            }
-        }
-        if (child.isForm("drill")) {
-            const cl = child.asList().?;
-            has_drill = true;
-            if (cl.len >= 2) {
-                if (cl[1].asAtom()) |a| {
-                    if (std.mem.eql(u8, a, "oval") and cl.len >= 4) {
-                        is_oval_drill = true;
-                        drill_x = cl[2].asNumber() orelse 0;
-                        drill_y = cl[3].asNumber() orelse 0;
-                    }
-                } else {
-                    drill_x = cl[1].asNumber() orelse 0;
-                    drill_y = drill_x;
-                }
-            }
-        }
-    }
-
-    // Write pad name - handle atom, string, or numeric names
-    if (children[1].asAtom() orelse children[1].asString()) |pn| {
-        try w.print("  (pad \"{s}\" {s} {s}\n", .{ pn, kicad_type, kicad_shape });
-    } else if (children[1].asNumber()) |num| {
-        const inum: i64 = @intFromFloat(num);
-        try w.print("  (pad \"{d}\" {s} {s}\n", .{ inum, kicad_type, kicad_shape });
-    } else {
-        return;
-    }
-
-    try w.print("    (at {d:.2} {d:.2})\n", .{ x, y });
-    try w.print("    (size {d:.2} {d:.2})\n", .{ sx, sy });
-
-    // Drill for through-hole pads
-    if (std.mem.eql(u8, pad_type_internal, "thru") or std.mem.eql(u8, pad_type_internal, "npth")) {
-        if (has_drill) {
-            if (is_oval_drill) {
-                try w.print("    (drill oval {d:.2} {d:.2})\n", .{ drill_x, drill_y });
-            } else {
-                try w.print("    (drill {d:.2})\n", .{drill_x});
-            }
+    for (block.sections) |sec| {
+        // If section has sub-sections, its instances belong to those — skip parent's instances
+        if (sec.sub_sections.len > 0) {
+            try flat_sections.append(allocator, .{ .name = sec.name, .instances = &.{}, .pin_groups = sec.pin_groups });
         } else {
-            // Fallback: guess drill as min dimension
-            const drill = @min(sx, sy);
-            try w.print("    (drill {d:.2})\n", .{drill});
+            try flat_sections.append(allocator, .{ .name = sec.name, .instances = sec.instances, .pin_groups = sec.pin_groups });
+        }
+        for (sec.sub_sections) |sub| {
+            try flat_sections.append(allocator, .{ .name = sub.name, .instances = sub.instances, .pin_groups = sub.pin_groups });
         }
     }
 
-    // Layers
-    if (std.mem.eql(u8, pad_type_internal, "smd")) {
-        try w.writeAll("    (layers \"F.Cu\" \"F.Mask\" \"F.Paste\")\n");
-        if (std.mem.eql(u8, kicad_shape, "roundrect")) {
-            try w.writeAll("    (roundrect_rratio 0.25)\n");
+    const n = flat_sections.items.len;
+    if (n == 0) return try allocator.dupe(u8, "{\"cell_size_mm\":50,\"sections\":[],\"ref_section\":{}}");
+
+    // Grid dimensions
+    var n_cols: usize = 1;
+    while (n_cols * n_cols < n) : (n_cols += 1) {}
+
+    // Build ref_des -> section index map
+    var ref_map = std.StringHashMap(usize).init(allocator);
+    defer ref_map.deinit();
+
+    for (flat_sections.items, 0..) |sec, si| {
+        for (sec.instances) |inst| {
+            try ref_map.put(inst.ref_des, si);
         }
-    } else if (std.mem.eql(u8, pad_type_internal, "thru")) {
-        try w.writeAll("    (layers \"*.Cu\" \"*.Mask\")\n");
-    } else if (std.mem.eql(u8, pad_type_internal, "npth")) {
-        try w.writeAll("    (layers \"*.Cu\" \"*.Mask\")\n");
-    }
-
-    try w.writeAll("  )\n");
-}
-
-fn emitKicadCourtyard(w: anytype, node: @import("sexpr/ast.zig").Node) !void {
-    const children = node.asList() orelse return;
-    // (courtyard (rect X1 Y1 X2 Y2))
-    for (children[1..]) |child| {
-        if (child.isForm("rect")) {
-            const cl = child.asList() orelse continue;
-            if (cl.len >= 5) {
-                const x1 = cl[1].asNumber() orelse 0;
-                const y1 = cl[2].asNumber() orelse 0;
-                const x2 = cl[3].asNumber() orelse 0;
-                const y2 = cl[4].asNumber() orelse 0;
-                try w.print("  (fp_rect (start {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ x1, y1, x2, y2 });
-                try w.writeAll("    (stroke (width 0.05) (type default))\n");
-                try w.writeAll("    (fill none)\n");
-                try w.writeAll("    (layer \"F.CrtYd\")\n");
-                try w.writeAll("  )\n");
+        // Also capture instances referenced via pin_groups
+        for (sec.pin_groups) |pg| {
+            if (!ref_map.contains(pg.ref_des)) {
+                try ref_map.put(pg.ref_des, si);
             }
         }
     }
-}
 
-fn emitKicadSilkscreen(w: anytype, node: @import("sexpr/ast.zig").Node) !void {
-    const children = node.asList() orelse return;
-    for (children[1..]) |child| {
-        if (child.isForm("line")) {
-            const cl = child.asList() orelse continue;
-            // (line (X1 Y1) (X2 Y2))
-            if (cl.len >= 3) {
-                const start = cl[1].asList() orelse continue;
-                const end = cl[2].asList() orelse continue;
-                if (start.len >= 2 and end.len >= 2) {
-                    const sx = start[0].asNumber() orelse continue;
-                    const sy = start[1].asNumber() orelse continue;
-                    const ex = end[0].asNumber() orelse continue;
-                    const ey = end[1].asNumber() orelse continue;
-                    try w.print("  (fp_line (start {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ sx, sy, ex, ey });
-                    try w.writeAll("    (stroke (width 0.12) (type default))\n");
-                    try w.writeAll("    (layer \"F.SilkS\")\n");
-                    try w.writeAll("  )\n");
+    // Write JSON
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+
+    try w.writeAll("{\"cell_size_mm\":50,\"sections\":[");
+    for (flat_sections.items, 0..) |sec, si| {
+        if (si > 0) try w.writeAll(",");
+        const row = si / n_cols;
+        const col = si % n_cols;
+        try w.print("{{\"name\":\"{s}\",\"row\":{d},\"col\":{d},\"refs\":[", .{ sec.name, row, col });
+        var first = true;
+        for (sec.instances) |inst| {
+            if (!first) try w.writeAll(",");
+            try w.print("\"{s}\"", .{inst.ref_des});
+            first = false;
+        }
+        for (sec.pin_groups) |pg| {
+            // Only add if not already listed as a direct instance
+            var found = false;
+            for (sec.instances) |inst| {
+                if (std.mem.eql(u8, inst.ref_des, pg.ref_des)) {
+                    found = true;
+                    break;
                 }
             }
-        }
-        if (child.isForm("circle")) {
-            const cl = child.asList() orelse continue;
-            // (circle (CX CY) R)
-            if (cl.len >= 3) {
-                const center = cl[1].asList() orelse continue;
-                if (center.len >= 2) {
-                    const cx = center[0].asNumber() orelse continue;
-                    const cy = center[1].asNumber() orelse continue;
-                    const r = cl[2].asNumber() orelse continue;
-                    // KiCad uses center + end point
-                    try w.print("  (fp_circle (center {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ cx, cy, cx + r, cy });
-                    try w.writeAll("    (stroke (width 0.12) (type default))\n");
-                    try w.writeAll("    (fill none)\n");
-                    try w.writeAll("    (layer \"F.SilkS\")\n");
-                    try w.writeAll("  )\n");
-                }
+            if (!found) {
+                if (!first) try w.writeAll(",");
+                try w.print("\"{s}\"", .{pg.ref_des});
+                first = false;
             }
         }
+        try w.writeAll("]}");
     }
+
+    try w.writeAll("],\"ref_section\":{");
+    var ref_first = true;
+    var ref_iter = ref_map.iterator();
+    while (ref_iter.next()) |entry| {
+        if (!ref_first) try w.writeAll(",");
+        try w.print("\"{s}\":{d}", .{ entry.key_ptr.*, entry.value_ptr.* });
+        ref_first = false;
+    }
+    try w.writeAll("}}");
+
+    return try allocator.dupe(u8, buf.items);
 }
 
-fn reverseMapPadType(internal: []const u8) []const u8 {
-    if (std.mem.eql(u8, internal, "smd")) return "smd";
-    if (std.mem.eql(u8, internal, "thru")) return "thru_hole";
-    if (std.mem.eql(u8, internal, "npth")) return "np_thru_hole";
-    return "smd";
-}
-
-// --- STEP model finder ---
-
-fn findModelFile(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    footprint_name: []const u8,
-    component_name: []const u8,
-) ?[]const u8 {
-    // Try exact footprint name match
-    const fp_step = std.fmt.allocPrint(allocator, "{s}.step", .{footprint_name}) catch return null;
-    defer allocator.free(fp_step);
-    {
-        const check_path = std.fmt.allocPrint(allocator, "{s}/lib/models/{s}", .{ project_dir, fp_step }) catch return null;
-        defer allocator.free(check_path);
-        if (std.fs.cwd().access(check_path, .{})) |_| {
-            return allocator.dupe(u8, fp_step) catch null;
-        } else |_| {}
-    }
-
-    // Try component name match
-    const comp_step = std.fmt.allocPrint(allocator, "{s}.step", .{component_name}) catch return null;
-    defer allocator.free(comp_step);
-    {
-        const check_path = std.fmt.allocPrint(allocator, "{s}/lib/models/{s}", .{ project_dir, comp_step }) catch return null;
-        defer allocator.free(check_path);
-        if (std.fs.cwd().access(check_path, .{})) |_| {
-            return allocator.dupe(u8, comp_step) catch null;
-        } else |_| {}
-    }
-
-    // Scan models directory for partial match
-    const models_path = std.fmt.allocPrint(allocator, "{s}/lib/models", .{project_dir}) catch return null;
-    defer allocator.free(models_path);
-
-    var dir = std.fs.cwd().openDir(models_path, .{ .iterate = true }) catch return null;
-    defer dir.close();
-
-    var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".step")) continue;
-        // Check if model filename contains the footprint or component name
-        const basename = entry.name[0 .. entry.name.len - 5]; // strip .step
-        if (std.mem.indexOf(u8, footprint_name, basename) != null or
-            std.mem.indexOf(u8, basename, footprint_name) != null or
-            std.mem.indexOf(u8, component_name, basename) != null or
-            std.mem.indexOf(u8, basename, component_name) != null)
-        {
-            return allocator.dupe(u8, entry.name) catch null;
-        }
-    }
-
-    return null;
-}
+const collectInstances = netlist_mod.collectInstances;
+const collectNets = netlist_mod.collectNets;
 
 const ConvertError = error{
     InvalidFormat,
@@ -871,6 +424,7 @@ const ConvertError = error{
     InvalidNumber,
 };
 
+// spec: export_kicad - Generates a KiCad netlist from a resolved design
 test "netlist generation" {
     const alloc = std.testing.allocator;
     var fp_map = std.StringHashMap([]const u8).init(alloc);
@@ -898,6 +452,7 @@ test "netlist generation" {
     try std.testing.expect(std.mem.indexOf(u8, output, "(name \"VDD\")") != null);
 }
 
+// spec: export_kicad - Exports a KiCad footprint mod file from footprint data
 test "footprint mod export" {
     const alloc = std.testing.allocator;
     const source =

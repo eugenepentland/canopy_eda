@@ -7,13 +7,13 @@ const Instance = env_mod.Instance;
 const Property = env_mod.Property;
 const Net = env_mod.Net;
 
-/// A single BOM entry: ref_des → UUID + component + footprint + properties.
+/// A single BOM entry: ref_des → UUID + component + properties.
 const BomEntry = struct {
     ref_des: []const u8,
     uuid: []const u8,
     component: []const u8,
-    footprint: []const u8,
     properties: []const Property,
+    id: []const u8 = "",
 };
 
 /// Load a .bom sidecar file and return the entries.
@@ -40,8 +40,8 @@ fn loadBom(allocator: std.mem.Allocator, bom_path: []const u8) ![]const BomEntry
         const uuid = children[2].asString() orelse continue;
         const component = if (children.len >= 4) (children[3].asString() orelse "") else "";
 
-        // Parse sub-forms: (footprint "..."), (key "val"), ...
-        var footprint: []const u8 = "";
+        // Parse sub-forms: (id "..."), (key "val"), ...
+        var entry_id: []const u8 = "";
         var props: std.ArrayListUnmanaged(Property) = .empty;
         const start_idx: usize = if (children.len >= 4) 4 else 3;
         if (children.len > start_idx) {
@@ -51,7 +51,9 @@ fn loadBom(allocator: std.mem.Allocator, bom_path: []const u8) ![]const BomEntry
                 const key = prop_children[0].asAtom() orelse continue;
                 const value = prop_children[1].asString() orelse continue;
                 if (std.mem.eql(u8, key, "footprint")) {
-                    footprint = try allocator.dupe(u8, value);
+                    continue; // Ignored — footprint comes from evaluator
+                } else if (std.mem.eql(u8, key, "id")) {
+                    entry_id = try allocator.dupe(u8, value);
                 } else if (std.mem.eql(u8, key, "value")) {
                     // Informational field, not stored in BomEntry
                     continue;
@@ -68,8 +70,8 @@ fn loadBom(allocator: std.mem.Allocator, bom_path: []const u8) ![]const BomEntry
             .ref_des = try allocator.dupe(u8, ref_des),
             .uuid = try allocator.dupe(u8, uuid),
             .component = if (component.len > 0) try allocator.dupe(u8, component) else "",
-            .footprint = footprint,
             .properties = props.toOwnedSlice(allocator) catch &.{},
+            .id = entry_id,
         });
     }
 
@@ -85,6 +87,7 @@ const FlatInfo = struct {
     attrs: []const []const u8,
     nets: []const []const u8,
     properties: []const Property,
+    id: []const u8 = "",
 };
 
 fn collectFlatInstances(
@@ -129,6 +132,7 @@ fn collectFlatInstances(
             .attrs = inst.attrs,
             .nets = nets_list,
             .properties = inst.properties,
+            .id = inst.id,
         });
     }
     for (block.sub_blocks) |sb| {
@@ -161,7 +165,10 @@ fn netOverlap(a: []const []const u8, b: []const []const u8) f64 {
     var matches: usize = 0;
     for (a) |na| {
         for (b) |nb| {
-            if (std.mem.eql(u8, na, nb)) { matches += 1; break; }
+            if (std.mem.eql(u8, na, nb)) {
+                matches += 1;
+                break;
+            }
         }
     }
     const max_len: f64 = @floatFromInt(@max(a.len, b.len));
@@ -219,7 +226,7 @@ pub fn resolveIdentities(
             if (e.ref_des.len > 0) allocator.free(e.ref_des);
             if (e.uuid.len > 0) allocator.free(e.uuid);
             if (e.component.len > 0) allocator.free(e.component);
-            if (e.footprint.len > 0) allocator.free(e.footprint);
+            if (e.id.len > 0) allocator.free(e.id);
             for (e.properties) |p| {
                 allocator.free(p.key);
                 allocator.free(p.value);
@@ -247,18 +254,35 @@ pub fn resolveIdentities(
     defer result_map.deinit();
     var props_map = std.StringHashMap([]const Property).init(allocator);
     defer props_map.deinit();
-    var footprint_map = std.StringHashMap([]const u8).init(allocator);
-    defer footprint_map.deinit();
 
-    // Pass 1: exact ref_des match
+    // Pass 0: match by (id ...) — stable even if ref_des changes
+    var old_by_id = std.StringHashMap(usize).init(allocator);
+    defer old_by_id.deinit();
+    for (old_entries, 0..) |e, i| {
+        if (e.id.len > 0) try old_by_id.put(e.id, i);
+    }
     for (flat_list.items) |info| {
+        if (info.id.len > 0) {
+            if (old_by_id.get(info.id)) |idx| {
+                if (!claimed[idx]) {
+                    try result_map.put(info.ref_des, try allocator.dupe(u8, old_entries[idx].uuid));
+                    if (old_entries[idx].properties.len > 0) {
+                        try props_map.put(info.ref_des, old_entries[idx].properties);
+                    }
+                    claimed[idx] = true;
+                }
+            }
+        }
+    }
+
+    // Pass 1: exact ref_des match (for entries without IDs)
+    for (flat_list.items) |info| {
+        if (result_map.contains(info.ref_des)) continue;
         if (old_by_ref.get(info.ref_des)) |idx| {
+            if (claimed[idx]) continue;
             try result_map.put(info.ref_des, try allocator.dupe(u8, old_entries[idx].uuid));
             if (old_entries[idx].properties.len > 0) {
                 try props_map.put(info.ref_des, old_entries[idx].properties);
-            }
-            if (old_entries[idx].footprint.len > 0) {
-                try footprint_map.put(info.ref_des, try allocator.dupe(u8, old_entries[idx].footprint));
             }
             claimed[idx] = true;
         }
@@ -284,9 +308,6 @@ pub fn resolveIdentities(
             if (old_entries[idx].properties.len > 0) {
                 try props_map.put(info.ref_des, old_entries[idx].properties);
             }
-            if (old_entries[idx].footprint.len > 0) {
-                try footprint_map.put(info.ref_des, try allocator.dupe(u8, old_entries[idx].footprint));
-            }
             claimed[idx] = true;
         }
     }
@@ -306,7 +327,10 @@ pub fn resolveIdentities(
         if (props_map.get(info.ref_des)) |existing_props| {
             var has_mpn = false;
             for (existing_props) |p| {
-                if (std.mem.eql(u8, p.key, "mpn")) { has_mpn = true; break; }
+                if (std.mem.eql(u8, p.key, "mpn")) {
+                    has_mpn = true;
+                    break;
+                }
             }
             if (has_mpn) continue;
         }
@@ -320,7 +344,10 @@ pub fn resolveIdentities(
         // Skip if component already has manufacturer+mpn from component definition
         var has_mpn_from_component = false;
         for (info.properties) |p| {
-            if (std.mem.eql(u8, p.key, "mpn")) { has_mpn_from_component = true; break; }
+            if (std.mem.eql(u8, p.key, "mpn")) {
+                has_mpn_from_component = true;
+                break;
+            }
         }
         if (has_mpn_from_component) continue;
 
@@ -347,10 +374,10 @@ pub fn resolveIdentities(
     }
 
     // Apply UUIDs, properties, and footprints to the design block
-    try applyBom(allocator, block, &result_map, &props_map, &footprint_map, "");
+    try applyBom(allocator, block, &result_map, &props_map, "");
 
     // Save .bom file
-    try saveBom(allocator, bom_path, flat_list.items, &result_map, &props_map, &footprint_map);
+    try saveBom(allocator, bom_path, flat_list.items, &result_map, &props_map);
 }
 
 /// Recursively apply BOM data (UUIDs, properties, footprints) to Instance structs.
@@ -359,7 +386,6 @@ fn applyBom(
     block: *const DesignBlock,
     uuid_map: *const std.StringHashMap([]const u8),
     props_map: *const std.StringHashMap([]const Property),
-    footprint_map: *const std.StringHashMap([]const u8),
     prefix: []const u8,
 ) !void {
     const instances: []Instance = @constCast(block.instances);
@@ -371,12 +397,7 @@ fn applyBom(
         defer if (prefix.len > 0) allocator.free(key);
 
         if (uuid_map.get(key)) |uuid| {
-            inst.uuid = uuid;
-        }
-
-        // Apply footprint from .bom (overrides component default if present)
-        if (footprint_map.get(key)) |fp| {
-            if (fp.len > 0) inst.footprint = fp;
+            inst.uuid = allocator.dupe(u8, uuid) catch uuid;
         }
 
         // Merge .bom properties into instance
@@ -386,11 +407,17 @@ fn applyBom(
                 for (inst.properties) |cp| {
                     var overridden = false;
                     for (bom_props) |ip| {
-                        if (std.mem.eql(u8, cp.key, ip.key)) { overridden = true; break; }
+                        if (std.mem.eql(u8, cp.key, ip.key)) {
+                            overridden = true;
+                            break;
+                        }
                     }
                     if (!overridden) merged.append(allocator, cp) catch {};
                 }
-                for (bom_props) |ip| merged.append(allocator, ip) catch {};
+                for (bom_props) |ip| merged.append(allocator, .{
+                    .key = allocator.dupe(u8, ip.key) catch ip.key,
+                    .value = allocator.dupe(u8, ip.value) catch ip.value,
+                }) catch {};
                 inst.properties = merged.toOwnedSlice(allocator) catch inst.properties;
             }
         }
@@ -401,7 +428,7 @@ fn applyBom(
         else
             sb.name;
         defer if (prefix.len > 0) allocator.free(child_prefix);
-        try applyBom(allocator, sb.block, uuid_map, props_map, footprint_map, child_prefix);
+        try applyBom(allocator, sb.block, uuid_map, props_map, child_prefix);
     }
 }
 
@@ -412,26 +439,20 @@ fn saveBom(
     flat_instances: []const FlatInfo,
     uuid_map: *const std.StringHashMap([]const u8),
     props_map: *const std.StringHashMap([]const Property),
-    footprint_map: *const std.StringHashMap([]const u8),
 ) !void {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
 
     try w.writeAll(";; BOM — auto-generated by eda build\n");
-    try w.writeAll(";; Stores identity, footprint, and properties per instance\n\n");
+    try w.writeAll(";; Stores identity and properties per instance\n\n");
 
     for (flat_instances) |info| {
         const uuid = uuid_map.get(info.ref_des) orelse continue;
         const props = props_map.get(info.ref_des) orelse info.properties;
-        const footprint = footprint_map.get(info.ref_des) orelse info.footprint;
 
-        // Always emit multi-line format with footprint visible
         try w.print("(part \"{s}\" \"{s}\" \"{s}\"\n", .{ info.ref_des, uuid, info.component });
-        try w.print("  (footprint \"{s}\")\n", .{footprint});
-        if (info.value.len > 0) {
-            try w.print("  (value \"{s}\")\n", .{info.value});
-        }
+        try w.print("  (id \"{s}\")\n", .{info.id});
         for (props) |p| {
             try w.print("  ({s} \"{s}\")\n", .{ p.key, p.value });
         }
@@ -443,6 +464,7 @@ fn saveBom(
     try f.writeAll(buf.items);
 }
 
+// spec: bom - Generates deterministic UUIDs in the expected format
 test "generate uuid format" {
     const alloc = std.testing.allocator;
     const uuid = try generateUuid(alloc);
@@ -454,12 +476,14 @@ test "generate uuid format" {
     try std.testing.expectEqual(@as(u8, '-'), uuid[23]);
 }
 
+// spec: bom - Loads an empty BOM file without error
 test "load empty bom" {
     const alloc = std.testing.allocator;
     const entries = try loadBom(alloc, "/nonexistent/path.bom");
     try std.testing.expectEqual(@as(usize, 0), entries.len);
 }
 
+// spec: bom - Detects net overlap between components
 test "net overlap" {
     const a = &[_][]const u8{ "VDD", "GND", "SDA" };
     const b = &[_][]const u8{ "VDD", "GND", "SCL" };

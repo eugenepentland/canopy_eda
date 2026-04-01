@@ -114,6 +114,8 @@ pub const Property = struct {
 
 pub const Instance = struct {
     ref_des: []const u8,
+    /// Descriptive label from source (e.g., "stm32", "flash"). Empty for auto-named passives.
+    label: []const u8 = "",
     component: []const u8,
     value: []const u8,
     footprint: []const u8,
@@ -126,7 +128,9 @@ pub const Instance = struct {
     parts: []const Part = &.{},
     /// Byte offset of the component family name in the source file.
     source_offset: u32 = 0,
-    /// Stable UUID for PCB identity tracking (assigned by identity module, not from source).
+    /// 8-char hex ID from (id xxxxxxxx) in source. Primary stable identity key.
+    id: []const u8 = "",
+    /// Full UUID for PCB/KiCad export (derived from id or assigned by BOM).
     uuid: []const u8 = "",
 };
 
@@ -195,6 +199,8 @@ pub const Section = struct {
     ports: []const SectionPort = &.{},
     /// Named calculation blocks.
     calcs: []const CalcBlock = &.{},
+    /// Nested sub-sections (internal detail, shown in schematic but merged in block diagram).
+    sub_sections: []const Section = &.{},
 };
 
 /// The result of evaluating a design-block form.
@@ -244,6 +250,7 @@ pub const Env = struct {
     }
 };
 
+// spec: eval/env - Stores and retrieves values by name in an environment
 test "env get and put" {
     const alloc = std.testing.allocator;
     var env = Env.init(alloc, null);
@@ -255,6 +262,7 @@ test "env get and put" {
     try std.testing.expect(env.get("y") == null);
 }
 
+// spec: eval/env - Resolves names through a parent environment chain
 test "env parent chain" {
     const alloc = std.testing.allocator;
     var parent = Env.init(alloc, null);

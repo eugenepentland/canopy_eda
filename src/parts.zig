@@ -167,6 +167,7 @@ pub const PartsDb = struct {
     }
 };
 
+// spec: parts - Returns null when looking up a missing component family
 test "parts db returns null for missing family" {
     const alloc = std.testing.allocator;
     var db = PartsDb.init(alloc, "/nonexistent");
@@ -175,6 +176,7 @@ test "parts db returns null for missing family" {
     try std.testing.expect(result == null);
 }
 
+// spec: parts - Matches component attributes against filter criteria
 test "attrs match" {
     const attrs = [_]Property{
         .{ .key = "dielectric", .value = "x7r" },
@@ -184,6 +186,7 @@ test "attrs match" {
     try std.testing.expect(PartsDb.attrsMatch(&attrs, &[_][]const u8{}));
 }
 
+// spec: parts - Picks the preferred component from matching candidates
 test "pick preferred" {
     var a = PartEntry{ .value = "100nF", .manufacturer = "A", .mpn = "A1", .attrs = &.{}, .preferred = false };
     var b = PartEntry{ .value = "100nF", .manufacturer = "B", .mpn = "B1", .attrs = &.{}, .preferred = true };

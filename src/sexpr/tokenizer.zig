@@ -232,6 +232,7 @@ pub const Tokenizer = struct {
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
+// spec: sexpr/tokenizer - Tokenizes parentheses and atoms from S-expression input
 test "tokenize parens and atoms" {
     var t = Tokenizer.init("(footprint \"QFN9\" pad-1)");
     const t1 = try t.next();
@@ -251,6 +252,7 @@ test "tokenize parens and atoms" {
     try std.testing.expectEqual(TokenTag.eof, t6.tag);
 }
 
+// spec: sexpr/tokenizer - Tokenizes integer and float numbers with optional unit suffixes
 test "tokenize numbers" {
     var t = Tokenizer.init("42 3.3 -5 1.0mm 10mil");
     const t1 = try t.next();
@@ -274,6 +276,7 @@ test "tokenize numbers" {
     try std.testing.expectEqualStrings("10", t5.text);
 }
 
+// spec: sexpr/tokenizer - Skips line comments starting with semicolon
 test "tokenize comments" {
     var t = Tokenizer.init(
         \\; this is a comment
@@ -286,6 +289,7 @@ test "tokenize comments" {
     try std.testing.expectEqualStrings("hello", t2.text);
 }
 
+// spec: sexpr/tokenizer - Tokenizes arithmetic operators as distinct tokens
 test "tokenize operators" {
     var t = Tokenizer.init("(+ a (* b c))");
     const t1 = try t.next();
@@ -300,6 +304,7 @@ test "tokenize operators" {
     try std.testing.expectEqualStrings("*", t5.text);
 }
 
+// spec: sexpr/tokenizer - Tokenizes comparison operators as distinct tokens
 test "tokenize comparison operators" {
     var t = Tokenizer.init(">= <= == !=");
     const t1 = try t.next();
@@ -312,6 +317,7 @@ test "tokenize comparison operators" {
     try std.testing.expectEqualStrings("!=", t4.text);
 }
 
+// spec: sexpr/tokenizer - Tracks line and column position for each token
 test "tracks line and column" {
     var t = Tokenizer.init("(a\n  b)");
     const t1 = try t.next();

@@ -1,0 +1,332 @@
+const std = @import("std");
+const ast = @import("../sexpr/ast.zig");
+const env_mod = @import("env.zig");
+const Evaluator = @import("evaluator.zig").Evaluator;
+const EvalError = @import("evaluator.zig").EvalError;
+const ids = @import("ids.zig");
+const PinNetDecl = @import("evaluator.zig").PinNetDecl;
+
+const Node = ast.Node;
+const Value = env_mod.Value;
+const Env = env_mod.Env;
+const Instance = env_mod.Instance;
+const Note = env_mod.Note;
+
+/// Result of building an instance: the instance + any inline pin-net declarations + notes
+pub const InstanceResult = struct {
+    instance: Instance,
+    pin_nets: []const PinNetDecl,
+    inline_notes: []const Note,
+};
+
+pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) EvalError!InstanceResult {
+    // form_children includes "instance" atom: (instance "R4" (res-0402 "220k") (pin 1 "NET_A") ...)
+    const args = form_children[1..];
+    if (args.len < 2) return EvalError.ArityError;
+    const ref_val = try self.evalNode(args[0], env);
+    const ref_des = ref_val.asString() orelse return EvalError.TypeError;
+
+    // Parse (id xxxxxxxx) from full form children
+    const parsed_id = ids.parseId(form_children);
+    const inst_id = parsed_id orelse try ids.generateId(self);
+
+    // Track for auto-insertion if no (id ...) was in source
+    if (parsed_id == null) {
+        self.pending_ids.append(self.allocator, .{
+            .form_offset = form_children[0].span.offset -| 1,
+            .id = inst_id,
+        }) catch {};
+    }
+
+    const comp_val = try self.evalNode(args[1], env);
+    const comp_offset = ids.componentSourceOffset(args[1]);
+    const inst = switch (comp_val) {
+        .component => |comp_name| blk: {
+            const comp = self.component_cache.get(comp_name) orelse return EvalError.UnboundVariable;
+            break :blk Instance{
+                .ref_des = ref_des,
+                .label = ref_des,
+                .component = comp_name,
+                .value = "",
+                .footprint = comp.footprint_name,
+                .symbol = comp.symbol_name,
+                .properties = comp.properties,
+                .source_offset = comp_offset,
+                .id = inst_id,
+            };
+        },
+        .component_instance => |ci| blk: {
+            const comp = self.component_cache.get(ci.family) orelse return EvalError.UnboundVariable;
+            break :blk Instance{
+                .ref_des = ref_des,
+                .label = ref_des,
+                .component = ci.family,
+                .value = ci.value,
+                .footprint = comp.footprint_name,
+                .symbol = comp.symbol_name,
+                .properties = comp.properties,
+                .attrs = ci.attrs,
+                .source_offset = comp_offset,
+                .id = inst_id,
+            };
+        },
+        else => return EvalError.TypeError,
+    };
+
+    // Resolve pinout for reverse lookup (function_name -> pin_id)
+    const reverse_pinout: ?*const std.StringHashMapUnmanaged([]const u8) = blk: {
+        const comp_data = self.component_cache.get(inst.component);
+        const pln = if (comp_data) |cd| (if (cd.pinout_name.len > 0) cd.pinout_name else cd.symbol_name) else inst.symbol;
+        if (pln.len > 0) break :blk ids.getSymbolPins(self, pln);
+        break :blk null;
+    };
+
+    // Parse inline pin declarations:
+    //   (pin 1 "NET")               -- single pin
+    //   (pin 3 4 5 6 7 "NET")       -- multiple pins on same net
+    //   (connect FUNC "NET" ...)     -- connect by function name from pinout
+    var pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var inline_notes: std.ArrayListUnmanaged(Note) = .empty;
+    var inline_props: std.ArrayListUnmanaged(env_mod.Property) = .empty;
+
+    const known_forms = [_][]const u8{ "pin", "note", "bus", "id" };
+
+    for (args[2..]) |form| {
+        if (form.isForm("note")) {
+            const nc = form.asList().?;
+            if (nc.len >= 2) {
+                const nv = try self.evalNode(nc[1], env);
+                if (nv.asString()) |text| {
+                    try inline_notes.append(self.allocator, .{ .ref_des = ref_des, .text = text });
+                }
+            }
+        } else if (form.isForm("pin")) {
+            try parsePinForm(self, form, ref_des, env, &pin_nets, reverse_pinout);
+        } else if (form.isForm("bus")) {
+            // (bus "NET_PREFIX" "BUS_NAME") -- expand component bus definition
+            const bc = form.asList().?;
+            if (bc.len >= 3) {
+                const prefix_val = try self.evalNode(bc[1], env);
+                const prefix = prefix_val.asString() orelse continue;
+                const bus_name_val = try self.evalNode(bc[2], env);
+                const bus_name = bus_name_val.asString() orelse (bc[2].asAtom() orelse continue);
+                // Look up bus definition from component
+                const comp_data = self.component_cache.get(inst.component);
+                if (comp_data) |cd| {
+                    for (cd.buses) |bus_def| {
+                        if (std.mem.eql(u8, bus_def.name, bus_name)) {
+                            for (bus_def.pins, 0..) |bus_pin, idx| {
+                                const net = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ prefix, idx }) catch continue;
+                                // Resolve pin through pinout
+                                const resolved = if (reverse_pinout) |rp| (resolvePinName(self, rp, bus_pin) orelse bus_pin) else bus_pin;
+                                try pin_nets.append(self.allocator, .{ .ref_des = ref_des, .pin = resolved, .net = net });
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            // Unknown form -- treat as inline property: (key "value")
+            const fc = form.asList() orelse continue;
+            if (fc.len >= 2) {
+                const key = fc[0].asAtom() orelse continue;
+                var is_known = false;
+                for (known_forms) |kf| {
+                    if (std.mem.eql(u8, key, kf)) {
+                        is_known = true;
+                        break;
+                    }
+                }
+                if (!is_known) {
+                    const val = (try self.evalNode(fc[1], env)).asString() orelse continue;
+                    try inline_props.append(self.allocator, .{ .key = key, .value = val });
+                }
+            }
+        }
+    }
+
+    var final_inst = inst;
+
+    // Merge properties: start with component defaults, override with inline
+    if (inline_props.items.len > 0) {
+        mergeInstanceProperties(self, &final_inst, inline_props.items);
+    }
+
+    return InstanceResult{
+        .instance = final_inst,
+        .pin_nets = pin_nets.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
+        .inline_notes = inline_notes.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
+    };
+}
+
+pub fn parsePinForm(self: *Evaluator, form: Node, ref_des: []const u8, env: *Env, pin_nets: *std.ArrayListUnmanaged(PinNetDecl), pinout: ?*const std.StringHashMapUnmanaged([]const u8)) EvalError!void {
+    const pin_children = form.asList() orelse return;
+    if (pin_children.len < 3) return;
+    const net_val = try self.evalNode(pin_children[pin_children.len - 1], env);
+    const net_name = net_val.asString() orelse return;
+    for (pin_children[1 .. pin_children.len - 1]) |pin_node| {
+        const raw = ids.pinId(self, pin_node) orelse continue;
+        // Resolve: try as function name first (via pinout), fall back to physical pin ID
+        const pn = if (pinout) |pm| (resolvePinName(self, pm, raw) orelse raw) else raw;
+        try pin_nets.append(self.allocator, .{
+            .ref_des = ref_des,
+            .pin = pn,
+            .net = net_name,
+        });
+    }
+}
+
+/// Build an Instance from a Value (.component or .component_instance),
+/// looking up cached footprint/symbol/properties.
+pub fn instanceFromValue(self: *Evaluator, val: Value, ref_des: []const u8, source_offset: u32, id: []const u8) ?Instance {
+    return switch (val) {
+        .component => |c| blk: {
+            const cd = self.component_cache.get(c) orelse
+                break :blk Instance{ .ref_des = ref_des, .component = c, .value = "", .footprint = "", .symbol = "", .source_offset = source_offset, .id = id };
+            break :blk Instance{ .ref_des = ref_des, .component = c, .value = "", .footprint = cd.footprint_name, .symbol = cd.symbol_name, .properties = cd.properties, .source_offset = source_offset, .id = id };
+        },
+        .component_instance => |ci| blk: {
+            const cd = self.component_cache.get(ci.family) orelse
+                break :blk Instance{ .ref_des = ref_des, .component = ci.family, .value = ci.value, .footprint = "", .symbol = "", .attrs = ci.attrs, .source_offset = source_offset, .id = id };
+            break :blk Instance{ .ref_des = ref_des, .component = ci.family, .value = ci.value, .footprint = cd.footprint_name, .symbol = cd.symbol_name, .properties = cd.properties, .attrs = ci.attrs, .source_offset = source_offset, .id = id };
+        },
+        else => null,
+    };
+}
+
+/// Merge override properties into an instance, replacing matching keys.
+pub fn mergeInstanceProperties(self: *Evaluator, inst: *Instance, overrides: []const env_mod.Property) void {
+    if (overrides.len == 0) return;
+    var merged: std.ArrayListUnmanaged(env_mod.Property) = .empty;
+    for (inst.properties) |cp| {
+        var overridden = false;
+        for (overrides) |ip| {
+            if (std.mem.eql(u8, cp.key, ip.key)) {
+                overridden = true;
+                break;
+            }
+        }
+        if (!overridden) merged.append(self.allocator, cp) catch {};
+    }
+    for (overrides) |ip| merged.append(self.allocator, ip) catch {};
+    inst.properties = merged.toOwnedSlice(self.allocator) catch inst.properties;
+}
+
+/// Parse trailing arguments: extract net names, properties, and optional note.
+pub const TrailingArgs = struct {
+    nets: std.ArrayListUnmanaged([]const u8),
+    props: std.ArrayListUnmanaged(env_mod.Property),
+    note: ?[]const u8,
+};
+
+pub fn parseTrailingArgs(self: *Evaluator, children: []const Node, env: *Env) EvalError!TrailingArgs {
+    var result = TrailingArgs{
+        .nets = .empty,
+        .props = .empty,
+        .note = null,
+    };
+    for (children) |fc| {
+        if (fc.isForm("id")) continue;
+        if (fc.asList()) |cl| {
+            if (cl.len >= 2) {
+                const k = cl[0].asAtom() orelse continue;
+                if (std.mem.eql(u8, k, "note")) {
+                    result.note = cl[1].asString();
+                } else {
+                    const v = cl[1].asString() orelse continue;
+                    result.props.append(self.allocator, .{ .key = k, .value = v }) catch {};
+                }
+            }
+        } else {
+            const v = (try self.evalNode(fc, env)).asString() orelse continue;
+            result.nets.append(self.allocator, v) catch {};
+        }
+    }
+    return result;
+}
+
+/// Get the component family name from a Value.
+pub fn componentFamily(val: Value) []const u8 {
+    return switch (val) {
+        .component => |c| c,
+        .component_instance => |ci| ci.family,
+        else => "",
+    };
+}
+
+/// Resolve a function name to a physical pin ID using the pinout map.
+/// The pinout maps pin_id -> function_name, so we need reverse lookup.
+pub fn resolvePinName(self: *Evaluator, pinout: *const std.StringHashMapUnmanaged([]const u8), name: []const u8) ?[]const u8 {
+    _ = self;
+    // Reverse lookup: find the pin_id whose function_name matches
+    var iter = pinout.iterator();
+    while (iter.next()) |entry| {
+        if (std.mem.eql(u8, entry.value_ptr.*, name)) {
+            return entry.key_ptr.*;
+        }
+    }
+    return null;
+}
+
+/// Evaluate a (series ...) form and emit instances + pin nets.
+/// Supports both named and auto ref-des forms:
+///   (series "REF" (comp) "NET1" "NET2")
+///   (series (comp) "NET1" "NET2" "NET3" "NET4" ...) -- one instance per pair
+pub fn evalSeriesForm(
+    self: *Evaluator,
+    form_children: []const Node,
+    env: *Env,
+    instances: *std.ArrayListUnmanaged(Instance),
+    all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
+    note_list: *std.ArrayListUnmanaged(Note),
+) !void {
+    if (form_children.len < 4) return;
+    const first_val = try self.evalNode(form_children[1], env);
+    // Parse (id ...) from series form children
+    const series_parsed_id = ids.parseId(form_children);
+
+    if (first_val == .component or first_val == .component_instance) {
+        // Auto ref-des: (series (comp) "NET1" "NET2" ...)
+        const comp_offset = ids.componentSourceOffset(form_children[1]);
+        const series_id = series_parsed_id orelse try ids.generateId(self);
+        if (series_parsed_id == null) {
+            self.pending_ids.append(self.allocator, .{
+                .form_offset = form_children[0].span.offset -| 1,
+                .id = series_id,
+            }) catch {};
+        }
+        const ta = try parseTrailingArgs(self, form_children[2..], env);
+        var ni: usize = 0;
+        while (ni + 1 < ta.nets.items.len) : (ni += 2) {
+            const ref = try ids.nextRefDes(self, ids.componentPrefix(componentFamily(first_val)));
+            const child_id = try ids.deriveChildId(self, series_id, ta.nets.items[ni], ni / 2);
+            const inst = instanceFromValue(self, first_val, ref, comp_offset, child_id) orelse continue;
+            try instances.append(self.allocator, inst);
+            try all_pin_nets.append(self.allocator, .{ .ref_des = ref, .pin = "1", .net = ta.nets.items[ni] });
+            try all_pin_nets.append(self.allocator, .{ .ref_des = ref, .pin = "2", .net = ta.nets.items[ni + 1] });
+        }
+    } else {
+        // Named ref-des: (series "REF" (comp) "NET1" "NET2")
+        if (form_children.len < 5) return;
+        const s_ref = first_val.asString() orelse return;
+        const s_comp_val = try self.evalNode(form_children[2], env);
+        const s_comp_offset = ids.componentSourceOffset(form_children[2]);
+        const s_id = series_parsed_id orelse try ids.generateId(self);
+        if (series_parsed_id == null) {
+            self.pending_ids.append(self.allocator, .{
+                .form_offset = form_children[0].span.offset -| 1,
+                .id = s_id,
+            }) catch {};
+        }
+        const ta = try parseTrailingArgs(self, form_children[3..], env);
+        if (ta.nets.items.len < 2) return;
+        var s_inst = instanceFromValue(self, s_comp_val, s_ref, s_comp_offset, s_id) orelse return;
+        mergeInstanceProperties(self, &s_inst, ta.props.items);
+        ids.registerRefDes(self, s_ref);
+        try instances.append(self.allocator, s_inst);
+        try all_pin_nets.append(self.allocator, .{ .ref_des = s_ref, .pin = "1", .net = ta.nets.items[0] });
+        try all_pin_nets.append(self.allocator, .{ .ref_des = s_ref, .pin = "2", .net = ta.nets.items[1] });
+        if (ta.note) |text| try note_list.append(self.allocator, .{ .ref_des = s_ref, .text = text });
+    }
+}

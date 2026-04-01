@@ -202,6 +202,7 @@ fn buildPrefix(allocator: std.mem.Allocator, prefix: []const u8, name: []const u
 
 // Tests
 
+// spec: emit - Emits a placeholder for an empty resolved design
 test "emit placeholder" {
     // Basic smoke test that emit compiles
     const alloc = std.testing.allocator;

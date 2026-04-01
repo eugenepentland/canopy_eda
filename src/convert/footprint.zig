@@ -339,6 +339,7 @@ pub const ConvertError = error{
     InvalidNumber,
 };
 
+// spec: convert/footprint - Converts a KiCad footprint file into S-expression format
 test "convert simple footprint" {
     const alloc = std.testing.allocator;
     const input =

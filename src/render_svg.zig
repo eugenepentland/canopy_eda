@@ -73,9 +73,18 @@ pub fn renderSchematic(allocator: Allocator, block: *const DesignBlock) ![]const
     try ctx.collectFlat(block, "");
 
     // Build section membership map (ref_des → section index)
-    for (block.sections, 0..) |sec, si| {
+    // Flatten sub-sections: sub-section instances get the parent's index
+    var flat_sec_idx: usize = 0;
+    for (block.sections) |sec| {
         for (sec.instances) |inst| {
-            try ctx.section_map.put(allocator, inst.ref_des, si);
+            try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
+        }
+        flat_sec_idx += 1;
+        for (sec.sub_sections) |sub| {
+            for (sub.instances) |inst| {
+                try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
+            }
+            flat_sec_idx += 1;
         }
     }
 
@@ -128,12 +137,17 @@ pub fn renderSchematic(allocator: Allocator, block: *const DesignBlock) ![]const
     for (block.sections) |sec| {
         const sec_idx = section_grid.items.len;
         try section_grid.append(allocator, .{ .name = sec.name, .description = sec.description, .notes = sec.notes, .cell_indices = .empty });
-        // Register instances declared in this section
         for (sec.instances) |inst| {
             try ref_to_section.put(inst.ref_des, sec_idx);
         }
-        // Register pin_group refs (the multi-section instance parts)
-        // pin_groups create Part entries on instances, matched by section name below
+        // Flatten sub-sections into the grid as their own cells
+        for (sec.sub_sections) |sub| {
+            const sub_idx = section_grid.items.len;
+            try section_grid.append(allocator, .{ .name = sub.name, .description = sub.description, .notes = sub.notes, .cell_indices = .empty });
+            for (sub.instances) |inst| {
+                try ref_to_section.put(inst.ref_des, sub_idx);
+            }
+        }
     }
 
     var cells: std.ArrayListUnmanaged(GridCell) = .empty;
@@ -497,7 +511,7 @@ fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBlock, y
         \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="18" font-weight="bold" fill="#8b949e" pointer-events="none">Bill of Materials</text>
         \\
     , .{
-        x, y_start, w_total, table_h,
+        x,                 y_start,        w_total, table_h,
         x + w_total / 2.0, y_start + 22.0,
     });
 
@@ -1014,7 +1028,9 @@ const RenderCtx = struct {
             }
         }
         std.mem.sortUnstable([]const u8, all_pins.items, {}, struct {
-            fn lt(_: void, a: []const u8, b: []const u8) bool { return pinOrder(a, b); }
+            fn lt(_: void, a: []const u8, b: []const u8) bool {
+                return pinOrder(a, b);
+            }
         }.lt);
 
         // Get adjacency for this hub
@@ -1068,9 +1084,10 @@ const RenderCtx = struct {
             \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="12" font-weight="bold" fill="#4a9eff">{s}</text></g>
             \\
         , .{
-            hub.ref_des, hub.ref_des, part.name,
-            hub_x, box_y, hub_width, hub_height,
-            hub_x + hub_width / 2.0, box_y + 18.0, label,
+            hub.ref_des, hub.ref_des,             part.name,
+            hub_x,       box_y,                   hub_width,
+            hub_height,  hub_x + hub_width / 2.0, box_y + 18.0,
+            label,
         });
 
         // Left pin groups
@@ -1231,7 +1248,10 @@ const RenderCtx = struct {
             for (adj_entries) |ae| {
                 if (std.mem.eql(u8, ae.pin, pin_id)) {
                     switch (ae.endpoint) {
-                        .net => |n| { pin_net = n; break; },
+                        .net => |n| {
+                            pin_net = n;
+                            break;
+                        },
                         .pin => {},
                     }
                 }
@@ -1469,9 +1489,9 @@ const RenderCtx = struct {
             \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="10" fill="#666">{s}</text>
             \\
         , .{
-            stub_x,             py, px, py,
-            px + 8.0,           py + 4.0, group.display_name,
-            stub_x + 38.0,     py - 1.0, group.pin_numbers,
+            stub_x,   py,                px,                 py,
+            px + 8.0, py + 4.0,          group.display_name, stub_x + 38.0,
+            py - 1.0, group.pin_numbers,
         });
 
         // Debug pin dot
@@ -1493,9 +1513,9 @@ const RenderCtx = struct {
             \\<text x="{d:.1}" y="{d:.1}" font-size="10" fill="#666">{s}</text>
             \\
         , .{
-            px,                  py, stub_x, py,
-            px - 8.0,            py + 4.0, group.display_name,
-            stub_x - 36.0,      py - 1.0, group.pin_numbers,
+            px,       py,                stub_x,             py,
+            px - 8.0, py + 4.0,          group.display_name, stub_x - 36.0,
+            py - 1.0, group.pin_numbers,
         });
 
         // Debug pin dot
@@ -2450,9 +2470,9 @@ fn drawSymbolShape(w: anytype, bx: f64, bw: f64, cx: f64, cy: f64, inst: FlatIns
             \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#8888cc" stroke-width="1.5"/>
             \\
         , .{
-            bx,                cy, body_x, cy,
-            body_x,            body_y, body_w, body_h,
-            body_x + body_w,   cy, bx + bw, cy,
+            bx,              cy,     body_x,  cy,
+            body_x,          body_y, body_w,  body_h,
+            body_x + body_w, cy,     bx + bw, cy,
         });
     } else if (std.mem.eql(u8, inst.symbol, "generic-res")) {
         // Resistor: open rectangle body with wire stubs
@@ -2466,9 +2486,9 @@ fn drawSymbolShape(w: anytype, bx: f64, bw: f64, cx: f64, cy: f64, inst: FlatIns
             \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#8888cc" stroke-width="1.5"/>
             \\
         , .{
-            bx,                cy, body_x, cy,
-            body_x,            body_y, body_w, body_h,
-            body_x + body_w,   cy, bx + bw, cy,
+            bx,              cy,     body_x,  cy,
+            body_x,          body_y, body_w,  body_h,
+            body_x + body_w, cy,     bx + bw, cy,
         });
     } else if (std.mem.eql(u8, inst.symbol, "generic-cap")) {
         // Capacitor: two vertical parallel plates with wire stubs
@@ -2485,10 +2505,10 @@ fn drawSymbolShape(w: anytype, bx: f64, bw: f64, cx: f64, cy: f64, inst: FlatIns
             \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#8888cc" stroke-width="1.5"/>
             \\
         , .{
-            bx,          cy, plate_l_x, cy,
-            plate_l_x,   plate_top, plate_l_x, plate_bot,
-            plate_r_x,   plate_top, plate_r_x, plate_bot,
-            plate_r_x,   cy, bx + bw, cy,
+            bx,        cy,        plate_l_x, cy,
+            plate_l_x, plate_top, plate_l_x, plate_bot,
+            plate_r_x, plate_top, plate_r_x, plate_bot,
+            plate_r_x, cy,        bx + bw,   cy,
         });
     } else if (std.mem.eql(u8, inst.symbol, "generic-ind")) {
         // Inductor: three arcs with wire stubs
@@ -2530,9 +2550,9 @@ fn drawGndSymbol(w: anytype, x: f64, y: f64) !void {
         \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#e8c547" stroke-width="1.5"/>
         \\
     , .{
-        x,       y,       x,       y + 6.0,
-        x - 7.0, y + 6.0, x + 7.0, y + 6.0,
-        x - 4.5, y + 9.0, x + 4.5, y + 9.0,
+        x,       y,        x,       y + 6.0,
+        x - 7.0, y + 6.0,  x + 7.0, y + 6.0,
+        x - 4.5, y + 9.0,  x + 4.5, y + 9.0,
         x - 2.0, y + 12.0, x + 2.0, y + 12.0,
     });
 }
@@ -2585,9 +2605,10 @@ fn drawBlockIcon(w: anytype, icon_name: []const u8, cx: f64, cy: f64, color: []c
             \\<polygon points="{d:.1},{d:.1} {d:.1},{d:.1} {d:.1},{d:.1}" fill="{s}" opacity="0.5"/>
             \\
         , .{
-            lx,        ty,           icon_w, icon_h, color,
-            lx - 8.0,  cy,           lx,     cy,     color,
-            lx - 4.0,  cy - 3.0,     lx,     cy,     lx - 4.0, cy + 3.0, color,
+            lx,       ty,       icon_w, icon_h, color,
+            lx - 8.0, cy,       lx,     cy,     color,
+            lx - 4.0, cy - 3.0, lx,     cy,     lx - 4.0,
+            cy + 3.0, color,
         });
         try w.print(
             \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="{s}" stroke-width="1.5" opacity="0.5"/>
@@ -2596,10 +2617,10 @@ fn drawBlockIcon(w: anytype, icon_name: []const u8, cx: f64, cy: f64, color: []c
             \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="10" fill="{s}" opacity="0.5">Linear Regulator</text>
             \\
         , .{
-            rx,        cy,           rx + 8.0, cy,  color,
-            rx + 4.0,  cy - 3.0,     rx + 8.0, cy,  rx + 4.0, cy + 3.0, color,
-            cx,        cy + 4.0,     color,
-            cx,        ty + icon_h + 14.0, color,
+            rx,       cy,                 rx + 8.0, cy,       color,
+            rx + 4.0, cy - 3.0,           rx + 8.0, cy,       rx + 4.0,
+            cy + 3.0, color,              cx,       cy + 4.0, color,
+            cx,       ty + icon_h + 14.0, color,
         });
     } else if (std.mem.eql(u8, icon_name, "transistor")) {
         const size: f64 = 24.0;
@@ -2617,12 +2638,12 @@ fn drawBlockIcon(w: anytype, icon_name: []const u8, cx: f64, cy: f64, color: []c
             \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="10" fill="{s}" opacity="0.5">Transistor</text>
             \\
         , .{
-            ch_x,          ch_top,         ch_x,            ch_bot, color,
-            cx - half,     cy,             gp_x,            cy,     color,
-            gp_x,          ch_top + 3.0,   gp_x,            ch_bot - 3.0, color,
-            ch_x,          ch_top,         ch_x + 8.0,      ch_top, color,
-            ch_x,          ch_bot,         ch_x + 8.0,      ch_bot, color,
-            cx,            ch_bot + 14.0,  color,
+            ch_x,      ch_top,        ch_x,       ch_bot,       color,
+            cx - half, cy,            gp_x,       cy,           color,
+            gp_x,      ch_top + 3.0,  gp_x,       ch_bot - 3.0, color,
+            ch_x,      ch_top,        ch_x + 8.0, ch_top,       color,
+            ch_x,      ch_bot,        ch_x + 8.0, ch_bot,       color,
+            cx,        ch_bot + 14.0, color,
         });
     }
 }

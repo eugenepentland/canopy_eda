@@ -104,9 +104,9 @@ fn logicNot(args: []const Value) BuiltinError!Value {
 /// Check if a name is a builtin operator.
 pub fn isBuiltin(name: []const u8) bool {
     const builtins = [_][]const u8{
-        "+", "-", "*", "/", "%",
-        ">", ">=", "<", "<=", "==", "!=",
-        "and", "or", "not",
+        "+",  "-",   "*",  "/",   "%",
+        ">",  ">=",  "<",  "<=",  "==",
+        "!=", "and", "or", "not",
     };
     for (builtins) |b| {
         if (std.mem.eql(u8, name, b)) return true;
@@ -116,6 +116,7 @@ pub fn isBuiltin(name: []const u8) bool {
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
+// spec: eval/builtins - Evaluates arithmetic operations on numeric values
 test "arithmetic operations" {
     const args2 = [_]Value{ .{ .number = 10.0 }, .{ .number = 3.0 } };
     try std.testing.expectEqual(@as(f64, 13.0), (try evalBuiltin("+", &args2)).asNumber().?);
@@ -123,6 +124,7 @@ test "arithmetic operations" {
     try std.testing.expectEqual(@as(f64, 30.0), (try evalBuiltin("*", &args2)).asNumber().?);
 }
 
+// spec: eval/builtins - Evaluates a voltage divider formula combining arithmetic operators
 test "voltage divider formula" {
     // VOUT = 0.6 * (1 + 220k/47k) = 0.6 * (1 + 4.68085...) = 0.6 * 5.68085... = 3.4085...
     const div_args = [_]Value{ .{ .number = 220000.0 }, .{ .number = 47000.0 } };
@@ -137,6 +139,7 @@ test "voltage divider formula" {
     try std.testing.expectApproxEqAbs(@as(f64, 3.4085), vout.asNumber().?, 0.001);
 }
 
+// spec: eval/builtins - Evaluates comparison operations returning boolean results
 test "comparison operations" {
     const args = [_]Value{ .{ .number = 5.0 }, .{ .number = 3.0 } };
     try std.testing.expectEqual(true, (try evalBuiltin(">", &args)).asBool().?);
@@ -144,6 +147,7 @@ test "comparison operations" {
     try std.testing.expectEqual(true, (try evalBuiltin(">=", &args)).asBool().?);
 }
 
+// spec: eval/builtins - Evaluates logic operations on boolean values
 test "logic operations" {
     const t = Value{ .boolean = true };
     const f = Value{ .boolean = false };

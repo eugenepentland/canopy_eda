@@ -76,6 +76,7 @@ fn parseList(allocator: std.mem.Allocator, tok: *Tokenizer, open_span: Span) Par
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
+// spec: sexpr/parser - Parses a simple S-expression list into an AST node
 test "parse simple list" {
     const alloc = std.testing.allocator;
     const nodes = try parse(alloc, "(hello 42 \"world\")");
@@ -90,6 +91,7 @@ test "parse simple list" {
     try std.testing.expectEqualStrings("world", children[2].asString().?);
 }
 
+// spec: sexpr/parser - Parses nested S-expression lists into a tree
 test "parse nested lists" {
     const alloc = std.testing.allocator;
     const nodes = try parse(alloc, "(a (b c) (d (e)))");
@@ -105,6 +107,7 @@ test "parse nested lists" {
     try std.testing.expectEqual(@as(usize, 2), inner2.len);
 }
 
+// spec: sexpr/parser - Parses numbers and unit values into typed AST nodes
 test "parse numbers and units" {
     const alloc = std.testing.allocator;
     const nodes = try parse(alloc, "(pos 1.0mm 0.5mm 10mil)");
@@ -116,6 +119,7 @@ test "parse numbers and units" {
     try std.testing.expectApproxEqAbs(@as(f64, 0.254), children[3].asNumber().?, 0.001);
 }
 
+// spec: sexpr/parser - Parses input containing comments by ignoring them
 test "parse with comments" {
     const alloc = std.testing.allocator;
     const nodes = try parse(alloc,
@@ -131,6 +135,7 @@ test "parse with comments" {
     try std.testing.expectEqualStrings("pin", children[0].asAtom().?);
 }
 
+// spec: sexpr/parser - Parses multiple top-level forms into separate AST nodes
 test "parse multiple top-level forms" {
     const alloc = std.testing.allocator;
     const nodes = try parse(alloc, "(import a) (import b)");
@@ -141,6 +146,7 @@ test "parse multiple top-level forms" {
     try std.testing.expect(nodes[1].isForm("import"));
 }
 
+// spec: sexpr/parser - Identifies forms by head atom via isForm helper
 test "parse isForm helper" {
     const alloc = std.testing.allocator;
     const nodes = try parse(alloc, "(net \"VIN\" (pin \"U1\" 6))");

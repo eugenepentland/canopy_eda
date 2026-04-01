@@ -129,6 +129,7 @@ fn writeIndent(writer: anytype, indent: u32) !void {
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
+// spec: sexpr/printer - Prints a simple list as a single-line S-expression string
 test "print simple list" {
     const alloc = std.testing.allocator;
     const parser = @import("parser.zig");
@@ -141,6 +142,7 @@ test "print simple list" {
     try std.testing.expectEqualStrings("(hello 42 \"world\")", output);
 }
 
+// spec: sexpr/printer - Prints short nested lists inline on one line
 test "print short nested lists inline" {
     const alloc = std.testing.allocator;
     const parser = @import("parser.zig");
@@ -154,6 +156,7 @@ test "print short nested lists inline" {
     try std.testing.expect(std.mem.indexOf(u8, output, "\n") == null);
 }
 
+// spec: sexpr/printer - Prints long nested lists with multiline indentation
 test "print long nested lists multiline" {
     const alloc = std.testing.allocator;
     const parser = @import("parser.zig");
@@ -167,6 +170,7 @@ test "print long nested lists multiline" {
     try std.testing.expect(std.mem.indexOf(u8, output, "\n") != null);
 }
 
+// spec: sexpr/printer - Round-trips parse to print to parse producing identical AST
 test "round-trip parse-print-parse" {
     const alloc = std.testing.allocator;
     const parser = @import("parser.zig");

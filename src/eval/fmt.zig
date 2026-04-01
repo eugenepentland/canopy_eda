@@ -124,6 +124,7 @@ fn formatNumber(writer: anytype, v: f64) !void {
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
+// spec: eval/fmt - Formats voltage values with SI prefix and V suffix
 test "format voltage" {
     const alloc = std.testing.allocator;
     const args = [_]Value{.{ .number = 3.41 }};
@@ -132,6 +133,7 @@ test "format voltage" {
     try std.testing.expectEqualStrings("3.41V Buck", result);
 }
 
+// spec: eval/fmt - Formats resistance values with SI prefix and ohm suffix
 test "format resistance" {
     const alloc = std.testing.allocator;
     {
@@ -154,6 +156,7 @@ test "format resistance" {
     }
 }
 
+// spec: eval/fmt - Formats capacitance values with SI prefix and F suffix
 test "format capacitance" {
     const alloc = std.testing.allocator;
     {
@@ -170,6 +173,7 @@ test "format capacitance" {
     }
 }
 
+// spec: eval/fmt - Formats tilde escape sequences in format strings
 test "format tilde escape" {
     const alloc = std.testing.allocator;
     const result = try format(alloc, "hello ~~ world", &[_]Value{});
@@ -177,6 +181,7 @@ test "format tilde escape" {
     try std.testing.expectEqualStrings("hello ~ world", result);
 }
 
+// spec: eval/fmt - Formats mixed specifiers in a single format string
 test "format mixed" {
     const alloc = std.testing.allocator;
     const args = [_]Value{
