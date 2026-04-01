@@ -36,6 +36,9 @@
             .url = "git+https://github.com/karlseguin/http.zig#86ec1ae5fca398a58dfb06ae7fd8395b8ab2ab76",
             .hash = "httpz-0.0.0-PNVzrOlMBwDf2xnpIPCRXuFtO-qK6h2Vrl8n7_UjXZI1",
         },
+        .guardian = .{
+            .path = "../guardian-zig",
+        },
     },
     .paths = .{
         "build.zig",
