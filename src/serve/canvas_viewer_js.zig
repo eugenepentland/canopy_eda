@@ -9,10 +9,11 @@ pub const CANVAS_VIEWER_JS =
     \\  background:'#0d1117',
     \\  resizeTo:container,
     \\  antialias:true,
-    \\  resolution:window.devicePixelRatio||1,
+    \\  resolution:Math.max(window.devicePixelRatio||1,2),
     \\  autoDensity:true
     \\});
     \\container.appendChild(app.canvas);
+    \\PIXI.TextStyle.defaultResolution=Math.max(window.devicePixelRatio||1,2);
     \\
     \\var world=new PIXI.Container();
     \\app.stage.addChild(world);
@@ -37,6 +38,7 @@ pub const CANVAS_VIEWER_JS =
     \\var liveVersion=0;
     \\var selectedRef=null;
     \\var selectedNet=null;
+    \\var justSelected=false;
     \\var refContainers={};
     \\var netGraphics={};
     \\
@@ -316,12 +318,14 @@ pub const CANVAS_VIEWER_JS =
     \\
     \\/* ── Click background to deselect ─────────────────────────── */
     \\app.canvas.addEventListener('click',function(e){
+    \\  if(justSelected){justSelected=false;return;}
     \\  if(!didPan){clearSelection();}
     \\});
     \\
     \\/* ── Selection / Highlight ────────────────────────────────── */
     \\function selectComponent(ref){
     \\  clearSelection();
+    \\  justSelected=true;
     \\  selectedRef=ref;
     \\  var c=refContainers[ref];
     \\  if(c){c.alpha=1;c.tint=C.highlight;}
@@ -330,6 +334,7 @@ pub const CANVAS_VIEWER_JS =
     \\
     \\function highlightNet(net){
     \\  clearSelection();
+    \\  justSelected=true;
     \\  if(!net)return;
     \\  selectedNet=net;
     \\  var items=netGraphics[net];
