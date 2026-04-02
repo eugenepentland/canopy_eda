@@ -90,7 +90,7 @@ pub fn designPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
 
     // Page container
     try w.writeAll("<div class=\"page\" id=\"page\">");
-    try w.print("<h1>{s}</h1>", .{block.name});
+    try w.print("<h1>{s} <a href=\"/canvas/{s}\" style=\"font-size:14px;color:#58a6ff;margin-left:12px\">Canvas View</a></h1>", .{ block.name, name });
 
     // Schematic
     try w.writeAll("<div class=\"schematic\"><div class=\"schematic-canvas\" id=\"schematic-canvas\">");

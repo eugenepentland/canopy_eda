@@ -10,12 +10,14 @@ const upload = @import("serve/upload.zig");
 const upload_package = @import("serve/upload_package.zig");
 const footprint_preview = @import("serve/footprint_preview.zig");
 const model = @import("serve/model.zig");
+const canvas_page = @import("serve/canvas_page.zig");
 
 // ── Global live state ──────────────────────────────────────────────────
 
 pub var live_mutex: std.Thread.Mutex = .{};
 pub var live_version: u32 = 0;
 pub var live_svg: ?[]const u8 = null;
+pub var live_layout_json: ?[]const u8 = null;
 
 // ── Layout storage (in-memory) ─────────────────────────────────────────
 
@@ -54,6 +56,7 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     router.get("/", pages.indexPage, .{});
     router.get("/style.css", pages.cssPage, .{});
     router.get("/schematics/:name", pages.designPage, .{});
+    router.get("/canvas/:name", canvas_page.canvasPage, .{});
 
     // API
     router.post("/api/push/:name", api.pushApi, .{});
@@ -64,6 +67,7 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     router.get("/api/export-kicad/:name", api.exportKicadApi, .{});
     router.get("/api/export-netlist/:name", api.exportNetlistApi, .{});
     router.post("/api/update-pcb/:name", api.updatePcbApi, .{});
+    router.get("/api/scene-graph/:name", api.sceneGraphApi, .{});
     router.get("/api/block-diagram/:name", api.blockDiagramApi, .{});
 
     // Edit

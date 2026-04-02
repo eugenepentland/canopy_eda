@@ -2,6 +2,7 @@ const std = @import("std");
 const httpz = @import("httpz");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const render_svg = @import("../render_svg.zig");
+const render_json = @import("../render_json.zig");
 const render_block = @import("../render_block.zig");
 const export_kicad = @import("../export_kicad.zig");
 const bom = @import("../bom.zig");
@@ -40,8 +41,11 @@ pub fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
         return;
     };
 
+    const new_layout = render_json.renderSceneGraph(ctx.allocator, block) catch null;
+
     serve_root.live_mutex.lock();
     serve_root.live_svg = new_svg;
+    serve_root.live_layout_json = new_layout;
     serve_root.live_version += 1;
     const v = serve_root.live_version;
     serve_root.live_mutex.unlock();
@@ -69,6 +73,16 @@ pub fn svgApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
     res.content_type = .SVG;
     res.header("access-control-allow-origin", "*");
     res.body = new_svg orelse "<!-- no svg -->";
+}
+
+pub fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+    serve_root.live_mutex.lock();
+    const data = serve_root.live_layout_json;
+    serve_root.live_mutex.unlock();
+
+    res.content_type = .JSON;
+    res.header("access-control-allow-origin", "*");
+    res.body = data orelse "{\"error\":\"no layout\"}";
 }
 
 pub fn blockDiagramApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
