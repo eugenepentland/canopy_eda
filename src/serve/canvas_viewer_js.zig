@@ -115,7 +115,9 @@ pub const CANVAS_VIEWER_JS =
     \\    var pg=new PIXI.Graphics();
     \\    drawPassiveSymbol(pg,p);
     \\    pc.addChild(pg);
-    \\    var pt=new PIXI.Text({text:p.ref+' '+((p.value&&p.value.length)?p.value:p.component),style:{fontFamily:'system-ui,sans-serif',fontSize:9,fill:C.passiveText}});
+    \\    var pval=(p.value&&p.value.length)?p.value:p.component;
+    \\    var plbl=(p.count>1)?(p.count+'x '+pval):(p.ref+' '+pval);
+    \\    var pt=new PIXI.Text({text:plbl,style:{fontFamily:'system-ui,sans-serif',fontSize:9,fill:C.passiveText}});
     \\    pt.anchor.set(0.5,1);pt.x=p.x+p.w/2;pt.y=p.y-p.h/2-4;
     \\    pc.addChild(pt);
     \\    pc.eventMode='static';pc.cursor='pointer';

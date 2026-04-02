@@ -84,6 +84,7 @@ const JsonPassive = struct {
     y: f64,
     w: f64,
     h: f64,
+    count: u32 = 1,
 };
 
 const JsonLabel = struct {
@@ -178,6 +179,20 @@ const SceneGraph = struct {
             .y = y,
             .w = passive_bw,
             .h = 20.0,
+        });
+    }
+
+    fn addPassiveWithCount(self: *SceneGraph, inst: FlatInst, x: f64, y: f64, count: u32) !void {
+        try self.passives.append(self.allocator, .{
+            .ref = shortRef(inst.ref_des),
+            .component = inst.component,
+            .value = inst.value,
+            .symbol = inst.symbol,
+            .x = x,
+            .y = y,
+            .w = passive_bw,
+            .h = 20.0,
+            .count = count,
         });
     }
 };
@@ -444,6 +459,7 @@ fn countNonOut(ports: []const env_mod.Port) usize {
 }
 
 const BranchResult = struct { end_x: f64, cy: f64, terminal: []const u8 };
+const Classified = struct { conn: AdjEntry, terminal: []const u8 };
 
 // ── Hub data collection ──────────────────────────────────────────────
 
@@ -661,7 +677,6 @@ fn collectGroupConnections(ctx: *RenderCtx, scene: *SceneGraph, allocator: Alloc
     const canon_key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ hub_ref, first_pin_id });
     const pin_net_name = ctx.pin_canonical_nets.get(canon_key) orelse "";
 
-    const Classified = struct { conn: AdjEntry, terminal: []const u8 };
     var classified: std.ArrayListUnmanaged(Classified) = .empty;
 
     for (group.conns) |conn| {
@@ -706,10 +721,13 @@ fn collectGroupConnections(ctx: *RenderCtx, scene: *SceneGraph, allocator: Alloc
         }
     }.lt);
 
-    var slot_counts = try allocator.alloc(u32, classified.items.len);
+    // Merge identical single-passive spokes to the same terminal (e.g. 5x 100nF decoupling caps to GND)
+    const merged = try mergeIdenticalSpokes(ctx, allocator, classified.items, hub_ref);
+
+    var slot_counts = try allocator.alloc(u32, merged.items.len);
     var total_slots: u32 = 0;
-    for (classified.items, 0..) |entry, i| {
-        const slots: u32 = switch (entry.conn.endpoint) {
+    for (merged.items, 0..) |entry, i| {
+        const slots: u32 = if (entry.merge_count > 1) 1 else switch (entry.classified.conn.endpoint) {
             .pin => |p| blk: {
                 if (ctx.spoke_set.contains(p.ref_des)) {
                     break :blk hub_mod.estimateBranchCount(ctx, p.ref_des, hub_ref);
@@ -722,7 +740,7 @@ fn collectGroupConnections(ctx: *RenderCtx, scene: *SceneGraph, allocator: Alloc
         total_slots += slots;
     }
 
-    const multi = classified.items.len > 1;
+    const multi = merged.items.len > 1;
     const bus_offset: f64 = 10.0;
     const bus_x: f64 = switch (side) {
         .left => stub_x - bus_offset,
@@ -736,7 +754,7 @@ fn collectGroupConnections(ctx: *RenderCtx, scene: *SceneGraph, allocator: Alloc
 
     var results: std.ArrayListUnmanaged(BranchResult) = .empty;
 
-    for (classified.items, 0..) |entry, i| {
+    for (merged.items, 0..) |entry, i| {
         const slots = slot_counts[i];
         const slot_center = @as(f64, @floatFromInt(consumed_slots)) + @as(f64, @floatFromInt(slots -| 1)) / 2.0;
         const cy = py + slot_center * per_conn_spacing - total_h2 / 2.0;
@@ -744,17 +762,21 @@ fn collectGroupConnections(ctx: *RenderCtx, scene: *SceneGraph, allocator: Alloc
         if (cy < min_cy) min_cy = cy;
         if (cy > max_cy) max_cy = cy;
 
-        const internal_net: []const u8 = switch (entry.conn.endpoint) {
-            .net => entry.terminal,
+        const internal_net: []const u8 = switch (entry.classified.conn.endpoint) {
+            .net => entry.classified.terminal,
             .pin => pin_net_name,
         };
 
         const conn_stub_x = if (multi) bus_x else stub_x;
         const conn_stub_y = if (multi) cy else py;
 
-        const end_x = try collectConnBody(ctx, scene, allocator, entry.conn.endpoint, hub_ref, entry.conn.pin, conn_stub_x, conn_stub_y, cy, side, internal_net);
-
-        try results.append(allocator, .{ .end_x = end_x, .cy = cy, .terminal = entry.terminal });
+        if (entry.merge_count > 1) {
+            const end_x = try collectMergedPassive(ctx, scene, allocator, entry.classified.conn.endpoint, hub_ref, entry.classified.conn.pin, conn_stub_x, conn_stub_y, cy, side, internal_net, entry.merge_count);
+            try results.append(allocator, .{ .end_x = end_x, .cy = cy, .terminal = entry.classified.terminal });
+        } else {
+            const end_x = try collectConnBody(ctx, scene, allocator, entry.classified.conn.endpoint, hub_ref, entry.classified.conn.pin, conn_stub_x, conn_stub_y, cy, side, internal_net);
+            try results.append(allocator, .{ .end_x = end_x, .cy = cy, .terminal = entry.classified.terminal });
+        }
     }
 
     // Bus wires
@@ -779,6 +801,126 @@ fn collectGroupConnections(ctx: *RenderCtx, scene: *SceneGraph, allocator: Alloc
     const term_x = default_term_x;
 
     try collectTerminals(ctx, scene, allocator, results.items, term_x, side);
+}
+
+const MergedEntry = struct {
+    classified: Classified,
+    merge_count: u32,
+};
+
+/// Find groups of identical single-passive spoke connections to the same terminal
+/// and collapse them into one entry with a count (e.g. "5x 100nF" to GND).
+fn mergeIdenticalSpokes(ctx: *RenderCtx, allocator: Allocator, classified: []const Classified, hub_ref: []const u8) !std.ArrayListUnmanaged(MergedEntry) {
+    var result: std.ArrayListUnmanaged(MergedEntry) = .empty;
+
+    // Build a key for each spoke connection: "terminal|value|symbol"
+    // Non-spoke connections get unique keys so they never merge.
+    const SpokeInfo = struct { key: []const u8, is_single_spoke: bool };
+    var infos = try allocator.alloc(SpokeInfo, classified.len);
+    var consumed = try allocator.alloc(bool, classified.len);
+    for (consumed) |*c| c.* = false;
+
+    for (classified, 0..) |entry, i| {
+        switch (entry.conn.endpoint) {
+            .pin => |p| {
+                if (ctx.spoke_set.contains(p.ref_des)) {
+                    const inst = ctx.inst_map.get(p.ref_des) orelse {
+                        infos[i] = .{ .key = "", .is_single_spoke = false };
+                        continue;
+                    };
+                    // Check it's a single passive (no chain)
+                    var visited: std.StringHashMapUnmanaged(void) = .empty;
+                    try visited.put(allocator, p.ref_des, {});
+                    const chain = try connection.findSpokeChain(ctx, p.ref_des, .{ .pin = .{ .ref_des = hub_ref, .pin = entry.conn.pin } }, &visited);
+                    if (chain.chain.len == 0 and chain.branches.len == 0) {
+                        // Single passive to terminal — mergeable
+                        const val = if (inst.value.len > 0) inst.value else inst.component;
+                        infos[i] = .{
+                            .key = try std.fmt.allocPrint(allocator, "{s}|{s}|{s}", .{ entry.terminal, val, inst.symbol }),
+                            .is_single_spoke = true,
+                        };
+                    } else {
+                        infos[i] = .{ .key = "", .is_single_spoke = false };
+                    }
+                } else {
+                    infos[i] = .{ .key = "", .is_single_spoke = false };
+                }
+            },
+            .net => {
+                infos[i] = .{ .key = "", .is_single_spoke = false };
+            },
+        }
+    }
+
+    // Group by key
+    for (classified, 0..) |entry, i| {
+        if (consumed[i]) continue;
+        if (!infos[i].is_single_spoke or infos[i].key.len == 0) {
+            try result.append(allocator, .{ .classified = entry, .merge_count = 1 });
+            consumed[i] = true;
+            continue;
+        }
+        // Count identical entries
+        var count: u32 = 1;
+        for (classified[i + 1 ..], i + 1..) |_, j| {
+            if (consumed[j]) continue;
+            if (infos[j].is_single_spoke and std.mem.eql(u8, infos[j].key, infos[i].key)) {
+                count += 1;
+                consumed[j] = true;
+                // Mark the merged spoke as rendered so SVG renderer doesn't re-draw
+                switch (classified[j].conn.endpoint) {
+                    .pin => |p2| try ctx.rendered_spokes.put(allocator, p2.ref_des, {}),
+                    .net => {},
+                }
+            }
+        }
+        try result.append(allocator, .{ .classified = entry, .merge_count = count });
+        consumed[i] = true;
+    }
+
+    return result;
+}
+
+/// Render a merged passive: one symbol with "Nx value" label.
+fn collectMergedPassive(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocator, endpoint: Endpoint, hub_ref: []const u8, from_pin: []const u8, stub_x: f64, stub_y: f64, cy: f64, side: Side, net_name: []const u8, count: u32) !f64 {
+    switch (endpoint) {
+        .net => {
+            const end_x: f64 = switch (side) {
+                .left => stub_x - 20.0,
+                .right => stub_x + 20.0,
+            };
+            try scene.addWire(net_name, stub_x, stub_y, end_x, cy, false);
+            return end_x;
+        },
+        .pin => |p| {
+            const inst = ctx.inst_map.get(p.ref_des) orelse return stub_x;
+            try ctx.rendered_spokes.put(allocator, p.ref_des, {});
+
+            switch (side) {
+                .left => {
+                    try scene.addWire(net_name, stub_x, stub_y, stub_x - 20.0, cy, false);
+                    try scene.addPassiveWithCount(inst, stub_x - 20.0 - passive_bw, cy, count);
+                    const chain_end_x = stub_x - 20.0 - passive_bw;
+                    // Find the terminal
+                    var visited: std.StringHashMapUnmanaged(void) = .empty;
+                    try visited.put(allocator, p.ref_des, {});
+                    const chain = try connection.findSpokeChain(ctx, p.ref_des, .{ .pin = .{ .ref_des = hub_ref, .pin = from_pin } }, &visited);
+                    _ = chain;
+                    return chain_end_x;
+                },
+                .right => {
+                    try scene.addWire(net_name, stub_x, stub_y, stub_x + 20.0, cy, false);
+                    try scene.addPassiveWithCount(inst, stub_x + 20.0, cy, count);
+                    const chain_end_x = stub_x + 20.0 + passive_bw;
+                    var visited: std.StringHashMapUnmanaged(void) = .empty;
+                    try visited.put(allocator, p.ref_des, {});
+                    const chain = try connection.findSpokeChain(ctx, p.ref_des, .{ .pin = .{ .ref_des = hub_ref, .pin = from_pin } }, &visited);
+                    _ = chain;
+                    return chain_end_x;
+                },
+            }
+        },
+    }
 }
 
 fn collectConnBody(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocator, endpoint: Endpoint, hub_ref: []const u8, from_pin: []const u8, stub_x: f64, stub_y: f64, cy: f64, side: Side, net_name: []const u8) !f64 {
@@ -1182,7 +1324,7 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
         try writeJsonString(w, "value", p.value);
         try w.writeAll(",");
         try writeJsonString(w, "symbol", p.symbol);
-        try w.print(",\"x\":{d:.1},\"y\":{d:.1},\"w\":{d:.1},\"h\":{d:.1}", .{ p.x, p.y, p.w, p.h });
+        try w.print(",\"x\":{d:.1},\"y\":{d:.1},\"w\":{d:.1},\"h\":{d:.1},\"count\":{d}", .{ p.x, p.y, p.w, p.h, p.count });
         try w.writeAll("}");
     }
     try w.writeAll("]");
