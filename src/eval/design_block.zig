@@ -6,6 +6,7 @@ const EvalError = @import("evaluator.zig").EvalError;
 const PinNetDecl = @import("evaluator.zig").PinNetDecl;
 const NetTie = Evaluator.NetTie;
 const ids = @import("ids.zig");
+const validate = @import("validate.zig");
 const instance_mod = @import("instance.zig");
 const builders = @import("builders.zig");
 
@@ -37,6 +38,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
 
     var net_ties: std.ArrayListUnmanaged(NetTie) = .empty;
     var sub_blocks: std.ArrayListUnmanaged(SubBlock) = .empty;
+    var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
 
     // Pre-scan: register all explicit ref-des to avoid auto-counter collisions
     ids.prescanRefDes(self, args[1..]);
@@ -74,6 +76,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             try evalSection(self, form_children, env, &instances, &all_pin_nets, &notes, &net_ties, &sections);
         } else if (std.mem.eql(u8, form_name, "net")) {
             try evalNetForm(self, form_children, env, &net_ties);
+            validate.trackNetFormSource(self, form_children, env, &net_form_sources);
         } else if (std.mem.eql(u8, form_name, "series")) {
             try instance_mod.evalSeriesForm(self, form_children, env, &instances, &all_pin_nets, &notes);
         } else if (std.mem.eql(u8, form_name, "decouple")) {
@@ -82,7 +85,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         // Ignore config and other unknown forms for now
     }
 
-    // Build nets from collected pin-net declarations
+    validate.warnCombinableNets(self, &net_form_sources);
     const nets_slice = try buildNets(self, &all_pin_nets, &net_ties);
 
     const block = self.allocator.create(DesignBlock) catch return EvalError.OutOfMemory;
@@ -99,6 +102,9 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
 
     // Auto-assign ref_des for instances with descriptive labels
     ids.autoAssignRefDes(self, block) catch {};
+
+    // Validate: warn about dead-end nets, etc.
+    validate.validateDesign(self, block);
 
     return .{ .design_block = block };
 }
@@ -439,13 +445,10 @@ fn evalSubSection(
 
 /// Build nets from collected pin-net declarations and net-ties.
 fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl), net_ties: *std.ArrayListUnmanaged(NetTie)) EvalError![]Net {
-    // Group by net name, collecting all pins for each net
     var net_map: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(PinRef)) = .empty;
     for (all_pin_nets.items) |pn| {
         const gop = net_map.getOrPut(self.allocator, pn.net) catch return EvalError.OutOfMemory;
-        if (!gop.found_existing) {
-            gop.value_ptr.* = .empty;
-        }
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
         gop.value_ptr.append(self.allocator, .{ .ref_des = pn.ref_des, .pin = pn.pin }) catch return EvalError.OutOfMemory;
     }
     // Apply net-ties: merge two nets into one.
@@ -456,7 +459,6 @@ fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl)
 
         const keep = nt.a;
         const remove = nt.b;
-
         if (net_map.get(remove)) |src_pins| {
             const gop = net_map.getOrPut(self.allocator, keep) catch return EvalError.OutOfMemory;
             if (!gop.found_existing) {
@@ -467,7 +469,6 @@ fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl)
             }
             _ = net_map.remove(remove);
         }
-
         // Also rename per-pin nets: "REMOVE.x" -> "KEEP.x"
         const remove_dot = std.fmt.allocPrint(self.allocator, "{s}.", .{remove}) catch return EvalError.OutOfMemory;
         var rename_keys: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -485,7 +486,6 @@ fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl)
             }
         }
     }
-
     // Convert to Net slice
     var nets: std.ArrayListUnmanaged(Net) = .empty;
     var net_iter = net_map.iterator();

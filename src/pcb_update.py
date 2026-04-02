@@ -153,6 +153,7 @@ def parse_netlist(path):
 # ---------------------------------------------------------------------------
 
 CANOPY_UUID_FIELD = "canopy_uuid"
+CANOPY_NET_FIELD = "canopy_net"
 
 
 def find_footprint_by_uuid(board, uuid):
@@ -195,6 +196,60 @@ def set_canopy_uuid(fp, uuid):
         fp.AddField(field)
 
 
+def set_canopy_net(fp, net_str):
+    """Set the canopy_net hidden field on a footprint."""
+    if fp.HasFieldByName(CANOPY_NET_FIELD):
+        field = fp.GetFieldByName(CANOPY_NET_FIELD)
+        field.SetText(net_str)
+    else:
+        field = pcbnew.PCB_FIELD(fp, fp.GetNextFieldId(), CANOPY_NET_FIELD)
+        field.SetText(net_str)
+        field.SetVisible(False)
+        fp.AddField(field)
+
+
+def set_field(fp, name, value):
+    """Set a visible field on a footprint, creating it if needed."""
+    if fp.HasFieldByName(name):
+        field = fp.GetFieldByName(name)
+        field.SetText(value)
+    else:
+        field = pcbnew.PCB_FIELD(fp, fp.GetNextFieldId(), name)
+        field.SetText(value)
+        field.SetVisible(False)
+        fp.AddField(field)
+
+
+def sync_3d_models(board_fp, lib_fp):
+    """Update 3D model on board footprint to match library footprint.
+
+    Replaces all 3D model entries (filename, offset, rotation, scale)
+    so the board stays in sync with model-config.json via the exported .kicad_mod.
+    """
+    lib_models = lib_fp.Models()
+    board_models = board_fp.Models()
+
+    # Compare: same count, same filenames, same transforms?
+    if len(lib_models) == len(board_models):
+        all_match = True
+        for lm, bm in zip(lib_models, board_models):
+            if (lm.m_Filename != bm.m_Filename or
+                lm.m_Offset != bm.m_Offset or
+                lm.m_Rotation != bm.m_Rotation or
+                lm.m_Scale != bm.m_Scale):
+                all_match = False
+                break
+        if all_match:
+            return False  # no change needed
+
+    # Clear existing models and copy from library
+    board_fp.Models().clear()
+    for lm in lib_models:
+        board_fp.Models().append(lm)
+
+    return True  # changed
+
+
 def backup_pcb(pcb_path):
     """Create a timestamped backup of the PCB file."""
     if not os.path.exists(pcb_path):
@@ -210,6 +265,76 @@ def backup_pcb(pcb_path):
     return backup_path
 
 
+def snapshot_footprints(board):
+    """Capture state of all canopy-tracked footprints for later comparison.
+
+    Returns a dict keyed by canopy_uuid with position, orientation, layer,
+    footprint name, and per-pad net/position.  Reference designator and value
+    are intentionally excluded (they're expected to change).
+    """
+    snaps = {}
+    for fp in board.GetFootprints():
+        if not fp.HasFieldByName(CANOPY_UUID_FIELD):
+            continue
+        uuid = fp.GetFieldText(CANOPY_UUID_FIELD)
+        if not uuid:
+            continue
+        pos = fp.GetPosition()
+        snaps[uuid] = {
+            "ref": fp.GetReference(),  # for error messages only
+            "footprint_name": fp.GetFPID().GetUniStringLibItemName(),
+            "pos_x": pos.x,
+            "pos_y": pos.y,
+            "orientation": fp.GetOrientation().AsDegrees(),
+            "layer": fp.GetLayer(),
+            "pads": {
+                pad.GetNumber(): {
+                    "net": pad.GetNetname(),
+                    "pos_x": pad.GetPosition().x,
+                    "pos_y": pad.GetPosition().y,
+                }
+                for pad in fp.Pads()
+            },
+        }
+    return snaps
+
+
+def verify_unchanged_footprints(before, after, changed_uuids):
+    """Compare footprint state before/after update for components that should be unchanged.
+
+    Returns a list of human-readable diff strings (empty = all good).
+    Skips reference designator and value (expected to change).
+    """
+    diffs = []
+    for uuid, old in before.items():
+        if uuid in changed_uuids:
+            continue
+        if uuid not in after:
+            continue  # removed component, not our concern
+        new = after[uuid]
+        ref_label = f"{new['ref']} (uuid={uuid[:8]})"
+
+        if old["footprint_name"] != new["footprint_name"]:
+            diffs.append(f"  {ref_label}: footprint changed: {old['footprint_name']} -> {new['footprint_name']}")
+        if old["pos_x"] != new["pos_x"] or old["pos_y"] != new["pos_y"]:
+            diffs.append(f"  {ref_label}: position changed: ({old['pos_x']},{old['pos_y']}) -> ({new['pos_x']},{new['pos_y']})")
+        if abs(old["orientation"] - new["orientation"]) > 0.001:
+            diffs.append(f"  {ref_label}: orientation changed: {old['orientation']} -> {new['orientation']}")
+        if old["layer"] != new["layer"]:
+            diffs.append(f"  {ref_label}: layer changed: {old['layer']} -> {new['layer']}")
+
+        for pad_num, old_pad in old["pads"].items():
+            new_pad = new["pads"].get(pad_num)
+            if new_pad is None:
+                diffs.append(f"  {ref_label}: pad {pad_num} disappeared")
+                continue
+            if old_pad["net"] != new_pad["net"]:
+                diffs.append(f"  {ref_label}: pad {pad_num} net changed: '{old_pad['net']}' -> '{new_pad['net']}'")
+            if old_pad["pos_x"] != new_pad["pos_x"] or old_pad["pos_y"] != new_pad["pos_y"]:
+                diffs.append(f"  {ref_label}: pad {pad_num} position changed")
+    return diffs
+
+
 def load_sections(sections_path):
     """Load section layout JSON for grid-based placement."""
     if not sections_path or not os.path.exists(sections_path):
@@ -221,20 +346,71 @@ def load_sections(sections_path):
         return None
 
 
-def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None):
+def shorten_net_name(name):
+    """Collapse 'BASE.REF.PIN' to 'BASE' for power-pour-friendly net names.
+
+    Heuristic: if the name contains a dot and the part after the first dot
+    looks like a ref designator (letter(s) + digits), treat everything before
+    the first dot as the base net name.
+    """
+    dot = name.find(".")
+    if dot < 0:
+        return name
+    after = name[dot + 1:]
+    # Check if next segment looks like a ref_des (e.g. U1, C36, R8)
+    parts = after.split(".", 1)
+    seg = parts[0]
+    if seg and seg[0].isalpha() and any(c.isdigit() for c in seg):
+        return name[:dot]
+    return name
+
+
+def merge_short_nets(nets):
+    """Merge nets that share the same shortened name."""
+    merged = {}  # short_name -> {nodes: [...], code: first_code}
+    for net in nets:
+        short = shorten_net_name(net["name"])
+        if short not in merged:
+            merged[short] = {"code": net["code"], "name": short, "nodes": []}
+        # Deduplicate nodes (same ref+pin shouldn't appear twice)
+        existing = {(n["ref"], n["pin"]) for n in merged[short]["nodes"]}
+        for node in net["nodes"]:
+            key = (node["ref"], node["pin"])
+            if key not in existing:
+                merged[short]["nodes"].append(node)
+                existing.add(key)
+    return list(merged.values())
+
+
+def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None, short_nets=False):
     """Create or update a PCB from a netlist."""
     components, nets = parse_netlist(netlist_path)
+
+    # Always build full (long) net lookup for canopy_net field tracking
+    full_pin_to_net = {}
+    for net in nets:
+        for node in net["nodes"]:
+            full_pin_to_net[(node["ref"], node["pin"])] = net["name"]
+    ref_to_nets = {}
+    for (ref, pin), net_name in full_pin_to_net.items():
+        if net_name:
+            ref_to_nets.setdefault(ref, set()).add(net_name)
+
+    # Optionally shorten nets for pad assignments only
+    if short_nets:
+        nets = merge_short_nets(nets)
+        print(f"  Short nets mode: merged to {len(nets)} nets")
+
     sections_data = load_sections(sections_path)
 
-    # Build lookup: net_name -> {(ref, pin), ...}
-    # and reverse: (ref, pin) -> net_name
+    # Build lookup for pad net assignments (may be shortened)
     pin_to_net = {}
     for net in nets:
         for node in net["nodes"]:
             pin_to_net[(node["ref"], node["pin"])] = net["name"]
 
     # Backup before modifying
-    backup_pcb(pcb_path)
+    backup_path = backup_pcb(pcb_path)
 
     # Load or create board
     if os.path.exists(pcb_path):
@@ -271,6 +447,10 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None):
     for fp in board.GetFootprints():
         if fp.HasFieldByName(CANOPY_UUID_FIELD):
             existing_uuids[fp.GetFieldText(CANOPY_UUID_FIELD)] = fp
+
+    # Snapshot existing footprint state for safety check
+    before_snapshot = snapshot_footprints(board)
+    changed_uuids = set()
 
     # Build net membership: net_name -> [(ref, pin), ...]
     net_members = {}
@@ -316,7 +496,14 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None):
             if old_ref != ref:
                 print(f"  Rename: {old_ref} -> {ref} (uuid={uuid[:8]}...)")
                 fp.SetReference(ref)
+            if fp.GetValue() != comp["value"]:
+                changed_uuids.add(uuid)
             fp.SetValue(comp["value"])
+            net_str = ",".join(sorted(ref_to_nets.get(ref, set())))
+            if net_str:
+                set_canopy_net(fp, net_str)
+            if comp["properties"].get("mpn"):
+                set_field(fp, "MPN", comp["properties"]["mpn"])
 
             # Check if footprint needs swapping
             nl_fp_spec = comp.get("footprint", "")
@@ -325,21 +512,29 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None):
             if nl_fp_name and pcb_fp_name != nl_fp_name:
                 new_fp = load_footprint(lib_path, nl_fp_spec)
                 if new_fp is not None:
-                    # Preserve position and orientation
+                    # Preserve position, orientation, and board side
                     pos = fp.GetPosition()
                     orient = fp.GetOrientation()
-                    layer = fp.GetLayer()
+                    was_back = fp.IsFlipped()
                     new_fp.SetReference(ref)
                     new_fp.SetValue(comp["value"])
                     set_canopy_uuid(new_fp, uuid)
+                    swap_net_str = ",".join(sorted(ref_to_nets.get(ref, set())))
+                    if swap_net_str:
+                        set_canopy_net(new_fp, swap_net_str)
+                    if comp["properties"].get("mpn"):
+                        set_field(new_fp, "MPN", comp["properties"]["mpn"])
                     new_fp.Reference().SetVisible(False)
                     new_fp.Value().SetVisible(False)
-                    new_fp.SetPosition(pos)
-                    new_fp.SetOrientation(orient)
-                    new_fp.SetLayer(layer)
                     board.Remove(fp)
                     board.Add(new_fp)
+                    if was_back:
+                        new_fp.Flip(pos, pcbnew.FLIP_DIRECTION_TOP_BOTTOM)
+                    # Restore exact position/orientation — never move placed parts
+                    new_fp.SetPosition(pos)
+                    new_fp.SetOrientation(orient)
                     existing_uuids[uuid] = new_fp
+                    changed_uuids.add(uuid)
                     print(f"  Swap footprint: {ref} {pcb_fp_name} -> {nl_fp_name}")
         else:
             fp = load_footprint(lib_path, comp["footprint"])
@@ -350,6 +545,11 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None):
             fp.SetReference(ref)
             fp.SetValue(comp["value"])
             set_canopy_uuid(fp, uuid)
+            new_net_str = ",".join(sorted(ref_to_nets.get(ref, set())))
+            if new_net_str:
+                set_canopy_net(fp, new_net_str)
+            if comp["properties"].get("mpn"):
+                set_field(fp, "MPN", comp["properties"]["mpn"])
             # Hide reference and value text on the board
             fp.Reference().SetVisible(False)
             fp.Value().SetVisible(False)
@@ -558,6 +758,35 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None):
                 # Unconnected
                 pad.SetNet(nets_by_name.get("", netinfo.GetNetItem(0)))
 
+    # Sync 3D models: ensure every footprint has the correct model from the library
+    for comp in components:
+        ref = comp["ref"]
+        fp_spec = comp.get("footprint", "")
+        if not fp_spec:
+            continue
+        board_fp = board.FindFootprintByReference(ref)
+        if board_fp is None:
+            continue
+        lib_fp = load_footprint(lib_path, fp_spec)
+        if lib_fp is None:
+            continue
+        lib_models = lib_fp.Models()
+        if len(lib_models) == 0:
+            continue
+        board_models = board_fp.Models()
+        # Check if models already match
+        needs_update = len(lib_models) != len(board_models)
+        if not needs_update:
+            for lm, bm in zip(lib_models, board_models):
+                if lm.m_Filename != bm.m_Filename:
+                    needs_update = True
+                    break
+        if needs_update:
+            board_fp.Models().clear()
+            for lm in lib_models:
+                board_fp.Models().append(lm)
+            print(f"  Sync 3D model: {ref} -> {lib_models[0].m_Filename}")
+
     # Check which section cells still have footprints inside them (after cap snap)
     occupied_sections = set()
     for si, (sx, sy, sw, sh) in section_positions.items():
@@ -567,12 +796,14 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None):
                 occupied_sections.add(si)
                 break
 
-    # Draw section cell borders and labels on User.1 layer
+    # Draw section cell borders and labels on User.9 layer
+    # (User.1 is reserved for user drawings — never modify it)
+    SECTION_LAYER = pcbnew.User_9
     if section_positions:
-        # Remove old section drawings
+        # Remove old auto-generated section drawings on our layer
         to_del = []
         for drawing in board.GetDrawings():
-            if hasattr(drawing, 'GetLayer') and drawing.GetLayer() == pcbnew.User_1:
+            if hasattr(drawing, 'GetLayer') and drawing.GetLayer() == SECTION_LAYER:
                 to_del.append(drawing)
         for d in to_del:
             board.Remove(d)
@@ -593,7 +824,7 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None):
             rect.SetShape(pcbnew.SHAPE_T_RECT)
             rect.SetStart(pcbnew.VECTOR2I(x1, y1))
             rect.SetEnd(pcbnew.VECTOR2I(x2, y2))
-            rect.SetLayer(pcbnew.User_1)
+            rect.SetLayer(SECTION_LAYER)
             rect.SetWidth(LINE_WIDTH)
             board.Add(rect)
 
@@ -602,8 +833,23 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None):
             text.SetText(sec["name"])
             text.SetPosition(pcbnew.VECTOR2I(x1 + cw // 2, y1 - LABEL_OFFSET))
             text.SetTextSize(TEXT_SIZE)
-            text.SetLayer(pcbnew.User_1)
+            text.SetLayer(SECTION_LAYER)
             board.Add(text)
+
+    # Safety check: verify unchanged components weren't corrupted
+    after_snapshot = snapshot_footprints(board)
+    diffs = verify_unchanged_footprints(before_snapshot, after_snapshot, changed_uuids)
+    if diffs:
+        # Check if all diffs are net-only changes (safe for migration)
+        net_only = all("net changed" in d for d in diffs)
+        print(f"\n  Safety check: {len(diffs)} change(s) detected" + (" (net names only — allowing)" if net_only else ""))
+        for d in diffs:
+            print(d)
+        if not net_only:
+            raise RuntimeError(
+                f"PCB update safety check failed: {len(diffs)} unexpected change(s). "
+                f"Board NOT saved. Backup at: {backup_path}"
+            )
 
     board.Save(pcb_path)
     print(f"Saved: {pcb_path}")
@@ -678,18 +924,24 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None):
 # ---------------------------------------------------------------------------
 
 def main():
-    if len(sys.argv) < 4 or len(sys.argv) > 5:
-        print(f"Usage: {sys.argv[0]} <netlist.net> <footprints.pretty> <output.kicad_pcb> [sections.json]")
+    # Parse --short-nets flag
+    args = [a for a in sys.argv[1:] if a != "--short-nets"]
+    short_nets = "--short-nets" in sys.argv
+
+    if len(args) < 3 or len(args) > 4:
+        print(f"Usage: {sys.argv[0]} [--short-nets] <netlist.net> <footprints.pretty> <output.kicad_pcb> [sections.json]")
         print()
         print("Creates or updates a KiCad PCB from a Canopy EDA netlist.")
         print("Components are tracked by stable UUID, not reference designator.")
         print("Optional sections.json enables section-based grid placement.")
+        print()
+        print("  --short-nets  Collapse per-pin nets (VDD.U1.F7) to base name (VDD)")
         sys.exit(1)
 
-    netlist_path = sys.argv[1]
-    lib_path = sys.argv[2]
-    pcb_path = sys.argv[3]
-    sections_path = sys.argv[4] if len(sys.argv) > 4 else None
+    netlist_path = args[0]
+    lib_path = args[1]
+    pcb_path = args[2]
+    sections_path = args[3] if len(args) > 3 else None
 
     if not os.path.exists(netlist_path):
         print(f"Error: netlist not found: {netlist_path}")
@@ -699,7 +951,7 @@ def main():
         print(f"Error: footprint library not found: {lib_path}")
         sys.exit(1)
 
-    update_pcb(netlist_path, lib_path, pcb_path, sections_path)
+    update_pcb(netlist_path, lib_path, pcb_path, sections_path, short_nets=short_nets)
 
 
 if __name__ == "__main__":

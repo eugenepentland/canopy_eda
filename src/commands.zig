@@ -165,6 +165,8 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) !void {
     for (eval.assertions.items) |assertion| {
         if (assertion.passed) {
             std.debug.print("PASS: {s}\n", .{assertion.message});
+        } else if (assertion.is_warning) {
+            std.debug.print("WARN: {s}\n", .{assertion.message});
         } else {
             std.debug.print("FAIL: {s}\n", .{assertion.message});
             has_failure = true;
@@ -284,6 +286,8 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) !v
     for (eval.assertions.items) |assertion| {
         if (assertion.passed) {
             std.debug.print("PASS: {s}\n", .{assertion.message});
+        } else if (assertion.is_warning) {
+            std.debug.print("WARN: {s}\n", .{assertion.message});
         } else {
             std.debug.print("FAIL: {s}\n", .{assertion.message});
             has_failure = true;
@@ -375,6 +379,8 @@ fn doServe(allocator: std.mem.Allocator, project_dir: []const u8, server_url: []
     for (eval.assertions.items) |assertion| {
         if (assertion.passed) {
             std.debug.print("  PASS: {s}\n", .{assertion.message});
+        } else if (assertion.is_warning) {
+            std.debug.print("  WARN: {s}\n", .{assertion.message});
         } else {
             std.debug.print("  FAIL: {s}\n", .{assertion.message});
         }

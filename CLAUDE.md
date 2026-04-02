@@ -1,4 +1,6 @@
-# EDA Tool
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Overview
 
@@ -10,7 +12,7 @@ A CLI-driven electronic design automation tool for schematic capture. All design
 # Build
 zig build
 
-# Run tests
+# Run tests (includes Guardian checks: fmt, spec, file-size, boundaries)
 zig build test
 
 # Start web server
@@ -19,46 +21,83 @@ zig build run -- serve --project-dir projects/designs --port 9000
 # Build a design (stdout)
 zig build run -- build --project-dir projects/designs --push <design-name>
 
+# Export KiCad netlist + footprints
+zig build run -- export-kicad --project-dir projects/designs --output-dir <dir>
+
 # Convert KiCad files
 zig build run -- convert-footprint <file.kicad_mod>
 zig build run -- convert-symbol <file.kicad_sym> [--filter <name>]
+zig build run -- convert-package <sym.kicad_sym> <fp.kicad_mod> [--name <name>]
+zig build run -- convert-pinout <file.kicad_sym>
+
+# Render SVG schematic
+zig build run -- render --project-dir projects/designs [<design-file>]
+
+# Block diagram
+zig build run -- block-diagram --project-dir projects/designs
 ```
 
-## Project Structure
+## Build System
+
+Dependencies: `httpz` (HTTP server), `guardian` (code quality checks).
+
+Guardian runs automatically on every build and test:
+- `fmt-check`: Zig formatting validation
+- `spec`: Validates SPEC.md matches public function signatures
+- `file-size`: Enforces file size limits
+- `boundaries`: Structural checks
+
+Use `zig build spec-init` to regenerate SPEC.md from `pub fn` signatures.
+
+## Architecture
+
+### Pipeline
 
 ```
-eda/
-  src/
-    main.zig              # CLI entry point
-    sexpr/                # S-expression parser
-      tokenizer.zig       # Lexer: atoms, strings, ints, floats, units, comments
-      parser.zig          # Recursive descent parser → AST
-      printer.zig         # Pretty-printer (round-trip capable)
-      ast.zig             # Node types with source spans
-    eval/                 # Design evaluator
-      evaluator.zig       # Main eval: imports, modules, design-blocks, assertions
-      env.zig             # Types: Value, Env, DesignBlock, Instance, Net, Port, Part
-      builtins.zig        # Arithmetic, comparison, logic operators
-      fmt.zig             # String formatting (~V, ~R, ~C, ~A, ~S specifiers)
-    convert/              # KiCad converters
-      footprint.zig       # .kicad_mod → .sexp footprint
-      symbol.zig          # .kicad_sym → .sexp symbol (side+order classification)
-    render_svg.zig        # SVG schematic renderer (hub/spoke model)
-    emit.zig              # Resolved design emitter (flattens hierarchy)
-    serve.zig             # HTTP server (httpz) with live update
-  test/
-    compare_svg.sh        # SVG comparison test script
-  projects/
-    designs/              # Main design project
-      lib/
-        components/       # Component definitions (.sexp)
-        modules/          # Parameterized subcircuits (.sexp)
-        symbols/          # Symbol pin definitions (.sexp)
-        footprints/       # Physical pad geometry (.sexp)
-      src/
-        *.sexp            # Design source files
-    tpsm84338_board/      # Reference design project
+Source (.sexp files)
+    → Tokenizer → Parser → AST (nodes with source spans)
+    → Evaluator (recursive eval with special forms, builtins, modules)
+    → DesignBlock (instances, nets, ports, notes, sections, sub_blocks)
+    → Post-build (ID insertion, BOM resolution, assertion checks)
+    → Output: emit.zig (.sexp), render_svg.zig (SVG), export_kicad.zig (KiCad)
 ```
+
+### Key Modules
+
+**S-expression layer** (`src/sexpr/`): tokenizer → parser → AST. Printer is round-trip capable.
+
+**Evaluator** (`src/eval/`): Split across multiple files:
+- `evaluator.zig` — Main eval dispatcher
+- `env.zig` — Core types: Value (union type), Env (lexical scope chain), DesignBlock, Instance, Net, Port
+- `special_forms.zig` — `let`, `if`, `cond`, `fmt`, `assert`
+- `modules.zig` — `import` (searches lib/components/ then lib/modules/), `defmodule` with closure capture
+- `design_block.zig` — `design-block` evaluation
+- `instance.zig` — Instance building + pin-net resolution
+- `builders.zig` — Port, note, group, section builders
+- `ids.zig` — 8-char hex ID generation, ref-des auto-assignment (prefix-based: C→C1, C2...)
+- `builtins.zig` — Arithmetic, comparison, logic operators
+- `fmt.zig` — String formatting (~V voltage, ~R resistance, ~C capacitance, ~A amperage, ~S string)
+
+**Rendering** (`src/render_svg.zig` + `src/render_svg/`): Hub/spoke model. Hubs = ICs/connectors (U/J/P/X/Q prefix, rendered as boxes). Spokes = passives (R/C/L/F/D prefix, rendered inline on connections). Grid layout from sections.
+
+**Export**: `emit.zig` (flattened .sexp), `export_kicad.zig` + `export_kicad_netlist.zig` + `export_kicad_footprint.zig` (KiCad format).
+
+**Web server** (`src/serve.zig` + `src/serve/`): Live update via version polling. Global mutable SVG state protected by mutex.
+
+### Component System
+
+- **component-family**: Parameterized (e.g., `(cap "100nF" "np0")`) — `is_family: true`
+- **component**: Fixed part (e.g., `(res-0402)`)
+- Both cached in `component_cache: StringHashMap(ComponentData)`
+- Import searches `lib/components/` then `lib/modules/` for `.sexp` files
+
+## Conventions
+
+- **Error handling**: `EvalError` enum propagated via `try`/`catch`. No panics. File load failures degrade gracefully.
+- **Memory**: Uses `page_allocator` globally. File contents are never freed (AST slices reference source buffers).
+- **Spans**: Every AST Node carries `span: Span` (line, col, byte offset) — used for ID insertion and error reporting.
+- **Test tags**: Tests use `// spec: Section - Behavior` comments mapping to SPEC.md entries.
+- **Strings**: All `[]const u8` slices into source or allocated buffers. Equality via `std.mem.eql(u8, ...)`.
 
 ## S-Expression Design Language
 
@@ -121,8 +160,10 @@ eda/
 ### Ports
 
 ```scheme
-(port "VDD"  "VDD"  in  (rated 1.62 1.98))
-(port "GND"  "GND"  bidi)
+(port "VDD"  in  (rated 1.62 1.98))
+(port "GND"  bidi)
+;; Long form when net differs from name:
+(port "VOUT" vout-str  out  (rated 0.6 16.0))
 ```
 
 ## Web Server
@@ -149,21 +190,10 @@ eda build --project-dir projects/designs --push stm32n6
 # Browser auto-updates within 500ms
 ```
 
-## SVG Renderer
-
-The renderer uses a hub/spoke model:
-- **Hubs**: ICs, connectors (U/J/P/X/Q prefix) rendered as boxes with pins
-- **Spokes**: Passives (R/C/L/F/D prefix) rendered inline on connections
-- **Chain following**: Passives chaining through intermediate nets
-- **Branch trees**: Junction nets with vertical bus lines
-- **Pin grouping**: Same-net pins merged into single rows
-- **Grid layout**: Multi-part symbols and hubs arranged in a 2D grid
-- **Interactive**: Click components/nets for sidebar details, pan/zoom, search
-
 ## Testing
 
 ```bash
-# Unit tests
+# Unit tests (also runs Guardian checks)
 zig build test
 
 # SVG comparison against Gleam reference

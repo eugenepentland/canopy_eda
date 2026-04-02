@@ -328,7 +328,7 @@ pub fn emitDecoupleItems(
             var ci: u32 = 0;
             while (ci < count) : (ci += 1) {
                 const ref = try ids.nextRefDes(self, 'C');
-                const cap_id = try ids.deriveChildId(self, decouple_id, "", child_counter.*);
+                const cap_id = try ids.deriveChildId(self, decouple_id, sub_net, ci);
                 child_counter.* += 1;
                 try instances.append(self.allocator, .{
                     .ref_des = ref,
@@ -359,16 +359,53 @@ pub fn emitDecoupleItems(
     }
 }
 
+fn isDirectionKeyword(s: []const u8) bool {
+    return std.mem.eql(u8, s, "in") or std.mem.eql(u8, s, "out") or
+        std.mem.eql(u8, s, "io") or std.mem.eql(u8, s, "bidi");
+}
+
 pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port {
-    if (args.len < 3) return EvalError.ArityError;
+    if (args.len < 2) return EvalError.ArityError;
     const name_val = try self.evalNode(args[0], env);
-    const net_val = try self.evalNode(args[1], env);
-    const dir = args[2].asAtom() orelse return EvalError.InvalidForm;
+    const name = name_val.asString() orelse return EvalError.TypeError;
+
+    // Short form: (port "NAME" direction ...) — net = name
+    // Long form:  (port "NAME" "NET" direction ...) — explicit net
+    var net: []const u8 = name;
+    var dir_idx: usize = 1;
+
+    if (args[1].asAtom()) |atom| {
+        if (isDirectionKeyword(atom)) {
+            // Short form: args[1] is the direction
+            dir_idx = 1;
+        } else {
+            // Could be a non-direction atom — treat as long form
+            const net_val = try self.evalNode(args[1], env);
+            net = net_val.asString() orelse return EvalError.TypeError;
+            dir_idx = 2;
+        }
+    } else if (args[1].asString()) |s| {
+        // Long form: args[1] is net name string
+        net = s;
+        dir_idx = 2;
+    } else {
+        return EvalError.InvalidForm;
+    }
+
+    if (dir_idx >= args.len) return EvalError.ArityError;
+    const dir = args[dir_idx].asAtom() orelse return EvalError.InvalidForm;
+
+    // Warn when long form is used with identical name and net
+    if (dir_idx == 2 and std.mem.eql(u8, name, net)) {
+        const msg = std.fmt.allocPrint(self.allocator, "Port \"{s}\" has identical name and net — use short form: (port \"{s}\" {s} ...)", .{ name, name, dir }) catch "";
+        if (msg.len > 0) self.assertions.append(self.allocator, .{ .passed = false, .message = msg, .is_warning = true }) catch {};
+    }
 
     var rated_min: ?f64 = null;
     var rated_max: ?f64 = null;
-    if (args.len >= 4 and args[3].isForm("rated")) {
-        const rated_children = args[3].asList().?;
+    const rated_idx = dir_idx + 1;
+    if (args.len > rated_idx and args[rated_idx].isForm("rated")) {
+        const rated_children = args[rated_idx].asList().?;
         if (rated_children.len >= 3) {
             rated_min = rated_children[1].asNumber();
             rated_max = rated_children[2].asNumber();
@@ -376,8 +413,8 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
     }
 
     return Port{
-        .name = name_val.asString() orelse return EvalError.TypeError,
-        .net = net_val.asString() orelse return EvalError.TypeError,
+        .name = name,
+        .net = net,
         .direction = dir,
         .rated_min = rated_min,
         .rated_max = rated_max,

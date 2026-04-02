@@ -2,9 +2,105 @@ const std = @import("std");
 const ast = @import("sexpr/ast.zig");
 const parser_mod = @import("sexpr/parser.zig");
 
+// --- Source .kicad_mod passthrough ---
+
+/// Find the original .kicad_mod source file for a footprint.
+/// Scans lib/sources/ with case-insensitive matching and underscore/hyphen normalization.
+pub fn findSourceKicadMod(allocator: std.mem.Allocator, project_dir: []const u8, footprint_name: []const u8) ?[]const u8 {
+    const sources_path = std.fmt.allocPrint(allocator, "{s}/lib/sources", .{project_dir}) catch return null;
+    defer allocator.free(sources_path);
+
+    var dir = std.fs.cwd().openDir(sources_path, .{ .iterate = true }) catch return null;
+    defer dir.close();
+
+    // Normalize the footprint name for comparison: lowercase, hyphens→underscores
+    const norm_fp = allocator.alloc(u8, footprint_name.len) catch return null;
+    defer allocator.free(norm_fp);
+    for (footprint_name, 0..) |c, i| {
+        norm_fp[i] = if (c >= 'A' and c <= 'Z') c + 32 else if (c == '_') '-' else c;
+    }
+
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".kicad_mod")) continue;
+
+        // Normalize source filename (strip extension, lowercase, underscores→hyphens)
+        const basename = entry.name[0 .. entry.name.len - 10]; // strip .kicad_mod
+        const norm_src = allocator.alloc(u8, basename.len) catch continue;
+        defer allocator.free(norm_src);
+        for (basename, 0..) |c, i| {
+            norm_src[i] = if (c >= 'A' and c <= 'Z') c + 32 else if (c == '_') '-' else c;
+        }
+
+        if (std.mem.eql(u8, norm_fp, norm_src)) {
+            const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ sources_path, entry.name }) catch return null;
+            return full_path;
+        }
+    }
+    return null;
+}
+
+/// Use an original .kicad_mod file, injecting/replacing the 3D model reference.
+pub fn useSourceKicadMod(allocator: std.mem.Allocator, source: []const u8, model_name: ?[]const u8, model_offset: ?[3]f64, model_rotation: ?[3]f64) ![]const u8 {
+    // If no model, return the source as-is
+    if (model_name == null) {
+        return allocator.dupe(u8, source);
+    }
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+
+    // Find existing (model ...) block to replace, or insert before final ')'
+    if (std.mem.indexOf(u8, source, "(model ")) |model_start| {
+        // Find the end of the model block by tracking parens
+        var depth: u32 = 0;
+        var model_end: usize = model_start;
+        for (source[model_start..], 0..) |c, i| {
+            if (c == '(') depth += 1;
+            if (c == ')') {
+                depth -= 1;
+                if (depth == 0) {
+                    model_end = model_start + i + 1;
+                    break;
+                }
+            }
+        }
+        // Skip trailing whitespace/newline after model block
+        while (model_end < source.len and (source[model_end] == '\n' or source[model_end] == '\r' or source[model_end] == ' ')) {
+            model_end += 1;
+        }
+        // Write everything before the old model, then new model, then rest
+        try w.writeAll(source[0..model_start]);
+        try writeModelBlock(w, model_name.?, model_offset, model_rotation);
+        try w.writeAll(source[model_end..]);
+    } else {
+        // No existing model — insert before the final ')'
+        const last_paren = std.mem.lastIndexOf(u8, source, ")") orelse return error.InvalidFormat;
+        try w.writeAll(source[0..last_paren]);
+        try writeModelBlock(w, model_name.?, model_offset, model_rotation);
+        try w.writeAll(")\n");
+    }
+
+    return buf.toOwnedSlice(allocator);
+}
+
+fn writeModelBlock(w: anytype, model_name: []const u8, model_offset: ?[3]f64, model_rotation: ?[3]f64) !void {
+    const off = model_offset orelse [3]f64{ 0, 0, 0 };
+    const rot = model_rotation orelse [3]f64{ 0, 0, 0 };
+    try w.writeAll("  (model \"${KIPRJMOD}/models/");
+    try w.writeAll(model_name);
+    try w.writeAll("\"\n");
+    try w.print("    (offset (xyz {d:.4} {d:.4} {d:.4}))\n", .{ -off[0], -off[1], -off[2] });
+    try w.writeAll("    (scale (xyz 1 1 1))\n");
+    try w.print("    (rotate (xyz {d:.4} {d:.4} {d:.4}))\n", .{ rot[0], rot[1], rot[2] });
+    try w.writeAll("  )\n");
+}
+
 // --- Footprint .sexp -> .kicad_mod ---
 
-pub fn exportFootprintMod(allocator: std.mem.Allocator, source: []const u8, model_name: ?[]const u8) ![]const u8 {
+pub fn exportFootprintMod(allocator: std.mem.Allocator, source: []const u8, model_name: ?[]const u8, model_offset: ?[3]f64, model_rotation: ?[3]f64) ![]const u8 {
     const nodes = try parser_mod.parse(allocator, source);
     defer parser_mod.freeNodes(allocator, nodes);
 
@@ -61,12 +157,14 @@ pub fn exportFootprintMod(allocator: std.mem.Allocator, source: []const u8, mode
 
     // 3D model reference
     if (model_name) |mname| {
+        const off = model_offset orelse [3]f64{ 0, 0, 0 };
+        const rot = model_rotation orelse [3]f64{ 0, 0, 0 };
         try w.writeAll("  (model \"${KIPRJMOD}/models/");
         try w.writeAll(mname);
         try w.writeAll("\"\n");
-        try w.writeAll("    (offset (xyz 0 0 0))\n");
+        try w.print("    (offset (xyz {d:.4} {d:.4} {d:.4}))\n", .{ -off[0], -off[1], -off[2] });
         try w.writeAll("    (scale (xyz 1 1 1))\n");
-        try w.writeAll("    (rotate (xyz 0 0 0))\n");
+        try w.print("    (rotate (xyz {d:.4} {d:.4} {d:.4}))\n", .{ rot[0], rot[1], rot[2] });
         try w.writeAll("  )\n");
     }
 

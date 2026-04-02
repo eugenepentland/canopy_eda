@@ -142,11 +142,13 @@ pub fn collectInstances(
         else
             try allocator.dupe(u8, inst.ref_des);
 
-        // Derive UUID from 8-char ID if available, fall back to existing uuid
-        const effective_uuid = if (inst.id.len > 0)
-            (export_kicad.uuidFromId(allocator, inst.id) catch inst.uuid)
+        // Use BOM-assigned UUID if available, otherwise derive from ID
+        const effective_uuid = if (inst.uuid.len > 0)
+            inst.uuid
+        else if (inst.id.len > 0)
+            (export_kicad.uuidFromId(allocator, inst.id) catch "")
         else
-            inst.uuid;
+            "";
 
         try list.append(allocator, .{
             .ref_des = ref,

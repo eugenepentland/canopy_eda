@@ -219,6 +219,7 @@ pub const DesignBlock = struct {
 pub const AssertionResult = struct {
     passed: bool,
     message: []const u8,
+    is_warning: bool = false,
 };
 
 /// Lexical environment with parent chain.

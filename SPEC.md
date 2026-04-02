@@ -1,0 +1,113 @@
+# EDA Tool
+
+CLI-driven electronic design automation for schematic capture using S-expression syntax.
+
+## sexpr/tokenizer
+
+- Tokenizes parentheses and atoms from S-expression input
+- Tokenizes integer and float numbers with optional unit suffixes
+- Skips line comments starting with semicolon
+- Tokenizes arithmetic operators as distinct tokens
+- Tokenizes comparison operators as distinct tokens
+- Tracks line and column position for each token
+
+## sexpr/parser
+
+- Parses a simple S-expression list into an AST node
+- Parses nested S-expression lists into a tree
+- Parses numbers and unit values into typed AST nodes
+- Parses input containing comments by ignoring them
+- Parses multiple top-level forms into separate AST nodes
+- Identifies forms by head atom via isForm helper
+
+## sexpr/printer
+
+- Prints a simple list as a single-line S-expression string
+- Prints short nested lists inline on one line
+- Prints long nested lists with multiline indentation
+- Round-trips parse to print to parse producing identical AST
+
+## sexpr/ast
+
+- Constructs typed AST nodes for list, atom, string, int, float, and unit values
+
+## eval/builtins
+
+- Evaluates arithmetic operations on numeric values
+- Evaluates a voltage divider formula combining arithmetic operators
+- Evaluates comparison operations returning boolean results
+- Evaluates logic operations on boolean values
+
+## eval/fmt
+
+- Formats voltage values with SI prefix and V suffix
+- Formats resistance values with SI prefix and ohm suffix
+- Formats capacitance values with SI prefix and F suffix
+- Formats tilde escape sequences in format strings
+- Formats mixed specifiers in a single format string
+
+## eval/env
+
+- Stores and retrieves values by name in an environment
+- Resolves names through a parent environment chain
+
+## eval/evaluator
+
+- Evaluates arithmetic expressions from S-expression AST
+- Evaluates let bindings that define named values in scope
+- Evaluates if conditionals selecting a branch by predicate
+- Evaluates fmt expressions producing formatted strings
+- Evaluates assert-range that passes when value is in bounds
+- Evaluates assert-range that fails when value is out of bounds
+- parseId extracts 8-char ID from form children
+- parseId returns null when no ID present
+- deriveChildId produces deterministic results
+- deriveChildId produces unique IDs per index
+- generateId produces 8-char hex starting with letter
+- isStandardRefDes distinguishes standard from descriptive labels
+
+## id_insert
+
+- findMatchingClose finds correct closing paren
+- findMatchingClose handles strings containing parens
+
+## convert/footprint
+
+- Converts a KiCad footprint file into S-expression format
+
+## convert/symbol
+
+- Converts a KiCad symbol file into S-expression format
+
+## emit
+
+- Emits a placeholder for an empty resolved design
+
+## parts
+
+- Returns null when looking up a missing component family
+- Matches component attributes against filter criteria
+- Picks the preferred component from matching candidates
+
+## export_kicad
+
+- Generates a KiCad netlist from a resolved design
+- Exports a KiCad footprint mod file from footprint data
+
+## bom
+
+- Generates deterministic UUIDs in the expected format
+- Loads an empty BOM file without error
+- Detects net overlap between components
+
+## render_svg
+
+Public functions: renderSchematic
+
+## render_block
+
+Public functions: renderBlockDiagram
+
+## serve
+
+Public functions: notFound, serve

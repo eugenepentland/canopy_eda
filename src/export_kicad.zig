@@ -8,6 +8,7 @@ const Property = env_mod.Property;
 
 const netlist_mod = @import("export_kicad_netlist.zig");
 const footprint_mod = @import("export_kicad_footprint.zig");
+const model_mod = @import("export_kicad_model.zig");
 
 const writeNetlist = netlist_mod.writeNetlist;
 const extractPadNames = netlist_mod.extractPadNames;
@@ -16,6 +17,14 @@ const exportFootprintMod = footprint_mod.exportFootprintMod;
 const findModelFile = footprint_mod.findModelFile;
 const buildZip = footprint_mod.buildZip;
 const ZipEntry = footprint_mod.ZipEntry;
+const buildKicadMod = model_mod.buildKicadMod;
+pub const loadModelConfig = model_mod.loadModelConfig;
+
+pub const ModelTransform = model_mod.ModelTransform;
+pub const ModelConfigMap = model_mod.ModelConfigMap;
+pub const exportSectionLayout = model_mod.exportSectionLayout;
+pub const exportFootprints = model_mod.exportFootprints;
+pub const parseFloat3 = model_mod.parseFloat3;
 
 /// Derive a full UUID (36-char) from an 8-char hex ID by hashing it.
 pub fn uuidFromId(allocator: std.mem.Allocator, id: []const u8) ![]const u8 {
@@ -102,6 +111,10 @@ pub fn exportKicad(
     var fp_components = std.StringHashMap([]const u8).init(allocator);
     defer fp_components.deinit();
 
+    // Load 3D model config for offset/rotation
+    var model_cfg = loadModelConfig(allocator, project_dir);
+    defer model_cfg.deinit();
+
     for (instances.items) |inst| {
         if (inst.footprint.len == 0) continue;
         if (processed_fps.contains(inst.footprint)) continue;
@@ -122,11 +135,12 @@ pub fn exportKicad(
         const kicad_name = extractFootprintName(allocator, fp_source) catch inst.footprint;
         try fp_name_map.put(inst.footprint, kicad_name);
 
-        // Check for matching STEP model
-        const model_name = findModelFile(allocator, project_dir, inst.footprint, inst.component);
+        // Check for matching STEP model (config override > auto-discovery)
+        const mcfg = model_cfg.get(inst.footprint);
+        const model_name = if (mcfg) |c| (c.model orelse findModelFile(allocator, project_dir, inst.footprint, inst.component)) else findModelFile(allocator, project_dir, inst.footprint, inst.component);
 
-        // Write .kicad_mod file
-        const mod_output = exportFootprintMod(allocator, fp_source, model_name) catch |err| {
+        // Write .kicad_mod file (prefer original source if available)
+        const mod_output = buildKicadMod(allocator, project_dir, inst.footprint, fp_source, model_name, if (mcfg) |c| c.offset else null, if (mcfg) |c| c.rotation else null) catch |err| {
             std.debug.print("Warning: failed to convert footprint {s}: {}\n", .{ inst.footprint, err });
             continue;
         };
@@ -142,7 +156,7 @@ pub fn exportKicad(
 
         // Copy STEP model if found
         if (model_name) |mname| {
-            defer allocator.free(mname);
+            defer if (mcfg == null) allocator.free(mname);
             const src_path = try std.fmt.allocPrint(allocator, "{s}/lib/models/{s}", .{ project_dir, mname });
             defer allocator.free(src_path);
             const dst_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ model_dir, mname });
@@ -260,6 +274,9 @@ pub fn exportKicadZip(
     var zip_files: std.ArrayListUnmanaged(ZipEntry) = .empty;
     defer zip_files.deinit(allocator);
 
+    var model_cfg = loadModelConfig(allocator, project_dir);
+    defer model_cfg.deinit();
+
     for (instances.items) |inst| {
         if (inst.footprint.len == 0) continue;
         if (processed_fps.contains(inst.footprint)) continue;
@@ -277,16 +294,17 @@ pub fn exportKicadZip(
         const kicad_name = extractFootprintName(allocator, fp_source) catch inst.footprint;
         try fp_name_map.put(inst.footprint, kicad_name);
 
-        const model_name = findModelFile(allocator, project_dir, inst.footprint, inst.component);
+        const mcfg = model_cfg.get(inst.footprint);
+        const model_name = if (mcfg) |c| (c.model orelse findModelFile(allocator, project_dir, inst.footprint, inst.component)) else findModelFile(allocator, project_dir, inst.footprint, inst.component);
 
-        const mod_output = exportFootprintMod(allocator, fp_source, model_name) catch continue;
+        const mod_output = buildKicadMod(allocator, project_dir, inst.footprint, fp_source, model_name, if (mcfg) |c| c.offset else null, if (mcfg) |c| c.rotation else null) catch continue;
 
         const mod_filename = try std.fmt.allocPrint(allocator, "footprints.pretty/{s}.kicad_mod", .{kicad_name});
         try zip_files.append(allocator, .{ .name = mod_filename, .data = mod_output });
 
         // Add STEP model
         if (model_name) |mname| {
-            defer allocator.free(mname);
+            defer if (mcfg == null) allocator.free(mname);
             const src_path = try std.fmt.allocPrint(allocator, "{s}/lib/models/{s}", .{ project_dir, mname });
             defer allocator.free(src_path);
             const model_data = std.fs.cwd().readFileAlloc(allocator, src_path, 20 * 1024 * 1024) catch continue;
@@ -316,99 +334,6 @@ pub fn exportKicadZip(
 
     // Build zip
     return buildZip(allocator, zip_files.items);
-}
-
-/// Export section layout as JSON for PCB placement.
-/// Maps each instance ref_des to its section grid cell.
-pub fn exportSectionLayout(
-    allocator: std.mem.Allocator,
-    block: *const DesignBlock,
-) ![]const u8 {
-    // Flatten sections + sub-sections into a flat list
-    var flat_sections: std.ArrayListUnmanaged(struct { name: []const u8, instances: []const Instance, pin_groups: []const env_mod.PinGroup }) = .empty;
-    defer flat_sections.deinit(allocator);
-
-    for (block.sections) |sec| {
-        // If section has sub-sections, its instances belong to those — skip parent's instances
-        if (sec.sub_sections.len > 0) {
-            try flat_sections.append(allocator, .{ .name = sec.name, .instances = &.{}, .pin_groups = sec.pin_groups });
-        } else {
-            try flat_sections.append(allocator, .{ .name = sec.name, .instances = sec.instances, .pin_groups = sec.pin_groups });
-        }
-        for (sec.sub_sections) |sub| {
-            try flat_sections.append(allocator, .{ .name = sub.name, .instances = sub.instances, .pin_groups = sub.pin_groups });
-        }
-    }
-
-    const n = flat_sections.items.len;
-    if (n == 0) return try allocator.dupe(u8, "{\"cell_size_mm\":50,\"sections\":[],\"ref_section\":{}}");
-
-    // Grid dimensions
-    var n_cols: usize = 1;
-    while (n_cols * n_cols < n) : (n_cols += 1) {}
-
-    // Build ref_des -> section index map
-    var ref_map = std.StringHashMap(usize).init(allocator);
-    defer ref_map.deinit();
-
-    for (flat_sections.items, 0..) |sec, si| {
-        for (sec.instances) |inst| {
-            try ref_map.put(inst.ref_des, si);
-        }
-        // Also capture instances referenced via pin_groups
-        for (sec.pin_groups) |pg| {
-            if (!ref_map.contains(pg.ref_des)) {
-                try ref_map.put(pg.ref_des, si);
-            }
-        }
-    }
-
-    // Write JSON
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-
-    try w.writeAll("{\"cell_size_mm\":50,\"sections\":[");
-    for (flat_sections.items, 0..) |sec, si| {
-        if (si > 0) try w.writeAll(",");
-        const row = si / n_cols;
-        const col = si % n_cols;
-        try w.print("{{\"name\":\"{s}\",\"row\":{d},\"col\":{d},\"refs\":[", .{ sec.name, row, col });
-        var first = true;
-        for (sec.instances) |inst| {
-            if (!first) try w.writeAll(",");
-            try w.print("\"{s}\"", .{inst.ref_des});
-            first = false;
-        }
-        for (sec.pin_groups) |pg| {
-            // Only add if not already listed as a direct instance
-            var found = false;
-            for (sec.instances) |inst| {
-                if (std.mem.eql(u8, inst.ref_des, pg.ref_des)) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                if (!first) try w.writeAll(",");
-                try w.print("\"{s}\"", .{pg.ref_des});
-                first = false;
-            }
-        }
-        try w.writeAll("]}");
-    }
-
-    try w.writeAll("],\"ref_section\":{");
-    var ref_first = true;
-    var ref_iter = ref_map.iterator();
-    while (ref_iter.next()) |entry| {
-        if (!ref_first) try w.writeAll(",");
-        try w.print("\"{s}\":{d}", .{ entry.key_ptr.*, entry.value_ptr.* });
-        ref_first = false;
-    }
-    try w.writeAll("}}");
-
-    return try allocator.dupe(u8, buf.items);
 }
 
 const collectInstances = netlist_mod.collectInstances;
@@ -468,7 +393,7 @@ test "footprint mod export" {
         \\)
     ;
 
-    const output = try exportFootprintMod(alloc, source, null);
+    const output = try exportFootprintMod(alloc, source, null, null, null);
     defer alloc.free(output);
 
     try std.testing.expect(std.mem.indexOf(u8, output, "(footprint \"R_0402_1005Metric\"") != null);
