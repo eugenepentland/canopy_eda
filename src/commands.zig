@@ -2,6 +2,7 @@ const std = @import("std");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 const emit = @import("emit.zig");
 const export_kicad = @import("export_kicad.zig");
+const export_kicad_pcb = @import("export_kicad_pcb.zig");
 const bom = @import("bom.zig");
 const render_block = @import("render_block.zig");
 const id_insert = @import("id_insert.zig");
@@ -321,6 +322,222 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) !v
             std.debug.print("Build did not produce a design block\n", .{});
             std.process.exit(1);
         },
+    }
+}
+
+pub fn cmdExportPcb(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var project_dir: []const u8 = ".";
+    var output_path: ?[]const u8 = null;
+    var design_name: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--project-dir") and i + 1 < args.len) {
+            project_dir = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--output") and i + 1 < args.len) {
+            output_path = args[i + 1];
+            i += 1;
+        } else {
+            design_name = args[i];
+        }
+    }
+
+    const name = design_name orelse {
+        std.debug.print("Usage: eda export-pcb --project-dir <d> --output <file.kicad_pcb> <design-name>\n", .{});
+        std.process.exit(1);
+    };
+
+    const board_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name }) catch {
+        std.debug.print("Out of memory\n", .{});
+        std.process.exit(1);
+    };
+    defer allocator.free(board_path);
+
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+
+    const result = eval.evalFile(board_path) catch |err| {
+        std.debug.print("Build error: {}\n", .{err});
+        std.process.exit(1);
+    };
+
+    var has_failure = false;
+    for (eval.assertions.items) |assertion| {
+        if (assertion.passed) {
+            std.debug.print("PASS: {s}\n", .{assertion.message});
+        } else if (assertion.is_warning) {
+            std.debug.print("WARN: {s}\n", .{assertion.message});
+        } else {
+            std.debug.print("FAIL: {s}\n", .{assertion.message});
+            has_failure = true;
+        }
+    }
+
+    if (has_failure) {
+        std.debug.print("Build failed: assertion violations\n", .{});
+        std.process.exit(1);
+    }
+
+    // Extract design block and optional board params
+    const env = @import("eval/env.zig");
+    var block: *env.DesignBlock = undefined;
+    var board_def: ?*env.Board = null;
+    switch (result) {
+        .design_block => |db| block = db,
+        .board => |b| {
+            block = b.design;
+            board_def = b;
+        },
+        else => {
+            std.debug.print("Build did not produce a design-block or board\n", .{});
+            std.process.exit(1);
+        },
+    }
+
+    const ids_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name }) catch {
+        std.debug.print("Out of memory\n", .{});
+        std.process.exit(1);
+    };
+    defer allocator.free(ids_path);
+    bom.resolveIdentities(allocator, block, ids_path, project_dir) catch |err| {
+        std.debug.print("Identity resolution error: {}\n", .{err});
+        std.process.exit(1);
+    };
+
+    // Determine output path
+    const out = output_path orelse blk: {
+        break :blk std.fmt.allocPrint(allocator, "{s}/out/{s}.kicad_pcb", .{ project_dir, name }) catch {
+            std.debug.print("Out of memory\n", .{});
+            std.process.exit(1);
+        };
+    };
+
+    // Layout path for native placement data
+    const layout_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.layout", .{ project_dir, name }) catch null;
+
+    // Use existing PCB for placement preservation if it exists
+    const pcb_content = export_kicad_pcb.exportPcb(allocator, block, project_dir, name, out, board_def, layout_path) catch |err| {
+        std.debug.print("PCB export error: {}\n", .{err});
+        std.process.exit(1);
+    };
+    defer allocator.free(pcb_content);
+
+    // Ensure output directory exists
+    if (std.fs.path.dirname(out)) |dir| {
+        std.fs.cwd().makePath(dir) catch {};
+    }
+
+    const f = std.fs.cwd().createFile(out, .{}) catch |err| {
+        std.debug.print("Cannot write {s}: {}\n", .{ out, err });
+        std.process.exit(1);
+    };
+    defer f.close();
+    f.writeAll(pcb_content) catch |err| {
+        std.debug.print("Write error: {}\n", .{err});
+        std.process.exit(1);
+    };
+    std.debug.print("PCB export complete: {s}\n", .{out});
+}
+
+pub fn cmdExportGerber(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const export_gerber = @import("export_gerber.zig");
+    const fp_mod = @import("export_kicad_footprint.zig");
+
+    var project_dir: []const u8 = ".";
+    var output_dir: ?[]const u8 = null;
+    var design_name: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--project-dir") and i + 1 < args.len) {
+            project_dir = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--output-dir") and i + 1 < args.len) {
+            output_dir = args[i + 1];
+            i += 1;
+        } else {
+            design_name = args[i];
+        }
+    }
+
+    const name = design_name orelse {
+        std.debug.print("Usage: eda export-gerber --project-dir <d> --output-dir <dir> <design-name>\n", .{});
+        std.process.exit(1);
+    };
+
+    const board_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    defer allocator.free(board_path);
+
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+
+    const result = eval.evalFile(board_path) catch |err| {
+        std.debug.print("Build error: {}\n", .{err});
+        std.process.exit(1);
+    };
+
+    const env = @import("eval/env.zig");
+    var block2: *env.DesignBlock = undefined;
+    var board_def: ?*env.Board = null;
+    switch (result) {
+        .design_block => |db| block2 = db,
+        .board => |b| {
+            block2 = b.design;
+            board_def = b;
+        },
+        else => {
+            std.debug.print("Build did not produce a design-block or board\n", .{});
+            std.process.exit(1);
+        },
+    }
+
+    const ids_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name });
+    defer allocator.free(ids_path);
+    bom.resolveIdentities(allocator, block2, ids_path, project_dir) catch {};
+
+    const layout_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.layout", .{ project_dir, name });
+    defer allocator.free(layout_path);
+
+    const files = export_gerber.exportGerber(allocator, block2, project_dir, name, board_def, layout_path) catch |err| {
+        std.debug.print("Gerber export error: {}\n", .{err});
+        std.process.exit(1);
+    };
+
+    if (output_dir) |dir| {
+        // Write individual files
+        std.fs.cwd().makePath(dir) catch {};
+        for (files) |f| {
+            const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, f.name });
+            defer allocator.free(path);
+            const file = std.fs.cwd().createFile(path, .{}) catch |err| {
+                std.debug.print("Cannot write {s}: {}\n", .{ path, err });
+                continue;
+            };
+            defer file.close();
+            file.writeAll(f.data) catch {};
+            std.debug.print("  {s}\n", .{f.name});
+        }
+        std.debug.print("Gerber export complete: {d} files in {s}\n", .{ files.len, dir });
+    } else {
+        // Write as zip to stdout
+        var zip_entries: std.ArrayListUnmanaged(fp_mod.ZipEntry) = .empty;
+        defer zip_entries.deinit(allocator);
+        for (files) |f| {
+            try zip_entries.append(allocator, .{ .name = f.name, .data = f.data });
+        }
+        const zip = try fp_mod.buildZip(allocator, zip_entries.items);
+        defer allocator.free(zip);
+        const out_path = try std.fmt.allocPrint(allocator, "{s}/out/{s}-gerber.zip", .{ project_dir, name });
+        defer allocator.free(out_path);
+        if (std.fs.path.dirname(out_path)) |dir2| {
+            std.fs.cwd().makePath(dir2) catch {};
+        }
+        const zf = std.fs.cwd().createFile(out_path, .{}) catch |err| {
+            std.debug.print("Cannot write zip: {}\n", .{err});
+            std.process.exit(1);
+        };
+        defer zf.close();
+        zf.writeAll(zip) catch {};
+        std.debug.print("Gerber export complete: {s}\n", .{out_path});
     }
 }
 

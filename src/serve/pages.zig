@@ -29,7 +29,7 @@ pub fn indexPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
         if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".sexp")) {
             const design_name = entry.name[0 .. entry.name.len - 5];
             if (std.mem.eql(u8, design_name, "board")) continue;
-            try w.print("<li><a href=\"/schematics/{s}\">{s}</a></li>", .{ design_name, design_name });
+            try w.print("<li><a href=\"/schematics/{s}\">{s}</a> <a href=\"/pcb/{s}\" style=\"color:#888;font-size:12px;margin-left:8px\">[PCB]</a></li>", .{ design_name, design_name, design_name });
         }
     }
 

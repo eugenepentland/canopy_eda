@@ -18,6 +18,8 @@ pub const Value = union(enum) {
     module: ModuleDef,
     /// A design block result
     design_block: *DesignBlock,
+    /// A board definition (design + physical parameters)
+    board: *Board,
     /// Nil / void
     nil,
 
@@ -79,6 +81,9 @@ pub const Port = struct {
     direction: []const u8,
     rated_min: ?f64 = null,
     rated_max: ?f64 = null,
+    nominal: ?f64 = null,
+    /// Whether this port is optional (no ERC error if unconnected).
+    optional: bool = false,
 };
 
 /// A note annotation.
@@ -170,6 +175,8 @@ pub const SectionPort = struct {
     role: []const u8 = "",
     /// Protocol annotation (e.g., "SPI", "USB2.0-HS").
     protocol: []const u8 = "",
+    /// Whether this port is optional (no ERC error if unconnected).
+    optional: bool = false,
 };
 
 /// A named calculation block with computed values.
@@ -197,11 +204,16 @@ pub const Section = struct {
     pin_groups: []const PinGroup = &.{},
     /// Declared interfaces (in/out/io) for block diagram generation.
     ports: []const SectionPort = &.{},
+    /// Communication protocols used by this section (e.g., "SPI", "I2C", "OctoSPI").
+    protocols: []const []const u8 = &.{},
     /// Named calculation blocks.
     calcs: []const CalcBlock = &.{},
     /// Nested sub-sections (internal detail, shown in schematic but merged in block diagram).
     sub_sections: []const Section = &.{},
 };
+
+/// A net-tie pair: merge net `b` into net `a`.
+pub const NetTie = struct { a: []const u8, b: []const u8 };
 
 /// The result of evaluating a design-block form.
 pub const DesignBlock = struct {
@@ -213,6 +225,87 @@ pub const DesignBlock = struct {
     groups: []const Group,
     sub_blocks: []const SubBlock,
     sections: []const Section = &.{},
+    /// Net ties for cross-block connections (sub-block port wiring).
+    net_ties: []const NetTie = &.{},
+};
+
+/// A board definition: a design-block plus physical PCB parameters.
+pub const Board = struct {
+    name: []const u8,
+    design: *DesignBlock,
+    /// Board outline as a list of (x, y) points in mm. Rectangle shorthand
+    /// produces 4 corner points.
+    outline: []const [2]f64 = &.{},
+    /// Board thickness in mm (default 1.6).
+    thickness: f64 = 1.6,
+    /// Copper layers (default 2).
+    copper_layers: u8 = 2,
+    /// Design rules.
+    rules: BoardRules = .{},
+    /// Layer stackup definition.
+    stackup: []const StackupLayer = &.{},
+    /// Net class overrides.
+    net_classes: []const NetClass = &.{},
+    /// Differential pair definitions.
+    diff_pairs: []const DiffPair = &.{},
+    /// Zone (copper pour) definitions.
+    zones: []const ZoneDef = &.{},
+    /// Keepout areas.
+    keepouts: []const Keepout = &.{},
+};
+
+/// PCB design rules.
+pub const BoardRules = struct {
+    clearance: f64 = 0.15,
+    track_width: f64 = 0.2,
+    via_drill: f64 = 0.3,
+    via_size: f64 = 0.6,
+};
+
+pub const StackupKind = enum { copper, prepreg, core };
+
+/// A layer in the board stackup.
+pub const StackupLayer = struct {
+    kind: StackupKind,
+    name: []const u8 = "",
+    thickness: f64,
+    er: f64 = 4.5,
+};
+
+/// Net class with per-class rule overrides.
+pub const NetClass = struct {
+    name: []const u8,
+    track_width: ?f64 = null,
+    clearance: ?f64 = null,
+    via_drill: ?f64 = null,
+    via_size: ?f64 = null,
+    nets: []const []const u8 = &.{},
+};
+
+/// Differential pair definition.
+pub const DiffPair = struct {
+    name: []const u8,
+    positive: []const u8,
+    negative: []const u8,
+    impedance: f64 = 90,
+    spacing: f64 = 0.15,
+};
+
+/// Zone (copper pour) definition — design intent only.
+pub const ZoneDef = struct {
+    name: []const u8,
+    layer: []const u8,
+    thermal_gap: f64 = 0.3,
+    thermal_width: f64 = 0.25,
+};
+
+/// Keepout area.
+pub const Keepout = struct {
+    name: []const u8,
+    outline: []const [2]f64,
+    no_tracks: bool = false,
+    no_vias: bool = false,
+    no_pours: bool = false,
 };
 
 /// Assertion result.

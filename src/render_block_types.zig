@@ -29,6 +29,7 @@ pub const Block = struct {
     detail: []const u8,
     category: Category,
     ports: []const env_mod.SectionPort,
+    protocols: []const []const u8 = &.{},
     x: f64 = 0,
     y: f64 = 0,
     w: f64 = block_w,
@@ -36,7 +37,7 @@ pub const Block = struct {
     col: usize = 0,
 };
 
-pub const Category = enum { mcu, power, memory, peripheral, connector, clock };
+pub const Category = enum { mcu, power, memory, peripheral, connector, clock, comms, sensor, analog, protection };
 
 pub fn categoryColor(cat: Category) []const u8 {
     return switch (cat) {
@@ -46,6 +47,36 @@ pub fn categoryColor(cat: Category) []const u8 {
         .peripheral => "#2ea043",
         .connector => "#d29922",
         .clock => "#4a9",
+        .comms => "#2196f3",
+        .sensor => "#2ea043",
+        .analog => "#e040fb",
+        .protection => "#8b949e",
+    };
+}
+
+pub fn categoryColumn(cat: Category) usize {
+    return switch (cat) {
+        .power, .clock, .protection => 0,
+        .mcu => 1,
+        .memory, .comms, .sensor, .connector, .peripheral, .analog => 2,
+    };
+}
+
+/// Sort priority within a column (lower = higher in column).
+pub fn categorySortOrder(cat: Category) usize {
+    return switch (cat) {
+        .mcu => 0,
+        // Left column
+        .power => 0,
+        .protection => 1,
+        .clock => 2,
+        // Right column
+        .memory => 0,
+        .comms => 1,
+        .sensor => 2,
+        .analog => 3,
+        .peripheral => 4,
+        .connector => 5,
     };
 }
 
@@ -71,6 +102,15 @@ pub fn edgeExists(items: []const Edge, from: usize, to: usize, label: []const u8
     return false;
 }
 
+const bidi_protocols = [_][]const u8{ "SPI", "I2C", "UART", "USB", "USB2.0-HS", "USB2.0-FS", "OctoSPI", "QuadSPI", "QSPI", "SWD", "JTAG", "SDIO", "SDMMC", "CAN" };
+
+pub fn isBidirectional(label: []const u8) bool {
+    for (&bidi_protocols) |proto| {
+        if (std.mem.eql(u8, label, proto)) return true;
+    }
+    return false;
+}
+
 pub fn strInList(list: []const []const u8, s: []const u8) bool {
     for (list) |item| {
         if (std.mem.eql(u8, item, s)) return true;
@@ -79,12 +119,36 @@ pub fn strInList(list: []const []const u8, s: []const u8) bool {
 }
 
 pub fn classifySection(sec: env_mod.Section) Category {
-    const name = sec.name;
-    if (containsCI(name, "Buck") or containsCI(name, "LDO") or containsCI(name, "Regulator") or containsCI(name, "Power")) return .power;
-    if (containsCI(name, "Flash") or containsCI(name, "PSRAM") or containsCI(name, "RAM") or containsCI(name, "EEPROM")) return .memory;
-    if (containsCI(name, "Clock") or containsCI(name, "HSE") or containsCI(name, "LSE") or containsCI(name, "Oscillator")) return .clock;
-    if (containsCI(name, "Connector") or containsCI(name, "Expansion") or containsCI(name, "Header")) return .connector;
-    for (sec.instances) |inst| {
+    return classifyByName(sec.name, sec.instances);
+}
+
+pub fn classifyByName(name: []const u8, instances: []const env_mod.Instance) Category {
+    // Power
+    if (containsCI(name, "Buck") or containsCI(name, "LDO") or containsCI(name, "Regulator") or
+        containsCI(name, "Power") or containsCI(name, "Charger") or containsCI(name, "Converter") or
+        containsCI(name, "PMIC")) return .power;
+    // Memory
+    if (containsCI(name, "Flash") or containsCI(name, "PSRAM") or containsCI(name, "RAM") or
+        containsCI(name, "EEPROM") or containsCI(name, "SD Card")) return .memory;
+    // Clocking
+    if (containsCI(name, "Clock") or containsCI(name, "HSE") or containsCI(name, "LSE") or
+        containsCI(name, "Oscillator") or containsCI(name, "PLL") or containsCI(name, "Crystal")) return .clock;
+    // Comms
+    if (containsCI(name, "USB") or containsCI(name, "Ethernet") or containsCI(name, "BLE") or
+        containsCI(name, "WiFi") or containsCI(name, "CAN") or containsCI(name, "UART")) return .comms;
+    // Sensor
+    if (containsCI(name, "IMU") or containsCI(name, "ADC") or containsCI(name, "Sensor") or
+        containsCI(name, "Temperature") or containsCI(name, "Accelerometer") or containsCI(name, "Gyro")) return .sensor;
+    // Analog
+    if (containsCI(name, "Analog") or containsCI(name, "DAC") or containsCI(name, "Op-Amp") or
+        containsCI(name, "Reference") or containsCI(name, "Amplifier")) return .analog;
+    // Protection
+    if (containsCI(name, "ESD") or containsCI(name, "Protection") or containsCI(name, "Fuse") or
+        containsCI(name, "TVS")) return .protection;
+    // Connector
+    if (containsCI(name, "Connector") or containsCI(name, "Expansion") or containsCI(name, "Header") or
+        containsCI(name, "Mounting")) return .connector;
+    for (instances) |inst| {
         if (inst.ref_des.len > 0 and (inst.ref_des[0] == 'J' or inst.ref_des[0] == 'P')) return .connector;
     }
     return .peripheral;

@@ -66,7 +66,7 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void
     try w.writeAll(assets_css.NAVBAR_CSS);
     try w.writeAll(
         \\body { font-family: system-ui, sans-serif; margin: 0; padding: 0; color: #e0e0e0; background: #121212; }
-        \\.lib-content { max-width: 900px; margin: 0 auto; padding: 2rem; }
+        \\.lib-content { max-width: 1000px; margin: 0 auto; padding: 2rem; }
         \\h1,h2,h3 { color: #fff; }
         \\a { color: #58a6ff; text-decoration: none; }
         \\.upload-box { background: #1a1a2e; border: 2px dashed #333; border-radius: 8px; padding: 2rem; margin: 1rem 0; text-align: center; }
@@ -77,21 +77,159 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void
         \\.result { margin: 1rem 0; padding: 1rem; border-radius: 6px; font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; overflow-x: auto; }
         \\.result.ok { background: #1a2e1a; border: 1px solid #3fb950; color: #3fb950; }
         \\.result.err { background: #2e1a1a; border: 1px solid #f85149; color: #f85149; }
-        \\.lib-list { list-style: none; padding: 0; }
-        \\.lib-list li { padding: 0.4rem 0.75rem; border-bottom: 1px solid #21262d; font-family: monospace; font-size: 0.9rem; }
         \\table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
-        \\th,td { text-align: left; padding: 0.4rem 0.75rem; border-bottom: 1px solid #21262d; }
+        \\th,td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #21262d; }
         \\th { background: #1a1a2e; color: #888; font-size: 0.85rem; text-transform: uppercase; }
         \\td { font-family: monospace; font-size: 0.9rem; }
+        \\.search-box { width: 100%; padding: 0.75rem 1rem; font-size: 1.1rem; background: #1a1a2e; color: #e0e0e0; border: 1px solid #333; border-radius: 6px; margin-bottom: 1.5rem; box-sizing: border-box; font-family: monospace; }
+        \\.search-box:focus { outline: none; border-color: #58a6ff; }
+        \\.search-box::placeholder { color: #555; }
+        \\.tag { display: inline-block; font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 3px; margin-right: 0.3rem; }
+        \\.tag-component { background: #1a2e1a; color: #3fb950; }
+        \\.tag-family { background: #2e2a1a; color: #d29922; }
+        \\.tag-pinout { background: #1a1a2e; color: #58a6ff; }
+        \\.tag-footprint { background: #2e1a2e; color: #bc8cff; }
+        \\.meta { color: #666; font-size: 0.8rem; }
+        \\.desc { color: #999; font-size: 0.85rem; font-family: system-ui, sans-serif; }
+        \\.count-info { color: #666; font-size: 0.85rem; margin-bottom: 1rem; }
         \\</style></head><body>
     );
     try assets_css.writeNavbar(w, "library");
     try w.writeAll("<div class=\"lib-content\"><h1>Component Library</h1>");
+    try w.writeAll("<input type=\"text\" class=\"search-box\" id=\"lib-search\" placeholder=\"Search components, footprints, pinouts...\" autofocus>");
+    try w.writeAll("<div class=\"count-info\" id=\"count-info\"></div>");
 
-    // Upload section
+    // Main results table
+    try w.writeAll("<table id=\"lib-table\"><thead><tr><th>Name</th><th>Type</th><th>Details</th></tr></thead><tbody>");
+
+    // Track which pinouts/footprints are referenced by components
+    var referenced_pinouts = std.StringHashMap(void).init(ctx.allocator);
+    var referenced_footprints = std.StringHashMap(void).init(ctx.allocator);
+
+    // Load model config once for 3D model checks
+    const model_cfg = export_kicad.loadModelConfig(ctx.allocator, ctx.project_dir);
+
+    // Collect all component entries
+    const comp_dir_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/components", .{ctx.project_dir});
+    defer ctx.allocator.free(comp_dir_path);
+    if (std.fs.cwd().openDir(comp_dir_path, .{ .iterate = true })) |dir_val| {
+        var dir = dir_val;
+        defer dir.close();
+        var iter = dir.iterate();
+        while (try iter.next()) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".sexp")) continue;
+            const base = entry.name[0 .. entry.name.len - 5];
+            const content = dir.readFileAlloc(ctx.allocator, entry.name, 256 * 1024) catch continue;
+
+            // Parse fields from sexp content
+            const description = extractField(content, "description");
+            const footprint = extractField(content, "footprint");
+            const pinout = extractField(content, "pinout");
+            const manufacturer = extractField(content, "manufacturer");
+            const mpn = extractField(content, "mpn");
+            const is_family = std.mem.indexOf(u8, content, "(component-family ") != null;
+
+            if (footprint) |fp| try referenced_footprints.put(fp, {});
+            if (pinout) |po| try referenced_pinouts.put(po, {});
+
+            // Write row with data attributes for search
+            try w.print("<tr data-search=\"{s}", .{base});
+            if (description) |d| try w.print(" {s}", .{d});
+            if (footprint) |fp| try w.print(" {s}", .{fp});
+            if (pinout) |po| try w.print(" {s}", .{po});
+            if (manufacturer) |m| try w.print(" {s}", .{m});
+            if (mpn) |m| try w.print(" {s}", .{m});
+            try w.writeAll("\">");
+
+            // Name column
+            try w.print("<td>{s}</td>", .{base});
+
+            // Type column
+            if (is_family) {
+                try w.writeAll("<td><span class=\"tag tag-family\">family</span></td>");
+            } else {
+                try w.writeAll("<td><span class=\"tag tag-component\">component</span></td>");
+            }
+
+            // Details column
+            try w.writeAll("<td>");
+            if (description) |d| try w.print("<span class=\"desc\">{s}</span><br>", .{d});
+            if (footprint) |fp| {
+                try w.print("<span class=\"meta\">footprint: </span><span class=\"tag tag-footprint\">{s}</span> ", .{fp});
+                const has_model = blk: {
+                    if (model_cfg.get(fp)) |c| {
+                        if (c.model != null) break :blk true;
+                    }
+                    break :blk footprint_mod.findModelFile(ctx.allocator, ctx.project_dir, fp, fp) != null;
+                };
+                if (has_model) {
+                    try w.print("<a href=\"/model-viewer/{s}\" style=\"color:#58a6ff;font-size:0.8rem;\">3D</a> ", .{fp});
+                } else {
+                    try w.print("<a href=\"/model-viewer/{s}\" style=\"color:#444;font-size:0.8rem;\" title=\"Upload 3D model\">+ 3D</a> ", .{fp});
+                }
+            }
+            if (pinout) |po| try w.print("<span class=\"meta\">pinout: </span><span class=\"tag tag-pinout\">{s}</span> ", .{po});
+            if (manufacturer) |m| {
+                try w.print("<span class=\"meta\">mfr: {s}</span> ", .{m});
+            }
+            if (mpn) |m| {
+                try w.print("<span class=\"meta\">mpn: {s}</span>", .{m});
+            }
+            try w.writeAll("</td></tr>");
+        }
+    } else |_| {}
+
+    // Add standalone pinouts (not referenced by any component)
+    {
+        const pinout_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/pinouts", .{ctx.project_dir});
+        defer ctx.allocator.free(pinout_path);
+        if (std.fs.cwd().openDir(pinout_path, .{ .iterate = true })) |dir_val| {
+            var dir = dir_val;
+            defer dir.close();
+            var liter = dir.iterate();
+            while (try liter.next()) |entry| {
+                if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".sexp")) continue;
+                const lname = entry.name[0 .. entry.name.len - 5];
+                if (referenced_pinouts.contains(lname)) continue;
+                const content = dir.readFileAlloc(ctx.allocator, entry.name, 256 * 1024) catch continue;
+                var pin_count: usize = 0;
+                var pos: usize = 0;
+                while (std.mem.indexOfPos(u8, content, pos, "(pin ")) |idx| {
+                    pin_count += 1;
+                    pos = idx + 5;
+                }
+                try w.print("<tr data-search=\"{s} pinout\"><td>{s}</td>", .{ lname, lname });
+                try w.writeAll("<td><span class=\"tag tag-pinout\">pinout</span></td>");
+                try w.print("<td><span class=\"meta\">{d} pins</span></td></tr>", .{pin_count});
+            }
+        } else |_| {}
+    }
+
+    // Add standalone footprints (not referenced by any component)
+    {
+        const fp_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints", .{ctx.project_dir});
+        defer ctx.allocator.free(fp_path);
+        if (std.fs.cwd().openDir(fp_path, .{ .iterate = true })) |dir_val| {
+            var dir = dir_val;
+            defer dir.close();
+            var fiter = dir.iterate();
+            while (try fiter.next()) |entry| {
+                if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".sexp")) continue;
+                const fname = entry.name[0 .. entry.name.len - 5];
+                if (referenced_footprints.contains(fname)) continue;
+                try w.print("<tr data-search=\"{s} footprint\"><td>{s}</td>", .{ fname, fname });
+                try w.writeAll("<td><span class=\"tag tag-footprint\">footprint</span></td>");
+                try w.writeAll("<td></td></tr>");
+            }
+        } else |_| {}
+    }
+
+    try w.writeAll("</tbody></table>");
+
+    // Upload section (collapsed by default)
     try w.writeAll(
-        \\<h2>Create Package</h2>
-        \\<div class="upload-box" id="zip-drop" style="margin-bottom:1rem;">
+        \\<details id="upload-section" style="margin-top:2rem;"><summary style="color:#58a6ff;font-size:0.95rem;cursor:pointer;">Upload New Component</summary>
+        \\<div class="upload-box" id="zip-drop" style="margin:1rem 0;">
         \\<p style="font-size:0.85rem;">Drop a component .zip (auto-extracts KiCad symbol, footprint, and 3D model)</p>
         \\<label class="upload-btn">Choose .zip<input type="file" id="zip-file" accept=".zip"></label>
         \\<div id="zip-name" style="color:#4a9;font-size:0.8rem;margin-top:0.5rem;"></div>
@@ -120,44 +258,33 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void
         \\</div>
         \\<div id="pkg-result"></div>
         \\</details>
+        \\</details>
     );
 
-    // List existing pinouts
-    try w.writeAll("<h2>Pinouts</h2><table><tr><th>Name</th><th>Pins</th></tr>");
-    {
-        const pinout_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/pinouts", .{ctx.project_dir});
-        defer ctx.allocator.free(pinout_path);
-        var dir = std.fs.cwd().openDir(pinout_path, .{ .iterate = true }) catch {
-            try w.writeAll("<tr><td colspan=\"2\">No pinouts yet</td></tr>");
-            try w.writeAll("</table>");
-            try footprint_preview.listFootprints(w, ctx);
-            try w.writeAll("</div></body></html>");
-            res.body = buf.items;
-            res.content_type = .HTML;
-            return;
-        };
-        defer dir.close();
-        var liter = dir.iterate();
-        while (try liter.next()) |entry| {
-            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".sexp")) {
-                const lname = entry.name[0 .. entry.name.len - 5];
-                const content = dir.readFileAlloc(ctx.allocator, entry.name, 256 * 1024) catch continue;
-                var pin_count: usize = 0;
-                var pos: usize = 0;
-                while (std.mem.indexOfPos(u8, content, pos, "(pin ")) |idx| {
-                    pin_count += 1;
-                    pos = idx + 5;
-                }
-                try w.print("<tr><td>{s}</td><td>{d}</td></tr>", .{ lname, pin_count });
-            }
-        }
-    }
-    try w.writeAll("</table>");
-    try footprint_preview.listFootprints(w, ctx);
-
-    // Upload JS
+    // JS: search + upload
     try w.writeAll(
         \\<script>
+        \\(function(){
+        \\  var input=document.getElementById('lib-search');
+        \\  var rows=document.querySelectorAll('#lib-table tbody tr');
+        \\  var info=document.getElementById('count-info');
+        \\  var upload=document.getElementById('upload-section');
+        \\  info.textContent=rows.length+' items';
+        \\  input.addEventListener('input',function(){
+        \\    var q=this.value.toLowerCase().trim();
+        \\    var terms=q.split(/\s+/);
+        \\    var shown=0;
+        \\    for(var i=0;i<rows.length;i++){
+        \\      var s=rows[i].getAttribute('data-search').toLowerCase();
+        \\      var match=true;
+        \\      for(var t=0;t<terms.length;t++){if(terms[t]&&s.indexOf(terms[t])<0){match=false;break;}}
+        \\      rows[i].style.display=match?'':'none';
+        \\      if(match)shown++;
+        \\    }
+        \\    info.textContent=q?(shown+' of '+rows.length+' items'):(rows.length+' items');
+        \\    upload.style.display=q?'none':'';
+        \\  });
+        \\})();
         \\var symData=null,fpData=null,stepData=null,symFilename='',fpFilename='',stepFilename='';
         \\function setupDrop(dropId,fileId,nameId,ext,onFile){
         \\  var drop=document.getElementById(dropId),fi=document.getElementById(fileId),nd=document.getElementById(nameId);
@@ -191,7 +318,6 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void
         \\    .then(function(d){pkgResult.className=d.ok?'result ok':'result err';pkgResult.textContent=d.text;submitBtn.textContent='Create Package';submitBtn.disabled=false;if(d.ok)setTimeout(function(){location.reload();},1000);})
         \\    .catch(function(e){pkgResult.className='result err';pkgResult.textContent='Error: '+e;submitBtn.textContent='Create Package';submitBtn.disabled=false;});
         \\});
-        \\/* Zip upload */
         \\var zipDrop=document.getElementById('zip-drop'),zipFile=document.getElementById('zip-file'),zipName=document.getElementById('zip-name'),zipResult=document.getElementById('zip-result');
         \\zipDrop.addEventListener('dragover',function(e){e.preventDefault();zipDrop.classList.add('dragover');});
         \\zipDrop.addEventListener('dragleave',function(){zipDrop.classList.remove('dragover');});
@@ -213,4 +339,34 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void
     try w.writeAll("</div></body></html>");
     res.body = buf.items;
     res.content_type = .HTML;
+}
+
+/// Extract a field value from sexp content, e.g. (footprint abc) -> "abc" or (description "foo bar") -> "foo bar"
+fn extractField(content: []const u8, field: []const u8) ?[]const u8 {
+    // Search for (field followed by space
+    var pos: usize = 0;
+    while (pos < content.len) {
+        const needle_start = std.mem.indexOfPos(u8, content, pos, "(") orelse return null;
+        const after_paren = needle_start + 1;
+        if (after_paren >= content.len) return null;
+        if (std.mem.startsWith(u8, content[after_paren..], field)) {
+            const after_field = after_paren + field.len;
+            if (after_field < content.len and content[after_field] == ' ') {
+                const val_start = after_field + 1;
+                if (val_start >= content.len) return null;
+                if (content[val_start] == '"') {
+                    // Quoted value
+                    const quote_end = std.mem.indexOfPos(u8, content, val_start + 1, "\"") orelse return null;
+                    return content[val_start + 1 .. quote_end];
+                } else {
+                    // Unquoted value - ends at ) or space
+                    var end = val_start;
+                    while (end < content.len and content[end] != ')' and content[end] != ' ' and content[end] != '\n') : (end += 1) {}
+                    if (end > val_start) return content[val_start..end];
+                }
+            }
+        }
+        pos = needle_start + 1;
+    }
+    return null;
 }

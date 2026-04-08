@@ -29,6 +29,7 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
     var role: []const u8 = "";
     var protocol: []const u8 = "";
     var group_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var is_optional: bool = false;
 
     var si: usize = 1;
     while (si < sf_children.len) : (si += 1) {
@@ -77,6 +78,10 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
                 sig_type = .differential;
                 continue;
             }
+            if (std.mem.eql(u8, atom, "optional")) {
+                is_optional = true;
+                continue;
+            }
             continue;
         }
         if (arg.asString()) |s| {
@@ -98,6 +103,7 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
         .group = group_list.toOwnedSlice(self.allocator) catch &.{},
         .role = role,
         .protocol = protocol,
+        .optional = is_optional,
     };
 }
 
@@ -403,12 +409,22 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
 
     var rated_min: ?f64 = null;
     var rated_max: ?f64 = null;
-    const rated_idx = dir_idx + 1;
-    if (args.len > rated_idx and args[rated_idx].isForm("rated")) {
-        const rated_children = args[rated_idx].asList().?;
-        if (rated_children.len >= 3) {
-            rated_min = rated_children[1].asNumber();
-            rated_max = rated_children[2].asNumber();
+    var nominal: ?f64 = null;
+    var is_optional: bool = false;
+    for (args[dir_idx + 1 ..]) |arg| {
+        if (arg.isForm("rated")) {
+            const rated_children = arg.asList().?;
+            if (rated_children.len >= 3) {
+                rated_min = rated_children[1].asNumber();
+                rated_max = rated_children[2].asNumber();
+            }
+        } else if (arg.isForm("nominal")) {
+            const nom_children = arg.asList().?;
+            if (nom_children.len >= 2) {
+                nominal = nom_children[1].asNumber();
+            }
+        } else if (arg.asAtom()) |kw| {
+            if (std.mem.eql(u8, kw, "optional")) is_optional = true;
         }
     }
 
@@ -418,6 +434,8 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
         .direction = dir,
         .rated_min = rated_min,
         .rated_max = rated_max,
+        .nominal = nominal,
+        .optional = is_optional,
     };
 }
 
@@ -453,11 +471,25 @@ pub fn buildSubBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!
     const name_val = try self.evalNode(args[0], env);
     const name = name_val.asString() orelse return EvalError.TypeError;
 
-    // Second arg is a module call: (module-name arg1 arg2 ...)
-    const call_val = try self.evalNode(args[1], env);
-    const block = switch (call_val) {
-        .design_block => |b| b,
-        else => return EvalError.TypeError,
+    // Second arg can be:
+    //   1. A string literal = file path to a design-block .sexp file
+    //   2. A module call expression = (module-name arg1 arg2 ...)
+    const block = blk: {
+        // Check if arg is a string literal (file path)
+        if (args[1].asString()) |file_path_raw| {
+            const full_path = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.project_dir, file_path_raw }) catch return EvalError.OutOfMemory;
+            const result = self.evalFile(full_path) catch return EvalError.ImportError;
+            switch (result) {
+                .design_block => |b| break :blk b,
+                else => return EvalError.TypeError,
+            }
+        }
+        // Otherwise evaluate as expression (module call)
+        const call_val = try self.evalNode(args[1], env);
+        switch (call_val) {
+            .design_block => |b| break :blk b,
+            else => return EvalError.TypeError,
+        }
     };
 
     return SubBlock{

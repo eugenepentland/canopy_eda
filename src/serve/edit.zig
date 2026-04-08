@@ -2,7 +2,9 @@ const std = @import("std");
 const httpz = @import("httpz");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const render_svg = @import("../render_svg.zig");
+const render_json = @import("../render_json.zig");
 const bom = @import("../bom.zig");
+const env_mod = @import("../eval/env.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 const bom_html = @import("bom_html.zig");
@@ -341,4 +343,496 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     res.header("access-control-allow-origin", "*");
     res.content_type = .JSON;
     res.body = comp_json.items;
+}
+
+pub fn editCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+
+    const footprint = parseJsonString(body, "\"footprint\"") orelse {
+        res.status = 400;
+        res.body = "missing footprint";
+        return;
+    };
+    const x1 = parseJsonFloat(body, "\"x1\"") orelse {
+        res.status = 400;
+        res.body = "missing x1";
+        return;
+    };
+    const y1 = parseJsonFloat(body, "\"y1\"") orelse {
+        res.status = 400;
+        res.body = "missing y1";
+        return;
+    };
+    const x2 = parseJsonFloat(body, "\"x2\"") orelse {
+        res.status = 400;
+        res.body = "missing x2";
+        return;
+    };
+    const y2 = parseJsonFloat(body, "\"y2\"") orelse {
+        res.status = 400;
+        res.body = "missing y2";
+        return;
+    };
+
+    // Find footprint file
+    const fp_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints/{s}.sexp", .{ ctx.project_dir, footprint });
+    defer ctx.allocator.free(fp_path);
+
+    const source = std.fs.cwd().readFileAlloc(ctx.allocator, fp_path, 1024 * 1024) catch {
+        res.status = 404;
+        res.body = "footprint file not found";
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    // Find and replace the courtyard line
+    const cy_start = std.mem.indexOf(u8, source, "(courtyard") orelse {
+        // No courtyard — insert before closing paren
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        const w = out.writer(ctx.allocator);
+        // Find last ')'
+        var last_paren: usize = source.len;
+        while (last_paren > 0) {
+            last_paren -= 1;
+            if (source[last_paren] == ')') break;
+        }
+        try w.writeAll(source[0..last_paren]);
+        try w.print("  (courtyard (rect {d:.2} {d:.2} {d:.2} {d:.2}))\n", .{ x1, y1, x2, y2 });
+        try w.writeAll(source[last_paren..]);
+
+        const file = std.fs.cwd().createFile(fp_path, .{}) catch {
+            res.status = 500;
+            return;
+        };
+        defer file.close();
+        file.writeAll(out.items) catch {
+            res.status = 500;
+            return;
+        };
+        res.content_type = .JSON;
+        res.body = "{\"ok\":true}";
+        return;
+    };
+
+    // Find end of courtyard form
+    var depth: u32 = 0;
+    var cy_end: usize = cy_start;
+    for (source[cy_start..], 0..) |ch, i| {
+        if (ch == '(') depth += 1;
+        if (ch == ')') {
+            depth -= 1;
+            if (depth == 0) {
+                cy_end = cy_start + i + 1;
+                break;
+            }
+        }
+    }
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    const w = out.writer(ctx.allocator);
+    try w.writeAll(source[0..cy_start]);
+    try w.print("(courtyard (rect {d:.2} {d:.2} {d:.2} {d:.2}))", .{ x1, y1, x2, y2 });
+    try w.writeAll(source[cy_end..]);
+
+    const file = std.fs.cwd().createFile(fp_path, .{}) catch {
+        res.status = 500;
+        return;
+    };
+    defer file.close();
+    file.writeAll(out.items) catch {
+        res.status = 500;
+        return;
+    };
+
+    std.debug.print("Edited courtyard for {s}: ({d:.2}, {d:.2}, {d:.2}, {d:.2})\n", .{ footprint, x1, y1, x2, y2 });
+    res.content_type = .JSON;
+    res.body = "{\"ok\":true}";
+}
+
+/// POST /api/add-instance/:name
+/// Body: {"section":"Power","component":"cap-0402","value":"100nF","pins":{"1":"VDD","2":"GND"}}
+pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+
+    const component = parseJsonString(body, "\"component\"") orelse {
+        res.status = 400;
+        res.body = "missing component";
+        return;
+    };
+    const value = parseJsonString(body, "\"value\"") orelse "";
+    const section = parseJsonString(body, "\"section\"") orelse "";
+
+    // Read source file
+    const file_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    defer ctx.allocator.free(file_path);
+
+    const source = std.fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
+        res.status = 500;
+        res.body = "cannot read file";
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    // Parse pin assignments from body: "pins":{"1":"VDD","2":"GND"}
+    var pin_str: std.ArrayListUnmanaged(u8) = .empty;
+    const pw = pin_str.writer(ctx.allocator);
+    if (std.mem.indexOf(u8, body, "\"pins\"")) |pins_start| {
+        // Find the opening brace
+        var pos = pins_start + 6;
+        while (pos < body.len and body[pos] != '{') : (pos += 1) {}
+        if (pos < body.len) {
+            pos += 1; // skip {
+            while (pos < body.len and body[pos] != '}') {
+                // Parse "pin_num":"net_name"
+                while (pos < body.len and body[pos] != '"') : (pos += 1) {}
+                if (pos >= body.len) break;
+                pos += 1;
+                const pin_start = pos;
+                while (pos < body.len and body[pos] != '"') : (pos += 1) {}
+                const pin_num = body[pin_start..pos];
+                pos += 1; // skip closing "
+
+                while (pos < body.len and body[pos] != '"') : (pos += 1) {}
+                if (pos >= body.len) break;
+                pos += 1;
+                const net_start = pos;
+                while (pos < body.len and body[pos] != '"') : (pos += 1) {}
+                const net_name = body[net_start..pos];
+                pos += 1;
+
+                try pw.print("\n    (pin {s} \"{s}\")", .{ pin_num, net_name });
+
+                while (pos < body.len and (body[pos] == ',' or body[pos] == ' ')) : (pos += 1) {}
+            }
+        }
+    }
+
+    // Build the instance form
+    var inst_form: std.ArrayListUnmanaged(u8) = .empty;
+    const iw = inst_form.writer(ctx.allocator);
+    if (value.len > 0) {
+        try iw.print("  (instance ({s} \"{s}\")", .{ component, value });
+    } else {
+        try iw.print("  (instance {s}", .{component});
+    }
+    try iw.writeAll(pin_str.items);
+    try iw.writeAll(")\n");
+
+    // Find insertion point: inside section if specified, otherwise before last closing paren
+    var new_source: std.ArrayListUnmanaged(u8) = .empty;
+    const nw = new_source.writer(ctx.allocator);
+
+    if (section.len > 0) {
+        // Find (section "Name" ...) and insert before its closing paren
+        const sec_needle = try std.fmt.allocPrint(ctx.allocator, "(section \"{s}\"", .{section});
+        defer ctx.allocator.free(sec_needle);
+
+        if (std.mem.indexOf(u8, source, sec_needle)) |sec_start| {
+            // Find matching closing paren
+            var depth: u32 = 0;
+            var sec_end: usize = sec_start;
+            for (source[sec_start..], 0..) |ch, i| {
+                if (ch == '(') depth += 1;
+                if (ch == ')') {
+                    depth -= 1;
+                    if (depth == 0) {
+                        sec_end = sec_start + i;
+                        break;
+                    }
+                }
+            }
+            try nw.writeAll(source[0..sec_end]);
+            try nw.writeAll("\n");
+            try nw.writeAll(inst_form.items);
+            try nw.writeAll(source[sec_end..]);
+        } else {
+            // Section not found, insert at end
+            const last_paren = std.mem.lastIndexOfScalar(u8, source, ')') orelse source.len;
+            try nw.writeAll(source[0..last_paren]);
+            try nw.writeAll("\n");
+            try nw.writeAll(inst_form.items);
+            try nw.writeAll(source[last_paren..]);
+        }
+    } else {
+        const last_paren = std.mem.lastIndexOfScalar(u8, source, ')') orelse source.len;
+        try nw.writeAll(source[0..last_paren]);
+        try nw.writeAll("\n");
+        try nw.writeAll(inst_form.items);
+        try nw.writeAll(source[last_paren..]);
+    }
+
+    // Write file
+    const file = std.fs.cwd().createFile(file_path, .{}) catch {
+        res.status = 500;
+        res.body = "cannot write file";
+        return;
+    };
+    defer file.close();
+    file.writeAll(new_source.items) catch {
+        res.status = 500;
+        return;
+    };
+
+    // Rebuild + push live update
+    rebuildAndPush(ctx, name, res) catch {
+        res.status = 500;
+        res.body = "rebuild failed";
+        return;
+    };
+}
+
+/// POST /api/remove-instance/:name
+/// Body: {"ref":"C3"}
+pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+
+    const ref_des = parseJsonString(body, "\"ref\"") orelse {
+        res.status = 400;
+        res.body = "missing ref";
+        return;
+    };
+
+    // Read source file
+    const file_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    defer ctx.allocator.free(file_path);
+
+    const source = std.fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
+        res.status = 500;
+        res.body = "cannot read file";
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    // Find (instance "REF" ...) and remove the entire form
+    const needle = try std.fmt.allocPrint(ctx.allocator, "(instance \"{s}\"", .{ref_des});
+    defer ctx.allocator.free(needle);
+
+    const inst_pos = std.mem.indexOf(u8, source, needle) orelse {
+        res.status = 404;
+        res.body = "instance not found";
+        return;
+    };
+
+    // Find matching closing paren
+    var depth: u32 = 0;
+    var inst_end: usize = inst_pos;
+    for (source[inst_pos..], 0..) |ch, i| {
+        if (ch == '(') depth += 1;
+        if (ch == ')') {
+            depth -= 1;
+            if (depth == 0) {
+                inst_end = inst_pos + i + 1;
+                break;
+            }
+        }
+    }
+
+    // Also eat trailing newline
+    if (inst_end < source.len and source[inst_end] == '\n') inst_end += 1;
+
+    // Also eat leading whitespace on the same line
+    var inst_start = inst_pos;
+    while (inst_start > 0 and (source[inst_start - 1] == ' ' or source[inst_start - 1] == '\t')) : (inst_start -= 1) {}
+
+    var new_source: std.ArrayListUnmanaged(u8) = .empty;
+    const nw = new_source.writer(ctx.allocator);
+    try nw.writeAll(source[0..inst_start]);
+    try nw.writeAll(source[inst_end..]);
+
+    const file = std.fs.cwd().createFile(file_path, .{}) catch {
+        res.status = 500;
+        res.body = "cannot write file";
+        return;
+    };
+    defer file.close();
+    file.writeAll(new_source.items) catch {
+        res.status = 500;
+        return;
+    };
+
+    std.debug.print("Removed instance {s} from {s}\n", .{ ref_des, name });
+    rebuildAndPush(ctx, name, res) catch {
+        res.status = 500;
+        res.body = "rebuild failed";
+        return;
+    };
+}
+
+/// POST /api/rewire-pin/:name
+/// Body: {"ref":"U1","pin":"5","net":"VDD_NEW"}
+pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+
+    const ref_des = parseJsonString(body, "\"ref\"") orelse {
+        res.status = 400;
+        res.body = "missing ref";
+        return;
+    };
+    const pin = parseJsonString(body, "\"pin\"") orelse {
+        res.status = 400;
+        res.body = "missing pin";
+        return;
+    };
+    const new_net = parseJsonString(body, "\"net\"") orelse {
+        res.status = 400;
+        res.body = "missing net";
+        return;
+    };
+
+    const file_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    defer ctx.allocator.free(file_path);
+
+    const source = std.fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
+        res.status = 500;
+        res.body = "cannot read file";
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    // Find the instance
+    const inst_needle = try std.fmt.allocPrint(ctx.allocator, "(instance \"{s}\"", .{ref_des});
+    defer ctx.allocator.free(inst_needle);
+
+    const inst_pos = std.mem.indexOf(u8, source, inst_needle) orelse {
+        res.status = 404;
+        res.body = "instance not found";
+        return;
+    };
+
+    // Find the pin form within this instance: (pin N "NET")
+    // Search for (pin <pin_num> "...) within the instance
+    const pin_needle = try std.fmt.allocPrint(ctx.allocator, "(pin {s} \"", .{pin});
+    defer ctx.allocator.free(pin_needle);
+
+    const search_start = inst_pos;
+    // Find the end of the instance form
+    var depth: u32 = 0;
+    var inst_end: usize = inst_pos;
+    for (source[inst_pos..], 0..) |ch, i| {
+        if (ch == '(') depth += 1;
+        if (ch == ')') {
+            depth -= 1;
+            if (depth == 0) {
+                inst_end = inst_pos + i + 1;
+                break;
+            }
+        }
+    }
+
+    const inst_region = source[search_start..inst_end];
+    const pin_offset = std.mem.indexOf(u8, inst_region, pin_needle) orelse {
+        res.status = 404;
+        res.body = "pin not found in instance";
+        return;
+    };
+
+    // Find the net string in this pin form
+    const abs_pin = search_start + pin_offset + pin_needle.len;
+    const net_end = std.mem.indexOfPos(u8, source, abs_pin, "\"") orelse {
+        res.status = 400;
+        res.body = "malformed pin form";
+        return;
+    };
+
+    var new_source: std.ArrayListUnmanaged(u8) = .empty;
+    const nw = new_source.writer(ctx.allocator);
+    try nw.writeAll(source[0..abs_pin]);
+    try nw.writeAll(new_net);
+    try nw.writeAll(source[net_end..]);
+
+    const file = std.fs.cwd().createFile(file_path, .{}) catch {
+        res.status = 500;
+        res.body = "cannot write file";
+        return;
+    };
+    defer file.close();
+    file.writeAll(new_source.items) catch {
+        res.status = 500;
+        return;
+    };
+
+    std.debug.print("Rewired {s} pin {s} -> \"{s}\" in {s}\n", .{ ref_des, pin, new_net, name });
+    rebuildAndPush(ctx, name, res) catch {
+        res.status = 500;
+        res.body = "rebuild failed";
+        return;
+    };
+}
+
+/// Rebuild design, render SVG, and push live update.
+fn rebuildAndPush(ctx: *Handler, name: []const u8, res: *httpz.Response) !void {
+    const board_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    defer ctx.allocator.free(board_path);
+
+    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+    const result = eval.evalFile(board_path) catch return error.RebuildFailed;
+    const block = switch (result) {
+        .design_block => |b| b,
+        else => return error.RebuildFailed,
+    };
+
+    const bom_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name });
+    defer ctx.allocator.free(bom_path);
+    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
+
+    const svg = render_svg.renderSchematic(ctx.allocator, block) catch return error.RebuildFailed;
+    const layout_json = render_json.renderSceneGraph(ctx.allocator, block) catch null;
+
+    serve_root.live_mutex.lock();
+    serve_root.live_svg = svg;
+    serve_root.live_layout_json = layout_json;
+    serve_root.live_version += 1;
+    serve_root.live_mutex.unlock();
+
+    res.header("access-control-allow-origin", "*");
+    res.content_type = .JSON;
+    res.body = "{\"ok\":true}";
+}
+
+fn parseJsonFloat(body: []const u8, key: []const u8) ?f64 {
+    const marker = std.mem.indexOf(u8, body, key) orelse return null;
+    var start = marker + key.len;
+    // Skip whitespace
+    while (start < body.len and (body[start] == ' ' or body[start] == ':')) : (start += 1) {}
+    var end = start;
+    while (end < body.len and (body[end] == '-' or body[end] == '.' or (body[end] >= '0' and body[end] <= '9'))) : (end += 1) {}
+    return std.fmt.parseFloat(f64, body[start..end]) catch null;
+}
+
+fn parseJsonString(body: []const u8, key: []const u8) ?[]const u8 {
+    const marker = std.mem.indexOf(u8, body, key) orelse return null;
+    var start = marker + key.len;
+    while (start < body.len and body[start] != '"') : (start += 1) {}
+    start += 1; // skip opening quote
+    const end = std.mem.indexOfPos(u8, body, start, "\"") orelse return null;
+    return body[start..end];
 }

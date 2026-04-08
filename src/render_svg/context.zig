@@ -8,6 +8,19 @@ const isGroundNet = draw.isGroundNet;
 const baseNetName = draw.baseNetName;
 const shortNetName = draw.shortNetName;
 
+/// Check if a ref-des is a standard format (1-2 uppercase letters + digits), e.g. U10, R5, C3.
+fn isStdRefDes(ref: []const u8) bool {
+    if (ref.len < 2) return false;
+    var i: usize = 0;
+    // 1-2 uppercase letters
+    while (i < ref.len and i < 2 and ref[i] >= 'A' and ref[i] <= 'Z') : (i += 1) {}
+    if (i == 0) return false;
+    // At least one digit
+    const digit_start = i;
+    while (i < ref.len and ref[i] >= '0' and ref[i] <= '9') : (i += 1) {}
+    return i == ref.len and i > digit_start;
+}
+
 const Allocator = std.mem.Allocator;
 
 // ── Flat types ────────────────────────────────────────────────────────
@@ -97,9 +110,127 @@ pub const RenderCtx = struct {
 
     // ── Data collection ───────────────────────────────────────────────
 
+    /// Render a sub-block as a single hub instance with port-based pins.
+    /// Instead of flattening all internal components, we create one synthetic
+    /// instance and synthetic nets for its ports.
+    fn collectSubBlockAsHub(self: *RenderCtx, sb: env_mod.SubBlock, sb_prefix: []const u8, parent_renames: []const std.StringHashMap([]const u8)) !void {
+        _ = sb_prefix;
+        // Use the first instance's ref_des as the hub ref, or generate one
+        const hub_ref = if (sb.block.instances.len > 0 and isStdRefDes(sb.block.instances[0].ref_des))
+            sb.block.instances[0].ref_des
+        else
+            sb.name;
+
+        // Create synthetic FlatInst for the sub-block
+        const flat = FlatInst{
+            .ref_des = hub_ref,
+            .component = sb.block.name,
+            .value = "",
+            .symbol = "",
+            .parts = &.{},
+        };
+        try self.instances.append(self.allocator, flat);
+        try self.inst_map.put(self.allocator, hub_ref, flat);
+
+        // Create synthetic nets from the sub-block's ports.
+        // Each port becomes a pin on the hub, connected to the parent net.
+        for (sb.block.ports) |port| {
+            // The port's net is internal (e.g., "VOUT"). In the parent's rename map,
+            // it would be prefixed as "buck/VOUT" → "VDD". Build the prefixed key.
+            const prefixed_net = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ sb.name, port.net });
+            var parent_net = resolveNetName(prefixed_net, parent_renames);
+            // If no rename found, fall back to the raw port net name
+            if (std.mem.eql(u8, parent_net, prefixed_net)) {
+                parent_net = port.net;
+            }
+
+            // Create a net entry: hub_ref.port_name on the parent net
+            var pins: std.ArrayListUnmanaged(PinRef) = .empty;
+            try pins.append(self.allocator, .{
+                .ref_des = hub_ref,
+                .pin = port.name,
+            });
+            try self.nets.append(self.allocator, .{
+                .name = parent_net,
+                .pins = try pins.toOwnedSlice(self.allocator),
+            });
+        }
+    }
+
+    /// Build a net rename map from a block's net_ties, prefixed appropriately.
+    /// A tie (a="VDD", b="buck/VOUT") at prefix="" means: rename net "buck/VOUT" to "VDD".
+    fn buildNetRenameMap(self: *RenderCtx, block: *const DesignBlock, prefix: []const u8) !std.StringHashMap([]const u8) {
+        var net_rename = std.StringHashMap([]const u8).init(self.allocator);
+        for (block.net_ties) |nt| {
+            const full_b = if (prefix.len > 0)
+                try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, nt.b })
+            else
+                nt.b;
+            const full_a = if (prefix.len > 0)
+                try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, nt.a })
+            else
+                nt.a;
+            try net_rename.put(full_b, full_a);
+        }
+        return net_rename;
+    }
+
+    /// Resolve a net name through a chain of rename maps (parent → grandparent → ...).
+    /// For qualified names like "ldo/VIN.U1.IN", also tries resolving the base
+    /// part "ldo/VIN" and preserves the suffix ".U1.IN".
+    fn resolveNetName(net_name: []const u8, rename_maps: []const std.StringHashMap([]const u8)) []const u8 {
+        // Try exact match first
+        var resolved = net_name;
+        for (rename_maps) |m| {
+            if (m.get(resolved)) |renamed| {
+                resolved = renamed;
+            }
+        }
+        if (!std.mem.eql(u8, resolved, net_name)) return resolved;
+
+        // Try resolving the base part (before first '.') with suffix preserved
+        // e.g., "ldo/VIN.U1.IN" → try "ldo/VIN" → "VDD" → "VDD.U1.IN"
+        if (std.mem.indexOfScalar(u8, net_name, '/')) |slash_idx| {
+            const after_slash = net_name[slash_idx + 1 ..];
+            if (std.mem.indexOfScalar(u8, after_slash, '.')) |dot_idx| {
+                const base = net_name[0 .. slash_idx + 1 + dot_idx];
+                const suffix = after_slash[dot_idx..];
+                var base_resolved = base;
+                for (rename_maps) |m| {
+                    if (m.get(base_resolved)) |renamed| {
+                        base_resolved = renamed;
+                    }
+                }
+                if (!std.mem.eql(u8, base_resolved, base)) {
+                    // Concatenate resolved base + suffix
+                    return std.fmt.allocPrint(
+                        std.heap.page_allocator,
+                        "{s}{s}",
+                        .{ base_resolved, suffix },
+                    ) catch net_name;
+                }
+            }
+        }
+        return resolved;
+    }
+
     pub fn collectFlat(self: *RenderCtx, block: *const DesignBlock, prefix: []const u8) !void {
+        try self.collectFlatWithRenames(block, prefix, &.{});
+    }
+
+    fn collectFlatWithRenames(self: *RenderCtx, block: *const DesignBlock, prefix: []const u8, parent_renames: []const std.StringHashMap([]const u8)) !void {
+        // Build rename map for this block's net_ties
+        const my_rename = try self.buildNetRenameMap(block, prefix);
+        // Combine with parent rename maps
+        var all_renames: std.ArrayListUnmanaged(std.StringHashMap([]const u8)) = .empty;
+        try all_renames.append(self.allocator, my_rename);
+        for (parent_renames) |pr| {
+            try all_renames.append(self.allocator, pr);
+        }
+
         for (block.instances) |inst| {
-            const rd = if (prefix.len > 0)
+            // Use global ref-des as-is (no prefix) if it's a standard ref-des (e.g., U10, R5)
+            const rd = if (prefix.len > 0 and !isStdRefDes(inst.ref_des))
                 try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, inst.ref_des })
             else
                 inst.ref_des;
@@ -116,16 +247,18 @@ pub const RenderCtx = struct {
         for (block.nets) |net| {
             var pins: std.ArrayListUnmanaged(PinRef) = .empty;
             for (net.pins) |pin| {
-                const rd = if (prefix.len > 0)
+                const rd = if (prefix.len > 0 and !isStdRefDes(pin.ref_des))
                     try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, pin.ref_des })
                 else
                     pin.ref_des;
                 try pins.append(self.allocator, .{ .ref_des = rd, .pin = pin.pin });
             }
-            const net_name = if (prefix.len > 0)
+            var net_name = if (prefix.len > 0)
                 try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, net.name })
             else
                 net.name;
+            // Apply cross-block net rename through all ancestor rename maps
+            net_name = resolveNetName(net_name, all_renames.items);
             try self.nets.append(self.allocator, .{
                 .name = net_name,
                 .pins = try pins.toOwnedSlice(self.allocator),
@@ -136,7 +269,9 @@ pub const RenderCtx = struct {
                 try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, sb.name })
             else
                 sb.name;
-            try self.collectFlat(sb.block, np);
+
+            // Expand sub-block: flatten internal components into the schematic
+            try self.collectFlatWithRenames(sb.block, np, all_renames.items);
         }
     }
 
@@ -225,24 +360,56 @@ pub const RenderCtx = struct {
 
             for (spoke_pins_buf[0..spoke_count]) |sp| {
                 const spoke_section = self.section_map.get(sp.ref_des);
-                for (hub_pins_buf[0..hub_count]) |hp| {
-                    if (hub_target) |target| {
-                        if (!std.mem.eql(u8, hp.ref_des, target)) continue;
+
+                // When the spoke has a section, prefer hubs in the same section.
+                // Only fall back to hubs without a section if no same-section hub exists.
+                if (spoke_section) |ss| {
+                    var has_same_section_hub = false;
+                    for (hub_pins_buf[0..hub_count]) |hp| {
+                        if (hub_target) |target| {
+                            if (!std.mem.eql(u8, hp.ref_des, target)) continue;
+                        }
+                        const hs = self.section_map.get(hp.ref_des);
+                        if (hs != null and hs.? == ss) {
+                            has_same_section_hub = true;
+                            break;
+                        }
                     }
-                    if (spoke_section) |ss| {
+
+                    for (hub_pins_buf[0..hub_count]) |hp| {
+                        if (hub_target) |target| {
+                            if (!std.mem.eql(u8, hp.ref_des, target)) continue;
+                        }
                         const hub_section = self.section_map.get(hp.ref_des);
                         if (hub_section) |hs| {
                             if (ss != hs) continue;
+                        } else if (has_same_section_hub) {
+                            // Skip hubs without a section when same-section hubs are available
+                            continue;
                         }
+                        try self.adjAppend(hp.ref_des, .{
+                            .pin = hp.pin,
+                            .endpoint = .{ .pin = .{ .ref_des = sp.ref_des, .pin = sp.pin } },
+                        });
+                        try self.adjAppend(sp.ref_des, .{
+                            .pin = sp.pin,
+                            .endpoint = .{ .pin = .{ .ref_des = hp.ref_des, .pin = hp.pin } },
+                        });
                     }
-                    try self.adjAppend(hp.ref_des, .{
-                        .pin = hp.pin,
-                        .endpoint = .{ .pin = .{ .ref_des = sp.ref_des, .pin = sp.pin } },
-                    });
-                    try self.adjAppend(sp.ref_des, .{
-                        .pin = sp.pin,
-                        .endpoint = .{ .pin = .{ .ref_des = hp.ref_des, .pin = hp.pin } },
-                    });
+                } else {
+                    for (hub_pins_buf[0..hub_count]) |hp| {
+                        if (hub_target) |target| {
+                            if (!std.mem.eql(u8, hp.ref_des, target)) continue;
+                        }
+                        try self.adjAppend(hp.ref_des, .{
+                            .pin = hp.pin,
+                            .endpoint = .{ .pin = .{ .ref_des = sp.ref_des, .pin = sp.pin } },
+                        });
+                        try self.adjAppend(sp.ref_des, .{
+                            .pin = sp.pin,
+                            .endpoint = .{ .pin = .{ .ref_des = hp.ref_des, .pin = hp.pin } },
+                        });
+                    }
                 }
             }
         }

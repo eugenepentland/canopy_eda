@@ -3,15 +3,21 @@ pub const CANVAS_VIEWER_JS =
     \\try{
     \\
     \\/* ── Init Pixi ─────────────────────────────────────────────── */
+    \\console.log('[SCHEM] Starting init');
     \\var container=document.getElementById('pixi-container');
+    \\console.log('[SCHEM] Container:', container ? container.clientWidth+'x'+container.clientHeight : 'NULL');
     \\var app=new PIXI.Application();
+    \\console.log('[SCHEM] Calling app.init...');
     \\await app.init({
     \\  background:'#0d1117',
     \\  resizeTo:container,
     \\  antialias:true,
     \\  resolution:Math.max(window.devicePixelRatio||1,2),
-    \\  autoDensity:true
+    \\  autoDensity:true,
+    \\  preference:'webgl',
+    \\  preferWebGLVersion:2
     \\});
+    \\console.log('[SCHEM] app.init done');
     \\container.appendChild(app.canvas);
     \\PIXI.TextStyle.defaultResolution=Math.max(window.devicePixelRatio||1,2);
     \\
@@ -38,9 +44,13 @@ pub const CANVAS_VIEWER_JS =
     \\var liveVersion=0;
     \\var selectedRef=null;
     \\var selectedNet=null;
+    \\var selectedSection=null;
     \\var justSelected=false;
     \\var refContainers={};
+    \\var refRects={};
     \\var netGraphics={};
+    \\var sectionRects={};
+    \\var PIN_NAMES={};
     \\
     \\/* ── Fetch scene graph ────────────────────────────────────── */
     \\async function loadScene(){
@@ -53,7 +63,10 @@ pub const CANVAS_VIEWER_JS =
     \\function buildScene(){
     \\  world.removeChildren();
     \\  refContainers={};
+    \\  refRects={};
     \\  netGraphics={};
+    \\  sectionRects={};
+    \\  PIN_NAMES={};
     \\  if(!sceneData||sceneData.error)return;
     \\
     \\  /* Sections */
@@ -63,6 +76,7 @@ pub const CANVAS_VIEWER_JS =
     \\    g.fill({color:C.secBox});
     \\    g.stroke({color:C.secStroke,width:1.5});
     \\    world.addChild(g);
+    \\    sectionRects[s.name]={x:s.x,y:s.y,w:s.w,h:s.h,gfx:g};
     \\    var cx=s.x+s.w/2;
     \\    var t=new PIXI.Text({text:s.name,style:{fontFamily:'system-ui,sans-serif',fontSize:24,fontWeight:'bold',fill:C.sectionTitle}});
     \\    t.anchor.set(0.5,0);t.x=cx;t.y=s.y+6;
@@ -115,6 +129,12 @@ pub const CANVAS_VIEWER_JS =
     \\    var pg=new PIXI.Graphics();
     \\    drawPassiveSymbol(pg,p);
     \\    pc.addChild(pg);
+    \\    /* Hit area - larger invisible rect for easier clicking */
+    \\    var hitPad=8;
+    \\    var hit=new PIXI.Graphics();
+    \\    hit.rect(p.x-hitPad,p.y-p.h/2-hitPad-12,p.w+hitPad*2,p.h+hitPad*2+12);
+    \\    hit.fill({color:0x000000,alpha:0.001});
+    \\    pc.addChild(hit);
     \\    var pval=(p.value&&p.value.length)?p.value:p.component;
     \\    var plbl=(p.count>1)?(p.count+'x '+pval):(p.ref+' '+pval);
     \\    var pt=new PIXI.Text({text:plbl,style:{fontFamily:'system-ui,sans-serif',fontSize:9,fill:C.passiveText}});
@@ -125,6 +145,7 @@ pub const CANVAS_VIEWER_JS =
     \\    pc.on('pointerdown',function(e){e.stopPropagation();selectComponent(this._ref);});
     \\    world.addChild(pc);
     \\    refContainers[p.ref]=pc;
+    \\    refRects[p.ref]={x:p.x,y:p.y-p.h,w:p.w,h:p.h*2};
     \\  }
     \\
     \\  /* Hubs */
@@ -142,6 +163,7 @@ pub const CANVAS_VIEWER_JS =
     \\    hc.addChild(ht);
     \\    /* Left pins */
     \\    var stubLen=40;
+    \\    function pinLabel(ps){var n=ps.split(',').length;return n>2?n+'x pins':ps;}
     \\    for(var lp of h.leftPins){
     \\      var lg=new PIXI.Graphics();
     \\      lg.moveTo(h.x-stubLen,lp.y);lg.lineTo(h.x,lp.y);
@@ -150,7 +172,7 @@ pub const CANVAS_VIEWER_JS =
     \\      var ln=new PIXI.Text({text:lp.name,style:{fontFamily:'system-ui,sans-serif',fontSize:12,fill:C.pinText}});
     \\      ln.x=h.x+8;ln.y=lp.y-6;
     \\      hc.addChild(ln);
-    \\      var lpn=new PIXI.Text({text:lp.pins,style:{fontFamily:'system-ui,sans-serif',fontSize:10,fill:C.pinNum}});
+    \\      var lpn=new PIXI.Text({text:pinLabel(lp.pins),style:{fontFamily:'system-ui,sans-serif',fontSize:10,fill:C.pinNum}});
     \\      lpn.anchor.set(1,1);lpn.x=h.x-stubLen+38;lpn.y=lp.y-1;
     \\      hc.addChild(lpn);
     \\    }
@@ -163,7 +185,7 @@ pub const CANVAS_VIEWER_JS =
     \\      var rn=new PIXI.Text({text:rp.name,style:{fontFamily:'system-ui,sans-serif',fontSize:12,fill:C.pinText}});
     \\      rn.anchor.set(1,0);rn.x=h.x+h.w-8;rn.y=rp.y-6;
     \\      hc.addChild(rn);
-    \\      var rpn=new PIXI.Text({text:rp.pins,style:{fontFamily:'system-ui,sans-serif',fontSize:10,fill:C.pinNum}});
+    \\      var rpn=new PIXI.Text({text:pinLabel(rp.pins),style:{fontFamily:'system-ui,sans-serif',fontSize:10,fill:C.pinNum}});
     \\      rpn.x=h.x+h.w+stubLen-36;rpn.y=rp.y-1;
     \\      hc.addChild(rpn);
     \\    }
@@ -174,6 +196,7 @@ pub const CANVAS_VIEWER_JS =
     \\    hc.on('pointerdown',function(e){e.stopPropagation();selectComponent(this._ref);});
     \\    world.addChild(hc);
     \\    refContainers[shortRef]=hc;
+    \\    refRects[shortRef]={x:h.x-stubLen,y:h.y,w:h.w+stubLen*2,h:h.h};
     \\  }
     \\
     \\  /* Labels */
@@ -295,17 +318,42 @@ pub const CANVAS_VIEWER_JS =
     \\});
     \\window.addEventListener('mouseup',function(){isPanning=false;});
     \\
-    \\app.canvas.addEventListener('wheel',function(e){
-    \\  e.preventDefault();
-    \\  var rect=app.canvas.getBoundingClientRect();
-    \\  var mx=e.clientX-rect.left,my=e.clientY-rect.top;
-    \\  var factor=e.deltaY<0?1.1:1/1.1;
+    \\function minZoomScale(){
+    \\  if(!sceneData)return 0.05;
+    \\  var vb=sceneData.viewBox;
+    \\  var cw=container.clientWidth,ch=container.clientHeight;
+    \\  return Math.min(cw/(vb.w+80),ch/(vb.h+80))*0.95;
+    \\}
+    \\function clampZoom(rect,mx,my,factor){
     \\  var wx=(mx-world.x)/world.scale.x;
     \\  var wy=(my-world.y)/world.scale.y;
-    \\  var ns=Math.max(0.05,Math.min(20,world.scale.x*factor));
+    \\  var ns=Math.max(minZoomScale(),Math.min(20,world.scale.x*factor));
     \\  world.scale.set(ns);
     \\  world.x=mx-wx*ns;
     \\  world.y=my-wy*ns;
+    \\}
+    \\app.canvas.addEventListener('wheel',function(e){
+    \\  e.preventDefault();
+    \\  if(e.ctrlKey){
+    \\    /* Pinch-to-zoom (trackpad) or Ctrl+scroll (mouse) */
+    \\    var rect=app.canvas.getBoundingClientRect();
+    \\    var mx=e.clientX-rect.left,my=e.clientY-rect.top;
+    \\    var factor=e.deltaY<0?1.04:1/1.04;
+    \\    clampZoom(rect,mx,my,factor);
+    \\  }else{
+    \\    /* Two-finger pan (trackpad) or regular scroll (mouse zooms) */
+    \\    if(e.deltaMode===0&&Math.abs(e.deltaX)+Math.abs(e.deltaY)<100){
+    \\      /* Likely trackpad — pan */
+    \\      world.x-=e.deltaX;
+    \\      world.y-=e.deltaY;
+    \\    }else{
+    \\      /* Likely mouse wheel — zoom */
+    \\      var rect2=app.canvas.getBoundingClientRect();
+    \\      var mx2=e.clientX-rect2.left,my2=e.clientY-rect2.top;
+    \\      var factor2=e.deltaY<0?1.04:1/1.04;
+    \\      clampZoom(rect2,mx2,my2,factor2);
+    \\    }
+    \\  }
     \\},{passive:false});
     \\
     \\function fitView(){
@@ -322,6 +370,76 @@ pub const CANVAS_VIEWER_JS =
     \\app.canvas.addEventListener('click',function(e){
     \\  if(justSelected){justSelected=false;return;}
     \\  if(!didPan){clearSelection();}
+    \\});
+    \\
+    \\/* ── Context Menu ─────────────────────────────────────────── */
+    \\var ctxMenu=document.createElement('div');
+    \\ctxMenu.style.cssText='display:none;position:fixed;background:#1c2128;border:1px solid #30363d;border-radius:6px;padding:4px 0;z-index:200;min-width:160px;box-shadow:0 4px 12px rgba(0,0,0,0.4)';
+    \\document.body.appendChild(ctxMenu);
+    \\function ctxItem(label,fn){
+    \\  var d=document.createElement('div');
+    \\  d.textContent=label;
+    \\  d.style.cssText='padding:6px 12px;color:#c9d1d9;font-size:12px;cursor:pointer';
+    \\  d.onmouseenter=function(){d.style.background='#30363d';};
+    \\  d.onmouseleave=function(){d.style.background='none';};
+    \\  d.onclick=function(){ctxMenu.style.display='none';fn();};
+    \\  return d;
+    \\}
+    \\function ctxSep(){
+    \\  var d=document.createElement('div');
+    \\  d.style.cssText='height:1px;background:#30363d;margin:4px 0';
+    \\  return d;
+    \\}
+    \\document.addEventListener('click',function(){ctxMenu.style.display='none';});
+    \\app.canvas.addEventListener('contextmenu',function(e){
+    \\  e.preventDefault();
+    \\  ctxMenu.innerHTML='';
+    \\  var mx=e.clientX,my=e.clientY;
+    \\  if(selectedRef){
+    \\    var comp=COMPONENTS[selectedRef];
+    \\    ctxMenu.appendChild(ctxItem('Edit Value...', function(){
+    \\      var cur=comp?comp.value:'';
+    \\      var nv=prompt('New value for '+selectedRef+':',cur);
+    \\      if(nv!==null&&nv!==cur){
+    \\        fetch('/api/edit-value/'+DESIGN_NAME,{method:'POST',body:JSON.stringify({ref:selectedRef,value:nv})})
+    \\          .then(function(r){return r.json();})
+    \\          .then(function(){location.reload();});
+    \\      }
+    \\    }));
+    \\    if(comp){
+    \\      ctxMenu.appendChild(ctxItem('Change Footprint...', function(){
+    \\        var cur=comp.component||'';
+    \\        var nf=prompt('New component family for '+selectedRef+':',cur);
+    \\        if(nf&&nf!==cur){
+    \\          fetch('/api/edit-footprint/'+DESIGN_NAME,{method:'POST',body:JSON.stringify({component:nf,oldComponent:cur,srcOff:comp.srcOff||0})})
+    \\            .then(function(r){return r.json();})
+    \\            .then(function(d){if(d.ok)location.reload();else alert('Error: component not found');});
+    \\        }
+    \\      }));
+    \\    }
+    \\    ctxMenu.appendChild(ctxSep());
+    \\    ctxMenu.appendChild(ctxItem('Remove Instance', function(){
+    \\      if(confirm('Remove '+selectedRef+'?')){
+    \\        fetch('/api/remove-instance/'+DESIGN_NAME,{method:'POST',body:JSON.stringify({ref:selectedRef})})
+    \\          .then(function(r){return r.json();})
+    \\          .then(function(){location.reload();});
+    \\      }
+    \\    }));
+    \\  }else if(selectedNet){
+    \\    ctxMenu.appendChild(ctxItem('Show Net: '+selectedNet,function(){highlightNet(selectedNet);}));
+    \\  }else{
+    \\    ctxMenu.appendChild(ctxItem('Add Instance...', function(){
+    \\      var comp=prompt('Component family (e.g. cap-0402):');
+    \\      if(!comp)return;
+    \\      var val=prompt('Value (e.g. 100nF):','');
+    \\      var sec=prompt('Section (leave empty for top-level):','');
+    \\      fetch('/api/add-instance/'+DESIGN_NAME,{method:'POST',body:JSON.stringify({component:comp,value:val||'',section:sec||'',pins:{}})})
+    \\        .then(function(r){return r.json();})
+    \\        .then(function(d){if(d.ok)location.reload();else alert('Error adding instance');});
+    \\    }));
+    \\    ctxMenu.appendChild(ctxItem('Run ERC',function(){runErc();}));
+    \\  }
+    \\  ctxMenu.style.left=mx+'px';ctxMenu.style.top=my+'px';ctxMenu.style.display='block';
     \\});
     \\
     \\/* ── Selection / Highlight ────────────────────────────────── */
@@ -350,22 +468,85 @@ pub const CANVAS_VIEWER_JS =
     \\    var items=netGraphics[selectedNet];
     \\    for(var i=0;i<items.length;i++)items[i].tint=0xFFFFFF;
     \\  }
-    \\  selectedRef=null;selectedNet=null;
+    \\  if(selectedSection&&sectionRects[selectedSection]){
+    \\    var sr=sectionRects[selectedSection];
+    \\    sr.gfx.clear();sr.gfx.roundRect(sr.x,sr.y,sr.w,sr.h,8);
+    \\    sr.gfx.fill({color:C.secBox});sr.gfx.stroke({color:C.secStroke,width:1.5});
+    \\  }
+    \\  selectedRef=null;selectedNet=null;selectedSection=null;
     \\  closeSidebar();
     \\}
     \\
     \\/* ── Sidebar ──────────────────────────────────────────────── */
-    \\var sidebar=document.getElementById('sidebar');
     \\var sidebarContent=document.getElementById('sidebar-content');
-    \\var sidebarClose=document.getElementById('sidebar-close');
-    \\sidebarClose.onclick=function(){closeSidebar();};
     \\
     \\function openSidebar(html){
     \\  sidebarContent.innerHTML=html;
-    \\  sidebar.classList.add('open');
     \\}
-    \\function closeSidebar(){sidebar.classList.remove('open');}
+    \\function closeSidebar(){showSectionList();}
     \\
+    \\function showSectionList(){
+    \\  var html='<h3 style="color:#fff;margin:0 0 12px;font-size:14px">Sections</h3>';
+    \\  if(!sceneData||!sceneData.sections||!sceneData.sections.length){
+    \\    html+='<div class="sidebar-empty">No sections</div>';
+    \\    sidebarContent.innerHTML=html;return;
+    \\  }
+    \\  for(var si=0;si<sceneData.sections.length;si++){
+    \\    var sec=sceneData.sections[si];
+    \\    html+='<div class="sec-item" onclick="showSectionDetail(\''+sec.name.replace(/'/g,"\\'")+'\')">';
+    \\    html+='<div class="sec-item-name">'+sec.name+'</div>';
+    \\    if(sec.description)html+='<div class="sec-item-desc">'+sec.description+'</div>';
+    \\    html+='</div>';
+    \\  }
+    \\  sidebarContent.innerHTML=html;
+    \\}
+    \\
+    \\function showSectionDetail(name){
+    \\  var sr=sectionRects[name];
+    \\  if(sr)zoomToRect(sr.x,sr.y,sr.w,sr.h);
+    \\  /* Find components in this section */
+    \\  var comps=[];
+    \\  for(var ref5 in refRects){
+    \\    var rr=refRects[ref5];
+    \\    var cx=rr.x+rr.w/2,cy=rr.y+rr.h/2;
+    \\    if(sr&&cx>=sr.x&&cx<=sr.x+sr.w&&cy>=sr.y&&cy<=sr.y+sr.h)comps.push(ref5);
+    \\  }
+    \\  var html='<div style="margin-bottom:8px"><a href="#" onclick="showSectionList();event.preventDefault();" style="color:#58a6ff;font-size:12px">&larr; All Sections</a></div>';
+    \\  html+='<h3 style="color:#3fb950;margin:0 0 4px;font-size:14px">'+name+'</h3>';
+    \\  var sec2=null;
+    \\  for(var si2=0;si2<sceneData.sections.length;si2++){if(sceneData.sections[si2].name===name){sec2=sceneData.sections[si2];break;}}
+    \\  if(sec2&&sec2.description)html+='<div style="color:#8b949e;font-size:12px;margin-bottom:12px;font-style:italic">'+sec2.description+'</div>';
+    \\  if(comps.length){
+    \\    html+='<div style="font-size:12px;color:#666;margin-bottom:6px">'+comps.length+' components</div>';
+    \\    html+='<table style="width:100%;font-size:12px;border-collapse:collapse">';
+    \\    html+='<tr style="border-bottom:1px solid #30363d"><th style="text-align:left;padding:4px;color:#666">Ref</th><th style="text-align:left;padding:4px;color:#666">Value</th></tr>';
+    \\    for(var ci=0;ci<comps.length;ci++){
+    \\      var cref=comps[ci],cdata=COMPONENTS[cref];
+    \\      var cval=cdata?((cdata.value&&cdata.value.length)?cdata.value:cdata.component):'';
+    \\      html+='<tr style="border-bottom:1px solid #21262d;cursor:pointer" onclick="selectComponent(\''+cref+'\')">';
+    \\      html+='<td style="padding:4px;color:#4a9eff">'+cref+'</td><td style="padding:4px">'+cval+'</td></tr>';
+    \\    }
+    \\    html+='</table>';
+    \\  }else{
+    \\    html+='<div style="color:#666;font-size:12px">No components</div>';
+    \\  }
+    \\  if(sec2&&sec2.notes&&sec2.notes.length){
+    \\    html+='<div style="margin-top:12px;padding-top:8px;border-top:1px solid #21262d">';
+    \\    for(var ni=0;ni<sec2.notes.length;ni++){
+    \\      html+='<div style="color:#6e7681;font-size:11px;font-style:italic;margin-bottom:4px">'+sec2.notes[ni]+'</div>';
+    \\    }
+    \\    html+='</div>';
+    \\  }
+    \\  openSidebar(html);
+    \\}
+    \\window.showSectionList=showSectionList;
+    \\window.showSectionDetail=showSectionDetail;
+    \\
+    \\function pinNetLookup(ref,pinNum){
+    \\  var key=ref+'.'+pinNum;
+    \\  for(var net in NETS){var pp=NETS[net];for(var i=0;i<pp.length;i++){if(pp[i]===key)return net;}}
+    \\  return '';
+    \\}
     \\function showComponentSidebar(ref){
     \\  var comp=COMPONENTS[ref];
     \\  if(!comp){openSidebar('<h3>'+ref+'</h3><p>No data</p>');return;}
@@ -373,14 +554,85 @@ pub const CANVAS_VIEWER_JS =
     \\  html+='<div style="font-size:13px;color:#8b949e;margin-bottom:12px">'+comp.component+'</div>';
     \\  if(comp.value)html+='<div style="margin-bottom:8px"><b>Value:</b> '+comp.value+'</div>';
     \\  if(comp.footprint)html+='<div style="margin-bottom:8px"><b>Footprint:</b> '+comp.footprint+'</div>';
-    \\  if(comp.pins&&comp.pins.length){
-    \\    html+='<div style="margin-top:12px"><b>Pins:</b></div><table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:4px">';
-    \\    html+='<tr style="border-bottom:1px solid #30363d"><th style="text-align:left;padding:4px">Pin</th><th style="text-align:left;padding:4px">Name</th><th style="text-align:left;padding:4px">Net</th></tr>';
-    \\    for(var i=0;i<comp.pins.length;i++){
-    \\      var p=comp.pins[i];
-    \\      html+='<tr style="border-bottom:1px solid #21262d"><td style="padding:4px;color:#666">'+p.pin+'</td><td style="padding:4px">'+p.name+'</td><td style="padding:4px;color:#e8c547;cursor:pointer" onclick="highlightNet(\''+p.net+'\')">'+p.net+'</td></tr>';
+    \\  if(comp.properties){
+    \\    var ds=comp.properties['datasheet']||comp.properties['Datasheet'];
+    \\    if(ds){
+    \\      var dsLabel=ds.length>40?ds.substring(0,37)+'...':ds;
+    \\      html+='<div style="margin-bottom:8px"><b>Datasheet:</b> <a href="'+ds+'" target="_blank" style="color:#58a6ff;text-decoration:underline">'+dsLabel+'</a></div>';
     \\    }
-    \\    html+='</table>';
+    \\    for(var pk in comp.properties){
+    \\      if(pk==='datasheet'||pk==='Datasheet')continue;
+    \\      html+='<div style="margin-bottom:4px;font-size:12px;color:#8b949e"><b>'+pk+':</b> '+comp.properties[pk]+'</div>';
+    \\    }
+    \\  }
+    \\  /* Use pins if available (active parts), else symbolPins (passives), else build from NETS */
+    \\  var pinList=comp.pins&&comp.pins.length?comp.pins:null;
+    \\  var useSym=!pinList&&comp.symbolPins&&comp.symbolPins.length;
+    \\  if(useSym)pinList=comp.symbolPins;
+    \\  if(!pinList||!pinList.length){
+    \\    /* Build pin list from NETS reverse lookup */
+    \\    var netPins=[];
+    \\    var prefix=ref+'.';
+    \\    for(var net in NETS){var pp=NETS[net];for(var ni=0;ni<pp.length;ni++){
+    \\      if(pp[ni].indexOf(prefix)===0){netPins.push({num:pp[ni].substring(prefix.length),pinName:'',net:net});}
+    \\    }}
+    \\    if(netPins.length)pinList=netPins;
+    \\  }
+    \\  if(pinList&&pinList.length){
+    \\    /* Group pins by section(part), then by net within each section */
+    \\    var sections={},secOrder=[];
+    \\    for(var i=0;i<pinList.length;i++){
+    \\      var p=pinList[i];
+    \\      var pNum=p.num||'';
+    \\      var pName=p.pinName||p.name||'';
+    \\      var pNet=p.net||pinNetLookup(ref,pNum);
+    \\      var pPart=p.part||'';
+    \\      var entry={num:pNum,name:pName,net:pNet};
+    \\      if(!sections[pPart]){sections[pPart]={nets:{},netOrder:[],ungrouped:[]};secOrder.push(pPart);}
+    \\      var sec=sections[pPart];
+    \\      if(pNet){
+    \\        if(!sec.nets[pNet]){sec.nets[pNet]=[];sec.netOrder.push(pNet);}
+    \\        sec.nets[pNet].push(entry);
+    \\      }else{sec.ungrouped.push(entry);}
+    \\    }
+    \\    var hasSections=secOrder.length>1||(secOrder.length===1&&secOrder[0]!=='');
+    \\    html+='<div style="margin-top:12px"><b>Pins:</b> <span style="color:#666;font-size:11px">'+pinList.length+' total</span></div>';
+    \\    var gid=0;
+    \\    for(var si=0;si<secOrder.length;si++){
+    \\      var secName=secOrder[si];
+    \\      var sec=sections[secName];
+    \\      if(hasSections&&secName){
+    \\        html+='<div style="margin-top:10px;padding:4px 0;border-bottom:1px solid #30363d;color:#3fb950;font-size:12px;font-weight:600">'+secName+'</div>';
+    \\      }
+    \\      html+='<table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:2px">';
+    \\      for(var gi=0;gi<sec.netOrder.length;gi++){
+    \\        var gNet=sec.netOrder[gi];
+    \\        var grp=sec.nets[gNet];
+    \\        var eNet=gNet.replace(/'/g,"\\'");
+    \\        if(grp.length>1){
+    \\          var gidStr='pg'+gid++;
+    \\          html+='<tr style="border-bottom:1px solid #21262d;cursor:pointer" onclick="var el=document.getElementById(\''+gidStr+'\');var ar=document.getElementById(\''+gidStr+'a\');if(el.style.display===\'none\'){el.style.display=\'\';ar.textContent=\'\u25BC\';}else{el.style.display=\'none\';ar.textContent=\'\u25B6\';}">';
+    \\          html+='<td style="padding:4px;color:#666"><span id="'+gidStr+'a" style="font-size:10px;margin-right:2px">\u25B6</span>'+grp.length+' pins</td>';
+    \\          html+='<td style="padding:4px;color:#888">'+grp[0].name+'</td>';
+    \\          html+='<td style="padding:4px;color:#e8c547;cursor:pointer" onclick="event.stopPropagation();highlightNet(\''+eNet+'\')">'+gNet+'</td></tr>';
+    \\          html+='<tbody id="'+gidStr+'" style="display:none">';
+    \\          for(var pi=0;pi<grp.length;pi++){
+    \\            html+='<tr style="border-bottom:1px solid #1a1a2e"><td style="padding:2px 4px 2px 20px;color:#555;font-size:11px">'+grp[pi].num+'</td>';
+    \\            html+='<td style="padding:2px 4px;color:#777;font-size:11px">'+grp[pi].name+'</td>';
+    \\            html+='<td style="padding:2px 4px;font-size:11px"></td></tr>';
+    \\          }
+    \\          html+='</tbody>';
+    \\        }else{
+    \\          html+='<tr style="border-bottom:1px solid #21262d"><td style="padding:4px;color:#666">'+grp[0].num+'</td><td style="padding:4px">'+grp[0].name+'</td>';
+    \\          html+='<td style="padding:4px;color:#e8c547;cursor:pointer" onclick="highlightNet(\''+eNet+'\')">'+gNet+'</td></tr>';
+    \\        }
+    \\      }
+    \\      for(var ui=0;ui<sec.ungrouped.length;ui++){
+    \\        html+='<tr style="border-bottom:1px solid #21262d"><td style="padding:4px;color:#666">'+sec.ungrouped[ui].num+'</td><td style="padding:4px">'+sec.ungrouped[ui].name+'</td>';
+    \\        html+='<td style="padding:4px;color:#444">-</td></tr>';
+    \\      }
+    \\      html+='</table>';
+    \\    }
     \\  }
     \\  openSidebar(html);
     \\}
@@ -407,54 +659,116 @@ pub const CANVAS_VIEWER_JS =
     \\window.highlightNet=highlightNet;
     \\window.selectComponent=selectComponent;
     \\
+    \\/* ── Build pin name search index ─────────────────────────── */
+    \\function buildPinIndex(){
+    \\  PIN_NAMES={};
+    \\  for(var ref4 in COMPONENTS){var info=COMPONENTS[ref4];if(info.pins)info.pins.forEach(function(p){
+    \\    if(p.pinName){var pn=p.pinName;if(!PIN_NAMES[pn])PIN_NAMES[pn]=[];PIN_NAMES[pn].push({ref:ref4,pin:p.num});}
+    \\  });}
+    \\}
+    \\buildPinIndex();
+    \\
+    \\/* ── Zoom to world-space rect ─────────────────────────────── */
+    \\function zoomToRect(rx,ry,rw,rh){
+    \\  var pad=80;
+    \\  var cw=container.clientWidth,ch=container.clientHeight;
+    \\  var cx2=rx+rw/2,cy2=ry+rh/2;
+    \\  var nw=rw+pad*2,nh=rh+pad*2;
+    \\  var canvasR=cw/ch,bbR=nw/nh;
+    \\  if(bbR>canvasR){nh=nw/canvasR;}else{nw=nh*canvasR;}
+    \\  var ns=cw/nw;
+    \\  ns=Math.max(0.05,Math.min(20,ns));
+    \\  world.scale.set(ns);
+    \\  world.x=cw/2-cx2*ns;
+    \\  world.y=ch/2-cy2*ns;
+    \\}
+    \\
+    \\/* ── Find containing section for a world-space rect ─────── */
+    \\function findSectionFor(rx,ry,rw,rh){
+    \\  var cx=rx+rw/2,cy=ry+rh/2;
+    \\  for(var sn in sectionRects){
+    \\    var sr=sectionRects[sn];
+    \\    if(cx>=sr.x&&cx<=sr.x+sr.w&&cy>=sr.y&&cy<=sr.y+sr.h)return sn;
+    \\  }
+    \\  return null;
+    \\}
+    \\
     \\/* ── Search ───────────────────────────────────────────────── */
     \\var searchInput=document.getElementById('search-input');
     \\var searchResults=document.getElementById('search-results');
     \\var searchIdx=-1;
+    \\var searchItems=[];
     \\
     \\searchInput.addEventListener('input',function(){
     \\  var q=this.value.toLowerCase().trim();
-    \\  searchResults.innerHTML='';searchIdx=-1;
-    \\  if(!q){searchResults.style.display='none';return;}
+    \\  searchResults.innerHTML='';searchIdx=-1;searchItems=[];
+    \\  if(!q){searchResults.classList.remove('open');return;}
     \\  var results=[];
+    \\  /* Sections */
+    \\  for(var sn in sectionRects){if(sn.toLowerCase().indexOf(q)>=0)results.push({name:sn,type:'section'});}
+    \\  /* Components */
     \\  for(var ref3 in COMPONENTS){
     \\    var c2=COMPONENTS[ref3];
-    \\    if(ref3.toLowerCase().indexOf(q)>=0||
-    \\       (c2.value&&c2.value.toLowerCase().indexOf(q)>=0)||
-    \\       c2.component.toLowerCase().indexOf(q)>=0){
-    \\      results.push({type:'component',label:ref3+' '+((c2.value&&c2.value.length)?c2.value:c2.component),ref:ref3});
-    \\    }
+    \\    if(ref3.toLowerCase().indexOf(q)>=0)results.push({name:ref3,type:'comp',ref:ref3});
+    \\    else if(c2.value&&c2.value.toLowerCase().indexOf(q)>=0)results.push({name:ref3+' ('+c2.value+')',type:'comp',ref:ref3});
+    \\    else if(c2.component.toLowerCase().indexOf(q)>=0)results.push({name:ref3+' ('+c2.component+')',type:'comp',ref:ref3});
     \\  }
+    \\  /* Pins */
+    \\  for(var pname in PIN_NAMES){if(pname.toLowerCase().indexOf(q)>=0){var pp=PIN_NAMES[pname];results.push({name:pp[0].ref+'.'+pp[0].pin+' ('+pname+')',type:'pin',ref:pp[0].ref,pin:pp[0].pin});}}
+    \\  /* Nets */
     \\  for(var net2 in NETS){
     \\    if(net2.toLowerCase().indexOf(q)>=0){
-    \\      results.push({type:'net',label:net2+' ('+NETS[net2].length+' pins)',net:net2});
+    \\      results.push({name:net2+' ('+NETS[net2].length+' pins)',type:'net',net:net2});
     \\    }
     \\  }
-    \\  if(!results.length){searchResults.style.display='none';return;}
-    \\  searchResults.style.display='block';
-    \\  for(var ri=0;ri<Math.min(results.length,15);ri++){
-    \\    var div=document.createElement('div');
-    \\    div.textContent=results[ri].label;
-    \\    div._data=results[ri];
-    \\    div.onclick=function(){
-    \\      var d2=this._data;
-    \\      if(d2.type==='component')selectComponent(d2.ref);
-    \\      else highlightNet(d2.net);
-    \\      searchResults.style.display='none';searchInput.value='';
-    \\    };
-    \\    searchResults.appendChild(div);
+    \\  results=results.slice(0,20);
+    \\  if(!results.length){searchResults.classList.remove('open');return;}
+    \\  searchResults.classList.add('open');
+    \\  results.forEach(function(r){
+    \\    var div=document.createElement('div');div.className='search-result';
+    \\    div.innerHTML='<span>'+r.name+'</span><span class="search-result-type '+r.type+'">'+r.type+'</span>';
+    \\    div._data=r;
+    \\    div.addEventListener('click',function(){selectSearchResult(this._data);});
+    \\    searchResults.appendChild(div);searchItems.push(div);
+    \\  });
+    \\});
+    \\function selectSearchResult(r){
+    \\  searchResults.classList.remove('open');searchInput.value='';
+    \\  if(r.type==='section'){
+    \\    clearSelection();
+    \\    justSelected=true;
+    \\    selectedSection=r.name;
+    \\    var sr=sectionRects[r.name];
+    \\    if(sr){
+    \\      sr.gfx.clear();sr.gfx.roundRect(sr.x,sr.y,sr.w,sr.h,8);
+    \\      sr.gfx.fill({color:C.secBox});sr.gfx.stroke({color:C.highlight,width:2.5});
+    \\      zoomToRect(sr.x,sr.y,sr.w,sr.h);
+    \\    }
+    \\  }else if(r.type==='comp'||r.type==='pin'){
+    \\    var cref=r.ref||r.name;
+    \\    selectComponent(cref);
+    \\    var rr=refRects[cref];
+    \\    if(rr){var sec=findSectionFor(rr.x,rr.y,rr.w,rr.h);
+    \\      if(sec&&sectionRects[sec])zoomToRect(sectionRects[sec].x,sectionRects[sec].y,sectionRects[sec].w,sectionRects[sec].h);
+    \\      else zoomToRect(rr.x,rr.y,rr.w,rr.h);}
+    \\  }else if(r.type==='net'){
+    \\    highlightNet(r.net);
+    \\    /* Zoom to section of first pin in net */
+    \\    var np=NETS[r.net];
+    \\    if(np&&np.length>0){var nr=refRects[np[0].ref];
+    \\      if(nr){var nsec=findSectionFor(nr.x,nr.y,nr.w,nr.h);
+    \\        if(nsec&&sectionRects[nsec])zoomToRect(sectionRects[nsec].x,sectionRects[nsec].y,sectionRects[nsec].w,sectionRects[nsec].h);}}
     \\  }
-    \\});
-    \\searchInput.addEventListener('keydown',function(e){
-    \\  var items2=searchResults.querySelectorAll('div');
-    \\  if(e.key==='ArrowDown'){e.preventDefault();searchIdx=Math.min(searchIdx+1,items2.length-1);updateSearchActive(items2);}
-    \\  else if(e.key==='ArrowUp'){e.preventDefault();searchIdx=Math.max(searchIdx-1,0);updateSearchActive(items2);}
-    \\  else if(e.key==='Enter'&&searchIdx>=0&&items2[searchIdx]){items2[searchIdx].click();}
-    \\  else if(e.key==='Escape'){searchResults.style.display='none';searchInput.blur();}
-    \\});
-    \\function updateSearchActive(items3){
-    \\  for(var i2=0;i2<items3.length;i2++)items3[i2].classList.toggle('active',i2===searchIdx);
     \\}
+    \\searchInput.addEventListener('keydown',function(e){
+    \\  if(e.key==='ArrowDown'){e.preventDefault();searchIdx=Math.min(searchIdx+1,searchItems.length-1);updateSearchSel();}
+    \\  else if(e.key==='ArrowUp'){e.preventDefault();searchIdx=Math.max(searchIdx-1,0);updateSearchSel();}
+    \\  else if(e.key==='Enter'&&searchItems.length>0){e.preventDefault();selectSearchResult(searchItems[Math.max(searchIdx,0)]._data);}
+    \\  else if(e.key==='Escape'){searchResults.classList.remove('open');searchInput.blur();}
+    \\});
+    \\function updateSearchSel(){searchItems.forEach(function(el,i){el.classList.toggle('selected',i===searchIdx);});}
+    \\searchInput.addEventListener('blur',function(){setTimeout(function(){searchResults.classList.remove('open');},200);});
+    \\document.addEventListener('keydown',function(e){if((e.ctrlKey||e.metaKey)&&e.key==='f'){e.preventDefault();searchInput.focus();searchInput.select();}});
     \\
     \\/* ── Rebuild ──────────────────────────────────────────────── */
     \\document.getElementById('rebuild-btn').onclick=async function(){
@@ -464,7 +778,7 @@ pub const CANVAS_VIEWER_JS =
     \\    var r2=await fetch('/api/scene-graph/'+DESIGN_NAME);
     \\    sceneData=await r2.json();
     \\    var sx=world.x,sy=world.y,ss=world.scale.x;
-    \\    buildScene();
+    \\    buildScene();buildPinIndex();
     \\    world.x=sx;world.y=sy;world.scale.set(ss);
     \\  }catch(err){console.error(err);}
     \\  this.textContent='Rebuild';this.disabled=false;
@@ -483,7 +797,7 @@ pub const CANVAS_VIEWER_JS =
     \\      var r4=await fetch('/api/scene-graph/'+DESIGN_NAME);
     \\      sceneData=await r4.json();
     \\      var sx2=world.x,sy2=world.y,ss2=world.scale.x;
-    \\      buildScene();
+    \\      buildScene();buildPinIndex();
     \\      world.x=sx2;world.y=sy2;world.scale.set(ss2);
     \\    }
     \\  }catch(e2){}
@@ -495,8 +809,274 @@ pub const CANVAS_VIEWER_JS =
     \\  if(e.key==='Escape'){clearSelection();}
     \\});
     \\
+    \\/* ── Block Diagram Toggle ─────────────────────────────────── */
+    \\var blockDiagramMode=false;
+    \\var blockDiagramData=null;
+    \\var bdBtn=document.getElementById('block-diagram-btn');
+    \\
+    \\var catColors={mcu:'#1f6feb',power:'#da3633',memory:'#8957e5',peripheral:'#2ea043',connector:'#d29922',clock:'#44aa99',comms:'#2196f3',sensor:'#2ea043',analog:'#e040fb',protection:'#8b949e'};
+    \\var catLabels={mcu:'MCU / Hub',power:'Power',memory:'Memory',peripheral:'Peripheral',connector:'Connector',clock:'Clock',comms:'Communications',sensor:'Sensor',analog:'Analog',protection:'Protection'};
+    \\var sigColors={power:'#e06060',clock:'#44aa99',data:'#4a9eff',differential:'#4a9eff',signal:'#8b949e'};
+    \\var sigLabels={power:'Power',clock:'Clock',data:'Data / Protocol',signal:'Signal'};
+    \\var bidiProtocols=['SPI','I2C','UART','USB','USB2.0-HS','USB2.0-FS','OctoSPI','QuadSPI','QSPI','SWD','JTAG','SDIO','SDMMC','CAN'];
+    \\/* Legend overlay */
+    \\var legend=document.createElement('div');
+    \\legend.style.cssText='display:none;position:absolute;bottom:12px;left:12px;background:rgba(22,27,34,0.92);border:1px solid #30363d;border-radius:8px;padding:10px 14px;font:11px system-ui,sans-serif;color:#8b949e;pointer-events:none;z-index:10;';
+    \\var lhtml='<div style="font-weight:600;color:#e0e0e0;margin-bottom:6px;font-size:12px">Blocks</div>';
+    \\for(var ck in catColors){
+    \\  if(ck==='sensor')continue;/* same color as peripheral */
+    \\  lhtml+='<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+catColors[ck]+'"></span>'+catLabels[ck]+'</div>';
+    \\}
+    \\lhtml+='<div style="font-weight:600;color:#e0e0e0;margin:8px 0 6px;font-size:12px">Lines</div>';
+    \\var sigDone={};
+    \\for(var sk in sigColors){
+    \\  if(sigDone[sigColors[sk]])continue;sigDone[sigColors[sk]]=1;
+    \\  lhtml+='<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px"><span style="display:inline-block;width:16px;height:2px;background:'+sigColors[sk]+'"></span>'+sigLabels[sk]+'</div>';
+    \\}
+    \\legend.innerHTML=lhtml;
+    \\container.appendChild(legend);
+    \\
+    \\function buildBlockDiagram(){
+    \\  world.removeChildren();
+    \\  if(!blockDiagramData)return;
+    \\  var bd=blockDiagramData;
+    \\  /* Draw edges first (behind blocks) */
+    \\  /* Count edges per peripheral block for vertical distribution */
+    \\  var edgeCounts={},edgeIdx={};
+    \\  /* Find hub (mcu) block index */
+    \\  var hubIdx=0;
+    \\  for(var hi=0;hi<bd.blocks.length;hi++){if(bd.blocks[hi].category==='mcu'){hubIdx=hi;break;}}
+    \\  for(var ei=0;ei<bd.edges.length;ei++){
+    \\    var edge=bd.edges[ei];
+    \\    var pi=edge.from===hubIdx?edge.to:edge.from;
+    \\    if(!edgeCounts[pi])edgeCounts[pi]=0;
+    \\    edgeIdx[ei]=edgeCounts[pi];
+    \\    edgeCounts[pi]++;
+    \\  }
+    \\  var edgeSpacing=20;
+    \\  for(var ei=0;ei<bd.edges.length;ei++){
+    \\    var edge=bd.edges[ei];
+    \\    var fb=bd.blocks[edge.from],tb=bd.blocks[edge.to];
+    \\    var x1,y1,x2,y2;
+    \\    /* Determine which block is left vs right */
+    \\    var leftB,rightB,isFromLeft;
+    \\    if(fb.x+fb.w/2<tb.x+tb.w/2){leftB=fb;rightB=tb;isFromLeft=true;}
+    \\    else{leftB=tb;rightB=fb;isFromLeft=false;}
+    \\    /* Distribute edges vertically across the peripheral block */
+    \\    var pi=edge.from===hubIdx?edge.to:edge.from;
+    \\    var periph=bd.blocks[pi];
+    \\    var nEdges=edgeCounts[pi]||1;
+    \\    var totalSpan=(nEdges-1)*edgeSpacing;
+    \\    var lineY=periph.y+periph.h/2-totalSpan/2+edgeIdx[ei]*edgeSpacing;
+    \\    /* Clamp hub attachment within hub bounds */
+    \\    var hub=bd.blocks[hubIdx];
+    \\    var mcuY=Math.max(hub.y+20,Math.min(hub.y+hub.h-20,lineY));
+    \\    /* Connect: left block right edge -> right block left edge */
+    \\    if(edge.from===hubIdx){
+    \\      x1=hub.x+hub.w;y1=mcuY;x2=periph.x;y2=lineY;
+    \\    }else if(periph.x+periph.w<hub.x){
+    \\      x1=periph.x+periph.w;y1=lineY;x2=hub.x;y2=mcuY;
+    \\    }else{
+    \\      x1=fb.x+fb.w;y1=fb.y+fb.h/2;x2=tb.x;y2=tb.y+tb.h/2;
+    \\    }
+    \\    /* If blocks are in the same column, connect vertically instead */
+    \\    if(Math.abs(leftB.x-rightB.x)<10){
+    \\      if(fb.y<tb.y){x1=fb.x+fb.w/2;y1=fb.y+fb.h;x2=tb.x+tb.w/2;y2=tb.y;}
+    \\      else{x1=fb.x+fb.w/2;y1=fb.y;x2=tb.x+tb.w/2;y2=tb.y+tb.h;}
+    \\    }
+    \\    var col=sigColors[edge.signal]||'#8b949e';
+    \\    var colInt=parseInt(col.replace('#',''),16);
+    \\    var sw=edge.signal==='power'?2.5:1.5;
+    \\    var eg=new PIXI.Graphics();
+    \\    if(Math.abs(y1-y2)<1){
+    \\      eg.moveTo(x1,y1);eg.lineTo(x2,y2);
+    \\    }else{
+    \\      var midX=(x1+x2)/2;
+    \\      eg.moveTo(x1,y1);eg.lineTo(midX,y1);eg.lineTo(midX,y2);eg.lineTo(x2,y2);
+    \\    }
+    \\    eg.stroke({color:colInt,width:sw,alpha:0.6});
+    \\    /* Arrow head at destination */
+    \\    var ax=x2,ay=y2,as=6;
+    \\    var ag=new PIXI.Graphics();
+    \\    if(x2>x1){ag.moveTo(ax,ay);ag.lineTo(ax-as,ay-as/2);ag.lineTo(ax-as,ay+as/2);ag.fill({color:colInt,alpha:0.7});}
+    \\    else if(x2<x1){ag.moveTo(ax,ay);ag.lineTo(ax+as,ay-as/2);ag.lineTo(ax+as,ay+as/2);ag.fill({color:colInt,alpha:0.7});}
+    \\    else if(y2>y1){ag.moveTo(ax,ay);ag.lineTo(ax-as/2,ay-as);ag.lineTo(ax+as/2,ay-as);ag.fill({color:colInt,alpha:0.7});}
+    \\    world.addChild(eg);world.addChild(ag);
+    \\    /* Reverse arrow for bidirectional protocols */
+    \\    if(bidiProtocols.indexOf(edge.label)>=0){
+    \\      var ag2=new PIXI.Graphics();
+    \\      if(x2>x1){ag2.moveTo(x1,y1);ag2.lineTo(x1+as,y1-as/2);ag2.lineTo(x1+as,y1+as/2);ag2.fill({color:colInt,alpha:0.7});}
+    \\      else if(x2<x1){ag2.moveTo(x1,y1);ag2.lineTo(x1-as,y1-as/2);ag2.lineTo(x1-as,y1+as/2);ag2.fill({color:colInt,alpha:0.7});}
+    \\      world.addChild(ag2);
+    \\    }
+    \\    /* Edge label — position near the source end */
+    \\    var lbl=edge.label;
+    \\    if(edge.voltage)lbl+=' '+edge.voltage+'V';
+    \\    var lt=new PIXI.Text({text:lbl,style:{fontFamily:'system-ui,sans-serif',fontSize:10,fill:colInt}});
+    \\    lt.anchor.set(0.5,1);lt.x=x1+(x2-x1)*0.3;lt.y=y1-5;
+    \\    world.addChild(lt);
+    \\  }
+    \\  /* Draw blocks */
+    \\  for(var bi=0;bi<bd.blocks.length;bi++){
+    \\    var b=bd.blocks[bi];
+    \\    var cc=catColors[b.category]||'#2ea043';
+    \\    var fillCol=parseInt(cc.replace('#',''),16);
+    \\    /* Container for click handling */
+    \\    var bc=new PIXI.Container();
+    \\    bc.eventMode='static';bc.cursor='pointer';
+    \\    bc.hitArea=new PIXI.Rectangle(b.x,b.y,b.w,b.h);
+    \\    (function(title){bc.on('pointertap',function(){
+    \\      blockDiagramMode=false;
+    \\      bdBtn.textContent='Block Diagram';bdBtn.style.borderColor='';
+    \\      legend.style.display='none';
+    \\      buildScene();buildPinIndex();
+    \\      showSectionDetail(title);
+    \\    });})(b.title);
+    \\    var bg=new PIXI.Graphics();
+    \\    bg.roundRect(b.x,b.y,b.w,b.h,8);
+    \\    bg.fill({color:fillCol,alpha:0.15});
+    \\    bg.stroke({color:fillCol,width:2});
+    \\    bc.addChild(bg);
+    \\    /* Title */
+    \\    var tt=new PIXI.Text({text:b.title,style:{fontFamily:'system-ui,sans-serif',fontSize:13,fontWeight:'bold',fill:0xe0e0e0}});
+    \\    tt.anchor.set(0.5,0);tt.x=b.x+b.w/2;tt.y=b.y+8;
+    \\    bc.addChild(tt);
+    \\    /* Subtitle */
+    \\    if(b.subtitle){
+    \\      var st=new PIXI.Text({text:b.subtitle,style:{fontFamily:'system-ui,sans-serif',fontSize:11,fill:0x8b949e}});
+    \\      st.anchor.set(0.5,0);st.x=b.x+b.w/2;st.y=b.y+26;
+    \\      bc.addChild(st);
+    \\    }
+    \\    /* Detail */
+    \\    if(b.detail){
+    \\      var dt=new PIXI.Text({text:b.detail,style:{fontFamily:'system-ui,sans-serif',fontSize:10,fontStyle:'italic',fill:0x666666}});
+    \\      dt.anchor.set(0.5,0);dt.x=b.x+b.w/2;dt.y=b.y+(b.subtitle?42:26);
+    \\      bc.addChild(dt);
+    \\    }
+    \\    world.addChild(bc);
+    \\  }
+    \\  /* Fit */
+    \\  if(bd.blocks.length){
+    \\    var minX=9999,minY=9999,maxX=0,maxY=0;
+    \\    for(var i=0;i<bd.blocks.length;i++){
+    \\      var bb=bd.blocks[i];
+    \\      if(bb.x<minX)minX=bb.x;if(bb.y<minY)minY=bb.y;
+    \\      if(bb.x+bb.w>maxX)maxX=bb.x+bb.w;if(bb.y+bb.h>maxY)maxY=bb.y+bb.h;
+    \\    }
+    \\    var pad=40,cw=container.clientWidth,ch=container.clientHeight;
+    \\    var bw=maxX-minX+pad*2,bh=maxY-minY+pad*2;
+    \\    var sc=Math.min(cw/bw,ch/bh)*0.9;
+    \\    world.scale.set(sc);
+    \\    world.x=(cw-bw*sc)/2-(minX-pad)*sc;
+    \\    world.y=(ch-bh*sc)/2-(minY-pad)*sc;
+    \\  }
+    \\}
+    \\
+    \\bdBtn.onclick=async function(){
+    \\  blockDiagramMode=!blockDiagramMode;
+    \\  if(blockDiagramMode){
+    \\    bdBtn.textContent='Schematic';
+    \\    bdBtn.style.borderColor='#58a6ff';
+    \\    try{
+    \\      var r5=await fetch('/api/block-diagram-json/'+DESIGN_NAME);
+    \\      blockDiagramData=await r5.json();
+    \\    }catch(e3){console.error(e3);}
+    \\    buildBlockDiagram();
+    \\    sidebarContent.innerHTML='<div class="sidebar-empty">Block diagram view</div>';
+    \\    legend.style.display='block';
+    \\  }else{
+    \\    bdBtn.textContent='Block Diagram';
+    \\    bdBtn.style.borderColor='';
+    \\    legend.style.display='none';
+    \\    buildScene();buildPinIndex();
+    \\    fitView();
+    \\    showSectionList();
+    \\  }
+    \\};
+    \\
+    \\/* ── ERC Panel ─────────────────────────────────────────────── */
+    \\var ercBtn=document.getElementById('erc-btn');
+    \\var ercViolations=[];
+    \\function updateErcButton(){
+    \\  var nErr=0,nWarn=0;
+    \\  for(var i=0;i<ercViolations.length;i++){
+    \\    if(ercViolations[i].severity==='error')nErr++;else nWarn++;
+    \\  }
+    \\  // Also count ASSERTIONS
+    \\  if(typeof ASSERTIONS!=='undefined'){
+    \\    for(var ai=0;ai<ASSERTIONS.length;ai++){
+    \\      if(!ASSERTIONS[ai].passed){if(ASSERTIONS[ai].isWarning)nWarn++;else nErr++;}
+    \\    }
+    \\  }
+    \\  if(nErr>0){ercBtn.style.borderColor='#da3633';ercBtn.textContent='ERC ('+nErr+')';}
+    \\  else if(nWarn>0){ercBtn.style.borderColor='#d29922';ercBtn.textContent='ERC ('+nWarn+')';}
+    \\  else{ercBtn.style.borderColor='#2ea043';ercBtn.textContent='ERC \u2713';}
+    \\}
+    \\async function runErc(){
+    \\  ercBtn.textContent='ERC ...';ercBtn.style.borderColor='#888';
+    \\  try{
+    \\    var r=await fetch('/api/erc/'+DESIGN_NAME);
+    \\    ercViolations=await r.json();
+    \\  }catch(e){ercViolations=[];console.error('ERC fetch error',e);}
+    \\  updateErcButton();
+    \\  showErcPanel();
+    \\}
+    \\function showErcPanel(){
+    \\  var html='<h3 style="color:#e0e0e0;margin:0 0 12px;font-size:14px">Electrical Rule Checks</h3>';
+    \\  // Server-side ERC violations
+    \\  var errs=ercViolations.filter(function(v){return v.severity==='error';});
+    \\  var warns=ercViolations.filter(function(v){return v.severity==='warning';});
+    \\  // Also include ASSERTIONS
+    \\  if(typeof ASSERTIONS!=='undefined'){
+    \\    var aFails=ASSERTIONS.filter(function(a){return !a.passed&&!a.isWarning;});
+    \\    var aWarns=ASSERTIONS.filter(function(a){return !a.passed&&a.isWarning;});
+    \\    for(var i=0;i<aFails.length;i++)errs.push({message:aFails[i].message,kind:'assertion'});
+    \\    for(var j=0;j<aWarns.length;j++)warns.push({message:aWarns[j].message,kind:'assertion'});
+    \\  }
+    \\  if(errs.length===0&&warns.length===0){
+    \\    html+='<div style="color:#2ea043;font-size:13px;padding:8px 0">\u2713 No issues found</div>';
+    \\  }
+    \\  if(errs.length){
+    \\    html+='<div style="margin-bottom:8px;font-weight:600;color:#da3633">Errors ('+errs.length+')</div>';
+    \\    for(var ei=0;ei<errs.length;ei++){
+    \\      var ev=errs[ei];
+    \\      var clickAttr=ev.ref?' onclick="window._ercNav(\''+ev.ref+'\')" style="cursor:pointer;color:#f85149;font-size:12px;margin-bottom:4px;padding:4px 6px;background:#1a0000;border-radius:4px;border-left:3px solid #da3633"':' style="color:#f85149;font-size:12px;margin-bottom:4px;padding:4px 6px;background:#1a0000;border-radius:4px"';
+    \\      html+='<div'+clickAttr+'>'+ev.message;
+    \\      if(ev.ref)html+=' <span style="color:#666;font-size:10px">['+ev.ref+']</span>';
+    \\      html+='</div>';
+    \\    }
+    \\  }
+    \\  if(warns.length){
+    \\    html+='<div style="margin:8px 0;font-weight:600;color:#d29922">Warnings ('+warns.length+')</div>';
+    \\    for(var wi=0;wi<warns.length;wi++){
+    \\      var wv=warns[wi];
+    \\      var wClickAttr=wv.ref?' onclick="window._ercNav(\''+wv.ref+'\')" style="cursor:pointer;color:#d29922;font-size:12px;margin-bottom:4px;padding:4px 6px;background:#1a1500;border-radius:4px;border-left:3px solid #d29922"':wv.net?' onclick="window._ercNavNet(\''+wv.net+'\')" style="cursor:pointer;color:#d29922;font-size:12px;margin-bottom:4px;padding:4px 6px;background:#1a1500;border-radius:4px;border-left:3px solid #d29922"':' style="color:#d29922;font-size:12px;margin-bottom:4px;padding:4px 6px;background:#1a1500;border-radius:4px"';
+    \\      html+='<div'+wClickAttr+'>'+wv.message;
+    \\      if(wv.ref)html+=' <span style="color:#666;font-size:10px">['+wv.ref+']</span>';
+    \\      if(wv.net&&!wv.ref)html+=' <span style="color:#666;font-size:10px">['+wv.net+']</span>';
+    \\      html+='</div>';
+    \\    }
+    \\  }
+    \\  // Passed assertions
+    \\  if(typeof ASSERTIONS!=='undefined'){
+    \\    var passes=ASSERTIONS.filter(function(a){return a.passed;});
+    \\    if(passes.length){
+    \\      html+='<div style="margin:8px 0;font-weight:600;color:#2ea043">Passed ('+passes.length+')</div>';
+    \\      for(var pi2=0;pi2<passes.length;pi2++)html+='<div style="color:#3fb950;font-size:12px;margin-bottom:4px;padding:4px 6px;background:#001a00;border-radius:4px">'+passes[pi2].message+'</div>';
+    \\    }
+    \\  }
+    \\  html+='<button style="margin-top:12px;padding:6px 16px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;cursor:pointer;font-size:12px" onclick="window._runErc()">Re-run ERC</button>';
+    \\  openSidebar(html);
+    \\}
+    \\window._ercNav=function(ref){selectComponent(ref);};
+    \\window._ercNavNet=function(net){highlightNet(net);};
+    \\window._runErc=function(){runErc();};
+    \\ercBtn.onclick=function(){runErc();};
+    \\updateErcButton();
+    \\
     \\/* ── Start ────────────────────────────────────────────────── */
     \\await loadScene();
+    \\showSectionList();
     \\
     \\}catch(err){console.error('Canvas viewer error:',err);}
     \\})();

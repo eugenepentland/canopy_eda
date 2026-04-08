@@ -143,22 +143,23 @@ fn renderBranchTerminalsRight(self: *RenderCtx, w: anytype, bodies: []const Bran
 
 /// Draw a terminal label or symbol (GND/NC/net label).
 pub fn drawTerminal(self: *RenderCtx, w: anytype, end_x: f64, cy: f64, term: []const u8, anchor: []const u8) !void {
-    if (isGroundNet(term)) {
+    const display = draw.baseNetName(term);
+    if (isGroundNet(display)) {
         try w.print(
             \\<g class="net" data-net="{s}" style="cursor:pointer">
             \\
-        , .{term});
+        , .{display});
         try drawGndSymbol(w, end_x, cy);
         try w.writeAll("</g>\n");
     } else {
-        const color: []const u8 = if (self.port_nets.contains(term)) "#4a9eff" else "#e8c547";
+        const color: []const u8 = if (self.port_nets.contains(term) or self.port_nets.contains(display)) "#4a9eff" else "#e8c547";
         const label_x: f64 = if (std.mem.eql(u8, anchor, "end")) end_x - net_label_gap else end_x + net_label_gap;
         try w.print(
             \\<g class="net" data-net="{s}" style="cursor:pointer">
             \\<text x="{d:.1}" y="{d:.1}" text-anchor="{s}" font-size="11" font-weight="bold" fill="{s}">{s}</text>
             \\</g>
             \\
-        , .{ term, label_x, cy + 4.0, anchor, color, term });
+        , .{ display, label_x, cy + 4.0, anchor, color, display });
     }
     try writeDebugPin(w, end_x, cy);
 }

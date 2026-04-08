@@ -86,6 +86,10 @@ pub fn main() !void {
         try commands.cmdBlockDiagram(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "export-kicad")) {
         try commands.cmdExportKicad(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "export-pcb")) {
+        try commands.cmdExportPcb(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "export-gerber")) {
+        try commands.cmdExportGerber(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "serve")) {
         var project_dir: []const u8 = ".";
         var port: u16 = 7050;
@@ -214,6 +218,7 @@ fn printUsage() !void {
         \\  eda build [--project-dir <d>]       Evaluate and emit resolved design
         \\  eda serve [--project-dir <d>] [--port <n>]  Start web server (default port 7040)
         \\  eda export-kicad --project-dir <d> --output-dir <out> <name>  Export KiCad netlist + footprints
+        \\  eda export-pcb --project-dir <d> [--output <file>] <name>   Export .kicad_pcb (native PCB)
         \\  eda convert-footprint <file>        Convert KiCad .kicad_mod to .sexp
         \\  eda convert-symbol <file> [--filter <name>]  Convert KiCad .kicad_sym to .sexp
         \\  eda convert-pinout <file> [--filter <name>]  Generate pinout from KiCad .kicad_sym
@@ -236,6 +241,7 @@ test {
     _ = @import("convert/footprint.zig");
     _ = @import("convert/symbol.zig");
     _ = @import("export_kicad.zig");
+    _ = @import("export_kicad_pcb.zig");
     _ = @import("serve.zig");
     _ = @import("render_svg.zig");
 }

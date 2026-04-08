@@ -52,26 +52,27 @@ pub fn canvasPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
     try w.writeAll("</style></head><body>");
     try assets_css.writeNavbar(w, "designs");
 
-    try w.writeAll("<div class=\"page\" id=\"page\">");
-    try w.print("<h1>{s} <a href=\"/schematics/{s}\" style=\"font-size:14px;color:#58a6ff;margin-left:12px\">SVG View</a></h1>", .{ block.name, name });
-
-    // Canvas container
-    try w.writeAll("<div class=\"schematic\"><div class=\"schematic-canvas\" id=\"schematic-canvas\">");
-    try w.writeAll("<div class=\"canvas-controls\">");
+    // Toolbar below navbar
+    try w.writeAll("<div class=\"toolbar\">");
+    try w.print("<span class=\"toolbar-title\">{s}</span>", .{block.name});
+    try w.writeAll("<button class=\"canvas-btn\" id=\"block-diagram-btn\">Block Diagram</button>");
+    try w.writeAll("<button class=\"canvas-btn\" id=\"erc-btn\">ERC</button>");
     try w.writeAll("<div class=\"search-container\">");
     try w.writeAll("<input type=\"text\" id=\"search-input\" class=\"search-input\" placeholder=\"Search...\" autocomplete=\"off\">");
     try w.writeAll("<div class=\"search-results\" id=\"search-results\"></div>");
     try w.writeAll("</div>");
     try w.writeAll("<button class=\"canvas-btn\" id=\"canvas-reset\">Reset</button>");
     try w.writeAll("<button class=\"canvas-btn\" id=\"rebuild-btn\">Rebuild</button>");
+    try w.print("<a class=\"canvas-btn\" href=\"/pcb/{s}\">PCB</a>", .{name});
+    try w.print("<button class=\"canvas-btn\" onclick=\"window.location='/api/export-bom/{s}'\">Export BOM</button>", .{name});
     try w.writeAll("</div>");
-    try w.writeAll("<div id=\"pixi-container\" style=\"width:100%;height:70vh;background:#0d1117\"></div>");
-    try w.writeAll("</div></div>");
 
-    // Sidebar
+    // Main area: canvas + sidebar
+    try w.writeAll("<div class=\"main-area\">");
+    try w.writeAll("<div id=\"pixi-container\" class=\"canvas-fill\"></div>");
     try w.writeAll("<div class=\"sidebar\" id=\"sidebar\">");
-    try w.writeAll("<button class=\"sidebar-close\" id=\"sidebar-close\">&times;</button>");
-    try w.writeAll("<div id=\"sidebar-content\"></div>");
+    try w.writeAll("<div id=\"sidebar-content\"><div class=\"sidebar-empty\">Click a component or net to inspect</div></div>");
+    try w.writeAll("</div>");
     try w.writeAll("</div>");
 
     // Inject data globals
@@ -80,9 +81,29 @@ pub fn canvasPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
     try w.writeAll("};var NETS={");
     _ = try bom_html.writeNetsJson(w, block, "");
     try w.writeAll("};var SECTIONS=[");
-    for (block.sections, 0..) |sec, si| {
-        if (si > 0) try w.writeAll(",");
+    var sec_written = false;
+    for (block.sections) |sec| {
+        if (sec_written) try w.writeAll(",");
         try w.print("\"{s}\"", .{sec.name});
+        sec_written = true;
+    }
+    for (block.sub_blocks) |sb| {
+        if (sec_written) try w.writeAll(",");
+        try w.writeAll("\"");
+        try bom_html.writeJsonEscaped(w, sb.block.name);
+        try w.writeAll("\"");
+        sec_written = true;
+    }
+    try w.writeAll("];var ASSERTIONS=[");
+    for (eval.assertions.items, 0..) |a, ai| {
+        if (ai > 0) try w.writeAll(",");
+        try w.writeAll("{\"passed\":");
+        try w.writeAll(if (a.passed) "true" else "false");
+        try w.writeAll(",\"message\":\"");
+        try bom_html.writeJsonEscaped(w, a.message);
+        try w.writeAll("\",\"isWarning\":");
+        try w.writeAll(if (a.is_warning) "true" else "false");
+        try w.writeAll("}");
     }
     try w.writeAll("];var FAMILIES={");
     try library.writeFamiliesJson(w, ctx.allocator, ctx.project_dir);
@@ -96,28 +117,43 @@ pub fn canvasPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
     try w.writeAll(CANVAS_VIEWER_JS);
     try w.writeAll("</script>");
 
-    try w.writeAll("</div></body></html>");
+    try w.writeAll("</body></html>");
     res.body = buf.items;
     res.content_type = .HTML;
+    res.header("connection", "close");
 }
 
 const CANVAS_CSS =
-    \\body{margin:0;background:#0d1117;color:#e0e0e0;font-family:system-ui,sans-serif}
-    \\.page{max-width:1800px;margin:0 auto;padding:1rem 2rem}
-    \\.page h1{font-size:20px;color:#e0e0e0;margin-bottom:12px}
-    \\.schematic{position:relative}
-    \\.schematic-canvas{position:relative;border:1px solid #21262d;border-radius:8px;overflow:hidden}
-    \\.canvas-controls{display:flex;gap:8px;padding:8px 12px;background:#161b22;border-bottom:1px solid #21262d;align-items:center;flex-wrap:wrap}
-    \\.canvas-btn{padding:4px 12px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;border-radius:4px;cursor:pointer;font-size:12px}
+    \\html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#0d1117;color:#e0e0e0;font-family:system-ui,sans-serif}
+    \\.toolbar{display:flex;gap:8px;padding:6px 12px;background:#161b22;border-bottom:1px solid #21262d;align-items:center}
+    \\.toolbar-title{font-size:15px;font-weight:600;color:#e0e0e0;margin-right:8px}
+    \\.canvas-btn{padding:4px 12px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;border-radius:4px;cursor:pointer;font-size:12px;text-decoration:none}
     \\.canvas-btn:hover{background:#30363d;border-color:#58a6ff}
-    \\.search-container{position:relative}
-    \\.search-input{padding:4px 8px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;border-radius:4px;font-size:12px;width:180px}
-    \\.search-results{position:absolute;top:100%;left:0;background:#161b22;border:1px solid #30363d;border-radius:4px;max-height:200px;overflow-y:auto;display:none;z-index:100;min-width:250px}
-    \\.search-results div{padding:6px 10px;cursor:pointer;font-size:12px;color:#c9d1d9}
-    \\.search-results div:hover,.search-results div.active{background:#30363d}
-    \\.sidebar{position:fixed;right:0;top:0;width:320px;height:100%;background:#161b22;border-left:1px solid #30363d;transform:translateX(100%);transition:transform .2s;z-index:200;padding:16px;overflow-y:auto}
-    \\.sidebar.open{transform:translateX(0)}
-    \\.sidebar-close{position:absolute;top:8px;right:8px;background:none;border:none;color:#8b949e;font-size:20px;cursor:pointer}
+    \\.search-container{position:relative;margin-left:auto}
+    \\.search-input{padding:4px 8px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;border-radius:4px;font-size:12px;width:220px}
+    \\.search-input:focus{border-color:#4a9eff}
+    \\.search-input::placeholder{color:#555}
+    \\.search-results{position:absolute;top:100%;left:0;background:#161b22;border:1px solid #30363d;border-radius:0 0 4px 4px;max-height:300px;overflow-y:auto;display:none;z-index:100;min-width:260px}
+    \\.search-results.open{display:block}
+    \\.search-result{padding:6px 10px;cursor:pointer;font-size:12px;font-family:monospace;color:#c9d1d9;border-bottom:1px solid #21262d;display:flex;justify-content:space-between}
+    \\.search-result:hover,.search-result.selected{background:#30363d}
+    \\.search-result-type{font-size:11px;color:#888;text-transform:uppercase}
+    \\.search-result-type.net{color:#e8c547}
+    \\.search-result-type.comp{color:#4a9eff}
+    \\.search-result-type.section{color:#3fb950}
+    \\.search-result-type.pin{color:#c084fc}
+    \\.main-area{display:flex;height:calc(100vh - 42px - 37px);overflow:hidden}
+    \\.canvas-fill{flex:1;min-width:0;background:#0d1117}
+    \\.sidebar{width:320px;min-width:320px;height:100%;background:#161b22;border-left:1px solid #30363d;padding:16px;overflow-y:auto;overflow-x:hidden;box-sizing:border-box}
+    \\.sidebar::-webkit-scrollbar{width:6px}
+    \\.sidebar::-webkit-scrollbar-track{background:#0d1117}
+    \\.sidebar::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
+    \\.sidebar::-webkit-scrollbar-thumb:hover{background:#484f58}
+    \\.sidebar-empty{color:#555;font-size:13px;font-style:italic;padding-top:8px}
+    \\.sec-item{padding:8px 10px;border-bottom:1px solid #21262d;cursor:pointer;border-radius:4px;margin-bottom:2px}
+    \\.sec-item:hover{background:#1a2e1a}
+    \\.sec-item-name{font-size:13px;color:#3fb950;font-weight:500}
+    \\.sec-item-desc{font-size:11px;color:#6e7681;margin-top:2px;font-style:italic}
     \\#pixi-container canvas{display:block}
 ;
 

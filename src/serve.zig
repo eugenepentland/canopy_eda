@@ -11,6 +11,7 @@ const upload_package = @import("serve/upload_package.zig");
 const footprint_preview = @import("serve/footprint_preview.zig");
 const model = @import("serve/model.zig");
 const canvas_page = @import("serve/canvas_page.zig");
+const pcb_page = @import("serve/pcb_page.zig");
 
 // ── Global live state ──────────────────────────────────────────────────
 
@@ -55,8 +56,8 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     // Pages
     router.get("/", pages.indexPage, .{});
     router.get("/style.css", pages.cssPage, .{});
-    router.get("/schematics/:name", pages.designPage, .{});
-    router.get("/canvas/:name", canvas_page.canvasPage, .{});
+    router.get("/schematics/:name", canvas_page.canvasPage, .{});
+    router.get("/pcb/:name", pcb_page.pcbPage, .{});
 
     // API
     router.post("/api/push/:name", api.pushApi, .{});
@@ -66,13 +67,26 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     router.post("/schematics/:name/layout", api.layoutPostApi, .{});
     router.get("/api/export-kicad/:name", api.exportKicadApi, .{});
     router.get("/api/export-netlist/:name", api.exportNetlistApi, .{});
+    router.get("/api/export-bom/:name", api.exportBomCsvApi, .{});
+    router.get("/api/export-gerber/:name", api.exportGerberApi, .{});
     router.post("/api/update-pcb/:name", api.updatePcbApi, .{});
+    router.post("/api/pcb-placement/:name", api.pcbPlacementApi, .{});
+    router.post("/api/pcb-routing/:name", api.pcbRoutingApi, .{});
+    router.post("/api/pcb-rules/:name", api.pcbRulesApi, .{});
+    router.post("/api/zone-fill/:name", api.zoneFillApi, .{});
+    router.get("/api/drc/:name", api.drcApi, .{});
+    router.get("/api/erc/:name", api.ercApi, .{});
     router.get("/api/scene-graph/:name", api.sceneGraphApi, .{});
     router.get("/api/block-diagram/:name", api.blockDiagramApi, .{});
+    router.get("/api/block-diagram-json/:name", api.blockDiagramJsonApi, .{});
 
     // Edit
     router.post("/api/edit-value/:name", edit.editValueApi, .{});
     router.post("/api/edit-footprint/:name", edit.editFootprintApi, .{});
+    router.post("/api/edit-courtyard", edit.editCourtyardApi, .{});
+    router.post("/api/add-instance/:name", edit.addInstanceApi, .{});
+    router.post("/api/remove-instance/:name", edit.removeInstanceApi, .{});
+    router.post("/api/rewire-pin/:name", edit.rewirePinApi, .{});
 
     // Library
     router.get("/library", library.libraryPage, .{});

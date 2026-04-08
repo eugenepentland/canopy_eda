@@ -43,6 +43,13 @@ pub fn renderSchematic(allocator: Allocator, block: *const DesignBlock) ![]const
             flat_sec_idx += 1;
         }
     }
+    // Include sub-block instances in section map
+    for (block.sub_blocks) |sb| {
+        for (sb.block.instances) |inst| {
+            try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
+        }
+        flat_sec_idx += 1;
+    }
 
     // Build pin->net lookup
     try ctx.buildPinNetMap();
@@ -100,6 +107,14 @@ pub fn renderSchematic(allocator: Allocator, block: *const DesignBlock) ![]const
             for (sub.instances) |inst| {
                 try ref_to_section.put(inst.ref_des, sub_idx);
             }
+        }
+    }
+    // Add sub-blocks as sections
+    for (block.sub_blocks) |sb| {
+        const sec_idx = section_grid.items.len;
+        try section_grid.append(allocator, .{ .name = sb.block.name, .description = "", .notes = &.{}, .cell_indices = .empty });
+        for (sb.block.instances) |inst| {
+            try ref_to_section.put(inst.ref_des, sec_idx);
         }
     }
 
@@ -287,21 +302,7 @@ pub fn renderSchematic(allocator: Allocator, block: *const DesignBlock) ![]const
         try w.writeAll("</g>\n");
     }
 
-    // Port block
-    if (block.ports.len > 0) {
-        y += 20.0;
-        const icon = branch.inferBlockIcon(&ctx, block);
-        const port_h = try branch.renderPortBlock(&ctx, w, block.name, block.ports, y, icon);
-        y += port_h + 40.0;
-    }
-    for (block.sub_blocks) |sb| {
-        if (sb.block.ports.len > 0) {
-            y += 10.0;
-            const icon = branch.inferBlockIcon(&ctx, sb.block);
-            const port_h = try branch.renderPortBlock(&ctx, w, sb.name, sb.block.ports, y, icon);
-            y += port_h + 40.0;
-        }
-    }
+    // Port block (skipped — interface ports not shown in schematic)
 
     // Wrap in SVG
     const vb_w = @max(total_width, 850.0);

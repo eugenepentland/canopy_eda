@@ -197,6 +197,180 @@ const SceneGraph = struct {
     }
 };
 
+// ── Merge-aware height calculation ──────────────────────────────────
+
+/// Compute group heights accounting for identical spoke merging.
+/// Unlike hub_mod.groupHeights which counts every spoke individually,
+/// this groups identical single-passive spokes and counts them as one slot.
+fn mergeAwareGroupHeights(ctx: *RenderCtx, allocator: Allocator, groups: []const PinGroup, hub_ref: []const u8) ![]f64 {
+    var heights = try allocator.alloc(f64, groups.len);
+    for (groups, 0..) |group, i| {
+        var total_slots: u32 = 0;
+
+        // Classify connections for this group (same logic as collectGroupConnections)
+        var classified: std.ArrayListUnmanaged(Classified) = .empty;
+        for (group.conns) |conn| {
+            switch (conn.endpoint) {
+                .net => |net| {
+                    const term = baseNetName(net);
+                    if (!ctx.significant_nets.contains(term)) continue;
+                    try classified.append(allocator, .{ .conn = conn, .terminal = term });
+                },
+                .pin => |p| {
+                    if (ctx.spoke_set.contains(p.ref_des)) {
+                        const term = try connection.getConnTerminal(ctx, conn.endpoint, hub_ref, conn.pin);
+                        try classified.append(allocator, .{ .conn = conn, .terminal = term });
+                    } else {
+                        try classified.append(allocator, .{ .conn = conn, .terminal = "" });
+                        total_slots += 1;
+                        continue; // Non-spoke hub connections are always 1 slot, skip merge logic
+                    }
+                },
+            }
+        }
+
+        // Now count slots with merge awareness for spoke/net connections
+        if (classified.items.len > 0) {
+            // Build merge keys for single-passive spokes
+            const SpokeKey = struct { key: []const u8, is_mergeable: bool };
+            var infos = try allocator.alloc(SpokeKey, classified.items.len);
+            var consumed = try allocator.alloc(bool, classified.items.len);
+            for (consumed) |*c| c.* = false;
+
+            for (classified.items, 0..) |entry, j| {
+                switch (entry.conn.endpoint) {
+                    .pin => |p| {
+                        if (ctx.spoke_set.contains(p.ref_des)) {
+                            const inst = ctx.inst_map.get(p.ref_des) orelse {
+                                infos[j] = .{ .key = "", .is_mergeable = false };
+                                continue;
+                            };
+                            var visited: std.StringHashMapUnmanaged(void) = .empty;
+                            try visited.put(allocator, p.ref_des, {});
+                            const chain = try connection.findSpokeChain(ctx, p.ref_des, .{ .pin = .{ .ref_des = hub_ref, .pin = entry.conn.pin } }, &visited);
+                            if (chain.chain.len == 0 and chain.branches.len == 0) {
+                                const val = if (inst.value.len > 0) inst.value else inst.component;
+                                infos[j] = .{
+                                    .key = try std.fmt.allocPrint(allocator, "{s}|{s}|{s}", .{ entry.terminal, val, inst.symbol }),
+                                    .is_mergeable = true,
+                                };
+                            } else {
+                                infos[j] = .{ .key = "", .is_mergeable = false };
+                            }
+                        } else {
+                            infos[j] = .{ .key = "", .is_mergeable = false };
+                        }
+                    },
+                    .net => {
+                        infos[j] = .{ .key = "", .is_mergeable = false };
+                    },
+                }
+            }
+
+            // Count slots: merged groups count as 1 slot
+            for (classified.items, 0..) |_, j| {
+                if (consumed[j]) continue;
+                consumed[j] = true;
+
+                if (!infos[j].is_mergeable or infos[j].key.len == 0) {
+                    // Non-mergeable: count normally
+                    switch (classified.items[j].conn.endpoint) {
+                        .pin => |p| {
+                            if (ctx.spoke_set.contains(p.ref_des)) {
+                                total_slots += hub_mod.estimateBranchCount(ctx, p.ref_des, hub_ref);
+                            } else {
+                                total_slots += 1;
+                            }
+                        },
+                        .net => total_slots += 1,
+                    }
+                } else {
+                    // Mergeable: consume all identical and count as 1 slot
+                    for (j + 1..classified.items.len) |k| {
+                        if (consumed[k]) continue;
+                        if (infos[k].is_mergeable and std.mem.eql(u8, infos[k].key, infos[j].key)) {
+                            consumed[k] = true;
+                        }
+                    }
+                    total_slots += 1;
+                }
+            }
+        }
+
+        const base: f64 = 40.0;
+        heights[i] = base + @as(f64, @floatFromInt(@max(total_slots, 1) -| 1)) * per_conn_spacing;
+    }
+    return heights;
+}
+
+/// Compute hub height using merge-aware group heights.
+fn mergeAwareHubHeight(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, part: ?env_mod.Part) !f64 {
+    const adj_entries = if (ctx.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
+
+    var all_pins_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer all_pins_list.deinit(allocator);
+
+    if (part) |p| {
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        defer seen.deinit(allocator);
+        for (p.pins) |pp| {
+            if (!seen.contains(pp.pin)) {
+                try seen.put(allocator, pp.pin, {});
+                try all_pins_list.append(allocator, pp.pin);
+            }
+        }
+    } else {
+        for (ctx.nets.items) |net| {
+            for (net.pins) |pin| {
+                if (std.mem.eql(u8, pin.ref_des, hub.ref_des)) {
+                    try all_pins_list.append(allocator, pin.pin);
+                }
+            }
+        }
+    }
+
+    std.mem.sortUnstable([]const u8, all_pins_list.items, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return draw.pinOrder(a, b);
+        }
+    }.lt);
+
+    const parts_for_names: []const env_mod.Part = if (part) |p2| &[_]env_mod.Part{p2} else hub.parts;
+    var pn_map = hub_mod.buildPinNameMap(ctx, parts_for_names);
+    defer pn_map.deinit(allocator);
+
+    const all_groups = try hub_mod.groupHubPins(ctx, all_pins_list.items, adj_entries, &pn_map);
+    var left_groups_list: std.ArrayListUnmanaged(PinGroup) = .empty;
+    var right_groups_list: std.ArrayListUnmanaged(PinGroup) = .empty;
+    var left_pc: usize = 0;
+    var right_pc: usize = 0;
+
+    for (all_groups) |group| {
+        var n: usize = 0;
+        var it = std.mem.splitScalar(u8, group.pin_numbers, ',');
+        while (it.next()) |_| n += 1;
+        if (left_pc <= right_pc) {
+            try left_groups_list.append(allocator, group);
+            left_pc += n;
+        } else {
+            try right_groups_list.append(allocator, group);
+            right_pc += n;
+        }
+    }
+
+    const left_groups = left_groups_list.toOwnedSlice(allocator) catch &[_]PinGroup{};
+    const right_groups = right_groups_list.toOwnedSlice(allocator) catch &[_]PinGroup{};
+    const left_heights = try mergeAwareGroupHeights(ctx, allocator, left_groups, hub.ref_des);
+    const right_heights = try mergeAwareGroupHeights(ctx, allocator, right_groups, hub.ref_des);
+
+    var left_total: f64 = 0;
+    for (left_heights) |h| left_total += h;
+    var right_total: f64 = 0;
+    for (right_heights) |h| right_total += h;
+
+    return @max(left_total, right_total) + 40.0;
+}
+
 // ── Public entry point ───────────────────────────────────────────────
 
 pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock) ![]const u8 {
@@ -217,6 +391,13 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock) ![]cons
             }
             flat_sec_idx += 1;
         }
+    }
+    // Include sub-block instances in section map (each sub-block becomes its own section)
+    for (block.sub_blocks) |sb| {
+        for (sb.block.instances) |inst| {
+            try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
+        }
+        flat_sec_idx += 1;
     }
 
     try ctx.buildPinNetMap();
@@ -259,6 +440,14 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock) ![]cons
             for (sub.instances) |inst| {
                 try ref_to_section.put(inst.ref_des, sub_idx);
             }
+        }
+    }
+    // Add sub-blocks as sections
+    for (block.sub_blocks) |sb| {
+        const sec_idx = section_grid.items.len;
+        try section_grid.append(allocator, .{ .name = sb.block.name, .description = "", .notes = &.{}, .cell_indices = .empty });
+        for (sb.block.instances) |inst| {
+            try ref_to_section.put(inst.ref_des, sec_idx);
         }
     }
 
@@ -332,21 +521,13 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock) ![]cons
         }
     }
 
-    // Pass 1: Measure cell heights (use SVG renderer for measurement)
+    // Pass 1: Measure cell heights (merge-aware)
     var cell_heights = try allocator.alloc(f64, cells.items.len);
     defer allocator.free(cell_heights);
 
     for (cells.items, 0..) |cell, ci| {
-        var measure_buf: std.ArrayListUnmanaged(u8) = .empty;
-        const mw = measure_buf.writer(allocator);
-        cell_heights[ci] = if (cell.part) |part|
-            try hub_mod.renderHubPart(&ctx, mw, cell.hub_inst, part, 0)
-        else
-            try hub_mod.renderHub(&ctx, mw, cell.hub_inst, 0);
-        measure_buf.deinit(allocator);
+        cell_heights[ci] = try mergeAwareHubHeight(&ctx, allocator, cell.hub_inst, cell.part);
     }
-
-    ctx.rendered_spokes.clearRetainingCapacity();
 
     // Compute row heights
     var row_heights = try allocator.alloc(f64, n_rows);
@@ -416,23 +597,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock) ![]cons
         }
     }
 
-    // Port blocks
-    if (block.ports.len > 0) {
-        y += 20.0;
-        const icon = branch_mod.inferBlockIcon(&ctx, block);
-        try collectPortBlock(&scene, allocator, block.name, block.ports, y, icon);
-        const max_side = @max(@max(countDir(block.ports, "out"), countNonOut(block.ports)), 1);
-        y += 80.0 + @as(f64, @floatFromInt(max_side - 1)) * 40.0 + 40.0;
-    }
-    for (block.sub_blocks) |sb| {
-        if (sb.block.ports.len > 0) {
-            y += 10.0;
-            const icon = branch_mod.inferBlockIcon(&ctx, sb.block);
-            try collectPortBlock(&scene, allocator, sb.name, sb.block.ports, y, icon);
-            const max_side = @max(@max(countDir(sb.block.ports, "out"), countNonOut(sb.block.ports)), 1);
-            y += 80.0 + @as(f64, @floatFromInt(max_side - 1)) * 40.0 + 40.0;
-        }
-    }
+    // Port blocks (skipped — interface ports not shown in schematic)
 
     // Set viewBox
     scene.vb_w = @max(total_width, 850.0);
@@ -520,8 +685,8 @@ fn collectHubData(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, part: ?e
 
     const left_groups = left_groups_list.toOwnedSlice(allocator) catch &[_]PinGroup{};
     const right_groups = right_groups_list.toOwnedSlice(allocator) catch &[_]PinGroup{};
-    const left_heights = try hub_mod.groupHeights(ctx, left_groups, hub.ref_des);
-    const right_heights = try hub_mod.groupHeights(ctx, right_groups, hub.ref_des);
+    const left_heights = try mergeAwareGroupHeights(ctx, allocator, left_groups, hub.ref_des);
+    const right_heights = try mergeAwareGroupHeights(ctx, allocator, right_groups, hub.ref_des);
 
     var left_total: f64 = 0;
     for (left_heights) |h| left_total += h;
@@ -642,8 +807,8 @@ fn collectHubConnections(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocat
 
     const left_groups = left_groups_list.toOwnedSlice(allocator) catch &[_]PinGroup{};
     const right_groups = right_groups_list.toOwnedSlice(allocator) catch &[_]PinGroup{};
-    const left_heights = try hub_mod.groupHeights(ctx, left_groups, hub.ref_des);
-    const right_heights = try hub_mod.groupHeights(ctx, right_groups, hub.ref_des);
+    const left_heights = try mergeAwareGroupHeights(ctx, allocator, left_groups, hub.ref_des);
+    const right_heights = try mergeAwareGroupHeights(ctx, allocator, right_groups, hub.ref_des);
 
     // Collect left connections
     var py_left = y_start + 40.0;
@@ -1145,12 +1310,13 @@ fn collectTerminals(ctx: *RenderCtx, scene: *SceneGraph, _: Allocator, results: 
 }
 
 fn collectTerminalLabel(ctx: *RenderCtx, scene: *SceneGraph, end_x: f64, cy: f64, term: []const u8, anchor: []const u8) !void {
-    if (isGroundNet(term)) {
-        try scene.addLabel(term, end_x, cy, anchor, false, true);
+    const display = baseNetName(term);
+    if (isGroundNet(display)) {
+        try scene.addLabel(display, end_x, cy, anchor, false, true);
     } else {
-        const is_port = ctx.port_nets.contains(term);
+        const is_port = ctx.port_nets.contains(term) or ctx.port_nets.contains(display);
         const label_x: f64 = if (std.mem.eql(u8, anchor, "end")) end_x - net_label_gap else end_x + net_label_gap;
-        try scene.addLabel(term, label_x, cy, anchor, is_port, false);
+        try scene.addLabel(display, label_x, cy, anchor, is_port, false);
     }
 }
 

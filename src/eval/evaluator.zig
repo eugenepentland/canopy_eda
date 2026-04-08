@@ -7,6 +7,7 @@ const builtins = @import("builtins.zig");
 const special_forms = @import("special_forms.zig");
 const modules = @import("modules.zig");
 const design_block = @import("design_block.zig");
+const board_eval = @import("board.zig");
 const instance_mod = @import("instance.zig");
 const builders = @import("builders.zig");
 pub const ids = @import("ids.zig");
@@ -47,6 +48,9 @@ pub const PinNetDecl = struct {
 pub const Evaluator = struct {
     allocator: std.mem.Allocator,
     project_dir: []const u8,
+    /// Shared library directory for component/module fallback resolution.
+    /// Defaults to project_dir; set separately when using per-project folders.
+    lib_dir: []const u8,
     assertions: std.ArrayListUnmanaged(AssertionResult),
     /// Cache of loaded file contents (path -> parsed nodes)
     loaded_files: std.StringHashMapUnmanaged([]const Node),
@@ -85,9 +89,14 @@ pub const Evaluator = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, project_dir: []const u8) Evaluator {
+        return initWithLibDir(allocator, project_dir, project_dir);
+    }
+
+    pub fn initWithLibDir(allocator: std.mem.Allocator, project_dir: []const u8, lib_dir: []const u8) Evaluator {
         return .{
             .allocator = allocator,
             .project_dir = project_dir,
+            .lib_dir = lib_dir,
             .assertions = .empty,
             .loaded_files = .empty,
             .component_cache = .empty,
@@ -159,6 +168,7 @@ pub const Evaluator = struct {
         if (std.mem.eql(u8, head_name, "import")) return modules.evalImport(self, args, env);
         if (std.mem.eql(u8, head_name, "defmodule")) return modules.evalDefmodule(self, args, env);
         if (std.mem.eql(u8, head_name, "design-block")) return design_block.evalDesignBlock(self, args, env);
+        if (std.mem.eql(u8, head_name, "board")) return board_eval.evalBoard(self, args, env);
         if (std.mem.eql(u8, head_name, "assert")) return special_forms.evalAssert(self, args, env);
         if (std.mem.eql(u8, head_name, "assert-range")) return special_forms.evalAssertRange(self, args, env);
         if (std.mem.eql(u8, head_name, "fmt")) return special_forms.evalFmt(self, args, env);
@@ -331,6 +341,7 @@ test {
     _ = special_forms;
     _ = modules;
     _ = design_block;
+    _ = board_eval;
     _ = instance_mod;
     _ = builders;
 }

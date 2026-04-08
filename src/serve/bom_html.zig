@@ -2,6 +2,17 @@ const std = @import("std");
 const env_mod = @import("../eval/env.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 
+/// Check if a ref-des is a standard format (1-2 uppercase letters + digits), e.g. U10, R5.
+fn isStdRefDes(ref: []const u8) bool {
+    if (ref.len < 2) return false;
+    var i: usize = 0;
+    while (i < ref.len and i < 2 and ref[i] >= 'A' and ref[i] <= 'Z') : (i += 1) {}
+    if (i == 0) return false;
+    const digit_start = i;
+    while (i < ref.len and ref[i] >= '0' and ref[i] <= '9') : (i += 1) {}
+    return i == ref.len and i > digit_start;
+}
+
 // ── Symbol pin cache ──────────────────────────────────────────────────
 
 pub const SymbolPin = struct {
@@ -139,7 +150,7 @@ pub fn writeBomHtml(wr: anytype, block: *const env_mod.DesignBlock) !void {
 
     try wr.writeAll("<div class=\"bom-section\"><h2>Bill of Materials</h2>");
     try wr.writeAll("<table class=\"bom-table\"><thead><tr>");
-    try wr.writeAll("<th>Qty</th><th>Ref Des</th><th>Component</th><th>Value</th><th>Package</th><th>Attributes</th>");
+    try wr.writeAll("<th>Qty</th><th>Ref Des</th><th>Component</th><th>Value</th><th>Package</th><th>Attributes</th><th>Datasheet</th>");
     try wr.writeAll("</tr></thead><tbody>");
 
     var total: u32 = 0;
@@ -206,6 +217,16 @@ pub fn writeBomHtml(wr: anytype, block: *const env_mod.DesignBlock) !void {
         }
         try wr.writeAll("</td>");
 
+        // Datasheet link
+        try wr.writeAll("<td>");
+        for (line.properties) |prop| {
+            if (std.mem.eql(u8, prop.key, "datasheet")) {
+                try wr.print("<a href=\"{s}\" target=\"_blank\" style=\"color:#58a6ff\">PDF</a>", .{prop.value});
+                break;
+            }
+        }
+        try wr.writeAll("</td>");
+
         try wr.writeAll("</tr>");
     }
 
@@ -262,6 +283,121 @@ pub fn getPassivePrefix(component: []const u8) []const u8 {
         if (std.mem.startsWith(u8, component, pfx) and component.len > pfx.len and component[pfx.len] == '-') return pfx;
     }
     return "";
+}
+
+pub fn writeBomCsv(w: anytype, block: *const env_mod.DesignBlock) !void {
+    const Instance = env_mod.Instance;
+    var all: std.ArrayListUnmanaged(Instance) = .empty;
+    try bomCollectInstances(block, &all);
+    if (all.items.len == 0) return;
+
+    const BomLine = struct {
+        component: []const u8,
+        value: []const u8,
+        footprint: []const u8,
+        properties: []const env_mod.Property,
+        attrs: []const []const u8,
+        count: u32,
+        refs: std.ArrayListUnmanaged([]const u8),
+    };
+
+    var lines: std.ArrayListUnmanaged(BomLine) = .empty;
+    for (all.items) |inst| {
+        var found = false;
+        for (lines.items) |*line| {
+            if (std.mem.eql(u8, line.component, inst.component) and
+                std.mem.eql(u8, line.value, inst.value) and
+                std.mem.eql(u8, line.footprint, inst.footprint) and
+                attrsEqual(line.attrs, inst.attrs))
+            {
+                line.count += 1;
+                line.refs.append(std.heap.page_allocator, inst.ref_des) catch {};
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            var refs: std.ArrayListUnmanaged([]const u8) = .empty;
+            refs.append(std.heap.page_allocator, inst.ref_des) catch {};
+            lines.append(std.heap.page_allocator, .{
+                .component = inst.component,
+                .value = inst.value,
+                .footprint = inst.footprint,
+                .properties = inst.properties,
+                .attrs = inst.attrs,
+                .count = 1,
+                .refs = refs,
+            }) catch {};
+        }
+    }
+
+    // Sort by count desc, then component name
+    std.mem.sortUnstable(BomLine, lines.items, {}, struct {
+        fn lt(_: void, a: BomLine, b: BomLine) bool {
+            if (a.count != b.count) return a.count > b.count;
+            return std.mem.order(u8, a.component, b.component) == .lt;
+        }
+    }.lt);
+
+    // CSV header
+    try w.writeAll("Qty,References,Component,Value,Footprint,MPN,Manufacturer,Datasheet\r\n");
+
+    for (lines.items) |line| {
+        // Qty
+        try w.print("{d},", .{line.count});
+
+        // References (quoted, comma-separated)
+        try w.writeAll("\"");
+        for (line.refs.items, 0..) |r, i| {
+            if (i > 0) try w.writeAll(", ");
+            try w.writeAll(r);
+        }
+        try w.writeAll("\",");
+
+        // Component, Value, Footprint
+        try writeCsvField(w, line.component);
+        try w.writeAll(",");
+        try writeCsvField(w, line.value);
+        try w.writeAll(",");
+        try writeCsvField(w, line.footprint);
+        try w.writeAll(",");
+
+        // MPN, Manufacturer, Datasheet from properties
+        var mpn: []const u8 = "";
+        var manufacturer: []const u8 = "";
+        var datasheet: []const u8 = "";
+        for (line.properties) |prop| {
+            if (std.mem.eql(u8, prop.key, "mpn")) mpn = prop.value;
+            if (std.mem.eql(u8, prop.key, "manufacturer")) manufacturer = prop.value;
+            if (std.mem.eql(u8, prop.key, "datasheet")) datasheet = prop.value;
+        }
+        try writeCsvField(w, mpn);
+        try w.writeAll(",");
+        try writeCsvField(w, manufacturer);
+        try w.writeAll(",");
+        try writeCsvField(w, datasheet);
+        try w.writeAll("\r\n");
+    }
+}
+
+fn writeCsvField(w: anytype, field: []const u8) !void {
+    // Quote if field contains comma, quote, or newline
+    var needs_quote = false;
+    for (field) |c| {
+        if (c == ',' or c == '"' or c == '\n' or c == '\r') {
+            needs_quote = true;
+            break;
+        }
+    }
+    if (needs_quote) {
+        try w.writeAll("\"");
+        for (field) |c| {
+            if (c == '"') try w.writeAll("\"\"") else try w.writeByte(c);
+        }
+        try w.writeAll("\"");
+    } else {
+        try w.writeAll(field);
+    }
 }
 
 fn bomCollectInstances(block: *const env_mod.DesignBlock, out: *std.ArrayListUnmanaged(env_mod.Instance)) !void {
@@ -387,7 +523,7 @@ pub fn writeComponentsJson(w: anytype, block: *const env_mod.DesignBlock, prefix
     for (block.instances) |inst| {
         if (written) try w.writeAll(",");
         try w.writeAll("\"");
-        if (prefix.len > 0) try w.print("{s}/", .{prefix});
+        if (prefix.len > 0 and !isStdRefDes(inst.ref_des)) try w.print("{s}/", .{prefix});
         const fp_ok = footprintHasPads(allocator, project_dir, inst.footprint);
         try w.print("{s}\":{{\"symbol\":\"{s}\",\"footprint\":\"{s}\",\"fpOk\":{s},\"value\":\"{s}\",\"component\":\"{s}\",\"srcOff\":{d},\"note\":\"", .{
             inst.ref_des,
@@ -451,26 +587,91 @@ pub fn writeComponentsJson(w: anytype, block: *const env_mod.DesignBlock, prefix
     return written;
 }
 
+/// Extract the base net name (before first '.'), e.g. "VDD.U3.W6" → "VDD".
+fn baseNetName(name: []const u8) []const u8 {
+    // Strip scope prefix (after last '/')
+    const short = if (std.mem.lastIndexOfScalar(u8, name, '/')) |idx| name[idx + 1 ..] else name;
+    if (std.mem.indexOfScalar(u8, short, '.')) |idx| return short[0..idx];
+    return short;
+}
+
 pub fn writeNetsJson(w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8) !bool {
-    var written = false;
+    const allocator = std.heap.page_allocator;
+
+    // Build rename map from net_ties: "sb_name/port" → "parent_net"
+    var rename = std.StringHashMap([]const u8).init(allocator);
+    for (block.net_ties) |nt| {
+        // A tie like (a="VDD", b="ldo/VIN") means rename "ldo/VIN" → "VDD"
+        const has_slash_a = std.mem.indexOfScalar(u8, nt.a, '/') != null;
+        const has_slash_b = std.mem.indexOfScalar(u8, nt.b, '/') != null;
+        if (!has_slash_a and has_slash_b) {
+            try rename.put(nt.b, nt.a);
+        } else if (has_slash_a and !has_slash_b) {
+            try rename.put(nt.a, nt.b);
+        }
+    }
+
+    // Collect pins grouped by resolved base net name, preserving order
+    const PinRef = struct { ref_des: []const u8, pin: []const u8 };
+    var grouped = std.StringArrayHashMap(std.ArrayListUnmanaged(PinRef)).init(allocator);
+
+    // Helper to resolve and group a net
+    const addNet = struct {
+        fn add(g: *std.StringArrayHashMap(std.ArrayListUnmanaged(PinRef)), alloc: std.mem.Allocator, name: []const u8, pfx: []const u8, pins: []const env_mod.PinRef) !void {
+            const base = baseNetName(name);
+            const gop = try g.getOrPut(base);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            for (pins) |pin| {
+                const rd = if (pfx.len > 0 and !isStdRefDes(pin.ref_des))
+                    try std.fmt.allocPrint(alloc, "{s}/{s}", .{ pfx, pin.ref_des })
+                else
+                    pin.ref_des;
+                try gop.value_ptr.append(alloc, .{ .ref_des = rd, .pin = pin.pin });
+            }
+        }
+    }.add;
+
     for (block.nets) |net| {
+        try addNet(&grouped, allocator, net.name, prefix, net.pins);
+    }
+
+    // Flatten sub-block nets into parent net groups using rename map
+    for (block.sub_blocks) |sb| {
+        for (sb.block.nets) |net| {
+            // Build the prefixed net name e.g. "ldo/VIN" or "ldo/VIN.U1.IN"
+            const prefixed = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, net.name });
+            const prefixed_base = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, baseNetName(net.name) });
+
+            // Try to rename to parent net (e.g. "ldo/VIN" → "VDD")
+            var resolved: []const u8 = prefixed;
+            if (rename.get(prefixed_base)) |parent_net| {
+                // Rebuild with parent net name + suffix
+                const base_local = baseNetName(net.name);
+                if (net.name.len > base_local.len) {
+                    // Has suffix like ".U1.IN"
+                    resolved = try std.fmt.allocPrint(allocator, "{s}{s}", .{ parent_net, net.name[base_local.len..] });
+                } else {
+                    resolved = parent_net;
+                }
+            }
+            try addNet(&grouped, allocator, resolved, "", net.pins);
+        }
+    }
+
+    var written = false;
+    var iter = grouped.iterator();
+    while (iter.next()) |entry| {
         if (written) try w.writeAll(",");
         try w.writeAll("\"");
         if (prefix.len > 0) try w.print("{s}/", .{prefix});
-        try w.print("{s}\":[", .{net.name});
-        for (net.pins, 0..) |pin, pi| {
+        try w.print("{s}\":[", .{entry.key_ptr.*});
+        for (entry.value_ptr.items, 0..) |pin, pi| {
             if (pi > 0) try w.writeAll(",");
             try w.writeAll("\"");
-            if (prefix.len > 0) try w.print("{s}/", .{prefix});
             try w.print("{s}.{s}\"", .{ pin.ref_des, pin.pin });
         }
         try w.writeAll("]");
         written = true;
-    }
-    for (block.sub_blocks) |sb| {
-        if (written) try w.writeAll(",");
-        const sub_written = try writeNetsJson(w, sb.block, sb.name);
-        if (sub_written) written = true;
     }
     return written;
 }

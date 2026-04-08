@@ -88,6 +88,12 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     validate.warnCombinableNets(self, &net_form_sources);
     const nets_slice = try buildNets(self, &all_pin_nets, &net_ties);
 
+    // Convert net ties to env NetTie format for storage on the block
+    var block_ties: std.ArrayListUnmanaged(env_mod.NetTie) = .empty;
+    for (net_ties.items) |nt| {
+        block_ties.append(self.allocator, .{ .a = nt.a, .b = nt.b }) catch {};
+    }
+
     const block = self.allocator.create(DesignBlock) catch return EvalError.OutOfMemory;
     block.* = .{
         .name = name,
@@ -98,10 +104,14 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .groups = groups.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .sub_blocks = sub_blocks.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .sections = sections.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
+        .net_ties = block_ties.toOwnedSlice(self.allocator) catch &.{},
     };
 
     // Auto-assign ref_des for instances with descriptive labels
     ids.autoAssignRefDes(self, block) catch {};
+
+    // Auto-assign global ref_des for sub-block instances
+    ids.autoAssignSubBlockRefDes(self, block) catch {};
 
     // Validate: warn about dead-end nets, etc.
     validate.validateDesign(self, block);
@@ -205,6 +215,7 @@ fn evalSection(
     var sec_description: []const u8 = "";
     var sec_notes: std.ArrayListUnmanaged([]const u8) = .empty;
     var sec_ports: std.ArrayListUnmanaged(env_mod.SectionPort) = .empty;
+    var sec_protocols: std.ArrayListUnmanaged([]const u8) = .empty;
     var sec_calcs: std.ArrayListUnmanaged(env_mod.CalcBlock) = .empty;
     var sec_sub_sections: std.ArrayListUnmanaged(env_mod.Section) = .empty;
 
@@ -237,6 +248,12 @@ fn evalSection(
         } else if (std.mem.eql(u8, sf_name, "port")) {
             const port = try builders.parseSectionPort(self, sf_children, env);
             if (port) |p| try sec_ports.append(self.allocator, p);
+        } else if (std.mem.eql(u8, sf_name, "protocol")) {
+            if (sf_children.len >= 2) {
+                if (sf_children[1].asAtom()) |proto| {
+                    try sec_protocols.append(self.allocator, proto);
+                }
+            }
         } else if (std.mem.eql(u8, sf_name, "calc")) {
             const calc = try builders.parseSectionCalc(self, sf_children, env);
             if (calc) |c| try sec_calcs.append(self.allocator, c);
@@ -277,6 +294,7 @@ fn evalSection(
         .instances = sec_instances.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .pin_groups = sec_pin_groups.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .ports = sec_ports.toOwnedSlice(self.allocator) catch &.{},
+        .protocols = sec_protocols.toOwnedSlice(self.allocator) catch &.{},
         .calcs = sec_calcs.toOwnedSlice(self.allocator) catch &.{},
         .sub_sections = sec_sub_sections.toOwnedSlice(self.allocator) catch &.{},
     });
@@ -370,6 +388,7 @@ fn evalSubSection(
     var sub_description: []const u8 = "";
     var sub_notes: std.ArrayListUnmanaged([]const u8) = .empty;
     var sub_ports: std.ArrayListUnmanaged(env_mod.SectionPort) = .empty;
+    var sub_protocols: std.ArrayListUnmanaged([]const u8) = .empty;
     var sub_calcs: std.ArrayListUnmanaged(env_mod.CalcBlock) = .empty;
 
     for (sf_children[2..]) |ssf| {
@@ -390,6 +409,12 @@ fn evalSubSection(
         } else if (std.mem.eql(u8, ssf_name, "port")) {
             const port = try builders.parseSectionPort(self, ssf_children, env);
             if (port) |p| try sub_ports.append(self.allocator, p);
+        } else if (std.mem.eql(u8, ssf_name, "protocol")) {
+            if (ssf_children.len >= 2) {
+                if (ssf_children[1].asAtom()) |proto| {
+                    try sub_protocols.append(self.allocator, proto);
+                }
+            }
         } else if (std.mem.eql(u8, ssf_name, "calc")) {
             const calc = try builders.parseSectionCalc(self, ssf_children, env);
             if (calc) |c| try sub_calcs.append(self.allocator, c);
@@ -439,6 +464,7 @@ fn evalSubSection(
         .instances = sub_instances.toOwnedSlice(self.allocator) catch &.{},
         .pin_groups = sub_pin_groups.toOwnedSlice(self.allocator) catch &.{},
         .ports = sub_ports.toOwnedSlice(self.allocator) catch &.{},
+        .protocols = sub_protocols.toOwnedSlice(self.allocator) catch &.{},
         .calcs = sub_calcs.toOwnedSlice(self.allocator) catch &.{},
     });
 }

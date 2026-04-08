@@ -94,6 +94,25 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Generates a KiCad netlist from a resolved design
 - Exports a KiCad footprint mod file from footprint data
 
+## board
+
+- Evaluates board form with design reference and outline
+
+## layout
+
+- Parses placement from layout source
+- Parses trace from layout source
+
+## render_pcb_json
+
+- Parses footprint geometry from sexp source
+
+## export_kicad_pcb
+
+- Generates a KiCad PCB file from a resolved design
+- Extracts footprint placements from existing PCB by canopy_uuid
+- Generates deterministic sub-UUIDs for pad elements
+
 ## bom
 
 - Generates deterministic UUIDs in the expected format

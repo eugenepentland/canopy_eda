@@ -27,39 +27,46 @@ pub fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!vo
     if (self.component_cache.contains(name)) return;
     if (env.get(name) != null) return;
 
-    // Search path: components first, then modules
-    const search_paths = [_][]const u8{
+    // Search path: components first, then modules.
+    // Search project_dir first, then lib_dir (shared library fallback).
+    const search_prefixes = [_][]const u8{
         "lib/components/",
         "lib/modules/",
     };
+    const search_roots = if (std.mem.eql(u8, self.project_dir, self.lib_dir))
+        &[_][]const u8{self.project_dir}
+    else
+        &[_][]const u8{ self.project_dir, self.lib_dir };
 
-    for (search_paths) |prefix| {
-        const path = std.fmt.allocPrint(self.allocator, "{s}/{s}{s}.sexp", .{ self.project_dir, prefix, name }) catch return EvalError.OutOfMemory;
-        defer self.allocator.free(path);
+    for (search_roots) |root| {
+        for (search_prefixes) |prefix| {
+            const path = std.fmt.allocPrint(self.allocator, "{s}/{s}{s}.sexp", .{ root, prefix, name }) catch return EvalError.OutOfMemory;
+            defer self.allocator.free(path);
 
-        // Note: don't free file_content — AST nodes reference slices into it
-        const file_content = std.fs.cwd().readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch continue;
+            // Note: don't free file_content — AST nodes reference slices into it
+            const file_content = std.fs.cwd().readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch continue;
 
-        const nodes = parser_mod.parse(self.allocator, file_content) catch return EvalError.ImportError;
+            const nodes = parser_mod.parse(self.allocator, file_content) catch return EvalError.ImportError;
 
-        // Determine what kind of file this is
-        if (nodes.len > 0) {
-            if (nodes[0].isForm("component")) {
-                try loadComponent(self, name, nodes[0]);
-                return;
-            }
-            if (nodes[0].isForm("component-family")) {
-                try loadComponentFamily(self, name, nodes[0]);
-                return;
-            }
-            // Module file — evaluate in a heap-allocated env (must outlive module def)
-            const mod_env = self.allocator.create(Env) catch return EvalError.OutOfMemory;
-            mod_env.* = Env.init(self.allocator, null);
-            _ = self.evalNodes(nodes, mod_env) catch return EvalError.ImportError;
-            // The defmodule should have been registered; copy module binding to caller env
-            if (mod_env.get(name)) |v| {
-                try env.put(name, v);
-                return;
+            // Determine what kind of file this is
+            if (nodes.len > 0) {
+                if (nodes[0].isForm("component")) {
+                    try loadComponent(self, name, nodes[0]);
+                    return;
+                }
+                if (nodes[0].isForm("component-family")) {
+                    try loadComponentFamily(self, name, nodes[0]);
+                    return;
+                }
+                // Module file — evaluate in a heap-allocated env (must outlive module def)
+                const mod_env = self.allocator.create(Env) catch return EvalError.OutOfMemory;
+                mod_env.* = Env.init(self.allocator, null);
+                _ = self.evalNodes(nodes, mod_env) catch return EvalError.ImportError;
+                // The defmodule should have been registered; copy module binding to caller env
+                if (mod_env.get(name)) |v| {
+                    try env.put(name, v);
+                    return;
+                }
             }
         }
     }

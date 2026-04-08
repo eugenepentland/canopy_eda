@@ -101,6 +101,69 @@ pub fn autoAssignRefDes(self: *Evaluator, block: *DesignBlock) !void {
     renameSectionRefs(@constCast(block.sections), &rename_map);
 }
 
+/// Assign global ref-des to sub-block instances, replacing local names (U1, R1, etc.)
+/// with globally unique ones. Also renames net pin references to match.
+pub fn autoAssignSubBlockRefDes(self: *Evaluator, block: *DesignBlock) !void {
+    for (@as([]env_mod.SubBlock, @constCast(block.sub_blocks))) |*sb| {
+        try assignSubBlockRefDes(self, sb.block);
+    }
+}
+
+fn assignSubBlockRefDes(self: *Evaluator, block: *DesignBlock) !void {
+    var rename_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer rename_map.deinit(self.allocator);
+
+    const insts: []Instance = @constCast(block.instances);
+
+    // Assign new global ref_des for all instances
+    for (insts) |*inst| {
+        const prefix = componentPrefix(inst.component);
+        const new_ref = nextRefDes(self, prefix) catch continue;
+        if (!std.mem.eql(u8, inst.ref_des, new_ref)) {
+            try rename_map.put(self.allocator, inst.ref_des, new_ref);
+            inst.ref_des = new_ref;
+        }
+    }
+
+    if (rename_map.count() == 0) return;
+
+    // Update net pin references and net names
+    const net_slice: []env_mod.Net = @constCast(block.nets);
+    for (net_slice) |*net| {
+        const pins: []env_mod.PinRef = @constCast(net.pins);
+        for (pins) |*pin| {
+            if (rename_map.get(pin.ref_des)) |new_ref| {
+                pin.ref_des = new_ref;
+            }
+        }
+        var ren_iter = rename_map.iterator();
+        while (ren_iter.next()) |entry| {
+            const old_label = entry.key_ptr.*;
+            const new_ref = entry.value_ptr.*;
+            const dot_old = std.fmt.allocPrint(self.allocator, ".{s}.", .{old_label}) catch continue;
+            if (std.mem.indexOf(u8, net.name, dot_old)) |pos| {
+                const dot_new = std.fmt.allocPrint(self.allocator, ".{s}.", .{new_ref}) catch continue;
+                const new_name = std.fmt.allocPrint(self.allocator, "{s}{s}{s}", .{ net.name[0..pos], dot_new, net.name[pos + dot_old.len ..] }) catch continue;
+                net.name = new_name;
+                break;
+            }
+        }
+    }
+
+    // Update notes
+    const note_slice: []env_mod.Note = @constCast(block.notes);
+    for (note_slice) |*note| {
+        if (rename_map.get(note.ref_des)) |new_ref| {
+            note.ref_des = new_ref;
+        }
+    }
+
+    // Recurse into nested sub-blocks
+    for (@as([]env_mod.SubBlock, @constCast(block.sub_blocks))) |*sb| {
+        try assignSubBlockRefDes(self, sb.block);
+    }
+}
+
 /// Recursively rename ref_des in sections and sub-sections.
 pub fn renameSectionRefs(sections: []env_mod.Section, rename_map: *std.StringHashMapUnmanaged([]const u8)) void {
     for (sections) |*sec| {
