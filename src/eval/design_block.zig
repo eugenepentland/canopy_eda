@@ -218,6 +218,8 @@ fn evalSection(
     var sec_protocols: std.ArrayListUnmanaged([]const u8) = .empty;
     var sec_calcs: std.ArrayListUnmanaged(env_mod.CalcBlock) = .empty;
     var sec_sub_sections: std.ArrayListUnmanaged(env_mod.Section) = .empty;
+    var explicit_status: ?env_mod.SectionStatus = null;
+    var block_role: env_mod.BlockRole = .auto;
 
     // Check for optional description as 2nd positional string arg
     var child_start: usize = 2;
@@ -233,7 +235,19 @@ fn evalSection(
         if (sf_children.len == 0) continue;
         const sf_name = sf_children[0].asAtom() orelse continue;
 
-        if (std.mem.eql(u8, sf_name, "description")) {
+        if (std.mem.eql(u8, sf_name, "status")) {
+            if (sf_children.len >= 2) {
+                if (sf_children[1].asAtom()) |status_str| {
+                    explicit_status = parseSectionStatus(status_str);
+                }
+            }
+        } else if (std.mem.eql(u8, sf_name, "role")) {
+            if (sf_children.len >= 2) {
+                if (sf_children[1].asAtom()) |role_str| {
+                    if (std.mem.eql(u8, role_str, "input")) block_role = .input else if (std.mem.eql(u8, role_str, "output")) block_role = .output;
+                }
+            }
+        } else if (std.mem.eql(u8, sf_name, "description")) {
             if (sf_children.len >= 2) {
                 const desc_val = try self.evalNode(sf_children[1], env);
                 sec_description = desc_val.asString() orelse "";
@@ -287,16 +301,28 @@ fn evalSection(
         }
     }
 
+    const final_instances = sec_instances.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
+    const final_pin_groups = sec_pin_groups.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
+    const final_sub_sections = sec_sub_sections.toOwnedSlice(self.allocator) catch &.{};
+
+    // Infer status: concept if no instances, no pin_groups, and no sub-sections with content
+    const status = explicit_status orelse if (final_instances.len == 0 and final_pin_groups.len == 0)
+        env_mod.SectionStatus.concept
+    else
+        env_mod.SectionStatus.implemented;
+
     try sections.append(self.allocator, .{
         .name = sec_name,
         .description = sec_description,
         .notes = sec_notes.toOwnedSlice(self.allocator) catch &.{},
-        .instances = sec_instances.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
-        .pin_groups = sec_pin_groups.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
+        .instances = final_instances,
+        .pin_groups = final_pin_groups,
         .ports = sec_ports.toOwnedSlice(self.allocator) catch &.{},
         .protocols = sec_protocols.toOwnedSlice(self.allocator) catch &.{},
         .calcs = sec_calcs.toOwnedSlice(self.allocator) catch &.{},
-        .sub_sections = sec_sub_sections.toOwnedSlice(self.allocator) catch &.{},
+        .sub_sections = final_sub_sections,
+        .status = status,
+        .block_role = block_role,
     });
 }
 
@@ -391,12 +417,20 @@ fn evalSubSection(
     var sub_protocols: std.ArrayListUnmanaged([]const u8) = .empty;
     var sub_calcs: std.ArrayListUnmanaged(env_mod.CalcBlock) = .empty;
 
+    var explicit_status: ?env_mod.SectionStatus = null;
+
     for (sf_children[2..]) |ssf| {
         const ssf_children = ssf.asList() orelse continue;
         if (ssf_children.len == 0) continue;
         const ssf_name = ssf_children[0].asAtom() orelse continue;
 
-        if (std.mem.eql(u8, ssf_name, "description")) {
+        if (std.mem.eql(u8, ssf_name, "status")) {
+            if (ssf_children.len >= 2) {
+                if (ssf_children[1].asAtom()) |status_str| {
+                    explicit_status = parseSectionStatus(status_str);
+                }
+            }
+        } else if (std.mem.eql(u8, ssf_name, "description")) {
             if (ssf_children.len >= 2) {
                 const dv = try self.evalNode(ssf_children[1], env);
                 sub_description = dv.asString() orelse "";
@@ -457,15 +491,24 @@ fn evalSubSection(
             try evalNetForm(self, ssf_children, env, net_ties);
         }
     }
+    const final_sub_instances = sub_instances.toOwnedSlice(self.allocator) catch &.{};
+    const final_sub_pin_groups = sub_pin_groups.toOwnedSlice(self.allocator) catch &.{};
+
+    const status = explicit_status orelse if (final_sub_instances.len == 0 and final_sub_pin_groups.len == 0)
+        env_mod.SectionStatus.concept
+    else
+        env_mod.SectionStatus.implemented;
+
     try sec_sub_sections.append(self.allocator, .{
         .name = sub_name,
         .description = sub_description,
         .notes = sub_notes.toOwnedSlice(self.allocator) catch &.{},
-        .instances = sub_instances.toOwnedSlice(self.allocator) catch &.{},
-        .pin_groups = sub_pin_groups.toOwnedSlice(self.allocator) catch &.{},
+        .instances = final_sub_instances,
+        .pin_groups = final_sub_pin_groups,
         .ports = sub_ports.toOwnedSlice(self.allocator) catch &.{},
         .protocols = sub_protocols.toOwnedSlice(self.allocator) catch &.{},
         .calcs = sub_calcs.toOwnedSlice(self.allocator) catch &.{},
+        .status = status,
     });
 }
 
@@ -522,4 +565,12 @@ fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl)
         }) catch return EvalError.OutOfMemory;
     }
     return nets.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
+}
+
+/// Parse a section status string into a SectionStatus enum value.
+fn parseSectionStatus(str: []const u8) ?env_mod.SectionStatus {
+    if (std.mem.eql(u8, str, "concept")) return .concept;
+    if (std.mem.eql(u8, str, "implemented")) return .implemented;
+    if (std.mem.eql(u8, str, "review")) return .review;
+    return null;
 }

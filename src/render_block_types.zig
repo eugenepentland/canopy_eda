@@ -30,6 +30,9 @@ pub const Block = struct {
     category: Category,
     ports: []const env_mod.SectionPort,
     protocols: []const []const u8 = &.{},
+    status: env_mod.SectionStatus = .implemented,
+    has_ic: bool = false,
+    block_role: env_mod.BlockRole = .auto,
     x: f64 = 0,
     y: f64 = 0,
     w: f64 = block_w,
@@ -122,6 +125,24 @@ pub fn classifySection(sec: env_mod.Section) Category {
     return classifyByName(sec.name, sec.instances);
 }
 
+/// Returns true for sections that are support/infrastructure (LEDs, clocking, boot, mounting)
+/// and should go in a separate Support section rather than Power/Signal flow.
+pub fn isSupportSection(sec: env_mod.Section) bool {
+    // LEDs, power indicators
+    if (containsCI(sec.name, "LED")) return true;
+    if (containsCI(sec.name, "Boot") or containsCI(sec.name, "Reset")) return true;
+    const cat = classifySection(sec);
+    return switch (cat) {
+        .clock => true,
+        .peripheral => sec.protocols.len == 0,
+        .connector => {
+            if (containsCI(sec.name, "Mounting") or containsCI(sec.name, "Test")) return true;
+            return false;
+        },
+        else => false,
+    };
+}
+
 pub fn classifyByName(name: []const u8, instances: []const env_mod.Instance) Category {
     // Power
     if (containsCI(name, "Buck") or containsCI(name, "LDO") or containsCI(name, "Regulator") or
@@ -147,7 +168,8 @@ pub fn classifyByName(name: []const u8, instances: []const env_mod.Instance) Cat
         containsCI(name, "TVS")) return .protection;
     // Connector
     if (containsCI(name, "Connector") or containsCI(name, "Expansion") or containsCI(name, "Header") or
-        containsCI(name, "Mounting")) return .connector;
+        containsCI(name, "Mounting") or containsCI(name, "SWD") or containsCI(name, "Debug") or
+        containsCI(name, "RJ45") or containsCI(name, "B2B")) return .connector;
     for (instances) |inst| {
         if (inst.ref_des.len > 0 and (inst.ref_des[0] == 'J' or inst.ref_des[0] == 'P')) return .connector;
     }

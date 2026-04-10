@@ -332,6 +332,45 @@ pub const CANVAS_VIEWER_JS =
     \\  world.x=mx-wx*ns;
     \\  world.y=my-wy*ns;
     \\}
+    \\/* ── Touch: single-finger pan + two-finger pinch-to-zoom ── */
+    \\var touchState={active:false,lastDist:0,lastMid:{x:0,y:0},startWorld:{x:0,y:0},fingers:0};
+    \\function touchDist(t){var dx=t[0].clientX-t[1].clientX,dy=t[0].clientY-t[1].clientY;return Math.sqrt(dx*dx+dy*dy);}
+    \\function touchMid(t){return{x:(t[0].clientX+t[1].clientX)/2,y:(t[0].clientY+t[1].clientY)/2};}
+    \\app.canvas.addEventListener('touchstart',function(e){
+    \\  e.preventDefault();
+    \\  touchState.active=true;touchState.fingers=e.touches.length;
+    \\  if(e.touches.length===1){
+    \\    panStart={x:e.touches[0].clientX,y:e.touches[0].clientY};
+    \\    worldStart={x:world.x,y:world.y};didPan=false;
+    \\  }else if(e.touches.length>=2){
+    \\    didPan=true;
+    \\    touchState.lastDist=touchDist(e.touches);
+    \\    touchState.lastMid=touchMid(e.touches);
+    \\    touchState.startWorld={x:world.x,y:world.y};
+    \\  }
+    \\},{passive:false});
+    \\app.canvas.addEventListener('touchmove',function(e){
+    \\  e.preventDefault();
+    \\  if(!touchState.active)return;
+    \\  if(e.touches.length===1&&touchState.fingers===1){
+    \\    var dx=e.touches[0].clientX-panStart.x,dy=e.touches[0].clientY-panStart.y;
+    \\    if(Math.abs(dx)>3||Math.abs(dy)>3)didPan=true;
+    \\    world.x=worldStart.x+dx;world.y=worldStart.y+dy;
+    \\  }else if(e.touches.length>=2){
+    \\    var dist=touchDist(e.touches);
+    \\    var mid=touchMid(e.touches);
+    \\    var rect=app.canvas.getBoundingClientRect();
+    \\    var mx=mid.x-rect.left,my=mid.y-rect.top;
+    \\    var factor=dist/touchState.lastDist;
+    \\    clampZoom(rect,mx,my,factor);
+    \\    touchState.lastDist=dist;touchState.lastMid=mid;
+    \\  }
+    \\},{passive:false});
+    \\app.canvas.addEventListener('touchend',function(e){
+    \\  if(e.touches.length===0){touchState.active=false;touchState.fingers=0;}
+    \\  else{touchState.fingers=e.touches.length;if(e.touches.length===1){panStart={x:e.touches[0].clientX,y:e.touches[0].clientY};worldStart={x:world.x,y:world.y};}}
+    \\},{passive:false});
+    \\
     \\app.canvas.addEventListener('wheel',function(e){
     \\  e.preventDefault();
     \\  if(e.ctrlKey){
@@ -840,83 +879,7 @@ pub const CANVAS_VIEWER_JS =
     \\  world.removeChildren();
     \\  if(!blockDiagramData)return;
     \\  var bd=blockDiagramData;
-    \\  /* Draw edges first (behind blocks) */
-    \\  /* Count edges per peripheral block for vertical distribution */
-    \\  var edgeCounts={},edgeIdx={};
-    \\  /* Find hub (mcu) block index */
-    \\  var hubIdx=0;
-    \\  for(var hi=0;hi<bd.blocks.length;hi++){if(bd.blocks[hi].category==='mcu'){hubIdx=hi;break;}}
-    \\  for(var ei=0;ei<bd.edges.length;ei++){
-    \\    var edge=bd.edges[ei];
-    \\    var pi=edge.from===hubIdx?edge.to:edge.from;
-    \\    if(!edgeCounts[pi])edgeCounts[pi]=0;
-    \\    edgeIdx[ei]=edgeCounts[pi];
-    \\    edgeCounts[pi]++;
-    \\  }
-    \\  var edgeSpacing=20;
-    \\  for(var ei=0;ei<bd.edges.length;ei++){
-    \\    var edge=bd.edges[ei];
-    \\    var fb=bd.blocks[edge.from],tb=bd.blocks[edge.to];
-    \\    var x1,y1,x2,y2;
-    \\    /* Determine which block is left vs right */
-    \\    var leftB,rightB,isFromLeft;
-    \\    if(fb.x+fb.w/2<tb.x+tb.w/2){leftB=fb;rightB=tb;isFromLeft=true;}
-    \\    else{leftB=tb;rightB=fb;isFromLeft=false;}
-    \\    /* Distribute edges vertically across the peripheral block */
-    \\    var pi=edge.from===hubIdx?edge.to:edge.from;
-    \\    var periph=bd.blocks[pi];
-    \\    var nEdges=edgeCounts[pi]||1;
-    \\    var totalSpan=(nEdges-1)*edgeSpacing;
-    \\    var lineY=periph.y+periph.h/2-totalSpan/2+edgeIdx[ei]*edgeSpacing;
-    \\    /* Clamp hub attachment within hub bounds */
-    \\    var hub=bd.blocks[hubIdx];
-    \\    var mcuY=Math.max(hub.y+20,Math.min(hub.y+hub.h-20,lineY));
-    \\    /* Connect: left block right edge -> right block left edge */
-    \\    if(edge.from===hubIdx){
-    \\      x1=hub.x+hub.w;y1=mcuY;x2=periph.x;y2=lineY;
-    \\    }else if(periph.x+periph.w<hub.x){
-    \\      x1=periph.x+periph.w;y1=lineY;x2=hub.x;y2=mcuY;
-    \\    }else{
-    \\      x1=fb.x+fb.w;y1=fb.y+fb.h/2;x2=tb.x;y2=tb.y+tb.h/2;
-    \\    }
-    \\    /* If blocks are in the same column, connect vertically instead */
-    \\    if(Math.abs(leftB.x-rightB.x)<10){
-    \\      if(fb.y<tb.y){x1=fb.x+fb.w/2;y1=fb.y+fb.h;x2=tb.x+tb.w/2;y2=tb.y;}
-    \\      else{x1=fb.x+fb.w/2;y1=fb.y;x2=tb.x+tb.w/2;y2=tb.y+tb.h;}
-    \\    }
-    \\    var col=sigColors[edge.signal]||'#8b949e';
-    \\    var colInt=parseInt(col.replace('#',''),16);
-    \\    var sw=edge.signal==='power'?2.5:1.5;
-    \\    var eg=new PIXI.Graphics();
-    \\    if(Math.abs(y1-y2)<1){
-    \\      eg.moveTo(x1,y1);eg.lineTo(x2,y2);
-    \\    }else{
-    \\      var midX=(x1+x2)/2;
-    \\      eg.moveTo(x1,y1);eg.lineTo(midX,y1);eg.lineTo(midX,y2);eg.lineTo(x2,y2);
-    \\    }
-    \\    eg.stroke({color:colInt,width:sw,alpha:0.6});
-    \\    /* Arrow head at destination */
-    \\    var ax=x2,ay=y2,as=6;
-    \\    var ag=new PIXI.Graphics();
-    \\    if(x2>x1){ag.moveTo(ax,ay);ag.lineTo(ax-as,ay-as/2);ag.lineTo(ax-as,ay+as/2);ag.fill({color:colInt,alpha:0.7});}
-    \\    else if(x2<x1){ag.moveTo(ax,ay);ag.lineTo(ax+as,ay-as/2);ag.lineTo(ax+as,ay+as/2);ag.fill({color:colInt,alpha:0.7});}
-    \\    else if(y2>y1){ag.moveTo(ax,ay);ag.lineTo(ax-as/2,ay-as);ag.lineTo(ax+as/2,ay-as);ag.fill({color:colInt,alpha:0.7});}
-    \\    world.addChild(eg);world.addChild(ag);
-    \\    /* Reverse arrow for bidirectional protocols */
-    \\    if(bidiProtocols.indexOf(edge.label)>=0){
-    \\      var ag2=new PIXI.Graphics();
-    \\      if(x2>x1){ag2.moveTo(x1,y1);ag2.lineTo(x1+as,y1-as/2);ag2.lineTo(x1+as,y1+as/2);ag2.fill({color:colInt,alpha:0.7});}
-    \\      else if(x2<x1){ag2.moveTo(x1,y1);ag2.lineTo(x1-as,y1-as/2);ag2.lineTo(x1-as,y1+as/2);ag2.fill({color:colInt,alpha:0.7});}
-    \\      world.addChild(ag2);
-    \\    }
-    \\    /* Edge label — position near the source end */
-    \\    var lbl=edge.label;
-    \\    if(edge.voltage)lbl+=' '+edge.voltage+'V';
-    \\    var lt=new PIXI.Text({text:lbl,style:{fontFamily:'system-ui,sans-serif',fontSize:10,fill:colInt}});
-    \\    lt.anchor.set(0.5,1);lt.x=x1+(x2-x1)*0.3;lt.y=y1-5;
-    \\    world.addChild(lt);
-    \\  }
-    \\  /* Draw blocks */
+    \\  /* Draw blocks with port stubs (no wires between blocks) */
     \\  for(var bi=0;bi<bd.blocks.length;bi++){
     \\    var b=bd.blocks[bi];
     \\    var cc=catColors[b.category]||'#2ea043';
@@ -926,6 +889,7 @@ pub const CANVAS_VIEWER_JS =
     \\    bc.eventMode='static';bc.cursor='pointer';
     \\    bc.hitArea=new PIXI.Rectangle(b.x,b.y,b.w,b.h);
     \\    (function(title){bc.on('pointertap',function(){
+    \\      if(didPan)return;
     \\      blockDiagramMode=false;
     \\      bdBtn.textContent='Block Diagram';bdBtn.style.borderColor='';
     \\      legend.style.display='none';
@@ -934,26 +898,169 @@ pub const CANVAS_VIEWER_JS =
     \\    });})(b.title);
     \\    var bg=new PIXI.Graphics();
     \\    bg.roundRect(b.x,b.y,b.w,b.h,8);
-    \\    bg.fill({color:fillCol,alpha:0.15});
-    \\    bg.stroke({color:fillCol,width:2});
+    \\    var isConcept=b.status==='concept';
+    \\    bg.fill({color:fillCol,alpha:isConcept?0.07:0.15});
+    \\    if(isConcept){bg.stroke({color:fillCol,width:2,cap:'round',join:'round'});}
+    \\    else{bg.stroke({color:fillCol,width:2});}
     \\    bc.addChild(bg);
     \\    /* Title */
+    \\    /* Component symbol — each shape uses a fresh Graphics to avoid path bleed */
+    \\    var sx=b.x+b.w/2,sy=b.y+10;
+    \\    var sc=fillCol;
+    \\    var tl=b.title.toLowerCase(),sl=b.subtitle.toLowerCase();
+    \\    function G(){return new PIXI.Graphics();}
+    \\    if(tl.indexOf('usb')>=0&&b.category==='connector'){
+    \\      var s1=G();s1.roundRect(sx-7,sy+1,14,10,3);s1.stroke({color:sc,width:1.5,alpha:0.7});bc.addChild(s1);
+    \\      var s2=G();s2.circle(sx,sy+6,1.5);s2.fill({color:sc,alpha:0.7});bc.addChild(s2);
+    \\      var s3=G();s3.moveTo(sx,sy+11);s3.lineTo(sx,sy+15);s3.moveTo(sx-3,sy+4);s3.lineTo(sx,sy+6);s3.lineTo(sx+3,sy+4);s3.stroke({color:sc,width:1,alpha:0.7});bc.addChild(s3);
+    \\    }else if(tl.indexOf('batt')>=0){
+    \\      var s1=G();s1.roundRect(sx-6,sy,12,10,1);s1.roundRect(sx-3,sy-2,6,3,1);s1.fill({color:sc,alpha:0.6});bc.addChild(s1);
+    \\      var s2=G();s2.moveTo(sx-2,sy+3);s2.lineTo(sx+2,sy+3);s2.moveTo(sx,sy+1);s2.lineTo(sx,sy+5);s2.moveTo(sx-2,sy+8);s2.lineTo(sx+2,sy+8);s2.stroke({color:0x0d1117,width:1.2});bc.addChild(s2);
+    \\    }else if(tl.indexOf('charger')>=0){
+    \\      var s1=G();s1.roundRect(sx-7,sy,14,11,1);s1.stroke({color:sc,width:1.2,alpha:0.7});bc.addChild(s1);
+    \\      var s2=G();s2.roundRect(sx-3,sy-2,6,3,1);s2.fill({color:sc,alpha:0.5});bc.addChild(s2);
+    \\      var s3=G();s3.moveTo(sx+1,sy+2);s3.lineTo(sx-2,sy+6);s3.lineTo(sx+1,sy+6);s3.lineTo(sx-1,sy+10);s3.lineTo(sx+2,sy+6);s3.lineTo(sx-1,sy+6);s3.closePath();s3.fill({color:sc,alpha:0.8});bc.addChild(s3);
+    \\    }else if(tl.indexOf('buck')>=0||sl.indexOf('buck')>=0){
+    \\      var s1=G();s1.moveTo(sx-6,sy+6);for(var ci2=0;ci2<4;ci2++){s1.arc(sx-4+ci2*3,sy+6,1.5,Math.PI,0);}s1.stroke({color:sc,width:1.5,alpha:0.7});bc.addChild(s1);
+    \\      var s2=G();s2.moveTo(sx,sy+9);s2.lineTo(sx,sy+14);s2.moveTo(sx,sy+14);s2.lineTo(sx-2,sy+12);s2.moveTo(sx,sy+14);s2.lineTo(sx+2,sy+12);s2.stroke({color:sc,width:1.2,alpha:0.7});bc.addChild(s2);
+    \\    }else if(tl.indexOf('ldo')>=0||sl.indexOf('ldo')>=0){
+    \\      var s1=G();s1.moveTo(sx-7,sy+1);s1.lineTo(sx+7,sy+7);s1.lineTo(sx-7,sy+13);s1.closePath();s1.stroke({color:sc,width:1.5,alpha:0.7});bc.addChild(s1);
+    \\      var s2=G();s2.moveTo(sx-10,sy+7);s2.lineTo(sx-7,sy+7);s2.moveTo(sx+7,sy+7);s2.lineTo(sx+10,sy+7);s2.moveTo(sx-2,sy+13);s2.lineTo(sx-2,sy+16);s2.stroke({color:sc,width:1.2,alpha:0.6});bc.addChild(s2);
+    \\    }else if(b.category==='mcu'||tl.indexOf('stm32')>=0||sl.indexOf('stm32')>=0){
+    \\      var s1=G();s1.roundRect(sx-7,sy,14,14,1);s1.fill({color:sc,alpha:0.6});bc.addChild(s1);
+    \\      var s2=G();s2.arc(sx,sy,3,0,Math.PI);s2.stroke({color:0x0d1117,width:1.2});bc.addChild(s2);
+    \\      var s3=G();for(var pi2=0;pi2<4;pi2++){var py2=sy+1+pi2*3.5;s3.moveTo(sx-7,py2);s3.lineTo(sx-10,py2);s3.moveTo(sx+7,py2);s3.lineTo(sx+10,py2);}s3.stroke({color:sc,width:0.8,alpha:0.6});bc.addChild(s3);
+    \\    }else if(sl.indexOf('mx66')>=0||sl.indexOf('aps256')>=0||b.category==='memory'){
+    \\      var s1=G();s1.roundRect(sx-6,sy,12,12,1);s1.fill({color:sc,alpha:0.6});bc.addChild(s1);
+    \\      var s2=G();for(var r2=0;r2<3;r2++)for(var c2=0;c2<3;c2++){s2.rect(sx-4+c2*3,sy+2+r2*3,2,2);}s2.fill({color:0x0d1117,alpha:0.5});bc.addChild(s2);
+    \\      var s3=G();s3.moveTo(sx-6,sy+6);s3.lineTo(sx-9,sy+6);s3.moveTo(sx+6,sy+6);s3.lineTo(sx+9,sy+6);s3.stroke({color:sc,width:0.8,alpha:0.6});bc.addChild(s3);
+    \\    }else if(tl.indexOf('imu')>=0||sl.indexOf('icm')>=0){
+    \\      var s1=G();s1.circle(sx,sy+7,6);s1.stroke({color:sc,width:1.2,alpha:0.7});bc.addChild(s1);
+    \\      var s2=G();s2.moveTo(sx,sy+3);s2.lineTo(sx,sy+11);s2.moveTo(sx-4,sy+7);s2.lineTo(sx+4,sy+7);s2.moveTo(sx-3,sy+4);s2.lineTo(sx+3,sy+10);s2.stroke({color:sc,width:0.8,alpha:0.6});bc.addChild(s2);
+    \\    }else if(tl.indexOf('adc')>=0||sl.indexOf('ltc2323')>=0||sl.indexOf('adc')>=0){
+    \\      var s1=G();s1.moveTo(sx-7,sy+7);s1.bezierCurveTo(sx-5,sy+2,sx-3,sy+12,sx-1,sy+7);s1.stroke({color:sc,width:1.2,alpha:0.7});bc.addChild(s1);
+    \\      var s2=G();s2.moveTo(sx+1,sy+10);s2.lineTo(sx+3,sy+10);s2.lineTo(sx+3,sy+7);s2.lineTo(sx+5,sy+7);s2.lineTo(sx+5,sy+4);s2.lineTo(sx+7,sy+4);s2.stroke({color:sc,width:1.2,alpha:0.7});bc.addChild(s2);
+    \\    }else if(tl.indexOf('swd')>=0||tl.indexOf('debug')>=0){
+    \\      var s1=G();s1.roundRect(sx-6,sy+1,12,10,2);s1.stroke({color:sc,width:1.2,alpha:0.7});bc.addChild(s1);
+    \\      var s2=G();for(var pi2=0;pi2<3;pi2++){s2.circle(sx-3+pi2*3,sy+4,1);s2.circle(sx-3+pi2*3,sy+8,1);}s2.fill({color:sc,alpha:0.6});bc.addChild(s2);
+    \\      var s3=G();s3.moveTo(sx,sy+11);s3.lineTo(sx,sy+15);s3.stroke({color:sc,width:1.2,alpha:0.6});bc.addChild(s3);
+    \\    }else{
+    \\      var s1=G();s1.roundRect(sx-6,sy,12,12,1);s1.fill({color:sc,alpha:0.6});bc.addChild(s1);
+    \\      var s2=G();s2.arc(sx,sy,2.5,0,Math.PI);s2.stroke({color:0x0d1117,width:1});bc.addChild(s2);
+    \\      var s3=G();for(var pi2=0;pi2<3;pi2++){var py2=sy+2+pi2*4;s3.moveTo(sx-6,py2);s3.lineTo(sx-9,py2);s3.moveTo(sx+6,py2);s3.lineTo(sx+9,py2);}s3.stroke({color:sc,width:0.8,alpha:0.6});bc.addChild(s3);
+    \\    }
+    \\    var ty=b.y+28;
     \\    var tt=new PIXI.Text({text:b.title,style:{fontFamily:'system-ui,sans-serif',fontSize:13,fontWeight:'bold',fill:0xe0e0e0}});
-    \\    tt.anchor.set(0.5,0);tt.x=b.x+b.w/2;tt.y=b.y+8;
-    \\    bc.addChild(tt);
+    \\    tt.anchor.set(0.5,0);tt.x=b.x+b.w/2;tt.y=ty;
+    \\    bc.addChild(tt);ty+=18;
     \\    /* Subtitle */
     \\    if(b.subtitle){
     \\      var st=new PIXI.Text({text:b.subtitle,style:{fontFamily:'system-ui,sans-serif',fontSize:11,fill:0x8b949e}});
-    \\      st.anchor.set(0.5,0);st.x=b.x+b.w/2;st.y=b.y+26;
-    \\      bc.addChild(st);
+    \\      st.anchor.set(0.5,0);st.x=b.x+b.w/2;st.y=ty;
+    \\      bc.addChild(st);ty+=16;
     \\    }
     \\    /* Detail */
     \\    if(b.detail){
     \\      var dt=new PIXI.Text({text:b.detail,style:{fontFamily:'system-ui,sans-serif',fontSize:10,fontStyle:'italic',fill:0x666666}});
-    \\      dt.anchor.set(0.5,0);dt.x=b.x+b.w/2;dt.y=b.y+(b.subtitle?42:26);
-    \\      bc.addChild(dt);
+    \\      dt.anchor.set(0.5,0);dt.x=b.x+b.w/2;dt.y=ty;
+    \\      bc.addChild(dt);ty+=14;
+    \\    }
+    \\    /* Port stubs */
+    \\    ty+=6;
+    \\    var stubLen=20,portH=16;
+    \\    var inPorts=[],outPorts=[];
+    \\    var isPowerConsumer=b.section==='power'&&b.category!=='power';
+    \\    if(b.ports){for(var pi=0;pi<b.ports.length;pi++){var p=b.ports[pi];
+    \\      if(isPowerConsumer&&p.signal!=='power')continue;
+    \\      if(p.direction==='out')outPorts.push(p);else inPorts.push(p);}}
+    \\    if(!isPowerConsumer&&b.protocols){for(var pi=0;pi<b.protocols.length;pi++){outPorts.push({name:b.protocols[pi],net:b.protocols[pi],direction:'out',signal:'data'});}}
+    \\    var maxPorts=Math.max(inPorts.length,outPorts.length);
+    \\    for(var pi=0;pi<maxPorts;pi++){
+    \\      var py=ty+pi*portH;
+    \\      if(pi<inPorts.length){
+    \\        var ip=inPorts[pi];
+    \\        var pc=sigColors[ip.signal]||'#8b949e';
+    \\        var pcInt=parseInt(pc.replace('#',''),16);
+    \\        var pg=new PIXI.Graphics();
+    \\        pg.moveTo(b.x-stubLen,py);pg.lineTo(b.x,py);
+    \\        pg.stroke({color:pcInt,width:1.5,alpha:0.8});
+    \\        bc.addChild(pg);
+    \\        /* Port name inside block */
+    \\        var ipt=new PIXI.Text({text:ip.name,style:{fontFamily:'monospace',fontSize:9,fill:pcInt}});
+    \\        ipt.anchor.set(0,0.5);ipt.x=b.x+4;ipt.y=py;ipt.alpha=0.7;
+    \\        bc.addChild(ipt);
+    \\        /* Net name on stub */
+    \\        var netName=ip.net||ip.name;
+    \\        var lbl=netName;if(ip.voltage)lbl+=' '+ip.voltage+'V';
+    \\        var pt=new PIXI.Text({text:lbl,style:{fontFamily:'monospace',fontSize:10,fill:pcInt}});
+    \\        pt.anchor.set(1,0.5);pt.x=b.x-stubLen-4;pt.y=py;
+    \\        bc.addChild(pt);
+    \\      }
+    \\      if(pi<outPorts.length){
+    \\        var op=outPorts[pi];
+    \\        var oc=sigColors[op.signal]||'#8b949e';
+    \\        var ocInt=parseInt(oc.replace('#',''),16);
+    \\        var og=new PIXI.Graphics();
+    \\        og.moveTo(b.x+b.w,py);og.lineTo(b.x+b.w+stubLen,py);
+    \\        og.stroke({color:ocInt,width:1.5,alpha:0.8});
+    \\        bc.addChild(og);
+    \\        /* Port name inside block */
+    \\        var opt=new PIXI.Text({text:op.name,style:{fontFamily:'monospace',fontSize:9,fill:ocInt}});
+    \\        opt.anchor.set(1,0.5);opt.x=b.x+b.w-4;opt.y=py;opt.alpha=0.7;
+    \\        bc.addChild(opt);
+    \\        /* Net name on stub */
+    \\        var oNetName=op.net||op.name;
+    \\        var olbl=oNetName;if(op.voltage)olbl+=' '+op.voltage+'V';
+    \\        var ot=new PIXI.Text({text:olbl,style:{fontFamily:'monospace',fontSize:10,fill:ocInt}});
+    \\        ot.anchor.set(0,0.5);ot.x=b.x+b.w+stubLen+4;ot.y=py;
+    \\        bc.addChild(ot);
+    \\      }
+    \\    }
+    \\    /* Concept badge */
+    \\    if(isConcept){
+    \\      var badge=new PIXI.Text({text:'CONCEPT',style:{fontFamily:'system-ui,sans-serif',fontSize:8,fontWeight:'bold',fill:0x8b949e,letterSpacing:1}});
+    \\      badge.anchor.set(1,0);badge.x=b.x+b.w-8;badge.y=b.y+4;
+    \\      bc.addChild(badge);
     \\    }
     \\    world.addChild(bc);
+    \\  }
+    \\
+    \\  /* Section boxes */
+    \\  if(bd.sections){
+    \\    var sectionNames=['power','signal'];
+    \\    for(var si=0;si<bd.sections.length;si++){
+    \\      var sec=bd.sections[si];
+    \\      var sn=sectionNames[si]||'';
+    \\      var sx1=9999,sy1=9999,sx2=0,sy2=0,found=false;
+    \\      for(var i=0;i<bd.blocks.length;i++){
+    \\        var bb=bd.blocks[i];
+    \\        if(bb.section!==sn)continue;
+    \\        found=true;
+    \\        if(bb.x<sx1)sx1=bb.x;if(bb.y<sy1)sy1=bb.y;
+    \\        if(bb.x+bb.w>sx2)sx2=bb.x+bb.w;if(bb.y+bb.h>sy2)sy2=bb.y+bb.h;
+    \\      }
+    \\      if(!found)continue;
+    \\      var spx=80,spy=50,titleH=30;
+    \\      /* Title above box */
+    \\      var sh=new PIXI.Text({text:sec.name,style:{fontFamily:'system-ui,sans-serif',fontSize:16,fontWeight:'bold',fill:0x8b949e}});
+    \\      sh.x=sx1-spx+14;sh.y=sy1-spy-titleH;sh.alpha=0.7;
+    \\      world.addChild(sh);
+    \\      /* Box */
+    \\      var sg=new PIXI.Graphics();
+    \\      sg.roundRect(sx1-spx,sy1-spy,sx2-sx1+spx*2,sy2-sy1+spy*2,12);
+    \\      sg.stroke({color:0x30363d,width:1.5,alpha:0.5});
+    \\      sg.fill({color:0x161b22,alpha:0.3});
+    \\      world.addChildAt(sg,0);
+    \\    }
+    \\  }
+    \\  /* Column labels */
+    \\  if(bd.columns){
+    \\    for(var ci=0;ci<bd.columns.length;ci++){
+    \\      var col=bd.columns[ci];
+    \\      var ct=new PIXI.Text({text:col.name,style:{fontFamily:'system-ui,sans-serif',fontSize:12,fontWeight:'600',fill:0x58a6ff,letterSpacing:0.5}});
+    \\      ct.anchor.set(0.5,1);ct.x=col.x+110;ct.y=col.y;ct.alpha=0.6;
+    \\      world.addChild(ct);
+    \\    }
     \\  }
     \\  /* Fit */
     \\  if(bd.blocks.length){
@@ -963,7 +1070,7 @@ pub const CANVAS_VIEWER_JS =
     \\      if(bb.x<minX)minX=bb.x;if(bb.y<minY)minY=bb.y;
     \\      if(bb.x+bb.w>maxX)maxX=bb.x+bb.w;if(bb.y+bb.h>maxY)maxY=bb.y+bb.h;
     \\    }
-    \\    var pad=40,cw=container.clientWidth,ch=container.clientHeight;
+    \\    var pad=60,cw=container.clientWidth,ch=container.clientHeight;
     \\    var bw=maxX-minX+pad*2,bh=maxY-minY+pad*2;
     \\    var sc=Math.min(cw/bw,ch/bh)*0.9;
     \\    world.scale.set(sc);
@@ -1077,6 +1184,12 @@ pub const CANVAS_VIEWER_JS =
     \\/* ── Start ────────────────────────────────────────────────── */
     \\await loadScene();
     \\showSectionList();
+    \\if(typeof CONCEPT_MODE!=='undefined'&&CONCEPT_MODE){
+    \\  blockDiagramMode=true;
+    \\  bdBtn.textContent='Schematic';bdBtn.style.borderColor='#58a6ff';
+    \\  try{var r5=await fetch('/api/block-diagram-json/'+DESIGN_NAME);blockDiagramData=await r5.json();}catch(e3){}
+    \\  buildBlockDiagram();sidebarContent.innerHTML='<div class="sidebar-empty">Block diagram view</div>';legend.style.display='block';
+    \\}
     \\
     \\}catch(err){console.error('Canvas viewer error:',err);}
     \\})();

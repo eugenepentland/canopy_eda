@@ -209,6 +209,11 @@ pub fn componentPrefix(family: []const u8) u8 {
     if (std.mem.startsWith(u8, family, "connector")) return 'J';
     if (std.mem.startsWith(u8, family, "amphenol")) return 'J';
     if (std.mem.startsWith(u8, family, "lsh-")) return 'J';
+    if (std.mem.startsWith(u8, family, "usb4")) return 'J';
+    // Known ESD/filter patterns
+    if (std.mem.startsWith(u8, family, "ecmf")) return 'U';
+    // Known ferrite patterns
+    if (std.mem.startsWith(u8, family, "ferrite")) return 'L';
     // Known crystal patterns
     if (std.mem.eql(u8, family, "abm8")) return 'Y';
     if (std.mem.startsWith(u8, family, "fc-")) return 'Y';

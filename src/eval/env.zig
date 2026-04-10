@@ -191,6 +191,16 @@ pub const CalcResult = struct {
     value: f64,
 };
 
+/// Design maturity status for a section.
+pub const SectionStatus = enum {
+    /// High-level concept: ports and protocols defined, no component implementation yet.
+    concept,
+    /// Fully implemented with real components, pinouts, and passives.
+    implemented,
+    /// Implemented but flagged for review.
+    review,
+};
+
 /// A named section that wraps related instances and pin groups.
 pub const Section = struct {
     name: []const u8,
@@ -210,7 +220,14 @@ pub const Section = struct {
     calcs: []const CalcBlock = &.{},
     /// Nested sub-sections (internal detail, shown in schematic but merged in block diagram).
     sub_sections: []const Section = &.{},
+    /// Design maturity status (concept, implemented, review). Inferred from content if not explicit.
+    status: SectionStatus = .implemented,
+    /// Block diagram role: input (power source), output (power sink), or auto (inferred).
+    block_role: BlockRole = .auto,
 };
+
+/// Block diagram placement role for sections.
+pub const BlockRole = enum { auto, input, output };
 
 /// A net-tie pair: merge net `b` into net `a`.
 pub const NetTie = struct { a: []const u8, b: []const u8 };
