@@ -4,7 +4,7 @@ const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
 const Net = env_mod.Net;
 
-pub const Severity = enum { @"error", warning };
+pub const Severity = enum { @"error", warning, info };
 
 pub const ViolationKind = enum {
     duplicate_refdes,
@@ -16,6 +16,7 @@ pub const ViolationKind = enum {
     voltage_mismatch,
     missing_decoupling,
     power_no_cap,
+    concept_remaining,
 };
 
 pub const Violation = struct {
@@ -40,6 +41,7 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock) ![]const 
     checkMissingDecoupling(allocator, block, &violations);
     checkVoltageMismatches(allocator, block, &violations);
     checkUnconnectedPowerPins(allocator, block, &violations);
+    checkConceptSections(allocator, block, &violations);
 
     return violations.items;
 }
@@ -233,9 +235,10 @@ fn checkMissingFootprints(allocator: std.mem.Allocator, block: *const DesignBloc
 
 /// Check power nets connected to ICs but missing decoupling caps.
 fn checkMissingDecoupling(allocator: std.mem.Allocator, block: *const DesignBlock, violations: *std.ArrayListUnmanaged(Violation)) void {
-    // Collect power nets from section port declarations
+    // Collect power nets from implemented section port declarations (skip concept sections)
     var power_nets: std.StringHashMapUnmanaged(void) = .empty;
     for (block.sections) |sec| {
+        if (sec.status == .concept) continue;
         for (sec.ports) |p| {
             if (p.signal_type == .power and p.direction == .in) {
                 power_nets.put(allocator, p.name, {}) catch {};
@@ -373,6 +376,20 @@ fn checkBlockPowerPins(allocator: std.mem.Allocator, block: *const DesignBlock, 
                 .severity = .warning,
                 .message = msg,
                 .ref_des = inst.ref_des,
+            }) catch {};
+        }
+    }
+}
+
+/// Report concept sections that still need implementation.
+fn checkConceptSections(allocator: std.mem.Allocator, block: *const DesignBlock, violations: *std.ArrayListUnmanaged(Violation)) void {
+    for (block.sections) |sec| {
+        if (sec.status == .concept) {
+            const msg = std.fmt.allocPrint(allocator, "Section \"{s}\" is still a concept — no implementation yet", .{sec.name}) catch continue;
+            violations.append(allocator, .{
+                .kind = .concept_remaining,
+                .severity = .info,
+                .message = msg,
             }) catch {};
         }
     }

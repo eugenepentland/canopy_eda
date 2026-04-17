@@ -1,13 +1,14 @@
 const std = @import("std");
 const httpz = @import("httpz");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
-const render_svg = @import("../render_svg.zig");
 const render_json = @import("../render_json.zig");
 const bom = @import("../bom.zig");
 const env_mod = @import("../eval/env.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 const bom_html = @import("bom_html.zig");
+const history = @import("history.zig");
+const sexpr_parser = @import("../sexpr/parser.zig");
 
 pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
@@ -136,15 +137,12 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     defer ctx.allocator.free(bom_path);
     bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
 
-    const svg = render_svg.renderSchematic(ctx.allocator, block) catch {
-        res.status = 500;
-        return;
-    };
+    const new_layout = render_json.renderSceneGraph(ctx.allocator, block) catch null;
 
     serve_root.live_mutex.lock();
-    serve_root.live_svg = svg;
-    serve_root.live_version += 1;
+    serve_root.live_layout_json = new_layout;
     serve_root.live_mutex.unlock();
+    _ = serve_root.bumpLiveVersion(name);
 
     res.header("access-control-allow-origin", "*");
     res.content_type = .JSON;
@@ -323,15 +321,12 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 
     var svg_sym_cache = try bom_html.buildSymbolPinCache(ctx.allocator, ctx.project_dir);
 
-    const svg = render_svg.renderSchematic(ctx.allocator, block) catch {
-        res.status = 500;
-        return;
-    };
+    const new_layout = render_json.renderSceneGraph(ctx.allocator, block) catch null;
 
     serve_root.live_mutex.lock();
-    serve_root.live_svg = svg;
-    serve_root.live_version += 1;
+    serve_root.live_layout_json = new_layout;
     serve_root.live_mutex.unlock();
+    _ = serve_root.bumpLiveVersion(name);
 
     // Return updated COMPONENTS so the client can refresh srcOff values
     var comp_json: std.ArrayListUnmanaged(u8) = .empty;
@@ -804,14 +799,12 @@ fn rebuildAndPush(ctx: *Handler, name: []const u8, res: *httpz.Response) !void {
     defer ctx.allocator.free(bom_path);
     bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
 
-    const svg = render_svg.renderSchematic(ctx.allocator, block) catch return error.RebuildFailed;
     const layout_json = render_json.renderSceneGraph(ctx.allocator, block) catch null;
 
     serve_root.live_mutex.lock();
-    serve_root.live_svg = svg;
     serve_root.live_layout_json = layout_json;
-    serve_root.live_version += 1;
     serve_root.live_mutex.unlock();
+    _ = serve_root.bumpLiveVersion(name);
 
     res.header("access-control-allow-origin", "*");
     res.content_type = .JSON;
@@ -835,4 +828,522 @@ fn parseJsonString(body: []const u8, key: []const u8) ?[]const u8 {
     start += 1; // skip opening quote
     const end = std.mem.indexOfPos(u8, body, start, "\"") orelse return null;
     return body[start..end];
+}
+
+// ── Board outline editing ───────────────────────────────────────────
+
+pub fn boardOutlineApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing body\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
+        res.status = 400;
+        res.body = "{\"error\":\"invalid json\"}";
+        res.content_type = .JSON;
+        return;
+    };
+    const root = parsed.value;
+    const x1 = if (root.object.get("x1")) |v| floatFromJson(v) else null;
+    const y1 = if (root.object.get("y1")) |v| floatFromJson(v) else null;
+    const x2 = if (root.object.get("x2")) |v| floatFromJson(v) else null;
+    const y2 = if (root.object.get("y2")) |v| floatFromJson(v) else null;
+    if (x1 == null or y1 == null or x2 == null or y2 == null) {
+        res.status = 400;
+        res.body = "{\"error\":\"missing x1/y1/x2/y2\"}";
+        res.content_type = .JSON;
+        return;
+    }
+
+    // Read the board file
+    const board_file_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}-board.sexp", .{ ctx.project_dir, name });
+    defer ctx.allocator.free(board_file_path);
+    const source = std.fs.cwd().readFileAlloc(ctx.allocator, board_file_path, 1024 * 1024) catch {
+        res.status = 404;
+        res.body = "{\"error\":\"board file not found\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    // Find and replace the outline line
+    const new_outline = try std.fmt.allocPrint(ctx.allocator, "(outline (rect {d:.1} {d:.1} {d:.1} {d:.1}))", .{ x1.?, y1.?, x2.?, y2.? });
+    defer ctx.allocator.free(new_outline);
+
+    var result_buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = result_buf.writer(ctx.allocator);
+
+    // Replace the outline form in the source
+    if (std.mem.indexOf(u8, source, "(outline ")) |start| {
+        // Find matching close paren
+        var depth: usize = 0;
+        var end: usize = start;
+        while (end < source.len) : (end += 1) {
+            if (source[end] == '(') depth += 1;
+            if (source[end] == ')') {
+                depth -= 1;
+                if (depth == 0) {
+                    end += 1;
+                    break;
+                }
+            }
+        }
+        try w.writeAll(source[0..start]);
+        try w.writeAll(new_outline);
+        try w.writeAll(source[end..]);
+    } else {
+        // No outline exists — insert after first line
+        if (std.mem.indexOf(u8, source, "\n")) |nl| {
+            try w.writeAll(source[0 .. nl + 1]);
+            try w.print("  {s}\n", .{new_outline});
+            try w.writeAll(source[nl + 1 ..]);
+        } else {
+            res.status = 500;
+            res.body = "{\"error\":\"malformed board file\"}";
+            res.content_type = .JSON;
+            return;
+        }
+    }
+
+    // Write back
+    const file = std.fs.cwd().createFile(board_file_path, .{}) catch {
+        res.status = 500;
+        res.body = "{\"error\":\"failed to write\"}";
+        res.content_type = .JSON;
+        return;
+    };
+    defer file.close();
+    file.writeAll(result_buf.items) catch {
+        res.status = 500;
+        res.body = "{\"error\":\"write error\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    res.content_type = .JSON;
+    res.body = "{\"ok\":true}";
+}
+
+fn floatFromJson(v: std.json.Value) ?f64 {
+    return switch (v) {
+        .float => |f| f,
+        .integer => |i| @floatFromInt(i),
+        else => null,
+    };
+}
+
+// ── Core mutation API (shared between HTTP handlers and MCP tools) ───────
+//
+// The `…Core` functions are pure-logic entry points: they take an allocator,
+// project dir, design name, and edit args, and return a MutationResult with
+// the post-edit live_version. HTTP handlers above still do their own parsing
+// and response-shaping; these cores are called by the MCP tool dispatcher
+// (see src/serve/mcp.zig). Later, the HTTP handlers can be converted to
+// delegate here to remove duplication.
+
+pub const EditError = error{
+    InstanceNotFound,
+    PinNotFound,
+    SectionNotFound,
+    ComponentNotFound,
+    MalformedSource,
+    InvalidSource,
+    CannotReadDesign,
+    CannotWriteDesign,
+    RebuildFailed,
+    SnapshotNotFound,
+    InvalidSnapshotId,
+} || std.mem.Allocator.Error;
+
+pub const MutationResult = struct {
+    version: u32,
+    /// Snapshot id for the state immediately before this mutation, or null if
+    /// the file did not exist yet (brand-new design). Caller owns the memory.
+    snapshot: ?[]const u8 = null,
+};
+
+pub const PinAssignment = struct {
+    pin: []const u8,
+    net: []const u8,
+};
+
+fn designFilePath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+}
+
+fn readDesignSource(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) EditError![]u8 {
+    const path = try designFilePath(allocator, project_dir, name);
+    defer allocator.free(path);
+    return std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch return error.CannotReadDesign;
+}
+
+fn writeAndRebuild(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    new_source: []const u8,
+) EditError!MutationResult {
+    const path = try designFilePath(allocator, project_dir, name);
+    defer allocator.free(path);
+
+    // Snapshot prior state before overwriting. Null means the design didn't
+    // exist yet (brand-new create). Snapshot errors are logged but don't
+    // block the write — undo is a nice-to-have, not a hard requirement.
+    const snap_id: ?[]const u8 = history.snapshot(allocator, project_dir, name) catch |e| blk: {
+        std.debug.print("[snapshot] failed for {s}: {s}\n", .{ name, @errorName(e) });
+        break :blk null;
+    };
+
+    {
+        const file = std.fs.cwd().createFile(path, .{}) catch return error.CannotWriteDesign;
+        defer file.close();
+        file.writeAll(new_source) catch return error.CannotWriteDesign;
+    }
+
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    const result = eval.evalFile(path) catch return error.RebuildFailed;
+    const block = switch (result) {
+        .design_block => |b| b,
+        else => return error.RebuildFailed,
+    };
+
+    const bom_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name }) catch return error.OutOfMemory;
+    defer allocator.free(bom_path);
+    bom.resolveIdentities(allocator, block, bom_path, project_dir) catch {};
+
+    const layout_json = render_json.renderSceneGraph(allocator, block) catch null;
+
+    serve_root.live_mutex.lock();
+    serve_root.live_layout_json = layout_json;
+    serve_root.live_mutex.unlock();
+    const version = serve_root.bumpLiveVersion(name);
+
+    return .{ .version = version, .snapshot = snap_id };
+}
+
+fn findInstanceEnd(source: []const u8, inst_start: usize) ?usize {
+    var depth: u32 = 0;
+    for (source[inst_start..], 0..) |ch, i| {
+        if (ch == '(') depth += 1;
+        if (ch == ')') {
+            depth -= 1;
+            if (depth == 0) return inst_start + i + 1;
+        }
+    }
+    return null;
+}
+
+pub fn editValueCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    ref_des: []const u8,
+    new_value: []const u8,
+) EditError!MutationResult {
+    const source = try readDesignSource(allocator, project_dir, name);
+    defer allocator.free(source);
+
+    const needle = try std.fmt.allocPrint(allocator, "(instance \"{s}\" (", .{ref_des});
+    defer allocator.free(needle);
+
+    const inst_pos = std.mem.indexOf(u8, source, needle) orelse return error.InstanceNotFound;
+    const after_inst = inst_pos + needle.len;
+
+    var pos = after_inst;
+    while (pos < source.len and source[pos] != '"' and source[pos] != ')') : (pos += 1) {}
+    if (pos >= source.len or source[pos] != '"') return error.MalformedSource;
+
+    const old_val_start = pos + 1;
+    const old_val_end = std.mem.indexOfPos(u8, source, old_val_start, "\"") orelse return error.MalformedSource;
+
+    var new_source: std.ArrayListUnmanaged(u8) = .empty;
+    defer new_source.deinit(allocator);
+    const nw = new_source.writer(allocator);
+    try nw.writeAll(source[0..old_val_start]);
+    try nw.writeAll(new_value);
+    try nw.writeAll(source[old_val_end..]);
+
+    return writeAndRebuild(allocator, project_dir, name, new_source.items);
+}
+
+pub fn removeInstanceCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    ref_des: []const u8,
+) EditError!MutationResult {
+    const source = try readDesignSource(allocator, project_dir, name);
+    defer allocator.free(source);
+
+    const needle = try std.fmt.allocPrint(allocator, "(instance \"{s}\"", .{ref_des});
+    defer allocator.free(needle);
+
+    const inst_pos = std.mem.indexOf(u8, source, needle) orelse return error.InstanceNotFound;
+    var inst_end = findInstanceEnd(source, inst_pos) orelse return error.MalformedSource;
+    if (inst_end < source.len and source[inst_end] == '\n') inst_end += 1;
+
+    var inst_start = inst_pos;
+    while (inst_start > 0 and (source[inst_start - 1] == ' ' or source[inst_start - 1] == '\t')) : (inst_start -= 1) {}
+
+    var new_source: std.ArrayListUnmanaged(u8) = .empty;
+    defer new_source.deinit(allocator);
+    const nw = new_source.writer(allocator);
+    try nw.writeAll(source[0..inst_start]);
+    try nw.writeAll(source[inst_end..]);
+
+    return writeAndRebuild(allocator, project_dir, name, new_source.items);
+}
+
+pub fn rewirePinCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    ref_des: []const u8,
+    pin: []const u8,
+    new_net: []const u8,
+) EditError!MutationResult {
+    const source = try readDesignSource(allocator, project_dir, name);
+    defer allocator.free(source);
+
+    const inst_needle = try std.fmt.allocPrint(allocator, "(instance \"{s}\"", .{ref_des});
+    defer allocator.free(inst_needle);
+    const inst_pos = std.mem.indexOf(u8, source, inst_needle) orelse return error.InstanceNotFound;
+    const inst_end = findInstanceEnd(source, inst_pos) orelse return error.MalformedSource;
+
+    const pin_needle = try std.fmt.allocPrint(allocator, "(pin {s} \"", .{pin});
+    defer allocator.free(pin_needle);
+    const pin_offset = std.mem.indexOf(u8, source[inst_pos..inst_end], pin_needle) orelse return error.PinNotFound;
+    const abs_pin = inst_pos + pin_offset + pin_needle.len;
+    const net_end = std.mem.indexOfPos(u8, source, abs_pin, "\"") orelse return error.MalformedSource;
+
+    var new_source: std.ArrayListUnmanaged(u8) = .empty;
+    defer new_source.deinit(allocator);
+    const nw = new_source.writer(allocator);
+    try nw.writeAll(source[0..abs_pin]);
+    try nw.writeAll(new_net);
+    try nw.writeAll(source[net_end..]);
+
+    return writeAndRebuild(allocator, project_dir, name, new_source.items);
+}
+
+pub fn addInstanceCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    section: []const u8,
+    component: []const u8,
+    value: []const u8,
+    pins: []const PinAssignment,
+) EditError!MutationResult {
+    const source = try readDesignSource(allocator, project_dir, name);
+    defer allocator.free(source);
+
+    var pin_body: std.ArrayListUnmanaged(u8) = .empty;
+    defer pin_body.deinit(allocator);
+    const pw = pin_body.writer(allocator);
+    for (pins) |p| try pw.print("\n    (pin {s} \"{s}\")", .{ p.pin, p.net });
+
+    var inst_form: std.ArrayListUnmanaged(u8) = .empty;
+    defer inst_form.deinit(allocator);
+    const iw = inst_form.writer(allocator);
+    if (value.len > 0) {
+        try iw.print("  (instance ({s} \"{s}\")", .{ component, value });
+    } else {
+        try iw.print("  (instance {s}", .{component});
+    }
+    try iw.writeAll(pin_body.items);
+    try iw.writeAll(")\n");
+
+    var new_source: std.ArrayListUnmanaged(u8) = .empty;
+    defer new_source.deinit(allocator);
+    const nw = new_source.writer(allocator);
+
+    var insert_at: usize = std.mem.lastIndexOfScalar(u8, source, ')') orelse source.len;
+    if (section.len > 0) {
+        const sec_needle = try std.fmt.allocPrint(allocator, "(section \"{s}\"", .{section});
+        defer allocator.free(sec_needle);
+        if (std.mem.indexOf(u8, source, sec_needle)) |sec_start| {
+            insert_at = (findInstanceEnd(source, sec_start) orelse return error.MalformedSource) - 1;
+        } else {
+            return error.SectionNotFound;
+        }
+    }
+
+    try nw.writeAll(source[0..insert_at]);
+    try nw.writeAll("\n");
+    try nw.writeAll(inst_form.items);
+    try nw.writeAll(source[insert_at..]);
+
+    return writeAndRebuild(allocator, project_dir, name, new_source.items);
+}
+
+pub fn swapComponentCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    ref_des: []const u8,
+    new_component: []const u8,
+) EditError!MutationResult {
+    // Verify component family exists
+    const comp_path = try std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, new_component });
+    defer allocator.free(comp_path);
+    std.fs.cwd().access(comp_path, .{}) catch return error.ComponentNotFound;
+
+    // Evaluate current design to look up source_offset for this ref_des
+    const design_path = try designFilePath(allocator, project_dir, name);
+    defer allocator.free(design_path);
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    const result = eval.evalFile(design_path) catch return error.RebuildFailed;
+    const block = switch (result) {
+        .design_block => |b| b,
+        else => return error.RebuildFailed,
+    };
+
+    var source_offset: usize = 0;
+    var old_component: []const u8 = "";
+    var found = false;
+    for (block.instances) |inst| {
+        if (std.mem.eql(u8, inst.ref_des, ref_des)) {
+            source_offset = @intCast(inst.source_offset);
+            old_component = inst.component;
+            found = true;
+            break;
+        }
+    }
+    if (!found) return error.InstanceNotFound;
+
+    const source = try readDesignSource(allocator, project_dir, name);
+    defer allocator.free(source);
+
+    if (source_offset + old_component.len > source.len or
+        !std.mem.eql(u8, source[source_offset .. source_offset + old_component.len], old_component))
+    {
+        return error.MalformedSource;
+    }
+
+    var new_source: std.ArrayListUnmanaged(u8) = .empty;
+    defer new_source.deinit(allocator);
+    const nw = new_source.writer(allocator);
+    try nw.writeAll(source[0..source_offset]);
+    try nw.writeAll(new_component);
+    try nw.writeAll(source[source_offset + old_component.len ..]);
+
+    // Ensure new component is in the import list
+    var final_bytes: []const u8 = new_source.items;
+    var final_owned: ?std.ArrayListUnmanaged(u8) = null;
+    defer if (final_owned) |*o| o.deinit(allocator);
+    if (std.mem.indexOf(u8, final_bytes, "(import ")) |import_start| {
+        const import_end = findInstanceEnd(final_bytes, import_start) orelse return error.MalformedSource;
+        const import_section = final_bytes[import_start..import_end];
+        const already_imported = blk: {
+            var search_from: usize = 0;
+            while (std.mem.indexOfPos(u8, import_section, search_from, new_component)) |ipos| {
+                const before_ok = ipos == 0 or import_section[ipos - 1] == ' ' or import_section[ipos - 1] == '\n';
+                const after_pos = ipos + new_component.len;
+                const after_ok = after_pos >= import_section.len or import_section[after_pos] == ' ' or import_section[after_pos] == '\n' or import_section[after_pos] == ')';
+                if (before_ok and after_ok) break :blk true;
+                search_from = ipos + 1;
+            }
+            break :blk false;
+        };
+        if (!already_imported) {
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            const bw = buf.writer(allocator);
+            // import_end points one past the closing paren; insert before it.
+            try bw.writeAll(final_bytes[0 .. import_end - 1]);
+            try bw.writeAll(" ");
+            try bw.writeAll(new_component);
+            try bw.writeAll(final_bytes[import_end - 1 ..]);
+            final_owned = buf;
+            final_bytes = buf.items;
+        }
+    }
+
+    return writeAndRebuild(allocator, project_dir, name, final_bytes);
+}
+
+/// Read the full `.sexp` source text for a design. Caller owns the returned
+/// buffer.
+pub fn readDesignSourcePub(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+) EditError![]u8 {
+    return readDesignSource(allocator, project_dir, name);
+}
+
+/// Overwrite (or create) the design's `.sexp` with `new_source`. Validates
+/// syntax via the sexpr parser before writing, snapshots any prior state,
+/// then rebuilds the design.
+pub fn writeDesignCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    new_source: []const u8,
+) EditError!MutationResult {
+    // Pre-flight: reject obvious syntax errors so a broken file never hits
+    // disk. Semantic errors (missing imports, assertion failures) still fall
+    // through to the rebuild step — the auto-snapshot serves as undo there.
+    _ = sexpr_parser.parse(allocator, new_source) catch return error.InvalidSource;
+
+    // Ensure src/ exists so brand-new designs can be created.
+    const src_dir = try std.fmt.allocPrint(allocator, "{s}/src", .{project_dir});
+    defer allocator.free(src_dir);
+    std.fs.cwd().makePath(src_dir) catch {};
+
+    return writeAndRebuild(allocator, project_dir, name, new_source);
+}
+
+/// Restore a design from a history snapshot. First snapshots the current
+/// state (so restore is itself undoable), then copies the snapshot files
+/// back into `src/` and rebuilds.
+pub fn restoreDesignCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    id: []const u8,
+) EditError!MutationResult {
+    // Snapshot current state first so the restore can be undone.
+    const pre_snap: ?[]const u8 = history.snapshot(allocator, project_dir, name) catch |e| blk: {
+        std.debug.print("[snapshot] pre-restore failed for {s}: {s}\n", .{ name, @errorName(e) });
+        break :blk null;
+    };
+
+    history.restore(allocator, project_dir, name, id) catch |e| switch (e) {
+        error.InvalidSnapshotId => return error.InvalidSnapshotId,
+        error.SnapshotNotFound => return error.SnapshotNotFound,
+        else => return error.CannotReadDesign,
+    };
+
+    // Rebuild from the restored source.
+    const path = try designFilePath(allocator, project_dir, name);
+    defer allocator.free(path);
+
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    const result = eval.evalFile(path) catch return error.RebuildFailed;
+    const block = switch (result) {
+        .design_block => |b| b,
+        else => return error.RebuildFailed,
+    };
+
+    const bom_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name }) catch return error.OutOfMemory;
+    defer allocator.free(bom_path);
+    bom.resolveIdentities(allocator, block, bom_path, project_dir) catch {};
+
+    const layout_json = render_json.renderSceneGraph(allocator, block) catch null;
+    serve_root.live_mutex.lock();
+    serve_root.live_layout_json = layout_json;
+    serve_root.live_mutex.unlock();
+    const version = serve_root.bumpLiveVersion(name);
+
+    return .{ .version = version, .snapshot = pre_snap };
 }

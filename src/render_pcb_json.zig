@@ -46,6 +46,89 @@ pub fn renderPcbJson(
         }
     }
 
+    // Build canonical net group map: nets sharing a base name get the same group ID.
+    // "VDD", "VDD.U3.F7", "VDD.U8.VDD_1" all → same group.
+    // Sub-block nets like "buck/VIN" → group of the parent net they're tied to.
+    var net_group = try allocator.alloc(usize, nets.items.len);
+    for (0..nets.items.len) |i| net_group[i] = i; // initial: each net is its own group
+    // Union-find helpers
+    const uf_find = struct {
+        fn f(p: []usize, x: usize) usize {
+            var cur = x;
+            while (p[cur] != cur) {
+                p[cur] = p[p[cur]];
+                cur = p[cur];
+            }
+            return cur;
+        }
+    }.f;
+    const uf_union = struct {
+        fn f(p: []usize, a: usize, b: usize) void {
+            const ra = @This().root(p, a);
+            const rb = @This().root(p, b);
+            if (ra != rb) p[ra] = rb;
+        }
+        fn root(p: []usize, x: usize) usize {
+            var cur = x;
+            while (p[cur] != cur) {
+                p[cur] = p[p[cur]];
+                cur = p[cur];
+            }
+            return cur;
+        }
+    }.f;
+    // Merge nets with same base name (strip dot suffix)
+    {
+        var base_to_idx = std.StringHashMap(usize).init(allocator);
+        defer base_to_idx.deinit();
+        for (nets.items, 0..) |net, ni| {
+            const base = if (std.mem.indexOfScalar(u8, net.name, '.')) |dot| net.name[0..dot] else net.name;
+            if (base_to_idx.get(base)) |existing| {
+                uf_union(net_group, ni, existing);
+            } else {
+                try base_to_idx.put(base, ni);
+            }
+        }
+    }
+    // Also merge nets connected by net_ties (sub-block port wiring)
+    for (block.net_ties) |nt| {
+        // Find net indices for both sides
+        var idx_a: ?usize = null;
+        var idx_b: ?usize = null;
+        for (nets.items, 0..) |net, ni| {
+            if (std.mem.eql(u8, net.name, nt.a)) idx_a = ni;
+            if (std.mem.eql(u8, net.name, nt.b)) idx_b = ni;
+        }
+        // Also try base name matching for hierarchical nets
+        if (idx_a == null or idx_b == null) {
+            const base_a = if (std.mem.indexOfScalar(u8, nt.a, '.')) |d| nt.a[0..d] else nt.a;
+            const base_b = if (std.mem.indexOfScalar(u8, nt.b, '.')) |d| nt.b[0..d] else nt.b;
+            for (nets.items, 0..) |net, ni| {
+                const net_base = if (std.mem.indexOfScalar(u8, net.name, '.')) |d| net.name[0..d] else net.name;
+                if (idx_a == null and std.mem.eql(u8, net_base, base_a)) idx_a = ni;
+                if (idx_b == null and std.mem.eql(u8, net_base, base_b)) idx_b = ni;
+            }
+        }
+        if (idx_a != null and idx_b != null) {
+            uf_union(net_group, idx_a.?, idx_b.?);
+        }
+    }
+    // Flatten groups to canonical IDs
+    for (0..nets.items.len) |i| {
+        net_group[i] = uf_find(net_group, i);
+    }
+    // Build net_name → group_id lookup for traces/vias
+    var net_name_to_group = std.StringHashMap(usize).init(allocator);
+    defer net_name_to_group.deinit();
+    for (nets.items, 0..) |net, ni| {
+        try net_name_to_group.put(net.name, net_group[ni]);
+        // Also register base name
+        const base = if (std.mem.indexOfScalar(u8, net.name, '.')) |dot| net.name[0..dot] else net.name;
+        if (!net_name_to_group.contains(base)) {
+            try net_name_to_group.put(base, net_group[ni]);
+        }
+    }
+
     // Load placements: try .layout first, fall back to .kicad_pcb
     var placed = std.StringHashMap(pcb_mod.PlacedFootprint).init(allocator);
     defer placed.deinit();
@@ -115,7 +198,7 @@ pub fn renderPcbJson(
         try w.print("\"thickness\":{d:.1},\"copper_layers\":{d},\"outline\":[", .{ b.thickness, b.copper_layers });
         for (b.outline, 0..) |pt, i| {
             if (i > 0) try w.writeAll(",");
-            try w.print("[{d:.6},{d:.6}]", .{ pt[0], pt[1] });
+            try w.print("[{d:.3},{d:.3}]", .{ pt[0], pt[1] });
         }
         try w.writeAll("]");
     } else {
@@ -314,7 +397,7 @@ pub fn renderPcbJson(
         try w.writeAll("{");
         try w.print("\"ref\":\"{s}\",\"component\":\"{s}\",\"value\":\"{s}\",\"footprint\":\"{s}\"", .{ inst.ref_des, inst.component, inst.value, inst.footprint });
         try w.print(",\"uuid\":\"{s}\"", .{inst.uuid});
-        try w.print(",\"x\":{d:.6},\"y\":{d:.6},\"angle\":{d:.1},\"layer\":\"{s}\"", .{ pos_x, pos_y, angle, layer });
+        try w.print(",\"x\":{d:.3},\"y\":{d:.3},\"angle\":{d:.1},\"layer\":\"{s}\"", .{ pos_x, pos_y, angle, layer });
 
         // Pads
         try w.writeAll(",\"pads\":[");
@@ -323,32 +406,30 @@ pub fn renderPcbJson(
             try w.writeAll("{");
             try writeJsonString(w, "name", pad.name);
             try w.print(",\"type\":\"{s}\",\"shape\":\"{s}\"", .{ pad.pad_type, pad.shape });
-            try w.print(",\"x\":{d:.6},\"y\":{d:.6},\"w\":{d:.6},\"h\":{d:.6}", .{ pad.x, pad.y, pad.w, pad.h });
+            try w.print(",\"x\":{d:.3},\"y\":{d:.3},\"w\":{d:.3},\"h\":{d:.3}", .{ pad.x, pad.y, pad.w, pad.h });
 
             // Net assignment
             const net_key = try std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ inst.ref_des, pad.name });
             defer allocator.free(net_key);
             if (pin_net_map.get(net_key)) |net_idx| {
-                try w.print(",\"net_id\":{d},\"net_name\":\"{s}\"", .{ net_idx, nets.items[net_idx].name });
-            } else {
-                try w.writeAll(",\"net_id\":-1,\"net_name\":\"\"");
+                try w.print(",\"net_id\":{d},\"net_name\":\"{s}\",\"ng\":{d}", .{ net_idx, nets.items[net_idx].name, net_group[net_idx] });
             }
+            // Omit net fields for unconnected pads — client treats missing as unconnected
             try w.writeAll("}");
         }
         try w.writeAll("]");
 
         // Courtyard
         if (geo.courtyard) |c| {
-            try w.print(",\"courtyard\":{{\"x1\":{d:.6},\"y1\":{d:.6},\"x2\":{d:.6},\"y2\":{d:.6}}}", .{ c.x1, c.y1, c.x2, c.y2 });
-        } else {
-            try w.writeAll(",\"courtyard\":null");
+            try w.print(",\"courtyard\":{{\"x1\":{d:.3},\"y1\":{d:.3},\"x2\":{d:.3},\"y2\":{d:.3}}}", .{ c.x1, c.y1, c.x2, c.y2 });
         }
+        // Omit courtyard key when null — client checks for field existence
 
         // Silkscreen lines
         try w.writeAll(",\"silk_lines\":[");
         for (geo.silk_lines, 0..) |line, li| {
             if (li > 0) try w.writeAll(",");
-            try w.print("[{d:.6},{d:.6},{d:.6},{d:.6}]", .{ line.x1, line.y1, line.x2, line.y2 });
+            try w.print("[{d:.3},{d:.3},{d:.3},{d:.3}]", .{ line.x1, line.y1, line.x2, line.y2 });
         }
         try w.writeAll("]");
 
@@ -363,7 +444,7 @@ pub fn renderPcbJson(
         if (net.pins.len < 2) continue;
         if (!first_net) try w.writeAll(",");
         first_net = false;
-        try w.print("{{\"id\":{d},\"name\":\"{s}\",\"pins\":[", .{ ni, net.name });
+        try w.print("{{\"id\":{d},\"name\":\"{s}\",\"ng\":{d},\"pins\":[", .{ ni, net.name, net_group[ni] });
         for (net.pins, 0..) |pin, pni| {
             if (pni > 0) try w.writeAll(",");
             try w.print("[\"{s}\",\"{s}\"]", .{ pin.ref_des, pin.pin });
@@ -412,10 +493,11 @@ pub fn renderPcbJson(
     try w.writeAll(",\"traces\":[");
     for (layout_traces, 0..) |t, ti| {
         if (ti > 0) try w.writeAll(",");
-        try w.print("{{\"net\":\"{s}\",\"layer\":\"{s}\",\"width\":{d:.4},\"points\":[", .{ t.net, t.layer, t.width });
+        const t_ng: i64 = if (net_name_to_group.get(t.net)) |g| @intCast(g) else -1;
+        try w.print("{{\"net\":\"{s}\",\"ng\":{d},\"layer\":\"{s}\",\"width\":{d:.3},\"points\":[", .{ t.net, t_ng, t.layer, t.width });
         for (t.points, 0..) |pt, pi| {
             if (pi > 0) try w.writeAll(",");
-            try w.print("[{d:.4},{d:.4}]", .{ pt[0], pt[1] });
+            try w.print("[{d:.3},{d:.3}]", .{ pt[0], pt[1] });
         }
         try w.writeAll("]}");
     }
@@ -425,8 +507,9 @@ pub fn renderPcbJson(
     try w.writeAll(",\"vias\":[");
     for (layout_vias, 0..) |v, vi| {
         if (vi > 0) try w.writeAll(",");
-        try w.print("{{\"x\":{d:.4},\"y\":{d:.4},\"net\":\"{s}\",\"drill\":{d:.4},\"pad_size\":{d:.4},\"from\":\"{s}\",\"to\":\"{s}\"}}", .{
-            v.x, v.y, v.net, v.drill, v.pad_size, v.layer_from, v.layer_to,
+        const v_ng: i64 = if (net_name_to_group.get(v.net)) |g| @intCast(g) else -1;
+        try w.print("{{\"x\":{d:.3},\"y\":{d:.3},\"net\":\"{s}\",\"ng\":{d},\"drill\":{d:.3},\"pad_size\":{d:.3},\"from\":\"{s}\",\"to\":\"{s}\"}}", .{
+            v.x, v.y, v.net, v_ng, v.drill, v.pad_size, v.layer_from, v.layer_to,
         });
     }
     try w.writeAll("]");
@@ -441,7 +524,7 @@ pub fn renderPcbJson(
             try w.writeAll("[");
             for (poly, 0..) |pt, pti| {
                 if (pti > 0) try w.writeAll(",");
-                try w.print("[{d:.4},{d:.4}]", .{ pt[0], pt[1] });
+                try w.print("[{d:.3},{d:.3}]", .{ pt[0], pt[1] });
             }
             try w.writeAll("]");
         }
@@ -451,11 +534,11 @@ pub fn renderPcbJson(
 
     // Board rules — layout overrides board defaults
     if (layout_rules) |lr| {
-        try w.print(",\"rules\":{{\"clearance\":{d:.4},\"track_width\":{d:.4},\"via_drill\":{d:.4},\"via_size\":{d:.4}}}", .{
+        try w.print(",\"rules\":{{\"clearance\":{d:.3},\"track_width\":{d:.3},\"via_drill\":{d:.3},\"via_size\":{d:.3}}}", .{
             lr.clearance, lr.track_width, lr.via_drill, lr.via_size,
         });
     } else if (board_def) |bd| {
-        try w.print(",\"rules\":{{\"clearance\":{d:.4},\"track_width\":{d:.4},\"via_drill\":{d:.4},\"via_size\":{d:.4}}}", .{
+        try w.print(",\"rules\":{{\"clearance\":{d:.3},\"track_width\":{d:.3},\"via_drill\":{d:.3},\"via_size\":{d:.3}}}", .{
             bd.rules.clearance, bd.rules.track_width, bd.rules.via_drill, bd.rules.via_size,
         });
     }
@@ -465,10 +548,10 @@ pub fn renderPcbJson(
         for (bd.net_classes, 0..) |nc, nci| {
             if (nci > 0) try w.writeAll(",");
             try w.print("{{\"name\":\"{s}\"", .{nc.name});
-            if (nc.track_width) |tw| try w.print(",\"track_width\":{d:.4}", .{tw});
-            if (nc.clearance) |cl| try w.print(",\"clearance\":{d:.4}", .{cl});
-            if (nc.via_drill) |vd| try w.print(",\"via_drill\":{d:.4}", .{vd});
-            if (nc.via_size) |vs| try w.print(",\"via_size\":{d:.4}", .{vs});
+            if (nc.track_width) |tw| try w.print(",\"track_width\":{d:.3}", .{tw});
+            if (nc.clearance) |cl| try w.print(",\"clearance\":{d:.3}", .{cl});
+            if (nc.via_drill) |vd| try w.print(",\"via_drill\":{d:.3}", .{vd});
+            if (nc.via_size) |vs| try w.print(",\"via_size\":{d:.3}", .{vs});
             try w.writeAll(",\"nets\":[");
             for (nc.nets, 0..) |net_name, ni| {
                 if (ni > 0) try w.writeAll(",");
@@ -482,7 +565,7 @@ pub fn renderPcbJson(
         try w.writeAll(",\"zones\":[");
         for (bd.zones, 0..) |zd, zdi| {
             if (zdi > 0) try w.writeAll(",");
-            try w.print("{{\"net\":\"{s}\",\"layer\":\"{s}\",\"thermal_gap\":{d:.4},\"thermal_width\":{d:.4}}}", .{
+            try w.print("{{\"net\":\"{s}\",\"layer\":\"{s}\",\"thermal_gap\":{d:.3},\"thermal_width\":{d:.3}}}", .{
                 zd.name, zd.layer, zd.thermal_gap, zd.thermal_width,
             });
         }
@@ -497,7 +580,7 @@ pub fn renderPcbJson(
             });
             for (ko.outline, 0..) |pt, pti| {
                 if (pti > 0) try w.writeAll(",");
-                try w.print("[{d:.4},{d:.4}]", .{ pt[0], pt[1] });
+                try w.print("[{d:.3},{d:.3}]", .{ pt[0], pt[1] });
             }
             try w.writeAll("]}");
         }

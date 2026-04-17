@@ -65,6 +65,24 @@ pub fn canvasPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
     try w.writeAll("<button class=\"canvas-btn\" id=\"rebuild-btn\">Rebuild</button>");
     try w.print("<a class=\"canvas-btn\" href=\"/pcb/{s}\">PCB</a>", .{name});
     try w.print("<button class=\"canvas-btn\" onclick=\"window.location='/api/export-bom/{s}'\">Export BOM</button>", .{name});
+    try w.writeAll("<div class=\"kicad-menu\">");
+    try w.writeAll("<button class=\"canvas-btn\" id=\"kicad-btn\">KiCad \u{25BE}</button>");
+    try w.writeAll("<div class=\"kicad-panel\" id=\"kicad-panel\">");
+    try w.print("<button class=\"kicad-row-btn\" onclick=\"window.location='/api/export-netlist/{s}'\">Download Netlist (.net)</button>", .{name});
+    try w.print("<button class=\"kicad-row-btn\" onclick=\"window.location='/api/export-kicad/{s}'\">Download Netlist + Footprints (.zip)</button>", .{name});
+    try w.writeAll("<div class=\"kicad-sep\"></div>");
+    try w.writeAll("<label class=\"kicad-label\">Output directory</label>");
+    try w.writeAll("<input type=\"text\" class=\"kicad-input\" id=\"kicad-path\" placeholder=\"/path/to/kicad/project\" />");
+    try w.writeAll("<label class=\"kicad-label\">.kicad_pcb file (optional)</label>");
+    try w.writeAll("<input type=\"text\" class=\"kicad-input\" id=\"kicad-pcb-file\" placeholder=\"defaults to {output_dir}/{name}.kicad_pcb\" />");
+    try w.writeAll("<button class=\"kicad-row-btn\" id=\"kicad-save-path\">Save settings</button>");
+    try w.writeAll("<div class=\"kicad-sep\"></div>");
+    try w.writeAll("<button class=\"kicad-row-btn\" id=\"kicad-write-netlist\">Write netlist to path</button>");
+    try w.writeAll("<button class=\"kicad-row-btn\" id=\"kicad-write-kicad\">Write netlist + footprints to path</button>");
+    try w.writeAll("<label class=\"kicad-check\"><input type=\"checkbox\" id=\"kicad-short-nets\" /> Shorten net names (.kicad_pcb update)</label>");
+    try w.writeAll("<button class=\"kicad-row-btn kicad-primary\" id=\"kicad-update-pcb\">Update KiCad PCB (pcb_update.py)</button>");
+    try w.writeAll("<div class=\"kicad-status\" id=\"kicad-status\"></div>");
+    try w.writeAll("</div></div>");
     try w.writeAll("</div>");
 
     // Main area: canvas + sidebar
@@ -117,6 +135,11 @@ pub fn canvasPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
     try w.print("var CONCEPT_MODE={s};", .{if (is_concept_mode) "true" else "false"});
     try w.writeAll("</script>");
 
+    // KiCad sync menu wiring
+    try w.writeAll("<script>");
+    try w.writeAll(KICAD_MENU_JS);
+    try w.writeAll("</script>");
+
     // Pixi.js from CDN
     try w.writeAll("<script src=\"https://cdn.jsdelivr.net/npm/pixi.js@8.6.6/dist/pixi.min.js\"></script>");
 
@@ -162,6 +185,21 @@ const CANVAS_CSS =
     \\.sec-item:hover{background:#1a2e1a}
     \\.sec-item-name{font-size:14px;color:#3fb950;font-weight:500}
     \\.sec-item-desc{font-size:12px;color:#6e7681;margin-top:2px;font-style:italic}
+    \\.kicad-menu{position:relative;display:inline-block}
+    \\.kicad-panel{display:none;position:absolute;top:calc(100% + 4px);right:0;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px;width:300px;z-index:200;box-shadow:0 4px 12px rgba(0,0,0,0.4)}
+    \\.kicad-menu.open .kicad-panel{display:flex;flex-direction:column;gap:6px}
+    \\.kicad-row-btn{padding:6px 10px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;border-radius:4px;cursor:pointer;font-size:12px;text-align:left}
+    \\.kicad-row-btn:hover{background:#30363d;border-color:#58a6ff}
+    \\.kicad-sep{border-top:1px solid #30363d;margin:4px 0}
+    \\.kicad-label{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
+    \\.kicad-input{padding:6px 8px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;border-radius:4px;font-size:12px;font-family:monospace}
+    \\.kicad-input:focus{border-color:#4a9eff;outline:none}
+    \\.kicad-status{font-size:11px;color:#8b949e;min-height:14px;word-break:break-all}
+    \\.kicad-status.ok{color:#3fb950}
+    \\.kicad-status.err{color:#f85149}
+    \\.kicad-check{font-size:12px;color:#c9d1d9;display:flex;align-items:center;gap:6px;margin:2px 0}
+    \\.kicad-primary{background:#1f6feb;border-color:#388bfd;color:#fff}
+    \\.kicad-primary:hover{background:#388bfd;border-color:#58a6ff}
     \\#pixi-container canvas{display:block;touch-action:none}
     \\@media(max-width:768px){
     \\.toolbar{padding:4px 8px;gap:4px}
@@ -175,3 +213,52 @@ const CANVAS_CSS =
 ;
 
 const CANVAS_VIEWER_JS = @import("canvas_viewer_js.zig").CANVAS_VIEWER_JS;
+
+const KICAD_MENU_JS =
+    \\(function(){
+    \\  var menu=document.querySelector('.kicad-menu');
+    \\  var btn=document.getElementById('kicad-btn');
+    \\  var panel=document.getElementById('kicad-panel');
+    \\  var pathInput=document.getElementById('kicad-path');
+    \\  var pcbFileInput=document.getElementById('kicad-pcb-file');
+    \\  var shortNetsCb=document.getElementById('kicad-short-nets');
+    \\  var status=document.getElementById('kicad-status');
+    \\  var saveBtn=document.getElementById('kicad-save-path');
+    \\  var writeNet=document.getElementById('kicad-write-netlist');
+    \\  var writeKicad=document.getElementById('kicad-write-kicad');
+    \\  var updatePcb=document.getElementById('kicad-update-pcb');
+    \\  if(!menu) return;
+    \\  function setStatus(msg,cls){status.textContent=msg||'';status.className='kicad-status'+(cls?' '+cls:'');}
+    \\  btn.addEventListener('click',function(e){e.stopPropagation();menu.classList.toggle('open');});
+    \\  panel.addEventListener('click',function(e){e.stopPropagation();});
+    \\  document.addEventListener('click',function(){menu.classList.remove('open');});
+    \\  fetch('/api/kicad-sync-config/'+SCHEMATIC_SLUG).then(function(r){return r.json();}).then(function(j){
+    \\    if(j&&j.output_dir)pathInput.value=j.output_dir;
+    \\    if(j&&j.pcb_file)pcbFileInput.value=j.pcb_file;
+    \\  }).catch(function(){});
+    \\  saveBtn.addEventListener('click',function(){
+    \\    setStatus('Saving...');
+    \\    fetch('/api/kicad-sync-config/'+SCHEMATIC_SLUG,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output_dir:pathInput.value.trim(),pcb_file:pcbFileInput.value.trim()})})
+    \\      .then(function(r){return r.json();}).then(function(j){setStatus(j.ok?'Settings saved':('Error: '+(j.error||'unknown')),j.ok?'ok':'err');})
+    \\      .catch(function(e){setStatus('Error: '+e,'err');});
+    \\  });
+    \\  function doWrite(url,label){
+    \\    if(!pathInput.value.trim()){setStatus('Enter an output path first','err');return;}
+    \\    setStatus(label+'...');
+    \\    fetch(url,{method:'POST'}).then(function(r){return r.json();}).then(function(j){
+    \\      if(!j.ok){setStatus('Error: '+(j.error||'unknown'),'err');return;}
+    \\      if(j.netlist&&j.pretty){setStatus('Wrote '+j.netlist+' and '+j.pretty,'ok');}
+    \\      else if(j.pcb){setStatus('Updated '+j.pcb,'ok');}
+    \\      else if(j.path){setStatus('Wrote '+j.path,'ok');}
+    \\      else{setStatus('Done','ok');}
+    \\    }).catch(function(e){setStatus('Error: '+e,'err');});
+    \\  }
+    \\  writeNet.addEventListener('click',function(){doWrite('/api/export-netlist-to-dir/'+SCHEMATIC_SLUG,'Writing netlist');});
+    \\  writeKicad.addEventListener('click',function(){doWrite('/api/export-kicad-to-dir/'+SCHEMATIC_SLUG,'Writing netlist + footprints');});
+    \\  updatePcb.addEventListener('click',function(){
+    \\    var url='/api/update-kicad-pcb/'+SCHEMATIC_SLUG;
+    \\    if(shortNetsCb.checked)url+='?short-nets=1';
+    \\    doWrite(url,'Updating KiCad PCB');
+    \\  });
+    \\})();
+;

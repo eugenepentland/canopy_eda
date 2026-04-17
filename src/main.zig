@@ -27,8 +27,6 @@ pub fn main() !void {
         try cmdParse(allocator, args[2]);
     } else if (std.mem.eql(u8, command, "build")) {
         try commands.cmdBuild(allocator, args[2..]);
-    } else if (std.mem.eql(u8, command, "render")) {
-        try commands.cmdRender(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "convert-footprint")) {
         if (args.len < 3) {
             std.debug.print("Usage: eda convert-footprint <file.kicad_mod>\n", .{});
@@ -82,8 +80,6 @@ pub fn main() !void {
             }
         }
         try cmdConvertPinout(allocator, args[2], filter);
-    } else if (std.mem.eql(u8, command, "block-diagram")) {
-        try commands.cmdBlockDiagram(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "export-kicad")) {
         try commands.cmdExportKicad(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "export-pcb")) {
@@ -243,5 +239,5 @@ test {
     _ = @import("export_kicad.zig");
     _ = @import("export_kicad_pcb.zig");
     _ = @import("serve.zig");
-    _ = @import("render_svg.zig");
+    _ = @import("render_json.zig");
 }

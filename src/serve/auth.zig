@@ -1,0 +1,1964 @@
+const std = @import("std");
+const httpz = @import("httpz");
+const serve_root = @import("../serve.zig");
+const Handler = serve_root.Handler;
+const oauth_store = @import("oauth_store.zig");
+const users = @import("users.zig");
+
+// ── Session store ────────────────────────────────────────────────────
+
+const SessionData = struct {
+    email: []const u8,
+    expiry: i64,
+};
+
+var sessions_mutex: std.Thread.Mutex = .{};
+var sessions: ?std.StringHashMap(SessionData) = null;
+var sessions_project_dir: ?[]const u8 = null;
+
+fn getSessionMap(allocator: std.mem.Allocator, project_dir: []const u8) *std.StringHashMap(SessionData) {
+    if (sessions == null) {
+        sessions = std.StringHashMap(SessionData).init(allocator);
+        sessions_project_dir = project_dir;
+        // Load persisted sessions
+        loadSessions(allocator, project_dir);
+    }
+    return &sessions.?;
+}
+
+fn sessionsPath(allocator: std.mem.Allocator, project_dir: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/auth/sessions.json", .{project_dir});
+}
+
+fn loadSessions(allocator: std.mem.Allocator, project_dir: []const u8) void {
+    const path = sessionsPath(allocator, project_dir) catch return;
+    defer allocator.free(path);
+    const file = std.fs.cwd().openFile(path, .{}) catch return;
+    defer file.close();
+    const data = file.readToEndAlloc(allocator, 256 * 1024) catch return;
+    const Entry = struct { token: []const u8, email: []const u8 = "", expiry: i64 };
+    const parsed = std.json.parseFromSlice([]const Entry, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch return;
+    const now = std.time.timestamp();
+    for (parsed.value) |entry| {
+        if (entry.email.len == 0) continue; // Drop legacy sessions without identity
+        if (now < entry.expiry) {
+            const token_dup = allocator.dupe(u8, entry.token) catch continue;
+            const email_dup = allocator.dupe(u8, entry.email) catch continue;
+            sessions.?.put(token_dup, .{ .email = email_dup, .expiry = entry.expiry }) catch {};
+        }
+    }
+}
+
+fn persistSessions(allocator: std.mem.Allocator) void {
+    const project_dir = sessions_project_dir orelse return;
+    const path = sessionsPath(allocator, project_dir) catch return;
+    defer allocator.free(path);
+    const dir_path = std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir}) catch return;
+    defer allocator.free(dir_path);
+    std.fs.cwd().makePath(dir_path) catch {};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(allocator);
+    w.writeAll("[") catch return;
+    var map = &sessions.?;
+    var it = map.iterator();
+    var first = true;
+    while (it.next()) |entry| {
+        if (!first) w.writeAll(",") catch return;
+        w.print("{{\"token\":\"{s}\",\"email\":\"{s}\",\"expiry\":{d}}}", .{ entry.key_ptr.*, entry.value_ptr.email, entry.value_ptr.expiry }) catch return;
+        first = false;
+    }
+    w.writeAll("]") catch return;
+    const file = std.fs.cwd().createFile(path, .{}) catch return;
+    defer file.close();
+    file.writeAll(buf.items) catch {};
+}
+
+pub fn createSession(allocator: std.mem.Allocator, project_dir: []const u8, email: []const u8) ![]const u8 {
+    var rand_bytes: [32]u8 = undefined;
+    std.crypto.random.bytes(&rand_bytes);
+    const hex = std.fmt.bytesToHex(rand_bytes, .lower);
+    const token = try allocator.dupe(u8, &hex);
+    const email_dup = try allocator.dupe(u8, email);
+
+    const now = std.time.timestamp();
+    const expiry = now + 7 * 24 * 60 * 60; // 7 days
+
+    sessions_mutex.lock();
+    defer sessions_mutex.unlock();
+    const map = getSessionMap(allocator, project_dir);
+    try map.put(token, .{ .email = email_dup, .expiry = expiry });
+    persistSessions(allocator);
+    return token;
+}
+
+pub fn validateSession(allocator: std.mem.Allocator, project_dir: []const u8, token: []const u8) ?[]const u8 {
+    sessions_mutex.lock();
+    defer sessions_mutex.unlock();
+    const map = getSessionMap(allocator, project_dir);
+    const entry = map.get(token) orelse return null;
+    const now = std.time.timestamp();
+    if (now > entry.expiry) {
+        _ = map.fetchRemove(token);
+        persistSessions(allocator);
+        return null;
+    }
+    return entry.email;
+}
+
+pub fn deleteSession(allocator: std.mem.Allocator, project_dir: []const u8, token: []const u8) void {
+    sessions_mutex.lock();
+    defer sessions_mutex.unlock();
+    const map = getSessionMap(allocator, project_dir);
+    _ = map.fetchRemove(token);
+    persistSessions(allocator);
+}
+
+// ── Challenge store ──────────────────────────────────────────────────
+
+var challenge_mutex: std.Thread.Mutex = .{};
+var pending_challenge: ?[32]u8 = null;
+
+fn storePendingChallenge(challenge: [32]u8) void {
+    challenge_mutex.lock();
+    defer challenge_mutex.unlock();
+    pending_challenge = challenge;
+}
+
+fn takePendingChallenge() ?[32]u8 {
+    challenge_mutex.lock();
+    defer challenge_mutex.unlock();
+    const c = pending_challenge orelse return null;
+    pending_challenge = null;
+    return c;
+}
+
+// ── Credential storage ───────────────────────────────────────────────
+
+const StoredCredential = struct {
+    id: []const u8, // base64url
+    public_key_x: []const u8, // base64url, 32 bytes decoded
+    public_key_y: []const u8, // base64url, 32 bytes decoded
+    email: []const u8 = "",
+    created_at: i64 = 0,
+};
+
+fn credentialsPath(allocator: std.mem.Allocator, project_dir: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/auth/credentials.json", .{project_dir});
+}
+
+fn loadCredentials(allocator: std.mem.Allocator, project_dir: []const u8) ![]StoredCredential {
+    const path = try credentialsPath(allocator, project_dir);
+    defer allocator.free(path);
+
+    const file = std.fs.cwd().openFile(path, .{}) catch return &[_]StoredCredential{};
+    defer file.close();
+
+    const data = file.readToEndAlloc(allocator, 1024 * 1024) catch return &[_]StoredCredential{};
+
+    const parsed = std.json.parseFromSlice([]StoredCredential, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch return &[_]StoredCredential{};
+    return parsed.value;
+}
+
+fn saveCredentials(allocator: std.mem.Allocator, project_dir: []const u8, creds: []const StoredCredential) !void {
+    const path = try credentialsPath(allocator, project_dir);
+    defer allocator.free(path);
+
+    // Ensure auth directory exists
+    const dir_path = try std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir});
+    defer allocator.free(dir_path);
+    std.fs.cwd().makePath(dir_path) catch {};
+
+    // Build JSON string
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const bw = buf.writer(allocator);
+    try bw.writeAll("[");
+    for (creds, 0..) |c, i| {
+        if (i > 0) try bw.writeAll(",");
+        try bw.print("{{\"id\":\"{s}\",\"public_key_x\":\"{s}\",\"public_key_y\":\"{s}\",\"email\":\"{s}\",\"created_at\":{d}}}", .{ c.id, c.public_key_x, c.public_key_y, c.email, c.created_at });
+    }
+    try bw.writeAll("]");
+
+    const file = try std.fs.cwd().createFile(path, .{});
+    defer file.close();
+    try file.writeAll(buf.items);
+}
+
+// ── Invite storage ───────────────────────────────────────────────────
+
+const Invite = struct {
+    token: []const u8,
+    created_by: []const u8, // email of inviter
+    expiry: i64,
+    /// Role to assign the invited user. Defaults to "writer" if the field is
+    /// absent (for backward compatibility with invites written before roles).
+    role: []const u8 = "writer",
+};
+
+const INVITE_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
+
+fn invitesPath(allocator: std.mem.Allocator, project_dir: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/auth/invites.json", .{project_dir});
+}
+
+fn loadInvites(allocator: std.mem.Allocator, project_dir: []const u8) ![]Invite {
+    const path = try invitesPath(allocator, project_dir);
+    defer allocator.free(path);
+
+    const file = std.fs.cwd().openFile(path, .{}) catch return &[_]Invite{};
+    defer file.close();
+
+    const data = file.readToEndAlloc(allocator, 256 * 1024) catch return &[_]Invite{};
+    const parsed = std.json.parseFromSlice([]Invite, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch return &[_]Invite{};
+    return parsed.value;
+}
+
+fn saveInvites(allocator: std.mem.Allocator, project_dir: []const u8, invites: []const Invite) !void {
+    const path = try invitesPath(allocator, project_dir);
+    defer allocator.free(path);
+
+    const dir_path = try std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir});
+    defer allocator.free(dir_path);
+    std.fs.cwd().makePath(dir_path) catch {};
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const bw = buf.writer(allocator);
+    try bw.writeAll("[");
+    for (invites, 0..) |inv, i| {
+        if (i > 0) try bw.writeAll(",");
+        try bw.print("{{\"token\":\"{s}\",\"created_by\":\"{s}\",\"expiry\":{d},\"role\":\"{s}\"}}", .{ inv.token, inv.created_by, inv.expiry, inv.role });
+    }
+    try bw.writeAll("]");
+
+    const file = try std.fs.cwd().createFile(path, .{});
+    defer file.close();
+    try file.writeAll(buf.items);
+}
+
+fn createInvite(allocator: std.mem.Allocator, project_dir: []const u8, created_by: []const u8, role: []const u8) ![]const u8 {
+    var rand_bytes: [24]u8 = undefined;
+    std.crypto.random.bytes(&rand_bytes);
+    const hex = std.fmt.bytesToHex(rand_bytes, .lower);
+    const token = try allocator.dupe(u8, &hex);
+
+    const now = std.time.timestamp();
+    const existing = try loadInvites(allocator, project_dir);
+    var invites: std.ArrayListUnmanaged(Invite) = .empty;
+    for (existing) |inv| {
+        if (now < inv.expiry) try invites.append(allocator, inv);
+    }
+    try invites.append(allocator, .{
+        .token = token,
+        .created_by = try allocator.dupe(u8, created_by),
+        .expiry = now + INVITE_TTL_SECONDS,
+        .role = try allocator.dupe(u8, role),
+    });
+    try saveInvites(allocator, project_dir, invites.items);
+    return token;
+}
+
+fn findInvite(allocator: std.mem.Allocator, project_dir: []const u8, token: []const u8) !?Invite {
+    const now = std.time.timestamp();
+    const invites = try loadInvites(allocator, project_dir);
+    for (invites) |inv| {
+        if (std.mem.eql(u8, inv.token, token) and now < inv.expiry) return inv;
+    }
+    return null;
+}
+
+fn consumeInvite(allocator: std.mem.Allocator, project_dir: []const u8, token: []const u8) !bool {
+    const invites = try loadInvites(allocator, project_dir);
+    const now = std.time.timestamp();
+    var remaining: std.ArrayListUnmanaged(Invite) = .empty;
+    var found = false;
+    for (invites) |inv| {
+        if (std.mem.eql(u8, inv.token, token) and now < inv.expiry) {
+            found = true;
+            continue; // consume (drop)
+        }
+        if (now < inv.expiry) try remaining.append(allocator, inv);
+    }
+    if (!found) return false;
+    try saveInvites(allocator, project_dir, remaining.items);
+    return true;
+}
+
+// ── Minimal CBOR decoder ─────────────────────────────────────────────
+
+const CborValue = union(enum) {
+    unsigned: u64,
+    negative: i64,
+    bytes: []const u8,
+    text: []const u8,
+    array: []const CborValue,
+    map: []const CborMapEntry,
+};
+
+const CborMapEntry = struct {
+    key: CborValue,
+    value: CborValue,
+};
+
+const CborError = error{
+    InvalidCbor,
+    UnsupportedType,
+    OutOfMemory,
+};
+
+fn decodeCborArg(allocator: std.mem.Allocator, data: []const u8) CborError!struct { CborValue, usize } {
+    if (data.len == 0) return CborError.InvalidCbor;
+
+    const major = data[0] >> 5;
+    const additional = data[0] & 0x1f;
+    var offset: usize = 1;
+
+    // Decode argument value
+    var arg: u64 = 0;
+    if (additional < 24) {
+        arg = additional;
+    } else if (additional == 24) {
+        if (data.len < 2) return CborError.InvalidCbor;
+        arg = data[1];
+        offset = 2;
+    } else if (additional == 25) {
+        if (data.len < 3) return CborError.InvalidCbor;
+        arg = std.mem.readInt(u16, data[1..3], .big);
+        offset = 3;
+    } else if (additional == 26) {
+        if (data.len < 5) return CborError.InvalidCbor;
+        arg = std.mem.readInt(u32, data[1..5], .big);
+        offset = 5;
+    } else if (additional == 27) {
+        if (data.len < 9) return CborError.InvalidCbor;
+        arg = std.mem.readInt(u64, data[1..9], .big);
+        offset = 9;
+    } else {
+        return CborError.InvalidCbor;
+    }
+
+    switch (major) {
+        0 => { // unsigned int
+            return .{ .{ .unsigned = arg }, offset };
+        },
+        1 => { // negative int
+            return .{ .{ .negative = -1 - @as(i64, @intCast(arg)) }, offset };
+        },
+        2 => { // byte string
+            const len: usize = @intCast(arg);
+            if (data.len < offset + len) return CborError.InvalidCbor;
+            const bytes = data[offset .. offset + len];
+            return .{ .{ .bytes = bytes }, offset + len };
+        },
+        3 => { // text string
+            const len: usize = @intCast(arg);
+            if (data.len < offset + len) return CborError.InvalidCbor;
+            const text = data[offset .. offset + len];
+            return .{ .{ .text = text }, offset + len };
+        },
+        4 => { // array
+            const count: usize = @intCast(arg);
+            var items = try allocator.alloc(CborValue, count);
+            var pos = offset;
+            for (0..count) |i| {
+                const result = try decodeCborArg(allocator, data[pos..]);
+                items[i] = result[0];
+                pos += result[1];
+            }
+            return .{ .{ .array = items }, pos };
+        },
+        5 => { // map
+            const count: usize = @intCast(arg);
+            var entries = try allocator.alloc(CborMapEntry, count);
+            var pos = offset;
+            for (0..count) |i| {
+                const k = try decodeCborArg(allocator, data[pos..]);
+                pos += k[1];
+                const v = try decodeCborArg(allocator, data[pos..]);
+                pos += v[1];
+                entries[i] = .{ .key = k[0], .value = v[0] };
+            }
+            return .{ .{ .map = entries }, pos };
+        },
+        else => return CborError.UnsupportedType,
+    }
+}
+
+fn decodeCbor(allocator: std.mem.Allocator, data: []const u8) CborError!CborValue {
+    const result = try decodeCborArg(allocator, data);
+    return result[0];
+}
+
+fn cborMapGet(m: []const CborMapEntry, key_int: i64) ?CborValue {
+    for (m) |entry| {
+        switch (entry.key) {
+            .unsigned => |v| {
+                if (key_int >= 0 and v == @as(u64, @intCast(key_int))) return entry.value;
+            },
+            .negative => |v| {
+                if (v == key_int) return entry.value;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn cborMapGetText(m: []const CborMapEntry, key: []const u8) ?CborValue {
+    for (m) |entry| {
+        switch (entry.key) {
+            .text => |t| {
+                if (std.mem.eql(u8, t, key)) return entry.value;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+// ── DER signature parsing ────────────────────────────────────────────
+
+fn parseDerInteger(data: []const u8) ?struct { []const u8, usize } {
+    if (data.len < 2) return null;
+    if (data[0] != 0x02) return null;
+    const len: usize = data[1];
+    if (data.len < 2 + len) return null;
+    return .{ data[2 .. 2 + len], 2 + len };
+}
+
+fn padTo32(allocator: std.mem.Allocator, raw: []const u8) !*[32]u8 {
+    var buf = try allocator.create([32]u8);
+    @memset(buf, 0);
+    if (raw.len >= 32) {
+        // Take last 32 bytes (skip leading zero padding)
+        @memcpy(buf, raw[raw.len - 32 ..]);
+    } else {
+        // Right-align into 32 bytes
+        @memcpy(buf[32 - raw.len ..], raw);
+    }
+    return buf;
+}
+
+fn parseDerSignature(allocator: std.mem.Allocator, der: []const u8) !?[64]u8 {
+    if (der.len < 6) return null;
+    if (der[0] != 0x30) return null;
+    // der[1] is the length of the rest
+
+    const r_result = parseDerInteger(der[2..]) orelse return null;
+    const r_raw = r_result[0];
+    const r_consumed = r_result[1];
+
+    const s_result = parseDerInteger(der[2 + r_consumed ..]) orelse return null;
+    const s_raw = s_result[0];
+
+    const r32 = try padTo32(allocator, r_raw);
+    const s32 = try padTo32(allocator, s_raw);
+
+    var sig: [64]u8 = undefined;
+    @memcpy(sig[0..32], r32);
+    @memcpy(sig[32..64], s32);
+    return sig;
+}
+
+// ── Base64url helpers ────────────────────────────────────────────────
+
+const b64url = std.base64.url_safe_no_pad;
+
+fn base64urlEncode(allocator: std.mem.Allocator, data: []const u8) ![]const u8 {
+    const len = b64url.Encoder.calcSize(data.len);
+    const buf = try allocator.alloc(u8, len);
+    _ = b64url.Encoder.encode(buf, data);
+    return buf;
+}
+
+fn base64urlDecode(allocator: std.mem.Allocator, encoded: []const u8) ![]const u8 {
+    const len = b64url.Decoder.calcSizeForSlice(encoded) catch return error.InvalidBase64;
+    const buf = try allocator.alloc(u8, len);
+    b64url.Decoder.decode(buf, encoded) catch return error.InvalidBase64;
+    return buf;
+}
+
+// ── Auth middleware ──────────────────────────────────────────────────
+
+fn isLocalhost(req: *httpz.Request) bool {
+    // Check peer address via the host header for loopback detection
+    const host = req.header("host") orelse return false;
+    // Strip port if present
+    var hostname = host;
+    if (std.mem.indexOfScalar(u8, host, ':')) |idx| {
+        hostname = host[0..idx];
+    }
+    if (std.mem.eql(u8, hostname, "127.0.0.1")) return true;
+    if (std.mem.eql(u8, hostname, "::1")) return true;
+    if (std.mem.eql(u8, hostname, "localhost")) return true;
+    return false;
+}
+
+pub fn getSessionToken(req: *httpz.Request) ?[]const u8 {
+    const cookie_header = req.header("cookie") orelse return null;
+    // Parse cookie header for session=<token>
+    var iter = std.mem.splitSequence(u8, cookie_header, "; ");
+    while (iter.next()) |part| {
+        const trimmed = std.mem.trim(u8, part, " ");
+        if (std.mem.startsWith(u8, trimmed, "session=")) {
+            return trimmed["session=".len..];
+        }
+    }
+    return null;
+}
+
+fn getBearerToken(req: *httpz.Request) ?[]const u8 {
+    const h = req.header("authorization") orelse return null;
+    const prefix = "Bearer ";
+    if (h.len <= prefix.len) return null;
+    if (!std.ascii.eqlIgnoreCase(h[0..prefix.len], prefix)) return null;
+    return std.mem.trim(u8, h[prefix.len..], " ");
+}
+
+pub fn validateBearerToken(ctx: *Handler, req: *httpz.Request) bool {
+    const raw = getBearerToken(req) orelse return false;
+    const tok = oauth_store.validateToken(ctx.allocator, ctx.project_dir, raw) catch return false;
+    return tok != null;
+}
+
+/// If the request carries a valid OAuth bearer token, return the token
+/// owner's email. Used by MCP role resolution.
+pub fn getBearerEmail(ctx: *Handler, req: *httpz.Request) ?[]const u8 {
+    const raw = getBearerToken(req) orelse return null;
+    const tok = oauth_store.validateToken(ctx.allocator, ctx.project_dir, raw) catch return null;
+    return if (tok) |t| t.email else null;
+}
+
+pub fn isLocalhostRequest(req: *httpz.Request) bool {
+    return isLocalhost(req);
+}
+
+/// Remove all stored passkey credentials for an email, and drop any live
+/// sessions tied to that email. Called by the admin delete-user flow.
+pub fn purgeIdentity(allocator: std.mem.Allocator, project_dir: []const u8, email: []const u8) void {
+    const creds = loadCredentials(allocator, project_dir) catch return;
+    var kept: std.ArrayListUnmanaged(StoredCredential) = .empty;
+    defer kept.deinit(allocator);
+    for (creds) |c| {
+        if (!std.mem.eql(u8, c.email, email)) kept.append(allocator, c) catch {};
+    }
+    saveCredentials(allocator, project_dir, kept.items) catch {};
+
+    sessions_mutex.lock();
+    defer sessions_mutex.unlock();
+    if (sessions) |*map| {
+        var it = map.iterator();
+        var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer to_remove.deinit(allocator);
+        while (it.next()) |entry| {
+            if (std.mem.eql(u8, entry.value_ptr.email, email)) {
+                to_remove.append(allocator, entry.key_ptr.*) catch continue;
+            }
+        }
+        for (to_remove.items) |tok| _ = map.fetchRemove(tok);
+        persistSessions(allocator);
+    }
+}
+
+/// Resolve the current user's email for OAuth/account flows. Returns the
+/// signed-in session's email, or falls back to a dev identity on localhost
+/// (matching the existing localhost auth bypass in authMiddleware). Off-
+/// localhost requests without a session return null.
+pub fn currentEmail(ctx: *Handler, req: *httpz.Request) ?[]const u8 {
+    if (getSessionToken(req)) |tok| {
+        if (validateSession(ctx.allocator, ctx.project_dir, tok)) |em| return em;
+    }
+    if (isLocalhost(req)) return "dev@localhost";
+    return null;
+}
+
+fn isApiPath(path: []const u8) bool {
+    return std.mem.startsWith(u8, path, "/api/");
+}
+
+pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !bool {
+    // Allow localhost without auth
+    if (isLocalhost(req)) return true;
+
+    // Exempt auth paths
+    if (std.mem.startsWith(u8, req.url.path, "/auth/")) return true;
+
+    // OAuth discovery + token/authorize endpoints must be reachable without
+    // a logged-in session — Claude Code fetches these before it has a token.
+    if (std.mem.startsWith(u8, req.url.path, "/.well-known/oauth-")) return true;
+    if (std.mem.startsWith(u8, req.url.path, "/oauth/token")) return true;
+    if (std.mem.startsWith(u8, req.url.path, "/oauth/authorize")) return true;
+
+    // MCP endpoints accept OAuth bearer tokens issued via /oauth/token.
+    if (std.mem.startsWith(u8, req.url.path, "/mcp")) {
+        if (validateBearerToken(ctx, req)) return true;
+    }
+
+    // Check for valid session
+    if (getSessionToken(req)) |token| {
+        if (validateSession(ctx.allocator, ctx.project_dir, token) != null) return true;
+    }
+
+    // Check if credentials exist; if not, redirect to setup
+    const creds = try loadCredentials(ctx.allocator, ctx.project_dir);
+    const has_creds = creds.len > 0;
+
+    if (isApiPath(req.url.path)) {
+        res.status = 401;
+        res.content_type = .JSON;
+        res.body = "{\"error\":\"unauthorized\"}";
+        return false;
+    }
+
+    // Redirect to login or setup
+    if (has_creds) {
+        res.status = 303;
+        res.header("location", "/auth/login");
+    } else {
+        res.status = 303;
+        res.header("location", "/auth/setup");
+    }
+    return false;
+}
+
+// ── Registration endpoints ───────────────────────────────────────────
+
+pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const existing = try loadCredentials(ctx.allocator, ctx.project_dir);
+    const q = try req.query();
+
+    // Determine mode and resolve email.
+    // Priority: valid session (add-device) > valid invite > bootstrap (no creds exist).
+    var email: []const u8 = "";
+    var authorized = false;
+
+    if (getSessionToken(req)) |tok| {
+        if (validateSession(ctx.allocator, ctx.project_dir, tok)) |session_email| {
+            email = session_email;
+            authorized = true;
+        }
+    }
+
+    if (!authorized) {
+        if (q.get("invite")) |inv_token| {
+            if (try findInvite(ctx.allocator, ctx.project_dir, inv_token)) |_| {
+                const body_email = q.get("email") orelse "";
+                if (body_email.len == 0 or std.mem.indexOfScalar(u8, body_email, '@') == null) {
+                    res.status = 400;
+                    res.content_type = .JSON;
+                    res.body = "{\"error\":\"invalid email\"}";
+                    return;
+                }
+                email = body_email;
+                authorized = true;
+            }
+        }
+    }
+
+    if (!authorized and existing.len == 0) {
+        // Bootstrap: first user
+        email = q.get("email") orelse "";
+        if (email.len == 0 or std.mem.indexOfScalar(u8, email, '@') == null) {
+            res.status = 400;
+            res.content_type = .JSON;
+            res.body = "{\"error\":\"invalid email\"}";
+            return;
+        }
+        authorized = true;
+    }
+
+    if (!authorized) {
+        res.status = 403;
+        res.content_type = .JSON;
+        res.body = "{\"error\":\"registration disabled\"}";
+        return;
+    }
+
+    var challenge: [32]u8 = undefined;
+    std.crypto.random.bytes(&challenge);
+    storePendingChallenge(challenge);
+
+    const challenge_b64 = try base64urlEncode(req.arena, &challenge);
+
+    const host = req.header("host") orelse "localhost";
+    var rp_id = host;
+    if (std.mem.indexOfScalar(u8, host, ':')) |idx| {
+        rp_id = host[0..idx];
+    }
+
+    // User ID is a stable hash of the email so multiple passkeys for the same
+    // email are associated with the same WebAuthn user handle.
+    var user_id_hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(email, &user_id_hash, .{});
+    const user_id_b64 = try base64urlEncode(req.arena, &user_id_hash);
+
+    // Build excludeCredentials list: passkeys already registered for this email
+    // so the browser won't offer to re-use them.
+    var exclude_buf: std.ArrayListUnmanaged(u8) = .empty;
+    const xw = exclude_buf.writer(req.arena);
+    try xw.writeAll("[");
+    var first_excl = true;
+    for (existing) |c| {
+        if (std.mem.eql(u8, c.email, email)) {
+            if (!first_excl) try xw.writeAll(",");
+            try xw.print("{{\"type\":\"public-key\",\"id\":\"{s}\"}}", .{c.id});
+            first_excl = false;
+        }
+    }
+    try xw.writeAll("]");
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(req.arena);
+    try w.print(
+        \\{{"challenge":"{s}","rp":{{"name":"Canopy EDA","id":"{s}"}},"user":{{"id":"{s}","name":"{s}","displayName":"{s}"}},"pubKeyCredParams":[{{"type":"public-key","alg":-7}}],"authenticatorSelection":{{"residentKey":"preferred","userVerification":"preferred"}},"excludeCredentials":{s},"timeout":60000}}
+    , .{ challenge_b64, rp_id, user_id_b64, email, email, exclude_buf.items });
+
+    res.content_type = .JSON;
+    res.body = buf.items;
+}
+
+pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing body\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    const parsed = std.json.parseFromSlice(std.json.Value, req.arena, body, .{}) catch {
+        res.status = 400;
+        res.body = "{\"error\":\"invalid json\"}";
+        res.content_type = .JSON;
+        return;
+    };
+    const root = parsed.value;
+
+    // Extract fields from the JSON
+    const cred_id_b64 = (root.object.get("id") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing id\"}";
+        res.content_type = .JSON;
+        return;
+    }).string;
+
+    const response_obj = (root.object.get("response") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing response\"}";
+        res.content_type = .JSON;
+        return;
+    }).object;
+
+    const attestation_b64 = (response_obj.get("attestationObject") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing attestationObject\"}";
+        res.content_type = .JSON;
+        return;
+    }).string;
+
+    const client_data_b64 = (response_obj.get("clientDataJSON") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing clientDataJSON\"}";
+        res.content_type = .JSON;
+        return;
+    }).string;
+
+    // Decode attestationObject
+    const attestation_raw = base64urlDecode(req.arena, attestation_b64) catch {
+        res.status = 400;
+        res.body = "{\"error\":\"invalid attestation base64\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    // Decode clientDataJSON and verify challenge
+    const client_data_raw = base64urlDecode(req.arena, client_data_b64) catch {
+        res.status = 400;
+        res.body = "{\"error\":\"invalid clientData base64\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    const client_data_parsed = std.json.parseFromSlice(std.json.Value, req.arena, client_data_raw, .{}) catch {
+        res.status = 400;
+        res.body = "{\"error\":\"invalid clientDataJSON\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    // Verify type
+    const cd_type = (client_data_parsed.value.object.get("type") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing type in clientData\"}";
+        res.content_type = .JSON;
+        return;
+    }).string;
+    if (!std.mem.eql(u8, cd_type, "webauthn.create")) {
+        res.status = 400;
+        res.body = "{\"error\":\"wrong ceremony type\"}";
+        res.content_type = .JSON;
+        return;
+    }
+
+    // Verify challenge
+    const cd_challenge = (client_data_parsed.value.object.get("challenge") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing challenge in clientData\"}";
+        res.content_type = .JSON;
+        return;
+    }).string;
+
+    const stored_challenge = takePendingChallenge() orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"no pending challenge\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    const expected_challenge_b64 = try base64urlEncode(req.arena, &stored_challenge);
+    if (!std.mem.eql(u8, cd_challenge, expected_challenge_b64)) {
+        res.status = 400;
+        res.body = "{\"error\":\"challenge mismatch\"}";
+        res.content_type = .JSON;
+        return;
+    }
+
+    // Parse CBOR attestationObject
+    const cbor_val = decodeCbor(req.arena, attestation_raw) catch {
+        res.status = 400;
+        res.body = "{\"error\":\"invalid CBOR\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    const att_map = switch (cbor_val) {
+        .map => |m| m,
+        else => {
+            res.status = 400;
+            res.body = "{\"error\":\"attestation not a map\"}";
+            res.content_type = .JSON;
+            return;
+        },
+    };
+
+    // Get authData
+    const auth_data_val = cborMapGetText(att_map, "authData") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing authData\"}";
+        res.content_type = .JSON;
+        return;
+    };
+    const auth_data = switch (auth_data_val) {
+        .bytes => |b| b,
+        else => {
+            res.status = 400;
+            res.body = "{\"error\":\"authData not bytes\"}";
+            res.content_type = .JSON;
+            return;
+        },
+    };
+
+    // Parse authenticatorData:
+    // 32 bytes rpIdHash + 1 byte flags + 4 bytes signCount + attestedCredentialData
+    if (auth_data.len < 37) {
+        res.status = 400;
+        res.body = "{\"error\":\"authData too short\"}";
+        res.content_type = .JSON;
+        return;
+    }
+
+    const flags = auth_data[32];
+    if (flags & 0x40 == 0) {
+        res.status = 400;
+        res.body = "{\"error\":\"no attested credential data\"}";
+        res.content_type = .JSON;
+        return;
+    }
+
+    // Skip: 32 rpIdHash + 1 flags + 4 signCount + 16 AAGUID = 53
+    if (auth_data.len < 55) {
+        res.status = 400;
+        res.body = "{\"error\":\"authData too short for credential\"}";
+        res.content_type = .JSON;
+        return;
+    }
+
+    const cred_id_len = std.mem.readInt(u16, auth_data[53..55], .big);
+    const cred_data_start: usize = 55 + cred_id_len;
+    if (auth_data.len < cred_data_start) {
+        res.status = 400;
+        res.body = "{\"error\":\"authData too short for cred id\"}";
+        res.content_type = .JSON;
+        return;
+    }
+
+    // Parse COSE public key (remainder of authData after credential ID)
+    const cose_key_bytes = auth_data[cred_data_start..];
+    const cose_key_cbor = decodeCbor(req.arena, cose_key_bytes) catch {
+        res.status = 400;
+        res.body = "{\"error\":\"invalid COSE key CBOR\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    const key_map = switch (cose_key_cbor) {
+        .map => |m| m,
+        else => {
+            res.status = 400;
+            res.body = "{\"error\":\"COSE key not a map\"}";
+            res.content_type = .JSON;
+            return;
+        },
+    };
+
+    // Extract x coordinate (key -2)
+    const x_val = cborMapGet(key_map, -2) orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing x in COSE key\"}";
+        res.content_type = .JSON;
+        return;
+    };
+    const x_bytes = switch (x_val) {
+        .bytes => |b| b,
+        else => {
+            res.status = 400;
+            res.body = "{\"error\":\"x not bytes\"}";
+            res.content_type = .JSON;
+            return;
+        },
+    };
+
+    // Extract y coordinate (key -3)
+    const y_val = cborMapGet(key_map, -3) orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing y in COSE key\"}";
+        res.content_type = .JSON;
+        return;
+    };
+    const y_bytes = switch (y_val) {
+        .bytes => |b| b,
+        else => {
+            res.status = 400;
+            res.body = "{\"error\":\"y not bytes\"}";
+            res.content_type = .JSON;
+            return;
+        },
+    };
+
+    if (x_bytes.len != 32 or y_bytes.len != 32) {
+        res.status = 400;
+        res.body = "{\"error\":\"invalid key coordinate length\"}";
+        res.content_type = .JSON;
+        return;
+    }
+
+    // Determine registration mode and resolve target email.
+    const existing = try loadCredentials(ctx.allocator, ctx.project_dir);
+    const body_email_val = root.object.get("email");
+    const body_email = if (body_email_val) |ev| (if (ev == .string) ev.string else "") else "";
+    const invite_val = root.object.get("invite");
+    const invite_token = if (invite_val) |iv| (if (iv == .string) iv.string else "") else "";
+
+    var resolved_email: []const u8 = "";
+    var invite_to_consume: []const u8 = "";
+    var invited_role: users.Role = .writer;
+
+    const session_token_opt = getSessionToken(req);
+    if (session_token_opt) |stok| {
+        if (validateSession(ctx.allocator, ctx.project_dir, stok)) |session_email| {
+            resolved_email = session_email;
+        }
+    }
+
+    if (resolved_email.len == 0 and invite_token.len > 0) {
+        if (try findInvite(ctx.allocator, ctx.project_dir, invite_token)) |inv| {
+            if (body_email.len == 0 or std.mem.indexOfScalar(u8, body_email, '@') == null) {
+                res.status = 400;
+                res.body = "{\"error\":\"invalid email\"}";
+                res.content_type = .JSON;
+                return;
+            }
+            resolved_email = body_email;
+            invite_to_consume = invite_token;
+            invited_role = users.Role.fromString(inv.role) orelse .writer;
+        }
+    }
+
+    if (resolved_email.len == 0 and existing.len == 0) {
+        // Bootstrap
+        if (body_email.len == 0 or std.mem.indexOfScalar(u8, body_email, '@') == null) {
+            res.status = 400;
+            res.body = "{\"error\":\"invalid email\"}";
+            res.content_type = .JSON;
+            return;
+        }
+        resolved_email = body_email;
+    }
+
+    if (resolved_email.len == 0) {
+        res.status = 403;
+        res.body = "{\"error\":\"registration disabled\"}";
+        res.content_type = .JSON;
+        return;
+    }
+
+    // Store credential
+    const x_b64 = try base64urlEncode(ctx.allocator, x_bytes);
+    const y_b64 = try base64urlEncode(ctx.allocator, y_bytes);
+    const id_dup = try ctx.allocator.dupe(u8, cred_id_b64);
+    const email_dup = try ctx.allocator.dupe(u8, resolved_email);
+
+    var creds: std.ArrayListUnmanaged(StoredCredential) = .empty;
+    for (existing) |c| {
+        try creds.append(ctx.allocator, c);
+    }
+
+    try creds.append(ctx.allocator, .{
+        .id = id_dup,
+        .public_key_x = x_b64,
+        .public_key_y = y_b64,
+        .email = email_dup,
+        .created_at = std.time.timestamp(),
+    });
+
+    saveCredentials(ctx.allocator, ctx.project_dir, creds.items) catch {
+        res.status = 500;
+        res.body = "{\"error\":\"failed to save credentials\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    if (invite_to_consume.len > 0) {
+        _ = consumeInvite(ctx.allocator, ctx.project_dir, invite_to_consume) catch {};
+    }
+
+    // Ensure a user record exists with the correct role. ensureUser is a no-op
+    // if this email already has a record (e.g. when a logged-in user adds
+    // another passkey to their own account).
+    _ = users.ensureUser(ctx.allocator, ctx.project_dir, resolved_email, invited_role) catch {};
+
+    // Create a session for the newly registered user (unless they already have one)
+    if (session_token_opt == null) {
+        const token = try createSession(ctx.allocator, ctx.project_dir, resolved_email);
+        const cookie = try std.fmt.allocPrint(req.arena, "session={s}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800", .{token});
+        res.header("set-cookie", cookie);
+    }
+
+    res.content_type = .JSON;
+    res.body = "{\"ok\":true}";
+}
+
+// ── Authentication endpoints ─────────────────────────────────────────
+
+pub fn loginChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    var challenge: [32]u8 = undefined;
+    std.crypto.random.bytes(&challenge);
+    storePendingChallenge(challenge);
+
+    const challenge_b64 = try base64urlEncode(req.arena, &challenge);
+
+    const q = try req.query();
+    const email_filter = q.get("email") orelse "";
+
+    const creds = try loadCredentials(ctx.allocator, ctx.project_dir);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(req.arena);
+    try w.print("{{\"challenge\":\"{s}\",\"allowCredentials\":[", .{challenge_b64});
+    var first = true;
+    for (creds) |cred| {
+        // If an email filter is supplied, only include matching credentials.
+        // No filter → include everything (supports synced/resident-key flows).
+        if (email_filter.len > 0 and !std.mem.eql(u8, cred.email, email_filter)) continue;
+        if (!first) try w.writeAll(",");
+        try w.print("{{\"type\":\"public-key\",\"id\":\"{s}\"}}", .{cred.id});
+        first = false;
+    }
+
+    const host = req.header("host") orelse "localhost";
+    var rp_id = host;
+    if (std.mem.indexOfScalar(u8, host, ':')) |idx| {
+        rp_id = host[0..idx];
+    }
+
+    try w.print("],\"rpId\":\"{s}\",\"timeout\":60000,\"userVerification\":\"preferred\"}}", .{rp_id});
+
+    res.content_type = .JSON;
+    res.body = buf.items;
+}
+
+pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing body\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    const parsed = std.json.parseFromSlice(std.json.Value, req.arena, body, .{}) catch {
+        res.status = 400;
+        res.body = "{\"error\":\"invalid json\"}";
+        res.content_type = .JSON;
+        return;
+    };
+    const root = parsed.value;
+
+    const cred_id = (root.object.get("id") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing id\"}";
+        res.content_type = .JSON;
+        return;
+    }).string;
+
+    const response_obj = (root.object.get("response") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing response\"}";
+        res.content_type = .JSON;
+        return;
+    }).object;
+
+    const auth_data_b64 = (response_obj.get("authenticatorData") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing authenticatorData\"}";
+        res.content_type = .JSON;
+        return;
+    }).string;
+
+    const client_data_b64 = (response_obj.get("clientDataJSON") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing clientDataJSON\"}";
+        res.content_type = .JSON;
+        return;
+    }).string;
+
+    const sig_b64 = (response_obj.get("signature") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing signature\"}";
+        res.content_type = .JSON;
+        return;
+    }).string;
+
+    // Decode all base64url fields
+    const auth_data = base64urlDecode(req.arena, auth_data_b64) catch {
+        res.status = 400;
+        res.body = "{\"error\":\"invalid authenticatorData base64\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    const client_data_raw = base64urlDecode(req.arena, client_data_b64) catch {
+        res.status = 400;
+        res.body = "{\"error\":\"invalid clientDataJSON base64\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    const sig_raw = base64urlDecode(req.arena, sig_b64) catch {
+        res.status = 400;
+        res.body = "{\"error\":\"invalid signature base64\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    // Parse and verify clientDataJSON
+    const client_data_parsed = std.json.parseFromSlice(std.json.Value, req.arena, client_data_raw, .{}) catch {
+        res.status = 400;
+        res.body = "{\"error\":\"invalid clientDataJSON\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    // Verify type
+    const cd_type = (client_data_parsed.value.object.get("type") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing type\"}";
+        res.content_type = .JSON;
+        return;
+    }).string;
+    if (!std.mem.eql(u8, cd_type, "webauthn.get")) {
+        res.status = 400;
+        res.body = "{\"error\":\"wrong ceremony type\"}";
+        res.content_type = .JSON;
+        return;
+    }
+
+    // Verify origin
+    const cd_origin = (client_data_parsed.value.object.get("origin") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing origin\"}";
+        res.content_type = .JSON;
+        return;
+    }).string;
+
+    const host = req.header("host") orelse "localhost";
+    // Construct expected origins (http and https)
+    const expected_https = try std.fmt.allocPrint(req.arena, "https://{s}", .{host});
+    const expected_http = try std.fmt.allocPrint(req.arena, "http://{s}", .{host});
+    if (!std.mem.eql(u8, cd_origin, expected_https) and !std.mem.eql(u8, cd_origin, expected_http)) {
+        res.status = 400;
+        res.body = "{\"error\":\"origin mismatch\"}";
+        res.content_type = .JSON;
+        return;
+    }
+
+    // Verify challenge
+    const cd_challenge = (client_data_parsed.value.object.get("challenge") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing challenge\"}";
+        res.content_type = .JSON;
+        return;
+    }).string;
+
+    const stored_challenge = takePendingChallenge() orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"no pending challenge\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    const expected_challenge_b64 = try base64urlEncode(req.arena, &stored_challenge);
+    if (!std.mem.eql(u8, cd_challenge, expected_challenge_b64)) {
+        res.status = 400;
+        res.body = "{\"error\":\"challenge mismatch\"}";
+        res.content_type = .JSON;
+        return;
+    }
+
+    // Find the matching credential
+    const creds = try loadCredentials(ctx.allocator, ctx.project_dir);
+    var matching_cred: ?StoredCredential = null;
+    for (creds) |cred| {
+        if (std.mem.eql(u8, cred.id, cred_id)) {
+            matching_cred = cred;
+            break;
+        }
+    }
+
+    const cred = matching_cred orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"unknown credential\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    // Reconstruct the public key
+    const x_bytes = base64urlDecode(req.arena, cred.public_key_x) catch {
+        res.status = 500;
+        res.body = "{\"error\":\"invalid stored key x\"}";
+        res.content_type = .JSON;
+        return;
+    };
+    const y_bytes = base64urlDecode(req.arena, cred.public_key_y) catch {
+        res.status = 500;
+        res.body = "{\"error\":\"invalid stored key y\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    if (x_bytes.len != 32 or y_bytes.len != 32) {
+        res.status = 500;
+        res.body = "{\"error\":\"invalid stored key length\"}";
+        res.content_type = .JSON;
+        return;
+    }
+
+    // Build SEC1 uncompressed point: 0x04 || x || y
+    var sec1: [65]u8 = undefined;
+    sec1[0] = 0x04;
+    @memcpy(sec1[1..33], x_bytes);
+    @memcpy(sec1[33..65], y_bytes);
+
+    const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+    const pubkey = EcdsaP256.PublicKey.fromSec1(&sec1) catch {
+        res.status = 500;
+        res.body = "{\"error\":\"invalid public key\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    // Compute SHA-256(clientDataJSON)
+    var client_data_hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(client_data_raw, &client_data_hash, .{});
+
+    // Verification message = authenticatorData || SHA-256(clientDataJSON)
+    const verify_msg = try req.arena.alloc(u8, auth_data.len + 32);
+    @memcpy(verify_msg[0..auth_data.len], auth_data);
+    @memcpy(verify_msg[auth_data.len..], &client_data_hash);
+
+    // Parse DER signature to raw r||s
+    const sig_rs = parseDerSignature(req.arena, sig_raw) catch {
+        res.status = 400;
+        res.body = "{\"error\":\"invalid signature format\"}";
+        res.content_type = .JSON;
+        return;
+    } orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"could not parse DER signature\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    const signature = EcdsaP256.Signature.fromBytes(sig_rs);
+
+    // Verify the signature
+    signature.verify(verify_msg, pubkey) catch {
+        res.status = 400;
+        res.body = "{\"error\":\"signature verification failed\"}";
+        res.content_type = .JSON;
+        return;
+    };
+
+    // Success - create session tied to the credential's email
+    const session_email = if (cred.email.len > 0) cred.email else "";
+    const token = try createSession(ctx.allocator, ctx.project_dir, session_email);
+    const cookie = try std.fmt.allocPrint(req.arena, "session={s}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800", .{token});
+    res.header("set-cookie", cookie);
+
+    res.content_type = .JSON;
+    res.body = "{\"ok\":true}";
+}
+
+// ── HTML Pages ───────────────────────────────────────────────────────
+
+pub const PAGE_STYLE =
+    \\* { margin: 0; padding: 0; box-sizing: border-box; }
+    \\body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    \\  background: #0d1117; color: #c9d1d9; display: flex; justify-content: center;
+    \\  align-items: center; min-height: 100vh; }
+    \\.auth-card { background: #161b22; border: 1px solid #21262d; border-radius: 12px;
+    \\  padding: 2.5rem; max-width: 400px; width: 90%; text-align: center; }
+    \\.auth-card h1 { color: #f0f6fc; font-size: 1.5rem; margin-bottom: 0.5rem; }
+    \\.auth-card p { color: #8b949e; font-size: 0.9rem; margin-bottom: 1.5rem; }
+    \\.auth-btn { background: #238636; color: #fff; border: none; border-radius: 6px;
+    \\  padding: 0.75rem 1.5rem; font-size: 1rem; cursor: pointer; width: 100%;
+    \\  font-weight: 600; transition: background 0.15s; }
+    \\.auth-btn:hover { background: #2ea043; }
+    \\.auth-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+    \\.status { margin-top: 1rem; font-size: 0.85rem; min-height: 1.2em; }
+    \\.status.error { color: #f85149; }
+    \\.status.ok { color: #3fb950; }
+    \\.brand { color: #58a6ff; font-weight: 600; font-size: 0.9rem; margin-bottom: 1.5rem; display: block; }
+    \\.link { color: #58a6ff; text-decoration: none; font-size: 0.85rem; display: inline-block; margin-top: 1rem; }
+    \\.link:hover { text-decoration: underline; }
+;
+
+pub const B64URL_JS =
+    \\function b64urlToBytes(b64) {
+    \\  let s = b64.replace(/-/g, '+').replace(/_/g, '/');
+    \\  while (s.length % 4) s += '=';
+    \\  const raw = atob(s);
+    \\  const arr = new Uint8Array(raw.length);
+    \\  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+    \\  return arr;
+    \\}
+    \\function bytesToB64url(buf) {
+    \\  const bytes = new Uint8Array(buf);
+    \\  let s = '';
+    \\  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    \\  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    \\}
+;
+
+pub fn loginPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+    res.content_type = .HTML;
+    res.body =
+        "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
+        "<title>Login - Canopy EDA</title><style>" ++ PAGE_STYLE ++ "</style></head><body>" ++
+        "<div class=\"auth-card\">" ++
+        "<span class=\"brand\">Canopy EDA</span>" ++
+        "<h1>Sign In</h1>" ++
+        "<p>Enter your email and use your passkey to authenticate.</p>" ++
+        "<input type=\"email\" id=\"email\" placeholder=\"Email address\" required " ++
+        "style=\"width:100%;box-sizing:border-box;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none\" />" ++
+        "<button class=\"auth-btn\" id=\"login-btn\">Sign in with Passkey</button>" ++
+        "<div class=\"status\" id=\"status\"></div>" ++
+        "</div>" ++
+        "<script>" ++ B64URL_JS ++
+        \\const btn = document.getElementById('login-btn');
+        \\const emailInput = document.getElementById('email');
+        \\const status = document.getElementById('status');
+        \\btn.addEventListener('click', async () => {
+        \\  const email = emailInput.value.trim();
+        \\  if (!email || !email.includes('@')) {
+        \\    status.className = 'status error';
+        \\    status.textContent = 'Please enter a valid email address';
+        \\    return;
+        \\  }
+        \\  btn.disabled = true;
+        \\  status.className = 'status';
+        \\  status.textContent = 'Requesting challenge...';
+        \\  try {
+        \\    const challengeRes = await fetch('/auth/login/challenge?email=' + encodeURIComponent(email));
+        \\    const opts = await challengeRes.json();
+        \\    if (!opts.allowCredentials || opts.allowCredentials.length === 0) {
+        \\      throw new Error('No passkey registered for this email on this server. Ask an admin for an invite link.');
+        \\    }
+        \\    const publicKey = {
+        \\      challenge: b64urlToBytes(opts.challenge),
+        \\      rpId: opts.rpId,
+        \\      timeout: opts.timeout,
+        \\      userVerification: opts.userVerification,
+        \\      allowCredentials: (opts.allowCredentials || []).map(c => ({
+        \\        type: c.type,
+        \\        id: b64urlToBytes(c.id)
+        \\      }))
+        \\    };
+        \\    status.textContent = 'Waiting for passkey...';
+        \\    const cred = await navigator.credentials.get({ publicKey });
+        \\    status.textContent = 'Verifying...';
+        \\    const body = JSON.stringify({
+        \\      id: bytesToB64url(cred.rawId),
+        \\      response: {
+        \\        authenticatorData: bytesToB64url(cred.response.authenticatorData),
+        \\        clientDataJSON: bytesToB64url(cred.response.clientDataJSON),
+        \\        signature: bytesToB64url(cred.response.signature)
+        \\      }
+        \\    });
+        \\    const verifyRes = await fetch('/auth/login/complete', {
+        \\      method: 'POST',
+        \\      headers: { 'Content-Type': 'application/json' },
+        \\      body: body
+        \\    });
+        \\    const result = await verifyRes.json();
+        \\    if (result.ok) {
+        \\      status.className = 'status ok';
+        \\      status.textContent = 'Authenticated!';
+        \\      window.location.href = '/';
+        \\    } else {
+        \\      status.className = 'status error';
+        \\      status.textContent = result.error || 'Authentication failed';
+        \\      btn.disabled = false;
+        \\    }
+        \\  } catch (e) {
+        \\    status.className = 'status error';
+        \\    status.textContent = e.message || 'Authentication failed';
+        \\    btn.disabled = false;
+        \\  }
+        \\});
+        ++ "</script></body></html>";
+}
+
+pub fn setupPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+    const existing = try loadCredentials(ctx.allocator, ctx.project_dir);
+    if (existing.len > 0) {
+        res.status = 303;
+        res.header("location", "/auth/login");
+        return;
+    }
+    res.content_type = .HTML;
+    res.body =
+        "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
+        "<title>Setup - Canopy EDA</title><style>" ++ PAGE_STYLE ++ "</style></head><body>" ++
+        "<div class=\"auth-card\">" ++
+        "<span class=\"brand\">Canopy EDA</span>" ++
+        "<h1>Setup Passkey</h1>" ++
+        "<p>Register a passkey to secure remote access to your EDA server.</p>" ++
+        "<input type=\"email\" id=\"email\" placeholder=\"Email address\" required " ++
+        "style=\"width:100%;box-sizing:border-box;padding:10px 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none\" />" ++
+        "<button class=\"auth-btn\" id=\"register-btn\">Register Passkey</button>" ++
+        "<div class=\"status\" id=\"status\"></div>" ++
+        "<a class=\"link\" href=\"/auth/login\">Already registered? Sign in</a>" ++
+        "</div>" ++
+        "<script>" ++ B64URL_JS ++
+        \\const btn = document.getElementById('register-btn');
+        \\const emailInput = document.getElementById('email');
+        \\const status = document.getElementById('status');
+        \\btn.addEventListener('click', async () => {
+        \\  const email = emailInput.value.trim();
+        \\  if (!email || !email.includes('@')) {
+        \\    status.className = 'status error';
+        \\    status.textContent = 'Please enter a valid email address';
+        \\    return;
+        \\  }
+        \\  btn.disabled = true;
+        \\  status.className = 'status';
+        \\  status.textContent = 'Requesting challenge...';
+        \\  try {
+        \\    const challengeRes = await fetch('/auth/register/challenge?email=' + encodeURIComponent(email));
+        \\    const opts = await challengeRes.json();
+        \\    const publicKey = {
+        \\      challenge: b64urlToBytes(opts.challenge),
+        \\      rp: opts.rp,
+        \\      user: {
+        \\        id: b64urlToBytes(opts.user.id),
+        \\        name: opts.user.name,
+        \\        displayName: opts.user.displayName
+        \\      },
+        \\      pubKeyCredParams: opts.pubKeyCredParams,
+        \\      authenticatorSelection: opts.authenticatorSelection,
+        \\      timeout: opts.timeout
+        \\    };
+        \\    status.textContent = 'Waiting for passkey...';
+        \\    const cred = await navigator.credentials.create({ publicKey });
+        \\    status.textContent = 'Registering...';
+        \\    const body = JSON.stringify({
+        \\      id: bytesToB64url(cred.rawId),
+        \\      email: email,
+        \\      response: {
+        \\        attestationObject: bytesToB64url(cred.response.attestationObject),
+        \\        clientDataJSON: bytesToB64url(cred.response.clientDataJSON)
+        \\      }
+        \\    });
+        \\    const verifyRes = await fetch('/auth/register/complete', {
+        \\      method: 'POST',
+        \\      headers: { 'Content-Type': 'application/json' },
+        \\      body: body
+        \\    });
+        \\    const result = await verifyRes.json();
+        \\    if (result.ok) {
+        \\      status.className = 'status ok';
+        \\      status.textContent = 'Passkey registered!';
+        \\      window.location.href = '/';
+        \\    } else {
+        \\      status.className = 'status error';
+        \\      status.textContent = result.error || 'Registration failed';
+        \\      btn.disabled = false;
+        \\    }
+        \\  } catch (e) {
+        \\    status.className = 'status error';
+        \\    status.textContent = e.message || 'Registration failed';
+        \\    btn.disabled = false;
+        \\  }
+        \\});
+        ++ "</script></body></html>";
+}
+
+// ── Session / account management ─────────────────────────────────────
+
+fn requireSession(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) ?[]const u8 {
+    const tok = getSessionToken(req) orelse {
+        res.status = 401;
+        res.content_type = .JSON;
+        res.body = "{\"error\":\"not signed in\"}";
+        return null;
+    };
+    const email = validateSession(ctx.allocator, ctx.project_dir, tok) orelse {
+        res.status = 401;
+        res.content_type = .JSON;
+        res.body = "{\"error\":\"invalid session\"}";
+        return null;
+    };
+    return email;
+}
+
+pub fn logoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    if (getSessionToken(req)) |tok| {
+        deleteSession(ctx.allocator, ctx.project_dir, tok);
+    }
+    res.header("set-cookie", "session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
+    res.content_type = .JSON;
+    res.body = "{\"ok\":true}";
+}
+
+pub fn listCredentialsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const email = requireSession(ctx, req, res) orelse return;
+
+    const creds = try loadCredentials(ctx.allocator, ctx.project_dir);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(req.arena);
+    try w.print("{{\"email\":\"{s}\",\"credentials\":[", .{email});
+    var first = true;
+    for (creds) |c| {
+        if (!std.mem.eql(u8, c.email, email)) continue;
+        if (!first) try w.writeAll(",");
+        try w.print("{{\"id\":\"{s}\",\"created_at\":{d}}}", .{ c.id, c.created_at });
+        first = false;
+    }
+    try w.writeAll("]}");
+
+    res.content_type = .JSON;
+    res.body = buf.items;
+}
+
+pub fn deleteCredentialApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const email = requireSession(ctx, req, res) orelse return;
+
+    const body = req.body() orelse {
+        res.status = 400;
+        res.content_type = .JSON;
+        res.body = "{\"error\":\"missing body\"}";
+        return;
+    };
+    const parsed = std.json.parseFromSlice(std.json.Value, req.arena, body, .{}) catch {
+        res.status = 400;
+        res.content_type = .JSON;
+        res.body = "{\"error\":\"invalid json\"}";
+        return;
+    };
+    const id_val = parsed.value.object.get("id") orelse {
+        res.status = 400;
+        res.content_type = .JSON;
+        res.body = "{\"error\":\"missing id\"}";
+        return;
+    };
+    if (id_val != .string) {
+        res.status = 400;
+        res.content_type = .JSON;
+        res.body = "{\"error\":\"id must be string\"}";
+        return;
+    }
+    const target_id = id_val.string;
+
+    const existing = try loadCredentials(ctx.allocator, ctx.project_dir);
+
+    var user_count: usize = 0;
+    for (existing) |c| {
+        if (std.mem.eql(u8, c.email, email)) user_count += 1;
+    }
+    if (user_count <= 1) {
+        res.status = 400;
+        res.content_type = .JSON;
+        res.body = "{\"error\":\"cannot delete your only passkey\"}";
+        return;
+    }
+
+    var kept: std.ArrayListUnmanaged(StoredCredential) = .empty;
+    var removed = false;
+    for (existing) |c| {
+        if (std.mem.eql(u8, c.id, target_id) and std.mem.eql(u8, c.email, email)) {
+            removed = true;
+            continue;
+        }
+        try kept.append(ctx.allocator, c);
+    }
+
+    if (!removed) {
+        res.status = 404;
+        res.content_type = .JSON;
+        res.body = "{\"error\":\"credential not found\"}";
+        return;
+    }
+
+    saveCredentials(ctx.allocator, ctx.project_dir, kept.items) catch {
+        res.status = 500;
+        res.content_type = .JSON;
+        res.body = "{\"error\":\"failed to save\"}";
+        return;
+    };
+
+    res.content_type = .JSON;
+    res.body = "{\"ok\":true}";
+}
+
+pub fn createInviteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const email = currentEmail(ctx, req) orelse {
+        res.status = 401;
+        res.content_type = .JSON;
+        res.body = "{\"error\":\"sign in required\"}";
+        return;
+    };
+
+    // Admin-only.
+    if (!users.getRole(ctx.allocator, ctx.project_dir, email).canAdmin()) {
+        res.status = 403;
+        res.content_type = .JSON;
+        res.body = "{\"error\":\"admin role required\"}";
+        return;
+    }
+
+    var role_str: []const u8 = "writer";
+    if (req.body()) |body| {
+        if (body.len > 0) {
+            if (std.json.parseFromSlice(std.json.Value, req.arena, body, .{})) |parsed| {
+                if (parsed.value == .object) {
+                    if (parsed.value.object.get("role")) |rv| {
+                        if (rv == .string and users.Role.fromString(rv.string) != null) {
+                            role_str = rv.string;
+                        }
+                    }
+                }
+            } else |_| {}
+        }
+    }
+
+    const token = try createInvite(ctx.allocator, ctx.project_dir, email, role_str);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(req.arena);
+    try w.print("{{\"ok\":true,\"token\":\"{s}\",\"path\":\"/auth/invite/{s}\",\"role\":\"{s}\"}}", .{ token, token, role_str });
+
+    res.content_type = .JSON;
+    res.body = buf.items;
+}
+
+pub fn invitePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const path = req.url.path;
+    const prefix = "/auth/invite/";
+    if (!std.mem.startsWith(u8, path, prefix)) {
+        res.status = 404;
+        res.body = "not found";
+        return;
+    }
+    const token = path[prefix.len..];
+    if (token.len == 0) {
+        res.status = 404;
+        res.body = "not found";
+        return;
+    }
+
+    const found = try findInvite(ctx.allocator, ctx.project_dir, token);
+    if (found == null) {
+        res.content_type = .HTML;
+        res.body =
+            "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
+            "<title>Invite - Canopy EDA</title><style>" ++ PAGE_STYLE ++ "</style></head><body>" ++
+            "<div class=\"auth-card\">" ++
+            "<span class=\"brand\">Canopy EDA</span>" ++
+            "<h1>Invite Expired</h1>" ++
+            "<p>This invite link is invalid or has expired. Ask the person who invited you for a new link.</p>" ++
+            "<a class=\"link\" href=\"/auth/login\">Back to sign in</a>" ++
+            "</div></body></html>";
+        return;
+    }
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(req.arena);
+    try w.writeAll(
+        "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
+            "<title>Accept Invite - Canopy EDA</title><style>" ++ PAGE_STYLE ++ "</style></head><body>" ++
+            "<div class=\"auth-card\">" ++
+            "<span class=\"brand\">Canopy EDA</span>" ++
+            "<h1>Accept Invite</h1>" ++
+            "<p>Enter your email and register a passkey for this device.</p>" ++
+            "<input type=\"email\" id=\"email\" placeholder=\"Email address\" required " ++
+            "style=\"width:100%;box-sizing:border-box;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none\" />" ++
+            "<button class=\"auth-btn\" id=\"register-btn\">Register Passkey</button>" ++
+            "<div class=\"status\" id=\"status\"></div>" ++
+            "</div>" ++
+            "<script>" ++ B64URL_JS,
+    );
+    try w.print("const INVITE_TOKEN = \"{s}\";\n", .{token});
+    try w.writeAll(
+        \\const btn = document.getElementById('register-btn');
+        \\const emailInput = document.getElementById('email');
+        \\const status = document.getElementById('status');
+        \\btn.addEventListener('click', async () => {
+        \\  const email = emailInput.value.trim();
+        \\  if (!email || !email.includes('@')) {
+        \\    status.className = 'status error';
+        \\    status.textContent = 'Please enter a valid email address';
+        \\    return;
+        \\  }
+        \\  btn.disabled = true;
+        \\  status.className = 'status';
+        \\  status.textContent = 'Requesting challenge...';
+        \\  try {
+        \\    const url = '/auth/register/challenge?invite=' + encodeURIComponent(INVITE_TOKEN) + '&email=' + encodeURIComponent(email);
+        \\    const challengeRes = await fetch(url);
+        \\    const opts = await challengeRes.json();
+        \\    if (!challengeRes.ok) throw new Error(opts.error || 'Challenge failed');
+        \\    const publicKey = {
+        \\      challenge: b64urlToBytes(opts.challenge),
+        \\      rp: opts.rp,
+        \\      user: { id: b64urlToBytes(opts.user.id), name: opts.user.name, displayName: opts.user.displayName },
+        \\      pubKeyCredParams: opts.pubKeyCredParams,
+        \\      authenticatorSelection: opts.authenticatorSelection,
+        \\      timeout: opts.timeout,
+        \\      excludeCredentials: (opts.excludeCredentials || []).map(c => ({ type: c.type, id: b64urlToBytes(c.id) }))
+        \\    };
+        \\    status.textContent = 'Waiting for passkey...';
+        \\    const cred = await navigator.credentials.create({ publicKey });
+        \\    status.textContent = 'Registering...';
+        \\    const body = JSON.stringify({
+        \\      id: bytesToB64url(cred.rawId),
+        \\      email: email,
+        \\      invite: INVITE_TOKEN,
+        \\      response: {
+        \\        attestationObject: bytesToB64url(cred.response.attestationObject),
+        \\        clientDataJSON: bytesToB64url(cred.response.clientDataJSON)
+        \\      }
+        \\    });
+        \\    const verifyRes = await fetch('/auth/register/complete', {
+        \\      method: 'POST',
+        \\      headers: { 'Content-Type': 'application/json' },
+        \\      body: body
+        \\    });
+        \\    const result = await verifyRes.json();
+        \\    if (result.ok) {
+        \\      status.className = 'status ok';
+        \\      status.textContent = 'Passkey registered!';
+        \\      window.location.href = '/';
+        \\    } else {
+        \\      status.className = 'status error';
+        \\      status.textContent = result.error || 'Registration failed';
+        \\      btn.disabled = false;
+        \\    }
+        \\  } catch (e) {
+        \\    status.className = 'status error';
+        \\    status.textContent = e.message || 'Registration failed';
+        \\    btn.disabled = false;
+        \\  }
+        \\});
+    );
+    try w.writeAll("</script></body></html>");
+
+    res.content_type = .HTML;
+    res.body = buf.items;
+}
+
+pub fn managePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const tok = getSessionToken(req) orelse {
+        res.status = 303;
+        res.header("location", "/auth/login");
+        return;
+    };
+    if (validateSession(ctx.allocator, ctx.project_dir, tok) == null) {
+        res.status = 303;
+        res.header("location", "/auth/login");
+        return;
+    }
+
+    res.content_type = .HTML;
+    res.body =
+        "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
+        "<title>Manage - Canopy EDA</title><style>" ++ PAGE_STYLE ++
+        "\n.auth-card { max-width: 520px; text-align: left; }" ++
+        "\n.auth-card h1 { text-align: center; }" ++
+        "\n.row { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border:1px solid #21262d; border-radius:6px; margin-bottom:8px; }" ++
+        "\n.row .meta { color:#8b949e; font-size:0.85rem; }" ++
+        "\n.row button { background:#21262d; color:#f85149; border:1px solid #30363d; border-radius:4px; padding:4px 10px; cursor:pointer; font-size:0.8rem; }" ++
+        "\n.row button:hover { background:#2d333b; }" ++
+        "\n.section-title { color:#8b949e; font-size:0.8rem; text-transform:uppercase; letter-spacing:0.05em; margin:1.5rem 0 0.5rem; }" ++
+        "\n.btn-sec { background:#21262d; border:1px solid #30363d; color:#c9d1d9; }" ++
+        "\n.btn-sec:hover { background:#2d333b; }" ++
+        "\n.invite-box { background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:10px; margin-top:8px; font-size:0.8rem; word-break:break-all; }" ++
+        "\n.user-bar { display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; padding-bottom:1rem; border-bottom:1px solid #21262d; }" ++
+        "\n.user-bar .email { color:#8b949e; font-size:0.85rem; }" ++
+        "</style></head><body>" ++
+        "<div class=\"auth-card\">" ++
+        "<span class=\"brand\">Canopy EDA</span>" ++
+        "<h1>Manage Passkeys</h1>" ++
+        "<div class=\"user-bar\"><span class=\"email\" id=\"user-email\"></span>" ++
+        "<button class=\"btn-sec\" id=\"logout-btn\" style=\"padding:4px 10px;font-size:0.8rem;border-radius:4px;cursor:pointer\">Sign out</button></div>" ++
+        "<div class=\"section-title\">Your Passkeys</div>" ++
+        "<div id=\"passkey-list\"></div>" ++
+        "<button class=\"auth-btn\" id=\"add-btn\" style=\"margin-top:8px\">Add passkey on this device</button>" ++
+        "<div class=\"section-title\">Invite a new user</div>" ++
+        "<p style=\"color:#8b949e;font-size:0.85rem;margin-bottom:8px\">Generate a one-time link (valid 7 days). The same link works on your other devices to add passkeys to your own account.</p>" ++
+        "<button class=\"btn-sec auth-btn\" id=\"invite-btn\">Create invite link</button>" ++
+        "<div id=\"invite-out\"></div>" ++
+        "<div class=\"status\" id=\"status\"></div>" ++
+        "<a class=\"link\" href=\"/\">Back to designs</a>" ++
+        "</div>" ++
+        "<script>" ++ B64URL_JS ++
+        \\const status = document.getElementById('status');
+        \\function fmtDate(ts) {
+        \\  if (!ts) return 'Unknown';
+        \\  const d = new Date(ts * 1000);
+        \\  return d.toLocaleString();
+        \\}
+        \\async function refresh() {
+        \\  const r = await fetch('/auth/credentials/list');
+        \\  if (!r.ok) { window.location.href = '/auth/login'; return; }
+        \\  const data = await r.json();
+        \\  document.getElementById('user-email').textContent = data.email;
+        \\  const list = document.getElementById('passkey-list');
+        \\  list.innerHTML = '';
+        \\  for (const c of data.credentials) {
+        \\    const row = document.createElement('div');
+        \\    row.className = 'row';
+        \\    const meta = document.createElement('div');
+        \\    const added = document.createElement('div');
+        \\    added.className = 'meta';
+        \\    added.textContent = 'Added ' + fmtDate(c.created_at);
+        \\    const title = document.createElement('div');
+        \\    title.textContent = 'Passkey';
+        \\    meta.appendChild(title);
+        \\    meta.appendChild(added);
+        \\    const btn = document.createElement('button');
+        \\    btn.textContent = 'Delete';
+        \\    btn.onclick = async () => {
+        \\      if (data.credentials.length <= 1) {
+        \\        status.className = 'status error';
+        \\        status.textContent = 'Cannot delete your only passkey. Add another first.';
+        \\        return;
+        \\      }
+        \\      if (!confirm('Delete this passkey?')) return;
+        \\      const rr = await fetch('/auth/credentials/delete', {
+        \\        method: 'POST',
+        \\        headers: { 'Content-Type': 'application/json' },
+        \\        body: JSON.stringify({ id: c.id })
+        \\      });
+        \\      const j = await rr.json();
+        \\      if (j.ok) { refresh(); } else {
+        \\        status.className = 'status error';
+        \\        status.textContent = j.error || 'Delete failed';
+        \\      }
+        \\    };
+        \\    row.appendChild(meta);
+        \\    row.appendChild(btn);
+        \\    list.appendChild(row);
+        \\  }
+        \\}
+        \\document.getElementById('logout-btn').onclick = async () => {
+        \\  await fetch('/auth/logout', { method: 'POST' });
+        \\  window.location.href = '/auth/login';
+        \\};
+        \\document.getElementById('add-btn').onclick = async () => {
+        \\  status.className = 'status';
+        \\  status.textContent = 'Requesting challenge...';
+        \\  try {
+        \\    const challengeRes = await fetch('/auth/register/challenge');
+        \\    const opts = await challengeRes.json();
+        \\    if (!challengeRes.ok) throw new Error(opts.error || 'Challenge failed');
+        \\    const publicKey = {
+        \\      challenge: b64urlToBytes(opts.challenge),
+        \\      rp: opts.rp,
+        \\      user: { id: b64urlToBytes(opts.user.id), name: opts.user.name, displayName: opts.user.displayName },
+        \\      pubKeyCredParams: opts.pubKeyCredParams,
+        \\      authenticatorSelection: opts.authenticatorSelection,
+        \\      timeout: opts.timeout,
+        \\      excludeCredentials: (opts.excludeCredentials || []).map(c => ({ type: c.type, id: b64urlToBytes(c.id) }))
+        \\    };
+        \\    status.textContent = 'Waiting for passkey...';
+        \\    const cred = await navigator.credentials.create({ publicKey });
+        \\    status.textContent = 'Registering...';
+        \\    const body = JSON.stringify({
+        \\      id: bytesToB64url(cred.rawId),
+        \\      response: {
+        \\        attestationObject: bytesToB64url(cred.response.attestationObject),
+        \\        clientDataJSON: bytesToB64url(cred.response.clientDataJSON)
+        \\      }
+        \\    });
+        \\    const verifyRes = await fetch('/auth/register/complete', {
+        \\      method: 'POST',
+        \\      headers: { 'Content-Type': 'application/json' },
+        \\      body: body
+        \\    });
+        \\    const result = await verifyRes.json();
+        \\    if (result.ok) {
+        \\      status.className = 'status ok';
+        \\      status.textContent = 'Passkey added.';
+        \\      refresh();
+        \\    } else {
+        \\      status.className = 'status error';
+        \\      status.textContent = result.error || 'Registration failed';
+        \\    }
+        \\  } catch (e) {
+        \\    status.className = 'status error';
+        \\    status.textContent = e.message || 'Registration failed';
+        \\  }
+        \\};
+        \\document.getElementById('invite-btn').onclick = async () => {
+        \\  const r = await fetch('/auth/invite/create', { method: 'POST' });
+        \\  const j = await r.json();
+        \\  if (j.ok) {
+        \\    const fullUrl = window.location.origin + j.path;
+        \\    const out = document.getElementById('invite-out');
+        \\    out.innerHTML = '';
+        \\    const box = document.createElement('div');
+        \\    box.className = 'invite-box';
+        \\    box.textContent = fullUrl;
+        \\    const note = document.createElement('div');
+        \\    note.style.color = '#8b949e';
+        \\    note.style.fontSize = '0.8rem';
+        \\    note.style.marginTop = '6px';
+        \\    note.textContent = 'Valid for 7 days. One-time use.';
+        \\    out.appendChild(box);
+        \\    out.appendChild(note);
+        \\  } else {
+        \\    status.className = 'status error';
+        \\    status.textContent = j.error || 'Failed to create invite';
+        \\  }
+        \\};
+        \\refresh();
+        ++ "</script></body></html>";
+}

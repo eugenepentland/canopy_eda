@@ -357,7 +357,7 @@ pub const INTERACTION_JS_PART2 =
     \\  searchResults.innerHTML='';searchIdx=-1;searchItems=[];
     \\  if(!q){searchResults.classList.remove('open');return;}
     \\  var results=[];
-    \\  SECTIONS.forEach(function(s){if(s.toLowerCase().indexOf(q)>=0)results.push({name:s,type:'section'});});
+    \\  SECTIONS.forEach(function(s){var sn=typeof s==='string'?s:s.name;if(sn.toLowerCase().indexOf(q)>=0)results.push({name:sn,type:'section'});});
     \\  for(var ref in COMPONENTS){var ci=COMPONENTS[ref];if(ref.toLowerCase().indexOf(q)>=0)results.push({name:ref,type:'comp'});
     \\    else if(ci.value&&ci.value.toLowerCase().indexOf(q)>=0)results.push({name:ref+' ('+ci.value+')',type:'comp',ref:ref});}
     \\  for(var pname in PIN_NAMES){if(pname.toLowerCase().indexOf(q)>=0){var pp=PIN_NAMES[pname];results.push({name:pp[0].ref+'.'+pp[0].pin+' ('+pname+')',type:'pin',ref:pp[0].ref,pin:pp[0].pin});}}

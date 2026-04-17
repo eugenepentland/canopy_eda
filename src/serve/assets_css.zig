@@ -3,11 +3,11 @@ const std = @import("std");
 // ── Shared navbar ─────────────────────────────────────────────────────
 
 pub const NAVBAR_CSS =
-    \\.navbar{background:#161b22;border-bottom:1px solid #21262d;padding:0 1.5rem;display:flex;align-items:center;gap:1.5rem;height:42px;font-family:system-ui,sans-serif;font-size:0.85rem;}
-    \\.navbar a{color:#8b949e;text-decoration:none;padding:0.4rem 0;border-bottom:2px solid transparent;}
+    \\.navbar{background:#161b22;border-bottom:1px solid #21262d;padding:0 1rem;display:flex;align-items:center;gap:1rem;height:42px;font-family:system-ui,sans-serif;font-size:0.85rem;}
+    \\.navbar a{color:#8b949e;text-decoration:none;padding:0.6rem 0;border-bottom:2px solid transparent;min-height:42px;display:flex;align-items:center}
     \\.navbar a:hover{color:#e0e0e0;}
     \\.navbar a.active{color:#e0e0e0;border-bottom-color:#58a6ff;}
-    \\.navbar .brand{color:#58a6ff;font-weight:600;font-size:0.9rem;margin-right:0.5rem;}
+    \\.navbar .brand{color:#58a6ff;font-weight:600;font-size:0.9rem;margin-right:0.3rem;}
 ;
 
 pub fn writeNavbar(w: anytype, active: []const u8) !void {
@@ -22,6 +22,7 @@ pub fn writeNavbar(w: anytype, active: []const u8) !void {
     } else {
         try w.writeAll("<a href=\"/library\">Library</a>");
     }
+    try w.writeAll("<a href=\"/account\" style=\"margin-left:auto\">Account</a>");
     try w.writeAll("</div>");
 }
 

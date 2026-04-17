@@ -1,7 +1,6 @@
 const std = @import("std");
 const httpz = @import("httpz");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
-const render_svg = @import("../render_svg.zig");
 const render_json = @import("../render_json.zig");
 const render_block = @import("../render_block.zig");
 const export_kicad = @import("../export_kicad.zig");
@@ -43,44 +42,28 @@ pub fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
         },
     };
 
-    const new_svg = render_svg.renderSchematic(ctx.allocator, block) catch {
-        res.status = 500;
-        res.body = "Render error";
-        return;
-    };
-
     const new_layout = render_json.renderSceneGraph(ctx.allocator, block) catch null;
 
     serve_root.live_mutex.lock();
-    serve_root.live_svg = new_svg;
     serve_root.live_layout_json = new_layout;
-    serve_root.live_version += 1;
-    const v = serve_root.live_version;
     serve_root.live_mutex.unlock();
+    const v = serve_root.bumpLiveVersion(name);
 
     std.debug.print("Pushed {s} (v{d})\n", .{ name, v });
     res.body = "ok";
 }
 
-pub fn versionApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
-    serve_root.live_mutex.lock();
-    const v = serve_root.live_version;
-    serve_root.live_mutex.unlock();
+pub fn versionApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const v = serve_root.getLiveVersion(name);
 
     res.content_type = .JSON;
     res.header("access-control-allow-origin", "*");
     const w = res.writer();
     try w.print("{{\"version\":{d}}}", .{v});
-}
-
-pub fn svgApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
-    serve_root.live_mutex.lock();
-    const new_svg = serve_root.live_svg;
-    serve_root.live_mutex.unlock();
-
-    res.content_type = .SVG;
-    res.header("access-control-allow-origin", "*");
-    res.body = new_svg orelse "<!-- no svg -->";
 }
 
 pub fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
@@ -91,43 +74,6 @@ pub fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void
     res.content_type = .JSON;
     res.header("access-control-allow-origin", "*");
     res.body = data orelse "{\"error\":\"no layout\"}";
-}
-
-pub fn blockDiagramApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
-
-    const board_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
-    defer ctx.allocator.free(board_path);
-
-    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
-    defer eval.deinit();
-
-    const result = eval.evalFile(board_path) catch {
-        res.status = 500;
-        res.body = "Build error";
-        return;
-    };
-
-    const block = switch (result) {
-        .design_block => |b| b,
-        else => {
-            res.status = 500;
-            return;
-        },
-    };
-
-    const svg = render_block.renderBlockDiagram(ctx.allocator, block) catch {
-        res.status = 500;
-        res.body = "Render error";
-        return;
-    };
-
-    res.content_type = .SVG;
-    res.header("access-control-allow-origin", "*");
-    res.body = svg;
 }
 
 pub fn blockDiagramJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
@@ -969,7 +915,22 @@ pub fn drcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     var block: *env_mod.DesignBlock = undefined;
     var board_def: ?*env_mod.Board = null;
     switch (result) {
-        .design_block => |db| block = db,
+        .design_block => |db| {
+            block = db;
+            // Try loading companion board definition
+            const bd_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}-board.sexp", .{ ctx.project_dir, name_param }) catch null;
+            if (bd_path) |bp| {
+                defer ctx.allocator.free(bp);
+                var eval2 = Evaluator.init(ctx.allocator, ctx.project_dir);
+                defer eval2.deinit();
+                if (eval2.evalFile(bp)) |bd_result| {
+                    switch (bd_result) {
+                        .board => |b| board_def = b,
+                        else => {},
+                    }
+                } else |_| {}
+            }
+        },
         .board => |b| {
             block = b.design;
             board_def = b;

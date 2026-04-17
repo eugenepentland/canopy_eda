@@ -99,24 +99,59 @@ pub fn runDrc(
         }
     }
 
-    // Check 1: Pad-to-pad clearance (different nets)
-    for (0..pad_list.items.len) |i| {
-        for (i + 1..pad_list.items.len) |j| {
-            const a = pad_list.items[i];
-            const b = pad_list.items[j];
-            if (sameNet(a.net, b.net)) continue;
-            if (!layersOverlap(a.layer, b.layer)) continue;
-            const dx = a.x - b.x;
-            const dy = a.y - b.y;
-            const dist = @sqrt(dx * dx + dy * dy) - a.r - b.r;
-            if (dist < rules.clearance) {
-                try violations.append(allocator, .{
-                    .kind = "clearance",
-                    .message = try std.fmt.allocPrint(allocator, "Pad {s}.{s} to {s}.{s}: {d:.2}mm < {d:.2}mm clearance", .{ a.ref, a.pin, b.ref, b.pin, dist, rules.clearance }),
-                    .x = (a.x + b.x) / 2.0,
-                    .y = (a.y + b.y) / 2.0,
-                    .severity = .error_,
-                });
+    // Check 1: Pad-to-pad clearance (different nets) — grid-accelerated
+    // Build spatial grid with cell size = 2x max clearance radius
+    const max_pad_r: f64 = blk: {
+        var mr: f64 = 0;
+        for (pad_list.items) |p| mr = @max(mr, p.r);
+        break :blk mr;
+    };
+    const grid_cell: f64 = @max(2.0, (rules.clearance + max_pad_r * 2) * 2.0);
+    {
+        // Hash pads into grid cells
+        var grid = std.AutoHashMap(i64, std.ArrayListUnmanaged(usize)).init(allocator);
+        defer {
+            var git = grid.iterator();
+            while (git.next()) |entry| entry.value_ptr.deinit(allocator);
+            grid.deinit();
+        }
+        for (pad_list.items, 0..) |p, i| {
+            const cx: i64 = @intFromFloat(@floor(p.x / grid_cell));
+            const cy: i64 = @intFromFloat(@floor(p.y / grid_cell));
+            const key: i64 = cx *% 100003 +% cy;
+            const gop = try grid.getOrPut(key);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.append(allocator, i);
+        }
+        // Check each pad against neighbors in adjacent cells
+        for (pad_list.items, 0..) |a, ai| {
+            const acx: i64 = @intFromFloat(@floor(a.x / grid_cell));
+            const acy: i64 = @intFromFloat(@floor(a.y / grid_cell));
+            var dcx: i64 = -1;
+            while (dcx <= 1) : (dcx += 1) {
+                var dcy: i64 = -1;
+                while (dcy <= 1) : (dcy += 1) {
+                    const nkey: i64 = (acx + dcx) *% 100003 +% (acy + dcy);
+                    const cell = grid.get(nkey) orelse continue;
+                    for (cell.items) |bi| {
+                        if (bi <= ai) continue; // avoid duplicate pairs
+                        const b = pad_list.items[bi];
+                        if (sameNet(a.net, b.net)) continue;
+                        if (!layersOverlap(a.layer, b.layer)) continue;
+                        const dx = a.x - b.x;
+                        const dy = a.y - b.y;
+                        const dist = @sqrt(dx * dx + dy * dy) - a.r - b.r;
+                        if (dist < rules.clearance) {
+                            try violations.append(allocator, .{
+                                .kind = "clearance",
+                                .message = try std.fmt.allocPrint(allocator, "Pad {s}.{s} to {s}.{s}: {d:.2}mm < {d:.2}mm clearance", .{ a.ref, a.pin, b.ref, b.pin, dist, rules.clearance }),
+                                .x = (a.x + b.x) / 2.0,
+                                .y = (a.y + b.y) / 2.0,
+                                .severity = .error_,
+                            });
+                        }
+                    }
+                }
             }
         }
     }
@@ -284,6 +319,206 @@ pub fn runDrc(
                             .y = v.y,
                             .severity = .error_,
                         });
+                    }
+                }
+            }
+        }
+    }
+
+    // Check 8: Unconnected nets — pads on same net not connected by traces/vias
+    {
+        // Build adjacency: two pads are connected if a trace/via chain links them.
+        // Use union-find on pad indices.
+        const n_pads = pad_list.items.len;
+        if (n_pads > 0) {
+            var parent = try allocator.alloc(usize, n_pads);
+            defer allocator.free(parent);
+            for (0..n_pads) |i| parent[i] = i;
+
+            // Find root with path compression
+            const find = struct {
+                fn f(p: []usize, x: usize) usize {
+                    var cur = x;
+                    while (p[cur] != cur) {
+                        p[cur] = p[p[cur]];
+                        cur = p[cur];
+                    }
+                    return cur;
+                }
+            }.f;
+
+            // Union two pads
+            const merge = struct {
+                fn f(p: []usize, a: usize, b: usize) void {
+                    const ra = @This().root(p, a);
+                    const rb = @This().root(p, b);
+                    if (ra != rb) p[ra] = rb;
+                }
+                fn root(p: []usize, x: usize) usize {
+                    var cur = x;
+                    while (p[cur] != cur) {
+                        p[cur] = p[p[cur]];
+                        cur = p[cur];
+                    }
+                    return cur;
+                }
+            }.f;
+
+            _ = find;
+
+            // Proximity threshold: pad is "connected" to a trace endpoint if within this distance
+            const connect_dist: f64 = 0.15; // mm
+
+            // Connect pads that touch the same trace endpoint or via
+            for (layout.traces) |t| {
+                if (t.points.len < 2) continue;
+                // Find pads near trace start and end points
+                var start_pads: std.ArrayListUnmanaged(usize) = .empty;
+                defer start_pads.deinit(allocator);
+                var end_pads: std.ArrayListUnmanaged(usize) = .empty;
+                defer end_pads.deinit(allocator);
+
+                for (pad_list.items, 0..) |pad, pi| {
+                    if (!sameNet(pad.net, t.net)) continue;
+                    // Check start
+                    const ds = @sqrt(std.math.pow(f64, pad.x - t.points[0][0], 2) + std.math.pow(f64, pad.y - t.points[0][1], 2));
+                    if (ds <= pad.r + connect_dist) {
+                        start_pads.append(allocator, pi) catch {};
+                    }
+                    // Check end
+                    const last = t.points.len - 1;
+                    const de = @sqrt(std.math.pow(f64, pad.x - t.points[last][0], 2) + std.math.pow(f64, pad.y - t.points[last][1], 2));
+                    if (de <= pad.r + connect_dist) {
+                        end_pads.append(allocator, pi) catch {};
+                    }
+                }
+
+                // Merge all start pads together
+                if (start_pads.items.len > 1)
+                    for (start_pads.items[1..]) |pi| merge(parent, start_pads.items[0], pi);
+                // Merge all end pads together
+                if (end_pads.items.len > 1)
+                    for (end_pads.items[1..]) |pi| merge(parent, end_pads.items[0], pi);
+                // Merge start and end groups (trace connects them)
+                if (start_pads.items.len > 0 and end_pads.items.len > 0) {
+                    merge(parent, start_pads.items[0], end_pads.items[0]);
+                }
+            }
+
+            // Vias connect pads near them on any layer
+            for (layout.vias) |v| {
+                var via_pads: std.ArrayListUnmanaged(usize) = .empty;
+                defer via_pads.deinit(allocator);
+                for (pad_list.items, 0..) |pad, pi| {
+                    if (!sameNet(pad.net, v.net)) continue;
+                    const dv = @sqrt(std.math.pow(f64, pad.x - v.x, 2) + std.math.pow(f64, pad.y - v.y, 2));
+                    if (dv <= pad.r + v.pad_size / 2.0 + connect_dist) {
+                        via_pads.append(allocator, pi) catch {};
+                    }
+                }
+                if (via_pads.items.len > 1)
+                    for (via_pads.items[1..]) |pi| merge(parent, via_pads.items[0], pi);
+            }
+
+            // Also connect traces to each other where endpoints meet
+            for (layout.traces, 0..) |ta, ti| {
+                if (ta.points.len < 2) continue;
+                for (layout.traces[ti + 1 ..]) |tb| {
+                    if (tb.points.len < 2) continue;
+                    if (!sameNet(ta.net, tb.net)) continue;
+                    // Check if any endpoints are close
+                    const ta_ends = [_][2]f64{ ta.points[0], ta.points[ta.points.len - 1] };
+                    const tb_ends = [_][2]f64{ tb.points[0], tb.points[tb.points.len - 1] };
+                    var traces_connected = false;
+                    for (ta_ends) |ea| {
+                        for (tb_ends) |eb| {
+                            const dt = @sqrt(std.math.pow(f64, ea[0] - eb[0], 2) + std.math.pow(f64, ea[1] - eb[1], 2));
+                            if (dt < connect_dist) traces_connected = true;
+                        }
+                    }
+                    if (traces_connected) {
+                        // Find any pad connected to each trace and merge
+                        var pad_a: ?usize = null;
+                        var pad_b: ?usize = null;
+                        for (pad_list.items, 0..) |pad, pi| {
+                            if (!sameNet(pad.net, ta.net)) continue;
+                            for (ta_ends) |ep| {
+                                const d = @sqrt(std.math.pow(f64, pad.x - ep[0], 2) + std.math.pow(f64, pad.y - ep[1], 2));
+                                if (d <= pad.r + connect_dist) {
+                                    pad_a = pi;
+                                    break;
+                                }
+                            }
+                            for (tb_ends) |ep| {
+                                const d = @sqrt(std.math.pow(f64, pad.x - ep[0], 2) + std.math.pow(f64, pad.y - ep[1], 2));
+                                if (d <= pad.r + connect_dist) {
+                                    pad_b = pi;
+                                    break;
+                                }
+                            }
+                        }
+                        if (pad_a != null and pad_b != null) merge(parent, pad_a.?, pad_b.?);
+                    }
+                }
+            }
+
+            // Now check each net: all pads should be in the same connected component
+            // Group pads by base net name
+            var net_pads = std.StringHashMap(std.ArrayListUnmanaged(usize)).init(allocator);
+            defer {
+                var it = net_pads.iterator();
+                while (it.next()) |entry| entry.value_ptr.deinit(allocator);
+                net_pads.deinit();
+            }
+            for (pad_list.items, 0..) |pad, pi| {
+                if (pad.net.len == 0) continue;
+                const bn = baseNet(pad.net);
+                if (std.mem.eql(u8, bn, "GND")) continue; // Skip GND — too many pads
+                const gop = try net_pads.getOrPut(bn);
+                if (!gop.found_existing) gop.value_ptr.* = .empty;
+                try gop.value_ptr.append(allocator, pi);
+            }
+
+            var net_iter = net_pads.iterator();
+            while (net_iter.next()) |entry| {
+                const net_name = entry.key_ptr.*;
+                const pads_on_net = entry.value_ptr.items;
+                if (pads_on_net.len < 2) continue;
+
+                // Find root of first pad
+                const root0 = struct {
+                    fn f(p: []usize, x: usize) usize {
+                        var cur = x;
+                        while (p[cur] != cur) {
+                            p[cur] = p[p[cur]];
+                            cur = p[cur];
+                        }
+                        return cur;
+                    }
+                }.f(parent, pads_on_net[0]);
+
+                // Check all others
+                for (pads_on_net[1..]) |pi| {
+                    const root_i = struct {
+                        fn f(p: []usize, x: usize) usize {
+                            var cur = x;
+                            while (p[cur] != cur) {
+                                p[cur] = p[p[cur]];
+                                cur = p[cur];
+                            }
+                            return cur;
+                        }
+                    }.f(parent, pi);
+                    if (root_i != root0) {
+                        const pad = pad_list.items[pi];
+                        try violations.append(allocator, .{
+                            .kind = "unconnected",
+                            .message = try std.fmt.allocPrint(allocator, "Pad {s}.{s} on net '{s}' is unconnected", .{ pad.ref, pad.pin, net_name }),
+                            .x = pad.x,
+                            .y = pad.y,
+                            .severity = .error_,
+                        });
+                        break; // One violation per net is enough
                     }
                 }
             }

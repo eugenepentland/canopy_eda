@@ -153,7 +153,7 @@ pub const PCB_VIEWER_JS =
     \\    sg.rect(bx, by, bw, bh);
     \\    sg.stroke({color: 0x3fb950, width: 1, alpha: 0.4});
     \\    sg.fill({color: 0x3fb950, alpha: 0.01});
-    \\    sg.eventMode = selectMode === 'section' ? 'static' : 'none';
+    \\    sg.eventMode = (selectMode === 'section' || (selFilter && selFilter.section)) ? 'static' : 'none';
     \\    sg.cursor = 'pointer';
     \\    sg._sectionIdx = si;
     \\    sg.on('pointerdown', function(e) {
@@ -188,6 +188,7 @@ pub const PCB_VIEWER_JS =
     \\var skipFitView = false;
     \\function buildScene() {
     \\  console.log('[PCB] buildScene: start, data=' + (data ? data.footprints.length + ' fps' : 'null'));
+    \\  invalidateObstacleCache(); cachedTraceSegs = null;
     \\  ensureRouteIds();
     \\  for (var k in layerContainers) layerContainers[k].removeChildren();
     \\  edgeLayer.removeChildren();
@@ -196,8 +197,10 @@ pub const PCB_VIEWER_JS =
     \\  fpData = {};
     \\  if (!data) return;
     \\
-    \\  // Board outline
+    \\  // Board outline (clickable)
     \\  if (data.board && data.board.outline && data.board.outline.length >= 3) {
+    \\    var oc = new PIXI.Container();
+    \\    oc.eventMode = 'static'; oc.cursor = 'pointer';
     \\    var og = new PIXI.Graphics();
     \\    var pts = data.board.outline;
     \\    og.moveTo(pts[0][0]*SCALE, pts[0][1]*SCALE);
@@ -205,7 +208,19 @@ pub const PCB_VIEWER_JS =
     \\    og.lineTo(pts[0][0]*SCALE, pts[0][1]*SCALE);
     \\    og.fill({color: C.edge, alpha: 0.04});
     \\    og.stroke({color: C.edge, width: 3});
-    \\    edgeLayer.addChild(og);
+    \\    oc.addChild(og);
+    \\    // Invisible wider hit area for easier clicking
+    \\    var oh = new PIXI.Graphics();
+    \\    oh.moveTo(pts[0][0]*SCALE, pts[0][1]*SCALE);
+    \\    for (var i=1; i<pts.length; i++) oh.lineTo(pts[i][0]*SCALE, pts[i][1]*SCALE);
+    \\    oh.lineTo(pts[0][0]*SCALE, pts[0][1]*SCALE);
+    \\    oh.stroke({color: 0x000000, width: 10, alpha: 0.001});
+    \\    oc.addChild(oh);
+    \\    oc.on('pointertap', function() {
+    \\      if (didPan) return;
+    \\      showOutlineSidebar();
+    \\    });
+    \\    edgeLayer.addChild(oc);
     \\  }
     \\
     \\  // Section boxes drawn dynamically via updateSectionBoxes()
@@ -338,6 +353,18 @@ pub const PCB_VIEWER_JS =
     \\        pg.rect(px-pw/2, py-ph/2, pw, ph);
     \\      }
     \\      pg.fill({color: padColor, alpha: 0.85});
+    \\      // Net name label on pad (counter-rotated, sized to fit)
+    \\      if (pad.net_name) {
+    \\        var netText = baseNetName(pad.net_name);
+    \\        var padMin = Math.min(pw, ph);
+    \\        var netFs = Math.max(0.4, padMin * 0.35 / Math.max(1, netText.length * 0.55));
+    \\        netFs = Math.min(netFs, padMin * 0.5);
+    \\        var netLbl = new PIXI.Text({text: netText, style:{fontFamily:'monospace',fontSize:netFs,fill:0x00FF88,fontWeight:'bold',stroke:{color:0x000000,width:netFs*0.1}}});
+    \\        netLbl.anchor.set(0.5, 0.5); netLbl.x = px; netLbl.y = py;
+    \\        netLbl.angle = -(fp.angle||0);
+    \\        netLbl.resolution = 32;
+    \\        pg.addChild(netLbl);
+    \\      }
     \\      pg._padData = pad;
     \\      pg._fpUuid = fp.uuid;
     \\      pg.eventMode = 'static';
@@ -347,7 +374,7 @@ pub const PCB_VIEWER_JS =
     \\      });
     \\      pg.on('pointerout', function() { hideTooltip(); });
     \\      pg.on('pointerdown', function(e) {
-    \\        if (selectMode === 'net') {
+    \\        if (selectMode === 'net' || (selFilter && selFilter.net && selectMode !== 'route')) {
     \\          e.stopPropagation();
     \\          if (this._padData.net_name) highlightNet(baseNetName(this._padData.net_name));
     \\        } else if (selectMode === 'route') {
@@ -410,53 +437,156 @@ pub const PCB_VIEWER_JS =
     \\  updateSectionBoxes();
     \\  if (!skipFitView) { fitView(); }
     \\  skipFitView = false;
+    \\  scheduleCull();
+    \\}
+    \\
+    \\// Lightweight rebuild: only traces, vias, and zones — footprints stay intact
+    \\function rebuildTracesAndVias() {
+    \\  invalidateObstacleCache(); cachedTraceSegs = null;
+    \\  layerContainers.traces_fcu.removeChildren();
+    \\  layerContainers.traces_bcu.removeChildren();
+    \\  layerContainers.vias.removeChildren();
+    \\  if (data.traces) {
+    \\    for (var ti=0; ti<data.traces.length; ti++) {
+    \\      var t = data.traces[ti];
+    \\      if (t.points.length < 2) continue;
+    \\      var tg = new PIXI.Graphics();
+    \\      tg.moveTo(t.points[0][0]*SCALE, t.points[0][1]*SCALE);
+    \\      for (var tpi=1; tpi<t.points.length; tpi++) tg.lineTo(t.points[tpi][0]*SCALE, t.points[tpi][1]*SCALE);
+    \\      tg.stroke({color: t.layer==='F.Cu' ? C.fcu : C.bcu, width: t.width*SCALE, cap:'round', join:'round'});
+    \\      tg._traceIndex = ti;
+    \\      tg._traceId = t.id;
+    \\      var tLayer = t.layer === 'F.Cu' ? layerContainers.traces_fcu : layerContainers.traces_bcu;
+    \\      tLayer.addChild(tg);
+    \\    }
+    \\  }
+    \\  if (data.vias) {
+    \\    for (var vi=0; vi<data.vias.length; vi++) {
+    \\      var v = data.vias[vi];
+    \\      var vg = new PIXI.Graphics();
+    \\      vg.circle(v.x*SCALE, v.y*SCALE, v.pad_size/2*SCALE);
+    \\      vg.fill({color: 0xC0C0C0, alpha: 0.9});
+    \\      vg.circle(v.x*SCALE, v.y*SCALE, v.drill/2*SCALE);
+    \\      vg.fill({color: 0x0d1117});
+    \\      vg._viaData = v;
+    \\      vg._viaIndex = vi;
+    \\      vg._viaId = v.id;
+    \\      vg.eventMode = 'static';
+    \\      vg.cursor = 'pointer';
+    \\      vg.on('pointerdown', function(e) {
+    \\        e.stopPropagation();
+    \\        if (selectMode === 'route' && routingNet) return;
+    \\        selectTraceOrVia('via', this._viaIndex, this._viaData, this);
+    \\      });
+    \\      layerContainers.vias.addChild(vg);
+    \\    }
+    \\  }
+    \\  buildRatsnest();
+    \\}
+    \\
+    \\function rebuildZones() {
+    \\  layerContainers.zones.removeChildren();
+    \\  if (data.zone_fills) {
+    \\    for (var zi=0; zi<data.zone_fills.length; zi++) {
+    \\      var z = data.zone_fills[zi];
+    \\      var zColor = z.layer === 'F.Cu' ? C.fcu : C.bcu;
+    \\      for (var pi=0; pi<z.polygons.length; pi++) {
+    \\        var zg = new PIXI.Graphics();
+    \\        var poly = z.polygons[pi];
+    \\        if (poly.length < 3) continue;
+    \\        zg.moveTo(poly[0][0]*SCALE, poly[0][1]*SCALE);
+    \\        for (var pp=1; pp<poly.length; pp++) zg.lineTo(poly[pp][0]*SCALE, poly[pp][1]*SCALE);
+    \\        zg.closePath();
+    \\        zg.fill({color: zColor, alpha: 0.15});
+    \\        zg.stroke({color: zColor, width: 0.5, alpha: 0.4});
+    \\        zg._zoneData = z;
+    \\        layerContainers.zones.addChild(zg);
+    \\      }
+    \\    }
+    \\  }
     \\}
     \\
     \\// Build connectivity from routed traces+vias for a given net
-    \\function getTraceConnectivity(netName, positions) {
+    \\function getTraceConnectivity(ng, positions) {
     \\  // Union-find over position indices
     \\  var parent = [];
     \\  for (var i=0; i<positions.length; i++) parent[i] = i;
     \\  function find(a) { while (parent[a]!==a) { parent[a]=parent[parent[a]]; a=parent[a]; } return a; }
     \\  function unite(a,b) { a=find(a); b=find(b); if(a!==b) parent[a]=b; }
-    \\  var TOL = 1.0; // 1mm tolerance for matching trace endpoints to pads (in pixels = 1mm * SCALE)
-    \\  var tolPx = TOL * SCALE;
-    \\  if (!data.traces && !data.vias) return parent;
-    \\  // Collect trace endpoints for this net
+    \\  if (!data.traces && !data.vias) return {find:find, parent:parent};
+    \\  var EPS = 0.01 * SCALE; // 0.01mm epsilon for exact endpoint matching
+    \\
+    \\  // Collect trace endpoints and find which pads they touch (point-in-pad-shape)
     \\  var traceEnds = [];
     \\  if (data.traces) {
     \\    for (var ti=0; ti<data.traces.length; ti++) {
     \\      var tr = data.traces[ti];
-    \\      if (baseNetName(tr.net) !== netName || tr.points.length < 2) continue;
+    \\      if (tr.ng !== ng || tr.points.length < 2) continue;
     \\      var p0 = tr.points[0], p1 = tr.points[tr.points.length-1];
-    \\      traceEnds.push([p0[0]*SCALE, p0[1]*SCALE, p1[0]*SCALE, p1[1]*SCALE]);
+    \\      var te = {sx:p0[0]*SCALE, sy:p0[1]*SCALE, ex:p1[0]*SCALE, ey:p1[1]*SCALE, padsStart:[], padsEnd:[]};
+    \\      for (var pi=0; pi<positions.length; pi++) {
+    \\        var pos = positions[pi];
+    \\        if (pos.fpUuid !== undefined && pos.padIdx !== undefined) {
+    \\          // Check point-in-pad shape, with distance fallback for floating point tolerance
+    \\          var dxs = te.sx - pos.x, dys = te.sy - pos.y;
+    \\          var dxe = te.ex - pos.x, dye = te.ey - pos.y;
+    \\          var padR = 0.15 * SCALE; // 0.15mm tolerance
+    \\          if (pointInPadShape(te.sx, te.sy, pos.fpUuid, pos.padIdx) || dxs*dxs+dys*dys < padR*padR) te.padsStart.push(pi);
+    \\          if (pointInPadShape(te.ex, te.ey, pos.fpUuid, pos.padIdx) || dxe*dxe+dye*dye < padR*padR) te.padsEnd.push(pi);
+    \\        }
+    \\      }
+    \\      traceEnds.push(te);
     \\    }
     \\  }
-    \\  // For each trace, find pads near start and end, unite them
+    \\
+    \\  // Unite pads connected by each trace
     \\  for (var ti=0; ti<traceEnds.length; ti++) {
-    \\    var startPads = [], endPads = [];
-    \\    for (var pi=0; pi<positions.length; pi++) {
-    \\      var dx0 = positions[pi].x - traceEnds[ti][0], dy0 = positions[pi].y - traceEnds[ti][1];
-    \\      if (dx0*dx0+dy0*dy0 < tolPx*tolPx) startPads.push(pi);
-    \\      var dx1 = positions[pi].x - traceEnds[ti][2], dy1 = positions[pi].y - traceEnds[ti][3];
-    \\      if (dx1*dx1+dy1*dy1 < tolPx*tolPx) endPads.push(pi);
-    \\    }
-    \\    for (var si=0; si<startPads.length; si++)
-    \\      for (var ei=0; ei<endPads.length; ei++)
-    \\        unite(startPads[si], endPads[ei]);
+    \\    var te = traceEnds[ti];
+    \\    for (var si=1; si<te.padsStart.length; si++) unite(te.padsStart[0], te.padsStart[si]);
+    \\    for (var ei=1; ei<te.padsEnd.length; ei++) unite(te.padsEnd[0], te.padsEnd[ei]);
+    \\    if (te.padsStart.length > 0 && te.padsEnd.length > 0) unite(te.padsStart[0], te.padsEnd[0]);
     \\  }
-    \\  // Also connect via vias: a via connects trace endpoints on different layers at the same point
+    \\
+    \\  // Trace-to-trace: connect traces with matching endpoints (within epsilon)
+    \\  for (var ti=0; ti<traceEnds.length; ti++) {
+    \\    for (var tj=ti+1; tj<traceEnds.length; tj++) {
+    \\      var a = traceEnds[ti], b = traceEnds[tj];
+    \\      var ends_a = [[a.sx,a.sy,a.padsStart],[a.ex,a.ey,a.padsEnd]];
+    \\      var ends_b = [[b.sx,b.sy,b.padsStart],[b.ex,b.ey,b.padsEnd]];
+    \\      for (var ai=0; ai<2; ai++) for (var bi=0; bi<2; bi++) {
+    \\        var ddx=ends_a[ai][0]-ends_b[bi][0], ddy=ends_a[ai][1]-ends_b[bi][1];
+    \\        if (ddx*ddx+ddy*ddy < EPS*EPS) {
+    \\          var pa = ends_a[ai][2], pb = ends_b[bi][2];
+    \\          if (pa.length > 0 && pb.length > 0) unite(pa[0], pb[0]);
+    \\          else if (pa.length > 0 && ends_b[1-bi][2].length > 0) unite(pa[0], ends_b[1-bi][2][0]);
+    \\          else if (pb.length > 0 && ends_a[1-ai][2].length > 0) unite(pb[0], ends_a[1-ai][2][0]);
+    \\        }
+    \\      }
+    \\    }
+    \\  }
+    \\
+    \\  // Via connectivity: point-in-pad and trace endpoints within via ring
     \\  if (data.vias) {
     \\    for (var vi=0; vi<data.vias.length; vi++) {
     \\      var v = data.vias[vi];
-    \\      if (baseNetName(v.net) !== netName) continue;
-    \\      var vx = v.x*SCALE, vy = v.y*SCALE;
-    \\      var nearPads = [];
+    \\      if (v.ng !== ng) continue;
+    \\      var vx = v.x*SCALE, vy = v.y*SCALE, vr = v.pad_size/2*SCALE;
+    \\      var viaPads = [];
     \\      for (var pi=0; pi<positions.length; pi++) {
-    \\        var dx = positions[pi].x - vx, dy = positions[pi].y - vy;
-    \\        if (dx*dx+dy*dy < tolPx*tolPx) nearPads.push(pi);
+    \\        var pos = positions[pi];
+    \\        var inPad = (pos.fpUuid !== undefined && pos.padIdx !== undefined) ? pointInPadShape(vx, vy, pos.fpUuid, pos.padIdx) : false;
+    \\        var dx = pos.x - vx, dy = pos.y - vy;
+    \\        var inVia = dx*dx+dy*dy <= vr*vr;
+    \\        if (inPad || inVia) viaPads.push(pi);
     \\      }
-    \\      for (var ni=1; ni<nearPads.length; ni++) unite(nearPads[0], nearPads[ni]);
+    \\      for (var ti=0; ti<traceEnds.length; ti++) {
+    \\        var te = traceEnds[ti];
+    \\        var ds = (te.sx-vx)*(te.sx-vx)+(te.sy-vy)*(te.sy-vy);
+    \\        var de = (te.ex-vx)*(te.ex-vx)+(te.ey-vy)*(te.ey-vy);
+    \\        if (ds <= vr*vr && te.padsStart.length > 0) viaPads.push(te.padsStart[0]);
+    \\        if (de <= vr*vr && te.padsEnd.length > 0) viaPads.push(te.padsEnd[0]);
+    \\      }
+    \\      for (var ni=1; ni<viaPads.length; ni++) unite(viaPads[0], viaPads[ni]);
     \\    }
     \\  }
     \\  return {find: find, parent: parent};
@@ -464,110 +594,44 @@ pub const PCB_VIEWER_JS =
     \\
     \\function buildRatsnest() {
     \\  layerContainers.ratsnest.removeChildren();
-    \\  if (!data || !data.ratsnest) return;
+    \\  if (!data || !data.footprints) return;
     \\  var dragRef = null;
     \\  if (isDragging && dragTarget && dragTarget._ref) dragRef = dragTarget._ref;
     \\  else if (selectedUuid && fpData[selectedUuid]) dragRef = fpData[selectedUuid].ref;
     \\
-    \\  // Track which ref+pin combos are covered by ratsnest entries
-    \\  var covered = {};
-    \\
-    \\  // Pass 1: draw MST for each ratsnest entry, excluding trace-connected pairs
-    \\  for (var ri=0; ri<data.ratsnest.length; ri++) {
-    \\    var rn = data.ratsnest[ri];
-    \\    if (rn.pins.length < 2) continue;
-    \\    var positions = [], isDragPin = [];
-    \\    for (var pi=0; pi<rn.pins.length; pi++) {
-    \\      var ref = rn.pins[pi][0], pin = rn.pins[pi][1];
-    \\      covered[ref + '\x00' + pin] = true;
-    \\      var pos = findPadPosition(ref, pin);
-    \\      if (pos) { positions.push(pos); isDragPin.push(dragRef && ref === dragRef); }
-    \\    }
-    \\    if (positions.length < 2) continue;
-    \\    var conn = getTraceConnectivity(baseNetName(rn.name), positions);
-    \\    drawMST(positions, isDragPin, baseNetName(rn.name), conn);
-    \\  }
-    \\
-    \\  // Pass 2: orphan subnets — pads with dotted net names not in any ratsnest entry
-    \\  var orphanNorm = new PIXI.Graphics();
-    \\  var orphanHl = new PIXI.Graphics();
-    \\  var orphanHlGnd = new PIXI.Graphics();
-    \\  var hasOrphanNorm = false, hasOrphanHl = false, hasOrphanHlGnd = false;
+    \\  // Single pass: group ALL pads by net group ID (ng)
+    \\  var ngGroups = {}; // ng -> [{x, y, fpUuid, padIdx, ref}]
     \\  for (var uuid in fpData) {
     \\    var fp = fpData[uuid];
     \\    var fc = fpContainers[uuid];
     \\    if (!fp || !fc) continue;
+    \\    var angle = (fp.angle||0) * Math.PI/180;
+    \\    var cos = Math.cos(angle), sin = Math.sin(angle);
     \\    for (var pi=0; pi<fp.pads.length; pi++) {
     \\      var pad = fp.pads[pi];
-    \\      if (!pad.net_name) continue;
-    \\      var sub = parseSubnetTarget(pad.net_name);
-    \\      if (!sub) continue;
-    \\      // Check if this pad is already covered
-    \\      if (covered[fp.ref + '\x00' + pad.name]) continue;
-    \\      // Find this pad's world position
-    \\      var angle = (fp.angle||0) * Math.PI/180;
+    \\      if (!pad.net_name || pad.ng === undefined || pad.ng < 0) continue;
     \\      var px = pad.x*SCALE, py = pad.y*SCALE;
-    \\      var rx = px*Math.cos(angle) - py*Math.sin(angle);
-    \\      var ry = px*Math.sin(angle) + py*Math.cos(angle);
-    \\      var padPos = {x: fc.x + rx, y: fc.y + ry};
-    \\      // Find closest pad on the target ref that shares the same base net
-    \\      var targetRef = sub.ref;
-    \\      var slash = fp.ref.lastIndexOf('/');
-    \\      if (slash >= 0) targetRef = fp.ref.substring(0, slash + 1) + sub.ref;
-    \\      // Try exact pin name first
-    \\      var targetPos = findPadPosition(targetRef, sub.pin);
-    \\      if (!targetPos) {
-    \\        // Pin name doesn't match footprint pad numbers — find closest pad on target ref with same base net
-    \\        var targetUuid = refToUuid[targetRef];
-    \\        if (targetUuid) {
-    \\          var tFp = fpData[targetUuid], tFc = fpContainers[targetUuid];
-    \\          if (tFp && tFc) {
-    \\            var bestDist = Infinity;
-    \\            var tAngle = (tFp.angle||0) * Math.PI/180;
-    \\            var tCos = Math.cos(tAngle), tSin = Math.sin(tAngle);
-    \\            for (var tpi=0; tpi<tFp.pads.length; tpi++) {
-    \\              var tp = tFp.pads[tpi];
-    \\              if (baseNetName(tp.net_name) !== sub.base) continue;
-    \\              var tpx = tp.x*SCALE, tpy = tp.y*SCALE;
-    \\              var trx = tpx*tCos - tpy*tSin + tFc.x;
-    \\              var try2 = tpx*tSin + tpy*tCos + tFc.y;
-    \\              var ddx = trx - padPos.x, ddy = try2 - padPos.y;
-    \\              var dist = ddx*ddx + ddy*ddy;
-    \\              if (dist < bestDist) { bestDist = dist; targetPos = {x: trx, y: try2}; }
-    \\            }
-    \\          }
-    \\        }
-    \\      }
-    \\      if (!targetPos) continue;
-    \\      // Draw ratsnest line
-    \\      var hl = dragRef && (fp.ref === dragRef || targetRef === dragRef);
-    \\      var isGnd2 = sub.base.indexOf('GND') >= 0 || sub.base.indexOf('gnd') >= 0;
-    \\      if (hl && isGnd2) {
-    \\        orphanHlGnd.moveTo(padPos.x, padPos.y); orphanHlGnd.lineTo(targetPos.x, targetPos.y);
-    \\        hasOrphanHlGnd = true;
-    \\      } else if (hl) {
-    \\        orphanHl.moveTo(padPos.x, padPos.y); orphanHl.lineTo(targetPos.x, targetPos.y);
-    \\        hasOrphanHl = true;
-    \\      } else {
-    \\        orphanNorm.moveTo(padPos.x, padPos.y); orphanNorm.lineTo(targetPos.x, targetPos.y);
-    \\        hasOrphanNorm = true;
-    \\      }
+    \\      var rx = px*cos - py*sin, ry = px*sin + py*cos;
+    \\      if (!ngGroups[pad.ng]) ngGroups[pad.ng] = [];
+    \\      ngGroups[pad.ng].push({x: fc.x+rx, y: fc.y+ry, fpUuid: uuid, padIdx: pi, ref: fp.ref});
     \\    }
     \\  }
-    \\  if (hasOrphanNorm) {
-    \\    orphanNorm.stroke({color: C.ratsnest, width: 0.25, alpha: 0.4});
-    \\    orphanNorm._netName = '';
-    \\    layerContainers.ratsnest.addChild(orphanNorm);
-    \\  }
-    \\  if (hasOrphanHl) {
-    \\    orphanHl.stroke({color: 0xFFFFFF, width: 0.5, alpha: 0.9});
-    \\    orphanHl._netName = '';
-    \\    layerContainers.ratsnest.addChild(orphanHl);
-    \\  }
-    \\  if (hasOrphanHlGnd) {
-    \\    orphanHlGnd.stroke({color: C.ratsnest, width: 0.25, alpha: 0.4});
-    \\    orphanHlGnd._netName = 'GND';
-    \\    layerContainers.ratsnest.addChild(orphanHlGnd);
+    \\
+    \\  // For each net group with 2+ pads, run connectivity check and draw MST
+    \\  for (var ng in ngGroups) {
+    \\    var positions = ngGroups[ng];
+    \\    if (positions.length < 2) continue;
+    \\    var ngInt = parseInt(ng);
+    \\    var isDragPin = [];
+    \\    for (var pi=0; pi<positions.length; pi++) {
+    \\      isDragPin.push(dragRef && positions[pi].ref === dragRef);
+    \\    }
+    \\    // Get a display name for this net group
+    \\    var netName = '';
+    \\    var fp0 = fpData[positions[0].fpUuid];
+    \\    if (fp0) { var p0 = fp0.pads[positions[0].padIdx]; if (p0) netName = baseNetName(p0.net_name); }
+    \\    var conn = getTraceConnectivity(ngInt, positions);
+    \\    drawMST(positions, isDragPin, netName, conn);
     \\  }
     \\}
     \\
@@ -639,10 +703,26 @@ pub const PCB_VIEWER_JS =
     \\      var py = fp.pads[i].y * SCALE;
     \\      var rx = px*Math.cos(angle) - py*Math.sin(angle);
     \\      var ry = px*Math.sin(angle) + py*Math.cos(angle);
-    \\      return {x: fc.x + rx, y: fc.y + ry};
+    \\      return {x: fc.x + rx, y: fc.y + ry, fpUuid: uuid, padIdx: i};
     \\    }
     \\  }
     \\  return null;
+    \\}
+    \\// Point-in-pad shape test: is world point (wx,wy) inside this pad's copper?
+    \\function pointInPadShape(wx, wy, fpUuid, padIdx) {
+    \\  var fp = fpData[fpUuid], fc = fpContainers[fpUuid];
+    \\  if (!fp || !fc) return false;
+    \\  var pad = fp.pads[padIdx];
+    \\  // Transform world point into pad-local coordinates
+    \\  var a = -(fp.angle||0) * Math.PI / 180;
+    \\  var rx = wx - fc.x, ry = wy - fc.y;
+    \\  var lx = rx*Math.cos(a) - ry*Math.sin(a);
+    \\  var ly = rx*Math.sin(a) + ry*Math.cos(a);
+    \\  var dx = lx - pad.x*SCALE, dy = ly - pad.y*SCALE;
+    \\  var hw = pad.w*SCALE/2, hh = pad.h*SCALE/2;
+    \\  if (pad.shape === 'circle') return dx*dx+dy*dy <= hw*hw;
+    \\  if (pad.shape === 'oval') { var r=Math.min(hw,hh); if (hw>=hh){var cx=Math.max(-hw+r,Math.min(hw-r,dx));return (dx-cx)*(dx-cx)+dy*dy<=r*r;} var cy=Math.max(-hh+r,Math.min(hh-r,dy));return dx*dx+(dy-cy)*(dy-cy)<=r*r; }
+    \\  return Math.abs(dx)<=hw && Math.abs(dy)<=hh; // rect, roundrect
     \\}
     \\
     \\// --- Courtyard Overlap Detection ---
@@ -752,8 +832,9 @@ pub const PCB_VIEWER_JS =
     \\}
     \\function onDragStart(e) {
     \\  if (isDragging) return;
-    \\  // In route/trace mode, don't start component dragging
-    \\  if (selectMode === 'route' || selectMode === 'trace') return;
+    \\  // In route mode or when component filter is off, don't start component dragging
+    \\  if (selectMode === 'route') return;
+    \\  if (selFilter && !selFilter.component) return;
     \\  // If multi-selection active and this component is in it, start multi drag
     \\  if (multiSelection && multiSelection.uuids.indexOf(this._uuid) >= 0) {
     \\    e.stopPropagation();
@@ -774,7 +855,7 @@ pub const PCB_VIEWER_JS =
     \\  wasDrag = false;
     \\  // If in section mode and a section is selected, keep section mode
     \\  var keepSection = false;
-    \\  if (selectMode === 'section' && selectedSection !== null && sectionUuids.indexOf(target._uuid) >= 0) {
+    \\  if ((selectMode === 'section' || (selFilter && selFilter.section)) && selectedSection !== null && sectionUuids.indexOf(target._uuid) >= 0) {
     \\    keepSection = true;
     \\  }
     \\  // If a component is already selected and the click overlaps it, prefer the selected one
@@ -848,8 +929,16 @@ pub const PCB_VIEWER_JS =
     \\    var wp2 = e.getLocalPosition(world);
     \\    var mx = wp2.x / SCALE, my = wp2.y / SCALE;
     \\    if (gridSnap > 0) { mx = Math.round(mx/gridSnap)*gridSnap; my = Math.round(my/gridSnap)*gridSnap; }
+    \\    // Snap to nearby same-net pad
+    \\    var snap = snapToPad(mx, my, routingNet, 1.0);
+    \\    if (snap) { mx = snap[0]; my = snap[1]; }
     \\    routingCursorMm = [mx, my];
-    \\    drawRoutingPreview(mx, my);
+    \\    // Throttle routing preview to once per animation frame
+    \\    if (!routingRafPending) {
+    \\      routingRafPending = true;
+    \\      var rmx = mx, rmy = my;
+    \\      requestAnimationFrame(function(){ routingRafPending = false; drawRoutingPreview(rmx, rmy); });
+    \\    }
     \\    // Via preview ghost with DRC
     \\    if (viaPreviewGfx) { viaPreviewGfx.destroy(); viaPreviewGfx = null; }
     \\    if (viaPreviewMode) {
@@ -1050,7 +1139,9 @@ pub const PCB_VIEWER_JS =
     \\  if (!isDragging || !dragTarget) return;
     \\  var wp = e.getLocalPosition(world);
     \\  var dist = Math.abs(wp.x - dragStartPos.x) + Math.abs(wp.y - dragStartPos.y);
-    \\  if (dist > 2) wasDrag = true;
+    \\  var dragThreshold = 0.3 * SCALE; // 0.3mm before drag starts
+    \\  if (dist < dragThreshold) return;
+    \\  wasDrag = true;
     \\  var nx = wp.x + dragOffset.x;
     \\  var ny = wp.y + dragOffset.y;
     \\  // Grid snap
@@ -1137,7 +1228,7 @@ pub const PCB_VIEWER_JS =
     \\    if (boxGfx) { boxGfx.destroy(); boxGfx = null; }
     \\    var rx1 = Math.min(boxStart.x, bx2), ry1 = Math.min(boxStart.y, by2);
     \\    var rx2 = Math.max(boxStart.x, bx2), ry2 = Math.max(boxStart.y, by2);
-    \\    if (rx2-rx1 < 0.5 && ry2-ry1 < 0.5) return; // too small, ignore
+    \\    if (rx2-rx1 < 0.5 && ry2-ry1 < 0.5) { clearSelection(); return; } // click, not drag
     \\    finalizeBoxSelection(rx1, ry1, rx2, ry2);
     \\    return;
     \\  }
@@ -1146,7 +1237,6 @@ pub const PCB_VIEWER_JS =
     \\    multiSelection._dragging = false;
     \\    skipFitView = true;
     \\    buildScene();
-    \\    buildRatsnest();
     \\    dirty = true; scheduleSave();
     \\    // Re-highlight
     \\    highlightMultiSelection();
@@ -1155,17 +1245,13 @@ pub const PCB_VIEWER_JS =
     \\  if (draggingVia) {
     \\    var moved = data.vias[draggingVia.index].x !== draggingVia.startX || data.vias[draggingVia.index].y !== draggingVia.startY;
     \\    if (moved) {
-    \\      skipFitView = true;
-    \\      buildScene();
-    \\      buildRatsnest();
+    \\      rebuildTracesAndVias();
     \\      dirty = true; scheduleSave();
     \\    }
     \\    draggingVia = null;
     \\  }
     \\  if (draggingTrace) {
-    \\    skipFitView = true;
-    \\    buildScene();
-    \\    buildRatsnest();
+    \\    rebuildTracesAndVias();
     \\    dirty = true; scheduleSave();
     \\    draggingTrace = null;
     \\  }
@@ -1199,6 +1285,9 @@ pub const PCB_VIEWER_JS =
     \\    var wp = e.getLocalPosition(world);
     \\    var mx = wp.x / SCALE, my = wp.y / SCALE;
     \\    if (gridSnap > 0) { mx = Math.round(mx/gridSnap)*gridSnap; my = Math.round(my/gridSnap)*gridSnap; }
+    \\    // Snap to nearby same-net pad
+    \\    var snap = snapToPad(mx, my, routingNet, 1.0);
+    \\    if (snap) { mx = snap[0]; my = snap[1]; }
     \\    if (viaPreviewMode) {
     \\      // Place via at click position
     \\      addRoutingViaAt(mx, my);
@@ -1214,8 +1303,8 @@ pub const PCB_VIEWER_JS =
     \\  }
     \\  if (!isDragging) {
     \\    // Check if click is near a trace or via (for selection/drag)
-    \\    // In 'trace' mode: only traces/vias. In 'component' mode: skip traces/vias.
-    \\    if (selectMode === 'trace') {
+    \\    // Trace/via selection when trace filter is active
+    \\    if (selectMode === 'trace' || (selFilter && selFilter.trace && selectMode !== 'route')) {
     \\      var wp3 = e.getLocalPosition(world);
     \\      var cmx = wp3.x / SCALE, cmy = wp3.y / SCALE;
     \\      var hit = findTraceOrViaAt(cmx, cmy);
@@ -1236,14 +1325,7 @@ pub const PCB_VIEWER_JS =
     \\        return;
     \\      }
     \\    }
-    \\    // Shift+click on empty space: start box selection
-    \\    if (e.data && e.data.originalEvent && e.data.originalEvent.shiftKey) {
-    \\      var wpb = e.getLocalPosition(world);
-    \\      boxStart = {x: wpb.x / SCALE, y: wpb.y / SCALE};
-    \\      boxSelecting = true;
-    \\      if (boxGfx) { boxGfx.destroy(); boxGfx = null; }
-    \\      return;
-    \\    }
+    \\    // Click on empty space: start box selection (drag to select region)
     \\    if (multiSelection) {
     \\      // Check if click is inside multi-selection (on a selected item) — start drag
     \\      var wpm2 = e.getLocalPosition(world);
@@ -1268,9 +1350,13 @@ pub const PCB_VIEWER_JS =
     \\        multiSelection._lastMy = mmy2;
     \\        return;
     \\      }
-    \\      clearMultiSelection(); return;
+    \\      clearMultiSelection();
     \\    }
-    \\    clearSelection();
+    \\    // Start box selection on empty space drag
+    \\    var wpb = e.getLocalPosition(world);
+    \\    boxStart = {x: wpb.x / SCALE, y: wpb.y / SCALE};
+    \\    boxSelecting = true;
+    \\    if (boxGfx) { boxGfx.destroy(); boxGfx = null; }
     \\  }
     \\});
     \\
@@ -1278,15 +1364,17 @@ pub const PCB_VIEWER_JS =
     \\function finalizeBoxSelection(rx1, ry1, rx2, ry2) {
     \\  clearSelection();
     \\  multiSelection = {uuids:[], traceIds:{}, viaIds:{}, _dragging:false, _lastMx:0, _lastMy:0};
-    \\  // Components whose center is in the box
-    \\  for (var uuid in fpData) {
-    \\    var fp = fpData[uuid];
-    \\    if (fp.x >= rx1 && fp.x <= rx2 && fp.y >= ry1 && fp.y <= ry2) {
-    \\      multiSelection.uuids.push(uuid);
+    \\  // Components whose center is in the box (if component filter active)
+    \\  if (selFilter.component) {
+    \\    for (var uuid in fpData) {
+    \\      var fp = fpData[uuid];
+    \\      if (fp.x >= rx1 && fp.x <= rx2 && fp.y >= ry1 && fp.y <= ry2) {
+    \\        multiSelection.uuids.push(uuid);
+    \\      }
     \\    }
     \\  }
-    \\  // Traces where all points are in the box
-    \\  if (data.traces) {
+    \\  // Traces where all points are in the box (if trace filter active)
+    \\  if (selFilter.trace && data.traces) {
     \\    for (var ti=0; ti<data.traces.length; ti++) {
     \\      var t = data.traces[ti];
     \\      var allIn = true;
@@ -1296,8 +1384,8 @@ pub const PCB_VIEWER_JS =
     \\      if (allIn && t.id) multiSelection.traceIds[t.id] = true;
     \\    }
     \\  }
-    \\  // Vias in the box
-    \\  if (data.vias) {
+    \\  // Vias in the box (if via filter active)
+    \\  if (selFilter.via && data.vias) {
     \\    for (var vi=0; vi<data.vias.length; vi++) {
     \\      var v = data.vias[vi];
     \\      if (v.x >= rx1 && v.x <= rx2 && v.y >= ry1 && v.y <= ry2 && v.id) {
@@ -1374,9 +1462,17 @@ pub const PCB_VIEWER_JS =
     \\  if (data.vias) {
     \\    data.vias = data.vias.filter(function(v) { return !multiSelection.viaIds[v.id]; });
     \\  }
+    \\  // Clear highlight before rebuilding
+    \\  if (multiHighlightGfx) { multiHighlightGfx.destroy(); multiHighlightGfx = null; }
+    \\  // Reset tints on selected components
+    \\  if (multiSelection.uuids) {
+    \\    for (var mi=0; mi<multiSelection.uuids.length; mi++) {
+    \\      var fc = fpContainers[multiSelection.uuids[mi]];
+    \\      if (fc) fc.tint = 0xFFFFFF;
+    \\    }
+    \\  }
     \\  multiSelection = null;
-    \\  skipFitView = true;
-    \\  buildScene();
+    \\  rebuildTracesAndVias();
     \\  dirty = true; scheduleSave();
     \\  showDefaultSidebar();
     \\}
@@ -1498,13 +1594,12 @@ pub const PCB_VIEWER_JS =
     \\    if (routingPoints.length >= 2) {
     \\      // Save trace at last clicked waypoint
     \\      if (!data.traces) data.traces = [];
-    \\      data.traces.push({id: uid(), net: baseNetName(routingNet), layer: routingLayer, width: routingWidth, points: routingPoints.slice()});
+    \\      data.traces.push({id: uid(), net: baseNetName(routingNet), ng: routingNg, layer: routingLayer, width: routingWidth, points: routingPoints.slice()});
     \\      dirty = true; scheduleSave();
     \\    }
     \\    // End routing (works even with 1 point, e.g. right after a via)
     \\    cancelRouting();
-    \\    skipFitView = true;
-    \\    buildScene();
+    \\    rebuildTracesAndVias();
     \\    showDefaultSidebar();
     \\  }
     \\});
@@ -1632,8 +1727,7 @@ pub const PCB_VIEWER_JS =
     \\  selectedRouteType = null;
     \\  selectedRouteIndex = -1;
     \\  selectedRouteGfx = null;
-    \\  skipFitView = true;
-    \\  buildScene();
+    \\  rebuildTracesAndVias();
     \\  dirty = true; scheduleSave();
     \\  showDefaultSidebar();
     \\}
@@ -1641,6 +1735,34 @@ pub const PCB_VIEWER_JS =
     \\// --- Sidebar ---
     \\var sidebar = document.getElementById('sidebar-content');
     \\
+    \\function showOutlineSidebar() {
+    \\  if (!data || !data.board || !data.board.outline || data.board.outline.length < 3) return;
+    \\  var pts = data.board.outline;
+    \\  var minX=9999,minY=9999,maxX=-9999,maxY=-9999;
+    \\  for (var i=0;i<pts.length;i++){if(pts[i][0]<minX)minX=pts[i][0];if(pts[i][1]<minY)minY=pts[i][1];if(pts[i][0]>maxX)maxX=pts[i][0];if(pts[i][1]>maxY)maxY=pts[i][1];}
+    \\  var ist='style="width:70px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:2px 6px;border-radius:3px;font-size:12px;font-family:monospace"';
+    \\  var html='<h3 style="color:#FFFF00;margin:0 0 12px">Board Outline</h3>';
+    \\  html+='<div style="color:#8b949e;font-size:11px;margin-bottom:8px">'+((maxX-minX).toFixed(1))+' x '+((maxY-minY).toFixed(1))+' mm</div>';
+    \\  html+='<div style="margin-bottom:6px;display:flex;align-items:center;gap:6px"><b style="width:24px;color:#8b949e">X1:</b><input id="ol-x1" type="number" step="0.5" value="'+minX.toFixed(2)+'" '+ist+'><span style="color:#666;font-size:11px">mm</span></div>';
+    \\  html+='<div style="margin-bottom:6px;display:flex;align-items:center;gap:6px"><b style="width:24px;color:#8b949e">Y1:</b><input id="ol-y1" type="number" step="0.5" value="'+minY.toFixed(2)+'" '+ist+'><span style="color:#666;font-size:11px">mm</span></div>';
+    \\  html+='<div style="margin-bottom:6px;display:flex;align-items:center;gap:6px"><b style="width:24px;color:#8b949e">X2:</b><input id="ol-x2" type="number" step="0.5" value="'+maxX.toFixed(2)+'" '+ist+'><span style="color:#666;font-size:11px">mm</span></div>';
+    \\  html+='<div style="margin-bottom:6px;display:flex;align-items:center;gap:6px"><b style="width:24px;color:#8b949e">Y2:</b><input id="ol-y2" type="number" step="0.5" value="'+maxY.toFixed(2)+'" '+ist+'><span style="color:#666;font-size:11px">mm</span></div>';
+    \\  html+='<button id="ol-apply" style="margin-top:8px;background:#238636;color:#fff;border:none;border-radius:4px;padding:6px 16px;cursor:pointer;font-size:12px;font-weight:600">Apply</button>';
+    \\  html+=' <button id="ol-cancel" style="margin-top:8px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:6px 12px;cursor:pointer;font-size:12px">Cancel</button>';
+    \\  sidebar.innerHTML=html;
+    \\  document.getElementById('ol-cancel').onclick=function(){showDefaultSidebar();};
+    \\  document.getElementById('ol-apply').onclick=function(){
+    \\    var x1=parseFloat(document.getElementById('ol-x1').value);
+    \\    var y1=parseFloat(document.getElementById('ol-y1').value);
+    \\    var x2=parseFloat(document.getElementById('ol-x2').value);
+    \\    var y2=parseFloat(document.getElementById('ol-y2').value);
+    \\    if(isNaN(x1)||isNaN(y1)||isNaN(x2)||isNaN(y2))return;
+    \\    fetch('/api/board-outline/'+DESIGN_NAME,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x1:x1,y1:y1,x2:x2,y2:y2})})
+    \\    .then(function(r){return r.json();}).then(function(d){
+    \\      if(d.ok){data.board.outline=[[x1,y1],[x2,y1],[x2,y2],[x1,y2]];buildScene();showDefaultSidebar();}
+    \\    }).catch(function(){});
+    \\  };
+    \\}
     \\function showDefaultSidebar() {
     \\  if (!data) { sidebar.innerHTML = ''; return; }
     \\  var html = '<h3 style="color:#fff;margin:0 0 12px;font-size:14px">PCB Layout</h3>';
@@ -2048,9 +2170,8 @@ pub const PCB_VIEWER_JS =
     \\      }
     \\    }
     \\  }
-    \\  // Rebuild scene to show split traces
-    \\  skipFitView = true;
-    \\  buildScene();
+    \\  // Rebuild traces/vias to show split traces
+    \\  rebuildTracesAndVias();
     \\}
     \\
     \\function isPointNearSectionPad(px, py) {
@@ -2191,6 +2312,7 @@ pub const PCB_VIEWER_JS =
     \\  if (Math.abs(dx)>3||Math.abs(dy)>3) didPan = true;
     \\  world.x = worldStart.x + dx;
     \\  world.y = worldStart.y + dy;
+    \\  scheduleCull();
     \\});
     \\window.addEventListener('mouseup', function() { isPanning = false; });
     \\
@@ -2201,7 +2323,65 @@ pub const PCB_VIEWER_JS =
     \\  world.scale.set(ns);
     \\  world.x = mx - wx * ns;
     \\  world.y = my - wy * ns;
+    \\  scheduleCull();
     \\}
+    \\// --- Viewport culling ---
+    \\var cullRafPending = false;
+    \\function scheduleCull() {
+    \\  if (cullRafPending) return;
+    \\  cullRafPending = true;
+    \\  requestAnimationFrame(function(){ cullRafPending = false; cullViewport(); });
+    \\}
+    \\function cullViewport() {
+    \\  var cw = container.clientWidth, ch = container.clientHeight;
+    \\  var s = world.scale.x;
+    \\  // Viewport bounds in world-pixel coords
+    \\  var vx1 = -world.x / s, vy1 = -world.y / s;
+    \\  var vx2 = vx1 + cw / s, vy2 = vy1 + ch / s;
+    \\  var margin = 20 * SCALE; // 20mm margin
+    \\  vx1 -= margin; vy1 -= margin; vx2 += margin; vy2 += margin;
+    \\  // Hide pad net labels when zoomed out (unreadable + expensive)
+    \\  var showPadLabels = s > 1.5;
+    \\  for (var uuid in fpContainers) {
+    \\    var fc = fpContainers[uuid];
+    \\    var fp = fpData[uuid];
+    \\    if (!fp) continue;
+    \\    // Cull footprints outside viewport
+    \\    var r = 10 * SCALE; // default radius
+    \\    if (fp.courtyard) r = Math.max(fp.courtyard.x2 - fp.courtyard.x1, fp.courtyard.y2 - fp.courtyard.y1) * SCALE;
+    \\    var inView = fc.x + r > vx1 && fc.x - r < vx2 && fc.y + r > vy1 && fc.y - r < vy2;
+    \\    fc.visible = inView;
+    \\    if (fc._refLabel) fc._refLabel.visible = inView;
+    \\    // Toggle pad net labels based on zoom level
+    \\    if (inView) {
+    \\      for (var ci = 0; ci < fc.children.length; ci++) {
+    \\        var child = fc.children[ci];
+    \\        if (child._padData && child.children.length > 0) {
+    \\          child.children[0].visible = showPadLabels;
+    \\        }
+    \\      }
+    \\    }
+    \\  }
+    \\}
+    \\
+    \\// Touch: single-finger pan + two-finger pinch-to-zoom
+    \\var touchState={active:false,lastDist:0,lastMid:{x:0,y:0},fingers:0};
+    \\function touchDist(t){var dx=t[0].clientX-t[1].clientX,dy=t[0].clientY-t[1].clientY;return Math.sqrt(dx*dx+dy*dy);}
+    \\function touchMid(t){return{x:(t[0].clientX+t[1].clientX)/2,y:(t[0].clientY+t[1].clientY)/2};}
+    \\app.canvas.addEventListener('touchstart',function(e){
+    \\  e.preventDefault();touchState.active=true;touchState.fingers=e.touches.length;
+    \\  if(e.touches.length===1){panStart={x:e.touches[0].clientX,y:e.touches[0].clientY};worldStart={x:world.x,y:world.y};isPanning=true;didPan=false;}
+    \\  else if(e.touches.length>=2){isPanning=false;touchState.lastDist=touchDist(e.touches);touchState.lastMid=touchMid(e.touches);}
+    \\},{passive:false});
+    \\app.canvas.addEventListener('touchmove',function(e){
+    \\  e.preventDefault();if(!touchState.active)return;
+    \\  if(e.touches.length===1&&touchState.fingers===1){var dx=e.touches[0].clientX-panStart.x,dy=e.touches[0].clientY-panStart.y;if(Math.abs(dx)>3||Math.abs(dy)>3)didPan=true;world.x=worldStart.x+dx;world.y=worldStart.y+dy;scheduleCull();}
+    \\  else if(e.touches.length>=2){var dist=touchDist(e.touches);var mid=touchMid(e.touches);var rect=app.canvas.getBoundingClientRect();clampZoom(mid.x-rect.left,mid.y-rect.top,dist/touchState.lastDist);touchState.lastDist=dist;touchState.lastMid=mid;}
+    \\},{passive:false});
+    \\app.canvas.addEventListener('touchend',function(e){
+    \\  if(e.touches.length===0){touchState.active=false;touchState.fingers=0;isPanning=false;}
+    \\  else{touchState.fingers=e.touches.length;if(e.touches.length===1){panStart={x:e.touches[0].clientX,y:e.touches[0].clientY};worldStart={x:world.x,y:world.y};isPanning=true;}}
+    \\},{passive:false});
     \\
     \\app.canvas.addEventListener('wheel', function(e) {
     \\  e.preventDefault();
@@ -2255,7 +2435,74 @@ pub const PCB_VIEWER_JS =
     \\    layerVisibility[layer] = !layerVisibility[layer];
     \\    this.classList.toggle('off', !layerVisibility[layer]);
     \\    if (layerContainers[layer]) layerContainers[layer].visible = layerVisibility[layer];
+    \\    // Deactivate preset buttons when manually toggling
+    \\    document.querySelectorAll('.layer-preset').forEach(function(p) { p.classList.remove('active'); });
     \\  });
+    \\});
+    \\
+    \\// --- Layer Presets ---
+    \\var layerPresets = {
+    \\  all: ['fcu','bcu','silk','courtyard','traces_fcu','traces_bcu','vias','zones','ratsnest','refs'],
+    \\  front: ['fcu','silk','traces_fcu','vias','zones','ratsnest','refs','courtyard'],
+    \\  back: ['bcu','traces_bcu','vias','zones','ratsnest','refs']
+    \\};
+    \\function applyLayerPreset(preset) {
+    \\  var show = layerPresets[preset] || layerPresets.all;
+    \\  var allLayers = layerPresets.all;
+    \\  for (var i=0; i<allLayers.length; i++) {
+    \\    var l = allLayers[i];
+    \\    var vis = show.indexOf(l) >= 0;
+    \\    layerVisibility[l] = vis;
+    \\    if (layerContainers[l]) layerContainers[l].visible = vis;
+    \\  }
+    \\  // Update toggle button states
+    \\  document.querySelectorAll('.layer-toggle').forEach(function(btn) {
+    \\    btn.classList.toggle('off', !layerVisibility[btn.dataset.layer]);
+    \\  });
+    \\  // Update preset button states
+    \\  document.querySelectorAll('.layer-preset').forEach(function(btn) {
+    \\    btn.classList.toggle('active', btn.dataset.preset === preset);
+    \\  });
+    \\}
+    \\document.querySelectorAll('.layer-preset').forEach(function(btn) {
+    \\  btn.addEventListener('click', function() { applyLayerPreset(this.dataset.preset); });
+    \\});
+    \\
+    \\// --- Selection Filter ---
+    \\var selFilter = {component: true, trace: true, via: true, net: false, section: false};
+    \\function updateSelFilter() {
+    \\  document.querySelectorAll('.sel-filter').forEach(function(cb) {
+    \\    selFilter[cb.dataset.filter] = cb.checked;
+    \\  });
+    \\  // Map filter state to selectMode for backward compatibility
+    \\  // If in route mode, stay in route mode
+    \\  if (selectMode === 'route') return;
+    \\  // If only one filter is active, use that as the selectMode
+    \\  var active = [];
+    \\  for (var k in selFilter) { if (selFilter[k]) active.push(k); }
+    \\  if (active.length === 1 && (active[0] === 'net' || active[0] === 'section')) {
+    \\    selectMode = active[0];
+    \\  } else if (active.indexOf('trace') >= 0 && active.indexOf('component') < 0 && active.indexOf('net') < 0 && active.indexOf('section') < 0) {
+    \\    selectMode = 'trace';
+    \\  } else {
+    \\    selectMode = 'component';
+    \\  }
+    \\  // Update interactivity based on filters
+    \\  layerContainers.traces_fcu.interactiveChildren = selFilter.trace;
+    \\  layerContainers.traces_bcu.interactiveChildren = selFilter.trace;
+    \\  layerContainers.vias.interactiveChildren = selFilter.via || selFilter.trace;
+    \\  updateSectionBoxes();
+    \\}
+    \\document.querySelectorAll('.sel-filter').forEach(function(cb) {
+    \\  cb.addEventListener('change', updateSelFilter);
+    \\});
+    \\document.getElementById('filter-all').addEventListener('click', function() {
+    \\  document.querySelectorAll('.sel-filter').forEach(function(cb) { cb.checked = true; });
+    \\  updateSelFilter();
+    \\});
+    \\document.getElementById('filter-none').addEventListener('click', function() {
+    \\  document.querySelectorAll('.sel-filter').forEach(function(cb) { cb.checked = false; });
+    \\  updateSelFilter();
     \\});
     \\
     \\// --- Save Placements ---
@@ -2306,8 +2553,7 @@ pub const PCB_VIEWER_JS =
     \\  fetch('/api/zone-fill/' + DESIGN_NAME, {method:'POST'}).then(function(r){return r.json();}).then(function(d) {
     \\    if (d.zone_fills) {
     \\      data.zone_fills = d.zone_fills;
-    \\      skipFitView = true;
-    \\      buildScene();
+    \\      rebuildZones();
     \\    }
     \\    zoneFillBtn.textContent = 'Fill Zones';
     \\  }).catch(function() { zoneFillBtn.textContent = 'Fill Zones'; });
@@ -2327,26 +2573,76 @@ pub const PCB_VIEWER_JS =
     \\      sidebar.innerHTML = '<h3 style="color:#3fb950;margin:0 0 12px">DRC: No violations</h3>';
     \\      return;
     \\    }
-    \\    // Draw markers
+    \\    // Draw markers (clickable)
     \\    for (var vi=0; vi<d.violations.length; vi++) {
     \\      var v = d.violations[vi];
+    \\      var mc = new PIXI.Container();
+    \\      mc.eventMode = 'static'; mc.cursor = 'pointer';
+    \\      var mcol = v.severity==='error' ? 0xFF0000 : 0xFFAA00;
     \\      var mg = new PIXI.Graphics();
-    \\      mg.circle(v.x*SCALE, v.y*SCALE, 1.0*SCALE);
-    \\      mg.stroke({color: v.severity==='error' ? 0xFF0000 : 0xFFAA00, width: 0.2*SCALE, alpha: 0.8});
-    \\      mg.moveTo((v.x-0.7)*SCALE, (v.y-0.7)*SCALE); mg.lineTo((v.x+0.7)*SCALE, (v.y+0.7)*SCALE);
-    \\      mg.moveTo((v.x+0.7)*SCALE, (v.y-0.7)*SCALE); mg.lineTo((v.x-0.7)*SCALE, (v.y+0.7)*SCALE);
-    \\      mg.stroke({color: v.severity==='error' ? 0xFF0000 : 0xFFAA00, width: 0.15*SCALE, alpha: 0.8});
-    \\      world.addChild(mg);
-    \\      drcMarkers.push(mg);
+    \\      mg.circle(v.x*SCALE, v.y*SCALE, 0.5*SCALE);
+    \\      mg.stroke({color: mcol, width: 0.05*SCALE, alpha: 0.8});
+    \\      var mx = new PIXI.Graphics();
+    \\      mx.moveTo((v.x-0.3)*SCALE, (v.y-0.3)*SCALE); mx.lineTo((v.x+0.3)*SCALE, (v.y+0.3)*SCALE);
+    \\      mx.moveTo((v.x+0.3)*SCALE, (v.y-0.3)*SCALE); mx.lineTo((v.x-0.3)*SCALE, (v.y+0.3)*SCALE);
+    \\      mx.stroke({color: mcol, width: 0.04*SCALE, alpha: 0.8});
+    \\      mc.addChild(mg); mc.addChild(mx);
+    \\      mc.hitArea = new PIXI.Circle(v.x*SCALE, v.y*SCALE, 0.6*SCALE);
+    \\      (function(viol){mc.on('pointertap', function(){
+    \\        var col2 = viol.severity==='error' ? '#da3633' : '#d29922';
+    \\        var ref = (viol.message.match(/(?:Pad |pad )?([A-Z][0-9]+)\./) || [])[1] || '';
+    \\        var sec = ''; if (data.sections && ref) { for (var si=0;si<data.sections.length;si++){if(data.sections[si].refs.indexOf(ref)>=0){sec=data.sections[si].name;break;}} }
+    \\        var h = '<h3 style="color:'+col2+';margin:0 0 8px">'+viol.kind+'</h3>';
+    \\        if (sec) h += '<div style="color:#3fb950;font-size:12px;margin-bottom:6px">'+sec+'</div>';
+    \\        h += '<div style="color:#c9d1d9;font-size:12px;margin-bottom:8px">'+viol.message+'</div>';
+    \\        h += '<div style="color:#666;font-size:11px">Location: ('+viol.x.toFixed(2)+', '+viol.y.toFixed(2)+') mm</div>';
+    \\        h += '<button onclick="showDefaultSidebar()" style="margin-top:12px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px">Back</button>';
+    \\        sidebar.innerHTML = h;
+    \\        window._pcbPanTo(viol.x, viol.y);
+    \\      });})(v);
+    \\      world.addChild(mc);
+    \\      drcMarkers.push(mc);
     \\    }
-    \\    // Show in sidebar
-    \\    var html = '<h3 style="color:#da3633;margin:0 0 12px">DRC: ' + d.count + ' violations</h3>';
+    \\    // Group violations by section
+    \\    function refToSection(ref) {
+    \\      if (!data.sections || !ref) return null;
+    \\      for (var si=0; si<data.sections.length; si++) {
+    \\        if (data.sections[si].refs.indexOf(ref) >= 0) return data.sections[si].name;
+    \\      }
+    \\      return null;
+    \\    }
+    \\    function extractRef(msg) {
+    \\      var m = msg.match(/(?:Pad |pad )?([A-Z][0-9]+)\./);
+    \\      return m ? m[1] : null;
+    \\    }
+    \\    var groups = {};
     \\    for (var vi2=0; vi2<d.violations.length; vi2++) {
     \\      var vv = d.violations[vi2];
-    \\      var col = vv.severity === 'error' ? '#da3633' : '#d29922';
-    \\      html += '<div class="sec-item" style="cursor:pointer;font-size:11px" onclick="window._pcbPanTo('+vv.x+','+vv.y+')">';
-    \\      html += '<span style="color:'+col+';font-weight:600">' + vv.kind + '</span> ';
-    \\      html += '<span style="color:#8b949e">' + vv.message + '</span></div>';
+    \\      var ref = extractRef(vv.message);
+    \\      var sec = refToSection(ref) || 'Other';
+    \\      if (!groups[sec]) groups[sec] = [];
+    \\      groups[sec].push(vv);
+    \\    }
+    \\    // Show in sidebar grouped by section
+    \\    var html = '<h3 style="color:#da3633;margin:0 0 12px">DRC: ' + d.count + ' violations</h3>';
+    \\    var secKeys = Object.keys(groups).sort(function(a,b){ return a==='Other'?1:b==='Other'?-1:a.localeCompare(b); });
+    \\    for (var gi=0; gi<secKeys.length; gi++) {
+    \\      var gname = secKeys[gi], gv = groups[gname];
+    \\      var nerr=0,nwarn=0;
+    \\      for (var gvi=0;gvi<gv.length;gvi++){if(gv[gvi].severity==='error')nerr++;else nwarn++;}
+    \\      var gcol=nerr>0?'#da3633':'#d29922';
+    \\      html += '<div style="margin:10px 0 4px;cursor:pointer;display:flex;align-items:center;gap:6px" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'block\':\'none\'">';
+    \\      html += '<span style="color:#e0e0e0;font-weight:600;font-size:12px">'+gname+'</span>';
+    \\      html += '<span style="color:'+gcol+';font-size:11px">('+gv.length+')</span></div>';
+    \\      html += '<div>';
+    \\      for (var gvi2=0; gvi2<gv.length; gvi2++) {
+    \\        var vv2 = gv[gvi2];
+    \\        var col = vv2.severity === 'error' ? '#da3633' : '#d29922';
+    \\        html += '<div class="sec-item" style="cursor:pointer;font-size:11px;padding-left:8px" onclick="window._pcbPanTo('+vv2.x+','+vv2.y+')">';
+    \\        html += '<span style="color:'+col+';font-weight:600">' + vv2.kind + '</span> ';
+    \\        html += '<span style="color:#8b949e">' + vv2.message + '</span></div>';
+    \\      }
+    \\      html += '</div>';
     \\    }
     \\    html += '<button id="drc-clear" style="margin-top:8px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px">Clear Markers</button>';
     \\    sidebar.innerHTML = html;
@@ -2382,10 +2678,15 @@ pub const PCB_VIEWER_JS =
     \\var routingWidth = 0.2;
     \\var routingGraphics = null;
     \\var routingStartPad = null; // {ref, pin, uuid}
+    \\var routingNg = -1; // net group ID for ratsnest connectivity
     \\var routingBendHV = true; // true=horizontal-first, false=vertical-first
     \\var routingCursorMm = [0, 0]; // current cursor position in mm (for via placement)
     \\var viaPreviewMode = false; // true when V pressed, waiting for click to place
     \\var viaPreviewGfx = null;
+    \\// Obstacle cache — built once at route start, invalidated on data change
+    \\var cachedObstacles = null; // {layer, netName, obs, traceSegs}
+    \\var routingRafPending = false;
+    \\function invalidateObstacleCache() { cachedObstacles = null; cachedObsSH = null; cachedSegSH = null; }
     \\
     \\function getTraceWidth(netName) {
     \\  var base = baseNetName(netName);
@@ -2454,6 +2755,63 @@ pub const PCB_VIEWER_JS =
     \\}
     \\
     \\// --- DRC: clearance checking ---
+    \\// Spatial hash for fast proximity queries (cell size in mm)
+    \\function SpatialHash(cellSize) {
+    \\  this.cs = cellSize;
+    \\  this.cells = {};
+    \\}
+    \\SpatialHash.prototype.key = function(x, y) {
+    \\  return (Math.floor(x/this.cs)) + ',' + (Math.floor(y/this.cs));
+    \\};
+    \\SpatialHash.prototype.insert = function(obj) {
+    \\  // Insert into all cells the object's bounding circle covers
+    \\  var r = obj.r || 0;
+    \\  var x1 = Math.floor((obj.x - r) / this.cs), x2 = Math.floor((obj.x + r) / this.cs);
+    \\  var y1 = Math.floor((obj.y - r) / this.cs), y2 = Math.floor((obj.y + r) / this.cs);
+    \\  for (var gx = x1; gx <= x2; gx++) {
+    \\    for (var gy = y1; gy <= y2; gy++) {
+    \\      var k = gx + ',' + gy;
+    \\      if (!this.cells[k]) this.cells[k] = [];
+    \\      this.cells[k].push(obj);
+    \\    }
+    \\  }
+    \\};
+    \\SpatialHash.prototype.insertSeg = function(seg) {
+    \\  // Insert a line segment into all cells it crosses
+    \\  var x1 = Math.min(seg.x1, seg.x2) - seg.hw, x2 = Math.max(seg.x1, seg.x2) + seg.hw;
+    \\  var y1 = Math.min(seg.y1, seg.y2) - seg.hw, y2 = Math.max(seg.y1, seg.y2) + seg.hw;
+    \\  var gx1 = Math.floor(x1/this.cs), gx2 = Math.floor(x2/this.cs);
+    \\  var gy1 = Math.floor(y1/this.cs), gy2 = Math.floor(y2/this.cs);
+    \\  for (var gx = gx1; gx <= gx2; gx++) {
+    \\    for (var gy = gy1; gy <= gy2; gy++) {
+    \\      var k = gx + ',' + gy;
+    \\      if (!this.cells[k]) this.cells[k] = [];
+    \\      this.cells[k].push(seg);
+    \\    }
+    \\  }
+    \\};
+    \\SpatialHash.prototype.query = function(x, y, radius) {
+    \\  var result = [];
+    \\  var x1 = Math.floor((x - radius) / this.cs), x2 = Math.floor((x + radius) / this.cs);
+    \\  var y1 = Math.floor((y - radius) / this.cs), y2 = Math.floor((y + radius) / this.cs);
+    \\  var seen = {};
+    \\  for (var gx = x1; gx <= x2; gx++) {
+    \\    for (var gy = y1; gy <= y2; gy++) {
+    \\      var items = this.cells[gx + ',' + gy];
+    \\      if (!items) continue;
+    \\      for (var i = 0; i < items.length; i++) {
+    \\        var item = items[i];
+    \\        if (!seen[item._shId]) { seen[item._shId] = true; result.push(item); }
+    \\      }
+    \\    }
+    \\  }
+    \\  return result;
+    \\};
+    \\var shIdCounter = 0;
+    \\// Cached spatial hashes — built with obstacle cache
+    \\var cachedObsSH = null; // SpatialHash for point obstacles
+    \\var cachedSegSH = null; // SpatialHash for trace segments
+    \\
     \\function getDrcClearance() {
     \\  return data.rules ? data.rules.clearance : 0.15;
     \\}
@@ -2480,6 +2838,10 @@ pub const PCB_VIEWER_JS =
     \\
     \\// Collect obstacles: returns [{x, y, radius}] for pads/vias on different nets, same layer
     \\function collectObstacles(layer, netName) {
+    \\  // Return cached obstacles if valid for same layer/net
+    \\  if (cachedObstacles && cachedObstacles.layer === layer && cachedObstacles.netName === netName) {
+    \\    return cachedObstacles.obs;
+    \\  }
     \\  var obs = [];
     \\  // Pads — only on same layer (or through-hole pads which are on all layers)
     \\  for (var uuid in fpData) {
@@ -2509,26 +2871,42 @@ pub const PCB_VIEWER_JS =
     \\      obs.push({x: v.x, y: v.y, r: v.pad_size/2});
     \\    }
     \\  }
+    \\  // Build spatial hash for fast proximity queries (2mm cell size)
+    \\  cachedObsSH = new SpatialHash(2.0);
+    \\  for (var oi=0; oi<obs.length; oi++) { obs[oi]._shId = ++shIdCounter; cachedObsSH.insert(obs[oi]); }
+    \\  cachedObstacles = {layer: layer, netName: netName, obs: obs};
     \\  return obs;
     \\}
     \\
     \\// Nudge a target point so the route from 'from' to 'to' maintains clearance.
     \\// Iteratively pushes 'to' away from the closest obstacle.
-    \\function nudgeForClearance(from, to, width, layer, netName) {
-    \\  var clearance = getDrcClearance();
-    \\  var halfW = width / 2;
-    \\  var obs = collectObstacles(layer, netName);
-    \\  // Also collect trace segments as obstacles
-    \\  var traceSegs = [];
+    \\var cachedTraceSegs = null; // {layer, netName, segs}
+    \\function collectTraceSegs(layer, netName) {
+    \\  if (cachedTraceSegs && cachedTraceSegs.layer === layer && cachedTraceSegs.netName === netName) {
+    \\    return cachedTraceSegs.segs;
+    \\  }
+    \\  var segs = [];
     \\  if (data.traces) {
     \\    for (var ti=0; ti<data.traces.length; ti++) {
     \\      var ot = data.traces[ti];
     \\      if (ot.layer !== layer || baseNetName(ot.net) === netName) continue;
     \\      for (var si=0; si<ot.points.length-1; si++) {
-    \\        traceSegs.push({x1:ot.points[si][0], y1:ot.points[si][1], x2:ot.points[si+1][0], y2:ot.points[si+1][1], hw:ot.width/2});
+    \\        segs.push({x1:ot.points[si][0], y1:ot.points[si][1], x2:ot.points[si+1][0], y2:ot.points[si+1][1], hw:ot.width/2});
     \\      }
     \\    }
     \\  }
+    \\  // Build spatial hash for trace segments
+    \\  cachedSegSH = new SpatialHash(2.0);
+    \\  for (var si2=0; si2<segs.length; si2++) { segs[si2]._shId = ++shIdCounter; cachedSegSH.insertSeg(segs[si2]); }
+    \\  cachedTraceSegs = {layer: layer, netName: netName, segs: segs};
+    \\  return segs;
+    \\}
+    \\function nudgeForClearance(from, to, width, layer, netName) {
+    \\  var clearance = getDrcClearance();
+    \\  var halfW = width / 2;
+    \\  collectObstacles(layer, netName);
+    \\  collectTraceSegs(layer, netName);
+    \\  var maxR = clearance + halfW + 2.0; // query radius for spatial hash
     \\  var tx = to[0], ty = to[1];
     \\  // Up to 5 nudge iterations
     \\  for (var iter=0; iter<5; iter++) {
@@ -2536,15 +2914,17 @@ pub const PCB_VIEWER_JS =
     \\    var testPts = [from];
     \\    for (var si=0; si<segs.length; si++) testPts.push(segs[si]);
     \\    var worstPush = null, worstAmount = 0;
-    \\    // Check point obstacles (pads, vias)
-    \\    for (var oi=0; oi<obs.length; oi++) {
-    \\      var o = obs[oi];
-    \\      var minGap = clearance + halfW + o.r;
-    \\      for (var si=0; si<testPts.length-1; si++) {
+    \\    // Check point obstacles (pads, vias) — use spatial hash
+    \\    for (var si=0; si<testPts.length-1; si++) {
+    \\      var smx2 = (testPts[si][0]+testPts[si+1][0])/2, smy2 = (testPts[si][1]+testPts[si+1][1])/2;
+    \\      var segLen = Math.sqrt(Math.pow(testPts[si+1][0]-testPts[si][0],2)+Math.pow(testPts[si+1][1]-testPts[si][1],2));
+    \\      var nearby = cachedObsSH ? cachedObsSH.query(smx2, smy2, maxR + segLen/2) : cachedObstacles.obs;
+    \\      for (var oi=0; oi<nearby.length; oi++) {
+    \\        var o = nearby[oi];
+    \\        var minGap = clearance + halfW + o.r;
     \\        var d = distPtSeg(o.x, o.y, testPts[si][0], testPts[si][1], testPts[si+1][0], testPts[si+1][1]);
     \\        if (d < minGap && (minGap - d) > worstAmount) {
     \\          worstAmount = minGap - d;
-    \\          // Push direction: from obstacle toward the target point
     \\          var pdx = tx - o.x, pdy = ty - o.y;
     \\          var plen = Math.sqrt(pdx*pdx + pdy*pdy);
     \\          if (plen < 0.001) { pdx = 1; pdy = 0; plen = 1; }
@@ -2552,11 +2932,14 @@ pub const PCB_VIEWER_JS =
     \\        }
     \\      }
     \\    }
-    \\    // Check trace segment obstacles
-    \\    for (var ti=0; ti<traceSegs.length; ti++) {
-    \\      var ts = traceSegs[ti];
-    \\      var minGap2 = clearance + halfW + ts.hw;
-    \\      for (var si=0; si<testPts.length-1; si++) {
+    \\    // Check trace segment obstacles — use spatial hash
+    \\    for (var si=0; si<testPts.length-1; si++) {
+    \\      var smx3 = (testPts[si][0]+testPts[si+1][0])/2, smy3 = (testPts[si][1]+testPts[si+1][1])/2;
+    \\      var segLen2 = Math.sqrt(Math.pow(testPts[si+1][0]-testPts[si][0],2)+Math.pow(testPts[si+1][1]-testPts[si][1],2));
+    \\      var nearSegs = cachedSegSH ? cachedSegSH.query(smx3, smy3, maxR + segLen2/2) : cachedTraceSegs.segs;
+    \\      for (var ti=0; ti<nearSegs.length; ti++) {
+    \\        var ts = nearSegs[ti];
+    \\        var minGap2 = clearance + halfW + ts.hw;
     \\        var d2 = distSegSeg(testPts[si][0],testPts[si][1],testPts[si+1][0],testPts[si+1][1], ts.x1,ts.y1,ts.x2,ts.y2);
     \\        if (d2 < minGap2 && (minGap2 - d2) > worstAmount) {
     \\          worstAmount = minGap2 - d2;
@@ -2583,62 +2966,33 @@ pub const PCB_VIEWER_JS =
     \\  var clearance = getDrcClearance();
     \\  var violations = [];
     \\  var halfW = width / 2;
-    \\  // Check against other traces on same layer, different net
-    \\  if (data.traces) {
-    \\    for (var ti=0; ti<data.traces.length; ti++) {
-    \\      var ot = data.traces[ti];
-    \\      if (ot.layer !== layer || baseNetName(ot.net) === netName) continue;
-    \\      var otHalf = ot.width / 2;
-    \\      var minGap = clearance + halfW + otHalf;
-    \\      for (var si=0; si<pts.length-1; si++) {
-    \\        for (var sj=0; sj<ot.points.length-1; sj++) {
-    \\          var d = distSegSeg(pts[si][0],pts[si][1],pts[si+1][0],pts[si+1][1],
-    \\                             ot.points[sj][0],ot.points[sj][1],ot.points[sj+1][0],ot.points[sj+1][1]);
-    \\          if (d < minGap) {
-    \\            var mx = (pts[si][0]+pts[si+1][0])/2, my = (pts[si][1]+pts[si+1][1])/2;
-    \\            violations.push({x:mx, y:my, msg:'Trace clearance: '+d.toFixed(2)+'mm < '+minGap.toFixed(2)+'mm'});
-    \\          }
-    \\        }
+    \\  // Ensure caches are populated
+    \\  collectObstacles(layer, netName);
+    \\  collectTraceSegs(layer, netName);
+    \\  var maxR = clearance + halfW + 2.0;
+    \\  for (var si=0; si<pts.length-1; si++) {
+    \\    var smx = (pts[si][0]+pts[si+1][0])/2, smy = (pts[si][1]+pts[si+1][1])/2;
+    \\    var segLen = Math.sqrt(Math.pow(pts[si+1][0]-pts[si][0],2)+Math.pow(pts[si+1][1]-pts[si][1],2));
+    \\    var qr = maxR + segLen/2;
+    \\    // Check point obstacles (pads, vias) via spatial hash
+    \\    var nearby = cachedObsSH ? cachedObsSH.query(smx, smy, qr) : cachedObstacles.obs;
+    \\    for (var oi=0; oi<nearby.length; oi++) {
+    \\      var o = nearby[oi];
+    \\      var minGap = clearance + halfW + o.r;
+    \\      var dp = distPtSeg(o.x, o.y, pts[si][0], pts[si][1], pts[si+1][0], pts[si+1][1]);
+    \\      if (dp < minGap) {
+    \\        violations.push({x:o.x, y:o.y, msg:'Clearance: '+dp.toFixed(2)+'mm < '+minGap.toFixed(2)+'mm'});
     \\      }
     \\    }
-    \\  }
-    \\  // Check against pads on same layer, different net
-    \\  for (var uuid in fpData) {
-    \\    var fpd = fpData[uuid];
-    \\    var fpc = fpContainers[uuid];
-    \\    if (!fpd || !fpc) continue;
-    \\    var fpLayer = fpd.layer || 'F.Cu';
-    \\    var fpAngle = (fpd.angle||0) * Math.PI/180;
-    \\    var cos = Math.cos(fpAngle), sin = Math.sin(fpAngle);
-    \\    for (var pi=0; pi<fpd.pads.length; pi++) {
-    \\      var pad = fpd.pads[pi];
-    \\      if (pad.net_name && baseNetName(pad.net_name) === netName) continue;
-    \\      var isThrough = pad.type === 'thru_hole' || pad.drill;
-    \\      if (!isThrough && fpLayer !== layer) continue;
-    \\      var ppx = pad.x*cos - pad.y*sin + fpc.x/SCALE;
-    \\      var ppy = pad.x*sin + pad.y*cos + fpc.y/SCALE;
-    \\      var padR = Math.max(pad.w, pad.h) / 2;
-    \\      var minGap2 = clearance + halfW + padR;
-    \\      for (var si=0; si<pts.length-1; si++) {
-    \\        var dp = distPtSeg(ppx, ppy, pts[si][0], pts[si][1], pts[si+1][0], pts[si+1][1]);
-    \\        if (dp < minGap2) {
-    \\          violations.push({x:ppx, y:ppy, msg:'Pad clearance: '+dp.toFixed(2)+'mm < '+minGap2.toFixed(2)+'mm'});
-    \\        }
-    \\      }
-    \\    }
-    \\  }
-    \\  // Check against vias, different net
-    \\  if (data.vias) {
-    \\    for (var vi=0; vi<data.vias.length; vi++) {
-    \\      var v = data.vias[vi];
-    \\      if (baseNetName(v.net) === netName) continue;
-    \\      var viaR = v.pad_size / 2;
-    \\      var minGap3 = clearance + halfW + viaR;
-    \\      for (var si=0; si<pts.length-1; si++) {
-    \\        var dv = distPtSeg(v.x, v.y, pts[si][0], pts[si][1], pts[si+1][0], pts[si+1][1]);
-    \\        if (dv < minGap3) {
-    \\          violations.push({x:v.x, y:v.y, msg:'Via clearance: '+dv.toFixed(2)+'mm < '+minGap3.toFixed(2)+'mm'});
-    \\        }
+    \\    // Check trace segment obstacles via spatial hash
+    \\    var nearSegs = cachedSegSH ? cachedSegSH.query(smx, smy, qr) : cachedTraceSegs.segs;
+    \\    for (var ti=0; ti<nearSegs.length; ti++) {
+    \\      var ts = nearSegs[ti];
+    \\      var minGap2 = clearance + halfW + ts.hw;
+    \\      var d2 = distSegSeg(pts[si][0],pts[si][1],pts[si+1][0],pts[si+1][1], ts.x1,ts.y1,ts.x2,ts.y2);
+    \\      if (d2 < minGap2) {
+    \\        var mx2 = (pts[si][0]+pts[si+1][0])/2, my2 = (pts[si][1]+pts[si+1][1])/2;
+    \\        violations.push({x:mx2, y:my2, msg:'Trace clearance: '+d2.toFixed(2)+'mm < '+minGap2.toFixed(2)+'mm'});
     \\      }
     \\    }
     \\  }
@@ -2709,14 +3063,30 @@ pub const PCB_VIEWER_JS =
     \\}
     \\
     \\function drawRoutingPreview(mx, my) {
-    \\  if (routingGraphics) { routingGraphics.destroy(); routingGraphics = null; }
-    \\  if (routingPoints.length === 0) return;
+    \\  if (routingPoints.length === 0) {
+    \\    if (routingGraphics) { routingGraphics.clear(); }
+    \\    return;
+    \\  }
     \\  var pts = routingPreviewPoints(mx, my);
-    \\  if (pts.length < 2) return;
+    \\  if (pts.length < 2) {
+    \\    if (routingGraphics) { routingGraphics.clear(); }
+    \\    return;
+    \\  }
     \\  // DRC check
     \\  var violations = checkRouteDrc(pts, routingWidth, routingLayer, baseNetName(routingNet));
     \\  var traceColor = violations.length > 0 ? 0xFF0000 : (routingLayer==='F.Cu' ? C.fcu : C.bcu);
-    \\  routingGraphics = new PIXI.Graphics();
+    \\  var tLayer = routingLayer === 'F.Cu' ? layerContainers.traces_fcu : layerContainers.traces_bcu;
+    \\  if (!routingGraphics) {
+    \\    routingGraphics = new PIXI.Graphics();
+    \\    tLayer.addChild(routingGraphics);
+    \\  } else {
+    \\    routingGraphics.clear();
+    \\    // Re-parent if layer changed (via placement switches layers)
+    \\    if (routingGraphics.parent !== tLayer) {
+    \\      routingGraphics.removeFromParent();
+    \\      tLayer.addChild(routingGraphics);
+    \\    }
+    \\  }
     \\  routingGraphics.moveTo(pts[0][0]*SCALE, pts[0][1]*SCALE);
     \\  for (var i=1; i<pts.length; i++) routingGraphics.lineTo(pts[i][0]*SCALE, pts[i][1]*SCALE);
     \\  routingGraphics.stroke({color: traceColor, width: routingWidth*SCALE, alpha: 0.6, cap:'round', join:'round'});
@@ -2731,13 +3101,37 @@ pub const PCB_VIEWER_JS =
     \\    routingGraphics.circle(vx, vy, getDrcClearance()*SCALE);
     \\    routingGraphics.stroke({color: 0xFF0000, width: 0.3*SCALE, alpha: 0.8});
     \\  }
-    \\  var tLayer = routingLayer === 'F.Cu' ? layerContainers.traces_fcu : layerContainers.traces_bcu;
-    \\  tLayer.addChild(routingGraphics);
+    \\}
+    \\
+    \\// Snap to nearest same-net pad center if within snapRadius (mm).
+    \\// Returns [x,y] snapped position or null if no nearby pad.
+    \\function snapToPad(mx, my, netName, snapRadius) {
+    \\  var bestDist = snapRadius * snapRadius;
+    \\  var bestX = null, bestY = null;
+    \\  var bn = baseNetName(netName);
+    \\  for (var uuid in fpData) {
+    \\    var fpd = fpData[uuid];
+    \\    var fpc = fpContainers[uuid];
+    \\    if (!fpd || !fpc) continue;
+    \\    var angle = (fpd.angle||0) * Math.PI/180;
+    \\    var cos = Math.cos(angle), sin = Math.sin(angle);
+    \\    for (var pi=0; pi<fpd.pads.length; pi++) {
+    \\      var pad = fpd.pads[pi];
+    \\      if (!pad.net_name || baseNetName(pad.net_name) !== bn) continue;
+    \\      var px = pad.x*cos - pad.y*sin + fpc.x/SCALE;
+    \\      var py = pad.x*sin + pad.y*cos + fpc.y/SCALE;
+    \\      var dx = mx - px, dy = my - py;
+    \\      var d2 = dx*dx + dy*dy;
+    \\      if (d2 < bestDist) { bestDist = d2; bestX = px; bestY = py; }
+    \\    }
+    \\  }
+    \\  return bestX !== null ? [bestX, bestY] : null;
     \\}
     \\
     \\function startRouting(padData, fpRef, fpUuid, fpLayer) {
     \\  if (!padData.net_name) return;
     \\  routingNet = padData.net_name;
+    \\  routingNg = (padData.ng !== undefined && padData.ng >= 0) ? padData.ng : -1;
     \\  routingLayer = fpLayer || 'F.Cu';
     \\  routingWidth = getTraceWidth(routingNet);
     \\  // Compute exact pad world position (no grid snap — must be centered on pad)
@@ -2785,10 +3179,9 @@ pub const PCB_VIEWER_JS =
     \\  if (!rl || Math.abs(rl[0]-wx)>0.001 || Math.abs(rl[1]-wy)>0.001) routingPoints.push([wx, wy]);
     \\  // Create trace
     \\  if (!data.traces) data.traces = [];
-    \\  data.traces.push({net: baseNetName(routingNet), layer: routingLayer, width: routingWidth, points: routingPoints.slice()});
+    \\  data.traces.push({net: baseNetName(routingNet), ng: routingNg, layer: routingLayer, width: routingWidth, points: routingPoints.slice()});
     \\  cancelRouting();
-    \\  skipFitView = true;
-    \\  buildScene();
+    \\  rebuildTracesAndVias();
     \\  dirty = true; scheduleSave();
     \\  showDefaultSidebar();
     \\}
@@ -2802,19 +3195,18 @@ pub const PCB_VIEWER_JS =
     \\  // Save the trace segment on the CURRENT layer up to the via
     \\  if (routingPoints.length >= 2) {
     \\    if (!data.traces) data.traces = [];
-    \\    data.traces.push({net: baseNetName(routingNet), layer: routingLayer, width: routingWidth, points: routingPoints.slice()});
+    \\    data.traces.push({net: baseNetName(routingNet), ng: routingNg, layer: routingLayer, width: routingWidth, points: routingPoints.slice()});
     \\  }
     \\  // Place the via
     \\  var vs = getViaSize();
     \\  if (!data.vias) data.vias = [];
     \\  var newLayer = routingLayer === 'F.Cu' ? 'B.Cu' : 'F.Cu';
-    \\  data.vias.push({id: uid(), x: viaPos[0], y: viaPos[1], net: baseNetName(routingNet), drill: vs.drill, pad_size: vs.pad_size, from: routingLayer, to: newLayer});
+    \\  data.vias.push({id: uid(), x: viaPos[0], y: viaPos[1], net: baseNetName(routingNet), ng: routingNg, drill: vs.drill, pad_size: vs.pad_size, from: routingLayer, to: newLayer});
     \\  // Start new segment on the other layer from the via position
     \\  routingLayer = newLayer;
     \\  routingPoints = [[viaPos[0], viaPos[1]]];
     \\  // Rebuild to show the via + saved trace, then re-highlight net
-    \\  skipFitView = true;
-    \\  buildScene();
+    \\  rebuildTracesAndVias();
     \\  highlightNet(baseNetName(routingNet));
     \\  updateRoutingSidebar();
     \\  dirty = true; scheduleSave();
@@ -2823,37 +3215,36 @@ pub const PCB_VIEWER_JS =
     \\function cancelRouting() {
     \\  routingPoints = [];
     \\  routingNet = null;
+    \\  routingNg = -1;
     \\  routingStartPad = null;
     \\  viaPreviewMode = false;
+    \\  invalidateObstacleCache(); cachedTraceSegs = null;
     \\  if (viaPreviewGfx) { viaPreviewGfx.destroy(); viaPreviewGfx = null; }
     \\  if (routingGraphics) { routingGraphics.destroy(); routingGraphics = null; }
     \\}
     \\
     \\// --- Select Mode Toggle ---
     \\var selComp = document.getElementById('sel-comp');
-    \\var selNet = document.getElementById('sel-net');
-    \\var selSec = document.getElementById('sel-sec');
-    \\var selTrace = document.getElementById('sel-trace');
     \\var selRoute = document.getElementById('sel-route');
     \\function setSelectMode(mode) {
-    \\  selectMode = mode;
-    \\  if (selComp) selComp.classList.toggle('active', mode==='component');
-    \\  if (selNet) selNet.classList.toggle('active', mode==='net');
-    \\  if (selSec) selSec.classList.toggle('active', mode==='section');
-    \\  if (selTrace) selTrace.classList.toggle('active', mode==='trace');
-    \\  if (selRoute) selRoute.classList.toggle('active', mode==='route');
-    \\  // Disable trace/via click interception in route mode so pads are reachable
-    \\  layerContainers.traces_fcu.interactiveChildren = (mode !== 'route');
-    \\  layerContainers.traces_bcu.interactiveChildren = (mode !== 'route');
-    \\  layerContainers.vias.interactiveChildren = (mode !== 'route');
-    \\  cancelRouting();
+    \\  if (mode === 'route') {
+    \\    selectMode = 'route';
+    \\    if (selComp) selComp.classList.remove('active');
+    \\    if (selRoute) selRoute.classList.add('active');
+    \\    layerContainers.traces_fcu.interactiveChildren = false;
+    \\    layerContainers.traces_bcu.interactiveChildren = false;
+    \\    layerContainers.vias.interactiveChildren = false;
+    \\  } else {
+    \\    // Select mode — use filter checkboxes to determine behavior
+    \\    if (selComp) selComp.classList.add('active');
+    \\    if (selRoute) selRoute.classList.remove('active');
+    \\    cancelRouting();
+    \\    updateSelFilter();
+    \\  }
     \\  clearSelection();
     \\  updateSectionBoxes();
     \\}
     \\if (selComp) selComp.onclick = function() { setSelectMode('component'); };
-    \\if (selNet) selNet.onclick = function() { setSelectMode('net'); };
-    \\if (selSec) selSec.onclick = function() { setSelectMode('section'); };
-    \\if (selTrace) selTrace.onclick = function() { setSelectMode('trace'); };
     \\if (selRoute) selRoute.onclick = function() { setSelectMode('route'); };
     \\
     \\// --- Init ---
