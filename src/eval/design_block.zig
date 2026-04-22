@@ -88,9 +88,13 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     validate.warnCombinableNets(self, &net_form_sources);
     const nets_slice = try buildNets(self, &all_pin_nets, &net_ties);
 
-    // Convert net ties to env NetTie format for storage on the block
+    // Convert net ties to env NetTie format for storage on the block.
+    // Skip auto-aliases: they're block-local helpers (symbol pin-function
+    // matching) and would otherwise bridge unrelated nets in the cross-block
+    // flatten done by export_kicad_netlist.applyNetTies.
     var block_ties: std.ArrayListUnmanaged(env_mod.NetTie) = .empty;
     for (net_ties.items) |nt| {
+        if (nt.is_auto) continue;
         block_ties.append(self.allocator, .{ .a = nt.a, .b = nt.b }) catch {};
     }
 
@@ -128,7 +132,7 @@ fn appendAutoAliases(self: *Evaluator, inst: Instance, pin_nets: []const PinNetD
             for (pin_nets) |pn| {
                 if (sym_pins.get(pn.pin)) |func_name| {
                     if (pn.net.len > 0 and !std.mem.eql(u8, pn.net, func_name)) {
-                        net_ties.append(self.allocator, .{ .a = pn.net, .b = func_name }) catch {};
+                        net_ties.append(self.allocator, .{ .a = pn.net, .b = func_name, .is_auto = true }) catch {};
                     }
                 }
             }

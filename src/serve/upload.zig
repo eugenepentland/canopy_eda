@@ -142,14 +142,14 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     }
 
     // Write footprint
+    const fp_name_final = extractFootprintName(ctx.allocator, footprint) orelse safe_name;
     {
-        const fp_name = extractFootprintName(ctx.allocator, footprint) orelse safe_name;
         const dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints", .{ctx.project_dir}) catch {
             res.status = 500;
             return;
         };
         std.fs.cwd().makePath(dir) catch {};
-        const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, fp_name }) catch {
+        const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, fp_name_final }) catch {
             res.status = 500;
             return;
         };
@@ -160,6 +160,9 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
         defer f.close();
         f.writeAll(footprint) catch {};
     }
+
+    // Write component definition (links pinout + footprint + MPN/manufacturer)
+    writeComponentFile(ctx.allocator, ctx.project_dir, safe_name, safe_name, fp_name_final, sym_data);
 
     // Write STEP model
     if (step_data) |sd| {
@@ -256,4 +259,73 @@ pub fn extractFootprintName(allocator: std.mem.Allocator, footprint: []const u8)
         }
     }
     return null;
+}
+
+/// Find a KiCad `(property "Key" "Value" ...)` inside `sym_data` and return
+/// the value slice, or null if the property isn't present or is empty.
+fn extractProperty(sym_data: []const u8, key: []const u8) ?[]const u8 {
+    var search: usize = 0;
+    while (std.mem.indexOfPos(u8, sym_data, search, "(property \"")) |idx| {
+        const ks = idx + 11;
+        const ke = std.mem.indexOfPos(u8, sym_data, ks, "\"") orelse return null;
+        if (std.mem.eql(u8, sym_data[ks..ke], key)) {
+            const vs_start = std.mem.indexOfPos(u8, sym_data, ke + 1, "\"") orelse return null;
+            const vs = vs_start + 1;
+            const ve = std.mem.indexOfPos(u8, sym_data, vs, "\"") orelse return null;
+            if (ve == vs) return null; // empty value
+            return sym_data[vs..ve];
+        }
+        search = ke + 1;
+    }
+    return null;
+}
+
+/// Write a `(component ...)` definition to lib/components/<safe_name>.sexp.
+/// Extracts description / manufacturer / MPN from the KiCad symbol properties
+/// when present. `pinout_name` and `footprint_name` are bare atoms referenced
+/// from the component; they must already have been written.
+pub fn writeComponentFile(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    safe_name: []const u8,
+    pinout_name: []const u8,
+    footprint_name: []const u8,
+    sym_data: []const u8,
+) void {
+    const dir = std.fmt.allocPrint(allocator, "{s}/lib/components", .{project_dir}) catch return;
+    defer allocator.free(dir);
+    std.fs.cwd().makePath(dir) catch {};
+
+    const path = std.fmt.allocPrint(allocator, "{s}/{s}.sexp", .{ dir, safe_name }) catch return;
+    defer allocator.free(path);
+
+    // Skip if a hand-authored component already exists.
+    if (std.fs.cwd().access(path, .{})) |_| {
+        std.debug.print("Component exists, skipping: lib/components/{s}.sexp\n", .{safe_name});
+        return;
+    } else |_| {}
+
+    const description = extractProperty(sym_data, "ki_description") orelse
+        extractProperty(sym_data, "Description") orelse
+        extractProperty(sym_data, "Value") orelse
+        safe_name;
+    const manufacturer = extractProperty(sym_data, "Manufacturer_Name");
+    const mpn = extractProperty(sym_data, "Manufacturer_Part_Number");
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(allocator);
+    w.print("(component \"{s}\"\n", .{safe_name}) catch return;
+    w.print("  (description \"{s}\")\n", .{description}) catch return;
+    // Names are always quoted: purely-numeric names (e.g. "2049280301") would
+    // otherwise tokenize as an int and fail field resolution.
+    w.print("  (pinout \"{s}\")\n", .{pinout_name}) catch return;
+    w.print("  (footprint \"{s}\")", .{footprint_name}) catch return;
+    if (manufacturer) |m| w.print("\n  (manufacturer \"{s}\")", .{m}) catch return;
+    if (mpn) |m| w.print("\n  (mpn \"{s}\")", .{m}) catch return;
+    w.writeAll(")\n") catch return;
+
+    const f = std.fs.cwd().createFile(path, .{}) catch return;
+    defer f.close();
+    f.writeAll(buf.items) catch return;
+    std.debug.print("Wrote component: lib/components/{s}.sexp\n", .{safe_name});
 }

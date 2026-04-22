@@ -36,9 +36,7 @@ pub fn canvasPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
 
     // Generate scene graph and seed live cache
     const layout_json = render_json.renderSceneGraph(ctx.allocator, block) catch null;
-    serve_root.live_mutex.lock();
-    serve_root.live_layout_json = layout_json;
-    serve_root.live_mutex.unlock();
+    serve_root.setLiveLayoutJson(layout_json);
 
     var sym_cache = try bom_html.buildSymbolPinCache(ctx.allocator, ctx.project_dir);
 
@@ -194,7 +192,7 @@ const CANVAS_CSS =
     \\.kicad-label{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
     \\.kicad-input{padding:6px 8px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;border-radius:4px;font-size:12px;font-family:monospace}
     \\.kicad-input:focus{border-color:#4a9eff;outline:none}
-    \\.kicad-status{font-size:11px;color:#8b949e;min-height:14px;word-break:break-all}
+    \\.kicad-status{font-size:11px;color:#8b949e;min-height:14px;word-break:break-all;white-space:pre-wrap}
     \\.kicad-status.ok{color:#3fb950}
     \\.kicad-status.err{color:#f85149}
     \\.kicad-check{font-size:12px;color:#c9d1d9;display:flex;align-items:center;gap:6px;margin:2px 0}
@@ -258,7 +256,33 @@ const KICAD_MENU_JS =
     \\  updatePcb.addEventListener('click',function(){
     \\    var url='/api/update-kicad-pcb/'+SCHEMATIC_SLUG;
     \\    if(shortNetsCb.checked)url+='?short-nets=1';
-    \\    doWrite(url,'Updating KiCad PCB');
+    \\    setStatus('Updating KiCad PCB...');
+    \\    fetch(url,{method:'POST'}).then(function(r){return r.json();}).then(function(j){
+    \\      if(!j.ok){
+    \\        var msg='Error: '+(j.error||'unknown');
+    \\        if(j.preflight)msg+='\n'+j.preflight;
+    \\        setStatus(msg,'err');
+    \\        return;
+    \\      }
+    \\      var lines=[];
+    \\      if(j.skipped){lines.push('No changes since last sync \u2014 '+j.pcb);}
+    \\      else{
+    \\        lines.push('Updated '+j.pcb);
+    \\        if(j.backup)lines.push('Backup: '+j.backup);
+    \\        else if(j.backup===null)lines.push('Backup: (new PCB, none needed)');
+    \\        var wf=j.wrote_footprints,wm=j.wrote_models;
+    \\        if(wf!==undefined||wm!==undefined){
+    \\          var parts=[];
+    \\          if(wf!==undefined)parts.push(wf+' footprint(s)');
+    \\          if(wm!==undefined)parts.push(wm+' model(s)');
+    \\          lines.push('Wrote: '+(parts.length?parts.join(', '):'netlist only'));
+    \\        }
+    \\      }
+    \\      var m=j.mismatches||0,miss=j.missing||0;
+    \\      if(m===0&&miss===0){if(!j.skipped)lines.push('Validation: all checks passed');}
+    \\      else lines.push('Validation: '+m+' mismatch(es), '+miss+' missing component(s) \u2014 see '+j.pcb.replace(/\.kicad_pcb$/,'.pcb_diff.json'));
+    \\      setStatus(lines.join('\n'),(m===0&&miss===0)?'ok':'err');
+    \\    }).catch(function(e){setStatus('Error: '+e,'err');});
     \\  });
     \\})();
 ;

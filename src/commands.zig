@@ -33,16 +33,15 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     if (push_name == null and positional_name != null) push_name = positional_name;
 
-    const board_path = if (push_name) |name|
-        std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name }) catch {
-            std.debug.print("Out of memory\n", .{});
-            std.process.exit(1);
-        }
-    else
-        std.fmt.allocPrint(allocator, "{s}/src/board.sexp", .{project_dir}) catch {
-            std.debug.print("Out of memory\n", .{});
-            std.process.exit(1);
-        };
+    const design = push_name orelse {
+        std.debug.print("Usage: eda build [--project-dir <d>] [--output-dir <out>] [--push] <design-name>\n", .{});
+        std.process.exit(1);
+    };
+
+    const board_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, design }) catch {
+        std.debug.print("Out of memory\n", .{});
+        std.process.exit(1);
+    };
     defer allocator.free(board_path);
 
     var eval = Evaluator.init(allocator, project_dir);

@@ -81,7 +81,13 @@ def parse_netlist(path):
     """
     with open(path, encoding="utf-8", errors="replace") as f:
         text = f.read()
+    return parse_netlist_text(text)
 
+
+def parse_netlist_text(text):
+    """Parse a netlist from a raw S-expression string. Same shape as
+    `parse_netlist`. Used by the KiCad plugin path, which fetches netlists
+    over HTTP (`GET /api/netlist/:name`) instead of reading a file."""
     tokens = tokenize(text)
     tree, _ = parse_sexp(tokens)
 
@@ -409,6 +415,39 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None, short_nets=
         for node in net["nodes"]:
             pin_to_net[(node["ref"], node["pin"])] = net["name"]
 
+    # Preflight: every component whose UUID isn't already on the board is about
+    # to be added, and that requires its footprint to load. Fail fast (before
+    # backup or any mutation) with the full list of missing footprints — we used
+    # to skip silently and the user wouldn't notice a connector going missing.
+    preflight_existing_uuids = set()
+    if os.path.exists(pcb_path):
+        preflight_board = pcbnew.LoadBoard(pcb_path)
+        for fp in preflight_board.GetFootprints():
+            if fp.HasFieldByName(CANOPY_UUID_FIELD):
+                u = fp.GetFieldText(CANOPY_UUID_FIELD)
+                if u:
+                    preflight_existing_uuids.add(u)
+
+    missing_fps = []
+    for comp in components:
+        if comp["uuid"] in preflight_existing_uuids:
+            continue
+        spec = comp.get("footprint", "")
+        if not spec:
+            missing_fps.append((comp["ref"], "(no footprint in netlist)"))
+            continue
+        if load_footprint(lib_path, spec) is None:
+            missing_fps.append((comp["ref"], spec))
+
+    if missing_fps:
+        print("Preflight: missing footprints for new components:")
+        for ref, spec in missing_fps:
+            print(f"  {ref}: {spec}")
+        raise RuntimeError(
+            f"Cannot update PCB: {len(missing_fps)} footprint(s) not found in "
+            f"library '{lib_path}'. PCB not modified, no backup written."
+        )
+
     # Backup before modifying
     backup_path = backup_pcb(pcb_path)
 
@@ -539,8 +578,12 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None, short_nets=
         else:
             fp = load_footprint(lib_path, comp["footprint"])
             if fp is None:
-                print(f"  SKIP: {ref} — footprint not found")
-                continue
+                # Preflight above should have caught this; if we land here, the
+                # library changed mid-run or load_footprint is non-deterministic.
+                raise RuntimeError(
+                    f"Footprint load failed after preflight for {ref}: "
+                    f"{comp['footprint']}"
+                )
 
             fp.SetReference(ref)
             fp.SetValue(comp["value"])
@@ -857,66 +900,81 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None, short_nets=
 
     # ── Validation: compare netlist vs PCB ─────────────────────────────────
     print("\n  Validation:")
-    errors = 0
+    mismatches = []  # list of {ref, kind, pcb, netlist, pin?}
+    missing = []     # list of refs on netlist but not on PCB
 
-    # Build netlist lookup: ref -> {value, footprint, nets}
-    netlist_by_ref = {}
-    for comp in components:
-        netlist_by_ref[comp["ref"]] = comp
-
-    # Build netlist net lookup: ref -> {pin -> net_name}
+    netlist_by_ref = {c["ref"]: c for c in components}
     netlist_pin_nets = {}
     for net in nets:
         for node in net["nodes"]:
             netlist_pin_nets.setdefault(node["ref"], {})[node["pin"]] = net["name"]
 
-    # Check each footprint on the board
     for fp in board.GetFootprints():
         ref = fp.GetReference()
         if ref not in netlist_by_ref:
             continue
         nl = netlist_by_ref[ref]
 
-        # Check value
         pcb_value = fp.GetValue()
         nl_value = nl.get("value", "")
         if nl_value and pcb_value != nl_value:
-            print(f"    MISMATCH {ref} value: PCB='{pcb_value}' netlist='{nl_value}'")
-            errors += 1
+            mismatches.append({"ref": ref, "kind": "value", "pcb": pcb_value, "netlist": nl_value})
 
-        # Check footprint name
         pcb_fp = fp.GetFPID().GetUniStringLibItemName()
         nl_fp = nl.get("footprint", "")
         if nl_fp:
-            # Extract just the name after "footprints:"
             nl_fp_name = nl_fp.split(":")[-1] if ":" in nl_fp else nl_fp
             if pcb_fp != nl_fp_name:
-                print(f"    MISMATCH {ref} footprint: PCB='{pcb_fp}' netlist='{nl_fp_name}'")
-                errors += 1
+                mismatches.append({"ref": ref, "kind": "footprint", "pcb": pcb_fp, "netlist": nl_fp_name})
 
-        # Check nets on each pad
         ref_pin_nets = netlist_pin_nets.get(ref, {})
         for pad in fp.Pads():
             pin = pad.GetNumber()
             pcb_net = pad.GetNetname()
             nl_net = ref_pin_nets.get(pin, "")
-            if nl_net and pcb_net != nl_net:
-                # Only report if both have a net (skip unconnected)
-                if pcb_net:
-                    print(f"    MISMATCH {ref}.{pin} net: PCB='{pcb_net}' netlist='{nl_net}'")
-                    errors += 1
+            if nl_net and pcb_net and pcb_net != nl_net:
+                mismatches.append({"ref": ref, "pin": pin, "kind": "net", "pcb": pcb_net, "netlist": nl_net})
 
-    # Check for missing components
     pcb_refs = {fp.GetReference() for fp in board.GetFootprints()}
     for comp in components:
         if comp["ref"] not in pcb_refs:
-            print(f"    MISSING {comp['ref']} not on PCB")
-            errors += 1
+            missing.append(comp["ref"])
 
+    for m in mismatches:
+        if "pin" in m:
+            print(f"    MISMATCH {m['ref']}.{m['pin']} {m['kind']}: PCB='{m['pcb']}' netlist='{m['netlist']}'")
+        else:
+            print(f"    MISMATCH {m['ref']} {m['kind']}: PCB='{m['pcb']}' netlist='{m['netlist']}'")
+    for r in missing:
+        print(f"    MISSING {r} not on PCB")
+
+    errors = len(mismatches) + len(missing)
     if errors == 0:
         print("    All checks passed")
     else:
         print(f"    {errors} issue(s) found")
+
+    # Machine-parseable summary, consumed by the server + UI.
+    diff_path = os.path.splitext(pcb_path)[0] + ".pcb_diff.json"
+    summary = {
+        "pcb": pcb_path,
+        "backup": backup_path,
+        "components": len(components),
+        "nets": len(nets),
+        "mismatches": mismatches,
+        "missing": missing,
+    }
+    try:
+        with open(diff_path, "w") as f:
+            json.dump(summary, f, indent=2)
+        print(f"  Diff report: {diff_path}")
+    except Exception as e:
+        print(f"  Warning: could not write {diff_path}: {e}")
+
+    # Single-line summary the server can grep out of stdout without parsing JSON.
+    print(f"SUMMARY mismatches={len(mismatches)} missing={len(missing)} backup={backup_path or '-'}")
+
+    return 0 if errors == 0 else 2
 
 
 # ---------------------------------------------------------------------------
@@ -951,7 +1009,7 @@ def main():
         print(f"Error: footprint library not found: {lib_path}")
         sys.exit(1)
 
-    update_pcb(netlist_path, lib_path, pcb_path, sections_path, short_nets=short_nets)
+    sys.exit(update_pcb(netlist_path, lib_path, pcb_path, sections_path, short_nets=short_nets))
 
 
 if __name__ == "__main__":

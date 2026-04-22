@@ -1,7 +1,11 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const Sha256 = std.crypto.hash.sha2.Sha256;
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const export_kicad = @import("../export_kicad.zig");
+const netlist_mod = @import("../export_kicad_netlist.zig");
+const fp_mod = @import("../export_kicad_footprint.zig");
+const model_mod = @import("../export_kicad_model.zig");
 const bom = @import("../bom.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
@@ -278,6 +282,12 @@ pub fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
 /// Writes netlist + footprints + sections JSON, then invokes src/pcb_update.py
 /// to merge the netlist into the configured .kicad_pcb file while preserving
 /// placements and routing (matched by canopy_uuid).
+///
+/// Uses content-addressed caching to skip unchanged artifacts: each click only
+/// rewrites the netlist / footprints / STEP files whose hashes (or mtime+size
+/// for big STEP blobs) differ from the last sync. When nothing has changed we
+/// short-circuit before invoking Python at all — the common "click to confirm"
+/// case returns in under 100ms instead of rewriting tens of MB of model files.
 pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -301,19 +311,98 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
 
     const block = loadAndResolve(ctx, name, res) orelse return;
 
+    // ── Compute desired state (everything we might need to write) ─────
+
     const netlist = export_kicad.exportNetlistOnly(ctx.allocator, block, ctx.project_dir, name) catch {
         res.status = 500;
         res.body = "{\"ok\":false,\"error\":\"Netlist export error\"}";
         res.content_type = .JSON;
         return;
     };
+    const netlist_sha = try sha256Hex(ctx.allocator, netlist);
 
-    std.fs.cwd().makePath(cfg.output_dir) catch {};
+    const sections_json = export_kicad.exportSectionLayout(ctx.allocator, block) catch "";
+    const sections_sha = try sha256Hex(ctx.allocator, sections_json);
 
-    // Write netlist
+    var desired = try collectDesiredFootprintsAndModels(ctx.allocator, block, ctx.project_dir);
+    defer desired.deinit(ctx.allocator);
+
+    // ── Load prior cache, compute diff ─────────────────────────────────
+
+    const cache_path = try std.fmt.allocPrint(ctx.allocator, "{s}/.canopy-sync-cache.json", .{cfg.output_dir});
+    defer ctx.allocator.free(cache_path);
+    var cache = loadCache(ctx.allocator, cache_path);
+    defer cache.deinit(ctx.allocator);
+
     const net_path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.net", .{ cfg.output_dir, name });
     defer ctx.allocator.free(net_path);
-    {
+    const pretty_dir = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.pretty", .{ cfg.output_dir, name });
+    defer ctx.allocator.free(pretty_dir);
+    const sections_path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sections.json", .{ cfg.output_dir, name });
+    defer ctx.allocator.free(sections_path);
+    const model_dir = try std.fmt.allocPrint(ctx.allocator, "{s}/models", .{cfg.output_dir});
+    defer ctx.allocator.free(model_dir);
+
+    // Each flag controls writing one artifact. "File missing on disk"
+    // counts as changed — we can't trust the cache if the output isn't there.
+    const netlist_changed = !std.mem.eql(u8, cache.netlist_sha, netlist_sha) or !fileExists(net_path);
+    const sections_changed = !std.mem.eql(u8, cache.sections_sha, sections_sha) or (sections_json.len > 0 and !fileExists(sections_path));
+
+    var fps_to_write: std.ArrayListUnmanaged(usize) = .empty; // indices into desired.footprints
+    defer fps_to_write.deinit(ctx.allocator);
+    for (desired.footprints.items, 0..) |fp, i| {
+        const cached = cache.footprints.get(fp.kicad_name);
+        const mod_path_i = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.kicad_mod", .{ pretty_dir, fp.kicad_name });
+        defer ctx.allocator.free(mod_path_i);
+        const exists = fileExists(mod_path_i);
+        if (cached == null or !std.mem.eql(u8, cached.?, fp.sha) or !exists) {
+            try fps_to_write.append(ctx.allocator, i);
+        }
+    }
+
+    var models_to_copy: std.ArrayListUnmanaged(usize) = .empty;
+    defer models_to_copy.deinit(ctx.allocator);
+    for (desired.models.items, 0..) |m, i| {
+        const dst = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ model_dir, m.name });
+        defer ctx.allocator.free(dst);
+        const cached = cache.models.get(m.name);
+        const unchanged = cached != null and cached.?.size == m.size and cached.?.mtime_ns == m.mtime_ns and fileExists(dst);
+        if (!unchanged) try models_to_copy.append(ctx.allocator, i);
+    }
+
+    const nothing_changed =
+        !netlist_changed and !sections_changed and
+        fps_to_write.items.len == 0 and
+        models_to_copy.items.len == 0;
+
+    // Resolve PCB path up front (needed for both fast-path and slow-path response).
+    const pcb_path = if (cfg.pcb_file.len > 0)
+        try ctx.allocator.dupe(u8, cfg.pcb_file)
+    else
+        try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.kicad_pcb", .{ cfg.output_dir, name });
+    defer ctx.allocator.free(pcb_path);
+
+    // Fast path: nothing to do. Every artifact on disk already matches the
+    // design, so the Python merge would be a no-op too.
+    if (nothing_changed and fileExists(pcb_path)) {
+        const body = try std.fmt.allocPrint(
+            ctx.allocator,
+            "{{\"ok\":true,\"skipped\":true,\"pcb\":\"{s}\",\"mismatches\":0,\"missing\":0}}",
+            .{pcb_path},
+        );
+        res.content_type = .JSON;
+        res.header("access-control-allow-origin", "*");
+        res.body = body;
+        return;
+    }
+
+    // ── Slow path: write only the artifacts that actually changed ─────
+
+    std.fs.cwd().makePath(cfg.output_dir) catch {};
+    std.fs.cwd().makePath(pretty_dir) catch {};
+    std.fs.cwd().makePath(model_dir) catch {};
+
+    if (netlist_changed) {
         const f = std.fs.cwd().createFile(net_path, .{}) catch {
             res.status = 500;
             res.body = "{\"ok\":false,\"error\":\"Cannot write netlist\"}";
@@ -327,36 +416,54 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
             res.content_type = .JSON;
             return;
         };
+        cache.setNetlistSha(ctx.allocator, netlist_sha);
     }
 
-    // Write footprints to {output_dir}/{name}.pretty
-    const pretty_dir = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.pretty", .{ cfg.output_dir, name });
-    defer ctx.allocator.free(pretty_dir);
-    std.fs.cwd().makePath(pretty_dir) catch {};
-    export_kicad.exportFootprints(ctx.allocator, block, ctx.project_dir, pretty_dir) catch {
-        res.status = 500;
-        res.body = "{\"ok\":false,\"error\":\"footprint export failed\"}";
-        res.content_type = .JSON;
-        return;
-    };
-
-    // Write sections JSON
-    const sections_path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sections.json", .{ cfg.output_dir, name });
-    defer ctx.allocator.free(sections_path);
-    const sections_json = export_kicad.exportSectionLayout(ctx.allocator, block) catch "";
-    if (sections_json.len > 0) {
+    if (sections_changed and sections_json.len > 0) {
         if (std.fs.cwd().createFile(sections_path, .{})) |sf| {
             defer sf.close();
             sf.writeAll(sections_json) catch {};
         } else |_| {}
+        cache.setSectionsSha(ctx.allocator, sections_sha);
     }
 
-    // Resolve PCB path: use configured pcb_file if set, else {output_dir}/{name}.kicad_pcb
-    const pcb_path = if (cfg.pcb_file.len > 0)
-        try ctx.allocator.dupe(u8, cfg.pcb_file)
-    else
-        try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.kicad_pcb", .{ cfg.output_dir, name });
-    defer ctx.allocator.free(pcb_path);
+    for (fps_to_write.items) |i| {
+        const fp = desired.footprints.items[i];
+        const mod_path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.kicad_mod", .{ pretty_dir, fp.kicad_name });
+        defer ctx.allocator.free(mod_path);
+        const f = std.fs.cwd().createFile(mod_path, .{}) catch continue;
+        defer f.close();
+        f.writeAll(fp.bytes) catch continue;
+        try cache.putFootprint(ctx.allocator, fp.kicad_name, fp.sha);
+    }
+
+    for (models_to_copy.items) |i| {
+        const m = desired.models.items[i];
+        const src = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/models/{s}", .{ ctx.project_dir, m.name });
+        defer ctx.allocator.free(src);
+        const dst = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ model_dir, m.name });
+        defer ctx.allocator.free(dst);
+        std.fs.cwd().copyFile(src, std.fs.cwd(), dst, .{}) catch continue;
+        try cache.putModel(ctx.allocator, m.name, .{ .size = m.size, .mtime_ns = m.mtime_ns });
+    }
+
+    // Only invoke the Python merger if the netlist or footprints actually
+    // changed — pcb_update.py doesn't read STEP files, so a model-only
+    // change doesn't need it.
+    const run_python = netlist_changed or fps_to_write.items.len > 0;
+
+    if (!run_python) {
+        saveCache(ctx.allocator, cache_path, &cache);
+        const body = try std.fmt.allocPrint(
+            ctx.allocator,
+            "{{\"ok\":true,\"skipped\":false,\"pcb\":\"{s}\",\"wrote_models\":{d},\"mismatches\":0,\"missing\":0}}",
+            .{ pcb_path, models_to_copy.items.len },
+        );
+        res.content_type = .JSON;
+        res.header("access-control-allow-origin", "*");
+        res.body = body;
+        return;
+    }
 
     // Run pcb_update.py
     var argv_buf: [7][]const u8 = undefined;
@@ -391,34 +498,119 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
     defer ctx.allocator.free(py.stderr);
 
     if (py.term.Exited != 0) {
-        const output = if (py.stderr.len > 0) py.stderr else py.stdout;
-        var err_msg: []const u8 = "PCB update script failed";
-        if (std.mem.lastIndexOf(u8, output, "RuntimeError: ")) |idx| {
-            const line_end = std.mem.indexOfPos(u8, output, idx, "\n") orelse output.len;
-            err_msg = output[idx + 14 .. line_end];
-        } else if (std.mem.lastIndexOf(u8, output, "Error: ")) |idx| {
-            const line_end = std.mem.indexOfPos(u8, output, idx, "\n") orelse output.len;
-            err_msg = output[idx + 7 .. line_end];
-        }
-        var esc: std.ArrayListUnmanaged(u8) = .empty;
-        defer esc.deinit(ctx.allocator);
-        const ew = esc.writer(ctx.allocator);
-        try writeJsonEscaped(ew, err_msg);
-        const body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"{s}\"}}", .{esc.items});
-        res.status = 500;
-        res.body = body;
-        res.content_type = .JSON;
+        // Python failed — invalidate cache so the next sync rewrites everything.
+        std.fs.cwd().deleteFile(cache_path) catch {};
+        try respondScriptFailure(ctx, res, py.stdout, py.stderr);
         return;
     }
 
+    // Persist cache now that the full pipeline succeeded.
+    saveCache(ctx.allocator, cache_path, &cache);
+
+    const summary = parseSummaryLine(py.stdout);
+
+    var esc_backup: std.ArrayListUnmanaged(u8) = .empty;
+    defer esc_backup.deinit(ctx.allocator);
+    try writeJsonEscaped(esc_backup.writer(ctx.allocator), summary.backup);
+
     const body = try std.fmt.allocPrint(
         ctx.allocator,
-        "{{\"ok\":true,\"pcb\":\"{s}\"}}",
-        .{pcb_path},
+        "{{\"ok\":true,\"skipped\":false,\"pcb\":\"{s}\",\"backup\":\"{s}\",\"mismatches\":{d},\"missing\":{d},\"wrote_footprints\":{d},\"wrote_models\":{d}}}",
+        .{ pcb_path, esc_backup.items, summary.mismatches, summary.missing, fps_to_write.items.len, models_to_copy.items.len },
     );
     res.content_type = .JSON;
     res.header("access-control-allow-origin", "*");
     res.body = body;
+}
+
+const ScriptSummary = struct {
+    mismatches: u32 = 0,
+    missing: u32 = 0,
+    backup: []const u8 = "",
+};
+
+/// Parse the last `SUMMARY mismatches=N missing=M backup=PATH` line written by
+/// pcb_update.py. If the line is absent (older script or aborted early), all
+/// fields are zero / empty — the caller treats that as "unknown, assume ok".
+fn parseSummaryLine(stdout: []const u8) ScriptSummary {
+    const tag = "\nSUMMARY ";
+    const found = std.mem.lastIndexOf(u8, stdout, tag) orelse return .{};
+    const start = found + 1;
+    const end = std.mem.indexOfPos(u8, stdout, start, "\n") orelse stdout.len;
+    const line = stdout[start..end];
+
+    var result: ScriptSummary = .{};
+    var it = std.mem.tokenizeScalar(u8, line, ' ');
+    _ = it.next(); // skip "SUMMARY"
+    while (it.next()) |kv| {
+        const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
+        const key = kv[0..eq];
+        const val = kv[eq + 1 ..];
+        if (std.mem.eql(u8, key, "mismatches")) {
+            result.mismatches = std.fmt.parseInt(u32, val, 10) catch 0;
+        } else if (std.mem.eql(u8, key, "missing")) {
+            result.missing = std.fmt.parseInt(u32, val, 10) catch 0;
+        } else if (std.mem.eql(u8, key, "backup")) {
+            result.backup = if (std.mem.eql(u8, val, "-")) "" else val;
+        }
+    }
+    return result;
+}
+
+fn respondScriptFailure(
+    ctx: *Handler,
+    res: *httpz.Response,
+    stdout: []const u8,
+    stderr: []const u8,
+) !void {
+    var err_msg: []const u8 = "PCB update script failed";
+    const err_source = if (stderr.len > 0) stderr else stdout;
+    if (std.mem.lastIndexOf(u8, err_source, "RuntimeError: ")) |idx| {
+        const line_end = std.mem.indexOfPos(u8, err_source, idx, "\n") orelse err_source.len;
+        err_msg = err_source[idx + 14 .. line_end];
+    } else if (std.mem.lastIndexOf(u8, err_source, "Error: ")) |idx| {
+        const line_end = std.mem.indexOfPos(u8, err_source, idx, "\n") orelse err_source.len;
+        err_msg = err_source[idx + 7 .. line_end];
+    }
+
+    // Extract preflight missing-footprint block from stdout, if present — it
+    // lists which components blocked the run, not in the RuntimeError line.
+    var preflight: []const u8 = "";
+    if (std.mem.indexOf(u8, stdout, "Preflight: missing footprints")) |pf_idx| {
+        // Block runs from pf_idx until the first line not starting with "  ".
+        var scan = pf_idx;
+        while (true) {
+            const nl = std.mem.indexOfScalarPos(u8, stdout, scan, '\n') orelse break;
+            const next_line_start = nl + 1;
+            if (next_line_start >= stdout.len) {
+                scan = stdout.len;
+                break;
+            }
+            if (!std.mem.startsWith(u8, stdout[next_line_start..], "  ")) {
+                scan = nl;
+                break;
+            }
+            scan = next_line_start;
+        }
+        preflight = stdout[pf_idx..scan];
+    }
+
+    var esc_msg: std.ArrayListUnmanaged(u8) = .empty;
+    defer esc_msg.deinit(ctx.allocator);
+    try writeJsonEscaped(esc_msg.writer(ctx.allocator), err_msg);
+
+    var esc_pre: std.ArrayListUnmanaged(u8) = .empty;
+    defer esc_pre.deinit(ctx.allocator);
+    try writeJsonEscaped(esc_pre.writer(ctx.allocator), preflight);
+
+    const body = try std.fmt.allocPrint(
+        ctx.allocator,
+        "{{\"ok\":false,\"error\":\"{s}\",\"preflight\":\"{s}\"}}",
+        .{ esc_msg.items, esc_pre.items },
+    );
+    res.status = 500;
+    res.body = body;
+    res.content_type = .JSON;
 }
 
 fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
@@ -432,4 +624,236 @@ fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
             else => try writer.writeByte(c),
         }
     }
+}
+
+// ── Incremental-sync cache ──────────────────────────────────────────────
+//
+// Content-addressed state of the last successful sync so the button can
+// short-circuit unchanged artifacts. Stored next to the output files as
+// `{output_dir}/.canopy-sync-cache.json`.
+
+const ModelMeta = struct {
+    size: u64 = 0,
+    // i64 nanoseconds since epoch — std.json can't round-trip i128 losslessly.
+    // Ranges ~±292 years from 1970, comfortably covering file mtimes.
+    mtime_ns: i64 = 0,
+};
+
+const DesiredFootprint = struct {
+    kicad_name: []const u8, // basename that lands in .pretty/
+    sha: []const u8, // sha of the generated .kicad_mod bytes
+    bytes: []const u8, // generated .kicad_mod bytes (written if changed)
+};
+
+const DesiredModel = struct {
+    name: []const u8,
+    size: u64,
+    mtime_ns: i64,
+};
+
+const DesiredState = struct {
+    footprints: std.ArrayListUnmanaged(DesiredFootprint),
+    models: std.ArrayListUnmanaged(DesiredModel),
+
+    fn deinit(self: *DesiredState, allocator: std.mem.Allocator) void {
+        self.footprints.deinit(allocator);
+        self.models.deinit(allocator);
+    }
+};
+
+/// Walk the design's instances once and produce the full list of footprint
+/// .kicad_mod bytes (with content hashes) and referenced STEP models (with
+/// their source mtime+size) that a full export would write. The diff between
+/// this and the cache tells us exactly which files need to be touched on disk.
+fn collectDesiredFootprintsAndModels(
+    allocator: std.mem.Allocator,
+    block: *const @import("../eval/env.zig").DesignBlock,
+    project_dir: []const u8,
+) !DesiredState {
+    var instances: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
+    defer instances.deinit(allocator);
+    try netlist_mod.collectInstances(allocator, block, "", &instances);
+
+    var model_cfg = export_kicad.loadModelConfig(allocator, project_dir);
+    defer model_cfg.deinit();
+
+    var state = DesiredState{ .footprints = .empty, .models = .empty };
+
+    var seen_fps = std.StringHashMap(void).init(allocator);
+    defer seen_fps.deinit();
+    var seen_models = std.StringHashMap(void).init(allocator);
+    defer seen_models.deinit();
+
+    for (instances.items) |inst| {
+        if (inst.footprint.len == 0) continue;
+        if (seen_fps.contains(inst.footprint)) continue;
+        try seen_fps.put(inst.footprint, {});
+
+        const fp_path = try std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, inst.footprint });
+        defer allocator.free(fp_path);
+        const fp_source = std.fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
+        defer allocator.free(fp_source);
+
+        const kicad_name = netlist_mod.extractFootprintName(allocator, fp_source) catch try allocator.dupe(u8, inst.footprint);
+        const mcfg = model_cfg.get(inst.footprint);
+        const model_name = if (mcfg) |c| (c.model orelse fp_mod.findModelFile(allocator, project_dir, inst.footprint, inst.component)) else fp_mod.findModelFile(allocator, project_dir, inst.footprint, inst.component);
+
+        const mod_bytes = model_mod.buildKicadMod(
+            allocator,
+            project_dir,
+            inst.footprint,
+            fp_source,
+            model_name,
+            if (mcfg) |c| c.offset else null,
+            if (mcfg) |c| c.rotation else null,
+        ) catch continue;
+
+        const sha = try sha256Hex(allocator, mod_bytes);
+        try state.footprints.append(allocator, .{
+            .kicad_name = kicad_name,
+            .sha = sha,
+            .bytes = mod_bytes,
+        });
+
+        // Model: cheap stat, no hashing (50MB STEP files would be wasteful
+        // to hash per click; mtime+size catches edits in practice).
+        if (model_name) |mname| {
+            const keep_mname = mcfg != null;
+            if (seen_models.contains(mname)) {
+                if (!keep_mname) allocator.free(mname);
+                continue;
+            }
+            try seen_models.put(try allocator.dupe(u8, mname), {});
+            const src_path = try std.fmt.allocPrint(allocator, "{s}/lib/models/{s}", .{ project_dir, mname });
+            defer allocator.free(src_path);
+            if (std.fs.cwd().statFile(src_path)) |st| {
+                try state.models.append(allocator, .{
+                    .name = try allocator.dupe(u8, mname),
+                    .size = @intCast(st.size),
+                    .mtime_ns = @truncate(st.mtime),
+                });
+            } else |_| {}
+            if (!keep_mname) allocator.free(mname);
+        }
+    }
+
+    return state;
+}
+
+const SyncCache = struct {
+    netlist_sha: []const u8 = "",
+    sections_sha: []const u8 = "",
+    footprints: std.StringHashMapUnmanaged([]const u8) = .empty,
+    models: std.StringHashMapUnmanaged(ModelMeta) = .empty,
+
+    fn deinit(self: *SyncCache, allocator: std.mem.Allocator) void {
+        self.footprints.deinit(allocator);
+        self.models.deinit(allocator);
+    }
+
+    fn setNetlistSha(self: *SyncCache, allocator: std.mem.Allocator, sha: []const u8) void {
+        _ = allocator;
+        self.netlist_sha = sha;
+    }
+    fn setSectionsSha(self: *SyncCache, allocator: std.mem.Allocator, sha: []const u8) void {
+        _ = allocator;
+        self.sections_sha = sha;
+    }
+    fn putFootprint(self: *SyncCache, allocator: std.mem.Allocator, name: []const u8, sha: []const u8) !void {
+        try self.footprints.put(allocator, name, sha);
+    }
+    fn putModel(self: *SyncCache, allocator: std.mem.Allocator, name: []const u8, meta: ModelMeta) !void {
+        try self.models.put(allocator, name, meta);
+    }
+};
+
+fn loadCache(allocator: std.mem.Allocator, path: []const u8) SyncCache {
+    const data = std.fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch return .{};
+    const Entry = struct {
+        netlist_sha: []const u8 = "",
+        sections_sha: []const u8 = "",
+        footprints: []const struct { name: []const u8, sha: []const u8 } = &.{},
+        models: []const struct { name: []const u8, size: u64 = 0, mtime_ns: i64 = 0 } = &.{},
+    };
+    const parsed = std.json.parseFromSlice(Entry, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch return .{};
+    var out = SyncCache{
+        .netlist_sha = allocator.dupe(u8, parsed.value.netlist_sha) catch "",
+        .sections_sha = allocator.dupe(u8, parsed.value.sections_sha) catch "",
+    };
+    for (parsed.value.footprints) |e| {
+        const k = allocator.dupe(u8, e.name) catch continue;
+        const v = allocator.dupe(u8, e.sha) catch continue;
+        out.footprints.put(allocator, k, v) catch {};
+    }
+    for (parsed.value.models) |e| {
+        const k = allocator.dupe(u8, e.name) catch continue;
+        out.models.put(allocator, k, .{ .size = e.size, .mtime_ns = e.mtime_ns }) catch {};
+    }
+    return out;
+}
+
+fn saveCache(allocator: std.mem.Allocator, path: []const u8, cache: *const SyncCache) void {
+    const parent = std.fs.path.dirname(path) orelse ".";
+    std.fs.cwd().makePath(parent) catch {};
+    const f = std.fs.cwd().createFile(path, .{}) catch return;
+    defer f.close();
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    w.print("{{\"netlist_sha\":\"{s}\",\"sections_sha\":\"{s}\",\"footprints\":[", .{ cache.netlist_sha, cache.sections_sha }) catch return;
+    var first = true;
+    var it = cache.footprints.iterator();
+    while (it.next()) |e| {
+        if (!first) w.writeAll(",") catch return;
+        first = false;
+        w.writeAll("{\"name\":") catch return;
+        writeJsonString(w, e.key_ptr.*) catch return;
+        w.writeAll(",\"sha\":\"") catch return;
+        w.writeAll(e.value_ptr.*) catch return;
+        w.writeAll("\"}") catch return;
+    }
+    w.writeAll("],\"models\":[") catch return;
+    first = true;
+    var mit = cache.models.iterator();
+    while (mit.next()) |e| {
+        if (!first) w.writeAll(",") catch return;
+        first = false;
+        w.writeAll("{\"name\":") catch return;
+        writeJsonString(w, e.key_ptr.*) catch return;
+        w.print(",\"size\":{d},\"mtime_ns\":{d}}}", .{ e.value_ptr.size, e.value_ptr.mtime_ns }) catch return;
+    }
+    w.writeAll("]}") catch return;
+    f.writeAll(buf.items) catch {};
+}
+
+fn fileExists(path: []const u8) bool {
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
+fn sha256Hex(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var digest: [32]u8 = undefined;
+    Sha256.hash(input, &digest, .{});
+    const hex = "0123456789abcdef";
+    var out = try allocator.alloc(u8, 64);
+    for (digest, 0..) |b, i| {
+        out[i * 2] = hex[b >> 4];
+        out[i * 2 + 1] = hex[b & 0x0f];
+    }
+    return out;
+}
+
+fn writeJsonString(w: anytype, s: []const u8) !void {
+    try w.writeAll("\"");
+    for (s) |ch| switch (ch) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '\n' => try w.writeAll("\\n"),
+        '\r' => try w.writeAll("\\r"),
+        '\t' => try w.writeAll("\\t"),
+        0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{ch}),
+        else => try w.writeByte(ch),
+    };
+    try w.writeAll("\"");
 }

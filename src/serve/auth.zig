@@ -3,6 +3,7 @@ const httpz = @import("httpz");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 const oauth_store = @import("oauth_store.zig");
+const plugin_tokens = @import("plugin_tokens.zig");
 const users = @import("users.zig");
 
 // ── Session store ────────────────────────────────────────────────────
@@ -519,6 +520,11 @@ pub fn validateBearerToken(ctx: *Handler, req: *httpz.Request) bool {
     return tok != null;
 }
 
+pub fn validatePluginBearerToken(ctx: *Handler, req: *httpz.Request) bool {
+    const raw = getBearerToken(req) orelse return false;
+    return plugin_tokens.validate(ctx.allocator, ctx.project_dir, raw);
+}
+
 /// If the request carries a valid OAuth bearer token, return the token
 /// owner's email. Used by MCP role resolution.
 pub fn getBearerEmail(ctx: *Handler, req: *httpz.Request) ?[]const u8 {
@@ -590,6 +596,16 @@ pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     // MCP endpoints accept OAuth bearer tokens issued via /oauth/token.
     if (std.mem.startsWith(u8, req.url.path, "/mcp")) {
         if (validateBearerToken(ctx, req)) return true;
+    }
+
+    // Incremental-sync endpoints accept a plugin bearer token (simpler auth
+    // than OAuth — minted once via `eda mint-plugin-token`). Scoped to these
+    // read-only sync routes; other APIs still require a session.
+    if (std.mem.startsWith(u8, req.url.path, "/api/sync-manifest/") or
+        std.mem.startsWith(u8, req.url.path, "/api/netlist/") or
+        std.mem.startsWith(u8, req.url.path, "/api/object/"))
+    {
+        if (validatePluginBearerToken(ctx, req)) return true;
     }
 
     // Check for valid session

@@ -18,23 +18,23 @@ zig build test
 # Start web server
 zig build run -- serve --project-dir projects/designs --port 9000
 
-# Build a design (stdout)
+# Build a design (stdout), --push sends to running server
 zig build run -- build --project-dir projects/designs --push <design-name>
 
 # Export KiCad netlist + footprints
 zig build run -- export-kicad --project-dir projects/designs --output-dir <dir>
+
+# Export Gerber/Excellon manufacturing files
+zig build run -- export-gerber --project-dir projects/designs --output-dir <dir>
+
+# Export PCB layout
+zig build run -- export-pcb --project-dir projects/designs --output-dir <dir>
 
 # Convert KiCad files
 zig build run -- convert-footprint <file.kicad_mod>
 zig build run -- convert-symbol <file.kicad_sym> [--filter <name>]
 zig build run -- convert-package <sym.kicad_sym> <fp.kicad_mod> [--name <name>]
 zig build run -- convert-pinout <file.kicad_sym>
-
-# Render SVG schematic
-zig build run -- render --project-dir projects/designs [<design-file>]
-
-# Block diagram
-zig build run -- block-diagram --project-dir projects/designs
 ```
 
 ## Build System
@@ -58,8 +58,14 @@ Source (.sexp files)
     → Tokenizer → Parser → AST (nodes with source spans)
     → Evaluator (recursive eval with special forms, builtins, modules)
     → DesignBlock (instances, nets, ports, notes, sections, sub_blocks)
+      OR Board (outline, stackup, rules, zones, keepouts)
     → Post-build (ID insertion, BOM resolution, assertion checks)
-    → Output: emit.zig (.sexp), render_svg.zig (SVG), export_kicad.zig (KiCad)
+    → Output:
+        Schematic: render_json.zig → JSON scene graph → Pixi.js canvas viewer
+        Block diagram: render_block.zig → JSON → Pixi.js canvas viewer
+        PCB: render_pcb_json.zig → JSON → Pixi.js PCB viewer
+        Export: emit.zig (.sexp), export_kicad.zig (KiCad), export_gerber.zig (Gerber)
+        Checks: erc.zig (electrical rules), drc.zig (design rules)
 ```
 
 ### Key Modules
@@ -78,11 +84,17 @@ Source (.sexp files)
 - `builtins.zig` — Arithmetic, comparison, logic operators
 - `fmt.zig` — String formatting (~V voltage, ~R resistance, ~C capacitance, ~A amperage, ~S string)
 
-**Rendering** (`src/render_svg.zig` + `src/render_svg/`): Hub/spoke model. Hubs = ICs/connectors (U/J/P/X/Q prefix, rendered as boxes). Spokes = passives (R/C/L/F/D prefix, rendered inline on connections). Grid layout from sections.
+**Schematic rendering** (`src/render_json.zig`): Converts DesignBlock to JSON scene graph. Hub/spoke model: Hubs = ICs/connectors (U/J/P/X/Q prefix, rendered as boxes). Spokes = passives (R/C/L/F/D prefix, rendered inline on connections). Grid layout from sections.
 
-**Export**: `emit.zig` (flattened .sexp), `export_kicad.zig` + `export_kicad_netlist.zig` + `export_kicad_footprint.zig` (KiCad format).
+**Block diagram** (`src/render_block.zig` + `src/render_block_types.zig`): Generates hierarchical block diagrams from section topology and ports. Auto-categorizes blocks (mcu, power, memory, peripheral, connector, etc.) into columns. Topology-aware edge routing for power chains, signals, and protocols (SPI, I2C, USB). Sections have status: concept (no components) vs implemented (full BOM).
 
-**Web server** (`src/serve.zig` + `src/serve/`): Live update via version polling. Global mutable SVG state protected by mutex.
+**PCB** (`src/render_pcb_json.zig` + `src/layout.zig`): Renders PCB layout as interactive JSON. Parses footprint geometry from `.sexp` files. Layout persistence in `.layout` files (component placements, traces, vias, zone fills). Zone fill via `zone_fill.zig`.
+
+**Checks**: `erc.zig` (duplicate ref-des, floating nets, unconnected pins, voltage mismatches, missing decoupling). `drc.zig` (pad clearance, trace width, via size/drill, obstacle avoidance).
+
+**Export**: `emit.zig` (flattened .sexp), `export_kicad.zig` + `export_kicad_netlist.zig` + `export_kicad_footprint.zig` (KiCad), `export_gerber.zig` (Gerber/Excellon).
+
+**Web server** (`src/serve.zig` + `src/serve/`): Serves Pixi.js-based viewers for schematics, block diagrams, and PCB layout. Live update via version polling. JSON scene graph state protected by mutex.
 
 ### Component System
 
@@ -168,14 +180,20 @@ Source (.sexp files)
 
 ## Web Server
 
-`eda serve` starts an HTTP server with:
+`eda serve` starts an HTTP server with Pixi.js-based viewers:
 
 - **Design list**: `GET /` — links to all .sexp designs
-- **Schematic view**: `GET /schematics/:name` — interactive SVG schematic
-- **Live push**: `POST /api/push/:name` — rebuild and push SVG update
+- **Schematic viewer**: `GET /schematics/:name` — Pixi.js canvas schematic
+- **PCB viewer**: `GET /pcb/:name` — interactive PCB layout editor
+- **Scene graph**: `GET /api/scene-graph/:name` — JSON scene graph for schematic
+- **Block diagram**: `GET /api/block-diagram-json/:name` — block diagram JSON
+- **Live push**: `POST /api/push/:name` — rebuild and push update
 - **Version polling**: `GET /api/version/:name` — returns `{"version":N}`
-- **SVG endpoint**: `GET /api/svg/:name` — latest rendered SVG
 - **Value editing**: `POST /api/edit-value/:name` — edit component value in .sexp file
+- **ERC/DRC**: `GET /api/erc/:name`, `GET /api/drc/:name` — rule check violations
+- **PCB editing**: `GET/POST /api/pcb-placement/:name`, `POST /api/pcb-routing/:name`
+- **Zone fill**: `POST /api/zone-fill/:name` — copper pour computation
+- **PCB rules**: `POST /api/pcb-rules/:name` — update board design rules
 - **Library upload**: `GET /library`, `POST /api/upload-symbol`, `POST /api/upload-footprint`
 
 ### Live update workflow
@@ -190,14 +208,53 @@ eda build --project-dir projects/designs --push stm32n6
 # Browser auto-updates within 500ms
 ```
 
+### MCP server (Claude Code integration)
+
+`eda serve` exposes an MCP server so Claude Code can pull schematics, edit
+them (values, add/remove instances, rewire pins), and have the browser viewer
+update live. Two transports:
+
+- **`POST /mcp`** — streamable HTTP, the transport Claude Code's remote MCP
+  connector uses. Claude Code authenticates via OAuth 2.0 (authorization code
+  + PKCE).
+- **`GET /mcp`** — WebSocket upgrade, for local testing and any stdio bridge.
+
+Tools exposed: `list_designs`, `get_schematic`, `get_version`, `edit_value`,
+`swap_component`, `add_component`, `remove_component`, `rewire_pin`,
+`run_erc`, `run_drc`. Defined in `src/serve/mcp_tools.zig`; each mutation
+tool calls a `…Core` function in `src/serve/edit.zig` and returns the new
+`live_version`, so the browser picks up changes via its existing 2 s poll of
+`/api/version/:name`.
+
+OAuth endpoints (implemented in `src/serve/oauth.zig`, store in
+`src/serve/oauth_store.zig`):
+
+- `GET /.well-known/oauth-authorization-server` (RFC 8414)
+- `GET /.well-known/oauth-protected-resource` (RFC 9728)
+- `GET /oauth/authorize` — consent page
+- `POST /oauth/authorize/approve` — form POST from the consent page
+- `POST /oauth/token` — authorization-code exchange
+
+User-facing client management lives at `GET /account` — sign in with a
+passkey, then mint an OAuth `client_id`/`client_secret` per Claude Code
+install. Clients and access tokens are persisted to
+`projects/designs/auth/oauth_clients.json` and `oauth_tokens.json` (secrets
+are stored as SHA-256 hashes only). On `localhost`, the account page falls
+back to a `dev@localhost` identity when no session exists, so local dev
+works without a passkey setup.
+
+```bash
+# Connect from Claude Code:
+claude mcp add --transport http eda http://localhost:9000/mcp \
+  --client-id eda_c_... --client-secret eda_s_...
+# Claude opens a browser for the authorize step.
+```
+
 ## Testing
 
 ```bash
 # Unit tests (also runs Guardian checks)
 zig build test
-
-# SVG comparison against Gleam reference
-./test/compare_svg.sh
 
 # Build all designs
 for d in pma3-14ln stm32n6 adf5901 tpsm84338 lt3045 power-6v; do

@@ -17,11 +17,28 @@ const mcp = @import("serve/mcp.zig");
 const oauth = @import("serve/oauth.zig");
 const account_page = @import("serve/account_page.zig");
 const kicad_sync = @import("serve/kicad_sync.zig");
+const sync = @import("serve/sync.zig");
 
 // ── Global live state ──────────────────────────────────────────────────
 
 pub var live_mutex: std.Thread.Mutex = .{};
 pub var live_layout_json: ?[]const u8 = null;
+
+/// Replace the cached live scene-graph JSON. The incoming slice may come from
+/// a request-scoped arena (e.g. MCP tool dispatch) so it must be duplicated
+/// into page_allocator memory that outlives the caller. The previous value,
+/// if any, is freed.
+pub fn setLiveLayoutJson(data: ?[]const u8) void {
+    const dup: ?[]const u8 = if (data) |d|
+        (std.heap.page_allocator.dupe(u8, d) catch null)
+    else
+        null;
+    live_mutex.lock();
+    const old = live_layout_json;
+    live_layout_json = dup;
+    live_mutex.unlock();
+    if (old) |o| std.heap.page_allocator.free(o);
+}
 
 // Per-design live version. The browser polls /api/version/:name; each design
 // has its own counter so mutating design A never invalidates B's viewer.
@@ -123,6 +140,10 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     router.post("/schematics/:name/layout", api.layoutPostApi, .{});
     router.get("/api/export-kicad/:name", api.exportKicadApi, .{});
     router.get("/api/export-netlist/:name", api.exportNetlistApi, .{});
+    // Incremental sync (content-addressed) for the KiCad plugin.
+    router.get("/api/sync-manifest/:name", sync.syncManifestApi, .{});
+    router.get("/api/netlist/:name", sync.netlistApi, .{});
+    router.get("/api/object/:sha", sync.objectApi, .{});
     router.get("/api/kicad-sync-config/:name", kicad_sync.getConfigApi, .{});
     router.post("/api/kicad-sync-config/:name", kicad_sync.setConfigApi, .{});
     router.post("/api/export-netlist-to-dir/:name", kicad_sync.writeNetlistApi, .{});
@@ -147,6 +168,9 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     router.post("/api/add-instance/:name", edit.addInstanceApi, .{});
     router.post("/api/remove-instance/:name", edit.removeInstanceApi, .{});
     router.post("/api/rewire-pin/:name", edit.rewirePinApi, .{});
+    router.post("/api/move-pin/:name", edit.movePinApi, .{});
+    router.get("/api/free-pins/:name", api.freePinsApi, .{});
+    router.get("/api/design-state/:name", api.designStateApi, .{});
     router.post("/api/board-outline/:name", edit.boardOutlineApi, .{});
 
     // Library

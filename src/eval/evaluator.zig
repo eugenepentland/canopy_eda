@@ -70,7 +70,17 @@ pub const Evaluator = struct {
         id: []const u8,
     };
 
-    pub const NetTie = struct { a: []const u8, b: []const u8 };
+    pub const NetTie = struct {
+        a: []const u8,
+        b: []const u8,
+        /// True for ties synthesized from symbol pin-function matching
+        /// (appendAutoAliases). These are block-local — buildNets consumes
+        /// them for pin-name consolidation, but they must NOT leak into
+        /// block.net_ties, because function names like "VDD_1" repeat across
+        /// components and would falsely bridge unrelated nets during the
+        /// cross-block flatten in export_kicad_netlist.applyNetTies.
+        is_auto: bool = false,
+    };
 
     pub const BusDef = struct {
         name: []const u8,

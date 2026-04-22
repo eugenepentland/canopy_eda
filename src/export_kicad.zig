@@ -98,7 +98,7 @@ pub fn exportKicad(
     defer nets.deinit(allocator);
 
     try collectInstances(allocator, block, "", &instances);
-    try collectNets(allocator, block, "", &nets);
+    try flattenAndMergeNets(allocator, block, &nets);
 
     // Build footprint name map: internal name -> KiCad declared name
     // Also track which footprints we've already processed
@@ -209,7 +209,7 @@ pub fn exportNetlistOnly(
     defer nets.deinit(allocator);
 
     try collectInstances(allocator, block, "", &instances);
-    try collectNets(allocator, block, "", &nets);
+    try flattenAndMergeNets(allocator, block, &nets);
 
     var fp_name_map = std.StringHashMap([]const u8).init(allocator);
     defer fp_name_map.deinit();
@@ -263,7 +263,7 @@ pub fn exportKicadZip(
     defer nets.deinit(allocator);
 
     try collectInstances(allocator, block, "", &instances);
-    try collectNets(allocator, block, "", &nets);
+    try flattenAndMergeNets(allocator, block, &nets);
 
     var fp_name_map = std.StringHashMap([]const u8).init(allocator);
     defer fp_name_map.deinit();
@@ -338,6 +338,21 @@ pub fn exportKicadZip(
 
 const collectInstances = netlist_mod.collectInstances;
 const collectNets = netlist_mod.collectNets;
+const collectNetTies = netlist_mod.collectNetTies;
+const applyNetTies = netlist_mod.applyNetTies;
+const FlatTie = netlist_mod.FlatTie;
+
+fn flattenAndMergeNets(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    nets: *std.ArrayListUnmanaged(FlatNet),
+) !void {
+    try collectNets(allocator, block, "", nets);
+    var ties: std.ArrayListUnmanaged(FlatTie) = .empty;
+    defer ties.deinit(allocator);
+    try collectNetTies(allocator, block, "", &ties);
+    try applyNetTies(allocator, nets, ties.items);
+}
 
 const ConvertError = error{
     InvalidFormat,

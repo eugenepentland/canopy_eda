@@ -586,6 +586,13 @@ pub const CANVAS_VIEWER_JS =
     \\  for(var net in NETS){var pp=NETS[net];for(var i=0;i<pp.length;i++){if(pp[i]===key)return net;}}
     \\  return '';
     \\}
+    \\function pinNameLookup(ref,pinNum){
+    \\  var comp=COMPONENTS[ref];
+    \\  if(!comp)return '';
+    \\  if(comp.pins){for(var i=0;i<comp.pins.length;i++){if(comp.pins[i].num===pinNum)return comp.pins[i].pinName||'';}}
+    \\  if(comp.symbolPins){for(var j=0;j<comp.symbolPins.length;j++){if(comp.symbolPins[j].num===pinNum)return comp.symbolPins[j].name||'';}}
+    \\  return '';
+    \\}
     \\function showComponentSidebar(ref){
     \\  var comp=COMPONENTS[ref];
     \\  if(!comp){openSidebar('<h3>'+ref+'</h3><p>No data</p>');return;}
@@ -635,7 +642,8 @@ pub const CANVAS_VIEWER_JS =
     \\      }else{sec.ungrouped.push(entry);}
     \\    }
     \\    var hasSections=secOrder.length>1||(secOrder.length===1&&secOrder[0]!=='');
-    \\    html+='<div style="margin-top:12px"><b>Pins:</b> <span style="color:#666;font-size:11px">'+pinList.length+' total</span></div>';
+    \\    html+='<div style="margin-top:12px;display:flex;align-items:center;justify-content:space-between;gap:8px"><div><b>Pins:</b> <span style="color:#666;font-size:11px">'+pinList.length+' total</span></div></div>';
+    \\    html+='<input type="text" id="pin-search" placeholder="Filter by net, pin number, or name…" oninput="filterPinTable()" style="width:100%;margin-top:6px;padding:4px 6px;background:#0d1117;color:#e0e0e0;border:1px solid #30363d;border-radius:3px;font-size:12px;box-sizing:border-box"/>';
     \\    var gid=0;
     \\    for(var si=0;si<secOrder.length;si++){
     \\      var secName=secOrder[si];
@@ -650,24 +658,32 @@ pub const CANVAS_VIEWER_JS =
     \\        var eNet=gNet.replace(/'/g,"\\'");
     \\        if(grp.length>1){
     \\          var gidStr='pg'+gid++;
-    \\          html+='<tr style="border-bottom:1px solid #21262d;cursor:pointer" onclick="var el=document.getElementById(\''+gidStr+'\');var ar=document.getElementById(\''+gidStr+'a\');if(el.style.display===\'none\'){el.style.display=\'\';ar.textContent=\'\u25BC\';}else{el.style.display=\'none\';ar.textContent=\'\u25B6\';}">';
-    \\          html+='<td style="padding:4px;color:#666"><span id="'+gidStr+'a" style="font-size:10px;margin-right:2px">\u25B6</span>'+grp.length+' pins</td>';
+    \\          var grpSearch=(grp[0].name+' '+gNet+' '+grp.map(function(p){return p.num;}).join(' ')).toLowerCase();
+    \\          html+='<tr data-summary="1" data-srch="'+grpSearch.replace(/"/g,"&quot;")+'" style="border-bottom:1px solid #21262d;cursor:pointer" onclick="var el=document.getElementById(\''+gidStr+'\');var ar=document.getElementById(\''+gidStr+'a\');if(el.style.display===\'none\'){el.style.display=\'\';ar.textContent=\'\u25BC\';}else{el.style.display=\'none\';ar.textContent=\'\u25B6\';}">';
+    \\          html+='<td style="padding:4px;color:#666"><span id="'+gidStr+'a" data-arrow="1" style="font-size:10px;margin-right:2px">\u25B6</span>'+grp.length+' pins</td>';
     \\          html+='<td style="padding:4px;color:#888">'+grp[0].name+'</td>';
     \\          html+='<td style="padding:4px;color:#e8c547;cursor:pointer" onclick="event.stopPropagation();highlightNet(\''+eNet+'\')">'+gNet+'</td></tr>';
-    \\          html+='<tbody id="'+gidStr+'" style="display:none">';
+    \\          html+='<tbody id="'+gidStr+'" data-group="'+gidStr+'" style="display:none">';
     \\          for(var pi=0;pi<grp.length;pi++){
-    \\            html+='<tr style="border-bottom:1px solid #1a1a2e"><td style="padding:2px 4px 2px 20px;color:#555;font-size:11px">'+grp[pi].num+'</td>';
+    \\            var innerSrch=(grp[pi].num+' '+grp[pi].name+' '+gNet).toLowerCase().replace(/"/g,"&quot;");
+    \\            html+='<tr data-srch="'+innerSrch+'" style="border-bottom:1px solid #1a1a2e"><td style="padding:2px 4px 2px 20px;color:#555;font-size:11px">'+grp[pi].num+'</td>';
     \\            html+='<td style="padding:2px 4px;color:#777;font-size:11px">'+grp[pi].name+'</td>';
     \\            html+='<td style="padding:2px 4px;font-size:11px"></td></tr>';
     \\          }
     \\          html+='</tbody>';
     \\        }else{
-    \\          html+='<tr style="border-bottom:1px solid #21262d"><td style="padding:4px;color:#666">'+grp[0].num+'</td><td style="padding:4px">'+grp[0].name+'</td>';
-    \\          html+='<td style="padding:4px;color:#e8c547;cursor:pointer" onclick="highlightNet(\''+eNet+'\')">'+gNet+'</td></tr>';
+    \\          var mvId='mv'+gid++;
+    \\          var ePin=grp[0].num.replace(/'/g,"\\'");
+    \\          var eRef=ref.replace(/'/g,"\\'");
+    \\          var singleSrch=(grp[0].num+' '+grp[0].name+' '+gNet).toLowerCase().replace(/"/g,"&quot;");
+    \\          html+='<tr id="'+mvId+'" data-srch="'+singleSrch+'" style="border-bottom:1px solid #21262d"><td style="padding:4px;color:#666">'+grp[0].num+'</td><td style="padding:4px">'+grp[0].name+'</td>';
+    \\          html+='<td style="padding:4px;color:#e8c547;cursor:pointer" onclick="highlightNet(\''+eNet+'\')">'+gNet+'</td>';
+    \\          html+='<td class="move-cell" style="padding:4px;text-align:right"><a href="#" style="color:#58a6ff;font-size:11px;text-decoration:none" onclick="event.preventDefault();startMovePin(\''+eRef+'\',\''+ePin+'\',\''+mvId+'\');">Move</a></td></tr>';
     \\        }
     \\      }
     \\      for(var ui=0;ui<sec.ungrouped.length;ui++){
-    \\        html+='<tr style="border-bottom:1px solid #21262d"><td style="padding:4px;color:#666">'+sec.ungrouped[ui].num+'</td><td style="padding:4px">'+sec.ungrouped[ui].name+'</td>';
+    \\        var ugSrch=(sec.ungrouped[ui].num+' '+sec.ungrouped[ui].name).toLowerCase().replace(/"/g,"&quot;");
+    \\        html+='<tr data-srch="'+ugSrch+'" style="border-bottom:1px solid #21262d"><td style="padding:4px;color:#666">'+sec.ungrouped[ui].num+'</td><td style="padding:4px">'+sec.ungrouped[ui].name+'</td>';
     \\        html+='<td style="padding:4px;color:#444">-</td></tr>';
     \\      }
     \\      html+='</table>';
@@ -678,6 +694,7 @@ pub const CANVAS_VIEWER_JS =
     \\
     \\function showNetSidebar(net){
     \\  var pins=NETS[net];
+    \\  var eNet2=net.replace(/'/g,"\\'");
     \\  var html='<h3 style="color:#e8c547;margin:0 0 8px">'+net+'</h3>';
     \\  if(pins&&pins.length){
     \\    html+='<div style="margin-bottom:8px"><b>Connections:</b> '+pins.length+'</div>';
@@ -685,7 +702,13 @@ pub const CANVAS_VIEWER_JS =
     \\    for(var i=0;i<pins.length;i++){
     \\      var parts=pins[i].split('.');
     \\      var ref2=parts[0],pin2=parts[1]||'';
-    \\      html+='<tr style="border-bottom:1px solid #21262d"><td style="padding:4px;color:#4a9eff;cursor:pointer" onclick="selectComponent(\''+ref2+'\')">'+ref2+'</td><td style="padding:4px;color:#666">pin '+pin2+'</td></tr>';
+    \\      var eRef2=ref2.replace(/'/g,"\\'");
+    \\      var ePin2=pin2.replace(/'/g,"\\'");
+    \\      var rowId2='nv'+i;
+    \\      var pName2=pinNameLookup(ref2,pin2);
+    \\      html+='<tr id="'+rowId2+'" style="border-bottom:1px solid #21262d"><td style="padding:4px;color:#4a9eff;cursor:pointer" onclick="selectComponent(\''+eRef2+'\')">'+ref2+'</td>';
+    \\      html+='<td style="padding:4px;color:#666">pin '+pin2+(pName2?' <span style="color:#8b949e">'+pName2+'</span>':'')+'</td>';
+    \\      html+='<td class="move-cell" style="padding:4px;text-align:right"><a href="#" style="color:#58a6ff;font-size:11px;text-decoration:none" onclick="event.preventDefault();startMovePin(\''+eRef2+'\',\''+ePin2+'\',\''+rowId2+'\');">Move</a></td></tr>';
     \\    }
     \\    html+='</table>';
     \\  }else{
@@ -693,6 +716,136 @@ pub const CANVAS_VIEWER_JS =
     \\  }
     \\  openSidebar(html);
     \\}
+    \\
+    \\/* ── Pin table search ─────────────────────────────────────── */
+    \\function filterPinTable(){
+    \\  var input=document.getElementById('pin-search');
+    \\  if(!input)return;
+    \\  var q=input.value.trim().toLowerCase();
+    \\  var rows=sidebarContent.querySelectorAll('[data-srch]');
+    \\  var summaries=sidebarContent.querySelectorAll('[data-summary]');
+    \\  var tbodies=sidebarContent.querySelectorAll('tbody[data-group]');
+    \\  var arrows=sidebarContent.querySelectorAll('[data-arrow]');
+    \\  if(!q){
+    \\    for(var a=0;a<summaries.length;a++)summaries[a].style.display='';
+    \\    for(var b=0;b<tbodies.length;b++)tbodies[b].style.display='none';
+    \\    for(var c=0;c<rows.length;c++)rows[c].style.display='';
+    \\    for(var d=0;d<arrows.length;d++)arrows[d].textContent='\u25B6';
+    \\    return;
+    \\  }
+    \\  for(var e=0;e<summaries.length;e++)summaries[e].style.display='none';
+    \\  for(var f=0;f<tbodies.length;f++)tbodies[f].style.display='';
+    \\  for(var g=0;g<rows.length;g++){
+    \\    var r=rows[g];
+    \\    if(r.hasAttribute('data-summary'))continue;
+    \\    r.style.display=(r.getAttribute('data-srch')||'').indexOf(q)>=0?'':'none';
+    \\  }
+    \\}
+    \\window.filterPinTable=filterPinTable;
+    \\
+    \\/* ── Pin reassignment ─────────────────────────────────────── */
+    \\function moveActionCell(rowId){
+    \\  var row=document.getElementById(rowId);
+    \\  if(!row)return null;
+    \\  return row.querySelector('.move-cell');
+    \\}
+    \\function renderMoveLink(ref,oldPin,rowId){
+    \\  var er=ref.replace(/\x27/g,"\\x27"),op=oldPin.replace(/\x27/g,"\\x27");
+    \\  return '<a href="#" style="color:#58a6ff;font-size:11px;text-decoration:none" onclick="event.preventDefault();startMovePin(\''+er+'\',\''+op+'\',\''+rowId+'\');">Move</a>';
+    \\}
+    \\function startMovePin(ref,oldPin,rowId){
+    \\  var actionTd=moveActionCell(rowId);
+    \\  if(!actionTd)return;
+    \\  actionTd.innerHTML='<span style="color:#666;font-size:11px">loading…</span>';
+    \\  fetch('/api/free-pins/'+DESIGN_NAME+'?ref='+encodeURIComponent(ref))
+    \\    .then(function(r){return r.json();})
+    \\    .then(function(d){
+    \\      if(!d||!d.free_pins||!d.free_pins.length){
+    \\        actionTd.innerHTML='<span style="color:#f85149;font-size:11px">no free pins</span>';
+    \\        setTimeout(function(){var c=moveActionCell(rowId);if(c)c.innerHTML=renderMoveLink(ref,oldPin,rowId);},2000);
+    \\        return;
+    \\      }
+    \\      var pins=d.free_pins;
+    \\      var inpId=rowId+'-inp',listId=rowId+'-list';
+    \\      var html='<div style="position:relative;display:inline-block;vertical-align:middle">';
+    \\      html+='<input id="'+inpId+'" placeholder="pin or func…" autocomplete="off" style="background:#0d1117;color:#e8c547;border:1px solid #30363d;font-size:11px;padding:1px 4px;width:120px;box-sizing:border-box"/>';
+    \\      html+='<div id="'+listId+'" style="display:none;position:absolute;top:100%;right:0;z-index:100;background:#0d1117;border:1px solid #30363d;max-height:220px;overflow-y:auto;min-width:140px;font-size:11px"></div>';
+    \\      html+='</div> <a href="#" style="color:#8b949e;font-size:11px;vertical-align:middle" onclick="event.preventDefault();cancelMovePin(\''+ref.replace(/\x27/g,"\\x27")+'\',\''+oldPin.replace(/\x27/g,"\\x27")+'\',\''+rowId+'\');">✕</a>';
+    \\      actionTd.innerHTML=html;
+    \\      var inp=document.getElementById(inpId);
+    \\      var list=document.getElementById(listId);
+    \\      var highlighted=-1;
+    \\      var visible=[];
+    \\      function renderList(){
+    \\        var q=inp.value.trim().toLowerCase();
+    \\        visible=[];
+    \\        for(var i=0;i<pins.length;i++){
+    \\          var p=pins[i];
+    \\          var hay=(p.pin+' '+(p.function||'')+' '+(p.category||'')).toLowerCase();
+    \\          if(!q||hay.indexOf(q)>=0)visible.push(p);
+    \\          if(visible.length>=50)break;
+    \\        }
+    \\        if(!visible.length){list.innerHTML='<div style="padding:4px 6px;color:#666">no matches</div>';list.style.display='block';highlighted=-1;return;}
+    \\        var h='';
+    \\        for(var j=0;j<visible.length;j++){
+    \\          var v=visible[j];
+    \\          var isHi=j===highlighted;
+    \\          h+='<div data-idx="'+j+'" style="padding:3px 6px;cursor:pointer;'+(isHi?'background:#1f6feb;color:#fff':'color:#e8c547')+'"><span style="font-weight:600">'+v.pin+'</span>';
+    \\          if(v.function)h+=' <span style="color:'+(isHi?'#cfe':'')+'#8b949e">'+v.function+'</span>';
+    \\          h+='</div>';
+    \\        }
+    \\        list.innerHTML=h;
+    \\        list.style.display='block';
+    \\        for(var k=0;k<list.children.length;k++){
+    \\          list.children[k].onmousedown=(function(idx){return function(e){e.preventDefault();applyMovePin(ref,oldPin,visible[idx].pin,rowId);};})(k);
+    \\          list.children[k].onmouseenter=(function(idx){return function(){highlighted=idx;renderList();};})(k);
+    \\        }
+    \\      }
+    \\      inp.addEventListener('input',function(){highlighted=visible.length?0:-1;renderList();});
+    \\      inp.addEventListener('focus',renderList);
+    \\      inp.addEventListener('blur',function(){setTimeout(function(){list.style.display='none';},120);});
+    \\      inp.addEventListener('keydown',function(e){
+    \\        if(e.key==='ArrowDown'){e.preventDefault();if(visible.length){highlighted=(highlighted+1)%visible.length;renderList();}}
+    \\        else if(e.key==='ArrowUp'){e.preventDefault();if(visible.length){highlighted=(highlighted-1+visible.length)%visible.length;renderList();}}
+    \\        else if(e.key==='Enter'){e.preventDefault();if(highlighted>=0&&visible[highlighted])applyMovePin(ref,oldPin,visible[highlighted].pin,rowId);else{inp.style.borderColor='#f85149';setTimeout(function(){inp.style.borderColor='#30363d';},800);}}
+    \\        else if(e.key==='Escape'){e.preventDefault();cancelMovePin(ref,oldPin,rowId);}
+    \\      });
+    \\      inp.focus();
+    \\      renderList();
+    \\    })
+    \\    .catch(function(){actionTd.innerHTML='<span style="color:#f85149;font-size:11px">error</span>';});
+    \\}
+    \\function cancelMovePin(ref,oldPin,rowId){
+    \\  var c=moveActionCell(rowId);if(!c)return;
+    \\  c.innerHTML=renderMoveLink(ref,oldPin,rowId);
+    \\}
+    \\function refreshDesignState(){
+    \\  return fetch('/api/design-state/'+DESIGN_NAME)
+    \\    .then(function(r){return r.json();})
+    \\    .then(function(d){
+    \\      if(d&&d.components)window.COMPONENTS=d.components;
+    \\      if(d&&d.nets)window.NETS=d.nets;
+    \\      if(selectedRef&&window.COMPONENTS[selectedRef])showComponentSidebar(selectedRef);
+    \\      else if(selectedNet&&window.NETS[selectedNet])showNetSidebar(selectedNet);
+    \\    });
+    \\}
+    \\function applyMovePin(ref,oldPin,newPin,rowId){
+    \\  var c=moveActionCell(rowId);if(!c)return;
+    \\  c.innerHTML='<span style="color:#666;font-size:11px">saving…</span>';
+    \\  fetch('/api/move-pin/'+DESIGN_NAME,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ref:ref,old_pin:oldPin,new_pin:newPin})})
+    \\    .then(function(r){return r.json().then(function(d){return{status:r.status,body:d};});})
+    \\    .then(function(x){
+    \\      if(x.status===200&&x.body.ok){refreshDesignState();return;}
+    \\      var msg=x.body&&x.body.error?x.body.error:('http '+x.status);
+    \\      var cc=moveActionCell(rowId);if(!cc)return;
+    \\      cc.innerHTML='<span style="color:#f85149;font-size:11px" title="'+msg+'">'+msg+'</span>';
+    \\      setTimeout(function(){cancelMovePin(ref,oldPin,rowId);},2500);
+    \\    })
+    \\    .catch(function(){var cc=moveActionCell(rowId);if(cc)cc.innerHTML='<span style="color:#f85149;font-size:11px">network error</span>';});
+    \\}
+    \\window.startMovePin=startMovePin;
+    \\window.cancelMovePin=cancelMovePin;
+    \\window.applyMovePin=applyMovePin;
     \\
     \\/* Make sidebar functions global for onclick handlers */
     \\window.highlightNet=highlightNet;

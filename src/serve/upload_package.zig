@@ -145,15 +145,15 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     }
 
     // Write footprint to lib/footprints/
+    const fp_name_final = upload.extractFootprintName(ctx.allocator, footprint) orelse safe_name;
     {
-        const fp_name = upload.extractFootprintName(ctx.allocator, footprint) orelse safe_name;
         const dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints", .{ctx.project_dir}) catch {
             res.status = 500;
             return;
         };
         defer ctx.allocator.free(dir);
         std.fs.cwd().makePath(dir) catch {};
-        const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, fp_name }) catch {
+        const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, fp_name_final }) catch {
             res.status = 500;
             return;
         };
@@ -169,6 +169,9 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
             return;
         };
     }
+
+    // Write component definition
+    upload.writeComponentFile(ctx.allocator, ctx.project_dir, safe_name, safe_name, fp_name_final, sym_data.?);
 
     // Save STEP model to lib/models/ if provided
     if (step_data) |sd| {

@@ -138,10 +138,7 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
 
     const new_layout = render_json.renderSceneGraph(ctx.allocator, block) catch null;
-
-    serve_root.live_mutex.lock();
-    serve_root.live_layout_json = new_layout;
-    serve_root.live_mutex.unlock();
+    serve_root.setLiveLayoutJson(new_layout);
     _ = serve_root.bumpLiveVersion(name);
 
     res.header("access-control-allow-origin", "*");
@@ -322,10 +319,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     var svg_sym_cache = try bom_html.buildSymbolPinCache(ctx.allocator, ctx.project_dir);
 
     const new_layout = render_json.renderSceneGraph(ctx.allocator, block) catch null;
-
-    serve_root.live_mutex.lock();
-    serve_root.live_layout_json = new_layout;
-    serve_root.live_mutex.unlock();
+    serve_root.setLiveLayoutJson(new_layout);
     _ = serve_root.bumpLiveVersion(name);
 
     // Return updated COMPONENTS so the client can refresh srcOff values
@@ -782,6 +776,88 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     };
 }
 
+/// Move a single-pin form `(pin OLD "NET")` to `(pin NEW "NET")` within an
+/// instance. Body: `{"ref":"U1","old_pin":"V11","new_pin":"V12"}`. Returns
+/// HTTP 409 with a structured error if the destination pin is already used.
+pub fn movePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    res.content_type = .JSON;
+    res.header("access-control-allow-origin", "*");
+
+    const name = req.param("name") orelse {
+        res.status = 404;
+        res.body = "{\"error\":\"missing name\"}";
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"no body\"}";
+        return;
+    };
+
+    const ref_des = parseJsonString(body, "\"ref\"") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing ref\"}";
+        return;
+    };
+    const old_pin = parseJsonString(body, "\"old_pin\"") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing old_pin\"}";
+        return;
+    };
+    const new_pin = parseJsonString(body, "\"new_pin\"") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing new_pin\"}";
+        return;
+    };
+
+    // Resolve ref_des → source key. Source `.sexp` forms use the instance's
+    // `label` (e.g. "stm32") when set, and the ref_des otherwise. The scene
+    // graph/UI always speaks ref_des.
+    const source_key = resolveSourceKey(ctx.allocator, ctx.project_dir, name, ref_des) catch ref_des;
+
+    const result = movePinCore(ctx.allocator, ctx.project_dir, name, source_key, old_pin, new_pin) catch |err| {
+        switch (err) {
+            error.PinAlreadyAssigned => {
+                res.status = 409;
+                res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"error\":\"pin_already_assigned\",\"pin\":\"{s}\"}}", .{new_pin});
+                return;
+            },
+            error.MultiPinFormUnsupported => {
+                res.status = 409;
+                res.body = "{\"error\":\"multi_pin_form_unsupported\"}";
+                return;
+            },
+            error.PinNotFound => {
+                res.status = 404;
+                res.body = "{\"error\":\"pin_not_found\"}";
+                return;
+            },
+            error.InstanceNotFound => {
+                res.status = 404;
+                res.body = "{\"error\":\"instance_not_found\"}";
+                return;
+            },
+            error.InvalidSource => {
+                res.status = 400;
+                res.body = "{\"error\":\"invalid_pin_id\"}";
+                return;
+            },
+            error.RebuildFailed => {
+                res.status = 500;
+                res.body = "{\"error\":\"rebuild_failed\"}";
+                return;
+            },
+            else => {
+                res.status = 500;
+                res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"error\":\"{s}\"}}", .{@errorName(err)});
+                return;
+            },
+        }
+    };
+
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
+}
+
 /// Rebuild design, render SVG, and push live update.
 fn rebuildAndPush(ctx: *Handler, name: []const u8, res: *httpz.Response) !void {
     const board_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
@@ -800,10 +876,7 @@ fn rebuildAndPush(ctx: *Handler, name: []const u8, res: *httpz.Response) !void {
     bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
 
     const layout_json = render_json.renderSceneGraph(ctx.allocator, block) catch null;
-
-    serve_root.live_mutex.lock();
-    serve_root.live_layout_json = layout_json;
-    serve_root.live_mutex.unlock();
+    serve_root.setLiveLayoutJson(layout_json);
     _ = serve_root.bumpLiveVersion(name);
 
     res.header("access-control-allow-origin", "*");
@@ -950,8 +1023,14 @@ fn floatFromJson(v: std.json.Value) ?f64 {
 pub const EditError = error{
     InstanceNotFound,
     PinNotFound,
+    PinAlreadyAssigned,
+    MultiPinFormUnsupported,
     SectionNotFound,
     ComponentNotFound,
+    NoteNotFound,
+    ImportsFormMissing,
+    DuplicateImport,
+    DuplicateParameter,
     MalformedSource,
     InvalidSource,
     CannotReadDesign,
@@ -959,6 +1038,7 @@ pub const EditError = error{
     RebuildFailed,
     SnapshotNotFound,
     InvalidSnapshotId,
+    AmbiguousMatch,
 } || std.mem.Allocator.Error;
 
 pub const MutationResult = struct {
@@ -988,6 +1068,7 @@ fn writeAndRebuild(
     project_dir: []const u8,
     name: []const u8,
     new_source: []const u8,
+    description: ?[]const u8,
 ) EditError!MutationResult {
     const path = try designFilePath(allocator, project_dir, name);
     defer allocator.free(path);
@@ -995,7 +1076,7 @@ fn writeAndRebuild(
     // Snapshot prior state before overwriting. Null means the design didn't
     // exist yet (brand-new create). Snapshot errors are logged but don't
     // block the write — undo is a nice-to-have, not a hard requirement.
-    const snap_id: ?[]const u8 = history.snapshot(allocator, project_dir, name) catch |e| blk: {
+    const snap_id: ?[]const u8 = history.snapshot(allocator, project_dir, name, description) catch |e| blk: {
         std.debug.print("[snapshot] failed for {s}: {s}\n", .{ name, @errorName(e) });
         break :blk null;
     };
@@ -1019,10 +1100,7 @@ fn writeAndRebuild(
     bom.resolveIdentities(allocator, block, bom_path, project_dir) catch {};
 
     const layout_json = render_json.renderSceneGraph(allocator, block) catch null;
-
-    serve_root.live_mutex.lock();
-    serve_root.live_layout_json = layout_json;
-    serve_root.live_mutex.unlock();
+    serve_root.setLiveLayoutJson(layout_json);
     const version = serve_root.bumpLiveVersion(name);
 
     return .{ .version = version, .snapshot = snap_id };
@@ -1035,6 +1113,34 @@ fn findInstanceEnd(source: []const u8, inst_start: usize) ?usize {
         if (ch == ')') {
             depth -= 1;
             if (depth == 0) return inst_start + i + 1;
+        }
+    }
+    return null;
+}
+
+/// Find the index one past the closing paren of the form whose open paren
+/// lives at `open_pos`. Respects strings and `;` line comments, so section
+/// bodies (which commonly contain both) are handled correctly.
+fn findFormEnd(source: []const u8, open_pos: usize) ?usize {
+    var i: usize = open_pos;
+    var depth: i32 = 0;
+    while (i < source.len) : (i += 1) {
+        const ch = source[i];
+        if (ch == '"') {
+            i += 1;
+            while (i < source.len and source[i] != '"') : (i += 1) {
+                if (source[i] == '\\' and i + 1 < source.len) i += 1;
+            }
+            continue;
+        }
+        if (ch == ';') {
+            while (i < source.len and source[i] != '\n') : (i += 1) {}
+            continue;
+        }
+        if (ch == '(') depth += 1;
+        if (ch == ')') {
+            depth -= 1;
+            if (depth == 0) return i + 1;
         }
     }
     return null;
@@ -1070,7 +1176,9 @@ pub fn editValueCore(
     try nw.writeAll(new_value);
     try nw.writeAll(source[old_val_end..]);
 
-    return writeAndRebuild(allocator, project_dir, name, new_source.items);
+    const desc = try std.fmt.allocPrint(allocator, "edit_value {s} → {s}", .{ ref_des, new_value });
+    defer allocator.free(desc);
+    return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
 }
 
 pub fn removeInstanceCore(
@@ -1098,7 +1206,9 @@ pub fn removeInstanceCore(
     try nw.writeAll(source[0..inst_start]);
     try nw.writeAll(source[inst_end..]);
 
-    return writeAndRebuild(allocator, project_dir, name, new_source.items);
+    const desc = try std.fmt.allocPrint(allocator, "remove_instance {s}", .{ref_des});
+    defer allocator.free(desc);
+    return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
 }
 
 pub fn rewirePinCore(
@@ -1130,7 +1240,9 @@ pub fn rewirePinCore(
     try nw.writeAll(new_net);
     try nw.writeAll(source[net_end..]);
 
-    return writeAndRebuild(allocator, project_dir, name, new_source.items);
+    const desc = try std.fmt.allocPrint(allocator, "rewire_pin {s}.{s} → {s}", .{ ref_des, pin, new_net });
+    defer allocator.free(desc);
+    return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
 }
 
 pub fn addInstanceCore(
@@ -1181,7 +1293,9 @@ pub fn addInstanceCore(
     try nw.writeAll(inst_form.items);
     try nw.writeAll(source[insert_at..]);
 
-    return writeAndRebuild(allocator, project_dir, name, new_source.items);
+    const desc = try std.fmt.allocPrint(allocator, "add_instance {s}", .{component});
+    defer allocator.free(desc);
+    return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
 }
 
 pub fn swapComponentCore(
@@ -1267,7 +1381,9 @@ pub fn swapComponentCore(
         }
     }
 
-    return writeAndRebuild(allocator, project_dir, name, final_bytes);
+    const desc = try std.fmt.allocPrint(allocator, "swap_component {s} → {s}", .{ ref_des, new_component });
+    defer allocator.free(desc);
+    return writeAndRebuild(allocator, project_dir, name, final_bytes, desc);
 }
 
 /// Read the full `.sexp` source text for a design. Caller owns the returned
@@ -1299,7 +1415,7 @@ pub fn writeDesignCore(
     defer allocator.free(src_dir);
     std.fs.cwd().makePath(src_dir) catch {};
 
-    return writeAndRebuild(allocator, project_dir, name, new_source);
+    return writeAndRebuild(allocator, project_dir, name, new_source, "write_design");
 }
 
 /// Restore a design from a history snapshot. First snapshots the current
@@ -1312,7 +1428,9 @@ pub fn restoreDesignCore(
     id: []const u8,
 ) EditError!MutationResult {
     // Snapshot current state first so the restore can be undone.
-    const pre_snap: ?[]const u8 = history.snapshot(allocator, project_dir, name) catch |e| blk: {
+    const pre_desc = try std.fmt.allocPrint(allocator, "pre-restore {s}", .{id});
+    defer allocator.free(pre_desc);
+    const pre_snap: ?[]const u8 = history.snapshot(allocator, project_dir, name, pre_desc) catch |e| blk: {
         std.debug.print("[snapshot] pre-restore failed for {s}: {s}\n", .{ name, @errorName(e) });
         break :blk null;
     };
@@ -1340,10 +1458,431 @@ pub fn restoreDesignCore(
     bom.resolveIdentities(allocator, block, bom_path, project_dir) catch {};
 
     const layout_json = render_json.renderSceneGraph(allocator, block) catch null;
-    serve_root.live_mutex.lock();
-    serve_root.live_layout_json = layout_json;
-    serve_root.live_mutex.unlock();
+    serve_root.setLiveLayoutJson(layout_json);
     const version = serve_root.bumpLiveVersion(name);
 
     return .{ .version = version, .snapshot = pre_snap };
+}
+
+/// Replace an entire `(section "SECTION_NAME" ...)` form with `new_source`.
+/// `new_source` must be the complete replacement form (including the outer
+/// parens). Returns `SectionNotFound` if no match and `Ambiguous` if more
+/// than one section with that name exists at the top level of the file.
+pub fn editSectionCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    section_name: []const u8,
+    new_source: []const u8,
+) EditError!MutationResult {
+    const source = try readDesignSource(allocator, project_dir, name);
+    defer allocator.free(source);
+
+    const needle = try std.fmt.allocPrint(allocator, "(section \"{s}\"", .{section_name});
+    defer allocator.free(needle);
+
+    const first = std.mem.indexOf(u8, source, needle) orelse return error.SectionNotFound;
+    // Ambiguity check — if the same name shows up twice we bail so the caller
+    // can disambiguate rather than edit the wrong one silently.
+    if (std.mem.indexOfPos(u8, source, first + needle.len, needle) != null) {
+        return error.AmbiguousMatch;
+    }
+    const end = findFormEnd(source, first) orelse return error.MalformedSource;
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try w.writeAll(source[0..first]);
+    try w.writeAll(new_source);
+    try w.writeAll(source[end..]);
+
+    const desc = try std.fmt.allocPrint(allocator, "edit_section {s}", .{section_name});
+    defer allocator.free(desc);
+    return writeAndRebuild(allocator, project_dir, name, buf.items, desc);
+}
+
+/// Replace the text of a `(note "...")` form. Identifies the target note by
+/// a substring match against its current text — if `match` does not uniquely
+/// identify one note, returns `AmbiguousMatch`. Use the full current text to
+/// disambiguate; use a distinctive substring for light-weight edits.
+pub fn editNoteCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    match: []const u8,
+    new_text: []const u8,
+) EditError!MutationResult {
+    const source = try readDesignSource(allocator, project_dir, name);
+    defer allocator.free(source);
+
+    // Scan every `(note "` occurrence, extract its quoted text, and record
+    // every form whose text contains `match`.
+    var found_start: ?usize = 0;
+    var found_text_start: usize = 0;
+    var found_text_end: usize = 0;
+    var count: usize = 0;
+    found_start = null;
+
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, source, cursor, "(note")) |note_start| {
+        // Must be followed by whitespace + opening quote to be a single-arg note.
+        var i: usize = note_start + "(note".len;
+        while (i < source.len and (source[i] == ' ' or source[i] == '\t' or source[i] == '\n')) : (i += 1) {}
+        if (i >= source.len or source[i] != '"') {
+            cursor = note_start + 1;
+            continue;
+        }
+        const text_start = i + 1;
+        // Scan for the closing quote (honoring \\ escapes).
+        var j: usize = text_start;
+        while (j < source.len and source[j] != '"') : (j += 1) {
+            if (source[j] == '\\' and j + 1 < source.len) j += 1;
+        }
+        if (j >= source.len) return error.MalformedSource;
+        const text_end = j;
+        if (std.mem.indexOf(u8, source[text_start..text_end], match) != null) {
+            count += 1;
+            if (count > 1) return error.AmbiguousMatch;
+            found_start = note_start;
+            found_text_start = text_start;
+            found_text_end = text_end;
+        }
+        cursor = text_end + 1;
+    }
+
+    if (count == 0 or found_start == null) return error.NoteNotFound;
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try w.writeAll(source[0..found_text_start]);
+    // Emit escaped replacement text so quotes inside the new body don't break the form.
+    for (new_text) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        else => try w.writeByte(c),
+    };
+    try w.writeAll(source[found_text_end..]);
+
+    const desc = try std.fmt.allocPrint(allocator, "edit_note \"{s}\"", .{match});
+    defer allocator.free(desc);
+    return writeAndRebuild(allocator, project_dir, name, buf.items, desc);
+}
+
+/// Add a single item to the top-level `(import ...)` list. If the item is
+/// already present (word-boundary match), returns `DuplicateImport` without
+/// modifying the file. Fails with `ImportsFormMissing` if the design has no
+/// `(import ...)` form at all.
+pub fn addImportCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    import_item: []const u8,
+) EditError!MutationResult {
+    if (import_item.len == 0) return error.InvalidSource;
+    // Reject items with whitespace or quotes — they must be atom-like.
+    for (import_item) |c| if (c == ' ' or c == '\n' or c == '\t' or c == '"' or c == '(' or c == ')') return error.InvalidSource;
+
+    const source = try readDesignSource(allocator, project_dir, name);
+    defer allocator.free(source);
+
+    const import_start = std.mem.indexOf(u8, source, "(import") orelse return error.ImportsFormMissing;
+    const import_end = findFormEnd(source, import_start) orelse return error.MalformedSource;
+    const import_body = source[import_start..import_end];
+
+    // Word-boundary dedup check: match import_item only when surrounded by
+    // whitespace, `(`, or `)`.
+    var search_from: usize = 0;
+    while (std.mem.indexOfPos(u8, import_body, search_from, import_item)) |ipos| {
+        const before_ok = ipos == 0 or import_body[ipos - 1] == ' ' or import_body[ipos - 1] == '\n' or import_body[ipos - 1] == '\t';
+        const after_pos = ipos + import_item.len;
+        const after_ok = after_pos >= import_body.len or
+            import_body[after_pos] == ' ' or
+            import_body[after_pos] == '\n' or
+            import_body[after_pos] == '\t' or
+            import_body[after_pos] == ')';
+        if (before_ok and after_ok) return error.DuplicateImport;
+        search_from = ipos + 1;
+    }
+
+    // Insert before the closing paren of the import form.
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try w.writeAll(source[0 .. import_end - 1]);
+    try w.writeAll(" ");
+    try w.writeAll(import_item);
+    try w.writeAll(source[import_end - 1 ..]);
+
+    const desc = try std.fmt.allocPrint(allocator, "add_import {s}", .{import_item});
+    defer allocator.free(desc);
+    return writeAndRebuild(allocator, project_dir, name, buf.items, desc);
+}
+
+/// Set a single pin on an instance to a new net. Thin wrapper over
+/// `rewirePinCore`; exposed separately so MCP callers can phrase a one-pin
+/// change without building a full `replace_instance` payload.
+pub fn setInstancePinCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    ref_des: []const u8,
+    pin: []const u8,
+    new_net: []const u8,
+) EditError!MutationResult {
+    return rewirePinCore(allocator, project_dir, name, ref_des, pin, new_net);
+}
+
+/// Scan every `(pin ... "...")` form inside [inst_start, inst_end) and return
+/// true if `pin` appears as a whitespace-delimited ID token in any of them.
+/// Handles both single-pin forms `(pin V11 "NET")` and multi-pin shorthand
+/// `(pin 1 2 3 "NET")`.
+fn pinIdPresentInInstance(source: []const u8, inst_start: usize, inst_end: usize, pin: []const u8) bool {
+    var search: usize = inst_start;
+    while (std.mem.indexOfPos(u8, source, search, "(pin ")) |p| {
+        if (p >= inst_end) break;
+        const after = p + "(pin ".len;
+        const quote = std.mem.indexOfPos(u8, source, after, "\"") orelse break;
+        if (quote > inst_end) break;
+        var tok_start: usize = after;
+        var i: usize = after;
+        while (i < quote) : (i += 1) {
+            const ch = source[i];
+            if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') {
+                if (i > tok_start and std.mem.eql(u8, source[tok_start..i], pin)) return true;
+                tok_start = i + 1;
+            }
+        }
+        // Trim trailing whitespace before the opening quote.
+        var tok_end = quote;
+        while (tok_end > tok_start and (source[tok_end - 1] == ' ' or source[tok_end - 1] == '\t')) : (tok_end -= 1) {}
+        if (tok_end > tok_start and std.mem.eql(u8, source[tok_start..tok_end], pin)) return true;
+        search = quote + 1;
+    }
+    return false;
+}
+
+/// Map a ref_des (e.g. "U3") to the string used in the `.sexp` source for
+/// that instance's `(instance "X" ...)` and `(pins "X" ...)` forms. Returns
+/// the instance's `label` if set, otherwise the ref_des itself. Falls back
+/// to the ref_des on any evaluation error.
+fn resolveSourceKey(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    ref_des: []const u8,
+) ![]const u8 {
+    const path = try designFilePath(allocator, project_dir, name);
+    defer allocator.free(path);
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    const result = eval.evalFile(path) catch return ref_des;
+    const block = switch (result) {
+        .design_block => |b| b,
+        .board => |b| b.design,
+        else => return ref_des,
+    };
+    for (block.instances) |inst| {
+        if (std.mem.eql(u8, inst.ref_des, ref_des)) {
+            return if (inst.label.len > 0) try allocator.dupe(u8, inst.label) else ref_des;
+        }
+    }
+    return ref_des;
+}
+
+const PinRegion = struct { start: usize, end: usize };
+
+/// Collect the byte ranges of every form that may contain pin assignments
+/// for `ref_des`: inline `(instance "REF" ...)` forms, and section-level
+/// `(pins "REF" ...)` routing groups.
+fn collectPinRegions(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    ref_des: []const u8,
+    out: *std.ArrayListUnmanaged(PinRegion),
+) EditError!void {
+    const heads = [_][]const u8{ "(instance \"", "(pins \"" };
+    inline for (heads) |head| {
+        const needle = try std.fmt.allocPrint(allocator, "{s}{s}\"", .{ head, ref_des });
+        defer allocator.free(needle);
+        var search: usize = 0;
+        while (std.mem.indexOfPos(u8, source, search, needle)) |p| {
+            const end = findInstanceEnd(source, p) orelse return error.MalformedSource;
+            try out.append(allocator, .{ .start = p, .end = end });
+            search = end;
+        }
+    }
+}
+
+/// Rename a single-pin form `(pin OLD_PIN "NET")` to `(pin NEW_PIN "NET")`
+/// within any region that declares pins for `ref_des` — either an inline
+/// `(instance "REF" ...)` form or a section-level `(pins "REF" ...)` group.
+/// Fails with `PinAlreadyAssigned` if `new_pin` is used anywhere across
+/// those regions, and with `MultiPinFormUnsupported` if `old_pin` only
+/// appears inside a multi-pin shorthand like `(pin 1 2 3 "NET")`.
+pub fn movePinCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    ref_des: []const u8,
+    old_pin: []const u8,
+    new_pin: []const u8,
+) EditError!MutationResult {
+    if (old_pin.len == 0 or new_pin.len == 0) return error.InvalidSource;
+    for (new_pin) |c| if (c == ' ' or c == '\t' or c == '\n' or c == '"' or c == '(' or c == ')') return error.InvalidSource;
+    if (std.mem.eql(u8, old_pin, new_pin)) return error.InvalidSource;
+
+    const source = try readDesignSource(allocator, project_dir, name);
+    defer allocator.free(source);
+
+    var regions: std.ArrayListUnmanaged(PinRegion) = .empty;
+    defer regions.deinit(allocator);
+    try collectPinRegions(allocator, source, ref_des, &regions);
+    if (regions.items.len == 0) return error.InstanceNotFound;
+
+    for (regions.items) |r| {
+        if (pinIdPresentInInstance(source, r.start, r.end, new_pin)) return error.PinAlreadyAssigned;
+    }
+
+    const single_needle = try std.fmt.allocPrint(allocator, "(pin {s} \"", .{old_pin});
+    defer allocator.free(single_needle);
+
+    var splice_at: ?usize = null;
+    for (regions.items) |r| {
+        if (std.mem.indexOf(u8, source[r.start..r.end], single_needle)) |rel| {
+            splice_at = r.start + rel + "(pin ".len;
+            break;
+        }
+    }
+
+    if (splice_at == null) {
+        for (regions.items) |r| {
+            if (pinIdPresentInInstance(source, r.start, r.end, old_pin)) {
+                return error.MultiPinFormUnsupported;
+            }
+        }
+        return error.PinNotFound;
+    }
+
+    const abs_old_start = splice_at.?;
+    const abs_old_end = abs_old_start + old_pin.len;
+
+    var new_source: std.ArrayListUnmanaged(u8) = .empty;
+    defer new_source.deinit(allocator);
+    const nw = new_source.writer(allocator);
+    try nw.writeAll(source[0..abs_old_start]);
+    try nw.writeAll(new_pin);
+    try nw.writeAll(source[abs_old_end..]);
+
+    const desc = try std.fmt.allocPrint(allocator, "move_pin {s}.{s} → {s}", .{ ref_des, old_pin, new_pin });
+    defer allocator.free(desc);
+    return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
+}
+
+/// Add a `(parameter "name" type)` declaration to the top-level
+/// `(component ...)` or `(component-family ...)` form in
+/// `lib/components/{component}.sexp`. Snapshots the prior library file under
+/// `history/_lib/components/...` so the edit is undoable. Does not rebuild
+/// any design — callers must re-run a design build to pick up the change.
+pub fn addComponentParameterCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    component: []const u8,
+    param_name: []const u8,
+    param_type: []const u8,
+) EditError!struct { snapshot: ?[]const u8 } {
+    // Path-traversal guard.
+    if (component.len == 0 or std.mem.indexOf(u8, component, "..") != null or std.mem.indexOfAny(u8, component, "/\\") != null) {
+        return error.InvalidSource;
+    }
+    if (param_name.len == 0) return error.InvalidSource;
+    for (param_name) |c| if (c == '"' or c == '\\' or c == '\n') return error.InvalidSource;
+    if (param_type.len == 0) return error.InvalidSource;
+    for (param_type) |c| if (c == ' ' or c == '(' or c == ')' or c == '"') return error.InvalidSource;
+
+    const path = try std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, component });
+    defer allocator.free(path);
+    const source = std.fs.cwd().readFileAlloc(allocator, path, 1 * 1024 * 1024) catch return error.ComponentNotFound;
+    defer allocator.free(source);
+
+    // Locate the outer (component ...) or (component-family ...) form.
+    const comp_open = findOuterComponentOpen(source) orelse return error.MalformedSource;
+    const comp_end = findFormEnd(source, comp_open) orelse return error.MalformedSource;
+    const body = source[comp_open..comp_end];
+
+    // Duplicate check — look for `(parameter "name"` (word-boundary on open paren).
+    const dup_needle = try std.fmt.allocPrint(allocator, "(parameter \"{s}\"", .{param_name});
+    defer allocator.free(dup_needle);
+    if (std.mem.indexOf(u8, body, dup_needle) != null) return error.DuplicateParameter;
+
+    // Snapshot the library file before modifying it.
+    const desc = try std.fmt.allocPrint(allocator, "add_component_parameter {s}.{s}", .{ component, param_name });
+    defer allocator.free(desc);
+    const snap_id: ?[]const u8 = history.snapshotLibraryFile(allocator, project_dir, "components", component, desc) catch null;
+
+    // Splice the new parameter line just before the final `)` of the outer
+    // form. Preserve the final newline by inserting before `comp_end - 1`.
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try w.writeAll(source[0 .. comp_end - 1]);
+    try w.print("\n  (parameter \"{s}\" {s})", .{ param_name, param_type });
+    try w.writeAll(source[comp_end - 1 ..]);
+
+    const file = std.fs.cwd().createFile(path, .{}) catch return error.CannotWriteDesign;
+    defer file.close();
+    file.writeAll(buf.items) catch return error.CannotWriteDesign;
+
+    return .{ .snapshot = snap_id };
+}
+
+/// Locate the opening paren of the first top-level `(component ...)` or
+/// `(component-family ...)` form. Ignores comments and leading whitespace.
+fn findOuterComponentOpen(source: []const u8) ?usize {
+    var i: usize = 0;
+    while (i < source.len) : (i += 1) {
+        const ch = source[i];
+        if (ch == ';') {
+            while (i < source.len and source[i] != '\n') : (i += 1) {}
+            continue;
+        }
+        if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') continue;
+        if (ch != '(') return null;
+        const tail = source[i + 1 ..];
+        if (std.mem.startsWith(u8, tail, "component-family") or std.mem.startsWith(u8, tail, "component")) {
+            return i;
+        }
+        return null;
+    }
+    return null;
+}
+
+/// Replace an entire `(instance "REF" ...)` form by reference designator
+/// with `new_source` (which must be a complete replacement instance form).
+pub fn replaceInstanceCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    ref_des: []const u8,
+    new_source: []const u8,
+) EditError!MutationResult {
+    const source = try readDesignSource(allocator, project_dir, name);
+    defer allocator.free(source);
+
+    const needle = try std.fmt.allocPrint(allocator, "(instance \"{s}\"", .{ref_des});
+    defer allocator.free(needle);
+
+    const inst_start = std.mem.indexOf(u8, source, needle) orelse return error.InstanceNotFound;
+    const end = findFormEnd(source, inst_start) orelse return error.MalformedSource;
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try w.writeAll(source[0..inst_start]);
+    try w.writeAll(new_source);
+    try w.writeAll(source[end..]);
+
+    const desc = try std.fmt.allocPrint(allocator, "replace_instance {s}", .{ref_des});
+    defer allocator.free(desc);
+    return writeAndRebuild(allocator, project_dir, name, buf.items, desc);
 }

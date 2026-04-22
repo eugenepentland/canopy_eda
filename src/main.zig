@@ -5,6 +5,7 @@ const footprint_conv = @import("convert/footprint.zig");
 const symbol_conv = @import("convert/symbol.zig");
 const serve_mod = @import("serve.zig");
 const commands = @import("commands.zig");
+const plugin_tokens = @import("serve/plugin_tokens.zig");
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
@@ -101,6 +102,25 @@ pub fn main() !void {
             }
         }
         try serve_mod.serve(allocator, port, project_dir);
+    } else if (std.mem.eql(u8, command, "mint-plugin-token")) {
+        var project_dir: []const u8 = ".";
+        var label: []const u8 = "plugin";
+        var mi: usize = 2;
+        while (mi < args.len) : (mi += 1) {
+            if (std.mem.eql(u8, args[mi], "--project-dir") and mi + 1 < args.len) {
+                project_dir = args[mi + 1];
+                mi += 1;
+            } else if (std.mem.eql(u8, args[mi], "--label") and mi + 1 < args.len) {
+                label = args[mi + 1];
+                mi += 1;
+            }
+        }
+        const raw = try plugin_tokens.mint(allocator, project_dir, label);
+        defer allocator.free(raw);
+        const stdout = std.fs.File.stdout();
+        try stdout.writeAll(raw);
+        try stdout.writeAll("\n");
+        try stdout.writeAll("Save this token — it will not be shown again.\n");
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
         try printUsage();
     } else {
@@ -213,6 +233,7 @@ fn printUsage() !void {
         \\  eda parse <file>                   Parse and pretty-print an S-expression file
         \\  eda build [--project-dir <d>]       Evaluate and emit resolved design
         \\  eda serve [--project-dir <d>] [--port <n>]  Start web server (default port 7040)
+        \\  eda mint-plugin-token [--project-dir <d>] [--label <l>]  Mint a bearer token for the KiCad plugin
         \\  eda export-kicad --project-dir <d> --output-dir <out> <name>  Export KiCad netlist + footprints
         \\  eda export-pcb --project-dir <d> [--output <file>] <name>   Export .kicad_pcb (native PCB)
         \\  eda convert-footprint <file>        Convert KiCad .kicad_mod to .sexp

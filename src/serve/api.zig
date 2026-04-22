@@ -13,6 +13,8 @@ const zone_fill = @import("../zone_fill.zig");
 const drc_mod = @import("../drc.zig");
 const erc_mod = @import("../erc.zig");
 const env_mod = @import("../eval/env.zig");
+const bom_html = @import("bom_html.zig");
+const mcp_tools = @import("mcp_tools.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
@@ -43,10 +45,7 @@ pub fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     };
 
     const new_layout = render_json.renderSceneGraph(ctx.allocator, block) catch null;
-
-    serve_root.live_mutex.lock();
-    serve_root.live_layout_json = new_layout;
-    serve_root.live_mutex.unlock();
+    serve_root.setLiveLayoutJson(new_layout);
     const v = serve_root.bumpLiveVersion(name);
 
     std.debug.print("Pushed {s} (v{d})\n", .{ name, v });
@@ -377,7 +376,6 @@ pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(ctx.allocator);
-    const bom_html = @import("bom_html.zig");
     try bom_html.writeBomCsv(w, block);
 
     const disposition = std.fmt.allocPrint(ctx.allocator, "attachment; filename=\"{s}-bom.csv\"", .{name}) catch {
@@ -1138,6 +1136,98 @@ pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     res.content_type = .JSON;
     res.header("access-control-allow-origin", "*");
     res.body = json;
+}
+
+/// List free (unassigned) pins on an instance. Thin wrapper over the MCP
+/// tool implementation so the browser sidebar can populate the "move pin"
+/// dropdown without going through the MCP transport.
+pub fn freePinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    res.content_type = .JSON;
+    res.header("access-control-allow-origin", "*");
+
+    const name = req.param("name") orelse {
+        res.status = 404;
+        res.body = "{\"error\":\"missing name\"}";
+        return;
+    };
+    const qs = req.query() catch {
+        res.status = 400;
+        res.body = "{\"error\":\"invalid query\"}";
+        return;
+    };
+    const ref_des = qs.get("ref") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing ref\"}";
+        return;
+    };
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.allocator);
+    const w = buf.writer(ctx.allocator);
+    const ok = mcp_tools.listFreePins(ctx.allocator, ctx.project_dir, name, ref_des, null, w) catch {
+        res.status = 500;
+        res.body = "{\"error\":\"internal\"}";
+        return;
+    };
+    if (!ok) {
+        res.status = 500;
+        // buf.items holds plain text like "error: instance not found".
+        res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"error\":\"{s}\"}}", .{buf.items});
+        return;
+    }
+    res.body = try ctx.allocator.dupe(u8, buf.items);
+}
+
+/// Return the current `{components, nets}` JSON for a design, matching the
+/// shape of the globals `COMPONENTS` and `NETS` that `canvas_page.zig`
+/// inlines at page load. The UI uses this after mutations to refresh the
+/// sidebar without reloading the page.
+pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    res.content_type = .JSON;
+    res.header("access-control-allow-origin", "*");
+
+    const name = req.param("name") orelse {
+        res.status = 404;
+        res.body = "{\"error\":\"missing name\"}";
+        return;
+    };
+
+    const board_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    defer ctx.allocator.free(board_path);
+
+    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+    const result = eval.evalFile(board_path) catch {
+        res.status = 500;
+        res.body = "{\"error\":\"rebuild_failed\"}";
+        return;
+    };
+    const block = switch (result) {
+        .design_block => |b| b,
+        .board => |b| @as(*const env_mod.DesignBlock, b.design),
+        else => {
+            res.status = 500;
+            res.body = "{\"error\":\"not_a_design\"}";
+            return;
+        },
+    };
+
+    const bom_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name });
+    defer ctx.allocator.free(bom_path);
+    bom.resolveIdentities(ctx.allocator, @constCast(block), bom_path, ctx.project_dir) catch {};
+
+    var sym_cache = try bom_html.buildSymbolPinCache(ctx.allocator, ctx.project_dir);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.allocator);
+    const w = buf.writer(ctx.allocator);
+    try w.writeAll("{\"components\":{");
+    _ = try bom_html.writeComponentsJson(w, block, "", &sym_cache, ctx.allocator, ctx.project_dir);
+    try w.writeAll("},\"nets\":{");
+    _ = try bom_html.writeNetsJson(w, block, "");
+    try w.writeAll("}}");
+
+    res.body = try ctx.allocator.dupe(u8, buf.items);
 }
 
 // Unused import suppression

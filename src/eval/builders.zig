@@ -189,7 +189,7 @@ pub fn processPinForm(
             if (pin_func_map) |m| {
                 if (m.get(pn)) |func_name| {
                     if (net_name.len > 0 and !std.mem.eql(u8, net_name, func_name))
-                        try net_ties.append(self.allocator, .{ .a = net_name, .b = func_name });
+                        try net_ties.append(self.allocator, .{ .a = net_name, .b = func_name, .is_auto = true });
                 }
             }
         }
@@ -210,7 +210,7 @@ pub fn processPinForm(
                     if (pin_func_map) |m| {
                         if (m.get(pn)) |func_name| {
                             if (bus_net.len > 0 and !std.mem.eql(u8, bus_net, func_name))
-                                try net_ties.append(self.allocator, .{ .a = bus_net, .b = func_name });
+                                try net_ties.append(self.allocator, .{ .a = bus_net, .b = func_name, .is_auto = true });
                         }
                     }
                     bus_idx += 1;

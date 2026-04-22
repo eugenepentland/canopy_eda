@@ -17,6 +17,7 @@ pub const ViolationKind = enum {
     missing_decoupling,
     power_no_cap,
     concept_remaining,
+    pin_multi_net,
 };
 
 pub const Violation = struct {
@@ -34,6 +35,7 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock) ![]const 
     var violations: std.ArrayListUnmanaged(Violation) = .empty;
 
     checkDuplicateRefDes(allocator, block, &violations);
+    checkPinMultiNet(allocator, block, &violations);
     checkFloatingNets(allocator, block, &violations);
     checkUnconnectedPorts(allocator, block, &violations);
     checkMissingValues(allocator, block, &violations);
@@ -67,6 +69,40 @@ fn checkDuplicateRefDes(allocator: std.mem.Allocator, block: *const DesignBlock,
                 .severity = .@"error",
                 .message = msg,
                 .ref_des = entry.key_ptr.*,
+            }) catch {};
+        }
+    }
+}
+
+/// Check for a single component pin attached to two or more distinct nets.
+fn checkPinMultiNet(allocator: std.mem.Allocator, block: *const DesignBlock, violations: *std.ArrayListUnmanaged(Violation)) void {
+    var pin_to_net: std.StringHashMapUnmanaged([]const u8) = .empty;
+    var reported: std.StringHashMapUnmanaged(void) = .empty;
+
+    for (block.nets) |net| {
+        const base = baseNetName(net.name);
+        for (net.pins) |p| {
+            if (p.ref_des.len == 0) continue;
+            const key = std.fmt.allocPrint(allocator, "{s}.{s}", .{ p.ref_des, p.pin }) catch continue;
+            const gop = pin_to_net.getOrPut(allocator, key) catch continue;
+            if (!gop.found_existing) {
+                gop.value_ptr.* = base;
+                continue;
+            }
+            if (std.mem.eql(u8, gop.value_ptr.*, base)) continue;
+            if (reported.contains(key)) continue;
+            reported.put(allocator, key, {}) catch {};
+            const msg = std.fmt.allocPrint(
+                allocator,
+                "{s} pin {s} connected to multiple nets: \"{s}\" and \"{s}\"",
+                .{ p.ref_des, p.pin, gop.value_ptr.*, base },
+            ) catch continue;
+            violations.append(allocator, .{
+                .kind = .pin_multi_net,
+                .severity = .@"error",
+                .message = msg,
+                .ref_des = p.ref_des,
+                .net = base,
             }) catch {};
         }
     }

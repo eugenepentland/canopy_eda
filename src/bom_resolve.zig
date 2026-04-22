@@ -7,6 +7,42 @@ const Property = env_mod.Property;
 const bom_mod = @import("bom.zig");
 const FlatInfo = bom_mod.FlatInfo;
 
+/// Drop `manufacturer` and `mpn` from a property list. Used when the
+/// component family on an instance changes: the UUID stays stable for PCB
+/// identity, but the stored part info is now stale and must be re-resolved
+/// from the new component's definition.
+fn filterOutPartProps(allocator: std.mem.Allocator, props: []const Property) ![]const Property {
+    var out: std.ArrayListUnmanaged(Property) = .empty;
+    for (props) |p| {
+        if (std.mem.eql(u8, p.key, "manufacturer")) continue;
+        if (std.mem.eql(u8, p.key, "mpn")) continue;
+        try out.append(allocator, p);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Decide which properties from the old BOM entry to carry forward onto the
+/// new instance. Same component → full passthrough. Different component
+/// (family swap) → drop manufacturer/mpn so the new component's freshly-
+/// evaluated values (or Pass 4's parts-DB lookup) take effect. Empty result
+/// → don't store anything; the fallback in saveBom to `info.properties` is
+/// the desired path.
+fn carryForwardProps(
+    allocator: std.mem.Allocator,
+    props_map: *std.StringHashMap([]const Property),
+    info: FlatInfo,
+    old_entry: bom_mod.BomEntry,
+) !void {
+    if (old_entry.properties.len == 0) return;
+    const same_component = std.mem.eql(u8, old_entry.component, info.component);
+    const props_to_keep = if (same_component)
+        old_entry.properties
+    else
+        try filterOutPartProps(allocator, old_entry.properties);
+    if (props_to_keep.len == 0) return;
+    try props_map.put(info.ref_des, props_to_keep);
+}
+
 /// Resolve identities and BOM data for all instances in a design block.
 pub fn resolveIdentities(
     allocator: std.mem.Allocator,
@@ -60,9 +96,7 @@ pub fn resolveIdentities(
             if (old_by_id.get(info.id)) |idx| {
                 if (!claimed[idx]) {
                     try result_map.put(info.ref_des, try allocator.dupe(u8, old_entries[idx].uuid));
-                    if (old_entries[idx].properties.len > 0) {
-                        try props_map.put(info.ref_des, old_entries[idx].properties);
-                    }
+                    try carryForwardProps(allocator, &props_map, info, old_entries[idx]);
                     claimed[idx] = true;
                 }
             }
@@ -75,9 +109,7 @@ pub fn resolveIdentities(
         if (old_by_ref.get(info.ref_des)) |idx| {
             if (claimed[idx]) continue;
             try result_map.put(info.ref_des, try allocator.dupe(u8, old_entries[idx].uuid));
-            if (old_entries[idx].properties.len > 0) {
-                try props_map.put(info.ref_des, old_entries[idx].properties);
-            }
+            try carryForwardProps(allocator, &props_map, info, old_entries[idx]);
             claimed[idx] = true;
         }
     }

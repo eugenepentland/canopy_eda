@@ -91,11 +91,11 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
         const field = cl[0].asAtom() orelse continue;
 
         if (std.mem.eql(u8, field, "symbol")) {
-            symbol_name = cl[1].asAtom() orelse "";
+            symbol_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
         } else if (std.mem.eql(u8, field, "footprint")) {
-            footprint_name = cl[1].asAtom() orelse "";
+            footprint_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
         } else if (std.mem.eql(u8, field, "pinout")) {
-            pinout_name = cl[1].asAtom() orelse "";
+            pinout_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
         } else if (std.mem.eql(u8, field, "bus")) {
             // (bus "name" pin1 pin2 pin3 ...)
             const bus_name = cl[1].asString() orelse (cl[1].asAtom() orelse continue);
@@ -145,15 +145,15 @@ pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalE
     for (children[1..]) |child| {
         if (child.isForm("symbol")) {
             const cl = child.asList().?;
-            if (cl.len >= 2) symbol_name = cl[1].asAtom() orelse "";
+            if (cl.len >= 2) symbol_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
         }
         if (child.isForm("footprint")) {
             const cl = child.asList().?;
-            if (cl.len >= 2) footprint_name = cl[1].asAtom() orelse "";
+            if (cl.len >= 2) footprint_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
         }
         if (child.isForm("parameter")) {
             const cl = child.asList().?;
-            if (cl.len >= 3) param_type = cl[2].asAtom() orelse "";
+            if (cl.len >= 3) param_type = cl[2].asAtom() orelse cl[2].asString() orelse "";
         }
     }
 

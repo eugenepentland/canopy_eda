@@ -204,3 +204,192 @@ pub fn collectNets(
         try collectNets(allocator, sb.block, sub_prefix, list);
     }
 }
+
+pub const FlatTie = struct {
+    a: []const u8,
+    b: []const u8,
+};
+
+/// Gather (net "A" "B" ...) ties from the block tree, prefixing each side with
+/// the sub-block path so they can be matched against names in the flat net
+/// list produced by `collectNets`.
+pub fn collectNetTies(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    prefix: []const u8,
+    list: *std.ArrayListUnmanaged(FlatTie),
+) !void {
+    for (block.net_ties) |t| {
+        const a = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, t.a })
+        else
+            try allocator.dupe(u8, t.a);
+        const b = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, t.b })
+        else
+            try allocator.dupe(u8, t.b);
+        try list.append(allocator, .{ .a = a, .b = b });
+    }
+    for (block.sub_blocks) |sb| {
+        const sub_prefix = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, sb.name })
+        else
+            try allocator.dupe(u8, sb.name);
+        try collectNetTies(allocator, sb.block, sub_prefix, list);
+    }
+}
+
+/// Prefer topmost (fewest slashes), then shortest, then lexicographic.
+fn preferName(candidate: []const u8, incumbent: []const u8) bool {
+    const cs = std.mem.count(u8, candidate, "/");
+    const is_ = std.mem.count(u8, incumbent, "/");
+    if (cs != is_) return cs < is_;
+    if (candidate.len != incumbent.len) return candidate.len < incumbent.len;
+    return std.mem.lessThan(u8, candidate, incumbent);
+}
+
+/// Merge nets in `nets` according to `ties`. A tie `(a, b)` means the two net
+/// names refer to the same electrical net. Per-pin split nets of the form
+/// `<base>.<ref>.<pin>` get renamed alongside their base when the base is
+/// merged, so `buck/VIN.U12.VIN_1` follows `buck/VIN` → `VBATT` to become
+/// `VBATT.U12.VIN_1` (still a separate micro-net for decoupling, but rooted on
+/// the right parent name).
+pub fn applyNetTies(
+    allocator: std.mem.Allocator,
+    nets: *std.ArrayListUnmanaged(FlatNet),
+    ties: []const FlatTie,
+) !void {
+    if (ties.len == 0 and nets.items.len == 0) return;
+
+    var name_to_idx: std.StringHashMapUnmanaged(u32) = .empty;
+    defer name_to_idx.deinit(allocator);
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer names.deinit(allocator);
+    var parent: std.ArrayListUnmanaged(u32) = .empty;
+    defer parent.deinit(allocator);
+
+    const getOrAdd = struct {
+        fn f(
+            al: std.mem.Allocator,
+            n: []const u8,
+            idx_map: *std.StringHashMapUnmanaged(u32),
+            all_names: *std.ArrayListUnmanaged([]const u8),
+            par: *std.ArrayListUnmanaged(u32),
+        ) !u32 {
+            const gop = try idx_map.getOrPut(al, n);
+            if (gop.found_existing) return gop.value_ptr.*;
+            const i: u32 = @intCast(all_names.items.len);
+            try all_names.append(al, n);
+            try par.append(al, i);
+            gop.value_ptr.* = i;
+            return i;
+        }
+    }.f;
+
+    const find = struct {
+        fn f(par: *std.ArrayListUnmanaged(u32), idx: u32) u32 {
+            var i = idx;
+            while (par.items[i] != i) : (i = par.items[i]) {}
+            var j = idx;
+            while (par.items[j] != i) {
+                const next = par.items[j];
+                par.items[j] = i;
+                j = next;
+            }
+            return i;
+        }
+    }.f;
+
+    // A name is "live" (eligible to be the canonical net name) if either it
+    // has pins, or it's on the LHS of a tie — i.e., the user wrote it as the
+    // preferred name in a `(net "LHS" "rhs" ...)` form. Without this, a tie
+    // LHS like `PG_3V3` (all its pins come in through other nets) would be
+    // dropped from canonical selection and a sub-block-prefixed RHS would
+    // win. RHS names aren't marked live because auto-aliases created by
+    // symbol pin-function lookup can produce junk names like "1" or "5"
+    // that would otherwise hijack shorter-wins preference.
+    var live_names: std.StringHashMapUnmanaged(void) = .empty;
+    defer live_names.deinit(allocator);
+    for (nets.items) |net| {
+        _ = try getOrAdd(allocator, net.name, &name_to_idx, &names, &parent);
+        try live_names.put(allocator, net.name, {});
+    }
+    for (ties) |t| {
+        const ai = try getOrAdd(allocator, t.a, &name_to_idx, &names, &parent);
+        const bi = try getOrAdd(allocator, t.b, &name_to_idx, &names, &parent);
+        try live_names.put(allocator, t.a, {});
+        const ra = find(&parent, ai);
+        const rb = find(&parent, bi);
+        if (ra != rb) parent.items[rb] = ra;
+    }
+
+    // Canonical name per root — only among names that actually have pins.
+    var canonical: std.AutoHashMapUnmanaged(u32, u32) = .empty;
+    defer canonical.deinit(allocator);
+    for (names.items, 0..) |nm, i| {
+        if (!live_names.contains(nm)) continue;
+        const root = find(&parent, @intCast(i));
+        const existing = canonical.get(root);
+        if (existing) |best_i| {
+            if (preferName(nm, names.items[best_i])) {
+                try canonical.put(allocator, root, @intCast(i));
+            }
+        } else {
+            try canonical.put(allocator, root, @intCast(i));
+        }
+    }
+
+    // old_name → canonical_name (only when they differ). If a root has no
+    // live name (all tie-only), skip — nothing to rename.
+    var rename_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer rename_map.deinit(allocator);
+    for (names.items, 0..) |nm, i| {
+        const root = find(&parent, @intCast(i));
+        const canon_i = canonical.get(root) orelse continue;
+        const canon_name = names.items[canon_i];
+        if (!std.mem.eql(u8, nm, canon_name)) {
+            try rename_map.put(allocator, nm, canon_name);
+        }
+    }
+
+    // Rename per-pin split nets: <base>.<ref>.<pin> inherits base's new name.
+    var per_pin_renames: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer per_pin_renames.deinit(allocator);
+    for (nets.items) |net| {
+        const dot = std.mem.indexOfScalar(u8, net.name, '.') orelse continue;
+        const base = net.name[0..dot];
+        const suffix = net.name[dot..];
+        const canon_base = rename_map.get(base) orelse continue;
+        const new_name = try std.fmt.allocPrint(allocator, "{s}{s}", .{ canon_base, suffix });
+        try per_pin_renames.put(allocator, net.name, new_name);
+    }
+
+    // Rebuild nets list, merging pins by canonical name.
+    var merged: std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged(FlatPin)) = .empty;
+    defer {
+        var it = merged.iterator();
+        while (it.next()) |e| e.value_ptr.deinit(allocator);
+        merged.deinit(allocator);
+    }
+
+    for (nets.items) |net| {
+        const canon = if (per_pin_renames.get(net.name)) |pn|
+            pn
+        else if (rename_map.get(net.name)) |rn|
+            rn
+        else
+            net.name;
+        const gop = try merged.getOrPut(allocator, canon);
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        for (net.pins) |p| try gop.value_ptr.append(allocator, p);
+    }
+
+    nets.clearRetainingCapacity();
+    var mit = merged.iterator();
+    while (mit.next()) |entry| {
+        try nets.append(allocator, .{
+            .name = entry.key_ptr.*,
+            .pins = try entry.value_ptr.toOwnedSlice(allocator),
+        });
+    }
+}

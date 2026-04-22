@@ -186,6 +186,17 @@ pub const Tokenizer = struct {
                 }
             }
         }
+        // If followed by an atom-continuation char, this wasn't a number at
+        // all — it's an identifier like "204928-0301.stp" or "12.5abc".
+        // Slurp the rest as an atom.
+        if (self.peek()) |ch| {
+            if (isAtomContinue(ch)) {
+                while (self.peek()) |c2| {
+                    if (isAtomContinue(c2)) self.advance() else break;
+                }
+                return Token{ .tag = .atom, .text = self.source[start..self.pos], .span = s };
+            }
+        }
         const text = self.source[start..self.pos];
         if (is_float) {
             return Token{ .tag = .float, .text = text, .span = s };

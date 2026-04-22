@@ -94,7 +94,10 @@ fn writeModelBlock(w: anytype, model_name: []const u8, model_offset: ?[3]f64, mo
     try w.writeAll("\"\n");
     try w.print("    (offset (xyz {d:.4} {d:.4} {d:.4}))\n", .{ -off[0], -off[1], -off[2] });
     try w.writeAll("    (scale (xyz 1 1 1))\n");
-    try w.print("    (rotate (xyz {d:.4} {d:.4} {d:.4}))\n", .{ rot[0], rot[1], rot[2] });
+    // KiCad .kicad_mod stores the X rotation negated vs. the 3D viewer display.
+    // Our config uses right-handed X rotation (matches the in-tool preview);
+    // negate X here so KiCad shows the same orientation the user set.
+    try w.print("    (rotate (xyz {d:.4} {d:.4} {d:.4}))\n", .{ -rot[0], rot[1], rot[2] });
     try w.writeAll("  )\n");
 }
 
@@ -164,7 +167,9 @@ pub fn exportFootprintMod(allocator: std.mem.Allocator, source: []const u8, mode
         try w.writeAll("\"\n");
         try w.print("    (offset (xyz {d:.4} {d:.4} {d:.4}))\n", .{ -off[0], -off[1], -off[2] });
         try w.writeAll("    (scale (xyz 1 1 1))\n");
-        try w.print("    (rotate (xyz {d:.4} {d:.4} {d:.4}))\n", .{ rot[0], rot[1], rot[2] });
+        // See note in writeModelBlock — KiCad negates X rotation vs. the in-tool
+        // viewer's right-handed convention.
+        try w.print("    (rotate (xyz {d:.4} {d:.4} {d:.4}))\n", .{ -rot[0], rot[1], rot[2] });
         try w.writeAll("  )\n");
     }
 

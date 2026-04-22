@@ -10,25 +10,47 @@ const drc_mod = @import("../drc.zig");
 const layout_mod = @import("../layout.zig");
 const bom = @import("../bom.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
+const ids = @import("../eval/ids.zig");
 
 /// Tools that mutate .sexp files — gated to writer/admin roles.
 pub fn isMutationTool(name: []const u8) bool {
-    const mutators = [_][]const u8{ "edit_value", "write_design", "restore_version" };
+    const mutators = [_][]const u8{
+        "edit_value",
+        "write_design",
+        "edit_section",
+        "replace_instance",
+        "restore_version",
+        "edit_note",
+        "add_import",
+        "set_instance_pin",
+        "add_component_parameter",
+    };
     for (mutators) |m| if (std.mem.eql(u8, name, m)) return true;
     return false;
 }
 
 pub const tools_list_result =
     \\{"tools":[
-    \\{"name":"list_designs","description":"List design names available in this project (one per .sexp file in src/).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
+    \\{"name":"list_designs","description":"List designs available in this project (one per .sexp file in src/ containing a top-level design-block). Returns an array of objects with fields: name (file basename), title (human-readable design-block title), sections (array of top-level section names), instance_count, net_count, mtime (Unix seconds of last source modification), build_ok (false if the design failed to evaluate, in which case counts and sections are empty).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
     \\{"name":"read_design","description":"Return the full .sexp source text for a design. Agents should read, then optionally call write_design with an edited version.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Design name (without .sexp)"}},"required":["name"],"additionalProperties":false}},
     \\{"name":"write_design","description":"Create or overwrite a design's .sexp with the full new source text. The previous version is auto-snapshotted before the write. Triggers a live rebuild and returns the new version + snapshot id.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"source":{"type":"string","description":"Full S-expression source for the design"}},"required":["name","source"],"additionalProperties":false}},
     \\{"name":"edit_value","description":"Quick single-value tweak: change a component's value by reference designator (e.g. set C3 to 100nF). Same snapshot/rebuild semantics as write_design.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"ref":{"type":"string","description":"Reference designator like C3, R1, U2"},"value":{"type":"string","description":"New value string"}},"required":["name","ref","value"],"additionalProperties":false}},
+    \\{"name":"edit_section","description":"Replace an entire (section \"SECTION_NAME\" ...) form with new_source. Use this when changing one section of the design instead of rewriting the whole file. new_source must include the outer (section ...) parens. Fails with AmbiguousMatch if the section name appears more than once. Snapshots and rebuilds like write_design.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Design name"},"section_name":{"type":"string","description":"Exact name of the section to replace, as in (section \"Name\" ...)"},"new_source":{"type":"string","description":"Full replacement (section ...) form"}},"required":["name","section_name","new_source"],"additionalProperties":false}},
+    \\{"name":"replace_instance","description":"Replace an entire (instance \"REF\" ...) form by reference designator. Use this to add/remove pins, swap the component family, or change any single-instance detail without rewriting the surrounding section. new_source must include the outer (instance ...) parens. Snapshots and rebuilds.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"ref":{"type":"string","description":"Reference designator of the instance to replace"},"new_source":{"type":"string","description":"Full replacement (instance ...) form"}},"required":["name","ref","new_source"],"additionalProperties":false}},
     \\{"name":"get_schematic","description":"Fetch the current scene graph JSON for a design. This is the same payload the browser viewer renders.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}},
     \\{"name":"get_version","description":"Return the current live version integer for a design. Increments on every mutation.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}},
-    \\{"name":"run_checks","description":"Run ERC and DRC together on a design. Returns {erc: [...violations], drc: {violations,count} | null}. DRC is null when there's no companion {name}-board.sexp.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}},
+    \\{"name":"run_checks","description":"Run ERC and/or DRC on a design. Optional filters: scope (\"erc\"|\"drc\"|\"both\", default \"both\"); severity (\"error\"|\"warning\"|\"info\", default all); changed_since (snapshot id from list_history — only ERC violations whose ref_des or net was added/removed since that snapshot are returned). DRC is not filtered by changed_since because its violations carry no structured ref. Returns {scope,filtered,changed_refs,changed_nets,erc:[...],drc:{violations,count}|null}.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"scope":{"type":"string","enum":["erc","drc","both"]},"severity":{"type":"string","enum":["error","warning","info"]},"changed_since":{"type":"string","description":"Snapshot id to diff the current design against; ERC violations are filtered to those touching instances or nets that differ."}},"required":["name"],"additionalProperties":false}},
     \\{"name":"list_history","description":"List snapshot ids for a design, newest first. Each id is a timestamp usable with restore_version.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}},
-    \\{"name":"restore_version","description":"Restore a design to a prior snapshot. The current state is itself snapshotted first, so the restore is undoable.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"id":{"type":"string","description":"Snapshot id from list_history"}},"required":["name","id"],"additionalProperties":false}}
+    \\{"name":"restore_version","description":"Restore a design to a prior snapshot. The current state is itself snapshotted first, so the restore is undoable.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"id":{"type":"string","description":"Snapshot id from list_history"}},"required":["name","id"],"additionalProperties":false}},
+    \\{"name":"list_library","description":"List all names available in the project's lib/. Returns {components,modules,pinouts,footprints}, each entry with name + optional description. Use these names in (import ...) forms and instance definitions.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
+    \\{"name":"read_library_file","description":"Return the .sexp source for a library file — use this to inspect a component's pin list, a module's parameters, or a footprint's pads before wiring them up.","inputSchema":{"type":"object","properties":{"kind":{"type":"string","enum":["component","module","pinout","footprint"],"description":"Which lib/ subdirectory to read from"},"name":{"type":"string","description":"File name without .sexp"}},"required":["kind","name"],"additionalProperties":false}},
+    \\{"name":"edit_note","description":"Replace the text of a single (note \"...\") form, located by a substring match on the note's current text. Returns AmbiguousMatch if the substring matches more than one note; use the full current text to disambiguate.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"match":{"type":"string","description":"Substring of the note's current text used to locate it; must uniquely identify one note"},"new_text":{"type":"string","description":"Full replacement text for the note body (no surrounding quotes)"}},"required":["name","match","new_text"],"additionalProperties":false}},
+    \\{"name":"add_import","description":"Add one item to the top-level (import ...) list. Dedup is word-boundary aware; returns DuplicateImport if the item already appears.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"item":{"type":"string","description":"Library item name (atom-like; no whitespace, quotes, or parens)"}},"required":["name","item"],"additionalProperties":false}},
+    \\{"name":"set_instance_pin","description":"Change one pin on an instance to a new net without rewriting the whole instance. Lighter-weight alternative to replace_instance for single-pin edits.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"ref":{"type":"string"},"pin":{"type":"string"},"net":{"type":"string"}},"required":["name","ref","pin","net"],"additionalProperties":false}},
+    \\{"name":"list_instances","description":"List every instance in the design with its ref_des (auto-assigned), label (user-given name from source), component family, symbol, value, and pin count. Use this to bridge between source-side names (stm32, expansion) and board-side ref_des (U1, U8).","inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}},
+    \\{"name":"list_free_pins","description":"List unassigned pins on an instance with their default pinout function names and a best-effort category (gpio|power|clock|analog|other). Use for picking GPIOs for new peripherals without scanning the full pinout file.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"ref":{"type":"string","description":"Reference designator of the instance (e.g. U1)"},"filter":{"type":"string","enum":["gpio","power","clock","analog","other"],"description":"Optional category filter"}},"required":["name","ref"],"additionalProperties":false}},
+    \\{"name":"get_net","description":"Return every pin connection on a net plus any passive instances (R/L/C/F/D) on it. Use to audit decoupling or verify wiring without scanning the whole source.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"net":{"type":"string"}},"required":["name","net"],"additionalProperties":false}},
+    \\{"name":"add_component_parameter","description":"Append a (parameter \"NAME\" TYPE) declaration to a library component file under lib/components/. Use to fix ERC \"missing value\" errors on user-uploaded components that lack a parameter slot. Snapshots the prior library file to history/_lib. Does not rebuild any design — re-run a build to pick up the change.","inputSchema":{"type":"object","properties":{"component":{"type":"string","description":"Component file name (without .sexp)"},"param_name":{"type":"string","description":"Parameter name (e.g. value, color)"},"param_type":{"type":"string","description":"Parameter type atom (e.g. string, capacitance, resistance, number)"}},"required":["component","param_name","param_type"],"additionalProperties":false}}
     \\]}
 ;
 
@@ -59,13 +81,25 @@ fn callInner(
     const w = out.writer(allocator);
 
     if (std.mem.eql(u8, tool_name, "list_designs")) {
-        const names = try listDesignNames(allocator, project_dir);
+        const summaries = try listDesignSummaries(allocator, project_dir);
         try w.writeAll("[");
-        for (names, 0..) |n, i| {
+        for (summaries, 0..) |s, i| {
             if (i > 0) try w.writeAll(",");
-            try w.writeAll("\"");
-            try w.writeAll(n);
-            try w.writeAll("\"");
+            try w.writeAll("{\"name\":");
+            try writeJsonString(w, s.name);
+            try w.writeAll(",\"title\":");
+            try writeJsonString(w, s.title);
+            try w.writeAll(",\"sections\":[");
+            for (s.sections, 0..) |sec, si| {
+                if (si > 0) try w.writeAll(",");
+                try writeJsonString(w, sec);
+            }
+            try w.print("],\"instance_count\":{d},\"net_count\":{d},\"mtime\":{d},\"build_ok\":{s}}}", .{
+                s.instance_count,
+                s.net_count,
+                s.mtime_sec,
+                if (s.build_ok) "true" else "false",
+            });
         }
         try w.writeAll("]");
         return true;
@@ -117,19 +151,46 @@ fn callInner(
         return true;
     }
 
+    if (std.mem.eql(u8, tool_name, "edit_section")) {
+        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+        const section_name = requireString(args_val, "section_name") orelse return missingArg(out, allocator, "section_name");
+        const new_source = requireString(args_val, "new_source") orelse return missingArg(out, allocator, "new_source");
+        const result = edit.editSectionCore(allocator, project_dir, name, section_name, new_source) catch |err| return editErrorMsg(out, allocator, err);
+        try w.print("{{\"ok\":true,\"version\":{d},\"snapshot\":", .{result.version});
+        if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
+        try w.writeAll("}");
+        return true;
+    }
+
+    if (std.mem.eql(u8, tool_name, "replace_instance")) {
+        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+        const ref = requireString(args_val, "ref") orelse return missingArg(out, allocator, "ref");
+        const new_source = requireString(args_val, "new_source") orelse return missingArg(out, allocator, "new_source");
+        const result = edit.replaceInstanceCore(allocator, project_dir, name, ref, new_source) catch |err| return editErrorMsg(out, allocator, err);
+        try w.print("{{\"ok\":true,\"version\":{d},\"snapshot\":", .{result.version});
+        if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
+        try w.writeAll("}");
+        return true;
+    }
+
     if (std.mem.eql(u8, tool_name, "run_checks")) {
         const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        return try runChecks(allocator, project_dir, name, w);
+        const scope = optionalString(args_val, "scope") orelse "both";
+        const severity = optionalString(args_val, "severity");
+        const changed_since = optionalString(args_val, "changed_since");
+        return try runChecks(allocator, project_dir, name, scope, severity, changed_since, w);
     }
 
     if (std.mem.eql(u8, tool_name, "list_history")) {
         const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const ids = try history.listSnapshots(allocator, project_dir, name);
+        const snaps = try history.listSnapshots(allocator, project_dir, name);
         try w.writeAll("{\"snapshots\":[");
-        for (ids, 0..) |id, i| {
+        for (snaps, 0..) |s, i| {
             if (i > 0) try w.writeAll(",");
             try w.writeAll("{\"id\":");
-            try writeJsonString(w, id);
+            try writeJsonString(w, s.id);
+            try w.writeAll(",\"description\":");
+            if (s.description) |d| try writeJsonString(w, d) else try w.writeAll("null");
             try w.writeAll("}");
         }
         try w.writeAll("]}");
@@ -150,16 +211,190 @@ fn callInner(
         return true;
     }
 
+    if (std.mem.eql(u8, tool_name, "list_library")) {
+        try w.writeAll("{");
+        const kinds = [_]struct { field: []const u8, sub: []const u8 }{
+            .{ .field = "components", .sub = "components" },
+            .{ .field = "modules", .sub = "modules" },
+            .{ .field = "pinouts", .sub = "pinouts" },
+            .{ .field = "footprints", .sub = "footprints" },
+        };
+        for (kinds, 0..) |k, i| {
+            if (i > 0) try w.writeAll(",");
+            try w.print("\"{s}\":", .{k.field});
+            try listLibrarySubdir(allocator, project_dir, k.sub, w);
+        }
+        try w.writeAll("}");
+        return true;
+    }
+
+    if (std.mem.eql(u8, tool_name, "read_library_file")) {
+        const kind = requireString(args_val, "kind") orelse return missingArg(out, allocator, "kind");
+        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+        const sub = libraryKindSubdir(kind) orelse {
+            try w.print("error: invalid kind \"{s}\" (expected component|module|pinout|footprint)", .{kind});
+            return false;
+        };
+        // Path-traversal guard.
+        if (name.len == 0 or std.mem.indexOf(u8, name, "..") != null or std.mem.indexOfAny(u8, name, "/\\") != null) {
+            try w.writeAll("error: invalid name");
+            return false;
+        }
+        const path = try std.fmt.allocPrint(allocator, "{s}/lib/{s}/{s}.sexp", .{ project_dir, sub, name });
+        defer allocator.free(path);
+        const src = std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch {
+            try w.print("error: not found: lib/{s}/{s}.sexp", .{ sub, name });
+            return false;
+        };
+        try w.writeAll("{\"source\":");
+        try writeJsonString(w, src);
+        try w.writeAll("}");
+        return true;
+    }
+
+    if (std.mem.eql(u8, tool_name, "edit_note")) {
+        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+        const match = requireString(args_val, "match") orelse return missingArg(out, allocator, "match");
+        const new_text = requireString(args_val, "new_text") orelse return missingArg(out, allocator, "new_text");
+        const result = edit.editNoteCore(allocator, project_dir, name, match, new_text) catch |err| return editErrorMsg(out, allocator, err);
+        try w.print("{{\"ok\":true,\"version\":{d},\"snapshot\":", .{result.version});
+        if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
+        try w.writeAll("}");
+        return true;
+    }
+
+    if (std.mem.eql(u8, tool_name, "add_import")) {
+        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+        const item = requireString(args_val, "item") orelse return missingArg(out, allocator, "item");
+        const result = edit.addImportCore(allocator, project_dir, name, item) catch |err| return editErrorMsg(out, allocator, err);
+        try w.print("{{\"ok\":true,\"version\":{d},\"snapshot\":", .{result.version});
+        if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
+        try w.writeAll("}");
+        return true;
+    }
+
+    if (std.mem.eql(u8, tool_name, "set_instance_pin")) {
+        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+        const ref = requireString(args_val, "ref") orelse return missingArg(out, allocator, "ref");
+        const pin = requireString(args_val, "pin") orelse return missingArg(out, allocator, "pin");
+        const net = requireString(args_val, "net") orelse return missingArg(out, allocator, "net");
+        const result = edit.setInstancePinCore(allocator, project_dir, name, ref, pin, net) catch |err| return editErrorMsg(out, allocator, err);
+        try w.print("{{\"ok\":true,\"version\":{d},\"snapshot\":", .{result.version});
+        if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
+        try w.writeAll("}");
+        return true;
+    }
+
+    if (std.mem.eql(u8, tool_name, "list_instances")) {
+        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+        return try listInstances(allocator, project_dir, name, w);
+    }
+
+    if (std.mem.eql(u8, tool_name, "list_free_pins")) {
+        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+        const ref = requireString(args_val, "ref") orelse return missingArg(out, allocator, "ref");
+        const filter = optionalString(args_val, "filter");
+        return try listFreePins(allocator, project_dir, name, ref, filter, w);
+    }
+
+    if (std.mem.eql(u8, tool_name, "get_net")) {
+        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+        const net = requireString(args_val, "net") orelse return missingArg(out, allocator, "net");
+        return try getNet(allocator, project_dir, name, net, w);
+    }
+
+    if (std.mem.eql(u8, tool_name, "add_component_parameter")) {
+        const component = requireString(args_val, "component") orelse return missingArg(out, allocator, "component");
+        const param_name = requireString(args_val, "param_name") orelse return missingArg(out, allocator, "param_name");
+        const param_type = requireString(args_val, "param_type") orelse return missingArg(out, allocator, "param_type");
+        const result = edit.addComponentParameterCore(allocator, project_dir, component, param_name, param_type) catch |err| return editErrorMsg(out, allocator, err);
+        try w.writeAll("{\"ok\":true,\"snapshot\":");
+        if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
+        try w.writeAll("}");
+        return true;
+    }
+
     try w.print("error: unknown tool \"{s}\"", .{tool_name});
     return false;
+}
+
+fn libraryKindSubdir(kind: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, kind, "component")) return "components";
+    if (std.mem.eql(u8, kind, "module")) return "modules";
+    if (std.mem.eql(u8, kind, "pinout")) return "pinouts";
+    if (std.mem.eql(u8, kind, "footprint")) return "footprints";
+    return null;
+}
+
+/// Write a JSON array of {name, description} objects for every .sexp file
+/// in `{project_dir}/lib/{sub}/`. Description is extracted from the first
+/// top-level (description "...") form in the file, or empty if absent.
+fn listLibrarySubdir(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    sub: []const u8,
+    w: anytype,
+) !void {
+    const dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/{s}", .{ project_dir, sub });
+    defer allocator.free(dir_path);
+
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+        try w.writeAll("[]");
+        return;
+    };
+    defer dir.close();
+
+    try w.writeAll("[");
+    var first = true;
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind != .file and entry.kind != .sym_link) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".sexp")) continue;
+        const base = entry.name[0 .. entry.name.len - ".sexp".len];
+        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
+        defer allocator.free(full_path);
+        const description = extractDescription(allocator, full_path);
+        defer if (description) |d| allocator.free(d);
+
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.writeAll("{\"name\":");
+        try writeJsonString(w, base);
+        try w.writeAll(",\"description\":");
+        if (description) |d| try writeJsonString(w, d) else try w.writeAll("\"\"");
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+}
+
+/// Find the first `(description "...")` form in the file and return its
+/// string value. Returns null if absent. Caller owns the returned memory.
+fn extractDescription(allocator: std.mem.Allocator, path: []const u8) ?[]const u8 {
+    const src = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return null;
+    defer allocator.free(src);
+    const marker = "(description \"";
+    const idx = std.mem.indexOf(u8, src, marker) orelse return null;
+    const start = idx + marker.len;
+    const end = std.mem.indexOfScalarPos(u8, src, start, '"') orelse return null;
+    return allocator.dupe(u8, src[start..end]) catch null;
 }
 
 fn runChecks(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
+    scope: []const u8,
+    severity_filter: ?[]const u8,
+    changed_since: ?[]const u8,
     w: anytype,
 ) !bool {
+    const want_erc = std.mem.eql(u8, scope, "erc") or std.mem.eql(u8, scope, "both");
+    const want_drc = std.mem.eql(u8, scope, "drc") or std.mem.eql(u8, scope, "both");
+    if (!want_erc and !want_drc) {
+        try w.print("error: invalid scope \"{s}\" (expected erc|drc|both)", .{scope});
+        return false;
+    }
+
     const path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
     defer allocator.free(path);
     var eval = Evaluator.init(allocator, project_dir);
@@ -199,15 +434,101 @@ fn runChecks(
     defer allocator.free(bom_path);
     bom.resolveIdentities(allocator, block, bom_path, project_dir) catch {};
 
-    const erc_violations = try erc_mod.runErc(allocator, block);
-    const erc_json = try erc_mod.writeViolationsJson(allocator, erc_violations);
+    // If changed_since is set, compute the symmetric-difference sets of
+    // ref_des and net names between the prior snapshot and the current
+    // design. ERC violations are filtered to those touching these sets.
+    // DRC filtering is not supported — documented in the schema.
+    var changed_refs: std.StringHashMapUnmanaged(void) = .empty;
+    defer changed_refs.deinit(allocator);
+    var changed_nets: std.StringHashMapUnmanaged(void) = .empty;
+    defer changed_nets.deinit(allocator);
+    var have_change_filter = false;
+    if (changed_since) |cs| {
+        // Validate snapshot id for path traversal.
+        if (cs.len == 0 or std.mem.indexOf(u8, cs, "..") != null or std.mem.indexOfAny(u8, cs, "/\\") != null) {
+            try w.writeAll("error: invalid changed_since id");
+            return false;
+        }
+        const snap_path = try std.fmt.allocPrint(allocator, "{s}/history/{s}/{s}/{s}.sexp", .{ project_dir, name, cs, name });
+        defer allocator.free(snap_path);
+        var eval_old = Evaluator.init(allocator, project_dir);
+        defer eval_old.deinit();
+        if (eval_old.evalFile(snap_path)) |old_result| {
+            const old_block: *const env_mod.DesignBlock = switch (old_result) {
+                .design_block => |b| b,
+                .board => |b| b.design,
+                else => {
+                    try w.writeAll("error: snapshot did not evaluate to a design");
+                    return false;
+                },
+            };
+            try diffSets(allocator, old_block, block, &changed_refs, &changed_nets);
+            have_change_filter = true;
+        } else |_| {
+            try w.writeAll("error: could not load snapshot");
+            return false;
+        }
+    }
 
-    try w.writeAll("{\"erc\":");
-    try w.writeAll(erc_json);
+    try w.print("{{\"scope\":\"{s}\",\"filtered\":{s}", .{ scope, if (have_change_filter or severity_filter != null) "true" else "false" });
+
+    if (have_change_filter) {
+        try w.writeAll(",\"changed_refs\":[");
+        var it = changed_refs.iterator();
+        var first = true;
+        while (it.next()) |e| {
+            if (!first) try w.writeAll(",");
+            first = false;
+            try writeJsonString(w, e.key_ptr.*);
+        }
+        try w.writeAll("],\"changed_nets\":[");
+        var it2 = changed_nets.iterator();
+        first = true;
+        while (it2.next()) |e| {
+            if (!first) try w.writeAll(",");
+            first = false;
+            try writeJsonString(w, e.key_ptr.*);
+        }
+        try w.writeAll("]");
+    }
+
+    try w.writeAll(",\"erc\":");
+    if (want_erc) {
+        const erc_all = try erc_mod.runErc(allocator, block);
+        try w.writeAll("[");
+        var first = true;
+        for (erc_all) |v| {
+            if (severity_filter) |sf| if (!std.mem.eql(u8, @tagName(v.severity), sf)) continue;
+            if (have_change_filter) {
+                const ref_hit = v.ref_des.len > 0 and changed_refs.contains(v.ref_des);
+                const net_hit = v.net.len > 0 and changed_nets.contains(v.net);
+                if (!ref_hit and !net_hit) continue;
+            }
+            if (!first) try w.writeAll(",");
+            first = false;
+            try w.writeAll("{\"kind\":\"");
+            try w.writeAll(@tagName(v.kind));
+            try w.writeAll("\",\"severity\":\"");
+            try w.writeAll(@tagName(v.severity));
+            try w.writeAll("\",\"message\":");
+            try writeJsonString(w, v.message);
+            if (v.ref_des.len > 0) {
+                try w.writeAll(",\"ref\":");
+                try writeJsonString(w, v.ref_des);
+            }
+            if (v.net.len > 0) {
+                try w.writeAll(",\"net\":");
+                try writeJsonString(w, v.net);
+            }
+            try w.writeAll("}");
+        }
+        try w.writeAll("]");
+    } else {
+        try w.writeAll("null");
+    }
+
     try w.writeAll(",\"drc\":");
-
-    if (board_def) |bd| {
-        _ = bd;
+    if (want_drc and board_def != null) {
         const layout_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.layout", .{ project_dir, name });
         defer allocator.free(layout_path);
         const lay = layout_mod.loadLayout(allocator, layout_path) catch layout_mod.Layout{
@@ -219,16 +540,342 @@ fn runChecks(
         };
         const drc_violations = try drc_mod.runDrc(allocator, block, board_def, project_dir, &lay);
         try w.writeAll("{\"violations\":[");
-        for (drc_violations, 0..) |v, i| {
-            if (i > 0) try w.writeAll(",");
+        var first = true;
+        var emitted: usize = 0;
+        for (drc_violations) |v| {
             const sev: []const u8 = if (v.severity == .error_) "error" else "warning";
+            if (severity_filter) |sf| if (!std.mem.eql(u8, sev, sf)) continue;
+            if (!first) try w.writeAll(",");
+            first = false;
+            emitted += 1;
             try w.print("{{\"kind\":\"{s}\",\"message\":\"{s}\",\"x\":{d:.4},\"y\":{d:.4},\"severity\":\"{s}\"}}", .{ v.kind, v.message, v.x, v.y, sev });
         }
-        try w.print("],\"count\":{d}}}", .{drc_violations.len});
+        try w.print("],\"count\":{d}}}", .{emitted});
     } else {
         try w.writeAll("null");
     }
     try w.writeAll("}");
+    return true;
+}
+
+fn diffSets(
+    allocator: std.mem.Allocator,
+    old_block: *const env_mod.DesignBlock,
+    new_block: *const env_mod.DesignBlock,
+    changed_refs: *std.StringHashMapUnmanaged(void),
+    changed_nets: *std.StringHashMapUnmanaged(void),
+) !void {
+    var old_refs: std.StringHashMapUnmanaged(void) = .empty;
+    defer old_refs.deinit(allocator);
+    var new_refs: std.StringHashMapUnmanaged(void) = .empty;
+    defer new_refs.deinit(allocator);
+    var old_nets: std.StringHashMapUnmanaged(void) = .empty;
+    defer old_nets.deinit(allocator);
+    var new_nets: std.StringHashMapUnmanaged(void) = .empty;
+    defer new_nets.deinit(allocator);
+
+    for (old_block.instances) |i| try old_refs.put(allocator, i.ref_des, {});
+    for (new_block.instances) |i| try new_refs.put(allocator, i.ref_des, {});
+    for (old_block.nets) |n| try old_nets.put(allocator, n.name, {});
+    for (new_block.nets) |n| try new_nets.put(allocator, n.name, {});
+
+    var it = old_refs.iterator();
+    while (it.next()) |e| if (!new_refs.contains(e.key_ptr.*)) try changed_refs.put(allocator, e.key_ptr.*, {});
+    var it2 = new_refs.iterator();
+    while (it2.next()) |e| if (!old_refs.contains(e.key_ptr.*)) try changed_refs.put(allocator, e.key_ptr.*, {});
+
+    var it3 = old_nets.iterator();
+    while (it3.next()) |e| if (!new_nets.contains(e.key_ptr.*)) try changed_nets.put(allocator, e.key_ptr.*, {});
+    var it4 = new_nets.iterator();
+    while (it4.next()) |e| if (!old_nets.contains(e.key_ptr.*)) try changed_nets.put(allocator, e.key_ptr.*, {});
+}
+
+/// Best-effort classification of a pinout function name. Used by
+/// `list_free_pins` to filter and annotate unassigned pins. Heuristics are
+/// tuned for STM32 / common MCU pinouts and will degrade gracefully (return
+/// `.other`) on unfamiliar names — callers should not treat this as authoritative.
+const PinCategory = enum { gpio, power, clock, analog, other };
+
+fn classifyPin(function: []const u8) PinCategory {
+    if (function.len == 0) return .other;
+    // STM32-style port pin: P[A-Z][digits], optionally followed by alt-function text.
+    if (function.len >= 3 and function[0] == 'P' and function[1] >= 'A' and function[1] <= 'Z') {
+        var all_digits = true;
+        for (function[2..]) |c| {
+            if (c < '0' or c > '9') {
+                all_digits = false;
+                break;
+            }
+        }
+        if (all_digits) return .gpio;
+    }
+    // Power: VDD, VSS, VCC, VBAT, VBUS, VREF, VDDA…
+    if (std.mem.startsWith(u8, function, "V") and function.len >= 2) {
+        const rest = function[1..];
+        if (std.mem.startsWith(u8, rest, "DD")) return .power;
+        if (std.mem.startsWith(u8, rest, "SS")) return .power;
+        if (std.mem.startsWith(u8, rest, "CC")) return .power;
+        if (std.mem.startsWith(u8, rest, "BAT")) return .power;
+        if (std.mem.startsWith(u8, rest, "BUS")) return .power;
+        if (std.mem.startsWith(u8, rest, "REF")) return .power;
+    }
+    if (std.mem.eql(u8, function, "GND") or std.mem.startsWith(u8, function, "GND_")) return .power;
+    // Analog: ADC_IN*, A[DI]C prefix, AIN*
+    if (std.mem.startsWith(u8, function, "ADC") or
+        std.mem.startsWith(u8, function, "AIN") or
+        std.mem.startsWith(u8, function, "DAC"))
+        return .analog;
+    // Clock: OSC*, XTAL*, CLK / CLKIN / CLKOUT prefix
+    if (std.mem.startsWith(u8, function, "OSC") or
+        std.mem.startsWith(u8, function, "XTAL") or
+        std.mem.startsWith(u8, function, "CLK"))
+        return .clock;
+    return .other;
+}
+
+fn categoryName(c: PinCategory) []const u8 {
+    return switch (c) {
+        .gpio => "gpio",
+        .power => "power",
+        .clock => "clock",
+        .analog => "analog",
+        .other => "other",
+    };
+}
+
+/// Return a pointer to the evaluated DesignBlock for `name`, or an error string
+/// written to `w` and null return. Caller must call `eval.deinit()` on the
+/// returned evaluator pointer's memory arena (via `defer` in the caller).
+fn listInstances(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    w: anytype,
+) !bool {
+    const path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    defer allocator.free(path);
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    const result = eval.evalFile(path) catch {
+        try w.writeAll("error: build failed");
+        return false;
+    };
+    const block: *const env_mod.DesignBlock = switch (result) {
+        .design_block => |b| b,
+        .board => |b| b.design,
+        else => {
+            try w.writeAll("error: not a design");
+            return false;
+        },
+    };
+
+    try w.writeAll("{\"instances\":[");
+    for (block.instances, 0..) |inst, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"ref_des\":");
+        try writeJsonString(w, inst.ref_des);
+        try w.writeAll(",\"label\":");
+        try writeJsonString(w, inst.label);
+        try w.writeAll(",\"component\":");
+        try writeJsonString(w, inst.component);
+        try w.writeAll(",\"symbol\":");
+        try writeJsonString(w, inst.symbol);
+        try w.writeAll(",\"value\":");
+        try writeJsonString(w, inst.value);
+
+        // Pin count: prefer explicit parts if present (multi-part symbol);
+        // else fall back to the symbol's pinout map size.
+        var pin_count: usize = 0;
+        if (inst.parts.len > 0) {
+            for (inst.parts) |p| pin_count += p.pins.len;
+        } else if (inst.symbol.len > 0) {
+            if (ids.getSymbolPins(&eval, inst.symbol)) |pm| pin_count = pm.count();
+        }
+        try w.print(",\"pin_count\":{d}}}", .{pin_count});
+    }
+    try w.writeAll("]}");
+    return true;
+}
+
+/// Collect every pin of the given instance that does not appear in any
+/// `(pin_groups)` or net mapping inside the design, and emit them as JSON
+/// with function names and classification.
+pub fn listFreePins(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    ref_des: []const u8,
+    filter: ?[]const u8,
+    w: anytype,
+) !bool {
+    const path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    defer allocator.free(path);
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    const result = eval.evalFile(path) catch {
+        try w.writeAll("error: build failed");
+        return false;
+    };
+    const block: *const env_mod.DesignBlock = switch (result) {
+        .design_block => |b| b,
+        .board => |b| b.design,
+        else => {
+            try w.writeAll("error: not a design");
+            return false;
+        },
+    };
+
+    var target: ?*const env_mod.Instance = null;
+    for (block.instances) |*inst| {
+        if (std.mem.eql(u8, inst.ref_des, ref_des)) {
+            target = inst;
+            break;
+        }
+    }
+    if (target == null) {
+        try w.writeAll("error: instance not found");
+        return false;
+    }
+    const inst = target.?;
+    // Prefer the component's explicit pinout name (common case: component
+    // declares `(pinout foo)`), falling back to symbol_name, then inst.symbol.
+    const lookup_name = if (eval.component_cache.get(inst.component)) |cd|
+        (if (cd.pinout_name.len > 0) cd.pinout_name else if (cd.symbol_name.len > 0) cd.symbol_name else inst.symbol)
+    else
+        inst.symbol;
+    if (lookup_name.len == 0) {
+        try w.writeAll("{\"free_pins\":[],\"note\":\"instance has no associated symbol pinout\"}");
+        return true;
+    }
+
+    const pin_map = ids.getSymbolPins(&eval, lookup_name) orelse {
+        try w.writeAll("{\"free_pins\":[],\"note\":\"pinout file not found for symbol\"}");
+        return true;
+    };
+
+    // Collect the set of pins assigned to this ref_des from every net.
+    var assigned: std.StringHashMapUnmanaged(void) = .empty;
+    defer assigned.deinit(allocator);
+    for (block.nets) |net| {
+        for (net.pins) |p| {
+            if (std.mem.eql(u8, p.ref_des, ref_des)) {
+                try assigned.put(allocator, p.pin, {});
+            }
+        }
+    }
+
+    try w.writeAll("{\"free_pins\":[");
+    var it = pin_map.iterator();
+    var first = true;
+    while (it.next()) |e| {
+        const pin_id = e.key_ptr.*;
+        if (assigned.contains(pin_id)) continue;
+        const fname = e.value_ptr.*;
+        const cat = classifyPin(fname);
+        if (filter) |f| if (!std.mem.eql(u8, f, categoryName(cat))) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.writeAll("{\"pin\":");
+        try writeJsonString(w, pin_id);
+        try w.writeAll(",\"function\":");
+        try writeJsonString(w, fname);
+        try w.print(",\"category\":\"{s}\"}}", .{categoryName(cat)});
+    }
+    try w.writeAll("]}");
+    return true;
+}
+
+/// Emit every pin connected to `net_name`, plus every passive instance
+/// (ref_des starting with R/L/C/F/D) whose ref_des appears on the net.
+fn getNet(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    net_name: []const u8,
+    w: anytype,
+) !bool {
+    const path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    defer allocator.free(path);
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    const result = eval.evalFile(path) catch {
+        try w.writeAll("error: build failed");
+        return false;
+    };
+    const block: *const env_mod.DesignBlock = switch (result) {
+        .design_block => |b| b,
+        .board => |b| b.design,
+        else => {
+            try w.writeAll("error: not a design");
+            return false;
+        },
+    };
+
+    var target: ?*const env_mod.Net = null;
+    for (block.nets) |*n| {
+        if (std.mem.eql(u8, n.name, net_name)) {
+            target = n;
+            break;
+        }
+    }
+    if (target == null) {
+        try w.writeAll("error: net not found");
+        return false;
+    }
+    const net = target.?;
+
+    try w.writeAll("{\"name\":");
+    try writeJsonString(w, net.name);
+    try w.writeAll(",\"pins\":[");
+
+    var passive_refs: std.StringHashMapUnmanaged(void) = .empty;
+    defer passive_refs.deinit(allocator);
+
+    for (net.pins, 0..) |p, i| {
+        if (i > 0) try w.writeAll(",");
+        // Look up the function name for this pin via the instance's symbol pinout.
+        var fname: []const u8 = "";
+        for (block.instances) |inst| {
+            if (!std.mem.eql(u8, inst.ref_des, p.ref_des)) continue;
+            if (inst.symbol.len == 0) break;
+            if (ids.getSymbolPins(&eval, inst.symbol)) |pm| {
+                if (pm.get(p.pin)) |f| fname = f;
+            }
+            // Flag passives for the `passives` array below.
+            const c0 = if (inst.ref_des.len > 0) inst.ref_des[0] else 0;
+            if (c0 == 'R' or c0 == 'L' or c0 == 'C' or c0 == 'F' or c0 == 'D') {
+                try passive_refs.put(allocator, inst.ref_des, {});
+            }
+            break;
+        }
+        try w.writeAll("{\"ref_des\":");
+        try writeJsonString(w, p.ref_des);
+        try w.writeAll(",\"pin\":");
+        try writeJsonString(w, p.pin);
+        try w.writeAll(",\"function\":");
+        try writeJsonString(w, fname);
+        try w.writeAll("}");
+    }
+    try w.writeAll("],\"passives\":[");
+
+    var it = passive_refs.iterator();
+    var first = true;
+    while (it.next()) |e| {
+        for (block.instances) |inst| {
+            if (!std.mem.eql(u8, inst.ref_des, e.key_ptr.*)) continue;
+            if (!first) try w.writeAll(",");
+            first = false;
+            try w.writeAll("{\"ref_des\":");
+            try writeJsonString(w, inst.ref_des);
+            try w.writeAll(",\"component\":");
+            try writeJsonString(w, inst.component);
+            try w.writeAll(",\"value\":");
+            try writeJsonString(w, inst.value);
+            try w.writeAll("}");
+            break;
+        }
+    }
+    try w.writeAll("]}");
     return true;
 }
 
@@ -289,6 +936,123 @@ pub fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) ![
         try names.append(allocator, try allocator.dupe(u8, base));
     }
     return names.toOwnedSlice(allocator);
+}
+
+/// Summary of a single design used by both the index page and the MCP
+/// `list_designs` tool. All owned slices are duped into `allocator`.
+pub const DesignSummary = struct {
+    /// File basename without extension.
+    name: []const u8,
+    /// Human-readable title from the design-block form (empty if not evaluable).
+    title: []const u8,
+    /// Top-level section names.
+    sections: []const []const u8,
+    /// Number of instances after evaluation (0 if build failed).
+    instance_count: usize,
+    /// Number of nets after evaluation (0 if build failed).
+    net_count: usize,
+    /// Source file mtime in Unix seconds.
+    mtime_sec: i64,
+    /// Whether the file evaluated cleanly.
+    build_ok: bool,
+};
+
+fn countInstancesInSection(sec: *const env_mod.Section) usize {
+    var n: usize = sec.instances.len;
+    for (sec.sub_sections) |ss| n += countInstancesInSection(&ss);
+    return n;
+}
+
+fn countInstances(block: *const env_mod.DesignBlock) usize {
+    var n: usize = block.instances.len;
+    for (block.sections) |s| n += countInstancesInSection(&s);
+    for (block.sub_blocks) |sb| n += countInstances(sb.block);
+    return n;
+}
+
+fn countNets(block: *const env_mod.DesignBlock) usize {
+    var n: usize = block.nets.len;
+    for (block.sub_blocks) |sb| n += countNets(sb.block);
+    return n;
+}
+
+/// Scan `{project_dir}/src/` for design files and return a summary for each.
+/// Designs that fail to evaluate are still included with build_ok=false so
+/// the UI can surface them instead of silently dropping them.
+pub fn listDesignSummaries(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+) ![]DesignSummary {
+    const src_path = try std.fmt.allocPrint(allocator, "{s}/src", .{project_dir});
+    defer allocator.free(src_path);
+
+    var dir = std.fs.cwd().openDir(src_path, .{ .iterate = true }) catch return &[_]DesignSummary{};
+    defer dir.close();
+
+    var summaries: std.ArrayListUnmanaged(DesignSummary) = .empty;
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind != .file and entry.kind != .sym_link) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".sexp")) continue;
+        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ src_path, entry.name });
+        defer allocator.free(full_path);
+        if (!hasTopLevelDesignBlock(allocator, full_path)) continue;
+
+        const base = try allocator.dupe(u8, entry.name[0 .. entry.name.len - ".sexp".len]);
+
+        var mtime_sec: i64 = 0;
+        if (dir.statFile(entry.name)) |st| {
+            mtime_sec = @intCast(@divTrunc(st.mtime, std.time.ns_per_s));
+        } else |_| {}
+
+        var summary = DesignSummary{
+            .name = base,
+            .title = "",
+            .sections = &.{},
+            .instance_count = 0,
+            .net_count = 0,
+            .mtime_sec = mtime_sec,
+            .build_ok = false,
+        };
+
+        var eval = Evaluator.init(allocator, project_dir);
+        defer eval.deinit();
+        if (eval.evalFile(full_path)) |result| {
+            const block_opt: ?*const env_mod.DesignBlock = switch (result) {
+                .design_block => |b| b,
+                .board => |b| b.design,
+                else => null,
+            };
+            if (block_opt) |block| {
+                summary.title = try allocator.dupe(u8, block.name);
+                var names: std.ArrayListUnmanaged([]const u8) = .empty;
+                for (block.sections) |s| {
+                    try names.append(allocator, try allocator.dupe(u8, s.name));
+                }
+                // Sub-blocks appear as sections on the block diagram too —
+                // include their names so designs that are pure-composition
+                // (e.g. a single sub-block wrapper) still show structure.
+                if (names.items.len == 0) {
+                    for (block.sub_blocks) |sb| {
+                        try names.append(allocator, try allocator.dupe(u8, sb.name));
+                    }
+                }
+                summary.sections = try names.toOwnedSlice(allocator);
+                summary.instance_count = countInstances(block);
+                summary.net_count = countNets(block);
+                summary.build_ok = true;
+            }
+        } else |_| {}
+
+        try summaries.append(allocator, summary);
+    }
+    const slice = try summaries.toOwnedSlice(allocator);
+    std.mem.sort(DesignSummary, slice, {}, struct {
+        fn lessThan(_: void, a: DesignSummary, b: DesignSummary) bool {
+            return a.mtime_sec > b.mtime_sec;
+        }
+    }.lessThan);
+    return slice;
 }
 
 /// Parse the file's top-level forms and return true iff any is a

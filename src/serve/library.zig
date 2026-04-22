@@ -92,10 +92,51 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void
         \\.meta { color: #666; font-size: 0.8rem; }
         \\.desc { color: #999; font-size: 0.85rem; font-family: system-ui, sans-serif; }
         \\.count-info { color: #666; font-size: 0.85rem; margin-bottom: 1rem; }
+        \\.pagination { display: flex; align-items: center; justify-content: center; gap: 0.5rem; margin: 1rem 0; }
+        \\.pagination button { background: #1a1a2e; color: #e0e0e0; border: 1px solid #333; border-radius: 4px; padding: 0.4rem 0.8rem; font-size: 0.85rem; cursor: pointer; font-family: monospace; }
+        \\.pagination button:hover:not(:disabled) { border-color: #58a6ff; color: #58a6ff; }
+        \\.pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
+        \\.pagination .page-info { color: #888; font-size: 0.85rem; font-family: monospace; min-width: 8rem; text-align: center; }
         \\</style></head><body>
     );
     try assets_css.writeNavbar(w, "library");
     try w.writeAll("<div class=\"lib-content\"><h1>Component Library</h1>");
+
+    // Upload section (at top)
+    try w.writeAll(
+        \\<details id="upload-section" style="margin-bottom:2rem;"><summary style="color:#58a6ff;font-size:0.95rem;cursor:pointer;">Upload New Component</summary>
+        \\<div class="upload-box" id="zip-drop" style="margin:1rem 0;">
+        \\<p style="font-size:0.85rem;">Drop a component .zip (auto-extracts KiCad symbol, footprint, and 3D model)</p>
+        \\<label class="upload-btn">Choose .zip<input type="file" id="zip-file" accept=".zip"></label>
+        \\<div id="zip-name" style="color:#4a9;font-size:0.8rem;margin-top:0.5rem;"></div>
+        \\</div>
+        \\<div id="zip-result"></div>
+        \\<details style="margin-bottom:1rem;"><summary style="color:#666;font-size:0.85rem;cursor:pointer;">Or upload files individually</summary>
+        \\<div style="display:flex;gap:1rem;margin:1rem 0;">
+        \\<div class="upload-box" id="sym-drop" style="flex:1;">
+        \\<p style="font-size:0.85rem;">Symbol (.kicad_sym)</p>
+        \\<label class="upload-btn">Choose file<input type="file" id="sym-file" accept=".kicad_sym"></label>
+        \\<div id="sym-name" style="color:#4a9;font-size:0.8rem;margin-top:0.5rem;"></div>
+        \\</div>
+        \\<div class="upload-box" id="fp-drop" style="flex:1;">
+        \\<p style="font-size:0.85rem;">Footprint (.kicad_mod)</p>
+        \\<label class="upload-btn">Choose file<input type="file" id="fp-file" accept=".kicad_mod"></label>
+        \\<div id="fp-name" style="color:#4a9;font-size:0.8rem;margin-top:0.5rem;"></div>
+        \\</div>
+        \\<div class="upload-box" id="step-drop" style="flex:1;">
+        \\<p style="font-size:0.85rem;">3D Model (.step) <span style="color:#666;">optional</span></p>
+        \\<label class="upload-btn">Choose file<input type="file" id="step-file" accept=".step,.stp"></label>
+        \\<div id="step-name" style="color:#4a9;font-size:0.8rem;margin-top:0.5rem;"></div>
+        \\</div>
+        \\</div>
+        \\<div style="margin-bottom:1rem;">
+        \\<button id="pkg-submit" class="upload-btn" disabled style="opacity:0.5;">Create Package</button>
+        \\</div>
+        \\<div id="pkg-result"></div>
+        \\</details>
+        \\</details>
+    );
+
     try w.writeAll("<input type=\"text\" class=\"search-box\" id=\"lib-search\" placeholder=\"Search components, footprints, pinouts...\" autofocus>");
     try w.writeAll("<div class=\"count-info\" id=\"count-info\"></div>");
 
@@ -226,39 +267,13 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void
 
     try w.writeAll("</tbody></table>");
 
-    // Upload section (collapsed by default)
+    // Pagination controls
     try w.writeAll(
-        \\<details id="upload-section" style="margin-top:2rem;"><summary style="color:#58a6ff;font-size:0.95rem;cursor:pointer;">Upload New Component</summary>
-        \\<div class="upload-box" id="zip-drop" style="margin:1rem 0;">
-        \\<p style="font-size:0.85rem;">Drop a component .zip (auto-extracts KiCad symbol, footprint, and 3D model)</p>
-        \\<label class="upload-btn">Choose .zip<input type="file" id="zip-file" accept=".zip"></label>
-        \\<div id="zip-name" style="color:#4a9;font-size:0.8rem;margin-top:0.5rem;"></div>
+        \\<div class="pagination" id="pagination">
+        \\<button id="page-prev">&larr; Prev</button>
+        \\<span class="page-info" id="page-info"></span>
+        \\<button id="page-next">Next &rarr;</button>
         \\</div>
-        \\<div id="zip-result"></div>
-        \\<details style="margin-bottom:1rem;"><summary style="color:#666;font-size:0.85rem;cursor:pointer;">Or upload files individually</summary>
-        \\<div style="display:flex;gap:1rem;margin:1rem 0;">
-        \\<div class="upload-box" id="sym-drop" style="flex:1;">
-        \\<p style="font-size:0.85rem;">Symbol (.kicad_sym)</p>
-        \\<label class="upload-btn">Choose file<input type="file" id="sym-file" accept=".kicad_sym"></label>
-        \\<div id="sym-name" style="color:#4a9;font-size:0.8rem;margin-top:0.5rem;"></div>
-        \\</div>
-        \\<div class="upload-box" id="fp-drop" style="flex:1;">
-        \\<p style="font-size:0.85rem;">Footprint (.kicad_mod)</p>
-        \\<label class="upload-btn">Choose file<input type="file" id="fp-file" accept=".kicad_mod"></label>
-        \\<div id="fp-name" style="color:#4a9;font-size:0.8rem;margin-top:0.5rem;"></div>
-        \\</div>
-        \\<div class="upload-box" id="step-drop" style="flex:1;">
-        \\<p style="font-size:0.85rem;">3D Model (.step) <span style="color:#666;">optional</span></p>
-        \\<label class="upload-btn">Choose file<input type="file" id="step-file" accept=".step,.stp"></label>
-        \\<div id="step-name" style="color:#4a9;font-size:0.8rem;margin-top:0.5rem;"></div>
-        \\</div>
-        \\</div>
-        \\<div style="margin-bottom:1rem;">
-        \\<button id="pkg-submit" class="upload-btn" disabled style="opacity:0.5;">Create Package</button>
-        \\</div>
-        \\<div id="pkg-result"></div>
-        \\</details>
-        \\</details>
     );
 
     // JS: search + upload
@@ -266,24 +281,46 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void
         \\<script>
         \\(function(){
         \\  var input=document.getElementById('lib-search');
-        \\  var rows=document.querySelectorAll('#lib-table tbody tr');
+        \\  var rows=Array.prototype.slice.call(document.querySelectorAll('#lib-table tbody tr'));
         \\  var info=document.getElementById('count-info');
-        \\  var upload=document.getElementById('upload-section');
-        \\  info.textContent=rows.length+' items';
-        \\  input.addEventListener('input',function(){
-        \\    var q=this.value.toLowerCase().trim();
+        \\  var pageInfo=document.getElementById('page-info');
+        \\  var prevBtn=document.getElementById('page-prev');
+        \\  var nextBtn=document.getElementById('page-next');
+        \\  var pager=document.getElementById('pagination');
+        \\  var PAGE_SIZE=50;
+        \\  var page=0;
+        \\  var filtered=rows.slice();
+        \\  function render(){
+        \\    var total=filtered.length;
+        \\    var pages=Math.max(1,Math.ceil(total/PAGE_SIZE));
+        \\    if(page>=pages)page=pages-1;
+        \\    if(page<0)page=0;
+        \\    var start=page*PAGE_SIZE,end=start+PAGE_SIZE;
+        \\    for(var i=0;i<rows.length;i++)rows[i].style.display='none';
+        \\    for(var j=start;j<end&&j<total;j++)filtered[j].style.display='';
+        \\    pageInfo.textContent='Page '+(page+1)+' of '+pages;
+        \\    prevBtn.disabled=page<=0;
+        \\    nextBtn.disabled=page>=pages-1;
+        \\    pager.style.display=total>PAGE_SIZE?'':'none';
+        \\  }
+        \\  function applyFilter(){
+        \\    var q=input.value.toLowerCase().trim();
         \\    var terms=q.split(/\s+/);
-        \\    var shown=0;
+        \\    filtered=[];
         \\    for(var i=0;i<rows.length;i++){
         \\      var s=rows[i].getAttribute('data-search').toLowerCase();
         \\      var match=true;
         \\      for(var t=0;t<terms.length;t++){if(terms[t]&&s.indexOf(terms[t])<0){match=false;break;}}
-        \\      rows[i].style.display=match?'':'none';
-        \\      if(match)shown++;
+        \\      if(match)filtered.push(rows[i]);
         \\    }
-        \\    info.textContent=q?(shown+' of '+rows.length+' items'):(rows.length+' items');
-        \\    upload.style.display=q?'none':'';
-        \\  });
+        \\    info.textContent=q?(filtered.length+' of '+rows.length+' items'):(rows.length+' items');
+        \\    page=0;
+        \\    render();
+        \\  }
+        \\  input.addEventListener('input',applyFilter);
+        \\  prevBtn.addEventListener('click',function(){page--;render();});
+        \\  nextBtn.addEventListener('click',function(){page++;render();});
+        \\  applyFilter();
         \\})();
         \\var symData=null,fpData=null,stepData=null,symFilename='',fpFilename='',stepFilename='';
         \\function setupDrop(dropId,fileId,nameId,ext,onFile){

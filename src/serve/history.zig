@@ -29,11 +29,13 @@ fn makeTimestamp(allocator: std.mem.Allocator) ![]u8 {
 /// Copy the current .sexp (and .layout if present) for `name` into
 /// projects/designs/history/<name>/<timestamp>/. Returns the snapshot id
 /// (caller owns). Returns null when the source file doesn't exist yet (nothing
-/// to snapshot on a brand-new create).
+/// to snapshot on a brand-new create). When `description` is non-null, a
+/// `.note` file alongside the copied `.sexp` records the human-readable reason.
 pub fn snapshot(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
+    description: ?[]const u8,
 ) !?[]const u8 {
     const sexp_src = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
     defer allocator.free(sexp_src);
@@ -62,21 +64,38 @@ pub fn snapshot(
         std.fs.cwd().copyFile(layout_src, std.fs.cwd(), dst_layout, .{}) catch {};
     } else |_| {}
 
+    if (description) |d| if (d.len > 0) {
+        const note_path = try std.fmt.allocPrint(allocator, "{s}/.note", .{dir});
+        defer allocator.free(note_path);
+        if (std.fs.cwd().createFile(note_path, .{})) |f| {
+            defer f.close();
+            f.writeAll(d) catch {};
+        } else |_| {}
+    };
+
     return id;
 }
 
-/// Return all snapshot ids for `name`, newest first.
+/// One snapshot entry: id plus optional human-readable description loaded
+/// from the `.note` file in the snapshot directory, if present.
+pub const SnapshotInfo = struct {
+    id: []const u8,
+    description: ?[]const u8 = null,
+};
+
+/// Return all snapshot entries for `name`, newest first. Each entry includes
+/// the description from `.note` when available.
 pub fn listSnapshots(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
-) ![][]const u8 {
+) ![]SnapshotInfo {
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/history/{s}", .{ project_dir, name });
     defer allocator.free(dir_path);
 
-    var ids: std.ArrayListUnmanaged([]const u8) = .empty;
+    var entries: std.ArrayListUnmanaged(SnapshotInfo) = .empty;
     var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |e| switch (e) {
-        error.FileNotFound => return ids.toOwnedSlice(allocator),
+        error.FileNotFound => return entries.toOwnedSlice(allocator),
         else => return e,
     };
     defer dir.close();
@@ -84,14 +103,60 @@ pub fn listSnapshots(
     var it = dir.iterate();
     while (try it.next()) |entry| {
         if (entry.kind != .directory) continue;
-        try ids.append(allocator, try allocator.dupe(u8, entry.name));
+        const id = try allocator.dupe(u8, entry.name);
+        const note_path = try std.fmt.allocPrint(allocator, "{s}/{s}/.note", .{ dir_path, id });
+        defer allocator.free(note_path);
+        const description: ?[]const u8 = std.fs.cwd().readFileAlloc(allocator, note_path, 4096) catch null;
+        try entries.append(allocator, .{ .id = id, .description = description });
     }
-    std.mem.sort([]const u8, ids.items, {}, struct {
-        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.lessThan(u8, b, a);
+    std.mem.sort(SnapshotInfo, entries.items, {}, struct {
+        fn lessThan(_: void, a: SnapshotInfo, b: SnapshotInfo) bool {
+            return std.mem.lessThan(u8, b.id, a.id);
         }
     }.lessThan);
-    return ids.toOwnedSlice(allocator);
+    return entries.toOwnedSlice(allocator);
+}
+
+/// Copy a library file under `lib/<subdir>/<name>.sexp` into
+/// `history/_lib/<subdir>/<name>/<timestamp>/<name>.sexp`, so library edits
+/// are undoable. Returns the snapshot id (caller owns) or null if the source
+/// does not exist yet.
+pub fn snapshotLibraryFile(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    subdir: []const u8,
+    name: []const u8,
+    description: ?[]const u8,
+) !?[]const u8 {
+    const src = try std.fmt.allocPrint(allocator, "{s}/lib/{s}/{s}.sexp", .{ project_dir, subdir, name });
+    defer allocator.free(src);
+
+    std.fs.cwd().access(src, .{}) catch |e| switch (e) {
+        error.FileNotFound => return null,
+        else => return e,
+    };
+
+    const id = try makeTimestamp(allocator);
+    errdefer allocator.free(id);
+
+    const dir = try std.fmt.allocPrint(allocator, "{s}/history/_lib/{s}/{s}/{s}", .{ project_dir, subdir, name, id });
+    defer allocator.free(dir);
+    try std.fs.cwd().makePath(dir);
+
+    const dst = try std.fmt.allocPrint(allocator, "{s}/{s}.sexp", .{ dir, name });
+    defer allocator.free(dst);
+    try std.fs.cwd().copyFile(src, std.fs.cwd(), dst, .{});
+
+    if (description) |d| if (d.len > 0) {
+        const note_path = try std.fmt.allocPrint(allocator, "{s}/.note", .{dir});
+        defer allocator.free(note_path);
+        if (std.fs.cwd().createFile(note_path, .{})) |f| {
+            defer f.close();
+            f.writeAll(d) catch {};
+        } else |_| {}
+    };
+
+    return id;
 }
 
 /// Restore the snapshot at `id` back into src/. Does NOT snapshot the current
