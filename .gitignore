@@ -3,3 +3,14 @@ zig-out/
 *.o
 *.swp
 *~
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Runtime auth/session data (OAuth clients, tokens, sessions, users)
+projects/designs/auth/
+
+# Loose root-level scratch files
+/ADC.md
+/ad7380-4.pdf
