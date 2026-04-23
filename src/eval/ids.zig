@@ -4,6 +4,7 @@ const parser_mod = @import("../sexpr/parser.zig");
 const env_mod = @import("env.zig");
 const Evaluator = @import("evaluator.zig").Evaluator;
 const EvalError = @import("evaluator.zig").EvalError;
+const AltFunc = @import("evaluator.zig").AltFunc;
 
 const Node = ast.Node;
 const Instance = env_mod.Instance;
@@ -260,6 +261,29 @@ pub fn deriveChildId(self: *Evaluator, parent_id: []const u8, context: []const u
     return std.fmt.allocPrint(self.allocator, "{c}{x:0>2}{x:0>2}{x:0>2}{x:0>1}", .{ first, hash[1], hash[2], hash[3], hash[0] & 0x0f });
 }
 
+/// Replace every instance ID inside a sub-block's design-block with a
+/// deterministic derivation from the sub-block's name and the instance's
+/// (still module-local) ref_des. Call this from `buildSubBlock` before the
+/// top-level evalDesignBlock runs autoAssignSubBlockRefDes — at that moment
+/// each instance still carries its module-source label ("R_FAP", "U1", …).
+///
+/// This replaces the random IDs that buildInstance assigned during module
+/// evaluation. Random IDs inside modules are unusable: they aren't written
+/// back to any file (insertPendingIds only knows how to write to the board
+/// file, and the offsets are in the module file), and persisting them into
+/// the shared module source would collide across multiple instantiations.
+pub fn reassignSubBlockIds(self: *Evaluator, block: *DesignBlock, sub_name: []const u8) !void {
+    const insts: []Instance = @constCast(block.instances);
+    for (insts) |*inst| {
+        const context = if (inst.ref_des.len > 0) inst.ref_des else inst.label;
+        inst.id = try deriveChildId(self, sub_name, context, 0);
+    }
+    for (@as([]env_mod.SubBlock, @constCast(block.sub_blocks))) |*sb| {
+        const nested = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ sub_name, sb.name });
+        try reassignSubBlockIds(self, sb.block, nested);
+    }
+}
+
 /// Get the (id ...) from form children, or generate one and track for insertion.
 pub fn getOrCreateFormId(self: *Evaluator, form_children: []const Node) ![]const u8 {
     if (parseId(form_children)) |existing| return existing;
@@ -288,25 +312,38 @@ pub fn getSymbolPins(self: *Evaluator, lookup_name: []const u8) ?*const std.Stri
     if (self.symbol_pin_cache.getPtr(lookup_name)) |cached| return cached;
 
     const pinout_path = std.fmt.allocPrint(self.allocator, "{s}/lib/pinouts/{s}.sexp", .{ self.project_dir, lookup_name }) catch return null;
-    if (loadPinFile(self, pinout_path, "pinout")) |pin_map| {
-        self.symbol_pin_cache.put(self.allocator, lookup_name, pin_map) catch return null;
-        return self.symbol_pin_cache.getPtr(lookup_name);
-    }
-
-    return null;
+    const loaded = loadPinoutFile(self, pinout_path) orelse return null;
+    self.symbol_pin_cache.put(self.allocator, lookup_name, loaded.pins) catch return null;
+    self.symbol_alt_cache.put(self.allocator, lookup_name, loaded.alts) catch return null;
+    return self.symbol_pin_cache.getPtr(lookup_name);
 }
 
-/// Load pin definitions from a pinout file.
-pub fn loadPinFile(self: *Evaluator, path: []const u8, expected_form: []const u8) ?std.StringHashMapUnmanaged([]const u8) {
+/// Look up cached alternate-function map for a symbol (pin_id -> []AltFunc). Returns null
+/// if the pinout has not been loaded yet; callers typically invoke `getSymbolPins` first.
+pub fn getSymbolAlts(self: *Evaluator, lookup_name: []const u8) ?*const std.StringHashMapUnmanaged([]const AltFunc) {
+    if (self.symbol_alt_cache.getPtr(lookup_name)) |cached| return cached;
+    // Warm the cache via getSymbolPins; it populates both maps together.
+    _ = getSymbolPins(self, lookup_name) orelse return null;
+    return self.symbol_alt_cache.getPtr(lookup_name);
+}
+
+pub const LoadedPinout = struct {
+    pins: std.StringHashMapUnmanaged([]const u8),
+    alts: std.StringHashMapUnmanaged([]const AltFunc),
+};
+
+/// Load pin names + alternate functions from a pinout file. Missing file returns null.
+pub fn loadPinoutFile(self: *Evaluator, path: []const u8) ?LoadedPinout {
     const content = std.fs.cwd().readFileAlloc(self.allocator, path, 1024 * 256) catch return null;
     const nodes = parser_mod.parse(self.allocator, content) catch return null;
     if (nodes.len == 0) return null;
     const top = nodes[0].asList() orelse return null;
     if (top.len < 2) return null;
     const head = top[0].asAtom() orelse return null;
-    if (!std.mem.eql(u8, head, expected_form)) return null;
+    if (!std.mem.eql(u8, head, "pinout")) return null;
 
     var pin_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    var alt_map: std.StringHashMapUnmanaged([]const AltFunc) = .empty;
     for (top[2..]) |child| {
         const cl = child.asList() orelse continue;
         if (cl.len < 3) continue;
@@ -315,8 +352,25 @@ pub fn loadPinFile(self: *Evaluator, path: []const u8, expected_form: []const u8
         const pin_id_str = pinId(self, cl[1]) orelse continue;
         const func_name = cl[2].asString() orelse (cl[2].asAtom() orelse continue);
         pin_map.put(self.allocator, pin_id_str, func_name) catch continue;
+
+        if (cl.len > 3) {
+            var alts: std.ArrayListUnmanaged(AltFunc) = .empty;
+            for (cl[3..]) |alt_node| {
+                const al = alt_node.asList() orelse continue;
+                if (al.len < 2) continue;
+                const hd = al[0].asAtom() orelse continue;
+                if (!std.mem.eql(u8, hd, "alt")) continue;
+                const alt_name = al[1].asString() orelse (al[1].asAtom() orelse continue);
+                const etype = if (al.len >= 3) (al[2].asAtom() orelse al[2].asString() orelse "") else "";
+                alts.append(self.allocator, .{ .name = alt_name, .etype = etype }) catch continue;
+            }
+            if (alts.items.len > 0) {
+                const owned = alts.toOwnedSlice(self.allocator) catch continue;
+                alt_map.put(self.allocator, pin_id_str, owned) catch continue;
+            }
+        }
     }
-    return pin_map;
+    return .{ .pins = pin_map, .alts = alt_map };
 }
 
 /// Check symbol pins against the pinout (source of truth).
@@ -391,7 +445,7 @@ test "parseId returns null when missing" {
     try std.testing.expect(parseId(children) == null);
 }
 
-// spec: eval/evaluator - deriveChildId produces deterministic results
+// spec: eval/evaluator - deriveChildId produces the same child ID when called with identical inputs
 test "deriveChildId is deterministic" {
     const alloc = std.testing.allocator;
     var eval = Evaluator.init(alloc, ".");
@@ -403,7 +457,7 @@ test "deriveChildId is deterministic" {
     try std.testing.expectEqualStrings(id1, id2);
 }
 
-// spec: eval/evaluator - deriveChildId produces unique IDs per index
+// spec: eval/evaluator - deriveChildId produces unique child IDs across different index values
 test "deriveChildId unique per index" {
     const alloc = std.testing.allocator;
     var eval = Evaluator.init(alloc, ".");

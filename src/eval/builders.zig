@@ -181,10 +181,27 @@ pub fn processPinForm(
         if (pin_children.len < 3) return;
         const net_val = try self.evalNode(pin_children[pin_children.len - 1], env);
         const net_name = net_val.asString() orelse return;
+
+        var asserted_fn: []const u8 = "";
+        var pin_count: usize = 0;
+        for (pin_children[1 .. pin_children.len - 1]) |child| {
+            if (child.isForm("as")) {
+                const ac = child.asList().?;
+                if (ac.len >= 2) {
+                    const val = try self.evalNode(ac[1], env);
+                    asserted_fn = val.asString() orelse (ac[1].asAtom() orelse "");
+                }
+            } else {
+                pin_count += 1;
+            }
+        }
+        if (pin_count != 1) asserted_fn = "";
+
         for (pin_children[1 .. pin_children.len - 1]) |pin_node| {
+            if (pin_node.isForm("as")) continue;
             const raw = ids.pinId(self, pin_node) orelse continue;
             const pn = if (pin_func_map) |pm| (instance_mod.resolvePinName(self, pm, raw) orelse raw) else raw;
-            try all_pin_nets.append(self.allocator, .{ .ref_des = pins_ref, .pin = pn, .net = net_name });
+            try all_pin_nets.append(self.allocator, .{ .ref_des = pins_ref, .pin = pn, .net = net_name, .asserted_fn = asserted_fn });
             try pg_pins.append(self.allocator, .{ .pin = pn, .net = net_name, .pin_name = if (pin_func_map) |m| (m.get(pn) orelse "") else "" });
             if (pin_func_map) |m| {
                 if (m.get(pn)) |func_name| {
@@ -474,8 +491,20 @@ pub fn buildSubBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!
     // Second arg can be:
     //   1. A string literal = file path to a design-block .sexp file
     //   2. A module call expression = (module-name arg1 arg2 ...)
+    //
+    // Module / file evaluation generates random IDs for instances and appends
+    // them to `pending_ids` with offsets that are in the sub-block's source
+    // buffer (module file or sub-block .sexp), NOT the top-level board file.
+    // commands.zig only knows how to write pending IDs back to the board
+    // file, so those module-scope entries would silently drop or, worse,
+    // land on matching `(` bytes in the board file and corrupt it.
+    //
+    // Track the length before/after the sub-block evaluates and discard any
+    // entries it pushed. Then replace each instance's random ID with a
+    // deterministic derivation from the sub-block's name and the instance's
+    // module-local ref_des so UUIDs are stable across builds.
+    const pending_pre = self.pending_ids.items.len;
     const block = blk: {
-        // Check if arg is a string literal (file path)
         if (args[1].asString()) |file_path_raw| {
             const full_path = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.project_dir, file_path_raw }) catch return EvalError.OutOfMemory;
             const result = self.evalFile(full_path) catch return EvalError.ImportError;
@@ -484,13 +513,14 @@ pub fn buildSubBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!
                 else => return EvalError.TypeError,
             }
         }
-        // Otherwise evaluate as expression (module call)
         const call_val = try self.evalNode(args[1], env);
         switch (call_val) {
             .design_block => |b| break :blk b,
             else => return EvalError.TypeError,
         }
     };
+    self.pending_ids.items.len = pending_pre;
+    try ids.reassignSubBlockIds(self, block, name);
 
     return SubBlock{
         .name = name,

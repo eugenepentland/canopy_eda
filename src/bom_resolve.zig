@@ -5,6 +5,7 @@ const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
 const Property = env_mod.Property;
 const bom_mod = @import("bom.zig");
+const export_kicad = @import("export_kicad.zig");
 const FlatInfo = bom_mod.FlatInfo;
 
 /// Drop `manufacturer` and `mpn` from a property list. Used when the
@@ -167,10 +168,18 @@ pub fn resolveIdentities(
         }
     }
 
-    // Pass 3: assign new UUIDs
+    // Pass 3: derive a stable UUID from the instance's stable id. This makes
+    // new UUID assignments deterministic, so a given logical instance always
+    // gets the same UUID regardless of when the BOM first sees it or how
+    // global ref_des numbering shifts across builds. Random generateUuid is
+    // only used as a last resort for instances that somehow lack an id.
     for (flat_list.items) |info| {
         if (result_map.contains(info.ref_des)) continue;
-        try result_map.put(info.ref_des, try bom_mod.generateUuid(allocator));
+        const uuid = if (info.id.len > 0)
+            try export_kicad.uuidFromId(allocator, info.id)
+        else
+            try bom_mod.generateUuid(allocator);
+        try result_map.put(info.ref_des, uuid);
     }
 
     // Pass 3.5: correct UUID assignments by net matching

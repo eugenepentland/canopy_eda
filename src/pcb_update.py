@@ -352,6 +352,137 @@ def load_sections(sections_path):
         return None
 
 
+def load_modules(modules_path):
+    """Load modules.json sidecar.
+
+    Returns a dict keyed by module name, with value = list of instance dicts
+    {"path": "adc1", "refs": [...]}. Returns None if the sidecar is missing
+    or unreadable — replication is then skipped.
+    """
+    if not modules_path or not os.path.exists(modules_path):
+        return None
+    try:
+        with open(modules_path) as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    grouped = {}
+    for inst in data.get("instances", []):
+        grouped.setdefault(inst["module"], []).append(inst)
+    return grouped
+
+
+def replicate_module_layouts(board, modules, existing_uuids, new_footprints,
+                             comp_by_ref, stack_y_mm):
+    """Seed new sub-block instances with a sibling's placement.
+
+    For each module with ≥2 instances, if exactly one instance is already laid
+    out (all UUIDs known to KiCad, non-default positions) and the others are
+    all newly added, copy the master's per-component offset + orientation into
+    each follower, shifted by `k * stack_y_mm` in Y.
+
+    Mixed instances (partial placement) and multi-master cases (user has
+    diverged) are skipped with a warning — one-shot semantics.
+
+    Pre-seeded footprints are removed from `new_footprints` so Pass 2 grid
+    placement leaves them alone. The caller is expected to filter
+    section_fps / fallback_fps with the returned set.
+
+    Returns the set of UUIDs that got seeded positions.
+    """
+    if not modules:
+        return set()
+
+    stack_y_nm = int(stack_y_mm * 1_000_000)
+    seeded_uuids = set()
+
+    for module_name, instances in modules.items():
+        if len(instances) < 2:
+            continue
+
+        # Categorize each instance.
+        masters = []
+        followers = []
+        mixed = False
+        for inst in instances:
+            refs = inst.get("refs", [])
+            placed_fps = []
+            new_fps = []
+            for ref in refs:
+                comp = comp_by_ref.get(ref)
+                if not comp:
+                    continue
+                uuid = comp.get("uuid", "")
+                if uuid in existing_uuids:
+                    fp = existing_uuids[uuid]
+                    pos = fp.GetPosition()
+                    # Treat (0, 0) as "placeholder, not truly placed" — new
+                    # footprints start there before grid layout runs.
+                    if pos.x != 0 or pos.y != 0:
+                        placed_fps.append((ref, fp, uuid))
+                        continue
+                if uuid in new_footprints:
+                    new_fps.append((ref, new_footprints[uuid], uuid))
+
+            if placed_fps and new_fps:
+                mixed = True
+                print(f"  Module '{module_name}' instance '{inst['path']}' "
+                      f"has partial layout — skipping replication for this module.")
+                break
+            if placed_fps and not new_fps:
+                masters.append((inst, placed_fps))
+            elif new_fps and not placed_fps:
+                followers.append((inst, new_fps))
+
+        if mixed:
+            continue
+        if len(masters) == 0:
+            continue  # nothing to copy from
+        if len(masters) >= 2:
+            # User has diverged layouts for this module — honor their choices.
+            continue
+        if len(followers) == 0:
+            continue  # everything already placed
+
+        master_inst, master_fps = masters[0]
+        follower_list = sorted(followers, key=lambda f: f[0]["path"])
+
+        # Build local_ref → master_fp map by stripping the master path prefix.
+        master_prefix = master_inst["path"] + "/"
+        master_local = {}
+        for ref, fp, _uuid in master_fps:
+            if ref.startswith(master_prefix):
+                local = ref[len(master_prefix):]
+                master_local[local] = fp
+
+        for k, (f_inst, f_fps) in enumerate(follower_list, start=1):
+            f_prefix = f_inst["path"] + "/"
+            seeded_here = 0
+            for ref, fp, uuid in f_fps:
+                if not ref.startswith(f_prefix):
+                    continue
+                local = ref[len(f_prefix):]
+                master_fp = master_local.get(local)
+                if master_fp is None:
+                    print(f"  Warning: follower '{ref}' has no matching "
+                          f"master component '{master_prefix}{local}' — "
+                          f"leaving at grid fallback.")
+                    continue
+                mpos = master_fp.GetPosition()
+                fp.SetPosition(pcbnew.VECTOR2I(mpos.x, mpos.y + k * stack_y_nm))
+                fp.SetOrientation(master_fp.GetOrientation())
+                if master_fp.IsFlipped() and not fp.IsFlipped():
+                    fp.Flip(fp.GetPosition(), pcbnew.FLIP_DIRECTION_TOP_BOTTOM)
+                seeded_uuids.add(uuid)
+                seeded_here += 1
+            if seeded_here:
+                print(f"  Replicated '{master_inst['path']}' layout → "
+                      f"'{f_inst['path']}' ({seeded_here} components, "
+                      f"Y offset {k * stack_y_mm:.1f} mm).")
+
+    return seeded_uuids
+
+
 def shorten_net_name(name):
     """Collapse 'BASE.REF.PIN' to 'BASE' for power-pour-friendly net names.
 
@@ -388,7 +519,8 @@ def merge_short_nets(nets):
     return list(merged.values())
 
 
-def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None, short_nets=False):
+def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None, short_nets=False,
+               modules_path=None, replicate_stack_y_mm=30.0):
     """Create or update a PCB from a netlist."""
     components, nets = parse_netlist(netlist_path)
 
@@ -459,6 +591,8 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None, short_nets=
         print(f"Creating new PCB: {pcb_path}")
         board = pcbnew.BOARD()
 
+    comp_by_ref = {c["ref"]: c for c in components}
+
     netinfo = board.GetNetInfo()
 
     # Collect all net names we need
@@ -481,7 +615,99 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None, short_nets=
     # Track which UUIDs are in the netlist
     netlist_uuids = {c["uuid"] for c in components}
 
-    # Track which UUIDs already exist in the PCB
+    # Signature-based remap: before we trust the canopy_uuid field, verify each
+    # footprint's (value + canopy_net) signature against the current netlist.
+    # If the signature uniquely identifies a netlist component, that's the
+    # footprint's true logical identity — overwrite canopy_uuid (and Reference)
+    # with the netlist's values. This corrects legacy misaligned UUIDs: e.g.,
+    # when the BOM's ref_des-based Pass 1 preserved a UUID across a ref_des
+    # shift, binding it to a different logical instance than the user placed.
+    # Include the sub-block prefix ("adc1", "adc2", ...) as part of the
+    # signature so that shared-rail caps (e.g. 1uF across V1P8 in three ADCs)
+    # are still uniquely identifiable — same module, same sub-block, same
+    # logical instance.
+    def _sub_prefix(ref):
+        return ref.split("/", 1)[0] if "/" in ref else ""
+
+    netlist_sig_to_ref = {}
+    for sig_ref, sig_nets in ref_to_nets.items():
+        c = comp_by_ref.get(sig_ref)
+        if c is None:
+            continue
+        sig = (c.get("value", "") or "") + "|" + ",".join(sorted(sig_nets)) + "|" + _sub_prefix(sig_ref)
+        netlist_sig_to_ref.setdefault(sig, []).append(sig_ref)
+    netlist_sig_unique = {sig: refs[0] for sig, refs in netlist_sig_to_ref.items() if len(refs) == 1}
+
+    pcb_sig_to_fps = {}
+    for fp in list(board.GetFootprints()):
+        if not fp.HasFieldByName(CANOPY_UUID_FIELD) or not fp.HasFieldByName(CANOPY_NET_FIELD):
+            continue
+        fp_ref = fp.GetReference()
+        sig = (fp.GetValue() or "") + "|" + fp.GetFieldText(CANOPY_NET_FIELD) + "|" + _sub_prefix(fp_ref)
+        pcb_sig_to_fps.setdefault(sig, []).append(fp)
+
+    # Step A: build full remap plan before applying anything, so we can detect
+    # conflicts between a fp's stale uuid and another fp's intended new uuid.
+    # (pcbnew.FOOTPRINT isn't hashable, so we key by id() and keep a list.)
+    remap_plan = []  # (fp, new_uuid, netlist_ref, stored_uuid)
+    for sig, pcb_fps in pcb_sig_to_fps.items():
+        if len(pcb_fps) != 1:
+            continue
+        netlist_ref = netlist_sig_unique.get(sig)
+        if netlist_ref is None:
+            continue
+        target = comp_by_ref.get(netlist_ref)
+        if target is None:
+            continue
+        new_uuid = target["uuid"]
+        if not new_uuid:
+            continue
+        fp = pcb_fps[0]
+        stored_uuid = fp.GetFieldText(CANOPY_UUID_FIELD)
+        if stored_uuid == new_uuid:
+            continue
+        remap_plan.append((fp, new_uuid, netlist_ref, stored_uuid))
+
+    # Step B: find footprints that are NOT in the plan but currently hold a
+    # UUID that the plan wants to assign elsewhere. Those are stale copies
+    # whose identity drifted through BOM churn — the canonical owner of the
+    # UUID is now somebody else, so these are orphans and must be removed.
+    # (pcbnew returns fresh Python wrappers per GetFootprints() call, so we
+    # key by the footprint's current canopy_uuid instead of id().)
+    claimed_uuids = {nu for (_, nu, _, _) in remap_plan}
+    planned_stored_uuids = {su for (_, _, _, su) in remap_plan}
+    to_remove = []
+    for fp in list(board.GetFootprints()):
+        if not fp.HasFieldByName(CANOPY_UUID_FIELD):
+            continue
+        current_uuid = fp.GetFieldText(CANOPY_UUID_FIELD)
+        if current_uuid in planned_stored_uuids:
+            continue  # this fp is being remapped to a new uuid; don't remove
+        if current_uuid in claimed_uuids:
+            to_remove.append(fp)
+
+    # Step C: apply — remove stale holders first, then commit remaps.
+    for fp in to_remove:
+        print(f"  Remove-dup: {fp.GetReference()} (stale uuid displaced by signature remap)")
+        board.Remove(fp)
+
+    sig_remap_count = 0
+    for fp, new_uuid, netlist_ref, stored_uuid in remap_plan:
+        old_ref = fp.GetReference()
+        set_canopy_uuid(fp, new_uuid)
+        if old_ref != netlist_ref:
+            fp.SetReference(netlist_ref)
+            print(f"  Sig-Remap: {old_ref} -> {netlist_ref} (uuid {stored_uuid[:8]}... -> {new_uuid[:8]}...)")
+        else:
+            print(f"  Sig-Remap: {netlist_ref} uuid {stored_uuid[:8]}... -> {new_uuid[:8]}...")
+        sig_remap_count += 1
+    if sig_remap_count:
+        print(f"  Remapped {sig_remap_count} footprint(s) by signature")
+    if to_remove:
+        print(f"  Removed {len(to_remove)} stale footprint(s) displaced by signature remap")
+
+    # Track which UUIDs already exist in the PCB (built AFTER sig-remap so the
+    # remapped UUIDs are what the main loop sees).
     existing_uuids = {}
     for fp in board.GetFootprints():
         if fp.HasFieldByName(CANOPY_UUID_FIELD):
@@ -495,9 +721,6 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None, short_nets=
     net_members = {}
     for net in nets:
         net_members[net["name"]] = [(n["ref"], n["pin"]) for n in net["nodes"]]
-
-    # Build ref -> component lookup
-    comp_by_ref = {c["ref"]: c for c in components}
 
     # Placement constants (nanometers)
     CELL_PAD = 3_000_000     # 3mm padding inside cell
@@ -607,6 +830,24 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None, short_nets=
                 section_fps.setdefault(sec_idx, []).append((fp, fp.GetPadCount() >= 8))
             else:
                 fallback_fps.append(fp)
+
+    # Auto-layout replication (stacking adc2/adc3 under adc1) is disabled —
+    # the user places repeated sub-block layouts manually in KiCad. Leave
+    # `replicate_module_layouts` defined for a future re-enable.
+    seeded_uuids = set()
+    _ = replicate_stack_y_mm
+    if seeded_uuids:
+        # Remove seeded footprints from the grid-placement lists so Pass 2
+        # doesn't overwrite their replicated positions.
+        for sec_idx, fps_list in list(section_fps.items()):
+            kept = [(fp, is_hub) for fp, is_hub in fps_list
+                    if fp.GetFieldText(CANOPY_UUID_FIELD) not in seeded_uuids]
+            if kept:
+                section_fps[sec_idx] = kept
+            else:
+                del section_fps[sec_idx]
+        fallback_fps = [fp for fp in fallback_fps
+                        if fp.GetFieldText(CANOPY_UUID_FIELD) not in seeded_uuids]
 
     # Pass 2: lay out each section's components in a grid, measure cell size
     # Then position cells in a single row
@@ -972,7 +1213,8 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None, short_nets=
         print(f"  Warning: could not write {diff_path}: {e}")
 
     # Single-line summary the server can grep out of stdout without parsing JSON.
-    print(f"SUMMARY mismatches={len(mismatches)} missing={len(missing)} backup={backup_path or '-'}")
+    print(f"SUMMARY mismatches={len(mismatches)} missing={len(missing)} "
+          f"seeded={len(seeded_uuids)} backup={backup_path or '-'}")
 
     return 0 if errors == 0 else 2
 
@@ -982,18 +1224,36 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None, short_nets=
 # ---------------------------------------------------------------------------
 
 def main():
-    # Parse --short-nets flag
-    args = [a for a in sys.argv[1:] if a != "--short-nets"]
-    short_nets = "--short-nets" in sys.argv
+    # Strip flags, keep positional args.
+    args = []
+    short_nets = False
+    modules_path = None
+    replicate_stack_y_mm = 30.0
+    it = iter(sys.argv[1:])
+    for a in it:
+        if a == "--short-nets":
+            short_nets = True
+        elif a == "--modules":
+            modules_path = next(it, None)
+        elif a == "--replicate-stack-y":
+            try:
+                replicate_stack_y_mm = float(next(it, "30"))
+            except ValueError:
+                replicate_stack_y_mm = 30.0
+        else:
+            args.append(a)
 
     if len(args) < 3 or len(args) > 4:
-        print(f"Usage: {sys.argv[0]} [--short-nets] <netlist.net> <footprints.pretty> <output.kicad_pcb> [sections.json]")
+        print(f"Usage: {sys.argv[0]} [--short-nets] [--modules <modules.json>] [--replicate-stack-y <mm>] <netlist.net> <footprints.pretty> <output.kicad_pcb> [sections.json]")
         print()
         print("Creates or updates a KiCad PCB from a Canopy EDA netlist.")
         print("Components are tracked by stable UUID, not reference designator.")
         print("Optional sections.json enables section-based grid placement.")
         print()
-        print("  --short-nets  Collapse per-pin nets (VDD.U1.F7) to base name (VDD)")
+        print("  --short-nets            Collapse per-pin nets (VDD.U1.F7) to base name (VDD)")
+        print("  --modules <path>        Modules JSON sidecar; enables one-shot layout replication")
+        print("                          for identical sub-block instances (e.g. 3x ADC channel).")
+        print("  --replicate-stack-y N   Y offset between stacked follower instances (mm, default 30).")
         sys.exit(1)
 
     netlist_path = args[0]
@@ -1009,7 +1269,12 @@ def main():
         print(f"Error: footprint library not found: {lib_path}")
         sys.exit(1)
 
-    sys.exit(update_pcb(netlist_path, lib_path, pcb_path, sections_path, short_nets=short_nets))
+    sys.exit(update_pcb(
+        netlist_path, lib_path, pcb_path, sections_path,
+        short_nets=short_nets,
+        modules_path=modules_path,
+        replicate_stack_y_mm=replicate_stack_y_mm,
+    ))
 
 
 if __name__ == "__main__":
