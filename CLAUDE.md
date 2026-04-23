@@ -15,8 +15,8 @@ zig build
 # Run tests (includes Guardian checks: fmt, spec, file-size, boundaries)
 zig build test
 
-# Start web server
-zig build run -- serve --project-dir projects/designs --port 9000
+# Start web server (default port 7050)
+zig build run -- serve --project-dir projects/designs
 
 # Build a design (stdout), --push sends to running server
 zig build run -- build --project-dir projects/designs --push <design-name>
@@ -199,8 +199,8 @@ Source (.sexp files)
 ### Live update workflow
 
 ```bash
-# Terminal 1: start server
-eda serve --project-dir projects/designs --port 9000
+# Terminal 1: start server (default port 7050)
+eda serve --project-dir projects/designs
 
 # Terminal 2: edit and push
 vim projects/designs/src/stm32n6.sexp
@@ -245,7 +245,7 @@ works without a passkey setup.
 
 ```bash
 # Connect from Claude Code:
-claude mcp add --transport http eda http://localhost:9000/mcp \
+claude mcp add --transport http eda http://localhost:7050/mcp \
   --client-id eda_c_... --client-secret eda_s_...
 # Claude opens a browser for the authorize step.
 ```
