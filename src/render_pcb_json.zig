@@ -1,5 +1,6 @@
 const std = @import("std");
 const env_mod = @import("eval/env.zig");
+const json_writer = @import("json_writer.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Board = env_mod.Board;
 const parser_mod = @import("sexpr/parser.zig");
@@ -592,9 +593,7 @@ pub fn renderPcbJson(
     return buf.toOwnedSlice(allocator);
 }
 
-fn writeJsonString(w: anytype, key: []const u8, value: []const u8) !void {
-    try w.print("\"{s}\":\"{s}\"", .{ key, value });
-}
+const writeJsonString = json_writer.writeField;
 
 // --- Footprint Geometry Parsing ---
 

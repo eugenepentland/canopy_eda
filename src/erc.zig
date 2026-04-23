@@ -2,11 +2,13 @@ const std = @import("std");
 const env_mod = @import("eval/env.zig");
 const na = @import("eval/net_analysis.zig");
 const parser_mod = @import("sexpr/parser.zig");
+const json_writer = @import("json_writer.zig");
+const checks = @import("checks.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
 const Net = env_mod.Net;
 
-pub const Severity = enum { @"error", warning, info };
+pub const Severity = checks.Severity;
 
 pub const ViolationKind = enum {
     duplicate_refdes,
@@ -788,18 +790,7 @@ pub fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Vio
     return buf.items;
 }
 
-fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            else => try writer.writeByte(c),
-        }
-    }
-}
+const writeJsonEscaped = json_writer.writeEscaped;
 
 // ── Tests ──────────────────────────────────────────────────────────────
 

@@ -294,20 +294,9 @@ pub fn emitDecoupleItems(
         const comp_val = try self.evalNode(items[idx], env);
         const dec_comp_offset = ids.componentSourceOffset(items[idx]);
 
-        const CompInfo = struct { comp: []const u8, value: []const u8, fp: []const u8, sym: []const u8, attrs: []const []const u8 };
-        const comp_info: CompInfo = switch (comp_val) {
-            .component => |c| blk: {
-                const cd = self.component_cache.get(c) orelse break :blk .{ .comp = c, .value = "", .fp = "", .sym = "", .attrs = &.{} };
-                break :blk .{ .comp = c, .value = "", .fp = cd.footprint_name, .sym = cd.symbol_name, .attrs = &.{} };
-            },
-            .component_instance => |ci| blk: {
-                const cd = self.component_cache.get(ci.family) orelse break :blk .{ .comp = ci.family, .value = ci.value, .fp = "", .sym = "", .attrs = ci.attrs };
-                break :blk .{ .comp = ci.family, .value = ci.value, .fp = cd.footprint_name, .sym = cd.symbol_name, .attrs = ci.attrs };
-            },
-            else => {
-                idx += 2;
-                continue;
-            },
+        const resolved = instance_mod.resolveComponent(self, comp_val) orelse {
+            idx += 2;
+            continue;
         };
 
         // Syntax: (comp "val") COUNT per-pin REF [PIN]
@@ -383,11 +372,11 @@ pub fn emitDecoupleItems(
                 child_counter.* += 1;
                 try instances.append(self.allocator, .{
                     .ref_des = ref,
-                    .component = comp_info.comp,
-                    .value = comp_info.value,
-                    .footprint = comp_info.fp,
-                    .symbol = comp_info.sym,
-                    .attrs = comp_info.attrs,
+                    .component = resolved.family,
+                    .value = resolved.value,
+                    .footprint = resolved.footprint,
+                    .symbol = resolved.symbol,
+                    .attrs = resolved.attrs,
                     .source_offset = dec_comp_offset,
                     .id = cap_id,
                 });

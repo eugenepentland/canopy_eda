@@ -12,20 +12,42 @@ const bom = @import("../bom.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
 const ids = @import("../eval/ids.zig");
 
+/// One entry per MCP tool. Keep in sync with `tools_list_result` below and
+/// with the dispatch arms in `callInner`. Adding a new tool should start here,
+/// not with a scatter across three separate sites.
+const ToolEntry = struct {
+    name: []const u8,
+    is_mutation: bool,
+};
+
+const tools = [_]ToolEntry{
+    .{ .name = "list_designs", .is_mutation = false },
+    .{ .name = "read_design", .is_mutation = false },
+    .{ .name = "write_design", .is_mutation = true },
+    .{ .name = "edit_value", .is_mutation = true },
+    .{ .name = "edit_section", .is_mutation = true },
+    .{ .name = "replace_instance", .is_mutation = true },
+    .{ .name = "get_schematic", .is_mutation = false },
+    .{ .name = "get_version", .is_mutation = false },
+    .{ .name = "run_checks", .is_mutation = false },
+    .{ .name = "list_history", .is_mutation = false },
+    .{ .name = "restore_version", .is_mutation = true },
+    .{ .name = "list_library", .is_mutation = false },
+    .{ .name = "read_library_file", .is_mutation = false },
+    .{ .name = "edit_note", .is_mutation = true },
+    .{ .name = "add_import", .is_mutation = true },
+    .{ .name = "set_instance_pin", .is_mutation = true },
+    .{ .name = "list_instances", .is_mutation = false },
+    .{ .name = "list_free_pins", .is_mutation = false },
+    .{ .name = "get_net", .is_mutation = false },
+    .{ .name = "add_component_parameter", .is_mutation = true },
+};
+
 /// Tools that mutate .sexp files — gated to writer/admin roles.
 pub fn isMutationTool(name: []const u8) bool {
-    const mutators = [_][]const u8{
-        "edit_value",
-        "write_design",
-        "edit_section",
-        "replace_instance",
-        "restore_version",
-        "edit_note",
-        "add_import",
-        "set_instance_pin",
-        "add_component_parameter",
-    };
-    for (mutators) |m| if (std.mem.eql(u8, name, m)) return true;
+    for (tools) |t| {
+        if (std.mem.eql(u8, t.name, name)) return t.is_mutation;
+    }
     return false;
 }
 
@@ -543,12 +565,17 @@ fn runChecks(
         var first = true;
         var emitted: usize = 0;
         for (drc_violations) |v| {
-            const sev: []const u8 = if (v.severity == .error_) "error" else "warning";
+            const sev = @tagName(v.severity);
             if (severity_filter) |sf| if (!std.mem.eql(u8, sev, sf)) continue;
             if (!first) try w.writeAll(",");
             first = false;
             emitted += 1;
-            try w.print("{{\"kind\":\"{s}\",\"message\":\"{s}\",\"x\":{d:.4},\"y\":{d:.4},\"severity\":\"{s}\"}}", .{ v.kind, v.message, v.x, v.y, sev });
+            try w.writeAll("{\"kind\":");
+            try writeJsonString(w, v.kind);
+            try w.writeAll(",\"message\":");
+            try writeJsonString(w, v.message);
+            try w.print(",\"x\":{d:.4},\"y\":{d:.4},\"severity\":\"{s}\"", .{ v.x, v.y, sev });
+            try w.writeAll("}");
         }
         try w.print("],\"count\":{d}}}", .{emitted});
     } else {

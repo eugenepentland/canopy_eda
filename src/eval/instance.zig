@@ -19,6 +19,60 @@ pub const InstanceResult = struct {
     inline_notes: []const Note,
 };
 
+/// Component metadata extracted from a Value. Before this helper, buildInstance,
+/// instanceFromValue, and emitDecoupleItems each rebuilt the same (family,
+/// value, attrs) → library-lookup sequence, so adding a new field meant editing
+/// three parallel sites.
+pub const ResolvedComponent = struct {
+    family: []const u8,
+    value: []const u8,
+    footprint: []const u8,
+    symbol: []const u8,
+    pinout: []const u8,
+    properties: []const env_mod.Property,
+    attrs: []const []const u8,
+};
+
+/// Extract component metadata from a Value. Returns null when the Value isn't a
+/// component form. When `family` isn't in the component cache the library
+/// fields come back empty — callers decide whether that should surface as an
+/// error (buildInstance does; instanceFromValue does not).
+pub fn resolveComponent(self: *Evaluator, val: Value) ?ResolvedComponent {
+    const family: []const u8 = switch (val) {
+        .component => |c| c,
+        .component_instance => |ci| ci.family,
+        else => return null,
+    };
+    const value: []const u8 = switch (val) {
+        .component_instance => |ci| ci.value,
+        else => "",
+    };
+    const attrs: []const []const u8 = switch (val) {
+        .component_instance => |ci| ci.attrs,
+        else => &.{},
+    };
+    if (self.component_cache.get(family)) |cd| {
+        return .{
+            .family = family,
+            .value = value,
+            .footprint = cd.footprint_name,
+            .symbol = cd.symbol_name,
+            .pinout = cd.pinout_name,
+            .properties = cd.properties,
+            .attrs = attrs,
+        };
+    }
+    return .{
+        .family = family,
+        .value = value,
+        .footprint = "",
+        .symbol = "",
+        .pinout = "",
+        .properties = &.{},
+        .attrs = attrs,
+    };
+}
+
 pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) EvalError!InstanceResult {
     // form_children includes "instance" atom: (instance "R4" (res-0402 "220k") (pin 1 "NET_A") ...)
     const args = form_children[1..];
@@ -40,39 +94,22 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
 
     const comp_val = try self.evalNode(args[1], env);
     const comp_offset = ids.componentSourceOffset(args[1]);
-    const inst = switch (comp_val) {
-        .component => |comp_name| blk: {
-            const comp = self.component_cache.get(comp_name) orelse return EvalError.UnboundVariable;
-            break :blk Instance{
-                .ref_des = ref_des,
-                .label = ref_des,
-                .component = comp_name,
-                .value = "",
-                .footprint = comp.footprint_name,
-                .symbol = comp.symbol_name,
-                .pinout = comp.pinout_name,
-                .properties = comp.properties,
-                .source_offset = comp_offset,
-                .id = inst_id,
-            };
-        },
-        .component_instance => |ci| blk: {
-            const comp = self.component_cache.get(ci.family) orelse return EvalError.UnboundVariable;
-            break :blk Instance{
-                .ref_des = ref_des,
-                .label = ref_des,
-                .component = ci.family,
-                .value = ci.value,
-                .footprint = comp.footprint_name,
-                .symbol = comp.symbol_name,
-                .pinout = comp.pinout_name,
-                .properties = comp.properties,
-                .attrs = ci.attrs,
-                .source_offset = comp_offset,
-                .id = inst_id,
-            };
-        },
-        else => return EvalError.TypeError,
+    const resolved = resolveComponent(self, comp_val) orelse return EvalError.TypeError;
+    // (instance ...) requires the component to resolve through the library —
+    // an empty footprint signals that the family wasn't in the cache.
+    if (!self.component_cache.contains(resolved.family)) return EvalError.UnboundVariable;
+    const inst = Instance{
+        .ref_des = ref_des,
+        .label = ref_des,
+        .component = resolved.family,
+        .value = resolved.value,
+        .footprint = resolved.footprint,
+        .symbol = resolved.symbol,
+        .pinout = resolved.pinout,
+        .properties = resolved.properties,
+        .attrs = resolved.attrs,
+        .source_offset = comp_offset,
+        .id = inst_id,
     };
 
     // Resolve pinout for reverse lookup (function_name -> pin_id)
@@ -120,8 +157,8 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
                             for (bus_def.pins, 0..) |bus_pin, idx| {
                                 const net = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ prefix, idx }) catch continue;
                                 // Resolve pin through pinout
-                                const resolved = if (reverse_pinout) |rp| (resolvePinName(self, rp, bus_pin) orelse bus_pin) else bus_pin;
-                                try pin_nets.append(self.allocator, .{ .ref_des = ref_des, .pin = resolved, .net = net });
+                                const resolved_pin = if (reverse_pinout) |rp| (resolvePinName(self, rp, bus_pin) orelse bus_pin) else bus_pin;
+                                try pin_nets.append(self.allocator, .{ .ref_des = ref_des, .pin = resolved_pin, .net = net });
                             }
                             break;
                         }
@@ -224,20 +261,22 @@ pub fn parsePinForm(self: *Evaluator, form: Node, ref_des: []const u8, env: *Env
 }
 
 /// Build an Instance from a Value (.component or .component_instance),
-/// looking up cached footprint/symbol/properties.
+/// looking up cached footprint/symbol/properties. Unlike `buildInstance`, an
+/// uncached component family is not an error — the returned instance's library
+/// fields come back empty.
 pub fn instanceFromValue(self: *Evaluator, val: Value, ref_des: []const u8, source_offset: u32, id: []const u8) ?Instance {
-    return switch (val) {
-        .component => |c| blk: {
-            const cd = self.component_cache.get(c) orelse
-                break :blk Instance{ .ref_des = ref_des, .component = c, .value = "", .footprint = "", .symbol = "", .source_offset = source_offset, .id = id };
-            break :blk Instance{ .ref_des = ref_des, .component = c, .value = "", .footprint = cd.footprint_name, .symbol = cd.symbol_name, .properties = cd.properties, .source_offset = source_offset, .id = id };
-        },
-        .component_instance => |ci| blk: {
-            const cd = self.component_cache.get(ci.family) orelse
-                break :blk Instance{ .ref_des = ref_des, .component = ci.family, .value = ci.value, .footprint = "", .symbol = "", .attrs = ci.attrs, .source_offset = source_offset, .id = id };
-            break :blk Instance{ .ref_des = ref_des, .component = ci.family, .value = ci.value, .footprint = cd.footprint_name, .symbol = cd.symbol_name, .properties = cd.properties, .attrs = ci.attrs, .source_offset = source_offset, .id = id };
-        },
-        else => null,
+    const resolved = resolveComponent(self, val) orelse return null;
+    return Instance{
+        .ref_des = ref_des,
+        .component = resolved.family,
+        .value = resolved.value,
+        .footprint = resolved.footprint,
+        .symbol = resolved.symbol,
+        .pinout = resolved.pinout,
+        .properties = resolved.properties,
+        .attrs = resolved.attrs,
+        .source_offset = source_offset,
+        .id = id,
     };
 }
 

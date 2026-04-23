@@ -5,8 +5,10 @@ const netlist_mod = @import("export_kicad_netlist.zig");
 const export_kicad = @import("export_kicad.zig");
 const FlatInstance = export_kicad.FlatInstance;
 const parser_mod = @import("sexpr/parser.zig");
+const checks = @import("checks.zig");
+const json_writer = @import("json_writer.zig");
 
-pub const Severity = enum { error_, warning };
+pub const Severity = checks.Severity;
 
 pub const Violation = struct {
     kind: []const u8,
@@ -15,6 +17,25 @@ pub const Violation = struct {
     y: f64,
     severity: Severity,
 };
+
+/// Serialize DRC violations to JSON. Output format:
+/// `{"violations":[{"kind":...,"message":...,"x":...,"y":...,"severity":...}],"count":N}`
+pub fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Violation) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(allocator);
+    try w.writeAll("{\"violations\":[");
+    for (violations, 0..) |v, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"kind\":");
+        try json_writer.writeString(w, v.kind);
+        try w.writeAll(",\"message\":");
+        try json_writer.writeString(w, v.message);
+        try w.print(",\"x\":{d:.4},\"y\":{d:.4},\"severity\":\"{s}\"", .{ v.x, v.y, @tagName(v.severity) });
+        try w.writeAll("}");
+    }
+    try w.print("],\"count\":{d}}}", .{violations.len});
+    return buf.items;
+}
 
 /// Run DRC on a design, returning all violations found.
 pub fn runDrc(
@@ -147,7 +168,7 @@ pub fn runDrc(
                                 .message = try std.fmt.allocPrint(allocator, "Pad {s}.{s} to {s}.{s}: {d:.2}mm < {d:.2}mm clearance", .{ a.ref, a.pin, b.ref, b.pin, dist, rules.clearance }),
                                 .x = (a.x + b.x) / 2.0,
                                 .y = (a.y + b.y) / 2.0,
-                                .severity = .error_,
+                                .severity = .@"error",
                             });
                         }
                     }
@@ -170,7 +191,7 @@ pub fn runDrc(
                         .message = try std.fmt.allocPrint(allocator, "Trace '{s}' to pad {s}.{s}: {d:.2}mm < {d:.2}mm", .{ baseNet(t.net), pad.ref, pad.pin, gap, rules.clearance }),
                         .x = pad.x,
                         .y = pad.y,
-                        .severity = .error_,
+                        .severity = .@"error",
                     });
                     break; // One violation per pad per trace
                 }
@@ -209,7 +230,7 @@ pub fn runDrc(
                             .message = try std.fmt.allocPrint(allocator, "Trace '{s}' to trace '{s}': {d:.2}mm < {d:.2}mm", .{ baseNet(ta.net), baseNet(tb.net), d, min_gap }),
                             .x = mx,
                             .y = my,
-                            .severity = .error_,
+                            .severity = .@"error",
                         });
                         found_violation = true;
                         break;
@@ -234,7 +255,7 @@ pub fn runDrc(
                     .message = try std.fmt.allocPrint(allocator, "Via '{s}' to pad {s}.{s}: {d:.2}mm < {d:.2}mm", .{ baseNet(v.net), pad.ref, pad.pin, dist, rules.clearance }),
                     .x = v.x,
                     .y = v.y,
-                    .severity = .error_,
+                    .severity = .@"error",
                 });
             }
         }
@@ -250,7 +271,7 @@ pub fn runDrc(
                         .message = try std.fmt.allocPrint(allocator, "Via '{s}' to trace '{s}': {d:.2}mm < {d:.2}mm", .{ baseNet(v.net), baseNet(t.net), gap, rules.clearance }),
                         .x = v.x,
                         .y = v.y,
-                        .severity = .error_,
+                        .severity = .@"error",
                     });
                     break;
                 }
@@ -301,7 +322,7 @@ pub fn runDrc(
                                 .message = try std.fmt.allocPrint(allocator, "Trace '{s}' in keepout '{s}'", .{ baseNet(t.net), ko.name }),
                                 .x = pt[0],
                                 .y = pt[1],
-                                .severity = .error_,
+                                .severity = .@"error",
                             });
                             break;
                         }
@@ -317,7 +338,7 @@ pub fn runDrc(
                             .message = try std.fmt.allocPrint(allocator, "Via '{s}' in keepout '{s}'", .{ baseNet(v.net), ko.name }),
                             .x = v.x,
                             .y = v.y,
-                            .severity = .error_,
+                            .severity = .@"error",
                         });
                     }
                 }
@@ -516,7 +537,7 @@ pub fn runDrc(
                             .message = try std.fmt.allocPrint(allocator, "Pad {s}.{s} on net '{s}' is unconnected", .{ pad.ref, pad.pin, net_name }),
                             .x = pad.x,
                             .y = pad.y,
-                            .severity = .error_,
+                            .severity = .@"error",
                         });
                         break; // One violation per net is enough
                     }

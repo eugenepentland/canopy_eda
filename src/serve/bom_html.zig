@@ -1,6 +1,7 @@
 const std = @import("std");
 const env_mod = @import("../eval/env.zig");
 const parser_mod = @import("../sexpr/parser.zig");
+const json_writer = @import("../json_writer.zig");
 
 /// Check if a ref-des is a standard format (1-2 uppercase letters + digits), e.g. U10, R5.
 fn isStdRefDes(ref: []const u8) bool {
@@ -676,15 +677,4 @@ pub fn writeNetsJson(w: anytype, block: *const env_mod.DesignBlock, prefix: []co
     return written;
 }
 
-pub fn writeJsonEscaped(w: anytype, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            else => try w.writeByte(c),
-        }
-    }
-}
+pub const writeJsonEscaped = json_writer.writeEscaped;

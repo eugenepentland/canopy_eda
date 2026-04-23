@@ -227,7 +227,10 @@ pub fn exportNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const qs = try req.query();
     const short_nets = if (qs.get("short-nets")) |v| std.mem.eql(u8, v, "1") else false;
-    const name = "stm32n6"; // TODO: parameterize
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
 
     const board_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name }) catch {
         res.status = 500;
@@ -962,21 +965,9 @@ pub fn drcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
         return;
     };
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const w = buf.writer(ctx.allocator);
-    try w.writeAll("{\"violations\":[");
-    for (violations, 0..) |v, vi| {
-        if (vi > 0) try w.writeAll(",");
-        const sev: []const u8 = if (v.severity == .error_) "error" else "warning";
-        try w.print("{{\"kind\":\"{s}\",\"message\":\"{s}\",\"x\":{d:.4},\"y\":{d:.4},\"severity\":\"{s}\"}}", .{
-            v.kind, v.message, v.x, v.y, sev,
-        });
-    }
-    try w.print("],\"count\":{d}}}", .{violations.len});
-
     res.content_type = .JSON;
     res.header("access-control-allow-origin", "*");
-    res.body = buf.items;
+    res.body = try drc_mod.writeViolationsJson(ctx.allocator, violations);
 }
 
 /// Apply placement updates to a .kicad_pcb file by matching canopy_uuid.

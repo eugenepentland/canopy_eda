@@ -8,6 +8,23 @@ const serve_mod = @import("serve.zig");
 const commands = @import("commands.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
 
+/// Return the value of `--<flag>` if present anywhere in `args`, else null.
+fn optionalArg(args: [][:0]u8, flag: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i + 1 < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], flag)) return args[i + 1];
+    }
+    return null;
+}
+
+/// Return true if `--<flag>` appears anywhere in `args`.
+fn hasFlag(args: [][:0]u8, flag: []const u8) bool {
+    for (args) |a| {
+        if (std.mem.eql(u8, a, flag)) return true;
+    }
+    return false;
+}
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
@@ -42,59 +59,27 @@ pub fn main() !void {
             std.debug.print("Usage: eda convert-symbol <file.kicad_sym> [--filter <name>]\n", .{});
             std.process.exit(1);
         }
-        var filter: ?[]const u8 = null;
-        var i: usize = 3;
-        while (i < args.len) : (i += 1) {
-            if (std.mem.eql(u8, args[i], "--filter") and i + 1 < args.len) {
-                filter = args[i + 1];
-                i += 1;
-            }
-        }
-        try cmdConvertSymbol(allocator, args[2], filter);
+        try cmdConvertSymbol(allocator, args[2], optionalArg(args[3..], "--filter"));
     } else if (std.mem.eql(u8, command, "convert-package")) {
         if (args.len < 4) {
             std.debug.print("Usage: eda convert-package <file.kicad_sym> <file.kicad_mod> [--name <n>] [--filter <f>]\n", .{});
             std.process.exit(1);
         }
-        var pkg_name: ?[]const u8 = null;
-        var filter: ?[]const u8 = null;
-        var i: usize = 4;
-        while (i < args.len) : (i += 1) {
-            if (std.mem.eql(u8, args[i], "--name") and i + 1 < args.len) {
-                pkg_name = args[i + 1];
-                i += 1;
-            }
-            if (std.mem.eql(u8, args[i], "--filter") and i + 1 < args.len) {
-                filter = args[i + 1];
-                i += 1;
-            }
-        }
-        try cmdConvertPackage(allocator, args[2], args[3], pkg_name orelse "package", filter);
+        const pkg_name = optionalArg(args[4..], "--name") orelse "package";
+        const filter = optionalArg(args[4..], "--filter");
+        try cmdConvertPackage(allocator, args[2], args[3], pkg_name, filter);
     } else if (std.mem.eql(u8, command, "convert-pinout")) {
         if (args.len < 3) {
             std.debug.print("Usage: eda convert-pinout <file.kicad_sym> [--filter <name>]\n", .{});
             std.process.exit(1);
         }
-        var filter: ?[]const u8 = null;
-        var i: usize = 3;
-        while (i < args.len) : (i += 1) {
-            if (std.mem.eql(u8, args[i], "--filter") and i + 1 < args.len) {
-                filter = args[i + 1];
-                i += 1;
-            }
-        }
-        try cmdConvertPinout(allocator, args[2], filter);
+        try cmdConvertPinout(allocator, args[2], optionalArg(args[3..], "--filter"));
     } else if (std.mem.eql(u8, command, "merge-alt-functions")) {
         if (args.len < 4) {
             std.debug.print("Usage: eda merge-alt-functions <pinout.sexp> <alts.csv|alts.xml> [--write]\n", .{});
             std.process.exit(1);
         }
-        var write_back = false;
-        var i: usize = 4;
-        while (i < args.len) : (i += 1) {
-            if (std.mem.eql(u8, args[i], "--write")) write_back = true;
-        }
-        try cmdMergeAltFunctions(allocator, args[2], args[3], write_back);
+        try cmdMergeAltFunctions(allocator, args[2], args[3], hasFlag(args[4..], "--write"));
     } else if (std.mem.eql(u8, command, "export-kicad")) {
         try commands.cmdExportKicad(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "export-pcb")) {
@@ -102,33 +87,15 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, command, "export-gerber")) {
         try commands.cmdExportGerber(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "serve")) {
-        var project_dir: []const u8 = ".";
-        var port: u16 = 7050;
-        var si: usize = 2;
-        while (si < args.len) : (si += 1) {
-            if (std.mem.eql(u8, args[si], "--project-dir") and si + 1 < args.len) {
-                project_dir = args[si + 1];
-                si += 1;
-            }
-            if (std.mem.eql(u8, args[si], "--port") and si + 1 < args.len) {
-                port = std.fmt.parseInt(u16, args[si + 1], 10) catch 7050;
-                si += 1;
-            }
-        }
+        const project_dir = optionalArg(args[2..], "--project-dir") orelse ".";
+        const port: u16 = if (optionalArg(args[2..], "--port")) |p|
+            std.fmt.parseInt(u16, p, 10) catch 7050
+        else
+            7050;
         try serve_mod.serve(allocator, port, project_dir);
     } else if (std.mem.eql(u8, command, "mint-plugin-token")) {
-        var project_dir: []const u8 = ".";
-        var label: []const u8 = "plugin";
-        var mi: usize = 2;
-        while (mi < args.len) : (mi += 1) {
-            if (std.mem.eql(u8, args[mi], "--project-dir") and mi + 1 < args.len) {
-                project_dir = args[mi + 1];
-                mi += 1;
-            } else if (std.mem.eql(u8, args[mi], "--label") and mi + 1 < args.len) {
-                label = args[mi + 1];
-                mi += 1;
-            }
-        }
+        const project_dir = optionalArg(args[2..], "--project-dir") orelse ".";
+        const label = optionalArg(args[2..], "--label") orelse "plugin";
         const raw = try plugin_tokens.mint(allocator, project_dir, label);
         defer allocator.free(raw);
         const stdout = std.fs.File.stdout();
@@ -312,4 +279,6 @@ test {
     _ = @import("export_kicad_pcb.zig");
     _ = @import("serve.zig");
     _ = @import("render_json.zig");
+    _ = @import("json_writer.zig");
+    _ = @import("checks.zig");
 }

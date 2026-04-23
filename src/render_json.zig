@@ -1,5 +1,6 @@
 const std = @import("std");
 const env_mod = @import("eval/env.zig");
+const json_writer = @import("json_writer.zig");
 const DesignBlock = env_mod.DesignBlock;
 
 const ctx_mod = @import("render_svg/context.zig");
@@ -1639,11 +1640,7 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
     return buf.toOwnedSlice(allocator);
 }
 
-fn writeJsonString(w: anytype, key: []const u8, value: []const u8) !void {
-    try w.print("\"{s}\":\"", .{key});
-    try writeEscaped(w, value);
-    try w.writeAll("\"");
-}
+const writeJsonString = json_writer.writeField;
 
 fn writeJsonPin(w: anytype, pin: JsonPin) !void {
     try w.writeAll("{");
@@ -1668,21 +1665,4 @@ fn writeJsonPin(w: anytype, pin: JsonPin) !void {
     try w.writeAll("}");
 }
 
-fn writeEscaped(w: anytype, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            else => {
-                if (c < 0x20) {
-                    try w.print("\\u{x:0>4}", .{c});
-                } else {
-                    try w.writeByte(c);
-                }
-            },
-        }
-    }
-}
+const writeEscaped = json_writer.writeEscaped;

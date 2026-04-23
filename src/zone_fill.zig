@@ -14,12 +14,15 @@ pub const ZoneFillResult = struct {
 };
 
 /// Obstacle for zone fill: a circle at (x,y) with radius r, on a specific net.
+/// `layer` is the copper layer the obstacle lives on ("F.Cu", "B.Cu"), or "*" for
+/// thru-hole pads and vias which affect every copper layer.
 const Obstacle = struct {
     x: f64,
     y: f64,
     r: f64,
     net: []const u8,
     is_thru: bool,
+    layer: []const u8,
 };
 
 /// Trace segment obstacle.
@@ -104,12 +107,19 @@ pub fn computeZoneFills(
             // Look up net for this pad
             const key = try std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ inst.ref_des, pad.name });
             const net_name = pin_net.get(key) orelse "";
+            const pad_layer: []const u8 = if (is_thru)
+                "*"
+            else switch (pl.side) {
+                .front => "F.Cu",
+                .back => "B.Cu",
+            };
             try obstacles.append(allocator, .{
                 .x = pos[0],
                 .y = pos[1],
                 .r = @max(pad.w, pad.h) / 2.0,
                 .net = net_name,
                 .is_thru = is_thru,
+                .layer = pad_layer,
             });
         }
     }
@@ -122,6 +132,7 @@ pub fn computeZoneFills(
             .r = v.pad_size / 2.0,
             .net = v.net,
             .is_thru = true,
+            .layer = "*",
         });
     }
 
@@ -214,10 +225,9 @@ fn fillZone(
     for (obstacles) |obs| {
         // Skip same-net obstacles (they get thermal relief instead)
         if (baseNetEql(obs.net, zone_def.name)) continue;
-        // Skip if obstacle is on wrong layer (SMD pads)
-        if (!obs.is_thru) {
-            // TODO: check layer match — for now, clear on all layers
-        }
+        // Skip SMD pads on a different copper layer than this zone. "*" marks
+        // thru-hole pads and vias which affect every layer.
+        if (!std.mem.eql(u8, obs.layer, "*") and !std.mem.eql(u8, obs.layer, zone_def.layer)) continue;
         const clear_r = obs.r + clearance;
         clearCircle(grid, cols, rows, min_x, min_y, obs.x, obs.y, clear_r);
     }
@@ -233,6 +243,7 @@ fn fillZone(
     // Step 4: Clear same-net pad centers (thermal relief — keep spokes)
     for (obstacles) |obs| {
         if (!baseNetEql(obs.net, zone_def.name)) continue;
+        if (!std.mem.eql(u8, obs.layer, "*") and !std.mem.eql(u8, obs.layer, zone_def.layer)) continue;
         // Clear the pad area but leave thermal spokes
         clearThermalRelief(grid, cols, rows, min_x, min_y, obs.x, obs.y, obs.r, zone_def.thermal_gap, zone_def.thermal_width);
     }
