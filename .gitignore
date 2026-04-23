@@ -11,6 +11,9 @@ __pycache__/
 # Runtime auth/session data (OAuth clients, tokens, sessions, users)
 projects/designs/auth/
 
+# Guardian runtime database
+guardian_runtime.db
+
 # Loose root-level scratch files
 /ADC.md
 /ad7380-4.pdf
