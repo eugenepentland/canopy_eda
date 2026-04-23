@@ -72,7 +72,7 @@ pub fn renderHubPart(self: *RenderCtx, w: anytype, hub: FlatInst, part: env_mod.
     const hub_height = @max(left_total, right_total) + 40.0;
     const box_y = y_start;
 
-    const label = try std.fmt.allocPrint(self.allocator, "{s} \xe2\x80\x94 {s}", .{ shortRef(hub.ref_des), part.name });
+    const label = try std.fmt.allocPrint(self.allocator, "{s} {s}", .{ shortRef(hub.ref_des), displayValue(hub) });
     try w.print(
         \\<g class="hub-group" data-ref="{s}" transform="translate(0,0)">
         \\<g data-ref="{s}" data-part="{s}" class="component" style="cursor:pointer"><rect x="{d:.1}" y="{d:.1}" width="{d:.0}" height="{d:.1}" fill="#16213e" stroke="#4a9eff" stroke-width="2" rx="6"/>

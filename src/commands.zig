@@ -5,6 +5,65 @@ const export_kicad = @import("export_kicad.zig");
 const export_kicad_pcb = @import("export_kicad_pcb.zig");
 const bom = @import("bom.zig");
 const id_insert = @import("id_insert.zig");
+const erc_mod = @import("erc.zig");
+const env_mod = @import("eval/env.zig");
+
+/// `eda check <name>` — run ERC on a design and print violations.
+pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var project_dir: []const u8 = ".";
+    var positional_name: ?[]const u8 = null;
+    var severity_filter: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--project-dir") and i + 1 < args.len) {
+            project_dir = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--severity") and i + 1 < args.len) {
+            severity_filter = args[i + 1];
+            i += 1;
+        } else if (!std.mem.startsWith(u8, args[i], "--")) {
+            positional_name = args[i];
+        }
+    }
+    const design = positional_name orelse {
+        std.debug.print("Usage: eda check [--project-dir <d>] [--severity error|warning|info] <design-name>\n", .{});
+        std.process.exit(1);
+    };
+
+    const board_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, design });
+    defer allocator.free(board_path);
+
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    const result = eval.evalFile(board_path) catch |err| {
+        std.debug.print("Evaluate error: {}\n", .{err});
+        std.process.exit(1);
+    };
+    const block = switch (result) {
+        .design_block => |b| b,
+        .board => |b| @as(*const env_mod.DesignBlock, b.design),
+        else => {
+            std.debug.print("error: {s} did not evaluate to a design\n", .{design});
+            std.process.exit(1);
+        },
+    };
+
+    const violations = try erc_mod.runErc(allocator, block, project_dir);
+    const stdout = std.fs.File.stdout();
+    var w_buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = w_buf.writer(allocator);
+    var shown: usize = 0;
+    for (violations) |v| {
+        if (severity_filter) |sf| if (!std.mem.eql(u8, @tagName(v.severity), sf)) continue;
+        shown += 1;
+        try w.print("{s:<9} {s:<26} ", .{ @tagName(v.severity), @tagName(v.kind) });
+        if (v.ref_des.len > 0) try w.print("{s} ", .{v.ref_des});
+        if (v.net.len > 0) try w.print("[{s}] ", .{v.net});
+        try w.print("— {s}\n", .{v.message});
+    }
+    try w.print("\n{d} violation(s)\n", .{shown});
+    try stdout.writeAll(w_buf.items);
+}
 
 pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var project_dir: []const u8 = ".";

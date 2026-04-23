@@ -1,6 +1,7 @@
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("env.zig");
+const na = @import("net_analysis.zig");
 const Evaluator = @import("evaluator.zig").Evaluator;
 const DesignBlock = env_mod.DesignBlock;
 const Node = ast.Node;
@@ -32,7 +33,7 @@ fn checkSinglePinNets(self: *Evaluator, block: *const DesignBlock) void {
     }
 
     for (block.nets) |net| {
-        const base = baseNetName(net.name);
+        const base = na.baseNetName(net.name);
         if (port_nets.contains(base)) continue; // Port nets connect externally
         const gop = net_pin_counts.getOrPut(self.allocator, base) catch continue;
         if (!gop.found_existing) gop.value_ptr.* = 0;
@@ -52,7 +53,7 @@ fn checkSinglePinNets(self: *Evaluator, block: *const DesignBlock) void {
         // Each net_tie side that doesn't have '/' is a plain net in this block
         for ([_][]const u8{ nt.a, nt.b }) |side| {
             if (std.mem.indexOfScalar(u8, side, '/') == null) {
-                const base = baseNetName(side);
+                const base = na.baseNetName(side);
                 const gop = net_pin_counts.getOrPut(self.allocator, base) catch continue;
                 if (!gop.found_existing) gop.value_ptr.* = 0;
                 gop.value_ptr.* += 1;
@@ -121,45 +122,20 @@ fn checkVoltageMismatches(self: *Evaluator, block: *const DesignBlock) void {
 }
 
 /// Warn about power nets connected to ICs but missing decoupling capacitors.
+/// Shares its core analysis with the on-demand ERC pass in `src/erc.zig` —
+/// see `eval/net_analysis.zig` for the actual walk (including the follow
+/// into sub-block ports tied to top-level rails).
 fn checkMissingDecoupling(self: *Evaluator, block: *const DesignBlock) void {
-    // Collect power net names from section ports
-    var power_nets: std.StringHashMapUnmanaged(void) = .empty;
-    for (block.sections) |sec| {
-        for (sec.ports) |p| {
-            if (p.signal_type == .power and p.direction == .in) {
-                power_nets.put(self.allocator, p.name, {}) catch {};
-            }
-        }
+    const missing = na.findMissingDecouplingNets(self.allocator, block);
+    defer self.allocator.free(missing);
+    for (missing) |base| {
+        const msg = std.fmt.allocPrint(
+            self.allocator,
+            "Power net \"{s}\" connects to IC but has no decoupling capacitor",
+            .{base},
+        ) catch continue;
+        self.assertions.append(self.allocator, .{ .passed = false, .message = msg, .is_warning = true }) catch {};
     }
-
-    // For each power net, check if any IC is connected without a cap
-    for (block.nets) |net| {
-        // Only check nets that are declared as power
-        const base = baseNetName(net.name);
-        if (!power_nets.contains(base)) continue;
-
-        var has_ic = false;
-        var has_cap = false;
-        for (net.pins) |pin| {
-            if (pin.ref_des.len == 0) continue;
-            const prefix = pin.ref_des[0];
-            if (prefix == 'U') has_ic = true;
-            if (prefix == 'C') has_cap = true;
-        }
-        if (has_ic and !has_cap) {
-            const msg = std.fmt.allocPrint(
-                self.allocator,
-                "Power net \"{s}\" connects to IC but has no decoupling capacitor",
-                .{base},
-            ) catch continue;
-            self.assertions.append(self.allocator, .{ .passed = false, .message = msg, .is_warning = true }) catch {};
-        }
-    }
-}
-
-fn baseNetName(name: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, name, '.')) |idx| return name[0..idx];
-    return name;
 }
 
 /// Track the first argument of a (net ...) form for combinability warnings.

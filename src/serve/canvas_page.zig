@@ -35,7 +35,7 @@ pub fn canvasPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
     };
 
     // Generate scene graph and seed live cache
-    const layout_json = render_json.renderSceneGraph(ctx.allocator, block) catch null;
+    const layout_json = render_json.renderSceneGraph(ctx.allocator, block, ctx.project_dir) catch null;
     serve_root.setLiveLayoutJson(layout_json);
 
     var sym_cache = try bom_html.buildSymbolPinCache(ctx.allocator, ctx.project_dir);
@@ -61,6 +61,7 @@ pub fn canvasPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
     try w.writeAll("</div>");
     try w.writeAll("<button class=\"canvas-btn\" id=\"canvas-reset\">Reset</button>");
     try w.writeAll("<button class=\"canvas-btn\" id=\"rebuild-btn\">Rebuild</button>");
+    try w.writeAll("<button class=\"canvas-btn\" id=\"source-btn\">Source</button>");
     try w.print("<a class=\"canvas-btn\" href=\"/pcb/{s}\">PCB</a>", .{name});
     try w.print("<button class=\"canvas-btn\" onclick=\"window.location='/api/export-bom/{s}'\">Export BOM</button>", .{name});
     try w.writeAll("<div class=\"kicad-menu\">");
@@ -90,6 +91,18 @@ pub fn canvasPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
     try w.writeAll("<div id=\"sidebar-content\"><div class=\"sidebar-empty\">Click a component or net to inspect</div></div>");
     try w.writeAll("</div>");
     try w.writeAll("</div>");
+
+    // Source editor modal — must come before any script that wires it
+    try w.writeAll("<div id=\"source-modal\" class=\"source-modal\" style=\"display:none\">");
+    try w.writeAll("<div class=\"source-modal-box\">");
+    try w.print("<div class=\"source-modal-head\"><span>Source: {s}.sexp</span><button class=\"canvas-btn\" id=\"source-close\">\u{2715}</button></div>", .{name});
+    try w.writeAll("<div class=\"source-modal-err\" id=\"source-err\" style=\"display:none\"></div>");
+    try w.writeAll("<textarea id=\"source-textarea\" spellcheck=\"false\" autocomplete=\"off\"></textarea>");
+    try w.writeAll("<div class=\"source-modal-foot\">");
+    try w.writeAll("<span class=\"source-modal-hint\">Cmd/Ctrl+S to save, Esc to cancel</span>");
+    try w.writeAll("<button class=\"canvas-btn\" id=\"source-cancel\">Cancel</button>");
+    try w.writeAll("<button class=\"canvas-btn source-save\" id=\"source-save\">Save &amp; Rebuild</button>");
+    try w.writeAll("</div></div></div>");
 
     // Inject data globals
     try w.print("<script>var SCHEMATIC_SLUG='{s}';var DESIGN_NAME='{s}';var COMPONENTS={{", .{ name, name });
@@ -208,6 +221,17 @@ const CANVAS_CSS =
     \\.sidebar{display:none}
     \\.main-area{height:calc(100vh - 42px - 37px)}
     \\}
+    \\.source-modal{position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:200;display:flex;align-items:center;justify-content:center}
+    \\.source-modal-box{background:#0d1117;border:1px solid #30363d;border-radius:8px;width:min(1100px,92vw);height:min(80vh,820px);display:flex;flex-direction:column;box-shadow:0 8px 40px rgba(0,0,0,0.5)}
+    \\.source-modal-head{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid #21262d;color:#c9d1d9;font-weight:600}
+    \\.source-modal-err{margin:8px 14px 0;padding:8px 10px;background:#1a0000;border:1px solid #da3633;border-left:3px solid #da3633;border-radius:4px;color:#f85149;font-size:12px;white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+    \\#source-textarea{flex:1;margin:10px 14px;padding:10px;background:#010409;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.45;tab-size:2;resize:none;outline:none}
+    \\#source-textarea:focus{border-color:#58a6ff}
+    \\.source-modal-foot{display:flex;gap:8px;align-items:center;padding:10px 14px;border-top:1px solid #21262d}
+    \\.source-modal-hint{margin-right:auto;color:#8b949e;font-size:11px}
+    \\.canvas-btn.source-save{background:#238636;border-color:#238636;color:#fff}
+    \\.canvas-btn.source-save:hover{background:#2ea043;border-color:#2ea043}
+    \\.canvas-btn.source-save:disabled{background:#30363d;border-color:#30363d;color:#8b949e;cursor:not-allowed}
 ;
 
 const CANVAS_VIEWER_JS = @import("canvas_viewer_js.zig").CANVAS_VIEWER_JS;
@@ -278,7 +302,8 @@ const KICAD_MENU_JS =
     \\          lines.push('Wrote: '+(parts.length?parts.join(', '):'netlist only'));
     \\        }
     \\      }
-    \\      var m=j.mismatches||0,miss=j.missing||0;
+    \\      var m=j.mismatches||0,miss=j.missing||0,seeded=j.seeded||0;
+    \\      if(seeded>0)lines.push('Replicated module layouts: '+seeded+' component(s) seeded from master instance(s).');
     \\      if(m===0&&miss===0){if(!j.skipped)lines.push('Validation: all checks passed');}
     \\      else lines.push('Validation: '+m+' mismatch(es), '+miss+' missing component(s) \u2014 see '+j.pcb.replace(/\.kicad_pcb$/,'.pcb_diff.json'));
     \\      setStatus(lines.join('\n'),(m===0&&miss===0)?'ok':'err');

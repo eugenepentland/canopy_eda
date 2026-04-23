@@ -52,6 +52,33 @@ pub const CANVAS_VIEWER_JS =
     \\var sectionRects={};
     \\var PIN_NAMES={};
     \\
+    \\/* ── Pin-function hover tooltip ──────────────────────────── */
+    \\var _pinTooltip=document.createElement('div');
+    \\_pinTooltip.style.cssText='position:fixed;display:none;z-index:9999;background:#161b22;border:1px solid #30363d;border-radius:4px;padding:6px 10px;font-family:system-ui,sans-serif;font-size:12px;color:#c9d1d9;pointer-events:none;max-width:260px;box-shadow:0 4px 12px rgba(0,0,0,0.5)';
+    \\document.body.appendChild(_pinTooltip);
+    \\function showPinTooltip(pd,ev){
+    \\  if((!pd.alts||!pd.alts.length)&&!pd.activeFn)return;
+    \\  var html='<div style="font-weight:bold;color:#e6edf3">'+pd.name+' ('+pd.pins+')</div>';
+    \\  if(pd.activeFn)html+='<div style="margin-top:3px;color:#58a6ff">active: '+pd.activeFn+'</div>';
+    \\  if(pd.alts&&pd.alts.length){
+    \\    html+='<div style="margin-top:4px;color:#8b949e;font-size:11px">alternates:</div>';
+    \\    for(var a of pd.alts){
+    \\      var isActive=pd.activeFn===a;
+    \\      html+='<div style="color:'+(isActive?'#58a6ff':'#c9d1d9')+';font-weight:'+(isActive?'bold':'normal')+'">'+a+'</div>';
+    \\    }
+    \\  }
+    \\  _pinTooltip.innerHTML=html;
+    \\  _pinTooltip.style.display='block';
+    \\  movePinTooltip(ev);
+    \\}
+    \\function movePinTooltip(ev){
+    \\  var x=ev.clientX||(ev.data&&ev.data.global?ev.data.global.x:0);
+    \\  var y=ev.clientY||(ev.data&&ev.data.global?ev.data.global.y:0);
+    \\  _pinTooltip.style.left=(x+14)+'px';
+    \\  _pinTooltip.style.top=(y+14)+'px';
+    \\}
+    \\function hidePinTooltip(){_pinTooltip.style.display='none';}
+    \\
     \\/* ── Fetch scene graph ────────────────────────────────────── */
     \\async function loadScene(){
     \\  var r=await fetch('/api/scene-graph/'+DESIGN_NAME);
@@ -164,17 +191,31 @@ pub const CANVAS_VIEWER_JS =
     \\    /* Left pins */
     \\    var stubLen=40;
     \\    function pinLabel(ps){var n=ps.split(',').length;return n>2?n+'x pins':ps;}
+    \\    function attachPinHover(hit,pd){
+    \\      if((!pd.alts||!pd.alts.length)&&!pd.activeFn)return;
+    \\      hit.eventMode='static';hit.cursor='help';hit._pinData=pd;
+    \\      hit.on('pointerover',function(e){showPinTooltip(this._pinData,e);});
+    \\      hit.on('pointermove',function(e){movePinTooltip(e);});
+    \\      hit.on('pointerout',function(){hidePinTooltip();});
+    \\    }
     \\    for(var lp of h.leftPins){
     \\      var lg=new PIXI.Graphics();
     \\      lg.moveTo(h.x-stubLen,lp.y);lg.lineTo(h.x,lp.y);
     \\      lg.stroke({color:C.pinStub,width:1.5});
     \\      hc.addChild(lg);
-    \\      var ln=new PIXI.Text({text:lp.name,style:{fontFamily:'system-ui,sans-serif',fontSize:12,fill:C.pinText}});
+    \\      var lnColor=lp.activeFn?C.labelPort:C.pinText;
+    \\      var lnText=lp.activeFn?lp.activeFn:lp.name;
+    \\      var ln=new PIXI.Text({text:lnText,style:{fontFamily:'system-ui,sans-serif',fontSize:12,fontWeight:lp.activeFn?'bold':'normal',fill:lnColor}});
     \\      ln.x=h.x+8;ln.y=lp.y-6;
     \\      hc.addChild(ln);
     \\      var lpn=new PIXI.Text({text:pinLabel(lp.pins),style:{fontFamily:'system-ui,sans-serif',fontSize:10,fill:C.pinNum}});
     \\      lpn.anchor.set(1,1);lpn.x=h.x-stubLen+38;lpn.y=lp.y-1;
     \\      hc.addChild(lpn);
+    \\      var lhit=new PIXI.Graphics();
+    \\      lhit.rect(h.x-stubLen,lp.y-9,stubLen+60,18);
+    \\      lhit.fill({color:0x000000,alpha:0.001});
+    \\      hc.addChild(lhit);
+    \\      attachPinHover(lhit,lp);
     \\    }
     \\    /* Right pins */
     \\    for(var rp of h.rightPins){
@@ -182,12 +223,19 @@ pub const CANVAS_VIEWER_JS =
     \\      rg.moveTo(h.x+h.w,rp.y);rg.lineTo(h.x+h.w+stubLen,rp.y);
     \\      rg.stroke({color:C.pinStub,width:1.5});
     \\      hc.addChild(rg);
-    \\      var rn=new PIXI.Text({text:rp.name,style:{fontFamily:'system-ui,sans-serif',fontSize:12,fill:C.pinText}});
+    \\      var rnColor=rp.activeFn?C.labelPort:C.pinText;
+    \\      var rnText=rp.activeFn?rp.activeFn:rp.name;
+    \\      var rn=new PIXI.Text({text:rnText,style:{fontFamily:'system-ui,sans-serif',fontSize:12,fontWeight:rp.activeFn?'bold':'normal',fill:rnColor}});
     \\      rn.anchor.set(1,0);rn.x=h.x+h.w-8;rn.y=rp.y-6;
     \\      hc.addChild(rn);
     \\      var rpn=new PIXI.Text({text:pinLabel(rp.pins),style:{fontFamily:'system-ui,sans-serif',fontSize:10,fill:C.pinNum}});
     \\      rpn.x=h.x+h.w+stubLen-36;rpn.y=rp.y-1;
     \\      hc.addChild(rpn);
+    \\      var rhit=new PIXI.Graphics();
+    \\      rhit.rect(h.x+h.w-60,rp.y-9,stubLen+60,18);
+    \\      rhit.fill({color:0x000000,alpha:0.001});
+    \\      hc.addChild(rhit);
+    \\      attachPinHover(rhit,rp);
     \\    }
     \\    hc.eventMode='static';hc.cursor='pointer';
     \\    var shortRef=h.ref;
@@ -760,45 +808,55 @@ pub const CANVAS_VIEWER_JS =
     \\  fetch('/api/free-pins/'+DESIGN_NAME+'?ref='+encodeURIComponent(ref))
     \\    .then(function(r){return r.json();})
     \\    .then(function(d){
-    \\      if(!d||!d.free_pins||!d.free_pins.length){
-    \\        actionTd.innerHTML='<span style="color:#f85149;font-size:11px">no free pins</span>';
+    \\      var freePins=(d&&d.free_pins)||[];
+    \\      var assignedPins=((d&&d.assigned_pins)||[]).filter(function(p){return p.pin!==oldPin;});
+    \\      if(!freePins.length&&!assignedPins.length){
+    \\        actionTd.innerHTML='<span style="color:#f85149;font-size:11px">no candidates</span>';
     \\        setTimeout(function(){var c=moveActionCell(rowId);if(c)c.innerHTML=renderMoveLink(ref,oldPin,rowId);},2000);
     \\        return;
     \\      }
-    \\      var pins=d.free_pins;
+    \\      var oldNet=pinNetLookup(ref,oldPin)||'';
     \\      var inpId=rowId+'-inp',listId=rowId+'-list';
     \\      var html='<div style="position:relative;display:inline-block;vertical-align:middle">';
-    \\      html+='<input id="'+inpId+'" placeholder="pin or func…" autocomplete="off" style="background:#0d1117;color:#e8c547;border:1px solid #30363d;font-size:11px;padding:1px 4px;width:120px;box-sizing:border-box"/>';
-    \\      html+='<div id="'+listId+'" style="display:none;position:absolute;top:100%;right:0;z-index:100;background:#0d1117;border:1px solid #30363d;max-height:220px;overflow-y:auto;min-width:140px;font-size:11px"></div>';
+    \\      html+='<input id="'+inpId+'" placeholder="pin, func, or net…" autocomplete="off" style="background:#0d1117;color:#e8c547;border:1px solid #30363d;font-size:11px;padding:1px 4px;width:150px;box-sizing:border-box"/>';
+    \\      html+='<div id="'+listId+'" style="display:none;position:absolute;top:100%;right:0;z-index:100;background:#0d1117;border:1px solid #30363d;max-height:260px;overflow-y:auto;min-width:220px;font-size:11px"></div>';
     \\      html+='</div> <a href="#" style="color:#8b949e;font-size:11px;vertical-align:middle" onclick="event.preventDefault();cancelMovePin(\''+ref.replace(/\x27/g,"\\x27")+'\',\''+oldPin.replace(/\x27/g,"\\x27")+'\',\''+rowId+'\');">✕</a>';
     \\      actionTd.innerHTML=html;
     \\      var inp=document.getElementById(inpId);
     \\      var list=document.getElementById(listId);
     \\      var highlighted=-1;
     \\      var visible=[];
+    \\      var all=freePins.map(function(p){return{kind:'free',pin:p.pin,func:p.function||'',category:p.category||''};}).concat(
+    \\        assignedPins.map(function(p){return{kind:'swap',pin:p.pin,func:p.function||'',category:p.category||'',net:p.net||''};})
+    \\      );
     \\      function renderList(){
     \\        var q=inp.value.trim().toLowerCase();
     \\        visible=[];
-    \\        for(var i=0;i<pins.length;i++){
-    \\          var p=pins[i];
-    \\          var hay=(p.pin+' '+(p.function||'')+' '+(p.category||'')).toLowerCase();
+    \\        for(var i=0;i<all.length;i++){
+    \\          var p=all[i];
+    \\          var hay=(p.pin+' '+p.func+' '+p.category+' '+(p.net||'')).toLowerCase();
     \\          if(!q||hay.indexOf(q)>=0)visible.push(p);
-    \\          if(visible.length>=50)break;
+    \\          if(visible.length>=60)break;
     \\        }
-    \\        if(!visible.length){list.innerHTML='<div style="padding:4px 6px;color:#666">no matches</div>';list.style.display='block';highlighted=-1;return;}
     \\        var h='';
+    \\        if(oldNet){h+='<div style="padding:4px 6px;color:#8b949e;background:#161b22;border-bottom:1px solid #30363d">pin '+oldPin+' currently on <span style="color:#e6edf3">'+oldNet+'</span></div>';}
+    \\        if(!visible.length){h+='<div style="padding:4px 6px;color:#666">no matches</div>';list.innerHTML=h;list.style.display='block';highlighted=-1;return;}
     \\        for(var j=0;j<visible.length;j++){
     \\          var v=visible[j];
     \\          var isHi=j===highlighted;
-    \\          h+='<div data-idx="'+j+'" style="padding:3px 6px;cursor:pointer;'+(isHi?'background:#1f6feb;color:#fff':'color:#e8c547')+'"><span style="font-weight:600">'+v.pin+'</span>';
-    \\          if(v.function)h+=' <span style="color:'+(isHi?'#cfe':'')+'#8b949e">'+v.function+'</span>';
+    \\          var bg=isHi?(v.kind==='swap'?'background:#4c2889;':'background:#1f6feb;'):'';
+    \\          var fg=isHi?'color:#fff':'color:#e8c547';
+    \\          h+='<div data-idx="'+j+'" style="padding:3px 6px;cursor:pointer;'+fg+';'+bg+'"><span style="font-weight:600">'+v.pin+'</span>';
+    \\          if(v.func)h+=' <span style="color:'+(isHi?'#cfe':'#8b949e')+'">'+v.func+'</span>';
+    \\          if(v.kind==='swap')h+=' <span style="color:'+(isHi?'#e9d5ff':'#b392f0')+'">\u21C4 '+v.net+'</span>';
     \\          h+='</div>';
     \\        }
     \\        list.innerHTML=h;
     \\        list.style.display='block';
-    \\        for(var k=0;k<list.children.length;k++){
-    \\          list.children[k].onmousedown=(function(idx){return function(e){e.preventDefault();applyMovePin(ref,oldPin,visible[idx].pin,rowId);};})(k);
-    \\          list.children[k].onmouseenter=(function(idx){return function(){highlighted=idx;renderList();};})(k);
+    \\        var children=list.querySelectorAll('[data-idx]');
+    \\        for(var k=0;k<children.length;k++){
+    \\          children[k].onmousedown=(function(idx){return function(e){e.preventDefault();pickMoveTarget(ref,oldPin,oldNet,visible[idx],rowId);};})(k);
+    \\          children[k].onmouseenter=(function(idx){return function(){highlighted=idx;renderList();};})(k);
     \\        }
     \\      }
     \\      inp.addEventListener('input',function(){highlighted=visible.length?0:-1;renderList();});
@@ -807,13 +865,17 @@ pub const CANVAS_VIEWER_JS =
     \\      inp.addEventListener('keydown',function(e){
     \\        if(e.key==='ArrowDown'){e.preventDefault();if(visible.length){highlighted=(highlighted+1)%visible.length;renderList();}}
     \\        else if(e.key==='ArrowUp'){e.preventDefault();if(visible.length){highlighted=(highlighted-1+visible.length)%visible.length;renderList();}}
-    \\        else if(e.key==='Enter'){e.preventDefault();if(highlighted>=0&&visible[highlighted])applyMovePin(ref,oldPin,visible[highlighted].pin,rowId);else{inp.style.borderColor='#f85149';setTimeout(function(){inp.style.borderColor='#30363d';},800);}}
+    \\        else if(e.key==='Enter'){e.preventDefault();if(highlighted>=0&&visible[highlighted])pickMoveTarget(ref,oldPin,oldNet,visible[highlighted],rowId);else{inp.style.borderColor='#f85149';setTimeout(function(){inp.style.borderColor='#30363d';},800);}}
     \\        else if(e.key==='Escape'){e.preventDefault();cancelMovePin(ref,oldPin,rowId);}
     \\      });
     \\      inp.focus();
     \\      renderList();
     \\    })
     \\    .catch(function(){actionTd.innerHTML='<span style="color:#f85149;font-size:11px">error</span>';});
+    \\}
+    \\function pickMoveTarget(ref,oldPin,oldNet,target,rowId){
+    \\  if(target.kind==='swap')applySwapPin(ref,oldPin,oldNet,target.pin,target.net,rowId);
+    \\  else applyMovePin(ref,oldPin,target.pin,rowId);
     \\}
     \\function cancelMovePin(ref,oldPin,rowId){
     \\  var c=moveActionCell(rowId);if(!c)return;
@@ -843,9 +905,26 @@ pub const CANVAS_VIEWER_JS =
     \\    })
     \\    .catch(function(){var cc=moveActionCell(rowId);if(cc)cc.innerHTML='<span style="color:#f85149;font-size:11px">network error</span>';});
     \\}
+    \\function applySwapPin(ref,oldPin,oldNet,newPin,newNet,rowId){
+    \\  var c=moveActionCell(rowId);if(!c)return;
+    \\  var label='swap '+(oldNet||oldPin)+' \u21C4 '+(newNet||newPin);
+    \\  c.innerHTML='<span style="color:#666;font-size:11px">'+label+'…</span>';
+    \\  fetch('/api/swap-pins/'+DESIGN_NAME,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ref:ref,pin_a:oldPin,pin_b:newPin})})
+    \\    .then(function(r){return r.json().then(function(d){return{status:r.status,body:d};});})
+    \\    .then(function(x){
+    \\      if(x.status===200&&x.body.ok){refreshDesignState();return;}
+    \\      var msg=x.body&&x.body.error?x.body.error:('http '+x.status);
+    \\      var cc=moveActionCell(rowId);if(!cc)return;
+    \\      cc.innerHTML='<span style="color:#f85149;font-size:11px" title="'+msg+'">'+msg+'</span>';
+    \\      setTimeout(function(){cancelMovePin(ref,oldPin,rowId);},2500);
+    \\    })
+    \\    .catch(function(){var cc=moveActionCell(rowId);if(cc)cc.innerHTML='<span style="color:#f85149;font-size:11px">network error</span>';});
+    \\}
     \\window.startMovePin=startMovePin;
     \\window.cancelMovePin=cancelMovePin;
     \\window.applyMovePin=applyMovePin;
+    \\window.applySwapPin=applySwapPin;
+    \\window.pickMoveTarget=pickMoveTarget;
     \\
     \\/* Make sidebar functions global for onclick handlers */
     \\window.highlightNet=highlightNet;
@@ -975,6 +1054,62 @@ pub const CANVAS_VIEWER_JS =
     \\  }catch(err){console.error(err);}
     \\  this.textContent='Rebuild';this.disabled=false;
     \\};
+    \\
+    \\/* ── Source editor ────────────────────────────────────────── */
+    \\(function(){
+    \\  var openBtn=document.getElementById('source-btn');
+    \\  var modal=document.getElementById('source-modal');
+    \\  var ta=document.getElementById('source-textarea');
+    \\  var errBox=document.getElementById('source-err');
+    \\  var saveBtn=document.getElementById('source-save');
+    \\  var cancelBtn=document.getElementById('source-cancel');
+    \\  var closeBtn=document.getElementById('source-close');
+    \\  function showErr(msg){errBox.textContent=msg;errBox.style.display='block';}
+    \\  function clearErr(){errBox.textContent='';errBox.style.display='none';}
+    \\  function closeModal(){modal.style.display='none';clearErr();}
+    \\  async function openModal(){
+    \\    clearErr();
+    \\    openBtn.disabled=true;openBtn.textContent='Loading...';
+    \\    try{
+    \\      var r=await fetch('/api/source/'+DESIGN_NAME);
+    \\      var d=await r.json();
+    \\      if(!r.ok||typeof d.source!=='string'){showErr('Failed to load source: '+(d.error||r.status));}
+    \\      else{ta.value=d.source;}
+    \\      modal.style.display='flex';
+    \\      setTimeout(function(){ta.focus();},0);
+    \\    }catch(e){alert('Failed to load source: '+e);}
+    \\    openBtn.disabled=false;openBtn.textContent='Source';
+    \\  }
+    \\  async function save(){
+    \\    clearErr();
+    \\    saveBtn.disabled=true;saveBtn.textContent='Saving...';
+    \\    try{
+    \\      var r=await fetch('/api/source/'+DESIGN_NAME,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:ta.value})});
+    \\      var d=await r.json();
+    \\      if(!r.ok||!d.ok){showErr(d.error||('HTTP '+r.status));}
+    \\      else{
+    \\        var r2=await fetch('/api/scene-graph/'+DESIGN_NAME);
+    \\        sceneData=await r2.json();
+    \\        var sx=world.x,sy=world.y,ss=world.scale.x;
+    \\        buildScene();buildPinIndex();
+    \\        world.x=sx;world.y=sy;world.scale.set(ss);
+    \\        if(typeof d.version==='number')liveVersion=d.version;
+    \\        closeModal();
+    \\      }
+    \\    }catch(e){showErr(String(e));}
+    \\    saveBtn.disabled=false;saveBtn.textContent='Save & Rebuild';
+    \\  }
+    \\  openBtn.onclick=openModal;
+    \\  cancelBtn.onclick=closeModal;
+    \\  closeBtn.onclick=closeModal;
+    \\  saveBtn.onclick=save;
+    \\  modal.addEventListener('click',function(e){if(e.target===modal)closeModal();});
+    \\  ta.addEventListener('keydown',function(e){
+    \\    if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();save();}
+    \\    else if(e.key==='Escape'){e.preventDefault();closeModal();}
+    \\    else if(e.key==='Tab'){e.preventDefault();var s=ta.selectionStart,en=ta.selectionEnd;ta.value=ta.value.slice(0,s)+'  '+ta.value.slice(en);ta.selectionStart=ta.selectionEnd=s+2;}
+    \\  });
+    \\})();
     \\
     \\/* ── Reset ────────────────────────────────────────────────── */
     \\document.getElementById('canvas-reset').onclick=function(){fitView();};

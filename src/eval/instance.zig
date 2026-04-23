@@ -50,6 +50,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
                 .value = "",
                 .footprint = comp.footprint_name,
                 .symbol = comp.symbol_name,
+                .pinout = comp.pinout_name,
                 .properties = comp.properties,
                 .source_offset = comp_offset,
                 .id = inst_id,
@@ -64,6 +65,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
                 .value = ci.value,
                 .footprint = comp.footprint_name,
                 .symbol = comp.symbol_name,
+                .pinout = comp.pinout_name,
                 .properties = comp.properties,
                 .attrs = ci.attrs,
                 .source_offset = comp_offset,
@@ -89,7 +91,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     var inline_notes: std.ArrayListUnmanaged(Note) = .empty;
     var inline_props: std.ArrayListUnmanaged(env_mod.Property) = .empty;
 
-    const known_forms = [_][]const u8{ "pin", "note", "bus", "id" };
+    const known_forms = [_][]const u8{ "pin", "note", "bus", "id", "as" };
 
     for (args[2..]) |form| {
         if (form.isForm("note")) {
@@ -163,9 +165,49 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
 pub fn parsePinForm(self: *Evaluator, form: Node, ref_des: []const u8, env: *Env, pin_nets: *std.ArrayListUnmanaged(PinNetDecl), pinout: ?*const std.StringHashMapUnmanaged([]const u8)) EvalError!void {
     const pin_children = form.asList() orelse return;
     if (pin_children.len < 3) return;
-    const net_val = try self.evalNode(pin_children[pin_children.len - 1], env);
+
+    // The last child is the net name only if it's not an (i-typ …)/(i-max …)
+    // annotation form — those sit at the tail of the pin form after the net.
+    var tail: usize = pin_children.len;
+    var i_typ: ?f64 = null;
+    var i_max: ?f64 = null;
+    while (tail > 0) {
+        const last = pin_children[tail - 1];
+        if (last.isForm("i-typ")) {
+            const cc = last.asList().?;
+            if (cc.len >= 2) i_typ = cc[1].asNumber();
+            tail -= 1;
+        } else if (last.isForm("i-max")) {
+            const cc = last.asList().?;
+            if (cc.len >= 2) i_max = cc[1].asNumber();
+            tail -= 1;
+        } else break;
+    }
+    if (tail < 3) return;
+
+    const net_val = try self.evalNode(pin_children[tail - 1], env);
     const net_name = net_val.asString() orelse return;
-    for (pin_children[1 .. pin_children.len - 1]) |pin_node| {
+
+    // Scan for an optional (as "FN") annotation among the pin children.
+    var asserted_fn: []const u8 = "";
+    var pin_count: usize = 0;
+    for (pin_children[1 .. tail - 1]) |child| {
+        if (child.isForm("as")) {
+            const ac = child.asList().?;
+            if (ac.len >= 2) {
+                const val = try self.evalNode(ac[1], env);
+                asserted_fn = val.asString() orelse (ac[1].asAtom() orelse "");
+            }
+        } else {
+            pin_count += 1;
+        }
+    }
+    // (as "FN") only makes sense with a single pin; silently ignore the assertion otherwise.
+    if (pin_count != 1) asserted_fn = "";
+
+    var first_pin = true;
+    for (pin_children[1 .. tail - 1]) |pin_node| {
+        if (pin_node.isForm("as")) continue;
         const raw = ids.pinId(self, pin_node) orelse continue;
         // Resolve: try as function name first (via pinout), fall back to physical pin ID
         const pn = if (pinout) |pm| (resolvePinName(self, pm, raw) orelse raw) else raw;
@@ -173,7 +215,11 @@ pub fn parsePinForm(self: *Evaluator, form: Node, ref_des: []const u8, env: *Env
             .ref_des = ref_des,
             .pin = pn,
             .net = net_name,
+            .asserted_fn = asserted_fn,
+            .i_typ = if (first_pin) i_typ else null,
+            .i_max = if (first_pin) i_max else null,
         });
+        first_pin = false;
     }
 }
 

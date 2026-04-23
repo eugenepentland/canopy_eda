@@ -45,7 +45,7 @@ pub fn format(allocator: std.mem.Allocator, template: []const u8, args: []const 
                     if (arg_idx >= args.len) return FmtError.NotEnoughArgs;
                     const v = args[arg_idx].asNumber() orelse return FmtError.TypeError;
                     arg_idx += 1;
-                    try formatNumber(writer, v);
+                    try formatAmperage(writer, v);
                 },
                 'S' => {
                     if (arg_idx >= args.len) return FmtError.NotEnoughArgs;
@@ -98,6 +98,22 @@ fn formatCapacitance(writer: anytype, v: f64) !void {
     } else {
         try formatNumber(writer, v * 1_000_000_000_000.0);
         try writer.writeAll("pF");
+    }
+}
+
+fn formatAmperage(writer: anytype, v: f64) !void {
+    const abs = @abs(v);
+    if (abs >= 1.0) {
+        try formatNumber(writer, v);
+        try writer.writeAll("A");
+    } else if (abs >= 0.001) {
+        try formatNumber(writer, v * 1000.0);
+        try writer.writeAll("mA");
+    } else if (abs == 0.0) {
+        try writer.writeAll("0A");
+    } else {
+        try formatNumber(writer, v * 1_000_000.0);
+        try writer.writeAll("uA");
     }
 }
 
@@ -170,6 +186,29 @@ test "format capacitance" {
         const r = try format(alloc, "~C", &args);
         defer alloc.free(r);
         try std.testing.expectEqualStrings("22nF", r);
+    }
+}
+
+// spec: eval/fmt - Formats amperage values with SI prefix (uA/mA/A)
+test "format amperage" {
+    const alloc = std.testing.allocator;
+    {
+        const args = [_]Value{.{ .number = 2.0 }};
+        const r = try format(alloc, "~A", &args);
+        defer alloc.free(r);
+        try std.testing.expectEqualStrings("2A", r);
+    }
+    {
+        const args = [_]Value{.{ .number = 0.15 }};
+        const r = try format(alloc, "~A", &args);
+        defer alloc.free(r);
+        try std.testing.expectEqualStrings("150mA", r);
+    }
+    {
+        const args = [_]Value{.{ .number = 0.00005 }};
+        const r = try format(alloc, "~A", &args);
+        defer alloc.free(r);
+        try std.testing.expectEqualStrings("50uA", r);
     }
 }
 

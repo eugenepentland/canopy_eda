@@ -522,13 +522,27 @@ fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl)
     for (all_pin_nets.items) |pn| {
         const gop = net_map.getOrPut(self.allocator, pn.net) catch return EvalError.OutOfMemory;
         if (!gop.found_existing) gop.value_ptr.* = .empty;
-        gop.value_ptr.append(self.allocator, .{ .ref_des = pn.ref_des, .pin = pn.pin }) catch return EvalError.OutOfMemory;
+        gop.value_ptr.append(self.allocator, .{
+            .ref_des = pn.ref_des,
+            .pin = pn.pin,
+            .asserted_fn = pn.asserted_fn,
+            .i_typ = pn.i_typ,
+            .i_max = pn.i_max,
+        }) catch return EvalError.OutOfMemory;
     }
     // Apply net-ties: merge two nets into one.
     for (net_ties.items) |nt| {
         const a_pins = net_map.get(nt.a);
         const b_pins = net_map.get(nt.b);
         if (a_pins == null and b_pins == null) continue;
+
+        // Auto-aliases (synthesized from symbol pin-function names) must not
+        // short-circuit two distinct user-declared nets. If both sides already
+        // have pins, the user clearly meant them separate — e.g. the AD7380's
+        // pin 19 is named "SDOA" in its pinout, but ad7380-channel uses
+        // "SDOA_RAW" on the IC side of a damping resistor and "SDOA" on the
+        // output side; merging those would jumper the 100Ω resistor.
+        if (nt.is_auto and a_pins != null and b_pins != null) continue;
 
         const keep = nt.a;
         const remove = nt.b;

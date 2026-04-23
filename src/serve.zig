@@ -169,9 +169,12 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     router.post("/api/remove-instance/:name", edit.removeInstanceApi, .{});
     router.post("/api/rewire-pin/:name", edit.rewirePinApi, .{});
     router.post("/api/move-pin/:name", edit.movePinApi, .{});
+    router.post("/api/swap-pins/:name", edit.swapPinsApi, .{});
     router.get("/api/free-pins/:name", api.freePinsApi, .{});
     router.get("/api/design-state/:name", api.designStateApi, .{});
     router.post("/api/board-outline/:name", edit.boardOutlineApi, .{});
+    router.get("/api/source/:name", edit.getSourceApi, .{});
+    router.post("/api/source/:name", edit.saveSourceApi, .{});
 
     // Library
     router.get("/library", library.libraryPage, .{});

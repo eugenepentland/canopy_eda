@@ -179,12 +179,31 @@ pub fn processPinForm(
     if (pin_form.isForm("pin")) {
         const pin_children = pin_form.asList() orelse return;
         if (pin_children.len < 3) return;
-        const net_val = try self.evalNode(pin_children[pin_children.len - 1], env);
+
+        // Trailing (i-typ …)/(i-max …) annotations sit after the net name.
+        var tail: usize = pin_children.len;
+        var i_typ: ?f64 = null;
+        var i_max: ?f64 = null;
+        while (tail > 0) {
+            const last = pin_children[tail - 1];
+            if (last.isForm("i-typ")) {
+                const cc = last.asList().?;
+                if (cc.len >= 2) i_typ = cc[1].asNumber();
+                tail -= 1;
+            } else if (last.isForm("i-max")) {
+                const cc = last.asList().?;
+                if (cc.len >= 2) i_max = cc[1].asNumber();
+                tail -= 1;
+            } else break;
+        }
+        if (tail < 3) return;
+
+        const net_val = try self.evalNode(pin_children[tail - 1], env);
         const net_name = net_val.asString() orelse return;
 
         var asserted_fn: []const u8 = "";
         var pin_count: usize = 0;
-        for (pin_children[1 .. pin_children.len - 1]) |child| {
+        for (pin_children[1 .. tail - 1]) |child| {
             if (child.isForm("as")) {
                 const ac = child.asList().?;
                 if (ac.len >= 2) {
@@ -197,11 +216,19 @@ pub fn processPinForm(
         }
         if (pin_count != 1) asserted_fn = "";
 
-        for (pin_children[1 .. pin_children.len - 1]) |pin_node| {
+        var first_pin = true;
+        for (pin_children[1 .. tail - 1]) |pin_node| {
             if (pin_node.isForm("as")) continue;
             const raw = ids.pinId(self, pin_node) orelse continue;
             const pn = if (pin_func_map) |pm| (instance_mod.resolvePinName(self, pm, raw) orelse raw) else raw;
-            try all_pin_nets.append(self.allocator, .{ .ref_des = pins_ref, .pin = pn, .net = net_name, .asserted_fn = asserted_fn });
+            try all_pin_nets.append(self.allocator, .{
+                .ref_des = pins_ref,
+                .pin = pn,
+                .net = net_name,
+                .asserted_fn = asserted_fn,
+                .i_typ = if (first_pin) i_typ else null,
+                .i_max = if (first_pin) i_max else null,
+            });
             try pg_pins.append(self.allocator, .{ .pin = pn, .net = net_name, .pin_name = if (pin_func_map) |m| (m.get(pn) orelse "") else "" });
             if (pin_func_map) |m| {
                 if (m.get(pn)) |func_name| {
@@ -209,6 +236,7 @@ pub fn processPinForm(
                         try net_ties.append(self.allocator, .{ .a = net_name, .b = func_name, .is_auto = true });
                 }
             }
+            first_pin = false;
         }
     } else if (pin_form.isForm("bus")) {
         const bus_children = pin_form.asList() orelse return;
@@ -427,6 +455,8 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
     var rated_min: ?f64 = null;
     var rated_max: ?f64 = null;
     var nominal: ?f64 = null;
+    var current_typ: ?f64 = null;
+    var current_max: ?f64 = null;
     var is_optional: bool = false;
     for (args[dir_idx + 1 ..]) |arg| {
         if (arg.isForm("rated")) {
@@ -440,6 +470,14 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
             if (nom_children.len >= 2) {
                 nominal = nom_children[1].asNumber();
             }
+        } else if (arg.isForm("current")) {
+            const cc = arg.asList().?;
+            if (cc.len >= 3) {
+                current_typ = cc[1].asNumber();
+                current_max = cc[2].asNumber();
+            } else if (cc.len == 2) {
+                current_typ = cc[1].asNumber();
+            }
         } else if (arg.asAtom()) |kw| {
             if (std.mem.eql(u8, kw, "optional")) is_optional = true;
         }
@@ -452,6 +490,8 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
         .rated_min = rated_min,
         .rated_max = rated_max,
         .nominal = nominal,
+        .current_typ = current_typ,
+        .current_max = current_max,
         .optional = is_optional,
     };
 }

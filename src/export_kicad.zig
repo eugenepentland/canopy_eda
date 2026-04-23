@@ -9,6 +9,10 @@ const Property = env_mod.Property;
 const netlist_mod = @import("export_kicad_netlist.zig");
 const footprint_mod = @import("export_kicad_footprint.zig");
 const model_mod = @import("export_kicad_model.zig");
+const modules_mod = @import("export_kicad_modules.zig");
+
+pub const writeModulesJson = modules_mod.writeModulesJson;
+pub const buildModulesJson = modules_mod.buildModulesJson;
 
 const writeNetlist = netlist_mod.writeNetlist;
 const extractPadNames = netlist_mod.extractPadNames;
@@ -194,6 +198,13 @@ pub fn exportKicad(
     defer nf.close();
     try nf.writeAll(netlist);
     std.debug.print("  Wrote {s}\n", .{net_path});
+
+    // Modules sidecar — consumed by pcb_update.py for one-shot layout replication.
+    const modules_path = try std.fmt.allocPrint(allocator, "{s}/{s}.modules.json", .{ output_dir, design_name });
+    defer allocator.free(modules_path);
+    writeModulesJson(allocator, block, modules_path) catch |err| {
+        std.debug.print("Warning: failed to write modules sidecar: {}\n", .{err});
+    };
 }
 
 /// Export just the KiCad netlist as a string.

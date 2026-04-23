@@ -43,6 +43,20 @@ pub const PinNetDecl = struct {
     ref_des: []const u8,
     pin: []const u8,
     net: []const u8,
+    /// Alternate function asserted via `(as "FN")`. Empty when the pin is used in its primary role.
+    asserted_fn: []const u8 = "",
+    /// Typical current (A) the instance draws on this net — set only on the first
+    /// pin of a pin-group so sums across nets don't double-count.
+    i_typ: ?f64 = null,
+    /// Absolute-max current (A) on this net — same first-pin-only semantics as i_typ.
+    i_max: ?f64 = null,
+};
+
+/// A single alternate function entry for a multi-function pin.
+pub const AltFunc = struct {
+    name: []const u8,
+    /// Electrical type (io / input / output / bidi / …). Empty if unspecified.
+    etype: []const u8 = "",
 };
 
 pub const Evaluator = struct {
@@ -58,6 +72,8 @@ pub const Evaluator = struct {
     component_cache: std.StringHashMapUnmanaged(ComponentData),
     /// Cache of symbol pin names: symbol_name -> (pin_id -> pin_function_name)
     symbol_pin_cache: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged([]const u8)),
+    /// Cache of per-pin alternate functions: symbol_name -> (pin_id -> []AltFunc)
+    symbol_alt_cache: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged([]const AltFunc)),
     /// Auto ref-des counter per prefix letter
     auto_refdes: std.AutoHashMapUnmanaged(u8, u32),
     /// Forms that need (id ...) auto-inserted: (source_offset, generated_id)
@@ -111,6 +127,7 @@ pub const Evaluator = struct {
             .loaded_files = .empty,
             .component_cache = .empty,
             .symbol_pin_cache = .empty,
+            .symbol_alt_cache = .empty,
             .auto_refdes = .empty,
             .pending_ids = .empty,
         };
@@ -121,6 +138,7 @@ pub const Evaluator = struct {
         self.loaded_files.deinit(self.allocator);
         self.component_cache.deinit(self.allocator);
         self.symbol_pin_cache.deinit(self.allocator);
+        self.symbol_alt_cache.deinit(self.allocator);
         self.auto_refdes.deinit(self.allocator);
         self.pending_ids.deinit(self.allocator);
     }

@@ -1,5 +1,7 @@
 const std = @import("std");
 const env_mod = @import("eval/env.zig");
+const na = @import("eval/net_analysis.zig");
+const parser_mod = @import("sexpr/parser.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
 const Net = env_mod.Net;
@@ -18,6 +20,8 @@ pub const ViolationKind = enum {
     power_no_cap,
     concept_remaining,
     pin_multi_net,
+    pin_function_unsupported,
+    power_budget,
 };
 
 pub const Violation = struct {
@@ -31,7 +35,9 @@ pub const Violation = struct {
 };
 
 /// Run all ERC checks on a design block and return violations.
-pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock) ![]const Violation {
+/// `project_dir` is used to locate pinout files for the pin-function check; pass
+/// an empty slice to skip that check when the project layout isn't available.
+pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8) ![]const Violation {
     var violations: std.ArrayListUnmanaged(Violation) = .empty;
 
     checkDuplicateRefDes(allocator, block, &violations);
@@ -44,6 +50,8 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock) ![]const 
     checkVoltageMismatches(allocator, block, &violations);
     checkUnconnectedPowerPins(allocator, block, &violations);
     checkConceptSections(allocator, block, &violations);
+    checkPowerBudget(allocator, block, &violations);
+    if (project_dir.len > 0) checkPinFunctions(allocator, block, project_dir, &violations);
 
     return violations.items;
 }
@@ -80,7 +88,7 @@ fn checkPinMultiNet(allocator: std.mem.Allocator, block: *const DesignBlock, vio
     var reported: std.StringHashMapUnmanaged(void) = .empty;
 
     for (block.nets) |net| {
-        const base = baseNetName(net.name);
+        const base = na.baseNetName(net.name);
         for (net.pins) |p| {
             if (p.ref_des.len == 0) continue;
             const key = std.fmt.allocPrint(allocator, "{s}.{s}", .{ p.ref_des, p.pin }) catch continue;
@@ -124,14 +132,14 @@ fn checkFloatingNets(allocator: std.mem.Allocator, block: *const DesignBlock, vi
     }
     // Optional top-level ports
     for (block.ports) |port| {
-        if (port.optional) optional_nets.put(allocator, baseNetName(port.net), {}) catch {};
+        if (port.optional) optional_nets.put(allocator, na.baseNetName(port.net), {}) catch {};
     }
 
     // Also exclude nets that participate in net_ties (sub-block connections)
     var tied_nets: std.StringHashMapUnmanaged(void) = .empty;
     for (block.net_ties) |nt| {
-        const base_a = baseNetName(nt.a);
-        const base_b = baseNetName(nt.b);
+        const base_a = na.baseNetName(nt.a);
+        const base_b = na.baseNetName(nt.b);
         tied_nets.put(allocator, base_a, {}) catch {};
         tied_nets.put(allocator, base_b, {}) catch {};
     }
@@ -139,7 +147,7 @@ fn checkFloatingNets(allocator: std.mem.Allocator, block: *const DesignBlock, vi
     // Count pins per base net name
     var net_pin_counts: std.StringHashMapUnmanaged(u32) = .empty;
     for (block.nets) |net| {
-        const base = baseNetName(net.name);
+        const base = na.baseNetName(net.name);
         if (port_nets.contains(base)) continue;
         if (tied_nets.contains(base)) continue;
         const gop = net_pin_counts.getOrPut(allocator, base) catch continue;
@@ -205,17 +213,17 @@ fn checkUnconnectedPorts(allocator: std.mem.Allocator, block: *const DesignBlock
     // one internal connection (via nets or net_ties)
     var connected_port_nets: std.StringHashMapUnmanaged(void) = .empty;
     for (block.nets) |net| {
-        const base = baseNetName(net.name);
+        const base = na.baseNetName(net.name);
         if (net.pins.len > 0) connected_port_nets.put(allocator, base, {}) catch {};
     }
     // Net ties also count as connections for parent ports
     for (block.net_ties) |nt| {
-        connected_port_nets.put(allocator, baseNetName(nt.a), {}) catch {};
-        connected_port_nets.put(allocator, baseNetName(nt.b), {}) catch {};
+        connected_port_nets.put(allocator, na.baseNetName(nt.a), {}) catch {};
+        connected_port_nets.put(allocator, na.baseNetName(nt.b), {}) catch {};
     }
 
     for (block.ports) |port| {
-        const base = baseNetName(port.net);
+        const base = na.baseNetName(port.net);
         if (!connected_port_nets.contains(base)) {
             if (port.optional) continue;
             const msg = std.fmt.allocPrint(
@@ -239,7 +247,7 @@ fn checkMissingValues(allocator: std.mem.Allocator, block: *const DesignBlock, v
     for (all_instances) |inst| {
         if (inst.ref_des.len == 0) continue;
         // Passives (R, C, L) need values
-        const prefix = inst.ref_des[0];
+        const prefix = na.refDesLocalPrefix(inst.ref_des);
         if ((prefix == 'R' or prefix == 'C' or prefix == 'L') and inst.value.len == 0) {
             const msg = std.fmt.allocPrint(allocator, "{s}: Missing value for {s}", .{ inst.ref_des, inst.component }) catch continue;
             violations.append(allocator, .{
@@ -269,40 +277,19 @@ fn checkMissingFootprints(allocator: std.mem.Allocator, block: *const DesignBloc
     }
 }
 
-/// Check power nets connected to ICs but missing decoupling caps.
+/// Check power nets connected to ICs but missing decoupling caps. Shares
+/// its analysis with the eval-time validator — see `eval/net_analysis.zig`.
 fn checkMissingDecoupling(allocator: std.mem.Allocator, block: *const DesignBlock, violations: *std.ArrayListUnmanaged(Violation)) void {
-    // Collect power nets from implemented section port declarations (skip concept sections)
-    var power_nets: std.StringHashMapUnmanaged(void) = .empty;
-    for (block.sections) |sec| {
-        if (sec.status == .concept) continue;
-        for (sec.ports) |p| {
-            if (p.signal_type == .power and p.direction == .in) {
-                power_nets.put(allocator, p.name, {}) catch {};
-            }
-        }
-    }
-
-    for (block.nets) |net| {
-        const base = baseNetName(net.name);
-        if (!power_nets.contains(base)) continue;
-
-        var has_ic = false;
-        var has_cap = false;
-        for (net.pins) |pin| {
-            if (pin.ref_des.len == 0) continue;
-            const prefix = pin.ref_des[0];
-            if (prefix == 'U') has_ic = true;
-            if (prefix == 'C') has_cap = true;
-        }
-        if (has_ic and !has_cap) {
-            const msg = std.fmt.allocPrint(allocator, "Power net \"{s}\" connects to IC but has no decoupling cap", .{base}) catch continue;
-            violations.append(allocator, .{
-                .kind = .missing_decoupling,
-                .severity = .warning,
-                .message = msg,
-                .net = base,
-            }) catch {};
-        }
+    const missing = na.findMissingDecouplingNets(allocator, block);
+    defer allocator.free(missing);
+    for (missing) |base| {
+        const msg = std.fmt.allocPrint(allocator, "Power net \"{s}\" connects to IC but has no decoupling cap", .{base}) catch continue;
+        violations.append(allocator, .{
+            .kind = .missing_decoupling,
+            .severity = .warning,
+            .message = msg,
+            .net = base,
+        }) catch {};
     }
 }
 
@@ -368,7 +355,7 @@ fn checkBlockPowerPins(allocator: std.mem.Allocator, block: *const DesignBlock, 
     var has_vdd: std.StringHashMapUnmanaged(void) = .empty;
 
     for (block.nets) |net| {
-        const base = baseNetName(net.name);
+        const base = na.baseNetName(net.name);
         const is_gnd = std.mem.eql(u8, base, "GND") or std.mem.eql(u8, base, "VSS") or
             std.mem.eql(u8, base, "AGND") or std.mem.eql(u8, base, "DGND") or
             std.mem.eql(u8, base, "PGND") or std.mem.eql(u8, base, "EP") or
@@ -390,7 +377,7 @@ fn checkBlockPowerPins(allocator: std.mem.Allocator, block: *const DesignBlock, 
 
     for (block.instances) |inst| {
         if (inst.ref_des.len == 0) continue;
-        const prefix = inst.ref_des[0];
+        const prefix = na.refDesLocalPrefix(inst.ref_des);
         // Only check ICs (U prefix)
         if (prefix != 'U') continue;
         // Skip passive components that got U prefix (LEDs, inductors, filters, crystals)
@@ -415,6 +402,192 @@ fn checkBlockPowerPins(allocator: std.mem.Allocator, block: *const DesignBlock, 
             }) catch {};
         }
     }
+}
+
+/// Sum per-rail current draw from pin annotations and compare against the
+/// regulator sourcing the rail. Ferrite beads are treated as electrically
+/// transparent (DC conductor) so downstream rails roll up to the upstream
+/// regulator's budget. Surfaces four outcomes per rail:
+///   - error:   max load exceeds the regulator's rated max
+///   - warning: typ load exceeds 80 % of the regulator's typ capacity
+///   - info:    rail has load but no declared source capacity
+///   - info:    rail has declared source but no consumer annotations
+fn checkPowerBudget(allocator: std.mem.Allocator, block: *const DesignBlock, violations: *std.ArrayListUnmanaged(Violation)) void {
+    // Union-find parent map; missing keys implicitly map to themselves.
+    var net_parent: std.StringHashMapUnmanaged([]const u8) = .empty;
+
+    // Step 1: union nets bridged by ferrite beads. A ferrite is a DC
+    // conductor — the current budget flows through it unchanged, so loads on
+    // VDDA18USB should attribute back to V1P8 (FB3 bridges them).
+    for (block.instances) |inst| {
+        if (!std.mem.startsWith(u8, inst.component, "ferrite")) continue;
+        var net_a: ?[]const u8 = null;
+        var net_b: ?[]const u8 = null;
+        for (block.nets) |net| {
+            const base = na.baseNetName(net.name);
+            for (net.pins) |p| {
+                if (!std.mem.eql(u8, p.ref_des, inst.ref_des)) continue;
+                if (std.mem.eql(u8, p.pin, "1")) net_a = base;
+                if (std.mem.eql(u8, p.pin, "2")) net_b = base;
+            }
+        }
+        if (net_a != null and net_b != null) {
+            unionNets(allocator, &net_parent, net_a.?, net_b.?);
+        }
+    }
+
+    // Step 2: collect source declarations from sub-block output ports, keyed
+    // on canonical root so ferrite-bridged equivalence classes share a budget.
+    // The display_rail is the top-level net the source was declared on — it's
+    // what engineers recognize (e.g. "V1P8"), regardless of which name
+    // union-find picked as the root.
+    const SourceInfo = struct {
+        source_label: []const u8, // e.g. "buck/VOUT"
+        display_rail: []const u8, // e.g. "V1P8"
+        current_typ: ?f64,
+        current_max: ?f64,
+    };
+    var sources: std.StringHashMapUnmanaged(SourceInfo) = .empty;
+
+    for (block.sub_blocks) |sb| {
+        for (sb.block.ports) |port| {
+            if (port.current_typ == null and port.current_max == null) continue;
+            if (!std.mem.eql(u8, port.direction, "out")) continue;
+            const path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, port.name }) catch continue;
+            for (block.net_ties) |nt| {
+                const matched = std.mem.eql(u8, nt.a, path) or std.mem.eql(u8, nt.b, path);
+                if (!matched) continue;
+                const top_net = if (std.mem.eql(u8, nt.a, path)) nt.b else nt.a;
+                const base = na.baseNetName(top_net);
+                const root = findRoot(&net_parent, base);
+                sources.put(allocator, root, .{
+                    .source_label = path,
+                    .display_rail = base,
+                    .current_typ = port.current_typ,
+                    .current_max = port.current_max,
+                }) catch {};
+            }
+        }
+    }
+
+    // Step 3: sum consumer currents into each canonical root.
+    const RailLoad = struct {
+        sum_typ: f64 = 0,
+        sum_max: f64 = 0,
+        any_typ: bool = false,
+        any_max: bool = false,
+    };
+    var loads: std.StringHashMapUnmanaged(RailLoad) = .empty;
+
+    for (block.nets) |net| {
+        const base = na.baseNetName(net.name);
+        const root = findRoot(&net_parent, base);
+        var load = loads.get(root) orelse RailLoad{};
+        for (net.pins) |pin| {
+            if (pin.i_typ) |v| {
+                load.sum_typ += v;
+                load.any_typ = true;
+            }
+            if (pin.i_max) |v| {
+                load.sum_max += v;
+                load.any_max = true;
+            }
+        }
+        loads.put(allocator, root, load) catch {};
+    }
+
+    // Step 4: cross-reference and emit.
+    var src_iter = sources.iterator();
+    while (src_iter.next()) |entry| {
+        const root = entry.key_ptr.*;
+        const src = entry.value_ptr.*;
+        const load = loads.get(root) orelse RailLoad{};
+
+        if (!load.any_typ and !load.any_max) {
+            const msg = std.fmt.allocPrint(
+                allocator,
+                "Rail \"{s}\" sourced by {s} has no annotated consumers — add (i-typ …)/(i-max …) on pin forms to populate the budget",
+                .{ src.display_rail, src.source_label },
+            ) catch continue;
+            violations.append(allocator, .{
+                .kind = .power_budget,
+                .severity = .info,
+                .message = msg,
+                .net = src.display_rail,
+            }) catch {};
+            continue;
+        }
+
+        if (src.current_max) |smax| {
+            if (load.any_max and load.sum_max > smax) {
+                const msg = std.fmt.allocPrint(
+                    allocator,
+                    "Rail \"{s}\" max load {d:.3}A exceeds {s} rated max {d:.3}A",
+                    .{ src.display_rail, load.sum_max, src.source_label, smax },
+                ) catch continue;
+                violations.append(allocator, .{
+                    .kind = .power_budget,
+                    .severity = .@"error",
+                    .message = msg,
+                    .net = src.display_rail,
+                }) catch {};
+                continue;
+            }
+        }
+        if (src.current_typ) |styp| {
+            if (load.any_typ and load.sum_typ > 0.8 * styp) {
+                const pct: u32 = @intFromFloat(100.0 * load.sum_typ / styp);
+                const msg = std.fmt.allocPrint(
+                    allocator,
+                    "Rail \"{s}\" typ load {d:.3}A is {d}% of {s} typ {d:.3}A — tight margin",
+                    .{ src.display_rail, load.sum_typ, pct, src.source_label, styp },
+                ) catch continue;
+                violations.append(allocator, .{
+                    .kind = .power_budget,
+                    .severity = .warning,
+                    .message = msg,
+                    .net = src.display_rail,
+                }) catch {};
+            }
+        }
+    }
+
+    // Step 5: rails that have load but no declared source capacity.
+    var load_iter = loads.iterator();
+    while (load_iter.next()) |entry| {
+        const root = entry.key_ptr.*;
+        const load = entry.value_ptr.*;
+        if (!load.any_typ and !load.any_max) continue;
+        if (sources.contains(root)) continue;
+        if (std.mem.eql(u8, root, "GND")) continue;
+        const msg = std.fmt.allocPrint(
+            allocator,
+            "Rail \"{s}\" has {d:.3}A typ load but no regulator declares (current …) on its output",
+            .{ root, load.sum_typ },
+        ) catch continue;
+        violations.append(allocator, .{
+            .kind = .power_budget,
+            .severity = .info,
+            .message = msg,
+            .net = root,
+        }) catch {};
+    }
+}
+
+fn findRoot(parent: *std.StringHashMapUnmanaged([]const u8), name: []const u8) []const u8 {
+    var cur = name;
+    while (parent.get(cur)) |p| {
+        if (std.mem.eql(u8, p, cur)) return cur;
+        cur = p;
+    }
+    return cur;
+}
+
+fn unionNets(allocator: std.mem.Allocator, parent: *std.StringHashMapUnmanaged([]const u8), a: []const u8, b: []const u8) void {
+    const ra = findRoot(parent, a);
+    const rb = findRoot(parent, b);
+    if (std.mem.eql(u8, ra, rb)) return;
+    parent.put(allocator, rb, ra) catch {};
 }
 
 /// Report concept sections that still need implementation.
@@ -460,9 +633,129 @@ fn collectOptionalPortNets(allocator: std.mem.Allocator, map: *std.StringHashMap
     for (sec.sub_sections) |sub| collectOptionalPortNets(allocator, map, sub);
 }
 
-fn baseNetName(name: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, name, '.')) |idx| return name[0..idx];
-    return name;
+const PinoutEntry = struct {
+    /// Primary function name (always valid).
+    primary: []const u8,
+    /// Additional valid function names for this physical pin.
+    alts: []const []const u8,
+};
+
+/// Load a pinout file and return pin_id -> {primary, alts}. Returns null if the file is missing
+/// or malformed. Allocator is used both for the parse tree (kept until end of ERC) and the map.
+fn loadPinoutMap(allocator: std.mem.Allocator, path: []const u8) ?std.StringHashMapUnmanaged(PinoutEntry) {
+    const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 256) catch return null;
+    const nodes = parser_mod.parse(allocator, content) catch return null;
+    if (nodes.len == 0) return null;
+    const top = nodes[0].asList() orelse return null;
+    if (top.len < 2) return null;
+    const head = top[0].asAtom() orelse return null;
+    if (!std.mem.eql(u8, head, "pinout")) return null;
+
+    var map: std.StringHashMapUnmanaged(PinoutEntry) = .empty;
+    for (top[2..]) |child| {
+        const cl = child.asList() orelse continue;
+        if (cl.len < 3) continue;
+        const ch = cl[0].asAtom() orelse continue;
+        if (!std.mem.eql(u8, ch, "pin")) continue;
+        const pin_id = atomOrString(cl[1]) orelse continue;
+        const primary = cl[2].asString() orelse (cl[2].asAtom() orelse continue);
+
+        var alts: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (cl[3..]) |alt_node| {
+            const al = alt_node.asList() orelse continue;
+            if (al.len < 2) continue;
+            const hd = al[0].asAtom() orelse continue;
+            if (!std.mem.eql(u8, hd, "alt")) continue;
+            const alt_name = al[1].asString() orelse (al[1].asAtom() orelse continue);
+            alts.append(allocator, alt_name) catch continue;
+        }
+        map.put(allocator, pin_id, .{
+            .primary = primary,
+            .alts = alts.toOwnedSlice(allocator) catch &.{},
+        }) catch continue;
+    }
+    return map;
+}
+
+fn atomOrString(node: @import("sexpr/ast.zig").Node) ?[]const u8 {
+    if (node.asAtom()) |a| return a;
+    if (node.asString()) |s| return s;
+    return null;
+}
+
+/// Validate that every (as "FN") assertion refers to the pin's primary function or one of its declared alternates.
+fn checkPinFunctions(allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, violations: *std.ArrayListUnmanaged(Violation)) void {
+    // Build ref_des -> pinout_lookup map so we know which pinout file to load per pin.
+    // Prefer `inst.pinout`, fall back to `inst.symbol`, then `inst.component`.
+    var ref_to_lookup: std.StringHashMapUnmanaged([]const u8) = .empty;
+    const all = collectAllInstances(allocator, block);
+    for (all) |inst| {
+        const lookup = if (inst.pinout.len > 0) inst.pinout else if (inst.symbol.len > 0) inst.symbol else inst.component;
+        if (lookup.len == 0) continue;
+        ref_to_lookup.put(allocator, inst.ref_des, lookup) catch {};
+    }
+
+    // Cache loaded pinouts by symbol so repeated lookups don't reparse.
+    var pinout_cache: std.StringHashMapUnmanaged(?std.StringHashMapUnmanaged(PinoutEntry)) = .empty;
+
+    for (block.nets) |net| {
+        for (net.pins) |pin| {
+            if (pin.asserted_fn.len == 0) continue;
+            const symbol = ref_to_lookup.get(pin.ref_des) orelse continue;
+
+            const gop = pinout_cache.getOrPut(allocator, symbol) catch continue;
+            if (!gop.found_existing) {
+                const path = std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ project_dir, symbol }) catch {
+                    gop.value_ptr.* = null;
+                    continue;
+                };
+                gop.value_ptr.* = loadPinoutMap(allocator, path);
+            }
+            const pinout_map = gop.value_ptr.* orelse continue;
+
+            const entry = pinout_map.get(pin.pin) orelse continue;
+            if (std.mem.eql(u8, pin.asserted_fn, entry.primary)) continue;
+            var matched = false;
+            for (entry.alts) |alt| {
+                if (std.mem.eql(u8, pin.asserted_fn, alt)) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (matched) continue;
+
+            const msg = formatFunctionMsg(allocator, pin.ref_des, pin.pin, pin.asserted_fn, na.baseNetName(net.name), entry) orelse continue;
+            violations.append(allocator, .{
+                .kind = .pin_function_unsupported,
+                .severity = .@"error",
+                .message = msg,
+                .ref_des = pin.ref_des,
+                .net = na.baseNetName(net.name),
+            }) catch {};
+        }
+    }
+}
+
+fn formatFunctionMsg(allocator: std.mem.Allocator, ref_des: []const u8, pin_id: []const u8, asserted: []const u8, net: []const u8, entry: PinoutEntry) ?[]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(allocator);
+    w.print("{s} pin {s} (net \"{s}\") does not support function \"{s}\". Allowed: {s}", .{ ref_des, pin_id, net, asserted, entry.primary }) catch return null;
+    for (entry.alts) |alt| {
+        w.print(", {s}", .{alt}) catch return null;
+    }
+    w.writeByte('.') catch return null;
+    return buf.toOwnedSlice(allocator) catch null;
+}
+
+fn collectAllInstances(allocator: std.mem.Allocator, block: *const DesignBlock) []const Instance {
+    var list: std.ArrayListUnmanaged(Instance) = .empty;
+    appendInstances(allocator, &list, block);
+    return list.items;
+}
+
+fn appendInstances(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(Instance), block: *const DesignBlock) void {
+    for (block.instances) |inst| list.append(allocator, inst) catch {};
+    for (block.sub_blocks) |sb| appendInstances(allocator, list, sb.block);
 }
 
 /// Serialize violations to JSON.
@@ -505,5 +798,110 @@ fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
             '\t' => try writer.writeAll("\\t"),
             else => try writer.writeByte(c),
         }
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────
+
+fn makeBudgetBlock(
+    alloc: std.mem.Allocator,
+    rail: []const u8,
+    src_label: []const u8,
+    src_typ: ?f64,
+    src_max: ?f64,
+    loads: []const struct { ref: []const u8, typ: ?f64, max: ?f64 },
+) !DesignBlock {
+    // Sub-block with an "out" port carrying the declared capacity.
+    const sub_ports = try alloc.alloc(env_mod.Port, 1);
+    sub_ports[0] = .{
+        .name = "VOUT",
+        .net = "VOUT",
+        .direction = "out",
+        .current_typ = src_typ,
+        .current_max = src_max,
+    };
+    const sub = try alloc.create(DesignBlock);
+    sub.* = .{
+        .name = "buck",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = sub_ports,
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const sub_blocks = try alloc.alloc(env_mod.SubBlock, 1);
+    sub_blocks[0] = .{ .name = src_label, .block = sub };
+
+    // Top-level net with the load pin refs.
+    const pins = try alloc.alloc(env_mod.PinRef, loads.len);
+    for (loads, 0..) |l, i| {
+        pins[i] = .{ .ref_des = l.ref, .pin = "1", .i_typ = l.typ, .i_max = l.max };
+    }
+    const nets = try alloc.alloc(env_mod.Net, 1);
+    nets[0] = .{ .name = rail, .pins = pins };
+
+    // Tie "{src_label}/VOUT" into the top-level rail.
+    const tie_b = try std.fmt.allocPrint(alloc, "{s}/VOUT", .{src_label});
+    const ties = try alloc.alloc(env_mod.NetTie, 1);
+    ties[0] = .{ .a = rail, .b = tie_b };
+
+    return .{
+        .name = "test",
+        .instances = &.{},
+        .nets = nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = sub_blocks,
+        .net_ties = ties,
+    };
+}
+
+// spec: erc - Emits power_budget error when load max exceeds source max
+test "power budget over-max" {
+    const alloc = std.testing.allocator;
+    const block = try makeBudgetBlock(alloc, "VDD", "buck", 2.0, 2.0, &.{
+        .{ .ref = "U1", .typ = 1.0, .max = 1.5 },
+        .{ .ref = "U2", .typ = 1.0, .max = 1.5 },
+    });
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    checkPowerBudget(alloc, &block, &violations);
+    var hit_error = false;
+    for (violations.items) |v| {
+        if (v.kind == .power_budget and v.severity == .@"error") hit_error = true;
+    }
+    try std.testing.expect(hit_error);
+}
+
+// spec: erc - Emits power_budget warning when typ load is above 80 percent of source typ
+test "power budget tight margin" {
+    const alloc = std.testing.allocator;
+    const block = try makeBudgetBlock(alloc, "VDD", "buck", 2.0, 2.5, &.{
+        .{ .ref = "U1", .typ = 1.7, .max = 2.0 },
+    });
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    checkPowerBudget(alloc, &block, &violations);
+    var hit_warning = false;
+    var hit_error = false;
+    for (violations.items) |v| {
+        if (v.kind != .power_budget) continue;
+        if (v.severity == .warning) hit_warning = true;
+        if (v.severity == .@"error") hit_error = true;
+    }
+    try std.testing.expect(hit_warning);
+    try std.testing.expect(!hit_error);
+}
+
+// spec: erc - Emits no power_budget violation when load is well below source capacity
+test "power budget within budget" {
+    const alloc = std.testing.allocator;
+    const block = try makeBudgetBlock(alloc, "VDD", "buck", 2.0, 2.5, &.{
+        .{ .ref = "U1", .typ = 0.4, .max = 0.6 },
+    });
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    checkPowerBudget(alloc, &block, &violations);
+    for (violations.items) |v| {
+        try std.testing.expect(v.kind != .power_budget);
     }
 }

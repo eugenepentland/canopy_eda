@@ -44,7 +44,7 @@ pub fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
         },
     };
 
-    const new_layout = render_json.renderSceneGraph(ctx.allocator, block) catch null;
+    const new_layout = render_json.renderSceneGraph(ctx.allocator, block, ctx.project_dir) catch null;
     serve_root.setLiveLayoutJson(new_layout);
     const v = serve_root.bumpLiveVersion(name);
 
@@ -1122,7 +1122,7 @@ pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     defer ctx.allocator.free(bom_path);
     bom.resolveIdentities(ctx.allocator, @constCast(block), bom_path, ctx.project_dir) catch {};
 
-    const violations = erc_mod.runErc(ctx.allocator, block) catch {
+    const violations = erc_mod.runErc(ctx.allocator, block, ctx.project_dir) catch {
         res.status = 500;
         res.body = "ERC error";
         return;

@@ -6,6 +6,8 @@ const export_kicad = @import("../export_kicad.zig");
 const netlist_mod = @import("../export_kicad_netlist.zig");
 const fp_mod = @import("../export_kicad_footprint.zig");
 const model_mod = @import("../export_kicad_model.zig");
+const pcb_mod = @import("../export_kicad_pcb.zig");
+const layout_mod = @import("../layout.zig");
 const bom = @import("../bom.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
@@ -324,6 +326,9 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
     const sections_json = export_kicad.exportSectionLayout(ctx.allocator, block) catch "";
     const sections_sha = try sha256Hex(ctx.allocator, sections_json);
 
+    const modules_json = export_kicad.buildModulesJson(ctx.allocator, block) catch "";
+    const modules_sha = try sha256Hex(ctx.allocator, modules_json);
+
     var desired = try collectDesiredFootprintsAndModels(ctx.allocator, block, ctx.project_dir);
     defer desired.deinit(ctx.allocator);
 
@@ -340,6 +345,8 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
     defer ctx.allocator.free(pretty_dir);
     const sections_path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sections.json", .{ cfg.output_dir, name });
     defer ctx.allocator.free(sections_path);
+    const modules_path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.modules.json", .{ cfg.output_dir, name });
+    defer ctx.allocator.free(modules_path);
     const model_dir = try std.fmt.allocPrint(ctx.allocator, "{s}/models", .{cfg.output_dir});
     defer ctx.allocator.free(model_dir);
 
@@ -347,6 +354,7 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
     // counts as changed — we can't trust the cache if the output isn't there.
     const netlist_changed = !std.mem.eql(u8, cache.netlist_sha, netlist_sha) or !fileExists(net_path);
     const sections_changed = !std.mem.eql(u8, cache.sections_sha, sections_sha) or (sections_json.len > 0 and !fileExists(sections_path));
+    const modules_changed = !std.mem.eql(u8, cache.modules_sha, modules_sha) or (modules_json.len > 0 and !fileExists(modules_path));
 
     var fps_to_write: std.ArrayListUnmanaged(usize) = .empty; // indices into desired.footprints
     defer fps_to_write.deinit(ctx.allocator);
@@ -370,33 +378,17 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
         if (!unchanged) try models_to_copy.append(ctx.allocator, i);
     }
 
-    const nothing_changed =
-        !netlist_changed and !sections_changed and
-        fps_to_write.items.len == 0 and
-        models_to_copy.items.len == 0;
-
-    // Resolve PCB path up front (needed for both fast-path and slow-path response).
+    // Resolve PCB path up front.
     const pcb_path = if (cfg.pcb_file.len > 0)
         try ctx.allocator.dupe(u8, cfg.pcb_file)
     else
         try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.kicad_pcb", .{ cfg.output_dir, name });
     defer ctx.allocator.free(pcb_path);
 
-    // Fast path: nothing to do. Every artifact on disk already matches the
-    // design, so the Python merge would be a no-op too.
-    if (nothing_changed and fileExists(pcb_path)) {
-        const body = try std.fmt.allocPrint(
-            ctx.allocator,
-            "{{\"ok\":true,\"skipped\":true,\"pcb\":\"{s}\",\"mismatches\":0,\"missing\":0}}",
-            .{pcb_path},
-        );
-        res.content_type = .JSON;
-        res.header("access-control-allow-origin", "*");
-        res.body = body;
-        return;
-    }
-
-    // ── Slow path: write only the artifacts that actually changed ─────
+    // ── Always rewrite the artifacts that actually changed and invoke
+    //    pcb_update.py. The cache still skips unchanged .kicad_mod / STEP
+    //    writes, but the sync button never short-circuits — the user wants
+    //    every click to refresh the PCB even when nothing upstream changed.
 
     std.fs.cwd().makePath(cfg.output_dir) catch {};
     std.fs.cwd().makePath(pretty_dir) catch {};
@@ -427,6 +419,14 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
         cache.setSectionsSha(ctx.allocator, sections_sha);
     }
 
+    if (modules_changed and modules_json.len > 0) {
+        if (std.fs.cwd().createFile(modules_path, .{})) |mf| {
+            defer mf.close();
+            mf.writeAll(modules_json) catch {};
+        } else |_| {}
+        cache.setModulesSha(ctx.allocator, modules_sha);
+    }
+
     for (fps_to_write.items) |i| {
         const fp = desired.footprints.items[i];
         const mod_path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.kicad_mod", .{ pretty_dir, fp.kicad_name });
@@ -447,26 +447,12 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
         try cache.putModel(ctx.allocator, m.name, .{ .size = m.size, .mtime_ns = m.mtime_ns });
     }
 
-    // Only invoke the Python merger if the netlist or footprints actually
-    // changed — pcb_update.py doesn't read STEP files, so a model-only
-    // change doesn't need it.
-    const run_python = netlist_changed or fps_to_write.items.len > 0;
-
-    if (!run_python) {
-        saveCache(ctx.allocator, cache_path, &cache);
-        const body = try std.fmt.allocPrint(
-            ctx.allocator,
-            "{{\"ok\":true,\"skipped\":false,\"pcb\":\"{s}\",\"wrote_models\":{d},\"mismatches\":0,\"missing\":0}}",
-            .{ pcb_path, models_to_copy.items.len },
-        );
-        res.content_type = .JSON;
-        res.header("access-control-allow-origin", "*");
-        res.body = body;
-        return;
-    }
+    // Always run pcb_update.py — even when only models (or nothing) changed,
+    // the user may have edited the .kicad_pcb externally and expects the
+    // sync button to repush.
 
     // Run pcb_update.py
-    var argv_buf: [7][]const u8 = undefined;
+    var argv_buf: [11][]const u8 = undefined;
     var argc: usize = 0;
     argv_buf[argc] = "python3";
     argc += 1;
@@ -474,6 +460,12 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
     argc += 1;
     if (short_nets) {
         argv_buf[argc] = "--short-nets";
+        argc += 1;
+    }
+    if (modules_json.len > 0) {
+        argv_buf[argc] = "--modules";
+        argc += 1;
+        argv_buf[argc] = modules_path;
         argc += 1;
     }
     argv_buf[argc] = net_path;
@@ -509,14 +501,19 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
 
     const summary = parseSummaryLine(py.stdout);
 
+    // Refresh the project's .layout file from the updated .kicad_pcb so the
+    // canvas viewer picks up both adopted follower placements and any other
+    // positions the user changed in KiCad since the last sync.
+    syncLayoutFromPcb(ctx.allocator, block, ctx.project_dir, name, pcb_path);
+
     var esc_backup: std.ArrayListUnmanaged(u8) = .empty;
     defer esc_backup.deinit(ctx.allocator);
     try writeJsonEscaped(esc_backup.writer(ctx.allocator), summary.backup);
 
     const body = try std.fmt.allocPrint(
         ctx.allocator,
-        "{{\"ok\":true,\"skipped\":false,\"pcb\":\"{s}\",\"backup\":\"{s}\",\"mismatches\":{d},\"missing\":{d},\"wrote_footprints\":{d},\"wrote_models\":{d}}}",
-        .{ pcb_path, esc_backup.items, summary.mismatches, summary.missing, fps_to_write.items.len, models_to_copy.items.len },
+        "{{\"ok\":true,\"skipped\":false,\"pcb\":\"{s}\",\"backup\":\"{s}\",\"mismatches\":{d},\"missing\":{d},\"seeded\":{d},\"wrote_footprints\":{d},\"wrote_models\":{d}}}",
+        .{ pcb_path, esc_backup.items, summary.mismatches, summary.missing, summary.seeded, fps_to_write.items.len, models_to_copy.items.len },
     );
     res.content_type = .JSON;
     res.header("access-control-allow-origin", "*");
@@ -526,6 +523,7 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
 const ScriptSummary = struct {
     mismatches: u32 = 0,
     missing: u32 = 0,
+    seeded: u32 = 0,
     backup: []const u8 = "",
 };
 
@@ -550,6 +548,8 @@ fn parseSummaryLine(stdout: []const u8) ScriptSummary {
             result.mismatches = std.fmt.parseInt(u32, val, 10) catch 0;
         } else if (std.mem.eql(u8, key, "missing")) {
             result.missing = std.fmt.parseInt(u32, val, 10) catch 0;
+        } else if (std.mem.eql(u8, key, "seeded")) {
+            result.seeded = std.fmt.parseInt(u32, val, 10) catch 0;
         } else if (std.mem.eql(u8, key, "backup")) {
             result.backup = if (std.mem.eql(u8, val, "-")) "" else val;
         }
@@ -743,6 +743,7 @@ fn collectDesiredFootprintsAndModels(
 const SyncCache = struct {
     netlist_sha: []const u8 = "",
     sections_sha: []const u8 = "",
+    modules_sha: []const u8 = "",
     footprints: std.StringHashMapUnmanaged([]const u8) = .empty,
     models: std.StringHashMapUnmanaged(ModelMeta) = .empty,
 
@@ -759,6 +760,10 @@ const SyncCache = struct {
         _ = allocator;
         self.sections_sha = sha;
     }
+    fn setModulesSha(self: *SyncCache, allocator: std.mem.Allocator, sha: []const u8) void {
+        _ = allocator;
+        self.modules_sha = sha;
+    }
     fn putFootprint(self: *SyncCache, allocator: std.mem.Allocator, name: []const u8, sha: []const u8) !void {
         try self.footprints.put(allocator, name, sha);
     }
@@ -772,6 +777,7 @@ fn loadCache(allocator: std.mem.Allocator, path: []const u8) SyncCache {
     const Entry = struct {
         netlist_sha: []const u8 = "",
         sections_sha: []const u8 = "",
+        modules_sha: []const u8 = "",
         footprints: []const struct { name: []const u8, sha: []const u8 } = &.{},
         models: []const struct { name: []const u8, size: u64 = 0, mtime_ns: i64 = 0 } = &.{},
     };
@@ -779,6 +785,7 @@ fn loadCache(allocator: std.mem.Allocator, path: []const u8) SyncCache {
     var out = SyncCache{
         .netlist_sha = allocator.dupe(u8, parsed.value.netlist_sha) catch "",
         .sections_sha = allocator.dupe(u8, parsed.value.sections_sha) catch "",
+        .modules_sha = allocator.dupe(u8, parsed.value.modules_sha) catch "",
     };
     for (parsed.value.footprints) |e| {
         const k = allocator.dupe(u8, e.name) catch continue;
@@ -801,7 +808,7 @@ fn saveCache(allocator: std.mem.Allocator, path: []const u8, cache: *const SyncC
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
-    w.print("{{\"netlist_sha\":\"{s}\",\"sections_sha\":\"{s}\",\"footprints\":[", .{ cache.netlist_sha, cache.sections_sha }) catch return;
+    w.print("{{\"netlist_sha\":\"{s}\",\"sections_sha\":\"{s}\",\"modules_sha\":\"{s}\",\"footprints\":[", .{ cache.netlist_sha, cache.sections_sha, cache.modules_sha }) catch return;
     var first = true;
     var it = cache.footprints.iterator();
     while (it.next()) |e| {
@@ -830,6 +837,72 @@ fn saveCache(allocator: std.mem.Allocator, path: []const u8, cache: *const SyncC
 fn fileExists(path: []const u8) bool {
     std.fs.cwd().access(path, .{}) catch return false;
     return true;
+}
+
+/// After `pcb_update.py` has written the updated .kicad_pcb, rebuild the
+/// project's `.layout` file from the board's current footprint positions.
+/// Placements are keyed by `canopy_uuid`; traces, vias, zone fills, and rules
+/// are preserved from the pre-existing `.layout` (if any) so the canvas
+/// viewer's routing state survives a sync.
+///
+/// Silent on failure: the sync has already succeeded, and the viewer can
+/// always fall back to reading placements out of the .kicad_pcb directly.
+fn syncLayoutFromPcb(
+    allocator: std.mem.Allocator,
+    block: *const @import("../eval/env.zig").DesignBlock,
+    project_dir: []const u8,
+    name: []const u8,
+    pcb_path: []const u8,
+) void {
+    const pcb_content = std.fs.cwd().readFileAlloc(allocator, pcb_path, 100 * 1024 * 1024) catch return;
+    defer allocator.free(pcb_content);
+
+    var placed = std.StringHashMap(pcb_mod.PlacedFootprint).init(allocator);
+    defer placed.deinit();
+    pcb_mod.parseExistingPlacements(allocator, pcb_content, &placed);
+
+    var instances: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
+    defer instances.deinit(allocator);
+    netlist_mod.collectInstances(allocator, block, "", &instances) catch return;
+
+    var placements: std.ArrayListUnmanaged(layout_mod.Placement) = .empty;
+    defer placements.deinit(allocator);
+    for (instances.items) |inst| {
+        if (inst.uuid.len == 0) continue;
+        const p = placed.get(inst.uuid) orelse continue;
+        placements.append(allocator, .{
+            .ref_des = inst.ref_des,
+            .x = p.x,
+            .y = p.y,
+            .angle = p.angle,
+            .side = if (p.flipped) .back else .front,
+            .uuid = inst.uuid,
+        }) catch return;
+    }
+
+    const layout_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.layout", .{ project_dir, name }) catch return;
+    defer allocator.free(layout_path);
+
+    // Preserve routing data from the prior .layout.
+    var existing_traces: []const layout_mod.Trace = &.{};
+    var existing_vias: []const layout_mod.Via = &.{};
+    var existing_zone_fills: []const layout_mod.ZoneFill = &.{};
+    var existing_rules: ?layout_mod.Rules = null;
+    if (layout_mod.loadLayout(allocator, layout_path)) |prev| {
+        existing_traces = prev.traces;
+        existing_vias = prev.vias;
+        existing_zone_fills = prev.zone_fills;
+        existing_rules = prev.rules;
+    } else |_| {}
+
+    const layout = layout_mod.Layout{
+        .placements = placements.items,
+        .traces = existing_traces,
+        .vias = existing_vias,
+        .zone_fills = existing_zone_fills,
+        .rules = existing_rules,
+    };
+    layout_mod.saveLayout(allocator, &layout, layout_path) catch {};
 }
 
 fn sha256Hex(allocator: std.mem.Allocator, input: []const u8) ![]u8 {

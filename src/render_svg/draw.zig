@@ -279,9 +279,8 @@ pub fn shortNetName(name: []const u8) []const u8 {
 }
 
 pub fn baseNetName(name: []const u8) []const u8 {
-    const short = shortNetName(name);
-    if (std.mem.indexOfScalar(u8, short, '.')) |idx| return short[0..idx];
-    return short;
+    if (std.mem.indexOfScalar(u8, name, '.')) |idx| return name[0..idx];
+    return name;
 }
 
 pub fn displayValue(inst: FlatInst) []const u8 {

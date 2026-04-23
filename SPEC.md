@@ -43,6 +43,7 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Formats voltage values with SI prefix and V suffix
 - Formats resistance values with SI prefix and ohm suffix
 - Formats capacitance values with SI prefix and F suffix
+- Formats amperage values with SI prefix (uA/mA/A)
 - Formats tilde escape sequences in format strings
 - Formats mixed specifiers in a single format string
 
@@ -61,8 +62,8 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Evaluates assert-range that fails when value is out of bounds
 - parseId extracts 8-char ID from form children
 - parseId returns null when no ID present
-- deriveChildId produces deterministic results
-- deriveChildId produces unique IDs per index
+- deriveChildId produces the same child ID when called with identical inputs
+- deriveChildId produces unique child IDs across different index values
 - generateId produces 8-char hex starting with letter
 - isStandardRefDes distinguishes standard from descriptive labels
 
@@ -78,6 +79,12 @@ CLI-driven electronic design automation for schematic capture using S-expression
 ## convert/symbol
 
 - Converts a KiCad symbol file into S-expression format
+
+## convert/alt-functions
+
+- Parses a long-format CSV with position/function/etype columns
+- Parses ST open-pin-data XML into alt-function rows
+- Merges CSV alternate-function rows into an existing pinout file
 
 ## emit
 
@@ -126,6 +133,12 @@ Public functions: renderSchematic
 ## render_block
 
 Public functions: renderBlockDiagram
+
+## erc
+
+- Emits power_budget error when load max exceeds source max
+- Emits power_budget warning when typ load is above 80 percent of source typ
+- Emits no power_budget violation when load is well below source capacity
 
 ## serve
 

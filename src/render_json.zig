@@ -51,6 +51,10 @@ const JsonPin = struct {
     display_name: []const u8,
     y: f64,
     side: []const u8,
+    /// Alternate functions available for this pin (empty for power/ground and multi-pin groups).
+    alts: []const []const u8 = &.{},
+    /// Asserted function if the user wrote `(pin X (as "FN") …)`, else empty.
+    active_fn: []const u8 = "",
 };
 
 const JsonHub = struct {
@@ -68,6 +72,66 @@ const JsonHub = struct {
     left_pins: std.ArrayListUnmanaged(JsonPin),
     right_pins: std.ArrayListUnmanaged(JsonPin),
 };
+
+/// Cached pinout data: symbol_name -> (pin_id -> []alt_names).
+/// Populated lazily in renderSceneGraph; lives for the lifetime of a single render.
+const PinoutAltMap = std.StringHashMapUnmanaged(std.StringHashMapUnmanaged([]const []const u8));
+
+fn loadPinoutAlts(allocator: Allocator, map: *PinoutAltMap, project_dir: []const u8, symbol: []const u8) void {
+    if (project_dir.len == 0 or symbol.len == 0) return;
+    if (map.contains(symbol)) return;
+    const path = std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ project_dir, symbol }) catch return;
+    const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 256) catch return;
+    const parser_m = @import("sexpr/parser.zig");
+    const nodes = parser_m.parse(allocator, content) catch return;
+    if (nodes.len == 0) return;
+    const top = nodes[0].asList() orelse return;
+    if (top.len < 2) return;
+    const head = top[0].asAtom() orelse return;
+    if (!std.mem.eql(u8, head, "pinout")) return;
+
+    var by_pin: std.StringHashMapUnmanaged([]const []const u8) = .empty;
+    for (top[2..]) |child| {
+        const cl = child.asList() orelse continue;
+        if (cl.len < 4) continue;
+        const ch = cl[0].asAtom() orelse continue;
+        if (!std.mem.eql(u8, ch, "pin")) continue;
+        const pin_id = cl[1].asAtom() orelse cl[1].asString() orelse continue;
+
+        var alts: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (cl[3..]) |alt_node| {
+            const al = alt_node.asList() orelse continue;
+            if (al.len < 2) continue;
+            const hd = al[0].asAtom() orelse continue;
+            if (!std.mem.eql(u8, hd, "alt")) continue;
+            const alt_name = al[1].asString() orelse (al[1].asAtom() orelse continue);
+            alts.append(allocator, alt_name) catch continue;
+        }
+        if (alts.items.len > 0) {
+            const owned = alts.toOwnedSlice(allocator) catch continue;
+            by_pin.put(allocator, pin_id, owned) catch continue;
+        }
+    }
+    map.put(allocator, symbol, by_pin) catch {};
+}
+
+/// Build a map of (ref_des|pin_id) -> asserted_fn from all nets. Keys are allocator-owned.
+fn buildAssertedFnMap(allocator: Allocator, block: *const DesignBlock) std.StringHashMapUnmanaged([]const u8) {
+    var map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    appendAssertedFromBlock(allocator, &map, block);
+    return map;
+}
+
+fn appendAssertedFromBlock(allocator: Allocator, map: *std.StringHashMapUnmanaged([]const u8), block: *const DesignBlock) void {
+    for (block.nets) |net| {
+        for (net.pins) |p| {
+            if (p.asserted_fn.len == 0) continue;
+            const key = std.fmt.allocPrint(allocator, "{s}|{s}", .{ p.ref_des, p.pin }) catch continue;
+            map.put(allocator, key, p.asserted_fn) catch {};
+        }
+    }
+    for (block.sub_blocks) |sb| appendAssertedFromBlock(allocator, map, sb.block);
+}
 
 const JsonWire = struct {
     net: []const u8,
@@ -373,8 +437,9 @@ fn mergeAwareHubHeight(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, par
 
 // ── Public entry point ───────────────────────────────────────────────
 
-pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock) ![]const u8 {
+pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project_dir: []const u8) ![]const u8 {
     var ctx = RenderCtx.init(allocator);
+    ctx.project_dir = project_dir;
 
     // Same pipeline as render_svg.zig
     try ctx.collectFlat(block, "");
@@ -411,6 +476,9 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock) ![]cons
 
     var scene = SceneGraph.init(allocator);
     scene.design_name = block.name;
+
+    var alt_map: PinoutAltMap = .empty;
+    var asserted_fns = buildAssertedFnMap(allocator, block);
 
     // Build grid cells from sections (same as render_svg.zig)
     const GridCell = struct {
@@ -584,7 +652,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock) ![]cons
             const h = cell_heights[ci];
 
             // Collect hub data
-            var json_hub = try collectHubData(&ctx, allocator, cell.hub_inst, cell.part, x_offset, content_y);
+            var json_hub = try collectHubData(&ctx, allocator, cell.hub_inst, cell.part, x_offset, content_y, &alt_map, &asserted_fns);
             try scene.hubs.append(allocator, json_hub);
 
             // Collect connections for this hub
@@ -628,7 +696,8 @@ const Classified = struct { conn: AdjEntry, terminal: []const u8 };
 
 // ── Hub data collection ──────────────────────────────────────────────
 
-fn collectHubData(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, part: ?env_mod.Part, x_offset: f64, y_start: f64) !JsonHub {
+fn collectHubData(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, part: ?env_mod.Part, x_offset: f64, y_start: f64, alt_map: *PinoutAltMap, asserted_fns: *const std.StringHashMapUnmanaged([]const u8)) !JsonHub {
+    loadPinoutAlts(allocator, alt_map, ctx.project_dir, hub.symbol);
     // Get pin groups (reuse hub.zig logic)
     const adj_entries = if (ctx.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
 
@@ -694,10 +763,7 @@ fn collectHubData(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, part: ?e
     for (right_heights) |h| right_total += h;
     const hub_height = @max(left_total, right_total) + 40.0;
 
-    const label = if (part) |p|
-        try std.fmt.allocPrint(allocator, "{s} \xe2\x80\x94 {s}", .{ shortRef(hub.ref_des), p.name })
-    else
-        try std.fmt.allocPrint(allocator, "{s} {s}", .{ shortRef(hub.ref_des), displayValue(hub) });
+    const label = try std.fmt.allocPrint(allocator, "{s} {s}", .{ shortRef(hub.ref_des), displayValue(hub) });
 
     const icon = draw.classifyComponent(hub);
 
@@ -722,11 +788,14 @@ fn collectHubData(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, part: ?e
     for (left_groups, 0..) |group, gi| {
         const height = left_heights[gi];
         const pin_cy = py_left + height / 2.0;
+        const enrich = pinEnrichment(allocator, group, hub.ref_des, hub.symbol, alt_map, asserted_fns);
         try json_hub.left_pins.append(allocator, .{
             .pin_numbers = group.pin_numbers,
             .display_name = group.display_name,
             .y = pin_cy,
             .side = "left",
+            .alts = enrich.alts,
+            .active_fn = enrich.active_fn,
         });
         py_left += height;
     }
@@ -736,16 +805,45 @@ fn collectHubData(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, part: ?e
     for (right_groups, 0..) |group, gi| {
         const height = right_heights[gi];
         const pin_cy = py_right + height / 2.0;
+        const enrich = pinEnrichment(allocator, group, hub.ref_des, hub.symbol, alt_map, asserted_fns);
         try json_hub.right_pins.append(allocator, .{
             .pin_numbers = group.pin_numbers,
             .display_name = group.display_name,
             .y = pin_cy,
             .side = "right",
+            .alts = enrich.alts,
+            .active_fn = enrich.active_fn,
         });
         py_right += height;
     }
 
     return json_hub;
+}
+
+const PinEnrichment = struct {
+    alts: []const []const u8 = &.{},
+    active_fn: []const u8 = "",
+};
+
+/// Return alt-function metadata for a single-pin group. Multi-pin groups get empty alts.
+fn pinEnrichment(
+    allocator: Allocator,
+    group: PinGroup,
+    ref_des: []const u8,
+    symbol: []const u8,
+    alt_map: *PinoutAltMap,
+    asserted_fns: *const std.StringHashMapUnmanaged([]const u8),
+) PinEnrichment {
+    if (std.mem.indexOfScalar(u8, group.pin_numbers, ',')) |_| return .{};
+    const pin_id = group.pin_numbers;
+
+    var result = PinEnrichment{};
+    if (alt_map.get(symbol)) |by_pin| {
+        if (by_pin.get(pin_id)) |alts| result.alts = alts;
+    }
+    const key = std.fmt.allocPrint(allocator, "{s}|{s}", .{ ref_des, pin_id }) catch return result;
+    if (asserted_fns.get(key)) |fn_name| result.active_fn = fn_name;
+    return result;
 }
 
 // ── Connection collection ────────────────────────────────────────────
@@ -1438,12 +1536,7 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
         try w.writeAll(",\"leftPins\":[");
         for (h.left_pins.items, 0..) |pin, pi| {
             if (pi > 0) try w.writeAll(",");
-            try w.writeAll("{");
-            try writeJsonString(w, "pins", pin.pin_numbers);
-            try w.writeAll(",");
-            try writeJsonString(w, "name", pin.display_name);
-            try w.print(",\"y\":{d:.1}", .{pin.y});
-            try w.writeAll("}");
+            try writeJsonPin(w, pin);
         }
         try w.writeAll("]");
 
@@ -1451,12 +1544,7 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
         try w.writeAll(",\"rightPins\":[");
         for (h.right_pins.items, 0..) |pin, pi| {
             if (pi > 0) try w.writeAll(",");
-            try w.writeAll("{");
-            try writeJsonString(w, "pins", pin.pin_numbers);
-            try w.writeAll(",");
-            try writeJsonString(w, "name", pin.display_name);
-            try w.print(",\"y\":{d:.1}", .{pin.y});
-            try w.writeAll("}");
+            try writeJsonPin(w, pin);
         }
         try w.writeAll("]}");
     }
@@ -1555,6 +1643,29 @@ fn writeJsonString(w: anytype, key: []const u8, value: []const u8) !void {
     try w.print("\"{s}\":\"", .{key});
     try writeEscaped(w, value);
     try w.writeAll("\"");
+}
+
+fn writeJsonPin(w: anytype, pin: JsonPin) !void {
+    try w.writeAll("{");
+    try writeJsonString(w, "pins", pin.pin_numbers);
+    try w.writeAll(",");
+    try writeJsonString(w, "name", pin.display_name);
+    try w.print(",\"y\":{d:.1}", .{pin.y});
+    if (pin.active_fn.len > 0) {
+        try w.writeAll(",");
+        try writeJsonString(w, "activeFn", pin.active_fn);
+    }
+    if (pin.alts.len > 0) {
+        try w.writeAll(",\"alts\":[");
+        for (pin.alts, 0..) |alt, ai| {
+            if (ai > 0) try w.writeAll(",");
+            try w.writeAll("\"");
+            try writeEscaped(w, alt);
+            try w.writeAll("\"");
+        }
+        try w.writeAll("]");
+    }
+    try w.writeAll("}");
 }
 
 fn writeEscaped(w: anytype, s: []const u8) !void {

@@ -3,6 +3,7 @@ const parser = @import("sexpr/parser.zig");
 const printer = @import("sexpr/printer.zig");
 const footprint_conv = @import("convert/footprint.zig");
 const symbol_conv = @import("convert/symbol.zig");
+const alt_functions = @import("convert/alt_functions.zig");
 const serve_mod = @import("serve.zig");
 const commands = @import("commands.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
@@ -28,6 +29,8 @@ pub fn main() !void {
         try cmdParse(allocator, args[2]);
     } else if (std.mem.eql(u8, command, "build")) {
         try commands.cmdBuild(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "check")) {
+        try commands.cmdCheck(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "convert-footprint")) {
         if (args.len < 3) {
             std.debug.print("Usage: eda convert-footprint <file.kicad_mod>\n", .{});
@@ -81,6 +84,17 @@ pub fn main() !void {
             }
         }
         try cmdConvertPinout(allocator, args[2], filter);
+    } else if (std.mem.eql(u8, command, "merge-alt-functions")) {
+        if (args.len < 4) {
+            std.debug.print("Usage: eda merge-alt-functions <pinout.sexp> <alts.csv|alts.xml> [--write]\n", .{});
+            std.process.exit(1);
+        }
+        var write_back = false;
+        var i: usize = 4;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--write")) write_back = true;
+        }
+        try cmdMergeAltFunctions(allocator, args[2], args[3], write_back);
     } else if (std.mem.eql(u8, command, "export-kicad")) {
         try commands.cmdExportKicad(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "export-pcb")) {
@@ -97,7 +111,7 @@ pub fn main() !void {
                 si += 1;
             }
             if (std.mem.eql(u8, args[si], "--port") and si + 1 < args.len) {
-                port = std.fmt.parseInt(u16, args[si + 1], 10) catch 7040;
+                port = std.fmt.parseInt(u16, args[si + 1], 10) catch 7050;
                 si += 1;
             }
         }
@@ -190,6 +204,40 @@ fn cmdConvertPackage(allocator: std.mem.Allocator, sym_path: []const u8, fp_path
     try file.writeAll(output);
 }
 
+fn cmdMergeAltFunctions(allocator: std.mem.Allocator, pinout_path: []const u8, src_path: []const u8, write_back: bool) !void {
+    const pinout_src = std.fs.cwd().readFileAlloc(allocator, pinout_path, 10 * 1024 * 1024) catch |err| {
+        std.debug.print("Error reading {s}: {}\n", .{ pinout_path, err });
+        std.process.exit(1);
+    };
+    defer allocator.free(pinout_src);
+    const alt_src = std.fs.cwd().readFileAlloc(allocator, src_path, 20 * 1024 * 1024) catch |err| {
+        std.debug.print("Error reading {s}: {}\n", .{ src_path, err });
+        std.process.exit(1);
+    };
+    defer allocator.free(alt_src);
+
+    const entries = alt_functions.parseAltSource(allocator, alt_src) catch |err| {
+        std.debug.print("Alt-function parse error: {}\n", .{err});
+        std.process.exit(1);
+    };
+    const output = alt_functions.mergePinoutWithAlts(allocator, pinout_src, entries) catch |err| {
+        std.debug.print("Merge error: {}\n", .{err});
+        std.process.exit(1);
+    };
+    defer allocator.free(output);
+
+    if (write_back) {
+        std.fs.cwd().writeFile(.{ .sub_path = pinout_path, .data = output }) catch |err| {
+            std.debug.print("Error writing {s}: {}\n", .{ pinout_path, err });
+            std.process.exit(1);
+        };
+        std.debug.print("Merged {d} alt-function rows into {s}\n", .{ entries.len, pinout_path });
+    } else {
+        const file = std.fs.File.stdout();
+        try file.writeAll(output);
+    }
+}
+
 fn cmdConvertPinout(allocator: std.mem.Allocator, path: []const u8, filter: ?[]const u8) !void {
     const source = std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
         std.debug.print("Error reading {s}: {}\n", .{ path, err });
@@ -232,13 +280,15 @@ fn printUsage() !void {
         \\Usage:
         \\  eda parse <file>                   Parse and pretty-print an S-expression file
         \\  eda build [--project-dir <d>]       Evaluate and emit resolved design
-        \\  eda serve [--project-dir <d>] [--port <n>]  Start web server (default port 7040)
+        \\  eda check [--project-dir <d>] [--severity <s>] <name>  Run ERC on a design
+        \\  eda serve [--project-dir <d>] [--port <n>]  Start web server (default port 7050)
         \\  eda mint-plugin-token [--project-dir <d>] [--label <l>]  Mint a bearer token for the KiCad plugin
         \\  eda export-kicad --project-dir <d> --output-dir <out> <name>  Export KiCad netlist + footprints
         \\  eda export-pcb --project-dir <d> [--output <file>] <name>   Export .kicad_pcb (native PCB)
         \\  eda convert-footprint <file>        Convert KiCad .kicad_mod to .sexp
         \\  eda convert-symbol <file> [--filter <name>]  Convert KiCad .kicad_sym to .sexp
         \\  eda convert-pinout <file> [--filter <name>]  Generate pinout from KiCad .kicad_sym
+        \\  eda merge-alt-functions <pinout.sexp> <alts.csv|alts.xml> [--write]  Merge alt functions (CSV or ST open-pin-data XML)
         \\  eda help                            Show this help
         \\
     );
@@ -257,6 +307,7 @@ test {
     _ = @import("emit.zig");
     _ = @import("convert/footprint.zig");
     _ = @import("convert/symbol.zig");
+    _ = @import("convert/alt_functions.zig");
     _ = @import("export_kicad.zig");
     _ = @import("export_kicad_pcb.zig");
     _ = @import("serve.zig");

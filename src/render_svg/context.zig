@@ -75,6 +75,8 @@ pub const PinGroup = struct {
 
 pub const RenderCtx = struct {
     allocator: Allocator,
+    /// Project directory for locating lib/pinouts/*.sexp (empty if unavailable).
+    project_dir: []const u8 = "",
     instances: std.ArrayListUnmanaged(FlatInst),
     nets: std.ArrayListUnmanaged(FlatNet),
     hub_order: std.ArrayListUnmanaged([]const u8),

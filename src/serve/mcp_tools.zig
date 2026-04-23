@@ -494,7 +494,7 @@ fn runChecks(
 
     try w.writeAll(",\"erc\":");
     if (want_erc) {
-        const erc_all = try erc_mod.runErc(allocator, block);
+        const erc_all = try erc_mod.runErc(allocator, block, project_dir);
         try w.writeAll("[");
         var first = true;
         for (erc_all) |v| {
@@ -744,22 +744,22 @@ pub fn listFreePins(
     else
         inst.symbol;
     if (lookup_name.len == 0) {
-        try w.writeAll("{\"free_pins\":[],\"note\":\"instance has no associated symbol pinout\"}");
+        try w.writeAll("{\"free_pins\":[],\"assigned_pins\":[],\"note\":\"instance has no associated symbol pinout\"}");
         return true;
     }
 
     const pin_map = ids.getSymbolPins(&eval, lookup_name) orelse {
-        try w.writeAll("{\"free_pins\":[],\"note\":\"pinout file not found for symbol\"}");
+        try w.writeAll("{\"free_pins\":[],\"assigned_pins\":[],\"note\":\"pinout file not found for symbol\"}");
         return true;
     };
 
-    // Collect the set of pins assigned to this ref_des from every net.
-    var assigned: std.StringHashMapUnmanaged(void) = .empty;
+    // Map each assigned pin on this instance to its current net name.
+    var assigned: std.StringHashMapUnmanaged([]const u8) = .empty;
     defer assigned.deinit(allocator);
     for (block.nets) |net| {
         for (net.pins) |p| {
             if (std.mem.eql(u8, p.ref_des, ref_des)) {
-                try assigned.put(allocator, p.pin, {});
+                try assigned.put(allocator, p.pin, net.name);
             }
         }
     }
@@ -779,6 +779,25 @@ pub fn listFreePins(
         try writeJsonString(w, pin_id);
         try w.writeAll(",\"function\":");
         try writeJsonString(w, fname);
+        try w.print(",\"category\":\"{s}\"}}", .{categoryName(cat)});
+    }
+    try w.writeAll("],\"assigned_pins\":[");
+    var it2 = pin_map.iterator();
+    var first2 = true;
+    while (it2.next()) |e| {
+        const pin_id = e.key_ptr.*;
+        const net_name = assigned.get(pin_id) orelse continue;
+        const fname = e.value_ptr.*;
+        const cat = classifyPin(fname);
+        if (filter) |f| if (!std.mem.eql(u8, f, categoryName(cat))) continue;
+        if (!first2) try w.writeAll(",");
+        first2 = false;
+        try w.writeAll("{\"pin\":");
+        try writeJsonString(w, pin_id);
+        try w.writeAll(",\"function\":");
+        try writeJsonString(w, fname);
+        try w.writeAll(",\"net\":");
+        try writeJsonString(w, net_name);
         try w.print(",\"category\":\"{s}\"}}", .{categoryName(cat)});
     }
     try w.writeAll("]}");
@@ -1087,5 +1106,5 @@ pub fn renderSceneGraph(
     defer allocator.free(bom_path);
     bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch {};
 
-    return render_json.renderSceneGraph(allocator, block);
+    return render_json.renderSceneGraph(allocator, block, project_dir);
 }

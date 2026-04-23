@@ -66,6 +66,16 @@ pub const ModuleDef = struct {
 pub const PinRef = struct {
     ref_des: []const u8,
     pin: []const u8,
+    /// Alternate function the user explicitly asserted via `(as "FN")`. Empty when not asserted.
+    asserted_fn: []const u8 = "",
+    /// Typical current drawn by this instance on the owning pin-group's net (A).
+    /// Populated from `(i-typ X)` on the pin form and attached only to the first
+    /// physical pin of the group — the remaining pins carry null so a straight sum
+    /// across a net counts each instance's contribution exactly once.
+    i_typ: ?f64 = null,
+    /// Absolute-max current drawn by this instance on the owning pin-group's net (A).
+    /// Populated from `(i-max X)`; same single-pin attachment semantics as i_typ.
+    i_max: ?f64 = null,
 };
 
 /// A net in a design block.
@@ -82,6 +92,12 @@ pub const Port = struct {
     rated_min: ?f64 = null,
     rated_max: ?f64 = null,
     nominal: ?f64 = null,
+    /// Typical current capacity (A) — set from `(current <typ> <max>)` on a port.
+    /// On a regulator output this is the typical deliverable current; on a
+    /// consumer input it's the expected draw under nominal conditions.
+    current_typ: ?f64 = null,
+    /// Absolute-max current capacity (A) from `(current <typ> <max>)`.
+    current_max: ?f64 = null,
     /// Whether this port is optional (no ERC error if unconnected).
     optional: bool = false,
 };
@@ -125,6 +141,8 @@ pub const Instance = struct {
     value: []const u8,
     footprint: []const u8,
     symbol: []const u8,
+    /// Pinout lookup key for lib/pinouts/*.sexp (falls back to symbol/component when unset).
+    pinout: []const u8 = "",
     /// Component properties (manufacturer, mpn, etc.)
     properties: []const Property = &.{},
     /// Schematic-level attributes (e.g., "np0", "x7r" for dielectric type)

@@ -137,7 +137,7 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     defer ctx.allocator.free(bom_path);
     bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
 
-    const new_layout = render_json.renderSceneGraph(ctx.allocator, block) catch null;
+    const new_layout = render_json.renderSceneGraph(ctx.allocator, block, ctx.project_dir) catch null;
     serve_root.setLiveLayoutJson(new_layout);
     _ = serve_root.bumpLiveVersion(name);
 
@@ -318,7 +318,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 
     var svg_sym_cache = try bom_html.buildSymbolPinCache(ctx.allocator, ctx.project_dir);
 
-    const new_layout = render_json.renderSceneGraph(ctx.allocator, block) catch null;
+    const new_layout = render_json.renderSceneGraph(ctx.allocator, block, ctx.project_dir) catch null;
     serve_root.setLiveLayoutJson(new_layout);
     _ = serve_root.bumpLiveVersion(name);
 
@@ -822,11 +822,74 @@ pub fn movePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
                 res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"error\":\"pin_already_assigned\",\"pin\":\"{s}\"}}", .{new_pin});
                 return;
             },
-            error.MultiPinFormUnsupported => {
-                res.status = 409;
-                res.body = "{\"error\":\"multi_pin_form_unsupported\"}";
+            error.PinNotFound => {
+                res.status = 404;
+                res.body = "{\"error\":\"pin_not_found\"}";
                 return;
             },
+            error.InstanceNotFound => {
+                res.status = 404;
+                res.body = "{\"error\":\"instance_not_found\"}";
+                return;
+            },
+            error.InvalidSource => {
+                res.status = 400;
+                res.body = "{\"error\":\"invalid_pin_id\"}";
+                return;
+            },
+            error.RebuildFailed => {
+                res.status = 500;
+                res.body = "{\"error\":\"rebuild_failed\"}";
+                return;
+            },
+            else => {
+                res.status = 500;
+                res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"error\":\"{s}\"}}", .{@errorName(err)});
+                return;
+            },
+        }
+    };
+
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
+}
+
+/// Swap the net assignments of two pins on the same instance.
+/// Body: `{"ref":"U1","pin_a":"V11","pin_b":"V12"}`.
+pub fn swapPinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    res.content_type = .JSON;
+    res.header("access-control-allow-origin", "*");
+
+    const name = req.param("name") orelse {
+        res.status = 404;
+        res.body = "{\"error\":\"missing name\"}";
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"no body\"}";
+        return;
+    };
+
+    const ref_des = parseJsonString(body, "\"ref\"") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing ref\"}";
+        return;
+    };
+    const pin_a = parseJsonString(body, "\"pin_a\"") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing pin_a\"}";
+        return;
+    };
+    const pin_b = parseJsonString(body, "\"pin_b\"") orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing pin_b\"}";
+        return;
+    };
+
+    const source_key = resolveSourceKey(ctx.allocator, ctx.project_dir, name, ref_des) catch ref_des;
+
+    const result = swapPinsCore(ctx.allocator, ctx.project_dir, name, source_key, pin_a, pin_b) catch |err| {
+        switch (err) {
             error.PinNotFound => {
                 res.status = 404;
                 res.body = "{\"error\":\"pin_not_found\"}";
@@ -875,7 +938,7 @@ fn rebuildAndPush(ctx: *Handler, name: []const u8, res: *httpz.Response) !void {
     defer ctx.allocator.free(bom_path);
     bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
 
-    const layout_json = render_json.renderSceneGraph(ctx.allocator, block) catch null;
+    const layout_json = render_json.renderSceneGraph(ctx.allocator, block, ctx.project_dir) catch null;
     serve_root.setLiveLayoutJson(layout_json);
     _ = serve_root.bumpLiveVersion(name);
 
@@ -1024,7 +1087,6 @@ pub const EditError = error{
     InstanceNotFound,
     PinNotFound,
     PinAlreadyAssigned,
-    MultiPinFormUnsupported,
     SectionNotFound,
     ComponentNotFound,
     NoteNotFound,
@@ -1099,7 +1161,7 @@ fn writeAndRebuild(
     defer allocator.free(bom_path);
     bom.resolveIdentities(allocator, block, bom_path, project_dir) catch {};
 
-    const layout_json = render_json.renderSceneGraph(allocator, block) catch null;
+    const layout_json = render_json.renderSceneGraph(allocator, block, project_dir) catch null;
     serve_root.setLiveLayoutJson(layout_json);
     const version = serve_root.bumpLiveVersion(name);
 
@@ -1457,7 +1519,7 @@ pub fn restoreDesignCore(
     defer allocator.free(bom_path);
     bom.resolveIdentities(allocator, block, bom_path, project_dir) catch {};
 
-    const layout_json = render_json.renderSceneGraph(allocator, block) catch null;
+    const layout_json = render_json.renderSceneGraph(allocator, block, project_dir) catch null;
     serve_root.setLiveLayoutJson(layout_json);
     const version = serve_root.bumpLiveVersion(name);
 
@@ -1633,33 +1695,57 @@ pub fn setInstancePinCore(
     return rewirePinCore(allocator, project_dir, name, ref_des, pin, new_net);
 }
 
-/// Scan every `(pin ... "...")` form inside [inst_start, inst_end) and return
-/// true if `pin` appears as a whitespace-delimited ID token in any of them.
-/// Handles both single-pin forms `(pin V11 "NET")` and multi-pin shorthand
-/// `(pin 1 2 3 "NET")`.
-fn pinIdPresentInInstance(source: []const u8, inst_start: usize, inst_end: usize, pin: []const u8) bool {
-    var search: usize = inst_start;
-    while (std.mem.indexOfPos(u8, source, search, "(pin ")) |p| {
-        if (p >= inst_end) break;
-        const after = p + "(pin ".len;
-        const quote = std.mem.indexOfPos(u8, source, after, "\"") orelse break;
-        if (quote > inst_end) break;
-        var tok_start: usize = after;
-        var i: usize = after;
-        while (i < quote) : (i += 1) {
-            const ch = source[i];
-            if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') {
-                if (i > tok_start and std.mem.eql(u8, source[tok_start..i], pin)) return true;
-                tok_start = i + 1;
-            }
+const PinTokenLoc = struct { start: usize, end: usize };
+
+/// Scan the interior of a single `(pin ...)` form — starting just after
+/// `(pin ` and bounded by `limit` — for the first top-level bareword token
+/// equal to `pin`. Stops at the first `"` (net string) or the form's
+/// closing `)`. Nested sub-forms like `(as "AF")` are skipped as opaque,
+/// so pin IDs declared as `(pin W12 (as "TIM2_CH2") "CNV_MASTER")` are
+/// recognised just like plain `(pin W12 "CNV_MASTER")` forms.
+fn findPinInForm(source: []const u8, start: usize, limit: usize, pin: []const u8) ?PinTokenLoc {
+    var i: usize = start;
+    while (i < limit) {
+        const c = source[i];
+        if (c == ')' or c == '"') return null;
+        if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
+            i += 1;
+            continue;
         }
-        // Trim trailing whitespace before the opening quote.
-        var tok_end = quote;
-        while (tok_end > tok_start and (source[tok_end - 1] == ' ' or source[tok_end - 1] == '\t')) : (tok_end -= 1) {}
-        if (tok_end > tok_start and std.mem.eql(u8, source[tok_start..tok_end], pin)) return true;
-        search = quote + 1;
+        if (c == '(') {
+            var depth: usize = 1;
+            i += 1;
+            while (i < limit and depth > 0) : (i += 1) {
+                if (source[i] == '(') depth += 1 else if (source[i] == ')') depth -= 1;
+            }
+            continue;
+        }
+        const tok_start = i;
+        while (i < limit) : (i += 1) {
+            const cc = source[i];
+            if (cc == ' ' or cc == '\t' or cc == '\n' or cc == '\r' or cc == '"' or cc == '(' or cc == ')') break;
+        }
+        if (std.mem.eql(u8, source[tok_start..i], pin)) return .{ .start = tok_start, .end = i };
     }
-    return false;
+    return null;
+}
+
+/// Locate the byte range of the first pin-ID token equal to `pin` across
+/// every `(pin ...)` form inside `regions`. Works for both single-pin
+/// `(pin X "NET")` and multi-pin shorthand `(pin 1 2 3 "NET")` — in the
+/// shorthand case the returned range covers just the matching numeric
+/// token, so callers can rename it in place and leave the rest of the
+/// list intact.
+fn findPinTokenInRegions(source: []const u8, regions: []const PinRegion, pin: []const u8) ?PinTokenLoc {
+    for (regions) |r| {
+        var search: usize = r.start;
+        while (std.mem.indexOfPos(u8, source, search, "(pin ")) |p| {
+            if (p >= r.end) break;
+            if (findPinInForm(source, p + "(pin ".len, r.end, pin)) |loc| return loc;
+            search = p + "(pin ".len;
+        }
+    }
+    return null;
 }
 
 /// Map a ref_des (e.g. "U3") to the string used in the `.sexp` source for
@@ -1714,12 +1800,12 @@ fn collectPinRegions(
     }
 }
 
-/// Rename a single-pin form `(pin OLD_PIN "NET")` to `(pin NEW_PIN "NET")`
-/// within any region that declares pins for `ref_des` — either an inline
-/// `(instance "REF" ...)` form or a section-level `(pins "REF" ...)` group.
-/// Fails with `PinAlreadyAssigned` if `new_pin` is used anywhere across
-/// those regions, and with `MultiPinFormUnsupported` if `old_pin` only
-/// appears inside a multi-pin shorthand like `(pin 1 2 3 "NET")`.
+/// Rename the pin-ID token `old_pin` to `new_pin` inside any `(pin ...)`
+/// form that declares pins for `ref_des` — works whether the old token
+/// sits in a single-pin form `(pin OLD "NET")` or inside a multi-pin
+/// shorthand `(pin 1 OLD 3 "NET")`. Multi-pin shorthand stays shorthand:
+/// only the numeric token changes. Fails with `PinAlreadyAssigned` if
+/// `new_pin` is already used anywhere across those regions.
 pub fn movePinCore(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -1740,41 +1826,68 @@ pub fn movePinCore(
     try collectPinRegions(allocator, source, ref_des, &regions);
     if (regions.items.len == 0) return error.InstanceNotFound;
 
-    for (regions.items) |r| {
-        if (pinIdPresentInInstance(source, r.start, r.end, new_pin)) return error.PinAlreadyAssigned;
-    }
-
-    const single_needle = try std.fmt.allocPrint(allocator, "(pin {s} \"", .{old_pin});
-    defer allocator.free(single_needle);
-
-    var splice_at: ?usize = null;
-    for (regions.items) |r| {
-        if (std.mem.indexOf(u8, source[r.start..r.end], single_needle)) |rel| {
-            splice_at = r.start + rel + "(pin ".len;
-            break;
-        }
-    }
-
-    if (splice_at == null) {
-        for (regions.items) |r| {
-            if (pinIdPresentInInstance(source, r.start, r.end, old_pin)) {
-                return error.MultiPinFormUnsupported;
-            }
-        }
-        return error.PinNotFound;
-    }
-
-    const abs_old_start = splice_at.?;
-    const abs_old_end = abs_old_start + old_pin.len;
+    if (findPinTokenInRegions(source, regions.items, new_pin) != null) return error.PinAlreadyAssigned;
+    const old_loc = findPinTokenInRegions(source, regions.items, old_pin) orelse return error.PinNotFound;
 
     var new_source: std.ArrayListUnmanaged(u8) = .empty;
     defer new_source.deinit(allocator);
     const nw = new_source.writer(allocator);
-    try nw.writeAll(source[0..abs_old_start]);
+    try nw.writeAll(source[0..old_loc.start]);
     try nw.writeAll(new_pin);
-    try nw.writeAll(source[abs_old_end..]);
+    try nw.writeAll(source[old_loc.end..]);
 
     const desc = try std.fmt.allocPrint(allocator, "move_pin {s}.{s} → {s}", .{ ref_des, old_pin, new_pin });
+    defer allocator.free(desc);
+    return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
+}
+
+/// Swap the pin-ID tokens of two pins on the same instance so the nets
+/// attached to `pin_a` and `pin_b` trade places. Each pin may live in a
+/// single-pin `(pin X "NET")` form or inside a multi-pin shorthand
+/// `(pin A B C "NET")` — the numeric/ID token is renamed wherever it
+/// sits, so shorthand forms stay shorthand.
+pub fn swapPinsCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    ref_des: []const u8,
+    pin_a: []const u8,
+    pin_b: []const u8,
+) EditError!MutationResult {
+    if (pin_a.len == 0 or pin_b.len == 0) return error.InvalidSource;
+    for (pin_a) |c| if (c == ' ' or c == '\t' or c == '\n' or c == '"' or c == '(' or c == ')') return error.InvalidSource;
+    for (pin_b) |c| if (c == ' ' or c == '\t' or c == '\n' or c == '"' or c == '(' or c == ')') return error.InvalidSource;
+    if (std.mem.eql(u8, pin_a, pin_b)) return error.InvalidSource;
+
+    const source = try readDesignSource(allocator, project_dir, name);
+    defer allocator.free(source);
+
+    var regions: std.ArrayListUnmanaged(PinRegion) = .empty;
+    defer regions.deinit(allocator);
+    try collectPinRegions(allocator, source, ref_des, &regions);
+    if (regions.items.len == 0) return error.InstanceNotFound;
+
+    const a_loc = findPinTokenInRegions(source, regions.items, pin_a) orelse return error.PinNotFound;
+    const b_loc = findPinTokenInRegions(source, regions.items, pin_b) orelse return error.PinNotFound;
+
+    const a_first = a_loc.start < b_loc.start;
+    const first_start = if (a_first) a_loc.start else b_loc.start;
+    const first_end = if (a_first) a_loc.end else b_loc.end;
+    const first_replace: []const u8 = if (a_first) pin_b else pin_a;
+    const second_start = if (a_first) b_loc.start else a_loc.start;
+    const second_end = if (a_first) b_loc.end else a_loc.end;
+    const second_replace: []const u8 = if (a_first) pin_a else pin_b;
+
+    var new_source: std.ArrayListUnmanaged(u8) = .empty;
+    defer new_source.deinit(allocator);
+    const nw = new_source.writer(allocator);
+    try nw.writeAll(source[0..first_start]);
+    try nw.writeAll(first_replace);
+    try nw.writeAll(source[first_end..second_start]);
+    try nw.writeAll(second_replace);
+    try nw.writeAll(source[second_end..]);
+
+    const desc = try std.fmt.allocPrint(allocator, "swap_pins {s}.{s} <-> {s}", .{ ref_des, pin_a, pin_b });
     defer allocator.free(desc);
     return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
 }
@@ -1885,4 +1998,105 @@ pub fn replaceInstanceCore(
     const desc = try std.fmt.allocPrint(allocator, "replace_instance {s}", .{ref_des});
     defer allocator.free(desc);
     return writeAndRebuild(allocator, project_dir, name, buf.items, desc);
+}
+
+/// GET /api/source/:name — returns `{"source":"<raw .sexp text>"}`.
+pub fn getSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    res.content_type = .JSON;
+    res.header("access-control-allow-origin", "*");
+
+    const name = req.param("name") orelse {
+        res.status = 404;
+        res.body = "{\"error\":\"missing name\"}";
+        return;
+    };
+
+    const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 404;
+        res.body = "{\"error\":\"cannot read design\"}";
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(ctx.allocator);
+    try w.writeAll("{\"source\":\"");
+    try bom_html.writeJsonEscaped(w, source);
+    try w.writeAll("\"}");
+    res.body = buf.items;
+}
+
+/// POST /api/source/:name — body `{"source":"<raw .sexp text>"}`. Validates
+/// syntax, writes the file, rebuilds, bumps version. Returns
+/// `{"ok":true,"version":N,"snapshot":...}` on success or
+/// `{"ok":false,"error":"..."}` with HTTP 400 on invalid source.
+pub fn saveSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    res.content_type = .JSON;
+    res.header("access-control-allow-origin", "*");
+
+    const name = req.param("name") orelse {
+        res.status = 404;
+        res.body = "{\"error\":\"missing name\"}";
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"no body\"}";
+        return;
+    };
+
+    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
+        res.status = 400;
+        res.body = "{\"ok\":false,\"error\":\"invalid json\"}";
+        return;
+    };
+    defer parsed.deinit();
+    const source_val = parsed.value.object.get("source") orelse {
+        res.status = 400;
+        res.body = "{\"ok\":false,\"error\":\"missing source\"}";
+        return;
+    };
+    if (source_val != .string) {
+        res.status = 400;
+        res.body = "{\"ok\":false,\"error\":\"source must be a string\"}";
+        return;
+    }
+
+    const result = writeDesignCore(ctx.allocator, ctx.project_dir, name, source_val.string) catch |err| {
+        switch (err) {
+            error.InvalidSource => {
+                res.status = 400;
+                res.body = "{\"ok\":false,\"error\":\"invalid sexp syntax\"}";
+                return;
+            },
+            error.RebuildFailed => {
+                res.status = 400;
+                res.body = "{\"ok\":false,\"error\":\"rebuild failed: source wrote but evaluator rejected it\"}";
+                return;
+            },
+            error.CannotWriteDesign => {
+                res.status = 500;
+                res.body = "{\"ok\":false,\"error\":\"cannot write file\"}";
+                return;
+            },
+            else => {
+                res.status = 500;
+                res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"{s}\"}}", .{@errorName(err)});
+                return;
+            },
+        }
+    };
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    const w = out.writer(ctx.allocator);
+    try w.print("{{\"ok\":true,\"version\":{d},\"snapshot\":", .{result.version});
+    if (result.snapshot) |s| {
+        try w.writeAll("\"");
+        try bom_html.writeJsonEscaped(w, s);
+        try w.writeAll("\"");
+    } else {
+        try w.writeAll("null");
+    }
+    try w.writeAll("}");
+    res.body = out.items;
 }
