@@ -629,12 +629,24 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None, short_nets=
     def _sub_prefix(ref):
         return ref.split("/", 1)[0] if "/" in ref else ""
 
+    def _norm_net(name):
+        # NET.REF.PIN -> NET.PIN so sub-block IC renumbering (U12 -> U11)
+        # doesn't invalidate a stored canopy_net on the old PCB.
+        parts = name.split(".")
+        if len(parts) < 3:
+            return name
+        return parts[0] + "." + ".".join(parts[2:])
+
+    def _sig(value, net_names, ref):
+        norm = sorted({_norm_net(n) for n in net_names})
+        return (value or "") + "|" + ",".join(norm) + "|" + _sub_prefix(ref)
+
     netlist_sig_to_ref = {}
     for sig_ref, sig_nets in ref_to_nets.items():
         c = comp_by_ref.get(sig_ref)
         if c is None:
             continue
-        sig = (c.get("value", "") or "") + "|" + ",".join(sorted(sig_nets)) + "|" + _sub_prefix(sig_ref)
+        sig = _sig(c.get("value", ""), sig_nets, sig_ref)
         netlist_sig_to_ref.setdefault(sig, []).append(sig_ref)
     netlist_sig_unique = {sig: refs[0] for sig, refs in netlist_sig_to_ref.items() if len(refs) == 1}
 
@@ -643,7 +655,8 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None, short_nets=
         if not fp.HasFieldByName(CANOPY_UUID_FIELD) or not fp.HasFieldByName(CANOPY_NET_FIELD):
             continue
         fp_ref = fp.GetReference()
-        sig = (fp.GetValue() or "") + "|" + fp.GetFieldText(CANOPY_NET_FIELD) + "|" + _sub_prefix(fp_ref)
+        stored_nets = [s for s in fp.GetFieldText(CANOPY_NET_FIELD).split(",") if s.strip()]
+        sig = _sig(fp.GetValue(), stored_nets, fp_ref)
         pcb_sig_to_fps.setdefault(sig, []).append(fp)
 
     # Step A: build full remap plan before applying anything, so we can detect
@@ -669,11 +682,12 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None, short_nets=
         remap_plan.append((fp, new_uuid, netlist_ref, stored_uuid))
 
     # Step B: find footprints that are NOT in the plan but currently hold a
-    # UUID that the plan wants to assign elsewhere. Those are stale copies
-    # whose identity drifted through BOM churn — the canonical owner of the
-    # UUID is now somebody else, so these are orphans and must be removed.
-    # (pcbnew returns fresh Python wrappers per GetFootprints() call, so we
-    # key by the footprint's current canopy_uuid instead of id().)
+    # UUID that the plan wants to assign elsewhere. If that UUID also appears
+    # in the new netlist as a legitimate component, keep the footprint — the
+    # main loop's UUID match will bind it, and the ambiguous-sig fallback
+    # after the main loop gives it a chance to claim an unbound netlist twin.
+    # Otherwise the UUID is genuinely orphaned (canonical owner is elsewhere),
+    # so this footprint is a stale copy and must be removed.
     claimed_uuids = {nu for (_, nu, _, _) in remap_plan}
     planned_stored_uuids = {su for (_, _, _, su) in remap_plan}
     to_remove = []
@@ -683,7 +697,7 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None, short_nets=
         current_uuid = fp.GetFieldText(CANOPY_UUID_FIELD)
         if current_uuid in planned_stored_uuids:
             continue  # this fp is being remapped to a new uuid; don't remove
-        if current_uuid in claimed_uuids:
+        if current_uuid in claimed_uuids and current_uuid not in netlist_uuids:
             to_remove.append(fp)
 
     # Step C: apply — remove stale holders first, then commit remaps.
@@ -708,6 +722,68 @@ def update_pcb(netlist_path, lib_path, pcb_path, sections_path=None, short_nets=
 
     # Track which UUIDs already exist in the PCB (built AFTER sig-remap so the
     # remapped UUIDs are what the main loop sees).
+    existing_uuids = {}
+    for fp in board.GetFootprints():
+        if fp.HasFieldByName(CANOPY_UUID_FIELD):
+            existing_uuids[fp.GetFieldText(CANOPY_UUID_FIELD)] = fp
+
+    # Step D: ambiguous-sig fallback. Sig-remap only fires on unique matches,
+    # so identical-signature twins (e.g. 2x 47uF VOUT caps in a buck) are
+    # never touched — and sig-remap's overwriting of one fp can duplicate a
+    # uuid onto two footprints. Here we look for fps whose uuid is bound
+    # elsewhere (via the "canonical" netlist→fp mapping built below) and
+    # rebind them to an unbound netlist twin with a matching signature.
+    # Preserves user placement instead of removing the extra fp and
+    # re-adding the twin at the origin.
+    canonical_fp_for_uuid = {}
+    for u, _nu, _ref, _su in []:  # placeholder so lint is happy; real map below
+        pass
+    # Build canonical map: prefer sig-remap target fp for the claimed uuid.
+    for fp, new_uuid, _nref, _su in remap_plan:
+        canonical_fp_for_uuid[new_uuid] = fp
+    # For remaining uuids, take whatever fp currently holds them.
+    for fp in list(board.GetFootprints()):
+        if not fp.HasFieldByName(CANOPY_UUID_FIELD):
+            continue
+        u = fp.GetFieldText(CANOPY_UUID_FIELD)
+        if u and u not in canonical_fp_for_uuid:
+            canonical_fp_for_uuid[u] = fp
+
+    unbound_nl = [c for c in components if c["uuid"] not in canonical_fp_for_uuid]
+    nl_by_sig = {}
+    for c in unbound_nl:
+        s = _sig(c.get("value", ""), ref_to_nets.get(c["ref"], set()), c["ref"])
+        nl_by_sig.setdefault(s, []).append(c)
+
+    # Orphan = fp whose uuid's canonical owner is some OTHER fp (i.e. duplicate
+    # uuid left behind by sig-remap), or fp whose uuid is not in the netlist.
+    netlist_uuid_set = {c["uuid"] for c in components}
+    orphan_fps_by_sig = {}
+    for fp in list(board.GetFootprints()):
+        if not fp.HasFieldByName(CANOPY_UUID_FIELD):
+            continue
+        u = fp.GetFieldText(CANOPY_UUID_FIELD)
+        if u in netlist_uuid_set and canonical_fp_for_uuid.get(u) is fp:
+            continue  # this fp is the canonical holder — not an orphan
+        stored_nets = [s for s in (fp.GetFieldText(CANOPY_NET_FIELD) if fp.HasFieldByName(CANOPY_NET_FIELD) else "").split(",") if s.strip()]
+        s = _sig(fp.GetValue(), stored_nets, fp.GetReference())
+        orphan_fps_by_sig.setdefault(s, []).append(fp)
+
+    ambig_count = 0
+    for s, fps in orphan_fps_by_sig.items():
+        twins = nl_by_sig.get(s, [])
+        for fp, c in zip(fps, twins):
+            new_uuid = c["uuid"]
+            old_ref = fp.GetReference()
+            set_canopy_uuid(fp, new_uuid)
+            fp.SetReference(c["ref"])
+            canonical_fp_for_uuid[new_uuid] = fp
+            print(f"  Ambig-match: {old_ref} -> {c['ref']} (uuid {new_uuid[:8]}...)")
+            ambig_count += 1
+    if ambig_count:
+        print(f"  Ambig-matched {ambig_count} footprint(s) by shared signature")
+
+    # Rebuild existing_uuids after Step D rebinding.
     existing_uuids = {}
     for fp in board.GetFootprints():
         if fp.HasFieldByName(CANOPY_UUID_FIELD):
