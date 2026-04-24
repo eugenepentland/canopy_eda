@@ -144,6 +144,13 @@ pub fn isSupportSection(sec: env_mod.Section) bool {
 }
 
 pub fn classifyByName(name: []const u8, instances: []const env_mod.Instance) Category {
+    // MCU — detect ahead of everything else so e.g. "STM32N657L0H3Q Core
+    // System" doesn't fall through to the J/P connector heuristic below
+    // just because it embeds a debug-header (J-prefix) instance.
+    if (containsCI(name, "MCU") or containsCI(name, "SoC") or
+        containsCI(name, "CPU") or containsCI(name, "Core System") or
+        containsCI(name, "STM32") or containsCI(name, "ESP32") or
+        containsCI(name, "nRF") or containsCI(name, "Microcontroller")) return .mcu;
     // Power
     if (containsCI(name, "Buck") or containsCI(name, "LDO") or containsCI(name, "Regulator") or
         containsCI(name, "Power") or containsCI(name, "Charger") or containsCI(name, "Converter") or

@@ -130,6 +130,11 @@ CLI-driven electronic design automation for schematic capture using S-expression
 
 Public functions: renderSchematic
 
+## render_svg/draw
+
+- Keeps short pin lists verbatim
+- Collapses four or more pins to an Nx summary
+
 ## render_block
 
 Public functions: renderBlockDiagram
@@ -165,14 +170,11 @@ Public functions: analyze
 
 ## render_system_svg
 
-- Classifies MCU-family components as hub
-- Classifies regulator and converter components as regulation
-- Classifies J and P ref-des connectors as io
-- Classifies remaining U-prefix components as peripheral
-- Omits passive R C L D F ref-des instances
-- Omits testpoint components and TP prefix ref-des
-- Omits mounting hole components and MH prefix ref-des
-- Collapses sub-blocks into a single regulation chip
+- Maps section categories to macro columns
+- Builds one chip per section classified by name
+- Recurses into sub-sections to expose each as its own chip
+- Emits a chip per sub-block classified by its name
+- Falls back to one synthetic chip when a design has no sections
 
 ## review_json
 

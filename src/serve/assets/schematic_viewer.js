@@ -88,7 +88,7 @@
     // Sections
     (SCH_INDEX.sections || []).forEach(function (s) {
       if (s.name.toLowerCase().indexOf(q) !== -1 || (s.description || '').toLowerCase().indexOf(q) !== -1) {
-        push({ kind: 'section', label: s.name, sub: s.description, slug: s.slug });
+        push({ kind: 'section', label: s.name, sub: s.description, slug: s.slug, category: s.category || '' });
       }
     });
     // Components (hubs + passives)
@@ -131,11 +131,18 @@
     }
     var html = '';
     currentResults.forEach(function (r, i) {
-      var typeClass = 't-' + (r.kind === 'section' ? 'sec' : r.kind);
+      var metaLabel, metaClass;
+      if (r.kind === 'section' && r.category) {
+        metaLabel = r.category;
+        metaClass = 'sb-cat cat-' + r.category;
+      } else {
+        metaLabel = r.kind;
+        metaClass = 'sb-result-meta t-' + (r.kind === 'section' ? 'sec' : r.kind);
+      }
       html += '<div class="sb-result' + (i === selectedIdx ? ' selected' : '') + '" data-idx="' + i + '">' +
         '<div class="sb-result-label" title="' + escapeHtml(r.label + (r.sub ? ' — ' + r.sub : '')) + '">' +
         escapeHtml(r.label) + (r.sub ? ' <span class="muted">' + escapeHtml(r.sub) + '</span>' : '') + '</div>' +
-        '<span class="sb-result-meta ' + typeClass + '">' + r.kind + '</span>' +
+        '<span class="' + metaClass + '">' + escapeHtml(metaLabel) + '</span>' +
         '</div>';
     });
     resultsBox.innerHTML = html;
@@ -218,8 +225,11 @@
     }
     var html = '<h4>Sections</h4>';
     SCH_INDEX.sections.forEach(function (s) {
+      var catPill = s.category
+        ? '<span class="sb-cat cat-' + s.category + '">' + escapeHtml(s.category) + '</span>'
+        : '';
       html += '<div class="sb-list-item" data-slug="' + escapeHtml(s.slug) + '">' +
-        '<div class="sb-li-head">' + escapeHtml(s.name) + '</div>';
+        '<div class="sb-li-head">' + catPill + '<span>' + escapeHtml(s.name) + '</span></div>';
       if (s.description) html += '<div class="sb-li-sub">' + escapeHtml(s.description) + '</div>';
       html += '</div>';
     });

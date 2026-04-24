@@ -353,6 +353,39 @@ pub fn pinOrder(a: []const u8, b: []const u8) bool {
 }
 
 /// Escape HTML entities in text content.
+/// Returns the text shown under a pin stub's net name. Keeps the comma-
+/// separated list verbatim when it has ≤3 pins; collapses to "Nx pins"
+/// once there are four or more, so long merged GND/VSS strips fit inside
+/// the hub column. The caller supplies a small stack buffer ("Nx pins"
+/// fits comfortably in 16 bytes).
+pub fn compactPinNumbers(buf: []u8, pin_numbers: []const u8) []const u8 {
+    if (pin_numbers.len == 0) return pin_numbers;
+    var count: usize = 1;
+    for (pin_numbers) |c| {
+        if (c == ',') count += 1;
+    }
+    if (count <= 3) return pin_numbers;
+    return std.fmt.bufPrint(buf, "{d}x pins", .{count}) catch pin_numbers;
+}
+
+// spec: render_svg/draw - Keeps short pin lists verbatim
+test "compactPinNumbers keeps up to three pin ids" {
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("A1", compactPinNumbers(&buf, "A1"));
+    try std.testing.expectEqualStrings("A1,B2", compactPinNumbers(&buf, "A1,B2"));
+    try std.testing.expectEqualStrings("A1,B2,C3", compactPinNumbers(&buf, "A1,B2,C3"));
+}
+
+// spec: render_svg/draw - Collapses four or more pins to an Nx summary
+test "compactPinNumbers collapses long merged-pin stubs" {
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("4x pins", compactPinNumbers(&buf, "A1,B2,C3,D4"));
+    try std.testing.expectEqualStrings(
+        "9x pins",
+        compactPinNumbers(&buf, "A19,F12,H14,N16,P8,P12,P14,W1,W19"),
+    );
+}
+
 pub fn escapeHtml(allocator: Allocator, s: []const u8) ![]const u8 {
     var needs_escape = false;
     for (s) |c| {

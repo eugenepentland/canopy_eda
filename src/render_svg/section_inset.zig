@@ -346,6 +346,11 @@ fn renderPinStub(w: anytype, side: ctx_mod.Side, px: f64, py: f64, group: PinGro
         \\<g class="pin-stub" data-ref="{s}" data-pin="{s}">
         \\
     , .{ hub_ref, group.pin_numbers });
+    // Long GND/VSS chains can have 9+ pins; spelling them all out blows past
+    // the hub's column width, so collapse ≥4 into "Nx pins" for display.
+    // `data-pin` above still carries the full list for click routing.
+    var pin_label_buf: [16]u8 = undefined;
+    const pin_label = draw.compactPinNumbers(&pin_label_buf, group.pin_numbers);
     switch (side) {
         .left => {
             const stub_x = px - pin_stub;
@@ -358,7 +363,7 @@ fn renderPinStub(w: anytype, side: ctx_mod.Side, px: f64, py: f64, group: PinGro
                 stub_x,             py,            px,
                 py,                 px + 8.0,      py + 4.0,
                 group.display_name, stub_x + 38.0, py - 1.0,
-                group.pin_numbers,
+                pin_label,
             });
         },
         .right => {
@@ -372,7 +377,7 @@ fn renderPinStub(w: anytype, side: ctx_mod.Side, px: f64, py: f64, group: PinGro
                 px,                 py,            stub_x,
                 py,                 px - 8.0,      py + 4.0,
                 group.display_name, stub_x - 36.0, py - 1.0,
-                group.pin_numbers,
+                pin_label,
             });
         },
     }

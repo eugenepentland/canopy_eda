@@ -434,15 +434,18 @@ fn renderPinLeft(self: *RenderCtx, w: anytype, hub_ref: []const u8, group: PinGr
     const px = hub_x;
     const stub_x = px - pin_stub;
 
+    var pin_label_buf: [16]u8 = undefined;
+    const pin_label = draw.compactPinNumbers(&pin_label_buf, group.pin_numbers);
+
     try w.print(
         \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#666" stroke-width="1.5"/>
         \\<text x="{d:.1}" y="{d:.1}" font-size="12" fill="#aaa">{s}</text>
         \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="10" fill="#666">{s}</text>
         \\
     , .{
-        stub_x,   py,                px,                 py,
-        px + 8.0, py + 4.0,          group.display_name, stub_x + 38.0,
-        py - 1.0, group.pin_numbers,
+        stub_x,   py,        px,                 py,
+        px + 8.0, py + 4.0,  group.display_name, stub_x + 38.0,
+        py - 1.0, pin_label,
     });
 
     try writeDebugPin(w, stub_x, py);
@@ -454,15 +457,18 @@ fn renderPinRight(self: *RenderCtx, w: anytype, hub_ref: []const u8, group: PinG
     const px = hub_x + hub_width;
     const stub_x = px + pin_stub;
 
+    var pin_label_buf: [16]u8 = undefined;
+    const pin_label = draw.compactPinNumbers(&pin_label_buf, group.pin_numbers);
+
     try w.print(
         \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#666" stroke-width="1.5"/>
         \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="12" fill="#aaa">{s}</text>
         \\<text x="{d:.1}" y="{d:.1}" font-size="10" fill="#666">{s}</text>
         \\
     , .{
-        px,       py,                stub_x,             py,
-        px - 8.0, py + 4.0,          group.display_name, stub_x - 36.0,
-        py - 1.0, group.pin_numbers,
+        px,       py,        stub_x,             py,
+        px - 8.0, py + 4.0,  group.display_name, stub_x - 36.0,
+        py - 1.0, pin_label,
     });
 
     try writeDebugPin(w, stub_x, py);

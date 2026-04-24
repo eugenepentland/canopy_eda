@@ -17,6 +17,7 @@ const hub_mod = @import("render_svg/hub.zig");
 const draw = @import("render_svg/draw.zig");
 const section_inset = @import("render_svg/section_inset.zig");
 const system_svg = @import("render_system_svg.zig");
+const rb = @import("render_block_types.zig");
 const isHub = draw.isHub;
 const pinOrder = draw.pinOrder;
 
@@ -560,12 +561,15 @@ fn writeSearchIndex(
         if (!first) try w.writeAll(",");
         first = false;
         const slug = try review.slugify(allocator, sb.name);
+        const sb_cat = rb.classifyByName(sb.name, sb.block.instances);
         try w.writeAll("{\"slug\":");
         try writeJsString(w, slug);
         try w.writeAll(",\"name\":");
         try writeJsString(w, sb.name);
         try w.writeAll(",\"description\":");
         try writeJsString(w, sb.block.name);
+        try w.writeAll(",\"category\":");
+        try writeJsString(w, @tagName(sb_cat));
         try w.writeAll(",\"hubs\":[");
         try emitHubRefsForBlock(w, sb.block);
         try w.writeAll("]}");
@@ -573,9 +577,12 @@ fn writeSearchIndex(
     if (block.sections.len == 0 and hasTopLevelHubs(block)) {
         if (!first) try w.writeAll(",");
         first = false;
+        const flat_cat = rb.classifyByName(block.name, block.instances);
         try w.writeAll("{\"slug\":\"design\",\"name\":");
         try writeJsString(w, block.name);
-        try w.writeAll(",\"description\":\"\",\"hubs\":[");
+        try w.writeAll(",\"description\":\"\",\"category\":");
+        try writeJsString(w, @tagName(flat_cat));
+        try w.writeAll(",\"hubs\":[");
         try emitHubRefsForBlock(w, block);
         try w.writeAll("]}");
     }
@@ -648,12 +655,15 @@ fn emitSectionEntry(
     if (!first.*) try w.writeAll(",");
     first.* = false;
     const slug = try review.slugify(allocator, sec.name);
+    const cat = rb.classifySection(sec);
     try w.writeAll("{\"slug\":");
     try writeJsString(w, slug);
     try w.writeAll(",\"name\":");
     try writeJsString(w, sec.name);
     try w.writeAll(",\"description\":");
     try writeJsString(w, sec.description);
+    try w.writeAll(",\"category\":");
+    try writeJsString(w, @tagName(cat));
     try w.writeAll(",\"hubs\":[");
     var first_hub = true;
     var seen: std.StringHashMapUnmanaged(void) = .empty;
@@ -861,8 +871,19 @@ const SCHEMATIC_CSS =
     \\.sb-detail .sb-back:hover{text-decoration:underline;}
     \\.sb-list-item{padding:7px 8px;border-bottom:1px solid #21262d;cursor:pointer;border-radius:3px;}
     \\.sb-list-item:hover{background:#1f2937;}
-    \\.sb-list-item .sb-li-head{font-family:"SF Mono",monospace;color:#c9d1d9;}
+    \\.sb-list-item .sb-li-head{font-family:"SF Mono",monospace;color:#c9d1d9;display:flex;align-items:center;gap:8px;}
     \\.sb-list-item .sb-li-sub{color:#8b949e;font-size:0.78rem;margin-top:2px;}
+    \\.sb-cat{display:inline-block;padding:1px 6px;border-radius:8px;font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;line-height:1.4;flex-shrink:0;}
+    \\.sb-cat.cat-mcu{background:rgba(31,111,235,0.18);color:#79c0ff;}
+    \\.sb-cat.cat-power{background:rgba(218,54,51,0.18);color:#f85149;}
+    \\.sb-cat.cat-memory{background:rgba(137,87,229,0.18);color:#b392f0;}
+    \\.sb-cat.cat-peripheral{background:rgba(46,160,67,0.18);color:#56d364;}
+    \\.sb-cat.cat-connector{background:rgba(210,153,34,0.18);color:#e8c547;}
+    \\.sb-cat.cat-clock{background:rgba(68,170,153,0.18);color:#6be6c1;}
+    \\.sb-cat.cat-comms{background:rgba(33,150,243,0.18);color:#79c0ff;}
+    \\.sb-cat.cat-sensor{background:rgba(46,160,67,0.18);color:#56d364;}
+    \\.sb-cat.cat-analog{background:rgba(224,64,251,0.18);color:#e879f9;}
+    \\.sb-cat.cat-protection{background:rgba(139,148,158,0.18);color:#c9d1d9;}
     \\.sb-comp-meta{color:#8b949e;font-size:0.78rem;margin:6px 0 10px;}
     \\.sb-pin-row{padding:5px 4px;border-bottom:1px solid #21262d;font-family:"SF Mono",monospace;font-size:0.78rem;display:grid;grid-template-columns:46px 1fr;gap:6px;cursor:pointer;}
     \\.sb-pin-row:hover{background:#1f2937;}
