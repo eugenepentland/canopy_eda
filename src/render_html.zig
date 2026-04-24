@@ -82,26 +82,40 @@ pub fn renderToHtml(
     try w.writeAll("<div class=\"sch-layout\">");
     try w.writeAll("<div class=\"sch-wrap\">");
     try writeHeader(w, block.name, design_name, status);
-    try system_svg.renderSystemOverviewSvg(allocator, block, w);
 
-    for (block.sections) |sec| try writeSection(&ctx, w, allocator, sec, 0);
+    // Top-of-page overview: block diagram, then the review summary + power/
+    // test-point tables. These are read-only dashboards, so they sit above
+    // the per-section schematics where the user does the detailed work.
+    try system_svg.renderSystemOverviewSvg(allocator, block, w);
+    if (review_doc) |doc| {
+        try w.writeAll("<div class=\"review-embed review-wrap\">");
+        try review_html.writeSummaryTable(w, doc.summary);
+        try review_html.writePowerSequence(w, doc.power_sequence);
+        try review_html.writeTestPoints(w, doc.test_points);
+        try review_html.writePowerBudget(w, doc.power_budget);
+        try w.writeAll("</div>");
+    }
+
+    const rstate: ?review.ReviewState = if (review_doc) |d| d.review_state else null;
+    for (block.sections) |sec| try writeSection(&ctx, w, allocator, sec, 0, rstate);
 
     // Designs without sections (typical of sub-block-only or flat hub+passives
     // designs like power-6v, pma3-14ln) still deserve a rendering. Emit a
     // synthetic card per sub-block, plus one flat card if any hubs live at
     // the top level outside any section.
-    for (block.sub_blocks) |sb| try writeSubBlockCard(&ctx, w, allocator, sb);
+    for (block.sub_blocks) |sb| try writeSubBlockCard(&ctx, w, allocator, sb, rstate);
 
     if (block.sections.len == 0 and hasTopLevelHubs(block)) {
-        try writeFlatHubs(&ctx, w, allocator, block);
+        try writeFlatHubs(&ctx, w, allocator, block, rstate);
     }
 
-    // Review content: summary, power budget, sequencing, test points, ERC
-    // violations, and assertions. Rendered inline below the schematic so a
-    // single page holds both "what it is" and "whether it's correct."
+    // Bottom-of-page audit trail: ERC violations and assertions. Repeated
+    // below the schematic so a reviewer who scrolls through can stamp
+    // approvals and then see the outstanding issues without jumping back.
     if (review_doc) |doc| {
         try w.writeAll("<div class=\"review-embed review-wrap\">");
-        try review_html.renderBodyInto(w, doc);
+        try review_html.writeUnresolved(w, doc.unresolved);
+        try review_html.writeAssertions(w, doc.assertions);
         try w.writeAll("</div>");
     }
 
@@ -213,10 +227,15 @@ fn joinAssertedFns(allocator: Allocator, fns: []const []const u8) ?[]const u8 {
     return buf.toOwnedSlice(allocator) catch null;
 }
 
-fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section, depth: u8) !void {
+fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section, depth: u8, review_state: ?review.ReviewState) !void {
     const indent_class: []const u8 = if (depth == 0) "sch-section" else "sch-section sch-subsection";
     const slug = try review.slugify(allocator, sec.name);
-    try w.print("<section class=\"{s}\" id=\"sec-{s}\">", .{ indent_class, slug });
+    const rs: ?review.SectionReviewState = if (review_state) |state|
+        review_html.findState(state, slug)
+    else
+        null;
+    const approved_class: []const u8 = if (rs) |s| (if (s.approved) " sec-card-approved" else "") else "";
+    try w.print("<section class=\"{s}{s}\" id=\"sec-{s}\" data-slug=\"{s}\">", .{ indent_class, approved_class, slug, slug });
 
     // Header
     const status_pill: []const u8 = switch (sec.status) {
@@ -226,7 +245,9 @@ fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section,
     };
     try w.writeAll("<div class=\"sec-head\"><h2>");
     try writeHtmlEscaped(w, sec.name);
-    try w.print("</h2><span class=\"pill {s}\">{s}</span></div>", .{ status_pill, @tagName(sec.status) });
+    try w.print("</h2><span class=\"pill {s}\">{s}</span>", .{ status_pill, @tagName(sec.status) });
+    if (rs) |s| if (s.approved) try w.writeAll("<span class=\"pill pill-approved\">APPROVED</span>");
+    try w.writeAll("</div>");
 
     if (sec.description.len > 0) {
         try w.writeAll("<p class=\"sec-desc\">");
@@ -266,7 +287,12 @@ fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section,
 
     if (sec.notes.len > 0) try writeNotes(w, sec.notes);
 
-    for (sec.sub_sections) |sub| try writeSection(ctx, w, allocator, sub, depth + 1);
+    for (sec.sub_sections) |sub| try writeSection(ctx, w, allocator, sub, depth + 1, review_state);
+
+    // Approval + checklist widget anchored to this section's slug. The shared
+    // review-state JS handler picks up the `data-slug` on the enclosing card
+    // and POSTs to /api/review-state/:name/...
+    if (rs) |s| try review_html.writeChecklist(w, s);
 
     try w.writeAll("</section>");
 }
@@ -483,12 +509,19 @@ fn writeNotes(w: anytype, notes: []const []const u8) !void {
 /// (tpsm84338 …))`). Lists every hub that the sub-block's DesignBlock declares
 /// and feeds them through the same writeHubCard path. The block's nets are
 /// already flattened into `ctx` via `collectFlat`, so adjacency works.
-fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_mod.SubBlock) !void {
+fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_mod.SubBlock, review_state: ?review.ReviewState) !void {
     const slug = try review.slugify(allocator, sb.name);
-    try w.print("<section class=\"sch-section\" id=\"sec-{s}\">", .{slug});
+    const rs: ?review.SectionReviewState = if (review_state) |state|
+        review_html.findState(state, slug)
+    else
+        null;
+    const approved_class: []const u8 = if (rs) |s| (if (s.approved) " sec-card-approved" else "") else "";
+    try w.print("<section class=\"sch-section{s}\" id=\"sec-{s}\" data-slug=\"{s}\">", .{ approved_class, slug, slug });
     try w.writeAll("<div class=\"sec-head\"><h2>");
     try writeHtmlEscaped(w, sb.name);
-    try w.writeAll("</h2><span class=\"pill pill-ok\">sub-block</span></div>");
+    try w.writeAll("</h2><span class=\"pill pill-ok\">sub-block</span>");
+    if (rs) |s| if (s.approved) try w.writeAll("<span class=\"pill pill-approved\">APPROVED</span>");
+    try w.writeAll("</div>");
     try w.writeAll("<p class=\"sec-desc\">");
     try writeHtmlEscaped(w, sb.block.name);
     try w.writeAll("</p>");
@@ -513,6 +546,8 @@ fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_
 
     try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items);
 
+    if (rs) |s| try review_html.writeChecklist(w, s);
+
     try w.writeAll("</section>");
 }
 
@@ -520,9 +555,15 @@ fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_
 /// `design-block` without any `section` wrapper (e.g. pma3-14ln). Every
 /// hub-prefixed top-level instance becomes its own card inside one synthetic
 /// section.
-fn writeFlatHubs(ctx: *RenderCtx, w: anytype, allocator: Allocator, block: *const DesignBlock) !void {
-    try w.writeAll("<section class=\"sch-section\" id=\"sec-design\"><div class=\"sec-head\"><h2>");
+fn writeFlatHubs(ctx: *RenderCtx, w: anytype, allocator: Allocator, block: *const DesignBlock, review_state: ?review.ReviewState) !void {
+    const rs: ?review.SectionReviewState = if (review_state) |state|
+        review_html.findState(state, "design")
+    else
+        null;
+    const approved_class: []const u8 = if (rs) |s| (if (s.approved) " sec-card-approved" else "") else "";
+    try w.print("<section class=\"sch-section{s}\" id=\"sec-design\" data-slug=\"design\"><div class=\"sec-head\"><h2>", .{approved_class});
     try writeHtmlEscaped(w, block.name);
+    if (rs) |s| if (s.approved) try w.writeAll("<span class=\"pill pill-approved\">APPROVED</span>");
     try w.writeAll("</h2></div>");
 
     var hub_refs: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -544,6 +585,8 @@ fn writeFlatHubs(ctx: *RenderCtx, w: anytype, allocator: Allocator, block: *cons
     }
 
     try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items);
+
+    if (rs) |s| try review_html.writeChecklist(w, s);
 
     try w.writeAll("</section>");
 }
@@ -988,6 +1031,14 @@ const SCHEMATIC_CSS =
     \\.sb-pinout-net{color:#e8c547;margin-left:auto;font-size:0.74rem;}
     \\.sb-pinout-alts{margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;}
     \\.sb-pinout-alt{color:#d2a8ff;background:rgba(210,168,255,0.1);padding:1px 5px;border-radius:3px;font-size:0.72rem;}
+    \\.sb-datasheet{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:6px 0 10px;padding:8px 10px;background:#0d1117;border:1px solid #21262d;border-radius:5px;font-size:0.8rem;}
+    \\.sb-ds-view{color:#58a6ff;text-decoration:none;}
+    \\.sb-ds-view:hover{text-decoration:underline;}
+    \\.sb-ds-upload,.sb-ds-replace{color:#c9d1d9;cursor:pointer;padding:3px 8px;background:#21262d;border:1px solid #30363d;border-radius:4px;}
+    \\.sb-ds-upload:hover,.sb-ds-replace:hover{border-color:#58a6ff;}
+    \\.sb-ds-status{width:100%;font-size:0.74rem;color:#8b949e;font-family:"SF Mono",monospace;}
+    \\.sb-ds-status.ok{color:#3fb950;}
+    \\.sb-ds-status.err{color:#f85149;}
     \\.sb-empty{color:#6e7681;font-style:italic;}
     \\.erc-ok{color:#3fb950;padding:8px 0;font-size:0.85rem;}
     \\.erc-group-head{margin:10px 0 4px;font-weight:600;font-size:0.78rem;text-transform:uppercase;letter-spacing:0.04em;}

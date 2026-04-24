@@ -375,6 +375,19 @@
       var html = '<span class="sb-back" data-back-ref="' + (fromRef ? escapeHtml(fromRef) : '') + '">← ' +
         (fromRef ? escapeHtml(fromRef) : 'Back') + '</span>' +
         '<h4>' + escapeHtml(componentName) + ' pinout</h4>';
+      // Datasheet strip sits under the title, always visible. When a PDF
+      // is already uploaded we show a "View" link; otherwise an upload
+      // prompt that posts the raw file to /api/datasheet/<component>.
+      var safe = escapeHtml(componentName);
+      var hasDs = data && data.has_datasheet;
+      html += '<div class="sb-datasheet" data-component="' + safe + '">';
+      if (hasDs) {
+        html += '<a class="sb-ds-view" href="/api/datasheet/' + encodeURIComponent(componentName) + '" target="_blank" rel="noopener">📄 View datasheet (PDF)</a>' +
+          '<label class="sb-ds-replace">Replace<input type="file" accept="application/pdf" class="sb-ds-file" hidden></label>';
+      } else {
+        html += '<label class="sb-ds-upload">📄 Upload datasheet (PDF)<input type="file" accept="application/pdf" class="sb-ds-file" hidden></label>';
+      }
+      html += '<div class="sb-ds-status" aria-live="polite"></div></div>';
       if (error) {
         html += '<div class="sb-empty">' + escapeHtml(error) + '</div>';
       } else if (!data || !data.pins || !data.pins.length) {
@@ -430,6 +443,44 @@
           var q = filter.value.trim().toLowerCase();
           detailBox.querySelectorAll('.sb-pinout-row').forEach(function (row) {
             row.style.display = (!q || row.dataset.hay.indexOf(q) !== -1) ? '' : 'none';
+          });
+        });
+      }
+      // Datasheet upload: the PDF is POSTed as the raw request body so the
+      // server can dump it straight to lib/datasheets/<component>.pdf with
+      // no multipart parsing. On success we invalidate the cache so the
+      // panel refreshes with the new "View" link.
+      var dsFile = detailBox.querySelector('.sb-ds-file');
+      var dsStatus = detailBox.querySelector('.sb-ds-status');
+      if (dsFile) {
+        dsFile.addEventListener('change', function () {
+          var file = dsFile.files && dsFile.files[0];
+          if (!file) return;
+          if (file.size > 64 * 1024 * 1024) {
+            dsStatus.textContent = 'File too large (limit 64MB).';
+            dsStatus.className = 'sb-ds-status err';
+            return;
+          }
+          dsStatus.textContent = 'Uploading ' + file.name + '…';
+          dsStatus.className = 'sb-ds-status';
+          fetch('/api/datasheet/' + encodeURIComponent(componentName), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/pdf' },
+            body: file,
+          }).then(function (r) { return r.json(); }).then(function (j) {
+            if (j.ok) {
+              dsStatus.textContent = 'Uploaded (' + j.bytes + ' bytes).';
+              dsStatus.className = 'sb-ds-status ok';
+              delete pinoutCache[componentName];
+              // Re-render after a short pause so the user sees the status.
+              setTimeout(function () { showPinout(componentName, fromRef); }, 700);
+            } else {
+              dsStatus.textContent = 'Error: ' + (j.error || 'upload failed');
+              dsStatus.className = 'sb-ds-status err';
+            }
+          }).catch(function (e) {
+            dsStatus.textContent = 'Error: ' + e;
+            dsStatus.className = 'sb-ds-status err';
           });
         });
       }

@@ -93,7 +93,7 @@ fn writeHeader(w: anytype, doc: review.ReviewDoc) !void {
     try w.writeAll("</header>");
 }
 
-fn writeSummaryTable(w: anytype, s: review.Summary) !void {
+pub fn writeSummaryTable(w: anytype, s: review.Summary) !void {
     try w.writeAll("<section><h2>Summary</h2><table class=\"summary\">");
     try w.print(
         "<tr><th>Sections</th><td>{d}</td><th>Components</th><td>{d}</td><th>Nets</th><td>{d}</td></tr>",
@@ -122,7 +122,7 @@ fn writeSummaryTable(w: anytype, s: review.Summary) !void {
     try w.writeAll("</table></section>");
 }
 
-fn writePowerBudget(w: anytype, rails: []const power_budget.Rail) !void {
+pub fn writePowerBudget(w: anytype, rails: []const power_budget.Rail) !void {
     if (rails.len == 0) return;
     try w.writeAll("<section><h2>Power budget</h2>");
     try w.writeAll("<p class=\"hint\">Rails sorted tightest first. Ferrite beads merge into upstream rails. Click a rail to see which components land on it.</p>");
@@ -207,7 +207,7 @@ fn statusLabel(s: power_budget.RailStatus) []const u8 {
     };
 }
 
-fn writePowerSequence(w: anytype, rows: []const power_sequencing.SequenceRow) !void {
+pub fn writePowerSequence(w: anytype, rows: []const power_sequencing.SequenceRow) !void {
     if (rows.len == 0) return;
     try w.writeAll("<section><h2>Power sequencing</h2>");
     try w.writeAll("<p class=\"hint\">Rails ordered top-down by power-up sequence. A rail's <code>enable</code> net must be stable before that rail comes up. Always-on rails have no enable and power up first.</p>");
@@ -255,7 +255,7 @@ fn sequenceLabel(s: power_sequencing.SequenceStatus) []const u8 {
     };
 }
 
-fn writeTestPoints(w: anytype, tps: []const review.TestPointEntry) !void {
+pub fn writeTestPoints(w: anytype, tps: []const review.TestPointEntry) !void {
     if (tps.len == 0) return;
     try w.writeAll("<section><h2>Test points</h2>");
     try w.writeAll("<p class=\"hint\">Physical probe pads on the board. Keep this list next to a multimeter when bringing up hardware.</p>");
@@ -282,7 +282,7 @@ fn writeTestPoints(w: anytype, tps: []const review.TestPointEntry) !void {
     try w.writeAll("</tbody></table></section>");
 }
 
-fn writeUnresolved(w: anytype, vs: []const erc_mod.Violation) !void {
+pub fn writeUnresolved(w: anytype, vs: []const erc_mod.Violation) !void {
     if (vs.len == 0) {
         try w.writeAll("<section><h2>Unresolved issues</h2><p class=\"hint\">No errors or warnings — clean build.</p></section>");
         return;
@@ -395,7 +395,7 @@ fn writeSections(w: anytype, sections: []const review.SectionReport, state: revi
     try w.writeAll("</section>");
 }
 
-fn writeChecklist(w: anytype, rs: review.SectionReviewState) !void {
+pub fn writeChecklist(w: anytype, rs: review.SectionReviewState) !void {
     const checked_count = countChecked(rs.items);
     try w.writeAll("<details class=\"sec-checklist\" open><summary>Review checklist");
     try w.print(" <span class=\"chk-progress\">({d}/{d})</span>", .{ checked_count, rs.items.len });
@@ -441,7 +441,7 @@ fn writeChecklist(w: anytype, rs: review.SectionReviewState) !void {
     try w.writeAll("</div></details>");
 }
 
-fn findState(state: review.ReviewState, slug: []const u8) review.SectionReviewState {
+pub fn findState(state: review.ReviewState, slug: []const u8) review.SectionReviewState {
     for (state.sections) |s| {
         if (std.mem.eql(u8, s.section_slug, slug)) return s;
     }
@@ -456,7 +456,7 @@ fn countChecked(items: []const review.ChecklistItem) usize {
     return n;
 }
 
-fn writeAssertions(w: anytype, assertions: []const review.AssertionReport) !void {
+pub fn writeAssertions(w: anytype, assertions: []const review.AssertionReport) !void {
     if (assertions.len == 0) return;
     try w.writeAll("<section><h2>Assertions</h2>");
     try w.writeAll("<table><thead><tr><th>Status</th><th>Message</th></tr></thead><tbody>");
@@ -629,7 +629,7 @@ const CHECKLIST_JS =
     \\      .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r;});
     \\  }
     \\  function base(){return '/api/review-state/'+encodeURIComponent(DESIGN_NAME);}
-    \\  function sectionSlug(el){var c=el.closest('.sec-card');return c?c.getAttribute('data-slug'):null;}
+    \\  function sectionSlug(el){var c=el.closest('[data-slug]');return c?c.getAttribute('data-slug'):null;}
     \\  document.addEventListener('change',function(e){
     \\    if(!e.target.classList.contains('chk-box'))return;
     \\    var slug=sectionSlug(e.target);

@@ -145,11 +145,21 @@ pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void
         return;
     };
 
+    // Check for an uploaded datasheet PDF so the pinout panel can decide
+    // whether to show a "View datasheet" link or an upload prompt.
+    const datasheet_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/datasheets/{s}.pdf", .{ ctx.project_dir, name });
+    defer ctx.allocator.free(datasheet_path);
+    const has_datasheet = blk: {
+        std.fs.cwd().access(datasheet_path, .{}) catch break :blk false;
+        break :blk true;
+    };
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(ctx.allocator);
 
     try w.writeAll("{\"component\":");
     try writeJsonString(w, name);
+    try w.print(",\"has_datasheet\":{s}", .{if (has_datasheet) "true" else "false"});
     try w.writeAll(",\"pins\":[");
 
     var first_pin = true;
@@ -204,6 +214,91 @@ pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void
 
     res.content_type = .JSON;
     res.header("access-control-allow-origin", "*");
+    res.body = buf.items;
+}
+
+/// Serve an uploaded datasheet PDF (`lib/datasheets/<component>.pdf`). The
+/// pinout panel links here so the user can cross-check pin assignments
+/// against the real datasheet without leaving the schematic page.
+pub fn datasheetGetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    if (name.len == 0 or std.mem.indexOfAny(u8, name, "/\\") != null or std.mem.indexOf(u8, name, "..") != null) {
+        res.status = 400;
+        res.body = "invalid component name";
+        return;
+    }
+    const path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/datasheets/{s}.pdf", .{ ctx.project_dir, name });
+    defer ctx.allocator.free(path);
+    const data = std.fs.cwd().readFileAlloc(ctx.allocator, path, 64 * 1024 * 1024) catch {
+        res.status = 404;
+        res.body = "datasheet not found";
+        return;
+    };
+    const disposition = try std.fmt.allocPrint(ctx.allocator, "inline; filename=\"{s}.pdf\"", .{name});
+    res.header("Content-Type", "application/pdf");
+    res.header("Content-Disposition", disposition);
+    res.body = data;
+}
+
+/// Accept a raw PDF body and store it at `lib/datasheets/<component>.pdf`,
+/// creating the directory if needed. Overwrites any existing datasheet
+/// for that component. The browser sends the PDF via fetch's `body` so
+/// the whole request body is the file content — no multipart parsing.
+pub fn datasheetUploadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    if (name.len == 0 or std.mem.indexOfAny(u8, name, "/\\") != null or std.mem.indexOf(u8, name, "..") != null) {
+        res.status = 400;
+        res.content_type = .JSON;
+        res.body = "{\"ok\":false,\"error\":\"invalid component name\"}";
+        return;
+    }
+    const body = req.body() orelse {
+        res.status = 400;
+        res.content_type = .JSON;
+        res.body = "{\"ok\":false,\"error\":\"empty upload\"}";
+        return;
+    };
+    // Reject anything that doesn't look like a PDF — stray uploads would
+    // otherwise happily overwrite a valid file with junk.
+    if (body.len < 4 or !std.mem.eql(u8, body[0..4], "%PDF")) {
+        res.status = 400;
+        res.content_type = .JSON;
+        res.body = "{\"ok\":false,\"error\":\"not a PDF (missing %PDF header)\"}";
+        return;
+    }
+
+    const dir = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/datasheets", .{ctx.project_dir});
+    defer ctx.allocator.free(dir);
+    std.fs.cwd().makePath(dir) catch {};
+
+    const path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.pdf", .{ dir, name });
+    defer ctx.allocator.free(path);
+    const f = std.fs.cwd().createFile(path, .{ .truncate = true }) catch {
+        res.status = 500;
+        res.content_type = .JSON;
+        res.body = "{\"ok\":false,\"error\":\"write failed\"}";
+        return;
+    };
+    defer f.close();
+    f.writeAll(body) catch {
+        res.status = 500;
+        res.content_type = .JSON;
+        res.body = "{\"ok\":false,\"error\":\"write failed\"}";
+        return;
+    };
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(ctx.allocator);
+    try w.writeAll("{\"ok\":true,\"component\":");
+    try writeJsonString(w, name);
+    try w.print(",\"bytes\":{d}}}", .{body.len});
+    res.content_type = .JSON;
     res.body = buf.items;
 }
 

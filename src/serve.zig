@@ -102,7 +102,9 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     var server = try httpz.Server(*Handler).init(allocator, .{
         .address = .all(port),
         .request = .{
-            .max_body_size = 10 * 1024 * 1024,
+            // 64 MiB so datasheet PDFs and large KiCad zips fit. Individual
+            // endpoints re-validate their own per-request limits.
+            .max_body_size = 64 * 1024 * 1024,
             .buffer_size = 256 * 1024,
             .max_header_count = 64,
             .max_form_count = 16,
@@ -182,6 +184,8 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     router.get("/api/scene-graph/:name", api.sceneGraphApi, .{});
     router.get("/api/block-diagram-json/:name", api.blockDiagramJsonApi, .{});
     router.get("/api/pinout/:name", api.pinoutApi, .{});
+    router.get("/api/datasheet/:name", api.datasheetGetApi, .{});
+    router.post("/api/datasheet/:name", api.datasheetUploadApi, .{});
 
     // Edit
     router.post("/api/edit-value/:name", edit.editValueApi, .{});
