@@ -242,29 +242,31 @@ fn isSinglePassiveToTerminal(
     return chain.chain.len == 0 and chain.branches.len == 0;
 }
 
-/// Render a standalone `<svg>` showing `hub` with only its spoke groups drawn.
-/// Layout mirrors `hub.renderHub` but scoped to the supplied group list.
-/// Returns without writing anything if `spoke_groups` is empty.
-pub fn renderHubInset(
+/// Render a standalone `<svg>` showing `hub` with the supplied pin groups
+/// drawn balanced left/right. Layout mirrors `hub.renderHub`. Returns without
+/// writing anything if `groups` is empty. Identical-spoke runs (e.g. five
+/// 100nF caps to the same VDD/GND terminal) are collapsed visually via
+/// `applyMergeAnnotations` before drawing.
+pub fn renderHubAllPins(
     ctx: *RenderCtx,
     w: anytype,
     hub: FlatInst,
-    spoke_groups: []const PinGroup,
+    groups: []const PinGroup,
 ) !void {
-    if (spoke_groups.len == 0) return;
+    if (groups.len == 0) return;
 
     var saved: std.ArrayListUnmanaged(Saved) = .empty;
     defer {
         restoreInstMap(ctx, saved.items);
         saved.deinit(ctx.allocator);
     }
-    try applyMergeAnnotations(ctx, hub.ref_des, spoke_groups, &saved);
+    try applyMergeAnnotations(ctx, hub.ref_des, groups, &saved);
 
     var left_list: std.ArrayListUnmanaged(PinGroup) = .empty;
     var right_list: std.ArrayListUnmanaged(PinGroup) = .empty;
     var left_pc: usize = 0;
     var right_pc: usize = 0;
-    for (spoke_groups) |g| {
+    for (groups) |g| {
         var n: usize = 0;
         var it = std.mem.splitScalar(u8, g.pin_numbers, ',');
         while (it.next()) |_| n += 1;
@@ -319,7 +321,7 @@ pub fn renderHubInset(
     for (left_groups, 0..) |group, gi| {
         const h = left_heights[gi];
         const cy = py_left + h / 2.0;
-        try renderPinStub(w, .left, hub_x, cy, group);
+        try renderPinStub(w, .left, hub_x, cy, group, hub.ref_des);
         try connection.renderGroupedConnections(ctx, w, hub.ref_des, group, hub_x - pin_stub, cy, .left);
         py_left += h;
     }
@@ -328,7 +330,7 @@ pub fn renderHubInset(
     for (right_groups, 0..) |group, gi| {
         const h = right_heights[gi];
         const cy = py_right + h / 2.0;
-        try renderPinStub(w, .right, hub_x + hub_width, cy, group);
+        try renderPinStub(w, .right, hub_x + hub_width, cy, group, hub.ref_des);
         try connection.renderGroupedConnections(ctx, w, hub.ref_des, group, hub_x + hub_width + pin_stub, cy, .right);
         py_right += h;
     }
@@ -336,7 +338,14 @@ pub fn renderHubInset(
     try w.writeAll("</svg>");
 }
 
-fn renderPinStub(w: anytype, side: ctx_mod.Side, px: f64, py: f64, group: PinGroup) !void {
+fn renderPinStub(w: anytype, side: ctx_mod.Side, px: f64, py: f64, group: PinGroup, hub_ref: []const u8) !void {
+    // Wrap the stub in a <g class="pin-stub"> with data-ref/data-pin so the
+    // sidebar can scrollIntoView() to a specific pin and attach hover/click
+    // behavior. Pin numbers stay comma-separated; the JS splits as needed.
+    try w.print(
+        \\<g class="pin-stub" data-ref="{s}" data-pin="{s}">
+        \\
+    , .{ hub_ref, group.pin_numbers });
     switch (side) {
         .left => {
             const stub_x = px - pin_stub;
@@ -367,4 +376,5 @@ fn renderPinStub(w: anytype, side: ctx_mod.Side, px: f64, py: f64, group: PinGro
             });
         },
     }
+    try w.writeAll("</g>\n");
 }
