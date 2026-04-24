@@ -129,6 +129,25 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
     try w.writeAll(".sexp</code></div></div>");
     try w.print("<div class=\"{s}\">{s}</div>", .{ banner_class, banner_label });
     try w.writeAll("<div class=\"head-links\">");
+    try w.writeAll("<button class=\"head-link head-btn\" id=\"erc-btn\" type=\"button\">ERC</button>");
+    try w.writeAll("<div class=\"kicad-menu\">");
+    try w.writeAll("<button class=\"head-link head-btn\" id=\"kicad-btn\" type=\"button\">KiCad \u{25BE}</button>");
+    try w.writeAll("<div class=\"kicad-panel\" id=\"kicad-panel\">");
+    try w.print("<button class=\"kicad-row-btn\" onclick=\"window.location='/api/export-netlist/{s}'\">Download Netlist (.net)</button>", .{design_name});
+    try w.print("<button class=\"kicad-row-btn\" onclick=\"window.location='/api/export-kicad/{s}'\">Download Netlist + Footprints (.zip)</button>", .{design_name});
+    try w.writeAll("<div class=\"kicad-sep\"></div>");
+    try w.writeAll("<label class=\"kicad-label\">Output directory</label>");
+    try w.writeAll("<input type=\"text\" class=\"kicad-input\" id=\"kicad-path\" placeholder=\"/path/to/kicad/project\" />");
+    try w.writeAll("<label class=\"kicad-label\">.kicad_pcb file (optional)</label>");
+    try w.writeAll("<input type=\"text\" class=\"kicad-input\" id=\"kicad-pcb-file\" placeholder=\"defaults to {output_dir}/{name}.kicad_pcb\" />");
+    try w.writeAll("<button class=\"kicad-row-btn\" id=\"kicad-save-path\">Save settings</button>");
+    try w.writeAll("<div class=\"kicad-sep\"></div>");
+    try w.writeAll("<button class=\"kicad-row-btn\" id=\"kicad-write-netlist\">Write netlist to path</button>");
+    try w.writeAll("<button class=\"kicad-row-btn\" id=\"kicad-write-kicad\">Write netlist + footprints to path</button>");
+    try w.writeAll("<label class=\"kicad-check\"><input type=\"checkbox\" id=\"kicad-short-nets\" /> Shorten net names (.kicad_pcb update)</label>");
+    try w.writeAll("<button class=\"kicad-row-btn kicad-primary\" id=\"kicad-update-pcb\">Update KiCad PCB (pcb_update.py)</button>");
+    try w.writeAll("<div class=\"kicad-status\" id=\"kicad-status\"></div>");
+    try w.writeAll("</div></div>");
     try w.print("<a class=\"head-link\" href=\"/pcb/{s}\">PCB</a>", .{design_name});
     try w.print("<a class=\"head-link\" href=\"/review/{s}\">Review</a>", .{design_name});
     try w.print("<a class=\"head-link\" href=\"/schematics/{s}/canvas\">Canvas (legacy)</a>", .{design_name});
@@ -826,9 +845,29 @@ const SCHEMATIC_CSS =
     \\.banner-pass{background:#0d3a1f;color:#3fb950;border:1px solid #1e5631;}
     \\.banner-warn{background:#3a2e0d;color:#d29922;border:1px solid #5b4617;}
     \\.banner-fail{background:#3a0d16;color:#f85149;border:1px solid #5b1e28;}
-    \\.head-links{grid-column:1/-1;display:flex;gap:8px;margin-top:8px;}
+    \\.head-links{grid-column:1/-1;display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap;}
     \\.head-link{padding:5px 12px;border:1px solid #30363d;border-radius:5px;color:#8b949e;font-size:0.85rem;}
     \\.head-link:hover{border-color:#58a6ff;color:#c9d1d9;text-decoration:none;}
+    \\.head-btn{background:transparent;font-family:inherit;cursor:pointer;}
+    \\.head-btn:hover{border-color:#58a6ff;color:#c9d1d9;}
+    \\#erc-btn.erc-pass{border-color:#2ea043;color:#3fb950;}
+    \\#erc-btn.erc-warn{border-color:#d29922;color:#d29922;}
+    \\#erc-btn.erc-err{border-color:#da3633;color:#f85149;}
+    \\.kicad-menu{position:relative;}
+    \\.kicad-panel{display:none;position:absolute;top:calc(100% + 6px);left:0;z-index:50;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px;width:340px;box-shadow:0 8px 24px rgba(0,0,0,0.6);}
+    \\.kicad-menu.open .kicad-panel{display:block;}
+    \\.kicad-row-btn{display:block;width:100%;text-align:left;padding:6px 10px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;font-size:0.8rem;font-family:inherit;cursor:pointer;margin-bottom:6px;}
+    \\.kicad-row-btn:hover{background:#30363d;border-color:#58a6ff;}
+    \\.kicad-row-btn.kicad-primary{background:#1f6feb;border-color:#388bfd;color:#fff;margin-top:4px;}
+    \\.kicad-row-btn.kicad-primary:hover{background:#388bfd;}
+    \\.kicad-label{display:block;color:#8b949e;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;margin:6px 0 3px;}
+    \\.kicad-input{width:100%;box-sizing:border-box;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:5px 8px;font-size:0.78rem;font-family:inherit;margin-bottom:4px;}
+    \\.kicad-input:focus{outline:none;border-color:#58a6ff;}
+    \\.kicad-check{display:flex;align-items:center;gap:6px;color:#c9d1d9;font-size:0.78rem;margin:4px 0 6px;}
+    \\.kicad-sep{height:1px;background:#21262d;margin:8px 0;}
+    \\.kicad-status{margin-top:6px;padding:6px 8px;border-radius:4px;font-size:0.74rem;white-space:pre-wrap;font-family:"SF Mono",monospace;color:#8b949e;}
+    \\.kicad-status.ok{background:rgba(63,185,80,0.1);color:#3fb950;}
+    \\.kicad-status.err{background:rgba(248,81,73,0.1);color:#f85149;}
     \\.sch-section{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:14px 16px;margin-bottom:16px;}
     \\.sch-subsection{margin-left:14px;margin-top:12px;background:#12161d;}
     \\.sch-section.flash,.sch-hub.flash{outline:2px solid #58a6ff;outline-offset:-2px;transition:outline-color .25s;}
@@ -932,5 +971,17 @@ const SCHEMATIC_CSS =
     \\.sb-pinout-alts{margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;}
     \\.sb-pinout-alt{color:#d2a8ff;background:rgba(210,168,255,0.1);padding:1px 5px;border-radius:3px;font-size:0.72rem;}
     \\.sb-empty{color:#6e7681;font-style:italic;}
+    \\.erc-ok{color:#3fb950;padding:8px 0;font-size:0.85rem;}
+    \\.erc-group-head{margin:10px 0 4px;font-weight:600;font-size:0.78rem;text-transform:uppercase;letter-spacing:0.04em;}
+    \\.erc-group-head.err{color:#f85149;}
+    \\.erc-group-head.warn{color:#d29922;}
+    \\.erc-group-head.info{color:#58a6ff;}
+    \\.erc-item{padding:6px 8px;border-radius:4px;font-size:0.78rem;margin-bottom:4px;border-left:3px solid transparent;}
+    \\.erc-item.erc-err{color:#f85149;background:rgba(248,81,73,0.08);border-left-color:#da3633;}
+    \\.erc-item.erc-warn{color:#d29922;background:rgba(210,153,34,0.08);border-left-color:#d29922;}
+    \\.erc-item.erc-info{color:#58a6ff;background:rgba(88,166,255,0.08);border-left-color:#58a6ff;}
+    \\.erc-item[data-nav-ref],.erc-item[data-nav-net]{cursor:pointer;}
+    \\.erc-item[data-nav-ref]:hover,.erc-item[data-nav-net]:hover{filter:brightness(1.2);}
+    \\.erc-tag{color:#8b949e;font-size:0.72rem;font-family:"SF Mono",monospace;}
     \\@media(max-width:900px){.sch-layout{grid-template-columns:1fr;}.sch-sidebar{position:static;height:auto;max-height:50vh;border-left:none;border-top:1px solid #30363d;}}
 ++ system_svg.SYSTEM_OVERVIEW_CSS;
