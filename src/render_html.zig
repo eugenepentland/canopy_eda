@@ -74,24 +74,26 @@ pub fn renderToHtml(
     try w.writeAll("</style></head><body>");
 
     try writeNavbar(w);
+    try w.writeAll("<div class=\"sch-layout\">");
     try w.writeAll("<div class=\"sch-wrap\">");
     try writeHeader(w, block.name, design_name, status);
-    try writeToolbar(w, design_name);
 
-    for (block.sections) |sec| try writeSection(&ctx, w, allocator, sec, 0, &asserted_fns);
+    for (block.sections) |sec| try writeSection(&ctx, w, allocator, sec, 0);
 
     // Designs without sections (typical of sub-block-only or flat hub+passives
     // designs like power-6v, pma3-14ln) still deserve a rendering. Emit a
     // synthetic card per sub-block, plus one flat card if any hubs live at
     // the top level outside any section.
-    for (block.sub_blocks) |sb| try writeSubBlockCard(&ctx, w, allocator, sb, &asserted_fns);
+    for (block.sub_blocks) |sb| try writeSubBlockCard(&ctx, w, allocator, sb);
 
     if (block.sections.len == 0 and hasTopLevelHubs(block)) {
-        try writeFlatHubs(&ctx, w, allocator, block, &asserted_fns);
+        try writeFlatHubs(&ctx, w, allocator, block);
     }
 
     try w.writeAll("</div>");
-    try writeScripts(w, design_name);
+    try writeSidebar(w);
+    try w.writeAll("</div>");
+    try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns);
     try w.writeAll("</body></html>");
 
     return buf.items;
@@ -132,12 +134,16 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
     try w.writeAll("</div></header>");
 }
 
-fn writeToolbar(w: anytype, design_name: []const u8) !void {
-    _ = design_name;
-    try w.writeAll("<div class=\"sch-tools\">");
-    try w.writeAll("<input type=\"search\" id=\"sch-search\" placeholder=\"Search ref, net, or pin…\" autocomplete=\"off\">");
-    try w.writeAll("<button type=\"button\" id=\"sch-clear-hl\" class=\"tool-btn\">Clear highlight</button>");
-    try w.writeAll("</div>");
+fn writeSidebar(w: anytype) !void {
+    try w.writeAll(
+        \\<aside class="sch-sidebar" id="sch-sidebar">
+        \\<div class="sb-search">
+        \\<input type="search" id="sch-search" placeholder="Search net, ref, pin…" autocomplete="off" spellcheck="false">
+        \\<div id="sb-results" class="sb-results"></div>
+        \\</div>
+        \\<div id="sb-detail" class="sb-detail"></div>
+        \\</aside>
+    );
 }
 
 /// Build a map of (ref_des|pin_id) -> asserted alt-function name (e.g. "SPI4_SCK")
@@ -153,17 +159,7 @@ fn appendAssertedFromBlock(allocator: Allocator, map: *std.StringHashMapUnmanage
     for (block.sub_blocks) |sb| appendAssertedFromBlock(allocator, map, sb.block);
 }
 
-/// Look up the asserted alt-function for a single-pin group. Returns empty when
-/// the group has multiple pins (multi-pin decls can't carry `(as ...)`) or no
-/// override was declared.
-fn altFnFor(ref_des: []const u8, g: PinGroup, asserted_fns: *const std.StringHashMapUnmanaged([]const u8), allocator: Allocator) []const u8 {
-    if (std.mem.indexOfScalar(u8, g.pin_numbers, ',')) |_| return "";
-    const key = std.fmt.allocPrint(allocator, "{s}|{s}", .{ ref_des, g.pin_numbers }) catch return "";
-    defer allocator.free(key);
-    return asserted_fns.get(key) orelse "";
-}
-
-fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section, depth: u8, asserted_fns: *const std.StringHashMapUnmanaged([]const u8)) !void {
+fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section, depth: u8) !void {
     const indent_class: []const u8 = if (depth == 0) "sch-section" else "sch-section sch-subsection";
     const slug = try review.slugify(allocator, sec.name);
     try w.print("<section class=\"{s}\" id=\"sec-{s}\">", .{ indent_class, slug });
@@ -212,11 +208,11 @@ fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section,
         try hub_refs.append(allocator, inst.ref_des);
     }
 
-    try writeSectionHubs(ctx, w, allocator, sec.pin_groups, hub_refs.items, asserted_fns);
+    try writeSectionHubs(ctx, w, allocator, sec.pin_groups, hub_refs.items);
 
     if (sec.notes.len > 0) try writeNotes(w, sec.notes);
 
-    for (sec.sub_sections) |sub| try writeSection(ctx, w, allocator, sub, depth + 1, asserted_fns);
+    for (sec.sub_sections) |sub| try writeSection(ctx, w, allocator, sub, depth + 1);
 
     try w.writeAll("</section>");
 }
@@ -224,179 +220,53 @@ fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section,
 const HubAnalysis = struct {
     ref: []const u8,
     inst: FlatInst,
-    direct: []const PinGroup,
-    spoke: []const PinGroup,
+    /// Every pin-group on this hub, tagged with its `(group "label")` feature
+    /// label (empty when no label was declared). Rendered as one SVG per
+    /// distinct label so the visual structure mirrors the source.
+    groups: []const PinGroup,
 };
 
-/// Render every hub in a section inside a single card: all spoke SVGs stacked
-/// at the top, one master pin-table below. Each hub with direct pins contributes
-/// a Pin/Function column pair to the table; each row is one unique net across
-/// the section. Hubs with only spokes (no direct rows) appear only in the SVG.
+/// Render every hub in a section as its own card. Each card shows the hub's
+/// header (ref + component + value) followed by one SVG per `(group "label")`
+/// feature block. The SVGs draw every pin connection — passive chains for
+/// dedicated spokes and labeled net stubs for everything else — so the page
+/// no longer needs a master pin-table to surface hub-to-net relationships.
+/// Search and inspection of nets/components/pins live in the sidebar.
 fn writeSectionHubs(
     ctx: *RenderCtx,
     w: anytype,
     allocator: Allocator,
     pin_groups: []const env_mod.PinGroup,
     hub_refs: []const []const u8,
-    asserted_fns: *const std.StringHashMapUnmanaged([]const u8),
 ) !void {
-    var analyses: std.ArrayListUnmanaged(HubAnalysis) = .empty;
-    defer analyses.deinit(allocator);
-
     for (hub_refs) |hub_ref| {
         if (try analyzeHub(ctx, allocator, pin_groups, hub_ref)) |a| {
-            try analyses.append(allocator, a);
+            try writeHubCard(ctx, w, allocator, a);
         }
     }
-    if (analyses.items.len == 0) return;
-
-    try writeUnifiedCard(ctx, w, allocator, analyses.items, asserted_fns);
 }
 
-const Cell = struct {
-    pins: []const u8 = "",
-    fn_name: []const u8 = "",
-    alt: []const u8 = "",
-};
-
-const MasterRow = struct {
-    group: []const u8,
-    net: []const u8,
-    cells: []Cell,
-};
-
-fn writeUnifiedCard(
-    ctx: *RenderCtx,
-    w: anytype,
-    allocator: Allocator,
-    hubs: []const HubAnalysis,
-    asserted_fns: *const std.StringHashMapUnmanaged([]const u8),
-) !void {
-    try w.writeAll("<div class=\"sch-hub sch-hub-merged\">");
-
-    // All spoke SVGs on top, in a single wrapper.
-    var any_spoke = false;
-    for (hubs) |h| if (h.spoke.len > 0) {
-        any_spoke = true;
-        break;
-    };
-    if (any_spoke) {
-        try w.writeAll("<div class=\"hub-inset-wrap\">");
-        for (hubs) |h| {
-            if (h.spoke.len > 0) try renderGroupedHubSvgs(ctx, w, allocator, h);
-        }
-        try w.writeAll("</div>");
+fn writeHubCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, h: HubAnalysis) !void {
+    try w.print("<div class=\"sch-hub\" data-ref=\"{s}\">", .{h.inst.ref_des});
+    try w.writeAll("<div class=\"hub-head\"><h3><code>");
+    try writeHtmlEscaped(w, h.inst.ref_des);
+    try w.writeAll("</code></h3><span class=\"hub-comp\">");
+    try writeHtmlEscaped(w, h.inst.component);
+    try w.writeAll("</span>");
+    if (h.inst.value.len > 0) {
+        try w.writeAll("<span class=\"hub-val\">");
+        try writeHtmlEscaped(w, h.inst.value);
+        try w.writeAll("</span>");
     }
-
-    // Collect hubs that contribute rows to the master table (those with direct pins).
-    var table_hubs: std.ArrayListUnmanaged(HubAnalysis) = .empty;
-    defer table_hubs.deinit(allocator);
-    for (hubs) |h| {
-        if (h.direct.len > 0) try table_hubs.append(allocator, h);
-    }
-    if (table_hubs.items.len == 0) {
-        try w.writeAll("</div>");
-        return;
-    }
-
-    // Union rows across hubs, keyed by (group, net). Pins sharing a net but
-    // belonging to different feature groups stay in distinct rows.
-    var by_key: std.StringHashMapUnmanaged(MasterRow) = .empty;
-    defer by_key.deinit(allocator);
-    var any_group_label = false;
-
-    for (table_hubs.items, 0..) |h, hi| {
-        for (h.direct) |g| {
-            const net = firstNet(g);
-            if (net.len == 0) continue;
-            if (g.group.len > 0) any_group_label = true;
-            const key = try std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ g.group, net });
-            const gop = try by_key.getOrPut(allocator, key);
-            if (!gop.found_existing) {
-                const cells = try allocator.alloc(Cell, table_hubs.items.len);
-                for (cells) |*c| c.* = .{};
-                gop.value_ptr.* = .{ .group = g.group, .net = net, .cells = cells };
-            }
-            gop.value_ptr.cells[hi] = .{
-                .pins = g.pin_numbers,
-                .fn_name = g.display_name,
-                .alt = altFnFor(h.ref, g, asserted_fns, allocator),
-            };
-        }
-    }
-
-    var rows: std.ArrayListUnmanaged(MasterRow) = .empty;
-    defer rows.deinit(allocator);
-    var row_it = by_key.valueIterator();
-    while (row_it.next()) |row| try rows.append(allocator, row.*);
-    std.mem.sortUnstable(MasterRow, rows.items, {}, struct {
-        fn lt(_: void, x: MasterRow, y: MasterRow) bool {
-            const gc = std.mem.order(u8, x.group, y.group);
-            if (gc != .eq) return gc == .lt;
-            return std.mem.order(u8, x.net, y.net) == .lt;
-        }
-    }.lt);
-
-    try w.writeAll("<table class=\"pins pins-merged\"><thead><tr>");
-    if (any_group_label) try w.writeAll("<th rowspan=\"2\">Group</th>");
-    try w.writeAll("<th rowspan=\"2\">Net</th>");
-    for (table_hubs.items) |h| {
-        try w.writeAll("<th colspan=\"2\"><code>");
-        try writeHtmlEscaped(w, h.inst.ref_des);
-        try w.writeAll("</code> <span class=\"hub-comp\">");
-        try writeHtmlEscaped(w, h.inst.component);
-        try w.writeAll("</span></th>");
-    }
-    try w.writeAll("</tr><tr>");
-    for (table_hubs.items) |_| try w.writeAll("<th>Pin</th><th>Function</th>");
-    try w.writeAll("</tr></thead><tbody>");
-
-    var prev_group: []const u8 = "\x01"; // impossible initial value
-    for (rows.items) |r| {
-        try w.print("<tr data-net=\"{s}\">", .{r.net});
-        if (any_group_label) {
-            // Only emit the Group cell when the label changes — consecutive rows
-            // in the same group read as a cleaner block.
-            if (!std.mem.eql(u8, r.group, prev_group)) {
-                try w.writeAll("<td class=\"pin-group\">");
-                if (r.group.len > 0) try writeHtmlEscaped(w, r.group) else try w.writeAll("<span class=\"muted\">—</span>");
-                try w.writeAll("</td>");
-                prev_group = r.group;
-            } else {
-                try w.writeAll("<td class=\"pin-group pin-group-repeat\"></td>");
-            }
-        }
-        try w.writeAll("<td><code>");
-        try writeHtmlEscaped(w, r.net);
-        try w.writeAll("</code></td>");
-        for (r.cells) |c| {
-            try w.writeAll("<td class=\"pin-nums\">");
-            if (c.pins.len > 0) {
-                try w.writeAll("<code>");
-                try writeHtmlEscaped(w, c.pins);
-                try w.writeAll("</code>");
-            } else {
-                try w.writeAll("<span class=\"muted\">—</span>");
-            }
-            try w.writeAll("</td><td>");
-            if (c.fn_name.len > 0) try writeHtmlEscaped(w, c.fn_name) else try w.writeAll("<span class=\"muted\">—</span>");
-            if (c.alt.len > 0 and !std.mem.eql(u8, c.alt, c.fn_name)) {
-                try w.writeAll(" <span class=\"pin-fn-alt\">");
-                try writeHtmlEscaped(w, c.alt);
-                try w.writeAll("</span>");
-            }
-            try w.writeAll("</td>");
-        }
-        try w.writeAll("</tr>");
-    }
-
-    try w.writeAll("</tbody></table></div>");
+    try w.writeAll("</div>");
+    try w.writeAll("<div class=\"hub-inset-wrap\">");
+    try renderGroupedHubSvgs(ctx, w, allocator, h);
+    try w.writeAll("</div></div>");
 }
 
-/// Render a hub's spoke SVGs broken out per feature group. Each group gets its
-/// own mini-hub rectangle prefixed by a group label (matching the feel of the
-/// old per-section blocks). Hubs whose spokes all carry the same group label
-/// (or no label at all) render as a single SVG, identical to before.
+/// Bucket a hub's pin-groups by `(group "label")` feature label and render
+/// one mini-SVG per bucket with the label as a small heading. When there's
+/// only one bucket (single label, or none), emit one ungrouped SVG.
 fn renderGroupedHubSvgs(
     ctx: *RenderCtx,
     w: anytype,
@@ -410,14 +280,14 @@ fn renderGroupedHubSvgs(
         buckets.deinit(allocator);
     }
 
-    for (h.spoke) |g| {
+    for (h.groups) |g| {
         const gop = try buckets.getOrPut(allocator, g.group);
         if (!gop.found_existing) gop.value_ptr.* = .empty;
         try gop.value_ptr.append(allocator, g);
     }
 
     if (buckets.count() <= 1) {
-        try section_inset.renderHubInset(ctx, w, h.inst, h.spoke);
+        try section_inset.renderHubAllPins(ctx, w, h.inst, h.groups);
         return;
     }
 
@@ -431,7 +301,7 @@ fn renderGroupedHubSvgs(
             try writeHtmlEscaped(w, label);
             try w.writeAll("</h4>");
         }
-        try section_inset.renderHubInset(ctx, w, h.inst, subset);
+        try section_inset.renderHubAllPins(ctx, w, h.inst, subset);
         try w.writeAll("</div>");
     }
 }
@@ -444,9 +314,8 @@ fn analyzeHub(
 ) !?HubAnalysis {
     const hub_inst = ctx.inst_map.get(hub_ref) orelse return null;
 
-    // Bucket pin_ids by feature group — each `(pins ref (group "X") ...)`
-    // block contributes to a separate bucket so that pins sharing a net but
-    // declared in different groups end up as distinct rows in the master table.
+    // Bucket pin_ids by `(pins ref (group "X") ...)` feature label so each
+    // bucket can render as its own SVG with the label as a heading.
     var buckets: std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .empty;
     defer {
         var it = buckets.iterator();
@@ -506,13 +375,10 @@ fn analyzeHub(
     }
     if (total_pins == 0) return null;
 
-    const partition = try section_inset.partitionGroups(allocator, ctx, hub_ref, all_groups.items);
-
     return .{
         .ref = hub_ref,
         .inst = hub_inst,
-        .direct = partition.direct,
-        .spoke = partition.spoke,
+        .groups = try all_groups.toOwnedSlice(allocator),
     };
 }
 
@@ -563,7 +429,7 @@ fn writeNotes(w: anytype, notes: []const []const u8) !void {
 /// (tpsm84338 …))`). Lists every hub that the sub-block's DesignBlock declares
 /// and feeds them through the same writeHubCard path. The block's nets are
 /// already flattened into `ctx` via `collectFlat`, so adjacency works.
-fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_mod.SubBlock, asserted_fns: *const std.StringHashMapUnmanaged([]const u8)) !void {
+fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_mod.SubBlock) !void {
     const slug = try review.slugify(allocator, sb.name);
     try w.print("<section class=\"sch-section\" id=\"sec-{s}\">", .{slug});
     try w.writeAll("<div class=\"sec-head\"><h2>");
@@ -591,7 +457,7 @@ fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_
         try hub_refs.append(allocator, inst.ref_des);
     }
 
-    try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items, asserted_fns);
+    try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items);
 
     try w.writeAll("</section>");
 }
@@ -600,7 +466,7 @@ fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_
 /// `design-block` without any `section` wrapper (e.g. pma3-14ln). Every
 /// hub-prefixed top-level instance becomes its own card inside one synthetic
 /// section.
-fn writeFlatHubs(ctx: *RenderCtx, w: anytype, allocator: Allocator, block: *const DesignBlock, asserted_fns: *const std.StringHashMapUnmanaged([]const u8)) !void {
+fn writeFlatHubs(ctx: *RenderCtx, w: anytype, allocator: Allocator, block: *const DesignBlock) !void {
     try w.writeAll("<section class=\"sch-section\" id=\"sec-design\"><div class=\"sec-head\"><h2>");
     try writeHtmlEscaped(w, block.name);
     try w.writeAll("</h2></div>");
@@ -623,7 +489,7 @@ fn writeFlatHubs(ctx: *RenderCtx, w: anytype, allocator: Allocator, block: *cons
         try hub_refs.append(allocator, inst.ref_des);
     }
 
-    try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items, asserted_fns);
+    try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items);
 
     try w.writeAll("</section>");
 }
@@ -642,12 +508,251 @@ fn hasTopLevelHubs(block: *const DesignBlock) bool {
     return false;
 }
 
-fn writeScripts(w: anytype, design_name: []const u8) !void {
+fn writeScripts(
+    w: anytype,
+    allocator: Allocator,
+    design_name: []const u8,
+    block: *const DesignBlock,
+    ctx: *RenderCtx,
+    asserted_fns: *const std.StringHashMapUnmanaged([]const u8),
+) !void {
     try w.writeAll("<script>var DESIGN_NAME=");
     try writeJsString(w, design_name);
-    try w.writeAll(";</script><script>");
-    try w.writeAll(SCHEMATIC_JS);
+    try w.writeAll(";var SCH_INDEX=");
+    try writeSearchIndex(w, allocator, block, ctx, asserted_fns);
+    try w.writeAll(";</script>");
+    try w.writeAll("<script>");
+    try w.writeAll(SCHEMATIC_VIEWER_JS);
     try w.writeAll("</script>");
+}
+
+const SCHEMATIC_VIEWER_JS = @import("serve/schematic_viewer_js.zig").SCHEMATIC_VIEWER_JS;
+
+/// Walk the design and emit a JSON object the sidebar JS uses for search +
+/// inspection. Shape:
+///   `{sections:[{slug,name,description,hubs:[ref...]}],
+///     components:[{ref,component,value,kind,section,pins?:[{id,net,fn,alt}]}],
+///     nets:[{name,members:[{ref,pin,fn?}]}]}`
+/// Every instance (hubs AND passives) lands in `components` so search hits
+/// "C83" or "10nF". Hubs additionally carry `pins` for the component-detail
+/// view; passives don't (they have at most a few pins and are inspected on
+/// the SVG itself). All strings are JSON-encoded.
+fn writeSearchIndex(
+    w: anytype,
+    allocator: Allocator,
+    block: *const DesignBlock,
+    ctx: *RenderCtx,
+    asserted_fns: *const std.StringHashMapUnmanaged([]const u8),
+) !void {
+    var ref_section: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer ref_section.deinit(allocator);
+    try buildRefSectionMap(allocator, block, &ref_section);
+
+    try w.writeAll("{\"sections\":[");
+
+    var first = true;
+    for (block.sections) |sec| {
+        try emitSectionEntry(w, allocator, sec, &first);
+    }
+    for (block.sub_blocks) |sb| {
+        if (!first) try w.writeAll(",");
+        first = false;
+        const slug = try review.slugify(allocator, sb.name);
+        try w.writeAll("{\"slug\":");
+        try writeJsString(w, slug);
+        try w.writeAll(",\"name\":");
+        try writeJsString(w, sb.name);
+        try w.writeAll(",\"description\":");
+        try writeJsString(w, sb.block.name);
+        try w.writeAll(",\"hubs\":[");
+        try emitHubRefsForBlock(w, sb.block);
+        try w.writeAll("]}");
+    }
+    if (block.sections.len == 0 and hasTopLevelHubs(block)) {
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.writeAll("{\"slug\":\"design\",\"name\":");
+        try writeJsString(w, block.name);
+        try w.writeAll(",\"description\":\"\",\"hubs\":[");
+        try emitHubRefsForBlock(w, block);
+        try w.writeAll("]}");
+    }
+
+    try w.writeAll("],\"components\":[");
+    first = true;
+    var inst_iter = ctx.inst_map.iterator();
+    while (inst_iter.next()) |kv| {
+        const inst = kv.value_ptr.*;
+        const slug = ref_section.get(inst.ref_des) orelse "";
+        try emitComponentEntry(w, allocator, inst, slug, ctx, asserted_fns, &first);
+    }
+
+    try w.writeAll("],\"nets\":[");
+    first = true;
+    var net_iter = ctx.net_index.iterator();
+    while (net_iter.next()) |kv| {
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.writeAll("{\"name\":");
+        try writeJsString(w, kv.key_ptr.*);
+        try w.writeAll(",\"members\":[");
+        var first_m = true;
+        for (kv.value_ptr.items) |pr| {
+            if (!first_m) try w.writeAll(",");
+            first_m = false;
+            try w.writeAll("{\"ref\":");
+            try writeJsString(w, pr.ref_des);
+            try w.writeAll(",\"pin\":");
+            try writeJsString(w, pr.pin);
+            try w.writeAll("}");
+        }
+        try w.writeAll("]}");
+    }
+
+    try w.writeAll("]}");
+}
+
+/// Map every instance ref_des in the design to the slug of the section (or
+/// sub-block) that contains it. Used by the search index so each component
+/// can carry its section context (drives sidebar back-navigation).
+fn buildRefSectionMap(
+    allocator: Allocator,
+    block: *const DesignBlock,
+    map: *std.StringHashMapUnmanaged([]const u8),
+) !void {
+    for (block.sections) |sec| try addRefsForSection(allocator, sec, map);
+    for (block.sub_blocks) |sb| {
+        const slug = try review.slugify(allocator, sb.name);
+        for (sb.block.instances) |inst| try map.put(allocator, inst.ref_des, slug);
+    }
+    if (block.sections.len == 0 and hasTopLevelHubs(block)) {
+        for (block.instances) |inst| try map.put(allocator, inst.ref_des, "design");
+    }
+}
+
+fn addRefsForSection(allocator: Allocator, sec: Section, map: *std.StringHashMapUnmanaged([]const u8)) !void {
+    const slug = try review.slugify(allocator, sec.name);
+    for (sec.instances) |inst| try map.put(allocator, inst.ref_des, slug);
+    for (sec.pin_groups) |pg| try map.put(allocator, pg.ref_des, slug);
+    for (sec.sub_sections) |sub| try addRefsForSection(allocator, sub, map);
+}
+
+fn emitSectionEntry(
+    w: anytype,
+    allocator: Allocator,
+    sec: Section,
+    first: *bool,
+) !void {
+    if (!first.*) try w.writeAll(",");
+    first.* = false;
+    const slug = try review.slugify(allocator, sec.name);
+    try w.writeAll("{\"slug\":");
+    try writeJsString(w, slug);
+    try w.writeAll(",\"name\":");
+    try writeJsString(w, sec.name);
+    try w.writeAll(",\"description\":");
+    try writeJsString(w, sec.description);
+    try w.writeAll(",\"hubs\":[");
+    var first_hub = true;
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(allocator);
+    for (sec.pin_groups) |pg| {
+        if (seen.contains(pg.ref_des)) continue;
+        try seen.put(allocator, pg.ref_des, {});
+        if (!first_hub) try w.writeAll(",");
+        first_hub = false;
+        try writeJsString(w, pg.ref_des);
+    }
+    for (sec.instances) |inst| {
+        const fi: FlatInst = .{ .ref_des = inst.ref_des, .component = inst.component, .value = inst.value, .symbol = inst.symbol, .parts = inst.parts };
+        if (!isHub(fi)) continue;
+        if (seen.contains(inst.ref_des)) continue;
+        try seen.put(allocator, inst.ref_des, {});
+        if (!first_hub) try w.writeAll(",");
+        first_hub = false;
+        try writeJsString(w, inst.ref_des);
+    }
+    try w.writeAll("]}");
+    for (sec.sub_sections) |sub| try emitSectionEntry(w, allocator, sub, first);
+}
+
+fn emitHubRefsForBlock(w: anytype, block: *const DesignBlock) !void {
+    var first = true;
+    for (block.instances) |inst| {
+        const fi: FlatInst = .{ .ref_des = inst.ref_des, .component = inst.component, .value = inst.value, .symbol = inst.symbol, .parts = inst.parts };
+        if (!isHub(fi)) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try writeJsString(w, inst.ref_des);
+    }
+}
+
+fn emitComponentEntry(
+    w: anytype,
+    allocator: Allocator,
+    inst: FlatInst,
+    section_slug: []const u8,
+    ctx: *RenderCtx,
+    asserted_fns: *const std.StringHashMapUnmanaged([]const u8),
+    first: *bool,
+) !void {
+    if (!first.*) try w.writeAll(",");
+    first.* = false;
+    const kind: []const u8 = if (isHub(inst)) "hub" else "passive";
+    try w.writeAll("{\"ref\":");
+    try writeJsString(w, inst.ref_des);
+    try w.writeAll(",\"component\":");
+    try writeJsString(w, inst.component);
+    try w.writeAll(",\"value\":");
+    try writeJsString(w, inst.value);
+    try w.writeAll(",\"kind\":");
+    try writeJsString(w, kind);
+    try w.writeAll(",\"section\":");
+    try writeJsString(w, section_slug);
+
+    if (!std.mem.eql(u8, kind, "hub")) {
+        try w.writeAll("}");
+        return;
+    }
+
+    try w.writeAll(",\"pins\":[");
+    var pn_map = hub_mod.buildPinNameMap(ctx, inst.parts);
+    defer pn_map.deinit(allocator);
+
+    var seen_pin: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen_pin.deinit(allocator);
+    var first_pin = true;
+    if (ctx.adjacency.get(inst.ref_des)) |adj| {
+        for (adj.items) |ae| {
+            if (seen_pin.contains(ae.pin)) continue;
+            try seen_pin.put(allocator, ae.pin, {});
+            const net_name: []const u8 = blk: {
+                const key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ inst.ref_des, ae.pin });
+                defer allocator.free(key);
+                break :blk ctx.pin_canonical_nets.get(key) orelse switch (ae.endpoint) {
+                    .net => |n| draw.baseNetName(n),
+                    .pin => "",
+                };
+            };
+            const fn_name: []const u8 = pn_map.get(ae.pin) orelse "";
+            const alt_key = try std.fmt.allocPrint(allocator, "{s}|{s}", .{ inst.ref_des, ae.pin });
+            defer allocator.free(alt_key);
+            const alt: []const u8 = asserted_fns.get(alt_key) orelse "";
+
+            if (!first_pin) try w.writeAll(",");
+            first_pin = false;
+            try w.writeAll("{\"id\":");
+            try writeJsString(w, ae.pin);
+            try w.writeAll(",\"net\":");
+            try writeJsString(w, net_name);
+            try w.writeAll(",\"fn\":");
+            try writeJsString(w, fn_name);
+            try w.writeAll(",\"alt\":");
+            try writeJsString(w, alt);
+            try w.writeAll("}");
+        }
+    }
+    try w.writeAll("]}");
 }
 
 fn writeJsString(w: anytype, s: []const u8) !void {
@@ -657,7 +762,14 @@ fn writeJsString(w: anytype, s: []const u8) !void {
         '\\' => try w.writeAll("\\\\"),
         '\n' => try w.writeAll("\\n"),
         '\r' => try w.writeAll("\\r"),
-        else => try w.writeByte(c),
+        '<' => try w.writeAll("\\u003c"),
+        '>' => try w.writeAll("\\u003e"),
+        '&' => try w.writeAll("\\u0026"),
+        else => if (c < 0x20) {
+            try w.print("\\u{x:0>4}", .{c});
+        } else {
+            try w.writeByte(c);
+        },
     };
     try w.writeByte('"');
 }
@@ -673,10 +785,11 @@ fn writeHtmlEscaped(w: anytype, s: []const u8) !void {
 }
 
 const SCHEMATIC_CSS =
-    \\body{margin:0;background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
+    \\html,body{margin:0;background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
     \\code{font-family:"SF Mono","Fira Code",monospace;font-size:0.9em;color:#c9d1d9;background:#161b22;padding:1px 5px;border-radius:3px;}
     \\a{color:#58a6ff;text-decoration:none;}a:hover{text-decoration:underline;}
-    \\.sch-wrap{max-width:1200px;margin:0 auto;padding:24px 20px 48px;}
+    \\.sch-layout{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:0;align-items:start;}
+    \\.sch-wrap{min-width:0;max-width:1200px;margin:0 auto;padding:24px 20px 48px;width:100%;box-sizing:border-box;}
     \\h1{color:#f0f6fc;margin:0;font-size:1.6rem;}
     \\h2{color:#f0f6fc;font-size:1.15rem;margin:0;}
     \\h3{color:#f0f6fc;font-size:0.95rem;margin:0;}
@@ -690,13 +803,9 @@ const SCHEMATIC_CSS =
     \\.head-links{grid-column:1/-1;display:flex;gap:8px;margin-top:8px;}
     \\.head-link{padding:5px 12px;border:1px solid #30363d;border-radius:5px;color:#8b949e;font-size:0.85rem;}
     \\.head-link:hover{border-color:#58a6ff;color:#c9d1d9;text-decoration:none;}
-    \\.sch-tools{display:flex;gap:8px;margin:16px 0 8px;align-items:center;position:sticky;top:0;background:#0d1117;padding:8px 0;z-index:10;border-bottom:1px solid #21262d;}
-    \\#sch-search{flex:1;max-width:360px;padding:7px 10px;border:1px solid #30363d;background:#010409;color:#c9d1d9;border-radius:5px;font-size:0.9rem;}
-    \\#sch-search:focus{border-color:#58a6ff;outline:none;}
-    \\.tool-btn{padding:7px 12px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;border-radius:5px;cursor:pointer;font-size:0.85rem;}
-    \\.tool-btn:hover{background:#30363d;border-color:#58a6ff;}
     \\.sch-section{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:14px 16px;margin-bottom:16px;}
     \\.sch-subsection{margin-left:14px;margin-top:12px;background:#12161d;}
+    \\.sch-section.flash,.sch-hub.flash{outline:2px solid #58a6ff;outline-offset:-2px;transition:outline-color .25s;}
     \\.sec-head{display:flex;align-items:center;gap:10px;margin-bottom:8px;}
     \\.sec-desc{margin:4px 0 10px;color:#8b949e;font-size:0.9rem;}
     \\.pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;}
@@ -708,15 +817,6 @@ const SCHEMATIC_CSS =
     \\th,td{text-align:left;padding:6px 10px;border-bottom:1px solid #21262d;font-size:0.88rem;}
     \\th{background:#0d1117;color:#8b949e;font-weight:600;text-transform:uppercase;font-size:0.72rem;letter-spacing:0.04em;}
     \\table.ports{margin-top:2px;}
-    \\table.pins td{font-family:"SF Mono","Fira Code",monospace;font-size:0.85rem;}
-    \\table.pins .pin-nums{color:#79c0ff;}
-    \\table.pins .pin-fn-alt{color:#d2a8ff;font-size:0.8rem;margin-left:6px;}
-    \\table.pins .pin-fn-alt::before{content:"· ";color:#6e7681;}
-    \\table.pins .pin-group{color:#e8c547;font-weight:500;white-space:nowrap;}
-    \\table.pins .pin-group-repeat{border-top:1px dashed #21262d;}
-    \\table.pins-merged th[colspan="2"]{text-align:center;color:#58a6ff;}
-    \\table.pins-merged td:first-child,table.pins td:first-child{color:#79c0ff;}
-    \\.sch-hub-merged .hub-head h3 code{color:#79c0ff;}
     \\.sch-hub{border:1px solid #21262d;border-radius:6px;padding:10px 12px;margin:10px 0;background:#0d1117;}
     \\.hub-head{display:flex;align-items:baseline;gap:10px;margin-bottom:6px;}
     \\.hub-comp{color:#8b949e;font-size:0.85rem;font-family:"SF Mono",monospace;}
@@ -728,61 +828,58 @@ const SCHEMATIC_CSS =
     \\svg.hub-inset{display:block;width:100%;max-width:900px;height:auto;}
     \\svg .component{cursor:pointer;}
     \\svg .net{cursor:pointer;}
+    \\svg .pin-stub{cursor:pointer;}
+    \\svg .pin-stub.pin-active text{fill:#f85149;font-weight:700;}
     \\svg .net:hover line:not(.hit-area),svg .net:hover polyline:not(.hit-area){stroke:#79c0ff;}
-    \\svg .net.net-active line:not(.hit-area),svg .net.net-active polyline:not(.hit-area){stroke:#f85149;}
+    \\svg .net.net-active line:not(.hit-area),svg .net.net-active polyline:not(.hit-area){stroke:#f85149;stroke-width:2.5;}
     \\svg .net.net-active text{fill:#f85149;}
-    \\table.pins tr.row-highlight{background:rgba(248,81,73,0.12);}
-    \\table.pins tr.row-hidden,section.sch-section.row-hidden{display:none;}
     \\details.sec-notes{margin:8px 0;}
     \\details summary{cursor:pointer;color:#8b949e;font-size:0.85rem;}
     \\details summary:hover{color:#c9d1d9;}
     \\details ul{margin:6px 0 0 20px;padding:0;}
     \\details li{margin:3px 0;font-size:0.88rem;color:#c9d1d9;line-height:1.45;}
-;
-
-// Highlight, search, and 2s version-poll. Plain JS, no framework.
-const SCHEMATIC_JS =
-    \\(function(){
-    \\  function netOf(el){
-    \\    while(el && el !== document){ if(el.dataset && el.dataset.net) return el.dataset.net; el=el.parentNode; }
-    \\    return null;
-    \\  }
-    \\  function clearNetHighlight(){
-    \\    document.querySelectorAll('.net-active').forEach(function(n){n.classList.remove('net-active');});
-    \\    document.querySelectorAll('tr.row-highlight').forEach(function(n){n.classList.remove('row-highlight');});
-    \\  }
-    \\  function setNetHighlight(net){
-    \\    clearNetHighlight();
-    \\    if(!net) return;
-    \\    document.querySelectorAll('svg .net').forEach(function(n){ if(n.dataset.net===net) n.classList.add('net-active'); });
-    \\    document.querySelectorAll('table.pins tr').forEach(function(r){ if(r.dataset.net===net) r.classList.add('row-highlight'); });
-    \\  }
-    \\  document.addEventListener('click', function(e){
-    \\    var n = netOf(e.target);
-    \\    if(n) setNetHighlight(n);
-    \\  });
-    \\  var clear = document.getElementById('sch-clear-hl');
-    \\  if(clear) clear.addEventListener('click', clearNetHighlight);
-    \\  // Search: filter section cards and pin rows by text.
-    \\  var search = document.getElementById('sch-search');
-    \\  if(search) search.addEventListener('input', function(){
-    \\    var q = search.value.trim().toLowerCase();
-    \\    var sections = document.querySelectorAll('section.sch-section');
-    \\    sections.forEach(function(sec){
-    \\      var hay = sec.textContent.toLowerCase();
-    \\      if(q.length === 0 || hay.indexOf(q) !== -1) sec.classList.remove('row-hidden');
-    \\      else sec.classList.add('row-hidden');
-    \\    });
-    \\  });
-    \\  // Live-reload on version bump.
-    \\  var lastVersion = null;
-    \\  function poll(){
-    \\    fetch('/api/version/'+DESIGN_NAME).then(function(r){return r.json();}).then(function(j){
-    \\      if(lastVersion === null){ lastVersion = j.version; return; }
-    \\      if(j.version !== lastVersion){ window.location.reload(); }
-    \\    }).catch(function(){});
-    \\  }
-    \\  setInterval(poll, 2000);
-    \\  poll();
-    \\})();
+    \\.sch-sidebar{position:sticky;top:0;height:100vh;background:#161b22;border-left:1px solid #30363d;display:flex;flex-direction:column;box-sizing:border-box;}
+    \\.sb-search{padding:12px 14px;border-bottom:1px solid #21262d;position:relative;}
+    \\.sb-search input{width:100%;padding:8px 10px;border:1px solid #30363d;background:#010409;color:#c9d1d9;border-radius:5px;font-size:0.9rem;box-sizing:border-box;}
+    \\.sb-search input:focus{border-color:#58a6ff;outline:none;}
+    \\.sb-results{position:absolute;top:100%;left:14px;right:14px;background:#0d1117;border:1px solid #30363d;border-top:none;border-radius:0 0 5px 5px;max-height:340px;overflow-y:auto;display:none;z-index:50;}
+    \\.sb-results.open{display:block;}
+    \\.sb-result{padding:7px 10px;cursor:pointer;font-size:0.85rem;font-family:"SF Mono",monospace;color:#c9d1d9;border-bottom:1px solid #21262d;display:flex;justify-content:space-between;gap:8px;}
+    \\.sb-result:last-child{border-bottom:none;}
+    \\.sb-result.selected,.sb-result:hover{background:#1f2937;}
+    \\.sb-result-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    \\.sb-result-meta{font-size:0.7rem;color:#6e7681;text-transform:uppercase;letter-spacing:0.04em;flex-shrink:0;align-self:center;}
+    \\.sb-result-meta.t-net{color:#e8c547;}
+    \\.sb-result-meta.t-comp{color:#58a6ff;}
+    \\.sb-result-meta.t-pin{color:#c084fc;}
+    \\.sb-result-meta.t-sec{color:#3fb950;}
+    \\.sb-detail{flex:1;overflow-y:auto;padding:12px 14px;font-size:0.85rem;}
+    \\.sb-detail h4{color:#f0f6fc;font-size:0.85rem;margin:0 0 6px;text-transform:uppercase;letter-spacing:0.05em;}
+    \\.sb-detail .sb-back{display:inline-block;color:#58a6ff;cursor:pointer;font-size:0.8rem;margin-bottom:8px;}
+    \\.sb-detail .sb-back:hover{text-decoration:underline;}
+    \\.sb-list-item{padding:7px 8px;border-bottom:1px solid #21262d;cursor:pointer;border-radius:3px;}
+    \\.sb-list-item:hover{background:#1f2937;}
+    \\.sb-list-item .sb-li-head{font-family:"SF Mono",monospace;color:#c9d1d9;}
+    \\.sb-list-item .sb-li-sub{color:#8b949e;font-size:0.78rem;margin-top:2px;}
+    \\.sb-comp-meta{color:#8b949e;font-size:0.78rem;margin:6px 0 10px;}
+    \\.sb-pin-row{padding:5px 4px;border-bottom:1px solid #21262d;font-family:"SF Mono",monospace;font-size:0.78rem;display:grid;grid-template-columns:46px 1fr;gap:6px;cursor:pointer;}
+    \\.sb-pin-row:hover{background:#1f2937;}
+    \\.sb-pin-row.active{background:rgba(248,81,73,0.12);}
+    \\.sb-pin-row .sb-pin-id{color:#79c0ff;}
+    \\.sb-pin-row .sb-pin-net{color:#e8c547;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    \\.sb-pin-row .sb-pin-net:hover{text-decoration:underline;color:#f0d75e;}
+    \\.sb-net-section{color:#3fb950;font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;margin:10px 0 4px;padding-top:6px;border-top:1px solid #21262d;}
+    \\.sb-net-section:first-of-type{border-top:none;padding-top:0;margin-top:6px;}
+    \\.sb-net-row{padding:6px 8px;border-radius:4px;cursor:pointer;}
+    \\.sb-net-row:hover{background:#1f2937;}
+    \\.sb-net-row-head{font-family:"SF Mono",monospace;font-size:0.82rem;}
+    \\.sb-net-ref{color:#79c0ff;font-weight:600;}
+    \\.sb-net-comp{color:#8b949e;font-size:0.78rem;}
+    \\.sb-net-pins{font-family:"SF Mono",monospace;font-size:0.78rem;color:#c9d1d9;margin-top:2px;}
+    \\.sb-net-pin{cursor:pointer;color:#c9d1d9;}
+    \\.sb-net-pin:hover{color:#f85149;text-decoration:underline;}
+    \\.sb-pin-row .sb-pin-fn{color:#8b949e;font-size:0.74rem;}
+    \\.sb-pin-row .sb-pin-alt{color:#d2a8ff;}
+    \\.sb-empty{color:#6e7681;font-style:italic;}
+    \\@media(max-width:900px){.sch-layout{grid-template-columns:1fr;}.sch-sidebar{position:static;height:auto;max-height:50vh;border-left:none;border-top:1px solid #30363d;}}
 ;
