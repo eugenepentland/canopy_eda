@@ -263,3 +263,14 @@ for d in pma3-14ln stm32n6 adf5901 tpsm84338 lt3045 power-6v; do
   zig build run -- build --project-dir projects/designs --push $d
 done
 ```
+
+## Worktrees
+
+This repo routinely has several git worktrees in flight under `.claude/worktrees/` (one per feature branch). The directory is `.gitignore`d. A few rules keep them from colliding:
+
+- **Keep the main worktree's tree clean.** If `git status` on main shows anything (uncommitted edits, staged deletions, untracked scratch files), deal with it *before* asking anything to merge branches — uncommitted state on main gets swept into auto-commits and can silently revert work from other branches. Lesson learned the hard way: a partial-revert sitting staged on main deleted the schematic sidebar when another branch was merged.
+- **Commit WIP; don't leave it dangling.** Across-session work should land as a `WIP: ...` commit on the feature branch (fine to squash later), never as loose edits in a worktree. Stashes are invisible to automation and to a future you — prefer a commit.
+- **Rebase worktree branches onto main weekly or before handoff.** Branches that drift more than a few commits behind main produce wide conflicts and, worse, context-line drift (e.g. a function call surviving a rebase after the function itself was deleted upstream). Small, frequent rebases keep the delta legible.
+- **Before bulk-merging worktrees, inventory them.** Run `git status` in each worktree (a `git worktree list` + loop works well). Flag any uncommitted work and decide commit-vs-discard *per worktree* before anything touches main.
+- **Retire merged worktrees.** `git worktree remove <path> && git branch -D <branch>` once a branch is in main. Fewer live worktrees = fewer places for drift to hide.
+- **Audit `git stash list` periodically.** Stashes labelled against deleted branches are almost always forgotten work worth reviewing or dropping.
