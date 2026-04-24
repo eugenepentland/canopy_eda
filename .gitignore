@@ -17,3 +17,6 @@ guardian_runtime.db
 # Loose root-level scratch files
 /ADC.md
 /ad7380-4.pdf
+
+# Claude Code worktree metadata (per-machine; not part of the project)
+.claude/worktrees/
