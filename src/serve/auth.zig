@@ -587,6 +587,11 @@ pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     // Exempt auth paths
     if (std.mem.startsWith(u8, req.url.path, "/auth/")) return true;
 
+    // SPA shell + its assets are public; the APIs it calls still enforce auth
+    // at their own check points.
+    if (std.mem.eql(u8, req.url.path, "/v2") or
+        std.mem.startsWith(u8, req.url.path, "/v2/")) return true;
+
     // OAuth discovery + token/authorize endpoints must be reachable without
     // a logged-in session — Claude Code fetches these before it has a token.
     if (std.mem.startsWith(u8, req.url.path, "/.well-known/oauth-")) return true;

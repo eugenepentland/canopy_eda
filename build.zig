@@ -17,6 +17,15 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.addImport("httpz", httpz.module("httpz"));
 
+    // Lustre SPA bundle (built by `make -C frontend build`). Exposed as a named
+    // module so @embedFile can reach outside the package root.
+    exe_mod.addAnonymousImport("spa_js", .{
+        .root_source_file = b.path("frontend/priv/static/eda_spa.js"),
+    });
+    exe_mod.addAnonymousImport("spa_css", .{
+        .root_source_file = b.path("frontend/priv/static/spa.css"),
+    });
+
     const exe = b.addExecutable(.{
         .name = "eda",
         .root_module = exe_mod,
