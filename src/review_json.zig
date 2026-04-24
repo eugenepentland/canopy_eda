@@ -74,8 +74,39 @@ pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) ![]cons
     }
     try w.writeAll("]");
 
+    try w.writeAll(",\"requirements_markdown\":");
+    try writeJsonString(w, doc.requirements_markdown);
+
+    try w.writeAll(",\"review_state\":");
+    try writeReviewState(w, doc.review_state);
+
     try w.writeAll("}");
     return buf.items;
+}
+
+fn writeReviewState(w: anytype, state: review.ReviewState) !void {
+    try w.writeAll("{\"sections\":[");
+    for (state.sections, 0..) |s, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"section_slug\":");
+        try writeJsonString(w, s.section_slug);
+        try w.writeAll(",\"items\":[");
+        for (s.items, 0..) |it, j| {
+            if (j > 0) try w.writeAll(",");
+            try w.writeAll("{\"id\":");
+            try writeJsonString(w, it.id);
+            try w.writeAll(",\"text\":");
+            try writeJsonString(w, it.text);
+            try w.print(",\"checked\":{}}}", .{it.checked});
+        }
+        try w.print("],\"approved\":{}", .{s.approved});
+        try w.writeAll(",\"approved_by\":");
+        try writeJsonString(w, s.approved_by);
+        try w.writeAll(",\"approved_at\":");
+        try writeJsonString(w, s.approved_at);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]}");
 }
 
 fn writeSummary(w: anytype, s: review.Summary) !void {

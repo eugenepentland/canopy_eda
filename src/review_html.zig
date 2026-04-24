@@ -5,9 +5,9 @@ const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const env_mod = @import("eval/env.zig");
 
-/// Render a ReviewDoc as a self-contained HTML page. Inline CSS, no JS
-/// beyond a tiny deep-link helper. The header navbar matches the rest of
-/// the EDA web server.
+/// Render a ReviewDoc as a self-contained HTML page. Inline CSS. One small
+/// inline script plus a CDN marked.js bundle power the checklist/markdown
+/// interactions. The header navbar matches the rest of the EDA web server.
 pub fn renderToHtml(allocator: std.mem.Allocator, doc: review.ReviewDoc, navbar_css: []const u8) ![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
@@ -18,20 +18,38 @@ pub fn renderToHtml(allocator: std.mem.Allocator, doc: review.ReviewDoc, navbar_
     try w.writeAll("<style>");
     try w.writeAll(navbar_css);
     try w.writeAll(REVIEW_CSS);
-    try w.writeAll("</style></head><body>");
+    try w.writeAll("</style>");
+    try w.writeAll("<script src=\"https://cdn.jsdelivr.net/npm/marked/marked.min.js\"></script>");
+    try w.writeAll("</head><body>");
     try writeNavbar(w);
     try w.writeAll("<div class=\"review-wrap\">");
 
     try writeHeader(w, doc);
+    try writeRequirements(w, doc);
     try writeSummaryTable(w, doc.summary);
+    try writeSections(w, doc.sections, doc.review_state);
     try writePowerSequence(w, doc.power_sequence);
     try writeTestPoints(w, doc.test_points);
     try writePowerBudget(w, doc.power_budget);
     try writeUnresolved(w, doc.unresolved);
     try writeAssertions(w, doc.assertions);
 
-    try w.writeAll("</div></body></html>");
+    try w.writeAll("</div>");
+    try writeScript(w, doc.design_name);
+    try w.writeAll("</body></html>");
     return buf.items;
+}
+
+fn writeRequirements(w: anytype, doc: review.ReviewDoc) !void {
+    try w.writeAll("<section><h2>Requirements</h2>");
+    if (doc.requirements_markdown.len == 0) {
+        try w.writeAll("<p class=\"hint\">No requirements doc. Create <code>projects/designs/reviews/");
+        try writeHtmlEscaped(w, doc.design_name);
+        try w.writeAll(".requirements.md</code> to populate this section.</p>");
+    } else {
+        try w.writeAll("<div id=\"requirements-doc\" class=\"requirements markdown-body\"></div>");
+    }
+    try w.writeAll("</section>");
 }
 
 fn writeNavbar(w: anytype) !void {
@@ -291,7 +309,7 @@ fn writeUnresolved(w: anytype, vs: []const erc_mod.Violation) !void {
     try w.writeAll("</tbody></table></section>");
 }
 
-fn writeSections(w: anytype, sections: []const review.SectionReport) !void {
+fn writeSections(w: anytype, sections: []const review.SectionReport, state: review.ReviewState) !void {
     if (sections.len == 0) return;
     try w.writeAll("<section><h2>Sections</h2>");
     for (sections) |s| {
@@ -300,10 +318,15 @@ fn writeSections(w: anytype, sections: []const review.SectionReport) !void {
             .implemented => "pill-ok",
             .review => "pill-warn",
         };
-        try w.print("<div class=\"sec-card\" id=\"sec-{s}\">", .{s.slug});
+        const rs = findState(state, s.slug);
+        const card_class: []const u8 = if (rs.approved) " sec-card-approved" else "";
+        try w.print("<div class=\"sec-card{s}\" id=\"sec-{s}\" data-slug=\"{s}\">", .{ card_class, s.slug, s.slug });
         try w.writeAll("<div class=\"sec-head\"><h3>");
         try writeHtmlEscaped(w, s.name);
         try w.print("</h3><span class=\"pill {s}\">{s}</span>", .{ status_pill, @tagName(s.status) });
+        if (rs.approved) {
+            try w.writeAll("<span class=\"pill pill-approved\">APPROVED</span>");
+        }
         try w.print("<span class=\"muted sec-count\">{d} component{s}</span>", .{ s.instance_count, if (s.instance_count == 1) "" else "s" });
         try w.writeAll("</div>");
 
@@ -362,9 +385,72 @@ fn writeSections(w: anytype, sections: []const review.SectionReport) !void {
             try w.writeAll("</ul></details>");
         }
 
+        try writeChecklist(w, rs);
+
         try w.writeAll("</div>");
     }
     try w.writeAll("</section>");
+}
+
+fn writeChecklist(w: anytype, rs: review.SectionReviewState) !void {
+    const checked_count = countChecked(rs.items);
+    try w.writeAll("<details class=\"sec-checklist\" open><summary>Review checklist");
+    try w.print(" <span class=\"chk-progress\">({d}/{d})</span>", .{ checked_count, rs.items.len });
+    if (rs.approved) {
+        try w.writeAll(" <span class=\"chk-status chk-status-approved\">Approved");
+        if (rs.approved_by.len > 0) {
+            try w.writeAll(" by ");
+            try writeHtmlEscaped(w, rs.approved_by);
+        }
+        if (rs.approved_at.len > 0) {
+            try w.writeAll(" · ");
+            try writeHtmlEscaped(w, rs.approved_at);
+        }
+        try w.writeAll("</span>");
+    } else {
+        try w.writeAll(" <span class=\"chk-status chk-status-pending\">Pending</span>");
+    }
+    try w.writeAll("</summary>");
+
+    try w.writeAll("<ul class=\"chk-list\">");
+    for (rs.items) |it| {
+        const is_checked: []const u8 = if (it.checked) " checked" else "";
+        try w.print("<li data-id=\"{s}\"><label><input type=\"checkbox\" class=\"chk-box\"{s}> ", .{ it.id, is_checked });
+        try writeHtmlEscaped(w, it.text);
+        try w.writeAll("</label><button class=\"chk-del\" title=\"Delete\">✕</button></li>");
+    }
+    try w.writeAll("</ul>");
+
+    try w.writeAll("<div class=\"chk-add\">");
+    try w.writeAll("<input type=\"text\" class=\"chk-new\" placeholder=\"Add a check (e.g. Power pins wired)\">");
+    try w.writeAll("<button class=\"chk-add-btn\">Add</button>");
+    try w.writeAll("</div>");
+
+    try w.writeAll("<div class=\"chk-approve-row\">");
+    try w.writeAll("<input type=\"text\" class=\"chk-reviewer\" placeholder=\"Reviewer name\" value=\"");
+    try writeHtmlEscaped(w, rs.approved_by);
+    try w.writeAll("\">");
+    if (rs.approved) {
+        try w.writeAll("<button class=\"chk-approve-btn\" data-approve=\"false\">Unapprove</button>");
+    } else {
+        try w.writeAll("<button class=\"chk-approve-btn\" data-approve=\"true\">Approve section</button>");
+    }
+    try w.writeAll("</div></details>");
+}
+
+fn findState(state: review.ReviewState, slug: []const u8) review.SectionReviewState {
+    for (state.sections) |s| {
+        if (std.mem.eql(u8, s.section_slug, slug)) return s;
+    }
+    return .{ .section_slug = slug, .items = &.{}, .approved = false, .approved_by = "", .approved_at = "" };
+}
+
+fn countChecked(items: []const review.ChecklistItem) usize {
+    var n: usize = 0;
+    for (items) |it| if (it.checked) {
+        n += 1;
+    };
+    return n;
 }
 
 fn writeAssertions(w: anytype, assertions: []const review.AssertionReport) !void {
@@ -483,4 +569,110 @@ const REVIEW_CSS =
     \\.consumer-table{font-size:0.85rem;}
     \\.consumer-table th{font-size:0.7rem;background:transparent;}
     \\.consumer-table td{font-family:"SF Mono","Fira Code",monospace;}
+    \\.requirements{background:#0a0e14;border:1px solid #21262d;border-radius:6px;padding:4px 18px;line-height:1.55;}
+    \\.requirements h1,.requirements h2,.requirements h3{color:#f0f6fc;border:0;margin:14px 0 8px;}
+    \\.requirements h1{font-size:1.25rem;}
+    \\.requirements h2{font-size:1.1rem;}
+    \\.requirements h3{font-size:1rem;}
+    \\.requirements ul,.requirements ol{margin:6px 0 10px 22px;}
+    \\.requirements li{margin:3px 0;}
+    \\.requirements code{background:#161b22;}
+    \\.requirements pre{background:#161b22;border:1px solid #21262d;border-radius:4px;padding:10px;overflow:auto;}
+    \\.requirements p{margin:8px 0;}
+    \\.requirements blockquote{border-left:3px solid #30363d;margin:8px 0;padding:2px 12px;color:#8b949e;}
+    \\.pill-approved{background:#0d3a1f;color:#3fb950;}
+    \\.sec-card-approved{border-left:3px solid #3fb950;}
+    \\.sec-checklist{margin-top:10px;padding-top:8px;border-top:1px solid #21262d;}
+    \\.sec-checklist>summary{color:#c9d1d9;font-weight:600;font-size:0.9rem;}
+    \\.chk-progress{color:#8b949e;font-weight:400;}
+    \\.chk-status{font-size:0.75rem;font-weight:600;padding:2px 8px;border-radius:10px;text-transform:uppercase;letter-spacing:0.04em;margin-left:6px;}
+    \\.chk-status-approved{background:#0d3a1f;color:#3fb950;}
+    \\.chk-status-pending{background:#24232e;color:#a89eff;}
+    \\.chk-list{list-style:none;margin:8px 0;padding:0;}
+    \\.chk-list li{display:flex;align-items:center;gap:8px;padding:4px 0;margin:0;border-bottom:1px solid #1a1f27;}
+    \\.chk-list li:last-child{border-bottom:0;}
+    \\.chk-list label{flex:1;cursor:pointer;color:#c9d1d9;font-size:0.9rem;display:flex;align-items:center;gap:8px;}
+    \\.chk-box{width:16px;height:16px;cursor:pointer;accent-color:#3fb950;}
+    \\.chk-box:checked + * {color:#8b949e;text-decoration:line-through;}
+    \\.chk-del{background:transparent;color:#6e7681;border:0;cursor:pointer;font-size:0.9rem;padding:2px 6px;border-radius:3px;}
+    \\.chk-del:hover{background:#3a0d16;color:#f85149;}
+    \\.chk-add,.chk-approve-row{display:flex;gap:6px;margin-top:8px;}
+    \\.chk-new,.chk-reviewer{flex:1;background:#0a0e14;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:5px 10px;font-size:0.88rem;font-family:inherit;}
+    \\.chk-new:focus,.chk-reviewer:focus{outline:none;border-color:#58a6ff;}
+    \\.chk-add-btn,.chk-approve-btn{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:5px 14px;font-size:0.85rem;cursor:pointer;font-weight:600;}
+    \\.chk-add-btn:hover,.chk-approve-btn:hover{background:#30363d;border-color:#58a6ff;}
+    \\.chk-approve-btn{background:#0d3a1f;color:#3fb950;border-color:#1e5631;}
+    \\.chk-approve-btn[data-approve="false"]{background:#3a2e0d;color:#d29922;border-color:#5b4617;}
+    \\.chk-approve-btn:hover{filter:brightness(1.2);}
+;
+
+fn writeScript(w: anytype, design_name: []const u8) !void {
+    try w.writeAll("<script>var DESIGN_NAME=");
+    try writeJsString(w, design_name);
+    try w.writeAll(";");
+    try w.writeAll(CHECKLIST_JS);
+    try w.writeAll("</script>");
+}
+
+fn writeJsString(w: anytype, s: []const u8) !void {
+    try w.writeAll("\"");
+    for (s) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '\n' => try w.writeAll("\\n"),
+        '\r' => try w.writeAll("\\r"),
+        '<' => try w.writeAll("\\u003c"),
+        '>' => try w.writeAll("\\u003e"),
+        '&' => try w.writeAll("\\u0026"),
+        0...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{c}),
+        else => try w.writeByte(c),
+    };
+    try w.writeAll("\"");
+}
+
+const CHECKLIST_JS =
+    \\(function(){
+    \\  var reqEl=document.getElementById('requirements-doc');
+    \\  if(reqEl&&window.marked){
+    \\    fetch('/api/requirements/'+encodeURIComponent(DESIGN_NAME))
+    \\      .then(function(r){return r.ok?r.text():''})
+    \\      .then(function(md){if(md)reqEl.innerHTML=marked.parse(md);});
+    \\  }
+    \\  function post(path,body){
+    \\    return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    \\      .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r;});
+    \\  }
+    \\  function base(){return '/api/review-state/'+encodeURIComponent(DESIGN_NAME);}
+    \\  function sectionSlug(el){var c=el.closest('.sec-card');return c?c.getAttribute('data-slug'):null;}
+    \\  document.addEventListener('change',function(e){
+    \\    if(!e.target.classList.contains('chk-box'))return;
+    \\    var slug=sectionSlug(e.target);
+    \\    var li=e.target.closest('li');
+    \\    if(!slug||!li)return;
+    \\    post(base()+'/item/toggle',{section_slug:slug,id:li.getAttribute('data-id'),checked:e.target.checked})
+    \\      .then(function(){location.reload();}).catch(function(err){alert('Toggle failed: '+err.message);});
+    \\  });
+    \\  document.addEventListener('click',function(e){
+    \\    var t=e.target;
+    \\    if(t.classList.contains('chk-add-btn')){
+    \\      var row=t.closest('.chk-add');var input=row.querySelector('.chk-new');
+    \\      var text=input.value.trim();if(!text)return;
+    \\      var slug=sectionSlug(t);if(!slug)return;
+    \\      post(base()+'/item',{section_slug:slug,text:text}).then(function(){location.reload();})
+    \\        .catch(function(err){alert('Add failed: '+err.message);});
+    \\    }else if(t.classList.contains('chk-del')){
+    \\      var li=t.closest('li');var slug=sectionSlug(t);if(!li||!slug)return;
+    \\      post(base()+'/item/delete',{section_slug:slug,id:li.getAttribute('data-id')}).then(function(){location.reload();})
+    \\        .catch(function(err){alert('Delete failed: '+err.message);});
+    \\    }else if(t.classList.contains('chk-approve-btn')){
+    \\      var row=t.closest('.chk-approve-row');var input=row.querySelector('.chk-reviewer');
+    \\      var approved=t.getAttribute('data-approve')==='true';
+    \\      var reviewer=input.value.trim();
+    \\      if(approved&&!reviewer){alert('Enter a reviewer name before approving.');input.focus();return;}
+    \\      var slug=sectionSlug(t);if(!slug)return;
+    \\      post(base()+'/approve',{section_slug:slug,approved:approved,reviewer:reviewer}).then(function(){location.reload();})
+    \\        .catch(function(err){alert('Approve failed: '+err.message);});
+    \\    }
+    \\  });
+    \\})();
 ;
