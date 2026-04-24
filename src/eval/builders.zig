@@ -201,20 +201,25 @@ pub fn processPinForm(
         const net_val = try self.evalNode(pin_children[tail - 1], env);
         const net_name = net_val.asString() orelse return;
 
-        var asserted_fn: []const u8 = "";
+        var asserted_buf: std.ArrayListUnmanaged([]const u8) = .empty;
         var pin_count: usize = 0;
         for (pin_children[1 .. tail - 1]) |child| {
             if (child.isForm("as")) {
                 const ac = child.asList().?;
-                if (ac.len >= 2) {
-                    const val = try self.evalNode(ac[1], env);
-                    asserted_fn = val.asString() orelse (ac[1].asAtom() orelse "");
+                for (ac[1..]) |arg| {
+                    const val = try self.evalNode(arg, env);
+                    const name = val.asString() orelse (arg.asAtom() orelse "");
+                    if (name.len == 0) continue;
+                    try asserted_buf.append(self.allocator, name);
                 }
             } else {
                 pin_count += 1;
             }
         }
-        if (pin_count != 1) asserted_fn = "";
+        const asserted_fns: []const []const u8 = if (pin_count == 1)
+            (asserted_buf.toOwnedSlice(self.allocator) catch &.{})
+        else
+            &.{};
 
         var first_pin = true;
         for (pin_children[1 .. tail - 1]) |pin_node| {
@@ -225,7 +230,7 @@ pub fn processPinForm(
                 .ref_des = pins_ref,
                 .pin = pn,
                 .net = net_name,
-                .asserted_fn = asserted_fn,
+                .asserted_fns = asserted_fns,
                 .i_typ = if (first_pin) i_typ else null,
                 .i_max = if (first_pin) i_max else null,
             });
@@ -243,14 +248,34 @@ pub fn processPinForm(
         if (bus_children.len < 3) return;
         const bus_prefix_val = try self.evalNode(bus_children[1], env);
         const bus_prefix = bus_prefix_val.asString() orelse return;
+        // Optional `(as-prefix "XSPIM_P2_IO")` — auto-asserts each pin as
+        // `<prefix><bus-idx>` so the design doesn't have to expand a wide bus
+        // into one (pin ...) form per lane just to pass the pin-function check.
+        var as_prefix: []const u8 = "";
+        for (bus_children[2..]) |child| {
+            if (child.isForm("as-prefix")) {
+                const ac = child.asList().?;
+                if (ac.len >= 2) {
+                    const v = try self.evalNode(ac[1], env);
+                    as_prefix = v.asString() orelse (ac[1].asAtom() orelse "");
+                }
+            }
+        }
         var bus_idx: u32 = 0;
         for (bus_children[2..]) |bus_node| {
+            if (bus_node.isForm("as-prefix")) continue;
             if (bus_node.asList()) |bus_list| {
                 for (bus_list) |bp| {
                     const raw = ids.pinId(self, bp) orelse continue;
                     const pn = if (pin_func_map) |pm| (instance_mod.resolvePinName(self, pm, raw) orelse raw) else raw;
                     const bus_net = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ bus_prefix, bus_idx }) catch continue;
-                    try all_pin_nets.append(self.allocator, .{ .ref_des = pins_ref, .pin = pn, .net = bus_net });
+                    const asserted: []const []const u8 = if (as_prefix.len > 0) blk: {
+                        const name = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ as_prefix, bus_idx }) catch break :blk &.{};
+                        const slot = self.allocator.alloc([]const u8, 1) catch break :blk &.{};
+                        slot[0] = name;
+                        break :blk slot;
+                    } else &.{};
+                    try all_pin_nets.append(self.allocator, .{ .ref_des = pins_ref, .pin = pn, .net = bus_net, .asserted_fns = asserted });
                     try pg_pins.append(self.allocator, .{ .pin = pn, .net = bus_net, .pin_name = if (pin_func_map) |m| (m.get(pn) orelse "") else "" });
                     if (pin_func_map) |m| {
                         if (m.get(pn)) |func_name| {
@@ -264,7 +289,13 @@ pub fn processPinForm(
                 const raw = ids.pinId(self, bus_node) orelse continue;
                 const pn = if (pin_func_map) |pm| (instance_mod.resolvePinName(self, pm, raw) orelse raw) else raw;
                 const bus_net = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ bus_prefix, bus_idx }) catch continue;
-                try all_pin_nets.append(self.allocator, .{ .ref_des = pins_ref, .pin = pn, .net = bus_net });
+                const asserted: []const []const u8 = if (as_prefix.len > 0) blk: {
+                    const name = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ as_prefix, bus_idx }) catch break :blk &.{};
+                    const slot = self.allocator.alloc([]const u8, 1) catch break :blk &.{};
+                    slot[0] = name;
+                    break :blk slot;
+                } else &.{};
+                try all_pin_nets.append(self.allocator, .{ .ref_des = pins_ref, .pin = pn, .net = bus_net, .asserted_fns = asserted });
                 try pg_pins.append(self.allocator, .{ .pin = pn, .net = bus_net, .pin_name = if (pin_func_map) |m| (m.get(pn) orelse "") else "" });
                 if (pin_func_map) |m| {
                     if (m.get(pn)) |func_name| {

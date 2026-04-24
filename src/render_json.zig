@@ -126,12 +126,25 @@ fn buildAssertedFnMap(allocator: Allocator, block: *const DesignBlock) std.Strin
 fn appendAssertedFromBlock(allocator: Allocator, map: *std.StringHashMapUnmanaged([]const u8), block: *const DesignBlock) void {
     for (block.nets) |net| {
         for (net.pins) |p| {
-            if (p.asserted_fn.len == 0) continue;
+            if (p.asserted_fns.len == 0) continue;
             const key = std.fmt.allocPrint(allocator, "{s}|{s}", .{ p.ref_des, p.pin }) catch continue;
-            map.put(allocator, key, p.asserted_fn) catch {};
+            const joined = joinAssertedFns(allocator, p.asserted_fns) orelse continue;
+            map.put(allocator, key, joined) catch {};
         }
     }
     for (block.sub_blocks) |sb| appendAssertedFromBlock(allocator, map, sb.block);
+}
+
+fn joinAssertedFns(allocator: Allocator, fns: []const []const u8) ?[]const u8 {
+    if (fns.len == 0) return null;
+    if (fns.len == 1) return fns[0];
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(allocator);
+    for (fns, 0..) |f, i| {
+        if (i > 0) w.writeAll(", ") catch return null;
+        w.writeAll(f) catch return null;
+    }
+    return buf.toOwnedSlice(allocator) catch null;
 }
 
 const JsonWire = struct {

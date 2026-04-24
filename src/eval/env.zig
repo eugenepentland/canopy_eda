@@ -66,8 +66,11 @@ pub const ModuleDef = struct {
 pub const PinRef = struct {
     ref_des: []const u8,
     pin: []const u8,
-    /// Alternate function the user explicitly asserted via `(as "FN")`. Empty when not asserted.
-    asserted_fn: []const u8 = "",
+    /// Alternate functions the user explicitly asserted via `(as "FN1" "FN2" ...)`. Empty slice
+    /// when none were asserted. Multiple entries let a single pin declare it's being used in
+    /// more than one role — e.g. `(as "TIM1_CH1" "GPIO")` for a pin that's both bit-banged and
+    /// driven by a timer depending on firmware phase.
+    asserted_fns: []const []const u8 = &.{},
     /// Typical current drawn by this instance on the owning pin-group's net (A).
     /// Populated from `(i-typ X)` on the pin form and attached only to the first
     /// physical pin of the group — the remaining pins carry null so a straight sum

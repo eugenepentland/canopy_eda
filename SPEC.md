@@ -144,6 +144,10 @@ Public functions: renderBlockDiagram
 - Emits power_budget error when load max exceeds source max
 - Emits power_budget warning when typ load is above 80 percent of source typ
 - Emits no power_budget violation when load is well below source capacity
+- Requires pin function assertion when pinout defines alternates
+- Allows pins without alternates to omit (as ...)
+- Accepts multiple asserted functions on a single pin
+- Rejects asserted function that is not in the pinout
 
 ## eval/power_budget
 

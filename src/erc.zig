@@ -24,6 +24,7 @@ pub const ViolationKind = enum {
     concept_remaining,
     pin_multi_net,
     pin_function_unsupported,
+    pin_function_required,
     power_budget,
 };
 
@@ -572,7 +573,14 @@ fn atomOrString(node: @import("sexpr/ast.zig").Node) ?[]const u8 {
     return null;
 }
 
-/// Validate that every (as "FN") assertion refers to the pin's primary function or one of its declared alternates.
+/// Validate `(as "FN")` assertions against the pinout file:
+///   1. Every asserted function must match the pin's primary function or one of its
+///      declared alternates.
+///   2. When the pin has any `(alt ...)` entries, the design MUST name at least one
+///      function via `(as ...)` — silence there means the user hasn't committed to
+///      which role the pin plays, and the error blocks the build.
+///
+/// Pins without alts (pure power/analog pads) don't need an assertion.
 fn checkPinFunctions(allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, violations: *std.ArrayListUnmanaged(Violation)) void {
     // Build ref_des -> pinout_lookup map so we know which pinout file to load per pin.
     // Prefer `inst.pinout`, fall back to `inst.symbol`, then `inst.component`.
@@ -587,9 +595,12 @@ fn checkPinFunctions(allocator: std.mem.Allocator, block: *const DesignBlock, pr
     // Cache loaded pinouts by symbol so repeated lookups don't reparse.
     var pinout_cache: std.StringHashMapUnmanaged(?std.StringHashMapUnmanaged(PinoutEntry)) = .empty;
 
+    // Track (ref_des|pin_id) pairs we've already emitted "required" errors for so
+    // multiple net occurrences of the same physical pin don't produce duplicates.
+    var required_seen: std.StringHashMapUnmanaged(void) = .empty;
+
     for (block.nets) |net| {
         for (net.pins) |pin| {
-            if (pin.asserted_fn.len == 0) continue;
             const symbol = ref_to_lookup.get(pin.ref_des) orelse continue;
 
             const gop = pinout_cache.getOrPut(allocator, symbol) catch continue;
@@ -603,24 +614,45 @@ fn checkPinFunctions(allocator: std.mem.Allocator, block: *const DesignBlock, pr
             const pinout_map = gop.value_ptr.* orelse continue;
 
             const entry = pinout_map.get(pin.pin) orelse continue;
-            if (std.mem.eql(u8, pin.asserted_fn, entry.primary)) continue;
-            var matched = false;
-            for (entry.alts) |alt| {
-                if (std.mem.eql(u8, pin.asserted_fn, alt)) {
-                    matched = true;
-                    break;
-                }
-            }
-            if (matched) continue;
 
-            const msg = formatFunctionMsg(allocator, pin.ref_des, pin.pin, pin.asserted_fn, na.baseNetName(net.name), entry) orelse continue;
-            violations.append(allocator, .{
-                .kind = .pin_function_unsupported,
-                .severity = .@"error",
-                .message = msg,
-                .ref_des = pin.ref_des,
-                .net = na.baseNetName(net.name),
-            }) catch {};
+            // Rule 2: pin has alts but no (as ...). Skip pure-power pads (no alts).
+            if (pin.asserted_fns.len == 0) {
+                if (entry.alts.len == 0) continue;
+                const seen_key = std.fmt.allocPrint(allocator, "{s}|{s}", .{ pin.ref_des, pin.pin }) catch continue;
+                if (required_seen.contains(seen_key)) continue;
+                required_seen.put(allocator, seen_key, {}) catch {};
+                const msg = formatRequiredMsg(allocator, pin.ref_des, pin.pin, na.baseNetName(net.name), entry) orelse continue;
+                violations.append(allocator, .{
+                    .kind = .pin_function_required,
+                    .severity = .@"error",
+                    .message = msg,
+                    .ref_des = pin.ref_des,
+                    .net = na.baseNetName(net.name),
+                }) catch {};
+                continue;
+            }
+
+            // Rule 1: every asserted function must resolve.
+            for (pin.asserted_fns) |asserted| {
+                if (std.mem.eql(u8, asserted, entry.primary)) continue;
+                var matched = false;
+                for (entry.alts) |alt| {
+                    if (std.mem.eql(u8, asserted, alt)) {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (matched) continue;
+
+                const msg = formatFunctionMsg(allocator, pin.ref_des, pin.pin, asserted, na.baseNetName(net.name), entry) orelse continue;
+                violations.append(allocator, .{
+                    .kind = .pin_function_unsupported,
+                    .severity = .@"error",
+                    .message = msg,
+                    .ref_des = pin.ref_des,
+                    .net = na.baseNetName(net.name),
+                }) catch {};
+            }
         }
     }
 }
@@ -629,6 +661,17 @@ fn formatFunctionMsg(allocator: std.mem.Allocator, ref_des: []const u8, pin_id: 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
     w.print("{s} pin {s} (net \"{s}\") does not support function \"{s}\". Allowed: {s}", .{ ref_des, pin_id, net, asserted, entry.primary }) catch return null;
+    for (entry.alts) |alt| {
+        w.print(", {s}", .{alt}) catch return null;
+    }
+    w.writeByte('.') catch return null;
+    return buf.toOwnedSlice(allocator) catch null;
+}
+
+fn formatRequiredMsg(allocator: std.mem.Allocator, ref_des: []const u8, pin_id: []const u8, net: []const u8, entry: PinoutEntry) ?[]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(allocator);
+    w.print("{s} pin {s} (net \"{s}\") has alternate functions but no `(as \"FN\")` was specified. Pick one of: {s}", .{ ref_des, pin_id, net, entry.primary }) catch return null;
     for (entry.alts) |alt| {
         w.print(", {s}", .{alt}) catch return null;
     }
@@ -782,4 +825,132 @@ test "power budget within budget" {
     for (violations.items) |v| {
         try std.testing.expect(v.kind != .power_budget);
     }
+}
+
+// Test fixture: single-instance block where U1 uses pin "A1" of a fake "testchip"
+// pinout. `asserted_fns` is plumbed through to the PinRef so we can exercise the
+// assertion rules without setting up a full eval pipeline.
+fn makePinFunctionBlock(
+    alloc: std.mem.Allocator,
+    pin_id: []const u8,
+    asserted_fns: []const []const u8,
+) !DesignBlock {
+    const insts = try alloc.alloc(Instance, 1);
+    insts[0] = .{
+        .ref_des = "U1",
+        .component = "testchip",
+        .value = "",
+        .footprint = "",
+        .symbol = "",
+        .pinout = "testchip",
+        .properties = &.{},
+        .attrs = &.{},
+        .source_offset = 0,
+        .id = "00000001",
+    };
+    const pins = try alloc.alloc(env_mod.PinRef, 1);
+    pins[0] = .{ .ref_des = "U1", .pin = pin_id, .asserted_fns = asserted_fns };
+    const nets = try alloc.alloc(env_mod.Net, 1);
+    nets[0] = .{ .name = "SIG", .pins = pins };
+    return .{
+        .name = "test",
+        .instances = insts,
+        .nets = nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .net_ties = &.{},
+    };
+}
+
+const pinout_fixture =
+    \\(pinout "testchip"
+    \\  (pin A1 "PA1"
+    \\    (alt "SPI1_MOSI" io)
+    \\    (alt "TIM1_CH1" io))
+    \\  (pin B1 "VDD")
+    \\)
+;
+
+// Create a temp directory with lib/pinouts/testchip.sexp so checkPinFunctions
+// can resolve the fixture. Returns a TmpDir (caller must cleanup) and its path.
+fn makePinoutTmp(alloc: std.mem.Allocator) !struct { tmp: std.testing.TmpDir, path: []const u8 } {
+    var tmp = std.testing.tmpDir(.{});
+    try tmp.dir.makePath("lib/pinouts");
+    try tmp.dir.writeFile(.{ .sub_path = "lib/pinouts/testchip.sexp", .data = pinout_fixture });
+    const path = try tmp.dir.realpathAlloc(alloc, ".");
+    return .{ .tmp = tmp, .path = path };
+}
+
+// spec: erc - Requires pin function assertion when pinout defines alternates
+test "pin function required when alts exist" {
+    const alloc = std.testing.allocator;
+    var fx = try makePinoutTmp(alloc);
+    defer fx.tmp.cleanup();
+    defer alloc.free(fx.path);
+
+    const block = try makePinFunctionBlock(alloc, "A1", &.{});
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    checkPinFunctions(alloc, &block, fx.path, &violations);
+
+    var hit = false;
+    for (violations.items) |v| {
+        if (v.kind == .pin_function_required and v.severity == .@"error") hit = true;
+    }
+    try std.testing.expect(hit);
+}
+
+// spec: erc - Allows pins without alternates to omit (as ...)
+test "pin function not required when no alts" {
+    const alloc = std.testing.allocator;
+    var fx = try makePinoutTmp(alloc);
+    defer fx.tmp.cleanup();
+    defer alloc.free(fx.path);
+
+    // B1 in the fixture is a power pin with no alts — no assertion needed.
+    const block = try makePinFunctionBlock(alloc, "B1", &.{});
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    checkPinFunctions(alloc, &block, fx.path, &violations);
+
+    for (violations.items) |v| {
+        try std.testing.expect(v.kind != .pin_function_required);
+    }
+}
+
+// spec: erc - Accepts multiple asserted functions on a single pin
+test "pin function multi assertion validated" {
+    const alloc = std.testing.allocator;
+    var fx = try makePinoutTmp(alloc);
+    defer fx.tmp.cleanup();
+    defer alloc.free(fx.path);
+
+    // Both functions exist in the pinout — no violation.
+    const block = try makePinFunctionBlock(alloc, "A1", &.{ "SPI1_MOSI", "TIM1_CH1" });
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    checkPinFunctions(alloc, &block, fx.path, &violations);
+
+    for (violations.items) |v| {
+        try std.testing.expect(v.kind != .pin_function_unsupported);
+        try std.testing.expect(v.kind != .pin_function_required);
+    }
+}
+
+// spec: erc - Rejects asserted function that is not in the pinout
+test "pin function unsupported across slice" {
+    const alloc = std.testing.allocator;
+    var fx = try makePinoutTmp(alloc);
+    defer fx.tmp.cleanup();
+    defer alloc.free(fx.path);
+
+    // TIM1_CH1 is valid, but UART9_TX is not on this pin — errors on the second.
+    const block = try makePinFunctionBlock(alloc, "A1", &.{ "TIM1_CH1", "UART9_TX" });
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    checkPinFunctions(alloc, &block, fx.path, &violations);
+
+    var hit = false;
+    for (violations.items) |v| {
+        if (v.kind == .pin_function_unsupported and std.mem.indexOf(u8, v.message, "UART9_TX") != null) hit = true;
+    }
+    try std.testing.expect(hit);
 }

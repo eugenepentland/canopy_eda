@@ -225,22 +225,27 @@ pub fn parsePinForm(self: *Evaluator, form: Node, ref_des: []const u8, env: *Env
     const net_val = try self.evalNode(pin_children[tail - 1], env);
     const net_name = net_val.asString() orelse return;
 
-    // Scan for an optional (as "FN") annotation among the pin children.
-    var asserted_fn: []const u8 = "";
+    // Scan for `(as "FN1" "FN2" ...)` — one or more asserted functions per pin.
+    var asserted_buf: std.ArrayListUnmanaged([]const u8) = .empty;
     var pin_count: usize = 0;
     for (pin_children[1 .. tail - 1]) |child| {
         if (child.isForm("as")) {
             const ac = child.asList().?;
-            if (ac.len >= 2) {
-                const val = try self.evalNode(ac[1], env);
-                asserted_fn = val.asString() orelse (ac[1].asAtom() orelse "");
+            for (ac[1..]) |arg| {
+                const val = try self.evalNode(arg, env);
+                const name = val.asString() orelse (arg.asAtom() orelse "");
+                if (name.len == 0) continue;
+                asserted_buf.append(self.allocator, name) catch return EvalError.OutOfMemory;
             }
         } else {
             pin_count += 1;
         }
     }
     // (as "FN") only makes sense with a single pin; silently ignore the assertion otherwise.
-    if (pin_count != 1) asserted_fn = "";
+    const asserted_fns: []const []const u8 = if (pin_count == 1)
+        (asserted_buf.toOwnedSlice(self.allocator) catch &.{})
+    else
+        &.{};
 
     var first_pin = true;
     for (pin_children[1 .. tail - 1]) |pin_node| {
@@ -252,7 +257,7 @@ pub fn parsePinForm(self: *Evaluator, form: Node, ref_des: []const u8, env: *Env
             .ref_des = ref_des,
             .pin = pn,
             .net = net_name,
-            .asserted_fn = asserted_fn,
+            .asserted_fns = asserted_fns,
             .i_typ = if (first_pin) i_typ else null,
             .i_max = if (first_pin) i_max else null,
         });

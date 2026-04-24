@@ -540,7 +540,7 @@ fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl)
         gop.value_ptr.append(self.allocator, .{
             .ref_des = pn.ref_des,
             .pin = pn.pin,
-            .asserted_fn = pn.asserted_fn,
+            .asserted_fns = pn.asserted_fns,
             .i_typ = pn.i_typ,
             .i_max = pn.i_max,
         }) catch return EvalError.OutOfMemory;

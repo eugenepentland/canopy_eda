@@ -43,8 +43,9 @@ pub const PinNetDecl = struct {
     ref_des: []const u8,
     pin: []const u8,
     net: []const u8,
-    /// Alternate function asserted via `(as "FN")`. Empty when the pin is used in its primary role.
-    asserted_fn: []const u8 = "",
+    /// Alternate functions asserted via `(as "FN1" "FN2" ...)`. Empty slice when none were
+    /// asserted. Multiple entries let a pin declare more than one simultaneous role.
+    asserted_fns: []const []const u8 = &.{},
     /// Typical current (A) the instance draws on this net — set only on the first
     /// pin of a pin-group so sums across nets don't double-count.
     i_typ: ?f64 = null,
