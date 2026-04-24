@@ -39,13 +39,25 @@ pub const SectionReport = struct {
     slug: []const u8,
     status: env_mod.SectionStatus,
     description: []const u8,
-    notes: []const []const u8,
+    notes: []const env_mod.SectionNote,
     ports: []const PortSummary,
     instance_count: usize,
     /// ERC violations filtered to ref_des declared inside this section
     /// (including sub-sections). Violations with no ref_des aren't attributed
     /// here — they show up in `unresolved` only.
     violations: []const erc_mod.Violation,
+    /// Component-level requirements aggregated from every instance in this
+    /// section (and nested sub-sections). Read-only in the review UI; edited
+    /// by changing `lib/components/<name>.sexp`. Sorted by ref_des.
+    component_requirements: []const ComponentRequirementEntry = &.{},
+};
+
+/// One component's set of library-declared requirements as seen from a
+/// specific placement in the design.
+pub const ComponentRequirementEntry = struct {
+    ref_des: []const u8,
+    component: []const u8,
+    requirements: []const env_mod.Requirement,
 };
 
 pub const BomEntry = struct {
@@ -94,6 +106,14 @@ pub const SectionReviewState = struct {
     approved: bool = false,
     approved_by: []const u8 = "",
     approved_at: []const u8 = "",
+    /// SHA-256 hex of the section's content at the moment of approval.
+    /// Recomputed on every build and compared in `reconcile()`; mismatch
+    /// flips `approval_stale` so the UI prompts a re-approval without
+    /// mutating the on-disk approval record.
+    content_hash: []const u8 = "",
+    /// Derived at build-time, not persisted: true when the live content
+    /// hash differs from `content_hash`. Reviewer must re-approve.
+    approval_stale: bool = false,
 };
 
 /// The full review-state payload for a design, persisted at
@@ -288,7 +308,7 @@ fn buildSectionReports(
 ) ![]const SectionReport {
     var out: std.ArrayListUnmanaged(SectionReport) = .empty;
     for (block.sections) |sec| {
-        const rep = try reportFromSection(allocator, sec, violations);
+        const rep = try reportFromSection(allocator, block, sec, violations);
         try out.append(allocator, rep);
     }
     return out.items;
@@ -296,6 +316,7 @@ fn buildSectionReports(
 
 fn reportFromSection(
     allocator: std.mem.Allocator,
+    block: *const DesignBlock,
     sec: Section,
     violations: []const erc_mod.Violation,
 ) !SectionReport {
@@ -323,6 +344,8 @@ fn reportFromSection(
         });
     }
 
+    const comp_reqs = try collectComponentRequirements(allocator, block, sec, &refs);
+
     return .{
         .name = sec.name,
         .slug = try slugify(allocator, sec.name),
@@ -332,7 +355,189 @@ fn reportFromSection(
         .ports = ports.items,
         .instance_count = countSectionInstances(sec),
         .violations = filtered.items,
+        .component_requirements = comp_reqs,
     };
+}
+
+/// Collect `(requirement ...)` entries for every component placed in this
+/// section. Walks `sec.instances` + sub-section instances, plus top-level
+/// instances referenced by `(pins ref "Uxx" ...)` — the STM32-style multipart
+/// case where one physical part is attached to several sections. Dedupes by
+/// ref_des so a single instance only contributes one entry.
+fn collectComponentRequirements(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    sec: Section,
+    refs: *const std.StringHashMapUnmanaged(void),
+) ![]const ComponentRequirementEntry {
+    var by_ref: std.StringHashMapUnmanaged(Instance) = .empty;
+    collectSectionInstances(sec, &by_ref, allocator);
+    // Add top-level instances that pin-groups attach to this section.
+    var it = refs.iterator();
+    while (it.next()) |e| {
+        const rd = e.key_ptr.*;
+        if (by_ref.contains(rd)) continue;
+        for (block.instances) |inst| {
+            if (std.mem.eql(u8, inst.ref_des, rd)) {
+                by_ref.put(allocator, rd, inst) catch {};
+                break;
+            }
+        }
+    }
+
+    var out: std.ArrayListUnmanaged(ComponentRequirementEntry) = .empty;
+    var it2 = by_ref.iterator();
+    while (it2.next()) |e| {
+        const inst = e.value_ptr.*;
+        if (inst.requirements.len == 0) continue;
+        try out.append(allocator, .{
+            .ref_des = inst.ref_des,
+            .component = inst.component,
+            .requirements = inst.requirements,
+        });
+    }
+    std.mem.sort(ComponentRequirementEntry, out.items, {}, lessThanByRefDes);
+    return out.items;
+}
+
+fn collectSectionInstances(
+    sec: Section,
+    out: *std.StringHashMapUnmanaged(Instance),
+    allocator: std.mem.Allocator,
+) void {
+    for (sec.instances) |inst| {
+        out.put(allocator, inst.ref_des, inst) catch {};
+    }
+    for (sec.sub_sections) |sub| collectSectionInstances(sub, out, allocator);
+}
+
+fn lessThanByRefDes(_: void, a: ComponentRequirementEntry, b: ComponentRequirementEntry) bool {
+    return std.mem.lessThan(u8, a.ref_des, b.ref_des);
+}
+
+/// Hash the review-relevant content of a section — instances + values + pin
+/// bindings, design notes, and every library-declared requirement of the
+/// parts placed in the section. Used by `review_state.reconcile()` to detect
+/// whether a section has drifted from what the reviewer approved, so the UI
+/// can demand a fresh approval. Keep the fed bytes stable across builds: we
+/// sort instance + requirement lists first, and include both design-side and
+/// library-side state (so editing `lib/components/<X>.sexp` invalidates every
+/// design that uses X).
+pub fn sectionContentHash(
+    allocator: std.mem.Allocator,
+    rep: SectionReport,
+    block: *const DesignBlock,
+    sec: Section,
+) ![]const u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(rep.name);
+    hasher.update("\x00");
+    hasher.update(rep.description);
+    hasher.update("\x00");
+
+    // Design notes.
+    const notes_sorted = try allocator.alloc(env_mod.SectionNote, rep.notes.len);
+    defer allocator.free(notes_sorted);
+    @memcpy(notes_sorted, rep.notes);
+    std.mem.sort(env_mod.SectionNote, notes_sorted, {}, lessThanNoteByText);
+    for (notes_sorted) |n| {
+        hasher.update("note:");
+        hasher.update(n.text);
+        if (n.ref) |r| {
+            hasher.update("|ref=");
+            hasher.update(r.pdf);
+            var pbuf: [16]u8 = undefined;
+            const ps = std.fmt.bufPrint(&pbuf, "@{d}", .{r.page}) catch "";
+            hasher.update(ps);
+        }
+        hasher.update("\x00");
+    }
+
+    // Instances (gathered via the same refs set used for requirements).
+    var refs: std.StringHashMapUnmanaged(void) = .empty;
+    collectSectionRefs(allocator, sec, &refs);
+    var insts: std.StringHashMapUnmanaged(Instance) = .empty;
+    collectSectionInstances(sec, &insts, allocator);
+    var it = refs.iterator();
+    while (it.next()) |e| {
+        const rd = e.key_ptr.*;
+        if (insts.contains(rd)) continue;
+        for (block.instances) |inst| {
+            if (std.mem.eql(u8, inst.ref_des, rd)) {
+                insts.put(allocator, rd, inst) catch {};
+                break;
+            }
+        }
+    }
+    var refs_sorted: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer refs_sorted.deinit(allocator);
+    var it2 = insts.iterator();
+    while (it2.next()) |e| try refs_sorted.append(allocator, e.key_ptr.*);
+    std.mem.sort([]const u8, refs_sorted.items, {}, lessThanStr);
+    for (refs_sorted.items) |rd| {
+        const inst = insts.get(rd).?;
+        hasher.update("inst:");
+        hasher.update(inst.ref_des);
+        hasher.update("|");
+        hasher.update(inst.component);
+        hasher.update("|");
+        hasher.update(inst.value);
+        hasher.update("|pins:");
+        try hashPinBindingsForRef(&hasher, block, inst.ref_des, allocator);
+        hasher.update("|req:");
+        for (inst.requirements) |r| {
+            hasher.update(r.text);
+            if (r.ref) |ref| {
+                hasher.update("@");
+                hasher.update(ref.pdf);
+                var pbuf: [16]u8 = undefined;
+                const ps = std.fmt.bufPrint(&pbuf, ":{d}", .{ref.page}) catch "";
+                hasher.update(ps);
+            }
+            hasher.update(";");
+        }
+        hasher.update("\x00");
+    }
+
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    const hex_chars = "0123456789abcdef";
+    var out = try allocator.alloc(u8, 64);
+    for (digest, 0..) |b, i| {
+        out[i * 2] = hex_chars[b >> 4];
+        out[i * 2 + 1] = hex_chars[b & 0x0f];
+    }
+    return out;
+}
+
+fn lessThanNoteByText(_: void, a: env_mod.SectionNote, b: env_mod.SectionNote) bool {
+    return std.mem.lessThan(u8, a.text, b.text);
+}
+
+fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+fn hashPinBindingsForRef(
+    hasher: *std.crypto.hash.sha2.Sha256,
+    block: *const DesignBlock,
+    ref_des: []const u8,
+    allocator: std.mem.Allocator,
+) !void {
+    var bindings: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer bindings.deinit(allocator);
+    for (block.nets) |net| {
+        for (net.pins) |p| {
+            if (!std.mem.eql(u8, p.ref_des, ref_des)) continue;
+            const s = try std.fmt.allocPrint(allocator, "{s}={s}", .{ p.pin, net.name });
+            try bindings.append(allocator, s);
+        }
+    }
+    std.mem.sort([]const u8, bindings.items, {}, lessThanStr);
+    for (bindings.items) |s| {
+        hasher.update(s);
+        hasher.update(",");
+    }
 }
 
 fn collectSectionRefs(

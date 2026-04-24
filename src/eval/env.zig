@@ -124,6 +124,166 @@ pub const Note = struct {
     text: []const u8,
 };
 
+/// Reference to a page in an uploaded datasheet PDF. Used by both section
+/// notes (design-specific commentary on a section) and component requirements
+/// (library-level rules for using a part).
+pub const NoteRef = struct {
+    /// Filename in `lib/datasheets/` (e.g. `"stm32n657-rev4.pdf"`).
+    pdf: []const u8,
+    /// 1-based page index. 0 means "link to the PDF without a specific page".
+    page: u32 = 0,
+    /// Verbatim datasheet text the rule was sourced from. When present, the
+    /// `/pdf-view/` viewer auto-highlights this string on load — so a click
+    /// from a requirement lands on the cited page with the source paragraph
+    /// visibly marked. Keep short and distinctive (one line on the PDF) so
+    /// the per-span match in the viewer reliably finds it.
+    quote: ?[]const u8 = null,
+};
+
+/// A design-specific note attached to a section. Stored inline in the design's
+/// `.sexp` via `(note "text" (ref "file.pdf" (page N)))`.
+pub const SectionNote = struct {
+    text: []const u8,
+    ref: ?NoteRef = null,
+};
+
+/// A library-level rule for using a component correctly. Stored in the
+/// component's `lib/components/<name>.sexp` via
+/// `(requirement "text" (ref "file.pdf" (page N)))`. Used to validate that
+/// designs using the part follow the datasheet's requirements. An optional
+/// `(check ...)` clause turns the requirement into a build-time assertion —
+/// the check engine walks the design and marks the requirement pass/fail
+/// instead of leaving it reviewer-judged.
+pub const Requirement = struct {
+    text: []const u8,
+    ref: ?NoteRef = null,
+    check: ?Check = null,
+};
+
+/// Tagged union of automated-check primitives that can hang off a
+/// Requirement. Each variant names a pattern the check engine knows how
+/// to match against a live design, keyed to one placement of the part.
+///
+/// Pin references use the *function* name declared in `lib/pinouts/*.sexp`
+/// (e.g. "VDD", "EP") — not a physical pin ID — because the same physical
+/// pin can carry different nets depending on how a design wires it.
+pub const Check = union(enum) {
+    /// `(connected (pin "A") (pin "B"))` — both pins of this instance must
+    /// resolve to the same net. Catches missed tie-together of EP↔VSS,
+    /// VDD-domain shorts, etc.
+    connected: struct { pin_a: []const u8, pin_b: []const u8 },
+    /// `(decoupling (pin "A") (pin "B") (min-uf F))` — at least one
+    /// capacitor, of value ≥ F µF, must bridge the nets carrying pin A and
+    /// pin B on this instance. Implements the canonical bypass-cap rule
+    /// ("VDD needs ≥4.7µF to VSS").
+    decoupling: struct { pin_a: []const u8, pin_b: []const u8, min_uf: f64 },
+    /// `(pullup-range (pin "P") (net "N") (min-ohms L) (max-ohms H))` — a
+    /// resistor must bridge the net seen on pin P and the named net N, with
+    /// value in the given range. Covers PROG-style "charge-current set
+    /// resistor must be 2k–67k" checks.
+    pullup_range: struct { pin: []const u8, target_net: []const u8, min_ohms: f64, max_ohms: f64 },
+    /// `(voltage-range (pin "V") (min L) (max H))` — the port declared on
+    /// the net wired to pin V must fall inside the range L..H. Covers
+    /// "VDD input supply must be 3.75–6V" style envelope checks against
+    /// the design's declared rails.
+    voltage_range: struct { pin: []const u8, min_v: f64, max_v: f64 },
+};
+
+/// Parse `(check (<primitive> ...))` nested inside a `(requirement ...)`
+/// body. Returns null if the form isn't a recognized check.
+pub fn parseCheck(node: @import("../sexpr/ast.zig").Node) ?Check {
+    const children = node.asList() orelse return null;
+    if (children.len < 2) return null;
+    const head = children[0].asAtom() orelse return null;
+    if (!std.mem.eql(u8, head, "check")) return null;
+    const body = children[1];
+    const body_children = body.asList() orelse return null;
+    if (body_children.len < 1) return null;
+    const kind = body_children[0].asAtom() orelse return null;
+
+    if (std.mem.eql(u8, kind, "connected")) {
+        if (body_children.len < 3) return null;
+        const a = pinArg(body_children[1]) orelse return null;
+        const b = pinArg(body_children[2]) orelse return null;
+        return .{ .connected = .{ .pin_a = a, .pin_b = b } };
+    }
+    if (std.mem.eql(u8, kind, "decoupling")) {
+        if (body_children.len < 4) return null;
+        const a = pinArg(body_children[1]) orelse return null;
+        const b = pinArg(body_children[2]) orelse return null;
+        const min_uf = namedNumberArg(body_children[3], "min-uf") orelse return null;
+        return .{ .decoupling = .{ .pin_a = a, .pin_b = b, .min_uf = min_uf } };
+    }
+    if (std.mem.eql(u8, kind, "pullup-range")) {
+        if (body_children.len < 5) return null;
+        const p = pinArg(body_children[1]) orelse return null;
+        const net_name = netArg(body_children[2]) orelse return null;
+        const lo = namedNumberArg(body_children[3], "min-ohms") orelse return null;
+        const hi = namedNumberArg(body_children[4], "max-ohms") orelse return null;
+        return .{ .pullup_range = .{ .pin = p, .target_net = net_name, .min_ohms = lo, .max_ohms = hi } };
+    }
+    if (std.mem.eql(u8, kind, "voltage-range")) {
+        if (body_children.len < 4) return null;
+        const p = pinArg(body_children[1]) orelse return null;
+        const lo = namedNumberArg(body_children[2], "min") orelse return null;
+        const hi = namedNumberArg(body_children[3], "max") orelse return null;
+        return .{ .voltage_range = .{ .pin = p, .min_v = lo, .max_v = hi } };
+    }
+    return null;
+}
+
+fn pinArg(node: @import("../sexpr/ast.zig").Node) ?[]const u8 {
+    const c = node.asList() orelse return null;
+    if (c.len < 2) return null;
+    const h = c[0].asAtom() orelse return null;
+    if (!std.mem.eql(u8, h, "pin")) return null;
+    return c[1].asString() orelse c[1].asAtom();
+}
+
+fn netArg(node: @import("../sexpr/ast.zig").Node) ?[]const u8 {
+    const c = node.asList() orelse return null;
+    if (c.len < 2) return null;
+    const h = c[0].asAtom() orelse return null;
+    if (!std.mem.eql(u8, h, "net")) return null;
+    return c[1].asString() orelse c[1].asAtom();
+}
+
+fn namedNumberArg(node: @import("../sexpr/ast.zig").Node, name: []const u8) ?f64 {
+    const c = node.asList() orelse return null;
+    if (c.len < 2) return null;
+    const h = c[0].asAtom() orelse return null;
+    if (!std.mem.eql(u8, h, name)) return null;
+    return c[1].asNumber();
+}
+
+/// Parse a `(ref "file.pdf" (page N))` form into a `NoteRef`. Returns null
+/// if the node isn't a well-formed ref (wrong head atom, missing pdf
+/// filename). Used by section-note and requirement parsers.
+pub fn parseNoteRef(node: @import("../sexpr/ast.zig").Node) ?NoteRef {
+    const children = node.asList() orelse return null;
+    if (children.len < 2) return null;
+    const head = children[0].asAtom() orelse return null;
+    if (!std.mem.eql(u8, head, "ref")) return null;
+    const pdf = children[1].asString() orelse return null;
+    var page: u32 = 0;
+    var quote: ?[]const u8 = null;
+    for (children[2..]) |child| {
+        const sub = child.asList() orelse continue;
+        if (sub.len < 2) continue;
+        const sub_head = sub[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, sub_head, "page")) {
+            if (sub[1].asNumber()) |n| {
+                if (n >= 0 and n < @as(f64, @floatFromInt(std.math.maxInt(u32)))) {
+                    page = @intFromFloat(n);
+                }
+            }
+        } else if (std.mem.eql(u8, sub_head, "quote")) {
+            if (sub[1].asString()) |s| quote = s;
+        }
+    }
+    return .{ .pdf = pdf, .page = page, .quote = quote };
+}
+
 /// A visual group.
 pub const Group = struct {
     name: []const u8,
@@ -164,6 +324,13 @@ pub const Instance = struct {
     pinout: []const u8 = "",
     /// Component properties (manufacturer, mpn, etc.)
     properties: []const Property = &.{},
+    /// PDF filenames in `lib/datasheets/` declared by the component in its
+    /// library definition. Copied onto every instance so downstream renderers
+    /// don't have to re-query the evaluator's cache.
+    datasheets: []const []const u8 = &.{},
+    /// Library-declared rules for using this part. Read-only during review.
+    /// Edited by modifying `lib/components/<component>.sexp`.
+    requirements: []const Requirement = &.{},
     /// Schematic-level attributes (e.g., "np0", "x7r" for dielectric type)
     attrs: []const []const u8 = &.{},
     /// Optional multi-part breakdown. Empty = single-part (render as one hub).
@@ -245,8 +412,10 @@ pub const Section = struct {
     name: []const u8,
     /// Optional description shown under the section title.
     description: []const u8 = "",
-    /// Design notes shown at the bottom of the section.
-    notes: []const []const u8 = &.{},
+    /// Design notes shown at the bottom of the section. Each carries optional
+    /// datasheet page references so reviewers can jump from a note to the
+    /// exact page in `lib/datasheets/` that backs the decision.
+    notes: []const SectionNote = &.{},
     /// Instances declared inside this section.
     instances: []const Instance = &.{},
     /// Pin assignments for top-level instances referenced inside this section.

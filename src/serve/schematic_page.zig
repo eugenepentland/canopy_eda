@@ -7,6 +7,7 @@ const bom = @import("../bom.zig");
 const render_html = @import("../render_html.zig");
 const review = @import("../review.zig");
 const review_state_mod = @import("../review_state.zig");
+const req_checks = @import("../req_checks.zig");
 const assets_css = @import("assets_css.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
@@ -58,10 +59,22 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
     const review_doc: ?review.ReviewDoc = blk: {
         var doc = review.buildReview(ctx.allocator, name, block, eval.assertions.items, violations) catch break :blk null;
         const stored_state = review_state_mod.loadState(ctx.allocator, ctx.project_dir, name) catch review.ReviewState{};
-        var live_slugs = ctx.allocator.alloc([]const u8, doc.sections.len) catch break :blk null;
-        for (doc.sections, 0..) |s, i| live_slugs[i] = s.slug;
-        doc.review_state = review_state_mod.reconcile(ctx.allocator, stored_state, live_slugs) catch review.ReviewState{};
+        const live_slugs = ctx.allocator.alloc([]const u8, doc.sections.len) catch break :blk null;
+        const live_hashes = ctx.allocator.alloc([]const u8, doc.sections.len) catch break :blk null;
+        for (doc.sections, 0..) |s, i| {
+            live_slugs[i] = s.slug;
+            live_hashes[i] = review.sectionContentHash(ctx.allocator, s, block, block.sections[i]) catch "";
+        }
+        doc.review_state = review_state_mod.reconcile(ctx.allocator, stored_state, live_slugs, live_hashes) catch review.ReviewState{};
         break :blk doc;
+    };
+
+    // Run the requirement-attached (check ...) primitives once per design
+    // load so the per-hub dropdown can show ✓/✗ next to each library-
+    // declared rule. Keyed by ref_des; same-order alignment with
+    // `inst.requirements`.
+    const check_results = req_checks.runChecks(ctx.allocator, &eval, block) catch blk: {
+        break :blk std.StringHashMapUnmanaged([]const req_checks.Result).empty;
     };
 
     const html = render_html.renderToHtml(
@@ -72,6 +85,7 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
         assets_css.NAVBAR_CSS,
         status,
         review_doc,
+        &check_results,
     ) catch |err| {
         res.status = 500;
         res.body = try std.fmt.allocPrint(ctx.allocator, "Render error: {s}", .{@errorName(err)});

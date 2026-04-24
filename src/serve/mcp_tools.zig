@@ -394,7 +394,12 @@ fn callInner(
             };
             if (av.object.get("approved")) |ap| if (ap == .bool) {
                 const reviewer: []const u8 = optionalString(args_val, "reviewer") orelse "";
-                review_state_mod.setApproval(allocator, project_dir, name, slug, ap.bool, reviewer) catch |err| {
+                // MCP approval path: leave content_hash empty. This means the
+                // approval is stamped without a hash baseline, which by the
+                // `reconcile()` rule keeps it always-fresh. That's acceptable
+                // for automated workflows; the UI path computes the hash so
+                // human approvals get stale-detection.
+                review_state_mod.setApproval(allocator, project_dir, name, slug, ap.bool, reviewer, "") catch |err| {
                     try w.print("error: approve failed: {s}", .{@errorName(err)});
                     return false;
                 };

@@ -1631,6 +1631,299 @@ pub fn editNoteCore(
     return writeAndRebuild(allocator, project_dir, name, buf.items, desc);
 }
 
+/// Splice a new `(note "text" [(ref "file.pdf" (page N))])` into the body of
+/// a `(section "NAME" ...)` form. Inserts immediately before the closing `)`
+/// of the section. `pdf` is optional — when non-empty, emits the `(ref ...)`
+/// sub-form; when the page is 0 it's omitted. This is the design-specific
+/// half of the two-tier notes model (design notes live in the .sexp; library
+/// requirements live in `lib/components/<...>.sexp`).
+pub fn addSectionNoteCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    section_name: []const u8,
+    text: []const u8,
+    pdf: []const u8,
+    page: u32,
+) EditError!MutationResult {
+    if (text.len == 0) return error.InvalidSource;
+    const source = try readDesignSource(allocator, project_dir, name);
+    defer allocator.free(source);
+
+    const needle = try std.fmt.allocPrint(allocator, "(section \"{s}\"", .{section_name});
+    defer allocator.free(needle);
+    const sec_start = std.mem.indexOf(u8, source, needle) orelse return error.SectionNotFound;
+    if (std.mem.indexOfPos(u8, source, sec_start + needle.len, needle) != null) return error.AmbiguousMatch;
+    const sec_end = findFormEnd(source, sec_start) orelse return error.MalformedSource;
+    const insert_at = sec_end - 1;
+
+    // Indent heuristic: match the first non-whitespace sibling inside the
+    // section body so new notes sit alongside existing forms.
+    const indent = detectSectionIndent(source, sec_start);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try w.writeAll(source[0..insert_at]);
+    try w.writeByte('\n');
+    try w.writeAll(indent);
+    try w.writeAll("(note \"");
+    for (text) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        else => try w.writeByte(c),
+    };
+    try w.writeAll("\"");
+    if (pdf.len > 0) {
+        try w.writeAll(" (ref \"");
+        for (pdf) |c| switch (c) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            else => try w.writeByte(c),
+        };
+        try w.writeAll("\"");
+        if (page > 0) try w.print(" (page {d})", .{page});
+        try w.writeAll(")");
+    }
+    try w.writeAll(")\n");
+    try w.writeAll(source[insert_at..]);
+
+    const desc = try std.fmt.allocPrint(allocator, "add_section_note {s}", .{section_name});
+    defer allocator.free(desc);
+    return writeAndRebuild(allocator, project_dir, name, buf.items, desc);
+}
+
+/// Remove the `idx`-th `(note ...)` form inside a named section (0-based,
+/// in source order). Used by the review UI when a reviewer clicks the
+/// delete button on a design note.
+pub fn removeSectionNoteCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    section_name: []const u8,
+    idx: usize,
+) EditError!MutationResult {
+    const source = try readDesignSource(allocator, project_dir, name);
+    defer allocator.free(source);
+
+    const needle = try std.fmt.allocPrint(allocator, "(section \"{s}\"", .{section_name});
+    defer allocator.free(needle);
+    const sec_start = std.mem.indexOf(u8, source, needle) orelse return error.SectionNotFound;
+    if (std.mem.indexOfPos(u8, source, sec_start + needle.len, needle) != null) return error.AmbiguousMatch;
+    const sec_end = findFormEnd(source, sec_start) orelse return error.MalformedSource;
+
+    // Walk `(note ` forms that are direct children of the section (depth 1
+    // relative to the section). Skip anything nested in sub-sections or
+    // instances so the caller's idx matches what the review UI shows.
+    // String literals and `;` line comments are skipped so parens inside
+    // them don't confuse depth tracking.
+    var cursor: usize = sec_start + 1;
+    var depth: usize = 1;
+    var note_idx: usize = 0;
+    while (cursor < sec_end) {
+        const ch = source[cursor];
+        if (ch == ';') {
+            while (cursor < sec_end and source[cursor] != '\n') : (cursor += 1) {}
+            continue;
+        }
+        if (ch == '(') {
+            if (depth == 1 and std.mem.startsWith(u8, source[cursor..], "(note")) {
+                const end = findFormEnd(source, cursor) orelse return error.MalformedSource;
+                if (note_idx == idx) {
+                    var trim_start: usize = cursor;
+                    while (trim_start > 0 and (source[trim_start - 1] == ' ' or source[trim_start - 1] == '\t')) : (trim_start -= 1) {}
+                    if (trim_start > 0 and source[trim_start - 1] == '\n') trim_start -= 1;
+                    var trim_end: usize = end;
+                    if (trim_end < source.len and source[trim_end] == '\n') trim_end += 1;
+
+                    var buf: std.ArrayListUnmanaged(u8) = .empty;
+                    defer buf.deinit(allocator);
+                    const w = buf.writer(allocator);
+                    try w.writeAll(source[0..trim_start]);
+                    try w.writeAll(source[trim_end..]);
+
+                    const desc = try std.fmt.allocPrint(allocator, "remove_section_note {s}[{d}]", .{ section_name, idx });
+                    defer allocator.free(desc);
+                    return writeAndRebuild(allocator, project_dir, name, buf.items, desc);
+                }
+                note_idx += 1;
+                cursor = end;
+                continue;
+            }
+            depth += 1;
+        } else if (ch == ')') {
+            depth -= 1;
+            if (depth == 0) break;
+        } else if (ch == '"') {
+            var j: usize = cursor + 1;
+            while (j < source.len and source[j] != '"') : (j += 1) {
+                if (source[j] == '\\' and j + 1 < source.len) j += 1;
+            }
+            cursor = j + 1;
+            continue;
+        }
+        cursor += 1;
+    }
+
+    return error.NoteNotFound;
+}
+
+/// Splice a `(datasheet "file.pdf")` entry into the component definition at
+/// `lib/components/<component>.sexp`. Dedupes — a duplicate filename returns
+/// `DuplicateImport` rather than re-adding. Lets the schematic sidebar link
+/// a PDF to a part with one click instead of editing the library by hand.
+///
+/// The library file isn't rebuilt into a design (it's a library, not a
+/// design), so this path bypasses the usual writeAndRebuild flow: we do a
+/// quick parse-check of the result, snapshot if possible, and bump a
+/// server-wide version the pinout cache reads off.
+pub fn addComponentDatasheetCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    component_name: []const u8,
+    pdf: []const u8,
+) EditError!MutationResult {
+    if (pdf.len == 0) return error.InvalidSource;
+    if (!safeLibName(component_name)) return error.InvalidSource;
+    if (!safePdfName(pdf)) return error.InvalidSource;
+
+    const path = try libComponentPath(allocator, project_dir, component_name);
+    defer allocator.free(path);
+    const source = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return error.CannotReadDesign;
+    defer allocator.free(source);
+
+    if (std.mem.indexOf(u8, source, "(component") == null) return error.MalformedSource;
+    const form_start = std.mem.indexOf(u8, source, "(component").?;
+    const form_end = findFormEnd(source, form_start) orelse return error.MalformedSource;
+
+    // Dedupe: already linked?
+    const needle = try std.fmt.allocPrint(allocator, "(datasheet \"{s}\")", .{pdf});
+    defer allocator.free(needle);
+    if (std.mem.indexOf(u8, source[form_start..form_end], needle) != null) return error.DuplicateImport;
+
+    // Insert before the closing `)` with matching indent.
+    const insert_at = form_end - 1;
+    const indent = detectComponentIndent(source, form_start);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try w.writeAll(source[0..insert_at]);
+    try w.writeByte('\n');
+    try w.writeAll(indent);
+    try w.writeAll("(datasheet \"");
+    for (pdf) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        else => try w.writeByte(c),
+    };
+    try w.writeAll("\")");
+    try w.writeAll(source[insert_at..]);
+
+    try writeLibComponent(path, buf.items);
+    const version = @import("../serve.zig").bumpLiveVersion(component_name);
+    return .{ .version = version, .snapshot = null };
+}
+
+/// Remove a single `(datasheet "file.pdf")` line from
+/// `lib/components/<component>.sexp`. Silently succeeds when the link
+/// didn't exist so UI double-clicks don't 500.
+pub fn removeComponentDatasheetCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    component_name: []const u8,
+    pdf: []const u8,
+) EditError!MutationResult {
+    if (pdf.len == 0) return error.InvalidSource;
+    if (!safeLibName(component_name)) return error.InvalidSource;
+    if (!safePdfName(pdf)) return error.InvalidSource;
+
+    const path = try libComponentPath(allocator, project_dir, component_name);
+    defer allocator.free(path);
+    const source = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return error.CannotReadDesign;
+    defer allocator.free(source);
+
+    const needle = try std.fmt.allocPrint(allocator, "(datasheet \"{s}\")", .{pdf});
+    defer allocator.free(needle);
+    const pos = std.mem.indexOf(u8, source, needle) orelse return error.NoteNotFound;
+    const end = pos + needle.len;
+
+    // Trim preceding whitespace + newline so we don't leave a blank line.
+    var trim_start: usize = pos;
+    while (trim_start > 0 and (source[trim_start - 1] == ' ' or source[trim_start - 1] == '\t')) : (trim_start -= 1) {}
+    if (trim_start > 0 and source[trim_start - 1] == '\n') trim_start -= 1;
+    var trim_end: usize = end;
+    if (trim_end < source.len and source[trim_end] == '\n') trim_end += 1;
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try w.writeAll(source[0..trim_start]);
+    try w.writeAll(source[trim_end..]);
+
+    try writeLibComponent(path, buf.items);
+    const version = @import("../serve.zig").bumpLiveVersion(component_name);
+    return .{ .version = version, .snapshot = null };
+}
+
+fn libComponentPath(allocator: std.mem.Allocator, project_dir: []const u8, component_name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, component_name });
+}
+
+fn writeLibComponent(path: []const u8, new_source: []const u8) EditError!void {
+    const file = std.fs.cwd().createFile(path, .{}) catch return error.CannotWriteDesign;
+    defer file.close();
+    file.writeAll(new_source) catch return error.CannotWriteDesign;
+}
+
+fn safeLibName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (std.mem.indexOf(u8, name, "..") != null) return false;
+    if (std.mem.indexOfAny(u8, name, "/\\") != null) return false;
+    return true;
+}
+
+fn safePdfName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 255) return false;
+    if (std.mem.indexOf(u8, name, "..") != null) return false;
+    if (std.mem.indexOfAny(u8, name, "/\\\"") != null) return false;
+    for (name) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_' or c == '-' or c == '.';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/// Indent prefix for the first child inside a `(component ...)` form —
+/// library files are typically indented with two spaces, but follow the
+/// file's existing style when possible.
+fn detectComponentIndent(source: []const u8, form_start: usize) []const u8 {
+    var i: usize = form_start;
+    while (i < source.len and source[i] != '\n') : (i += 1) {}
+    if (i >= source.len) return "  ";
+    i += 1;
+    const indent_start = i;
+    while (i < source.len and (source[i] == ' ' or source[i] == '\t')) : (i += 1) {}
+    if (i == indent_start) return "  ";
+    return source[indent_start..i];
+}
+
+/// Return the indentation prefix (leading whitespace) of the first child
+/// form inside a `(section ...)` body, so splice points match the file's
+/// existing indent style. Falls back to two spaces when the section is
+/// empty.
+fn detectSectionIndent(source: []const u8, sec_start: usize) []const u8 {
+    // Skip past `(section "NAME"` opening — find the first newline after it.
+    var i: usize = sec_start;
+    while (i < source.len and source[i] != '\n') : (i += 1) {}
+    if (i >= source.len) return "  ";
+    i += 1;
+    const indent_start = i;
+    while (i < source.len and (source[i] == ' ' or source[i] == '\t')) : (i += 1) {}
+    if (i == indent_start) return "  ";
+    return source[indent_start..i];
+}
+
 /// Add a single item to the top-level `(import ...)` list. If the item is
 /// already present (word-boundary match), returns `DuplicateImport` without
 /// modifying the file. Fails with `ImportsFormMissing` if the design has no

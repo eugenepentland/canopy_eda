@@ -322,13 +322,15 @@ fn writeSections(w: anytype, sections: []const review.SectionReport, state: revi
             .review => "pill-warn",
         };
         const rs = findState(state, s.slug);
-        const card_class: []const u8 = if (rs.approved) " sec-card-approved" else "";
+        const card_class: []const u8 = if (rs.approved and !rs.approval_stale) " sec-card-approved" else if (rs.approval_stale) " sec-card-stale" else "";
         try w.print("<div class=\"sec-card{s}\" id=\"sec-{s}\" data-slug=\"{s}\">", .{ card_class, s.slug, s.slug });
         try w.writeAll("<div class=\"sec-head\"><h3>");
         try writeHtmlEscaped(w, s.name);
         try w.print("</h3><span class=\"pill {s}\">{s}</span>", .{ status_pill, @tagName(s.status) });
-        if (rs.approved) {
+        if (rs.approved and !rs.approval_stale) {
             try w.writeAll("<span class=\"pill pill-approved\">APPROVED</span>");
+        } else if (rs.approval_stale) {
+            try w.writeAll("<span class=\"pill pill-stale\" title=\"Section content changed since approval\">⚠ RE-APPROVAL NEEDED</span>");
         }
         try w.print("<span class=\"muted sec-count\">{d} component{s}</span>", .{ s.instance_count, if (s.instance_count == 1) "" else "s" });
         try w.writeAll("</div>");
@@ -359,16 +361,49 @@ fn writeSections(w: anytype, sections: []const review.SectionReport, state: revi
             try w.writeAll("</ul></details>");
         }
 
-        if (s.notes.len > 0) {
-            try w.writeAll("<details class=\"sec-notes\"><summary>Design notes");
-            try w.print(" ({d})</summary><ul>", .{s.notes.len});
-            for (s.notes) |n| {
-                try w.writeAll("<li>");
-                try writeHtmlEscaped(w, n);
-                try w.writeAll("</li>");
+        // Design-specific notes: stored inline in the design's .sexp as
+        // `(note "..." (ref "foo.pdf" (page N)))`. Editable from the GUI —
+        // add/delete hit /api/section-note/:name/(add|remove) which splices
+        // the form directly into the .sexp source.
+        try w.writeAll("<details class=\"sec-notes\" open><summary>Design notes");
+        try w.print(" ({d})</summary><ul class=\"note-list\">", .{s.notes.len});
+        for (s.notes, 0..) |n, ni| {
+            try w.print("<li data-index=\"{d}\">", .{ni});
+            try writeHtmlEscaped(w, n.text);
+            if (n.ref) |r| {
+                try w.writeAll(" <a class=\"note-ref\" target=\"_blank\" href=\"/pdf-view/");
+                try writeHtmlEscaped(w, r.pdf);
+                var has_query = false;
+                if (r.page > 0) {
+                    try w.print("?page={d}", .{r.page});
+                    has_query = true;
+                }
+                if (r.quote) |q| {
+                    try w.writeAll(if (has_query) "&highlight=" else "?highlight=");
+                    try writeUrlEncoded(w, q);
+                }
+                try w.writeAll("\">📄 ");
+                try writeHtmlEscaped(w, r.pdf);
+                if (r.page > 0) try w.print(" p.{d}", .{r.page});
+                try w.writeAll("</a>");
             }
-            try w.writeAll("</ul></details>");
+            try w.writeAll(" <button class=\"note-del\" title=\"Delete note\">✕</button></li>");
         }
+        try w.writeAll("</ul>");
+        try w.writeAll("<div class=\"note-add\" data-section=\"");
+        try writeHtmlEscaped(w, s.name);
+        try w.writeAll("\">");
+        try w.writeAll("<input type=\"text\" class=\"note-new-text\" placeholder=\"Add a design note…\">");
+        try w.writeAll("<select class=\"note-new-pdf\"><option value=\"\">(no datasheet)</option></select>");
+        try w.writeAll("<input type=\"number\" min=\"0\" class=\"note-new-page\" placeholder=\"page\">");
+        try w.writeAll("<button class=\"note-add-btn\">Add</button>");
+        try w.writeAll("</div></details>");
+
+        // Component-level requirements render per-hub on the schematic card
+        // itself (see `writeHubRequirements` in render_html.zig). They sit
+        // right under the hub's SVG so the reviewer sees datasheet-derived
+        // rules in the same visual row they're checking pins on — no
+        // duplicate list at the section-summary level here.
 
         if (s.violations.len > 0) {
             try w.writeAll("<details open class=\"sec-vios\"><summary>Violations");
@@ -399,7 +434,7 @@ pub fn writeChecklist(w: anytype, rs: review.SectionReviewState) !void {
     const checked_count = countChecked(rs.items);
     try w.writeAll("<details class=\"sec-checklist\" open><summary>Review checklist");
     try w.print(" <span class=\"chk-progress\">({d}/{d})</span>", .{ checked_count, rs.items.len });
-    if (rs.approved) {
+    if (rs.approved and !rs.approval_stale) {
         try w.writeAll(" <span class=\"chk-status chk-status-approved\">Approved");
         if (rs.approved_by.len > 0) {
             try w.writeAll(" by ");
@@ -410,6 +445,17 @@ pub fn writeChecklist(w: anytype, rs: review.SectionReviewState) !void {
             try writeHtmlEscaped(w, rs.approved_at);
         }
         try w.writeAll("</span>");
+    } else if (rs.approval_stale) {
+        try w.writeAll(" <span class=\"chk-status chk-status-stale\">⚠ Section changed since approval");
+        if (rs.approved_by.len > 0) {
+            try w.writeAll(" by ");
+            try writeHtmlEscaped(w, rs.approved_by);
+        }
+        if (rs.approved_at.len > 0) {
+            try w.writeAll(" on ");
+            try writeHtmlEscaped(w, rs.approved_at);
+        }
+        try w.writeAll(" — re-approve to refresh.</span>");
     } else {
         try w.writeAll(" <span class=\"chk-status chk-status-pending\">Pending</span>");
     }
@@ -433,8 +479,10 @@ pub fn writeChecklist(w: anytype, rs: review.SectionReviewState) !void {
     try w.writeAll("<input type=\"text\" class=\"chk-reviewer\" placeholder=\"Reviewer name\" value=\"");
     try writeHtmlEscaped(w, rs.approved_by);
     try w.writeAll("\">");
-    if (rs.approved) {
+    if (rs.approved and !rs.approval_stale) {
         try w.writeAll("<button class=\"chk-approve-btn\" data-approve=\"false\">Unapprove</button>");
+    } else if (rs.approval_stale) {
+        try w.writeAll("<button class=\"chk-approve-btn\" data-approve=\"true\">Re-approve section</button>");
     } else {
         try w.writeAll("<button class=\"chk-approve-btn\" data-approve=\"true\">Approve section</button>");
     }
@@ -445,7 +493,7 @@ pub fn findState(state: review.ReviewState, slug: []const u8) review.SectionRevi
     for (state.sections) |s| {
         if (std.mem.eql(u8, s.section_slug, slug)) return s;
     }
-    return .{ .section_slug = slug, .items = &.{}, .approved = false, .approved_by = "", .approved_at = "" };
+    return .{ .section_slug = slug, .items = &.{}, .approved = false, .approved_by = "", .approved_at = "", .content_hash = "", .approval_stale = false };
 }
 
 fn countChecked(items: []const review.ChecklistItem) usize {
@@ -511,6 +559,18 @@ fn writeHtmlEscaped(w: anytype, s: []const u8) !void {
     };
 }
 
+fn writeUrlEncoded(w: anytype, s: []const u8) !void {
+    for (s) |c| {
+        const safe = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.' or c == '~';
+        if (safe) {
+            try w.writeByte(c);
+        } else {
+            try w.print("%{X:0>2}", .{c});
+        }
+    }
+}
+
 const REVIEW_CSS =
     \\body{margin:0;background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
     \\.review-wrap{max-width:1100px;margin:0 auto;padding:24px 20px 48px;}
@@ -573,7 +633,26 @@ const REVIEW_CSS =
     \\.consumer-table th{font-size:0.7rem;background:transparent;}
     \\.consumer-table td{font-family:"SF Mono","Fira Code",monospace;}
     \\.pill-approved{background:#0d3a1f;color:#3fb950;}
+    \\.pill-stale{background:#3d2c05;color:#e3b341;}
     \\.sec-card-approved{border-left:3px solid #3fb950;}
+    \\.sec-card-stale{border-left:3px solid #e3b341;background:linear-gradient(90deg,rgba(227,179,65,0.06),transparent 240px);}
+    \\.chk-status-stale{background:#3d2c05;color:#e3b341;}
+    \\.note-list{list-style:none;padding:0;margin:6px 0 0 0;}
+    \\.note-list li{display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid #1a1f27;font-size:0.88rem;color:#c9d1d9;}
+    \\.note-list li:last-child{border-bottom:0;}
+    \\.note-list .note-del{margin-left:auto;background:transparent;color:#6e7681;border:0;cursor:pointer;font-size:0.85rem;padding:2px 6px;border-radius:3px;}
+    \\.note-list .note-del:hover{background:#3a0d16;color:#f85149;}
+    \\.note-ref{color:#58a6ff;text-decoration:none;font-size:0.82rem;}
+    \\.note-ref:hover{text-decoration:underline;}
+    \\.note-add{display:flex;gap:6px;margin-top:8px;}
+    \\.note-new-text{flex:1;background:#0a0e14;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:5px 10px;font-size:0.88rem;font-family:inherit;}
+    \\.note-new-pdf,.note-new-page{background:#0a0e14;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:5px 8px;font-size:0.85rem;}
+    \\.note-new-page{width:70px;}
+    \\.note-add-btn{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:5px 14px;font-size:0.85rem;cursor:pointer;font-weight:600;}
+    \\.note-add-btn:hover{background:#30363d;border-color:#58a6ff;}
+    \\.sec-reqs .req-group{margin:8px 0;padding-left:12px;border-left:2px solid #30363d;}
+    \\.sec-reqs .req-head{font-size:0.85rem;color:#8b949e;margin-bottom:4px;}
+    \\.sec-reqs code{background:#21262d;padding:1px 6px;border-radius:3px;font-size:0.82rem;}
     \\.sec-checklist{margin-top:10px;padding-top:8px;border-top:1px solid #21262d;}
     \\.sec-checklist>summary{color:#c9d1d9;font-weight:600;font-size:0.9rem;}
     \\.chk-progress{color:#8b949e;font-weight:400;}
@@ -629,7 +708,15 @@ const CHECKLIST_JS =
     \\      .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r;});
     \\  }
     \\  function base(){return '/api/review-state/'+encodeURIComponent(DESIGN_NAME);}
+    \\  function noteBase(){return '/api/section-note/'+encodeURIComponent(DESIGN_NAME);}
     \\  function sectionSlug(el){var c=el.closest('[data-slug]');return c?c.getAttribute('data-slug'):null;}
+    \\  // Populate the PDF dropdown on every design-note "Add" form from the
+    \\  // list of uploaded datasheets, so reviewers can pin a source link
+    \\  // without editing the .sexp by hand.
+    \\  fetch('/api/datasheets').then(function(r){return r.ok?r.json():{files:[]};}).then(function(j){
+    \\    var files=(j.files||[]).map(function(f){return '<option value="'+f.name+'">'+f.name+'</option>';}).join('');
+    \\    document.querySelectorAll('.note-new-pdf').forEach(function(sel){sel.innerHTML='<option value="">(no datasheet)</option>'+files;});
+    \\  });
     \\  document.addEventListener('change',function(e){
     \\    if(!e.target.classList.contains('chk-box'))return;
     \\    var slug=sectionSlug(e.target);
@@ -658,6 +745,26 @@ const CHECKLIST_JS =
     \\      var slug=sectionSlug(t);if(!slug)return;
     \\      post(base()+'/approve',{section_slug:slug,approved:approved,reviewer:reviewer}).then(function(){location.reload();})
     \\        .catch(function(err){alert('Approve failed: '+err.message);});
+    \\    }else if(t.classList.contains('note-add-btn')){
+    \\      // Design note add: uses section NAME (not slug) because the editor
+    \\      // splices into the .sexp by "(section \"NAME\"" needle match.
+    \\      var addRow=t.closest('.note-add');
+    \\      var section=addRow.getAttribute('data-section');
+    \\      var text=addRow.querySelector('.note-new-text').value.trim();
+    \\      if(!text)return;
+    \\      var pdf=addRow.querySelector('.note-new-pdf').value||'';
+    \\      var page=parseInt(addRow.querySelector('.note-new-page').value,10)||0;
+    \\      post(noteBase()+'/add',{section:section,text:text,pdf:pdf,page:page}).then(function(){location.reload();})
+    \\        .catch(function(err){alert('Add note failed: '+err.message);});
+    \\    }else if(t.classList.contains('note-del')){
+    \\      var li=t.closest('li');
+    \\      var idx=parseInt(li.getAttribute('data-index'),10);
+    \\      var det=t.closest('details');
+    \\      var addRow=det&&det.querySelector('.note-add');
+    \\      var section=addRow&&addRow.getAttribute('data-section');
+    \\      if(isNaN(idx)||!section)return;
+    \\      post(noteBase()+'/remove',{section:section,index:idx}).then(function(){location.reload();})
+    \\        .catch(function(err){alert('Delete note failed: '+err.message);});
     \\    }
     \\  });
     \\})();

@@ -31,6 +31,10 @@ pub const FlatInst = struct {
     value: []const u8,
     symbol: []const u8,
     parts: []const env_mod.Part = &.{},
+    /// Library-declared rules for using this part, copied off the Instance at
+    /// eval time. Lets the schematic renderer emit a per-hub "Requirements"
+    /// dropdown without a second library parse.
+    requirements: []const env_mod.Requirement = &.{},
 };
 
 pub const FlatNet = struct {
@@ -245,6 +249,7 @@ pub const RenderCtx = struct {
                 .value = inst.value,
                 .symbol = inst.symbol,
                 .parts = inst.parts,
+                .requirements = inst.requirements,
             };
             try self.instances.append(self.allocator, flat);
             try self.inst_map.put(self.allocator, rd, flat);

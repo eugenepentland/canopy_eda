@@ -8,6 +8,8 @@ const edit = @import("serve/edit.zig");
 const library = @import("serve/library.zig");
 const upload = @import("serve/upload.zig");
 const upload_package = @import("serve/upload_package.zig");
+const upload_datasheet = @import("serve/upload_datasheet.zig");
+const pdf_viewer = @import("serve/pdf_viewer.zig");
 const footprint_preview = @import("serve/footprint_preview.zig");
 const model = @import("serve/model.zig");
 const schematic_page = @import("serve/schematic_page.zig");
@@ -180,12 +182,18 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     router.post("/api/review-state/:name/item/toggle", api.reviewStateToggleItemApi, .{});
     router.post("/api/review-state/:name/item/delete", api.reviewStateDeleteItemApi, .{});
     router.post("/api/review-state/:name/approve", api.reviewStateApproveApi, .{});
+    router.post("/api/section-note/:name/add", api.addSectionNoteApi, .{});
+    router.post("/api/section-note/:name/remove", api.removeSectionNoteApi, .{});
+    router.post("/api/component-datasheet/:component/add", api.addComponentDatasheetApi, .{});
+    router.post("/api/component-datasheet/:component/remove", api.removeComponentDatasheetApi, .{});
     router.get("/api/designs", api.designsApi, .{});
     router.get("/api/scene-graph/:name", api.sceneGraphApi, .{});
     router.get("/api/block-diagram-json/:name", api.blockDiagramJsonApi, .{});
     router.get("/api/pinout/:name", api.pinoutApi, .{});
-    router.get("/api/datasheet/:name", api.datasheetGetApi, .{});
-    router.post("/api/datasheet/:name", api.datasheetUploadApi, .{});
+    router.post("/api/upload-datasheet", upload_datasheet.uploadDatasheetApi, .{});
+    router.get("/api/datasheets", upload_datasheet.listDatasheetsApi, .{});
+    router.get("/datasheets/:filename", upload_datasheet.serveDatasheetApi, .{});
+    router.get("/pdf-view/:filename", pdf_viewer.pdfViewerPage, .{});
 
     // Edit
     router.post("/api/edit-value/:name", edit.editValueApi, .{});

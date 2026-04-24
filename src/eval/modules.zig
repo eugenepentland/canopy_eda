@@ -80,10 +80,12 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
     var pinout_name: []const u8 = "";
 
     // Known structural fields (not properties)
-    const skip_fields = [_][]const u8{ "symbol", "footprint", "pinout", "component", "parameter", "component-family", "bus", "note" };
+    const skip_fields = [_][]const u8{ "symbol", "footprint", "pinout", "component", "parameter", "component-family", "bus", "note", "datasheet", "requirement" };
 
     var props: std.ArrayListUnmanaged(env_mod.Property) = .empty;
     var buses: std.ArrayListUnmanaged(BusDef) = .empty;
+    var datasheets: std.ArrayListUnmanaged([]const u8) = .empty;
+    var requirements: std.ArrayListUnmanaged(env_mod.Requirement) = .empty;
 
     for (children[1..]) |child| {
         const cl = child.asList() orelse continue;
@@ -102,6 +104,21 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
             footprint_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
         } else if (std.mem.eql(u8, field, "pinout")) {
             pinout_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
+        } else if (std.mem.eql(u8, field, "datasheet")) {
+            const ds = cl[1].asString() orelse (cl[1].asAtom() orelse continue);
+            datasheets.append(self.allocator, ds) catch continue;
+        } else if (std.mem.eql(u8, field, "requirement")) {
+            const text = cl[1].asString() orelse continue;
+            var ref: ?env_mod.NoteRef = null;
+            var chk: ?env_mod.Check = null;
+            for (cl[2..]) |extra| {
+                if (env_mod.parseNoteRef(extra)) |r| {
+                    ref = r;
+                } else if (env_mod.parseCheck(extra)) |c| {
+                    chk = c;
+                }
+            }
+            requirements.append(self.allocator, .{ .text = text, .ref = ref, .check = chk }) catch continue;
         } else if (std.mem.eql(u8, field, "bus")) {
             // (bus "name" pin1 pin2 pin3 ...)
             const bus_name = cl[1].asString() orelse (cl[1].asAtom() orelse continue);
@@ -139,6 +156,8 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
         .buses = buses.toOwnedSlice(self.allocator) catch &.{},
         .is_family = false,
         .param_type = "",
+        .datasheets = datasheets.toOwnedSlice(self.allocator) catch &.{},
+        .requirements = requirements.toOwnedSlice(self.allocator) catch &.{},
     });
 }
 

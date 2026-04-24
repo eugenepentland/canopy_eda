@@ -113,6 +113,15 @@ pub const Evaluator = struct {
         buses: []const BusDef = &.{},
         is_family: bool,
         param_type: []const u8, // "resistance", "capacitance", etc.
+        /// PDF filenames in `lib/datasheets/` that document this part.
+        /// Parsed from `(datasheet "file.pdf")` in the component file.
+        datasheets: []const []const u8 = &.{},
+        /// Rules for using this part correctly (e.g. "VDD must be decoupled
+        /// with 100nF within 3mm"). Parsed from
+        /// `(requirement "text" (ref "file.pdf" (page N)))`. Shared across
+        /// every design that uses the part — used by the review page to
+        /// cross-check design work against the part's rules.
+        requirements: []const env_mod.Requirement = &.{},
     };
 
     pub fn init(allocator: std.mem.Allocator, project_dir: []const u8) Evaluator {

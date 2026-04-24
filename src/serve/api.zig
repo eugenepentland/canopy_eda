@@ -19,6 +19,7 @@ const mcp_tools = @import("mcp_tools.zig");
 const review_mod = @import("../review.zig");
 const review_json_mod = @import("../review_json.zig");
 const review_state_mod = @import("../review_state.zig");
+const edit_mod = @import("edit.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
@@ -145,21 +146,12 @@ pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void
         return;
     };
 
-    // Check for an uploaded datasheet PDF so the pinout panel can decide
-    // whether to show a "View datasheet" link or an upload prompt.
-    const datasheet_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/datasheets/{s}.pdf", .{ ctx.project_dir, name });
-    defer ctx.allocator.free(datasheet_path);
-    const has_datasheet = blk: {
-        std.fs.cwd().access(datasheet_path, .{}) catch break :blk false;
-        break :blk true;
-    };
-
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(ctx.allocator);
 
     try w.writeAll("{\"component\":");
     try writeJsonString(w, name);
-    try w.print(",\"has_datasheet\":{s}", .{if (has_datasheet) "true" else "false"});
+    try writeComponentLibInfo(ctx.allocator, w, ctx.project_dir, name);
     try w.writeAll(",\"pins\":[");
 
     var first_pin = true;
@@ -217,89 +209,92 @@ pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void
     res.body = buf.items;
 }
 
-/// Serve an uploaded datasheet PDF (`lib/datasheets/<component>.pdf`). The
-/// pinout panel links here so the user can cross-check pin assignments
-/// against the real datasheet without leaving the schematic page.
-pub fn datasheetGetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
-    const name = req.param("name") orelse {
-        res.status = 404;
+/// Append `"datasheets":[{name,size}], "requirements":[{text,pdf,page}]` to
+/// the pinout JSON. Reads `lib/components/<name>.sexp` and scans for
+/// `(datasheet ...)` and `(requirement ...)` forms. Emits empty arrays when
+/// the component file isn't found — pinouts without a sibling component
+/// definition (legacy) still render, just with nothing to link to.
+fn writeComponentLibInfo(
+    allocator: std.mem.Allocator,
+    w: anytype,
+    project_dir: []const u8,
+    name: []const u8,
+) !void {
+    const path = try std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, name });
+    defer allocator.free(path);
+    const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 512) catch {
+        try w.writeAll(",\"datasheets\":[],\"requirements\":[]");
         return;
     };
-    if (name.len == 0 or std.mem.indexOfAny(u8, name, "/\\") != null or std.mem.indexOf(u8, name, "..") != null) {
-        res.status = 400;
-        res.body = "invalid component name";
+    const nodes = parser_mod.parse(allocator, content) catch {
+        try w.writeAll(",\"datasheets\":[],\"requirements\":[]");
+        return;
+    };
+    if (nodes.len == 0) {
+        try w.writeAll(",\"datasheets\":[],\"requirements\":[]");
         return;
     }
-    const path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/datasheets/{s}.pdf", .{ ctx.project_dir, name });
-    defer ctx.allocator.free(path);
-    const data = std.fs.cwd().readFileAlloc(ctx.allocator, path, 64 * 1024 * 1024) catch {
-        res.status = 404;
-        res.body = "datasheet not found";
+    const top = nodes[0].asList() orelse {
+        try w.writeAll(",\"datasheets\":[],\"requirements\":[]");
         return;
     };
-    const disposition = try std.fmt.allocPrint(ctx.allocator, "inline; filename=\"{s}.pdf\"", .{name});
-    res.header("Content-Type", "application/pdf");
-    res.header("Content-Disposition", disposition);
-    res.body = data;
+
+    try w.writeAll(",\"datasheets\":[");
+    var first_ds = true;
+    for (top[1..]) |child| {
+        const cl = child.asList() orelse continue;
+        if (cl.len < 2) continue;
+        const head = cl[0].asAtom() orelse continue;
+        if (!std.mem.eql(u8, head, "datasheet")) continue;
+        const ds = cl[1].asString() orelse (cl[1].asAtom() orelse continue);
+        if (!first_ds) try w.writeAll(",");
+        first_ds = false;
+        const size = datasheetSize(allocator, project_dir, ds);
+        try w.writeAll("{\"name\":");
+        try writeJsonString(w, ds);
+        try w.print(",\"size\":{d}}}", .{size});
+    }
+    try w.writeAll("]");
+
+    try w.writeAll(",\"requirements\":[");
+    var first_r = true;
+    for (top[1..]) |child| {
+        const cl = child.asList() orelse continue;
+        if (cl.len < 2) continue;
+        const head = cl[0].asAtom() orelse continue;
+        if (!std.mem.eql(u8, head, "requirement")) continue;
+        const text = cl[1].asString() orelse continue;
+        if (!first_r) try w.writeAll(",");
+        first_r = false;
+        try w.writeAll("{\"text\":");
+        try writeJsonString(w, text);
+        for (cl[2..]) |extra| {
+            if (env_mod.parseNoteRef(extra)) |r| {
+                try w.writeAll(",\"pdf\":");
+                try writeJsonString(w, r.pdf);
+                try w.print(",\"page\":{d}", .{r.page});
+                if (r.quote) |q| {
+                    try w.writeAll(",\"quote\":");
+                    try writeJsonString(w, q);
+                }
+                break;
+            }
+        }
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
 }
 
-/// Accept a raw PDF body and store it at `lib/datasheets/<component>.pdf`,
-/// creating the directory if needed. Overwrites any existing datasheet
-/// for that component. The browser sends the PDF via fetch's `body` so
-/// the whole request body is the file content — no multipart parsing.
-pub fn datasheetUploadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
-    if (name.len == 0 or std.mem.indexOfAny(u8, name, "/\\") != null or std.mem.indexOf(u8, name, "..") != null) {
-        res.status = 400;
-        res.content_type = .JSON;
-        res.body = "{\"ok\":false,\"error\":\"invalid component name\"}";
-        return;
-    }
-    const body = req.body() orelse {
-        res.status = 400;
-        res.content_type = .JSON;
-        res.body = "{\"ok\":false,\"error\":\"empty upload\"}";
-        return;
-    };
-    // Reject anything that doesn't look like a PDF — stray uploads would
-    // otherwise happily overwrite a valid file with junk.
-    if (body.len < 4 or !std.mem.eql(u8, body[0..4], "%PDF")) {
-        res.status = 400;
-        res.content_type = .JSON;
-        res.body = "{\"ok\":false,\"error\":\"not a PDF (missing %PDF header)\"}";
-        return;
-    }
-
-    const dir = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/datasheets", .{ctx.project_dir});
-    defer ctx.allocator.free(dir);
-    std.fs.cwd().makePath(dir) catch {};
-
-    const path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.pdf", .{ dir, name });
-    defer ctx.allocator.free(path);
-    const f = std.fs.cwd().createFile(path, .{ .truncate = true }) catch {
-        res.status = 500;
-        res.content_type = .JSON;
-        res.body = "{\"ok\":false,\"error\":\"write failed\"}";
-        return;
-    };
+/// Stat `lib/datasheets/<name>` and return the file size, or 0 if missing.
+/// Used by the sidebar pinout panel so users can see which declared
+/// datasheets have actually been uploaded without an extra round-trip.
+fn datasheetSize(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) u64 {
+    const path = std.fmt.allocPrint(allocator, "{s}/lib/datasheets/{s}", .{ project_dir, name }) catch return 0;
+    defer allocator.free(path);
+    const f = std.fs.cwd().openFile(path, .{}) catch return 0;
     defer f.close();
-    f.writeAll(body) catch {
-        res.status = 500;
-        res.content_type = .JSON;
-        res.body = "{\"ok\":false,\"error\":\"write failed\"}";
-        return;
-    };
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const w = buf.writer(ctx.allocator);
-    try w.writeAll("{\"ok\":true,\"component\":");
-    try writeJsonString(w, name);
-    try w.print(",\"bytes\":{d}}}", .{body.len});
-    res.content_type = .JSON;
-    res.body = buf.items;
+    const stat = f.stat() catch return 0;
+    return stat.size;
 }
 
 pub fn layoutGetApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
@@ -1435,10 +1430,16 @@ fn buildDocForName(
 
     // Attach reconciled review state. Degrades to empty on missing/malformed
     // files so a design with no reviews/ dir still renders a clean report.
+    // live_hashes lets reconcile flag stale approvals for sections whose
+    // content changed after they were approved.
     const stored_state = review_state_mod.loadState(allocator, project_dir, name) catch review_mod.ReviewState{};
-    var live_slugs = try allocator.alloc([]const u8, doc.sections.len);
-    for (doc.sections, 0..) |s, i| live_slugs[i] = s.slug;
-    doc.review_state = review_state_mod.reconcile(allocator, stored_state, live_slugs) catch review_mod.ReviewState{};
+    const live_slugs = try allocator.alloc([]const u8, doc.sections.len);
+    const live_hashes = try allocator.alloc([]const u8, doc.sections.len);
+    for (doc.sections, 0..) |s, i| {
+        live_slugs[i] = s.slug;
+        live_hashes[i] = review_mod.sectionContentHash(allocator, s, block, block.sections[i]) catch "";
+    }
+    doc.review_state = review_state_mod.reconcile(allocator, stored_state, live_slugs, live_hashes) catch review_mod.ReviewState{};
 
     return doc;
 }
@@ -1446,6 +1447,37 @@ fn buildDocForName(
 fn renderReviewJson(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]const u8 {
     const doc = try buildDocForName(allocator, project_dir, name);
     return try review_json_mod.renderToJson(allocator, doc);
+}
+
+/// Recompute the content hash for a single section so the approve endpoint
+/// can stamp it into review-state. Re-evaluates the design, then locates
+/// the section whose slug matches. Returns "" if the section isn't found.
+fn sectionHashForSlug(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    slug: []const u8,
+) ![]const u8 {
+    const board_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    defer allocator.free(board_path);
+
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+
+    const result = try eval.evalFile(board_path);
+    const block = switch (result) {
+        .design_block => |b| b,
+        .board => |b| @as(*const env_mod.DesignBlock, b.design),
+        else => return "",
+    };
+    const violations = try erc_mod.runErc(allocator, block, project_dir);
+    const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations);
+    for (doc.sections, 0..) |s, i| {
+        if (std.mem.eql(u8, s.slug, slug)) {
+            return review_mod.sectionContentHash(allocator, s, block, block.sections[i]) catch "";
+        }
+    }
+    return "";
 }
 
 /// List free (unassigned) pins on an instance. Thin wrapper over the MCP
@@ -1664,13 +1696,148 @@ pub fn reviewStateApproveApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
     };
     const approved = jsonBoolField(body, "approved") orelse false;
     const reviewer = jsonField(body, "reviewer") orelse "";
-    review_state_mod.setApproval(ctx.allocator, ctx.project_dir, name, slug, approved, reviewer) catch {
+
+    // Re-build the design so the approval stamp pins a hash of the section's
+    // live content — that way the very next build-time reconcile sees the
+    // approval as fresh, and a subsequent edit trips `approval_stale`.
+    const content_hash = if (approved) sectionHashForSlug(ctx.allocator, ctx.project_dir, name, slug) catch "" else "";
+    review_state_mod.setApproval(ctx.allocator, ctx.project_dir, name, slug, approved, reviewer, content_hash) catch {
         res.status = 500;
         return;
     };
     const v = serve_root.bumpLiveVersion(name);
     res.content_type = .JSON;
     res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{v});
+}
+
+/// POST /api/section-note/:name/add — body `{section, text, pdf?, page?}`.
+/// Splices a new `(note "text" [(ref ...)])` into the named section of the
+/// design's .sexp. Returns the new live_version so the browser's 2 s poll
+/// picks up the redraw.
+pub fn addSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        return;
+    };
+    const section = jsonField(body, "section") orelse {
+        res.status = 400;
+        return;
+    };
+    const text = jsonField(body, "text") orelse {
+        res.status = 400;
+        return;
+    };
+    const pdf = jsonField(body, "pdf") orelse "";
+    const page_u = jsonUintField(body, "page") orelse 0;
+    const page: u32 = @intCast(page_u);
+
+    const result = edit_mod.addSectionNoteCore(ctx.allocator, ctx.project_dir, name, section, text, pdf, page) catch |err| {
+        res.status = 500;
+        res.content_type = .JSON;
+        res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"{s}\"}}", .{@errorName(err)});
+        return;
+    };
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
+}
+
+/// POST /api/section-note/:name/remove — body `{section, index}`. Deletes the
+/// nth (0-based) `(note ...)` form nested directly in the named section.
+pub fn removeSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        return;
+    };
+    const section = jsonField(body, "section") orelse {
+        res.status = 400;
+        return;
+    };
+    const idx_u = jsonUintField(body, "index") orelse 0;
+    const idx: usize = @intCast(idx_u);
+
+    const result = edit_mod.removeSectionNoteCore(ctx.allocator, ctx.project_dir, name, section, idx) catch |err| {
+        res.status = 500;
+        res.content_type = .JSON;
+        res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"{s}\"}}", .{@errorName(err)});
+        return;
+    };
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
+}
+
+/// POST /api/component-datasheet/:component/add — body `{pdf: "file.pdf"}`.
+/// Splices a `(datasheet "file.pdf")` entry into
+/// `lib/components/<component>.sexp`. Lets the sidebar link uploaded PDFs
+/// to parts without manual .sexp editing.
+pub fn addComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const component = req.param("component") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        return;
+    };
+    const pdf = jsonField(body, "pdf") orelse {
+        res.status = 400;
+        return;
+    };
+    const result = edit_mod.addComponentDatasheetCore(ctx.allocator, ctx.project_dir, component, pdf) catch |err| {
+        res.status = 500;
+        res.content_type = .JSON;
+        res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"{s}\"}}", .{@errorName(err)});
+        return;
+    };
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
+}
+
+/// POST /api/component-datasheet/:component/remove — body `{pdf: "file.pdf"}`.
+/// Counterpart to /add; unlinks a PDF from the library part.
+pub fn removeComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const component = req.param("component") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        return;
+    };
+    const pdf = jsonField(body, "pdf") orelse {
+        res.status = 400;
+        return;
+    };
+    const result = edit_mod.removeComponentDatasheetCore(ctx.allocator, ctx.project_dir, component, pdf) catch |err| {
+        res.status = 500;
+        res.content_type = .JSON;
+        res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"{s}\"}}", .{@errorName(err)});
+        return;
+    };
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
+}
+
+/// Extract a positive integer value for `"key":N` out of a flat JSON body.
+/// Same shortcut approach as `jsonField`/`jsonBoolField` — no full parser,
+/// but plenty for the small POSTs these endpoints handle.
+fn jsonUintField(body: []const u8, key: []const u8) ?u64 {
+    var buf: [64]u8 = undefined;
+    const marker = std.fmt.bufPrint(&buf, "\"{s}\":", .{key}) catch return null;
+    const start = std.mem.indexOf(u8, body, marker) orelse return null;
+    var i: usize = start + marker.len;
+    while (i < body.len and (body[i] == ' ' or body[i] == '\t')) : (i += 1) {}
+    var end: usize = i;
+    while (end < body.len and body[end] >= '0' and body[end] <= '9') : (end += 1) {}
+    if (end == i) return null;
+    return std.fmt.parseInt(u64, body[i..end], 10) catch null;
 }
 
 /// Extract `"key":"value"` from a flat JSON body. Matches the substring

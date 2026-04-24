@@ -40,7 +40,7 @@ const Allocator = std.mem.Allocator;
 const JsonSection = struct {
     name: []const u8,
     description: []const u8,
-    notes: []const []const u8,
+    notes: []const env_mod.SectionNote,
     x: f64,
     y: f64,
     w: f64,
@@ -518,7 +518,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     const SectionInfo = struct {
         name: []const u8,
         description: []const u8,
-        notes: []const []const u8,
+        notes: []const env_mod.SectionNote,
         cell_indices: std.ArrayListUnmanaged(usize),
     };
     var section_grid: std.ArrayListUnmanaged(SectionInfo) = .empty;
@@ -1534,9 +1534,15 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
         try w.writeAll(",\"notes\":[");
         for (sec.notes, 0..) |note, ni| {
             if (ni > 0) try w.writeAll(",");
+            try w.writeAll("{\"text\":\"");
+            try writeEscaped(w, note.text);
             try w.writeAll("\"");
-            try writeEscaped(w, note);
-            try w.writeAll("\"");
+            if (note.ref) |r| {
+                try w.writeAll(",\"pdf\":\"");
+                try writeEscaped(w, r.pdf);
+                try w.print("\",\"page\":{d}", .{r.page});
+            }
+            try w.writeAll("}");
         }
         try w.writeAll("]}");
     }

@@ -3,6 +3,8 @@ const env_mod = @import("eval/env.zig");
 const erc_mod = @import("erc.zig");
 const review = @import("review.zig");
 const review_html = @import("review_html.zig");
+const req_checks = @import("req_checks.zig");
+const CheckResultMap = std.StringHashMapUnmanaged([]const req_checks.Result);
 const DesignBlock = env_mod.DesignBlock;
 const Section = env_mod.Section;
 const Instance = env_mod.Instance;
@@ -36,6 +38,7 @@ pub fn renderToHtml(
     navbar_css: []const u8,
     status: review.Status,
     review_doc: ?review.ReviewDoc,
+    check_results: *const CheckResultMap,
 ) ![]const u8 {
     var ctx = RenderCtx.init(allocator);
     ctx.project_dir = project_dir;
@@ -107,16 +110,16 @@ pub fn renderToHtml(
     }
 
     const rstate: ?review.ReviewState = if (review_doc) |d| d.review_state else null;
-    for (block.sections) |sec| try writeSection(&ctx, w, allocator, sec, 0, rstate);
+    for (block.sections) |sec| try writeSection(&ctx, w, allocator, sec, 0, rstate, check_results);
 
     // Designs without sections (typical of sub-block-only or flat hub+passives
     // designs like power-6v, pma3-14ln) still deserve a rendering. Emit a
     // synthetic card per sub-block, plus one flat card if any hubs live at
     // the top level outside any section.
-    for (block.sub_blocks) |sb| try writeSubBlockCard(&ctx, w, allocator, sb, rstate);
+    for (block.sub_blocks) |sb| try writeSubBlockCard(&ctx, w, allocator, sb, rstate, check_results);
 
     if (block.sections.len == 0 and hasTopLevelHubs(block)) {
-        try writeFlatHubs(&ctx, w, allocator, block, rstate);
+        try writeFlatHubs(&ctx, w, allocator, block, rstate, check_results);
     }
 
     // Bottom-of-page audit trail: ERC violations and assertions. Repeated
@@ -195,6 +198,12 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
     try w.print("<a class=\"head-link\" href=\"/schematics/{s}/canvas\">Canvas (legacy)</a>", .{design_name});
     try w.print("<a class=\"head-link\" href=\"/api/export-bom/{s}\">BOM</a>", .{design_name});
     try w.print("<a class=\"head-link\" href=\"/api/export-netlist/{s}\">Netlist</a>", .{design_name});
+    // Global PDF upload: any datasheet, chosen by filename, lands in
+    // lib/datasheets/. Users then wire one up by editing a component file's
+    // `(datasheet "foo.pdf")` field. Keeps upload one-click without
+    // committing to a specific part.
+    try w.writeAll("<label class=\"head-link head-btn\" style=\"cursor:pointer\">📄 Upload PDF<input type=\"file\" accept=\"application/pdf\" id=\"global-ds-upload\" hidden></label>");
+    try w.writeAll("<span id=\"global-ds-status\" class=\"head-link\" style=\"color:#8b949e\"></span>");
     try w.writeAll("</div></header>");
 }
 
@@ -237,7 +246,7 @@ fn joinAssertedFns(allocator: Allocator, fns: []const []const u8) ?[]const u8 {
     return buf.toOwnedSlice(allocator) catch null;
 }
 
-fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section, depth: u8, review_state: ?review.ReviewState) !void {
+fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section, depth: u8, review_state: ?review.ReviewState, check_results: *const CheckResultMap) !void {
     const indent_class: []const u8 = if (depth == 0) "sch-section" else "sch-section sch-subsection";
     const slug = try review.slugify(allocator, sec.name);
     const rs: ?review.SectionReviewState = if (review_state) |state|
@@ -293,11 +302,11 @@ fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section,
         try hub_refs.append(allocator, inst.ref_des);
     }
 
-    try writeSectionHubs(ctx, w, allocator, sec.pin_groups, hub_refs.items);
+    try writeSectionHubs(ctx, w, allocator, sec.pin_groups, hub_refs.items, check_results);
 
     if (sec.notes.len > 0) try writeNotes(w, sec.notes);
 
-    for (sec.sub_sections) |sub| try writeSection(ctx, w, allocator, sub, depth + 1, review_state);
+    for (sec.sub_sections) |sub| try writeSection(ctx, w, allocator, sub, depth + 1, review_state, check_results);
 
     // Approval + checklist widget anchored to this section's slug. The shared
     // review-state JS handler picks up the `data-slug` on the enclosing card
@@ -328,15 +337,16 @@ fn writeSectionHubs(
     allocator: Allocator,
     pin_groups: []const env_mod.PinGroup,
     hub_refs: []const []const u8,
+    check_results: *const CheckResultMap,
 ) !void {
     for (hub_refs) |hub_ref| {
         if (try analyzeHub(ctx, allocator, pin_groups, hub_ref)) |a| {
-            try writeHubCard(ctx, w, allocator, a);
+            try writeHubCard(ctx, w, allocator, a, check_results);
         }
     }
 }
 
-fn writeHubCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, h: HubAnalysis) !void {
+fn writeHubCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, h: HubAnalysis, check_results: *const CheckResultMap) !void {
     try w.print("<div class=\"sch-hub\" data-ref=\"{s}\">", .{h.inst.ref_des});
     try w.writeAll("<div class=\"hub-head\"><h3><code>");
     try writeHtmlEscaped(w, h.inst.ref_des);
@@ -351,7 +361,83 @@ fn writeHubCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, h: HubAnalysi
     try w.writeAll("</div>");
     try w.writeAll("<div class=\"hub-inset-wrap\">");
     try renderGroupedHubSvgs(ctx, w, allocator, h);
-    try w.writeAll("</div></div>");
+    try w.writeAll("</div>");
+    try writeHubRequirements(w, h, check_results);
+    try w.writeAll("</div>");
+}
+
+/// Emit a `<details>` dropdown listing every `(requirement ...)` declared on
+/// the hub's component. Each row carries a ✓/✗/⋯ badge depending on whether
+/// the requirement's attached `(check ...)` clause passed, failed, or is
+/// absent (reviewer-judged).
+fn writeHubRequirements(w: anytype, h: HubAnalysis, check_results: *const CheckResultMap) !void {
+    if (h.inst.requirements.len == 0) return;
+    const results: []const req_checks.Result = check_results.get(h.inst.ref_des) orelse &.{};
+
+    var pass_ct: usize = 0;
+    var fail_ct: usize = 0;
+    for (results) |r| switch (r.status) {
+        .pass => pass_ct += 1,
+        .fail => fail_ct += 1,
+        .na => {},
+    };
+    const header_class: []const u8 = if (fail_ct > 0) "hub-reqs has-fail" else if (pass_ct > 0) "hub-reqs" else "hub-reqs";
+    try w.print("<details class=\"{s}\"", .{header_class});
+    if (fail_ct > 0) try w.writeAll(" open");
+    try w.print("><summary>Requirements ({d})", .{h.inst.requirements.len});
+    if (fail_ct > 0) try w.print(" <span class=\"req-badge fail\">{d} failing</span>", .{fail_ct});
+    if (pass_ct > 0) try w.print(" <span class=\"req-badge pass\">{d} ok</span>", .{pass_ct});
+    try w.writeAll("</summary><ul>");
+    for (h.inst.requirements, 0..) |r, i| {
+        const status: req_checks.Status = if (i < results.len) results[i].status else .na;
+        const msg: []const u8 = if (i < results.len) results[i].message else "";
+        const icon_class: []const u8 = switch (status) {
+            .pass => "req-icon pass",
+            .fail => "req-icon fail",
+            .na => "req-icon na",
+        };
+        const icon_char: []const u8 = switch (status) {
+            .pass => "✓",
+            .fail => "✗",
+            .na => "⋯",
+        };
+        const icon_title: []const u8 = switch (status) {
+            .pass => "Automated check passed",
+            .fail => "Automated check failed",
+            .na => "No automated check — reviewer-judged",
+        };
+        try w.print("<li class=\"req-row status-{s}\"><span class=\"{s}\" title=\"{s}\">{s}</span> ", .{ @tagName(status), icon_class, icon_title, icon_char });
+        try writeHtmlEscaped(w, r.text);
+        if (r.ref) |ref| {
+            try w.writeAll(" <a class=\"note-ref\" target=\"_blank\" href=\"/pdf-view/");
+            try writeHtmlEscaped(w, ref.pdf);
+            var has_query = false;
+            if (ref.page > 0) {
+                try w.print("?page={d}", .{ref.page});
+                has_query = true;
+            }
+            if (ref.quote) |q| {
+                try w.writeAll(if (has_query) "&highlight=" else "?highlight=");
+                try writeUrlEncoded(w, q);
+            }
+            try w.writeAll("\">📄 ");
+            try writeHtmlEscaped(w, ref.pdf);
+            if (ref.page > 0) try w.print(" p.{d}", .{ref.page});
+            try w.writeAll("</a>");
+        }
+        if (r.ref) |ref| if (ref.quote) |q| {
+            try w.writeAll("<div class=\"req-quote\">“");
+            try writeHtmlEscaped(w, q);
+            try w.writeAll("”</div>");
+        };
+        if (msg.len > 0) {
+            try w.writeAll("<div class=\"req-msg\">");
+            try writeHtmlEscaped(w, msg);
+            try w.writeAll("</div>");
+        }
+        try w.writeAll("</li>");
+    }
+    try w.writeAll("</ul></details>");
 }
 
 /// Bucket a hub's pin-groups by `(group "label")` feature label and render
@@ -504,12 +590,29 @@ fn writeSectionPorts(w: anytype, sec: Section) !void {
     try w.writeAll("</tbody></table>");
 }
 
-fn writeNotes(w: anytype, notes: []const []const u8) !void {
+fn writeNotes(w: anytype, notes: []const env_mod.SectionNote) !void {
     try w.writeAll("<details class=\"sec-notes\"><summary>");
     try w.print("Notes ({d})</summary><ul>", .{notes.len});
     for (notes) |n| {
         try w.writeAll("<li>");
-        try writeHtmlEscaped(w, n);
+        try writeHtmlEscaped(w, n.text);
+        if (n.ref) |r| {
+            try w.writeAll(" <a class=\"note-ref\" target=\"_blank\" href=\"/pdf-view/");
+            try writeHtmlEscaped(w, r.pdf);
+            var has_query = false;
+            if (r.page > 0) {
+                try w.print("?page={d}", .{r.page});
+                has_query = true;
+            }
+            if (r.quote) |q| {
+                try w.writeAll(if (has_query) "&highlight=" else "?highlight=");
+                try writeUrlEncoded(w, q);
+            }
+            try w.writeAll("\">📄 ");
+            try writeHtmlEscaped(w, r.pdf);
+            if (r.page > 0) try w.print(" p.{d}", .{r.page});
+            try w.writeAll("</a>");
+        }
         try w.writeAll("</li>");
     }
     try w.writeAll("</ul></details>");
@@ -519,7 +622,7 @@ fn writeNotes(w: anytype, notes: []const []const u8) !void {
 /// (tpsm84338 …))`). Lists every hub that the sub-block's DesignBlock declares
 /// and feeds them through the same writeHubCard path. The block's nets are
 /// already flattened into `ctx` via `collectFlat`, so adjacency works.
-fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_mod.SubBlock, review_state: ?review.ReviewState) !void {
+fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_mod.SubBlock, review_state: ?review.ReviewState, check_results: *const CheckResultMap) !void {
     const slug = try review.slugify(allocator, sb.name);
     const rs: ?review.SectionReviewState = if (review_state) |state|
         review_html.findState(state, slug)
@@ -554,7 +657,7 @@ fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_
         try hub_refs.append(allocator, inst.ref_des);
     }
 
-    try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items);
+    try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items, check_results);
 
     if (rs) |s| try review_html.writeChecklist(w, s);
 
@@ -565,7 +668,7 @@ fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_
 /// `design-block` without any `section` wrapper (e.g. pma3-14ln). Every
 /// hub-prefixed top-level instance becomes its own card inside one synthetic
 /// section.
-fn writeFlatHubs(ctx: *RenderCtx, w: anytype, allocator: Allocator, block: *const DesignBlock, review_state: ?review.ReviewState) !void {
+fn writeFlatHubs(ctx: *RenderCtx, w: anytype, allocator: Allocator, block: *const DesignBlock, review_state: ?review.ReviewState, check_results: *const CheckResultMap) !void {
     const rs: ?review.SectionReviewState = if (review_state) |state|
         review_html.findState(state, "design")
     else
@@ -594,7 +697,7 @@ fn writeFlatHubs(ctx: *RenderCtx, w: anytype, allocator: Allocator, block: *cons
         try hub_refs.append(allocator, inst.ref_des);
     }
 
-    try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items);
+    try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items, check_results);
 
     if (rs) |s| try review_html.writeChecklist(w, s);
 
@@ -900,6 +1003,23 @@ fn writeHtmlEscaped(w: anytype, s: []const u8) !void {
     };
 }
 
+/// Percent-encode a UTF-8 string for use as a query-parameter *value*.
+/// Mirrors JS `encodeURIComponent` — every byte outside the RFC 3986
+/// unreserved set (alnum + `-._~`) gets `%XX`-escaped, including spaces
+/// and multi-byte UTF-8 sequences. Used to splice datasheet quote text
+/// into `/pdf-view/?highlight=…` URLs.
+fn writeUrlEncoded(w: anytype, s: []const u8) !void {
+    for (s) |c| {
+        const safe = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.' or c == '~';
+        if (safe) {
+            try w.writeByte(c);
+        } else {
+            try w.print("%{X:0>2}", .{c});
+        }
+    }
+}
+
 const SCHEMATIC_CSS =
     \\html,body{margin:0;background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
     \\code{font-family:"SF Mono","Fira Code",monospace;font-size:0.9em;color:#c9d1d9;background:#161b22;padding:1px 5px;border-radius:3px;}
@@ -958,6 +1078,31 @@ const SCHEMATIC_CSS =
     \\.hub-comp{color:#8b949e;font-size:0.85rem;font-family:"SF Mono",monospace;}
     \\.hub-val{color:#d29922;font-size:0.85rem;font-family:"SF Mono",monospace;margin-left:auto;}
     \\.hub-inset-wrap{background:#010409;border:1px solid #21262d;border-radius:4px;padding:6px;margin:6px 0;overflow-x:auto;}
+    \\.hub-reqs{margin:12px 0 2px 0;}
+    \\.hub-reqs>summary{cursor:pointer;color:#8b949e;font-size:0.88rem;font-weight:600;letter-spacing:0.02em;padding:8px 10px;border-radius:5px;list-style:none;display:flex;align-items:center;gap:8px;}
+    \\.hub-reqs>summary::-webkit-details-marker{display:none;}
+    \\.hub-reqs>summary::before{content:"▸";color:#6e7681;font-size:0.75rem;width:10px;display:inline-block;}
+    \\.hub-reqs[open]>summary::before{content:"▾";}
+    \\.hub-reqs>summary:hover{color:#c9d1d9;background:#161b22;}
+    \\.hub-reqs>ul{list-style:none;margin:8px 0 4px 4px;padding:10px 14px;background:#0a0e14;border-left:2px solid #30363d;border-radius:0 5px 5px 0;display:flex;flex-direction:column;gap:10px;}
+    \\.hub-reqs>ul>li{margin:0;font-size:0.86rem;color:#c9d1d9;line-height:1.55;padding:8px 10px;border-radius:4px;border:1px solid transparent;}
+    \\.hub-reqs .note-ref{color:#58a6ff;text-decoration:none;font-size:0.8rem;margin-left:8px;white-space:nowrap;}
+    \\.hub-reqs .note-ref:hover{text-decoration:underline;}
+    \\.hub-reqs.has-fail>summary{color:#e3b341;}
+    \\.hub-reqs .req-badge{font-size:0.7rem;font-weight:600;padding:2px 8px;border-radius:10px;margin-left:4px;letter-spacing:0.04em;text-transform:uppercase;}
+    \\.hub-reqs .req-badge.pass{background:#0d3a1f;color:#3fb950;}
+    \\.hub-reqs .req-badge.fail{background:#3a0d16;color:#f85149;}
+    \\.hub-reqs .req-row.status-fail{background:rgba(248,81,73,0.07);border-color:rgba(248,81,73,0.25);}
+    \\.hub-reqs .req-row.status-pass{background:rgba(63,185,80,0.04);border-color:rgba(63,185,80,0.18);color:#c9d1d9;}
+    \\.hub-reqs .req-row.status-na{background:rgba(139,148,158,0.04);border-color:rgba(139,148,158,0.15);}
+    \\.hub-reqs .req-icon{display:inline-block;width:18px;font-weight:700;text-align:center;margin-right:8px;vertical-align:baseline;}
+    \\.hub-reqs .req-icon.pass{color:#3fb950;}
+    \\.hub-reqs .req-icon.fail{color:#f85149;}
+    \\.hub-reqs .req-icon.na{color:#6e7681;}
+    \\.hub-reqs .req-quote{margin:6px 0 0 26px;padding:6px 12px;font-size:0.82rem;color:#e3b341;font-style:italic;line-height:1.5;background:rgba(227,179,65,0.06);border-radius:3px;border-left:3px solid #e3b341;}
+    \\.hub-reqs .req-msg{margin:6px 0 0 26px;padding:6px 10px;font-size:0.78rem;color:#8b949e;font-family:"SF Mono",monospace;line-height:1.5;background:rgba(255,255,255,0.02);border-radius:3px;border-left:2px solid #30363d;}
+    \\.hub-reqs .req-row.status-fail .req-msg{color:#f0a6a1;border-left-color:#f85149;}
+    \\.hub-reqs .req-row.status-pass .req-msg{color:#7ee787;border-left-color:#3fb950;}
     \\.hub-group-block{margin:4px 0 8px;}
     \\.hub-group-block:first-child{margin-top:0;}
     \\.hub-group-label{color:#e8c547;font-size:0.8rem;font-weight:600;margin:4px 0 2px;letter-spacing:0.03em;}
@@ -1041,14 +1186,27 @@ const SCHEMATIC_CSS =
     \\.sb-pinout-net{color:#e8c547;margin-left:auto;font-size:0.74rem;}
     \\.sb-pinout-alts{margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;}
     \\.sb-pinout-alt{color:#d2a8ff;background:rgba(210,168,255,0.1);padding:1px 5px;border-radius:3px;font-size:0.72rem;}
-    \\.sb-datasheet{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:6px 0 10px;padding:8px 10px;background:#0d1117;border:1px solid #21262d;border-radius:5px;font-size:0.8rem;}
-    \\.sb-ds-view{color:#58a6ff;text-decoration:none;}
-    \\.sb-ds-view:hover{text-decoration:underline;}
-    \\.sb-ds-upload,.sb-ds-replace{color:#c9d1d9;cursor:pointer;padding:3px 8px;background:#21262d;border:1px solid #30363d;border-radius:4px;}
-    \\.sb-ds-upload:hover,.sb-ds-replace:hover{border-color:#58a6ff;}
-    \\.sb-ds-status{width:100%;font-size:0.74rem;color:#8b949e;font-family:"SF Mono",monospace;}
-    \\.sb-ds-status.ok{color:#3fb950;}
-    \\.sb-ds-status.err{color:#f85149;}
+    \\.sb-datasheet{display:flex;flex-direction:column;gap:6px;margin:6px 0 10px;padding:8px 10px;background:#0d1117;border:1px solid #21262d;border-radius:5px;font-size:0.8rem;}
+    \\.sb-ds-title,.sb-req-title{font-weight:600;color:#c9d1d9;font-size:0.78rem;text-transform:uppercase;letter-spacing:0.04em;margin-top:2px;}
+    \\.sb-ds-count{font-weight:400;text-transform:none;letter-spacing:0;}
+    \\.sb-ds-list,.sb-req-list{list-style:none;margin:0;padding:0;}
+    \\.sb-ds-list li,.sb-req-list li{display:flex;align-items:center;gap:6px;padding:3px 0;font-size:0.78rem;color:#c9d1d9;}
+    \\.sb-ds-list a{color:#58a6ff;text-decoration:none;flex:1;}
+    \\.sb-ds-list a:hover{text-decoration:underline;}
+    \\.sb-ds-size{color:#8b949e;font-size:0.72rem;}
+    \\.sb-ds-missing{color:#d29922;font-size:0.72rem;}
+    \\.sb-ds-unlink{background:transparent;color:#6e7681;border:0;cursor:pointer;font-size:0.8rem;padding:2px 6px;border-radius:3px;}
+    \\.sb-ds-unlink:hover{background:#3a0d16;color:#f85149;}
+    \\.sb-ds-hint{font-size:0.76rem;}
+    \\.sb-ds-link-row{display:flex;gap:6px;}
+    \\.sb-ds-search{flex:1;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:5px 8px;font-size:0.78rem;font-family:inherit;}
+    \\.sb-ds-search:focus{outline:none;border-color:#58a6ff;}
+    \\.sb-ds-link-btn{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:5px 12px;font-size:0.78rem;cursor:pointer;font-weight:600;}
+    \\.sb-ds-link-btn:hover{background:#30363d;border-color:#58a6ff;}
+    \\.sb-ds-upload-row{display:flex;align-items:center;gap:8px;}
+    \\.sb-ds-upload-btn{color:#c9d1d9;cursor:pointer;padding:4px 10px;background:#21262d;border:1px solid #30363d;border-radius:4px;font-size:0.78rem;}
+    \\.sb-ds-upload-btn:hover{border-color:#58a6ff;}
+    \\.sb-ds-status{font-size:0.74rem;color:#8b949e;font-family:"SF Mono",monospace;}
     \\.sb-empty{color:#6e7681;font-style:italic;}
     \\.erc-ok{color:#3fb950;padding:8px 0;font-size:0.85rem;}
     \\.erc-group-head{margin:10px 0 4px;font-weight:600;font-size:0.78rem;text-transform:uppercase;letter-spacing:0.04em;}

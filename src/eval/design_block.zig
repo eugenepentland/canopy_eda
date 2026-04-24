@@ -217,7 +217,7 @@ fn evalSection(
     var sec_instances: std.ArrayListUnmanaged(Instance) = .empty;
     var sec_pin_groups: std.ArrayListUnmanaged(env_mod.PinGroup) = .empty;
     var sec_description: []const u8 = "";
-    var sec_notes: std.ArrayListUnmanaged([]const u8) = .empty;
+    var sec_notes: std.ArrayListUnmanaged(env_mod.SectionNote) = .empty;
     var sec_ports: std.ArrayListUnmanaged(env_mod.SectionPort) = .empty;
     var sec_protocols: std.ArrayListUnmanaged([]const u8) = .empty;
     var sec_calcs: std.ArrayListUnmanaged(env_mod.CalcBlock) = .empty;
@@ -260,7 +260,14 @@ fn evalSection(
             if (sf_children.len >= 2) {
                 const note_val = try self.evalNode(sf_children[1], env);
                 if (note_val.asString()) |text| {
-                    sec_notes.append(self.allocator, text) catch {};
+                    var ref: ?env_mod.NoteRef = null;
+                    for (sf_children[2..]) |extra| {
+                        if (env_mod.parseNoteRef(extra)) |r| {
+                            ref = r;
+                            break;
+                        }
+                    }
+                    sec_notes.append(self.allocator, .{ .text = text, .ref = ref }) catch {};
                 }
             }
         } else if (std.mem.eql(u8, sf_name, "port")) {
@@ -431,7 +438,7 @@ fn evalSubSection(
     var sub_instances: std.ArrayListUnmanaged(Instance) = .empty;
     var sub_pin_groups: std.ArrayListUnmanaged(env_mod.PinGroup) = .empty;
     var sub_description: []const u8 = "";
-    var sub_notes: std.ArrayListUnmanaged([]const u8) = .empty;
+    var sub_notes: std.ArrayListUnmanaged(env_mod.SectionNote) = .empty;
     var sub_ports: std.ArrayListUnmanaged(env_mod.SectionPort) = .empty;
     var sub_protocols: std.ArrayListUnmanaged([]const u8) = .empty;
     var sub_calcs: std.ArrayListUnmanaged(env_mod.CalcBlock) = .empty;
@@ -457,7 +464,16 @@ fn evalSubSection(
         } else if (std.mem.eql(u8, ssf_name, "note")) {
             if (ssf_children.len >= 2) {
                 const nv = try self.evalNode(ssf_children[1], env);
-                if (nv.asString()) |text| sub_notes.append(self.allocator, text) catch {};
+                if (nv.asString()) |text| {
+                    var ref: ?env_mod.NoteRef = null;
+                    for (ssf_children[2..]) |extra| {
+                        if (env_mod.parseNoteRef(extra)) |r| {
+                            ref = r;
+                            break;
+                        }
+                    }
+                    sub_notes.append(self.allocator, .{ .text = text, .ref = ref }) catch {};
+                }
             }
         } else if (std.mem.eql(u8, ssf_name, "port")) {
             const port = try builders.parseSectionPort(self, ssf_children, env);

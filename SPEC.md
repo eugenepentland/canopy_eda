@@ -184,6 +184,13 @@ Public functions: analyze
 
 Public functions: renderToJson
 
+## req_checks
+
+Public functions: runChecks, deinit, parseMicroFarads, parseOhms
+
+- parseMicroFarads handles SI-suffixed cap values
+- parseOhms handles SI prefixes for resistor values
+
 ## review_html
 
 Public functions: renderToHtml

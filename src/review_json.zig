@@ -101,6 +101,7 @@ fn writeReviewState(w: anytype, state: review.ReviewState) !void {
         try writeJsonString(w, s.approved_by);
         try w.writeAll(",\"approved_at\":");
         try writeJsonString(w, s.approved_at);
+        try w.print(",\"approval_stale\":{}", .{s.approval_stale});
         try w.writeAll("}");
     }
     try w.writeAll("]}");
@@ -137,7 +138,37 @@ fn writeSection(w: anytype, s: review.SectionReport) !void {
     try w.writeAll(",\"notes\":[");
     for (s.notes, 0..) |n, i| {
         if (i > 0) try w.writeAll(",");
-        try writeJsonString(w, n);
+        try w.writeAll("{\"text\":");
+        try writeJsonString(w, n.text);
+        if (n.ref) |r| {
+            try w.writeAll(",\"pdf\":");
+            try writeJsonString(w, r.pdf);
+            try w.print(",\"page\":{d}", .{r.page});
+        }
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+
+    try w.writeAll(",\"component_requirements\":[");
+    for (s.component_requirements, 0..) |entry, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"ref_des\":");
+        try writeJsonString(w, entry.ref_des);
+        try w.writeAll(",\"component\":");
+        try writeJsonString(w, entry.component);
+        try w.writeAll(",\"requirements\":[");
+        for (entry.requirements, 0..) |r, j| {
+            if (j > 0) try w.writeAll(",");
+            try w.writeAll("{\"text\":");
+            try writeJsonString(w, r.text);
+            if (r.ref) |ref| {
+                try w.writeAll(",\"pdf\":");
+                try writeJsonString(w, ref.pdf);
+                try w.print(",\"page\":{d}", .{ref.page});
+            }
+            try w.writeAll("}");
+        }
+        try w.writeAll("]}");
     }
     try w.writeAll("]");
 

@@ -10,6 +10,37 @@
   var resultsBox = document.getElementById('sb-results');
   var detailBox = document.getElementById('sb-detail');
 
+  // ---- Global PDF upload ----
+  // One-click upload to lib/datasheets/. The filename is preserved (sanitized
+  // server-side). Users wire the uploaded PDF to a part by editing
+  // lib/components/<name>.sexp and adding `(datasheet "filename.pdf")`.
+  var globalDsInput = document.getElementById('global-ds-upload');
+  var globalDsStatus = document.getElementById('global-ds-status');
+  if (globalDsInput) {
+    globalDsInput.addEventListener('change', function () {
+      var file = globalDsInput.files && globalDsInput.files[0];
+      if (!file) return;
+      if (file.size > 64 * 1024 * 1024) {
+        globalDsStatus.textContent = 'too large (64MB limit)';
+        return;
+      }
+      globalDsStatus.textContent = 'uploading ' + file.name + '…';
+      fetch('/api/upload-datasheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/pdf', 'x-filename': file.name },
+        body: file,
+      }).then(function (r) { return r.json(); }).then(function (j) {
+        if (j.ok) {
+          globalDsStatus.textContent = 'uploaded as ' + j.name;
+          setTimeout(function () { globalDsStatus.textContent = ''; }, 4000);
+        } else {
+          globalDsStatus.textContent = 'error: ' + (j.error || 'failed');
+        }
+      }).catch(function (e) { globalDsStatus.textContent = 'error: ' + e; });
+      globalDsInput.value = '';
+    });
+  }
+
   // ---- State ----
   var currentResults = [];
   var selectedIdx = -1;
@@ -375,19 +406,54 @@
       var html = '<span class="sb-back" data-back-ref="' + (fromRef ? escapeHtml(fromRef) : '') + '">← ' +
         (fromRef ? escapeHtml(fromRef) : 'Back') + '</span>' +
         '<h4>' + escapeHtml(componentName) + ' pinout</h4>';
-      // Datasheet strip sits under the title, always visible. When a PDF
-      // is already uploaded we show a "View" link; otherwise an upload
-      // prompt that posts the raw file to /api/datasheet/<component>.
+      // Datasheet + requirements strip sits under the title, always visible.
+      // Datasheets are declared in the component's lib/components/<name>.sexp
+      // as `(datasheet "file.pdf")` and uploaded generically to /api/upload-
+      // datasheet; this panel just links to whatever is declared. Requirements
+      // are read-only rules ("VDD must be decoupled within 3mm") that tie
+      // library parts to validation steps during schematic review.
       var safe = escapeHtml(componentName);
-      var hasDs = data && data.has_datasheet;
+      var dsList = (data && data.datasheets) || [];
+      var reqList = (data && data.requirements) || [];
       html += '<div class="sb-datasheet" data-component="' + safe + '">';
-      if (hasDs) {
-        html += '<a class="sb-ds-view" href="/api/datasheet/' + encodeURIComponent(componentName) + '" target="_blank" rel="noopener">📄 View datasheet (PDF)</a>' +
-          '<label class="sb-ds-replace">Replace<input type="file" accept="application/pdf" class="sb-ds-file" hidden></label>';
+      html += '<div class="sb-ds-title">Datasheets <span class="sb-ds-count muted">(' + dsList.length + ')</span></div>';
+      if (dsList.length) {
+        html += '<ul class="sb-ds-list">' + dsList.map(function (d) {
+          var name = escapeHtml(d.name);
+          var kb = d.size ? ' <span class="sb-ds-size">(' + Math.round(d.size / 1024) + ' KB)</span>' : ' <span class="sb-ds-missing">(uploaded file missing)</span>';
+          return '<li><a href="/datasheets/' + encodeURIComponent(d.name) + '" target="_blank" rel="noopener">📄 ' + name + '</a>' + kb +
+            ' <button class="sb-ds-unlink" data-pdf="' + name + '" title="Unlink from ' + safe + '">✕</button></li>';
+        }).join('') + '</ul>';
       } else {
-        html += '<label class="sb-ds-upload">📄 Upload datasheet (PDF)<input type="file" accept="application/pdf" class="sb-ds-file" hidden></label>';
+        html += '<div class="sb-ds-hint muted">No datasheets linked yet. Pick one below or upload a new PDF.</div>';
       }
-      html += '<div class="sb-ds-status" aria-live="polite"></div></div>';
+      // Link UI: searchable picker populated from /api/datasheets, with an
+      // inline upload for new PDFs. Selecting + clicking Link splices
+      // `(datasheet "...")` into lib/components/<component>.sexp.
+      html += '<div class="sb-ds-link-row">' +
+        '<input type="text" class="sb-ds-search" list="sb-ds-options" placeholder="search uploaded PDFs…" />' +
+        '<datalist id="sb-ds-options"></datalist>' +
+        '<button class="sb-ds-link-btn">Link</button>' +
+        '</div>';
+      html += '<div class="sb-ds-upload-row">' +
+        '<label class="sb-ds-upload-btn">📎 Upload &amp; link new PDF<input type="file" accept="application/pdf" class="sb-ds-upload-input" hidden></label>' +
+        '<span class="sb-ds-status muted"></span>' +
+        '</div>';
+      if (reqList.length) {
+        html += '<div class="sb-req-title">Requirements</div>' +
+          '<ul class="sb-req-list">' + reqList.map(function (r) {
+            var t = escapeHtml(r.text);
+            if (r.pdf) {
+              var hParts = [];
+              if (r.page) hParts.push('page=' + encodeURIComponent(r.page));
+              if (r.quote) hParts.push('highlight=' + encodeURIComponent(r.quote));
+              var href = '/pdf-view/' + encodeURIComponent(r.pdf) + (hParts.length ? '?' + hParts.join('&') : '');
+              t += ' <a class="sb-req-ref" href="' + href + '" target="_blank" rel="noopener">📄 ' + escapeHtml(r.pdf) + (r.page ? ' p.' + r.page : '') + '</a>';
+            }
+            return '<li>' + t + '</li>';
+          }).join('') + '</ul>';
+      }
+      html += '</div>';
       if (error) {
         html += '<div class="sb-empty">' + escapeHtml(error) + '</div>';
       } else if (!data || !data.pins || !data.pins.length) {
@@ -446,42 +512,95 @@
           });
         });
       }
-      // Datasheet upload: the PDF is POSTed as the raw request body so the
-      // server can dump it straight to lib/datasheets/<component>.pdf with
-      // no multipart parsing. On success we invalidate the cache so the
-      // panel refreshes with the new "View" link.
-      var dsFile = detailBox.querySelector('.sb-ds-file');
-      var dsStatus = detailBox.querySelector('.sb-ds-status');
-      if (dsFile) {
-        dsFile.addEventListener('change', function () {
-          var file = dsFile.files && dsFile.files[0];
+      wireDatasheetControls(componentName, fromRef);
+    }
+
+    // Wire up link / unlink / upload buttons in the datasheet strip. Kept
+    // outside `render()` so it can be re-entrant after an action — each
+    // action invalidates the pinout cache and re-fetches so the panel
+    // shows the new linked set.
+    function wireDatasheetControls(componentName, fromRef) {
+      var linkedSet = {};
+      ((pinoutCache[componentName] && pinoutCache[componentName].datasheets) || []).forEach(function (d) { linkedSet[d.name] = true; });
+
+      // Populate the <datalist> with uploaded PDFs that aren't already linked
+      // so the search picker only offers meaningful choices.
+      var datalist = detailBox.querySelector('#sb-ds-options');
+      fetch('/api/datasheets').then(function (r) { return r.ok ? r.json() : { files: [] }; }).then(function (j) {
+        if (!datalist) return;
+        var options = (j.files || []).filter(function (f) { return !linkedSet[f.name]; })
+          .map(function (f) { return '<option value="' + escapeHtml(f.name) + '">'; }).join('');
+        datalist.innerHTML = options;
+      });
+
+      detailBox.querySelectorAll('.sb-ds-unlink').forEach(function (btn) {
+        btn.addEventListener('click', function (e) {
+          e.stopPropagation();
+          var pdf = btn.getAttribute('data-pdf');
+          if (!pdf) return;
+          if (!confirm('Unlink ' + pdf + ' from ' + componentName + '?')) return;
+          fetch('/api/component-datasheet/' + encodeURIComponent(componentName) + '/remove', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pdf: pdf }),
+          }).then(function (r) { return r.json(); }).then(function (j) {
+            if (!j.ok) throw new Error(j.error || 'failed');
+            delete pinoutCache[componentName];
+            showPinout(componentName, fromRef);
+          }).catch(function (err) { alert('Unlink failed: ' + err.message); });
+        });
+      });
+
+      var linkInput = detailBox.querySelector('.sb-ds-search');
+      var linkBtn = detailBox.querySelector('.sb-ds-link-btn');
+      function doLink(pdf) {
+        if (!pdf) return;
+        fetch('/api/component-datasheet/' + encodeURIComponent(componentName) + '/add', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pdf: pdf }),
+        }).then(function (r) { return r.json(); }).then(function (j) {
+          if (!j.ok) throw new Error(j.error || 'failed');
+          delete pinoutCache[componentName];
+          showPinout(componentName, fromRef);
+        }).catch(function (err) { alert('Link failed: ' + err.message); });
+      }
+      if (linkBtn && linkInput) {
+        linkBtn.addEventListener('click', function () { doLink(linkInput.value.trim()); });
+        linkInput.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter') { e.preventDefault(); doLink(linkInput.value.trim()); }
+        });
+      }
+
+      var uploadInput = detailBox.querySelector('.sb-ds-upload-input');
+      var status = detailBox.querySelector('.sb-ds-status');
+      if (uploadInput) {
+        uploadInput.addEventListener('change', function () {
+          var file = uploadInput.files && uploadInput.files[0];
           if (!file) return;
           if (file.size > 64 * 1024 * 1024) {
-            dsStatus.textContent = 'File too large (limit 64MB).';
-            dsStatus.className = 'sb-ds-status err';
+            status.textContent = 'too large (64MB limit)';
             return;
           }
-          dsStatus.textContent = 'Uploading ' + file.name + '…';
-          dsStatus.className = 'sb-ds-status';
-          fetch('/api/datasheet/' + encodeURIComponent(componentName), {
+          status.textContent = 'uploading ' + file.name + '…';
+          fetch('/api/upload-datasheet', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/pdf' },
+            headers: { 'Content-Type': 'application/pdf', 'x-filename': file.name },
             body: file,
           }).then(function (r) { return r.json(); }).then(function (j) {
-            if (j.ok) {
-              dsStatus.textContent = 'Uploaded (' + j.bytes + ' bytes).';
-              dsStatus.className = 'sb-ds-status ok';
-              delete pinoutCache[componentName];
-              // Re-render after a short pause so the user sees the status.
-              setTimeout(function () { showPinout(componentName, fromRef); }, 700);
-            } else {
-              dsStatus.textContent = 'Error: ' + (j.error || 'upload failed');
-              dsStatus.className = 'sb-ds-status err';
-            }
-          }).catch(function (e) {
-            dsStatus.textContent = 'Error: ' + e;
-            dsStatus.className = 'sb-ds-status err';
+            if (!j.ok) throw new Error(j.error || 'upload failed');
+            status.textContent = 'linking ' + j.name + '…';
+            // Chain link after upload so one click both uploads and attaches.
+            return fetch('/api/component-datasheet/' + encodeURIComponent(componentName) + '/add', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ pdf: j.name }),
+            }).then(function (r) { return r.json(); });
+          }).then(function (j) {
+            if (!j.ok && j.error !== 'DuplicateImport') throw new Error(j.error || 'link failed');
+            delete pinoutCache[componentName];
+            showPinout(componentName, fromRef);
+          }).catch(function (err) {
+            status.textContent = 'error: ' + err.message;
           });
+          uploadInput.value = '';
         });
       }
     }

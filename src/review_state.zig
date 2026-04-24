@@ -56,19 +56,32 @@ pub fn saveState(
 }
 
 /// Drop any section state entries whose slug is no longer in `live_slugs`,
-/// and synthesise empty entries for slugs that have no prior state. Result
-/// mirrors `live_slugs` one-for-one so the UI always has a card to render
-/// against.
+/// and synthesise empty entries for slugs that have no prior state. When
+/// `live_hashes` is provided, compare each section's stored content hash
+/// against the current build's hash and flip `approval_stale` so the UI can
+/// prompt a re-approval without clobbering the historical `approved_by` /
+/// `approved_at` stamp.
 pub fn reconcile(
     allocator: std.mem.Allocator,
     stored: review.ReviewState,
     live_slugs: []const []const u8,
+    live_hashes: ?[]const []const u8,
 ) !review.ReviewState {
     var out: std.ArrayListUnmanaged(review.SectionReviewState) = .empty;
-    for (live_slugs) |slug| {
+    for (live_slugs, 0..) |slug, i| {
         const found = findSection(stored, slug);
+        const live_hash: []const u8 = if (live_hashes) |hashes| (if (i < hashes.len) hashes[i] else "") else "";
         if (found) |s| {
-            try out.append(allocator, s);
+            const stale = s.approved and s.content_hash.len > 0 and live_hash.len > 0 and !std.mem.eql(u8, s.content_hash, live_hash);
+            try out.append(allocator, .{
+                .section_slug = s.section_slug,
+                .items = s.items,
+                .approved = s.approved,
+                .approved_by = s.approved_by,
+                .approved_at = s.approved_at,
+                .content_hash = s.content_hash,
+                .approval_stale = stale,
+            });
         } else {
             try out.append(allocator, .{
                 .section_slug = slug,
@@ -76,6 +89,8 @@ pub fn reconcile(
                 .approved = false,
                 .approved_by = "",
                 .approved_at = "",
+                .content_hash = "",
+                .approval_stale = false,
             });
         }
     }
@@ -204,8 +219,9 @@ pub fn deleteItem(
 }
 
 /// Stamp or clear the section-level approval. When `approved` flips true,
-/// we write the reviewer name and current UTC timestamp; when it flips
-/// false, both are cleared so the UI shows "Pending".
+/// we write the reviewer name, current UTC timestamp, and the live content
+/// hash; when it flips false, approval fields are cleared but the stored
+/// hash remains irrelevant (re-computed on next approval).
 pub fn setApproval(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -213,10 +229,12 @@ pub fn setApproval(
     slug: []const u8,
     approved: bool,
     reviewer: []const u8,
+    content_hash: []const u8,
 ) !void {
     var state = try loadState(allocator, project_dir, name);
     const stamp: []const u8 = if (approved) try review.isoTimestamp(allocator, std.time.timestamp()) else "";
     const who: []const u8 = if (approved) try allocator.dupe(u8, reviewer) else "";
+    const stored_hash: []const u8 = if (approved) try allocator.dupe(u8, content_hash) else "";
 
     var sections = std.ArrayListUnmanaged(review.SectionReviewState){};
     var found = false;
@@ -232,6 +250,7 @@ pub fn setApproval(
             .approved = approved,
             .approved_by = who,
             .approved_at = stamp,
+            .content_hash = stored_hash,
         });
     }
     if (!found) {
@@ -241,6 +260,7 @@ pub fn setApproval(
             .approved = approved,
             .approved_by = who,
             .approved_at = stamp,
+            .content_hash = stored_hash,
         });
     }
     state.sections = sections.items;
@@ -316,6 +336,7 @@ const SectionEntry = struct {
     approved: bool = false,
     approved_by: []const u8 = "",
     approved_at: []const u8 = "",
+    content_hash: []const u8 = "",
 };
 
 const StateFile = struct {
@@ -345,6 +366,7 @@ fn parseState(allocator: std.mem.Allocator, data: []const u8) !review.ReviewStat
             .approved = s.approved,
             .approved_by = try allocator.dupe(u8, s.approved_by),
             .approved_at = try allocator.dupe(u8, s.approved_at),
+            .content_hash = try allocator.dupe(u8, s.content_hash),
         };
     }
     return .{ .sections = sections };
@@ -374,6 +396,8 @@ pub fn renderState(allocator: std.mem.Allocator, state: review.ReviewState) ![]c
         try writeJsonString(w, s.approved_by);
         try w.writeAll(",\"approved_at\":");
         try writeJsonString(w, s.approved_at);
+        try w.writeAll(",\"content_hash\":");
+        try writeJsonString(w, s.content_hash);
         try w.writeAll("}");
     }
     try w.writeAll("]}");
