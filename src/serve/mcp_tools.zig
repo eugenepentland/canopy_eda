@@ -11,6 +11,8 @@ const layout_mod = @import("../layout.zig");
 const bom = @import("../bom.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
 const ids = @import("../eval/ids.zig");
+const review_mod = @import("../review.zig");
+const review_json_mod = @import("../review_json.zig");
 
 /// One entry per MCP tool. Keep in sync with `tools_list_result` below and
 /// with the dispatch arms in `callInner`. Adding a new tool should start here,
@@ -62,6 +64,7 @@ pub const tools_list_result =
     \\{"name":"get_schematic","description":"Fetch the current scene graph JSON for a design. This is the same payload the browser viewer renders.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}},
     \\{"name":"get_version","description":"Return the current live version integer for a design. Increments on every mutation.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}},
     \\{"name":"run_checks","description":"Run ERC and/or DRC on a design. Optional filters: scope (\"erc\"|\"drc\"|\"both\", default \"both\"); severity (\"error\"|\"warning\"|\"info\", default all); changed_since (snapshot id from list_history — only ERC violations whose ref_des or net was added/removed since that snapshot are returned). DRC is not filtered by changed_since because its violations carry no structured ref. Returns {scope,filtered,changed_refs,changed_nets,erc:[...],drc:{violations,count}|null}.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"scope":{"type":"string","enum":["erc","drc","both"]},"severity":{"type":"string","enum":["error","warning","info"]},"changed_since":{"type":"string","description":"Snapshot id to diff the current design against; ERC violations are filtered to those touching instances or nets that differ."}},"required":["name"],"additionalProperties":false}},
+    \\{"name":"generate_review","description":"Build a structured design review document. Returns the same JSON shape as GET /api/review/:name: {design_name,title,generated_at,summary,sections[],power_budget[],bom[],assertions[],unresolved[]}. summary.status is pass|warn|fail. Rails in power_budget are sorted tightest first. unresolved is the flat list of error+warning ERC/DRC violations. Use this for a top-to-bottom audit before declaring a design done.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}},
     \\{"name":"list_history","description":"List snapshot ids for a design, newest first. Each id is a timestamp usable with restore_version.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}},
     \\{"name":"restore_version","description":"Restore a design to a prior snapshot. The current state is itself snapshotted first, so the restore is undoable.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"id":{"type":"string","description":"Snapshot id from list_history"}},"required":["name","id"],"additionalProperties":false}},
     \\{"name":"list_library","description":"List all names available in the project's lib/. Returns {components,modules,pinouts,footprints}, each entry with name + optional description. Use these names in (import ...) forms and instance definitions.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
@@ -201,6 +204,11 @@ fn callInner(
         const severity = optionalString(args_val, "severity");
         const changed_since = optionalString(args_val, "changed_since");
         return try runChecks(allocator, project_dir, name, scope, severity, changed_since, w);
+    }
+
+    if (std.mem.eql(u8, tool_name, "generate_review")) {
+        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+        return try generateReview(allocator, project_dir, name, w);
     }
 
     if (std.mem.eql(u8, tool_name, "list_history")) {
@@ -582,6 +590,44 @@ fn runChecks(
         try w.writeAll("null");
     }
     try w.writeAll("}");
+    return true;
+}
+
+/// Build and serialize the review document for a design. Returns the JSON
+/// body directly; mirrors the HTTP handler so the browser and MCP tool
+/// consume the same shape.
+fn generateReview(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    w: anytype,
+) !bool {
+    const path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    defer allocator.free(path);
+
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    const result = eval.evalFile(path) catch {
+        try w.writeAll("error: build failed");
+        return false;
+    };
+    const block: *const env_mod.DesignBlock = switch (result) {
+        .design_block => |b| b,
+        .board => |b| b.design,
+        else => {
+            try w.writeAll("error: not a design");
+            return false;
+        },
+    };
+
+    const bom_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name });
+    defer allocator.free(bom_path);
+    bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch {};
+
+    const violations = try erc_mod.runErc(allocator, block, project_dir);
+    const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations);
+    const json = try review_json_mod.renderToJson(allocator, doc);
+    try w.writeAll(json);
     return true;
 }
 
@@ -1003,15 +1049,12 @@ pub const DesignSummary = struct {
     build_ok: bool,
 };
 
-fn countInstancesInSection(sec: *const env_mod.Section) usize {
-    var n: usize = sec.instances.len;
-    for (sec.sub_sections) |ss| n += countInstancesInSection(&ss);
-    return n;
-}
-
+/// Count instances flattened across a design plus every sub-block. Does NOT
+/// add section.instances — they are already in block.instances (evaluator
+/// puts each section instance in both lists), so summing sections here would
+/// double-count.
 fn countInstances(block: *const env_mod.DesignBlock) usize {
     var n: usize = block.instances.len;
-    for (block.sections) |s| n += countInstancesInSection(&s);
     for (block.sub_blocks) |sb| n += countInstances(sb.block);
     return n;
 }

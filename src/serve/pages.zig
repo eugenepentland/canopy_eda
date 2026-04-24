@@ -6,7 +6,6 @@ const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 const bom_html = @import("bom_html.zig");
 const assets_css = @import("assets_css.zig");
-const assets_js = @import("assets_js.zig");
 const library = @import("library.zig");
 const mcp_tools = @import("mcp_tools.zig");
 
@@ -88,7 +87,7 @@ pub fn indexPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
         }
 
         // Action links
-        try w.print("<div class=\"design-card-links\"><a class=\"design-card-link\" href=\"/schematics/{s}\">Schematic</a><a class=\"design-card-link\" href=\"/pcb/{s}\">PCB</a></div></div>", .{ s.name, s.name });
+        try w.print("<div class=\"design-card-links\"><a class=\"design-card-link\" href=\"/schematics/{s}\">Schematic</a><a class=\"design-card-link\" href=\"/pcb/{s}\">PCB</a><a class=\"design-card-link\" href=\"/review/{s}\">Review</a></div></div>", .{ s.name, s.name, s.name });
     }
     if (summaries.len == 0) {
         try w.writeAll("<div class=\"empty-hint\">No designs found in src/.</div>");

@@ -98,6 +98,19 @@ pub const Port = struct {
     current_typ: ?f64 = null,
     /// Absolute-max current capacity (A) from `(current <typ> <max>)`.
     current_max: ?f64 = null,
+    /// Power-conversion efficiency (0.0–1.0) from `(efficiency <ratio>)` on an
+    /// output port. Used by the power-budget analyzer to back-compute input
+    /// current draw (`Iin = Iout × Vout/Vin / η`) so VBATT and other upstream
+    /// rails include the regulators that tap them.
+    efficiency: ?f64 = null,
+    /// `(efficiency linear)` was declared. Meaningful only on output ports of
+    /// linear regulators (LDOs): η is computed as `Vout/Vin` at analysis
+    /// time, which reduces to `Iin ≈ Iout` regardless of the input rail.
+    efficiency_linear: bool = false,
+    /// Name of the net/port that enables this rail. Populated from
+    /// `(enable "NET")` on an output port. Drives the review's power-sequencing
+    /// table so debuggers can see "VOUT comes up after PG_3V3 asserts."
+    enable_net: []const u8 = "",
     /// Whether this port is optional (no ERC error if unconnected).
     optional: bool = false,
 };

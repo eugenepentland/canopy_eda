@@ -15,6 +15,10 @@ const erc_mod = @import("../erc.zig");
 const env_mod = @import("../eval/env.zig");
 const bom_html = @import("bom_html.zig");
 const mcp_tools = @import("mcp_tools.zig");
+const review_mod = @import("../review.zig");
+const review_json_mod = @import("../review_json.zig");
+const review_html_mod = @import("../review_html.zig");
+const assets_css = @import("assets_css.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
@@ -1127,6 +1131,79 @@ pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     res.content_type = .JSON;
     res.header("access-control-allow-origin", "*");
     res.body = json;
+}
+
+/// Build the review document for a design and render it as JSON. Evaluates
+/// the design fresh each call (not live-layout cache) so assertions and ERC
+/// reflect the current source on disk. Returns 500 with a plain-text error
+/// body on build failures — the review page calls this on load and the MCP
+/// tool shares the same code path.
+pub fn reviewJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    res.content_type = .JSON;
+    res.header("access-control-allow-origin", "*");
+    const json = renderReviewJson(ctx.allocator, ctx.project_dir, name) catch |err| {
+        res.status = 500;
+        res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"error\":\"{s}\"}}", .{@errorName(err)});
+        return;
+    };
+    res.body = json;
+}
+
+/// Render the same review data as HTML. Deep-link anchors are `#sec-<slug>`.
+pub fn reviewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const html = renderReviewHtml(ctx.allocator, ctx.project_dir, name) catch |err| {
+        res.status = 500;
+        res.body = try std.fmt.allocPrint(ctx.allocator, "Review build failed: {s}", .{@errorName(err)});
+        return;
+    };
+    res.content_type = .HTML;
+    res.body = html;
+}
+
+/// Shared build path: evaluate, resolve BOM identities, run ERC, package
+/// the ReviewDoc. Returns an opaque error on build failure.
+fn buildDocForName(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+) !review_mod.ReviewDoc {
+    const board_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    defer allocator.free(board_path);
+
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+
+    const result = try eval.evalFile(board_path);
+    const block = switch (result) {
+        .design_block => |b| b,
+        .board => |b| @as(*const env_mod.DesignBlock, b.design),
+        else => return error.NotADesign,
+    };
+
+    const bom_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name });
+    defer allocator.free(bom_path);
+    bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch {};
+
+    const violations = try erc_mod.runErc(allocator, block, project_dir);
+    return try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations);
+}
+
+fn renderReviewJson(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]const u8 {
+    const doc = try buildDocForName(allocator, project_dir, name);
+    return try review_json_mod.renderToJson(allocator, doc);
+}
+
+fn renderReviewHtml(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]const u8 {
+    const doc = try buildDocForName(allocator, project_dir, name);
+    return try review_html_mod.renderToHtml(allocator, doc, assets_css.NAVBAR_CSS);
 }
 
 /// List free (unassigned) pins on an instance. Thin wrapper over the MCP

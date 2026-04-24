@@ -140,6 +140,37 @@ Public functions: renderBlockDiagram
 - Emits power_budget warning when typ load is above 80 percent of source typ
 - Emits no power_budget violation when load is well below source capacity
 
+## eval/power_budget
+
+Public functions: analyze
+
+## eval/power_sequencing
+
+Public functions: analyze
+
+- Emits one always_on row per sub-block output with no enable
+- Orders dependent rail after its enable source
+- Flags enable that never resolves to a known rail
+- Routes enable through PG signal to source rail
+
+## review
+
+- slugify converts section titles to anchor-safe identifiers
+- isoTimestamp formats epoch seconds as ISO-8601 UTC
+- buildSummary marks status=pass when no errors or warnings
+- buildSummary marks status=warn on warning-level violations
+- buildSummary marks status=fail on error-level violations
+- buildTestPoints collects testpoint instances with pin 1 net
+- buildTestPoints ignores non-testpoints
+
+## review_json
+
+Public functions: renderToJson
+
+## review_html
+
+Public functions: renderToHtml
+
 ## serve
 
 Public functions: notFound, serve
