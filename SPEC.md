@@ -190,7 +190,7 @@ Public functions: renderToHtml
 
 ## review_state
 
-Public functions: loadRequirements, loadState, saveState, reconcile, addItem, toggleItem, deleteItem, setApproval, renderState
+Public functions: loadState, saveState, reconcile, addItem, toggleItem, deleteItem, setApproval, renderState
 
 - saveState then loadState round-trips a checklist
 - loadState returns empty state when file is missing

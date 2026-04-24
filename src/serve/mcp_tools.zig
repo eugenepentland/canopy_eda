@@ -44,7 +44,6 @@ const tools = [_]ToolEntry{
     .{ .name = "list_free_pins", .is_mutation = false },
     .{ .name = "get_net", .is_mutation = false },
     .{ .name = "add_component_parameter", .is_mutation = true },
-    .{ .name = "get_requirements", .is_mutation = false },
     .{ .name = "get_review_state", .is_mutation = false },
     .{ .name = "set_review_state", .is_mutation = true },
 };
@@ -80,7 +79,6 @@ pub const tools_list_result =
     \\{"name":"list_free_pins","description":"List unassigned pins on an instance with their default pinout function names and a best-effort category (gpio|power|clock|analog|other). Use for picking GPIOs for new peripherals without scanning the full pinout file.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"ref":{"type":"string","description":"Reference designator of the instance (e.g. U1)"},"filter":{"type":"string","enum":["gpio","power","clock","analog","other"],"description":"Optional category filter"}},"required":["name","ref"],"additionalProperties":false}},
     \\{"name":"get_net","description":"Return every pin connection on a net plus any passive instances (R/L/C/F/D) on it. Use to audit decoupling or verify wiring without scanning the whole source.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"net":{"type":"string"}},"required":["name","net"],"additionalProperties":false}},
     \\{"name":"add_component_parameter","description":"Append a (parameter \"NAME\" TYPE) declaration to a library component file under lib/components/. Use to fix ERC \"missing value\" errors on user-uploaded components that lack a parameter slot. Snapshots the prior library file to history/_lib. Does not rebuild any design — re-run a build to pick up the change.","inputSchema":{"type":"object","properties":{"component":{"type":"string","description":"Component file name (without .sexp)"},"param_name":{"type":"string","description":"Parameter name (e.g. value, color)"},"param_type":{"type":"string","description":"Parameter type atom (e.g. string, capacitance, resistance, number)"}},"required":["component","param_name","param_type"],"additionalProperties":false}},
-    \\{"name":"get_requirements","description":"Return the raw requirements markdown for a design (from projects/designs/reviews/<name>.requirements.md). Empty string when the file is missing. Surface this alongside the review to read system-level spec during an audit.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Design name (without .sexp)"}},"required":["name"],"additionalProperties":false}},
     \\{"name":"get_review_state","description":"Return the per-section review state: the checklist items (with id, text, checked) and per-section approval (approved, approved_by, approved_at). One entry per section slug present in the design. Use this to see which sections are still pending review.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}},
     \\{"name":"set_review_state","description":"Mutate one section's review state in one call: optionally append new checklist items, toggle existing ones by id, delete items by id, and/or set the approval flag + reviewer. At least one of add_items/toggle/delete/approved must be present. approved=true stamps approved_at with the current UTC time.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"section_slug":{"type":"string","description":"Slug of the section to edit (match what generate_review returns)"},"add_items":{"type":"array","items":{"type":"string"},"description":"Texts for new checklist items to append"},"toggle":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"checked":{"type":"boolean"}},"required":["id","checked"]},"description":"Existing items to toggle by id"},"delete":{"type":"array","items":{"type":"string"},"description":"Item ids to delete"},"approved":{"type":"boolean","description":"Set the section-level approval flag"},"reviewer":{"type":"string","description":"Reviewer name stamped when approved=true"}},"required":["name","section_slug"],"additionalProperties":false}}
     \\]}
@@ -347,18 +345,6 @@ fn callInner(
         const result = edit.addComponentParameterCore(allocator, project_dir, component, param_name, param_type) catch |err| return editErrorMsg(out, allocator, err);
         try w.writeAll("{\"ok\":true,\"snapshot\":");
         if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
-        try w.writeAll("}");
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "get_requirements")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const md = review_state_mod.loadRequirements(allocator, project_dir, name) catch |err| {
-            try w.print("error: {s}", .{@errorName(err)});
-            return false;
-        };
-        try w.writeAll("{\"markdown\":");
-        try writeJsonString(w, md);
         try w.writeAll("}");
         return true;
     }

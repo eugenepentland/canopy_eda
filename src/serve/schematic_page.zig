@@ -6,6 +6,7 @@ const erc_mod = @import("../erc.zig");
 const bom = @import("../bom.zig");
 const render_html = @import("../render_html.zig");
 const review = @import("../review.zig");
+const review_state_mod = @import("../review_state.zig");
 const assets_css = @import("assets_css.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
@@ -50,6 +51,19 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
     const violations = erc_mod.runErc(ctx.allocator, block, ctx.project_dir) catch &[_]erc_mod.Violation{};
     const status = computeStatus(violations, eval.assertions.items);
 
+    // Build the review doc too — the schematic page embeds its content
+    // (summary, power budget/sequencing, test points, ERC, assertions) below
+    // the section cards so a single URL covers both "what it is" and
+    // "whether it's correct."
+    const review_doc: ?review.ReviewDoc = blk: {
+        var doc = review.buildReview(ctx.allocator, name, block, eval.assertions.items, violations) catch break :blk null;
+        const stored_state = review_state_mod.loadState(ctx.allocator, ctx.project_dir, name) catch review.ReviewState{};
+        var live_slugs = ctx.allocator.alloc([]const u8, doc.sections.len) catch break :blk null;
+        for (doc.sections, 0..) |s, i| live_slugs[i] = s.slug;
+        doc.review_state = review_state_mod.reconcile(ctx.allocator, stored_state, live_slugs) catch review.ReviewState{};
+        break :blk doc;
+    };
+
     const html = render_html.renderToHtml(
         ctx.allocator,
         block,
@@ -57,6 +71,7 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
         name,
         assets_css.NAVBAR_CSS,
         status,
+        review_doc,
     ) catch |err| {
         res.status = 500;
         res.body = try std.fmt.allocPrint(ctx.allocator, "Render error: {s}", .{@errorName(err)});

@@ -7,23 +7,6 @@ const review = @import("review.zig");
 /// will refresh.
 var save_mutex: std.Thread.Mutex = .{};
 
-/// Read the per-design requirements markdown. Returns an empty slice if
-/// the file is missing so the review page can render a "no doc" hint
-/// without a hard failure.
-pub fn loadRequirements(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-) ![]const u8 {
-    if (!safeName(name)) return error.InvalidName;
-    const path = try requirementsPath(allocator, project_dir, name);
-    defer allocator.free(path);
-    return std.fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch |err| switch (err) {
-        error.FileNotFound => &.{},
-        else => err,
-    };
-}
-
 /// Load the review-state JSON for a design. Returns an empty state if the
 /// file is absent or malformed — a corrupt file shouldn't 500 the review
 /// page, the user can re-create it by checking items again.
@@ -286,10 +269,6 @@ fn appendItem(
 
 fn statePath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/reviews/{s}.state.json", .{ project_dir, name });
-}
-
-fn requirementsPath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/reviews/{s}.requirements.md", .{ project_dir, name });
 }
 
 fn ensureReviewsDir(allocator: std.mem.Allocator, project_dir: []const u8) !void {

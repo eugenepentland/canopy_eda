@@ -116,9 +116,6 @@ pub const ReviewDoc = struct {
     /// Flat list of every error+warning ERC violation (any severity-info is
     /// excluded to keep the unresolved list actionable).
     unresolved: []const erc_mod.Violation,
-    /// Raw markdown from `reviews/{name}.requirements.md`, empty when the
-    /// file is missing. Rendered client-side by marked.js.
-    requirements_markdown: []const u8 = "",
     /// Per-section checklist and approval state loaded from
     /// `reviews/{name}.state.json` and reconciled against the live section
     /// list, so every section report has a matching state entry by slug.

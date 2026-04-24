@@ -19,20 +19,12 @@ pub fn renderToHtml(allocator: std.mem.Allocator, doc: review.ReviewDoc, navbar_
     try w.writeAll(navbar_css);
     try w.writeAll(REVIEW_CSS);
     try w.writeAll("</style>");
-    try w.writeAll("<script src=\"https://cdn.jsdelivr.net/npm/marked/marked.min.js\"></script>");
     try w.writeAll("</head><body>");
     try writeNavbar(w);
     try w.writeAll("<div class=\"review-wrap\">");
 
     try writeHeader(w, doc);
-    try writeRequirements(w, doc);
-    try writeSummaryTable(w, doc.summary);
-    try writeSections(w, doc.sections, doc.review_state);
-    try writePowerSequence(w, doc.power_sequence);
-    try writeTestPoints(w, doc.test_points);
-    try writePowerBudget(w, doc.power_budget);
-    try writeUnresolved(w, doc.unresolved);
-    try writeAssertions(w, doc.assertions);
+    try renderBodyInto(w, doc);
 
     try w.writeAll("</div>");
     try writeScript(w, doc.design_name);
@@ -40,17 +32,28 @@ pub fn renderToHtml(allocator: std.mem.Allocator, doc: review.ReviewDoc, navbar_
     return buf.items;
 }
 
-fn writeRequirements(w: anytype, doc: review.ReviewDoc) !void {
-    try w.writeAll("<section><h2>Requirements</h2>");
-    if (doc.requirements_markdown.len == 0) {
-        try w.writeAll("<p class=\"hint\">No requirements doc. Create <code>projects/designs/reviews/");
-        try writeHtmlEscaped(w, doc.design_name);
-        try w.writeAll(".requirements.md</code> to populate this section.</p>");
-    } else {
-        try w.writeAll("<div id=\"requirements-doc\" class=\"requirements markdown-body\"></div>");
-    }
-    try w.writeAll("</section>");
+/// Write every review section (summary → assertions) into an existing writer,
+/// without any page chrome — nav, <style>, <head>, wrapper div. Lets the
+/// schematic page embed the full review content inline below its section
+/// cards so a single URL (`/schematics/:name`) covers both "here's what we
+/// built" and "here's whether it's correct." The caller is responsible for
+/// including REVIEW_CSS in its <style> and CHECKLIST_JS in a <script>.
+pub fn renderBodyInto(w: anytype, doc: review.ReviewDoc) !void {
+    try writeSummaryTable(w, doc.summary);
+    try writeSections(w, doc.sections, doc.review_state);
+    try writePowerSequence(w, doc.power_sequence);
+    try writeTestPoints(w, doc.test_points);
+    try writePowerBudget(w, doc.power_budget);
+    try writeUnresolved(w, doc.unresolved);
+    try writeAssertions(w, doc.assertions);
 }
+
+/// CSS rules for review content. Exposed so the schematic page can include
+/// them when embedding `renderBodyInto`.
+pub const BODY_CSS = REVIEW_CSS;
+
+/// Checklist interaction JS. Exposed for embedding alongside `renderBodyInto`.
+pub const BODY_JS = CHECKLIST_JS;
 
 fn writeNavbar(w: anytype) !void {
     try w.writeAll("<div class=\"navbar\"><span class=\"brand\">Canopy EDA</span>");
@@ -569,17 +572,6 @@ const REVIEW_CSS =
     \\.consumer-table{font-size:0.85rem;}
     \\.consumer-table th{font-size:0.7rem;background:transparent;}
     \\.consumer-table td{font-family:"SF Mono","Fira Code",monospace;}
-    \\.requirements{background:#0a0e14;border:1px solid #21262d;border-radius:6px;padding:4px 18px;line-height:1.55;}
-    \\.requirements h1,.requirements h2,.requirements h3{color:#f0f6fc;border:0;margin:14px 0 8px;}
-    \\.requirements h1{font-size:1.25rem;}
-    \\.requirements h2{font-size:1.1rem;}
-    \\.requirements h3{font-size:1rem;}
-    \\.requirements ul,.requirements ol{margin:6px 0 10px 22px;}
-    \\.requirements li{margin:3px 0;}
-    \\.requirements code{background:#161b22;}
-    \\.requirements pre{background:#161b22;border:1px solid #21262d;border-radius:4px;padding:10px;overflow:auto;}
-    \\.requirements p{margin:8px 0;}
-    \\.requirements blockquote{border-left:3px solid #30363d;margin:8px 0;padding:2px 12px;color:#8b949e;}
     \\.pill-approved{background:#0d3a1f;color:#3fb950;}
     \\.sec-card-approved{border-left:3px solid #3fb950;}
     \\.sec-checklist{margin-top:10px;padding-top:8px;border-top:1px solid #21262d;}
@@ -632,12 +624,6 @@ fn writeJsString(w: anytype, s: []const u8) !void {
 
 const CHECKLIST_JS =
     \\(function(){
-    \\  var reqEl=document.getElementById('requirements-doc');
-    \\  if(reqEl&&window.marked){
-    \\    fetch('/api/requirements/'+encodeURIComponent(DESIGN_NAME))
-    \\      .then(function(r){return r.ok?r.text():''})
-    \\      .then(function(md){if(md)reqEl.innerHTML=marked.parse(md);});
-    \\  }
     \\  function post(path,body){
     \\    return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
     \\      .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r;});

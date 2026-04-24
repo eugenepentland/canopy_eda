@@ -2,6 +2,7 @@ const std = @import("std");
 const env_mod = @import("eval/env.zig");
 const erc_mod = @import("erc.zig");
 const review = @import("review.zig");
+const review_html = @import("review_html.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Section = env_mod.Section;
 const Instance = env_mod.Instance;
@@ -34,6 +35,7 @@ pub fn renderToHtml(
     design_name: []const u8,
     navbar_css: []const u8,
     status: review.Status,
+    review_doc: ?review.ReviewDoc,
 ) ![]const u8 {
     var ctx = RenderCtx.init(allocator);
     ctx.project_dir = project_dir;
@@ -73,6 +75,7 @@ pub fn renderToHtml(
     try w.writeAll("<style>");
     try w.writeAll(navbar_css);
     try w.writeAll(SCHEMATIC_CSS);
+    if (review_doc != null) try w.writeAll(review_html.BODY_CSS);
     try w.writeAll("</style></head><body>");
 
     try writeNavbar(w);
@@ -93,10 +96,26 @@ pub fn renderToHtml(
         try writeFlatHubs(&ctx, w, allocator, block);
     }
 
+    // Review content: summary, power budget, sequencing, test points, ERC
+    // violations, and assertions. Rendered inline below the schematic so a
+    // single page holds both "what it is" and "whether it's correct."
+    if (review_doc) |doc| {
+        try w.writeAll("<div class=\"review-embed review-wrap\">");
+        try review_html.renderBodyInto(w, doc);
+        try w.writeAll("</div>");
+    }
+
     try w.writeAll("</div>");
     try writeSidebar(w);
     try w.writeAll("</div>");
     try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns);
+    if (review_doc != null) {
+        // BODY_JS (review checklist handlers) reuses DESIGN_NAME — already
+        // declared by writeScripts above.
+        try w.writeAll("<script>");
+        try w.writeAll(review_html.BODY_JS);
+        try w.writeAll("</script>");
+    }
     try w.writeAll("</body></html>");
 
     return buf.items;
@@ -149,7 +168,6 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
     try w.writeAll("<div class=\"kicad-status\" id=\"kicad-status\"></div>");
     try w.writeAll("</div></div>");
     try w.print("<a class=\"head-link\" href=\"/pcb/{s}\">PCB</a>", .{design_name});
-    try w.print("<a class=\"head-link\" href=\"/review/{s}\">Review</a>", .{design_name});
     try w.print("<a class=\"head-link\" href=\"/schematics/{s}/canvas\">Canvas (legacy)</a>", .{design_name});
     try w.print("<a class=\"head-link\" href=\"/api/export-bom/{s}\">BOM</a>", .{design_name});
     try w.print("<a class=\"head-link\" href=\"/api/export-netlist/{s}\">Netlist</a>", .{design_name});

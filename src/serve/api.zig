@@ -18,9 +18,7 @@ const bom_html = @import("bom_html.zig");
 const mcp_tools = @import("mcp_tools.zig");
 const review_mod = @import("../review.zig");
 const review_json_mod = @import("../review_json.zig");
-const review_html_mod = @import("../review_html.zig");
 const review_state_mod = @import("../review_state.zig");
-const assets_css = @import("assets_css.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
@@ -1300,19 +1298,17 @@ fn writeJsonString(w: anytype, s: []const u8) !void {
     try w.writeAll("\"");
 }
 
-/// Render the same review data as HTML. Deep-link anchors are `#sec-<slug>`.
+/// Legacy `/review/:name` route — the schematic page now embeds every review
+/// section inline, so we 301-redirect here. Old bookmarks and PR links keep
+/// working; scroll anchors (`#sec-<slug>`) are preserved by the browser.
 pub fn reviewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
     };
-    const html = renderReviewHtml(ctx.allocator, ctx.project_dir, name) catch |err| {
-        res.status = 500;
-        res.body = try std.fmt.allocPrint(ctx.allocator, "Review build failed: {s}", .{@errorName(err)});
-        return;
-    };
-    res.content_type = .HTML;
-    res.body = html;
+    const location = try std.fmt.allocPrint(ctx.allocator, "/schematics/{s}", .{name});
+    res.status = 301;
+    res.header("location", location);
 }
 
 /// Shared build path: evaluate, resolve BOM identities, run ERC, package
@@ -1342,10 +1338,8 @@ fn buildDocForName(
     const violations = try erc_mod.runErc(allocator, block, project_dir);
     var doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations);
 
-    // Attach requirements markdown + reconciled review state. Both degrade
-    // to empty on missing/malformed files so a design with no reviews/ dir
-    // still renders a clean report.
-    doc.requirements_markdown = review_state_mod.loadRequirements(allocator, project_dir, name) catch &.{};
+    // Attach reconciled review state. Degrades to empty on missing/malformed
+    // files so a design with no reviews/ dir still renders a clean report.
     const stored_state = review_state_mod.loadState(allocator, project_dir, name) catch review_mod.ReviewState{};
     var live_slugs = try allocator.alloc([]const u8, doc.sections.len);
     for (doc.sections, 0..) |s, i| live_slugs[i] = s.slug;
@@ -1357,11 +1351,6 @@ fn buildDocForName(
 fn renderReviewJson(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]const u8 {
     const doc = try buildDocForName(allocator, project_dir, name);
     return try review_json_mod.renderToJson(allocator, doc);
-}
-
-fn renderReviewHtml(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]const u8 {
-    const doc = try buildDocForName(allocator, project_dir, name);
-    return try review_html_mod.renderToHtml(allocator, doc, assets_css.NAVBAR_CSS);
 }
 
 /// List free (unassigned) pins on an instance. Thin wrapper over the MCP
@@ -1456,28 +1445,7 @@ pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     res.body = try ctx.allocator.dupe(u8, buf.items);
 }
 
-// ── Requirements + review-state (persisted per design) ─────────────────
-
-/// Serve the raw requirements markdown for a design. Empty file returns
-/// 204 so the browser's fetch doesn't flash a visible "failed" error.
-pub fn requirementsGetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
-    const md = review_state_mod.loadRequirements(ctx.allocator, ctx.project_dir, name) catch {
-        res.status = 500;
-        res.body = "load failed";
-        return;
-    };
-    if (md.len == 0) {
-        res.status = 204;
-        return;
-    }
-    res.content_type = .TEXT;
-    res.header("content-type", "text/markdown; charset=utf-8");
-    res.body = md;
-}
+// ── Review-state (persisted per design) ────────────────────────────────
 
 /// Return the reconciled review state for a design as JSON. Reconcile
 /// matches the live section list so the client can render empty entries

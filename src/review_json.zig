@@ -74,9 +74,6 @@ pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) ![]cons
     }
     try w.writeAll("]");
 
-    try w.writeAll(",\"requirements_markdown\":");
-    try writeJsonString(w, doc.requirements_markdown);
-
     try w.writeAll(",\"review_state\":");
     try writeReviewState(w, doc.review_state);
 
