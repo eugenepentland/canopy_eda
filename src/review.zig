@@ -77,6 +77,31 @@ pub const TestPointEntry = struct {
     purpose: []const u8 = "",
 };
 
+/// One user-written checklist item on a section — e.g. "Power pins wired",
+/// "Decoupling placed". Server allocates the 8-char hex id on add so the
+/// client never has to invent one.
+pub const ChecklistItem = struct {
+    id: []const u8,
+    text: []const u8,
+    checked: bool = false,
+};
+
+/// Per-section review state: the checklist plus an overall approval
+/// stamped with reviewer + UTC timestamp when the user clicks Approve.
+pub const SectionReviewState = struct {
+    section_slug: []const u8,
+    items: []const ChecklistItem = &.{},
+    approved: bool = false,
+    approved_by: []const u8 = "",
+    approved_at: []const u8 = "",
+};
+
+/// The full review-state payload for a design, persisted at
+/// `{project_dir}/reviews/{name}.state.json`.
+pub const ReviewState = struct {
+    sections: []const SectionReviewState = &.{},
+};
+
 pub const ReviewDoc = struct {
     design_name: []const u8,
     title: []const u8,
@@ -91,6 +116,13 @@ pub const ReviewDoc = struct {
     /// Flat list of every error+warning ERC violation (any severity-info is
     /// excluded to keep the unresolved list actionable).
     unresolved: []const erc_mod.Violation,
+    /// Raw markdown from `reviews/{name}.requirements.md`, empty when the
+    /// file is missing. Rendered client-side by marked.js.
+    requirements_markdown: []const u8 = "",
+    /// Per-section checklist and approval state loaded from
+    /// `reviews/{name}.state.json` and reconciled against the live section
+    /// list, so every section report has a matching state entry by slug.
+    review_state: ReviewState = .{},
 };
 
 /// Build a review document for a design block. `assertions` comes from the

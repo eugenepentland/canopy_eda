@@ -164,6 +164,12 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     router.get("/api/drc/:name", api.drcApi, .{});
     router.get("/api/erc/:name", api.ercApi, .{});
     router.get("/api/review/:name", api.reviewJsonApi, .{});
+    router.get("/api/requirements/:name", api.requirementsGetApi, .{});
+    router.get("/api/review-state/:name", api.reviewStateGetApi, .{});
+    router.post("/api/review-state/:name/item", api.reviewStateAddItemApi, .{});
+    router.post("/api/review-state/:name/item/toggle", api.reviewStateToggleItemApi, .{});
+    router.post("/api/review-state/:name/item/delete", api.reviewStateDeleteItemApi, .{});
+    router.post("/api/review-state/:name/approve", api.reviewStateApproveApi, .{});
     router.get("/api/scene-graph/:name", api.sceneGraphApi, .{});
     router.get("/api/block-diagram-json/:name", api.blockDiagramJsonApi, .{});
 

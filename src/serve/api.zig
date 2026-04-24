@@ -18,6 +18,7 @@ const mcp_tools = @import("mcp_tools.zig");
 const review_mod = @import("../review.zig");
 const review_json_mod = @import("../review_json.zig");
 const review_html_mod = @import("../review_html.zig");
+const review_state_mod = @import("../review_state.zig");
 const assets_css = @import("assets_css.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
@@ -1193,7 +1194,18 @@ fn buildDocForName(
     bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch {};
 
     const violations = try erc_mod.runErc(allocator, block, project_dir);
-    return try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations);
+    var doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations);
+
+    // Attach requirements markdown + reconciled review state. Both degrade
+    // to empty on missing/malformed files so a design with no reviews/ dir
+    // still renders a clean report.
+    doc.requirements_markdown = review_state_mod.loadRequirements(allocator, project_dir, name) catch &.{};
+    const stored_state = review_state_mod.loadState(allocator, project_dir, name) catch review_mod.ReviewState{};
+    var live_slugs = try allocator.alloc([]const u8, doc.sections.len);
+    for (doc.sections, 0..) |s, i| live_slugs[i] = s.slug;
+    doc.review_state = review_state_mod.reconcile(allocator, stored_state, live_slugs) catch review_mod.ReviewState{};
+
+    return doc;
 }
 
 fn renderReviewJson(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]const u8 {
@@ -1296,6 +1308,182 @@ pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     try w.writeAll("}}");
 
     res.body = try ctx.allocator.dupe(u8, buf.items);
+}
+
+// ── Requirements + review-state (persisted per design) ─────────────────
+
+/// Serve the raw requirements markdown for a design. Empty file returns
+/// 204 so the browser's fetch doesn't flash a visible "failed" error.
+pub fn requirementsGetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const md = review_state_mod.loadRequirements(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = "load failed";
+        return;
+    };
+    if (md.len == 0) {
+        res.status = 204;
+        return;
+    }
+    res.content_type = .TEXT;
+    res.header("content-type", "text/markdown; charset=utf-8");
+    res.body = md;
+}
+
+/// Return the reconciled review state for a design as JSON. Reconcile
+/// matches the live section list so the client can render empty entries
+/// for new sections without a page reload.
+pub fn reviewStateGetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const state = review_state_mod.loadState(ctx.allocator, ctx.project_dir, name) catch review_mod.ReviewState{};
+    const json = review_state_mod.renderState(ctx.allocator, state) catch {
+        res.status = 500;
+        res.body = "{\"error\":\"render failed\"}";
+        return;
+    };
+    res.content_type = .JSON;
+    res.header("access-control-allow-origin", "*");
+    res.body = json;
+}
+
+/// POST /api/review-state/:name/item — body {section_slug, text}. Server
+/// mints the id and returns {id, version}.
+pub fn reviewStateAddItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        return;
+    };
+    const slug = jsonField(body, "section_slug") orelse {
+        res.status = 400;
+        res.body = "missing section_slug";
+        return;
+    };
+    const text = jsonField(body, "text") orelse {
+        res.status = 400;
+        res.body = "missing text";
+        return;
+    };
+    const id = review_state_mod.addItem(ctx.allocator, ctx.project_dir, name, slug, text) catch {
+        res.status = 500;
+        res.body = "save failed";
+        return;
+    };
+    const v = serve_root.bumpLiveVersion(name);
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"id\":\"{s}\",\"version\":{d}}}", .{ id, v });
+}
+
+/// POST /api/review-state/:name/item/toggle — body {section_slug, id, checked}.
+pub fn reviewStateToggleItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        return;
+    };
+    const slug = jsonField(body, "section_slug") orelse {
+        res.status = 400;
+        return;
+    };
+    const id = jsonField(body, "id") orelse {
+        res.status = 400;
+        return;
+    };
+    const checked = jsonBoolField(body, "checked") orelse false;
+    review_state_mod.toggleItem(ctx.allocator, ctx.project_dir, name, slug, id, checked) catch {
+        res.status = 500;
+        return;
+    };
+    const v = serve_root.bumpLiveVersion(name);
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{v});
+}
+
+/// POST /api/review-state/:name/item/delete — body {section_slug, id}.
+pub fn reviewStateDeleteItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        return;
+    };
+    const slug = jsonField(body, "section_slug") orelse {
+        res.status = 400;
+        return;
+    };
+    const id = jsonField(body, "id") orelse {
+        res.status = 400;
+        return;
+    };
+    review_state_mod.deleteItem(ctx.allocator, ctx.project_dir, name, slug, id) catch {
+        res.status = 500;
+        return;
+    };
+    const v = serve_root.bumpLiveVersion(name);
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{v});
+}
+
+/// POST /api/review-state/:name/approve — body {section_slug, approved, reviewer}.
+/// Server stamps approved_at with isoTimestampNow on approval.
+pub fn reviewStateApproveApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        return;
+    };
+    const slug = jsonField(body, "section_slug") orelse {
+        res.status = 400;
+        return;
+    };
+    const approved = jsonBoolField(body, "approved") orelse false;
+    const reviewer = jsonField(body, "reviewer") orelse "";
+    review_state_mod.setApproval(ctx.allocator, ctx.project_dir, name, slug, approved, reviewer) catch {
+        res.status = 500;
+        return;
+    };
+    const v = serve_root.bumpLiveVersion(name);
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{v});
+}
+
+/// Extract `"key":"value"` from a flat JSON body. Matches the substring
+/// pattern used by edit.zig for other small endpoints — good enough for
+/// these short POSTs and avoids pulling in a full JSON parse per request.
+fn jsonField(body: []const u8, key: []const u8) ?[]const u8 {
+    var buf: [64]u8 = undefined;
+    const marker = std.fmt.bufPrint(&buf, "\"{s}\":\"", .{key}) catch return null;
+    const start = std.mem.indexOf(u8, body, marker) orelse return null;
+    const val_start = start + marker.len;
+    const end = std.mem.indexOfPos(u8, body, val_start, "\"") orelse return null;
+    return body[val_start..end];
+}
+
+fn jsonBoolField(body: []const u8, key: []const u8) ?bool {
+    var buf: [64]u8 = undefined;
+    const marker = std.fmt.bufPrint(&buf, "\"{s}\":", .{key}) catch return null;
+    const start = std.mem.indexOf(u8, body, marker) orelse return null;
+    const val_start = start + marker.len;
+    if (std.mem.startsWith(u8, body[val_start..], "true")) return true;
+    if (std.mem.startsWith(u8, body[val_start..], "false")) return false;
+    return null;
 }
 
 // Unused import suppression
