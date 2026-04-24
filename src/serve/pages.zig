@@ -6,7 +6,6 @@ const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 const bom_html = @import("bom_html.zig");
 const assets_css = @import("assets_css.zig");
-const assets_js = @import("assets_js.zig");
 const library = @import("library.zig");
 const mcp_tools = @import("mcp_tools.zig");
 

@@ -10,6 +10,7 @@ const upload = @import("serve/upload.zig");
 const upload_package = @import("serve/upload_package.zig");
 const footprint_preview = @import("serve/footprint_preview.zig");
 const model = @import("serve/model.zig");
+const schematic_page = @import("serve/schematic_page.zig");
 const canvas_page = @import("serve/canvas_page.zig");
 const pcb_page = @import("serve/pcb_page.zig");
 const auth = @import("serve/auth.zig");
@@ -130,7 +131,10 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     // Pages
     router.get("/", pages.indexPage, .{});
     router.get("/style.css", pages.cssPage, .{});
-    router.get("/schematics/:name", canvas_page.canvasPage, .{});
+    router.get("/schematics/:name", schematic_page.schematicPage, .{});
+    // Legacy Pixi.js canvas kept alongside the new HTML view while the HTML
+    // version catches up on editing / search / pin-move parity.
+    router.get("/schematics/:name/canvas", canvas_page.canvasPage, .{});
     router.get("/pcb/:name", pcb_page.pcbPage, .{});
     router.get("/review/:name", api.reviewPage, .{});
 
