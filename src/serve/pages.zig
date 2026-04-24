@@ -88,7 +88,7 @@ pub fn indexPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
         }
 
         // Action links
-        try w.print("<div class=\"design-card-links\"><a class=\"design-card-link\" href=\"/schematics/{s}\">Schematic</a><a class=\"design-card-link\" href=\"/pcb/{s}\">PCB</a></div></div>", .{ s.name, s.name });
+        try w.print("<div class=\"design-card-links\"><a class=\"design-card-link\" href=\"/schematics/{s}\">Schematic</a><a class=\"design-card-link\" href=\"/pcb/{s}\">PCB</a><a class=\"design-card-link\" href=\"/review/{s}\">Review</a></div></div>", .{ s.name, s.name, s.name });
     }
     if (summaries.len == 0) {
         try w.writeAll("<div class=\"empty-hint\">No designs found in src/.</div>");

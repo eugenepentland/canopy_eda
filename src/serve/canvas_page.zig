@@ -63,6 +63,7 @@ pub fn canvasPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
     try w.writeAll("<button class=\"canvas-btn\" id=\"rebuild-btn\">Rebuild</button>");
     try w.writeAll("<button class=\"canvas-btn\" id=\"source-btn\">Source</button>");
     try w.print("<a class=\"canvas-btn\" href=\"/pcb/{s}\">PCB</a>", .{name});
+    try w.print("<a class=\"canvas-btn\" href=\"/review/{s}\">Review</a>", .{name});
     try w.print("<button class=\"canvas-btn\" onclick=\"window.location='/api/export-bom/{s}'\">Export BOM</button>", .{name});
     try w.writeAll("<div class=\"kicad-menu\">");
     try w.writeAll("<button class=\"canvas-btn\" id=\"kicad-btn\">KiCad \u{25BE}</button>");

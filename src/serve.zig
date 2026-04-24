@@ -132,6 +132,7 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     router.get("/style.css", pages.cssPage, .{});
     router.get("/schematics/:name", canvas_page.canvasPage, .{});
     router.get("/pcb/:name", pcb_page.pcbPage, .{});
+    router.get("/review/:name", api.reviewPage, .{});
 
     // API
     router.post("/api/push/:name", api.pushApi, .{});
@@ -158,6 +159,7 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     router.post("/api/zone-fill/:name", api.zoneFillApi, .{});
     router.get("/api/drc/:name", api.drcApi, .{});
     router.get("/api/erc/:name", api.ercApi, .{});
+    router.get("/api/review/:name", api.reviewJsonApi, .{});
     router.get("/api/scene-graph/:name", api.sceneGraphApi, .{});
     router.get("/api/block-diagram-json/:name", api.blockDiagramJsonApi, .{});
 

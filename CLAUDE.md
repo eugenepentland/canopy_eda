@@ -185,6 +185,7 @@ Source (.sexp files)
 - **Design list**: `GET /` — links to all .sexp designs
 - **Schematic viewer**: `GET /schematics/:name` — Pixi.js canvas schematic
 - **PCB viewer**: `GET /pcb/:name` — interactive PCB layout editor
+- **Review report**: `GET /review/:name` — HTML design-review doc (summary banner, power-budget table, per-section cards, BOM, assertions, unresolved issues). JSON form at `GET /api/review/:name` for programmatic use.
 - **Scene graph**: `GET /api/scene-graph/:name` — JSON scene graph for schematic
 - **Block diagram**: `GET /api/block-diagram-json/:name` — block diagram JSON
 - **Live push**: `POST /api/push/:name` — rebuild and push update
@@ -221,10 +222,11 @@ update live. Two transports:
 
 Tools exposed: `list_designs`, `get_schematic`, `get_version`, `edit_value`,
 `swap_component`, `add_component`, `remove_component`, `rewire_pin`,
-`run_erc`, `run_drc`. Defined in `src/serve/mcp_tools.zig`; each mutation
-tool calls a `…Core` function in `src/serve/edit.zig` and returns the new
-`live_version`, so the browser picks up changes via its existing 2 s poll of
-`/api/version/:name`.
+`run_checks`, `generate_review`. Defined in `src/serve/mcp_tools.zig`; each
+mutation tool calls a `…Core` function in `src/serve/edit.zig` and returns
+the new `live_version`, so the browser picks up changes via its existing
+2 s poll of `/api/version/:name`. `generate_review` is read-only and returns
+the full review-doc JSON (matching `GET /api/review/:name`).
 
 OAuth endpoints (implemented in `src/serve/oauth.zig`, store in
 `src/serve/oauth_store.zig`):

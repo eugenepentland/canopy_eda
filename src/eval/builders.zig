@@ -457,6 +457,9 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
     var nominal: ?f64 = null;
     var current_typ: ?f64 = null;
     var current_max: ?f64 = null;
+    var efficiency: ?f64 = null;
+    var efficiency_linear: bool = false;
+    var enable_net: []const u8 = "";
     var is_optional: bool = false;
     for (args[dir_idx + 1 ..]) |arg| {
         if (arg.isForm("rated")) {
@@ -478,6 +481,21 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
             } else if (cc.len == 2) {
                 current_typ = cc[1].asNumber();
             }
+        } else if (arg.isForm("efficiency")) {
+            const ec = arg.asList().?;
+            if (ec.len >= 2) {
+                if (ec[1].asAtom()) |atom| {
+                    if (std.mem.eql(u8, atom, "linear")) efficiency_linear = true;
+                } else {
+                    efficiency = ec[1].asNumber();
+                }
+            }
+        } else if (arg.isForm("enable")) {
+            const ec = arg.asList().?;
+            if (ec.len >= 2) {
+                const en_val = try self.evalNode(ec[1], env);
+                enable_net = en_val.asString() orelse (ec[1].asAtom() orelse "");
+            }
         } else if (arg.asAtom()) |kw| {
             if (std.mem.eql(u8, kw, "optional")) is_optional = true;
         }
@@ -492,6 +510,9 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
         .nominal = nominal,
         .current_typ = current_typ,
         .current_max = current_max,
+        .efficiency = efficiency,
+        .efficiency_linear = efficiency_linear,
+        .enable_net = enable_net,
         .optional = is_optional,
     };
 }

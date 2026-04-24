@@ -1,6 +1,7 @@
 const std = @import("std");
 const env_mod = @import("eval/env.zig");
 const na = @import("eval/net_analysis.zig");
+const power_budget = @import("eval/power_budget.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
@@ -404,190 +405,76 @@ fn checkBlockPowerPins(allocator: std.mem.Allocator, block: *const DesignBlock, 
     }
 }
 
-/// Sum per-rail current draw from pin annotations and compare against the
-/// regulator sourcing the rail. Ferrite beads are treated as electrically
-/// transparent (DC conductor) so downstream rails roll up to the upstream
-/// regulator's budget. Surfaces four outcomes per rail:
+/// Emit power-budget violations by translating the rail analysis from
+/// eval/power_budget.zig into ERC violations. Ferrite beads are treated as
+/// electrically transparent (DC conductor) so downstream rails roll up to
+/// the upstream regulator's budget. Surfaces four outcomes per rail:
 ///   - error:   max load exceeds the regulator's rated max
 ///   - warning: typ load exceeds 80 % of the regulator's typ capacity
 ///   - info:    rail has load but no declared source capacity
 ///   - info:    rail has declared source but no consumer annotations
 fn checkPowerBudget(allocator: std.mem.Allocator, block: *const DesignBlock, violations: *std.ArrayListUnmanaged(Violation)) void {
-    // Union-find parent map; missing keys implicitly map to themselves.
-    var net_parent: std.StringHashMapUnmanaged([]const u8) = .empty;
-
-    // Step 1: union nets bridged by ferrite beads. A ferrite is a DC
-    // conductor — the current budget flows through it unchanged, so loads on
-    // VDDA18USB should attribute back to V1P8 (FB3 bridges them).
-    for (block.instances) |inst| {
-        if (!std.mem.startsWith(u8, inst.component, "ferrite")) continue;
-        var net_a: ?[]const u8 = null;
-        var net_b: ?[]const u8 = null;
-        for (block.nets) |net| {
-            const base = na.baseNetName(net.name);
-            for (net.pins) |p| {
-                if (!std.mem.eql(u8, p.ref_des, inst.ref_des)) continue;
-                if (std.mem.eql(u8, p.pin, "1")) net_a = base;
-                if (std.mem.eql(u8, p.pin, "2")) net_b = base;
-            }
-        }
-        if (net_a != null and net_b != null) {
-            unionNets(allocator, &net_parent, net_a.?, net_b.?);
-        }
-    }
-
-    // Step 2: collect source declarations from sub-block output ports, keyed
-    // on canonical root so ferrite-bridged equivalence classes share a budget.
-    // The display_rail is the top-level net the source was declared on — it's
-    // what engineers recognize (e.g. "V1P8"), regardless of which name
-    // union-find picked as the root.
-    const SourceInfo = struct {
-        source_label: []const u8, // e.g. "buck/VOUT"
-        display_rail: []const u8, // e.g. "V1P8"
-        current_typ: ?f64,
-        current_max: ?f64,
-    };
-    var sources: std.StringHashMapUnmanaged(SourceInfo) = .empty;
-
-    for (block.sub_blocks) |sb| {
-        for (sb.block.ports) |port| {
-            if (port.current_typ == null and port.current_max == null) continue;
-            if (!std.mem.eql(u8, port.direction, "out")) continue;
-            const path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, port.name }) catch continue;
-            for (block.net_ties) |nt| {
-                const matched = std.mem.eql(u8, nt.a, path) or std.mem.eql(u8, nt.b, path);
-                if (!matched) continue;
-                const top_net = if (std.mem.eql(u8, nt.a, path)) nt.b else nt.a;
-                const base = na.baseNetName(top_net);
-                const root = findRoot(&net_parent, base);
-                sources.put(allocator, root, .{
-                    .source_label = path,
-                    .display_rail = base,
-                    .current_typ = port.current_typ,
-                    .current_max = port.current_max,
+    const rails = power_budget.analyze(allocator, block);
+    for (rails) |rail| {
+        switch (rail.status) {
+            .ok => {},
+            .no_consumers => {
+                const msg = std.fmt.allocPrint(
+                    allocator,
+                    "Rail \"{s}\" sourced by {s} has no annotated consumers — add (i-typ …)/(i-max …) on pin forms to populate the budget",
+                    .{ rail.net, rail.source_label },
+                ) catch continue;
+                violations.append(allocator, .{
+                    .kind = .power_budget,
+                    .severity = .info,
+                    .message = msg,
+                    .net = rail.net,
                 }) catch {};
-            }
-        }
-    }
-
-    // Step 3: sum consumer currents into each canonical root.
-    const RailLoad = struct {
-        sum_typ: f64 = 0,
-        sum_max: f64 = 0,
-        any_typ: bool = false,
-        any_max: bool = false,
-    };
-    var loads: std.StringHashMapUnmanaged(RailLoad) = .empty;
-
-    for (block.nets) |net| {
-        const base = na.baseNetName(net.name);
-        const root = findRoot(&net_parent, base);
-        var load = loads.get(root) orelse RailLoad{};
-        for (net.pins) |pin| {
-            if (pin.i_typ) |v| {
-                load.sum_typ += v;
-                load.any_typ = true;
-            }
-            if (pin.i_max) |v| {
-                load.sum_max += v;
-                load.any_max = true;
-            }
-        }
-        loads.put(allocator, root, load) catch {};
-    }
-
-    // Step 4: cross-reference and emit.
-    var src_iter = sources.iterator();
-    while (src_iter.next()) |entry| {
-        const root = entry.key_ptr.*;
-        const src = entry.value_ptr.*;
-        const load = loads.get(root) orelse RailLoad{};
-
-        if (!load.any_typ and !load.any_max) {
-            const msg = std.fmt.allocPrint(
-                allocator,
-                "Rail \"{s}\" sourced by {s} has no annotated consumers — add (i-typ …)/(i-max …) on pin forms to populate the budget",
-                .{ src.display_rail, src.source_label },
-            ) catch continue;
-            violations.append(allocator, .{
-                .kind = .power_budget,
-                .severity = .info,
-                .message = msg,
-                .net = src.display_rail,
-            }) catch {};
-            continue;
-        }
-
-        if (src.current_max) |smax| {
-            if (load.any_max and load.sum_max > smax) {
+            },
+            .over => {
+                const smax = rail.source_max_a orelse continue;
                 const msg = std.fmt.allocPrint(
                     allocator,
                     "Rail \"{s}\" max load {d:.3}A exceeds {s} rated max {d:.3}A",
-                    .{ src.display_rail, load.sum_max, src.source_label, smax },
+                    .{ rail.net, rail.load_max_a, rail.source_label, smax },
                 ) catch continue;
                 violations.append(allocator, .{
                     .kind = .power_budget,
                     .severity = .@"error",
                     .message = msg,
-                    .net = src.display_rail,
+                    .net = rail.net,
                 }) catch {};
-                continue;
-            }
-        }
-        if (src.current_typ) |styp| {
-            if (load.any_typ and load.sum_typ > 0.8 * styp) {
-                const pct: u32 = @intFromFloat(100.0 * load.sum_typ / styp);
+            },
+            .tight => {
+                const styp = rail.source_typ_a orelse continue;
+                const pct: u32 = @intFromFloat(100.0 * rail.load_typ_a / styp);
                 const msg = std.fmt.allocPrint(
                     allocator,
                     "Rail \"{s}\" typ load {d:.3}A is {d}% of {s} typ {d:.3}A — tight margin",
-                    .{ src.display_rail, load.sum_typ, pct, src.source_label, styp },
+                    .{ rail.net, rail.load_typ_a, pct, rail.source_label, styp },
                 ) catch continue;
                 violations.append(allocator, .{
                     .kind = .power_budget,
                     .severity = .warning,
                     .message = msg,
-                    .net = src.display_rail,
+                    .net = rail.net,
                 }) catch {};
-            }
+            },
+            .no_source => {
+                const msg = std.fmt.allocPrint(
+                    allocator,
+                    "Rail \"{s}\" has {d:.3}A typ load but no regulator declares (current …) on its output",
+                    .{ rail.net, rail.load_typ_a },
+                ) catch continue;
+                violations.append(allocator, .{
+                    .kind = .power_budget,
+                    .severity = .info,
+                    .message = msg,
+                    .net = rail.net,
+                }) catch {};
+            },
         }
     }
-
-    // Step 5: rails that have load but no declared source capacity.
-    var load_iter = loads.iterator();
-    while (load_iter.next()) |entry| {
-        const root = entry.key_ptr.*;
-        const load = entry.value_ptr.*;
-        if (!load.any_typ and !load.any_max) continue;
-        if (sources.contains(root)) continue;
-        if (std.mem.eql(u8, root, "GND")) continue;
-        const msg = std.fmt.allocPrint(
-            allocator,
-            "Rail \"{s}\" has {d:.3}A typ load but no regulator declares (current …) on its output",
-            .{ root, load.sum_typ },
-        ) catch continue;
-        violations.append(allocator, .{
-            .kind = .power_budget,
-            .severity = .info,
-            .message = msg,
-            .net = root,
-        }) catch {};
-    }
-}
-
-fn findRoot(parent: *std.StringHashMapUnmanaged([]const u8), name: []const u8) []const u8 {
-    var cur = name;
-    while (parent.get(cur)) |p| {
-        if (std.mem.eql(u8, p, cur)) return cur;
-        cur = p;
-    }
-    return cur;
-}
-
-fn unionNets(allocator: std.mem.Allocator, parent: *std.StringHashMapUnmanaged([]const u8), a: []const u8, b: []const u8) void {
-    const ra = findRoot(parent, a);
-    const rb = findRoot(parent, b);
-    if (std.mem.eql(u8, ra, rb)) return;
-    parent.put(allocator, rb, ra) catch {};
 }
 
 /// Report concept sections that still need implementation.
