@@ -52,6 +52,7 @@ pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u
                     if (self.port_nets.contains(term)) should_show = true;
                     if (!should_show) {
                         if (self.net_index.get(term)) |nps| {
+                            const my_section = self.section_map.get(hub_ref);
                             for (nps.items) |np| {
                                 if (self.rendered_spokes.contains(np.ref_des)) {
                                     should_show = true;
@@ -60,6 +61,15 @@ pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u
                                 if (!self.spoke_set.contains(np.ref_des) and !std.mem.eql(u8, np.ref_des, hub_ref)) {
                                     should_show = true;
                                     break;
+                                }
+                                // Spoke in a different section: net crosses section boundaries,
+                                // so the label belongs on this side of the crossing too.
+                                if (self.spoke_set.contains(np.ref_des)) {
+                                    const other_section = self.section_map.get(np.ref_des);
+                                    if (my_section != null and other_section != null and my_section.? != other_section.?) {
+                                        should_show = true;
+                                        break;
+                                    }
                                 }
                             }
                         }

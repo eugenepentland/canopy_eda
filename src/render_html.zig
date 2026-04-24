@@ -44,9 +44,19 @@ pub fn renderToHtml(
     var flat_sec_idx: usize = 0;
     for (block.sections) |sec| {
         for (sec.instances) |inst| try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
+        for (sec.pin_groups) |pg| {
+            if (!ctx.section_map.contains(pg.ref_des)) {
+                try ctx.section_map.put(allocator, pg.ref_des, flat_sec_idx);
+            }
+        }
         flat_sec_idx += 1;
         for (sec.sub_sections) |sub| {
             for (sub.instances) |inst| try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
+            for (sub.pin_groups) |pg| {
+                if (!ctx.section_map.contains(pg.ref_des)) {
+                    try ctx.section_map.put(allocator, pg.ref_des, flat_sec_idx);
+                }
+            }
             flat_sec_idx += 1;
         }
     }

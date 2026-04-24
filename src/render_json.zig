@@ -463,10 +463,24 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
         for (sec.instances) |inst| {
             try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
         }
+        // Top-level instances whose pins are declared in this section via
+        // `(pins ref ...)` should also count as "in" the section — this lets
+        // the cross-section detection work for multipart hubs like U3 (the
+        // STM32) whose body is top-level but whose pins live per-section.
+        for (sec.pin_groups) |pg| {
+            if (!ctx.section_map.contains(pg.ref_des)) {
+                try ctx.section_map.put(allocator, pg.ref_des, flat_sec_idx);
+            }
+        }
         flat_sec_idx += 1;
         for (sec.sub_sections) |sub| {
             for (sub.instances) |inst| {
                 try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
+            }
+            for (sub.pin_groups) |pg| {
+                if (!ctx.section_map.contains(pg.ref_des)) {
+                    try ctx.section_map.put(allocator, pg.ref_des, flat_sec_idx);
+                }
             }
             flat_sec_idx += 1;
         }
@@ -966,6 +980,7 @@ fn collectGroupConnections(ctx: *RenderCtx, scene: *SceneGraph, allocator: Alloc
                     if (ctx.port_nets.contains(term)) should_show = true;
                     if (!should_show) {
                         if (ctx.net_index.get(term)) |nps| {
+                            const my_section = ctx.section_map.get(hub_ref);
                             for (nps.items) |np| {
                                 if (ctx.rendered_spokes.contains(np.ref_des)) {
                                     should_show = true;
@@ -974,6 +989,15 @@ fn collectGroupConnections(ctx: *RenderCtx, scene: *SceneGraph, allocator: Alloc
                                 if (!ctx.spoke_set.contains(np.ref_des) and !std.mem.eql(u8, np.ref_des, hub_ref)) {
                                     should_show = true;
                                     break;
+                                }
+                                // Spoke in a different section: net crosses section boundaries,
+                                // so the label belongs on this side of the crossing too.
+                                if (ctx.spoke_set.contains(np.ref_des)) {
+                                    const other_section = ctx.section_map.get(np.ref_des);
+                                    if (my_section != null and other_section != null and my_section.? != other_section.?) {
+                                        should_show = true;
+                                        break;
+                                    }
                                 }
                             }
                         }
