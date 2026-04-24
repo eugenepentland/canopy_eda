@@ -282,7 +282,12 @@
     var html = '<span class="sb-back" data-back="' + (backTarget ? escapeHtml(backTarget) : '') + '">← ' +
       (backTarget ? 'Section' : 'All sections') + '</span>' +
       '<h4>' + escapeHtml(ref) + '</h4>' +
-      '<div class="sb-comp-meta">' + escapeHtml(c.component) + (c.value ? ' · ' + escapeHtml(c.value) : '') + '</div>';
+      '<div class="sb-comp-meta">' +
+        (c.component ?
+          '<span class="sb-comp-link" data-component="' + escapeHtml(c.component) + '" title="Show pinout">' +
+          escapeHtml(c.component) + '</span>' : '') +
+        (c.value ? ' · ' + escapeHtml(c.value) : '') +
+      '</div>';
     if (c.kind !== 'hub') {
       // Passives: show the nets they sit on, derived from SCH_INDEX.nets.
       var rows = [];
@@ -324,6 +329,13 @@
       var target = back.dataset.back;
       if (target) showSection(target, false); else showSectionList();
     });
+    var compLink = detailBox.querySelector('.sb-comp-link');
+    if (compLink) {
+      compLink.addEventListener('click', function (e) {
+        e.stopPropagation();
+        showPinout(compLink.dataset.component, ref);
+      });
+    }
     detailBox.querySelectorAll('.sb-pin-row').forEach(function (row) {
       row.addEventListener('click', function (e) {
         var net = row.dataset.net;
@@ -342,6 +354,108 @@
           scrollTo(pinEl || firstSvgPin);
         }
       });
+    });
+  }
+
+  // Pinout viewer: fetches lib/pinouts/<component>.sexp via API and shows the
+  // full pin map (every alternate function) so the user can verify that the
+  // pin they wired to a peripheral like XSPIM actually carries that function.
+  // Pins that are wired in the current schematic are highlighted and show the
+  // attached net; clicking a wired pin jumps to its net view.
+  var pinoutCache = {};
+  function showPinout(componentName, fromRef) {
+    if (!componentName) return;
+    var hub = fromRef ? compByRef[fromRef] : null;
+    var wired = {};
+    if (hub && hub.pins) {
+      hub.pins.forEach(function (p) { wired[p.id] = p; });
+    }
+
+    function render(data, error) {
+      var html = '<span class="sb-back" data-back-ref="' + (fromRef ? escapeHtml(fromRef) : '') + '">← ' +
+        (fromRef ? escapeHtml(fromRef) : 'Back') + '</span>' +
+        '<h4>' + escapeHtml(componentName) + ' pinout</h4>';
+      if (error) {
+        html += '<div class="sb-empty">' + escapeHtml(error) + '</div>';
+      } else if (!data || !data.pins || !data.pins.length) {
+        html += '<div class="sb-empty">No pins in pinout file.</div>';
+      } else {
+        var wiredCount = 0;
+        (data.pins || []).forEach(function (p) { if (wired[p.id]) wiredCount++; });
+        html += '<div class="sb-comp-meta">' + data.pins.length + ' pins' +
+          (fromRef ? ' · ' + wiredCount + ' wired on ' + escapeHtml(fromRef) : '') + '</div>' +
+          '<input type="text" class="sb-pinout-filter" placeholder="Filter by pin / function (e.g. XSPI)" />' +
+          '<div class="sb-pinout-rows">';
+        var sorted = data.pins.slice().sort(function (a, b) { return cmpPin(a.id, b.id); });
+        sorted.forEach(function (p) {
+          var w = wired[p.id];
+          var cls = 'sb-pinout-row' + (w ? ' is-wired' : '');
+          var altHay = (p.alts || []).map(function (a) { return a.name; }).join(' ');
+          var hay = (p.id + ' ' + (p.fn || '') + ' ' + altHay).toLowerCase();
+          html += '<div class="' + cls + '" data-hay="' + escapeHtml(hay) +
+            '" data-pin="' + escapeHtml(p.id) +
+            '" data-net="' + escapeHtml(w ? (w.net || '') : '') + '">' +
+            '<div class="sb-pinout-head">' +
+            '<span class="sb-pin-id">' + escapeHtml(p.id) + '</span>' +
+            '<span class="sb-pinout-fn">' + escapeHtml(p.fn || '') + '</span>' +
+            (w && w.net ? '<span class="sb-pinout-net" title="Wired to this net">' + escapeHtml(w.net) + '</span>' : '') +
+            '</div>';
+          if (p.alts && p.alts.length) {
+            html += '<div class="sb-pinout-alts">' + p.alts.map(function (a) {
+              return '<span class="sb-pinout-alt" data-type="' + escapeHtml(a.type || '') + '">' +
+                escapeHtml(a.name) + '</span>';
+            }).join('') + '</div>';
+          }
+          html += '</div>';
+        });
+        html += '</div>';
+      }
+      detailBox.innerHTML = html;
+      var back = detailBox.querySelector('.sb-back');
+      if (back) back.addEventListener('click', function () {
+        var r = back.dataset.backRef;
+        if (r) showComponent(r, false); else showSectionList();
+      });
+      // Clicking a wired pin row jumps to its net view.
+      detailBox.querySelectorAll('.sb-pinout-row.is-wired').forEach(function (row) {
+        row.addEventListener('click', function () {
+          var net = row.dataset.net;
+          if (net) showNet(net, true);
+        });
+      });
+      // Filter: substring match against "pin id / fn / alt names".
+      var filter = detailBox.querySelector('.sb-pinout-filter');
+      if (filter) {
+        filter.addEventListener('input', function () {
+          var q = filter.value.trim().toLowerCase();
+          detailBox.querySelectorAll('.sb-pinout-row').forEach(function (row) {
+            row.style.display = (!q || row.dataset.hay.indexOf(q) !== -1) ? '' : 'none';
+          });
+        });
+      }
+    }
+
+    if (pinoutCache[componentName]) {
+      render(pinoutCache[componentName]);
+      return;
+    }
+    detailBox.innerHTML = '<span class="sb-back" data-back-ref="' + (fromRef ? escapeHtml(fromRef) : '') + '">← ' +
+      (fromRef ? escapeHtml(fromRef) : 'Back') + '</span>' +
+      '<h4>' + escapeHtml(componentName) + ' pinout</h4>' +
+      '<div class="sb-empty">Loading…</div>';
+    var back0 = detailBox.querySelector('.sb-back');
+    if (back0) back0.addEventListener('click', function () {
+      var r = back0.dataset.backRef;
+      if (r) showComponent(r, false); else showSectionList();
+    });
+    fetch('/api/pinout/' + encodeURIComponent(componentName)).then(function (r) {
+      if (!r.ok) throw new Error('not found');
+      return r.json();
+    }).then(function (data) {
+      pinoutCache[componentName] = data;
+      render(data);
+    }).catch(function () {
+      render(null, 'No pinout file for ' + componentName + ' (expected lib/pinouts/' + componentName + '.sexp).');
     });
   }
 

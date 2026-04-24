@@ -903,6 +903,20 @@ const SCHEMATIC_CSS =
     \\.sb-net-pin:hover{color:#f85149;text-decoration:underline;}
     \\.sb-pin-row .sb-pin-fn{color:#8b949e;font-size:0.74rem;}
     \\.sb-pin-row .sb-pin-alt{color:#d2a8ff;}
+    \\.sb-comp-link{color:#58a6ff;cursor:pointer;}
+    \\.sb-comp-link:hover{text-decoration:underline;}
+    \\.sb-pinout-filter{width:100%;box-sizing:border-box;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:5px 8px;font-size:0.78rem;font-family:inherit;margin:4px 0 8px;}
+    \\.sb-pinout-filter:focus{outline:none;border-color:#58a6ff;}
+    \\.sb-pinout-rows{display:flex;flex-direction:column;gap:4px;}
+    \\.sb-pinout-row{padding:6px 8px;border:1px solid #21262d;border-radius:4px;font-family:"SF Mono",monospace;font-size:0.78rem;background:#0d1117;}
+    \\.sb-pinout-row.is-wired{border-color:#3fb950;background:rgba(63,185,80,0.08);cursor:pointer;}
+    \\.sb-pinout-row.is-wired:hover{background:rgba(63,185,80,0.16);}
+    \\.sb-pinout-head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;}
+    \\.sb-pinout-head .sb-pin-id{color:#79c0ff;min-width:40px;}
+    \\.sb-pinout-fn{color:#c9d1d9;}
+    \\.sb-pinout-net{color:#e8c547;margin-left:auto;font-size:0.74rem;}
+    \\.sb-pinout-alts{margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;}
+    \\.sb-pinout-alt{color:#d2a8ff;background:rgba(210,168,255,0.1);padding:1px 5px;border-radius:3px;font-size:0.72rem;}
     \\.sb-empty{color:#6e7681;font-style:italic;}
     \\@media(max-width:900px){.sch-layout{grid-template-columns:1fr;}.sch-sidebar{position:static;height:auto;max-height:50vh;border-left:none;border-top:1px solid #30363d;}}
 ++ system_svg.SYSTEM_OVERVIEW_CSS;

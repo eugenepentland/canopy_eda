@@ -13,6 +13,7 @@ const zone_fill = @import("../zone_fill.zig");
 const drc_mod = @import("../drc.zig");
 const erc_mod = @import("../erc.zig");
 const env_mod = @import("../eval/env.zig");
+const parser_mod = @import("../sexpr/parser.zig");
 const bom_html = @import("bom_html.zig");
 const mcp_tools = @import("mcp_tools.zig");
 const review_mod = @import("../review.zig");
@@ -109,6 +110,103 @@ pub fn blockDiagramJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
     res.content_type = .JSON;
     res.header("access-control-allow-origin", "*");
     res.body = json;
+}
+
+/// Serve a component's pinout file (lib/pinouts/:name.sexp) as JSON so the
+/// schematic viewer can show the full pin map — primary function + every
+/// alternate function — next to the ref-des. Lets the user verify, for
+/// example, that the pin they wired to XSPIM_P1_IO5 really does expose that
+/// peripheral on the part.
+pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    // Reject path traversal / absolute paths — component names are bare idents.
+    if (name.len == 0 or std.mem.indexOfAny(u8, name, "/\\") != null or std.mem.indexOf(u8, name, "..") != null) {
+        res.status = 400;
+        res.body = "{\"error\":\"invalid component name\"}";
+        res.content_type = .JSON;
+        return;
+    }
+
+    const path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/pinouts/{s}.sexp", .{ ctx.project_dir, name });
+    defer ctx.allocator.free(path);
+
+    const content = std.fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 256) catch {
+        res.status = 404;
+        res.content_type = .JSON;
+        res.body = "{\"error\":\"pinout not found\"}";
+        return;
+    };
+
+    const nodes = parser_mod.parse(ctx.allocator, content) catch {
+        res.status = 500;
+        res.content_type = .JSON;
+        res.body = "{\"error\":\"parse error\"}";
+        return;
+    };
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(ctx.allocator);
+
+    try w.writeAll("{\"component\":");
+    try writeJsonString(w, name);
+    try w.writeAll(",\"pins\":[");
+
+    var first_pin = true;
+    if (nodes.len > 0) {
+        if (nodes[0].asList()) |top| {
+            if (top.len >= 2) {
+                const head = top[0].asAtom() orelse "";
+                if (std.mem.eql(u8, head, "pinout")) {
+                    for (top[2..]) |child| {
+                        const cl = child.asList() orelse continue;
+                        if (cl.len < 3) continue;
+                        const ch = cl[0].asAtom() orelse continue;
+                        if (!std.mem.eql(u8, ch, "pin")) continue;
+                        const pin_id = cl[1].asAtom() orelse cl[1].asString() orelse continue;
+                        const fn_name = cl[2].asString() orelse cl[2].asAtom() orelse continue;
+
+                        if (!first_pin) try w.writeAll(",");
+                        first_pin = false;
+                        try w.writeAll("{\"id\":");
+                        try writeJsonString(w, pin_id);
+                        try w.writeAll(",\"fn\":");
+                        try writeJsonString(w, fn_name);
+                        try w.writeAll(",\"alts\":[");
+
+                        var first_alt = true;
+                        if (cl.len > 3) {
+                            for (cl[3..]) |alt_node| {
+                                const al = alt_node.asList() orelse continue;
+                                if (al.len < 2) continue;
+                                const hd = al[0].asAtom() orelse continue;
+                                if (!std.mem.eql(u8, hd, "alt")) continue;
+                                const alt_name = al[1].asString() orelse al[1].asAtom() orelse continue;
+                                const etype = if (al.len >= 3) (al[2].asAtom() orelse al[2].asString() orelse "") else "";
+
+                                if (!first_alt) try w.writeAll(",");
+                                first_alt = false;
+                                try w.writeAll("{\"name\":");
+                                try writeJsonString(w, alt_name);
+                                try w.writeAll(",\"type\":");
+                                try writeJsonString(w, etype);
+                                try w.writeAll("}");
+                            }
+                        }
+                        try w.writeAll("]}");
+                    }
+                }
+            }
+        }
+    }
+
+    try w.writeAll("]}");
+
+    res.content_type = .JSON;
+    res.header("access-control-allow-origin", "*");
+    res.body = buf.items;
 }
 
 pub fn layoutGetApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {

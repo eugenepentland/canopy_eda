@@ -182,6 +182,7 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     router.get("/api/designs", api.designsApi, .{});
     router.get("/api/scene-graph/:name", api.sceneGraphApi, .{});
     router.get("/api/block-diagram-json/:name", api.blockDiagramJsonApi, .{});
+    router.get("/api/pinout/:name", api.pinoutApi, .{});
 
     // Edit
     router.post("/api/edit-value/:name", edit.editValueApi, .{});
