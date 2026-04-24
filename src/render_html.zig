@@ -16,6 +16,7 @@ const PinGroup = ctx_mod.PinGroup;
 const hub_mod = @import("render_svg/hub.zig");
 const draw = @import("render_svg/draw.zig");
 const section_inset = @import("render_svg/section_inset.zig");
+const system_svg = @import("render_system_svg.zig");
 const isHub = draw.isHub;
 const pinOrder = draw.pinOrder;
 
@@ -76,6 +77,7 @@ pub fn renderToHtml(
     try writeNavbar(w);
     try w.writeAll("<div class=\"sch-wrap\">");
     try writeHeader(w, block.name, design_name, status);
+    try system_svg.renderSystemOverviewSvg(allocator, block, w);
     try writeToolbar(w, design_name);
 
     for (block.sections) |sec| try writeSection(&ctx, w, allocator, sec, 0, &asserted_fns);
@@ -738,7 +740,7 @@ const SCHEMATIC_CSS =
     \\details summary:hover{color:#c9d1d9;}
     \\details ul{margin:6px 0 0 20px;padding:0;}
     \\details li{margin:3px 0;font-size:0.88rem;color:#c9d1d9;line-height:1.45;}
-;
+++ system_svg.SYSTEM_OVERVIEW_CSS;
 
 // Highlight, search, and 2s version-poll. Plain JS, no framework.
 const SCHEMATIC_JS =

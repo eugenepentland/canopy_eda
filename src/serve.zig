@@ -19,6 +19,8 @@ const oauth = @import("serve/oauth.zig");
 const account_page = @import("serve/account_page.zig");
 const kicad_sync = @import("serve/kicad_sync.zig");
 const sync = @import("serve/sync.zig");
+const spa_shell = @import("serve/spa_shell.zig");
+const spa_bundle = @import("serve/spa_bundle.zig");
 
 // ── Global live state ──────────────────────────────────────────────────
 
@@ -128,6 +130,13 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     router.post("/auth/invite/create", auth.createInviteApi, .{});
     router.get("/auth/invite/*", auth.invitePage, .{});
 
+    // Lustre SPA (v2) — single-page app served under /v2/*. The bundle is
+    // produced by `make -C frontend build` and embedded into the Zig binary.
+    router.get("/v2/spa.js", spa_bundle.jsApi, .{});
+    router.get("/v2/spa.css", spa_bundle.cssApi, .{});
+    router.get("/v2", spa_shell.shellApi, .{});
+    router.get("/v2/*", spa_shell.shellApi, .{});
+
     // Pages
     router.get("/", pages.indexPage, .{});
     router.get("/style.css", pages.cssPage, .{});
@@ -170,6 +179,7 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     router.post("/api/review-state/:name/item/toggle", api.reviewStateToggleItemApi, .{});
     router.post("/api/review-state/:name/item/delete", api.reviewStateDeleteItemApi, .{});
     router.post("/api/review-state/:name/approve", api.reviewStateApproveApi, .{});
+    router.get("/api/designs", api.designsApi, .{});
     router.get("/api/scene-graph/:name", api.sceneGraphApi, .{});
     router.get("/api/block-diagram-json/:name", api.blockDiagramJsonApi, .{});
 

@@ -80,7 +80,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
     var pinout_name: []const u8 = "";
 
     // Known structural fields (not properties)
-    const skip_fields = [_][]const u8{ "description", "symbol", "footprint", "pinout", "component", "parameter", "component-family", "bus", "note" };
+    const skip_fields = [_][]const u8{ "symbol", "footprint", "pinout", "component", "parameter", "component-family", "bus", "note" };
 
     var props: std.ArrayListUnmanaged(env_mod.Property) = .empty;
     var buses: std.ArrayListUnmanaged(BusDef) = .empty;
@@ -90,7 +90,13 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
         if (cl.len < 2) continue;
         const field = cl[0].asAtom() orelse continue;
 
-        if (std.mem.eql(u8, field, "symbol")) {
+        if (std.mem.eql(u8, field, "description")) {
+            // Surface the library description on every instance that uses
+            // this component so downstream renderers (schematic overview,
+            // review doc, BOM) can show it without re-reading lib files.
+            const val = cl[1].asString() orelse (cl[1].asAtom() orelse continue);
+            props.append(self.allocator, .{ .key = "description", .value = val }) catch continue;
+        } else if (std.mem.eql(u8, field, "symbol")) {
             symbol_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
         } else if (std.mem.eql(u8, field, "footprint")) {
             footprint_name = cl[1].asAtom() orelse cl[1].asString() orelse "";

@@ -1154,6 +1154,54 @@ pub fn reviewJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
     res.body = json;
 }
 
+/// Return all designs in the project as a JSON array. Same shape as the
+/// MCP `list_designs` tool: `[{name, title, sections, instance_count,
+/// net_count, mtime, build_ok}, ...]`.
+pub fn designsApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+    res.content_type = .JSON;
+    res.header("access-control-allow-origin", "*");
+
+    const summaries = mcp_tools.listDesignSummaries(ctx.allocator, ctx.project_dir) catch &[_]mcp_tools.DesignSummary{};
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(ctx.allocator);
+    try w.writeAll("[");
+    for (summaries, 0..) |s, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try writeJsonString(w, s.name);
+        try w.writeAll(",\"title\":");
+        try writeJsonString(w, s.title);
+        try w.writeAll(",\"sections\":[");
+        for (s.sections, 0..) |sec, si| {
+            if (si > 0) try w.writeAll(",");
+            try writeJsonString(w, sec);
+        }
+        try w.print("],\"instance_count\":{d},\"net_count\":{d},\"mtime\":{d},\"build_ok\":{s}}}", .{
+            s.instance_count,
+            s.net_count,
+            s.mtime_sec,
+            if (s.build_ok) "true" else "false",
+        });
+    }
+    try w.writeAll("]");
+    res.body = buf.items;
+}
+
+fn writeJsonString(w: anytype, s: []const u8) !void {
+    try w.writeAll("\"");
+    for (s) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '\n' => try w.writeAll("\\n"),
+        '\r' => try w.writeAll("\\r"),
+        '\t' => try w.writeAll("\\t"),
+        0...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{c}),
+        else => try w.writeByte(c),
+    };
+    try w.writeAll("\"");
+}
+
 /// Render the same review data as HTML. Deep-link anchors are `#sec-<slug>`.
 pub fn reviewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {

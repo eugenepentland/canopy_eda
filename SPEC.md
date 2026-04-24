@@ -163,6 +163,17 @@ Public functions: analyze
 - buildTestPoints collects testpoint instances with pin 1 net
 - buildTestPoints ignores non-testpoints
 
+## render_system_svg
+
+- Classifies MCU-family components as hub
+- Classifies regulator and converter components as regulation
+- Classifies J and P ref-des connectors as io
+- Classifies remaining U-prefix components as peripheral
+- Omits passive R C L D F ref-des instances
+- Omits testpoint components and TP prefix ref-des
+- Omits mounting hole components and MH prefix ref-des
+- Collapses sub-blocks into a single regulation chip
+
 ## review_json
 
 Public functions: renderToJson
