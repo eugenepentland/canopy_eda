@@ -344,13 +344,28 @@ fn evalPinsForm(
     if (sf_children.len < 2) return;
     const pins_ref_val = try self.evalNode(sf_children[1], env);
     const pins_ref = pins_ref_val.asString() orelse return;
+
+    // Sibling `(group "label")` applies its label to every PartPin in this block.
+    var group_label: []const u8 = "";
+    for (sf_children[2..]) |ch| {
+        if (!ch.isForm("group")) continue;
+        const gc = ch.asList() orelse continue;
+        if (gc.len < 2) continue;
+        const gv = try self.evalNode(gc[1], env);
+        group_label = gv.asString() orelse (gc[1].asAtom() orelse "");
+    }
+
     const pin_func_map = builders.findPinFuncMap(self, instances.items, pins_ref);
     var pg_pins: std.ArrayListUnmanaged(env_mod.PartPin) = .empty;
     for (sf_children[2..]) |pin_form| {
+        if (pin_form.isForm("group")) continue;
         try builders.processPinForm(self, pin_form, pins_ref, pin_func_map, env, all_pin_nets, &pg_pins, net_ties);
     }
     const pg_slice = pg_pins.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
-    try sec_pin_groups.append(self.allocator, .{ .ref_des = pins_ref, .pins = pg_slice });
+    if (group_label.len > 0) {
+        for (pg_slice) |*pp| pp.group = group_label;
+    }
+    try sec_pin_groups.append(self.allocator, .{ .ref_des = pins_ref, .pins = pg_slice, .group = group_label });
     try builders.addPartToInstance(self, instances.items, pins_ref, sec_name, pg_slice);
 }
 

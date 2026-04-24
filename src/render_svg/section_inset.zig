@@ -14,26 +14,31 @@ const pin_stub = draw.pin_stub;
 const shortRef = draw.shortRef;
 const displayValue = draw.displayValue;
 
-/// A hub pin-group partitioned for the HTML schematic view.
-/// Direct groups feed the HTML pin-table; spoke groups feed the SVG inset.
+/// Two possibly-overlapping selections of a hub's pin-groups for the HTML
+/// schematic view. `direct` feeds the master table; `spoke` feeds the SVG
+/// inset. A pin-group can appear in both when it has both cross-device
+/// significance (a port, or a connection to another hub) and local support
+/// (a dedicated decouple cap, crystal, etc.).
 pub const Partition = struct {
     direct: []const PinGroup,
     spoke: []const PinGroup,
 };
 
-/// Partition a hub's pin-groups into direct-table and spoke-SVG buckets.
+/// Select a hub's pin-groups into two views:
 ///
-/// A spoke is *dedicated* to this hub when it only connects back to this hub
-/// (plus ground/terminal nets) — a decoupling cap is the canonical example. A
-/// spoke is *shared* when it also connects to another hub — a series resistor
-/// between two ICs is shared infrastructure, and should render as a plain net
-/// row on both sides, since the resistor will appear in whichever section
-/// declared it.
+/// * **Table (direct)** — pin-groups with *cross-device significance*:
+///   any `.pin` endpoint to another hub, any `.pin` to a shared passive
+///   (e.g., series resistor bridging two hubs), or any `.net` endpoint on a
+///   declared section/block port.
+/// * **SVG (spoke)** — pin-groups with local support worth visualizing:
+///   any `.pin` endpoint to a passive dedicated to this hub, or any `.net`
+///   endpoint on a ground net.
 ///
-/// Rule: a group is a spoke-group only if it has at least one dedicated spoke.
-/// Otherwise (no `.pin` endpoints, or all `.pin` endpoints are shared) it is
-/// direct. This keeps the SVG inset reserved for "passives that belong to
-/// this hub" and avoids double-drawing shared resistors across sections.
+/// A pin-group may land in both — VDD on an MCU is a port *and* has
+/// decoupling, so it earns a table row (to show which hub pins are VDD) and
+/// an SVG stub (to show the cap). A pin-group matching neither rule
+/// (rare — e.g., a bare net that's not a port and not cross-hub) falls back
+/// to SVG so nothing disappears.
 pub fn partitionGroups(
     allocator: std.mem.Allocator,
     ctx: *RenderCtx,
@@ -43,22 +48,88 @@ pub fn partitionGroups(
     var direct: std.ArrayListUnmanaged(PinGroup) = .empty;
     var spoke: std.ArrayListUnmanaged(PinGroup) = .empty;
     for (groups) |g| {
-        var has_dedicated = false;
-        for (g.conns) |c| switch (c.endpoint) {
-            .pin => |p| {
-                if (isDedicatedSpoke(ctx, p.ref_des, hub_ref)) {
-                    has_dedicated = true;
-                    break;
-                }
-            },
-            .net => {},
-        };
-        if (has_dedicated) try spoke.append(allocator, g) else try direct.append(allocator, g);
+        // Ground pins render in the SVG only — GND is universally shared and
+        // would otherwise trip the cross-hub check, cluttering every table.
+        if (groupIsGround(g)) {
+            try spoke.append(allocator, g);
+            continue;
+        }
+        const for_svg = hasDedicatedSpoke(ctx, g, hub_ref);
+        const for_table = hasCrossDeviceSignificance(ctx, g, hub_ref, groups);
+        if (for_table) try direct.append(allocator, g);
+        if (for_svg) try spoke.append(allocator, g);
+        // Fallback: pins with a real net connection but no local spoke and no
+        // in-section peer (e.g. stm32 pins driving a sub-block at the parent
+        // level) still belong in the table. Rendering them as bare SVG stubs
+        // leaves an orphan pin with no wire.
+        if (!for_table and !for_svg) try direct.append(allocator, g);
     }
     return .{
         .direct = try direct.toOwnedSlice(allocator),
         .spoke = try spoke.toOwnedSlice(allocator),
     };
+}
+
+fn hasDedicatedSpoke(ctx: *RenderCtx, g: PinGroup, hub_ref: []const u8) bool {
+    for (g.conns) |c| switch (c.endpoint) {
+        .pin => |p| {
+            if (ctx.spoke_set.contains(p.ref_des) and isDedicatedSpoke(ctx, p.ref_des, hub_ref)) return true;
+        },
+        .net => {},
+    };
+    return false;
+}
+
+fn hasCrossDeviceSignificance(ctx: *RenderCtx, g: PinGroup, hub_ref: []const u8, all_groups: []const PinGroup) bool {
+    _ = all_groups;
+    for (g.conns) |c| switch (c.endpoint) {
+        .pin => |p| {
+            // Another hub directly, or a spoke passive that bridges to another hub.
+            if (!ctx.spoke_set.contains(p.ref_des)) return true;
+            if (!isDedicatedSpoke(ctx, p.ref_des, hub_ref)) return true;
+        },
+        .net => |n| {
+            if (netIsCrossDevice(ctx, draw.baseNetName(n), hub_ref)) return true;
+        },
+    };
+    // Fallback: the real net may only show up through `pin_canonical_nets`
+    // (e.g., STM32 VDD pins whose adjacency lists only dedicated decouple
+    // caps — no `.net` endpoint). Resolve each pin's canonical net and check
+    // it the same way.
+    var pin_it = std.mem.splitScalar(u8, g.pin_numbers, ',');
+    while (pin_it.next()) |pin_id| {
+        if (pin_id.len == 0) continue;
+        var key_buf: [256]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_buf, "{s}.{s}", .{ hub_ref, pin_id }) catch continue;
+        if (ctx.pin_canonical_nets.get(key)) |net| {
+            if (netIsCrossDevice(ctx, draw.baseNetName(net), hub_ref)) return true;
+        }
+    }
+    return false;
+}
+
+/// A net is cross-device when it's a declared port OR when at least one other
+/// hub in the design pins it too. The latter catches hub-to-hub buses wired
+/// directly (no passive between them) — e.g. the XSPI signals shared by the
+/// STM32 and the PSRAM.
+fn netIsCrossDevice(ctx: *RenderCtx, base_net: []const u8, hub_ref: []const u8) bool {
+    if (ctx.port_nets.contains(base_net)) return true;
+    if (ctx.net_index.get(base_net)) |pin_list| {
+        for (pin_list.items) |pr| {
+            if (std.mem.eql(u8, pr.ref_des, hub_ref)) continue;
+            if (ctx.spoke_set.contains(pr.ref_des)) continue;
+            return true;
+        }
+    }
+    return false;
+}
+
+fn groupIsGround(g: PinGroup) bool {
+    for (g.conns) |c| switch (c.endpoint) {
+        .net => |n| if (draw.isGroundNet(draw.baseNetName(n))) return true,
+        .pin => {},
+    };
+    return false;
 }
 
 /// A spoke is dedicated to `hub_ref` when none of its adjacency `.pin`

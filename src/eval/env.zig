@@ -139,6 +139,9 @@ pub const PartPin = struct {
     net: []const u8,
     /// Function name from pinout file (e.g. "PG10"), empty if unavailable.
     pin_name: []const u8 = "",
+    /// Feature group label from the enclosing `(pins ref (group "Foo") ...)`.
+    /// Rendered as the leftmost column in the schematic master table.
+    group: []const u8 = "",
 };
 
 pub const Property = struct {
@@ -180,6 +183,8 @@ pub const SubBlock = struct {
 pub const PinGroup = struct {
     ref_des: []const u8,
     pins: []const PartPin,
+    /// Optional feature label from `(pins ref (group "Boot & Reset") ...)`.
+    group: []const u8 = "",
 };
 
 /// Signal type classification for section interfaces.

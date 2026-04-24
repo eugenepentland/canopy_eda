@@ -59,6 +59,9 @@ pub fn renderToHtml(
     try ctx.buildSignificantNets(block);
     try ctx.buildPinCanonicalNets();
 
+    var asserted_fns: std.StringHashMapUnmanaged([]const u8) = .empty;
+    appendAssertedFromBlock(allocator, &asserted_fns, block);
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
 
@@ -75,16 +78,16 @@ pub fn renderToHtml(
     try writeHeader(w, block.name, design_name, status);
     try writeToolbar(w, design_name);
 
-    for (block.sections) |sec| try writeSection(&ctx, w, allocator, sec, 0);
+    for (block.sections) |sec| try writeSection(&ctx, w, allocator, sec, 0, &asserted_fns);
 
     // Designs without sections (typical of sub-block-only or flat hub+passives
     // designs like power-6v, pma3-14ln) still deserve a rendering. Emit a
     // synthetic card per sub-block, plus one flat card if any hubs live at
     // the top level outside any section.
-    for (block.sub_blocks) |sb| try writeSubBlockCard(&ctx, w, allocator, sb);
+    for (block.sub_blocks) |sb| try writeSubBlockCard(&ctx, w, allocator, sb, &asserted_fns);
 
     if (block.sections.len == 0 and hasTopLevelHubs(block)) {
-        try writeFlatHubs(&ctx, w, allocator, block);
+        try writeFlatHubs(&ctx, w, allocator, block, &asserted_fns);
     }
 
     try w.writeAll("</div>");
@@ -137,7 +140,30 @@ fn writeToolbar(w: anytype, design_name: []const u8) !void {
     try w.writeAll("</div>");
 }
 
-fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section, depth: u8) !void {
+/// Build a map of (ref_des|pin_id) -> asserted alt-function name (e.g. "SPI4_SCK")
+/// from all `(pin X (as "FN") ...)` declarations in the design tree.
+fn appendAssertedFromBlock(allocator: Allocator, map: *std.StringHashMapUnmanaged([]const u8), block: *const DesignBlock) void {
+    for (block.nets) |net| {
+        for (net.pins) |p| {
+            if (p.asserted_fn.len == 0) continue;
+            const key = std.fmt.allocPrint(allocator, "{s}|{s}", .{ p.ref_des, p.pin }) catch continue;
+            map.put(allocator, key, p.asserted_fn) catch {};
+        }
+    }
+    for (block.sub_blocks) |sb| appendAssertedFromBlock(allocator, map, sb.block);
+}
+
+/// Look up the asserted alt-function for a single-pin group. Returns empty when
+/// the group has multiple pins (multi-pin decls can't carry `(as ...)`) or no
+/// override was declared.
+fn altFnFor(ref_des: []const u8, g: PinGroup, asserted_fns: *const std.StringHashMapUnmanaged([]const u8), allocator: Allocator) []const u8 {
+    if (std.mem.indexOfScalar(u8, g.pin_numbers, ',')) |_| return "";
+    const key = std.fmt.allocPrint(allocator, "{s}|{s}", .{ ref_des, g.pin_numbers }) catch return "";
+    defer allocator.free(key);
+    return asserted_fns.get(key) orelse "";
+}
+
+fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section, depth: u8, asserted_fns: *const std.StringHashMapUnmanaged([]const u8)) !void {
     const indent_class: []const u8 = if (depth == 0) "sch-section" else "sch-section sch-subsection";
     const slug = try review.slugify(allocator, sec.name);
     try w.print("<section class=\"{s}\" id=\"sec-{s}\">", .{ indent_class, slug });
@@ -186,11 +212,11 @@ fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section,
         try hub_refs.append(allocator, inst.ref_des);
     }
 
-    try writeSectionHubs(ctx, w, allocator, sec.pin_groups, hub_refs.items);
+    try writeSectionHubs(ctx, w, allocator, sec.pin_groups, hub_refs.items, asserted_fns);
 
     if (sec.notes.len > 0) try writeNotes(w, sec.notes);
 
-    for (sec.sub_sections) |sub| try writeSection(ctx, w, allocator, sub, depth + 1);
+    for (sec.sub_sections) |sub| try writeSection(ctx, w, allocator, sub, depth + 1, asserted_fns);
 
     try w.writeAll("</section>");
 }
@@ -202,17 +228,17 @@ const HubAnalysis = struct {
     spoke: []const PinGroup,
 };
 
-/// Analyze hubs in a section and decide whether to render them as individual
-/// cards or fold them into a single combined pin-map table. We merge when the
-/// section has exactly two hubs with only direct pins (no dedicated spokes) —
-/// typical of "STM32 GPIOs ↔ expansion connector" style pages where a big
-/// table keyed by net is easier to scan than two side-by-side tables.
+/// Render every hub in a section inside a single card: all spoke SVGs stacked
+/// at the top, one master pin-table below. Each hub with direct pins contributes
+/// a Pin/Function column pair to the table; each row is one unique net across
+/// the section. Hubs with only spokes (no direct rows) appear only in the SVG.
 fn writeSectionHubs(
     ctx: *RenderCtx,
     w: anytype,
     allocator: Allocator,
     pin_groups: []const env_mod.PinGroup,
     hub_refs: []const []const u8,
+    asserted_fns: *const std.StringHashMapUnmanaged([]const u8),
 ) !void {
     var analyses: std.ArrayListUnmanaged(HubAnalysis) = .empty;
     defer analyses.deinit(allocator);
@@ -222,17 +248,191 @@ fn writeSectionHubs(
             try analyses.append(allocator, a);
         }
     }
+    if (analyses.items.len == 0) return;
 
-    const mergeable = analyses.items.len == 2 and
-        analyses.items[0].spoke.len == 0 and
-        analyses.items[1].spoke.len == 0 and
-        analyses.items[0].direct.len > 0 and
-        analyses.items[1].direct.len > 0;
+    try writeUnifiedCard(ctx, w, allocator, analyses.items, asserted_fns);
+}
 
-    if (mergeable) {
-        try writeCombinedPinMap(w, allocator, analyses.items[0], analyses.items[1]);
-    } else {
-        for (analyses.items) |a| try writeHubCardFromAnalysis(ctx, w, a);
+const Cell = struct {
+    pins: []const u8 = "",
+    fn_name: []const u8 = "",
+    alt: []const u8 = "",
+};
+
+const MasterRow = struct {
+    group: []const u8,
+    net: []const u8,
+    cells: []Cell,
+};
+
+fn writeUnifiedCard(
+    ctx: *RenderCtx,
+    w: anytype,
+    allocator: Allocator,
+    hubs: []const HubAnalysis,
+    asserted_fns: *const std.StringHashMapUnmanaged([]const u8),
+) !void {
+    try w.writeAll("<div class=\"sch-hub sch-hub-merged\">");
+
+    // All spoke SVGs on top, in a single wrapper.
+    var any_spoke = false;
+    for (hubs) |h| if (h.spoke.len > 0) {
+        any_spoke = true;
+        break;
+    };
+    if (any_spoke) {
+        try w.writeAll("<div class=\"hub-inset-wrap\">");
+        for (hubs) |h| {
+            if (h.spoke.len > 0) try renderGroupedHubSvgs(ctx, w, allocator, h);
+        }
+        try w.writeAll("</div>");
+    }
+
+    // Collect hubs that contribute rows to the master table (those with direct pins).
+    var table_hubs: std.ArrayListUnmanaged(HubAnalysis) = .empty;
+    defer table_hubs.deinit(allocator);
+    for (hubs) |h| {
+        if (h.direct.len > 0) try table_hubs.append(allocator, h);
+    }
+    if (table_hubs.items.len == 0) {
+        try w.writeAll("</div>");
+        return;
+    }
+
+    // Union rows across hubs, keyed by (group, net). Pins sharing a net but
+    // belonging to different feature groups stay in distinct rows.
+    var by_key: std.StringHashMapUnmanaged(MasterRow) = .empty;
+    defer by_key.deinit(allocator);
+    var any_group_label = false;
+
+    for (table_hubs.items, 0..) |h, hi| {
+        for (h.direct) |g| {
+            const net = firstNet(g);
+            if (net.len == 0) continue;
+            if (g.group.len > 0) any_group_label = true;
+            const key = try std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ g.group, net });
+            const gop = try by_key.getOrPut(allocator, key);
+            if (!gop.found_existing) {
+                const cells = try allocator.alloc(Cell, table_hubs.items.len);
+                for (cells) |*c| c.* = .{};
+                gop.value_ptr.* = .{ .group = g.group, .net = net, .cells = cells };
+            }
+            gop.value_ptr.cells[hi] = .{
+                .pins = g.pin_numbers,
+                .fn_name = g.display_name,
+                .alt = altFnFor(h.ref, g, asserted_fns, allocator),
+            };
+        }
+    }
+
+    var rows: std.ArrayListUnmanaged(MasterRow) = .empty;
+    defer rows.deinit(allocator);
+    var row_it = by_key.valueIterator();
+    while (row_it.next()) |row| try rows.append(allocator, row.*);
+    std.mem.sortUnstable(MasterRow, rows.items, {}, struct {
+        fn lt(_: void, x: MasterRow, y: MasterRow) bool {
+            const gc = std.mem.order(u8, x.group, y.group);
+            if (gc != .eq) return gc == .lt;
+            return std.mem.order(u8, x.net, y.net) == .lt;
+        }
+    }.lt);
+
+    try w.writeAll("<table class=\"pins pins-merged\"><thead><tr>");
+    if (any_group_label) try w.writeAll("<th rowspan=\"2\">Group</th>");
+    try w.writeAll("<th rowspan=\"2\">Net</th>");
+    for (table_hubs.items) |h| {
+        try w.writeAll("<th colspan=\"2\"><code>");
+        try writeHtmlEscaped(w, h.inst.ref_des);
+        try w.writeAll("</code> <span class=\"hub-comp\">");
+        try writeHtmlEscaped(w, h.inst.component);
+        try w.writeAll("</span></th>");
+    }
+    try w.writeAll("</tr><tr>");
+    for (table_hubs.items) |_| try w.writeAll("<th>Pin</th><th>Function</th>");
+    try w.writeAll("</tr></thead><tbody>");
+
+    var prev_group: []const u8 = "\x01"; // impossible initial value
+    for (rows.items) |r| {
+        try w.print("<tr data-net=\"{s}\">", .{r.net});
+        if (any_group_label) {
+            // Only emit the Group cell when the label changes — consecutive rows
+            // in the same group read as a cleaner block.
+            if (!std.mem.eql(u8, r.group, prev_group)) {
+                try w.writeAll("<td class=\"pin-group\">");
+                if (r.group.len > 0) try writeHtmlEscaped(w, r.group) else try w.writeAll("<span class=\"muted\">—</span>");
+                try w.writeAll("</td>");
+                prev_group = r.group;
+            } else {
+                try w.writeAll("<td class=\"pin-group pin-group-repeat\"></td>");
+            }
+        }
+        try w.writeAll("<td><code>");
+        try writeHtmlEscaped(w, r.net);
+        try w.writeAll("</code></td>");
+        for (r.cells) |c| {
+            try w.writeAll("<td class=\"pin-nums\">");
+            if (c.pins.len > 0) {
+                try w.writeAll("<code>");
+                try writeHtmlEscaped(w, c.pins);
+                try w.writeAll("</code>");
+            } else {
+                try w.writeAll("<span class=\"muted\">—</span>");
+            }
+            try w.writeAll("</td><td>");
+            if (c.fn_name.len > 0) try writeHtmlEscaped(w, c.fn_name) else try w.writeAll("<span class=\"muted\">—</span>");
+            if (c.alt.len > 0 and !std.mem.eql(u8, c.alt, c.fn_name)) {
+                try w.writeAll(" <span class=\"pin-fn-alt\">");
+                try writeHtmlEscaped(w, c.alt);
+                try w.writeAll("</span>");
+            }
+            try w.writeAll("</td>");
+        }
+        try w.writeAll("</tr>");
+    }
+
+    try w.writeAll("</tbody></table></div>");
+}
+
+/// Render a hub's spoke SVGs broken out per feature group. Each group gets its
+/// own mini-hub rectangle prefixed by a group label (matching the feel of the
+/// old per-section blocks). Hubs whose spokes all carry the same group label
+/// (or no label at all) render as a single SVG, identical to before.
+fn renderGroupedHubSvgs(
+    ctx: *RenderCtx,
+    w: anytype,
+    allocator: Allocator,
+    h: HubAnalysis,
+) !void {
+    var buckets: std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged(PinGroup)) = .empty;
+    defer {
+        var it = buckets.iterator();
+        while (it.next()) |e| e.value_ptr.deinit(allocator);
+        buckets.deinit(allocator);
+    }
+
+    for (h.spoke) |g| {
+        const gop = try buckets.getOrPut(allocator, g.group);
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        try gop.value_ptr.append(allocator, g);
+    }
+
+    if (buckets.count() <= 1) {
+        try section_inset.renderHubInset(ctx, w, h.inst, h.spoke);
+        return;
+    }
+
+    var it = buckets.iterator();
+    while (it.next()) |entry| {
+        const label = entry.key_ptr.*;
+        const subset = entry.value_ptr.items;
+        try w.writeAll("<div class=\"hub-group-block\">");
+        if (label.len > 0) {
+            try w.writeAll("<h4 class=\"hub-group-label\">");
+            try writeHtmlEscaped(w, label);
+            try w.writeAll("</h4>");
+        }
+        try section_inset.renderHubInset(ctx, w, h.inst, subset);
+        try w.writeAll("</div>");
     }
 }
 
@@ -244,8 +444,15 @@ fn analyzeHub(
 ) !?HubAnalysis {
     const hub_inst = ctx.inst_map.get(hub_ref) orelse return null;
 
-    var pin_ids: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer pin_ids.deinit(allocator);
+    // Bucket pin_ids by feature group — each `(pins ref (group "X") ...)`
+    // block contributes to a separate bucket so that pins sharing a net but
+    // declared in different groups end up as distinct rows in the master table.
+    var buckets: std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .empty;
+    defer {
+        var it = buckets.iterator();
+        while (it.next()) |e| e.value_ptr.deinit(allocator);
+        buckets.deinit(allocator);
+    }
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer seen.deinit(allocator);
 
@@ -256,31 +463,50 @@ fn analyzeHub(
         for (pg.pins) |pp| {
             if (seen.contains(pp.pin)) continue;
             try seen.put(allocator, pp.pin, {});
-            try pin_ids.append(allocator, pp.pin);
+            const gop = try buckets.getOrPut(allocator, pp.group);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.append(allocator, pp.pin);
         }
     }
     if (!from_pin_groups) {
         if (ctx.adjacency.get(hub_ref)) |adj| {
+            const gop = try buckets.getOrPut(allocator, "");
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
             for (adj.items) |ae| {
                 if (seen.contains(ae.pin)) continue;
                 try seen.put(allocator, ae.pin, {});
-                try pin_ids.append(allocator, ae.pin);
+                try gop.value_ptr.append(allocator, ae.pin);
             }
         }
     }
-    if (pin_ids.items.len == 0) return null;
-
-    std.mem.sortUnstable([]const u8, pin_ids.items, {}, struct {
-        fn lt(_: void, a: []const u8, b: []const u8) bool {
-            return pinOrder(a, b);
-        }
-    }.lt);
+    if (buckets.count() == 0) return null;
 
     const adj_entries = if (ctx.adjacency.get(hub_ref)) |list| list.items else &[_]AdjEntry{};
     var pn_map = hub_mod.buildPinNameMap(ctx, hub_inst.parts);
     defer pn_map.deinit(allocator);
-    const all_groups = try hub_mod.groupHubPins(ctx, pin_ids.items, adj_entries, &pn_map);
-    const partition = try section_inset.partitionGroups(allocator, ctx, hub_ref, all_groups);
+
+    var all_groups: std.ArrayListUnmanaged(PinGroup) = .empty;
+    var total_pins: usize = 0;
+    var it = buckets.iterator();
+    while (it.next()) |e| {
+        const grp = e.key_ptr.*;
+        const pins = e.value_ptr.items;
+        total_pins += pins.len;
+        std.mem.sortUnstable([]const u8, pins, {}, struct {
+            fn lt(_: void, a: []const u8, b: []const u8) bool {
+                return pinOrder(a, b);
+            }
+        }.lt);
+        const hub_pg = try hub_mod.groupHubPins(ctx, pins, adj_entries, &pn_map);
+        for (hub_pg) |g| {
+            var tagged = g;
+            tagged.group = grp;
+            try all_groups.append(allocator, tagged);
+        }
+    }
+    if (total_pins == 0) return null;
+
+    const partition = try section_inset.partitionGroups(allocator, ctx, hub_ref, all_groups.items);
 
     return .{
         .ref = hub_ref,
@@ -288,128 +514,6 @@ fn analyzeHub(
         .direct = partition.direct,
         .spoke = partition.spoke,
     };
-}
-
-fn writeHubCardFromAnalysis(ctx: *RenderCtx, w: anytype, a: HubAnalysis) !void {
-    try w.writeAll("<div class=\"sch-hub\"><div class=\"hub-head\"><h3><code>");
-    try writeHtmlEscaped(w, a.inst.ref_des);
-    try w.writeAll("</code></h3><span class=\"hub-comp\">");
-    try writeHtmlEscaped(w, a.inst.component);
-    try w.writeAll("</span>");
-    if (a.inst.value.len > 0 and !std.mem.eql(u8, a.inst.value, a.inst.component)) {
-        try w.writeAll("<span class=\"hub-val\">");
-        try writeHtmlEscaped(w, a.inst.value);
-        try w.writeAll("</span>");
-    }
-    try w.writeAll("</div>");
-
-    if (a.spoke.len > 0) {
-        try w.writeAll("<div class=\"hub-inset-wrap\">");
-        try section_inset.renderHubInset(ctx, w, a.inst, a.spoke);
-        try w.writeAll("</div>");
-    }
-    if (a.direct.len > 0) try writePinTable(w, a.direct);
-
-    try w.writeAll("</div>");
-}
-
-/// Emit a side-by-side pin-map table when a section contains two pure-direct
-/// hubs. Every unique net appearing in either hub becomes a row; nets only on
-/// one side get a muted placeholder on the other. Sorted by net name.
-fn writeCombinedPinMap(w: anytype, allocator: Allocator, a: HubAnalysis, b: HubAnalysis) !void {
-    const Row = struct {
-        net: []const u8,
-        a_pins: []const u8,
-        a_fn: []const u8,
-        b_pins: []const u8,
-        b_fn: []const u8,
-    };
-
-    var map: std.StringHashMapUnmanaged(Row) = .empty;
-    defer map.deinit(allocator);
-
-    for (a.direct) |g| {
-        const net = firstNet(g);
-        if (net.len == 0) continue;
-        const gop = try map.getOrPut(allocator, net);
-        if (!gop.found_existing) gop.value_ptr.* = .{
-            .net = net,
-            .a_pins = "",
-            .a_fn = "",
-            .b_pins = "",
-            .b_fn = "",
-        };
-        gop.value_ptr.a_pins = g.pin_numbers;
-        gop.value_ptr.a_fn = g.display_name;
-    }
-    for (b.direct) |g| {
-        const net = firstNet(g);
-        if (net.len == 0) continue;
-        const gop = try map.getOrPut(allocator, net);
-        if (!gop.found_existing) gop.value_ptr.* = .{
-            .net = net,
-            .a_pins = "",
-            .a_fn = "",
-            .b_pins = "",
-            .b_fn = "",
-        };
-        gop.value_ptr.b_pins = g.pin_numbers;
-        gop.value_ptr.b_fn = g.display_name;
-    }
-
-    var rows: std.ArrayListUnmanaged(Row) = .empty;
-    defer rows.deinit(allocator);
-    var it = map.valueIterator();
-    while (it.next()) |row| try rows.append(allocator, row.*);
-    std.mem.sortUnstable(Row, rows.items, {}, struct {
-        fn lt(_: void, x: Row, y: Row) bool {
-            return std.mem.order(u8, x.net, y.net) == .lt;
-        }
-    }.lt);
-
-    try w.writeAll("<div class=\"sch-hub sch-hub-merged\"><div class=\"hub-head\">");
-    try w.writeAll("<h3><code>");
-    try writeHtmlEscaped(w, a.inst.ref_des);
-    try w.writeAll("</code> ↔ <code>");
-    try writeHtmlEscaped(w, b.inst.ref_des);
-    try w.writeAll("</code></h3><span class=\"hub-comp\">");
-    try writeHtmlEscaped(w, a.inst.component);
-    try w.writeAll(" · ");
-    try writeHtmlEscaped(w, b.inst.component);
-    try w.writeAll("</span></div>");
-
-    try w.writeAll("<table class=\"pins pins-merged\"><thead><tr>");
-    try w.print("<th colspan=\"2\">{s}</th><th>Net</th><th colspan=\"2\">{s}</th>", .{ a.inst.ref_des, b.inst.ref_des });
-    try w.writeAll("</tr><tr><th>Pin</th><th>Function</th><th></th><th>Pin</th><th>Function</th></tr></thead><tbody>");
-
-    for (rows.items) |r| {
-        try w.print("<tr data-net=\"{s}\">", .{r.net});
-        try w.writeAll("<td class=\"pin-nums\">");
-        if (r.a_pins.len > 0) {
-            try w.writeAll("<code>");
-            try writeHtmlEscaped(w, r.a_pins);
-            try w.writeAll("</code>");
-        } else {
-            try w.writeAll("<span class=\"muted\">—</span>");
-        }
-        try w.writeAll("</td><td>");
-        if (r.a_fn.len > 0) try writeHtmlEscaped(w, r.a_fn) else try w.writeAll("<span class=\"muted\">—</span>");
-        try w.writeAll("</td><td><code>");
-        try writeHtmlEscaped(w, r.net);
-        try w.writeAll("</code></td><td class=\"pin-nums\">");
-        if (r.b_pins.len > 0) {
-            try w.writeAll("<code>");
-            try writeHtmlEscaped(w, r.b_pins);
-            try w.writeAll("</code>");
-        } else {
-            try w.writeAll("<span class=\"muted\">—</span>");
-        }
-        try w.writeAll("</td><td>");
-        if (r.b_fn.len > 0) try writeHtmlEscaped(w, r.b_fn) else try w.writeAll("<span class=\"muted\">—</span>");
-        try w.writeAll("</td></tr>");
-    }
-
-    try w.writeAll("</tbody></table></div>");
 }
 
 fn firstNet(g: PinGroup) []const u8 {
@@ -459,7 +563,7 @@ fn writeNotes(w: anytype, notes: []const []const u8) !void {
 /// (tpsm84338 …))`). Lists every hub that the sub-block's DesignBlock declares
 /// and feeds them through the same writeHubCard path. The block's nets are
 /// already flattened into `ctx` via `collectFlat`, so adjacency works.
-fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_mod.SubBlock) !void {
+fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_mod.SubBlock, asserted_fns: *const std.StringHashMapUnmanaged([]const u8)) !void {
     const slug = try review.slugify(allocator, sb.name);
     try w.print("<section class=\"sch-section\" id=\"sec-{s}\">", .{slug});
     try w.writeAll("<div class=\"sec-head\"><h2>");
@@ -487,7 +591,7 @@ fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_
         try hub_refs.append(allocator, inst.ref_des);
     }
 
-    try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items);
+    try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items, asserted_fns);
 
     try w.writeAll("</section>");
 }
@@ -496,7 +600,7 @@ fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_
 /// `design-block` without any `section` wrapper (e.g. pma3-14ln). Every
 /// hub-prefixed top-level instance becomes its own card inside one synthetic
 /// section.
-fn writeFlatHubs(ctx: *RenderCtx, w: anytype, allocator: Allocator, block: *const DesignBlock) !void {
+fn writeFlatHubs(ctx: *RenderCtx, w: anytype, allocator: Allocator, block: *const DesignBlock, asserted_fns: *const std.StringHashMapUnmanaged([]const u8)) !void {
     try w.writeAll("<section class=\"sch-section\" id=\"sec-design\"><div class=\"sec-head\"><h2>");
     try writeHtmlEscaped(w, block.name);
     try w.writeAll("</h2></div>");
@@ -519,7 +623,7 @@ fn writeFlatHubs(ctx: *RenderCtx, w: anytype, allocator: Allocator, block: *cons
         try hub_refs.append(allocator, inst.ref_des);
     }
 
-    try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items);
+    try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items, asserted_fns);
 
     try w.writeAll("</section>");
 }
@@ -536,30 +640,6 @@ fn hasTopLevelHubs(block: *const DesignBlock) bool {
         if (isHub(fi)) return true;
     }
     return false;
-}
-
-fn writePinTable(w: anytype, groups: []const PinGroup) !void {
-    try w.writeAll("<table class=\"pins\"><thead><tr><th>Pins</th><th>Function</th><th>Net</th></tr></thead><tbody>");
-    for (groups) |g| {
-        // Find the first .net endpoint for the net column — every pin in a
-        // direct group shares the same net, so peeking the first is enough.
-        var net_name: []const u8 = "";
-        for (g.conns) |c| switch (c.endpoint) {
-            .net => |n| {
-                net_name = n;
-                break;
-            },
-            .pin => {},
-        };
-        try w.print("<tr data-net=\"{s}\"><td class=\"pin-nums\"><code>", .{net_name});
-        try writeHtmlEscaped(w, g.pin_numbers);
-        try w.writeAll("</code></td><td>");
-        try writeHtmlEscaped(w, g.display_name);
-        try w.writeAll("</td><td><code>");
-        try writeHtmlEscaped(w, net_name);
-        try w.writeAll("</code></td></tr>");
-    }
-    try w.writeAll("</tbody></table>");
 }
 
 fn writeScripts(w: anytype, design_name: []const u8) !void {
@@ -630,14 +710,21 @@ const SCHEMATIC_CSS =
     \\table.ports{margin-top:2px;}
     \\table.pins td{font-family:"SF Mono","Fira Code",monospace;font-size:0.85rem;}
     \\table.pins .pin-nums{color:#79c0ff;}
+    \\table.pins .pin-fn-alt{color:#d2a8ff;font-size:0.8rem;margin-left:6px;}
+    \\table.pins .pin-fn-alt::before{content:"· ";color:#6e7681;}
+    \\table.pins .pin-group{color:#e8c547;font-weight:500;white-space:nowrap;}
+    \\table.pins .pin-group-repeat{border-top:1px dashed #21262d;}
     \\table.pins-merged th[colspan="2"]{text-align:center;color:#58a6ff;}
-    \\table.pins-merged td:nth-child(3){text-align:center;}
+    \\table.pins-merged td:first-child,table.pins td:first-child{color:#79c0ff;}
     \\.sch-hub-merged .hub-head h3 code{color:#79c0ff;}
     \\.sch-hub{border:1px solid #21262d;border-radius:6px;padding:10px 12px;margin:10px 0;background:#0d1117;}
     \\.hub-head{display:flex;align-items:baseline;gap:10px;margin-bottom:6px;}
     \\.hub-comp{color:#8b949e;font-size:0.85rem;font-family:"SF Mono",monospace;}
     \\.hub-val{color:#d29922;font-size:0.85rem;font-family:"SF Mono",monospace;margin-left:auto;}
     \\.hub-inset-wrap{background:#010409;border:1px solid #21262d;border-radius:4px;padding:6px;margin:6px 0;overflow-x:auto;}
+    \\.hub-group-block{margin:4px 0 8px;}
+    \\.hub-group-block:first-child{margin-top:0;}
+    \\.hub-group-label{color:#e8c547;font-size:0.8rem;font-weight:600;margin:4px 0 2px;letter-spacing:0.03em;}
     \\svg.hub-inset{display:block;width:100%;max-width:900px;height:auto;}
     \\svg .component{cursor:pointer;}
     \\svg .net{cursor:pointer;}

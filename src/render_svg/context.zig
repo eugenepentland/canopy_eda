@@ -69,6 +69,9 @@ pub const PinGroup = struct {
     display_name: []const u8,
     pin_numbers: []const u8,
     conns: []const AdjEntry,
+    /// Feature-group label propagated from `(pins ref (group "X") ...)`.
+    /// Only the HTML unified card uses this; empty for ungrouped pins.
+    group: []const u8 = "",
 };
 
 // ── Render Context ────────────────────────────────────────────────────
