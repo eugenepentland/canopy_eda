@@ -44,6 +44,9 @@ const tools = [_]ToolEntry{
     .{ .name = "list_free_pins", .is_mutation = false },
     .{ .name = "get_net", .is_mutation = false },
     .{ .name = "add_component_parameter", .is_mutation = true },
+    .{ .name = "add_component_requirements", .is_mutation = true },
+    .{ .name = "list_datasheets", .is_mutation = false },
+    .{ .name = "read_datasheet", .is_mutation = false },
     .{ .name = "get_review_state", .is_mutation = false },
     .{ .name = "set_review_state", .is_mutation = true },
 };
@@ -79,26 +82,41 @@ pub const tools_list_result =
     \\{"name":"list_free_pins","description":"List unassigned pins on an instance with their default pinout function names and a best-effort category (gpio|power|clock|analog|other). Use for picking GPIOs for new peripherals without scanning the full pinout file.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"ref":{"type":"string","description":"Reference designator of the instance (e.g. U1)"},"filter":{"type":"string","enum":["gpio","power","clock","analog","other"],"description":"Optional category filter"}},"required":["name","ref"],"additionalProperties":false}},
     \\{"name":"get_net","description":"Return every pin connection on a net plus any passive instances (R/L/C/F/D) on it. Use to audit decoupling or verify wiring without scanning the whole source.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"net":{"type":"string"}},"required":["name","net"],"additionalProperties":false}},
     \\{"name":"add_component_parameter","description":"Append a (parameter \"NAME\" TYPE) declaration to a library component file under lib/components/. Use to fix ERC \"missing value\" errors on user-uploaded components that lack a parameter slot. Snapshots the prior library file to history/_lib. Does not rebuild any design — re-run a build to pick up the change.","inputSchema":{"type":"object","properties":{"component":{"type":"string","description":"Component file name (without .sexp)"},"param_name":{"type":"string","description":"Parameter name (e.g. value, color)"},"param_type":{"type":"string","description":"Parameter type atom (e.g. string, capacitance, resistance, number)"}},"required":["component","param_name","param_type"],"additionalProperties":false}},
+    \\{"name":"add_component_requirements","description":"Append one or more full (requirement \"text\" ...) forms to a library component file under lib/components/. Each requirement is a complete s-expression so the body can include any mix of (ref \"file.pdf\" (page N) (quote \"...\")) and (check ...) clauses. Typical workflow: call read_library_file to see existing requirements, call list_datasheets + read_datasheet to mine the datasheet for specs, then call this tool ONCE with every new rule you derived. Atomic: every form is validated and dedup-checked before any write — if any one is malformed or duplicates an existing rule (or another item in the same batch), nothing is written and the response identifies the offending index. Snapshots the prior library file once to history/_lib. Does not rebuild any design.","inputSchema":{"type":"object","properties":{"component":{"type":"string","description":"Component file name (without .sexp) — e.g. \"bno08x\""},"requirements":{"type":"array","minItems":1,"items":{"type":"string","description":"Full (requirement \"text\" ...) s-expression. Example: (requirement \"VDD must be 2.4 V to 3.6 V\" (ref \"foo.pdf\" (page 10) (quote \"2.4V to 3.6V\")) (check (voltage-range (pin \"VDD\") (min 2.4) (max 3.6))))"}}},"required":["component","requirements"],"additionalProperties":false}},
+    \\{"name":"list_datasheets","description":"List PDF files in lib/datasheets/ with size and the set of components that reference each (via (datasheet \"file.pdf\") in their .sexp). Use this to know what datasheets are available to cite from (requirement ...) (ref ...) forms.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
+    \\{"name":"read_datasheet","description":"Return a PDF datasheet as an MCP resource content block (base64 blob, mimeType application/pdf) so the agent can read it directly. Capped at 10 MB; larger files are rejected. Use list_datasheets first to discover filenames and pick the one referenced by the component you are editing.","inputSchema":{"type":"object","properties":{"filename":{"type":"string","description":"File name with .pdf extension, as listed by list_datasheets"}},"required":["filename"],"additionalProperties":false}},
     \\{"name":"get_review_state","description":"Return the per-section review state: the checklist items (with id, text, checked) and per-section approval (approved, approved_by, approved_at). One entry per section slug present in the design. Use this to see which sections are still pending review.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}},
     \\{"name":"set_review_state","description":"Mutate one section's review state in one call: optionally append new checklist items, toggle existing ones by id, delete items by id, and/or set the approval flag + reviewer. At least one of add_items/toggle/delete/approved must be present. approved=true stamps approved_at with the current UTC time.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"section_slug":{"type":"string","description":"Slug of the section to edit (match what generate_review returns)"},"add_items":{"type":"array","items":{"type":"string"},"description":"Texts for new checklist items to append"},"toggle":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"checked":{"type":"boolean"}},"required":["id","checked"]},"description":"Existing items to toggle by id"},"delete":{"type":"array","items":{"type":"string"},"description":"Item ids to delete"},"approved":{"type":"boolean","description":"Set the section-level approval flag"},"reviewer":{"type":"string","description":"Reviewer name stamped when approved=true"}},"required":["name","section_slug"],"additionalProperties":false}}
     \\]}
 ;
 
-/// Dispatch a tool call. Writes a textual result into `out`. Returns true on
-/// success, false on error (caller sets isError on the MCP envelope).
+/// Result of a tool call for the MCP envelope writer. `ok=false` flips the
+/// `isError` flag on the response. `raw_content=true` means `out` already
+/// contains a full content-array JSON literal (e.g. a `resource` block with
+/// a binary blob); otherwise `out` is plain text that the caller wraps in
+/// a single `{"type":"text","text":...}` block.
+pub const CallResult = struct {
+    ok: bool,
+    raw_content: bool = false,
+};
+
+/// Dispatch a tool call. Writes the result into `out` and returns how the
+/// caller should frame it in the MCP envelope.
 pub fn call(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     tool_name: []const u8,
     args_val: ?std.json.Value,
     out: *std.ArrayListUnmanaged(u8),
-) bool {
-    return callInner(allocator, project_dir, tool_name, args_val, out) catch |err| {
+) CallResult {
+    var raw: bool = false;
+    const ok = callInner(allocator, project_dir, tool_name, args_val, out, &raw) catch |err| {
         const msg = @errorName(err);
         const w = out.writer(allocator);
         w.print("error: {s}", .{msg}) catch {};
-        return false;
+        return .{ .ok = false };
     };
+    return .{ .ok = ok, .raw_content = raw };
 }
 
 fn callInner(
@@ -107,6 +125,7 @@ fn callInner(
     tool_name: []const u8,
     args_val: ?std.json.Value,
     out: *std.ArrayListUnmanaged(u8),
+    raw_content_out: *bool,
 ) !bool {
     const w = out.writer(allocator);
 
@@ -347,6 +366,54 @@ fn callInner(
         if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
         try w.writeAll("}");
         return true;
+    }
+
+    if (std.mem.eql(u8, tool_name, "add_component_requirements")) {
+        const component = requireString(args_val, "component") orelse return missingArg(out, allocator, "component");
+        // Pull the `requirements` array out of the JSON args. We materialize
+        // it as a `[][]const u8` so the core takes a plain slice and stays
+        // JSON-agnostic. Reject any non-string element rather than silently
+        // skipping — a typo'd item should fail loudly, not vanish.
+        const reqs_val = blk: {
+            const av = args_val orelse return missingArg(out, allocator, "requirements");
+            if (av != .object) return missingArg(out, allocator, "requirements");
+            break :blk av.object.get("requirements") orelse return missingArg(out, allocator, "requirements");
+        };
+        if (reqs_val != .array) {
+            try w.writeAll("error: \"requirements\" must be an array of strings");
+            return false;
+        }
+        if (reqs_val.array.items.len == 0) {
+            try w.writeAll("error: \"requirements\" must contain at least one item");
+            return false;
+        }
+        var reqs = try allocator.alloc([]const u8, reqs_val.array.items.len);
+        defer allocator.free(reqs);
+        for (reqs_val.array.items, 0..) |item, i| {
+            if (item != .string) {
+                try w.print("error: requirements[{d}] is not a string", .{i});
+                return false;
+            }
+            reqs[i] = item.string;
+        }
+        var failed_idx: usize = 0;
+        const result = edit.addComponentRequirementsCore(allocator, project_dir, component, reqs, &failed_idx) catch |err| {
+            try w.print("error: requirements[{d}]: {s}", .{ failed_idx, @errorName(err) });
+            return false;
+        };
+        try w.print("{{\"ok\":true,\"count\":{d},\"snapshot\":", .{result.count});
+        if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
+        try w.writeAll("}");
+        return true;
+    }
+
+    if (std.mem.eql(u8, tool_name, "list_datasheets")) {
+        return try listDatasheets(allocator, project_dir, w);
+    }
+
+    if (std.mem.eql(u8, tool_name, "read_datasheet")) {
+        const filename = requireString(args_val, "filename") orelse return missingArg(out, allocator, "filename");
+        return try readDatasheet(allocator, project_dir, filename, out, raw_content_out);
     }
 
     if (std.mem.eql(u8, tool_name, "get_review_state")) {
@@ -1036,6 +1103,176 @@ fn getNet(
     }
     try w.writeAll("]}");
     return true;
+}
+
+/// List every `.pdf` in `lib/datasheets/`, attaching the set of library
+/// components that cite it via their `(datasheet "...")` declaration. The
+/// `used_by` list lets the agent jump straight from "I have component X" to
+/// "here is its datasheet" without a second scan.
+fn listDatasheets(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    w: anytype,
+) !bool {
+    // Pass 1: scan lib/components/ and build filename → [component, ...].
+    var uses: std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .empty;
+    defer {
+        var vit = uses.valueIterator();
+        while (vit.next()) |v| v.deinit(allocator);
+        uses.deinit(allocator);
+    }
+    const comp_dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/components", .{project_dir});
+    defer allocator.free(comp_dir_path);
+    if (std.fs.cwd().openDir(comp_dir_path, .{ .iterate = true })) |dir_const| {
+        var cdir = dir_const;
+        defer cdir.close();
+        var cit = cdir.iterate();
+        while (try cit.next()) |centry| {
+            if (centry.kind != .file and centry.kind != .sym_link) continue;
+            if (!std.mem.endsWith(u8, centry.name, ".sexp")) continue;
+            const cbase = centry.name[0 .. centry.name.len - ".sexp".len];
+            const cpath = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ comp_dir_path, centry.name });
+            defer allocator.free(cpath);
+            const src = std.fs.cwd().readFileAlloc(allocator, cpath, 1 * 1024 * 1024) catch continue;
+            defer allocator.free(src);
+            // Linear scan for every `(datasheet "..."` occurrence. Matches
+            // the evaluator's schema: the filename is the first string
+            // argument of the datasheet form.
+            var search_from: usize = 0;
+            while (std.mem.indexOfPos(u8, src, search_from, "(datasheet")) |idx| {
+                var k = idx + "(datasheet".len;
+                while (k < src.len and (src[k] == ' ' or src[k] == '\t' or src[k] == '\n' or src[k] == '\r')) : (k += 1) {}
+                if (k >= src.len or src[k] != '"') {
+                    search_from = idx + 1;
+                    continue;
+                }
+                const qstart = k + 1;
+                const qend = std.mem.indexOfScalarPos(u8, src, qstart, '"') orelse {
+                    search_from = idx + 1;
+                    continue;
+                };
+                const fname = src[qstart..qend];
+                // Key into the hashmap is owned by `uses`; dupe both key
+                // and component name because `src` and `centry.name` are
+                // short-lived.
+                const key = try allocator.dupe(u8, fname);
+                const val_name = try allocator.dupe(u8, cbase);
+                const gop = try uses.getOrPut(allocator, key);
+                if (!gop.found_existing) gop.value_ptr.* = .empty else allocator.free(key);
+                try gop.value_ptr.*.append(allocator, val_name);
+                search_from = qend + 1;
+            }
+        }
+    } else |_| {}
+
+    // Pass 2: iterate lib/datasheets/ and emit metadata.
+    try w.writeAll("{\"datasheets\":[");
+    const dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/datasheets", .{project_dir});
+    defer allocator.free(dir_path);
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+        try w.writeAll("]}");
+        return true;
+    };
+    defer dir.close();
+    var it = dir.iterate();
+    var first = true;
+    while (try it.next()) |entry| {
+        if (entry.kind != .file and entry.kind != .sym_link) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".pdf")) continue;
+        const stat = dir.statFile(entry.name) catch continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.writeAll("{\"name\":");
+        try writeJsonString(w, entry.name);
+        try w.print(",\"size\":{d},\"used_by\":[", .{stat.size});
+        if (uses.get(entry.name)) |list| {
+            for (list.items, 0..) |c, i| {
+                if (i > 0) try w.writeAll(",");
+                try writeJsonString(w, c);
+            }
+        }
+        try w.writeAll("]}");
+    }
+    try w.writeAll("]}");
+    return true;
+}
+
+/// Emit a single MCP `resource` content block containing the raw PDF bytes
+/// base64-encoded. Sets `raw_content_out=true` so the envelope writer
+/// splices the content array in verbatim instead of wrapping it as text.
+/// Size capped at 10 MB; larger PDFs return an error asking the caller to
+/// open `/datasheets/:filename` in a browser instead.
+fn readDatasheet(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    filename: []const u8,
+    out: *std.ArrayListUnmanaged(u8),
+    raw_content_out: *bool,
+) !bool {
+    const w = out.writer(allocator);
+
+    if (filename.len == 0 or !std.mem.endsWith(u8, filename, ".pdf") or
+        std.mem.indexOf(u8, filename, "..") != null or
+        std.mem.indexOfAny(u8, filename, "/\\") != null)
+    {
+        try w.writeAll("error: invalid filename (must be a bare <name>.pdf under lib/datasheets/)");
+        return false;
+    }
+
+    const path = try std.fmt.allocPrint(allocator, "{s}/lib/datasheets/{s}", .{ project_dir, filename });
+    defer allocator.free(path);
+
+    const MAX_BYTES: usize = 10 * 1024 * 1024;
+    const data = std.fs.cwd().readFileAlloc(allocator, path, MAX_BYTES) catch |err| {
+        switch (err) {
+            error.FileTooBig => {
+                try w.print("error: datasheet exceeds 10 MB cap — open /datasheets/{s} in a browser instead", .{filename});
+                return false;
+            },
+            error.FileNotFound => {
+                try w.print("error: datasheet not found: {s}", .{filename});
+                return false;
+            },
+            else => {
+                try w.print("error: could not read datasheet: {s}", .{@errorName(err)});
+                return false;
+            },
+        }
+    };
+    defer allocator.free(data);
+
+    const encoder = std.base64.standard.Encoder;
+    const encoded_len = encoder.calcSize(data.len);
+    const encoded = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded);
+    _ = encoder.encode(encoded, data);
+
+    // Switch the envelope to raw-content mode, then emit a one-element
+    // content array. URI uses a synthetic `eda://` scheme — MCP doesn't
+    // require it to be dereferenceable when a blob is attached.
+    raw_content_out.* = true;
+    try w.writeAll("[{\"type\":\"resource\",\"resource\":{\"uri\":\"eda://datasheet/");
+    try writeJsonStringBody(w, filename);
+    try w.writeAll("\",\"mimeType\":\"application/pdf\",\"blob\":\"");
+    try w.writeAll(encoded);
+    try w.writeAll("\"}}]");
+    return true;
+}
+
+/// Write `s` into `w` escaping only the characters that would break a JSON
+/// string literal. Unlike `writeJsonString`, does NOT emit surrounding
+/// double quotes — the caller already wrote them. Used when the surrounding
+/// JSON shape is being composed character by character.
+fn writeJsonStringBody(w: anytype, s: []const u8) !void {
+    for (s) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '\n' => try w.writeAll("\\n"),
+        '\r' => try w.writeAll("\\r"),
+        '\t' => try w.writeAll("\\t"),
+        0...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{c}),
+        else => try w.writeByte(c),
+    };
 }
 
 fn missingArg(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, key: []const u8) !bool {

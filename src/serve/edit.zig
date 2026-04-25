@@ -1093,6 +1093,8 @@ pub const EditError = error{
     ImportsFormMissing,
     DuplicateImport,
     DuplicateParameter,
+    DuplicateRequirement,
+    InvalidRequirement,
     MalformedSource,
     InvalidSource,
     CannotReadDesign,
@@ -2240,6 +2242,176 @@ pub fn addComponentParameterCore(
     file.writeAll(buf.items) catch return error.CannotWriteDesign;
 
     return .{ .snapshot = snap_id };
+}
+
+/// One element of an `addComponentRequirementsCore` batch after validation.
+/// `trimmed` slices into the caller-supplied input (no copy); `text` is the
+/// extracted requirement text used for dedup.
+const ParsedRequirement = struct {
+    trimmed: []const u8,
+    text: []const u8,
+};
+
+/// Validate a single `(requirement "text" ...)` form: must start with
+/// `(requirement`, then whitespace + a double-quoted text literal, and the
+/// parens must balance to exactly one top-level form. We do not require the
+/// full body to pass `parseCheck` / `parseNoteRef` — the evaluator will
+/// surface those errors the next time a design that imports this component
+/// is built. Returns the trimmed view + extracted text on success.
+fn validateRequirementForm(requirement_sexp: []const u8) EditError!ParsedRequirement {
+    const trimmed = std.mem.trim(u8, requirement_sexp, " \t\r\n");
+    if (trimmed.len == 0) return error.InvalidRequirement;
+    if (!std.mem.startsWith(u8, trimmed, "(requirement")) return error.InvalidRequirement;
+    const after_head = trimmed["(requirement".len..];
+    var k: usize = 0;
+    while (k < after_head.len and (after_head[k] == ' ' or after_head[k] == '\t' or after_head[k] == '\n' or after_head[k] == '\r')) : (k += 1) {}
+    if (k >= after_head.len or after_head[k] != '"') return error.InvalidRequirement;
+    const text_start_rel = k + 1;
+    var text_end_rel: ?usize = null;
+    var esc = false;
+    var j: usize = text_start_rel;
+    while (j < after_head.len) : (j += 1) {
+        const ch = after_head[j];
+        if (esc) {
+            esc = false;
+            continue;
+        }
+        if (ch == '\\') {
+            esc = true;
+            continue;
+        }
+        if (ch == '"') {
+            text_end_rel = j;
+            break;
+        }
+    }
+    const end_off = text_end_rel orelse return error.InvalidRequirement;
+    const req_text = after_head[text_start_rel..end_off];
+
+    // Paren-balance check on the full form. Skip over comments (;...\n) and
+    // string literals (" with escape). The form must close at exactly the
+    // last character of `trimmed`.
+    if (trimmed[trimmed.len - 1] != ')') return error.InvalidRequirement;
+    var depth: i32 = 0;
+    var i: usize = 0;
+    var in_string = false;
+    var str_esc = false;
+    while (i < trimmed.len) : (i += 1) {
+        const ch = trimmed[i];
+        if (in_string) {
+            if (str_esc) {
+                str_esc = false;
+            } else if (ch == '\\') {
+                str_esc = true;
+            } else if (ch == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        switch (ch) {
+            '"' => in_string = true,
+            ';' => while (i < trimmed.len and trimmed[i] != '\n') : (i += 1) {},
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if (depth == 0 and i != trimmed.len - 1) return error.InvalidRequirement;
+                if (depth < 0) return error.InvalidRequirement;
+            },
+            else => {},
+        }
+    }
+    if (depth != 0) return error.InvalidRequirement;
+    return .{ .trimmed = trimmed, .text = req_text };
+}
+
+/// Append one or more full `(requirement "text" ...)` forms to the top-level
+/// `(component ...)` form in `lib/components/{component}.sexp`. The caller
+/// supplies each requirement as a complete s-expression so arbitrarily
+/// structured bodies (with `(ref ...)` and/or `(check ...)` children) can be
+/// authored without this function needing to know the schema.
+///
+/// Atomic semantics: every requirement is validated and dedup-checked first,
+/// against both the existing file and earlier items in the same batch. If
+/// any one fails, the file is not touched at all — `out_failed_index` is
+/// set to the offending element so the caller can surface "requirement #N
+/// invalid" without a partial write to roll back.
+///
+/// On success, snapshots the library file once under
+/// `history/_lib/components/...` and writes once. Does not rebuild any
+/// design — callers must re-run a build to pick up the change.
+pub fn addComponentRequirementsCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    component: []const u8,
+    requirements: []const []const u8,
+    out_failed_index: *usize,
+) EditError!struct { snapshot: ?[]const u8, count: usize } {
+    out_failed_index.* = 0;
+    if (component.len == 0 or std.mem.indexOf(u8, component, "..") != null or std.mem.indexOfAny(u8, component, "/\\") != null) {
+        return error.InvalidSource;
+    }
+    if (requirements.len == 0) return error.InvalidRequirement;
+
+    const path = try std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, component });
+    defer allocator.free(path);
+    const source = std.fs.cwd().readFileAlloc(allocator, path, 1 * 1024 * 1024) catch return error.ComponentNotFound;
+    defer allocator.free(source);
+
+    const comp_open = findOuterComponentOpen(source) orelse return error.MalformedSource;
+    const comp_end = findFormEnd(source, comp_open) orelse return error.MalformedSource;
+    const body = source[comp_open..comp_end];
+
+    // Pass 1: validate every form. On failure, surface the offending index
+    // and bail without touching the file. Allocate the parsed slice up front
+    // so we can also dedup later items against earlier ones in the batch
+    // without re-parsing.
+    var parsed = try allocator.alloc(ParsedRequirement, requirements.len);
+    defer allocator.free(parsed);
+    for (requirements, 0..) |raw, idx| {
+        out_failed_index.* = idx;
+        parsed[idx] = try validateRequirementForm(raw);
+    }
+
+    // Pass 2: dedup. Each new requirement's text must not match (a) any
+    // existing `(requirement "<text>"` in the file, nor (b) any earlier
+    // item in the same batch. Same-batch dedup catches the case where the
+    // agent accidentally generated the same rule twice — without it, the
+    // file would gain two byte-identical rules in one call.
+    for (parsed, 0..) |p, idx| {
+        const dup_needle = try std.fmt.allocPrint(allocator, "(requirement \"{s}\"", .{p.text});
+        defer allocator.free(dup_needle);
+        if (std.mem.indexOf(u8, body, dup_needle) != null) {
+            out_failed_index.* = idx;
+            return error.DuplicateRequirement;
+        }
+        for (parsed[0..idx]) |earlier| {
+            if (std.mem.eql(u8, earlier.text, p.text)) {
+                out_failed_index.* = idx;
+                return error.DuplicateRequirement;
+            }
+        }
+    }
+
+    // All clear — single snapshot, single splice.
+    const desc = try std.fmt.allocPrint(allocator, "add_component_requirements {s} (+{d})", .{ component, parsed.len });
+    defer allocator.free(desc);
+    const snap_id: ?[]const u8 = history.snapshotLibraryFile(allocator, project_dir, "components", component, desc) catch null;
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try w.writeAll(source[0 .. comp_end - 1]);
+    for (parsed) |p| {
+        try w.writeAll("\n  ");
+        try w.writeAll(p.trimmed);
+    }
+    try w.writeAll(source[comp_end - 1 ..]);
+
+    const file = std.fs.cwd().createFile(path, .{}) catch return error.CannotWriteDesign;
+    defer file.close();
+    file.writeAll(buf.items) catch return error.CannotWriteDesign;
+
+    return .{ .snapshot = snap_id, .count = parsed.len };
 }
 
 /// Locate the opening paren of the first top-level `(component ...)` or

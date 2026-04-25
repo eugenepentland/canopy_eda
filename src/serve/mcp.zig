@@ -108,14 +108,21 @@ fn handleToolCall(
     const args_val: ?std.json.Value = p.object.get("arguments");
 
     var content_buf: std.ArrayListUnmanaged(u8) = .empty;
-    const ok = mcp_tools.call(allocator, project_dir, tool_name, args_val, &content_buf);
+    const call_result = mcp_tools.call(allocator, project_dir, tool_name, args_val, &content_buf);
 
     var result: std.ArrayListUnmanaged(u8) = .empty;
     const rw = result.writer(allocator);
-    try rw.writeAll("{\"content\":[{\"type\":\"text\",\"text\":");
-    try writeJsonStringTo(rw, content_buf.items);
-    try rw.writeAll("}]");
-    if (!ok) try rw.writeAll(",\"isError\":true");
+    if (call_result.raw_content) {
+        // Tool already emitted a full MCP content-array literal (e.g. a
+        // `resource` block with a binary blob). Splice it in verbatim.
+        try rw.writeAll("{\"content\":");
+        try rw.writeAll(content_buf.items);
+    } else {
+        try rw.writeAll("{\"content\":[{\"type\":\"text\",\"text\":");
+        try writeJsonStringTo(rw, content_buf.items);
+        try rw.writeAll("}]");
+    }
+    if (!call_result.ok) try rw.writeAll(",\"isError\":true");
     try rw.writeAll("}");
 
     return resultEnvelope(allocator, id_val, result.items);
