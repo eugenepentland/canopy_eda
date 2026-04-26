@@ -416,7 +416,7 @@ fn reportFromSection(
     // Collect every ref_des that belongs to this section (including nested
     // sub-sections and pin-group attachments on top-level instances).
     var refs: std.StringHashMapUnmanaged(void) = .empty;
-    collectSectionRefs(allocator, sec, &refs);
+    try collectSectionRefs(allocator, sec, &refs);
 
     var filtered: std.ArrayListUnmanaged(erc_mod.Violation) = .empty;
     for (violations) |v| {
@@ -465,7 +465,7 @@ fn collectComponentRequirements(
     check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
 ) ![]const ComponentRequirementEntry {
     var by_ref: std.StringHashMapUnmanaged(Instance) = .empty;
-    collectSectionInstances(sec, &by_ref, allocator);
+    try collectSectionInstances(sec, &by_ref, allocator);
     // Add top-level instances that pin-groups attach to this section.
     var it = refs.iterator();
     while (it.next()) |e| {
@@ -473,7 +473,7 @@ fn collectComponentRequirements(
         if (by_ref.contains(rd)) continue;
         for (block.instances) |inst| {
             if (std.mem.eql(u8, inst.ref_des, rd)) {
-                by_ref.put(allocator, rd, inst) catch {};
+                try by_ref.put(allocator, rd, inst);
                 break;
             }
         }
@@ -503,11 +503,11 @@ fn collectSectionInstances(
     sec: Section,
     out: *std.StringHashMapUnmanaged(Instance),
     allocator: std.mem.Allocator,
-) void {
+) std.mem.Allocator.Error!void {
     for (sec.instances) |inst| {
-        out.put(allocator, inst.ref_des, inst) catch {};
+        try out.put(allocator, inst.ref_des, inst);
     }
-    for (sec.sub_sections) |sub| collectSectionInstances(sub, out, allocator);
+    for (sec.sub_sections) |sub| try collectSectionInstances(sub, out, allocator);
 }
 
 fn lessThanByRefDes(_: void, a: ComponentRequirementEntry, b: ComponentRequirementEntry) bool {
@@ -554,16 +554,16 @@ pub fn sectionContentHash(
 
     // Instances (gathered via the same refs set used for requirements).
     var refs: std.StringHashMapUnmanaged(void) = .empty;
-    collectSectionRefs(allocator, sec, &refs);
+    try collectSectionRefs(allocator, sec, &refs);
     var insts: std.StringHashMapUnmanaged(Instance) = .empty;
-    collectSectionInstances(sec, &insts, allocator);
+    try collectSectionInstances(sec, &insts, allocator);
     var it = refs.iterator();
     while (it.next()) |e| {
         const rd = e.key_ptr.*;
         if (insts.contains(rd)) continue;
         for (block.instances) |inst| {
             if (std.mem.eql(u8, inst.ref_des, rd)) {
-                insts.put(allocator, rd, inst) catch {};
+                try insts.put(allocator, rd, inst);
                 break;
             }
         }
@@ -643,10 +643,10 @@ fn collectSectionRefs(
     allocator: std.mem.Allocator,
     sec: Section,
     refs: *std.StringHashMapUnmanaged(void),
-) void {
-    for (sec.instances) |inst| refs.put(allocator, inst.ref_des, {}) catch {};
-    for (sec.pin_groups) |pg| refs.put(allocator, pg.ref_des, {}) catch {};
-    for (sec.sub_sections) |sub| collectSectionRefs(allocator, sub, refs);
+) std.mem.Allocator.Error!void {
+    for (sec.instances) |inst| try refs.put(allocator, inst.ref_des, {});
+    for (sec.pin_groups) |pg| try refs.put(allocator, pg.ref_des, {});
+    for (sec.sub_sections) |sub| try collectSectionRefs(allocator, sub, refs);
 }
 
 fn countSectionInstances(sec: Section) usize {
@@ -659,7 +659,7 @@ fn buildBom(allocator: std.mem.Allocator, block: *const DesignBlock) ![]const Bo
     // Group by ref_des letter prefix (U, J, C, R, L, D, F, TP, SW, X, Q, ...).
     var by_prefix: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(BomEntry)) = .empty;
     var all_instances: std.ArrayListUnmanaged(Instance) = .empty;
-    appendInstances(allocator, &all_instances, block);
+    try appendInstances(allocator, &all_instances, block);
 
     for (all_instances.items) |inst| {
         if (inst.ref_des.len == 0) continue;
@@ -692,9 +692,13 @@ fn buildBom(allocator: std.mem.Allocator, block: *const DesignBlock) ![]const Bo
     return groups.items;
 }
 
-fn appendInstances(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(Instance), block: *const DesignBlock) void {
-    for (block.instances) |inst| list.append(allocator, inst) catch {};
-    for (block.sub_blocks) |sb| appendInstances(allocator, list, sb.block);
+fn appendInstances(
+    allocator: std.mem.Allocator,
+    list: *std.ArrayListUnmanaged(Instance),
+    block: *const DesignBlock,
+) std.mem.Allocator.Error!void {
+    for (block.instances) |inst| try list.append(allocator, inst);
+    for (block.sub_blocks) |sb| try appendInstances(allocator, list, sb.block);
 }
 
 fn prefixOf(allocator: std.mem.Allocator, ref_des: []const u8) ![]const u8 {

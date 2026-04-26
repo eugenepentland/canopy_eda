@@ -44,7 +44,7 @@ pub fn renderToHtml(
     ctx.project_dir = project_dir;
 
     var asserted_fns: std.StringHashMapUnmanaged([]const u8) = .empty;
-    appendAssertedFromBlock(allocator, &asserted_fns, block);
+    try appendAssertedFromBlock(allocator, &asserted_fns, block);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
@@ -232,10 +232,10 @@ fn collectSectionRefsRec(
     sec: Section,
     out: *std.ArrayListUnmanaged([]const u8),
     allocator: Allocator,
-) void {
-    for (sec.pin_groups) |pg| out.append(allocator, pg.ref_des) catch {};
-    for (sec.instances) |inst| out.append(allocator, inst.ref_des) catch {};
-    for (sec.sub_sections) |sub| collectSectionRefsRec(sub, out, allocator);
+) std.mem.Allocator.Error!void {
+    for (sec.pin_groups) |pg| try out.append(allocator, pg.ref_des);
+    for (sec.instances) |inst| try out.append(allocator, inst.ref_des);
+    for (sec.sub_sections) |sub| try collectSectionRefsRec(sub, out, allocator);
 }
 
 fn countsForRefs(check_results: *const CheckResultMap, refs: []const []const u8) SecCounts {
@@ -259,16 +259,20 @@ fn writeSidebar(w: anytype) !void {
 /// Build a map of (ref_des|pin_id) -> asserted alt-function names (e.g. "SPI4_SCK",
 /// or "TIM1_CH1, GPIO" when the pin declared multiple roles) from all
 /// `(pin X (as "FN" ...) ...)` declarations in the design tree.
-fn appendAssertedFromBlock(allocator: Allocator, map: *std.StringHashMapUnmanaged([]const u8), block: *const DesignBlock) void {
+fn appendAssertedFromBlock(
+    allocator: Allocator,
+    map: *std.StringHashMapUnmanaged([]const u8),
+    block: *const DesignBlock,
+) std.mem.Allocator.Error!void {
     for (block.nets) |net| {
         for (net.pins) |p| {
             if (p.asserted_fns.len == 0) continue;
             const key = std.fmt.allocPrint(allocator, "{s}|{s}", .{ p.ref_des, p.pin }) catch continue;
             const joined = joinAssertedFns(allocator, p.asserted_fns) orelse continue;
-            map.put(allocator, key, joined) catch {};
+            try map.put(allocator, key, joined);
         }
     }
-    for (block.sub_blocks) |sb| appendAssertedFromBlock(allocator, map, sb.block);
+    for (block.sub_blocks) |sb| try appendAssertedFromBlock(allocator, map, sb.block);
 }
 
 fn joinAssertedFns(allocator: Allocator, fns: []const []const u8) ?[]const u8 {
@@ -1059,7 +1063,7 @@ fn emitSectionEntry(
     // sub-section so the sidebar status reflects the worst child too.
     var refs: std.ArrayListUnmanaged([]const u8) = .empty;
     defer refs.deinit(allocator);
-    collectSectionRefsRec(sec, &refs, allocator);
+    try collectSectionRefsRec(sec, &refs, allocator);
     const counts = countsForRefs(check_results, refs.items);
 
     try w.writeAll("{\"slug\":");

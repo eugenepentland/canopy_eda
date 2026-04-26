@@ -63,11 +63,9 @@ pub fn loadModelConfig(allocator: std.mem.Allocator, project_dir: []const u8) Mo
             }
         }
 
-        const duped_key = allocator.dupe(u8, key) catch {
-            pos = brace_end + 1;
-            continue;
-        };
-        map.put(duped_key, transform) catch {};
+        // OOM mid-parse: stop and return whatever we've collected so far.
+        const duped_key = allocator.dupe(u8, key) catch return map;
+        map.put(duped_key, transform) catch return map;
         pos = brace_end + 1;
     }
 
@@ -116,7 +114,7 @@ pub fn exportFootprints(
     const pretty_parent = std.fs.path.dirname(output_pretty_dir) orelse ".";
     const model_dir = try std.fmt.allocPrint(allocator, "{s}/models", .{pretty_parent});
     defer allocator.free(model_dir);
-    std.fs.cwd().makePath(model_dir) catch {};
+    try std.fs.cwd().makePath(model_dir);
 
     var instances: std.ArrayListUnmanaged(FlatInstance) = .empty;
     defer instances.deinit(allocator);
@@ -157,7 +155,7 @@ pub fn exportFootprints(
             continue;
         };
         defer f.close();
-        f.writeAll(mod_output) catch {};
+        try f.writeAll(mod_output);
 
         if (model_name) |mname| {
             defer if (mcfg == null) allocator.free(mname);
@@ -165,7 +163,9 @@ pub fn exportFootprints(
             defer allocator.free(src_path);
             const dst_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ model_dir, mname }) catch continue;
             defer allocator.free(dst_path);
-            std.fs.cwd().copyFile(src_path, std.fs.cwd(), dst_path, .{}) catch {};
+            std.fs.cwd().copyFile(src_path, std.fs.cwd(), dst_path, .{}) catch |e| {
+                std.debug.print("warning: copy {s}: {s}\n", .{ mname, @errorName(e) });
+            };
         }
     }
 }

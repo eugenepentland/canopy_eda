@@ -46,12 +46,12 @@ pub fn exportGerber(
     if (layout_path) |lp| {
         if (layout_mod.loadLayout(allocator, lp)) |layout| {
             for (layout.placements) |p| {
-                placements.put(p.uuid, .{
+                try placements.put(p.uuid, .{
                     .x = p.x,
                     .y = p.y,
                     .angle = p.angle,
                     .side = p.side,
-                }) catch {};
+                });
             }
             layout_traces = layout.traces;
             layout_vias = layout.vias;
@@ -70,7 +70,7 @@ pub fn exportGerber(
         defer allocator.free(fp_path);
         const source = std.fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
         const geom = parseGeometry(allocator, source) catch continue;
-        fp_geom.put(inst.footprint, geom) catch {};
+        try fp_geom.put(inst.footprint, geom);
     }
 
     var files: std.ArrayListUnmanaged(GerberFile) = .empty;

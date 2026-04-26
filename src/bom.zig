@@ -184,8 +184,8 @@ pub fn netSignature(allocator: std.mem.Allocator, nets: []const []const u8) ![]c
     }.lt);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     for (sorted, 0..) |net, i| {
-        if (i > 0) buf.append(allocator, '|') catch {};
-        buf.appendSlice(allocator, net) catch {};
+        if (i > 0) try buf.append(allocator, '|');
+        try buf.appendSlice(allocator, net);
     }
     return buf.toOwnedSlice(allocator);
 }

@@ -294,7 +294,7 @@ fn statePath(allocator: std.mem.Allocator, project_dir: []const u8, name: []cons
 fn ensureReviewsDir(allocator: std.mem.Allocator, project_dir: []const u8) !void {
     const dir = try std.fmt.allocPrint(allocator, "{s}/reviews", .{project_dir});
     defer allocator.free(dir);
-    std.fs.cwd().makePath(dir) catch {};
+    try std.fs.cwd().makePath(dir);
 }
 
 /// Reject design names containing path separators or `..` — the name is

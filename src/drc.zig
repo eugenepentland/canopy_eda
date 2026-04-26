@@ -76,7 +76,7 @@ pub fn runDrc(
     var placed = std.StringHashMap(PlacementInfo).init(allocator);
     defer placed.deinit();
     for (layout.placements) |p| {
-        placed.put(p.uuid, .{ .x = p.x, .y = p.y, .angle = p.angle, .side = p.side }) catch {};
+        try placed.put(p.uuid, .{ .x = p.x, .y = p.y, .angle = p.angle, .side = p.side });
     }
 
     // Parse footprint pads
@@ -89,7 +89,7 @@ pub fn runDrc(
         defer allocator.free(fp_path);
         const source = std.fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
         const pads = parsePads(allocator, source) catch continue;
-        fp_geom.put(inst.footprint, pads) catch {};
+        try fp_geom.put(inst.footprint, pads);
     }
 
     // Build list of pad positions with net/layer info
@@ -404,13 +404,13 @@ pub fn runDrc(
                     // Check start
                     const ds = @sqrt(std.math.pow(f64, pad.x - t.points[0][0], 2) + std.math.pow(f64, pad.y - t.points[0][1], 2));
                     if (ds <= pad.r + connect_dist) {
-                        start_pads.append(allocator, pi) catch {};
+                        try start_pads.append(allocator, pi);
                     }
                     // Check end
                     const last = t.points.len - 1;
                     const de = @sqrt(std.math.pow(f64, pad.x - t.points[last][0], 2) + std.math.pow(f64, pad.y - t.points[last][1], 2));
                     if (de <= pad.r + connect_dist) {
-                        end_pads.append(allocator, pi) catch {};
+                        try end_pads.append(allocator, pi);
                     }
                 }
 
@@ -434,7 +434,7 @@ pub fn runDrc(
                     if (!sameNet(pad.net, v.net)) continue;
                     const dv = @sqrt(std.math.pow(f64, pad.x - v.x, 2) + std.math.pow(f64, pad.y - v.y, 2));
                     if (dv <= pad.r + v.pad_size / 2.0 + connect_dist) {
-                        via_pads.append(allocator, pi) catch {};
+                        try via_pads.append(allocator, pi);
                     }
                 }
                 if (via_pads.items.len > 1)

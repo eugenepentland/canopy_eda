@@ -127,7 +127,7 @@ src/export_kicad_netlist.zig::extractFootprintName | fn extractFootprintName(all
 src/export_kicad_netlist.zig::extractPadNames | fn extractPadNames(allocator: std.mem.Allocator, source: []const u8) ![]const []const u8
 src/export_kicad_netlist.zig::writeNetlist | fn writeNetlist( allocator: std.mem.Allocator, design_name: []const u8, instances: []const FlatInstance, nets: []const FlatNet, fp_name_map: *const std.StringHashMap([]const u8), fp_pad_map: *const std.StringHashMap([]const []const u8), ) ![]const u8
 src/export_kicad_pcb.zig::exportPcb | fn exportPcb( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, existing_pcb_path: ?[]const u8, board_def: ?*const env_mod.Board, layout_path: ?[]const u8, ) ![]const u8
-src/export_kicad_pcb.zig::parseExistingPlacements | fn parseExistingPlacements(allocator: std.mem.Allocator, pcb_content: []const u8, placed: *std.StringHashMap(PlacedFootprint)) void
+src/export_kicad_pcb.zig::parseExistingPlacements | fn parseExistingPlacements( allocator: std.mem.Allocator, pcb_content: []const u8, placed: *std.StringHashMap(PlacedFootprint), ) std.mem.Allocator.Error!void
 src/id_insert.zig::insertPendingIds | fn insertPendingIds( allocator: std.mem.Allocator, source_path: []const u8, pending: []const Evaluator.PendingId, ) !void
 src/json_writer.zig::writeEscaped | fn writeEscaped(w: anytype, s: []const u8) !void
 src/json_writer.zig::writeField | fn writeField(w: anytype, key: []const u8, value: []const u8) !void

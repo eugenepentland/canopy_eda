@@ -103,6 +103,7 @@ src/export_kicad.zig:206: std.debug.print reference outside allowed paths
 src/export_kicad.zig:86: std.debug.print reference outside allowed paths
 src/export_kicad.zig:90: std.debug.print reference outside allowed paths
 src/export_kicad.zig:94: std.debug.print reference outside allowed paths
+src/export_kicad_model.zig:167: std.debug.print reference outside allowed paths
 src/main.zig:118: std.debug.print reference outside allowed paths
 src/main.zig:124: std.debug.print reference outside allowed paths
 src/main.zig:139: std.debug.print reference outside allowed paths

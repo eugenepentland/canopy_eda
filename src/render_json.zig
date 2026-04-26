@@ -78,7 +78,7 @@ const JsonHub = struct {
 /// Populated lazily in renderSceneGraph; lives for the lifetime of a single render.
 const PinoutAltMap = std.StringHashMapUnmanaged(std.StringHashMapUnmanaged([]const []const u8));
 
-fn loadPinoutAlts(allocator: Allocator, map: *PinoutAltMap, project_dir: []const u8, symbol: []const u8) void {
+fn loadPinoutAlts(allocator: Allocator, map: *PinoutAltMap, project_dir: []const u8, symbol: []const u8) std.mem.Allocator.Error!void {
     if (project_dir.len == 0 or symbol.len == 0) return;
     if (map.contains(symbol)) return;
     const path = std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ project_dir, symbol }) catch return;
@@ -113,26 +113,33 @@ fn loadPinoutAlts(allocator: Allocator, map: *PinoutAltMap, project_dir: []const
             by_pin.put(allocator, pin_id, owned) catch continue;
         }
     }
-    map.put(allocator, symbol, by_pin) catch {};
+    try map.put(allocator, symbol, by_pin);
 }
 
 /// Build a map of (ref_des|pin_id) -> asserted_fn from all nets. Keys are allocator-owned.
-fn buildAssertedFnMap(allocator: Allocator, block: *const DesignBlock) std.StringHashMapUnmanaged([]const u8) {
+fn buildAssertedFnMap(
+    allocator: Allocator,
+    block: *const DesignBlock,
+) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]const u8) {
     var map: std.StringHashMapUnmanaged([]const u8) = .empty;
-    appendAssertedFromBlock(allocator, &map, block);
+    try appendAssertedFromBlock(allocator, &map, block);
     return map;
 }
 
-fn appendAssertedFromBlock(allocator: Allocator, map: *std.StringHashMapUnmanaged([]const u8), block: *const DesignBlock) void {
+fn appendAssertedFromBlock(
+    allocator: Allocator,
+    map: *std.StringHashMapUnmanaged([]const u8),
+    block: *const DesignBlock,
+) std.mem.Allocator.Error!void {
     for (block.nets) |net| {
         for (net.pins) |p| {
             if (p.asserted_fns.len == 0) continue;
             const key = std.fmt.allocPrint(allocator, "{s}|{s}", .{ p.ref_des, p.pin }) catch continue;
             const joined = joinAssertedFns(allocator, p.asserted_fns) orelse continue;
-            map.put(allocator, key, joined) catch {};
+            try map.put(allocator, key, joined);
         }
     }
-    for (block.sub_blocks) |sb| appendAssertedFromBlock(allocator, map, sb.block);
+    for (block.sub_blocks) |sb| try appendAssertedFromBlock(allocator, map, sb.block);
 }
 
 fn joinAssertedFns(allocator: Allocator, fns: []const []const u8) ?[]const u8 {
@@ -506,7 +513,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     scene.design_name = block.name;
 
     var alt_map: PinoutAltMap = .empty;
-    var asserted_fns = buildAssertedFnMap(allocator, block);
+    var asserted_fns = try buildAssertedFnMap(allocator, block);
 
     // Build grid cells from sections (same as render_svg.zig)
     const GridCell = struct {
@@ -725,7 +732,7 @@ const Classified = struct { conn: AdjEntry, terminal: []const u8 };
 // ── Hub data collection ──────────────────────────────────────────────
 
 fn collectHubData(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, part: ?env_mod.Part, x_offset: f64, y_start: f64, alt_map: *PinoutAltMap, asserted_fns: *const std.StringHashMapUnmanaged([]const u8)) !JsonHub {
-    loadPinoutAlts(allocator, alt_map, ctx.project_dir, hub.symbol);
+    try loadPinoutAlts(allocator, alt_map, ctx.project_dir, hub.symbol);
     // Get pin groups (reuse hub.zig logic)
     const adj_entries = if (ctx.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
 

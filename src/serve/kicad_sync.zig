@@ -859,7 +859,7 @@ fn syncLayoutFromPcb(
 
     var placed = std.StringHashMap(pcb_mod.PlacedFootprint).init(allocator);
     defer placed.deinit();
-    pcb_mod.parseExistingPlacements(allocator, pcb_content, &placed);
+    pcb_mod.parseExistingPlacements(allocator, pcb_content, &placed) catch return;
 
     var instances: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
     defer instances.deinit(allocator);

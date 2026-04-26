@@ -162,7 +162,7 @@ pub fn saveLayout(allocator: std.mem.Allocator, layout: *const Layout, path: []c
 
     // Write to file
     if (std.fs.path.dirname(path)) |dir| {
-        std.fs.cwd().makePath(dir) catch {};
+        try std.fs.cwd().makePath(dir);
     }
     const file = try std.fs.cwd().createFile(path, .{});
     defer file.close();

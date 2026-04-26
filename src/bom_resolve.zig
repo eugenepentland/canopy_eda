@@ -189,7 +189,7 @@ pub fn resolveIdentities(
         for (old_entries, 0..) |old, idx| {
             if (old.nets.len == 0) continue;
             const sig = bom_mod.netSignature(allocator, old.nets) catch continue;
-            old_by_netsig.put(sig, idx) catch {};
+            try old_by_netsig.put(sig, idx);
         }
 
         for (flat_list.items) |info| {
@@ -315,13 +315,13 @@ fn applyBom(
                             break;
                         }
                     }
-                    if (!overridden) merged.append(allocator, cp) catch {};
+                    if (!overridden) try merged.append(allocator, cp);
                 }
-                for (bom_props) |ip| merged.append(allocator, .{
+                for (bom_props) |ip| try merged.append(allocator, .{
                     .key = allocator.dupe(u8, ip.key) catch ip.key,
                     .value = allocator.dupe(u8, ip.value) catch ip.value,
-                }) catch {};
-                inst.properties = merged.toOwnedSlice(allocator) catch inst.properties;
+                });
+                inst.properties = try merged.toOwnedSlice(allocator);
             }
         }
     }

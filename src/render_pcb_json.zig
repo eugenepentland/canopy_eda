@@ -141,13 +141,13 @@ pub fn renderPcbJson(
     if (layout_path) |lp| {
         if (layout_mod.loadLayout(allocator, lp)) |layout| {
             for (layout.placements) |p| {
-                placed.put(p.uuid, .{
+                try placed.put(p.uuid, .{
                     .x = p.x,
                     .y = p.y,
                     .angle = p.angle,
                     .layer = if (p.side == .back) "B.Cu" else "F.Cu",
                     .flipped = p.side == .back,
-                }) catch {};
+                });
             }
             layout_traces = layout.traces;
             layout_vias = layout.vias;
@@ -160,7 +160,7 @@ pub fn renderPcbJson(
         if (existing_pcb_path) |pcb_path| {
             const existing = std.fs.cwd().readFileAlloc(allocator, pcb_path, 100 * 1024 * 1024) catch null;
             if (existing) |pcb_content| {
-                pcb_mod.parseExistingPlacements(allocator, pcb_content, &placed);
+                try pcb_mod.parseExistingPlacements(allocator, pcb_content, &placed);
             }
         }
     }

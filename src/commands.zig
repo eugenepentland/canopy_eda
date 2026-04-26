@@ -379,7 +379,7 @@ pub fn cmdExportPcb(allocator: std.mem.Allocator, args: []const []const u8) !voi
 
     // Ensure output directory exists
     if (std.fs.path.dirname(out)) |dir| {
-        std.fs.cwd().makePath(dir) catch {};
+        try std.fs.cwd().makePath(dir);
     }
 
     const f = std.fs.cwd().createFile(out, .{}) catch |err| {
@@ -447,7 +447,7 @@ pub fn cmdExportGerber(allocator: std.mem.Allocator, args: []const []const u8) !
 
     const ids_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name });
     defer allocator.free(ids_path);
-    bom.resolveIdentities(allocator, block2, ids_path, project_dir) catch {};
+    try bom.resolveIdentities(allocator, block2, ids_path, project_dir);
 
     const layout_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.layout", .{ project_dir, name });
     defer allocator.free(layout_path);
@@ -459,7 +459,7 @@ pub fn cmdExportGerber(allocator: std.mem.Allocator, args: []const []const u8) !
 
     if (output_dir) |dir| {
         // Write individual files
-        std.fs.cwd().makePath(dir) catch {};
+        try std.fs.cwd().makePath(dir);
         for (files) |f| {
             const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, f.name });
             defer allocator.free(path);
@@ -468,7 +468,7 @@ pub fn cmdExportGerber(allocator: std.mem.Allocator, args: []const []const u8) !
                 continue;
             };
             defer file.close();
-            file.writeAll(f.data) catch {};
+            try file.writeAll(f.data);
             std.debug.print("  {s}\n", .{f.name});
         }
         std.debug.print("Gerber export complete: {d} files in {s}\n", .{ files.len, dir });
@@ -484,14 +484,14 @@ pub fn cmdExportGerber(allocator: std.mem.Allocator, args: []const []const u8) !
         const out_path = try std.fmt.allocPrint(allocator, "{s}/out/{s}-gerber.zip", .{ project_dir, name });
         defer allocator.free(out_path);
         if (std.fs.path.dirname(out_path)) |dir2| {
-            std.fs.cwd().makePath(dir2) catch {};
+            try std.fs.cwd().makePath(dir2);
         }
         const zf = std.fs.cwd().createFile(out_path, .{}) catch |err| {
             std.debug.print("Cannot write zip: {}\n", .{err});
             std.process.exit(1);
         };
         defer zf.close();
-        zf.writeAll(zip) catch {};
+        try zf.writeAll(zip);
         std.debug.print("Gerber export complete: {s}\n", .{out_path});
     }
 }
@@ -553,7 +553,7 @@ pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) !
 
     const bom_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name });
     defer allocator.free(bom_path);
-    bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch {};
+    try bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir);
 
     const violations = erc_mod.runErc(allocator, block, project_dir) catch &[_]erc_mod.Violation{};
 
@@ -570,7 +570,7 @@ pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) !
     var csv_buf: std.ArrayListUnmanaged(u8) = .empty;
     try bom_html.writeBomCsv(csv_buf.writer(allocator), block);
 
-    std.fs.cwd().makePath(output_dir) catch {};
+    try std.fs.cwd().makePath(output_dir);
     const md_name = try std.fmt.allocPrint(allocator, "{s}-review.md", .{name});
     const csv_name = try std.fmt.allocPrint(allocator, "{s}-bom.csv", .{name});
 
@@ -704,7 +704,7 @@ fn pushToServer(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
     try child.spawn();
 
     if (child.stdin) |*stdin| {
-        stdin.writeAll(body) catch {};
+        try stdin.writeAll(body);
         stdin.close();
         child.stdin = null;
     }

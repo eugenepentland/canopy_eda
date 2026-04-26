@@ -117,13 +117,13 @@ pub fn exportPcb(
     if (layout_path) |lp| {
         if (layout_mod.loadLayout(allocator, lp)) |layout| {
             for (layout.placements) |p| {
-                placed.put(p.uuid, .{
+                try placed.put(p.uuid, .{
                     .x = p.x,
                     .y = p.y,
                     .angle = p.angle,
                     .layer = if (p.side == .back) "B.Cu" else "F.Cu",
                     .flipped = p.side == .back,
-                }) catch {};
+                });
             }
             layout_traces = layout.traces;
             layout_vias = layout.vias;
@@ -135,7 +135,7 @@ pub fn exportPcb(
         if (existing_pcb_path) |pcb_path| {
             const existing = std.fs.cwd().readFileAlloc(allocator, pcb_path, 100 * 1024 * 1024) catch null;
             if (existing) |pcb_content| {
-                parseExistingPlacements(allocator, pcb_content, &placed);
+                try parseExistingPlacements(allocator, pcb_content, &placed);
             }
         }
     }
@@ -143,7 +143,7 @@ pub fn exportPcb(
     // Build section→ref_des mapping for grid placement
     var ref_section = std.StringHashMap(usize).init(allocator);
     defer ref_section.deinit();
-    buildSectionMap(allocator, block, &ref_section);
+    try buildSectionMap(allocator, block, &ref_section);
 
     // Generate .kicad_pcb output
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -594,7 +594,11 @@ fn writeOutline(w: anytype, points: []const [2]f64) !void {
 }
 
 /// Parse an existing .kicad_pcb file to extract footprint placements keyed by canopy_uuid.
-pub fn parseExistingPlacements(allocator: std.mem.Allocator, pcb_content: []const u8, placed: *std.StringHashMap(PlacedFootprint)) void {
+pub fn parseExistingPlacements(
+    allocator: std.mem.Allocator,
+    pcb_content: []const u8,
+    placed: *std.StringHashMap(PlacedFootprint),
+) std.mem.Allocator.Error!void {
     // Simple line-based parser: find footprint blocks, extract canopy_uuid and (at x y angle)
     var i: usize = 0;
     while (i < pcb_content.len) {
@@ -636,13 +640,13 @@ pub fn parseExistingPlacements(allocator: std.mem.Allocator, pcb_content: []cons
                 fp_layer = ln;
             }
 
-            placed.put(allocator.dupe(u8, uuid) catch continue, .{
+            try placed.put(allocator.dupe(u8, uuid) catch continue, .{
                 .x = x,
                 .y = y,
                 .angle = ang,
                 .layer = fp_layer,
                 .flipped = std.mem.eql(u8, fp_layer, "B.Cu"),
-            }) catch {};
+            });
         }
 
         i = fp_end;
@@ -735,20 +739,24 @@ fn extractFieldValue(block: []const u8, field_name: []const u8) ?[]const u8 {
 }
 
 /// Build a mapping from ref_des to section index for grid placement.
-fn buildSectionMap(allocator: std.mem.Allocator, block: *const DesignBlock, map: *std.StringHashMap(usize)) void {
+fn buildSectionMap(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    map: *std.StringHashMap(usize),
+) std.mem.Allocator.Error!void {
     for (block.sections, 0..) |sec, si| {
         for (sec.instances) |inst| {
-            map.put(inst.ref_des, si) catch {};
+            try map.put(inst.ref_des, si);
         }
         for (sec.sub_sections) |sub| {
             for (sub.instances) |inst| {
-                map.put(inst.ref_des, si) catch {};
+                try map.put(inst.ref_des, si);
             }
         }
     }
     // Also recurse into sub-blocks
     for (block.sub_blocks) |sb| {
-        buildSectionMap(allocator, sb.block, map);
+        try buildSectionMap(allocator, sb.block, map);
     }
 }
 
@@ -787,7 +795,7 @@ test "placement extraction" {
         }
         placed.deinit();
     }
-    parseExistingPlacements(alloc, pcb, &placed);
+    try parseExistingPlacements(alloc, pcb, &placed);
 
     try std.testing.expect(placed.count() == 1);
     const p = placed.get("test-uuid-1234").?;

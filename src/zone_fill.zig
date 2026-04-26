@@ -55,12 +55,12 @@ pub fn computeZoneFills(
     var placed = std.StringHashMap(PlacementInfo).init(allocator);
     defer placed.deinit();
     for (layout.placements) |p| {
-        placed.put(p.uuid, .{
+        try placed.put(p.uuid, .{
             .x = p.x,
             .y = p.y,
             .angle = p.angle,
             .side = p.side,
-        }) catch {};
+        });
     }
 
     // Parse footprint geometry
@@ -73,7 +73,7 @@ pub fn computeZoneFills(
         defer allocator.free(fp_path);
         const source = std.fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
         const pads = parsePads(allocator, source) catch continue;
-        fp_geom.put(inst.footprint, pads) catch {};
+        try fp_geom.put(inst.footprint, pads);
     }
 
     // Collect net names for pin→net lookup
