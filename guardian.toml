@@ -17,3 +17,42 @@ max_file_lines = 10000
 # in code review.
 [baseline]
 enabled = true
+
+# ── Per-check cap relaxations ────────────────────────────────────────
+# This codebase is dominated by single-pass interpreters (eval/), AST
+# walkers, geometric DRC, and SVG/HTML renderers. Several Guardian
+# defaults are calibrated for typical application code and produce a
+# wall of false positives against state-machine and pattern-matching
+# styles. The bumps below match the precedent set by guardian-zig's
+# own toml, with a per-knob justification.
+
+# parseCheck (eval/env.zig), runDrc (drc.zig), renderHub
+# (render_svg/hub.zig), evalDesignBlock, and several renderer
+# entry points are single-pass interpreters/dispatchers whose data
+# flow lives in one function. Splitting them adds context-passing
+# noise without making the logic clearer. New consumers should keep
+# the framework default 60.
+[function_length]
+max_lines = 200
+
+# The evaluator's switch-on-token-tag dispatch nests inside a switch
+# inside a for-loop, and the DRC's grid-clearance check uses
+# nested-loop spatial scans. Both reach depth 5-6 idiomatically.
+# New consumers should keep the framework default 4.
+[nesting_depth]
+max_depth = 6
+
+# Cognitive complexity counts each branch + nesting level. Eval and
+# render functions stitch many small branches but each is locally
+# readable; refactoring fragments the readability rather than
+# improving it. New consumers should keep the framework default 15.
+[complexity]
+max_score = 50
+
+# Pattern-matching dispatchers (parseCheck, classifyPin, isHub) and
+# resolver chains (loadPinoutMap, resolveRailVoltage) idiomatically
+# emit many early returns — one per case. Refactoring to a single
+# tail return adds nesting without changing behaviour. New consumers
+# should keep the framework default 3.
+[returns_per_fn]
+max_returns = 12
