@@ -204,7 +204,7 @@ pub fn buildPinNameMap(self: *RenderCtx, parts: []const env_mod.Part) std.String
     for (parts) |part| {
         for (part.pins) |pp| {
             if (pp.pin_name.len > 0) {
-                map.put(self.allocator, pp.pin, pp.pin_name) catch {};
+                map.put(self.allocator, pp.pin, pp.pin_name) catch return map;
             }
         }
     }

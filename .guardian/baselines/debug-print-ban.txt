@@ -124,6 +124,7 @@ src/main.zig:235: std.debug.print reference outside allowed paths
 src/render_svg/context.zig:514: std.debug.print reference outside allowed paths
 src/render_svg/context.zig:538: std.debug.print reference outside allowed paths
 src/render_svg/context.zig:555: std.debug.print reference outside allowed paths
+src/render_svg/section_inset.zig:224: std.debug.print reference outside allowed paths
 src/serve.zig:250: std.debug.print reference outside allowed paths
 src/serve.zig:251: std.debug.print reference outside allowed paths
 src/serve/api.zig:1015: std.debug.print reference outside allowed paths

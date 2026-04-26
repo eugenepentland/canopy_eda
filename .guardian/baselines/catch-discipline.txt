@@ -1,14 +1,1 @@
 # guardian-snapshot v1
-src/convert/symbol.zig:132: catch {} silently swallows error
-src/convert/symbol.zig:93: catch {} silently swallows error
-src/convert/symbol_helpers.zig:123: catch {} silently swallows error
-src/convert/symbol_helpers.zig:46: catch {} silently swallows error
-src/render_svg/bom_table.zig:165: catch {} silently swallows error
-src/render_svg/bom_table.zig:166: catch {} silently swallows error
-src/render_svg/bom_table.zig:37: catch {} silently swallows error
-src/render_svg/bom_table.zig:38: catch {} silently swallows error
-src/render_svg/bom_table.zig:51: catch {} silently swallows error
-src/render_svg/bom_table.zig:64: catch {} silently swallows error
-src/render_svg/bom_table.zig:76: catch {} silently swallows error
-src/render_svg/hub.zig:207: catch {} silently swallows error
-src/render_svg/section_inset.zig:221: catch {} silently swallows error

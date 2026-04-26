@@ -218,7 +218,11 @@ fn applyMergeAnnotations(
 }
 
 fn restoreInstMap(ctx: *RenderCtx, saved: []const Saved) void {
-    for (saved) |s| ctx.inst_map.put(ctx.allocator, s.ref, s.original) catch {};
+    // Called from defer — can't propagate. OOM on restore would corrupt the
+    // map, so log every failure rather than silently dropping the entry.
+    for (saved) |s| ctx.inst_map.put(ctx.allocator, s.ref, s.original) catch |e| {
+        std.debug.print("warning: restoreInstMap put {s}: {s}\n", .{ s.ref, @errorName(e) });
+    };
 }
 
 /// A spoke counts as "single passive to terminal" when its chain from the

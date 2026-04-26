@@ -34,8 +34,8 @@ pub fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBloc
         const attrs_key = if (inst.attrs.len > 0) blk: {
             var ab: std.ArrayListUnmanaged(u8) = .empty;
             for (inst.attrs, 0..) |attr, ai| {
-                if (ai > 0) ab.append(allocator, ' ') catch {};
-                ab.appendSlice(allocator, attr) catch {};
+                if (ai > 0) try ab.append(allocator, ' ');
+                try ab.appendSlice(allocator, attr);
             }
             break :blk ab.toOwnedSlice(allocator) catch "";
         } else "";
@@ -48,7 +48,7 @@ pub fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBloc
                 std.mem.eql(u8, entry.key.attrs_key, attrs_key))
             {
                 entry.count += 1;
-                entry.ref_des_list.append(allocator, inst.ref_des) catch {};
+                try entry.ref_des_list.append(allocator, inst.ref_des);
                 found = true;
                 break;
             }
@@ -61,8 +61,8 @@ pub fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBloc
                 if (std.mem.eql(u8, prop.key, "manufacturer")) manufacturer = prop.value;
             }
             var ref_list: std.ArrayListUnmanaged([]const u8) = .empty;
-            ref_list.append(allocator, inst.ref_des) catch {};
-            entries.append(allocator, .{
+            try ref_list.append(allocator, inst.ref_des);
+            try entries.append(allocator, .{
                 .key = .{
                     .component = inst.component,
                     .value = inst.value,
@@ -73,7 +73,7 @@ pub fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBloc
                 .ref_des_list = ref_list,
                 .mpn = mpn,
                 .manufacturer = manufacturer,
-            }) catch {};
+            });
         }
     }
 
@@ -162,8 +162,8 @@ pub fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBloc
         var ref_buf: std.ArrayListUnmanaged(u8) = .empty;
         defer ref_buf.deinit(allocator);
         for (entry.ref_des_list.items, 0..) |rd, rdi| {
-            if (rdi > 0) ref_buf.appendSlice(allocator, ", ") catch {};
-            ref_buf.appendSlice(allocator, rd) catch {};
+            if (rdi > 0) try ref_buf.appendSlice(allocator, ", ");
+            try ref_buf.appendSlice(allocator, rd);
         }
         const refs_str = ref_buf.items;
 

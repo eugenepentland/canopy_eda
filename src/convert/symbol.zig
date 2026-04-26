@@ -90,7 +90,7 @@ pub fn generatePinout(allocator: std.mem.Allocator, source: []const u8, filter: 
 
         var pins: std.ArrayListUnmanaged(PinInfo) = .empty;
         defer pins.deinit(allocator);
-        helpers.collectPins(sym_children[2..], &pins, allocator) catch {};
+        try helpers.collectPins(sym_children[2..], &pins, allocator);
 
         try w.writeAll(";; Auto-generated pinout — DO NOT EDIT\n");
         try w.writeAll(";; Source of truth for pin ID → function name mapping\n");
@@ -129,7 +129,7 @@ pub fn generatePackage(allocator: std.mem.Allocator, sym_source: []const u8, fp_
             if (filter) |f| {
                 if (!std.mem.eql(u8, sn, f)) continue;
             }
-            helpers.collectPins(sc[2..], &sym_pins, allocator) catch {};
+            try helpers.collectPins(sc[2..], &sym_pins, allocator);
         }
     }
 

@@ -43,7 +43,7 @@ pub fn emitSymbol(allocator: std.mem.Allocator, w: anytype, sym_children: []cons
     var pins: std.ArrayListUnmanaged(PinInfo) = .empty;
     defer pins.deinit(allocator);
 
-    collectPins(sym_children[2..], &pins, allocator) catch {};
+    try collectPins(sym_children[2..], &pins, allocator);
 
     // Compute body bounding box from rectangles
     var body_x1: f64 = -5;
@@ -120,7 +120,7 @@ pub fn collectPins(children: []const Node, pins: *std.ArrayListUnmanaged(PinInfo
         if (child.isForm("symbol")) {
             const cl = child.asList().?;
             if (cl.len > 2) {
-                collectPins(cl[2..], pins, allocator) catch {};
+                try collectPins(cl[2..], pins, allocator);
             }
         }
     }
