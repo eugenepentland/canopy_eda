@@ -155,7 +155,9 @@ fn loadAndResolve(ctx: *Handler, name: []const u8, res: *httpz.Response) ?*const
         res.status = 500;
         return null;
     };
-    bom.resolveIdentities(ctx.allocator, @constCast(block), bom_path, ctx.project_dir) catch {};
+    bom.resolveIdentities(ctx.allocator, @constCast(block), bom_path, ctx.project_dir) catch |e| {
+        std.debug.print("warning: bom.resolveIdentities for {s}: {s}\n", .{ name, @errorName(e) });
+    };
     return block;
 }
 
@@ -189,7 +191,7 @@ pub fn writeNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     const out_path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.net", .{ cfg.output_dir, name });
     defer ctx.allocator.free(out_path);
 
-    std.fs.cwd().makePath(cfg.output_dir) catch {};
+    try std.fs.cwd().makePath(cfg.output_dir);
     const f = std.fs.cwd().createFile(out_path, .{}) catch {
         res.status = 500;
         const body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"Cannot write to {s}\"}}", .{out_path});
@@ -238,7 +240,7 @@ pub fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
         return;
     };
 
-    std.fs.cwd().makePath(cfg.output_dir) catch {};
+    try std.fs.cwd().makePath(cfg.output_dir);
 
     const net_path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.net", .{ cfg.output_dir, name });
     defer ctx.allocator.free(net_path);
@@ -261,7 +263,7 @@ pub fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
 
     const pretty_dir = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.pretty", .{ cfg.output_dir, name });
     defer ctx.allocator.free(pretty_dir);
-    std.fs.cwd().makePath(pretty_dir) catch {};
+    try std.fs.cwd().makePath(pretty_dir);
 
     export_kicad.exportFootprints(ctx.allocator, block, ctx.project_dir, pretty_dir) catch {
         res.status = 500;
@@ -390,9 +392,9 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
     //    writes, but the sync button never short-circuits — the user wants
     //    every click to refresh the PCB even when nothing upstream changed.
 
-    std.fs.cwd().makePath(cfg.output_dir) catch {};
-    std.fs.cwd().makePath(pretty_dir) catch {};
-    std.fs.cwd().makePath(model_dir) catch {};
+    try std.fs.cwd().makePath(cfg.output_dir);
+    try std.fs.cwd().makePath(pretty_dir);
+    try std.fs.cwd().makePath(model_dir);
 
     if (netlist_changed) {
         const f = std.fs.cwd().createFile(net_path, .{}) catch {
@@ -414,7 +416,7 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
     if (sections_changed and sections_json.len > 0) {
         if (std.fs.cwd().createFile(sections_path, .{})) |sf| {
             defer sf.close();
-            sf.writeAll(sections_json) catch {};
+            try sf.writeAll(sections_json);
         } else |_| {}
         cache.setSectionsSha(ctx.allocator, sections_sha);
     }
@@ -422,7 +424,7 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
     if (modules_changed and modules_json.len > 0) {
         if (std.fs.cwd().createFile(modules_path, .{})) |mf| {
             defer mf.close();
-            mf.writeAll(modules_json) catch {};
+            try mf.writeAll(modules_json);
         } else |_| {}
         cache.setModulesSha(ctx.allocator, modules_sha);
     }
@@ -491,7 +493,10 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
 
     if (py.term.Exited != 0) {
         // Python failed — invalidate cache so the next sync rewrites everything.
-        std.fs.cwd().deleteFile(cache_path) catch {};
+        std.fs.cwd().deleteFile(cache_path) catch |e| switch (e) {
+            error.FileNotFound => {},
+            else => std.debug.print("warning: deleting {s}: {s}\n", .{ cache_path, @errorName(e) }),
+        };
         try respondScriptFailure(ctx, res, py.stdout, py.stderr);
         return;
     }
@@ -790,18 +795,18 @@ fn loadCache(allocator: std.mem.Allocator, path: []const u8) SyncCache {
     for (parsed.value.footprints) |e| {
         const k = allocator.dupe(u8, e.name) catch continue;
         const v = allocator.dupe(u8, e.sha) catch continue;
-        out.footprints.put(allocator, k, v) catch {};
+        out.footprints.put(allocator, k, v) catch return out;
     }
     for (parsed.value.models) |e| {
         const k = allocator.dupe(u8, e.name) catch continue;
-        out.models.put(allocator, k, .{ .size = e.size, .mtime_ns = e.mtime_ns }) catch {};
+        out.models.put(allocator, k, .{ .size = e.size, .mtime_ns = e.mtime_ns }) catch return out;
     }
     return out;
 }
 
 fn saveCache(allocator: std.mem.Allocator, path: []const u8, cache: *const SyncCache) void {
     const parent = std.fs.path.dirname(path) orelse ".";
-    std.fs.cwd().makePath(parent) catch {};
+    std.fs.cwd().makePath(parent) catch return;
     const f = std.fs.cwd().createFile(path, .{}) catch return;
     defer f.close();
 
@@ -831,7 +836,7 @@ fn saveCache(allocator: std.mem.Allocator, path: []const u8, cache: *const SyncC
         w.print(",\"size\":{d},\"mtime_ns\":{d}}}", .{ e.value_ptr.size, e.value_ptr.mtime_ns }) catch return;
     }
     w.writeAll("]}") catch return;
-    f.writeAll(buf.items) catch {};
+    f.writeAll(buf.items) catch return;
 }
 
 fn fileExists(path: []const u8) bool {
@@ -902,7 +907,7 @@ fn syncLayoutFromPcb(
         .zone_fills = existing_zone_fills,
         .rules = existing_rules,
     };
-    layout_mod.saveLayout(allocator, &layout, layout_path) catch {};
+    layout_mod.saveLayout(allocator, &layout, layout_path) catch return;
 }
 
 fn sha256Hex(allocator: std.mem.Allocator, input: []const u8) ![]u8 {

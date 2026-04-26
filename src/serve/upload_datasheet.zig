@@ -34,7 +34,7 @@ pub fn uploadDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 
     const dir = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/datasheets", .{ctx.project_dir});
     defer ctx.allocator.free(dir);
-    std.fs.cwd().makePath(dir) catch {};
+    try std.fs.cwd().makePath(dir);
 
     const path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ dir, safe });
     defer ctx.allocator.free(path);

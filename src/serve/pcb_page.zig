@@ -61,7 +61,9 @@ pub fn pcbPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     // Resolve BOM identities
     const ids_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name });
     defer ctx.allocator.free(ids_path);
-    bom.resolveIdentities(ctx.allocator, block, ids_path, ctx.project_dir) catch {};
+    bom.resolveIdentities(ctx.allocator, block, ids_path, ctx.project_dir) catch |e| {
+        std.debug.print("warning: resolveIdentities {s} failed: {s}\n", .{ name, @errorName(e) });
+    };
 
     // Layout path (.layout) and fallback PCB path
     const layout_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.layout", .{ ctx.project_dir, name });

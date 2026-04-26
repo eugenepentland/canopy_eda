@@ -16,6 +16,10 @@ const review_json_mod = @import("../review_json.zig");
 const review_state_mod = @import("../review_state.zig");
 const req_checks = @import("../req_checks.zig");
 
+fn warnResolveIdentities(name: []const u8, err: anyerror) void {
+    std.debug.print("warning: resolveIdentities {s} failed: {s}\n", .{ name, @errorName(err) });
+}
+
 /// One entry per MCP tool. Keep in sync with `tools_list_result` below and
 /// with the dispatch arms in `callInner`. Adding a new tool should start here,
 /// not with a scatter across three separate sites.
@@ -108,7 +112,9 @@ pub fn call(
     const ok = callInner(allocator, project_dir, tool_name, args_val, out) catch |err| {
         const msg = @errorName(err);
         const w = out.writer(allocator);
-        w.print("error: {s}", .{msg}) catch {};
+        w.print("error: {s}", .{msg}) catch |e| {
+            std.debug.print("warning: failed to write error msg: {s}\n", .{@errorName(e)});
+        };
         return .{ .ok = false };
     };
     return .{ .ok = ok };
@@ -585,7 +591,7 @@ fn runChecks(
 
     const bom_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name });
     defer allocator.free(bom_path);
-    bom.resolveIdentities(allocator, block, bom_path, project_dir) catch {};
+    bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
     // If changed_since is set, compute the symmetric-difference sets of
     // ref_des and net names between the prior snapshot and the current
@@ -745,7 +751,7 @@ fn generateReview(
 
     const bom_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name });
     defer allocator.free(bom_path);
-    bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch {};
+    bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
     const violations = try erc_mod.runErc(allocator, block, project_dir);
     var check_results = req_checks.runChecks(allocator, &eval, block) catch
@@ -1392,7 +1398,7 @@ pub fn renderSceneGraph(
 
     const bom_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name });
     defer allocator.free(bom_path);
-    bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch {};
+    bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
     return render_json.renderSceneGraph(allocator, block, project_dir);
 }

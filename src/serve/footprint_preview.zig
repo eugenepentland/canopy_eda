@@ -73,7 +73,7 @@ pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
                     }
                 }
             }
-            pads.append(ctx.allocator, .{ .id = pid_val, .x = px, .y = py, .w = pw, .h = ph, .shape = shape }) catch {};
+            try pads.append(ctx.allocator, .{ .id = pid_val, .x = px, .y = py, .w = pw, .h = ph, .shape = shape });
         }
         if (child.isForm("silkscreen")) {
             const cl = child.asList() orelse continue;
@@ -84,12 +84,12 @@ pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
                         const p1 = sl[1].asList() orelse continue;
                         const p2 = sl[2].asList() orelse continue;
                         if (p1.len >= 2 and p2.len >= 2) {
-                            silk_lines.append(ctx.allocator, .{
+                            try silk_lines.append(ctx.allocator, .{
                                 .x1 = p1[0].asNumber() orelse 0,
                                 .y1 = p1[1].asNumber() orelse 0,
                                 .x2 = p2[0].asNumber() orelse 0,
                                 .y2 = p2[1].asNumber() orelse 0,
-                            }) catch {};
+                            });
                         }
                     }
                 }
@@ -99,11 +99,11 @@ pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
                         const center = sl[1].asList() orelse continue;
                         const radius = sl[2].asNumber() orelse 0;
                         if (center.len >= 2) {
-                            silk_circles.append(ctx.allocator, .{
+                            try silk_circles.append(ctx.allocator, .{
                                 .cx = center[0].asNumber() orelse 0,
                                 .cy = center[1].asNumber() orelse 0,
                                 .r = radius,
-                            }) catch {};
+                            });
                         }
                     }
                 }

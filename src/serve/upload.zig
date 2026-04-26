@@ -128,7 +128,7 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
             res.status = 500;
             return;
         };
-        std.fs.cwd().makePath(dir) catch {};
+        try std.fs.cwd().makePath(dir);
         const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, safe_name }) catch {
             res.status = 500;
             return;
@@ -138,7 +138,7 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
             return;
         };
         defer f.close();
-        f.writeAll(pinout) catch {};
+        try f.writeAll(pinout);
     }
 
     // Write footprint
@@ -148,7 +148,7 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
             res.status = 500;
             return;
         };
-        std.fs.cwd().makePath(dir) catch {};
+        try std.fs.cwd().makePath(dir);
         const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, fp_name_final }) catch {
             res.status = 500;
             return;
@@ -158,7 +158,7 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
             return;
         };
         defer f.close();
-        f.writeAll(footprint) catch {};
+        try f.writeAll(footprint);
     }
 
     // Write component definition (links pinout + footprint + MPN/manufacturer)
@@ -168,24 +168,27 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     if (step_data) |sd| {
         const dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/models", .{ctx.project_dir}) catch "";
         if (dir.len > 0) {
-            std.fs.cwd().makePath(dir) catch {};
+            try std.fs.cwd().makePath(dir);
             const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.step", .{ dir, safe_name }) catch "";
             if (path.len > 0) {
                 const f = std.fs.cwd().createFile(path, .{}) catch null;
                 if (f) |file| {
                     defer file.close();
-                    file.writeAll(sd) catch {};
+                    try file.writeAll(sd);
                 }
             }
         }
     }
 
     // Clean up temp files
-    std.fs.cwd().deleteFile(tmp_zip) catch {};
+    std.fs.cwd().deleteFile(tmp_zip) catch |e| switch (e) {
+        error.FileNotFound => {},
+        else => std.debug.print("warning: deleting {s}: {s}\n", .{ tmp_zip, @errorName(e) }),
+    };
     _ = std.process.Child.run(.{
         .allocator = ctx.allocator,
         .argv = &.{ "rm", "-rf", tmp_dir },
-    }) catch {};
+    }) catch |e| std.debug.print("warning: cleanup {s}: {s}\n", .{ tmp_dir, @errorName(e) });
 
     const step_msg: []const u8 = if (step_data != null) " + 3D model" else "";
     const msg = std.fmt.allocPrint(ctx.allocator, "Created pinout + footprint{s} for \"{s}\" (sources saved)", .{ step_msg, pkg_name }) catch {
@@ -200,14 +203,14 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
 pub fn saveSourceFile(allocator: std.mem.Allocator, project_dir: []const u8, filename: []const u8, body_data: []const u8) void {
     const dir_path = std.fmt.allocPrint(allocator, "{s}/lib/sources", .{project_dir}) catch return;
     defer allocator.free(dir_path);
-    std.fs.cwd().makePath(dir_path) catch {};
+    std.fs.cwd().makePath(dir_path) catch return;
 
     const out_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, filename }) catch return;
     defer allocator.free(out_path);
 
     const file = std.fs.cwd().createFile(out_path, .{}) catch return;
     defer file.close();
-    file.writeAll(body_data) catch {};
+    file.writeAll(body_data) catch return;
     std.debug.print("Saved source: lib/sources/{s}\n", .{filename});
 }
 
@@ -294,7 +297,7 @@ pub fn writeComponentFile(
 ) void {
     const dir = std.fmt.allocPrint(allocator, "{s}/lib/components", .{project_dir}) catch return;
     defer allocator.free(dir);
-    std.fs.cwd().makePath(dir) catch {};
+    std.fs.cwd().makePath(dir) catch return;
 
     const path = std.fmt.allocPrint(allocator, "{s}/{s}.sexp", .{ dir, safe_name }) catch return;
     defer allocator.free(path);

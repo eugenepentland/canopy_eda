@@ -193,7 +193,7 @@ pub fn uploadModelApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
         return;
     };
     defer ctx.allocator.free(models_dir);
-    std.fs.cwd().makePath(models_dir) catch {};
+    try std.fs.cwd().makePath(models_dir);
 
     const model_path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.step", .{ models_dir, name }) catch {
         res.status = 500;

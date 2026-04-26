@@ -353,7 +353,7 @@ pub fn exportKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
         res.status = 500;
         return;
     };
-    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
+    try bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir);
 
     const zip_data = export_kicad.exportKicadZip(ctx.allocator, block, ctx.project_dir, name) catch {
         res.status = 500;
@@ -401,7 +401,7 @@ pub fn exportNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         res.status = 500;
         return;
     };
-    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
+    try bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir);
 
     const netlist = export_kicad.exportNetlistOnly(ctx.allocator, block, ctx.project_dir, name) catch {
         res.status = 500;
@@ -455,7 +455,7 @@ pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
         res.status = 500;
         return;
     };
-    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
+    try bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir);
 
     const netlist = export_kicad.exportNetlistOnly(ctx.allocator, block, ctx.project_dir, name) catch {
         res.status = 500;
@@ -464,7 +464,9 @@ pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
         return;
     };
 
-    export_kicad.exportFootprints(ctx.allocator, block, ctx.project_dir, "/mnt/nas/Cyclops/Cyclops Digital/footprints.pretty") catch {};
+    export_kicad.exportFootprints(ctx.allocator, block, ctx.project_dir, "/mnt/nas/Cyclops/Cyclops Digital/footprints.pretty") catch |e| {
+        std.debug.print("warning: exportFootprints failed: {s}\n", .{@errorName(e)});
+    };
 
     const sections_json = export_kicad.exportSectionLayout(ctx.allocator, block) catch "";
     const sections_path = "/mnt/nas/Cyclops/Cyclops Digital/stm32n6.sections.json";
@@ -488,7 +490,7 @@ pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
         const sf = std.fs.cwd().createFile(sections_path, .{}) catch null;
         if (sf) |f| {
             defer f.close();
-            f.writeAll(sections_json) catch {};
+            try f.writeAll(sections_json);
         }
     }
 
@@ -622,7 +624,7 @@ pub fn exportGerberApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 
     const bom_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name });
     defer ctx.allocator.free(bom_path);
-    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
+    try bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir);
 
     const layout_path_str = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.layout", .{ ctx.project_dir, name });
     defer ctx.allocator.free(layout_path_str);
@@ -803,7 +805,7 @@ pub fn pcbPlacementApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
             layer = obj_slice[ls .. ls + le];
         }
 
-        entries.append(ctx.allocator, .{ .uuid = uuid, .ref = ref, .x = x, .y = y, .angle = angle, .layer = layer }) catch {};
+        try entries.append(ctx.allocator, .{ .uuid = uuid, .ref = ref, .x = x, .y = y, .angle = angle, .layer = layer });
         pos = abs_uuid_start + obj_end + 1;
     }
 
@@ -814,14 +816,14 @@ pub fn pcbPlacementApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     var layout_placements: std.ArrayListUnmanaged(layout_mod.Placement) = .empty;
     defer layout_placements.deinit(ctx.allocator);
     for (entries.items) |e| {
-        layout_placements.append(ctx.allocator, .{
+        try layout_placements.append(ctx.allocator, .{
             .ref_des = e.ref,
             .x = e.x,
             .y = e.y,
             .angle = e.angle,
             .side = if (std.mem.eql(u8, e.layer, "B.Cu")) .back else .front,
             .uuid = e.uuid,
-        }) catch {};
+        });
     }
     // Load existing routing data (traces/vias/zones) to preserve them
     var existing_traces: []const layout_mod.Trace = &.{};
@@ -842,7 +844,7 @@ pub fn pcbPlacementApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         .zone_fills = existing_zone_fills,
         .rules = existing_rules,
     };
-    layout_mod.saveLayout(ctx.allocator, &layout, layout_path) catch {};
+    try layout_mod.saveLayout(ctx.allocator, &layout, layout_path);
 
     // Also update .kicad_pcb for export compatibility
     const pcb_path = try std.fmt.allocPrint(ctx.allocator, "{s}/out/{s}.kicad_pcb", .{ ctx.project_dir, name });
@@ -853,7 +855,7 @@ pub fn pcbPlacementApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
             defer ctx.allocator.free(updated);
             if (std.fs.cwd().createFile(pcb_path, .{})) |f| {
                 defer f.close();
-                f.writeAll(updated) catch {};
+                try f.writeAll(updated);
             } else |_| {}
         } else |_| {}
     } else |_| {}
@@ -940,7 +942,7 @@ pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
                         ppos = bracket_end + 1;
                         continue;
                     };
-                    points.append(ctx.allocator, .{ px, py }) catch {};
+                    try points.append(ctx.allocator, .{ px, py });
                     ppos = bracket_end + 1;
                     // Stop at end of points array
                     if (ppos < obj.len and obj[ppos] == ']') break;
@@ -948,12 +950,12 @@ pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
             }
 
             if (points.items.len >= 2) {
-                traces.append(ctx.allocator, .{
+                try traces.append(ctx.allocator, .{
                     .net = net,
                     .layer = layer,
                     .width = width,
                     .points = points.items,
-                }) catch {};
+                });
             }
 
             tpos = obj_end_rel + 1;
@@ -995,7 +997,7 @@ pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
                 to = obj[ts..te];
             }
 
-            vias.append(ctx.allocator, .{
+            try vias.append(ctx.allocator, .{
                 .x = x,
                 .y = y,
                 .net = net,
@@ -1003,7 +1005,7 @@ pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
                 .pad_size = pad_size,
                 .layer_from = from,
                 .layer_to = to,
-            }) catch {};
+            });
 
             vpos = obj_end_rel + 1;
             if (vpos < body.len and body[vpos] == ']') break;
@@ -1119,7 +1121,7 @@ pub fn zoneFillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
     const bom2 = @import("../bom.zig");
     const bom_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name_param });
     defer ctx.allocator.free(bom_path);
-    bom2.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
+    try bom2.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir);
 
     const layout_path2 = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.layout", .{ ctx.project_dir, name_param });
     defer ctx.allocator.free(layout_path2);
@@ -1233,7 +1235,7 @@ pub fn drcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const bom3 = @import("../bom.zig");
     const bom_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name_param });
     defer ctx.allocator.free(bom_path);
-    bom3.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
+    try bom3.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir);
 
     const layout_path3 = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.layout", .{ ctx.project_dir, name_param });
     defer ctx.allocator.free(layout_path3);
@@ -1398,7 +1400,7 @@ pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
 
     const bom_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name });
     defer ctx.allocator.free(bom_path);
-    bom.resolveIdentities(ctx.allocator, @constCast(block), bom_path, ctx.project_dir) catch {};
+    try bom.resolveIdentities(ctx.allocator, @constCast(block), bom_path, ctx.project_dir);
 
     const violations = erc_mod.runErc(ctx.allocator, block, ctx.project_dir) catch {
         res.status = 500;
@@ -1519,7 +1521,7 @@ fn buildDocForName(
 
     const bom_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name });
     defer allocator.free(bom_path);
-    bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch {};
+    try bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir);
 
     const violations = try erc_mod.runErc(allocator, block, project_dir);
 
@@ -1660,7 +1662,7 @@ pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 
     const bom_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name });
     defer ctx.allocator.free(bom_path);
-    bom.resolveIdentities(ctx.allocator, @constCast(block), bom_path, ctx.project_dir) catch {};
+    try bom.resolveIdentities(ctx.allocator, @constCast(block), bom_path, ctx.project_dir);
 
     var sym_cache = try bom_html.buildSymbolPinCache(ctx.allocator, ctx.project_dir);
 

@@ -26,6 +26,10 @@ const bom = @import("../bom.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
+fn warnResolveIdentities(name: []const u8, err: anyerror) void {
+    std.debug.print("warning: resolveIdentities {s} failed: {s}\n", .{ name, @errorName(err) });
+}
+
 // ── Object cache ────────────────────────────────────────────────────────
 // Populated by syncManifestApi; read by objectApi. A single mutex guards
 // the map and all value strings (which are allocated with page_allocator
@@ -112,7 +116,7 @@ pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     // what /api/export-netlist does.
     const bom_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name });
     defer ctx.allocator.free(bom_path);
-    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
+    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| warnResolveIdentities(name, e);
 
     // Flatten hierarchy to enumerate footprints actually used by instances.
     var instances: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
@@ -253,7 +257,7 @@ pub fn netlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
 
     const bom_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name });
     defer ctx.allocator.free(bom_path);
-    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
+    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| warnResolveIdentities(name, e);
 
     const netlist = export_kicad.exportNetlistOnly(ctx.allocator, block, ctx.project_dir, name) catch {
         res.status = 500;

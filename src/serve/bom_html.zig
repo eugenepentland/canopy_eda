@@ -115,18 +115,18 @@ pub fn writeBomHtml(wr: anytype, block: *const env_mod.DesignBlock) !void {
                 attrsEqual(line.attrs, inst.attrs))
             {
                 line.count += 1;
-                line.refs.append(std.heap.page_allocator, inst.ref_des) catch {};
-                line.source_offsets.append(std.heap.page_allocator, inst.source_offset) catch {};
+                try line.refs.append(std.heap.page_allocator, inst.ref_des);
+                try line.source_offsets.append(std.heap.page_allocator, inst.source_offset);
                 found = true;
                 break;
             }
         }
         if (!found) {
             var refs: std.ArrayListUnmanaged([]const u8) = .empty;
-            refs.append(std.heap.page_allocator, inst.ref_des) catch {};
+            try refs.append(std.heap.page_allocator, inst.ref_des);
             var offsets: std.ArrayListUnmanaged(u32) = .empty;
-            offsets.append(std.heap.page_allocator, inst.source_offset) catch {};
-            lines.append(std.heap.page_allocator, .{
+            try offsets.append(std.heap.page_allocator, inst.source_offset);
+            try lines.append(std.heap.page_allocator, .{
                 .component = inst.component,
                 .value = inst.value,
                 .footprint = inst.footprint,
@@ -135,7 +135,7 @@ pub fn writeBomHtml(wr: anytype, block: *const env_mod.DesignBlock) !void {
                 .count = 1,
                 .refs = refs,
                 .source_offsets = offsets,
-            }) catch {};
+            });
         }
     }
 
@@ -312,15 +312,15 @@ pub fn writeBomCsv(w: anytype, block: *const env_mod.DesignBlock) !void {
                 attrsEqual(line.attrs, inst.attrs))
             {
                 line.count += 1;
-                line.refs.append(std.heap.page_allocator, inst.ref_des) catch {};
+                try line.refs.append(std.heap.page_allocator, inst.ref_des);
                 found = true;
                 break;
             }
         }
         if (!found) {
             var refs: std.ArrayListUnmanaged([]const u8) = .empty;
-            refs.append(std.heap.page_allocator, inst.ref_des) catch {};
-            lines.append(std.heap.page_allocator, .{
+            try refs.append(std.heap.page_allocator, inst.ref_des);
+            try lines.append(std.heap.page_allocator, .{
                 .component = inst.component,
                 .value = inst.value,
                 .footprint = inst.footprint,
@@ -328,7 +328,7 @@ pub fn writeBomCsv(w: anytype, block: *const env_mod.DesignBlock) !void {
                 .attrs = inst.attrs,
                 .count = 1,
                 .refs = refs,
-            }) catch {};
+            });
         }
     }
 

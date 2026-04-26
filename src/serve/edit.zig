@@ -10,6 +10,10 @@ const bom_html = @import("bom_html.zig");
 const history = @import("history.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
 
+fn warnResolveIdentities(name: []const u8, err: anyerror) void {
+    std.debug.print("warning: resolveIdentities {s} failed: {s}\n", .{ name, @errorName(err) });
+}
+
 pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -135,7 +139,7 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
         return;
     };
     defer ctx.allocator.free(bom_path);
-    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
+    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| warnResolveIdentities(name, e);
 
     const new_layout = render_json.renderSceneGraph(ctx.allocator, block, ctx.project_dir) catch null;
     serve_root.setLiveLayoutJson(new_layout);
@@ -314,7 +318,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         return;
     };
     defer ctx.allocator.free(bom_path);
-    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
+    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| warnResolveIdentities(name, e);
 
     var svg_sym_cache = try bom_html.buildSymbolPinCache(ctx.allocator, ctx.project_dir);
 
@@ -936,7 +940,7 @@ fn rebuildAndPush(ctx: *Handler, name: []const u8, res: *httpz.Response) !void {
 
     const bom_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name });
     defer ctx.allocator.free(bom_path);
-    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
+    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| warnResolveIdentities(name, e);
 
     const layout_json = render_json.renderSceneGraph(ctx.allocator, block, ctx.project_dir) catch null;
     serve_root.setLiveLayoutJson(layout_json);
@@ -1161,7 +1165,7 @@ fn writeAndRebuild(
 
     const bom_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name }) catch return error.OutOfMemory;
     defer allocator.free(bom_path);
-    bom.resolveIdentities(allocator, block, bom_path, project_dir) catch {};
+    bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
     const layout_json = render_json.renderSceneGraph(allocator, block, project_dir) catch null;
     serve_root.setLiveLayoutJson(layout_json);
@@ -1477,7 +1481,9 @@ pub fn writeDesignCore(
     // Ensure src/ exists so brand-new designs can be created.
     const src_dir = try std.fmt.allocPrint(allocator, "{s}/src", .{project_dir});
     defer allocator.free(src_dir);
-    std.fs.cwd().makePath(src_dir) catch {};
+    std.fs.cwd().makePath(src_dir) catch |e| {
+        std.debug.print("warning: makePath {s} failed: {s}\n", .{ src_dir, @errorName(e) });
+    };
 
     return writeAndRebuild(allocator, project_dir, name, new_source, "write_design");
 }
@@ -1519,7 +1525,7 @@ pub fn restoreDesignCore(
 
     const bom_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name }) catch return error.OutOfMemory;
     defer allocator.free(bom_path);
-    bom.resolveIdentities(allocator, block, bom_path, project_dir) catch {};
+    bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
     const layout_json = render_json.renderSceneGraph(allocator, block, project_dir) catch null;
     serve_root.setLiveLayoutJson(layout_json);

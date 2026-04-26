@@ -126,7 +126,7 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
             return;
         };
         defer ctx.allocator.free(dir);
-        std.fs.cwd().makePath(dir) catch {};
+        try std.fs.cwd().makePath(dir);
         const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, safe_name }) catch {
             res.status = 500;
             return;
@@ -152,7 +152,7 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
             return;
         };
         defer ctx.allocator.free(dir);
-        std.fs.cwd().makePath(dir) catch {};
+        try std.fs.cwd().makePath(dir);
         const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, fp_name_final }) catch {
             res.status = 500;
             return;
@@ -177,13 +177,17 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     if (step_data) |sd| {
         const model_dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/models", .{ctx.project_dir}) catch "";
         if (model_dir.len > 0) {
-            std.fs.cwd().makePath(model_dir) catch {};
+            std.fs.cwd().makePath(model_dir) catch |e| {
+                std.debug.print("warning: makePath {s} failed: {s}\n", .{ model_dir, @errorName(e) });
+            };
             const model_path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.step", .{ model_dir, safe_name }) catch "";
             if (model_path.len > 0) {
                 const mf = std.fs.cwd().createFile(model_path, .{}) catch null;
                 if (mf) |f| {
                     defer f.close();
-                    f.writeAll(sd) catch {};
+                    f.writeAll(sd) catch |e| {
+                        std.debug.print("warning: write model {s} failed: {s}\n", .{ model_path, @errorName(e) });
+                    };
                 }
             }
         }
@@ -237,7 +241,7 @@ pub fn uploadSymbolApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         return;
     };
     defer ctx.allocator.free(dir_path);
-    std.fs.cwd().makePath(dir_path) catch {};
+    try std.fs.cwd().makePath(dir_path);
 
     const out_path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir_path, safe_name }) catch {
         res.status = 500;
@@ -297,7 +301,7 @@ pub fn uploadFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         return;
     };
     defer ctx.allocator.free(dir_path);
-    std.fs.cwd().makePath(dir_path) catch {};
+    try std.fs.cwd().makePath(dir_path);
 
     const out_path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir_path, safe_name }) catch {
         res.status = 500;

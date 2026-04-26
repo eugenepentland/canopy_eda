@@ -47,7 +47,9 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
         return;
     };
     defer ctx.allocator.free(bom_path);
-    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch {};
+    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| {
+        std.debug.print("warning: resolveIdentities {s} failed: {s}\n", .{ name, @errorName(e) });
+    };
 
     const violations = erc_mod.runErc(ctx.allocator, block, ctx.project_dir) catch &[_]erc_mod.Violation{};
     const status = computeStatus(violations, eval.assertions.items);

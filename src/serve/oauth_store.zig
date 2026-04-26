@@ -58,7 +58,9 @@ fn tokensPath(allocator: std.mem.Allocator, project_dir: []const u8) ![]const u8
 fn ensureAuthDir(project_dir: []const u8) void {
     var buf: [512]u8 = undefined;
     const dir = std.fmt.bufPrint(&buf, "{s}/auth", .{project_dir}) catch return;
-    std.fs.cwd().makePath(dir) catch {};
+    std.fs.cwd().makePath(dir) catch |e| {
+        std.debug.print("warning: makePath {s} failed: {s}\n", .{ dir, @errorName(e) });
+    };
 }
 
 fn loadClients(allocator: std.mem.Allocator, project_dir: []const u8) void {
@@ -85,7 +87,7 @@ fn loadClients(allocator: std.mem.Allocator, project_dir: []const u8) void {
             .redirect_uri = allocator.dupe(u8, e.redirect_uri) catch continue,
             .created_at = e.created_at,
             .revoked = e.revoked,
-        }) catch {};
+        }) catch continue;
     }
 }
 
@@ -133,7 +135,7 @@ fn loadTokens(allocator: std.mem.Allocator, project_dir: []const u8) void {
             .email = allocator.dupe(u8, e.email) catch continue,
             .scope = allocator.dupe(u8, e.scope) catch continue,
             .expires_at = e.expires_at,
-        }) catch {};
+        }) catch continue;
     }
 }
 

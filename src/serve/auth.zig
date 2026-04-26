@@ -45,7 +45,7 @@ fn loadSessions(allocator: std.mem.Allocator, project_dir: []const u8) void {
         if (now < entry.expiry) {
             const token_dup = allocator.dupe(u8, entry.token) catch continue;
             const email_dup = allocator.dupe(u8, entry.email) catch continue;
-            sessions.?.put(token_dup, .{ .email = email_dup, .expiry = entry.expiry }) catch {};
+            sessions.?.put(token_dup, .{ .email = email_dup, .expiry = entry.expiry }) catch continue;
         }
     }
 }
@@ -56,7 +56,7 @@ fn persistSessions(allocator: std.mem.Allocator) void {
     defer allocator.free(path);
     const dir_path = std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir}) catch return;
     defer allocator.free(dir_path);
-    std.fs.cwd().makePath(dir_path) catch {};
+    std.fs.cwd().makePath(dir_path) catch return;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
     w.writeAll("[") catch return;
@@ -71,7 +71,7 @@ fn persistSessions(allocator: std.mem.Allocator) void {
     w.writeAll("]") catch return;
     const file = std.fs.cwd().createFile(path, .{}) catch return;
     defer file.close();
-    file.writeAll(buf.items) catch {};
+    file.writeAll(buf.items) catch return;
 }
 
 pub fn createSession(allocator: std.mem.Allocator, project_dir: []const u8, email: []const u8) ![]const u8 {
@@ -167,7 +167,7 @@ fn saveCredentials(allocator: std.mem.Allocator, project_dir: []const u8, creds:
     // Ensure auth directory exists
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir});
     defer allocator.free(dir_path);
-    std.fs.cwd().makePath(dir_path) catch {};
+    try std.fs.cwd().makePath(dir_path);
 
     // Build JSON string
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -219,7 +219,7 @@ fn saveInvites(allocator: std.mem.Allocator, project_dir: []const u8, invites: [
 
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir});
     defer allocator.free(dir_path);
-    std.fs.cwd().makePath(dir_path) catch {};
+    try std.fs.cwd().makePath(dir_path);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const bw = buf.writer(allocator);
@@ -544,9 +544,11 @@ pub fn purgeIdentity(allocator: std.mem.Allocator, project_dir: []const u8, emai
     var kept: std.ArrayListUnmanaged(StoredCredential) = .empty;
     defer kept.deinit(allocator);
     for (creds) |c| {
-        if (!std.mem.eql(u8, c.email, email)) kept.append(allocator, c) catch {};
+        if (!std.mem.eql(u8, c.email, email)) kept.append(allocator, c) catch continue;
     }
-    saveCredentials(allocator, project_dir, kept.items) catch {};
+    saveCredentials(allocator, project_dir, kept.items) catch |e| {
+        std.debug.print("warning: saveCredentials failed: {s}\n", .{@errorName(e)});
+    };
 
     sessions_mutex.lock();
     defer sessions_mutex.unlock();
@@ -1047,13 +1049,17 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     };
 
     if (invite_to_consume.len > 0) {
-        _ = consumeInvite(ctx.allocator, ctx.project_dir, invite_to_consume) catch {};
+        _ = consumeInvite(ctx.allocator, ctx.project_dir, invite_to_consume) catch |e| {
+            std.debug.print("warning: consumeInvite failed: {s}\n", .{@errorName(e)});
+        };
     }
 
     // Ensure a user record exists with the correct role. ensureUser is a no-op
     // if this email already has a record (e.g. when a logged-in user adds
     // another passkey to their own account).
-    _ = users.ensureUser(ctx.allocator, ctx.project_dir, resolved_email, invited_role) catch {};
+    _ = users.ensureUser(ctx.allocator, ctx.project_dir, resolved_email, invited_role) catch |e| {
+        std.debug.print("warning: ensureUser failed: {s}\n", .{@errorName(e)});
+    };
 
     // Create a session for the newly registered user (unless they already have one)
     if (session_token_opt == null) {

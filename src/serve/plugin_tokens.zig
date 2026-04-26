@@ -20,7 +20,9 @@ fn tokensPath(allocator: std.mem.Allocator, project_dir: []const u8) ![]const u8
 fn ensureAuthDir(project_dir: []const u8) void {
     var buf: [512]u8 = undefined;
     const dir = std.fmt.bufPrint(&buf, "{s}/auth", .{project_dir}) catch return;
-    std.fs.cwd().makePath(dir) catch {};
+    std.fs.cwd().makePath(dir) catch |e| {
+        std.debug.print("warning: makePath {s} failed: {s}\n", .{ dir, @errorName(e) });
+    };
 }
 
 fn ensureLoaded(allocator: std.mem.Allocator, project_dir: []const u8) void {
@@ -47,7 +49,7 @@ fn load(allocator: std.mem.Allocator, project_dir: []const u8) void {
             .hash = allocator.dupe(u8, e.hash) catch continue,
             .label = allocator.dupe(u8, e.label) catch continue,
             .created_at = e.created_at,
-        }) catch {};
+        }) catch continue;
     }
 }
 

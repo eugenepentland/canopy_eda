@@ -61,7 +61,9 @@ pub fn snapshot(
     if (std.fs.cwd().access(layout_src, .{})) |_| {
         const dst_layout = try std.fmt.allocPrint(allocator, "{s}/{s}.layout", .{ dir, name });
         defer allocator.free(dst_layout);
-        std.fs.cwd().copyFile(layout_src, std.fs.cwd(), dst_layout, .{}) catch {};
+        std.fs.cwd().copyFile(layout_src, std.fs.cwd(), dst_layout, .{}) catch |e| {
+            std.debug.print("warning: copy layout {s} failed: {s}\n", .{ layout_src, @errorName(e) });
+        };
     } else |_| {}
 
     if (description) |d| if (d.len > 0) {
@@ -69,7 +71,9 @@ pub fn snapshot(
         defer allocator.free(note_path);
         if (std.fs.cwd().createFile(note_path, .{})) |f| {
             defer f.close();
-            f.writeAll(d) catch {};
+            f.writeAll(d) catch |e| {
+                std.debug.print("warning: write .note failed: {s}\n", .{@errorName(e)});
+            };
         } else |_| {}
     };
 
@@ -152,7 +156,9 @@ pub fn snapshotLibraryFile(
         defer allocator.free(note_path);
         if (std.fs.cwd().createFile(note_path, .{})) |f| {
             defer f.close();
-            f.writeAll(d) catch {};
+            f.writeAll(d) catch |e| {
+                std.debug.print("warning: write .note failed: {s}\n", .{@errorName(e)});
+            };
         } else |_| {}
     };
 
@@ -188,6 +194,8 @@ pub fn restore(
     const dst_layout = try std.fmt.allocPrint(allocator, "{s}/src/{s}.layout", .{ project_dir, name });
     defer allocator.free(dst_layout);
     if (std.fs.cwd().access(src_layout, .{})) |_| {
-        std.fs.cwd().copyFile(src_layout, std.fs.cwd(), dst_layout, .{}) catch {};
+        std.fs.cwd().copyFile(src_layout, std.fs.cwd(), dst_layout, .{}) catch |e| {
+            std.debug.print("warning: copy layout {s} failed: {s}\n", .{ src_layout, @errorName(e) });
+        };
     } else |_| {}
 }
