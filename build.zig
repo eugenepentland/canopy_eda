@@ -55,7 +55,11 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
-    // Guardian — runs on every build
+    // Guardian — runs on every build. Baseline mode is configured in
+    // guardian.toml: every check records existing violations once and
+    // only fails when new ones appear, so the full check suite can be
+    // turned on without fixing the back-catalogue first.
+    const guardian = @import("guardian");
     const guardian_dep = b.dependency("guardian", .{
         .target = target,
         .optimize = optimize,
@@ -66,13 +70,8 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&fmt_check.step);
     test_step.dependOn(&fmt_check.step);
 
-    for ([_][]const u8{ "spec", "file-size", "boundaries" }) |cmd| {
-        const run = b.addRunArtifact(check_exe);
-        run.addArgs(&.{ cmd, ".", "--quiet" });
-        run.setCwd(b.path("."));
-        b.getInstallStep().dependOn(&run.step);
-        test_step.dependOn(&run.step);
-    }
+    guardian.addAllChecks(b, check_exe, b.getInstallStep(), .{});
+    guardian.addAllChecks(b, check_exe, test_step, .{});
 
     // spec-init: generate starter SPEC.md
     const spec_init_run = b.addRunArtifact(check_exe);

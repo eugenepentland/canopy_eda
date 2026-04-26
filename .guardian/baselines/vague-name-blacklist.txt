@@ -1,0 +1,2 @@
+# guardian-snapshot v1
+src/serve.zig: pub const 'Handler' uses a vague name

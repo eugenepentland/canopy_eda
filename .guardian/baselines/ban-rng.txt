@@ -1,0 +1,10 @@
+# guardian-snapshot v1
+src/bom.zig:164: std.crypto.random reference outside allowed paths
+src/eval/ids.zig:254: std.crypto.random reference outside allowed paths
+src/review_state.zig:314: std.crypto.random reference outside allowed paths
+src/serve/auth.zig:1073: std.crypto.random reference outside allowed paths
+src/serve/auth.zig:240: std.crypto.random reference outside allowed paths
+src/serve/auth.zig:697: std.crypto.random reference outside allowed paths
+src/serve/auth.zig:79: std.crypto.random reference outside allowed paths
+src/serve/oauth_store.zig:388: std.crypto.random reference outside allowed paths
+src/serve/plugin_tokens.zig:128: std.crypto.random reference outside allowed paths

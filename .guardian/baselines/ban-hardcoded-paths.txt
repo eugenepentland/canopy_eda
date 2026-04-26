@@ -1,0 +1,7 @@
+# guardian-snapshot v1
+src/commands.zig:617: hardcoded literal (hardcoded http URL)
+src/commands.zig:72: hardcoded literal (hardcoded http URL)
+src/serve/auth.zig:1213: hardcoded literal (hardcoded https URL)
+src/serve/auth.zig:1214: hardcoded literal (hardcoded http URL)
+src/serve/upload.zig:14: hardcoded literal (absolute /tmp path)
+src/serve/upload.zig:32: hardcoded literal (absolute /tmp path)

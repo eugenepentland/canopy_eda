@@ -1,0 +1,3 @@
+# guardian-snapshot v1
+src/review_state.zig:155: pub fn has a `bool` parameter (replace with two named methods or an enum)
+src/review_state.zig:225: pub fn has a `bool` parameter (replace with two named methods or an enum)

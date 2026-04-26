@@ -1,0 +1,141 @@
+# guardian-snapshot v1
+src/commands.zig: string literal --output-dir appears 4 times — extract a const
+src/commands.zig: string literal --project-dir appears 7 times — extract a const
+src/commands.zig: string literal Build error: {}\n appears 5 times — extract a const
+src/commands.zig: string literal Build failed: assertion violations\n appears 3 times — extract a const
+src/commands.zig: string literal Cannot write {s}: {}\n appears 5 times — extract a const
+src/commands.zig: string literal FAIL: {s}\n appears 3 times — extract a const
+src/commands.zig: string literal Identity resolution error: {}\n appears 3 times — extract a const
+src/commands.zig: string literal Out of memory\n appears 9 times — extract a const
+src/commands.zig: string literal PASS: {s}\n appears 3 times — extract a const
+src/commands.zig: string literal WARN: {s}\n appears 3 times — extract a const
+src/commands.zig: string literal Wrote {s} ({d} bytes)\n appears 3 times — extract a const
+src/commands.zig: string literal eval/env.zig appears 3 times — extract a const
+src/commands.zig: string literal {s}/src/{s}.bom appears 5 times — extract a const
+src/commands.zig: string literal {s}/src/{s}.sexp appears 6 times — extract a const
+src/convert/symbol.zig: string literal kicad_symbol_lib appears 3 times — extract a const
+src/convert/symbol_helpers.zig: string literal unconnected appears 3 times — extract a const
+src/drc.zig: string literal clearance appears 5 times — extract a const
+src/eval/builders.zig: string literal evaluator.zig appears 3 times — extract a const
+src/eval/design_block.zig: string literal decouple appears 3 times — extract a const
+src/eval/design_block.zig: string literal evaluator.zig appears 3 times — extract a const
+src/eval/design_block.zig: string literal instance appears 3 times — extract a const
+src/eval/env.zig: string literal ../sexpr/ast.zig appears 6 times — extract a const
+src/eval/ids.zig: string literal evaluator.zig appears 3 times — extract a const
+src/eval/instance.zig: string literal evaluator.zig appears 3 times — extract a const
+src/eval/modules.zig: string literal footprint appears 3 times — extract a const
+src/export_gerber.zig: string literal %ADD{d}C,{d:.4}*%\n appears 3 times — extract a const
+src/export_gerber.zig: string literal X{d}Y{d}D01*\n appears 3 times — extract a const
+src/export_gerber.zig: string literal thru_hole appears 3 times — extract a const
+src/export_kicad.zig: string literal {s}/lib/footprints/{s}.sexp appears 6 times — extract a const
+src/main.zig: string literal --filter appears 3 times — extract a const
+src/main.zig: string literal Convert error: {}\n appears 4 times — extract a const
+src/main.zig: string literal Error reading {s}: {}\n appears 8 times — extract a const
+src/render_block.zig: string literal {s}\x00{s} appears 7 times — extract a const
+src/render_html.zig: string literal  sec-card-approved appears 3 times — extract a const
+src/render_html.zig: string literal ,\"hubs\":[ appears 3 times — extract a const
+src/render_html.zig: string literal </section> appears 3 times — extract a const
+src/render_html.zig: string literal <span class=\"pill pill-approved\">APPROVED</span> appears 3 times — extract a const
+src/render_pcb_json.zig: string literal [{d:.3},{d:.3}] appears 4 times — extract a const
+src/req_checks.zig: string literal pin '{s}' not found in pinout appears 9 times — extract a const
+src/review_html.zig: string literal </code></td><td> appears 5 times — extract a const
+src/review_html.zig: string literal </code></td><td><code> appears 3 times — extract a const
+src/review_html.zig: string literal </section> appears 4 times — extract a const
+src/review_html.zig: string literal </span><span> appears 4 times — extract a const
+src/review_html.zig: string literal </tbody></table></section> appears 4 times — extract a const
+src/review_html.zig: string literal </td></tr> appears 4 times — extract a const
+src/review_html.zig: string literal </td><td> appears 6 times — extract a const
+src/review_html.zig: string literal <span class=\"muted\">—</span> appears 12 times — extract a const
+src/review_html.zig: string literal <tr><td><code> appears 3 times — extract a const
+src/review_json.zig: string literal ,\"component\": appears 3 times — extract a const
+src/review_json.zig: string literal ,\"net\": appears 3 times — extract a const
+src/review_json.zig: string literal ,\"status\":\"{s}\" appears 3 times — extract a const
+src/review_json.zig: string literal {\"ref_des\": appears 4 times — extract a const
+src/serve/account_page.zig: string literal expected object appears 3 times — extract a const
+src/serve/account_page.zig: string literal invalid json appears 3 times — extract a const
+src/serve/account_page.zig: string literal missing body appears 3 times — extract a const
+src/serve/account_page.zig: string literal {\"ok\":true} appears 3 times — extract a const
+src/serve/api.zig: string literal ,\"datasheets\":[],\"requirements\":[] appears 4 times — extract a const
+src/serve/api.zig: string literal ../bom.zig appears 3 times — extract a const
+src/serve/api.zig: string literal Build error appears 9 times — extract a const
+src/serve/api.zig: string literal Content-Disposition appears 5 times — extract a const
+src/serve/api.zig: string literal Content-Type appears 5 times — extract a const
+src/serve/api.zig: string literal access-control-allow-origin appears 18 times — extract a const
+src/serve/api.zig: string literal application/zip appears 3 times — extract a const
+src/serve/api.zig: string literal section_slug appears 4 times — extract a const
+src/serve/api.zig: string literal {\"error\":\"no body\"} appears 3 times — extract a const
+src/serve/api.zig: string literal {\"name\": appears 3 times — extract a const
+src/serve/api.zig: string literal {\"ok\":true} appears 5 times — extract a const
+src/serve/api.zig: string literal {s}/src/{s}.bom appears 9 times — extract a const
+src/serve/api.zig: string literal {s}/src/{s}.layout appears 6 times — extract a const
+src/serve/api.zig: string literal {s}/src/{s}.sexp appears 14 times — extract a const
+src/serve/api.zig: string literal {{\"ok\":false,\"error\":\"{s}\"}} appears 5 times — extract a const
+src/serve/api.zig: string literal {{\"ok\":true,\"version\":{d}}} appears 7 times — extract a const
+src/serve/auth.zig: string literal /auth/login appears 4 times — extract a const
+src/serve/auth.zig: string literal <!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"> appears 5 times — extract a const
+src/serve/auth.zig: string literal </script></body></html> appears 4 times — extract a const
+src/serve/auth.zig: string literal </style></head><body> appears 5 times — extract a const
+src/serve/auth.zig: string literal <div class=\"auth-card\"> appears 5 times — extract a const
+src/serve/auth.zig: string literal <div class=\"status\" id=\"status\"></div> appears 4 times — extract a const
+src/serve/auth.zig: string literal <input type=\"email\" id=\"email\" placeholder=\"Email address\" required  appears 3 times — extract a const
+src/serve/auth.zig: string literal <script> appears 4 times — extract a const
+src/serve/auth.zig: string literal <span class=\"brand\">Canopy EDA</span> appears 5 times — extract a const
+src/serve/auth.zig: string literal localhost appears 4 times — extract a const
+src/serve/auth.zig: string literal location appears 5 times — extract a const
+src/serve/auth.zig: string literal set-cookie appears 3 times — extract a const
+src/serve/auth.zig: string literal {\"error\":\"invalid email\"} appears 4 times — extract a const
+src/serve/auth.zig: string literal {\"error\":\"invalid json\"} appears 3 times — extract a const
+src/serve/auth.zig: string literal {\"error\":\"missing body\"} appears 3 times — extract a const
+src/serve/auth.zig: string literal {\"error\":\"missing id\"} appears 3 times — extract a const
+src/serve/auth.zig: string literal {\"ok\":true} appears 4 times — extract a const
+src/serve/auth.zig: string literal {s}/auth appears 3 times — extract a const
+src/serve/canvas_page.zig: string literal </script> appears 3 times — extract a const
+src/serve/edit.zig: string literal (instance \"{s}\" appears 5 times — extract a const
+src/serve/edit.zig: string literal (section \"{s}\" appears 5 times — extract a const
+src/serve/edit.zig: string literal ../serve.zig appears 3 times — extract a const
+src/serve/edit.zig: string literal access-control-allow-origin appears 7 times — extract a const
+src/serve/edit.zig: string literal cannot read file appears 5 times — extract a const
+src/serve/edit.zig: string literal cannot write file appears 5 times — extract a const
+src/serve/edit.zig: string literal instance not found appears 3 times — extract a const
+src/serve/edit.zig: string literal missing ref appears 3 times — extract a const
+src/serve/edit.zig: string literal rebuild failed appears 5 times — extract a const
+src/serve/edit.zig: string literal {\"error\":\"missing name\"} appears 4 times — extract a const
+src/serve/edit.zig: string literal {\"error\":\"no body\"} appears 3 times — extract a const
+src/serve/edit.zig: string literal {\"ok\":true} appears 5 times — extract a const
+src/serve/edit.zig: string literal {s}/lib/components/{s}.sexp appears 5 times — extract a const
+src/serve/edit.zig: string literal {s}/src/{s}.bom appears 5 times — extract a const
+src/serve/edit.zig: string literal {s}/src/{s}.sexp appears 9 times — extract a const
+src/serve/history.zig: string literal {s}/{s}.sexp appears 3 times — extract a const
+src/serve/kicad_sync.zig: string literal ../eval/env.zig appears 3 times — extract a const
+src/serve/kicad_sync.zig: string literal access-control-allow-origin appears 5 times — extract a const
+src/serve/kicad_sync.zig: string literal {\"ok\":false,\"error\":\"Netlist export error\"} appears 3 times — extract a const
+src/serve/kicad_sync.zig: string literal {\"ok\":false,\"error\":\"No output path configured. Set one first.\"} appears 3 times — extract a const
+src/serve/kicad_sync.zig: string literal {s}/{s}.net appears 3 times — extract a const
+src/serve/mcp.zig: string literal {\"jsonrpc\":\"2.0\",\"id\": appears 3 times — extract a const
+src/serve/mcp_tools.zig: string literal ,\"function\": appears 3 times — extract a const
+src/serve/mcp_tools.zig: string literal component appears 5 times — extract a const
+src/serve/mcp_tools.zig: string literal components appears 3 times — extract a const
+src/serve/mcp_tools.zig: string literal error: build failed appears 5 times — extract a const
+src/serve/mcp_tools.zig: string literal error: not a design appears 5 times — extract a const
+src/serve/mcp_tools.zig: string literal footprints appears 3 times — extract a const
+src/serve/mcp_tools.zig: string literal new_source appears 4 times — extract a const
+src/serve/mcp_tools.zig: string literal requirements appears 4 times — extract a const
+src/serve/mcp_tools.zig: string literal {\"name\": appears 4 times — extract a const
+src/serve/mcp_tools.zig: string literal {\"ref_des\": appears 3 times — extract a const
+src/serve/mcp_tools.zig: string literal {s}/src/{s}.bom appears 3 times — extract a const
+src/serve/mcp_tools.zig: string literal {s}/src/{s}.sexp appears 6 times — extract a const
+src/serve/mcp_tools.zig: string literal {{\"ok\":true,\"version\":{d},\"snapshot\": appears 7 times — extract a const
+src/serve/model.zig: string literal {s}/lib/models/model-config.json appears 3 times — extract a const
+src/serve/oauth.zig: string literal access-control-allow-origin appears 3 times — extract a const
+src/serve/oauth.zig: string literal client_id appears 3 times — extract a const
+src/serve/oauth.zig: string literal invalid_grant appears 4 times — extract a const
+src/serve/oauth.zig: string literal invalid_request appears 6 times — extract a const
+src/serve/oauth.zig: string literal missing client_id appears 3 times — extract a const
+src/serve/oauth.zig: string literal missing redirect_uri appears 3 times — extract a const
+src/serve/oauth.zig: string literal redirect_uri appears 3 times — extract a const
+src/serve/sync.zig: string literal Cache-Control appears 3 times — extract a const
+src/serve/sync.zig: string literal access-control-allow-origin appears 3 times — extract a const
+src/serve/upload.zig: string literal {s}/{s}.sexp appears 3 times — extract a const
+src/serve/upload_package.zig: string literal Upload: {s}\n appears 3 times — extract a const
+src/serve/upload_package.zig: string literal filename=\" appears 3 times — extract a const
+src/serve/upload_package.zig: string literal {s}/{s}.sexp appears 4 times — extract a const

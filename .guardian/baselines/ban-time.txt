@@ -1,0 +1,21 @@
+# guardian-snapshot v1
+src/review.zig:794: std.time.nanoTimestamp reference outside allowed paths
+src/review_state.zig:235: std.time.timestamp reference outside allowed paths
+src/serve/auth.zig:100: std.time.timestamp reference outside allowed paths
+src/serve/auth.zig:1039: std.time.timestamp reference outside allowed paths
+src/serve/auth.zig:244: std.time.timestamp reference outside allowed paths
+src/serve/auth.zig:261: std.time.timestamp reference outside allowed paths
+src/serve/auth.zig:271: std.time.timestamp reference outside allowed paths
+src/serve/auth.zig:42: std.time.timestamp reference outside allowed paths
+src/serve/auth.zig:84: std.time.timestamp reference outside allowed paths
+src/serve/history.zig:12: std.time.timestamp reference outside allowed paths
+src/serve/oauth_store.zig:127: std.time.timestamp reference outside allowed paths
+src/serve/oauth_store.zig:192: std.time.timestamp reference outside allowed paths
+src/serve/oauth_store.zig:284: std.time.timestamp reference outside allowed paths
+src/serve/oauth_store.zig:295: std.time.timestamp reference outside allowed paths
+src/serve/oauth_store.zig:322: std.time.timestamp reference outside allowed paths
+src/serve/oauth_store.zig:334: std.time.timestamp reference outside allowed paths
+src/serve/pages.zig:43: std.time.nanoTimestamp reference outside allowed paths
+src/serve/plugin_tokens.zig:90: std.time.timestamp reference outside allowed paths
+src/serve/upload.zig:32: std.time.milliTimestamp reference outside allowed paths
+src/serve/users.zig:152: std.time.timestamp reference outside allowed paths

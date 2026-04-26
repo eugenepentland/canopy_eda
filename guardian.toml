@@ -1,2 +1,19 @@
 spec_file = "SPEC.md"
 max_file_lines = 10000
+
+# Baseline mode: every check records its current violations into
+# .guardian/baselines/<check>.txt on the first build and only fails
+# when NEW violations are introduced. This lets us turn on Guardian's
+# full ~50-check suite without a wall of pre-existing failures.
+#
+# Workflow:
+#   - First build:    baselines are written, all checks pass.
+#   - Later builds:   new violations fail; resolved violations print
+#                     "M resolved — re-run with GUARDIAN_UPDATE_SNAPSHOT=1
+#                     to prune".
+#   - Refresh:        GUARDIAN_UPDATE_SNAPSHOT=1 zig build && git add .guardian/
+#
+# Baseline files are plain text and sorted, designed to diff cleanly
+# in code review.
+[baseline]
+enabled = true

@@ -1,0 +1,4 @@
+# guardian-snapshot v1
+src/render_svg/context.zig:83: pub struct 'RenderCtx' owns an allocator field but has no pub fn deinit
+src/serve.zig:84: pub struct 'Handler' owns an allocator field but has no pub fn deinit
+src/serve/mcp.zig:246: pub struct 'Client' owns an allocator field but has no pub fn deinit
