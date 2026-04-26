@@ -1,10 +1,14 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const infra_fs = @import("../infra/fs.zig");
+const clock = @import("../infra/clock.zig");
+const log = @import("../infra/log.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 const oauth_store = @import("oauth_store.zig");
 const plugin_tokens = @import("plugin_tokens.zig");
 const users = @import("users.zig");
+const infra_random = @import("../infra/random.zig");
 
 // ── Session store ────────────────────────────────────────────────────
 
@@ -34,12 +38,12 @@ fn sessionsPath(allocator: std.mem.Allocator, project_dir: []const u8) ![]const 
 fn loadSessions(allocator: std.mem.Allocator, project_dir: []const u8) void {
     const path = sessionsPath(allocator, project_dir) catch return;
     defer allocator.free(path);
-    const file = std.fs.cwd().openFile(path, .{}) catch return;
+    const file = infra_fs.cwd().openFile(path, .{}) catch return;
     defer file.close();
     const data = file.readToEndAlloc(allocator, 256 * 1024) catch return;
     const Entry = struct { token: []const u8, email: []const u8 = "", expiry: i64 };
     const parsed = std.json.parseFromSlice([]const Entry, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch return;
-    const now = std.time.timestamp();
+    const now = clock.timestamp();
     for (parsed.value) |entry| {
         if (entry.email.len == 0) continue; // Drop legacy sessions without identity
         if (now < entry.expiry) {
@@ -56,7 +60,7 @@ fn persistSessions(allocator: std.mem.Allocator) void {
     defer allocator.free(path);
     const dir_path = std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir}) catch return;
     defer allocator.free(dir_path);
-    std.fs.cwd().makePath(dir_path) catch return;
+    infra_fs.cwd().makePath(dir_path) catch return;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
     w.writeAll("[") catch return;
@@ -69,7 +73,7 @@ fn persistSessions(allocator: std.mem.Allocator) void {
         first = false;
     }
     w.writeAll("]") catch return;
-    const file = std.fs.cwd().createFile(path, .{}) catch return;
+    const file = infra_fs.cwd().createFile(path, .{}) catch return;
     defer file.close();
     file.writeAll(buf.items) catch return;
 }
@@ -79,12 +83,12 @@ fn persistSessions(allocator: std.mem.Allocator) void {
 /// caller should send back as `eda_session`.
 pub fn createSession(allocator: std.mem.Allocator, project_dir: []const u8, email: []const u8) ![]const u8 {
     var rand_bytes: [32]u8 = undefined;
-    std.crypto.random.bytes(&rand_bytes);
+    infra_random.bytes(&rand_bytes);
     const hex = std.fmt.bytesToHex(rand_bytes, .lower);
     const token = try allocator.dupe(u8, &hex);
     const email_dup = try allocator.dupe(u8, email);
 
-    const now = std.time.timestamp();
+    const now = clock.timestamp();
     const expiry = now + 7 * 24 * 60 * 60; // 7 days
 
     sessions_mutex.lock();
@@ -103,7 +107,7 @@ pub fn validateSession(allocator: std.mem.Allocator, project_dir: []const u8, to
     defer sessions_mutex.unlock();
     const map = getSessionMap(allocator, project_dir);
     const entry = map.get(token) orelse return null;
-    const now = std.time.timestamp();
+    const now = clock.timestamp();
     if (now > entry.expiry) {
         _ = map.fetchRemove(token);
         persistSessions(allocator);
@@ -160,7 +164,7 @@ fn loadCredentials(allocator: std.mem.Allocator, project_dir: []const u8) ![]Sto
     const path = try credentialsPath(allocator, project_dir);
     defer allocator.free(path);
 
-    const file = std.fs.cwd().openFile(path, .{}) catch return &[_]StoredCredential{};
+    const file = infra_fs.cwd().openFile(path, .{}) catch return &[_]StoredCredential{};
     defer file.close();
 
     const data = file.readToEndAlloc(allocator, 1024 * 1024) catch return &[_]StoredCredential{};
@@ -176,7 +180,7 @@ fn saveCredentials(allocator: std.mem.Allocator, project_dir: []const u8, creds:
     // Ensure auth directory exists
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir});
     defer allocator.free(dir_path);
-    try std.fs.cwd().makePath(dir_path);
+    try infra_fs.cwd().makePath(dir_path);
 
     // Build JSON string
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -188,7 +192,7 @@ fn saveCredentials(allocator: std.mem.Allocator, project_dir: []const u8, creds:
     }
     try bw.writeAll("]");
 
-    const file = try std.fs.cwd().createFile(path, .{});
+    const file = try infra_fs.cwd().createFile(path, .{});
     defer file.close();
     try file.writeAll(buf.items);
 }
@@ -214,7 +218,7 @@ fn loadInvites(allocator: std.mem.Allocator, project_dir: []const u8) ![]Invite 
     const path = try invitesPath(allocator, project_dir);
     defer allocator.free(path);
 
-    const file = std.fs.cwd().openFile(path, .{}) catch return &[_]Invite{};
+    const file = infra_fs.cwd().openFile(path, .{}) catch return &[_]Invite{};
     defer file.close();
 
     const data = file.readToEndAlloc(allocator, 256 * 1024) catch return &[_]Invite{};
@@ -228,7 +232,7 @@ fn saveInvites(allocator: std.mem.Allocator, project_dir: []const u8, invites: [
 
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir});
     defer allocator.free(dir_path);
-    try std.fs.cwd().makePath(dir_path);
+    try infra_fs.cwd().makePath(dir_path);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const bw = buf.writer(allocator);
@@ -239,18 +243,18 @@ fn saveInvites(allocator: std.mem.Allocator, project_dir: []const u8, invites: [
     }
     try bw.writeAll("]");
 
-    const file = try std.fs.cwd().createFile(path, .{});
+    const file = try infra_fs.cwd().createFile(path, .{});
     defer file.close();
     try file.writeAll(buf.items);
 }
 
 fn createInvite(allocator: std.mem.Allocator, project_dir: []const u8, created_by: []const u8, role: []const u8) ![]const u8 {
     var rand_bytes: [24]u8 = undefined;
-    std.crypto.random.bytes(&rand_bytes);
+    infra_random.bytes(&rand_bytes);
     const hex = std.fmt.bytesToHex(rand_bytes, .lower);
     const token = try allocator.dupe(u8, &hex);
 
-    const now = std.time.timestamp();
+    const now = clock.timestamp();
     const existing = try loadInvites(allocator, project_dir);
     var invites: std.ArrayListUnmanaged(Invite) = .empty;
     for (existing) |inv| {
@@ -267,7 +271,7 @@ fn createInvite(allocator: std.mem.Allocator, project_dir: []const u8, created_b
 }
 
 fn findInvite(allocator: std.mem.Allocator, project_dir: []const u8, token: []const u8) !?Invite {
-    const now = std.time.timestamp();
+    const now = clock.timestamp();
     const invites = try loadInvites(allocator, project_dir);
     for (invites) |inv| {
         if (std.mem.eql(u8, inv.token, token) and now < inv.expiry) return inv;
@@ -277,7 +281,7 @@ fn findInvite(allocator: std.mem.Allocator, project_dir: []const u8, token: []co
 
 fn consumeInvite(allocator: std.mem.Allocator, project_dir: []const u8, token: []const u8) !bool {
     const invites = try loadInvites(allocator, project_dir);
-    const now = std.time.timestamp();
+    const now = clock.timestamp();
     var remaining: std.ArrayListUnmanaged(Invite) = .empty;
     var found = false;
     for (invites) |inv| {
@@ -567,7 +571,7 @@ pub fn purgeIdentity(allocator: std.mem.Allocator, project_dir: []const u8, emai
         if (!std.mem.eql(u8, c.email, email)) kept.append(allocator, c) catch continue;
     }
     saveCredentials(allocator, project_dir, kept.items) catch |e| {
-        std.debug.print("warning: saveCredentials failed: {s}\n", .{@errorName(e)});
+        log.warn("saveCredentials failed: {s}", .{@errorName(e)});
     };
 
     sessions_mutex.lock();
@@ -724,7 +728,7 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
     }
 
     var challenge: [32]u8 = undefined;
-    std.crypto.random.bytes(&challenge);
+    infra_random.bytes(&challenge);
     storePendingChallenge(challenge);
 
     const challenge_b64 = try base64urlEncode(req.arena, &challenge);
@@ -1069,7 +1073,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
         .public_key_x = x_b64,
         .public_key_y = y_b64,
         .email = email_dup,
-        .created_at = std.time.timestamp(),
+        .created_at = clock.timestamp(),
     });
 
     saveCredentials(ctx.allocator, ctx.project_dir, creds.items) catch {
@@ -1081,7 +1085,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 
     if (invite_to_consume.len > 0) {
         _ = consumeInvite(ctx.allocator, ctx.project_dir, invite_to_consume) catch |e| {
-            std.debug.print("warning: consumeInvite failed: {s}\n", .{@errorName(e)});
+            log.warn("consumeInvite failed: {s}", .{@errorName(e)});
         };
     }
 
@@ -1089,7 +1093,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     // if this email already has a record (e.g. when a logged-in user adds
     // another passkey to their own account).
     _ = users.ensureUser(ctx.allocator, ctx.project_dir, resolved_email, invited_role) catch |e| {
-        std.debug.print("warning: ensureUser failed: {s}\n", .{@errorName(e)});
+        log.warn("ensureUser failed: {s}", .{@errorName(e)});
     };
 
     // Create a session for the newly registered user (unless they already have one)
@@ -1110,7 +1114,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 /// the browser can prompt the user to tap their passkey.
 pub fn loginChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     var challenge: [32]u8 = undefined;
-    std.crypto.random.bytes(&challenge);
+    infra_random.bytes(&challenge);
     storePendingChallenge(challenge);
 
     const challenge_b64 = try base64urlEncode(req.arena, &challenge);

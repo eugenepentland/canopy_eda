@@ -1,5 +1,8 @@
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
+const clock = @import("infra/clock.zig");
 const review = @import("review.zig");
+const infra_random = @import("infra/random.zig");
 
 /// Mutex protecting on-disk state writes from concurrent checklist edits
 /// arriving via HTTP or MCP. Loads stay outside the lock — a stale read
@@ -18,7 +21,7 @@ pub fn loadState(
     if (!safeName(name)) return error.InvalidName;
     const path = try statePath(allocator, project_dir, name);
     defer allocator.free(path);
-    const data = std.fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch |err| switch (err) {
+    const data = infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch |err| switch (err) {
         error.FileNotFound => return .{ .sections = &.{} },
         else => return err,
     };
@@ -48,11 +51,11 @@ pub fn saveState(
     defer allocator.free(json);
 
     {
-        const file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true });
+        const file = try infra_fs.cwd().createFile(tmp_path, .{ .truncate = true });
         defer file.close();
         try file.writeAll(json);
     }
-    try std.fs.cwd().rename(tmp_path, path);
+    try infra_fs.cwd().rename(tmp_path, path);
 }
 
 /// Drop any section state entries whose slug is no longer in `live_slugs`,
@@ -232,7 +235,7 @@ pub fn setApproval(
     content_hash: []const u8,
 ) !void {
     var state = try loadState(allocator, project_dir, name);
-    const stamp: []const u8 = if (approved) try review.isoTimestamp(allocator, std.time.timestamp()) else "";
+    const stamp: []const u8 = if (approved) try review.isoTimestamp(allocator, clock.timestamp()) else "";
     const who: []const u8 = if (approved) try allocator.dupe(u8, reviewer) else "";
     const stored_hash: []const u8 = if (approved) try allocator.dupe(u8, content_hash) else "";
 
@@ -294,7 +297,7 @@ fn statePath(allocator: std.mem.Allocator, project_dir: []const u8, name: []cons
 fn ensureReviewsDir(allocator: std.mem.Allocator, project_dir: []const u8) !void {
     const dir = try std.fmt.allocPrint(allocator, "{s}/reviews", .{project_dir});
     defer allocator.free(dir);
-    try std.fs.cwd().makePath(dir);
+    try infra_fs.cwd().makePath(dir);
 }
 
 /// Reject design names containing path separators or `..` — the name is
@@ -311,7 +314,7 @@ fn randomHex(allocator: std.mem.Allocator, n_chars: usize) ![]u8 {
     const n_bytes = (n_chars + 1) / 2;
     const bytes = try allocator.alloc(u8, n_bytes);
     defer allocator.free(bytes);
-    std.crypto.random.bytes(bytes);
+    infra_random.bytes(bytes);
     var out = try allocator.alloc(u8, n_chars);
     const hex = "0123456789abcdef";
     var i: usize = 0;

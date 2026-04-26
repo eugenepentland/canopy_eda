@@ -1,6 +1,7 @@
 const std = @import("std");
 const httpz = @import("httpz");
 const websocket = httpz.websocket;
+const log = @import("../infra/log.zig");
 
 const server_mod = @import("../serve.zig");
 const auth = @import("auth.zig");
@@ -276,7 +277,7 @@ pub const Client = struct {
         else
             users.Role.admin;
         const reply_opt = dispatchFrame(aa, self.project_dir, data, role) catch |err| blk: {
-            std.debug.print("mcp dispatch error: {s}\n", .{@errorName(err)});
+            log.warn("mcp dispatch error: {s}", .{@errorName(err)});
             break :blk @as(?[]const u8, null);
         };
         if (reply_opt) |reply| try self.conn.write(reply);
@@ -319,7 +320,7 @@ pub fn postApi(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Respon
 
     const role = resolveRole(ctx, req);
     const reply_opt = dispatchFrame(aa, ctx.project_dir, body, role) catch |err| {
-        std.debug.print("mcp dispatch error: {s}\n", .{@errorName(err)});
+        log.warn("mcp dispatch error: {s}", .{@errorName(err)});
         res.status = 500;
         res.body = "internal error";
         return;

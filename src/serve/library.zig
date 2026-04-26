@@ -1,5 +1,6 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const infra_fs = @import("../infra/fs.zig");
 const export_kicad = @import("../export_kicad.zig");
 const footprint_mod = @import("../export_kicad_footprint.zig");
 const serve_root = @import("../serve.zig");
@@ -13,7 +14,7 @@ pub fn writeFamiliesJson(w: anytype, allocator: std.mem.Allocator, project_dir: 
     const comp_dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/components", .{project_dir});
     defer allocator.free(comp_dir_path);
 
-    var dir = std.fs.cwd().openDir(comp_dir_path, .{ .iterate = true }) catch return;
+    var dir = infra_fs.cwd().openDir(comp_dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
 
     const prefixes = [_][]const u8{ "cap", "res", "ind", "led" };
@@ -156,7 +157,7 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void
     // Collect all component entries
     const comp_dir_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/components", .{ctx.project_dir});
     defer ctx.allocator.free(comp_dir_path);
-    if (std.fs.cwd().openDir(comp_dir_path, .{ .iterate = true })) |dir_val| {
+    if (infra_fs.cwd().openDir(comp_dir_path, .{ .iterate = true })) |dir_val| {
         var dir = dir_val;
         defer dir.close();
         var iter = dir.iterate();
@@ -227,7 +228,7 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void
     {
         const pinout_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/pinouts", .{ctx.project_dir});
         defer ctx.allocator.free(pinout_path);
-        if (std.fs.cwd().openDir(pinout_path, .{ .iterate = true })) |dir_val| {
+        if (infra_fs.cwd().openDir(pinout_path, .{ .iterate = true })) |dir_val| {
             var dir = dir_val;
             defer dir.close();
             var liter = dir.iterate();
@@ -253,7 +254,7 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void
     {
         const fp_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints", .{ctx.project_dir});
         defer ctx.allocator.free(fp_path);
-        if (std.fs.cwd().openDir(fp_path, .{ .iterate = true })) |dir_val| {
+        if (infra_fs.cwd().openDir(fp_path, .{ .iterate = true })) |dir_val| {
             var dir = dir_val;
             defer dir.close();
             var fiter = dir.iterate();

@@ -1,5 +1,6 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const log = @import("../infra/log.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const render_pcb_json = @import("../render_pcb_json.zig");
 const serve_root = @import("../serve.zig");
@@ -65,7 +66,7 @@ pub fn pcbPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const ids_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name });
     defer ctx.allocator.free(ids_path);
     bom.resolveIdentities(ctx.allocator, block, ids_path, ctx.project_dir) catch |e| {
-        std.debug.print("warning: resolveIdentities {s} failed: {s}\n", .{ name, @errorName(e) });
+        log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(e) });
     };
 
     // Layout path (.layout) and fallback PCB path

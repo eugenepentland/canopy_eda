@@ -1,4 +1,6 @@
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
+const log = @import("infra/log.zig");
 const env_mod = @import("eval/env.zig");
 const parts_mod = @import("parts.zig");
 const DesignBlock = env_mod.DesignBlock;
@@ -247,7 +249,7 @@ pub fn resolveIdentities(
         }
         if (info.footprint.len == 0) {
             if (info.value.len > 0) {
-                std.debug.print("warning: {s} uses unsized family '{s}' — no footprint or MPN resolution\n", .{ info.ref_des, info.component });
+                log.warn("{s} uses unsized family '{s}' — no footprint or MPN resolution", .{ info.ref_des, info.component });
             }
             continue;
         }
@@ -370,7 +372,7 @@ fn saveBom(
         try w.writeAll(")\n");
     }
 
-    const f = try std.fs.cwd().createFile(bom_path, .{});
+    const f = try infra_fs.cwd().createFile(bom_path, .{});
     defer f.close();
     try f.writeAll(buf.items);
 }

@@ -14,6 +14,8 @@
 
 const std = @import("std");
 const httpz = @import("httpz");
+const infra_fs = @import("../infra/fs.zig");
+const log = @import("../infra/log.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
@@ -27,7 +29,7 @@ const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
 fn warnResolveIdentities(name: []const u8, err: anyerror) void {
-    std.debug.print("warning: resolveIdentities {s} failed: {s}\n", .{ name, @errorName(err) });
+    log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(err) });
 }
 
 // ── Object cache ────────────────────────────────────────────────────────
@@ -148,7 +150,7 @@ pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 
         const fp_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints/{s}.sexp", .{ ctx.project_dir, inst.footprint });
         defer ctx.allocator.free(fp_path);
-        const fp_source = std.fs.cwd().readFileAlloc(ctx.allocator, fp_path, 1024 * 1024) catch continue;
+        const fp_source = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path, 1024 * 1024) catch continue;
         defer ctx.allocator.free(fp_source);
 
         const kicad_name = netlist_mod.extractFootprintName(ctx.allocator, fp_source) catch try ctx.allocator.dupe(u8, inst.footprint);
@@ -186,7 +188,7 @@ pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
             try seen_models.put(try ctx.allocator.dupe(u8, mname), {});
             const step_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/models/{s}", .{ ctx.project_dir, mname });
             defer ctx.allocator.free(step_path);
-            const step_bytes = std.fs.cwd().readFileAlloc(ctx.allocator, step_path, 50 * 1024 * 1024) catch {
+            const step_bytes = infra_fs.cwd().readFileAlloc(ctx.allocator, step_path, 50 * 1024 * 1024) catch {
                 if (!keep_mname) ctx.allocator.free(mname);
                 continue;
             };
@@ -320,7 +322,7 @@ pub fn objectApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void
     const bytes: []const u8 = switch (obj.kind) {
         .footprint => obj.data,
         .model => blk: {
-            const data = std.fs.cwd().readFileAlloc(ctx.allocator, obj.data, 100 * 1024 * 1024) catch {
+            const data = infra_fs.cwd().readFileAlloc(ctx.allocator, obj.data, 100 * 1024 * 1024) catch {
                 res.status = 500;
                 res.body = "model read error";
                 return;

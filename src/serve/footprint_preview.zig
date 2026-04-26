@@ -1,5 +1,6 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const infra_fs = @import("../infra/fs.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const export_kicad = @import("../export_kicad.zig");
 const footprint_mod = @import("../export_kicad_footprint.zig");
@@ -20,7 +21,7 @@ pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         return;
     };
     defer ctx.allocator.free(fp_path);
-    const content = std.fs.cwd().readFileAlloc(ctx.allocator, fp_path, 256 * 1024) catch {
+    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path, 256 * 1024) catch {
         res.status = 404;
         res.body = "Footprint not found";
         return;
@@ -189,7 +190,7 @@ pub fn listFootprints(w: anytype, ctx: *Handler) !void {
     try w.writeAll("<h2>Footprints</h2><table><tr><th>Name</th><th>Size (mm)</th><th></th></tr>");
     const fp_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints", .{ctx.project_dir});
     defer ctx.allocator.free(fp_path);
-    var dir = std.fs.cwd().openDir(fp_path, .{ .iterate = true }) catch {
+    var dir = infra_fs.cwd().openDir(fp_path, .{ .iterate = true }) catch {
         try w.writeAll("<tr><td colspan=\"2\">No footprints yet</td></tr></table>");
         return;
     };
@@ -200,7 +201,7 @@ pub fn listFootprints(w: anytype, ctx: *Handler) !void {
             const fname = entry.name[0 .. entry.name.len - 5];
             const file_path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ fp_path, entry.name }) catch continue;
             defer ctx.allocator.free(file_path);
-            const file_content = std.fs.cwd().readFileAlloc(ctx.allocator, file_path, 256 * 1024) catch {
+            const file_content = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, 256 * 1024) catch {
                 try w.print("<tr><td>{s}</td><td>-</td></tr>", .{fname});
                 continue;
             };

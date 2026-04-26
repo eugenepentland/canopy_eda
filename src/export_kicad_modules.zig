@@ -1,4 +1,5 @@
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
 const env_mod = @import("eval/env.zig");
 const DesignBlock = env_mod.DesignBlock;
 
@@ -54,7 +55,7 @@ pub fn writeModulesJson(
     const json = try buildModulesJson(allocator, block);
     defer allocator.free(json);
 
-    const file = try std.fs.cwd().createFile(out_path, .{});
+    const file = try infra_fs.cwd().createFile(out_path, .{});
     defer file.close();
     try file.writeAll(json);
 }

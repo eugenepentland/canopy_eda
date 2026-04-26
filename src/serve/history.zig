@@ -1,4 +1,7 @@
 const std = @import("std");
+const infra_fs = @import("../infra/fs.zig");
+const clock = @import("../infra/clock.zig");
+const log = @import("../infra/log.zig");
 
 // Snapshot storage: projects/designs/history/<name>/<timestamp>/{name}.sexp (+ .layout if present)
 // Timestamp format: YYYY-MM-DDTHH-MM-SS (filesystem-safe, sorts lexicographically).
@@ -9,7 +12,7 @@ pub const HistoryError = error{
 } || std.mem.Allocator.Error;
 
 fn makeTimestamp(allocator: std.mem.Allocator) ![]u8 {
-    const sec = std.time.timestamp();
+    const sec = clock.timestamp();
     const epoch_sec: u64 = if (sec < 0) 0 else @intCast(sec);
     const es = std.time.epoch.EpochSeconds{ .secs = epoch_sec };
     const day = es.getEpochDay();
@@ -40,7 +43,7 @@ pub fn snapshot(
     const sexp_src = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
     defer allocator.free(sexp_src);
 
-    std.fs.cwd().access(sexp_src, .{}) catch |e| switch (e) {
+    infra_fs.cwd().access(sexp_src, .{}) catch |e| switch (e) {
         error.FileNotFound => return null,
         else => return e,
     };
@@ -50,29 +53,29 @@ pub fn snapshot(
 
     const dir = try std.fmt.allocPrint(allocator, "{s}/history/{s}/{s}", .{ project_dir, name, id });
     defer allocator.free(dir);
-    try std.fs.cwd().makePath(dir);
+    try infra_fs.cwd().makePath(dir);
 
     const dst_sexp = try std.fmt.allocPrint(allocator, "{s}/{s}.sexp", .{ dir, name });
     defer allocator.free(dst_sexp);
-    try std.fs.cwd().copyFile(sexp_src, std.fs.cwd(), dst_sexp, .{});
+    try infra_fs.cwd().copyFile(sexp_src, infra_fs.cwd(), dst_sexp, .{});
 
     const layout_src = try std.fmt.allocPrint(allocator, "{s}/src/{s}.layout", .{ project_dir, name });
     defer allocator.free(layout_src);
-    if (std.fs.cwd().access(layout_src, .{})) |_| {
+    if (infra_fs.cwd().access(layout_src, .{})) |_| {
         const dst_layout = try std.fmt.allocPrint(allocator, "{s}/{s}.layout", .{ dir, name });
         defer allocator.free(dst_layout);
-        std.fs.cwd().copyFile(layout_src, std.fs.cwd(), dst_layout, .{}) catch |e| {
-            std.debug.print("warning: copy layout {s} failed: {s}\n", .{ layout_src, @errorName(e) });
+        infra_fs.cwd().copyFile(layout_src, infra_fs.cwd(), dst_layout, .{}) catch |e| {
+            log.warn("copy layout {s} failed: {s}", .{ layout_src, @errorName(e) });
         };
     } else |_| {}
 
     if (description) |d| if (d.len > 0) {
         const note_path = try std.fmt.allocPrint(allocator, "{s}/.note", .{dir});
         defer allocator.free(note_path);
-        if (std.fs.cwd().createFile(note_path, .{})) |f| {
+        if (infra_fs.cwd().createFile(note_path, .{})) |f| {
             defer f.close();
             f.writeAll(d) catch |e| {
-                std.debug.print("warning: write .note failed: {s}\n", .{@errorName(e)});
+                log.warn("write .note failed: {s}", .{@errorName(e)});
             };
         } else |_| {}
     };
@@ -98,7 +101,7 @@ pub fn listSnapshots(
     defer allocator.free(dir_path);
 
     var entries: std.ArrayListUnmanaged(SnapshotInfo) = .empty;
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |e| switch (e) {
+    var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |e| switch (e) {
         error.FileNotFound => return entries.toOwnedSlice(allocator),
         else => return e,
     };
@@ -110,7 +113,7 @@ pub fn listSnapshots(
         const id = try allocator.dupe(u8, entry.name);
         const note_path = try std.fmt.allocPrint(allocator, "{s}/{s}/.note", .{ dir_path, id });
         defer allocator.free(note_path);
-        const description: ?[]const u8 = std.fs.cwd().readFileAlloc(allocator, note_path, 4096) catch null;
+        const description: ?[]const u8 = infra_fs.cwd().readFileAlloc(allocator, note_path, 4096) catch null;
         try entries.append(allocator, .{ .id = id, .description = description });
     }
     std.mem.sort(SnapshotInfo, entries.items, {}, struct {
@@ -135,7 +138,7 @@ pub fn snapshotLibraryFile(
     const src = try std.fmt.allocPrint(allocator, "{s}/lib/{s}/{s}.sexp", .{ project_dir, subdir, name });
     defer allocator.free(src);
 
-    std.fs.cwd().access(src, .{}) catch |e| switch (e) {
+    infra_fs.cwd().access(src, .{}) catch |e| switch (e) {
         error.FileNotFound => return null,
         else => return e,
     };
@@ -145,19 +148,19 @@ pub fn snapshotLibraryFile(
 
     const dir = try std.fmt.allocPrint(allocator, "{s}/history/_lib/{s}/{s}/{s}", .{ project_dir, subdir, name, id });
     defer allocator.free(dir);
-    try std.fs.cwd().makePath(dir);
+    try infra_fs.cwd().makePath(dir);
 
     const dst = try std.fmt.allocPrint(allocator, "{s}/{s}.sexp", .{ dir, name });
     defer allocator.free(dst);
-    try std.fs.cwd().copyFile(src, std.fs.cwd(), dst, .{});
+    try infra_fs.cwd().copyFile(src, infra_fs.cwd(), dst, .{});
 
     if (description) |d| if (d.len > 0) {
         const note_path = try std.fmt.allocPrint(allocator, "{s}/.note", .{dir});
         defer allocator.free(note_path);
-        if (std.fs.cwd().createFile(note_path, .{})) |f| {
+        if (infra_fs.cwd().createFile(note_path, .{})) |f| {
             defer f.close();
             f.writeAll(d) catch |e| {
-                std.debug.print("warning: write .note failed: {s}\n", .{@errorName(e)});
+                log.warn("write .note failed: {s}", .{@errorName(e)});
             };
         } else |_| {}
     };
@@ -181,21 +184,21 @@ pub fn restore(
 
     const dir = try std.fmt.allocPrint(allocator, "{s}/history/{s}/{s}", .{ project_dir, name, id });
     defer allocator.free(dir);
-    std.fs.cwd().access(dir, .{}) catch return error.SnapshotNotFound;
+    infra_fs.cwd().access(dir, .{}) catch return error.SnapshotNotFound;
 
     const src_sexp = try std.fmt.allocPrint(allocator, "{s}/{s}.sexp", .{ dir, name });
     defer allocator.free(src_sexp);
     const dst_sexp = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
     defer allocator.free(dst_sexp);
-    try std.fs.cwd().copyFile(src_sexp, std.fs.cwd(), dst_sexp, .{});
+    try infra_fs.cwd().copyFile(src_sexp, infra_fs.cwd(), dst_sexp, .{});
 
     const src_layout = try std.fmt.allocPrint(allocator, "{s}/{s}.layout", .{ dir, name });
     defer allocator.free(src_layout);
     const dst_layout = try std.fmt.allocPrint(allocator, "{s}/src/{s}.layout", .{ project_dir, name });
     defer allocator.free(dst_layout);
-    if (std.fs.cwd().access(src_layout, .{})) |_| {
-        std.fs.cwd().copyFile(src_layout, std.fs.cwd(), dst_layout, .{}) catch |e| {
-            std.debug.print("warning: copy layout {s} failed: {s}\n", .{ src_layout, @errorName(e) });
+    if (infra_fs.cwd().access(src_layout, .{})) |_| {
+        infra_fs.cwd().copyFile(src_layout, infra_fs.cwd(), dst_layout, .{}) catch |e| {
+            log.warn("copy layout {s} failed: {s}", .{ src_layout, @errorName(e) });
         };
     } else |_| {}
 }

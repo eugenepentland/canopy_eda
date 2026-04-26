@@ -215,6 +215,14 @@ src/export_kicad_pcb.zig::PlacedFootprint struct_
 src/export_kicad_pcb.zig::exportPcb fn
 src/export_kicad_pcb.zig::parseExistingPlacements fn
 src/id_insert.zig::insertPendingIds fn
+src/infra/clock.zig::epoch value
+src/infra/clock.zig::milliTimestamp value
+src/infra/clock.zig::nanoTimestamp value
+src/infra/clock.zig::ns_per_s value
+src/infra/clock.zig::timestamp value
+src/infra/fs.zig::cwd value
+src/infra/log.zig::warn fn
+src/infra/random.zig::bytes fn
 src/json_writer.zig::writeEscaped fn
 src/json_writer.zig::writeField fn
 src/json_writer.zig::writeString fn

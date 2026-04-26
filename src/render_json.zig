@@ -1,4 +1,5 @@
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
 const env_mod = @import("eval/env.zig");
 const json_writer = @import("json_writer.zig");
 const DesignBlock = env_mod.DesignBlock;
@@ -82,7 +83,7 @@ fn loadPinoutAlts(allocator: Allocator, map: *PinoutAltMap, project_dir: []const
     if (project_dir.len == 0 or symbol.len == 0) return;
     if (map.contains(symbol)) return;
     const path = std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ project_dir, symbol }) catch return;
-    const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 256) catch return;
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 256) catch return;
     const parser_m = @import("sexpr/parser.zig");
     const nodes = parser_m.parse(allocator, content) catch return;
     if (nodes.len == 0) return;

@@ -1,4 +1,5 @@
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
 const env_mod = @import("eval/env.zig");
 const na = @import("eval/net_analysis.zig");
 const power_budget = @import("eval/power_budget.zig");
@@ -595,7 +596,7 @@ const PinoutEntry = struct {
 /// Load a pinout file and return pin_id -> {primary, alts}. Returns null if the file is missing
 /// or malformed. Allocator is used both for the parse tree (kept until end of ERC) and the map.
 fn loadPinoutMap(allocator: std.mem.Allocator, path: []const u8) ?std.StringHashMapUnmanaged(PinoutEntry) {
-    const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 256) catch return null;
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 256) catch return null;
     const nodes = parser_mod.parse(allocator, content) catch return null;
     if (nodes.len == 0) return null;
     const top = nodes[0].asList() orelse return null;

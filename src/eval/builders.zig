@@ -1,4 +1,6 @@
 const std = @import("std");
+const infra_fs = @import("../infra/fs.zig");
+const log = @import("../infra/log.zig");
 const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const env_mod = @import("env.zig");
@@ -333,8 +335,8 @@ pub fn emitDecoupleItems(
         // Syntax: (comp "val") COUNT per-pin REF [PIN]
         // COUNT is required, per-pin keyword is required
         const count_val = items[idx + 1].asNumber() orelse {
-            std.debug.print("Error: decouple requires a count after component (net: {s})\n", .{net_name});
-            std.debug.print("  Use: (decouple \"{s}\" (comp \"val\") COUNT per-pin REF)\n", .{net_name});
+            log.warn("decouple requires a count after component (net: {s})", .{net_name});
+            log.warn("  Use: (decouple \"{s}\" (comp \"val\") COUNT per-pin REF)", .{net_name});
             return EvalError.InvalidForm;
         };
         const count: u32 = @intFromFloat(count_val);
@@ -349,11 +351,11 @@ pub fn emitDecoupleItems(
             continue;
         }
         const per_pin_kw = items[idx + 2].asAtom() orelse {
-            std.debug.print("Error: decouple expects 'per-pin' keyword (net: {s})\n", .{net_name});
+            log.warn("decouple expects 'per-pin' keyword (net: {s})", .{net_name});
             return EvalError.InvalidForm;
         };
         if (!std.mem.eql(u8, per_pin_kw, "per-pin")) {
-            std.debug.print("Error: decouple expects 'per-pin', got '{s}' (net: {s})\n", .{ per_pin_kw, net_name });
+            log.warn("decouple expects 'per-pin', got '{s}' (net: {s})", .{ per_pin_kw, net_name });
             return EvalError.InvalidForm;
         }
 
@@ -644,7 +646,7 @@ pub fn addPartToInstance(self: *Evaluator, instances: []Instance, ref_des: []con
 pub fn loadFile(self: *Evaluator, path: []const u8) ?[]const Node {
     if (self.loaded_files.get(path)) |nodes| return nodes;
 
-    const source = std.fs.cwd().readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch return null;
+    const source = infra_fs.cwd().readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch return null;
     // Note: we don't free source because AST references slices into it
     const nodes = parser_mod.parse(self.allocator, source) catch return null;
     self.loaded_files.put(self.allocator, path, nodes) catch return null;

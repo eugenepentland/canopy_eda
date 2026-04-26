@@ -1,4 +1,5 @@
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
 const env_mod = @import("eval/env.zig");
 const DesignBlock = env_mod.DesignBlock;
 const layout_mod = @import("layout.zig");
@@ -68,7 +69,7 @@ pub fn exportGerber(
         if (fp_geom.contains(inst.footprint)) continue;
         const fp_path = try std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, inst.footprint });
         defer allocator.free(fp_path);
-        const source = std.fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
+        const source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
         const geom = parseGeometry(allocator, source) catch continue;
         try fp_geom.put(inst.footprint, geom);
     }

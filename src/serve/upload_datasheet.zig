@@ -1,5 +1,6 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const infra_fs = @import("../infra/fs.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
@@ -34,11 +35,11 @@ pub fn uploadDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 
     const dir = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/datasheets", .{ctx.project_dir});
     defer ctx.allocator.free(dir);
-    try std.fs.cwd().makePath(dir);
+    try infra_fs.cwd().makePath(dir);
 
     const path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ dir, safe });
     defer ctx.allocator.free(path);
-    const f = std.fs.cwd().createFile(path, .{ .truncate = true }) catch {
+    const f = infra_fs.cwd().createFile(path, .{ .truncate = true }) catch {
         res.status = 500;
         res.content_type = .JSON;
         res.body = "{\"ok\":false,\"error\":\"write failed\"}";
@@ -73,7 +74,7 @@ pub fn listDatasheetsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     const w = buf.writer(ctx.allocator);
     try w.writeAll("{\"files\":[");
 
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+    var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
         try w.writeAll("]}");
         res.content_type = .JSON;
         res.body = buf.items;
@@ -113,7 +114,7 @@ pub fn serveDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     }
     const path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/datasheets/{s}", .{ ctx.project_dir, filename });
     defer ctx.allocator.free(path);
-    const data = std.fs.cwd().readFileAlloc(ctx.allocator, path, 64 * 1024 * 1024) catch {
+    const data = infra_fs.cwd().readFileAlloc(ctx.allocator, path, 64 * 1024 * 1024) catch {
         res.status = 404;
         res.body = "datasheet not found";
         return;

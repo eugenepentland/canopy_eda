@@ -1,4 +1,5 @@
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 const emit = @import("emit.zig");
 const export_kicad = @import("export_kicad.zig");
@@ -164,7 +165,7 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) !void {
                     std.process.exit(1);
                 };
                 defer allocator.free(out_path);
-                const f = std.fs.cwd().createFile(out_path, .{}) catch {
+                const f = infra_fs.cwd().createFile(out_path, .{}) catch {
                     std.debug.print("Failed to write {s}\n", .{out_path});
                     std.process.exit(1);
                 };
@@ -390,10 +391,10 @@ pub fn cmdExportPcb(allocator: std.mem.Allocator, args: []const []const u8) !voi
 
     // Ensure output directory exists
     if (std.fs.path.dirname(out)) |dir| {
-        try std.fs.cwd().makePath(dir);
+        try infra_fs.cwd().makePath(dir);
     }
 
-    const f = std.fs.cwd().createFile(out, .{}) catch |err| {
+    const f = infra_fs.cwd().createFile(out, .{}) catch |err| {
         std.debug.print("Cannot write {s}: {}\n", .{ out, err });
         std.process.exit(1);
     };
@@ -474,11 +475,11 @@ pub fn cmdExportGerber(allocator: std.mem.Allocator, args: []const []const u8) !
 
     if (output_dir) |dir| {
         // Write individual files
-        try std.fs.cwd().makePath(dir);
+        try infra_fs.cwd().makePath(dir);
         for (files) |f| {
             const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, f.name });
             defer allocator.free(path);
-            const file = std.fs.cwd().createFile(path, .{}) catch |err| {
+            const file = infra_fs.cwd().createFile(path, .{}) catch |err| {
                 std.debug.print("Cannot write {s}: {}\n", .{ path, err });
                 continue;
             };
@@ -499,9 +500,9 @@ pub fn cmdExportGerber(allocator: std.mem.Allocator, args: []const []const u8) !
         const out_path = try std.fmt.allocPrint(allocator, "{s}/out/{s}-gerber.zip", .{ project_dir, name });
         defer allocator.free(out_path);
         if (std.fs.path.dirname(out_path)) |dir2| {
-            try std.fs.cwd().makePath(dir2);
+            try infra_fs.cwd().makePath(dir2);
         }
-        const zf = std.fs.cwd().createFile(out_path, .{}) catch |err| {
+        const zf = infra_fs.cwd().createFile(out_path, .{}) catch |err| {
             std.debug.print("Cannot write zip: {}\n", .{err});
             std.process.exit(1);
         };
@@ -578,14 +579,14 @@ pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) !
 
     const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, &check_results);
 
-    const source = std.fs.cwd().readFileAlloc(allocator, board_path, 16 * 1024 * 1024) catch &[_]u8{};
+    const source = infra_fs.cwd().readFileAlloc(allocator, board_path, 16 * 1024 * 1024) catch &[_]u8{};
 
     const md = try review_md.renderToMarkdown(allocator, block, project_dir, name, doc, source, &check_results);
 
     var csv_buf: std.ArrayListUnmanaged(u8) = .empty;
     try bom_html.writeBomCsv(csv_buf.writer(allocator), block);
 
-    try std.fs.cwd().makePath(output_dir);
+    try infra_fs.cwd().makePath(output_dir);
     const md_name = try std.fmt.allocPrint(allocator, "{s}-review.md", .{name});
     const csv_name = try std.fmt.allocPrint(allocator, "{s}-bom.csv", .{name});
 
@@ -598,7 +599,7 @@ pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) !
         defer allocator.free(zip);
         const zip_path = try std.fmt.allocPrint(allocator, "{s}/{s}-review.zip", .{ output_dir, name });
         defer allocator.free(zip_path);
-        const f = std.fs.cwd().createFile(zip_path, .{}) catch |err| {
+        const f = infra_fs.cwd().createFile(zip_path, .{}) catch |err| {
             std.debug.print("Cannot write {s}: {}\n", .{ zip_path, err });
             std.process.exit(1);
         };
@@ -610,13 +611,13 @@ pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) !
         defer allocator.free(md_path);
         const csv_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ output_dir, csv_name });
         defer allocator.free(csv_path);
-        var fmd = std.fs.cwd().createFile(md_path, .{}) catch |err| {
+        var fmd = infra_fs.cwd().createFile(md_path, .{}) catch |err| {
             std.debug.print("Cannot write {s}: {}\n", .{ md_path, err });
             std.process.exit(1);
         };
         defer fmd.close();
         try fmd.writeAll(md);
-        var fcsv = std.fs.cwd().createFile(csv_path, .{}) catch |err| {
+        var fcsv = infra_fs.cwd().createFile(csv_path, .{}) catch |err| {
             std.debug.print("Cannot write {s}: {}\n", .{ csv_path, err });
             std.process.exit(1);
         };
@@ -740,7 +741,7 @@ fn getNewestMtime(allocator: std.mem.Allocator, project_dir: []const u8) !i128 {
         const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ project_dir, sub });
         defer allocator.free(dir_path);
 
-        var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch continue;
+        var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch continue;
         defer dir.close();
 
         var iter = dir.iterate();

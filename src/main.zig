@@ -1,4 +1,5 @@
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
 const parser = @import("sexpr/parser.zig");
 const printer = @import("sexpr/printer.zig");
 const footprint_conv = @import("convert/footprint.zig");
@@ -118,7 +119,7 @@ pub fn main() !void {
 }
 
 fn cmdParse(allocator: std.mem.Allocator, path: []const u8) !void {
-    const source = std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
+    const source = infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
         std.debug.print("Error reading {s}: {}\n", .{ path, err });
         std.process.exit(1);
     };
@@ -139,7 +140,7 @@ fn cmdParse(allocator: std.mem.Allocator, path: []const u8) !void {
 }
 
 fn cmdConvertFootprint(allocator: std.mem.Allocator, path: []const u8) !void {
-    const source = std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
+    const source = infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
         std.debug.print("Error reading {s}: {}\n", .{ path, err });
         std.process.exit(1);
     };
@@ -156,12 +157,12 @@ fn cmdConvertFootprint(allocator: std.mem.Allocator, path: []const u8) !void {
 }
 
 fn cmdConvertPackage(allocator: std.mem.Allocator, sym_path: []const u8, fp_path: []const u8, name: []const u8, filter: ?[]const u8) !void {
-    const sym_source = std.fs.cwd().readFileAlloc(allocator, sym_path, 10 * 1024 * 1024) catch |err| {
+    const sym_source = infra_fs.cwd().readFileAlloc(allocator, sym_path, 10 * 1024 * 1024) catch |err| {
         std.debug.print("Error reading {s}: {}\n", .{ sym_path, err });
         std.process.exit(1);
     };
     defer allocator.free(sym_source);
-    const fp_source = std.fs.cwd().readFileAlloc(allocator, fp_path, 10 * 1024 * 1024) catch |err| {
+    const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 10 * 1024 * 1024) catch |err| {
         std.debug.print("Error reading {s}: {}\n", .{ fp_path, err });
         std.process.exit(1);
     };
@@ -178,12 +179,12 @@ fn cmdConvertPackage(allocator: std.mem.Allocator, sym_path: []const u8, fp_path
 }
 
 fn cmdMergeAltFunctions(allocator: std.mem.Allocator, pinout_path: []const u8, src_path: []const u8, write_back: bool) !void {
-    const pinout_src = std.fs.cwd().readFileAlloc(allocator, pinout_path, 10 * 1024 * 1024) catch |err| {
+    const pinout_src = infra_fs.cwd().readFileAlloc(allocator, pinout_path, 10 * 1024 * 1024) catch |err| {
         std.debug.print("Error reading {s}: {}\n", .{ pinout_path, err });
         std.process.exit(1);
     };
     defer allocator.free(pinout_src);
-    const alt_src = std.fs.cwd().readFileAlloc(allocator, src_path, 20 * 1024 * 1024) catch |err| {
+    const alt_src = infra_fs.cwd().readFileAlloc(allocator, src_path, 20 * 1024 * 1024) catch |err| {
         std.debug.print("Error reading {s}: {}\n", .{ src_path, err });
         std.process.exit(1);
     };
@@ -200,7 +201,7 @@ fn cmdMergeAltFunctions(allocator: std.mem.Allocator, pinout_path: []const u8, s
     defer allocator.free(output);
 
     if (write_back) {
-        std.fs.cwd().writeFile(.{ .sub_path = pinout_path, .data = output }) catch |err| {
+        infra_fs.cwd().writeFile(.{ .sub_path = pinout_path, .data = output }) catch |err| {
             std.debug.print("Error writing {s}: {}\n", .{ pinout_path, err });
             std.process.exit(1);
         };
@@ -212,7 +213,7 @@ fn cmdMergeAltFunctions(allocator: std.mem.Allocator, pinout_path: []const u8, s
 }
 
 fn cmdConvertPinout(allocator: std.mem.Allocator, path: []const u8, filter: ?[]const u8) !void {
-    const source = std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
+    const source = infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
         std.debug.print("Error reading {s}: {}\n", .{ path, err });
         std.process.exit(1);
     };
@@ -229,7 +230,7 @@ fn cmdConvertPinout(allocator: std.mem.Allocator, path: []const u8, filter: ?[]c
 }
 
 fn cmdConvertSymbol(allocator: std.mem.Allocator, path: []const u8, filter: ?[]const u8) !void {
-    const source = std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
+    const source = infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
         std.debug.print("Error reading {s}: {}\n", .{ path, err });
         std.process.exit(1);
     };

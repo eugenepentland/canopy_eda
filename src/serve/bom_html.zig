@@ -1,4 +1,5 @@
 const std = @import("std");
+const infra_fs = @import("../infra/fs.zig");
 const env_mod = @import("../eval/env.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const json_writer = @import("../json_writer.zig");
@@ -43,7 +44,7 @@ pub fn collectMissing(
             try checked_fp.put(inst.footprint, {});
             const fp_path = try std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, inst.footprint });
             defer allocator.free(fp_path);
-            std.fs.cwd().access(fp_path, .{}) catch {
+            infra_fs.cwd().access(fp_path, .{}) catch {
                 try missing_fp.append(allocator, inst.footprint);
             };
         }
@@ -57,7 +58,7 @@ pub fn collectMissing(
                 if (try_name.len == 0) continue;
                 const m = try std.fmt.allocPrint(allocator, "{s}/lib/models/{s}.step", .{ project_dir, try_name });
                 defer allocator.free(m);
-                if (std.fs.cwd().access(m, .{})) |_| {
+                if (infra_fs.cwd().access(m, .{})) |_| {
                     found = true;
                     break;
                 } else |_| {}
@@ -66,7 +67,7 @@ pub fn collectMissing(
             if (!found) {
                 const models_path = try std.fmt.allocPrint(allocator, "{s}/lib/models", .{project_dir});
                 defer allocator.free(models_path);
-                var dir = std.fs.cwd().openDir(models_path, .{ .iterate = true }) catch null;
+                var dir = infra_fs.cwd().openDir(models_path, .{ .iterate = true }) catch null;
                 if (dir) |*d| {
                     defer d.close();
                     var iter = d.iterate();
@@ -443,7 +444,7 @@ pub fn buildSymbolPinCache(allocator: std.mem.Allocator, project_dir: []const u8
     for (dirs) |d| {
         const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ project_dir, d.path });
         defer allocator.free(dir_path);
-        var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch continue;
+        var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch continue;
         defer dir.close();
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
@@ -534,7 +535,7 @@ pub fn footprintHasPads(allocator: std.mem.Allocator, project_dir: []const u8, f
     if (footprint.len == 0) return false;
     const fp_path = std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, footprint }) catch return false;
     defer allocator.free(fp_path);
-    const content = std.fs.cwd().readFileAlloc(allocator, fp_path, 256 * 1024) catch return false;
+    const content = infra_fs.cwd().readFileAlloc(allocator, fp_path, 256 * 1024) catch return false;
     defer allocator.free(content);
     return std.mem.indexOf(u8, content, "(pad ") != null;
 }

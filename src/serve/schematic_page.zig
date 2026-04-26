@@ -1,5 +1,6 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const log = @import("../infra/log.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const env_mod = @import("../eval/env.zig");
 const erc_mod = @import("../erc.zig");
@@ -48,7 +49,7 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
     };
     defer ctx.allocator.free(bom_path);
     bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| {
-        std.debug.print("warning: resolveIdentities {s} failed: {s}\n", .{ name, @errorName(e) });
+        log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(e) });
     };
 
     const violations = erc_mod.runErc(ctx.allocator, block, ctx.project_dir) catch &[_]erc_mod.Violation{};

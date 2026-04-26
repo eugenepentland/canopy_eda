@@ -1,4 +1,7 @@
 const std = @import("std");
+const infra_fs = @import("../infra/fs.zig");
+const clock = @import("../infra/clock.zig");
+const log = @import("../infra/log.zig");
 
 /// Permission tier assigned to a user. Drives the canWrite/canAdmin gates
 /// the auth middleware and MCP dispatcher consult before accepting a
@@ -54,8 +57,8 @@ fn usersPath(allocator: std.mem.Allocator, project_dir: []const u8) ![]const u8 
 fn ensureAuthDir(project_dir: []const u8) void {
     var buf: [512]u8 = undefined;
     const dir = std.fmt.bufPrint(&buf, "{s}/auth", .{project_dir}) catch return;
-    std.fs.cwd().makePath(dir) catch |e| {
-        std.debug.print("warning: makePath {s} failed: {s}\n", .{ dir, @errorName(e) });
+    infra_fs.cwd().makePath(dir) catch |e| {
+        log.warn("makePath {s} failed: {s}", .{ dir, @errorName(e) });
     };
 }
 
@@ -71,7 +74,7 @@ fn ensureLoaded(allocator: std.mem.Allocator, project_dir: []const u8) void {
 fn loadUsers(allocator: std.mem.Allocator, project_dir: []const u8) void {
     const path = usersPath(allocator, project_dir) catch return;
     defer allocator.free(path);
-    const data = std.fs.cwd().readFileAlloc(allocator, path, 1 * 1024 * 1024) catch return;
+    const data = infra_fs.cwd().readFileAlloc(allocator, path, 1 * 1024 * 1024) catch return;
     const Entry = struct { email: []const u8, role: []const u8, created_at: i64 };
     const parsed = std.json.parseFromSlice([]const Entry, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch return;
     defer parsed.deinit();
@@ -89,7 +92,7 @@ fn saveUsers(allocator: std.mem.Allocator, project_dir: []const u8) void {
     ensureAuthDir(project_dir);
     const path = usersPath(allocator, project_dir) catch return;
     defer allocator.free(path);
-    const file = std.fs.cwd().createFile(path, .{}) catch return;
+    const file = infra_fs.cwd().createFile(path, .{}) catch return;
     defer file.close();
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
@@ -109,7 +112,7 @@ fn saveUsers(allocator: std.mem.Allocator, project_dir: []const u8) void {
 fn backfillFromCredentials(allocator: std.mem.Allocator, project_dir: []const u8) void {
     const path = std.fmt.allocPrint(allocator, "{s}/auth/credentials.json", .{project_dir}) catch return;
     defer allocator.free(path);
-    const data = std.fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch return;
+    const data = infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch return;
     const Cred = struct { email: []const u8, created_at: i64 };
     const parsed = std.json.parseFromSlice([]const Cred, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch return;
     defer parsed.deinit();
@@ -157,7 +160,7 @@ pub fn ensureUser(
     try users_list.append(allocator, .{
         .email = try allocator.dupe(u8, email),
         .role = role,
-        .created_at = std.time.timestamp(),
+        .created_at = clock.timestamp(),
     });
     saveUsers(allocator, project_dir);
     return role;

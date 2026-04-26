@@ -1,4 +1,6 @@
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
+const log = @import("infra/log.zig");
 const env_mod = @import("eval/env.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
@@ -37,7 +39,7 @@ pub fn loadModelConfig(allocator: std.mem.Allocator, project_dir: []const u8) Mo
     var map = ModelConfigMap.init(allocator);
     const path = std.fmt.allocPrint(allocator, "{s}/lib/models/model-config.json", .{project_dir}) catch return map;
     defer allocator.free(path);
-    const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return map;
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return map;
     defer allocator.free(content);
 
     var pos: usize = 0;
@@ -111,7 +113,7 @@ pub fn buildKicadMod(
 ) ![]const u8 {
     if (findSourceKicadMod(allocator, project_dir, fp_name)) |src_path| {
         defer allocator.free(src_path);
-        if (std.fs.cwd().readFileAlloc(allocator, src_path, 10 * 1024 * 1024)) |original| {
+        if (infra_fs.cwd().readFileAlloc(allocator, src_path, 10 * 1024 * 1024)) |original| {
             defer allocator.free(original);
             return useSourceKicadMod(allocator, original, model_name, model_offset, model_rotation);
         } else |_| {}
@@ -129,7 +131,7 @@ pub fn exportFootprints(
     const pretty_parent = std.fs.path.dirname(output_pretty_dir) orelse ".";
     const model_dir = try std.fmt.allocPrint(allocator, "{s}/models", .{pretty_parent});
     defer allocator.free(model_dir);
-    try std.fs.cwd().makePath(model_dir);
+    try infra_fs.cwd().makePath(model_dir);
 
     var instances: std.ArrayListUnmanaged(FlatInstance) = .empty;
     defer instances.deinit(allocator);
@@ -149,7 +151,7 @@ pub fn exportFootprints(
         const fp_path = try std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, inst.footprint });
         defer allocator.free(fp_path);
 
-        const fp_source = std.fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
+        const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
         defer allocator.free(fp_source);
 
         const kicad_name = extractFootprintName(allocator, fp_source) catch inst.footprint;
@@ -165,7 +167,7 @@ pub fn exportFootprints(
         const mod_path = try std.fmt.allocPrint(allocator, "{s}/{s}.kicad_mod", .{ output_pretty_dir, kicad_name });
         defer allocator.free(mod_path);
 
-        const f = std.fs.cwd().createFile(mod_path, .{}) catch {
+        const f = infra_fs.cwd().createFile(mod_path, .{}) catch {
             if (mcfg == null) if (model_name) |m| allocator.free(m);
             continue;
         };
@@ -178,8 +180,8 @@ pub fn exportFootprints(
             defer allocator.free(src_path);
             const dst_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ model_dir, mname }) catch continue;
             defer allocator.free(dst_path);
-            std.fs.cwd().copyFile(src_path, std.fs.cwd(), dst_path, .{}) catch |e| {
-                std.debug.print("warning: copy {s}: {s}\n", .{ mname, @errorName(e) });
+            infra_fs.cwd().copyFile(src_path, infra_fs.cwd(), dst_path, .{}) catch |e| {
+                log.warn("copy {s}: {s}", .{ mname, @errorName(e) });
             };
         }
     }

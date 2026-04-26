@@ -1,5 +1,7 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const infra_fs = @import("../infra/fs.zig");
+const log = @import("../infra/log.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const render_json = @import("../render_json.zig");
 const bom = @import("../bom.zig");
@@ -11,7 +13,7 @@ const history = @import("history.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
 
 fn warnResolveIdentities(name: []const u8, err: anyerror) void {
-    std.debug.print("warning: resolveIdentities {s} failed: {s}\n", .{ name, @errorName(err) });
+    log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(err) });
 }
 
 /// POST /api/edit-value/:name — patch a single instance's value string in
@@ -60,7 +62,7 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     };
     defer ctx.allocator.free(file_path);
 
-    const source = std.fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
         res.status = 500;
         res.body = "cannot read file";
         return;
@@ -102,7 +104,7 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     try nw.writeAll(new_value);
     try nw.writeAll(source[old_val_end_pos..]);
 
-    const file = std.fs.cwd().createFile(file_path, .{}) catch {
+    const file = infra_fs.cwd().createFile(file_path, .{}) catch {
         res.status = 500;
         res.body = "cannot write file";
         return;
@@ -213,7 +215,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         return;
     };
     defer ctx.allocator.free(comp_path);
-    std.fs.cwd().access(comp_path, .{}) catch {
+    infra_fs.cwd().access(comp_path, .{}) catch {
         res.status = 400;
         res.body = "component family not found";
         return;
@@ -226,7 +228,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     };
     defer ctx.allocator.free(file_path);
 
-    const source = std.fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
         res.status = 500;
         res.body = "cannot read file";
         return;
@@ -285,7 +287,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         }
     }
 
-    const file = std.fs.cwd().createFile(file_path, .{}) catch {
+    const file = infra_fs.cwd().createFile(file_path, .{}) catch {
         res.status = 500;
         res.body = "cannot write file";
         return;
@@ -385,7 +387,7 @@ pub fn editCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     const fp_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints/{s}.sexp", .{ ctx.project_dir, footprint });
     defer ctx.allocator.free(fp_path);
 
-    const source = std.fs.cwd().readFileAlloc(ctx.allocator, fp_path, 1024 * 1024) catch {
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path, 1024 * 1024) catch {
         res.status = 404;
         res.body = "footprint file not found";
         return;
@@ -407,7 +409,7 @@ pub fn editCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         try w.print("  (courtyard (rect {d:.2} {d:.2} {d:.2} {d:.2}))\n", .{ x1, y1, x2, y2 });
         try w.writeAll(source[last_paren..]);
 
-        const file = std.fs.cwd().createFile(fp_path, .{}) catch {
+        const file = infra_fs.cwd().createFile(fp_path, .{}) catch {
             res.status = 500;
             return;
         };
@@ -441,7 +443,7 @@ pub fn editCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     try w.print("(courtyard (rect {d:.2} {d:.2} {d:.2} {d:.2}))", .{ x1, y1, x2, y2 });
     try w.writeAll(source[cy_end..]);
 
-    const file = std.fs.cwd().createFile(fp_path, .{}) catch {
+    const file = infra_fs.cwd().createFile(fp_path, .{}) catch {
         res.status = 500;
         return;
     };
@@ -481,7 +483,7 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     const file_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
     defer ctx.allocator.free(file_path);
 
-    const source = std.fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
         res.status = 500;
         res.body = "cannot read file";
         return;
@@ -577,7 +579,7 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     }
 
     // Write file
-    const file = std.fs.cwd().createFile(file_path, .{}) catch {
+    const file = infra_fs.cwd().createFile(file_path, .{}) catch {
         res.status = 500;
         res.body = "cannot write file";
         return;
@@ -619,7 +621,7 @@ pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     const file_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
     defer ctx.allocator.free(file_path);
 
-    const source = std.fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
         res.status = 500;
         res.body = "cannot read file";
         return;
@@ -662,7 +664,7 @@ pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     try nw.writeAll(source[0..inst_start]);
     try nw.writeAll(source[inst_end..]);
 
-    const file = std.fs.cwd().createFile(file_path, .{}) catch {
+    const file = infra_fs.cwd().createFile(file_path, .{}) catch {
         res.status = 500;
         res.body = "cannot write file";
         return;
@@ -713,7 +715,7 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     const file_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
     defer ctx.allocator.free(file_path);
 
-    const source = std.fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
         res.status = 500;
         res.body = "cannot read file";
         return;
@@ -771,7 +773,7 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     try nw.writeAll(new_net);
     try nw.writeAll(source[net_end..]);
 
-    const file = std.fs.cwd().createFile(file_path, .{}) catch {
+    const file = infra_fs.cwd().createFile(file_path, .{}) catch {
         res.status = 500;
         res.body = "cannot write file";
         return;
@@ -1018,7 +1020,7 @@ pub fn boardOutlineApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     // Read the board file
     const board_file_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}-board.sexp", .{ ctx.project_dir, name });
     defer ctx.allocator.free(board_file_path);
-    const source = std.fs.cwd().readFileAlloc(ctx.allocator, board_file_path, 1024 * 1024) catch {
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, board_file_path, 1024 * 1024) catch {
         res.status = 404;
         res.body = "{\"error\":\"board file not found\"}";
         res.content_type = .JSON;
@@ -1065,7 +1067,7 @@ pub fn boardOutlineApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     }
 
     // Write back
-    const file = std.fs.cwd().createFile(board_file_path, .{}) catch {
+    const file = infra_fs.cwd().createFile(board_file_path, .{}) catch {
         res.status = 500;
         res.body = "{\"error\":\"failed to write\"}";
         res.content_type = .JSON;
@@ -1147,7 +1149,7 @@ fn designFilePath(allocator: std.mem.Allocator, project_dir: []const u8, name: [
 fn readDesignSource(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) EditError![]u8 {
     const path = try designFilePath(allocator, project_dir, name);
     defer allocator.free(path);
-    return std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch return error.CannotReadDesign;
+    return infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch return error.CannotReadDesign;
 }
 
 fn writeAndRebuild(
@@ -1164,12 +1166,12 @@ fn writeAndRebuild(
     // exist yet (brand-new create). Snapshot errors are logged but don't
     // block the write — undo is a nice-to-have, not a hard requirement.
     const snap_id: ?[]const u8 = history.snapshot(allocator, project_dir, name, description) catch |e| blk: {
-        std.debug.print("[snapshot] failed for {s}: {s}\n", .{ name, @errorName(e) });
+        log.warn("[snapshot] failed for {s}: {s}", .{ name, @errorName(e) });
         break :blk null;
     };
 
     {
-        const file = std.fs.cwd().createFile(path, .{}) catch return error.CannotWriteDesign;
+        const file = infra_fs.cwd().createFile(path, .{}) catch return error.CannotWriteDesign;
         defer file.close();
         file.writeAll(new_source) catch return error.CannotWriteDesign;
     }
@@ -1410,7 +1412,7 @@ pub fn swapComponentCore(
     // Verify component family exists
     const comp_path = try std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, new_component });
     defer allocator.free(comp_path);
-    std.fs.cwd().access(comp_path, .{}) catch return error.ComponentNotFound;
+    infra_fs.cwd().access(comp_path, .{}) catch return error.ComponentNotFound;
 
     // Evaluate current design to look up source_offset for this ref_des
     const design_path = try designFilePath(allocator, project_dir, name);
@@ -1515,8 +1517,8 @@ pub fn writeDesignCore(
     // Ensure src/ exists so brand-new designs can be created.
     const src_dir = try std.fmt.allocPrint(allocator, "{s}/src", .{project_dir});
     defer allocator.free(src_dir);
-    std.fs.cwd().makePath(src_dir) catch |e| {
-        std.debug.print("warning: makePath {s} failed: {s}\n", .{ src_dir, @errorName(e) });
+    infra_fs.cwd().makePath(src_dir) catch |e| {
+        log.warn("makePath {s} failed: {s}", .{ src_dir, @errorName(e) });
     };
 
     return writeAndRebuild(allocator, project_dir, name, new_source, "write_design");
@@ -1535,7 +1537,7 @@ pub fn restoreDesignCore(
     const pre_desc = try std.fmt.allocPrint(allocator, "pre-restore {s}", .{id});
     defer allocator.free(pre_desc);
     const pre_snap: ?[]const u8 = history.snapshot(allocator, project_dir, name, pre_desc) catch |e| blk: {
-        std.debug.print("[snapshot] pre-restore failed for {s}: {s}\n", .{ name, @errorName(e) });
+        log.warn("[snapshot] pre-restore failed for {s}: {s}", .{ name, @errorName(e) });
         break :blk null;
     };
 
@@ -1831,7 +1833,7 @@ pub fn addComponentDatasheetCore(
 
     const path = try libComponentPath(allocator, project_dir, component_name);
     defer allocator.free(path);
-    const source = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return error.CannotReadDesign;
+    const source = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return error.CannotReadDesign;
     defer allocator.free(source);
 
     if (std.mem.indexOf(u8, source, "(component") == null) return error.MalformedSource;
@@ -1882,7 +1884,7 @@ pub fn removeComponentDatasheetCore(
 
     const path = try libComponentPath(allocator, project_dir, component_name);
     defer allocator.free(path);
-    const source = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return error.CannotReadDesign;
+    const source = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return error.CannotReadDesign;
     defer allocator.free(source);
 
     const needle = try std.fmt.allocPrint(allocator, "(datasheet \"{s}\")", .{pdf});
@@ -1913,7 +1915,7 @@ fn libComponentPath(allocator: std.mem.Allocator, project_dir: []const u8, compo
 }
 
 fn writeLibComponent(path: []const u8, new_source: []const u8) EditError!void {
-    const file = std.fs.cwd().createFile(path, .{}) catch return error.CannotWriteDesign;
+    const file = infra_fs.cwd().createFile(path, .{}) catch return error.CannotWriteDesign;
     defer file.close();
     file.writeAll(new_source) catch return error.CannotWriteDesign;
 }
@@ -2250,7 +2252,7 @@ pub fn addComponentParameterCore(
 
     const path = try std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, component });
     defer allocator.free(path);
-    const source = std.fs.cwd().readFileAlloc(allocator, path, 1 * 1024 * 1024) catch return error.ComponentNotFound;
+    const source = infra_fs.cwd().readFileAlloc(allocator, path, 1 * 1024 * 1024) catch return error.ComponentNotFound;
     defer allocator.free(source);
 
     // Locate the outer (component ...) or (component-family ...) form.
@@ -2277,7 +2279,7 @@ pub fn addComponentParameterCore(
     try w.print("\n  (parameter \"{s}\" {s})", .{ param_name, param_type });
     try w.writeAll(source[comp_end - 1 ..]);
 
-    const file = std.fs.cwd().createFile(path, .{}) catch return error.CannotWriteDesign;
+    const file = infra_fs.cwd().createFile(path, .{}) catch return error.CannotWriteDesign;
     defer file.close();
     file.writeAll(buf.items) catch return error.CannotWriteDesign;
 
@@ -2394,7 +2396,7 @@ pub fn addComponentRequirementsCore(
 
     const path = try std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, component });
     defer allocator.free(path);
-    const source = std.fs.cwd().readFileAlloc(allocator, path, 1 * 1024 * 1024) catch return error.ComponentNotFound;
+    const source = infra_fs.cwd().readFileAlloc(allocator, path, 1 * 1024 * 1024) catch return error.ComponentNotFound;
     defer allocator.free(source);
 
     const comp_open = findOuterComponentOpen(source) orelse return error.MalformedSource;
@@ -2447,7 +2449,7 @@ pub fn addComponentRequirementsCore(
     }
     try w.writeAll(source[comp_end - 1 ..]);
 
-    const file = std.fs.cwd().createFile(path, .{}) catch return error.CannotWriteDesign;
+    const file = infra_fs.cwd().createFile(path, .{}) catch return error.CannotWriteDesign;
     defer file.close();
     file.writeAll(buf.items) catch return error.CannotWriteDesign;
 

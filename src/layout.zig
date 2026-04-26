@@ -1,4 +1,5 @@
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const ast = @import("sexpr/ast.zig");
 const Node = ast.Node;
@@ -74,7 +75,7 @@ pub const ZoneFill = struct {
 
 /// Load a layout from a `.layout` file.
 pub fn loadLayout(allocator: std.mem.Allocator, path: []const u8) !Layout {
-    const source = try std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024);
+    const source = try infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024);
     const nodes = try parser_mod.parse(allocator, source);
 
     var placements: std.ArrayListUnmanaged(Placement) = .empty;
@@ -180,9 +181,9 @@ pub fn saveLayout(allocator: std.mem.Allocator, layout: *const Layout, path: []c
 
     // Write to file
     if (std.fs.path.dirname(path)) |dir| {
-        try std.fs.cwd().makePath(dir);
+        try infra_fs.cwd().makePath(dir);
     }
-    const file = try std.fs.cwd().createFile(path, .{});
+    const file = try infra_fs.cwd().createFile(path, .{});
     defer file.close();
     try file.writeAll(buf.items);
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const clock = @import("infra/clock.zig");
 const env_mod = @import("eval/env.zig");
 const erc_mod = @import("erc.zig");
 const req_checks = @import("req_checks.zig");
@@ -825,7 +826,7 @@ fn statusRank(s: power_budget.RailStatus) u8 {
 
 /// Format the current UTC time as ISO-8601 "YYYY-MM-DDTHH:MM:SSZ".
 fn isoTimestampNow(allocator: std.mem.Allocator) ![]const u8 {
-    const now_s: i64 = @intCast(@divTrunc(std.time.nanoTimestamp(), std.time.ns_per_s));
+    const now_s: i64 = @intCast(@divTrunc(clock.nanoTimestamp(), clock.ns_per_s));
     return isoTimestamp(allocator, now_s);
 }
 

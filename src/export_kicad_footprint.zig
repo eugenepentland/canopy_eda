@@ -1,4 +1,5 @@
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
 const ast = @import("sexpr/ast.zig");
 const parser_mod = @import("sexpr/parser.zig");
 
@@ -10,7 +11,7 @@ pub fn findSourceKicadMod(allocator: std.mem.Allocator, project_dir: []const u8,
     const sources_path = std.fmt.allocPrint(allocator, "{s}/lib/sources", .{project_dir}) catch return null;
     defer allocator.free(sources_path);
 
-    var dir = std.fs.cwd().openDir(sources_path, .{ .iterate = true }) catch return null;
+    var dir = infra_fs.cwd().openDir(sources_path, .{ .iterate = true }) catch return null;
     defer dir.close();
 
     // Normalize the footprint name for comparison: lowercase, hyphens→underscores
@@ -368,7 +369,7 @@ pub fn findModelFile(
     {
         const check_path = std.fmt.allocPrint(allocator, "{s}/lib/models/{s}", .{ project_dir, fp_step }) catch return null;
         defer allocator.free(check_path);
-        if (std.fs.cwd().access(check_path, .{})) |_| {
+        if (infra_fs.cwd().access(check_path, .{})) |_| {
             return allocator.dupe(u8, fp_step) catch null;
         } else |_| {}
     }
@@ -379,7 +380,7 @@ pub fn findModelFile(
     {
         const check_path = std.fmt.allocPrint(allocator, "{s}/lib/models/{s}", .{ project_dir, comp_step }) catch return null;
         defer allocator.free(check_path);
-        if (std.fs.cwd().access(check_path, .{})) |_| {
+        if (infra_fs.cwd().access(check_path, .{})) |_| {
             return allocator.dupe(u8, comp_step) catch null;
         } else |_| {}
     }
@@ -388,7 +389,7 @@ pub fn findModelFile(
     const models_path = std.fmt.allocPrint(allocator, "{s}/lib/models", .{project_dir}) catch return null;
     defer allocator.free(models_path);
 
-    var dir = std.fs.cwd().openDir(models_path, .{ .iterate = true }) catch return null;
+    var dir = infra_fs.cwd().openDir(models_path, .{ .iterate = true }) catch return null;
     defer dir.close();
 
     var iter = dir.iterate();

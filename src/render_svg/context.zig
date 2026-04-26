@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("../infra/log.zig");
 const env_mod = @import("../eval/env.zig");
 const DesignBlock = env_mod.DesignBlock;
 const PinRef = env_mod.PinRef;
@@ -530,7 +531,7 @@ pub const RenderCtx = struct {
                         const pin_bn = baseNetName(pin_net_name);
                         const ep_bn = baseNetName(endpoint_net);
                         if (!std.mem.eql(u8, pin_bn, ep_bn)) {
-                            std.debug.print("NET VALIDATE: {s} pin {s}: pin_net=\"{s}\" but adjacency endpoint=\"{s}\"\n", .{ ref_des, entry.pin, pin_bn, ep_bn });
+                            log.warn("NET VALIDATE: {s} pin {s}: pin_net=\"{s}\" but adjacency endpoint=\"{s}\"", .{ ref_des, entry.pin, pin_bn, ep_bn });
                         }
                     },
                     .pin => {},
@@ -554,7 +555,7 @@ pub const RenderCtx = struct {
                         const bn_b = baseNetName(net_b);
                         if (isGroundNet(bn_a) or isGroundNet(bn_b)) continue;
                         if (!std.mem.eql(u8, bn_a, bn_b)) {
-                            std.debug.print("NET VALIDATE: spoke {s} pin {s} (net=\"{s}\") <-> {s} pin {s} (net=\"{s}\") — mismatch\n", .{ ref_des, entry.pin, bn_a, p.ref_des, p.pin, bn_b });
+                            log.warn("NET VALIDATE: spoke {s} pin {s} (net=\"{s}\") <-> {s} pin {s} (net=\"{s}\") — mismatch", .{ ref_des, entry.pin, bn_a, p.ref_des, p.pin, bn_b });
                         }
                     },
                     .net => {},
@@ -571,7 +572,7 @@ pub const RenderCtx = struct {
             const raw_bn = baseNetName(raw);
             if (isGroundNet(canon_bn) or isGroundNet(raw_bn)) continue;
             if (!std.mem.eql(u8, canon_bn, raw_bn)) {
-                std.debug.print("NET VALIDATE: {s}: pin_net=\"{s}\" but canonical=\"{s}\"\n", .{ key, raw_bn, canon_bn });
+                log.warn("NET VALIDATE: {s}: pin_net=\"{s}\" but canonical=\"{s}\"", .{ key, raw_bn, canon_bn });
             }
         }
     }

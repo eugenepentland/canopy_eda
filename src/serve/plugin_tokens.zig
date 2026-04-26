@@ -1,5 +1,9 @@
 const std = @import("std");
+const clock = @import("../infra/clock.zig");
+const infra_fs = @import("../infra/fs.zig");
+const log = @import("../infra/log.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const infra_random = @import("../infra/random.zig");
 
 /// Stored record for a minted plugin token. Only the hash is persisted —
 /// the raw token is shown once at mint time and never stored.
@@ -20,8 +24,8 @@ fn tokensPath(allocator: std.mem.Allocator, project_dir: []const u8) ![]const u8
 fn ensureAuthDir(project_dir: []const u8) void {
     var buf: [512]u8 = undefined;
     const dir = std.fmt.bufPrint(&buf, "{s}/auth", .{project_dir}) catch return;
-    std.fs.cwd().makePath(dir) catch |e| {
-        std.debug.print("warning: makePath {s} failed: {s}\n", .{ dir, @errorName(e) });
+    infra_fs.cwd().makePath(dir) catch |e| {
+        log.warn("makePath {s} failed: {s}", .{ dir, @errorName(e) });
     };
 }
 
@@ -36,7 +40,7 @@ fn ensureLoaded(allocator: std.mem.Allocator, project_dir: []const u8) void {
 fn load(allocator: std.mem.Allocator, project_dir: []const u8) void {
     const path = tokensPath(allocator, project_dir) catch return;
     defer allocator.free(path);
-    const data = std.fs.cwd().readFileAlloc(allocator, path, 1 * 1024 * 1024) catch return;
+    const data = infra_fs.cwd().readFileAlloc(allocator, path, 1 * 1024 * 1024) catch return;
     const Entry = struct {
         hash: []const u8,
         label: []const u8 = "",
@@ -57,7 +61,7 @@ fn save(allocator: std.mem.Allocator, project_dir: []const u8) void {
     ensureAuthDir(project_dir);
     const path = tokensPath(allocator, project_dir) catch return;
     defer allocator.free(path);
-    const file = std.fs.cwd().createFile(path, .{}) catch return;
+    const file = infra_fs.cwd().createFile(path, .{}) catch return;
     defer file.close();
     var bw: std.ArrayListUnmanaged(u8) = .empty;
     defer bw.deinit(allocator);
@@ -89,7 +93,7 @@ pub fn mint(allocator: std.mem.Allocator, project_dir: []const u8, label: []cons
     try tokens_list.append(allocator, .{
         .hash = hash,
         .label = try allocator.dupe(u8, label),
-        .created_at = std.time.timestamp(),
+        .created_at = clock.timestamp(),
     });
     save(allocator, project_dir);
     return raw;
@@ -127,7 +131,7 @@ fn randomHex(allocator: std.mem.Allocator, n_chars: usize) ![]u8 {
     const n_bytes = (n_chars + 1) / 2;
     const bytes = try allocator.alloc(u8, n_bytes);
     defer allocator.free(bytes);
-    std.crypto.random.bytes(bytes);
+    infra_random.bytes(bytes);
     var out = try allocator.alloc(u8, n_chars);
     const hex = "0123456789abcdef";
     var i: usize = 0;

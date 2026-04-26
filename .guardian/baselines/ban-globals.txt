@@ -5,4 +5,4 @@ src/serve.zig:51: pub var (mutable global) outside wiring/main
 src/serve.zig:52: pub var (mutable global) outside wiring/main
 src/serve.zig:79: pub var (mutable global) outside wiring/main
 src/serve.zig:80: pub var (mutable global) outside wiring/main
-src/serve/model.zig:11: pub var (mutable global) outside wiring/main
+src/serve/model.zig:12: pub var (mutable global) outside wiring/main

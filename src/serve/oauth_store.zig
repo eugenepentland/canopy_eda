@@ -1,5 +1,9 @@
 const std = @import("std");
+const infra_fs = @import("../infra/fs.zig");
+const clock = @import("../infra/clock.zig");
+const log = @import("../infra/log.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const infra_random = @import("../infra/random.zig");
 
 /// Persisted OAuth client record (one per Claude Code install). Secrets are
 /// hashed via SHA-256 before storage so a leaked `oauth_clients.json`
@@ -67,15 +71,15 @@ fn tokensPath(allocator: std.mem.Allocator, project_dir: []const u8) ![]const u8
 fn ensureAuthDir(project_dir: []const u8) void {
     var buf: [512]u8 = undefined;
     const dir = std.fmt.bufPrint(&buf, "{s}/auth", .{project_dir}) catch return;
-    std.fs.cwd().makePath(dir) catch |e| {
-        std.debug.print("warning: makePath {s} failed: {s}\n", .{ dir, @errorName(e) });
+    infra_fs.cwd().makePath(dir) catch |e| {
+        log.warn("makePath {s} failed: {s}", .{ dir, @errorName(e) });
     };
 }
 
 fn loadClients(allocator: std.mem.Allocator, project_dir: []const u8) void {
     const path = clientsPath(allocator, project_dir) catch return;
     defer allocator.free(path);
-    const data = std.fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch return;
+    const data = infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch return;
     const Entry = struct {
         id: []const u8,
         secret_hash: []const u8,
@@ -104,7 +108,7 @@ fn saveClients(allocator: std.mem.Allocator, project_dir: []const u8) void {
     ensureAuthDir(project_dir);
     const path = clientsPath(allocator, project_dir) catch return;
     defer allocator.free(path);
-    const file = std.fs.cwd().createFile(path, .{}) catch return;
+    const file = infra_fs.cwd().createFile(path, .{}) catch return;
     defer file.close();
     var bw: std.ArrayListUnmanaged(u8) = .empty;
     defer bw.deinit(allocator);
@@ -125,7 +129,7 @@ fn saveClients(allocator: std.mem.Allocator, project_dir: []const u8) void {
 fn loadTokens(allocator: std.mem.Allocator, project_dir: []const u8) void {
     const path = tokensPath(allocator, project_dir) catch return;
     defer allocator.free(path);
-    const data = std.fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch return;
+    const data = infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch return;
     const Entry = struct {
         hash: []const u8,
         client_id: []const u8,
@@ -135,7 +139,7 @@ fn loadTokens(allocator: std.mem.Allocator, project_dir: []const u8) void {
     };
     const parsed = std.json.parseFromSlice([]const Entry, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch return;
     defer parsed.deinit();
-    const now = std.time.timestamp();
+    const now = clock.timestamp();
     for (parsed.value) |e| {
         if (e.expires_at < now) continue;
         tokens_list.append(allocator, .{
@@ -152,7 +156,7 @@ fn saveTokens(allocator: std.mem.Allocator, project_dir: []const u8) void {
     ensureAuthDir(project_dir);
     const path = tokensPath(allocator, project_dir) catch return;
     defer allocator.free(path);
-    const file = std.fs.cwd().createFile(path, .{}) catch return;
+    const file = infra_fs.cwd().createFile(path, .{}) catch return;
     defer file.close();
     var bw: std.ArrayListUnmanaged(u8) = .empty;
     defer bw.deinit(allocator);
@@ -206,7 +210,7 @@ pub fn createClient(
         .name = try allocator.dupe(u8, name),
         .email = try allocator.dupe(u8, email),
         .redirect_uri = try allocator.dupe(u8, redirect_uri),
-        .created_at = std.time.timestamp(),
+        .created_at = clock.timestamp(),
         .revoked = false,
     });
 
@@ -315,7 +319,7 @@ pub fn issueCode(
         .email = try allocator.dupe(u8, email),
         .code_challenge = try allocator.dupe(u8, code_challenge),
         .scope = try allocator.dupe(u8, scope),
-        .expires_at = std.time.timestamp() + 600,
+        .expires_at = clock.timestamp() + 600,
     };
     try codes_map.?.put(code, entry);
     return code;
@@ -329,7 +333,7 @@ pub fn consumeCode(allocator: std.mem.Allocator, project_dir: []const u8, code: 
     defer mu.unlock();
     ensureLoaded(allocator, project_dir);
     const entry = codes_map.?.fetchRemove(code) orelse return null;
-    if (entry.value.expires_at < std.time.timestamp()) return null;
+    if (entry.value.expires_at < clock.timestamp()) return null;
     return entry.value;
 }
 
@@ -359,7 +363,7 @@ pub fn issueToken(
         .client_id = try allocator.dupe(u8, client_id),
         .email = try allocator.dupe(u8, email),
         .scope = try allocator.dupe(u8, scope),
-        .expires_at = std.time.timestamp() + 30 * 24 * 60 * 60,
+        .expires_at = clock.timestamp() + 30 * 24 * 60 * 60,
     });
     saveTokens(allocator, project_dir);
     return raw;
@@ -374,7 +378,7 @@ pub fn validateToken(allocator: std.mem.Allocator, project_dir: []const u8, raw:
     ensureLoaded(allocator, project_dir);
     const hash = try sha256Hex(allocator, raw);
     defer allocator.free(hash);
-    const now = std.time.timestamp();
+    const now = clock.timestamp();
     for (tokens_list.items) |t| {
         if (t.expires_at < now) continue;
         if (std.mem.eql(u8, t.hash, hash)) {
@@ -434,7 +438,7 @@ fn randomHex(allocator: std.mem.Allocator, n_chars: usize) ![]u8 {
     const n_bytes = (n_chars + 1) / 2;
     const bytes = try allocator.alloc(u8, n_bytes);
     defer allocator.free(bytes);
-    std.crypto.random.bytes(bytes);
+    infra_random.bytes(bytes);
     var out = try allocator.alloc(u8, n_chars);
     const hex = "0123456789abcdef";
     var i: usize = 0;

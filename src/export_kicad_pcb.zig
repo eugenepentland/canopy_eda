@@ -1,4 +1,5 @@
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
 const env_mod = @import("eval/env.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
@@ -87,7 +88,7 @@ pub fn exportPcb(
         const fp_path = try std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, inst.footprint });
         defer allocator.free(fp_path);
 
-        const fp_source = std.fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch {
+        const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch {
             try fp_name_map.put(inst.footprint, inst.footprint);
             continue;
         };
@@ -133,7 +134,7 @@ pub fn exportPcb(
     }
     if (!loaded_from_layout) {
         if (existing_pcb_path) |pcb_path| {
-            const existing = std.fs.cwd().readFileAlloc(allocator, pcb_path, 100 * 1024 * 1024) catch null;
+            const existing = infra_fs.cwd().readFileAlloc(allocator, pcb_path, 100 * 1024 * 1024) catch null;
             if (existing) |pcb_content| {
                 try parseExistingPlacements(allocator, pcb_content, &placed);
             }

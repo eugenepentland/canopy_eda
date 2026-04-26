@@ -1,5 +1,8 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const infra_fs = @import("../infra/fs.zig");
+const clock = @import("../infra/clock.zig");
+const log = @import("../infra/log.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
@@ -21,7 +24,7 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     };
     defer ctx.allocator.free(tmp_zip);
     {
-        const f = std.fs.cwd().createFile(tmp_zip, .{}) catch {
+        const f = infra_fs.cwd().createFile(tmp_zip, .{}) catch {
             res.status = 500;
             res.body = "Cannot write temp file";
             return;
@@ -33,7 +36,7 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
         };
     }
 
-    const tmp_dir = std.fmt.allocPrint(ctx.allocator, "/tmp/eda-extract-{d}", .{std.time.milliTimestamp()}) catch {
+    const tmp_dir = std.fmt.allocPrint(ctx.allocator, "/tmp/eda-extract-{d}", .{clock.milliTimestamp()}) catch {
         res.status = 500;
         return;
     };
@@ -84,18 +87,18 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
         return;
     }
 
-    const sym_data = std.fs.cwd().readFileAlloc(ctx.allocator, sym_path.?, 10 * 1024 * 1024) catch {
+    const sym_data = infra_fs.cwd().readFileAlloc(ctx.allocator, sym_path.?, 10 * 1024 * 1024) catch {
         res.status = 500;
         res.body = "Cannot read symbol from zip";
         return;
     };
-    const fp_data = std.fs.cwd().readFileAlloc(ctx.allocator, fp_path.?, 10 * 1024 * 1024) catch {
+    const fp_data = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path.?, 10 * 1024 * 1024) catch {
         res.status = 500;
         res.body = "Cannot read footprint from zip";
         return;
     };
     const step_data: ?[]const u8 = if (step_path) |sp|
-        (std.fs.cwd().readFileAlloc(ctx.allocator, sp, 50 * 1024 * 1024) catch null)
+        (infra_fs.cwd().readFileAlloc(ctx.allocator, sp, 50 * 1024 * 1024) catch null)
     else
         null;
 
@@ -132,12 +135,12 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
             res.status = 500;
             return;
         };
-        try std.fs.cwd().makePath(dir);
+        try infra_fs.cwd().makePath(dir);
         const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, safe_name }) catch {
             res.status = 500;
             return;
         };
-        const f = std.fs.cwd().createFile(path, .{}) catch {
+        const f = infra_fs.cwd().createFile(path, .{}) catch {
             res.status = 500;
             return;
         };
@@ -152,12 +155,12 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
             res.status = 500;
             return;
         };
-        try std.fs.cwd().makePath(dir);
+        try infra_fs.cwd().makePath(dir);
         const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, fp_name_final }) catch {
             res.status = 500;
             return;
         };
-        const f = std.fs.cwd().createFile(path, .{}) catch {
+        const f = infra_fs.cwd().createFile(path, .{}) catch {
             res.status = 500;
             return;
         };
@@ -172,10 +175,10 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     if (step_data) |sd| {
         const dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/models", .{ctx.project_dir}) catch "";
         if (dir.len > 0) {
-            try std.fs.cwd().makePath(dir);
+            try infra_fs.cwd().makePath(dir);
             const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.step", .{ dir, safe_name }) catch "";
             if (path.len > 0) {
-                const f = std.fs.cwd().createFile(path, .{}) catch null;
+                const f = infra_fs.cwd().createFile(path, .{}) catch null;
                 if (f) |file| {
                     defer file.close();
                     try file.writeAll(sd);
@@ -185,14 +188,14 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     }
 
     // Clean up temp files
-    std.fs.cwd().deleteFile(tmp_zip) catch |e| switch (e) {
+    infra_fs.cwd().deleteFile(tmp_zip) catch |e| switch (e) {
         error.FileNotFound => {},
-        else => std.debug.print("warning: deleting {s}: {s}\n", .{ tmp_zip, @errorName(e) }),
+        else => log.warn("deleting {s}: {s}", .{ tmp_zip, @errorName(e) }),
     };
     _ = std.process.Child.run(.{
         .allocator = ctx.allocator,
         .argv = &.{ "rm", "-rf", tmp_dir },
-    }) catch |e| std.debug.print("warning: cleanup {s}: {s}\n", .{ tmp_dir, @errorName(e) });
+    }) catch |e| log.warn("cleanup {s}: {s}", .{ tmp_dir, @errorName(e) });
 
     const step_msg: []const u8 = if (step_data != null) " + 3D model" else "";
     const msg = std.fmt.allocPrint(ctx.allocator, "Created pinout + footprint{s} for \"{s}\" (sources saved)", .{ step_msg, pkg_name }) catch {
@@ -207,12 +210,12 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
 pub fn saveSourceFile(allocator: std.mem.Allocator, project_dir: []const u8, filename: []const u8, body_data: []const u8) void {
     const dir_path = std.fmt.allocPrint(allocator, "{s}/lib/sources", .{project_dir}) catch return;
     defer allocator.free(dir_path);
-    std.fs.cwd().makePath(dir_path) catch return;
+    infra_fs.cwd().makePath(dir_path) catch return;
 
     const out_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, filename }) catch return;
     defer allocator.free(out_path);
 
-    const file = std.fs.cwd().createFile(out_path, .{}) catch return;
+    const file = infra_fs.cwd().createFile(out_path, .{}) catch return;
     defer file.close();
     file.writeAll(body_data) catch return;
     std.debug.print("Saved source: lib/sources/{s}\n", .{filename});
@@ -310,13 +313,13 @@ pub fn writeComponentFile(
 ) void {
     const dir = std.fmt.allocPrint(allocator, "{s}/lib/components", .{project_dir}) catch return;
     defer allocator.free(dir);
-    std.fs.cwd().makePath(dir) catch return;
+    infra_fs.cwd().makePath(dir) catch return;
 
     const path = std.fmt.allocPrint(allocator, "{s}/{s}.sexp", .{ dir, safe_name }) catch return;
     defer allocator.free(path);
 
     // Skip if a hand-authored component already exists.
-    if (std.fs.cwd().access(path, .{})) |_| {
+    if (infra_fs.cwd().access(path, .{})) |_| {
         std.debug.print("Component exists, skipping: lib/components/{s}.sexp\n", .{safe_name});
         return;
     } else |_| {}
@@ -340,7 +343,7 @@ pub fn writeComponentFile(
     if (mpn) |m| w.print("\n  (mpn \"{s}\")", .{m}) catch return;
     w.writeAll(")\n") catch return;
 
-    const f = std.fs.cwd().createFile(path, .{}) catch return;
+    const f = infra_fs.cwd().createFile(path, .{}) catch return;
     defer f.close();
     f.writeAll(buf.items) catch return;
     std.debug.print("Wrote component: lib/components/{s}.sexp\n", .{safe_name});

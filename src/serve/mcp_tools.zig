@@ -1,4 +1,5 @@
 const std = @import("std");
+const infra_fs = @import("../infra/fs.zig");
 const edit = @import("edit.zig");
 const history = @import("history.zig");
 const serve_root = @import("../serve.zig");
@@ -8,6 +9,7 @@ const env_mod = @import("../eval/env.zig");
 const erc_mod = @import("../erc.zig");
 const drc_mod = @import("../drc.zig");
 const layout_mod = @import("../layout.zig");
+const log = @import("../infra/log.zig");
 const bom = @import("../bom.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
 const ids = @import("../eval/ids.zig");
@@ -17,7 +19,7 @@ const review_state_mod = @import("../review_state.zig");
 const req_checks = @import("../req_checks.zig");
 
 fn warnResolveIdentities(name: []const u8, err: anyerror) void {
-    std.debug.print("warning: resolveIdentities {s} failed: {s}\n", .{ name, @errorName(err) });
+    log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(err) });
 }
 
 /// One entry per MCP tool. Keep in sync with `tools_list_result` below and
@@ -113,7 +115,7 @@ pub fn call(
         const msg = @errorName(err);
         const w = out.writer(allocator);
         w.print("error: {s}", .{msg}) catch |e| {
-            std.debug.print("warning: failed to write error msg: {s}\n", .{@errorName(e)});
+            log.warn("failed to write error msg: {s}", .{@errorName(e)});
         };
         return .{ .ok = false };
     };
@@ -296,7 +298,7 @@ fn callInner(
         }
         const path = try std.fmt.allocPrint(allocator, "{s}/lib/{s}/{s}.sexp", .{ project_dir, sub, name });
         defer allocator.free(path);
-        const src = std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch {
+        const src = infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch {
             try w.print("error: not found: lib/{s}/{s}.sexp", .{ sub, name });
             return false;
         };
@@ -497,7 +499,7 @@ fn listLibrarySubdir(
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/{s}", .{ project_dir, sub });
     defer allocator.free(dir_path);
 
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+    var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
         try w.writeAll("[]");
         return;
     };
@@ -529,7 +531,7 @@ fn listLibrarySubdir(
 /// Find the first `(description "...")` form in the file and return its
 /// string value. Returns null if absent. Caller owns the returned memory.
 fn extractDescription(allocator: std.mem.Allocator, path: []const u8) ?[]const u8 {
-    const src = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return null;
+    const src = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return null;
     defer allocator.free(src);
     const marker = "(description \"";
     const idx = std.mem.indexOf(u8, src, marker) orelse return null;
@@ -1121,7 +1123,7 @@ fn listDatasheets(
     }
     const comp_dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/components", .{project_dir});
     defer allocator.free(comp_dir_path);
-    if (std.fs.cwd().openDir(comp_dir_path, .{ .iterate = true })) |dir_const| {
+    if (infra_fs.cwd().openDir(comp_dir_path, .{ .iterate = true })) |dir_const| {
         var cdir = dir_const;
         defer cdir.close();
         var cit = cdir.iterate();
@@ -1131,7 +1133,7 @@ fn listDatasheets(
             const cbase = centry.name[0 .. centry.name.len - ".sexp".len];
             const cpath = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ comp_dir_path, centry.name });
             defer allocator.free(cpath);
-            const src = std.fs.cwd().readFileAlloc(allocator, cpath, 1 * 1024 * 1024) catch continue;
+            const src = infra_fs.cwd().readFileAlloc(allocator, cpath, 1 * 1024 * 1024) catch continue;
             defer allocator.free(src);
             // Linear scan for every `(datasheet "..."` occurrence. Matches
             // the evaluator's schema: the filename is the first string
@@ -1167,7 +1169,7 @@ fn listDatasheets(
     try w.writeAll("{\"datasheets\":[");
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/datasheets", .{project_dir});
     defer allocator.free(dir_path);
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+    var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
         try w.writeAll("]}");
         return true;
     };
@@ -1240,7 +1242,7 @@ pub fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) ![
     const src_path = try std.fmt.allocPrint(allocator, "{s}/src", .{project_dir});
     defer allocator.free(src_path);
 
-    var dir = std.fs.cwd().openDir(src_path, .{ .iterate = true }) catch return &[_][]const u8{};
+    var dir = infra_fs.cwd().openDir(src_path, .{ .iterate = true }) catch return &[_][]const u8{};
     defer dir.close();
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -1302,7 +1304,7 @@ pub fn listDesignSummaries(
     const src_path = try std.fmt.allocPrint(allocator, "{s}/src", .{project_dir});
     defer allocator.free(src_path);
 
-    var dir = std.fs.cwd().openDir(src_path, .{ .iterate = true }) catch return &[_]DesignSummary{};
+    var dir = infra_fs.cwd().openDir(src_path, .{ .iterate = true }) catch return &[_]DesignSummary{};
     defer dir.close();
 
     var summaries: std.ArrayListUnmanaged(DesignSummary) = .empty;
@@ -1375,7 +1377,7 @@ pub fn listDesignSummaries(
 /// `(design-block ...)`. Used to filter out board definitions and auxiliary
 /// .sexp files from list_designs.
 fn hasTopLevelDesignBlock(allocator: std.mem.Allocator, path: []const u8) bool {
-    const src = std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch return false;
+    const src = infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch return false;
     defer allocator.free(src);
     const nodes = sexpr_parser.parse(allocator, src) catch return false;
     for (nodes) |n| if (n.isForm("design-block")) return true;

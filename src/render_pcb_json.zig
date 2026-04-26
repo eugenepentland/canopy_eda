@@ -1,4 +1,5 @@
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
 const env_mod = @import("eval/env.zig");
 const json_writer = @import("json_writer.zig");
 const DesignBlock = env_mod.DesignBlock;
@@ -158,7 +159,7 @@ pub fn renderPcbJson(
     }
     if (!loaded_from_layout) {
         if (existing_pcb_path) |pcb_path| {
-            const existing = std.fs.cwd().readFileAlloc(allocator, pcb_path, 100 * 1024 * 1024) catch null;
+            const existing = infra_fs.cwd().readFileAlloc(allocator, pcb_path, 100 * 1024 * 1024) catch null;
             if (existing) |pcb_content| {
                 try pcb_mod.parseExistingPlacements(allocator, pcb_content, &placed);
             }
@@ -178,7 +179,7 @@ pub fn renderPcbJson(
 
         const fp_path = try std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, inst.footprint });
         defer allocator.free(fp_path);
-        const fp_source = std.fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
+        const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
         const geo = parseFootprintGeometry(allocator, fp_source) catch continue;
         try fp_geo_cache.put(inst.footprint, geo);
     }

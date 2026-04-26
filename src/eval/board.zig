@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("../infra/log.zig");
 const env_mod = @import("env.zig");
 const Value = env_mod.Value;
 const Env = env_mod.Env;
@@ -30,14 +31,14 @@ const Node = @import("../sexpr/ast.zig").Node;
 /// ```
 pub fn evalBoard(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     if (args.len < 2) {
-        std.debug.print("board: requires at least a name and (design ...) form\n", .{});
+        log.warn("board: requires at least a name and (design ...) form", .{});
         return EvalError.ArityError;
     }
 
     // First arg: board name (string)
     const name_val = try self.evalNode(args[0], env);
     const name = name_val.asString() orelse {
-        std.debug.print("board: first argument must be a string name\n", .{});
+        log.warn("board: first argument must be a string name", .{});
         return EvalError.TypeError;
     };
 
@@ -60,20 +61,20 @@ pub fn evalBoard(self: *Evaluator, args: []const Node, env: *Env) EvalError!Valu
 
         if (std.mem.eql(u8, tag, "design")) {
             if (children.len < 2) {
-                std.debug.print("board: (design ...) requires a design expression\n", .{});
+                log.warn("board: (design ...) requires a design expression", .{});
                 return EvalError.ArityError;
             }
             // If the argument is a string, treat it as a relative file path
             if (children[1].asString()) |path| {
                 const full_path = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.project_dir, path }) catch return EvalError.OutOfMemory;
                 const design_val = self.evalFile(full_path) catch |err| {
-                    std.debug.print("board: failed to load design from {s}: {}\n", .{ full_path, err });
+                    log.warn("board: failed to load design from {s}: {}", .{ full_path, err });
                     return EvalError.ImportError;
                 };
                 switch (design_val) {
                     .design_block => |db| design = db,
                     else => {
-                        std.debug.print("board: file did not evaluate to a design-block\n", .{});
+                        log.warn("board: file did not evaluate to a design-block", .{});
                         return EvalError.TypeError;
                     },
                 }
@@ -82,7 +83,7 @@ pub fn evalBoard(self: *Evaluator, args: []const Node, env: *Env) EvalError!Valu
                 switch (design_val) {
                     .design_block => |db| design = db,
                     else => {
-                        std.debug.print("board: (design ...) must evaluate to a design-block\n", .{});
+                        log.warn("board: (design ...) must evaluate to a design-block", .{});
                         return EvalError.TypeError;
                     },
                 }
@@ -121,7 +122,7 @@ pub fn evalBoard(self: *Evaluator, args: []const Node, env: *Env) EvalError!Valu
     }
 
     if (design == null) {
-        std.debug.print("board: missing required (design ...) form\n", .{});
+        log.warn("board: missing required (design ...) form", .{});
         return EvalError.ArityError;
     }
 
@@ -153,14 +154,14 @@ fn parseOutline(self: *Evaluator, args: []const Node, env: *Env, outline: *std.A
         if (std.mem.eql(u8, tag, "rect")) {
             // (rect x1 y1 x2 y2)
             if (children.len < 5) {
-                std.debug.print("board: (rect) requires 4 coordinates\n", .{});
+                log.warn("board: (rect) requires 4 coordinates", .{});
                 return EvalError.ArityError;
             }
             var coords: [4]f64 = undefined;
             for (0..4) |i| {
                 const v = try self.evalNode(children[i + 1], env);
                 coords[i] = v.asNumber() orelse {
-                    std.debug.print("board: (rect) coordinates must be numbers\n", .{});
+                    log.warn("board: (rect) coordinates must be numbers", .{});
                     return EvalError.TypeError;
                 };
             }

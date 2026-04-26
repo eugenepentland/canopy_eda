@@ -1,7 +1,9 @@
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
 const env_mod = @import("eval/env.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const parts_mod = @import("parts.zig");
+const infra_random = @import("infra/random.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
 const Property = env_mod.Property;
@@ -23,7 +25,7 @@ pub const BomEntry = struct {
 /// Load a .bom sidecar file and return the entries.
 /// Returns empty slice if file does not exist.
 pub fn loadBom(allocator: std.mem.Allocator, bom_path: []const u8) ![]const BomEntry {
-    const source = std.fs.cwd().readFileAlloc(allocator, bom_path, 4 * 1024 * 1024) catch |err| switch (err) {
+    const source = infra_fs.cwd().readFileAlloc(allocator, bom_path, 4 * 1024 * 1024) catch |err| switch (err) {
         error.FileNotFound => return &.{},
         else => return err,
     };
@@ -164,7 +166,7 @@ pub fn collectFlatInstances(
 /// Generate a v4 UUID string (lowercase hex with dashes).
 pub fn generateUuid(allocator: std.mem.Allocator) ![]const u8 {
     var bytes: [16]u8 = undefined;
-    std.crypto.random.bytes(&bytes);
+    infra_random.bytes(&bytes);
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
 

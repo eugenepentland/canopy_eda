@@ -1,5 +1,7 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const infra_fs = @import("../infra/fs.zig");
+const log = @import("../infra/log.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const export_kicad = @import("../export_kicad.zig");
@@ -24,7 +26,7 @@ fn configPath(allocator: std.mem.Allocator, project_dir: []const u8, name: []con
 fn loadConfig(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) Config {
     const path = configPath(allocator, project_dir, name) catch return .{};
     defer allocator.free(path);
-    const content = std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024) catch return .{};
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, 64 * 1024) catch return .{};
     defer allocator.free(content);
     return .{
         .output_dir = extractJsonString(allocator, content, "\"output_dir\"") orelse "",
@@ -109,7 +111,7 @@ pub fn setConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     try writeJsonEscaped(w, pcb);
     try w.writeAll("\"}\n");
 
-    const f = std.fs.cwd().createFile(path, .{}) catch {
+    const f = infra_fs.cwd().createFile(path, .{}) catch {
         res.status = 500;
         res.body = "{\"ok\":false,\"error\":\"cannot write config\"}";
         res.content_type = .JSON;
@@ -162,7 +164,7 @@ fn loadAndResolve(ctx: *Handler, name: []const u8, res: *httpz.Response) ?*const
         return null;
     };
     bom.resolveIdentities(ctx.allocator, @constCast(block), bom_path, ctx.project_dir) catch |e| {
-        std.debug.print("warning: bom.resolveIdentities for {s}: {s}\n", .{ name, @errorName(e) });
+        log.warn("bom.resolveIdentities for {s}: {s}", .{ name, @errorName(e) });
     };
     return block;
 }
@@ -200,8 +202,8 @@ pub fn writeNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     const out_path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.net", .{ cfg.output_dir, name });
     defer ctx.allocator.free(out_path);
 
-    try std.fs.cwd().makePath(cfg.output_dir);
-    const f = std.fs.cwd().createFile(out_path, .{}) catch {
+    try infra_fs.cwd().makePath(cfg.output_dir);
+    const f = infra_fs.cwd().createFile(out_path, .{}) catch {
         res.status = 500;
         const body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"Cannot write to {s}\"}}", .{out_path});
         res.body = body;
@@ -252,12 +254,12 @@ pub fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
         return;
     };
 
-    try std.fs.cwd().makePath(cfg.output_dir);
+    try infra_fs.cwd().makePath(cfg.output_dir);
 
     const net_path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.net", .{ cfg.output_dir, name });
     defer ctx.allocator.free(net_path);
     {
-        const f = std.fs.cwd().createFile(net_path, .{}) catch {
+        const f = infra_fs.cwd().createFile(net_path, .{}) catch {
             res.status = 500;
             const body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"Cannot write to {s}\"}}", .{net_path});
             res.body = body;
@@ -275,7 +277,7 @@ pub fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
 
     const pretty_dir = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.pretty", .{ cfg.output_dir, name });
     defer ctx.allocator.free(pretty_dir);
-    try std.fs.cwd().makePath(pretty_dir);
+    try infra_fs.cwd().makePath(pretty_dir);
 
     export_kicad.exportFootprints(ctx.allocator, block, ctx.project_dir, pretty_dir) catch {
         res.status = 500;
@@ -404,12 +406,12 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
     //    writes, but the sync button never short-circuits — the user wants
     //    every click to refresh the PCB even when nothing upstream changed.
 
-    try std.fs.cwd().makePath(cfg.output_dir);
-    try std.fs.cwd().makePath(pretty_dir);
-    try std.fs.cwd().makePath(model_dir);
+    try infra_fs.cwd().makePath(cfg.output_dir);
+    try infra_fs.cwd().makePath(pretty_dir);
+    try infra_fs.cwd().makePath(model_dir);
 
     if (netlist_changed) {
-        const f = std.fs.cwd().createFile(net_path, .{}) catch {
+        const f = infra_fs.cwd().createFile(net_path, .{}) catch {
             res.status = 500;
             res.body = "{\"ok\":false,\"error\":\"Cannot write netlist\"}";
             res.content_type = .JSON;
@@ -426,7 +428,7 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
     }
 
     if (sections_changed and sections_json.len > 0) {
-        if (std.fs.cwd().createFile(sections_path, .{})) |sf| {
+        if (infra_fs.cwd().createFile(sections_path, .{})) |sf| {
             defer sf.close();
             try sf.writeAll(sections_json);
         } else |_| {}
@@ -434,7 +436,7 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
     }
 
     if (modules_changed and modules_json.len > 0) {
-        if (std.fs.cwd().createFile(modules_path, .{})) |mf| {
+        if (infra_fs.cwd().createFile(modules_path, .{})) |mf| {
             defer mf.close();
             try mf.writeAll(modules_json);
         } else |_| {}
@@ -445,7 +447,7 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
         const fp = desired.footprints.items[i];
         const mod_path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.kicad_mod", .{ pretty_dir, fp.kicad_name });
         defer ctx.allocator.free(mod_path);
-        const f = std.fs.cwd().createFile(mod_path, .{}) catch continue;
+        const f = infra_fs.cwd().createFile(mod_path, .{}) catch continue;
         defer f.close();
         f.writeAll(fp.bytes) catch continue;
         try cache.putFootprint(ctx.allocator, fp.kicad_name, fp.sha);
@@ -457,7 +459,7 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
         defer ctx.allocator.free(src);
         const dst = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ model_dir, m.name });
         defer ctx.allocator.free(dst);
-        std.fs.cwd().copyFile(src, std.fs.cwd(), dst, .{}) catch continue;
+        infra_fs.cwd().copyFile(src, infra_fs.cwd(), dst, .{}) catch continue;
         try cache.putModel(ctx.allocator, m.name, .{ .size = m.size, .mtime_ns = m.mtime_ns });
     }
 
@@ -505,9 +507,9 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
 
     if (py.term.Exited != 0) {
         // Python failed — invalidate cache so the next sync rewrites everything.
-        std.fs.cwd().deleteFile(cache_path) catch |e| switch (e) {
+        infra_fs.cwd().deleteFile(cache_path) catch |e| switch (e) {
             error.FileNotFound => {},
-            else => std.debug.print("warning: deleting {s}: {s}\n", .{ cache_path, @errorName(e) }),
+            else => log.warn("deleting {s}: {s}", .{ cache_path, @errorName(e) }),
         };
         try respondScriptFailure(ctx, res, py.stdout, py.stderr);
         return;
@@ -708,7 +710,7 @@ fn collectDesiredFootprintsAndModels(
 
         const fp_path = try std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, inst.footprint });
         defer allocator.free(fp_path);
-        const fp_source = std.fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
+        const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
         defer allocator.free(fp_source);
 
         const kicad_name = netlist_mod.extractFootprintName(allocator, fp_source) catch try allocator.dupe(u8, inst.footprint);
@@ -743,7 +745,7 @@ fn collectDesiredFootprintsAndModels(
             try seen_models.put(try allocator.dupe(u8, mname), {});
             const src_path = try std.fmt.allocPrint(allocator, "{s}/lib/models/{s}", .{ project_dir, mname });
             defer allocator.free(src_path);
-            if (std.fs.cwd().statFile(src_path)) |st| {
+            if (infra_fs.cwd().statFile(src_path)) |st| {
                 try state.models.append(allocator, .{
                     .name = try allocator.dupe(u8, mname),
                     .size = @intCast(st.size),
@@ -790,7 +792,7 @@ const SyncCache = struct {
 };
 
 fn loadCache(allocator: std.mem.Allocator, path: []const u8) SyncCache {
-    const data = std.fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch return .{};
+    const data = infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch return .{};
     const Entry = struct {
         netlist_sha: []const u8 = "",
         sections_sha: []const u8 = "",
@@ -818,8 +820,8 @@ fn loadCache(allocator: std.mem.Allocator, path: []const u8) SyncCache {
 
 fn saveCache(allocator: std.mem.Allocator, path: []const u8, cache: *const SyncCache) void {
     const parent = std.fs.path.dirname(path) orelse ".";
-    std.fs.cwd().makePath(parent) catch return;
-    const f = std.fs.cwd().createFile(path, .{}) catch return;
+    infra_fs.cwd().makePath(parent) catch return;
+    const f = infra_fs.cwd().createFile(path, .{}) catch return;
     defer f.close();
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -852,7 +854,7 @@ fn saveCache(allocator: std.mem.Allocator, path: []const u8, cache: *const SyncC
 }
 
 fn fileExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch return false;
+    infra_fs.cwd().access(path, .{}) catch return false;
     return true;
 }
 
@@ -871,7 +873,7 @@ fn syncLayoutFromPcb(
     name: []const u8,
     pcb_path: []const u8,
 ) void {
-    const pcb_content = std.fs.cwd().readFileAlloc(allocator, pcb_path, 100 * 1024 * 1024) catch return;
+    const pcb_content = infra_fs.cwd().readFileAlloc(allocator, pcb_path, 100 * 1024 * 1024) catch return;
     defer allocator.free(pcb_content);
 
     var placed = std.StringHashMap(pcb_mod.PlacedFootprint).init(allocator);

@@ -1,10 +1,13 @@
 const std = @import("std");
+const infra_fs = @import("../infra/fs.zig");
+const log = @import("../infra/log.zig");
 const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const env_mod = @import("env.zig");
 const Evaluator = @import("evaluator.zig").Evaluator;
 const EvalError = @import("evaluator.zig").EvalError;
 const AltFunc = @import("evaluator.zig").AltFunc;
+const infra_random = @import("../infra/random.zig");
 
 const Node = ast.Node;
 const Instance = env_mod.Instance;
@@ -251,7 +254,7 @@ pub fn parseId(children: []const Node) ?[]const u8 {
 /// to ensure the tokenizer parses it as an atom, not a number.
 pub fn generateId(self: *Evaluator) ![]const u8 {
     var bytes: [4]u8 = undefined;
-    std.crypto.random.bytes(&bytes);
+    infra_random.bytes(&bytes);
     const first: u8 = (bytes[0] % 6) + 'a'; // ensure first char is a-f letter
     return std.fmt.allocPrint(self.allocator, "{c}{x:0>2}{x:0>2}{x:0>2}{x:0>1}", .{ first, bytes[1], bytes[2], bytes[3], bytes[0] & 0x0f });
 }
@@ -349,7 +352,7 @@ pub const LoadedPinout = struct {
 
 /// Load pin names + alternate functions from a pinout file. Missing file returns null.
 pub fn loadPinoutFile(self: *Evaluator, path: []const u8) ?LoadedPinout {
-    const content = std.fs.cwd().readFileAlloc(self.allocator, path, 1024 * 256) catch return null;
+    const content = infra_fs.cwd().readFileAlloc(self.allocator, path, 1024 * 256) catch return null;
     const nodes = parser_mod.parse(self.allocator, content) catch return null;
     if (nodes.len == 0) return null;
     const top = nodes[0].asList() orelse return null;
@@ -391,7 +394,7 @@ pub fn loadPinoutFile(self: *Evaluator, path: []const u8) ?LoadedPinout {
 /// Check symbol pins against the pinout (source of truth).
 pub fn validateSymbolAgainstPinout(self: *Evaluator, symbol_name: []const u8, sym_pins: *const std.StringHashMapUnmanaged([]const u8)) void {
     const pinout_path = std.fmt.allocPrint(self.allocator, "{s}/lib/pinouts/{s}.sexp", .{ self.project_dir, symbol_name }) catch return;
-    const pinout_content = std.fs.cwd().readFileAlloc(self.allocator, pinout_path, 1024 * 256) catch return;
+    const pinout_content = infra_fs.cwd().readFileAlloc(self.allocator, pinout_path, 1024 * 256) catch return;
     const pinout_nodes = parser_mod.parse(self.allocator, pinout_content) catch return;
     if (pinout_nodes.len == 0) return;
     const pinout_top = pinout_nodes[0].asList() orelse return;
@@ -419,10 +422,10 @@ pub fn validateSymbolAgainstPinout(self: *Evaluator, symbol_name: []const u8, sy
         const sym_name = entry.value_ptr.*;
         if (pinout_map.get(pin_id_key)) |pinout_name| {
             if (!std.mem.eql(u8, sym_name, pinout_name)) {
-                std.debug.print("PINOUT ERROR: symbol '{s}' pin {s}: symbol says \"{s}\" but pinout says \"{s}\"\n", .{ symbol_name, pin_id_key, sym_name, pinout_name });
+                log.warn("PINOUT ERROR: symbol '{s}' pin {s}: symbol says \"{s}\" but pinout says \"{s}\"", .{ symbol_name, pin_id_key, sym_name, pinout_name });
             }
         } else {
-            std.debug.print("PINOUT ERROR: symbol '{s}' pin {s} (\"{s}\") does not exist in pinout\n", .{ symbol_name, pin_id_key, sym_name });
+            log.warn("PINOUT ERROR: symbol '{s}' pin {s} (\"{s}\") does not exist in pinout", .{ symbol_name, pin_id_key, sym_name });
         }
     }
 }

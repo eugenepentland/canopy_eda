@@ -1,5 +1,7 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const infra_fs = @import("../infra/fs.zig");
+const log = @import("../infra/log.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const render_json = @import("../render_json.zig");
 const render_block = @import("../render_block.zig");
@@ -148,7 +150,7 @@ pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void
     const path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/pinouts/{s}.sexp", .{ ctx.project_dir, name });
     defer ctx.allocator.free(path);
 
-    const content = std.fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 256) catch {
+    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 256) catch {
         res.status = 404;
         res.content_type = .JSON;
         res.body = "{\"error\":\"pinout not found\"}";
@@ -238,7 +240,7 @@ fn writeComponentLibInfo(
 ) !void {
     const path = try std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, name });
     defer allocator.free(path);
-    const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 512) catch {
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 512) catch {
         try w.writeAll(",\"datasheets\":[],\"requirements\":[]");
         return;
     };
@@ -307,7 +309,7 @@ fn writeComponentLibInfo(
 fn datasheetSize(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) u64 {
     const path = std.fmt.allocPrint(allocator, "{s}/lib/datasheets/{s}", .{ project_dir, name }) catch return 0;
     defer allocator.free(path);
-    const f = std.fs.cwd().openFile(path, .{}) catch return 0;
+    const f = infra_fs.cwd().openFile(path, .{}) catch return 0;
     defer f.close();
     const stat = f.stat() catch return 0;
     return stat.size;
@@ -493,7 +495,7 @@ pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     };
 
     export_kicad.exportFootprints(ctx.allocator, block, ctx.project_dir, "/mnt/nas/Cyclops/Cyclops Digital/footprints.pretty") catch |e| {
-        std.debug.print("warning: exportFootprints failed: {s}\n", .{@errorName(e)});
+        log.warn("exportFootprints failed: {s}", .{@errorName(e)});
     };
 
     const sections_json = export_kicad.exportSectionLayout(ctx.allocator, block) catch "";
@@ -501,7 +503,7 @@ pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
 
     const net_path = "/mnt/nas/Cyclops/Cyclops Digital/stm32n6.net";
     {
-        const f = std.fs.cwd().createFile(net_path, .{}) catch {
+        const f = infra_fs.cwd().createFile(net_path, .{}) catch {
             res.status = 500;
             res.body = "{\"ok\":false,\"error\":\"Cannot write netlist\"}";
             res.content_type = .JSON;
@@ -515,7 +517,7 @@ pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     }
 
     if (sections_json.len > 0) {
-        const sf = std.fs.cwd().createFile(sections_path, .{}) catch null;
+        const sf = infra_fs.cwd().createFile(sections_path, .{}) catch null;
         if (sf) |f| {
             defer f.close();
             try f.writeAll(sections_json);
@@ -735,7 +737,7 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
     req_checks.applyVerifications(&check_results, block, block.instances);
 
     // Read the source file verbatim for embedding.
-    const source = std.fs.cwd().readFileAlloc(ctx.allocator, board_path, 8 * 1024 * 1024) catch &[_]u8{};
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, board_path, 8 * 1024 * 1024) catch &[_]u8{};
 
     // Render markdown.
     const md = review_md_mod.renderToMarkdown(ctx.allocator, block, ctx.project_dir, name, doc, source, &check_results) catch {
@@ -883,11 +885,11 @@ pub fn pcbPlacementApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     // Also update .kicad_pcb for export compatibility
     const pcb_path = try std.fmt.allocPrint(ctx.allocator, "{s}/out/{s}.kicad_pcb", .{ ctx.project_dir, name });
     defer ctx.allocator.free(pcb_path);
-    if (std.fs.cwd().readFileAlloc(ctx.allocator, pcb_path, 100 * 1024 * 1024)) |pcb_content| {
+    if (infra_fs.cwd().readFileAlloc(ctx.allocator, pcb_path, 100 * 1024 * 1024)) |pcb_content| {
         defer ctx.allocator.free(pcb_content);
         if (applyPlacements(ctx.allocator, pcb_content, body)) |updated| {
             defer ctx.allocator.free(updated);
-            if (std.fs.cwd().createFile(pcb_path, .{})) |f| {
+            if (infra_fs.cwd().createFile(pcb_path, .{})) |f| {
                 defer f.close();
                 try f.writeAll(updated);
             } else |_| {}
@@ -927,7 +929,7 @@ pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
     } else |_| {}
 
     // Parse traces from JSON
-    std.debug.print("[pcbRoutingApi] body len={d}\n", .{body.len});
+    log.warn("[pcbRoutingApi] body len={d}", .{body.len});
     var traces: std.ArrayListUnmanaged(layout_mod.Trace) = .empty;
     defer traces.deinit(ctx.allocator);
     var vias: std.ArrayListUnmanaged(layout_mod.Via) = .empty;
@@ -1050,7 +1052,7 @@ pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
         }
     }
 
-    std.debug.print("[pcbRoutingApi] parsed {d} traces, {d} vias\n", .{ traces.items.len, vias.items.len });
+    log.warn("[pcbRoutingApi] parsed {d} traces, {d} vias", .{ traces.items.len, vias.items.len });
     const layout = layout_mod.Layout{
         .placements = existing_placements,
         .traces = traces.items,

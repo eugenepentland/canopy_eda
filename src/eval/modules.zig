@@ -1,4 +1,5 @@
 const std = @import("std");
+const infra_fs = @import("../infra/fs.zig");
 const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const env_mod = @import("env.zig");
@@ -52,7 +53,7 @@ pub fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!vo
             defer self.allocator.free(path);
 
             // Note: don't free file_content — AST nodes reference slices into it
-            const file_content = std.fs.cwd().readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch continue;
+            const file_content = infra_fs.cwd().readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch continue;
 
             const nodes = parser_mod.parse(self.allocator, file_content) catch return EvalError.ImportError;
 

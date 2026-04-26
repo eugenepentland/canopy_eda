@@ -1,4 +1,5 @@
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 
 /// Insert pending (id xxxxxxxx) forms into a source file.
@@ -11,7 +12,7 @@ pub fn insertPendingIds(
 ) !void {
     if (pending.len == 0) return;
 
-    const source = try std.fs.cwd().readFileAlloc(allocator, source_path, 10 * 1024 * 1024);
+    const source = try infra_fs.cwd().readFileAlloc(allocator, source_path, 10 * 1024 * 1024);
     defer allocator.free(source);
 
     // Sort by offset descending so insertions don't shift earlier offsets
@@ -38,7 +39,7 @@ pub fn insertPendingIds(
     }
 
     // Write back
-    const file = try std.fs.cwd().createFile(source_path, .{});
+    const file = try infra_fs.cwd().createFile(source_path, .{});
     defer file.close();
     try file.writeAll(result.items);
 }

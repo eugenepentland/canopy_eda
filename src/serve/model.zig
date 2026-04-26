@@ -1,5 +1,6 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const infra_fs = @import("../infra/fs.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const footprint_mod = @import("../export_kicad_footprint.zig");
 const serve_root = @import("../serve.zig");
@@ -25,7 +26,7 @@ pub fn modelFileApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
         return;
     };
     defer ctx.allocator.free(path);
-    const content = std.fs.cwd().readFileAlloc(ctx.allocator, path, 50 * 1024 * 1024) catch {
+    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, path, 50 * 1024 * 1024) catch {
         res.status = 404;
         res.body = "Model not found";
         return;
@@ -45,7 +46,7 @@ pub fn modelConfigGetApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response)
         return;
     };
     defer ctx.allocator.free(path);
-    const content = std.fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 1024) catch {
+    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 1024) catch {
         res.body = "{}";
         res.content_type = .JSON;
         return;
@@ -108,7 +109,7 @@ pub fn modelConfigPostApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         return;
     };
     defer ctx.allocator.free(config_path);
-    const existing = std.fs.cwd().readFileAlloc(ctx.allocator, config_path, 1024 * 1024) catch null;
+    const existing = infra_fs.cwd().readFileAlloc(ctx.allocator, config_path, 1024 * 1024) catch null;
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(ctx.allocator);
@@ -166,7 +167,7 @@ pub fn modelConfigPostApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         try w.writeAll("\n}");
     }
 
-    const f = std.fs.cwd().createFile(config_path, .{}) catch {
+    const f = infra_fs.cwd().createFile(config_path, .{}) catch {
         res.status = 500;
         res.body = "cannot write config";
         return;
@@ -205,7 +206,7 @@ pub fn uploadModelApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
         return;
     };
     defer ctx.allocator.free(models_dir);
-    try std.fs.cwd().makePath(models_dir);
+    try infra_fs.cwd().makePath(models_dir);
 
     const model_path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.step", .{ models_dir, name }) catch {
         res.status = 500;
@@ -213,7 +214,7 @@ pub fn uploadModelApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     };
     defer ctx.allocator.free(model_path);
 
-    const f = std.fs.cwd().createFile(model_path, .{}) catch {
+    const f = infra_fs.cwd().createFile(model_path, .{}) catch {
         res.status = 500;
         res.body = "cannot write model";
         return;
@@ -245,7 +246,7 @@ pub fn modelViewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         return;
     };
     defer ctx.allocator.free(fp_path);
-    const fp_content = std.fs.cwd().readFileAlloc(ctx.allocator, fp_path, 256 * 1024) catch {
+    const fp_content = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path, 256 * 1024) catch {
         res.status = 404;
         res.body = "Footprint not found";
         return;
@@ -273,7 +274,7 @@ pub fn modelViewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         return;
     };
     defer ctx.allocator.free(config_path);
-    const config_content = std.fs.cwd().readFileAlloc(ctx.allocator, config_path, 1024 * 1024) catch null;
+    const config_content = infra_fs.cwd().readFileAlloc(ctx.allocator, config_path, 1024 * 1024) catch null;
 
     var cfg_offset: [3]f64 = .{ 0, 0, 0 };
     var cfg_rotation: [3]f64 = .{ 0, 0, 0 };

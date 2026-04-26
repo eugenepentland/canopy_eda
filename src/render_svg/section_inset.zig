@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("../infra/log.zig");
 const env_mod = @import("../eval/env.zig");
 const ctx_mod = @import("context.zig");
 const RenderCtx = ctx_mod.RenderCtx;
@@ -221,7 +222,7 @@ fn restoreInstMap(ctx: *RenderCtx, saved: []const Saved) void {
     // Called from defer — can't propagate. OOM on restore would corrupt the
     // map, so log every failure rather than silently dropping the entry.
     for (saved) |s| ctx.inst_map.put(ctx.allocator, s.ref, s.original) catch |e| {
-        std.debug.print("warning: restoreInstMap put {s}: {s}\n", .{ s.ref, @errorName(e) });
+        log.warn("restoreInstMap put {s}: {s}", .{ s.ref, @errorName(e) });
     };
 }
 

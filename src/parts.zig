@@ -1,4 +1,5 @@
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const env_mod = @import("eval/env.zig");
 const Property = env_mod.Property;
@@ -103,7 +104,7 @@ pub const PartsDb = struct {
         const path = try std.fmt.allocPrint(self.allocator, "{s}/lib/parts/{s}.sexp", .{ self.project_dir, family });
         defer self.allocator.free(path);
 
-        const source = std.fs.cwd().readFileAlloc(self.allocator, path, 1 * 1024 * 1024) catch |err| switch (err) {
+        const source = infra_fs.cwd().readFileAlloc(self.allocator, path, 1 * 1024 * 1024) catch |err| switch (err) {
             error.FileNotFound => {
                 // Cache empty so we don't retry
                 try self.entries.put(self.allocator, try self.allocator.dupe(u8, family), &.{});

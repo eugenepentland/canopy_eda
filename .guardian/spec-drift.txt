@@ -129,6 +129,8 @@ src/export_kicad_netlist.zig::writeNetlist | fn writeNetlist( allocator: std.mem
 src/export_kicad_pcb.zig::exportPcb | fn exportPcb( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, existing_pcb_path: ?[]const u8, board_def: ?*const env_mod.Board, layout_path: ?[]const u8, ) ![]const u8
 src/export_kicad_pcb.zig::parseExistingPlacements | fn parseExistingPlacements( allocator: std.mem.Allocator, pcb_content: []const u8, placed: *std.StringHashMap(PlacedFootprint), ) std.mem.Allocator.Error!void
 src/id_insert.zig::insertPendingIds | fn insertPendingIds( allocator: std.mem.Allocator, source_path: []const u8, pending: []const Evaluator.PendingId, ) !void
+src/infra/log.zig::warn | fn warn(comptime fmt: []const u8, args: anytype) void
+src/infra/random.zig::bytes | fn bytes(buf: []u8) void
 src/json_writer.zig::writeEscaped | fn writeEscaped(w: anytype, s: []const u8) !void
 src/json_writer.zig::writeField | fn writeField(w: anytype, key: []const u8, value: []const u8) !void
 src/json_writer.zig::writeString | fn writeString(w: anytype, s: []const u8) !void

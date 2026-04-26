@@ -1,5 +1,6 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const clock = @import("../infra/clock.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const env_mod = @import("../eval/env.zig");
 const serve_root = @import("../serve.zig");
@@ -43,7 +44,7 @@ pub fn indexPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
     try w.writeAll("<div style=\"max-width:960px;margin:0 auto\"><h1 style=\"padding:16px 16px 0;color:#f0f6fc\">Designs</h1><div class=\"designs-grid\">");
 
     const summaries = mcp_tools.listDesignSummaries(ctx.allocator, ctx.project_dir) catch &[_]mcp_tools.DesignSummary{};
-    const now_sec: i64 = @intCast(@divTrunc(std.time.nanoTimestamp(), std.time.ns_per_s));
+    const now_sec: i64 = @intCast(@divTrunc(clock.nanoTimestamp(), clock.ns_per_s));
     for (summaries) |s| {
         try w.writeAll("<div class=\"design-card\"><div class=\"design-card-header\">");
 
