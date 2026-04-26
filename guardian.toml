@@ -56,3 +56,13 @@ max_score = 50
 # should keep the framework default 3.
 [returns_per_fn]
 max_returns = 12
+
+# HTML / SVG / KiCad-S-expression template literals (multi-line
+# `\\` block strings) and JSON-schema definitions in src/serve/
+# routinely run 130-160 chars. Wrapping them across lines breaks the
+# template's visual structure. The hard outliers (200+ chars in
+# mcp_tools.zig and the page-render handlers) get extracted to
+# module-level const blocks rather than relying on this cap.
+# New consumers should keep the framework recommendation 100-120.
+[line_length]
+max_len = 160
