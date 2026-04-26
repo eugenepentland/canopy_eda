@@ -52,12 +52,22 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
     const violations = erc_mod.runErc(ctx.allocator, block, ctx.project_dir) catch &[_]erc_mod.Violation{};
     const status = computeStatus(violations, eval.assertions.items);
 
+    // Run the requirement-attached (check ...) primitives once per design
+    // load so the per-hub dropdown can show ✓/✗ next to each library-
+    // declared rule. Keyed by ref_des; same-order alignment with
+    // `inst.requirements`. Computed before buildReview so verified-status
+    // surfaces in the embedded review JSON too.
+    var check_results = req_checks.runChecks(ctx.allocator, &eval, block) catch blk: {
+        break :blk std.StringHashMapUnmanaged([]req_checks.Result).empty;
+    };
+    req_checks.applyVerifications(&check_results, block, block.instances);
+
     // Build the review doc too — the schematic page embeds its content
     // (summary, power budget/sequencing, test points, ERC, assertions) below
     // the section cards so a single URL covers both "what it is" and
     // "whether it's correct."
     const review_doc: ?review.ReviewDoc = blk: {
-        var doc = review.buildReview(ctx.allocator, name, block, eval.assertions.items, violations) catch break :blk null;
+        var doc = review.buildReview(ctx.allocator, name, block, eval.assertions.items, violations, &check_results) catch break :blk null;
         const stored_state = review_state_mod.loadState(ctx.allocator, ctx.project_dir, name) catch review.ReviewState{};
         const live_slugs = ctx.allocator.alloc([]const u8, doc.sections.len) catch break :blk null;
         const live_hashes = ctx.allocator.alloc([]const u8, doc.sections.len) catch break :blk null;
@@ -67,14 +77,6 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
         }
         doc.review_state = review_state_mod.reconcile(ctx.allocator, stored_state, live_slugs, live_hashes) catch review.ReviewState{};
         break :blk doc;
-    };
-
-    // Run the requirement-attached (check ...) primitives once per design
-    // load so the per-hub dropdown can show ✓/✗ next to each library-
-    // declared rule. Keyed by ref_des; same-order alignment with
-    // `inst.requirements`.
-    const check_results = req_checks.runChecks(ctx.allocator, &eval, block) catch blk: {
-        break :blk std.StringHashMapUnmanaged([]const req_checks.Result).empty;
     };
 
     const html = render_html.renderToHtml(

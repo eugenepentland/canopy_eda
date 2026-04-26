@@ -119,7 +119,32 @@ pub fn writeSummaryTable(w: anytype, s: review.Summary) !void {
             s.assertion_fail,
         },
     );
-    try w.writeAll("</table></section>");
+    const missing_n = s.critical_missing_requirements.len;
+    const cov_class: []const u8 = if (s.critical_count == 0) "" else if (missing_n == 0) "pass" else "warn";
+    try w.print(
+        "<tr><th>Critical ICs</th><td>{d}</td><th>With requirements</th><td class=\"{s}\">{d}</td><th>Missing</th><td class=\"{s}\">{d}</td></tr>",
+        .{
+            s.critical_count,
+            cov_class,
+            s.critical_with_requirements,
+            if (missing_n > 0) "warn" else "",
+            missing_n,
+        },
+    );
+    try w.writeAll("</table>");
+    if (missing_n > 0) {
+        try w.writeAll("<p class=\"hint\">Add <code>(requirement \"...\")</code> forms in <code>lib/components/&lt;name&gt;.sexp</code> for:</p>");
+        try w.writeAll("<ul class=\"missing-reqs\">");
+        for (s.critical_missing_requirements) |m| {
+            try w.writeAll("<li><code>");
+            try writeHtmlEscaped(w, m.ref_des);
+            try w.writeAll("</code> — <code>");
+            try writeHtmlEscaped(w, m.component);
+            try w.writeAll("</code></li>");
+        }
+        try w.writeAll("</ul>");
+    }
+    try w.writeAll("</section>");
 }
 
 pub fn writePowerBudget(w: anytype, rails: []const power_budget.Rail) !void {

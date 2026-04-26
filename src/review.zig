@@ -1,6 +1,7 @@
 const std = @import("std");
 const env_mod = @import("eval/env.zig");
 const erc_mod = @import("erc.zig");
+const req_checks = @import("req_checks.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const DesignBlock = env_mod.DesignBlock;
@@ -23,6 +24,25 @@ pub const Summary = struct {
     assertion_pass: usize,
     assertion_warn: usize,
     assertion_fail: usize,
+    /// Hub-prefix instances (U/J/P/X/Q and any non-passive prefix) — the
+    /// "main ICs" the user wants requirement coverage on. Mirrors the
+    /// classification used by the SVG renderer (`render_svg.draw.isHub`).
+    critical_count: usize = 0,
+    /// Subset of `critical_count` whose library component declares at least
+    /// one `(requirement ...)` form.
+    critical_with_requirements: usize = 0,
+    /// Path-qualified ref-deses of the critical components missing any
+    /// requirements, sorted naturally so the user can scan and act on them.
+    critical_missing_requirements: []const MissingRequirement = &.{},
+};
+
+pub const MissingRequirement = struct {
+    /// Sub-block-prefixed ref_des (e.g. "pwr/U1") so duplicates across
+    /// sub-blocks stay distinguishable.
+    ref_des: []const u8,
+    /// Library component name — points the user at the .sexp file under
+    /// `lib/components/` they need to add `(requirement ...)` to.
+    component: []const u8,
 };
 
 pub const PortSummary = struct {
@@ -58,6 +78,10 @@ pub const ComponentRequirementEntry = struct {
     ref_des: []const u8,
     component: []const u8,
     requirements: []const env_mod.Requirement,
+    /// Aligned with `requirements[i]` — pass/fail/na/verified plus the
+    /// human-readable check message and any matching `(verifies …)`
+    /// rationale. Empty slice when no check engine ran.
+    req_results: []const req_checks.Result = &.{},
 };
 
 pub const BomEntry = struct {
@@ -144,6 +168,9 @@ pub const ReviewDoc = struct {
 
 /// Build a review document for a design block. `assertions` comes from the
 /// evaluator's `assertions` list (pass an empty slice when not available).
+/// `check_results` is the (already verifies-overlaid) map from
+/// `req_checks.runChecks` + `applyVerifications`; pass `null` to skip status
+/// info (every requirement will surface as `na`).
 /// All allocations use the supplied allocator; the returned struct references
 /// those allocations plus string slices owned by the block.
 pub fn buildReview(
@@ -152,8 +179,9 @@ pub fn buildReview(
     block: *const DesignBlock,
     assertions: []const AssertionResult,
     violations: []const erc_mod.Violation,
+    check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
 ) !ReviewDoc {
-    const sections = try buildSectionReports(allocator, block, violations);
+    const sections = try buildSectionReports(allocator, block, violations, check_results);
     const rails = power_budget.analyze(allocator, block);
     const rails_sorted = try sortRailsByTightness(allocator, rails);
     const sequence = power_sequencing.analyze(allocator, block);
@@ -162,7 +190,7 @@ pub fn buildReview(
     const asserts = try buildAssertionReports(allocator, assertions);
     const unresolved = try filterUnresolved(allocator, violations);
 
-    const summary = buildSummary(block, sections.len, violations, assertions);
+    const summary = try buildSummary(allocator, block, sections.len, violations, assertions);
     const generated_at = try isoTimestampNow(allocator);
 
     return .{
@@ -235,11 +263,12 @@ fn lessThanTestPoint(_: void, a: TestPointEntry, b: TestPointEntry) bool {
 }
 
 fn buildSummary(
+    allocator: std.mem.Allocator,
     block: *const DesignBlock,
     section_count: usize,
     violations: []const erc_mod.Violation,
     assertions: []const AssertionResult,
-) Summary {
+) !Summary {
     var err: usize = 0;
     var warn: usize = 0;
     var info: usize = 0;
@@ -268,6 +297,12 @@ fn buildSummary(
         break :blk .pass;
     };
 
+    var critical_total: usize = 0;
+    var critical_with_reqs: usize = 0;
+    var missing: std.ArrayListUnmanaged(MissingRequirement) = .empty;
+    try collectCriticalCoverage(allocator, block, "", &critical_total, &critical_with_reqs, &missing);
+    std.mem.sort(MissingRequirement, missing.items, {}, lessThanMissing);
+
     return .{
         .status = status,
         .section_count = section_count,
@@ -279,7 +314,63 @@ fn buildSummary(
         .assertion_pass = a_pass,
         .assertion_warn = a_warn,
         .assertion_fail = a_fail,
+        .critical_count = critical_total,
+        .critical_with_requirements = critical_with_reqs,
+        .critical_missing_requirements = missing.items,
     };
+}
+
+/// Walk the design (and every sub-block) and bucket every "critical" hub
+/// instance into total, with-reqs, and missing-list. `path_prefix` carries
+/// the sub-block path so a missing entry like "pwr/U1" stays distinct from
+/// a top-level "U1".
+fn collectCriticalCoverage(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    path_prefix: []const u8,
+    total: *usize,
+    with_reqs: *usize,
+    missing: *std.ArrayListUnmanaged(MissingRequirement),
+) !void {
+    for (block.instances) |inst| {
+        if (!isCriticalRefDes(inst.ref_des)) continue;
+        if (isTestPoint(inst)) continue;
+        if (inst.requirements_ignored) continue;
+        total.* += 1;
+        if (inst.requirements.len > 0) {
+            with_reqs.* += 1;
+        } else {
+            const qualified = if (path_prefix.len == 0)
+                try allocator.dupe(u8, inst.ref_des)
+            else
+                try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path_prefix, inst.ref_des });
+            try missing.append(allocator, .{ .ref_des = qualified, .component = inst.component });
+        }
+    }
+    for (block.sub_blocks) |sb| {
+        const child_prefix = if (path_prefix.len == 0)
+            try allocator.dupe(u8, sb.name)
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path_prefix, sb.name });
+        try collectCriticalCoverage(allocator, sb.block, child_prefix, total, with_reqs, missing);
+    }
+}
+
+/// Mirror of `render_svg.draw.isHub`: U/J/P/X/Q and any non-passive prefix
+/// counts as a critical IC; R/C/L/F/D are passive spokes and excluded.
+/// Operates on the bare ref_des as it appears in source — the caller adds
+/// any sub-block path prefix separately.
+fn isCriticalRefDes(ref_des: []const u8) bool {
+    if (ref_des.len == 0) return false;
+    return switch (ref_des[0]) {
+        'U', 'J', 'P', 'X', 'Q' => true,
+        'R', 'C', 'L', 'F', 'D' => false,
+        else => true,
+    };
+}
+
+fn lessThanMissing(_: void, a: MissingRequirement, b: MissingRequirement) bool {
+    return lessThanNatural(a.ref_des, b.ref_des);
 }
 
 /// Flatten instance count across the design plus every sub-block.
@@ -305,10 +396,11 @@ fn buildSectionReports(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     violations: []const erc_mod.Violation,
+    check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
 ) ![]const SectionReport {
     var out: std.ArrayListUnmanaged(SectionReport) = .empty;
     for (block.sections) |sec| {
-        const rep = try reportFromSection(allocator, block, sec, violations);
+        const rep = try reportFromSection(allocator, block, sec, violations, check_results);
         try out.append(allocator, rep);
     }
     return out.items;
@@ -319,6 +411,7 @@ fn reportFromSection(
     block: *const DesignBlock,
     sec: Section,
     violations: []const erc_mod.Violation,
+    check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
 ) !SectionReport {
     // Collect every ref_des that belongs to this section (including nested
     // sub-sections and pin-group attachments on top-level instances).
@@ -344,7 +437,7 @@ fn reportFromSection(
         });
     }
 
-    const comp_reqs = try collectComponentRequirements(allocator, block, sec, &refs);
+    const comp_reqs = try collectComponentRequirements(allocator, block, sec, &refs, check_results);
 
     return .{
         .name = sec.name,
@@ -369,6 +462,7 @@ fn collectComponentRequirements(
     block: *const DesignBlock,
     sec: Section,
     refs: *const std.StringHashMapUnmanaged(void),
+    check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
 ) ![]const ComponentRequirementEntry {
     var by_ref: std.StringHashMapUnmanaged(Instance) = .empty;
     collectSectionInstances(sec, &by_ref, allocator);
@@ -390,10 +484,15 @@ fn collectComponentRequirements(
     while (it2.next()) |e| {
         const inst = e.value_ptr.*;
         if (inst.requirements.len == 0) continue;
+        const results: []const req_checks.Result = if (check_results) |m|
+            (m.get(inst.ref_des) orelse &.{})
+        else
+            &.{};
         try out.append(allocator, .{
             .ref_des = inst.ref_des,
             .component = inst.component,
             .requirements = inst.requirements,
+            .req_results = results,
         });
     }
     std.mem.sort(ComponentRequirementEntry, out.items, {}, lessThanByRefDes);
@@ -769,7 +868,6 @@ test "isoTimestamp formats epoch seconds" {
 // spec: review - buildSummary marks status=pass when no errors or warnings
 test "buildSummary status pass" {
     const alloc = std.testing.allocator;
-    _ = alloc;
     const block: DesignBlock = .{
         .name = "test",
         .instances = &.{},
@@ -779,12 +877,13 @@ test "buildSummary status pass" {
         .groups = &.{},
         .sub_blocks = &.{},
     };
-    const summary = buildSummary(&block, 0, &.{}, &.{});
+    const summary = try buildSummary(alloc, &block, 0, &.{}, &.{});
     try std.testing.expectEqual(Status.pass, summary.status);
 }
 
 // spec: review - buildSummary marks status=warn on warning-level violations
 test "buildSummary status warn" {
+    const alloc = std.testing.allocator;
     const block: DesignBlock = .{
         .name = "test",
         .instances = &.{},
@@ -797,7 +896,7 @@ test "buildSummary status warn" {
     const violations = [_]erc_mod.Violation{
         .{ .kind = .missing_decoupling, .severity = .warning, .message = "x" },
     };
-    const summary = buildSummary(&block, 0, &violations, &.{});
+    const summary = try buildSummary(alloc, &block, 0, &violations, &.{});
     try std.testing.expectEqual(Status.warn, summary.status);
 }
 
@@ -855,6 +954,7 @@ test "buildTestPoints ignores non-testpoints" {
 
 // spec: review - buildSummary marks status=fail on error-level violations
 test "buildSummary status fail" {
+    const alloc = std.testing.allocator;
     const block: DesignBlock = .{
         .name = "test",
         .instances = &.{},
@@ -867,6 +967,68 @@ test "buildSummary status fail" {
     const violations = [_]erc_mod.Violation{
         .{ .kind = .duplicate_refdes, .severity = .@"error", .message = "x" },
     };
-    const summary = buildSummary(&block, 0, &violations, &.{});
+    const summary = try buildSummary(alloc, &block, 0, &violations, &.{});
     try std.testing.expectEqual(Status.fail, summary.status);
+}
+
+// spec: review - buildSummary counts critical hub instances and lists those missing requirements
+test "buildSummary tracks critical-component requirement coverage" {
+    const alloc = std.testing.allocator;
+    const reqs = [_]env_mod.Requirement{.{ .text = "VDD must be 3V3" }};
+    const insts = [_]Instance{
+        .{ .ref_des = "U1", .component = "stm32", .value = "", .footprint = "", .symbol = "", .requirements = &reqs },
+        .{ .ref_des = "U2", .component = "ltc6655", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "C1", .component = "cap-0402", .value = "100nF", .footprint = "", .symbol = "" },
+        .{ .ref_des = "J1", .component = "usb-c", .value = "", .footprint = "", .symbol = "" },
+        // Test points have hub-style ref_des (TPx) but should be excluded —
+        // they get their own table elsewhere and don't need requirements.
+        .{ .ref_des = "TP1", .component = "testpoint", .value = "", .footprint = "", .symbol = "" },
+    };
+    const block: DesignBlock = .{
+        .name = "t",
+        .instances = &insts,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const summary = try buildSummary(alloc, &block, 0, &.{}, &.{});
+    defer {
+        for (summary.critical_missing_requirements) |m| alloc.free(m.ref_des);
+        alloc.free(summary.critical_missing_requirements);
+    }
+    try std.testing.expectEqual(@as(usize, 3), summary.critical_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.critical_with_requirements);
+    try std.testing.expectEqual(@as(usize, 2), summary.critical_missing_requirements.len);
+    try std.testing.expectEqualStrings("J1", summary.critical_missing_requirements[0].ref_des);
+    try std.testing.expectEqualStrings("U2", summary.critical_missing_requirements[1].ref_des);
+}
+
+// spec: review - buildSummary skips instances whose component sets ignore-requirements
+test "buildSummary respects requirements_ignored opt-out" {
+    const alloc = std.testing.allocator;
+    const insts = [_]Instance{
+        .{ .ref_des = "U1", .component = "stm32", .value = "", .footprint = "", .symbol = "" },
+        // Mounting hardware: shows up as a hub (H prefix → critical) but the
+        // library marked it `(ignore-requirements)`, so it must not count.
+        .{ .ref_des = "H1", .component = "screw-bushing", .value = "", .footprint = "", .symbol = "", .requirements_ignored = true },
+    };
+    const block: DesignBlock = .{
+        .name = "t",
+        .instances = &insts,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const summary = try buildSummary(alloc, &block, 0, &.{}, &.{});
+    defer {
+        for (summary.critical_missing_requirements) |m| alloc.free(m.ref_des);
+        alloc.free(summary.critical_missing_requirements);
+    }
+    try std.testing.expectEqual(@as(usize, 1), summary.critical_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.critical_missing_requirements.len);
+    try std.testing.expectEqualStrings("U1", summary.critical_missing_requirements[0].ref_des);
 }

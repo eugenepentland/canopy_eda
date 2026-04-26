@@ -202,10 +202,13 @@ pub fn prescanRefDes(self: *Evaluator, forms: []const Node) void {
 pub fn componentPrefix(family: []const u8) u8 {
     // Known passive/generic families
     if (std.mem.eql(u8, family, "ind")) return 'L';
-    if (std.mem.eql(u8, family, "led")) return 'D';
+    if (std.mem.eql(u8, family, "led") or std.mem.startsWith(u8, family, "led-")) return 'D';
     if (std.mem.startsWith(u8, family, "cap")) return 'C';
     if (std.mem.startsWith(u8, family, "res")) return 'R';
     if (std.mem.startsWith(u8, family, "diode")) return 'D';
+    // Coilcraft XFL-series power inductors live as standalone library parts
+    // (e.g. xfl4012) rather than being modeled as the generic `ind` family.
+    if (std.mem.startsWith(u8, family, "xfl")) return 'L';
     // Known connector patterns
     if (std.mem.startsWith(u8, family, "connector")) return 'J';
     if (std.mem.startsWith(u8, family, "amphenol")) return 'J';

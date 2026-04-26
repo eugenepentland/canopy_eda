@@ -122,6 +122,11 @@ pub const Evaluator = struct {
         /// every design that uses the part — used by the review page to
         /// cross-check design work against the part's rules.
         requirements: []const env_mod.Requirement = &.{},
+        /// Set by `(ignore-requirements)` in the component file. Marks parts
+        /// where requirement coverage is intentionally skipped (mounting
+        /// hardware, simple debug headers, etc.) so they don't show up in
+        /// the schematic-summary "missing requirements" list.
+        requirements_ignored: bool = false,
     };
 
     pub fn init(allocator: std.mem.Allocator, project_dir: []const u8) Evaluator {

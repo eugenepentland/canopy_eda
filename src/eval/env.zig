@@ -147,6 +147,37 @@ pub const SectionNote = struct {
     ref: ?NoteRef = null,
 };
 
+/// A design-side sign-off that explicitly answers a library `(requirement ...)`.
+/// Stored at top level inside `(design-block ...)` via:
+///   `(verifies (req "<ref-des>" <req-id>) "rationale prose")`
+/// or the long form with optional `(rationale ...)`, `(signed-off-by ...)`,
+/// `(date ...)` sub-forms.
+///
+/// Use cases: requirements the netlist alone can't answer (firmware
+/// sequencing, layout proximity, BOM matching across channels). The review
+/// pairs each verifies entry with its target `(ref_des, req_id)` so the UI
+/// shows "machine check failed/n.a. → human signed off with prose".
+///
+/// Override semantics: when a target requirement also has a `(check ...)`
+/// that *fails*, the verifies entry does NOT flip the status to `verified`.
+/// The review marks the requirement as fail-with-override so a real defect
+/// can never be silently buried by prose. When the requirement has no check
+/// (or the check is `na`), a matching verifies flips the status to
+/// `verified`.
+pub const Verification = struct {
+    /// Reference designator of the target instance (e.g. "U1", "U_VREF").
+    ref_des: []const u8,
+    /// Requirement ID — either explicit `(id …)` from the component file or
+    /// the CRC32-derived fallback. Matched against `Requirement.id`.
+    req_id: []const u8,
+    /// Free-text justification for the sign-off.
+    rationale: []const u8,
+    /// Optional signer (email or handle).
+    signed_by: []const u8 = "",
+    /// Optional ISO-8601 date.
+    date: []const u8 = "",
+};
+
 /// A library-level rule for using a component correctly. Stored in the
 /// component's `lib/components/<name>.sexp` via
 /// `(requirement "text" (ref "file.pdf" (page N)))`. Used to validate that
@@ -158,7 +189,24 @@ pub const Requirement = struct {
     text: []const u8,
     ref: ?NoteRef = null,
     check: ?Check = null,
+    /// 8-char hex ID. When the source declares `(id <hex>)` inside the
+    /// `(requirement ...)` form, that wins. Otherwise this field is the
+    /// CRC32 of `text` formatted as 8 lowercase hex digits — derived at
+    /// parse time so every requirement is addressable from a `(verifies ...)`
+    /// form without a prior freeze. Editing the requirement text without
+    /// freezing first will break links, so we recommend running
+    /// `eda freeze-requirement-ids` once a design starts using verifies.
+    id: []const u8 = "",
 };
+
+/// Compute the auto-derived 8-char hex requirement ID from the requirement
+/// text. Returned slice is owned by the caller (allocated via `allocator`).
+pub fn requirementIdForText(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    var hasher = std.hash.Crc32.init();
+    hasher.update(text);
+    const h = hasher.final();
+    return std.fmt.allocPrint(allocator, "{x:0>8}", .{h});
+}
 
 /// Tagged union of automated-check primitives that can hang off a
 /// Requirement. Each variant names a pattern the check engine knows how
@@ -187,7 +235,52 @@ pub const Check = union(enum) {
     /// "VDD input supply must be 3.75–6V" style envelope checks against
     /// the design's declared rails.
     voltage_range: struct { pin: []const u8, min_v: f64, max_v: f64 },
+    /// `(tied-to-net (pin "P") (net "N"))` — pin P must resolve to net N
+    /// (alias-aware). Covers "PDR_ON must be tied to VDDA18_AON" style
+    /// fixed-net rules where the part datasheet calls out a specific rail.
+    tied_to_net: struct { pin: []const u8, target_net: []const u8 },
+    /// `(not-connected (pin "P"))` — pin P must NOT be wired to anything.
+    /// Used for DNC pins that the datasheet says must float. Looks at raw
+    /// `block.nets`, not the alias-folded view, so a per-pin stub with no
+    /// foreign pins counts as disconnected.
+    not_connected: struct { pin: []const u8 },
+    /// `(pin-not-floating (pin "P"))` — pin P must resolve to a non-empty
+    /// net with at least one other co-pin. Inverse of `not-connected`;
+    /// catches BOOT0-style "must be tied to a defined logic level" rules.
+    pin_not_floating: struct { pin: []const u8 },
+    /// `(pins-on-same-net (pins "A" "B" "C" ...))` — every listed pin
+    /// function on this instance must resolve to the same (alias-equal)
+    /// net. Generalises `connected` to N pins; covers "all VSSSMPS pins
+    /// must be tied externally to VSS" type rules.
+    pins_on_same_net: struct { pins: []const []const u8 },
+    /// `(decoupling-per-pin (return-pin "GND") (pins "VDD_1" "VDD_2") (min-uf F) (count N))`
+    /// — for each VDD pin, find at least one cap of value ≥ F µF whose
+    /// terminals are on (that-pin's net, return-pin's net). Total distinct
+    /// caps satisfying the rule must be ≥ N. Implements "one 100 nF MLCC
+    /// per VDD pin" rules where the existing `decoupling` primitive's
+    /// "≥1 cap total" semantics are too lax.
+    decoupling_per_pin: struct {
+        return_pin: []const u8,
+        pins: []const []const u8,
+        min_uf: f64,
+        count: u32,
+    },
+    /// `(series-element (kind R|L|C) (pin "P") (target-net "N") (min X) (max Y))` —
+    /// a resistor / inductor / capacitor of value in [min, max] must bridge
+    /// the net resolved on pin P and the named net. Generalisation of
+    /// `pullup-range`; min/max units are ohms/µH/µF chosen by `kind`.
+    series_element: struct {
+        kind: SeriesKind,
+        pin: []const u8,
+        target_net: []const u8,
+        min: f64,
+        max: f64,
+    },
 };
+
+/// Element kind for `series-element` checks. Determines which ref-des prefix
+/// (R/L/C) the check engine filters by, and which value-parser to use.
+pub const SeriesKind = enum { R, L, C };
 
 /// Parse `(check (<primitive> ...))` nested inside a `(requirement ...)`
 /// body. Returns null if the form isn't a recognized check.
@@ -228,6 +321,99 @@ pub fn parseCheck(node: @import("../sexpr/ast.zig").Node) ?Check {
         const lo = namedNumberArg(body_children[2], "min") orelse return null;
         const hi = namedNumberArg(body_children[3], "max") orelse return null;
         return .{ .voltage_range = .{ .pin = p, .min_v = lo, .max_v = hi } };
+    }
+    if (std.mem.eql(u8, kind, "tied-to-net")) {
+        if (body_children.len < 3) return null;
+        const p = pinArg(body_children[1]) orelse return null;
+        const n = netArg(body_children[2]) orelse return null;
+        return .{ .tied_to_net = .{ .pin = p, .target_net = n } };
+    }
+    if (std.mem.eql(u8, kind, "not-connected")) {
+        if (body_children.len < 2) return null;
+        const p = pinArg(body_children[1]) orelse return null;
+        return .{ .not_connected = .{ .pin = p } };
+    }
+    if (std.mem.eql(u8, kind, "pin-not-floating")) {
+        if (body_children.len < 2) return null;
+        const p = pinArg(body_children[1]) orelse return null;
+        return .{ .pin_not_floating = .{ .pin = p } };
+    }
+    if (std.mem.eql(u8, kind, "pins-on-same-net")) {
+        if (body_children.len < 2) return null;
+        // Body: (pins-on-same-net (pins "A" "B" "C" ...))
+        const pins_form = body_children[1].asList() orelse return null;
+        if (pins_form.len < 3) return null;
+        const ph = pins_form[0].asAtom() orelse return null;
+        if (!std.mem.eql(u8, ph, "pins")) return null;
+        // Allocate the pin slice in the global page allocator — same lifetime
+        // policy as other AST string slices.
+        const allocator = std.heap.page_allocator;
+        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (pins_form[1..]) |pn| {
+            const s = pn.asString() orelse pn.asAtom() orelse continue;
+            list.append(allocator, s) catch return null;
+        }
+        if (list.items.len < 2) return null;
+        return .{ .pins_on_same_net = .{ .pins = list.toOwnedSlice(allocator) catch return null } };
+    }
+    if (std.mem.eql(u8, kind, "decoupling-per-pin")) {
+        if (body_children.len < 5) return null;
+        // (decoupling-per-pin (return-pin "X") (pins "A" "B"...) (min-uf F) (count N))
+        const rp_form = body_children[1].asList() orelse return null;
+        if (rp_form.len < 2) return null;
+        const rp_head = rp_form[0].asAtom() orelse return null;
+        if (!std.mem.eql(u8, rp_head, "return-pin")) return null;
+        const return_pin = rp_form[1].asString() orelse rp_form[1].asAtom() orelse return null;
+
+        const pins_form = body_children[2].asList() orelse return null;
+        if (pins_form.len < 2) return null;
+        const ph = pins_form[0].asAtom() orelse return null;
+        if (!std.mem.eql(u8, ph, "pins")) return null;
+        const allocator = std.heap.page_allocator;
+        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (pins_form[1..]) |pn| {
+            const s = pn.asString() orelse pn.asAtom() orelse continue;
+            list.append(allocator, s) catch return null;
+        }
+        if (list.items.len == 0) return null;
+
+        const min_uf = namedNumberArg(body_children[3], "min-uf") orelse return null;
+        const count_f = namedNumberArg(body_children[4], "count") orelse return null;
+        const count: u32 = if (count_f < 0) 0 else @intFromFloat(count_f);
+        return .{ .decoupling_per_pin = .{
+            .return_pin = return_pin,
+            .pins = list.toOwnedSlice(allocator) catch return null,
+            .min_uf = min_uf,
+            .count = count,
+        } };
+    }
+    if (std.mem.eql(u8, kind, "series-element")) {
+        if (body_children.len < 6) return null;
+        // (series-element (kind R|L|C) (pin "P") (target-net "N") (min X) (max Y))
+        const kind_form = body_children[1].asList() orelse return null;
+        if (kind_form.len < 2) return null;
+        const kh = kind_form[0].asAtom() orelse return null;
+        if (!std.mem.eql(u8, kh, "kind")) return null;
+        const kind_atom = kind_form[1].asAtom() orelse return null;
+        const sk: SeriesKind = if (std.mem.eql(u8, kind_atom, "R")) .R //
+            else if (std.mem.eql(u8, kind_atom, "L")) .L //
+            else if (std.mem.eql(u8, kind_atom, "C")) .C //
+            else return null;
+        const p = pinArg(body_children[2]) orelse return null;
+        const tn_form = body_children[3].asList() orelse return null;
+        if (tn_form.len < 2) return null;
+        const tn_head = tn_form[0].asAtom() orelse return null;
+        if (!std.mem.eql(u8, tn_head, "target-net")) return null;
+        const target_net = tn_form[1].asString() orelse tn_form[1].asAtom() orelse return null;
+        const lo = namedNumberArg(body_children[4], "min") orelse return null;
+        const hi = namedNumberArg(body_children[5], "max") orelse return null;
+        return .{ .series_element = .{
+            .kind = sk,
+            .pin = p,
+            .target_net = target_net,
+            .min = lo,
+            .max = hi,
+        } };
     }
     return null;
 }
@@ -331,6 +517,10 @@ pub const Instance = struct {
     /// Library-declared rules for using this part. Read-only during review.
     /// Edited by modifying `lib/components/<component>.sexp`.
     requirements: []const Requirement = &.{},
+    /// True when the component declares `(ignore-requirements)` — opt-out for
+    /// parts that don't need a requirement check (mounting hardware, debug
+    /// headers, etc.). Read by the review summary's missing-requirements list.
+    requirements_ignored: bool = false,
     /// Schematic-level attributes (e.g., "np0", "x7r" for dielectric type)
     attrs: []const []const u8 = &.{},
     /// Optional multi-part breakdown. Empty = single-part (render as one hub).
@@ -452,6 +642,9 @@ pub const DesignBlock = struct {
     sections: []const Section = &.{},
     /// Net ties for cross-block connections (sub-block port wiring).
     net_ties: []const NetTie = &.{},
+    /// Design-side `(verifies …)` sign-offs that answer library requirements
+    /// the netlist alone can't verify.
+    verifications: []const Verification = &.{},
 };
 
 /// A board definition: a design-block plus physical PCB parameters.

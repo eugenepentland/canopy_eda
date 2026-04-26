@@ -169,6 +169,8 @@ Public functions: analyze
 - buildSummary marks status=pass when no errors or warnings
 - buildSummary marks status=warn on warning-level violations
 - buildSummary marks status=fail on error-level violations
+- buildSummary counts critical hub instances and lists those missing requirements
+- buildSummary skips instances whose component sets ignore-requirements
 - buildTestPoints collects testpoint instances with pin 1 net
 - buildTestPoints ignores non-testpoints
 
@@ -184,12 +186,19 @@ Public functions: analyze
 
 Public functions: renderToJson
 
+## review_md
+
+Public functions: renderToMarkdown
+
+- emits markdown header for design name
+
 ## req_checks
 
-Public functions: runChecks, deinit, parseMicroFarads, parseOhms
+Public functions: runChecks, deinit, parseMicroFarads, parseOhms, parseMicroHenries
 
 - parseMicroFarads handles SI-suffixed cap values
 - parseOhms handles SI prefixes for resistor values
+- parseMicroHenries handles SI-suffixed inductor values
 
 ## review_html
 

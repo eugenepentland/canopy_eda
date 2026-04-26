@@ -169,6 +169,7 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !
     router.post("/api/update-kicad-pcb/:name", kicad_sync.writePcbApi, .{});
     router.get("/api/export-bom/:name", api.exportBomCsvApi, .{});
     router.get("/api/export-gerber/:name", api.exportGerberApi, .{});
+    router.get("/api/export-review/:name", api.exportReviewPackageApi, .{});
     router.post("/api/update-pcb/:name", api.updatePcbApi, .{});
     router.post("/api/pcb-placement/:name", api.pcbPlacementApi, .{});
     router.post("/api/pcb-routing/:name", api.pcbRoutingApi, .{});

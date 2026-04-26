@@ -4,7 +4,7 @@ const erc_mod = @import("erc.zig");
 const review = @import("review.zig");
 const review_html = @import("review_html.zig");
 const req_checks = @import("req_checks.zig");
-const CheckResultMap = std.StringHashMapUnmanaged([]const req_checks.Result);
+const CheckResultMap = std.StringHashMapUnmanaged([]req_checks.Result);
 const DesignBlock = env_mod.DesignBlock;
 const Section = env_mod.Section;
 const Instance = env_mod.Instance;
@@ -40,41 +40,8 @@ pub fn renderToHtml(
     review_doc: ?review.ReviewDoc,
     check_results: *const CheckResultMap,
 ) ![]const u8 {
-    var ctx = RenderCtx.init(allocator);
+    var ctx = try setupRenderCtx(allocator, block);
     ctx.project_dir = project_dir;
-    try ctx.collectFlat(block, "");
-
-    var flat_sec_idx: usize = 0;
-    for (block.sections) |sec| {
-        for (sec.instances) |inst| try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
-        for (sec.pin_groups) |pg| {
-            if (!ctx.section_map.contains(pg.ref_des)) {
-                try ctx.section_map.put(allocator, pg.ref_des, flat_sec_idx);
-            }
-        }
-        flat_sec_idx += 1;
-        for (sec.sub_sections) |sub| {
-            for (sub.instances) |inst| try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
-            for (sub.pin_groups) |pg| {
-                if (!ctx.section_map.contains(pg.ref_des)) {
-                    try ctx.section_map.put(allocator, pg.ref_des, flat_sec_idx);
-                }
-            }
-            flat_sec_idx += 1;
-        }
-    }
-    for (block.sub_blocks) |sb| {
-        for (sb.block.instances) |inst| try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
-        flat_sec_idx += 1;
-    }
-
-    try ctx.buildPinNetMap();
-    try ctx.classify();
-    try ctx.buildAdjacency();
-    try ctx.synthesizeSpokeConnections();
-    try ctx.buildNetIndex();
-    try ctx.buildSignificantNets(block);
-    try ctx.buildPinCanonicalNets();
 
     var asserted_fns: std.StringHashMapUnmanaged([]const u8) = .empty;
     appendAssertedFromBlock(allocator, &asserted_fns, block);
@@ -135,7 +102,7 @@ pub fn renderToHtml(
     try w.writeAll("</div>");
     try writeSidebar(w);
     try w.writeAll("</div>");
-    try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns);
+    try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns, check_results);
     if (review_doc != null) {
         // BODY_JS (review checklist handlers) reuses DESIGN_NAME — already
         // declared by writeScripts above.
@@ -198,6 +165,7 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
     try w.print("<a class=\"head-link\" href=\"/schematics/{s}/canvas\">Canvas (legacy)</a>", .{design_name});
     try w.print("<a class=\"head-link\" href=\"/api/export-bom/{s}\">BOM</a>", .{design_name});
     try w.print("<a class=\"head-link\" href=\"/api/export-netlist/{s}\">Netlist</a>", .{design_name});
+    try w.print("<a class=\"head-link head-btn\" href=\"/api/export-review/{s}\" title=\"Download a self-contained design-review package (markdown + BOM CSV) as a zip\">📦 Export Review</a>", .{design_name});
     // Global PDF upload: any datasheet, chosen by filename, lands in
     // lib/datasheets/. Users then wire one up by editing a component file's
     // `(datasheet "foo.pdf")` field. Keeps upload one-click without
@@ -205,6 +173,75 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
     try w.writeAll("<label class=\"head-link head-btn\" style=\"cursor:pointer\">📄 Upload PDF<input type=\"file\" accept=\"application/pdf\" id=\"global-ds-upload\" hidden></label>");
     try w.writeAll("<span id=\"global-ds-status\" class=\"head-link\" style=\"color:#8b949e\"></span>");
     try w.writeAll("</div></header>");
+}
+
+/// Roll-up requirement status for a section (or sub-block) — surfaced as a
+/// status badge in the sidebar TOC so reviewers can see at a glance which
+/// sections are clean, which still need an answer, and which have a real
+/// failing check.
+const SecStatus = enum {
+    /// All requirements pass or have a `(verifies …)` sign-off.
+    ok,
+    /// Has unanswered requirements (`na`) or a fail with an override
+    /// note attached (manual review still recommended).
+    warn,
+    /// Has at least one fail with no `(verifies …)` override.
+    fail,
+    /// No instances with requirements in this section at all.
+    empty,
+};
+
+const SecCounts = struct {
+    pass: usize = 0,
+    verified: usize = 0,
+    na: usize = 0,
+    fail_overridden: usize = 0,
+    fail_real: usize = 0,
+    has_reqs: bool = false,
+
+    fn status(self: SecCounts) SecStatus {
+        if (!self.has_reqs) return .empty;
+        if (self.fail_real > 0) return .fail;
+        if (self.na > 0 or self.fail_overridden > 0) return .warn;
+        if (self.pass + self.verified > 0) return .ok;
+        return .empty;
+    }
+};
+
+fn tallyRefCounts(
+    check_results: *const CheckResultMap,
+    ref_des: []const u8,
+    out: *SecCounts,
+) void {
+    const results = check_results.get(ref_des) orelse return;
+    if (results.len > 0) out.has_reqs = true;
+    for (results) |r| switch (r.status) {
+        .pass => out.pass += 1,
+        .verified => out.verified += 1,
+        .fail => {
+            if (r.verification != null) out.fail_overridden += 1 else out.fail_real += 1;
+        },
+        .na => out.na += 1,
+    };
+}
+
+/// Collect every ref_des that belongs to a section (its own instances +
+/// pin-grouped top-level instances + every nested sub-section's refs).
+/// Sub-block refs are walked separately by `tocEntryForSubBlock`.
+fn collectSectionRefsRec(
+    sec: Section,
+    out: *std.ArrayListUnmanaged([]const u8),
+    allocator: Allocator,
+) void {
+    for (sec.pin_groups) |pg| out.append(allocator, pg.ref_des) catch {};
+    for (sec.instances) |inst| out.append(allocator, inst.ref_des) catch {};
+    for (sec.sub_sections) |sub| collectSectionRefsRec(sub, out, allocator);
+}
+
+fn countsForRefs(check_results: *const CheckResultMap, refs: []const []const u8) SecCounts {
+    var counts: SecCounts = .{};
+    for (refs) |r| tallyRefCounts(check_results, r, &counts);
+    return counts;
 }
 
 fn writeSidebar(w: anytype) !void {
@@ -245,6 +282,79 @@ fn joinAssertedFns(allocator: Allocator, fns: []const []const u8) ?[]const u8 {
     }
     return buf.toOwnedSlice(allocator) catch null;
 }
+
+/// Build a fully-populated `RenderCtx` for `block`. Same setup the schematic
+/// page does — flatten instances, build pin/net maps, classify, build
+/// adjacency, etc. — exposed so static exporters (markdown review package)
+/// can render the same per-hub SVGs the live page emits.
+pub fn setupRenderCtx(allocator: Allocator, block: *const DesignBlock) !RenderCtx {
+    var ctx = RenderCtx.init(allocator);
+    try ctx.collectFlat(block, "");
+    var flat_sec_idx: usize = 0;
+    for (block.sections) |sec| {
+        for (sec.instances) |inst| try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
+        for (sec.pin_groups) |pg| {
+            if (!ctx.section_map.contains(pg.ref_des)) {
+                try ctx.section_map.put(allocator, pg.ref_des, flat_sec_idx);
+            }
+        }
+        flat_sec_idx += 1;
+        for (sec.sub_sections) |sub| {
+            for (sub.instances) |inst| try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
+            for (sub.pin_groups) |pg| {
+                if (!ctx.section_map.contains(pg.ref_des)) {
+                    try ctx.section_map.put(allocator, pg.ref_des, flat_sec_idx);
+                }
+            }
+            flat_sec_idx += 1;
+        }
+    }
+    for (block.sub_blocks) |sb| {
+        for (sb.block.instances) |inst| try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
+        flat_sec_idx += 1;
+    }
+    try ctx.buildPinNetMap();
+    try ctx.classify();
+    try ctx.buildAdjacency();
+    try ctx.synthesizeSpokeConnections();
+    try ctx.buildNetIndex();
+    try ctx.buildSignificantNets(block);
+    try ctx.buildPinCanonicalNets();
+    return ctx;
+}
+
+/// Emit one hub's grouped pin-table SVG(s) to `w`. Returns true if the hub
+/// produced output (a renderable hub was found in `pin_groups` or in the
+/// flat instance map for the given `hub_ref`); false otherwise.
+pub fn renderHubSvg(
+    ctx: *RenderCtx,
+    w: anytype,
+    allocator: Allocator,
+    pin_groups: []const env_mod.PinGroup,
+    hub_ref: []const u8,
+) !bool {
+    if (try analyzeHub(ctx, allocator, pin_groups, hub_ref)) |a| {
+        try renderGroupedHubSvgs(ctx, w, allocator, a);
+        return true;
+    }
+    return false;
+}
+
+/// CSS subset for static SVG exports — strips hover/click states (no JS in
+/// a markdown viewer) but keeps the visual identity (component box colors,
+/// pin label fonts, net stroke colors). Embed once at the top of an
+/// exported document; per-hub SVGs reference these classes.
+pub const STATIC_SVG_CSS =
+    \\svg.hub-inset{display:block;width:100%;max-width:900px;height:auto;}
+    \\svg .component rect{fill:#16213e;stroke:#4a9eff;stroke-width:1.5;}
+    \\svg .component text{fill:#e6e6e6;font-family:"SF Mono",monospace;}
+    \\svg .pin-stub line{stroke:#6e7681;stroke-width:1;}
+    \\svg .pin-stub text{fill:#c9d1d9;font-family:"SF Mono",monospace;font-size:11px;}
+    \\svg .net line,svg .net polyline{stroke:#8b949e;stroke-width:1.2;fill:none;}
+    \\svg .net text{fill:#79c0ff;font-family:"SF Mono",monospace;font-size:10px;}
+    \\svg .passive rect,svg .passive circle,svg .passive line{stroke:#8b949e;fill:none;}
+    \\svg .passive text{fill:#c9d1d9;font-family:"SF Mono",monospace;font-size:10px;}
+;
 
 fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section, depth: u8, review_state: ?review.ReviewState, check_results: *const CheckResultMap) !void {
     const indent_class: []const u8 = if (depth == 0) "sch-section" else "sch-section sch-subsection";
@@ -370,15 +480,29 @@ fn writeHubCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, h: HubAnalysi
 /// the hub's component. Each row carries a ✓/✗/⋯ badge depending on whether
 /// the requirement's attached `(check ...)` clause passed, failed, or is
 /// absent (reviewer-judged).
+/// Sort priority: worst-first so the reviewer sees what needs attention
+/// before the noise. Real fails are most urgent, then signed-off fails (the
+/// check still says no), then unanswered, then verified, then pass.
+fn statusSortKey(status: req_checks.Status, has_verification: bool) u8 {
+    return switch (status) {
+        .fail => if (has_verification) @as(u8, 1) else @as(u8, 0),
+        .na => 2,
+        .verified => 3,
+        .pass => 4,
+    };
+}
+
 fn writeHubRequirements(w: anytype, h: HubAnalysis, check_results: *const CheckResultMap) !void {
     if (h.inst.requirements.len == 0) return;
     const results: []const req_checks.Result = check_results.get(h.inst.ref_des) orelse &.{};
 
     var pass_ct: usize = 0;
     var fail_ct: usize = 0;
+    var verified_ct: usize = 0;
     for (results) |r| switch (r.status) {
         .pass => pass_ct += 1,
         .fail => fail_ct += 1,
+        .verified => verified_ct += 1,
         .na => {},
     };
     const header_class: []const u8 = if (fail_ct > 0) "hub-reqs has-fail" else if (pass_ct > 0) "hub-reqs" else "hub-reqs";
@@ -387,29 +511,59 @@ fn writeHubRequirements(w: anytype, h: HubAnalysis, check_results: *const CheckR
     try w.print("><summary>Requirements ({d})", .{h.inst.requirements.len});
     if (fail_ct > 0) try w.print(" <span class=\"req-badge fail\">{d} failing</span>", .{fail_ct});
     if (pass_ct > 0) try w.print(" <span class=\"req-badge pass\">{d} ok</span>", .{pass_ct});
+    if (verified_ct > 0) try w.print(" <span class=\"req-badge verified\">{d} verified</span>", .{verified_ct});
     try w.writeAll("</summary><ul>");
-    for (h.inst.requirements, 0..) |r, i| {
+
+    // Build a sorted index into h.inst.requirements so the rendered list
+    // reads worst → best regardless of the order entries appear in
+    // `lib/components/<part>.sexp`.
+    const SortItem = struct { idx: usize, key: u8 };
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var sorted = a.alloc(SortItem, h.inst.requirements.len) catch return;
+    for (h.inst.requirements, 0..) |_, i| {
+        const status: req_checks.Status = if (i < results.len) results[i].status else .na;
+        const has_v = (i < results.len) and (results[i].verification != null);
+        sorted[i] = .{ .idx = i, .key = statusSortKey(status, has_v) };
+    }
+    std.mem.sortUnstable(SortItem, sorted, {}, struct {
+        fn lt(_: void, x: SortItem, y: SortItem) bool {
+            if (x.key != y.key) return x.key < y.key;
+            return x.idx < y.idx; // stable within group: preserve source order
+        }
+    }.lt);
+
+    for (sorted) |it| {
+        const i = it.idx;
+        const r = h.inst.requirements[i];
         const status: req_checks.Status = if (i < results.len) results[i].status else .na;
         const msg: []const u8 = if (i < results.len) results[i].message else "";
-        const icon_class: []const u8 = switch (status) {
-            .pass => "req-icon pass",
-            .fail => "req-icon fail",
-            .na => "req-icon na",
+        const verification: ?env_mod.Verification = if (i < results.len) results[i].verification else null;
+        // Labeled pill instead of an icon char — at-a-glance status reads
+        // PASS / FAIL / VERIFIED / PENDING in color, plus a secondary
+        // "OVERRIDDEN" pill on the fail-with-sign-off case.
+        const pill_label: []const u8 = switch (status) {
+            .pass => "PASS",
+            .fail => "FAIL",
+            .na => "PENDING",
+            .verified => "VERIFIED",
         };
-        const icon_char: []const u8 = switch (status) {
-            .pass => "✓",
-            .fail => "✗",
-            .na => "⋯",
-        };
-        const icon_title: []const u8 = switch (status) {
+        const pill_title: []const u8 = switch (status) {
             .pass => "Automated check passed",
             .fail => "Automated check failed",
-            .na => "No automated check — reviewer-judged",
+            .na => "No automated check — reviewer judgment required",
+            .verified => "Manually verified by design-side (verifies …)",
         };
-        try w.print("<li class=\"req-row status-{s}\"><span class=\"{s}\" title=\"{s}\">{s}</span> ", .{ @tagName(status), icon_class, icon_title, icon_char });
+        try w.print("<li class=\"req-row status-{s}\"><div class=\"req-head\"><span class=\"req-pill pill-{s}\" title=\"{s}\">{s}</span>", .{ @tagName(status), @tagName(status), pill_title, pill_label });
+        if (status == .fail and verification != null) {
+            try w.writeAll("<span class=\"req-pill pill-overridden\" title=\"Has a design-side (verifies …) note attached — see rationale below\">OVERRIDDEN</span>");
+        }
+        try w.writeAll("<span class=\"req-text\">");
         try writeHtmlEscaped(w, r.text);
+        try w.writeAll("</span>");
         if (r.ref) |ref| {
-            try w.writeAll(" <a class=\"note-ref\" target=\"_blank\" href=\"/pdf-view/");
+            try w.writeAll("<a class=\"note-ref\" target=\"_blank\" href=\"/pdf-view/");
             try writeHtmlEscaped(w, ref.pdf);
             var has_query = false;
             if (ref.page > 0) {
@@ -425,6 +579,7 @@ fn writeHubRequirements(w: anytype, h: HubAnalysis, check_results: *const CheckR
             if (ref.page > 0) try w.print(" p.{d}", .{ref.page});
             try w.writeAll("</a>");
         }
+        try w.writeAll("</div>");
         if (r.ref) |ref| if (ref.quote) |q| {
             try w.writeAll("<div class=\"req-quote\">“");
             try writeHtmlEscaped(w, q);
@@ -433,6 +588,23 @@ fn writeHubRequirements(w: anytype, h: HubAnalysis, check_results: *const CheckR
         if (msg.len > 0) {
             try w.writeAll("<div class=\"req-msg\">");
             try writeHtmlEscaped(w, msg);
+            try w.writeAll("</div>");
+        }
+        if (verification) |v| {
+            const cls: []const u8 = if (status == .fail) "req-verif overridden" else "req-verif";
+            try w.print("<div class=\"{s}\"><span class=\"req-verif-tag\">", .{cls});
+            try w.writeAll(if (status == .fail) "Sign-off (overrides fail):" else "Verified by design:");
+            try w.writeAll("</span> ");
+            try writeHtmlEscaped(w, v.rationale);
+            if (v.signed_by.len > 0) {
+                try w.writeAll(" — <em>");
+                try writeHtmlEscaped(w, v.signed_by);
+                if (v.date.len > 0) {
+                    try w.writeAll(", ");
+                    try writeHtmlEscaped(w, v.date);
+                }
+                try w.writeAll("</em>");
+            }
             try w.writeAll("</div>");
         }
         try w.writeAll("</li>");
@@ -489,6 +661,10 @@ fn analyzeHub(
     hub_ref: []const u8,
 ) !?HubAnalysis {
     const hub_inst = ctx.inst_map.get(hub_ref) orelse return null;
+    // Test points get a dedicated table at the top of the page; they don't
+    // need their own per-section schematic card cluttering the layout.
+    if (std.mem.eql(u8, hub_inst.component, "testpoint") or
+        std.mem.startsWith(u8, hub_inst.component, "testpoint-")) return null;
 
     // Bucket pin_ids by `(pins ref (group "X") ...)` feature label so each
     // bucket can render as its own SVG with the label as a heading.
@@ -725,11 +901,12 @@ fn writeScripts(
     block: *const DesignBlock,
     ctx: *RenderCtx,
     asserted_fns: *const std.StringHashMapUnmanaged([]const u8),
+    check_results: *const CheckResultMap,
 ) !void {
     try w.writeAll("<script>var DESIGN_NAME=");
     try writeJsString(w, design_name);
     try w.writeAll(";var SCH_INDEX=");
-    try writeSearchIndex(w, allocator, block, ctx, asserted_fns);
+    try writeSearchIndex(w, allocator, block, ctx, asserted_fns, check_results);
     try w.writeAll(";</script>");
     try w.writeAll("<script>");
     try w.writeAll(SCHEMATIC_VIEWER_JS);
@@ -753,6 +930,7 @@ fn writeSearchIndex(
     block: *const DesignBlock,
     ctx: *RenderCtx,
     asserted_fns: *const std.StringHashMapUnmanaged([]const u8),
+    check_results: *const CheckResultMap,
 ) !void {
     var ref_section: std.StringHashMapUnmanaged([]const u8) = .empty;
     defer ref_section.deinit(allocator);
@@ -762,13 +940,19 @@ fn writeSearchIndex(
 
     var first = true;
     for (block.sections) |sec| {
-        try emitSectionEntry(w, allocator, sec, &first);
+        try emitSectionEntry(w, allocator, sec, &first, check_results);
     }
     for (block.sub_blocks) |sb| {
         if (!first) try w.writeAll(",");
         first = false;
         const slug = try review.slugify(allocator, sb.name);
         const sb_cat = rb.classifyByName(sb.name, sb.block.instances);
+        // Roll up requirement counts for this sub-block (uses every
+        // instance ref_des inside the sub-block design).
+        var sb_refs: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer sb_refs.deinit(allocator);
+        for (sb.block.instances) |inst| try sb_refs.append(allocator, inst.ref_des);
+        const sb_counts = countsForRefs(check_results, sb_refs.items);
         try w.writeAll("{\"slug\":");
         try writeJsString(w, slug);
         try w.writeAll(",\"name\":");
@@ -777,6 +961,7 @@ fn writeSearchIndex(
         try writeJsString(w, sb.block.name);
         try w.writeAll(",\"category\":");
         try writeJsString(w, @tagName(sb_cat));
+        try emitReqStatusFields(w, sb_counts);
         try w.writeAll(",\"hubs\":[");
         try emitHubRefsForBlock(w, sb.block);
         try w.writeAll("]}");
@@ -785,10 +970,15 @@ fn writeSearchIndex(
         if (!first) try w.writeAll(",");
         first = false;
         const flat_cat = rb.classifyByName(block.name, block.instances);
+        var flat_refs: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer flat_refs.deinit(allocator);
+        for (block.instances) |inst| try flat_refs.append(allocator, inst.ref_des);
+        const flat_counts = countsForRefs(check_results, flat_refs.items);
         try w.writeAll("{\"slug\":\"design\",\"name\":");
         try writeJsString(w, block.name);
         try w.writeAll(",\"description\":\"\",\"category\":");
         try writeJsString(w, @tagName(flat_cat));
+        try emitReqStatusFields(w, flat_counts);
         try w.writeAll(",\"hubs\":[");
         try emitHubRefsForBlock(w, block);
         try w.writeAll("]}");
@@ -858,11 +1048,20 @@ fn emitSectionEntry(
     allocator: Allocator,
     sec: Section,
     first: *bool,
+    check_results: *const CheckResultMap,
 ) !void {
     if (!first.*) try w.writeAll(",");
     first.* = false;
     const slug = try review.slugify(allocator, sec.name);
     const cat = rb.classifySection(sec);
+
+    // Roll up requirement counts across this section + every nested
+    // sub-section so the sidebar status reflects the worst child too.
+    var refs: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer refs.deinit(allocator);
+    collectSectionRefsRec(sec, &refs, allocator);
+    const counts = countsForRefs(check_results, refs.items);
+
     try w.writeAll("{\"slug\":");
     try writeJsString(w, slug);
     try w.writeAll(",\"name\":");
@@ -871,6 +1070,7 @@ fn emitSectionEntry(
     try writeJsString(w, sec.description);
     try w.writeAll(",\"category\":");
     try writeJsString(w, @tagName(cat));
+    try emitReqStatusFields(w, counts);
     try w.writeAll(",\"hubs\":[");
     var first_hub = true;
     var seen: std.StringHashMapUnmanaged(void) = .empty;
@@ -892,7 +1092,21 @@ fn emitSectionEntry(
         try writeJsString(w, inst.ref_des);
     }
     try w.writeAll("]}");
-    for (sec.sub_sections) |sub| try emitSectionEntry(w, allocator, sub, first);
+    for (sec.sub_sections) |sub| try emitSectionEntry(w, allocator, sub, first, check_results);
+}
+
+/// Emit the comma-prefixed `,"req_status":"…","req_pass":N,…` fields
+/// shared between top-level sections and sub-block synthetic sections.
+/// The leading comma is intentional — caller has already emitted the
+/// previous field.
+fn emitReqStatusFields(w: anytype, counts: SecCounts) !void {
+    const status = counts.status();
+    try w.print(",\"req_status\":\"{s}\"", .{@tagName(status)});
+    try w.print(",\"req_pass\":{d}", .{counts.pass});
+    try w.print(",\"req_verified\":{d}", .{counts.verified});
+    try w.print(",\"req_na\":{d}", .{counts.na});
+    try w.print(",\"req_fail\":{d}", .{counts.fail_real});
+    try w.print(",\"req_overridden\":{d}", .{counts.fail_overridden});
 }
 
 fn emitHubRefsForBlock(w: anytype, block: *const DesignBlock) !void {
@@ -1085,24 +1299,35 @@ const SCHEMATIC_CSS =
     \\.hub-reqs[open]>summary::before{content:"▾";}
     \\.hub-reqs>summary:hover{color:#c9d1d9;background:#161b22;}
     \\.hub-reqs>ul{list-style:none;margin:8px 0 4px 4px;padding:10px 14px;background:#0a0e14;border-left:2px solid #30363d;border-radius:0 5px 5px 0;display:flex;flex-direction:column;gap:10px;}
-    \\.hub-reqs>ul>li{margin:0;font-size:0.86rem;color:#c9d1d9;line-height:1.55;padding:8px 10px;border-radius:4px;border:1px solid transparent;}
-    \\.hub-reqs .note-ref{color:#58a6ff;text-decoration:none;font-size:0.8rem;margin-left:8px;white-space:nowrap;}
+    \\.hub-reqs>ul>li{margin:0;font-size:0.86rem;color:#c9d1d9;line-height:1.55;padding:8px 10px 8px 14px;border-radius:4px;border-left:4px solid transparent;background:rgba(255,255,255,0.015);}
+    \\.hub-reqs .note-ref{color:#58a6ff;text-decoration:none;font-size:0.8rem;margin-left:auto;white-space:nowrap;}
     \\.hub-reqs .note-ref:hover{text-decoration:underline;}
     \\.hub-reqs.has-fail>summary{color:#e3b341;}
     \\.hub-reqs .req-badge{font-size:0.7rem;font-weight:600;padding:2px 8px;border-radius:10px;margin-left:4px;letter-spacing:0.04em;text-transform:uppercase;}
     \\.hub-reqs .req-badge.pass{background:#0d3a1f;color:#3fb950;}
     \\.hub-reqs .req-badge.fail{background:#3a0d16;color:#f85149;}
-    \\.hub-reqs .req-row.status-fail{background:rgba(248,81,73,0.07);border-color:rgba(248,81,73,0.25);}
-    \\.hub-reqs .req-row.status-pass{background:rgba(63,185,80,0.04);border-color:rgba(63,185,80,0.18);color:#c9d1d9;}
-    \\.hub-reqs .req-row.status-na{background:rgba(139,148,158,0.04);border-color:rgba(139,148,158,0.15);}
-    \\.hub-reqs .req-icon{display:inline-block;width:18px;font-weight:700;text-align:center;margin-right:8px;vertical-align:baseline;}
-    \\.hub-reqs .req-icon.pass{color:#3fb950;}
-    \\.hub-reqs .req-icon.fail{color:#f85149;}
-    \\.hub-reqs .req-icon.na{color:#6e7681;}
-    \\.hub-reqs .req-quote{margin:6px 0 0 26px;padding:6px 12px;font-size:0.82rem;color:#e3b341;font-style:italic;line-height:1.5;background:rgba(227,179,65,0.06);border-radius:3px;border-left:3px solid #e3b341;}
-    \\.hub-reqs .req-msg{margin:6px 0 0 26px;padding:6px 10px;font-size:0.78rem;color:#8b949e;font-family:"SF Mono",monospace;line-height:1.5;background:rgba(255,255,255,0.02);border-radius:3px;border-left:2px solid #30363d;}
-    \\.hub-reqs .req-row.status-fail .req-msg{color:#f0a6a1;border-left-color:#f85149;}
-    \\.hub-reqs .req-row.status-pass .req-msg{color:#7ee787;border-left-color:#3fb950;}
+    \\.hub-reqs .req-badge.verified{background:#0c2d6b;color:#79c0ff;}
+    \\.hub-reqs .req-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+    \\.hub-reqs .req-text{flex:1;min-width:200px;}
+    \\.hub-reqs .req-pill{flex-shrink:0;display:inline-block;font-size:0.68rem;font-weight:700;padding:2px 8px;border-radius:3px;letter-spacing:0.06em;text-transform:uppercase;line-height:1.4;border:1px solid transparent;font-family:"SF Mono",monospace;}
+    \\.hub-reqs .req-pill.pill-pass{background:#0d3a1f;color:#3fb950;border-color:rgba(63,185,80,0.4);}
+    \\.hub-reqs .req-pill.pill-fail{background:#3a0d16;color:#f85149;border-color:rgba(248,81,73,0.5);}
+    \\.hub-reqs .req-pill.pill-na{background:#1f2128;color:#8b949e;border-color:rgba(139,148,158,0.3);}
+    \\.hub-reqs .req-pill.pill-verified{background:#0c2d6b;color:#79c0ff;border-color:rgba(121,192,255,0.4);}
+    \\.hub-reqs .req-pill.pill-overridden{background:#3d2814;color:#e8c547;border-color:rgba(232,197,71,0.45);}
+    \\.hub-reqs .req-row.status-fail{background:rgba(248,81,73,0.09);border-left-color:#f85149;}
+    \\.hub-reqs .req-row.status-pass{background:rgba(63,185,80,0.05);border-left-color:#3fb950;}
+    \\.hub-reqs .req-row.status-na{background:rgba(139,148,158,0.06);border-left-color:#6e7681;}
+    \\.hub-reqs .req-row.status-verified{background:rgba(121,192,255,0.05);border-left-color:#388bfd;}
+    \\.hub-reqs .req-quote{margin:8px 0 0 0;padding:6px 12px;font-size:0.82rem;color:#e3b341;font-style:italic;line-height:1.5;background:rgba(227,179,65,0.06);border-radius:3px;border-left:3px solid #e3b341;}
+    \\.hub-reqs .req-msg{margin:8px 0 0 0;padding:6px 10px;font-size:0.78rem;color:#8b949e;font-family:"SF Mono",monospace;line-height:1.5;background:rgba(255,255,255,0.02);border-radius:3px;border-left:2px solid #30363d;}
+    \\.hub-reqs .req-row.status-fail .req-msg{color:#f0a6a1;border-left-color:#f85149;background:rgba(248,81,73,0.06);}
+    \\.hub-reqs .req-row.status-pass .req-msg{color:#7ee787;border-left-color:#3fb950;background:rgba(63,185,80,0.04);}
+    \\.hub-reqs .req-row.status-na .req-msg{border-left-color:#6e7681;}
+    \\.hub-reqs .req-verif{margin:8px 0 0 0;padding:8px 12px;font-size:0.82rem;line-height:1.55;background:rgba(121,192,255,0.06);border-radius:3px;border-left:3px solid #388bfd;color:#c9d1d9;}
+    \\.hub-reqs .req-verif.overridden{background:rgba(232,197,71,0.07);border-left-color:#e8c547;color:#e3b341;}
+    \\.hub-reqs .req-verif-tag{font-weight:700;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;color:#79c0ff;margin-right:6px;}
+    \\.hub-reqs .req-verif.overridden .req-verif-tag{color:#e8c547;}
     \\.hub-group-block{margin:4px 0 8px;}
     \\.hub-group-block:first-child{margin-top:0;}
     \\.hub-group-label{color:#e8c547;font-size:0.8rem;font-weight:600;margin:4px 0 2px;letter-spacing:0.03em;}
@@ -1142,6 +1367,11 @@ const SCHEMATIC_CSS =
     \\.sb-list-item:hover{background:#1f2937;}
     \\.sb-list-item .sb-li-head{font-family:"SF Mono",monospace;color:#c9d1d9;display:flex;align-items:center;gap:8px;}
     \\.sb-list-item .sb-li-sub{color:#8b949e;font-size:0.78rem;margin-top:2px;}
+    \\.sb-list-item .sb-req-icon{flex-shrink:0;width:16px;text-align:center;font-weight:700;font-size:0.95rem;line-height:1;}
+    \\.sb-list-item .sb-req-icon.req-ok{color:#3fb950;}
+    \\.sb-list-item .sb-req-icon.req-warn{color:#d29922;}
+    \\.sb-list-item .sb-req-icon.req-fail{color:#f85149;}
+    \\.sb-list-item .sb-req-icon.req-empty{color:#484f58;}
     \\.sb-cat{display:inline-block;padding:1px 6px;border-radius:8px;font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;line-height:1.4;flex-shrink:0;}
     \\.sb-cat.cat-mcu{background:rgba(31,111,235,0.18);color:#79c0ff;}
     \\.sb-cat.cat-power{background:rgba(218,54,51,0.18);color:#f85149;}

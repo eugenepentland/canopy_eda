@@ -80,15 +80,26 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
     var pinout_name: []const u8 = "";
 
     // Known structural fields (not properties)
-    const skip_fields = [_][]const u8{ "symbol", "footprint", "pinout", "component", "parameter", "component-family", "bus", "note", "datasheet", "requirement" };
+    const skip_fields = [_][]const u8{ "symbol", "footprint", "pinout", "component", "parameter", "component-family", "bus", "note", "datasheet", "requirement", "ignore-requirements" };
 
     var props: std.ArrayListUnmanaged(env_mod.Property) = .empty;
     var buses: std.ArrayListUnmanaged(BusDef) = .empty;
     var datasheets: std.ArrayListUnmanaged([]const u8) = .empty;
     var requirements: std.ArrayListUnmanaged(env_mod.Requirement) = .empty;
+    var requirements_ignored = false;
 
     for (children[1..]) |child| {
         const cl = child.asList() orelse continue;
+        if (cl.len >= 1) {
+            // Zero-arg marker forms have to be checked before the cl.len < 2
+            // gate below — `(ignore-requirements)` has no body.
+            if (cl[0].asAtom()) |head| {
+                if (std.mem.eql(u8, head, "ignore-requirements")) {
+                    requirements_ignored = true;
+                    continue;
+                }
+            }
+        }
         if (cl.len < 2) continue;
         const field = cl[0].asAtom() orelse continue;
 
@@ -111,14 +122,31 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
             const text = cl[1].asString() orelse continue;
             var ref: ?env_mod.NoteRef = null;
             var chk: ?env_mod.Check = null;
+            var explicit_id: []const u8 = "";
             for (cl[2..]) |extra| {
                 if (env_mod.parseNoteRef(extra)) |r| {
                     ref = r;
                 } else if (env_mod.parseCheck(extra)) |c| {
                     chk = c;
+                } else if (extra.asList()) |sub| {
+                    if (sub.len >= 2) {
+                        if (sub[0].asAtom()) |sub_head| {
+                            if (std.mem.eql(u8, sub_head, "id")) {
+                                if (sub[1].asAtom()) |id_str| {
+                                    explicit_id = id_str;
+                                } else if (sub[1].asString()) |id_str| {
+                                    explicit_id = id_str;
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            requirements.append(self.allocator, .{ .text = text, .ref = ref, .check = chk }) catch continue;
+            const rid: []const u8 = if (explicit_id.len > 0)
+                explicit_id
+            else
+                env_mod.requirementIdForText(self.allocator, text) catch "";
+            requirements.append(self.allocator, .{ .text = text, .ref = ref, .check = chk, .id = rid }) catch continue;
         } else if (std.mem.eql(u8, field, "bus")) {
             // (bus "name" pin1 pin2 pin3 ...)
             const bus_name = cl[1].asString() orelse (cl[1].asAtom() orelse continue);
@@ -158,6 +186,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
         .param_type = "",
         .datasheets = datasheets.toOwnedSlice(self.allocator) catch &.{},
         .requirements = requirements.toOwnedSlice(self.allocator) catch &.{},
+        .requirements_ignored = requirements_ignored,
     });
 }
 

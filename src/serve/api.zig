@@ -18,7 +18,9 @@ const bom_html = @import("bom_html.zig");
 const mcp_tools = @import("mcp_tools.zig");
 const review_mod = @import("../review.zig");
 const review_json_mod = @import("../review_json.zig");
+const review_md_mod = @import("../review_md.zig");
 const review_state_mod = @import("../review_state.zig");
+const req_checks = @import("../req_checks.zig");
 const edit_mod = @import("edit.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
@@ -117,11 +119,13 @@ pub fn blockDiagramJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
 /// example, that the pin they wired to XSPIM_P1_IO5 really does expose that
 /// peripheral on the part.
 pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
-    const name = req.param("name") orelse {
+    const name_raw = req.param("name") orelse {
         res.status = 404;
         return;
     };
-    // Reject path traversal / absolute paths — component names are bare idents.
+    // Decode before validating so `%2e%2e` can't slip past the traversal check,
+    // and so library files with reserved chars (e.g. `…#pbf`) actually resolve.
+    const name = try urlDecodeAlloc(ctx.allocator, name_raw);
     if (name.len == 0 or std.mem.indexOfAny(u8, name, "/\\") != null or std.mem.indexOf(u8, name, "..") != null) {
         res.status = 400;
         res.body = "{\"error\":\"invalid component name\"}";
@@ -642,6 +646,98 @@ pub fn exportGerberApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     };
 
     const disposition = try std.fmt.allocPrint(ctx.allocator, "attachment; filename=\"{s}-gerber.zip\"", .{name});
+    res.header("Content-Type", "application/zip");
+    res.header("Content-Disposition", disposition);
+    res.body = zip;
+}
+
+/// GET /api/export-review/:name — design-review package as a zip with two
+/// files: `<name>-review.md` (full markdown report including system block
+/// diagram, per-hub schematics, power tables, ERC, per-IC checklist, and
+/// the verbatim source) plus `<name>-bom.csv` (parts list as CSV).
+pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+
+    // Build a fully-populated ReviewDoc using the same path the live page
+    // uses — ensures the export reflects exactly what the reviewer sees.
+    const doc = buildDocForName(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = "Build error";
+        return;
+    };
+
+    // Re-evaluate so we have access to the underlying block + check_results.
+    // This duplicates the work in buildDocForName but avoids leaking those
+    // intermediates through the function signature; the cost is one extra
+    // eval per export which is acceptable for a manual operation.
+    const board_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name }) catch {
+        res.status = 500;
+        return;
+    };
+    defer ctx.allocator.free(board_path);
+
+    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+    const result = eval.evalFile(board_path) catch {
+        res.status = 500;
+        res.body = "Build error";
+        return;
+    };
+    const block = switch (result) {
+        .design_block => |b| b,
+        .board => |b| @as(*const env_mod.DesignBlock, b.design),
+        else => {
+            res.status = 500;
+            return;
+        },
+    };
+    var check_results = req_checks.runChecks(ctx.allocator, &eval, block) catch
+        std.StringHashMapUnmanaged([]req_checks.Result).empty;
+    req_checks.applyVerifications(&check_results, block, block.instances);
+
+    // Read the source file verbatim for embedding.
+    const source = std.fs.cwd().readFileAlloc(ctx.allocator, board_path, 8 * 1024 * 1024) catch &[_]u8{};
+
+    // Render markdown.
+    const md = review_md_mod.renderToMarkdown(ctx.allocator, block, ctx.project_dir, name, doc, source, &check_results) catch {
+        res.status = 500;
+        res.body = "Markdown render error";
+        return;
+    };
+
+    // Render BOM CSV.
+    var csv_buf: std.ArrayListUnmanaged(u8) = .empty;
+    bom_html.writeBomCsv(csv_buf.writer(ctx.allocator), block) catch {
+        res.status = 500;
+        res.body = "BOM CSV error";
+        return;
+    };
+
+    // Filenames inside the zip include the design name so a reviewer who
+    // unzips into a shared directory doesn't collide with another design.
+    const md_name = std.fmt.allocPrint(ctx.allocator, "{s}-review.md", .{name}) catch {
+        res.status = 500;
+        return;
+    };
+    const csv_name = std.fmt.allocPrint(ctx.allocator, "{s}-bom.csv", .{name}) catch {
+        res.status = 500;
+        return;
+    };
+
+    const entries = [_]fp_mod.ZipEntry{
+        .{ .name = md_name, .data = md },
+        .{ .name = csv_name, .data = csv_buf.items },
+    };
+    const zip = fp_mod.buildZip(ctx.allocator, &entries) catch {
+        res.status = 500;
+        res.body = "Zip error";
+        return;
+    };
+
+    const disposition = try std.fmt.allocPrint(ctx.allocator, "attachment; filename=\"{s}-review.zip\"", .{name});
     res.header("Content-Type", "application/zip");
     res.header("Content-Disposition", disposition);
     res.body = zip;
@@ -1426,7 +1522,15 @@ fn buildDocForName(
     bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch {};
 
     const violations = try erc_mod.runErc(allocator, block, project_dir);
-    var doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations);
+
+    // Run requirement-attached (check ...) primitives + overlay (verifies …)
+    // sign-offs so the per-component review entries carry pass/fail/verified
+    // status alongside the prose.
+    var check_results = req_checks.runChecks(allocator, &eval, block) catch
+        std.StringHashMapUnmanaged([]req_checks.Result).empty;
+    req_checks.applyVerifications(&check_results, block, block.instances);
+
+    var doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, &check_results);
 
     // Attach reconciled review state. Degrades to empty on missing/malformed
     // files so a design with no reviews/ dir still renders a clean report.
@@ -1471,7 +1575,7 @@ fn sectionHashForSlug(
         else => return "",
     };
     const violations = try erc_mod.runErc(allocator, block, project_dir);
-    const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations);
+    const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, null);
     for (doc.sections, 0..) |s, i| {
         if (std.mem.eql(u8, s.slug, slug)) {
             return review_mod.sectionContentHash(allocator, s, block, block.sections[i]) catch "";
@@ -1778,10 +1882,11 @@ pub fn removeSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 /// `lib/components/<component>.sexp`. Lets the sidebar link uploaded PDFs
 /// to parts without manual .sexp editing.
 pub fn addComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
-    const component = req.param("component") orelse {
+    const component_raw = req.param("component") orelse {
         res.status = 404;
         return;
     };
+    const component = try urlDecodeAlloc(ctx.allocator, component_raw);
     const body = req.body() orelse {
         res.status = 400;
         return;
@@ -1803,10 +1908,11 @@ pub fn addComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.
 /// POST /api/component-datasheet/:component/remove — body `{pdf: "file.pdf"}`.
 /// Counterpart to /add; unlinks a PDF from the library part.
 pub fn removeComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
-    const component = req.param("component") orelse {
+    const component_raw = req.param("component") orelse {
         res.status = 404;
         return;
     };
+    const component = try urlDecodeAlloc(ctx.allocator, component_raw);
     const body = req.body() orelse {
         res.status = 400;
         return;
@@ -1860,6 +1966,15 @@ fn jsonBoolField(body: []const u8, key: []const u8) ?bool {
     if (std.mem.startsWith(u8, body[val_start..], "true")) return true;
     if (std.mem.startsWith(u8, body[val_start..], "false")) return false;
     return null;
+}
+
+/// httpz returns URL path params verbatim — `%23` stays `%23`, not `#`.
+/// Library filenames can include reserved chars (e.g. `ltc6655bhms8-2-5#pbf`),
+/// so endpoints that map a `:component` param to a file on disk need to
+/// percent-decode first or they'll miss the file.
+fn urlDecodeAlloc(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    const buf = try allocator.dupe(u8, raw);
+    return std.Uri.percentDecodeInPlace(buf);
 }
 
 // Unused import suppression

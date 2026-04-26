@@ -38,6 +38,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
 
     var net_ties: std.ArrayListUnmanaged(NetTie) = .empty;
     var sub_blocks: std.ArrayListUnmanaged(SubBlock) = .empty;
+    var verifications: std.ArrayListUnmanaged(env_mod.Verification) = .empty;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
 
     // Pre-scan: register all explicit ref-des to avoid auto-counter collisions
@@ -81,6 +82,10 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             try instance_mod.evalSeriesForm(self, form_children, env, &instances, &all_pin_nets, &notes);
         } else if (std.mem.eql(u8, form_name, "decouple")) {
             try evalDecoupleForm(self, form_children, env, &instances, &all_pin_nets);
+        } else if (std.mem.eql(u8, form_name, "verifies")) {
+            if (parseVerifies(self, form_children, env)) |v| {
+                try verifications.append(self.allocator, v);
+            }
         }
         // Ignore config and other unknown forms for now
     }
@@ -109,6 +114,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .sub_blocks = sub_blocks.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .sections = sections.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .net_ties = block_ties.toOwnedSlice(self.allocator) catch &.{},
+        .verifications = verifications.toOwnedSlice(self.allocator) catch &.{},
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -622,4 +628,64 @@ fn parseSectionStatus(str: []const u8) ?env_mod.SectionStatus {
     if (std.mem.eql(u8, str, "implemented")) return .implemented;
     if (std.mem.eql(u8, str, "review")) return .review;
     return null;
+}
+
+/// Parse a top-level `(verifies (req "REFDES" REQID) "rationale" ...)` form.
+/// Both the short form (single trailing string) and the long form with
+/// `(rationale "...")` / `(signed-off-by "...")` / `(date "...")` sub-clauses
+/// are accepted. Returns null when the form is malformed.
+fn parseVerifies(self: *Evaluator, form_children: []const Node, env: *Env) ?env_mod.Verification {
+    if (form_children.len < 2) return null;
+    // form_children[0] = "verifies"; form_children[1] = (req "REFDES" REQID)
+    const req_form = form_children[1].asList() orelse return null;
+    if (req_form.len < 3) return null;
+    const req_head = req_form[0].asAtom() orelse return null;
+    if (!std.mem.eql(u8, req_head, "req")) return null;
+    const ref_des_val = self.evalNode(req_form[1], env) catch return null;
+    const ref_des = ref_des_val.asString() orelse return null;
+    // Accept atom (`b68c3fa5`) or string ("b68c3fa5"). All-digit hex ids
+    // like "41510609" must be quoted as a string in the source — bare
+    // digits would be tokenised as a decimal int and the AST has no way
+    // to recover the original spelling. The id-freezing emitter quotes
+    // these automatically, so this only matters for hand-written entries.
+    const req_id = req_form[2].asAtom() orelse req_form[2].asString() orelse return null;
+
+    var rationale: []const u8 = "";
+    var signed_by: []const u8 = "";
+    var date_str: []const u8 = "";
+
+    for (form_children[2..]) |extra| {
+        if (extra.asString()) |s| {
+            // Short form: a single trailing string is the rationale.
+            if (rationale.len == 0) rationale = s;
+            continue;
+        }
+        const sub = extra.asList() orelse continue;
+        if (sub.len < 2) continue;
+        const sub_head = sub[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, sub_head, "rationale")) {
+            if (sub[1].asString()) |s| rationale = s;
+        } else if (std.mem.eql(u8, sub_head, "signed-off-by")) {
+            if (sub[1].asString()) |s| signed_by = s;
+            // Optional (date ...) inside signed-off-by
+            for (sub[2..]) |inner| {
+                const il = inner.asList() orelse continue;
+                if (il.len < 2) continue;
+                const ih = il[0].asAtom() orelse continue;
+                if (std.mem.eql(u8, ih, "date")) {
+                    if (il[1].asString()) |d| date_str = d;
+                }
+            }
+        } else if (std.mem.eql(u8, sub_head, "date")) {
+            if (sub[1].asString()) |d| date_str = d;
+        }
+    }
+
+    return .{
+        .ref_des = ref_des,
+        .req_id = req_id,
+        .rationale = rationale,
+        .signed_by = signed_by,
+        .date = date_str,
+    };
 }

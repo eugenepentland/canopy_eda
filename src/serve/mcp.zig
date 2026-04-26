@@ -112,16 +112,9 @@ fn handleToolCall(
 
     var result: std.ArrayListUnmanaged(u8) = .empty;
     const rw = result.writer(allocator);
-    if (call_result.raw_content) {
-        // Tool already emitted a full MCP content-array literal (e.g. a
-        // `resource` block with a binary blob). Splice it in verbatim.
-        try rw.writeAll("{\"content\":");
-        try rw.writeAll(content_buf.items);
-    } else {
-        try rw.writeAll("{\"content\":[{\"type\":\"text\",\"text\":");
-        try writeJsonStringTo(rw, content_buf.items);
-        try rw.writeAll("}]");
-    }
+    try rw.writeAll("{\"content\":[{\"type\":\"text\",\"text\":");
+    try writeJsonStringTo(rw, content_buf.items);
+    try rw.writeAll("}]");
     if (!call_result.ok) try rw.writeAll(",\"isError\":true");
     try rw.writeAll("}");
 

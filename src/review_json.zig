@@ -109,7 +109,7 @@ fn writeReviewState(w: anytype, state: review.ReviewState) !void {
 
 fn writeSummary(w: anytype, s: review.Summary) !void {
     try w.print(
-        "{{\"status\":\"{s}\",\"section_count\":{d},\"instance_count\":{d},\"net_count\":{d},\"violations\":{{\"error\":{d},\"warning\":{d},\"info\":{d}}},\"assertions\":{{\"pass\":{d},\"warn\":{d},\"fail\":{d}}}}}",
+        "{{\"status\":\"{s}\",\"section_count\":{d},\"instance_count\":{d},\"net_count\":{d},\"violations\":{{\"error\":{d},\"warning\":{d},\"info\":{d}}},\"assertions\":{{\"pass\":{d},\"warn\":{d},\"fail\":{d}}}",
         .{
             @tagName(s.status),
             s.section_count,
@@ -123,6 +123,19 @@ fn writeSummary(w: anytype, s: review.Summary) !void {
             s.assertion_fail,
         },
     );
+    try w.print(
+        ",\"critical_components\":{{\"total\":{d},\"with_requirements\":{d},\"missing\":[",
+        .{ s.critical_count, s.critical_with_requirements },
+    );
+    for (s.critical_missing_requirements, 0..) |m, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"ref_des\":");
+        try writeJsonString(w, m.ref_des);
+        try w.writeAll(",\"component\":");
+        try writeJsonString(w, m.component);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]}}");
 }
 
 fn writeSection(w: anytype, s: review.SectionReport) !void {
@@ -161,10 +174,43 @@ fn writeSection(w: anytype, s: review.SectionReport) !void {
             if (j > 0) try w.writeAll(",");
             try w.writeAll("{\"text\":");
             try writeJsonString(w, r.text);
+            if (r.id.len > 0) {
+                try w.writeAll(",\"id\":");
+                try writeJsonString(w, r.id);
+            }
             if (r.ref) |ref| {
                 try w.writeAll(",\"pdf\":");
                 try writeJsonString(w, ref.pdf);
                 try w.print(",\"page\":{d}", .{ref.page});
+            }
+            // Status + check message + (verifies …) sign-off (when any).
+            const status_tag: []const u8 = if (j < entry.req_results.len)
+                @tagName(entry.req_results[j].status)
+            else
+                "na";
+            try w.print(",\"status\":\"{s}\"", .{status_tag});
+            if (j < entry.req_results.len) {
+                const rr = entry.req_results[j];
+                if (rr.message.len > 0) {
+                    try w.writeAll(",\"check_message\":");
+                    try writeJsonString(w, rr.message);
+                }
+                if (rr.verification) |v| {
+                    if (rr.status == .fail) {
+                        try w.writeAll(",\"overridden_by_note\":true");
+                    }
+                    try w.writeAll(",\"verified_by\":{\"rationale\":");
+                    try writeJsonString(w, v.rationale);
+                    if (v.signed_by.len > 0) {
+                        try w.writeAll(",\"signed_by\":");
+                        try writeJsonString(w, v.signed_by);
+                    }
+                    if (v.date.len > 0) {
+                        try w.writeAll(",\"date\":");
+                        try writeJsonString(w, v.date);
+                    }
+                    try w.writeAll("}");
+                }
             }
             try w.writeAll("}");
         }

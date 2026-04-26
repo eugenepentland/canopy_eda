@@ -86,6 +86,8 @@ pub fn main() !void {
         try commands.cmdExportPcb(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "export-gerber")) {
         try commands.cmdExportGerber(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "export-review")) {
+        try commands.cmdExportReview(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "serve")) {
         const project_dir = optionalArg(args[2..], "--project-dir") orelse ".";
         const port: u16 = if (optionalArg(args[2..], "--port")) |p|
@@ -252,6 +254,7 @@ fn printUsage() !void {
         \\  eda mint-plugin-token [--project-dir <d>] [--label <l>]  Mint a bearer token for the KiCad plugin
         \\  eda export-kicad --project-dir <d> --output-dir <out> <name>  Export KiCad netlist + footprints
         \\  eda export-pcb --project-dir <d> [--output <file>] <name>   Export .kicad_pcb (native PCB)
+        \\  eda export-review --project-dir <d> [--output-dir <out>] [--zip] <name>  Export design-review package (markdown + BOM CSV)
         \\  eda convert-footprint <file>        Convert KiCad .kicad_mod to .sexp
         \\  eda convert-symbol <file> [--filter <name>]  Convert KiCad .kicad_sym to .sexp
         \\  eda convert-pinout <file> [--filter <name>]  Generate pinout from KiCad .kicad_sym

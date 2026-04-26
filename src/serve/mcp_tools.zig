@@ -14,6 +14,7 @@ const ids = @import("../eval/ids.zig");
 const review_mod = @import("../review.zig");
 const review_json_mod = @import("../review_json.zig");
 const review_state_mod = @import("../review_state.zig");
+const req_checks = @import("../req_checks.zig");
 
 /// One entry per MCP tool. Keep in sync with `tools_list_result` below and
 /// with the dispatch arms in `callInner`. Adding a new tool should start here,
@@ -46,7 +47,6 @@ const tools = [_]ToolEntry{
     .{ .name = "add_component_parameter", .is_mutation = true },
     .{ .name = "add_component_requirements", .is_mutation = true },
     .{ .name = "list_datasheets", .is_mutation = false },
-    .{ .name = "read_datasheet", .is_mutation = false },
     .{ .name = "get_review_state", .is_mutation = false },
     .{ .name = "set_review_state", .is_mutation = true },
 };
@@ -82,22 +82,18 @@ pub const tools_list_result =
     \\{"name":"list_free_pins","description":"List unassigned pins on an instance with their default pinout function names and a best-effort category (gpio|power|clock|analog|other). Use for picking GPIOs for new peripherals without scanning the full pinout file.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"ref":{"type":"string","description":"Reference designator of the instance (e.g. U1)"},"filter":{"type":"string","enum":["gpio","power","clock","analog","other"],"description":"Optional category filter"}},"required":["name","ref"],"additionalProperties":false}},
     \\{"name":"get_net","description":"Return every pin connection on a net plus any passive instances (R/L/C/F/D) on it. Use to audit decoupling or verify wiring without scanning the whole source.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"net":{"type":"string"}},"required":["name","net"],"additionalProperties":false}},
     \\{"name":"add_component_parameter","description":"Append a (parameter \"NAME\" TYPE) declaration to a library component file under lib/components/. Use to fix ERC \"missing value\" errors on user-uploaded components that lack a parameter slot. Snapshots the prior library file to history/_lib. Does not rebuild any design — re-run a build to pick up the change.","inputSchema":{"type":"object","properties":{"component":{"type":"string","description":"Component file name (without .sexp)"},"param_name":{"type":"string","description":"Parameter name (e.g. value, color)"},"param_type":{"type":"string","description":"Parameter type atom (e.g. string, capacitance, resistance, number)"}},"required":["component","param_name","param_type"],"additionalProperties":false}},
-    \\{"name":"add_component_requirements","description":"Append one or more full (requirement \"text\" ...) forms to a library component file under lib/components/. Each requirement is a complete s-expression so the body can include any mix of (ref \"file.pdf\" (page N) (quote \"...\")) and (check ...) clauses. Typical workflow: call read_library_file to see existing requirements, call list_datasheets + read_datasheet to mine the datasheet for specs, then call this tool ONCE with every new rule you derived. Atomic: every form is validated and dedup-checked before any write — if any one is malformed or duplicates an existing rule (or another item in the same batch), nothing is written and the response identifies the offending index. Snapshots the prior library file once to history/_lib. Does not rebuild any design.","inputSchema":{"type":"object","properties":{"component":{"type":"string","description":"Component file name (without .sexp) — e.g. \"bno08x\""},"requirements":{"type":"array","minItems":1,"items":{"type":"string","description":"Full (requirement \"text\" ...) s-expression. Example: (requirement \"VDD must be 2.4 V to 3.6 V\" (ref \"foo.pdf\" (page 10) (quote \"2.4V to 3.6V\")) (check (voltage-range (pin \"VDD\") (min 2.4) (max 3.6))))"}}},"required":["component","requirements"],"additionalProperties":false}},
+    \\{"name":"add_component_requirements","description":"Append one or more full (requirement \"text\" ...) forms to a library component file under lib/components/. Each requirement is a complete s-expression so the body can include any mix of (ref \"file.pdf\" (page N) (quote \"...\")) and (check ...) clauses. Typical workflow: call read_library_file to see existing requirements, call list_datasheets and open the PDF in a browser at /datasheets/:filename to mine the datasheet for specs, then call this tool ONCE with every new rule you derived. Atomic: every form is validated and dedup-checked before any write — if any one is malformed or duplicates an existing rule (or another item in the same batch), nothing is written and the response identifies the offending index. Snapshots the prior library file once to history/_lib. Does not rebuild any design.","inputSchema":{"type":"object","properties":{"component":{"type":"string","description":"Component file name (without .sexp) — e.g. \"bno08x\""},"requirements":{"type":"array","minItems":1,"items":{"type":"string","description":"Full (requirement \"text\" ...) s-expression. Example: (requirement \"VDD must be 2.4 V to 3.6 V\" (ref \"foo.pdf\" (page 10) (quote \"2.4V to 3.6V\")) (check (voltage-range (pin \"VDD\") (min 2.4) (max 3.6))))"}}},"required":["component","requirements"],"additionalProperties":false}},
     \\{"name":"list_datasheets","description":"List PDF files in lib/datasheets/ with size and the set of components that reference each (via (datasheet \"file.pdf\") in their .sexp). Use this to know what datasheets are available to cite from (requirement ...) (ref ...) forms.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
-    \\{"name":"read_datasheet","description":"Return a PDF datasheet as an MCP resource content block (base64 blob, mimeType application/pdf) so the agent can read it directly. Capped at 10 MB; larger files are rejected. Use list_datasheets first to discover filenames and pick the one referenced by the component you are editing.","inputSchema":{"type":"object","properties":{"filename":{"type":"string","description":"File name with .pdf extension, as listed by list_datasheets"}},"required":["filename"],"additionalProperties":false}},
     \\{"name":"get_review_state","description":"Return the per-section review state: the checklist items (with id, text, checked) and per-section approval (approved, approved_by, approved_at). One entry per section slug present in the design. Use this to see which sections are still pending review.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}},
     \\{"name":"set_review_state","description":"Mutate one section's review state in one call: optionally append new checklist items, toggle existing ones by id, delete items by id, and/or set the approval flag + reviewer. At least one of add_items/toggle/delete/approved must be present. approved=true stamps approved_at with the current UTC time.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"section_slug":{"type":"string","description":"Slug of the section to edit (match what generate_review returns)"},"add_items":{"type":"array","items":{"type":"string"},"description":"Texts for new checklist items to append"},"toggle":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"checked":{"type":"boolean"}},"required":["id","checked"]},"description":"Existing items to toggle by id"},"delete":{"type":"array","items":{"type":"string"},"description":"Item ids to delete"},"approved":{"type":"boolean","description":"Set the section-level approval flag"},"reviewer":{"type":"string","description":"Reviewer name stamped when approved=true"}},"required":["name","section_slug"],"additionalProperties":false}}
     \\]}
 ;
 
 /// Result of a tool call for the MCP envelope writer. `ok=false` flips the
-/// `isError` flag on the response. `raw_content=true` means `out` already
-/// contains a full content-array JSON literal (e.g. a `resource` block with
-/// a binary blob); otherwise `out` is plain text that the caller wraps in
-/// a single `{"type":"text","text":...}` block.
+/// `isError` flag on the response. `out` always holds plain text that the
+/// caller wraps in a single `{"type":"text","text":...}` block.
 pub const CallResult = struct {
     ok: bool,
-    raw_content: bool = false,
 };
 
 /// Dispatch a tool call. Writes the result into `out` and returns how the
@@ -109,14 +105,13 @@ pub fn call(
     args_val: ?std.json.Value,
     out: *std.ArrayListUnmanaged(u8),
 ) CallResult {
-    var raw: bool = false;
-    const ok = callInner(allocator, project_dir, tool_name, args_val, out, &raw) catch |err| {
+    const ok = callInner(allocator, project_dir, tool_name, args_val, out) catch |err| {
         const msg = @errorName(err);
         const w = out.writer(allocator);
         w.print("error: {s}", .{msg}) catch {};
         return .{ .ok = false };
     };
-    return .{ .ok = ok, .raw_content = raw };
+    return .{ .ok = ok };
 }
 
 fn callInner(
@@ -125,7 +120,6 @@ fn callInner(
     tool_name: []const u8,
     args_val: ?std.json.Value,
     out: *std.ArrayListUnmanaged(u8),
-    raw_content_out: *bool,
 ) !bool {
     const w = out.writer(allocator);
 
@@ -409,11 +403,6 @@ fn callInner(
 
     if (std.mem.eql(u8, tool_name, "list_datasheets")) {
         return try listDatasheets(allocator, project_dir, w);
-    }
-
-    if (std.mem.eql(u8, tool_name, "read_datasheet")) {
-        const filename = requireString(args_val, "filename") orelse return missingArg(out, allocator, "filename");
-        return try readDatasheet(allocator, project_dir, filename, out, raw_content_out);
     }
 
     if (std.mem.eql(u8, tool_name, "get_review_state")) {
@@ -759,7 +748,10 @@ fn generateReview(
     bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch {};
 
     const violations = try erc_mod.runErc(allocator, block, project_dir);
-    const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations);
+    var check_results = req_checks.runChecks(allocator, &eval, block) catch
+        std.StringHashMapUnmanaged([]req_checks.Result).empty;
+    req_checks.applyVerifications(&check_results, block, block.instances);
+    const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, &check_results);
     const json = try review_json_mod.renderToJson(allocator, doc);
     try w.writeAll(json);
     return true;
@@ -1195,84 +1187,6 @@ fn listDatasheets(
     }
     try w.writeAll("]}");
     return true;
-}
-
-/// Emit a single MCP `resource` content block containing the raw PDF bytes
-/// base64-encoded. Sets `raw_content_out=true` so the envelope writer
-/// splices the content array in verbatim instead of wrapping it as text.
-/// Size capped at 10 MB; larger PDFs return an error asking the caller to
-/// open `/datasheets/:filename` in a browser instead.
-fn readDatasheet(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    filename: []const u8,
-    out: *std.ArrayListUnmanaged(u8),
-    raw_content_out: *bool,
-) !bool {
-    const w = out.writer(allocator);
-
-    if (filename.len == 0 or !std.mem.endsWith(u8, filename, ".pdf") or
-        std.mem.indexOf(u8, filename, "..") != null or
-        std.mem.indexOfAny(u8, filename, "/\\") != null)
-    {
-        try w.writeAll("error: invalid filename (must be a bare <name>.pdf under lib/datasheets/)");
-        return false;
-    }
-
-    const path = try std.fmt.allocPrint(allocator, "{s}/lib/datasheets/{s}", .{ project_dir, filename });
-    defer allocator.free(path);
-
-    const MAX_BYTES: usize = 10 * 1024 * 1024;
-    const data = std.fs.cwd().readFileAlloc(allocator, path, MAX_BYTES) catch |err| {
-        switch (err) {
-            error.FileTooBig => {
-                try w.print("error: datasheet exceeds 10 MB cap — open /datasheets/{s} in a browser instead", .{filename});
-                return false;
-            },
-            error.FileNotFound => {
-                try w.print("error: datasheet not found: {s}", .{filename});
-                return false;
-            },
-            else => {
-                try w.print("error: could not read datasheet: {s}", .{@errorName(err)});
-                return false;
-            },
-        }
-    };
-    defer allocator.free(data);
-
-    const encoder = std.base64.standard.Encoder;
-    const encoded_len = encoder.calcSize(data.len);
-    const encoded = try allocator.alloc(u8, encoded_len);
-    defer allocator.free(encoded);
-    _ = encoder.encode(encoded, data);
-
-    // Switch the envelope to raw-content mode, then emit a one-element
-    // content array. URI uses a synthetic `eda://` scheme — MCP doesn't
-    // require it to be dereferenceable when a blob is attached.
-    raw_content_out.* = true;
-    try w.writeAll("[{\"type\":\"resource\",\"resource\":{\"uri\":\"eda://datasheet/");
-    try writeJsonStringBody(w, filename);
-    try w.writeAll("\",\"mimeType\":\"application/pdf\",\"blob\":\"");
-    try w.writeAll(encoded);
-    try w.writeAll("\"}}]");
-    return true;
-}
-
-/// Write `s` into `w` escaping only the characters that would break a JSON
-/// string literal. Unlike `writeJsonString`, does NOT emit surrounding
-/// double quotes — the caller already wrote them. Used when the surrounding
-/// JSON shape is being composed character by character.
-fn writeJsonStringBody(w: anytype, s: []const u8) !void {
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        0...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{c}),
-        else => try w.writeByte(c),
-    };
 }
 
 fn missingArg(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, key: []const u8) !bool {

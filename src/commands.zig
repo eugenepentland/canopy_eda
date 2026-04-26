@@ -496,6 +496,122 @@ pub fn cmdExportGerber(allocator: std.mem.Allocator, args: []const []const u8) !
     }
 }
 
+/// `eda export-review --project-dir <d> [--output-dir <out>] [--zip] <design>`
+///
+/// Produces the same package the web button does: `<name>-review.md`
+/// + `<name>-bom.csv`. Default writes both files to `--output-dir`
+/// (created if missing). With `--zip` writes a single `<name>-review.zip`
+/// instead — useful for CI artifacts.
+pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const review_md = @import("review_md.zig");
+    const review_mod = @import("review.zig");
+    const req_checks = @import("req_checks.zig");
+    const bom_html = @import("serve/bom_html.zig");
+    const fp_mod = @import("export_kicad_footprint.zig");
+
+    var project_dir: []const u8 = ".";
+    var output_dir: []const u8 = ".";
+    var design_name: ?[]const u8 = null;
+    var as_zip = false;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--project-dir") and i + 1 < args.len) {
+            project_dir = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--output-dir") and i + 1 < args.len) {
+            output_dir = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--zip")) {
+            as_zip = true;
+        } else {
+            design_name = args[i];
+        }
+    }
+
+    const name = design_name orelse {
+        std.debug.print("Usage: eda export-review --project-dir <d> [--output-dir <dir>] [--zip] <design>\n", .{});
+        std.process.exit(1);
+    };
+
+    const board_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    defer allocator.free(board_path);
+
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    const result = eval.evalFile(board_path) catch |err| {
+        std.debug.print("Build error: {}\n", .{err});
+        std.process.exit(1);
+    };
+    const block = switch (result) {
+        .design_block => |b| b,
+        .board => |b| @as(*const env_mod.DesignBlock, b.design),
+        else => {
+            std.debug.print("Build did not produce a design-block\n", .{});
+            std.process.exit(1);
+        },
+    };
+
+    const bom_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name });
+    defer allocator.free(bom_path);
+    bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch {};
+
+    const violations = erc_mod.runErc(allocator, block, project_dir) catch &[_]erc_mod.Violation{};
+
+    var check_results = req_checks.runChecks(allocator, &eval, block) catch
+        std.StringHashMapUnmanaged([]req_checks.Result).empty;
+    req_checks.applyVerifications(&check_results, block, block.instances);
+
+    const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, &check_results);
+
+    const source = std.fs.cwd().readFileAlloc(allocator, board_path, 16 * 1024 * 1024) catch &[_]u8{};
+
+    const md = try review_md.renderToMarkdown(allocator, block, project_dir, name, doc, source, &check_results);
+
+    var csv_buf: std.ArrayListUnmanaged(u8) = .empty;
+    try bom_html.writeBomCsv(csv_buf.writer(allocator), block);
+
+    std.fs.cwd().makePath(output_dir) catch {};
+    const md_name = try std.fmt.allocPrint(allocator, "{s}-review.md", .{name});
+    const csv_name = try std.fmt.allocPrint(allocator, "{s}-bom.csv", .{name});
+
+    if (as_zip) {
+        const entries = [_]fp_mod.ZipEntry{
+            .{ .name = md_name, .data = md },
+            .{ .name = csv_name, .data = csv_buf.items },
+        };
+        const zip = try fp_mod.buildZip(allocator, &entries);
+        defer allocator.free(zip);
+        const zip_path = try std.fmt.allocPrint(allocator, "{s}/{s}-review.zip", .{ output_dir, name });
+        defer allocator.free(zip_path);
+        const f = std.fs.cwd().createFile(zip_path, .{}) catch |err| {
+            std.debug.print("Cannot write {s}: {}\n", .{ zip_path, err });
+            std.process.exit(1);
+        };
+        defer f.close();
+        try f.writeAll(zip);
+        std.debug.print("Wrote {s} ({d} bytes)\n", .{ zip_path, zip.len });
+    } else {
+        const md_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ output_dir, md_name });
+        defer allocator.free(md_path);
+        const csv_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ output_dir, csv_name });
+        defer allocator.free(csv_path);
+        var fmd = std.fs.cwd().createFile(md_path, .{}) catch |err| {
+            std.debug.print("Cannot write {s}: {}\n", .{ md_path, err });
+            std.process.exit(1);
+        };
+        defer fmd.close();
+        try fmd.writeAll(md);
+        var fcsv = std.fs.cwd().createFile(csv_path, .{}) catch |err| {
+            std.debug.print("Cannot write {s}: {}\n", .{ csv_path, err });
+            std.process.exit(1);
+        };
+        defer fcsv.close();
+        try fcsv.writeAll(csv_buf.items);
+        std.debug.print("Wrote {s} ({d} bytes)\n", .{ md_path, md.len });
+        std.debug.print("Wrote {s} ({d} bytes)\n", .{ csv_path, csv_buf.items.len });
+    }
+}
+
 pub fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var project_dir: []const u8 = ".";
     var server_url: []const u8 = "http://localhost:7050";

@@ -249,6 +249,30 @@
   });
 
   // ---- Sidebar views ----
+  // Map per-section requirement status → glyph + tooltip + CSS modifier.
+  // `req_status` is computed server-side and travels in SCH_INDEX.sections[].
+  function reqStatusBadge(s) {
+    var st = s.req_status || 'empty';
+    var icon = st === 'ok' ? '✓'
+             : st === 'warn' ? '⚠'
+             : st === 'fail' ? '✗'
+             : '·';
+    var tip;
+    if (st === 'ok') {
+      tip = (s.req_pass || 0) + ' pass · ' + (s.req_verified || 0) + ' verified — all requirements satisfied';
+    } else if (st === 'warn') {
+      tip = (s.req_pass || 0) + ' pass · ' + (s.req_verified || 0) + ' verified · '
+          + (s.req_na || 0) + ' unanswered · ' + (s.req_overridden || 0) + ' override';
+    } else if (st === 'fail') {
+      tip = (s.req_fail || 0) + ' failing · ' + (s.req_na || 0) + ' unanswered · '
+          + (s.req_pass || 0) + ' pass · ' + (s.req_verified || 0) + ' verified';
+    } else {
+      tip = 'No requirement-bearing instances in this section';
+    }
+    return '<span class="sb-req-icon req-' + st + '" title="' + escapeHtml(tip) + '">'
+         + icon + '</span>';
+  }
+
   function showSectionList() {
     if (!SCH_INDEX.sections || !SCH_INDEX.sections.length) {
       detailBox.innerHTML = '<div class="sb-empty">No sections.</div>';
@@ -260,7 +284,7 @@
         ? '<span class="sb-cat cat-' + s.category + '">' + escapeHtml(s.category) + '</span>'
         : '';
       html += '<div class="sb-list-item" data-slug="' + escapeHtml(s.slug) + '">' +
-        '<div class="sb-li-head">' + catPill + '<span>' + escapeHtml(s.name) + '</span></div>';
+        '<div class="sb-li-head">' + reqStatusBadge(s) + catPill + '<span>' + escapeHtml(s.name) + '</span></div>';
       if (s.description) html += '<div class="sb-li-sub">' + escapeHtml(s.description) + '</div>';
       html += '</div>';
     });
