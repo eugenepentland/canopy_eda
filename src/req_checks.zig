@@ -14,8 +14,14 @@ const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
 const Check = env_mod.Check;
 
+/// Outcome of evaluating one component requirement: `pass` / `fail` for
+/// automated checks, `na` when no check primitive ran, and `verified` once
+/// `applyVerifications` overlays a matching design-side `(verifies …)` form.
 pub const Status = enum { pass, fail, na, verified };
 
+/// One requirement-check outcome: a `Status`, a human `message` the review
+/// UI displays under the requirement text, and an optional `Verification`
+/// when a `(verifies …)` form has signed off the rule for this part.
 pub const Result = struct {
     status: Status,
     message: []const u8 = "",
@@ -104,6 +110,9 @@ pub fn runChecks(
     return out;
 }
 
+/// Free the per-ref-des `Result` slices owned by a `runChecks` map and the
+/// map's own backing storage. Call once after the review render is done
+/// to release every requirement-check allocation in one pass.
 pub fn deinit(
     allocator: std.mem.Allocator,
     m: *std.StringHashMapUnmanaged([]Result),

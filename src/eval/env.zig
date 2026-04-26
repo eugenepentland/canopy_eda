@@ -54,6 +54,9 @@ pub const Value = union(enum) {
     }
 };
 
+/// A `(defmodule …)` definition: the parameter list, body AST nodes, and the
+/// module file's lexical scope so calls bind parameters into a child env that
+/// still resolves imports the module declared.
 pub const ModuleDef = struct {
     name: []const u8,
     params: []const []const u8,
@@ -493,11 +496,17 @@ pub const PartPin = struct {
     group: []const u8 = "",
 };
 
+/// One key/value attribute attached to a component or instance, e.g.
+/// `manufacturer = "TI"` or `mpn = "STM32N657L0H3Q"`. Surfaced verbatim in
+/// the BOM and KiCad netlist export.
 pub const Property = struct {
     key: []const u8,
     value: []const u8,
 };
 
+/// A placed component in the design — a single ref-des bound to a library
+/// component plus its value, footprint, attached requirements, and per-part
+/// pin breakdown for multi-part symbols.
 pub const Instance = struct {
     ref_des: []const u8,
     /// Descriptive label from source (e.g., "stm32", "flash"). Empty for auto-named passives.
@@ -556,6 +565,9 @@ pub const SignalType = enum {
     differential,
 };
 
+/// Direction of a section-level port for the block diagram. `in` is a sink
+/// (consumes power/signal), `out` is a source, `io` is bidirectional like an
+/// SPI or I2C bus.
 pub const PortDirection = enum { in, out, io };
 
 /// A declared interface on a section (in/out/io).
@@ -582,6 +594,9 @@ pub const CalcBlock = struct {
     results: []const CalcResult = &.{},
 };
 
+/// One named scalar produced by a `(calc …)` block — e.g. the Vout computed
+/// from feedback resistors. Rendered into the section's review card so the
+/// reviewer sees the design intent next to the components that implement it.
 pub const CalcResult = struct {
     name: []const u8,
     value: f64,
@@ -680,6 +695,9 @@ pub const BoardRules = struct {
     via_size: f64 = 0.6,
 };
 
+/// Material kind of one layer in the PCB stackup — copper traces, prepreg
+/// glue, or rigid core. Drives the dielectric/Z-axis math used by the
+/// impedance and zone-fill calculations.
 pub const StackupKind = enum { copper, prepreg, core };
 
 /// A layer in the board stackup.

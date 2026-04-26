@@ -16,6 +16,8 @@ fn isStdRefDes(ref: []const u8) bool {
 
 // ── Symbol pin cache ──────────────────────────────────────────────────
 
+/// One row from a `lib/pinouts/*.sexp` file: a single pin's number and its
+/// human-readable name (e.g. `{ .num = "27", .name = "GND" }`).
 pub const SymbolPin = struct {
     num: []const u8,
     name: []const u8,
@@ -23,6 +25,9 @@ pub const SymbolPin = struct {
 
 pub const SymbolPinCache = std.StringHashMapUnmanaged([]const SymbolPin);
 
+/// Walk the design and append component names whose footprint .sexp or
+/// 3D `.step` model can't be found under `lib/`. The two `checked_*` sets
+/// dedupe so each missing asset is reported once across deep hierarchies.
 pub fn collectMissing(
     allocator: std.mem.Allocator,
     block: *const env_mod.DesignBlock,
@@ -87,6 +92,9 @@ pub fn collectMissing(
     }
 }
 
+/// Render the design's parts list as an HTML BOM table (component, value,
+/// footprint, attrs, count, refs) with inline value-edit controls that
+/// POST to `/api/edit-value/:name`.
 pub fn writeBomHtml(wr: anytype, block: *const env_mod.DesignBlock) !void {
     const Instance = env_mod.Instance;
     var all: std.ArrayListUnmanaged(Instance) = .empty;
@@ -278,6 +286,9 @@ pub fn writeBomHtml(wr: anytype, block: *const env_mod.DesignBlock) !void {
     try wr.writeAll("</div>");
 }
 
+/// Return `"cap"`, `"res"`, `"ind"`, or `"led"` when `component` is a
+/// passive part name like `cap-0402`, otherwise the empty string. Used to
+/// route value edits through the right `(cap …)` / `(res …)` builder.
 pub fn getPassivePrefix(component: []const u8) []const u8 {
     const prefixes = [_][]const u8{ "cap", "res", "ind", "led" };
     for (prefixes) |pfx| {
@@ -286,6 +297,9 @@ pub fn getPassivePrefix(component: []const u8) []const u8 {
     return "";
 }
 
+/// Emit the parts list as CSV (component, value, footprint, count, refs,
+/// then any extra `attrs` columns). Used by `exportBomCsvApi` and the
+/// review-package zip exporter.
 pub fn writeBomCsv(w: anytype, block: *const env_mod.DesignBlock) !void {
     const Instance = env_mod.Instance;
     var all: std.ArrayListUnmanaged(Instance) = .empty;
@@ -418,6 +432,9 @@ fn attrsEqual(a: []const []const u8, b: []const []const u8) bool {
     return true;
 }
 
+/// Scan `lib/pinouts/*.sexp` once and return a map from symbol name to its
+/// full pin list. Cached so per-instance lookups in
+/// `augmentUnconnectedPins` and `writeComponentsJson` stay O(1).
 pub fn buildSymbolPinCache(allocator: std.mem.Allocator, project_dir: []const u8) !SymbolPinCache {
     var cache: SymbolPinCache = .empty;
     const dirs = [_]struct { path: []const u8, form: []const u8 }{
@@ -510,6 +527,9 @@ pub fn augmentUnconnectedPins(allocator: std.mem.Allocator, block: *env_mod.Desi
 
 // ── JSON helpers ───────────────────────────────────────────────────────
 
+/// Cheap probe: open `lib/footprints/<footprint>.sexp` and look for a
+/// `(pad ` token. Used to skip rendering rows in the BOM that would have
+/// no physical pads (decorative or reference-only entries).
 pub fn footprintHasPads(allocator: std.mem.Allocator, project_dir: []const u8, footprint: []const u8) bool {
     if (footprint.len == 0) return false;
     const fp_path = std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, footprint }) catch return false;
@@ -519,6 +539,10 @@ pub fn footprintHasPads(allocator: std.mem.Allocator, project_dir: []const u8, f
     return std.mem.indexOf(u8, content, "(pad ") != null;
 }
 
+/// Walk the design hierarchy and emit a `{ "<refdes>": {…}, … }` object
+/// keyed on hierarchical ref-des, embedding each instance's symbol,
+/// footprint, value, source offset, note text, pin-net pairs, and full
+/// symbol-pin list. Returns true when at least one entry was written.
 pub fn writeComponentsJson(w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8, sym_cache: *const SymbolPinCache, allocator: std.mem.Allocator, project_dir: []const u8) !bool {
     var written = false;
     for (block.instances) |inst| {
@@ -596,6 +620,9 @@ fn baseNetName(name: []const u8) []const u8 {
     return short;
 }
 
+/// Emit a `{ "<net>": [{ref_des, pin}, …], … }` object grouping every pin
+/// reference by its base net name, applying `net_ties` to merge sub-block
+/// nets into the parent's name (so `ldo/VIN` collapses into `VDD`).
 pub fn writeNetsJson(w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8) !bool {
     const allocator = std.heap.page_allocator;
 

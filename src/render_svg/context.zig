@@ -25,6 +25,10 @@ const Allocator = std.mem.Allocator;
 
 // ── Flat types ────────────────────────────────────────────────────────
 
+/// Schematic-renderer view of an instance after sub-block flattening:
+/// path-qualified ref-des plus the few fields the renderer actually uses
+/// (component, value, symbol, parts, requirements). Strips evaluator-only
+/// metadata so the render context can be built without copying everything.
 pub const FlatInst = struct {
     ref_des: []const u8,
     component: []const u8,
@@ -37,11 +41,17 @@ pub const FlatInst = struct {
     requirements: []const env_mod.Requirement = &.{},
 };
 
+/// Schematic-renderer view of a net after sub-block flattening — name plus
+/// the list of pin refs that touch it. Equivalent of `env_mod.Net` once
+/// hierarchy paths have been collapsed.
 pub const FlatNet = struct {
     name: []const u8,
     pins: []const PinRef,
 };
 
+/// Which side of a hub a connection should render to. Drives whether the
+/// chain extends leftward or rightward and whether labels are end-anchored
+/// or start-anchored.
 pub const Side = enum { left, right };
 
 /// An endpoint in the adjacency list.
@@ -62,6 +72,10 @@ pub const Branch = struct {
     terminal: []const u8,
 };
 
+/// One rendered passive-chain stub: the x-coordinate of its furthest-out
+/// component, the y-coordinate the chain sits at, and the terminal net or
+/// pin name to label its open end with. Collected then post-processed so
+/// terminals on the same net group into one shared label.
 pub const BranchBody = struct {
     end_x: f64,
     cy: f64,
@@ -80,6 +94,11 @@ pub const PinGroup = struct {
 
 // ── Render Context ────────────────────────────────────────────────────
 
+/// All the pre-computed lookup tables the SVG schematic renderer needs:
+/// flattened instances + nets, hub/spoke classification, adjacency lists,
+/// per-pin canonical net mapping, port-net set, and the section→index
+/// table that drives section-aware label placement. Built once via
+/// `collectFlat` + helpers, then fed to the per-hub render passes.
 pub const RenderCtx = struct {
     allocator: Allocator,
     /// Project directory for locating lib/pinouts/*.sexp (empty if unavailable).

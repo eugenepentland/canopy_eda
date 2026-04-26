@@ -21,6 +21,11 @@ const hub_mod = @import("hub.zig");
 const estimateBranchCount = hub_mod.estimateBranchCount;
 const branch_mod = @import("branch.zig");
 
+/// Render every connection out of one merged hub-pin group. Classifies each
+/// connection as net-label or pin-link (spoke-chain), filters out
+/// insignificant nets, then routes the surviving ones onto a per-pin local
+/// bus and lays the chains/terminals out vertically without overlapping the
+/// neighbouring pins.
 pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u8, group: PinGroup, stub_x: f64, py: f64, side: Side) !void {
     if (group.conns.len == 0) {
         const nc_x = switch (side) {

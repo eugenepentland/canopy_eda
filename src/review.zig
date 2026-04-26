@@ -13,6 +13,10 @@ const AssertionResult = env_mod.AssertionResult;
 /// Overall review verdict for a design.
 pub const Status = enum { pass, warn, fail };
 
+/// Top-of-page review summary: overall pass/warn/fail status plus the
+/// roll-up counts (sections, instances, nets, ERC violations, assertions,
+/// critical-IC requirement coverage). Computed by `buildSummary` from the
+/// design's evaluator output and ERC results.
 pub const Summary = struct {
     status: Status,
     section_count: usize,
@@ -36,6 +40,9 @@ pub const Summary = struct {
     critical_missing_requirements: []const MissingRequirement = &.{},
 };
 
+/// One critical-IC instance that the library hasn't declared any
+/// `(requirement …)` rules for. Surfaced in the review summary so the
+/// designer knows which `lib/components/<name>.sexp` files to add rules to.
 pub const MissingRequirement = struct {
     /// Sub-block-prefixed ref_des (e.g. "pwr/U1") so duplicates across
     /// sub-blocks stay distinguishable.
@@ -45,6 +52,9 @@ pub const MissingRequirement = struct {
     component: []const u8,
 };
 
+/// Section-level port flattened into review-friendly strings (direction
+/// and signal_type are tag names rather than enums) so JSON / HTML
+/// renderers can emit them without re-importing `env_mod`.
 pub const PortSummary = struct {
     name: []const u8,
     direction: []const u8, // "in" | "out" | "io"
@@ -54,6 +64,10 @@ pub const PortSummary = struct {
     protocol: []const u8 = "",
 };
 
+/// Per-section review entry: title, slug for HTML anchors, status, design
+/// notes, declared ports, and the subset of ERC violations that fall on
+/// instances inside this section. Backs the per-section card on the
+/// review page.
 pub const SectionReport = struct {
     name: []const u8,
     slug: []const u8,
@@ -84,6 +98,9 @@ pub const ComponentRequirementEntry = struct {
     req_results: []const req_checks.Result = &.{},
 };
 
+/// One row in the review's BOM table — a single placed instance with
+/// its component family, value, and footprint. Sorting + grouping happens
+/// at the BomGroup level above.
 pub const BomEntry = struct {
     ref_des: []const u8,
     component: []const u8,
@@ -91,14 +108,22 @@ pub const BomEntry = struct {
     footprint: []const u8,
 };
 
+/// BOM rows bucketed by ref-des prefix letter (U, C, R, …) so the review
+/// renders one collapsible section per part class. Entries inside are
+/// natural-sorted (C2 before C10) for readability.
 pub const BomGroup = struct {
     /// Ref-des letter prefix (e.g. "U", "C", "R", "TP").
     prefix: []const u8,
     entries: []const BomEntry,
 };
 
+/// Per-assertion outcome shown in the review's Assertions table.
+/// `warn` is for `is_warning` assertions; `fail` is for hard failures.
 pub const AssertionStatus = enum { pass, warn, fail };
 
+/// One row in the review's Assertions table — the formatted message the
+/// evaluator emitted (e.g. `VOUT = 3.30 (range 0.6-16.0)`) plus its
+/// pass/warn/fail status pill.
 pub const AssertionReport = struct {
     message: []const u8,
     status: AssertionStatus,
@@ -146,6 +171,11 @@ pub const ReviewState = struct {
     sections: []const SectionReviewState = &.{},
 };
 
+/// The fully-built review document for a design — everything the
+/// `/review/:name` HTML and `/api/review/:name` JSON endpoints need to
+/// render. Aggregates the summary, per-section reports, power-budget /
+/// sequencing tables, BOM, assertions, unresolved violations, and any
+/// loaded review-state checklist data.
 pub const ReviewDoc = struct {
     design_name: []const u8,
     title: []const u8,
@@ -799,6 +829,10 @@ fn isoTimestampNow(allocator: std.mem.Allocator) ![]const u8 {
     return isoTimestamp(allocator, now_s);
 }
 
+/// Format a unix-epoch second count as ISO-8601 UTC ("YYYY-MM-DDTHH:MM:SSZ").
+/// Used for both `generated_at` on the review doc and the `approved_at`
+/// stamp on each per-section approval. Allocates the returned string on
+/// the supplied allocator.
 pub fn isoTimestamp(allocator: std.mem.Allocator, unix_s: i64) ![]const u8 {
     const es = std.time.epoch.EpochSeconds{ .secs = @intCast(unix_s) };
     const day_secs = es.getDaySeconds();

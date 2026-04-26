@@ -458,6 +458,10 @@ fn mergeAwareHubHeight(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, par
 
 // ── Public entry point ───────────────────────────────────────────────
 
+/// Render a design's hub/spoke schematic as a JSON scene graph for the
+/// Pixi.js canvas viewer. Flattens sub-blocks, classifies each instance as
+/// hub or spoke (passive), groups pins, lays out sections in a grid, and
+/// emits hub boxes plus the wires/labels needed to render the schematic.
 pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project_dir: []const u8) ![]const u8 {
     var ctx = RenderCtx.init(allocator);
     ctx.project_dir = project_dir;

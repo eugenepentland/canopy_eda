@@ -65,6 +65,10 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) !void {
     try stdout.writeAll(w_buf.items);
 }
 
+/// CLI entry point for `eda build`. Evaluates `<design>.sexp`, runs assertions,
+/// resolves identities into the `.bom`, and either prints the resolved design
+/// to stdout, writes it to `--output-dir`, or pushes it to a running server
+/// via `--push` so the browser viewer updates live.
 pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var project_dir: []const u8 = ".";
     var push_name: ?[]const u8 = null;
@@ -198,6 +202,9 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 }
 
+/// CLI entry point for `eda export-kicad`. Builds the design, resolves the
+/// BOM, and writes a KiCad-compatible netlist plus per-footprint
+/// `.kicad_mod` files (and any associated STEP models) into `--output-dir`.
 pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var project_dir: []const u8 = ".";
     var output_dir: ?[]const u8 = null;
@@ -280,6 +287,10 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) !v
     }
 }
 
+/// CLI entry point for `eda export-pcb`. Builds the design and emits a native
+/// `.kicad_pcb` file, applying any stored `.layout` placements/traces and the
+/// optional `(board …)` outline so the result opens directly in KiCad's PCB
+/// editor.
 pub fn cmdExportPcb(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var project_dir: []const u8 = ".";
     var output_path: ?[]const u8 = null;
@@ -394,6 +405,10 @@ pub fn cmdExportPcb(allocator: std.mem.Allocator, args: []const []const u8) !voi
     std.debug.print("PCB export complete: {s}\n", .{out});
 }
 
+/// CLI entry point for `eda export-gerber`. Builds the design, applies the
+/// stored `.layout` placements, and emits a Gerber/Excellon manufacturing
+/// set as files (`--output-dir`) or as a single zip on disk when no
+/// directory is given.
 pub fn cmdExportGerber(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const export_gerber = @import("export_gerber.zig");
     const fp_mod = @import("export_kicad_footprint.zig");
@@ -612,6 +627,10 @@ pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) !
     }
 }
 
+/// CLI entry point for `eda serve` in watcher mode. Polls source files under
+/// the project's `src/`, `lib/components/`, and `lib/modules/` directories
+/// and re-pushes the rebuilt design to a separately-running web server
+/// whenever it sees a change.
 pub fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var project_dir: []const u8 = ".";
     var server_url: []const u8 = "http://localhost:7050";

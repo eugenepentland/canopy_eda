@@ -12,6 +12,9 @@ pub const Rules = struct {
     via_size: f64 = 0.6,
 };
 
+/// In-memory representation of a `.layout` sidecar file: every component
+/// placement, every routed trace, every via, and any pre-computed copper
+/// pours, plus the optional design-rule overrides applied during DRC.
 pub const Layout = struct {
     placements: []const Placement,
     traces: []const Trace,
@@ -20,8 +23,13 @@ pub const Layout = struct {
     rules: ?Rules = null,
 };
 
+/// Which physical side of the PCB a component sits on; back-side parts get
+/// their footprint mirrored and routed on `B.Cu` instead of `F.Cu`.
 pub const Side = enum { front, back };
 
+/// One component's placement on the PCB: ref-des, mm position, rotation in
+/// degrees, board side, and the stable UUID used to re-attach the
+/// placement after a rebuild even if the ref-des changes.
 pub const Placement = struct {
     ref_des: []const u8,
     x: f64,
@@ -31,6 +39,9 @@ pub const Placement = struct {
     uuid: []const u8,
 };
 
+/// A routed copper trace: an ordered polyline of mm coordinates on a single
+/// `layer` (`F.Cu`/`B.Cu`/inner) with a fixed `width`, carrying the named
+/// net so DRC can detect clearance violations against other nets.
 pub const Trace = struct {
     net: []const u8,
     layer: []const u8,
@@ -38,6 +49,9 @@ pub const Trace = struct {
     points: []const [2]f64,
 };
 
+/// A through-board via at `(x, y)` connecting `layer_from` to `layer_to`
+/// for the named `net`, with `drill` and `pad_size` (mm) feeding both DRC
+/// (annular ring, clearance) and Gerber/Excellon export.
 pub const Via = struct {
     x: f64,
     y: f64,
@@ -48,6 +62,10 @@ pub const Via = struct {
     layer_to: []const u8,
 };
 
+/// Cached copper-pour result for a `(zone …)` definition: the polygons that
+/// resulted from clipping the zone outline against pads, traces, and
+/// keepouts on `layer`. Stored so the PCB viewer can render the fill
+/// without re-running `zone_fill.zig` on every page load.
 pub const ZoneFill = struct {
     zone_name: []const u8,
     layer: []const u8,

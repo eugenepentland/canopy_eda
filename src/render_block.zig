@@ -889,6 +889,10 @@ fn serializeEdge(w: anytype, edge: Edge, idx_offset: usize) !void {
 
 // ── JSON Renderer ────────────────────────────────────────────────────
 
+/// Render the design's section topology as a JSON scene graph for the
+/// Pixi.js block-diagram viewer. Builds one block per section (and one per
+/// sub-block), categorizes them, column-packs the layout, then routes
+/// power/signal/protocol edges between them.
 pub fn renderBlockDiagramJson(allocator: Allocator, design: *const DesignBlock) ![]const u8 {
     var result = try buildBlocksFromDesign(allocator, design);
     const section_count = result.blocks.items.len;

@@ -85,6 +85,10 @@ fn cacheGet(sha: []const u8) ?Object {
 
 // ── Endpoints ──────────────────────────────────────────────────────────
 
+/// GET /api/sync-manifest/:name — return the list of every footprint
+/// (`.kicad_mod`) and STEP model the design references, each with a
+/// content sha and size, so a remote sync client can `/api/object/:sha`
+/// only the blobs it doesn't already cache locally.
 pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -229,6 +233,10 @@ pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     res.body = buf.items;
 }
 
+/// GET /api/sync-netlist/:name — same payload as `exportNetlistApi` but
+/// adds a content-hash `ETag` and honours `If-None-Match` (returns 304)
+/// so a client polling for changes only re-downloads when the netlist
+/// has actually mutated.
 pub fn netlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -286,6 +294,9 @@ pub fn netlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
     res.body = netlist;
 }
 
+/// GET /api/object/:sha — content-addressed fetch for any footprint or
+/// STEP model the most recent `syncManifestApi` call advertised. Rejects
+/// non-hex shas to block path-traversal attempts on the cache.
 pub fn objectApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const sha = req.param("sha") orelse {
         res.status = 404;

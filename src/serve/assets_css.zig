@@ -10,6 +10,9 @@ pub const NAVBAR_CSS =
     \\.navbar .brand{color:#58a6ff;font-weight:600;font-size:0.9rem;margin-right:0.3rem;}
 ;
 
+/// Render the shared top navigation bar (Designs / Library / Account) into
+/// `w`, marking the link whose name matches `active` with the `.active` CSS
+/// class so the current page is highlighted.
 pub fn writeNavbar(w: anytype, active: []const u8) !void {
     try w.writeAll("<div class=\"navbar\"><span class=\"brand\">Canopy EDA</span>");
     if (std.mem.eql(u8, active, "designs")) {

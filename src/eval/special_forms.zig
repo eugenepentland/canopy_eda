@@ -9,6 +9,9 @@ const Node = ast.Node;
 const Value = env_mod.Value;
 const Env = env_mod.Env;
 
+/// Evaluate `(let name expr)`: bind `name` in the current env to the
+/// evaluated value of `expr`. Returns `.nil` since let is a side-effecting
+/// statement, not a value-producing form.
 pub fn evalLet(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     if (args.len != 2) return EvalError.ArityError;
     const name = args[0].asAtom() orelse return EvalError.InvalidForm;
@@ -17,6 +20,9 @@ pub fn evalLet(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value 
     return .nil;
 }
 
+/// Evaluate `(if cond then else)`: short-circuits — only the matching
+/// branch is evaluated, mirroring Lisp semantics so designers can guard
+/// expensive sub-block calls behind compile-time flags.
 pub fn evalIf(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     if (args.len != 3) return EvalError.ArityError;
     const cond = try self.evalNode(args[0], env);
@@ -27,6 +33,9 @@ pub fn evalIf(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     }
 }
 
+/// Evaluate `(cond (test1 expr1) … (else exprN))`: walks each clause in
+/// order, returning the first matching expression's value. The `else`
+/// keyword on a clause head matches unconditionally, like Scheme's `cond`.
 pub fn evalCond(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     for (args) |clause| {
         const clause_children = clause.asList() orelse return EvalError.InvalidForm;
@@ -47,6 +56,10 @@ pub fn evalCond(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
     return .nil;
 }
 
+/// Evaluate `(fmt "template" args…)` and return the formatted string. The
+/// template uses the `~V` / `~R` / `~C` / `~A` / `~S` directives from
+/// `eval/fmt.zig` so module names can render computed voltages / resistances
+/// without manually formatting the numbers.
 pub fn evalFmt(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     if (args.len < 1) return EvalError.ArityError;
     const template_val = try self.evalNode(args[0], env);
@@ -68,6 +81,9 @@ pub fn evalFmt(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value 
     return .{ .string = result };
 }
 
+/// Evaluate `(assert cond "message")`: append a pass/fail entry to the
+/// evaluator's assertions list. The build never aborts on failure — the
+/// review page surfaces the failures so the designer can decide.
 pub fn evalAssert(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     if (args.len != 2) return EvalError.ArityError;
     const cond = try self.evalNode(args[0], env);
@@ -80,6 +96,10 @@ pub fn evalAssert(self: *Evaluator, args: []const Node, env: *Env) EvalError!Val
     return .nil;
 }
 
+/// Evaluate `(assert-range value lo hi "label")` and record a pass/fail
+/// assertion with a formatted message like `VOUT = 3.3000 (range 0.6-16.0)`.
+/// Used by power-supply modules to verify computed Vout sits inside the
+/// regulator's datasheet envelope.
 pub fn evalAssertRange(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     if (args.len != 4) return EvalError.ArityError;
     const val = try self.evalNode(args[0], env);

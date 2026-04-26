@@ -105,6 +105,11 @@ pub fn renderHubPart(self: *RenderCtx, w: anytype, hub: FlatInst, part: env_mod.
     return hub_height;
 }
 
+/// Render an entire hub instance as one boxed schematic — gather every
+/// pin connected to the hub, group consecutive same-net pins, split them
+/// left vs right by pin count, then draw the box, icon, and per-pin
+/// connection lanes. Returns the box height so the caller can stack the
+/// next section beneath.
 pub fn renderHub(self: *RenderCtx, w: anytype, hub: FlatInst, y_start: f64) !f64 {
     var pin_nets_map: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
     defer pin_nets_map.deinit(self.allocator);

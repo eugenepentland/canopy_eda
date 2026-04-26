@@ -56,6 +56,9 @@ pub fn writeFamiliesJson(w: anytype, allocator: std.mem.Allocator, project_dir: 
     }
 }
 
+/// GET /library — render the component-library browser: a searchable
+/// listing of every symbol/family/footprint/pinout under `lib/` plus a
+/// drag-drop upload box that posts to the `/api/upload-*` endpoints.
 pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(ctx.allocator);

@@ -3,6 +3,10 @@ const parser_mod = @import("sexpr/parser.zig");
 const env_mod = @import("eval/env.zig");
 const Property = env_mod.Property;
 
+/// One row in a `lib/parts/<family>.sexp` table: the value string a design
+/// would request (e.g. `"100nF"`), the manufacturer/MPN to ship in the
+/// BOM, any extra `(key "val")` attributes used to disambiguate variants
+/// (dielectric, tolerance, …), and a `preferred` flag for tie-breaking.
 pub const PartEntry = struct {
     value: []const u8,
     manufacturer: []const u8,
@@ -11,6 +15,10 @@ pub const PartEntry = struct {
     preferred: bool,
 };
 
+/// Lazy on-disk index of `lib/parts/<family>.sexp` tables. Components ask
+/// `lookup(family, value, attrs)` to resolve a parameterised request
+/// (e.g. `cap-0402` + `"100nF"` + `"x7r"`) into a real manufacturer
+/// part for the BOM; each family is parsed once and cached.
 pub const PartsDb = struct {
     allocator: std.mem.Allocator,
     project_dir: []const u8,

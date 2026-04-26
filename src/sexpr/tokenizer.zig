@@ -2,6 +2,9 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const Span = ast.Span;
 
+/// Lexical category of an S-expression token. `unit_val` covers numbers
+/// with a trailing unit (`100k`, `3.3V`, `220nF`); `int` and `float` are
+/// reserved for plain numerics.
 pub const TokenTag = enum {
     lparen,
     rparen,
@@ -13,12 +16,18 @@ pub const TokenTag = enum {
     eof,
 };
 
+/// One lexed token: the classification (`tag`), the verbatim source slice
+/// (`text`), and the byte/line span carried through to the AST so error
+/// messages can point at the original location.
 pub const Token = struct {
     tag: TokenTag,
     text: []const u8,
     span: Span,
 };
 
+/// S-expression tokenizer. Holds a non-owning reference to `source` plus
+/// the cursor (`pos`, `line`, `col`) used for span reporting; instantiate
+/// with `init(source)` then call `next()` to walk tokens until `eof`.
 pub const Tokenizer = struct {
     source: []const u8,
     pos: u32,

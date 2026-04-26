@@ -313,6 +313,9 @@ fn stripLibPrefix(name: []const u8) []const u8 {
     return name;
 }
 
+/// Translate a KiCad pad type token (`smd`/`thru_hole`/`np_thru_hole`) into
+/// the project's compact form (`smd`/`thru`/`npth`); unknown inputs default
+/// to `smd` so partial conversions still produce a valid footprint.
 pub fn mapPadType(kicad: []const u8) []const u8 {
     if (std.mem.eql(u8, kicad, "smd")) return "smd";
     if (std.mem.eql(u8, kicad, "thru_hole")) return "thru";
@@ -320,6 +323,9 @@ pub fn mapPadType(kicad: []const u8) []const u8 {
     return "smd";
 }
 
+/// Normalise a KiCad pad shape name into the subset the project's footprint
+/// renderer understands; unrecognised shapes fall back to `rect` so import
+/// of an unfamiliar footprint still produces a usable approximation.
 pub fn mapPadShape(kicad: []const u8) []const u8 {
     if (std.mem.eql(u8, kicad, "roundrect")) return "roundrect";
     if (std.mem.eql(u8, kicad, "circle")) return "circle";

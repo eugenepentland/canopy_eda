@@ -4,6 +4,9 @@ const na = @import("net_analysis.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Section = env_mod.Section;
 
+/// Verdict for one power rail in the budget table. `tight` flags rails
+/// pulling >80% of source capacity, `over` flags rails whose load exceeds
+/// declared max, `no_source`/`no_consumers` mark incomplete declarations.
 pub const RailStatus = enum { ok, tight, over, no_source, no_consumers };
 
 /// Breakdown of one (ref_des, net) group's contribution to a rail. Pins on

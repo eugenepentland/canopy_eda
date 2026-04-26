@@ -3,6 +3,10 @@ const httpz = @import("httpz");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
+/// POST /api/upload-zip — accept a KiCad library zip (must contain a
+/// `.kicad_sym` plus a `.kicad_mod`, optionally a STEP), unpack via the
+/// system `unzip`, convert each part, and write `lib/components`,
+/// `lib/footprints`, `lib/pinouts`, and `lib/models` entries for it.
 pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const body = req.body() orelse {
         res.status = 400;
@@ -216,6 +220,9 @@ pub fn saveSourceFile(allocator: std.mem.Allocator, project_dir: []const u8, fil
 
 // ── Shared helpers ────────────────────────────────────────────────────
 
+/// Pull the first `(symbol "<name>" …)` identifier out of a KiCad
+/// `.kicad_sym` payload to use as the package basename. Falls back to
+/// `"package"` when the file shape is unexpected.
 pub fn extractPackageName(sym_data: []const u8) []const u8 {
     var search_pos: usize = 0;
     if (std.mem.indexOf(u8, sym_data, "(kicad_symbol_lib")) |_| {
@@ -232,6 +239,9 @@ pub fn extractPackageName(sym_data: []const u8) []const u8 {
     return "package";
 }
 
+/// Lower-case `name` and replace spaces, dots, and underscores with `-`
+/// so it's safe to use as a `lib/.../*.sexp` filename. Other characters
+/// pass through unchanged.
 pub fn sanitizeName(allocator: std.mem.Allocator, name: []const u8) []const u8 {
     var safe_name: std.ArrayListUnmanaged(u8) = .empty;
     for (name) |c| {
@@ -245,6 +255,9 @@ pub fn sanitizeName(allocator: std.mem.Allocator, name: []const u8) []const u8 {
     return safe_name.items;
 }
 
+/// Read the first `(footprint "<name>" …)` identifier out of a
+/// `.kicad_mod` blob and return it sanitized for use as a library
+/// filename. Returns null when no `(footprint …)` form is present.
 pub fn extractFootprintName(allocator: std.mem.Allocator, footprint: []const u8) ?[]const u8 {
     if (std.mem.indexOf(u8, footprint, "(footprint \"")) |idx| {
         const ns = idx + 12;

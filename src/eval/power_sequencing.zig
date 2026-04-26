@@ -3,6 +3,10 @@ const env_mod = @import("env.zig");
 const na = @import("net_analysis.zig");
 const DesignBlock = env_mod.DesignBlock;
 
+/// Resolution status for one rail's `(enable …)` declaration. `ok` means
+/// the enable net traces back to a known upstream rail; `unresolved` flags
+/// dangling enables a debugger needs to look at; `always_on` marks rails
+/// with no enable that come up unconditionally.
 pub const SequenceStatus = enum {
     /// Enable is tied to a known rail (another regulator's output).
     ok,
@@ -14,6 +18,10 @@ pub const SequenceStatus = enum {
     always_on,
 };
 
+/// One row in the power-sequencing table: a regulator-sourced rail plus
+/// the upstream rail it depends on (resolved through `(enable …)` and any
+/// PG signal in the way) and its computed turn-on `order` for top-down
+/// reading.
 pub const SequenceRow = struct {
     /// Top-level rail name this regulator sources (e.g. "V1P8").
     rail: []const u8,

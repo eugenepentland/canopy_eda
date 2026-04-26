@@ -12,6 +12,9 @@ pub var model_config_mutex: std.Thread.Mutex = .{};
 
 // ── Model API endpoints ──────────────────────────────────────────────
 
+/// GET /api/model/:name — stream a `lib/models/<name>` file (typically a
+/// `.step` model up to 50 MB) as binary so the 3D viewer can fetch the
+/// geometry referenced by the BOM's footprints.
 pub fn modelFileApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -31,6 +34,9 @@ pub fn modelFileApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     res.content_type = .BINARY;
 }
 
+/// GET /api/model-config — return `lib/models/model-config.json` (per-
+/// footprint 3D-model offsets and rotations) as JSON, or `{}` when the
+/// file does not yet exist.
 pub fn modelConfigGetApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
     model_config_mutex.lock();
     defer model_config_mutex.unlock();
@@ -48,6 +54,9 @@ pub fn modelConfigGetApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response)
     res.content_type = .JSON;
 }
 
+/// POST /api/model-config — upsert a single footprint's offset and
+/// rotation entry inside `lib/models/model-config.json`, leaving every
+/// other footprint's settings untouched. Guarded by `model_config_mutex`.
 pub fn modelConfigPostApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const body = req.body() orelse {
         res.status = 400;
@@ -172,6 +181,9 @@ pub fn modelConfigPostApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
     res.content_type = .JSON;
 }
 
+/// POST /api/upload-model/:name — write the request body (raw STEP file)
+/// to `lib/models/<name>.step`, creating the directory on first upload so
+/// new footprints can ship a 3D model from the library page.
 pub fn uploadModelApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -219,6 +231,9 @@ pub fn uploadModelApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 
 // ── 3D Model Viewer Page ─────────────────────────────────────────────
 
+/// GET /model-viewer/:name — render the Three.js footprint viewer for a
+/// single library footprint, with controls for editing the 3D model's
+/// offset/rotation that POST back to `/api/model-config`.
 pub fn modelViewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;

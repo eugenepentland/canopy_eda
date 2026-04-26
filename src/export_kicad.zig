@@ -49,6 +49,9 @@ pub fn uuidFromId(allocator: std.mem.Allocator, id: []const u8) ![]const u8 {
     });
 }
 
+/// One component flattened out of the design hierarchy for KiCad export:
+/// the joined `sub-block/REF` reference designator plus the value,
+/// footprint, properties, and stable UUID written into the `.net` file.
 pub const FlatInstance = struct {
     ref_des: []const u8,
     component: []const u8,
@@ -58,11 +61,17 @@ pub const FlatInstance = struct {
     uuid: []const u8,
 };
 
+/// One net in the flattened design with a hierarchically-prefixed name and
+/// the list of `FlatPin`s connected to it. Net ties from `applyNetTies`
+/// merge multiple `FlatNet`s into one before the netlist is emitted.
 pub const FlatNet = struct {
     name: []const u8,
     pins: []const FlatPin,
 };
 
+/// One `(node (ref …) (pin …))` entry in a KiCad netlist: the flattened
+/// component reference designator and the physical pad name on the
+/// component's footprint.
 pub const FlatPin = struct {
     ref_des: []const u8,
     pin: []const u8,
@@ -262,6 +271,9 @@ pub fn exportNetlistOnly(
     return writeNetlist(allocator, design_name, instances.items, nets.items, &fp_name_map, &fp_pad_map);
 }
 
+/// Like `exportKicad`, but returns the entire output bundle (netlist plus
+/// every `.kicad_mod` and STEP model) as an in-memory zip — useful for
+/// the web download endpoint that streams a single file to the browser.
 pub fn exportKicadZip(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,

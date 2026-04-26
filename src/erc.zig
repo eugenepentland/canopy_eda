@@ -11,6 +11,9 @@ const Net = env_mod.Net;
 
 pub const Severity = checks.Severity;
 
+/// Tag identifying which electrical-rule check produced a `Violation`. The
+/// review UI groups findings by this kind so users can scan all
+/// power-budget warnings or all floating nets in one cluster.
 pub const ViolationKind = enum {
     duplicate_refdes,
     floating_net,
@@ -28,6 +31,9 @@ pub const ViolationKind = enum {
     power_budget,
 };
 
+/// One electrical-rule-check finding. `kind` selects the rule, `severity`
+/// drives the UI colouring (error/warning/info), and `ref_des`/`net` carry
+/// the offending entity so the schematic viewer can jump straight to it.
 pub const Violation = struct {
     kind: ViolationKind,
     severity: Severity,

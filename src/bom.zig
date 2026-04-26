@@ -104,6 +104,9 @@ pub const FlatInfo = struct {
     id: []const u8 = "",
 };
 
+/// Walk a design block and append a flat `FlatInfo` per instance into `list`,
+/// recursing into sub-blocks with `prefix` joined onto the ref-des path so
+/// every instance is uniquely identified across the hierarchy.
 pub fn collectFlatInstances(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
@@ -190,6 +193,8 @@ pub fn netSignature(allocator: std.mem.Allocator, nets: []const []const u8) ![]c
     return buf.toOwnedSlice(allocator);
 }
 
+/// Jaccard-style overlap of two net lists in [0, 1]: `|a ∩ b| / |a ∪ b|`.
+/// Returns 1.0 when both are empty, 0.0 when exactly one is empty.
 pub fn netOverlap(a: []const []const u8, b: []const []const u8) f64 {
     if (a.len == 0 and b.len == 0) return 1.0;
     if (a.len == 0 or b.len == 0) return 0.0;

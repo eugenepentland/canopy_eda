@@ -1233,6 +1233,9 @@ fn writeJsonString(w: anytype, s: []const u8) !void {
     try w.writeAll("\"");
 }
 
+/// Scan `{project_dir}/src/*.sexp` and return the basename of every file
+/// whose top-level form is a `(design-block …)`. Helper for the MCP
+/// `list_designs` tool and the index page's design list.
 pub fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) ![][]const u8 {
     const src_path = try std.fmt.allocPrint(allocator, "{s}/src", .{project_dir});
     defer allocator.free(src_path);
@@ -1379,6 +1382,9 @@ fn hasTopLevelDesignBlock(allocator: std.mem.Allocator, path: []const u8) bool {
     return false;
 }
 
+/// Evaluate a design and return the schematic scene-graph JSON the MCP
+/// `get_schematic` tool ships back to Claude Code. Same renderer the
+/// browser viewer consumes via `/api/scene-graph/:name`.
 pub fn renderSceneGraph(
     allocator: std.mem.Allocator,
     project_dir: []const u8,

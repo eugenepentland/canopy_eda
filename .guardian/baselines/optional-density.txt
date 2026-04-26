@@ -1,2 +1,2 @@
 # guardian-snapshot v1
-src/eval/env.zig:694: pub struct 'NetClass' is 66% optional (4/6 fields)
+src/eval/env.zig:712: pub struct 'NetClass' is 66% optional (4/6 fields)

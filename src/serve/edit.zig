@@ -14,6 +14,9 @@ fn warnResolveIdentities(name: []const u8, err: anyerror) void {
     std.debug.print("warning: resolveIdentities {s} failed: {s}\n", .{ name, @errorName(err) });
 }
 
+/// POST /api/edit-value/:name — patch a single instance's value string in
+/// the source `.sexp` (e.g. C3 → `0.5pF`), re-evaluate the design, and
+/// bump the live version so the schematic viewer redraws on its next poll.
 pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -150,6 +153,10 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     res.body = "{\"ok\":true}";
 }
 
+/// POST /api/edit-footprint/:name — swap an instance's component family
+/// (e.g. `cap-0805` → `cap-0603`) using a source-offset checksum to
+/// detect concurrent edits, ensure the new family is in `(import …)`,
+/// rebuild, and return the refreshed components JSON.
 pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -338,6 +345,9 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     res.body = comp_json.items;
 }
 
+/// POST /api/edit-courtyard — replace (or insert) the `(courtyard (rect …))`
+/// form in a `lib/footprints/<name>.sexp` so the PCB editor can adjust a
+/// footprint's keep-out box without hand-editing the library file.
 pub fn editCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const body = req.body() orelse {
         res.status = 400;
@@ -972,6 +982,9 @@ fn parseJsonString(body: []const u8, key: []const u8) ?[]const u8 {
 
 // ── Board outline editing ───────────────────────────────────────────
 
+/// POST /api/board-outline/:name — replace (or insert) the `(outline (rect …))`
+/// in `<name>-board.sexp` so the PCB editor can resize the board boundary
+/// without hand-editing the board source.
 pub fn boardOutlineApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -1109,6 +1122,9 @@ pub const EditError = error{
     AmbiguousMatch,
 } || std.mem.Allocator.Error;
 
+/// Returned by every `…Core` mutation to tell the caller the new live
+/// version (so it can include the value the next viewer poll will see) and
+/// the pre-edit snapshot id used by `restoreDesignCore` for undo.
 pub const MutationResult = struct {
     version: u32,
     /// Snapshot id for the state immediately before this mutation, or null if
@@ -1116,6 +1132,9 @@ pub const MutationResult = struct {
     snapshot: ?[]const u8 = null,
 };
 
+/// One pin-to-net binding for `addInstanceCore`. `pin` is the symbol pin
+/// number (string so `"A1"`-style BGA pads work), `net` is the net name
+/// the new instance should connect that pin to.
 pub const PinAssignment = struct {
     pin: []const u8,
     net: []const u8,
@@ -1214,6 +1233,9 @@ fn findFormEnd(source: []const u8, open_pos: usize) ?usize {
     return null;
 }
 
+/// Replace the value string of `ref_des` in `<name>.sexp`, write the file,
+/// re-evaluate the design, and bump the live version. Shared between the
+/// HTTP `editValueApi` and the MCP `edit_value` tool.
 pub fn editValueCore(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -1249,6 +1271,9 @@ pub fn editValueCore(
     return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
 }
 
+/// Delete the `(instance "<ref_des>" …)` form (and its trailing newline)
+/// from the design source, then rebuild. Returns `error.InstanceNotFound`
+/// if no matching ref-des exists.
 pub fn removeInstanceCore(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -1279,6 +1304,9 @@ pub fn removeInstanceCore(
     return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
 }
 
+/// Locate `(pin <pin> "<old_net>")` inside `(instance "<ref_des>" …)` and
+/// replace just the net string with `new_net`, leaving every other pin
+/// untouched. Backs the MCP `rewire_pin` tool.
 pub fn rewirePinCore(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -1313,6 +1341,9 @@ pub fn rewirePinCore(
     return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
 }
 
+/// Append a new `(instance …)` form to the design (or, when `section` is
+/// non-empty, into the matching named section), wired up with the supplied
+/// `pins`. Used by both the HTTP `addInstanceApi` and MCP `add_component`.
 pub fn addInstanceCore(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -1366,6 +1397,9 @@ pub fn addInstanceCore(
     return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
 }
 
+/// Replace one instance's component family at its evaluator-recorded
+/// `source_offset`, then add the new family to the `(import …)` form if
+/// it is not yet imported. Backs the MCP `swap_component` tool.
 pub fn swapComponentCore(
     allocator: std.mem.Allocator,
     project_dir: []const u8,

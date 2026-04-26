@@ -1,6 +1,9 @@
 const std = @import("std");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
+/// Persisted OAuth client record (one per Claude Code install). Secrets are
+/// hashed via SHA-256 before storage so a leaked `oauth_clients.json`
+/// cannot be replayed against the token endpoint.
 pub const Client = struct {
     id: []const u8,
     secret_hash: []const u8,
@@ -11,6 +14,9 @@ pub const Client = struct {
     revoked: bool = false,
 };
 
+/// Short-lived authorization code waiting to be exchanged for an access
+/// token at `/oauth/token`. Held only in memory; PKCE `code_challenge` is
+/// verified against the verifier the client posts back.
 pub const AuthCode = struct {
     code: []const u8,
     client_id: []const u8,
@@ -21,6 +27,9 @@ pub const AuthCode = struct {
     expires_at: i64,
 };
 
+/// Persisted bearer-token record. Only the SHA-256 `hash` of the token
+/// reaches disk; comparison happens on the hash so a stolen
+/// `oauth_tokens.json` reveals neither the original token nor the secret.
 pub const Token = struct {
     hash: []const u8,
     client_id: []const u8,
@@ -159,11 +168,17 @@ fn saveTokens(allocator: std.mem.Allocator, project_dir: []const u8) void {
 
 // ── Client CRUD ─────────────────────────────────────────────────────────
 
+/// Returned by `createClient`: the fresh `client_id` and the *plaintext*
+/// `client_secret` shown to the user exactly once on the account page.
+/// Only the secret's hash is persisted to disk after this point.
 pub const NewClientResult = struct {
     id: []const u8,
     secret: []const u8,
 };
 
+/// Mint a new `eda_c_…` client_id and `eda_s_…` secret pair, persist the
+/// client (with hashed secret) to `oauth_clients.json`, and return the
+/// plaintext secret for one-time display in the account UI.
 pub fn createClient(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -199,6 +214,9 @@ pub fn createClient(
     return .{ .id = id, .secret = secret };
 }
 
+/// Return the active client with the given id, or null when no match
+/// exists or the row has been revoked. Used during the authorize flow to
+/// confirm the client_id parameter is one we know about.
 pub fn findClient(allocator: std.mem.Allocator, project_dir: []const u8, id: []const u8) ?Client {
     mu.lock();
     defer mu.unlock();
@@ -210,6 +228,9 @@ pub fn findClient(allocator: std.mem.Allocator, project_dir: []const u8, id: []c
     return null;
 }
 
+/// Look up the client and constant-compare its stored hash against
+/// `sha256(secret)`. Returns the client record on a match, null on
+/// unknown/revoked id or wrong secret. Called from the token endpoint.
 pub fn verifyClientSecret(allocator: std.mem.Allocator, project_dir: []const u8, id: []const u8, secret: []const u8) !?Client {
     const client = findClient(allocator, project_dir, id) orelse return null;
     const hash = try sha256Hex(allocator, secret);
@@ -218,6 +239,9 @@ pub fn verifyClientSecret(allocator: std.mem.Allocator, project_dir: []const u8,
     return client;
 }
 
+/// Mark a single client as revoked, but only when `owner_email` matches —
+/// users can't accidentally (or maliciously) revoke another user's client.
+/// Returns true when a row was modified.
 pub fn revokeClient(allocator: std.mem.Allocator, project_dir: []const u8, id: []const u8, owner_email: []const u8) bool {
     mu.lock();
     defer mu.unlock();
@@ -234,6 +258,9 @@ pub fn revokeClient(allocator: std.mem.Allocator, project_dir: []const u8, id: [
     return changed;
 }
 
+/// Mass-revoke every active client owned by `owner_email`. Called by the
+/// admin user-deletion path so a removed user can't keep using cached
+/// `client_id`/`client_secret` pairs from Claude Code.
 pub fn revokeAllClientsForEmail(allocator: std.mem.Allocator, project_dir: []const u8, owner_email: []const u8) void {
     mu.lock();
     defer mu.unlock();
@@ -248,6 +275,8 @@ pub fn revokeAllClientsForEmail(allocator: std.mem.Allocator, project_dir: []con
     if (changed) saveClients(allocator, project_dir);
 }
 
+/// Return every non-revoked client owned by `owner_email`. Backs the
+/// account page's "Your Claude Code clients" list. Caller owns the slice.
 pub fn listClientsByEmail(allocator: std.mem.Allocator, project_dir: []const u8, owner_email: []const u8) ![]Client {
     mu.lock();
     defer mu.unlock();
@@ -262,6 +291,9 @@ pub fn listClientsByEmail(allocator: std.mem.Allocator, project_dir: []const u8,
 
 // ── Auth codes (in-memory, 10 min TTL) ──────────────────────────────────
 
+/// Generate and stash a fresh authorization code (10-minute TTL, in
+/// memory only) the user's browser will redirect with after consenting on
+/// `/oauth/authorize`. Bound to the PKCE `code_challenge`.
 pub fn issueCode(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -289,6 +321,9 @@ pub fn issueCode(
     return code;
 }
 
+/// Single-use lookup: pop the AuthCode out of the in-memory map and
+/// return it (only when not yet expired). The code is gone after this
+/// call — replays at the token endpoint return null.
 pub fn consumeCode(allocator: std.mem.Allocator, project_dir: []const u8, code: []const u8) ?AuthCode {
     mu.lock();
     defer mu.unlock();
@@ -300,6 +335,9 @@ pub fn consumeCode(allocator: std.mem.Allocator, project_dir: []const u8, code: 
 
 // ── Access tokens (persisted, 30 day TTL) ───────────────────────────────
 
+/// Mint a new `eda_t_…` access token (30-day TTL), persist its hash to
+/// `oauth_tokens.json`, and return the plaintext token to hand back at the
+/// `/oauth/token` endpoint.
 pub fn issueToken(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -327,6 +365,9 @@ pub fn issueToken(
     return raw;
 }
 
+/// Return the Token record matching `sha256(raw)` when it has not
+/// expired and its owning client is still active. Used by the auth
+/// middleware on every request that carries a Bearer header.
 pub fn validateToken(allocator: std.mem.Allocator, project_dir: []const u8, raw: []const u8) !?Token {
     mu.lock();
     defer mu.unlock();
@@ -354,6 +395,9 @@ pub fn validateToken(allocator: std.mem.Allocator, project_dir: []const u8, raw:
 
 // ── Crypto helpers ──────────────────────────────────────────────────────
 
+/// SHA-256 of `input` rendered as a 64-char lower-case hex string.
+/// Caller owns the buffer. Used to hash secrets and tokens before they
+/// reach `oauth_clients.json` / `oauth_tokens.json`.
 pub fn sha256Hex(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var digest: [32]u8 = undefined;
     Sha256.hash(input, &digest, .{});
@@ -366,6 +410,9 @@ pub fn sha256Hex(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return out;
 }
 
+/// SHA-256 of `input` rendered as base64url with no padding — the format
+/// PKCE S256 uses for `code_challenge`. Used by `verifyPkce` to compare
+/// what the client-provided `code_verifier` should hash to.
 pub fn sha256Base64Url(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var digest: [32]u8 = undefined;
     Sha256.hash(input, &digest, .{});

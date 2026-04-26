@@ -42,6 +42,9 @@ fn extractJsonString(allocator: std.mem.Allocator, json: []const u8, key: []cons
     return allocator.dupe(u8, json[i..end]) catch null;
 }
 
+/// GET /api/kicad-config/:name — return the persisted output directory and
+/// `.kicad_pcb` path for a design (read from `<name>.kicad.json`). Empty
+/// strings when no config has been set yet.
 pub fn getConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -66,6 +69,9 @@ pub fn getConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     res.body = buf.items;
 }
 
+/// POST /api/kicad-config/:name — persist the user's KiCad sync settings
+/// (output directory and optional `.kicad_pcb` path) to
+/// `<name>.kicad.json` so subsequent sync clicks know where to write.
 pub fn setConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -161,6 +167,9 @@ fn loadAndResolve(ctx: *Handler, name: []const u8, res: *httpz.Response) ?*const
     return block;
 }
 
+/// POST /api/kicad-netlist/:name — re-export the design's KiCad netlist and
+/// drop the file at `<output_dir>/<name>.net`. Used by the sync button when
+/// only the netlist needs to land on disk (no footprint regeneration).
 pub fn writeNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -213,6 +222,9 @@ pub fn writeNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     res.body = body;
 }
 
+/// POST /api/kicad-write/:name — write the KiCad netlist plus a full
+/// `<name>.pretty/` footprint library to the configured output directory,
+/// so the user can pick up both halves in KiCad's pcbnew without zipping.
 pub fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;

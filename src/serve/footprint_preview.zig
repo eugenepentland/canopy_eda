@@ -6,6 +6,9 @@ const footprint_mod = @import("../export_kicad_footprint.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
+/// GET /api/footprint-svg/:name — render a `lib/footprints/<name>.sexp`
+/// as an inline SVG (pads, silkscreen lines and circles) for the library
+/// page's preview thumbnails and the swap-component dialog.
 pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -180,6 +183,8 @@ pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     res.content_type = .HTML;
 }
 
+/// Write an HTML table of every footprint under `lib/footprints/` (name,
+/// pad-bounding-box size, link to the 3D viewer) for the library page.
 pub fn listFootprints(w: anytype, ctx: *Handler) !void {
     try w.writeAll("<h2>Footprints</h2><table><tr><th>Name</th><th>Size (mm)</th><th></th></tr>");
     const fp_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints", .{ctx.project_dir});
@@ -223,6 +228,9 @@ pub fn listFootprints(w: anytype, ctx: *Handler) !void {
     try w.writeAll("</table>");
 }
 
+/// Compute the bounding box of every `(pad …)` form in a footprint .sexp
+/// and return its width and height in millimetres, or null when the file
+/// has no pads.
 pub fn footprintPadBounds(allocator: std.mem.Allocator, content: []const u8) ?struct { w: f64, h: f64 } {
     const nodes = parser_mod.parse(allocator, content) catch return null;
     if (nodes.len == 0) return null;

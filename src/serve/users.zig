@@ -1,5 +1,8 @@
 const std = @import("std");
 
+/// Permission tier assigned to a user. Drives the canWrite/canAdmin gates
+/// the auth middleware and MCP dispatcher consult before accepting a
+/// mutation; the first registered user is bootstrapped as admin.
 pub const Role = enum {
     admin,
     writer,
@@ -31,6 +34,9 @@ pub const Role = enum {
     }
 };
 
+/// One row from `auth/users.json`: a registered email, its current Role,
+/// and the unix timestamp at which the account was first created. Owned
+/// strings are duped from the project allocator on load.
 pub const User = struct {
     email: []const u8,
     role: Role,
@@ -168,6 +174,9 @@ pub fn getRole(allocator: std.mem.Allocator, project_dir: []const u8, email: []c
     return .reader;
 }
 
+/// Return a duped slice of every registered user record. Used by the
+/// admin page to render the user-management table; caller owns the slice
+/// (the inner `email` strings are still backed by the loaded data).
 pub fn listUsers(allocator: std.mem.Allocator, project_dir: []const u8) ![]User {
     mu.lock();
     defer mu.unlock();
@@ -175,6 +184,9 @@ pub fn listUsers(allocator: std.mem.Allocator, project_dir: []const u8) ![]User 
     return allocator.dupe(User, users_list.items);
 }
 
+/// Promote or demote `target_email` to `new_role`, persisting the change.
+/// Returns false when the target user is unknown; returns
+/// `error.LastAdmin` if the change would leave the system with no admins.
 pub fn setRole(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -202,6 +214,9 @@ pub fn setRole(
     return true;
 }
 
+/// Remove `target_email` from the user list. Refuses to delete the
+/// caller themselves (`error.CannotDeleteSelf`) or the last admin
+/// (`error.LastAdmin`). Returns false when the user does not exist.
 pub fn deleteUser(
     allocator: std.mem.Allocator,
     project_dir: []const u8,

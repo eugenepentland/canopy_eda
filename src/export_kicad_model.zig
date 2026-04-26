@@ -17,6 +17,10 @@ const extractFootprintName = netlist_mod.extractFootprintName;
 
 // ── Model config (3D offset/rotation) ──────────────────────────────
 
+/// Per-footprint 3D-model placement loaded from `lib/models/model-config.json`:
+/// XYZ `offset` (mm) and `rotation` (degrees) applied to the STEP model when
+/// emitted into a `.kicad_mod`, plus an optional `model` filename that
+/// overrides the auto-discovered match.
 pub const ModelTransform = struct {
     offset: [3]f64,
     rotation: [3]f64,
@@ -25,6 +29,10 @@ pub const ModelTransform = struct {
 
 pub const ModelConfigMap = std.StringHashMap(ModelTransform);
 
+/// Read `lib/models/model-config.json` and return a footprint-name →
+/// `ModelTransform` map. The JSON is parsed with a minimal hand-rolled
+/// scanner; missing or malformed files yield an empty map rather than
+/// erroring so footprint export still succeeds without a config.
 pub fn loadModelConfig(allocator: std.mem.Allocator, project_dir: []const u8) ModelConfigMap {
     var map = ModelConfigMap.init(allocator);
     const path = std.fmt.allocPrint(allocator, "{s}/lib/models/model-config.json", .{project_dir}) catch return map;
@@ -72,6 +80,9 @@ pub fn loadModelConfig(allocator: std.mem.Allocator, project_dir: []const u8) Mo
     return map;
 }
 
+/// Parse a `"x,y,z"` triple out of the JSON model-config arrays into a
+/// fixed-size `[3]f64`. Missing or unparseable components default to `0`,
+/// so a malformed entry degrades to an identity offset/rotation.
 pub fn parseFloat3(s: []const u8) [3]f64 {
     var result: [3]f64 = .{ 0, 0, 0 };
     var idx: usize = 0;
@@ -85,6 +96,10 @@ pub fn parseFloat3(s: []const u8) [3]f64 {
     return result;
 }
 
+/// Produce the `.kicad_mod` text for a footprint. Prefers passing through
+/// an unmodified `lib/sources/<name>.kicad_mod` (with the 3D model block
+/// rewritten) so vendor-supplied geometry survives round-trips, and falls
+/// back to converting the project's `.sexp` footprint when no source exists.
 pub fn buildKicadMod(
     allocator: std.mem.Allocator,
     project_dir: []const u8,

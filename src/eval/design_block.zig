@@ -22,6 +22,11 @@ const Note = env_mod.Note;
 const Group = env_mod.Group;
 const SubBlock = env_mod.SubBlock;
 
+/// Evaluate a `(design-block "name" form…)` form into a heap-allocated
+/// `DesignBlock`. Iterates each child form (instance/port/note/group/section/
+/// sub-block/net/series/decouple/verifies), builds nets from collected
+/// pin-net declarations and net-ties, auto-assigns ref-deses, and runs the
+/// design validator. The returned Value owns the DesignBlock.
 pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     if (args.len < 1) return EvalError.ArityError;
 

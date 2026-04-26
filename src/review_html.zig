@@ -93,6 +93,10 @@ fn writeHeader(w: anytype, doc: review.ReviewDoc) !void {
     try w.writeAll("</header>");
 }
 
+/// Render the Summary section: a 4-row table covering counts, ERC
+/// severities, assertion outcomes, and critical-IC requirement coverage,
+/// followed by a missing-requirements list when the design has
+/// undocumented hubs.
 pub fn writeSummaryTable(w: anytype, s: review.Summary) !void {
     try w.writeAll("<section><h2>Summary</h2><table class=\"summary\">");
     try w.print(
@@ -147,6 +151,10 @@ pub fn writeSummaryTable(w: anytype, s: review.Summary) !void {
     try w.writeAll("</section>");
 }
 
+/// Render the Power Budget section: one collapsible row per rail, sorted
+/// tightest-first, with source/load currents, computed margin, status
+/// pill, and an expandable per-consumer breakdown that lists every
+/// (ref_des, net) group landing on the rail.
 pub fn writePowerBudget(w: anytype, rails: []const power_budget.Rail) !void {
     if (rails.len == 0) return;
     try w.writeAll("<section><h2>Power budget</h2>");
@@ -232,6 +240,10 @@ fn statusLabel(s: power_budget.RailStatus) []const u8 {
     };
 }
 
+/// Render the Power Sequencing section: rails ordered top-down by power-up
+/// sequence, showing each rail's source sub-block, its `(enable …)` net,
+/// and the upstream rail it depends on. `via` notes intermediate PG signals
+/// so the reviewer can trace e.g. "LDO depends on VDD via PG_3V3".
 pub fn writePowerSequence(w: anytype, rows: []const power_sequencing.SequenceRow) !void {
     if (rows.len == 0) return;
     try w.writeAll("<section><h2>Power sequencing</h2>");
@@ -280,6 +292,9 @@ fn sequenceLabel(s: power_sequencing.SequenceStatus) []const u8 {
     };
 }
 
+/// Render the Test Points section — a probe-pad checklist for hardware
+/// bring-up. Each row pairs a ref_des with the net visible at pin 1 and
+/// the optional `(note …)` describing what to look for.
 pub fn writeTestPoints(w: anytype, tps: []const review.TestPointEntry) !void {
     if (tps.len == 0) return;
     try w.writeAll("<section><h2>Test points</h2>");
@@ -307,6 +322,10 @@ pub fn writeTestPoints(w: anytype, tps: []const review.TestPointEntry) !void {
     try w.writeAll("</tbody></table></section>");
 }
 
+/// Render the Unresolved Issues section — every error+warning ERC violation
+/// the design still carries, severity-styled and with ref_des / net links so
+/// the reviewer can drill into each one. Emits a "clean build" banner when
+/// the slice is empty.
 pub fn writeUnresolved(w: anytype, vs: []const erc_mod.Violation) !void {
     if (vs.len == 0) {
         try w.writeAll("<section><h2>Unresolved issues</h2><p class=\"hint\">No errors or warnings — clean build.</p></section>");
@@ -455,6 +474,10 @@ fn writeSections(w: anytype, sections: []const review.SectionReport, state: revi
     try w.writeAll("</section>");
 }
 
+/// Render the per-section review checklist: progress count, approval pill
+/// (approved / stale / pending), the editable check items, the "Add a
+/// check" input, and the reviewer name + Approve button. Backed by
+/// `/api/review-state/:name` POST handlers which `CHECKLIST_JS` calls.
 pub fn writeChecklist(w: anytype, rs: review.SectionReviewState) !void {
     const checked_count = countChecked(rs.items);
     try w.writeAll("<details class=\"sec-checklist\" open><summary>Review checklist");
@@ -514,6 +537,9 @@ pub fn writeChecklist(w: anytype, rs: review.SectionReviewState) !void {
     try w.writeAll("</div></details>");
 }
 
+/// Look up the persisted `SectionReviewState` for a section slug, returning
+/// an empty default record when no entry exists yet. Lets the section
+/// renderer always have an `rs` to work against without nullable plumbing.
 pub fn findState(state: review.ReviewState, slug: []const u8) review.SectionReviewState {
     for (state.sections) |s| {
         if (std.mem.eql(u8, s.section_slug, slug)) return s;
@@ -529,6 +555,9 @@ fn countChecked(items: []const review.ChecklistItem) usize {
     return n;
 }
 
+/// Render the Assertions section — one row per `(assert …)` /
+/// `(assert-range …)` outcome the evaluator collected, status-pilled and
+/// shown verbatim. Skipped entirely when the slice is empty.
 pub fn writeAssertions(w: anytype, assertions: []const review.AssertionReport) !void {
     if (assertions.len == 0) return;
     try w.writeAll("<section><h2>Assertions</h2>");

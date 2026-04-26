@@ -435,6 +435,10 @@ fn isDirectionKeyword(s: []const u8) bool {
         std.mem.eql(u8, s, "io") or std.mem.eql(u8, s, "bidi");
 }
 
+/// Parse a `(port "NAME" [net] dir ...)` form into a `Port`. Accepts the
+/// short form (net = name) and the long form with explicit net string, plus
+/// the optional `(rated …)`, `(nominal …)`, `(current …)`, `(efficiency …)`,
+/// and `(enable …)` sub-clauses that drive the power-budget analyzer.
 pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port {
     if (args.len < 2) return EvalError.ArityError;
     const name_val = try self.evalNode(args[0], env);
@@ -537,6 +541,8 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
     };
 }
 
+/// Build a `(note "REFDES" "text")` annotation that the schematic renderer
+/// pins next to the named instance. Both arguments must evaluate to strings.
 pub fn buildNote(self: *Evaluator, args: []const Node, env: *Env) EvalError!Note {
     if (args.len != 2) return EvalError.ArityError;
     const rd_val = try self.evalNode(args[0], env);
@@ -547,6 +553,8 @@ pub fn buildNote(self: *Evaluator, args: []const Node, env: *Env) EvalError!Note
     };
 }
 
+/// Build a `(group "name" ("R1" "R2" ...))` form into a `Group` that bundles
+/// a set of ref-deses for the schematic renderer's visual grouping pass.
 pub fn buildGroup(self: *Evaluator, args: []const Node, env: *Env) EvalError!Group {
     if (args.len != 2) return EvalError.ArityError;
     const name_val = try self.evalNode(args[0], env);
@@ -564,6 +572,11 @@ pub fn buildGroup(self: *Evaluator, args: []const Node, env: *Env) EvalError!Gro
     };
 }
 
+/// Build a `(sub-block "name" <expr>)` reference, evaluating the expression
+/// either as a `.sexp` file path or a module call that returns a DesignBlock,
+/// then re-deriving every nested instance ID from the sub-block's name so
+/// IDs stay stable across rebuilds and never leak into the parent's pending
+/// pending-ID write-back list.
 pub fn buildSubBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!SubBlock {
     if (args.len != 2) return EvalError.ArityError;
     const name_val = try self.evalNode(args[0], env);
@@ -624,6 +637,10 @@ pub fn addPartToInstance(self: *Evaluator, instances: []Instance, ref_des: []con
 
 // ── File loading ────────────────────────────────────────────────────
 
+/// Read and parse a `.sexp` file, returning its top-level AST nodes. Caches
+/// by path so the same file evaluated from multiple `(import …)` sites only
+/// hits disk once. The source buffer is intentionally never freed because
+/// AST node strings reference slices into it.
 pub fn loadFile(self: *Evaluator, path: []const u8) ?[]const Node {
     if (self.loaded_files.get(path)) |nodes| return nodes;
 

@@ -11,6 +11,10 @@ const Property = env_mod.Property;
 
 // --- Netlist writer ---
 
+/// Emit a KiCad `.net` file body for a flattened design: the components
+/// section with footprint references and tstamps, then the nets section
+/// where any pad not present on a real net is gathered into the
+/// unconnected (`code "0"`) net so KiCad treats them as NC.
 pub fn writeNetlist(
     allocator: std.mem.Allocator,
     design_name: []const u8,
@@ -91,6 +95,9 @@ pub fn writeNetlist(
 
 // --- Footprint pad extraction ---
 
+/// Parse a `.sexp` footprint and return the ordered list of pad names. The
+/// netlist writer uses this to surface pads that don't appear on any net,
+/// so KiCad sees the full pad inventory even when the design leaves some NC.
 pub fn extractPadNames(allocator: std.mem.Allocator, source: []const u8) ![]const []const u8 {
     const nodes = try parser_mod.parse(allocator, source);
     defer parser_mod.freeNodes(allocator, nodes);
@@ -114,6 +121,9 @@ pub fn extractPadNames(allocator: std.mem.Allocator, source: []const u8) ![]cons
 
 // --- Footprint name extraction ---
 
+/// Pull the declared footprint name out of a parsed `.sexp` source. The
+/// netlist writer uses this to map the project's internal footprint id
+/// (e.g. `r-0402`) to the KiCad library name (`R_0402_1005Metric`).
 pub fn extractFootprintName(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
     const nodes = try parser_mod.parse(allocator, source);
     defer parser_mod.freeNodes(allocator, nodes);
@@ -130,6 +140,10 @@ pub fn extractFootprintName(allocator: std.mem.Allocator, source: []const u8) ![
 
 // --- Hierarchy flattening ---
 
+/// Walk the design tree and append a `FlatInstance` for every component,
+/// joining `prefix` onto each ref-des as it descends into sub-blocks so
+/// references stay unique. Each instance carries the BOM-assigned UUID
+/// when available, falling back to a hash of the stable 8-char id.
 pub fn collectInstances(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
@@ -168,6 +182,10 @@ pub fn collectInstances(
     }
 }
 
+/// Recurse through the design tree and append a `FlatNet` per net, prefixing
+/// both the net name and each pin's ref-des with `prefix` so sub-block-local
+/// nets stay distinct before `applyNetTies` merges them onto the canonical
+/// top-level name.
 pub fn collectNets(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
@@ -205,6 +223,10 @@ pub fn collectNets(
     }
 }
 
+/// One side-to-side net-tie collected from the design hierarchy: `a` and
+/// `b` are net names (already prefixed by sub-block path) that
+/// `applyNetTies` should treat as the same electrical net when merging
+/// the flat netlist.
 pub const FlatTie = struct {
     a: []const u8,
     b: []const u8,

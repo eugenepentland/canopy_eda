@@ -20,6 +20,9 @@ fn isTls(req: *httpz.Request) bool {
     return false;
 }
 
+/// GET /.well-known/oauth-protected-resource — RFC 9728 metadata that
+/// tells Claude Code which authorization server protects this MCP
+/// resource and which bearer mechanism (header) it expects.
 pub fn metadataProtectedResource(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const base = try requestUrl(ctx, req);
     defer ctx.allocator.free(base);
@@ -33,6 +36,9 @@ pub fn metadataProtectedResource(ctx: *Handler, req: *httpz.Request, res: *httpz
     );
 }
 
+/// GET /.well-known/oauth-authorization-server — RFC 8414 metadata
+/// describing this server's authorization and token endpoints, supported
+/// PKCE method (S256), and the `mcp` scope used by Claude Code.
 pub fn metadataAuthServer(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const base = try requestUrl(ctx, req);
     defer ctx.allocator.free(base);

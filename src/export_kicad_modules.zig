@@ -43,6 +43,9 @@ pub fn buildModulesJson(
     return buf.toOwnedSlice(allocator);
 }
 
+/// Build the modules sidecar via `buildModulesJson` and write it to disk
+/// at `out_path`. The KiCad `pcb_update.py` plugin reads this file to spot
+/// repeated sub-block instances and replicate their layout in one shot.
 pub fn writeModulesJson(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,

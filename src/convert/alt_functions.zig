@@ -3,6 +3,9 @@ const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const Node = ast.Node;
 
+/// One alternate-function row pulled from a CSV or ST open-pin-data XML:
+/// `position` is the package pin id, `function` is the signal name to add
+/// as `(alt …)`, and `etype` is the optional electrical type (e.g. `io`).
 pub const AltEntry = struct {
     position: []const u8,
     function: []const u8,

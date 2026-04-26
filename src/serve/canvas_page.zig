@@ -8,6 +8,10 @@ const assets_css = @import("assets_css.zig");
 const bom_html = @import("bom_html.zig");
 const library = @import("library.zig");
 
+/// GET /schematics/:name — render the Pixi.js schematic viewer page for a
+/// design. Evaluates the source, seeds the live scene-graph cache so the
+/// initial paint and subsequent `/api/version/:name` polls stay in sync,
+/// and inlines the BOM table and toolbar markup into the HTML response.
 pub fn canvasPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;

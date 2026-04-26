@@ -12,6 +12,10 @@ const Value = env_mod.Value;
 const Env = env_mod.Env;
 const ModuleDef = env_mod.ModuleDef;
 
+/// Evaluate `(import name1 name2 …)`, resolving each name against the
+/// project's `lib/components/` and `lib/modules/` folders (project_dir then
+/// lib_dir fallback) and registering the resulting component or module in
+/// the caller's environment.
 pub fn evalImport(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     // Support multi-import: (import a b c ...)
     if (args.len < 1) return EvalError.ArityError;
@@ -22,6 +26,10 @@ pub fn evalImport(self: *Evaluator, args: []const Node, env: *Env) EvalError!Val
     return .nil;
 }
 
+/// Locate `name` on disk and load it as the right kind of file. Searches
+/// `lib/components/` then `lib/modules/`, under both the project_dir and
+/// the shared lib_dir. Components get cached in `component_cache`; modules
+/// are evaluated against a heap-owned env and bound into the caller's env.
 pub fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!void {
     // Already loaded?
     if (self.component_cache.contains(name)) return;
@@ -73,6 +81,10 @@ pub fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!vo
     return EvalError.ImportError;
 }
 
+/// Parse a `(component …)` library file into a `ComponentData` cache entry,
+/// extracting the symbol/footprint/pinout names, properties, declared buses,
+/// datasheet PDFs, library `(requirement …)` rules, and the
+/// `(ignore-requirements)` opt-out flag.
 pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!void {
     const children = node.asList() orelse return EvalError.InvalidForm;
     var symbol_name: []const u8 = "";
@@ -190,6 +202,9 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
     });
 }
 
+/// Parse a `(component-family …)` library file into a `ComponentData` entry
+/// flagged `is_family = true`. Families are parameterized: a call site like
+/// `(cap "100nF")` instantiates the family with the value as its parameter.
 pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalError!void {
     const children = node.asList() orelse return EvalError.InvalidForm;
     var symbol_name: []const u8 = "";
@@ -220,6 +235,10 @@ pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalE
     });
 }
 
+/// Evaluate `(defmodule name (params…) "doc?" body…)` and bind the resulting
+/// `ModuleDef` in the current env. The body nodes are stored verbatim for
+/// later evaluation when the module is called; the param list is captured
+/// alongside the module file's import scope so calls resolve correctly.
 pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     // (defmodule name (params...) docstring? body...)
     if (args.len < 2) return EvalError.ArityError;
@@ -251,6 +270,10 @@ pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!
     return .nil;
 }
 
+/// Call a module: evaluate each call-site argument in the caller's env,
+/// bind them to the module's parameter names in a fresh child scope rooted
+/// at the module file's import env, and run the module body. Returns the
+/// last body expression's value — typically a `(design-block …)`.
 pub fn callModule(self: *Evaluator, mod: ModuleDef, call_args: []const Node, caller_env: *Env) EvalError!Value {
     // Evaluate call arguments
     var arg_values: std.ArrayListUnmanaged(Value) = .empty;

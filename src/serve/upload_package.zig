@@ -4,6 +4,10 @@ const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 const upload = @import("upload.zig");
 
+/// POST /api/upload-package — accept a multipart upload of a KiCad symbol
+/// + footprint (+ optional STEP) bundle, convert each piece, and persist
+/// the resulting `lib/components`, `lib/pinouts`, `lib/footprints`, and
+/// `lib/models` files in one transaction.
 pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const body = req.body() orelse {
         res.status = 400;
@@ -202,6 +206,9 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 }
 
 // Legacy upload endpoints (kept for backwards compatibility)
+/// POST /api/upload-symbol — legacy single-file endpoint that accepts a
+/// raw `.kicad_sym` body, converts it, and saves the result under
+/// `lib/pinouts/<sanitized>.sexp`. Kept for older library clients.
 pub fn uploadSymbolApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const body = req.body() orelse {
         res.status = 400;
@@ -268,6 +275,9 @@ pub fn uploadSymbolApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     res.body = msg;
 }
 
+/// POST /api/upload-footprint — legacy single-file endpoint that accepts
+/// a raw `.kicad_mod` body, converts it, and saves the result under
+/// `lib/footprints/<sanitized>.sexp`. Kept for older library clients.
 pub fn uploadFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const body = req.body() orelse {
         res.status = 400;

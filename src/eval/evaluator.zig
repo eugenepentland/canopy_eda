@@ -39,6 +39,9 @@ pub const EvalError = error{
     AssertionFailed,
 };
 
+/// One pin-to-net binding gathered while evaluating an instance or
+/// `(decouple …)` form. The design-block builder collects these into a flat
+/// list and then groups them by net name to produce `Net` records.
 pub const PinNetDecl = struct {
     ref_des: []const u8,
     pin: []const u8,
@@ -60,6 +63,11 @@ pub const AltFunc = struct {
     etype: []const u8 = "",
 };
 
+/// The S-expression evaluator. Holds the project + library directories,
+/// caches loaded files, parsed library components, and per-symbol pinouts,
+/// and accumulates assertion results plus the pending-ID write-back list
+/// the build command uses to freeze freshly-generated 8-char hex IDs into
+/// the source files.
 pub const Evaluator = struct {
     allocator: std.mem.Allocator,
     project_dir: []const u8,

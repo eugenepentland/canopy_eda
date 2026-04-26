@@ -25,6 +25,10 @@ fn hasFlag(args: [][:0]u8, flag: []const u8) bool {
     return false;
 }
 
+/// CLI entry point: parses `argv[1]` as the subcommand name and dispatches
+/// to the matching `cmd*` handler in `commands.zig` (or one of the local
+/// `convert-*` / `parse` / `mint-plugin-token` helpers). Prints the usage
+/// banner and exits 1 on unknown commands.
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 

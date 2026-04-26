@@ -7,6 +7,9 @@ const auth = @import("auth.zig");
 const users = @import("users.zig");
 const mcp_tools = @import("mcp_tools.zig");
 
+/// Per-connection MCP context: ties a streaming Client back to the parent
+/// HTTP `Handler` and carries the authenticated user's email so role
+/// resolution can decide which mutation tools the session may invoke.
 pub const Context = struct {
     handler: *server_mod.Handler,
     email: []const u8,
@@ -243,6 +246,9 @@ fn writeJsonStringTo(w: anytype, s: []const u8) !void {
 
 // ── WebSocket transport ────────────────────────────────────────────────
 
+/// Long-lived WebSocket peer used by the local MCP transport. Each frame
+/// is dispatched through the shared `dispatchFrame` with the role pinned
+/// at upgrade time — clients can't escalate mid-connection.
 pub const Client = struct {
     conn: *websocket.Conn,
     allocator: std.mem.Allocator,
@@ -277,6 +283,9 @@ pub const Client = struct {
     }
 };
 
+/// GET /mcp — perform the WebSocket upgrade for the local MCP transport,
+/// resolving the requesting user's email from their session cookie so the
+/// `Client` instance carries it for the lifetime of the connection.
 pub fn upgrade(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const email = blk: {
         if (auth.getSessionToken(req)) |tok| {
@@ -294,6 +303,9 @@ pub fn upgrade(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Respon
 
 // ── HTTP streamable transport ─────────────────────────────────────────
 
+/// POST /mcp — streamable-HTTP transport used by Claude Code's remote MCP
+/// connector. Resolves the role from the bearer/session cookie, dispatches
+/// one JSON-RPC frame, and returns 202 for notifications (no body).
 pub fn postApi(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const body = req.body() orelse {
         res.status = 400;

@@ -9,6 +9,9 @@ const bom = @import("../bom.zig");
 const env_mod = @import("../eval/env.zig");
 const pcb_viewer_js = @import("pcb_viewer_js.zig");
 
+/// GET /pcb/:name — render the Pixi.js PCB layout editor for a design.
+/// Evaluates `<name>.sexp` (and the optional `<name>-board.sexp` companion
+/// for outline/stackup/rules), then ships the page JS and initial state.
 pub fn pcbPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;

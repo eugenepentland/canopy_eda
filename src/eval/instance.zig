@@ -79,6 +79,11 @@ pub fn resolveComponent(self: *Evaluator, val: Value) ?ResolvedComponent {
     };
 }
 
+/// Evaluate an `(instance "REF" (component …) (pin …) …)` form into an
+/// `InstanceResult`: the placed `Instance`, every inline pin-net declaration
+/// it produced, and any `(note …)` annotations sitting inside the form. The
+/// component must resolve through the library cache or this errors —
+/// missing footprints would silently break KiCad export downstream.
 pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) EvalError!InstanceResult {
     // form_children includes "instance" atom: (instance "R4" (res-0402 "220k") (pin 1 "NET_A") ...)
     const args = form_children[1..];
@@ -208,6 +213,11 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     };
 }
 
+/// Parse a single `(pin … "NET" [(i-typ X) (i-max Y) (as "FN")])` form on
+/// an instance, expanding multi-pin shorthand and resolving each pin token
+/// either as a physical pin ID or as a function name through the pinout
+/// reverse map. Each resolved (pin, net) pair gets appended to `pin_nets`
+/// with the optional asserted-function and current-annotation metadata.
 pub fn parsePinForm(self: *Evaluator, form: Node, ref_des: []const u8, env: *Env, pin_nets: *std.ArrayListUnmanaged(PinNetDecl), pinout: ?*const std.StringHashMapUnmanaged([]const u8)) EvalError!void {
     const pin_children = form.asList() orelse return;
     if (pin_children.len < 3) return;
@@ -326,6 +336,10 @@ pub const TrailingArgs = struct {
     note: ?[]const u8,
 };
 
+/// Walk the trailing args of a `(series …)` form and bucket each child into
+/// a net string, an inline `(key "value")` property, or a single `(note …)`
+/// text. Used by both the named and auto-ref-des series forms so they share
+/// one parser.
 pub fn parseTrailingArgs(self: *Evaluator, children: []const Node, env: *Env) EvalError!TrailingArgs {
     var result = TrailingArgs{
         .nets = .empty,

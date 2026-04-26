@@ -10,6 +10,10 @@ const json_writer = @import("json_writer.zig");
 
 pub const Severity = checks.Severity;
 
+/// A single design-rule-check finding on the PCB layout: the rule kind
+/// (e.g. `clearance`, `min_width`, `keepout`, `unconnected`), a human
+/// message, the board-coordinate location to highlight, and a severity
+/// the UI uses to colour the marker.
 pub const Violation = struct {
     kind: []const u8,
     message: []const u8,

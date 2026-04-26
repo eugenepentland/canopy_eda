@@ -338,6 +338,10 @@ pub fn getSymbolAlts(self: *Evaluator, lookup_name: []const u8) ?*const std.Stri
     return self.symbol_alt_cache.getPtr(lookup_name);
 }
 
+/// Pinout file load result: the `pin_id → function_name` map plus the
+/// `pin_id → []AltFunc` map of declared alternate pin functions. Both maps
+/// are indexed identically and cached together because `loadPinoutFile`
+/// fills them in one pass.
 pub const LoadedPinout = struct {
     pins: std.StringHashMapUnmanaged([]const u8),
     alts: std.StringHashMapUnmanaged([]const AltFunc),

@@ -25,6 +25,9 @@ const edit_mod = @import("edit.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
+/// POST /api/push/:name — re-evaluate the design's `.sexp` source, replace the
+/// live scene-graph JSON, and bump the version counter so the browser viewer
+/// picks up the rebuild on its next `/api/version/:name` poll.
 pub fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -59,6 +62,9 @@ pub fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     res.body = "ok";
 }
 
+/// GET /api/version/:name — return `{"version":N}`. The schematic and PCB
+/// viewers poll this every ~500 ms and reload their scene graph when N
+/// changes. Bumped by `pushApi` and the MCP mutation tools.
 pub fn versionApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -72,6 +78,9 @@ pub fn versionApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) !void 
     try w.print("{{\"version\":{d}}}", .{v});
 }
 
+/// GET /api/scene-graph/:name — return the cached schematic scene-graph JSON
+/// produced by the last build/push. Read under `live_mutex`; falls back to a
+/// minimal `{"error":"no layout"}` body when nothing has been pushed yet.
 pub fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
     serve_root.live_mutex.lock();
     const data = serve_root.live_layout_json;
@@ -82,6 +91,9 @@ pub fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void
     res.body = data orelse "{\"error\":\"no layout\"}";
 }
 
+/// GET /api/block-diagram-json/:name — evaluate the design and emit the
+/// hierarchical block-diagram JSON consumed by the diagram viewer (auto-
+/// categorised columns, topology-aware edges between sections).
 pub fn blockDiagramJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -301,6 +313,9 @@ fn datasheetSize(allocator: std.mem.Allocator, project_dir: []const u8, name: []
     return stat.size;
 }
 
+/// GET /api/layout — return the in-memory editor layout blob the schematic
+/// viewer uses for component placement persistence between live reloads.
+/// Empty `{}` until something has been POSTed via `layoutPostApi`.
 pub fn layoutGetApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
     serve_root.layout_mutex.lock();
     const data = serve_root.layout_data;
@@ -311,6 +326,9 @@ pub fn layoutGetApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void 
     res.body = data orelse "{}";
 }
 
+/// POST /api/layout — store an arbitrary JSON layout blob in process memory
+/// (under `layout_mutex`). The schematic viewer uses this as a session-
+/// scoped scratchpad; payload is not validated server-side.
 pub fn layoutPostApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const body = req.body() orelse "{}";
 
@@ -323,6 +341,9 @@ pub fn layoutPostApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
     res.body = "{\"ok\":true}";
 }
 
+/// GET /api/export-kicad/:name — build the design, resolve BOM identities,
+/// and stream back a `<name>-kicad.zip` containing the KiCad schematic,
+/// netlist, and per-instance footprint files.
 pub fn exportKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -371,6 +392,9 @@ pub fn exportKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     res.body = zip_data;
 }
 
+/// GET /api/export-netlist/:name — build the design and return just the
+/// KiCad `.net` file (no footprints, no zip). Used by external tools that
+/// only care about connectivity for routing or simulation.
 pub fn exportNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -419,6 +443,10 @@ pub fn exportNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     res.body = netlist;
 }
 
+/// POST /api/update-pcb/:name — sync the design's netlist and footprints to a
+/// shared NAS location, then shell out to `src/pcb_update.py` to update the
+/// upstream `.kicad_pcb`. Used by the Cyclops design loop; honours the
+/// `?short-nets=1` query string for KiCad's net-name truncation mode.
 pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const qs = try req.query();
     const short_nets = if (qs.get("short-nets")) |v| std.mem.eql(u8, v, "1") else false;
@@ -548,6 +576,9 @@ pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
     res.content_type = .JSON;
 }
 
+/// GET /api/export-bom-csv/:name — build the design and stream the parts
+/// list as `<name>-bom.csv`. Same column layout as the BOM table on the
+/// review page; suitable for hand-off to procurement.
 pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -589,6 +620,9 @@ pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     res.body = buf.items;
 }
 
+/// GET /api/export-gerber/:name — run the Gerber/Excellon exporter against
+/// the saved `.layout` and stream the resulting fab files back as
+/// `<name>-gerber.zip` for upload to a PCB house.
 pub fn exportGerberApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -865,6 +899,10 @@ pub fn pcbPlacementApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     res.body = "{\"ok\":true}";
 }
 
+/// POST /api/pcb-routing/:name — replace the design's traces and vias in the
+/// `.layout` file. Existing placements and rules are preserved; the body is
+/// a JSON `{traces: [...], vias: [...]}` document the PCB editor sends on
+/// every routing edit.
 pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -1031,6 +1069,9 @@ pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
     res.body = "{\"ok\":true}";
 }
 
+/// POST /api/pcb-rules/:name — update the design rules (clearance, trace
+/// width, via dimensions) stored in the `.layout` file. Used by the PCB
+/// editor's settings panel; placements and traces stay untouched.
 pub fn pcbRulesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -1079,6 +1120,9 @@ pub fn pcbRulesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
     res.body = "{\"ok\":true}";
 }
 
+/// POST /api/zone-fill/:name — recompute copper-pour polygons for every
+/// zone on the board, persist them into the `.layout` file, and return the
+/// fills as JSON for the PCB viewer to render without a round-trip reload.
 pub fn zoneFillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name_param = req.param("name") orelse {
         res.status = 404;
@@ -1184,6 +1228,9 @@ pub fn zoneFillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
     res.body = buf.items;
 }
 
+/// GET /api/drc/:name — run the design-rule checker over the saved layout
+/// (pad clearance, trace widths, via drill/size, obstacle hits) and return
+/// the violations as JSON for the PCB viewer's issues panel.
 pub fn drcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name_param = req.param("name") orelse {
         res.status = 404;
@@ -1370,6 +1417,9 @@ fn parseJsonFloat(json: []const u8, key: []const u8) ?f64 {
     return std.fmt.parseFloat(f64, json[val_start..end]) catch null;
 }
 
+/// GET /api/erc/:name — run electrical-rule checks (duplicate ref-des,
+/// floating nets, unconnected pins, voltage mismatches, missing decoupling)
+/// and return the violations as JSON for the schematic viewer's panel.
 pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const name = req.param("name") orelse {
         res.status = 404;

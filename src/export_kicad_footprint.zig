@@ -103,6 +103,9 @@ fn writeModelBlock(w: anytype, model_name: []const u8, model_offset: ?[3]f64, mo
 
 // --- Footprint .sexp -> .kicad_mod ---
 
+/// Render a project `(footprint …)` source into a KiCad `.kicad_mod` file:
+/// emits the version header, every pad, the courtyard, silkscreen geometry,
+/// and an optional `(model …)` reference to a STEP file under `models/`.
 pub fn exportFootprintMod(allocator: std.mem.Allocator, source: []const u8, model_name: ?[]const u8, model_offset: ?[3]f64, model_rotation: ?[3]f64) ![]const u8 {
     const nodes = try parser_mod.parse(allocator, source);
     defer parser_mod.freeNodes(allocator, nodes);
@@ -337,6 +340,9 @@ fn emitKicadSilkscreen(w: anytype, node: ast.Node) !void {
     }
 }
 
+/// Inverse of `convert.footprint.mapPadType`: turn the project's compact
+/// pad-type token (`smd`/`thru`/`npth`) back into the KiCad spelling
+/// (`smd`/`thru_hole`/`np_thru_hole`) used in `.kicad_mod` output.
 pub fn reverseMapPadType(internal: []const u8) []const u8 {
     if (std.mem.eql(u8, internal, "smd")) return "smd";
     if (std.mem.eql(u8, internal, "thru")) return "thru_hole";
@@ -346,6 +352,10 @@ pub fn reverseMapPadType(internal: []const u8) []const u8 {
 
 // --- STEP model finder ---
 
+/// Locate the STEP model that pairs with a footprint by trying
+/// `<footprint>.step`, then `<component>.step`, then a partial-name scan
+/// of `lib/models/`. Returns the model filename (caller frees) or null
+/// when no candidate is found.
 pub fn findModelFile(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -401,6 +411,9 @@ pub fn findModelFile(
 
 // --- ZIP builder ---
 
+/// A single file inside a built-in-memory zip archive: the archive path
+/// (e.g. `footprints.pretty/R_0402.kicad_mod`) and its raw contents. Used
+/// by the KiCad and Gerber zip exporters as their unit of work.
 pub const ZipEntry = struct {
     name: []const u8,
     data: []const u8,

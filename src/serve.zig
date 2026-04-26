@@ -81,6 +81,10 @@ pub var layout_data: ?[]const u8 = null;
 
 // ── Server ─────────────────────────────────────────────────────────────
 
+/// httpz request handler shared across every route and worker thread. Owns
+/// the long-lived allocator and project directory, runs the auth middleware
+/// before dispatch, and exposes the MCP WebSocket client type so the server
+/// can upgrade `GET /mcp` connections.
 pub const Handler = struct {
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -99,6 +103,9 @@ pub const Handler = struct {
     }
 };
 
+/// Bring up the EDA web server on `port`: registers every page, JSON API,
+/// auth, OAuth, and MCP route against an httpz instance, then blocks on
+/// `server.listen()`. Project files are served out of `project_dir`.
 pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !void {
     var handler = Handler{ .allocator = allocator, .project_dir = project_dir };
     var server = try httpz.Server(*Handler).init(allocator, .{

@@ -2,6 +2,9 @@ const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const Node = ast.Node;
 
+/// One pin extracted from a `.kicad_sym` symbol: pad `number`, display
+/// `name`, KiCad electrical type, and the `(at x y angle)` placement used
+/// to classify which side of the symbol body the pin sits on.
 pub const PinInfo = struct {
     number: []const u8,
     name: []const u8,
@@ -11,6 +14,9 @@ pub const PinInfo = struct {
     angle: f64,
 };
 
+/// One pad extracted from a `.kicad_mod` footprint: pad `id`, type, shape,
+/// and the geometry (centre `x`/`y` plus `sx`/`sy` size) used when pairing
+/// a footprint with its companion symbol during package conversion.
 pub const PadInfo = struct {
     id: []const u8,
     pad_type: []const u8,
@@ -23,6 +29,10 @@ pub const PadInfo = struct {
 
 const Side = enum { left, right, top, bottom };
 
+/// Render a parsed KiCad symbol tree as a project `(symbol …)` form:
+/// extracts the description, gathers pins (recursing into KiCad's per-unit
+/// sub-symbols), classifies them by side using the rectangle-derived body
+/// bbox, and writes ordered pin groups followed by a body label.
 pub fn emitSymbol(allocator: std.mem.Allocator, w: anytype, sym_children: []const Node, sym_name: []const u8) !void {
     // Extract description from properties
     var description: []const u8 = "";
@@ -99,6 +109,9 @@ pub fn emitSymbol(allocator: std.mem.Allocator, w: anytype, sym_children: []cons
     try w.writeAll("\")))\n");
 }
 
+/// Write a sorted list of pins as `(pin NUM "NAME" etype side order)` lines,
+/// numbering the `order` field 1..N so the schematic renderer lays them out
+/// in the exact sequence given.
 pub fn emitPinGroup(w: anytype, pin_list: []const PinInfo, side: []const u8) !void {
     for (pin_list, 0..) |pin, i| {
         const order = i + 1;
@@ -109,6 +122,9 @@ pub fn emitPinGroup(w: anytype, pin_list: []const PinInfo, side: []const u8) !vo
     }
 }
 
+/// Walk a KiCad symbol's child nodes, appending each `(pin …)` and recursing
+/// into any nested `(symbol …)` sub-units (e.g. `R_0_1`, `R_1_1`) so a
+/// multi-unit symbol contributes all of its pins to a single flat list.
 pub fn collectPins(children: []const Node, pins: *std.ArrayListUnmanaged(PinInfo), allocator: std.mem.Allocator) !void {
     for (children) |child| {
         if (child.isForm("pin")) {
@@ -167,6 +183,9 @@ fn extractPin(node: Node) ?PinInfo {
     };
 }
 
+/// Expand the `x1`/`y1`/`x2`/`y2` bounding box to enclose every
+/// `(rectangle …)` declared on the symbol (and any KiCad sub-units), so
+/// `emitSymbol` can decide which side of the body each pin sits on.
 pub fn computeBodyBBox(children: []const Node, x1: *f64, y1: *f64, x2: *f64, y2: *f64) void {
     var found = false;
     for (children) |child| {
@@ -233,6 +252,9 @@ fn sortPinsByX(list: *std.ArrayListUnmanaged(PinInfo)) void {
     }.lessThan);
 }
 
+/// Translate KiCad pin electrical-type tokens (`input`, `power_in`,
+/// `bidirectional`, …) into the project's compact spelling
+/// (`input`, `power-in`, `bidi`, …). Unknown values fall back to `passive`.
 pub fn mapElectricalType(kicad: []const u8) []const u8 {
     if (std.mem.eql(u8, kicad, "input")) return "input";
     if (std.mem.eql(u8, kicad, "output")) return "output";
