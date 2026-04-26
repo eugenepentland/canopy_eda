@@ -56,7 +56,10 @@ pub const Rail = struct {
 /// return one Rail entry per rail that has either a source declaration or a
 /// nonzero annotated load. GND is excluded. The returned slice is owned by
 /// the caller's allocator and references string data in the block itself.
-pub fn analyze(allocator: std.mem.Allocator, block: *const DesignBlock) []const Rail {
+pub fn analyze(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+) std.mem.Allocator.Error![]const Rail {
     // Step 1: union-find on ferrite-bead-bridged nets. A ferrite is a DC
     // conductor, so loads on its downstream side must attribute back to the
     // upstream regulator's budget.
@@ -73,7 +76,7 @@ pub fn analyze(allocator: std.mem.Allocator, block: *const DesignBlock) []const 
                 if (std.mem.eql(u8, p.pin, "2")) net_b = base;
             }
         }
-        if (net_a != null and net_b != null) unionNets(allocator, &net_parent, net_a.?, net_b.?);
+        if (net_a != null and net_b != null) try unionNets(allocator, &net_parent, net_a.?, net_b.?);
     }
 
     // Step 2: collect source declarations from sub-block output ports.
@@ -110,7 +113,7 @@ pub fn analyze(allocator: std.mem.Allocator, block: *const DesignBlock) []const 
                     const incoming_max = incoming.current_max orelse incoming.current_typ orelse 0;
                     if (incoming_max <= existing_max) continue;
                 }
-                sources.put(allocator, root, incoming) catch {};
+                try sources.put(allocator, root, incoming);
             }
         }
     }
@@ -162,9 +165,9 @@ pub fn analyze(allocator: std.mem.Allocator, block: *const DesignBlock) []const 
             const gop = consumer_groups.getOrPut(allocator, group_key) catch continue;
             if (!gop.found_existing) {
                 gop.value_ptr.* = .{ .ref_des = pin.ref_des, .net = base, .root = root };
-                load.group_keys.append(allocator, group_key) catch {};
+                try load.group_keys.append(allocator, group_key);
             }
-            gop.value_ptr.pins.append(allocator, pin.pin) catch {};
+            try gop.value_ptr.pins.append(allocator, pin.pin);
             if (pin.i_typ) |v| {
                 gop.value_ptr.sum_typ += v;
                 gop.value_ptr.any_typ = true;
@@ -174,7 +177,7 @@ pub fn analyze(allocator: std.mem.Allocator, block: *const DesignBlock) []const 
                 gop.value_ptr.any_max = true;
             }
         }
-        loads.put(allocator, root, load) catch {};
+        try loads.put(allocator, root, load);
     }
 
     // Step 3b: back-compute input-side draw for sub-blocks with
@@ -239,10 +242,10 @@ pub fn analyze(allocator: std.mem.Allocator, block: *const DesignBlock) []const 
                     const gop = consumer_groups.getOrPut(allocator, group_key) catch break;
                     if (!gop.found_existing) {
                         gop.value_ptr.* = .{ .ref_des = sb.name, .net = in_display.first_name, .root = in_rail_root };
-                        gop.value_ptr.pins.append(allocator, in_port.name) catch {};
+                        try gop.value_ptr.pins.append(allocator, in_port.name);
                         var updated = in_display;
-                        updated.group_keys.append(allocator, group_key) catch {};
-                        loads.put(allocator, in_rail_root, updated) catch {};
+                        try updated.group_keys.append(allocator, group_key);
+                        try loads.put(allocator, in_rail_root, updated);
                     }
                     gop.value_ptr.sum_typ = iin_typ;
                     gop.value_ptr.sum_max = iin_max;
@@ -254,9 +257,9 @@ pub fn analyze(allocator: std.mem.Allocator, block: *const DesignBlock) []const 
                     in_load.sum_max += delta_max;
                     if (out_load.any_typ) in_load.any_typ = true;
                     if (out_load.any_max) in_load.any_max = true;
-                    loads.put(allocator, in_rail_root, in_load) catch {};
+                    try loads.put(allocator, in_rail_root, in_load);
 
-                    sb_contrib.put(allocator, sb.name, SubContribution{ .iin_typ = iin_typ, .iin_max = iin_max }) catch {};
+                    try sb_contrib.put(allocator, sb.name, SubContribution{ .iin_typ = iin_typ, .iin_max = iin_max });
                     break;
                 }
             }
@@ -274,10 +277,10 @@ pub fn analyze(allocator: std.mem.Allocator, block: *const DesignBlock) []const 
         const root = entry.key_ptr.*;
         const src = entry.value_ptr.*;
         const load = loads.get(root) orelse RailLoad{};
-        const consumers = buildConsumers(allocator, load.group_keys.items, &consumer_groups);
+        const consumers = try buildConsumers(allocator, load.group_keys.items, &consumer_groups);
         const rail = buildRail(src.display_rail, src.source_label, src.current_typ, src.current_max, load.sum_typ, load.sum_max, load.any_typ, load.any_max, consumers);
-        rails.append(allocator, rail) catch {};
-        emitted_roots.put(allocator, root, {}) catch {};
+        try rails.append(allocator, rail);
+        try emitted_roots.put(allocator, root, {});
     }
 
     var load_iter = loads.iterator();
@@ -287,9 +290,9 @@ pub fn analyze(allocator: std.mem.Allocator, block: *const DesignBlock) []const 
         if (!load.any_typ and !load.any_max) continue;
         if (std.mem.eql(u8, root, "GND")) continue;
         if (emitted_roots.contains(root)) continue;
-        const consumers = buildConsumers(allocator, load.group_keys.items, &consumer_groups);
+        const consumers = try buildConsumers(allocator, load.group_keys.items, &consumer_groups);
         const rail = buildRail(load.first_name, "", null, null, load.sum_typ, load.sum_max, load.any_typ, load.any_max, consumers);
-        rails.append(allocator, rail) catch {};
+        try rails.append(allocator, rail);
     }
 
     return rails.items;
@@ -299,7 +302,7 @@ fn buildConsumers(
     allocator: std.mem.Allocator,
     group_keys: []const []const u8,
     groups: anytype,
-) []const RailConsumer {
+) std.mem.Allocator.Error![]const RailConsumer {
     var out: std.ArrayListUnmanaged(RailConsumer) = .empty;
     for (group_keys) |key| {
         const g = groups.get(key) orelse continue;
@@ -307,13 +310,13 @@ fn buildConsumers(
         // points, connectors, and other passive witnesses don't contribute
         // to the rail budget and just clutter the review.
         if (!g.any_typ and !g.any_max) continue;
-        out.append(allocator, .{
+        try out.append(allocator, .{
             .ref_des = g.ref_des,
             .net = g.net,
             .pins = g.pins.items,
             .i_typ = if (g.any_typ) g.sum_typ else null,
             .i_max = if (g.any_max) g.sum_max else null,
-        }) catch {};
+        });
     }
     std.mem.sort(RailConsumer, out.items, {}, lessThanConsumer);
     return out.items;
@@ -463,9 +466,14 @@ fn findRoot(parent: *std.StringHashMapUnmanaged([]const u8), name: []const u8) [
     return cur;
 }
 
-fn unionNets(allocator: std.mem.Allocator, parent: *std.StringHashMapUnmanaged([]const u8), a: []const u8, b: []const u8) void {
+fn unionNets(
+    allocator: std.mem.Allocator,
+    parent: *std.StringHashMapUnmanaged([]const u8),
+    a: []const u8,
+    b: []const u8,
+) std.mem.Allocator.Error!void {
     const ra = findRoot(parent, a);
     const rb = findRoot(parent, b);
     if (std.mem.eql(u8, ra, rb)) return;
-    parent.put(allocator, rb, ra) catch {};
+    try parent.put(allocator, rb, ra);
 }

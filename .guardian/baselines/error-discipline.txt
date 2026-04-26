@@ -42,6 +42,8 @@ src/eval/ids.zig: pub fn getOrCreateFormId uses inferred error set `!T` (use `My
 src/eval/ids.zig: pub fn nextRefDes uses inferred error set `!T` (use `MyErr!T`)
 src/eval/ids.zig: pub fn reassignSubBlockIds uses inferred error set `!T` (use `MyErr!T`)
 src/eval/instance.zig: pub fn evalSeriesForm uses inferred error set `!T` (use `MyErr!T`)
+src/eval/validate.zig: pub fn validateDesign uses inferred error set `!T` (use `MyErr!T`)
+src/eval/validate.zig: pub fn warnCombinableNets uses inferred error set `!T` (use `MyErr!T`)
 src/export_gerber.zig: pub fn exportGerber uses inferred error set `!T` (use `MyErr!T`)
 src/export_kicad.zig: pub fn exportKicad uses inferred error set `!T` (use `MyErr!T`)
 src/export_kicad.zig: pub fn exportKicadZip uses inferred error set `!T` (use `MyErr!T`)

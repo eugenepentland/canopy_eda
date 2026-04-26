@@ -60,7 +60,7 @@ pub fn subBlockNetHasCap(block: *const DesignBlock, net_path: []const u8) bool {
 pub fn findMissingDecouplingNets(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
-) []const []const u8 {
+) std.mem.Allocator.Error![]const []const u8 {
     var power_nets: std.StringHashMapUnmanaged(void) = .empty;
     defer power_nets.deinit(allocator);
     for (block.sections) |sec| {
@@ -69,7 +69,7 @@ pub fn findMissingDecouplingNets(
         if (sec.status == .concept) continue;
         for (sec.ports) |p| {
             if (p.signal_type == .power and p.direction == .in) {
-                power_nets.put(allocator, p.name, {}) catch {};
+                try power_nets.put(allocator, p.name, {});
             }
         }
     }
@@ -104,8 +104,8 @@ pub fn findMissingDecouplingNets(
             }
         }
         if (has_ic and !has_cap) {
-            missing.append(allocator, base) catch {};
+            try missing.append(allocator, base);
         }
     }
-    return missing.toOwnedSlice(allocator) catch &.{};
+    return missing.toOwnedSlice(allocator);
 }

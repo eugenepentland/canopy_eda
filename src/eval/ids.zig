@@ -299,10 +299,10 @@ pub fn reassignSubBlockIds(self: *Evaluator, block: *DesignBlock, sub_name: []co
 pub fn getOrCreateFormId(self: *Evaluator, form_children: []const Node) ![]const u8 {
     if (parseId(form_children)) |existing| return existing;
     const new_id = try generateId(self);
-    self.pending_ids.append(self.allocator, .{
+    try self.pending_ids.append(self.allocator, .{
         .form_offset = form_children[0].span.offset -| 1,
         .id = new_id,
-    }) catch {};
+    });
     return new_id;
 }
 

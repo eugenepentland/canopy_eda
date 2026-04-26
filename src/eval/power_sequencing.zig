@@ -42,16 +42,19 @@ pub const SequenceRow = struct {
 ///
 /// Slice and string fields reference allocations via `allocator` plus strings
 /// owned by `block`; caller owns the returned slice.
-pub fn analyze(allocator: std.mem.Allocator, block: *const DesignBlock) []const SequenceRow {
+pub fn analyze(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+) std.mem.Allocator.Error![]const SequenceRow {
     // Map each sub-block output port path ("ldo/VOUT") to the top-level rail
     // it's tied to. `sub_to_rail` drives both row construction and rail-name
     // validation for enable resolution.
     var sub_to_rail: std.StringHashMapUnmanaged([]const u8) = .empty;
     for (block.net_ties) |nt| {
         if (std.mem.indexOfScalar(u8, nt.a, '/')) |_| {
-            sub_to_rail.put(allocator, nt.a, na.baseNetName(nt.b)) catch {};
+            try sub_to_rail.put(allocator, nt.a, na.baseNetName(nt.b));
         } else if (std.mem.indexOfScalar(u8, nt.b, '/')) |_| {
-            sub_to_rail.put(allocator, nt.b, na.baseNetName(nt.a)) catch {};
+            try sub_to_rail.put(allocator, nt.b, na.baseNetName(nt.a));
         }
     }
 
@@ -76,11 +79,11 @@ pub fn analyze(allocator: std.mem.Allocator, block: *const DesignBlock) []const 
             const rail = sub_to_rail.get(out_path) orelse continue;
             if (isPowerPort(port)) {
                 if (!primary_rail_of.contains(sb.name)) {
-                    primary_rail_of.put(allocator, sb.name, rail) catch {};
+                    try primary_rail_of.put(allocator, sb.name, rail);
                 }
-                power_rail_set.put(allocator, rail, {}) catch {};
+                try power_rail_set.put(allocator, rail, {});
             } else {
-                signal_source.put(allocator, rail, sb.name) catch {};
+                try signal_source.put(allocator, rail, sb.name);
             }
         }
     }
@@ -95,23 +98,23 @@ pub fn analyze(allocator: std.mem.Allocator, block: *const DesignBlock) []const 
             const rail = sub_to_rail.get(out_path) orelse continue;
 
             if (port.enable_net.len == 0) {
-                rows.append(allocator, .{
+                try rows.append(allocator, .{
                     .rail = rail,
                     .source = sb.name,
                     .status = .always_on,
-                }) catch {};
+                });
                 continue;
             }
 
             const resolved = resolveEnable(allocator, block, &power_rail_set, &signal_source, &primary_rail_of, sb.name, port.enable_net);
-            rows.append(allocator, .{
+            try rows.append(allocator, .{
                 .rail = rail,
                 .source = sb.name,
                 .enable = port.enable_net,
                 .depends_on = resolved.depends_on,
                 .via = resolved.via,
                 .status = if (resolved.depends_on.len > 0) .ok else .unresolved,
-            }) catch {};
+            });
         }
     }
 

@@ -8,17 +8,17 @@ const Node = ast.Node;
 const Env = env_mod.Env;
 
 /// Run post-build validations on a design block and its sub-blocks.
-pub fn validateDesign(self: *Evaluator, block: *const DesignBlock) void {
-    checkSinglePinNets(self, block);
-    checkVoltageMismatches(self, block);
-    checkMissingDecoupling(self, block);
+pub fn validateDesign(self: *Evaluator, block: *const DesignBlock) !void {
+    try checkSinglePinNets(self, block);
+    try checkVoltageMismatches(self, block);
+    try checkMissingDecoupling(self, block);
 }
 
 /// Warn about nets that have only a single pin (dead-end connections).
 /// Groups nets by base name (before first '.') so that "VDD" and "VDD.U3.W6"
 /// are counted together. Sub-blocks are excluded since their internal nets
 /// connect to the parent design via net_ties.
-fn checkSinglePinNets(self: *Evaluator, block: *const DesignBlock) void {
+fn checkSinglePinNets(self: *Evaluator, block: *const DesignBlock) !void {
     // Count total pins per base net name
     var net_pin_counts: std.StringHashMapUnmanaged(u32) = .empty;
     // Track a representative single-pin net for the error message
@@ -28,8 +28,8 @@ fn checkSinglePinNets(self: *Evaluator, block: *const DesignBlock) void {
     // Build set of port net names — these connect externally and aren't dead-ends
     var port_nets: std.StringHashMapUnmanaged(void) = .empty;
     for (block.ports) |port| {
-        port_nets.put(self.allocator, port.net, {}) catch {};
-        port_nets.put(self.allocator, port.name, {}) catch {};
+        try port_nets.put(self.allocator, port.net, {});
+        try port_nets.put(self.allocator, port.name, {});
     }
 
     for (block.nets) |net| {
@@ -41,10 +41,10 @@ fn checkSinglePinNets(self: *Evaluator, block: *const DesignBlock) void {
 
         // Store single-pin info for the first occurrence
         if (net.pins.len == 1 and !net_single_pin.contains(base)) {
-            net_single_pin.put(self.allocator, base, .{
+            try net_single_pin.put(self.allocator, base, .{
                 .ref_des = net.pins[0].ref_des,
                 .pin = net.pins[0].pin,
-            }) catch {};
+            });
         }
     }
 
@@ -71,14 +71,14 @@ fn checkSinglePinNets(self: *Evaluator, block: *const DesignBlock) void {
                     "Dead-end net \"{s}\" — only connected to {s} pin {s}",
                     .{ base, info.ref_des, info.pin },
                 ) catch continue;
-                self.assertions.append(self.allocator, .{ .passed = false, .message = msg, .is_warning = true }) catch {};
+                try self.assertions.append(self.allocator, .{ .passed = false, .message = msg, .is_warning = true });
             }
         }
     }
 }
 
 /// Warn when two sections declare the same net with different voltages.
-fn checkVoltageMismatches(self: *Evaluator, block: *const DesignBlock) void {
+fn checkVoltageMismatches(self: *Evaluator, block: *const DesignBlock) !void {
     // Collect voltage declarations per net name across sections
     const Entry = struct { section: []const u8, voltage: f64 };
     var net_voltages: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(Entry)) = .empty;
@@ -88,7 +88,7 @@ fn checkVoltageMismatches(self: *Evaluator, block: *const DesignBlock) void {
             if (p.voltage) |v| {
                 const gop = net_voltages.getOrPut(self.allocator, p.name) catch continue;
                 if (!gop.found_existing) gop.value_ptr.* = .empty;
-                gop.value_ptr.append(self.allocator, .{ .section = sec.name, .voltage = v }) catch {};
+                try gop.value_ptr.append(self.allocator, .{ .section = sec.name, .voltage = v });
             }
         }
         for (sec.sub_sections) |sub| {
@@ -96,7 +96,7 @@ fn checkVoltageMismatches(self: *Evaluator, block: *const DesignBlock) void {
                 if (p.voltage) |v| {
                     const gop = net_voltages.getOrPut(self.allocator, p.name) catch continue;
                     if (!gop.found_existing) gop.value_ptr.* = .empty;
-                    gop.value_ptr.append(self.allocator, .{ .section = sub.name, .voltage = v }) catch {};
+                    try gop.value_ptr.append(self.allocator, .{ .section = sub.name, .voltage = v });
                 }
             }
         }
@@ -114,7 +114,7 @@ fn checkVoltageMismatches(self: *Evaluator, block: *const DesignBlock) void {
                     "Voltage mismatch on net \"{s}\": {s} declares {d:.1}V but {s} declares {d:.1}V",
                     .{ entry.key_ptr.*, entries[0].section, first_v, e.section, e.voltage },
                 ) catch continue;
-                self.assertions.append(self.allocator, .{ .passed = false, .message = msg, .is_warning = true }) catch {};
+                try self.assertions.append(self.allocator, .{ .passed = false, .message = msg, .is_warning = true });
                 break;
             }
         }
@@ -125,8 +125,8 @@ fn checkVoltageMismatches(self: *Evaluator, block: *const DesignBlock) void {
 /// Shares its core analysis with the on-demand ERC pass in `src/erc.zig` —
 /// see `eval/net_analysis.zig` for the actual walk (including the follow
 /// into sub-block ports tied to top-level rails).
-fn checkMissingDecoupling(self: *Evaluator, block: *const DesignBlock) void {
-    const missing = na.findMissingDecouplingNets(self.allocator, block);
+fn checkMissingDecoupling(self: *Evaluator, block: *const DesignBlock) !void {
+    const missing = try na.findMissingDecouplingNets(self.allocator, block);
     defer self.allocator.free(missing);
     for (missing) |base| {
         const msg = std.fmt.allocPrint(
@@ -134,7 +134,7 @@ fn checkMissingDecoupling(self: *Evaluator, block: *const DesignBlock) void {
             "Power net \"{s}\" connects to IC but has no decoupling capacitor",
             .{base},
         ) catch continue;
-        self.assertions.append(self.allocator, .{ .passed = false, .message = msg, .is_warning = true }) catch {};
+        try self.assertions.append(self.allocator, .{ .passed = false, .message = msg, .is_warning = true });
     }
 }
 
@@ -152,7 +152,7 @@ pub fn trackNetFormSource(self: *Evaluator, form_children: []const Node, env: *E
 }
 
 /// Emit warnings for net forms that share a common first net and could be combined.
-pub fn warnCombinableNets(self: *Evaluator, sources: *std.StringHashMapUnmanaged(u32)) void {
+pub fn warnCombinableNets(self: *Evaluator, sources: *std.StringHashMapUnmanaged(u32)) !void {
     var iter = sources.iterator();
     while (iter.next()) |entry| {
         if (entry.value_ptr.* > 1) {
@@ -161,7 +161,7 @@ pub fn warnCombinableNets(self: *Evaluator, sources: *std.StringHashMapUnmanaged
                 "Net \"{s}\" has {d} separate (net) forms that could be combined",
                 .{ entry.key_ptr.*, entry.value_ptr.* },
             ) catch continue;
-            self.assertions.append(self.allocator, .{ .passed = false, .message = msg, .is_warning = true }) catch {};
+            try self.assertions.append(self.allocator, .{ .passed = false, .message = msg, .is_warning = true });
         }
     }
 }

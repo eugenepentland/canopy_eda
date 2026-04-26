@@ -75,7 +75,7 @@ src/eval/instance.zig::buildInstance | fn buildInstance(self: *Evaluator, form_c
 src/eval/instance.zig::componentFamily | fn componentFamily(val: Value) []const u8
 src/eval/instance.zig::evalSeriesForm | fn evalSeriesForm( self: *Evaluator, form_children: []const Node, env: *Env, instances: *std.ArrayListUnmanaged(Instance), all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl), note_list: *std.ArrayListUnmanaged(Note), ) !void
 src/eval/instance.zig::instanceFromValue | fn instanceFromValue(self: *Evaluator, val: Value, ref_des: []const u8, source_offset: u32, id: []const u8) ?Instance
-src/eval/instance.zig::mergeInstanceProperties | fn mergeInstanceProperties(self: *Evaluator, inst: *Instance, overrides: []const env_mod.Property) void
+src/eval/instance.zig::mergeInstanceProperties | fn mergeInstanceProperties( self: *Evaluator, inst: *Instance, overrides: []const env_mod.Property, ) std.mem.Allocator.Error!void
 src/eval/instance.zig::parsePinForm | fn parsePinForm(self: *Evaluator, form: Node, ref_des: []const u8, env: *Env, pin_nets: *std.ArrayListUnmanaged(PinNetDecl), pinout: ?*const std.StringHashMapUnmanaged([]const u8)) EvalError!void
 src/eval/instance.zig::parseTrailingArgs | fn parseTrailingArgs(self: *Evaluator, children: []const Node, env: *Env) EvalError!TrailingArgs
 src/eval/instance.zig::resolveComponent | fn resolveComponent(self: *Evaluator, val: Value) ?ResolvedComponent
@@ -87,11 +87,11 @@ src/eval/modules.zig::loadComponent | fn loadComponent(self: *Evaluator, name: [
 src/eval/modules.zig::loadComponentFamily | fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalError!void
 src/eval/modules.zig::resolveImport | fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!void
 src/eval/net_analysis.zig::baseNetName | fn baseNetName(name: []const u8) []const u8
-src/eval/net_analysis.zig::findMissingDecouplingNets | fn findMissingDecouplingNets( allocator: std.mem.Allocator, block: *const DesignBlock, ) []const []const u8
+src/eval/net_analysis.zig::findMissingDecouplingNets | fn findMissingDecouplingNets( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const []const u8
 src/eval/net_analysis.zig::refDesLocalPrefix | fn refDesLocalPrefix(ref_des: []const u8) u8
 src/eval/net_analysis.zig::subBlockNetHasCap | fn subBlockNetHasCap(block: *const DesignBlock, net_path: []const u8) bool
-src/eval/power_budget.zig::analyze | fn analyze(allocator: std.mem.Allocator, block: *const DesignBlock) []const Rail
-src/eval/power_sequencing.zig::analyze | fn analyze(allocator: std.mem.Allocator, block: *const DesignBlock) []const SequenceRow
+src/eval/power_budget.zig::analyze | fn analyze( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const Rail
+src/eval/power_sequencing.zig::analyze | fn analyze( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const SequenceRow
 src/eval/special_forms.zig::evalAssert | fn evalAssert(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalAssertRange | fn evalAssertRange(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalCond | fn evalCond(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
@@ -99,8 +99,8 @@ src/eval/special_forms.zig::evalFmt | fn evalFmt(self: *Evaluator, args: []const
 src/eval/special_forms.zig::evalIf | fn evalIf(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalLet | fn evalLet(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/validate.zig::trackNetFormSource | fn trackNetFormSource(self: *Evaluator, form_children: []const Node, env: *Env, sources: *std.StringHashMapUnmanaged(u32)) void
-src/eval/validate.zig::validateDesign | fn validateDesign(self: *Evaluator, block: *const DesignBlock) void
-src/eval/validate.zig::warnCombinableNets | fn warnCombinableNets(self: *Evaluator, sources: *std.StringHashMapUnmanaged(u32)) void
+src/eval/validate.zig::validateDesign | fn validateDesign(self: *Evaluator, block: *const DesignBlock) !void
+src/eval/validate.zig::warnCombinableNets | fn warnCombinableNets(self: *Evaluator, sources: *std.StringHashMapUnmanaged(u32)) !void
 src/export_gerber.zig::exportGerber | fn exportGerber( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, board_def: ?*const env_mod.Board, layout_path: ?[]const u8, ) ![]const GerberFile
 src/export_kicad.zig::exportKicad | fn exportKicad( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, output_dir: []const u8, design_name: []const u8, ) !void
 src/export_kicad.zig::exportKicadZip | fn exportKicadZip( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, ) ![]const u8

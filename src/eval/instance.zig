@@ -92,10 +92,10 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
 
     // Track for auto-insertion if no (id ...) was in source
     if (parsed_id == null) {
-        self.pending_ids.append(self.allocator, .{
+        try self.pending_ids.append(self.allocator, .{
             .form_offset = form_children[0].span.offset -| 1,
             .id = inst_id,
-        }) catch {};
+        });
     }
 
     const comp_val = try self.evalNode(args[1], env);
@@ -198,7 +198,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
 
     // Merge properties: start with component defaults, override with inline
     if (inline_props.items.len > 0) {
-        mergeInstanceProperties(self, &final_inst, inline_props.items);
+        try mergeInstanceProperties(self, &final_inst, inline_props.items);
     }
 
     return InstanceResult{
@@ -298,7 +298,11 @@ pub fn instanceFromValue(self: *Evaluator, val: Value, ref_des: []const u8, sour
 }
 
 /// Merge override properties into an instance, replacing matching keys.
-pub fn mergeInstanceProperties(self: *Evaluator, inst: *Instance, overrides: []const env_mod.Property) void {
+pub fn mergeInstanceProperties(
+    self: *Evaluator,
+    inst: *Instance,
+    overrides: []const env_mod.Property,
+) std.mem.Allocator.Error!void {
     if (overrides.len == 0) return;
     var merged: std.ArrayListUnmanaged(env_mod.Property) = .empty;
     for (inst.properties) |cp| {
@@ -309,10 +313,10 @@ pub fn mergeInstanceProperties(self: *Evaluator, inst: *Instance, overrides: []c
                 break;
             }
         }
-        if (!overridden) merged.append(self.allocator, cp) catch {};
+        if (!overridden) try merged.append(self.allocator, cp);
     }
-    for (overrides) |ip| merged.append(self.allocator, ip) catch {};
-    inst.properties = merged.toOwnedSlice(self.allocator) catch inst.properties;
+    for (overrides) |ip| try merged.append(self.allocator, ip);
+    inst.properties = try merged.toOwnedSlice(self.allocator);
 }
 
 /// Parse trailing arguments: extract net names, properties, and optional note.
@@ -337,12 +341,12 @@ pub fn parseTrailingArgs(self: *Evaluator, children: []const Node, env: *Env) Ev
                     result.note = cl[1].asString();
                 } else {
                     const v = cl[1].asString() orelse continue;
-                    result.props.append(self.allocator, .{ .key = k, .value = v }) catch {};
+                    try result.props.append(self.allocator, .{ .key = k, .value = v });
                 }
             }
         } else {
             const v = (try self.evalNode(fc, env)).asString() orelse continue;
-            result.nets.append(self.allocator, v) catch {};
+            try result.nets.append(self.allocator, v);
         }
     }
     return result;
@@ -393,10 +397,10 @@ pub fn evalSeriesForm(
         const comp_offset = ids.componentSourceOffset(form_children[1]);
         const series_id = series_parsed_id orelse try ids.generateId(self);
         if (series_parsed_id == null) {
-            self.pending_ids.append(self.allocator, .{
+            try self.pending_ids.append(self.allocator, .{
                 .form_offset = form_children[0].span.offset -| 1,
                 .id = series_id,
-            }) catch {};
+            });
         }
         const ta = try parseTrailingArgs(self, form_children[2..], env);
         var ni: usize = 0;
@@ -416,15 +420,15 @@ pub fn evalSeriesForm(
         const s_comp_offset = ids.componentSourceOffset(form_children[2]);
         const s_id = series_parsed_id orelse try ids.generateId(self);
         if (series_parsed_id == null) {
-            self.pending_ids.append(self.allocator, .{
+            try self.pending_ids.append(self.allocator, .{
                 .form_offset = form_children[0].span.offset -| 1,
                 .id = s_id,
-            }) catch {};
+            });
         }
         const ta = try parseTrailingArgs(self, form_children[3..], env);
         if (ta.nets.items.len < 2) return;
         var s_inst = instanceFromValue(self, s_comp_val, s_ref, s_comp_offset, s_id) orelse return;
-        mergeInstanceProperties(self, &s_inst, ta.props.items);
+        try mergeInstanceProperties(self, &s_inst, ta.props.items);
         ids.registerRefDes(self, s_ref);
         try instances.append(self.allocator, s_inst);
         try all_pin_nets.append(self.allocator, .{ .ref_des = s_ref, .pin = "1", .net = ta.nets.items[0] });

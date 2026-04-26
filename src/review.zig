@@ -182,9 +182,9 @@ pub fn buildReview(
     check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
 ) !ReviewDoc {
     const sections = try buildSectionReports(allocator, block, violations, check_results);
-    const rails = power_budget.analyze(allocator, block);
+    const rails = try power_budget.analyze(allocator, block);
     const rails_sorted = try sortRailsByTightness(allocator, rails);
-    const sequence = power_sequencing.analyze(allocator, block);
+    const sequence = try power_sequencing.analyze(allocator, block);
     const test_points = try buildTestPoints(allocator, block);
     const bom = try buildBom(allocator, block);
     const asserts = try buildAssertionReports(allocator, assertions);

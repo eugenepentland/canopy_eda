@@ -60,7 +60,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
                 try notes.append(self.allocator, note);
             }
             // Auto pin aliases: if package/symbol has pin names, create net-ties
-            appendAutoAliases(self, result.instance, result.pin_nets, &net_ties);
+            try appendAutoAliases(self, result.instance, result.pin_nets, &net_ties);
         } else if (std.mem.eql(u8, form_name, "port")) {
             const port = try builders.buildPort(self, form_children[1..], env);
             try ports.append(self.allocator, port);
@@ -90,7 +90,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         // Ignore config and other unknown forms for now
     }
 
-    validate.warnCombinableNets(self, &net_form_sources);
+    try validate.warnCombinableNets(self, &net_form_sources);
     const nets_slice = try buildNets(self, &all_pin_nets, &net_ties);
 
     // Convert net ties to env NetTie format for storage on the block.
@@ -100,7 +100,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var block_ties: std.ArrayListUnmanaged(env_mod.NetTie) = .empty;
     for (net_ties.items) |nt| {
         if (nt.is_auto) continue;
-        block_ties.append(self.allocator, .{ .a = nt.a, .b = nt.b }) catch {};
+        try block_ties.append(self.allocator, .{ .a = nt.a, .b = nt.b });
     }
 
     const block = self.allocator.create(DesignBlock) catch return EvalError.OutOfMemory;
@@ -118,19 +118,24 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     };
 
     // Auto-assign ref_des for instances with descriptive labels
-    ids.autoAssignRefDes(self, block) catch {};
+    try ids.autoAssignRefDes(self, block);
 
     // Auto-assign global ref_des for sub-block instances
-    ids.autoAssignSubBlockRefDes(self, block) catch {};
+    try ids.autoAssignSubBlockRefDes(self, block);
 
     // Validate: warn about dead-end nets, etc.
-    validate.validateDesign(self, block);
+    try validate.validateDesign(self, block);
 
     return .{ .design_block = block };
 }
 
 /// Append auto pin aliases (net-ties) for an instance based on its pinout.
-fn appendAutoAliases(self: *Evaluator, inst: Instance, pin_nets: []const PinNetDecl, net_ties: *std.ArrayListUnmanaged(NetTie)) void {
+fn appendAutoAliases(
+    self: *Evaluator,
+    inst: Instance,
+    pin_nets: []const PinNetDecl,
+    net_ties: *std.ArrayListUnmanaged(NetTie),
+) EvalError!void {
     const comp_data = self.component_cache.get(inst.component);
     const pin_lookup_name = if (comp_data) |cd| (if (cd.pinout_name.len > 0) cd.pinout_name else cd.symbol_name) else inst.symbol;
     if (pin_lookup_name.len > 0) {
@@ -138,7 +143,7 @@ fn appendAutoAliases(self: *Evaluator, inst: Instance, pin_nets: []const PinNetD
             for (pin_nets) |pn| {
                 if (sym_pins.get(pn.pin)) |func_name| {
                     if (pn.net.len > 0 and !std.mem.eql(u8, pn.net, func_name)) {
-                        net_ties.append(self.allocator, .{ .a = pn.net, .b = func_name, .is_auto = true }) catch {};
+                        try net_ties.append(self.allocator, .{ .a = pn.net, .b = func_name, .is_auto = true });
                     }
                 }
             }
@@ -273,7 +278,7 @@ fn evalSection(
                             break;
                         }
                     }
-                    sec_notes.append(self.allocator, .{ .text = text, .ref = ref }) catch {};
+                    try sec_notes.append(self.allocator, .{ .text = text, .ref = ref });
                 }
             }
         } else if (std.mem.eql(u8, sf_name, "port")) {
@@ -296,7 +301,7 @@ fn evalSection(
             for (result.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
             for (result.inline_notes) |note| try notes.append(self.allocator, note);
             // Auto pin aliases
-            appendAutoAliases(self, result.instance, result.pin_nets, net_ties);
+            try appendAutoAliases(self, result.instance, result.pin_nets, net_ties);
         } else if (std.mem.eql(u8, sf_name, "pins")) {
             try evalPinsForm(self, sf_children, sec_name, env, instances, all_pin_nets, net_ties, &sec_pin_groups);
         } else if (std.mem.eql(u8, sf_name, "decouple")) {
@@ -478,7 +483,7 @@ fn evalSubSection(
                             break;
                         }
                     }
-                    sub_notes.append(self.allocator, .{ .text = text, .ref = ref }) catch {};
+                    try sub_notes.append(self.allocator, .{ .text = text, .ref = ref });
                 }
             }
         } else if (std.mem.eql(u8, ssf_name, "port")) {

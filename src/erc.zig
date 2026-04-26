@@ -312,7 +312,7 @@ fn checkMissingDecoupling(
     block: *const DesignBlock,
     violations: *std.ArrayListUnmanaged(Violation),
 ) !void {
-    const missing = na.findMissingDecouplingNets(allocator, block);
+    const missing = try na.findMissingDecouplingNets(allocator, block);
     defer allocator.free(missing);
     for (missing) |base| {
         const msg = std.fmt.allocPrint(allocator, "Power net \"{s}\" connects to IC but has no decoupling cap", .{base}) catch continue;
@@ -465,7 +465,7 @@ fn checkPowerBudget(
     block: *const DesignBlock,
     violations: *std.ArrayListUnmanaged(Violation),
 ) !void {
-    const rails = power_budget.analyze(allocator, block);
+    const rails = try power_budget.analyze(allocator, block);
     for (rails) |rail| {
         switch (rail.status) {
             .ok => {},
