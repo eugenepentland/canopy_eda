@@ -7,7 +7,7 @@ const power_sequencing = @import("eval/power_sequencing.zig");
 /// Serialize a ReviewDoc to JSON. Field names are snake_case. Consumers
 /// (the web UI and the `generate_review` MCP tool) rely on the schema being
 /// stable, so changes should be strictly additive.
-pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) ![]const u8 {
+pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) std.mem.Allocator.Error![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
 

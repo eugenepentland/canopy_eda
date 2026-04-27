@@ -25,6 +25,5 @@ src/serve/edit.zig::addInstanceCore: unused public declaration
 src/serve/edit.zig::removeInstanceCore: unused public declaration
 src/serve/edit.zig::swapComponentCore: unused public declaration
 src/serve/footprint_preview.zig::listFootprints: unused public declaration
-src/serve/history.zig::HistoryError: unused public declaration
 src/serve/upload_package.zig::uploadFootprintApi: unused public declaration
 src/serve/upload_package.zig::uploadSymbolApi: unused public declaration

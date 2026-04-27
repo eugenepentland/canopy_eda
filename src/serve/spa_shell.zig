@@ -24,7 +24,7 @@ const SHELL_HTML =
 /// GET /v2 — serve the SPA shell HTML: a Pixi.js script tag plus links to
 /// the embedded `/v2/spa.{js,css}` bundle. Acts as the root page for the
 /// new client-side viewer that subsumes the legacy server-rendered pages.
-pub fn shellApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+pub fn shellApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) error{}!void {
     res.content_type = .HTML;
     res.header("cache-control", "no-cache");
     res.body = SHELL_HTML;

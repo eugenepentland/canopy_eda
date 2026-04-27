@@ -28,6 +28,12 @@ const bom = @import("../bom.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
+/// Error set for HTTP handlers in this module.
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
+    std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
+    std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence, NotOpenForReading, ReadOnlyFileSystem, LinkQuotaExceeded };
+
 fn warnResolveIdentities(name: []const u8, err: anyerror) void {
     log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(err) });
 }
@@ -91,7 +97,7 @@ fn cacheGet(sha: []const u8) ?Object {
 /// (`.kicad_mod`) and STEP model the design references, each with a
 /// content sha and size, so a remote sync client can `/api/object/:sha`
 /// only the blobs it doesn't already cache locally.
-pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -239,7 +245,7 @@ pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 /// adds a content-hash `ETag` and honours `If-None-Match` (returns 304)
 /// so a client polling for changes only re-downloads when the netlist
 /// has actually mutated.
-pub fn netlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn netlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -299,7 +305,7 @@ pub fn netlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
 /// GET /api/object/:sha — content-addressed fetch for any footprint or
 /// STEP model the most recent `syncManifestApi` call advertised. Rejects
 /// non-hex shas to block path-traversal attempts on the cache.
-pub fn objectApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn objectApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const sha = req.param("sha") orelse {
         res.status = 404;
         return;

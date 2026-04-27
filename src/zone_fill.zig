@@ -44,7 +44,7 @@ pub fn computeZoneFills(
     board_def: *const env_mod.Board,
     project_dir: []const u8,
     layout: *const layout_mod.Layout,
-) ![]const ZoneFillResult {
+) std.mem.Allocator.Error![]const ZoneFillResult {
     var results: std.ArrayListUnmanaged(ZoneFillResult) = .empty;
 
     // Collect obstacles from component pads

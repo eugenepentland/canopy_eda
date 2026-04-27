@@ -32,8 +32,19 @@ pub const exportSectionLayout = model_mod.exportSectionLayout;
 pub const exportFootprints = model_mod.exportFootprints;
 pub const parseFloat3 = model_mod.parseFloat3;
 
+/// Error set for the KiCad exporter. Wraps file IO (read & write multiple
+/// `.kicad_*` files), parser errors on the source `.sexp`, and the writer
+/// allocations done while building the output buffers.
+pub const ExportError = std.mem.Allocator.Error ||
+    std.fs.File.OpenError ||
+    std.fs.File.ReadError ||
+    std.fs.File.WriteError ||
+    std.fs.Dir.MakeError ||
+    parser_mod.ParseError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream, NotDir };
+
 /// Derive a full UUID (36-char) from an 8-char hex ID by hashing it.
-pub fn uuidFromId(allocator: std.mem.Allocator, id: []const u8) ![]const u8 {
+pub fn uuidFromId(allocator: std.mem.Allocator, id: []const u8) std.mem.Allocator.Error![]const u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update("canopy:");
     hasher.update(id);
@@ -86,7 +97,7 @@ pub fn exportKicad(
     project_dir: []const u8,
     output_dir: []const u8,
     design_name: []const u8,
-) !void {
+) ExportError!void {
     // Create output directories
     const fp_dir = try std.fmt.allocPrint(allocator, "{s}/footprints.pretty", .{output_dir});
     defer allocator.free(fp_dir);
@@ -224,7 +235,7 @@ pub fn exportNetlistOnly(
     block: *const DesignBlock,
     project_dir: []const u8,
     design_name: []const u8,
-) ![]const u8 {
+) ExportError![]const u8 {
     var instances: std.ArrayListUnmanaged(FlatInstance) = .empty;
     defer instances.deinit(allocator);
     var nets: std.ArrayListUnmanaged(FlatNet) = .empty;
@@ -281,7 +292,7 @@ pub fn exportKicadZip(
     block: *const DesignBlock,
     project_dir: []const u8,
     design_name: []const u8,
-) ![]const u8 {
+) ExportError![]const u8 {
     var instances: std.ArrayListUnmanaged(FlatInstance) = .empty;
     defer instances.deinit(allocator);
     var nets: std.ArrayListUnmanaged(FlatNet) = .empty;

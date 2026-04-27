@@ -1,6 +1,16 @@
 const std = @import("std");
 const httpz = @import("httpz");
 
+/// Error set for the `serve` entry point — wraps all the failure modes that
+/// can come out of `httpz.Server.init`, `router`, and `listen`. The set is
+/// intentionally broad because the http server's own surface is wide; we
+/// derive it from the actual `listen()` return type so it stays in sync.
+pub const ServeError = std.mem.Allocator.Error ||
+    @typeInfo(@typeInfo(@TypeOf(httpz.Server(*Handler).listen)).@"fn".return_type.?).error_union.error_set ||
+    @typeInfo(@typeInfo(@TypeOf(httpz.Server(*Handler).router)).@"fn".return_type.?).error_union.error_set ||
+    @typeInfo(@typeInfo(@TypeOf(httpz.Server(*Handler).init)).@"fn".return_type.?).error_union.error_set ||
+    error{ InvalidIPAddressFormat, ThreadQuotaExceeded };
+
 // Sub-modules
 const pages = @import("serve/pages.zig");
 const api = @import("serve/api.zig");
@@ -106,7 +116,7 @@ pub const Handler = struct {
 /// Bring up the EDA web server on `port`: registers every page, JSON API,
 /// auth, OAuth, and MCP route against an httpz instance, then blocks on
 /// `server.listen()`. Project files are served out of `project_dir`.
-pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) !void {
+pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) ServeError!void {
     var handler = Handler{ .allocator = allocator, .project_dir = project_dir };
     var server = try httpz.Server(*Handler).init(allocator, .{
         .address = .all(port),

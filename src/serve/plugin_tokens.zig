@@ -81,7 +81,7 @@ fn save(allocator: std.mem.Allocator, project_dir: []const u8) void {
 
 /// Mint a new plugin token. Returns the raw token string (prefix `eda_p_`) —
 /// shown once to the user and never stored. Caller owns the returned memory.
-pub fn mint(allocator: std.mem.Allocator, project_dir: []const u8, label: []const u8) ![]const u8 {
+pub fn mint(allocator: std.mem.Allocator, project_dir: []const u8, label: []const u8) std.mem.Allocator.Error![]const u8 {
     mu.lock();
     defer mu.unlock();
     ensureLoaded(allocator, project_dir);

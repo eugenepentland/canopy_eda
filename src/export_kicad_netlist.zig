@@ -9,6 +9,11 @@ const FlatNet = export_kicad.FlatNet;
 const FlatPin = export_kicad.FlatPin;
 const Property = env_mod.Property;
 
+/// Error set for the KiCad netlist helpers in this module — covers parser
+/// failures, allocator failures, and the local `InvalidFormat` thrown when
+/// a footprint sexp is missing the expected nodes.
+pub const NetlistError = std.mem.Allocator.Error || parser_mod.ParseError || error{InvalidFormat};
+
 // --- Netlist writer ---
 
 /// Emit a KiCad `.net` file body for a flattened design: the components
@@ -22,7 +27,7 @@ pub fn writeNetlist(
     nets: []const FlatNet,
     fp_name_map: *const std.StringHashMap([]const u8),
     fp_pad_map: *const std.StringHashMap([]const []const u8),
-) ![]const u8 {
+) std.mem.Allocator.Error![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
     const w = buf.writer(allocator);
@@ -98,7 +103,7 @@ pub fn writeNetlist(
 /// Parse a `.sexp` footprint and return the ordered list of pad names. The
 /// netlist writer uses this to surface pads that don't appear on any net,
 /// so KiCad sees the full pad inventory even when the design leaves some NC.
-pub fn extractPadNames(allocator: std.mem.Allocator, source: []const u8) ![]const []const u8 {
+pub fn extractPadNames(allocator: std.mem.Allocator, source: []const u8) NetlistError![]const []const u8 {
     const nodes = try parser_mod.parse(allocator, source);
     defer parser_mod.freeNodes(allocator, nodes);
 
@@ -124,7 +129,7 @@ pub fn extractPadNames(allocator: std.mem.Allocator, source: []const u8) ![]cons
 /// Pull the declared footprint name out of a parsed `.sexp` source. The
 /// netlist writer uses this to map the project's internal footprint id
 /// (e.g. `r-0402`) to the KiCad library name (`R_0402_1005Metric`).
-pub fn extractFootprintName(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
+pub fn extractFootprintName(allocator: std.mem.Allocator, source: []const u8) NetlistError![]const u8 {
     const nodes = try parser_mod.parse(allocator, source);
     defer parser_mod.freeNodes(allocator, nodes);
 
@@ -149,7 +154,7 @@ pub fn collectInstances(
     block: *const DesignBlock,
     prefix: []const u8,
     list: *std.ArrayListUnmanaged(FlatInstance),
-) !void {
+) std.mem.Allocator.Error!void {
     for (block.instances) |inst| {
         const ref = if (prefix.len > 0)
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, inst.ref_des })
@@ -191,7 +196,7 @@ pub fn collectNets(
     block: *const DesignBlock,
     prefix: []const u8,
     list: *std.ArrayListUnmanaged(FlatNet),
-) !void {
+) std.mem.Allocator.Error!void {
     for (block.nets) |net| {
         const net_name = if (prefix.len > 0)
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, net.name })
@@ -240,7 +245,7 @@ pub fn collectNetTies(
     block: *const DesignBlock,
     prefix: []const u8,
     list: *std.ArrayListUnmanaged(FlatTie),
-) !void {
+) std.mem.Allocator.Error!void {
     for (block.net_ties) |t| {
         const a = if (prefix.len > 0)
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, t.a })
@@ -280,7 +285,7 @@ pub fn applyNetTies(
     allocator: std.mem.Allocator,
     nets: *std.ArrayListUnmanaged(FlatNet),
     ties: []const FlatTie,
-) !void {
+) std.mem.Allocator.Error!void {
     if (ties.len == 0 and nets.items.len == 0) return;
 
     var name_to_idx: std.StringHashMapUnmanaged(u32) = .empty;

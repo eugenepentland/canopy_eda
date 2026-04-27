@@ -10,6 +10,14 @@ const plugin_tokens = @import("plugin_tokens.zig");
 const users = @import("users.zig");
 const infra_random = @import("../infra/random.zig");
 
+/// Error set for HTTP handlers in this module. Wide enough to cover
+/// allocator, writer, file IO, makePath, and JSON / form parsing errors
+/// surfaced by `try` from helpers in the body.
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
+    std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
+    std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence };
+
 // ── Session store ────────────────────────────────────────────────────
 
 const SessionData = struct {
@@ -81,7 +89,7 @@ fn persistSessions(allocator: std.mem.Allocator) void {
 /// Mint a new 7-day session for `email` (32-byte hex random token), persist
 /// it to `projects/.../auth/sessions.json`, and return the cookie value the
 /// caller should send back as `eda_session`.
-pub fn createSession(allocator: std.mem.Allocator, project_dir: []const u8, email: []const u8) ![]const u8 {
+pub fn createSession(allocator: std.mem.Allocator, project_dir: []const u8, email: []const u8) std.mem.Allocator.Error![]const u8 {
     var rand_bytes: [32]u8 = undefined;
     infra_random.bytes(&rand_bytes);
     const hex = std.fmt.bytesToHex(rand_bytes, .lower);
@@ -610,7 +618,7 @@ fn isApiPath(path: []const u8) bool {
 /// requests carrying a valid session cookie or bearer token; redirect
 /// others to `/auth/login`. Returns `true` to continue dispatch, `false`
 /// when the response has already been written by the middleware.
-pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !bool {
+pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!bool {
     // Allow localhost without auth
     if (isLocalhost(req)) return true;
 
@@ -676,7 +684,7 @@ pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// `PublicKeyCredentialCreationOptions` JSON for the browser. Authorises
 /// the request via active session (add-device), invite token, or first-
 /// user bootstrap when no credentials exist yet.
-pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const existing = try loadCredentials(ctx.allocator, ctx.project_dir);
     const q = try req.query();
 
@@ -773,7 +781,7 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
 /// POST /auth/register/complete — verify the WebAuthn attestation against
 /// the pending challenge, persist the new passkey under its email, and set
 /// a session cookie so the browser is logged in once registration succeeds.
-pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = 400;
         res.body = "{\"error\":\"missing body\"}";
@@ -1112,7 +1120,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 /// POST /auth/login/challenge — issue a fresh WebAuthn assertion challenge
 /// and the `allowCredentials` list (optionally filtered by `?email=`) so
 /// the browser can prompt the user to tap their passkey.
-pub fn loginChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn loginChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     var challenge: [32]u8 = undefined;
     infra_random.bytes(&challenge);
     storePendingChallenge(challenge);
@@ -1152,7 +1160,7 @@ pub fn loginChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 /// POST /auth/login/complete — verify the WebAuthn assertion against the
 /// pending challenge and the stored credential's public key, then mint a
 /// session cookie tied to the credential's email on success.
-pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = 400;
         res.body = "{\"error\":\"missing body\"}";
@@ -1427,7 +1435,7 @@ pub const B64URL_JS =
 /// GET /auth/login — render the sign-in HTML: an email field plus a button
 /// that drives the WebAuthn `navigator.credentials.get` flow against the
 /// challenge/complete endpoints.
-pub fn loginPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+pub fn loginPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .HTML;
     res.body =
         "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
@@ -1509,7 +1517,7 @@ pub fn loginPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
 /// GET /auth/setup — first-user bootstrap page. Redirects to `/auth/login`
 /// when at least one credential already exists; otherwise renders the
 /// passkey-registration UI for the initial admin account.
-pub fn setupPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+pub fn setupPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const existing = try loadCredentials(ctx.allocator, ctx.project_dir);
     if (existing.len > 0) {
         res.status = 303;
@@ -1615,7 +1623,7 @@ fn requireSession(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) ?[]c
 /// POST /auth/logout — invalidate the current session both server-side
 /// (drop from `sessions.json`) and client-side (overwrite the cookie with
 /// `Max-Age=0`).
-pub fn logoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn logoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     if (getSessionToken(req)) |tok| {
         deleteSession(ctx.allocator, ctx.project_dir, tok);
     }
@@ -1627,7 +1635,7 @@ pub fn logoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void
 /// GET /api/auth/credentials — return the signed-in user's registered
 /// passkeys (id, email, created_at) as JSON for the account page's
 /// device-management list.
-pub fn listCredentialsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn listCredentialsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const email = requireSession(ctx, req, res) orelse return;
 
     const creds = try loadCredentials(ctx.allocator, ctx.project_dir);
@@ -1651,7 +1659,7 @@ pub fn listCredentialsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 /// POST /api/auth/credentials/delete — drop a single passkey by id from
 /// `credentials.json`. Refuses to delete the user's last remaining passkey
 /// to avoid locking themselves out.
-pub fn deleteCredentialApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn deleteCredentialApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const email = requireSession(ctx, req, res) orelse return;
 
     const body = req.body() orelse {
@@ -1724,7 +1732,7 @@ pub fn deleteCredentialApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
 /// POST /api/auth/invites — admin-only: mint a 7-day single-use invite token
 /// (defaulting to writer role) the recipient can redeem at
 /// `/auth/invite/<token>` to register their first passkey.
-pub fn createInviteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn createInviteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const email = currentEmail(ctx, req) orelse {
         res.status = 401;
         res.content_type = .JSON;
@@ -1768,7 +1776,7 @@ pub fn createInviteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 /// GET /auth/invite/:token — render the passkey-registration UI for an
 /// invite recipient. Shows an "expired" page when the token is missing,
 /// consumed, or past its TTL; otherwise drives the WebAuthn create flow.
-pub fn invitePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn invitePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const path = req.url.path;
     const prefix = "/auth/invite/";
     if (!std.mem.startsWith(u8, path, prefix)) {
@@ -1886,7 +1894,7 @@ pub fn invitePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
 /// GET /auth/manage — signed-in account page for listing the user's
 /// passkeys, adding another device, generating invite links, and signing
 /// out. Redirects to `/auth/login` when the request lacks a valid session.
-pub fn managePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn managePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const tok = getSessionToken(req) orelse {
         res.status = 303;
         res.header("location", "/auth/login");

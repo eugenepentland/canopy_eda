@@ -9,6 +9,10 @@ const FlatInstance = @import("export_kicad.zig").FlatInstance;
 const parser_mod = @import("sexpr/parser.zig");
 const pcb_json = @import("render_pcb_json.zig");
 
+/// Error set for the Gerber/Excellon exporter — covers layout-file IO,
+/// parser failures, and the allocator failures from the per-layer writers.
+pub const GerberError = std.mem.Allocator.Error || layout_mod.LayoutError || parser_mod.ParseError;
+
 /// A single Gerber output file.
 pub const GerberFile = struct {
     name: []const u8,
@@ -31,7 +35,7 @@ pub fn exportGerber(
     design_name: []const u8,
     board_def: ?*const env_mod.Board,
     layout_path: ?[]const u8,
-) ![]const GerberFile {
+) GerberError![]const GerberFile {
     // Flatten hierarchy
     var instances: std.ArrayListUnmanaged(FlatInstance) = .empty;
     defer instances.deinit(allocator);

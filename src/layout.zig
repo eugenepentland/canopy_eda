@@ -4,6 +4,16 @@ const parser_mod = @import("sexpr/parser.zig");
 const ast = @import("sexpr/ast.zig");
 const Node = ast.Node;
 
+/// Error set for layout file IO. Covers the std.fs surfaces (open / read /
+/// write / makePath / createFile / rename) plus parser + allocator errors.
+pub const LayoutError = std.mem.Allocator.Error ||
+    std.fs.File.OpenError ||
+    std.fs.File.ReadError ||
+    std.fs.File.WriteError ||
+    std.fs.Dir.MakeError ||
+    parser_mod.ParseError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream };
+
 /// PCB layout data: component placements, traces, vias, and zone fills.
 /// Parsed from and written to `.layout` files (s-expression format).
 pub const Rules = struct {
@@ -74,7 +84,7 @@ pub const ZoneFill = struct {
 };
 
 /// Load a layout from a `.layout` file.
-pub fn loadLayout(allocator: std.mem.Allocator, path: []const u8) !Layout {
+pub fn loadLayout(allocator: std.mem.Allocator, path: []const u8) LayoutError!Layout {
     const source = try infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024);
     const nodes = try parser_mod.parse(allocator, source);
 
@@ -116,7 +126,7 @@ pub fn loadLayout(allocator: std.mem.Allocator, path: []const u8) !Layout {
 }
 
 /// Save a layout to a `.layout` file.
-pub fn saveLayout(allocator: std.mem.Allocator, layout: *const Layout, path: []const u8) !void {
+pub fn saveLayout(allocator: std.mem.Allocator, layout: *const Layout, path: []const u8) LayoutError!void {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
@@ -189,7 +199,7 @@ pub fn saveLayout(allocator: std.mem.Allocator, layout: *const Layout, path: []c
 }
 
 /// Build a uuid→Placement map from a Layout for quick lookup.
-pub fn placementsByUuid(allocator: std.mem.Allocator, layout: *const Layout) !std.StringHashMap(Placement) {
+pub fn placementsByUuid(allocator: std.mem.Allocator, layout: *const Layout) std.mem.Allocator.Error!std.StringHashMap(Placement) {
     var map = std.StringHashMap(Placement).init(allocator);
     for (layout.placements) |p| {
         try map.put(p.uuid, p);

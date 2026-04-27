@@ -18,6 +18,13 @@ const review_json_mod = @import("../review_json.zig");
 const review_state_mod = @import("../review_state.zig");
 const req_checks = @import("../req_checks.zig");
 
+const EvalError = @import("../eval/evaluator.zig").EvalError;
+const RenderError = render_json.RenderError;
+
+/// Error set used by mcp_tools helper fns that orchestrate eval + render
+/// + filesystem walks, plus any writer in JSON-emitting helpers.
+pub const ToolError = std.mem.Allocator.Error || std.Io.Writer.Error || EvalError || RenderError || std.fs.Dir.Iterator.Error || error{NotADesign};
+
 fn warnResolveIdentities(name: []const u8, err: anyerror) void {
     log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(err) });
 }
@@ -914,7 +921,7 @@ pub fn listFreePins(
     ref_des: []const u8,
     filter: ?[]const u8,
     w: anytype,
-) !bool {
+) ToolError!bool {
     const path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
     defer allocator.free(path);
     var eval = Evaluator.init(allocator, project_dir);
@@ -1238,7 +1245,7 @@ fn writeJsonString(w: anytype, s: []const u8) !void {
 /// Scan `{project_dir}/src/*.sexp` and return the basename of every file
 /// whose top-level form is a `(design-block …)`. Helper for the MCP
 /// `list_designs` tool and the index page's design list.
-pub fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) ![][]const u8 {
+pub fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) ToolError![][]const u8 {
     const src_path = try std.fmt.allocPrint(allocator, "{s}/src", .{project_dir});
     defer allocator.free(src_path);
 
@@ -1300,7 +1307,7 @@ fn countNets(block: *const env_mod.DesignBlock) usize {
 pub fn listDesignSummaries(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
-) ![]DesignSummary {
+) ToolError![]DesignSummary {
     const src_path = try std.fmt.allocPrint(allocator, "{s}/src", .{project_dir});
     defer allocator.free(src_path);
 
@@ -1391,7 +1398,7 @@ pub fn renderSceneGraph(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
-) ![]const u8 {
+) ToolError![]const u8 {
     const path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
     defer allocator.free(path);
 

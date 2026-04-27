@@ -8,9 +8,12 @@ const Handler = serve_root.Handler;
 const assets_css = @import("assets_css.zig");
 const footprint_preview = @import("footprint_preview.zig");
 
+/// Error set for HTTP handlers and writers in this module.
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error || std.fs.Dir.Iterator.Error;
+
 /// Scan lib/components/ for passive families and write a JSON object
 /// mapping type prefixes (cap, res, ind, led) to arrays of family names.
-pub fn writeFamiliesJson(w: anytype, allocator: std.mem.Allocator, project_dir: []const u8) !void {
+pub fn writeFamiliesJson(w: anytype, allocator: std.mem.Allocator, project_dir: []const u8) HandlerError!void {
     const comp_dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/components", .{project_dir});
     defer allocator.free(comp_dir_path);
 
@@ -60,7 +63,7 @@ pub fn writeFamiliesJson(w: anytype, allocator: std.mem.Allocator, project_dir: 
 /// GET /library — render the component-library browser: a searchable
 /// listing of every symbol/family/footprint/pinout under `lib/` plus a
 /// drag-drop upload box that posts to the `/api/upload-*` endpoints.
-pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(ctx.allocator);
 

@@ -2,6 +2,14 @@ const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 
+/// Error set for source-file ID insertion. Combines file IO (read & write)
+/// with the allocator failures that can come out of `ArrayList`/dupe.
+pub const IdInsertError = std.mem.Allocator.Error ||
+    std.fs.File.OpenError ||
+    std.fs.File.ReadError ||
+    std.fs.File.WriteError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream };
+
 /// Insert pending (id xxxxxxxx) forms into a source file.
 /// Each pending ID has a form_offset (byte position of the opening paren).
 /// We find the matching closing paren and insert " (id xxxxxxxx)" before it.
@@ -9,7 +17,7 @@ pub fn insertPendingIds(
     allocator: std.mem.Allocator,
     source_path: []const u8,
     pending: []const Evaluator.PendingId,
-) !void {
+) IdInsertError!void {
     if (pending.len == 0) return;
 
     const source = try infra_fs.cwd().readFileAlloc(allocator, source_path, 10 * 1024 * 1024);

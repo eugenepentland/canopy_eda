@@ -21,7 +21,7 @@ const Group = env_mod.Group;
 const SubBlock = env_mod.SubBlock;
 
 /// Parse (port "NET" in/out/io ...) section port declaration.
-pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod.Env) !?env_mod.SectionPort {
+pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod.Env) EvalError!?env_mod.SectionPort {
     // (port "NET" in/out/io [signal-type] [voltage] [role R] [protocol P])
     if (sf_children.len < 3) return null;
     var port_name: []const u8 = "";
@@ -110,7 +110,7 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
 }
 
 /// Parse (calc "name" (let ...) ...) block.
-pub fn parseSectionCalc(self: *Evaluator, sf_children: []const Node, env: *env_mod.Env) !?env_mod.CalcBlock {
+pub fn parseSectionCalc(self: *Evaluator, sf_children: []const Node, env: *env_mod.Env) EvalError!?env_mod.CalcBlock {
     if (sf_children.len < 2) return null;
     const calc_name_val = try self.evalNode(sf_children[1], env);
     const calc_name = calc_name_val.asString() orelse return null;
@@ -177,7 +177,7 @@ pub fn processPinForm(
     all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
     pg_pins: *std.ArrayListUnmanaged(env_mod.PartPin),
     net_ties: *std.ArrayListUnmanaged(NetTie),
-) !void {
+) EvalError!void {
     if (pin_form.isForm("pin")) {
         const pin_children = pin_form.asList() orelse return;
         if (pin_children.len < 3) return;

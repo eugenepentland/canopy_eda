@@ -26,6 +26,10 @@ const pinOrder = draw.pinOrder;
 
 const Allocator = std.mem.Allocator;
 
+/// Error set for HTML emit helpers — the writers used here are
+/// `ArrayListUnmanaged(u8).writer()` whose only failure is `OutOfMemory`.
+pub const RenderError = std.mem.Allocator.Error;
+
 /// Render a design as a self-contained HTML schematic page. Mirrors the
 /// review page's style: inline CSS, navbar, status banner, then a stack of
 /// section cards. Each hub inside a section is partitioned into a direct-pin
@@ -39,7 +43,7 @@ pub fn renderToHtml(
     status: review.Status,
     review_doc: ?review.ReviewDoc,
     check_results: *const CheckResultMap,
-) ![]const u8 {
+) RenderError![]const u8 {
     var ctx = try setupRenderCtx(allocator, block);
     ctx.project_dir = project_dir;
 
@@ -291,7 +295,7 @@ fn joinAssertedFns(allocator: Allocator, fns: []const []const u8) ?[]const u8 {
 /// page does — flatten instances, build pin/net maps, classify, build
 /// adjacency, etc. — exposed so static exporters (markdown review package)
 /// can render the same per-hub SVGs the live page emits.
-pub fn setupRenderCtx(allocator: Allocator, block: *const DesignBlock) !RenderCtx {
+pub fn setupRenderCtx(allocator: Allocator, block: *const DesignBlock) RenderError!RenderCtx {
     var ctx = RenderCtx.init(allocator);
     try ctx.collectFlat(block, "");
     var flat_sec_idx: usize = 0;
@@ -336,7 +340,7 @@ pub fn renderHubSvg(
     allocator: Allocator,
     pin_groups: []const env_mod.PinGroup,
     hub_ref: []const u8,
-) !bool {
+) RenderError!bool {
     if (try analyzeHub(ctx, allocator, pin_groups, hub_ref)) |a| {
         try renderGroupedHubSvgs(ctx, w, allocator, a);
         return true;

@@ -12,6 +12,16 @@ const bom_html = @import("bom_html.zig");
 const history = @import("history.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
 
+/// Error set for HTTP handlers in this module. Wide enough to cover
+/// every subsystem error that may bubble through `try`: allocator, writer,
+/// file IO, BOM resolve, sexpr parser, and httpz form/query parsing.
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
+    std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
+    std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
+    @import("../bom_resolve.zig").ResolveError ||
+    @import("../sexpr/parser.zig").ParseError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence, NotOpenForReading, ConnectionTimedOut, Canceled, ReadOnlyFileSystem, LinkQuotaExceeded, RebuildFailed };
+
 fn warnResolveIdentities(name: []const u8, err: anyerror) void {
     log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(err) });
 }
@@ -19,7 +29,7 @@ fn warnResolveIdentities(name: []const u8, err: anyerror) void {
 /// POST /api/edit-value/:name — patch a single instance's value string in
 /// the source `.sexp` (e.g. C3 → `0.5pF`), re-evaluate the design, and
 /// bump the live version so the schematic viewer redraws on its next poll.
-pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -159,7 +169,7 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
 /// (e.g. `cap-0805` → `cap-0603`) using a source-offset checksum to
 /// detect concurrent edits, ensure the new family is in `(import …)`,
 /// rebuild, and return the refreshed components JSON.
-pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -350,7 +360,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 /// POST /api/edit-courtyard — replace (or insert) the `(courtyard (rect …))`
 /// form in a `lib/footprints/<name>.sexp` so the PCB editor can adjust a
 /// footprint's keep-out box without hand-editing the library file.
-pub fn editCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn editCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = 400;
         res.body = "no body";
@@ -460,7 +470,7 @@ pub fn editCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 
 /// POST /api/add-instance/:name
 /// Body: {"section":"Power","component":"cap-0402","value":"100nF","pins":{"1":"VDD","2":"GND"}}
-pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -600,7 +610,7 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 
 /// POST /api/remove-instance/:name
 /// Body: {"ref":"C3"}
-pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -685,7 +695,7 @@ pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
 /// POST /api/rewire-pin/:name
 /// Body: {"ref":"U1","pin":"5","net":"VDD_NEW"}
-pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -795,7 +805,7 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
 /// Move a single-pin form `(pin OLD "NET")` to `(pin NEW "NET")` within an
 /// instance. Body: `{"ref":"U1","old_pin":"V11","new_pin":"V12"}`. Returns
 /// HTTP 409 with a structured error if the destination pin is already used.
-pub fn movePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn movePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header("access-control-allow-origin", "*");
 
@@ -871,7 +881,7 @@ pub fn movePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !voi
 
 /// Swap the net assignments of two pins on the same instance.
 /// Body: `{"ref":"U1","pin_a":"V11","pin_b":"V12"}`.
-pub fn swapPinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn swapPinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header("access-control-allow-origin", "*");
 
@@ -938,7 +948,7 @@ pub fn swapPinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
 }
 
 /// Rebuild design, render SVG, and push live update.
-fn rebuildAndPush(ctx: *Handler, name: []const u8, res: *httpz.Response) !void {
+fn rebuildAndPush(ctx: *Handler, name: []const u8, res: *httpz.Response) HandlerError!void {
     const board_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
     defer ctx.allocator.free(board_path);
 
@@ -987,7 +997,7 @@ fn parseJsonString(body: []const u8, key: []const u8) ?[]const u8 {
 /// POST /api/board-outline/:name — replace (or insert) the `(outline (rect …))`
 /// in `<name>-board.sexp` so the PCB editor can resize the board boundary
 /// without hand-editing the board source.
-pub fn boardOutlineApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn boardOutlineApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -2508,7 +2518,7 @@ pub fn replaceInstanceCore(
 }
 
 /// GET /api/source/:name — returns `{"source":"<raw .sexp text>"}`.
-pub fn getSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn getSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header("access-control-allow-origin", "*");
 
@@ -2537,7 +2547,7 @@ pub fn getSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
 /// syntax, writes the file, rebuilds, bumps version. Returns
 /// `{"ok":true,"version":N,"snapshot":...}` on success or
 /// `{"ok":false,"error":"..."}` with HTTP 400 on invalid source.
-pub fn saveSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn saveSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header("access-control-allow-origin", "*");
 

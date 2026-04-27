@@ -7,10 +7,13 @@ const footprint_mod = @import("../export_kicad_footprint.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
+/// Error set for HTTP handlers in this module.
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
+
 /// GET /api/footprint-svg/:name — render a `lib/footprints/<name>.sexp`
 /// as an inline SVG (pads, silkscreen lines and circles) for the library
 /// page's preview thumbnails and the swap-component dialog.
-pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -186,7 +189,7 @@ pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 
 /// Write an HTML table of every footprint under `lib/footprints/` (name,
 /// pad-bounding-box size, link to the 3D viewer) for the library page.
-pub fn listFootprints(w: anytype, ctx: *Handler) !void {
+pub fn listFootprints(w: anytype, ctx: *Handler) HandlerError!void {
     try w.writeAll("<h2>Footprints</h2><table><tr><th>Name</th><th>Size (mm)</th><th></th></tr>");
     const fp_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints", .{ctx.project_dir});
     defer ctx.allocator.free(fp_path);

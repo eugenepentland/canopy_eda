@@ -36,6 +36,10 @@ const endpointEql = draw.endpointEql;
 
 const Allocator = std.mem.Allocator;
 
+/// Error set for the JSON scene-graph emitter — uses the same
+/// `ArrayListUnmanaged(u8).writer()` pattern, so just `Allocator.Error`.
+pub const RenderError = std.mem.Allocator.Error;
+
 // ── JSON Scene Graph Types ───────────────────────────────────────────
 
 const JsonSection = struct {
@@ -463,7 +467,7 @@ fn mergeAwareHubHeight(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, par
 /// Pixi.js canvas viewer. Flattens sub-blocks, classifies each instance as
 /// hub or spoke (passive), groups pins, lays out sections in a grid, and
 /// emits hub boxes plus the wires/labels needed to render the schematic.
-pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project_dir: []const u8) ![]const u8 {
+pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project_dir: []const u8) RenderError![]const u8 {
     var ctx = RenderCtx.init(allocator);
     ctx.project_dir = project_dir;
 

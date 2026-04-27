@@ -7,6 +7,12 @@ const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 const assets_css = @import("assets_css.zig");
 
+/// Error set for HTTP handlers in this module.
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
+    std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
+    std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence, ReadOnlyFileSystem, LinkQuotaExceeded };
+
 // ── Model config mutex ────────────────────────────────────────────────
 
 pub var model_config_mutex: std.Thread.Mutex = .{};
@@ -16,7 +22,7 @@ pub var model_config_mutex: std.Thread.Mutex = .{};
 /// GET /api/model/:name — stream a `lib/models/<name>` file (typically a
 /// `.step` model up to 50 MB) as binary so the 3D viewer can fetch the
 /// geometry referenced by the BOM's footprints.
-pub fn modelFileApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn modelFileApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -38,7 +44,7 @@ pub fn modelFileApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
 /// GET /api/model-config — return `lib/models/model-config.json` (per-
 /// footprint 3D-model offsets and rotations) as JSON, or `{}` when the
 /// file does not yet exist.
-pub fn modelConfigGetApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+pub fn modelConfigGetApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     model_config_mutex.lock();
     defer model_config_mutex.unlock();
     const path = std.fmt.allocPrint(ctx.allocator, "{s}/lib/models/model-config.json", .{ctx.project_dir}) catch {
@@ -58,7 +64,7 @@ pub fn modelConfigGetApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response)
 /// POST /api/model-config — upsert a single footprint's offset and
 /// rotation entry inside `lib/models/model-config.json`, leaving every
 /// other footprint's settings untouched. Guarded by `model_config_mutex`.
-pub fn modelConfigPostApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn modelConfigPostApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = 400;
         res.body = "no body";
@@ -185,7 +191,7 @@ pub fn modelConfigPostApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 /// POST /api/upload-model/:name — write the request body (raw STEP file)
 /// to `lib/models/<name>.step`, creating the directory on first upload so
 /// new footprints can ship a 3D model from the library page.
-pub fn uploadModelApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn uploadModelApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -235,7 +241,7 @@ pub fn uploadModelApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// GET /model-viewer/:name — render the Three.js footprint viewer for a
 /// single library footprint, with controls for editing the 3D model's
 /// offset/rotation that POST back to `/api/model-config`.
-pub fn modelViewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn modelViewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;

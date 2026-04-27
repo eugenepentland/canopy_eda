@@ -6,11 +6,17 @@ const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 const upload = @import("upload.zig");
 
+/// Error set for HTTP handlers in this module.
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
+    std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
+    std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence, ReadOnlyFileSystem, LinkQuotaExceeded };
+
 /// POST /api/upload-package — accept a multipart upload of a KiCad symbol
 /// + footprint (+ optional STEP) bundle, convert each piece, and persist
 /// the resulting `lib/components`, `lib/pinouts`, `lib/footprints`, and
 /// `lib/models` files in one transaction.
-pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = 400;
         res.body = "No data";
@@ -211,7 +217,7 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 /// POST /api/upload-symbol — legacy single-file endpoint that accepts a
 /// raw `.kicad_sym` body, converts it, and saves the result under
 /// `lib/pinouts/<sanitized>.sexp`. Kept for older library clients.
-pub fn uploadSymbolApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn uploadSymbolApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = 400;
         res.body = "No file data";
@@ -280,7 +286,7 @@ pub fn uploadSymbolApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 /// POST /api/upload-footprint — legacy single-file endpoint that accepts
 /// a raw `.kicad_mod` body, converts it, and saves the result under
 /// `lib/footprints/<sanitized>.sexp`. Kept for older library clients.
-pub fn uploadFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn uploadFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = 400;
         res.body = "No file data";

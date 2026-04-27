@@ -6,7 +6,7 @@ const Node = ast.Node;
 const Span = ast.Span;
 
 /// Convert a KiCad .kicad_mod file to .sexp footprint format.
-pub fn convertFootprint(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
+pub fn convertFootprint(allocator: std.mem.Allocator, source: []const u8) ConvertError![]const u8 {
     const nodes = try parser_mod.parse(allocator, source);
     defer parser_mod.freeNodes(allocator, nodes);
 

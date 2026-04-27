@@ -27,10 +27,22 @@ const edit_mod = @import("edit.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
+/// Error set for HTTP handlers in this module. Wide because handlers
+/// orchestrate many subsystems (eval, render, parser, file IO, BOM resolve)
+/// and propagate the worst case via `try`. httpz turns any leaked error
+/// into a 5xx body, so the union just needs to be a superset of every
+/// callee — the type itself is informational.
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
+    std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
+    std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
+    @import("../bom_resolve.zig").ResolveError ||
+    @import("../sexpr/parser.zig").ParseError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream, Canceled, ConnectionTimedOut, NotOpenForReading, SocketNotConnected, ReadOnlyFileSystem, LinkQuotaExceeded, InvalidEscapeSequence };
+
 /// POST /api/push/:name — re-evaluate the design's `.sexp` source, replace the
 /// live scene-graph JSON, and bump the version counter so the browser viewer
 /// picks up the rebuild on its next `/api/version/:name` poll.
-pub fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -67,7 +79,7 @@ pub fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
 /// GET /api/version/:name — return `{"version":N}`. The schematic and PCB
 /// viewers poll this every ~500 ms and reload their scene graph when N
 /// changes. Bumped by `pushApi` and the MCP mutation tools.
-pub fn versionApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn versionApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -83,7 +95,7 @@ pub fn versionApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) !void 
 /// GET /api/scene-graph/:name — return the cached schematic scene-graph JSON
 /// produced by the last build/push. Read under `live_mutex`; falls back to a
 /// minimal `{"error":"no layout"}` body when nothing has been pushed yet.
-pub fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+pub fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     serve_root.live_mutex.lock();
     const data = serve_root.live_layout_json;
     serve_root.live_mutex.unlock();
@@ -96,7 +108,7 @@ pub fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void
 /// GET /api/block-diagram-json/:name — evaluate the design and emit the
 /// hierarchical block-diagram JSON consumed by the diagram viewer (auto-
 /// categorised columns, topology-aware edges between sections).
-pub fn blockDiagramJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn blockDiagramJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -132,7 +144,7 @@ pub fn blockDiagramJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
 /// alternate function — next to the ref-des. Lets the user verify, for
 /// example, that the pin they wired to XSPIM_P1_IO5 really does expose that
 /// peripheral on the part.
-pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name_raw = req.param("name") orelse {
         res.status = 404;
         return;
@@ -318,7 +330,7 @@ fn datasheetSize(allocator: std.mem.Allocator, project_dir: []const u8, name: []
 /// GET /api/layout — return the in-memory editor layout blob the schematic
 /// viewer uses for component placement persistence between live reloads.
 /// Empty `{}` until something has been POSTed via `layoutPostApi`.
-pub fn layoutGetApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+pub fn layoutGetApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     serve_root.layout_mutex.lock();
     const data = serve_root.layout_data;
     serve_root.layout_mutex.unlock();
@@ -331,7 +343,7 @@ pub fn layoutGetApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void 
 /// POST /api/layout — store an arbitrary JSON layout blob in process memory
 /// (under `layout_mutex`). The schematic viewer uses this as a session-
 /// scoped scratchpad; payload is not validated server-side.
-pub fn layoutPostApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn layoutPostApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse "{}";
 
     serve_root.layout_mutex.lock();
@@ -346,7 +358,7 @@ pub fn layoutPostApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
 /// GET /api/export-kicad/:name — build the design, resolve BOM identities,
 /// and stream back a `<name>-kicad.zip` containing the KiCad schematic,
 /// netlist, and per-instance footprint files.
-pub fn exportKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn exportKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -397,7 +409,7 @@ pub fn exportKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// GET /api/export-netlist/:name — build the design and return just the
 /// KiCad `.net` file (no footprints, no zip). Used by external tools that
 /// only care about connectivity for routing or simulation.
-pub fn exportNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn exportNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -449,7 +461,7 @@ pub fn exportNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 /// shared NAS location, then shell out to `src/pcb_update.py` to update the
 /// upstream `.kicad_pcb`. Used by the Cyclops design loop; honours the
 /// `?short-nets=1` query string for KiCad's net-name truncation mode.
-pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const qs = try req.query();
     const short_nets = if (qs.get("short-nets")) |v| std.mem.eql(u8, v, "1") else false;
     const name = req.param("name") orelse {
@@ -581,7 +593,7 @@ pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
 /// GET /api/export-bom-csv/:name — build the design and stream the parts
 /// list as `<name>-bom.csv`. Same column layout as the BOM table on the
 /// review page; suitable for hand-off to procurement.
-pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -625,7 +637,7 @@ pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 /// GET /api/export-gerber/:name — run the Gerber/Excellon exporter against
 /// the saved `.layout` and stream the resulting fab files back as
 /// `<name>-gerber.zip` for upload to a PCB house.
-pub fn exportGerberApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn exportGerberApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -693,7 +705,7 @@ pub fn exportGerberApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 /// files: `<name>-review.md` (full markdown report including system block
 /// diagram, per-hub schematics, power tables, ERC, per-IC checklist, and
 /// the verbatim source) plus `<name>-bom.csv` (parts list as CSV).
-pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -785,7 +797,7 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
 ///
 /// Request body: {"placements": [{"uuid":"...", "x":10.5, "y":20.3, "angle":90, "layer":"F.Cu"}, ...]}
 /// Writes a native .layout file and also updates .kicad_pcb for export compatibility.
-pub fn pcbPlacementApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn pcbPlacementApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -905,7 +917,7 @@ pub fn pcbPlacementApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 /// `.layout` file. Existing placements and rules are preserved; the body is
 /// a JSON `{traces: [...], vias: [...]}` document the PCB editor sends on
 /// every routing edit.
-pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1074,7 +1086,7 @@ pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
 /// POST /api/pcb-rules/:name — update the design rules (clearance, trace
 /// width, via dimensions) stored in the `.layout` file. Used by the PCB
 /// editor's settings panel; placements and traces stay untouched.
-pub fn pcbRulesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn pcbRulesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1125,7 +1137,7 @@ pub fn pcbRulesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
 /// POST /api/zone-fill/:name — recompute copper-pour polygons for every
 /// zone on the board, persist them into the `.layout` file, and return the
 /// fills as JSON for the PCB viewer to render without a round-trip reload.
-pub fn zoneFillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn zoneFillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name_param = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1233,7 +1245,7 @@ pub fn zoneFillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
 /// GET /api/drc/:name — run the design-rule checker over the saved layout
 /// (pad clearance, trace widths, via drill/size, obstacle hits) and return
 /// the violations as JSON for the PCB viewer's issues panel.
-pub fn drcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn drcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name_param = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1422,7 +1434,7 @@ fn parseJsonFloat(json: []const u8, key: []const u8) ?f64 {
 /// GET /api/erc/:name — run electrical-rule checks (duplicate ref-des,
 /// floating nets, unconnected pins, voltage mismatches, missing decoupling)
 /// and return the violations as JSON for the schematic viewer's panel.
-pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1475,7 +1487,7 @@ pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
 /// reflect the current source on disk. Returns 500 with a plain-text error
 /// body on build failures — the review page calls this on load and the MCP
 /// tool shares the same code path.
-pub fn reviewJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn reviewJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1493,7 +1505,7 @@ pub fn reviewJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
 /// Return all designs in the project as a JSON array. Same shape as the
 /// MCP `list_designs` tool: `[{name, title, sections, instance_count,
 /// net_count, mtime, build_ok}, ...]`.
-pub fn designsApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+pub fn designsApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header("access-control-allow-origin", "*");
 
@@ -1541,7 +1553,7 @@ fn writeJsonString(w: anytype, s: []const u8) !void {
 /// Legacy `/review/:name` route — the schematic page now embeds every review
 /// section inline, so we 301-redirect here. Old bookmarks and PR links keep
 /// working; scroll anchors (`#sec-<slug>`) are preserved by the browser.
-pub fn reviewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn reviewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1641,7 +1653,7 @@ fn sectionHashForSlug(
 /// List free (unassigned) pins on an instance. Thin wrapper over the MCP
 /// tool implementation so the browser sidebar can populate the "move pin"
 /// dropdown without going through the MCP transport.
-pub fn freePinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn freePinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header("access-control-allow-origin", "*");
 
@@ -1682,7 +1694,7 @@ pub fn freePinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
 /// shape of the globals `COMPONENTS` and `NETS` that `canvas_page.zig`
 /// inlines at page load. The UI uses this after mutations to refresh the
 /// sidebar without reloading the page.
-pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header("access-control-allow-origin", "*");
 
@@ -1735,7 +1747,7 @@ pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// Return the reconciled review state for a design as JSON. Reconcile
 /// matches the live section list so the client can render empty entries
 /// for new sections without a page reload.
-pub fn reviewStateGetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn reviewStateGetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1753,7 +1765,7 @@ pub fn reviewStateGetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
 /// POST /api/review-state/:name/item — body {section_slug, text}. Server
 /// mints the id and returns {id, version}.
-pub fn reviewStateAddItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn reviewStateAddItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1783,7 +1795,7 @@ pub fn reviewStateAddItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
 }
 
 /// POST /api/review-state/:name/item/toggle — body {section_slug, id, checked}.
-pub fn reviewStateToggleItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn reviewStateToggleItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1811,7 +1823,7 @@ pub fn reviewStateToggleItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.
 }
 
 /// POST /api/review-state/:name/item/delete — body {section_slug, id}.
-pub fn reviewStateDeleteItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn reviewStateDeleteItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1839,7 +1851,7 @@ pub fn reviewStateDeleteItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.
 
 /// POST /api/review-state/:name/approve — body {section_slug, approved, reviewer}.
 /// Server stamps approved_at with isoTimestampNow on approval.
-pub fn reviewStateApproveApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn reviewStateApproveApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1872,7 +1884,7 @@ pub fn reviewStateApproveApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
 /// Splices a new `(note "text" [(ref ...)])` into the named section of the
 /// design's .sexp. Returns the new live_version so the browser's 2 s poll
 /// picks up the redraw.
-pub fn addSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn addSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1905,7 +1917,7 @@ pub fn addSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
 /// POST /api/section-note/:name/remove — body `{section, index}`. Deletes the
 /// nth (0-based) `(note ...)` form nested directly in the named section.
-pub fn removeSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn removeSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1935,7 +1947,7 @@ pub fn removeSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 /// Splices a `(datasheet "file.pdf")` entry into
 /// `lib/components/<component>.sexp`. Lets the sidebar link uploaded PDFs
 /// to parts without manual .sexp editing.
-pub fn addComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn addComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const component_raw = req.param("component") orelse {
         res.status = 404;
         return;
@@ -1961,7 +1973,7 @@ pub fn addComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.
 
 /// POST /api/component-datasheet/:component/remove — body `{pdf: "file.pdf"}`.
 /// Counterpart to /add; unlinks a PDF from the library part.
-pub fn removeComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn removeComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const component_raw = req.param("component") orelse {
         res.status = 404;
         return;

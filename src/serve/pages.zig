@@ -10,10 +10,15 @@ const assets_css = @import("assets_css.zig");
 const library = @import("library.zig");
 const mcp_tools = @import("mcp_tools.zig");
 
+/// Error set for HTTP handlers in this module: only writer-side errors
+/// propagate back to httpz; everything else is caught internally and
+/// translated to a 5xx body.
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
+
 /// GET / — render the home page: a card grid of every `.sexp` design under
 /// `src/` with title, instance/net counts, recent-mtime badge, section
 /// chips, and links to Schematic / PCB / Review for each.
-pub fn indexPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+pub fn indexPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(ctx.allocator);
 
@@ -131,7 +136,7 @@ fn writeRelativeTime(w: anytype, age_sec: i64) !void {
 /// GET /style.css — serve the static stylesheet shared by the index page
 /// and other plain-HTML pages so they pick up the dark theme without
 /// inlining the CSS into every response.
-pub fn cssPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+pub fn cssPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .CSS;
     res.body = assets_css.INDEX_CSS;
 }

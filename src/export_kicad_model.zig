@@ -17,6 +17,17 @@ const findSourceKicadMod = footprint_mod.findSourceKicadMod;
 const useSourceKicadMod = footprint_mod.useSourceKicadMod;
 const extractFootprintName = netlist_mod.extractFootprintName;
 
+/// Error set for the KiCad model/footprint exporters in this module. Mostly
+/// covers the file-system surface (open / read / write / makePath) plus
+/// allocator + footprint-parser errors.
+pub const ModelError = std.mem.Allocator.Error ||
+    std.fs.File.OpenError ||
+    std.fs.File.ReadError ||
+    std.fs.File.WriteError ||
+    std.fs.Dir.MakeError ||
+    footprint_mod.FootprintError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream };
+
 // ── Model config (3D offset/rotation) ──────────────────────────────
 
 /// Per-footprint 3D-model placement loaded from `lib/models/model-config.json`:
@@ -110,7 +121,7 @@ pub fn buildKicadMod(
     model_name: ?[]const u8,
     model_offset: ?[3]f64,
     model_rotation: ?[3]f64,
-) ![]const u8 {
+) ModelError![]const u8 {
     if (findSourceKicadMod(allocator, project_dir, fp_name)) |src_path| {
         defer allocator.free(src_path);
         if (infra_fs.cwd().readFileAlloc(allocator, src_path, 10 * 1024 * 1024)) |original| {
@@ -127,7 +138,7 @@ pub fn exportFootprints(
     block: *const DesignBlock,
     project_dir: []const u8,
     output_pretty_dir: []const u8,
-) !void {
+) ModelError!void {
     const pretty_parent = std.fs.path.dirname(output_pretty_dir) orelse ".";
     const model_dir = try std.fmt.allocPrint(allocator, "{s}/models", .{pretty_parent});
     defer allocator.free(model_dir);
@@ -191,7 +202,7 @@ pub fn exportFootprints(
 pub fn exportSectionLayout(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
-) ![]const u8 {
+) std.mem.Allocator.Error![]const u8 {
     var flat_sections: std.ArrayListUnmanaged(struct { name: []const u8, instances: []const Instance, pin_groups: []const env_mod.PinGroup }) = .empty;
     defer flat_sections.deinit(allocator);
 

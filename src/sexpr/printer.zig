@@ -3,7 +3,7 @@ const ast = @import("ast.zig");
 const Node = ast.Node;
 
 /// Pretty-print a list of top-level nodes as S-expression text.
-pub fn print(allocator: std.mem.Allocator, nodes: []const Node) ![]const u8 {
+pub fn print(allocator: std.mem.Allocator, nodes: []const Node) std.mem.Allocator.Error![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
     const writer = buf.writer(allocator);

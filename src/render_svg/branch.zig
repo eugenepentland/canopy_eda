@@ -26,12 +26,13 @@ const drawGndSymbol = draw.drawGndSymbol;
 const drawBlockIcon = draw.drawBlockIcon;
 const writeDebugPin = draw.writeDebugPin;
 const classifyComponent = draw.classifyComponent;
+const RenderError = draw.RenderError;
 
 /// Render the left-side branch tree off a hub pin: a vertical bus with
 /// horizontal stubs feeding each passive chain, then per-chain terminals.
 /// Used when one hub pin fans out to several spoke chains (e.g. a power
 /// rail decoupled by multiple caps in series).
-pub fn drawBranchTreeLeft(self: *RenderCtx, w: anytype, junction_x: f64, center_y: f64, branches: []const Branch, junction_net: []const u8) !void {
+pub fn drawBranchTreeLeft(self: *RenderCtx, w: anytype, junction_x: f64, center_y: f64, branches: []const Branch, junction_net: []const u8) RenderError!void {
     const n = branches.len;
     const total_height = @as(f64, @floatFromInt(n -| 1)) * branch_spacing;
     const start_y = center_y - total_height / 2.0;
@@ -58,7 +59,7 @@ pub fn drawBranchTreeLeft(self: *RenderCtx, w: anytype, junction_x: f64, center_
 /// Mirror of `drawBranchTreeLeft` for the right side of a hub. Wires the
 /// junction net out to a vertical bus, then walks each branch's passive
 /// chain rightward to its terminal label or symbol.
-pub fn drawBranchTreeRight(self: *RenderCtx, w: anytype, junction_x: f64, center_y: f64, branches: []const Branch, junction_net: []const u8) !void {
+pub fn drawBranchTreeRight(self: *RenderCtx, w: anytype, junction_x: f64, center_y: f64, branches: []const Branch, junction_net: []const u8) RenderError!void {
     const n = branches.len;
     const total_height = @as(f64, @floatFromInt(n -| 1)) * branch_spacing;
     const start_y = center_y - total_height / 2.0;
@@ -149,7 +150,7 @@ fn renderBranchTerminalsRight(self: *RenderCtx, w: anytype, bodies: []const Bran
 }
 
 /// Draw a terminal label or symbol (GND/NC/net label).
-pub fn drawTerminal(self: *RenderCtx, w: anytype, end_x: f64, cy: f64, term: []const u8, anchor: []const u8) !void {
+pub fn drawTerminal(self: *RenderCtx, w: anytype, end_x: f64, cy: f64, term: []const u8, anchor: []const u8) RenderError!void {
     const display = draw.baseNetName(term);
     if (isGroundNet(display)) {
         try w.print(
@@ -176,7 +177,7 @@ pub fn drawTerminal(self: *RenderCtx, w: anytype, end_x: f64, cy: f64, term: []c
 /// Stamp a centred component icon (amplifier, LDO, transistor, …) inside a
 /// hub box when `classifyComponent` matches the part. Quietly does nothing
 /// for hubs without a known icon class so generic ICs render plain boxes.
-pub fn drawHubIcon(self: *RenderCtx, w: anytype, hub: FlatInst, box_y: f64, hub_height: f64) !void {
+pub fn drawHubIcon(self: *RenderCtx, w: anytype, hub: FlatInst, box_y: f64, hub_height: f64) RenderError!void {
     _ = self;
     const icon = classifyComponent(hub);
     if (icon) |icon_name| {
@@ -208,7 +209,7 @@ pub fn inferBlockIcon(self: *RenderCtx, block: *const env_mod.DesignBlock) ?[]co
 /// ports laid out as labelled stubs on each side. Used when the schematic
 /// embeds a sub-block inline rather than expanding its internals — input
 /// ports stub out the left edge, outputs out the right.
-pub fn renderPortBlock(self: *RenderCtx, w: anytype, name: []const u8, ports: []const Port, y_start: f64, icon: ?[]const u8) !f64 {
+pub fn renderPortBlock(self: *RenderCtx, w: anytype, name: []const u8, ports: []const Port, y_start: f64, icon: ?[]const u8) RenderError!f64 {
     _ = self;
     var left_count: usize = 0;
     var right_count: usize = 0;
@@ -330,7 +331,7 @@ pub fn renderPortBlock(self: *RenderCtx, w: anytype, name: []const u8, ports: []
 /// Lay out a horizontal series chain of passive spokes leftward from
 /// `start_x`, drawing wire segments between each pair and returning the
 /// final x of the chain so the caller can attach a terminal symbol.
-pub fn drawPassiveChainLeft(_: *RenderCtx, w: anytype, start_x: f64, cy: f64, spokes: []const FlatInst) !f64 {
+pub fn drawPassiveChainLeft(_: *RenderCtx, w: anytype, start_x: f64, cy: f64, spokes: []const FlatInst) RenderError!f64 {
     if (spokes.len == 0) return start_x;
     var x = start_x;
     for (spokes, 0..) |inst, i| {
@@ -347,7 +348,7 @@ pub fn drawPassiveChainLeft(_: *RenderCtx, w: anytype, start_x: f64, cy: f64, sp
 /// Right-hand mirror of `drawPassiveChainLeft`. Walks the spoke list left
 /// to right, drawing each passive box in series, and returns the final x
 /// past the last passive's right edge.
-pub fn drawPassiveChainRight(_: *RenderCtx, w: anytype, start_x: f64, cy: f64, spokes: []const FlatInst) !f64 {
+pub fn drawPassiveChainRight(_: *RenderCtx, w: anytype, start_x: f64, cy: f64, spokes: []const FlatInst) RenderError!f64 {
     if (spokes.len == 0) return start_x;
     var x = start_x;
     for (spokes, 0..) |inst, i| {

@@ -5,6 +5,10 @@ const Endpoint = ctx_mod.Endpoint;
 
 const Allocator = std.mem.Allocator;
 
+/// Error set for SVG-emit helpers — every writer used here is an
+/// `ArrayListUnmanaged(u8).writer()` whose only failure is `OutOfMemory`.
+pub const RenderError = std.mem.Allocator.Error;
+
 // ── Layout Constants (re-exported for sub-modules) ────────────────────
 pub const hub_width: f64 = 180.0;
 pub const pin_stub: f64 = 40.0;
@@ -21,7 +25,7 @@ pub const per_conn_spacing: f64 = 40.0;
 pub const bus_gap: f64 = 15.0;
 
 /// Draw a wire (Manhattan routing: horizontal, or H-V-H polyline).
-pub fn drawWire(w: anytype, x1: f64, y1: f64, x2: f64, y2: f64) !void {
+pub fn drawWire(w: anytype, x1: f64, y1: f64, x2: f64, y2: f64) RenderError!void {
     if (y1 == y2) {
         try w.print(
             \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#4a9" stroke-width="1.5"/>
@@ -37,7 +41,7 @@ pub fn drawWire(w: anytype, x1: f64, y1: f64, x2: f64, y2: f64) !void {
 }
 
 /// Draw a net wire with hit area and data-net attribute.
-pub fn drawNetWire(w: anytype, x1: f64, y1: f64, x2: f64, y2: f64, net: []const u8) !void {
+pub fn drawNetWire(w: anytype, x1: f64, y1: f64, x2: f64, y2: f64, net: []const u8) RenderError!void {
     try w.print(
         \\<g class="net" data-net="{s}" style="cursor:pointer">
     , .{net});
@@ -63,7 +67,7 @@ pub fn drawNetWire(w: anytype, x1: f64, y1: f64, x2: f64, y2: f64, net: []const 
 }
 
 /// Draw the symbol shape inside a passive component box.
-pub fn drawSymbolShape(w: anytype, bx: f64, bw: f64, cx: f64, cy: f64, inst: FlatInst) !void {
+pub fn drawSymbolShape(w: anytype, bx: f64, bw: f64, cx: f64, cy: f64, inst: FlatInst) RenderError!void {
     const ref = shortRef(inst.ref_des);
     const is_ferrite = ref.len >= 2 and ref[0] == 'F' and ref[1] == 'B';
 
@@ -146,7 +150,7 @@ pub fn drawSymbolShape(w: anytype, bx: f64, bw: f64, cx: f64, cy: f64, inst: Fla
 }
 
 /// Draw the ground symbol: vertical stub + 3 decreasing horizontal lines.
-pub fn drawGndSymbol(w: anytype, x: f64, y: f64) !void {
+pub fn drawGndSymbol(w: anytype, x: f64, y: f64) RenderError!void {
     try w.print(
         \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#e8c547" stroke-width="1.5"/>
         \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#e8c547" stroke-width="1.5"/>
@@ -162,7 +166,7 @@ pub fn drawGndSymbol(w: anytype, x: f64, y: f64) !void {
 }
 
 /// Draw the no-connect X symbol.
-pub fn drawNcSymbol(w: anytype, x: f64, y: f64) !void {
+pub fn drawNcSymbol(w: anytype, x: f64, y: f64) RenderError!void {
     const size: f64 = 5.0;
     try w.print(
         \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#555" stroke-width="1.5"/>
@@ -175,7 +179,7 @@ pub fn drawNcSymbol(w: anytype, x: f64, y: f64) !void {
 }
 
 /// Draw debug pin dot (hidden by default).
-pub fn writeDebugPin(w: anytype, x: f64, y: f64) !void {
+pub fn writeDebugPin(w: anytype, x: f64, y: f64) RenderError!void {
     try w.print(
         \\<circle class="debug-pin" cx="{d:.1}" cy="{d:.1}" r="3" fill="red" opacity="0.8" style="display:none"/>
         \\
@@ -183,7 +187,7 @@ pub fn writeDebugPin(w: anytype, x: f64, y: f64) !void {
 }
 
 /// Draw a block-level icon centered at (cx, cy) with given stroke color.
-pub fn drawBlockIcon(w: anytype, icon_name: []const u8, cx: f64, cy: f64, color: []const u8) !void {
+pub fn drawBlockIcon(w: anytype, icon_name: []const u8, cx: f64, cy: f64, color: []const u8) RenderError!void {
     if (std.mem.eql(u8, icon_name, "amplifier")) {
         const size: f64 = 28.0;
         const half_h = size * 0.6;
@@ -414,7 +418,7 @@ test "compactPinNumbers collapses long merged-pin stubs" {
 /// Minimal HTML/SVG-attribute escaping. Returns the input slice unchanged
 /// when no escapable byte is present so the common path doesn't allocate;
 /// otherwise builds a freshly-owned string with `&`, `<`, `>`, `"` replaced.
-pub fn escapeHtml(allocator: Allocator, s: []const u8) ![]const u8 {
+pub fn escapeHtml(allocator: Allocator, s: []const u8) RenderError![]const u8 {
     var needs_escape = false;
     for (s) |c| {
         if (c == '&' or c == '<' or c == '>' or c == '"') {

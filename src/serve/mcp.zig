@@ -8,6 +8,12 @@ const auth = @import("auth.zig");
 const users = @import("users.zig");
 const mcp_tools = @import("mcp_tools.zig");
 
+/// Error set for HTTP/WebSocket handlers in this module and the JSON-RPC
+/// dispatcher. Wide enough to cover JSON parsing, allocation, websocket
+/// upgrade, and httpz writer errors.
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
+    error{ NoSpaceLeft, InvalidCompressionServerMaxBits };
+
 /// Per-connection MCP context: ties a streaming Client back to the parent
 /// HTTP `Handler` and carries the authenticated user's email so role
 /// resolution can decide which mutation tools the session may invoke.
@@ -39,7 +45,7 @@ pub fn dispatchFrame(
     project_dir: []const u8,
     data: []const u8,
     role: users.Role,
-) !?[]const u8 {
+) HandlerError!?[]const u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch {
         return parseErrorEnvelope(allocator);
     };
@@ -287,7 +293,7 @@ pub const Client = struct {
 /// GET /mcp — perform the WebSocket upgrade for the local MCP transport,
 /// resolving the requesting user's email from their session cookie so the
 /// `Client` instance carries it for the lifetime of the connection.
-pub fn upgrade(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn upgrade(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const email = blk: {
         if (auth.getSessionToken(req)) |tok| {
             if (auth.validateSession(ctx.allocator, ctx.project_dir, tok)) |em| break :blk em;
@@ -307,7 +313,7 @@ pub fn upgrade(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Respon
 /// POST /mcp — streamable-HTTP transport used by Claude Code's remote MCP
 /// connector. Resolves the role from the bearer/session cookie, dispatches
 /// one JSON-RPC frame, and returns 202 for notifications (no body).
-pub fn postApi(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn postApi(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = 400;
         res.body = "missing body";

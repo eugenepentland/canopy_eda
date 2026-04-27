@@ -48,7 +48,7 @@ pub const Violation = struct {
 /// Run all ERC checks on a design block and return violations.
 /// `project_dir` is used to locate pinout files for the pin-function check; pass
 /// an empty slice to skip that check when the project layout isn't available.
-pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8) ![]const Violation {
+pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8) std.mem.Allocator.Error![]const Violation {
     var violations: std.ArrayListUnmanaged(Violation) = .empty;
 
     try checkDuplicateRefDes(allocator, block, &violations);
@@ -763,7 +763,7 @@ fn appendInstances(
 }
 
 /// Serialize violations to JSON.
-pub fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Violation) ![]const u8 {
+pub fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Violation) std.mem.Allocator.Error![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
     try w.writeAll("[");

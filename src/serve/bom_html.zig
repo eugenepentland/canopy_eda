@@ -4,6 +4,14 @@ const env_mod = @import("../eval/env.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const json_writer = @import("../json_writer.zig");
 
+/// Error set for the BOM rendering helpers — a writer-or-allocator union
+/// because the `anytype` writer parameters are called with both
+/// `ArrayListUnmanaged.writer()` (Allocator.Error) and `*std.Io.Writer`
+/// (Writer.Error) depending on the call site. Also covers directory
+/// iteration errors surfaced by helpers that scan `lib/`.
+pub const BomError = std.mem.Allocator.Error || std.Io.Writer.Error ||
+    std.fs.Dir.Iterator.Error;
+
 /// Check if a ref-des is a standard format (1-2 uppercase letters + digits), e.g. U10, R5.
 fn isStdRefDes(ref: []const u8) bool {
     if (ref.len < 2) return false;
@@ -37,7 +45,7 @@ pub fn collectMissing(
     missing_model: *std.ArrayListUnmanaged([]const u8),
     checked_fp: *std.StringHashMap(void),
     checked_model: *std.StringHashMap(void),
-) !void {
+) BomError!void {
     for (block.instances) |inst| {
         // Check footprint
         if (inst.footprint.len > 0 and !checked_fp.contains(inst.footprint)) {
@@ -96,7 +104,7 @@ pub fn collectMissing(
 /// Render the design's parts list as an HTML BOM table (component, value,
 /// footprint, attrs, count, refs) with inline value-edit controls that
 /// POST to `/api/edit-value/:name`.
-pub fn writeBomHtml(wr: anytype, block: *const env_mod.DesignBlock) !void {
+pub fn writeBomHtml(wr: anytype, block: *const env_mod.DesignBlock) BomError!void {
     const Instance = env_mod.Instance;
     var all: std.ArrayListUnmanaged(Instance) = .empty;
     try bomCollectInstances(block, &all);
@@ -301,7 +309,7 @@ pub fn getPassivePrefix(component: []const u8) []const u8 {
 /// Emit the parts list as CSV (component, value, footprint, count, refs,
 /// then any extra `attrs` columns). Used by `exportBomCsvApi` and the
 /// review-package zip exporter.
-pub fn writeBomCsv(w: anytype, block: *const env_mod.DesignBlock) !void {
+pub fn writeBomCsv(w: anytype, block: *const env_mod.DesignBlock) BomError!void {
     const Instance = env_mod.Instance;
     var all: std.ArrayListUnmanaged(Instance) = .empty;
     try bomCollectInstances(block, &all);
@@ -436,7 +444,7 @@ fn attrsEqual(a: []const []const u8, b: []const []const u8) bool {
 /// Scan `lib/pinouts/*.sexp` once and return a map from symbol name to its
 /// full pin list. Cached so per-instance lookups in
 /// `augmentUnconnectedPins` and `writeComponentsJson` stay O(1).
-pub fn buildSymbolPinCache(allocator: std.mem.Allocator, project_dir: []const u8) !SymbolPinCache {
+pub fn buildSymbolPinCache(allocator: std.mem.Allocator, project_dir: []const u8) BomError!SymbolPinCache {
     var cache: SymbolPinCache = .empty;
     const dirs = [_]struct { path: []const u8, form: []const u8 }{
         .{ .path = "lib/pinouts", .form = "pinout" },
@@ -485,7 +493,7 @@ pub fn buildSymbolPinCache(allocator: std.mem.Allocator, project_dir: []const u8
 }
 
 /// Augment instances with an "Unconnected" part for symbol pins not in any part.
-pub fn augmentUnconnectedPins(allocator: std.mem.Allocator, block: *env_mod.DesignBlock, sym_cache: *const SymbolPinCache) !void {
+pub fn augmentUnconnectedPins(allocator: std.mem.Allocator, block: *env_mod.DesignBlock, sym_cache: *const SymbolPinCache) std.mem.Allocator.Error!void {
     for (block.instances, 0..) |inst, inst_idx| {
         if (inst.parts.len == 0) continue;
 
@@ -544,7 +552,7 @@ pub fn footprintHasPads(allocator: std.mem.Allocator, project_dir: []const u8, f
 /// keyed on hierarchical ref-des, embedding each instance's symbol,
 /// footprint, value, source offset, note text, pin-net pairs, and full
 /// symbol-pin list. Returns true when at least one entry was written.
-pub fn writeComponentsJson(w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8, sym_cache: *const SymbolPinCache, allocator: std.mem.Allocator, project_dir: []const u8) !bool {
+pub fn writeComponentsJson(w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8, sym_cache: *const SymbolPinCache, allocator: std.mem.Allocator, project_dir: []const u8) BomError!bool {
     var written = false;
     for (block.instances) |inst| {
         if (written) try w.writeAll(",");
@@ -624,7 +632,7 @@ fn baseNetName(name: []const u8) []const u8 {
 /// Emit a `{ "<net>": [{ref_des, pin}, …], … }` object grouping every pin
 /// reference by its base net name, applying `net_ties` to merge sub-block
 /// nets into the parent's name (so `ldo/VIN` collapses into `VDD`).
-pub fn writeNetsJson(w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8) !bool {
+pub fn writeNetsJson(w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8) BomError!bool {
     const allocator = std.heap.page_allocator;
 
     // Build rename map from net_ties: "sb_name/port" → "parent_net"

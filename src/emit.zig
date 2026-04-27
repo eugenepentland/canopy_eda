@@ -8,7 +8,7 @@ const SubBlock = env_mod.SubBlock;
 
 /// Emit a resolved design as an S-expression string.
 /// Flattens hierarchy with / prefixed ref-des.
-pub fn emitResolved(allocator: std.mem.Allocator, block: *const DesignBlock) ![]const u8 {
+pub fn emitResolved(allocator: std.mem.Allocator, block: *const DesignBlock) std.mem.Allocator.Error![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
     const w = buf.writer(allocator);

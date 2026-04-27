@@ -9,7 +9,7 @@ const log = @import("../infra/log.zig");
 pub const HistoryError = error{
     InvalidSnapshotId,
     SnapshotNotFound,
-} || std.mem.Allocator.Error;
+} || std.mem.Allocator.Error || std.fs.Dir.AccessError || std.fs.Dir.MakeError || std.fs.Dir.CopyFileError || std.fs.Dir.OpenError || std.fs.File.OpenError || std.fs.Dir.Iterator.Error || std.fs.File.ReadError;
 
 fn makeTimestamp(allocator: std.mem.Allocator) ![]u8 {
     const sec = clock.timestamp();
@@ -39,7 +39,7 @@ pub fn snapshot(
     project_dir: []const u8,
     name: []const u8,
     description: ?[]const u8,
-) !?[]const u8 {
+) HistoryError!?[]const u8 {
     const sexp_src = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
     defer allocator.free(sexp_src);
 
@@ -96,7 +96,7 @@ pub fn listSnapshots(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
-) ![]SnapshotInfo {
+) HistoryError![]SnapshotInfo {
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/history/{s}", .{ project_dir, name });
     defer allocator.free(dir_path);
 
@@ -134,7 +134,7 @@ pub fn snapshotLibraryFile(
     subdir: []const u8,
     name: []const u8,
     description: ?[]const u8,
-) !?[]const u8 {
+) HistoryError!?[]const u8 {
     const src = try std.fmt.allocPrint(allocator, "{s}/lib/{s}/{s}.sexp", .{ project_dir, subdir, name });
     defer allocator.free(src);
 
@@ -176,7 +176,7 @@ pub fn restore(
     project_dir: []const u8,
     name: []const u8,
     id: []const u8,
-) !void {
+) HistoryError!void {
     // Defense against path traversal and weird input.
     if (id.len == 0) return error.InvalidSnapshotId;
     for (id) |c| if (c == '/' or c == '\\' or c == 0) return error.InvalidSnapshotId;

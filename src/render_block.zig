@@ -5,6 +5,10 @@ const types = @import("render_block_types.zig");
 
 const Allocator = std.mem.Allocator;
 
+/// Error set for block-diagram JSON emission — uses an
+/// `ArrayListUnmanaged(u8)` writer; only `OutOfMemory` propagates.
+pub const RenderError = std.mem.Allocator.Error;
+
 const Block = types.Block;
 const Edge = types.Edge;
 const block_w = types.block_w;
@@ -893,7 +897,7 @@ fn serializeEdge(w: anytype, edge: Edge, idx_offset: usize) !void {
 /// Pixi.js block-diagram viewer. Builds one block per section (and one per
 /// sub-block), categorizes them, column-packs the layout, then routes
 /// power/signal/protocol edges between them.
-pub fn renderBlockDiagramJson(allocator: Allocator, design: *const DesignBlock) ![]const u8 {
+pub fn renderBlockDiagramJson(allocator: Allocator, design: *const DesignBlock) RenderError![]const u8 {
     var result = try buildBlocksFromDesign(allocator, design);
     const section_count = result.blocks.items.len;
 

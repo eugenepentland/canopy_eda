@@ -5,10 +5,14 @@ const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const env_mod = @import("eval/env.zig");
 
+/// Error set for HTML emit helpers in this module — the writers are
+/// `ArrayListUnmanaged(u8).writer()`, so only `OutOfMemory` propagates.
+pub const RenderError = std.mem.Allocator.Error;
+
 /// Render a ReviewDoc as a self-contained HTML page. Inline CSS. One small
 /// inline script plus a CDN marked.js bundle power the checklist/markdown
 /// interactions. The header navbar matches the rest of the EDA web server.
-pub fn renderToHtml(allocator: std.mem.Allocator, doc: review.ReviewDoc, navbar_css: []const u8) ![]const u8 {
+pub fn renderToHtml(allocator: std.mem.Allocator, doc: review.ReviewDoc, navbar_css: []const u8) RenderError![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
 
@@ -38,7 +42,7 @@ pub fn renderToHtml(allocator: std.mem.Allocator, doc: review.ReviewDoc, navbar_
 /// cards so a single URL (`/schematics/:name`) covers both "here's what we
 /// built" and "here's whether it's correct." The caller is responsible for
 /// including REVIEW_CSS in its <style> and CHECKLIST_JS in a <script>.
-pub fn renderBodyInto(w: anytype, doc: review.ReviewDoc) !void {
+pub fn renderBodyInto(w: anytype, doc: review.ReviewDoc) RenderError!void {
     try writeSummaryTable(w, doc.summary);
     try writeSections(w, doc.sections, doc.review_state);
     try writePowerSequence(w, doc.power_sequence);
@@ -97,7 +101,7 @@ fn writeHeader(w: anytype, doc: review.ReviewDoc) !void {
 /// severities, assertion outcomes, and critical-IC requirement coverage,
 /// followed by a missing-requirements list when the design has
 /// undocumented hubs.
-pub fn writeSummaryTable(w: anytype, s: review.Summary) !void {
+pub fn writeSummaryTable(w: anytype, s: review.Summary) RenderError!void {
     try w.writeAll("<section><h2>Summary</h2><table class=\"summary\">");
     try w.print(
         "<tr><th>Sections</th><td>{d}</td><th>Components</th><td>{d}</td><th>Nets</th><td>{d}</td></tr>",
@@ -155,7 +159,7 @@ pub fn writeSummaryTable(w: anytype, s: review.Summary) !void {
 /// tightest-first, with source/load currents, computed margin, status
 /// pill, and an expandable per-consumer breakdown that lists every
 /// (ref_des, net) group landing on the rail.
-pub fn writePowerBudget(w: anytype, rails: []const power_budget.Rail) !void {
+pub fn writePowerBudget(w: anytype, rails: []const power_budget.Rail) RenderError!void {
     if (rails.len == 0) return;
     try w.writeAll("<section><h2>Power budget</h2>");
     try w.writeAll("<p class=\"hint\">Rails sorted tightest first. Ferrite beads merge into upstream rails. Click a rail to see which components land on it.</p>");
@@ -244,7 +248,7 @@ fn statusLabel(s: power_budget.RailStatus) []const u8 {
 /// sequence, showing each rail's source sub-block, its `(enable …)` net,
 /// and the upstream rail it depends on. `via` notes intermediate PG signals
 /// so the reviewer can trace e.g. "LDO depends on VDD via PG_3V3".
-pub fn writePowerSequence(w: anytype, rows: []const power_sequencing.SequenceRow) !void {
+pub fn writePowerSequence(w: anytype, rows: []const power_sequencing.SequenceRow) RenderError!void {
     if (rows.len == 0) return;
     try w.writeAll("<section><h2>Power sequencing</h2>");
     try w.writeAll("<p class=\"hint\">Rails ordered top-down by power-up sequence. A rail's <code>enable</code> net must be stable before that rail comes up. Always-on rails have no enable and power up first.</p>");
@@ -295,7 +299,7 @@ fn sequenceLabel(s: power_sequencing.SequenceStatus) []const u8 {
 /// Render the Test Points section — a probe-pad checklist for hardware
 /// bring-up. Each row pairs a ref_des with the net visible at pin 1 and
 /// the optional `(note …)` describing what to look for.
-pub fn writeTestPoints(w: anytype, tps: []const review.TestPointEntry) !void {
+pub fn writeTestPoints(w: anytype, tps: []const review.TestPointEntry) RenderError!void {
     if (tps.len == 0) return;
     try w.writeAll("<section><h2>Test points</h2>");
     try w.writeAll("<p class=\"hint\">Physical probe pads on the board. Keep this list next to a multimeter when bringing up hardware.</p>");
@@ -326,7 +330,7 @@ pub fn writeTestPoints(w: anytype, tps: []const review.TestPointEntry) !void {
 /// the design still carries, severity-styled and with ref_des / net links so
 /// the reviewer can drill into each one. Emits a "clean build" banner when
 /// the slice is empty.
-pub fn writeUnresolved(w: anytype, vs: []const erc_mod.Violation) !void {
+pub fn writeUnresolved(w: anytype, vs: []const erc_mod.Violation) RenderError!void {
     if (vs.len == 0) {
         try w.writeAll("<section><h2>Unresolved issues</h2><p class=\"hint\">No errors or warnings — clean build.</p></section>");
         return;
@@ -478,7 +482,7 @@ fn writeSections(w: anytype, sections: []const review.SectionReport, state: revi
 /// (approved / stale / pending), the editable check items, the "Add a
 /// check" input, and the reviewer name + Approve button. Backed by
 /// `/api/review-state/:name` POST handlers which `CHECKLIST_JS` calls.
-pub fn writeChecklist(w: anytype, rs: review.SectionReviewState) !void {
+pub fn writeChecklist(w: anytype, rs: review.SectionReviewState) RenderError!void {
     const checked_count = countChecked(rs.items);
     try w.writeAll("<details class=\"sec-checklist\" open><summary>Review checklist");
     try w.print(" <span class=\"chk-progress\">({d}/{d})</span>", .{ checked_count, rs.items.len });
@@ -558,7 +562,7 @@ fn countChecked(items: []const review.ChecklistItem) usize {
 /// Render the Assertions section — one row per `(assert …)` /
 /// `(assert-range …)` outcome the evaluator collected, status-pilled and
 /// shown verbatim. Skipped entirely when the slice is empty.
-pub fn writeAssertions(w: anytype, assertions: []const review.AssertionReport) !void {
+pub fn writeAssertions(w: anytype, assertions: []const review.AssertionReport) RenderError!void {
     if (assertions.len == 0) return;
     try w.writeAll("<section><h2>Assertions</h2>");
     try w.writeAll("<table><thead><tr><th>Status</th><th>Message</th></tr></thead><tbody>");

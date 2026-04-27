@@ -14,6 +14,7 @@ const hub_x = draw.hub_x;
 const pin_stub = draw.pin_stub;
 const shortRef = draw.shortRef;
 const displayValue = draw.displayValue;
+const RenderError = draw.RenderError;
 
 /// Two possibly-overlapping selections of a hub's pin-groups for the HTML
 /// schematic view. `direct` feeds the master table; `spoke` feeds the SVG
@@ -45,7 +46,7 @@ pub fn partitionGroups(
     ctx: *RenderCtx,
     hub_ref: []const u8,
     groups: []const PinGroup,
-) !Partition {
+) RenderError!Partition {
     var direct: std.ArrayListUnmanaged(PinGroup) = .empty;
     var spoke: std.ArrayListUnmanaged(PinGroup) = .empty;
     for (groups) |g| {
@@ -257,7 +258,7 @@ pub fn renderHubAllPins(
     w: anytype,
     hub: FlatInst,
     groups: []const PinGroup,
-) !void {
+) RenderError!void {
     if (groups.len == 0) return;
 
     var saved: std.ArrayListUnmanaged(Saved) = .empty;

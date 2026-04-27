@@ -33,7 +33,7 @@ const Side = enum { left, right, top, bottom };
 /// extracts the description, gathers pins (recursing into KiCad's per-unit
 /// sub-symbols), classifies them by side using the rectangle-derived body
 /// bbox, and writes ordered pin groups followed by a body label.
-pub fn emitSymbol(allocator: std.mem.Allocator, w: anytype, sym_children: []const Node, sym_name: []const u8) !void {
+pub fn emitSymbol(allocator: std.mem.Allocator, w: anytype, sym_children: []const Node, sym_name: []const u8) std.mem.Allocator.Error!void {
     // Extract description from properties
     var description: []const u8 = "";
     for (sym_children[2..]) |child| {
@@ -112,7 +112,7 @@ pub fn emitSymbol(allocator: std.mem.Allocator, w: anytype, sym_children: []cons
 /// Write a sorted list of pins as `(pin NUM "NAME" etype side order)` lines,
 /// numbering the `order` field 1..N so the schematic renderer lays them out
 /// in the exact sequence given.
-pub fn emitPinGroup(w: anytype, pin_list: []const PinInfo, side: []const u8) !void {
+pub fn emitPinGroup(w: anytype, pin_list: []const PinInfo, side: []const u8) std.mem.Allocator.Error!void {
     for (pin_list, 0..) |pin, i| {
         const order = i + 1;
         const etype = mapElectricalType(pin.electrical_type);
@@ -125,7 +125,7 @@ pub fn emitPinGroup(w: anytype, pin_list: []const PinInfo, side: []const u8) !vo
 /// Walk a KiCad symbol's child nodes, appending each `(pin …)` and recursing
 /// into any nested `(symbol …)` sub-units (e.g. `R_0_1`, `R_1_1`) so a
 /// multi-unit symbol contributes all of its pins to a single flat list.
-pub fn collectPins(children: []const Node, pins: *std.ArrayListUnmanaged(PinInfo), allocator: std.mem.Allocator) !void {
+pub fn collectPins(children: []const Node, pins: *std.ArrayListUnmanaged(PinInfo), allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
     for (children) |child| {
         if (child.isForm("pin")) {
             if (extractPin(child)) |pin| {

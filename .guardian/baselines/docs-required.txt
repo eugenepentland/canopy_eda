@@ -1,0 +1,9 @@
+# guardian-snapshot v1
+Guardian's docs-required check enforces three artifacts:
+Run `zig build docs-init` to scaffold them, then edit each file.
+docs/ARCHITECTURE.md      — how the system is structured
+docs/GOALS.md              — what we prefer when forced to choose
+docs/adr/README.md   — index of architecture decisions
+missing: docs/ARCHITECTURE.md (architecture overview)
+missing: docs/GOALS.md (goals)
+missing: docs/adr/README.md (ADR index)

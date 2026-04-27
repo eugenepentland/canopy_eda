@@ -20,13 +20,14 @@ const drawNcSymbol = draw.drawNcSymbol;
 const hub_mod = @import("hub.zig");
 const estimateBranchCount = hub_mod.estimateBranchCount;
 const branch_mod = @import("branch.zig");
+const RenderError = draw.RenderError;
 
 /// Render every connection out of one merged hub-pin group. Classifies each
 /// connection as net-label or pin-link (spoke-chain), filters out
 /// insignificant nets, then routes the surviving ones onto a per-pin local
 /// bus and lays the chains/terminals out vertically without overlapping the
 /// neighbouring pins.
-pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u8, group: PinGroup, stub_x: f64, py: f64, side: Side) !void {
+pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u8, group: PinGroup, stub_x: f64, py: f64, side: Side) RenderError!void {
     if (group.conns.len == 0) {
         const nc_x = switch (side) {
             .left => stub_x - 10.0,
@@ -185,7 +186,7 @@ pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u
 }
 
 /// Render terminal labels/symbols, grouping by terminal name.
-pub fn renderTerminalGroups(self: *RenderCtx, w: anytype, results: []const BranchBody, term_x: f64, side: Side) !void {
+pub fn renderTerminalGroups(self: *RenderCtx, w: anytype, results: []const BranchBody, term_x: f64, side: Side) RenderError!void {
     if (results.len == 0) return;
 
     const anchor: []const u8 = switch (side) {
@@ -251,7 +252,7 @@ pub fn renderTerminalGroups(self: *RenderCtx, w: anytype, results: []const Branc
 }
 
 /// Get the terminal net name for a connection endpoint.
-pub fn getConnTerminal(self: *RenderCtx, endpoint: Endpoint, hub_ref: []const u8, from_pin: []const u8) ![]const u8 {
+pub fn getConnTerminal(self: *RenderCtx, endpoint: Endpoint, hub_ref: []const u8, from_pin: []const u8) RenderError![]const u8 {
     switch (endpoint) {
         .net => |net| return net,
         .pin => |p| {
@@ -415,7 +416,7 @@ fn tryChainConns(self: *RenderCtx, conns: []const AdjEntry, current_ref: []const
 }
 
 /// Render the body of a connection. Returns end_x position.
-pub fn renderConnBody(self: *RenderCtx, w: anytype, endpoint: Endpoint, hub_ref: []const u8, from_pin: []const u8, stub_x: f64, stub_y: f64, cy: f64, side: Side, net_name: []const u8) !f64 {
+pub fn renderConnBody(self: *RenderCtx, w: anytype, endpoint: Endpoint, hub_ref: []const u8, from_pin: []const u8, stub_x: f64, stub_y: f64, cy: f64, side: Side, net_name: []const u8) RenderError!f64 {
     switch (endpoint) {
         .net => {
             const end_x: f64 = switch (side) {

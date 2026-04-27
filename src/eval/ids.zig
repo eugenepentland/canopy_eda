@@ -14,7 +14,7 @@ const Instance = env_mod.Instance;
 const DesignBlock = env_mod.DesignBlock;
 
 /// Get the next auto ref-des for a given prefix (e.g., 'C' -> "C1", "C2", ...).
-pub fn nextRefDes(self: *Evaluator, prefix: u8) ![]const u8 {
+pub fn nextRefDes(self: *Evaluator, prefix: u8) EvalError![]const u8 {
     const gop = self.auto_refdes.getOrPut(self.allocator, prefix) catch return EvalError.OutOfMemory;
     if (!gop.found_existing) gop.value_ptr.* = 0;
     gop.value_ptr.* += 1;
@@ -47,7 +47,7 @@ pub fn isStandardRefDes(ref_des: []const u8) bool {
 
 /// Auto-assign ref_des for instances that have descriptive labels (not standard ref_des).
 /// Updates all references (nets, notes, pin groups, sections) to use the new ref_des.
-pub fn autoAssignRefDes(self: *Evaluator, block: *DesignBlock) !void {
+pub fn autoAssignRefDes(self: *Evaluator, block: *DesignBlock) EvalError!void {
     // Build rename map: old_ref_des (label) -> new_ref_des
     var rename_map = std.StringHashMapUnmanaged([]const u8).empty;
     defer rename_map.deinit(self.allocator);
@@ -107,7 +107,7 @@ pub fn autoAssignRefDes(self: *Evaluator, block: *DesignBlock) !void {
 
 /// Assign global ref-des to sub-block instances, replacing local names (U1, R1, etc.)
 /// with globally unique ones. Also renames net pin references to match.
-pub fn autoAssignSubBlockRefDes(self: *Evaluator, block: *DesignBlock) !void {
+pub fn autoAssignSubBlockRefDes(self: *Evaluator, block: *DesignBlock) EvalError!void {
     for (@as([]env_mod.SubBlock, @constCast(block.sub_blocks))) |*sb| {
         try assignSubBlockRefDes(self, sb.block);
     }
@@ -252,7 +252,7 @@ pub fn parseId(children: []const Node) ?[]const u8 {
 
 /// Generate a random 8-char hex ID. First char is always a letter (a-f)
 /// to ensure the tokenizer parses it as an atom, not a number.
-pub fn generateId(self: *Evaluator) ![]const u8 {
+pub fn generateId(self: *Evaluator) EvalError![]const u8 {
     var bytes: [4]u8 = undefined;
     infra_random.bytes(&bytes);
     const first: u8 = (bytes[0] % 6) + 'a'; // ensure first char is a-f letter
@@ -260,7 +260,7 @@ pub fn generateId(self: *Evaluator) ![]const u8 {
 }
 
 /// Derive a child ID from a parent ID, net context, and index.
-pub fn deriveChildId(self: *Evaluator, parent_id: []const u8, context: []const u8, index: usize) ![]const u8 {
+pub fn deriveChildId(self: *Evaluator, parent_id: []const u8, context: []const u8, index: usize) EvalError![]const u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(parent_id);
     hasher.update(":");
@@ -286,7 +286,7 @@ pub fn deriveChildId(self: *Evaluator, parent_id: []const u8, context: []const u
 /// back to any file (insertPendingIds only knows how to write to the board
 /// file, and the offsets are in the module file), and persisting them into
 /// the shared module source would collide across multiple instantiations.
-pub fn reassignSubBlockIds(self: *Evaluator, block: *DesignBlock, sub_name: []const u8) !void {
+pub fn reassignSubBlockIds(self: *Evaluator, block: *DesignBlock, sub_name: []const u8) EvalError!void {
     const insts: []Instance = @constCast(block.instances);
     for (insts) |*inst| {
         const context = if (inst.ref_des.len > 0) inst.ref_des else inst.label;
@@ -299,7 +299,7 @@ pub fn reassignSubBlockIds(self: *Evaluator, block: *DesignBlock, sub_name: []co
 }
 
 /// Get the (id ...) from form children, or generate one and track for insertion.
-pub fn getOrCreateFormId(self: *Evaluator, form_children: []const Node) ![]const u8 {
+pub fn getOrCreateFormId(self: *Evaluator, form_children: []const Node) EvalError![]const u8 {
     if (parseId(form_children)) |existing| return existing;
     const new_id = try generateId(self);
     try self.pending_ids.append(self.allocator, .{

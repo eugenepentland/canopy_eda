@@ -6,6 +6,11 @@ const Handler = server_mod.Handler;
 const auth = @import("auth.zig");
 const store = @import("oauth_store.zig");
 
+/// Error set for HTTP handlers in this module.
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
+    std.fs.File.WriteError || std.fs.File.OpenError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence };
+
 fn requestUrl(ctx: *Handler, req: *httpz.Request) ![]const u8 {
     const host = req.header("host") orelse "localhost";
     const scheme = if (isTls(req)) "https" else "http";
@@ -23,7 +28,7 @@ fn isTls(req: *httpz.Request) bool {
 /// GET /.well-known/oauth-protected-resource — RFC 9728 metadata that
 /// tells Claude Code which authorization server protects this MCP
 /// resource and which bearer mechanism (header) it expects.
-pub fn metadataProtectedResource(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn metadataProtectedResource(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const base = try requestUrl(ctx, req);
     defer ctx.allocator.free(base);
     res.content_type = .JSON;
@@ -39,7 +44,7 @@ pub fn metadataProtectedResource(ctx: *Handler, req: *httpz.Request, res: *httpz
 /// GET /.well-known/oauth-authorization-server — RFC 8414 metadata
 /// describing this server's authorization and token endpoints, supported
 /// PKCE method (S256), and the `mcp` scope used by Claude Code.
-pub fn metadataAuthServer(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn metadataAuthServer(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const base = try requestUrl(ctx, req);
     defer ctx.allocator.free(base);
     res.content_type = .JSON;
@@ -58,7 +63,7 @@ pub fn metadataAuthServer(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 ///
 /// If signed in, render a consent page. If not, render a "please sign in" page
 /// with a link to /auth/login.
-pub fn authorizePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn authorizePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const q = try req.query();
     const client_id = q.get("client_id") orelse return badRequest(res, "missing client_id");
     const redirect_uri = q.get("redirect_uri") orelse return badRequest(res, "missing redirect_uri");
@@ -118,7 +123,7 @@ pub fn authorizePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
 /// POST /oauth/authorize/approve
 /// User has clicked "Authorize" on the consent page. Re-validate everything,
 /// mint an auth code, and 302-redirect to the client's redirect_uri.
-pub fn authorizeApprove(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn authorizeApprove(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const email = auth.currentEmail(ctx, req) orelse return unauthorized(res);
 
     const form = try req.formData();
@@ -142,7 +147,7 @@ pub fn authorizeApprove(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 /// POST /oauth/token
 /// Form body: grant_type=authorization_code, code, redirect_uri, client_id,
 /// client_secret, code_verifier
-pub fn tokenEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn tokenEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const form = try req.formData();
 
     const grant_type = form.get("grant_type") orelse return tokenError(req, res, "invalid_request", "missing grant_type");

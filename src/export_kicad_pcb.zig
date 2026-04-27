@@ -47,7 +47,7 @@ pub fn exportPcb(
     existing_pcb_path: ?[]const u8,
     board_def: ?*const env_mod.Board,
     layout_path: ?[]const u8,
-) ![]const u8 {
+) std.mem.Allocator.Error![]const u8 {
     // Flatten hierarchy
     var instances: std.ArrayListUnmanaged(FlatInstance) = .empty;
     defer instances.deinit(allocator);

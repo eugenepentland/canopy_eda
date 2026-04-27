@@ -3,6 +3,12 @@ const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const Node = ast.Node;
 
+/// Error set for the alt-function pinout helpers — covers the parse step,
+/// allocator failures, plus the local `InvalidPinout`/`UnsupportedFormat`
+/// errors thrown when input doesn't match the expected schema.
+pub const AltError = std.mem.Allocator.Error || parser_mod.ParseError ||
+    error{ InvalidPinout, UnsupportedFormat, MissingHeader, MissingPositionColumn, MissingFunctionColumn, InvalidXml };
+
 /// One alternate-function row pulled from a CSV or ST open-pin-data XML:
 /// `position` is the package pin id, `function` is the signal name to add
 /// as `(alt …)`, and `etype` is the optional electrical type (e.g. `io`).
@@ -19,7 +25,7 @@ pub fn mergePinoutWithAlts(
     allocator: std.mem.Allocator,
     pinout_source: []const u8,
     alts: []const AltEntry,
-) ![]const u8 {
+) AltError![]const u8 {
     const nodes = try parser_mod.parse(allocator, pinout_source);
     defer parser_mod.freeNodes(allocator, nodes);
     if (nodes.len == 0) return error.InvalidPinout;
@@ -99,7 +105,7 @@ pub fn mergePinoutWithAlts(
 
 /// Parse a long-format CSV: header row names the columns; required columns are
 /// `position` and `function`. Optional: `etype`. Whitespace in cells is trimmed.
-pub fn parseAltCsv(allocator: std.mem.Allocator, source: []const u8) ![]AltEntry {
+pub fn parseAltCsv(allocator: std.mem.Allocator, source: []const u8) AltError![]AltEntry {
     var rows: std.ArrayListUnmanaged(AltEntry) = .empty;
 
     var line_iter = std.mem.splitScalar(u8, source, '\n');
@@ -151,7 +157,7 @@ fn trimCr(s: []const u8) []const u8 {
 
 /// Dispatch by content: an XML declaration or `<` as the first non-whitespace byte
 /// routes through `parseAltXml`; anything else is treated as CSV.
-pub fn parseAltSource(allocator: std.mem.Allocator, source: []const u8) ![]AltEntry {
+pub fn parseAltSource(allocator: std.mem.Allocator, source: []const u8) AltError![]AltEntry {
     const trimmed = std.mem.trimLeft(u8, source, " \t\r\n");
     if (trimmed.len > 0 and trimmed[0] == '<') return parseAltXml(allocator, source);
     return parseAltCsv(allocator, source);
@@ -160,7 +166,7 @@ pub fn parseAltSource(allocator: std.mem.Allocator, source: []const u8) ![]AltEn
 /// Parse ST's open-pin-data MCU XML (e.g. STM32N657L0HxQ.xml). For every I/O pin we
 /// emit one row per `<Signal Name="…"/>`, skipping the implicit `GPIO` signal (that's
 /// the primary, already in the pinout). Power / reset / self-closing pins are ignored.
-pub fn parseAltXml(allocator: std.mem.Allocator, source: []const u8) ![]AltEntry {
+pub fn parseAltXml(allocator: std.mem.Allocator, source: []const u8) AltError![]AltEntry {
     var rows: std.ArrayListUnmanaged(AltEntry) = .empty;
 
     var cursor: usize = 0;

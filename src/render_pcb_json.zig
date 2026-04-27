@@ -16,6 +16,10 @@ const collectNets = netlist_mod.collectNets;
 const pcb_mod = @import("export_kicad_pcb.zig");
 const layout_mod = @import("layout.zig");
 
+/// Error set for the PCB JSON emitter — uses an `ArrayListUnmanaged(u8)` writer
+/// so the only failure mode is `OutOfMemory`.
+pub const RenderError = std.mem.Allocator.Error;
+
 /// Render a PCB design as JSON for the Pixi.js viewer.
 ///
 /// The JSON contains all the data needed to render footprints, pads, nets,
@@ -28,7 +32,7 @@ pub fn renderPcbJson(
     board_def: ?*const Board,
     existing_pcb_path: ?[]const u8,
     layout_path: ?[]const u8,
-) ![]const u8 {
+) RenderError![]const u8 {
     // Flatten hierarchy
     var instances: std.ArrayListUnmanaged(FlatInstance) = .empty;
     defer instances.deinit(allocator);

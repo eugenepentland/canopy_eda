@@ -3,6 +3,12 @@ const infra_fs = @import("infra/fs.zig");
 const ast = @import("sexpr/ast.zig");
 const parser_mod = @import("sexpr/parser.zig");
 
+/// Error set for footprint emission helpers — covers the parse step on the
+/// project source and the allocator failures from string formatting, plus
+/// the local `InvalidFormat` thrown when the input doesn't look like a
+/// KiCad footprint sexp.
+pub const FootprintError = std.mem.Allocator.Error || parser_mod.ParseError || error{InvalidFormat};
+
 // --- Source .kicad_mod passthrough ---
 
 /// Find the original .kicad_mod source file for a footprint.
@@ -43,7 +49,7 @@ pub fn findSourceKicadMod(allocator: std.mem.Allocator, project_dir: []const u8,
 }
 
 /// Use an original .kicad_mod file, injecting/replacing the 3D model reference.
-pub fn useSourceKicadMod(allocator: std.mem.Allocator, source: []const u8, model_name: ?[]const u8, model_offset: ?[3]f64, model_rotation: ?[3]f64) ![]const u8 {
+pub fn useSourceKicadMod(allocator: std.mem.Allocator, source: []const u8, model_name: ?[]const u8, model_offset: ?[3]f64, model_rotation: ?[3]f64) FootprintError![]const u8 {
     // If no model, return the source as-is
     if (model_name == null) {
         return allocator.dupe(u8, source);
@@ -107,7 +113,7 @@ fn writeModelBlock(w: anytype, model_name: []const u8, model_offset: ?[3]f64, mo
 /// Render a project `(footprint …)` source into a KiCad `.kicad_mod` file:
 /// emits the version header, every pad, the courtyard, silkscreen geometry,
 /// and an optional `(model …)` reference to a STEP file under `models/`.
-pub fn exportFootprintMod(allocator: std.mem.Allocator, source: []const u8, model_name: ?[]const u8, model_offset: ?[3]f64, model_rotation: ?[3]f64) ![]const u8 {
+pub fn exportFootprintMod(allocator: std.mem.Allocator, source: []const u8, model_name: ?[]const u8, model_offset: ?[3]f64, model_rotation: ?[3]f64) FootprintError![]const u8 {
     const nodes = try parser_mod.parse(allocator, source);
     defer parser_mod.freeNodes(allocator, nodes);
 
@@ -421,7 +427,7 @@ pub const ZipEntry = struct {
 };
 
 /// Build a ZIP file in memory using store (no compression).
-pub fn buildZip(allocator: std.mem.Allocator, entries: []const ZipEntry) ![]const u8 {
+pub fn buildZip(allocator: std.mem.Allocator, entries: []const ZipEntry) std.mem.Allocator.Error![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
 

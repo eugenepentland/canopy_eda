@@ -3,6 +3,12 @@ const infra_fs = @import("infra/fs.zig");
 const env_mod = @import("eval/env.zig");
 const DesignBlock = env_mod.DesignBlock;
 
+/// Error set for the modules sidecar writer — combines `OutOfMemory`,
+/// `createFile`, and `writeAll` failure modes.
+pub const ModulesError = std.mem.Allocator.Error ||
+    std.fs.File.OpenError ||
+    std.fs.File.WriteError;
+
 /// Emit a JSON sidecar listing every `sub-block` instance in the design block
 /// tree along with the ordered refs of the components inside it. Used by
 /// `pcb_update.py` to detect identical module instances for one-shot layout
@@ -31,7 +37,7 @@ const DesignBlock = env_mod.DesignBlock;
 pub fn buildModulesJson(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
-) ![]const u8 {
+) std.mem.Allocator.Error![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
@@ -51,7 +57,7 @@ pub fn writeModulesJson(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     out_path: []const u8,
-) !void {
+) ModulesError!void {
     const json = try buildModulesJson(allocator, block);
     defer allocator.free(json);
 

@@ -18,9 +18,10 @@ const pinOrder = draw.pinOrder;
 const writeDebugPin = draw.writeDebugPin;
 const connection = @import("connection.zig");
 const branch = @import("branch.zig");
+const RenderError = draw.RenderError;
 
 /// Render a single part of a multi-part instance as its own hub box.
-pub fn renderHubPart(self: *RenderCtx, w: anytype, hub: FlatInst, part: env_mod.Part, y_start: f64) !f64 {
+pub fn renderHubPart(self: *RenderCtx, w: anytype, hub: FlatInst, part: env_mod.Part, y_start: f64) RenderError!f64 {
     var all_pins: std.ArrayListUnmanaged([]const u8) = .empty;
     defer all_pins.deinit(self.allocator);
     var seen: std.StringHashMapUnmanaged(void) = .empty;
@@ -110,7 +111,7 @@ pub fn renderHubPart(self: *RenderCtx, w: anytype, hub: FlatInst, part: env_mod.
 /// left vs right by pin count, then draw the box, icon, and per-pin
 /// connection lanes. Returns the box height so the caller can stack the
 /// next section beneath.
-pub fn renderHub(self: *RenderCtx, w: anytype, hub: FlatInst, y_start: f64) !f64 {
+pub fn renderHub(self: *RenderCtx, w: anytype, hub: FlatInst, y_start: f64) RenderError!f64 {
     var pin_nets_map: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
     defer pin_nets_map.deinit(self.allocator);
 
@@ -217,7 +218,7 @@ pub fn buildPinNameMap(self: *RenderCtx, parts: []const env_mod.Part) std.String
 }
 
 /// Group hub pins: consecutive pins sharing the same net get merged.
-pub fn groupHubPins(self: *RenderCtx, pins: []const []const u8, adj_entries: []const AdjEntry, pin_names: *const std.StringHashMapUnmanaged([]const u8)) ![]const PinGroup {
+pub fn groupHubPins(self: *RenderCtx, pins: []const []const u8, adj_entries: []const AdjEntry, pin_names: *const std.StringHashMapUnmanaged([]const u8)) RenderError![]const PinGroup {
     if (pins.len == 0) return &[_]PinGroup{};
 
     const PinInfo = struct { pin: []const u8, net: []const u8 };
@@ -360,7 +361,7 @@ fn dedupConns(self: *RenderCtx, conns: []const AdjEntry) ![]const AdjEntry {
 }
 
 /// Calculate per-group heights based on connection count and branch estimates.
-pub fn groupHeights(self: *RenderCtx, groups: []const PinGroup, hub_ref: []const u8) ![]f64 {
+pub fn groupHeights(self: *RenderCtx, groups: []const PinGroup, hub_ref: []const u8) RenderError![]f64 {
     var heights = try self.allocator.alloc(f64, groups.len);
     for (groups, 0..) |group, i| {
         var total_slots: i32 = 0;

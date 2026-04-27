@@ -11,6 +11,10 @@ const Instance = env_mod.Instance;
 const Note = env_mod.Note;
 const AssertionResult = env_mod.AssertionResult;
 
+/// Error set for the review-builder pipeline. Mostly bubbles up the few I/O
+/// callees (power-budget computation, sorting), all of which only allocate.
+pub const ReviewError = std.mem.Allocator.Error;
+
 /// Overall review verdict for a design.
 pub const Status = enum { pass, warn, fail };
 
@@ -211,7 +215,7 @@ pub fn buildReview(
     assertions: []const AssertionResult,
     violations: []const erc_mod.Violation,
     check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
-) !ReviewDoc {
+) ReviewError!ReviewDoc {
     const sections = try buildSectionReports(allocator, block, violations, check_results);
     const rails = try power_budget.analyze(allocator, block);
     const rails_sorted = try sortRailsByTightness(allocator, rails);
@@ -558,7 +562,7 @@ pub fn sectionContentHash(
     rep: SectionReport,
     block: *const DesignBlock,
     sec: Section,
-) ![]const u8 {
+) ReviewError![]const u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(rep.name);
     hasher.update("\x00");
@@ -834,7 +838,7 @@ fn isoTimestampNow(allocator: std.mem.Allocator) ![]const u8 {
 /// Used for both `generated_at` on the review doc and the `approved_at`
 /// stamp on each per-section approval. Allocates the returned string on
 /// the supplied allocator.
-pub fn isoTimestamp(allocator: std.mem.Allocator, unix_s: i64) ![]const u8 {
+pub fn isoTimestamp(allocator: std.mem.Allocator, unix_s: i64) std.mem.Allocator.Error![]const u8 {
     const es = std.time.epoch.EpochSeconds{ .secs = @intCast(unix_s) };
     const day_secs = es.getDaySeconds();
     const ed = es.getEpochDay();
@@ -856,7 +860,7 @@ pub fn isoTimestamp(allocator: std.mem.Allocator, unix_s: i64) ![]const u8 {
 
 /// Replace any non-alphanumeric run with a single hyphen; lower-case the rest.
 /// Used for HTML anchor ids like "#sec-usb".
-pub fn slugify(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
+pub fn slugify(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var last_hyphen = true; // suppresses leading hyphens
     for (s) |c| {

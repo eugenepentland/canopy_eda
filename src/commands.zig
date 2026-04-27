@@ -1,6 +1,7 @@
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
+const EvalError = @import("eval/evaluator.zig").EvalError;
 const emit = @import("emit.zig");
 const export_kicad = @import("export_kicad.zig");
 const export_kicad_pcb = @import("export_kicad_pcb.zig");
@@ -9,8 +10,46 @@ const id_insert = @import("id_insert.zig");
 const erc_mod = @import("erc.zig");
 const env_mod = @import("eval/env.zig");
 
+/// Error set for the CLI command handlers in this file. Wide on purpose:
+/// each `cmd*` orchestrates the evaluator (`EvalError`), file IO, network
+/// pushes, and writers, so we union the relevant std error sets up front
+/// rather than computing a per-command set.
+pub const CommandError = std.mem.Allocator.Error ||
+    EvalError ||
+    std.fs.File.OpenError ||
+    std.fs.File.ReadError ||
+    std.fs.File.WriteError ||
+    std.fs.Dir.MakeError ||
+    std.fs.Dir.RenameError ||
+    std.posix.GetRandomError ||
+    error{
+        FileTooBig,
+        StreamTooLong,
+        EndOfStream,
+        InvalidName,
+        InvalidArgument,
+        WriteFailed,
+        Canceled,
+        ConnectionRefused,
+        ConnectionResetByPeer,
+        ConnectionTimedOut,
+        NetworkUnreachable,
+        AddressFamilyNotSupported,
+        ProtocolFamilyNotAvailable,
+        AddressNotAvailable,
+        SocketTypeNotSupported,
+        ProtocolNotSupported,
+        SystemResources,
+        Unexpected,
+        TemporaryNameServerFailure,
+        NameServerFailure,
+        UnknownHostName,
+        HostLacksNetworkAddresses,
+        ServiceUnavailable,
+    };
+
 /// `eda check <name>` — run ERC on a design and print violations.
-pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
     var project_dir: []const u8 = ".";
     var positional_name: ?[]const u8 = null;
     var severity_filter: ?[]const u8 = null;
@@ -70,7 +109,7 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) !void {
 /// resolves identities into the `.bom`, and either prints the resolved design
 /// to stdout, writes it to `--output-dir`, or pushes it to a running server
 /// via `--push` so the browser viewer updates live.
-pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
     var project_dir: []const u8 = ".";
     var push_name: ?[]const u8 = null;
     var output_dir: ?[]const u8 = null;
@@ -206,7 +245,7 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) !void {
 /// CLI entry point for `eda export-kicad`. Builds the design, resolves the
 /// BOM, and writes a KiCad-compatible netlist plus per-footprint
 /// `.kicad_mod` files (and any associated STEP models) into `--output-dir`.
-pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
     var project_dir: []const u8 = ".";
     var output_dir: ?[]const u8 = null;
     var design_name: ?[]const u8 = null;
@@ -292,7 +331,7 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) !v
 /// `.kicad_pcb` file, applying any stored `.layout` placements/traces and the
 /// optional `(board …)` outline so the result opens directly in KiCad's PCB
 /// editor.
-pub fn cmdExportPcb(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn cmdExportPcb(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
     var project_dir: []const u8 = ".";
     var output_path: ?[]const u8 = null;
     var design_name: ?[]const u8 = null;
@@ -410,7 +449,7 @@ pub fn cmdExportPcb(allocator: std.mem.Allocator, args: []const []const u8) !voi
 /// stored `.layout` placements, and emits a Gerber/Excellon manufacturing
 /// set as files (`--output-dir`) or as a single zip on disk when no
 /// directory is given.
-pub fn cmdExportGerber(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn cmdExportGerber(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
     const export_gerber = @import("export_gerber.zig");
     const fp_mod = @import("export_kicad_footprint.zig");
 
@@ -518,7 +557,7 @@ pub fn cmdExportGerber(allocator: std.mem.Allocator, args: []const []const u8) !
 /// + `<name>-bom.csv`. Default writes both files to `--output-dir`
 /// (created if missing). With `--zip` writes a single `<name>-review.zip`
 /// instead — useful for CI artifacts.
-pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
     const review_md = @import("review_md.zig");
     const review_mod = @import("review.zig");
     const req_checks = @import("req_checks.zig");
@@ -632,7 +671,7 @@ pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) !
 /// the project's `src/`, `lib/components/`, and `lib/modules/` directories
 /// and re-pushes the rebuilt design to a separately-running web server
 /// whenever it sees a change.
-pub fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
     var project_dir: []const u8 = ".";
     var server_url: []const u8 = "http://localhost:7050";
     var slug: []const u8 = "live";

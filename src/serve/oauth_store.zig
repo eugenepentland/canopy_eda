@@ -189,7 +189,7 @@ pub fn createClient(
     name: []const u8,
     email: []const u8,
     redirect_uri: []const u8,
-) !NewClientResult {
+) std.mem.Allocator.Error!NewClientResult {
     mu.lock();
     defer mu.unlock();
     ensureLoaded(allocator, project_dir);
@@ -235,7 +235,7 @@ pub fn findClient(allocator: std.mem.Allocator, project_dir: []const u8, id: []c
 /// Look up the client and constant-compare its stored hash against
 /// `sha256(secret)`. Returns the client record on a match, null on
 /// unknown/revoked id or wrong secret. Called from the token endpoint.
-pub fn verifyClientSecret(allocator: std.mem.Allocator, project_dir: []const u8, id: []const u8, secret: []const u8) !?Client {
+pub fn verifyClientSecret(allocator: std.mem.Allocator, project_dir: []const u8, id: []const u8, secret: []const u8) std.mem.Allocator.Error!?Client {
     const client = findClient(allocator, project_dir, id) orelse return null;
     const hash = try sha256Hex(allocator, secret);
     defer allocator.free(hash);
@@ -281,7 +281,7 @@ pub fn revokeAllClientsForEmail(allocator: std.mem.Allocator, project_dir: []con
 
 /// Return every non-revoked client owned by `owner_email`. Backs the
 /// account page's "Your Claude Code clients" list. Caller owns the slice.
-pub fn listClientsByEmail(allocator: std.mem.Allocator, project_dir: []const u8, owner_email: []const u8) ![]Client {
+pub fn listClientsByEmail(allocator: std.mem.Allocator, project_dir: []const u8, owner_email: []const u8) std.mem.Allocator.Error![]Client {
     mu.lock();
     defer mu.unlock();
     ensureLoaded(allocator, project_dir);
@@ -306,7 +306,7 @@ pub fn issueCode(
     email: []const u8,
     code_challenge: []const u8,
     scope: []const u8,
-) ![]const u8 {
+) std.mem.Allocator.Error![]const u8 {
     mu.lock();
     defer mu.unlock();
     ensureLoaded(allocator, project_dir);
@@ -348,7 +348,7 @@ pub fn issueToken(
     client_id: []const u8,
     email: []const u8,
     scope: []const u8,
-) ![]const u8 {
+) std.mem.Allocator.Error![]const u8 {
     mu.lock();
     defer mu.unlock();
     ensureLoaded(allocator, project_dir);
@@ -372,7 +372,7 @@ pub fn issueToken(
 /// Return the Token record matching `sha256(raw)` when it has not
 /// expired and its owning client is still active. Used by the auth
 /// middleware on every request that carries a Bearer header.
-pub fn validateToken(allocator: std.mem.Allocator, project_dir: []const u8, raw: []const u8) !?Token {
+pub fn validateToken(allocator: std.mem.Allocator, project_dir: []const u8, raw: []const u8) std.mem.Allocator.Error!?Token {
     mu.lock();
     defer mu.unlock();
     ensureLoaded(allocator, project_dir);
@@ -402,7 +402,7 @@ pub fn validateToken(allocator: std.mem.Allocator, project_dir: []const u8, raw:
 /// SHA-256 of `input` rendered as a 64-char lower-case hex string.
 /// Caller owns the buffer. Used to hash secrets and tokens before they
 /// reach `oauth_clients.json` / `oauth_tokens.json`.
-pub fn sha256Hex(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+pub fn sha256Hex(allocator: std.mem.Allocator, input: []const u8) std.mem.Allocator.Error![]u8 {
     var digest: [32]u8 = undefined;
     Sha256.hash(input, &digest, .{});
     var out = try allocator.alloc(u8, 64);
@@ -417,7 +417,7 @@ pub fn sha256Hex(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 /// SHA-256 of `input` rendered as base64url with no padding — the format
 /// PKCE S256 uses for `code_challenge`. Used by `verifyPkce` to compare
 /// what the client-provided `code_verifier` should hash to.
-pub fn sha256Base64Url(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+pub fn sha256Base64Url(allocator: std.mem.Allocator, input: []const u8) std.mem.Allocator.Error![]u8 {
     var digest: [32]u8 = undefined;
     Sha256.hash(input, &digest, .{});
     const enc = std.base64.url_safe_no_pad.Encoder;
@@ -428,7 +428,7 @@ pub fn sha256Base64Url(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 }
 
 /// PKCE S256: verify code_verifier matches code_challenge.
-pub fn verifyPkce(allocator: std.mem.Allocator, code_verifier: []const u8, code_challenge: []const u8) !bool {
+pub fn verifyPkce(allocator: std.mem.Allocator, code_verifier: []const u8, code_challenge: []const u8) std.mem.Allocator.Error!bool {
     const expected = try sha256Base64Url(allocator, code_verifier);
     defer allocator.free(expected);
     return std.mem.eql(u8, expected, code_challenge);

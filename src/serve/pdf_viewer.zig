@@ -3,6 +3,9 @@ const httpz = @import("httpz");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
+/// Error set for HTTP handlers in this module.
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
+
 /// GET /pdf-view/:filename — interactive datasheet viewer backed by PDF.js
 /// loaded from jsDelivr. Query params: `page=N` (1-based; jump on load) and
 /// `highlight=S` (substring to mark; first hit is scrolled into view). The
@@ -11,7 +14,7 @@ const Handler = serve_root.Handler;
 /// Used by hub `(requirement …)` rows and section `(note …)` rows so a
 /// click lands on the cited page with the rule highlighted, instead of
 /// Chrome's native viewer which ignores `#search=` fragments.
-pub fn pdfViewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn pdfViewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const filename = req.param("filename") orelse {
         res.status = 404;
         return;

@@ -2,12 +2,14 @@ const std = @import("std");
 const env_mod = @import("../eval/env.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Allocator = std.mem.Allocator;
+const draw = @import("draw.zig");
+const RenderError = draw.RenderError;
 
 /// Emit the BOM table at the bottom of the SVG schematic — one row per
 /// distinct (component, value, footprint, attrs) tuple with its rolled-up
 /// ref-des list and Qty. Returns the table's drawn height so the caller
 /// can extend the SVG viewport accordingly.
-pub fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBlock, y_start: f64, table_width: f64) !f64 {
+pub fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBlock, y_start: f64, table_width: f64) RenderError!f64 {
     var all_instances: std.ArrayListUnmanaged(env_mod.Instance) = .empty;
     defer all_instances.deinit(allocator);
     try collectAllInstances(allocator, block, &all_instances);
@@ -245,7 +247,7 @@ pub fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBloc
 /// sub-blocks into `out` so the BOM grouping pass sees each placed part
 /// once. Sub-block instances keep their original ref-des — they were
 /// already globalized by the evaluator's auto-assign pass.
-pub fn collectAllInstances(allocator: Allocator, block: *const DesignBlock, out: *std.ArrayListUnmanaged(env_mod.Instance)) !void {
+pub fn collectAllInstances(allocator: Allocator, block: *const DesignBlock, out: *std.ArrayListUnmanaged(env_mod.Instance)) RenderError!void {
     for (block.instances) |inst| {
         try out.append(allocator, inst);
     }

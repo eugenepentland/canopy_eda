@@ -3,12 +3,13 @@ const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("env.zig");
 const na = @import("net_analysis.zig");
 const Evaluator = @import("evaluator.zig").Evaluator;
+const EvalError = @import("evaluator.zig").EvalError;
 const DesignBlock = env_mod.DesignBlock;
 const Node = ast.Node;
 const Env = env_mod.Env;
 
 /// Run post-build validations on a design block and its sub-blocks.
-pub fn validateDesign(self: *Evaluator, block: *const DesignBlock) !void {
+pub fn validateDesign(self: *Evaluator, block: *const DesignBlock) EvalError!void {
     try checkSinglePinNets(self, block);
     try checkVoltageMismatches(self, block);
     try checkMissingDecoupling(self, block);
@@ -152,7 +153,7 @@ pub fn trackNetFormSource(self: *Evaluator, form_children: []const Node, env: *E
 }
 
 /// Emit warnings for net forms that share a common first net and could be combined.
-pub fn warnCombinableNets(self: *Evaluator, sources: *std.StringHashMapUnmanaged(u32)) !void {
+pub fn warnCombinableNets(self: *Evaluator, sources: *std.StringHashMapUnmanaged(u32)) EvalError!void {
     var iter = sources.iterator();
     while (iter.next()) |entry| {
         if (entry.value_ptr.* > 1) {

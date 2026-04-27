@@ -13,9 +13,12 @@ const assets_css = @import("assets_css.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
+/// Error set for HTTP handlers in this module.
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
+
 /// GET /schematics/:name — HTML schematic page. Evaluates the design, runs
 /// ERC for the status banner, then hands off to render_html.renderToHtml.
-pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;

@@ -10,6 +10,17 @@ const infra_random = @import("infra/random.zig");
 /// will refresh.
 var save_mutex: std.Thread.Mutex = .{};
 
+/// Error set for review-state IO + mutation. Covers the file-system errors
+/// `std.fs.Dir` can surface (open / write / rename), plus `OutOfMemory` and
+/// the `InvalidName` guard returned for unsafe design names.
+pub const StateError = std.mem.Allocator.Error ||
+    std.fs.File.OpenError ||
+    std.fs.File.WriteError ||
+    std.fs.File.ReadError ||
+    std.fs.Dir.RenameError ||
+    std.fs.Dir.MakeError ||
+    error{ InvalidName, FileTooBig, StreamTooLong, EndOfStream };
+
 /// Load the review-state JSON for a design. Returns an empty state if the
 /// file is absent or malformed — a corrupt file shouldn't 500 the review
 /// page, the user can re-create it by checking items again.
@@ -17,7 +28,7 @@ pub fn loadState(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
-) !review.ReviewState {
+) StateError!review.ReviewState {
     if (!safeName(name)) return error.InvalidName;
     const path = try statePath(allocator, project_dir, name);
     defer allocator.free(path);
@@ -36,7 +47,7 @@ pub fn saveState(
     project_dir: []const u8,
     name: []const u8,
     state: review.ReviewState,
-) !void {
+) StateError!void {
     if (!safeName(name)) return error.InvalidName;
     save_mutex.lock();
     defer save_mutex.unlock();
@@ -69,7 +80,7 @@ pub fn reconcile(
     stored: review.ReviewState,
     live_slugs: []const []const u8,
     live_hashes: ?[]const []const u8,
-) !review.ReviewState {
+) std.mem.Allocator.Error!review.ReviewState {
     var out: std.ArrayListUnmanaged(review.SectionReviewState) = .empty;
     for (live_slugs, 0..) |slug, i| {
         const found = findSection(stored, slug);
@@ -109,7 +120,7 @@ pub fn addItem(
     name: []const u8,
     slug: []const u8,
     text: []const u8,
-) ![]const u8 {
+) StateError![]const u8 {
     var state = try loadState(allocator, project_dir, name);
     const id = try randomHex(allocator, 8);
 
@@ -162,7 +173,7 @@ pub fn toggleItem(
     slug: []const u8,
     id: []const u8,
     checked: bool,
-) !void {
+) StateError!void {
     var state = try loadState(allocator, project_dir, name);
     var sections = std.ArrayListUnmanaged(review.SectionReviewState){};
     for (state.sections) |s| {
@@ -197,7 +208,7 @@ pub fn deleteItem(
     name: []const u8,
     slug: []const u8,
     id: []const u8,
-) !void {
+) StateError!void {
     var state = try loadState(allocator, project_dir, name);
     var sections = std.ArrayListUnmanaged(review.SectionReviewState){};
     for (state.sections) |s| {
@@ -233,7 +244,7 @@ pub fn setApproval(
     approved: bool,
     reviewer: []const u8,
     content_hash: []const u8,
-) !void {
+) StateError!void {
     var state = try loadState(allocator, project_dir, name);
     const stamp: []const u8 = if (approved) try review.isoTimestamp(allocator, clock.timestamp()) else "";
     const who: []const u8 = if (approved) try allocator.dupe(u8, reviewer) else "";
@@ -377,7 +388,7 @@ fn parseState(allocator: std.mem.Allocator, data: []const u8) !review.ReviewStat
 
 /// Serialize a ReviewState to JSON. Same shape consumed by the browser
 /// and parsed on load — keep the field set stable.
-pub fn renderState(allocator: std.mem.Allocator, state: review.ReviewState) ![]const u8 {
+pub fn renderState(allocator: std.mem.Allocator, state: review.ReviewState) std.mem.Allocator.Error![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
     try w.writeAll("{\"sections\":[");

@@ -25,7 +25,7 @@ pub const Violation = struct {
 
 /// Serialize DRC violations to JSON. Output format:
 /// `{"violations":[{"kind":...,"message":...,"x":...,"y":...,"severity":...}],"count":N}`
-pub fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Violation) ![]const u8 {
+pub fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Violation) std.mem.Allocator.Error![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
     try w.writeAll("{\"violations\":[");
@@ -49,7 +49,7 @@ pub fn runDrc(
     board_def: ?*const env_mod.Board,
     project_dir: []const u8,
     layout: *const layout_mod.Layout,
-) ![]const Violation {
+) std.mem.Allocator.Error![]const Violation {
     var violations: std.ArrayListUnmanaged(Violation) = .empty;
 
     const rules = if (layout.rules) |r| r else if (board_def) |bd| layout_mod.Rules{

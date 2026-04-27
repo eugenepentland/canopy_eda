@@ -14,6 +14,12 @@ const bom = @import("../bom.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
+/// Error set for HTTP handlers in this module.
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
+    std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
+    std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence, NotOpenForReading, ReadOnlyFileSystem, LinkQuotaExceeded };
+
 const Config = struct {
     output_dir: []const u8 = "",
     pcb_file: []const u8 = "",
@@ -47,7 +53,7 @@ fn extractJsonString(allocator: std.mem.Allocator, json: []const u8, key: []cons
 /// GET /api/kicad-config/:name — return the persisted output directory and
 /// `.kicad_pcb` path for a design (read from `<name>.kicad.json`). Empty
 /// strings when no config has been set yet.
-pub fn getConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn getConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -74,7 +80,7 @@ pub fn getConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !v
 /// POST /api/kicad-config/:name — persist the user's KiCad sync settings
 /// (output directory and optional `.kicad_pcb` path) to
 /// `<name>.kicad.json` so subsequent sync clicks know where to write.
-pub fn setConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn setConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -172,7 +178,7 @@ fn loadAndResolve(ctx: *Handler, name: []const u8, res: *httpz.Response) ?*const
 /// POST /api/kicad-netlist/:name — re-export the design's KiCad netlist and
 /// drop the file at `<output_dir>/<name>.net`. Used by the sync button when
 /// only the netlist needs to land on disk (no footprint regeneration).
-pub fn writeNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn writeNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -227,7 +233,7 @@ pub fn writeNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 /// POST /api/kicad-write/:name — write the KiCad netlist plus a full
 /// `<name>.pretty/` footprint library to the configured output directory,
 /// so the user can pick up both halves in KiCad's pcbnew without zipping.
-pub fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -306,7 +312,7 @@ pub fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !
 /// for big STEP blobs) differ from the last sync. When nothing has changed we
 /// short-circuit before invoking Python at all — the common "click to confirm"
 /// case returns in under 100ms instead of rewriting tens of MB of model files.
-pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;

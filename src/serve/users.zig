@@ -148,7 +148,7 @@ pub fn ensureUser(
     project_dir: []const u8,
     email: []const u8,
     requested_role: Role,
-) !Role {
+) std.mem.Allocator.Error!Role {
     mu.lock();
     defer mu.unlock();
     ensureLoaded(allocator, project_dir);
@@ -180,7 +180,7 @@ pub fn getRole(allocator: std.mem.Allocator, project_dir: []const u8, email: []c
 /// Return a duped slice of every registered user record. Used by the
 /// admin page to render the user-management table; caller owns the slice
 /// (the inner `email` strings are still backed by the loaded data).
-pub fn listUsers(allocator: std.mem.Allocator, project_dir: []const u8) ![]User {
+pub fn listUsers(allocator: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error![]User {
     mu.lock();
     defer mu.unlock();
     ensureLoaded(allocator, project_dir);
@@ -196,7 +196,7 @@ pub fn setRole(
     target_email: []const u8,
     new_role: Role,
     acting_email: []const u8,
-) !bool {
+) (std.mem.Allocator.Error || error{LastAdmin})!bool {
     mu.lock();
     defer mu.unlock();
     ensureLoaded(allocator, project_dir);
@@ -225,7 +225,7 @@ pub fn deleteUser(
     project_dir: []const u8,
     target_email: []const u8,
     acting_email: []const u8,
-) !bool {
+) (std.mem.Allocator.Error || error{ CannotDeleteSelf, LastAdmin })!bool {
     if (std.mem.eql(u8, target_email, acting_email)) return error.CannotDeleteSelf;
 
     mu.lock();

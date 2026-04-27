@@ -10,6 +10,15 @@ const bom_mod = @import("bom.zig");
 const export_kicad = @import("export_kicad.zig");
 const FlatInfo = bom_mod.FlatInfo;
 
+/// Error set for the BOM-resolve pipeline. Combines BOM file IO (open/read/
+/// write the .bom sidecar) with `OutOfMemory` from the various
+/// `ArrayList`/`HashMap` operations.
+pub const ResolveError = std.mem.Allocator.Error ||
+    std.fs.File.OpenError ||
+    std.fs.File.ReadError ||
+    std.fs.File.WriteError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream };
+
 /// Drop `manufacturer` and `mpn` from a property list. Used when the
 /// component family on an instance changes: the UUID stays stable for PCB
 /// identity, but the stored part info is now stale and must be re-resolved
@@ -52,7 +61,7 @@ pub fn resolveIdentities(
     block: *const DesignBlock,
     bom_path: []const u8,
     project_dir: []const u8,
-) !void {
+) ResolveError!void {
     const old_entries = try bom_mod.loadBom(allocator, bom_path);
     defer {
         for (old_entries) |e| {

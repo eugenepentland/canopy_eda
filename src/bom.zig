@@ -12,6 +12,13 @@ const bom_resolve = @import("bom_resolve.zig");
 
 pub const resolveIdentities = bom_resolve.resolveIdentities;
 
+/// Error set for BOM loading and application. Covers parser-side errors,
+/// the file IO surface infra_fs.cwd() exposes, and `OutOfMemory`.
+pub const BomError = std.mem.Allocator.Error ||
+    std.fs.File.OpenError ||
+    std.fs.File.ReadError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream };
+
 /// A single BOM entry: ref_des → UUID + component + properties.
 pub const BomEntry = struct {
     ref_des: []const u8,
@@ -24,7 +31,7 @@ pub const BomEntry = struct {
 
 /// Load a .bom sidecar file and return the entries.
 /// Returns empty slice if file does not exist.
-pub fn loadBom(allocator: std.mem.Allocator, bom_path: []const u8) ![]const BomEntry {
+pub fn loadBom(allocator: std.mem.Allocator, bom_path: []const u8) BomError![]const BomEntry {
     const source = infra_fs.cwd().readFileAlloc(allocator, bom_path, 4 * 1024 * 1024) catch |err| switch (err) {
         error.FileNotFound => return &.{},
         else => return err,
@@ -114,7 +121,7 @@ pub fn collectFlatInstances(
     block: *const DesignBlock,
     prefix: []const u8,
     list: *std.ArrayListUnmanaged(FlatInfo),
-) !void {
+) std.mem.Allocator.Error!void {
     var net_map = std.StringHashMap(std.ArrayListUnmanaged([]const u8)).init(allocator);
     defer {
         var it = net_map.iterator();
@@ -164,7 +171,7 @@ pub fn collectFlatInstances(
 }
 
 /// Generate a v4 UUID string (lowercase hex with dashes).
-pub fn generateUuid(allocator: std.mem.Allocator) ![]const u8 {
+pub fn generateUuid(allocator: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
     var bytes: [16]u8 = undefined;
     infra_random.bytes(&bytes);
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
@@ -179,7 +186,7 @@ pub fn generateUuid(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 /// Create a sorted, joined signature string from net names for exact matching.
-pub fn netSignature(allocator: std.mem.Allocator, nets: []const []const u8) ![]const u8 {
+pub fn netSignature(allocator: std.mem.Allocator, nets: []const []const u8) std.mem.Allocator.Error![]const u8 {
     const sorted = try allocator.alloc([]const u8, nets.len);
     @memcpy(sorted, nets);
     std.mem.sortUnstable([]const u8, sorted, {}, struct {
@@ -221,7 +228,7 @@ pub fn applyBomUuids(
     block: *const DesignBlock,
     project_dir: []const u8,
     design_name: []const u8,
-) !void {
+) BomError!void {
     const bom_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, design_name });
     defer allocator.free(bom_path);
 

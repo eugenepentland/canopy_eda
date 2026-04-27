@@ -400,7 +400,7 @@ pub fn evalSeriesForm(
     instances: *std.ArrayListUnmanaged(Instance),
     all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
     note_list: *std.ArrayListUnmanaged(Note),
-) !void {
+) EvalError!void {
     if (form_children.len < 4) return;
     const first_val = try self.evalNode(form_children[1], env);
     // Parse (id ...) from series form children

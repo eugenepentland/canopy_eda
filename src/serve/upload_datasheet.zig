@@ -4,12 +4,18 @@ const infra_fs = @import("../infra/fs.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
+/// Error set for HTTP handlers in this module.
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
+    std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
+    std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence, ReadOnlyFileSystem, LinkQuotaExceeded };
+
 /// POST /api/upload-datasheet — raw PDF body + `x-filename` header. Writes
 /// to `{project_dir}/lib/datasheets/{sanitized}`. Filenames pass through a
 /// conservative whitelist (alphanum + `_-.`) and are forced to end in `.pdf`
 /// so component-library references can only ever address this directory.
 /// Size is capped at 64 MiB by the httpz config.
-pub fn uploadDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn uploadDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = 400;
         res.content_type = .JSON;
@@ -65,7 +71,7 @@ pub fn uploadDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 /// GET /api/datasheets — JSON list of uploaded PDFs in `lib/datasheets/`.
 /// Used by the schematic sidebar to populate any "link datasheet" UI and by
 /// the review page to cross-reference what's on disk vs what's declared.
-pub fn listDatasheetsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn listDatasheetsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     _ = req;
     const dir_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/datasheets", .{ctx.project_dir});
     defer ctx.allocator.free(dir_path);
@@ -102,7 +108,7 @@ pub fn listDatasheetsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 /// GET /datasheets/:filename — serve a PDF inline. Path-traversal guard
 /// rejects `..` and slashes so the URL space stays rooted at the
 /// datasheets dir.
-pub fn serveDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn serveDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const filename = req.param("filename") orelse {
         res.status = 404;
         return;

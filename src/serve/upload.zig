@@ -6,11 +6,17 @@ const log = @import("../infra/log.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
+/// Error set for HTTP handlers in this module.
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
+    std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
+    std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence, ReadOnlyFileSystem, LinkQuotaExceeded };
+
 /// POST /api/upload-zip — accept a KiCad library zip (must contain a
 /// `.kicad_sym` plus a `.kicad_mod`, optionally a STEP), unpack via the
 /// system `unzip`, convert each part, and write `lib/components`,
 /// `lib/footprints`, `lib/pinouts`, and `lib/models` entries for it.
-pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = 400;
         res.body = "No data";

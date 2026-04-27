@@ -7,13 +7,21 @@ const auth = @import("auth.zig");
 const store = @import("oauth_store.zig");
 const users = @import("users.zig");
 
+/// Error set for HTTP handlers in this module. Wide enough to absorb
+/// the file-IO and form-parsing errors propagated by every helper called
+/// from the bodies via `try`.
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
+    std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
+    std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
+    error{ LastAdmin, CannotDeleteSelf, FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence };
+
 fn currentEmail(ctx: *Handler, req: *httpz.Request) ?[]const u8 {
     return auth.currentEmail(ctx, req);
 }
 
 /// GET /account
 /// Unified account page: passkeys, invite link, and OAuth clients for MCP.
-pub fn accountPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn accountPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const email = currentEmail(ctx, req) orelse {
         res.status = 303;
         res.header("location", "/auth/login");
@@ -287,7 +295,7 @@ pub fn accountPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !vo
 
 /// POST /api/oauth/clients
 /// Body: {"name":"...","redirect_uri":"..."}
-pub fn createClientApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn createClientApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const email = currentEmail(ctx, req) orelse {
         res.status = 401;
         res.body = "sign in required";
@@ -328,7 +336,7 @@ pub fn createClientApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 }
 
 /// POST /api/oauth/clients/:id/revoke
-pub fn revokeClientApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn revokeClientApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const email = currentEmail(ctx, req) orelse {
         res.status = 401;
         res.body = "sign in required";
@@ -350,7 +358,7 @@ pub fn revokeClientApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 }
 
 /// GET /auth/manage — legacy redirect to /account.
-pub fn manageRedirect(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+pub fn manageRedirect(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.status = 303;
     res.header("location", "/account");
 }
@@ -373,7 +381,7 @@ fn requireAdmin(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) ?[]con
 
 /// POST /api/users/role
 /// Body: {"email":"target@example.com","role":"admin"|"writer"|"reader"}
-pub fn updateUserRoleApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn updateUserRoleApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const actor = requireAdmin(ctx, req, res) orelse return;
     const body = req.body() orelse {
         res.status = 400;
@@ -426,7 +434,7 @@ pub fn updateUserRoleApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 /// Removes the user record, revokes all their OAuth clients, deletes their
 /// passkeys, and drops their sessions. Admin-only. Cannot delete yourself or
 /// the last admin.
-pub fn deleteUserApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+pub fn deleteUserApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const actor = requireAdmin(ctx, req, res) orelse return;
     const body = req.body() orelse {
         res.status = 400;

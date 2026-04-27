@@ -204,7 +204,7 @@ pub const Requirement = struct {
 
 /// Compute the auto-derived 8-char hex requirement ID from the requirement
 /// text. Returned slice is owned by the caller (allocated via `allocator`).
-pub fn requirementIdForText(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+pub fn requirementIdForText(allocator: std.mem.Allocator, text: []const u8) std.mem.Allocator.Error![]const u8 {
     var hasher = std.hash.Crc32.init();
     hasher.update(text);
     const h = hasher.final();

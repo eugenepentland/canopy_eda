@@ -104,7 +104,7 @@ pub fn runChecks(
     allocator: std.mem.Allocator,
     eval: *Evaluator,
     block: *const DesignBlock,
-) !std.StringHashMapUnmanaged([]Result) {
+) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]Result) {
     var out: std.StringHashMapUnmanaged([]Result) = .empty;
     try walkInstances(allocator, eval, block, &out);
     return out;
