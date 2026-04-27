@@ -86,8 +86,11 @@ pub fn renderHubPart(self: *RenderCtx, w: anytype, hub: FlatInst, part: env_mod.
     const label = try std.fmt.allocPrint(self.allocator, "{s} {s}", .{ shortRef(hub.ref_des), displayValue(hub) });
     try w.print(
         \\<g class="hub-group" data-ref="{s}" transform="translate(0,0)">
-        \\<g data-ref="{s}" data-part="{s}" class="component" style="cursor:pointer"><rect x="{d:.1}" y="{d:.1}" width="{d:.0}" height="{d:.1}" fill="#16213e" stroke="#4a9eff" stroke-width="2" rx="6"/>
-        \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="12" font-weight="bold" fill="#4a9eff">{s}</text></g>
+        \\<g data-ref="{s}" data-part="{s}" class="component" style="cursor:pointer">
+        \\<rect x="{d:.1}" y="{d:.1}" width="{d:.0}" height="{d:.1}"
+        \\  fill="#16213e" stroke="#4a9eff" stroke-width="2" rx="6"/>
+        \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle"
+        \\  font-size="12" font-weight="bold" fill="#4a9eff">{s}</text></g>
         \\
     , .{
         hub.ref_des, hub.ref_des,                      part.name,
@@ -178,8 +181,11 @@ pub fn renderHub(self: *RenderCtx, w: anytype, hub: FlatInst, y_start: f64) Rend
     const box_y = y_start;
 
     try w.print(
-        \\<g data-ref="{s}" class="component" style="cursor:pointer"><rect x="{d:.1}" y="{d:.1}" width="{d:.0}" height="{d:.1}" fill="#16213e" stroke="#4a9eff" stroke-width="2" rx="6"/>
-        \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="12" font-weight="bold" fill="#4a9eff">{s} {s}</text></g>
+        \\<g data-ref="{s}" class="component" style="cursor:pointer">
+        \\<rect x="{d:.1}" y="{d:.1}" width="{d:.0}" height="{d:.1}"
+        \\  fill="#16213e" stroke="#4a9eff" stroke-width="2" rx="6"/>
+        \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle"
+        \\  font-size="12" font-weight="bold" fill="#4a9eff">{s} {s}</text></g>
         \\
     , .{
         hub.ref_des,
@@ -228,7 +234,12 @@ pub fn buildPinNameMap(self: *RenderCtx, parts: []const env_mod.Part) std.String
 }
 
 /// Group hub pins: consecutive pins sharing the same net get merged.
-pub fn groupHubPins(self: *RenderCtx, pins: []const []const u8, adj_entries: []const AdjEntry, pin_names: *const std.StringHashMapUnmanaged([]const u8)) RenderError![]const PinGroup {
+pub fn groupHubPins(
+    self: *RenderCtx,
+    pins: []const []const u8,
+    adj_entries: []const AdjEntry,
+    pin_names: *const std.StringHashMapUnmanaged([]const u8),
+) RenderError![]const PinGroup {
     if (pins.len == 0) return &[_]PinGroup{};
 
     const PinInfo = struct { pin: []const u8, net: []const u8 };
@@ -307,7 +318,12 @@ pub fn groupHubPins(self: *RenderCtx, pins: []const []const u8, adj_entries: []c
     return groups.toOwnedSlice(self.allocator);
 }
 
-fn finishGroup(self: *RenderCtx, pins: *std.ArrayListUnmanaged([]const u8), conns: *std.ArrayListUnmanaged(AdjEntry), pin_names: *const std.StringHashMapUnmanaged([]const u8)) !PinGroup {
+fn finishGroup(
+    self: *RenderCtx,
+    pins: *std.ArrayListUnmanaged([]const u8),
+    conns: *std.ArrayListUnmanaged(AdjEntry),
+    pin_names: *const std.StringHashMapUnmanaged([]const u8),
+) !PinGroup {
     var display_name: []const u8 = "~";
 
     if (pins.items.len > 0) {

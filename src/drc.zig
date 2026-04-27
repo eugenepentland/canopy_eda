@@ -181,7 +181,11 @@ pub fn runDrc(
                         if (dist < rules.clearance) {
                             try violations.append(allocator, .{
                                 .kind = KIND_CLEARANCE,
-                                .message = try std.fmt.allocPrint(allocator, "Pad {s}.{s} to {s}.{s}: {d:.2}mm < {d:.2}mm clearance", .{ a.ref, a.pin, b.ref, b.pin, dist, rules.clearance }),
+                                .message = try std.fmt.allocPrint(
+                                    allocator,
+                                    "Pad {s}.{s} to {s}.{s}: {d:.2}mm < {d:.2}mm clearance",
+                                    .{ a.ref, a.pin, b.ref, b.pin, dist, rules.clearance },
+                                ),
                                 .x = (a.x + b.x) / HALF_DIVISOR,
                                 .y = (a.y + b.y) / HALF_DIVISOR,
                                 .severity = .@"error",
@@ -204,7 +208,11 @@ pub fn runDrc(
                 if (gap < rules.clearance) {
                     try violations.append(allocator, .{
                         .kind = KIND_CLEARANCE,
-                        .message = try std.fmt.allocPrint(allocator, "Trace '{s}' to pad {s}.{s}: {d:.2}mm < {d:.2}mm", .{ baseNet(t.net), pad.ref, pad.pin, gap, rules.clearance }),
+                        .message = try std.fmt.allocPrint(
+                            allocator,
+                            "Trace '{s}' to pad {s}.{s}: {d:.2}mm < {d:.2}mm",
+                            .{ baseNet(t.net), pad.ref, pad.pin, gap, rules.clearance },
+                        ),
                         .x = pad.x,
                         .y = pad.y,
                         .severity = .@"error",
@@ -243,7 +251,11 @@ pub fn runDrc(
                         const my = (ta.points[ai][1] + tb.points[bi][1]) / HALF_DIVISOR;
                         try violations.append(allocator, .{
                             .kind = KIND_CLEARANCE,
-                            .message = try std.fmt.allocPrint(allocator, "Trace '{s}' to trace '{s}': {d:.2}mm < {d:.2}mm", .{ baseNet(ta.net), baseNet(tb.net), d, min_gap }),
+                            .message = try std.fmt.allocPrint(
+                                allocator,
+                                "Trace '{s}' to trace '{s}': {d:.2}mm < {d:.2}mm",
+                                .{ baseNet(ta.net), baseNet(tb.net), d, min_gap },
+                            ),
                             .x = mx,
                             .y = my,
                             .severity = .@"error",
@@ -268,7 +280,11 @@ pub fn runDrc(
             if (dist < rules.clearance) {
                 try violations.append(allocator, .{
                     .kind = KIND_CLEARANCE,
-                    .message = try std.fmt.allocPrint(allocator, "Via '{s}' to pad {s}.{s}: {d:.2}mm < {d:.2}mm", .{ baseNet(v.net), pad.ref, pad.pin, dist, rules.clearance }),
+                    .message = try std.fmt.allocPrint(
+                        allocator,
+                        "Via '{s}' to pad {s}.{s}: {d:.2}mm < {d:.2}mm",
+                        .{ baseNet(v.net), pad.ref, pad.pin, dist, rules.clearance },
+                    ),
                     .x = v.x,
                     .y = v.y,
                     .severity = .@"error",
@@ -284,7 +300,11 @@ pub fn runDrc(
                 if (gap < rules.clearance) {
                     try violations.append(allocator, .{
                         .kind = KIND_CLEARANCE,
-                        .message = try std.fmt.allocPrint(allocator, "Via '{s}' to trace '{s}': {d:.2}mm < {d:.2}mm", .{ baseNet(v.net), baseNet(t.net), gap, rules.clearance }),
+                        .message = try std.fmt.allocPrint(
+                            allocator,
+                            "Via '{s}' to trace '{s}': {d:.2}mm < {d:.2}mm",
+                            .{ baseNet(v.net), baseNet(t.net), gap, rules.clearance },
+                        ),
                         .x = v.x,
                         .y = v.y,
                         .severity = .@"error",
@@ -601,7 +621,16 @@ fn distPtSeg(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2: f64) f64 {
 }
 
 fn distSegSeg(ax1: f64, ay1: f64, ax2: f64, ay2: f64, bx1: f64, by1: f64, bx2: f64, by2: f64) f64 {
-    return @min(@min(distPtSeg(ax1, ay1, bx1, by1, bx2, by2), distPtSeg(ax2, ay2, bx1, by1, bx2, by2)), @min(distPtSeg(bx1, by1, ax1, ay1, ax2, ay2), distPtSeg(bx2, by2, ax1, ay1, ax2, ay2)));
+    return @min(
+        @min(
+            distPtSeg(ax1, ay1, bx1, by1, bx2, by2),
+            distPtSeg(ax2, ay2, bx1, by1, bx2, by2),
+        ),
+        @min(
+            distPtSeg(bx1, by1, ax1, ay1, ax2, ay2),
+            distPtSeg(bx2, by2, ax1, ay1, ax2, ay2),
+        ),
+    );
 }
 
 fn pointInPolygon(x: f64, y: f64, polygon: []const [2]f64) bool {

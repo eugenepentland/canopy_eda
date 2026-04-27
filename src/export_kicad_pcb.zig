@@ -121,9 +121,20 @@ pub fn exportPcb(
 
         // Build .kicad_mod content
         const mcfg = model_cfg.get(inst.footprint);
-        const model_name = if (mcfg) |c| (c.model orelse findModelFile(allocator, project_dir, inst.footprint, inst.component)) else findModelFile(allocator, project_dir, inst.footprint, inst.component);
+        const model_name = if (mcfg) |c|
+            (c.model orelse findModelFile(allocator, project_dir, inst.footprint, inst.component))
+        else
+            findModelFile(allocator, project_dir, inst.footprint, inst.component);
 
-        const mod_output = buildKicadMod(allocator, project_dir, inst.footprint, fp_source, model_name, if (mcfg) |c| c.offset else null, if (mcfg) |c| c.rotation else null) catch continue;
+        const mod_output = buildKicadMod(
+            allocator,
+            project_dir,
+            inst.footprint,
+            fp_source,
+            model_name,
+            if (mcfg) |c| c.offset else null,
+            if (mcfg) |c| c.rotation else null,
+        ) catch continue;
         try fp_kicad_mod_map.put(inst.footprint, mod_output);
     }
 
@@ -507,7 +518,8 @@ fn generateSubUuid(allocator: std.mem.Allocator, parent_uuid: []const u8, suffix
     @memcpy(&bytes, hash[0..16]);
     bytes[UUID_VERSION_BYTE] = (bytes[UUID_VERSION_BYTE] & 0x0f) | 0x50;
     bytes[UUID_VARIANT_BYTE] = (bytes[UUID_VARIANT_BYTE] & 0x3f) | 0x80;
-    return std.fmt.allocPrint(allocator, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
+    return std.fmt.allocPrint(allocator, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}" ++
+        "-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
         bytes[0],                 bytes[1],            bytes[2],                 bytes[3],
         bytes[4],                 bytes[UUID_BYTE_5],  bytes[UUID_VERSION_BYTE], bytes[UUID_BYTE_7],
         bytes[UUID_VARIANT_BYTE], bytes[UUID_BYTE_9],  bytes[UUID_BYTE_10],      bytes[UUID_BYTE_11],
@@ -805,7 +817,17 @@ test "pcb header generation" {
 // spec: export_kicad_pcb - Extracts footprint placements from existing PCB by canopy_uuid
 test "placement extraction" {
     const alloc = std.testing.allocator;
-    const pcb = "(kicad_pcb\n (footprint \"R_0402\"\n  (layer \"F.Cu\")\n  (at 10.5 20.3 90)\n  (property \"canopy_uuid\" \"test-uuid-1234\"\n   (at 0 0 0)\n   (layer \"F.SilkS\")\n   (hide yes)\n  )\n )\n)";
+    const pcb = "(kicad_pcb\n" ++
+        " (footprint \"R_0402\"\n" ++
+        "  (layer \"F.Cu\")\n" ++
+        "  (at 10.5 20.3 90)\n" ++
+        "  (property \"canopy_uuid\" \"test-uuid-1234\"\n" ++
+        "   (at 0 0 0)\n" ++
+        "   (layer \"F.SilkS\")\n" ++
+        "   (hide yes)\n" ++
+        "  )\n" ++
+        " )\n" ++
+        ")";
 
     var placed = std.StringHashMap(PlacedFootprint).init(alloc);
     defer {

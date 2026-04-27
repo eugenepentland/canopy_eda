@@ -13,7 +13,15 @@ const NOTE_MAX_BYTES: usize = 4096;
 pub const HistoryError = error{
     InvalidSnapshotId,
     SnapshotNotFound,
-} || std.mem.Allocator.Error || std.fs.Dir.AccessError || std.fs.Dir.MakeError || std.fs.Dir.CopyFileError || std.fs.Dir.OpenError || std.fs.File.OpenError || std.fs.Dir.Iterator.Error || std.fs.File.ReadError;
+} ||
+    std.mem.Allocator.Error ||
+    std.fs.Dir.AccessError ||
+    std.fs.Dir.MakeError ||
+    std.fs.Dir.CopyFileError ||
+    std.fs.Dir.OpenError ||
+    std.fs.File.OpenError ||
+    std.fs.Dir.Iterator.Error ||
+    std.fs.File.ReadError;
 
 fn makeTimestamp(allocator: std.mem.Allocator) ![]u8 {
     const sec = clock.timestamp();

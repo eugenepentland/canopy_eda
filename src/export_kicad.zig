@@ -70,7 +70,8 @@ pub fn uuidFromId(allocator: std.mem.Allocator, id: []const u8) std.mem.Allocato
     @memcpy(&bytes, hash[0..16]);
     bytes[UUID_VERSION_BYTE] = (bytes[UUID_VERSION_BYTE] & 0x0f) | 0x50; // version 5
     bytes[UUID_VARIANT_BYTE] = (bytes[UUID_VARIANT_BYTE] & 0x3f) | 0x80; // variant 1
-    return std.fmt.allocPrint(allocator, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
+    return std.fmt.allocPrint(allocator, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}" ++
+        "-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
         bytes[0],                 bytes[1],            bytes[2],                 bytes[3],
         bytes[4],                 bytes[UUID_BYTE_5],  bytes[UUID_VERSION_BYTE], bytes[UUID_BYTE_7],
         bytes[UUID_VARIANT_BYTE], bytes[UUID_BYTE_9],  bytes[UUID_BYTE_10],      bytes[UUID_BYTE_11],
@@ -179,10 +180,21 @@ pub fn exportKicad(
 
         // Check for matching STEP model (config override > auto-discovery)
         const mcfg = model_cfg.get(inst.footprint);
-        const model_name = if (mcfg) |c| (c.model orelse findModelFile(allocator, project_dir, inst.footprint, inst.component)) else findModelFile(allocator, project_dir, inst.footprint, inst.component);
+        const model_name = if (mcfg) |c|
+            (c.model orelse findModelFile(allocator, project_dir, inst.footprint, inst.component))
+        else
+            findModelFile(allocator, project_dir, inst.footprint, inst.component);
 
         // Write .kicad_mod file (prefer original source if available)
-        const mod_output = buildKicadMod(allocator, project_dir, inst.footprint, fp_source, model_name, if (mcfg) |c| c.offset else null, if (mcfg) |c| c.rotation else null) catch |err| {
+        const mod_output = buildKicadMod(
+            allocator,
+            project_dir,
+            inst.footprint,
+            fp_source,
+            model_name,
+            if (mcfg) |c| c.offset else null,
+            if (mcfg) |c| c.rotation else null,
+        ) catch |err| {
             log.warn("failed to convert footprint {s}: {}", .{ inst.footprint, err });
             continue;
         };
@@ -347,9 +359,20 @@ pub fn exportKicadZip(
         try fp_name_map.put(inst.footprint, kicad_name);
 
         const mcfg = model_cfg.get(inst.footprint);
-        const model_name = if (mcfg) |c| (c.model orelse findModelFile(allocator, project_dir, inst.footprint, inst.component)) else findModelFile(allocator, project_dir, inst.footprint, inst.component);
+        const model_name = if (mcfg) |c|
+            (c.model orelse findModelFile(allocator, project_dir, inst.footprint, inst.component))
+        else
+            findModelFile(allocator, project_dir, inst.footprint, inst.component);
 
-        const mod_output = buildKicadMod(allocator, project_dir, inst.footprint, fp_source, model_name, if (mcfg) |c| c.offset else null, if (mcfg) |c| c.rotation else null) catch continue;
+        const mod_output = buildKicadMod(
+            allocator,
+            project_dir,
+            inst.footprint,
+            fp_source,
+            model_name,
+            if (mcfg) |c| c.offset else null,
+            if (mcfg) |c| c.rotation else null,
+        ) catch continue;
 
         const mod_filename = try std.fmt.allocPrint(allocator, "footprints.pretty/{s}.kicad_mod", .{kicad_name});
         try zip_files.append(allocator, .{ .name = mod_filename, .data = mod_output });

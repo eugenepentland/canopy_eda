@@ -59,7 +59,13 @@ pub fn findSourceKicadMod(allocator: std.mem.Allocator, project_dir: []const u8,
 }
 
 /// Use an original .kicad_mod file, injecting/replacing the 3D model reference.
-pub fn useSourceKicadMod(allocator: std.mem.Allocator, source: []const u8, model_name: ?[]const u8, model_offset: ?[3]f64, model_rotation: ?[3]f64) FootprintError![]const u8 {
+pub fn useSourceKicadMod(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    model_name: ?[]const u8,
+    model_offset: ?[3]f64,
+    model_rotation: ?[3]f64,
+) FootprintError![]const u8 {
     // If no model, return the source as-is
     if (model_name == null) {
         return allocator.dupe(u8, source);
@@ -123,7 +129,13 @@ fn writeModelBlock(w: anytype, model_name: []const u8, model_offset: ?[3]f64, mo
 /// Render a project `(footprint …)` source into a KiCad `.kicad_mod` file:
 /// emits the version header, every pad, the courtyard, silkscreen geometry,
 /// and an optional `(model …)` reference to a STEP file under `models/`.
-pub fn exportFootprintMod(allocator: std.mem.Allocator, source: []const u8, model_name: ?[]const u8, model_offset: ?[3]f64, model_rotation: ?[3]f64) FootprintError![]const u8 {
+pub fn exportFootprintMod(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    model_name: ?[]const u8,
+    model_offset: ?[3]f64,
+    model_rotation: ?[3]f64,
+) FootprintError![]const u8 {
     const nodes = try parser_mod.parse(allocator, source);
     defer parser_mod.freeNodes(allocator, nodes);
 

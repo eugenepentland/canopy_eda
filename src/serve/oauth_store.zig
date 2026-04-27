@@ -169,7 +169,11 @@ fn saveTokens(allocator: std.mem.Allocator, project_dir: []const u8) void {
     w.writeAll("[") catch return;
     for (tokens_list.items, 0..) |t, i| {
         if (i > 0) w.writeAll(",") catch return;
-        w.print("{{\"hash\":\"{s}\",\"client_id\":\"{s}\",\"email\":\"{s}\",\"scope\":\"{s}\",\"expires_at\":{d}}}", .{ t.hash, t.client_id, t.email, t.scope, t.expires_at }) catch return;
+        w.print(
+            "{{\"hash\":\"{s}\",\"client_id\":\"{s}\"," ++
+                "\"email\":\"{s}\",\"scope\":\"{s}\",\"expires_at\":{d}}}",
+            .{ t.hash, t.client_id, t.email, t.scope, t.expires_at },
+        ) catch return;
     }
     w.writeAll("]") catch return;
     file.writeAll(bw.items) catch return;

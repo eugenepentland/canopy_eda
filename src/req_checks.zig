@@ -579,7 +579,12 @@ fn evalDecouplingPerPin(
         return passMsg(allocator, "{d}/{d} pins have ≥{d:.3} µF cap to {s}", .{ matched, pins.len, min_uf, ret_net });
     }
     if (first_unmatched.len > 0) {
-        return fail(allocator, "only {d}/{d} pins decoupled (need {d}); first missing: '{s}' (need ≥{d:.3} µF to {s})", .{ matched, pins.len, count, first_unmatched, min_uf, ret_net });
+        return fail(
+            allocator,
+            "only {d}/{d} pins decoupled (need {d}); " ++
+                "first missing: '{s}' (need ≥{d:.3} µF to {s})",
+            .{ matched, pins.len, count, first_unmatched, min_uf, ret_net },
+        );
     }
     return fail(allocator, "only {d}/{d} pins decoupled (need {d})", .{ matched, pins.len, count });
 }
@@ -627,7 +632,11 @@ fn evalSeriesElement(
         }
     }
     if (matched_ref.len > 0) {
-        return passMsg(allocator, "{s} = {s} ({d:.3} {s}) within [{d:.3}, {d:.3}] {s}", .{ matched_ref, matched_value, matched_v, unit_label, min, max, unit_label });
+        return passMsg(
+            allocator,
+            "{s} = {s} ({d:.3} {s}) within [{d:.3}, {d:.3}] {s}",
+            .{ matched_ref, matched_value, matched_v, unit_label, min, max, unit_label },
+        );
     }
     if (any_bridge) {
         return fail(allocator, "{c}-element(s) between {s} and {s} are outside [{d:.3}, {d:.3}] {s}", .{ prefix, pin_net, target_net, min, max, unit_label });

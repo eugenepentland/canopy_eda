@@ -91,10 +91,32 @@ pub fn exportGerber(
     var files: std.ArrayListUnmanaged(GerberFile) = .empty;
 
     // Generate copper layers
-    const fcu = try generateCopperLayer(allocator, "F.Cu", instances.items, &placements, &fp_geom, layout_traces, layout_vias, layout_zone_fills, board_def, design_name);
+    const fcu = try generateCopperLayer(
+        allocator,
+        "F.Cu",
+        instances.items,
+        &placements,
+        &fp_geom,
+        layout_traces,
+        layout_vias,
+        layout_zone_fills,
+        board_def,
+        design_name,
+    );
     try files.append(allocator, .{ .name = try std.fmt.allocPrint(allocator, "{s}-F_Cu.gbr", .{design_name}), .data = fcu });
 
-    const bcu = try generateCopperLayer(allocator, "B.Cu", instances.items, &placements, &fp_geom, layout_traces, layout_vias, layout_zone_fills, board_def, design_name);
+    const bcu = try generateCopperLayer(
+        allocator,
+        "B.Cu",
+        instances.items,
+        &placements,
+        &fp_geom,
+        layout_traces,
+        layout_vias,
+        layout_zone_fills,
+        board_def,
+        design_name,
+    );
     try files.append(allocator, .{ .name = try std.fmt.allocPrint(allocator, "{s}-B_Cu.gbr", .{design_name}), .data = bcu });
 
     // Solder mask (pads expanded by 0.05mm)

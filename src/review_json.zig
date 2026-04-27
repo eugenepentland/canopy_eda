@@ -115,7 +115,10 @@ fn writeReviewState(w: anytype, state: review.ReviewState) !void {
 
 fn writeSummary(w: anytype, s: review.Summary) !void {
     try w.print(
-        "{{\"status\":\"{s}\",\"section_count\":{d},\"instance_count\":{d},\"net_count\":{d},\"violations\":{{\"error\":{d},\"warning\":{d},\"info\":{d}}},\"assertions\":{{\"pass\":{d},\"warn\":{d},\"fail\":{d}}}",
+        "{{\"status\":\"{s}\",\"section_count\":{d}," ++
+            "\"instance_count\":{d},\"net_count\":{d}," ++
+            "\"violations\":{{\"error\":{d},\"warning\":{d},\"info\":{d}}}," ++
+            "\"assertions\":{{\"pass\":{d},\"warn\":{d},\"fail\":{d}}}",
         .{
             @tagName(s.status),
             s.section_count,

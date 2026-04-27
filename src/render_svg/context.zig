@@ -555,7 +555,11 @@ pub const RenderCtx = struct {
                         const bn_b = baseNetName(net_b);
                         if (isGroundNet(bn_a) or isGroundNet(bn_b)) continue;
                         if (!std.mem.eql(u8, bn_a, bn_b)) {
-                            log.warn("NET VALIDATE: spoke {s} pin {s} (net=\"{s}\") <-> {s} pin {s} (net=\"{s}\") — mismatch", .{ ref_des, entry.pin, bn_a, p.ref_des, p.pin, bn_b });
+                            log.warn(
+                                "NET VALIDATE: spoke {s} pin {s} (net=\"{s}\") " ++
+                                    "<-> {s} pin {s} (net=\"{s}\") — mismatch",
+                                .{ ref_des, entry.pin, bn_a, p.ref_des, p.pin, bn_b },
+                            );
                         }
                     },
                     .net => {},

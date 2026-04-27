@@ -52,7 +52,18 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
     @import("../bom_resolve.zig").ResolveError ||
     @import("../sexpr/parser.zig").ParseError ||
-    error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence, NotOpenForReading, ConnectionTimedOut, Canceled, ReadOnlyFileSystem, LinkQuotaExceeded, RebuildFailed };
+    error{
+        FileTooBig,
+        StreamTooLong,
+        EndOfStream,
+        InvalidEscapeSequence,
+        NotOpenForReading,
+        ConnectionTimedOut,
+        Canceled,
+        ReadOnlyFileSystem,
+        LinkQuotaExceeded,
+        RebuildFailed,
+    };
 
 fn warnResolveIdentities(name: []const u8, err: anyerror) void {
     log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(err) });
@@ -312,7 +323,10 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
             while (std.mem.indexOfPos(u8, import_section, search_from, new_component)) |ipos| {
                 const before_ok = ipos == 0 or import_section[ipos - 1] == ' ' or import_section[ipos - 1] == '\n';
                 const after_pos = ipos + new_component.len;
-                const after_ok = after_pos >= import_section.len or import_section[after_pos] == ' ' or import_section[after_pos] == '\n' or import_section[after_pos] == ')';
+                const after_ok = after_pos >= import_section.len or
+                    import_section[after_pos] == ' ' or
+                    import_section[after_pos] == '\n' or
+                    import_section[after_pos] == ')';
                 if (before_ok and after_ok) break :blk true;
                 search_from = ipos + 1;
             }
@@ -1508,7 +1522,10 @@ pub fn swapComponentCore(
             while (std.mem.indexOfPos(u8, import_section, search_from, new_component)) |ipos| {
                 const before_ok = ipos == 0 or import_section[ipos - 1] == ' ' or import_section[ipos - 1] == '\n';
                 const after_pos = ipos + new_component.len;
-                const after_ok = after_pos >= import_section.len or import_section[after_pos] == ' ' or import_section[after_pos] == '\n' or import_section[after_pos] == ')';
+                const after_ok = after_pos >= import_section.len or
+                    import_section[after_pos] == ' ' or
+                    import_section[after_pos] == '\n' or
+                    import_section[after_pos] == ')';
                 if (before_ok and after_ok) break :blk true;
                 search_from = ipos + 1;
             }

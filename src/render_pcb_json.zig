@@ -419,7 +419,11 @@ pub fn renderPcbJson(
         }
 
         try w.writeAll("{");
-        try w.print("\"ref\":\"{s}\",\"component\":\"{s}\",\"value\":\"{s}\",\"footprint\":\"{s}\"", .{ inst.ref_des, inst.component, inst.value, inst.footprint });
+        try w.print(
+            "\"ref\":\"{s}\",\"component\":\"{s}\"," ++
+                "\"value\":\"{s}\",\"footprint\":\"{s}\"",
+            .{ inst.ref_des, inst.component, inst.value, inst.footprint },
+        );
         try w.print(",\"uuid\":\"{s}\"", .{inst.uuid});
         try w.print(",\"x\":{d:.3},\"y\":{d:.3},\"angle\":{d:.1},\"layer\":\"{s}\"", .{ pos_x, pos_y, angle, layer });
 
@@ -497,7 +501,12 @@ pub fn renderPcbJson(
         if (!first_sec) try w.writeAll(",");
         first_sec = false;
         const box = sec_boxes[sec_json_idx];
-        try w.print("{{\"name\":\"{s}\",\"box\":{{\"x\":{d:.2},\"y\":{d:.2},\"w\":{d:.2},\"h\":{d:.2}}},\"refs\":[", .{ sb.block.name, box.x, box.y, box.w, box.h });
+        try w.print(
+            "{{\"name\":\"{s}\"," ++
+                "\"box\":{{\"x\":{d:.2},\"y\":{d:.2},\"w\":{d:.2},\"h\":{d:.2}}}," ++
+                "\"refs\":[",
+            .{ sb.block.name, box.x, box.y, box.w, box.h },
+        );
         for (sb.block.instances, 0..) |inst, ii| {
             if (ii > 0) try w.writeAll(",");
             try w.print("\"{s}/{s}\"", .{ sb.name, inst.ref_des });
@@ -657,7 +666,10 @@ fn parseFootprintGeometry(allocator: std.mem.Allocator, source: []const u8) !Foo
 
         if (std.mem.eql(u8, tag, "pad")) {
             if (cl.len < PAD_NODE_MIN_CHILDREN) continue;
-            const name = cl[1].asAtom() orelse cl[1].asString() orelse if (cl[1].asNumber()) |n| try std.fmt.allocPrint(allocator, "{d}", .{@as(i64, @intFromFloat(n))}) else continue;
+            const name = cl[1].asAtom() orelse cl[1].asString() orelse if (cl[1].asNumber()) |n|
+                try std.fmt.allocPrint(allocator, "{d}", .{@as(i64, @intFromFloat(n))})
+            else
+                continue;
             const pad_type = cl[2].asAtom() orelse continue;
             const shape = cl[3].asAtom() orelse continue;
 

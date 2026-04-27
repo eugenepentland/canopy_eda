@@ -173,7 +173,10 @@ pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         const kicad_name = netlist_mod.extractFootprintName(ctx.allocator, fp_source) catch try ctx.allocator.dupe(u8, inst.footprint);
 
         const mcfg = model_cfg.get(inst.footprint);
-        const model_name = if (mcfg) |c| (c.model orelse fp_mod.findModelFile(ctx.allocator, ctx.project_dir, inst.footprint, inst.component)) else fp_mod.findModelFile(ctx.allocator, ctx.project_dir, inst.footprint, inst.component);
+        const model_name = if (mcfg) |c|
+            (c.model orelse fp_mod.findModelFile(ctx.allocator, ctx.project_dir, inst.footprint, inst.component))
+        else
+            fp_mod.findModelFile(ctx.allocator, ctx.project_dir, inst.footprint, inst.component);
 
         const mod_bytes = model_mod.buildKicadMod(
             ctx.allocator,

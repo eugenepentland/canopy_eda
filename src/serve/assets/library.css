@@ -1,0 +1,33 @@
+body { font-family: system-ui, sans-serif; margin: 0; padding: 0; color: #e0e0e0; background: #121212; }
+.lib-content { max-width: 1000px; margin: 0 auto; padding: 2rem; }
+h1,h2,h3 { color: #fff; }
+a { color: #58a6ff; text-decoration: none; }
+.upload-box { background: #1a1a2e; border: 2px dashed #333; border-radius: 8px; padding: 2rem; margin: 1rem 0; text-align: center; }
+.upload-box.dragover { border-color: #4a9eff; background: #16213e; }
+.upload-box input[type=file] { display: none; }
+.upload-btn { background: #2a4a2a; color: #4a9; border: 1px solid #4a9; border-radius: 4px; padding: 0.5rem 1.5rem; font-size: 0.9rem; cursor: pointer; }
+.upload-btn:hover { background: #3a5a3a; }
+.result { margin: 1rem 0; padding: 1rem; border-radius: 6px; font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; overflow-x: auto; }
+.result.ok { background: #1a2e1a; border: 1px solid #3fb950; color: #3fb950; }
+.result.err { background: #2e1a1a; border: 1px solid #f85149; color: #f85149; }
+table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+th,td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #21262d; }
+th { background: #1a1a2e; color: #888; font-size: 0.85rem; text-transform: uppercase; }
+td { font-family: monospace; font-size: 0.9rem; }
+.search-box { width: 100%; padding: 0.75rem 1rem; font-size: 1.1rem; background: #1a1a2e; color: #e0e0e0; border: 1px solid #333; border-radius: 6px; margin-bottom: 1.5rem; box-sizing: border-box; font-family: monospace; }
+.search-box:focus { outline: none; border-color: #58a6ff; }
+.search-box::placeholder { color: #555; }
+.tag { display: inline-block; font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 3px; margin-right: 0.3rem; }
+.tag-component { background: #1a2e1a; color: #3fb950; }
+.tag-family { background: #2e2a1a; color: #d29922; }
+.tag-pinout { background: #1a1a2e; color: #58a6ff; }
+.tag-footprint { background: #2e1a2e; color: #bc8cff; }
+.meta { color: #666; font-size: 0.8rem; }
+.desc { color: #999; font-size: 0.85rem; font-family: system-ui, sans-serif; }
+.count-info { color: #666; font-size: 0.85rem; margin-bottom: 1rem; }
+.pagination { display: flex; align-items: center; justify-content: center; gap: 0.5rem; margin: 1rem 0; }
+.pagination button { background: #1a1a2e; color: #e0e0e0; border: 1px solid #333; border-radius: 4px; padding: 0.4rem 0.8rem; font-size: 0.85rem; cursor: pointer; font-family: monospace; }
+.pagination button:hover:not(:disabled) { border-color: #58a6ff; color: #58a6ff; }
+.pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
+.pagination .page-info { color: #888; font-size: 0.85rem; font-family: monospace; min-width: 8rem; text-align: center; }
+</style></head><body>

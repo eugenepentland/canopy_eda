@@ -51,43 +51,7 @@ pub fn accountPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     try w.writeAll("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     try w.writeAll("<title>Account — Canopy EDA</title><style>");
     try w.writeAll(auth.PAGE_STYLE);
-    try w.writeAll(
-        \\body{display:block;align-items:initial;justify-content:initial;padding:40px 16px}
-        \\.wrap{max-width:760px;margin:0 auto}
-        \\h1,h2{color:#f0f6fc}
-        \\h2{font-size:1.1rem;margin:0 0 10px 0}
-        \\.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:20px 24px;margin-bottom:20px}
-        \\.user-bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem}
-        \\.user-bar .email{color:#8b949e;font-size:0.85rem}
-        \\table{width:100%;border-collapse:collapse;font-size:14px;margin-bottom:12px}
-        \\th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #21262d;vertical-align:top}
-        \\th{color:#8b949e;font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:0.05em}
-        \\code{font-family:ui-monospace,monospace;font-size:12px;background:#0d1117;padding:2px 6px;border-radius:4px}
-        \\input[type=text]{width:100%;box-sizing:border-box;padding:8px 10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:12px;font-family:inherit}
-        \\label{display:block;color:#8b949e;font-size:0.85rem;margin-bottom:4px}
-        \\button{cursor:pointer;border-radius:6px;padding:8px 16px;font-size:14px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;font-family:inherit}
-        \\button:hover{background:#2d333b}
-        \\.btn-primary{background:#238636;border-color:#2ea043;color:white}
-        \\.btn-primary:hover{background:#2ea043}
-        \\.btn-danger{background:#21262d;color:#f85149}
-        \\.muted{color:#8b949e;font-size:13px}
-        \\.secret-box{background:#0d1117;border:1px solid #d29922;border-radius:6px;padding:12px;margin-top:12px;font-family:ui-monospace,monospace;font-size:12px;word-break:break-all}
-        \\.warn{color:#d29922;font-size:13px;margin-top:4px}
-        \\.row{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border:1px solid #21262d;border-radius:6px;margin-bottom:8px}
-        \\.row .meta{color:#8b949e;font-size:0.85rem}
-        \\.invite-box{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;margin-top:8px;font-size:0.8rem;word-break:break-all}
-        \\.role-pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;margin-left:6px;border:1px solid transparent}
-        \\.role-admin{background:#3c2d00;color:#d29922;border-color:#5c4500}
-        \\.role-writer{background:#0d2f1a;color:#3fb950;border-color:#174d2a}
-        \\.role-reader{background:#1a2637;color:#58a6ff;border-color:#24456a}
-        \\select{background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:5px 8px;font-family:inherit}
-        \\a{color:#58a6ff;text-decoration:none}
-        \\a:hover{text-decoration:underline}
-        \\.status{margin-top:0.5rem;font-size:0.85rem;min-height:1.2em}
-        \\.status.error{color:#f85149}
-        \\.status.ok{color:#3fb950}
-        \\
-    );
+    try w.writeAll(ACCOUNT_PAGE_CSS);
     try w.writeAll("</style></head><body><div class=\"wrap\">");
 
     try w.writeAll("<div class=\"user-bar\"><span class=\"email\"><a href=\"/\">← Designs</a> · Signed in as ");
@@ -124,11 +88,7 @@ pub fn accountPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 
     // ── Users card (admin only) ──
     if (is_admin) {
-        try w.writeAll(
-            \\<div class="card"><h2>Users</h2>
-            \\<p class="muted">Every user registered on this server. Admins can change roles or remove users (which revokes their passkeys, sessions, and OAuth clients).</p>
-            \\<table><tr><th>Email</th><th>Role</th><th>Joined</th><th></th></tr>
-        );
+        try w.writeAll(USERS_CARD_HEAD);
         for (user_list) |u| {
             try w.writeAll("<tr><td>");
             try w.writeAll(u.email);
@@ -174,125 +134,11 @@ pub fn accountPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         }
         try w.writeAll("</table>");
     }
-    try w.writeAll(
-        \\<h3 style="margin-top:18px;font-size:0.95rem;color:#f0f6fc">Create new client</h3>
-        \\<form onsubmit="return createClient(event)">
-        \\<label>Name (for your reference)</label>
-        \\<input type="text" id="client-name" placeholder="e.g. My laptop — Claude Code" required>
-        \\<label>Redirect URI (must match your MCP client's OAuth callback exactly)</label>
-        \\<input type="text" id="client-redirect" value="https://claude.ai/api/mcp/auth_callback" required>
-        \\<p class="muted" style="margin-bottom:8px">Common values: <code>https://claude.ai/api/mcp/auth_callback</code> (Claude.ai web), <code>http://localhost:8080/callback</code> (Claude Code CLI default).</p>
-        \\<button type="submit" class="btn-primary">Create client</button>
-        \\</form>
-        \\<div id="client-secret-output"></div>
-        \\</div>
-        \\<div class="status" id="status"></div>
-    );
+    try w.writeAll(CLIENT_CREATE_FORM);
 
     try w.writeAll("<script>");
     try w.writeAll(auth.B64URL_JS);
-    try w.writeAll(
-        \\const status = document.getElementById('status');
-        \\function fmtDate(ts){if(!ts)return 'Unknown';return new Date(ts*1000).toLocaleString()}
-        \\async function refreshPasskeys(){
-        \\  const r = await fetch('/auth/credentials/list');
-        \\  if (!r.ok) return; // probably not logged in with a real session
-        \\  const data = await r.json();
-        \\  const list = document.getElementById('passkey-list');
-        \\  list.innerHTML = '';
-        \\  for (const c of data.credentials) {
-        \\    const row = document.createElement('div'); row.className = 'row';
-        \\    const meta = document.createElement('div');
-        \\    const title = document.createElement('div'); title.textContent = 'Passkey';
-        \\    const added = document.createElement('div'); added.className = 'meta'; added.textContent = 'Added ' + fmtDate(c.created_at);
-        \\    meta.appendChild(title); meta.appendChild(added);
-        \\    const btn = document.createElement('button'); btn.className='btn-danger'; btn.textContent = 'Delete';
-        \\    btn.onclick = async () => {
-        \\      if (data.credentials.length <= 1) { status.className='status error'; status.textContent='Cannot delete your only passkey. Add another first.'; return; }
-        \\      if (!confirm('Delete this passkey?')) return;
-        \\      const rr = await fetch('/auth/credentials/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id:c.id})});
-        \\      const j = await rr.json();
-        \\      if (j.ok) refreshPasskeys(); else { status.className='status error'; status.textContent = j.error || 'Delete failed'; }
-        \\    };
-        \\    row.appendChild(meta); row.appendChild(btn); list.appendChild(row);
-        \\  }
-        \\  if (data.credentials.length === 0) list.innerHTML = '<p class="muted">No passkeys yet.</p>';
-        \\}
-        \\document.getElementById('logout-btn').onclick = async () => {
-        \\  await fetch('/auth/logout', {method:'POST'}); window.location.href = '/auth/login';
-        \\};
-        \\document.getElementById('add-passkey-btn').onclick = async () => {
-        \\  status.className = 'status'; status.textContent = 'Requesting challenge...';
-        \\  try {
-        \\    const cr = await fetch('/auth/register/challenge');
-        \\    const opts = await cr.json();
-        \\    if (!cr.ok) throw new Error(opts.error || 'Challenge failed');
-        \\    const publicKey = {
-        \\      challenge: b64urlToBytes(opts.challenge), rp: opts.rp,
-        \\      user: { id: b64urlToBytes(opts.user.id), name: opts.user.name, displayName: opts.user.displayName },
-        \\      pubKeyCredParams: opts.pubKeyCredParams,
-        \\      authenticatorSelection: opts.authenticatorSelection, timeout: opts.timeout,
-        \\      excludeCredentials: (opts.excludeCredentials || []).map(c => ({type:c.type, id:b64urlToBytes(c.id)}))
-        \\    };
-        \\    status.textContent = 'Waiting for passkey...';
-        \\    const cred = await navigator.credentials.create({publicKey});
-        \\    const body = JSON.stringify({id: bytesToB64url(cred.rawId), response:{attestationObject: bytesToB64url(cred.response.attestationObject), clientDataJSON: bytesToB64url(cred.response.clientDataJSON)}});
-        \\    const vr = await fetch('/auth/register/complete', {method:'POST', headers:{'Content-Type':'application/json'}, body});
-        \\    const result = await vr.json();
-        \\    if (result.ok) { status.className='status ok'; status.textContent='Passkey added.'; refreshPasskeys(); }
-        \\    else { status.className='status error'; status.textContent = result.error || 'Registration failed'; }
-        \\  } catch (e) { status.className='status error'; status.textContent = e.message || 'Registration failed'; }
-        \\};
-        \\const inviteBtn = document.getElementById('invite-btn');
-        \\if (inviteBtn) inviteBtn.onclick = async () => {
-        \\  const role = document.getElementById('invite-role').value;
-        \\  const r = await fetch('/auth/invite/create', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({role})});
-        \\  const j = await r.json();
-        \\  if (j.ok) {
-        \\    const fullUrl = window.location.origin + j.path;
-        \\    const out = document.getElementById('invite-out');
-        \\    out.innerHTML = '<div class="invite-box">' + fullUrl + '</div><div class="muted" style="margin-top:6px">Role: <strong>' + j.role + '</strong>. Valid for 7 days. One-time use.</div>';
-        \\  } else { status.className='status error'; status.textContent = j.error || 'Failed to create invite'; }
-        \\};
-        \\async function updateRole(sel, targetEmail) {
-        \\  const role = sel.value;
-        \\  const r = await fetch('/api/users/role', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email: targetEmail, role})});
-        \\  if (!r.ok) { status.className='status error'; status.textContent = (await r.text()) || 'Update failed'; return; }
-        \\  status.className='status ok'; status.textContent = targetEmail + ' → ' + role;
-        \\}
-        \\async function deleteUser(targetEmail) {
-        \\  if (!confirm('Delete ' + targetEmail + '?\nThis removes their passkeys, sessions, and OAuth clients. This cannot be undone.')) return;
-        \\  const r = await fetch('/api/users/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email: targetEmail})});
-        \\  if (r.ok) { location.reload(); return; }
-        \\  let msg;
-        \\  try { msg = (await r.json()).error; } catch(e) { msg = await r.text(); }
-        \\  status.className='status error'; status.textContent = msg || 'Delete failed';
-        \\}
-        \\document.querySelectorAll('span[data-ts]').forEach(el => {
-        \\  const ts = parseInt(el.dataset.ts, 10);
-        \\  if (ts) el.textContent = new Date(ts * 1000).toLocaleString();
-        \\});
-        \\async function createClient(ev) {
-        \\  ev.preventDefault();
-        \\  const name = document.getElementById('client-name').value;
-        \\  const redirect_uri = document.getElementById('client-redirect').value;
-        \\  const r = await fetch('/api/oauth/clients', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name, redirect_uri})});
-        \\  if (!r.ok) { alert('Failed: ' + await r.text()); return false; }
-        \\  const d = await r.json();
-        \\  const out = document.getElementById('client-secret-output');
-        \\  out.innerHTML = '<div class="secret-box"><strong>Client ID:</strong><br>' + d.client_id +
-        \\    '<br><br><strong>Client Secret:</strong><br>' + d.client_secret +
-        \\    '</div><div class="warn">⚠ This is the only time the secret is shown. Copy it now.</div>' +
-        \\    '<p><a href="/account">Reload page</a> to see the new client in the table.</p>';
-        \\  return false;
-        \\}
-        \\async function revokeClient(id) {
-        \\  if (!confirm('Revoke client ' + id + '? Tokens issued to it stop working immediately.')) return;
-        \\  const r = await fetch('/api/oauth/clients/' + encodeURIComponent(id) + '/revoke', {method:'POST'});
-        \\  if (r.ok) location.reload(); else alert('Failed: ' + await r.text());
-        \\}
-        \\refreshPasskeys();
-    );
+    try w.writeAll(ACCOUNT_PAGE_JS);
     try w.writeAll("</script></div></body></html>");
 
     res.content_type = .HTML;
@@ -487,3 +333,32 @@ pub fn deleteUserApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     res.content_type = .JSON;
     res.body = OK_JSON_TRUE;
 }
+
+const ACCOUNT_PAGE_CSS = @embedFile("assets/account_page.css");
+const ACCOUNT_PAGE_JS = @embedFile("assets/account_page.js");
+
+const USERS_CARD_HEAD =
+    \\<div class="card"><h2>Users</h2>
+    \\<p class="muted">Every user registered on this server.
+    \\Admins can change roles or remove users
+    \\(which revokes their passkeys, sessions, and OAuth clients).</p>
+    \\<table><tr><th>Email</th><th>Role</th><th>Joined</th><th></th></tr>
+;
+
+const CLIENT_CREATE_FORM =
+    \\<h3 style="margin-top:18px;font-size:0.95rem;color:#f0f6fc">Create new client</h3>
+    \\<form onsubmit="return createClient(event)">
+    \\<label>Name (for your reference)</label>
+    \\<input type="text" id="client-name" placeholder="e.g. My laptop — Claude Code" required>
+    \\<label>Redirect URI (must match your MCP client's OAuth callback exactly)</label>
+    \\<input type="text" id="client-redirect"
+    \\ value="https://claude.ai/api/mcp/auth_callback" required>
+    \\<p class="muted" style="margin-bottom:8px">Common values:
+    \\ <code>https://claude.ai/api/mcp/auth_callback</code> (Claude.ai web),
+    \\ <code>http://localhost:8080/callback</code> (Claude Code CLI default).</p>
+    \\<button type="submit" class="btn-primary">Create client</button>
+    \\</form>
+    \\<div id="client-secret-output"></div>
+    \\</div>
+    \\<div class="status" id="status"></div>
+;

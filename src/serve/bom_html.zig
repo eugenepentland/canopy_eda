@@ -85,7 +85,9 @@ pub fn collectMissing(
                     while (iter.next() catch null) |entry| {
                         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".step")) continue;
                         const basename = entry.name[0 .. entry.name.len - STEP_EXT_LEN];
-                        if ((inst.footprint.len > 0 and (std.mem.indexOf(u8, inst.footprint, basename) != null or std.mem.indexOf(u8, basename, inst.footprint) != null)) or
+                        if ((inst.footprint.len > 0 and
+                            (std.mem.indexOf(u8, inst.footprint, basename) != null or
+                                std.mem.indexOf(u8, basename, inst.footprint) != null)) or
                             (std.mem.indexOf(u8, inst.component, basename) != null or std.mem.indexOf(u8, basename, inst.component) != null))
                         {
                             found = true;
@@ -555,7 +557,14 @@ pub fn footprintHasPads(allocator: std.mem.Allocator, project_dir: []const u8, f
 /// keyed on hierarchical ref-des, embedding each instance's symbol,
 /// footprint, value, source offset, note text, pin-net pairs, and full
 /// symbol-pin list. Returns true when at least one entry was written.
-pub fn writeComponentsJson(w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8, sym_cache: *const SymbolPinCache, allocator: std.mem.Allocator, project_dir: []const u8) BomError!bool {
+pub fn writeComponentsJson(
+    w: anytype,
+    block: *const env_mod.DesignBlock,
+    prefix: []const u8,
+    sym_cache: *const SymbolPinCache,
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+) BomError!bool {
     var written = false;
     for (block.instances) |inst| {
         if (written) try w.writeAll(",");
@@ -657,7 +666,13 @@ pub fn writeNetsJson(w: anytype, block: *const env_mod.DesignBlock, prefix: []co
 
     // Helper to resolve and group a net
     const addNet = struct {
-        fn add(g: *std.StringArrayHashMap(std.ArrayListUnmanaged(PinRef)), alloc: std.mem.Allocator, name: []const u8, pfx: []const u8, pins: []const env_mod.PinRef) !void {
+        fn add(
+            g: *std.StringArrayHashMap(std.ArrayListUnmanaged(PinRef)),
+            alloc: std.mem.Allocator,
+            name: []const u8,
+            pfx: []const u8,
+            pins: []const env_mod.PinRef,
+        ) !void {
             const base = baseNetName(name);
             const gop = try g.getOrPut(base);
             if (!gop.found_existing) gop.value_ptr.* = .empty;

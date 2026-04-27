@@ -60,8 +60,14 @@ pub fn metadataAuthServer(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
     res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = try std.fmt.allocPrint(
         req.arena,
-        \\{{"issuer":"{s}","authorization_endpoint":"{s}/oauth/authorize","token_endpoint":"{s}/oauth/token","response_types_supported":["code"],"grant_types_supported":["authorization_code"],"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["client_secret_post"],"scopes_supported":["mcp"]}}
-    ,
+        "{{\"issuer\":\"{s}\"," ++
+            "\"authorization_endpoint\":\"{s}/oauth/authorize\"," ++
+            "\"token_endpoint\":\"{s}/oauth/token\"," ++
+            "\"response_types_supported\":[\"code\"]," ++
+            "\"grant_types_supported\":[\"authorization_code\"]," ++
+            "\"code_challenge_methods_supported\":[\"S256\"]," ++
+            "\"token_endpoint_auth_methods_supported\":[\"client_secret_post\"]," ++
+            "\"scopes_supported\":[\"mcp\"]}}",
         .{ base, base, base },
     );
 }
@@ -97,7 +103,12 @@ pub fn authorizePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     if (signed_in_email == null) {
         res.body = try std.fmt.allocPrint(req.arena,
             \\<!DOCTYPE html><html><head><title>Authorize — Canopy EDA</title>
-            \\<style>body{{font-family:system-ui,sans-serif;background:#0d1117;color:#c9d1d9;max-width:520px;margin:80px auto;padding:24px;line-height:1.5}}a{{color:#58a6ff}}.card{{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:20px 24px}}</style>
+            \\<style>body{{font-family:system-ui,sans-serif;
+            \\background:#0d1117;color:#c9d1d9;
+            \\max-width:520px;margin:80px auto;padding:24px;line-height:1.5}}
+            \\a{{color:#58a6ff}}
+            \\.card{{background:#161b22;border:1px solid #30363d;
+            \\border-radius:8px;padding:20px 24px}}</style>
             \\</head><body><div class="card"><h1>Sign in required</h1>
             \\<p>The MCP client <strong>{s}</strong> wants to access this server on your behalf.</p>
             \\<p>Please <a href="/auth/login">sign in</a>, then re-open this page to continue.</p>
@@ -111,7 +122,16 @@ pub fn authorizePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // the POST /oauth/authorize/approve has everything it needs.
     res.body = try std.fmt.allocPrint(req.arena,
         \\<!DOCTYPE html><html><head><title>Authorize {s} — Canopy EDA</title>
-        \\<style>body{{font-family:system-ui,sans-serif;background:#0d1117;color:#c9d1d9;max-width:560px;margin:80px auto;padding:24px;line-height:1.5}}.card{{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:20px 24px}}button{{cursor:pointer;border-radius:6px;padding:10px 18px;font-size:14px;border:1px solid #30363d;margin-right:8px}}.btn-primary{{background:#238636;color:white;border-color:#2ea043}}.btn-deny{{background:#21262d;color:#c9d1d9}}.muted{{color:#8b949e;font-size:13px}}</style>
+        \\<style>body{{font-family:system-ui,sans-serif;
+        \\background:#0d1117;color:#c9d1d9;max-width:560px;margin:80px auto;
+        \\padding:24px;line-height:1.5}}
+        \\.card{{background:#161b22;border:1px solid #30363d;
+        \\border-radius:8px;padding:20px 24px}}
+        \\button{{cursor:pointer;border-radius:6px;padding:10px 18px;
+        \\font-size:14px;border:1px solid #30363d;margin-right:8px}}
+        \\.btn-primary{{background:#238636;color:white;border-color:#2ea043}}
+        \\.btn-deny{{background:#21262d;color:#c9d1d9}}
+        \\.muted{{color:#8b949e;font-size:13px}}</style>
         \\</head><body><div class="card">
         \\<h1>Authorize access</h1>
         \\<p><strong>{s}</strong> wants permission to read and modify your designs on this server.</p>
@@ -172,7 +192,8 @@ pub fn tokenEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const verified_client = try store.verifyClientSecret(ctx.allocator, ctx.project_dir, client_id, client_secret);
     if (verified_client == null) return tokenError(req, res, "invalid_client", "bad client_id or client_secret");
 
-    const auth_code = store.consumeCode(ctx.allocator, ctx.project_dir, code) orelse return tokenError(req, res, ERR_INVALID_GRANT, "code expired or already used");
+    const auth_code = store.consumeCode(ctx.allocator, ctx.project_dir, code) orelse
+        return tokenError(req, res, ERR_INVALID_GRANT, "code expired or already used");
     if (!std.mem.eql(u8, auth_code.client_id, client_id)) return tokenError(req, res, ERR_INVALID_GRANT, "code was issued to a different client");
     if (!std.mem.eql(u8, auth_code.redirect_uri, redirect_uri)) return tokenError(req, res, ERR_INVALID_GRANT, "redirect_uri mismatch");
 

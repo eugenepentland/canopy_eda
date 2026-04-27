@@ -1,0 +1,32 @@
+</title>
+<style>
+html,body{margin:0;padding:0;background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;height:100%;}
+#toolbar{position:sticky;top:0;z-index:100;display:flex;gap:12px;align-items:center;padding:8px 16px;background:#161b22;border-bottom:1px solid #21262d;font-size:0.85rem;flex-wrap:wrap;}
+#toolbar a{color:#58a6ff;text-decoration:none;}
+#toolbar a:hover{text-decoration:underline;}
+#toolbar .filename{color:#8b949e;font-family:"SF Mono",Consolas,monospace;font-size:0.8rem;}
+#toolbar input[type="text"]{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:5px 10px;font-size:0.85rem;min-width:240px;}
+#toolbar input[type="text"]:focus{outline:none;border-color:#58a6ff;}
+#toolbar button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:5px 10px;font-size:0.85rem;cursor:pointer;}
+#toolbar button:hover:not(:disabled){background:#30363d;}
+#toolbar button:disabled{opacity:0.4;cursor:default;}
+.match-count{color:#e3b341;font-size:0.78rem;font-family:monospace;margin-left:6px;}
+.quote-label{color:#e3b341;font-style:italic;font-size:0.82rem;max-width:50%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-left:2px solid #e3b341;padding-left:8px;}
+.spacer{flex:1;}
+#matchCtrls{display:inline-flex;align-items:center;gap:6px;}
+#matchCtrls[hidden]{display:none;}
+#status{position:fixed;bottom:16px;right:16px;background:#161b22;border:1px solid #30363d;border-radius:4px;padding:8px 14px;font-size:0.78rem;color:#8b949e;box-shadow:0 4px 12px rgba(0,0,0,0.5);transition:opacity 0.3s;z-index:200;}
+#status.hidden{opacity:0;pointer-events:none;}
+#viewer{display:flex;flex-direction:column;align-items:center;padding:32px 16px;gap:24px;}
+.page-container{position:relative;background:white;box-shadow:0 4px 12px rgba(0,0,0,0.5);}
+.page-container canvas{display:block;}
+.page-label{position:absolute;top:-22px;left:0;color:#6e7681;font-size:0.72rem;font-family:monospace;letter-spacing:0.04em;}
+.page-placeholder{display:flex;align-items:center;justify-content:center;color:#6e7681;font-size:0.85rem;font-family:monospace;background:#161b22;}
+.textLayer{position:absolute;top:0;left:0;right:0;bottom:0;overflow:hidden;line-height:1.0;text-size-adjust:none;forced-color-adjust:none;}
+.textLayer span,.textLayer br{color:transparent;position:absolute;white-space:pre;cursor:text;transform-origin:0% 0%;}
+.textLayer ::selection{background:rgba(88,166,255,0.4);}
+.textLayer mark.match{background:rgba(255,211,61,0.55);color:transparent;border-radius:2px;padding:0;}
+.textLayer mark.match.current{background:rgba(255,140,66,0.75);outline:2px solid #ff8c42;outline-offset:1px;}
+</style>
+</head>
+<body data-pdf="

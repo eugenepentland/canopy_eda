@@ -108,7 +108,13 @@ pub fn generatePinout(allocator: std.mem.Allocator, source: []const u8, filter: 
 }
 
 /// Generate a combined package file from a KiCad symbol + footprint.
-pub fn generatePackage(allocator: std.mem.Allocator, sym_source: []const u8, fp_source: []const u8, name: []const u8, filter: ?[]const u8) ConvertError![]const u8 {
+pub fn generatePackage(
+    allocator: std.mem.Allocator,
+    sym_source: []const u8,
+    fp_source: []const u8,
+    name: []const u8,
+    filter: ?[]const u8,
+) ConvertError![]const u8 {
     // Parse symbol pins
     const sym_nodes = try parser_mod.parse(allocator, sym_source);
     var sym_pins: std.ArrayListUnmanaged(PinInfo) = .empty;

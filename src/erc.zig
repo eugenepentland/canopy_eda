@@ -729,10 +729,20 @@ fn checkPinFunctions(
     }
 }
 
-fn formatFunctionMsg(allocator: std.mem.Allocator, ref_des: []const u8, pin_id: []const u8, asserted: []const u8, net: []const u8, entry: PinoutEntry) ?[]const u8 {
+fn formatFunctionMsg(
+    allocator: std.mem.Allocator,
+    ref_des: []const u8,
+    pin_id: []const u8,
+    asserted: []const u8,
+    net: []const u8,
+    entry: PinoutEntry,
+) ?[]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
-    w.print("{s} pin {s} (net \"{s}\") does not support function \"{s}\". Allowed: {s}", .{ ref_des, pin_id, net, asserted, entry.primary }) catch return null;
+    w.print(
+        "{s} pin {s} (net \"{s}\") does not support function \"{s}\". Allowed: {s}",
+        .{ ref_des, pin_id, net, asserted, entry.primary },
+    ) catch return null;
     for (entry.alts) |alt| {
         w.print(", {s}", .{alt}) catch return null;
     }
@@ -743,7 +753,10 @@ fn formatFunctionMsg(allocator: std.mem.Allocator, ref_des: []const u8, pin_id: 
 fn formatRequiredMsg(allocator: std.mem.Allocator, ref_des: []const u8, pin_id: []const u8, net: []const u8, entry: PinoutEntry) ?[]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
-    w.print("{s} pin {s} (net \"{s}\") has alternate functions but no `(as \"FN\")` was specified. Pick one of: {s}", .{ ref_des, pin_id, net, entry.primary }) catch return null;
+    w.print(
+        "{s} pin {s} (net \"{s}\") has alternate functions but no `(as \"FN\")` was specified. Pick one of: {s}",
+        .{ ref_des, pin_id, net, entry.primary },
+    ) catch return null;
     for (entry.alts) |alt| {
         w.print(", {s}", .{alt}) catch return null;
     }

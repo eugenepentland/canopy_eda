@@ -131,7 +131,13 @@ pub fn edgeExists(items: []const Edge, from: usize, to: usize, label: []const u8
     return false;
 }
 
-const bidi_protocols = [_][]const u8{ "SPI", "I2C", "UART", "USB", "USB2.0-HS", "USB2.0-FS", "OctoSPI", "QuadSPI", "QSPI", "SWD", "JTAG", "SDIO", "SDMMC", "CAN" };
+const bidi_protocols = [_][]const u8{
+    "SPI",     "I2C",       "UART",
+    "USB",     "USB2.0-HS", "USB2.0-FS",
+    "OctoSPI", "QuadSPI",   "QSPI",
+    "SWD",     "JTAG",      "SDIO",
+    "SDMMC",   "CAN",
+};
 
 /// Return true if the protocol label denotes a bidirectional bus (SPI, I2C,
 /// USB, OctoSPI, JTAG, …). Used to draw double-headed arrows in the block

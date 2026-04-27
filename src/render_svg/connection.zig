@@ -320,7 +320,12 @@ pub fn findSpokeChain(self: *RenderCtx, ref_des: []const u8, came_from: Endpoint
     return tryChainConns(self, other_conns.items, ref_des, visited);
 }
 
-fn tryChainConns(self: *RenderCtx, conns: []const AdjEntry, current_ref: []const u8, visited: *std.StringHashMapUnmanaged(void)) error{OutOfMemory}!ChainResult {
+fn tryChainConns(
+    self: *RenderCtx,
+    conns: []const AdjEntry,
+    current_ref: []const u8,
+    visited: *std.StringHashMapUnmanaged(void),
+) error{OutOfMemory}!ChainResult {
     if (conns.len == 0) return .{ .chain = &.{}, .terminal = "?", .branches = &.{} };
 
     const ae = conns[0];
@@ -423,7 +428,18 @@ fn tryChainConns(self: *RenderCtx, conns: []const AdjEntry, current_ref: []const
 }
 
 /// Render the body of a connection. Returns end_x position.
-pub fn renderConnBody(self: *RenderCtx, w: anytype, endpoint: Endpoint, hub_ref: []const u8, from_pin: []const u8, stub_x: f64, stub_y: f64, cy: f64, side: Side, net_name: []const u8) RenderError!f64 {
+pub fn renderConnBody(
+    self: *RenderCtx,
+    w: anytype,
+    endpoint: Endpoint,
+    hub_ref: []const u8,
+    from_pin: []const u8,
+    stub_x: f64,
+    stub_y: f64,
+    cy: f64,
+    side: Side,
+    net_name: []const u8,
+) RenderError!f64 {
     switch (endpoint) {
         .net => {
             const end_x: f64 = switch (side) {

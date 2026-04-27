@@ -96,7 +96,14 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
     var pinout_name: []const u8 = "";
 
     // Known structural fields (not properties)
-    const skip_fields = [_][]const u8{ "symbol", FOOTPRINT_FORM, "pinout", "component", "parameter", "component-family", "bus", "note", "datasheet", "requirement", "ignore-requirements" };
+    const skip_fields = [_][]const u8{
+        "symbol",              FOOTPRINT_FORM,
+        "pinout",              "component",
+        "parameter",           "component-family",
+        "bus",                 "note",
+        "datasheet",           "requirement",
+        "ignore-requirements",
+    };
 
     var props: std.ArrayListUnmanaged(env_mod.Property) = .empty;
     var buses: std.ArrayListUnmanaged(BusDef) = .empty;

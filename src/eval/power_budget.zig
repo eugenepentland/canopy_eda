@@ -290,7 +290,17 @@ pub fn analyze(
         const src = entry.value_ptr.*;
         const load = loads.get(root) orelse RailLoad{};
         const consumers = try buildConsumers(allocator, load.group_keys.items, &consumer_groups);
-        const rail = buildRail(src.display_rail, src.source_label, src.current_typ, src.current_max, load.sum_typ, load.sum_max, load.any_typ, load.any_max, consumers);
+        const rail = buildRail(
+            src.display_rail,
+            src.source_label,
+            src.current_typ,
+            src.current_max,
+            load.sum_typ,
+            load.sum_max,
+            load.any_typ,
+            load.any_max,
+            consumers,
+        );
         try rails.append(allocator, rail);
         try emitted_roots.put(allocator, root, {});
     }

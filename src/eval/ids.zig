@@ -428,7 +428,10 @@ pub fn validateSymbolAgainstPinout(self: *Evaluator, symbol_name: []const u8, sy
         const sym_name = entry.value_ptr.*;
         if (pinout_map.get(pin_id_key)) |pinout_name| {
             if (!std.mem.eql(u8, sym_name, pinout_name)) {
-                log.warn("PINOUT ERROR: symbol '{s}' pin {s}: symbol says \"{s}\" but pinout says \"{s}\"", .{ symbol_name, pin_id_key, sym_name, pinout_name });
+                log.warn(
+                    "PINOUT ERROR: symbol '{s}' pin {s}: symbol says \"{s}\" but pinout says \"{s}\"",
+                    .{ symbol_name, pin_id_key, sym_name, pinout_name },
+                );
             }
         } else {
             log.warn("PINOUT ERROR: symbol '{s}' pin {s} (\"{s}\") does not exist in pinout", .{ symbol_name, pin_id_key, sym_name });

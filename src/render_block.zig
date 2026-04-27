@@ -75,7 +75,10 @@ fn buildBlocksFromDesign(allocator: Allocator, design: *const DesignBlock) !Buil
             try blocks.append(allocator, .{
                 .title = sec.name,
                 .subtitle = key_comp,
-                .detail = if (hub_detail_buf.items.len > 0) (try allocator.dupe(u8, hub_detail_buf.items)) else (if (sec.description.len > 0) sec.description else ""),
+                .detail = if (hub_detail_buf.items.len > 0)
+                    (try allocator.dupe(u8, hub_detail_buf.items))
+                else
+                    (if (sec.description.len > 0) sec.description else ""),
                 .category = .mcu,
                 .ports = sec.ports,
                 .protocols = sec.protocols,
@@ -853,9 +856,17 @@ fn filterSubDiagram(
 const PortNetMap = std.StringHashMap([]const u8);
 
 fn serializeBlock(w: anytype, blk: Block, section: []const u8, port_net_map: *const PortNetMap) !void {
-    try w.print("{{\"title\":\"{s}\",\"subtitle\":\"{s}\",\"detail\":\"{s}\",\"category\":\"{s}\",\"status\":\"{s}\",\"section\":\"{s}\",\"x\":{d:.1},\"y\":{d:.1},\"w\":{d:.1},\"h\":{d:.1},\"ports\":[", .{
-        blk.title, blk.subtitle, blk.detail, @tagName(blk.category), @tagName(blk.status), section, blk.x, blk.y, blk.w, blk.h,
-    });
+    try w.print(
+        "{{\"title\":\"{s}\",\"subtitle\":\"{s}\",\"detail\":\"{s}\"," ++
+            "\"category\":\"{s}\",\"status\":\"{s}\",\"section\":\"{s}\"," ++
+            "\"x\":{d:.1},\"y\":{d:.1},\"w\":{d:.1},\"h\":{d:.1},\"ports\":[",
+        .{
+            blk.title,              blk.subtitle,         blk.detail,
+            @tagName(blk.category), @tagName(blk.status), section,
+            blk.x,                  blk.y,                blk.w,
+            blk.h,
+        },
+    );
     const is_power_section = std.mem.eql(u8, section, "power");
     var has_power_out = false;
     var has_non_power = blk.protocols.len > 0;
@@ -893,7 +904,10 @@ fn serializeBlock(w: anytype, blk: Block, section: []const u8, port_net_map: *co
 }
 
 fn serializeEdge(w: anytype, edge: Edge, idx_offset: usize) !void {
-    try w.print("{{\"from\":{d},\"to\":{d},\"label\":\"{s}\",\"signal\":\"{s}\"", .{ edge.from + idx_offset, edge.to + idx_offset, edge.label, @tagName(edge.signal_type) });
+    try w.print(
+        "{{\"from\":{d},\"to\":{d},\"label\":\"{s}\",\"signal\":\"{s}\"",
+        .{ edge.from + idx_offset, edge.to + idx_offset, edge.label, @tagName(edge.signal_type) },
+    );
     if (edge.voltage) |v| {
         try w.print(",\"voltage\":{d:.1}", .{v});
     }
@@ -954,7 +968,12 @@ pub fn renderBlockDiagramJson(allocator: Allocator, design: *const DesignBlock) 
             if (std.mem.indexOfScalar(u8, side, '/')) |slash| {
                 const sb_name = side[0..slash];
                 const port_name = side[slash + 1 ..];
-                const plain_net = if (std.mem.indexOfScalar(u8, nt.a, '/') == null) nt.a else if (std.mem.indexOfScalar(u8, nt.b, '/') == null) nt.b else continue;
+                const plain_net = if (std.mem.indexOfScalar(u8, nt.a, '/') == null)
+                    nt.a
+                else if (std.mem.indexOfScalar(u8, nt.b, '/') == null)
+                    nt.b
+                else
+                    continue;
                 for (result.blocks.items, 0..) |blk, bi| {
                     if (!std.mem.eql(u8, blk.title, sb_name)) continue;
                     for (blk.ports) |p| {
@@ -1000,7 +1019,13 @@ pub fn renderBlockDiagramJson(allocator: Allocator, design: *const DesignBlock) 
                 if (dst.is_source) continue;
                 if (src.block_idx == dst.block_idx) continue;
                 if (!types.edgeExists(edges.items, src.block_idx, dst.block_idx, net_name))
-                    try edges.append(allocator, .{ .from = src.block_idx, .to = dst.block_idx, .label = net_name, .signal_type = src.sig, .voltage = src.voltage });
+                    try edges.append(allocator, .{
+                        .from = src.block_idx,
+                        .to = dst.block_idx,
+                        .label = net_name,
+                        .signal_type = src.sig,
+                        .voltage = src.voltage,
+                    });
             }
         }
     }
@@ -1091,14 +1116,24 @@ pub fn renderBlockDiagramJson(allocator: Allocator, design: *const DesignBlock) 
                 if (std.mem.indexOfScalar(u8, side, '/')) |slash| {
                     const sb_name = side[0..slash];
                     const port_name = side[slash + 1 ..];
-                    const plain_net = if (std.mem.indexOfScalar(u8, nt.a, '/') == null) nt.a else if (std.mem.indexOfScalar(u8, nt.b, '/') == null) nt.b else continue;
+                    const plain_net = if (std.mem.indexOfScalar(u8, nt.a, '/') == null)
+                        nt.a
+                    else if (std.mem.indexOfScalar(u8, nt.b, '/') == null)
+                        nt.b
+                    else
+                        continue;
                     for (pwr_blocks.items, 0..) |blk, bi| {
                         if (!std.mem.eql(u8, blk.title, sb_name)) continue;
                         for (blk.ports) |p| {
                             if (!std.mem.eql(u8, p.name, port_name)) continue;
                             const gop = try sb_net_map.getOrPut(plain_net);
                             if (!gop.found_existing) gop.value_ptr.* = .empty;
-                            try gop.value_ptr.append(allocator, .{ .block_idx = bi, .voltage = p.voltage, .sig = p.signal_type, .is_source = p.direction == .out });
+                            try gop.value_ptr.append(allocator, .{
+                                .block_idx = bi,
+                                .voltage = p.voltage,
+                                .sig = p.signal_type,
+                                .is_source = p.direction == .out,
+                            });
                             break;
                         }
                         break;
@@ -1115,7 +1150,13 @@ pub fn renderBlockDiagramJson(allocator: Allocator, design: *const DesignBlock) 
                 for (eps) |dst| {
                     if (dst.is_source or src.block_idx == dst.block_idx) continue;
                     if (!types.edgeExists(pwr_edges.items, src.block_idx, dst.block_idx, net_name))
-                        try pwr_edges.append(allocator, .{ .from = src.block_idx, .to = dst.block_idx, .label = net_name, .signal_type = src.sig, .voltage = src.voltage });
+                        try pwr_edges.append(allocator, .{
+                            .from = src.block_idx,
+                            .to = dst.block_idx,
+                            .label = net_name,
+                            .signal_type = src.sig,
+                            .voltage = src.voltage,
+                        });
                 }
             }
         }

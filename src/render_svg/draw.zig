@@ -86,7 +86,9 @@ pub fn drawNetWire(w: anytype, x1: f64, y1: f64, x2: f64, y2: f64, net: []const 
     } else {
         const mid_x = (x1 + x2) / HALF_DIVISOR;
         try w.print(
-            \\<polyline points="{d:.1},{d:.1} {d:.1},{d:.1} {d:.1},{d:.1} {d:.1},{d:.1}" fill="none" stroke="transparent" stroke-width="12" stroke-linejoin="round" class="hit-area"/>
+            \\<polyline points="{d:.1},{d:.1} {d:.1},{d:.1} {d:.1},{d:.1} {d:.1},{d:.1}"
+            \\ fill="none" stroke="transparent" stroke-width="12"
+            \\ stroke-linejoin="round" class="hit-area"/>
         , .{ x1, y1, mid_x, y1, mid_x, y2, x2, y2 });
         try w.print(
             \\<polyline points="{d:.1},{d:.1} {d:.1},{d:.1} {d:.1},{d:.1} {d:.1},{d:.1}" fill="none" stroke="#4a9" stroke-width="1.5"/>
@@ -374,7 +376,9 @@ pub fn classifyComponent(inst: FlatInst) ?[]const u8 {
     const name_lower = inst.component;
     if (containsCI(name_lower, "pma") or containsCI(name_lower, "lna") or containsCI(name_lower, "mmic")) return "amplifier";
     if (containsCI(name_lower, "tpsm") or containsCI(name_lower, "tps5") or containsCI(name_lower, "lm267")) return "buck";
-    if (containsCI(name_lower, "lt3045") or containsCI(name_lower, "lt3042") or containsCI(name_lower, "lp5907") or containsCI(name_lower, "ams1117")) return "ldo";
+    if (containsCI(name_lower, "lt3045") or containsCI(name_lower, "lt3042") or
+        containsCI(name_lower, "lp5907") or containsCI(name_lower, "ams1117"))
+        return "ldo";
     const ref = shortRef(inst.ref_des);
     if (ref.len > 0 and ref[0] == 'Q') return "transistor";
     if (ref.len > 0 and ref[0] == 'D') return "led";

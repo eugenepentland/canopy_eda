@@ -173,9 +173,20 @@ pub fn exportFootprints(
 
         const kicad_name = extractFootprintName(allocator, fp_source) catch inst.footprint;
         const mcfg = model_cfg.get(inst.footprint);
-        const model_name = if (mcfg) |c| (c.model orelse findModelFile(allocator, project_dir, inst.footprint, inst.component)) else findModelFile(allocator, project_dir, inst.footprint, inst.component);
+        const model_name = if (mcfg) |c|
+            (c.model orelse findModelFile(allocator, project_dir, inst.footprint, inst.component))
+        else
+            findModelFile(allocator, project_dir, inst.footprint, inst.component);
 
-        const mod_output = buildKicadMod(allocator, project_dir, inst.footprint, fp_source, model_name, if (mcfg) |c| c.offset else null, if (mcfg) |c| c.rotation else null) catch {
+        const mod_output = buildKicadMod(
+            allocator,
+            project_dir,
+            inst.footprint,
+            fp_source,
+            model_name,
+            if (mcfg) |c| c.offset else null,
+            if (mcfg) |c| c.rotation else null,
+        ) catch {
             if (mcfg == null) if (model_name) |m| allocator.free(m);
             continue;
         };

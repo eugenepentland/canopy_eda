@@ -759,7 +759,16 @@ const Classified = struct { conn: AdjEntry, terminal: []const u8 };
 
 // ── Hub data collection ──────────────────────────────────────────────
 
-fn collectHubData(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, part: ?env_mod.Part, x_offset: f64, y_start: f64, alt_map: *PinoutAltMap, asserted_fns: *const std.StringHashMapUnmanaged([]const u8)) !JsonHub {
+fn collectHubData(
+    ctx: *RenderCtx,
+    allocator: Allocator,
+    hub: FlatInst,
+    part: ?env_mod.Part,
+    x_offset: f64,
+    y_start: f64,
+    alt_map: *PinoutAltMap,
+    asserted_fns: *const std.StringHashMapUnmanaged([]const u8),
+) !JsonHub {
     try loadPinoutAlts(allocator, alt_map, ctx.project_dir, hub.symbol);
     // Get pin groups (reuse hub.zig logic)
     const adj_entries = if (ctx.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
@@ -911,7 +920,16 @@ fn pinEnrichment(
 
 // ── Connection collection ────────────────────────────────────────────
 
-fn collectHubConnections(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocator, hub: FlatInst, part: ?env_mod.Part, x_offset: f64, y_start: f64, json_hub: *JsonHub) !void {
+fn collectHubConnections(
+    ctx: *RenderCtx,
+    scene: *SceneGraph,
+    allocator: Allocator,
+    hub: FlatInst,
+    part: ?env_mod.Part,
+    x_offset: f64,
+    y_start: f64,
+    json_hub: *JsonHub,
+) !void {
     _ = json_hub;
     const adj_entries = if (ctx.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
 
@@ -992,7 +1010,16 @@ fn collectHubConnections(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocat
     }
 }
 
-fn collectGroupConnections(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocator, hub_ref: []const u8, group: PinGroup, stub_x: f64, py: f64, side: Side) !void {
+fn collectGroupConnections(
+    ctx: *RenderCtx,
+    scene: *SceneGraph,
+    allocator: Allocator,
+    hub_ref: []const u8,
+    group: PinGroup,
+    stub_x: f64,
+    py: f64,
+    side: Side,
+) !void {
     if (group.conns.len == 0) return;
 
     var first_pin_id: []const u8 = "";
@@ -1107,10 +1134,35 @@ fn collectGroupConnections(ctx: *RenderCtx, scene: *SceneGraph, allocator: Alloc
         const conn_stub_y = if (multi) cy else py;
 
         if (entry.merge_count > 1) {
-            const end_x = try collectMergedPassive(ctx, scene, allocator, entry.classified.conn.endpoint, hub_ref, entry.classified.conn.pin, conn_stub_x, conn_stub_y, cy, side, internal_net, entry.merge_count);
+            const end_x = try collectMergedPassive(
+                ctx,
+                scene,
+                allocator,
+                entry.classified.conn.endpoint,
+                hub_ref,
+                entry.classified.conn.pin,
+                conn_stub_x,
+                conn_stub_y,
+                cy,
+                side,
+                internal_net,
+                entry.merge_count,
+            );
             try results.append(allocator, .{ .end_x = end_x, .cy = cy, .terminal = entry.classified.terminal });
         } else {
-            const end_x = try collectConnBody(ctx, scene, allocator, entry.classified.conn.endpoint, hub_ref, entry.classified.conn.pin, conn_stub_x, conn_stub_y, cy, side, internal_net);
+            const end_x = try collectConnBody(
+                ctx,
+                scene,
+                allocator,
+                entry.classified.conn.endpoint,
+                hub_ref,
+                entry.classified.conn.pin,
+                conn_stub_x,
+                conn_stub_y,
+                cy,
+                side,
+                internal_net,
+            );
             try results.append(allocator, .{ .end_x = end_x, .cy = cy, .terminal = entry.classified.terminal });
         }
     }
@@ -1218,7 +1270,20 @@ fn mergeIdenticalSpokes(ctx: *RenderCtx, allocator: Allocator, classified: []con
 }
 
 /// Render a merged passive: one symbol with "Nx value" label.
-fn collectMergedPassive(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocator, endpoint: Endpoint, hub_ref: []const u8, from_pin: []const u8, stub_x: f64, stub_y: f64, cy: f64, side: Side, net_name: []const u8, count: u32) !f64 {
+fn collectMergedPassive(
+    ctx: *RenderCtx,
+    scene: *SceneGraph,
+    allocator: Allocator,
+    endpoint: Endpoint,
+    hub_ref: []const u8,
+    from_pin: []const u8,
+    stub_x: f64,
+    stub_y: f64,
+    cy: f64,
+    side: Side,
+    net_name: []const u8,
+    count: u32,
+) !f64 {
     switch (endpoint) {
         .net => {
             const end_x: f64 = switch (side) {
@@ -1259,7 +1324,19 @@ fn collectMergedPassive(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocato
     }
 }
 
-fn collectConnBody(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocator, endpoint: Endpoint, hub_ref: []const u8, from_pin: []const u8, stub_x: f64, stub_y: f64, cy: f64, side: Side, net_name: []const u8) !f64 {
+fn collectConnBody(
+    ctx: *RenderCtx,
+    scene: *SceneGraph,
+    allocator: Allocator,
+    endpoint: Endpoint,
+    hub_ref: []const u8,
+    from_pin: []const u8,
+    stub_x: f64,
+    stub_y: f64,
+    cy: f64,
+    side: Side,
+    net_name: []const u8,
+) !f64 {
     switch (endpoint) {
         .net => {
             const end_x: f64 = switch (side) {
@@ -1349,7 +1426,15 @@ fn collectPassiveChainRight(scene: *SceneGraph, allocator: Allocator, start_x: f
     return x;
 }
 
-fn collectBranchTreeLeft(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocator, junction_x: f64, center_y: f64, branches: []const ctx_mod.Branch, junction_net: []const u8) !void {
+fn collectBranchTreeLeft(
+    ctx: *RenderCtx,
+    scene: *SceneGraph,
+    allocator: Allocator,
+    junction_x: f64,
+    center_y: f64,
+    branches: []const ctx_mod.Branch,
+    junction_net: []const u8,
+) !void {
     const n = branches.len;
     const total_height = @as(f64, @floatFromInt(n -| 1)) * branch_spacing;
     const start_y = center_y - total_height / HALF_DIVISOR;
@@ -1385,7 +1470,15 @@ fn collectBranchTreeLeft(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocat
     }
 }
 
-fn collectBranchTreeRight(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocator, junction_x: f64, center_y: f64, branches: []const ctx_mod.Branch, junction_net: []const u8) !void {
+fn collectBranchTreeRight(
+    ctx: *RenderCtx,
+    scene: *SceneGraph,
+    allocator: Allocator,
+    junction_x: f64,
+    center_y: f64,
+    branches: []const ctx_mod.Branch,
+    junction_net: []const u8,
+) !void {
     const n = branches.len;
     const total_height = @as(f64, @floatFromInt(n -| 1)) * branch_spacing;
     const start_y = center_y - total_height / HALF_DIVISOR;

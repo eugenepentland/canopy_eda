@@ -1,0 +1,31 @@
+<details id="upload-section" style="margin-bottom:2rem;"><summary style="color:#58a6ff;font-size:0.95rem;cursor:pointer;">Upload New Component</summary>
+<div class="upload-box" id="zip-drop" style="margin:1rem 0;">
+<p style="font-size:0.85rem;">Drop a component .zip (auto-extracts KiCad symbol, footprint, and 3D model)</p>
+<label class="upload-btn">Choose .zip<input type="file" id="zip-file" accept=".zip"></label>
+<div id="zip-name" style="color:#4a9;font-size:0.8rem;margin-top:0.5rem;"></div>
+</div>
+<div id="zip-result"></div>
+<details style="margin-bottom:1rem;"><summary style="color:#666;font-size:0.85rem;cursor:pointer;">Or upload files individually</summary>
+<div style="display:flex;gap:1rem;margin:1rem 0;">
+<div class="upload-box" id="sym-drop" style="flex:1;">
+<p style="font-size:0.85rem;">Symbol (.kicad_sym)</p>
+<label class="upload-btn">Choose file<input type="file" id="sym-file" accept=".kicad_sym"></label>
+<div id="sym-name" style="color:#4a9;font-size:0.8rem;margin-top:0.5rem;"></div>
+</div>
+<div class="upload-box" id="fp-drop" style="flex:1;">
+<p style="font-size:0.85rem;">Footprint (.kicad_mod)</p>
+<label class="upload-btn">Choose file<input type="file" id="fp-file" accept=".kicad_mod"></label>
+<div id="fp-name" style="color:#4a9;font-size:0.8rem;margin-top:0.5rem;"></div>
+</div>
+<div class="upload-box" id="step-drop" style="flex:1;">
+<p style="font-size:0.85rem;">3D Model (.step) <span style="color:#666;">optional</span></p>
+<label class="upload-btn">Choose file<input type="file" id="step-file" accept=".step,.stp"></label>
+<div id="step-name" style="color:#4a9;font-size:0.8rem;margin-top:0.5rem;"></div>
+</div>
+</div>
+<div style="margin-bottom:1rem;">
+<button id="pkg-submit" class="upload-btn" disabled style="opacity:0.5;">Create Package</button>
+</div>
+<div id="pkg-result"></div>
+</details>
+</details>

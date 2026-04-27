@@ -321,8 +321,11 @@ pub fn renderHubAllPins(
     , .{ svg_w, svg_h, hub.ref_des });
 
     try w.print(
-        \\<g data-ref="{s}" class="component"><rect x="{d:.1}" y="{d:.1}" width="{d:.0}" height="{d:.1}" fill="#16213e" stroke="#4a9eff" stroke-width="2" rx="6"/>
-        \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="12" font-weight="bold" fill="#4a9eff">{s} {s}</text></g>
+        \\<g data-ref="{s}" class="component">
+        \\<rect x="{d:.1}" y="{d:.1}" width="{d:.0}" height="{d:.1}"
+        \\  fill="#16213e" stroke="#4a9eff" stroke-width="2" rx="6"/>
+        \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle"
+        \\  font-size="12" font-weight="bold" fill="#4a9eff">{s} {s}</text></g>
         \\
     , .{
         hub.ref_des,

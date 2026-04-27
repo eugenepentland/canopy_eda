@@ -375,14 +375,25 @@ pub fn modelViewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         \\</div>
         \\<div id="status"></div>
         \\<h2 style="margin-top:16px">3D Model</h2>
-        \\<div id="upload-area" style="border:1px dashed #444;border-radius:4px;padding:12px;text-align:center;cursor:pointer" ondragover="event.preventDefault();this.style.borderColor='#58a6ff'" ondragleave="this.style.borderColor='#444'" ondrop="event.preventDefault();this.style.borderColor='#444';handleModelDrop(event.dataTransfer.files[0])">
+        \\<div id="upload-area"
+        \\ style="border:1px dashed #444;border-radius:4px;padding:12px;
+        \\text-align:center;cursor:pointer"
+        \\ ondragover="event.preventDefault();this.style.borderColor='#58a6ff'"
+        \\ ondragleave="this.style.borderColor='#444'"
+        \\ ondrop="event.preventDefault();this.style.borderColor='#444';
+        \\handleModelDrop(event.dataTransfer.files[0])">
         \\<div style="font-size:12px;color:#888">Drop .step file or click</div>
         \\<input type="file" id="model-file" accept=".step,.stp" style="display:none">
         \\</div>
         \\<div id="upload-status" style="font-size:12px;min-height:18px"></div>
         \\</div>
         \\<script src="https://cdn.jsdelivr.net/npm/occt-import-js@0.0.23/dist/occt-import-js.js"></script>
-        \\<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
+        \\<script type="importmap">
+        \\{"imports":{
+        \\ "three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        \\ "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+        \\}}
+        \\</script>
         \\<script type="module">
         \\import*as THREE from'three';
         \\import{OrbitControls}from'three/addons/controls/OrbitControls.js';
@@ -402,7 +413,10 @@ pub fn modelViewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         if (child.isForm("pad")) {
             const cl = child.asList() orelse continue;
             if (cl.len < 4) continue;
-            const pid: ?[]const u8 = cl[1].asAtom() orelse if (cl[1].asNumber()) |n| (std.fmt.allocPrint(ctx.allocator, "{d}", .{@as(i64, @intFromFloat(n))}) catch null) else null;
+            const pid: ?[]const u8 = cl[1].asAtom() orelse if (cl[1].asNumber()) |n|
+                (std.fmt.allocPrint(ctx.allocator, "{d}", .{@as(i64, @intFromFloat(n))}) catch null)
+            else
+                null;
             if (pid == null) continue;
             var px: f64 = 0;
             var py: f64 = 0;

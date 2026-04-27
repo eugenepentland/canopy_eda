@@ -101,7 +101,12 @@ pub const Handler = struct {
 
     pub const WebsocketHandler = mcp.Client;
 
-    pub fn dispatch(self: *Handler, action: *const fn (*Handler, *httpz.Request, *httpz.Response) anyerror!void, req: *httpz.Request, res: *httpz.Response) !void {
+    pub fn dispatch(
+        self: *Handler,
+        action: *const fn (*Handler, *httpz.Request, *httpz.Response) anyerror!void,
+        req: *httpz.Request,
+        res: *httpz.Response,
+    ) !void {
         // Auth middleware: check before dispatching to route handler
         if (!try auth.authMiddleware(self, req, res)) return;
         return action(self, req, res);

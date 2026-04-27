@@ -72,7 +72,18 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
     @import("../bom_resolve.zig").ResolveError ||
     @import("../sexpr/parser.zig").ParseError ||
-    error{ FileTooBig, StreamTooLong, EndOfStream, Canceled, ConnectionTimedOut, NotOpenForReading, SocketNotConnected, ReadOnlyFileSystem, LinkQuotaExceeded, InvalidEscapeSequence };
+    error{
+        FileTooBig,
+        StreamTooLong,
+        EndOfStream,
+        Canceled,
+        ConnectionTimedOut,
+        NotOpenForReading,
+        SocketNotConnected,
+        ReadOnlyFileSystem,
+        LinkQuotaExceeded,
+        InvalidEscapeSequence,
+    };
 
 /// POST /api/push/:name — re-evaluate the design's `.sexp` source, replace the
 /// live scene-graph JSON, and bump the version counter so the browser viewer
@@ -1423,7 +1434,9 @@ fn applyPlacements(allocator: std.mem.Allocator, pcb_content: []const u8, body: 
         const FOOTPRINT_PREFIX = "(footprint \"";
         var fp_start = search_pos - 1;
         while (fp_start > 0) : (fp_start -= 1) {
-            if (fp_start + FOOTPRINT_PREFIX.len <= pcb_content.len and std.mem.eql(u8, pcb_content[fp_start .. fp_start + FOOTPRINT_PREFIX.len], FOOTPRINT_PREFIX)) break;
+            if (fp_start + FOOTPRINT_PREFIX.len <= pcb_content.len and
+                std.mem.eql(u8, pcb_content[fp_start .. fp_start + FOOTPRINT_PREFIX.len], FOOTPRINT_PREFIX))
+                break;
         }
         // Find first (at ...) after (footprint line — skip the footprint name line
         const fp_region = pcb_content[fp_start..uuid_val_start];

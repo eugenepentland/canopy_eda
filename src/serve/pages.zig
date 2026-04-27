@@ -33,7 +33,9 @@ pub fn indexPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handler
     try w.writeAll(assets_css.NAVBAR_CSS);
     try w.writeAll(
         \\.designs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;padding:16px}
-        \\.design-card{background:#161b22;border:1px solid #21262d;border-radius:10px;padding:18px 20px;display:flex;flex-direction:column;gap:10px;transition:border-color 0.15s}
+        \\.design-card{background:#161b22;border:1px solid #21262d;
+        \\border-radius:10px;padding:18px 20px;display:flex;flex-direction:column;
+        \\gap:10px;transition:border-color 0.15s}
         \\.design-card:hover{border-color:#58a6ff}
         \\.design-card-header{display:flex;flex-direction:column;gap:2px}
         \\.design-card-title{color:#f0f6fc;font-size:1.05rem;font-weight:600;line-height:1.3}
@@ -45,7 +47,9 @@ pub fn indexPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handler
         \\.section-chip{background:#1a1a2e;color:#8b949e;font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid #21262d}
         \\.section-chip-more{color:#6e7681;font-size:11px;padding:2px 4px}
         \\.design-card-links{display:flex;gap:8px;margin-top:auto;padding-top:4px}
-        \\.design-card-link{color:#8b949e;font-size:13px;padding:6px 14px;border:1px solid #30363d;border-radius:6px;text-decoration:none;text-align:center;flex:1}
+        \\.design-card-link{color:#8b949e;font-size:13px;padding:6px 14px;
+        \\border:1px solid #30363d;border-radius:6px;text-decoration:none;
+        \\text-align:center;flex:1}
         \\.design-card-link:hover{border-color:#58a6ff;color:#c9d1d9}
         \\.empty-hint{color:#6e7681;font-size:13px;padding:24px;text-align:center}
         \\@media(max-width:600px){.designs-grid{grid-template-columns:1fr;padding:12px;gap:10px}.design-card{padding:16px}}
@@ -102,7 +106,14 @@ pub fn indexPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handler
         }
 
         // Action links
-        try w.print("<div class=\"design-card-links\"><a class=\"design-card-link\" href=\"/schematics/{s}\">Schematic</a><a class=\"design-card-link\" href=\"/pcb/{s}\">PCB</a><a class=\"design-card-link\" href=\"/review/{s}\">Review</a></div></div>", .{ s.name, s.name, s.name });
+        try w.print(
+            "<div class=\"design-card-links\">" ++
+                "<a class=\"design-card-link\" href=\"/schematics/{s}\">Schematic</a>" ++
+                "<a class=\"design-card-link\" href=\"/pcb/{s}\">PCB</a>" ++
+                "<a class=\"design-card-link\" href=\"/review/{s}\">Review</a>" ++
+                "</div></div>",
+            .{ s.name, s.name, s.name },
+        );
     }
     if (summaries.len == 0) {
         try w.writeAll("<div class=\"empty-hint\">No designs found in src/.</div>");

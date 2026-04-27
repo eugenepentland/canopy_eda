@@ -71,6 +71,31 @@ const HTML_AUTH_CARD_OPEN = "<div class=\"auth-card\">";
 const HTML_STATUS_DIV = "<div class=\"status\" id=\"status\"></div>";
 const HTML_BRAND_SPAN = "<span class=\"brand\">Canopy EDA</span>";
 const HTML_EMAIL_INPUT = "<input type=\"email\" id=\"email\" placeholder=\"Email address\" required ";
+const HTML_INPUT_STYLE_DARK =
+    "style=\"width:100%;box-sizing:border-box;padding:10px 12px;" ++
+    "background:#0d1117;border:1px solid #30363d;border-radius:6px;" ++
+    "color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none\" />";
+const HTML_INPUT_STYLE_MID =
+    "style=\"width:100%;box-sizing:border-box;padding:10px 12px;" ++
+    "background:#161b22;border:1px solid #30363d;border-radius:6px;" ++
+    "color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none\" />";
+
+const MANAGE_PAGE_EXTRA_CSS =
+    "\n.row { display:flex; justify-content:space-between; align-items:center;" ++
+    " padding:10px 12px; border:1px solid #21262d; border-radius:6px; margin-bottom:8px; }" ++
+    "\n.row .meta { color:#8b949e; font-size:0.85rem; }" ++
+    "\n.row button { background:#21262d; color:#f85149; border:1px solid #30363d;" ++
+    " border-radius:4px; padding:4px 10px; cursor:pointer; font-size:0.8rem; }" ++
+    "\n.row button:hover { background:#2d333b; }" ++
+    "\n.section-title { color:#8b949e; font-size:0.8rem; text-transform:uppercase;" ++
+    " letter-spacing:0.05em; margin:1.5rem 0 0.5rem; }" ++
+    "\n.btn-sec { background:#21262d; border:1px solid #30363d; color:#c9d1d9; }" ++
+    "\n.btn-sec:hover { background:#2d333b; }" ++
+    "\n.invite-box { background:#0d1117; border:1px solid #30363d; border-radius:6px;" ++
+    " padding:10px; margin-top:8px; font-size:0.8rem; word-break:break-all; }" ++
+    "\n.user-bar { display:flex; justify-content:space-between; align-items:center;" ++
+    " margin-bottom:1rem; padding-bottom:1rem; border-bottom:1px solid #21262d; }" ++
+    "\n.user-bar .email { color:#8b949e; font-size:0.85rem; }";
 const HTML_SCRIPT_OPEN = "<script>";
 const HTML_SCRIPT_BODY_CLOSE = "</script></body></html>";
 
@@ -248,7 +273,12 @@ fn loadCredentials(allocator: std.mem.Allocator, project_dir: []const u8) ![]Sto
 
     const data = file.readToEndAlloc(allocator, 1024 * 1024) catch return &[_]StoredCredential{};
 
-    const parsed = std.json.parseFromSlice([]StoredCredential, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch return &[_]StoredCredential{};
+    const parsed = std.json.parseFromSlice(
+        []StoredCredential,
+        allocator,
+        data,
+        .{ .allocate = .alloc_always, .ignore_unknown_fields = true },
+    ) catch return &[_]StoredCredential{};
     return parsed.value;
 }
 
@@ -267,7 +297,11 @@ fn saveCredentials(allocator: std.mem.Allocator, project_dir: []const u8, creds:
     try bw.writeAll("[");
     for (creds, 0..) |c, i| {
         if (i > 0) try bw.writeAll(",");
-        try bw.print("{{\"id\":\"{s}\",\"public_key_x\":\"{s}\",\"public_key_y\":\"{s}\",\"email\":\"{s}\",\"created_at\":{d}}}", .{ c.id, c.public_key_x, c.public_key_y, c.email, c.created_at });
+        try bw.print(
+            "{{\"id\":\"{s}\",\"public_key_x\":\"{s}\",\"public_key_y\":\"{s}\"," ++
+                "\"email\":\"{s}\",\"created_at\":{d}}}",
+            .{ c.id, c.public_key_x, c.public_key_y, c.email, c.created_at },
+        );
     }
     try bw.writeAll("]");
 
@@ -842,8 +876,14 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(req.arena);
     try w.print(
-        \\{{"challenge":"{s}","rp":{{"name":"Canopy EDA","id":"{s}"}},"user":{{"id":"{s}","name":"{s}","displayName":"{s}"}},"pubKeyCredParams":[{{"type":"public-key","alg":-7}}],"authenticatorSelection":{{"residentKey":"preferred","userVerification":"preferred"}},"excludeCredentials":{s},"timeout":60000}}
-    , .{ challenge_b64, rp_id, user_id_b64, email, email, exclude_buf.items });
+        "{{\"challenge\":\"{s}\",\"rp\":{{\"name\":\"Canopy EDA\",\"id\":\"{s}\"}}," ++
+            "\"user\":{{\"id\":\"{s}\",\"name\":\"{s}\",\"displayName\":\"{s}\"}}," ++
+            "\"pubKeyCredParams\":[{{\"type\":\"public-key\",\"alg\":-7}}]," ++
+            "\"authenticatorSelection\":{{\"residentKey\":\"preferred\"," ++
+            "\"userVerification\":\"preferred\"}}," ++
+            "\"excludeCredentials\":{s},\"timeout\":60000}}",
+        .{ challenge_b64, rp_id, user_id_b64, email, email, exclude_buf.items },
+    );
 
     res.content_type = .JSON;
     res.body = buf.items;
@@ -1516,7 +1556,7 @@ pub fn loginPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerEr
         "<h1>Sign In</h1>" ++
         "<p>Enter your email and use your passkey to authenticate.</p>" ++
         HTML_EMAIL_INPUT ++
-        "style=\"width:100%;box-sizing:border-box;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none\" />" ++
+        HTML_INPUT_STYLE_DARK ++
         "<button class=\"auth-btn\" id=\"login-btn\">Sign in with Passkey</button>" ++
         HTML_STATUS_DIV ++
         "</div>" ++
@@ -1604,7 +1644,7 @@ pub fn setupPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handler
         "<h1>Setup Passkey</h1>" ++
         "<p>Register a passkey to secure remote access to your EDA server.</p>" ++
         HTML_EMAIL_INPUT ++
-        "style=\"width:100%;box-sizing:border-box;padding:10px 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none\" />" ++
+        HTML_INPUT_STYLE_MID ++
         "<button class=\"auth-btn\" id=\"register-btn\">Register Passkey</button>" ++
         HTML_STATUS_DIV ++
         "<a class=\"link\" href=\"/auth/login\">Already registered? Sign in</a>" ++
@@ -1887,7 +1927,7 @@ pub fn invitePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
             "<h1>Accept Invite</h1>" ++
             "<p>Enter your email and register a passkey for this device.</p>" ++
             HTML_EMAIL_INPUT ++
-            "style=\"width:100%;box-sizing:border-box;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none\" />" ++
+            HTML_INPUT_STYLE_DARK ++
             "<button class=\"auth-btn\" id=\"register-btn\">Register Passkey</button>" ++
             HTML_STATUS_DIV ++
             "</div>" ++
@@ -1983,27 +2023,22 @@ pub fn managePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
         "<title>Manage - Canopy EDA</title><style>" ++ PAGE_STYLE ++
         "\n.auth-card { max-width: 520px; text-align: left; }" ++
         "\n.auth-card h1 { text-align: center; }" ++
-        "\n.row { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border:1px solid #21262d; border-radius:6px; margin-bottom:8px; }" ++
-        "\n.row .meta { color:#8b949e; font-size:0.85rem; }" ++
-        "\n.row button { background:#21262d; color:#f85149; border:1px solid #30363d; border-radius:4px; padding:4px 10px; cursor:pointer; font-size:0.8rem; }" ++
-        "\n.row button:hover { background:#2d333b; }" ++
-        "\n.section-title { color:#8b949e; font-size:0.8rem; text-transform:uppercase; letter-spacing:0.05em; margin:1.5rem 0 0.5rem; }" ++
-        "\n.btn-sec { background:#21262d; border:1px solid #30363d; color:#c9d1d9; }" ++
-        "\n.btn-sec:hover { background:#2d333b; }" ++
-        "\n.invite-box { background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:10px; margin-top:8px; font-size:0.8rem; word-break:break-all; }" ++
-        "\n.user-bar { display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; padding-bottom:1rem; border-bottom:1px solid #21262d; }" ++
-        "\n.user-bar .email { color:#8b949e; font-size:0.85rem; }" ++
+        MANAGE_PAGE_EXTRA_CSS ++
         HTML_STYLE_HEAD_BODY_OPEN ++
         HTML_AUTH_CARD_OPEN ++
         HTML_BRAND_SPAN ++
         "<h1>Manage Passkeys</h1>" ++
         "<div class=\"user-bar\"><span class=\"email\" id=\"user-email\"></span>" ++
-        "<button class=\"btn-sec\" id=\"logout-btn\" style=\"padding:4px 10px;font-size:0.8rem;border-radius:4px;cursor:pointer\">Sign out</button></div>" ++
+        "<button class=\"btn-sec\" id=\"logout-btn\" " ++
+        "style=\"padding:4px 10px;font-size:0.8rem;border-radius:4px;cursor:pointer\">" ++
+        "Sign out</button></div>" ++
         "<div class=\"section-title\">Your Passkeys</div>" ++
         "<div id=\"passkey-list\"></div>" ++
         "<button class=\"auth-btn\" id=\"add-btn\" style=\"margin-top:8px\">Add passkey on this device</button>" ++
         "<div class=\"section-title\">Invite a new user</div>" ++
-        "<p style=\"color:#8b949e;font-size:0.85rem;margin-bottom:8px\">Generate a one-time link (valid 7 days). The same link works on your other devices to add passkeys to your own account.</p>" ++
+        "<p style=\"color:#8b949e;font-size:0.85rem;margin-bottom:8px\">" ++
+        "Generate a one-time link (valid 7 days). " ++
+        "The same link works on your other devices to add passkeys to your own account.</p>" ++
         "<button class=\"btn-sec auth-btn\" id=\"invite-btn\">Create invite link</button>" ++
         "<div id=\"invite-out\"></div>" ++
         HTML_STATUS_DIV ++

@@ -548,7 +548,9 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 
     const body = try std.fmt.allocPrint(
         ctx.allocator,
-        "{{\"ok\":true,\"skipped\":false,\"pcb\":\"{s}\",\"backup\":\"{s}\",\"mismatches\":{d},\"missing\":{d},\"seeded\":{d},\"wrote_footprints\":{d},\"wrote_models\":{d}}}",
+        "{{\"ok\":true,\"skipped\":false,\"pcb\":\"{s}\",\"backup\":\"{s}\"," ++
+            "\"mismatches\":{d},\"missing\":{d},\"seeded\":{d}," ++
+            "\"wrote_footprints\":{d},\"wrote_models\":{d}}}",
         .{ pcb_path, esc_backup.items, summary.mismatches, summary.missing, summary.seeded, fps_to_write.items.len, models_to_copy.items.len },
     );
     res.content_type = .JSON;
@@ -734,7 +736,10 @@ fn collectDesiredFootprintsAndModels(
 
         const kicad_name = netlist_mod.extractFootprintName(allocator, fp_source) catch try allocator.dupe(u8, inst.footprint);
         const mcfg = model_cfg.get(inst.footprint);
-        const model_name = if (mcfg) |c| (c.model orelse fp_mod.findModelFile(allocator, project_dir, inst.footprint, inst.component)) else fp_mod.findModelFile(allocator, project_dir, inst.footprint, inst.component);
+        const model_name = if (mcfg) |c|
+            (c.model orelse fp_mod.findModelFile(allocator, project_dir, inst.footprint, inst.component))
+        else
+            fp_mod.findModelFile(allocator, project_dir, inst.footprint, inst.component);
 
         const mod_bytes = model_mod.buildKicadMod(
             allocator,
@@ -846,7 +851,11 @@ fn saveCache(allocator: std.mem.Allocator, path: []const u8, cache: *const SyncC
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
-    w.print("{{\"netlist_sha\":\"{s}\",\"sections_sha\":\"{s}\",\"modules_sha\":\"{s}\",\"footprints\":[", .{ cache.netlist_sha, cache.sections_sha, cache.modules_sha }) catch return;
+    w.print(
+        "{{\"netlist_sha\":\"{s}\",\"sections_sha\":\"{s}\"," ++
+            "\"modules_sha\":\"{s}\",\"footprints\":[",
+        .{ cache.netlist_sha, cache.sections_sha, cache.modules_sha },
+    ) catch return;
     var first = true;
     var it = cache.footprints.iterator();
     while (it.next()) |e| {

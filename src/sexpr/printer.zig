@@ -168,7 +168,12 @@ test "print long nested lists multiline" {
     const alloc = std.testing.allocator;
     const parser = @import("parser.zig");
     // This is too long for one line (> 72 chars with nested lists)
-    const nodes = try parser.parse(alloc, "(footprint \"QFN9-3.3x4.5\" (pad 1 smd rect (pos -1.25 1.75) (size 0.7 0.3)) (pad 2 smd rect (pos -1.25 0.75) (size 0.7 0.3)))");
+    const nodes = try parser.parse(
+        alloc,
+        "(footprint \"QFN9-3.3x4.5\" " ++
+            "(pad 1 smd rect (pos -1.25 1.75) (size 0.7 0.3)) " ++
+            "(pad 2 smd rect (pos -1.25 0.75) (size 0.7 0.3)))",
+    );
     defer parser.freeNodes(alloc, nodes);
 
     const output = try print(alloc, nodes);

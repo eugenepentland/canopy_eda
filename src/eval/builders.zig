@@ -479,7 +479,11 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
 
     // Warn when long form is used with identical name and net
     if (dir_idx == 2 and std.mem.eql(u8, name, net)) {
-        const msg = std.fmt.allocPrint(self.allocator, "Port \"{s}\" has identical name and net — use short form: (port \"{s}\" {s} ...)", .{ name, name, dir }) catch "";
+        const msg = std.fmt.allocPrint(
+            self.allocator,
+            "Port \"{s}\" has identical name and net — use short form: (port \"{s}\" {s} ...)",
+            .{ name, name, dir },
+        ) catch "";
         if (msg.len > 0) try self.assertions.append(self.allocator, .{ .passed = false, .message = msg, .is_warning = true });
     }
 

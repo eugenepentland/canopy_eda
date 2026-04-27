@@ -64,7 +64,10 @@ pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         if (child.isForm("pad")) {
             const cl = child.asList() orelse continue;
             if (cl.len < 4) continue;
-            const pid: ?[]const u8 = cl[1].asAtom() orelse if (cl[1].asNumber()) |n| (std.fmt.allocPrint(ctx.allocator, "{d}", .{@as(i64, @intFromFloat(n))}) catch null) else null;
+            const pid: ?[]const u8 = cl[1].asAtom() orelse if (cl[1].asNumber()) |n|
+                (std.fmt.allocPrint(ctx.allocator, "{d}", .{@as(i64, @intFromFloat(n))}) catch null)
+            else
+                null;
             if (pid == null) continue;
             const pid_val = pid.?;
             var px: f64 = 0;
@@ -166,10 +169,19 @@ pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(ctx.allocator);
 
-    try w.print("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{d:.2} {d:.2} {d:.2} {d:.2}\" style=\"background:#161b22;border-radius:4px;\">", .{ min_x, min_y, vw, vh });
+    try w.print(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" " ++
+            "viewBox=\"{d:.2} {d:.2} {d:.2} {d:.2}\" " ++
+            "style=\"background:#161b22;border-radius:4px;\">",
+        .{ min_x, min_y, vw, vh },
+    );
 
     for (silk_lines.items) |l| {
-        try w.print("<line x1=\"{d:.3}\" y1=\"{d:.3}\" x2=\"{d:.3}\" y2=\"{d:.3}\" stroke=\"#555\" stroke-width=\"0.08\" stroke-linecap=\"round\"/>", .{ l.x1, l.y1, l.x2, l.y2 });
+        try w.print(
+            "<line x1=\"{d:.3}\" y1=\"{d:.3}\" x2=\"{d:.3}\" y2=\"{d:.3}\" " ++
+                "stroke=\"#555\" stroke-width=\"0.08\" stroke-linecap=\"round\"/>",
+            .{ l.x1, l.y1, l.x2, l.y2 },
+        );
     }
     for (silk_circles.items) |c| {
         try w.print("<circle cx=\"{d:.3}\" cy=\"{d:.3}\" r=\"{d:.3}\" fill=\"none\" stroke=\"#555\" stroke-width=\"0.08\"/>", .{ c.cx, c.cy, c.r });
@@ -182,9 +194,17 @@ pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         } else if (std.mem.eql(u8, p.shape, "oval")) {
             const rx = p.w / 2;
             const ry = p.h / 2;
-            try w.print("<rect x=\"{d:.3}\" y=\"{d:.3}\" width=\"{d:.3}\" height=\"{d:.3}\" rx=\"{d:.3}\" fill=\"#c4a000\"/>", .{ p.x - rx, p.y - ry, p.w, p.h, @min(rx, ry) });
+            try w.print(
+                "<rect x=\"{d:.3}\" y=\"{d:.3}\" width=\"{d:.3}\" height=\"{d:.3}\" " ++
+                    "rx=\"{d:.3}\" fill=\"#c4a000\"/>",
+                .{ p.x - rx, p.y - ry, p.w, p.h, @min(rx, ry) },
+            );
         } else {
-            try w.print("<rect x=\"{d:.3}\" y=\"{d:.3}\" width=\"{d:.3}\" height=\"{d:.3}\" rx=\"0.03\" fill=\"#c4a000\"/>", .{ p.x - p.w / 2, p.y - p.h / 2, p.w, p.h });
+            try w.print(
+                "<rect x=\"{d:.3}\" y=\"{d:.3}\" width=\"{d:.3}\" height=\"{d:.3}\" " ++
+                    "rx=\"0.03\" fill=\"#c4a000\"/>",
+                .{ p.x - p.w / 2, p.y - p.h / 2, p.w, p.h },
+            );
         }
     }
 
@@ -232,7 +252,12 @@ pub fn listFootprints(w: anytype, ctx: *Handler) HandlerError!void {
             if (has_model) {
                 try w.print("<td><a href=\"/model-viewer/{s}\" style=\"color:#58a6ff;text-decoration:none\">3D</a></td></tr>", .{fname});
             } else {
-                try w.print("<td><a href=\"/model-viewer/{s}\" style=\"color:#666;text-decoration:none\" title=\"Upload 3D model\">+ 3D</a></td></tr>", .{fname});
+                try w.print(
+                    "<td><a href=\"/model-viewer/{s}\" " ++
+                        "style=\"color:#666;text-decoration:none\" " ++
+                        "title=\"Upload 3D model\">+ 3D</a></td></tr>",
+                    .{fname},
+                );
             }
         }
     }

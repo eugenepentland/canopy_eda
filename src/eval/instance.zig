@@ -222,7 +222,14 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
 /// either as a physical pin ID or as a function name through the pinout
 /// reverse map. Each resolved (pin, net) pair gets appended to `pin_nets`
 /// with the optional asserted-function and current-annotation metadata.
-pub fn parsePinForm(self: *Evaluator, form: Node, ref_des: []const u8, env: *Env, pin_nets: *std.ArrayListUnmanaged(PinNetDecl), pinout: ?*const std.StringHashMapUnmanaged([]const u8)) EvalError!void {
+pub fn parsePinForm(
+    self: *Evaluator,
+    form: Node,
+    ref_des: []const u8,
+    env: *Env,
+    pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
+    pinout: ?*const std.StringHashMapUnmanaged([]const u8),
+) EvalError!void {
     const pin_children = form.asList() orelse return;
     if (pin_children.len < 3) return;
 

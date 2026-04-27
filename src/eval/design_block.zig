@@ -196,7 +196,16 @@ fn evalDecoupleForm(
             if (mn_node.isForm("id")) continue;
             const mn_val = try self.evalNode(mn_node, env);
             const mn_net = mn_val.asString() orelse continue;
-            try builders.emitDecoupleItems(self, form_children[1..DECOUPLE_MULTI_NET_NET_OFFSET], mn_net, env, instances, all_pin_nets, tl_dec_id, &tl_dec_counter);
+            try builders.emitDecoupleItems(
+                self,
+                form_children[1..DECOUPLE_MULTI_NET_NET_OFFSET],
+                mn_net,
+                env,
+                instances,
+                all_pin_nets,
+                tl_dec_id,
+                &tl_dec_counter,
+            );
         }
     } else {
         const net_name = first_val.asString() orelse return;

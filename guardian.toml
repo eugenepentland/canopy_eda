@@ -66,3 +66,35 @@ max_returns = 12
 # New consumers should keep the framework recommendation 100-120.
 [line_length]
 max_len = 160
+
+# `Instance` (16 fields), `RenderCtx` (15), `Block` (14), `ViolationKind`
+# (14 enum cases), `Summary` (13), `ReviewDoc` (12), `Port` (12), `Rail`
+# (11), `Section` (11), `Board` (11) are domain-natural aggregates: an
+# electrical instance has 16 attributes; an ERC report has 14 distinct
+# kinds. Splitting them into nested sub-structs adds `inst.foo.bar`
+# access noise across hundreds of call sites without making the model
+# any clearer. New consumers should keep the framework default 7.
+[type_size]
+max_fields = 16
+
+# Recursive AST walkers (`evalSection`, `evalSubSection`, `evalPinsForm`,
+# `processPinForm`, `emitDecoupleItems`) carry collector pointers; the
+# Gerber layer generators (`generateCopperLayer` at 10 params, `writeFootprint`
+# at 12, `collectMergedPassive` at 12) take pre-computed scratch buffers
+# alongside several formatting flags. Bundling into context structs
+# would touch ~50 call sites for marginal clarity. The 12 cap is the
+# current worst case; DO NOT INCREASE — ratchet downward via
+# context-struct refactors instead. New consumers should keep the
+# framework default 4.
+[function_size]
+max_params = 12
+
+# Template-rendering modules (`render_html.zig` 22, `review_md.zig` 20,
+# `review_html.zig` 17, `branch.zig` 11, `review_json.zig` 10,
+# `mcp_tools.zig` 8) take `writer: anytype` on every helper — that's
+# the idiomatic Zig pattern for a generic format-target. The 22 cap
+# is the current worst case (render_html.zig); DO NOT INCREASE.
+# Refactoring to a typed Writer interface would touch every helper
+# in those modules. New consumers should keep the framework default 2.
+[anytype_budget]
+max_per_file = 22

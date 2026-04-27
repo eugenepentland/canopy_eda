@@ -1,0 +1,26 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  max-width: 960px; margin: 0 auto; padding: 2rem; background: #0d1117; color: #c9d1d9; }
+a { color: #58a6ff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+h1 { margin-bottom: 1rem; color: #f0f6fc; }
+h2 { margin: 1.5rem 0 0.5rem; color: #f0f6fc; border-bottom: 1px solid #21262d; padding-bottom: 0.3rem; }
+.design-list { list-style: none; }
+.design-list li { padding: 0.75rem 1rem; border: 1px solid #21262d; border-radius: 6px;
+  margin-bottom: 0.5rem; background: #161b22; }
+.design-list li:hover { border-color: #58a6ff; }
+.design-list a { font-size: 1.1rem; display: block; }
+table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; }
+th, td { text-align: left; padding: 0.4rem 0.75rem; border-bottom: 1px solid #21262d; }
+th { background: #161b22; color: #8b949e; font-weight: 600; font-size: 0.85rem; text-transform: uppercase; }
+td { font-family: "SF Mono", "Fira Code", monospace; font-size: 0.9rem; }
+.assertions { margin: 1rem 0; }
+.pass { color: #3fb950; font-family: monospace; }
+.fail { color: #f85149; font-family: monospace; font-weight: bold; }
+.warn { color: #d29922; font-family: monospace; }
+.schematic { margin: 1rem 0; border: 1px solid #21262d; border-radius: 8px; overflow: hidden; }
+.schematic svg { display: block; }
+details { margin: 0.5rem 0; }
+summary { cursor: pointer; color: #58a6ff; }
+pre { background: #161b22; padding: 1rem; border-radius: 6px; overflow-x: auto;
+  font-size: 0.85rem; line-height: 1.5; margin-top: 0.5rem; }
