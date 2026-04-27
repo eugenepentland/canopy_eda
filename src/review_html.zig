@@ -150,6 +150,18 @@ pub fn writeSummaryTable(w: anytype, s: review.Summary) RenderError!void {
             missing_n,
         },
     );
+    const missing_mpn_n = s.bom_missing_mpn.len;
+    const mpn_class: []const u8 = if (s.bom_total == 0) "" else if (missing_mpn_n == 0) "pass" else "warn";
+    try w.print(
+        "<tr><th>BOM parts</th><td>{d}</td><th>With MPN</th><td class=\"{s}\">{d}</td><th>Missing MPN</th><td class=\"{s}\">{d}</td></tr>",
+        .{
+            s.bom_total,
+            mpn_class,
+            s.bom_with_mpn,
+            if (missing_mpn_n > 0) "warn" else "",
+            missing_mpn_n,
+        },
+    );
     try w.writeAll("</table>");
     if (missing_n > 0) {
         try w.writeAll("<p class=\"hint\">Add <code>(requirement \"...\")</code> forms in <code>lib/components/&lt;name&gt;.sexp</code> for:</p>");

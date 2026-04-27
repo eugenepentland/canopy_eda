@@ -378,6 +378,7 @@ src/review.zig::BomEntry struct_
 src/review.zig::BomGroup struct_
 src/review.zig::ChecklistItem struct_
 src/review.zig::ComponentRequirementEntry struct_
+src/review.zig::MissingMpn struct_
 src/review.zig::MissingRequirement struct_
 src/review.zig::PortSummary struct_
 src/review.zig::ReviewDoc struct_

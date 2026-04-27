@@ -43,6 +43,24 @@ pub const Summary = struct {
     /// Path-qualified ref-deses of the critical components missing any
     /// requirements, sorted naturally so the user can scan and act on them.
     critical_missing_requirements: []const MissingRequirement = &.{},
+    /// Total instances expected to have an MPN — every component except
+    /// test points (which are board features, not parts a fab orders).
+    bom_total: usize = 0,
+    /// Subset of `bom_total` whose `(mpn …)` property is set in the
+    /// `.bom` sidecar (or carried forward from the parts DB).
+    bom_with_mpn: usize = 0,
+    /// Path-qualified instances still missing an MPN. Sorted by ref_des.
+    bom_missing_mpn: []const MissingMpn = &.{},
+};
+
+/// One instance in the design that doesn't yet have an MPN. Surfaced in the
+/// summary so the user knows which BOM rows still need filling in.
+pub const MissingMpn = struct {
+    /// Sub-block-prefixed ref_des (e.g. "buck/L2") so duplicates across
+    /// sub-blocks stay distinct.
+    ref_des: []const u8,
+    /// Library component family — useful context for picking an MPN.
+    component: []const u8,
 };
 
 /// One critical-IC instance that the library hasn't declared any
@@ -338,6 +356,12 @@ fn buildSummary(
     try collectCriticalCoverage(allocator, block, "", &critical_total, &critical_with_reqs, &missing);
     std.mem.sort(MissingRequirement, missing.items, {}, lessThanMissing);
 
+    var bom_total: usize = 0;
+    var bom_with_mpn: usize = 0;
+    var bom_missing: std.ArrayListUnmanaged(MissingMpn) = .empty;
+    try collectMpnCoverage(allocator, block, "", &bom_total, &bom_with_mpn, &bom_missing);
+    std.mem.sort(MissingMpn, bom_missing.items, {}, lessThanMissingMpn);
+
     return .{
         .status = status,
         .section_count = section_count,
@@ -352,6 +376,9 @@ fn buildSummary(
         .critical_count = critical_total,
         .critical_with_requirements = critical_with_reqs,
         .critical_missing_requirements = missing.items,
+        .bom_total = bom_total,
+        .bom_with_mpn = bom_with_mpn,
+        .bom_missing_mpn = bom_missing.items,
     };
 }
 
@@ -405,6 +432,52 @@ fn isCriticalRefDes(ref_des: []const u8) bool {
 }
 
 fn lessThanMissing(_: void, a: MissingRequirement, b: MissingRequirement) bool {
+    return lessThanNatural(a.ref_des, b.ref_des);
+}
+
+/// Walk the design (and every sub-block) bucketing every non-testpoint
+/// instance into bom_total + bom_with_mpn, with leftovers appended to
+/// `missing` so the summary table can name them. `path_prefix` carries
+/// the sub-block path so a missing entry like "buck/L2" stays distinct
+/// from a top-level "L2".
+fn collectMpnCoverage(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    path_prefix: []const u8,
+    total: *usize,
+    with_mpn: *usize,
+    missing: *std.ArrayListUnmanaged(MissingMpn),
+) std.mem.Allocator.Error!void {
+    for (block.instances) |inst| {
+        if (isTestPoint(inst)) continue;
+        total.* += 1;
+        var has_mpn = false;
+        for (inst.properties) |p| {
+            if (std.mem.eql(u8, p.key, "mpn") and p.value.len > 0) {
+                has_mpn = true;
+                break;
+            }
+        }
+        if (has_mpn) {
+            with_mpn.* += 1;
+        } else {
+            const ref = if (path_prefix.len > 0)
+                try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path_prefix, inst.ref_des })
+            else
+                try allocator.dupe(u8, inst.ref_des);
+            try missing.append(allocator, .{ .ref_des = ref, .component = inst.component });
+        }
+    }
+    for (block.sub_blocks) |sb| {
+        const child_prefix = if (path_prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path_prefix, sb.name })
+        else
+            sb.name;
+        try collectMpnCoverage(allocator, sb.block, child_prefix, total, with_mpn, missing);
+    }
+}
+
+fn lessThanMissingMpn(_: void, a: MissingMpn, b: MissingMpn) bool {
     return lessThanNatural(a.ref_des, b.ref_des);
 }
 
