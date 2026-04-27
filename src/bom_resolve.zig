@@ -40,9 +40,13 @@ fn filterOutPartProps(allocator: std.mem.Allocator, props: []const Property) ![]
 /// Decide which properties from the old BOM entry to carry forward onto the
 /// new instance. Same component → full passthrough. Different component
 /// (family swap) → drop manufacturer/mpn so the new component's freshly-
-/// evaluated values (or Pass 4's parts-DB lookup) take effect. Empty result
-/// → don't store anything; the fallback in saveBom to `info.properties` is
-/// the desired path.
+/// evaluated values (or Pass 4's parts-DB lookup) take effect. Empty
+/// `old_entry.component` is treated as "same" so legacy .bom files
+/// written before saveBom started persisting the component field don't
+/// lose their MPN/manufacturer on first reload — and so the inline
+/// edit-mpn endpoint (which writes via setBomProperty without knowing
+/// the component) keeps the user's edit until the next full save
+/// migrates the entry.
 fn carryForwardProps(
     allocator: std.mem.Allocator,
     props_map: *std.StringHashMap([]const Property),
@@ -50,7 +54,8 @@ fn carryForwardProps(
     old_entry: bom_mod.BomEntry,
 ) !void {
     if (old_entry.properties.len == 0) return;
-    const same_component = std.mem.eql(u8, old_entry.component, info.component);
+    const same_component = old_entry.component.len == 0 or
+        std.mem.eql(u8, old_entry.component, info.component);
     const props_to_keep = if (same_component)
         old_entry.properties
     else
@@ -368,7 +373,7 @@ fn saveBom(
         const uuid = uuid_map.get(info.ref_des) orelse continue;
         const props = props_map.get(info.ref_des) orelse info.properties;
 
-        try w.print("(part \"{s}\" \"{s}\"\n", .{ info.ref_des, uuid });
+        try w.print("(part \"{s}\" \"{s}\" \"{s}\"\n", .{ info.ref_des, uuid, info.component });
         try w.print("  (id \"{s}\")\n", .{info.id});
         if (info.nets.len > 0) {
             try w.writeAll("  (nets");
@@ -407,7 +412,10 @@ fn writeBomEntries(
     try w.writeAll(";; Stores identity and properties per instance\n\n");
 
     for (entries) |entry| {
-        try w.print("(part \"{s}\" \"{s}\"\n", .{ entry.ref_des, entry.uuid });
+        // entry.component may be "" for a brand-new stub from setBomProperty
+        // or for a legacy .bom that pre-dates the component field. The next
+        // full saveBom (after a design rebuild) re-populates it from FlatInfo.
+        try w.print("(part \"{s}\" \"{s}\" \"{s}\"\n", .{ entry.ref_des, entry.uuid, entry.component });
         if (entry.id.len > 0) try w.print("  (id \"{s}\")\n", .{entry.id});
         if (entry.nets.len > 0) {
             try w.writeAll("  (nets");
