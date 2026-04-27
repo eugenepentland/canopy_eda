@@ -976,7 +976,14 @@
           body[propName] = newVal;
           fetch(endpoint + '/' + DESIGN_NAME, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
             .then(function (r) { return r.json(); })
-            .then(function (d) { if (!d.ok) { ok = false; } i++; next(); })
+            .then(function (d) {
+              if (!d.ok) ok = false;
+              // Sync the live-version watermark forward so the 2s poll
+              // doesn't notice OUR own edit and force a full page reload —
+              // we already have the value the user typed, no refresh needed.
+              if (d && typeof d.version === 'number') lastVersion = d.version;
+              i++; next();
+            })
             .catch(function () { ok = false; i++; next(); });
         }
         next();
