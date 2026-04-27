@@ -309,7 +309,7 @@ pub fn writeBomHtml(wr: anytype, block: *const env_mod.DesignBlock) BomError!voi
 pub fn writeSchematicBomHtml(wr: anytype, block: *const env_mod.DesignBlock) BomError!void {
     const Instance = env_mod.Instance;
     var all: std.ArrayListUnmanaged(Instance) = .empty;
-    try bomCollectInstances(block, &all);
+    try bomCollectInstancesHierarchical(std.heap.page_allocator, block, "", &all);
     if (all.items.len == 0) return;
 
     const BomLine = struct {
@@ -606,6 +606,31 @@ fn bomCollectInstances(block: *const env_mod.DesignBlock, out: *std.ArrayListUnm
     }
     for (block.sub_blocks) |sb| {
         try bomCollectInstances(sb.block, out);
+    }
+}
+
+/// Same walk as `bomCollectInstances` but rewrites each sub-block instance's
+/// `ref_des` to its hierarchical form (e.g. `buck/L2`), which is the key the
+/// `.bom` sidecar uses. The schematic BOM card needs this so the `data-ref`
+/// it emits round-trips through `editMpnCore` → `setBomProperty` and lands
+/// on the correct `BomEntry`. Top-level instances pass through unchanged.
+fn bomCollectInstancesHierarchical(
+    allocator: std.mem.Allocator,
+    block: *const env_mod.DesignBlock,
+    prefix: []const u8,
+    out: *std.ArrayListUnmanaged(env_mod.Instance),
+) !void {
+    for (block.instances) |inst| {
+        var copy = inst;
+        if (prefix.len > 0) copy.ref_des = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, inst.ref_des });
+        try out.append(std.heap.page_allocator, copy);
+    }
+    for (block.sub_blocks) |sb| {
+        const child_prefix = if (prefix.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, sb.name })
+        else
+            sb.name;
+        try bomCollectInstancesHierarchical(allocator, sb.block, child_prefix, out);
     }
 }
 

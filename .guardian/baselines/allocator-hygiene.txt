@@ -15,6 +15,7 @@ src/serve/bom_html.zig:141: hardcoded std.heap.page_allocator outside main/test
 src/serve/bom_html.zig:148: hardcoded std.heap.page_allocator outside main/test
 src/serve/bom_html.zig:150: hardcoded std.heap.page_allocator outside main/test
 src/serve/bom_html.zig:151: hardcoded std.heap.page_allocator outside main/test
+src/serve/bom_html.zig:312: hardcoded std.heap.page_allocator outside main/test
 src/serve/bom_html.zig:339: hardcoded std.heap.page_allocator outside main/test
 src/serve/bom_html.zig:346: hardcoded std.heap.page_allocator outside main/test
 src/serve/bom_html.zig:347: hardcoded std.heap.page_allocator outside main/test
@@ -24,6 +25,7 @@ src/serve/bom_html.zig:514: hardcoded std.heap.page_allocator outside main/test
 src/serve/bom_html.zig:521: hardcoded std.heap.page_allocator outside main/test
 src/serve/bom_html.zig:522: hardcoded std.heap.page_allocator outside main/test
 src/serve/bom_html.zig:605: hardcoded std.heap.page_allocator outside main/test
-src/serve/bom_html.zig:829: hardcoded std.heap.page_allocator outside main/test
+src/serve/bom_html.zig:626: hardcoded std.heap.page_allocator outside main/test
+src/serve/bom_html.zig:854: hardcoded std.heap.page_allocator outside main/test
 src/serve/sync.zig:71: hardcoded std.heap.page_allocator outside main/test
 src/serve/sync.zig:87: hardcoded std.heap.page_allocator outside main/test
