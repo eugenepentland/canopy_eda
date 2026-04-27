@@ -59,7 +59,12 @@ const HTML_PART_1 =
     \\<title>
 ;
 
-const HTML_PART_2 = @embedFile("assets/pdf_viewer_part2.html");
+// `assets/pdf_viewer_part2.html` ends right after `<body data-pdf="`, so we
+// must concatenate the filename with no whitespace in between. Editors add a
+// trailing newline to the file, which would emit `data-pdf="\nFC-135_en.pdf"`
+// → JS reads "\nFC-135_en.pdf" → /datasheets/%0AFC-135_en.pdf → 404. Strip
+// the trailing newline at comptime so the filename lands flush against `="`.
+const HTML_PART_2 = std.mem.trimRight(u8, @embedFile("assets/pdf_viewer_part2.html"), "\r\n");
 
 const HTML_PART_3 =
     \\">
