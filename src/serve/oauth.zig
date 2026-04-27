@@ -6,6 +6,15 @@ const Handler = server_mod.Handler;
 const auth = @import("auth.zig");
 const store = @import("oauth_store.zig");
 
+// ── Constants ─────────────────────────────────────────────────────
+const HEADER_CORS_ALLOW_ORIGIN = "access-control-allow-origin";
+const KEY_CLIENT_ID = "client_id";
+const KEY_REDIRECT_URI = "redirect_uri";
+const ERR_INVALID_GRANT = "invalid_grant";
+const ERR_INVALID_REQUEST = "invalid_request";
+const ERR_MISSING_CLIENT_ID = "missing client_id";
+const ERR_MISSING_REDIRECT_URI = "missing redirect_uri";
+
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     std.fs.File.WriteError || std.fs.File.OpenError ||
@@ -32,7 +41,7 @@ pub fn metadataProtectedResource(ctx: *Handler, req: *httpz.Request, res: *httpz
     const base = try requestUrl(ctx, req);
     defer ctx.allocator.free(base);
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = try std.fmt.allocPrint(
         req.arena,
         \\{{"resource":"{s}","authorization_servers":["{s}"],"scopes_supported":["mcp"],"bearer_methods_supported":["header"]}}
@@ -48,7 +57,7 @@ pub fn metadataAuthServer(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
     const base = try requestUrl(ctx, req);
     defer ctx.allocator.free(base);
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = try std.fmt.allocPrint(
         req.arena,
         \\{{"issuer":"{s}","authorization_endpoint":"{s}/oauth/authorize","token_endpoint":"{s}/oauth/token","response_types_supported":["code"],"grant_types_supported":["authorization_code"],"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["client_secret_post"],"scopes_supported":["mcp"]}}
@@ -65,8 +74,8 @@ pub fn metadataAuthServer(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 /// with a link to /auth/login.
 pub fn authorizePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const q = try req.query();
-    const client_id = q.get("client_id") orelse return badRequest(res, "missing client_id");
-    const redirect_uri = q.get("redirect_uri") orelse return badRequest(res, "missing redirect_uri");
+    const client_id = q.get(KEY_CLIENT_ID) orelse return badRequest(res, ERR_MISSING_CLIENT_ID);
+    const redirect_uri = q.get(KEY_REDIRECT_URI) orelse return badRequest(res, ERR_MISSING_REDIRECT_URI);
     const response_type = q.get("response_type") orelse "";
     const state = q.get("state") orelse "";
     const code_challenge = q.get("code_challenge") orelse "";
@@ -127,8 +136,8 @@ pub fn authorizeApprove(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     const email = auth.currentEmail(ctx, req) orelse return unauthorized(res);
 
     const form = try req.formData();
-    const client_id = form.get("client_id") orelse return badRequest(res, "missing client_id");
-    const redirect_uri = form.get("redirect_uri") orelse return badRequest(res, "missing redirect_uri");
+    const client_id = form.get(KEY_CLIENT_ID) orelse return badRequest(res, ERR_MISSING_CLIENT_ID);
+    const redirect_uri = form.get(KEY_REDIRECT_URI) orelse return badRequest(res, ERR_MISSING_REDIRECT_URI);
     const state = form.get("state") orelse "";
     const code_challenge = form.get("code_challenge") orelse return badRequest(res, "missing code_challenge");
     const scope = form.get("scope") orelse "mcp";
@@ -150,31 +159,31 @@ pub fn authorizeApprove(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 pub fn tokenEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const form = try req.formData();
 
-    const grant_type = form.get("grant_type") orelse return tokenError(req, res, "invalid_request", "missing grant_type");
+    const grant_type = form.get("grant_type") orelse return tokenError(req, res, ERR_INVALID_REQUEST, "missing grant_type");
     if (!std.mem.eql(u8, grant_type, "authorization_code")) {
         return tokenError(req, res, "unsupported_grant_type", "only authorization_code is supported");
     }
-    const code = form.get("code") orelse return tokenError(req, res, "invalid_request", "missing code");
-    const redirect_uri = form.get("redirect_uri") orelse return tokenError(req, res, "invalid_request", "missing redirect_uri");
-    const client_id = form.get("client_id") orelse return tokenError(req, res, "invalid_request", "missing client_id");
-    const client_secret = form.get("client_secret") orelse return tokenError(req, res, "invalid_request", "missing client_secret");
-    const code_verifier = form.get("code_verifier") orelse return tokenError(req, res, "invalid_request", "missing code_verifier");
+    const code = form.get("code") orelse return tokenError(req, res, ERR_INVALID_REQUEST, "missing code");
+    const redirect_uri = form.get(KEY_REDIRECT_URI) orelse return tokenError(req, res, ERR_INVALID_REQUEST, ERR_MISSING_REDIRECT_URI);
+    const client_id = form.get(KEY_CLIENT_ID) orelse return tokenError(req, res, ERR_INVALID_REQUEST, ERR_MISSING_CLIENT_ID);
+    const client_secret = form.get("client_secret") orelse return tokenError(req, res, ERR_INVALID_REQUEST, "missing client_secret");
+    const code_verifier = form.get("code_verifier") orelse return tokenError(req, res, ERR_INVALID_REQUEST, "missing code_verifier");
 
     const verified_client = try store.verifyClientSecret(ctx.allocator, ctx.project_dir, client_id, client_secret);
     if (verified_client == null) return tokenError(req, res, "invalid_client", "bad client_id or client_secret");
 
-    const auth_code = store.consumeCode(ctx.allocator, ctx.project_dir, code) orelse return tokenError(req, res, "invalid_grant", "code expired or already used");
-    if (!std.mem.eql(u8, auth_code.client_id, client_id)) return tokenError(req, res, "invalid_grant", "code was issued to a different client");
-    if (!std.mem.eql(u8, auth_code.redirect_uri, redirect_uri)) return tokenError(req, res, "invalid_grant", "redirect_uri mismatch");
+    const auth_code = store.consumeCode(ctx.allocator, ctx.project_dir, code) orelse return tokenError(req, res, ERR_INVALID_GRANT, "code expired or already used");
+    if (!std.mem.eql(u8, auth_code.client_id, client_id)) return tokenError(req, res, ERR_INVALID_GRANT, "code was issued to a different client");
+    if (!std.mem.eql(u8, auth_code.redirect_uri, redirect_uri)) return tokenError(req, res, ERR_INVALID_GRANT, "redirect_uri mismatch");
 
     const pkce_ok = try store.verifyPkce(ctx.allocator, code_verifier, auth_code.code_challenge);
-    if (!pkce_ok) return tokenError(req, res, "invalid_grant", "PKCE verification failed");
+    if (!pkce_ok) return tokenError(req, res, ERR_INVALID_GRANT, "PKCE verification failed");
 
     const access_token = try store.issueToken(ctx.allocator, ctx.project_dir, client_id, auth_code.email, auth_code.scope);
 
     res.content_type = .JSON;
     res.header("cache-control", "no-store");
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = try std.fmt.allocPrint(
         req.arena,
         \\{{"access_token":"{s}","token_type":"Bearer","expires_in":2592000,"scope":"{s}"}}

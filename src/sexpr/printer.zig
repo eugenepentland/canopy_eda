@@ -2,6 +2,13 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const Node = ast.Node;
 
+// ── Constants ─────────────────────────────────────────────────────
+const FALLBACK_INT_WIDTH: usize = 12;
+const FALLBACK_FLOAT_WIDTH: usize = 12;
+const FALLBACK_UNIT_VAL_WIDTH: usize = 14;
+const SHORT_LIST_MAX_WIDTH: usize = 72;
+const NODE_EQ_FLOAT_TOLERANCE: f64 = 0.0001;
+
 /// Pretty-print a list of top-level nodes as S-expression text.
 pub fn print(allocator: std.mem.Allocator, nodes: []const Node) std.mem.Allocator.Error![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -95,17 +102,17 @@ fn estimateWidth(node: Node, depth: u32) ?usize {
         .string => |s| s.len + 2,
         .int => |i| blk: {
             var buf: [24]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break :blk 12;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break :blk FALLBACK_INT_WIDTH;
             break :blk s.len;
         },
         .float => |f| blk: {
             var buf: [32]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d:.6}", .{f}) catch break :blk 12;
+            const s = std.fmt.bufPrint(&buf, "{d:.6}", .{f}) catch break :blk FALLBACK_FLOAT_WIDTH;
             break :blk s.len;
         },
         .unit_val => |u| blk: {
             var buf: [32]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d:.6}", .{u}) catch break :blk 14;
+            const s = std.fmt.bufPrint(&buf, "{d:.6}", .{u}) catch break :blk FALLBACK_UNIT_VAL_WIDTH;
             break :blk s.len + 2; // +2 for "mm"
         },
     };
@@ -116,7 +123,7 @@ fn isShortList(children: []const Node) bool {
     for (children, 0..) |child, i| {
         if (i > 0) total_width += 1;
         total_width += estimateWidth(child, 0) orelse return false;
-        if (total_width > 72) return false;
+        if (total_width > SHORT_LIST_MAX_WIDTH) return false;
     }
     return true;
 }
@@ -207,10 +214,10 @@ fn expectNodesEqual(a: Node, b: Node) !void {
         .float => |fv| try std.testing.expectApproxEqAbs(fv, switch (b.tag) {
             .float => |bv| bv,
             else => return error.TestExpectedEqual,
-        }, 0.0001),
+        }, NODE_EQ_FLOAT_TOLERANCE),
         .unit_val => |uv| try std.testing.expectApproxEqAbs(uv, switch (b.tag) {
             .unit_val => |bv| bv,
             else => return error.TestExpectedEqual,
-        }, 0.0001),
+        }, NODE_EQ_FLOAT_TOLERANCE),
     }
 }

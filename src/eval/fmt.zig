@@ -9,6 +9,18 @@ pub const FmtError = error{
     NotEnoughArgs,
 };
 
+// ── Constants ─────────────────────────────────────────────────────
+const ONE_UNIT: f64 = 1.0;
+const ZERO_UNIT: f64 = 0.0;
+const MILLI_THRESHOLD: f64 = 0.001;
+const MICRO_THRESHOLD: f64 = 0.000001;
+const NANO_THRESHOLD: f64 = 0.000000001;
+const KILO: f64 = 1000.0;
+const MEGA: f64 = 1_000_000.0;
+const GIGA: f64 = 1_000_000_000.0;
+const TERA: f64 = 1_000_000_000_000.0;
+const WHOLE_NUMBER_LIMIT: f64 = 1e15;
+
 /// Format a string with ~V, ~R, ~C, ~A, ~S, ~~ specifiers.
 pub fn format(allocator: std.mem.Allocator, template: []const u8, args: []const Value) FmtError![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -70,11 +82,11 @@ fn formatVoltage(writer: anytype, v: f64) !void {
 
 fn formatResistance(writer: anytype, v: f64) !void {
     const abs = @abs(v);
-    if (abs >= 1_000_000.0) {
-        try formatNumber(writer, v / 1_000_000.0);
+    if (abs >= MEGA) {
+        try formatNumber(writer, v / MEGA);
         try writer.writeByte('M');
-    } else if (abs >= 1000.0) {
-        try formatNumber(writer, v / 1000.0);
+    } else if (abs >= KILO) {
+        try formatNumber(writer, v / KILO);
         try writer.writeByte('k');
     } else {
         try formatNumber(writer, v);
@@ -83,43 +95,43 @@ fn formatResistance(writer: anytype, v: f64) !void {
 
 fn formatCapacitance(writer: anytype, v: f64) !void {
     const abs = @abs(v);
-    if (abs >= 1.0) {
+    if (abs >= ONE_UNIT) {
         try formatNumber(writer, v);
         try writer.writeByte('F');
-    } else if (abs >= 0.001) {
-        try formatNumber(writer, v * 1000.0);
+    } else if (abs >= MILLI_THRESHOLD) {
+        try formatNumber(writer, v * KILO);
         try writer.writeAll("mF");
-    } else if (abs >= 0.000001) {
-        try formatNumber(writer, v * 1_000_000.0);
+    } else if (abs >= MICRO_THRESHOLD) {
+        try formatNumber(writer, v * MEGA);
         try writer.writeAll("uF");
-    } else if (abs >= 0.000000001) {
-        try formatNumber(writer, v * 1_000_000_000.0);
+    } else if (abs >= NANO_THRESHOLD) {
+        try formatNumber(writer, v * GIGA);
         try writer.writeAll("nF");
     } else {
-        try formatNumber(writer, v * 1_000_000_000_000.0);
+        try formatNumber(writer, v * TERA);
         try writer.writeAll("pF");
     }
 }
 
 fn formatAmperage(writer: anytype, v: f64) !void {
     const abs = @abs(v);
-    if (abs >= 1.0) {
+    if (abs >= ONE_UNIT) {
         try formatNumber(writer, v);
         try writer.writeAll("A");
-    } else if (abs >= 0.001) {
-        try formatNumber(writer, v * 1000.0);
+    } else if (abs >= MILLI_THRESHOLD) {
+        try formatNumber(writer, v * KILO);
         try writer.writeAll("mA");
-    } else if (abs == 0.0) {
+    } else if (abs == ZERO_UNIT) {
         try writer.writeAll("0A");
     } else {
-        try formatNumber(writer, v * 1_000_000.0);
+        try formatNumber(writer, v * MEGA);
         try writer.writeAll("uA");
     }
 }
 
 fn formatNumber(writer: anytype, v: f64) !void {
     // If it's a whole number, print without decimals
-    if (v == @floor(v) and @abs(v) < 1e15) {
+    if (v == @floor(v) and @abs(v) < WHOLE_NUMBER_LIMIT) {
         const i: i64 = @intFromFloat(v);
         writer.print("{d}", .{i}) catch return error.OutOfMemory;
     } else {

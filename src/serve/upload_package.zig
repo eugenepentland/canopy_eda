@@ -6,6 +6,14 @@ const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 const upload = @import("upload.zig");
 
+// ── Constants ─────────────────────────────────────────────────────
+const HTTP_BAD_REQUEST: u16 = 400;
+const HTTP_INTERNAL_ERROR: u16 = 500;
+const BOUNDARY_PREFIX = "boundary=";
+const FILENAME_PREFIX = "filename=\"";
+const UPLOAD_LOG_TEMPLATE = "Upload: {s}\n";
+const SEXP_PATH_TEMPLATE = "{s}/{s}.sexp";
+
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
@@ -18,7 +26,7 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
 /// `lib/models` files in one transaction.
 pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         res.body = "No data";
         return;
     };
@@ -26,10 +34,10 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     // Parse multipart form data
     const content_type = req.header("content-type") orelse "";
     const boundary = blk: {
-        if (std.mem.indexOf(u8, content_type, "boundary=")) |idx| {
-            break :blk content_type[idx + 9 ..];
+        if (std.mem.indexOf(u8, content_type, BOUNDARY_PREFIX)) |idx| {
+            break :blk content_type[idx + BOUNDARY_PREFIX.len ..];
         }
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         res.body = "Missing multipart boundary";
         return;
     };
@@ -42,7 +50,7 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     var step_filename: []const u8 = "unknown.step";
 
     const delim = std.fmt.allocPrint(ctx.allocator, "--{s}", .{boundary}) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
 
@@ -66,24 +74,24 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         const headers_lower = std.ascii.allocLowerString(ctx.allocator, headers) catch continue;
         if (std.mem.indexOf(u8, headers_lower, "name=\"symbol\"")) |_| {
             sym_data = data;
-            if (std.mem.indexOf(u8, headers, "filename=\"")) |fi| {
-                const fn_start = fi + 10;
+            if (std.mem.indexOf(u8, headers, FILENAME_PREFIX)) |fi| {
+                const fn_start = fi + FILENAME_PREFIX.len;
                 if (std.mem.indexOfPos(u8, headers, fn_start, "\"")) |fn_end| {
                     sym_filename = headers[fn_start..fn_end];
                 }
             }
         } else if (std.mem.indexOf(u8, headers_lower, "name=\"footprint\"")) |_| {
             fp_data = data;
-            if (std.mem.indexOf(u8, headers, "filename=\"")) |fi| {
-                const fn_start = fi + 10;
+            if (std.mem.indexOf(u8, headers, FILENAME_PREFIX)) |fi| {
+                const fn_start = fi + FILENAME_PREFIX.len;
                 if (std.mem.indexOfPos(u8, headers, fn_start, "\"")) |fn_end| {
                     fp_filename = headers[fn_start..fn_end];
                 }
             }
         } else if (std.mem.indexOf(u8, headers_lower, "name=\"step\"")) |_| {
             step_data = data;
-            if (std.mem.indexOf(u8, headers, "filename=\"")) |fi| {
-                const fn_start = fi + 10;
+            if (std.mem.indexOf(u8, headers, FILENAME_PREFIX)) |fi| {
+                const fn_start = fi + FILENAME_PREFIX.len;
                 if (std.mem.indexOfPos(u8, headers, fn_start, "\"")) |fn_end| {
                     step_filename = headers[fn_start..fn_end];
                 }
@@ -94,7 +102,7 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     }
 
     if (sym_data == null or fp_data == null) {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         res.body = "Both symbol and footprint files are required";
         return;
     }
@@ -113,12 +121,12 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     // Generate pinout from symbol
     const symbol_conv = @import("../convert/symbol.zig");
     const pinout = symbol_conv.generatePinout(ctx.allocator, sym_data.?, null) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Pinout generation failed — check symbol file format";
         return;
     };
     if (pinout.len == 0) {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         res.body = "No pins found in symbol file";
         return;
     }
@@ -126,7 +134,7 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     // Generate footprint
     const footprint_conv = @import("../convert/footprint.zig");
     const footprint = footprint_conv.convertFootprint(ctx.allocator, fp_data.?) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Footprint conversion failed — check footprint file format";
         return;
     };
@@ -134,24 +142,24 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     // Write pinout to lib/pinouts/
     {
         const dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/pinouts", .{ctx.project_dir}) catch {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             return;
         };
         defer ctx.allocator.free(dir);
         try infra_fs.cwd().makePath(dir);
-        const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, safe_name }) catch {
-            res.status = 500;
+        const path = std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ dir, safe_name }) catch {
+            res.status = HTTP_INTERNAL_ERROR;
             return;
         };
         defer ctx.allocator.free(path);
         const f = infra_fs.cwd().createFile(path, .{}) catch {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             res.body = "Cannot write pinout";
             return;
         };
         defer f.close();
         f.writeAll(pinout) catch {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             return;
         };
     }
@@ -160,24 +168,24 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     const fp_name_final = upload.extractFootprintName(ctx.allocator, footprint) orelse safe_name;
     {
         const dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints", .{ctx.project_dir}) catch {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             return;
         };
         defer ctx.allocator.free(dir);
         try infra_fs.cwd().makePath(dir);
-        const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir, fp_name_final }) catch {
-            res.status = 500;
+        const path = std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ dir, fp_name_final }) catch {
+            res.status = HTTP_INTERNAL_ERROR;
             return;
         };
         defer ctx.allocator.free(path);
         const f = infra_fs.cwd().createFile(path, .{}) catch {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             res.body = "Cannot write footprint";
             return;
         };
         defer f.close();
         f.writeAll(footprint) catch {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             return;
         };
     }
@@ -209,7 +217,7 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         res.body = "OK";
         return;
     };
-    std.debug.print("Upload: {s}\n", .{msg});
+    std.debug.print(UPLOAD_LOG_TEMPLATE, .{msg});
     res.body = msg;
 }
 
@@ -219,7 +227,7 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 /// `lib/pinouts/<sanitized>.sexp`. Kept for older library clients.
 pub fn uploadSymbolApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         res.body = "No file data";
         return;
     };
@@ -230,13 +238,13 @@ pub fn uploadSymbolApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 
     const symbol_conv = @import("../convert/symbol.zig");
     const converted = symbol_conv.convertSymbol(ctx.allocator, body, null) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Conversion failed — check file format";
         return;
     };
 
     if (converted.len == 0) {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         res.body = "No symbols found in file";
         return;
     }
@@ -252,26 +260,26 @@ pub fn uploadSymbolApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     const safe_name = upload.sanitizeName(ctx.allocator, basename);
 
     const dir_path = std.fmt.allocPrint(ctx.allocator, "{s}/lib/pinouts", .{ctx.project_dir}) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     defer ctx.allocator.free(dir_path);
     try infra_fs.cwd().makePath(dir_path);
 
-    const out_path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir_path, safe_name }) catch {
-        res.status = 500;
+    const out_path = std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ dir_path, safe_name }) catch {
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     defer ctx.allocator.free(out_path);
 
     const file = infra_fs.cwd().createFile(out_path, .{}) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Cannot write file";
         return;
     };
     defer file.close();
     file.writeAll(converted) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
 
@@ -279,7 +287,7 @@ pub fn uploadSymbolApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         res.body = "OK";
         return;
     };
-    std.debug.print("Upload: {s}\n", .{msg});
+    std.debug.print(UPLOAD_LOG_TEMPLATE, .{msg});
     res.body = msg;
 }
 
@@ -288,7 +296,7 @@ pub fn uploadSymbolApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 /// `lib/footprints/<sanitized>.sexp`. Kept for older library clients.
 pub fn uploadFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         res.body = "No file data";
         return;
     };
@@ -299,7 +307,7 @@ pub fn uploadFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 
     const footprint_conv = @import("../convert/footprint.zig");
     const converted = footprint_conv.convertFootprint(ctx.allocator, body) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Conversion failed — check file format";
         return;
     };
@@ -315,26 +323,26 @@ pub fn uploadFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
     const safe_name = upload.sanitizeName(ctx.allocator, basename);
 
     const dir_path = std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints", .{ctx.project_dir}) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     defer ctx.allocator.free(dir_path);
     try infra_fs.cwd().makePath(dir_path);
 
-    const out_path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.sexp", .{ dir_path, safe_name }) catch {
-        res.status = 500;
+    const out_path = std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ dir_path, safe_name }) catch {
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     defer ctx.allocator.free(out_path);
 
     const file = infra_fs.cwd().createFile(out_path, .{}) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Cannot write file";
         return;
     };
     defer file.close();
     file.writeAll(converted) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
 
@@ -342,6 +350,6 @@ pub fn uploadFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         res.body = "OK";
         return;
     };
-    std.debug.print("Upload: {s}\n", .{msg});
+    std.debug.print(UPLOAD_LOG_TEMPLATE, .{msg});
     res.body = msg;
 }

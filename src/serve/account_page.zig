@@ -7,6 +7,12 @@ const auth = @import("auth.zig");
 const store = @import("oauth_store.zig");
 const users = @import("users.zig");
 
+// ── Constants ─────────────────────────────────────────────────────
+const ERR_EXPECTED_OBJECT = "expected object";
+const ERR_INVALID_JSON = "invalid json";
+const ERR_MISSING_BODY = "missing body";
+const OK_JSON_TRUE = "{\"ok\":true}";
+
 /// Error set for HTTP handlers in this module. Wide enough to absorb
 /// the file-IO and form-parsing errors propagated by every helper called
 /// from the bodies via `try`.
@@ -303,18 +309,18 @@ pub fn createClientApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     };
     const body = req.body() orelse {
         res.status = 400;
-        res.body = "missing body";
+        res.body = ERR_MISSING_BODY;
         return;
     };
 
     const parsed = std.json.parseFromSlice(std.json.Value, req.arena, body, .{}) catch {
         res.status = 400;
-        res.body = "invalid json";
+        res.body = ERR_INVALID_JSON;
         return;
     };
     if (parsed.value != .object) {
         res.status = 400;
-        res.body = "expected object";
+        res.body = ERR_EXPECTED_OBJECT;
         return;
     }
     const name = if (parsed.value.object.get("name")) |v| (if (v == .string) v.string else "") else "";
@@ -354,7 +360,7 @@ pub fn revokeClientApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         return;
     }
     res.content_type = .JSON;
-    res.body = "{\"ok\":true}";
+    res.body = OK_JSON_TRUE;
 }
 
 /// GET /auth/manage — legacy redirect to /account.
@@ -385,17 +391,17 @@ pub fn updateUserRoleApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     const actor = requireAdmin(ctx, req, res) orelse return;
     const body = req.body() orelse {
         res.status = 400;
-        res.body = "missing body";
+        res.body = ERR_MISSING_BODY;
         return;
     };
     const parsed = std.json.parseFromSlice(std.json.Value, req.arena, body, .{}) catch {
         res.status = 400;
-        res.body = "invalid json";
+        res.body = ERR_INVALID_JSON;
         return;
     };
     if (parsed.value != .object) {
         res.status = 400;
-        res.body = "expected object";
+        res.body = ERR_EXPECTED_OBJECT;
         return;
     }
     const target = if (parsed.value.object.get("email")) |v| (if (v == .string) v.string else "") else "";
@@ -426,7 +432,7 @@ pub fn updateUserRoleApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
         return;
     }
     res.content_type = .JSON;
-    res.body = "{\"ok\":true}";
+    res.body = OK_JSON_TRUE;
 }
 
 /// POST /api/users/delete
@@ -438,17 +444,17 @@ pub fn deleteUserApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const actor = requireAdmin(ctx, req, res) orelse return;
     const body = req.body() orelse {
         res.status = 400;
-        res.body = "missing body";
+        res.body = ERR_MISSING_BODY;
         return;
     };
     const parsed = std.json.parseFromSlice(std.json.Value, req.arena, body, .{}) catch {
         res.status = 400;
-        res.body = "invalid json";
+        res.body = ERR_INVALID_JSON;
         return;
     };
     if (parsed.value != .object) {
         res.status = 400;
-        res.body = "expected object";
+        res.body = ERR_EXPECTED_OBJECT;
         return;
     }
     const target = if (parsed.value.object.get("email")) |v| (if (v == .string) v.string else "") else "";
@@ -479,5 +485,5 @@ pub fn deleteUserApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     auth.purgeIdentity(ctx.allocator, ctx.project_dir, target);
 
     res.content_type = .JSON;
-    res.body = "{\"ok\":true}";
+    res.body = OK_JSON_TRUE;
 }

@@ -20,6 +20,24 @@ const layout_mod = @import("layout.zig");
 /// so the only failure mode is `OutOfMemory`.
 pub const RenderError = std.mem.Allocator.Error;
 
+// ── Layout constants ──────────────────────────────────────────────
+const HALF_DIVISOR: f64 = 2.0;
+const DEFAULT_COURTYARD_MM: f64 = 2.0;
+const COURTYARD_PAD_MM: f64 = 1.0;
+const SECTION_GRID_3X3_MAX: usize = 9;
+const SECTION_OFFSET_MM: f64 = 20.0;
+const SECTION_TOP_MM: f64 = 10.0;
+const SECTION_AREA_PAD: f64 = 1.5;
+const SECTION_MIN_DIM_MM: f64 = 15.0;
+const SECTION_GRID_GAP_MM: f64 = 10.0;
+const SECTION_INSET_MM: f64 = 2.0;
+const SECTION_ROW_GAP_MM: f64 = 1.0;
+const PAD_NODE_MIN_CHILDREN: usize = 5;
+const COURTYARD_RECT_MIN_CHILDREN: usize = 5;
+
+// ── Repeated string literals ──────────────────────────────────────
+const POINT_JSON_FMT: []const u8 = "[{d:.3},{d:.3}]";
+
 /// Render a PCB design as JSON for the Pixi.js viewer.
 ///
 /// The JSON contains all the data needed to render footprints, pads, nets,
@@ -204,7 +222,7 @@ pub fn renderPcbJson(
         try w.print("\"thickness\":{d:.1},\"copper_layers\":{d},\"outline\":[", .{ b.thickness, b.copper_layers });
         for (b.outline, 0..) |pt, i| {
             if (i > 0) try w.writeAll(",");
-            try w.print("[{d:.3},{d:.3}]", .{ pt[0], pt[1] });
+            try w.print(POINT_JSON_FMT, .{ pt[0], pt[1] });
         }
         try w.writeAll("]");
     } else {
@@ -259,11 +277,11 @@ pub fn renderPcbJson(
         if (inst.footprint.len == 0) continue;
         const geo = fp_geo_cache.get(inst.footprint) orelse continue;
         const sec_idx = ref_to_section.get(inst.ref_des) orelse num_sections;
-        var cw: f64 = 2.0;
-        var ch: f64 = 2.0;
+        var cw: f64 = DEFAULT_COURTYARD_MM;
+        var ch: f64 = DEFAULT_COURTYARD_MM;
         if (geo.courtyard) |c| {
-            cw = c.x2 - c.x1 + 1.0;
-            ch = c.y2 - c.y1 + 1.0;
+            cw = c.x2 - c.x1 + COURTYARD_PAD_MM;
+            ch = c.y2 - c.y1 + COURTYARD_PAD_MM;
         }
         sec_info[sec_idx].count += 1;
         sec_info[sec_idx].total_area += cw * ch;
@@ -280,7 +298,7 @@ pub fn renderPcbJson(
         }
         if (active <= 1) break :blk 1;
         if (active <= 4) break :blk 2;
-        if (active <= 9) break :blk 3;
+        if (active <= SECTION_GRID_3X3_MAX) break :blk 3;
         break :blk 4;
     };
 
@@ -293,8 +311,8 @@ pub fn renderPcbJson(
             if (pt[1] > board_max_y) board_max_y = pt[1];
         }
     }
-    const section_start_x: f64 = board_max_x + 20.0;
-    const section_start_y: f64 = 10.0;
+    const section_start_x: f64 = board_max_x + SECTION_OFFSET_MM;
+    const section_start_y: f64 = SECTION_TOP_MM;
 
     // Compute section box dimensions and positions in a grid
     const BoxInfo = struct { x: f64, y: f64, w: f64, h: f64 };
@@ -311,20 +329,20 @@ pub fn renderPcbJson(
             continue;
         }
         // Box size: sqrt of total area * 1.5 for padding
-        const side = @sqrt(s.total_area) * 1.5;
-        const box_w = @max(side, 15.0);
-        const box_h = @max(side, 15.0);
+        const side = @sqrt(s.total_area) * SECTION_AREA_PAD;
+        const box_w = @max(side, SECTION_MIN_DIM_MM);
+        const box_h = @max(side, SECTION_MIN_DIM_MM);
 
         sec_boxes[si] = .{ .x = cur_x, .y = cur_y, .w = box_w, .h = box_h };
         if (box_h > row_height) row_height = box_h;
 
         grid_col += 1;
-        cur_x += box_w + 10.0;
+        cur_x += box_w + SECTION_GRID_GAP_MM;
         if (grid_col >= grid_cols) {
             grid_col = 0;
             grid_row += 1;
             cur_x = section_start_x;
-            cur_y += row_height + 10.0;
+            cur_y += row_height + SECTION_GRID_GAP_MM;
             row_height = 0;
         }
     }
@@ -334,8 +352,8 @@ pub fn renderPcbJson(
     var sec_cursor_y = try allocator.alloc(f64, num_sections + 1);
     var sec_row_h = try allocator.alloc(f64, num_sections + 1);
     for (0..num_sections + 1) |i| {
-        sec_cursor_x[i] = sec_boxes[i].x + 2.0;
-        sec_cursor_y[i] = sec_boxes[i].y + 2.0;
+        sec_cursor_x[i] = sec_boxes[i].x + SECTION_INSET_MM;
+        sec_cursor_y[i] = sec_boxes[i].y + SECTION_INSET_MM;
         sec_row_h[i] = 0;
     }
 
@@ -351,22 +369,22 @@ pub fn renderPcbJson(
         const box = sec_boxes[sec_idx];
         if (box.w == 0) continue;
 
-        var cw: f64 = 2.0;
-        var ch: f64 = 2.0;
+        var cw: f64 = DEFAULT_COURTYARD_MM;
+        var ch: f64 = DEFAULT_COURTYARD_MM;
         if (geo.courtyard) |c| {
-            cw = c.x2 - c.x1 + 1.0;
-            ch = c.y2 - c.y1 + 1.0;
+            cw = c.x2 - c.x1 + COURTYARD_PAD_MM;
+            ch = c.y2 - c.y1 + COURTYARD_PAD_MM;
         }
 
         // Wrap to next row if needed
         if (sec_cursor_x[sec_idx] + cw > box.x + box.w) {
-            sec_cursor_x[sec_idx] = box.x + 2.0;
-            sec_cursor_y[sec_idx] += sec_row_h[sec_idx] + 1.0;
+            sec_cursor_x[sec_idx] = box.x + SECTION_INSET_MM;
+            sec_cursor_y[sec_idx] += sec_row_h[sec_idx] + SECTION_ROW_GAP_MM;
             sec_row_h[sec_idx] = 0;
         }
 
-        const px = sec_cursor_x[sec_idx] + cw / 2.0;
-        const py = sec_cursor_y[sec_idx] + ch / 2.0;
+        const px = sec_cursor_x[sec_idx] + cw / HALF_DIVISOR;
+        const py = sec_cursor_y[sec_idx] + ch / HALF_DIVISOR;
         try auto_placed.put(inst.uuid, .{ .x = px, .y = py, .angle = 0, .layer = "F.Cu", .flipped = false });
 
         sec_cursor_x[sec_idx] += cw;
@@ -503,7 +521,7 @@ pub fn renderPcbJson(
         try w.print("{{\"net\":\"{s}\",\"ng\":{d},\"layer\":\"{s}\",\"width\":{d:.3},\"points\":[", .{ t.net, t_ng, t.layer, t.width });
         for (t.points, 0..) |pt, pi| {
             if (pi > 0) try w.writeAll(",");
-            try w.print("[{d:.3},{d:.3}]", .{ pt[0], pt[1] });
+            try w.print(POINT_JSON_FMT, .{ pt[0], pt[1] });
         }
         try w.writeAll("]}");
     }
@@ -530,7 +548,7 @@ pub fn renderPcbJson(
             try w.writeAll("[");
             for (poly, 0..) |pt, pti| {
                 if (pti > 0) try w.writeAll(",");
-                try w.print("[{d:.3},{d:.3}]", .{ pt[0], pt[1] });
+                try w.print(POINT_JSON_FMT, .{ pt[0], pt[1] });
             }
             try w.writeAll("]");
         }
@@ -586,7 +604,7 @@ pub fn renderPcbJson(
             });
             for (ko.outline, 0..) |pt, pti| {
                 if (pti > 0) try w.writeAll(",");
-                try w.print("[{d:.3},{d:.3}]", .{ pt[0], pt[1] });
+                try w.print(POINT_JSON_FMT, .{ pt[0], pt[1] });
             }
             try w.writeAll("]}");
         }
@@ -638,7 +656,7 @@ fn parseFootprintGeometry(allocator: std.mem.Allocator, source: []const u8) !Foo
         const tag = cl[0].asAtom() orelse continue;
 
         if (std.mem.eql(u8, tag, "pad")) {
-            if (cl.len < 5) continue;
+            if (cl.len < PAD_NODE_MIN_CHILDREN) continue;
             const name = cl[1].asAtom() orelse cl[1].asString() orelse if (cl[1].asNumber()) |n| try std.fmt.allocPrint(allocator, "{d}", .{@as(i64, @intFromFloat(n))}) else continue;
             const pad_type = cl[2].asAtom() orelse continue;
             const shape = cl[3].asAtom() orelse continue;
@@ -674,7 +692,7 @@ fn parseFootprintGeometry(allocator: std.mem.Allocator, source: []const u8) !Foo
             // (courtyard (rect x1 y1 x2 y2))
             for (cl[1..]) |sub| {
                 const sl = sub.asList() orelse continue;
-                if (sl.len < 5) continue;
+                if (sl.len < COURTYARD_RECT_MIN_CHILDREN) continue;
                 const stag = sl[0].asAtom() orelse continue;
                 if (std.mem.eql(u8, stag, "rect")) {
                     courtyard = .{

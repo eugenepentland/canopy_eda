@@ -14,6 +14,13 @@ const EvalError = @import("evaluator.zig").EvalError;
 const Evaluator = @import("evaluator.zig").Evaluator;
 const Node = @import("../sexpr/ast.zig").Node;
 
+// ── Constants ─────────────────────────────────────────────────────
+const DEFAULT_BOARD_THICKNESS_MM: f64 = 1.6;
+const DEFAULT_DIELECTRIC_ER: f64 = 4.5;
+const DEFAULT_DIFF_PAIR_IMPEDANCE: f64 = 90;
+const DEFAULT_DIFF_PAIR_SPACING_MM: f64 = 0.15;
+const RECT_COORD_COUNT: usize = 5;
+
 /// Evaluate a `(board "name" ...)` form.
 ///
 /// Syntax:
@@ -93,7 +100,7 @@ pub fn evalBoard(self: *Evaluator, args: []const Node, env: *Env) EvalError!Valu
         } else if (std.mem.eql(u8, tag, "thickness")) {
             if (children.len >= 2) {
                 const v = try self.evalNode(children[1], env);
-                thickness = v.asNumber() orelse 1.6;
+                thickness = v.asNumber() orelse DEFAULT_BOARD_THICKNESS_MM;
             }
         } else if (std.mem.eql(u8, tag, "copper-layers")) {
             if (children.len >= 2) {
@@ -153,7 +160,7 @@ fn parseOutline(self: *Evaluator, args: []const Node, env: *Env, outline: *std.A
 
         if (std.mem.eql(u8, tag, "rect")) {
             // (rect x1 y1 x2 y2)
-            if (children.len < 5) {
+            if (children.len < RECT_COORD_COUNT) {
                 log.warn("board: (rect) requires 4 coordinates", .{});
                 return EvalError.ArityError;
             }
@@ -248,7 +255,7 @@ fn parseStackup(self: *Evaluator, args: []const Node, env: *Env, stackup: *std.A
                 const stag = sub[0].asAtom() orelse continue;
                 if (std.mem.eql(u8, stag, "er")) {
                     const ev = try self.evalNode(sub[1], env);
-                    er = ev.asNumber() orelse 4.5;
+                    er = ev.asNumber() orelse DEFAULT_DIELECTRIC_ER;
                 }
             }
         }
@@ -324,10 +331,10 @@ fn parseDiffPair(self: *Evaluator, args: []const Node, env: *Env) EvalError!Diff
             dp.negative = v.asString() orelse "";
         } else if (std.mem.eql(u8, tag, "impedance")) {
             const v = try self.evalNode(children[1], env);
-            dp.impedance = v.asNumber() orelse 90;
+            dp.impedance = v.asNumber() orelse DEFAULT_DIFF_PAIR_IMPEDANCE;
         } else if (std.mem.eql(u8, tag, "spacing")) {
             const v = try self.evalNode(children[1], env);
-            dp.spacing = v.asNumber() orelse 0.15;
+            dp.spacing = v.asNumber() orelse DEFAULT_DIFF_PAIR_SPACING_MM;
         }
     }
 
@@ -383,7 +390,7 @@ fn parseKeepout(self: *Evaluator, args: []const Node, env: *Env) EvalError!Keepo
         if (children.len == 0) continue;
         const tag = children[0].asAtom() orelse continue;
 
-        if (std.mem.eql(u8, tag, "rect") and children.len >= 5) {
+        if (std.mem.eql(u8, tag, "rect") and children.len >= RECT_COORD_COUNT) {
             var coords: [4]f64 = undefined;
             for (0..4) |i| {
                 const v = try self.evalNode(children[i + 1], env);

@@ -5,6 +5,11 @@ const log = @import("../infra/log.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const infra_random = @import("../infra/random.zig");
 
+// ── Constants ─────────────────────────────────────────────────────
+const AUTH_CODE_TTL_SECS: i64 = 600; // 10 min
+const ACCESS_TOKEN_TTL_DAYS: i64 = 30;
+const ACCESS_TOKEN_TTL_SECS: i64 = ACCESS_TOKEN_TTL_DAYS * std.time.s_per_day;
+
 /// Persisted OAuth client record (one per Claude Code install). Secrets are
 /// hashed via SHA-256 before storage so a leaked `oauth_clients.json`
 /// cannot be replayed against the token endpoint.
@@ -319,7 +324,7 @@ pub fn issueCode(
         .email = try allocator.dupe(u8, email),
         .code_challenge = try allocator.dupe(u8, code_challenge),
         .scope = try allocator.dupe(u8, scope),
-        .expires_at = clock.timestamp() + 600,
+        .expires_at = clock.timestamp() + AUTH_CODE_TTL_SECS,
     };
     try codes_map.?.put(code, entry);
     return code;
@@ -363,7 +368,7 @@ pub fn issueToken(
         .client_id = try allocator.dupe(u8, client_id),
         .email = try allocator.dupe(u8, email),
         .scope = try allocator.dupe(u8, scope),
-        .expires_at = clock.timestamp() + 30 * 24 * 60 * 60,
+        .expires_at = clock.timestamp() + ACCESS_TOKEN_TTL_SECS,
     });
     saveTokens(allocator, project_dir);
     return raw;

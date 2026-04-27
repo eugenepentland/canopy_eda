@@ -10,6 +10,21 @@ const id_insert = @import("id_insert.zig");
 const erc_mod = @import("erc.zig");
 const env_mod = @import("eval/env.zig");
 
+// ── Constants ─────────────────────────────────────────────────────
+const PROJECT_DIR_FLAG = "--project-dir";
+const OUTPUT_DIR_FLAG = "--output-dir";
+const SEXP_PATH_TEMPLATE = "{s}/src/{s}.sexp";
+const BOM_PATH_TEMPLATE = "{s}/src/{s}.bom";
+const OUT_OF_MEMORY_MSG = "Out of memory\n";
+const BUILD_ERROR_FMT = "Build error: {}\n";
+const BUILD_FAILED_ASSERTION_MSG = "Build failed: assertion violations\n";
+const CANNOT_WRITE_FMT = "Cannot write {s}: {}\n";
+const PASS_FMT = "PASS: {s}\n";
+const WARN_FMT = "WARN: {s}\n";
+const FAIL_FMT = "FAIL: {s}\n";
+const IDENTITY_RESOLUTION_ERROR_FMT = "Identity resolution error: {}\n";
+const WROTE_BYTES_FMT = "Wrote {s} ({d} bytes)\n";
+
 /// Error set for the CLI command handlers in this file. Wide on purpose:
 /// each `cmd*` orchestrates the evaluator (`EvalError`), file IO, network
 /// pushes, and writers, so we union the relevant std error sets up front
@@ -55,7 +70,7 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     var severity_filter: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--project-dir") and i + 1 < args.len) {
+        if (std.mem.eql(u8, args[i], PROJECT_DIR_FLAG) and i + 1 < args.len) {
             project_dir = args[i + 1];
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--severity") and i + 1 < args.len) {
@@ -70,7 +85,7 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandE
         std.process.exit(1);
     };
 
-    const board_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, design });
+    const board_path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, design });
     defer allocator.free(board_path);
 
     var eval = Evaluator.init(allocator, project_dir);
@@ -117,13 +132,13 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     var positional_name: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--project-dir") and i + 1 < args.len) {
+        if (std.mem.eql(u8, args[i], PROJECT_DIR_FLAG) and i + 1 < args.len) {
             project_dir = args[i + 1];
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--push") and i + 1 < args.len) {
             push_name = args[i + 1];
             i += 1;
-        } else if (std.mem.eql(u8, args[i], "--output-dir") and i + 1 < args.len) {
+        } else if (std.mem.eql(u8, args[i], OUTPUT_DIR_FLAG) and i + 1 < args.len) {
             output_dir = args[i + 1];
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--server") and i + 1 < args.len) {
@@ -141,8 +156,8 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
         std.process.exit(1);
     };
 
-    const board_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, design }) catch {
-        std.debug.print("Out of memory\n", .{});
+    const board_path = std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, design }) catch {
+        std.debug.print(OUT_OF_MEMORY_MSG, .{});
         std.process.exit(1);
     };
     defer allocator.free(board_path);
@@ -151,7 +166,7 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch |err| {
-        std.debug.print("Build error: {}\n", .{err});
+        std.debug.print(BUILD_ERROR_FMT, .{err});
         std.process.exit(1);
     };
 
@@ -164,30 +179,30 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     var has_failure = false;
     for (eval.assertions.items) |assertion| {
         if (assertion.passed) {
-            std.debug.print("PASS: {s}\n", .{assertion.message});
+            std.debug.print(PASS_FMT, .{assertion.message});
         } else if (assertion.is_warning) {
-            std.debug.print("WARN: {s}\n", .{assertion.message});
+            std.debug.print(WARN_FMT, .{assertion.message});
         } else {
-            std.debug.print("FAIL: {s}\n", .{assertion.message});
+            std.debug.print(FAIL_FMT, .{assertion.message});
             has_failure = true;
         }
     }
 
     if (has_failure) {
-        std.debug.print("Build failed: assertion violations\n", .{});
+        std.debug.print(BUILD_FAILED_ASSERTION_MSG, .{});
         std.process.exit(1);
     }
 
     switch (result) {
         .design_block => |block| {
             const design_name = push_name orelse "board";
-            const ids_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, design_name }) catch {
-                std.debug.print("Out of memory\n", .{});
+            const ids_path = std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, design_name }) catch {
+                std.debug.print(OUT_OF_MEMORY_MSG, .{});
                 std.process.exit(1);
             };
             defer allocator.free(ids_path);
             bom.resolveIdentities(allocator, block, ids_path, project_dir) catch |err| {
-                std.debug.print("Identity resolution error: {}\n", .{err});
+                std.debug.print(IDENTITY_RESOLUTION_ERROR_FMT, .{err});
                 std.process.exit(1);
             };
 
@@ -200,7 +215,7 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
             if (output_dir) |dir| {
                 const name = push_name orelse "design";
                 const out_path = std.fmt.allocPrint(allocator, "{s}/{s}.sexp", .{ dir, name }) catch {
-                    std.debug.print("Out of memory\n", .{});
+                    std.debug.print(OUT_OF_MEMORY_MSG, .{});
                     std.process.exit(1);
                 };
                 defer allocator.free(out_path);
@@ -218,7 +233,7 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
 
             if (push_name) |name| {
                 const url = std.fmt.allocPrint(allocator, "{s}/api/push/{s}", .{ server_url, name }) catch {
-                    std.debug.print("Out of memory\n", .{});
+                    std.debug.print(OUT_OF_MEMORY_MSG, .{});
                     std.process.exit(1);
                 };
                 defer allocator.free(url);
@@ -251,10 +266,10 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
     var design_name: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--project-dir") and i + 1 < args.len) {
+        if (std.mem.eql(u8, args[i], PROJECT_DIR_FLAG) and i + 1 < args.len) {
             project_dir = args[i + 1];
             i += 1;
-        } else if (std.mem.eql(u8, args[i], "--output-dir") and i + 1 < args.len) {
+        } else if (std.mem.eql(u8, args[i], OUTPUT_DIR_FLAG) and i + 1 < args.len) {
             output_dir = args[i + 1];
             i += 1;
         } else {
@@ -271,8 +286,8 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
         std.process.exit(1);
     };
 
-    const board_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name }) catch {
-        std.debug.print("Out of memory\n", .{});
+    const board_path = std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name }) catch {
+        std.debug.print(OUT_OF_MEMORY_MSG, .{});
         std.process.exit(1);
     };
     defer allocator.free(board_path);
@@ -281,36 +296,36 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch |err| {
-        std.debug.print("Build error: {}\n", .{err});
+        std.debug.print(BUILD_ERROR_FMT, .{err});
         std.process.exit(1);
     };
 
     var has_failure = false;
     for (eval.assertions.items) |assertion| {
         if (assertion.passed) {
-            std.debug.print("PASS: {s}\n", .{assertion.message});
+            std.debug.print(PASS_FMT, .{assertion.message});
         } else if (assertion.is_warning) {
-            std.debug.print("WARN: {s}\n", .{assertion.message});
+            std.debug.print(WARN_FMT, .{assertion.message});
         } else {
-            std.debug.print("FAIL: {s}\n", .{assertion.message});
+            std.debug.print(FAIL_FMT, .{assertion.message});
             has_failure = true;
         }
     }
 
     if (has_failure) {
-        std.debug.print("Build failed: assertion violations\n", .{});
+        std.debug.print(BUILD_FAILED_ASSERTION_MSG, .{});
         std.process.exit(1);
     }
 
     switch (result) {
         .design_block => |block| {
-            const ids_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name }) catch {
-                std.debug.print("Out of memory\n", .{});
+            const ids_path = std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name }) catch {
+                std.debug.print(OUT_OF_MEMORY_MSG, .{});
                 std.process.exit(1);
             };
             defer allocator.free(ids_path);
             bom.resolveIdentities(allocator, block, ids_path, project_dir) catch |err| {
-                std.debug.print("Identity resolution error: {}\n", .{err});
+                std.debug.print(IDENTITY_RESOLUTION_ERROR_FMT, .{err});
                 std.process.exit(1);
             };
 
@@ -337,7 +352,7 @@ pub fn cmdExportPcb(allocator: std.mem.Allocator, args: []const []const u8) Comm
     var design_name: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--project-dir") and i + 1 < args.len) {
+        if (std.mem.eql(u8, args[i], PROJECT_DIR_FLAG) and i + 1 < args.len) {
             project_dir = args[i + 1];
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--output") and i + 1 < args.len) {
@@ -353,8 +368,8 @@ pub fn cmdExportPcb(allocator: std.mem.Allocator, args: []const []const u8) Comm
         std.process.exit(1);
     };
 
-    const board_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name }) catch {
-        std.debug.print("Out of memory\n", .{});
+    const board_path = std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name }) catch {
+        std.debug.print(OUT_OF_MEMORY_MSG, .{});
         std.process.exit(1);
     };
     defer allocator.free(board_path);
@@ -363,31 +378,30 @@ pub fn cmdExportPcb(allocator: std.mem.Allocator, args: []const []const u8) Comm
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch |err| {
-        std.debug.print("Build error: {}\n", .{err});
+        std.debug.print(BUILD_ERROR_FMT, .{err});
         std.process.exit(1);
     };
 
     var has_failure = false;
     for (eval.assertions.items) |assertion| {
         if (assertion.passed) {
-            std.debug.print("PASS: {s}\n", .{assertion.message});
+            std.debug.print(PASS_FMT, .{assertion.message});
         } else if (assertion.is_warning) {
-            std.debug.print("WARN: {s}\n", .{assertion.message});
+            std.debug.print(WARN_FMT, .{assertion.message});
         } else {
-            std.debug.print("FAIL: {s}\n", .{assertion.message});
+            std.debug.print(FAIL_FMT, .{assertion.message});
             has_failure = true;
         }
     }
 
     if (has_failure) {
-        std.debug.print("Build failed: assertion violations\n", .{});
+        std.debug.print(BUILD_FAILED_ASSERTION_MSG, .{});
         std.process.exit(1);
     }
 
     // Extract design block and optional board params
-    const env = @import("eval/env.zig");
-    var block: *env.DesignBlock = undefined;
-    var board_def: ?*env.Board = null;
+    var block: *env_mod.DesignBlock = undefined;
+    var board_def: ?*env_mod.Board = null;
     switch (result) {
         .design_block => |db| block = db,
         .board => |b| {
@@ -400,20 +414,20 @@ pub fn cmdExportPcb(allocator: std.mem.Allocator, args: []const []const u8) Comm
         },
     }
 
-    const ids_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name }) catch {
-        std.debug.print("Out of memory\n", .{});
+    const ids_path = std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name }) catch {
+        std.debug.print(OUT_OF_MEMORY_MSG, .{});
         std.process.exit(1);
     };
     defer allocator.free(ids_path);
     bom.resolveIdentities(allocator, block, ids_path, project_dir) catch |err| {
-        std.debug.print("Identity resolution error: {}\n", .{err});
+        std.debug.print(IDENTITY_RESOLUTION_ERROR_FMT, .{err});
         std.process.exit(1);
     };
 
     // Determine output path
     const out = output_path orelse blk: {
         break :blk std.fmt.allocPrint(allocator, "{s}/out/{s}.kicad_pcb", .{ project_dir, name }) catch {
-            std.debug.print("Out of memory\n", .{});
+            std.debug.print(OUT_OF_MEMORY_MSG, .{});
             std.process.exit(1);
         };
     };
@@ -434,7 +448,7 @@ pub fn cmdExportPcb(allocator: std.mem.Allocator, args: []const []const u8) Comm
     }
 
     const f = infra_fs.cwd().createFile(out, .{}) catch |err| {
-        std.debug.print("Cannot write {s}: {}\n", .{ out, err });
+        std.debug.print(CANNOT_WRITE_FMT, .{ out, err });
         std.process.exit(1);
     };
     defer f.close();
@@ -458,10 +472,10 @@ pub fn cmdExportGerber(allocator: std.mem.Allocator, args: []const []const u8) C
     var design_name: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--project-dir") and i + 1 < args.len) {
+        if (std.mem.eql(u8, args[i], PROJECT_DIR_FLAG) and i + 1 < args.len) {
             project_dir = args[i + 1];
             i += 1;
-        } else if (std.mem.eql(u8, args[i], "--output-dir") and i + 1 < args.len) {
+        } else if (std.mem.eql(u8, args[i], OUTPUT_DIR_FLAG) and i + 1 < args.len) {
             output_dir = args[i + 1];
             i += 1;
         } else {
@@ -474,20 +488,19 @@ pub fn cmdExportGerber(allocator: std.mem.Allocator, args: []const []const u8) C
         std.process.exit(1);
     };
 
-    const board_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    const board_path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
     defer allocator.free(board_path);
 
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch |err| {
-        std.debug.print("Build error: {}\n", .{err});
+        std.debug.print(BUILD_ERROR_FMT, .{err});
         std.process.exit(1);
     };
 
-    const env = @import("eval/env.zig");
-    var block2: *env.DesignBlock = undefined;
-    var board_def: ?*env.Board = null;
+    var block2: *env_mod.DesignBlock = undefined;
+    var board_def: ?*env_mod.Board = null;
     switch (result) {
         .design_block => |db| block2 = db,
         .board => |b| {
@@ -500,7 +513,7 @@ pub fn cmdExportGerber(allocator: std.mem.Allocator, args: []const []const u8) C
         },
     }
 
-    const ids_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name });
+    const ids_path = try std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name });
     defer allocator.free(ids_path);
     try bom.resolveIdentities(allocator, block2, ids_path, project_dir);
 
@@ -519,7 +532,7 @@ pub fn cmdExportGerber(allocator: std.mem.Allocator, args: []const []const u8) C
             const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, f.name });
             defer allocator.free(path);
             const file = infra_fs.cwd().createFile(path, .{}) catch |err| {
-                std.debug.print("Cannot write {s}: {}\n", .{ path, err });
+                std.debug.print(CANNOT_WRITE_FMT, .{ path, err });
                 continue;
             };
             defer file.close();
@@ -570,10 +583,10 @@ pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) C
     var as_zip = false;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--project-dir") and i + 1 < args.len) {
+        if (std.mem.eql(u8, args[i], PROJECT_DIR_FLAG) and i + 1 < args.len) {
             project_dir = args[i + 1];
             i += 1;
-        } else if (std.mem.eql(u8, args[i], "--output-dir") and i + 1 < args.len) {
+        } else if (std.mem.eql(u8, args[i], OUTPUT_DIR_FLAG) and i + 1 < args.len) {
             output_dir = args[i + 1];
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--zip")) {
@@ -588,13 +601,13 @@ pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) C
         std.process.exit(1);
     };
 
-    const board_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    const board_path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
     defer allocator.free(board_path);
 
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
     const result = eval.evalFile(board_path) catch |err| {
-        std.debug.print("Build error: {}\n", .{err});
+        std.debug.print(BUILD_ERROR_FMT, .{err});
         std.process.exit(1);
     };
     const block = switch (result) {
@@ -606,7 +619,7 @@ pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) C
         },
     };
 
-    const bom_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name });
+    const bom_path = try std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name });
     defer allocator.free(bom_path);
     try bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir);
 
@@ -639,31 +652,31 @@ pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) C
         const zip_path = try std.fmt.allocPrint(allocator, "{s}/{s}-review.zip", .{ output_dir, name });
         defer allocator.free(zip_path);
         const f = infra_fs.cwd().createFile(zip_path, .{}) catch |err| {
-            std.debug.print("Cannot write {s}: {}\n", .{ zip_path, err });
+            std.debug.print(CANNOT_WRITE_FMT, .{ zip_path, err });
             std.process.exit(1);
         };
         defer f.close();
         try f.writeAll(zip);
-        std.debug.print("Wrote {s} ({d} bytes)\n", .{ zip_path, zip.len });
+        std.debug.print(WROTE_BYTES_FMT, .{ zip_path, zip.len });
     } else {
         const md_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ output_dir, md_name });
         defer allocator.free(md_path);
         const csv_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ output_dir, csv_name });
         defer allocator.free(csv_path);
         var fmd = infra_fs.cwd().createFile(md_path, .{}) catch |err| {
-            std.debug.print("Cannot write {s}: {}\n", .{ md_path, err });
+            std.debug.print(CANNOT_WRITE_FMT, .{ md_path, err });
             std.process.exit(1);
         };
         defer fmd.close();
         try fmd.writeAll(md);
         var fcsv = infra_fs.cwd().createFile(csv_path, .{}) catch |err| {
-            std.debug.print("Cannot write {s}: {}\n", .{ csv_path, err });
+            std.debug.print(CANNOT_WRITE_FMT, .{ csv_path, err });
             std.process.exit(1);
         };
         defer fcsv.close();
         try fcsv.writeAll(csv_buf.items);
-        std.debug.print("Wrote {s} ({d} bytes)\n", .{ md_path, md.len });
-        std.debug.print("Wrote {s} ({d} bytes)\n", .{ csv_path, csv_buf.items.len });
+        std.debug.print(WROTE_BYTES_FMT, .{ md_path, md.len });
+        std.debug.print(WROTE_BYTES_FMT, .{ csv_path, csv_buf.items.len });
     }
 }
 
@@ -677,7 +690,7 @@ pub fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     var slug: []const u8 = "live";
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--project-dir") and i + 1 < args.len) {
+        if (std.mem.eql(u8, args[i], PROJECT_DIR_FLAG) and i + 1 < args.len) {
             project_dir = args[i + 1];
             i += 1;
         }

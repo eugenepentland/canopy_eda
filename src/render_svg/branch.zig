@@ -28,6 +28,24 @@ const writeDebugPin = draw.writeDebugPin;
 const classifyComponent = draw.classifyComponent;
 const RenderError = draw.RenderError;
 
+// ── Layout constants ──────────────────────────────────────────────
+const HALF_DIVISOR: f64 = 2.0;
+const BRANCH_BUS_GAP: f64 = 10.0;
+const TERMINAL_GAP: f64 = 20.0;
+const FAR_X_SENTINEL: f64 = 99999.0;
+const TERMINAL_INSET: f64 = 15.0;
+const LABEL_BASELINE: f64 = 4.0;
+const HUB_TITLE_Y: f64 = 18.0;
+const ICON_OFF_Y: f64 = 8.0;
+const PORT_BLOCK_PAD: f64 = 40.0;
+const PORT_SPACING: f64 = 40.0;
+const PORT_LABEL_PAD: f64 = 8.0;
+const RATING_LINE_OFFSET: f64 = 16.0;
+const PASSIVE_LABEL_PAD: f64 = 6.0;
+const PASSIVE_LABEL_OFFSET_Y: f64 = 14.0;
+const PASSIVE_HIT_PAD_H: f64 = 18.0;
+const PASSIVE_VALUE_OFFSET: f64 = 4.0;
+
 /// Render the left-side branch tree off a hub pin: a vertical bus with
 /// horizontal stubs feeding each passive chain, then per-chain terminals.
 /// Used when one hub pin fans out to several spoke chains (e.g. a power
@@ -35,7 +53,7 @@ const RenderError = draw.RenderError;
 pub fn drawBranchTreeLeft(self: *RenderCtx, w: anytype, junction_x: f64, center_y: f64, branches: []const Branch, junction_net: []const u8) RenderError!void {
     const n = branches.len;
     const total_height = @as(f64, @floatFromInt(n -| 1)) * branch_spacing;
-    const start_y = center_y - total_height / 2.0;
+    const start_y = center_y - total_height / HALF_DIVISOR;
 
     const bx = junction_x - bus_gap;
     try drawNetWire(w, junction_x, center_y, bx, center_y, junction_net);
@@ -48,8 +66,8 @@ pub fn drawBranchTreeLeft(self: *RenderCtx, w: anytype, junction_x: f64, center_
 
     for (branches, 0..) |branch, idx| {
         const by = start_y + @as(f64, @floatFromInt(idx)) * branch_spacing;
-        try drawNetWire(w, bx, by, bx - 10.0, by, junction_net);
-        const chain_end_x = try drawPassiveChainLeft(self, w, bx - 10.0, by, branch.chain);
+        try drawNetWire(w, bx, by, bx - BRANCH_BUS_GAP, by, junction_net);
+        const chain_end_x = try drawPassiveChainLeft(self, w, bx - BRANCH_BUS_GAP, by, branch.chain);
         try bodies.append(self.allocator, .{ .end_x = chain_end_x, .cy = by, .terminal = branch.terminal });
     }
 
@@ -62,7 +80,7 @@ pub fn drawBranchTreeLeft(self: *RenderCtx, w: anytype, junction_x: f64, center_
 pub fn drawBranchTreeRight(self: *RenderCtx, w: anytype, junction_x: f64, center_y: f64, branches: []const Branch, junction_net: []const u8) RenderError!void {
     const n = branches.len;
     const total_height = @as(f64, @floatFromInt(n -| 1)) * branch_spacing;
-    const start_y = center_y - total_height / 2.0;
+    const start_y = center_y - total_height / HALF_DIVISOR;
 
     const bx = junction_x + bus_gap;
     try drawNetWire(w, junction_x, center_y, bx, center_y, junction_net);
@@ -75,8 +93,8 @@ pub fn drawBranchTreeRight(self: *RenderCtx, w: anytype, junction_x: f64, center
 
     for (branches, 0..) |branch, idx| {
         const by = start_y + @as(f64, @floatFromInt(idx)) * branch_spacing;
-        try drawNetWire(w, bx, by, bx + 10.0, by, junction_net);
-        const chain_end_x = try drawPassiveChainRight(self, w, bx + 10.0, by, branch.chain);
+        try drawNetWire(w, bx, by, bx + BRANCH_BUS_GAP, by, junction_net);
+        const chain_end_x = try drawPassiveChainRight(self, w, bx + BRANCH_BUS_GAP, by, branch.chain);
         try bodies.append(self.allocator, .{ .end_x = chain_end_x, .cy = by, .terminal = branch.terminal });
     }
 
@@ -87,7 +105,7 @@ fn renderBranchTerminalsLeft(self: *RenderCtx, w: anytype, bodies: []const Branc
     if (bodies.len == 0) return;
     var term_x: f64 = 0;
     for (bodies) |b| {
-        const tx = b.end_x - 20.0;
+        const tx = b.end_x - TERMINAL_GAP;
         if (term_x == 0 or tx < term_x) term_x = tx;
     }
 
@@ -104,8 +122,8 @@ fn renderBranchTerminalsLeft(self: *RenderCtx, w: anytype, bodies: []const Branc
             try drawNetWire(w, group[0].end_x, group[0].cy, term_x, group[0].cy, term);
             try drawTerminal(self, w, term_x, group[0].cy, term, "end");
         } else {
-            var bx: f64 = 99999.0;
-            for (group) |b| bx = @min(bx, b.end_x - 15.0);
+            var bx: f64 = FAR_X_SENTINEL;
+            for (group) |b| bx = @min(bx, b.end_x - TERMINAL_INSET);
             for (group) |b| try drawNetWire(w, b.end_x, b.cy, bx, b.cy, term);
             try drawNetWire(w, bx, group[0].cy, bx, group[group.len - 1].cy, term);
             try drawNetWire(w, bx, group[group.len - 1].cy, term_x, group[group.len - 1].cy, term);
@@ -120,7 +138,7 @@ fn renderBranchTerminalsRight(self: *RenderCtx, w: anytype, bodies: []const Bran
     if (bodies.len == 0) return;
     var term_x: f64 = 0;
     for (bodies) |b| {
-        const tx = b.end_x + 20.0;
+        const tx = b.end_x + TERMINAL_GAP;
         if (term_x == 0 or tx > term_x) term_x = tx;
     }
 
@@ -137,8 +155,8 @@ fn renderBranchTerminalsRight(self: *RenderCtx, w: anytype, bodies: []const Bran
             try drawNetWire(w, group[0].end_x, group[0].cy, term_x, group[0].cy, term);
             try drawTerminal(self, w, term_x, group[0].cy, term, "start");
         } else {
-            var bx: f64 = -99999.0;
-            for (group) |b| bx = @max(bx, b.end_x + 15.0);
+            var bx: f64 = -FAR_X_SENTINEL;
+            for (group) |b| bx = @max(bx, b.end_x + TERMINAL_INSET);
             for (group) |b| try drawNetWire(w, b.end_x, b.cy, bx, b.cy, term);
             try drawNetWire(w, bx, group[0].cy, bx, group[group.len - 1].cy, term);
             try drawNetWire(w, bx, group[group.len - 1].cy, term_x, group[group.len - 1].cy, term);
@@ -167,7 +185,7 @@ pub fn drawTerminal(self: *RenderCtx, w: anytype, end_x: f64, cy: f64, term: []c
             \\<text x="{d:.1}" y="{d:.1}" text-anchor="{s}" font-size="11" font-weight="bold" fill="{s}">{s}</text>
             \\</g>
             \\
-        , .{ display, label_x, cy + 4.0, anchor, color, display });
+        , .{ display, label_x, cy + LABEL_BASELINE, anchor, color, display });
     }
     try writeDebugPin(w, end_x, cy);
 }
@@ -181,8 +199,8 @@ pub fn drawHubIcon(self: *RenderCtx, w: anytype, hub: FlatInst, box_y: f64, hub_
     _ = self;
     const icon = classifyComponent(hub);
     if (icon) |icon_name| {
-        const icon_cx = hub_x + hub_width / 2.0;
-        const icon_cy = box_y + hub_height / 2.0 + 8.0;
+        const icon_cx = hub_x + hub_width / HALF_DIVISOR;
+        const icon_cy = box_y + hub_height / HALF_DIVISOR + ICON_OFF_Y;
         try drawBlockIcon(w, icon_name, icon_cx, icon_cy, "#4a9eff");
     }
 }
@@ -221,10 +239,10 @@ pub fn renderPortBlock(self: *RenderCtx, w: anytype, name: []const u8, ports: []
         }
     }
 
-    const port_spacing: f64 = 40.0;
-    const box_pad: f64 = 40.0;
+    const port_spacing: f64 = PORT_SPACING;
+    const box_pad: f64 = PORT_BLOCK_PAD;
     const max_side = @max(@max(left_count, right_count), 1);
-    const block_height = box_pad * 2.0 + @as(f64, @floatFromInt(max_side - 1)) * port_spacing;
+    const block_height = box_pad * HALF_DIVISOR + @as(f64, @floatFromInt(max_side - 1)) * port_spacing;
     const box_y = y_start;
 
     try w.print(
@@ -236,14 +254,14 @@ pub fn renderPortBlock(self: *RenderCtx, w: anytype, name: []const u8, ports: []
         box_y,
         hub_width,
         block_height,
-        hub_x + hub_width / 2.0,
-        box_y + 18.0,
+        hub_x + hub_width / HALF_DIVISOR,
+        box_y + HUB_TITLE_Y,
         name,
     });
 
     if (icon) |icon_name| {
-        const icon_cx = hub_x + hub_width / 2.0;
-        const icon_cy = box_y + block_height / 2.0 + 8.0;
+        const icon_cx = hub_x + hub_width / HALF_DIVISOR;
+        const icon_cy = box_y + block_height / HALF_DIVISOR + ICON_OFF_Y;
         try drawBlockIcon(w, icon_name, icon_cx, icon_cy, "#4a9");
     }
 
@@ -262,20 +280,20 @@ pub fn renderPortBlock(self: *RenderCtx, w: anytype, name: []const u8, ports: []
             try w.print(
                 \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="12" fill="#4a9">{s} {s}</text>
                 \\
-            , .{ edge_x - 8.0, py + 4.0, port.name, dir_text });
+            , .{ edge_x - PORT_LABEL_PAD, py + LABEL_BASELINE, port.name, dir_text });
 
             try w.print(
                 \\<g class="net" data-net="{s}" style="cursor:pointer">
                 \\<text x="{d:.1}" y="{d:.1}" text-anchor="start" font-size="11" font-weight="bold" fill="#4a9eff">{s}</text>
                 \\</g>
                 \\
-            , .{ port.net, stub_x + net_label_gap, py + 4.0, port.net });
+            , .{ port.net, stub_x + net_label_gap, py + LABEL_BASELINE, port.net });
 
             if (port.rated_min != null and port.rated_max != null) {
                 try w.print(
                     \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="9" fill="#888">{d:.1}V - {d:.1}V</text>
                     \\
-                , .{ edge_x - 8.0, py + 16.0, port.rated_min.?, port.rated_max.? });
+                , .{ edge_x - PORT_LABEL_PAD, py + RATING_LINE_OFFSET, port.rated_min.?, port.rated_max.? });
             }
 
             right_idx += 1;
@@ -294,7 +312,7 @@ pub fn renderPortBlock(self: *RenderCtx, w: anytype, name: []const u8, ports: []
             try w.print(
                 \\<text x="{d:.1}" y="{d:.1}" font-size="12" fill="#4a9">{s}{s}</text>
                 \\
-            , .{ edge_x + 8.0, py + 4.0, dir_text, port.name });
+            , .{ edge_x + PORT_LABEL_PAD, py + LABEL_BASELINE, dir_text, port.name });
 
             if (isGroundNet(baseNetName(port.net))) {
                 try w.print(
@@ -309,14 +327,14 @@ pub fn renderPortBlock(self: *RenderCtx, w: anytype, name: []const u8, ports: []
                     \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="11" font-weight="bold" fill="#4a9eff">{s}</text>
                     \\</g>
                     \\
-                , .{ port.net, stub_x - net_label_gap, py + 4.0, port.net });
+                , .{ port.net, stub_x - net_label_gap, py + LABEL_BASELINE, port.net });
             }
 
             if (port.rated_min != null and port.rated_max != null) {
                 try w.print(
                     \\<text x="{d:.1}" y="{d:.1}" font-size="9" fill="#888">{d:.1}V - {d:.1}V</text>
                     \\
-                , .{ edge_x + 8.0, py + 16.0, port.rated_min.?, port.rated_max.? });
+                , .{ edge_x + PORT_LABEL_PAD, py + RATING_LINE_OFFSET, port.rated_min.?, port.rated_max.? });
             }
 
             left_idx += 1;
@@ -336,8 +354,8 @@ pub fn drawPassiveChainLeft(_: *RenderCtx, w: anytype, start_x: f64, cy: f64, sp
     var x = start_x;
     for (spokes, 0..) |inst, i| {
         if (i > 0) {
-            try drawWire(w, x, cy, x - 20.0, cy);
-            x -= 20.0;
+            try drawWire(w, x, cy, x - TERMINAL_GAP, cy);
+            x -= TERMINAL_GAP;
         }
         try drawPassiveLeft(w, inst, x, cy);
         x -= passive_bw;
@@ -353,8 +371,8 @@ pub fn drawPassiveChainRight(_: *RenderCtx, w: anytype, start_x: f64, cy: f64, s
     var x = start_x;
     for (spokes, 0..) |inst, i| {
         if (i > 0) {
-            try drawWire(w, x, cy, x + 20.0, cy);
-            x += 20.0;
+            try drawWire(w, x, cy, x + TERMINAL_GAP, cy);
+            x += TERMINAL_GAP;
         }
         try drawPassiveRight(w, inst, x, cy);
         x += passive_bw;
@@ -364,9 +382,9 @@ pub fn drawPassiveChainRight(_: *RenderCtx, w: anytype, start_x: f64, cy: f64, s
 
 fn drawPassiveLeft(w: anytype, inst: FlatInst, x: f64, cy: f64) !void {
     const bx = x - passive_bw;
-    const by = cy - passive_bh / 2.0;
-    const cx = bx + passive_bw / 2.0;
-    const pad: f64 = 6.0;
+    const by = cy - passive_bh / HALF_DIVISOR;
+    const cx = bx + passive_bw / HALF_DIVISOR;
+    const pad: f64 = PASSIVE_LABEL_PAD;
 
     try w.print(
         \\<g data-ref="{s}" class="component" style="cursor:pointer">
@@ -375,9 +393,9 @@ fn drawPassiveLeft(w: anytype, inst: FlatInst, x: f64, cy: f64) !void {
     , .{
         shortRef(inst.ref_des),
         bx - pad,
-        by - 14.0,
-        passive_bw + pad * 2.0,
-        passive_bh + 18.0,
+        by - PASSIVE_LABEL_OFFSET_Y,
+        passive_bw + pad * HALF_DIVISOR,
+        passive_bh + PASSIVE_HIT_PAD_H,
     });
 
     try drawSymbolShape(w, bx, passive_bw, cx, cy, inst);
@@ -386,7 +404,7 @@ fn drawPassiveLeft(w: anytype, inst: FlatInst, x: f64, cy: f64) !void {
         \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="9" fill="#888">{s} {s}</text>
         \\</g>
         \\
-    , .{ cx, by - 4.0, shortRef(inst.ref_des), formatShort(inst) });
+    , .{ cx, by - PASSIVE_VALUE_OFFSET, shortRef(inst.ref_des), formatShort(inst) });
 
     try writeDebugPin(w, bx, cy);
     try writeDebugPin(w, bx + passive_bw, cy);
@@ -394,9 +412,9 @@ fn drawPassiveLeft(w: anytype, inst: FlatInst, x: f64, cy: f64) !void {
 
 fn drawPassiveRight(w: anytype, inst: FlatInst, x: f64, cy: f64) !void {
     const bx = x;
-    const by = cy - passive_bh / 2.0;
-    const cx = bx + passive_bw / 2.0;
-    const pad: f64 = 6.0;
+    const by = cy - passive_bh / HALF_DIVISOR;
+    const cx = bx + passive_bw / HALF_DIVISOR;
+    const pad: f64 = PASSIVE_LABEL_PAD;
 
     try w.print(
         \\<g data-ref="{s}" class="component" style="cursor:pointer">
@@ -405,9 +423,9 @@ fn drawPassiveRight(w: anytype, inst: FlatInst, x: f64, cy: f64) !void {
     , .{
         shortRef(inst.ref_des),
         bx - pad,
-        by - 14.0,
-        passive_bw + pad * 2.0,
-        passive_bh + 18.0,
+        by - PASSIVE_LABEL_OFFSET_Y,
+        passive_bw + pad * HALF_DIVISOR,
+        passive_bh + PASSIVE_HIT_PAD_H,
     });
 
     try drawSymbolShape(w, bx, passive_bw, cx, cy, inst);
@@ -416,7 +434,7 @@ fn drawPassiveRight(w: anytype, inst: FlatInst, x: f64, cy: f64) !void {
         \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="9" fill="#888">{s} {s}</text>
         \\</g>
         \\
-    , .{ cx, by - 4.0, shortRef(inst.ref_des), formatShort(inst) });
+    , .{ cx, by - PASSIVE_VALUE_OFFSET, shortRef(inst.ref_des), formatShort(inst) });
 
     try writeDebugPin(w, bx, cy);
     try writeDebugPin(w, bx + passive_bw, cy);

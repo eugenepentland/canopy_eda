@@ -7,6 +7,14 @@ const footprint_mod = @import("../export_kicad_footprint.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
+// ── Constants ─────────────────────────────────────────────────────
+const HTTP_NOT_FOUND: u16 = 404;
+const HTTP_INTERNAL_ERROR: u16 = 500;
+const MAX_FOOTPRINT_BYTES: usize = 256 * 1024;
+const SEXP_EXT_LEN: usize = ".sexp".len;
+const FAR_AWAY: f64 = 999;
+const SVG_BBOX_PAD: f64 = 0.5;
+
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
@@ -15,32 +23,32 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 /// page's preview thumbnails and the swap-component dialog.
 pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
     const fp_path = std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints/{s}.sexp", .{ ctx.project_dir, name }) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     defer ctx.allocator.free(fp_path);
-    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path, 256 * 1024) catch {
-        res.status = 404;
+    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path, MAX_FOOTPRINT_BYTES) catch {
+        res.status = HTTP_NOT_FOUND;
         res.body = "Footprint not found";
         return;
     };
 
     const nodes = parser_mod.parse(ctx.allocator, content) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Parse error";
         return;
     };
     if (nodes.len == 0) {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     }
     const top = nodes[0].asList() orelse {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
 
@@ -118,10 +126,10 @@ pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         }
     }
 
-    var min_x: f64 = 999;
-    var min_y: f64 = 999;
-    var max_x: f64 = -999;
-    var max_y: f64 = -999;
+    var min_x: f64 = FAR_AWAY;
+    var min_y: f64 = FAR_AWAY;
+    var max_x: f64 = -FAR_AWAY;
+    var max_y: f64 = -FAR_AWAY;
     for (pads.items) |p| {
         const lx = p.x - p.w / 2;
         const ly = p.y - p.h / 2;
@@ -143,16 +151,15 @@ pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         if (l.y2 > max_y) max_y = l.y2;
     }
     if (pads.items.len == 0 and silk_lines.items.len == 0) {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         res.body = "Empty footprint";
         return;
     }
 
-    const pad_f: f64 = 0.5;
-    min_x -= pad_f;
-    min_y -= pad_f;
-    max_x += pad_f;
-    max_y += pad_f;
+    min_x -= SVG_BBOX_PAD;
+    min_y -= SVG_BBOX_PAD;
+    max_x += SVG_BBOX_PAD;
+    max_y += SVG_BBOX_PAD;
     const vw = max_x - min_x;
     const vh = max_y - min_y;
 
@@ -201,10 +208,10 @@ pub fn listFootprints(w: anytype, ctx: *Handler) HandlerError!void {
     var iter = dir.iterate();
     while (try iter.next()) |entry| {
         if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".sexp")) {
-            const fname = entry.name[0 .. entry.name.len - 5];
+            const fname = entry.name[0 .. entry.name.len - SEXP_EXT_LEN];
             const file_path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ fp_path, entry.name }) catch continue;
             defer ctx.allocator.free(file_path);
-            const file_content = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, 256 * 1024) catch {
+            const file_content = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_FOOTPRINT_BYTES) catch {
                 try w.print("<tr><td>{s}</td><td>-</td></tr>", .{fname});
                 continue;
             };
@@ -239,10 +246,10 @@ pub fn footprintPadBounds(allocator: std.mem.Allocator, content: []const u8) ?st
     const nodes = parser_mod.parse(allocator, content) catch return null;
     if (nodes.len == 0) return null;
     const top = nodes[0].asList() orelse return null;
-    var min_x: f64 = 999;
-    var min_y: f64 = 999;
-    var max_x: f64 = -999;
-    var max_y: f64 = -999;
+    var min_x: f64 = FAR_AWAY;
+    var min_y: f64 = FAR_AWAY;
+    var max_x: f64 = -FAR_AWAY;
+    var max_y: f64 = -FAR_AWAY;
     var found = false;
     for (top[1..]) |child| {
         if (child.isForm("pad")) {

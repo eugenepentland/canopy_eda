@@ -11,6 +11,17 @@ const json_writer = @import("json_writer.zig");
 
 pub const Severity = checks.Severity;
 
+// ── Numeric constants ──────────────────────────────────────────────
+const HALF_DIVISOR: f64 = 2.0;
+const GRID_HASH_PRIME: i64 = 100003;
+const TRACE_WIDTH_EPSILON: f64 = 0.001;
+const SEG_LEN_EPSILON: f64 = 0.0001;
+const DEG_TO_RAD_BASE: f64 = 180.0;
+const PAD_NODE_MIN_CHILDREN: usize = 5;
+
+// ── Repeated string literals ───────────────────────────────────────
+const KIND_CLEARANCE: []const u8 = "clearance";
+
 /// A single design-rule-check finding on the PCB layout: the rule kind
 /// (e.g. `clearance`, `min_width`, `keepout`, `unconnected`), a human
 /// message, the board-coordinate location to highlight, and a severity
@@ -116,7 +127,7 @@ pub fn runDrc(
             try pad_list.append(allocator, .{
                 .x = pos[0],
                 .y = pos[1],
-                .r = @max(pad.w, pad.h) / 2.0,
+                .r = @max(pad.w, pad.h) / HALF_DIVISOR,
                 .net = net_name,
                 .layer = if (is_thru) "ALL" else fp_layer,
                 .ref = inst.ref_des,
@@ -132,7 +143,7 @@ pub fn runDrc(
         for (pad_list.items) |p| mr = @max(mr, p.r);
         break :blk mr;
     };
-    const grid_cell: f64 = @max(2.0, (rules.clearance + max_pad_r * 2) * 2.0);
+    const grid_cell: f64 = @max(HALF_DIVISOR, (rules.clearance + max_pad_r * 2) * HALF_DIVISOR);
     {
         // Hash pads into grid cells
         var grid = std.AutoHashMap(i64, std.ArrayListUnmanaged(usize)).init(allocator);
@@ -144,7 +155,7 @@ pub fn runDrc(
         for (pad_list.items, 0..) |p, i| {
             const cx: i64 = @intFromFloat(@floor(p.x / grid_cell));
             const cy: i64 = @intFromFloat(@floor(p.y / grid_cell));
-            const key: i64 = cx *% 100003 +% cy;
+            const key: i64 = cx *% GRID_HASH_PRIME +% cy;
             const gop = try grid.getOrPut(key);
             if (!gop.found_existing) gop.value_ptr.* = .empty;
             try gop.value_ptr.append(allocator, i);
@@ -157,7 +168,7 @@ pub fn runDrc(
             while (dcx <= 1) : (dcx += 1) {
                 var dcy: i64 = -1;
                 while (dcy <= 1) : (dcy += 1) {
-                    const nkey: i64 = (acx + dcx) *% 100003 +% (acy + dcy);
+                    const nkey: i64 = (acx + dcx) *% GRID_HASH_PRIME +% (acy + dcy);
                     const cell = grid.get(nkey) orelse continue;
                     for (cell.items) |bi| {
                         if (bi <= ai) continue; // avoid duplicate pairs
@@ -169,10 +180,10 @@ pub fn runDrc(
                         const dist = @sqrt(dx * dx + dy * dy) - a.r - b.r;
                         if (dist < rules.clearance) {
                             try violations.append(allocator, .{
-                                .kind = "clearance",
+                                .kind = KIND_CLEARANCE,
                                 .message = try std.fmt.allocPrint(allocator, "Pad {s}.{s} to {s}.{s}: {d:.2}mm < {d:.2}mm clearance", .{ a.ref, a.pin, b.ref, b.pin, dist, rules.clearance }),
-                                .x = (a.x + b.x) / 2.0,
-                                .y = (a.y + b.y) / 2.0,
+                                .x = (a.x + b.x) / HALF_DIVISOR,
+                                .y = (a.y + b.y) / HALF_DIVISOR,
                                 .severity = .@"error",
                             });
                         }
@@ -189,10 +200,10 @@ pub fn runDrc(
                 if (sameNet(t.net, pad.net)) continue;
                 if (!std.mem.eql(u8, pad.layer, "ALL") and !std.mem.eql(u8, pad.layer, t.layer)) continue;
                 const d = distPtSeg(pad.x, pad.y, t.points[pi][0], t.points[pi][1], t.points[pi + 1][0], t.points[pi + 1][1]);
-                const gap = d - pad.r - t.width / 2.0;
+                const gap = d - pad.r - t.width / HALF_DIVISOR;
                 if (gap < rules.clearance) {
                     try violations.append(allocator, .{
-                        .kind = "clearance",
+                        .kind = KIND_CLEARANCE,
                         .message = try std.fmt.allocPrint(allocator, "Trace '{s}' to pad {s}.{s}: {d:.2}mm < {d:.2}mm", .{ baseNet(t.net), pad.ref, pad.pin, gap, rules.clearance }),
                         .x = pad.x,
                         .y = pad.y,
@@ -211,7 +222,7 @@ pub fn runDrc(
             const tb = layout.traces[tj];
             if (sameNet(ta.net, tb.net)) continue;
             if (!std.mem.eql(u8, ta.layer, tb.layer)) continue;
-            const min_gap = rules.clearance + ta.width / 2.0 + tb.width / 2.0;
+            const min_gap = rules.clearance + ta.width / HALF_DIVISOR + tb.width / HALF_DIVISOR;
             // Check all segment pairs
             var found_violation = false;
             for (0..ta.points.len -| 1) |ai| {
@@ -228,10 +239,10 @@ pub fn runDrc(
                         tb.points[bi + 1][1],
                     );
                     if (d < min_gap) {
-                        const mx = (ta.points[ai][0] + tb.points[bi][0]) / 2.0;
-                        const my = (ta.points[ai][1] + tb.points[bi][1]) / 2.0;
+                        const mx = (ta.points[ai][0] + tb.points[bi][0]) / HALF_DIVISOR;
+                        const my = (ta.points[ai][1] + tb.points[bi][1]) / HALF_DIVISOR;
                         try violations.append(allocator, .{
-                            .kind = "clearance",
+                            .kind = KIND_CLEARANCE,
                             .message = try std.fmt.allocPrint(allocator, "Trace '{s}' to trace '{s}': {d:.2}mm < {d:.2}mm", .{ baseNet(ta.net), baseNet(tb.net), d, min_gap }),
                             .x = mx,
                             .y = my,
@@ -253,10 +264,10 @@ pub fn runDrc(
             if (sameNet(v.net, pad.net)) continue;
             const dx = v.x - pad.x;
             const dy = v.y - pad.y;
-            const dist = @sqrt(dx * dx + dy * dy) - v.pad_size / 2.0 - pad.r;
+            const dist = @sqrt(dx * dx + dy * dy) - v.pad_size / HALF_DIVISOR - pad.r;
             if (dist < rules.clearance) {
                 try violations.append(allocator, .{
-                    .kind = "clearance",
+                    .kind = KIND_CLEARANCE,
                     .message = try std.fmt.allocPrint(allocator, "Via '{s}' to pad {s}.{s}: {d:.2}mm < {d:.2}mm", .{ baseNet(v.net), pad.ref, pad.pin, dist, rules.clearance }),
                     .x = v.x,
                     .y = v.y,
@@ -269,10 +280,10 @@ pub fn runDrc(
             if (sameNet(v.net, t.net)) continue;
             for (0..t.points.len -| 1) |pi| {
                 const d = distPtSeg(v.x, v.y, t.points[pi][0], t.points[pi][1], t.points[pi + 1][0], t.points[pi + 1][1]);
-                const gap = d - v.pad_size / 2.0 - t.width / 2.0;
+                const gap = d - v.pad_size / HALF_DIVISOR - t.width / HALF_DIVISOR;
                 if (gap < rules.clearance) {
                     try violations.append(allocator, .{
-                        .kind = "clearance",
+                        .kind = KIND_CLEARANCE,
                         .message = try std.fmt.allocPrint(allocator, "Via '{s}' to trace '{s}': {d:.2}mm < {d:.2}mm", .{ baseNet(v.net), baseNet(t.net), gap, rules.clearance }),
                         .x = v.x,
                         .y = v.y,
@@ -286,7 +297,7 @@ pub fn runDrc(
 
     // Check 5: Minimum trace width
     for (layout.traces) |t| {
-        if (t.width < rules.track_width - 0.001) {
+        if (t.width < rules.track_width - TRACE_WIDTH_EPSILON) {
             if (t.points.len >= 2) {
                 try violations.append(allocator, .{
                     .kind = "min_width",
@@ -302,7 +313,7 @@ pub fn runDrc(
     // Check 6: Minimum annular ring (via pad_size - drill should be >= 0.15mm total, 0.075mm per side)
     const min_annular = 0.075; // mm per side
     for (layout.vias) |v| {
-        const annular = (v.pad_size - v.drill) / 2.0;
+        const annular = (v.pad_size - v.drill) / HALF_DIVISOR;
         if (annular < min_annular) {
             try violations.append(allocator, .{
                 .kind = "annular_ring",
@@ -438,7 +449,7 @@ pub fn runDrc(
                 for (pad_list.items, 0..) |pad, pi| {
                     if (!sameNet(pad.net, v.net)) continue;
                     const dv = @sqrt(std.math.pow(f64, pad.x - v.x, 2) + std.math.pow(f64, pad.y - v.y, 2));
-                    if (dv <= pad.r + v.pad_size / 2.0 + connect_dist) {
+                    if (dv <= pad.r + v.pad_size / HALF_DIVISOR + connect_dist) {
                         try via_pads.append(allocator, pi);
                     }
                 }
@@ -575,7 +586,7 @@ fn distPtSeg(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2: f64) f64 {
     const dx = x2 - x1;
     const dy = y2 - y1;
     const len2 = dx * dx + dy * dy;
-    if (len2 < 0.0001) {
+    if (len2 < SEG_LEN_EPSILON) {
         const ddx = px - x1;
         const ddy = py - y1;
         return @sqrt(ddx * ddx + ddy * ddy);
@@ -610,7 +621,7 @@ fn pointInPolygon(x: f64, y: f64, polygon: []const [2]f64) bool {
 }
 
 fn transformPad(px: f64, py: f64, angle_deg: f64, comp_x: f64, comp_y: f64) [2]f64 {
-    const a = angle_deg * std.math.pi / 180.0;
+    const a = angle_deg * std.math.pi / DEG_TO_RAD_BASE;
     return .{
         comp_x + px * @cos(a) - py * @sin(a),
         comp_y + px * @sin(a) + py * @cos(a),
@@ -627,7 +638,7 @@ fn parsePads(allocator: std.mem.Allocator, source: []const u8) ![]const PadGeom 
     var pads: std.ArrayListUnmanaged(PadGeom) = .empty;
     for (children) |child| {
         const cl = child.asList() orelse continue;
-        if (cl.len < 5) continue;
+        if (cl.len < PAD_NODE_MIN_CHILDREN) continue;
         const tag = cl[0].asAtom() orelse continue;
         if (!std.mem.eql(u8, tag, "pad")) continue;
         const name = cl[1].asAtom() orelse cl[1].asString() orelse continue;

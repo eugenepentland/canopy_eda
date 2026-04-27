@@ -4,6 +4,15 @@ const parser_mod = @import("sexpr/parser.zig");
 const ast = @import("sexpr/ast.zig");
 const Node = ast.Node;
 
+// ── Constants ─────────────────────────────────────────────────────
+// (placement "ref" x y angle side uuid) — child indices
+const PLACEMENT_SIDE_INDEX: usize = 5;
+const PLACEMENT_UUID_INDEX: usize = 6;
+// (via x y "net" drill pad_size "layer_from" "layer_to") — child indices
+const VIA_PAD_SIZE_INDEX: usize = 5;
+const VIA_LAYER_FROM_INDEX: usize = 6;
+const VIA_LAYER_TO_INDEX: usize = 7;
+
 /// Error set for layout file IO. Covers the std.fs surfaces (open / read /
 /// write / makePath / createFile / rename) plus parser + allocator errors.
 pub const LayoutError = std.mem.Allocator.Error ||
@@ -218,10 +227,10 @@ fn parsePlacement(children: []const Node) ?Placement {
         .y = nodeFloat(children[3]) orelse return null,
         .angle = nodeFloat(children[4]) orelse 0,
         .side = blk: {
-            const s = children[5].asAtom() orelse return null;
+            const s = children[PLACEMENT_SIDE_INDEX].asAtom() orelse return null;
             break :blk if (std.mem.eql(u8, s, "back")) .back else .front;
         },
-        .uuid = children[6].asString() orelse return null,
+        .uuid = children[PLACEMENT_UUID_INDEX].asString() orelse return null,
     };
 }
 
@@ -258,9 +267,9 @@ fn parseVia(children: []const Node) ?Via {
         .y = nodeFloat(children[2]) orelse return null,
         .net = children[3].asString() orelse return null,
         .drill = nodeFloat(children[4]) orelse return null,
-        .pad_size = nodeFloat(children[5]) orelse return null,
-        .layer_from = children[6].asString() orelse return null,
-        .layer_to = children[7].asString() orelse return null,
+        .pad_size = nodeFloat(children[VIA_PAD_SIZE_INDEX]) orelse return null,
+        .layer_from = children[VIA_LAYER_FROM_INDEX].asString() orelse return null,
+        .layer_to = children[VIA_LAYER_TO_INDEX].asString() orelse return null,
     };
 }
 

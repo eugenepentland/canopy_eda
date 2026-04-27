@@ -12,6 +12,10 @@ const Net = env_mod.Net;
 
 pub const Severity = checks.Severity;
 
+// ── Constants ─────────────────────────────────────────────────────
+const VOLTAGE_MISMATCH_TOLERANCE_V: f64 = 0.01;
+const PERCENT_MULTIPLIER: f64 = 100.0;
+
 /// Tag identifying which electrical-rule check produced a `Violation`. The
 /// review UI groups findings by this kind so users can scan all
 /// power-budget warnings or all floating nets in one cluster.
@@ -350,7 +354,7 @@ fn checkVoltageMismatches(
         if (entries.len < 2) continue;
         const first_v = entries[0].voltage;
         for (entries[1..]) |e| {
-            if (@abs(e.voltage - first_v) > 0.01) {
+            if (@abs(e.voltage - first_v) > VOLTAGE_MISMATCH_TOLERANCE_V) {
                 const msg = std.fmt.allocPrint(
                     allocator,
                     "Voltage mismatch on \"{s}\": {s} declares {d:.1}V vs {s} declares {d:.1}V",
@@ -505,7 +509,7 @@ fn checkPowerBudget(
             },
             .tight => {
                 const styp = rail.source_typ_a orelse continue;
-                const pct: u32 = @intFromFloat(100.0 * rail.load_typ_a / styp);
+                const pct: u32 = @intFromFloat(PERCENT_MULTIPLIER * rail.load_typ_a / styp);
                 const msg = std.fmt.allocPrint(
                     allocator,
                     "Rail \"{s}\" typ load {d:.3}A is {d}% of {s} typ {d:.3}A — tight margin",

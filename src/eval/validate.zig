@@ -8,6 +8,9 @@ const DesignBlock = env_mod.DesignBlock;
 const Node = ast.Node;
 const Env = env_mod.Env;
 
+// ── Constants ─────────────────────────────────────────────────────
+const VOLTAGE_MISMATCH_TOLERANCE_V: f64 = 0.01;
+
 /// Run post-build validations on a design block and its sub-blocks.
 pub fn validateDesign(self: *Evaluator, block: *const DesignBlock) EvalError!void {
     try checkSinglePinNets(self, block);
@@ -109,7 +112,7 @@ fn checkVoltageMismatches(self: *Evaluator, block: *const DesignBlock) !void {
         if (entries.len < 2) continue;
         const first_v = entries[0].voltage;
         for (entries[1..]) |e| {
-            if (@abs(e.voltage - first_v) > 0.01) {
+            if (@abs(e.voltage - first_v) > VOLTAGE_MISMATCH_TOLERANCE_V) {
                 const msg = std.fmt.allocPrint(
                     self.allocator,
                     "Voltage mismatch on net \"{s}\": {s} declares {d:.1}V but {s} declares {d:.1}V",

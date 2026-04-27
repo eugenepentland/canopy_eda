@@ -20,6 +20,16 @@ const connection = @import("connection.zig");
 const branch = @import("branch.zig");
 const RenderError = draw.RenderError;
 
+// ── Layout constants ──────────────────────────────────────────────
+const HALF_DIVISOR: f64 = 2.0;
+const HUB_VPAD: f64 = 40.0;
+const HUB_TITLE_Y: f64 = 18.0;
+const PIN_LABEL_PAD_X: f64 = 8.0;
+const PIN_LABEL_PAD_Y: f64 = 4.0;
+const PIN_NUMBER_INSET_LEFT: f64 = 38.0;
+const PIN_NUMBER_INSET_RIGHT: f64 = 36.0;
+const PIN_NUMBER_BASELINE: f64 = 1.0;
+
 /// Render a single part of a multi-part instance as its own hub box.
 pub fn renderHubPart(self: *RenderCtx, w: anytype, hub: FlatInst, part: env_mod.Part, y_start: f64) RenderError!f64 {
     var all_pins: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -70,7 +80,7 @@ pub fn renderHubPart(self: *RenderCtx, w: anytype, hub: FlatInst, part: env_mod.
     for (left_heights) |h| left_total += h;
     var right_total: f64 = 0;
     for (right_heights) |h| right_total += h;
-    const hub_height = @max(left_total, right_total) + 40.0;
+    const hub_height = @max(left_total, right_total) + HUB_VPAD;
     const box_y = y_start;
 
     const label = try std.fmt.allocPrint(self.allocator, "{s} {s}", .{ shortRef(hub.ref_des), displayValue(hub) });
@@ -80,24 +90,24 @@ pub fn renderHubPart(self: *RenderCtx, w: anytype, hub: FlatInst, part: env_mod.
         \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="12" font-weight="bold" fill="#4a9eff">{s}</text></g>
         \\
     , .{
-        hub.ref_des, hub.ref_des,             part.name,
-        hub_x,       box_y,                   hub_width,
-        hub_height,  hub_x + hub_width / 2.0, box_y + 18.0,
+        hub.ref_des, hub.ref_des,                      part.name,
+        hub_x,       box_y,                            hub_width,
+        hub_height,  hub_x + hub_width / HALF_DIVISOR, box_y + HUB_TITLE_Y,
         label,
     });
 
-    var py_left = box_y + 40.0;
+    var py_left = box_y + HUB_VPAD;
     for (left_groups, 0..) |group, gi| {
         const h = left_heights[gi];
-        const cy = py_left + h / 2.0;
+        const cy = py_left + h / HALF_DIVISOR;
         try renderPinLeft(self, w, hub.ref_des, group, cy, h);
         py_left += h;
     }
 
-    var py_right = box_y + 40.0;
+    var py_right = box_y + HUB_VPAD;
     for (right_groups, 0..) |group, gi| {
         const h = right_heights[gi];
-        const cy = py_right + h / 2.0;
+        const cy = py_right + h / HALF_DIVISOR;
         try renderPinRight(self, w, hub.ref_des, group, cy, h);
         py_right += h;
     }
@@ -164,7 +174,7 @@ pub fn renderHub(self: *RenderCtx, w: anytype, hub: FlatInst, y_start: f64) Rend
     var right_total: f64 = 0;
     for (right_heights) |h| right_total += h;
 
-    const hub_height = @max(left_total, right_total) + 40.0;
+    const hub_height = @max(left_total, right_total) + HUB_VPAD;
     const box_y = y_start;
 
     try w.print(
@@ -177,26 +187,26 @@ pub fn renderHub(self: *RenderCtx, w: anytype, hub: FlatInst, y_start: f64) Rend
         box_y,
         hub_width,
         hub_height,
-        hub_x + hub_width / 2.0,
-        box_y + 18.0,
+        hub_x + hub_width / HALF_DIVISOR,
+        box_y + HUB_TITLE_Y,
         shortRef(hub.ref_des),
         displayValue(hub),
     });
 
     try branch.drawHubIcon(self, w, hub, box_y, hub_height);
 
-    var py_left = box_y + 40.0;
+    var py_left = box_y + HUB_VPAD;
     for (left_groups, 0..) |group, gi| {
         const height = left_heights[gi];
-        const pin_cy = py_left + height / 2.0;
+        const pin_cy = py_left + height / HALF_DIVISOR;
         try renderPinLeft(self, w, hub.ref_des, group, pin_cy, height);
         py_left += height;
     }
 
-    var py_right = box_y + 40.0;
+    var py_right = box_y + HUB_VPAD;
     for (right_groups, 0..) |group, gi| {
         const height = right_heights[gi];
-        const pin_cy = py_right + height / 2.0;
+        const pin_cy = py_right + height / HALF_DIVISOR;
         try renderPinRight(self, w, hub.ref_des, group, pin_cy, height);
         py_right += height;
     }
@@ -449,9 +459,9 @@ fn renderPinLeft(self: *RenderCtx, w: anytype, hub_ref: []const u8, group: PinGr
         \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="10" fill="#666">{s}</text>
         \\
     , .{
-        stub_x,   py,        px,                 py,
-        px + 8.0, py + 4.0,  group.display_name, stub_x + 38.0,
-        py - 1.0, pin_label,
+        stub_x,                   py,                   px,                 py,
+        px + PIN_LABEL_PAD_X,     py + PIN_LABEL_PAD_Y, group.display_name, stub_x + PIN_NUMBER_INSET_LEFT,
+        py - PIN_NUMBER_BASELINE, pin_label,
     });
 
     try writeDebugPin(w, stub_x, py);
@@ -472,9 +482,9 @@ fn renderPinRight(self: *RenderCtx, w: anytype, hub_ref: []const u8, group: PinG
         \\<text x="{d:.1}" y="{d:.1}" font-size="10" fill="#666">{s}</text>
         \\
     , .{
-        px,       py,        stub_x,             py,
-        px - 8.0, py + 4.0,  group.display_name, stub_x - 36.0,
-        py - 1.0, pin_label,
+        px,                       py,                   stub_x,             py,
+        px - PIN_LABEL_PAD_X,     py + PIN_LABEL_PAD_Y, group.display_name, stub_x - PIN_NUMBER_INSET_RIGHT,
+        py - PIN_NUMBER_BASELINE, pin_label,
     });
 
     try writeDebugPin(w, stub_x, py);

@@ -7,6 +7,18 @@ const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 const assets_css = @import("assets_css.zig");
 
+// ── Constants ─────────────────────────────────────────────────────
+const HTTP_NOT_FOUND: u16 = 404;
+const HTTP_BAD_REQUEST: u16 = 400;
+const HTTP_INTERNAL_ERROR: u16 = 500;
+const MAX_MODEL_BYTES: usize = 50 * 1024 * 1024;
+const MAX_FOOTPRINT_BYTES: usize = 256 * 1024;
+const MAX_CONFIG_BYTES: usize = 1024 * 1024;
+const MODEL_CONFIG_PATH_TEMPLATE = "{s}/lib/models/model-config.json";
+const FOOTPRINT_KEY = "\"footprint\":\"";
+const OFFSET_KEY = "\"offset\":[";
+const ROTATION_KEY = "\"rotation\":[";
+
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
@@ -24,16 +36,16 @@ pub var model_config_mutex: std.Thread.Mutex = .{};
 /// geometry referenced by the BOM's footprints.
 pub fn modelFileApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     const path = std.fmt.allocPrint(ctx.allocator, "{s}/lib/models/{s}", .{ ctx.project_dir, name }) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     defer ctx.allocator.free(path);
-    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, path, 50 * 1024 * 1024) catch {
-        res.status = 404;
+    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, path, MAX_MODEL_BYTES) catch {
+        res.status = HTTP_NOT_FOUND;
         res.body = "Model not found";
         return;
     };
@@ -47,12 +59,12 @@ pub fn modelFileApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 pub fn modelConfigGetApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     model_config_mutex.lock();
     defer model_config_mutex.unlock();
-    const path = std.fmt.allocPrint(ctx.allocator, "{s}/lib/models/model-config.json", .{ctx.project_dir}) catch {
-        res.status = 500;
+    const path = std.fmt.allocPrint(ctx.allocator, MODEL_CONFIG_PATH_TEMPLATE, .{ctx.project_dir}) catch {
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     defer ctx.allocator.free(path);
-    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 1024) catch {
+    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, path, MAX_CONFIG_BYTES) catch {
         res.body = "{}";
         res.content_type = .JSON;
         return;
@@ -66,43 +78,43 @@ pub fn modelConfigGetApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response)
 /// other footprint's settings untouched. Guarded by `model_config_mutex`.
 pub fn modelConfigPostApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         res.body = "no body";
         return;
     };
 
-    const fp_start = std.mem.indexOf(u8, body, "\"footprint\":\"") orelse {
-        res.status = 400;
+    const fp_start = std.mem.indexOf(u8, body, FOOTPRINT_KEY) orelse {
+        res.status = HTTP_BAD_REQUEST;
         res.body = "missing footprint";
         return;
     };
-    const fp_val_start = fp_start + 13;
+    const fp_val_start = fp_start + FOOTPRINT_KEY.len;
     const fp_end = std.mem.indexOfPos(u8, body, fp_val_start, "\"") orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
     const footprint = body[fp_val_start..fp_end];
 
-    const off_start = std.mem.indexOf(u8, body, "\"offset\":[") orelse {
-        res.status = 400;
+    const off_start = std.mem.indexOf(u8, body, OFFSET_KEY) orelse {
+        res.status = HTTP_BAD_REQUEST;
         res.body = "missing offset";
         return;
     };
-    const off_arr_start = off_start + 10;
+    const off_arr_start = off_start + OFFSET_KEY.len;
     const off_arr_end = std.mem.indexOfPos(u8, body, off_arr_start, "]") orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
     const off_str = body[off_arr_start..off_arr_end];
 
-    const rot_start = std.mem.indexOf(u8, body, "\"rotation\":[") orelse {
-        res.status = 400;
+    const rot_start = std.mem.indexOf(u8, body, ROTATION_KEY) orelse {
+        res.status = HTTP_BAD_REQUEST;
         res.body = "missing rotation";
         return;
     };
-    const rot_arr_start = rot_start + 12;
+    const rot_arr_start = rot_start + ROTATION_KEY.len;
     const rot_arr_end = std.mem.indexOfPos(u8, body, rot_arr_start, "]") orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
     const rot_str = body[rot_arr_start..rot_arr_end];
@@ -110,17 +122,17 @@ pub fn modelConfigPostApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
     model_config_mutex.lock();
     defer model_config_mutex.unlock();
 
-    const config_path = std.fmt.allocPrint(ctx.allocator, "{s}/lib/models/model-config.json", .{ctx.project_dir}) catch {
-        res.status = 500;
+    const config_path = std.fmt.allocPrint(ctx.allocator, MODEL_CONFIG_PATH_TEMPLATE, .{ctx.project_dir}) catch {
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     defer ctx.allocator.free(config_path);
-    const existing = infra_fs.cwd().readFileAlloc(ctx.allocator, config_path, 1024 * 1024) catch null;
+    const existing = infra_fs.cwd().readFileAlloc(ctx.allocator, config_path, MAX_CONFIG_BYTES) catch null;
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(ctx.allocator);
     const entry_str = std.fmt.allocPrint(ctx.allocator, "\"{s}\":{{\"offset\":[{s}],\"rotation\":[{s}]}}", .{ footprint, off_str, rot_str }) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     defer ctx.allocator.free(entry_str);
@@ -128,7 +140,7 @@ pub fn modelConfigPostApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
     if (existing) |ex| {
         defer ctx.allocator.free(ex);
         const key_marker = std.fmt.allocPrint(ctx.allocator, "\"{s}\":", .{footprint}) catch {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             return;
         };
         defer ctx.allocator.free(key_marker);
@@ -174,13 +186,13 @@ pub fn modelConfigPostApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
     }
 
     const f = infra_fs.cwd().createFile(config_path, .{}) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "cannot write config";
         return;
     };
     defer f.close();
     f.writeAll(buf.items) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
 
@@ -193,41 +205,41 @@ pub fn modelConfigPostApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 /// new footprints can ship a 3D model from the library page.
 pub fn uploadModelApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     const body = req.body() orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         res.body = "no body";
         return;
     };
     if (body.len == 0) {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         res.body = "empty file";
         return;
     }
 
     const models_dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/models", .{ctx.project_dir}) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     defer ctx.allocator.free(models_dir);
     try infra_fs.cwd().makePath(models_dir);
 
     const model_path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.step", .{ models_dir, name }) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     defer ctx.allocator.free(model_path);
 
     const f = infra_fs.cwd().createFile(model_path, .{}) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "cannot write model";
         return;
     };
     defer f.close();
     f.writeAll(body) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
 
@@ -243,44 +255,44 @@ pub fn uploadModelApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// offset/rotation that POST back to `/api/model-config`.
 pub fn modelViewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
     const fp_path = std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints/{s}.sexp", .{ ctx.project_dir, name }) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     defer ctx.allocator.free(fp_path);
-    const fp_content = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path, 256 * 1024) catch {
-        res.status = 404;
+    const fp_content = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path, MAX_FOOTPRINT_BYTES) catch {
+        res.status = HTTP_NOT_FOUND;
         res.body = "Footprint not found";
         return;
     };
     defer ctx.allocator.free(fp_content);
 
     const nodes = parser_mod.parse(ctx.allocator, fp_content) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Parse error";
         return;
     };
     if (nodes.len == 0) {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     }
     const top = nodes[0].asList() orelse {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
 
     const model_name = footprint_mod.findModelFile(ctx.allocator, ctx.project_dir, name, name);
 
-    const config_path = std.fmt.allocPrint(ctx.allocator, "{s}/lib/models/model-config.json", .{ctx.project_dir}) catch {
-        res.status = 500;
+    const config_path = std.fmt.allocPrint(ctx.allocator, MODEL_CONFIG_PATH_TEMPLATE, .{ctx.project_dir}) catch {
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     defer ctx.allocator.free(config_path);
-    const config_content = infra_fs.cwd().readFileAlloc(ctx.allocator, config_path, 1024 * 1024) catch null;
+    const config_content = infra_fs.cwd().readFileAlloc(ctx.allocator, config_path, MAX_CONFIG_BYTES) catch null;
 
     var cfg_offset: [3]f64 = .{ 0, 0, 0 };
     var cfg_rotation: [3]f64 = .{ 0, 0, 0 };
@@ -292,14 +304,14 @@ pub fn modelViewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
             if (std.mem.indexOf(u8, cc, km)) |_| {
                 if (std.mem.indexOf(u8, cc, km)) |kp| {
                     const after_key = cc[kp..];
-                    if (std.mem.indexOf(u8, after_key, "\"offset\":[")) |os| {
-                        const arr_start = os + 10;
+                    if (std.mem.indexOf(u8, after_key, OFFSET_KEY)) |os| {
+                        const arr_start = os + OFFSET_KEY.len;
                         if (std.mem.indexOfPos(u8, after_key, arr_start, "]")) |arr_end| {
                             cfg_offset = parseFloat3(after_key[arr_start..arr_end]);
                         }
                     }
-                    if (std.mem.indexOf(u8, after_key, "\"rotation\":[")) |rs| {
-                        const arr_start = rs + 12;
+                    if (std.mem.indexOf(u8, after_key, ROTATION_KEY)) |rs| {
+                        const arr_start = rs + ROTATION_KEY.len;
                         if (std.mem.indexOfPos(u8, after_key, arr_start, "]")) |arr_end| {
                             cfg_rotation = parseFloat3(after_key[arr_start..arr_end]);
                         }

@@ -1,9 +1,10 @@
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("env.zig");
-const Evaluator = @import("evaluator.zig").Evaluator;
-const EvalError = @import("evaluator.zig").EvalError;
-const PinNetDecl = @import("evaluator.zig").PinNetDecl;
+const evaluator_mod = @import("evaluator.zig");
+const Evaluator = evaluator_mod.Evaluator;
+const EvalError = evaluator_mod.EvalError;
+const PinNetDecl = evaluator_mod.PinNetDecl;
 const NetTie = Evaluator.NetTie;
 const ids = @import("ids.zig");
 const validate = @import("validate.zig");
@@ -21,6 +22,12 @@ const Port = env_mod.Port;
 const Note = env_mod.Note;
 const Group = env_mod.Group;
 const SubBlock = env_mod.SubBlock;
+
+// ── Constants ─────────────────────────────────────────────────────
+const DECOUPLE_FORM = "decouple";
+const INSTANCE_FORM = "instance";
+const DECOUPLE_MULTI_NET_MIN_ARITY: usize = 6;
+const DECOUPLE_MULTI_NET_NET_OFFSET: usize = 5;
 
 /// Evaluate a `(design-block "name" form…)` form into a heap-allocated
 /// `DesignBlock`. Iterates each child form (instance/port/note/group/section/
@@ -54,7 +61,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         if (form_children.len == 0) continue;
         const form_name = form_children[0].asAtom() orelse continue;
 
-        if (std.mem.eql(u8, form_name, "instance")) {
+        if (std.mem.eql(u8, form_name, INSTANCE_FORM)) {
             const result = try instance_mod.buildInstance(self, form_children, env);
             ids.registerRefDes(self, result.instance.ref_des);
             try instances.append(self.allocator, result.instance);
@@ -85,7 +92,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             validate.trackNetFormSource(self, form_children, env, &net_form_sources);
         } else if (std.mem.eql(u8, form_name, "series")) {
             try instance_mod.evalSeriesForm(self, form_children, env, &instances, &all_pin_nets, &notes);
-        } else if (std.mem.eql(u8, form_name, "decouple")) {
+        } else if (std.mem.eql(u8, form_name, DECOUPLE_FORM)) {
             try evalDecoupleForm(self, form_children, env, &instances, &all_pin_nets);
         } else if (std.mem.eql(u8, form_name, "verifies")) {
             if (parseVerifies(self, form_children, env)) |v| {
@@ -184,12 +191,12 @@ fn evalDecoupleForm(
 
     // Multi-net form: (decouple (comp "val") COUNT per-pin REF "NET1" "NET2" ...)
     if (first_val == .component or first_val == .component_instance) {
-        if (form_children.len < 6) return;
-        for (form_children[5..]) |mn_node| {
+        if (form_children.len < DECOUPLE_MULTI_NET_MIN_ARITY) return;
+        for (form_children[DECOUPLE_MULTI_NET_NET_OFFSET..]) |mn_node| {
             if (mn_node.isForm("id")) continue;
             const mn_val = try self.evalNode(mn_node, env);
             const mn_net = mn_val.asString() orelse continue;
-            try builders.emitDecoupleItems(self, form_children[1..5], mn_net, env, instances, all_pin_nets, tl_dec_id, &tl_dec_counter);
+            try builders.emitDecoupleItems(self, form_children[1..DECOUPLE_MULTI_NET_NET_OFFSET], mn_net, env, instances, all_pin_nets, tl_dec_id, &tl_dec_counter);
         }
     } else {
         const net_name = first_val.asString() orelse return;
@@ -298,7 +305,7 @@ fn evalSection(
         } else if (std.mem.eql(u8, sf_name, "calc")) {
             const calc = try builders.parseSectionCalc(self, sf_children, env);
             if (calc) |c| try sec_calcs.append(self.allocator, c);
-        } else if (std.mem.eql(u8, sf_name, "instance")) {
+        } else if (std.mem.eql(u8, sf_name, INSTANCE_FORM)) {
             const result = try instance_mod.buildInstance(self, sf_children, env);
             ids.registerRefDes(self, result.instance.ref_des);
             try instances.append(self.allocator, result.instance);
@@ -309,7 +316,7 @@ fn evalSection(
             try appendAutoAliases(self, result.instance, result.pin_nets, net_ties);
         } else if (std.mem.eql(u8, sf_name, "pins")) {
             try evalPinsForm(self, sf_children, sec_name, env, instances, all_pin_nets, net_ties, &sec_pin_groups);
-        } else if (std.mem.eql(u8, sf_name, "decouple")) {
+        } else if (std.mem.eql(u8, sf_name, DECOUPLE_FORM)) {
             const pre_count = instances.items.len;
             try evalSectionDecouple(self, sf_children, env, instances, all_pin_nets);
             // Add newly created instances to section
@@ -407,12 +414,12 @@ fn evalSectionDecouple(
 
     // Multi-net form: (decouple (comp "val") COUNT per-pin REF "NET1" "NET2" ...)
     if (dec_first_val == .component or dec_first_val == .component_instance) {
-        if (sf_children.len < 6) return;
-        for (sf_children[5..]) |mn_node| {
+        if (sf_children.len < DECOUPLE_MULTI_NET_MIN_ARITY) return;
+        for (sf_children[DECOUPLE_MULTI_NET_NET_OFFSET..]) |mn_node| {
             if (mn_node.isForm("id")) continue;
             const mn_val = try self.evalNode(mn_node, env);
             const mn_net = mn_val.asString() orelse continue;
-            try builders.emitDecoupleItems(self, sf_children[1..5], mn_net, env, instances, all_pin_nets, dec_id, &dec_counter);
+            try builders.emitDecoupleItems(self, sf_children[1..DECOUPLE_MULTI_NET_NET_OFFSET], mn_net, env, instances, all_pin_nets, dec_id, &dec_counter);
         }
     } else {
         const net_name = dec_first_val.asString() orelse return;
@@ -503,7 +510,7 @@ fn evalSubSection(
         } else if (std.mem.eql(u8, ssf_name, "calc")) {
             const calc = try builders.parseSectionCalc(self, ssf_children, env);
             if (calc) |c| try sub_calcs.append(self.allocator, c);
-        } else if (std.mem.eql(u8, ssf_name, "instance")) {
+        } else if (std.mem.eql(u8, ssf_name, INSTANCE_FORM)) {
             const result = try instance_mod.buildInstance(self, ssf_children, env);
             ids.registerRefDes(self, result.instance.ref_des);
             try instances.append(self.allocator, result.instance);
@@ -524,7 +531,7 @@ fn evalSubSection(
             const pg_slice2 = pg_pins2.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
             try sub_pin_groups.append(self.allocator, .{ .ref_des = pins_ref, .pins = pg_slice2 });
             try builders.addPartToInstance(self, instances.items, pins_ref, sub_name, pg_slice2);
-        } else if (std.mem.eql(u8, ssf_name, "decouple")) {
+        } else if (std.mem.eql(u8, ssf_name, DECOUPLE_FORM)) {
             const pre_count = instances.items.len;
             try evalSectionDecouple(self, ssf_children, env, instances, all_pin_nets);
             for (instances.items[pre_count..]) |new_inst| {

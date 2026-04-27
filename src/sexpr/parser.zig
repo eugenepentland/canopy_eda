@@ -7,6 +7,9 @@ const Tokenizer = tokenizer_mod.Tokenizer;
 const TokenTag = tokenizer_mod.TokenTag;
 const Token = tokenizer_mod.Token;
 
+// ── Constants ─────────────────────────────────────────────────────
+const MIL_TO_MM: f64 = 0.0254;
+
 pub const ParseError = error{
     UnexpectedEof,
     UnexpectedRparen,
@@ -52,7 +55,7 @@ fn parseNode(allocator: std.mem.Allocator, tok: *Tokenizer, token: Token) ParseE
             const source = tok.source;
             var mm_value = val;
             if (after_pos + 2 < source.len and source[after_pos] == 'm' and source[after_pos + 1] == 'i' and source[after_pos + 2] == 'l') {
-                mm_value = val * 0.0254; // mil to mm
+                mm_value = val * MIL_TO_MM; // mil to mm
             }
             return Node.unitVal(token.span, mm_value);
         },

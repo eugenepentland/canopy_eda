@@ -40,6 +40,25 @@ const Allocator = std.mem.Allocator;
 /// `ArrayListUnmanaged(u8).writer()` pattern, so just `Allocator.Error`.
 pub const RenderError = std.mem.Allocator.Error;
 
+// ── Layout constants ──────────────────────────────────────────────
+const HALF_DIVISOR: f64 = 2.0;
+const HUB_VPAD: f64 = 40.0;
+const PIN_OFFSET: f64 = 20.0;
+const TITLE_LINE_GAP: f64 = 12.0;
+const DESC_LINE_GAP: f64 = 6.0;
+const NOTE_BLOCK_PAD: f64 = 16.0;
+const SECTION_PAD_X: f64 = 8.0;
+const SECTION_BORDER_W: f64 = 16.0;
+const CELL_BLOCK_GAP: f64 = 40.0;
+const MIN_VB_WIDTH: f64 = 850.0;
+const MIN_VB_HEIGHT: f64 = 400.0;
+const VB_MARGIN: f64 = 40.0;
+const FAR_X_SENTINEL: f64 = 99999.0;
+const BUS_OFFSET: f64 = 10.0;
+const BRANCH_BUS_GAP: f64 = 10.0;
+const PORT_BLOCK_PAD: f64 = 40.0;
+const PORT_SPACING: f64 = 40.0;
+
 // ── JSON Scene Graph Types ───────────────────────────────────────────
 
 const JsonSection = struct {
@@ -235,7 +254,7 @@ const SceneGraph = struct {
             try pts.append(self.allocator, .{ x1, y1 });
             try pts.append(self.allocator, .{ x2, y2 });
         } else {
-            const mid_x = (x1 + x2) / 2.0;
+            const mid_x = (x1 + x2) / HALF_DIVISOR;
             try pts.append(self.allocator, .{ x1, y1 });
             try pts.append(self.allocator, .{ mid_x, y1 });
             try pts.append(self.allocator, .{ mid_x, y2 });
@@ -458,7 +477,7 @@ fn mergeAwareHubHeight(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, par
     var right_total: f64 = 0;
     for (right_heights) |h| right_total += h;
 
-    return @max(left_total, right_total) + 40.0;
+    return @max(left_total, right_total) + HUB_VPAD;
 }
 
 // ── Public entry point ───────────────────────────────────────────────
@@ -617,8 +636,8 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     var section_header_heights = try allocator.alloc(f64, section_grid.items.len);
     defer allocator.free(section_header_heights);
     for (section_grid.items, 0..) |sg, si| {
-        var h: f64 = title_font_size + 12.0;
-        if (sg.description.len > 0) h += desc_font_size + 6.0;
+        var h: f64 = title_font_size + TITLE_LINE_GAP;
+        if (sg.description.len > 0) h += desc_font_size + DESC_LINE_GAP;
         section_header_heights[si] = h;
     }
 
@@ -627,7 +646,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     defer allocator.free(section_footer_heights);
     for (section_grid.items, 0..) |sg, si| {
         if (sg.notes.len > 0) {
-            section_footer_heights[si] = @as(f64, @floatFromInt(sg.notes.len)) * note_line_height + 16.0;
+            section_footer_heights[si] = @as(f64, @floatFromInt(sg.notes.len)) * note_line_height + NOTE_BLOCK_PAD;
         } else {
             section_footer_heights[si] = 0;
         }
@@ -650,7 +669,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
         const grid_row = si / n_cols;
         var sec_height: f64 = 0;
         for (sg.cell_indices.items) |ci| {
-            sec_height += cell_heights[ci] + 40.0;
+            sec_height += cell_heights[ci] + CELL_BLOCK_GAP;
         }
         const total = sec_height + section_pad * 2 + section_header_heights[si] + section_footer_heights[si];
         if (total > row_heights[grid_row]) row_heights[grid_row] = total;
@@ -684,9 +703,9 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
             .name = sg.name,
             .description = sg.description,
             .notes = sg.notes,
-            .x = x_offset + 8.0,
+            .x = x_offset + SECTION_PAD_X,
             .y = cell_y,
-            .w = cell_width - 16.0,
+            .w = cell_width - SECTION_BORDER_W,
             .h = section_h,
         });
 
@@ -705,15 +724,15 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
             // Update the hub in the array with pin data
             scene.hubs.items[scene.hubs.items.len - 1] = json_hub;
 
-            content_y += h + 40.0;
+            content_y += h + CELL_BLOCK_GAP;
         }
     }
 
     // Port blocks (skipped — interface ports not shown in schematic)
 
     // Set viewBox
-    scene.vb_w = @max(total_width, 850.0);
-    scene.vb_h = @max(y + 40.0, 400.0);
+    scene.vb_w = @max(total_width, MIN_VB_WIDTH);
+    scene.vb_h = @max(y + VB_MARGIN, MIN_VB_HEIGHT);
 
     // Serialize to JSON
     return serializeScene(allocator, &scene);
@@ -805,7 +824,7 @@ fn collectHubData(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, part: ?e
     for (left_heights) |h| left_total += h;
     var right_total: f64 = 0;
     for (right_heights) |h| right_total += h;
-    const hub_height = @max(left_total, right_total) + 40.0;
+    const hub_height = @max(left_total, right_total) + HUB_VPAD;
 
     const label = try std.fmt.allocPrint(allocator, "{s} {s}", .{ shortRef(hub.ref_des), displayValue(hub) });
 
@@ -828,10 +847,10 @@ fn collectHubData(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, part: ?e
     };
 
     // Collect left pin positions
-    var py_left = y_start + 40.0;
+    var py_left = y_start + HUB_VPAD;
     for (left_groups, 0..) |group, gi| {
         const height = left_heights[gi];
-        const pin_cy = py_left + height / 2.0;
+        const pin_cy = py_left + height / HALF_DIVISOR;
         const enrich = pinEnrichment(allocator, group, hub.ref_des, hub.symbol, alt_map, asserted_fns);
         try json_hub.left_pins.append(allocator, .{
             .pin_numbers = group.pin_numbers,
@@ -845,10 +864,10 @@ fn collectHubData(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, part: ?e
     }
 
     // Collect right pin positions
-    var py_right = y_start + 40.0;
+    var py_right = y_start + HUB_VPAD;
     for (right_groups, 0..) |group, gi| {
         const height = right_heights[gi];
-        const pin_cy = py_right + height / 2.0;
+        const pin_cy = py_right + height / HALF_DIVISOR;
         const enrich = pinEnrichment(allocator, group, hub.ref_des, hub.symbol, alt_map, asserted_fns);
         try json_hub.right_pins.append(allocator, .{
             .pin_numbers = group.pin_numbers,
@@ -953,20 +972,20 @@ fn collectHubConnections(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocat
     const right_heights = try mergeAwareGroupHeights(ctx, allocator, right_groups, hub.ref_des);
 
     // Collect left connections
-    var py_left = y_start + 40.0;
+    var py_left = y_start + HUB_VPAD;
     for (left_groups, 0..) |group, gi| {
         const height = left_heights[gi];
-        const pin_cy = py_left + height / 2.0;
+        const pin_cy = py_left + height / HALF_DIVISOR;
         const stub_x = x_offset + hub_x - pin_stub;
         try collectGroupConnections(ctx, scene, allocator, hub.ref_des, group, stub_x, pin_cy, .left);
         py_left += height;
     }
 
     // Collect right connections
-    var py_right = y_start + 40.0;
+    var py_right = y_start + HUB_VPAD;
     for (right_groups, 0..) |group, gi| {
         const height = right_heights[gi];
-        const pin_cy = py_right + height / 2.0;
+        const pin_cy = py_right + height / HALF_DIVISOR;
         const stub_x = x_offset + hub_x + hub_width + pin_stub;
         try collectGroupConnections(ctx, scene, allocator, hub.ref_des, group, stub_x, pin_cy, .right);
         py_right += height;
@@ -1058,7 +1077,7 @@ fn collectGroupConnections(ctx: *RenderCtx, scene: *SceneGraph, allocator: Alloc
     }
 
     const multi = merged.items.len > 1;
-    const bus_offset: f64 = 10.0;
+    const bus_offset: f64 = BUS_OFFSET;
     const bus_x: f64 = switch (side) {
         .left => stub_x - bus_offset,
         .right => stub_x + bus_offset,
@@ -1073,8 +1092,8 @@ fn collectGroupConnections(ctx: *RenderCtx, scene: *SceneGraph, allocator: Alloc
 
     for (merged.items, 0..) |entry, i| {
         const slots = slot_counts[i];
-        const slot_center = @as(f64, @floatFromInt(consumed_slots)) + @as(f64, @floatFromInt(slots -| 1)) / 2.0;
-        const cy = py + slot_center * per_conn_spacing - total_h2 / 2.0;
+        const slot_center = @as(f64, @floatFromInt(consumed_slots)) + @as(f64, @floatFromInt(slots -| 1)) / HALF_DIVISOR;
+        const cy = py + slot_center * per_conn_spacing - total_h2 / HALF_DIVISOR;
         consumed_slots += slots;
         if (cy < min_cy) min_cy = cy;
         if (cy > max_cy) max_cy = cy;
@@ -1106,13 +1125,13 @@ fn collectGroupConnections(ctx: *RenderCtx, scene: *SceneGraph, allocator: Alloc
 
     // Terminal labels
     var default_term_x: f64 = switch (side) {
-        .left => stub_x - spoke_len - 20.0,
-        .right => stub_x + spoke_len + 20.0,
+        .left => stub_x - spoke_len - PIN_OFFSET,
+        .right => stub_x + spoke_len + PIN_OFFSET,
     };
     for (results.items) |r| {
         switch (side) {
-            .left => default_term_x = @min(default_term_x, r.end_x - 20.0),
-            .right => default_term_x = @max(default_term_x, r.end_x + 20.0),
+            .left => default_term_x = @min(default_term_x, r.end_x - PIN_OFFSET),
+            .right => default_term_x = @max(default_term_x, r.end_x + PIN_OFFSET),
         }
     }
     const term_x = default_term_x;
@@ -1203,8 +1222,8 @@ fn collectMergedPassive(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocato
     switch (endpoint) {
         .net => {
             const end_x: f64 = switch (side) {
-                .left => stub_x - 20.0,
-                .right => stub_x + 20.0,
+                .left => stub_x - PIN_OFFSET,
+                .right => stub_x + PIN_OFFSET,
             };
             try scene.addWire(net_name, stub_x, stub_y, end_x, cy, false);
             return end_x;
@@ -1215,9 +1234,9 @@ fn collectMergedPassive(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocato
 
             switch (side) {
                 .left => {
-                    try scene.addWire(net_name, stub_x, stub_y, stub_x - 20.0, cy, false);
-                    try scene.addPassiveWithCount(inst, stub_x - 20.0 - passive_bw, cy, count);
-                    const chain_end_x = stub_x - 20.0 - passive_bw;
+                    try scene.addWire(net_name, stub_x, stub_y, stub_x - PIN_OFFSET, cy, false);
+                    try scene.addPassiveWithCount(inst, stub_x - PIN_OFFSET - passive_bw, cy, count);
+                    const chain_end_x = stub_x - PIN_OFFSET - passive_bw;
                     // Find the terminal
                     var visited: std.StringHashMapUnmanaged(void) = .empty;
                     try visited.put(allocator, p.ref_des, {});
@@ -1226,9 +1245,9 @@ fn collectMergedPassive(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocato
                     return chain_end_x;
                 },
                 .right => {
-                    try scene.addWire(net_name, stub_x, stub_y, stub_x + 20.0, cy, false);
-                    try scene.addPassiveWithCount(inst, stub_x + 20.0, cy, count);
-                    const chain_end_x = stub_x + 20.0 + passive_bw;
+                    try scene.addWire(net_name, stub_x, stub_y, stub_x + PIN_OFFSET, cy, false);
+                    try scene.addPassiveWithCount(inst, stub_x + PIN_OFFSET, cy, count);
+                    const chain_end_x = stub_x + PIN_OFFSET + passive_bw;
                     var visited: std.StringHashMapUnmanaged(void) = .empty;
                     try visited.put(allocator, p.ref_des, {});
                     const chain = try connection.findSpokeChain(ctx, p.ref_des, .{ .pin = .{ .ref_des = hub_ref, .pin = from_pin } }, &visited);
@@ -1244,8 +1263,8 @@ fn collectConnBody(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocator, en
     switch (endpoint) {
         .net => {
             const end_x: f64 = switch (side) {
-                .left => stub_x - 20.0,
-                .right => stub_x + 20.0,
+                .left => stub_x - PIN_OFFSET,
+                .right => stub_x + PIN_OFFSET,
             };
             try scene.addWire(net_name, stub_x, stub_y, end_x, cy, false);
             return end_x;
@@ -1273,16 +1292,16 @@ fn collectConnBody(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocator, en
 
                 switch (side) {
                     .left => {
-                        try scene.addWire(net_name, stub_x, stub_y, stub_x - 20.0, cy, false);
-                        const chain_end_x = try collectPassiveChainLeft(scene, allocator, stub_x - 20.0, cy, all_spokes.items);
+                        try scene.addWire(net_name, stub_x, stub_y, stub_x - PIN_OFFSET, cy, false);
+                        const chain_end_x = try collectPassiveChainLeft(scene, allocator, stub_x - PIN_OFFSET, cy, all_spokes.items);
                         if (chain_result.branches.len > 0) {
                             try collectBranchTreeLeft(ctx, scene, allocator, chain_end_x, cy, chain_result.branches, chain_result.terminal);
                         }
                         return chain_end_x;
                     },
                     .right => {
-                        try scene.addWire(net_name, stub_x, stub_y, stub_x + 20.0, cy, false);
-                        const chain_end_x = try collectPassiveChainRight(scene, allocator, stub_x + 20.0, cy, all_spokes.items);
+                        try scene.addWire(net_name, stub_x, stub_y, stub_x + PIN_OFFSET, cy, false);
+                        const chain_end_x = try collectPassiveChainRight(scene, allocator, stub_x + PIN_OFFSET, cy, all_spokes.items);
                         if (chain_result.branches.len > 0) {
                             try collectBranchTreeRight(ctx, scene, allocator, chain_end_x, cy, chain_result.branches, chain_result.terminal);
                         }
@@ -1291,8 +1310,8 @@ fn collectConnBody(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocator, en
                 }
             } else {
                 const end_x: f64 = switch (side) {
-                    .left => stub_x - spoke_len - 20.0,
-                    .right => stub_x + spoke_len + 20.0,
+                    .left => stub_x - spoke_len - PIN_OFFSET,
+                    .right => stub_x + spoke_len + PIN_OFFSET,
                 };
                 try scene.addWire(net_name, stub_x, stub_y, end_x, cy, false);
                 return end_x;
@@ -1306,8 +1325,8 @@ fn collectPassiveChainLeft(scene: *SceneGraph, _: Allocator, start_x: f64, cy: f
     var x = start_x;
     for (spokes, 0..) |inst, i| {
         if (i > 0) {
-            try scene.addWire("", x, cy, x - 20.0, cy, false);
-            x -= 20.0;
+            try scene.addWire("", x, cy, x - PIN_OFFSET, cy, false);
+            x -= PIN_OFFSET;
         }
         try scene.addPassive(inst, x - passive_bw, cy);
         x -= passive_bw;
@@ -1321,8 +1340,8 @@ fn collectPassiveChainRight(scene: *SceneGraph, allocator: Allocator, start_x: f
     var x = start_x;
     for (spokes, 0..) |inst, i| {
         if (i > 0) {
-            try scene.addWire("", x, cy, x + 20.0, cy, false);
-            x += 20.0;
+            try scene.addWire("", x, cy, x + PIN_OFFSET, cy, false);
+            x += PIN_OFFSET;
         }
         try scene.addPassive(inst, x, cy);
         x += passive_bw;
@@ -1333,7 +1352,7 @@ fn collectPassiveChainRight(scene: *SceneGraph, allocator: Allocator, start_x: f
 fn collectBranchTreeLeft(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocator, junction_x: f64, center_y: f64, branches: []const ctx_mod.Branch, junction_net: []const u8) !void {
     const n = branches.len;
     const total_height = @as(f64, @floatFromInt(n -| 1)) * branch_spacing;
-    const start_y = center_y - total_height / 2.0;
+    const start_y = center_y - total_height / HALF_DIVISOR;
 
     const bx = junction_x - bus_gap;
     try scene.addWire(junction_net, junction_x, center_y, bx, center_y, false);
@@ -1346,15 +1365,15 @@ fn collectBranchTreeLeft(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocat
 
     for (branches, 0..) |branch, idx| {
         const by = start_y + @as(f64, @floatFromInt(idx)) * branch_spacing;
-        try scene.addWire(junction_net, bx, by, bx - 10.0, by, false);
-        const chain_end_x = try collectPassiveChainLeft(scene, allocator, bx - 10.0, by, branch.chain);
+        try scene.addWire(junction_net, bx, by, bx - BRANCH_BUS_GAP, by, false);
+        const chain_end_x = try collectPassiveChainLeft(scene, allocator, bx - BRANCH_BUS_GAP, by, branch.chain);
         try bodies.append(allocator, .{ .end_x = chain_end_x, .cy = by, .terminal = branch.terminal });
     }
 
     // Terminals
     var term_x: f64 = 0;
     for (bodies.items) |b| {
-        const tx = b.end_x - 20.0;
+        const tx = b.end_x - PIN_OFFSET;
         if (term_x == 0 or tx < term_x) term_x = tx;
     }
     for (bodies.items) |b| {
@@ -1369,7 +1388,7 @@ fn collectBranchTreeLeft(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocat
 fn collectBranchTreeRight(ctx: *RenderCtx, scene: *SceneGraph, allocator: Allocator, junction_x: f64, center_y: f64, branches: []const ctx_mod.Branch, junction_net: []const u8) !void {
     const n = branches.len;
     const total_height = @as(f64, @floatFromInt(n -| 1)) * branch_spacing;
-    const start_y = center_y - total_height / 2.0;
+    const start_y = center_y - total_height / HALF_DIVISOR;
 
     const bx = junction_x + bus_gap;
     try scene.addWire(junction_net, junction_x, center_y, bx, center_y, false);
@@ -1382,14 +1401,14 @@ fn collectBranchTreeRight(ctx: *RenderCtx, scene: *SceneGraph, allocator: Alloca
 
     for (branches, 0..) |branch, idx| {
         const by = start_y + @as(f64, @floatFromInt(idx)) * branch_spacing;
-        try scene.addWire(junction_net, bx, by, bx + 10.0, by, false);
-        const chain_end_x = try collectPassiveChainRight(scene, allocator, bx + 10.0, by, branch.chain);
+        try scene.addWire(junction_net, bx, by, bx + BRANCH_BUS_GAP, by, false);
+        const chain_end_x = try collectPassiveChainRight(scene, allocator, bx + BRANCH_BUS_GAP, by, branch.chain);
         try bodies.append(allocator, .{ .end_x = chain_end_x, .cy = by, .terminal = branch.terminal });
     }
 
     var term_x: f64 = 0;
     for (bodies.items) |b| {
-        const tx = b.end_x + 20.0;
+        const tx = b.end_x + PIN_OFFSET;
         if (term_x == 0 or tx > term_x) term_x = tx;
     }
     for (bodies.items) |b| {
@@ -1430,8 +1449,8 @@ fn collectTerminals(ctx: *RenderCtx, scene: *SceneGraph, _: Allocator, results: 
         } else {
             const nearest_x = blk: {
                 var nx: f64 = switch (side) {
-                    .left => 99999.0,
-                    .right => -99999.0,
+                    .left => FAR_X_SENTINEL,
+                    .right => -FAR_X_SENTINEL,
                 };
                 for (group_slice) |r| {
                     switch (side) {
@@ -1442,8 +1461,8 @@ fn collectTerminals(ctx: *RenderCtx, scene: *SceneGraph, _: Allocator, results: 
                 break :blk nx;
             };
             const grp_bus_x = switch (side) {
-                .left => nearest_x - 20.0,
-                .right => nearest_x + 20.0,
+                .left => nearest_x - PIN_OFFSET,
+                .right => nearest_x + PIN_OFFSET,
             };
 
             const first_cy = group_slice[0].cy;
@@ -1485,10 +1504,10 @@ fn collectPortBlock(scene: *SceneGraph, allocator: Allocator, name: []const u8, 
         }
     }
 
-    const port_spacing: f64 = 40.0;
-    const box_pad: f64 = 40.0;
+    const port_spacing: f64 = PORT_SPACING;
+    const box_pad: f64 = PORT_BLOCK_PAD;
     const max_side = @max(@max(left_count, right_count), 1);
-    const block_height = box_pad * 2.0 + @as(f64, @floatFromInt(max_side - 1)) * port_spacing;
+    const block_height = box_pad * HALF_DIVISOR + @as(f64, @floatFromInt(max_side - 1)) * port_spacing;
 
     var port_block = JsonPortBlock{
         .name = name,

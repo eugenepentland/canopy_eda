@@ -8,6 +8,9 @@ const assets_css = @import("assets_css.zig");
 const bom_html = @import("bom_html.zig");
 const library = @import("library.zig");
 
+// ── Constants ─────────────────────────────────────────────────────
+const SCRIPT_CLOSE_TAG = "</script>";
+
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     std.fs.Dir.Iterator.Error || library.HandlerError || bom_html.BomError;
@@ -153,12 +156,12 @@ pub fn canvasPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     // Default to block diagram view if majority of sections are concept
     const is_concept_mode = total_sections > 0 and concept_count * 2 > total_sections;
     try w.print("var CONCEPT_MODE={s};", .{if (is_concept_mode) "true" else "false"});
-    try w.writeAll("</script>");
+    try w.writeAll(SCRIPT_CLOSE_TAG);
 
     // KiCad sync menu wiring
     try w.writeAll("<script>");
     try w.writeAll(KICAD_MENU_JS);
-    try w.writeAll("</script>");
+    try w.writeAll(SCRIPT_CLOSE_TAG);
 
     // Pixi.js from CDN
     try w.writeAll("<script src=\"https://cdn.jsdelivr.net/npm/pixi.js@8.6.6/dist/pixi.min.js\"></script>");
@@ -166,7 +169,7 @@ pub fn canvasPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     // Canvas viewer JS
     try w.writeAll("<script>");
     try w.writeAll(CANVAS_VIEWER_JS);
-    try w.writeAll("</script>");
+    try w.writeAll(SCRIPT_CLOSE_TAG);
 
     try w.writeAll("</body></html>");
     res.body = buf.items;

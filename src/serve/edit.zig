@@ -12,6 +12,38 @@ const bom_html = @import("bom_html.zig");
 const history = @import("history.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
 
+// ── Constants ─────────────────────────────────────────────────────
+const HTTP_NOT_FOUND: u16 = 404;
+const HTTP_BAD_REQUEST: u16 = 400;
+const HTTP_INTERNAL_ERROR: u16 = 500;
+const MAX_SOURCE_BYTES: usize = 10 * 1024 * 1024;
+
+// JSON key prefixes (length-encoded so we don't need bare integer offsets)
+const JSON_REF_KEY = "\"ref\":\"";
+const JSON_VALUE_KEY = "\"value\":\"";
+const JSON_COMPONENT_KEY = "\"component\":\"";
+const JSON_OLD_COMPONENT_KEY = "\"oldComponent\":\"";
+const JSON_SRC_OFF_KEY = "\"srcOff\":";
+const JSON_PINS_KEY = "\"pins\"";
+
+// Repeated string templates / fragments
+const SEXP_PATH_TEMPLATE = "{s}/src/{s}.sexp";
+const BOM_PATH_TEMPLATE = "{s}/src/{s}.bom";
+const COMPONENT_PATH_TEMPLATE = "{s}/lib/components/{s}.sexp";
+const INSTANCE_OPEN_TEMPLATE = "(instance \"{s}\"";
+const SECTION_OPEN_TEMPLATE = "(section \"{s}\"";
+
+const HEADER_CORS_ALLOW_ORIGIN = "access-control-allow-origin";
+const ERR_CANNOT_READ_FILE = "cannot read file";
+const ERR_CANNOT_WRITE_FILE = "cannot write file";
+const ERR_REBUILD_FAILED = "rebuild failed";
+const ERR_INSTANCE_NOT_FOUND = "instance not found";
+const ERR_MISSING_REF = "missing ref";
+
+const ERR_JSON_NO_BODY = "{\"error\":\"no body\"}";
+const ERR_JSON_MISSING_NAME = "{\"error\":\"missing name\"}";
+const OK_JSON_TRUE = "{\"ok\":true}";
+
 /// Error set for HTTP handlers in this module. Wide enough to cover
 /// every subsystem error that may bubble through `try`: allocator, writer,
 /// file IO, BOM resolve, sexpr parser, and httpz form/query parsing.
@@ -41,24 +73,24 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     };
 
     // Parse JSON: {"ref": "C3", "value": "0.5pF"}
-    const ref_start = std.mem.indexOf(u8, body, "\"ref\":\"") orelse {
+    const ref_start = std.mem.indexOf(u8, body, JSON_REF_KEY) orelse {
         res.status = 400;
-        res.body = "missing ref";
+        res.body = ERR_MISSING_REF;
         return;
     };
-    const ref_val_start = ref_start + 7;
+    const ref_val_start = ref_start + JSON_REF_KEY.len;
     const ref_end = std.mem.indexOfPos(u8, body, ref_val_start, "\"") orelse {
         res.status = 400;
         return;
     };
     const ref_des = body[ref_val_start..ref_end];
 
-    const val_start_marker = std.mem.indexOf(u8, body, "\"value\":\"") orelse {
+    const val_start_marker = std.mem.indexOf(u8, body, JSON_VALUE_KEY) orelse {
         res.status = 400;
         res.body = "missing value";
         return;
     };
-    const val_start = val_start_marker + 9;
+    const val_start = val_start_marker + JSON_VALUE_KEY.len;
     const val_end = std.mem.indexOfPos(u8, body, val_start, "\"") orelse {
         res.status = 400;
         return;
@@ -66,29 +98,29 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     const new_value = body[val_start..val_end];
 
     // Read the .sexp file
-    const file_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name }) catch {
+    const file_path = std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name }) catch {
         res.status = 500;
         return;
     };
     defer ctx.allocator.free(file_path);
 
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
         res.status = 500;
-        res.body = "cannot read file";
+        res.body = ERR_CANNOT_READ_FILE;
         return;
     };
     defer ctx.allocator.free(source);
 
     // Find the instance line and replace the value
-    const needle = std.fmt.allocPrint(ctx.allocator, "(instance \"{s}\" (", .{ref_des}) catch {
-        res.status = 500;
+    const needle = std.fmt.allocPrint(ctx.allocator, INSTANCE_OPEN_TEMPLATE ++ " (", .{ref_des}) catch {
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     defer ctx.allocator.free(needle);
 
     const inst_pos = std.mem.indexOf(u8, source, needle) orelse {
-        res.status = 404;
-        res.body = "instance not found";
+        res.status = HTTP_NOT_FOUND;
+        res.body = ERR_INSTANCE_NOT_FOUND;
         return;
     };
 
@@ -116,7 +148,7 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 
     const file = infra_fs.cwd().createFile(file_path, .{}) catch {
         res.status = 500;
-        res.body = "cannot write file";
+        res.body = ERR_CANNOT_WRITE_FILE;
         return;
     };
     defer file.close();
@@ -128,7 +160,7 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     std.debug.print("Edited {s} {s} -> \"{s}\"\n", .{ name, ref_des, new_value });
 
     // Rebuild and push live update
-    const board_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name }) catch {
+    const board_path = std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name }) catch {
         res.status = 500;
         return;
     };
@@ -138,7 +170,7 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     defer eval.deinit();
     const result = eval.evalFile(board_path) catch {
         res.status = 500;
-        res.body = "rebuild failed";
+        res.body = ERR_REBUILD_FAILED;
         return;
     };
     const block = switch (result) {
@@ -149,7 +181,7 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
         },
     };
 
-    const bom_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name }) catch {
+    const bom_path = std.fmt.allocPrint(ctx.allocator, BOM_PATH_TEMPLATE, .{ ctx.project_dir, name }) catch {
         res.status = 500;
         return;
     };
@@ -160,9 +192,9 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     serve_root.setLiveLayoutJson(new_layout);
     _ = serve_root.bumpLiveVersion(name);
 
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.content_type = .JSON;
-    res.body = "{\"ok\":true}";
+    res.body = OK_JSON_TRUE;
 }
 
 /// POST /api/edit-footprint/:name — swap an instance's component family
@@ -181,36 +213,36 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     };
 
     // Parse JSON: {"ref": "C3", "component": "cap-0603", "oldComponent": "cap-0805", "srcOff": 1234}
-    const comp_start_marker = std.mem.indexOf(u8, body, "\"component\":\"") orelse {
+    const comp_start_marker = std.mem.indexOf(u8, body, JSON_COMPONENT_KEY) orelse {
         res.status = 400;
         res.body = "missing component";
         return;
     };
-    const comp_start = comp_start_marker + 13;
+    const comp_start = comp_start_marker + JSON_COMPONENT_KEY.len;
     const comp_end = std.mem.indexOfPos(u8, body, comp_start, "\"") orelse {
         res.status = 400;
         return;
     };
     const new_component = body[comp_start..comp_end];
 
-    const old_comp_marker = std.mem.indexOf(u8, body, "\"oldComponent\":\"") orelse {
+    const old_comp_marker = std.mem.indexOf(u8, body, JSON_OLD_COMPONENT_KEY) orelse {
         res.status = 400;
         res.body = "missing oldComponent";
         return;
     };
-    const old_comp_start = old_comp_marker + 16;
+    const old_comp_start = old_comp_marker + JSON_OLD_COMPONENT_KEY.len;
     const old_comp_end = std.mem.indexOfPos(u8, body, old_comp_start, "\"") orelse {
         res.status = 400;
         return;
     };
     const old_component = body[old_comp_start..old_comp_end];
 
-    const src_off_marker = std.mem.indexOf(u8, body, "\"srcOff\":") orelse {
+    const src_off_marker = std.mem.indexOf(u8, body, JSON_SRC_OFF_KEY) orelse {
         res.status = 400;
         res.body = "missing srcOff";
         return;
     };
-    const src_off_num_start = src_off_marker + 9;
+    const src_off_num_start = src_off_marker + JSON_SRC_OFF_KEY.len;
     var src_off_num_end = src_off_num_start;
     while (src_off_num_end < body.len and body[src_off_num_end] >= '0' and body[src_off_num_end] <= '9') : (src_off_num_end += 1) {}
     const source_offset = std.fmt.parseInt(usize, body[src_off_num_start..src_off_num_end], 10) catch {
@@ -220,7 +252,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     };
 
     // Verify the new component family exists
-    const comp_path = std.fmt.allocPrint(ctx.allocator, "{s}/lib/components/{s}.sexp", .{ ctx.project_dir, new_component }) catch {
+    const comp_path = std.fmt.allocPrint(ctx.allocator, COMPONENT_PATH_TEMPLATE, .{ ctx.project_dir, new_component }) catch {
         res.status = 500;
         return;
     };
@@ -232,15 +264,15 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     };
 
     // Read the .sexp file
-    const file_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name }) catch {
+    const file_path = std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name }) catch {
         res.status = 500;
         return;
     };
     defer ctx.allocator.free(file_path);
 
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
         res.status = 500;
-        res.body = "cannot read file";
+        res.body = ERR_CANNOT_READ_FILE;
         return;
     };
     defer ctx.allocator.free(source);
@@ -299,7 +331,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 
     const file = infra_fs.cwd().createFile(file_path, .{}) catch {
         res.status = 500;
-        res.body = "cannot write file";
+        res.body = ERR_CANNOT_WRITE_FILE;
         return;
     };
     defer file.close();
@@ -311,7 +343,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     std.debug.print("Edited footprint {s} {s} -> \"{s}\"\n", .{ name, old_component, new_component });
 
     // Rebuild and push live update
-    const board_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name }) catch {
+    const board_path = std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name }) catch {
         res.status = 500;
         return;
     };
@@ -321,7 +353,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     defer eval.deinit();
     const result = eval.evalFile(board_path) catch {
         res.status = 500;
-        res.body = "rebuild failed";
+        res.body = ERR_REBUILD_FAILED;
         return;
     };
     const block = switch (result) {
@@ -332,7 +364,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         },
     };
 
-    const bom_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name }) catch {
+    const bom_path = std.fmt.allocPrint(ctx.allocator, BOM_PATH_TEMPLATE, .{ ctx.project_dir, name }) catch {
         res.status = 500;
         return;
     };
@@ -352,7 +384,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     _ = try bom_html.writeComponentsJson(cw, block, "", &svg_sym_cache, ctx.allocator, ctx.project_dir);
     try cw.writeAll("}}");
 
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.content_type = .JSON;
     res.body = comp_json.items;
 }
@@ -429,7 +461,7 @@ pub fn editCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
             return;
         };
         res.content_type = .JSON;
-        res.body = "{\"ok\":true}";
+        res.body = OK_JSON_TRUE;
         return;
     };
 
@@ -465,7 +497,7 @@ pub fn editCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 
     std.debug.print("Edited courtyard for {s}: ({d:.2}, {d:.2}, {d:.2}, {d:.2})\n", .{ footprint, x1, y1, x2, y2 });
     res.content_type = .JSON;
-    res.body = "{\"ok\":true}";
+    res.body = OK_JSON_TRUE;
 }
 
 /// POST /api/add-instance/:name
@@ -490,12 +522,12 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     const section = parseJsonString(body, "\"section\"") orelse "";
 
     // Read source file
-    const file_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    const file_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(file_path);
 
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
         res.status = 500;
-        res.body = "cannot read file";
+        res.body = ERR_CANNOT_READ_FILE;
         return;
     };
     defer ctx.allocator.free(source);
@@ -503,9 +535,9 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     // Parse pin assignments from body: "pins":{"1":"VDD","2":"GND"}
     var pin_str: std.ArrayListUnmanaged(u8) = .empty;
     const pw = pin_str.writer(ctx.allocator);
-    if (std.mem.indexOf(u8, body, "\"pins\"")) |pins_start| {
+    if (std.mem.indexOf(u8, body, JSON_PINS_KEY)) |pins_start| {
         // Find the opening brace
-        var pos = pins_start + 6;
+        var pos = pins_start + JSON_PINS_KEY.len;
         while (pos < body.len and body[pos] != '{') : (pos += 1) {}
         if (pos < body.len) {
             pos += 1; // skip {
@@ -551,7 +583,7 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 
     if (section.len > 0) {
         // Find (section "Name" ...) and insert before its closing paren
-        const sec_needle = try std.fmt.allocPrint(ctx.allocator, "(section \"{s}\"", .{section});
+        const sec_needle = try std.fmt.allocPrint(ctx.allocator, SECTION_OPEN_TEMPLATE, .{section});
         defer ctx.allocator.free(sec_needle);
 
         if (std.mem.indexOf(u8, source, sec_needle)) |sec_start| {
@@ -591,7 +623,7 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     // Write file
     const file = infra_fs.cwd().createFile(file_path, .{}) catch {
         res.status = 500;
-        res.body = "cannot write file";
+        res.body = ERR_CANNOT_WRITE_FILE;
         return;
     };
     defer file.close();
@@ -603,7 +635,7 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     // Rebuild + push live update
     rebuildAndPush(ctx, name, res) catch {
         res.status = 500;
-        res.body = "rebuild failed";
+        res.body = ERR_REBUILD_FAILED;
         return;
     };
 }
@@ -623,28 +655,28 @@ pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
     const ref_des = parseJsonString(body, "\"ref\"") orelse {
         res.status = 400;
-        res.body = "missing ref";
+        res.body = ERR_MISSING_REF;
         return;
     };
 
     // Read source file
-    const file_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    const file_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(file_path);
 
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
         res.status = 500;
-        res.body = "cannot read file";
+        res.body = ERR_CANNOT_READ_FILE;
         return;
     };
     defer ctx.allocator.free(source);
 
     // Find (instance "REF" ...) and remove the entire form
-    const needle = try std.fmt.allocPrint(ctx.allocator, "(instance \"{s}\"", .{ref_des});
+    const needle = try std.fmt.allocPrint(ctx.allocator, INSTANCE_OPEN_TEMPLATE, .{ref_des});
     defer ctx.allocator.free(needle);
 
     const inst_pos = std.mem.indexOf(u8, source, needle) orelse {
         res.status = 404;
-        res.body = "instance not found";
+        res.body = ERR_INSTANCE_NOT_FOUND;
         return;
     };
 
@@ -676,7 +708,7 @@ pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
     const file = infra_fs.cwd().createFile(file_path, .{}) catch {
         res.status = 500;
-        res.body = "cannot write file";
+        res.body = ERR_CANNOT_WRITE_FILE;
         return;
     };
     defer file.close();
@@ -688,7 +720,7 @@ pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     std.debug.print("Removed instance {s} from {s}\n", .{ ref_des, name });
     rebuildAndPush(ctx, name, res) catch {
         res.status = 500;
-        res.body = "rebuild failed";
+        res.body = ERR_REBUILD_FAILED;
         return;
     };
 }
@@ -708,7 +740,7 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 
     const ref_des = parseJsonString(body, "\"ref\"") orelse {
         res.status = 400;
-        res.body = "missing ref";
+        res.body = ERR_MISSING_REF;
         return;
     };
     const pin = parseJsonString(body, "\"pin\"") orelse {
@@ -722,23 +754,23 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
         return;
     };
 
-    const file_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    const file_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(file_path);
 
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, 10 * 1024 * 1024) catch {
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
         res.status = 500;
-        res.body = "cannot read file";
+        res.body = ERR_CANNOT_READ_FILE;
         return;
     };
     defer ctx.allocator.free(source);
 
     // Find the instance
-    const inst_needle = try std.fmt.allocPrint(ctx.allocator, "(instance \"{s}\"", .{ref_des});
+    const inst_needle = try std.fmt.allocPrint(ctx.allocator, INSTANCE_OPEN_TEMPLATE, .{ref_des});
     defer ctx.allocator.free(inst_needle);
 
     const inst_pos = std.mem.indexOf(u8, source, inst_needle) orelse {
         res.status = 404;
-        res.body = "instance not found";
+        res.body = ERR_INSTANCE_NOT_FOUND;
         return;
     };
 
@@ -785,7 +817,7 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 
     const file = infra_fs.cwd().createFile(file_path, .{}) catch {
         res.status = 500;
-        res.body = "cannot write file";
+        res.body = ERR_CANNOT_WRITE_FILE;
         return;
     };
     defer file.close();
@@ -797,7 +829,7 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     std.debug.print("Rewired {s} pin {s} -> \"{s}\" in {s}\n", .{ ref_des, pin, new_net, name });
     rebuildAndPush(ctx, name, res) catch {
         res.status = 500;
-        res.body = "rebuild failed";
+        res.body = ERR_REBUILD_FAILED;
         return;
     };
 }
@@ -807,16 +839,16 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 /// HTTP 409 with a structured error if the destination pin is already used.
 pub fn movePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
 
     const name = req.param("name") orelse {
         res.status = 404;
-        res.body = "{\"error\":\"missing name\"}";
+        res.body = ERR_JSON_MISSING_NAME;
         return;
     };
     const body = req.body() orelse {
         res.status = 400;
-        res.body = "{\"error\":\"no body\"}";
+        res.body = ERR_JSON_NO_BODY;
         return;
     };
 
@@ -883,16 +915,16 @@ pub fn movePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
 /// Body: `{"ref":"U1","pin_a":"V11","pin_b":"V12"}`.
 pub fn swapPinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
 
     const name = req.param("name") orelse {
         res.status = 404;
-        res.body = "{\"error\":\"missing name\"}";
+        res.body = ERR_JSON_MISSING_NAME;
         return;
     };
     const body = req.body() orelse {
         res.status = 400;
-        res.body = "{\"error\":\"no body\"}";
+        res.body = ERR_JSON_NO_BODY;
         return;
     };
 
@@ -949,7 +981,7 @@ pub fn swapPinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 
 /// Rebuild design, render SVG, and push live update.
 fn rebuildAndPush(ctx: *Handler, name: []const u8, res: *httpz.Response) HandlerError!void {
-    const board_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    const board_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(board_path);
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
@@ -960,7 +992,7 @@ fn rebuildAndPush(ctx: *Handler, name: []const u8, res: *httpz.Response) Handler
         else => return error.RebuildFailed,
     };
 
-    const bom_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name });
+    const bom_path = try std.fmt.allocPrint(ctx.allocator, BOM_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(bom_path);
     bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| warnResolveIdentities(name, e);
 
@@ -968,9 +1000,9 @@ fn rebuildAndPush(ctx: *Handler, name: []const u8, res: *httpz.Response) Handler
     serve_root.setLiveLayoutJson(layout_json);
     _ = serve_root.bumpLiveVersion(name);
 
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.content_type = .JSON;
-    res.body = "{\"ok\":true}";
+    res.body = OK_JSON_TRUE;
 }
 
 fn parseJsonFloat(body: []const u8, key: []const u8) ?f64 {
@@ -1092,7 +1124,7 @@ pub fn boardOutlineApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     };
 
     res.content_type = .JSON;
-    res.body = "{\"ok\":true}";
+    res.body = OK_JSON_TRUE;
 }
 
 fn floatFromJson(v: std.json.Value) ?f64 {
@@ -1153,13 +1185,13 @@ pub const PinAssignment = struct {
 };
 
 fn designFilePath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    return std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
 }
 
 fn readDesignSource(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) EditError![]u8 {
     const path = try designFilePath(allocator, project_dir, name);
     defer allocator.free(path);
-    return infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch return error.CannotReadDesign;
+    return infra_fs.cwd().readFileAlloc(allocator, path, MAX_SOURCE_BYTES) catch return error.CannotReadDesign;
 }
 
 fn writeAndRebuild(
@@ -1194,7 +1226,7 @@ fn writeAndRebuild(
         else => return error.RebuildFailed,
     };
 
-    const bom_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name }) catch return error.OutOfMemory;
+    const bom_path = std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name }) catch return error.OutOfMemory;
     defer allocator.free(bom_path);
     bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
@@ -1258,7 +1290,7 @@ pub fn editValueCore(
     const source = try readDesignSource(allocator, project_dir, name);
     defer allocator.free(source);
 
-    const needle = try std.fmt.allocPrint(allocator, "(instance \"{s}\" (", .{ref_des});
+    const needle = try std.fmt.allocPrint(allocator, INSTANCE_OPEN_TEMPLATE ++ " (", .{ref_des});
     defer allocator.free(needle);
 
     const inst_pos = std.mem.indexOf(u8, source, needle) orelse return error.InstanceNotFound;
@@ -1295,7 +1327,7 @@ pub fn removeInstanceCore(
     const source = try readDesignSource(allocator, project_dir, name);
     defer allocator.free(source);
 
-    const needle = try std.fmt.allocPrint(allocator, "(instance \"{s}\"", .{ref_des});
+    const needle = try std.fmt.allocPrint(allocator, INSTANCE_OPEN_TEMPLATE, .{ref_des});
     defer allocator.free(needle);
 
     const inst_pos = std.mem.indexOf(u8, source, needle) orelse return error.InstanceNotFound;
@@ -1330,7 +1362,7 @@ pub fn rewirePinCore(
     const source = try readDesignSource(allocator, project_dir, name);
     defer allocator.free(source);
 
-    const inst_needle = try std.fmt.allocPrint(allocator, "(instance \"{s}\"", .{ref_des});
+    const inst_needle = try std.fmt.allocPrint(allocator, INSTANCE_OPEN_TEMPLATE, .{ref_des});
     defer allocator.free(inst_needle);
     const inst_pos = std.mem.indexOf(u8, source, inst_needle) orelse return error.InstanceNotFound;
     const inst_end = findInstanceEnd(source, inst_pos) orelse return error.MalformedSource;
@@ -1390,7 +1422,7 @@ pub fn addInstanceCore(
 
     var insert_at: usize = std.mem.lastIndexOfScalar(u8, source, ')') orelse source.len;
     if (section.len > 0) {
-        const sec_needle = try std.fmt.allocPrint(allocator, "(section \"{s}\"", .{section});
+        const sec_needle = try std.fmt.allocPrint(allocator, SECTION_OPEN_TEMPLATE, .{section});
         defer allocator.free(sec_needle);
         if (std.mem.indexOf(u8, source, sec_needle)) |sec_start| {
             insert_at = (findInstanceEnd(source, sec_start) orelse return error.MalformedSource) - 1;
@@ -1420,7 +1452,7 @@ pub fn swapComponentCore(
     new_component: []const u8,
 ) EditError!MutationResult {
     // Verify component family exists
-    const comp_path = try std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, new_component });
+    const comp_path = try std.fmt.allocPrint(allocator, COMPONENT_PATH_TEMPLATE, .{ project_dir, new_component });
     defer allocator.free(comp_path);
     infra_fs.cwd().access(comp_path, .{}) catch return error.ComponentNotFound;
 
@@ -1569,7 +1601,7 @@ pub fn restoreDesignCore(
         else => return error.RebuildFailed,
     };
 
-    const bom_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name }) catch return error.OutOfMemory;
+    const bom_path = std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name }) catch return error.OutOfMemory;
     defer allocator.free(bom_path);
     bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
@@ -1594,7 +1626,7 @@ pub fn editSectionCore(
     const source = try readDesignSource(allocator, project_dir, name);
     defer allocator.free(source);
 
-    const needle = try std.fmt.allocPrint(allocator, "(section \"{s}\"", .{section_name});
+    const needle = try std.fmt.allocPrint(allocator, SECTION_OPEN_TEMPLATE, .{section_name});
     defer allocator.free(needle);
 
     const first = std.mem.indexOf(u8, source, needle) orelse return error.SectionNotFound;
@@ -1704,7 +1736,7 @@ pub fn addSectionNoteCore(
     const source = try readDesignSource(allocator, project_dir, name);
     defer allocator.free(source);
 
-    const needle = try std.fmt.allocPrint(allocator, "(section \"{s}\"", .{section_name});
+    const needle = try std.fmt.allocPrint(allocator, SECTION_OPEN_TEMPLATE, .{section_name});
     defer allocator.free(needle);
     const sec_start = std.mem.indexOf(u8, source, needle) orelse return error.SectionNotFound;
     if (std.mem.indexOfPos(u8, source, sec_start + needle.len, needle) != null) return error.AmbiguousMatch;
@@ -1760,7 +1792,7 @@ pub fn removeSectionNoteCore(
     const source = try readDesignSource(allocator, project_dir, name);
     defer allocator.free(source);
 
-    const needle = try std.fmt.allocPrint(allocator, "(section \"{s}\"", .{section_name});
+    const needle = try std.fmt.allocPrint(allocator, SECTION_OPEN_TEMPLATE, .{section_name});
     defer allocator.free(needle);
     const sec_start = std.mem.indexOf(u8, source, needle) orelse return error.SectionNotFound;
     if (std.mem.indexOfPos(u8, source, sec_start + needle.len, needle) != null) return error.AmbiguousMatch;
@@ -1875,7 +1907,7 @@ pub fn addComponentDatasheetCore(
     try w.writeAll(source[insert_at..]);
 
     try writeLibComponent(path, buf.items);
-    const version = @import("../serve.zig").bumpLiveVersion(component_name);
+    const version = serve_root.bumpLiveVersion(component_name);
     return .{ .version = version, .snapshot = null };
 }
 
@@ -1916,12 +1948,12 @@ pub fn removeComponentDatasheetCore(
     try w.writeAll(source[trim_end..]);
 
     try writeLibComponent(path, buf.items);
-    const version = @import("../serve.zig").bumpLiveVersion(component_name);
+    const version = serve_root.bumpLiveVersion(component_name);
     return .{ .version = version, .snapshot = null };
 }
 
 fn libComponentPath(allocator: std.mem.Allocator, project_dir: []const u8, component_name: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, component_name });
+    return std.fmt.allocPrint(allocator, COMPONENT_PATH_TEMPLATE, .{ project_dir, component_name });
 }
 
 fn writeLibComponent(path: []const u8, new_source: []const u8) EditError!void {
@@ -2260,7 +2292,7 @@ pub fn addComponentParameterCore(
     if (param_type.len == 0) return error.InvalidSource;
     for (param_type) |c| if (c == ' ' or c == '(' or c == ')' or c == '"') return error.InvalidSource;
 
-    const path = try std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, component });
+    const path = try std.fmt.allocPrint(allocator, COMPONENT_PATH_TEMPLATE, .{ project_dir, component });
     defer allocator.free(path);
     const source = infra_fs.cwd().readFileAlloc(allocator, path, 1 * 1024 * 1024) catch return error.ComponentNotFound;
     defer allocator.free(source);
@@ -2404,7 +2436,7 @@ pub fn addComponentRequirementsCore(
     }
     if (requirements.len == 0) return error.InvalidRequirement;
 
-    const path = try std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, component });
+    const path = try std.fmt.allocPrint(allocator, COMPONENT_PATH_TEMPLATE, .{ project_dir, component });
     defer allocator.free(path);
     const source = infra_fs.cwd().readFileAlloc(allocator, path, 1 * 1024 * 1024) catch return error.ComponentNotFound;
     defer allocator.free(source);
@@ -2499,7 +2531,7 @@ pub fn replaceInstanceCore(
     const source = try readDesignSource(allocator, project_dir, name);
     defer allocator.free(source);
 
-    const needle = try std.fmt.allocPrint(allocator, "(instance \"{s}\"", .{ref_des});
+    const needle = try std.fmt.allocPrint(allocator, INSTANCE_OPEN_TEMPLATE, .{ref_des});
     defer allocator.free(needle);
 
     const inst_start = std.mem.indexOf(u8, source, needle) orelse return error.InstanceNotFound;
@@ -2520,11 +2552,11 @@ pub fn replaceInstanceCore(
 /// GET /api/source/:name — returns `{"source":"<raw .sexp text>"}`.
 pub fn getSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
 
     const name = req.param("name") orelse {
         res.status = 404;
-        res.body = "{\"error\":\"missing name\"}";
+        res.body = ERR_JSON_MISSING_NAME;
         return;
     };
 
@@ -2549,16 +2581,16 @@ pub fn getSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 /// `{"ok":false,"error":"..."}` with HTTP 400 on invalid source.
 pub fn saveSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
 
     const name = req.param("name") orelse {
         res.status = 404;
-        res.body = "{\"error\":\"missing name\"}";
+        res.body = ERR_JSON_MISSING_NAME;
         return;
     };
     const body = req.body() orelse {
         res.status = 400;
-        res.body = "{\"error\":\"no body\"}";
+        res.body = ERR_JSON_NO_BODY;
         return;
     };
 

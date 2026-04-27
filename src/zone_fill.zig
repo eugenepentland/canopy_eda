@@ -26,6 +26,17 @@ const Obstacle = struct {
     layer: []const u8,
 };
 
+// ── Numeric constants ──────────────────────────────────────────────
+const HALF_DIVISOR: f64 = 2.0;
+const ZONE_BBOX_MARGIN_MM: f64 = 1.0;
+const MAX_GRID_DIM: usize = 10000;
+const CELL_CENTER_OFFSET: f64 = 0.5;
+const SEG_LEN_EPSILON: f64 = 0.0001;
+const POLYGON_SUBSAMPLE_THRESHOLD: usize = 200;
+const POLYGON_TARGET_POINTS: usize = 100;
+const DEG_TO_RAD_BASE: f64 = 180.0;
+const PAD_NODE_MIN_CHILDREN: usize = 5;
+
 /// Trace segment obstacle.
 const TraceSeg = struct {
     x1: f64,
@@ -117,7 +128,7 @@ pub fn computeZoneFills(
             try obstacles.append(allocator, .{
                 .x = pos[0],
                 .y = pos[1],
-                .r = @max(pad.w, pad.h) / 2.0,
+                .r = @max(pad.w, pad.h) / HALF_DIVISOR,
                 .net = net_name,
                 .is_thru = is_thru,
                 .layer = pad_layer,
@@ -130,7 +141,7 @@ pub fn computeZoneFills(
         try obstacles.append(allocator, .{
             .x = v.x,
             .y = v.y,
-            .r = v.pad_size / 2.0,
+            .r = v.pad_size / HALF_DIVISOR,
             .net = v.net,
             .is_thru = true,
             .layer = "*",
@@ -145,7 +156,7 @@ pub fn computeZoneFills(
                 .y1 = t.points[pi][1],
                 .x2 = t.points[pi + 1][0],
                 .y2 = t.points[pi + 1][1],
-                .hw = t.width / 2.0,
+                .hw = t.width / HALF_DIVISOR,
                 .net = t.net,
                 .layer = t.layer,
             });
@@ -194,15 +205,15 @@ fn fillZone(
     }
 
     // Add margin
-    min_x -= 1.0;
-    min_y -= 1.0;
-    max_x += 1.0;
-    max_y += 1.0;
+    min_x -= ZONE_BBOX_MARGIN_MM;
+    min_y -= ZONE_BBOX_MARGIN_MM;
+    max_x += ZONE_BBOX_MARGIN_MM;
+    max_y += ZONE_BBOX_MARGIN_MM;
 
     const cols: usize = @intFromFloat(@ceil((max_x - min_x) / GRID_SIZE));
     const rows: usize = @intFromFloat(@ceil((max_y - min_y) / GRID_SIZE));
 
-    if (cols == 0 or rows == 0 or cols > 10000 or rows > 10000) {
+    if (cols == 0 or rows == 0 or cols > MAX_GRID_DIM or rows > MAX_GRID_DIM) {
         return .{ .zone_name = zone_def.name, .layer = zone_def.layer, .polygons = &.{} };
     }
 
@@ -214,8 +225,8 @@ fn fillZone(
     // Step 1: Mark cells inside the boundary polygon
     for (0..rows) |r| {
         for (0..cols) |c| {
-            const x = min_x + (@as(f64, @floatFromInt(c)) + 0.5) * GRID_SIZE;
-            const y = min_y + (@as(f64, @floatFromInt(r)) + 0.5) * GRID_SIZE;
+            const x = min_x + (@as(f64, @floatFromInt(c)) + CELL_CENTER_OFFSET) * GRID_SIZE;
+            const y = min_y + (@as(f64, @floatFromInt(r)) + CELL_CENTER_OFFSET) * GRID_SIZE;
             if (pointInPolygon(x, y, boundary)) {
                 grid[r * cols + c] = true;
             }
@@ -290,8 +301,8 @@ fn clearCircle(grid: []bool, cols: usize, rows: usize, min_x: f64, min_y: f64, c
 
     for (start_r..end_r) |r| {
         for (start_c..end_c) |c| {
-            const gx = min_x + (@as(f64, @floatFromInt(c)) + 0.5) * GRID_SIZE;
-            const gy = min_y + (@as(f64, @floatFromInt(r)) + 0.5) * GRID_SIZE;
+            const gx = min_x + (@as(f64, @floatFromInt(c)) + CELL_CENTER_OFFSET) * GRID_SIZE;
+            const gy = min_y + (@as(f64, @floatFromInt(r)) + CELL_CENTER_OFFSET) * GRID_SIZE;
             const dx = gx - cx;
             const dy = gy - cy;
             if (dx * dx + dy * dy <= r2) {
@@ -305,7 +316,7 @@ fn distPointToSegment(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2: f64) f64 
     const dx = x2 - x1;
     const dy = y2 - y1;
     const len2 = dx * dx + dy * dy;
-    if (len2 < 0.0001) {
+    if (len2 < SEG_LEN_EPSILON) {
         const ddx = px - x1;
         const ddy = py - y1;
         return @sqrt(ddx * ddx + ddy * ddy);
@@ -333,8 +344,8 @@ fn clearLineSegment(grid: []bool, cols: usize, rows: usize, min_x: f64, min_y: f
 
     for (start_r..end_r) |r| {
         for (start_c..end_c) |c| {
-            const gx = min_x + (@as(f64, @floatFromInt(c)) + 0.5) * GRID_SIZE;
-            const gy = min_y + (@as(f64, @floatFromInt(r)) + 0.5) * GRID_SIZE;
+            const gx = min_x + (@as(f64, @floatFromInt(c)) + CELL_CENTER_OFFSET) * GRID_SIZE;
+            const gy = min_y + (@as(f64, @floatFromInt(r)) + CELL_CENTER_OFFSET) * GRID_SIZE;
             const d = distPointToSegment(gx, gy, x1, y1, x2, y2);
             if (d <= half_width) {
                 grid[r * cols + c] = false;
@@ -346,7 +357,7 @@ fn clearLineSegment(grid: []bool, cols: usize, rows: usize, min_x: f64, min_y: f
 fn clearThermalRelief(grid: []bool, cols: usize, rows: usize, min_x: f64, min_y: f64, cx: f64, cy: f64, pad_r: f64, gap: f64, spoke_width: f64) void {
     // Clear a ring around the pad, but leave 4 spokes (N/S/E/W)
     const outer_r = pad_r + gap;
-    const half_spoke = spoke_width / 2.0;
+    const half_spoke = spoke_width / HALF_DIVISOR;
     const r_cells: usize = @as(usize, @intFromFloat(@ceil(outer_r / GRID_SIZE))) + 1;
     const cc: usize = @intFromFloat(@max(0, @floor((cx - min_x) / GRID_SIZE)));
     const cr: usize = @intFromFloat(@max(0, @floor((cy - min_y) / GRID_SIZE)));
@@ -358,8 +369,8 @@ fn clearThermalRelief(grid: []bool, cols: usize, rows: usize, min_x: f64, min_y:
 
     for (start_r..end_r) |r| {
         for (start_c..end_c) |c| {
-            const gx = min_x + (@as(f64, @floatFromInt(c)) + 0.5) * GRID_SIZE;
-            const gy = min_y + (@as(f64, @floatFromInt(r)) + 0.5) * GRID_SIZE;
+            const gx = min_x + (@as(f64, @floatFromInt(c)) + CELL_CENTER_OFFSET) * GRID_SIZE;
+            const gy = min_y + (@as(f64, @floatFromInt(r)) + CELL_CENTER_OFFSET) * GRID_SIZE;
             const dx = gx - cx;
             const dy = gy - cy;
             const dist = @sqrt(dx * dx + dy * dy);
@@ -433,8 +444,8 @@ fn extractPolygons(allocator: std.mem.Allocator, grid: []const bool, cols: usize
                     (cy + 1 >= rows or !grid[(cy + 1) * cols + cx]);
 
                 if (is_boundary) {
-                    const px = min_x + (@as(f64, @floatFromInt(cx)) + 0.5) * GRID_SIZE;
-                    const py = min_y + (@as(f64, @floatFromInt(cy)) + 0.5) * GRID_SIZE;
+                    const px = min_x + (@as(f64, @floatFromInt(cx)) + CELL_CENTER_OFFSET) * GRID_SIZE;
+                    const py = min_y + (@as(f64, @floatFromInt(cy)) + CELL_CENTER_OFFSET) * GRID_SIZE;
                     try boundary_pts.append(allocator, .{ px, py });
                 }
 
@@ -493,7 +504,7 @@ fn simplifyBoundary(allocator: std.mem.Allocator, points: [][2]f64) ![]const [2]
     }.lessThan);
 
     // Subsample to reduce point count (max ~100 points per polygon)
-    const step = if (ap.items.len > 200) ap.items.len / 100 else 1;
+    const step = if (ap.items.len > POLYGON_SUBSAMPLE_THRESHOLD) ap.items.len / POLYGON_TARGET_POINTS else 1;
     var result: std.ArrayListUnmanaged([2]f64) = .empty;
     var i: usize = 0;
     while (i < ap.items.len) : (i += step) {
@@ -517,7 +528,7 @@ const PadGeom = struct {
 const PlacementInfo = struct { x: f64, y: f64, angle: f64, side: layout_mod.Side };
 
 fn transformPad(px: f64, py: f64, angle_deg: f64, comp_x: f64, comp_y: f64) [2]f64 {
-    const a = angle_deg * std.math.pi / 180.0;
+    const a = angle_deg * std.math.pi / DEG_TO_RAD_BASE;
     const cos_a = @cos(a);
     const sin_a = @sin(a);
     return .{
@@ -534,7 +545,7 @@ fn parsePads(allocator: std.mem.Allocator, source: []const u8) ![]const PadGeom 
     var pads: std.ArrayListUnmanaged(PadGeom) = .empty;
     for (children) |child| {
         const cl = child.asList() orelse continue;
-        if (cl.len < 5) continue;
+        if (cl.len < PAD_NODE_MIN_CHILDREN) continue;
         const tag = cl[0].asAtom() orelse continue;
         if (!std.mem.eql(u8, tag, "pad")) continue;
 

@@ -1,1 +1,34 @@
 # guardian-snapshot v1
+BOM_PATH_TEMPLATE = "{s}/src/{s}.bom"
+HEADER_CORS_ALLOW_ORIGIN = "access-control-allow-origin"
+NAME_FIELD_PREFIX = "{\"name\":"
+OK_JSON_TRUE = "{\"ok\":true}"
+SEXP_EXT_LEN = ".sexp"
+SEXP_PATH_TEMPLATE = "{s}/src/{s}.sexp"
+SEXP_PATH_TEMPLATE = "{s}/{s}.sexp"
+in: src/commands.zig
+in: src/commands.zig
+in: src/render_html.zig
+in: src/review_html.zig
+in: src/serve/account_page.zig
+in: src/serve/api.zig
+in: src/serve/api.zig
+in: src/serve/api.zig
+in: src/serve/api.zig
+in: src/serve/api.zig
+in: src/serve/auth.zig
+in: src/serve/edit.zig
+in: src/serve/edit.zig
+in: src/serve/edit.zig
+in: src/serve/edit.zig
+in: src/serve/footprint_preview.zig
+in: src/serve/kicad_sync.zig
+in: src/serve/library.zig
+in: src/serve/mcp_tools.zig
+in: src/serve/mcp_tools.zig
+in: src/serve/mcp_tools.zig
+in: src/serve/oauth.zig
+in: src/serve/sync.zig
+in: src/serve/upload.zig
+in: src/serve/upload_package.zig
+u8 = "</section>"

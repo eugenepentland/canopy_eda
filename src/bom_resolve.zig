@@ -10,6 +10,10 @@ const bom_mod = @import("bom.zig");
 const export_kicad = @import("export_kicad.zig");
 const FlatInfo = bom_mod.FlatInfo;
 
+// ── Constants ─────────────────────────────────────────────────────
+const MIN_TIE_BREAKER_OVERLAP: f64 = 0.5;
+const STRONG_NET_MATCH_RATIO: f64 = 0.99;
+
 /// Error set for the BOM-resolve pipeline. Combines BOM file IO (open/read/
 /// write the .bom sidecar) with `OutOfMemory` from the various
 /// `ArrayList`/`HashMap` operations.
@@ -161,7 +165,7 @@ pub fn resolveIdentities(
             if (claimed[idx]) continue;
             if (old.nets.len == 0) continue;
             const overlap = bom_mod.netOverlap(info.nets, old.nets);
-            if (overlap > best_overlap or (overlap == best_overlap and overlap > 0.5)) {
+            if (overlap > best_overlap or (overlap == best_overlap and overlap > MIN_TIE_BREAKER_OVERLAP)) {
                 best_overlap = overlap;
                 best_idx = idx;
                 best_count = 0;
@@ -169,7 +173,7 @@ pub fn resolveIdentities(
             if (overlap == best_overlap) best_count += 1;
         }
         if (best_idx) |idx| {
-            if (best_overlap >= 0.99 and best_count == 1) {
+            if (best_overlap >= STRONG_NET_MATCH_RATIO and best_count == 1) {
                 try result_map.put(info.ref_des, try allocator.dupe(u8, old_entries[idx].uuid));
                 if (old_entries[idx].properties.len > 0) {
                     try props_map.put(info.ref_des, old_entries[idx].properties);
@@ -218,7 +222,7 @@ pub fn resolveIdentities(
             const old = old_entries[old_idx];
             if (old.nets.len == 0) continue;
 
-            if (bom_mod.netOverlap(info.nets, old.nets) >= 0.99) continue;
+            if (bom_mod.netOverlap(info.nets, old.nets) >= STRONG_NET_MATCH_RATIO) continue;
 
             const new_sig = bom_mod.netSignature(allocator, info.nets) catch continue;
             const correct_old_idx = old_by_netsig.get(new_sig) orelse continue;

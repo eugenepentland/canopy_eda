@@ -18,6 +18,21 @@ const review_json_mod = @import("../review_json.zig");
 const review_state_mod = @import("../review_state.zig");
 const req_checks = @import("../req_checks.zig");
 
+// ── Constants ─────────────────────────────────────────────────────
+const SEXP_PATH_TEMPLATE = "{s}/src/{s}.sexp";
+const BOM_PATH_TEMPLATE = "{s}/src/{s}.bom";
+const NAME_FIELD_PREFIX = "{\"name\":";
+const REF_DES_FIELD_PREFIX = "{\"ref_des\":";
+const FUNCTION_FIELD = ",\"function\":";
+const KEY_COMPONENT = "component";
+const KEY_COMPONENTS = "components";
+const KEY_FOOTPRINTS = "footprints";
+const KEY_REQUIREMENTS = "requirements";
+const KEY_NEW_SOURCE = "new_source";
+const ERR_NOT_DESIGN = "error: not a design";
+const ERR_BUILD_FAILED = "error: build failed";
+const VERSION_SNAPSHOT_TEMPLATE = "{{\"ok\":true,\"version\":{d},\"snapshot\":";
+
 const EvalError = @import("../eval/evaluator.zig").EvalError;
 const RenderError = render_json.RenderError;
 
@@ -143,7 +158,7 @@ fn callInner(
         try w.writeAll("[");
         for (summaries, 0..) |s, i| {
             if (i > 0) try w.writeAll(",");
-            try w.writeAll("{\"name\":");
+            try w.writeAll(NAME_FIELD_PREFIX);
             try writeJsonString(w, s.name);
             try w.writeAll(",\"title\":");
             try writeJsonString(w, s.title);
@@ -176,7 +191,7 @@ fn callInner(
         const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
         const source = requireString(args_val, "source") orelse return missingArg(out, allocator, "source");
         const result = edit.writeDesignCore(allocator, project_dir, name, source) catch |err| return editErrorMsg(out, allocator, err);
-        try w.print("{{\"ok\":true,\"version\":{d},\"snapshot\":", .{result.version});
+        try w.print(VERSION_SNAPSHOT_TEMPLATE, .{result.version});
         if (result.snapshot) |s| {
             try writeJsonString(w, s);
         } else {
@@ -212,9 +227,9 @@ fn callInner(
     if (std.mem.eql(u8, tool_name, "edit_section")) {
         const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
         const section_name = requireString(args_val, "section_name") orelse return missingArg(out, allocator, "section_name");
-        const new_source = requireString(args_val, "new_source") orelse return missingArg(out, allocator, "new_source");
+        const new_source = requireString(args_val, KEY_NEW_SOURCE) orelse return missingArg(out, allocator, KEY_NEW_SOURCE);
         const result = edit.editSectionCore(allocator, project_dir, name, section_name, new_source) catch |err| return editErrorMsg(out, allocator, err);
-        try w.print("{{\"ok\":true,\"version\":{d},\"snapshot\":", .{result.version});
+        try w.print(VERSION_SNAPSHOT_TEMPLATE, .{result.version});
         if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
         try w.writeAll("}");
         return true;
@@ -223,9 +238,9 @@ fn callInner(
     if (std.mem.eql(u8, tool_name, "replace_instance")) {
         const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
         const ref = requireString(args_val, "ref") orelse return missingArg(out, allocator, "ref");
-        const new_source = requireString(args_val, "new_source") orelse return missingArg(out, allocator, "new_source");
+        const new_source = requireString(args_val, KEY_NEW_SOURCE) orelse return missingArg(out, allocator, KEY_NEW_SOURCE);
         const result = edit.replaceInstanceCore(allocator, project_dir, name, ref, new_source) catch |err| return editErrorMsg(out, allocator, err);
-        try w.print("{{\"ok\":true,\"version\":{d},\"snapshot\":", .{result.version});
+        try w.print(VERSION_SNAPSHOT_TEMPLATE, .{result.version});
         if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
         try w.writeAll("}");
         return true;
@@ -264,7 +279,7 @@ fn callInner(
         const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
         const id = requireString(args_val, "id") orelse return missingArg(out, allocator, "id");
         const result = edit.restoreDesignCore(allocator, project_dir, name, id) catch |err| return editErrorMsg(out, allocator, err);
-        try w.print("{{\"ok\":true,\"version\":{d},\"snapshot\":", .{result.version});
+        try w.print(VERSION_SNAPSHOT_TEMPLATE, .{result.version});
         if (result.snapshot) |s| {
             try writeJsonString(w, s);
         } else {
@@ -277,10 +292,10 @@ fn callInner(
     if (std.mem.eql(u8, tool_name, "list_library")) {
         try w.writeAll("{");
         const kinds = [_]struct { field: []const u8, sub: []const u8 }{
-            .{ .field = "components", .sub = "components" },
+            .{ .field = KEY_COMPONENTS, .sub = KEY_COMPONENTS },
             .{ .field = "modules", .sub = "modules" },
             .{ .field = "pinouts", .sub = "pinouts" },
-            .{ .field = "footprints", .sub = "footprints" },
+            .{ .field = KEY_FOOTPRINTS, .sub = KEY_FOOTPRINTS },
         };
         for (kinds, 0..) |k, i| {
             if (i > 0) try w.writeAll(",");
@@ -320,7 +335,7 @@ fn callInner(
         const match = requireString(args_val, "match") orelse return missingArg(out, allocator, "match");
         const new_text = requireString(args_val, "new_text") orelse return missingArg(out, allocator, "new_text");
         const result = edit.editNoteCore(allocator, project_dir, name, match, new_text) catch |err| return editErrorMsg(out, allocator, err);
-        try w.print("{{\"ok\":true,\"version\":{d},\"snapshot\":", .{result.version});
+        try w.print(VERSION_SNAPSHOT_TEMPLATE, .{result.version});
         if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
         try w.writeAll("}");
         return true;
@@ -330,7 +345,7 @@ fn callInner(
         const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
         const item = requireString(args_val, "item") orelse return missingArg(out, allocator, "item");
         const result = edit.addImportCore(allocator, project_dir, name, item) catch |err| return editErrorMsg(out, allocator, err);
-        try w.print("{{\"ok\":true,\"version\":{d},\"snapshot\":", .{result.version});
+        try w.print(VERSION_SNAPSHOT_TEMPLATE, .{result.version});
         if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
         try w.writeAll("}");
         return true;
@@ -342,7 +357,7 @@ fn callInner(
         const pin = requireString(args_val, "pin") orelse return missingArg(out, allocator, "pin");
         const net = requireString(args_val, "net") orelse return missingArg(out, allocator, "net");
         const result = edit.setInstancePinCore(allocator, project_dir, name, ref, pin, net) catch |err| return editErrorMsg(out, allocator, err);
-        try w.print("{{\"ok\":true,\"version\":{d},\"snapshot\":", .{result.version});
+        try w.print(VERSION_SNAPSHOT_TEMPLATE, .{result.version});
         if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
         try w.writeAll("}");
         return true;
@@ -367,7 +382,7 @@ fn callInner(
     }
 
     if (std.mem.eql(u8, tool_name, "add_component_parameter")) {
-        const component = requireString(args_val, "component") orelse return missingArg(out, allocator, "component");
+        const component = requireString(args_val, KEY_COMPONENT) orelse return missingArg(out, allocator, KEY_COMPONENT);
         const param_name = requireString(args_val, "param_name") orelse return missingArg(out, allocator, "param_name");
         const param_type = requireString(args_val, "param_type") orelse return missingArg(out, allocator, "param_type");
         const result = edit.addComponentParameterCore(allocator, project_dir, component, param_name, param_type) catch |err| return editErrorMsg(out, allocator, err);
@@ -378,15 +393,15 @@ fn callInner(
     }
 
     if (std.mem.eql(u8, tool_name, "add_component_requirements")) {
-        const component = requireString(args_val, "component") orelse return missingArg(out, allocator, "component");
+        const component = requireString(args_val, KEY_COMPONENT) orelse return missingArg(out, allocator, KEY_COMPONENT);
         // Pull the `requirements` array out of the JSON args. We materialize
         // it as a `[][]const u8` so the core takes a plain slice and stays
         // JSON-agnostic. Reject any non-string element rather than silently
         // skipping — a typo'd item should fail loudly, not vanish.
         const reqs_val = blk: {
-            const av = args_val orelse return missingArg(out, allocator, "requirements");
-            if (av != .object) return missingArg(out, allocator, "requirements");
-            break :blk av.object.get("requirements") orelse return missingArg(out, allocator, "requirements");
+            const av = args_val orelse return missingArg(out, allocator, KEY_REQUIREMENTS);
+            if (av != .object) return missingArg(out, allocator, KEY_REQUIREMENTS);
+            break :blk av.object.get(KEY_REQUIREMENTS) orelse return missingArg(out, allocator, KEY_REQUIREMENTS);
         };
         if (reqs_val != .array) {
             try w.writeAll("error: \"requirements\" must be an array of strings");
@@ -487,10 +502,10 @@ fn callInner(
 }
 
 fn libraryKindSubdir(kind: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, kind, "component")) return "components";
+    if (std.mem.eql(u8, kind, KEY_COMPONENT)) return KEY_COMPONENTS;
     if (std.mem.eql(u8, kind, "module")) return "modules";
     if (std.mem.eql(u8, kind, "pinout")) return "pinouts";
-    if (std.mem.eql(u8, kind, "footprint")) return "footprints";
+    if (std.mem.eql(u8, kind, "footprint")) return KEY_FOOTPRINTS;
     return null;
 }
 
@@ -526,7 +541,7 @@ fn listLibrarySubdir(
 
         if (!first) try w.writeAll(",");
         first = false;
-        try w.writeAll("{\"name\":");
+        try w.writeAll(NAME_FIELD_PREFIX);
         try writeJsonString(w, base);
         try w.writeAll(",\"description\":");
         if (description) |d| try writeJsonString(w, d) else try w.writeAll("\"\"");
@@ -563,12 +578,12 @@ fn runChecks(
         return false;
     }
 
-    const path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    const path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
     defer allocator.free(path);
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
     const result = eval.evalFile(path) catch {
-        try w.writeAll("error: build failed");
+        try w.writeAll(ERR_BUILD_FAILED);
         return false;
     };
 
@@ -593,12 +608,12 @@ fn runChecks(
             board_def = b;
         },
         else => {
-            try w.writeAll("error: not a design");
+            try w.writeAll(ERR_NOT_DESIGN);
             return false;
         },
     }
 
-    const bom_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name });
+    const bom_path = try std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name });
     defer allocator.free(bom_path);
     bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
@@ -740,25 +755,25 @@ fn generateReview(
     name: []const u8,
     w: anytype,
 ) !bool {
-    const path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    const path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
     defer allocator.free(path);
 
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
     const result = eval.evalFile(path) catch {
-        try w.writeAll("error: build failed");
+        try w.writeAll(ERR_BUILD_FAILED);
         return false;
     };
     const block: *const env_mod.DesignBlock = switch (result) {
         .design_block => |b| b,
         .board => |b| b.design,
         else => {
-            try w.writeAll("error: not a design");
+            try w.writeAll(ERR_NOT_DESIGN);
             return false;
         },
     };
 
-    const bom_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name });
+    const bom_path = try std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name });
     defer allocator.free(bom_path);
     bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
@@ -866,19 +881,19 @@ fn listInstances(
     name: []const u8,
     w: anytype,
 ) !bool {
-    const path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    const path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
     defer allocator.free(path);
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
     const result = eval.evalFile(path) catch {
-        try w.writeAll("error: build failed");
+        try w.writeAll(ERR_BUILD_FAILED);
         return false;
     };
     const block: *const env_mod.DesignBlock = switch (result) {
         .design_block => |b| b,
         .board => |b| b.design,
         else => {
-            try w.writeAll("error: not a design");
+            try w.writeAll(ERR_NOT_DESIGN);
             return false;
         },
     };
@@ -886,7 +901,7 @@ fn listInstances(
     try w.writeAll("{\"instances\":[");
     for (block.instances, 0..) |inst, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll("{\"ref_des\":");
+        try w.writeAll(REF_DES_FIELD_PREFIX);
         try writeJsonString(w, inst.ref_des);
         try w.writeAll(",\"label\":");
         try writeJsonString(w, inst.label);
@@ -922,19 +937,19 @@ pub fn listFreePins(
     filter: ?[]const u8,
     w: anytype,
 ) ToolError!bool {
-    const path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    const path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
     defer allocator.free(path);
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
     const result = eval.evalFile(path) catch {
-        try w.writeAll("error: build failed");
+        try w.writeAll(ERR_BUILD_FAILED);
         return false;
     };
     const block: *const env_mod.DesignBlock = switch (result) {
         .design_block => |b| b,
         .board => |b| b.design,
         else => {
-            try w.writeAll("error: not a design");
+            try w.writeAll(ERR_NOT_DESIGN);
             return false;
         },
     };
@@ -991,7 +1006,7 @@ pub fn listFreePins(
         first = false;
         try w.writeAll("{\"pin\":");
         try writeJsonString(w, pin_id);
-        try w.writeAll(",\"function\":");
+        try w.writeAll(FUNCTION_FIELD);
         try writeJsonString(w, fname);
         try w.print(",\"category\":\"{s}\"}}", .{categoryName(cat)});
     }
@@ -1008,7 +1023,7 @@ pub fn listFreePins(
         first2 = false;
         try w.writeAll("{\"pin\":");
         try writeJsonString(w, pin_id);
-        try w.writeAll(",\"function\":");
+        try w.writeAll(FUNCTION_FIELD);
         try writeJsonString(w, fname);
         try w.writeAll(",\"net\":");
         try writeJsonString(w, net_name);
@@ -1027,19 +1042,19 @@ fn getNet(
     net_name: []const u8,
     w: anytype,
 ) !bool {
-    const path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    const path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
     defer allocator.free(path);
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
     const result = eval.evalFile(path) catch {
-        try w.writeAll("error: build failed");
+        try w.writeAll(ERR_BUILD_FAILED);
         return false;
     };
     const block: *const env_mod.DesignBlock = switch (result) {
         .design_block => |b| b,
         .board => |b| b.design,
         else => {
-            try w.writeAll("error: not a design");
+            try w.writeAll(ERR_NOT_DESIGN);
             return false;
         },
     };
@@ -1057,7 +1072,7 @@ fn getNet(
     }
     const net = target.?;
 
-    try w.writeAll("{\"name\":");
+    try w.writeAll(NAME_FIELD_PREFIX);
     try writeJsonString(w, net.name);
     try w.writeAll(",\"pins\":[");
 
@@ -1081,11 +1096,11 @@ fn getNet(
             }
             break;
         }
-        try w.writeAll("{\"ref_des\":");
+        try w.writeAll(REF_DES_FIELD_PREFIX);
         try writeJsonString(w, p.ref_des);
         try w.writeAll(",\"pin\":");
         try writeJsonString(w, p.pin);
-        try w.writeAll(",\"function\":");
+        try w.writeAll(FUNCTION_FIELD);
         try writeJsonString(w, fname);
         try w.writeAll("}");
     }
@@ -1098,7 +1113,7 @@ fn getNet(
             if (!std.mem.eql(u8, inst.ref_des, e.key_ptr.*)) continue;
             if (!first) try w.writeAll(",");
             first = false;
-            try w.writeAll("{\"ref_des\":");
+            try w.writeAll(REF_DES_FIELD_PREFIX);
             try writeJsonString(w, inst.ref_des);
             try w.writeAll(",\"component\":");
             try writeJsonString(w, inst.component);
@@ -1189,7 +1204,7 @@ fn listDatasheets(
         const stat = dir.statFile(entry.name) catch continue;
         if (!first) try w.writeAll(",");
         first = false;
-        try w.writeAll("{\"name\":");
+        try w.writeAll(NAME_FIELD_PREFIX);
         try writeJsonString(w, entry.name);
         try w.print(",\"size\":{d},\"used_by\":[", .{stat.size});
         if (uses.get(entry.name)) |list| {
@@ -1399,7 +1414,7 @@ pub fn renderSceneGraph(
     project_dir: []const u8,
     name: []const u8,
 ) ToolError![]const u8 {
-    const path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    const path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
     defer allocator.free(path);
 
     var eval = Evaluator.init(allocator, project_dir);
@@ -1411,7 +1426,7 @@ pub fn renderSceneGraph(
         else => return error.NotADesign,
     };
 
-    const bom_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name });
+    const bom_path = try std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name });
     defer allocator.free(bom_path);
     bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 

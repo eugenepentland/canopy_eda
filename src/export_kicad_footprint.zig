@@ -9,6 +9,16 @@ const parser_mod = @import("sexpr/parser.zig");
 /// KiCad footprint sexp.
 pub const FootprintError = std.mem.Allocator.Error || parser_mod.ParseError || error{InvalidFormat};
 
+// ── Constants ─────────────────────────────────────────────────────
+const PAD_MIN_CHILDREN: usize = 5;
+const RECT_MIN_CHILDREN: usize = 5;
+const STEP_EXT_LEN: usize = 5;
+// ZIP file format constants (PKZIP appnote.txt)
+const ZIP_VERSION_NEEDED: u16 = 20;
+const ZIP_VERSION_MADE_BY: u16 = 20;
+const ZIP_EOCD_SIG_5: u8 = 5;
+const ZIP_EOCD_SIG_6: u8 = 6;
+
 // --- Source .kicad_mod passthrough ---
 
 /// Find the original .kicad_mod source file for a footprint.
@@ -189,7 +199,7 @@ pub fn exportFootprintMod(allocator: std.mem.Allocator, source: []const u8, mode
 
 fn emitKicadPad(w: anytype, node: ast.Node) !void {
     const children = node.asList() orelse return;
-    if (children.len < 5) return;
+    if (children.len < PAD_MIN_CHILDREN) return;
 
     // (pad NAME TYPE SHAPE (pos X Y) (size W H))
     const pad_type_internal = children[2].asAtom() orelse return;
@@ -290,7 +300,7 @@ fn emitKicadCourtyard(w: anytype, node: ast.Node) !void {
     for (children[1..]) |child| {
         if (child.isForm("rect")) {
             const cl = child.asList() orelse continue;
-            if (cl.len >= 5) {
+            if (cl.len >= RECT_MIN_CHILDREN) {
                 const x1 = cl[1].asNumber() orelse 0;
                 const y1 = cl[2].asNumber() orelse 0;
                 const x2 = cl[3].asNumber() orelse 0;
@@ -403,7 +413,7 @@ pub fn findModelFile(
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".step")) continue;
         // Check if model filename contains the footprint or component name
-        const basename = entry.name[0 .. entry.name.len - 5]; // strip .step
+        const basename = entry.name[0 .. entry.name.len - STEP_EXT_LEN]; // strip .step
         if (std.mem.indexOf(u8, footprint_name, basename) != null or
             std.mem.indexOf(u8, basename, footprint_name) != null or
             std.mem.indexOf(u8, component_name, basename) != null or
@@ -440,7 +450,7 @@ pub fn buildZip(allocator: std.mem.Allocator, entries: []const ZipEntry) std.mem
         offsets[i] = @intCast(buf.items.len);
         // Local file header
         try buf.appendSlice(allocator, &[_]u8{ 'P', 'K', 3, 4 }); // signature
-        try appendU16(&buf, allocator, 20); // version needed
+        try appendU16(&buf, allocator, ZIP_VERSION_NEEDED); // version needed
         try appendU16(&buf, allocator, 0); // flags
         try appendU16(&buf, allocator, 0); // compression: store
         try appendU16(&buf, allocator, 0); // mod time
@@ -458,8 +468,8 @@ pub fn buildZip(allocator: std.mem.Allocator, entries: []const ZipEntry) std.mem
     const cd_start: u32 = @intCast(buf.items.len);
     for (entries, 0..) |entry, i| {
         try buf.appendSlice(allocator, &[_]u8{ 'P', 'K', 1, 2 }); // signature
-        try appendU16(&buf, allocator, 20); // version made by
-        try appendU16(&buf, allocator, 20); // version needed
+        try appendU16(&buf, allocator, ZIP_VERSION_MADE_BY); // version made by
+        try appendU16(&buf, allocator, ZIP_VERSION_NEEDED); // version needed
         try appendU16(&buf, allocator, 0); // flags
         try appendU16(&buf, allocator, 0); // compression: store
         try appendU16(&buf, allocator, 0); // mod time
@@ -479,7 +489,7 @@ pub fn buildZip(allocator: std.mem.Allocator, entries: []const ZipEntry) std.mem
     const cd_size: u32 = @intCast(buf.items.len - cd_start);
 
     // End of central directory
-    try buf.appendSlice(allocator, &[_]u8{ 'P', 'K', 5, 6 }); // signature
+    try buf.appendSlice(allocator, &[_]u8{ 'P', 'K', ZIP_EOCD_SIG_5, ZIP_EOCD_SIG_6 }); // signature
     try appendU16(&buf, allocator, 0); // disk number
     try appendU16(&buf, allocator, 0); // disk with CD
     try appendU16(&buf, allocator, @intCast(entries.len)); // entries on disk

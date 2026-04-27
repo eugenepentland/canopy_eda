@@ -1,4 +1,11 @@
 const std = @import("std");
+const ast = @import("../sexpr/ast.zig");
+
+// ── Constants ─────────────────────────────────────────────────────
+const PULLUP_RANGE_MIN_CHILDREN: usize = 5;
+const DECOUPLING_PER_PIN_MIN_CHILDREN: usize = 5;
+const SERIES_ELEMENT_MIN_CHILDREN: usize = 6;
+const SERIES_ELEMENT_MAX_INDEX: usize = 5;
 
 /// A value in the evaluator.
 pub const Value = union(enum) {
@@ -60,7 +67,7 @@ pub const Value = union(enum) {
 pub const ModuleDef = struct {
     name: []const u8,
     params: []const []const u8,
-    body: []const @import("../sexpr/ast.zig").Node,
+    body: []const ast.Node,
     /// Import scope from the module file
     imports: *Env,
 };
@@ -287,7 +294,7 @@ pub const SeriesKind = enum { R, L, C };
 
 /// Parse `(check (<primitive> ...))` nested inside a `(requirement ...)`
 /// body. Returns null if the form isn't a recognized check.
-pub fn parseCheck(node: @import("../sexpr/ast.zig").Node) ?Check {
+pub fn parseCheck(node: ast.Node) ?Check {
     const children = node.asList() orelse return null;
     if (children.len < 2) return null;
     const head = children[0].asAtom() orelse return null;
@@ -311,7 +318,7 @@ pub fn parseCheck(node: @import("../sexpr/ast.zig").Node) ?Check {
         return .{ .decoupling = .{ .pin_a = a, .pin_b = b, .min_uf = min_uf } };
     }
     if (std.mem.eql(u8, kind, "pullup-range")) {
-        if (body_children.len < 5) return null;
+        if (body_children.len < PULLUP_RANGE_MIN_CHILDREN) return null;
         const p = pinArg(body_children[1]) orelse return null;
         const net_name = netArg(body_children[2]) orelse return null;
         const lo = namedNumberArg(body_children[3], "min-ohms") orelse return null;
@@ -360,7 +367,7 @@ pub fn parseCheck(node: @import("../sexpr/ast.zig").Node) ?Check {
         return .{ .pins_on_same_net = .{ .pins = list.toOwnedSlice(allocator) catch return null } };
     }
     if (std.mem.eql(u8, kind, "decoupling-per-pin")) {
-        if (body_children.len < 5) return null;
+        if (body_children.len < DECOUPLING_PER_PIN_MIN_CHILDREN) return null;
         // (decoupling-per-pin (return-pin "X") (pins "A" "B"...) (min-uf F) (count N))
         const rp_form = body_children[1].asList() orelse return null;
         if (rp_form.len < 2) return null;
@@ -391,7 +398,7 @@ pub fn parseCheck(node: @import("../sexpr/ast.zig").Node) ?Check {
         } };
     }
     if (std.mem.eql(u8, kind, "series-element")) {
-        if (body_children.len < 6) return null;
+        if (body_children.len < SERIES_ELEMENT_MIN_CHILDREN) return null;
         // (series-element (kind R|L|C) (pin "P") (target-net "N") (min X) (max Y))
         const kind_form = body_children[1].asList() orelse return null;
         if (kind_form.len < 2) return null;
@@ -409,7 +416,7 @@ pub fn parseCheck(node: @import("../sexpr/ast.zig").Node) ?Check {
         if (!std.mem.eql(u8, tn_head, "target-net")) return null;
         const target_net = tn_form[1].asString() orelse tn_form[1].asAtom() orelse return null;
         const lo = namedNumberArg(body_children[4], "min") orelse return null;
-        const hi = namedNumberArg(body_children[5], "max") orelse return null;
+        const hi = namedNumberArg(body_children[SERIES_ELEMENT_MAX_INDEX], "max") orelse return null;
         return .{ .series_element = .{
             .kind = sk,
             .pin = p,
@@ -421,7 +428,7 @@ pub fn parseCheck(node: @import("../sexpr/ast.zig").Node) ?Check {
     return null;
 }
 
-fn pinArg(node: @import("../sexpr/ast.zig").Node) ?[]const u8 {
+fn pinArg(node: ast.Node) ?[]const u8 {
     const c = node.asList() orelse return null;
     if (c.len < 2) return null;
     const h = c[0].asAtom() orelse return null;
@@ -429,7 +436,7 @@ fn pinArg(node: @import("../sexpr/ast.zig").Node) ?[]const u8 {
     return c[1].asString() orelse c[1].asAtom();
 }
 
-fn netArg(node: @import("../sexpr/ast.zig").Node) ?[]const u8 {
+fn netArg(node: ast.Node) ?[]const u8 {
     const c = node.asList() orelse return null;
     if (c.len < 2) return null;
     const h = c[0].asAtom() orelse return null;
@@ -437,7 +444,7 @@ fn netArg(node: @import("../sexpr/ast.zig").Node) ?[]const u8 {
     return c[1].asString() orelse c[1].asAtom();
 }
 
-fn namedNumberArg(node: @import("../sexpr/ast.zig").Node, name: []const u8) ?f64 {
+fn namedNumberArg(node: ast.Node, name: []const u8) ?f64 {
     const c = node.asList() orelse return null;
     if (c.len < 2) return null;
     const h = c[0].asAtom() orelse return null;
@@ -448,7 +455,7 @@ fn namedNumberArg(node: @import("../sexpr/ast.zig").Node, name: []const u8) ?f64
 /// Parse a `(ref "file.pdf" (page N))` form into a `NoteRef`. Returns null
 /// if the node isn't a well-formed ref (wrong head atom, missing pdf
 /// filename). Used by section-note and requirement parsers.
-pub fn parseNoteRef(node: @import("../sexpr/ast.zig").Node) ?NoteRef {
+pub fn parseNoteRef(node: ast.Node) ?NoteRef {
     const children = node.asList() orelse return null;
     if (children.len < 2) return null;
     const head = children[0].asAtom() orelse return null;

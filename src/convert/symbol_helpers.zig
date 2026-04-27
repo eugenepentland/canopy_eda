@@ -2,6 +2,14 @@ const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const Node = ast.Node;
 
+// ── Constants ─────────────────────────────────────────────────────
+const DEFAULT_BODY_HALF_SIZE: f64 = 5;
+const PIN_ANGLE_RIGHT: f64 = 180;
+const PIN_ANGLE_BOTTOM: f64 = 90;
+const PIN_ANGLE_TOP: f64 = 270;
+const HALF_DIVISOR: f64 = 2.0;
+const UNCONNECTED_LABEL = "unconnected";
+
 /// One pin extracted from a `.kicad_sym` symbol: pad `number`, display
 /// `name`, KiCad electrical type, and the `(at x y angle)` placement used
 /// to classify which side of the symbol body the pin sits on.
@@ -56,10 +64,10 @@ pub fn emitSymbol(allocator: std.mem.Allocator, w: anytype, sym_children: []cons
     try collectPins(sym_children[2..], &pins, allocator);
 
     // Compute body bounding box from rectangles
-    var body_x1: f64 = -5;
-    var body_y1: f64 = -5;
-    var body_x2: f64 = 5;
-    var body_y2: f64 = 5;
+    var body_x1: f64 = -DEFAULT_BODY_HALF_SIZE;
+    var body_y1: f64 = -DEFAULT_BODY_HALF_SIZE;
+    var body_x2: f64 = DEFAULT_BODY_HALF_SIZE;
+    var body_y2: f64 = DEFAULT_BODY_HALF_SIZE;
     computeBodyBBox(sym_children[2..], &body_x1, &body_y1, &body_x2, &body_y2);
 
     // Classify pins by side and assign order
@@ -220,12 +228,12 @@ pub fn computeBodyBBox(children: []const Node, x1: *f64, y1: *f64, x2: *f64, y2:
 
 fn classifyPinSide(pin: PinInfo, bx1: f64, by1: f64, bx2: f64, by2: f64) Side {
     if (pin.angle == 0) return .left;
-    if (pin.angle == 180) return .right;
-    if (pin.angle == 90) return .bottom;
-    if (pin.angle == 270) return .top;
+    if (pin.angle == PIN_ANGLE_RIGHT) return .right;
+    if (pin.angle == PIN_ANGLE_BOTTOM) return .bottom;
+    if (pin.angle == PIN_ANGLE_TOP) return .top;
 
-    const cx = (bx1 + bx2) / 2.0;
-    const cy = (by1 + by2) / 2.0;
+    const cx = (bx1 + bx2) / HALF_DIVISOR;
+    const cy = (by1 + by2) / HALF_DIVISOR;
     const dx = @abs(pin.x - cx);
     const dy = @abs(pin.y - cy);
 
@@ -262,7 +270,7 @@ pub fn mapElectricalType(kicad: []const u8) []const u8 {
     if (std.mem.eql(u8, kicad, "passive")) return "passive";
     if (std.mem.eql(u8, kicad, "power_in")) return "power-in";
     if (std.mem.eql(u8, kicad, "power_out")) return "power-out";
-    if (std.mem.eql(u8, kicad, "unconnected")) return "unconnected";
-    if (std.mem.eql(u8, kicad, "no_connect")) return "unconnected";
+    if (std.mem.eql(u8, kicad, UNCONNECTED_LABEL)) return UNCONNECTED_LABEL;
+    if (std.mem.eql(u8, kicad, "no_connect")) return UNCONNECTED_LABEL;
     return "passive";
 }

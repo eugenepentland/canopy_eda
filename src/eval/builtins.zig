@@ -8,6 +8,9 @@ pub const BuiltinError = error{
     DivisionByZero,
 };
 
+// ── Constants ─────────────────────────────────────────────────────
+const ZERO_DIVISOR: f64 = 0.0;
+
 /// Evaluate an arithmetic or logic builtin given the operator name and evaluated arguments.
 pub fn evalBuiltin(op: []const u8, args: []const Value) BuiltinError!Value {
     // Arithmetic: +, -, *, /, %
@@ -44,11 +47,11 @@ fn arithmetic(args: []const Value, op: ArithOp) BuiltinError!Value {
         .sub => a - b,
         .mul => a * b,
         .div => blk: {
-            if (b == 0.0) return BuiltinError.DivisionByZero;
+            if (b == ZERO_DIVISOR) return BuiltinError.DivisionByZero;
             break :blk a / b;
         },
         .mod => blk: {
-            if (b == 0.0) return BuiltinError.DivisionByZero;
+            if (b == ZERO_DIVISOR) return BuiltinError.DivisionByZero;
             break :blk @mod(a, b);
         },
     };

@@ -8,6 +8,11 @@ const Handler = serve_root.Handler;
 const assets_css = @import("assets_css.zig");
 const footprint_preview = @import("footprint_preview.zig");
 
+// ── Constants ─────────────────────────────────────────────────────
+const SEXP_EXT_LEN: usize = ".sexp".len;
+const PIN_FORM_LEN: usize = "(pin ".len;
+const MAX_LIB_FILE_BYTES: usize = 256 * 1024;
+
 /// Error set for HTTP handlers and writers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error || std.fs.Dir.Iterator.Error;
 
@@ -28,7 +33,7 @@ pub fn writeFamiliesJson(w: anytype, allocator: std.mem.Allocator, project_dir: 
         if (entry.kind != .file) continue;
         const fname = entry.name;
         if (!std.mem.endsWith(u8, fname, ".sexp")) continue;
-        const base = fname[0 .. fname.len - 5];
+        const base = fname[0 .. fname.len - SEXP_EXT_LEN];
         for (prefixes, 0..) |pfx, pi| {
             if (std.mem.startsWith(u8, base, pfx) and base.len > pfx.len and base[pfx.len] == '-') {
                 try lists[pi].append(allocator, try allocator.dupe(u8, base));
@@ -166,8 +171,8 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handl
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".sexp")) continue;
-            const base = entry.name[0 .. entry.name.len - 5];
-            const content = dir.readFileAlloc(ctx.allocator, entry.name, 256 * 1024) catch continue;
+            const base = entry.name[0 .. entry.name.len - SEXP_EXT_LEN];
+            const content = dir.readFileAlloc(ctx.allocator, entry.name, MAX_LIB_FILE_BYTES) catch continue;
 
             // Parse fields from sexp content
             const description = extractField(content, "description");
@@ -237,14 +242,14 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handl
             var liter = dir.iterate();
             while (try liter.next()) |entry| {
                 if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".sexp")) continue;
-                const lname = entry.name[0 .. entry.name.len - 5];
+                const lname = entry.name[0 .. entry.name.len - SEXP_EXT_LEN];
                 if (referenced_pinouts.contains(lname)) continue;
-                const content = dir.readFileAlloc(ctx.allocator, entry.name, 256 * 1024) catch continue;
+                const content = dir.readFileAlloc(ctx.allocator, entry.name, MAX_LIB_FILE_BYTES) catch continue;
                 var pin_count: usize = 0;
                 var pos: usize = 0;
                 while (std.mem.indexOfPos(u8, content, pos, "(pin ")) |idx| {
                     pin_count += 1;
-                    pos = idx + 5;
+                    pos = idx + PIN_FORM_LEN;
                 }
                 try w.print("<tr data-search=\"{s} pinout\"><td>{s}</td>", .{ lname, lname });
                 try w.writeAll("<td><span class=\"tag tag-pinout\">pinout</span></td>");
@@ -263,7 +268,7 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handl
             var fiter = dir.iterate();
             while (try fiter.next()) |entry| {
                 if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".sexp")) continue;
-                const fname = entry.name[0 .. entry.name.len - 5];
+                const fname = entry.name[0 .. entry.name.len - SEXP_EXT_LEN];
                 if (referenced_footprints.contains(fname)) continue;
                 try w.print("<tr data-search=\"{s} footprint\"><td>{s}</td>", .{ fname, fname });
                 try w.writeAll("<td><span class=\"tag tag-footprint\">footprint</span></td>");

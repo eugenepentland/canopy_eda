@@ -13,6 +13,25 @@ const FlatPin = export_kicad.FlatPin;
 const Property = env_mod.Property;
 const uuidFromId = export_kicad.uuidFromId;
 
+// ── Constants ─────────────────────────────────────────────────────
+const DEFAULT_BOARD_THICKNESS_MM: f64 = 1.6;
+const COMP_GAP_ADVANCE_MM: f64 = 3.0;
+const PAD_MIN_CHILDREN: usize = 5;
+const NUM_LAYERS_FOR_INNER_4: u8 = 4;
+const NUM_LAYERS_FOR_INNER_6: u8 = 6;
+// UUID v5 byte indices (RFC 4122)
+const UUID_VERSION_BYTE: usize = 6;
+const UUID_VARIANT_BYTE: usize = 8;
+const UUID_BYTE_5: usize = 5;
+const UUID_BYTE_7: usize = 7;
+const UUID_BYTE_9: usize = 9;
+const UUID_BYTE_10: usize = 10;
+const UUID_BYTE_11: usize = 11;
+const UUID_BYTE_12: usize = 12;
+const UUID_BYTE_13: usize = 13;
+const UUID_BYTE_14: usize = 14;
+const UUID_BYTE_15: usize = 15;
+
 const layout_mod = @import("layout.zig");
 const netlist_mod = @import("export_kicad_netlist.zig");
 const collectInstances = netlist_mod.collectInstances;
@@ -152,7 +171,7 @@ pub fn exportPcb(
     const w = buf.writer(allocator);
 
     // Board parameters (from board form or defaults)
-    const thickness: f64 = if (board_def) |b| b.thickness else 1.6;
+    const thickness: f64 = if (board_def) |b| b.thickness else DEFAULT_BOARD_THICKNESS_MM;
     const copper_layers: u8 = if (board_def) |b| b.copper_layers else 2;
 
     // Header
@@ -200,10 +219,10 @@ pub fn exportPcb(
                 layer = p.layer;
             } else {
                 // New component — advance grid
-                next_x += comp_gap + 3.0; // estimate 3mm per component
+                next_x += comp_gap + COMP_GAP_ADVANCE_MM; // estimate 3mm per component
                 if (next_x > max_row_width) {
                     next_x = 20.0;
-                    next_y += comp_gap + 3.0;
+                    next_y += comp_gap + COMP_GAP_ADVANCE_MM;
                 }
             }
         }
@@ -367,7 +386,7 @@ fn writeFootprint(
     for (children[2..]) |child| {
         if (!child.isForm("pad")) continue;
         const cl = child.asList() orelse continue;
-        if (cl.len < 5) continue;
+        if (cl.len < PAD_MIN_CHILDREN) continue;
 
         const pad_name = cl[1].asAtom() orelse cl[1].asString() orelse continue;
         const pad_type = cl[2].asAtom() orelse continue; // smd, thru_hole, etc.
@@ -486,13 +505,13 @@ fn generateSubUuid(allocator: std.mem.Allocator, parent_uuid: []const u8, suffix
     const hash = hasher.finalResult();
     var bytes: [16]u8 = undefined;
     @memcpy(&bytes, hash[0..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x50;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    bytes[UUID_VERSION_BYTE] = (bytes[UUID_VERSION_BYTE] & 0x0f) | 0x50;
+    bytes[UUID_VARIANT_BYTE] = (bytes[UUID_VARIANT_BYTE] & 0x3f) | 0x80;
     return std.fmt.allocPrint(allocator, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
-        bytes[0],  bytes[1],  bytes[2],  bytes[3],
-        bytes[4],  bytes[5],  bytes[6],  bytes[7],
-        bytes[8],  bytes[9],  bytes[10], bytes[11],
-        bytes[12], bytes[13], bytes[14], bytes[15],
+        bytes[0],                 bytes[1],            bytes[2],                 bytes[3],
+        bytes[4],                 bytes[UUID_BYTE_5],  bytes[UUID_VERSION_BYTE], bytes[UUID_BYTE_7],
+        bytes[UUID_VARIANT_BYTE], bytes[UUID_BYTE_9],  bytes[UUID_BYTE_10],      bytes[UUID_BYTE_11],
+        bytes[UUID_BYTE_12],      bytes[UUID_BYTE_13], bytes[UUID_BYTE_14],      bytes[UUID_BYTE_15],
     });
 }
 
@@ -501,11 +520,11 @@ fn writeLayerDefs(w: anytype, copper_layers: u8) !void {
     try w.writeAll("\t(layers\n");
     try w.writeAll("\t\t(0 \"F.Cu\" signal)\n");
     // Inner copper layers for 4+ layer boards
-    if (copper_layers >= 4) {
+    if (copper_layers >= NUM_LAYERS_FOR_INNER_4) {
         try w.writeAll("\t\t(4 \"In1.Cu\" signal)\n");
         try w.writeAll("\t\t(6 \"In2.Cu\" signal)\n");
     }
-    if (copper_layers >= 6) {
+    if (copper_layers >= NUM_LAYERS_FOR_INNER_6) {
         try w.writeAll("\t\t(8 \"In3.Cu\" signal)\n");
         try w.writeAll("\t\t(10 \"In4.Cu\" signal)\n");
     }

@@ -12,6 +12,20 @@ const bom_resolve = @import("bom_resolve.zig");
 
 pub const resolveIdentities = bom_resolve.resolveIdentities;
 
+// ── Constants ─────────────────────────────────────────────────────
+// UUID v4 byte indices (RFC 4122)
+const UUID_VERSION_BYTE: usize = 6;
+const UUID_VARIANT_BYTE: usize = 8;
+const UUID_BYTE_5: usize = 5;
+const UUID_BYTE_7: usize = 7;
+const UUID_BYTE_9: usize = 9;
+const UUID_BYTE_10: usize = 10;
+const UUID_BYTE_11: usize = 11;
+const UUID_BYTE_12: usize = 12;
+const UUID_BYTE_13: usize = 13;
+const UUID_BYTE_14: usize = 14;
+const UUID_BYTE_15: usize = 15;
+
 /// Error set for BOM loading and application. Covers parser-side errors,
 /// the file IO surface infra_fs.cwd() exposes, and `OutOfMemory`.
 pub const BomError = std.mem.Allocator.Error ||
@@ -174,14 +188,14 @@ pub fn collectFlatInstances(
 pub fn generateUuid(allocator: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
     var bytes: [16]u8 = undefined;
     infra_random.bytes(&bytes);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    bytes[UUID_VERSION_BYTE] = (bytes[UUID_VERSION_BYTE] & 0x0f) | 0x40;
+    bytes[UUID_VARIANT_BYTE] = (bytes[UUID_VARIANT_BYTE] & 0x3f) | 0x80;
 
     return std.fmt.allocPrint(allocator, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
-        bytes[0],  bytes[1],  bytes[2],  bytes[3],
-        bytes[4],  bytes[5],  bytes[6],  bytes[7],
-        bytes[8],  bytes[9],  bytes[10], bytes[11],
-        bytes[12], bytes[13], bytes[14], bytes[15],
+        bytes[0],                 bytes[1],            bytes[2],                 bytes[3],
+        bytes[4],                 bytes[UUID_BYTE_5],  bytes[UUID_VERSION_BYTE], bytes[UUID_BYTE_7],
+        bytes[UUID_VARIANT_BYTE], bytes[UUID_BYTE_9],  bytes[UUID_BYTE_10],      bytes[UUID_BYTE_11],
+        bytes[UUID_BYTE_12],      bytes[UUID_BYTE_13], bytes[UUID_BYTE_14],      bytes[UUID_BYTE_15],
     });
 }
 

@@ -4,9 +4,10 @@ const log = @import("../infra/log.zig");
 const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const env_mod = @import("env.zig");
-const Evaluator = @import("evaluator.zig").Evaluator;
-const EvalError = @import("evaluator.zig").EvalError;
-const PinNetDecl = @import("evaluator.zig").PinNetDecl;
+const evaluator_mod = @import("evaluator.zig");
+const Evaluator = evaluator_mod.Evaluator;
+const EvalError = evaluator_mod.EvalError;
+const PinNetDecl = evaluator_mod.PinNetDecl;
 const NetTie = Evaluator.NetTie;
 const ids = @import("ids.zig");
 const instance_mod = @import("instance.zig");
@@ -19,6 +20,10 @@ const Port = env_mod.Port;
 const Note = env_mod.Note;
 const Group = env_mod.Group;
 const SubBlock = env_mod.SubBlock;
+
+// ── Constants ─────────────────────────────────────────────────────
+const ASSERT_RANGE_ARITY: usize = 5;
+const PIN_DECL_STRIDE_WITH_REF: usize = 5;
 
 /// Parse (port "NET" in/out/io ...) section port declaration.
 pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod.Env) EvalError!?env_mod.SectionPort {
@@ -129,7 +134,7 @@ pub fn parseSectionCalc(self: *Evaluator, sf_children: []const Node, env: *env_m
                 if (var_val.asNumber()) |n| try calc_results.append(self.allocator, .{ .name = var_name, .value = n });
             }
         } else if (std.mem.eql(u8, cf_name, "assert-range")) {
-            if (cf_children.len >= 5) {
+            if (cf_children.len >= ASSERT_RANGE_ARITY) {
                 const val = try self.evalNode(cf_children[1], &calc_env);
                 const lo = try self.evalNode(cf_children[2], &calc_env);
                 const hi = try self.evalNode(cf_children[3], &calc_env);
@@ -428,7 +433,7 @@ pub fn emitDecoupleItems(
                 }
             }
         }
-        idx += if (specific_pin != null) @as(usize, 5) else @as(usize, 4);
+        idx += if (specific_pin != null) @as(usize, PIN_DECL_STRIDE_WITH_REF) else @as(usize, 4);
     }
 }
 

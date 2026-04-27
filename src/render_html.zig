@@ -30,6 +30,12 @@ const Allocator = std.mem.Allocator;
 /// `ArrayListUnmanaged(u8).writer()` whose only failure is `OutOfMemory`.
 pub const RenderError = std.mem.Allocator.Error;
 
+// ── Repeated string literals ──────────────────────────────────────
+const approvedClass: []const u8 = " sec-card-approved";
+const hubsArrayPrefix: []const u8 = ",\"hubs\":[";
+const sectionClose: []const u8 = "</section>";
+const approvedPill: []const u8 = "<span class=\"pill pill-approved\">APPROVED</span>";
+
 /// Render a design as a self-contained HTML schematic page. Mirrors the
 /// review page's style: inline CSS, navbar, status banner, then a stack of
 /// section cards. Each hub inside a section is partitioned into a direct-pin
@@ -371,7 +377,7 @@ fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section,
         review_html.findState(state, slug)
     else
         null;
-    const approved_class: []const u8 = if (rs) |s| (if (s.approved) " sec-card-approved" else "") else "";
+    const approved_class: []const u8 = if (rs) |s| (if (s.approved) approvedClass else "") else "";
     try w.print("<section class=\"{s}{s}\" id=\"sec-{s}\" data-slug=\"{s}\">", .{ indent_class, approved_class, slug, slug });
 
     // Header
@@ -383,7 +389,7 @@ fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section,
     try w.writeAll("<div class=\"sec-head\"><h2>");
     try writeHtmlEscaped(w, sec.name);
     try w.print("</h2><span class=\"pill {s}\">{s}</span>", .{ status_pill, @tagName(sec.status) });
-    if (rs) |s| if (s.approved) try w.writeAll("<span class=\"pill pill-approved\">APPROVED</span>");
+    if (rs) |s| if (s.approved) try w.writeAll(approvedPill);
     try w.writeAll("</div>");
 
     if (sec.description.len > 0) {
@@ -431,7 +437,7 @@ fn writeSection(ctx: *RenderCtx, w: anytype, allocator: Allocator, sec: Section,
     // and POSTs to /api/review-state/:name/...
     if (rs) |s| try review_html.writeChecklist(w, s);
 
-    try w.writeAll("</section>");
+    try w.writeAll(sectionClose);
 }
 
 const HubAnalysis = struct {
@@ -812,12 +818,12 @@ fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_
         review_html.findState(state, slug)
     else
         null;
-    const approved_class: []const u8 = if (rs) |s| (if (s.approved) " sec-card-approved" else "") else "";
+    const approved_class: []const u8 = if (rs) |s| (if (s.approved) approvedClass else "") else "";
     try w.print("<section class=\"sch-section{s}\" id=\"sec-{s}\" data-slug=\"{s}\">", .{ approved_class, slug, slug });
     try w.writeAll("<div class=\"sec-head\"><h2>");
     try writeHtmlEscaped(w, sb.name);
     try w.writeAll("</h2><span class=\"pill pill-ok\">sub-block</span>");
-    if (rs) |s| if (s.approved) try w.writeAll("<span class=\"pill pill-approved\">APPROVED</span>");
+    if (rs) |s| if (s.approved) try w.writeAll(approvedPill);
     try w.writeAll("</div>");
     try w.writeAll("<p class=\"sec-desc\">");
     try writeHtmlEscaped(w, sb.block.name);
@@ -845,7 +851,7 @@ fn writeSubBlockCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, sb: env_
 
     if (rs) |s| try review_html.writeChecklist(w, s);
 
-    try w.writeAll("</section>");
+    try w.writeAll(sectionClose);
 }
 
 /// Fallback rendering for designs that declare instances directly in
@@ -857,10 +863,10 @@ fn writeFlatHubs(ctx: *RenderCtx, w: anytype, allocator: Allocator, block: *cons
         review_html.findState(state, "design")
     else
         null;
-    const approved_class: []const u8 = if (rs) |s| (if (s.approved) " sec-card-approved" else "") else "";
+    const approved_class: []const u8 = if (rs) |s| (if (s.approved) approvedClass else "") else "";
     try w.print("<section class=\"sch-section{s}\" id=\"sec-design\" data-slug=\"design\"><div class=\"sec-head\"><h2>", .{approved_class});
     try writeHtmlEscaped(w, block.name);
-    if (rs) |s| if (s.approved) try w.writeAll("<span class=\"pill pill-approved\">APPROVED</span>");
+    if (rs) |s| if (s.approved) try w.writeAll(approvedPill);
     try w.writeAll("</h2></div>");
 
     var hub_refs: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -885,7 +891,7 @@ fn writeFlatHubs(ctx: *RenderCtx, w: anytype, allocator: Allocator, block: *cons
 
     if (rs) |s| try review_html.writeChecklist(w, s);
 
-    try w.writeAll("</section>");
+    try w.writeAll(sectionClose);
 }
 
 fn hasTopLevelHubs(block: *const DesignBlock) bool {
@@ -970,7 +976,7 @@ fn writeSearchIndex(
         try w.writeAll(",\"category\":");
         try writeJsString(w, @tagName(sb_cat));
         try emitReqStatusFields(w, sb_counts);
-        try w.writeAll(",\"hubs\":[");
+        try w.writeAll(hubsArrayPrefix);
         try emitHubRefsForBlock(w, sb.block);
         try w.writeAll("]}");
     }
@@ -987,7 +993,7 @@ fn writeSearchIndex(
         try w.writeAll(",\"description\":\"\",\"category\":");
         try writeJsString(w, @tagName(flat_cat));
         try emitReqStatusFields(w, flat_counts);
-        try w.writeAll(",\"hubs\":[");
+        try w.writeAll(hubsArrayPrefix);
         try emitHubRefsForBlock(w, block);
         try w.writeAll("]}");
     }
@@ -1079,7 +1085,7 @@ fn emitSectionEntry(
     try w.writeAll(",\"category\":");
     try writeJsString(w, @tagName(cat));
     try emitReqStatusFields(w, counts);
-    try w.writeAll(",\"hubs\":[");
+    try w.writeAll(hubsArrayPrefix);
     var first_hub = true;
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer seen.deinit(allocator);

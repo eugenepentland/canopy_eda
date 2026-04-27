@@ -4,6 +4,9 @@ const env_mod = @import("../eval/env.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const json_writer = @import("../json_writer.zig");
 
+// ── Constants ─────────────────────────────────────────────────────
+const STEP_EXT_LEN: usize = ".step".len;
+
 /// Error set for the BOM rendering helpers — a writer-or-allocator union
 /// because the `anytype` writer parameters are called with both
 /// `ArrayListUnmanaged.writer()` (Allocator.Error) and `*std.Io.Writer`
@@ -81,7 +84,7 @@ pub fn collectMissing(
                     var iter = d.iterate();
                     while (iter.next() catch null) |entry| {
                         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".step")) continue;
-                        const basename = entry.name[0 .. entry.name.len - 5];
+                        const basename = entry.name[0 .. entry.name.len - STEP_EXT_LEN];
                         if ((inst.footprint.len > 0 and (std.mem.indexOf(u8, inst.footprint, basename) != null or std.mem.indexOf(u8, basename, inst.footprint) != null)) or
                             (std.mem.indexOf(u8, inst.component, basename) != null or std.mem.indexOf(u8, basename, inst.component) != null))
                         {

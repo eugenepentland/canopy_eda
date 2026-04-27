@@ -5,6 +5,13 @@ const printer_mod = @import("../sexpr/printer.zig");
 const Node = ast.Node;
 const Span = ast.Span;
 
+// ── Constants ─────────────────────────────────────────────────────
+const FULL_TURN_DEG: f64 = 360.0;
+const ROT_45_DEG: f64 = 45.0;
+const ROT_135_DEG: f64 = 135.0;
+const ROT_225_DEG: f64 = 225.0;
+const ROT_315_DEG: f64 = 315.0;
+
 /// Convert a KiCad .kicad_mod file to .sexp footprint format.
 pub fn convertFootprint(allocator: std.mem.Allocator, source: []const u8) ConvertError![]const u8 {
     const nodes = try parser_mod.parse(allocator, source);
@@ -129,8 +136,8 @@ fn emitPad(w: anytype, node: Node) !void {
     }
 
     // Apply pad rotation: 90° or 270° swaps width and height
-    const rot_mod = @mod(rotation, 360.0);
-    const is_rotated = (rot_mod > 45.0 and rot_mod < 135.0) or (rot_mod > 225.0 and rot_mod < 315.0);
+    const rot_mod = @mod(rotation, FULL_TURN_DEG);
+    const is_rotated = (rot_mod > ROT_45_DEG and rot_mod < ROT_135_DEG) or (rot_mod > ROT_225_DEG and rot_mod < ROT_315_DEG);
     const out_sx = if (is_rotated) sy else sx;
     const out_sy = if (is_rotated) sx else sy;
 

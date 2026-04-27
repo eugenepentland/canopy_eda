@@ -14,6 +14,17 @@ const bom = @import("../bom.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
+// ── Constants ─────────────────────────────────────────────────────
+const HTTP_NOT_FOUND: u16 = 404;
+const HTTP_BAD_REQUEST: u16 = 400;
+const HTTP_INTERNAL_ERROR: u16 = 500;
+
+const HEADER_CORS_ALLOW_ORIGIN = "access-control-allow-origin";
+const ERR_NETLIST_EXPORT_JSON = "{\"ok\":false,\"error\":\"Netlist export error\"}";
+const ERR_NO_OUTPUT_PATH_JSON = "{\"ok\":false,\"error\":\"No output path configured. Set one first.\"}";
+const NET_FILE_TEMPLATE = "{s}/{s}.net";
+const env_mod = @import("../eval/env.zig");
+
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
@@ -55,11 +66,11 @@ fn extractJsonString(allocator: std.mem.Allocator, json: []const u8, key: []cons
 /// strings when no config has been set yet.
 pub fn getConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
 
     const cfg = loadConfig(ctx.allocator, ctx.project_dir, name);
     defer {
@@ -82,25 +93,25 @@ pub fn getConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 /// `<name>.kicad.json` so subsequent sync clicks know where to write.
 pub fn setConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     const body = req.body() orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         res.body = "{\"ok\":false,\"error\":\"no body\"}";
         res.content_type = .JSON;
         return;
     };
 
     const dir = extractJsonString(ctx.allocator, body, "\"output_dir\"") orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         res.body = "{\"ok\":false,\"error\":\"missing output_dir\"}";
         res.content_type = .JSON;
         return;
     };
     defer ctx.allocator.free(dir);
     const pcb = extractJsonString(ctx.allocator, body, "\"pcb_file\"") orelse ctx.allocator.dupe(u8, "") catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     defer ctx.allocator.free(pcb);
@@ -118,27 +129,27 @@ pub fn setConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     try w.writeAll("\"}\n");
 
     const f = infra_fs.cwd().createFile(path, .{}) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"ok\":false,\"error\":\"cannot write config\"}";
         res.content_type = .JSON;
         return;
     };
     defer f.close();
     f.writeAll(out.items) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"ok\":false,\"error\":\"write failed\"}";
         res.content_type = .JSON;
         return;
     };
 
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = "{\"ok\":true}";
 }
 
-fn loadAndResolve(ctx: *Handler, name: []const u8, res: *httpz.Response) ?*const @import("../eval/env.zig").DesignBlock {
+fn loadAndResolve(ctx: *Handler, name: []const u8, res: *httpz.Response) ?*const env_mod.DesignBlock {
     const board_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name }) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return null;
     };
     defer ctx.allocator.free(board_path);
@@ -148,7 +159,7 @@ fn loadAndResolve(ctx: *Handler, name: []const u8, res: *httpz.Response) ?*const
     // Matches the lifetime pattern used in src/serve/api.zig.
 
     const result = eval.evalFile(board_path) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"ok\":false,\"error\":\"Build error\"}";
         res.content_type = .JSON;
         return null;
@@ -158,7 +169,7 @@ fn loadAndResolve(ctx: *Handler, name: []const u8, res: *httpz.Response) ?*const
         .design_block => |b| b,
         .board => |b| b.design,
         else => {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             res.body = "{\"ok\":false,\"error\":\"Not a design block\"}";
             res.content_type = .JSON;
             return null;
@@ -166,7 +177,7 @@ fn loadAndResolve(ctx: *Handler, name: []const u8, res: *httpz.Response) ?*const
     };
 
     const bom_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name }) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return null;
     };
     bom.resolveIdentities(ctx.allocator, @constCast(block), bom_path, ctx.project_dir) catch |e| {
@@ -180,7 +191,7 @@ fn loadAndResolve(ctx: *Handler, name: []const u8, res: *httpz.Response) ?*const
 /// only the netlist needs to land on disk (no footprint regeneration).
 pub fn writeNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
@@ -190,8 +201,8 @@ pub fn writeNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         if (cfg.pcb_file.len > 0) ctx.allocator.free(cfg.pcb_file);
     }
     if (cfg.output_dir.len == 0) {
-        res.status = 400;
-        res.body = "{\"ok\":false,\"error\":\"No output path configured. Set one first.\"}";
+        res.status = HTTP_BAD_REQUEST;
+        res.body = ERR_NO_OUTPUT_PATH_JSON;
         res.content_type = .JSON;
         return;
     }
@@ -199,18 +210,18 @@ pub fn writeNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     const block = loadAndResolve(ctx, name, res) orelse return;
 
     const netlist = export_kicad.exportNetlistOnly(ctx.allocator, block, ctx.project_dir, name) catch {
-        res.status = 500;
-        res.body = "{\"ok\":false,\"error\":\"Netlist export error\"}";
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = ERR_NETLIST_EXPORT_JSON;
         res.content_type = .JSON;
         return;
     };
 
-    const out_path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.net", .{ cfg.output_dir, name });
+    const out_path = try std.fmt.allocPrint(ctx.allocator, NET_FILE_TEMPLATE, .{ cfg.output_dir, name });
     defer ctx.allocator.free(out_path);
 
     try infra_fs.cwd().makePath(cfg.output_dir);
     const f = infra_fs.cwd().createFile(out_path, .{}) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         const body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"Cannot write to {s}\"}}", .{out_path});
         res.body = body;
         res.content_type = .JSON;
@@ -218,7 +229,7 @@ pub fn writeNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     };
     defer f.close();
     f.writeAll(netlist) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"ok\":false,\"error\":\"write failed\"}";
         res.content_type = .JSON;
         return;
@@ -226,7 +237,7 @@ pub fn writeNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 
     const body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"path\":\"{s}\"}}", .{out_path});
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = body;
 }
 
@@ -235,7 +246,7 @@ pub fn writeNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 /// so the user can pick up both halves in KiCad's pcbnew without zipping.
 pub fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
@@ -245,8 +256,8 @@ pub fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         if (cfg.pcb_file.len > 0) ctx.allocator.free(cfg.pcb_file);
     }
     if (cfg.output_dir.len == 0) {
-        res.status = 400;
-        res.body = "{\"ok\":false,\"error\":\"No output path configured. Set one first.\"}";
+        res.status = HTTP_BAD_REQUEST;
+        res.body = ERR_NO_OUTPUT_PATH_JSON;
         res.content_type = .JSON;
         return;
     }
@@ -254,19 +265,19 @@ pub fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const block = loadAndResolve(ctx, name, res) orelse return;
 
     const netlist = export_kicad.exportNetlistOnly(ctx.allocator, block, ctx.project_dir, name) catch {
-        res.status = 500;
-        res.body = "{\"ok\":false,\"error\":\"Netlist export error\"}";
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = ERR_NETLIST_EXPORT_JSON;
         res.content_type = .JSON;
         return;
     };
 
     try infra_fs.cwd().makePath(cfg.output_dir);
 
-    const net_path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.net", .{ cfg.output_dir, name });
+    const net_path = try std.fmt.allocPrint(ctx.allocator, NET_FILE_TEMPLATE, .{ cfg.output_dir, name });
     defer ctx.allocator.free(net_path);
     {
         const f = infra_fs.cwd().createFile(net_path, .{}) catch {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             const body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"Cannot write to {s}\"}}", .{net_path});
             res.body = body;
             res.content_type = .JSON;
@@ -274,7 +285,7 @@ pub fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         };
         defer f.close();
         f.writeAll(netlist) catch {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             res.body = "{\"ok\":false,\"error\":\"netlist write failed\"}";
             res.content_type = .JSON;
             return;
@@ -286,7 +297,7 @@ pub fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     try infra_fs.cwd().makePath(pretty_dir);
 
     export_kicad.exportFootprints(ctx.allocator, block, ctx.project_dir, pretty_dir) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"ok\":false,\"error\":\"footprint export failed\"}";
         res.content_type = .JSON;
         return;
@@ -298,7 +309,7 @@ pub fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         .{ net_path, pretty_dir },
     );
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = body;
 }
 
@@ -314,7 +325,7 @@ pub fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 /// case returns in under 100ms instead of rewriting tens of MB of model files.
 pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
@@ -327,8 +338,8 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         if (cfg.pcb_file.len > 0) ctx.allocator.free(cfg.pcb_file);
     }
     if (cfg.output_dir.len == 0) {
-        res.status = 400;
-        res.body = "{\"ok\":false,\"error\":\"No output path configured. Set one first.\"}";
+        res.status = HTTP_BAD_REQUEST;
+        res.body = ERR_NO_OUTPUT_PATH_JSON;
         res.content_type = .JSON;
         return;
     }
@@ -338,8 +349,8 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     // ── Compute desired state (everything we might need to write) ─────
 
     const netlist = export_kicad.exportNetlistOnly(ctx.allocator, block, ctx.project_dir, name) catch {
-        res.status = 500;
-        res.body = "{\"ok\":false,\"error\":\"Netlist export error\"}";
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = ERR_NETLIST_EXPORT_JSON;
         res.content_type = .JSON;
         return;
     };
@@ -361,7 +372,7 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     var cache = loadCache(ctx.allocator, cache_path);
     defer cache.deinit(ctx.allocator);
 
-    const net_path = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.net", .{ cfg.output_dir, name });
+    const net_path = try std.fmt.allocPrint(ctx.allocator, NET_FILE_TEMPLATE, .{ cfg.output_dir, name });
     defer ctx.allocator.free(net_path);
     const pretty_dir = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}.pretty", .{ cfg.output_dir, name });
     defer ctx.allocator.free(pretty_dir);
@@ -418,14 +429,14 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 
     if (netlist_changed) {
         const f = infra_fs.cwd().createFile(net_path, .{}) catch {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             res.body = "{\"ok\":false,\"error\":\"Cannot write netlist\"}";
             res.content_type = .JSON;
             return;
         };
         defer f.close();
         f.writeAll(netlist) catch {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             res.body = "{\"ok\":false,\"error\":\"netlist write failed\"}";
             res.content_type = .JSON;
             return;
@@ -503,7 +514,7 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         .allocator = ctx.allocator,
         .argv = argv_buf[0..argc],
     }) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"ok\":false,\"error\":\"Failed to run pcb_update.py\"}";
         res.content_type = .JSON;
         return;
@@ -541,7 +552,7 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         .{ pcb_path, esc_backup.items, summary.mismatches, summary.missing, summary.seeded, fps_to_write.items.len, models_to_copy.items.len },
     );
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = body;
 }
 
@@ -589,13 +600,15 @@ fn respondScriptFailure(
     stderr: []const u8,
 ) !void {
     var err_msg: []const u8 = "PCB update script failed";
+    const RUNTIME_ERROR_PREFIX = "RuntimeError: ";
+    const ERROR_PREFIX = "Error: ";
     const err_source = if (stderr.len > 0) stderr else stdout;
-    if (std.mem.lastIndexOf(u8, err_source, "RuntimeError: ")) |idx| {
+    if (std.mem.lastIndexOf(u8, err_source, RUNTIME_ERROR_PREFIX)) |idx| {
         const line_end = std.mem.indexOfPos(u8, err_source, idx, "\n") orelse err_source.len;
-        err_msg = err_source[idx + 14 .. line_end];
-    } else if (std.mem.lastIndexOf(u8, err_source, "Error: ")) |idx| {
+        err_msg = err_source[idx + RUNTIME_ERROR_PREFIX.len .. line_end];
+    } else if (std.mem.lastIndexOf(u8, err_source, ERROR_PREFIX)) |idx| {
         const line_end = std.mem.indexOfPos(u8, err_source, idx, "\n") orelse err_source.len;
-        err_msg = err_source[idx + 7 .. line_end];
+        err_msg = err_source[idx + ERROR_PREFIX.len .. line_end];
     }
 
     // Extract preflight missing-footprint block from stdout, if present — it
@@ -692,7 +705,7 @@ const DesiredState = struct {
 /// this and the cache tells us exactly which files need to be touched on disk.
 fn collectDesiredFootprintsAndModels(
     allocator: std.mem.Allocator,
-    block: *const @import("../eval/env.zig").DesignBlock,
+    block: *const env_mod.DesignBlock,
     project_dir: []const u8,
 ) !DesiredState {
     var instances: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
@@ -874,7 +887,7 @@ fn fileExists(path: []const u8) bool {
 /// always fall back to reading placements out of the .kicad_pcb directly.
 fn syncLayoutFromPcb(
     allocator: std.mem.Allocator,
-    block: *const @import("../eval/env.zig").DesignBlock,
+    block: *const env_mod.DesignBlock,
     project_dir: []const u8,
     name: []const u8,
     pcb_path: []const u8,

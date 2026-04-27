@@ -3,6 +3,10 @@ const infra_fs = @import("../infra/fs.zig");
 const clock = @import("../infra/clock.zig");
 const log = @import("../infra/log.zig");
 
+// ── Constants ─────────────────────────────────────────────────────
+const SEXP_FILE_TEMPLATE = "{s}/{s}.sexp";
+const NOTE_MAX_BYTES: usize = 4096;
+
 // Snapshot storage: projects/designs/history/<name>/<timestamp>/{name}.sexp (+ .layout if present)
 // Timestamp format: YYYY-MM-DDTHH-MM-SS (filesystem-safe, sorts lexicographically).
 
@@ -55,7 +59,7 @@ pub fn snapshot(
     defer allocator.free(dir);
     try infra_fs.cwd().makePath(dir);
 
-    const dst_sexp = try std.fmt.allocPrint(allocator, "{s}/{s}.sexp", .{ dir, name });
+    const dst_sexp = try std.fmt.allocPrint(allocator, SEXP_FILE_TEMPLATE, .{ dir, name });
     defer allocator.free(dst_sexp);
     try infra_fs.cwd().copyFile(sexp_src, infra_fs.cwd(), dst_sexp, .{});
 
@@ -113,7 +117,7 @@ pub fn listSnapshots(
         const id = try allocator.dupe(u8, entry.name);
         const note_path = try std.fmt.allocPrint(allocator, "{s}/{s}/.note", .{ dir_path, id });
         defer allocator.free(note_path);
-        const description: ?[]const u8 = infra_fs.cwd().readFileAlloc(allocator, note_path, 4096) catch null;
+        const description: ?[]const u8 = infra_fs.cwd().readFileAlloc(allocator, note_path, NOTE_MAX_BYTES) catch null;
         try entries.append(allocator, .{ .id = id, .description = description });
     }
     std.mem.sort(SnapshotInfo, entries.items, {}, struct {
@@ -150,7 +154,7 @@ pub fn snapshotLibraryFile(
     defer allocator.free(dir);
     try infra_fs.cwd().makePath(dir);
 
-    const dst = try std.fmt.allocPrint(allocator, "{s}/{s}.sexp", .{ dir, name });
+    const dst = try std.fmt.allocPrint(allocator, SEXP_FILE_TEMPLATE, .{ dir, name });
     defer allocator.free(dst);
     try infra_fs.cwd().copyFile(src, infra_fs.cwd(), dst, .{});
 
@@ -186,7 +190,7 @@ pub fn restore(
     defer allocator.free(dir);
     infra_fs.cwd().access(dir, .{}) catch return error.SnapshotNotFound;
 
-    const src_sexp = try std.fmt.allocPrint(allocator, "{s}/{s}.sexp", .{ dir, name });
+    const src_sexp = try std.fmt.allocPrint(allocator, SEXP_FILE_TEMPLATE, .{ dir, name });
     defer allocator.free(src_sexp);
     const dst_sexp = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
     defer allocator.free(dst_sexp);

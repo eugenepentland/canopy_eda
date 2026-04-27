@@ -10,6 +10,12 @@ const assets_css = @import("assets_css.zig");
 const library = @import("library.zig");
 const mcp_tools = @import("mcp_tools.zig");
 
+// ── Constants ─────────────────────────────────────────────────────
+const SECONDS_PER_MINUTE: i64 = 60;
+const SECONDS_PER_HOUR: i64 = 3600;
+const SECONDS_PER_DAY: i64 = 86400;
+const DAYS_PER_MONTH_APPROX: i64 = 30;
+
 /// Error set for HTTP handlers in this module: only writer-side errors
 /// propagate back to httpz; everything else is caught internally and
 /// translated to a 5xx body.
@@ -114,23 +120,23 @@ fn writeRelativeTime(w: anytype, age_sec: i64) !void {
         try w.writeAll("just now");
         return;
     }
-    if (age_sec < 60) {
+    if (age_sec < SECONDS_PER_MINUTE) {
         try w.writeAll("just now");
         return;
     }
-    if (age_sec < 3600) {
-        try w.print("{d}m ago", .{@divTrunc(age_sec, 60)});
+    if (age_sec < SECONDS_PER_HOUR) {
+        try w.print("{d}m ago", .{@divTrunc(age_sec, SECONDS_PER_MINUTE)});
         return;
     }
-    if (age_sec < 86400) {
-        try w.print("{d}h ago", .{@divTrunc(age_sec, 3600)});
+    if (age_sec < SECONDS_PER_DAY) {
+        try w.print("{d}h ago", .{@divTrunc(age_sec, SECONDS_PER_HOUR)});
         return;
     }
-    if (age_sec < 30 * 86400) {
-        try w.print("{d}d ago", .{@divTrunc(age_sec, 86400)});
+    if (age_sec < DAYS_PER_MONTH_APPROX * SECONDS_PER_DAY) {
+        try w.print("{d}d ago", .{@divTrunc(age_sec, SECONDS_PER_DAY)});
         return;
     }
-    try w.print("{d}mo ago", .{@divTrunc(age_sec, 30 * 86400)});
+    try w.print("{d}mo ago", .{@divTrunc(age_sec, DAYS_PER_MONTH_APPROX * SECONDS_PER_DAY)});
 }
 
 /// GET /style.css — serve the static stylesheet shared by the index page

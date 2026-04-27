@@ -13,6 +13,9 @@ const Value = env_mod.Value;
 const Env = env_mod.Env;
 const ModuleDef = env_mod.ModuleDef;
 
+// ── Constants ─────────────────────────────────────────────────────
+const FOOTPRINT_FORM = "footprint";
+
 /// Evaluate `(import name1 name2 …)`, resolving each name against the
 /// project's `lib/components/` and `lib/modules/` folders (project_dir then
 /// lib_dir fallback) and registering the resulting component or module in
@@ -93,7 +96,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
     var pinout_name: []const u8 = "";
 
     // Known structural fields (not properties)
-    const skip_fields = [_][]const u8{ "symbol", "footprint", "pinout", "component", "parameter", "component-family", "bus", "note", "datasheet", "requirement", "ignore-requirements" };
+    const skip_fields = [_][]const u8{ "symbol", FOOTPRINT_FORM, "pinout", "component", "parameter", "component-family", "bus", "note", "datasheet", "requirement", "ignore-requirements" };
 
     var props: std.ArrayListUnmanaged(env_mod.Property) = .empty;
     var buses: std.ArrayListUnmanaged(BusDef) = .empty;
@@ -124,7 +127,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
             props.append(self.allocator, .{ .key = "description", .value = val }) catch continue;
         } else if (std.mem.eql(u8, field, "symbol")) {
             symbol_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
-        } else if (std.mem.eql(u8, field, "footprint")) {
+        } else if (std.mem.eql(u8, field, FOOTPRINT_FORM)) {
             footprint_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
         } else if (std.mem.eql(u8, field, "pinout")) {
             pinout_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
@@ -217,7 +220,7 @@ pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalE
             const cl = child.asList().?;
             if (cl.len >= 2) symbol_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
         }
-        if (child.isForm("footprint")) {
+        if (child.isForm(FOOTPRINT_FORM)) {
             const cl = child.asList().?;
             if (cl.len >= 2) footprint_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
         }

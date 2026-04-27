@@ -4,10 +4,16 @@ const log = @import("../infra/log.zig");
 const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const env_mod = @import("env.zig");
-const Evaluator = @import("evaluator.zig").Evaluator;
-const EvalError = @import("evaluator.zig").EvalError;
-const AltFunc = @import("evaluator.zig").AltFunc;
+const evaluator_mod = @import("evaluator.zig");
+const Evaluator = evaluator_mod.Evaluator;
+const EvalError = evaluator_mod.EvalError;
+const AltFunc = evaluator_mod.AltFunc;
 const infra_random = @import("../infra/random.zig");
+
+// ── Constants ─────────────────────────────────────────────────────
+/// Number of letters (a-f) we map the leading hex byte into so the first
+/// character of an ID is always alphabetic.
+const ID_FIRST_LETTER_RANGE: u8 = 6;
 
 const Node = ast.Node;
 const Instance = env_mod.Instance;
@@ -255,7 +261,7 @@ pub fn parseId(children: []const Node) ?[]const u8 {
 pub fn generateId(self: *Evaluator) EvalError![]const u8 {
     var bytes: [4]u8 = undefined;
     infra_random.bytes(&bytes);
-    const first: u8 = (bytes[0] % 6) + 'a'; // ensure first char is a-f letter
+    const first: u8 = (bytes[0] % ID_FIRST_LETTER_RANGE) + 'a'; // ensure first char is a-f letter
     return std.fmt.allocPrint(self.allocator, "{c}{x:0>2}{x:0>2}{x:0>2}{x:0>1}", .{ first, bytes[1], bytes[2], bytes[3], bytes[0] & 0x0f });
 }
 
@@ -271,7 +277,7 @@ pub fn deriveChildId(self: *Evaluator, parent_id: []const u8, context: []const u
     hasher.update(idx_str);
     const hash = hasher.finalResult();
     // Ensure first char is a letter (so tokenizer parses as atom)
-    const first: u8 = (hash[0] % 6) + 'a';
+    const first: u8 = (hash[0] % ID_FIRST_LETTER_RANGE) + 'a';
     return std.fmt.allocPrint(self.allocator, "{c}{x:0>2}{x:0>2}{x:0>2}{x:0>1}", .{ first, hash[1], hash[2], hash[3], hash[0] & 0x0f });
 }
 

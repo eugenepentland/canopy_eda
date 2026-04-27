@@ -28,6 +28,17 @@ const bom = @import("../bom.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
+// ── Constants ─────────────────────────────────────────────────────
+const HTTP_NOT_FOUND: u16 = 404;
+const HTTP_BAD_REQUEST: u16 = 400;
+const HTTP_NOT_MODIFIED: u16 = 304;
+const HTTP_INTERNAL_ERROR: u16 = 500;
+const MAX_FOOTPRINT_BYTES: usize = 1024 * 1024;
+const MAX_STEP_FILE_BYTES: usize = 50 * 1024 * 1024;
+const MAX_OBJECT_BYTES: usize = 100 * 1024 * 1024;
+const HEADER_CACHE_CONTROL = "Cache-Control";
+const HEADER_CORS_ALLOW_ORIGIN = "access-control-allow-origin";
+
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
@@ -99,7 +110,7 @@ fn cacheGet(sha: []const u8) ?Object {
 /// only the blobs it doesn't already cache locally.
 pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
@@ -110,7 +121,7 @@ pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Build error";
         return;
     };
@@ -118,7 +129,7 @@ pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         .design_block => |b| b,
         .board => |b| b.design,
         else => {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             res.body = "Not a design";
             return;
         },
@@ -156,7 +167,7 @@ pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 
         const fp_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints/{s}.sexp", .{ ctx.project_dir, inst.footprint });
         defer ctx.allocator.free(fp_path);
-        const fp_source = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path, 1024 * 1024) catch continue;
+        const fp_source = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path, MAX_FOOTPRINT_BYTES) catch continue;
         defer ctx.allocator.free(fp_source);
 
         const kicad_name = netlist_mod.extractFootprintName(ctx.allocator, fp_source) catch try ctx.allocator.dupe(u8, inst.footprint);
@@ -194,7 +205,7 @@ pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
             try seen_models.put(try ctx.allocator.dupe(u8, mname), {});
             const step_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/models/{s}", .{ ctx.project_dir, mname });
             defer ctx.allocator.free(step_path);
-            const step_bytes = infra_fs.cwd().readFileAlloc(ctx.allocator, step_path, 50 * 1024 * 1024) catch {
+            const step_bytes = infra_fs.cwd().readFileAlloc(ctx.allocator, step_path, MAX_STEP_FILE_BYTES) catch {
                 if (!keep_mname) ctx.allocator.free(mname);
                 continue;
             };
@@ -237,7 +248,7 @@ pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     try w.writeAll("]}");
 
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = buf.items;
 }
 
@@ -247,7 +258,7 @@ pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 /// has actually mutated.
 pub fn netlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
@@ -257,7 +268,7 @@ pub fn netlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
     const result = eval.evalFile(board_path) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Build error";
         return;
     };
@@ -265,7 +276,7 @@ pub fn netlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
         .design_block => |b| b,
         .board => |b| b.design,
         else => {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             res.body = "Not a design";
             return;
         },
@@ -276,7 +287,7 @@ pub fn netlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| warnResolveIdentities(name, e);
 
     const netlist = export_kicad.exportNetlistOnly(ctx.allocator, block, ctx.project_dir, name) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Export error";
         return;
     };
@@ -288,17 +299,17 @@ pub fn netlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     // Conditional GET: match against If-None-Match.
     if (req.header("if-none-match")) |inm| {
         if (std.mem.eql(u8, std.mem.trim(u8, inm, " "), etag)) {
-            res.status = 304;
+            res.status = HTTP_NOT_MODIFIED;
             res.header("ETag", etag);
-            res.header("Cache-Control", "no-cache");
+            res.header(HEADER_CACHE_CONTROL, "no-cache");
             return;
         }
     }
 
     res.header("Content-Type", "text/plain; charset=utf-8");
     res.header("ETag", etag);
-    res.header("Cache-Control", "no-cache");
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CACHE_CONTROL, "no-cache");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = netlist;
 }
 
@@ -307,20 +318,20 @@ pub fn netlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
 /// non-hex shas to block path-traversal attempts on the cache.
 pub fn objectApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const sha = req.param("sha") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     // Guard against path traversal — sha should be pure hex.
     for (sha) |c| {
         if (!((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f'))) {
-            res.status = 400;
+            res.status = HTTP_BAD_REQUEST;
             res.body = "invalid sha";
             return;
         }
     }
 
     const obj = cacheGet(sha) orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         res.body = "unknown object (fetch /api/sync-manifest first)";
         return;
     };
@@ -328,8 +339,8 @@ pub fn objectApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     const bytes: []const u8 = switch (obj.kind) {
         .footprint => obj.data,
         .model => blk: {
-            const data = infra_fs.cwd().readFileAlloc(ctx.allocator, obj.data, 100 * 1024 * 1024) catch {
-                res.status = 500;
+            const data = infra_fs.cwd().readFileAlloc(ctx.allocator, obj.data, MAX_OBJECT_BYTES) catch {
+                res.status = HTTP_INTERNAL_ERROR;
                 res.body = "model read error";
                 return;
             };
@@ -341,8 +352,8 @@ pub fn objectApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     const etag = try std.fmt.allocPrint(ctx.allocator, "\"{s}\"", .{sha});
     res.header("Content-Type", "application/octet-stream");
     res.header("ETag", etag);
-    res.header("Cache-Control", "public, max-age=31536000, immutable");
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CACHE_CONTROL, "public, max-age=31536000, immutable");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = bytes;
 }
 

@@ -27,6 +27,41 @@ const edit_mod = @import("edit.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
+// ── Constants ─────────────────────────────────────────────────────
+const HTTP_NOT_FOUND: u16 = 404;
+const HTTP_BAD_REQUEST: u16 = 400;
+const HTTP_INTERNAL_ERROR: u16 = 500;
+
+const MAX_SOURCE_BYTES: usize = 10 * 1024 * 1024;
+const STREAM_BUF_BYTES: usize = 8192;
+
+// File path templates (multiple uses across handlers)
+const SEXP_PATH_TEMPLATE = "{s}/src/{s}.sexp";
+const BOM_PATH_TEMPLATE = "{s}/src/{s}.bom";
+const LAYOUT_PATH_TEMPLATE = "{s}/src/{s}.layout";
+
+// Headers
+const HEADER_CORS_ALLOW_ORIGIN = "access-control-allow-origin";
+const HEADER_CONTENT_TYPE = "Content-Type";
+const HEADER_CONTENT_DISPOSITION = "Content-Disposition";
+const CONTENT_TYPE_ZIP = "application/zip";
+
+// JSON fragments / response templates
+const ERR_BUILD = "Build error";
+const ERR_NO_BODY_JSON = "{\"error\":\"no body\"}";
+const OK_JSON_TRUE = "{\"ok\":true}";
+const OK_VERSION_TEMPLATE = "{{\"ok\":true,\"version\":{d}}}";
+const ERR_OK_FALSE_TEMPLATE = "{{\"ok\":false,\"error\":\"{s}\"}}";
+const NAME_FIELD_PREFIX = "{\"name\":";
+const EMPTY_DATASHEETS_REQS = ",\"datasheets\":[],\"requirements\":[]";
+const SECTION_SLUG_KEY = "section_slug";
+
+// PCB default rules (mm)
+const DEFAULT_VIA_DRILL_MM: f64 = 0.3;
+const DEFAULT_VIA_SIZE_MM: f64 = 0.6;
+const DEFAULT_CLEARANCE_MM: f64 = 0.15;
+const DEFAULT_TRACK_WIDTH_MM: f64 = 0.2;
+
 /// Error set for HTTP handlers in this module. Wide because handlers
 /// orchestrate many subsystems (eval, render, parser, file IO, BOM resolve)
 /// and propagate the worst case via `try`. httpz turns any leaked error
@@ -44,26 +79,26 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
 /// picks up the rebuild on its next `/api/version/:name` poll.
 pub fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
-    const board_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    const board_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(board_path);
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch {
-        res.status = 500;
-        res.body = "Build error";
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = ERR_BUILD;
         return;
     };
 
     const block = switch (result) {
         .design_block => |b| b,
         else => {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             return;
         },
     };
@@ -81,13 +116,13 @@ pub fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handler
 /// changes. Bumped by `pushApi` and the MCP mutation tools.
 pub fn versionApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     const v = serve_root.getLiveVersion(name);
 
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     const w = res.writer();
     try w.print("{{\"version\":{d}}}", .{v});
 }
@@ -101,7 +136,7 @@ pub fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) Handl
     serve_root.live_mutex.unlock();
 
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = data orelse "{\"error\":\"no layout\"}";
 }
 
@@ -110,32 +145,32 @@ pub fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) Handl
 /// categorised columns, topology-aware edges between sections).
 pub fn blockDiagramJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
-    const board_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    const board_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(board_path);
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
     const result = eval.evalFile(board_path) catch {
-        res.status = 500;
-        res.body = "Build error";
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = ERR_BUILD;
         return;
     };
     const block = switch (result) {
         .design_block => |b| b,
         else => {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             return;
         },
     };
     const json = render_block.renderBlockDiagramJson(ctx.allocator, block) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Render error";
         return;
     };
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = json;
 }
 
@@ -146,14 +181,14 @@ pub fn blockDiagramJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
 /// peripheral on the part.
 pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name_raw = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     // Decode before validating so `%2e%2e` can't slip past the traversal check,
     // and so library files with reserved chars (e.g. `…#pbf`) actually resolve.
     const name = try urlDecodeAlloc(ctx.allocator, name_raw);
     if (name.len == 0 or std.mem.indexOfAny(u8, name, "/\\") != null or std.mem.indexOf(u8, name, "..") != null) {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         res.body = "{\"error\":\"invalid component name\"}";
         res.content_type = .JSON;
         return;
@@ -163,14 +198,14 @@ pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     defer ctx.allocator.free(path);
 
     const content = infra_fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 256) catch {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         res.content_type = .JSON;
         res.body = "{\"error\":\"pinout not found\"}";
         return;
     };
 
     const nodes = parser_mod.parse(ctx.allocator, content) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.content_type = .JSON;
         res.body = "{\"error\":\"parse error\"}";
         return;
@@ -218,7 +253,7 @@ pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
 
                                 if (!first_alt) try w.writeAll(",");
                                 first_alt = false;
-                                try w.writeAll("{\"name\":");
+                                try w.writeAll(NAME_FIELD_PREFIX);
                                 try writeJsonString(w, alt_name);
                                 try w.writeAll(",\"type\":");
                                 try writeJsonString(w, etype);
@@ -235,7 +270,7 @@ pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     try w.writeAll("]}");
 
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = buf.items;
 }
 
@@ -253,19 +288,19 @@ fn writeComponentLibInfo(
     const path = try std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, name });
     defer allocator.free(path);
     const content = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 512) catch {
-        try w.writeAll(",\"datasheets\":[],\"requirements\":[]");
+        try w.writeAll(EMPTY_DATASHEETS_REQS);
         return;
     };
     const nodes = parser_mod.parse(allocator, content) catch {
-        try w.writeAll(",\"datasheets\":[],\"requirements\":[]");
+        try w.writeAll(EMPTY_DATASHEETS_REQS);
         return;
     };
     if (nodes.len == 0) {
-        try w.writeAll(",\"datasheets\":[],\"requirements\":[]");
+        try w.writeAll(EMPTY_DATASHEETS_REQS);
         return;
     }
     const top = nodes[0].asList() orelse {
-        try w.writeAll(",\"datasheets\":[],\"requirements\":[]");
+        try w.writeAll(EMPTY_DATASHEETS_REQS);
         return;
     };
 
@@ -280,7 +315,7 @@ fn writeComponentLibInfo(
         if (!first_ds) try w.writeAll(",");
         first_ds = false;
         const size = datasheetSize(allocator, project_dir, ds);
-        try w.writeAll("{\"name\":");
+        try w.writeAll(NAME_FIELD_PREFIX);
         try writeJsonString(w, ds);
         try w.print(",\"size\":{d}}}", .{size});
     }
@@ -336,7 +371,7 @@ pub fn layoutGetApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) Handle
     serve_root.layout_mutex.unlock();
 
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = data orelse "{}";
 }
 
@@ -351,8 +386,8 @@ pub fn layoutPostApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     serve_root.layout_mutex.unlock();
 
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
-    res.body = "{\"ok\":true}";
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.body = OK_JSON_TRUE;
 }
 
 /// GET /api/export-kicad/:name — build the design, resolve BOM identities,
@@ -360,49 +395,49 @@ pub fn layoutPostApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 /// netlist, and per-instance footprint files.
 pub fn exportKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
-    const board_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    const board_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(board_path);
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch {
-        res.status = 500;
-        res.body = "Build error";
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = ERR_BUILD;
         return;
     };
 
     const block = switch (result) {
         .design_block => |b| b,
         else => {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             return;
         },
     };
 
-    const bom_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name }) catch {
-        res.status = 500;
+    const bom_path = std.fmt.allocPrint(ctx.allocator, BOM_PATH_TEMPLATE, .{ ctx.project_dir, name }) catch {
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     try bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir);
 
     const zip_data = export_kicad.exportKicadZip(ctx.allocator, block, ctx.project_dir, name) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Export error";
         return;
     };
 
     const disposition = std.fmt.allocPrint(ctx.allocator, "attachment; filename=\"{s}-kicad.zip\"", .{name}) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
 
-    res.header("Content-Type", "application/zip");
-    res.header("Content-Disposition", disposition);
+    res.header(HEADER_CONTENT_TYPE, CONTENT_TYPE_ZIP);
+    res.header(HEADER_CONTENT_DISPOSITION, disposition);
     res.body = zip_data;
 }
 
@@ -411,49 +446,49 @@ pub fn exportKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// only care about connectivity for routing or simulation.
 pub fn exportNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
-    const board_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    const board_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(board_path);
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch {
-        res.status = 500;
-        res.body = "Build error";
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = ERR_BUILD;
         return;
     };
 
     const block = switch (result) {
         .design_block => |b| b,
         else => {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             return;
         },
     };
 
-    const bom_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name }) catch {
-        res.status = 500;
+    const bom_path = std.fmt.allocPrint(ctx.allocator, BOM_PATH_TEMPLATE, .{ ctx.project_dir, name }) catch {
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     try bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir);
 
     const netlist = export_kicad.exportNetlistOnly(ctx.allocator, block, ctx.project_dir, name) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Export error";
         return;
     };
 
     const disposition = std.fmt.allocPrint(ctx.allocator, "attachment; filename=\"{s}.net\"", .{name}) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
 
-    res.header("Content-Type", "text/plain");
-    res.header("Content-Disposition", disposition);
+    res.header(HEADER_CONTENT_TYPE, "text/plain");
+    res.header(HEADER_CONTENT_DISPOSITION, disposition);
     res.body = netlist;
 }
 
@@ -465,12 +500,12 @@ pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     const qs = try req.query();
     const short_nets = if (qs.get("short-nets")) |v| std.mem.eql(u8, v, "1") else false;
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
-    const board_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name }) catch {
-        res.status = 500;
+    const board_path = std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name }) catch {
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     defer ctx.allocator.free(board_path);
@@ -479,7 +514,7 @@ pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"ok\":false,\"error\":\"Build error\"}";
         res.content_type = .JSON;
         return;
@@ -488,19 +523,19 @@ pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     const block = switch (result) {
         .design_block => |b| b,
         else => {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             return;
         },
     };
 
-    const bom_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name }) catch {
-        res.status = 500;
+    const bom_path = std.fmt.allocPrint(ctx.allocator, BOM_PATH_TEMPLATE, .{ ctx.project_dir, name }) catch {
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     try bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir);
 
     const netlist = export_kicad.exportNetlistOnly(ctx.allocator, block, ctx.project_dir, name) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"ok\":false,\"error\":\"Export error\"}";
         res.content_type = .JSON;
         return;
@@ -516,14 +551,14 @@ pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     const net_path = "/mnt/nas/Cyclops/Cyclops Digital/stm32n6.net";
     {
         const f = infra_fs.cwd().createFile(net_path, .{}) catch {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             res.body = "{\"ok\":false,\"error\":\"Cannot write netlist\"}";
             res.content_type = .JSON;
             return;
         };
         defer f.close();
         f.writeAll(netlist) catch {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             return;
         };
     }
@@ -536,7 +571,8 @@ pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
         }
     }
 
-    var argv_buf: [7][]const u8 = undefined;
+    const PCB_UPDATE_MAX_ARGV: usize = 7;
+    var argv_buf: [PCB_UPDATE_MAX_ARGV][]const u8 = undefined;
     var argc: usize = 0;
     argv_buf[argc] = "python3";
     argc += 1;
@@ -558,7 +594,7 @@ pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
         .allocator = ctx.allocator,
         .argv = argv_buf[0..argc],
     }) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"ok\":false,\"error\":\"Failed to run pcb_update.py\"}";
         res.content_type = .JSON;
         return;
@@ -569,14 +605,16 @@ pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     if (py_result.term.Exited != 0) {
         const output = if (py_result.stderr.len > 0) py_result.stderr else py_result.stdout;
         var err_msg: []const u8 = "PCB update script failed";
-        if (std.mem.lastIndexOf(u8, output, "RuntimeError: ")) |idx| {
+        const RUNTIME_ERROR_PREFIX = "RuntimeError: ";
+        const ERROR_PREFIX = "Error: ";
+        if (std.mem.lastIndexOf(u8, output, RUNTIME_ERROR_PREFIX)) |idx| {
             const line_end = std.mem.indexOfPos(u8, output, idx, "\n") orelse output.len;
-            err_msg = output[idx + 14 .. line_end];
-        } else if (std.mem.lastIndexOf(u8, output, "Error: ")) |idx| {
+            err_msg = output[idx + RUNTIME_ERROR_PREFIX.len .. line_end];
+        } else if (std.mem.lastIndexOf(u8, output, ERROR_PREFIX)) |idx| {
             const line_end = std.mem.indexOfPos(u8, output, idx, "\n") orelse output.len;
-            err_msg = output[idx + 7 .. line_end];
+            err_msg = output[idx + ERROR_PREFIX.len .. line_end];
         }
-        const body = std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"{s}\"}}", .{err_msg}) catch {
+        const body = std.fmt.allocPrint(ctx.allocator, ERR_OK_FALSE_TEMPLATE, .{err_msg}) catch {
             res.body = "{\"ok\":false,\"error\":\"PCB update script failed\"}";
             res.content_type = .JSON;
             return;
@@ -586,7 +624,7 @@ pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
         return;
     }
 
-    res.body = "{\"ok\":true}";
+    res.body = OK_JSON_TRUE;
     res.content_type = .JSON;
 }
 
@@ -595,26 +633,26 @@ pub fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 /// review page; suitable for hand-off to procurement.
 pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
-    const board_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    const board_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(board_path);
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch {
-        res.status = 500;
-        res.body = "Build error";
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = ERR_BUILD;
         return;
     };
 
     const block = switch (result) {
         .design_block => |b| b,
         else => {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             return;
         },
     };
@@ -624,13 +662,13 @@ pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     try bom_html.writeBomCsv(w, block);
 
     const disposition = std.fmt.allocPrint(ctx.allocator, "attachment; filename=\"{s}-bom.csv\"", .{name}) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
 
-    res.header("Content-Type", "text/csv");
-    res.header("Content-Disposition", disposition);
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CONTENT_TYPE, "text/csv");
+    res.header(HEADER_CONTENT_DISPOSITION, disposition);
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = buf.items;
 }
 
@@ -639,19 +677,19 @@ pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 /// `<name>-gerber.zip` for upload to a PCB house.
 pub fn exportGerberApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
-    const board_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    const board_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(board_path);
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch {
-        res.status = 500;
-        res.body = "Build error";
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = ERR_BUILD;
         return;
     };
 
@@ -664,21 +702,21 @@ pub fn exportGerberApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
             board_def = b;
         },
         else => {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             res.body = "Not a design block";
             return;
         },
     }
 
-    const bom_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name });
+    const bom_path = try std.fmt.allocPrint(ctx.allocator, BOM_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(bom_path);
     try bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir);
 
-    const layout_path_str = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.layout", .{ ctx.project_dir, name });
+    const layout_path_str = try std.fmt.allocPrint(ctx.allocator, LAYOUT_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(layout_path_str);
 
     const files = export_gerber.exportGerber(ctx.allocator, block, ctx.project_dir, name, board_def, layout_path_str) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Gerber export error";
         return;
     };
@@ -690,14 +728,14 @@ pub fn exportGerberApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         try zip_entries.append(ctx.allocator, .{ .name = f.name, .data = f.data });
     }
     const zip = fp_mod.buildZip(ctx.allocator, zip_entries.items) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Zip error";
         return;
     };
 
     const disposition = try std.fmt.allocPrint(ctx.allocator, "attachment; filename=\"{s}-gerber.zip\"", .{name});
-    res.header("Content-Type", "application/zip");
-    res.header("Content-Disposition", disposition);
+    res.header(HEADER_CONTENT_TYPE, CONTENT_TYPE_ZIP);
+    res.header(HEADER_CONTENT_DISPOSITION, disposition);
     res.body = zip;
 }
 
@@ -707,15 +745,15 @@ pub fn exportGerberApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 /// the verbatim source) plus `<name>-bom.csv` (parts list as CSV).
 pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
     // Build a fully-populated ReviewDoc using the same path the live page
     // uses — ensures the export reflects exactly what the reviewer sees.
     const doc = buildDocForName(ctx.allocator, ctx.project_dir, name) catch {
-        res.status = 500;
-        res.body = "Build error";
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = ERR_BUILD;
         return;
     };
 
@@ -723,8 +761,8 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
     // This duplicates the work in buildDocForName but avoids leaking those
     // intermediates through the function signature; the cost is one extra
     // eval per export which is acceptable for a manual operation.
-    const board_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name }) catch {
-        res.status = 500;
+    const board_path = std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name }) catch {
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     defer ctx.allocator.free(board_path);
@@ -732,15 +770,15 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
     const result = eval.evalFile(board_path) catch {
-        res.status = 500;
-        res.body = "Build error";
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = ERR_BUILD;
         return;
     };
     const block = switch (result) {
         .design_block => |b| b,
         .board => |b| @as(*const env_mod.DesignBlock, b.design),
         else => {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             return;
         },
     };
@@ -753,7 +791,7 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
 
     // Render markdown.
     const md = review_md_mod.renderToMarkdown(ctx.allocator, block, ctx.project_dir, name, doc, source, &check_results) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Markdown render error";
         return;
     };
@@ -761,7 +799,7 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
     // Render BOM CSV.
     var csv_buf: std.ArrayListUnmanaged(u8) = .empty;
     bom_html.writeBomCsv(csv_buf.writer(ctx.allocator), block) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "BOM CSV error";
         return;
     };
@@ -769,11 +807,11 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
     // Filenames inside the zip include the design name so a reviewer who
     // unzips into a shared directory doesn't collide with another design.
     const md_name = std.fmt.allocPrint(ctx.allocator, "{s}-review.md", .{name}) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     const csv_name = std.fmt.allocPrint(ctx.allocator, "{s}-bom.csv", .{name}) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
 
@@ -782,14 +820,14 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
         .{ .name = csv_name, .data = csv_buf.items },
     };
     const zip = fp_mod.buildZip(ctx.allocator, &entries) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "Zip error";
         return;
     };
 
     const disposition = try std.fmt.allocPrint(ctx.allocator, "attachment; filename=\"{s}-review.zip\"", .{name});
-    res.header("Content-Type", "application/zip");
-    res.header("Content-Disposition", disposition);
+    res.header(HEADER_CONTENT_TYPE, CONTENT_TYPE_ZIP);
+    res.header(HEADER_CONTENT_DISPOSITION, disposition);
     res.body = zip;
 }
 
@@ -799,13 +837,13 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
 /// Writes a native .layout file and also updates .kicad_pcb for export compatibility.
 pub fn pcbPlacementApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
     const body = req.body() orelse {
-        res.status = 400;
-        res.body = "{\"error\":\"no body\"}";
+        res.status = HTTP_BAD_REQUEST;
+        res.body = ERR_NO_BODY_JSON;
         return;
     };
 
@@ -836,9 +874,11 @@ pub fn pcbPlacementApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         const angle = parseJsonFloat(obj_slice, "\"angle\":") orelse 0;
 
         // Parse ref
+        const REF_KEY = "\"ref\":";
+        const LAYER_KEY = "\"layer\":";
         var ref: []const u8 = "";
-        if (std.mem.indexOf(u8, obj_slice, "\"ref\":")) |rp| {
-            var rs = rp + 6;
+        if (std.mem.indexOf(u8, obj_slice, REF_KEY)) |rp| {
+            var rs = rp + REF_KEY.len;
             while (rs < obj_slice.len and (obj_slice[rs] == ' ' or obj_slice[rs] == '"')) rs += 1;
             const re = std.mem.indexOf(u8, obj_slice[rs..], "\"") orelse obj_slice.len - rs;
             ref = obj_slice[rs .. rs + re];
@@ -846,8 +886,8 @@ pub fn pcbPlacementApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 
         // Parse layer
         var layer: []const u8 = "F.Cu";
-        if (std.mem.indexOf(u8, obj_slice, "\"layer\":")) |lp| {
-            var ls = lp + 8;
+        if (std.mem.indexOf(u8, obj_slice, LAYER_KEY)) |lp| {
+            var ls = lp + LAYER_KEY.len;
             while (ls < obj_slice.len and (obj_slice[ls] == ' ' or obj_slice[ls] == '"')) ls += 1;
             const le = std.mem.indexOf(u8, obj_slice[ls..], "\"") orelse obj_slice.len - ls;
             layer = obj_slice[ls .. ls + le];
@@ -858,7 +898,7 @@ pub fn pcbPlacementApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     }
 
     // Write .layout file
-    const layout_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.layout", .{ ctx.project_dir, name });
+    const layout_path = try std.fmt.allocPrint(ctx.allocator, LAYOUT_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(layout_path);
 
     var layout_placements: std.ArrayListUnmanaged(layout_mod.Placement) = .empty;
@@ -909,8 +949,8 @@ pub fn pcbPlacementApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     } else |_| {}
 
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
-    res.body = "{\"ok\":true}";
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.body = OK_JSON_TRUE;
 }
 
 /// POST /api/pcb-routing/:name — replace the design's traces and vias in the
@@ -919,17 +959,17 @@ pub fn pcbPlacementApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 /// every routing edit.
 pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
     const body = req.body() orelse {
-        res.status = 400;
-        res.body = "{\"error\":\"no body\"}";
+        res.status = HTTP_BAD_REQUEST;
+        res.body = ERR_NO_BODY_JSON;
         return;
     };
 
-    const layout_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.layout", .{ ctx.project_dir, name });
+    const layout_path = try std.fmt.allocPrint(ctx.allocator, LAYOUT_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(layout_path);
 
     // Load existing layout to preserve placements and rules
@@ -948,11 +988,15 @@ pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     defer vias.deinit(ctx.allocator);
 
     // Parse traces array
-    if (std.mem.indexOf(u8, body, "\"traces\":[")) |traces_start| {
-        var tpos = traces_start + 10;
+    const TRACES_KEY = "\"traces\":[";
+    const NET_QUOTED_KEY = "\"net\":\"";
+    const LAYER_QUOTED_KEY = "\"layer\":\"";
+    const POINTS_KEY = "\"points\":[";
+    if (std.mem.indexOf(u8, body, TRACES_KEY)) |traces_start| {
+        var tpos = traces_start + TRACES_KEY.len;
         while (tpos < body.len) {
-            const net_marker = std.mem.indexOf(u8, body[tpos..], "\"net\":\"") orelse break;
-            const abs_net = tpos + net_marker + 7;
+            const net_marker = std.mem.indexOf(u8, body[tpos..], NET_QUOTED_KEY) orelse break;
+            const abs_net = tpos + net_marker + NET_QUOTED_KEY.len;
             const net_end = std.mem.indexOfPos(u8, body, abs_net, "\"") orelse break;
             const net = body[abs_net..net_end];
 
@@ -960,23 +1004,23 @@ pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
             const obj_end_rel = std.mem.indexOfPos(u8, body, net_end, "}") orelse break;
             const obj = body[obj_start .. obj_end_rel + 1];
 
-            const layer_marker = std.mem.indexOf(u8, obj, "\"layer\":\"") orelse {
+            const layer_marker = std.mem.indexOf(u8, obj, LAYER_QUOTED_KEY) orelse {
                 tpos = obj_end_rel + 1;
                 continue;
             };
-            const layer_start = layer_marker + 9;
+            const layer_start = layer_marker + LAYER_QUOTED_KEY.len;
             const layer_end = std.mem.indexOfPos(u8, obj, layer_start, "\"") orelse {
                 tpos = obj_end_rel + 1;
                 continue;
             };
             const layer = obj[layer_start..layer_end];
 
-            const width = parseJsonFloat(obj, "\"width\":") orelse 0.2;
+            const width = parseJsonFloat(obj, "\"width\":") orelse DEFAULT_TRACK_WIDTH_MM;
 
             // Parse points array
             var points: std.ArrayListUnmanaged([2]f64) = .empty;
-            if (std.mem.indexOf(u8, obj, "\"points\":[")) |pts_start| {
-                var ppos = pts_start + 10;
+            if (std.mem.indexOf(u8, obj, POINTS_KEY)) |pts_start| {
+                var ppos = pts_start + POINTS_KEY.len;
                 while (ppos < obj.len) {
                     const bracket = std.mem.indexOfPos(u8, obj, ppos, "[") orelse break;
                     if (bracket >= obj.len) break;
@@ -1017,8 +1061,12 @@ pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     }
 
     // Parse vias array
-    if (std.mem.indexOf(u8, body, "\"vias\":[")) |vias_start| {
-        var vpos = vias_start + 8;
+    const VIAS_KEY = "\"vias\":[";
+    const NET_KEY = "\"net\":\"";
+    const FROM_KEY = "\"from\":\"";
+    const TO_KEY = "\"to\":\"";
+    if (std.mem.indexOf(u8, body, VIAS_KEY)) |vias_start| {
+        var vpos = vias_start + VIAS_KEY.len;
         while (vpos < body.len) {
             const x_marker = std.mem.indexOf(u8, body[vpos..], "\"x\":") orelse break;
             const abs_x = vpos + x_marker;
@@ -1027,24 +1075,24 @@ pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 
             const x = parseJsonFloat(obj, "\"x\":") orelse 0;
             const y = parseJsonFloat(obj, "\"y\":") orelse 0;
-            const drill = parseJsonFloat(obj, "\"drill\":") orelse 0.3;
-            const pad_size = parseJsonFloat(obj, "\"pad_size\":") orelse 0.6;
+            const drill = parseJsonFloat(obj, "\"drill\":") orelse DEFAULT_VIA_DRILL_MM;
+            const pad_size = parseJsonFloat(obj, "\"pad_size\":") orelse DEFAULT_VIA_SIZE_MM;
 
             var net: []const u8 = "";
-            if (std.mem.indexOf(u8, obj, "\"net\":\"")) |np| {
-                const ns = np + 7;
+            if (std.mem.indexOf(u8, obj, NET_KEY)) |np| {
+                const ns = np + NET_KEY.len;
                 const ne = std.mem.indexOfPos(u8, obj, ns, "\"") orelse ns;
                 net = obj[ns..ne];
             }
             var from: []const u8 = "F.Cu";
-            if (std.mem.indexOf(u8, obj, "\"from\":\"")) |fp| {
-                const fs = fp + 8;
+            if (std.mem.indexOf(u8, obj, FROM_KEY)) |fp| {
+                const fs = fp + FROM_KEY.len;
                 const fe = std.mem.indexOfPos(u8, obj, fs, "\"") orelse fs;
                 from = obj[fs..fe];
             }
             var to: []const u8 = "B.Cu";
-            if (std.mem.indexOf(u8, obj, "\"to\":\"")) |tp| {
-                const ts = tp + 6;
+            if (std.mem.indexOf(u8, obj, TO_KEY)) |tp| {
+                const ts = tp + TO_KEY.len;
                 const te = std.mem.indexOfPos(u8, obj, ts, "\"") orelse ts;
                 to = obj[ts..te];
             }
@@ -1073,14 +1121,14 @@ pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         .rules = existing_rules,
     };
     layout_mod.saveLayout(ctx.allocator, &layout, layout_path) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"error\":\"save failed\"}";
         return;
     };
 
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
-    res.body = "{\"ok\":true}";
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.body = OK_JSON_TRUE;
 }
 
 /// POST /api/pcb-rules/:name — update the design rules (clearance, trace
@@ -1088,17 +1136,17 @@ pub fn pcbRoutingApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 /// editor's settings panel; placements and traces stay untouched.
 pub fn pcbRulesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
     const body = req.body() orelse {
-        res.status = 400;
-        res.body = "{\"error\":\"no body\"}";
+        res.status = HTTP_BAD_REQUEST;
+        res.body = ERR_NO_BODY_JSON;
         return;
     };
 
-    const layout_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.layout", .{ ctx.project_dir, name });
+    const layout_path = try std.fmt.allocPrint(ctx.allocator, LAYOUT_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(layout_path);
 
     // Load existing layout
@@ -1111,10 +1159,10 @@ pub fn pcbRulesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     };
 
     // Parse rules from JSON
-    const clearance = parseJsonFloat(body, "\"clearance\":") orelse 0.15;
-    const track_width = parseJsonFloat(body, "\"track_width\":") orelse 0.2;
-    const via_drill = parseJsonFloat(body, "\"via_drill\":") orelse 0.3;
-    const via_size = parseJsonFloat(body, "\"via_size\":") orelse 0.6;
+    const clearance = parseJsonFloat(body, "\"clearance\":") orelse DEFAULT_CLEARANCE_MM;
+    const track_width = parseJsonFloat(body, "\"track_width\":") orelse DEFAULT_TRACK_WIDTH_MM;
+    const via_drill = parseJsonFloat(body, "\"via_drill\":") orelse DEFAULT_VIA_DRILL_MM;
+    const via_size = parseJsonFloat(body, "\"via_size\":") orelse DEFAULT_VIA_SIZE_MM;
 
     existing.rules = .{
         .clearance = clearance,
@@ -1124,14 +1172,14 @@ pub fn pcbRulesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     };
 
     layout_mod.saveLayout(ctx.allocator, &existing, layout_path) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"error\":\"save failed\"}";
         return;
     };
 
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
-    res.body = "{\"ok\":true}";
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.body = OK_JSON_TRUE;
 }
 
 /// POST /api/zone-fill/:name — recompute copper-pour polygons for every
@@ -1139,18 +1187,18 @@ pub fn pcbRulesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 /// fills as JSON for the PCB viewer to render without a round-trip reload.
 pub fn zoneFillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name_param = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
-    const board_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name_param });
+    const board_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name_param });
     defer ctx.allocator.free(board_path);
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"error\":\"build error\"}";
         return;
     };
@@ -1164,24 +1212,23 @@ pub fn zoneFillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
             board_def = b;
         },
         else => {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             res.body = "{\"error\":\"not a board\"}";
             return;
         },
     }
 
     const bd = board_def orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         res.body = "{\"error\":\"no board definition with zones\"}";
         return;
     };
 
-    const bom2 = @import("../bom.zig");
-    const bom_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name_param });
+    const bom_path = try std.fmt.allocPrint(ctx.allocator, BOM_PATH_TEMPLATE, .{ ctx.project_dir, name_param });
     defer ctx.allocator.free(bom_path);
-    try bom2.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir);
+    try bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir);
 
-    const layout_path2 = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.layout", .{ ctx.project_dir, name_param });
+    const layout_path2 = try std.fmt.allocPrint(ctx.allocator, LAYOUT_PATH_TEMPLATE, .{ ctx.project_dir, name_param });
     defer ctx.allocator.free(layout_path2);
 
     var existing_layout = layout_mod.loadLayout(ctx.allocator, layout_path2) catch layout_mod.Layout{
@@ -1194,7 +1241,7 @@ pub fn zoneFillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 
     // Compute zone fills
     const fills = zone_fill.computeZoneFills(ctx.allocator, block, bd, ctx.project_dir, &existing_layout) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"error\":\"zone fill error\"}";
         return;
     };
@@ -1212,7 +1259,7 @@ pub fn zoneFillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 
     existing_layout.zone_fills = zone_fills_out.items;
     layout_mod.saveLayout(ctx.allocator, &existing_layout, layout_path2) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"error\":\"save error\"}";
         return;
     };
@@ -1238,7 +1285,7 @@ pub fn zoneFillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     try w.writeAll("]}");
 
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = buf.items;
 }
 
@@ -1247,18 +1294,18 @@ pub fn zoneFillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 /// the violations as JSON for the PCB viewer's issues panel.
 pub fn drcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name_param = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
-    const board_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name_param });
+    const board_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name_param });
     defer ctx.allocator.free(board_path);
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"error\":\"build error\"}";
         return;
     };
@@ -1287,18 +1334,17 @@ pub fn drcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerE
             board_def = b;
         },
         else => {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             res.body = "{\"error\":\"not a board\"}";
             return;
         },
     }
 
-    const bom3 = @import("../bom.zig");
-    const bom_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name_param });
+    const bom_path = try std.fmt.allocPrint(ctx.allocator, BOM_PATH_TEMPLATE, .{ ctx.project_dir, name_param });
     defer ctx.allocator.free(bom_path);
-    try bom3.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir);
+    try bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir);
 
-    const layout_path3 = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.layout", .{ ctx.project_dir, name_param });
+    const layout_path3 = try std.fmt.allocPrint(ctx.allocator, LAYOUT_PATH_TEMPLATE, .{ ctx.project_dir, name_param });
     defer ctx.allocator.free(layout_path3);
 
     const existing_layout = layout_mod.loadLayout(ctx.allocator, layout_path3) catch layout_mod.Layout{
@@ -1310,13 +1356,13 @@ pub fn drcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerE
     };
 
     const violations = drc_mod.runDrc(ctx.allocator, block, board_def, ctx.project_dir, &existing_layout) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"error\":\"DRC error\"}";
         return;
     };
 
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = try drc_mod.writeViolationsJson(ctx.allocator, violations);
 }
 
@@ -1374,9 +1420,10 @@ fn applyPlacements(allocator: std.mem.Allocator, pcb_content: []const u8, body: 
         const pl = placements.get(uuid_str) orelse continue;
 
         // Walk backwards to find enclosing (footprint "
+        const FOOTPRINT_PREFIX = "(footprint \"";
         var fp_start = search_pos - 1;
         while (fp_start > 0) : (fp_start -= 1) {
-            if (fp_start + 12 <= pcb_content.len and std.mem.eql(u8, pcb_content[fp_start .. fp_start + 12], "(footprint \"")) break;
+            if (fp_start + FOOTPRINT_PREFIX.len <= pcb_content.len and std.mem.eql(u8, pcb_content[fp_start .. fp_start + FOOTPRINT_PREFIX.len], FOOTPRINT_PREFIX)) break;
         }
         // Find first (at ...) after (footprint line — skip the footprint name line
         const fp_region = pcb_content[fp_start..uuid_val_start];
@@ -1400,7 +1447,7 @@ fn applyPlacements(allocator: std.mem.Allocator, pcb_content: []const u8, body: 
 
     // Pass 2: Build output, replacing each (at ...) range
     var out: std.ArrayListUnmanaged(u8) = .empty;
-    try out.ensureTotalCapacity(allocator, pcb_content.len + 8192);
+    try out.ensureTotalCapacity(allocator, pcb_content.len + STREAM_BUF_BYTES);
     const w = out.writer(allocator);
 
     var cursor: usize = 0;
@@ -1436,19 +1483,19 @@ fn parseJsonFloat(json: []const u8, key: []const u8) ?f64 {
 /// and return the violations as JSON for the schematic viewer's panel.
 pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
 
-    const board_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    const board_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(board_path);
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch {
-        res.status = 500;
-        res.body = "Build error";
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = ERR_BUILD;
         return;
     };
 
@@ -1456,29 +1503,29 @@ pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerE
         .design_block => |b| b,
         .board => |b| @as(*const env_mod.DesignBlock, b.design),
         else => {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             res.body = "Not a design block";
             return;
         },
     };
 
-    const bom_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name });
+    const bom_path = try std.fmt.allocPrint(ctx.allocator, BOM_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(bom_path);
     try bom.resolveIdentities(ctx.allocator, @constCast(block), bom_path, ctx.project_dir);
 
     const violations = erc_mod.runErc(ctx.allocator, block, ctx.project_dir) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "ERC error";
         return;
     };
 
     const json = erc_mod.writeViolationsJson(ctx.allocator, violations) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
 
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = json;
 }
 
@@ -1489,13 +1536,13 @@ pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerE
 /// tool shares the same code path.
 pub fn reviewJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     const json = renderReviewJson(ctx.allocator, ctx.project_dir, name) catch |err| {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"error\":\"{s}\"}}", .{@errorName(err)});
         return;
     };
@@ -1507,7 +1554,7 @@ pub fn reviewJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 /// net_count, mtime, build_ok}, ...]`.
 pub fn designsApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
 
     const summaries = mcp_tools.listDesignSummaries(ctx.allocator, ctx.project_dir) catch &[_]mcp_tools.DesignSummary{};
 
@@ -1516,7 +1563,7 @@ pub fn designsApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handle
     try w.writeAll("[");
     for (summaries, 0..) |s, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll("{\"name\":");
+        try w.writeAll(NAME_FIELD_PREFIX);
         try writeJsonString(w, s.name);
         try w.writeAll(",\"title\":");
         try writeJsonString(w, s.title);
@@ -1555,7 +1602,7 @@ fn writeJsonString(w: anytype, s: []const u8) !void {
 /// working; scroll anchors (`#sec-<slug>`) are preserved by the browser.
 pub fn reviewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     const location = try std.fmt.allocPrint(ctx.allocator, "/schematics/{s}", .{name});
@@ -1570,7 +1617,7 @@ fn buildDocForName(
     project_dir: []const u8,
     name: []const u8,
 ) !review_mod.ReviewDoc {
-    const board_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    const board_path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
     defer allocator.free(board_path);
 
     var eval = Evaluator.init(allocator, project_dir);
@@ -1583,7 +1630,7 @@ fn buildDocForName(
         else => return error.NotADesign,
     };
 
-    const bom_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, name });
+    const bom_path = try std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name });
     defer allocator.free(bom_path);
     try bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir);
 
@@ -1628,7 +1675,7 @@ fn sectionHashForSlug(
     name: []const u8,
     slug: []const u8,
 ) ![]const u8 {
-    const board_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    const board_path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
     defer allocator.free(board_path);
 
     var eval = Evaluator.init(allocator, project_dir);
@@ -1655,20 +1702,20 @@ fn sectionHashForSlug(
 /// dropdown without going through the MCP transport.
 pub fn freePinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
 
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         res.body = "{\"error\":\"missing name\"}";
         return;
     };
     const qs = req.query() catch {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         res.body = "{\"error\":\"invalid query\"}";
         return;
     };
     const ref_des = qs.get("ref") orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         res.body = "{\"error\":\"missing ref\"}";
         return;
     };
@@ -1677,12 +1724,12 @@ pub fn freePinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     defer buf.deinit(ctx.allocator);
     const w = buf.writer(ctx.allocator);
     const ok = mcp_tools.listFreePins(ctx.allocator, ctx.project_dir, name, ref_des, null, w) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"error\":\"internal\"}";
         return;
     };
     if (!ok) {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         // buf.items holds plain text like "error: instance not found".
         res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"error\":\"{s}\"}}", .{buf.items});
         return;
@@ -1696,21 +1743,21 @@ pub fn freePinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 /// sidebar without reloading the page.
 pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
 
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         res.body = "{\"error\":\"missing name\"}";
         return;
     };
 
-    const board_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    const board_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(board_path);
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
     const result = eval.evalFile(board_path) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"error\":\"rebuild_failed\"}";
         return;
     };
@@ -1718,13 +1765,13 @@ pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
         .design_block => |b| b,
         .board => |b| @as(*const env_mod.DesignBlock, b.design),
         else => {
-            res.status = 500;
+            res.status = HTTP_INTERNAL_ERROR;
             res.body = "{\"error\":\"not_a_design\"}";
             return;
         },
     };
 
-    const bom_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name });
+    const bom_path = try std.fmt.allocPrint(ctx.allocator, BOM_PATH_TEMPLATE, .{ ctx.project_dir, name });
     defer ctx.allocator.free(bom_path);
     try bom.resolveIdentities(ctx.allocator, @constCast(block), bom_path, ctx.project_dir);
 
@@ -1749,17 +1796,17 @@ pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// for new sections without a page reload.
 pub fn reviewStateGetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     const state = review_state_mod.loadState(ctx.allocator, ctx.project_dir, name) catch review_mod.ReviewState{};
     const json = review_state_mod.renderState(ctx.allocator, state) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"error\":\"render failed\"}";
         return;
     };
     res.content_type = .JSON;
-    res.header("access-control-allow-origin", "*");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = json;
 }
 
@@ -1767,25 +1814,25 @@ pub fn reviewStateGetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 /// mints the id and returns {id, version}.
 pub fn reviewStateAddItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     const body = req.body() orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
-    const slug = jsonField(body, "section_slug") orelse {
-        res.status = 400;
+    const slug = jsonField(body, SECTION_SLUG_KEY) orelse {
+        res.status = HTTP_BAD_REQUEST;
         res.body = "missing section_slug";
         return;
     };
     const text = jsonField(body, "text") orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         res.body = "missing text";
         return;
     };
     const id = review_state_mod.addItem(ctx.allocator, ctx.project_dir, name, slug, text) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.body = "save failed";
         return;
     };
@@ -1797,71 +1844,71 @@ pub fn reviewStateAddItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
 /// POST /api/review-state/:name/item/toggle — body {section_slug, id, checked}.
 pub fn reviewStateToggleItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     const body = req.body() orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
-    const slug = jsonField(body, "section_slug") orelse {
-        res.status = 400;
+    const slug = jsonField(body, SECTION_SLUG_KEY) orelse {
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
     const id = jsonField(body, "id") orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
     const checked = jsonBoolField(body, "checked") orelse false;
     review_state_mod.toggleItem(ctx.allocator, ctx.project_dir, name, slug, id, checked) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     const v = serve_root.bumpLiveVersion(name);
     res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{v});
+    res.body = try std.fmt.allocPrint(ctx.allocator, OK_VERSION_TEMPLATE, .{v});
 }
 
 /// POST /api/review-state/:name/item/delete — body {section_slug, id}.
 pub fn reviewStateDeleteItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     const body = req.body() orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
-    const slug = jsonField(body, "section_slug") orelse {
-        res.status = 400;
+    const slug = jsonField(body, SECTION_SLUG_KEY) orelse {
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
     const id = jsonField(body, "id") orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
     review_state_mod.deleteItem(ctx.allocator, ctx.project_dir, name, slug, id) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     const v = serve_root.bumpLiveVersion(name);
     res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{v});
+    res.body = try std.fmt.allocPrint(ctx.allocator, OK_VERSION_TEMPLATE, .{v});
 }
 
 /// POST /api/review-state/:name/approve — body {section_slug, approved, reviewer}.
 /// Server stamps approved_at with isoTimestampNow on approval.
 pub fn reviewStateApproveApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     const body = req.body() orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
-    const slug = jsonField(body, "section_slug") orelse {
-        res.status = 400;
+    const slug = jsonField(body, SECTION_SLUG_KEY) orelse {
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
     const approved = jsonBoolField(body, "approved") orelse false;
@@ -1872,12 +1919,12 @@ pub fn reviewStateApproveApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
     // approval as fresh, and a subsequent edit trips `approval_stale`.
     const content_hash = if (approved) sectionHashForSlug(ctx.allocator, ctx.project_dir, name, slug) catch "" else "";
     review_state_mod.setApproval(ctx.allocator, ctx.project_dir, name, slug, approved, reviewer, content_hash) catch {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         return;
     };
     const v = serve_root.bumpLiveVersion(name);
     res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{v});
+    res.body = try std.fmt.allocPrint(ctx.allocator, OK_VERSION_TEMPLATE, .{v});
 }
 
 /// POST /api/section-note/:name/add — body `{section, text, pdf?, page?}`.
@@ -1886,19 +1933,19 @@ pub fn reviewStateApproveApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
 /// picks up the redraw.
 pub fn addSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     const body = req.body() orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
     const section = jsonField(body, "section") orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
     const text = jsonField(body, "text") orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
     const pdf = jsonField(body, "pdf") orelse "";
@@ -1906,41 +1953,41 @@ pub fn addSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     const page: u32 = @intCast(page_u);
 
     const result = edit_mod.addSectionNoteCore(ctx.allocator, ctx.project_dir, name, section, text, pdf, page) catch |err| {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.content_type = .JSON;
-        res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"{s}\"}}", .{@errorName(err)});
+        res.body = try std.fmt.allocPrint(ctx.allocator, ERR_OK_FALSE_TEMPLATE, .{@errorName(err)});
         return;
     };
     res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
+    res.body = try std.fmt.allocPrint(ctx.allocator, OK_VERSION_TEMPLATE, .{result.version});
 }
 
 /// POST /api/section-note/:name/remove — body `{section, index}`. Deletes the
 /// nth (0-based) `(note ...)` form nested directly in the named section.
 pub fn removeSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     const body = req.body() orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
     const section = jsonField(body, "section") orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
     const idx_u = jsonUintField(body, "index") orelse 0;
     const idx: usize = @intCast(idx_u);
 
     const result = edit_mod.removeSectionNoteCore(ctx.allocator, ctx.project_dir, name, section, idx) catch |err| {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.content_type = .JSON;
-        res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"{s}\"}}", .{@errorName(err)});
+        res.body = try std.fmt.allocPrint(ctx.allocator, ERR_OK_FALSE_TEMPLATE, .{@errorName(err)});
         return;
     };
     res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
+    res.body = try std.fmt.allocPrint(ctx.allocator, OK_VERSION_TEMPLATE, .{result.version});
 }
 
 /// POST /api/component-datasheet/:component/add — body `{pdf: "file.pdf"}`.
@@ -1949,52 +1996,52 @@ pub fn removeSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 /// to parts without manual .sexp editing.
 pub fn addComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const component_raw = req.param("component") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     const component = try urlDecodeAlloc(ctx.allocator, component_raw);
     const body = req.body() orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
     const pdf = jsonField(body, "pdf") orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
     const result = edit_mod.addComponentDatasheetCore(ctx.allocator, ctx.project_dir, component, pdf) catch |err| {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.content_type = .JSON;
-        res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"{s}\"}}", .{@errorName(err)});
+        res.body = try std.fmt.allocPrint(ctx.allocator, ERR_OK_FALSE_TEMPLATE, .{@errorName(err)});
         return;
     };
     res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
+    res.body = try std.fmt.allocPrint(ctx.allocator, OK_VERSION_TEMPLATE, .{result.version});
 }
 
 /// POST /api/component-datasheet/:component/remove — body `{pdf: "file.pdf"}`.
 /// Counterpart to /add; unlinks a PDF from the library part.
 pub fn removeComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const component_raw = req.param("component") orelse {
-        res.status = 404;
+        res.status = HTTP_NOT_FOUND;
         return;
     };
     const component = try urlDecodeAlloc(ctx.allocator, component_raw);
     const body = req.body() orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
     const pdf = jsonField(body, "pdf") orelse {
-        res.status = 400;
+        res.status = HTTP_BAD_REQUEST;
         return;
     };
     const result = edit_mod.removeComponentDatasheetCore(ctx.allocator, ctx.project_dir, component, pdf) catch |err| {
-        res.status = 500;
+        res.status = HTTP_INTERNAL_ERROR;
         res.content_type = .JSON;
-        res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"{s}\"}}", .{@errorName(err)});
+        res.body = try std.fmt.allocPrint(ctx.allocator, ERR_OK_FALSE_TEMPLATE, .{@errorName(err)});
         return;
     };
     res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
+    res.body = try std.fmt.allocPrint(ctx.allocator, OK_VERSION_TEMPLATE, .{result.version});
 }
 
 /// Extract a positive integer value for `"key":N` out of a flat JSON body.

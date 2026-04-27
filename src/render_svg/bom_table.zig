@@ -5,6 +5,18 @@ const Allocator = std.mem.Allocator;
 const draw = @import("draw.zig");
 const RenderError = draw.RenderError;
 
+// ── Layout constants ──────────────────────────────────────────────
+const HALF_DIVISOR: f64 = 2.0;
+const TABLE_X_INSET: f64 = 8.0;
+const TABLE_BORDER: f64 = 16.0;
+const TABLE_MAX_WIDTH: f64 = 1600.0;
+const TITLE_BASELINE: f64 = 22.0;
+const ROW_TEXT_BASELINE: f64 = 14.0;
+const HEADER_TEXT_BASELINE: f64 = 18.0;
+const FOOTER_TEXT_OFFSET: f64 = 16.0;
+const FOOTER_BOTTOM_PAD: f64 = 20.0;
+const TABLE_BOTTOM_PAD: f64 = 8.0;
+
 /// Emit the BOM table at the bottom of the SVG schematic — one row per
 /// distinct (component, value, footprint, attrs) tuple with its rolled-up
 /// ref-des list and Qty. Returns the table's drawn height so the caller
@@ -100,8 +112,8 @@ pub fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBloc
     const pad_x: f64 = 12.0;
     const font_size: f64 = 11.0;
     const header_font: f64 = 11.0;
-    const x = 8.0;
-    const w_total = @min(table_width - 16.0, 1600.0);
+    const x = TABLE_X_INSET;
+    const w_total = @min(table_width - TABLE_BORDER, TABLE_MAX_WIDTH);
 
     const col_qty: f64 = 40.0;
     const col_refs: f64 = 160.0;
@@ -124,7 +136,7 @@ pub fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBloc
     };
 
     const total_rows = entries.items.len;
-    const table_h = title_height + header_height + @as(f64, @floatFromInt(total_rows)) * row_height + 8.0;
+    const table_h = title_height + header_height + @as(f64, @floatFromInt(total_rows)) * row_height + TABLE_BOTTOM_PAD;
 
     try w.print(
         \\<g class="bom-table">
@@ -132,8 +144,8 @@ pub fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBloc
         \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="18" font-weight="bold" fill="#8b949e" pointer-events="none">Bill of Materials</text>
         \\
     , .{
-        x,                 y_start,        w_total, table_h,
-        x + w_total / 2.0, y_start + 22.0,
+        x,                          y_start,                  w_total, table_h,
+        x + w_total / HALF_DIVISOR, y_start + TITLE_BASELINE,
     });
 
     const header_y = y_start + title_height;
@@ -147,7 +159,7 @@ pub fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBloc
         try w.print(
             \\<text x="{d:.1}" y="{d:.1}" font-size="{d:.0}" font-weight="bold" fill="#8b949e" pointer-events="none">{s}</text>
             \\
-        , .{ cx + pad_x, header_y + 18.0, header_font, col.label });
+        , .{ cx + pad_x, header_y + HEADER_TEXT_BASELINE, header_font, col.label });
         cx += col.width;
     }
 
@@ -173,7 +185,7 @@ pub fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBloc
         }
         const refs_str = ref_buf.items;
 
-        const text_y = ry + 14.0;
+        const text_y = ry + ROW_TEXT_BASELINE;
         cx = x;
 
         try w.print(
@@ -237,10 +249,10 @@ pub fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBloc
     try w.print(
         \\<text x="{d:.1}" y="{d:.1}" font-size="11" fill="#6e7681" pointer-events="none">{d} unique lines, {d} total parts</text>
         \\
-    , .{ x + pad_x, ry + 16.0, entries.items.len, total_parts });
+    , .{ x + pad_x, ry + FOOTER_TEXT_OFFSET, entries.items.len, total_parts });
 
     try w.writeAll("</g>\n");
-    return table_h + 20.0;
+    return table_h + FOOTER_BOTTOM_PAD;
 }
 
 /// Recursively flatten every `Instance` from a DesignBlock and all of its

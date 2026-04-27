@@ -13,6 +13,16 @@ const pcb_json = @import("render_pcb_json.zig");
 /// parser failures, and the allocator failures from the per-layer writers.
 pub const GerberError = std.mem.Allocator.Error || layout_mod.LayoutError || parser_mod.ParseError;
 
+// ── Constants ─────────────────────────────────────────────────────
+const PAD_MIN_CHILDREN: usize = 5;
+const PTS_MIN_CHILDREN: usize = 5;
+const DEGREES_PER_HALF_TURN: f64 = 180.0;
+const DEG_TO_RAD: f64 = std.math.pi / DEGREES_PER_HALF_TURN;
+const DRILL_SIZE_TOLERANCE_MM: f64 = 0.001;
+const THRU_HOLE_PAD = "thru_hole";
+const APERTURE_DEF_FMT = "%ADD{d}C,{d:.4}*%\n";
+const DRAW_TO_FMT = "X{d}Y{d}D01*\n";
+
 /// A single Gerber output file.
 pub const GerberFile = struct {
     name: []const u8,
@@ -154,7 +164,7 @@ fn parseGeometry(allocator: std.mem.Allocator, source: []const u8) !FootprintGeo
         const tag = cl[0].asAtom() orelse continue;
 
         if (std.mem.eql(u8, tag, "pad")) {
-            if (cl.len < 5) continue;
+            if (cl.len < PAD_MIN_CHILDREN) continue;
             const name = cl[1].asAtom() orelse cl[1].asString() orelse continue;
             const pad_type = cl[2].asAtom() orelse continue;
             const shape = cl[3].asAtom() orelse continue;
@@ -199,7 +209,7 @@ fn parseGeometry(allocator: std.mem.Allocator, source: []const u8) !FootprintGeo
                 const sl = sub.asList() orelse continue;
                 if (sl.len < 2) continue;
                 const stag = sl[0].asAtom() orelse continue;
-                if (std.mem.eql(u8, stag, "pts") and sl.len >= 5) {
+                if (std.mem.eql(u8, stag, "pts") and sl.len >= PTS_MIN_CHILDREN) {
                     lx1 = nodeFloat(sl[1]);
                     ly1 = nodeFloat(sl[2]);
                     lx2 = nodeFloat(sl[3]);
@@ -253,11 +263,11 @@ fn writeFlash(w: anytype, x: f64, y: f64) !void {
 
 fn writeDraw(w: anytype, x1: f64, y1: f64, x2: f64, y2: f64) !void {
     try w.print("X{d}Y{d}D02*\n", .{ fmtCoord(x1), fmtCoord(y1) });
-    try w.print("X{d}Y{d}D01*\n", .{ fmtCoord(x2), fmtCoord(y2) });
+    try w.print(DRAW_TO_FMT, .{ fmtCoord(x2), fmtCoord(y2) });
 }
 
 fn transformPad(px: f64, py: f64, angle_deg: f64, comp_x: f64, comp_y: f64) [2]f64 {
-    const a = angle_deg * std.math.pi / 180.0;
+    const a = angle_deg * DEG_TO_RAD;
     const cos_a = @cos(a);
     const sin_a = @sin(a);
     return .{
@@ -303,7 +313,7 @@ fn generateCopperLayer(
         const geom = fp_geom.get(inst.footprint) orelse continue;
 
         for (geom.pads) |pad| {
-            const is_thru = std.mem.eql(u8, pad.pad_type, "thru_hole");
+            const is_thru = std.mem.eql(u8, pad.pad_type, THRU_HOLE_PAD);
             if (!is_thru and is_inst_front != is_front) continue;
 
             const key = try std.fmt.allocPrint(allocator, "pad_{s}_{d:.4}_{d:.4}", .{ pad.shape, pad.w, pad.h });
@@ -347,7 +357,7 @@ fn generateCopperLayer(
     var ap_idx: u32 = 10;
     for (apertures.items) |ap| {
         switch (ap.kind) {
-            .circle => try w.print("%ADD{d}C,{d:.4}*%\n", .{ ap_idx, ap.w }),
+            .circle => try w.print(APERTURE_DEF_FMT, .{ ap_idx, ap.w }),
             .rect => try w.print("%ADD{d}R,{d:.4}X{d:.4}*%\n", .{ ap_idx, ap.w, ap.h }),
             .oblong => try w.print("%ADD{d}O,{d:.4}X{d:.4}*%\n", .{ ap_idx, ap.w, ap.h }),
         }
@@ -362,7 +372,7 @@ fn generateCopperLayer(
         const geom = fp_geom.get(inst.footprint) orelse continue;
 
         for (geom.pads) |pad| {
-            const is_thru = std.mem.eql(u8, pad.pad_type, "thru_hole");
+            const is_thru = std.mem.eql(u8, pad.pad_type, THRU_HOLE_PAD);
             if (!is_thru and is_inst_front != is_front) continue;
 
             const key = try std.fmt.allocPrint(allocator, "pad_{s}_{d:.4}_{d:.4}", .{ pad.shape, pad.w, pad.h });
@@ -406,10 +416,10 @@ fn generateCopperLayer(
             try w.writeAll("G36*\n"); // Region begin
             try w.print("X{d}Y{d}D02*\n", .{ fmtCoord(poly[0][0]), fmtCoord(poly[0][1]) });
             for (poly[1..]) |pt| {
-                try w.print("X{d}Y{d}D01*\n", .{ fmtCoord(pt[0]), fmtCoord(pt[1]) });
+                try w.print(DRAW_TO_FMT, .{ fmtCoord(pt[0]), fmtCoord(pt[1]) });
             }
             // Close polygon
-            try w.print("X{d}Y{d}D01*\n", .{ fmtCoord(poly[0][0]), fmtCoord(poly[0][1]) });
+            try w.print(DRAW_TO_FMT, .{ fmtCoord(poly[0][0]), fmtCoord(poly[0][1]) });
             try w.writeAll("G37*\n"); // Region end
         }
     }
@@ -447,13 +457,13 @@ fn generateMaskLayer(
         const geom = fp_geom.get(inst.footprint) orelse continue;
 
         for (geom.pads) |pad| {
-            const is_thru = std.mem.eql(u8, pad.pad_type, "thru_hole");
+            const is_thru = std.mem.eql(u8, pad.pad_type, THRU_HOLE_PAD);
             if (!is_thru and is_inst_front != is_front) continue;
 
             const ew = pad.w + mask_expansion * 2;
             const eh = pad.h + mask_expansion * 2;
             if (std.mem.eql(u8, pad.shape, "circle")) {
-                try w.print("%ADD{d}C,{d:.4}*%\n", .{ next_ap, ew });
+                try w.print(APERTURE_DEF_FMT, .{ next_ap, ew });
             } else if (std.mem.eql(u8, pad.shape, "oval")) {
                 try w.print("%ADD{d}O,{d:.4}X{d:.4}*%\n", .{ next_ap, ew, eh });
             } else {
@@ -470,7 +480,7 @@ fn generateMaskLayer(
     // Via mask openings
     for (vias) |v| {
         const vs = v.pad_size + mask_expansion * 2;
-        try w.print("%ADD{d}C,{d:.4}*%\n", .{ next_ap, vs });
+        try w.print(APERTURE_DEF_FMT, .{ next_ap, vs });
         try w.print("D{d}*\n", .{next_ap});
         next_ap += 1;
         try writeFlash(w, v.x, v.y);
@@ -566,7 +576,7 @@ fn generateDrill(
     for (vias) |v| {
         var found = false;
         for (drill_sizes.items) |d| {
-            if (@abs(d - v.drill) < 0.001) {
+            if (@abs(d - v.drill) < DRILL_SIZE_TOLERANCE_MM) {
                 found = true;
                 break;
             }
@@ -583,7 +593,7 @@ fn generateDrill(
             if (pad.drill <= 0) continue;
             var found = false;
             for (drill_sizes.items) |d| {
-                if (@abs(d - pad.drill) < 0.001) {
+                if (@abs(d - pad.drill) < DRILL_SIZE_TOLERANCE_MM) {
                     found = true;
                     break;
                 }
@@ -604,7 +614,7 @@ fn generateDrill(
 
         // Vias with this drill size
         for (vias) |v| {
-            if (@abs(v.drill - drill_size) < 0.001) {
+            if (@abs(v.drill - drill_size) < DRILL_SIZE_TOLERANCE_MM) {
                 try w.print("X{d:.4}Y{d:.4}\n", .{ v.x, v.y });
             }
         }
@@ -615,7 +625,7 @@ fn generateDrill(
             const pl = placed.get(inst.uuid) orelse continue;
             const geom = fp_geom.get(inst.footprint) orelse continue;
             for (geom.pads) |pad| {
-                if (@abs(pad.drill - drill_size) >= 0.001) continue;
+                if (@abs(pad.drill - drill_size) >= DRILL_SIZE_TOLERANCE_MM) continue;
                 const pos = transformPad(pad.x, pad.y, pl.angle, pl.x, pl.y);
                 try w.print("X{d:.4}Y{d:.4}\n", .{ pos[0], pos[1] });
             }

@@ -22,6 +22,13 @@ const estimateBranchCount = hub_mod.estimateBranchCount;
 const branch_mod = @import("branch.zig");
 const RenderError = draw.RenderError;
 
+// ── Layout constants ──────────────────────────────────────────────
+const HALF_DIVISOR: f64 = 2.0;
+const NC_OFFSET: f64 = 10.0;
+const BUS_OFFSET: f64 = 10.0;
+const PIN_OFFSET: f64 = 20.0;
+const FAR_X_SENTINEL: f64 = 99999.0;
+
 /// Render every connection out of one merged hub-pin group. Classifies each
 /// connection as net-label or pin-link (spoke-chain), filters out
 /// insignificant nets, then routes the surviving ones onto a per-pin local
@@ -30,8 +37,8 @@ const RenderError = draw.RenderError;
 pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u8, group: PinGroup, stub_x: f64, py: f64, side: Side) RenderError!void {
     if (group.conns.len == 0) {
         const nc_x = switch (side) {
-            .left => stub_x - 10.0,
-            .right => stub_x + 10.0,
+            .left => stub_x - NC_OFFSET,
+            .right => stub_x + NC_OFFSET,
         };
         try drawNcSymbol(w, nc_x, py);
         return;
@@ -121,7 +128,7 @@ pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u
     var results: std.ArrayListUnmanaged(BranchBody) = .empty;
 
     const multi = classified.items.len > 1;
-    const bus_offset: f64 = 10.0;
+    const bus_offset: f64 = BUS_OFFSET;
     const bus_x: f64 = switch (side) {
         .left => stub_x - bus_offset,
         .right => stub_x + bus_offset,
@@ -134,8 +141,8 @@ pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u
 
     for (classified.items, 0..) |entry, i| {
         const slots = slot_counts[i];
-        const slot_center = @as(f64, @floatFromInt(consumed_slots)) + @as(f64, @floatFromInt(slots -| 1)) / 2.0;
-        const cy = py + slot_center * per_conn_spacing - total_h2 / 2.0;
+        const slot_center = @as(f64, @floatFromInt(consumed_slots)) + @as(f64, @floatFromInt(slots -| 1)) / HALF_DIVISOR;
+        const cy = py + slot_center * per_conn_spacing - total_h2 / HALF_DIVISOR;
         consumed_slots += slots;
         if (cy < min_cy) min_cy = cy;
         if (cy > max_cy) max_cy = cy;
@@ -167,16 +174,16 @@ pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u
     }
 
     var default_term_x: f64 = switch (side) {
-        .left => stub_x - spoke_len - 20.0,
-        .right => stub_x + spoke_len + 20.0,
+        .left => stub_x - spoke_len - PIN_OFFSET,
+        .right => stub_x + spoke_len + PIN_OFFSET,
     };
     for (results.items) |r| {
         switch (side) {
             .left => {
-                default_term_x = @min(default_term_x, r.end_x - 20.0);
+                default_term_x = @min(default_term_x, r.end_x - PIN_OFFSET);
             },
             .right => {
-                default_term_x = @max(default_term_x, r.end_x + 20.0);
+                default_term_x = @max(default_term_x, r.end_x + PIN_OFFSET);
             },
         }
     }
@@ -215,8 +222,8 @@ pub fn renderTerminalGroups(self: *RenderCtx, w: anytype, results: []const Branc
         } else {
             const nearest_x = blk: {
                 var nx: f64 = switch (side) {
-                    .left => 99999.0,
-                    .right => -99999.0,
+                    .left => FAR_X_SENTINEL,
+                    .right => -FAR_X_SENTINEL,
                 };
                 for (group_slice) |r| {
                     switch (side) {
@@ -231,8 +238,8 @@ pub fn renderTerminalGroups(self: *RenderCtx, w: anytype, results: []const Branc
                 break :blk nx;
             };
             const grp_bus_x = switch (side) {
-                .left => nearest_x - 20.0,
-                .right => nearest_x + 20.0,
+                .left => nearest_x - PIN_OFFSET,
+                .right => nearest_x + PIN_OFFSET,
             };
 
             const first_cy = group_slice[0].cy;
@@ -420,8 +427,8 @@ pub fn renderConnBody(self: *RenderCtx, w: anytype, endpoint: Endpoint, hub_ref:
     switch (endpoint) {
         .net => {
             const end_x: f64 = switch (side) {
-                .left => stub_x - 20.0,
-                .right => stub_x + 20.0,
+                .left => stub_x - PIN_OFFSET,
+                .right => stub_x + PIN_OFFSET,
             };
             try drawNetWire(w, stub_x, stub_y, end_x, cy, net_name);
             return end_x;
@@ -449,16 +456,16 @@ pub fn renderConnBody(self: *RenderCtx, w: anytype, endpoint: Endpoint, hub_ref:
 
                 switch (side) {
                     .left => {
-                        try drawNetWire(w, stub_x, stub_y, stub_x - 20.0, cy, net_name);
-                        const chain_end_x = try branch_mod.drawPassiveChainLeft(self, w, stub_x - 20.0, cy, all_spokes.items);
+                        try drawNetWire(w, stub_x, stub_y, stub_x - PIN_OFFSET, cy, net_name);
+                        const chain_end_x = try branch_mod.drawPassiveChainLeft(self, w, stub_x - PIN_OFFSET, cy, all_spokes.items);
                         if (chain_result.branches.len > 0) {
                             try branch_mod.drawBranchTreeLeft(self, w, chain_end_x, cy, chain_result.branches, chain_result.terminal);
                         }
                         return chain_end_x;
                     },
                     .right => {
-                        try drawNetWire(w, stub_x, stub_y, stub_x + 20.0, cy, net_name);
-                        const chain_end_x = try branch_mod.drawPassiveChainRight(self, w, stub_x + 20.0, cy, all_spokes.items);
+                        try drawNetWire(w, stub_x, stub_y, stub_x + PIN_OFFSET, cy, net_name);
+                        const chain_end_x = try branch_mod.drawPassiveChainRight(self, w, stub_x + PIN_OFFSET, cy, all_spokes.items);
                         if (chain_result.branches.len > 0) {
                             try branch_mod.drawBranchTreeRight(self, w, chain_end_x, cy, chain_result.branches, chain_result.terminal);
                         }
@@ -467,8 +474,8 @@ pub fn renderConnBody(self: *RenderCtx, w: anytype, endpoint: Endpoint, hub_ref:
                 }
             } else {
                 const end_x: f64 = switch (side) {
-                    .left => stub_x - spoke_len - 20.0,
-                    .right => stub_x + spoke_len + 20.0,
+                    .left => stub_x - spoke_len - PIN_OFFSET,
+                    .right => stub_x + spoke_len + PIN_OFFSET,
                 };
                 try drawNetWire(w, stub_x, stub_y, end_x, cy, net_name);
                 return end_x;

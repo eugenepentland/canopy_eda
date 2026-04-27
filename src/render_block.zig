@@ -21,6 +21,15 @@ const margin = types.margin_val;
 const top_margin = types.top_margin;
 const arrow_size = types.arrow_size;
 
+// ── Layout constants ──────────────────────────────────────────────
+const HALF_DIVISOR: f64 = 2.0;
+const EDGE_SPACING_LIMIT: f64 = 20.0;
+const SECTION_LABEL_OFFSET: f64 = 30.0;
+const COLUMN_LABEL_OFFSET: f64 = 24.0;
+
+// ── Repeated string literals ──────────────────────────────────────
+const PIN_KEY_FMT: []const u8 = "{s}\x00{s}";
+
 // ── Shared: build blocks from design sections ────────────────────────
 
 const BuildResult = struct {
@@ -743,27 +752,27 @@ fn computeEdgeAttachments(
         if (same_col) {
             // Vertical: attach at bottom/top center
             if (src.y < dst.y) {
-                src_attach[ei] = .{ .x = src.x + src.w / 2.0, .y = src.y + src.h };
-                dst_attach[ei] = .{ .x = dst.x + dst.w / 2.0, .y = dst.y };
+                src_attach[ei] = .{ .x = src.x + src.w / HALF_DIVISOR, .y = src.y + src.h };
+                dst_attach[ei] = .{ .x = dst.x + dst.w / HALF_DIVISOR, .y = dst.y };
             } else {
-                src_attach[ei] = .{ .x = src.x + src.w / 2.0, .y = src.y };
-                dst_attach[ei] = .{ .x = dst.x + dst.w / 2.0, .y = dst.y + dst.h };
+                src_attach[ei] = .{ .x = src.x + src.w / HALF_DIVISOR, .y = src.y };
+                dst_attach[ei] = .{ .x = dst.x + dst.w / HALF_DIVISOR, .y = dst.y + dst.h };
             }
         } else {
             // Horizontal: distribute along right edge of source, left edge of dest
             const r_count = right_counts[e.from];
             const r_i = right_idx[e.from];
             right_idx[e.from] += 1;
-            const r_spacing: f64 = if (r_count > 1) @min(20.0, (src.h - 20.0) / @as(f64, @floatFromInt(r_count - 1))) else 0;
+            const r_spacing: f64 = if (r_count > 1) @min(EDGE_SPACING_LIMIT, (src.h - EDGE_SPACING_LIMIT) / @as(f64, @floatFromInt(r_count - 1))) else 0;
             const r_total = @as(f64, @floatFromInt(r_count - 1)) * r_spacing;
-            const r_y = src.y + src.h / 2.0 - r_total / 2.0 + @as(f64, @floatFromInt(r_i)) * r_spacing;
+            const r_y = src.y + src.h / HALF_DIVISOR - r_total / HALF_DIVISOR + @as(f64, @floatFromInt(r_i)) * r_spacing;
 
             const l_count = left_counts[e.to];
             const l_i = left_idx[e.to];
             left_idx[e.to] += 1;
-            const l_spacing: f64 = if (l_count > 1) @min(20.0, (dst.h - 20.0) / @as(f64, @floatFromInt(l_count - 1))) else 0;
+            const l_spacing: f64 = if (l_count > 1) @min(EDGE_SPACING_LIMIT, (dst.h - EDGE_SPACING_LIMIT) / @as(f64, @floatFromInt(l_count - 1))) else 0;
             const l_total = @as(f64, @floatFromInt(l_count - 1)) * l_spacing;
-            const l_y = dst.y + dst.h / 2.0 - l_total / 2.0 + @as(f64, @floatFromInt(l_i)) * l_spacing;
+            const l_y = dst.y + dst.h / HALF_DIVISOR - l_total / HALF_DIVISOR + @as(f64, @floatFromInt(l_i)) * l_spacing;
 
             if (src.x < dst.x) {
                 src_attach[ei] = .{ .x = src.x + src.w, .y = r_y };
@@ -864,7 +873,7 @@ fn serializeBlock(w: anytype, blk: Block, section: []const u8, port_net_map: *co
         if (port_written) try w.writeAll(",");
         // Look up net name: key is "block_title\x00port_name"
         var key_buf: [512]u8 = undefined;
-        const key = std.fmt.bufPrint(&key_buf, "{s}\x00{s}", .{ blk.title, p.name }) catch p.name;
+        const key = std.fmt.bufPrint(&key_buf, PIN_KEY_FMT, .{ blk.title, p.name }) catch p.name;
         const net_name = port_net_map.get(key) orelse p.name;
         try w.print("{{\"name\":\"{s}\",\"net\":\"{s}\",\"direction\":\"{s}\",\"signal\":\"{s}\"", .{
             p.name, net_name, @tagName(p.direction), @tagName(p.signal_type),
@@ -1012,7 +1021,7 @@ pub fn renderBlockDiagramJson(allocator: Allocator, design: *const DesignBlock) 
                     const sb_name = side[0..slash];
                     const port_name = side[slash + 1 ..];
                     const plain_net = if (!a_has_slash) nt.a else if (!b_has_slash) nt.b else continue;
-                    const key = try std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ sb_name, port_name });
+                    const key = try std.fmt.allocPrint(allocator, PIN_KEY_FMT, .{ sb_name, port_name });
                     try pwr_port_net.put(key, plain_net);
                 }
             }
@@ -1162,7 +1171,7 @@ pub fn renderBlockDiagramJson(allocator: Allocator, design: *const DesignBlock) 
         for (design.sub_blocks) |sb| {
             for (sb.block.ports) |p| {
                 if (std.mem.eql(u8, p.direction, "out")) {
-                    const pk = std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ sb.name, p.name }) catch continue;
+                    const pk = std.fmt.allocPrint(allocator, PIN_KEY_FMT, .{ sb.name, p.name }) catch continue;
                     const resolved_name = pwr_port_net.get(pk) orelse p.net;
                     if (std.mem.eql(u8, resolved_name, canonical_rail)) is_sb_output = true;
                 }
@@ -1175,7 +1184,7 @@ pub fn renderBlockDiagramJson(allocator: Allocator, design: *const DesignBlock) 
                         if (!std.mem.eql(u8, p.direction, "out")) continue;
                         const pv = p.nominal orelse continue;
                         if (pv == v) {
-                            const port_key = std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ sb.name, p.name }) catch continue;
+                            const port_key = std.fmt.allocPrint(allocator, PIN_KEY_FMT, .{ sb.name, p.name }) catch continue;
                             canonical_rail = pwr_port_net.get(port_key) orelse p.net;
                             break;
                         }
@@ -1190,7 +1199,7 @@ pub fn renderBlockDiagramJson(allocator: Allocator, design: *const DesignBlock) 
             for (blk.ports) |p| {
                 if (p.direction != .out or p.signal_type != .power) continue;
                 var kb: [512]u8 = undefined;
-                const k = std.fmt.bufPrint(&kb, "{s}\x00{s}", .{ blk.title, p.name }) catch continue;
+                const k = std.fmt.bufPrint(&kb, PIN_KEY_FMT, .{ blk.title, p.name }) catch continue;
                 const resolved = pwr_port_net.get(k) orelse p.name;
                 if (std.mem.eql(u8, resolved, canonical_rail) or std.mem.eql(u8, resolved, net.name)) {
                     source_sb_idx = bi;
@@ -1648,7 +1657,7 @@ pub fn renderBlockDiagramJson(allocator: Allocator, design: *const DesignBlock) 
                     const sb_name = side[0..slash];
                     const port_name = side[slash + 1 ..];
                     const plain_net = if (!a_slash) nt.a else if (!b_slash) nt.b else continue;
-                    const key = try std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ sb_name, port_name });
+                    const key = try std.fmt.allocPrint(allocator, PIN_KEY_FMT, .{ sb_name, port_name });
                     try port_net_map.put(key, plain_net);
                 }
             }
@@ -1656,7 +1665,7 @@ pub fn renderBlockDiagramJson(allocator: Allocator, design: *const DesignBlock) 
             for (result.blocks.items) |blk| {
                 for (blk.ports) |p| {
                     if (std.mem.eql(u8, p.name, nt.b)) {
-                        const key = try std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ blk.title, nt.b });
+                        const key = try std.fmt.allocPrint(allocator, PIN_KEY_FMT, .{ blk.title, nt.b });
                         try port_net_map.put(key, nt.a);
                     }
                 }
@@ -1700,10 +1709,10 @@ pub fn renderBlockDiagramJson(allocator: Allocator, design: *const DesignBlock) 
         edge_written = true;
     }
     try w.writeAll("],\"sections\":[");
-    try w.print("{{\"name\":\"Power Flow\",\"y\":{d:.1}}}", .{top_margin - 30.0});
-    try w.print(",{{\"name\":\"Signal Flow\",\"y\":{d:.1}}}", .{signal_y_offset - 30.0});
+    try w.print("{{\"name\":\"Power Flow\",\"y\":{d:.1}}}", .{top_margin - SECTION_LABEL_OFFSET});
+    try w.print(",{{\"name\":\"Signal Flow\",\"y\":{d:.1}}}", .{signal_y_offset - SECTION_LABEL_OFFSET});
     if (sup_blocks.items.len > 0)
-        try w.print(",{{\"name\":\"Support\",\"y\":{d:.1}}}", .{support_y_offset - 30.0});
+        try w.print(",{{\"name\":\"Support\",\"y\":{d:.1}}}", .{support_y_offset - SECTION_LABEL_OFFSET});
     try w.writeAll("],\"columns\":[");
     // Power section column labels
     const pwr_col_names = [_][]const u8{ "Input", "Regulation", "Peripherals", "Output" };
@@ -1719,7 +1728,7 @@ pub fn renderBlockDiagramJson(allocator: Allocator, design: *const DesignBlock) 
         }
         if (col_x) |x| {
             if (col_written) try w.writeAll(",");
-            try w.print("{{\"name\":\"{s}\",\"x\":{d:.1},\"y\":{d:.1}}}", .{ pwr_col_names[c], x, col_min_y - 24.0 });
+            try w.print("{{\"name\":\"{s}\",\"x\":{d:.1},\"y\":{d:.1}}}", .{ pwr_col_names[c], x, col_min_y - COLUMN_LABEL_OFFSET });
             col_written = true;
         }
     }
@@ -1736,7 +1745,7 @@ pub fn renderBlockDiagramJson(allocator: Allocator, design: *const DesignBlock) 
         }
         if (col_x) |x| {
             if (col_written) try w.writeAll(",");
-            try w.print("{{\"name\":\"{s}\",\"x\":{d:.1},\"y\":{d:.1}}}", .{ sig_col_names[c], x, col_min_y - 24.0 });
+            try w.print("{{\"name\":\"{s}\",\"x\":{d:.1},\"y\":{d:.1}}}", .{ sig_col_names[c], x, col_min_y - COLUMN_LABEL_OFFSET });
             col_written = true;
         }
     }

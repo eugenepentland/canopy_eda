@@ -26,6 +26,18 @@ const Chip = struct {
     slug: []const u8,
 };
 
+// ── Layout constants ──────────────────────────────────────────────
+const col_title_y_off: f64 = 20;
+const empty_label_y_off: f64 = 32;
+const chip_label_y_off: f64 = 18;
+const chip_subtitle_y_off: f64 = 36;
+const cat_char_width: f64 = 6.2;
+const cat_reserve_pad: f64 = 10.0;
+const label_char_width: f64 = 6.6;
+const label_min_chars: usize = 6;
+const sub_char_width: f64 = 5.6;
+const sub_min_chars: usize = 8;
+
 const col_count: usize = 4;
 const col_w: f64 = 270;
 const col_gap: f64 = 12;
@@ -97,13 +109,13 @@ fn writeColumn(
     );
     try w.print(
         "<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"sys-col-title\" fill=\"{s}\">{s}</text>",
-        .{ x + col_pad, y + 20, color, columnTitle(column) },
+        .{ x + col_pad, y + col_title_y_off, color, columnTitle(column) },
     );
 
     if (chips.len == 0) {
         try w.print(
             "<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"sys-empty\">—</text>",
-            .{ x + col_w / 2, y + header_h + 32 },
+            .{ x + col_w / 2, y + header_h + empty_label_y_off },
         );
         return;
     }
@@ -137,27 +149,27 @@ fn writeChip(
 
     // Reserve room on the right for the category tag — ~6.2px per character
     // of 10px monospace plus a small gap.
-    const cat_reserve: f64 = @as(f64, @floatFromInt(cat_name.len)) * 6.2 + 10.0;
-    const label_max: usize = @max(6, @as(usize, @intFromFloat((width - chip_pad_x * 2 - cat_reserve) / 6.6)));
+    const cat_reserve: f64 = @as(f64, @floatFromInt(cat_name.len)) * cat_char_width + cat_reserve_pad;
+    const label_max: usize = @max(label_min_chars, @as(usize, @intFromFloat((width - chip_pad_x * 2 - cat_reserve) / label_char_width)));
     try w.print(
         "<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"sys-chip-label\">",
-        .{ x + chip_pad_x, y + 18 },
+        .{ x + chip_pad_x, y + chip_label_y_off },
     );
     try writeHtmlEscaped(w, try truncate(allocator, chip.label, label_max));
     try w.writeAll("</text>");
 
     try w.print(
         "<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"sys-chip-cat\" fill=\"{s}\">",
-        .{ x + width - chip_pad_x, y + 18, color },
+        .{ x + width - chip_pad_x, y + chip_label_y_off, color },
     );
     try writeHtmlEscaped(w, cat_name);
     try w.writeAll("</text>");
 
     if (chip.subtitle.len > 0) {
-        const sub_max: usize = @max(8, @as(usize, @intFromFloat((width - chip_pad_x * 2) / 5.6)));
+        const sub_max: usize = @max(sub_min_chars, @as(usize, @intFromFloat((width - chip_pad_x * 2) / sub_char_width)));
         try w.print(
             "<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"sys-chip-sub\">",
-            .{ x + chip_pad_x, y + 36 },
+            .{ x + chip_pad_x, y + chip_subtitle_y_off },
         );
         try writeHtmlEscaped(w, try truncate(allocator, chip.subtitle, sub_max));
         try w.writeAll("</text>");

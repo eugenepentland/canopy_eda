@@ -9,6 +9,17 @@ const env_mod = @import("eval/env.zig");
 /// `ArrayListUnmanaged(u8).writer()`, so only `OutOfMemory` propagates.
 pub const RenderError = std.mem.Allocator.Error;
 
+// ── Repeated string literals ──────────────────────────────────────
+const codeTdSep: []const u8 = "</code></td><td>";
+const codeTdToCode: []const u8 = "</code></td><td><code>";
+const sectionClose: []const u8 = "</section>";
+const spanSpanSep: []const u8 = "</span><span>";
+const tableSectionClose: []const u8 = "</tbody></table></section>";
+const tdTrClose: []const u8 = "</td></tr>";
+const tdSep: []const u8 = "</td><td>";
+const mutedDash: []const u8 = "<span class=\"muted\">—</span>";
+const trCodeOpen: []const u8 = "<tr><td><code>";
+
 /// Render a ReviewDoc as a self-contained HTML page. Inline CSS. One small
 /// inline script plus a CDN marked.js bundle power the checklist/markdown
 /// interactions. The header navbar matches the rest of the EDA web server.
@@ -152,7 +163,7 @@ pub fn writeSummaryTable(w: anytype, s: review.Summary) RenderError!void {
         }
         try w.writeAll("</ul>");
     }
-    try w.writeAll("</section>");
+    try w.writeAll(sectionClose);
 }
 
 /// Render the Power Budget section: one collapsible row per rail, sorted
@@ -190,39 +201,39 @@ pub fn writePowerBudget(w: anytype, rails: []const power_budget.Rail) RenderErro
             try writeHtmlEscaped(w, r.source_label);
             try w.writeAll("</code>");
         } else {
-            try w.writeAll("<span class=\"muted\">—</span>");
+            try w.writeAll(mutedDash);
         }
         try w.writeAll("</span>");
         try w.writeAll("<span>");
         try writeFloatCell(w, r.source_typ_a);
-        try w.writeAll("</span><span>");
+        try w.writeAll(spanSpanSep);
         try writeFloatCell(w, r.source_max_a);
-        try w.writeAll("</span><span>");
-        if (r.any_typ_load) try w.print("{d:.3}", .{r.load_typ_a}) else try w.writeAll("<span class=\"muted\">—</span>");
-        try w.writeAll("</span><span>");
-        if (r.any_max_load) try w.print("{d:.3}", .{r.load_max_a}) else try w.writeAll("<span class=\"muted\">—</span>");
-        try w.writeAll("</span><span>");
-        if (r.margin_pct) |m| try w.print("{d:.1}%", .{m}) else try w.writeAll("<span class=\"muted\">—</span>");
+        try w.writeAll(spanSpanSep);
+        if (r.any_typ_load) try w.print("{d:.3}", .{r.load_typ_a}) else try w.writeAll(mutedDash);
+        try w.writeAll(spanSpanSep);
+        if (r.any_max_load) try w.print("{d:.3}", .{r.load_max_a}) else try w.writeAll(mutedDash);
+        try w.writeAll(spanSpanSep);
+        if (r.margin_pct) |m| try w.print("{d:.1}%", .{m}) else try w.writeAll(mutedDash);
         try w.print("</span><span><span class=\"pill pill-{s}\">{s}</span></span>", .{ @tagName(r.status), statusLabel(r.status) });
         try w.writeAll("</summary>");
 
         if (r.consumers.len > 0) {
             try w.writeAll("<div class=\"rail-body\"><table class=\"consumer-table\"><thead><tr><th>Ref</th><th>Net</th><th>Pins</th><th>i-typ (A)</th><th>i-max (A)</th></tr></thead><tbody>");
             for (r.consumers) |c| {
-                try w.writeAll("<tr><td><code>");
+                try w.writeAll(trCodeOpen);
                 try writeHtmlEscaped(w, c.ref_des);
-                try w.writeAll("</code></td><td><code>");
+                try w.writeAll(codeTdToCode);
                 try writeHtmlEscaped(w, c.net);
-                try w.writeAll("</code></td><td>");
+                try w.writeAll(codeTdSep);
                 for (c.pins, 0..) |p, i| {
                     if (i > 0) try w.writeAll(", ");
                     try writeHtmlEscaped(w, p);
                 }
-                try w.writeAll("</td><td>");
-                if (c.i_typ) |v| try w.print("{d:.4}", .{v}) else try w.writeAll("<span class=\"muted\">—</span>");
-                try w.writeAll("</td><td>");
-                if (c.i_max) |v| try w.print("{d:.4}", .{v}) else try w.writeAll("<span class=\"muted\">—</span>");
-                try w.writeAll("</td></tr>");
+                try w.writeAll(tdSep);
+                if (c.i_typ) |v| try w.print("{d:.4}", .{v}) else try w.writeAll(mutedDash);
+                try w.writeAll(tdSep);
+                if (c.i_max) |v| try w.print("{d:.4}", .{v}) else try w.writeAll(mutedDash);
+                try w.writeAll(tdTrClose);
             }
             try w.writeAll("</tbody></table></div>");
         } else {
@@ -231,7 +242,7 @@ pub fn writePowerBudget(w: anytype, rails: []const power_budget.Rail) RenderErro
 
         try w.writeAll("</details>");
     }
-    try w.writeAll("</section>");
+    try w.writeAll(sectionClose);
 }
 
 fn statusLabel(s: power_budget.RailStatus) []const u8 {
@@ -260,17 +271,17 @@ pub fn writePowerSequence(w: anytype, rows: []const power_sequencing.SequenceRow
         };
         try w.print("<tr{s}><td>{d}</td><td><code>", .{ row_class, r.order + 1 });
         try writeHtmlEscaped(w, r.rail);
-        try w.writeAll("</code></td><td><code>");
+        try w.writeAll(codeTdToCode);
         try writeHtmlEscaped(w, r.source);
-        try w.writeAll("</code></td><td>");
+        try w.writeAll(codeTdSep);
         if (r.enable.len > 0) {
             try w.writeAll("<code>");
             try writeHtmlEscaped(w, r.enable);
             try w.writeAll("</code>");
         } else {
-            try w.writeAll("<span class=\"muted\">—</span>");
+            try w.writeAll(mutedDash);
         }
-        try w.writeAll("</td><td>");
+        try w.writeAll(tdSep);
         if (r.depends_on.len > 0) {
             try w.writeAll("<code>");
             try writeHtmlEscaped(w, r.depends_on);
@@ -281,11 +292,11 @@ pub fn writePowerSequence(w: anytype, rows: []const power_sequencing.SequenceRow
                 try w.writeAll("</code></span>");
             }
         } else {
-            try w.writeAll("<span class=\"muted\">—</span>");
+            try w.writeAll(mutedDash);
         }
         try w.print("</td><td><span class=\"pill pill-{s}\">{s}</span></td></tr>", .{ @tagName(r.status), sequenceLabel(r.status) });
     }
-    try w.writeAll("</tbody></table></section>");
+    try w.writeAll(tableSectionClose);
 }
 
 fn sequenceLabel(s: power_sequencing.SequenceStatus) []const u8 {
@@ -305,9 +316,9 @@ pub fn writeTestPoints(w: anytype, tps: []const review.TestPointEntry) RenderErr
     try w.writeAll("<p class=\"hint\">Physical probe pads on the board. Keep this list next to a multimeter when bringing up hardware.</p>");
     try w.writeAll("<table><thead><tr><th>Ref</th><th>Net</th><th>Purpose</th></tr></thead><tbody>");
     for (tps) |tp| {
-        try w.writeAll("<tr><td><code>");
+        try w.writeAll(trCodeOpen);
         try writeHtmlEscaped(w, tp.ref_des);
-        try w.writeAll("</code></td><td>");
+        try w.writeAll(codeTdSep);
         if (tp.net.len > 0) {
             try w.writeAll("<code>");
             try writeHtmlEscaped(w, tp.net);
@@ -315,15 +326,15 @@ pub fn writeTestPoints(w: anytype, tps: []const review.TestPointEntry) RenderErr
         } else {
             try w.writeAll("<span class=\"muted\">unconnected</span>");
         }
-        try w.writeAll("</td><td>");
+        try w.writeAll(tdSep);
         if (tp.purpose.len > 0) {
             try writeHtmlEscaped(w, tp.purpose);
         } else {
-            try w.writeAll("<span class=\"muted\">—</span>");
+            try w.writeAll(mutedDash);
         }
-        try w.writeAll("</td></tr>");
+        try w.writeAll(tdTrClose);
     }
-    try w.writeAll("</tbody></table></section>");
+    try w.writeAll(tableSectionClose);
 }
 
 /// Render the Unresolved Issues section — every error+warning ERC violation
@@ -349,15 +360,15 @@ pub fn writeUnresolved(w: anytype, vs: []const erc_mod.Violation) RenderError!vo
             @tagName(v.severity),
         });
         try writeHtmlEscaped(w, @tagName(v.kind));
-        try w.writeAll("</code></td><td>");
-        if (v.ref_des.len > 0) try writeHtmlEscaped(w, v.ref_des) else try w.writeAll("<span class=\"muted\">—</span>");
-        try w.writeAll("</td><td>");
-        if (v.net.len > 0) try writeHtmlEscaped(w, v.net) else try w.writeAll("<span class=\"muted\">—</span>");
-        try w.writeAll("</td><td>");
+        try w.writeAll(codeTdSep);
+        if (v.ref_des.len > 0) try writeHtmlEscaped(w, v.ref_des) else try w.writeAll(mutedDash);
+        try w.writeAll(tdSep);
+        if (v.net.len > 0) try writeHtmlEscaped(w, v.net) else try w.writeAll(mutedDash);
+        try w.writeAll(tdSep);
         try writeHtmlEscaped(w, v.message);
-        try w.writeAll("</td></tr>");
+        try w.writeAll(tdTrClose);
     }
-    try w.writeAll("</tbody></table></section>");
+    try w.writeAll(tableSectionClose);
 }
 
 fn writeSections(w: anytype, sections: []const review.SectionReport, state: review.ReviewState) !void {
@@ -475,7 +486,7 @@ fn writeSections(w: anytype, sections: []const review.SectionReport, state: revi
 
         try w.writeAll("</div>");
     }
-    try w.writeAll("</section>");
+    try w.writeAll(sectionClose);
 }
 
 /// Render the per-section review checklist: progress count, approval pill
@@ -569,9 +580,9 @@ pub fn writeAssertions(w: anytype, assertions: []const review.AssertionReport) R
     for (assertions) |a| {
         try w.print("<tr><td><span class=\"pill pill-{s}\">{s}</span></td><td>", .{ @tagName(a.status), @tagName(a.status) });
         try writeHtmlEscaped(w, a.message);
-        try w.writeAll("</td></tr>");
+        try w.writeAll(tdTrClose);
     }
-    try w.writeAll("</tbody></table></section>");
+    try w.writeAll(tableSectionClose);
 }
 
 fn writeBom(w: anytype, groups: []const review.BomGroup) !void {
@@ -583,11 +594,11 @@ fn writeBom(w: anytype, groups: []const review.BomGroup) !void {
         try w.print(" ({d})</summary>", .{g.entries.len});
         try w.writeAll("<table><thead><tr><th>Ref</th><th>Component</th><th>Value</th><th>Footprint</th></tr></thead><tbody>");
         for (g.entries) |e| {
-            try w.writeAll("<tr><td><code>");
+            try w.writeAll(trCodeOpen);
             try writeHtmlEscaped(w, e.ref_des);
-            try w.writeAll("</code></td><td><code>");
+            try w.writeAll(codeTdToCode);
             try writeHtmlEscaped(w, e.component);
-            try w.writeAll("</code></td><td>");
+            try w.writeAll(codeTdSep);
             try writeHtmlEscaped(w, e.value);
             try w.writeAll("</td><td><code>");
             try writeHtmlEscaped(w, e.footprint);
@@ -595,14 +606,14 @@ fn writeBom(w: anytype, groups: []const review.BomGroup) !void {
         }
         try w.writeAll("</tbody></table></details>");
     }
-    try w.writeAll("</section>");
+    try w.writeAll(sectionClose);
 }
 
 fn writeFloatCell(w: anytype, v: ?f64) !void {
     if (v) |f| {
         try w.print("{d:.3}", .{f});
     } else {
-        try w.writeAll("<span class=\"muted\">—</span>");
+        try w.writeAll(mutedDash);
     }
 }
 
