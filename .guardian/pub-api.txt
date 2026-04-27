@@ -10,7 +10,9 @@ src/bom.zig::netOverlap fn
 src/bom.zig::netSignature fn
 src/bom.zig::resolveIdentities value
 src/bom_resolve.zig::ResolveError value
+src/bom_resolve.zig::SetPropertyError value
 src/bom_resolve.zig::resolveIdentities fn
+src/bom_resolve.zig::setBomProperty fn
 src/checks.zig::Severity enum_
 src/commands.zig::CommandError value
 src/commands.zig::cmdBuild fn
@@ -512,11 +514,13 @@ src/serve/bom_html.zig::writeBomHtml fn
 src/serve/bom_html.zig::writeComponentsJson fn
 src/serve/bom_html.zig::writeJsonEscaped value
 src/serve/bom_html.zig::writeNetsJson fn
+src/serve/bom_html.zig::writeSchematicBomHtml fn
 src/serve/canvas_page.zig::HandlerError value
 src/serve/canvas_page.zig::canvasPage fn
 src/serve/canvas_viewer_js.zig::CANVAS_VIEWER_JS value
 src/serve/edit.zig::EditError value
 src/serve/edit.zig::HandlerError value
+src/serve/edit.zig::MpnEditError value
 src/serve/edit.zig::MutationResult struct_
 src/serve/edit.zig::PinAssignment struct_
 src/serve/edit.zig::addComponentDatasheetCore fn
@@ -529,6 +533,8 @@ src/serve/edit.zig::addSectionNoteCore fn
 src/serve/edit.zig::boardOutlineApi fn
 src/serve/edit.zig::editCourtyardApi fn
 src/serve/edit.zig::editFootprintApi fn
+src/serve/edit.zig::editMpnApi fn
+src/serve/edit.zig::editMpnCore fn
 src/serve/edit.zig::editNoteCore fn
 src/serve/edit.zig::editSectionCore fn
 src/serve/edit.zig::editValueApi fn

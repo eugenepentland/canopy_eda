@@ -300,6 +300,169 @@ pub fn writeBomHtml(wr: anytype, block: *const env_mod.DesignBlock) BomError!voi
     try wr.writeAll("</div>");
 }
 
+/// Render the design's BOM as a grouped HTML table with editable MPN /
+/// manufacturer cells. Sibling to `writeBomHtml` — same grouping pass
+/// `(component, value, footprint, attrs)` — but tuned for the
+/// always-visible card on the schematic page: editable inputs, all
+/// `Property` keys surfaced as badges, no embedded JS (the page-wide
+/// interaction.js owns the click handlers).
+pub fn writeSchematicBomHtml(wr: anytype, block: *const env_mod.DesignBlock) BomError!void {
+    const Instance = env_mod.Instance;
+    var all: std.ArrayListUnmanaged(Instance) = .empty;
+    try bomCollectInstances(block, &all);
+    if (all.items.len == 0) return;
+
+    const BomLine = struct {
+        component: []const u8,
+        value: []const u8,
+        footprint: []const u8,
+        attrs: []const []const u8,
+        properties: []const env_mod.Property,
+        count: u32,
+        refs: std.ArrayListUnmanaged([]const u8),
+    };
+
+    var lines: std.ArrayListUnmanaged(BomLine) = .empty;
+    for (all.items) |inst| {
+        var found = false;
+        for (lines.items) |*line| {
+            if (std.mem.eql(u8, line.component, inst.component) and
+                std.mem.eql(u8, line.value, inst.value) and
+                std.mem.eql(u8, line.footprint, inst.footprint) and
+                attrsEqual(line.attrs, inst.attrs))
+            {
+                line.count += 1;
+                try line.refs.append(std.heap.page_allocator, inst.ref_des);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            var refs: std.ArrayListUnmanaged([]const u8) = .empty;
+            try refs.append(std.heap.page_allocator, inst.ref_des);
+            try lines.append(std.heap.page_allocator, .{
+                .component = inst.component,
+                .value = inst.value,
+                .footprint = inst.footprint,
+                .attrs = inst.attrs,
+                .properties = inst.properties,
+                .count = 1,
+                .refs = refs,
+            });
+        }
+    }
+
+    std.mem.sortUnstable(BomLine, lines.items, {}, struct {
+        fn lt(_: void, a: BomLine, b: BomLine) bool {
+            if (a.count != b.count) return a.count > b.count;
+            const c = std.mem.order(u8, a.component, b.component);
+            if (c == .lt) return true;
+            if (c == .gt) return false;
+            return std.mem.order(u8, a.value, b.value) == .lt;
+        }
+    }.lt);
+
+    try wr.writeAll("<div class=\"sch-bom-wrap\"><table class=\"sch-bom-table\"><thead><tr>");
+    try wr.writeAll("<th>Qty</th><th>Refs</th><th>Component</th><th>Value</th>" ++
+        "<th>Footprint</th><th>Attrs</th><th>MPN</th><th>Manufacturer</th><th>Other</th>");
+    try wr.writeAll("</tr></thead><tbody>");
+
+    for (lines.items) |line| {
+        // Pull mpn / manufacturer (and stash everything else for the "Other" cell).
+        var mpn: []const u8 = "";
+        var manufacturer: []const u8 = "";
+        for (line.properties) |p| {
+            if (std.mem.eql(u8, p.key, "mpn")) mpn = p.value;
+            if (std.mem.eql(u8, p.key, "manufacturer")) manufacturer = p.value;
+        }
+
+        try wr.writeAll("<tr>");
+        try wr.print("<td class=\"sch-bom-qty\">{d}</td>", .{line.count});
+
+        // Refs cell — full list with title for hover.
+        try wr.writeAll("<td class=\"sch-bom-refs\" title=\"");
+        for (line.refs.items, 0..) |r, i| {
+            if (i > 0) try wr.writeAll(", ");
+            try wr.writeAll(r);
+        }
+        try wr.writeAll("\">");
+        for (line.refs.items, 0..) |r, i| {
+            if (i > 0) try wr.writeAll(", ");
+            try wr.writeAll(r);
+        }
+        try wr.writeAll("</td>");
+
+        try wr.print("<td class=\"sch-bom-comp\">{s}</td>", .{line.component});
+        try wr.print("<td>{s}</td>", .{line.value});
+        try wr.print("<td>{s}</td>", .{line.footprint});
+
+        // Attrs — schematic-time annotations like "x7r", "np0".
+        try wr.writeAll("<td class=\"sch-bom-attrs\">");
+        for (line.attrs) |attr| {
+            try wr.print("<span class=\"sch-bom-tag\">{s}</span>", .{attr});
+        }
+        try wr.writeAll("</td>");
+
+        // refs joined for the data-ref payload.
+        const refs_csv = try joinRefs(std.heap.page_allocator, line.refs.items);
+        defer std.heap.page_allocator.free(refs_csv);
+
+        // MPN — editable. data-ref carries every ref-des in the group; the
+        // JS save handler iterates and POSTs once per ref.
+        try wr.writeAll("<td class=\"sch-bom-mpn\">");
+        try wr.print(
+            "<input class=\"sch-bom-mpn-edit\" data-ref=\"{s}\" value=\"{s}\" placeholder=\"set MPN\">" ++
+                "<button class=\"sch-bom-mpn-save\" data-ref=\"{s}\" type=\"button\">Save</button>",
+            .{ refs_csv, mpn, refs_csv },
+        );
+        try wr.writeAll("</td>");
+
+        // Manufacturer — editable.
+        try wr.writeAll("<td class=\"sch-bom-mfr\">");
+        try wr.print(
+            "<input class=\"sch-bom-mfr-edit\" data-ref=\"{s}\" value=\"{s}\" placeholder=\"set manufacturer\">" ++
+                "<button class=\"sch-bom-mfr-save\" data-ref=\"{s}\" type=\"button\">Save</button>",
+            .{ refs_csv, manufacturer, refs_csv },
+        );
+        try wr.writeAll("</td>");
+
+        // Other properties (datasheet, wattage, custom keys) as read-only badges.
+        try wr.writeAll("<td class=\"sch-bom-other\">");
+        for (line.properties) |p| {
+            if (std.mem.eql(u8, p.key, "mpn") or std.mem.eql(u8, p.key, "manufacturer")) continue;
+            if (std.mem.eql(u8, p.key, "datasheet")) {
+                try wr.print("<a class=\"sch-bom-tag sch-bom-tag-link\" href=\"{s}\" target=\"_blank\">datasheet</a>", .{p.value});
+            } else {
+                try wr.print("<span class=\"sch-bom-tag sch-bom-tag-prop\">{s}: {s}</span>", .{ p.key, p.value });
+            }
+        }
+        try wr.writeAll("</td>");
+
+        try wr.writeAll("</tr>");
+    }
+
+    try wr.writeAll("</tbody></table></div>");
+}
+
+/// Comma-join a list of ref-des strings for embedding in `data-ref`. Caller
+/// owns the returned slice. Used by `writeSchematicBomHtml` so the
+/// client-side save handler can iterate group members in one click.
+fn joinRefs(allocator: std.mem.Allocator, refs: []const []const u8) ![]u8 {
+    var total: usize = 0;
+    for (refs, 0..) |r, i| total += r.len + (if (i > 0) @as(usize, 1) else 0);
+    var buf = try allocator.alloc(u8, total);
+    var pos: usize = 0;
+    for (refs, 0..) |r, i| {
+        if (i > 0) {
+            buf[pos] = ',';
+            pos += 1;
+        }
+        @memcpy(buf[pos .. pos + r.len], r);
+        pos += r.len;
+    }
+    return buf;
+}
+
 /// Return `"cap"`, `"res"`, `"ind"`, or `"led"` when `component` is a
 /// passive part name like `cap-0402`, otherwise the empty string. Used to
 /// route value edits through the right `(cap …)` / `(res …)` builder.

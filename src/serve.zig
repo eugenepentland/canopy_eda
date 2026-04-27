@@ -220,6 +220,7 @@ pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) S
 
     // Edit
     router.post("/api/edit-value/:name", edit.editValueApi, .{});
+    router.post("/api/edit-mpn/:name", edit.editMpnApi, .{});
     router.post("/api/edit-footprint/:name", edit.editFootprintApi, .{});
     router.post("/api/edit-courtyard", edit.editCourtyardApi, .{});
     router.post("/api/add-instance/:name", edit.addInstanceApi, .{});

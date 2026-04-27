@@ -31,6 +31,7 @@ const KEY_REQUIREMENTS = "requirements";
 const KEY_NEW_SOURCE = "new_source";
 const ERR_NOT_DESIGN = "error: not a design";
 const ERR_BUILD_FAILED = "error: build failed";
+const ERR_LINE_TEMPLATE = "error: {s}";
 const VERSION_SNAPSHOT_TEMPLATE = "{{\"ok\":true,\"version\":{d},\"snapshot\":";
 
 const EvalError = @import("../eval/evaluator.zig").EvalError;
@@ -57,6 +58,7 @@ const tools = [_]ToolEntry{
     .{ .name = "read_design", .is_mutation = false },
     .{ .name = "write_design", .is_mutation = true },
     .{ .name = "edit_value", .is_mutation = true },
+    .{ .name = "edit_mpn", .is_mutation = true },
     .{ .name = "edit_section", .is_mutation = true },
     .{ .name = "replace_instance", .is_mutation = true },
     .{ .name = "get_schematic", .is_mutation = false },
@@ -108,7 +110,7 @@ pub fn call(
     const ok = callInner(allocator, project_dir, tool_name, args_val, out) catch |err| {
         const msg = @errorName(err);
         const w = out.writer(allocator);
-        w.print("error: {s}", .{msg}) catch |e| {
+        w.print(ERR_LINE_TEMPLATE, .{msg}) catch |e| {
             log.warn("failed to write error msg: {s}", .{@errorName(e)});
         };
         return .{ .ok = false };
@@ -193,6 +195,20 @@ fn callInner(
         const value = requireString(args_val, "value") orelse return missingArg(out, allocator, "value");
         const result = edit.editValueCore(allocator, project_dir, name, ref, value) catch |err| return editErrorMsg(out, allocator, err);
         try w.print("{{\"ok\":true,\"version\":{d}}}", .{result.version});
+        return true;
+    }
+
+    if (std.mem.eql(u8, tool_name, "edit_mpn")) {
+        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+        const ref = requireString(args_val, "ref") orelse return missingArg(out, allocator, "ref");
+        const mpn = optionalString(args_val, "mpn") orelse "";
+        const manufacturer = optionalString(args_val, "manufacturer") orelse "";
+        if (mpn.len == 0 and manufacturer.len == 0) return missingArg(out, allocator, "mpn or manufacturer");
+        const version = edit.editMpnCore(allocator, project_dir, name, ref, mpn, manufacturer) catch |err| {
+            try w.print(ERR_LINE_TEMPLATE, .{@errorName(err)});
+            return false;
+        };
+        try w.print("{{\"ok\":true,\"version\":{d}}}", .{version});
         return true;
     }
 
@@ -1205,7 +1221,7 @@ fn missingArg(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, ke
 
 fn editErrorMsg(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, err: edit.EditError) !bool {
     const w = out.writer(allocator);
-    try w.print("error: {s}", .{@errorName(err)});
+    try w.print(ERR_LINE_TEMPLATE, .{@errorName(err)});
     return false;
 }
 

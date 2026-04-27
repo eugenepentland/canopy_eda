@@ -214,3 +214,33 @@ details li{margin:3px 0;font-size:0.88rem;color:#c9d1d9;line-height:1.45;}
 .erc-item[data-nav-ref]:hover,.erc-item[data-nav-net]:hover{filter:brightness(1.2);}
 .erc-tag{color:#8b949e;font-size:0.72rem;font-family:"SF Mono",monospace;}
 @media(max-width:900px){.sch-layout{grid-template-columns:1fr;}.sch-sidebar{position:static;height:auto;max-height:50vh;border-left:none;border-top:1px solid #30363d;}}
+
+/* ── Schematic BOM card ─────────────────────────────────────────── */
+.sch-bom-card{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:14px 18px 18px;margin:14px 16px;}
+.sch-bom-card>summary{font-size:1.05rem;font-weight:600;cursor:pointer;color:#c9d1d9;list-style:none;padding:4px 0;outline:none;}
+.sch-bom-card>summary::-webkit-details-marker{display:none;}
+.sch-bom-card>summary::before{content:"▾ ";color:#58a6ff;font-size:0.85em;}
+.sch-bom-card[open]>summary::before{content:"▾ ";}
+.sch-bom-card:not([open])>summary::before{content:"▸ ";}
+.sch-bom-wrap{margin-top:10px;overflow-x:auto;}
+.sch-bom-table{width:100%;border-collapse:collapse;font-size:0.78rem;color:#c9d1d9;font-family:"SF Mono","Menlo",monospace;}
+.sch-bom-table thead th{background:#161b22;text-align:left;padding:6px 10px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:0.04em;font-size:0.7rem;border-bottom:1px solid #30363d;}
+.sch-bom-table tbody tr{border-bottom:1px solid #1f2429;}
+.sch-bom-table tbody tr:hover{background:#161b22;}
+.sch-bom-table td{padding:5px 10px;vertical-align:middle;}
+.sch-bom-qty{text-align:right;color:#58a6ff;font-weight:600;width:36px;}
+.sch-bom-refs{color:#79c0ff;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.sch-bom-comp{color:#d2a8ff;}
+.sch-bom-attrs,.sch-bom-other{max-width:180px;}
+.sch-bom-tag{display:inline-block;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:3px;padding:1px 6px;font-size:0.7rem;margin-right:3px;}
+.sch-bom-tag-prop{background:#1f2a3d;border-color:#243454;color:#79c0ff;}
+.sch-bom-tag-link{color:#58a6ff;text-decoration:none;}
+.sch-bom-tag-link:hover{text-decoration:underline;}
+.sch-bom-mpn,.sch-bom-mfr{white-space:nowrap;}
+.sch-bom-mpn input,.sch-bom-mfr input{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:3px;padding:3px 6px;font-size:0.75rem;font-family:inherit;width:160px;}
+.sch-bom-mpn input:focus,.sch-bom-mfr input:focus{outline:none;border-color:#58a6ff;}
+.sch-bom-mpn input.bom-saved,.sch-bom-mfr input.bom-saved{border-color:#3fb950;background:rgba(63,185,80,0.06);}
+.sch-bom-mpn input.bom-error,.sch-bom-mfr input.bom-error{border-color:#f85149;background:rgba(248,81,73,0.06);}
+.sch-bom-mpn button,.sch-bom-mfr button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:3px;padding:3px 9px;font-size:0.72rem;cursor:pointer;margin-left:4px;font-family:inherit;font-weight:600;}
+.sch-bom-mpn button:hover,.sch-bom-mfr button:hover{background:#30363d;border-color:#58a6ff;}
+.sch-bom-mpn button:disabled,.sch-bom-mfr button:disabled{opacity:0.5;cursor:wait;}

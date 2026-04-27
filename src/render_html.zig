@@ -21,14 +21,18 @@ const draw = @import("render_svg/draw.zig");
 const section_inset = @import("render_svg/section_inset.zig");
 const system_svg = @import("render_system_svg.zig");
 const rb = @import("render_block_types.zig");
+const bom_html = @import("serve/bom_html.zig");
 const isHub = draw.isHub;
 const pinOrder = draw.pinOrder;
 
 const Allocator = std.mem.Allocator;
 
-/// Error set for HTML emit helpers — the writers used here are
-/// `ArrayListUnmanaged(u8).writer()` whose only failure is `OutOfMemory`.
-pub const RenderError = std.mem.Allocator.Error;
+/// Error set for HTML emit helpers. The writers in this module are
+/// `ArrayListUnmanaged(u8).writer()` (only fails on OOM), but we also
+/// embed the schematic BOM table via `bom_html.writeSchematicBomHtml`
+/// which is declared with the wider `bom_html.BomError` (Writer.Error +
+/// Dir.Iterator.Error) so the public surface widens to match.
+pub const RenderError = bom_html.BomError;
 
 // ── Repeated string literals ──────────────────────────────────────
 const approvedClass: []const u8 = " sec-card-approved";
@@ -85,6 +89,13 @@ pub fn renderToHtml(
         try review_html.writePowerBudget(w, doc.power_budget);
         try w.writeAll("</div>");
     }
+
+    // Editable BOM table — sits between the review dashboards and the
+    // per-section schematic cards. <details open> so it's visible by
+    // default but the user can collapse it on long pages.
+    try w.writeAll("<details class=\"sch-bom-card\" open><summary>Bill of Materials</summary>");
+    try bom_html.writeSchematicBomHtml(w, block);
+    try w.writeAll("</details>");
 
     const rstate: ?review.ReviewState = if (review_doc) |d| d.review_state else null;
     for (block.sections) |sec| try writeSection(&ctx, w, allocator, sec, 0, rstate, check_results);
@@ -315,7 +326,7 @@ fn joinAssertedFns(allocator: Allocator, fns: []const []const u8) ?[]const u8 {
 /// page does — flatten instances, build pin/net maps, classify, build
 /// adjacency, etc. — exposed so static exporters (markdown review package)
 /// can render the same per-hub SVGs the live page emits.
-pub fn setupRenderCtx(allocator: Allocator, block: *const DesignBlock) RenderError!RenderCtx {
+pub fn setupRenderCtx(allocator: Allocator, block: *const DesignBlock) std.mem.Allocator.Error!RenderCtx {
     var ctx = RenderCtx.init(allocator);
     try ctx.collectFlat(block, "");
     var flat_sec_idx: usize = 0;

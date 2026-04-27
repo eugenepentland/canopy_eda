@@ -6,6 +6,7 @@ src/bom.zig::loadBom | fn loadBom(allocator: std.mem.Allocator, bom_path: []cons
 src/bom.zig::netOverlap | fn netOverlap(a: []const []const u8, b: []const []const u8) f64
 src/bom.zig::netSignature | fn netSignature(allocator: std.mem.Allocator, nets: []const []const u8) std.mem.Allocator.Error![]const u8
 src/bom_resolve.zig::resolveIdentities | fn resolveIdentities( allocator: std.mem.Allocator, block: *const DesignBlock, bom_path: []const u8, project_dir: []const u8, ) ResolveError!void
+src/bom_resolve.zig::setBomProperty | fn setBomProperty( allocator: std.mem.Allocator, bom_path: []const u8, ref_des: []const u8, key: []const u8, value: []const u8, ) SetPropertyError!void
 src/commands.zig::cmdBuild | fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdCheck | fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdExportGerber | fn cmdExportGerber(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
@@ -155,7 +156,7 @@ src/render_block_types.zig::strInList | fn strInList(list: []const []const u8, s
 src/render_block_types.zig::toLower | fn toLower(c: u8) u8
 src/render_html.zig::renderHubSvg | fn renderHubSvg( ctx: *RenderCtx, w: anytype, allocator: Allocator, pin_groups: []const env_mod.PinGroup, hub_ref: []const u8, ) RenderError!bool
 src/render_html.zig::renderToHtml | fn renderToHtml( allocator: Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, navbar_css: []const u8, status: review.Status, review_doc: ?review.ReviewDoc, check_results: *const CheckResultMap, ) RenderError![]const u8
-src/render_html.zig::setupRenderCtx | fn setupRenderCtx(allocator: Allocator, block: *const DesignBlock) RenderError!RenderCtx
+src/render_html.zig::setupRenderCtx | fn setupRenderCtx(allocator: Allocator, block: *const DesignBlock) std.mem.Allocator.Error!RenderCtx
 src/render_json.zig::renderSceneGraph | fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project_dir: []const u8) RenderError![]const u8
 src/render_pcb_json.zig::renderPcbJson | fn renderPcbJson( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, board_def: ?*const Board, existing_pcb_path: ?[]const u8, layout_path: ?[]const u8, ) RenderError![]const u8
 src/render_svg/bom_table.zig::collectAllInstances | fn collectAllInstances(allocator: Allocator, block: *const DesignBlock, out: *std.ArrayListUnmanaged(env_mod.Instance)) RenderError!void
@@ -309,6 +310,7 @@ src/serve/bom_html.zig::writeBomCsv | fn writeBomCsv(w: anytype, block: *const e
 src/serve/bom_html.zig::writeBomHtml | fn writeBomHtml(wr: anytype, block: *const env_mod.DesignBlock) BomError!void
 src/serve/bom_html.zig::writeComponentsJson | fn writeComponentsJson( w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8, sym_cache: *const SymbolPinCache, allocator: std.mem.Allocator, project_dir: []const u8, ) BomError!bool
 src/serve/bom_html.zig::writeNetsJson | fn writeNetsJson(w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8) BomError!bool
+src/serve/bom_html.zig::writeSchematicBomHtml | fn writeSchematicBomHtml(wr: anytype, block: *const env_mod.DesignBlock) BomError!void
 src/serve/canvas_page.zig::canvasPage | fn canvasPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::addComponentDatasheetCore | fn addComponentDatasheetCore( allocator: std.mem.Allocator, project_dir: []const u8, component_name: []const u8, pdf: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::addComponentParameterCore | fn addComponentParameterCore( allocator: std.mem.Allocator, project_dir: []const u8, component: []const u8, param_name: []const u8, param_type: []const u8, ) EditError!struct { snapshot: ?[]const u8 }
@@ -320,6 +322,8 @@ src/serve/edit.zig::addSectionNoteCore | fn addSectionNoteCore( allocator: std.m
 src/serve/edit.zig::boardOutlineApi | fn boardOutlineApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::editCourtyardApi | fn editCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::editFootprintApi | fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::editMpnApi | fn editMpnApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::editMpnCore | fn editMpnCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, mpn: []const u8, manufacturer: []const u8, ) MpnEditError!u32
 src/serve/edit.zig::editNoteCore | fn editNoteCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, match: []const u8, new_text: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::editSectionCore | fn editSectionCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, section_name: []const u8, new_source: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::editValueApi | fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void

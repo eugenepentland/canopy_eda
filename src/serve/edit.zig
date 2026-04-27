@@ -5,6 +5,7 @@ const log = @import("../infra/log.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const render_json = @import("../render_json.zig");
 const bom = @import("../bom.zig");
+const bom_resolve = @import("../bom_resolve.zig");
 const env_mod = @import("../eval/env.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
@@ -1327,6 +1328,98 @@ pub fn editValueCore(
     const desc = try std.fmt.allocPrint(allocator, "edit_value {s} → {s}", .{ ref_des, new_value });
     defer allocator.free(desc);
     return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
+}
+
+/// Error set for the BOM-side MPN/manufacturer edit path. Narrower than
+/// `EditError` because we don't touch the `.sexp` source or rebuild the
+/// design — just patch the `.bom` sidecar via `bom_resolve.setBomProperty`.
+pub const MpnEditError = std.mem.Allocator.Error ||
+    std.fs.File.OpenError ||
+    std.fs.File.ReadError ||
+    std.fs.File.WriteError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream };
+
+/// Update MPN and/or manufacturer for `ref_des` in the `.bom` sidecar.
+/// Empty string for either field leaves that field untouched (so callers
+/// can patch one or both in a single call). Bumps the live version so the
+/// browser's poll picks up the change. Shared between the HTTP
+/// `editMpnApi` and the MCP `edit_mpn` tool.
+pub fn editMpnCore(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    ref_des: []const u8,
+    mpn: []const u8,
+    manufacturer: []const u8,
+) MpnEditError!u32 {
+    const bom_path = try std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name });
+    defer allocator.free(bom_path);
+
+    if (mpn.len > 0) try bom_resolve.setBomProperty(allocator, bom_path, ref_des, "mpn", mpn);
+    if (manufacturer.len > 0) try bom_resolve.setBomProperty(allocator, bom_path, ref_des, "manufacturer", manufacturer);
+
+    return serve_root.bumpLiveVersion(name);
+}
+
+/// POST /api/edit-mpn/:name — body `{"ref":"R1","mpn":"…","manufacturer":"…"}`.
+/// Either the `mpn` or `manufacturer` field may be omitted; only the present
+/// ones are persisted. Persists to the `.bom` sidecar and bumps the live
+/// version. Returns `{"ok":true,"version":N}`.
+pub fn editMpnApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = HTTP_NOT_FOUND;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = HTTP_BAD_REQUEST;
+        res.body = ERR_JSON_NO_BODY;
+        return;
+    };
+
+    // ref is required.
+    const ref_start = std.mem.indexOf(u8, body, JSON_REF_KEY) orelse {
+        res.status = HTTP_BAD_REQUEST;
+        res.body = ERR_MISSING_REF;
+        return;
+    };
+    const ref_val_start = ref_start + JSON_REF_KEY.len;
+    const ref_end = std.mem.indexOfPos(u8, body, ref_val_start, "\"") orelse {
+        res.status = HTTP_BAD_REQUEST;
+        return;
+    };
+    const ref_des = body[ref_val_start..ref_end];
+
+    // mpn + manufacturer are optional (empty string = leave alone).
+    const mpn = parseOptionalStringField(body, "\"mpn\":\"");
+    const manufacturer = parseOptionalStringField(body, "\"manufacturer\":\"");
+
+    if (mpn.len == 0 and manufacturer.len == 0) {
+        res.status = HTTP_BAD_REQUEST;
+        res.body = "no fields to update";
+        return;
+    }
+
+    const version = editMpnCore(ctx.allocator, ctx.project_dir, name, ref_des, mpn, manufacturer) catch |e| {
+        log.warn("editMpn {s} {s}: {s}", .{ name, ref_des, @errorName(e) });
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = "{\"ok\":false}";
+        return;
+    };
+
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{version});
+}
+
+/// Look for `key` (e.g. `"\"mpn\":\""`) in a tiny JSON body and return the
+/// quoted string value, or "" if the key is missing. Doesn't unescape — the
+/// inputs we accept here (MPN, manufacturer) don't use JSON escapes in
+/// practice. Used by `editMpnApi`.
+fn parseOptionalStringField(body: []const u8, key: []const u8) []const u8 {
+    const start = std.mem.indexOf(u8, body, key) orelse return "";
+    const val_start = start + key.len;
+    const end = std.mem.indexOfPos(u8, body, val_start, "\"") orelse return "";
+    return body[val_start..end];
 }
 
 /// Delete the `(instance "<ref_des>" …)` form (and its trailing newline)
