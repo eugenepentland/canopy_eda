@@ -104,7 +104,6 @@ const ERR_INVALID_JSON_JSON = "{\"error\":\"invalid json\"}";
 const ERR_MISSING_BODY_JSON = "{\"error\":\"missing body\"}";
 const ERR_MISSING_ID_JSON = "{\"error\":\"missing id\"}";
 const OK_JSON_TRUE = "{\"ok\":true}";
-const AUTH_SUBDIR_TEMPLATE = "{s}/auth";
 
 /// Error set for HTTP handlers in this module. Wide enough to cover
 /// allocator, writer, file IO, makePath, and JSON / form parsing errors
@@ -123,24 +122,24 @@ const SessionData = struct {
 
 var sessions_mutex: std.Thread.Mutex = .{};
 var sessions: ?std.StringHashMap(SessionData) = null;
-var sessions_project_dir: ?[]const u8 = null;
+var sessions_auth_dir: ?[]const u8 = null;
 
-fn getSessionMap(allocator: std.mem.Allocator, project_dir: []const u8) *std.StringHashMap(SessionData) {
+fn getSessionMap(allocator: std.mem.Allocator, auth_dir: []const u8) *std.StringHashMap(SessionData) {
     if (sessions == null) {
         sessions = std.StringHashMap(SessionData).init(allocator);
-        sessions_project_dir = project_dir;
+        sessions_auth_dir = auth_dir;
         // Load persisted sessions
-        loadSessions(allocator, project_dir);
+        loadSessions(allocator, auth_dir);
     }
     return &sessions.?;
 }
 
-fn sessionsPath(allocator: std.mem.Allocator, project_dir: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/auth/sessions.json", .{project_dir});
+fn sessionsPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/sessions.json", .{auth_dir});
 }
 
-fn loadSessions(allocator: std.mem.Allocator, project_dir: []const u8) void {
-    const path = sessionsPath(allocator, project_dir) catch return;
+fn loadSessions(allocator: std.mem.Allocator, auth_dir: []const u8) void {
+    const path = sessionsPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
     const file = infra_fs.cwd().openFile(path, .{}) catch return;
     defer file.close();
@@ -159,12 +158,10 @@ fn loadSessions(allocator: std.mem.Allocator, project_dir: []const u8) void {
 }
 
 fn persistSessions(allocator: std.mem.Allocator) void {
-    const project_dir = sessions_project_dir orelse return;
-    const path = sessionsPath(allocator, project_dir) catch return;
+    const auth_dir = sessions_auth_dir orelse return;
+    const path = sessionsPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
-    const dir_path = std.fmt.allocPrint(allocator, AUTH_SUBDIR_TEMPLATE, .{project_dir}) catch return;
-    defer allocator.free(dir_path);
-    infra_fs.cwd().makePath(dir_path) catch return;
+    infra_fs.cwd().makePath(auth_dir) catch return;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
     w.writeAll("[") catch return;
@@ -185,7 +182,7 @@ fn persistSessions(allocator: std.mem.Allocator) void {
 /// Mint a new 7-day session for `email` (32-byte hex random token), persist
 /// it to `projects/.../auth/sessions.json`, and return the cookie value the
 /// caller should send back as `eda_session`.
-pub fn createSession(allocator: std.mem.Allocator, project_dir: []const u8, email: []const u8) std.mem.Allocator.Error![]const u8 {
+pub fn createSession(allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8) std.mem.Allocator.Error![]const u8 {
     var rand_bytes: [32]u8 = undefined;
     infra_random.bytes(&rand_bytes);
     const hex = std.fmt.bytesToHex(rand_bytes, .lower);
@@ -197,7 +194,7 @@ pub fn createSession(allocator: std.mem.Allocator, project_dir: []const u8, emai
 
     sessions_mutex.lock();
     defer sessions_mutex.unlock();
-    const map = getSessionMap(allocator, project_dir);
+    const map = getSessionMap(allocator, auth_dir);
     try map.put(token, .{ .email = email_dup, .expiry = expiry });
     persistSessions(allocator);
     return token;
@@ -206,10 +203,10 @@ pub fn createSession(allocator: std.mem.Allocator, project_dir: []const u8, emai
 /// Look up `token` in the persisted session map and return the associated
 /// email if it has not yet expired. Expired entries are evicted as a side
 /// effect; returns `null` for unknown or expired tokens.
-pub fn validateSession(allocator: std.mem.Allocator, project_dir: []const u8, token: []const u8) ?[]const u8 {
+pub fn validateSession(allocator: std.mem.Allocator, auth_dir: []const u8, token: []const u8) ?[]const u8 {
     sessions_mutex.lock();
     defer sessions_mutex.unlock();
-    const map = getSessionMap(allocator, project_dir);
+    const map = getSessionMap(allocator, auth_dir);
     const entry = map.get(token) orelse return null;
     const now = clock.timestamp();
     if (now > entry.expiry) {
@@ -223,10 +220,10 @@ pub fn validateSession(allocator: std.mem.Allocator, project_dir: []const u8, to
 /// Drop `token` from the in-memory map and persist the change to disk so a
 /// stolen cookie cannot reauthenticate. Used by `logoutApi` and during
 /// credential-revocation flows.
-pub fn deleteSession(allocator: std.mem.Allocator, project_dir: []const u8, token: []const u8) void {
+pub fn deleteSession(allocator: std.mem.Allocator, auth_dir: []const u8, token: []const u8) void {
     sessions_mutex.lock();
     defer sessions_mutex.unlock();
-    const map = getSessionMap(allocator, project_dir);
+    const map = getSessionMap(allocator, auth_dir);
     _ = map.fetchRemove(token);
     persistSessions(allocator);
 }
@@ -260,12 +257,12 @@ const StoredCredential = struct {
     created_at: i64 = 0,
 };
 
-fn credentialsPath(allocator: std.mem.Allocator, project_dir: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/auth/credentials.json", .{project_dir});
+fn credentialsPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/credentials.json", .{auth_dir});
 }
 
-fn loadCredentials(allocator: std.mem.Allocator, project_dir: []const u8) ![]StoredCredential {
-    const path = try credentialsPath(allocator, project_dir);
+fn loadCredentials(allocator: std.mem.Allocator, auth_dir: []const u8) ![]StoredCredential {
+    const path = try credentialsPath(allocator, auth_dir);
     defer allocator.free(path);
 
     const file = infra_fs.cwd().openFile(path, .{}) catch return &[_]StoredCredential{};
@@ -282,14 +279,12 @@ fn loadCredentials(allocator: std.mem.Allocator, project_dir: []const u8) ![]Sto
     return parsed.value;
 }
 
-fn saveCredentials(allocator: std.mem.Allocator, project_dir: []const u8, creds: []const StoredCredential) !void {
-    const path = try credentialsPath(allocator, project_dir);
+fn saveCredentials(allocator: std.mem.Allocator, auth_dir: []const u8, creds: []const StoredCredential) !void {
+    const path = try credentialsPath(allocator, auth_dir);
     defer allocator.free(path);
 
     // Ensure auth directory exists
-    const dir_path = try std.fmt.allocPrint(allocator, AUTH_SUBDIR_TEMPLATE, .{project_dir});
-    defer allocator.free(dir_path);
-    try infra_fs.cwd().makePath(dir_path);
+    try infra_fs.cwd().makePath(auth_dir);
 
     // Build JSON string
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -323,12 +318,12 @@ const Invite = struct {
 
 const INVITE_TTL_SECONDS: i64 = SESSION_TTL_SECS;
 
-fn invitesPath(allocator: std.mem.Allocator, project_dir: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/auth/invites.json", .{project_dir});
+fn invitesPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/invites.json", .{auth_dir});
 }
 
-fn loadInvites(allocator: std.mem.Allocator, project_dir: []const u8) ![]Invite {
-    const path = try invitesPath(allocator, project_dir);
+fn loadInvites(allocator: std.mem.Allocator, auth_dir: []const u8) ![]Invite {
+    const path = try invitesPath(allocator, auth_dir);
     defer allocator.free(path);
 
     const file = infra_fs.cwd().openFile(path, .{}) catch return &[_]Invite{};
@@ -339,13 +334,11 @@ fn loadInvites(allocator: std.mem.Allocator, project_dir: []const u8) ![]Invite 
     return parsed.value;
 }
 
-fn saveInvites(allocator: std.mem.Allocator, project_dir: []const u8, invites: []const Invite) !void {
-    const path = try invitesPath(allocator, project_dir);
+fn saveInvites(allocator: std.mem.Allocator, auth_dir: []const u8, invites: []const Invite) !void {
+    const path = try invitesPath(allocator, auth_dir);
     defer allocator.free(path);
 
-    const dir_path = try std.fmt.allocPrint(allocator, AUTH_SUBDIR_TEMPLATE, .{project_dir});
-    defer allocator.free(dir_path);
-    try infra_fs.cwd().makePath(dir_path);
+    try infra_fs.cwd().makePath(auth_dir);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const bw = buf.writer(allocator);
@@ -361,14 +354,14 @@ fn saveInvites(allocator: std.mem.Allocator, project_dir: []const u8, invites: [
     try file.writeAll(buf.items);
 }
 
-fn createInvite(allocator: std.mem.Allocator, project_dir: []const u8, created_by: []const u8, role: []const u8) ![]const u8 {
+fn createInvite(allocator: std.mem.Allocator, auth_dir: []const u8, created_by: []const u8, role: []const u8) ![]const u8 {
     var rand_bytes: [24]u8 = undefined;
     infra_random.bytes(&rand_bytes);
     const hex = std.fmt.bytesToHex(rand_bytes, .lower);
     const token = try allocator.dupe(u8, &hex);
 
     const now = clock.timestamp();
-    const existing = try loadInvites(allocator, project_dir);
+    const existing = try loadInvites(allocator, auth_dir);
     var invites: std.ArrayListUnmanaged(Invite) = .empty;
     for (existing) |inv| {
         if (now < inv.expiry) try invites.append(allocator, inv);
@@ -379,21 +372,21 @@ fn createInvite(allocator: std.mem.Allocator, project_dir: []const u8, created_b
         .expiry = now + INVITE_TTL_SECONDS,
         .role = try allocator.dupe(u8, role),
     });
-    try saveInvites(allocator, project_dir, invites.items);
+    try saveInvites(allocator, auth_dir, invites.items);
     return token;
 }
 
-fn findInvite(allocator: std.mem.Allocator, project_dir: []const u8, token: []const u8) !?Invite {
+fn findInvite(allocator: std.mem.Allocator, auth_dir: []const u8, token: []const u8) !?Invite {
     const now = clock.timestamp();
-    const invites = try loadInvites(allocator, project_dir);
+    const invites = try loadInvites(allocator, auth_dir);
     for (invites) |inv| {
         if (std.mem.eql(u8, inv.token, token) and now < inv.expiry) return inv;
     }
     return null;
 }
 
-fn consumeInvite(allocator: std.mem.Allocator, project_dir: []const u8, token: []const u8) !bool {
-    const invites = try loadInvites(allocator, project_dir);
+fn consumeInvite(allocator: std.mem.Allocator, auth_dir: []const u8, token: []const u8) !bool {
+    const invites = try loadInvites(allocator, auth_dir);
     const now = clock.timestamp();
     var remaining: std.ArrayListUnmanaged(Invite) = .empty;
     var found = false;
@@ -405,7 +398,7 @@ fn consumeInvite(allocator: std.mem.Allocator, project_dir: []const u8, token: [
         if (now < inv.expiry) try remaining.append(allocator, inv);
     }
     if (!found) return false;
-    try saveInvites(allocator, project_dir, remaining.items);
+    try saveInvites(allocator, auth_dir, remaining.items);
     return true;
 }
 
@@ -647,7 +640,7 @@ fn getBearerToken(req: *httpz.Request) ?[]const u8 {
 /// transport for remote Claude Code clients.
 pub fn validateBearerToken(ctx: *Handler, req: *httpz.Request) bool {
     const raw = getBearerToken(req) orelse return false;
-    const tok = oauth_store.validateToken(ctx.allocator, ctx.project_dir, raw) catch return false;
+    const tok = oauth_store.validateToken(ctx.allocator, ctx.auth_dir, raw) catch return false;
     return tok != null;
 }
 
@@ -656,14 +649,14 @@ pub fn validateBearerToken(ctx: *Handler, req: *httpz.Request) bool {
 /// but are scoped to read-only schematic/PCB consumers.
 pub fn validatePluginBearerToken(ctx: *Handler, req: *httpz.Request) bool {
     const raw = getBearerToken(req) orelse return false;
-    return plugin_tokens.validate(ctx.allocator, ctx.project_dir, raw);
+    return plugin_tokens.validate(ctx.allocator, ctx.auth_dir, raw);
 }
 
 /// If the request carries a valid OAuth bearer token, return the token
 /// owner's email. Used by MCP role resolution.
 pub fn getBearerEmail(ctx: *Handler, req: *httpz.Request) ?[]const u8 {
     const raw = getBearerToken(req) orelse return null;
-    const tok = oauth_store.validateToken(ctx.allocator, ctx.project_dir, raw) catch return null;
+    const tok = oauth_store.validateToken(ctx.allocator, ctx.auth_dir, raw) catch return null;
     return if (tok) |t| t.email else null;
 }
 
@@ -676,14 +669,14 @@ pub fn isLocalhostRequest(req: *httpz.Request) bool {
 
 /// Remove all stored passkey credentials for an email, and drop any live
 /// sessions tied to that email. Called by the admin delete-user flow.
-pub fn purgeIdentity(allocator: std.mem.Allocator, project_dir: []const u8, email: []const u8) void {
-    const creds = loadCredentials(allocator, project_dir) catch return;
+pub fn purgeIdentity(allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8) void {
+    const creds = loadCredentials(allocator, auth_dir) catch return;
     var kept: std.ArrayListUnmanaged(StoredCredential) = .empty;
     defer kept.deinit(allocator);
     for (creds) |c| {
         if (!std.mem.eql(u8, c.email, email)) kept.append(allocator, c) catch continue;
     }
-    saveCredentials(allocator, project_dir, kept.items) catch |e| {
+    saveCredentials(allocator, auth_dir, kept.items) catch |e| {
         log.warn("saveCredentials failed: {s}", .{@errorName(e)});
     };
 
@@ -709,7 +702,7 @@ pub fn purgeIdentity(allocator: std.mem.Allocator, project_dir: []const u8, emai
 /// localhost requests without a session return null.
 pub fn currentEmail(ctx: *Handler, req: *httpz.Request) ?[]const u8 {
     if (getSessionToken(req)) |tok| {
-        if (validateSession(ctx.allocator, ctx.project_dir, tok)) |em| return em;
+        if (validateSession(ctx.allocator, ctx.auth_dir, tok)) |em| return em;
     }
     if (isLocalhost(req)) return "dev@localhost";
     return null;
@@ -758,11 +751,11 @@ pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 
     // Check for valid session
     if (getSessionToken(req)) |token| {
-        if (validateSession(ctx.allocator, ctx.project_dir, token) != null) return true;
+        if (validateSession(ctx.allocator, ctx.auth_dir, token) != null) return true;
     }
 
     // Check if credentials exist; if not, redirect to setup
-    const creds = try loadCredentials(ctx.allocator, ctx.project_dir);
+    const creds = try loadCredentials(ctx.allocator, ctx.auth_dir);
     const has_creds = creds.len > 0;
 
     if (isApiPath(req.url.path)) {
@@ -790,7 +783,7 @@ pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// the request via active session (add-device), invite token, or first-
 /// user bootstrap when no credentials exist yet.
 pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const existing = try loadCredentials(ctx.allocator, ctx.project_dir);
+    const existing = try loadCredentials(ctx.allocator, ctx.auth_dir);
     const q = try req.query();
 
     // Determine mode and resolve email.
@@ -799,7 +792,7 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
     var authorized = false;
 
     if (getSessionToken(req)) |tok| {
-        if (validateSession(ctx.allocator, ctx.project_dir, tok)) |session_email| {
+        if (validateSession(ctx.allocator, ctx.auth_dir, tok)) |session_email| {
             email = session_email;
             authorized = true;
         }
@@ -807,7 +800,7 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
 
     if (!authorized) {
         if (q.get("invite")) |inv_token| {
-            if (try findInvite(ctx.allocator, ctx.project_dir, inv_token)) |_| {
+            if (try findInvite(ctx.allocator, ctx.auth_dir, inv_token)) |_| {
                 const body_email = q.get("email") orelse "";
                 if (body_email.len == 0 or std.mem.indexOfScalar(u8, body_email, '@') == null) {
                     res.status = HTTP_BAD_REQUEST;
@@ -1127,7 +1120,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     }
 
     // Determine registration mode and resolve target email.
-    const existing = try loadCredentials(ctx.allocator, ctx.project_dir);
+    const existing = try loadCredentials(ctx.allocator, ctx.auth_dir);
     const body_email_val = root.object.get("email");
     const body_email = if (body_email_val) |ev| (if (ev == .string) ev.string else "") else "";
     const invite_val = root.object.get("invite");
@@ -1139,13 +1132,13 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 
     const session_token_opt = getSessionToken(req);
     if (session_token_opt) |stok| {
-        if (validateSession(ctx.allocator, ctx.project_dir, stok)) |session_email| {
+        if (validateSession(ctx.allocator, ctx.auth_dir, stok)) |session_email| {
             resolved_email = session_email;
         }
     }
 
     if (resolved_email.len == 0 and invite_token.len > 0) {
-        if (try findInvite(ctx.allocator, ctx.project_dir, invite_token)) |inv| {
+        if (try findInvite(ctx.allocator, ctx.auth_dir, invite_token)) |inv| {
             if (body_email.len == 0 or std.mem.indexOfScalar(u8, body_email, '@') == null) {
                 res.status = HTTP_BAD_REQUEST;
                 res.body = ERR_INVALID_EMAIL_JSON;
@@ -1195,7 +1188,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
         .created_at = clock.timestamp(),
     });
 
-    saveCredentials(ctx.allocator, ctx.project_dir, creds.items) catch {
+    saveCredentials(ctx.allocator, ctx.auth_dir, creds.items) catch {
         res.status = HTTP_INTERNAL_ERROR;
         res.body = "{\"error\":\"failed to save credentials\"}";
         res.content_type = .JSON;
@@ -1203,7 +1196,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     };
 
     if (invite_to_consume.len > 0) {
-        _ = consumeInvite(ctx.allocator, ctx.project_dir, invite_to_consume) catch |e| {
+        _ = consumeInvite(ctx.allocator, ctx.auth_dir, invite_to_consume) catch |e| {
             log.warn("consumeInvite failed: {s}", .{@errorName(e)});
         };
     }
@@ -1211,13 +1204,13 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     // Ensure a user record exists with the correct role. ensureUser is a no-op
     // if this email already has a record (e.g. when a logged-in user adds
     // another passkey to their own account).
-    _ = users.ensureUser(ctx.allocator, ctx.project_dir, resolved_email, invited_role) catch |e| {
+    _ = users.ensureUser(ctx.allocator, ctx.auth_dir, resolved_email, invited_role) catch |e| {
         log.warn("ensureUser failed: {s}", .{@errorName(e)});
     };
 
     // Create a session for the newly registered user (unless they already have one)
     if (session_token_opt == null) {
-        const token = try createSession(ctx.allocator, ctx.project_dir, resolved_email);
+        const token = try createSession(ctx.allocator, ctx.auth_dir, resolved_email);
         const cookie = try std.fmt.allocPrint(req.arena, "session={s}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800", .{token});
         res.header(HEADER_SET_COOKIE, cookie);
     }
@@ -1241,7 +1234,7 @@ pub fn loginChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
     const q = try req.query();
     const email_filter = q.get("email") orelse "";
 
-    const creds = try loadCredentials(ctx.allocator, ctx.project_dir);
+    const creds = try loadCredentials(ctx.allocator, ctx.auth_dir);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(req.arena);
@@ -1409,7 +1402,7 @@ pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     }
 
     // Find the matching credential
-    const creds = try loadCredentials(ctx.allocator, ctx.project_dir);
+    const creds = try loadCredentials(ctx.allocator, ctx.auth_dir);
     var matching_cred: ?StoredCredential = null;
     for (creds) |cred| {
         if (std.mem.eql(u8, cred.id, cred_id)) {
@@ -1494,7 +1487,7 @@ pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
     // Success - create session tied to the credential's email
     const session_email = if (cred.email.len > 0) cred.email else "";
-    const token = try createSession(ctx.allocator, ctx.project_dir, session_email);
+    const token = try createSession(ctx.allocator, ctx.auth_dir, session_email);
     const cookie = try std.fmt.allocPrint(req.arena, "session={s}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800", .{token});
     res.header(HEADER_SET_COOKIE, cookie);
 
@@ -1629,7 +1622,7 @@ pub fn loginPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerEr
 /// when at least one credential already exists; otherwise renders the
 /// passkey-registration UI for the initial admin account.
 pub fn setupPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const existing = try loadCredentials(ctx.allocator, ctx.project_dir);
+    const existing = try loadCredentials(ctx.allocator, ctx.auth_dir);
     if (existing.len > 0) {
         res.status = 303;
         res.header(HEADER_LOCATION, PATH_AUTH_LOGIN);
@@ -1722,7 +1715,7 @@ fn requireSession(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) ?[]c
         res.body = "{\"error\":\"not signed in\"}";
         return null;
     };
-    const email = validateSession(ctx.allocator, ctx.project_dir, tok) orelse {
+    const email = validateSession(ctx.allocator, ctx.auth_dir, tok) orelse {
         res.status = 401;
         res.content_type = .JSON;
         res.body = "{\"error\":\"invalid session\"}";
@@ -1736,7 +1729,7 @@ fn requireSession(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) ?[]c
 /// `Max-Age=0`).
 pub fn logoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     if (getSessionToken(req)) |tok| {
-        deleteSession(ctx.allocator, ctx.project_dir, tok);
+        deleteSession(ctx.allocator, ctx.auth_dir, tok);
     }
     res.header(HEADER_SET_COOKIE, "session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
     res.content_type = .JSON;
@@ -1749,7 +1742,7 @@ pub fn logoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
 pub fn listCredentialsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const email = requireSession(ctx, req, res) orelse return;
 
-    const creds = try loadCredentials(ctx.allocator, ctx.project_dir);
+    const creds = try loadCredentials(ctx.allocator, ctx.auth_dir);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(req.arena);
@@ -1799,7 +1792,7 @@ pub fn deleteCredentialApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
     }
     const target_id = id_val.string;
 
-    const existing = try loadCredentials(ctx.allocator, ctx.project_dir);
+    const existing = try loadCredentials(ctx.allocator, ctx.auth_dir);
 
     var user_count: usize = 0;
     for (existing) |c| {
@@ -1829,7 +1822,7 @@ pub fn deleteCredentialApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
         return;
     }
 
-    saveCredentials(ctx.allocator, ctx.project_dir, kept.items) catch {
+    saveCredentials(ctx.allocator, ctx.auth_dir, kept.items) catch {
         res.status = HTTP_INTERNAL_ERROR;
         res.content_type = .JSON;
         res.body = "{\"error\":\"failed to save\"}";
@@ -1852,7 +1845,7 @@ pub fn createInviteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     };
 
     // Admin-only.
-    if (!users.getRole(ctx.allocator, ctx.project_dir, email).canAdmin()) {
+    if (!users.getRole(ctx.allocator, ctx.auth_dir, email).canAdmin()) {
         res.status = 403;
         res.content_type = .JSON;
         res.body = "{\"error\":\"admin role required\"}";
@@ -1874,7 +1867,7 @@ pub fn createInviteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         }
     }
 
-    const token = try createInvite(ctx.allocator, ctx.project_dir, email, role_str);
+    const token = try createInvite(ctx.allocator, ctx.auth_dir, email, role_str);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(req.arena);
@@ -1902,7 +1895,7 @@ pub fn invitePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
         return;
     }
 
-    const found = try findInvite(ctx.allocator, ctx.project_dir, token);
+    const found = try findInvite(ctx.allocator, ctx.auth_dir, token);
     if (found == null) {
         res.content_type = .HTML;
         res.body =
@@ -2011,7 +2004,7 @@ pub fn managePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
         res.header(HEADER_LOCATION, PATH_AUTH_LOGIN);
         return;
     };
-    if (validateSession(ctx.allocator, ctx.project_dir, tok) == null) {
+    if (validateSession(ctx.allocator, ctx.auth_dir, tok) == null) {
         res.status = 303;
         res.header(HEADER_LOCATION, PATH_AUTH_LOGIN);
         return;

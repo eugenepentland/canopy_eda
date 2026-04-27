@@ -44,10 +44,10 @@ pub const Context = struct {
 
 fn resolveRole(ctx: *server_mod.Handler, req: *httpz.Request) users.Role {
     // Bearer-token path: look up the token's email.
-    if (auth.getBearerEmail(ctx, req)) |em| return users.getRole(ctx.allocator, ctx.project_dir, em);
+    if (auth.getBearerEmail(ctx, req)) |em| return users.getRole(ctx.allocator, ctx.auth_dir, em);
     // Session path: look up the session's email.
     if (auth.getSessionToken(req)) |tok| {
-        if (auth.validateSession(ctx.allocator, ctx.project_dir, tok)) |em| return users.getRole(ctx.allocator, ctx.project_dir, em);
+        if (auth.validateSession(ctx.allocator, ctx.auth_dir, tok)) |em| return users.getRole(ctx.allocator, ctx.auth_dir, em);
     }
     // Localhost dev bypass — auth middleware already let us through.
     if (auth.isLocalhostRequest(req)) return .admin;
@@ -316,7 +316,7 @@ pub const Client = struct {
 pub fn upgrade(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const email = blk: {
         if (auth.getSessionToken(req)) |tok| {
-            if (auth.validateSession(ctx.allocator, ctx.project_dir, tok)) |em| break :blk em;
+            if (auth.validateSession(ctx.allocator, ctx.auth_dir, tok)) |em| break :blk em;
         }
         break :blk "";
     };

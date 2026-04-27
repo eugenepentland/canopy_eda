@@ -98,6 +98,15 @@ pub var layout_data: ?[]const u8 = null;
 pub const Handler = struct {
     allocator: std.mem.Allocator,
     project_dir: []const u8,
+    /// Directory holding the auth state files (`credentials.json`,
+    /// `sessions.json`, `users.json`, `invites.json`, `oauth_clients.json`,
+    /// `oauth_tokens.json`, `plugin_tokens.json`). Defaults to
+    /// `<project_dir>/auth` when no explicit override is supplied — the
+    /// historic location. Override via `eda serve --auth-dir <path>` or the
+    /// `EDA_AUTH_DIR` env var so multiple worktrees / project checkouts
+    /// share one passkey + session store and a passkey registered in one
+    /// worktree keeps working in the others.
+    auth_dir: []const u8,
 
     pub const WebsocketHandler = mcp.Client;
 
@@ -120,9 +129,16 @@ pub const Handler = struct {
 
 /// Bring up the EDA web server on `port`: registers every page, JSON API,
 /// auth, OAuth, and MCP route against an httpz instance, then blocks on
-/// `server.listen()`. Project files are served out of `project_dir`.
-pub fn serve(allocator: std.mem.Allocator, port: u16, project_dir: []const u8) ServeError!void {
-    var handler = Handler{ .allocator = allocator, .project_dir = project_dir };
+/// `server.listen()`. Project files are served out of `project_dir`; auth
+/// state lives in `auth_dir` (or `<project_dir>/auth` when null).
+pub fn serve(
+    allocator: std.mem.Allocator,
+    port: u16,
+    project_dir: []const u8,
+    auth_dir: ?[]const u8,
+) ServeError!void {
+    const effective_auth: []const u8 = if (auth_dir) |d| d else try std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir});
+    var handler = Handler{ .allocator = allocator, .project_dir = project_dir, .auth_dir = effective_auth };
     var server = try httpz.Server(*Handler).init(allocator, .{
         .address = .all(port),
         .request = .{

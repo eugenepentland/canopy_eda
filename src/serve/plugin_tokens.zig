@@ -15,30 +15,28 @@ pub const Token = struct {
 
 var mu: std.Thread.Mutex = .{};
 var tokens_list: std.ArrayListUnmanaged(Token) = .empty;
-var loaded_project_dir: ?[]const u8 = null;
+var loaded_auth_dir: ?[]const u8 = null;
 
-fn tokensPath(allocator: std.mem.Allocator, project_dir: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/auth/plugin_tokens.json", .{project_dir});
+fn tokensPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/plugin_tokens.json", .{auth_dir});
 }
 
-fn ensureAuthDir(project_dir: []const u8) void {
-    var buf: [512]u8 = undefined;
-    const dir = std.fmt.bufPrint(&buf, "{s}/auth", .{project_dir}) catch return;
-    infra_fs.cwd().makePath(dir) catch |e| {
-        log.warn("makePath {s} failed: {s}", .{ dir, @errorName(e) });
+fn ensureAuthDir(auth_dir: []const u8) void {
+    infra_fs.cwd().makePath(auth_dir) catch |e| {
+        log.warn("makePath {s} failed: {s}", .{ auth_dir, @errorName(e) });
     };
 }
 
-fn ensureLoaded(allocator: std.mem.Allocator, project_dir: []const u8) void {
-    if (loaded_project_dir) |d| {
-        if (std.mem.eql(u8, d, project_dir)) return;
+fn ensureLoaded(allocator: std.mem.Allocator, auth_dir: []const u8) void {
+    if (loaded_auth_dir) |d| {
+        if (std.mem.eql(u8, d, auth_dir)) return;
     }
-    loaded_project_dir = project_dir;
-    load(allocator, project_dir);
+    loaded_auth_dir = auth_dir;
+    load(allocator, auth_dir);
 }
 
-fn load(allocator: std.mem.Allocator, project_dir: []const u8) void {
-    const path = tokensPath(allocator, project_dir) catch return;
+fn load(allocator: std.mem.Allocator, auth_dir: []const u8) void {
+    const path = tokensPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
     const data = infra_fs.cwd().readFileAlloc(allocator, path, 1 * 1024 * 1024) catch return;
     const Entry = struct {
@@ -57,9 +55,9 @@ fn load(allocator: std.mem.Allocator, project_dir: []const u8) void {
     }
 }
 
-fn save(allocator: std.mem.Allocator, project_dir: []const u8) void {
-    ensureAuthDir(project_dir);
-    const path = tokensPath(allocator, project_dir) catch return;
+fn save(allocator: std.mem.Allocator, auth_dir: []const u8) void {
+    ensureAuthDir(auth_dir);
+    const path = tokensPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
     const file = infra_fs.cwd().createFile(path, .{}) catch return;
     defer file.close();
@@ -81,10 +79,10 @@ fn save(allocator: std.mem.Allocator, project_dir: []const u8) void {
 
 /// Mint a new plugin token. Returns the raw token string (prefix `eda_p_`) —
 /// shown once to the user and never stored. Caller owns the returned memory.
-pub fn mint(allocator: std.mem.Allocator, project_dir: []const u8, label: []const u8) std.mem.Allocator.Error![]const u8 {
+pub fn mint(allocator: std.mem.Allocator, auth_dir: []const u8, label: []const u8) std.mem.Allocator.Error![]const u8 {
     mu.lock();
     defer mu.unlock();
-    ensureLoaded(allocator, project_dir);
+    ensureLoaded(allocator, auth_dir);
 
     const suffix = try randomHex(allocator, 32);
     defer allocator.free(suffix);
@@ -95,16 +93,16 @@ pub fn mint(allocator: std.mem.Allocator, project_dir: []const u8, label: []cons
         .label = try allocator.dupe(u8, label),
         .created_at = clock.timestamp(),
     });
-    save(allocator, project_dir);
+    save(allocator, auth_dir);
     return raw;
 }
 
 /// Returns true if `raw` matches a stored plugin token. Tokens do not expire;
 /// revoke by deleting from `plugin_tokens.json`.
-pub fn validate(allocator: std.mem.Allocator, project_dir: []const u8, raw: []const u8) bool {
+pub fn validate(allocator: std.mem.Allocator, auth_dir: []const u8, raw: []const u8) bool {
     mu.lock();
     defer mu.unlock();
-    ensureLoaded(allocator, project_dir);
+    ensureLoaded(allocator, auth_dir);
     const hash = sha256Hex(allocator, raw) catch return false;
     defer allocator.free(hash);
     for (tokens_list.items) |t| {

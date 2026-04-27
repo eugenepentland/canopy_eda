@@ -53,36 +53,34 @@ var mu = std.Thread.Mutex{};
 var clients_list: std.ArrayListUnmanaged(Client) = .empty;
 var tokens_list: std.ArrayListUnmanaged(Token) = .empty;
 var codes_map: ?std.StringHashMap(AuthCode) = null;
-var loaded_project_dir: ?[]const u8 = null;
+var loaded_auth_dir: ?[]const u8 = null;
 
-fn ensureLoaded(allocator: std.mem.Allocator, project_dir: []const u8) void {
-    if (loaded_project_dir) |d| {
-        if (std.mem.eql(u8, d, project_dir)) return;
+fn ensureLoaded(allocator: std.mem.Allocator, auth_dir: []const u8) void {
+    if (loaded_auth_dir) |d| {
+        if (std.mem.eql(u8, d, auth_dir)) return;
     }
-    loaded_project_dir = project_dir;
-    loadClients(allocator, project_dir);
-    loadTokens(allocator, project_dir);
+    loaded_auth_dir = auth_dir;
+    loadClients(allocator, auth_dir);
+    loadTokens(allocator, auth_dir);
     if (codes_map == null) codes_map = std.StringHashMap(AuthCode).init(allocator);
 }
 
-fn clientsPath(allocator: std.mem.Allocator, project_dir: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/auth/oauth_clients.json", .{project_dir});
+fn clientsPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/oauth_clients.json", .{auth_dir});
 }
 
-fn tokensPath(allocator: std.mem.Allocator, project_dir: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/auth/oauth_tokens.json", .{project_dir});
+fn tokensPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/oauth_tokens.json", .{auth_dir});
 }
 
-fn ensureAuthDir(project_dir: []const u8) void {
-    var buf: [512]u8 = undefined;
-    const dir = std.fmt.bufPrint(&buf, "{s}/auth", .{project_dir}) catch return;
-    infra_fs.cwd().makePath(dir) catch |e| {
-        log.warn("makePath {s} failed: {s}", .{ dir, @errorName(e) });
+fn ensureAuthDir(auth_dir: []const u8) void {
+    infra_fs.cwd().makePath(auth_dir) catch |e| {
+        log.warn("makePath {s} failed: {s}", .{ auth_dir, @errorName(e) });
     };
 }
 
-fn loadClients(allocator: std.mem.Allocator, project_dir: []const u8) void {
-    const path = clientsPath(allocator, project_dir) catch return;
+fn loadClients(allocator: std.mem.Allocator, auth_dir: []const u8) void {
+    const path = clientsPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
     const data = infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch return;
     const Entry = struct {
@@ -109,9 +107,9 @@ fn loadClients(allocator: std.mem.Allocator, project_dir: []const u8) void {
     }
 }
 
-fn saveClients(allocator: std.mem.Allocator, project_dir: []const u8) void {
-    ensureAuthDir(project_dir);
-    const path = clientsPath(allocator, project_dir) catch return;
+fn saveClients(allocator: std.mem.Allocator, auth_dir: []const u8) void {
+    ensureAuthDir(auth_dir);
+    const path = clientsPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
     const file = infra_fs.cwd().createFile(path, .{}) catch return;
     defer file.close();
@@ -131,8 +129,8 @@ fn saveClients(allocator: std.mem.Allocator, project_dir: []const u8) void {
     file.writeAll(bw.items) catch return;
 }
 
-fn loadTokens(allocator: std.mem.Allocator, project_dir: []const u8) void {
-    const path = tokensPath(allocator, project_dir) catch return;
+fn loadTokens(allocator: std.mem.Allocator, auth_dir: []const u8) void {
+    const path = tokensPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
     const data = infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch return;
     const Entry = struct {
@@ -157,9 +155,9 @@ fn loadTokens(allocator: std.mem.Allocator, project_dir: []const u8) void {
     }
 }
 
-fn saveTokens(allocator: std.mem.Allocator, project_dir: []const u8) void {
-    ensureAuthDir(project_dir);
-    const path = tokensPath(allocator, project_dir) catch return;
+fn saveTokens(allocator: std.mem.Allocator, auth_dir: []const u8) void {
+    ensureAuthDir(auth_dir);
+    const path = tokensPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
     const file = infra_fs.cwd().createFile(path, .{}) catch return;
     defer file.close();
@@ -194,14 +192,14 @@ pub const NewClientResult = struct {
 /// plaintext secret for one-time display in the account UI.
 pub fn createClient(
     allocator: std.mem.Allocator,
-    project_dir: []const u8,
+    auth_dir: []const u8,
     name: []const u8,
     email: []const u8,
     redirect_uri: []const u8,
 ) std.mem.Allocator.Error!NewClientResult {
     mu.lock();
     defer mu.unlock();
-    ensureLoaded(allocator, project_dir);
+    ensureLoaded(allocator, auth_dir);
 
     const id_suffix = try randomHex(allocator, 16);
     defer allocator.free(id_suffix);
@@ -223,17 +221,17 @@ pub fn createClient(
         .revoked = false,
     });
 
-    saveClients(allocator, project_dir);
+    saveClients(allocator, auth_dir);
     return .{ .id = id, .secret = secret };
 }
 
 /// Return the active client with the given id, or null when no match
 /// exists or the row has been revoked. Used during the authorize flow to
 /// confirm the client_id parameter is one we know about.
-pub fn findClient(allocator: std.mem.Allocator, project_dir: []const u8, id: []const u8) ?Client {
+pub fn findClient(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8) ?Client {
     mu.lock();
     defer mu.unlock();
-    ensureLoaded(allocator, project_dir);
+    ensureLoaded(allocator, auth_dir);
     for (clients_list.items) |c| {
         if (c.revoked) continue;
         if (std.mem.eql(u8, c.id, id)) return c;
@@ -244,8 +242,8 @@ pub fn findClient(allocator: std.mem.Allocator, project_dir: []const u8, id: []c
 /// Look up the client and constant-compare its stored hash against
 /// `sha256(secret)`. Returns the client record on a match, null on
 /// unknown/revoked id or wrong secret. Called from the token endpoint.
-pub fn verifyClientSecret(allocator: std.mem.Allocator, project_dir: []const u8, id: []const u8, secret: []const u8) std.mem.Allocator.Error!?Client {
-    const client = findClient(allocator, project_dir, id) orelse return null;
+pub fn verifyClientSecret(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, secret: []const u8) std.mem.Allocator.Error!?Client {
+    const client = findClient(allocator, auth_dir, id) orelse return null;
     const hash = try sha256Hex(allocator, secret);
     defer allocator.free(hash);
     if (!std.mem.eql(u8, hash, client.secret_hash)) return null;
@@ -255,10 +253,10 @@ pub fn verifyClientSecret(allocator: std.mem.Allocator, project_dir: []const u8,
 /// Mark a single client as revoked, but only when `owner_email` matches —
 /// users can't accidentally (or maliciously) revoke another user's client.
 /// Returns true when a row was modified.
-pub fn revokeClient(allocator: std.mem.Allocator, project_dir: []const u8, id: []const u8, owner_email: []const u8) bool {
+pub fn revokeClient(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, owner_email: []const u8) bool {
     mu.lock();
     defer mu.unlock();
-    ensureLoaded(allocator, project_dir);
+    ensureLoaded(allocator, auth_dir);
     var changed = false;
     for (clients_list.items) |*c| {
         if (std.mem.eql(u8, c.id, id) and std.mem.eql(u8, c.email, owner_email)) {
@@ -267,17 +265,17 @@ pub fn revokeClient(allocator: std.mem.Allocator, project_dir: []const u8, id: [
             break;
         }
     }
-    if (changed) saveClients(allocator, project_dir);
+    if (changed) saveClients(allocator, auth_dir);
     return changed;
 }
 
 /// Mass-revoke every active client owned by `owner_email`. Called by the
 /// admin user-deletion path so a removed user can't keep using cached
 /// `client_id`/`client_secret` pairs from Claude Code.
-pub fn revokeAllClientsForEmail(allocator: std.mem.Allocator, project_dir: []const u8, owner_email: []const u8) void {
+pub fn revokeAllClientsForEmail(allocator: std.mem.Allocator, auth_dir: []const u8, owner_email: []const u8) void {
     mu.lock();
     defer mu.unlock();
-    ensureLoaded(allocator, project_dir);
+    ensureLoaded(allocator, auth_dir);
     var changed = false;
     for (clients_list.items) |*c| {
         if (!c.revoked and std.mem.eql(u8, c.email, owner_email)) {
@@ -285,15 +283,15 @@ pub fn revokeAllClientsForEmail(allocator: std.mem.Allocator, project_dir: []con
             changed = true;
         }
     }
-    if (changed) saveClients(allocator, project_dir);
+    if (changed) saveClients(allocator, auth_dir);
 }
 
 /// Return every non-revoked client owned by `owner_email`. Backs the
 /// account page's "Your Claude Code clients" list. Caller owns the slice.
-pub fn listClientsByEmail(allocator: std.mem.Allocator, project_dir: []const u8, owner_email: []const u8) std.mem.Allocator.Error![]Client {
+pub fn listClientsByEmail(allocator: std.mem.Allocator, auth_dir: []const u8, owner_email: []const u8) std.mem.Allocator.Error![]Client {
     mu.lock();
     defer mu.unlock();
-    ensureLoaded(allocator, project_dir);
+    ensureLoaded(allocator, auth_dir);
     var out: std.ArrayListUnmanaged(Client) = .empty;
     for (clients_list.items) |c| {
         if (c.revoked) continue;
@@ -309,7 +307,7 @@ pub fn listClientsByEmail(allocator: std.mem.Allocator, project_dir: []const u8,
 /// `/oauth/authorize`. Bound to the PKCE `code_challenge`.
 pub fn issueCode(
     allocator: std.mem.Allocator,
-    project_dir: []const u8,
+    auth_dir: []const u8,
     client_id: []const u8,
     redirect_uri: []const u8,
     email: []const u8,
@@ -318,7 +316,7 @@ pub fn issueCode(
 ) std.mem.Allocator.Error![]const u8 {
     mu.lock();
     defer mu.unlock();
-    ensureLoaded(allocator, project_dir);
+    ensureLoaded(allocator, auth_dir);
 
     const code = try randomHex(allocator, 32);
     const entry = AuthCode{
@@ -337,10 +335,10 @@ pub fn issueCode(
 /// Single-use lookup: pop the AuthCode out of the in-memory map and
 /// return it (only when not yet expired). The code is gone after this
 /// call — replays at the token endpoint return null.
-pub fn consumeCode(allocator: std.mem.Allocator, project_dir: []const u8, code: []const u8) ?AuthCode {
+pub fn consumeCode(allocator: std.mem.Allocator, auth_dir: []const u8, code: []const u8) ?AuthCode {
     mu.lock();
     defer mu.unlock();
-    ensureLoaded(allocator, project_dir);
+    ensureLoaded(allocator, auth_dir);
     const entry = codes_map.?.fetchRemove(code) orelse return null;
     if (entry.value.expires_at < clock.timestamp()) return null;
     return entry.value;
@@ -353,14 +351,14 @@ pub fn consumeCode(allocator: std.mem.Allocator, project_dir: []const u8, code: 
 /// `/oauth/token` endpoint.
 pub fn issueToken(
     allocator: std.mem.Allocator,
-    project_dir: []const u8,
+    auth_dir: []const u8,
     client_id: []const u8,
     email: []const u8,
     scope: []const u8,
 ) std.mem.Allocator.Error![]const u8 {
     mu.lock();
     defer mu.unlock();
-    ensureLoaded(allocator, project_dir);
+    ensureLoaded(allocator, auth_dir);
 
     const raw_suffix = try randomHex(allocator, 32);
     defer allocator.free(raw_suffix);
@@ -374,17 +372,17 @@ pub fn issueToken(
         .scope = try allocator.dupe(u8, scope),
         .expires_at = clock.timestamp() + ACCESS_TOKEN_TTL_SECS,
     });
-    saveTokens(allocator, project_dir);
+    saveTokens(allocator, auth_dir);
     return raw;
 }
 
 /// Return the Token record matching `sha256(raw)` when it has not
 /// expired and its owning client is still active. Used by the auth
 /// middleware on every request that carries a Bearer header.
-pub fn validateToken(allocator: std.mem.Allocator, project_dir: []const u8, raw: []const u8) std.mem.Allocator.Error!?Token {
+pub fn validateToken(allocator: std.mem.Allocator, auth_dir: []const u8, raw: []const u8) std.mem.Allocator.Error!?Token {
     mu.lock();
     defer mu.unlock();
-    ensureLoaded(allocator, project_dir);
+    ensureLoaded(allocator, auth_dir);
     const hash = try sha256Hex(allocator, raw);
     defer allocator.free(hash);
     const now = clock.timestamp();

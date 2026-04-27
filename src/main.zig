@@ -34,6 +34,14 @@ fn hasFlag(args: [][:0]u8, flag: []const u8) bool {
     return false;
 }
 
+/// Read `EDA_AUTH_DIR` from the environment so multiple worktrees / project
+/// checkouts can share one passkey + session store. Returns `null` when the
+/// env var is unset; the caller falls back to the `<project_dir>/auth`
+/// default. Caller owns any returned slice (allocator-owned dupe).
+fn readAuthDirEnv(allocator: std.mem.Allocator) ?[]const u8 {
+    return std.process.getEnvVarOwned(allocator, "EDA_AUTH_DIR") catch null;
+}
+
 /// CLI entry point: parses `argv[1]` as the subcommand name and dispatches
 /// to the matching `cmd*` handler in `commands.zig` (or one of the local
 /// `convert-*` / `parse` / `mint-plugin-token` helpers). Prints the usage
@@ -107,11 +115,15 @@ pub fn main() !void {
             std.fmt.parseInt(u16, p, PARSE_PORT_RADIX) catch DEFAULT_SERVE_PORT
         else
             DEFAULT_SERVE_PORT;
-        try serve_mod.serve(allocator, port, project_dir);
+        const auth_dir_override = optionalArg(args[2..], "--auth-dir") orelse readAuthDirEnv(allocator);
+        try serve_mod.serve(allocator, port, project_dir, auth_dir_override);
     } else if (std.mem.eql(u8, command, "mint-plugin-token")) {
         const project_dir = optionalArg(args[2..], "--project-dir") orelse ".";
         const label = optionalArg(args[2..], "--label") orelse "plugin";
-        const raw = try plugin_tokens.mint(allocator, project_dir, label);
+        const auth_dir = optionalArg(args[2..], "--auth-dir") orelse
+            readAuthDirEnv(allocator) orelse
+            try std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir});
+        const raw = try plugin_tokens.mint(allocator, auth_dir, label);
         defer allocator.free(raw);
         const stdout = std.fs.File.stdout();
         try stdout.writeAll(raw);

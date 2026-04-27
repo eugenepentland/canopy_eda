@@ -92,7 +92,7 @@ pub fn authorizePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     if (code_challenge.len == 0) return badRequest(res, "missing code_challenge (PKCE required)");
     if (!std.mem.eql(u8, code_challenge_method, "S256")) return badRequest(res, "code_challenge_method must be \"S256\"");
 
-    const client = store.findClient(ctx.allocator, ctx.project_dir, client_id) orelse return badRequest(res, "unknown client_id");
+    const client = store.findClient(ctx.allocator, ctx.auth_dir, client_id) orelse return badRequest(res, "unknown client_id");
     if (!std.mem.eql(u8, client.redirect_uri, redirect_uri)) {
         return badRequest(res, "redirect_uri does not match registered URI");
     }
@@ -162,10 +162,10 @@ pub fn authorizeApprove(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     const code_challenge = form.get("code_challenge") orelse return badRequest(res, "missing code_challenge");
     const scope = form.get("scope") orelse "mcp";
 
-    const client = store.findClient(ctx.allocator, ctx.project_dir, client_id) orelse return badRequest(res, "unknown client_id");
+    const client = store.findClient(ctx.allocator, ctx.auth_dir, client_id) orelse return badRequest(res, "unknown client_id");
     if (!std.mem.eql(u8, client.redirect_uri, redirect_uri)) return badRequest(res, "redirect_uri mismatch");
 
-    const code = try store.issueCode(ctx.allocator, ctx.project_dir, client_id, redirect_uri, email, code_challenge, scope);
+    const code = try store.issueCode(ctx.allocator, ctx.auth_dir, client_id, redirect_uri, email, code_challenge, scope);
 
     const separator: []const u8 = if (std.mem.indexOfScalar(u8, redirect_uri, '?') == null) "?" else "&";
     const location = try std.fmt.allocPrint(req.arena, "{s}{s}code={s}&state={s}", .{ redirect_uri, separator, code, state });
@@ -189,10 +189,10 @@ pub fn tokenEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const client_secret = form.get("client_secret") orelse return tokenError(req, res, ERR_INVALID_REQUEST, "missing client_secret");
     const code_verifier = form.get("code_verifier") orelse return tokenError(req, res, ERR_INVALID_REQUEST, "missing code_verifier");
 
-    const verified_client = try store.verifyClientSecret(ctx.allocator, ctx.project_dir, client_id, client_secret);
+    const verified_client = try store.verifyClientSecret(ctx.allocator, ctx.auth_dir, client_id, client_secret);
     if (verified_client == null) return tokenError(req, res, "invalid_client", "bad client_id or client_secret");
 
-    const auth_code = store.consumeCode(ctx.allocator, ctx.project_dir, code) orelse
+    const auth_code = store.consumeCode(ctx.allocator, ctx.auth_dir, code) orelse
         return tokenError(req, res, ERR_INVALID_GRANT, "code expired or already used");
     if (!std.mem.eql(u8, auth_code.client_id, client_id)) return tokenError(req, res, ERR_INVALID_GRANT, "code was issued to a different client");
     if (!std.mem.eql(u8, auth_code.redirect_uri, redirect_uri)) return tokenError(req, res, ERR_INVALID_GRANT, "redirect_uri mismatch");
@@ -200,7 +200,7 @@ pub fn tokenEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const pkce_ok = try store.verifyPkce(ctx.allocator, code_verifier, auth_code.code_challenge);
     if (!pkce_ok) return tokenError(req, res, ERR_INVALID_GRANT, "PKCE verification failed");
 
-    const access_token = try store.issueToken(ctx.allocator, ctx.project_dir, client_id, auth_code.email, auth_code.scope);
+    const access_token = try store.issueToken(ctx.allocator, ctx.auth_dir, client_id, auth_code.email, auth_code.scope);
 
     res.content_type = .JSON;
     res.header("cache-control", "no-store");

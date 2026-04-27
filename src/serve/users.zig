@@ -48,31 +48,29 @@ pub const User = struct {
 
 var mu = std.Thread.Mutex{};
 var users_list: std.ArrayListUnmanaged(User) = .empty;
-var loaded_project_dir: ?[]const u8 = null;
+var loaded_auth_dir: ?[]const u8 = null;
 
-fn usersPath(allocator: std.mem.Allocator, project_dir: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/auth/users.json", .{project_dir});
+fn usersPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/users.json", .{auth_dir});
 }
 
-fn ensureAuthDir(project_dir: []const u8) void {
-    var buf: [512]u8 = undefined;
-    const dir = std.fmt.bufPrint(&buf, "{s}/auth", .{project_dir}) catch return;
-    infra_fs.cwd().makePath(dir) catch |e| {
-        log.warn("makePath {s} failed: {s}", .{ dir, @errorName(e) });
+fn ensureAuthDir(auth_dir: []const u8) void {
+    infra_fs.cwd().makePath(auth_dir) catch |e| {
+        log.warn("makePath {s} failed: {s}", .{ auth_dir, @errorName(e) });
     };
 }
 
-fn ensureLoaded(allocator: std.mem.Allocator, project_dir: []const u8) void {
-    if (loaded_project_dir) |d| {
-        if (std.mem.eql(u8, d, project_dir)) return;
+fn ensureLoaded(allocator: std.mem.Allocator, auth_dir: []const u8) void {
+    if (loaded_auth_dir) |d| {
+        if (std.mem.eql(u8, d, auth_dir)) return;
     }
-    loaded_project_dir = project_dir;
-    loadUsers(allocator, project_dir);
-    backfillFromCredentials(allocator, project_dir);
+    loaded_auth_dir = auth_dir;
+    loadUsers(allocator, auth_dir);
+    backfillFromCredentials(allocator, auth_dir);
 }
 
-fn loadUsers(allocator: std.mem.Allocator, project_dir: []const u8) void {
-    const path = usersPath(allocator, project_dir) catch return;
+fn loadUsers(allocator: std.mem.Allocator, auth_dir: []const u8) void {
+    const path = usersPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
     const data = infra_fs.cwd().readFileAlloc(allocator, path, 1 * 1024 * 1024) catch return;
     const Entry = struct { email: []const u8, role: []const u8, created_at: i64 };
@@ -88,9 +86,9 @@ fn loadUsers(allocator: std.mem.Allocator, project_dir: []const u8) void {
     }
 }
 
-fn saveUsers(allocator: std.mem.Allocator, project_dir: []const u8) void {
-    ensureAuthDir(project_dir);
-    const path = usersPath(allocator, project_dir) catch return;
+fn saveUsers(allocator: std.mem.Allocator, auth_dir: []const u8) void {
+    ensureAuthDir(auth_dir);
+    const path = usersPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
     const file = infra_fs.cwd().createFile(path, .{}) catch return;
     defer file.close();
@@ -109,8 +107,8 @@ fn saveUsers(allocator: std.mem.Allocator, project_dir: []const u8) void {
 /// On first migration (users.json doesn't exist yet but credentials do),
 /// seed user records from credentials — the first credential's email becomes
 /// admin, the rest become writer.
-fn backfillFromCredentials(allocator: std.mem.Allocator, project_dir: []const u8) void {
-    const path = std.fmt.allocPrint(allocator, "{s}/auth/credentials.json", .{project_dir}) catch return;
+fn backfillFromCredentials(allocator: std.mem.Allocator, auth_dir: []const u8) void {
+    const path = std.fmt.allocPrint(allocator, "{s}/credentials.json", .{auth_dir}) catch return;
     defer allocator.free(path);
     const data = infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch return;
     const Cred = struct { email: []const u8, created_at: i64 };
@@ -129,7 +127,7 @@ fn backfillFromCredentials(allocator: std.mem.Allocator, project_dir: []const u8
         }) catch continue;
         dirty = true;
     }
-    if (dirty) saveUsers(allocator, project_dir);
+    if (dirty) saveUsers(allocator, auth_dir);
 }
 
 fn indexOfEmailLocked(email: []const u8) ?usize {
@@ -145,13 +143,13 @@ fn indexOfEmailLocked(email: []const u8) ?usize {
 /// the role actually recorded (either the new one or the existing one).
 pub fn ensureUser(
     allocator: std.mem.Allocator,
-    project_dir: []const u8,
+    auth_dir: []const u8,
     email: []const u8,
     requested_role: Role,
 ) std.mem.Allocator.Error!Role {
     mu.lock();
     defer mu.unlock();
-    ensureLoaded(allocator, project_dir);
+    ensureLoaded(allocator, auth_dir);
 
     if (indexOfEmailLocked(email)) |idx| return users_list.items[idx].role;
 
@@ -162,17 +160,17 @@ pub fn ensureUser(
         .role = role,
         .created_at = clock.timestamp(),
     });
-    saveUsers(allocator, project_dir);
+    saveUsers(allocator, auth_dir);
     return role;
 }
 
 /// Resolve a user's role, defaulting to reader for unknown users. For
 /// localhost dev identity we return admin so dev flows are unblocked.
-pub fn getRole(allocator: std.mem.Allocator, project_dir: []const u8, email: []const u8) Role {
+pub fn getRole(allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8) Role {
     if (std.mem.eql(u8, email, "dev@localhost")) return .admin;
     mu.lock();
     defer mu.unlock();
-    ensureLoaded(allocator, project_dir);
+    ensureLoaded(allocator, auth_dir);
     if (indexOfEmailLocked(email)) |idx| return users_list.items[idx].role;
     return .reader;
 }
@@ -180,10 +178,10 @@ pub fn getRole(allocator: std.mem.Allocator, project_dir: []const u8, email: []c
 /// Return a duped slice of every registered user record. Used by the
 /// admin page to render the user-management table; caller owns the slice
 /// (the inner `email` strings are still backed by the loaded data).
-pub fn listUsers(allocator: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error![]User {
+pub fn listUsers(allocator: std.mem.Allocator, auth_dir: []const u8) std.mem.Allocator.Error![]User {
     mu.lock();
     defer mu.unlock();
-    ensureLoaded(allocator, project_dir);
+    ensureLoaded(allocator, auth_dir);
     return allocator.dupe(User, users_list.items);
 }
 
@@ -192,14 +190,14 @@ pub fn listUsers(allocator: std.mem.Allocator, project_dir: []const u8) std.mem.
 /// `error.LastAdmin` if the change would leave the system with no admins.
 pub fn setRole(
     allocator: std.mem.Allocator,
-    project_dir: []const u8,
+    auth_dir: []const u8,
     target_email: []const u8,
     new_role: Role,
     acting_email: []const u8,
 ) (std.mem.Allocator.Error || error{LastAdmin})!bool {
     mu.lock();
     defer mu.unlock();
-    ensureLoaded(allocator, project_dir);
+    ensureLoaded(allocator, auth_dir);
     const idx = indexOfEmailLocked(target_email) orelse return false;
 
     // Prevent demoting the last admin.
@@ -213,7 +211,7 @@ pub fn setRole(
 
     _ = acting_email;
     users_list.items[idx].role = new_role;
-    saveUsers(allocator, project_dir);
+    saveUsers(allocator, auth_dir);
     return true;
 }
 
@@ -222,7 +220,7 @@ pub fn setRole(
 /// (`error.LastAdmin`). Returns false when the user does not exist.
 pub fn deleteUser(
     allocator: std.mem.Allocator,
-    project_dir: []const u8,
+    auth_dir: []const u8,
     target_email: []const u8,
     acting_email: []const u8,
 ) (std.mem.Allocator.Error || error{ CannotDeleteSelf, LastAdmin })!bool {
@@ -230,7 +228,7 @@ pub fn deleteUser(
 
     mu.lock();
     defer mu.unlock();
-    ensureLoaded(allocator, project_dir);
+    ensureLoaded(allocator, auth_dir);
     const idx = indexOfEmailLocked(target_email) orelse return false;
 
     // Prevent deleting the last admin.
@@ -243,6 +241,6 @@ pub fn deleteUser(
     }
 
     _ = users_list.orderedRemove(idx);
-    saveUsers(allocator, project_dir);
+    saveUsers(allocator, auth_dir);
     return true;
 }
