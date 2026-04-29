@@ -522,8 +522,10 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     defer ctx.allocator.free(py.stdout);
     defer ctx.allocator.free(py.stderr);
 
-    if (py.term.Exited != 0) {
-        // Python failed — invalidate cache so the next sync rewrites everything.
+    // Exit 0 = clean success, exit 2 = saved-with-validation-warnings (mismatches
+    // already surfaced in the summary), anything else = real failure.
+    if (py.term.Exited != 0 and py.term.Exited != 2) {
+        log.warn("pcb_update.py exit={d}\nstdout:\n{s}\nstderr:\n{s}", .{ py.term.Exited, py.stdout, py.stderr });
         infra_fs.cwd().deleteFile(cache_path) catch |e| switch (e) {
             error.FileNotFound => {},
             else => log.warn("deleting {s}: {s}", .{ cache_path, @errorName(e) }),
@@ -576,7 +578,16 @@ fn parseSummaryLine(stdout: []const u8) ScriptSummary {
     const line = stdout[start..end];
 
     var result: ScriptSummary = .{};
-    var it = std.mem.tokenizeScalar(u8, line, ' ');
+    // backup=PATH may contain spaces; pcb_update.py emits it as the last
+    // field on the line, so consume everything after " backup=" first and
+    // then tokenize what remains for the integer fields.
+    var head = line;
+    if (std.mem.indexOf(u8, line, " backup=")) |bi| {
+        const val = line[bi + " backup=".len ..];
+        result.backup = if (std.mem.eql(u8, val, "-")) "" else val;
+        head = line[0..bi];
+    }
+    var it = std.mem.tokenizeScalar(u8, head, ' ');
     _ = it.next(); // skip "SUMMARY"
     while (it.next()) |kv| {
         const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
@@ -588,8 +599,6 @@ fn parseSummaryLine(stdout: []const u8) ScriptSummary {
             result.missing = std.fmt.parseInt(u32, val, 10) catch 0;
         } else if (std.mem.eql(u8, key, "seeded")) {
             result.seeded = std.fmt.parseInt(u32, val, 10) catch 0;
-        } else if (std.mem.eql(u8, key, "backup")) {
-            result.backup = if (std.mem.eql(u8, val, "-")) "" else val;
         }
     }
     return result;

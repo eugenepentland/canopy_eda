@@ -229,6 +229,8 @@ fn emitKicadPad(w: anytype, node: ast.Node) !void {
     var drill_y: f64 = 0;
     var has_drill = false;
     var is_oval_drill = false;
+    var mask_margin: ?f64 = null;
+    var no_paste = false;
 
     for (children[4..]) |child| {
         if (child.isForm("pos")) {
@@ -244,6 +246,13 @@ fn emitKicadPad(w: anytype, node: ast.Node) !void {
                 sx = cl[1].asNumber() orelse 0;
                 sy = cl[2].asNumber() orelse 0;
             }
+        }
+        if (child.isForm("mask-margin")) {
+            const cl = child.asList().?;
+            if (cl.len >= 2) mask_margin = cl[1].asNumber();
+        }
+        if (child.asAtom()) |a| {
+            if (std.mem.eql(u8, a, "no-paste")) no_paste = true;
         }
         if (child.isForm("drill")) {
             const cl = child.asList().?;
@@ -293,7 +302,11 @@ fn emitKicadPad(w: anytype, node: ast.Node) !void {
 
     // Layers
     if (std.mem.eql(u8, pad_type_internal, "smd")) {
-        try w.writeAll("    (layers \"F.Cu\" \"F.Mask\" \"F.Paste\")\n");
+        if (no_paste) {
+            try w.writeAll("    (layers \"F.Cu\" \"F.Mask\")\n");
+        } else {
+            try w.writeAll("    (layers \"F.Cu\" \"F.Mask\" \"F.Paste\")\n");
+        }
         if (std.mem.eql(u8, kicad_shape, "roundrect")) {
             try w.writeAll("    (roundrect_rratio 0.25)\n");
         }
@@ -302,6 +315,8 @@ fn emitKicadPad(w: anytype, node: ast.Node) !void {
     } else if (std.mem.eql(u8, pad_type_internal, "npth")) {
         try w.writeAll("    (layers \"*.Cu\" \"*.Mask\")\n");
     }
+
+    if (mask_margin) |m| try w.print("    (solder_mask_margin {d:.3})\n", .{m});
 
     try w.writeAll("  )\n");
 }

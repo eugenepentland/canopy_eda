@@ -83,8 +83,71 @@ pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) std.mem
     try w.writeAll(",\"review_state\":");
     try writeReviewState(w, doc.review_state);
 
+    try w.writeAll(",\"subblock_requirements\":");
+    try writeComponentRequirements(w, doc.subblock_requirements);
+
     try w.writeAll("}");
     return buf.items;
+}
+
+fn writeComponentRequirements(
+    w: anytype,
+    entries: []const review.ComponentRequirementEntry,
+) !void {
+    try w.writeAll("[");
+    for (entries, 0..) |entry, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll(REF_DES_OPEN);
+        try writeJsonString(w, entry.ref_des);
+        try w.writeAll(COMPONENT_KEY);
+        try writeJsonString(w, entry.component);
+        try w.writeAll(",\"requirements\":[");
+        for (entry.requirements, 0..) |r, j| {
+            if (j > 0) try w.writeAll(",");
+            try w.writeAll("{\"text\":");
+            try writeJsonString(w, r.text);
+            if (r.id.len > 0) {
+                try w.writeAll(",\"id\":");
+                try writeJsonString(w, r.id);
+            }
+            if (r.ref) |ref| {
+                try w.writeAll(",\"pdf\":");
+                try writeJsonString(w, ref.pdf);
+                try w.print(",\"page\":{d}", .{ref.page});
+            }
+            const status_tag: []const u8 = if (j < entry.req_results.len)
+                @tagName(entry.req_results[j].status)
+            else
+                "na";
+            try w.print(STATUS_FMT, .{status_tag});
+            if (j < entry.req_results.len) {
+                const rr = entry.req_results[j];
+                if (rr.message.len > 0) {
+                    try w.writeAll(",\"check_message\":");
+                    try writeJsonString(w, rr.message);
+                }
+                if (rr.verification) |v| {
+                    if (rr.status == .fail) {
+                        try w.writeAll(",\"overridden_by_note\":true");
+                    }
+                    try w.writeAll(",\"verified_by\":{\"rationale\":");
+                    try writeJsonString(w, v.rationale);
+                    if (v.signed_by.len > 0) {
+                        try w.writeAll(",\"signed_by\":");
+                        try writeJsonString(w, v.signed_by);
+                    }
+                    if (v.date.len > 0) {
+                        try w.writeAll(",\"date\":");
+                        try writeJsonString(w, v.date);
+                    }
+                    try w.writeAll("}");
+                }
+            }
+            try w.writeAll("}");
+        }
+        try w.writeAll("]}");
+    }
+    try w.writeAll("]");
 }
 
 fn writeReviewState(w: anytype, state: review.ReviewState) !void {
@@ -171,61 +234,8 @@ fn writeSection(w: anytype, s: review.SectionReport) !void {
     }
     try w.writeAll("]");
 
-    try w.writeAll(",\"component_requirements\":[");
-    for (s.component_requirements, 0..) |entry, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll(REF_DES_OPEN);
-        try writeJsonString(w, entry.ref_des);
-        try w.writeAll(COMPONENT_KEY);
-        try writeJsonString(w, entry.component);
-        try w.writeAll(",\"requirements\":[");
-        for (entry.requirements, 0..) |r, j| {
-            if (j > 0) try w.writeAll(",");
-            try w.writeAll("{\"text\":");
-            try writeJsonString(w, r.text);
-            if (r.id.len > 0) {
-                try w.writeAll(",\"id\":");
-                try writeJsonString(w, r.id);
-            }
-            if (r.ref) |ref| {
-                try w.writeAll(",\"pdf\":");
-                try writeJsonString(w, ref.pdf);
-                try w.print(",\"page\":{d}", .{ref.page});
-            }
-            // Status + check message + (verifies …) sign-off (when any).
-            const status_tag: []const u8 = if (j < entry.req_results.len)
-                @tagName(entry.req_results[j].status)
-            else
-                "na";
-            try w.print(STATUS_FMT, .{status_tag});
-            if (j < entry.req_results.len) {
-                const rr = entry.req_results[j];
-                if (rr.message.len > 0) {
-                    try w.writeAll(",\"check_message\":");
-                    try writeJsonString(w, rr.message);
-                }
-                if (rr.verification) |v| {
-                    if (rr.status == .fail) {
-                        try w.writeAll(",\"overridden_by_note\":true");
-                    }
-                    try w.writeAll(",\"verified_by\":{\"rationale\":");
-                    try writeJsonString(w, v.rationale);
-                    if (v.signed_by.len > 0) {
-                        try w.writeAll(",\"signed_by\":");
-                        try writeJsonString(w, v.signed_by);
-                    }
-                    if (v.date.len > 0) {
-                        try w.writeAll(",\"date\":");
-                        try writeJsonString(w, v.date);
-                    }
-                    try w.writeAll("}");
-                }
-            }
-            try w.writeAll("}");
-        }
-        try w.writeAll("]}");
-    }
-    try w.writeAll("]");
+    try w.writeAll(",\"component_requirements\":");
+    try writeComponentRequirements(w, s.component_requirements);
 
     try w.writeAll(",\"ports\":[");
     for (s.ports, 0..) |p, i| {

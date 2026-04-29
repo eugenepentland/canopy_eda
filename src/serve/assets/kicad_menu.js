@@ -67,7 +67,7 @@
       if(seeded>0)lines.push('Replicated module layouts: '+seeded+' component(s) seeded from master instance(s).');
       if(m===0&&miss===0){if(!j.skipped)lines.push('Validation: all checks passed');}
       else lines.push('Validation: '+m+' mismatch(es), '+miss+' missing component(s) \u2014 see '+j.pcb.replace(/\.kicad_pcb$/,'.pcb_diff.json'));
-      setStatus(lines.join('\n'),(m===0&&miss===0)?'ok':'err');
+      setStatus(lines.join('\n'),(m===0&&miss===0)?'ok':'warn');
     }).catch(function(e){setStatus('Error: '+e,'err');});
   });
 })();

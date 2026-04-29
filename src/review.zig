@@ -217,6 +217,12 @@ pub const ReviewDoc = struct {
     /// `reviews/{name}.state.json` and reconciled against the live section
     /// list, so every section report has a matching state entry by slug.
     review_state: ReviewState = .{},
+    /// Component requirements for instances that live inside a sub-block
+    /// (and therefore aren't attached to any top-level section). The check
+    /// engine already evaluates these; this field surfaces them in the
+    /// review JSON / HTML so power-chain ICs (charger, buck, LDO, ADCs in
+    /// modules, …) get the same coverage as top-level parts.
+    subblock_requirements: []const ComponentRequirementEntry = &.{},
 };
 
 /// Build a review document for a design block. `assertions` comes from the
@@ -235,6 +241,7 @@ pub fn buildReview(
     check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
 ) ReviewError!ReviewDoc {
     const sections = try buildSectionReports(allocator, block, violations, check_results);
+    const sub_reqs = try collectSubblockRequirements(allocator, block, check_results);
     const rails = try power_budget.analyze(allocator, block);
     const rails_sorted = try sortRailsByTightness(allocator, rails);
     const sequence = try power_sequencing.analyze(allocator, block);
@@ -258,7 +265,53 @@ pub fn buildReview(
         .bom = bom,
         .assertions = asserts,
         .unresolved = unresolved,
+        .subblock_requirements = sub_reqs,
     };
+}
+
+/// Walk every nested sub-block instance and emit a ComponentRequirementEntry
+/// for each one that has library requirements. Ref-des is prefixed with the
+/// sub-block path (e.g. "buck/U12") to match the keys in `check_results`.
+fn collectSubblockRequirements(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
+) ![]const ComponentRequirementEntry {
+    var out: std.ArrayListUnmanaged(ComponentRequirementEntry) = .empty;
+    for (block.sub_blocks) |sb| try walkSubblock(allocator, sb.block, sb.name, check_results, &out);
+    std.mem.sort(ComponentRequirementEntry, out.items, {}, lessThanByRefDes);
+    return out.items;
+}
+
+fn walkSubblock(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    prefix: []const u8,
+    check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
+    out: *std.ArrayListUnmanaged(ComponentRequirementEntry),
+) !void {
+    for (block.instances) |inst| {
+        if (inst.requirements.len == 0) continue;
+        // Display the sub-block path (e.g. "buck/U12") so the reviewer knows
+        // which sub-block placed it, but the check_results map is keyed by
+        // the post-renumbering global ref_des (`req_checks.zig:150` uses
+        // `inst.ref_des` directly), so look up under the plain ref.
+        const display_ref = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, inst.ref_des });
+        const results: []const req_checks.Result = if (check_results) |m|
+            (m.get(inst.ref_des) orelse &.{})
+        else
+            &.{};
+        try out.append(allocator, .{
+            .ref_des = display_ref,
+            .component = inst.component,
+            .requirements = inst.requirements,
+            .req_results = results,
+        });
+    }
+    for (block.sub_blocks) |child| {
+        const nested = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, child.name });
+        try walkSubblock(allocator, child.block, nested, check_results, out);
+    }
 }
 
 /// Collect all `testpoint`-component instances across the design and its
