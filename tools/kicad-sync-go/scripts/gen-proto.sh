@@ -25,16 +25,40 @@ if [[ ! -d "$KICAD_SRC/api/proto" ]]; then
 fi
 
 OUT=internal/kicad/proto
+GO_BASE=github.com/canopy/eda/tools/kicad-sync-go/internal/kicad/proto
 mkdir -p "$OUT"
 
 # All proto files KiCad ships, recursively. The IPC surface lives across
 # several: base_types.proto, common/, board/, schematic/, etc.
-mapfile -t PROTOS < <(find "$KICAD_SRC/api/proto" -name '*.proto')
+mapfile -t PROTOS < <(cd "$KICAD_SRC/api/proto" && find . -name '*.proto' | sed 's|^\./||' | sort)
 
+# KiCad's .proto files do not carry `option go_package`, so we map every
+# file to a Go import path on the command line. We put each .proto in its
+# own Go package (named after the file stem) to avoid import cycles —
+# multiple .proto files in the same directory can import each other across
+# directories, which collapses into a circular Go dependency if they share
+# a package.
+M_ARGS=()
+for p in "${PROTOS[@]}"; do
+  dir=$(dirname "$p")
+  base=$(basename "$p" .proto)
+  if [[ "$dir" == "." ]]; then
+    pkg_dir="$base"
+  else
+    pkg_dir="${dir}/${base}"
+  fi
+  M_ARGS+=("--go_opt=M${p}=${GO_BASE}/${pkg_dir}")
+done
+
+# `paths=import` lays files out at their go_package path (one subdir per
+# .proto file, matching the M-args above). Combined with --go_out=$OUT
+# and the GO_BASE prefix in the M-args, this puts every generated .pb.go
+# at internal/kicad/proto/<dir>/<stem>/<stem>.pb.go in its own package.
 protoc \
   --proto_path="$KICAD_SRC/api/proto" \
   --go_out="$OUT" \
-  --go_opt=paths=source_relative \
+  --go_opt=module="$GO_BASE" \
+  "${M_ARGS[@]}" \
   "${PROTOS[@]}"
 
 echo "Generated $(find "$OUT" -name '*.pb.go' | wc -l) .pb.go files in $OUT"
