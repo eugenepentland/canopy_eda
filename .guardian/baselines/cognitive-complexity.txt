@@ -9,4 +9,3 @@ src/render_block.zig: fn renderBlockDiagramJson cognitive complexity 326 (limit:
 src/render_block_types.zig: fn classifyByName cognitive complexity 59 (limit: 50)
 src/render_pcb_json.zig: fn renderPcbJson cognitive complexity 139 (limit: 50)
 src/req_checks.zig: fn findVoltageForNet cognitive complexity 51 (limit: 50)
-src/serve/mcp_tools.zig: fn callInner cognitive complexity 92 (limit: 50)

@@ -217,3 +217,18 @@ Public functions: loadState, saveState, reconcile, addItem, toggleItem, deleteIt
 ## serve
 
 Public functions: notFound, serve
+
+## serve/vfs
+
+Public functions: readFile, writeFile, editFile, listDir, glob, deleteFile, moveFile, dirtyDesignsForPath
+
+- rejects parent traversal
+- rejects absolute paths
+- rejects dot-prefixed segments
+- rejects NUL and backslash bytes
+- allows project source and library paths
+- denies auth and oauth paths
+- denies writes to history and out
+- denies writes to .layout files
+- matches basic glob patterns
+- import detection respects word boundaries

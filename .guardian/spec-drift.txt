@@ -313,9 +313,6 @@ src/serve/bom_html.zig::writeNetsJson | fn writeNetsJson(w: anytype, block: *con
 src/serve/bom_html.zig::writeSchematicBomHtml | fn writeSchematicBomHtml(wr: anytype, block: *const env_mod.DesignBlock) BomError!void
 src/serve/canvas_page.zig::canvasPage | fn canvasPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::addComponentDatasheetCore | fn addComponentDatasheetCore( allocator: std.mem.Allocator, project_dir: []const u8, component_name: []const u8, pdf: []const u8, ) EditError!MutationResult
-src/serve/edit.zig::addComponentParameterCore | fn addComponentParameterCore( allocator: std.mem.Allocator, project_dir: []const u8, component: []const u8, param_name: []const u8, param_type: []const u8, ) EditError!struct { snapshot: ?[]const u8 }
-src/serve/edit.zig::addComponentRequirementsCore | fn addComponentRequirementsCore( allocator: std.mem.Allocator, project_dir: []const u8, component: []const u8, requirements: []const []const u8, out_failed_index: *usize, ) EditError!struct { snapshot: ?[]const u8, count: usize }
-src/serve/edit.zig::addImportCore | fn addImportCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, import_item: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::addInstanceApi | fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::addInstanceCore | fn addInstanceCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, section: []const u8, component: []const u8, value: []const u8, pins: []const PinAssignment, ) EditError!MutationResult
 src/serve/edit.zig::addSectionNoteCore | fn addSectionNoteCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, section_name: []const u8, text: []const u8, pdf: []const u8, page: u32, ) EditError!MutationResult
@@ -324,24 +321,18 @@ src/serve/edit.zig::editCourtyardApi | fn editCourtyardApi(ctx: *Handler, req: *
 src/serve/edit.zig::editFootprintApi | fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::editMpnApi | fn editMpnApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::editMpnCore | fn editMpnCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, mpn: []const u8, manufacturer: []const u8, ) MpnEditError!u32
-src/serve/edit.zig::editNoteCore | fn editNoteCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, match: []const u8, new_text: []const u8, ) EditError!MutationResult
-src/serve/edit.zig::editSectionCore | fn editSectionCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, section_name: []const u8, new_source: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::editValueApi | fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit.zig::editValueCore | fn editValueCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, new_value: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::getSourceApi | fn getSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::movePinApi | fn movePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::movePinCore | fn movePinCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, old_pin: []const u8, new_pin: []const u8, ) EditError!MutationResult
-src/serve/edit.zig::readDesignSourcePub | fn readDesignSourcePub( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) EditError![]u8
+src/serve/edit.zig::rebuildDesign | fn rebuildDesign( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) BuildReport
 src/serve/edit.zig::removeComponentDatasheetCore | fn removeComponentDatasheetCore( allocator: std.mem.Allocator, project_dir: []const u8, component_name: []const u8, pdf: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::removeInstanceApi | fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::removeInstanceCore | fn removeInstanceCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::removeSectionNoteCore | fn removeSectionNoteCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, section_name: []const u8, idx: usize, ) EditError!MutationResult
-src/serve/edit.zig::replaceInstanceCore | fn replaceInstanceCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, new_source: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::restoreDesignCore | fn restoreDesignCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, id: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::rewirePinApi | fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit.zig::rewirePinCore | fn rewirePinCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, pin: []const u8, new_net: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::saveSourceApi | fn saveSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit.zig::setInstancePinCore | fn setInstancePinCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, pin: []const u8, new_net: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::swapComponentCore | fn swapComponentCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, new_component: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::swapPinsApi | fn swapPinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::swapPinsCore | fn swapPinsCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, pin_a: []const u8, pin_b: []const u8, ) EditError!MutationResult
@@ -352,7 +343,6 @@ src/serve/footprint_preview.zig::listFootprints | fn listFootprints(w: anytype, 
 src/serve/history.zig::listSnapshots | fn listSnapshots( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) HistoryError![]SnapshotInfo
 src/serve/history.zig::restore | fn restore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, id: []const u8, ) HistoryError!void
 src/serve/history.zig::snapshot | fn snapshot( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, description: ?[]const u8, ) HistoryError!?[]const u8
-src/serve/history.zig::snapshotLibraryFile | fn snapshotLibraryFile( allocator: std.mem.Allocator, project_dir: []const u8, subdir: []const u8, name: []const u8, description: ?[]const u8, ) HistoryError!?[]const u8
 src/serve/kicad_sync.zig::getConfigApi | fn getConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/kicad_sync.zig::setConfigApi | fn setConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/kicad_sync.zig::writeKicadApi | fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -422,6 +412,14 @@ src/serve/users.zig::ensureUser | fn ensureUser( allocator: std.mem.Allocator, a
 src/serve/users.zig::getRole | fn getRole(allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8) Role
 src/serve/users.zig::listUsers | fn listUsers(allocator: std.mem.Allocator, auth_dir: []const u8) std.mem.Allocator.Error![]User
 src/serve/users.zig::setRole | fn setRole( allocator: std.mem.Allocator, auth_dir: []const u8, target_email: []const u8, new_role: Role, acting_email: []const u8, ) (std.mem.Allocator.Error || error{LastAdmin})!bool
+src/serve/vfs.zig::deleteFile | fn deleteFile( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, out: *std.ArrayListUnmanaged(u8), ) VfsError!bool
+src/serve/vfs.zig::dirtyDesignsForPath | fn dirtyDesignsForPath( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, ) (std.mem.Allocator.Error || std.fs.Dir.OpenError || std.fs.Dir.Iterator.Error)![][]const u8
+src/serve/vfs.zig::editFile | fn editFile( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, old_string: []const u8, new_string: []const u8, expected_sha256: ?[]const u8, replace_mode: ReplaceMode, out: *std.ArrayListUnmanaged(u8), ) VfsError!bool
+src/serve/vfs.zig::glob | fn glob( allocator: std.mem.Allocator, project_dir: []const u8, pattern: []const u8, base: ?[]const u8, out: *std.ArrayListUnmanaged(u8), ) VfsError!bool
+src/serve/vfs.zig::listDir | fn listDir( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, list_mode: ListMode, max_entries: ?u64, out: *std.ArrayListUnmanaged(u8), ) VfsError!bool
+src/serve/vfs.zig::moveFile | fn moveFile( allocator: std.mem.Allocator, project_dir: []const u8, from_rel: []const u8, to_rel: []const u8, out: *std.ArrayListUnmanaged(u8), ) VfsError!bool
+src/serve/vfs.zig::readFile | fn readFile( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, offset: ?u64, limit: ?u64, out: *std.ArrayListUnmanaged(u8), ) VfsError!bool
+src/serve/vfs.zig::writeFile | fn writeFile( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, content: []const u8, expected_sha256: ?[]const u8, out: *std.ArrayListUnmanaged(u8), ) VfsError!bool
 src/sexpr/parser.zig::freeNodes | fn freeNodes(allocator: std.mem.Allocator, nodes: []const Node) void
 src/sexpr/parser.zig::parse | fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError![]const Node
 src/sexpr/printer.zig::print | fn print(allocator: std.mem.Allocator, nodes: []const Node) std.mem.Allocator.Error![]const u8
