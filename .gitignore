@@ -20,3 +20,14 @@ guardian_runtime.db
 
 # Claude Code worktree metadata (per-machine; not part of the project)
 .claude/worktrees/
+
+# OAuth client registrations and tokens (user-specific, contain secret hashes)
+projects/designs/oauth_clients.json
+projects/designs/auth/oauth_clients.json
+projects/designs/auth/oauth_tokens.json
+
+# Auto-generated edit history (every save snapshots; grows unboundedly)
+projects/designs/history/
+
+# Stray Guardian artifacts inside library directories
+projects/designs/lib/components/.guardian/
