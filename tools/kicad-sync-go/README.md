@@ -42,11 +42,25 @@ make install                    # builds + symlinks into KiCad's plugin folder
 After `make install`, restart KiCad. The PCB editor gets an **EDA Sync**
 toolbar button + **Tools → External Plugins → EDA Sync** menu item.
 
-KiCad's user plugin path varies by OS (the Makefile auto-detects):
+The plugin is a tiny Python `pcbnew.ActionPlugin` shim
+(`kicad_plugin/__init__.py`) that just spawns the Go binary, so KiCad
+discovers it via its standard "External Plugins" menu. KiCad's user
+plugin path varies by OS:
 
-- Linux: `~/.local/share/kicad/10.0/3rdparty/plugins/eda-sync/`
-- macOS: `~/Library/Preferences/kicad/10.0/3rdparty/plugins/eda-sync/`
-- Windows: `%APPDATA%\kicad\10.0\3rdparty\plugins\eda-sync\` (manual)
+- Linux: `~/.config/kicad/10.0/scripting/plugins/eda-sync/`
+- macOS: `~/Library/Preferences/kicad/10.0/scripting/plugins/eda-sync/`
+- Windows: `%USERPROFILE%\Documents\KiCad\10.0\scripting\plugins\eda-sync\` (manual)
+
+You install by symlinking the `kicad_plugin/` subfolder of this repo
+into the KiCad plugins path above. The Go binary lives one level up
+(in `tools/kicad-sync-go/`), so the shim resolves it via `..`.
+
+**Windows (PowerShell):**
+```powershell
+$dst = "$env:USERPROFILE\Documents\KiCad\10.0\scripting\plugins\eda-sync"
+cd C:\Users\you\Code\canvas_eda\tools\kicad-sync-go
+New-Item -ItemType SymbolicLink -Path $dst -Target "$((Get-Location).Path)\kicad_plugin"
+```
 
 ### Build from source (one-time codegen)
 
