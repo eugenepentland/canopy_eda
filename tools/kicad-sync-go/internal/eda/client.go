@@ -1,0 +1,126 @@
+// Package eda is the HTTP client for the EDA server's sync-plan endpoint.
+//
+// The agent sends the user's current board state, the server runs the diff,
+// and the agent applies the returned ops via IPC. Auth is a Bearer header
+// carrying the OAuth access token.
+package eda
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// PadAssign is one (pad_number, net_name) tuple.
+type PadAssign struct {
+	Number string `json:"number"`
+	Net    string `json:"net"`
+}
+
+// BoardFp is one footprint on the user's board, as the client describes it.
+type BoardFp struct {
+	UUID          string      `json:"uuid"`
+	Ref           string      `json:"ref"`
+	Value         string      `json:"value"`
+	FootprintName string      `json:"footprint_name"`
+	Pads          []PadAssign `json:"pads"`
+}
+
+// SyncPlanRequest is the JSON body posted to /api/sync-plan/:name.
+type SyncPlanRequest struct {
+	Board      []BoardFp `json:"board"`
+	PruneStale bool      `json:"prune_stale"`
+}
+
+// Op is one server-emitted operation. Fields not relevant for a given `op`
+// are zero-value. PadNets is encoded as `[][2]string` over the wire.
+type Op struct {
+	Op               string      `json:"op"`
+	UUID             string      `json:"uuid,omitempty"`
+	Field            string      `json:"field,omitempty"`
+	Value            string      `json:"value,omitempty"`
+	Pad              string      `json:"pad,omitempty"`
+	Net              string      `json:"net,omitempty"`
+	Ref              string      `json:"ref,omitempty"`
+	FootprintName    string      `json:"footprint_name,omitempty"`
+	NewFootprintName string      `json:"new_footprint_name,omitempty"`
+	KicadMod         string      `json:"kicad_mod,omitempty"`
+	PadNets          [][2]string `json:"pad_nets,omitempty"`
+}
+
+// Summary is the counts the server tracked while building the plan.
+type Summary struct {
+	Updated      int `json:"updated"`
+	Added        int `json:"added"`
+	Removed      int `json:"removed"`
+	Swapped      int `json:"swapped"`
+	FlaggedStale int `json:"flagged_stale"`
+}
+
+// SyncPlanResponse is the parsed response body.
+type SyncPlanResponse struct {
+	DesignVersion int     `json:"design_version"`
+	Summary       Summary `json:"summary"`
+	Ops           []Op    `json:"ops"`
+}
+
+// ErrUnauthorized signals a 401 — the token has been revoked / expired.
+// Caller is expected to re-run OAuth.
+var ErrUnauthorized = errors.New("server rejected token (401)")
+
+// Client is configured per-server. Reusable across multiple syncs.
+type Client struct {
+	BaseURL  string
+	Token    string
+	HTTP     *http.Client
+}
+
+// New returns a Client with sane defaults.
+func New(baseURL, token string) *Client {
+	return &Client{
+		BaseURL: strings.TrimRight(baseURL, "/"),
+		Token:   token,
+		HTTP:    &http.Client{Timeout: 60 * time.Second},
+	}
+}
+
+// SyncPlan calls POST /api/sync-plan/:design.
+func (c *Client) SyncPlan(design string, req SyncPlanRequest) (*SyncPlanResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	url := c.BaseURL + "/api/sync-plan/" + design
+	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+c.Token)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+
+	resp, err := c.HTTP.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("sync-plan request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, ErrUnauthorized
+	}
+	if resp.StatusCode != http.StatusOK {
+		preview, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("sync-plan: HTTP %d — %s", resp.StatusCode, preview)
+	}
+
+	var out SyncPlanResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &out, nil
+}

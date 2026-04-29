@@ -1,0 +1,3 @@
+# Generated *.pb.go files land here. Run `make proto` to populate (see
+# ../../../scripts/gen-proto.sh). Committed so downstream users don't need
+# protoc + KiCad's source tree.
