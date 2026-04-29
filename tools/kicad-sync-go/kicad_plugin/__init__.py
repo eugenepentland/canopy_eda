@@ -16,7 +16,10 @@ import sys
 import pcbnew  # type: ignore[import-not-found]
 
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
+# `realpath` (not `abspath`) so we follow the symlink that the install
+# step creates. Without it, __file__ resolves to KiCad's plugin folder
+# and `..` lands in scripting/plugins/ rather than next to the Go binary.
+_HERE = os.path.dirname(os.path.realpath(__file__))
 _PLUGIN_ROOT = os.path.normpath(os.path.join(_HERE, ".."))
 
 
