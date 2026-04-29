@@ -12,6 +12,7 @@ const Handler = serve_root.Handler;
 const bom_html = @import("bom_html.zig");
 const history = @import("history.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
+const erc_mod = @import("../erc.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const HTTP_NOT_FOUND: u16 = 404;
@@ -1199,8 +1200,118 @@ pub const PinAssignment = struct {
     net: []const u8,
 };
 
+/// One assertion failure surfaced from the evaluator. `message` is the
+/// human-readable text (already formatted by the eval), `is_warning`
+/// distinguishes assert-warn from assert.
+pub const AssertionFailure = struct {
+    message: []const u8,
+    is_warning: bool,
+};
+
+/// Result of a `build` MCP call. The `version` and `snapshot` mirror the
+/// existing MutationResult shape; `eval_ok` is false iff the .sexp failed
+/// to parse/evaluate (in which case the JSON viewer state is unchanged).
+/// `assertions` and `erc` are summary + flat lists for the agent to act
+/// on without a follow-up `run_checks` round-trip.
+pub const BuildReport = struct {
+    ok: bool,
+    version: u32,
+    snapshot: ?[]const u8 = null,
+    eval_ok: bool,
+    error_message: ?[]const u8 = null,
+    assertion_failures: []const AssertionFailure = &.{},
+    erc: []const erc_mod.Violation = &.{},
+};
+
 fn designFilePath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
+}
+
+/// Re-evaluate `<name>.sexp`, resolve BOM, render the scene-graph, run
+/// ERC, snapshot the prior state, and bump the live version. This is the
+/// MCP `build` tool's worker — it mirrors `eda build --push <name>`
+/// locally. The agent edits files via VFS, then calls this to make
+/// changes visible in the browser viewer.
+pub fn rebuildDesign(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+) BuildReport {
+    const path = designFilePath(allocator, project_dir, name) catch {
+        return .{
+            .ok = false,
+            .version = serve_root.getLiveVersion(name),
+            .eval_ok = false,
+            .error_message = "out of memory",
+        };
+    };
+    defer allocator.free(path);
+
+    // Snapshot first so the build is undoable via restore_version. Logs
+    // and continues on snapshot errors — undo is a nice-to-have.
+    const snap_id: ?[]const u8 = history.snapshot(allocator, project_dir, name, "build") catch |e| blk: {
+        log.warn("[snapshot] failed for {s}: {s}", .{ name, @errorName(e) });
+        break :blk null;
+    };
+
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    const eval_result = eval.evalFile(path) catch |e| {
+        return .{
+            .ok = false,
+            .version = serve_root.getLiveVersion(name),
+            .snapshot = snap_id,
+            .eval_ok = false,
+            .error_message = @errorName(e),
+        };
+    };
+    const block = switch (eval_result) {
+        .design_block => |b| b,
+        .board => |b| b.design,
+        else => {
+            return .{
+                .ok = false,
+                .version = serve_root.getLiveVersion(name),
+                .snapshot = snap_id,
+                .eval_ok = false,
+                .error_message = "not a design-block",
+            };
+        },
+    };
+
+    var failures: std.ArrayListUnmanaged(AssertionFailure) = .empty;
+    for (eval.assertions.items) |a| {
+        if (a.passed) continue;
+        failures.append(allocator, .{ .message = a.message, .is_warning = a.is_warning }) catch break;
+    }
+
+    const bom_path = std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name }) catch {
+        return .{
+            .ok = false,
+            .version = serve_root.getLiveVersion(name),
+            .snapshot = snap_id,
+            .eval_ok = true,
+            .error_message = "out of memory (bom path)",
+            .assertion_failures = failures.items,
+        };
+    };
+    defer allocator.free(bom_path);
+    bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
+
+    const layout_json = render_json.renderSceneGraph(allocator, block, project_dir) catch null;
+    serve_root.setLiveLayoutJson(layout_json);
+    const version = serve_root.bumpLiveVersion(name);
+
+    const erc_violations = erc_mod.runErc(allocator, block, project_dir) catch &[_]erc_mod.Violation{};
+
+    return .{
+        .ok = true,
+        .version = version,
+        .snapshot = snap_id,
+        .eval_ok = true,
+        .assertion_failures = failures.items,
+        .erc = erc_violations,
+    };
 }
 
 fn readDesignSource(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) EditError![]u8 {
@@ -1290,44 +1401,6 @@ fn findFormEnd(source: []const u8, open_pos: usize) ?usize {
         }
     }
     return null;
-}
-
-/// Replace the value string of `ref_des` in `<name>.sexp`, write the file,
-/// re-evaluate the design, and bump the live version. Shared between the
-/// HTTP `editValueApi` and the MCP `edit_value` tool.
-pub fn editValueCore(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-    ref_des: []const u8,
-    new_value: []const u8,
-) EditError!MutationResult {
-    const source = try readDesignSource(allocator, project_dir, name);
-    defer allocator.free(source);
-
-    const needle = try std.fmt.allocPrint(allocator, INSTANCE_OPEN_TEMPLATE ++ " (", .{ref_des});
-    defer allocator.free(needle);
-
-    const inst_pos = std.mem.indexOf(u8, source, needle) orelse return error.InstanceNotFound;
-    const after_inst = inst_pos + needle.len;
-
-    var pos = after_inst;
-    while (pos < source.len and source[pos] != '"' and source[pos] != ')') : (pos += 1) {}
-    if (pos >= source.len or source[pos] != '"') return error.MalformedSource;
-
-    const old_val_start = pos + 1;
-    const old_val_end = std.mem.indexOfPos(u8, source, old_val_start, "\"") orelse return error.MalformedSource;
-
-    var new_source: std.ArrayListUnmanaged(u8) = .empty;
-    defer new_source.deinit(allocator);
-    const nw = new_source.writer(allocator);
-    try nw.writeAll(source[0..old_val_start]);
-    try nw.writeAll(new_value);
-    try nw.writeAll(source[old_val_end..]);
-
-    const desc = try std.fmt.allocPrint(allocator, "edit_value {s} → {s}", .{ ref_des, new_value });
-    defer allocator.free(desc);
-    return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
 }
 
 /// Error set for the BOM-side MPN/manufacturer edit path. Narrower than
@@ -1451,43 +1524,6 @@ pub fn removeInstanceCore(
     try nw.writeAll(source[inst_end..]);
 
     const desc = try std.fmt.allocPrint(allocator, "remove_instance {s}", .{ref_des});
-    defer allocator.free(desc);
-    return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
-}
-
-/// Locate `(pin <pin> "<old_net>")` inside `(instance "<ref_des>" …)` and
-/// replace just the net string with `new_net`, leaving every other pin
-/// untouched. Backs the MCP `rewire_pin` tool.
-pub fn rewirePinCore(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-    ref_des: []const u8,
-    pin: []const u8,
-    new_net: []const u8,
-) EditError!MutationResult {
-    const source = try readDesignSource(allocator, project_dir, name);
-    defer allocator.free(source);
-
-    const inst_needle = try std.fmt.allocPrint(allocator, INSTANCE_OPEN_TEMPLATE, .{ref_des});
-    defer allocator.free(inst_needle);
-    const inst_pos = std.mem.indexOf(u8, source, inst_needle) orelse return error.InstanceNotFound;
-    const inst_end = findInstanceEnd(source, inst_pos) orelse return error.MalformedSource;
-
-    const pin_needle = try std.fmt.allocPrint(allocator, "(pin {s} \"", .{pin});
-    defer allocator.free(pin_needle);
-    const pin_offset = std.mem.indexOf(u8, source[inst_pos..inst_end], pin_needle) orelse return error.PinNotFound;
-    const abs_pin = inst_pos + pin_offset + pin_needle.len;
-    const net_end = std.mem.indexOfPos(u8, source, abs_pin, "\"") orelse return error.MalformedSource;
-
-    var new_source: std.ArrayListUnmanaged(u8) = .empty;
-    defer new_source.deinit(allocator);
-    const nw = new_source.writer(allocator);
-    try nw.writeAll(source[0..abs_pin]);
-    try nw.writeAll(new_net);
-    try nw.writeAll(source[net_end..]);
-
-    const desc = try std.fmt.allocPrint(allocator, "rewire_pin {s}.{s} → {s}", .{ ref_des, pin, new_net });
     defer allocator.free(desc);
     return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
 }
@@ -1642,16 +1678,6 @@ pub fn swapComponentCore(
     return writeAndRebuild(allocator, project_dir, name, final_bytes, desc);
 }
 
-/// Read the full `.sexp` source text for a design. Caller owns the returned
-/// buffer.
-pub fn readDesignSourcePub(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-) EditError![]u8 {
-    return readDesignSource(allocator, project_dir, name);
-}
-
 /// Overwrite (or create) the design's `.sexp` with `new_source`. Validates
 /// syntax via the sexpr parser before writing, snapshots any prior state,
 /// then rebuilds the design.
@@ -1720,111 +1746,6 @@ pub fn restoreDesignCore(
     const version = serve_root.bumpLiveVersion(name);
 
     return .{ .version = version, .snapshot = pre_snap };
-}
-
-/// Replace an entire `(section "SECTION_NAME" ...)` form with `new_source`.
-/// `new_source` must be the complete replacement form (including the outer
-/// parens). Returns `SectionNotFound` if no match and `Ambiguous` if more
-/// than one section with that name exists at the top level of the file.
-pub fn editSectionCore(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-    section_name: []const u8,
-    new_source: []const u8,
-) EditError!MutationResult {
-    const source = try readDesignSource(allocator, project_dir, name);
-    defer allocator.free(source);
-
-    const needle = try std.fmt.allocPrint(allocator, SECTION_OPEN_TEMPLATE, .{section_name});
-    defer allocator.free(needle);
-
-    const first = std.mem.indexOf(u8, source, needle) orelse return error.SectionNotFound;
-    // Ambiguity check — if the same name shows up twice we bail so the caller
-    // can disambiguate rather than edit the wrong one silently.
-    if (std.mem.indexOfPos(u8, source, first + needle.len, needle) != null) {
-        return error.AmbiguousMatch;
-    }
-    const end = findFormEnd(source, first) orelse return error.MalformedSource;
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-    try w.writeAll(source[0..first]);
-    try w.writeAll(new_source);
-    try w.writeAll(source[end..]);
-
-    const desc = try std.fmt.allocPrint(allocator, "edit_section {s}", .{section_name});
-    defer allocator.free(desc);
-    return writeAndRebuild(allocator, project_dir, name, buf.items, desc);
-}
-
-/// Replace the text of a `(note "...")` form. Identifies the target note by
-/// a substring match against its current text — if `match` does not uniquely
-/// identify one note, returns `AmbiguousMatch`. Use the full current text to
-/// disambiguate; use a distinctive substring for light-weight edits.
-pub fn editNoteCore(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-    match: []const u8,
-    new_text: []const u8,
-) EditError!MutationResult {
-    const source = try readDesignSource(allocator, project_dir, name);
-    defer allocator.free(source);
-
-    // Scan every `(note "` occurrence, extract its quoted text, and record
-    // every form whose text contains `match`.
-    var found_start: ?usize = 0;
-    var found_text_start: usize = 0;
-    var found_text_end: usize = 0;
-    var count: usize = 0;
-    found_start = null;
-
-    var cursor: usize = 0;
-    while (std.mem.indexOfPos(u8, source, cursor, "(note")) |note_start| {
-        // Must be followed by whitespace + opening quote to be a single-arg note.
-        var i: usize = note_start + "(note".len;
-        while (i < source.len and (source[i] == ' ' or source[i] == '\t' or source[i] == '\n')) : (i += 1) {}
-        if (i >= source.len or source[i] != '"') {
-            cursor = note_start + 1;
-            continue;
-        }
-        const text_start = i + 1;
-        // Scan for the closing quote (honoring \\ escapes).
-        var j: usize = text_start;
-        while (j < source.len and source[j] != '"') : (j += 1) {
-            if (source[j] == '\\' and j + 1 < source.len) j += 1;
-        }
-        if (j >= source.len) return error.MalformedSource;
-        const text_end = j;
-        if (std.mem.indexOf(u8, source[text_start..text_end], match) != null) {
-            count += 1;
-            if (count > 1) return error.AmbiguousMatch;
-            found_start = note_start;
-            found_text_start = text_start;
-            found_text_end = text_end;
-        }
-        cursor = text_end + 1;
-    }
-
-    if (count == 0 or found_start == null) return error.NoteNotFound;
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-    try w.writeAll(source[0..found_text_start]);
-    // Emit escaped replacement text so quotes inside the new body don't break the form.
-    for (new_text) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        else => try w.writeByte(c),
-    };
-    try w.writeAll(source[found_text_end..]);
-
-    const desc = try std.fmt.allocPrint(allocator, "edit_note \"{s}\"", .{match});
-    defer allocator.free(desc);
-    return writeAndRebuild(allocator, project_dir, name, buf.items, desc);
 }
 
 /// Splice a new `(note "text" [(ref "file.pdf" (page N))])` into the body of
@@ -2120,70 +2041,6 @@ fn detectSectionIndent(source: []const u8, sec_start: usize) []const u8 {
     return source[indent_start..i];
 }
 
-/// Add a single item to the top-level `(import ...)` list. If the item is
-/// already present (word-boundary match), returns `DuplicateImport` without
-/// modifying the file. Fails with `ImportsFormMissing` if the design has no
-/// `(import ...)` form at all.
-pub fn addImportCore(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-    import_item: []const u8,
-) EditError!MutationResult {
-    if (import_item.len == 0) return error.InvalidSource;
-    // Reject items with whitespace or quotes — they must be atom-like.
-    for (import_item) |c| if (c == ' ' or c == '\n' or c == '\t' or c == '"' or c == '(' or c == ')') return error.InvalidSource;
-
-    const source = try readDesignSource(allocator, project_dir, name);
-    defer allocator.free(source);
-
-    const import_start = std.mem.indexOf(u8, source, "(import") orelse return error.ImportsFormMissing;
-    const import_end = findFormEnd(source, import_start) orelse return error.MalformedSource;
-    const import_body = source[import_start..import_end];
-
-    // Word-boundary dedup check: match import_item only when surrounded by
-    // whitespace, `(`, or `)`.
-    var search_from: usize = 0;
-    while (std.mem.indexOfPos(u8, import_body, search_from, import_item)) |ipos| {
-        const before_ok = ipos == 0 or import_body[ipos - 1] == ' ' or import_body[ipos - 1] == '\n' or import_body[ipos - 1] == '\t';
-        const after_pos = ipos + import_item.len;
-        const after_ok = after_pos >= import_body.len or
-            import_body[after_pos] == ' ' or
-            import_body[after_pos] == '\n' or
-            import_body[after_pos] == '\t' or
-            import_body[after_pos] == ')';
-        if (before_ok and after_ok) return error.DuplicateImport;
-        search_from = ipos + 1;
-    }
-
-    // Insert before the closing paren of the import form.
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-    try w.writeAll(source[0 .. import_end - 1]);
-    try w.writeAll(" ");
-    try w.writeAll(import_item);
-    try w.writeAll(source[import_end - 1 ..]);
-
-    const desc = try std.fmt.allocPrint(allocator, "add_import {s}", .{import_item});
-    defer allocator.free(desc);
-    return writeAndRebuild(allocator, project_dir, name, buf.items, desc);
-}
-
-/// Set a single pin on an instance to a new net. Thin wrapper over
-/// `rewirePinCore`; exposed separately so MCP callers can phrase a one-pin
-/// change without building a full `replace_instance` payload.
-pub fn setInstancePinCore(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-    ref_des: []const u8,
-    pin: []const u8,
-    new_net: []const u8,
-) EditError!MutationResult {
-    return rewirePinCore(allocator, project_dir, name, ref_des, pin, new_net);
-}
-
 const PinTokenLoc = struct { start: usize, end: usize };
 
 /// Scan the interior of a single `(pin ...)` form — starting just after
@@ -2379,284 +2236,6 @@ pub fn swapPinsCore(
     const desc = try std.fmt.allocPrint(allocator, "swap_pins {s}.{s} <-> {s}", .{ ref_des, pin_a, pin_b });
     defer allocator.free(desc);
     return writeAndRebuild(allocator, project_dir, name, new_source.items, desc);
-}
-
-/// Add a `(parameter "name" type)` declaration to the top-level
-/// `(component ...)` or `(component-family ...)` form in
-/// `lib/components/{component}.sexp`. Snapshots the prior library file under
-/// `history/_lib/components/...` so the edit is undoable. Does not rebuild
-/// any design — callers must re-run a design build to pick up the change.
-pub fn addComponentParameterCore(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    component: []const u8,
-    param_name: []const u8,
-    param_type: []const u8,
-) EditError!struct { snapshot: ?[]const u8 } {
-    // Path-traversal guard.
-    if (component.len == 0 or std.mem.indexOf(u8, component, "..") != null or std.mem.indexOfAny(u8, component, "/\\") != null) {
-        return error.InvalidSource;
-    }
-    if (param_name.len == 0) return error.InvalidSource;
-    for (param_name) |c| if (c == '"' or c == '\\' or c == '\n') return error.InvalidSource;
-    if (param_type.len == 0) return error.InvalidSource;
-    for (param_type) |c| if (c == ' ' or c == '(' or c == ')' or c == '"') return error.InvalidSource;
-
-    const path = try std.fmt.allocPrint(allocator, COMPONENT_PATH_TEMPLATE, .{ project_dir, component });
-    defer allocator.free(path);
-    const source = infra_fs.cwd().readFileAlloc(allocator, path, 1 * 1024 * 1024) catch return error.ComponentNotFound;
-    defer allocator.free(source);
-
-    // Locate the outer (component ...) or (component-family ...) form.
-    const comp_open = findOuterComponentOpen(source) orelse return error.MalformedSource;
-    const comp_end = findFormEnd(source, comp_open) orelse return error.MalformedSource;
-    const body = source[comp_open..comp_end];
-
-    // Duplicate check — look for `(parameter "name"` (word-boundary on open paren).
-    const dup_needle = try std.fmt.allocPrint(allocator, "(parameter \"{s}\"", .{param_name});
-    defer allocator.free(dup_needle);
-    if (std.mem.indexOf(u8, body, dup_needle) != null) return error.DuplicateParameter;
-
-    // Snapshot the library file before modifying it.
-    const desc = try std.fmt.allocPrint(allocator, "add_component_parameter {s}.{s}", .{ component, param_name });
-    defer allocator.free(desc);
-    const snap_id: ?[]const u8 = history.snapshotLibraryFile(allocator, project_dir, "components", component, desc) catch null;
-
-    // Splice the new parameter line just before the final `)` of the outer
-    // form. Preserve the final newline by inserting before `comp_end - 1`.
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-    try w.writeAll(source[0 .. comp_end - 1]);
-    try w.print("\n  (parameter \"{s}\" {s})", .{ param_name, param_type });
-    try w.writeAll(source[comp_end - 1 ..]);
-
-    const file = infra_fs.cwd().createFile(path, .{}) catch return error.CannotWriteDesign;
-    defer file.close();
-    file.writeAll(buf.items) catch return error.CannotWriteDesign;
-
-    return .{ .snapshot = snap_id };
-}
-
-/// One element of an `addComponentRequirementsCore` batch after validation.
-/// `trimmed` slices into the caller-supplied input (no copy); `text` is the
-/// extracted requirement text used for dedup.
-const ParsedRequirement = struct {
-    trimmed: []const u8,
-    text: []const u8,
-};
-
-/// Validate a single `(requirement "text" ...)` form: must start with
-/// `(requirement`, then whitespace + a double-quoted text literal, and the
-/// parens must balance to exactly one top-level form. We do not require the
-/// full body to pass `parseCheck` / `parseNoteRef` — the evaluator will
-/// surface those errors the next time a design that imports this component
-/// is built. Returns the trimmed view + extracted text on success.
-fn validateRequirementForm(requirement_sexp: []const u8) EditError!ParsedRequirement {
-    const trimmed = std.mem.trim(u8, requirement_sexp, " \t\r\n");
-    if (trimmed.len == 0) return error.InvalidRequirement;
-    if (!std.mem.startsWith(u8, trimmed, "(requirement")) return error.InvalidRequirement;
-    const after_head = trimmed["(requirement".len..];
-    var k: usize = 0;
-    while (k < after_head.len and (after_head[k] == ' ' or after_head[k] == '\t' or after_head[k] == '\n' or after_head[k] == '\r')) : (k += 1) {}
-    if (k >= after_head.len or after_head[k] != '"') return error.InvalidRequirement;
-    const text_start_rel = k + 1;
-    var text_end_rel: ?usize = null;
-    var esc = false;
-    var j: usize = text_start_rel;
-    while (j < after_head.len) : (j += 1) {
-        const ch = after_head[j];
-        if (esc) {
-            esc = false;
-            continue;
-        }
-        if (ch == '\\') {
-            esc = true;
-            continue;
-        }
-        if (ch == '"') {
-            text_end_rel = j;
-            break;
-        }
-    }
-    const end_off = text_end_rel orelse return error.InvalidRequirement;
-    const req_text = after_head[text_start_rel..end_off];
-
-    // Paren-balance check on the full form. Skip over comments (;...\n) and
-    // string literals (" with escape). The form must close at exactly the
-    // last character of `trimmed`.
-    if (trimmed[trimmed.len - 1] != ')') return error.InvalidRequirement;
-    var depth: i32 = 0;
-    var i: usize = 0;
-    var in_string = false;
-    var str_esc = false;
-    while (i < trimmed.len) : (i += 1) {
-        const ch = trimmed[i];
-        if (in_string) {
-            if (str_esc) {
-                str_esc = false;
-            } else if (ch == '\\') {
-                str_esc = true;
-            } else if (ch == '"') {
-                in_string = false;
-            }
-            continue;
-        }
-        switch (ch) {
-            '"' => in_string = true,
-            ';' => while (i < trimmed.len and trimmed[i] != '\n') : (i += 1) {},
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if (depth == 0 and i != trimmed.len - 1) return error.InvalidRequirement;
-                if (depth < 0) return error.InvalidRequirement;
-            },
-            else => {},
-        }
-    }
-    if (depth != 0) return error.InvalidRequirement;
-    return .{ .trimmed = trimmed, .text = req_text };
-}
-
-/// Append one or more full `(requirement "text" ...)` forms to the top-level
-/// `(component ...)` form in `lib/components/{component}.sexp`. The caller
-/// supplies each requirement as a complete s-expression so arbitrarily
-/// structured bodies (with `(ref ...)` and/or `(check ...)` children) can be
-/// authored without this function needing to know the schema.
-///
-/// Atomic semantics: every requirement is validated and dedup-checked first,
-/// against both the existing file and earlier items in the same batch. If
-/// any one fails, the file is not touched at all — `out_failed_index` is
-/// set to the offending element so the caller can surface "requirement #N
-/// invalid" without a partial write to roll back.
-///
-/// On success, snapshots the library file once under
-/// `history/_lib/components/...` and writes once. Does not rebuild any
-/// design — callers must re-run a build to pick up the change.
-pub fn addComponentRequirementsCore(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    component: []const u8,
-    requirements: []const []const u8,
-    out_failed_index: *usize,
-) EditError!struct { snapshot: ?[]const u8, count: usize } {
-    out_failed_index.* = 0;
-    if (component.len == 0 or std.mem.indexOf(u8, component, "..") != null or std.mem.indexOfAny(u8, component, "/\\") != null) {
-        return error.InvalidSource;
-    }
-    if (requirements.len == 0) return error.InvalidRequirement;
-
-    const path = try std.fmt.allocPrint(allocator, COMPONENT_PATH_TEMPLATE, .{ project_dir, component });
-    defer allocator.free(path);
-    const source = infra_fs.cwd().readFileAlloc(allocator, path, 1 * 1024 * 1024) catch return error.ComponentNotFound;
-    defer allocator.free(source);
-
-    const comp_open = findOuterComponentOpen(source) orelse return error.MalformedSource;
-    const comp_end = findFormEnd(source, comp_open) orelse return error.MalformedSource;
-    const body = source[comp_open..comp_end];
-
-    // Pass 1: validate every form. On failure, surface the offending index
-    // and bail without touching the file. Allocate the parsed slice up front
-    // so we can also dedup later items against earlier ones in the batch
-    // without re-parsing.
-    var parsed = try allocator.alloc(ParsedRequirement, requirements.len);
-    defer allocator.free(parsed);
-    for (requirements, 0..) |raw, idx| {
-        out_failed_index.* = idx;
-        parsed[idx] = try validateRequirementForm(raw);
-    }
-
-    // Pass 2: dedup. Each new requirement's text must not match (a) any
-    // existing `(requirement "<text>"` in the file, nor (b) any earlier
-    // item in the same batch. Same-batch dedup catches the case where the
-    // agent accidentally generated the same rule twice — without it, the
-    // file would gain two byte-identical rules in one call.
-    for (parsed, 0..) |p, idx| {
-        const dup_needle = try std.fmt.allocPrint(allocator, "(requirement \"{s}\"", .{p.text});
-        defer allocator.free(dup_needle);
-        if (std.mem.indexOf(u8, body, dup_needle) != null) {
-            out_failed_index.* = idx;
-            return error.DuplicateRequirement;
-        }
-        for (parsed[0..idx]) |earlier| {
-            if (std.mem.eql(u8, earlier.text, p.text)) {
-                out_failed_index.* = idx;
-                return error.DuplicateRequirement;
-            }
-        }
-    }
-
-    // All clear — single snapshot, single splice.
-    const desc = try std.fmt.allocPrint(allocator, "add_component_requirements {s} (+{d})", .{ component, parsed.len });
-    defer allocator.free(desc);
-    const snap_id: ?[]const u8 = history.snapshotLibraryFile(allocator, project_dir, "components", component, desc) catch null;
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-    try w.writeAll(source[0 .. comp_end - 1]);
-    for (parsed) |p| {
-        try w.writeAll("\n  ");
-        try w.writeAll(p.trimmed);
-    }
-    try w.writeAll(source[comp_end - 1 ..]);
-
-    const file = infra_fs.cwd().createFile(path, .{}) catch return error.CannotWriteDesign;
-    defer file.close();
-    file.writeAll(buf.items) catch return error.CannotWriteDesign;
-
-    return .{ .snapshot = snap_id, .count = parsed.len };
-}
-
-/// Locate the opening paren of the first top-level `(component ...)` or
-/// `(component-family ...)` form. Ignores comments and leading whitespace.
-fn findOuterComponentOpen(source: []const u8) ?usize {
-    var i: usize = 0;
-    while (i < source.len) : (i += 1) {
-        const ch = source[i];
-        if (ch == ';') {
-            while (i < source.len and source[i] != '\n') : (i += 1) {}
-            continue;
-        }
-        if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') continue;
-        if (ch != '(') return null;
-        const tail = source[i + 1 ..];
-        if (std.mem.startsWith(u8, tail, "component-family") or std.mem.startsWith(u8, tail, "component")) {
-            return i;
-        }
-        return null;
-    }
-    return null;
-}
-
-/// Replace an entire `(instance "REF" ...)` form by reference designator
-/// with `new_source` (which must be a complete replacement instance form).
-pub fn replaceInstanceCore(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-    ref_des: []const u8,
-    new_source: []const u8,
-) EditError!MutationResult {
-    const source = try readDesignSource(allocator, project_dir, name);
-    defer allocator.free(source);
-
-    const needle = try std.fmt.allocPrint(allocator, INSTANCE_OPEN_TEMPLATE, .{ref_des});
-    defer allocator.free(needle);
-
-    const inst_start = std.mem.indexOf(u8, source, needle) orelse return error.InstanceNotFound;
-    const end = findFormEnd(source, inst_start) orelse return error.MalformedSource;
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-    try w.writeAll(source[0..inst_start]);
-    try w.writeAll(new_source);
-    try w.writeAll(source[end..]);
-
-    const desc = try std.fmt.allocPrint(allocator, "replace_instance {s}", .{ref_des});
-    defer allocator.free(desc);
-    return writeAndRebuild(allocator, project_dir, name, buf.items, desc);
 }
 
 /// GET /api/source/:name — returns `{"source":"<raw .sexp text>"}`.

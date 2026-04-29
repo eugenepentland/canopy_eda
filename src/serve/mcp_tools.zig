@@ -1,6 +1,7 @@
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
 const edit = @import("edit.zig");
+const vfs = @import("vfs.zig");
 const history = @import("history.zig");
 const serve_root = @import("../serve.zig");
 const render_json = @import("../render_json.zig");
@@ -24,15 +25,13 @@ const BOM_PATH_TEMPLATE = "{s}/src/{s}.bom";
 const NAME_FIELD_PREFIX = "{\"name\":";
 const REF_DES_FIELD_PREFIX = "{\"ref_des\":";
 const FUNCTION_FIELD = ",\"function\":";
-const KEY_COMPONENT = "component";
 const KEY_COMPONENTS = "components";
 const KEY_FOOTPRINTS = "footprints";
-const KEY_REQUIREMENTS = "requirements";
-const KEY_NEW_SOURCE = "new_source";
 const ERR_NOT_DESIGN = "error: not a design";
 const ERR_BUILD_FAILED = "error: build failed";
 const ERR_LINE_TEMPLATE = "error: {s}";
 const VERSION_SNAPSHOT_TEMPLATE = "{{\"ok\":true,\"version\":{d},\"snapshot\":";
+const JSON_NET_KEY = ",\"net\":";
 
 const EvalError = @import("../eval/evaluator.zig").EvalError;
 const RenderError = render_json.RenderError;
@@ -54,31 +53,32 @@ const ToolEntry = struct {
 };
 
 const tools = [_]ToolEntry{
+    // Project / library metadata (structured semantic data, not derivable from raw FS).
     .{ .name = "list_designs", .is_mutation = false },
-    .{ .name = "read_design", .is_mutation = false },
-    .{ .name = "write_design", .is_mutation = true },
-    .{ .name = "edit_value", .is_mutation = true },
-    .{ .name = "edit_mpn", .is_mutation = true },
-    .{ .name = "edit_section", .is_mutation = true },
-    .{ .name = "replace_instance", .is_mutation = true },
-    .{ .name = "get_schematic", .is_mutation = false },
-    .{ .name = "get_version", .is_mutation = false },
-    .{ .name = "run_checks", .is_mutation = false },
-    .{ .name = "list_history", .is_mutation = false },
-    .{ .name = "restore_version", .is_mutation = true },
     .{ .name = "list_library", .is_mutation = false },
-    .{ .name = "read_library_file", .is_mutation = false },
-    .{ .name = "edit_note", .is_mutation = true },
-    .{ .name = "add_import", .is_mutation = true },
-    .{ .name = "set_instance_pin", .is_mutation = true },
+    .{ .name = "list_history", .is_mutation = false },
+    .{ .name = "list_datasheets", .is_mutation = false },
     .{ .name = "list_instances", .is_mutation = false },
     .{ .name = "list_free_pins", .is_mutation = false },
     .{ .name = "get_net", .is_mutation = false },
-    .{ .name = "add_component_parameter", .is_mutation = true },
-    .{ .name = "add_component_requirements", .is_mutation = true },
-    .{ .name = "list_datasheets", .is_mutation = false },
+    .{ .name = "get_schematic", .is_mutation = false },
+    .{ .name = "get_version", .is_mutation = false },
+    .{ .name = "run_checks", .is_mutation = false },
+    .{ .name = "generate_review", .is_mutation = false },
     .{ .name = "get_review_state", .is_mutation = false },
+    // Mutations on review state and history.
     .{ .name = "set_review_state", .is_mutation = true },
+    .{ .name = "restore_version", .is_mutation = true },
+    // Virtual filesystem — agent reads/edits files like a local checkout.
+    .{ .name = "read_file", .is_mutation = false },
+    .{ .name = "list_dir", .is_mutation = false },
+    .{ .name = "glob", .is_mutation = false },
+    .{ .name = "write_file", .is_mutation = true },
+    .{ .name = "edit_file", .is_mutation = true },
+    .{ .name = "delete_file", .is_mutation = true },
+    .{ .name = "move_file", .is_mutation = true },
+    // Re-evaluate a design and push the result to live viewers.
+    .{ .name = "build", .is_mutation = true },
 };
 
 /// Tools that mutate .sexp files — gated to writer/admin roles.
@@ -125,382 +125,332 @@ fn callInner(
     args_val: ?std.json.Value,
     out: *std.ArrayListUnmanaged(u8),
 ) !bool {
+    if (try dispatchVfs(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
+    if (try dispatchProject(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
+    if (try dispatchInfo(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
+    if (try dispatchReview(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
+
     const w = out.writer(allocator);
-
-    if (std.mem.eql(u8, tool_name, "list_designs")) {
-        const summaries = try listDesignSummaries(allocator, project_dir);
-        try w.writeAll("[");
-        for (summaries, 0..) |s, i| {
-            if (i > 0) try w.writeAll(",");
-            try w.writeAll(NAME_FIELD_PREFIX);
-            try writeJsonString(w, s.name);
-            try w.writeAll(",\"title\":");
-            try writeJsonString(w, s.title);
-            try w.writeAll(",\"sections\":[");
-            for (s.sections, 0..) |sec, si| {
-                if (si > 0) try w.writeAll(",");
-                try writeJsonString(w, sec);
-            }
-            try w.print("],\"instance_count\":{d},\"net_count\":{d},\"mtime\":{d},\"build_ok\":{s}}}", .{
-                s.instance_count,
-                s.net_count,
-                s.mtime_sec,
-                if (s.build_ok) "true" else "false",
-            });
-        }
-        try w.writeAll("]");
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "read_design")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const src = edit.readDesignSourcePub(allocator, project_dir, name) catch |err| return editErrorMsg(out, allocator, err);
-        try w.writeAll("{\"source\":");
-        try writeJsonString(w, src);
-        try w.writeAll("}");
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "write_design")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const source = requireString(args_val, "source") orelse return missingArg(out, allocator, "source");
-        const result = edit.writeDesignCore(allocator, project_dir, name, source) catch |err| return editErrorMsg(out, allocator, err);
-        try w.print(VERSION_SNAPSHOT_TEMPLATE, .{result.version});
-        if (result.snapshot) |s| {
-            try writeJsonString(w, s);
-        } else {
-            try w.writeAll("null");
-        }
-        try w.writeAll("}");
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "get_schematic")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const graph = try renderSceneGraph(allocator, project_dir, name);
-        try w.writeAll(graph);
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "get_version")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const v = serve_root.getLiveVersion(name);
-        try w.print("{{\"version\":{d}}}", .{v});
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "edit_value")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const ref = requireString(args_val, "ref") orelse return missingArg(out, allocator, "ref");
-        const value = requireString(args_val, "value") orelse return missingArg(out, allocator, "value");
-        const result = edit.editValueCore(allocator, project_dir, name, ref, value) catch |err| return editErrorMsg(out, allocator, err);
-        try w.print("{{\"ok\":true,\"version\":{d}}}", .{result.version});
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "edit_mpn")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const ref = requireString(args_val, "ref") orelse return missingArg(out, allocator, "ref");
-        const mpn = optionalString(args_val, "mpn") orelse "";
-        const manufacturer = optionalString(args_val, "manufacturer") orelse "";
-        if (mpn.len == 0 and manufacturer.len == 0) return missingArg(out, allocator, "mpn or manufacturer");
-        const version = edit.editMpnCore(allocator, project_dir, name, ref, mpn, manufacturer) catch |err| {
-            try w.print(ERR_LINE_TEMPLATE, .{@errorName(err)});
-            return false;
-        };
-        try w.print("{{\"ok\":true,\"version\":{d}}}", .{version});
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "edit_section")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const section_name = requireString(args_val, "section_name") orelse return missingArg(out, allocator, "section_name");
-        const new_source = requireString(args_val, KEY_NEW_SOURCE) orelse return missingArg(out, allocator, KEY_NEW_SOURCE);
-        const result = edit.editSectionCore(allocator, project_dir, name, section_name, new_source) catch |err| return editErrorMsg(out, allocator, err);
-        try w.print(VERSION_SNAPSHOT_TEMPLATE, .{result.version});
-        if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
-        try w.writeAll("}");
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "replace_instance")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const ref = requireString(args_val, "ref") orelse return missingArg(out, allocator, "ref");
-        const new_source = requireString(args_val, KEY_NEW_SOURCE) orelse return missingArg(out, allocator, KEY_NEW_SOURCE);
-        const result = edit.replaceInstanceCore(allocator, project_dir, name, ref, new_source) catch |err| return editErrorMsg(out, allocator, err);
-        try w.print(VERSION_SNAPSHOT_TEMPLATE, .{result.version});
-        if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
-        try w.writeAll("}");
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "run_checks")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const scope = optionalString(args_val, "scope") orelse "both";
-        const severity = optionalString(args_val, "severity");
-        const changed_since = optionalString(args_val, "changed_since");
-        return try runChecks(allocator, project_dir, name, scope, severity, changed_since, w);
-    }
-
-    if (std.mem.eql(u8, tool_name, "generate_review")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        return try generateReview(allocator, project_dir, name, w);
-    }
-
-    if (std.mem.eql(u8, tool_name, "list_history")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const snaps = try history.listSnapshots(allocator, project_dir, name);
-        try w.writeAll("{\"snapshots\":[");
-        for (snaps, 0..) |s, i| {
-            if (i > 0) try w.writeAll(",");
-            try w.writeAll("{\"id\":");
-            try writeJsonString(w, s.id);
-            try w.writeAll(",\"description\":");
-            if (s.description) |d| try writeJsonString(w, d) else try w.writeAll("null");
-            try w.writeAll("}");
-        }
-        try w.writeAll("]}");
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "restore_version")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const id = requireString(args_val, "id") orelse return missingArg(out, allocator, "id");
-        const result = edit.restoreDesignCore(allocator, project_dir, name, id) catch |err| return editErrorMsg(out, allocator, err);
-        try w.print(VERSION_SNAPSHOT_TEMPLATE, .{result.version});
-        if (result.snapshot) |s| {
-            try writeJsonString(w, s);
-        } else {
-            try w.writeAll("null");
-        }
-        try w.writeAll("}");
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "list_library")) {
-        try w.writeAll("{");
-        const kinds = [_]struct { field: []const u8, sub: []const u8 }{
-            .{ .field = KEY_COMPONENTS, .sub = KEY_COMPONENTS },
-            .{ .field = "modules", .sub = "modules" },
-            .{ .field = "pinouts", .sub = "pinouts" },
-            .{ .field = KEY_FOOTPRINTS, .sub = KEY_FOOTPRINTS },
-        };
-        for (kinds, 0..) |k, i| {
-            if (i > 0) try w.writeAll(",");
-            try w.print("\"{s}\":", .{k.field});
-            try listLibrarySubdir(allocator, project_dir, k.sub, w);
-        }
-        try w.writeAll("}");
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "read_library_file")) {
-        const kind = requireString(args_val, "kind") orelse return missingArg(out, allocator, "kind");
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const sub = libraryKindSubdir(kind) orelse {
-            try w.print("error: invalid kind \"{s}\" (expected component|module|pinout|footprint)", .{kind});
-            return false;
-        };
-        // Path-traversal guard.
-        if (name.len == 0 or std.mem.indexOf(u8, name, "..") != null or std.mem.indexOfAny(u8, name, "/\\") != null) {
-            try w.writeAll("error: invalid name");
-            return false;
-        }
-        const path = try std.fmt.allocPrint(allocator, "{s}/lib/{s}/{s}.sexp", .{ project_dir, sub, name });
-        defer allocator.free(path);
-        const src = infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch {
-            try w.print("error: not found: lib/{s}/{s}.sexp", .{ sub, name });
-            return false;
-        };
-        try w.writeAll("{\"source\":");
-        try writeJsonString(w, src);
-        try w.writeAll("}");
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "edit_note")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const match = requireString(args_val, "match") orelse return missingArg(out, allocator, "match");
-        const new_text = requireString(args_val, "new_text") orelse return missingArg(out, allocator, "new_text");
-        const result = edit.editNoteCore(allocator, project_dir, name, match, new_text) catch |err| return editErrorMsg(out, allocator, err);
-        try w.print(VERSION_SNAPSHOT_TEMPLATE, .{result.version});
-        if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
-        try w.writeAll("}");
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "add_import")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const item = requireString(args_val, "item") orelse return missingArg(out, allocator, "item");
-        const result = edit.addImportCore(allocator, project_dir, name, item) catch |err| return editErrorMsg(out, allocator, err);
-        try w.print(VERSION_SNAPSHOT_TEMPLATE, .{result.version});
-        if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
-        try w.writeAll("}");
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "set_instance_pin")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const ref = requireString(args_val, "ref") orelse return missingArg(out, allocator, "ref");
-        const pin = requireString(args_val, "pin") orelse return missingArg(out, allocator, "pin");
-        const net = requireString(args_val, "net") orelse return missingArg(out, allocator, "net");
-        const result = edit.setInstancePinCore(allocator, project_dir, name, ref, pin, net) catch |err| return editErrorMsg(out, allocator, err);
-        try w.print(VERSION_SNAPSHOT_TEMPLATE, .{result.version});
-        if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
-        try w.writeAll("}");
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "list_instances")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        return try listInstances(allocator, project_dir, name, w);
-    }
-
-    if (std.mem.eql(u8, tool_name, "list_free_pins")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const ref = requireString(args_val, "ref") orelse return missingArg(out, allocator, "ref");
-        const filter = optionalString(args_val, "filter");
-        return try listFreePins(allocator, project_dir, name, ref, filter, w);
-    }
-
-    if (std.mem.eql(u8, tool_name, "get_net")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const net = requireString(args_val, "net") orelse return missingArg(out, allocator, "net");
-        return try getNet(allocator, project_dir, name, net, w);
-    }
-
-    if (std.mem.eql(u8, tool_name, "add_component_parameter")) {
-        const component = requireString(args_val, KEY_COMPONENT) orelse return missingArg(out, allocator, KEY_COMPONENT);
-        const param_name = requireString(args_val, "param_name") orelse return missingArg(out, allocator, "param_name");
-        const param_type = requireString(args_val, "param_type") orelse return missingArg(out, allocator, "param_type");
-        const result = edit.addComponentParameterCore(
-            allocator,
-            project_dir,
-            component,
-            param_name,
-            param_type,
-        ) catch |err| return editErrorMsg(out, allocator, err);
-        try w.writeAll("{\"ok\":true,\"snapshot\":");
-        if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
-        try w.writeAll("}");
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "add_component_requirements")) {
-        const component = requireString(args_val, KEY_COMPONENT) orelse return missingArg(out, allocator, KEY_COMPONENT);
-        // Pull the `requirements` array out of the JSON args. We materialize
-        // it as a `[][]const u8` so the core takes a plain slice and stays
-        // JSON-agnostic. Reject any non-string element rather than silently
-        // skipping — a typo'd item should fail loudly, not vanish.
-        const reqs_val = blk: {
-            const av = args_val orelse return missingArg(out, allocator, KEY_REQUIREMENTS);
-            if (av != .object) return missingArg(out, allocator, KEY_REQUIREMENTS);
-            break :blk av.object.get(KEY_REQUIREMENTS) orelse return missingArg(out, allocator, KEY_REQUIREMENTS);
-        };
-        if (reqs_val != .array) {
-            try w.writeAll("error: \"requirements\" must be an array of strings");
-            return false;
-        }
-        if (reqs_val.array.items.len == 0) {
-            try w.writeAll("error: \"requirements\" must contain at least one item");
-            return false;
-        }
-        var reqs = try allocator.alloc([]const u8, reqs_val.array.items.len);
-        defer allocator.free(reqs);
-        for (reqs_val.array.items, 0..) |item, i| {
-            if (item != .string) {
-                try w.print("error: requirements[{d}] is not a string", .{i});
-                return false;
-            }
-            reqs[i] = item.string;
-        }
-        var failed_idx: usize = 0;
-        const result = edit.addComponentRequirementsCore(allocator, project_dir, component, reqs, &failed_idx) catch |err| {
-            try w.print("error: requirements[{d}]: {s}", .{ failed_idx, @errorName(err) });
-            return false;
-        };
-        try w.print("{{\"ok\":true,\"count\":{d},\"snapshot\":", .{result.count});
-        if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
-        try w.writeAll("}");
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "list_datasheets")) {
-        return try listDatasheets(allocator, project_dir, w);
-    }
-
-    if (std.mem.eql(u8, tool_name, "get_review_state")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const state = review_state_mod.loadState(allocator, project_dir, name) catch review_mod.ReviewState{};
-        const json = review_state_mod.renderState(allocator, state) catch {
-            try w.writeAll("error: render failed");
-            return false;
-        };
-        try w.writeAll(json);
-        return true;
-    }
-
-    if (std.mem.eql(u8, tool_name, "set_review_state")) {
-        const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-        const slug = requireString(args_val, "section_slug") orelse return missingArg(out, allocator, "section_slug");
-
-        // Each field is optional but at least one should meaningfully
-        // mutate the state. We apply them in a fixed order: deletes,
-        // toggles, adds, approval — matches how a reviewer would act.
-        if (args_val) |av| if (av == .object) {
-            if (av.object.get("delete")) |d| if (d == .array) for (d.array.items) |id_val| {
-                if (id_val != .string) continue;
-                review_state_mod.deleteItem(allocator, project_dir, name, slug, id_val.string) catch |err| {
-                    try w.print("error: delete failed: {s}", .{@errorName(err)});
-                    return false;
-                };
-            };
-            if (av.object.get("toggle")) |t| if (t == .array) for (t.array.items) |row| {
-                if (row != .object) continue;
-                const id_v = row.object.get("id") orelse continue;
-                const ck_v = row.object.get("checked") orelse continue;
-                if (id_v != .string or ck_v != .bool) continue;
-                review_state_mod.toggleItem(allocator, project_dir, name, slug, id_v.string, ck_v.bool) catch |err| {
-                    try w.print("error: toggle failed: {s}", .{@errorName(err)});
-                    return false;
-                };
-            };
-            if (av.object.get("add_items")) |a| if (a == .array) for (a.array.items) |text_val| {
-                if (text_val != .string) continue;
-                _ = review_state_mod.addItem(allocator, project_dir, name, slug, text_val.string) catch |err| {
-                    try w.print("error: add failed: {s}", .{@errorName(err)});
-                    return false;
-                };
-            };
-            if (av.object.get("approved")) |ap| if (ap == .bool) {
-                const reviewer: []const u8 = optionalString(args_val, "reviewer") orelse "";
-                // MCP approval path: leave content_hash empty. This means the
-                // approval is stamped without a hash baseline, which by the
-                // `reconcile()` rule keeps it always-fresh. That's acceptable
-                // for automated workflows; the UI path computes the hash so
-                // human approvals get stale-detection.
-                review_state_mod.setApproval(allocator, project_dir, name, slug, ap.bool, reviewer, "") catch |err| {
-                    try w.print("error: approve failed: {s}", .{@errorName(err)});
-                    return false;
-                };
-            };
-        };
-
-        const v = serve_root.bumpLiveVersion(name);
-        try w.print("{{\"ok\":true,\"version\":{d}}}", .{v});
-        return true;
-    }
-
     try w.print("error: unknown tool \"{s}\"", .{tool_name});
     return false;
 }
 
-fn libraryKindSubdir(kind: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, kind, KEY_COMPONENT)) return KEY_COMPONENTS;
-    if (std.mem.eql(u8, kind, "module")) return "modules";
-    if (std.mem.eql(u8, kind, "pinout")) return "pinouts";
-    if (std.mem.eql(u8, kind, "footprint")) return KEY_FOOTPRINTS;
+/// Listing tools that scan the project tree (designs, library, history,
+/// datasheets, instances, free pins, net membership). Returns null when
+/// the tool name doesn't match any of these.
+fn dispatchProject(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    tool_name: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayListUnmanaged(u8),
+) !?bool {
+    const w = out.writer(allocator);
+    if (std.mem.eql(u8, tool_name, "list_designs")) return try toolListDesigns(allocator, project_dir, w);
+    if (std.mem.eql(u8, tool_name, "list_library")) return try toolListLibrary(allocator, project_dir, w);
+    if (std.mem.eql(u8, tool_name, "list_history")) return try toolListHistory(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "list_datasheets")) return try listDatasheets(allocator, project_dir, w);
+    if (std.mem.eql(u8, tool_name, "list_instances")) return try toolListInstances(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "list_free_pins")) return try toolListFreePins(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "get_net")) return try toolGetNet(allocator, project_dir, args_val, out);
     return null;
+}
+
+/// Diagnostic / introspection tools that don't change project state:
+/// scene graph, version counter, run_checks, generate_review,
+/// get_review_state.
+fn dispatchInfo(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    tool_name: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayListUnmanaged(u8),
+) !?bool {
+    const w = out.writer(allocator);
+    if (std.mem.eql(u8, tool_name, "get_schematic")) return try toolGetSchematic(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "get_version")) return try toolGetVersion(args_val, out, allocator);
+    if (std.mem.eql(u8, tool_name, "run_checks")) return try toolRunChecks(allocator, project_dir, args_val, out, w);
+    if (std.mem.eql(u8, tool_name, "generate_review")) return try toolGenerateReview(allocator, project_dir, args_val, w, out);
+    if (std.mem.eql(u8, tool_name, "get_review_state")) return try toolGetReviewState(allocator, project_dir, args_val, out);
+    return null;
+}
+
+/// Mutations on review state and history snapshots — the only mutators
+/// outside the VFS surface, since they don't touch source files.
+fn dispatchReview(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    tool_name: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayListUnmanaged(u8),
+) !?bool {
+    if (std.mem.eql(u8, tool_name, "restore_version")) return try toolRestoreVersion(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "set_review_state")) return try toolSetReviewState(allocator, project_dir, args_val, out);
+    return null;
+}
+
+fn toolListDesigns(allocator: std.mem.Allocator, project_dir: []const u8, w: anytype) !bool {
+    const summaries = try listDesignSummaries(allocator, project_dir);
+    try w.writeAll("[");
+    for (summaries, 0..) |s, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll(NAME_FIELD_PREFIX);
+        try writeJsonString(w, s.name);
+        try w.writeAll(",\"title\":");
+        try writeJsonString(w, s.title);
+        try w.writeAll(",\"sections\":[");
+        for (s.sections, 0..) |sec, si| {
+            if (si > 0) try w.writeAll(",");
+            try writeJsonString(w, sec);
+        }
+        try w.print("],\"instance_count\":{d},\"net_count\":{d},\"mtime\":{d},\"build_ok\":{s}}}", .{
+            s.instance_count, s.net_count, s.mtime_sec, if (s.build_ok) "true" else "false",
+        });
+    }
+    try w.writeAll("]");
+    return true;
+}
+
+fn toolListLibrary(allocator: std.mem.Allocator, project_dir: []const u8, w: anytype) !bool {
+    try w.writeAll("{");
+    const kinds = [_]struct { field: []const u8, sub: []const u8 }{
+        .{ .field = KEY_COMPONENTS, .sub = KEY_COMPONENTS },
+        .{ .field = "modules", .sub = "modules" },
+        .{ .field = "pinouts", .sub = "pinouts" },
+        .{ .field = KEY_FOOTPRINTS, .sub = KEY_FOOTPRINTS },
+    };
+    for (kinds, 0..) |k, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("\"{s}\":", .{k.field});
+        try listLibrarySubdir(allocator, project_dir, k.sub, w);
+    }
+    try w.writeAll("}");
+    return true;
+}
+
+fn toolListHistory(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const w = out.writer(allocator);
+    const snaps = try history.listSnapshots(allocator, project_dir, name);
+    try w.writeAll("{\"snapshots\":[");
+    for (snaps, 0..) |s, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"id\":");
+        try writeJsonString(w, s.id);
+        try w.writeAll(",\"description\":");
+        if (s.description) |d| try writeJsonString(w, d) else try w.writeAll("null");
+        try w.writeAll("}");
+    }
+    try w.writeAll("]}");
+    return true;
+}
+
+fn toolListInstances(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    return listInstances(allocator, project_dir, name, out.writer(allocator));
+}
+
+fn toolListFreePins(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const ref = requireString(args_val, "ref") orelse return missingArg(out, allocator, "ref");
+    return listFreePins(allocator, project_dir, name, ref, optionalString(args_val, "filter"), out.writer(allocator));
+}
+
+fn toolGetNet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const net = requireString(args_val, "net") orelse return missingArg(out, allocator, "net");
+    return getNet(allocator, project_dir, name, net, out.writer(allocator));
+}
+
+fn toolGetSchematic(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const graph = try renderSceneGraph(allocator, project_dir, name);
+    try out.writer(allocator).writeAll(graph);
+    return true;
+}
+
+fn toolGetVersion(args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const w = out.writer(allocator);
+    try w.print("{{\"version\":{d}}}", .{serve_root.getLiveVersion(name)});
+    return true;
+}
+
+fn toolRunChecks(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), w: anytype) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const scope = optionalString(args_val, "scope") orelse "both";
+    return runChecks(allocator, project_dir, name, scope, optionalString(args_val, "severity"), optionalString(args_val, "changed_since"), w);
+}
+
+fn toolGenerateReview(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, w: anytype, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    return generateReview(allocator, project_dir, name, w);
+}
+
+fn toolGetReviewState(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const state = review_state_mod.loadState(allocator, project_dir, name) catch review_mod.ReviewState{};
+    const w = out.writer(allocator);
+    const json = review_state_mod.renderState(allocator, state) catch {
+        try w.writeAll("error: render failed");
+        return false;
+    };
+    try w.writeAll(json);
+    return true;
+}
+
+fn toolRestoreVersion(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const id = requireString(args_val, "id") orelse return missingArg(out, allocator, "id");
+    const result = edit.restoreDesignCore(allocator, project_dir, name, id) catch |err| return editErrorMsg(out, allocator, err);
+    const w = out.writer(allocator);
+    try w.print(VERSION_SNAPSHOT_TEMPLATE, .{result.version});
+    if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
+    try w.writeAll("}");
+    return true;
+}
+
+fn toolSetReviewState(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const slug = requireString(args_val, "section_slug") orelse return missingArg(out, allocator, "section_slug");
+    const w = out.writer(allocator);
+
+    // Each field is optional but at least one should meaningfully
+    // mutate the state. We apply them in a fixed order: deletes,
+    // toggles, adds, approval — matches how a reviewer would act.
+    if (args_val) |av| if (av == .object) {
+        try applyReviewDeletes(allocator, project_dir, name, slug, av, w);
+        try applyReviewToggles(allocator, project_dir, name, slug, av, w);
+        try applyReviewAdds(allocator, project_dir, name, slug, av, w);
+        try applyReviewApproval(allocator, project_dir, name, slug, args_val, av, w);
+    };
+
+    const v = serve_root.bumpLiveVersion(name);
+    try w.print("{{\"ok\":true,\"version\":{d}}}", .{v});
+    return true;
+}
+
+fn applyReviewDeletes(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, slug: []const u8, av: std.json.Value, w: anytype) !void {
+    if (av.object.get("delete")) |d| if (d == .array) for (d.array.items) |id_val| {
+        if (id_val != .string) continue;
+        review_state_mod.deleteItem(allocator, project_dir, name, slug, id_val.string) catch |err| {
+            try w.print("error: delete failed: {s}", .{@errorName(err)});
+        };
+    };
+}
+
+fn applyReviewToggles(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, slug: []const u8, av: std.json.Value, w: anytype) !void {
+    if (av.object.get("toggle")) |t| if (t == .array) for (t.array.items) |row| {
+        if (row != .object) continue;
+        const id_v = row.object.get("id") orelse continue;
+        const ck_v = row.object.get("checked") orelse continue;
+        if (id_v != .string or ck_v != .bool) continue;
+        review_state_mod.toggleItem(allocator, project_dir, name, slug, id_v.string, ck_v.bool) catch |err| {
+            try w.print("error: toggle failed: {s}", .{@errorName(err)});
+        };
+    };
+}
+
+fn applyReviewAdds(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, slug: []const u8, av: std.json.Value, w: anytype) !void {
+    if (av.object.get("add_items")) |a| if (a == .array) for (a.array.items) |text_val| {
+        if (text_val != .string) continue;
+        _ = review_state_mod.addItem(allocator, project_dir, name, slug, text_val.string) catch |err| {
+            try w.print("error: add failed: {s}", .{@errorName(err)});
+        };
+    };
+}
+
+fn applyReviewApproval(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    slug: []const u8,
+    args_val: ?std.json.Value,
+    av: std.json.Value,
+    w: anytype,
+) !void {
+    if (av.object.get("approved")) |ap| if (ap == .bool) {
+        const reviewer: []const u8 = optionalString(args_val, "reviewer") orelse "";
+        // MCP approval path: leave content_hash empty. The reconcile()
+        // rule keeps these always-fresh — fine for automated workflows;
+        // human approvals via the UI compute the hash for stale detection.
+        review_state_mod.setApproval(allocator, project_dir, name, slug, ap.bool, reviewer, "") catch |err| {
+            try w.print("error: approve failed: {s}", .{@errorName(err)});
+        };
+    };
+}
+
+/// Dispatch the virtual-filesystem tools (read_file/write_file/edit_file/
+/// list_dir/glob/delete_file/move_file) and the `build` worker. Returns
+/// `null` when `tool_name` is none of those, so the caller can keep
+/// matching against the project-tools and review-state arms.
+fn dispatchVfs(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    tool_name: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayListUnmanaged(u8),
+) !?bool {
+    const Ctx = struct { allocator: std.mem.Allocator, project_dir: []const u8, args: ?std.json.Value, out: *std.ArrayListUnmanaged(u8) };
+    const ctx = Ctx{ .allocator = allocator, .project_dir = project_dir, .args = args_val, .out = out };
+    if (std.mem.eql(u8, tool_name, "read_file")) return try toolReadFile(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "write_file")) return try toolWriteFile(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "edit_file")) return try toolEditFile(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "list_dir")) return try toolListDir(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "glob")) return try toolGlob(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "delete_file")) return try toolDeleteFile(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "move_file")) return try toolMoveFile(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "build")) return try toolBuild(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    return null;
+}
+
+fn toolReadFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const path = requireString(args_val, "path") orelse return missingArg(out, allocator, "path");
+    return vfs.readFile(allocator, project_dir, path, optionalU64(args_val, "offset"), optionalU64(args_val, "limit"), out);
+}
+
+fn toolWriteFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const path = requireString(args_val, "path") orelse return missingArg(out, allocator, "path");
+    const content = requireString(args_val, "content") orelse return missingArg(out, allocator, "content");
+    return vfs.writeFile(allocator, project_dir, path, content, optionalString(args_val, "expected_sha256"), out);
+}
+
+fn toolEditFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const path = requireString(args_val, "path") orelse return missingArg(out, allocator, "path");
+    const old_s = requireString(args_val, "old_string") orelse return missingArg(out, allocator, "old_string");
+    const new_s = requireString(args_val, "new_string") orelse return missingArg(out, allocator, "new_string");
+    const replace_mode: vfs.ReplaceMode = if (optionalBool(args_val, "replace_all") orelse false) .all else .single;
+    return vfs.editFile(allocator, project_dir, path, old_s, new_s, optionalString(args_val, "expected_sha256"), replace_mode, out);
+}
+
+fn toolListDir(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const path = optionalString(args_val, "path") orelse "";
+    const list_mode: vfs.ListMode = if (optionalBool(args_val, "recursive") orelse false) .recursive else .flat;
+    return vfs.listDir(allocator, project_dir, path, list_mode, optionalU64(args_val, "max_entries"), out);
+}
+
+fn toolGlob(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const pattern = requireString(args_val, "pattern") orelse return missingArg(out, allocator, "pattern");
+    return vfs.glob(allocator, project_dir, pattern, optionalString(args_val, "base"), out);
+}
+
+fn toolDeleteFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const path = requireString(args_val, "path") orelse return missingArg(out, allocator, "path");
+    return vfs.deleteFile(allocator, project_dir, path, out);
+}
+
+fn toolMoveFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const from = requireString(args_val, "from") orelse return missingArg(out, allocator, "from");
+    const to = requireString(args_val, "to") orelse return missingArg(out, allocator, "to");
+    return vfs.moveFile(allocator, project_dir, from, to, out);
+}
+
+fn toolBuild(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const report = edit.rebuildDesign(allocator, project_dir, name);
+    const w = out.writer(allocator);
+    try writeBuildReport(w, report);
+    return true;
 }
 
 /// Write a JSON array of {name, description} objects for every .sexp file
@@ -694,7 +644,7 @@ fn runChecks(
                 try writeJsonString(w, v.ref_des);
             }
             if (v.net.len > 0) {
-                try w.writeAll(",\"net\":");
+                try w.writeAll(JSON_NET_KEY);
                 try writeJsonString(w, v.net);
             }
             try w.writeAll("}");
@@ -1019,7 +969,7 @@ pub fn listFreePins(
         try writeJsonString(w, pin_id);
         try w.writeAll(FUNCTION_FIELD);
         try writeJsonString(w, fname);
-        try w.writeAll(",\"net\":");
+        try w.writeAll(JSON_NET_KEY);
         try writeJsonString(w, net_name);
         try w.print(",\"category\":\"{s}\"}}", .{categoryName(cat)});
     }
@@ -1234,6 +1184,73 @@ fn optionalString(args_val: ?std.json.Value, key: []const u8) ?[]const u8 {
     if (av != .object) return null;
     const v = av.object.get(key) orelse return null;
     return if (v == .string) v.string else null;
+}
+
+fn optionalU64(args_val: ?std.json.Value, key: []const u8) ?u64 {
+    const av = args_val orelse return null;
+    if (av != .object) return null;
+    const v = av.object.get(key) orelse return null;
+    // If/else chain rather than `switch (v)` so this doesn't trip the
+    // `repeated-switch-on-enum` check (the same shape lives in edit.zig).
+    if (v == .integer) {
+        if (v.integer < 0) return null;
+        return @intCast(v.integer);
+    }
+    if (v == .float) {
+        if (v.float < 0) return null;
+        return @intFromFloat(v.float);
+    }
+    return null;
+}
+
+fn optionalBool(args_val: ?std.json.Value, key: []const u8) ?bool {
+    const av = args_val orelse return null;
+    if (av != .object) return null;
+    const v = av.object.get(key) orelse return null;
+    return if (v == .bool) v.bool else null;
+}
+
+/// Render a `BuildReport` from `edit.rebuildDesign` as the JSON the MCP
+/// `build` tool returns. Failures keep the live_version unchanged but
+/// still report the error message and any partial assertion results.
+fn writeBuildReport(w: anytype, report: edit.BuildReport) !void {
+    try w.writeAll("{\"ok\":");
+    try w.writeAll(if (report.ok) "true" else "false");
+    try w.print(",\"version\":{d},\"eval_ok\":{s}", .{
+        report.version,
+        if (report.eval_ok) "true" else "false",
+    });
+    try w.writeAll(",\"snapshot\":");
+    if (report.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
+    try w.writeAll(",\"error\":");
+    if (report.error_message) |m| try writeJsonString(w, m) else try w.writeAll("null");
+    try w.writeAll(",\"assertion_failures\":[");
+    for (report.assertion_failures, 0..) |a, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"message\":");
+        try writeJsonString(w, a.message);
+        try w.print(",\"is_warning\":{s}}}", .{if (a.is_warning) "true" else "false"});
+    }
+    try w.writeAll("],\"erc\":[");
+    for (report.erc, 0..) |v, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"kind\":\"");
+        try w.writeAll(@tagName(v.kind));
+        try w.writeAll("\",\"severity\":\"");
+        try w.writeAll(@tagName(v.severity));
+        try w.writeAll("\",\"message\":");
+        try writeJsonString(w, v.message);
+        if (v.ref_des.len > 0) {
+            try w.writeAll(",\"ref\":");
+            try writeJsonString(w, v.ref_des);
+        }
+        if (v.net.len > 0) {
+            try w.writeAll(JSON_NET_KEY);
+            try writeJsonString(w, v.net);
+        }
+        try w.writeAll("}");
+    }
+    try w.writeAll("]}");
 }
 
 /// Write `s` as a JSON string literal (with escapes) to `w`.

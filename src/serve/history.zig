@@ -136,50 +136,6 @@ pub fn listSnapshots(
     return entries.toOwnedSlice(allocator);
 }
 
-/// Copy a library file under `lib/<subdir>/<name>.sexp` into
-/// `history/_lib/<subdir>/<name>/<timestamp>/<name>.sexp`, so library edits
-/// are undoable. Returns the snapshot id (caller owns) or null if the source
-/// does not exist yet.
-pub fn snapshotLibraryFile(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    subdir: []const u8,
-    name: []const u8,
-    description: ?[]const u8,
-) HistoryError!?[]const u8 {
-    const src = try std.fmt.allocPrint(allocator, "{s}/lib/{s}/{s}.sexp", .{ project_dir, subdir, name });
-    defer allocator.free(src);
-
-    infra_fs.cwd().access(src, .{}) catch |e| switch (e) {
-        error.FileNotFound => return null,
-        else => return e,
-    };
-
-    const id = try makeTimestamp(allocator);
-    errdefer allocator.free(id);
-
-    const dir = try std.fmt.allocPrint(allocator, "{s}/history/_lib/{s}/{s}/{s}", .{ project_dir, subdir, name, id });
-    defer allocator.free(dir);
-    try infra_fs.cwd().makePath(dir);
-
-    const dst = try std.fmt.allocPrint(allocator, SEXP_FILE_TEMPLATE, .{ dir, name });
-    defer allocator.free(dst);
-    try infra_fs.cwd().copyFile(src, infra_fs.cwd(), dst, .{});
-
-    if (description) |d| if (d.len > 0) {
-        const note_path = try std.fmt.allocPrint(allocator, "{s}/.note", .{dir});
-        defer allocator.free(note_path);
-        if (infra_fs.cwd().createFile(note_path, .{})) |f| {
-            defer f.close();
-            f.writeAll(d) catch |e| {
-                log.warn("write .note failed: {s}", .{@errorName(e)});
-            };
-        } else |_| {}
-    };
-
-    return id;
-}
-
 /// Restore the snapshot at `id` back into src/. Does NOT snapshot the current
 /// state — callers should call `snapshot` first if they want the restore to
 /// be undoable.
