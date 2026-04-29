@@ -417,11 +417,11 @@ const collectNetTies = netlist_mod.collectNetTies;
 const applyNetTies = netlist_mod.applyNetTies;
 const FlatTie = netlist_mod.FlatTie;
 
-fn flattenAndMergeNets(
+pub fn flattenAndMergeNets(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     nets: *std.ArrayListUnmanaged(FlatNet),
-) !void {
+) std.mem.Allocator.Error!void {
     try collectNets(allocator, block, "", nets);
     var ties: std.ArrayListUnmanaged(FlatTie) = .empty;
     defer ties.deinit(allocator);

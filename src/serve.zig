@@ -200,6 +200,7 @@ pub fn serve(
     router.get("/api/sync-manifest/:name", sync.syncManifestApi, .{});
     router.get("/api/netlist/:name", sync.netlistApi, .{});
     router.get("/api/object/:sha", sync.objectApi, .{});
+    router.post("/api/sync-plan/:name", sync.syncPlanApi, .{});
     router.get("/api/kicad-sync-config/:name", kicad_sync.getConfigApi, .{});
     router.post("/api/kicad-sync-config/:name", kicad_sync.setConfigApi, .{});
     router.post("/api/export-netlist-to-dir/:name", kicad_sync.writeNetlistApi, .{});

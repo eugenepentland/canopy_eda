@@ -746,6 +746,7 @@ pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     // only sync routes; other APIs still require a session.
     if (std.mem.startsWith(u8, req.url.path, "/api/sync-manifest/") or
         std.mem.startsWith(u8, req.url.path, "/api/netlist/") or
+        std.mem.startsWith(u8, req.url.path, "/api/sync-plan/") or
         std.mem.startsWith(u8, req.url.path, "/api/object/"))
     {
         if (validatePluginBearerToken(ctx, req)) return true;

@@ -106,6 +106,7 @@ src/export_gerber.zig::exportGerber | fn exportGerber( allocator: std.mem.Alloca
 src/export_kicad.zig::exportKicad | fn exportKicad( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, output_dir: []const u8, design_name: []const u8, ) ExportError!void
 src/export_kicad.zig::exportKicadZip | fn exportKicadZip( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, ) ExportError![]const u8
 src/export_kicad.zig::exportNetlistOnly | fn exportNetlistOnly( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, ) ExportError![]const u8
+src/export_kicad.zig::flattenAndMergeNets | fn flattenAndMergeNets( allocator: std.mem.Allocator, block: *const DesignBlock, nets: *std.ArrayListUnmanaged(FlatNet), ) std.mem.Allocator.Error!void
 src/export_kicad.zig::uuidFromId | fn uuidFromId(allocator: std.mem.Allocator, id: []const u8) std.mem.Allocator.Error![]const u8
 src/export_kicad_footprint.zig::buildZip | fn buildZip(allocator: std.mem.Allocator, entries: []const ZipEntry) std.mem.Allocator.Error![]const u8
 src/export_kicad_footprint.zig::exportFootprintMod | fn exportFootprintMod( allocator: std.mem.Allocator, source: []const u8, model_name: ?[]const u8, model_offset: ?[3]f64, model_rotation: ?[3]f64, ) FootprintError![]const u8
@@ -395,6 +396,7 @@ src/serve/spa_shell.zig::shellApi | fn shellApi(_: *Handler, _: *httpz.Request, 
 src/serve/sync.zig::netlistApi | fn netlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/sync.zig::objectApi | fn objectApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/sync.zig::syncManifestApi | fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/sync.zig::syncPlanApi | fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/upload.zig::extractFootprintName | fn extractFootprintName(allocator: std.mem.Allocator, footprint: []const u8) ?[]const u8
 src/serve/upload.zig::extractPackageName | fn extractPackageName(sym_data: []const u8) []const u8
 src/serve/upload.zig::sanitizeName | fn sanitizeName(allocator: std.mem.Allocator, name: []const u8) []const u8

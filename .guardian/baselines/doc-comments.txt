@@ -1,1 +1,2 @@
 # guardian-snapshot v1
+src/export_kicad.zig: pub fn flattenAndMergeNets has no /// doc comment

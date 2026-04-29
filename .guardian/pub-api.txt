@@ -191,6 +191,7 @@ src/export_kicad.zig::exportKicad fn
 src/export_kicad.zig::exportKicadZip fn
 src/export_kicad.zig::exportNetlistOnly fn
 src/export_kicad.zig::exportSectionLayout value
+src/export_kicad.zig::flattenAndMergeNets fn
 src/export_kicad.zig::loadModelConfig value
 src/export_kicad.zig::parseFloat3 value
 src/export_kicad.zig::uuidFromId fn
@@ -640,6 +641,7 @@ src/serve/sync.zig::HandlerError value
 src/serve/sync.zig::netlistApi fn
 src/serve/sync.zig::objectApi fn
 src/serve/sync.zig::syncManifestApi fn
+src/serve/sync.zig::syncPlanApi fn
 src/serve/upload.zig::HandlerError value
 src/serve/upload.zig::extractFootprintName fn
 src/serve/upload.zig::extractPackageName fn
