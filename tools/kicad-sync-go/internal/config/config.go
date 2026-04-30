@@ -101,8 +101,19 @@ func (s *TokenStore) write(m map[string]TokenRecord) error {
 	return atomicWrite(s.Path, data, 0o600)
 }
 
+// canonicalServerURL strips trailing slashes so a token saved with
+// "https://x.dev" matches a lookup with "https://x.dev/" and vice versa.
+// Without this, a stray slash in the per-board config triggers re-auth on
+// every click.
+func canonicalServerURL(s string) string {
+	for len(s) > 0 && s[len(s)-1] == '/' {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
 func tokenKey(serverURL, clientID string) string {
-	return serverURL + "#" + clientID
+	return canonicalServerURL(serverURL) + "#" + clientID
 }
 
 // Get fetches the cached record for (serverURL, clientID), or zero-value if missing.
@@ -110,8 +121,10 @@ func (s *TokenStore) Get(serverURL, clientID string) TokenRecord {
 	return s.read()[tokenKey(serverURL, clientID)]
 }
 
-// Put stores or replaces the record.
+// Put stores or replaces the record. The stored ServerURL is canonicalised
+// so subsequent Get calls match regardless of trailing-slash variation.
 func (s *TokenStore) Put(rec TokenRecord) error {
+	rec.ServerURL = canonicalServerURL(rec.ServerURL)
 	m := s.read()
 	m[tokenKey(rec.ServerURL, rec.ClientID)] = rec
 	return s.write(m)

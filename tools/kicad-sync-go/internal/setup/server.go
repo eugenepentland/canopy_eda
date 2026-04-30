@@ -63,7 +63,7 @@ func Run(boardPath string, initial config.BoardConfig) (config.BoardConfig, erro
 			return
 		}
 		cfg := config.BoardConfig{
-			ServerURL:    strings.TrimSpace(r.FormValue("server_url")),
+			ServerURL:    strings.TrimRight(strings.TrimSpace(r.FormValue("server_url")), "/"),
 			Design:       strings.TrimSpace(r.FormValue("design")),
 			ClientID:     strings.TrimSpace(r.FormValue("client_id")),
 			ClientSecret: strings.TrimSpace(r.FormValue("client_secret")),

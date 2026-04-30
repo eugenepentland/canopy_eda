@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -45,8 +46,13 @@ func EnsureToken(serverURL, clientID, clientSecret string, store *config.TokenSt
 	}
 	cached := store.Get(serverURL, clientID)
 	if cached.Fresh() {
+		fmt.Fprintf(os.Stderr, "oauth: cache HIT for %s (expires_at=%d, now=%d)\n",
+			clientID, cached.ExpiresAt, time.Now().Unix())
 		return cached, nil
 	}
+	fmt.Fprintf(os.Stderr,
+		"oauth: cache MISS for client_id=%s server=%s (cached.token=%q, cached.expires_at=%d, now=%d) — opening browser\n",
+		clientID, serverURL, cached.AccessToken, cached.ExpiresAt, time.Now().Unix())
 	rec, err := Authorize(serverURL, clientID, clientSecret)
 	if err != nil {
 		return config.TokenRecord{}, err
@@ -54,6 +60,7 @@ func EnsureToken(serverURL, clientID, clientSecret string, store *config.TokenSt
 	if err := store.Put(rec); err != nil {
 		return rec, fmt.Errorf("save token: %w", err)
 	}
+	fmt.Fprintf(os.Stderr, "oauth: token saved at %s\n", store.Path)
 	return rec, nil
 }
 
