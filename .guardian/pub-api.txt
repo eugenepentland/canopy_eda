@@ -492,6 +492,8 @@ src/serve/bom_html.zig::writeComponentsJson fn
 src/serve/bom_html.zig::writeJsonEscaped value
 src/serve/bom_html.zig::writeNetsJson fn
 src/serve/bom_html.zig::writeSchematicBomHtml fn
+src/serve/component_info.zig::DescribeError value
+src/serve/component_info.zig::describeComponent fn
 src/serve/edit.zig::AssertionFailure struct_
 src/serve/edit.zig::BuildReport struct_
 src/serve/edit.zig::EditError value
@@ -622,8 +624,15 @@ src/serve/upload.zig::saveSourceFile fn
 src/serve/upload.zig::uploadZipApi fn
 src/serve/upload.zig::writeComponentFile fn
 src/serve/upload_datasheet.zig::HandlerError value
+src/serve/upload_datasheet.zig::SanitizeError value
+src/serve/upload_datasheet.zig::StoreError value
+src/serve/upload_datasheet.zig::isPdfMagic fn
 src/serve/upload_datasheet.zig::listDatasheetsApi fn
+src/serve/upload_datasheet.zig::sanitizeFilename fn
 src/serve/upload_datasheet.zig::serveDatasheetApi fn
+src/serve/upload_datasheet.zig::storeDatasheet fn
+src/serve/upload_datasheet.zig::storeErrorBody fn
+src/serve/upload_datasheet.zig::storeErrorStatus fn
 src/serve/upload_datasheet.zig::uploadDatasheetApi fn
 src/serve/upload_package.zig::HandlerError value
 src/serve/upload_package.zig::uploadFootprintApi fn

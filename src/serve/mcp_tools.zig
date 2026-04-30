@@ -18,6 +18,8 @@ const review_mod = @import("../review.zig");
 const review_json_mod = @import("../review_json.zig");
 const review_state_mod = @import("../review_state.zig");
 const req_checks = @import("../req_checks.zig");
+const component_info = @import("component_info.zig");
+const symbol_conv = @import("../convert/symbol.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const SEXP_PATH_TEMPLATE = "{s}/src/{s}.sexp";
@@ -60,6 +62,7 @@ const tools = [_]ToolEntry{
     .{ .name = "list_instances", .is_mutation = false },
     .{ .name = "list_free_pins", .is_mutation = false },
     .{ .name = "get_net", .is_mutation = false },
+    .{ .name = "describe_component", .is_mutation = false },
     .{ .name = "get_schematic", .is_mutation = false },
     .{ .name = "get_version", .is_mutation = false },
     .{ .name = "run_checks", .is_mutation = false },
@@ -78,6 +81,8 @@ const tools = [_]ToolEntry{
     .{ .name = "move_file", .is_mutation = true },
     // Re-evaluate a design and push the result to live viewers.
     .{ .name = "build", .is_mutation = true },
+    // KiCad-source-driven regeneration of an auto-generated pinout file.
+    .{ .name = "regenerate_pinout", .is_mutation = true },
 };
 
 /// Tools that mutate .sexp files — gated to writer/admin roles.
@@ -151,6 +156,7 @@ fn dispatchProject(
     if (std.mem.eql(u8, tool_name, "list_instances")) return try toolListInstances(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "list_free_pins")) return try toolListFreePins(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "get_net")) return try toolGetNet(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "describe_component")) return try toolDescribeComponent(allocator, project_dir, args_val, out);
     return null;
 }
 
@@ -258,6 +264,11 @@ fn toolGetNet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const net = requireString(args_val, "net") orelse return missingArg(out, allocator, "net");
     return getNet(allocator, project_dir, name, net, out.writer(allocator));
+}
+
+fn toolDescribeComponent(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    return component_info.describeComponent(allocator, project_dir, name, out);
 }
 
 fn toolGetSchematic(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
@@ -399,6 +410,7 @@ fn dispatchVfs(
     if (std.mem.eql(u8, tool_name, "delete_file")) return try toolDeleteFile(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "move_file")) return try toolMoveFile(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "build")) return try toolBuild(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "regenerate_pinout")) return try toolRegeneratePinout(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     return null;
 }
 
@@ -449,6 +461,124 @@ fn toolBuild(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?s
     const w = out.writer(allocator);
     try writeBuildReport(w, report);
     return true;
+}
+
+/// Regenerate `lib/pinouts/<name>.sexp` from `<source>` (a `.kicad_sym`
+/// in `lib/sources/`). Mirrors what the `eda convert-pinout` CLI does
+/// — same `generatePinout` function, same `;; Auto-generated pinout`
+/// header — but routes the write through the VFS so sandbox checks
+/// apply and the response carries `dirty_designs`/`library_changes`
+/// alongside the path written.
+///
+/// Defaults: `name` falls back to the source file's basename (minus
+/// `.kicad_sym`); `filter` is forwarded straight to generatePinout for
+/// multi-symbol library files.
+fn toolRegeneratePinout(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayListUnmanaged(u8),
+) !bool {
+    const source = requireString(args_val, "source") orelse return missingArg(out, allocator, "source");
+    const w = out.writer(allocator);
+
+    // Source must live under lib/sources/ (read access from there is in the
+    // sandbox; we don't go through writeFile so we must check explicitly).
+    if (!std.mem.startsWith(u8, source, "lib/sources/")) {
+        try w.writeAll("{\"ok\":false,\"error\":\"source must be a path under lib/sources/\"}");
+        return false;
+    }
+
+    // Read the .kicad_sym through the VFS surface — same path validation,
+    // same deny-list rules, no new code path for traversal escapes.
+    var read_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer read_buf.deinit(allocator);
+    const read_ok = try vfs.readFile(allocator, project_dir, source, null, null, &read_buf);
+    if (!read_ok) {
+        // Forward the structured error from readFile verbatim.
+        try w.writeAll(read_buf.items);
+        return false;
+    }
+
+    // readFile returns JSON; pull `content` out for symbol_conv. Errors
+    // here mean the source was a binary extension (so we'd have got base64)
+    // or the JSON was malformed — both are bugs, not user errors.
+    const source_text = try extractFileContent(allocator, read_buf.items);
+    defer allocator.free(source_text);
+
+    const filter = optionalString(args_val, "filter");
+    const raw_pinout = symbol_conv.generatePinout(allocator, source_text, filter) catch |err| {
+        try w.print("{{\"ok\":false,\"error\":\"convert failed: {s}\"}}", .{@errorName(err)});
+        return false;
+    };
+    defer allocator.free(raw_pinout);
+
+    // Inject a `;; source: <path>` header so describe_component can surface
+    // the source-of-truth linkage. Future regenerations stay idempotent —
+    // generatePinout always re-emits the standard header so the previous
+    // source line is overwritten by the next regenerate_pinout call.
+    const pinout_text = try std.fmt.allocPrint(
+        allocator,
+        ";; source: {s}\n{s}",
+        .{ source, raw_pinout },
+    );
+    defer allocator.free(pinout_text);
+
+    // Default the output basename from the source filename, stripping the
+    // .kicad_sym extension. Caller can override with `name`.
+    const default_name = blk: {
+        const base = std.fs.path.basename(source);
+        break :blk if (std.mem.endsWith(u8, base, ".kicad_sym"))
+            base[0 .. base.len - ".kicad_sym".len]
+        else
+            base;
+    };
+    const out_name = optionalString(args_val, "name") orelse default_name;
+    if (out_name.len == 0 or std.mem.indexOfAny(u8, out_name, "/\\") != null or std.mem.indexOf(u8, out_name, "..") != null) {
+        try w.writeAll("{\"ok\":false,\"error\":\"invalid output name\"}");
+        return false;
+    }
+
+    const out_path = try std.fmt.allocPrint(allocator, "lib/pinouts/{s}.sexp", .{out_name});
+    defer allocator.free(out_path);
+
+    var write_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer write_buf.deinit(allocator);
+    const wrote_ok = try vfs.writeFile(allocator, project_dir, out_path, pinout_text, null, &write_buf);
+    if (!wrote_ok) {
+        // writeFile already emitted a structured `{"error":"..."}`.
+        try w.writeAll(write_buf.items);
+        return false;
+    }
+
+    // Wrap the write response with `ok:true` and the source we converted
+    // from. Splice in writeFile's existing JSON object verbatim by
+    // stripping its outer braces and re-emitting them with the extra
+    // fields prepended.
+    if (write_buf.items.len < 2 or write_buf.items[0] != '{' or write_buf.items[write_buf.items.len - 1] != '}') {
+        // writeFile contract: always object literal. If that ever changes,
+        // surface the raw response so the failure is debuggable.
+        try w.writeAll(write_buf.items);
+        return true;
+    }
+    try w.writeAll("{\"ok\":true,\"source\":");
+    try writeJsonString(w, source);
+    try w.writeAll(",");
+    try w.writeAll(write_buf.items[1..]);
+    return true;
+}
+
+/// Extract the `content` string from a successful `vfs.readFile` JSON
+/// response. The schema is `{"path":"…","size":N,"sha256":"…","truncated":B,
+/// "binary":false,"content":"…"}` — we only need to unescape `content`.
+/// Returns an allocator-owned slice so the caller can free it.
+fn extractFileContent(allocator: std.mem.Allocator, json_str: []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidFormat;
+    const v = parsed.value.object.get("content") orelse return error.InvalidFormat;
+    if (v != .string) return error.InvalidFormat;
+    return allocator.dupe(u8, v.string);
 }
 
 /// Write a JSON array of {name, description} objects for every .sexp file

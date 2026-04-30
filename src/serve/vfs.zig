@@ -23,10 +23,23 @@ const DEFAULT_LIST_ENTRIES: usize = 1024;
 // Repeated JSON / error fragments — extracted so the same literal isn't
 // duplicated across handlers.
 const JSON_PATH_OPEN = "{\"path\":";
+const JSON_LIBRARY_CHANGES_KEY = ",\"library_changes\":";
 const ERR_NOT_FOUND = "not found";
 const ERR_ACCESS_DENIED = "access denied";
 const ERR_FILE_TOO_LARGE = "file too large";
 const ERR_REFUSE_SYMLINK = "refusing to write through symlink";
+
+// Library subdirectory prefixes — shared between READ_PREFIXES, WRITE_PREFIXES,
+// `denialHint`, and `libraryEntityFor` so a new subdir or rename only touches
+// one place.
+const LIB_COMPONENTS = "lib/components/";
+const LIB_MODULES = "lib/modules/";
+const LIB_PINOUTS = "lib/pinouts/";
+const LIB_FOOTPRINTS = "lib/footprints/";
+const LIB_DATASHEETS = "lib/datasheets/";
+const LIB_MODELS = "lib/models/";
+const LIB_SOURCES = "lib/sources/";
+const LIB_PARTS = "lib/parts/";
 
 const Mode = enum { read, write };
 
@@ -70,14 +83,18 @@ pub const VfsError = std.mem.Allocator.Error || std.Io.Writer.Error ||
 /// itself (for `list_dir ""`).
 const READ_PREFIXES = [_][]const u8{
     "src/",
-    "lib/components/",
-    "lib/modules/",
-    "lib/pinouts/",
-    "lib/footprints/",
-    "lib/datasheets/",
-    "lib/models/",
-    "lib/sources/",
-    "lib/parts/",
+    // Bare `lib/` is readable so `list_dir lib` works. Reads of files
+    // *under* `lib/` still need to match a more specific subdir prefix
+    // — listing the parent shouldn't grant access to its children.
+    "lib/",
+    LIB_COMPONENTS,
+    LIB_MODULES,
+    LIB_PINOUTS,
+    LIB_FOOTPRINTS,
+    LIB_DATASHEETS,
+    LIB_MODELS,
+    LIB_SOURCES,
+    LIB_PARTS,
     "blocks/",
     "out/",
     "reviews/",
@@ -86,13 +103,20 @@ const READ_PREFIXES = [_][]const u8{
 
 /// Top-level prefixes that may be written. Stricter than reads — `history/`
 /// is read-only (use the `restore_version` tool); `out/` is build output;
-/// datasheets and 3D models are imported by humans.
+/// `lib/datasheets/` is read-only via write_file (use the `upload_datasheet`
+/// tool); 3D models and curated parts are imported by humans.
+///
+/// `lib/sources/` is writable so agents can correct upstream KiCad symbol or
+/// footprint files before re-running `regenerate_pinout` — the
+/// `;; DO NOT EDIT` header on auto-generated pinouts only stays honest if
+/// the *source* of those pinouts can be edited too.
 const WRITE_PREFIXES = [_][]const u8{
     "src/",
-    "lib/components/",
-    "lib/modules/",
-    "lib/pinouts/",
-    "lib/footprints/",
+    LIB_COMPONENTS,
+    LIB_MODULES,
+    LIB_PINOUTS,
+    LIB_FOOTPRINTS,
+    LIB_SOURCES,
     "blocks/",
 };
 
@@ -247,6 +271,118 @@ fn sandboxErrorMsg(err: SandboxError) []const u8 {
     };
 }
 
+/// Return a human-readable hint when the agent hits a denial that has a
+/// well-known workaround. Keeps the generic "permission denied" message in
+/// the `error` field and adds the redirection in `hint`. Common cases:
+///   - `list_dir lib` / `lib/`      → suggest list_library / list_dir on a subdir
+///   - write to lib/datasheets/*    → point at upload_datasheet
+///   - write to history/, out/      → explain why these are read-only
+/// Returns null when no specific guidance applies; caller emits no hint.
+///
+/// Trailing slashes and `./` prefixes are normalised here because the catch
+/// path passes the agent's raw input (un-validated), so `"lib/"` and `"lib"`
+/// must both produce the same hint.
+fn denialHint(rel_path: []const u8, mode: Mode) ?[]const u8 {
+    if (rel_path.len == 0) return null;
+    const norm = normalizePathForHint(rel_path);
+    if (norm.len == 0) return null;
+
+    if (mode == .read) {
+        // Bare "lib" — not in READ_PREFIXES (which require trailing slash + content).
+        // Also catch attempts to read sub-paths of `lib/` that aren't a known
+        // subdir (e.g. `list_dir lib/widgets`) — the right answer is still
+        // "use list_library to see which subdirs exist."
+        if (std.mem.eql(u8, norm, "lib") or
+            (std.mem.startsWith(u8, norm, "lib/") and !isKnownLibSubdir(norm)))
+        {
+            return "use list_library, or list_dir on a known subdir " ++
+                "(components/, modules/, pinouts/, footprints/, " ++
+                "datasheets/, sources/, models/, parts/) under lib/";
+        }
+        return null;
+    }
+
+    // mode == .write
+    if (matchesPrefix(norm, LIB_DATASHEETS) or std.mem.eql(u8, norm, "lib/datasheets")) {
+        return "lib/datasheets/ is read-only from MCP — ask the user to " ++
+            "drop the PDF on disk or upload via the browser library page";
+    }
+    if (matchesPrefix(norm, "history/") or std.mem.eql(u8, norm, "history")) {
+        return "history/ is read-only; use restore_version to revert a design to a prior snapshot";
+    }
+    if (matchesPrefix(norm, "out/") or std.mem.eql(u8, norm, "out")) {
+        return "out/ holds build outputs and is regenerated by the build tool; nothing to write there directly";
+    }
+    if (matchesPrefix(norm, LIB_MODELS) or std.mem.eql(u8, norm, "lib/models")) {
+        return "lib/models/ holds 3D STEP models imported by humans; not currently writable from MCP";
+    }
+    if (matchesPrefix(norm, LIB_PARTS) or std.mem.eql(u8, norm, "lib/parts")) {
+        return "lib/parts/ holds curated part data imported by humans; not currently writable from MCP";
+    }
+    if (isReadOnlyExt(norm)) {
+        return "this extension is regenerated by build (e.g. .layout, .bom) and not directly writable";
+    }
+    return null;
+}
+
+/// True if `rel_path` is exactly the directory `prefix` (with or without
+/// trailing slash) or any path under it. Used by `denialHint` to map a
+/// denied path to a single subtree without repeating the literal twice.
+fn matchesPrefix(rel_path: []const u8, prefix: []const u8) bool {
+    if (std.mem.startsWith(u8, rel_path, prefix)) return true;
+    if (prefix.len > 0 and prefix[prefix.len - 1] == '/') {
+        const stripped = prefix[0 .. prefix.len - 1];
+        return std.mem.eql(u8, rel_path, stripped);
+    }
+    return false;
+}
+
+/// Normalise the kind of small variations the agent might pass in so the
+/// hint matchers don't need a case for each. Strips a leading `./` and any
+/// trailing `/`. Slice into the input — caller must NOT free.
+fn normalizePathForHint(rel_path: []const u8) []const u8 {
+    var p = rel_path;
+    if (std.mem.startsWith(u8, p, "./")) p = p[2..];
+    while (p.len > 1 and p[p.len - 1] == '/') p = p[0 .. p.len - 1];
+    return p;
+}
+
+/// True iff `norm` (a `lib/`-prefixed path) is rooted at one of the
+/// directories `list_library` actually exposes. Used to decide whether to
+/// hint at `list_library` for an unknown subdir or stay quiet.
+fn isKnownLibSubdir(norm: []const u8) bool {
+    const known = [_][]const u8{
+        LIB_COMPONENTS, LIB_MODULES, LIB_PINOUTS, LIB_FOOTPRINTS,
+        LIB_DATASHEETS, LIB_SOURCES, LIB_MODELS,  LIB_PARTS,
+    };
+    for (known) |p| if (matchesPrefix(norm, p)) return true;
+    return false;
+}
+
+/// Write a sandbox error response with an optional hint. Drop-in replacement
+/// for `writeError(out, allocator, sandboxErrorMsg(e))` at sites where the
+/// agent benefits from a redirection (list_dir on lib, write to datasheets).
+fn writeSandboxError(
+    out: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    err: SandboxError,
+    rel_path: []const u8,
+    mode: Mode,
+) !bool {
+    out.clearRetainingCapacity();
+    const w = out.writer(allocator);
+    try w.writeAll("{\"error\":");
+    try writeJsonString(w, sandboxErrorMsg(err));
+    if (err == error.PermissionDenied) {
+        if (denialHint(rel_path, mode)) |hint| {
+            try w.writeAll(",\"hint\":");
+            try writeJsonString(w, hint);
+        }
+    }
+    try w.writeAll("}");
+    return false;
+}
+
 fn writeError(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, msg: []const u8) !bool {
     out.clearRetainingCapacity();
     const w = out.writer(allocator);
@@ -294,7 +430,7 @@ pub fn readFile(
     out: *std.ArrayListUnmanaged(u8),
 ) VfsError!bool {
     const resolved = resolveSandboxedWithRel(allocator, project_dir, rel_path, .read) catch |e| {
-        return writeError(out, allocator, sandboxErrorMsg(e));
+        return writeSandboxError(out, allocator, e, rel_path, .read);
     };
     defer allocator.free(resolved.abs);
 
@@ -363,7 +499,7 @@ pub fn writeFile(
         return writeError(out, allocator, "content too large");
     }
     const resolved = resolveSandboxedWithRel(allocator, project_dir, rel_path, .write) catch |e| {
-        return writeError(out, allocator, sandboxErrorMsg(e));
+        return writeSandboxError(out, allocator, e, rel_path, .write);
     };
     defer allocator.free(resolved.abs);
 
@@ -413,6 +549,8 @@ pub fn writeFile(
     try writeJsonString(w, resolved.rel);
     try w.print(",\"bytes_written\":{d},\"sha256\":\"{s}\",\"dirty_designs\":", .{ content.len, hash_hex[0..] });
     try writeDirtyDesigns(w, allocator, project_dir, resolved.rel);
+    try w.writeAll(JSON_LIBRARY_CHANGES_KEY);
+    try writeLibraryChanges(w, resolved.rel);
     try w.writeAll("}");
     return true;
 }
@@ -464,7 +602,7 @@ pub fn editFile(
     }
     const replace_all = replace_mode == .all;
     const resolved = resolveSandboxedWithRel(allocator, project_dir, rel_path, .write) catch |e| {
-        return writeError(out, allocator, sandboxErrorMsg(e));
+        return writeSandboxError(out, allocator, e, rel_path, .write);
     };
     defer allocator.free(resolved.abs);
 
@@ -530,6 +668,8 @@ pub fn editFile(
     try writeJsonString(w, resolved.rel);
     try w.print(",\"replacements\":{d},\"sha256\":\"{s}\",\"dirty_designs\":", .{ replacements, hash_hex[0..] });
     try writeDirtyDesigns(w, allocator, project_dir, resolved.rel);
+    try w.writeAll(JSON_LIBRARY_CHANGES_KEY);
+    try writeLibraryChanges(w, resolved.rel);
     try w.writeAll("}");
     return true;
 }
@@ -572,7 +712,7 @@ pub fn listDir(
         owned_abs = true;
     } else {
         const r = resolveSandboxedWithRel(allocator, project_dir, rel_path, .read) catch |e| {
-            return writeError(out, allocator, sandboxErrorMsg(e));
+            return writeSandboxError(out, allocator, e, rel_path, .read);
         };
         abs = r.abs;
         canonical = r.rel;
@@ -671,7 +811,7 @@ pub fn glob(
         base_abs = try allocator.dupe(u8, project_dir);
     } else {
         const r = resolveSandboxedWithRel(allocator, project_dir, base_rel, .read) catch |e| {
-            return writeError(out, allocator, sandboxErrorMsg(e));
+            return writeSandboxError(out, allocator, e, base_rel, .read);
         };
         base_abs = r.abs;
         base_canonical = r.rel;
@@ -777,7 +917,7 @@ pub fn deleteFile(
     out: *std.ArrayListUnmanaged(u8),
 ) VfsError!bool {
     const resolved = resolveSandboxedWithRel(allocator, project_dir, rel_path, .write) catch |e| {
-        return writeError(out, allocator, sandboxErrorMsg(e));
+        return writeSandboxError(out, allocator, e, rel_path, .write);
     };
     defer allocator.free(resolved.abs);
 
@@ -798,6 +938,8 @@ pub fn deleteFile(
     try writeJsonString(w, resolved.rel);
     try w.writeAll(",\"deleted\":true,\"dirty_designs\":");
     try writeDirtyDesigns(w, allocator, project_dir, resolved.rel);
+    try w.writeAll(JSON_LIBRARY_CHANGES_KEY);
+    try writeLibraryChanges(w, resolved.rel);
     try w.writeAll("}");
     return true;
 }
@@ -812,11 +954,11 @@ pub fn moveFile(
     out: *std.ArrayListUnmanaged(u8),
 ) VfsError!bool {
     const from = resolveSandboxedWithRel(allocator, project_dir, from_rel, .write) catch |e| {
-        return writeError(out, allocator, sandboxErrorMsg(e));
+        return writeSandboxError(out, allocator, e, from_rel, .write);
     };
     defer allocator.free(from.abs);
     const to = resolveSandboxedWithRel(allocator, project_dir, to_rel, .write) catch |e| {
-        return writeError(out, allocator, sandboxErrorMsg(e));
+        return writeSandboxError(out, allocator, e, to_rel, .write);
     };
     defer allocator.free(to.abs);
 
@@ -841,8 +983,68 @@ pub fn moveFile(
     try writeJsonString(w, to.rel);
     try w.writeAll(",\"dirty_designs\":");
     try writeDirtyDesigns(w, allocator, project_dir, to.rel);
+    try w.writeAll(JSON_LIBRARY_CHANGES_KEY);
+    try writeLibraryChanges(w, to.rel);
     try w.writeAll("}");
     return true;
+}
+
+/// Write a `library_changes` JSON array describing which library entity (if
+/// any) was touched by the write. Computed purely from `rel_path` — no file
+/// content parsing — so it remains accurate even if the agent edited the
+/// file into something unparsable. Empty array for paths outside `lib/`.
+///
+/// Why this exists: when an agent edits `lib/components/foo.sexp` and no
+/// design currently imports `foo`, `dirty_designs` is correctly `[]` but the
+/// empty array reads as "nothing happened." `library_changes` is the
+/// unambiguous "the write landed at this library entity" signal so the agent
+/// doesn't second-guess and re-write.
+fn writeLibraryChanges(w: anytype, rel_path: []const u8) !void {
+    try w.writeAll("[");
+    if (libraryEntityFor(rel_path)) |entity| {
+        try w.writeAll("{\"kind\":\"");
+        try w.writeAll(entity.kind);
+        try w.writeAll("\",\"name\":");
+        try writeJsonString(w, entity.name);
+        try w.writeAll(",\"path\":");
+        try writeJsonString(w, rel_path);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+}
+
+const LibraryEntity = struct {
+    kind: []const u8,
+    name: []const u8,
+};
+
+/// Map `lib/<sub>/<name>.<ext>` to `{kind, name}`. Returns null for paths
+/// outside the library or for files in unknown subdirs. The `name` is the
+/// basename stripped of its extension; library-aware tools key on this.
+fn libraryEntityFor(rel_path: []const u8) ?LibraryEntity {
+    const Map = struct { prefix: []const u8, kind: []const u8 };
+    const known = [_]Map{
+        .{ .prefix = LIB_COMPONENTS, .kind = "component" },
+        .{ .prefix = LIB_MODULES, .kind = "module" },
+        .{ .prefix = LIB_PINOUTS, .kind = "pinout" },
+        .{ .prefix = LIB_FOOTPRINTS, .kind = "footprint" },
+        .{ .prefix = LIB_DATASHEETS, .kind = "datasheet" },
+        .{ .prefix = LIB_SOURCES, .kind = "source" },
+        .{ .prefix = LIB_MODELS, .kind = "model" },
+        .{ .prefix = LIB_PARTS, .kind = "part" },
+    };
+    for (known) |m| {
+        if (!std.mem.startsWith(u8, rel_path, m.prefix)) continue;
+        const tail = rel_path[m.prefix.len..];
+        if (tail.len == 0 or std.mem.indexOfScalar(u8, tail, '/') != null) return null;
+        // Strip trailing extension (last '.'). Datasheets keep the .pdf
+        // suffix off the name, sources lose .kicad_sym, etc.
+        const dot_idx = std.mem.lastIndexOfScalar(u8, tail, '.');
+        const base = if (dot_idx) |di| tail[0..di] else tail;
+        if (base.len == 0) return null;
+        return .{ .kind = m.kind, .name = base };
+    }
+    return null;
 }
 
 /// Compute which design names are made dirty by a write to `rel_path`.
@@ -972,6 +1174,12 @@ test "checkAcl allows src and lib paths" {
     try std.testing.expectEqual({}, try checkAcl("lib/components/cap-0402.sexp", .write));
     try std.testing.expectEqual({}, try checkAcl("blocks/buck-boost.sexp", .write));
     try std.testing.expectEqual({}, try checkAcl("lib/datasheets/foo.pdf", .read));
+    try std.testing.expectEqual({}, try checkAcl("lib/sources/foo.kicad_sym", .write));
+}
+
+test "checkAcl denies writes to lib/datasheets via write_file" {
+    // spec: serve/vfs - denies write_file on lib/datasheets (use upload_datasheet)
+    try std.testing.expectError(error.PermissionDenied, checkAcl("lib/datasheets/foo.pdf", .write));
 }
 
 test "checkAcl denies auth and oauth paths" {
@@ -1007,4 +1215,42 @@ test "importsName word boundary" {
     try std.testing.expect(importsName("(import cap-0402)", "cap-0402"));
     try std.testing.expect(!importsName("(import cap-0402-special)", "cap-0402"));
     try std.testing.expect(importsName("(import foo)\n(import bar)", "bar"));
+}
+
+test "denialHint surfaces lib redirection on read for slash variants" {
+    // spec: serve/vfs - denialHint redirects bare lib listing to list_library
+    // The catch path passes the agent's raw input; both `lib` and `lib/` must hint.
+    try std.testing.expect(denialHint("lib", .read) != null);
+    try std.testing.expect(denialHint("lib/", .read) != null);
+    try std.testing.expect(denialHint("./lib", .read) != null);
+    try std.testing.expect(denialHint("./lib/", .read) != null);
+    // Unknown subdir under lib/ also hints — the agent should run list_library first.
+    try std.testing.expect(denialHint("lib/widgets", .read) != null);
+    // Known subdirs aren't actually denied, but if they were we'd not hint.
+    try std.testing.expect(denialHint("lib/components/foo.sexp", .read) == null);
+}
+
+test "denialHint surfaces upload_datasheet on write to lib/datasheets" {
+    // spec: serve/vfs - denialHint points at upload_datasheet for PDF writes
+    try std.testing.expect(denialHint("lib/datasheets/foo.pdf", .write) != null);
+    try std.testing.expect(denialHint("lib/datasheets", .write) != null);
+    try std.testing.expect(denialHint("lib/datasheets/", .write) != null);
+    try std.testing.expect(denialHint("lib/components/foo.sexp", .write) == null);
+}
+
+test "libraryEntityFor maps lib paths to entity descriptors" {
+    // spec: serve/vfs - libraryEntityFor classifies library subdirs
+    const c = libraryEntityFor("lib/components/adar2004accz.sexp").?;
+    try std.testing.expectEqualStrings("component", c.kind);
+    try std.testing.expectEqualStrings("adar2004accz", c.name);
+
+    const p = libraryEntityFor("lib/pinouts/foo.sexp").?;
+    try std.testing.expectEqualStrings("pinout", p.kind);
+
+    const d = libraryEntityFor("lib/datasheets/example.pdf").?;
+    try std.testing.expectEqualStrings("datasheet", d.kind);
+    try std.testing.expectEqualStrings("example", d.name);
+
+    try std.testing.expect(libraryEntityFor("src/foo.sexp") == null);
+    try std.testing.expect(libraryEntityFor("lib/components/sub/nested.sexp") == null);
 }

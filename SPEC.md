@@ -228,3 +228,24 @@ Public functions: readFile, writeFile, editFile, listDir, glob, deleteFile, move
 - denies writes to .layout files
 - matches basic glob patterns
 - import detection respects word boundaries
+- denialHint redirects bare lib listing to list_library
+- denialHint points at upload_datasheet for PDF writes
+- libraryEntityFor classifies library subdirs
+- denies write_file on lib/datasheets (use upload_datasheet)
+
+## serve/component_info
+
+Public functions: describeComponent
+
+- kebab-cases every Check variant tag
+- findSourceComment finds the source-of-truth path
+- parsePinoutBody normalises pin ID shapes
+
+## serve/upload_datasheet
+
+Public functions: uploadDatasheetApi, listDatasheetsApi, serveDatasheetApi, isPdfMagic, sanitizeFilename, storeDatasheet, storeErrorBody, storeErrorStatus
+
+- sanitize strips path segments
+- sanitize forces .pdf extension
+- sanitize replaces unsafe chars
+- isPdfMagic gates non-PDF input

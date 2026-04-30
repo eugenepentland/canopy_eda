@@ -301,6 +301,7 @@ src/serve/bom_html.zig::writeBomHtml | fn writeBomHtml(wr: anytype, block: *cons
 src/serve/bom_html.zig::writeComponentsJson | fn writeComponentsJson( w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8, sym_cache: *const SymbolPinCache, allocator: std.mem.Allocator, project_dir: []const u8, ) BomError!bool
 src/serve/bom_html.zig::writeNetsJson | fn writeNetsJson(w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8) BomError!bool
 src/serve/bom_html.zig::writeSchematicBomHtml | fn writeSchematicBomHtml(wr: anytype, block: *const env_mod.DesignBlock) BomError!void
+src/serve/component_info.zig::describeComponent | fn describeComponent( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, out: *std.ArrayListUnmanaged(u8), ) DescribeError!bool
 src/serve/edit.zig::addComponentDatasheetCore | fn addComponentDatasheetCore( allocator: std.mem.Allocator, project_dir: []const u8, component_name: []const u8, pdf: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::addInstanceApi | fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::addInstanceCore | fn addInstanceCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, section: []const u8, component: []const u8, value: []const u8, pins: []const PinAssignment, ) EditError!MutationResult
@@ -391,8 +392,13 @@ src/serve/upload.zig::sanitizeName | fn sanitizeName(allocator: std.mem.Allocato
 src/serve/upload.zig::saveSourceFile | fn saveSourceFile(allocator: std.mem.Allocator, project_dir: []const u8, filename: []const u8, body_data: []const u8) void
 src/serve/upload.zig::uploadZipApi | fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/upload.zig::writeComponentFile | fn writeComponentFile( allocator: std.mem.Allocator, project_dir: []const u8, safe_name: []const u8, pinout_name: []const u8, footprint_name: []const u8, sym_data: []const u8, ) void
+src/serve/upload_datasheet.zig::isPdfMagic | fn isPdfMagic(body: []const u8) bool
 src/serve/upload_datasheet.zig::listDatasheetsApi | fn listDatasheetsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/upload_datasheet.zig::sanitizeFilename | fn sanitizeFilename(allocator: std.mem.Allocator, raw: []const u8) SanitizeError![]u8
 src/serve/upload_datasheet.zig::serveDatasheetApi | fn serveDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/upload_datasheet.zig::storeDatasheet | fn storeDatasheet( allocator: std.mem.Allocator, project_dir: []const u8, raw_filename: []const u8, body: []const u8, ) StoreError!struct { name: []u8, size: usize }
+src/serve/upload_datasheet.zig::storeErrorBody | fn storeErrorBody(e: StoreError) ?[]const u8
+src/serve/upload_datasheet.zig::storeErrorStatus | fn storeErrorStatus(e: StoreError) u16
 src/serve/upload_datasheet.zig::uploadDatasheetApi | fn uploadDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/upload_package.zig::uploadFootprintApi | fn uploadFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/upload_package.zig::uploadPackageApi | fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void

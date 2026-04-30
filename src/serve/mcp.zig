@@ -151,6 +151,12 @@ fn handleToolCall(
     return resultEnvelope(allocator, id_val, result.items);
 }
 
+/// Static help document advertised as the `eda://docs/workspace` resource.
+/// Markdown rather than JSON so MCP clients render it as prose. Covers the
+/// sandbox layout, mutation response shape, pinout regeneration workflow,
+/// and the `(id …)` / Unicode quirks that aren't obvious from tool docs.
+const workspace_doc: []const u8 = @embedFile("assets/workspace.md");
+
 fn handleResourcesList(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -159,10 +165,15 @@ fn handleResourcesList(
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
     try w.writeAll("{\"resources\":[");
+    // Static help resource — emitted first so clients with a UI for
+    // "important resources" surface it without having to scroll through
+    // every design schematic.
+    try w.writeAll("{\"uri\":\"eda://docs/workspace\",\"name\":\"workspace\",");
+    try w.writeAll("\"description\":\"Sandbox layout, mutation response shapes, pinout regeneration, (id ...) semantics, Unicode in strings.\",");
+    try w.writeAll("\"mimeType\":\"text/markdown\"}");
     const names = mcp_tools.listDesignNames(allocator, project_dir) catch &[_][]const u8{};
-    for (names, 0..) |design, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll("{\"uri\":\"eda://schematic/");
+    for (names) |design| {
+        try w.writeAll(",{\"uri\":\"eda://schematic/");
         try w.writeAll(design);
         try w.writeAll("\",\"name\":\"");
         try w.writeAll(design);
@@ -182,6 +193,19 @@ fn handleResourcesRead(
     if (p != .object) return errorEnvelope(allocator, id_val, JSONRPC_INVALID_PARAMS, "params must be an object");
 
     const uri = if (p.object.get("uri")) |u| (if (u == .string) u.string else "") else "";
+
+    // Static workspace help — embedded markdown, no project access needed.
+    if (std.mem.eql(u8, uri, "eda://docs/workspace")) {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        const w = buf.writer(allocator);
+        try w.writeAll("{\"contents\":[{\"uri\":\"");
+        try w.writeAll(uri);
+        try w.writeAll("\",\"mimeType\":\"text/markdown\",\"text\":");
+        try writeJsonStringTo(w, workspace_doc);
+        try w.writeAll("}]}");
+        return resultEnvelope(allocator, id_val, buf.items);
+    }
+
     const prefix = "eda://schematic/";
     if (!std.mem.startsWith(u8, uri, prefix)) {
         return errorEnvelope(allocator, id_val, JSONRPC_INVALID_PARAMS, "unknown resource uri");
