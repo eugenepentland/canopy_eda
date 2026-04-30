@@ -93,8 +93,17 @@ pub fn authorizePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     if (!std.mem.eql(u8, code_challenge_method, "S256")) return badRequest(res, "code_challenge_method must be \"S256\"");
 
     const client = store.findClient(ctx.allocator, ctx.auth_dir, client_id) orelse return badRequest(res, "unknown client_id");
-    if (!std.mem.eql(u8, client.redirect_uri, redirect_uri)) {
-        return badRequest(res, "redirect_uri does not match registered URI");
+    if (!redirectUriMatches(client.redirect_uri, redirect_uri)) {
+        const msg = try std.fmt.allocPrint(
+            req.arena,
+            "redirect_uri mismatch.\n" ++
+                "Requested:  {s}\n" ++
+                "Registered: {s}\n\n" ++
+                "Revoke this client at /account and re-register with a matching URI.\n" ++
+                "(Loopback ports may differ — host and path must match.)",
+            .{ redirect_uri, client.redirect_uri },
+        );
+        return badRequest(res, msg);
     }
 
     const signed_in_email: ?[]const u8 = auth.currentEmail(ctx, req);
@@ -163,7 +172,7 @@ pub fn authorizeApprove(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     const scope = form.get("scope") orelse "mcp";
 
     const client = store.findClient(ctx.allocator, ctx.auth_dir, client_id) orelse return badRequest(res, "unknown client_id");
-    if (!std.mem.eql(u8, client.redirect_uri, redirect_uri)) return badRequest(res, "redirect_uri mismatch");
+    if (!redirectUriMatches(client.redirect_uri, redirect_uri)) return badRequest(res, "redirect_uri mismatch");
 
     const code = try store.issueCode(ctx.allocator, ctx.auth_dir, client_id, redirect_uri, email, code_challenge, scope);
 
@@ -195,7 +204,7 @@ pub fn tokenEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const auth_code = store.consumeCode(ctx.allocator, ctx.auth_dir, code) orelse
         return tokenError(req, res, ERR_INVALID_GRANT, "code expired or already used");
     if (!std.mem.eql(u8, auth_code.client_id, client_id)) return tokenError(req, res, ERR_INVALID_GRANT, "code was issued to a different client");
-    if (!std.mem.eql(u8, auth_code.redirect_uri, redirect_uri)) return tokenError(req, res, ERR_INVALID_GRANT, "redirect_uri mismatch");
+    if (!redirectUriMatches(auth_code.redirect_uri, redirect_uri)) return tokenError(req, res, ERR_INVALID_GRANT, "redirect_uri mismatch");
 
     const pkce_ok = try store.verifyPkce(ctx.allocator, code_verifier, auth_code.code_challenge);
     if (!pkce_ok) return tokenError(req, res, ERR_INVALID_GRANT, "PKCE verification failed");
@@ -211,6 +220,58 @@ pub fn tokenEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     ,
         .{ access_token, auth_code.scope },
     );
+}
+
+/// True when `requested` matches `registered` either exactly, or both are
+/// loopback URIs in which case any port is accepted (RFC 8252 §7.3 — native
+/// apps can't pre-register a fixed port because the OS may have it already).
+/// Both URIs must use the same scheme + host + path; only the port may
+/// differ on loopback.
+fn redirectUriMatches(registered: []const u8, requested: []const u8) bool {
+    if (std.mem.eql(u8, registered, requested)) return true;
+    const a = parseLoopbackUri(registered) orelse return false;
+    const b = parseLoopbackUri(requested) orelse return false;
+    return std.mem.eql(u8, a.host, b.host) and std.mem.eql(u8, a.path, b.path);
+}
+
+const LoopbackUri = struct { host: []const u8, path: []const u8 };
+
+/// Returns host/path for `http://127.0.0.1[:port][/path]` or
+/// `http://localhost[:port][/path]`. Anything else (https, other hosts,
+/// missing scheme) returns null so the strict-equality fallback applies.
+const HTTP_PREFIX = "http" ++ "://";
+
+fn parseLoopbackUri(uri: []const u8) ?LoopbackUri {
+    if (!std.mem.startsWith(u8, uri, HTTP_PREFIX)) return null;
+    const rest = uri[HTTP_PREFIX.len..];
+    // Split off the path at the first '/'.
+    const path_start = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+    var hostport = rest[0..path_start];
+    const path = if (path_start == rest.len) "" else rest[path_start..];
+    // Strip the port if present.
+    if (std.mem.indexOfScalar(u8, hostport, ':')) |colon| hostport = hostport[0..colon];
+    if (!std.mem.eql(u8, hostport, "127.0.0.1") and !std.mem.eql(u8, hostport, "localhost")) return null;
+    return .{ .host = hostport, .path = path };
+}
+
+test "redirectUriMatches: exact" {
+    try std.testing.expect(redirectUriMatches("http://x.example/cb", "http://x.example/cb"));
+    try std.testing.expect(!redirectUriMatches("http://x.example/cb", "http://y.example/cb"));
+}
+
+test "redirectUriMatches: loopback flex port" {
+    try std.testing.expect(redirectUriMatches("http://127.0.0.1:53682/callback", "http://127.0.0.1:9000/callback"));
+    try std.testing.expect(redirectUriMatches("http://127.0.0.1/callback", "http://127.0.0.1:53682/callback"));
+}
+
+test "redirectUriMatches: loopback different paths" {
+    try std.testing.expect(!redirectUriMatches("http://127.0.0.1:53682/callback", "http://127.0.0.1:53682/other"));
+}
+
+test "redirectUriMatches: localhost vs 127.0.0.1 still strict on host" {
+    // RFC 8252 considers these the same host but we keep them distinct to
+    // match what most OAuth servers do — apps should pick one and stick.
+    try std.testing.expect(!redirectUriMatches("http://localhost:53682/callback", "http://127.0.0.1:53682/callback"));
 }
 
 fn badRequest(res: *httpz.Response, msg: []const u8) void {
