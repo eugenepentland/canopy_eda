@@ -23,7 +23,6 @@ const pdf_viewer = @import("serve/pdf_viewer.zig");
 const footprint_preview = @import("serve/footprint_preview.zig");
 const model = @import("serve/model.zig");
 const schematic_page = @import("serve/schematic_page.zig");
-const canvas_page = @import("serve/canvas_page.zig");
 const pcb_page = @import("serve/pcb_page.zig");
 const auth = @import("serve/auth.zig");
 const mcp = @import("serve/mcp.zig");
@@ -183,9 +182,6 @@ pub fn serve(
     router.get("/", pages.indexPage, .{});
     router.get("/style.css", pages.cssPage, .{});
     router.get("/schematics/:name", schematic_page.schematicPage, .{});
-    // Legacy Pixi.js canvas kept alongside the new HTML view while the HTML
-    // version catches up on editing / search / pin-move parity.
-    router.get("/schematics/:name/canvas", canvas_page.canvasPage, .{});
     router.get("/pcb/:name", pcb_page.pcbPage, .{});
     router.get("/review/:name", api.reviewPage, .{});
 
@@ -228,7 +224,6 @@ pub fn serve(
     router.post("/api/component-datasheet/:component/remove", api.removeComponentDatasheetApi, .{});
     router.get("/api/designs", api.designsApi, .{});
     router.get("/api/scene-graph/:name", api.sceneGraphApi, .{});
-    router.get("/api/block-diagram-json/:name", api.blockDiagramJsonApi, .{});
     router.get("/api/pinout/:name", api.pinoutApi, .{});
     router.post("/api/upload-datasheet", upload_datasheet.uploadDatasheetApi, .{});
     router.get("/api/datasheets", upload_datasheet.listDatasheetsApi, .{});

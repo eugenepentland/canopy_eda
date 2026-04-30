@@ -187,7 +187,6 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
     try w.writeAll("<div class=\"kicad-status\" id=\"kicad-status\"></div>");
     try w.writeAll("</div></div>");
     try w.print("<a class=\"head-link\" href=\"/pcb/{s}\">PCB</a>", .{design_name});
-    try w.print("<a class=\"head-link\" href=\"/schematics/{s}/canvas\">Canvas (legacy)</a>", .{design_name});
     try w.print("<a class=\"head-link\" href=\"/api/export-bom/{s}\">BOM</a>", .{design_name});
     try w.print("<a class=\"head-link\" href=\"/api/export-netlist/{s}\">Netlist</a>", .{design_name});
     try w.print(

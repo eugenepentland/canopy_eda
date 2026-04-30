@@ -135,10 +135,6 @@ Public functions: renderSchematic
 - Keeps short pin lists verbatim
 - Collapses four or more pins to an Nx summary
 
-## render_block
-
-Public functions: renderBlockDiagram
-
 ## erc
 
 - Emits power_budget error when load max exceeds source max

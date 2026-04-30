@@ -140,20 +140,10 @@ src/layout.zig::loadLayout | fn loadLayout(allocator: std.mem.Allocator, path: [
 src/layout.zig::placementsByUuid | fn placementsByUuid(allocator: std.mem.Allocator, layout: *const Layout) std.mem.Allocator.Error!std.StringHashMap(Placement)
 src/layout.zig::saveLayout | fn saveLayout(allocator: std.mem.Allocator, layout: *const Layout, path: []const u8) LayoutError!void
 src/main.zig::main | fn main() !void
-src/render_block.zig::renderBlockDiagramJson | fn renderBlockDiagramJson(allocator: Allocator, design: *const DesignBlock) RenderError![]const u8
-src/render_block_types.zig::blk_text_height | fn blk_text_height(blk: Block) f64
 src/render_block_types.zig::categoryColor | fn categoryColor(cat: Category) []const u8
-src/render_block_types.zig::categoryColumn | fn categoryColumn(cat: Category) usize
-src/render_block_types.zig::categorySortOrder | fn categorySortOrder(cat: Category) usize
 src/render_block_types.zig::classifyByName | fn classifyByName(name: []const u8, instances: []const env_mod.Instance) Category
 src/render_block_types.zig::classifySection | fn classifySection(sec: env_mod.Section) Category
 src/render_block_types.zig::containsCI | fn containsCI(haystack: []const u8, needle: []const u8) bool
-src/render_block_types.zig::edgeExists | fn edgeExists(items: []const Edge, from: usize, to: usize, label: []const u8) bool
-src/render_block_types.zig::findKeyComponent | fn findKeyComponent(sec: env_mod.Section) []const u8
-src/render_block_types.zig::isBidirectional | fn isBidirectional(label: []const u8) bool
-src/render_block_types.zig::isSupportSection | fn isSupportSection(sec: env_mod.Section) bool
-src/render_block_types.zig::signalColor | fn signalColor(sig: env_mod.SignalType) []const u8
-src/render_block_types.zig::strInList | fn strInList(list: []const []const u8, s: []const u8) bool
 src/render_block_types.zig::toLower | fn toLower(c: u8) u8
 src/render_html.zig::renderHubSvg | fn renderHubSvg( ctx: *RenderCtx, w: anytype, allocator: Allocator, pin_groups: []const env_mod.PinGroup, hub_ref: []const u8, ) RenderError!bool
 src/render_html.zig::renderToHtml | fn renderToHtml( allocator: Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, navbar_css: []const u8, status: review.Status, review_doc: ?review.ReviewDoc, check_results: *const CheckResultMap, ) RenderError![]const u8
@@ -247,7 +237,6 @@ src/serve/account_page.zig::revokeClientApi | fn revokeClientApi(ctx: *Handler, 
 src/serve/account_page.zig::updateUserRoleApi | fn updateUserRoleApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::addComponentDatasheetApi | fn addComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::addSectionNoteApi | fn addSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::blockDiagramJsonApi | fn blockDiagramJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::designStateApi | fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::designsApi | fn designsApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::drcApi | fn drcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -312,7 +301,6 @@ src/serve/bom_html.zig::writeBomHtml | fn writeBomHtml(wr: anytype, block: *cons
 src/serve/bom_html.zig::writeComponentsJson | fn writeComponentsJson( w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8, sym_cache: *const SymbolPinCache, allocator: std.mem.Allocator, project_dir: []const u8, ) BomError!bool
 src/serve/bom_html.zig::writeNetsJson | fn writeNetsJson(w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8) BomError!bool
 src/serve/bom_html.zig::writeSchematicBomHtml | fn writeSchematicBomHtml(wr: anytype, block: *const env_mod.DesignBlock) BomError!void
-src/serve/canvas_page.zig::canvasPage | fn canvasPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::addComponentDatasheetCore | fn addComponentDatasheetCore( allocator: std.mem.Allocator, project_dir: []const u8, component_name: []const u8, pdf: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::addInstanceApi | fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::addInstanceCore | fn addInstanceCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, section: []const u8, component: []const u8, value: []const u8, pins: []const PinAssignment, ) EditError!MutationResult

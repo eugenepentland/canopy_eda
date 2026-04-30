@@ -304,8 +304,8 @@ pub fn writeBomHtml(wr: anytype, block: *const env_mod.DesignBlock) BomError!voi
 /// manufacturer cells. Sibling to `writeBomHtml` — same grouping pass
 /// `(component, value, footprint, attrs)` — but tuned for the
 /// always-visible card on the schematic page: editable inputs, all
-/// `Property` keys surfaced as badges, no embedded JS (the page-wide
-/// interaction.js owns the click handlers).
+/// `Property` keys surfaced as badges, no embedded JS (the schematic
+/// page's own scripts own the click handlers).
 pub fn writeSchematicBomHtml(wr: anytype, block: *const env_mod.DesignBlock) BomError!void {
     const Instance = env_mod.Instance;
     var all: std.ArrayListUnmanaged(Instance) = .empty;

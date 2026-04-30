@@ -3,10 +3,6 @@ src/commands.zig::cmdServe: unused public declaration
 src/eval/ids.zig::getSymbolAlts: unused public declaration
 src/eval/ids.zig::validateSymbolAgainstPinout: unused public declaration
 src/layout.zig::placementsByUuid: unused public declaration
-src/render_block_types.zig::blk_text_height: unused public declaration
-src/render_block_types.zig::categoryColumn: unused public declaration
-src/render_block_types.zig::isBidirectional: unused public declaration
-src/render_block_types.zig::signalColor: unused public declaration
 src/render_svg/bom_table.zig::renderBomTable: unused public declaration
 src/render_svg/branch.zig::inferBlockIcon: unused public declaration
 src/render_svg/branch.zig::renderPortBlock: unused public declaration
@@ -17,13 +13,12 @@ src/render_svg/hub.zig::renderHub: unused public declaration
 src/render_svg/hub.zig::renderHubPart: unused public declaration
 src/render_svg/section_inset.zig::partitionGroups: unused public declaration
 src/serve/assets_css.zig::DESIGN_CSS: unused public declaration
-src/serve/assets_js.zig::INTERACTION_JS_PART1: unused public declaration
-src/serve/assets_js.zig::INTERACTION_JS_PART2: unused public declaration
 src/serve/auth.zig::managePage: unused public declaration
 src/serve/bom_html.zig::writeBomHtml: unused public declaration
 src/serve/edit.zig::addInstanceCore: unused public declaration
 src/serve/edit.zig::removeInstanceCore: unused public declaration
 src/serve/edit.zig::swapComponentCore: unused public declaration
 src/serve/footprint_preview.zig::listFootprints: unused public declaration
+src/serve/library.zig::writeFamiliesJson: unused public declaration
 src/serve/upload_package.zig::uploadFootprintApi: unused public declaration
 src/serve/upload_package.zig::uploadSymbolApi: unused public declaration

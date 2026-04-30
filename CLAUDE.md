@@ -61,8 +61,7 @@ Source (.sexp files)
       OR Board (outline, stackup, rules, zones, keepouts)
     → Post-build (ID insertion, BOM resolution, assertion checks)
     → Output:
-        Schematic: render_json.zig → JSON scene graph → Pixi.js canvas viewer
-        Block diagram: render_block.zig → JSON → Pixi.js canvas viewer
+        Schematic: render_html.zig → server-rendered HTML (hub-and-spoke SVG)
         PCB: render_pcb_json.zig → JSON → Pixi.js PCB viewer
         Export: emit.zig (.sexp), export_kicad.zig (KiCad), export_gerber.zig (Gerber)
         Checks: erc.zig (electrical rules), drc.zig (design rules)
@@ -84,9 +83,7 @@ Source (.sexp files)
 - `builtins.zig` — Arithmetic, comparison, logic operators
 - `fmt.zig` — String formatting (~V voltage, ~R resistance, ~C capacitance, ~A amperage, ~S string)
 
-**Schematic rendering** (`src/render_json.zig`): Converts DesignBlock to JSON scene graph. Hub/spoke model: Hubs = ICs/connectors (U/J/P/X/Q prefix, rendered as boxes). Spokes = passives (R/C/L/F/D prefix, rendered inline on connections). Grid layout from sections.
-
-**Block diagram** (`src/render_block.zig` + `src/render_block_types.zig`): Generates hierarchical block diagrams from section topology and ports. Auto-categorizes blocks (mcu, power, memory, peripheral, connector, etc.) into columns. Topology-aware edge routing for power chains, signals, and protocols (SPI, I2C, USB). Sections have status: concept (no components) vs implemented (full BOM).
+**Schematic rendering** (`src/render_html.zig` + `src/render_svg/`): Converts DesignBlock to an HTML page with inline SVG. Hub/spoke model: Hubs = ICs/connectors (U/J/P/X/Q prefix, rendered as boxes). Spokes = passives (R/C/L/F/D prefix, rendered inline on connections). Grid layout from sections. `src/render_json.zig` still emits a scene-graph JSON (`/api/scene-graph/:name`) used by the live-push pipeline. `src/render_system_svg.zig` + `src/render_block_types.zig` produce the system-overview SVG embedded in the page header (auto-categorised columns: mcu, power, memory, peripheral, connector, etc.).
 
 **PCB** (`src/render_pcb_json.zig` + `src/layout.zig`): Renders PCB layout as interactive JSON. Parses footprint geometry from `.sexp` files. Layout persistence in `.layout` files (component placements, traces, vias, zone fills). Zone fill via `zone_fill.zig`.
 
@@ -180,14 +177,13 @@ Source (.sexp files)
 
 ## Web Server
 
-`eda serve` starts an HTTP server with Pixi.js-based viewers:
+`eda serve` starts an HTTP server with HTML and Pixi.js-based viewers:
 
 - **Design list**: `GET /` — links to all .sexp designs
-- **Schematic viewer**: `GET /schematics/:name` — Pixi.js canvas schematic
-- **PCB viewer**: `GET /pcb/:name` — interactive PCB layout editor
+- **Schematic viewer**: `GET /schematics/:name` — server-rendered HTML schematic with embedded SVG
+- **PCB viewer**: `GET /pcb/:name` — interactive PCB layout editor (Pixi.js)
 - **Review report**: `GET /review/:name` — HTML design-review doc (summary banner, power-budget table, per-section cards, BOM, assertions, unresolved issues). JSON form at `GET /api/review/:name` for programmatic use.
-- **Scene graph**: `GET /api/scene-graph/:name` — JSON scene graph for schematic
-- **Block diagram**: `GET /api/block-diagram-json/:name` — block diagram JSON
+- **Scene graph**: `GET /api/scene-graph/:name` — JSON scene graph for schematic (used by the live-push pipeline)
 - **Live push**: `POST /api/push/:name` — rebuild and push update
 - **Version polling**: `GET /api/version/:name` — returns `{"version":N}`
 - **Value editing**: `POST /api/edit-value/:name` — edit component value in .sexp file

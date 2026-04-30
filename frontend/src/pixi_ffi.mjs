@@ -1,7 +1,7 @@
 // Minimal Pixi-mount prototype used by Phase (a) of the SPA port.
 //
-// Real canvas/PCB viewers live at src/serve/assets/{canvas_viewer,pcb_viewer}.js
-// and get wired up via window.EDA_CanvasViewer / window.EDA_PcbViewer in Phase (e).
+// The real PCB viewer lives at src/serve/assets/pcb_viewer.js and gets wired
+// up via window.EDA_PcbViewer in Phase (e).
 // For now this file just proves the keyed-div mount pattern works.
 
 export async function mount_prototype(container_id, label) {

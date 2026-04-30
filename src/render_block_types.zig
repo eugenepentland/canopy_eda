@@ -1,59 +1,18 @@
 const std = @import("std");
 const env_mod = @import("eval/env.zig");
 
-// ── Layout Constants ──────────────────────────────────────────────────
-pub const block_w: f64 = 220.0;
-pub const block_min_h: f64 = 60.0;
-pub const line_h: f64 = 18.0;
-pub const block_pad: f64 = 14.0;
-pub const grid_gap_x: f64 = 140.0;
-pub const grid_gap_y: f64 = 30.0;
-pub const margin_val: f64 = 50.0;
-pub const top_margin: f64 = 50.0;
-pub const arrow_size: f64 = 7.0;
+// Section / sub-block category helpers. Originally shared between the
+// (now-removed) Pixi.js block diagram and the system-overview SVG embedded
+// in the schematic page; only the system SVG and `render_html.zig` still
+// consume the classifier today.
 
-// ── Colors ────────────────────────────────────────────────────────────
-/// Map a section-port signal type to the wire color the block diagram uses
-/// when drawing edges of that type. Power rails are red, clocks are teal,
-/// data/differential pairs are blue, plain signals are grey.
-pub fn signalColor(sig: env_mod.SignalType) []const u8 {
-    return switch (sig) {
-        .power => "#e06060",
-        .clock => "#4a9",
-        .data, .differential => "#4a9eff",
-        .signal => "#8b949e",
-    };
-}
-
-// ── High-level block ──────────────────────────────────────────────────
-/// One node in the block diagram — a section or sub-block rendered as a
-/// labelled rectangle with its declared ports. Categorized so the layout
-/// engine column-packs MCUs in the centre, power on the left, and
-/// peripherals on the right.
-pub const Block = struct {
-    title: []const u8,
-    subtitle: []const u8,
-    detail: []const u8,
-    category: Category,
-    ports: []const env_mod.SectionPort,
-    protocols: []const []const u8 = &.{},
-    status: env_mod.SectionStatus = .implemented,
-    has_ic: bool = false,
-    block_role: env_mod.BlockRole = .auto,
-    x: f64 = 0,
-    y: f64 = 0,
-    w: f64 = block_w,
-    h: f64 = 0,
-    col: usize = 0,
-};
-
-/// Coarse classification of a block in the block diagram, used to pick the
-/// block's color and which column it sits in. Inferred from the section
-/// name + instance ref-deses by `classifyByName`.
+/// Coarse classification of a block, used to pick its color and which
+/// column it sits in. Inferred from the section name + instance ref-deses
+/// by `classifyByName`.
 pub const Category = enum { mcu, power, memory, peripheral, connector, clock, comms, sensor, analog, protection };
 
 /// Hex color for a block of this category. Picked from the GitHub-style
-/// dark-theme palette so the block diagram looks consistent with the
+/// dark-theme palette so the system overview looks consistent with the
 /// schematic and review pages.
 pub fn categoryColor(cat: Category) []const u8 {
     return switch (cat) {
@@ -70,117 +29,11 @@ pub fn categoryColor(cat: Category) []const u8 {
     };
 }
 
-/// Column index (0=left, 1=middle, 2=right) where a block of this category
-/// belongs in the diagram. Power/clock/protection sit on the left feeding
-/// the centre MCU, peripherals/connectors/memory hang off the right.
-pub fn categoryColumn(cat: Category) usize {
-    return switch (cat) {
-        .power, .clock, .protection => 0,
-        .mcu => 1,
-        .memory, .comms, .sensor, .connector, .peripheral, .analog => 2,
-    };
-}
-
-/// Sort priority within a column (lower = higher in column).
-pub fn categorySortOrder(cat: Category) usize {
-    return switch (cat) {
-        .mcu => 0,
-        // Left column
-        .power => 0,
-        .protection => 1,
-        .clock => 2,
-        // Right column
-        .memory => 0,
-        .comms => 1,
-        .sensor => 2,
-        .analog => 3,
-        .peripheral => 4,
-        .connector => 5,
-    };
-}
-
-/// One directed connection between blocks in the diagram — a power rail,
-/// a protocol bus, or a plain signal. `from`/`to` index into the diagram's
-/// blocks slice; `voltage` is set for power edges so the renderer can
-/// annotate "VBATT 3.7V".
-pub const Edge = struct {
-    from: usize,
-    to: usize,
-    label: []const u8,
-    signal_type: env_mod.SignalType,
-    voltage: ?f64,
-};
-
-/// Total vertical space the block's title + subtitle + detail lines take.
-/// Used by the layout pass to size each block's bounding rect before laying
-/// out ports and edges.
-pub fn blk_text_height(blk: Block) f64 {
-    var h: f64 = line_h;
-    if (blk.subtitle.len > 0) h += line_h;
-    if (blk.detail.len > 0) h += line_h;
-    return h;
-}
-
-/// Check whether an edge with the same endpoints and label is already in
-/// the slice. Used by the edge builder to dedupe parallel signals so power
-/// rails and bus protocols don't draw twice.
-pub fn edgeExists(items: []const Edge, from: usize, to: usize, label: []const u8) bool {
-    for (items) |e| {
-        if (e.from == from and e.to == to and std.mem.eql(u8, e.label, label)) return true;
-    }
-    return false;
-}
-
-const bidi_protocols = [_][]const u8{
-    "SPI",     "I2C",       "UART",
-    "USB",     "USB2.0-HS", "USB2.0-FS",
-    "OctoSPI", "QuadSPI",   "QSPI",
-    "SWD",     "JTAG",      "SDIO",
-    "SDMMC",   "CAN",
-};
-
-/// Return true if the protocol label denotes a bidirectional bus (SPI, I2C,
-/// USB, OctoSPI, JTAG, …). Used to draw double-headed arrows in the block
-/// diagram instead of single direction.
-pub fn isBidirectional(label: []const u8) bool {
-    for (&bidi_protocols) |proto| {
-        if (std.mem.eql(u8, label, proto)) return true;
-    }
-    return false;
-}
-
-/// Linear-scan membership test for a slice of strings — used while
-/// collecting protocols and ports so duplicates don't get appended twice.
-pub fn strInList(list: []const []const u8, s: []const u8) bool {
-    for (list) |item| {
-        if (std.mem.eql(u8, item, s)) return true;
-    }
-    return false;
-}
-
 /// Pick the best-fitting `Category` for a section. Thin wrapper around
 /// `classifyByName` that passes the section's name and instances so the
 /// keyword + ref-des heuristics can both fire.
 pub fn classifySection(sec: env_mod.Section) Category {
     return classifyByName(sec.name, sec.instances);
-}
-
-/// Returns true for sections that are support/infrastructure (LEDs, clocking, boot, mounting)
-/// and should go in a separate Support section rather than Power/Signal flow.
-pub fn isSupportSection(sec: env_mod.Section) bool {
-    // LEDs, power indicators
-    if (containsCI(sec.name, "LED")) return true;
-    if (containsCI(sec.name, "Boot") or containsCI(sec.name, "Reset")) return true;
-    const cat = classifySection(sec);
-    return switch (cat) {
-        .clock => true,
-        .peripheral => sec.protocols.len == 0,
-        .connector => {
-            if (containsCI(sec.name, "Mounting") or containsCI(sec.name, "Test")) return true;
-            return false;
-        },
-        else => false,
-    };
 }
 
 /// Classify a section/sub-block into a `Category` from a section name and
@@ -225,23 +78,6 @@ pub fn classifyByName(name: []const u8, instances: []const env_mod.Instance) Cat
         if (inst.ref_des.len > 0 and (inst.ref_des[0] == 'J' or inst.ref_des[0] == 'P')) return .connector;
     }
     return .peripheral;
-}
-
-/// Pick the most informative subtitle for a section's block — the MPN of
-/// the first hub-prefix instance (U/J/P/X/Q), falling back to the component
-/// family name. Skips passives so the diagram says "STM32N657L0H3Q" not
-/// "100nF".
-pub fn findKeyComponent(sec: env_mod.Section) []const u8 {
-    for (sec.instances) |inst| {
-        if (inst.ref_des.len == 0) continue;
-        const prefix = inst.ref_des[0];
-        if (prefix == 'R' or prefix == 'C' or prefix == 'L' or prefix == 'D' or prefix == 'F') continue;
-        for (inst.properties) |prop| {
-            if (std.mem.eql(u8, prop.key, "mpn") and prop.value.len > 0) return prop.value;
-        }
-        return inst.component;
-    }
-    return "";
 }
 
 /// Case-insensitive substring search — section names aren't normalized at

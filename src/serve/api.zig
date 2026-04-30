@@ -4,7 +4,6 @@ const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const render_json = @import("../render_json.zig");
-const render_block = @import("../render_block.zig");
 const export_kicad = @import("../export_kicad.zig");
 const export_kicad_pcb = @import("../export_kicad_pcb.zig");
 const layout_mod = @import("../layout.zig");
@@ -149,40 +148,6 @@ pub fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) Handl
     res.content_type = .JSON;
     res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = data orelse "{\"error\":\"no layout\"}";
-}
-
-/// GET /api/block-diagram-json/:name — evaluate the design and emit the
-/// hierarchical block-diagram JSON consumed by the diagram viewer (auto-
-/// categorised columns, topology-aware edges between sections).
-pub fn blockDiagramJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
-        return;
-    };
-    const board_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name });
-    defer ctx.allocator.free(board_path);
-    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
-    defer eval.deinit();
-    const result = eval.evalFile(board_path) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = ERR_BUILD;
-        return;
-    };
-    const block = switch (result) {
-        .design_block => |b| b,
-        else => {
-            res.status = HTTP_INTERNAL_ERROR;
-            return;
-        },
-    };
-    const json = render_block.renderBlockDiagramJson(ctx.allocator, block) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = "Render error";
-        return;
-    };
-    res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
-    res.body = json;
 }
 
 /// Serve a component's pinout file (lib/pinouts/:name.sexp) as JSON so the

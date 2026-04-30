@@ -1,3 +1,2 @@
 # guardian-snapshot v1
 src/render_svg/bom_table.zig
-src/serve/assets_js.zig
