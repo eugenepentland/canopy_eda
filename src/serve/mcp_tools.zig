@@ -57,7 +57,6 @@ const tools = [_]ToolEntry{
     .{ .name = "list_designs", .is_mutation = false },
     .{ .name = "list_library", .is_mutation = false },
     .{ .name = "list_history", .is_mutation = false },
-    .{ .name = "list_datasheets", .is_mutation = false },
     .{ .name = "list_instances", .is_mutation = false },
     .{ .name = "list_free_pins", .is_mutation = false },
     .{ .name = "get_net", .is_mutation = false },
@@ -136,8 +135,8 @@ fn callInner(
 }
 
 /// Listing tools that scan the project tree (designs, library, history,
-/// datasheets, instances, free pins, net membership). Returns null when
-/// the tool name doesn't match any of these.
+/// instances, free pins, net membership). Returns null when the tool name
+/// doesn't match any of these.
 fn dispatchProject(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -149,7 +148,6 @@ fn dispatchProject(
     if (std.mem.eql(u8, tool_name, "list_designs")) return try toolListDesigns(allocator, project_dir, w);
     if (std.mem.eql(u8, tool_name, "list_library")) return try toolListLibrary(allocator, project_dir, w);
     if (std.mem.eql(u8, tool_name, "list_history")) return try toolListHistory(allocator, project_dir, args_val, out);
-    if (std.mem.eql(u8, tool_name, "list_datasheets")) return try listDatasheets(allocator, project_dir, w);
     if (std.mem.eql(u8, tool_name, "list_instances")) return try toolListInstances(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "list_free_pins")) return try toolListFreePins(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "get_net")) return try toolGetNet(allocator, project_dir, args_val, out);
@@ -1066,98 +1064,6 @@ fn getNet(
             try w.writeAll("}");
             break;
         }
-    }
-    try w.writeAll("]}");
-    return true;
-}
-
-/// List every `.pdf` in `lib/datasheets/`, attaching the set of library
-/// components that cite it via their `(datasheet "...")` declaration. The
-/// `used_by` list lets the agent jump straight from "I have component X" to
-/// "here is its datasheet" without a second scan.
-fn listDatasheets(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    w: anytype,
-) !bool {
-    // Pass 1: scan lib/components/ and build filename → [component, ...].
-    var uses: std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .empty;
-    defer {
-        var vit = uses.valueIterator();
-        while (vit.next()) |v| v.deinit(allocator);
-        uses.deinit(allocator);
-    }
-    const comp_dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/components", .{project_dir});
-    defer allocator.free(comp_dir_path);
-    if (infra_fs.cwd().openDir(comp_dir_path, .{ .iterate = true })) |dir_const| {
-        var cdir = dir_const;
-        defer cdir.close();
-        var cit = cdir.iterate();
-        while (try cit.next()) |centry| {
-            if (centry.kind != .file and centry.kind != .sym_link) continue;
-            if (!std.mem.endsWith(u8, centry.name, ".sexp")) continue;
-            const cbase = centry.name[0 .. centry.name.len - ".sexp".len];
-            const cpath = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ comp_dir_path, centry.name });
-            defer allocator.free(cpath);
-            const src = infra_fs.cwd().readFileAlloc(allocator, cpath, 1 * 1024 * 1024) catch continue;
-            defer allocator.free(src);
-            // Linear scan for every `(datasheet "..."` occurrence. Matches
-            // the evaluator's schema: the filename is the first string
-            // argument of the datasheet form.
-            var search_from: usize = 0;
-            while (std.mem.indexOfPos(u8, src, search_from, "(datasheet")) |idx| {
-                var k = idx + "(datasheet".len;
-                while (k < src.len and (src[k] == ' ' or src[k] == '\t' or src[k] == '\n' or src[k] == '\r')) : (k += 1) {}
-                if (k >= src.len or src[k] != '"') {
-                    search_from = idx + 1;
-                    continue;
-                }
-                const qstart = k + 1;
-                const qend = std.mem.indexOfScalarPos(u8, src, qstart, '"') orelse {
-                    search_from = idx + 1;
-                    continue;
-                };
-                const fname = src[qstart..qend];
-                // Key into the hashmap is owned by `uses`; dupe both key
-                // and component name because `src` and `centry.name` are
-                // short-lived.
-                const key = try allocator.dupe(u8, fname);
-                const val_name = try allocator.dupe(u8, cbase);
-                const gop = try uses.getOrPut(allocator, key);
-                if (!gop.found_existing) gop.value_ptr.* = .empty else allocator.free(key);
-                try gop.value_ptr.*.append(allocator, val_name);
-                search_from = qend + 1;
-            }
-        }
-    } else |_| {}
-
-    // Pass 2: iterate lib/datasheets/ and emit metadata.
-    try w.writeAll("{\"datasheets\":[");
-    const dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/datasheets", .{project_dir});
-    defer allocator.free(dir_path);
-    var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
-        try w.writeAll("]}");
-        return true;
-    };
-    defer dir.close();
-    var it = dir.iterate();
-    var first = true;
-    while (try it.next()) |entry| {
-        if (entry.kind != .file and entry.kind != .sym_link) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".pdf")) continue;
-        const stat = dir.statFile(entry.name) catch continue;
-        if (!first) try w.writeAll(",");
-        first = false;
-        try w.writeAll(NAME_FIELD_PREFIX);
-        try writeJsonString(w, entry.name);
-        try w.print(",\"size\":{d},\"used_by\":[", .{stat.size});
-        if (uses.get(entry.name)) |list| {
-            for (list.items, 0..) |c, i| {
-                if (i > 0) try w.writeAll(",");
-                try writeJsonString(w, c);
-            }
-        }
-        try w.writeAll("]}");
     }
     try w.writeAll("]}");
     return true;
