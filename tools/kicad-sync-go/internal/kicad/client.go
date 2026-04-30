@@ -65,11 +65,11 @@ type realClient struct {
 	// UpdateItems batch so KiCad records the sync as a single undo.
 	cache map[string]*board_types.FootprintInstance
 
-	dirty   map[string]struct{}      // uuids of mutated FPs
-	removed map[string]struct{}      // uuids to delete
-	added   []*board_types.FootprintInstance
+	dirty   map[string]struct{}                // uuids of mutated FPs
+	removed map[string]struct{}                // uuids to delete
+	added   []*board_types.FootprintInstance   // staged new footprints
 
-	commitID *base_types.KIID
+	commitID      *base_types.KIID
 	commitMessage string
 }
 
@@ -266,18 +266,42 @@ func (c *realClient) SetPadNet(uuid, padNumber, netName string) error {
 	return nil
 }
 
-func (c *realClient) AddFootprint(kicadMod, uuid, ref, value string, padNets [][2]string) error {
-	return errors.New(
-		"AddFootprint not yet implemented in IPC mode — the Go agent v1 supports update + remove only. " +
-			"For a fresh PCB, use the Python plugin (../kicad-sync-plugin) for the first sync to place all footprints, " +
-			"then use the Go agent for ongoing updates.",
-	)
+func (c *realClient) AddFootprint(def *FootprintDef, uuid, ref, value string, padNets [][2]string) error {
+	if def == nil {
+		return errors.New("AddFootprint: server returned no footprint_def — make sure the EDA server is running a build with structured-fp emission")
+	}
+	fp := buildFootprintInstance(def, uuid, ref, value, padNets)
+	c.added = append(c.added, fp)
+	return nil
 }
 
-func (c *realClient) SwapFootprint(uuid, kicadMod string, padNets [][2]string) error {
-	return errors.New(
-		"SwapFootprint not yet implemented in IPC mode — change the footprint manually in KiCad and re-sync to update value/nets only.",
-	)
+func (c *realClient) SwapFootprint(uuid string, def *FootprintDef, padNets [][2]string) error {
+	if def == nil {
+		return errors.New("SwapFootprint: server returned no footprint_def")
+	}
+	// Swap = delete old + create new. KiCad records both halves as one
+	// undo step thanks to the surrounding commit.
+	c.removed[uuid] = struct{}{}
+	fp := buildFootprintInstance(def, uuid, "", "", padNets)
+	// Carry over the old ref/value if they were on the cached footprint.
+	if old, ok := c.cache[uuid]; ok {
+		if t := old.GetReferenceField().GetText().GetText().GetText(); t != "" {
+			ensureBoardTextString(ensureField(&fp.ReferenceField)).Text = t
+		}
+		if t := old.GetValueField().GetText().GetText().GetText(); t != "" {
+			ensureBoardTextString(ensureField(&fp.ValueField)).Text = t
+		}
+		// Preserve placement.
+		if old.Position != nil {
+			fp.Position = old.Position
+		}
+		if old.Orientation != nil {
+			fp.Orientation = old.Orientation
+		}
+		fp.Layer = old.Layer
+	}
+	c.added = append(c.added, fp)
+	return nil
 }
 
 func (c *realClient) Remove(uuid string) error {
@@ -309,20 +333,39 @@ func (c *realClient) Push() error {
 		}
 	}
 
-	// 2. RemoveItems — flush deletions. Uses GetItemsById to remove by KIID
-	//    isn't a thing; the proper command is just UpdateItems on a
-	//    delete-flagged item, OR DeleteItems if it exists in this build.
-	//    Punt to GetItemsByID-then-skip for now: KiCad's IPC has both
-	//    behaviors depending on version; the safest portable path is to
-	//    log unsupported and let the user prune manually.
-	if len(c.removed) > 0 {
-		// TODO: wire a real RemoveItems / DeleteItems message once we
-		// confirm the type exposed by the running KiCad build.
-		// For v1, surface but don't fail — the result toast lists removed
-		// UUIDs so the user can clean up manually.
+	// 2. CreateItems — flush newly-added footprints.
+	if len(c.added) > 0 {
+		items := make([]*anypb.Any, 0, len(c.added))
+		for _, fp := range c.added {
+			any, err := anypb.New(fp)
+			if err != nil {
+				return fmt.Errorf("pack new fp: %w", err)
+			}
+			items = append(items, any)
+		}
+		if _, err := c.rpc(&editor_commands.CreateItems{
+			Header: &base_types.ItemHeader{Document: c.doc},
+			Items:  items,
+		}); err != nil {
+			return fmt.Errorf("CreateItems: %w", err)
+		}
 	}
 
-	// 3. EndCommit (action: COMMIT, with our message).
+	// 3. DeleteItems — flush removals.
+	if len(c.removed) > 0 {
+		ids := make([]*base_types.KIID, 0, len(c.removed))
+		for uuid := range c.removed {
+			ids = append(ids, &base_types.KIID{Value: uuid})
+		}
+		if _, err := c.rpc(&editor_commands.DeleteItems{
+			Header:  &base_types.ItemHeader{Document: c.doc},
+			ItemIds: ids,
+		}); err != nil {
+			return fmt.Errorf("DeleteItems: %w", err)
+		}
+	}
+
+	// 4. EndCommit (action: COMMIT, with our message).
 	if _, err := c.rpc(&editor_commands.EndCommit{
 		Id:      c.commitID,
 		Action:  editor_commands.CommitAction_CMA_COMMIT,

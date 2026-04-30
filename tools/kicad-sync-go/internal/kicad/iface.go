@@ -25,14 +25,16 @@ type Client interface {
 	// SetPadNet sets the net assignment of one pad on `uuid`.
 	SetPadNet(uuid, padNumber, netName string) error
 
-	// AddFootprint loads `kicadMod` text, places it at the origin, sets
-	// uuid/ref/value/pad nets, and stages it for commit.
-	AddFootprint(kicadMod, uuid, ref, value string, padNets [][2]string) error
+	// AddFootprint instantiates a footprint from the structured `def`,
+	// places it at the origin, sets uuid/ref/value/pad-nets, and stages
+	// it for commit.
+	AddFootprint(def *FootprintDef, uuid, ref, value string, padNets [][2]string) error
 
-	// SwapFootprint replaces the footprint for uuid with one parsed from
-	// `kicadMod`, preserving position/orientation/layer and re-applying
-	// pad nets where pad numbers match.
-	SwapFootprint(uuid, kicadMod string, padNets [][2]string) error
+	// SwapFootprint replaces the footprint for uuid with one built from
+	// `def`. v2 implements as Remove + AddFootprint internally to keep
+	// the proto builder reusable; KiCad records both halves as one undo
+	// step via the surrounding commit.
+	SwapFootprint(uuid string, def *FootprintDef, padNets [][2]string) error
 
 	// Remove stages the footprint for deletion in this commit.
 	Remove(uuid string) error

@@ -37,20 +37,43 @@ type SyncPlanRequest struct {
 	PruneStale bool      `json:"prune_stale"`
 }
 
+// FootprintPad is one pad in a structured footprint definition. Distances
+// are in millimetres; rotation is in degrees. Layers default to standard
+// SMD/thru-hole sets when the wire omits them.
+type FootprintPad struct {
+	Number   string     `json:"number"`
+	Type     string     `json:"type"`     // smd | thru_hole | np_thru_hole
+	Shape    string     `json:"shape"`    // rect | circle | oval | roundrect
+	Pos      [2]float64 `json:"pos"`      // mm, relative to footprint origin
+	Size     [2]float64 `json:"size"`     // mm
+	Drill    float64    `json:"drill,omitempty"`
+	Rotation float64    `json:"rotation,omitempty"`
+	Layers   []string   `json:"layers,omitempty"`
+}
+
+// FootprintDef is the structured form the server ships alongside the
+// legacy kicad_mod text on add/swap ops, so the Go agent can build a
+// FootprintInstance proto without parsing kicad_mod.
+type FootprintDef struct {
+	Name string         `json:"name"`
+	Pads []FootprintPad `json:"pads"`
+}
+
 // Op is one server-emitted operation. Fields not relevant for a given `op`
 // are zero-value. PadNets is encoded as `[][2]string` over the wire.
 type Op struct {
-	Op               string      `json:"op"`
-	UUID             string      `json:"uuid,omitempty"`
-	Field            string      `json:"field,omitempty"`
-	Value            string      `json:"value,omitempty"`
-	Pad              string      `json:"pad,omitempty"`
-	Net              string      `json:"net,omitempty"`
-	Ref              string      `json:"ref,omitempty"`
-	FootprintName    string      `json:"footprint_name,omitempty"`
-	NewFootprintName string      `json:"new_footprint_name,omitempty"`
-	KicadMod         string      `json:"kicad_mod,omitempty"`
-	PadNets          [][2]string `json:"pad_nets,omitempty"`
+	Op               string        `json:"op"`
+	UUID             string        `json:"uuid,omitempty"`
+	Field            string        `json:"field,omitempty"`
+	Value            string        `json:"value,omitempty"`
+	Pad              string        `json:"pad,omitempty"`
+	Net              string        `json:"net,omitempty"`
+	Ref              string        `json:"ref,omitempty"`
+	FootprintName    string        `json:"footprint_name,omitempty"`
+	NewFootprintName string        `json:"new_footprint_name,omitempty"`
+	KicadMod         string        `json:"kicad_mod,omitempty"`
+	FootprintDef     *FootprintDef `json:"footprint_def,omitempty"`
+	PadNets          [][2]string   `json:"pad_nets,omitempty"`
 }
 
 // Summary is the counts the server tracked while building the plan.

@@ -73,8 +73,14 @@ func TestAddOpInsertsFootprint(t *testing.T) {
 		Ops: []eda.Op{
 			{Op: "add", UUID: "u-c1", Ref: "C1", Value: "100nF",
 				FootprintName: "C_0402",
-				KicadMod:      `(footprint "C_0402" (layer F.Cu))`,
-				PadNets:       [][2]string{{"1", "VDD"}, {"2", "GND"}}},
+				FootprintDef: &eda.FootprintDef{
+					Name: "C_0402",
+					Pads: []eda.FootprintPad{
+						{Number: "1", Type: "smd", Shape: "rect", Pos: [2]float64{-0.5, 0}, Size: [2]float64{0.5, 0.6}},
+						{Number: "2", Type: "smd", Shape: "rect", Pos: [2]float64{0.5, 0}, Size: [2]float64{0.5, 0.6}},
+					},
+				},
+				PadNets: [][2]string{{"1", "VDD"}, {"2", "GND"}}},
 		},
 	}
 	var gotReq eda.SyncPlanRequest
@@ -103,8 +109,14 @@ func TestSwapOpReplacesFootprint(t *testing.T) {
 		Summary: eda.Summary{Swapped: 1},
 		Ops: []eda.Op{
 			{Op: "swap_footprint", UUID: "u-r1", NewFootprintName: "R_0805",
-				KicadMod: `(footprint "R_0805" (layer F.Cu))`,
-				PadNets:  [][2]string{{"1", "VDD"}, {"2", "GND"}}},
+				FootprintDef: &eda.FootprintDef{
+					Name: "R_0805",
+					Pads: []eda.FootprintPad{
+						{Number: "1", Type: "smd", Shape: "rect", Pos: [2]float64{-1, 0}, Size: [2]float64{1, 1}},
+						{Number: "2", Type: "smd", Shape: "rect", Pos: [2]float64{1, 0}, Size: [2]float64{1, 1}},
+					},
+				},
+				PadNets: [][2]string{{"1", "VDD"}, {"2", "GND"}}},
 		},
 	}
 	var gotReq eda.SyncPlanRequest

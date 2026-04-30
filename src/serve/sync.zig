@@ -25,6 +25,8 @@ const netlist_mod = @import("../export_kicad_netlist.zig");
 const fp_mod = @import("../export_kicad_footprint.zig");
 const model_mod = @import("../export_kicad_model.zig");
 const bom = @import("../bom.zig");
+const parser_mod = @import("../sexpr/parser.zig");
+const env_mod_node = @import("../sexpr/ast.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
@@ -42,6 +44,7 @@ const ERR_BUILD_ERROR = "Build error";
 const ERR_NOT_A_DESIGN = "Not a design";
 const PATH_FMT_SEXP = "{s}/src/{s}.sexp";
 const PATH_FMT_BOM = "{s}/src/{s}.bom";
+const PATH_FMT_FP_SEXP = "{s}/lib/footprints/{s}.sexp";
 const OP_SET_FIELD = "set_field";
 
 /// Error set for HTTP handlers in this module.
@@ -170,7 +173,7 @@ pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         if (seen_fps.contains(inst.footprint)) continue;
         try seen_fps.put(inst.footprint, {});
 
-        const fp_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints/{s}.sexp", .{ ctx.project_dir, inst.footprint });
+        const fp_path = try std.fmt.allocPrint(ctx.allocator, PATH_FMT_FP_SEXP, .{ ctx.project_dir, inst.footprint });
         defer ctx.allocator.free(fp_path);
         const fp_source = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path, MAX_FOOTPRINT_BYTES) catch continue;
         defer ctx.allocator.free(fp_source);
@@ -463,7 +466,7 @@ fn loadKicadMod(
     fp_name: []const u8,
     component: []const u8,
 ) ?[]const u8 {
-    const fp_path = std.fmt.allocPrint(spc.arena, "{s}/lib/footprints/{s}.sexp", .{ spc.project_dir, fp_name }) catch return null;
+    const fp_path = std.fmt.allocPrint(spc.arena, PATH_FMT_FP_SEXP, .{ spc.project_dir, fp_name }) catch return null;
     const fp_source = infra_fs.cwd().readFileAlloc(spc.arena, fp_path, MAX_FOOTPRINT_BYTES) catch return null;
     const mcfg = spc.model_cfg.get(fp_name);
     const model_name = if (mcfg) |c|
@@ -479,6 +482,128 @@ fn loadKicadMod(
         if (mcfg) |c| c.offset else null,
         if (mcfg) |c| c.rotation else null,
     ) catch null;
+}
+
+/// Build a structured JSON description of `fp_name` for the Go IPC agent.
+/// Returns the JSON text or null when no `.sexp` source exists (vendor-only
+/// footprints in `lib/sources/` aren't covered by v2). The JSON shape:
+///
+///   {"name":"R_0402","pads":[{"number":"1","type":"smd","shape":"rect",
+///                              "pos":[x,y],"size":[w,h],"rotation":N,
+///                              "drill":D,"layers":["F.Cu",...]}, ...]}
+///
+/// All distances in mm. Layers default to standard SMD/thru-hole sets when
+/// the source doesn't list them explicitly.
+fn loadFootprintDef(
+    spc: *SyncPlanContext,
+    fp_name: []const u8,
+) ?[]const u8 {
+    return loadFootprintDefImpl(spc, fp_name) catch null;
+}
+
+fn loadFootprintDefImpl(
+    spc: *SyncPlanContext,
+    fp_name: []const u8,
+) !?[]const u8 {
+    const fp_path = try std.fmt.allocPrint(spc.arena, PATH_FMT_FP_SEXP, .{ spc.project_dir, fp_name });
+    const fp_source = infra_fs.cwd().readFileAlloc(spc.arena, fp_path, MAX_FOOTPRINT_BYTES) catch return null;
+
+    const nodes = parser_mod.parse(spc.arena, fp_source) catch return null;
+    if (nodes.len == 0 or !nodes[0].isForm("footprint")) return null;
+    const children = nodes[0].asList() orelse return null;
+    if (children.len < 2) return null;
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(spc.arena);
+    try w.writeAll("{\"name\":");
+    try writeJsonString(w, fp_name);
+    try w.writeAll(",\"pads\":[");
+    var first_pad = true;
+    for (children[2..]) |child| {
+        if (!child.isForm("pad")) continue;
+        try writePadJson(spc.arena, w, child, &first_pad);
+    }
+    try w.writeAll("]}");
+    return buf.items;
+}
+
+/// Emit one pad entry as JSON. Schema:
+///   {"number":"1","type":"smd","shape":"roundrect",
+///    "pos":[x,y],"size":[w,h],"rotation":N,"drill":D,"layers":[...]}
+/// Mirrors the field names the Go agent expects in eda.FootprintPad.
+fn writePadJson(arena: std.mem.Allocator, w: anytype, pad: env_mod_node.Node, first: *bool) !void {
+    const nodes = pad.asList() orelse return;
+    if (nodes.len < 4) return;
+    // (pad <num> <type> <shape> ...)
+    const num = padNumberText(arena, nodes[1]) orelse return;
+    const ptype = nodes[2].asAtom() orelse return;
+    const shape = nodes[3].asAtom() orelse return;
+
+    var pos_x: f64 = 0;
+    var pos_y: f64 = 0;
+    var pos_rot: f64 = 0;
+    var size_w: f64 = 0;
+    var size_h: f64 = 0;
+    var drill_d: f64 = 0;
+
+    for (nodes[4..]) |n| {
+        if (n.isForm("pos")) {
+            const pl = n.asList().?;
+            if (pl.len >= 3) {
+                pos_x = pl[1].asNumber() orelse 0;
+                pos_y = pl[2].asNumber() orelse 0;
+            }
+            if (pl.len >= 4) pos_rot = pl[3].asNumber() orelse 0;
+        } else if (n.isForm("size")) {
+            const sl = n.asList().?;
+            if (sl.len >= 3) {
+                size_w = sl[1].asNumber() orelse 0;
+                size_h = sl[2].asNumber() orelse 0;
+            }
+        } else if (n.isForm("drill")) {
+            const dl = n.asList().?;
+            if (dl.len >= 2) drill_d = dl[1].asNumber() orelse 0;
+        }
+    }
+
+    if (!first.*) try w.writeAll(",");
+    first.* = false;
+    // Normalise the EDA-format short type names into KiCad-format full names
+    // so the Go agent gets a stable vocabulary.
+    const ptype_norm = if (std.mem.eql(u8, ptype, "thru")) "thru_hole" else if (std.mem.eql(u8, ptype, "np_thru")) "np_thru_hole" else ptype;
+    try w.writeAll("{\"number\":");
+    try writeJsonString(w, num);
+    try w.writeAll(",\"type\":");
+    try writeJsonString(w, ptype_norm);
+    try w.writeAll(",\"shape\":");
+    try writeJsonString(w, shape);
+    try w.print(",\"pos\":[{d},{d}]", .{ pos_x, pos_y });
+    try w.print(",\"size\":[{d},{d}]", .{ size_w, size_h });
+    if (pos_rot != 0) try w.print(",\"rotation\":{d}", .{pos_rot});
+    if (drill_d != 0) try w.print(",\"drill\":{d}", .{drill_d});
+
+    // Default layer sets — the EDA `.sexp` format doesn't carry them per-pad.
+    if (std.mem.eql(u8, ptype_norm, "smd")) {
+        try w.writeAll(",\"layers\":[\"F.Cu\",\"F.Paste\",\"F.Mask\"]");
+    } else {
+        // thru_hole, np_thru_hole — multilayer.
+        try w.writeAll(",\"layers\":[\"F.Cu\",\"B.Cu\",\"F.Mask\",\"B.Mask\"]");
+    }
+    try w.writeAll("}");
+}
+
+/// Pad numbers in EDA `.sexp` come in three flavors:
+///   - bare digit token  (1, 2, …) — parsed as `int` by the sexpr parser
+///   - bare alphanumeric (MP1, A1) — parsed as `atom`
+///   - quoted             ("1A")    — parsed as `string`
+/// Normalise all three to a heap-allocated text slice.
+fn padNumberText(arena: std.mem.Allocator, n: env_mod_node.Node) ?[]const u8 {
+    if (n.asAtom()) |a| return a;
+    if (n.asString()) |s| return s;
+    switch (n.tag) {
+        .int => |i| return std.fmt.allocPrint(arena, "{d}", .{i}) catch null,
+        else => return null,
+    }
 }
 
 const SyncSummary = struct {
@@ -632,7 +757,8 @@ fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, f
     if (m.uuid.len > 0) try d.matched_uuids.put(m.uuid, {});
     if (!std.mem.eql(u8, m.footprint_name, fp_name_short)) {
         if (loadKicadMod(d.spc, fp_name_short, inst.component)) |kmod| {
-            try emitSwapOp(w, first, m.uuid, fp_name_short, kmod, inst.ref_des, d.pad_net_map);
+            const fp_def = loadFootprintDef(d.spc, fp_name_short);
+            try emitSwapOp(w, first, m.uuid, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map);
             d.summary.swapped += 1;
         }
     }
@@ -661,7 +787,8 @@ fn handleInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, 
         return;
     }
     const kmod = loadKicadMod(d.spc, fp_name_short, inst.component) orelse return;
-    try emitAddOp(w, first, inst, fp_name_short, kmod, d.pad_net_map);
+    const fp_def = loadFootprintDef(d.spc, fp_name_short);
+    try emitAddOp(w, first, inst, fp_name_short, kmod, fp_def, d.pad_net_map);
     d.summary.added += 1;
 }
 
@@ -685,6 +812,7 @@ fn emitAddOp(
     inst: export_kicad.FlatInstance,
     fp_name: []const u8,
     kmod: []const u8,
+    fp_def_json: ?[]const u8,
     pad_net_map: *std.StringHashMap([]const u8),
 ) !void {
     if (!first.*) try w.*.writeAll(",");
@@ -699,6 +827,10 @@ fn emitAddOp(
     try writeJsonString(w.*, fp_name);
     try w.*.writeAll(",\"kicad_mod\":");
     try writeJsonString(w.*, kmod);
+    if (fp_def_json) |def| {
+        try w.*.writeAll(",\"footprint_def\":");
+        try w.*.writeAll(def);
+    }
     try w.*.writeAll(",\"pad_nets\":");
     try writePadNetsArray(w.*, inst.ref_des, pad_net_map);
     try w.*.writeAll("}");
@@ -710,6 +842,7 @@ fn emitSwapOp(
     uuid: []const u8,
     fp_name: []const u8,
     kmod: []const u8,
+    fp_def_json: ?[]const u8,
     ref_des: []const u8,
     pad_net_map: *std.StringHashMap([]const u8),
 ) !void {
@@ -721,6 +854,10 @@ fn emitSwapOp(
     try writeJsonString(w.*, fp_name);
     try w.*.writeAll(",\"kicad_mod\":");
     try writeJsonString(w.*, kmod);
+    if (fp_def_json) |def| {
+        try w.*.writeAll(",\"footprint_def\":");
+        try w.*.writeAll(def);
+    }
     try w.*.writeAll(",\"pad_nets\":");
     try writePadNetsArray(w.*, ref_des, pad_net_map);
     try w.*.writeAll("}");

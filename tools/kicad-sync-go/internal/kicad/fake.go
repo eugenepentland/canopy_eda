@@ -85,16 +85,20 @@ func (f *Fake) SetPadNet(uuid, pad, net string) error {
 	return fmt.Errorf("SetPadNet: pad %q not on uuid %q", pad, uuid)
 }
 
-func (f *Fake) AddFootprint(kicadMod, uuid, ref, value string, padNets [][2]string) error {
+func (f *Fake) AddFootprint(def *FootprintDef, uuid, ref, value string, padNets [][2]string) error {
 	pads := make([]Pad, 0, len(padNets))
 	for _, kv := range padNets {
 		pads = append(pads, Pad{Number: kv[0], Net: kv[1]})
+	}
+	name := ""
+	if def != nil {
+		name = def.Name
 	}
 	fp := Footprint{
 		UUID:          uuid,
 		Reference:     ref,
 		Value:         value,
-		FootprintName: extractFpName(kicadMod),
+		FootprintName: name,
 		Pads:          pads,
 	}
 	f.pendingAdded = append(f.pendingAdded, fp)
@@ -102,7 +106,7 @@ func (f *Fake) AddFootprint(kicadMod, uuid, ref, value string, padNets [][2]stri
 	return nil
 }
 
-func (f *Fake) SwapFootprint(uuid, kicadMod string, padNets [][2]string) error {
+func (f *Fake) SwapFootprint(uuid string, def *FootprintDef, padNets [][2]string) error {
 	i, ok := f.findIdx(uuid)
 	if !ok {
 		return fmt.Errorf("SwapFootprint: uuid %q not found", uuid)
@@ -111,7 +115,9 @@ func (f *Fake) SwapFootprint(uuid, kicadMod string, padNets [][2]string) error {
 	for _, kv := range padNets {
 		pads = append(pads, Pad{Number: kv[0], Net: kv[1]})
 	}
-	f.Footprints[i].FootprintName = extractFpName(kicadMod)
+	if def != nil {
+		f.Footprints[i].FootprintName = def.Name
+	}
 	f.Footprints[i].Pads = pads
 	f.pendingDirty[uuid] = struct{}{}
 	return nil
