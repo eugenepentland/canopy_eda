@@ -16,7 +16,6 @@ const sexpr_parser = @import("../sexpr/parser.zig");
 const ids = @import("../eval/ids.zig");
 const review_mod = @import("../review.zig");
 const review_json_mod = @import("../review_json.zig");
-const review_state_mod = @import("../review_state.zig");
 const req_checks = @import("../req_checks.zig");
 const component_info = @import("component_info.zig");
 const symbol_conv = @import("../convert/symbol.zig");
@@ -67,9 +66,7 @@ const tools = [_]ToolEntry{
     .{ .name = "get_version", .is_mutation = false },
     .{ .name = "run_checks", .is_mutation = false },
     .{ .name = "generate_review", .is_mutation = false },
-    .{ .name = "get_review_state", .is_mutation = false },
-    // Mutations on review state and history.
-    .{ .name = "set_review_state", .is_mutation = true },
+    // Mutations on history.
     .{ .name = "restore_version", .is_mutation = true },
     // Virtual filesystem — agent reads/edits files like a local checkout.
     .{ .name = "read_file", .is_mutation = false },
@@ -161,8 +158,7 @@ fn dispatchProject(
 }
 
 /// Diagnostic / introspection tools that don't change project state:
-/// scene graph, version counter, run_checks, generate_review,
-/// get_review_state.
+/// scene graph, version counter, run_checks, generate_review.
 fn dispatchInfo(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -175,12 +171,11 @@ fn dispatchInfo(
     if (std.mem.eql(u8, tool_name, "get_version")) return try toolGetVersion(args_val, out, allocator);
     if (std.mem.eql(u8, tool_name, "run_checks")) return try toolRunChecks(allocator, project_dir, args_val, out, w);
     if (std.mem.eql(u8, tool_name, "generate_review")) return try toolGenerateReview(allocator, project_dir, args_val, w, out);
-    if (std.mem.eql(u8, tool_name, "get_review_state")) return try toolGetReviewState(allocator, project_dir, args_val, out);
     return null;
 }
 
-/// Mutations on review state and history snapshots — the only mutators
-/// outside the VFS surface, since they don't touch source files.
+/// Mutations on history snapshots — the only mutator outside the VFS
+/// surface, since it doesn't touch source files.
 fn dispatchReview(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -189,7 +184,6 @@ fn dispatchReview(
     out: *std.ArrayListUnmanaged(u8),
 ) !?bool {
     if (std.mem.eql(u8, tool_name, "restore_version")) return try toolRestoreVersion(allocator, project_dir, args_val, out);
-    if (std.mem.eql(u8, tool_name, "set_review_state")) return try toolSetReviewState(allocator, project_dir, args_val, out);
     return null;
 }
 
@@ -296,18 +290,6 @@ fn toolGenerateReview(allocator: std.mem.Allocator, project_dir: []const u8, arg
     return generateReview(allocator, project_dir, name, w);
 }
 
-fn toolGetReviewState(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
-    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const state = review_state_mod.loadState(allocator, project_dir, name) catch review_mod.ReviewState{};
-    const w = out.writer(allocator);
-    const json = review_state_mod.renderState(allocator, state) catch {
-        try w.writeAll("error: render failed");
-        return false;
-    };
-    try w.writeAll(json);
-    return true;
-}
-
 fn toolRestoreVersion(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const id = requireString(args_val, "id") orelse return missingArg(out, allocator, "id");
@@ -319,80 +301,10 @@ fn toolRestoreVersion(allocator: std.mem.Allocator, project_dir: []const u8, arg
     return true;
 }
 
-fn toolSetReviewState(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
-    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const slug = requireString(args_val, "section_slug") orelse return missingArg(out, allocator, "section_slug");
-    const w = out.writer(allocator);
-
-    // Each field is optional but at least one should meaningfully
-    // mutate the state. We apply them in a fixed order: deletes,
-    // toggles, adds, approval — matches how a reviewer would act.
-    if (args_val) |av| if (av == .object) {
-        try applyReviewDeletes(allocator, project_dir, name, slug, av, w);
-        try applyReviewToggles(allocator, project_dir, name, slug, av, w);
-        try applyReviewAdds(allocator, project_dir, name, slug, av, w);
-        try applyReviewApproval(allocator, project_dir, name, slug, args_val, av, w);
-    };
-
-    const v = serve_root.bumpLiveVersion(name);
-    try w.print("{{\"ok\":true,\"version\":{d}}}", .{v});
-    return true;
-}
-
-fn applyReviewDeletes(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, slug: []const u8, av: std.json.Value, w: anytype) !void {
-    if (av.object.get("delete")) |d| if (d == .array) for (d.array.items) |id_val| {
-        if (id_val != .string) continue;
-        review_state_mod.deleteItem(allocator, project_dir, name, slug, id_val.string) catch |err| {
-            try w.print("error: delete failed: {s}", .{@errorName(err)});
-        };
-    };
-}
-
-fn applyReviewToggles(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, slug: []const u8, av: std.json.Value, w: anytype) !void {
-    if (av.object.get("toggle")) |t| if (t == .array) for (t.array.items) |row| {
-        if (row != .object) continue;
-        const id_v = row.object.get("id") orelse continue;
-        const ck_v = row.object.get("checked") orelse continue;
-        if (id_v != .string or ck_v != .bool) continue;
-        review_state_mod.toggleItem(allocator, project_dir, name, slug, id_v.string, ck_v.bool) catch |err| {
-            try w.print("error: toggle failed: {s}", .{@errorName(err)});
-        };
-    };
-}
-
-fn applyReviewAdds(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, slug: []const u8, av: std.json.Value, w: anytype) !void {
-    if (av.object.get("add_items")) |a| if (a == .array) for (a.array.items) |text_val| {
-        if (text_val != .string) continue;
-        _ = review_state_mod.addItem(allocator, project_dir, name, slug, text_val.string) catch |err| {
-            try w.print("error: add failed: {s}", .{@errorName(err)});
-        };
-    };
-}
-
-fn applyReviewApproval(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-    slug: []const u8,
-    args_val: ?std.json.Value,
-    av: std.json.Value,
-    w: anytype,
-) !void {
-    if (av.object.get("approved")) |ap| if (ap == .bool) {
-        const reviewer: []const u8 = optionalString(args_val, "reviewer") orelse "";
-        // MCP approval path: leave content_hash empty. The reconcile()
-        // rule keeps these always-fresh — fine for automated workflows;
-        // human approvals via the UI compute the hash for stale detection.
-        review_state_mod.setApproval(allocator, project_dir, name, slug, ap.bool, reviewer, "") catch |err| {
-            try w.print("error: approve failed: {s}", .{@errorName(err)});
-        };
-    };
-}
-
 /// Dispatch the virtual-filesystem tools (read_file/write_file/edit_file/
 /// list_dir/glob/delete_file/move_file) and the `build` worker. Returns
 /// `null` when `tool_name` is none of those, so the caller can keep
-/// matching against the project-tools and review-state arms.
+/// matching against the project-tools and review arms.
 fn dispatchVfs(
     allocator: std.mem.Allocator,
     project_dir: []const u8,

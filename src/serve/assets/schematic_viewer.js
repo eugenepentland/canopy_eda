@@ -273,12 +273,49 @@
          + icon + '</span>';
   }
 
+  // Build the small "Audit" block that sits above the Sections list when
+  // a review-doc is attached to the page. Each item is a click-target that
+  // scrolls to the matching `#page-…` anchor (the audit chunks rendered at
+  // the bottom of the schematic body).
+  function auditListHtml() {
+    var a = (typeof SCH_AUDIT !== 'undefined') ? SCH_AUDIT : null;
+    if (!a || !a.present) return '';
+    var unresolvedCount = a.unresolved || 0;
+    var unresolvedClass = unresolvedCount > 0 ? 'req-warn' : 'req-ok';
+    var unresolvedLabel = unresolvedCount > 0
+      ? unresolvedCount + ' issue' + (unresolvedCount === 1 ? '' : 's')
+      : 'clean';
+    var html = '<h4>Audit</h4>';
+    html += '<div class="sb-list-item sb-audit-item" data-anchor="page-unresolved">' +
+      '<div class="sb-li-head"><span class="sb-req-icon ' + unresolvedClass + '">' +
+      (unresolvedCount > 0 ? '⚠' : '✓') + '</span>' +
+      '<span>Unresolved issues</span></div>' +
+      '<div class="sb-li-sub">' + escapeHtml(unresolvedLabel) + '</div>' +
+      '</div>';
+    if (a.assertion_total && a.assertion_total > 0) {
+      var failCount = a.assertion_fail || 0;
+      var assertClass = failCount > 0 ? 'req-fail' : 'req-ok';
+      var assertLabel = failCount > 0
+        ? failCount + ' failing of ' + a.assertion_total
+        : a.assertion_total + ' passing';
+      html += '<div class="sb-list-item sb-audit-item" data-anchor="page-assertions">' +
+        '<div class="sb-li-head"><span class="sb-req-icon ' + assertClass + '">' +
+        (failCount > 0 ? '✗' : '✓') + '</span>' +
+        '<span>Assertions</span></div>' +
+        '<div class="sb-li-sub">' + escapeHtml(assertLabel) + '</div>' +
+        '</div>';
+    }
+    return html;
+  }
+
   function showSectionList() {
+    var auditHtml = auditListHtml();
     if (!SCH_INDEX.sections || !SCH_INDEX.sections.length) {
-      detailBox.innerHTML = '<div class="sb-empty">No sections.</div>';
+      detailBox.innerHTML = auditHtml + '<div class="sb-empty">No sections.</div>';
+      wireAuditClicks();
       return;
     }
-    var html = '<h4>Sections</h4>';
+    var html = auditHtml + '<h4>Sections</h4>';
     SCH_INDEX.sections.forEach(function (s) {
       var catPill = s.category
         ? '<span class="sb-cat cat-' + s.category + '">' + escapeHtml(s.category) + '</span>'
@@ -289,8 +326,18 @@
       html += '</div>';
     });
     detailBox.innerHTML = html;
-    detailBox.querySelectorAll('.sb-list-item').forEach(function (el) {
+    wireAuditClicks();
+    detailBox.querySelectorAll('.sb-list-item[data-slug]').forEach(function (el) {
       el.addEventListener('click', function () { showSection(el.dataset.slug, true); });
+    });
+  }
+
+  function wireAuditClicks() {
+    detailBox.querySelectorAll('.sb-audit-item[data-anchor]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        var anchor = document.getElementById(el.dataset.anchor);
+        if (anchor) { scrollTo(anchor); flash(anchor); }
+      });
     });
   }
 

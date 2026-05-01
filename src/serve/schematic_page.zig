@@ -7,7 +7,6 @@ const erc_mod = @import("../erc.zig");
 const bom = @import("../bom.zig");
 const render_html = @import("../render_html.zig");
 const review = @import("../review.zig");
-const review_state_mod = @import("../review_state.zig");
 const req_checks = @import("../req_checks.zig");
 const assets_css = @import("assets_css.zig");
 const serve_root = @import("../serve.zig");
@@ -72,18 +71,7 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // (summary, power budget/sequencing, test points, ERC, assertions) below
     // the section cards so a single URL covers both "what it is" and
     // "whether it's correct."
-    const review_doc: ?review.ReviewDoc = blk: {
-        var doc = review.buildReview(ctx.allocator, name, block, eval.assertions.items, violations, &check_results) catch break :blk null;
-        const stored_state = review_state_mod.loadState(ctx.allocator, ctx.project_dir, name) catch review.ReviewState{};
-        const live_slugs = ctx.allocator.alloc([]const u8, doc.sections.len) catch break :blk null;
-        const live_hashes = ctx.allocator.alloc([]const u8, doc.sections.len) catch break :blk null;
-        for (doc.sections, 0..) |s, i| {
-            live_slugs[i] = s.slug;
-            live_hashes[i] = review.sectionContentHash(ctx.allocator, s, block, block.sections[i]) catch "";
-        }
-        doc.review_state = review_state_mod.reconcile(ctx.allocator, stored_state, live_slugs, live_hashes) catch review.ReviewState{};
-        break :blk doc;
-    };
+    const review_doc: ?review.ReviewDoc = review.buildReview(ctx.allocator, name, block, eval.assertions.items, violations, &check_results) catch null;
 
     const html = render_html.renderToHtml(
         ctx.allocator,

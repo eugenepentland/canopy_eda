@@ -213,11 +213,6 @@ pub fn serve(
     router.get("/api/drc/:name", api.drcApi, .{});
     router.get("/api/erc/:name", api.ercApi, .{});
     router.get("/api/review/:name", api.reviewJsonApi, .{});
-    router.get("/api/review-state/:name", api.reviewStateGetApi, .{});
-    router.post("/api/review-state/:name/item", api.reviewStateAddItemApi, .{});
-    router.post("/api/review-state/:name/item/toggle", api.reviewStateToggleItemApi, .{});
-    router.post("/api/review-state/:name/item/delete", api.reviewStateDeleteItemApi, .{});
-    router.post("/api/review-state/:name/approve", api.reviewStateApproveApi, .{});
     router.post("/api/section-note/:name/add", api.addSectionNoteApi, .{});
     router.post("/api/section-note/:name/remove", api.removeSectionNoteApi, .{});
     router.post("/api/component-datasheet/:component/add", api.addComponentDatasheetApi, .{});

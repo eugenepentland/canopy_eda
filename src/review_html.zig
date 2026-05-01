@@ -21,8 +21,8 @@ const mutedDash: []const u8 = "<span class=\"muted\">—</span>";
 const trCodeOpen: []const u8 = "<tr><td><code>";
 
 /// Render a ReviewDoc as a self-contained HTML page. Inline CSS. One small
-/// inline script plus a CDN marked.js bundle power the checklist/markdown
-/// interactions. The header navbar matches the rest of the EDA web server.
+/// inline script powers the design-note add/delete interactions. The header
+/// navbar matches the rest of the EDA web server.
 pub fn renderToHtml(allocator: std.mem.Allocator, doc: review.ReviewDoc, navbar_css: []const u8) RenderError![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
@@ -52,10 +52,10 @@ pub fn renderToHtml(allocator: std.mem.Allocator, doc: review.ReviewDoc, navbar_
 /// schematic page embed the full review content inline below its section
 /// cards so a single URL (`/schematics/:name`) covers both "here's what we
 /// built" and "here's whether it's correct." The caller is responsible for
-/// including REVIEW_CSS in its <style> and CHECKLIST_JS in a <script>.
+/// including REVIEW_CSS in its <style> and BODY_JS in a <script>.
 pub fn renderBodyInto(w: anytype, doc: review.ReviewDoc) RenderError!void {
     try writeSummaryTable(w, doc.summary);
-    try writeSections(w, doc.sections, doc.review_state);
+    try writeSections(w, doc.sections);
     try writePowerSequence(w, doc.power_sequence);
     try writeTestPoints(w, doc.test_points);
     try writePowerBudget(w, doc.power_budget);
@@ -67,8 +67,8 @@ pub fn renderBodyInto(w: anytype, doc: review.ReviewDoc) RenderError!void {
 /// them when embedding `renderBodyInto`.
 pub const BODY_CSS = REVIEW_CSS;
 
-/// Checklist interaction JS. Exposed for embedding alongside `renderBodyInto`.
-pub const BODY_JS = CHECKLIST_JS;
+/// Design-note interaction JS. Exposed for embedding alongside `renderBodyInto`.
+pub const BODY_JS = NOTE_JS;
 
 fn writeNavbar(w: anytype) !void {
     try w.writeAll("<div class=\"navbar\"><span class=\"brand\">Canopy EDA</span>");
@@ -408,7 +408,7 @@ pub fn writeUnresolved(w: anytype, vs: []const erc_mod.Violation) RenderError!vo
     try w.writeAll(tableSectionClose);
 }
 
-fn writeSections(w: anytype, sections: []const review.SectionReport, state: review.ReviewState) !void {
+fn writeSections(w: anytype, sections: []const review.SectionReport) !void {
     if (sections.len == 0) return;
     try w.writeAll("<section><h2>Sections</h2>");
     for (sections) |s| {
@@ -417,17 +417,10 @@ fn writeSections(w: anytype, sections: []const review.SectionReport, state: revi
             .implemented => "pill-ok",
             .review => "pill-warn",
         };
-        const rs = findState(state, s.slug);
-        const card_class: []const u8 = if (rs.approved and !rs.approval_stale) " sec-card-approved" else if (rs.approval_stale) " sec-card-stale" else "";
-        try w.print("<div class=\"sec-card{s}\" id=\"sec-{s}\" data-slug=\"{s}\">", .{ card_class, s.slug, s.slug });
+        try w.print("<div class=\"sec-card\" id=\"sec-{s}\" data-slug=\"{s}\">", .{ s.slug, s.slug });
         try w.writeAll("<div class=\"sec-head\"><h3>");
         try writeHtmlEscaped(w, s.name);
         try w.print("</h3><span class=\"pill {s}\">{s}</span>", .{ status_pill, @tagName(s.status) });
-        if (rs.approved and !rs.approval_stale) {
-            try w.writeAll("<span class=\"pill pill-approved\">APPROVED</span>");
-        } else if (rs.approval_stale) {
-            try w.writeAll("<span class=\"pill pill-stale\" title=\"Section content changed since approval\">⚠ RE-APPROVAL NEEDED</span>");
-        }
         try w.print("<span class=\"muted sec-count\">{d} component{s}</span>", .{ s.instance_count, if (s.instance_count == 1) "" else "s" });
         try w.writeAll("</div>");
 
@@ -519,92 +512,9 @@ fn writeSections(w: anytype, sections: []const review.SectionReport, state: revi
             try w.writeAll("</ul></details>");
         }
 
-        try writeChecklist(w, rs);
-
         try w.writeAll("</div>");
     }
     try w.writeAll(sectionClose);
-}
-
-/// Render the per-section review checklist: progress count, approval pill
-/// (approved / stale / pending), the editable check items, the "Add a
-/// check" input, and the reviewer name + Approve button. Backed by
-/// `/api/review-state/:name` POST handlers which `CHECKLIST_JS` calls.
-pub fn writeChecklist(w: anytype, rs: review.SectionReviewState) RenderError!void {
-    const checked_count = countChecked(rs.items);
-    try w.writeAll("<details class=\"sec-checklist\" open><summary>Review checklist");
-    try w.print(" <span class=\"chk-progress\">({d}/{d})</span>", .{ checked_count, rs.items.len });
-    if (rs.approved and !rs.approval_stale) {
-        try w.writeAll(" <span class=\"chk-status chk-status-approved\">Approved");
-        if (rs.approved_by.len > 0) {
-            try w.writeAll(" by ");
-            try writeHtmlEscaped(w, rs.approved_by);
-        }
-        if (rs.approved_at.len > 0) {
-            try w.writeAll(" · ");
-            try writeHtmlEscaped(w, rs.approved_at);
-        }
-        try w.writeAll("</span>");
-    } else if (rs.approval_stale) {
-        try w.writeAll(" <span class=\"chk-status chk-status-stale\">⚠ Section changed since approval");
-        if (rs.approved_by.len > 0) {
-            try w.writeAll(" by ");
-            try writeHtmlEscaped(w, rs.approved_by);
-        }
-        if (rs.approved_at.len > 0) {
-            try w.writeAll(" on ");
-            try writeHtmlEscaped(w, rs.approved_at);
-        }
-        try w.writeAll(" — re-approve to refresh.</span>");
-    } else {
-        try w.writeAll(" <span class=\"chk-status chk-status-pending\">Pending</span>");
-    }
-    try w.writeAll("</summary>");
-
-    try w.writeAll("<ul class=\"chk-list\">");
-    for (rs.items) |it| {
-        const is_checked: []const u8 = if (it.checked) " checked" else "";
-        try w.print("<li data-id=\"{s}\"><label><input type=\"checkbox\" class=\"chk-box\"{s}> ", .{ it.id, is_checked });
-        try writeHtmlEscaped(w, it.text);
-        try w.writeAll("</label><button class=\"chk-del\" title=\"Delete\">✕</button></li>");
-    }
-    try w.writeAll("</ul>");
-
-    try w.writeAll("<div class=\"chk-add\">");
-    try w.writeAll("<input type=\"text\" class=\"chk-new\" placeholder=\"Add a check (e.g. Power pins wired)\">");
-    try w.writeAll("<button class=\"chk-add-btn\">Add</button>");
-    try w.writeAll("</div>");
-
-    try w.writeAll("<div class=\"chk-approve-row\">");
-    try w.writeAll("<input type=\"text\" class=\"chk-reviewer\" placeholder=\"Reviewer name\" value=\"");
-    try writeHtmlEscaped(w, rs.approved_by);
-    try w.writeAll("\">");
-    if (rs.approved and !rs.approval_stale) {
-        try w.writeAll("<button class=\"chk-approve-btn\" data-approve=\"false\">Unapprove</button>");
-    } else if (rs.approval_stale) {
-        try w.writeAll("<button class=\"chk-approve-btn\" data-approve=\"true\">Re-approve section</button>");
-    } else {
-        try w.writeAll("<button class=\"chk-approve-btn\" data-approve=\"true\">Approve section</button>");
-    }
-    try w.writeAll("</div></details>");
-}
-
-/// Look up the persisted `SectionReviewState` for a section slug, returning
-/// an empty default record when no entry exists yet. Lets the section
-/// renderer always have an `rs` to work against without nullable plumbing.
-pub fn findState(state: review.ReviewState, slug: []const u8) review.SectionReviewState {
-    for (state.sections) |s| {
-        if (std.mem.eql(u8, s.section_slug, slug)) return s;
-    }
-    return .{ .section_slug = slug, .items = &.{}, .approved = false, .approved_by = "", .approved_at = "", .content_hash = "", .approval_stale = false };
-}
-
-fn countChecked(items: []const review.ChecklistItem) usize {
-    var n: usize = 0;
-    for (items) |it| if (it.checked) {
-        n += 1;
-    };
-    return n;
 }
 
 /// Render the Assertions section — one row per `(assert …)` /
@@ -683,7 +593,7 @@ fn writeScript(w: anytype, design_name: []const u8) !void {
     try w.writeAll("<script>var DESIGN_NAME=");
     try writeJsString(w, design_name);
     try w.writeAll(";");
-    try w.writeAll(CHECKLIST_JS);
+    try w.writeAll(NOTE_JS);
     try w.writeAll("</script>");
 }
 
@@ -703,15 +613,13 @@ fn writeJsString(w: anytype, s: []const u8) !void {
     try w.writeAll("\"");
 }
 
-const CHECKLIST_JS =
+const NOTE_JS =
     \\(function(){
     \\  function post(path,body){
     \\    return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
     \\      .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r;});
     \\  }
-    \\  function base(){return '/api/review-state/'+encodeURIComponent(DESIGN_NAME);}
     \\  function noteBase(){return '/api/section-note/'+encodeURIComponent(DESIGN_NAME);}
-    \\  function sectionSlug(el){var c=el.closest('[data-slug]');return c?c.getAttribute('data-slug'):null;}
     \\  // Populate the PDF dropdown on every design-note "Add" form from the
     \\  // list of uploaded datasheets, so reviewers can pin a source link
     \\  // without editing the .sexp by hand.
@@ -719,35 +627,9 @@ const CHECKLIST_JS =
     \\    var files=(j.files||[]).map(function(f){return '<option value="'+f.name+'">'+f.name+'</option>';}).join('');
     \\    document.querySelectorAll('.note-new-pdf').forEach(function(sel){sel.innerHTML='<option value="">(no datasheet)</option>'+files;});
     \\  });
-    \\  document.addEventListener('change',function(e){
-    \\    if(!e.target.classList.contains('chk-box'))return;
-    \\    var slug=sectionSlug(e.target);
-    \\    var li=e.target.closest('li');
-    \\    if(!slug||!li)return;
-    \\    post(base()+'/item/toggle',{section_slug:slug,id:li.getAttribute('data-id'),checked:e.target.checked})
-    \\      .then(function(){location.reload();}).catch(function(err){alert('Toggle failed: '+err.message);});
-    \\  });
     \\  document.addEventListener('click',function(e){
     \\    var t=e.target;
-    \\    if(t.classList.contains('chk-add-btn')){
-    \\      var row=t.closest('.chk-add');var input=row.querySelector('.chk-new');
-    \\      var text=input.value.trim();if(!text)return;
-    \\      var slug=sectionSlug(t);if(!slug)return;
-    \\      post(base()+'/item',{section_slug:slug,text:text}).then(function(){location.reload();})
-    \\        .catch(function(err){alert('Add failed: '+err.message);});
-    \\    }else if(t.classList.contains('chk-del')){
-    \\      var li=t.closest('li');var slug=sectionSlug(t);if(!li||!slug)return;
-    \\      post(base()+'/item/delete',{section_slug:slug,id:li.getAttribute('data-id')}).then(function(){location.reload();})
-    \\        .catch(function(err){alert('Delete failed: '+err.message);});
-    \\    }else if(t.classList.contains('chk-approve-btn')){
-    \\      var row=t.closest('.chk-approve-row');var input=row.querySelector('.chk-reviewer');
-    \\      var approved=t.getAttribute('data-approve')==='true';
-    \\      var reviewer=input.value.trim();
-    \\      if(approved&&!reviewer){alert('Enter a reviewer name before approving.');input.focus();return;}
-    \\      var slug=sectionSlug(t);if(!slug)return;
-    \\      post(base()+'/approve',{section_slug:slug,approved:approved,reviewer:reviewer}).then(function(){location.reload();})
-    \\        .catch(function(err){alert('Approve failed: '+err.message);});
-    \\    }else if(t.classList.contains('note-add-btn')){
+    \\    if(t.classList.contains('note-add-btn')){
     \\      // Design note add: uses section NAME (not slug) because the editor
     \\      // splices into the .sexp by "(section \"NAME\"" needle match.
     \\      var addRow=t.closest('.note-add');
