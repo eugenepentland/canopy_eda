@@ -201,16 +201,6 @@ Public functions: runChecks, deinit, parseMicroFarads, parseOhms, parseMicroHenr
 
 Public functions: renderToHtml
 
-## review_state
-
-Public functions: loadState, saveState, reconcile, addItem, toggleItem, deleteItem, setApproval, renderState
-
-- saveState then loadState round-trips a checklist
-- loadState returns empty state when file is missing
-- reconcile drops stale slugs and synthesises empty entries
-- safeName rejects path-traversal attempts
-- addItem appends a new checklist item with a fresh id
-
 ## serve
 
 Public functions: notFound, serve

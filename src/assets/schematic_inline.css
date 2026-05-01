@@ -108,6 +108,12 @@ details summary:hover{color:#c9d1d9;}
 details ul{margin:6px 0 0 20px;padding:0;}
 details li{margin:3px 0;font-size:0.88rem;color:#c9d1d9;line-height:1.45;}
 .sch-sidebar{position:sticky;top:0;height:100vh;background:#161b22;border-left:1px solid #30363d;display:flex;flex-direction:column;box-sizing:border-box;}
+/* TOC chip bar — page-level dashboards only (block diagram, summary, power
+   tables, BOM). Sits above the search and is intentionally compact so the
+   per-section list below it stays the primary use of vertical space. */
+.sb-toc{padding:10px 12px;border-bottom:1px solid #21262d;display:flex;flex-wrap:wrap;gap:6px;flex-shrink:0;}
+.sb-toc-btn{padding:4px 10px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:12px;font-size:0.72rem;text-decoration:none;line-height:1.4;white-space:nowrap;}
+.sb-toc-btn:hover{background:#30363d;border-color:#58a6ff;color:#f0f6fc;}
 .sb-search{padding:12px 14px;border-bottom:1px solid #21262d;position:relative;}
 .sb-search input{width:100%;padding:8px 10px;border:1px solid #30363d;background:#010409;color:#c9d1d9;border-radius:5px;font-size:0.9rem;box-sizing:border-box;}
 .sb-search input:focus{border-color:#58a6ff;outline:none;}
@@ -129,7 +135,10 @@ details li{margin:3px 0;font-size:0.88rem;color:#c9d1d9;line-height:1.45;}
 .sb-list-item{padding:7px 8px;border-bottom:1px solid #21262d;cursor:pointer;border-radius:3px;}
 .sb-list-item:hover{background:#1f2937;}
 .sb-list-item .sb-li-head{font-family:"SF Mono",monospace;color:#c9d1d9;display:flex;align-items:center;gap:8px;}
-.sb-list-item .sb-li-sub{color:#8b949e;font-size:0.78rem;margin-top:2px;}
+/* Clamp the description under each section card title to 2 lines so long
+   blurbs ("STM6601A push-button on/off controller — gates the system buck
+   for true off-state…") don't push the rest of the list off-screen. */
+.sb-list-item .sb-li-sub{color:#8b949e;font-size:0.78rem;margin-top:2px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;text-overflow:ellipsis;}
 .sb-list-item .sb-req-icon{flex-shrink:0;width:16px;text-align:center;font-weight:700;font-size:0.95rem;line-height:1;}
 .sb-list-item .sb-req-icon.req-ok{color:#3fb950;}
 .sb-list-item .sb-req-icon.req-warn{color:#d29922;}

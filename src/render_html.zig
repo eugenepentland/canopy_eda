@@ -35,10 +35,8 @@ const Allocator = std.mem.Allocator;
 pub const RenderError = bom_html.BomError;
 
 // ── Repeated string literals ──────────────────────────────────────
-const approvedClass: []const u8 = " sec-card-approved";
 const hubsArrayPrefix: []const u8 = ",\"hubs\":[";
 const sectionClose: []const u8 = "</section>";
-const approvedPill: []const u8 = "<span class=\"pill pill-approved\">APPROVED</span>";
 
 /// Render a design as a self-contained HTML schematic page. Mirrors the
 /// review page's style: inline CSS, navbar, status banner, then a stack of
@@ -80,34 +78,49 @@ pub fn renderToHtml(
     // Top-of-page overview: block diagram, then the review summary + power/
     // test-point tables. These are read-only dashboards, so they sit above
     // the per-section schematics where the user does the detailed work.
+    try w.writeAll("<div id=\"page-block-diagram\" class=\"page-anchor\">");
     try system_svg.renderSystemOverviewSvg(allocator, block, w);
+    try w.writeAll("</div>");
     if (review_doc) |doc| {
         try w.writeAll("<div class=\"review-embed review-wrap\">");
+        try w.writeAll("<div id=\"page-summary\" class=\"page-anchor\">");
         try review_html.writeSummaryTable(w, doc.summary);
-        try review_html.writePowerSequence(w, doc.power_sequence);
-        try review_html.writeTestPoints(w, doc.test_points);
-        try review_html.writePowerBudget(w, doc.power_budget);
+        try w.writeAll("</div>");
+        if (doc.power_sequence.len > 0) {
+            try w.writeAll("<div id=\"page-power-sequence\" class=\"page-anchor\">");
+            try review_html.writePowerSequence(w, doc.power_sequence);
+            try w.writeAll("</div>");
+        }
+        if (doc.test_points.len > 0) {
+            try w.writeAll("<div id=\"page-test-points\" class=\"page-anchor\">");
+            try review_html.writeTestPoints(w, doc.test_points);
+            try w.writeAll("</div>");
+        }
+        if (doc.power_budget.len > 0) {
+            try w.writeAll("<div id=\"page-power-budget\" class=\"page-anchor\">");
+            try review_html.writePowerBudget(w, doc.power_budget);
+            try w.writeAll("</div>");
+        }
         try w.writeAll("</div>");
     }
 
     // Editable BOM table — sits between the review dashboards and the
     // per-section schematic cards. <details open> so it's visible by
     // default but the user can collapse it on long pages.
-    try w.writeAll("<details class=\"sch-bom-card\" open><summary>Bill of Materials</summary>");
+    try w.writeAll("<details id=\"page-bom\" class=\"sch-bom-card page-anchor\" open><summary>Bill of Materials</summary>");
     try bom_html.writeSchematicBomHtml(w, block);
     try w.writeAll("</details>");
 
-    const rstate: ?review.ReviewState = if (review_doc) |d| d.review_state else null;
-    for (block.sections) |sec| try writeSection(&ctx, w, allocator, sec, 0, rstate, check_results);
+    for (block.sections) |sec| try writeSection(&ctx, w, allocator, sec, 0, check_results);
 
     // Designs without sections (typical of sub-block-only or flat hub+passives
     // designs like power-6v, pma3-14ln) still deserve a rendering. Emit a
     // synthetic card per sub-block, plus one flat card if any hubs live at
     // the top level outside any section.
-    for (block.sub_blocks) |sb| try writeSubBlockCard(&ctx, w, allocator, sb, rstate, check_results);
+    for (block.sub_blocks) |sb| try writeSubBlockCard(&ctx, w, allocator, sb, check_results);
 
     if (block.sections.len == 0 and hasTopLevelHubs(block)) {
-        try writeFlatHubs(&ctx, w, allocator, block, rstate, check_results);
+        try writeFlatHubs(&ctx, w, allocator, block, check_results);
     }
 
     // Bottom-of-page audit trail: ERC violations and assertions. Repeated
@@ -115,17 +128,23 @@ pub fn renderToHtml(
     // approvals and then see the outstanding issues without jumping back.
     if (review_doc) |doc| {
         try w.writeAll("<div class=\"review-embed review-wrap\">");
+        try w.writeAll("<div id=\"page-unresolved\" class=\"page-anchor\">");
         try review_html.writeUnresolved(w, doc.unresolved);
-        try review_html.writeAssertions(w, doc.assertions);
+        try w.writeAll("</div>");
+        if (doc.assertions.len > 0) {
+            try w.writeAll("<div id=\"page-assertions\" class=\"page-anchor\">");
+            try review_html.writeAssertions(w, doc.assertions);
+            try w.writeAll("</div>");
+        }
         try w.writeAll("</div>");
     }
 
     try w.writeAll("</div>");
-    try writeSidebar(w);
+    try writeSidebar(w, review_doc);
     try w.writeAll("</div>");
-    try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns, check_results);
+    try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns, check_results, review_doc);
     if (review_doc != null) {
-        // BODY_JS (review checklist handlers) reuses DESIGN_NAME — already
+        // BODY_JS (design-note handlers) reuses DESIGN_NAME — already
         // declared by writeScripts above.
         try w.writeAll("<script>");
         try w.writeAll(review_html.BODY_JS);
@@ -278,9 +297,28 @@ fn countsForRefs(check_results: *const CheckResultMap, refs: []const []const u8)
     return counts;
 }
 
-fn writeSidebar(w: anytype) !void {
+/// Sidebar: a compact "table of contents" chip bar above the search box
+/// (jump to block diagram / summary / power tables / BOM), the search input,
+/// and the detail pane (which the schematic-viewer JS uses for the section
+/// list, audit summary, and per-section/component detail views).
+///
+/// Optional dashboards (power sequencing, test points, power budget) only
+/// get a chip when their backing data is non-empty — the renderer skips
+/// the matching `<section>` block in those cases too, so a chip linking to
+/// a missing section would scroll to nowhere.
+fn writeSidebar(w: anytype, review_doc: ?review.ReviewDoc) !void {
+    try w.writeAll("<aside class=\"sch-sidebar\" id=\"sch-sidebar\">");
+    try w.writeAll("<nav class=\"sb-toc\" aria-label=\"Page contents\">");
+    try writeTocChip(w, "page-block-diagram", "Block diagram");
+    if (review_doc) |doc| {
+        try writeTocChip(w, "page-summary", "Summary");
+        if (doc.power_sequence.len > 0) try writeTocChip(w, "page-power-sequence", "Power sequencing");
+        if (doc.test_points.len > 0) try writeTocChip(w, "page-test-points", "Test points");
+        if (doc.power_budget.len > 0) try writeTocChip(w, "page-power-budget", "Power budget");
+    }
+    try writeTocChip(w, "page-bom", "BOM");
+    try w.writeAll("</nav>");
     try w.writeAll(
-        \\<aside class="sch-sidebar" id="sch-sidebar">
         \\<div class="sb-search">
         \\<input type="search" id="sch-search" placeholder="Search net, ref, pin…" autocomplete="off" spellcheck="false">
         \\<div id="sb-results" class="sb-results"></div>
@@ -288,6 +326,12 @@ fn writeSidebar(w: anytype) !void {
         \\<div id="sb-detail" class="sb-detail"></div>
         \\</aside>
     );
+}
+
+fn writeTocChip(w: anytype, anchor_id: []const u8, label: []const u8) !void {
+    try w.print("<a class=\"sb-toc-btn\" href=\"#{s}\">", .{anchor_id});
+    try writeHtmlEscaped(w, label);
+    try w.writeAll("</a>");
 }
 
 /// Build a map of (ref_des|pin_id) -> asserted alt-function names (e.g. "SPI4_SCK",
@@ -400,17 +444,11 @@ fn writeSection(
     allocator: Allocator,
     sec: Section,
     depth: u8,
-    review_state: ?review.ReviewState,
     check_results: *const CheckResultMap,
 ) !void {
     const indent_class: []const u8 = if (depth == 0) "sch-section" else "sch-section sch-subsection";
     const slug = try review.slugify(allocator, sec.name);
-    const rs: ?review.SectionReviewState = if (review_state) |state|
-        review_html.findState(state, slug)
-    else
-        null;
-    const approved_class: []const u8 = if (rs) |s| (if (s.approved) approvedClass else "") else "";
-    try w.print("<section class=\"{s}{s}\" id=\"sec-{s}\" data-slug=\"{s}\">", .{ indent_class, approved_class, slug, slug });
+    try w.print("<section class=\"{s}\" id=\"sec-{s}\" data-slug=\"{s}\">", .{ indent_class, slug, slug });
 
     // Header
     const status_pill: []const u8 = switch (sec.status) {
@@ -421,7 +459,6 @@ fn writeSection(
     try w.writeAll("<div class=\"sec-head\"><h2>");
     try writeHtmlEscaped(w, sec.name);
     try w.print("</h2><span class=\"pill {s}\">{s}</span>", .{ status_pill, @tagName(sec.status) });
-    if (rs) |s| if (s.approved) try w.writeAll(approvedPill);
     try w.writeAll("</div>");
 
     if (sec.description.len > 0) {
@@ -462,12 +499,7 @@ fn writeSection(
 
     if (sec.notes.len > 0) try writeNotes(w, sec.notes);
 
-    for (sec.sub_sections) |sub| try writeSection(ctx, w, allocator, sub, depth + 1, review_state, check_results);
-
-    // Approval + checklist widget anchored to this section's slug. The shared
-    // review-state JS handler picks up the `data-slug` on the enclosing card
-    // and POSTs to /api/review-state/:name/...
-    if (rs) |s| try review_html.writeChecklist(w, s);
+    for (sec.sub_sections) |sub| try writeSection(ctx, w, allocator, sub, depth + 1, check_results);
 
     try w.writeAll(sectionClose);
 }
@@ -857,20 +889,13 @@ fn writeSubBlockCard(
     w: anytype,
     allocator: Allocator,
     sb: env_mod.SubBlock,
-    review_state: ?review.ReviewState,
     check_results: *const CheckResultMap,
 ) !void {
     const slug = try review.slugify(allocator, sb.name);
-    const rs: ?review.SectionReviewState = if (review_state) |state|
-        review_html.findState(state, slug)
-    else
-        null;
-    const approved_class: []const u8 = if (rs) |s| (if (s.approved) approvedClass else "") else "";
-    try w.print("<section class=\"sch-section{s}\" id=\"sec-{s}\" data-slug=\"{s}\">", .{ approved_class, slug, slug });
+    try w.print("<section class=\"sch-section\" id=\"sec-{s}\" data-slug=\"{s}\">", .{ slug, slug });
     try w.writeAll("<div class=\"sec-head\"><h2>");
     try writeHtmlEscaped(w, sb.name);
     try w.writeAll("</h2><span class=\"pill pill-ok\">sub-block</span>");
-    if (rs) |s| if (s.approved) try w.writeAll(approvedPill);
     try w.writeAll("</div>");
     try w.writeAll("<p class=\"sec-desc\">");
     try writeHtmlEscaped(w, sb.block.name);
@@ -896,8 +921,6 @@ fn writeSubBlockCard(
 
     try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items, check_results);
 
-    if (rs) |s| try review_html.writeChecklist(w, s);
-
     try w.writeAll(sectionClose);
 }
 
@@ -910,17 +933,10 @@ fn writeFlatHubs(
     w: anytype,
     allocator: Allocator,
     block: *const DesignBlock,
-    review_state: ?review.ReviewState,
     check_results: *const CheckResultMap,
 ) !void {
-    const rs: ?review.SectionReviewState = if (review_state) |state|
-        review_html.findState(state, "design")
-    else
-        null;
-    const approved_class: []const u8 = if (rs) |s| (if (s.approved) approvedClass else "") else "";
-    try w.print("<section class=\"sch-section{s}\" id=\"sec-design\" data-slug=\"design\"><div class=\"sec-head\"><h2>", .{approved_class});
+    try w.writeAll("<section class=\"sch-section\" id=\"sec-design\" data-slug=\"design\"><div class=\"sec-head\"><h2>");
     try writeHtmlEscaped(w, block.name);
-    if (rs) |s| if (s.approved) try w.writeAll(approvedPill);
     try w.writeAll("</h2></div>");
 
     var hub_refs: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -942,8 +958,6 @@ fn writeFlatHubs(
     }
 
     try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items, check_results);
-
-    if (rs) |s| try review_html.writeChecklist(w, s);
 
     try w.writeAll(sectionClose);
 }
@@ -970,15 +984,35 @@ fn writeScripts(
     ctx: *RenderCtx,
     asserted_fns: *const std.StringHashMapUnmanaged([]const u8),
     check_results: *const CheckResultMap,
+    review_doc: ?review.ReviewDoc,
 ) !void {
     try w.writeAll("<script>var DESIGN_NAME=");
     try writeJsString(w, design_name);
     try w.writeAll(";var SCH_INDEX=");
     try writeSearchIndex(w, allocator, block, ctx, asserted_fns, check_results);
+    try w.writeAll(";var SCH_AUDIT=");
+    try writeAuditSummary(w, review_doc);
     try w.writeAll(";</script>");
     try w.writeAll("<script>");
     try w.writeAll(SCHEMATIC_VIEWER_JS);
     try w.writeAll("</script>");
+}
+
+/// Emit the small JSON object the sidebar's "Audit" block reads to label
+/// its links — `unresolved` counts error+warning ERC violations, and
+/// `assertion_fail` counts failed `(assert …)` evaluations. Both default
+/// to 0 / null when no review-doc is attached so the client can suppress
+/// the Audit block entirely on designs that don't build cleanly.
+fn writeAuditSummary(w: anytype, review_doc: ?review.ReviewDoc) !void {
+    if (review_doc) |doc| {
+        var assertion_fail: usize = 0;
+        for (doc.assertions) |a| {
+            if (a.status == .fail) assertion_fail += 1;
+        }
+        try w.print("{{\"present\":true,\"unresolved\":{d},\"assertion_total\":{d},\"assertion_fail\":{d}}}", .{ doc.unresolved.len, doc.assertions.len, assertion_fail });
+    } else {
+        try w.writeAll("{\"present\":false}");
+    }
 }
 
 const SCHEMATIC_VIEWER_JS = @import("serve/schematic_viewer_js.zig").SCHEMATIC_VIEWER_JS;

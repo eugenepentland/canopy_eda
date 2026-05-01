@@ -20,7 +20,6 @@ const mcp_tools = @import("mcp_tools.zig");
 const review_mod = @import("../review.zig");
 const review_json_mod = @import("../review_json.zig");
 const review_md_mod = @import("../review_md.zig");
-const review_state_mod = @import("../review_state.zig");
 const req_checks = @import("../req_checks.zig");
 const edit_mod = @import("edit.zig");
 const serve_root = @import("../serve.zig");
@@ -53,7 +52,6 @@ const OK_VERSION_TEMPLATE = "{{\"ok\":true,\"version\":{d}}}";
 const ERR_OK_FALSE_TEMPLATE = "{{\"ok\":false,\"error\":\"{s}\"}}";
 const NAME_FIELD_PREFIX = "{\"name\":";
 const EMPTY_DATASHEETS_REQS = ",\"datasheets\":[],\"requirements\":[]";
-const SECTION_SLUG_KEY = "section_slug";
 
 // PCB default rules (mm)
 const DEFAULT_VIA_DRILL_MM: f64 = 0.3;
@@ -1621,58 +1619,13 @@ fn buildDocForName(
         std.StringHashMapUnmanaged([]req_checks.Result).empty;
     req_checks.applyVerifications(&check_results, block, block.instances);
 
-    var doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, &check_results);
-
-    // Attach reconciled review state. Degrades to empty on missing/malformed
-    // files so a design with no reviews/ dir still renders a clean report.
-    // live_hashes lets reconcile flag stale approvals for sections whose
-    // content changed after they were approved.
-    const stored_state = review_state_mod.loadState(allocator, project_dir, name) catch review_mod.ReviewState{};
-    const live_slugs = try allocator.alloc([]const u8, doc.sections.len);
-    const live_hashes = try allocator.alloc([]const u8, doc.sections.len);
-    for (doc.sections, 0..) |s, i| {
-        live_slugs[i] = s.slug;
-        live_hashes[i] = review_mod.sectionContentHash(allocator, s, block, block.sections[i]) catch "";
-    }
-    doc.review_state = review_state_mod.reconcile(allocator, stored_state, live_slugs, live_hashes) catch review_mod.ReviewState{};
-
+    const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, &check_results);
     return doc;
 }
 
 fn renderReviewJson(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]const u8 {
     const doc = try buildDocForName(allocator, project_dir, name);
     return try review_json_mod.renderToJson(allocator, doc);
-}
-
-/// Recompute the content hash for a single section so the approve endpoint
-/// can stamp it into review-state. Re-evaluates the design, then locates
-/// the section whose slug matches. Returns "" if the section isn't found.
-fn sectionHashForSlug(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-    slug: []const u8,
-) ![]const u8 {
-    const board_path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
-    defer allocator.free(board_path);
-
-    var eval = Evaluator.init(allocator, project_dir);
-    defer eval.deinit();
-
-    const result = try eval.evalFile(board_path);
-    const block = switch (result) {
-        .design_block => |b| b,
-        .board => |b| @as(*const env_mod.DesignBlock, b.design),
-        else => return "",
-    };
-    const violations = try erc_mod.runErc(allocator, block, project_dir);
-    const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, null);
-    for (doc.sections, 0..) |s, i| {
-        if (std.mem.eql(u8, s.slug, slug)) {
-            return review_mod.sectionContentHash(allocator, s, block, block.sections[i]) catch "";
-        }
-    }
-    return "";
 }
 
 /// List free (unassigned) pins on an instance. Thin wrapper over the MCP
@@ -1765,144 +1718,6 @@ pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     try w.writeAll("}}");
 
     res.body = try ctx.allocator.dupe(u8, buf.items);
-}
-
-// ── Review-state (persisted per design) ────────────────────────────────
-
-/// Return the reconciled review state for a design as JSON. Reconcile
-/// matches the live section list so the client can render empty entries
-/// for new sections without a page reload.
-pub fn reviewStateGetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
-        return;
-    };
-    const state = review_state_mod.loadState(ctx.allocator, ctx.project_dir, name) catch review_mod.ReviewState{};
-    const json = review_state_mod.renderState(ctx.allocator, state) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = "{\"error\":\"render failed\"}";
-        return;
-    };
-    res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
-    res.body = json;
-}
-
-/// POST /api/review-state/:name/item — body {section_slug, text}. Server
-/// mints the id and returns {id, version}.
-pub fn reviewStateAddItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
-        return;
-    };
-    const body = req.body() orelse {
-        res.status = HTTP_BAD_REQUEST;
-        return;
-    };
-    const slug = jsonField(body, SECTION_SLUG_KEY) orelse {
-        res.status = HTTP_BAD_REQUEST;
-        res.body = "missing section_slug";
-        return;
-    };
-    const text = jsonField(body, "text") orelse {
-        res.status = HTTP_BAD_REQUEST;
-        res.body = "missing text";
-        return;
-    };
-    const id = review_state_mod.addItem(ctx.allocator, ctx.project_dir, name, slug, text) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = "save failed";
-        return;
-    };
-    const v = serve_root.bumpLiveVersion(name);
-    res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"id\":\"{s}\",\"version\":{d}}}", .{ id, v });
-}
-
-/// POST /api/review-state/:name/item/toggle — body {section_slug, id, checked}.
-pub fn reviewStateToggleItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
-        return;
-    };
-    const body = req.body() orelse {
-        res.status = HTTP_BAD_REQUEST;
-        return;
-    };
-    const slug = jsonField(body, SECTION_SLUG_KEY) orelse {
-        res.status = HTTP_BAD_REQUEST;
-        return;
-    };
-    const id = jsonField(body, "id") orelse {
-        res.status = HTTP_BAD_REQUEST;
-        return;
-    };
-    const checked = jsonBoolField(body, "checked") orelse false;
-    review_state_mod.toggleItem(ctx.allocator, ctx.project_dir, name, slug, id, checked) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        return;
-    };
-    const v = serve_root.bumpLiveVersion(name);
-    res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, OK_VERSION_TEMPLATE, .{v});
-}
-
-/// POST /api/review-state/:name/item/delete — body {section_slug, id}.
-pub fn reviewStateDeleteItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
-        return;
-    };
-    const body = req.body() orelse {
-        res.status = HTTP_BAD_REQUEST;
-        return;
-    };
-    const slug = jsonField(body, SECTION_SLUG_KEY) orelse {
-        res.status = HTTP_BAD_REQUEST;
-        return;
-    };
-    const id = jsonField(body, "id") orelse {
-        res.status = HTTP_BAD_REQUEST;
-        return;
-    };
-    review_state_mod.deleteItem(ctx.allocator, ctx.project_dir, name, slug, id) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        return;
-    };
-    const v = serve_root.bumpLiveVersion(name);
-    res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, OK_VERSION_TEMPLATE, .{v});
-}
-
-/// POST /api/review-state/:name/approve — body {section_slug, approved, reviewer}.
-/// Server stamps approved_at with isoTimestampNow on approval.
-pub fn reviewStateApproveApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
-        return;
-    };
-    const body = req.body() orelse {
-        res.status = HTTP_BAD_REQUEST;
-        return;
-    };
-    const slug = jsonField(body, SECTION_SLUG_KEY) orelse {
-        res.status = HTTP_BAD_REQUEST;
-        return;
-    };
-    const approved = jsonBoolField(body, "approved") orelse false;
-    const reviewer = jsonField(body, "reviewer") orelse "";
-
-    // Re-build the design so the approval stamp pins a hash of the section's
-    // live content — that way the very next build-time reconcile sees the
-    // approval as fresh, and a subsequent edit trips `approval_stale`.
-    const content_hash = if (approved) sectionHashForSlug(ctx.allocator, ctx.project_dir, name, slug) catch "" else "";
-    review_state_mod.setApproval(ctx.allocator, ctx.project_dir, name, slug, approved, reviewer, content_hash) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        return;
-    };
-    const v = serve_root.bumpLiveVersion(name);
-    res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, OK_VERSION_TEMPLATE, .{v});
 }
 
 /// POST /api/section-note/:name/add — body `{section, text, pdf?, page?}`.

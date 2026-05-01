@@ -203,13 +203,10 @@ src/req_checks.zig::parseOhms | fn parseOhms(s: []const u8) ?f64
 src/req_checks.zig::runChecks | fn runChecks( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, ) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]Result)
 src/review.zig::buildReview | fn buildReview( allocator: std.mem.Allocator, design_name: []const u8, block: *const DesignBlock, assertions: []const AssertionResult, violations: []const erc_mod.Violation, check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result), ) ReviewError!ReviewDoc
 src/review.zig::isoTimestamp | fn isoTimestamp(allocator: std.mem.Allocator, unix_s: i64) std.mem.Allocator.Error![]const u8
-src/review.zig::sectionContentHash | fn sectionContentHash( allocator: std.mem.Allocator, rep: SectionReport, block: *const DesignBlock, sec: Section, ) ReviewError![]const u8
 src/review.zig::slugify | fn slugify(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8
-src/review_html.zig::findState | fn findState(state: review.ReviewState, slug: []const u8) review.SectionReviewState
 src/review_html.zig::renderBodyInto | fn renderBodyInto(w: anytype, doc: review.ReviewDoc) RenderError!void
 src/review_html.zig::renderToHtml | fn renderToHtml(allocator: std.mem.Allocator, doc: review.ReviewDoc, navbar_css: []const u8) RenderError![]const u8
 src/review_html.zig::writeAssertions | fn writeAssertions(w: anytype, assertions: []const review.AssertionReport) RenderError!void
-src/review_html.zig::writeChecklist | fn writeChecklist(w: anytype, rs: review.SectionReviewState) RenderError!void
 src/review_html.zig::writePowerBudget | fn writePowerBudget(w: anytype, rails: []const power_budget.Rail) RenderError!void
 src/review_html.zig::writePowerSequence | fn writePowerSequence(w: anytype, rows: []const power_sequencing.SequenceRow) RenderError!void
 src/review_html.zig::writeSummaryTable | fn writeSummaryTable(w: anytype, s: review.Summary) RenderError!void
@@ -217,14 +214,6 @@ src/review_html.zig::writeTestPoints | fn writeTestPoints(w: anytype, tps: []con
 src/review_html.zig::writeUnresolved | fn writeUnresolved(w: anytype, vs: []const erc_mod.Violation) RenderError!void
 src/review_json.zig::renderToJson | fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) std.mem.Allocator.Error![]const u8
 src/review_md.zig::renderToMarkdown | fn renderToMarkdown( allocator: Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, doc: review.ReviewDoc, source: []const u8, check_results: *const CheckResultMap, ) std.mem.Allocator.Error![]const u8
-src/review_state.zig::addItem | fn addItem( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, slug: []const u8, text: []const u8, ) StateError![]const u8
-src/review_state.zig::deleteItem | fn deleteItem( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, slug: []const u8, id: []const u8, ) StateError!void
-src/review_state.zig::loadState | fn loadState( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) StateError!review.ReviewState
-src/review_state.zig::reconcile | fn reconcile( allocator: std.mem.Allocator, stored: review.ReviewState, live_slugs: []const []const u8, live_hashes: ?[]const []const u8, ) std.mem.Allocator.Error!review.ReviewState
-src/review_state.zig::renderState | fn renderState(allocator: std.mem.Allocator, state: review.ReviewState) std.mem.Allocator.Error![]const u8
-src/review_state.zig::saveState | fn saveState( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, state: review.ReviewState, ) StateError!void
-src/review_state.zig::setApproval | fn setApproval( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, slug: []const u8, approved: bool, reviewer: []const u8, content_hash: []const u8, ) StateError!void
-src/review_state.zig::toggleItem | fn toggleItem( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, slug: []const u8, id: []const u8, checked: bool, ) StateError!void
 src/serve.zig::bumpLiveVersion | fn bumpLiveVersion(name: []const u8) u32
 src/serve.zig::getLiveVersion | fn getLiveVersion(name: []const u8) u32
 src/serve.zig::serve | fn serve( allocator: std.mem.Allocator, port: u16, project_dir: []const u8, auth_dir: ?[]const u8, ) ServeError!void
@@ -258,11 +247,6 @@ src/serve/api.zig::removeComponentDatasheetApi | fn removeComponentDatasheetApi(
 src/serve/api.zig::removeSectionNoteApi | fn removeSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::reviewJsonApi | fn reviewJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::reviewPage | fn reviewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::reviewStateAddItemApi | fn reviewStateAddItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::reviewStateApproveApi | fn reviewStateApproveApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::reviewStateDeleteItemApi | fn reviewStateDeleteItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::reviewStateGetApi | fn reviewStateGetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::reviewStateToggleItemApi | fn reviewStateToggleItemApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::sceneGraphApi | fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::updatePcbApi | fn updatePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::versionApi | fn versionApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
