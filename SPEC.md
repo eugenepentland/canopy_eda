@@ -10,6 +10,7 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Tokenizes arithmetic operators as distinct tokens
 - Tokenizes comparison operators as distinct tokens
 - Tracks line and column position for each token
+- Tokenizes KiCad-style unquoted filenames containing +
 
 ## sexpr/parser
 
@@ -229,9 +230,9 @@ Public functions: readFile, writeFile, editFile, listDir, glob, deleteFile, move
 - matches basic glob patterns
 - import detection respects word boundaries
 - denialHint redirects bare lib listing to list_library
-- denialHint points at upload_datasheet for PDF writes
+- denialHint redirects PDF writes to the disk/browser route
 - libraryEntityFor classifies library subdirs
-- denies write_file on lib/datasheets (use upload_datasheet)
+- denies write_file on lib/datasheets (PDFs are read-only via MCP)
 
 ## serve/component_info
 

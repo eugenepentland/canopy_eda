@@ -34,7 +34,7 @@ pub fn accountPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         return;
     };
 
-    const clients = try store.listClientsByEmail(ctx.allocator, ctx.project_dir, email);
+    const clients = try store.listClientsByEmail(ctx.allocator, ctx.auth_dir, email);
     defer ctx.allocator.free(clients);
 
     const current_role = users.getRole(ctx.allocator, ctx.project_dir, email);
@@ -177,7 +177,7 @@ pub fn createClientApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         return;
     }
 
-    const r = try store.createClient(ctx.allocator, ctx.project_dir, name, email, redirect_uri);
+    const r = try store.createClient(ctx.allocator, ctx.auth_dir, name, email, redirect_uri);
     res.content_type = .JSON;
     res.body = try std.fmt.allocPrint(
         req.arena,
@@ -199,7 +199,7 @@ pub fn revokeClientApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         res.body = "missing id";
         return;
     };
-    const ok = store.revokeClient(ctx.allocator, ctx.project_dir, id, email);
+    const ok = store.revokeClient(ctx.allocator, ctx.auth_dir, id, email);
     if (!ok) {
         res.status = 404;
         res.body = "client not found";
@@ -327,7 +327,7 @@ pub fn deleteUserApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     }
 
     // Cascade: revoke OAuth clients, drop passkeys + sessions.
-    store.revokeAllClientsForEmail(ctx.allocator, ctx.project_dir, target);
+    store.revokeAllClientsForEmail(ctx.allocator, ctx.auth_dir, target);
     auth.purgeIdentity(ctx.allocator, ctx.project_dir, target);
 
     res.content_type = .JSON;

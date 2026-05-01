@@ -54,10 +54,42 @@ var clients_list: std.ArrayListUnmanaged(Client) = .empty;
 var tokens_list: std.ArrayListUnmanaged(Token) = .empty;
 var codes_map: ?std.StringHashMap(AuthCode) = null;
 var loaded_auth_dir: ?[]const u8 = null;
+/// Set when `loadClients` successfully read a non-empty file. Used by
+/// `saveClients` as a tripwire: if the in-memory list is empty but the
+/// loaded file had content, refuse to write — that's the signature of a
+/// silent parse failure that would otherwise blow away all the credentials
+/// on the next createClient/revokeClient call. The user has to fix the
+/// file (or reset the flag) before the server will overwrite it.
+var clients_file_was_nonempty: bool = false;
+var tokens_file_was_nonempty: bool = false;
 
 fn ensureLoaded(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     if (loaded_auth_dir) |d| {
         if (std.mem.eql(u8, d, auth_dir)) return;
+        // auth_dir is changing — reset the in-memory state so we don't end
+        // up with the union of two files' contents (the previous behaviour
+        // when callers passed inconsistent paths). This shouldn't happen in
+        // normal operation but did slip in via a typo bug at one point;
+        // making it well-defined keeps the failure mode "load the wrong
+        // file" rather than "merge two files into a duplicated mess that
+        // then writes back."
+        for (clients_list.items) |c| {
+            allocator.free(@constCast(c.id));
+            allocator.free(@constCast(c.secret_hash));
+            allocator.free(@constCast(c.name));
+            allocator.free(@constCast(c.email));
+            allocator.free(@constCast(c.redirect_uri));
+        }
+        clients_list.clearRetainingCapacity();
+        for (tokens_list.items) |t| {
+            allocator.free(@constCast(t.hash));
+            allocator.free(@constCast(t.client_id));
+            allocator.free(@constCast(t.email));
+            allocator.free(@constCast(t.scope));
+        }
+        tokens_list.clearRetainingCapacity();
+        clients_file_was_nonempty = false;
+        tokens_file_was_nonempty = false;
     }
     loaded_auth_dir = auth_dir;
     loadClients(allocator, auth_dir);
@@ -82,7 +114,13 @@ fn ensureAuthDir(auth_dir: []const u8) void {
 fn loadClients(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     const path = clientsPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
-    const data = infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch return;
+    const data = infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch |e| {
+        if (e != error.FileNotFound) {
+            log.warn("oauth: read {s} failed: {s}", .{ path, @errorName(e) });
+        }
+        return;
+    };
+    const file_had_content = data.len > 2; // "[]" is the only possible empty-but-valid file.
     const Entry = struct {
         id: []const u8,
         secret_hash: []const u8,
@@ -92,7 +130,16 @@ fn loadClients(allocator: std.mem.Allocator, auth_dir: []const u8) void {
         created_at: i64,
         revoked: bool = false,
     };
-    const parsed = std.json.parseFromSlice([]const Entry, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch return;
+    const parsed = std.json.parseFromSlice([]const Entry, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch |e| {
+        // Parse failed — file is corrupt or in an unexpected schema. Trip
+        // the safety so the next save refuses to clobber it; the operator
+        // has to fix the file by hand. Without this, a parse failure
+        // followed by createClient would write a fresh file with a single
+        // entry and silently destroy the rest.
+        log.warn("oauth: parse {s} failed: {s} — load skipped, saves locked", .{ path, @errorName(e) });
+        if (file_had_content) clients_file_was_nonempty = true;
+        return;
+    };
     defer parsed.deinit();
     for (parsed.value) |e| {
         clients_list.append(allocator, .{
@@ -105,14 +152,23 @@ fn loadClients(allocator: std.mem.Allocator, auth_dir: []const u8) void {
             .revoked = e.revoked,
         }) catch continue;
     }
+    if (file_had_content) clients_file_was_nonempty = true;
 }
 
 fn saveClients(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     ensureAuthDir(auth_dir);
     const path = clientsPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
-    const file = infra_fs.cwd().createFile(path, .{}) catch return;
-    defer file.close();
+
+    // Empty-list guard: refuse to overwrite a file that previously had
+    // content. Catches the case where loadClients silently failed (parse
+    // error, transient I/O blip) and a subsequent createClient/revokeClient
+    // would otherwise write `[]` and destroy every credential.
+    if (clients_list.items.len == 0 and clients_file_was_nonempty) {
+        log.warn("oauth: refusing to overwrite {s} with empty list (file had content; possible prior load failure)", .{path});
+        return;
+    }
+
     var bw: std.ArrayListUnmanaged(u8) = .empty;
     defer bw.deinit(allocator);
     const w = bw.writer(allocator);
@@ -126,13 +182,20 @@ fn saveClients(allocator: std.mem.Allocator, auth_dir: []const u8) void {
         w.print(",\"created_at\":{d},\"revoked\":{}}}", .{ c.created_at, c.revoked }) catch return;
     }
     w.writeAll("]") catch return;
-    file.writeAll(bw.items) catch return;
+    writeFileAtomicWithBackup(allocator, path, bw.items);
+    if (clients_list.items.len > 0) clients_file_was_nonempty = true;
 }
 
 fn loadTokens(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     const path = tokensPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
-    const data = infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch return;
+    const data = infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch |e| {
+        if (e != error.FileNotFound) {
+            log.warn("oauth: read {s} failed: {s}", .{ path, @errorName(e) });
+        }
+        return;
+    };
+    const file_had_content = data.len > 2;
     const Entry = struct {
         hash: []const u8,
         client_id: []const u8,
@@ -140,7 +203,11 @@ fn loadTokens(allocator: std.mem.Allocator, auth_dir: []const u8) void {
         scope: []const u8,
         expires_at: i64,
     };
-    const parsed = std.json.parseFromSlice([]const Entry, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch return;
+    const parsed = std.json.parseFromSlice([]const Entry, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch |e| {
+        log.warn("oauth: parse {s} failed: {s} — load skipped, saves locked", .{ path, @errorName(e) });
+        if (file_had_content) tokens_file_was_nonempty = true;
+        return;
+    };
     defer parsed.deinit();
     const now = clock.timestamp();
     for (parsed.value) |e| {
@@ -153,14 +220,21 @@ fn loadTokens(allocator: std.mem.Allocator, auth_dir: []const u8) void {
             .expires_at = e.expires_at,
         }) catch continue;
     }
+    if (file_had_content) tokens_file_was_nonempty = true;
 }
 
 fn saveTokens(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     ensureAuthDir(auth_dir);
     const path = tokensPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
-    const file = infra_fs.cwd().createFile(path, .{}) catch return;
-    defer file.close();
+
+    // Same empty-list guard as saveClients: don't overwrite a previously
+    // populated tokens file with `[]` after a load failure.
+    if (tokens_list.items.len == 0 and tokens_file_was_nonempty) {
+        log.warn("oauth: refusing to overwrite {s} with empty list (file had content; possible prior load failure)", .{path});
+        return;
+    }
+
     var bw: std.ArrayListUnmanaged(u8) = .empty;
     defer bw.deinit(allocator);
     const w = bw.writer(allocator);
@@ -174,7 +248,50 @@ fn saveTokens(allocator: std.mem.Allocator, auth_dir: []const u8) void {
         ) catch return;
     }
     w.writeAll("]") catch return;
-    file.writeAll(bw.items) catch return;
+    writeFileAtomicWithBackup(allocator, path, bw.items);
+    if (tokens_list.items.len > 0) tokens_file_was_nonempty = true;
+}
+
+/// Atomic save with rolling backup:
+///   1. Copy `<path>` → `<path>.bak` (best effort; missing source = no-op)
+///   2. Write `data` to `<path>.tmp`, then rename onto `<path>`
+///
+/// Step 1 gives us a trivial recovery point — if anything dropped entries
+/// (manual edit, bad merge, partial restore), the previous good state is
+/// one `cp` away. Step 2 means a crash mid-write can't truncate the live
+/// file: the rename either succeeds atomically or the live file stays as
+/// whichever side completed last.
+fn writeFileAtomicWithBackup(allocator: std.mem.Allocator, path: []const u8, data: []const u8) void {
+    // Backup: copy current file (if any) to <path>.bak. We don't fail the
+    // save when backup fails — a missing source on first save is normal
+    // and we don't want to block saves on FS quirks.
+    const bak_path = std.fmt.allocPrint(allocator, "{s}.bak", .{path}) catch return;
+    defer allocator.free(bak_path);
+    if (infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024)) |existing| {
+        defer allocator.free(existing);
+        if (infra_fs.cwd().createFile(bak_path, .{ .truncate = true })) |bf| {
+            defer bf.close();
+            bf.writeAll(existing) catch |e| log.warn("oauth: backup write {s} failed: {s}", .{ bak_path, @errorName(e) });
+        } else |e| {
+            log.warn("oauth: backup create {s} failed: {s}", .{ bak_path, @errorName(e) });
+        }
+    } else |_| {} // no prior file; nothing to back up
+
+    // Atomic write: tmp → rename. Same pattern vfs.zig uses for user files.
+    var write_buf: [4096]u8 = undefined;
+    var atomic = infra_fs.cwd().atomicFile(path, .{ .write_buffer = &write_buf }) catch |e| {
+        log.warn("oauth: atomicFile {s} failed: {s}", .{ path, @errorName(e) });
+        return;
+    };
+    defer atomic.deinit();
+    atomic.file_writer.interface.writeAll(data) catch |e| {
+        log.warn("oauth: atomic write {s} failed: {s}", .{ path, @errorName(e) });
+        return;
+    };
+    atomic.finish() catch |e| {
+        log.warn("oauth: atomic finish {s} failed: {s}", .{ path, @errorName(e) });
+        return;
+    };
 }
 
 // ── Client CRUD ─────────────────────────────────────────────────────────

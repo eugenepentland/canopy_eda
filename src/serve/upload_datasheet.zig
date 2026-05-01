@@ -11,9 +11,9 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence, ReadOnlyFileSystem, LinkQuotaExceeded };
 
 /// True iff the buffer starts with the four `%PDF` magic bytes — gates
-/// every datasheet write so an agent can't smuggle arbitrary content
-/// into `lib/datasheets/<name>.pdf`. Public so the MCP `upload_datasheet`
-/// tool can reuse the same gate as the HTTP `/api/upload-datasheet` route.
+/// every datasheet write so the HTTP route can't accept arbitrary content
+/// into `lib/datasheets/<name>.pdf`. Kept public so future binary-write
+/// callers (if any) can share the same gate as `/api/upload-datasheet`.
 pub fn isPdfMagic(body: []const u8) bool {
     return body.len >= 4 and std.mem.eql(u8, body[0..4], "%PDF");
 }
@@ -106,8 +106,7 @@ pub fn storeDatasheet(
 /// conservative whitelist (alphanum + `_-.`) and are forced to end in `.pdf`
 /// so component-library references can only ever address this directory.
 /// Size is capped at 64 MiB by the httpz config. The actual write goes
-/// through `storeDatasheet` so the policy stays in one place — the MCP
-/// `upload_datasheet` tool calls the same function.
+/// through `storeDatasheet` so the policy stays in one place.
 pub fn uploadDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = 400;

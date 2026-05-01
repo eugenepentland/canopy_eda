@@ -103,8 +103,9 @@ const READ_PREFIXES = [_][]const u8{
 
 /// Top-level prefixes that may be written. Stricter than reads — `history/`
 /// is read-only (use the `restore_version` tool); `out/` is build output;
-/// `lib/datasheets/` is read-only via write_file (use the `upload_datasheet`
-/// tool); 3D models and curated parts are imported by humans.
+/// `lib/datasheets/` is read-only via MCP (PDFs are added by hand or
+/// through the browser library page); 3D models and curated parts are
+/// imported by humans.
 ///
 /// `lib/sources/` is writable so agents can correct upstream KiCad symbol or
 /// footprint files before re-running `regenerate_pinout` — the
@@ -275,7 +276,7 @@ fn sandboxErrorMsg(err: SandboxError) []const u8 {
 /// well-known workaround. Keeps the generic "permission denied" message in
 /// the `error` field and adds the redirection in `hint`. Common cases:
 ///   - `list_dir lib` / `lib/`      → suggest list_library / list_dir on a subdir
-///   - write to lib/datasheets/*    → point at upload_datasheet
+///   - write to lib/datasheets/*    → point at the disk / browser route
 ///   - write to history/, out/      → explain why these are read-only
 /// Returns null when no specific guidance applies; caller emits no hint.
 ///
@@ -1178,7 +1179,7 @@ test "checkAcl allows src and lib paths" {
 }
 
 test "checkAcl denies writes to lib/datasheets via write_file" {
-    // spec: serve/vfs - denies write_file on lib/datasheets (use upload_datasheet)
+    // spec: serve/vfs - denies write_file on lib/datasheets (PDFs are read-only via MCP)
     try std.testing.expectError(error.PermissionDenied, checkAcl("lib/datasheets/foo.pdf", .write));
 }
 
@@ -1230,8 +1231,8 @@ test "denialHint surfaces lib redirection on read for slash variants" {
     try std.testing.expect(denialHint("lib/components/foo.sexp", .read) == null);
 }
 
-test "denialHint surfaces upload_datasheet on write to lib/datasheets" {
-    // spec: serve/vfs - denialHint points at upload_datasheet for PDF writes
+test "denialHint redirects writes to lib/datasheets/" {
+    // spec: serve/vfs - denialHint redirects PDF writes to the disk/browser route
     try std.testing.expect(denialHint("lib/datasheets/foo.pdf", .write) != null);
     try std.testing.expect(denialHint("lib/datasheets", .write) != null);
     try std.testing.expect(denialHint("lib/datasheets/", .write) != null);

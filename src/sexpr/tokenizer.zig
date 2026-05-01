@@ -242,7 +242,12 @@ pub const Tokenizer = struct {
 
     fn isAtomContinue(c: ?u8) bool {
         const ch = c orelse return false;
-        return isAtomStart(ch) or isDigit(ch) or ch == '-' or ch == '/' or ch == '.' or ch == '*' or ch == '#' or ch == '@' or ch == ':';
+        // `+` is included so KiCad's unquoted model paths (e.g.
+        // `PMA3-24323LN+.stp` from Mini-Circuits part libraries) tokenize
+        // as a single atom. `+` standalone is still picked up by
+        // `readOperator` since it isn't an atom *start* char, so
+        // arithmetic forms like `(+ 1 2)` are unaffected.
+        return isAtomStart(ch) or isDigit(ch) or ch == '-' or ch == '/' or ch == '.' or ch == '*' or ch == '#' or ch == '@' or ch == ':' or ch == '+';
     }
 
     fn isOperatorChar(c: u8) bool {
@@ -270,6 +275,35 @@ test "tokenize parens and atoms" {
     try std.testing.expectEqual(TokenTag.rparen, t5.tag);
     const t6 = try t.next();
     try std.testing.expectEqual(TokenTag.eof, t6.tag);
+}
+
+// spec: sexpr/tokenizer - Tokenizes KiCad-style unquoted filenames containing +
+test "tokenize unquoted filename with plus" {
+    // (model PMA3-24323LN+.stp …) — Mini-Circuits' Samacsys export uses
+    // unquoted model paths with `+` in the part name. Regression: previously
+    // this split the atom at `+` and then choked on the leading `.`.
+    var t = Tokenizer.init("(model PMA3-24323LN+.stp)");
+    _ = try t.next(); // (
+    const t2 = try t.next();
+    try std.testing.expectEqual(TokenTag.atom, t2.tag);
+    try std.testing.expectEqualStrings("model", t2.text);
+    const t3 = try t.next();
+    try std.testing.expectEqual(TokenTag.atom, t3.tag);
+    try std.testing.expectEqualStrings("PMA3-24323LN+.stp", t3.text);
+    const t4 = try t.next();
+    try std.testing.expectEqual(TokenTag.rparen, t4.tag);
+}
+
+test "tokenize standalone plus stays as operator atom" {
+    // Make sure the atom-continue change doesn't break arithmetic forms.
+    var t = Tokenizer.init("(+ 1 2)");
+    _ = try t.next(); // (
+    const plus = try t.next();
+    try std.testing.expectEqual(TokenTag.atom, plus.tag);
+    try std.testing.expectEqualStrings("+", plus.text);
+    const one = try t.next();
+    try std.testing.expectEqual(TokenTag.int, one.tag);
+    try std.testing.expectEqualStrings("1", one.text);
 }
 
 // spec: sexpr/tokenizer - Tokenizes integer and float numbers with optional unit suffixes
