@@ -69,6 +69,15 @@ pub fn accountPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         \\</div>
     );
 
+    // ── Password card ──
+    try w.writeAll(
+        \\<div class="card"><h2>Password</h2>
+        \\<p class="muted" id="pw-help">Set a password as a fallback in case your passkey is lost.</p>
+        \\<input type="password" id="pw-input" placeholder="New password (min 8 chars)" minlength="8" autocomplete="new-password">
+        \\<button class="btn-primary" id="pw-btn">Set password</button>
+        \\</div>
+    );
+
     // ── Invite card (admin only) ──
     if (is_admin) {
         try w.writeAll(

@@ -249,16 +249,7 @@ pub fn listFootprints(w: anytype, ctx: *Handler) HandlerError!void {
             } else {
                 try w.print("<tr><td>{s}</td><td>-</td>", .{fname});
             }
-            if (has_model) {
-                try w.print("<td><a href=\"/model-viewer/{s}\" style=\"color:#58a6ff;text-decoration:none\">3D</a></td></tr>", .{fname});
-            } else {
-                try w.print(
-                    "<td><a href=\"/model-viewer/{s}\" " ++
-                        "style=\"color:#666;text-decoration:none\" " ++
-                        "title=\"Upload 3D model\">+ 3D</a></td></tr>",
-                    .{fname},
-                );
-            }
+            try w.print("<td>{s}</td></tr>", .{if (has_model) "yes" else "-"});
         }
     }
     try w.writeAll("</table>");

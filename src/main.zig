@@ -8,6 +8,9 @@ const alt_functions = @import("convert/alt_functions.zig");
 const serve_mod = @import("serve.zig");
 const commands = @import("commands.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
+const auth = @import("serve/auth.zig");
+const users = @import("serve/users.zig");
+const passwords = @import("serve/passwords.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const DEFAULT_SERVE_PORT: u16 = 7050;
@@ -40,6 +43,16 @@ fn hasFlag(args: [][:0]u8, flag: []const u8) bool {
 /// default. Caller owns any returned slice (allocator-owned dupe).
 fn readAuthDirEnv(allocator: std.mem.Allocator) ?[]const u8 {
     return std.process.getEnvVarOwned(allocator, "EDA_AUTH_DIR") catch null;
+}
+
+/// Resolve the auth directory from CLI args, env, or `<project_dir>/auth`.
+/// Returns the same answer the long-running `serve` flow uses, so CLI helpers
+/// (mint-invite, set-password) operate on the same files the server writes.
+fn resolveAuthDir(allocator: std.mem.Allocator, args: [][:0]u8) ![]const u8 {
+    const project_dir = optionalArg(args, "--project-dir") orelse ".";
+    if (optionalArg(args, "--auth-dir")) |d| return d;
+    if (readAuthDirEnv(allocator)) |d| return d;
+    return std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir});
 }
 
 /// CLI entry point: parses `argv[1]` as the subcommand name and dispatches
@@ -103,10 +116,6 @@ pub fn main() !void {
         try cmdMergeAltFunctions(allocator, args[2], args[3], hasFlag(args[4..], "--write"));
     } else if (std.mem.eql(u8, command, "export-kicad")) {
         try commands.cmdExportKicad(allocator, args[2..]);
-    } else if (std.mem.eql(u8, command, "export-pcb")) {
-        try commands.cmdExportPcb(allocator, args[2..]);
-    } else if (std.mem.eql(u8, command, "export-gerber")) {
-        try commands.cmdExportGerber(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "export-review")) {
         try commands.cmdExportReview(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "serve")) {
@@ -118,17 +127,18 @@ pub fn main() !void {
         const auth_dir_override = optionalArg(args[2..], "--auth-dir") orelse readAuthDirEnv(allocator);
         try serve_mod.serve(allocator, port, project_dir, auth_dir_override);
     } else if (std.mem.eql(u8, command, "mint-plugin-token")) {
-        const project_dir = optionalArg(args[2..], "--project-dir") orelse ".";
         const label = optionalArg(args[2..], "--label") orelse "plugin";
-        const auth_dir = optionalArg(args[2..], "--auth-dir") orelse
-            readAuthDirEnv(allocator) orelse
-            try std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir});
+        const auth_dir = try resolveAuthDir(allocator, args[2..]);
         const raw = try plugin_tokens.mint(allocator, auth_dir, label);
         defer allocator.free(raw);
         const stdout = std.fs.File.stdout();
         try stdout.writeAll(raw);
         try stdout.writeAll("\n");
         try stdout.writeAll("Save this token — it will not be shown again.\n");
+    } else if (std.mem.eql(u8, command, "mint-invite")) {
+        try cmdMintInvite(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "set-password")) {
+        try cmdSetPassword(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
         try printUsage();
     } else {
@@ -266,6 +276,74 @@ fn cmdConvertSymbol(allocator: std.mem.Allocator, path: []const u8, filter: ?[]c
     try file.writeAll(output);
 }
 
+fn cmdMintInvite(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    const role = optionalArg(args, "--role") orelse "writer";
+    const created_by = optionalArg(args, "--created-by") orelse "cli";
+    const auth_dir = try resolveAuthDir(allocator, args);
+
+    if (users.Role.fromString(role) == null) {
+        std.debug.print("Invalid --role {s}. Use: admin, writer, reader.\n", .{role});
+        std.process.exit(1);
+    }
+
+    const token = auth.createInvite(allocator, auth_dir, created_by, role) catch |e| {
+        std.debug.print("Failed to mint invite: {s}\n", .{@errorName(e)});
+        std.process.exit(1);
+    };
+    defer allocator.free(token);
+
+    const stdout = std.fs.File.stdout();
+    try stdout.writeAll("Invite path: /auth/invite/");
+    try stdout.writeAll(token);
+    try stdout.writeAll("\n");
+    try stdout.writeAll("Token: ");
+    try stdout.writeAll(token);
+    try stdout.writeAll("\n");
+    try stdout.writeAll("Role: ");
+    try stdout.writeAll(role);
+    try stdout.writeAll("\nValid for 7 days, single-use. Prepend your server's origin to form the full URL.\n");
+}
+
+fn cmdSetPassword(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    const auth_dir = try resolveAuthDir(allocator, args);
+
+    const email = optionalArg(args, "--email") orelse {
+        std.debug.print("Usage: eda set-password --email <addr> --password <pw> [--role admin] [--auth-dir <d>]\n", .{});
+        std.process.exit(1);
+    };
+    const password = optionalArg(args, "--password") orelse {
+        std.debug.print("Usage: eda set-password --email <addr> --password <pw> [--role admin] [--auth-dir <d>]\n", .{});
+        std.process.exit(1);
+    };
+    const role_str = optionalArg(args, "--role") orelse "writer";
+    const role = users.Role.fromString(role_str) orelse {
+        std.debug.print("Invalid --role {s}. Use: admin, writer, reader.\n", .{role_str});
+        std.process.exit(1);
+    };
+
+    passwords.set(allocator, auth_dir, email, password) catch |e| switch (e) {
+        error.PasswordTooShort => {
+            std.debug.print("Password must be at least 8 characters.\n", .{});
+            std.process.exit(1);
+        },
+        else => {
+            std.debug.print("Failed to set password: {s}\n", .{@errorName(e)});
+            std.process.exit(1);
+        },
+    };
+
+    _ = users.ensureUser(allocator, auth_dir, email, role) catch |e| {
+        std.debug.print("Warning: ensureUser failed: {s}\n", .{@errorName(e)});
+    };
+
+    const stdout = std.fs.File.stdout();
+    try stdout.writeAll("Password set for ");
+    try stdout.writeAll(email);
+    try stdout.writeAll(" (role ");
+    try stdout.writeAll(role.toString());
+    try stdout.writeAll("). Sign in via /auth/login → \"Use password instead\".\n");
+}
+
 fn printUsage() !void {
     const file = std.fs.File.stdout();
     try file.writeAll(
@@ -277,8 +355,9 @@ fn printUsage() !void {
         \\  eda check [--project-dir <d>] [--severity <s>] <name>  Run ERC on a design
         \\  eda serve [--project-dir <d>] [--port <n>]  Start web server (default port 7050)
         \\  eda mint-plugin-token [--project-dir <d>] [--label <l>]  Mint a bearer token for the KiCad plugin
+        \\  eda mint-invite [--project-dir <d>] [--role <r>] [--auth-dir <d>]  Mint a single-use invite (7-day TTL)
+        \\  eda set-password --email <a> --password <p> [--role <r>] [--auth-dir <d>]  Set or reset a user's password
         \\  eda export-kicad --project-dir <d> --output-dir <out> <name>  Export KiCad netlist + footprints
-        \\  eda export-pcb --project-dir <d> [--output <file>] <name>   Export .kicad_pcb (native PCB)
         \\  eda export-review --project-dir <d> [--output-dir <out>] [--zip] <name>  Export design-review package (markdown + BOM CSV)
         \\  eda convert-footprint <file>        Convert KiCad .kicad_mod to .sexp
         \\  eda convert-symbol <file> [--filter <name>]  Convert KiCad .kicad_sym to .sexp
@@ -304,7 +383,6 @@ test {
     _ = @import("convert/symbol.zig");
     _ = @import("convert/alt_functions.zig");
     _ = @import("export_kicad.zig");
-    _ = @import("export_kicad_pcb.zig");
     _ = @import("serve.zig");
     _ = @import("render_json.zig");
     _ = @import("json_writer.zig");

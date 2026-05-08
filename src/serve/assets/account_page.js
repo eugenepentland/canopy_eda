@@ -97,4 +97,25 @@ async function revokeClient(id) {
   const r = await fetch('/api/oauth/clients/' + encodeURIComponent(id) + '/revoke', {method:'POST'});
   if (r.ok) location.reload(); else alert('Failed: ' + await r.text());
 }
+async function refreshPasswordStatus(){
+  try {
+    const r = await fetch('/auth/password/status');
+    if (!r.ok) return;
+    const j = await r.json();
+    document.getElementById('pw-btn').textContent = j.set ? 'Change password' : 'Set password';
+    document.getElementById('pw-help').textContent = j.set
+      ? 'A password is set. You can sign in with it if you lose your passkey.'
+      : 'Set a password as a fallback in case your passkey is lost.';
+  } catch (e) {}
+}
+document.getElementById('pw-btn').onclick = async () => {
+  const input = document.getElementById('pw-input');
+  const pw = input.value;
+  if (pw.length < 8) { status.className='status error'; status.textContent='Password must be at least 8 characters'; return; }
+  const r = await fetch('/auth/password/set', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({password: pw})});
+  const j = await r.json();
+  if (j.ok) { status.className='status ok'; status.textContent='Password saved.'; input.value=''; refreshPasswordStatus(); }
+  else { status.className='status error'; status.textContent = j.error || 'Failed to save password'; }
+};
 refreshPasskeys();
+refreshPasswordStatus();

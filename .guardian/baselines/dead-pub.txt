@@ -2,7 +2,6 @@
 src/commands.zig::cmdServe: unused public declaration
 src/eval/ids.zig::getSymbolAlts: unused public declaration
 src/eval/ids.zig::validateSymbolAgainstPinout: unused public declaration
-src/layout.zig::placementsByUuid: unused public declaration
 src/render_svg/bom_table.zig::renderBomTable: unused public declaration
 src/render_svg/branch.zig::inferBlockIcon: unused public declaration
 src/render_svg/branch.zig::renderPortBlock: unused public declaration

@@ -8,6 +8,7 @@ const Handler = serve_root.Handler;
 const oauth_store = @import("oauth_store.zig");
 const plugin_tokens = @import("plugin_tokens.zig");
 const users = @import("users.zig");
+const passwords = @import("passwords.zig");
 const infra_random = @import("../infra/random.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -66,6 +67,7 @@ const PATH_AUTH_LOGIN = "/auth/login";
 const HOST_LOCALHOST = "localhost";
 
 const HTML_DOCTYPE_HEAD = "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
+const SESSION_COOKIE_FMT = "session={s}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800";
 const HTML_STYLE_HEAD_BODY_OPEN = "</style></head><body>";
 const HTML_AUTH_CARD_OPEN = "<div class=\"auth-card\">";
 const HTML_STATUS_DIV = "<div class=\"status\" id=\"status\"></div>";
@@ -79,6 +81,57 @@ const HTML_INPUT_STYLE_MID =
     "style=\"width:100%;box-sizing:border-box;padding:10px 12px;" ++
     "background:#161b22;border:1px solid #30363d;border-radius:6px;" ++
     "color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none\" />";
+
+// Password <input> markup. The login + invite pages start hidden and are
+// revealed by the "Use password" toggle; the manage page leaves it visible.
+const HTML_PASSWORD_INPUT_HIDDEN =
+    "<input type=\"password\" id=\"password\" placeholder=\"Password\" minlength=\"8\" " ++
+    "style=\"display:none;width:100%;box-sizing:border-box;padding:10px 12px;" ++
+    "background:#0d1117;border:1px solid #30363d;border-radius:6px;" ++
+    "color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none\" />";
+const HTML_PASSWORD_INPUT_VISIBLE =
+    "<input type=\"password\" id=\"pw-input\" placeholder=\"New password (min 8 chars)\" minlength=\"8\" " ++
+    "style=\"width:100%;box-sizing:border-box;padding:10px 12px;background:#0d1117;" ++
+    "border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:8px;outline:none\" />";
+
+// JS for the manage page's password section. Pulled out as a constant so
+// `managePage` stays under Guardian's function-length cap.
+const MANAGE_PASSWORD_JS =
+    \\async function refreshPasswordStatus() {
+    \\  try {
+    \\    const r = await fetch('/auth/password/status');
+    \\    if (!r.ok) return;
+    \\    const j = await r.json();
+    \\    document.getElementById('pw-btn').textContent = j.set ? 'Change password' : 'Set password';
+    \\    document.getElementById('pw-help').textContent = j.set
+    \\      ? 'A password is set. You can sign in with it if you lose your passkey.'
+    \\      : 'Set a password as a fallback in case your passkey is lost.';
+    \\  } catch (e) { /* noop */ }
+    \\}
+    \\document.getElementById('pw-btn').onclick = async () => {
+    \\  const pw = document.getElementById('pw-input').value;
+    \\  if (pw.length < 8) {
+    \\    status.className = 'status error';
+    \\    status.textContent = 'Password must be at least 8 characters';
+    \\    return;
+    \\  }
+    \\  const r = await fetch('/auth/password/set', {
+    \\    method: 'POST',
+    \\    headers: { 'Content-Type': 'application/json' },
+    \\    body: JSON.stringify({ password: pw })
+    \\  });
+    \\  const j = await r.json();
+    \\  if (j.ok) {
+    \\    status.className = 'status ok';
+    \\    status.textContent = 'Password saved.';
+    \\    document.getElementById('pw-input').value = '';
+    \\    refreshPasswordStatus();
+    \\  } else {
+    \\    status.className = 'status error';
+    \\    status.textContent = j.error || 'Failed to save password';
+    \\  }
+    \\};
+;
 
 const MANAGE_PAGE_EXTRA_CSS =
     "\n.row { display:flex; justify-content:space-between; align-items:center;" ++
@@ -354,7 +407,13 @@ fn saveInvites(allocator: std.mem.Allocator, auth_dir: []const u8, invites: []co
     try file.writeAll(buf.items);
 }
 
-fn createInvite(allocator: std.mem.Allocator, auth_dir: []const u8, created_by: []const u8, role: []const u8) ![]const u8 {
+/// Mint a single-use invite token tied to `created_by`. The token is a
+/// 24-byte random hex string; `role` is the role assigned to the user when
+/// they redeem the invite. Persists to `auth_dir/invites.json`. Public so
+/// the `eda mint-invite` CLI command can call it without going through the
+/// admin HTTP endpoint (used for out-of-band recovery on locked-out
+/// deployments).
+pub fn createInvite(allocator: std.mem.Allocator, auth_dir: []const u8, created_by: []const u8, role: []const u8) HandlerError![]const u8 {
     var rand_bytes: [24]u8 = undefined;
     infra_random.bytes(&rand_bytes);
     const hex = std.fmt.bytesToHex(rand_bytes, .lower);
@@ -679,6 +738,8 @@ pub fn purgeIdentity(allocator: std.mem.Allocator, auth_dir: []const u8, email: 
     saveCredentials(allocator, auth_dir, kept.items) catch |e| {
         log.warn("saveCredentials failed: {s}", .{@errorName(e)});
     };
+
+    passwords.purge(allocator, auth_dir, email);
 
     sessions_mutex.lock();
     defer sessions_mutex.unlock();
@@ -1215,7 +1276,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     // Create a session for the newly registered user (unless they already have one)
     if (session_token_opt == null) {
         const token = try createSession(ctx.allocator, ctx.auth_dir, resolved_email);
-        const cookie = try std.fmt.allocPrint(req.arena, "session={s}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800", .{token});
+        const cookie = try std.fmt.allocPrint(req.arena, SESSION_COOKIE_FMT, .{token});
         res.header(HEADER_SET_COOKIE, cookie);
     }
 
@@ -1492,11 +1553,198 @@ pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     // Success - create session tied to the credential's email
     const session_email = if (cred.email.len > 0) cred.email else "";
     const token = try createSession(ctx.allocator, ctx.auth_dir, session_email);
-    const cookie = try std.fmt.allocPrint(req.arena, "session={s}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800", .{token});
+    const cookie = try std.fmt.allocPrint(req.arena, SESSION_COOKIE_FMT, .{token});
     res.header(HEADER_SET_COOKIE, cookie);
 
     res.content_type = .JSON;
     res.body = OK_JSON_TRUE;
+}
+
+// ── Password endpoints ───────────────────────────────────────────────
+
+const ERR_MISSING_PASSWORD_JSON = "{\"error\":\"missing password\"}";
+const ERR_PASSWORD_TOO_SHORT_JSON = "{\"error\":\"password must be at least 8 characters\"}";
+const ERR_INVALID_CREDENTIALS_JSON = "{\"error\":\"invalid email or password\"}";
+
+fn jsonString(value_obj: ?std.json.Value) []const u8 {
+    const v = value_obj orelse return "";
+    return if (v == .string) v.string else "";
+}
+
+/// POST /auth/password/login — body `{email, password}`. Verifies the
+/// password against the scrypt hash stored in `passwords.json` and, on
+/// success, mints a session cookie identical to the WebAuthn flow.
+pub fn passwordLoginApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const body = req.body() orelse {
+        res.status = HTTP_BAD_REQUEST;
+        res.content_type = .JSON;
+        res.body = ERR_MISSING_BODY_JSON;
+        return;
+    };
+    const parsed = std.json.parseFromSlice(std.json.Value, req.arena, body, .{}) catch {
+        res.status = HTTP_BAD_REQUEST;
+        res.content_type = .JSON;
+        res.body = ERR_INVALID_JSON_JSON;
+        return;
+    };
+
+    const email = jsonString(parsed.value.object.get("email"));
+    const password = jsonString(parsed.value.object.get("password"));
+
+    if (email.len == 0 or std.mem.indexOfScalar(u8, email, '@') == null) {
+        res.status = HTTP_BAD_REQUEST;
+        res.content_type = .JSON;
+        res.body = ERR_INVALID_EMAIL_JSON;
+        return;
+    }
+    if (password.len == 0) {
+        res.status = HTTP_BAD_REQUEST;
+        res.content_type = .JSON;
+        res.body = ERR_MISSING_PASSWORD_JSON;
+        return;
+    }
+
+    if (!passwords.verify(ctx.allocator, ctx.auth_dir, email, password)) {
+        res.status = 401;
+        res.content_type = .JSON;
+        res.body = ERR_INVALID_CREDENTIALS_JSON;
+        return;
+    }
+
+    const token = try createSession(ctx.allocator, ctx.auth_dir, email);
+    const cookie = try std.fmt.allocPrint(req.arena, SESSION_COOKIE_FMT, .{token});
+    res.header(HEADER_SET_COOKIE, cookie);
+    res.content_type = .JSON;
+    res.body = OK_JSON_TRUE;
+}
+
+/// POST /auth/password/set — set or change the caller's password. Authorises
+/// via active session (set/change own password), invite token (recover with
+/// password instead of passkey), or first-user bootstrap.
+///
+/// Body: `{password, email?, invite?}`. `email` and `invite` are required
+/// only on the unauthenticated paths (invite redemption, bootstrap).
+pub fn passwordSetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const body = req.body() orelse {
+        res.status = HTTP_BAD_REQUEST;
+        res.content_type = .JSON;
+        res.body = ERR_MISSING_BODY_JSON;
+        return;
+    };
+    const parsed = std.json.parseFromSlice(std.json.Value, req.arena, body, .{}) catch {
+        res.status = HTTP_BAD_REQUEST;
+        res.content_type = .JSON;
+        res.body = ERR_INVALID_JSON_JSON;
+        return;
+    };
+
+    const password = jsonString(parsed.value.object.get("password"));
+    const body_email = jsonString(parsed.value.object.get("email"));
+    const invite_token = jsonString(parsed.value.object.get("invite"));
+
+    if (password.len == 0) {
+        res.status = HTTP_BAD_REQUEST;
+        res.content_type = .JSON;
+        res.body = ERR_MISSING_PASSWORD_JSON;
+        return;
+    }
+
+    // Resolve the target email and the role for newly-created users.
+    var resolved_email: []const u8 = "";
+    var invite_to_consume: []const u8 = "";
+    var invited_role: users.Role = .writer;
+
+    const session_token_opt = getSessionToken(req);
+    if (session_token_opt) |stok| {
+        if (validateSession(ctx.allocator, ctx.auth_dir, stok)) |session_email| {
+            resolved_email = session_email;
+        }
+    }
+
+    const existing_creds = try loadCredentials(ctx.allocator, ctx.auth_dir);
+
+    if (resolved_email.len == 0 and invite_token.len > 0) {
+        if (try findInvite(ctx.allocator, ctx.auth_dir, invite_token)) |inv| {
+            if (body_email.len == 0 or std.mem.indexOfScalar(u8, body_email, '@') == null) {
+                res.status = HTTP_BAD_REQUEST;
+                res.content_type = .JSON;
+                res.body = ERR_INVALID_EMAIL_JSON;
+                return;
+            }
+            resolved_email = body_email;
+            invite_to_consume = invite_token;
+            invited_role = users.Role.fromString(inv.role) orelse .writer;
+        }
+    }
+
+    if (resolved_email.len == 0 and existing_creds.len == 0) {
+        // Bootstrap: no users exist yet, the first password sets up admin.
+        if (body_email.len == 0 or std.mem.indexOfScalar(u8, body_email, '@') == null) {
+            res.status = HTTP_BAD_REQUEST;
+            res.content_type = .JSON;
+            res.body = ERR_INVALID_EMAIL_JSON;
+            return;
+        }
+        resolved_email = body_email;
+    }
+
+    if (resolved_email.len == 0) {
+        res.status = 403;
+        res.content_type = .JSON;
+        res.body = "{\"error\":\"sign in or invite required\"}";
+        return;
+    }
+
+    passwords.set(ctx.allocator, ctx.auth_dir, resolved_email, password) catch |e| switch (e) {
+        error.PasswordTooShort => {
+            res.status = HTTP_BAD_REQUEST;
+            res.content_type = .JSON;
+            res.body = ERR_PASSWORD_TOO_SHORT_JSON;
+            return;
+        },
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            log.warn("passwords.set failed: {s}", .{@errorName(e)});
+            res.status = HTTP_INTERNAL_ERROR;
+            res.content_type = .JSON;
+            res.body = "{\"error\":\"failed to save password\"}";
+            return;
+        },
+    };
+
+    if (invite_to_consume.len > 0) {
+        _ = consumeInvite(ctx.allocator, ctx.auth_dir, invite_to_consume) catch |e| {
+            log.warn("consumeInvite failed: {s}", .{@errorName(e)});
+        };
+    }
+
+    _ = users.ensureUser(ctx.allocator, ctx.auth_dir, resolved_email, invited_role) catch |e| {
+        log.warn("ensureUser failed: {s}", .{@errorName(e)});
+    };
+
+    // For unauthenticated callers (invite redemption / bootstrap), drop them
+    // straight into a session so they don't need to re-enter the password.
+    if (session_token_opt == null) {
+        const token = try createSession(ctx.allocator, ctx.auth_dir, resolved_email);
+        const cookie = try std.fmt.allocPrint(req.arena, SESSION_COOKIE_FMT, .{token});
+        res.header(HEADER_SET_COOKIE, cookie);
+    }
+
+    res.content_type = .JSON;
+    res.body = OK_JSON_TRUE;
+}
+
+/// GET /auth/password/status — returns `{set: bool}` for the signed-in
+/// user, or 401 when there is no session. Used by the manage page to swap
+/// the button label between "Set password" and "Change password".
+pub fn passwordStatusApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const email = requireSession(ctx, req, res) orelse return;
+    const set_flag = passwords.isSet(ctx.allocator, ctx.auth_dir, email);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(req.arena);
+    try w.print("{{\"set\":{s}}}", .{if (set_flag) "true" else "false"});
+    res.content_type = .JSON;
+    res.body = buf.items;
 }
 
 // ── HTML Pages ───────────────────────────────────────────────────────
@@ -1554,13 +1802,50 @@ pub fn loginPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerEr
         "<p>Enter your email and use your passkey to authenticate.</p>" ++
         HTML_EMAIL_INPUT ++
         HTML_INPUT_STYLE_DARK ++
+        HTML_PASSWORD_INPUT_HIDDEN ++
         "<button class=\"auth-btn\" id=\"login-btn\">Sign in with Passkey</button>" ++
+        "<a class=\"link\" href=\"#\" id=\"toggle-mode\">Use password instead</a>" ++
         HTML_STATUS_DIV ++
         "</div>" ++
         HTML_SCRIPT_OPEN ++ B64URL_JS ++
         \\const btn = document.getElementById('login-btn');
         \\const emailInput = document.getElementById('email');
+        \\const passwordInput = document.getElementById('password');
+        \\const toggle = document.getElementById('toggle-mode');
         \\const status = document.getElementById('status');
+        \\let mode = 'passkey';
+        \\toggle.addEventListener('click', (e) => {
+        \\  e.preventDefault();
+        \\  if (mode === 'passkey') {
+        \\    mode = 'password';
+        \\    passwordInput.style.display = '';
+        \\    btn.textContent = 'Sign in with Password';
+        \\    toggle.textContent = 'Use passkey instead';
+        \\    passwordInput.focus();
+        \\  } else {
+        \\    mode = 'passkey';
+        \\    passwordInput.style.display = 'none';
+        \\    btn.textContent = 'Sign in with Passkey';
+        \\    toggle.textContent = 'Use password instead';
+        \\  }
+        \\  status.textContent = '';
+        \\});
+        \\async function doPasswordLogin(email) {
+        \\  status.textContent = 'Signing in...';
+        \\  const r = await fetch('/auth/password/login', {
+        \\    method: 'POST',
+        \\    headers: { 'Content-Type': 'application/json' },
+        \\    body: JSON.stringify({ email, password: passwordInput.value })
+        \\  });
+        \\  const j = await r.json();
+        \\  if (j.ok) {
+        \\    status.className = 'status ok';
+        \\    status.textContent = 'Authenticated!';
+        \\    window.location.href = '/';
+        \\  } else {
+        \\    throw new Error(j.error || 'Sign-in failed');
+        \\  }
+        \\}
         \\btn.addEventListener('click', async () => {
         \\  const email = emailInput.value.trim();
         \\  if (!email || !email.includes('@')) {
@@ -1570,12 +1855,16 @@ pub fn loginPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerEr
         \\  }
         \\  btn.disabled = true;
         \\  status.className = 'status';
-        \\  status.textContent = 'Requesting challenge...';
         \\  try {
+        \\    if (mode === 'password') {
+        \\      await doPasswordLogin(email);
+        \\      return;
+        \\    }
+        \\    status.textContent = 'Requesting challenge...';
         \\    const challengeRes = await fetch('/auth/login/challenge?email=' + encodeURIComponent(email));
         \\    const opts = await challengeRes.json();
         \\    if (!opts.allowCredentials || opts.allowCredentials.length === 0) {
-        \\      throw new Error('No passkey registered for this email on this server. Ask an admin for an invite link.');
+        \\      throw new Error('No passkey registered for this email on this server. Try "Use password instead" or ask an admin for an invite link.');
         \\    }
         \\    const publicKey = {
         \\      challenge: b64urlToBytes(opts.challenge),
@@ -1922,10 +2211,12 @@ pub fn invitePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
             HTML_AUTH_CARD_OPEN ++
             HTML_BRAND_SPAN ++
             "<h1>Accept Invite</h1>" ++
-            "<p>Enter your email and register a passkey for this device.</p>" ++
+            "<p>Pick how you'd like to sign in. Passkeys are recommended; passwords are a fallback if your device doesn't support passkeys.</p>" ++
             HTML_EMAIL_INPUT ++
             HTML_INPUT_STYLE_DARK ++
+            HTML_PASSWORD_INPUT_HIDDEN ++
             "<button class=\"auth-btn\" id=\"register-btn\">Register Passkey</button>" ++
+            "<a class=\"link\" href=\"#\" id=\"toggle-mode\">Use a password instead</a>" ++
             HTML_STATUS_DIV ++
             "</div>" ++
             HTML_SCRIPT_OPEN ++ B64URL_JS,
@@ -1934,7 +2225,41 @@ pub fn invitePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     try w.writeAll(
         \\const btn = document.getElementById('register-btn');
         \\const emailInput = document.getElementById('email');
+        \\const passwordInput = document.getElementById('password');
+        \\const toggle = document.getElementById('toggle-mode');
         \\const status = document.getElementById('status');
+        \\let mode = 'passkey';
+        \\toggle.addEventListener('click', (e) => {
+        \\  e.preventDefault();
+        \\  if (mode === 'passkey') {
+        \\    mode = 'password';
+        \\    passwordInput.style.display = '';
+        \\    btn.textContent = 'Set Password';
+        \\    toggle.textContent = 'Use a passkey instead';
+        \\  } else {
+        \\    mode = 'passkey';
+        \\    passwordInput.style.display = 'none';
+        \\    btn.textContent = 'Register Passkey';
+        \\    toggle.textContent = 'Use a password instead';
+        \\  }
+        \\  status.textContent = '';
+        \\});
+        \\async function doPasswordSet(email) {
+        \\  if (passwordInput.value.length < 8) {
+        \\    throw new Error('Password must be at least 8 characters');
+        \\  }
+        \\  status.textContent = 'Saving password...';
+        \\  const r = await fetch('/auth/password/set', {
+        \\    method: 'POST',
+        \\    headers: { 'Content-Type': 'application/json' },
+        \\    body: JSON.stringify({ email, password: passwordInput.value, invite: INVITE_TOKEN })
+        \\  });
+        \\  const j = await r.json();
+        \\  if (!j.ok) throw new Error(j.error || 'Failed to set password');
+        \\  status.className = 'status ok';
+        \\  status.textContent = 'Password set!';
+        \\  window.location.href = '/';
+        \\}
         \\btn.addEventListener('click', async () => {
         \\  const email = emailInput.value.trim();
         \\  if (!email || !email.includes('@')) {
@@ -1944,8 +2269,12 @@ pub fn invitePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
         \\  }
         \\  btn.disabled = true;
         \\  status.className = 'status';
-        \\  status.textContent = 'Requesting challenge...';
         \\  try {
+        \\    if (mode === 'password') {
+        \\      await doPasswordSet(email);
+        \\      return;
+        \\    }
+        \\    status.textContent = 'Requesting challenge...';
         \\    const url = '/auth/register/challenge?invite=' + encodeURIComponent(INVITE_TOKEN) + '&email=' + encodeURIComponent(email);
         \\    const challengeRes = await fetch(url);
         \\    const opts = await challengeRes.json();
@@ -1982,9 +2311,7 @@ pub fn invitePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
         \\      status.textContent = 'Passkey registered!';
         \\      window.location.href = '/';
         \\    } else {
-        \\      status.className = 'status error';
-        \\      status.textContent = result.error || 'Registration failed';
-        \\      btn.disabled = false;
+        \\      throw new Error(result.error || 'Registration failed');
         \\    }
         \\  } catch (e) {
         \\    status.className = 'status error';
@@ -2032,6 +2359,11 @@ pub fn managePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
         "<div class=\"section-title\">Your Passkeys</div>" ++
         "<div id=\"passkey-list\"></div>" ++
         "<button class=\"auth-btn\" id=\"add-btn\" style=\"margin-top:8px\">Add passkey on this device</button>" ++
+        "<div class=\"section-title\">Password</div>" ++
+        "<p style=\"color:#8b949e;font-size:0.85rem;margin-bottom:8px\" id=\"pw-help\">" ++
+        "Set a password as a fallback in case your passkey is lost.</p>" ++
+        HTML_PASSWORD_INPUT_VISIBLE ++
+        "<button class=\"btn-sec auth-btn\" id=\"pw-btn\">Set password</button>" ++
         "<div class=\"section-title\">Invite a new user</div>" ++
         "<p style=\"color:#8b949e;font-size:0.85rem;margin-bottom:8px\">" ++
         "Generate a one-time link (valid 7 days). " ++
@@ -2095,6 +2427,7 @@ pub fn managePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
         \\  await fetch('/auth/logout', { method: 'POST' });
         \\  window.location.href = '/auth/login';
         \\};
+        ++ MANAGE_PASSWORD_JS ++
         \\document.getElementById('add-btn').onclick = async () => {
         \\  status.className = 'status';
         \\  status.textContent = 'Requesting challenge...';
@@ -2163,5 +2496,6 @@ pub fn managePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
         \\  }
         \\};
         \\refresh();
+        \\refreshPasswordStatus();
         ++ HTML_SCRIPT_BODY_CLOSE;
 }

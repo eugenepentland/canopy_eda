@@ -1,5 +1,6 @@
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
+const paths = @import("paths.zig");
 const env_mod = @import("eval/env.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const parts_mod = @import("parts.zig");
@@ -244,7 +245,7 @@ pub fn applyBomUuids(
     project_dir: []const u8,
     design_name: []const u8,
 ) BomError!void {
-    const bom_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.bom", .{ project_dir, design_name });
+    const bom_path = try paths.designSiblingPath(allocator, project_dir, design_name, ".bom");
     defer allocator.free(bom_path);
 
     const entries = try loadBom(allocator, bom_path);

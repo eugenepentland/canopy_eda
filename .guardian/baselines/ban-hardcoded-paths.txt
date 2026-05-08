@@ -1,3 +1,3 @@
 # guardian-snapshot v1
-src/commands.zig:131: hardcoded literal (hardcoded http URL)
-src/commands.zig:689: hardcoded literal (hardcoded http URL)
+src/commands.zig:128: hardcoded literal (hardcoded http URL)
+src/commands.zig:463: hardcoded literal (hardcoded http URL)

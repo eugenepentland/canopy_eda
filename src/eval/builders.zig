@@ -661,3 +661,54 @@ pub fn loadFile(self: *Evaluator, path: []const u8) ?[]const Node {
     self.loaded_files.put(self.allocator, path, nodes) catch return null;
     return nodes;
 }
+
+/// Load a top-level design file. Wraps `loadFile` with an autoloader for a
+/// sibling `<path-without-.sexp>.checks.sexp` file: when present, its
+/// top-level forms are spliced into the trailing `(design-block …)` form's
+/// body before evaluation. This lets a design's verification entries live
+/// next to the schematic instead of inside it.
+///
+/// Library imports continue to call `loadFile` directly so module files
+/// don't get checks-spliced.
+pub fn loadDesignFile(self: *Evaluator, path: []const u8) ?[]const Node {
+    const nodes = loadFile(self, path) orelse return null;
+    if (!std.mem.endsWith(u8, path, ".sexp")) return nodes;
+
+    const stem = path[0 .. path.len - ".sexp".len];
+    const checks_path = std.fmt.allocPrint(self.allocator, "{s}.checks.sexp", .{stem}) catch return nodes;
+    infra_fs.cwd().access(checks_path, .{}) catch {
+        self.allocator.free(checks_path);
+        return nodes;
+    };
+
+    const checks_nodes = loadFile(self, checks_path) orelse return nodes;
+
+    return spliceChecksIntoDesignBlock(self, nodes, checks_nodes) orelse nodes;
+}
+
+/// Build a new top-level node slice where the design-block form's children
+/// have the checks-file forms appended. Returns null when the file has no
+/// design-block to splice into (e.g. a `(board …)` source) — the caller
+/// should fall back to the original node list in that case.
+fn spliceChecksIntoDesignBlock(
+    self: *Evaluator,
+    nodes: []const Node,
+    checks_nodes: []const Node,
+) ?[]const Node {
+    var design_idx: ?usize = null;
+    for (nodes, 0..) |n, i| if (n.isForm("design-block")) {
+        design_idx = i;
+        break;
+    };
+    const di = design_idx orelse return null;
+
+    const original_children = nodes[di].asList() orelse return null;
+    const merged_children = self.allocator.alloc(Node, original_children.len + checks_nodes.len) catch return null;
+    @memcpy(merged_children[0..original_children.len], original_children);
+    @memcpy(merged_children[original_children.len..], checks_nodes);
+
+    const merged_top = self.allocator.alloc(Node, nodes.len) catch return null;
+    @memcpy(merged_top, nodes);
+    merged_top[di] = Node.list(nodes[di].span, merged_children);
+    return merged_top;
+}

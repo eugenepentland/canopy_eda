@@ -16,6 +16,7 @@ const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
+const paths = @import("../paths.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
@@ -42,8 +43,6 @@ const HEADER_CACHE_CONTROL = "Cache-Control";
 const HEADER_CORS_ALLOW_ORIGIN = "access-control-allow-origin";
 const ERR_BUILD_ERROR = "Build error";
 const ERR_NOT_A_DESIGN = "Not a design";
-const PATH_FMT_SEXP = "{s}/src/{s}.sexp";
-const PATH_FMT_BOM = "{s}/src/{s}.bom";
 const PATH_FMT_FP_SEXP = "{s}/lib/footprints/{s}.sexp";
 const OP_SET_FIELD = "set_field";
 
@@ -122,7 +121,7 @@ pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         return;
     };
 
-    const board_path = try std.fmt.allocPrint(ctx.allocator, PATH_FMT_SEXP, .{ ctx.project_dir, name });
+    const board_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(board_path);
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
@@ -135,7 +134,6 @@ pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     };
     const block = switch (result) {
         .design_block => |b| b,
-        .board => |b| b.design,
         else => {
             res.status = HTTP_INTERNAL_ERROR;
             res.body = ERR_NOT_A_DESIGN;
@@ -145,7 +143,7 @@ pub fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 
     // Resolve BOM identities so footprint + mpn fields are populated — matches
     // what /api/export-netlist does.
-    const bom_path = try std.fmt.allocPrint(ctx.allocator, PATH_FMT_BOM, .{ ctx.project_dir, name });
+    const bom_path = try paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, ".bom");
     defer ctx.allocator.free(bom_path);
     bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| warnResolveIdentities(name, e);
 
@@ -273,7 +271,7 @@ pub fn netlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
         return;
     };
 
-    const board_path = try std.fmt.allocPrint(ctx.allocator, PATH_FMT_SEXP, .{ ctx.project_dir, name });
+    const board_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(board_path);
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
@@ -285,7 +283,6 @@ pub fn netlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     };
     const block = switch (result) {
         .design_block => |b| b,
-        .board => |b| b.design,
         else => {
             res.status = HTTP_INTERNAL_ERROR;
             res.body = ERR_NOT_A_DESIGN;
@@ -293,7 +290,7 @@ pub fn netlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
         },
     };
 
-    const bom_path = try std.fmt.allocPrint(ctx.allocator, PATH_FMT_BOM, .{ ctx.project_dir, name });
+    const bom_path = try paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, ".bom");
     defer ctx.allocator.free(bom_path);
     bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| warnResolveIdentities(name, e);
 
@@ -634,7 +631,7 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         return;
     };
 
-    const board_path = try std.fmt.allocPrint(req.arena, PATH_FMT_SEXP, .{ ctx.project_dir, name });
+    const board_path = try paths.designSourcePath(req.arena, ctx.project_dir, name);
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
     const result = eval.evalFile(board_path) catch {
@@ -644,7 +641,6 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     };
     const block = switch (result) {
         .design_block => |b| b,
-        .board => |b| b.design,
         else => {
             res.status = HTTP_INTERNAL_ERROR;
             res.body = ERR_NOT_A_DESIGN;
@@ -652,7 +648,7 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         },
     };
 
-    const bom_path = try std.fmt.allocPrint(req.arena, PATH_FMT_BOM, .{ ctx.project_dir, name });
+    const bom_path = try paths.designSiblingPath(req.arena, ctx.project_dir, name, ".bom");
     bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| warnResolveIdentities(name, e);
 
     var instances: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;

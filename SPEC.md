@@ -102,25 +102,6 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Generates a KiCad netlist from a resolved design
 - Exports a KiCad footprint mod file from footprint data
 
-## board
-
-- Evaluates board form with design reference and outline
-
-## layout
-
-- Parses placement from layout source
-- Parses trace from layout source
-
-## render_pcb_json
-
-- Parses footprint geometry from sexp source
-
-## export_kicad_pcb
-
-- Generates a KiCad PCB file from a resolved design
-- Extracts footprint placements from existing PCB by canopy_uuid
-- Generates deterministic sub-UUIDs for pad elements
-
 ## bom
 
 - Generates deterministic UUIDs in the expected format
@@ -216,7 +197,6 @@ Public functions: readFile, writeFile, editFile, listDir, glob, deleteFile, move
 - allows project source and library paths
 - denies auth and oauth paths
 - denies writes to history and out
-- denies writes to .layout files
 - matches basic glob patterns
 - import detection respects word boundaries
 - denialHint redirects bare lib listing to list_library
@@ -240,3 +220,10 @@ Public functions: uploadDatasheetApi, listDatasheetsApi, serveDatasheetApi, isPd
 - sanitize forces .pdf extension
 - sanitize replaces unsafe chars
 - isPdfMagic gates non-PDF input
+
+## paths
+
+Public functions: designSourcePath, designSiblingPath
+
+- Resolves <name>.sexp via designSourcePath, falling back to flat layout when missing
+- Resolves sibling artifacts via designSiblingPath using the supplied extension

@@ -2,12 +2,13 @@ const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
 const clock = @import("../infra/clock.zig");
 const log = @import("../infra/log.zig");
+const paths = @import("../paths.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const SEXP_FILE_TEMPLATE = "{s}/{s}.sexp";
 const NOTE_MAX_BYTES: usize = 4096;
 
-// Snapshot storage: projects/designs/history/<name>/<timestamp>/{name}.sexp (+ .layout if present)
+// Snapshot storage: projects/designs/history/<name>/<timestamp>/{name}.sexp
 // Timestamp format: YYYY-MM-DDTHH-MM-SS (filesystem-safe, sorts lexicographically).
 
 pub const HistoryError = error{
@@ -41,7 +42,7 @@ fn makeTimestamp(allocator: std.mem.Allocator) ![]u8 {
     });
 }
 
-/// Copy the current .sexp (and .layout if present) for `name` into
+/// Copy the current .sexp for `name` into
 /// projects/designs/history/<name>/<timestamp>/. Returns the snapshot id
 /// (caller owns). Returns null when the source file doesn't exist yet (nothing
 /// to snapshot on a brand-new create). When `description` is non-null, a
@@ -52,7 +53,7 @@ pub fn snapshot(
     name: []const u8,
     description: ?[]const u8,
 ) HistoryError!?[]const u8 {
-    const sexp_src = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    const sexp_src = try paths.designSourcePath(allocator, project_dir, name);
     defer allocator.free(sexp_src);
 
     infra_fs.cwd().access(sexp_src, .{}) catch |e| switch (e) {
@@ -70,16 +71,6 @@ pub fn snapshot(
     const dst_sexp = try std.fmt.allocPrint(allocator, SEXP_FILE_TEMPLATE, .{ dir, name });
     defer allocator.free(dst_sexp);
     try infra_fs.cwd().copyFile(sexp_src, infra_fs.cwd(), dst_sexp, .{});
-
-    const layout_src = try std.fmt.allocPrint(allocator, "{s}/src/{s}.layout", .{ project_dir, name });
-    defer allocator.free(layout_src);
-    if (infra_fs.cwd().access(layout_src, .{})) |_| {
-        const dst_layout = try std.fmt.allocPrint(allocator, "{s}/{s}.layout", .{ dir, name });
-        defer allocator.free(dst_layout);
-        infra_fs.cwd().copyFile(layout_src, infra_fs.cwd(), dst_layout, .{}) catch |e| {
-            log.warn("copy layout {s} failed: {s}", .{ layout_src, @errorName(e) });
-        };
-    } else |_| {}
 
     if (description) |d| if (d.len > 0) {
         const note_path = try std.fmt.allocPrint(allocator, "{s}/.note", .{dir});
@@ -156,17 +147,7 @@ pub fn restore(
 
     const src_sexp = try std.fmt.allocPrint(allocator, SEXP_FILE_TEMPLATE, .{ dir, name });
     defer allocator.free(src_sexp);
-    const dst_sexp = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ project_dir, name });
+    const dst_sexp = try paths.designSourcePath(allocator, project_dir, name);
     defer allocator.free(dst_sexp);
     try infra_fs.cwd().copyFile(src_sexp, infra_fs.cwd(), dst_sexp, .{});
-
-    const src_layout = try std.fmt.allocPrint(allocator, "{s}/{s}.layout", .{ dir, name });
-    defer allocator.free(src_layout);
-    const dst_layout = try std.fmt.allocPrint(allocator, "{s}/src/{s}.layout", .{ project_dir, name });
-    defer allocator.free(dst_layout);
-    if (infra_fs.cwd().access(src_layout, .{})) |_| {
-        infra_fs.cwd().copyFile(src_layout, infra_fs.cwd(), dst_layout, .{}) catch |e| {
-            log.warn("copy layout {s} failed: {s}", .{ src_layout, @errorName(e) });
-        };
-    } else |_| {}
 }

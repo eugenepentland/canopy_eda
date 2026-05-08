@@ -102,7 +102,6 @@ fn writeHeader(w: anytype, doc: review.ReviewDoc) !void {
     try w.print("<div class=\"{s}\">{s}</div>", .{ banner_class, banner_label });
     try w.writeAll("<div class=\"head-links\">");
     try w.print("<a class=\"head-link\" href=\"/schematics/{s}\">Schematic</a>", .{doc.design_name});
-    try w.print("<a class=\"head-link\" href=\"/pcb/{s}\">PCB</a>", .{doc.design_name});
     try w.print("<a class=\"head-link\" href=\"/api/review/{s}\">JSON</a>", .{doc.design_name});
     try w.writeAll("</div>");
     try w.writeAll("</header>");

@@ -23,7 +23,7 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
 /// GET / — render the home page: a card grid of every `.sexp` design under
 /// `src/` with title, instance/net counts, recent-mtime badge, section
-/// chips, and links to Schematic / PCB / Review for each.
+/// chips, and links to Schematic / Review for each.
 pub fn indexPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(ctx.allocator);
@@ -109,10 +109,9 @@ pub fn indexPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handler
         try w.print(
             "<div class=\"design-card-links\">" ++
                 "<a class=\"design-card-link\" href=\"/schematics/{s}\">Schematic</a>" ++
-                "<a class=\"design-card-link\" href=\"/pcb/{s}\">PCB</a>" ++
                 "<a class=\"design-card-link\" href=\"/review/{s}\">Review</a>" ++
                 "</div></div>",
-            .{ s.name, s.name, s.name },
+            .{ s.name, s.name },
         );
     }
     if (summaries.len == 0) {

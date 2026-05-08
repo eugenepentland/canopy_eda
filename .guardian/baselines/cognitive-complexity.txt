@@ -1,8 +1,6 @@
 # guardian-snapshot v1
 src/bom_resolve.zig: fn resolveIdentities cognitive complexity 72 (limit: 50)
-src/drc.zig: fn runDrc cognitive complexity 115 (limit: 50)
 src/eval/builders.zig: fn processPinForm cognitive complexity 53 (limit: 50)
 src/eval/power_budget.zig: fn analyze cognitive complexity 62 (limit: 50)
 src/render_block_types.zig: fn classifyByName cognitive complexity 59 (limit: 50)
-src/render_pcb_json.zig: fn renderPcbJson cognitive complexity 139 (limit: 50)
 src/req_checks.zig: fn findVoltageForNet cognitive complexity 51 (limit: 50)

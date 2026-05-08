@@ -2,6 +2,7 @@ const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
+const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const render_json = @import("../render_json.zig");
 const bom = @import("../bom.zig");
@@ -29,8 +30,6 @@ const JSON_SRC_OFF_KEY = "\"srcOff\":";
 const JSON_PINS_KEY = "\"pins\"";
 
 // Repeated string templates / fragments
-const SEXP_PATH_TEMPLATE = "{s}/src/{s}.sexp";
-const BOM_PATH_TEMPLATE = "{s}/src/{s}.bom";
 const COMPONENT_PATH_TEMPLATE = "{s}/lib/components/{s}.sexp";
 const INSTANCE_OPEN_TEMPLATE = "(instance \"{s}\"";
 const SECTION_OPEN_TEMPLATE = "(section \"{s}\"";
@@ -111,7 +110,7 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     const new_value = body[val_start..val_end];
 
     // Read the .sexp file
-    const file_path = std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name }) catch {
+    const file_path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch {
         res.status = 500;
         return;
     };
@@ -173,7 +172,7 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     std.debug.print("Edited {s} {s} -> \"{s}\"\n", .{ name, ref_des, new_value });
 
     // Rebuild and push live update
-    const board_path = std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name }) catch {
+    const board_path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch {
         res.status = 500;
         return;
     };
@@ -194,7 +193,7 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
         },
     };
 
-    const bom_path = std.fmt.allocPrint(ctx.allocator, BOM_PATH_TEMPLATE, .{ ctx.project_dir, name }) catch {
+    const bom_path = paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, ".bom") catch {
         res.status = 500;
         return;
     };
@@ -277,7 +276,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     };
 
     // Read the .sexp file
-    const file_path = std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name }) catch {
+    const file_path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch {
         res.status = 500;
         return;
     };
@@ -359,7 +358,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     std.debug.print("Edited footprint {s} {s} -> \"{s}\"\n", .{ name, old_component, new_component });
 
     // Rebuild and push live update
-    const board_path = std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name }) catch {
+    const board_path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch {
         res.status = 500;
         return;
     };
@@ -380,7 +379,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         },
     };
 
-    const bom_path = std.fmt.allocPrint(ctx.allocator, BOM_PATH_TEMPLATE, .{ ctx.project_dir, name }) catch {
+    const bom_path = paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, ".bom") catch {
         res.status = 500;
         return;
     };
@@ -405,117 +404,6 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     res.body = comp_json.items;
 }
 
-/// POST /api/edit-courtyard — replace (or insert) the `(courtyard (rect …))`
-/// form in a `lib/footprints/<name>.sexp` so the PCB editor can adjust a
-/// footprint's keep-out box without hand-editing the library file.
-pub fn editCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const body = req.body() orelse {
-        res.status = 400;
-        res.body = "no body";
-        return;
-    };
-
-    const footprint = parseJsonString(body, "\"footprint\"") orelse {
-        res.status = 400;
-        res.body = "missing footprint";
-        return;
-    };
-    const x1 = parseJsonFloat(body, "\"x1\"") orelse {
-        res.status = 400;
-        res.body = "missing x1";
-        return;
-    };
-    const y1 = parseJsonFloat(body, "\"y1\"") orelse {
-        res.status = 400;
-        res.body = "missing y1";
-        return;
-    };
-    const x2 = parseJsonFloat(body, "\"x2\"") orelse {
-        res.status = 400;
-        res.body = "missing x2";
-        return;
-    };
-    const y2 = parseJsonFloat(body, "\"y2\"") orelse {
-        res.status = 400;
-        res.body = "missing y2";
-        return;
-    };
-
-    // Find footprint file
-    const fp_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints/{s}.sexp", .{ ctx.project_dir, footprint });
-    defer ctx.allocator.free(fp_path);
-
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path, 1024 * 1024) catch {
-        res.status = 404;
-        res.body = "footprint file not found";
-        return;
-    };
-    defer ctx.allocator.free(source);
-
-    // Find and replace the courtyard line
-    const cy_start = std.mem.indexOf(u8, source, "(courtyard") orelse {
-        // No courtyard — insert before closing paren
-        var out: std.ArrayListUnmanaged(u8) = .empty;
-        const w = out.writer(ctx.allocator);
-        // Find last ')'
-        var last_paren: usize = source.len;
-        while (last_paren > 0) {
-            last_paren -= 1;
-            if (source[last_paren] == ')') break;
-        }
-        try w.writeAll(source[0..last_paren]);
-        try w.print("  (courtyard (rect {d:.2} {d:.2} {d:.2} {d:.2}))\n", .{ x1, y1, x2, y2 });
-        try w.writeAll(source[last_paren..]);
-
-        const file = infra_fs.cwd().createFile(fp_path, .{}) catch {
-            res.status = 500;
-            return;
-        };
-        defer file.close();
-        file.writeAll(out.items) catch {
-            res.status = 500;
-            return;
-        };
-        res.content_type = .JSON;
-        res.body = OK_JSON_TRUE;
-        return;
-    };
-
-    // Find end of courtyard form
-    var depth: u32 = 0;
-    var cy_end: usize = cy_start;
-    for (source[cy_start..], 0..) |ch, i| {
-        if (ch == '(') depth += 1;
-        if (ch == ')') {
-            depth -= 1;
-            if (depth == 0) {
-                cy_end = cy_start + i + 1;
-                break;
-            }
-        }
-    }
-
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    const w = out.writer(ctx.allocator);
-    try w.writeAll(source[0..cy_start]);
-    try w.print("(courtyard (rect {d:.2} {d:.2} {d:.2} {d:.2}))", .{ x1, y1, x2, y2 });
-    try w.writeAll(source[cy_end..]);
-
-    const file = infra_fs.cwd().createFile(fp_path, .{}) catch {
-        res.status = 500;
-        return;
-    };
-    defer file.close();
-    file.writeAll(out.items) catch {
-        res.status = 500;
-        return;
-    };
-
-    std.debug.print("Edited courtyard for {s}: ({d:.2}, {d:.2}, {d:.2}, {d:.2})\n", .{ footprint, x1, y1, x2, y2 });
-    res.content_type = .JSON;
-    res.body = OK_JSON_TRUE;
-}
-
 /// POST /api/add-instance/:name
 /// Body: {"section":"Power","component":"cap-0402","value":"100nF","pins":{"1":"VDD","2":"GND"}}
 pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
@@ -538,7 +426,7 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     const section = parseJsonString(body, "\"section\"") orelse "";
 
     // Read source file
-    const file_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name });
+    const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(file_path);
 
     const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
@@ -676,7 +564,7 @@ pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     };
 
     // Read source file
-    const file_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name });
+    const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(file_path);
 
     const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
@@ -770,7 +658,7 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
         return;
     };
 
-    const file_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name });
+    const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(file_path);
 
     const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
@@ -997,7 +885,7 @@ pub fn swapPinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 
 /// Rebuild design, render SVG, and push live update.
 fn rebuildAndPush(ctx: *Handler, name: []const u8, res: *httpz.Response) HandlerError!void {
-    const board_path = try std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ ctx.project_dir, name });
+    const board_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(board_path);
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
@@ -1008,7 +896,7 @@ fn rebuildAndPush(ctx: *Handler, name: []const u8, res: *httpz.Response) Handler
         else => return error.RebuildFailed,
     };
 
-    const bom_path = try std.fmt.allocPrint(ctx.allocator, BOM_PATH_TEMPLATE, .{ ctx.project_dir, name });
+    const bom_path = try paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, ".bom");
     defer ctx.allocator.free(bom_path);
     bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| warnResolveIdentities(name, e);
 
@@ -1038,117 +926,6 @@ fn parseJsonString(body: []const u8, key: []const u8) ?[]const u8 {
     start += 1; // skip opening quote
     const end = std.mem.indexOfPos(u8, body, start, "\"") orelse return null;
     return body[start..end];
-}
-
-// ── Board outline editing ───────────────────────────────────────────
-
-/// POST /api/board-outline/:name — replace (or insert) the `(outline (rect …))`
-/// in `<name>-board.sexp` so the PCB editor can resize the board boundary
-/// without hand-editing the board source.
-pub fn boardOutlineApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
-    const body = req.body() orelse {
-        res.status = 400;
-        res.body = "{\"error\":\"missing body\"}";
-        res.content_type = .JSON;
-        return;
-    };
-
-    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
-        res.status = 400;
-        res.body = "{\"error\":\"invalid json\"}";
-        res.content_type = .JSON;
-        return;
-    };
-    const root = parsed.value;
-    const x1 = if (root.object.get("x1")) |v| floatFromJson(v) else null;
-    const y1 = if (root.object.get("y1")) |v| floatFromJson(v) else null;
-    const x2 = if (root.object.get("x2")) |v| floatFromJson(v) else null;
-    const y2 = if (root.object.get("y2")) |v| floatFromJson(v) else null;
-    if (x1 == null or y1 == null or x2 == null or y2 == null) {
-        res.status = 400;
-        res.body = "{\"error\":\"missing x1/y1/x2/y2\"}";
-        res.content_type = .JSON;
-        return;
-    }
-
-    // Read the board file
-    const board_file_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}-board.sexp", .{ ctx.project_dir, name });
-    defer ctx.allocator.free(board_file_path);
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, board_file_path, 1024 * 1024) catch {
-        res.status = 404;
-        res.body = "{\"error\":\"board file not found\"}";
-        res.content_type = .JSON;
-        return;
-    };
-
-    // Find and replace the outline line
-    const new_outline = try std.fmt.allocPrint(ctx.allocator, "(outline (rect {d:.1} {d:.1} {d:.1} {d:.1}))", .{ x1.?, y1.?, x2.?, y2.? });
-    defer ctx.allocator.free(new_outline);
-
-    var result_buf: std.ArrayListUnmanaged(u8) = .empty;
-    const w = result_buf.writer(ctx.allocator);
-
-    // Replace the outline form in the source
-    if (std.mem.indexOf(u8, source, "(outline ")) |start| {
-        // Find matching close paren
-        var depth: usize = 0;
-        var end: usize = start;
-        while (end < source.len) : (end += 1) {
-            if (source[end] == '(') depth += 1;
-            if (source[end] == ')') {
-                depth -= 1;
-                if (depth == 0) {
-                    end += 1;
-                    break;
-                }
-            }
-        }
-        try w.writeAll(source[0..start]);
-        try w.writeAll(new_outline);
-        try w.writeAll(source[end..]);
-    } else {
-        // No outline exists — insert after first line
-        if (std.mem.indexOf(u8, source, "\n")) |nl| {
-            try w.writeAll(source[0 .. nl + 1]);
-            try w.print("  {s}\n", .{new_outline});
-            try w.writeAll(source[nl + 1 ..]);
-        } else {
-            res.status = 500;
-            res.body = "{\"error\":\"malformed board file\"}";
-            res.content_type = .JSON;
-            return;
-        }
-    }
-
-    // Write back
-    const file = infra_fs.cwd().createFile(board_file_path, .{}) catch {
-        res.status = 500;
-        res.body = "{\"error\":\"failed to write\"}";
-        res.content_type = .JSON;
-        return;
-    };
-    defer file.close();
-    file.writeAll(result_buf.items) catch {
-        res.status = 500;
-        res.body = "{\"error\":\"write error\"}";
-        res.content_type = .JSON;
-        return;
-    };
-
-    res.content_type = .JSON;
-    res.body = OK_JSON_TRUE;
-}
-
-fn floatFromJson(v: std.json.Value) ?f64 {
-    return switch (v) {
-        .float => |f| f,
-        .integer => |i| @floatFromInt(i),
-        else => null,
-    };
 }
 
 // ── Core mutation API (shared between HTTP handlers and MCP tools) ───────
@@ -1224,7 +1001,11 @@ pub const BuildReport = struct {
 };
 
 fn designFilePath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
+    return paths.designSourcePath(allocator, project_dir, name);
+}
+
+fn designBomPath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]u8 {
+    return paths.designSiblingPath(allocator, project_dir, name, ".bom");
 }
 
 /// Re-evaluate `<name>.sexp`, resolve BOM, render the scene-graph, run
@@ -1267,7 +1048,6 @@ pub fn rebuildDesign(
     };
     const block = switch (eval_result) {
         .design_block => |b| b,
-        .board => |b| b.design,
         else => {
             return .{
                 .ok = false,
@@ -1285,7 +1065,7 @@ pub fn rebuildDesign(
         failures.append(allocator, .{ .message = a.message, .is_warning = a.is_warning }) catch break;
     }
 
-    const bom_path = std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name }) catch {
+    const bom_path = paths.designSiblingPath(allocator, project_dir, name, ".bom") catch {
         return .{
             .ok = false,
             .version = serve_root.getLiveVersion(name),
@@ -1352,7 +1132,7 @@ fn writeAndRebuild(
         else => return error.RebuildFailed,
     };
 
-    const bom_path = std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name }) catch return error.OutOfMemory;
+    const bom_path = paths.designSiblingPath(allocator, project_dir, name, ".bom") catch return error.OutOfMemory;
     defer allocator.free(bom_path);
     bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
@@ -1425,7 +1205,7 @@ pub fn editMpnCore(
     mpn: []const u8,
     manufacturer: []const u8,
 ) MpnEditError!u32 {
-    const bom_path = try std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name });
+    const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
     defer allocator.free(bom_path);
 
     if (mpn.len > 0) try bom_resolve.setBomProperty(allocator, bom_path, ref_des, "mpn", mpn);
@@ -1737,7 +1517,7 @@ pub fn restoreDesignCore(
         else => return error.RebuildFailed,
     };
 
-    const bom_path = std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name }) catch return error.OutOfMemory;
+    const bom_path = paths.designSiblingPath(allocator, project_dir, name, ".bom") catch return error.OutOfMemory;
     defer allocator.free(bom_path);
     bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
@@ -2111,7 +1891,6 @@ fn resolveSourceKey(
     const result = eval.evalFile(path) catch return ref_des;
     const block = switch (result) {
         .design_block => |b| b,
-        .board => |b| b.design,
         else => return ref_des,
     };
     for (block.instances) |inst| {

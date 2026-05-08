@@ -1,5 +1,6 @@
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
+const paths = @import("../paths.zig");
 const edit = @import("edit.zig");
 const vfs = @import("vfs.zig");
 const history = @import("history.zig");
@@ -8,8 +9,6 @@ const render_json = @import("../render_json.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const env_mod = @import("../eval/env.zig");
 const erc_mod = @import("../erc.zig");
-const drc_mod = @import("../drc.zig");
-const layout_mod = @import("../layout.zig");
 const log = @import("../infra/log.zig");
 const bom = @import("../bom.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
@@ -21,8 +20,6 @@ const component_info = @import("component_info.zig");
 const symbol_conv = @import("../convert/symbol.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
-const SEXP_PATH_TEMPLATE = "{s}/src/{s}.sexp";
-const BOM_PATH_TEMPLATE = "{s}/src/{s}.bom";
 const NAME_FIELD_PREFIX = "{\"name\":";
 const REF_DES_FIELD_PREFIX = "{\"ref_des\":";
 const FUNCTION_FIELD = ",\"function\":";
@@ -39,7 +36,9 @@ const RenderError = render_json.RenderError;
 
 /// Error set used by mcp_tools helper fns that orchestrate eval + render
 /// + filesystem walks, plus any writer in JSON-emitting helpers.
-pub const ToolError = std.mem.Allocator.Error || std.Io.Writer.Error || EvalError || RenderError || std.fs.Dir.Iterator.Error || error{NotADesign};
+pub const ToolError = std.mem.Allocator.Error || std.Io.Writer.Error || EvalError || RenderError ||
+    std.fs.Dir.Iterator.Error || std.fs.Dir.OpenError || std.fs.File.OpenError || std.fs.File.ReadError ||
+    error{ NotADesign, FileTooBig, StreamTooLong, NotOpenForReading, ReadOnlyFileSystem, LinkQuotaExceeded };
 
 fn warnResolveIdentities(name: []const u8, err: anyerror) void {
     log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(err) });
@@ -281,8 +280,7 @@ fn toolGetVersion(args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), a
 
 fn toolRunChecks(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), w: anytype) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const scope = optionalString(args_val, "scope") orelse "both";
-    return runChecks(allocator, project_dir, name, scope, optionalString(args_val, "severity"), optionalString(args_val, "changed_since"), w);
+    return runChecks(allocator, project_dir, name, optionalString(args_val, "severity"), optionalString(args_val, "changed_since"), w);
 }
 
 fn toolGenerateReview(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, w: anytype, out: *std.ArrayListUnmanaged(u8)) !bool {
@@ -550,19 +548,11 @@ fn runChecks(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
-    scope: []const u8,
     severity_filter: ?[]const u8,
     changed_since: ?[]const u8,
     w: anytype,
 ) !bool {
-    const want_erc = std.mem.eql(u8, scope, "erc") or std.mem.eql(u8, scope, "both");
-    const want_drc = std.mem.eql(u8, scope, "drc") or std.mem.eql(u8, scope, "both");
-    if (!want_erc and !want_drc) {
-        try w.print("error: invalid scope \"{s}\" (expected erc|drc|both)", .{scope});
-        return false;
-    }
-
-    const path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
+    const path = try paths.designSourcePath(allocator, project_dir, name);
     defer allocator.free(path);
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
@@ -571,40 +561,21 @@ fn runChecks(
         return false;
     };
 
-    var block: *env_mod.DesignBlock = undefined;
-    var board_def: ?*env_mod.Board = null;
-    switch (result) {
-        .design_block => |db| {
-            block = db;
-            const bd_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}-board.sexp", .{ project_dir, name });
-            defer allocator.free(bd_path);
-            var eval2 = Evaluator.init(allocator, project_dir);
-            defer eval2.deinit();
-            if (eval2.evalFile(bd_path)) |bd_result| {
-                switch (bd_result) {
-                    .board => |b| board_def = b,
-                    else => {},
-                }
-            } else |_| {}
-        },
-        .board => |b| {
-            block = b.design;
-            board_def = b;
-        },
+    const block: *env_mod.DesignBlock = switch (result) {
+        .design_block => |db| db,
         else => {
             try w.writeAll(ERR_NOT_DESIGN);
             return false;
         },
-    }
+    };
 
-    const bom_path = try std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name });
+    const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
     defer allocator.free(bom_path);
     bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
     // If changed_since is set, compute the symmetric-difference sets of
     // ref_des and net names between the prior snapshot and the current
     // design. ERC violations are filtered to those touching these sets.
-    // DRC filtering is not supported — documented in the schema.
     var changed_refs: std.StringHashMapUnmanaged(void) = .empty;
     defer changed_refs.deinit(allocator);
     var changed_nets: std.StringHashMapUnmanaged(void) = .empty;
@@ -623,7 +594,6 @@ fn runChecks(
         if (eval_old.evalFile(snap_path)) |old_result| {
             const old_block: *const env_mod.DesignBlock = switch (old_result) {
                 .design_block => |b| b,
-                .board => |b| b.design,
                 else => {
                     try w.writeAll("error: snapshot did not evaluate to a design");
                     return false;
@@ -637,7 +607,7 @@ fn runChecks(
         }
     }
 
-    try w.print("{{\"scope\":\"{s}\",\"filtered\":{s}", .{ scope, if (have_change_filter or severity_filter != null) "true" else "false" });
+    try w.print("{{\"filtered\":{s}", .{if (have_change_filter or severity_filter != null) "true" else "false"});
 
     if (have_change_filter) {
         try w.writeAll(",\"changed_refs\":[");
@@ -659,74 +629,35 @@ fn runChecks(
         try w.writeAll("]");
     }
 
-    try w.writeAll(",\"erc\":");
-    if (want_erc) {
-        const erc_all = try erc_mod.runErc(allocator, block, project_dir);
-        try w.writeAll("[");
-        var first = true;
-        for (erc_all) |v| {
-            if (severity_filter) |sf| if (!std.mem.eql(u8, @tagName(v.severity), sf)) continue;
-            if (have_change_filter) {
-                const ref_hit = v.ref_des.len > 0 and changed_refs.contains(v.ref_des);
-                const net_hit = v.net.len > 0 and changed_nets.contains(v.net);
-                if (!ref_hit and !net_hit) continue;
-            }
-            if (!first) try w.writeAll(",");
-            first = false;
-            try w.writeAll("{\"kind\":\"");
-            try w.writeAll(@tagName(v.kind));
-            try w.writeAll("\",\"severity\":\"");
-            try w.writeAll(@tagName(v.severity));
-            try w.writeAll("\",\"message\":");
-            try writeJsonString(w, v.message);
-            if (v.ref_des.len > 0) {
-                try w.writeAll(",\"ref\":");
-                try writeJsonString(w, v.ref_des);
-            }
-            if (v.net.len > 0) {
-                try w.writeAll(JSON_NET_KEY);
-                try writeJsonString(w, v.net);
-            }
-            try w.writeAll("}");
+    try w.writeAll(",\"erc\":[");
+    const erc_all = try erc_mod.runErc(allocator, block, project_dir);
+    var first = true;
+    for (erc_all) |v| {
+        if (severity_filter) |sf| if (!std.mem.eql(u8, @tagName(v.severity), sf)) continue;
+        if (have_change_filter) {
+            const ref_hit = v.ref_des.len > 0 and changed_refs.contains(v.ref_des);
+            const net_hit = v.net.len > 0 and changed_nets.contains(v.net);
+            if (!ref_hit and !net_hit) continue;
         }
-        try w.writeAll("]");
-    } else {
-        try w.writeAll("null");
-    }
-
-    try w.writeAll(",\"drc\":");
-    if (want_drc and board_def != null) {
-        const layout_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.layout", .{ project_dir, name });
-        defer allocator.free(layout_path);
-        const lay = layout_mod.loadLayout(allocator, layout_path) catch layout_mod.Layout{
-            .placements = &.{},
-            .traces = &.{},
-            .vias = &.{},
-            .zone_fills = &.{},
-            .rules = null,
-        };
-        const drc_violations = try drc_mod.runDrc(allocator, block, board_def, project_dir, &lay);
-        try w.writeAll("{\"violations\":[");
-        var first = true;
-        var emitted: usize = 0;
-        for (drc_violations) |v| {
-            const sev = @tagName(v.severity);
-            if (severity_filter) |sf| if (!std.mem.eql(u8, sev, sf)) continue;
-            if (!first) try w.writeAll(",");
-            first = false;
-            emitted += 1;
-            try w.writeAll("{\"kind\":");
-            try writeJsonString(w, v.kind);
-            try w.writeAll(",\"message\":");
-            try writeJsonString(w, v.message);
-            try w.print(",\"x\":{d:.4},\"y\":{d:.4},\"severity\":\"{s}\"", .{ v.x, v.y, sev });
-            try w.writeAll("}");
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.writeAll("{\"kind\":\"");
+        try w.writeAll(@tagName(v.kind));
+        try w.writeAll("\",\"severity\":\"");
+        try w.writeAll(@tagName(v.severity));
+        try w.writeAll("\",\"message\":");
+        try writeJsonString(w, v.message);
+        if (v.ref_des.len > 0) {
+            try w.writeAll(",\"ref\":");
+            try writeJsonString(w, v.ref_des);
         }
-        try w.print("],\"count\":{d}}}", .{emitted});
-    } else {
-        try w.writeAll("null");
+        if (v.net.len > 0) {
+            try w.writeAll(JSON_NET_KEY);
+            try writeJsonString(w, v.net);
+        }
+        try w.writeAll("}");
     }
-    try w.writeAll("}");
+    try w.writeAll("]}");
     return true;
 }
 
@@ -739,7 +670,7 @@ fn generateReview(
     name: []const u8,
     w: anytype,
 ) !bool {
-    const path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
+    const path = try paths.designSourcePath(allocator, project_dir, name);
     defer allocator.free(path);
 
     var eval = Evaluator.init(allocator, project_dir);
@@ -750,14 +681,13 @@ fn generateReview(
     };
     const block: *const env_mod.DesignBlock = switch (result) {
         .design_block => |b| b,
-        .board => |b| b.design,
         else => {
             try w.writeAll(ERR_NOT_DESIGN);
             return false;
         },
     };
 
-    const bom_path = try std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name });
+    const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
     defer allocator.free(bom_path);
     bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
@@ -865,7 +795,7 @@ fn listInstances(
     name: []const u8,
     w: anytype,
 ) !bool {
-    const path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
+    const path = try paths.designSourcePath(allocator, project_dir, name);
     defer allocator.free(path);
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
@@ -875,7 +805,6 @@ fn listInstances(
     };
     const block: *const env_mod.DesignBlock = switch (result) {
         .design_block => |b| b,
-        .board => |b| b.design,
         else => {
             try w.writeAll(ERR_NOT_DESIGN);
             return false;
@@ -921,7 +850,7 @@ pub fn listFreePins(
     filter: ?[]const u8,
     w: anytype,
 ) ToolError!bool {
-    const path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
+    const path = try paths.designSourcePath(allocator, project_dir, name);
     defer allocator.free(path);
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
@@ -931,7 +860,6 @@ pub fn listFreePins(
     };
     const block: *const env_mod.DesignBlock = switch (result) {
         .design_block => |b| b,
-        .board => |b| b.design,
         else => {
             try w.writeAll(ERR_NOT_DESIGN);
             return false;
@@ -1026,7 +954,7 @@ fn getNet(
     net_name: []const u8,
     w: anytype,
 ) !bool {
-    const path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
+    const path = try paths.designSourcePath(allocator, project_dir, name);
     defer allocator.free(path);
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
@@ -1036,7 +964,6 @@ fn getNet(
     };
     const block: *const env_mod.DesignBlock = switch (result) {
         .design_block => |b| b,
-        .board => |b| b.design,
         else => {
             try w.writeAll(ERR_NOT_DESIGN);
             return false;
@@ -1216,9 +1143,10 @@ fn writeJsonString(w: anytype, s: []const u8) !void {
     try w.writeAll("\"");
 }
 
-/// Scan `{project_dir}/src/*.sexp` and return the basename of every file
-/// whose top-level form is a `(design-block …)`. Helper for the MCP
-/// `list_designs` tool and the index page's design list.
+/// Scan `{project_dir}/src/` recursively and return the basename of every
+/// file whose top-level form is a `(design-block …)`. Helper for the MCP
+/// `list_designs` tool and the index page's design list. Sibling
+/// `<name>.checks.sexp` files (autoloaded verifications) are skipped.
 pub fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) ToolError![][]const u8 {
     const src_path = try std.fmt.allocPrint(allocator, "{s}/src", .{project_dir});
     defer allocator.free(src_path);
@@ -1227,14 +1155,16 @@ pub fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) To
     defer dir.close();
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
-    var it = dir.iterate();
-    while (try it.next()) |entry| {
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next()) |entry| {
         if (entry.kind != .file and entry.kind != .sym_link) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".sexp")) continue;
-        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ src_path, entry.name });
+        if (!std.mem.endsWith(u8, entry.basename, ".sexp")) continue;
+        if (std.mem.endsWith(u8, entry.basename, ".checks.sexp")) continue;
+        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ src_path, entry.path });
         defer allocator.free(full_path);
         if (!hasTopLevelDesignBlock(allocator, full_path)) continue;
-        const base = entry.name[0 .. entry.name.len - ".sexp".len];
+        const base = entry.basename[0 .. entry.basename.len - ".sexp".len];
         try names.append(allocator, try allocator.dupe(u8, base));
     }
     return names.toOwnedSlice(allocator);
@@ -1289,18 +1219,20 @@ pub fn listDesignSummaries(
     defer dir.close();
 
     var summaries: std.ArrayListUnmanaged(DesignSummary) = .empty;
-    var it = dir.iterate();
-    while (try it.next()) |entry| {
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next()) |entry| {
         if (entry.kind != .file and entry.kind != .sym_link) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".sexp")) continue;
-        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ src_path, entry.name });
+        if (!std.mem.endsWith(u8, entry.basename, ".sexp")) continue;
+        if (std.mem.endsWith(u8, entry.basename, ".checks.sexp")) continue;
+        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ src_path, entry.path });
         defer allocator.free(full_path);
         if (!hasTopLevelDesignBlock(allocator, full_path)) continue;
 
-        const base = try allocator.dupe(u8, entry.name[0 .. entry.name.len - ".sexp".len]);
+        const base = try allocator.dupe(u8, entry.basename[0 .. entry.basename.len - ".sexp".len]);
 
         var mtime_sec: i64 = 0;
-        if (dir.statFile(entry.name)) |st| {
+        if (dir.statFile(entry.path)) |st| {
             mtime_sec = @intCast(@divTrunc(st.mtime, std.time.ns_per_s));
         } else |_| {}
 
@@ -1319,7 +1251,6 @@ pub fn listDesignSummaries(
         if (eval.evalFile(full_path)) |result| {
             const block_opt: ?*const env_mod.DesignBlock = switch (result) {
                 .design_block => |b| b,
-                .board => |b| b.design,
                 else => null,
             };
             if (block_opt) |block| {
@@ -1373,7 +1304,7 @@ pub fn renderSceneGraph(
     project_dir: []const u8,
     name: []const u8,
 ) ToolError![]const u8 {
-    const path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ project_dir, name });
+    const path = try paths.designSourcePath(allocator, project_dir, name);
     defer allocator.free(path);
 
     var eval = Evaluator.init(allocator, project_dir);
@@ -1381,11 +1312,10 @@ pub fn renderSceneGraph(
     const result = try eval.evalFile(path);
     const block: *const env_mod.DesignBlock = switch (result) {
         .design_block => |b| b,
-        .board => |b| b.design,
         else => return error.NotADesign,
     };
 
-    const bom_path = try std.fmt.allocPrint(allocator, BOM_PATH_TEMPLATE, .{ project_dir, name });
+    const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
     defer allocator.free(bom_path);
     bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 

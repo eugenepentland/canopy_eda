@@ -21,14 +21,8 @@ zig build run -- serve --project-dir projects/designs
 # Build a design (stdout), --push sends to running server
 zig build run -- build --project-dir projects/designs --push <design-name>
 
-# Export KiCad netlist + footprints
+# Export KiCad netlist + footprints (handoff to KiCad's PCB editor)
 zig build run -- export-kicad --project-dir projects/designs --output-dir <dir>
-
-# Export Gerber/Excellon manufacturing files
-zig build run -- export-gerber --project-dir projects/designs --output-dir <dir>
-
-# Export PCB layout
-zig build run -- export-pcb --project-dir projects/designs --output-dir <dir>
 
 # Convert KiCad files
 zig build run -- convert-footprint <file.kicad_mod>
@@ -58,13 +52,11 @@ Source (.sexp files)
     → Tokenizer → Parser → AST (nodes with source spans)
     → Evaluator (recursive eval with special forms, builtins, modules)
     → DesignBlock (instances, nets, ports, notes, sections, sub_blocks)
-      OR Board (outline, stackup, rules, zones, keepouts)
     → Post-build (ID insertion, BOM resolution, assertion checks)
     → Output:
         Schematic: render_html.zig → server-rendered HTML (hub-and-spoke SVG)
-        PCB: render_pcb_json.zig → JSON → Pixi.js PCB viewer
-        Export: emit.zig (.sexp), export_kicad.zig (KiCad), export_gerber.zig (Gerber)
-        Checks: erc.zig (electrical rules), drc.zig (design rules)
+        Export: emit.zig (.sexp), export_kicad.zig (KiCad netlist + footprints + STEP models)
+        Checks: erc.zig (electrical rules)
 ```
 
 ### Key Modules
@@ -85,13 +77,11 @@ Source (.sexp files)
 
 **Schematic rendering** (`src/render_html.zig` + `src/render_svg/`): Converts DesignBlock to an HTML page with inline SVG. Hub/spoke model: Hubs = ICs/connectors (U/J/P/X/Q prefix, rendered as boxes). Spokes = passives (R/C/L/F/D prefix, rendered inline on connections). Grid layout from sections. `src/render_json.zig` still emits a scene-graph JSON (`/api/scene-graph/:name`) used by the live-push pipeline. `src/render_system_svg.zig` + `src/render_block_types.zig` produce the system-overview SVG embedded in the page header (auto-categorised columns: mcu, power, memory, peripheral, connector, etc.).
 
-**PCB** (`src/render_pcb_json.zig` + `src/layout.zig`): Renders PCB layout as interactive JSON. Parses footprint geometry from `.sexp` files. Layout persistence in `.layout` files (component placements, traces, vias, zone fills). Zone fill via `zone_fill.zig`.
+**Checks**: `erc.zig` (duplicate ref-des, floating nets, unconnected pins, voltage mismatches, missing decoupling).
 
-**Checks**: `erc.zig` (duplicate ref-des, floating nets, unconnected pins, voltage mismatches, missing decoupling). `drc.zig` (pad clearance, trace width, via size/drill, obstacle avoidance).
+**Export**: `emit.zig` (flattened .sexp), `export_kicad.zig` + `export_kicad_netlist.zig` + `export_kicad_footprint.zig` + `export_kicad_model.zig` + `export_kicad_modules.zig` (KiCad netlist + footprints + STEP models — the bridge for handing schematic edits off to KiCad's PCB editor via the plugin sync).
 
-**Export**: `emit.zig` (flattened .sexp), `export_kicad.zig` + `export_kicad_netlist.zig` + `export_kicad_footprint.zig` (KiCad), `export_gerber.zig` (Gerber/Excellon).
-
-**Web server** (`src/serve.zig` + `src/serve/`): Serves Pixi.js-based viewers for schematics, block diagrams, and PCB layout. Live update via version polling. JSON scene graph state protected by mutex.
+**Web server** (`src/serve.zig` + `src/serve/`): Serves the schematic viewer + review report. Live update via version polling. JSON scene graph state protected by mutex.
 
 ### Component System
 
@@ -177,20 +167,17 @@ Source (.sexp files)
 
 ## Web Server
 
-`eda serve` starts an HTTP server with HTML and Pixi.js-based viewers:
+`eda serve` starts an HTTP server with the schematic viewer + review report:
 
 - **Design list**: `GET /` — links to all .sexp designs
 - **Schematic viewer**: `GET /schematics/:name` — server-rendered HTML schematic with embedded SVG
-- **PCB viewer**: `GET /pcb/:name` — interactive PCB layout editor (Pixi.js)
 - **Review report**: `GET /review/:name` — HTML design-review doc (summary banner, power-budget table, per-section cards, BOM, assertions, unresolved issues). JSON form at `GET /api/review/:name` for programmatic use.
 - **Scene graph**: `GET /api/scene-graph/:name` — JSON scene graph for schematic (used by the live-push pipeline)
 - **Live push**: `POST /api/push/:name` — rebuild and push update
 - **Version polling**: `GET /api/version/:name` — returns `{"version":N}`
 - **Value editing**: `POST /api/edit-value/:name` — edit component value in .sexp file
-- **ERC/DRC**: `GET /api/erc/:name`, `GET /api/drc/:name` — rule check violations
-- **PCB editing**: `GET/POST /api/pcb-placement/:name`, `POST /api/pcb-routing/:name`
-- **Zone fill**: `POST /api/zone-fill/:name` — copper pour computation
-- **PCB rules**: `POST /api/pcb-rules/:name` — update board design rules
+- **ERC**: `GET /api/erc/:name` — electrical-rule violations
+- **KiCad plugin sync**: `POST /api/update-kicad-pcb/:name` — write netlist + footprints + STEP models to the configured output dir and invoke `pcb_update.py` so KiCad's PCB editor picks up schematic changes (preserving placements/routing). Companion config endpoints under `/api/kicad-sync-config/:name`.
 - **Library upload**: `GET /library`, `POST /api/upload-symbol`, `POST /api/upload-footprint`
 
 ### Live update workflow
@@ -200,7 +187,7 @@ Source (.sexp files)
 eda serve --project-dir projects/designs
 
 # Terminal 2: edit and push
-vim projects/designs/src/stm32n6.sexp
+vim projects/designs/src/stm32n6/stm32n6.sexp
 eda build --project-dir projects/designs --push stm32n6
 # Browser auto-updates within 500ms
 ```

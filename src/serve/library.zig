@@ -154,9 +154,7 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handl
                     break :blk footprint_mod.findModelFile(ctx.allocator, ctx.project_dir, fp, fp) != null;
                 };
                 if (has_model) {
-                    try w.print("<a href=\"/model-viewer/{s}\" style=\"color:#58a6ff;font-size:0.8rem;\">3D</a> ", .{fp});
-                } else {
-                    try w.print("<a href=\"/model-viewer/{s}\" style=\"color:#444;font-size:0.8rem;\" title=\"Upload 3D model\">+ 3D</a> ", .{fp});
+                    try w.writeAll("<span class=\"meta\" style=\"font-size:0.8rem;\">3D</span> ");
                 }
             }
             if (pinout) |po| try w.print("<span class=\"meta\">pinout: </span><span class=\"tag tag-pinout\">{s}</span> ", .{po});

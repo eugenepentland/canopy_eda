@@ -2,14 +2,13 @@ const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
+const paths = @import("../paths.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const export_kicad = @import("../export_kicad.zig");
 const netlist_mod = @import("../export_kicad_netlist.zig");
 const fp_mod = @import("../export_kicad_footprint.zig");
 const model_mod = @import("../export_kicad_model.zig");
-const pcb_mod = @import("../export_kicad_pcb.zig");
-const layout_mod = @import("../layout.zig");
 const bom = @import("../bom.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
@@ -37,7 +36,7 @@ const Config = struct {
 };
 
 fn configPath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/src/{s}.kicad.json", .{ project_dir, name });
+    return paths.designSiblingPath(allocator, project_dir, name, ".kicad.json");
 }
 
 fn loadConfig(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) Config {
@@ -148,7 +147,7 @@ pub fn setConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 }
 
 fn loadAndResolve(ctx: *Handler, name: []const u8, res: *httpz.Response) ?*const env_mod.DesignBlock {
-    const board_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name }) catch {
+    const board_path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch {
         res.status = HTTP_INTERNAL_ERROR;
         return null;
     };
@@ -167,7 +166,6 @@ fn loadAndResolve(ctx: *Handler, name: []const u8, res: *httpz.Response) ?*const
 
     const block = switch (result) {
         .design_block => |b| b,
-        .board => |b| b.design,
         else => {
             res.status = HTTP_INTERNAL_ERROR;
             res.body = "{\"ok\":false,\"error\":\"Not a design block\"}";
@@ -176,7 +174,7 @@ fn loadAndResolve(ctx: *Handler, name: []const u8, res: *httpz.Response) ?*const
         },
     };
 
-    const bom_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name }) catch {
+    const bom_path = paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, ".bom") catch {
         res.status = HTTP_INTERNAL_ERROR;
         return null;
     };
@@ -539,11 +537,6 @@ pub fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 
     const summary = parseSummaryLine(py.stdout);
 
-    // Refresh the project's .layout file from the updated .kicad_pcb so the
-    // canvas viewer picks up both adopted follower placements and any other
-    // positions the user changed in KiCad since the last sync.
-    syncLayoutFromPcb(ctx.allocator, block, ctx.project_dir, name, pcb_path);
-
     var esc_backup: std.ArrayListUnmanaged(u8) = .empty;
     defer esc_backup.deinit(ctx.allocator);
     try writeJsonEscaped(esc_backup.writer(ctx.allocator), summary.backup);
@@ -893,72 +886,6 @@ fn saveCache(allocator: std.mem.Allocator, path: []const u8, cache: *const SyncC
 fn fileExists(path: []const u8) bool {
     infra_fs.cwd().access(path, .{}) catch return false;
     return true;
-}
-
-/// After `pcb_update.py` has written the updated .kicad_pcb, rebuild the
-/// project's `.layout` file from the board's current footprint positions.
-/// Placements are keyed by `canopy_uuid`; traces, vias, zone fills, and rules
-/// are preserved from the pre-existing `.layout` (if any) so the canvas
-/// viewer's routing state survives a sync.
-///
-/// Silent on failure: the sync has already succeeded, and the viewer can
-/// always fall back to reading placements out of the .kicad_pcb directly.
-fn syncLayoutFromPcb(
-    allocator: std.mem.Allocator,
-    block: *const env_mod.DesignBlock,
-    project_dir: []const u8,
-    name: []const u8,
-    pcb_path: []const u8,
-) void {
-    const pcb_content = infra_fs.cwd().readFileAlloc(allocator, pcb_path, 100 * 1024 * 1024) catch return;
-    defer allocator.free(pcb_content);
-
-    var placed = std.StringHashMap(pcb_mod.PlacedFootprint).init(allocator);
-    defer placed.deinit();
-    pcb_mod.parseExistingPlacements(allocator, pcb_content, &placed) catch return;
-
-    var instances: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
-    defer instances.deinit(allocator);
-    netlist_mod.collectInstances(allocator, block, "", &instances) catch return;
-
-    var placements: std.ArrayListUnmanaged(layout_mod.Placement) = .empty;
-    defer placements.deinit(allocator);
-    for (instances.items) |inst| {
-        if (inst.uuid.len == 0) continue;
-        const p = placed.get(inst.uuid) orelse continue;
-        placements.append(allocator, .{
-            .ref_des = inst.ref_des,
-            .x = p.x,
-            .y = p.y,
-            .angle = p.angle,
-            .side = if (p.flipped) .back else .front,
-            .uuid = inst.uuid,
-        }) catch return;
-    }
-
-    const layout_path = std.fmt.allocPrint(allocator, "{s}/src/{s}.layout", .{ project_dir, name }) catch return;
-    defer allocator.free(layout_path);
-
-    // Preserve routing data from the prior .layout.
-    var existing_traces: []const layout_mod.Trace = &.{};
-    var existing_vias: []const layout_mod.Via = &.{};
-    var existing_zone_fills: []const layout_mod.ZoneFill = &.{};
-    var existing_rules: ?layout_mod.Rules = null;
-    if (layout_mod.loadLayout(allocator, layout_path)) |prev| {
-        existing_traces = prev.traces;
-        existing_vias = prev.vias;
-        existing_zone_fills = prev.zone_fills;
-        existing_rules = prev.rules;
-    } else |_| {}
-
-    const layout = layout_mod.Layout{
-        .placements = placements.items,
-        .traces = existing_traces,
-        .vias = existing_vias,
-        .zone_fills = existing_zone_fills,
-        .rules = existing_rules,
-    };
-    layout_mod.saveLayout(allocator, &layout, layout_path) catch return;
 }
 
 fn sha256Hex(allocator: std.mem.Allocator, input: []const u8) ![]u8 {

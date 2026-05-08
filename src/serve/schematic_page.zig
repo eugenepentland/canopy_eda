@@ -1,6 +1,7 @@
 const std = @import("std");
 const httpz = @import("httpz");
 const log = @import("../infra/log.zig");
+const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const env_mod = @import("../eval/env.zig");
 const erc_mod = @import("../erc.zig");
@@ -23,7 +24,7 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         return;
     };
 
-    const board_path = try std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.sexp", .{ ctx.project_dir, name });
+    const board_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(board_path);
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
@@ -37,7 +38,6 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 
     const block: *env_mod.DesignBlock = switch (result) {
         .design_block => |b| b,
-        .board => |b| b.design,
         else => {
             res.status = 500;
             res.body = "Not a design block";
@@ -45,7 +45,7 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         },
     };
 
-    const bom_path = std.fmt.allocPrint(ctx.allocator, "{s}/src/{s}.bom", .{ ctx.project_dir, name }) catch {
+    const bom_path = paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, ".bom") catch {
         res.status = 500;
         return;
     };

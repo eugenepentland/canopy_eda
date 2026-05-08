@@ -7,7 +7,6 @@ const builtins = @import("builtins.zig");
 const special_forms = @import("special_forms.zig");
 const modules = @import("modules.zig");
 const design_block = @import("design_block.zig");
-const board_eval = @import("board.zig");
 const instance_mod = @import("instance.zig");
 const builders = @import("builders.zig");
 pub const ids = @import("ids.zig");
@@ -166,9 +165,12 @@ pub const Evaluator = struct {
         self.pending_ids.deinit(self.allocator);
     }
 
-    /// Evaluate a file and return the top-level design block.
+    /// Evaluate a file and return the top-level design block. Routes
+    /// through `loadDesignFile` so a sibling `<name>.checks.sexp` file —
+    /// when present — has its forms spliced into the design-block body
+    /// before evaluation.
     pub fn evalFile(self: *Evaluator, path: []const u8) EvalError!Value {
-        const nodes = builders.loadFile(self, path) orelse return EvalError.ImportError;
+        const nodes = builders.loadDesignFile(self, path) orelse return EvalError.ImportError;
         var env = Env.init(self.allocator, null);
         defer env.deinit();
         return self.evalNodes(nodes, &env);
@@ -219,7 +221,6 @@ pub const Evaluator = struct {
         if (std.mem.eql(u8, head_name, "import")) return modules.evalImport(self, args, env);
         if (std.mem.eql(u8, head_name, "defmodule")) return modules.evalDefmodule(self, args, env);
         if (std.mem.eql(u8, head_name, "design-block")) return design_block.evalDesignBlock(self, args, env);
-        if (std.mem.eql(u8, head_name, "board")) return board_eval.evalBoard(self, args, env);
         if (std.mem.eql(u8, head_name, "assert")) return special_forms.evalAssert(self, args, env);
         if (std.mem.eql(u8, head_name, "assert-range")) return special_forms.evalAssertRange(self, args, env);
         if (std.mem.eql(u8, head_name, "fmt")) return special_forms.evalFmt(self, args, env);
@@ -392,7 +393,6 @@ test {
     _ = special_forms;
     _ = modules;
     _ = design_block;
-    _ = board_eval;
     _ = instance_mod;
     _ = builders;
 }

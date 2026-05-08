@@ -25,8 +25,6 @@ pub const Value = union(enum) {
     module: ModuleDef,
     /// A design block result
     design_block: *DesignBlock,
-    /// A board definition (design + physical parameters)
-    board: *Board,
     /// Nil / void
     nil,
 
@@ -667,88 +665,6 @@ pub const DesignBlock = struct {
     /// Design-side `(verifies …)` sign-offs that answer library requirements
     /// the netlist alone can't verify.
     verifications: []const Verification = &.{},
-};
-
-/// A board definition: a design-block plus physical PCB parameters.
-pub const Board = struct {
-    name: []const u8,
-    design: *DesignBlock,
-    /// Board outline as a list of (x, y) points in mm. Rectangle shorthand
-    /// produces 4 corner points.
-    outline: []const [2]f64 = &.{},
-    /// Board thickness in mm (default 1.6).
-    thickness: f64 = 1.6,
-    /// Copper layers (default 2).
-    copper_layers: u8 = 2,
-    /// Design rules.
-    rules: BoardRules = .{},
-    /// Layer stackup definition.
-    stackup: []const StackupLayer = &.{},
-    /// Net class overrides.
-    net_classes: []const NetClass = &.{},
-    /// Differential pair definitions.
-    diff_pairs: []const DiffPair = &.{},
-    /// Zone (copper pour) definitions.
-    zones: []const ZoneDef = &.{},
-    /// Keepout areas.
-    keepouts: []const Keepout = &.{},
-};
-
-/// PCB design rules.
-pub const BoardRules = struct {
-    clearance: f64 = 0.15,
-    track_width: f64 = 0.2,
-    via_drill: f64 = 0.3,
-    via_size: f64 = 0.6,
-};
-
-/// Material kind of one layer in the PCB stackup — copper traces, prepreg
-/// glue, or rigid core. Drives the dielectric/Z-axis math used by the
-/// impedance and zone-fill calculations.
-pub const StackupKind = enum { copper, prepreg, core };
-
-/// A layer in the board stackup.
-pub const StackupLayer = struct {
-    kind: StackupKind,
-    name: []const u8 = "",
-    thickness: f64,
-    er: f64 = 4.5,
-};
-
-/// Net class with per-class rule overrides.
-pub const NetClass = struct {
-    name: []const u8,
-    track_width: ?f64 = null,
-    clearance: ?f64 = null,
-    via_drill: ?f64 = null,
-    via_size: ?f64 = null,
-    nets: []const []const u8 = &.{},
-};
-
-/// Differential pair definition.
-pub const DiffPair = struct {
-    name: []const u8,
-    positive: []const u8,
-    negative: []const u8,
-    impedance: f64 = 90,
-    spacing: f64 = 0.15,
-};
-
-/// Zone (copper pour) definition — design intent only.
-pub const ZoneDef = struct {
-    name: []const u8,
-    layer: []const u8,
-    thermal_gap: f64 = 0.3,
-    thermal_width: f64 = 0.25,
-};
-
-/// Keepout area.
-pub const Keepout = struct {
-    name: []const u8,
-    outline: []const [2]f64,
-    no_tracks: bool = false,
-    no_vias: bool = false,
-    no_pours: bool = false,
 };
 
 /// Assertion result.

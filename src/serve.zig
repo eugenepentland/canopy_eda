@@ -21,9 +21,7 @@ const upload_package = @import("serve/upload_package.zig");
 const upload_datasheet = @import("serve/upload_datasheet.zig");
 const pdf_viewer = @import("serve/pdf_viewer.zig");
 const footprint_preview = @import("serve/footprint_preview.zig");
-const model = @import("serve/model.zig");
 const schematic_page = @import("serve/schematic_page.zig");
-const pcb_page = @import("serve/pcb_page.zig");
 const auth = @import("serve/auth.zig");
 const mcp = @import("serve/mcp.zig");
 const oauth = @import("serve/oauth.zig");
@@ -38,10 +36,10 @@ const spa_bundle = @import("serve/spa_bundle.zig");
 pub var live_mutex: std.Thread.Mutex = .{};
 pub var live_layout_json: ?[]const u8 = null;
 
-/// Replace the cached live scene-graph JSON. The incoming slice may come from
-/// a request-scoped arena (e.g. MCP tool dispatch) so it must be duplicated
-/// into page_allocator memory that outlives the caller. The previous value,
-/// if any, is freed.
+/// Replace the cached live schematic scene-graph JSON. The incoming slice may
+/// come from a request-scoped arena (e.g. MCP tool dispatch) so it must be
+/// duplicated into page_allocator memory that outlives the caller. The previous
+/// value, if any, is freed.
 pub fn setLiveLayoutJson(data: ?[]const u8) void {
     const dup: ?[]const u8 = if (data) |d|
         (std.heap.page_allocator.dupe(u8, d) catch null)
@@ -82,11 +80,6 @@ pub fn getLiveVersion(name: []const u8) u32 {
     defer live_version_mutex.unlock();
     return live_versions.get(name) orelse 0;
 }
-
-// ── Layout storage (in-memory) ─────────────────────────────────────────
-
-pub var layout_mutex: std.Thread.Mutex = .{};
-pub var layout_data: ?[]const u8 = null;
 
 // ── Server ─────────────────────────────────────────────────────────────
 
@@ -170,6 +163,9 @@ pub fn serve(
     router.post("/auth/credentials/delete", auth.deleteCredentialApi, .{});
     router.post("/auth/invite/create", auth.createInviteApi, .{});
     router.get("/auth/invite/*", auth.invitePage, .{});
+    router.post("/auth/password/login", auth.passwordLoginApi, .{});
+    router.post("/auth/password/set", auth.passwordSetApi, .{});
+    router.get("/auth/password/status", auth.passwordStatusApi, .{});
 
     // Lustre SPA (v2) — single-page app served under /v2/*. The bundle is
     // produced by `make -C frontend build` and embedded into the Zig binary.
@@ -182,14 +178,11 @@ pub fn serve(
     router.get("/", pages.indexPage, .{});
     router.get("/style.css", pages.cssPage, .{});
     router.get("/schematics/:name", schematic_page.schematicPage, .{});
-    router.get("/pcb/:name", pcb_page.pcbPage, .{});
     router.get("/review/:name", api.reviewPage, .{});
 
     // API
     router.post("/api/push/:name", api.pushApi, .{});
     router.get("/api/version/:name", api.versionApi, .{});
-    router.get("/schematics/:name/layout", api.layoutGetApi, .{});
-    router.post("/schematics/:name/layout", api.layoutPostApi, .{});
     router.get("/api/export-kicad/:name", api.exportKicadApi, .{});
     router.get("/api/export-netlist/:name", api.exportNetlistApi, .{});
     // Incremental sync (content-addressed) for the KiCad plugin.
@@ -203,14 +196,7 @@ pub fn serve(
     router.post("/api/export-kicad-to-dir/:name", kicad_sync.writeKicadApi, .{});
     router.post("/api/update-kicad-pcb/:name", kicad_sync.writePcbApi, .{});
     router.get("/api/export-bom/:name", api.exportBomCsvApi, .{});
-    router.get("/api/export-gerber/:name", api.exportGerberApi, .{});
     router.get("/api/export-review/:name", api.exportReviewPackageApi, .{});
-    router.post("/api/update-pcb/:name", api.updatePcbApi, .{});
-    router.post("/api/pcb-placement/:name", api.pcbPlacementApi, .{});
-    router.post("/api/pcb-routing/:name", api.pcbRoutingApi, .{});
-    router.post("/api/pcb-rules/:name", api.pcbRulesApi, .{});
-    router.post("/api/zone-fill/:name", api.zoneFillApi, .{});
-    router.get("/api/drc/:name", api.drcApi, .{});
     router.get("/api/erc/:name", api.ercApi, .{});
     router.get("/api/review/:name", api.reviewJsonApi, .{});
     router.post("/api/section-note/:name/add", api.addSectionNoteApi, .{});
@@ -229,7 +215,6 @@ pub fn serve(
     router.post("/api/edit-value/:name", edit.editValueApi, .{});
     router.post("/api/edit-mpn/:name", edit.editMpnApi, .{});
     router.post("/api/edit-footprint/:name", edit.editFootprintApi, .{});
-    router.post("/api/edit-courtyard", edit.editCourtyardApi, .{});
     router.post("/api/add-instance/:name", edit.addInstanceApi, .{});
     router.post("/api/remove-instance/:name", edit.removeInstanceApi, .{});
     router.post("/api/rewire-pin/:name", edit.rewirePinApi, .{});
@@ -237,7 +222,6 @@ pub fn serve(
     router.post("/api/swap-pins/:name", edit.swapPinsApi, .{});
     router.get("/api/free-pins/:name", api.freePinsApi, .{});
     router.get("/api/design-state/:name", api.designStateApi, .{});
-    router.post("/api/board-outline/:name", edit.boardOutlineApi, .{});
     router.get("/api/source/:name", edit.getSourceApi, .{});
     router.post("/api/source/:name", edit.saveSourceApi, .{});
 
@@ -269,13 +253,6 @@ pub fn serve(
     router.post("/api/oauth/clients/:id/revoke", account_page.revokeClientApi, .{});
     router.post("/api/users/role", account_page.updateUserRoleApi, .{});
     router.post("/api/users/delete", account_page.deleteUserApi, .{});
-
-    // Model
-    router.get("/model-viewer/:name", model.modelViewerPage, .{});
-    router.get("/api/model/:name", model.modelFileApi, .{});
-    router.get("/api/model-config", model.modelConfigGetApi, .{});
-    router.post("/api/model-config", model.modelConfigPostApi, .{});
-    router.post("/api/upload-model/:name", model.uploadModelApi, .{});
 
     std.debug.print("Listening on http://localhost:{d}\n", .{port});
     std.debug.print("Project: {s}\n", .{project_dir});
