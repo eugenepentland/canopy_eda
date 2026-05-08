@@ -27,16 +27,44 @@ import (
 )
 
 const (
-	// LoopbackPort matches the Python plugin's port. The user registers
-	// this redirect_uri at /account.
-	LoopbackPort = 53682
-	redirectPath = "/callback"
-	scope        = "mcp"
+	// PreferredPort is what we try to bind first so the redirect URI is
+	// stable and recognisable in logs. If something else is already using
+	// it (VS Code and similar dev tools randomly grab dynamic ports in
+	// this range), we fall back to an OS-assigned free port — the EDA
+	// server's redirect_uri matcher accepts any port on a loopback host.
+	PreferredPort = 53682
+	redirectPath  = "/callback"
+	scope         = "mcp"
 )
 
-// RedirectURI is the value the server must have registered for the client.
+// RedirectURI is the canonical loopback redirect URI registered with the
+// server during dynamic client registration. The OAuth flow may use a
+// different port at runtime when PreferredPort is busy; the server's
+// loopback matcher accepts that.
 func RedirectURI() string {
-	return fmt.Sprintf("http://127.0.0.1:%d%s", LoopbackPort, redirectPath)
+	return fmt.Sprintf("http://127.0.0.1:%d%s", PreferredPort, redirectPath)
+}
+
+func redirectURIForPort(port int) string {
+	return fmt.Sprintf("http://127.0.0.1:%d%s", port, redirectPath)
+}
+
+// bindLoopback tries PreferredPort first, then falls back to an OS-assigned
+// free port. Returns the listener + the port it actually bound.
+func bindLoopback() (net.Listener, int, error) {
+	if l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", PreferredPort)); err == nil {
+		return l, PreferredPort, nil
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, 0, fmt.Errorf("no loopback port available (preferred %d busy and OS-assigned bind failed): %w", PreferredPort, err)
+	}
+	addr, ok := l.Addr().(*net.TCPAddr)
+	if !ok {
+		_ = l.Close()
+		return nil, 0, fmt.Errorf("listener address is not TCP: %T", l.Addr())
+	}
+	return l, addr.Port, nil
 }
 
 // EnsureToken returns a fresh access token, running the browser auth dance
@@ -66,23 +94,14 @@ func EnsureToken(serverURL, clientID, clientSecret string, store *config.TokenSt
 }
 
 // Authorize runs the auth-code+PKCE dance once and returns a fresh token.
-// Side effect: opens the user's browser to the authorize URL and binds the
+// Side effect: opens the user's browser to the authorize URL and binds a
 // loopback port to capture the callback.
 func Authorize(serverURL, clientID, clientSecret string) (config.TokenRecord, error) {
-	// Bind the loopback port FIRST. If something else is already on 53682
-	// (VS Code and other dev tools randomly grab dynamic ports in this
-	// range), we error out with a clear message instead of opening the
-	// browser and silently waiting 3 minutes for a callback that will
-	// never arrive.
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", LoopbackPort))
+	listener, port, err := bindLoopback()
 	if err != nil {
-		return config.TokenRecord{}, fmt.Errorf(
-			"port %d is in use — close whatever is holding it and retry. "+
-				"On Windows, VS Code and similar tools sometimes claim this port; "+
-				"`Get-NetTCPConnection -LocalPort %d` will show the owning PID. "+
-				"Underlying error: %w",
-			LoopbackPort, LoopbackPort, err)
+		return config.TokenRecord{}, err
 	}
+	redirectURI := redirectURIForPort(port)
 
 	verifier := genVerifier()
 	challenge := s256(verifier)
@@ -91,7 +110,7 @@ func Authorize(serverURL, clientID, clientSecret string) (config.TokenRecord, er
 	q := url.Values{}
 	q.Set("response_type", "code")
 	q.Set("client_id", clientID)
-	q.Set("redirect_uri", RedirectURI())
+	q.Set("redirect_uri", redirectURI)
 	q.Set("scope", scope)
 	q.Set("state", state)
 	q.Set("code_challenge", challenge)
@@ -105,7 +124,7 @@ func Authorize(serverURL, clientID, clientSecret string) (config.TokenRecord, er
 		return config.TokenRecord{}, err
 	}
 
-	return exchangeCode(serverURL, clientID, clientSecret, captured.code, verifier)
+	return exchangeCode(serverURL, clientID, clientSecret, captured.code, verifier, redirectURI)
 }
 
 type capture struct {
@@ -157,11 +176,11 @@ func waitForCodeOn(listener net.Listener, expectState string, timeout time.Durat
 	}
 }
 
-func exchangeCode(serverURL, clientID, clientSecret, code, verifier string) (config.TokenRecord, error) {
+func exchangeCode(serverURL, clientID, clientSecret, code, verifier, redirectURI string) (config.TokenRecord, error) {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
-	form.Set("redirect_uri", RedirectURI())
+	form.Set("redirect_uri", redirectURI)
 	form.Set("client_id", clientID)
 	form.Set("client_secret", clientSecret)
 	form.Set("code_verifier", verifier)
