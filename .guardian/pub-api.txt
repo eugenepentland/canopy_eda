@@ -168,7 +168,6 @@ src/export_kicad.zig::FlatNet struct_
 src/export_kicad.zig::FlatPin struct_
 src/export_kicad.zig::ModelConfigMap value
 src/export_kicad.zig::ModelTransform value
-src/export_kicad.zig::buildModulesJson value
 src/export_kicad.zig::exportFootprints value
 src/export_kicad.zig::exportKicad fn
 src/export_kicad.zig::exportKicadZip fn
@@ -178,7 +177,6 @@ src/export_kicad.zig::flattenAndMergeNets fn
 src/export_kicad.zig::loadModelConfig value
 src/export_kicad.zig::parseFloat3 value
 src/export_kicad.zig::uuidFromId fn
-src/export_kicad.zig::writeModulesJson value
 src/export_kicad_footprint.zig::FootprintError value
 src/export_kicad_footprint.zig::ZipEntry struct_
 src/export_kicad_footprint.zig::buildZip fn
@@ -195,9 +193,6 @@ src/export_kicad_model.zig::exportFootprints fn
 src/export_kicad_model.zig::exportSectionLayout fn
 src/export_kicad_model.zig::loadModelConfig fn
 src/export_kicad_model.zig::parseFloat3 fn
-src/export_kicad_modules.zig::ModulesError value
-src/export_kicad_modules.zig::buildModulesJson fn
-src/export_kicad_modules.zig::writeModulesJson fn
 src/export_kicad_netlist.zig::FlatTie struct_
 src/export_kicad_netlist.zig::NetlistError value
 src/export_kicad_netlist.zig::applyNetTies fn
@@ -475,12 +470,6 @@ src/serve/history.zig::SnapshotInfo struct_
 src/serve/history.zig::listSnapshots fn
 src/serve/history.zig::restore fn
 src/serve/history.zig::snapshot fn
-src/serve/kicad_sync.zig::HandlerError value
-src/serve/kicad_sync.zig::getConfigApi fn
-src/serve/kicad_sync.zig::setConfigApi fn
-src/serve/kicad_sync.zig::writeKicadApi fn
-src/serve/kicad_sync.zig::writeNetlistApi fn
-src/serve/kicad_sync.zig::writePcbApi fn
 src/serve/library.zig::HandlerError value
 src/serve/library.zig::libraryPage fn
 src/serve/library.zig::writeFamiliesJson fn
@@ -505,11 +494,13 @@ src/serve/oauth.zig::authorizeApprove fn
 src/serve/oauth.zig::authorizePage fn
 src/serve/oauth.zig::metadataAuthServer fn
 src/serve/oauth.zig::metadataProtectedResource fn
+src/serve/oauth.zig::registerEndpoint fn
 src/serve/oauth.zig::tokenEndpoint fn
 src/serve/oauth_store.zig::AuthCode struct_
 src/serve/oauth_store.zig::Client struct_
 src/serve/oauth_store.zig::NewClientResult struct_
 src/serve/oauth_store.zig::Token struct_
+src/serve/oauth_store.zig::claimClient fn
 src/serve/oauth_store.zig::consumeCode fn
 src/serve/oauth_store.zig::createClient fn
 src/serve/oauth_store.zig::findClient fn
@@ -545,9 +536,6 @@ src/serve/spa_bundle.zig::cssApi fn
 src/serve/spa_bundle.zig::jsApi fn
 src/serve/spa_shell.zig::shellApi fn
 src/serve/sync.zig::HandlerError value
-src/serve/sync.zig::netlistApi fn
-src/serve/sync.zig::objectApi fn
-src/serve/sync.zig::syncManifestApi fn
 src/serve/sync.zig::syncPlanApi fn
 src/serve/upload.zig::HandlerError value
 src/serve/upload.zig::extractFootprintName fn

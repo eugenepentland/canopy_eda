@@ -114,8 +114,6 @@ src/export_kicad_model.zig::exportFootprints | fn exportFootprints( allocator: s
 src/export_kicad_model.zig::exportSectionLayout | fn exportSectionLayout( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const u8
 src/export_kicad_model.zig::loadModelConfig | fn loadModelConfig(allocator: std.mem.Allocator, project_dir: []const u8) ModelConfigMap
 src/export_kicad_model.zig::parseFloat3 | fn parseFloat3(s: []const u8) [3]f64
-src/export_kicad_modules.zig::buildModulesJson | fn buildModulesJson( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const u8
-src/export_kicad_modules.zig::writeModulesJson | fn writeModulesJson( allocator: std.mem.Allocator, block: *const DesignBlock, out_path: []const u8, ) ModulesError!void
 src/export_kicad_netlist.zig::applyNetTies | fn applyNetTies( allocator: std.mem.Allocator, nets: *std.ArrayListUnmanaged(FlatNet), ties: []const FlatTie, ) std.mem.Allocator.Error!void
 src/export_kicad_netlist.zig::collectInstances | fn collectInstances( allocator: std.mem.Allocator, block: *const DesignBlock, prefix: []const u8, list: *std.ArrayListUnmanaged(FlatInstance), ) std.mem.Allocator.Error!void
 src/export_kicad_netlist.zig::collectNetTies | fn collectNetTies( allocator: std.mem.Allocator, block: *const DesignBlock, prefix: []const u8, list: *std.ArrayListUnmanaged(FlatTie), ) std.mem.Allocator.Error!void
@@ -301,11 +299,6 @@ src/serve/footprint_preview.zig::listFootprints | fn listFootprints(w: anytype, 
 src/serve/history.zig::listSnapshots | fn listSnapshots( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) HistoryError![]SnapshotInfo
 src/serve/history.zig::restore | fn restore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, id: []const u8, ) HistoryError!void
 src/serve/history.zig::snapshot | fn snapshot( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, description: ?[]const u8, ) HistoryError!?[]const u8
-src/serve/kicad_sync.zig::getConfigApi | fn getConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/kicad_sync.zig::setConfigApi | fn setConfigApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/kicad_sync.zig::writeKicadApi | fn writeKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/kicad_sync.zig::writeNetlistApi | fn writeNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/kicad_sync.zig::writePcbApi | fn writePcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/library.zig::libraryPage | fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/library.zig::writeFamiliesJson | fn writeFamiliesJson(w: anytype, allocator: std.mem.Allocator, project_dir: []const u8) HandlerError!void
 src/serve/mcp.zig::dispatchFrame | fn dispatchFrame( allocator: std.mem.Allocator, project_dir: []const u8, data: []const u8, role: users.Role, ) HandlerError!?[]const u8
@@ -321,7 +314,9 @@ src/serve/oauth.zig::authorizeApprove | fn authorizeApprove(ctx: *Handler, req: 
 src/serve/oauth.zig::authorizePage | fn authorizePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/oauth.zig::metadataAuthServer | fn metadataAuthServer(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/oauth.zig::metadataProtectedResource | fn metadataProtectedResource(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/oauth.zig::registerEndpoint | fn registerEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/oauth.zig::tokenEndpoint | fn tokenEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/oauth_store.zig::claimClient | fn claimClient(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, owner_email: []const u8) void
 src/serve/oauth_store.zig::consumeCode | fn consumeCode(allocator: std.mem.Allocator, auth_dir: []const u8, code: []const u8) ?AuthCode
 src/serve/oauth_store.zig::createClient | fn createClient( allocator: std.mem.Allocator, auth_dir: []const u8, name: []const u8, email: []const u8, redirect_uri: []const u8, ) std.mem.Allocator.Error!NewClientResult
 src/serve/oauth_store.zig::findClient | fn findClient(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8) ?Client
@@ -348,9 +343,6 @@ src/serve/schematic_page.zig::schematicPage | fn schematicPage(ctx: *Handler, re
 src/serve/spa_bundle.zig::cssApi | fn cssApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/spa_bundle.zig::jsApi | fn jsApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/spa_shell.zig::shellApi | fn shellApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) error{}!void
-src/serve/sync.zig::netlistApi | fn netlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/sync.zig::objectApi | fn objectApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/sync.zig::syncManifestApi | fn syncManifestApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/sync.zig::syncPlanApi | fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/upload.zig::extractFootprintName | fn extractFootprintName(allocator: std.mem.Allocator, footprint: []const u8) ?[]const u8
 src/serve/upload.zig::extractPackageName | fn extractPackageName(sym_data: []const u8) []const u8

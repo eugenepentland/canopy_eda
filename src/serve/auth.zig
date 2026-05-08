@@ -791,9 +791,14 @@ pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 
     // OAuth discovery + token/authorize endpoints must be reachable without
     // a logged-in session — Claude Code fetches these before it has a token.
-    if (std.mem.startsWith(u8, req.url.path, "/.well-known/oauth-")) return true;
-    if (std.mem.startsWith(u8, req.url.path, "/oauth/token")) return true;
-    if (std.mem.startsWith(u8, req.url.path, "/oauth/authorize")) return true;
+    // RFC 7591 dynamic client registration is in the exempt set: the agent
+    // calls /oauth/register before it has any session, and the minted client
+    // is unowned until the first user signs in on /oauth/authorize and
+    // approves it.
+    if (std.mem.startsWith(u8, req.url.path, "/.well-known/oauth-") or
+        std.mem.startsWith(u8, req.url.path, "/oauth/token") or
+        std.mem.startsWith(u8, req.url.path, "/oauth/authorize") or
+        std.mem.startsWith(u8, req.url.path, "/oauth/register")) return true;
 
     // MCP endpoints accept OAuth bearer tokens issued via /oauth/token.
     if (std.mem.startsWith(u8, req.url.path, "/mcp")) {

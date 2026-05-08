@@ -14,7 +14,6 @@ in: src/serve/auth.zig
 in: src/serve/edit.zig
 in: src/serve/edit.zig
 in: src/serve/footprint_preview.zig
-in: src/serve/kicad_sync.zig
 in: src/serve/library.zig
 in: src/serve/mcp_tools.zig
 in: src/serve/oauth.zig
