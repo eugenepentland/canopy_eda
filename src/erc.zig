@@ -571,7 +571,7 @@ fn isPassiveComponent(component: []const u8) bool {
     const passive_prefixes = [_][]const u8{
         "led",  "ind",   "ferrite", "xfl",      "abm",
         "fc-",  "diode", "ecmf",    "esd",      "tvs",
-        "fuse", "ntc",   "ptc",     "varistor",
+        "fuse", "ntc",   "ptc",     "varistor", "sw-",
     };
     for (passive_prefixes) |pfx| {
         if (component.len >= pfx.len and std.ascii.eqlIgnoreCase(component[0..pfx.len], pfx)) return true;
