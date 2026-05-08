@@ -1,12 +1,14 @@
 """OAuth 2.0 authorization-code + PKCE client for the EDA server.
 
-Mirrors the flow Claude Code uses for `/mcp` (see src/serve/oauth.zig). The
-user mints a client_id / client_secret pair at /account in the EDA web UI
-and registers a redirect_uri of `http://127.0.0.1:53682/callback`. The plugin
-binds that exact port during the auth dance because the server enforces
-strict redirect_uri equality.
+Mirrors the flow Claude Code uses for `/mcp` (see src/serve/oauth.zig).
+The plugin self-registers via RFC 7591 Dynamic Client Registration on
+first run — no manual minting of client_id / client_secret on /account
+is required. The minted credentials are cached per server URL so
+subsequent runs reuse them.
 
-Cached token lives at ~/.config/eda-kicad-sync/tokens.json (mode 0600).
+Cached files (all mode 0600):
+  ~/.config/eda-kicad-sync/clients.json — registered credentials per server
+  ~/.config/eda-kicad-sync/tokens.json  — access tokens
 """
 
 from __future__ import annotations
@@ -104,6 +106,123 @@ class TokenStore:
             "scope": rec.scope,
         }
         self._write(data)
+
+
+@dataclass
+class ClientRecord:
+    server_url: str
+    client_id: str
+    client_secret: str
+
+
+class ClientStore:
+    """JSON file at ~/.config/eda-kicad-sync/clients.json. One registered
+    client_id/client_secret per server_url — reused across boards so a user
+    isn't prompted to authorize once per project."""
+
+    def __init__(self, path: Optional[str] = None):
+        self.path = path or os.path.join(
+            os.path.expanduser("~"), ".config", "eda-kicad-sync", "clients.json"
+        )
+
+    def _read(self) -> dict:
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _write(self, data: dict) -> None:
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self.path)
+
+    @staticmethod
+    def _key(server_url: str) -> str:
+        return server_url.rstrip("/")
+
+    def get(self, server_url: str) -> Optional[ClientRecord]:
+        d = self._read().get(self._key(server_url))
+        if not d:
+            return None
+        return ClientRecord(
+            server_url=d["server_url"],
+            client_id=d["client_id"],
+            client_secret=d["client_secret"],
+        )
+
+    def put(self, rec: ClientRecord) -> None:
+        data = self._read()
+        data[self._key(rec.server_url)] = {
+            "server_url": rec.server_url,
+            "client_id": rec.client_id,
+            "client_secret": rec.client_secret,
+        }
+        self._write(data)
+
+    def forget(self, server_url: str) -> None:
+        data = self._read()
+        data.pop(self._key(server_url), None)
+        self._write(data)
+
+
+# ── Dynamic client registration (RFC 7591) ───────────────────────────────
+
+
+def register_client(server_url: str, *, client_name: str = "EDA Sync KiCad Plugin") -> ClientRecord:
+    """POST to the server's /oauth/register endpoint to mint a fresh
+    client_id/client_secret. Caller is responsible for caching the result
+    via ClientStore. Raises RuntimeError on any failure."""
+    server_url = server_url.rstrip("/")
+    body = json.dumps(
+        {
+            "client_name": client_name,
+            "redirect_uris": [redirect_uri()],
+        }
+    ).encode("utf-8")
+    req = request.Request(
+        urljoin(server_url + "/", "oauth/register"),
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=30.0) as resp:
+            payload = json.loads(resp.read())
+    except urlerror.HTTPError as e:
+        body_excerpt = e.read()[:500].decode("utf-8", errors="replace")
+        if e.code == 404:
+            raise RuntimeError(
+                "Server does not support dynamic client registration "
+                "(/oauth/register returned 404). Either the server is "
+                "running an older version, or you can mint credentials "
+                f"manually at {server_url}/account."
+            ) from None
+        raise RuntimeError(f"client registration failed: HTTP {e.code} — {body_excerpt}") from None
+    except urlerror.URLError as e:
+        raise RuntimeError(f"could not reach {server_url}: {e.reason}") from None
+    cid = payload.get("client_id")
+    csecret = payload.get("client_secret")
+    if not cid or not csecret:
+        raise RuntimeError(f"server registration response missing client_id/secret: {payload!r}")
+    return ClientRecord(server_url=server_url, client_id=cid, client_secret=csecret)
+
+
+def ensure_client(server_url: str, store: Optional[ClientStore] = None) -> ClientRecord:
+    """Return cached credentials for `server_url` if present, otherwise
+    register a fresh client and cache it."""
+    s = store or ClientStore()
+    cached = s.get(server_url)
+    if cached:
+        return cached
+    rec = register_client(server_url)
+    s.put(rec)
+    return rec
 
 
 # ── PKCE helpers ─────────────────────────────────────────────────────────

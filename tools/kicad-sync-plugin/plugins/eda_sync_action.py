@@ -51,30 +51,32 @@ def _resolve_board_path() -> Optional[str]:
 
 
 def _tk_setup_dialog(initial: cfg_mod.BoardConfig) -> Optional[cfg_mod.BoardConfig]:
-    """Tk-based setup form. Returns None if the user cancels."""
+    """Tk-based setup form. Returns None if the user cancels.
+
+    Only collects the server URL and the design name. OAuth credentials
+    are minted automatically on first sync via dynamic client
+    registration — the user just clicks Authorize in the browser."""
     try:
         import tkinter as tk
-        from tkinter import messagebox, ttk
+        from tkinter import ttk
     except ImportError:
-        print("Tkinter is unavailable; configure ~/.eda-sync.json manually.", file=sys.stderr)
+        print("Tkinter is unavailable; configure the .eda-sync.json file manually.", file=sys.stderr)
         return None
 
     out: dict[str, str] = {}
 
     root = tk.Tk()
     root.title("EDA Sync — first-run setup")
-    root.geometry("520x260")
+    root.geometry("520x200")
 
     fields = [
         ("Server URL", "server_url", initial.server_url or "http://127.0.0.1:7050"),
         ("Design name", "design", initial.design),
-        ("OAuth client_id", "client_id", initial.client_id),
-        ("OAuth client_secret", "client_secret", initial.client_secret),
     ]
     entries: dict[str, tk.Entry] = {}
     for i, (label, key, default) in enumerate(fields):
         ttk.Label(root, text=label).grid(row=i, column=0, sticky="e", padx=8, pady=4)
-        e = ttk.Entry(root, width=50, show="*" if "secret" in key else "")
+        e = ttk.Entry(root, width=50)
         e.insert(0, default)
         e.grid(row=i, column=1, padx=8, pady=4)
         entries[key] = e
@@ -82,8 +84,9 @@ def _tk_setup_dialog(initial: cfg_mod.BoardConfig) -> Optional[cfg_mod.BoardConf
     note = ttk.Label(
         root,
         text=(
-            f"Mint client_id/client_secret at {initial.server_url or 'http://server'}/account.\n"
-            f"Register redirect_uri exactly as: {oauth_client.redirect_uri()}"
+            "On the next sync, your browser will open and ask you to sign in "
+            "(if needed) and approve EDA Sync. No client_id or client_secret "
+            "is required — they're minted automatically and cached locally."
         ),
         foreground="#555",
         wraplength=480,
@@ -114,8 +117,6 @@ def _tk_setup_dialog(initial: cfg_mod.BoardConfig) -> Optional[cfg_mod.BoardConf
     return cfg_mod.BoardConfig(
         server_url=out["server_url"],
         design=out["design"],
-        client_id=out["client_id"],
-        client_secret=out["client_secret"],
         last_synced_version=initial.last_synced_version,
     )
 
@@ -190,15 +191,49 @@ def run(*, prune_stale: bool = False, board_path_override: Optional[str] = None)
         return 2
 
     cfg = cfg_mod.load(board_path)
-    if not cfg.server_url or not cfg.design or not cfg.client_id or not cfg.client_secret:
+    if not cfg.server_url or not cfg.design:
         new_cfg = _tk_setup_dialog(cfg)
         if new_cfg is None:
             return 1
         cfg = new_cfg
         cfg_mod.save(board_path, cfg)
 
+    # Resolve OAuth credentials. Order of precedence:
+    #   1. Per-server cache (~/.config/eda-kicad-sync/clients.json) populated
+    #      by a previous dynamic registration on this machine.
+    #   2. Legacy fields in BoardConfig (client_id/client_secret) — kept for
+    #      configs minted before dynamic registration existed; migrated into
+    #      the per-server cache and cleared from the board config.
+    #   3. Dynamic client registration against /oauth/register (RFC 7591).
+    client_store = oauth_client.ClientStore()
+    client_rec = client_store.get(cfg.server_url)
+    if client_rec is None and cfg.client_id and cfg.client_secret:
+        # Migrate the legacy per-board credentials into the per-server cache.
+        client_rec = oauth_client.ClientRecord(
+            server_url=cfg.server_url.rstrip("/"),
+            client_id=cfg.client_id,
+            client_secret=cfg.client_secret,
+        )
+        client_store.put(client_rec)
+        cfg.client_id = ""
+        cfg.client_secret = ""
+        cfg_mod.save(board_path, cfg)
+    if client_rec is None:
+        try:
+            client_rec = oauth_client.register_client(cfg.server_url)
+            client_store.put(client_rec)
+        except Exception as e:
+            _show_error(
+                "Could not register an OAuth client with the server.\n\n"
+                f"{e}\n\n"
+                f"If your server is older and lacks /oauth/register, mint "
+                f"a client manually at {cfg.server_url.rstrip('/')}/account "
+                "and put the values in your .eda-sync.json file."
+            )
+            return 3
+
     try:
-        token = oauth_client.ensure_token(cfg.server_url, cfg.client_id, cfg.client_secret)
+        token = oauth_client.ensure_token(cfg.server_url, client_rec.client_id, client_rec.client_secret)
     except Exception as e:
         _show_error(f"OAuth failed: {e}")
         return 3
@@ -210,7 +245,7 @@ def run(*, prune_stale: bool = False, board_path_override: Optional[str] = None)
     except PermissionError:
         # Token may have been revoked — force re-auth once.
         try:
-            token = oauth_client.authorize(cfg.server_url, cfg.client_id, cfg.client_secret)
+            token = oauth_client.authorize(cfg.server_url, client_rec.client_id, client_rec.client_secret)
             oauth_client.TokenStore().put(token)
             client = EdaClient(cfg.server_url, token.access_token)
             manifest = client.get_manifest(cfg.design)

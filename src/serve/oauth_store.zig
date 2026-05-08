@@ -367,6 +367,27 @@ pub fn verifyClientSecret(allocator: std.mem.Allocator, auth_dir: []const u8, id
     return client;
 }
 
+/// Set an unowned client's email. Called when the first user approves a
+/// dynamically-registered client on `/oauth/authorize` — assigns ownership
+/// so they can revoke it later from `/account`. No-op if the client
+/// already has an owner (different email) or doesn't exist.
+pub fn claimClient(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, owner_email: []const u8) void {
+    mu.lock();
+    defer mu.unlock();
+    ensureLoaded(allocator, auth_dir);
+    var changed = false;
+    for (clients_list.items) |*c| {
+        if (!std.mem.eql(u8, c.id, id)) continue;
+        if (c.email.len != 0) return; // already owned
+        const dup = allocator.dupe(u8, owner_email) catch return;
+        allocator.free(@constCast(c.email));
+        c.email = dup;
+        changed = true;
+        break;
+    }
+    if (changed) saveClients(allocator, auth_dir);
+}
+
 /// Mark a single client as revoked, but only when `owner_email` matches —
 /// users can't accidentally (or maliciously) revoke another user's client.
 /// Returns true when a row was modified.

@@ -63,13 +63,90 @@ pub fn metadataAuthServer(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         "{{\"issuer\":\"{s}\"," ++
             "\"authorization_endpoint\":\"{s}/oauth/authorize\"," ++
             "\"token_endpoint\":\"{s}/oauth/token\"," ++
+            "\"registration_endpoint\":\"{s}/oauth/register\"," ++
             "\"response_types_supported\":[\"code\"]," ++
             "\"grant_types_supported\":[\"authorization_code\"]," ++
             "\"code_challenge_methods_supported\":[\"S256\"]," ++
             "\"token_endpoint_auth_methods_supported\":[\"client_secret_post\"]," ++
             "\"scopes_supported\":[\"mcp\"]}}",
-        .{ base, base, base },
+        .{ base, base, base, base },
     );
+}
+
+/// POST /oauth/register — RFC 7591 Dynamic Client Registration.
+///
+/// Body: JSON with `client_name` (string) and `redirect_uris` (array of one).
+/// Only loopback redirect_uris (`http://127.0.0.1[:port]/path` or
+/// `http://localhost[:port]/path`) are accepted — public clients without
+/// pre-existing operator review can't be allowed to redirect anywhere else.
+///
+/// Returns the standard RFC 7591 client-info response. The minted client
+/// has no `email` (owner) yet; the first user to approve it on
+/// `/oauth/authorize` claims it via `store.claimClient`. Until then it
+/// can't actually do anything — `/oauth/authorize` still requires the
+/// user to sign in before issuing any auth code.
+pub fn registerEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const body = req.body() orelse "";
+    const Body = struct {
+        client_name: ?[]const u8 = null,
+        redirect_uris: ?[]const []const u8 = null,
+        scope: ?[]const u8 = null,
+        // RFC 7591 lists more optional fields; we accept and ignore them.
+    };
+    const parsed = std.json.parseFromSlice(Body, req.arena, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
+        return registerError(req, res, ERR_INVALID_REQUEST, "request body must be JSON with client_name and redirect_uris");
+    };
+    defer parsed.deinit();
+
+    const uris = parsed.value.redirect_uris orelse return registerError(req, res, ERR_INVALID_REQUEST, "redirect_uris required");
+    if (uris.len != 1) return registerError(req, res, ERR_INVALID_REQUEST, "exactly one redirect_uri is required");
+    const redirect_uri = uris[0];
+    if (parseLoopbackUri(redirect_uri) == null) {
+        return registerError(req, res, "invalid_redirect_uri", "redirect_uri must be a loopback URI (http://127.0.0.1 or http://localhost)");
+    }
+
+    const client_name = parsed.value.client_name orelse "Dynamic Client";
+    if (client_name.len > 200) return registerError(req, res, ERR_INVALID_REQUEST, "client_name too long");
+
+    // Empty email = unclaimed; first /oauth/authorize approval will set it.
+    const minted = store.createClient(ctx.allocator, ctx.auth_dir, client_name, "", redirect_uri) catch {
+        res.status = 500;
+        res.content_type = .JSON;
+        res.body = "{\"error\":\"server_error\",\"error_description\":\"could not register client\"}";
+        return;
+    };
+
+    res.status = 201;
+    res.content_type = .JSON;
+    res.header("cache-control", "no-store");
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    // RFC 7591 §3.2.1 response shape. `token_endpoint_auth_method` matches
+    // what the metadata advertises so the client knows to POST creds in the
+    // form body rather than HTTP Basic.
+    res.body = try std.fmt.allocPrint(
+        req.arena,
+        "{{\"client_id\":\"{s}\"," ++
+            "\"client_secret\":\"{s}\"," ++
+            "\"client_name\":\"{s}\"," ++
+            "\"redirect_uris\":[\"{s}\"]," ++
+            "\"grant_types\":[\"authorization_code\"]," ++
+            "\"response_types\":[\"code\"]," ++
+            "\"token_endpoint_auth_method\":\"client_secret_post\"," ++
+            "\"scope\":\"mcp\"}}",
+        .{ minted.id, minted.secret, client_name, redirect_uri },
+    );
+}
+
+fn registerError(req: *httpz.Request, res: *httpz.Response, code: []const u8, desc: []const u8) void {
+    res.status = 400;
+    res.content_type = .JSON;
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.body = std.fmt.allocPrint(
+        req.arena,
+        \\{{"error":"{s}","error_description":"{s}"}}
+    ,
+        .{ code, desc },
+    ) catch "{\"error\":\"server_error\"}";
 }
 
 /// GET /oauth/authorize
@@ -173,6 +250,13 @@ pub fn authorizeApprove(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 
     const client = store.findClient(ctx.allocator, ctx.auth_dir, client_id) orelse return badRequest(res, "unknown client_id");
     if (!redirectUriMatches(client.redirect_uri, redirect_uri)) return badRequest(res, "redirect_uri mismatch");
+
+    // Dynamically-registered clients have no owner email until the first
+    // user signs in and approves. Claim it now so the user can revoke it
+    // from /account later. Already-owned clients are left alone.
+    if (client.email.len == 0) {
+        store.claimClient(ctx.allocator, ctx.auth_dir, client_id, email);
+    }
 
     const code = try store.issueCode(ctx.allocator, ctx.auth_dir, client_id, redirect_uri, email, code_challenge, scope);
 

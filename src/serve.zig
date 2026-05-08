@@ -246,6 +246,11 @@ pub fn serve(
     router.get("/oauth/authorize", oauth.authorizePage, .{});
     router.post("/oauth/authorize/approve", oauth.authorizeApprove, .{});
     router.post("/oauth/token", oauth.tokenEndpoint, .{});
+    // RFC 7591 Dynamic Client Registration: lets a native app self-register
+    // (loopback redirect_uri only) so users don't have to mint client_id +
+    // client_secret on /account by hand. The minted client has no owner
+    // email until the user signs in and approves on /oauth/authorize.
+    router.post("/oauth/register", oauth.registerEndpoint, .{});
 
     // Account (user-facing OAuth client management)
     router.get("/account", account_page.accountPage, .{});
