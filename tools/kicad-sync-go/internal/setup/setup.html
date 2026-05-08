@@ -28,14 +28,10 @@
     <input type="text" id="design" name="design" value="{{.Initial.Design}}" placeholder="cyclops-breakout-board" required>
     <div class="hint">The <code>.sexp</code> filename without extension.</div>
 
-    <label for="client_id">OAuth client_id</label>
-    <input type="text" id="client_id" name="client_id" value="{{.Initial.ClientID}}" placeholder="eda_c_…" required>
-
-    <label for="client_secret">OAuth client_secret</label>
-    <input type="password" id="client_secret" name="client_secret" value="{{.Initial.ClientSecret}}" placeholder="eda_s_…" required>
-    <div class="hint">
-      Mint these at <code>&lt;server&gt;/account</code>. Register the redirect URI as exactly:
-      <br><code>{{.RedirectURI}}</code>
+    <div class="hint" style="margin-top: 16px;">
+      No client ID/secret needed — the agent registers itself with the
+      server automatically. You'll be asked to sign in and approve on
+      the next page.
     </div>
 
     <button type="submit">Save & continue to OAuth</button>

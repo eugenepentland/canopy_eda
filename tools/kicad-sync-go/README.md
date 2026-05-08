@@ -97,18 +97,27 @@ Bash if you'd rather: `KICAD_SRC=/c/Users/you/Code/kicad-src ./scripts/gen-proto
 
 ## First-run setup
 
-1. Mint an OAuth client at `<server>/account` with redirect URI exactly
-   `http://127.0.0.1:53682/callback`.
-2. Open a `.kicad_pcb` in KiCad.
-3. Click **EDA Sync** in the toolbar (or **Tools → External Plugins →
+1. Open a `.kicad_pcb` in KiCad.
+2. Click **EDA Sync** in the toolbar (or **Tools → External Plugins →
    EDA Sync — Setup**).
-4. The agent opens `http://127.0.0.1:53683/setup` in your browser. Fill
-   in server URL, design name, OAuth client ID/secret. Submit.
-5. Browser redirects to the OAuth approve page. Click **Approve**.
+3. The agent opens a setup page in your browser. Fill in the server URL
+   and design name; submit.
+4. The agent registers itself with the server (RFC 7591 dynamic client
+   registration) — no manual client_id/secret needed.
+5. Browser redirects to the OAuth approve page. Sign in if prompted, then
+   click **Approve**. The minted client is bound to your account so you
+   can revoke it later from `<server>/account`.
 6. Click **EDA Sync** again to run the first sync.
 
-Per-board config lives at `<board>.eda-sync.json` next to the PCB.
-Tokens are cached in `~/.config/eda-kicad-sync/tokens.json` (mode 0600).
+Per-board config lives at `<board>.eda-sync.json` next to the PCB and
+holds only `server_url` + `design`. The minted OAuth client is shared
+across all boards talking to the same server and is cached in
+`~/.config/eda-kicad-sync/clients.json`. Access tokens live in
+`~/.config/eda-kicad-sync/tokens.json` (both mode 0600).
+
+> Older configs that already contain `client_id`/`client_secret` keep
+> working — those values take precedence over auto-registration so a
+> previously-minted client isn't replaced silently.
 
 ## Per-sync workflow
 
@@ -139,7 +148,7 @@ internal/
   config/    per-board config + token cache
   eda/       HTTP client to /api/sync-plan
   oauth/     auth-code+PKCE + 127.0.0.1:53682 loopback
-  setup/     127.0.0.1:53683 setup web page (embedded HTML)
+  setup/     loopback setup web page (embedded HTML, OS-assigned port)
   kicad/     IPC client (NNG REQ/REP + protobuf)
     types.go     neutral Footprint/Pad types
     iface.go     Client interface
@@ -171,11 +180,13 @@ prune, flag_stale, empty plan.
   "Build from source" above). The error message is intentional in builds
   shipped without generated bindings.
 - **`server rejected token (401)`** — server doesn't have the
-  `/api/sync-plan/:name` endpoint, or your OAuth client/secret is wrong.
-  Confirm the server is running a build at or after the commit that
-  added `POST /api/sync-plan/:name`.
-- **Setup page never opens** — port 53683 is already in use by another
-  process. Stop the conflicting one and retry.
-- **OAuth callback timeout** — the registered redirect_uri at
-  `<server>/account` doesn't match `http://127.0.0.1:53682/callback`
-  exactly.
+  `/api/sync-plan/:name` endpoint, or the cached OAuth client was deleted
+  on the server. Delete `~/.config/eda-kicad-sync/clients.json` to force
+  a fresh registration on the next click.
+- **`server doesn't advertise a registration_endpoint`** — server is
+  running an older build that predates RFC 7591 support. Either upgrade
+  the server, or mint a client manually at `<server>/account` and paste
+  `client_id`/`client_secret` into `<board>.eda-sync.json` by hand.
+- **OAuth callback timeout** — port 53682 is taken by another process
+  (VS Code and similar dev tools randomly grab dynamic ports in this
+  range). Stop the conflicting one and retry.

@@ -55,7 +55,12 @@ func run(setupMode bool, boardArg string, prune bool) error {
 		return runSetup(boardPath, cfg)
 	}
 
-	token, err := oauth.EnsureToken(cfg.ServerURL, cfg.ClientID, cfg.ClientSecret, nil)
+	creds, err := resolveClient(cfg)
+	if err != nil {
+		return fmt.Errorf("OAuth client: %w", err)
+	}
+
+	token, err := oauth.EnsureToken(cfg.ServerURL, creds.ClientID, creds.ClientSecret, nil)
 	if err != nil {
 		return fmt.Errorf("OAuth: %w", err)
 	}
@@ -70,7 +75,7 @@ func run(setupMode bool, boardArg string, prune bool) error {
 	plan, err := sync.Run(client, kc, cfg.Design, prune)
 	if errors.Is(err, eda.ErrUnauthorized) {
 		// Token revoked — force re-auth once.
-		fresh, err2 := oauth.Authorize(cfg.ServerURL, cfg.ClientID, cfg.ClientSecret)
+		fresh, err2 := oauth.Authorize(cfg.ServerURL, creds.ClientID, creds.ClientSecret)
 		if err2 != nil {
 			return fmt.Errorf("OAuth retry: %w", err2)
 		}
@@ -121,7 +126,11 @@ func runSetup(boardPath string, initial config.BoardConfig) error {
 	if err := config.SaveBoard(boardPath, cfg); err != nil {
 		return fmt.Errorf("save board config: %w", err)
 	}
-	tok, err := oauth.Authorize(cfg.ServerURL, cfg.ClientID, cfg.ClientSecret)
+	creds, err := resolveClient(cfg)
+	if err != nil {
+		return fmt.Errorf("register OAuth client: %w", err)
+	}
+	tok, err := oauth.Authorize(cfg.ServerURL, creds.ClientID, creds.ClientSecret)
 	if err != nil {
 		return fmt.Errorf("OAuth authorize: %w", err)
 	}
@@ -130,6 +139,25 @@ func runSetup(boardPath string, initial config.BoardConfig) error {
 	}
 	notify.Show("EDA Sync", "Setup complete. Click EDA Sync again to run the first sync.")
 	return nil
+}
+
+// resolveClient returns the OAuth credentials for cfg.ServerURL. Order of
+// preference:
+//
+//  1. Legacy ClientID/ClientSecret stored directly in BoardConfig (configs
+//     written before dynamic registration landed).
+//  2. The shared ClientStore at ~/.config/eda-kicad-sync/clients.json.
+//  3. Dynamic registration (RFC 7591) against the server, with the result
+//     written through to the ClientStore for next time.
+func resolveClient(cfg config.BoardConfig) (config.ClientCredentials, error) {
+	if cfg.ClientID != "" && cfg.ClientSecret != "" {
+		return config.ClientCredentials{
+			ServerURL:    cfg.ServerURL,
+			ClientID:     cfg.ClientID,
+			ClientSecret: cfg.ClientSecret,
+		}, nil
+	}
+	return oauth.EnsureClient(cfg.ServerURL, nil)
 }
 
 func summarize(p *eda.SyncPlanResponse) string {

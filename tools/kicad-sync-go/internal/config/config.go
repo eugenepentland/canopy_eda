@@ -15,17 +15,24 @@ import (
 )
 
 // BoardConfig is the shape of <board>.eda-sync.json.
+//
+// ClientID/ClientSecret are kept for back-compat with configs written before
+// dynamic client registration (RFC 7591) landed. New setups leave them
+// empty; the agent looks up (or mints) credentials in the per-server
+// ClientStore instead, keyed by ServerURL.
 type BoardConfig struct {
-	ServerURL          string `json:"server_url"`
-	Design             string `json:"design"`
-	ClientID           string `json:"client_id"`
-	ClientSecret       string `json:"client_secret"`
-	LastSyncedVersion  int    `json:"last_synced_version"`
+	ServerURL         string `json:"server_url"`
+	Design            string `json:"design"`
+	ClientID          string `json:"client_id,omitempty"`
+	ClientSecret      string `json:"client_secret,omitempty"`
+	LastSyncedVersion int    `json:"last_synced_version"`
 }
 
-// Complete reports whether the config has all four fields needed to start a sync.
+// Complete reports whether the config has the fields needed to start a sync.
+// Client credentials are obtained via the ClientStore / dynamic registration,
+// so they are no longer required here.
 func (c BoardConfig) Complete() bool {
-	return c.ServerURL != "" && c.Design != "" && c.ClientID != "" && c.ClientSecret != ""
+	return c.ServerURL != "" && c.Design != ""
 }
 
 // LoadBoard reads <boardPath>.eda-sync.json. Missing file → zero-value config + nil error.
@@ -127,6 +134,68 @@ func (s *TokenStore) Put(rec TokenRecord) error {
 	rec.ServerURL = canonicalServerURL(rec.ServerURL)
 	m := s.read()
 	m[tokenKey(rec.ServerURL, rec.ClientID)] = rec
+	return s.write(m)
+}
+
+// ClientCredentials is one OAuth client registered against a given server.
+type ClientCredentials struct {
+	ServerURL    string `json:"server_url"`
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+}
+
+// ClientStore is a JSON file at ~/.config/eda-kicad-sync/clients.json mapping
+// canonical server URL → (client_id, client_secret). One client is shared
+// across all boards that talk to the same server, so we don't re-register
+// every time the user opens a new PCB.
+type ClientStore struct {
+	Path string
+}
+
+// DefaultClientStore returns a ClientStore at the user's standard config dir.
+func DefaultClientStore() *ClientStore {
+	home, _ := os.UserHomeDir()
+	return &ClientStore{Path: filepath.Join(home, ".config", "eda-kicad-sync", "clients.json")}
+}
+
+func (s *ClientStore) read() map[string]ClientCredentials {
+	out := map[string]ClientCredentials{}
+	data, err := os.ReadFile(s.Path)
+	if err != nil {
+		return out
+	}
+	_ = json.Unmarshal(data, &out)
+	return out
+}
+
+func (s *ClientStore) write(m map[string]ClientCredentials) error {
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(s.Path, data, 0o600)
+}
+
+// Get returns the cached credentials for serverURL, or zero-value if missing.
+func (s *ClientStore) Get(serverURL string) ClientCredentials {
+	return s.read()[canonicalServerURL(serverURL)]
+}
+
+// Put stores or replaces credentials. ServerURL is canonicalised so a stored
+// entry from "https://x.dev" matches a lookup with "https://x.dev/".
+func (s *ClientStore) Put(rec ClientCredentials) error {
+	rec.ServerURL = canonicalServerURL(rec.ServerURL)
+	m := s.read()
+	m[rec.ServerURL] = rec
+	return s.write(m)
+}
+
+// Delete removes any cached credentials for serverURL. Used when the server
+// rejects the stored client (e.g. operator deleted it on /account) so the
+// next call re-registers cleanly.
+func (s *ClientStore) Delete(serverURL string) error {
+	m := s.read()
+	delete(m, canonicalServerURL(serverURL))
 	return s.write(m)
 }
 

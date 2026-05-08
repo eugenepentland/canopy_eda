@@ -1,7 +1,7 @@
 // Package setup serves a tiny first-run configuration page on
-// http://127.0.0.1:<free-port>/setup. The user fills in server URL, design
-// name, and OAuth client_id/secret; on submit, the page kicks off the OAuth
-// dance and saves the result.
+// http://127.0.0.1:<free-port>/setup. The user fills in server URL and
+// design name; on submit, the agent dynamically registers an OAuth client
+// against the server (RFC 7591) and kicks off the OAuth dance.
 //
 // We ask the OS for a free port (net.Listen on :0) rather than hardcoding
 // one — VS Code, Postman, and other dev tools randomly bind ports in this
@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/canopy/eda/tools/kicad-sync-go/internal/config"
-	"github.com/canopy/eda/tools/kicad-sync-go/internal/oauth"
 )
 
 //go:embed setup.html
@@ -57,10 +56,9 @@ func Run(boardPath string, initial config.BoardConfig) (config.BoardConfig, erro
 	mux.HandleFunc("/setup", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_ = tmpl.Execute(w, struct {
-			Initial     config.BoardConfig
-			BoardPath   string
-			RedirectURI string
-		}{initial, boardPath, oauth.RedirectURI()})
+			Initial   config.BoardConfig
+			BoardPath string
+		}{initial, boardPath})
 	})
 	mux.HandleFunc("/save", func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
@@ -68,13 +66,11 @@ func Run(boardPath string, initial config.BoardConfig) (config.BoardConfig, erro
 			return
 		}
 		cfg := config.BoardConfig{
-			ServerURL:    strings.TrimRight(strings.TrimSpace(r.FormValue("server_url")), "/"),
-			Design:       strings.TrimSpace(r.FormValue("design")),
-			ClientID:     strings.TrimSpace(r.FormValue("client_id")),
-			ClientSecret: strings.TrimSpace(r.FormValue("client_secret")),
+			ServerURL: strings.TrimRight(strings.TrimSpace(r.FormValue("server_url")), "/"),
+			Design:    strings.TrimSpace(r.FormValue("design")),
 		}
 		if !cfg.Complete() {
-			http.Error(w, "all four fields are required", http.StatusBadRequest)
+			http.Error(w, "server_url and design are required", http.StatusBadRequest)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
