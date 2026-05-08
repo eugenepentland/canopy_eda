@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -68,6 +69,21 @@ func EnsureToken(serverURL, clientID, clientSecret string, store *config.TokenSt
 // Side effect: opens the user's browser to the authorize URL and binds the
 // loopback port to capture the callback.
 func Authorize(serverURL, clientID, clientSecret string) (config.TokenRecord, error) {
+	// Bind the loopback port FIRST. If something else is already on 53682
+	// (VS Code and other dev tools randomly grab dynamic ports in this
+	// range), we error out with a clear message instead of opening the
+	// browser and silently waiting 3 minutes for a callback that will
+	// never arrive.
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", LoopbackPort))
+	if err != nil {
+		return config.TokenRecord{}, fmt.Errorf(
+			"port %d is in use — close whatever is holding it and retry. "+
+				"On Windows, VS Code and similar tools sometimes claim this port; "+
+				"`Get-NetTCPConnection -LocalPort %d` will show the owning PID. "+
+				"Underlying error: %w",
+			LoopbackPort, LoopbackPort, err)
+	}
+
 	verifier := genVerifier()
 	challenge := s256(verifier)
 	state := genState()
@@ -84,7 +100,7 @@ func Authorize(serverURL, clientID, clientSecret string) (config.TokenRecord, er
 
 	openBrowser(authURL)
 
-	captured, err := waitForCode(state, 3*time.Minute)
+	captured, err := waitForCodeOn(listener, state, 3*time.Minute)
 	if err != nil {
 		return config.TokenRecord{}, err
 	}
@@ -98,7 +114,11 @@ type capture struct {
 	err   string
 }
 
-func waitForCode(expectState string, timeout time.Duration) (capture, error) {
+// waitForCodeOn serves the callback on a listener that the caller has
+// already bound. The caller-bound model means we surface "port in use"
+// errors before opening the browser; the listener is closed when this
+// function returns.
+func waitForCodeOn(listener net.Listener, expectState string, timeout time.Duration) (capture, error) {
 	out := make(chan capture, 1)
 	mux := http.NewServeMux()
 	mux.HandleFunc(redirectPath, func(w http.ResponseWriter, r *http.Request) {
@@ -116,11 +136,8 @@ func waitForCode(expectState string, timeout time.Duration) (capture, error) {
 		}
 	})
 
-	srv := &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", LoopbackPort),
-		Handler: mux,
-	}
-	go func() { _ = srv.ListenAndServe() }()
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(listener) }()
 	defer srv.Close()
 
 	select {
