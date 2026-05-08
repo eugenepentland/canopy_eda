@@ -46,7 +46,7 @@ func TestRequestCarriesBothUUIDs(t *testing.T) {
 	srv := fakeServer(t, eda.SyncPlanResponse{}, &gotReq)
 	defer srv.Close()
 
-	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", false); err != nil {
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", sync.Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(gotReq.Board) != 2 {
@@ -87,7 +87,7 @@ func TestSetFieldByKicadUUIDResolves(t *testing.T) {
 	srv := fakeServer(t, planResp, &gotReq)
 	defer srv.Close()
 
-	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", false); err != nil {
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", sync.Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if kc.Footprints[0].UUID != "abc12345" {
@@ -117,7 +117,7 @@ func TestPureUpdateAppliesSetField(t *testing.T) {
 	defer srv.Close()
 
 	client := eda.New(srv.URL, "test-token")
-	plan, err := sync.Run(client, kc, "demo", false)
+	plan, err := sync.Run(client, kc, "demo", sync.Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestAddOpInsertsFootprint(t *testing.T) {
 	srv := fakeServer(t, planResp, &gotReq)
 	defer srv.Close()
 
-	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", false); err != nil {
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", sync.Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(kc.Added) != 1 || kc.Added[0].UUID != "u-c1" {
@@ -193,7 +193,7 @@ func TestSwapOpReplacesFootprint(t *testing.T) {
 	srv := fakeServer(t, planResp, &gotReq)
 	defer srv.Close()
 
-	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", false); err != nil {
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", sync.Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if kc.Footprints[0].FootprintName != "R_0805" {
@@ -218,7 +218,7 @@ func TestRemoveOpDeletesFootprint(t *testing.T) {
 	srv := fakeServer(t, planResp, &gotReq)
 	defer srv.Close()
 
-	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", true); err != nil {
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", sync.Options{Prune: true}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(kc.Removed) != 1 || kc.Removed[0] != "u-stale" {
@@ -244,7 +244,7 @@ func TestFlagStaleIsInformational(t *testing.T) {
 	srv := fakeServer(t, planResp, &gotReq)
 	defer srv.Close()
 
-	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", false); err != nil {
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", sync.Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(kc.Removed) != 0 {
@@ -262,7 +262,7 @@ func TestEmptyPlanSkipsCommit(t *testing.T) {
 	srv := fakeServer(t, planResp, &gotReq)
 	defer srv.Close()
 
-	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", false); err != nil {
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", sync.Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(kc.CommitMessages) != 0 {

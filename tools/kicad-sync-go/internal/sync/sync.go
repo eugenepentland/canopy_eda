@@ -9,17 +9,33 @@ import (
 	"github.com/canopy/eda/tools/kicad-sync-go/internal/kicad"
 )
 
+// Options bundles per-click flags so additions don't churn the Run
+// signature. Most syncs leave both fields zero.
+type Options struct {
+	// Prune removes board footprints whose canopy_uuid no longer maps to
+	// any design instance. Off by default so a stray "Save → click sync"
+	// can't silently nuke user-placed parts.
+	Prune bool
+	// MigrateHeuristic enables (parent_path, footprint_name, value)
+	// matching as a third-tier fallback after canopy_uuid + ref_des. The
+	// agent's `--migrate` flag wires this on; intended as a one-shot
+	// repair when a legacy board's ref-des numbering has drifted away
+	// from the current schematic.
+	MigrateHeuristic bool
+}
+
 // Run pulls board state, asks the server for a plan, and applies the ops.
 // Returns the parsed response so the caller can show a result toast.
-func Run(client *eda.Client, kc kicad.Client, design string, prune bool) (*eda.SyncPlanResponse, error) {
+func Run(client *eda.Client, kc kicad.Client, design string, opts Options) (*eda.SyncPlanResponse, error) {
 	fps, err := kc.ListFootprints()
 	if err != nil {
 		return nil, fmt.Errorf("list footprints: %w", err)
 	}
 
 	req := eda.SyncPlanRequest{
-		Board:      toBoardFps(fps),
-		PruneStale: prune,
+		Board:            toBoardFps(fps),
+		PruneStale:       opts.Prune,
+		MigrateHeuristic: opts.MigrateHeuristic,
 	}
 	plan, err := client.SyncPlan(design, req)
 	if err != nil {

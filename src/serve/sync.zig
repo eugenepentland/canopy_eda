@@ -76,6 +76,13 @@ fn opTargetUuid(m: BoardFp) []const u8 {
 const ParsedSyncPlan = struct {
     board: []const BoardFp,
     prune_stale: bool,
+    /// When true, after canopy_uuid + ref_des matching, try a third tier
+    /// keyed on (parent_path, footprint_name, value). Used by the agent's
+    /// `--migrate` mode to recover board footprints whose ref_des drifted
+    /// from the design's auto-numbering. Only applied when the (key, side)
+    /// pair is unique on BOTH the design and the board so we never silently
+    /// remap the wrong footprint.
+    migrate_heuristic: bool,
 };
 
 fn parsePadList(arena: std.mem.Allocator, pv: std.json.Value) std.mem.Allocator.Error![]const PadAssign {
@@ -108,22 +115,25 @@ fn parseSyncPlanBody(arena: std.mem.Allocator, body: []const u8) !ParsedSyncPlan
     const parsed = try std.json.parseFromSlice(std.json.Value, arena, body, .{});
     if (parsed.value != .object) return error.NotObject;
 
-    const prune_stale = blk: {
-        const v = parsed.value.object.get("prune_stale") orelse break :blk false;
-        break :blk v == .bool and v.bool;
-    };
+    const prune_stale = jsonBool(parsed.value.object.get("prune_stale"));
+    const migrate_heuristic = jsonBool(parsed.value.object.get("migrate_heuristic"));
 
     var board_list: std.ArrayListUnmanaged(BoardFp) = .empty;
     const bv = parsed.value.object.get("board") orelse {
-        return .{ .board = board_list.items, .prune_stale = prune_stale };
+        return .{ .board = board_list.items, .prune_stale = prune_stale, .migrate_heuristic = migrate_heuristic };
     };
-    if (bv != .array) return .{ .board = board_list.items, .prune_stale = prune_stale };
+    if (bv != .array) return .{ .board = board_list.items, .prune_stale = prune_stale, .migrate_heuristic = migrate_heuristic };
 
     for (bv.array.items) |entry| {
         const fp = (try parseBoardEntry(arena, entry)) orelse continue;
         try board_list.append(arena, fp);
     }
-    return .{ .board = board_list.items, .prune_stale = prune_stale };
+    return .{ .board = board_list.items, .prune_stale = prune_stale, .migrate_heuristic = migrate_heuristic };
+}
+
+fn jsonBool(v: ?std.json.Value) bool {
+    const val = v orelse return false;
+    return val == .bool and val.bool;
 }
 
 fn jsonStr(v: ?std.json.Value) []const u8 {
@@ -361,6 +371,17 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         if (bfp.ref.len > 0) try by_ref.put(bfp.ref, bfp);
     }
 
+    // Heuristic index for --migrate mode. Maps each design instance's
+    // canopy uuid → the board footprint it should adopt placement from,
+    // when both sides have the same count of footprints with the same
+    // (parent_path, footprint_name, value) signature. Pairing within a
+    // group is deterministic-by-ref so the user gets a reproducible
+    // shuffle even when individual identities can't be recovered.
+    var by_migration = std.StringHashMap(BoardFp).init(req.arena);
+    if (parsed.migrate_heuristic) {
+        try buildMigrationIndex(req.arena, parsed.board, instances.items, &by_migration);
+    }
+
     var model_cfg = export_kicad.loadModelConfig(req.arena, ctx.project_dir);
     defer model_cfg.deinit();
     var spc = SyncPlanContext{ .arena = req.arena, .project_dir = ctx.project_dir, .model_cfg = &model_cfg };
@@ -376,10 +397,12 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     var diff_ctx = DiffContext{
         .by_uuid = &by_uuid,
         .by_ref = &by_ref,
+        .by_migration = &by_migration,
         .pad_net_map = &pad_net_map,
         .matched_uuids = &matched_uuids,
         .spc = &spc,
         .summary = &summary,
+        .migrate_heuristic = parsed.migrate_heuristic,
     };
     for (instances.items) |inst| try handleInstance(&diff_ctx, inst, &w, &first_op);
 
@@ -424,28 +447,127 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 const DiffContext = struct {
     by_uuid: *std.StringHashMap(BoardFp),
     by_ref: *std.StringHashMap(BoardFp),
+    /// Migration mode: design instance uuid → BoardFp it should adopt
+    /// placement from. Populated by `buildMigrationIndex`; empty when
+    /// --migrate is off.
+    by_migration: *std.StringHashMap(BoardFp),
     pad_net_map: *std.StringHashMap([]const u8),
     matched_uuids: *std.StringHashMap(void),
     spc: *SyncPlanContext,
     summary: *SyncSummary,
+    migrate_heuristic: bool,
 };
+
+/// Extract the parent-path prefix of a hierarchical ref-des. Returns the
+/// empty string for a top-level ref. e.g. `"adc1/C146"` → `"adc1/"`,
+/// `"C18"` → `""`.
+fn parentPathOf(ref: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, ref, '/')) |i| return ref[0 .. i + 1];
+    return "";
+}
+
+/// Build the (parent_path, value) key used for migration-mode heuristic
+/// matching. We deliberately omit footprint_name: legacy boards routinely
+/// carry KiCad-canonical names (`C_0201_0603Metric`) while the design
+/// emits EDA-short names (`c-0201`). The swap_footprint op the diff loop
+/// emits afterwards handles the rename, and value is specific enough to
+/// keep different cap sizes apart within a sub-section.
+fn heuristicKey(arena: std.mem.Allocator, parent: []const u8, _: []const u8, value: []const u8) std.mem.Allocator.Error![]const u8 {
+    return std.fmt.allocPrint(arena, "{s}|{s}", .{ parent, value });
+}
 
 fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, first: *bool) !?BoardFp {
     if (d.by_uuid.get(inst.uuid)) |m| return m;
-    if (inst.ref_des.len == 0) return null;
-    const m = d.by_ref.get(inst.ref_des) orelse return null;
-    if (m.uuid.len == 0) {
-        // Backfill the canopy_uuid custom field on this footprint so the
-        // next sync UUID-matches without falling back to ref_des. We
-        // target by the KiCad-internal UUID so the agent's cache resolves
-        // even before canopy_uuid is set.
-        try emitOp(w, first, OP_SET_FIELD, .{
-            .{ "uuid", opTargetUuid(m) },
-            .{ "field", "canopy_uuid" },
-            .{ "value", inst.uuid },
-        });
+    if (inst.ref_des.len > 0) {
+        if (d.by_ref.get(inst.ref_des)) |m| {
+            if (m.uuid.len == 0) {
+                // Backfill the canopy_uuid custom field on this footprint
+                // so the next sync UUID-matches without falling back to
+                // ref_des. Target by KiCad-internal UUID so the agent's
+                // cache resolves even before canopy_uuid is set.
+                try emitOp(w, first, OP_SET_FIELD, .{
+                    .{ "uuid", opTargetUuid(m) },
+                    .{ "field", "canopy_uuid" },
+                    .{ "value", inst.uuid },
+                });
+            }
+            return m;
+        }
     }
-    return m;
+    if (heuristicMatch(d, inst)) |m| {
+        // Migration tier: rename the matched board footprint to the
+        // design's ref_des and stamp the design's canopy_uuid. The normal
+        // handleMatched path emits the reference + canopy_uuid set_field
+        // ops as part of its diff (since m.ref != inst.ref_des and
+        // m.uuid != inst.uuid), so no extra emission needed here.
+        return m;
+    }
+    return null;
+}
+
+/// Migration-mode lookup. Returns the board footprint paired with this
+/// design instance during `buildMigrationIndex`; null when no pairing was
+/// possible (e.g. group sizes differ between board and design).
+fn heuristicMatch(d: *DiffContext, inst: export_kicad.FlatInstance) ?BoardFp {
+    if (!d.migrate_heuristic) return null;
+    return d.by_migration.get(inst.uuid);
+}
+
+/// Pair board footprints with design instances by (parent_path,
+/// footprint_name, value). When a key has the same count N on both sides,
+/// pair them deterministically — sort each side by ref-des and match
+/// element-i to element-i. The N==M skip rule prevents a 12-cap section
+/// from silently absorbing 8 caps and dropping 4 on the floor.
+///
+/// The pairings populate `out` keyed by design instance uuid so the diff
+/// loop can resolve each `inst.uuid` → adopted `BoardFp` in O(1).
+fn buildMigrationIndex(
+    arena: std.mem.Allocator,
+    board: []const BoardFp,
+    instances: []const export_kicad.FlatInstance,
+    out: *std.StringHashMap(BoardFp),
+) !void {
+    // Index design + board by heuristic key. Hash → list of refs; we sort
+    // the lists later for deterministic pairing.
+    var board_groups = std.StringHashMap(std.ArrayListUnmanaged(BoardFp)).init(arena);
+    var design_groups = std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatInstance)).init(arena);
+
+    for (board) |bfp| {
+        const key = try heuristicKey(arena, parentPathOf(bfp.ref), bfp.footprint_name, bfp.value);
+        const e = try board_groups.getOrPut(key);
+        if (!e.found_existing) e.value_ptr.* = .empty;
+        try e.value_ptr.append(arena, bfp);
+    }
+    for (instances) |inst| {
+        const fp_name = stripLibPrefix(inst.footprint);
+        const key = try heuristicKey(arena, parentPathOf(inst.ref_des), fp_name, inst.value);
+        const e = try design_groups.getOrPut(key);
+        if (!e.found_existing) e.value_ptr.* = .empty;
+        try e.value_ptr.append(arena, inst);
+    }
+
+    var it = design_groups.iterator();
+    while (it.next()) |entry| {
+        const dgroup = entry.value_ptr.*;
+        const bgroup = board_groups.get(entry.key_ptr.*) orelse continue;
+        if (dgroup.items.len != bgroup.items.len) continue;
+        // Sort both sides by ref-des so the pairing is stable across
+        // re-runs and across rebuilds. Different runs of --migrate against
+        // the same inputs MUST produce the same plan.
+        std.mem.sort(BoardFp, bgroup.items, {}, lessByRef);
+        std.mem.sort(export_kicad.FlatInstance, dgroup.items, {}, lessByDesignRef);
+        for (dgroup.items, bgroup.items) |inst, bfp| {
+            try out.put(inst.uuid, bfp);
+        }
+    }
+}
+
+fn lessByRef(_: void, a: BoardFp, b: BoardFp) bool {
+    return std.mem.lessThan(u8, a.ref, b.ref);
+}
+
+fn lessByDesignRef(_: void, a: export_kicad.FlatInstance, b: export_kicad.FlatInstance) bool {
+    return std.mem.lessThan(u8, a.ref_des, b.ref_des);
 }
 
 fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, fp_name_short: []const u8, w: anytype, first: *bool) !void {
@@ -473,6 +595,16 @@ fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, f
             .{ "uuid", target },
             .{ "field", "value" },
             .{ "value", inst.value },
+        });
+    }
+    // Align canopy_uuid whenever it drifted (legacy long-form, --migrate
+    // pairing, etc.). After this op lands, the next sync UUID-matches
+    // without falling through to ref-des or migration tiers.
+    if (m.uuid.len > 0 and !std.mem.eql(u8, m.uuid, inst.uuid)) {
+        try emitOp(w, first, OP_SET_FIELD, .{
+            .{ "uuid", target },
+            .{ "field", "canopy_uuid" },
+            .{ "value", inst.uuid },
         });
     }
     try emitPadNetOps(w, first, target, inst.ref_des, d.pad_net_map, m.pads);

@@ -28,16 +28,17 @@ func main() {
 		setupMode = flag.Bool("setup", false, "open the setup web page and exit")
 		boardArg  = flag.String("board", "", "explicit path to .kicad_pcb (otherwise: ask IPC)")
 		prune     = flag.Bool("prune", false, "remove footprints whose canopy_uuid is no longer in the netlist")
+		migrate   = flag.Bool("migrate", false, "one-shot heuristic remap: when ref_des doesn't match the design, rename board footprints whose (parent, footprint, value) is uniquely identifiable on both sides. Use this once after upgrading from the legacy Python plugin so existing placements stay attached to the new schematic.")
 	)
 	flag.Parse()
 
-	if err := run(*setupMode, *boardArg, *prune); err != nil {
+	if err := run(*setupMode, *boardArg, *prune, *migrate); err != nil {
 		notify.Show("EDA Sync — error", err.Error())
 		os.Exit(1)
 	}
 }
 
-func run(setupMode bool, boardArg string, prune bool) error {
+func run(setupMode bool, boardArg string, prune, migrate bool) error {
 	boardPath, kc, err := openBoard(boardArg)
 	if err != nil {
 		return err
@@ -72,7 +73,8 @@ func run(setupMode bool, boardArg string, prune bool) error {
 	}
 
 	client := eda.New(cfg.ServerURL, token.AccessToken)
-	plan, err := sync.Run(client, kc, cfg.Design, prune)
+	opts := sync.Options{Prune: prune, MigrateHeuristic: migrate}
+	plan, err := sync.Run(client, kc, cfg.Design, opts)
 	if errors.Is(err, eda.ErrUnauthorized) {
 		// Token revoked — force re-auth once.
 		fresh, err2 := oauth.Authorize(cfg.ServerURL, creds.ClientID, creds.ClientSecret)
@@ -81,7 +83,7 @@ func run(setupMode bool, boardArg string, prune bool) error {
 		}
 		_ = config.DefaultTokenStore().Put(fresh)
 		client = eda.New(cfg.ServerURL, fresh.AccessToken)
-		plan, err = sync.Run(client, kc, cfg.Design, prune)
+		plan, err = sync.Run(client, kc, cfg.Design, opts)
 	}
 	if err != nil {
 		return err

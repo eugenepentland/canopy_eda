@@ -40,8 +40,9 @@ type BoardFp struct {
 
 // SyncPlanRequest is the JSON body posted to /api/sync-plan/:name.
 type SyncPlanRequest struct {
-	Board      []BoardFp `json:"board"`
-	PruneStale bool      `json:"prune_stale"`
+	Board            []BoardFp `json:"board"`
+	PruneStale       bool      `json:"prune_stale"`
+	MigrateHeuristic bool      `json:"migrate_heuristic,omitempty"`
 }
 
 // FootprintPad is one pad in a structured footprint definition. Distances
