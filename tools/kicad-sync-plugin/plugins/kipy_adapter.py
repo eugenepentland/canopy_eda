@@ -33,6 +33,31 @@ def _import_kipy() -> None:
     _kipy_geometry_mod = kipy_geometry
 
 
+_NO_BOARD_OPEN_MSG = (
+    "No board document is open in KiCad's PCB Editor. Open the .kicad_pcb "
+    "you want to sync (from the project manager, double-click the board, "
+    "or File → Open in the PCB Editor) and run EDA Sync from that window. "
+    "Having only the schematic editor open — or just the project manager "
+    "with the .kicad_pcb listed — is not enough: the IPC API only routes "
+    "board requests while a PCB Editor window has the board open."
+)
+
+
+def _is_no_board_open_error(exc: BaseException) -> bool:
+    """Detect KiCad's AS_UNHANDLED reply to GetOpenDocuments (DOCTYPE_PCB).
+    kipy surfaces this as an ApiError whose message contains either
+    'AS_UNHANDLED' / 'no handler available' or 'Expected to be able to
+    retrieve at least one board' depending on version."""
+    msg = str(exc)
+    needles = (
+        "AS_UNHANDLED",
+        "no handler available",
+        "GetOpenDocuments",
+        "Expected to be able to retrieve at least one board",
+    )
+    return any(n in msg for n in needles)
+
+
 class KipyBoardAdapter:
     """Adapter implementing the `BoardAdapter` protocol from sync_core.
 
@@ -44,9 +69,19 @@ class KipyBoardAdapter:
     def __init__(self) -> None:
         _import_kipy()
         self._kicad = _kipy.KiCad()
-        self._board = self._kicad.get_board()
+        try:
+            self._board = self._kicad.get_board()
+        except Exception as e:
+            # kipy raises ApiError with AS_UNHANDLED when no PCB Editor
+            # window has a board open — the IPC API only routes board
+            # requests while the PCB Editor application is running with
+            # an open document. Schematic editor alone, or just having a
+            # .kicad_pcb file on disk, is not enough.
+            if _is_no_board_open_error(e):
+                raise RuntimeError(_NO_BOARD_OPEN_MSG) from e
+            raise
         if self._board is None:
-            raise RuntimeError("No PCB is open in KiCad. Open a .kicad_pcb first.")
+            raise RuntimeError(_NO_BOARD_OPEN_MSG)
         self._dirty: list[Any] = []
         self._added: list[Any] = []
         self._removed: list[Any] = []
@@ -54,7 +89,12 @@ class KipyBoardAdapter:
     # ── Read ────────────────────────────────────────────────────────────
 
     def list_footprints(self) -> list[Any]:
-        return list(self._board.get_footprints())
+        try:
+            return list(self._board.get_footprints())
+        except Exception as e:
+            if _is_no_board_open_error(e):
+                raise RuntimeError(_NO_BOARD_OPEN_MSG) from e
+            raise
 
     def get_field(self, fp: Any, name: str) -> str:
         # kipy exposes custom fields as a dict-like on Footprint. Fall back

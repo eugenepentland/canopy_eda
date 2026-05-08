@@ -244,14 +244,22 @@ def run(*, prune_stale: bool = False, board_path_override: Optional[str] = None)
 
     # Talk to KiCad now that we have all the inputs.
     try:
-        from .kipy_adapter import KipyBoardAdapter
+        from .kipy_adapter import KipyBoardAdapter, _is_no_board_open_error
 
         adapter = KipyBoardAdapter()
+    except RuntimeError as e:
+        # kipy_adapter already translated AS_UNHANDLED into a clear message.
+        _show_error(str(e))
+        return 7
     except Exception as e:
-        _show_error(
-            "Could not connect to KiCad's IPC API. Enable it under "
-            f"Preferences → Plugins → IPC API and ensure a board is open.\n\n{e}"
-        )
+        if _is_no_board_open_error(e):
+            from .kipy_adapter import _NO_BOARD_OPEN_MSG
+            _show_error(_NO_BOARD_OPEN_MSG)
+        else:
+            _show_error(
+                "Could not connect to KiCad's IPC API. Enable it under "
+                f"Preferences → Plugins → IPC API and ensure a board is open.\n\n{e}"
+            )
         return 7
 
     try:
