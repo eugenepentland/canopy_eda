@@ -1,7 +1,7 @@
 # EDA Sync — Go agent for KiCad 10
 
 Single-binary local agent that syncs the open `.kicad_pcb` from a Canopy
-EDA design. Replaces the Python plugin under `../kicad-sync-plugin/`:
+EDA design.
 
 - **All sync logic lives on the EDA server** (`POST /api/sync-plan/:name`).
   Updates ship to every user on the next click — no client redeploy.
@@ -162,14 +162,6 @@ The orchestrator test uses `httptest.NewServer` for the EDA HTTP side
 and `kicad.Fake` for the IPC side, so it runs without KiCad or the
 generated protos. Coverage: pure update, footprint swap, add at origin,
 prune, flag_stale, empty plan.
-
-## Co-existence with the Python plugin
-
-The Python plugin in `../kicad-sync-plugin/` keeps working. It uses the
-read endpoints (`/api/sync-manifest`, `/api/netlist`, `/api/object`);
-the Go agent uses `/api/sync-plan`. They don't conflict. Once the Go
-path covers the full v1 surface and you've used it for a bit, delete
-`../kicad-sync-plugin/`.
 
 ## Troubleshooting
 

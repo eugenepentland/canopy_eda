@@ -26,16 +26,6 @@ h3{color:#f0f6fc;font-size:0.95rem;margin:0;}
 .kicad-menu.open .kicad-panel{display:block;}
 .kicad-row-btn{display:block;width:100%;text-align:left;padding:6px 10px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;font-size:0.8rem;font-family:inherit;cursor:pointer;margin-bottom:6px;}
 .kicad-row-btn:hover{background:#30363d;border-color:#58a6ff;}
-.kicad-row-btn.kicad-primary{background:#1f6feb;border-color:#388bfd;color:#fff;margin-top:4px;}
-.kicad-row-btn.kicad-primary:hover{background:#388bfd;}
-.kicad-label{display:block;color:#8b949e;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;margin:6px 0 3px;}
-.kicad-input{width:100%;box-sizing:border-box;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:5px 8px;font-size:0.78rem;font-family:inherit;margin-bottom:4px;}
-.kicad-input:focus{outline:none;border-color:#58a6ff;}
-.kicad-check{display:flex;align-items:center;gap:6px;color:#c9d1d9;font-size:0.78rem;margin:4px 0 6px;}
-.kicad-sep{height:1px;background:#21262d;margin:8px 0;}
-.kicad-status{margin-top:6px;padding:6px 8px;border-radius:4px;font-size:0.74rem;white-space:pre-wrap;font-family:"SF Mono",monospace;color:#8b949e;}
-.kicad-status.ok{background:rgba(63,185,80,0.1);color:#3fb950;}
-.kicad-status.err{background:rgba(248,81,73,0.1);color:#f85149;}
 .sch-section{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:14px 16px;margin-bottom:16px;}
 .sch-subsection{margin-left:14px;margin-top:12px;background:#12161d;}
 .sch-section.flash,.sch-hub.flash{outline:2px solid #58a6ff;outline-offset:-2px;transition:outline-color .25s;}

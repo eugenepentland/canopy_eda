@@ -192,18 +192,6 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
             "Download Netlist + Footprints (.zip)</button>",
         .{design_name},
     );
-    try w.writeAll("<div class=\"kicad-sep\"></div>");
-    try w.writeAll("<label class=\"kicad-label\">Output directory</label>");
-    try w.writeAll("<input type=\"text\" class=\"kicad-input\" id=\"kicad-path\" placeholder=\"/path/to/kicad/project\" />");
-    try w.writeAll("<label class=\"kicad-label\">.kicad_pcb file (optional)</label>");
-    try w.writeAll("<input type=\"text\" class=\"kicad-input\" id=\"kicad-pcb-file\" placeholder=\"defaults to {output_dir}/{name}.kicad_pcb\" />");
-    try w.writeAll("<button class=\"kicad-row-btn\" id=\"kicad-save-path\">Save settings</button>");
-    try w.writeAll("<div class=\"kicad-sep\"></div>");
-    try w.writeAll("<button class=\"kicad-row-btn\" id=\"kicad-write-netlist\">Write netlist to path</button>");
-    try w.writeAll("<button class=\"kicad-row-btn\" id=\"kicad-write-kicad\">Write netlist + footprints to path</button>");
-    try w.writeAll("<label class=\"kicad-check\"><input type=\"checkbox\" id=\"kicad-short-nets\" /> Shorten net names (.kicad_pcb update)</label>");
-    try w.writeAll("<button class=\"kicad-row-btn kicad-primary\" id=\"kicad-update-pcb\">Update KiCad PCB (pcb_update.py)</button>");
-    try w.writeAll("<div class=\"kicad-status\" id=\"kicad-status\"></div>");
     try w.writeAll("</div></div>");
     try w.print("<a class=\"head-link\" href=\"/api/export-bom/{s}\">BOM</a>", .{design_name});
     try w.print("<a class=\"head-link\" href=\"/api/export-netlist/{s}\">Netlist</a>", .{design_name});

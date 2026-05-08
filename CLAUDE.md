@@ -79,7 +79,7 @@ Source (.sexp files)
 
 **Checks**: `erc.zig` (duplicate ref-des, floating nets, unconnected pins, voltage mismatches, missing decoupling).
 
-**Export**: `emit.zig` (flattened .sexp), `export_kicad.zig` + `export_kicad_netlist.zig` + `export_kicad_footprint.zig` + `export_kicad_model.zig` + `export_kicad_modules.zig` (KiCad netlist + footprints + STEP models — the bridge for handing schematic edits off to KiCad's PCB editor via the plugin sync).
+**Export**: `emit.zig` (flattened .sexp), `export_kicad.zig` + `export_kicad_netlist.zig` + `export_kicad_footprint.zig` + `export_kicad_model.zig` (KiCad netlist + footprints + STEP models — the bridge for handing schematic edits off to KiCad's PCB editor).
 
 **Web server** (`src/serve.zig` + `src/serve/`): Serves the schematic viewer + review report. Live update via version polling. JSON scene graph state protected by mutex.
 
@@ -177,7 +177,7 @@ Source (.sexp files)
 - **Version polling**: `GET /api/version/:name` — returns `{"version":N}`
 - **Value editing**: `POST /api/edit-value/:name` — edit component value in .sexp file
 - **ERC**: `GET /api/erc/:name` — electrical-rule violations
-- **KiCad plugin sync**: `POST /api/update-kicad-pcb/:name` — write netlist + footprints + STEP models to the configured output dir and invoke `pcb_update.py` so KiCad's PCB editor picks up schematic changes (preserving placements/routing). Companion config endpoints under `/api/kicad-sync-config/:name`.
+- **KiCad sync**: `POST /api/sync-plan/:name` — server-side diff for the local Go IPC agent (`tools/kicad-sync-go/`). The agent reads board state from KiCad over IPC, posts it here, and applies the returned ops in one commit so footprint placements and routing are preserved.
 - **Library upload**: `GET /library`, `POST /api/upload-symbol`, `POST /api/upload-footprint`
 
 ### Live update workflow

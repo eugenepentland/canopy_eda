@@ -800,16 +800,11 @@ pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
         if (validateBearerToken(ctx, req)) return true;
     }
 
-    // Incremental-sync endpoints accept either a plugin bearer token or an
-    // OAuth bearer token. Plugin tokens are minted once via `eda mint-plugin-
-    // token`; OAuth is what the KiCad-side IPC sync plugin (tools/kicad-sync-
-    // plugin/) uses, mirroring the MCP flow. Both are scoped to these read-
-    // only sync routes; other APIs still require a session.
-    if (std.mem.startsWith(u8, req.url.path, "/api/sync-manifest/") or
-        std.mem.startsWith(u8, req.url.path, "/api/netlist/") or
-        std.mem.startsWith(u8, req.url.path, "/api/sync-plan/") or
-        std.mem.startsWith(u8, req.url.path, "/api/object/"))
-    {
+    // KiCad-sync endpoint accepts either a plugin bearer token or an OAuth
+    // bearer token. Plugin tokens are minted once via `eda mint-plugin-token`;
+    // OAuth is what the Go IPC agent (tools/kicad-sync-go/) uses, mirroring
+    // the MCP flow.
+    if (std.mem.startsWith(u8, req.url.path, "/api/sync-plan/")) {
         if (validatePluginBearerToken(ctx, req)) return true;
         if (validateBearerToken(ctx, req)) return true;
     }

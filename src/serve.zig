@@ -26,7 +26,6 @@ const auth = @import("serve/auth.zig");
 const mcp = @import("serve/mcp.zig");
 const oauth = @import("serve/oauth.zig");
 const account_page = @import("serve/account_page.zig");
-const kicad_sync = @import("serve/kicad_sync.zig");
 const sync = @import("serve/sync.zig");
 const spa_shell = @import("serve/spa_shell.zig");
 const spa_bundle = @import("serve/spa_bundle.zig");
@@ -185,16 +184,8 @@ pub fn serve(
     router.get("/api/version/:name", api.versionApi, .{});
     router.get("/api/export-kicad/:name", api.exportKicadApi, .{});
     router.get("/api/export-netlist/:name", api.exportNetlistApi, .{});
-    // Incremental sync (content-addressed) for the KiCad plugin.
-    router.get("/api/sync-manifest/:name", sync.syncManifestApi, .{});
-    router.get("/api/netlist/:name", sync.netlistApi, .{});
-    router.get("/api/object/:sha", sync.objectApi, .{});
+    // KiCad sync — server-side diff for the local Go IPC agent.
     router.post("/api/sync-plan/:name", sync.syncPlanApi, .{});
-    router.get("/api/kicad-sync-config/:name", kicad_sync.getConfigApi, .{});
-    router.post("/api/kicad-sync-config/:name", kicad_sync.setConfigApi, .{});
-    router.post("/api/export-netlist-to-dir/:name", kicad_sync.writeNetlistApi, .{});
-    router.post("/api/export-kicad-to-dir/:name", kicad_sync.writeKicadApi, .{});
-    router.post("/api/update-kicad-pcb/:name", kicad_sync.writePcbApi, .{});
     router.get("/api/export-bom/:name", api.exportBomCsvApi, .{});
     router.get("/api/export-review/:name", api.exportReviewPackageApi, .{});
     router.get("/api/erc/:name", api.ercApi, .{});

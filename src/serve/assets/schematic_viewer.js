@@ -893,89 +893,15 @@
     if (rerun) rerun.addEventListener('click', showErc);
   }
 
-  // ---- KiCad sync menu ----
-  // Ports the legacy canvas dropdown: path config + "Update KiCad PCB (pcb_update.py)".
+  // ---- KiCad menu (dropdown toggle for the two download buttons) ----
   (function () {
     var menu = document.querySelector('.kicad-menu');
     var btn = document.getElementById('kicad-btn');
     var panel = document.getElementById('kicad-panel');
     if (!menu || !btn || !panel) return;
-    var pathInput = document.getElementById('kicad-path');
-    var pcbFileInput = document.getElementById('kicad-pcb-file');
-    var shortNets = document.getElementById('kicad-short-nets');
-    var statusEl = document.getElementById('kicad-status');
-    var saveBtn = document.getElementById('kicad-save-path');
-    var writeNet = document.getElementById('kicad-write-netlist');
-    var writeKicad = document.getElementById('kicad-write-kicad');
-    var updatePcb = document.getElementById('kicad-update-pcb');
-
-    function setStatus(msg, cls) {
-      statusEl.textContent = msg || '';
-      statusEl.className = 'kicad-status' + (cls ? ' ' + cls : '');
-    }
     btn.addEventListener('click', function (e) { e.stopPropagation(); menu.classList.toggle('open'); });
     panel.addEventListener('click', function (e) { e.stopPropagation(); });
     document.addEventListener('click', function () { menu.classList.remove('open'); });
-
-    fetch('/api/kicad-sync-config/' + DESIGN_NAME).then(function (r) { return r.json(); }).then(function (j) {
-      if (j && j.output_dir) pathInput.value = j.output_dir;
-      if (j && j.pcb_file) pcbFileInput.value = j.pcb_file;
-    }).catch(function () {});
-
-    saveBtn.addEventListener('click', function () {
-      setStatus('Saving…');
-      fetch('/api/kicad-sync-config/' + DESIGN_NAME, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ output_dir: pathInput.value.trim(), pcb_file: pcbFileInput.value.trim() }),
-      }).then(function (r) { return r.json(); }).then(function (j) {
-        setStatus(j.ok ? 'Settings saved' : ('Error: ' + (j.error || 'unknown')), j.ok ? 'ok' : 'err');
-      }).catch(function (e) { setStatus('Error: ' + e, 'err'); });
-    });
-
-    function doWrite(url, label) {
-      if (!pathInput.value.trim()) { setStatus('Enter an output path first', 'err'); return; }
-      setStatus(label + '…');
-      fetch(url, { method: 'POST' }).then(function (r) { return r.json(); }).then(function (j) {
-        if (!j.ok) { setStatus('Error: ' + (j.error || 'unknown'), 'err'); return; }
-        if (j.netlist && j.pretty) setStatus('Wrote ' + j.netlist + ' and ' + j.pretty, 'ok');
-        else if (j.pcb) setStatus('Updated ' + j.pcb, 'ok');
-        else if (j.path) setStatus('Wrote ' + j.path, 'ok');
-        else setStatus('Done', 'ok');
-      }).catch(function (e) { setStatus('Error: ' + e, 'err'); });
-    }
-    writeNet.addEventListener('click', function () { doWrite('/api/export-netlist-to-dir/' + DESIGN_NAME, 'Writing netlist'); });
-    writeKicad.addEventListener('click', function () { doWrite('/api/export-kicad-to-dir/' + DESIGN_NAME, 'Writing netlist + footprints'); });
-
-    updatePcb.addEventListener('click', function () {
-      var url = '/api/update-kicad-pcb/' + DESIGN_NAME;
-      if (shortNets && shortNets.checked) url += '?short-nets=1';
-      setStatus('Updating KiCad PCB…');
-      fetch(url, { method: 'POST' }).then(function (r) { return r.json(); }).then(function (j) {
-        if (!j.ok) {
-          var msg = 'Error: ' + (j.error || 'unknown');
-          if (j.preflight) msg += '\n' + j.preflight;
-          setStatus(msg, 'err');
-          return;
-        }
-        var lines = [];
-        if (j.skipped) lines.push('No changes since last sync — ' + j.pcb);
-        else {
-          lines.push('Updated ' + j.pcb);
-          if (j.backup) lines.push('Backup: ' + j.backup);
-          else if (j.backup === null) lines.push('Backup: (new PCB, none needed)');
-          var parts = [];
-          if (j.wrote_footprints !== undefined) parts.push(j.wrote_footprints + ' footprint(s)');
-          if (j.wrote_models !== undefined) parts.push(j.wrote_models + ' model(s)');
-          if (parts.length) lines.push('Wrote: ' + parts.join(', '));
-        }
-        var m = j.mismatches || 0, miss = j.missing || 0, seeded = j.seeded || 0;
-        if (seeded > 0) lines.push('Replicated module layouts: ' + seeded + ' component(s) seeded.');
-        if (m === 0 && miss === 0) { if (!j.skipped) lines.push('Validation: all checks passed'); }
-        else lines.push('Validation: ' + m + ' mismatch(es), ' + miss + ' missing component(s) — see ' + j.pcb.replace(/\.kicad_pcb$/, '.pcb_diff.json'));
-        setStatus(lines.join('\n'), (m === 0 && miss === 0) ? 'ok' : 'warn');
-      }).catch(function (e) { setStatus('Error: ' + e, 'err'); });
-    });
   })();
 
   // ---- Live reload ----
