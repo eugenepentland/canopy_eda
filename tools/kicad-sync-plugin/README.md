@@ -38,19 +38,29 @@ routing are preserved.
 If you already pulled the new plugin code but the dialog still asks for
 `client_id` / `client_secret`, you have an older copy installed
 elsewhere. The dialog title shows the build tag; if it's missing or the
-tag predates `v2-dyn-reg`, reinstall:
+tag predates `v2-dyn-reg`, reinstall.
 
-```bash
-# editable install — updates whenever you `git pull`
+The action plugin spawns `python -m plugins.eda_sync_action` directly,
+so the `plugins/` package just needs to be importable from the spawned
+process's cwd (which is the kicad-sync-plugin directory). A `pip
+install -e .` is **optional** — and on Windows it can fail with
+`WinError 2` on the leftover `eda-kicad-sync.exe` from older versions.
+If you hit that:
+
+```powershell
+# Clean leftovers from an older install (Windows)
+Remove-Item C:\Python311\Scripts\eda-kicad-sync* -ErrorAction SilentlyContinue
+pip uninstall -y eda-kicad-sync   # ok if it says "not installed"
+
+# Then either reinstall (now safe — no .exe entry point):
 pip install -e tools/kicad-sync-plugin
-
-# or copy current code over the old install
-cp -r tools/kicad-sync-plugin/plugins/* <kicad-plugin-dir>/plugins/
+# …or skip pip entirely; the KiCad toolbar button works without it.
 ```
 
-Then fully restart KiCad (close all windows, reopen). KiCad caches the
-plugin discovery, not the Python code, but a fresh start guarantees a
-clean slate.
+Then fully restart KiCad (close all windows, reopen). KiCad's action-
+plugin discovery runs once at startup; a fresh start guarantees the new
+`kicad_action_plugin/__init__.py` and the new `plugins/eda_sync_action.py`
+are both loaded.
 
 ## What each click does
 

@@ -12,8 +12,11 @@ dev = [
   "pytest>=7",
 ]
 
-[project.scripts]
-eda-kicad-sync = "plugins.eda_sync_action:main"
+# No [project.scripts] entry: the KiCad action plugin spawns
+# `python -m plugins.eda_sync_action` directly (see kicad_action_plugin/
+# __init__.py), so a console-script .exe is not needed. Adding one breaks
+# `pip install -e .` on Windows when the .exe is locked or partially
+# uninstalled (WinError 2 on the .deleteme rename dance).
 
 [build-system]
 requires = ["setuptools>=64"]
