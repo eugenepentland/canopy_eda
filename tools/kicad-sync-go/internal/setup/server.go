@@ -1,7 +1,12 @@
 // Package setup serves a tiny first-run configuration page on
-// http://127.0.0.1:53683/setup. The user fills in server URL, design name,
-// and OAuth client_id/secret; on submit, the page kicks off the OAuth dance
-// and saves the result.
+// http://127.0.0.1:<free-port>/setup. The user fills in server URL, design
+// name, and OAuth client_id/secret; on submit, the page kicks off the OAuth
+// dance and saves the result.
+//
+// We ask the OS for a free port (net.Listen on :0) rather than hardcoding
+// one — VS Code, Postman, and other dev tools randomly bind ports in this
+// range and will silently steal a fixed choice, leaving the user with a
+// browser that hangs forever talking to the wrong server.
 package setup
 
 import (
@@ -10,7 +15,9 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -20,8 +27,6 @@ import (
 	"github.com/canopy/eda/tools/kicad-sync-go/internal/config"
 	"github.com/canopy/eda/tools/kicad-sync-go/internal/oauth"
 )
-
-const port = 53683
 
 //go:embed setup.html
 var setupHTML string
@@ -84,12 +89,19 @@ func Run(boardPath string, initial config.BoardConfig) (config.BoardConfig, erro
 		}
 	})
 
-	srv := &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", port),
-		Handler: mux,
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return initial, fmt.Errorf("bind setup port: %w", err)
 	}
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		_ = listener.Close()
+		return initial, fmt.Errorf("listener address is not TCP: %T", listener.Addr())
+	}
+
+	srv := &http.Server{Handler: mux}
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			done <- err
 		}
 	}()
@@ -99,7 +111,9 @@ func Run(boardPath string, initial config.BoardConfig) (config.BoardConfig, erro
 		_ = srv.Shutdown(ctx)
 	}()
 
-	openBrowser(fmt.Sprintf("http://127.0.0.1:%d/setup", port))
+	setupURL := fmt.Sprintf("http://127.0.0.1:%d/setup", addr.Port)
+	fmt.Fprintf(os.Stderr, "Setup page: %s\n", setupURL)
+	openBrowser(setupURL)
 
 	select {
 	case err := <-done:
