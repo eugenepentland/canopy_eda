@@ -33,10 +33,18 @@ var setupHTML string
 //go:embed done.html
 var doneHTML string
 
+// DefaultServerURL is pre-filled into the setup form when the user hasn't
+// configured a server before. The production EDA server lives there; users
+// running their own dev server can just overwrite it.
+const DefaultServerURL = "https://co-circuit.eugenepentland.dev"
+
 // Run starts the setup HTTP server, opens the user's browser, and blocks
 // until the user completes the form (or times out). Returns the populated
 // BoardConfig — the caller saves it next to the .kicad_pcb.
 func Run(boardPath string, initial config.BoardConfig) (config.BoardConfig, error) {
+	if initial.ServerURL == "" {
+		initial.ServerURL = DefaultServerURL
+	}
 	tmpl, err := template.New("setup").Parse(setupHTML)
 	if err != nil {
 		return initial, fmt.Errorf("parse template: %w", err)

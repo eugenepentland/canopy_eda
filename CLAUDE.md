@@ -167,6 +167,10 @@ Source (.sexp files)
 
 ## Web Server
 
+The production EDA server runs at **https://co-circuit.eugenepentland.dev** —
+that's the canonical URL for the KiCad-sync agent and any remote MCP client.
+Local dev still uses `http://localhost:7050`.
+
 `eda serve` starts an HTTP server with the schematic viewer + review report:
 
 - **Design list**: `GET /` — links to all .sexp designs
