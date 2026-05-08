@@ -23,8 +23,15 @@ type PadAssign struct {
 }
 
 // BoardFp is one footprint on the user's board, as the client describes it.
+//
+// UUID is the project-stable canopy_uuid custom field — empty when the
+// footprint hasn't been synced before. KicadUUID is the KiCad-internal
+// handle the agent uses to apply mutations; the server echoes it back in
+// emitted ops so the agent's cache lookup resolves regardless of whether
+// the footprint already has a canopy_uuid.
 type BoardFp struct {
 	UUID          string      `json:"uuid"`
+	KicadUUID     string      `json:"kicad_uuid,omitempty"`
 	Ref           string      `json:"ref"`
 	Value         string      `json:"value"`
 	FootprintName string      `json:"footprint_name"`

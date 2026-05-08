@@ -120,28 +120,34 @@ func (c *realClient) ListFootprints() ([]Footprint, error) {
 		if err := item.UnmarshalTo(&fp); err != nil {
 			return nil, fmt.Errorf("item is not a FootprintInstance: %w", err)
 		}
-		uuid := fp.GetId().GetValue()
-		c.cache[uuid] = &fp
-		out = append(out, footprintToNeutral(&fp))
+		neutral := footprintToNeutral(&fp)
+		// Cache aliasing: ops from the server may target the footprint by
+		// either the KiCad-internal UUID or the project's canopy_uuid (the
+		// stable identity that survives KiCad re-imports). Both keys map to
+		// the same FootprintInstance pointer so SetField/SetPadNet/Remove
+		// resolve regardless of which form the op carries.
+		c.cache[neutral.KicadUUID] = &fp
+		if neutral.UUID != "" {
+			c.cache[neutral.UUID] = &fp
+		}
+		out = append(out, neutral)
 	}
 	return out, nil
 }
 
 // footprintToNeutral converts a KiCad FootprintInstance to our internal
-// Footprint type, extracting only the fields the sync algorithm cares
-// about. Custom fields (canopy_uuid) live inside Definition.Items as
-// Any-wrapped Field messages — we walk them once.
+// Footprint type. Custom fields (most importantly `canopy_uuid`) live
+// inside Definition.Items as Any-wrapped Field messages, so we walk that
+// list once to pull out both pads and any project-level identity field.
 func footprintToNeutral(fp *board_types.FootprintInstance) Footprint {
 	// Field.Text is a BoardText which wraps base_types.Text; the actual
 	// string lives at fp.<Field>.Text.Text.Text.
 	out := Footprint{
-		UUID:          fp.GetId().GetValue(),
+		KicadUUID:     fp.GetId().GetValue(),
 		Reference:     fp.GetReferenceField().GetText().GetText().GetText(),
 		Value:         fp.GetValueField().GetText().GetText().GetText(),
 		FootprintName: fp.GetDefinition().GetId().GetEntryName(),
 	}
-	// Pads (and custom fields) are inside Definition.Items as Any-wrapped
-	// messages. Pull pads out so the diff can read pad nets.
 	for _, item := range fp.GetDefinition().GetItems() {
 		var pad board_types.Pad
 		if err := item.UnmarshalTo(&pad); err == nil {
@@ -151,12 +157,22 @@ func footprintToNeutral(fp *board_types.FootprintInstance) Footprint {
 			})
 			continue
 		}
-		// Walk Field items too in case canopy_uuid / similar live here.
-		// (We don't need to surface them via the neutral type — sync_core
-		// only needs UUID matching, which uses fp.GetId().)
+		var field board_types.Field
+		if err := item.UnmarshalTo(&field); err == nil {
+			if field.GetName() == fieldCanopyUUID {
+				out.UUID = field.GetText().GetText().GetText()
+			}
+			continue
+		}
 	}
 	return out
 }
+
+// fieldCanopyUUID is the well-known custom-field name carrying the project's
+// stable instance ID on a KiCad footprint. The schematic-side evaluator
+// emits 8-char hex; legacy boards from the Python plugin carry full 36-char
+// UUIDs. The sync server treats both as opaque strings.
+const fieldCanopyUUID = "canopy_uuid"
 
 // ── Write side ────────────────────────────────────────────────────────
 
@@ -197,14 +213,55 @@ func (c *realClient) SetField(uuid, field, value string) error {
 	case "value":
 		ensureBoardTextString(ensureField(&fp.ValueField)).Text = value
 	default:
-		// Custom field (e.g. canopy_uuid). Stored under
-		// Definition.Items as Any-wrapped Field. v1 doesn't write these
-		// — the server uses canopy_uuid only for matching, and the
-		// initial population of canopy_uuid happens via the Python
-		// plugin's first sync. New IPC syncs should already see them.
+		// Custom field (e.g. canopy_uuid). Lives in Definition.Items as an
+		// Any-wrapped Field with .Name == <field>. We mutate in place when
+		// it already exists so KiCad sees an UPDATE, not a stack of
+		// duplicates after repeated syncs.
+		if err := setOrAppendCustomField(fp, field, value); err != nil {
+			return err
+		}
+	}
+	// Look up the cached entry's "canonical" KiCad-internal UUID so we mark
+	// the right footprint dirty even when the caller targeted us by an
+	// alias key (canopy_uuid).
+	c.dirty[fp.GetId().GetValue()] = struct{}{}
+	return nil
+}
+
+// setOrAppendCustomField rewrites an existing Field.Text.Text.Text inside
+// fp.Definition.Items, or appends a new Any-wrapped Field if no entry with
+// that Name exists yet. Used for canopy_uuid backfill on legacy boards
+// where the schematic ID hasn't yet been written to the footprint.
+func setOrAppendCustomField(fp *board_types.FootprintInstance, name, value string) error {
+	def := fp.GetDefinition()
+	if def == nil {
+		// A footprint with no Definition can't carry custom fields; the
+		// caller's set_field op is meaningless here.
 		return nil
 	}
-	c.dirty[uuid] = struct{}{}
+	for i, item := range def.Items {
+		var existing board_types.Field
+		if err := item.UnmarshalTo(&existing); err != nil {
+			continue
+		}
+		if existing.GetName() != name {
+			continue
+		}
+		ensureBoardTextString(&existing).Text = value
+		newAny, err := anypb.New(&existing)
+		if err != nil {
+			return fmt.Errorf("marshal updated %s field: %w", name, err)
+		}
+		def.Items[i] = newAny
+		return nil
+	}
+	fresh := &board_types.Field{Name: name}
+	ensureBoardTextString(fresh).Text = value
+	newAny, err := anypb.New(fresh)
+	if err != nil {
+		return fmt.Errorf("marshal new %s field: %w", name, err)
+	}
+	def.Items = append(def.Items, newAny)
 	return nil
 }
 
@@ -260,7 +317,7 @@ func (c *realClient) SetPadNet(uuid, padNumber, netName string) error {
 		}
 		item.TypeUrl = repacked.TypeUrl
 		item.Value = repacked.Value
-		c.dirty[uuid] = struct{}{}
+		c.dirty[fp.GetId().GetValue()] = struct{}{}
 		return nil
 	}
 	return nil
@@ -281,30 +338,40 @@ func (c *realClient) SwapFootprint(uuid string, def *FootprintDef, padNets [][2]
 	}
 	// Swap = delete old + create new. KiCad records both halves as one
 	// undo step thanks to the surrounding commit.
-	c.removed[uuid] = struct{}{}
-	fp := buildFootprintInstance(def, uuid, "", "", padNets)
-	// Carry over the old ref/value if they were on the cached footprint.
-	if old, ok := c.cache[uuid]; ok {
-		if t := old.GetReferenceField().GetText().GetText().GetText(); t != "" {
-			ensureBoardTextString(ensureField(&fp.ReferenceField)).Text = t
-		}
-		if t := old.GetValueField().GetText().GetText().GetText(); t != "" {
-			ensureBoardTextString(ensureField(&fp.ValueField)).Text = t
-		}
-		// Preserve placement.
-		if old.Position != nil {
-			fp.Position = old.Position
-		}
-		if old.Orientation != nil {
-			fp.Orientation = old.Orientation
-		}
-		fp.Layer = old.Layer
+	old, ok := c.cache[uuid]
+	if !ok {
+		// Nothing to swap — caller is targeting an unknown footprint.
+		return nil
 	}
+	kicadUUID := old.GetId().GetValue()
+	c.removed[kicadUUID] = struct{}{}
+	fp := buildFootprintInstance(def, kicadUUID, "", "", padNets)
+	// Carry over the old ref/value if they were on the cached footprint.
+	if t := old.GetReferenceField().GetText().GetText().GetText(); t != "" {
+		ensureBoardTextString(ensureField(&fp.ReferenceField)).Text = t
+	}
+	if t := old.GetValueField().GetText().GetText().GetText(); t != "" {
+		ensureBoardTextString(ensureField(&fp.ValueField)).Text = t
+	}
+	// Preserve placement.
+	if old.Position != nil {
+		fp.Position = old.Position
+	}
+	if old.Orientation != nil {
+		fp.Orientation = old.Orientation
+	}
+	fp.Layer = old.Layer
 	c.added = append(c.added, fp)
 	return nil
 }
 
 func (c *realClient) Remove(uuid string) error {
+	if fp, ok := c.cache[uuid]; ok {
+		c.removed[fp.GetId().GetValue()] = struct{}{}
+		return nil
+	}
+	// Unknown UUID — record it anyway. Either a stale-prune from the
+	// server or a uuid we never read; KiCad will just no-op the delete.
 	c.removed[uuid] = struct{}{}
 	return nil
 }

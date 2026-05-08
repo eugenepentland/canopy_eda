@@ -16,10 +16,16 @@ type Pad struct {
 }
 
 // Footprint is the subset of a KiCad footprint the sync algorithm needs.
-// The agent treats UUID as the stable identity (sourced from the
-// `canopy_uuid` custom field).
+//
+// UUID is the project-stable identity sourced from the `canopy_uuid` custom
+// field — this is what the server diffs against the design's instance IDs.
+// Empty when the footprint hasn't been synced before.
+//
+// KicadUUID is the KiCad-internal handle that IPC mutation calls
+// (SetField, SetPadNet, …) use to target the footprint. Always populated.
 type Footprint struct {
 	UUID          string
+	KicadUUID     string
 	Reference     string
 	Value         string
 	FootprintName string // KiCad library:name → name only

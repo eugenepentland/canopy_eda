@@ -46,9 +46,12 @@ func (f *Fake) Begin(message string) error {
 	return nil
 }
 
+// findIdx resolves a uuid to a slot in Footprints, matching either the
+// canopy UUID or the KiCad-internal UUID. Mirrors the real client's cache
+// aliasing so tests exercise the same lookup semantics.
 func (f *Fake) findIdx(uuid string) (int, bool) {
 	for i, fp := range f.Footprints {
-		if fp.UUID == uuid {
+		if fp.UUID == uuid || (fp.KicadUUID != "" && fp.KicadUUID == uuid) {
 			return i, true
 		}
 	}
@@ -65,6 +68,8 @@ func (f *Fake) SetField(uuid, field, value string) error {
 		f.Footprints[i].Reference = value
 	case "value":
 		f.Footprints[i].Value = value
+	case fieldCanopyUUID:
+		f.Footprints[i].UUID = value
 	}
 	f.pendingDirty[uuid] = struct{}{}
 	return nil

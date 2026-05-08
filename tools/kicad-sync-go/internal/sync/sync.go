@@ -41,6 +41,7 @@ func toBoardFps(fps []kicad.Footprint) []eda.BoardFp {
 		}
 		out = append(out, eda.BoardFp{
 			UUID:          fp.UUID,
+			KicadUUID:     fp.KicadUUID,
 			Ref:           fp.Reference,
 			Value:         fp.Value,
 			FootprintName: fp.FootprintName,

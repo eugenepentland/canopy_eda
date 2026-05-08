@@ -52,12 +52,26 @@ fn warnResolveIdentities(name: []const u8, err: anyerror) void {
 const PadAssign = struct { number: []const u8, net: []const u8 };
 
 const BoardFp = struct {
+    /// Project-stable canopy_uuid custom field. Empty when the footprint
+    /// has never been synced (or was placed manually in KiCad).
     uuid: []const u8,
+    /// KiCad-internal handle. Always populated. Echoed back in emitted ops
+    /// so the agent's apply path can target the right footprint regardless
+    /// of whether canopy_uuid is set yet.
+    kicad_uuid: []const u8,
     ref: []const u8,
     value: []const u8,
     footprint_name: []const u8,
     pads: []const PadAssign,
 };
+
+/// Pick the UUID the agent should use to find this footprint in its cache.
+/// Prefer kicad_uuid when present (always wired by the modern agent); fall
+/// back to canopy uuid for older agents that don't ship it yet.
+fn opTargetUuid(m: BoardFp) []const u8 {
+    if (m.kicad_uuid.len > 0) return m.kicad_uuid;
+    return m.uuid;
+}
 
 const ParsedSyncPlan = struct {
     board: []const BoardFp,
@@ -82,6 +96,7 @@ fn parseBoardEntry(arena: std.mem.Allocator, entry: std.json.Value) std.mem.Allo
     const pads = if (o.get("pads")) |pv| try parsePadList(arena, pv) else &[_]PadAssign{};
     return BoardFp{
         .uuid = jsonStr(o.get("uuid")),
+        .kicad_uuid = jsonStr(o.get("kicad_uuid")),
         .ref = jsonStr(o.get("ref")),
         .value = jsonStr(o.get("value")),
         .footprint_name = jsonStr(o.get("footprint_name")),
@@ -368,15 +383,22 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     };
     for (instances.items) |inst| try handleInstance(&diff_ctx, inst, &w, &first_op);
 
-    // Stale: anything in `parsed.board` with a uuid not in the netlist.
+    // Stale = a board footprint that didn't match any design instance.
+    // We only flag/prune footprints the sync has ever managed (i.e. those
+    // with a canopy_uuid set). Footprints without canopy_uuid are
+    // typically user-placed mechanicals (mounting holes, fiducials,
+    // logos) that we leave alone. Ops target by KiCad-internal UUID so
+    // the agent's apply path resolves regardless of canopy_uuid state.
     for (parsed.board) |bfp| {
         if (bfp.uuid.len == 0) continue;
-        if (matched_uuids.contains(bfp.uuid)) continue;
+        if (matched_uuids.contains(bfp.kicad_uuid)) continue;
+        const target = opTargetUuid(bfp);
+        if (target.len == 0) continue;
         if (parsed.prune_stale) {
-            try emitOp(&w, &first_op, "remove", .{.{ "uuid", bfp.uuid }});
+            try emitOp(&w, &first_op, "remove", .{.{ "uuid", target }});
             summary.removed += 1;
         } else {
-            try emitOp(&w, &first_op, "flag_stale", .{ .{ "uuid", bfp.uuid }, .{ "ref", bfp.ref } });
+            try emitOp(&w, &first_op, "flag_stale", .{ .{ "uuid", target }, .{ "ref", bfp.ref } });
             summary.flagged_stale += 1;
         }
     }
@@ -413,8 +435,12 @@ fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, f
     if (inst.ref_des.len == 0) return null;
     const m = d.by_ref.get(inst.ref_des) orelse return null;
     if (m.uuid.len == 0) {
+        // Backfill the canopy_uuid custom field on this footprint so the
+        // next sync UUID-matches without falling back to ref_des. We
+        // target by the KiCad-internal UUID so the agent's cache resolves
+        // even before canopy_uuid is set.
         try emitOp(w, first, OP_SET_FIELD, .{
-            .{ "uuid", m.uuid },
+            .{ "uuid", opTargetUuid(m) },
             .{ "field", "canopy_uuid" },
             .{ "value", inst.uuid },
         });
@@ -423,29 +449,33 @@ fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, f
 }
 
 fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, fp_name_short: []const u8, w: anytype, first: *bool) !void {
-    if (m.uuid.len > 0) try d.matched_uuids.put(m.uuid, {});
+    // Track matches by KiCad-internal UUID — that field is always
+    // populated, whereas canopy_uuid is empty for ref-des-fallback
+    // matches until the backfill op lands on a future sync.
+    if (m.kicad_uuid.len > 0) try d.matched_uuids.put(m.kicad_uuid, {});
+    const target = opTargetUuid(m);
     if (!std.mem.eql(u8, m.footprint_name, fp_name_short)) {
         if (loadKicadMod(d.spc, fp_name_short, inst.component)) |kmod| {
             const fp_def = loadFootprintDef(d.spc, fp_name_short);
-            try emitSwapOp(w, first, m.uuid, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map);
+            try emitSwapOp(w, first, target, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map);
             d.summary.swapped += 1;
         }
     }
     if (!std.mem.eql(u8, m.ref, inst.ref_des)) {
         try emitOp(w, first, OP_SET_FIELD, .{
-            .{ "uuid", inst.uuid },
+            .{ "uuid", target },
             .{ "field", "reference" },
             .{ "value", inst.ref_des },
         });
     }
     if (!std.mem.eql(u8, m.value, inst.value)) {
         try emitOp(w, first, OP_SET_FIELD, .{
-            .{ "uuid", inst.uuid },
+            .{ "uuid", target },
             .{ "field", "value" },
             .{ "value", inst.value },
         });
     }
-    try emitPadNetOps(w, first, inst.uuid, inst.ref_des, d.pad_net_map, m.pads);
+    try emitPadNetOps(w, first, target, inst.ref_des, d.pad_net_map, m.pads);
     d.summary.updated += 1;
 }
 
