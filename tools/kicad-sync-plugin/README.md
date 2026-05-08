@@ -21,19 +21,36 @@ routing are preserved.
 
 ## First-run setup
 
-1. In the EDA web UI, sign in at `/account` and mint an OAuth client.
-2. Set the registered **Redirect URI** to exactly:
-   ```
-   http://127.0.0.1:53682/callback
-   ```
-   The plugin binds that exact port; the server enforces strict equality.
-3. Open your `.kicad_pcb` in KiCad and click **EDA Sync**.
-4. Fill in: server URL (e.g. `http://localhost:7050`), design name,
-   `client_id`, `client_secret`. Settings are stored next to the board
-   as `<board>.eda-sync.json`.
-5. A browser opens for the OAuth approval. Click *Approve*. The token
-   caches at `~/.config/eda-kicad-sync/tokens.json` (mode 0600) and
-   subsequent clicks sync silently.
+1. Open your `.kicad_pcb` in KiCad and click **EDA Sync**.
+2. The setup dialog asks for **Server URL** and **Design** (a dropdown
+   populated from `GET /api/designs`). The dialog title carries a build
+   tag (e.g. `(v2-dyn-reg)`) — if you don't see one, your installed
+   plugin is older than dynamic registration; reinstall (see Install).
+3. Click **Save & sync**. A browser opens for OAuth approval; click
+   *Authorize*. Credentials are minted automatically (RFC 7591 dynamic
+   client registration) and cached at
+   `~/.config/eda-kicad-sync/clients.json`. Tokens cache at
+   `~/.config/eda-kicad-sync/tokens.json`. Per-board settings (server +
+   design) live next to the .kicad_pcb as `<board>.eda-sync.json`.
+
+### Updating an existing install
+
+If you already pulled the new plugin code but the dialog still asks for
+`client_id` / `client_secret`, you have an older copy installed
+elsewhere. The dialog title shows the build tag; if it's missing or the
+tag predates `v2-dyn-reg`, reinstall:
+
+```bash
+# editable install — updates whenever you `git pull`
+pip install -e tools/kicad-sync-plugin
+
+# or copy current code over the old install
+cp -r tools/kicad-sync-plugin/plugins/* <kicad-plugin-dir>/plugins/
+```
+
+Then fully restart KiCad (close all windows, reopen). KiCad caches the
+plugin discovery, not the Python code, but a fresh start guarantees a
+clean slate.
 
 ## What each click does
 

@@ -50,12 +50,50 @@ def _resolve_board_path() -> Optional[str]:
 # ── First-run dialog ─────────────────────────────────────────────────────
 
 
+_PLUGIN_BUILD_TAG = "v2-dyn-reg"  # bump when the dialog UX changes
+
+
+def _default_server_url(initial: cfg_mod.BoardConfig) -> str:
+    """Pick the most useful default for the server URL field. Order:
+    (1) value already in the board config, (2) a server URL from a previous
+    successful registration cached in ClientStore, (3) localhost."""
+    if initial.server_url:
+        return initial.server_url
+    try:
+        cached = oauth_client.ClientStore()._read()  # noqa: SLF001
+        # Cache keys are server URLs; pick the first non-empty.
+        for key in cached:
+            if key:
+                return key
+    except Exception:
+        pass
+    return "http://127.0.0.1:7050"
+
+
+def _fetch_design_names(server_url: str, timeout: float = 8.0) -> list[str]:
+    """GET /api/designs and return the list of design names. Empty list on
+    any error — callers fall back to free-text entry."""
+    import json
+    from urllib import request as _request, error as _urlerror
+
+    url = server_url.rstrip("/") + "/api/designs"
+    try:
+        with _request.urlopen(url, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+    except (_urlerror.URLError, json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(d.get("name", "")) for d in data if isinstance(d, dict) and d.get("name")]
+
+
 def _tk_setup_dialog(initial: cfg_mod.BoardConfig) -> Optional[cfg_mod.BoardConfig]:
     """Tk-based setup form. Returns None if the user cancels.
 
-    Only collects the server URL and the design name. OAuth credentials
-    are minted automatically on first sync via dynamic client
-    registration — the user just clicks Authorize in the browser."""
+    Asks only for server URL and design name (chosen from a dropdown
+    populated by `GET /api/designs`). OAuth credentials are minted
+    automatically on first sync via dynamic client registration — the
+    user just clicks Authorize in the browser."""
     try:
         import tkinter as tk
         from tkinter import ttk
@@ -63,42 +101,65 @@ def _tk_setup_dialog(initial: cfg_mod.BoardConfig) -> Optional[cfg_mod.BoardConf
         print("Tkinter is unavailable; configure the .eda-sync.json file manually.", file=sys.stderr)
         return None
 
-    out: dict[str, str] = {}
-
     root = tk.Tk()
-    root.title("EDA Sync — first-run setup")
-    root.geometry("520x200")
+    root.title(f"EDA Sync — first-run setup ({_PLUGIN_BUILD_TAG})")
+    root.geometry("560x260")
 
-    fields = [
-        ("Server URL", "server_url", initial.server_url or "http://127.0.0.1:7050"),
-        ("Design name", "design", initial.design),
-    ]
-    entries: dict[str, tk.Entry] = {}
-    for i, (label, key, default) in enumerate(fields):
-        ttk.Label(root, text=label).grid(row=i, column=0, sticky="e", padx=8, pady=4)
-        e = ttk.Entry(root, width=50)
-        e.insert(0, default)
-        e.grid(row=i, column=1, padx=8, pady=4)
-        entries[key] = e
+    server_var = tk.StringVar(value=_default_server_url(initial))
+    design_var = tk.StringVar(value=initial.design)
+
+    ttk.Label(root, text="Server URL").grid(row=0, column=0, sticky="e", padx=8, pady=6)
+    server_entry = ttk.Entry(root, width=52, textvariable=server_var)
+    server_entry.grid(row=0, column=1, columnspan=2, padx=8, pady=6, sticky="w")
+
+    ttk.Label(root, text="Design").grid(row=1, column=0, sticky="e", padx=8, pady=6)
+    design_combo = ttk.Combobox(root, width=49, textvariable=design_var, values=[])
+    design_combo.grid(row=1, column=1, padx=8, pady=6, sticky="w")
+
+    status_var = tk.StringVar(value="")
+    status_label = ttk.Label(root, textvariable=status_var, foreground="#555", wraplength=520, justify="left")
+    status_label.grid(row=2, column=0, columnspan=3, padx=8, pady=4, sticky="w")
+
+    def refresh_designs():
+        url = server_var.get().strip()
+        if not url:
+            status_var.set("")
+            design_combo["values"] = []
+            return
+        status_var.set(f"Fetching designs from {url}…")
+        root.update_idletasks()
+        names = _fetch_design_names(url)
+        if names:
+            design_combo["values"] = names
+            status_var.set(f"Found {len(names)} design(s) on {url}.")
+            if not design_var.get() and names:
+                design_var.set(names[0])
+        else:
+            design_combo["values"] = []
+            status_var.set(
+                f"Could not list designs at {url}/api/designs. "
+                "Check the server URL, then click Refresh — or type the design name."
+            )
+
+    ttk.Button(root, text="Refresh", command=refresh_designs).grid(row=1, column=2, padx=4)
 
     note = ttk.Label(
         root,
         text=(
-            "On the next sync, your browser will open and ask you to sign in "
-            "(if needed) and approve EDA Sync. No client_id or client_secret "
-            "is required — they're minted automatically and cached locally."
+            "On Save, your browser will open and ask you to sign in (if needed) "
+            "and Authorize EDA Sync. No client_id / client_secret is required: "
+            "credentials are minted automatically via dynamic registration "
+            "(RFC 7591) and cached at ~/.config/eda-kicad-sync/clients.json."
         ),
         foreground="#555",
-        wraplength=480,
+        wraplength=520,
         justify="left",
     )
-    note.grid(row=len(fields), column=0, columnspan=2, padx=8, pady=8, sticky="w")
+    note.grid(row=3, column=0, columnspan=3, padx=8, pady=10, sticky="w")
 
     cancelled = {"v": True}
 
     def on_ok():
-        for k, e in entries.items():
-            out[k] = e.get().strip()
         cancelled["v"] = False
         root.destroy()
 
@@ -106,17 +167,20 @@ def _tk_setup_dialog(initial: cfg_mod.BoardConfig) -> Optional[cfg_mod.BoardConf
         root.destroy()
 
     btns = ttk.Frame(root)
-    btns.grid(row=len(fields) + 1, column=0, columnspan=2, pady=10)
+    btns.grid(row=4, column=0, columnspan=3, pady=10)
     ttk.Button(btns, text="Cancel", command=on_cancel).grid(row=0, column=0, padx=4)
     ttk.Button(btns, text="Save & sync", command=on_ok).grid(row=0, column=1, padx=4)
+
+    # Auto-populate the dropdown on open so the user just picks.
+    root.after(50, refresh_designs)
 
     root.mainloop()
 
     if cancelled["v"]:
         return None
     return cfg_mod.BoardConfig(
-        server_url=out["server_url"],
-        design=out["design"],
+        server_url=server_var.get().strip(),
+        design=design_var.get().strip(),
         last_synced_version=initial.last_synced_version,
     )
 
