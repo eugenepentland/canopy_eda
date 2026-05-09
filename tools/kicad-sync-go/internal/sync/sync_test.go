@@ -6,9 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/canopy/eda/tools/kicad-sync-go/internal/eda"
-	"github.com/canopy/eda/tools/kicad-sync-go/internal/kicad"
-	"github.com/canopy/eda/tools/kicad-sync-go/internal/sync"
+	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/eda"
+	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad"
+	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/sync"
 )
 
 // fakeServer hands back the canned response and records the body it received.

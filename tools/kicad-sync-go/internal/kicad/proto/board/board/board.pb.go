@@ -26,8 +26,8 @@
 package board
 
 import (
-	board_types "github.com/canopy/eda/tools/kicad-sync-go/internal/kicad/proto/board/board_types"
-	base_types "github.com/canopy/eda/tools/kicad-sync-go/internal/kicad/proto/common/types/base_types"
+	board_types "github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad/proto/board/board_types"
+	base_types "github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad/proto/common/types/base_types"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"

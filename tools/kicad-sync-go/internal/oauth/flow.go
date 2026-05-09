@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/canopy/eda/tools/kicad-sync-go/internal/config"
+	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/config"
 )
 
 const (

@@ -5,8 +5,8 @@ import (
 
 	"google.golang.org/protobuf/types/known/anypb"
 
-	board_types "github.com/canopy/eda/tools/kicad-sync-go/internal/kicad/proto/board/board_types"
-	base_types "github.com/canopy/eda/tools/kicad-sync-go/internal/kicad/proto/common/types/base_types"
+	board_types "github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad/proto/board/board_types"
+	base_types "github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad/proto/common/types/base_types"
 )
 
 func wrapPad(pad *board_types.Pad) (*anypb.Any, error) {

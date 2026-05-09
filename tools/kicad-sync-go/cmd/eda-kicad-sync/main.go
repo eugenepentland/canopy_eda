@@ -14,23 +14,33 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/canopy/eda/tools/kicad-sync-go/internal/config"
-	"github.com/canopy/eda/tools/kicad-sync-go/internal/eda"
-	"github.com/canopy/eda/tools/kicad-sync-go/internal/kicad"
-	"github.com/canopy/eda/tools/kicad-sync-go/internal/notify"
-	"github.com/canopy/eda/tools/kicad-sync-go/internal/oauth"
-	"github.com/canopy/eda/tools/kicad-sync-go/internal/setup"
-	"github.com/canopy/eda/tools/kicad-sync-go/internal/sync"
+	kicadsync "github.com/eugenepentland/canvas_eda/tools/kicad-sync-go"
+	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/config"
+	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/eda"
+	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad"
+	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/notify"
+	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/oauth"
+	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/setup"
+	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/sync"
 )
 
 func main() {
 	var (
-		setupMode = flag.Bool("setup", false, "open the setup web page and exit")
-		boardArg  = flag.String("board", "", "explicit path to .kicad_pcb (otherwise: ask IPC)")
-		prune     = flag.Bool("prune", false, "remove footprints whose canopy_uuid is no longer in the netlist")
-		migrate   = flag.Bool("migrate", false, "one-shot heuristic remap: when ref_des doesn't match the design, rename board footprints whose (parent, footprint, value) is uniquely identifiable on both sides. Use this once after upgrading from the legacy Python plugin so existing placements stay attached to the new schematic.")
+		setupMode    = flag.Bool("setup", false, "open the setup web page and exit")
+		boardArg     = flag.String("board", "", "explicit path to .kicad_pcb (otherwise: ask IPC)")
+		prune        = flag.Bool("prune", false, "remove footprints whose canopy_uuid is no longer in the netlist")
+		migrate      = flag.Bool("migrate", false, "one-shot heuristic remap: when ref_des doesn't match the design, rename board footprints whose (parent, footprint, value) is uniquely identifiable on both sides. Use this once after upgrading from the legacy Python plugin so existing placements stay attached to the new schematic.")
+		installPlug  = flag.Bool("install-kicad-plugin", false, "drop plugin.json and a symlink to this binary into KiCad's per-user plugin folder, then exit. Set EDA_KICAD_PLUGIN_DIR to override the destination.")
 	)
 	flag.Parse()
+
+	if *installPlug {
+		if err := kicadsync.Install(); err != nil {
+			fmt.Fprintln(os.Stderr, "install:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if err := run(*setupMode, *boardArg, *prune, *migrate); err != nil {
 		notify.Show("EDA Sync — error", err.Error())

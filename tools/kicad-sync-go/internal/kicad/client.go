@@ -11,11 +11,11 @@ import (
 	_ "go.nanomsg.org/mangos/v3/transport/tcp"
 	"google.golang.org/protobuf/types/known/anypb"
 
-	board_types "github.com/canopy/eda/tools/kicad-sync-go/internal/kicad/proto/board/board_types"
-	base_commands "github.com/canopy/eda/tools/kicad-sync-go/internal/kicad/proto/common/commands/base_commands"
-	editor_commands "github.com/canopy/eda/tools/kicad-sync-go/internal/kicad/proto/common/commands/editor_commands"
-	base_types "github.com/canopy/eda/tools/kicad-sync-go/internal/kicad/proto/common/types/base_types"
-	enums "github.com/canopy/eda/tools/kicad-sync-go/internal/kicad/proto/common/types/enums"
+	board_types "github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad/proto/board/board_types"
+	base_commands "github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad/proto/common/commands/base_commands"
+	editor_commands "github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad/proto/common/commands/editor_commands"
+	base_types "github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad/proto/common/types/base_types"
+	enums "github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad/proto/common/types/enums"
 )
 
 // Connect dials the KiCad IPC socket advertised in KICAD_API_SOCKET (set

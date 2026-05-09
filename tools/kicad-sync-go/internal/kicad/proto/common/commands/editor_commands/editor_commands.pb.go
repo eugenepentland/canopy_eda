@@ -28,8 +28,8 @@
 package editor_commands
 
 import (
-	base_types "github.com/canopy/eda/tools/kicad-sync-go/internal/kicad/proto/common/types/base_types"
-	enums "github.com/canopy/eda/tools/kicad-sync-go/internal/kicad/proto/common/types/enums"
+	base_types "github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad/proto/common/types/base_types"
+	enums "github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad/proto/common/types/enums"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	anypb "google.golang.org/protobuf/types/known/anypb"

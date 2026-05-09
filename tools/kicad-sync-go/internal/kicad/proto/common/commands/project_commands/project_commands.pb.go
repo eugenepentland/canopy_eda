@@ -25,8 +25,8 @@
 package project_commands
 
 import (
-	base_types "github.com/canopy/eda/tools/kicad-sync-go/internal/kicad/proto/common/types/base_types"
-	project_settings "github.com/canopy/eda/tools/kicad-sync-go/internal/kicad/proto/common/types/project_settings"
+	base_types "github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad/proto/common/types/base_types"
+	project_settings "github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad/proto/common/types/project_settings"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"

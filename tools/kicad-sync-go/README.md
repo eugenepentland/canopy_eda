@@ -31,69 +31,69 @@ the diff algorithm.
 
 ## Install
 
-### From source
+### `go install` (recommended)
+
+Requires Go 1.23+ on PATH. Generated protobuf bindings are committed to
+the repo, so no `protoc` / KiCad source clone is needed for installs.
 
 ```bash
-# Clone the repo, then:
-cd tools/kicad-sync-go
-make install                    # builds + symlinks into KiCad's plugin folder
+go install github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/cmd/eda-kicad-sync@latest
+eda-kicad-sync --install-kicad-plugin
 ```
 
-After `make install`, restart KiCad. The PCB editor gets an **EDA Sync**
-toolbar button + **Tools → External Plugins → EDA Sync** menu item.
+The first command drops the binary into `$(go env GOBIN)` (defaults to
+`~/go/bin`). The second writes `plugin.json` into KiCad's per-user
+plugin folder and symlinks the binary alongside it (Windows: copy, since
+non-admin symlinks are flaky there). Restart KiCad — the PCB editor
+gains an **EDA Sync** toolbar button.
 
-The plugin is a tiny Python `pcbnew.ActionPlugin` shim
-(`kicad_plugin/__init__.py`) that just spawns the Go binary, so KiCad
-discovers it via its standard "External Plugins" menu. KiCad's user
-plugin path varies by OS:
+Install destinations match what the legacy `make install` used:
 
-- Linux: `~/.config/kicad/10.0/scripting/plugins/eda-sync/`
-- macOS: `~/Library/Preferences/kicad/10.0/scripting/plugins/eda-sync/`
-- Windows: `%USERPROFILE%\Documents\KiCad\10.0\scripting\plugins\eda-sync\` (manual)
+- Linux: `~/.local/share/kicad/10.0/3rdparty/plugins/eda-sync/`
+- macOS: `~/Library/Preferences/kicad/10.0/3rdparty/plugins/eda-sync/`
+- Windows: `%USERPROFILE%\Documents\KiCad\10.0\3rdparty\plugins\eda-sync\`
 
-You install by symlinking the `kicad_plugin/` subfolder of this repo
-into the KiCad plugins path above. The Go binary lives one level up
-(in `tools/kicad-sync-go/`), so the shim resolves it via `..`.
+Override the destination via `EDA_KICAD_PLUGIN_DIR` (e.g. for Flatpak
+KiCad or a custom `XDG_DATA_HOME`):
 
-**Windows (PowerShell):**
-```powershell
-$dst = "$env:USERPROFILE\Documents\KiCad\10.0\scripting\plugins\eda-sync"
-cd C:\Users\you\Code\canvas_eda\tools\kicad-sync-go
-New-Item -ItemType SymbolicLink -Path $dst -Target "$((Get-Location).Path)\kicad_plugin"
+```bash
+EDA_KICAD_PLUGIN_DIR=~/.var/app/org.kicad.KiCad/data/kicad/10.0/3rdparty/plugins/eda-sync \
+  eda-kicad-sync --install-kicad-plugin
 ```
 
-### Build from source (one-time codegen)
+To upgrade: re-run `go install …@latest`. Because the install symlinks
+into `$GOBIN` on Unix, KiCad picks up the new binary on its next launch
+without rerunning `--install-kicad-plugin`. On Windows you'll need to
+re-run `--install-kicad-plugin` to refresh the copied binary.
 
-The agent depends on Go bindings generated from KiCad's protobuf API
-definitions. The `internal/kicad/proto/` directory ships empty; running
-the codegen script populates it. You only need to run this once per
-upstream KiCad protocol bump.
+### From source (contributors)
 
-You'll need:
+```bash
+git clone https://github.com/eugenepentland/canvas_eda
+cd canvas_eda/tools/kicad-sync-go
+make install                    # builds + symlinks the entire repo dir
+```
+
+Use this when iterating on the agent itself — `make install` symlinks
+the working tree into KiCad's plugin folder so `git pull` updates the
+plugin in place.
+
+### Regenerating protobuf bindings (rare)
+
+Generated bindings live in `internal/kicad/proto/` and are committed.
+You only need to regenerate when KiCad bumps its protocol:
 
 - **protoc** on PATH ([releases](https://github.com/protocolbuffers/protobuf/releases))
 - **protoc-gen-go**: `go install google.golang.org/protobuf/cmd/protoc-gen-go@latest`
-  (puts `protoc-gen-go` in `$(go env GOPATH)/bin` — make sure that's on PATH)
 - A clone of KiCad's source tree
 
-**Linux / macOS:**
 ```bash
 git clone --depth 1 https://gitlab.com/kicad/code/kicad ~/src/kicad
 KICAD_SRC=~/src/kicad make proto
-make build
 ```
 
-**Windows (PowerShell):**
-```powershell
-git clone --depth 1 https://gitlab.com/kicad/code/kicad C:\Users\you\Code\kicad-src
-$env:KICAD_SRC = "C:\Users\you\Code\kicad-src"
-.\scripts\gen-proto.ps1
-go build -o eda-kicad-sync.exe .\cmd\eda-kicad-sync
-```
-
-(PowerShell uses `$env:VAR = "..."` per-line — `VAR=value command`
-inline syntax is bash-only. You can also run `gen-proto.sh` from Git
-Bash if you'd rather: `KICAD_SRC=/c/Users/you/Code/kicad-src ./scripts/gen-proto.sh`.)
+The Windows equivalent uses `scripts/gen-proto.ps1`; see the script for
+details.
 
 ## First-run setup
 
@@ -176,9 +176,10 @@ prune, flag_stale, empty plan.
 
 - **`KICAD_API_SOCKET is not set`** — run from KiCad's plugin button,
   or export `KICAD_API_SOCKET` and `KICAD_API_TOKEN` manually for CLI use.
-- **`protobuf wire format not generated yet`** — run `make proto` (see
-  "Build from source" above). The error message is intentional in builds
-  shipped without generated bindings.
+- **`protobuf wire format not generated yet`** — only seen by contributors
+  who deleted `internal/kicad/proto/`. Run `make proto` to regenerate
+  (see "Regenerating protobuf bindings" above). End-user installs via
+  `go install` already include the bindings.
 - **`server rejected token (401)`** — server doesn't have the
   `/api/sync-plan/:name` endpoint, or the cached OAuth client was deleted
   on the server. Delete `~/.config/eda-kicad-sync/clients.json` to force
