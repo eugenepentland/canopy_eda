@@ -78,33 +78,28 @@ column (supplier_pn, lifecycle, revision, …) is a pure server-side
 change — the agent already reads every Field item on the footprint
 into the map and ships it.
 
-## What's currently still thick on the agent (and the plan)
+## How footprint geometry travels
 
-The agent today still hand-builds protobuf messages for `add` and
-`swap_footprint` — `buildFootprintInstance` / `buildPad` /
-`buildPadStack` and helpers in
-[`internal/kicad/builder.go`](../tools/kicad-sync-go/internal/kicad/builder.go).
-These contain hardcoded mappings:
-
-- pad type → `PadType` enum (`smd → PT_SMD`)
-- pad shape → `PadStackShape` enum (`rect → PSS_RECTANGLE`)
-- layer name → `BoardLayer` enum (`F.Cu → BL_F_Cu`)
-
-Adding a new pad shape, pad type, or layer requires updating these
-tables and pushing a new agent build.
-
-**Migration target:** the server emits proto-canonical JSON for the
-`FootprintInstance` / `Footprint` proto messages — using KiCad's
-generated camelCase field names, string enum values, and Any-wrapped
+Server emits proto-canonical JSON for `kiapi.board.types.Footprint`
+messages — camelCase field names, string enum values, Any-wrapped
 items with `@type: type.googleapis.com/kiapi.board.types.Pad`. The
-agent calls `protojson.Unmarshal` directly into
-`*board_types.FootprintInstance`, deletes the entire builder
-package, and inherits new geometry features for free as long as the
-generated `.pb.go` files are regenerated when KiCad bumps its proto
-schema.
+agent decodes via `protojson.Unmarshal` into `*board_types.Footprint`
+with no schema-aware code on the client. New pad shapes / types /
+layers / drill features are server-only changes; the agent inherits
+them for free as long as the generated `.pb.go` files match KiCad's
+proto schema.
 
-The migration is mechanical but touches both sides; it's tracked as
-the next concrete refactor of this surface.
+Per-instance pad-net assignments don't travel inside the geometry
+JSON (it's shared across every instance of a footprint name). They
+ride alongside in `op.PadNets` and are stamped onto the decoded Pad
+messages by `stampPadNets` in the agent — a tiny bit of glue that
+wraps `protojson.Unmarshal`.
+
+The two places the server still hand-rolls the JSON shape are
+`writePadProtoJson` (pad geometry) and `loadFootprintDef` (the
+Footprint wrapper) in `src/serve/sync.zig`. Adding a new field to
+either is a one-line server change — tables for pad-type and
+pad-shape enum names live next to those writers.
 
 ## When the agent *does* need an update
 
@@ -151,10 +146,9 @@ Agent (Go) — owns IPC plumbing only:
 - `internal/kicad/iface.go` — `Client` interface, the small surface
   the orchestrator depends on.
 - `internal/kicad/client.go` — real IPC implementation; the only file
-  that touches NNG + protobuf.
-- `internal/kicad/builder.go` — proto-message builder for `add` /
-  `swap_footprint`; **the next file to delete** when the proto-
-  canonical migration lands.
+  that touches NNG + protobuf. `decodeFootprintDef` is the entire
+  geometry surface (calls `protojson.Unmarshal`); `stampPadNets`
+  threads per-instance net assignments onto the decoded pads.
 - `internal/kicad/fake.go` — in-process fake for tests.
 
 ## Versioning

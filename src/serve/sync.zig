@@ -255,8 +255,21 @@ const PROTO_PADSTACK_NORMAL = "PST_NORMAL";
 fn protoPadType(short: []const u8) []const u8 {
     if (std.mem.eql(u8, short, "smd")) return PROTO_PADTYPE_SMD;
     if (std.mem.eql(u8, short, "thru_hole") or std.mem.eql(u8, short, "thru")) return PROTO_PADTYPE_PTH;
-    if (std.mem.eql(u8, short, "np_thru_hole") or std.mem.eql(u8, short, "np_thru")) return PROTO_PADTYPE_NPTH;
+    if (std.mem.eql(u8, short, "np_thru_hole") or std.mem.eql(u8, short, "np_thru") or std.mem.eql(u8, short, "npth")) return PROTO_PADTYPE_NPTH;
     return PROTO_PADTYPE_SMD;
+}
+
+/// True when `s` is an EDA pad-type keyword. Used to distinguish the two
+/// `(pad …)` syntactic forms: numbered pads start `(pad "1" smd …)` while
+/// unnumbered NPTH mounting holes are `(pad npth circle …)` — the parser
+/// has to decide whether nodes[1] is a number or the type.
+fn isPadTypeKeyword(s: []const u8) bool {
+    return std.mem.eql(u8, s, "smd") or
+        std.mem.eql(u8, s, "thru") or
+        std.mem.eql(u8, s, "thru_hole") or
+        std.mem.eql(u8, s, "np_thru") or
+        std.mem.eql(u8, s, "np_thru_hole") or
+        std.mem.eql(u8, s, "npth");
 }
 
 fn protoPadShape(short: []const u8) []const u8 {
@@ -282,12 +295,23 @@ fn protoBoardLayer(short: []const u8) []const u8 {
 /// what `protojson.Unmarshal` expects for `kiapi.board.types.Pad`:
 /// camelCase field names, string enum values, and a `@type` field that
 /// makes the decode resolve into `*board_types.Pad` on the agent side.
+///
+/// Two `(pad …)` forms in the EDA DSL:
+///   (pad "1" smd roundrect (pos …) (size …))   — numbered electrical pad
+///   (pad npth circle (pos …) (size …) (drill …))   — unnumbered NPTH mounting hole
+/// We detect the second form by checking whether nodes[1] is a known
+/// pad-type keyword; otherwise nodes[1] is the pad number string.
 fn writePadProtoJson(arena: std.mem.Allocator, w: anytype, pad: env_mod_node.Node, first: *bool) !void {
     const nodes = pad.asList() orelse return;
-    if (nodes.len < 4) return;
-    const num = padNumberText(arena, nodes[1]) orelse return;
-    const ptype = nodes[2].asAtom() orelse return;
-    const shape = nodes[3].asAtom() orelse return;
+    if (nodes.len < 3) return;
+    const unnumbered = if (nodes[1].asAtom()) |a| isPadTypeKeyword(a) else false;
+    const type_idx: usize = if (unnumbered) 1 else 2;
+    const shape_idx: usize = if (unnumbered) 2 else 3;
+    if (nodes.len <= shape_idx) return;
+
+    const num: []const u8 = if (unnumbered) "" else (padNumberText(arena, nodes[1]) orelse return);
+    const ptype = nodes[type_idx].asAtom() orelse return;
+    const shape = nodes[shape_idx].asAtom() orelse return;
 
     var pos_x: f64 = 0;
     var pos_y: f64 = 0;
@@ -296,7 +320,7 @@ fn writePadProtoJson(arena: std.mem.Allocator, w: anytype, pad: env_mod_node.Nod
     var size_h: f64 = 0;
     var drill_d: f64 = 0;
 
-    for (nodes[4..]) |n| {
+    for (nodes[shape_idx + 1 ..]) |n| {
         if (n.isForm("pos")) {
             const pl = n.asList().?;
             if (pl.len >= 3) {
