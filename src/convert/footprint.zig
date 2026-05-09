@@ -6,6 +6,7 @@ const Node = ast.Node;
 const Span = ast.Span;
 
 // ── Constants ─────────────────────────────────────────────────────
+const SHAPE_ROUNDRECT = "roundrect";
 const FULL_TURN_DEG: f64 = 360.0;
 const ROT_45_DEG: f64 = 45.0;
 const ROT_135_DEG: f64 = 135.0;
@@ -99,6 +100,8 @@ fn emitPad(w: anytype, node: Node) !void {
     var drill_y: f64 = 0;
     var has_drill = false;
     var is_oval_drill = false;
+    var rratio: f64 = 0;
+    var has_rratio = false;
 
     for (children[4..]) |child| {
         if (child.isForm("at")) {
@@ -133,6 +136,13 @@ fn emitPad(w: anytype, node: Node) !void {
                 }
             }
         }
+        if (child.isForm("roundrect_rratio")) {
+            const cl = child.asList().?;
+            if (cl.len >= 2) {
+                rratio = cl[1].asNumber() orelse 0;
+                has_rratio = true;
+            }
+        }
     }
 
     // Apply pad rotation: 90° or 270° swaps width and height
@@ -151,156 +161,132 @@ fn emitPad(w: anytype, node: Node) !void {
             try w.print(" (drill {d:.2})", .{drill_x});
         }
     }
+    // Preserve rratio so the proto sync emits the right cornerRoundingRatio —
+    // 0.5 on a square pad is what makes a steel-spacer SMD ring render as a
+    // visual circle even though the underlying shape is roundrect.
+    if (has_rratio and std.mem.eql(u8, out_shape, SHAPE_ROUNDRECT)) {
+        try w.print(" (roundrect_rratio {d:.3})", .{rratio});
+    }
     try w.writeAll(")\n");
 }
 
-fn emitCourtyard(w: anytype, children: []const Node) !void {
-    // Look for fp_rect on F.CrtYd layer
-    for (children) |child| {
-        if (child.isForm("fp_rect")) {
-            const cl = child.asList() orelse continue;
-            var layer: []const u8 = "";
-            var x1: f64 = 0;
-            var y1: f64 = 0;
-            var x2: f64 = 0;
-            var y2: f64 = 0;
-
-            for (cl[1..]) |sub| {
-                if (sub.isForm("layer")) {
-                    const sl = sub.asList().?;
-                    if (sl.len >= 2) layer = sl[1].asAtom() orelse sl[1].asString() orelse "";
-                }
-                if (sub.isForm("start")) {
-                    const sl = sub.asList().?;
-                    if (sl.len >= 3) {
-                        x1 = sl[1].asNumber() orelse 0;
-                        y1 = sl[2].asNumber() orelse 0;
-                    }
-                }
-                if (sub.isForm("end")) {
-                    const sl = sub.asList().?;
-                    if (sl.len >= 3) {
-                        x2 = sl[1].asNumber() orelse 0;
-                        y2 = sl[2].asNumber() orelse 0;
-                    }
-                }
-            }
-
-            if (std.mem.eql(u8, layer, "F.CrtYd")) {
-                try w.print("  (courtyard (rect {d:.2} {d:.2} {d:.2} {d:.2}))\n", .{ x1, y1, x2, y2 });
-                return;
-            }
-        }
+/// Read a `(name X Y …)` form returning the first two numeric children, or
+/// `null` if absent. Used to extract `(start X Y)`, `(end X Y)`, `(center X
+/// Y)` from inside fp_line / fp_circle / fp_rect bodies.
+fn readPair(items: []const Node, name: []const u8) ?struct { x: f64, y: f64 } {
+    for (items) |sub| {
+        if (!sub.isForm(name)) continue;
+        const sl = sub.asList() orelse continue;
+        if (sl.len < 3) return null;
+        const x = sl[1].asNumber() orelse return null;
+        const y = sl[2].asNumber() orelse return null;
+        return .{ .x = x, .y = y };
     }
+    return null;
+}
 
-    // Fallback: derive courtyard bounding box from fp_line on F.CrtYd
+fn emitCourtyard(w: anytype, children: []const Node) !void {
+    // fp_circle on F.CrtYd is what mounting-spacer / round-body footprints
+    // (e.g. wurth WA-SMSI 9774020633R) use instead of a rectangular boundary.
+    // Capture it before falling through to the rect / line-bbox paths below.
+    for (children) |child| {
+        if (try emitCourtyardCircle(w, child)) return;
+    }
+    for (children) |child| {
+        if (try emitCourtyardRect(w, child)) return;
+    }
+    try emitCourtyardLineBBox(w, children);
+}
+
+fn emitCourtyardCircle(w: anytype, child: Node) !bool {
+    if (!child.isForm("fp_circle")) return false;
+    const cl = child.asList() orelse return false;
+    if (!std.mem.eql(u8, getLayer(cl[1..]), "F.CrtYd")) return false;
+    const center = readPair(cl[1..], "center") orelse return false;
+    const end = readPair(cl[1..], "end") orelse return false;
+    const dx = end.x - center.x;
+    const dy = end.y - center.y;
+    const radius = @sqrt(dx * dx + dy * dy);
+    try w.print("  (courtyard (circle ({d:.2} {d:.2}) {d:.3}))\n", .{ center.x, center.y, radius });
+    return true;
+}
+
+fn emitCourtyardRect(w: anytype, child: Node) !bool {
+    if (!child.isForm("fp_rect")) return false;
+    const cl = child.asList() orelse return false;
+    if (!std.mem.eql(u8, getLayer(cl[1..]), "F.CrtYd")) return false;
+    const start = readPair(cl[1..], "start") orelse return false;
+    const end = readPair(cl[1..], "end") orelse return false;
+    try w.print("  (courtyard (rect {d:.2} {d:.2} {d:.2} {d:.2}))\n", .{ start.x, start.y, end.x, end.y });
+    return true;
+}
+
+fn emitCourtyardLineBBox(w: anytype, children: []const Node) !void {
     var min_x: f64 = std.math.inf(f64);
     var min_y: f64 = std.math.inf(f64);
     var max_x: f64 = -std.math.inf(f64);
     var max_y: f64 = -std.math.inf(f64);
     var found = false;
-
     for (children) |child| {
-        if (child.isForm("fp_line")) {
-            const cl = child.asList() orelse continue;
-            const layer = getLayer(cl[1..]);
-            if (std.mem.eql(u8, layer, "F.CrtYd")) {
-                found = true;
-                for (cl[1..]) |sub| {
-                    if (sub.isForm("start") or sub.isForm("end")) {
-                        const sl = sub.asList().?;
-                        if (sl.len >= 3) {
-                            const px = sl[1].asNumber() orelse continue;
-                            const py = sl[2].asNumber() orelse continue;
-                            if (px < min_x) min_x = px;
-                            if (py < min_y) min_y = py;
-                            if (px > max_x) max_x = px;
-                            if (py > max_y) max_y = py;
-                        }
-                    }
-                }
-            }
-        }
+        if (try expandBBoxFromCrtydLine(child, &min_x, &min_y, &max_x, &max_y)) found = true;
     }
-
     if (found) {
         try w.print("  (courtyard (rect {d:.3} {d:.3} {d:.3} {d:.3}))\n", .{ min_x, min_y, max_x, max_y });
     }
 }
 
+fn expandBBoxFromCrtydLine(child: Node, min_x: *f64, min_y: *f64, max_x: *f64, max_y: *f64) !bool {
+    if (!child.isForm("fp_line")) return false;
+    const cl = child.asList() orelse return false;
+    if (!std.mem.eql(u8, getLayer(cl[1..]), "F.CrtYd")) return false;
+    if (readPair(cl[1..], "start")) |p| accumulateBBox(p.x, p.y, min_x, min_y, max_x, max_y);
+    if (readPair(cl[1..], "end")) |p| accumulateBBox(p.x, p.y, min_x, min_y, max_x, max_y);
+    return true;
+}
+
+fn accumulateBBox(x: f64, y: f64, min_x: *f64, min_y: *f64, max_x: *f64, max_y: *f64) void {
+    if (x < min_x.*) min_x.* = x;
+    if (y < min_y.*) min_y.* = y;
+    if (x > max_x.*) max_x.* = x;
+    if (y > max_y.*) max_y.* = y;
+}
+
 fn emitSilkscreen(w: anytype, children: []const Node) !void {
     var has_silk = false;
-
     for (children) |child| {
-        if (child.isForm("fp_line")) {
-            const cl = child.asList() orelse continue;
-            const layer = getLayer(cl[1..]);
-            if (std.mem.eql(u8, layer, "F.SilkS")) {
-                if (!has_silk) {
-                    try w.writeAll("  (silkscreen\n");
-                    has_silk = true;
-                }
-                var sx: f64 = 0;
-                var sy: f64 = 0;
-                var ex: f64 = 0;
-                var ey: f64 = 0;
-                for (cl[1..]) |sub| {
-                    if (sub.isForm("start")) {
-                        const sl = sub.asList().?;
-                        if (sl.len >= 3) {
-                            sx = sl[1].asNumber() orelse 0;
-                            sy = sl[2].asNumber() orelse 0;
-                        }
-                    }
-                    if (sub.isForm("end")) {
-                        const sl = sub.asList().?;
-                        if (sl.len >= 3) {
-                            ex = sl[1].asNumber() orelse 0;
-                            ey = sl[2].asNumber() orelse 0;
-                        }
-                    }
-                }
-                try w.print("    (line ({d:.2} {d:.2}) ({d:.2} {d:.2}))\n", .{ sx, sy, ex, ey });
-            }
-        }
-        if (child.isForm("fp_circle")) {
-            const cl = child.asList() orelse continue;
-            const layer = getLayer(cl[1..]);
-            if (std.mem.eql(u8, layer, "F.SilkS")) {
-                if (!has_silk) {
-                    try w.writeAll("  (silkscreen\n");
-                    has_silk = true;
-                }
-                var cx: f64 = 0;
-                var cy: f64 = 0;
-                var ex: f64 = 0;
-                var ey: f64 = 0;
-                for (cl[1..]) |sub| {
-                    if (sub.isForm("center")) {
-                        const sl = sub.asList().?;
-                        if (sl.len >= 3) {
-                            cx = sl[1].asNumber() orelse 0;
-                            cy = sl[2].asNumber() orelse 0;
-                        }
-                    }
-                    if (sub.isForm("end")) {
-                        const sl = sub.asList().?;
-                        if (sl.len >= 3) {
-                            ex = sl[1].asNumber() orelse 0;
-                            ey = sl[2].asNumber() orelse 0;
-                        }
-                    }
-                }
-                const dx = ex - cx;
-                const dy = ey - cy;
-                const radius = @sqrt(dx * dx + dy * dy);
-                try w.print("    (circle ({d:.2} {d:.2}) {d:.2})\n", .{ cx, cy, radius });
-            }
-        }
+        try emitSilkLine(w, child, &has_silk);
+        try emitSilkCircle(w, child, &has_silk);
     }
-    if (has_silk) {
-        try w.writeAll("  )\n");
-    }
+    if (has_silk) try w.writeAll("  )\n");
+}
+
+fn emitSilkLine(w: anytype, child: Node, has_silk: *bool) !void {
+    if (!child.isForm("fp_line")) return;
+    const cl = child.asList() orelse return;
+    if (!std.mem.eql(u8, getLayer(cl[1..]), "F.SilkS")) return;
+    const start = readPair(cl[1..], "start") orelse return;
+    const end = readPair(cl[1..], "end") orelse return;
+    try ensureSilkOpen(w, has_silk);
+    try w.print("    (line ({d:.2} {d:.2}) ({d:.2} {d:.2}))\n", .{ start.x, start.y, end.x, end.y });
+}
+
+fn emitSilkCircle(w: anytype, child: Node, has_silk: *bool) !void {
+    if (!child.isForm("fp_circle")) return;
+    const cl = child.asList() orelse return;
+    if (!std.mem.eql(u8, getLayer(cl[1..]), "F.SilkS")) return;
+    const center = readPair(cl[1..], "center") orelse return;
+    const end = readPair(cl[1..], "end") orelse return;
+    const dx = end.x - center.x;
+    const dy = end.y - center.y;
+    const radius = @sqrt(dx * dx + dy * dy);
+    try ensureSilkOpen(w, has_silk);
+    try w.print("    (circle ({d:.2} {d:.2}) {d:.2})\n", .{ center.x, center.y, radius });
+}
+
+fn ensureSilkOpen(w: anytype, has_silk: *bool) !void {
+    if (has_silk.*) return;
+    try w.writeAll("  (silkscreen\n");
+    has_silk.* = true;
 }
 
 fn getLayer(items: []const Node) []const u8 {
@@ -334,7 +320,7 @@ pub fn mapPadType(kicad: []const u8) []const u8 {
 /// renderer understands; unrecognised shapes fall back to `rect` so import
 /// of an unfamiliar footprint still produces a usable approximation.
 pub fn mapPadShape(kicad: []const u8) []const u8 {
-    if (std.mem.eql(u8, kicad, "roundrect")) return "roundrect";
+    if (std.mem.eql(u8, kicad, SHAPE_ROUNDRECT)) return SHAPE_ROUNDRECT;
     if (std.mem.eql(u8, kicad, "circle")) return "circle";
     if (std.mem.eql(u8, kicad, "oval")) return "oval";
     if (std.mem.eql(u8, kicad, "rect")) return "rect";

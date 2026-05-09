@@ -12,6 +12,8 @@ pub const FootprintError = std.mem.Allocator.Error || parser_mod.ParseError || e
 // ── Constants ─────────────────────────────────────────────────────
 const PAD_MIN_CHILDREN: usize = 5;
 const RECT_MIN_CHILDREN: usize = 5;
+const DEFAULT_ROUNDRECT_RRATIO: f64 = 0.25;
+const KICAD_FILL_NONE = "    (fill none)\n";
 const STEP_EXT_LEN: usize = 5;
 // ZIP file format constants (PKZIP appnote.txt)
 const ZIP_VERSION_NEEDED: u16 = 20;
@@ -231,8 +233,16 @@ fn emitKicadPad(w: anytype, node: ast.Node) !void {
     var is_oval_drill = false;
     var mask_margin: ?f64 = null;
     var no_paste = false;
+    // rratio defaults match KiCad's library default; override via
+    // `(roundrect_rratio R)` on the .sexp pad form. 0.5 turns a square
+    // pad into a circle (used by mounting-spacer footprints).
+    var rratio: f64 = DEFAULT_ROUNDRECT_RRATIO;
 
     for (children[4..]) |child| {
+        if (child.isForm("roundrect_rratio")) {
+            const cl = child.asList().?;
+            if (cl.len >= 2) rratio = cl[1].asNumber() orelse DEFAULT_ROUNDRECT_RRATIO;
+        }
         if (child.isForm("pos")) {
             const cl = child.asList().?;
             if (cl.len >= 3) {
@@ -308,7 +318,7 @@ fn emitKicadPad(w: anytype, node: ast.Node) !void {
             try w.writeAll("    (layers \"F.Cu\" \"F.Mask\" \"F.Paste\")\n");
         }
         if (std.mem.eql(u8, kicad_shape, "roundrect")) {
-            try w.writeAll("    (roundrect_rratio 0.25)\n");
+            try w.print("    (roundrect_rratio {d:.3})\n", .{rratio});
         }
     } else if (std.mem.eql(u8, pad_type_internal, "thru")) {
         try w.writeAll("    (layers \"*.Cu\" \"*.Mask\")\n");
@@ -323,7 +333,7 @@ fn emitKicadPad(w: anytype, node: ast.Node) !void {
 
 fn emitKicadCourtyard(w: anytype, node: ast.Node) !void {
     const children = node.asList() orelse return;
-    // (courtyard (rect X1 Y1 X2 Y2))
+    // (courtyard (rect X1 Y1 X2 Y2)) and (courtyard (circle (CX CY) R))
     for (children[1..]) |child| {
         if (child.isForm("rect")) {
             const cl = child.asList() orelse continue;
@@ -334,10 +344,23 @@ fn emitKicadCourtyard(w: anytype, node: ast.Node) !void {
                 const y2 = cl[4].asNumber() orelse 0;
                 try w.print("  (fp_rect (start {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ x1, y1, x2, y2 });
                 try w.writeAll("    (stroke (width 0.05) (type default))\n");
-                try w.writeAll("    (fill none)\n");
+                try w.writeAll(KICAD_FILL_NONE);
                 try w.writeAll("    (layer \"F.CrtYd\")\n");
                 try w.writeAll("  )\n");
             }
+        } else if (child.isForm("circle")) {
+            const cl = child.asList() orelse continue;
+            if (cl.len < 3) continue;
+            const center = cl[1].asList() orelse continue;
+            if (center.len < 2) continue;
+            const cx = center[0].asNumber() orelse continue;
+            const cy = center[1].asNumber() orelse continue;
+            const r = cl[2].asNumber() orelse continue;
+            try w.print("  (fp_circle (center {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ cx, cy, cx + r, cy });
+            try w.writeAll("    (stroke (width 0.05) (type default))\n");
+            try w.writeAll(KICAD_FILL_NONE);
+            try w.writeAll("    (layer \"F.CrtYd\")\n");
+            try w.writeAll("  )\n");
         }
     }
 }
@@ -375,7 +398,7 @@ fn emitKicadSilkscreen(w: anytype, node: ast.Node) !void {
                     // KiCad uses center + end point
                     try w.print("  (fp_circle (center {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ cx, cy, cx + r, cy });
                     try w.writeAll("    (stroke (width 0.12) (type default))\n");
-                    try w.writeAll("    (fill none)\n");
+                    try w.writeAll(KICAD_FILL_NONE);
                     try w.writeAll("    (layer \"F.SilkS\")\n");
                     try w.writeAll("  )\n");
                 }

@@ -255,6 +255,19 @@ fn loadFootprintDefImpl(
         if (!child.isForm("pad")) continue;
         try writePadProtoJson(spc.arena, w, child, &first_item);
     }
+    // Courtyard / silkscreen graphics ship inline alongside Pads. Without
+    // these the wurth WA-SMSI mounting spacer renders without its F.CrtYd
+    // boundary because KiCad treats our partial Definition.Items as
+    // authoritative and never reads the staged library. RunAction "Update
+    // Footprint From Library" was the intended escape hatch but every
+    // candidate name returned RAS_INVALID, so we ship the geometry directly.
+    for (children[2..]) |child| {
+        if (child.isForm("courtyard")) {
+            try writeCourtyardProtoJson(w, child, &first_item);
+        } else if (child.isForm("silkscreen")) {
+            try writeSilkscreenProtoJson(w, child, &first_item);
+        }
+    }
     if (inst_opt) |inst| {
         try writeFieldProtoJson(w, FIELD_CANOPY_UUID, inst.uuid, &first_item);
         for (inst.properties) |p| {
@@ -286,10 +299,17 @@ fn writeFieldProtoJson(w: anytype, name: []const u8, value: []const u8, first: *
 // values the generated Go .pb.go expects for protojson decoding. Adding a
 // new shape/type/layer is one line here on the server, with NO agent change.
 const PROTO_TYPE_URL_PAD = "type.googleapis.com/kiapi.board.types.Pad";
+const PROTO_TYPE_URL_BOARDSHAPE = "type.googleapis.com/kiapi.board.types.BoardGraphicShape";
 const PROTO_PADTYPE_SMD = "PT_SMD";
 const PROTO_PADTYPE_PTH = "PT_PTH";
 const PROTO_PADTYPE_NPTH = "PT_NPTH";
 const PROTO_PADSTACK_NORMAL = "PST_NORMAL";
+const PROTO_LAYER_F_CRTYD = "BL_F_CrtYd";
+const PROTO_LAYER_F_SILK = "BL_F_SilkS";
+const COURTYARD_STROKE_MM: f64 = 0.05;
+const SILK_STROKE_MM: f64 = 0.12;
+const RECT_NODE_MIN_CHILDREN: usize = 5;
+const DEFAULT_ROUNDRECT_RRATIO: f64 = 0.25;
 
 fn protoPadType(short: []const u8) []const u8 {
     if (std.mem.eql(u8, short, "smd")) return PROTO_PADTYPE_SMD;
@@ -327,7 +347,120 @@ fn protoBoardLayer(short: []const u8) []const u8 {
     if (std.mem.eql(u8, short, "B.Mask")) return "BL_B_Mask";
     if (std.mem.eql(u8, short, "F.SilkS")) return "BL_F_SilkS";
     if (std.mem.eql(u8, short, "B.SilkS")) return "BL_B_SilkS";
+    if (std.mem.eql(u8, short, "F.CrtYd")) return "BL_F_CrtYd";
+    if (std.mem.eql(u8, short, "B.CrtYd")) return "BL_B_CrtYd";
     return "BL_F_Cu";
+}
+
+/// Emit a `{xNm, yNm}` Vector2 in proto-canonical JSON form.
+fn writeProtoVec2(w: anytype, x_mm: f64, y_mm: f64) !void {
+    try w.print("{{\"xNm\":{d},\"yNm\":{d}}}", .{ mmToNm(x_mm), mmToNm(y_mm) });
+}
+
+/// Write the BoardGraphicShape header (Any tag, GraphicAttributes, layer)
+/// up to the geometry oneof. Caller writes the geometry field
+/// (`segment` / `circle` / `rectangle`) and closes the outer JSON object.
+fn writeBoardShapeOpen(w: anytype, layer: []const u8, stroke_mm: f64, first: *bool) !void {
+    if (!first.*) try w.writeAll(",");
+    first.* = false;
+    const stroke_nm = mmToNm(stroke_mm);
+    try w.writeAll("{\"@type\":\"" ++ PROTO_TYPE_URL_BOARDSHAPE ++ "\",");
+    try w.print("\"layer\":\"{s}\",", .{layer});
+    try w.writeAll("\"shape\":{\"attributes\":{\"stroke\":{\"width\":");
+    try w.print("{{\"valueNm\":{d}}},\"style\":\"SLS_DEFAULT\"}},", .{stroke_nm});
+    try w.writeAll("\"fill\":{\"fillType\":\"GFT_UNFILLED\"}},");
+}
+
+fn writeCircleGeom(w: anytype, cx: f64, cy: f64, r: f64) !void {
+    try w.writeAll("\"circle\":{\"center\":");
+    try writeProtoVec2(w, cx, cy);
+    try w.writeAll(",\"radiusPoint\":");
+    try writeProtoVec2(w, cx + r, cy);
+    try w.writeAll("}");
+}
+
+fn writeRectGeom(w: anytype, x1: f64, y1: f64, x2: f64, y2: f64) !void {
+    try w.writeAll("\"rectangle\":{\"topLeft\":");
+    try writeProtoVec2(w, x1, y1);
+    try w.writeAll(",\"bottomRight\":");
+    try writeProtoVec2(w, x2, y2);
+    try w.writeAll("}");
+}
+
+fn writeSegmentGeom(w: anytype, sx: f64, sy: f64, ex: f64, ey: f64) !void {
+    try w.writeAll("\"segment\":{\"start\":");
+    try writeProtoVec2(w, sx, sy);
+    try w.writeAll(",\"end\":");
+    try writeProtoVec2(w, ex, ey);
+    try w.writeAll("}");
+}
+
+fn parseCirclePoints(node: env_mod_node.Node) ?struct { cx: f64, cy: f64, r: f64 } {
+    const cl = node.asList() orelse return null;
+    if (cl.len < 3) return null;
+    const center = cl[1].asList() orelse return null;
+    if (center.len < 2) return null;
+    const cx = center[0].asNumber() orelse return null;
+    const cy = center[1].asNumber() orelse return null;
+    const r = cl[2].asNumber() orelse return null;
+    return .{ .cx = cx, .cy = cy, .r = r };
+}
+
+fn parseSegmentPoints(node: env_mod_node.Node) ?struct { sx: f64, sy: f64, ex: f64, ey: f64 } {
+    const cl = node.asList() orelse return null;
+    if (cl.len < 3) return null;
+    const start = cl[1].asList() orelse return null;
+    const end = cl[2].asList() orelse return null;
+    if (start.len < 2 or end.len < 2) return null;
+    return .{
+        .sx = start[0].asNumber() orelse return null,
+        .sy = start[1].asNumber() orelse return null,
+        .ex = end[0].asNumber() orelse return null,
+        .ey = end[1].asNumber() orelse return null,
+    };
+}
+
+/// Emit a `(courtyard …)` form as one or more BoardGraphicShape Any-wrapped
+/// items on F.CrtYd. Supports `(rect X1 Y1 X2 Y2)` and
+/// `(circle (CX CY) R)` — the latter is what mounting-spacer footprints use.
+fn writeCourtyardProtoJson(w: anytype, node: env_mod_node.Node, first: *bool) !void {
+    const children = node.asList() orelse return;
+    for (children[1..]) |child| {
+        if (child.isForm("rect")) {
+            const cl = child.asList() orelse continue;
+            if (cl.len < RECT_NODE_MIN_CHILDREN) continue;
+            const x1 = cl[1].asNumber() orelse continue;
+            const y1 = cl[2].asNumber() orelse continue;
+            const x2 = cl[3].asNumber() orelse continue;
+            const y2 = cl[4].asNumber() orelse continue;
+            try writeBoardShapeOpen(w, PROTO_LAYER_F_CRTYD, COURTYARD_STROKE_MM, first);
+            try writeRectGeom(w, x1, y1, x2, y2);
+            try w.writeAll("}}");
+        } else if (child.isForm("circle")) {
+            const c = parseCirclePoints(child) orelse continue;
+            try writeBoardShapeOpen(w, PROTO_LAYER_F_CRTYD, COURTYARD_STROKE_MM, first);
+            try writeCircleGeom(w, c.cx, c.cy, c.r);
+            try w.writeAll("}}");
+        }
+    }
+}
+
+/// Emit a `(silkscreen …)` form as BoardGraphicShape items on F.SilkS.
+fn writeSilkscreenProtoJson(w: anytype, node: env_mod_node.Node, first: *bool) !void {
+    const children = node.asList() orelse return;
+    for (children[1..]) |child| {
+        if (child.isForm("line")) {
+            const seg = parseSegmentPoints(child) orelse continue;
+            try writeBoardShapeOpen(w, PROTO_LAYER_F_SILK, SILK_STROKE_MM, first);
+            try writeSegmentGeom(w, seg.sx, seg.sy, seg.ex, seg.ey);
+            try w.writeAll("}}");
+        } else if (child.isForm("circle")) {
+            const c = parseCirclePoints(child) orelse continue;
+            try writeBoardShapeOpen(w, PROTO_LAYER_F_SILK, SILK_STROKE_MM, first);
+            try writeCircleGeom(w, c.cx, c.cy, c.r);
+            try w.writeAll("}}");
+        }
+    }
 }
 
 /// Emit one pad as a proto-canonical Any-wrapped Pad message. The shape is
@@ -358,6 +491,10 @@ fn writePadProtoJson(arena: std.mem.Allocator, w: anytype, pad: env_mod_node.Nod
     var size_w: f64 = 0;
     var size_h: f64 = 0;
     var drill_d: f64 = 0;
+    // Default rratio matches KiCad's library default. Override via
+    // `(roundrect_rratio R)` — 0.5 turns a square pad into a circle, used
+    // by mounting-spacer footprints (e.g. wurth WA-SMSI).
+    var rratio: f64 = DEFAULT_ROUNDRECT_RRATIO;
 
     for (nodes[shape_idx + 1 ..]) |n| {
         if (n.isForm("pos")) {
@@ -376,6 +513,9 @@ fn writePadProtoJson(arena: std.mem.Allocator, w: anytype, pad: env_mod_node.Nod
         } else if (n.isForm("drill")) {
             const dl = n.asList().?;
             if (dl.len >= 2) drill_d = dl[1].asNumber() orelse 0;
+        } else if (n.isForm("roundrect_rratio")) {
+            const rl = n.asList().?;
+            if (rl.len >= 2) rratio = rl[1].asNumber() orelse DEFAULT_ROUNDRECT_RRATIO;
         }
     }
 
@@ -402,7 +542,7 @@ fn writePadProtoJson(arena: std.mem.Allocator, w: anytype, pad: env_mod_node.Nod
     try w.print("\"layer\":\"{s}\",\"shape\":\"{s}\"", .{ protoBoardLayer("F.Cu"), proto_shape });
     try w.print(",\"size\":{{\"xNm\":{d},\"yNm\":{d}}}", .{ mmToNm(size_w), mmToNm(size_h) });
     if (std.mem.eql(u8, proto_shape, "PSS_ROUNDRECT")) {
-        try w.writeAll(",\"cornerRoundingRatio\":0.25");
+        try w.print(",\"cornerRoundingRatio\":{d}", .{rratio});
     }
     try w.writeAll("}]");
     try w.print(",\"angle\":{{\"valueDegrees\":{d}}}", .{pos_rot});
