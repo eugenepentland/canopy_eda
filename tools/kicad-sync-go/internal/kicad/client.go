@@ -504,6 +504,47 @@ func buildLibraryFootprintInstance(uuid, entryName, ref, value string) *board_ty
 	return fp
 }
 
+// tryRefreshFootprints fires KiCad's "Update Footprints from Library"
+// action over IPC so newly-CreateItems'd FootprintInstances pick up
+// the geometry from the .kicad_mod we just staged. KiCad's TOOL_ACTION
+// names aren't a stable API (the proto comment explicitly warns
+// "command names may change as code is refactored"), so we try a list
+// of candidates and accept whichever one KiCad doesn't reject.
+//
+// Logged extensively because if every candidate fails we still want a
+// breadcrumb trail — a future KiCad version may rename the action and
+// we'll need to update the list.
+func (c *realClient) tryRefreshFootprints() {
+	candidates := []string{
+		// Most likely names based on KiCad's action namespace.
+		"pcbnew.EditorControl.updateFootprints",
+		"pcbnew.EditorControl.updateFootprint",
+		"pcbnew.EditFrame.updateFootprints",
+		"pcbnew.EditFrame.updateFootprint",
+		"pcbnew.EditorControl.changeFootprints",
+		"pcbnew.EditorControl.changeFootprint",
+	}
+	for _, action := range candidates {
+		synclog.Logf("RunAction: trying %q", action)
+		any, err := c.rpc(&editor_commands.RunAction{Action: action})
+		if err != nil {
+			synclog.Logf("RunAction %q rpc error: %v", action, err)
+			continue
+		}
+		var resp editor_commands.RunActionResponse
+		if uerr := any.UnmarshalTo(&resp); uerr != nil {
+			synclog.Logf("RunAction %q unmarshal error: %v", action, uerr)
+			continue
+		}
+		synclog.Logf("RunAction %q status=%v", action, resp.GetStatus())
+		if resp.GetStatus() == editor_commands.RunActionStatus_RAS_OK {
+			synclog.Logf("RunAction %q accepted; library geometry should now be inlined", action)
+			return
+		}
+	}
+	synclog.Logf("RunAction: none of the candidates were accepted; user may need to right-click → Update Footprint(s) From Library")
+}
+
 // newKIID mints a fresh RFC 4122 v4 UUID string suitable for KiCad's
 // `kiapi.common.types.KIID.value`. Used by SwapFootprint to avoid a
 // CreateItems / DeleteItems collision on the same UUID.
@@ -586,6 +627,16 @@ func (c *realClient) Push() error {
 			return fmt.Errorf("CreateItems: %w", err)
 		}
 		synclog.Logf("CreateItems OK")
+
+		// CreateItems with a LibraryIdentifier creates a FootprintInstance
+		// that *references* the library entry but doesn't inline its
+		// geometry — pads/silkscreen/drills only appear after a
+		// "Update Footprint(s) from Library" action. Trigger it
+		// programmatically so the user doesn't have to right-click
+		// every freshly-synced fp. Run a small list of candidate
+		// action names; KiCad's RunAction returns RAS_INVALID for
+		// names it doesn't recognise and we just keep going.
+		c.tryRefreshFootprints()
 	}
 
 	// 3. DeleteItems — flush removals.
