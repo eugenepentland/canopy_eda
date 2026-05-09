@@ -7,6 +7,7 @@ import (
 
 	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/eda"
 	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad"
+	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/synclog"
 )
 
 // Options bundles per-click flags so additions don't churn the Run
@@ -27,9 +28,16 @@ type Options struct {
 // Run pulls board state, asks the server for a plan, and applies the ops.
 // Returns the parsed response so the caller can show a result toast.
 func Run(client *eda.Client, kc kicad.Client, design string, opts Options) (*eda.SyncPlanResponse, error) {
+	synclog.Logf("Run design=%q prune=%v migrate=%v", design, opts.Prune, opts.MigrateHeuristic)
 	fps, err := kc.ListFootprints()
 	if err != nil {
+		synclog.Logf("ListFootprints failed: %v", err)
 		return nil, fmt.Errorf("list footprints: %w", err)
+	}
+	synclog.Logf("ListFootprints returned %d fps", len(fps))
+	for _, fp := range fps {
+		synclog.Logf("  fp ref=%q kid=%q canopy=%q name=%q pads=%d fields=%d",
+			fp.Reference, fp.KicadUUID, fp.UUID, fp.FootprintName, len(fp.Pads), len(fp.Fields))
 	}
 
 	req := eda.SyncPlanRequest{
@@ -37,14 +45,25 @@ func Run(client *eda.Client, kc kicad.Client, design string, opts Options) (*eda
 		PruneStale:       opts.Prune,
 		MigrateHeuristic: opts.MigrateHeuristic,
 	}
+	synclog.Logf("POST /api/sync-plan/%s with %d board fps", design, len(req.Board))
 	plan, err := client.SyncPlan(design, req)
 	if err != nil {
+		synclog.Logf("SyncPlan request failed: %v", err)
 		return nil, err
+	}
+	synclog.Logf("SyncPlan returned: design_version=%d ops=%d summary=%+v",
+		plan.DesignVersion, len(plan.Ops), plan.Summary)
+	for i, op := range plan.Ops {
+		synclog.Logf("  op[%d] %s uuid=%q ref=%q field=%q value=%q pad=%q net=%q fp_name=%q new_name=%q kicad_mod_len=%d pad_nets=%d",
+			i, op.Op, op.UUID, op.Ref, op.Field, op.Value, op.Pad, op.Net,
+			op.FootprintName, op.NewFootprintName, len(op.KicadMod), len(op.PadNets))
 	}
 
 	if err := apply(kc, design, plan); err != nil {
+		synclog.Logf("apply ops failed: %v", err)
 		return plan, fmt.Errorf("apply ops: %w", err)
 	}
+	synclog.Logf("apply ops completed")
 	return plan, nil
 }
 

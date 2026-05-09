@@ -17,6 +17,7 @@ import (
 	editor_commands "github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad/proto/common/commands/editor_commands"
 	base_types "github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad/proto/common/types/base_types"
 	enums "github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad/proto/common/types/enums"
+	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/synclog"
 )
 
 // Connect dials the KiCad IPC socket advertised in KICAD_API_SOCKET (set
@@ -37,10 +38,13 @@ func Connect() (Client, error) {
 	if !looksLikeURL(dialURL) {
 		dialURL = "ipc://" + socketPath
 	}
+	synclog.Logf("Connect: dialing %s (token=%s)", dialURL, synclog.Redact(token))
 	if err := sock.Dial(dialURL); err != nil {
 		_ = sock.Close()
+		synclog.Logf("Connect: dial failed: %v", err)
 		return nil, fmt.Errorf("dial %s: %w", dialURL, err)
 	}
+	synclog.Logf("Connect: dial OK")
 	return &realClient{sock: sock, token: token}, nil
 }
 
@@ -431,7 +435,14 @@ func (c *realClient) stageLibraryAndCheck(kicadMod, entryName string) error {
 	if boardPath == "" {
 		return errors.New("KiCad reported no board path; cannot stage footprint library")
 	}
-	return stageLibraryFootprint(boardPath, entryName, kicadMod)
+	synclog.Logf("stage library footprint entry=%q board=%q kicad_mod_len=%d",
+		entryName, boardPath, len(kicadMod))
+	if err := stageLibraryFootprint(boardPath, entryName, kicadMod); err != nil {
+		synclog.Logf("stage library failed: %v", err)
+		return err
+	}
+	synclog.Logf("stage library OK")
+	return nil
 }
 
 // buildLibraryFootprintInstance creates a minimal FootprintInstance proto
@@ -492,6 +503,7 @@ func (c *realClient) Push() error {
 	if c.commitID == nil {
 		return errors.New("Push without Begin")
 	}
+	synclog.Logf("Push: dirty=%d added=%d removed=%d", len(c.dirty), len(c.added), len(c.removed))
 
 	// 1. UpdateItems — flush dirty footprints.
 	if len(c.dirty) > 0 {
@@ -504,12 +516,15 @@ func (c *realClient) Push() error {
 			}
 			items = append(items, any)
 		}
+		synclog.Logf("UpdateItems: sending %d items", len(items))
 		if _, err := c.rpc(&editor_commands.UpdateItems{
 			Header: &base_types.ItemHeader{Document: c.doc},
 			Items:  items,
 		}); err != nil {
+			synclog.Logf("UpdateItems failed: %v", err)
 			return fmt.Errorf("UpdateItems: %w", err)
 		}
+		synclog.Logf("UpdateItems OK")
 	}
 
 	// 2. CreateItems — flush newly-added footprints.
@@ -522,12 +537,22 @@ func (c *realClient) Push() error {
 			}
 			items = append(items, any)
 		}
+		synclog.Logf("CreateItems: sending %d new fps", len(items))
+		for _, fp := range c.added {
+			synclog.Logf("  add fp id=%q lib=%q entry=%q ref=%q",
+				fp.GetId().GetValue(),
+				fp.GetDefinition().GetId().GetLibraryNickname(),
+				fp.GetDefinition().GetId().GetEntryName(),
+				fp.GetReferenceField().GetText().GetText().GetText())
+		}
 		if _, err := c.rpc(&editor_commands.CreateItems{
 			Header: &base_types.ItemHeader{Document: c.doc},
 			Items:  items,
 		}); err != nil {
+			synclog.Logf("CreateItems failed: %v", err)
 			return fmt.Errorf("CreateItems: %w", err)
 		}
+		synclog.Logf("CreateItems OK")
 	}
 
 	// 3. DeleteItems — flush removals.
@@ -536,12 +561,15 @@ func (c *realClient) Push() error {
 		for uuid := range c.removed {
 			ids = append(ids, &base_types.KIID{Value: uuid})
 		}
+		synclog.Logf("DeleteItems: sending %d uuids", len(ids))
 		if _, err := c.rpc(&editor_commands.DeleteItems{
 			Header:  &base_types.ItemHeader{Document: c.doc},
 			ItemIds: ids,
 		}); err != nil {
+			synclog.Logf("DeleteItems failed: %v", err)
 			return fmt.Errorf("DeleteItems: %w", err)
 		}
+		synclog.Logf("DeleteItems OK")
 	}
 
 	// 4. EndCommit (action: COMMIT, with our message).
@@ -551,8 +579,10 @@ func (c *realClient) Push() error {
 		Message: c.commitMessage,
 		Header:  &base_types.ItemHeader{Document: c.doc},
 	}); err != nil {
+		synclog.Logf("EndCommit failed: %v", err)
 		return fmt.Errorf("EndCommit: %w", err)
 	}
+	synclog.Logf("EndCommit OK; sync complete")
 
 	c.commitID = nil
 	c.dirty = nil

@@ -22,6 +22,7 @@ import (
 	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/oauth"
 	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/setup"
 	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/sync"
+	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/synclog"
 )
 
 func main() {
@@ -42,10 +43,19 @@ func main() {
 		return
 	}
 
+	synclog.Logf("startup args=%v setup=%v board=%q prune=%v migrate=%v",
+		os.Args[1:], *setupMode, *boardArg, *prune, *migrate)
+	synclog.Logf("env KICAD_API_SOCKET=%q KICAD_API_TOKEN=%s",
+		os.Getenv("KICAD_API_SOCKET"),
+		synclog.Redact(os.Getenv("KICAD_API_TOKEN")))
+
 	if err := run(*setupMode, *boardArg, *prune, *migrate); err != nil {
-		notify.Show("EDA Sync — error", err.Error())
+		synclog.Logf("FATAL run error: %v", err)
+		notify.Show("EDA Sync — error",
+			fmt.Sprintf("%s\n\nLog: %s", err.Error(), synclog.Path()))
 		os.Exit(1)
 	}
+	synclog.Logf("run completed cleanly")
 }
 
 func run(setupMode bool, boardArg string, prune, migrate bool) error {
