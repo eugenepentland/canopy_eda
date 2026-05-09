@@ -30,18 +30,20 @@ type PadAssign struct {
 // emitted ops so the agent's cache lookup resolves regardless of whether
 // the footprint already has a canopy_uuid.
 type BoardFp struct {
-	UUID          string      `json:"uuid"`
-	KicadUUID     string      `json:"kicad_uuid,omitempty"`
-	Ref           string      `json:"ref"`
-	Value         string      `json:"value"`
-	FootprintName string      `json:"footprint_name"`
-	// MPN as the user's KiCad currently records it. Empty when the
-	// footprint hasn't received an MPN from a prior sync. Server diffs
-	// against the design's `(mpn …)` property and emits a set_field op
-	// when they drift, so the BOM column in KiCad stays aligned with the
-	// schematic source of truth without re-emitting on every sync.
-	MPN  string      `json:"mpn,omitempty"`
-	Pads []PadAssign `json:"pads"`
+	UUID          string `json:"uuid"`
+	KicadUUID     string `json:"kicad_uuid,omitempty"`
+	Ref           string `json:"ref"`
+	Value         string `json:"value"`
+	FootprintName string `json:"footprint_name"`
+	// Fields is every custom KiCad field on this footprint, keyed by
+	// field name (e.g. "MPN", "Manufacturer", "canopy_uuid"). The server
+	// diffs design properties against this map and emits set_field ops
+	// for any drift — so a new field type becomes a pure server-side
+	// change, no agent update required. UUID above is the canonical
+	// canopy_uuid value duplicated out of Fields for the server's
+	// by_uuid matching index.
+	Fields map[string]string `json:"fields,omitempty"`
+	Pads   []PadAssign       `json:"pads"`
 }
 
 // SyncPlanRequest is the JSON body posted to /api/sync-plan/:name.

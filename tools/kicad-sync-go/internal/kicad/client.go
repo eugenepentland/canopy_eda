@@ -159,11 +159,17 @@ func footprintToNeutral(fp *board_types.FootprintInstance) Footprint {
 		}
 		var field board_types.Field
 		if err := item.UnmarshalTo(&field); err == nil {
-			switch field.GetName() {
-			case fieldCanopyUUID:
-				out.UUID = field.GetText().GetText().GetText()
-			case fieldMPN:
-				out.MPN = field.GetText().GetText().GetText()
+			name := field.GetName()
+			if name == "" {
+				continue
+			}
+			text := field.GetText().GetText().GetText()
+			if out.Fields == nil {
+				out.Fields = map[string]string{}
+			}
+			out.Fields[name] = text
+			if name == fieldCanopyUUID {
+				out.UUID = text
 			}
 			continue
 		}
@@ -174,13 +180,10 @@ func footprintToNeutral(fp *board_types.FootprintInstance) Footprint {
 // fieldCanopyUUID is the well-known custom-field name carrying the project's
 // stable instance ID on a KiCad footprint. The schematic-side evaluator
 // emits 8-char hex; legacy boards from the Python plugin carry full 36-char
-// UUIDs. The sync server treats both as opaque strings.
+// UUIDs. The sync server treats both as opaque strings. Surfaced as
+// Footprint.UUID alongside Footprint.Fields so existing match-by-uuid logic
+// keeps working.
 const fieldCanopyUUID = "canopy_uuid"
-
-// fieldMPN is the manufacturer part-number custom field. KiCad's BOM tools
-// surface this column natively, so writing it from the design's `(mpn …)`
-// property keeps the schematic and the PCB views in sync.
-const fieldMPN = "MPN"
 
 // ── Write side ────────────────────────────────────────────────────────
 

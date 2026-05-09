@@ -29,11 +29,16 @@ type Footprint struct {
 	Reference     string
 	Value         string
 	FootprintName string // KiCad library:name → name only
-	// MPN custom field as KiCad currently has it. Empty when not set.
-	// Sent up to the server so it can diff against the design's `(mpn …)`
-	// property and emit a one-shot set_field op when they drift.
-	MPN  string
-	Pads []Pad
+	// Fields carries every custom Field on the KiCad footprint, keyed by
+	// the field name as KiCad has it (e.g. "MPN", "Manufacturer",
+	// "canopy_uuid"). Posted up to the server so it can diff arbitrary
+	// design properties against the board without the agent ever needing
+	// to know which fields exist — adding a new BOM column becomes a
+	// pure server-side change. UUID above is the same value as
+	// Fields["canopy_uuid"], surfaced as a top-level convenience because
+	// the server's `by_uuid` matching index keys on it directly.
+	Fields map[string]string
+	Pads   []Pad
 }
 
 // PadDef describes one pad of a footprint we're about to instantiate via

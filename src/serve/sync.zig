@@ -63,11 +63,12 @@ const BoardFp = struct {
     ref: []const u8,
     value: []const u8,
     footprint_name: []const u8,
-    /// MPN custom field as the agent reads it from the board. Empty when the
-    /// footprint hasn't received an MPN sync yet. Diffed against the design's
-    /// `mpn` property so a one-shot set_field op restores the field after a
-    /// manual placement, a swap, or a part-number bump in the BOM.
-    mpn: []const u8,
+    /// Every custom Field on the KiCad footprint, keyed by name. The agent
+    /// posts the full map per sync so the server can diff arbitrary design
+    /// properties (mpn, manufacturer, datasheet, …) without the client
+    /// knowing which fields exist — adding a new BOM column is a pure
+    /// server-side change.
+    fields: std.StringHashMapUnmanaged([]const u8),
     pads: []const PadAssign,
 };
 
@@ -103,17 +104,30 @@ fn parsePadList(arena: std.mem.Allocator, pv: std.json.Value) std.mem.Allocator.
     return pads_list.items;
 }
 
+fn parseFieldsMap(arena: std.mem.Allocator, fv: std.json.Value) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]const u8) {
+    var fields: std.StringHashMapUnmanaged([]const u8) = .empty;
+    if (fv != .object) return fields;
+    var it = fv.object.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const val = jsonStr(entry.value_ptr.*);
+        try fields.put(arena, key, val);
+    }
+    return fields;
+}
+
 fn parseBoardEntry(arena: std.mem.Allocator, entry: std.json.Value) std.mem.Allocator.Error!?BoardFp {
     if (entry != .object) return null;
     const o = entry.object;
     const pads = if (o.get("pads")) |pv| try parsePadList(arena, pv) else &[_]PadAssign{};
+    const fields = if (o.get("fields")) |fv| try parseFieldsMap(arena, fv) else std.StringHashMapUnmanaged([]const u8){};
     return BoardFp{
         .uuid = jsonStr(o.get("uuid")),
         .kicad_uuid = jsonStr(o.get("kicad_uuid")),
         .ref = jsonStr(o.get("ref")),
         .value = jsonStr(o.get("value")),
         .footprint_name = jsonStr(o.get("footprint_name")),
-        .mpn = jsonStr(o.get("mpn")),
+        .fields = fields,
         .pads = pads,
     };
 }
@@ -619,23 +633,50 @@ fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, f
         });
         ops_emitted.* += 1;
     }
-    // Surface MPN onto the KiCad footprint as a custom field so the BOM
-    // editor and KiCad's "Edit Symbol Fields" view both pick it up. Only
-    // emit when the design carries an `(mpn …)` property AND the board's
-    // current value differs — keeps repeat syncs quiet when MPN is already
-    // aligned. Manufacturer/datasheet follow the same pattern by reusing
-    // findProperty when we wire those in later.
-    if (findProperty(inst.properties, "mpn")) |design_mpn| {
-        if (!std.mem.eql(u8, m.mpn, design_mpn)) {
-            try emitOp(w, first, OP_SET_FIELD, .{
-                .{ "uuid", target },
-                .{ "field", "MPN" },
-                .{ "value", design_mpn },
-            });
-            ops_emitted.* += 1;
-        }
+    // Push every design property to KiCad as a custom Field, so adding a
+    // new BOM column (manufacturer, datasheet, supplier_pn, …) is a pure
+    // server-side change with no agent update. Skip property keys that
+    // collide with KiCad's built-in ref/value/footprint handling — those
+    // travel through dedicated set_field ops above. The canonical-name map
+    // upper-cases well-known KiCad field names (mpn → MPN) so manually-
+    // placed footprints with the standard column name match cleanly.
+    for (inst.properties) |p| {
+        if (skipDesignProperty(p.key)) continue;
+        if (p.value.len == 0) continue;
+        const field_name = canonicalFieldName(p.key);
+        const board_value = m.fields.get(field_name) orelse "";
+        if (std.mem.eql(u8, board_value, p.value)) continue;
+        try emitOp(w, first, OP_SET_FIELD, .{
+            .{ "uuid", target },
+            .{ "field", field_name },
+            .{ "value", p.value },
+        });
+        ops_emitted.* += 1;
     }
     ops_emitted.* += try emitPadNetOps(w, first, target, inst.ref_des, d.pad_net_map, m.pads);
+}
+
+/// Property keys we deliberately don't push to KiCad as custom fields:
+/// `value`/`footprint` are KiCad-built-in (already handled via dedicated
+/// set_field ops on inst.value / inst.footprint), and `description` would
+/// collide with the description KiCad reads from the footprint library.
+fn skipDesignProperty(key: []const u8) bool {
+    if (std.mem.eql(u8, key, "value")) return true;
+    if (std.mem.eql(u8, key, "footprint")) return true;
+    if (std.mem.eql(u8, key, "description")) return true;
+    return false;
+}
+
+/// Canonicalise design property keys to KiCad's standard field-column
+/// names so users with manually-placed footprints (already carrying
+/// "MPN", "Manufacturer", …) don't see a duplicate lower-cased twin land
+/// on first sync. Unknown keys pass through unchanged so user-defined
+/// property keys still work.
+fn canonicalFieldName(key: []const u8) []const u8 {
+    if (std.mem.eql(u8, key, "mpn")) return "MPN";
+    if (std.mem.eql(u8, key, "manufacturer")) return "Manufacturer";
+    if (std.mem.eql(u8, key, "datasheet")) return "Datasheet";
+    return key;
 }
 
 fn handleInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, first: *bool) !void {
@@ -653,17 +694,6 @@ fn handleInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, 
     const fp_def = loadFootprintDef(d.spc, fp_name_short);
     try emitAddOp(w, first, inst, fp_name_short, kmod, fp_def, d.pad_net_map);
     d.summary.added += 1;
-}
-
-/// Locate a property by key on a flattened design instance. Returns null
-/// when the design doesn't carry that key for this instance — caller
-/// shouldn't emit a set_field op against an empty value (KiCad would
-/// surface a blank field rather than skipping).
-fn findProperty(properties: []const env_mod.Property, key: []const u8) ?[]const u8 {
-    for (properties) |p| {
-        if (std.mem.eql(u8, p.key, key)) return p.value;
-    }
-    return null;
 }
 
 fn emitOp(w: anytype, first: *bool, op: []const u8, fields: anytype) !void {
