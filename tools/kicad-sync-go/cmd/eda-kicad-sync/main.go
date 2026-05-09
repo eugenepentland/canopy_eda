@@ -174,6 +174,14 @@ func resolveClient(cfg config.BoardConfig) (config.ClientCredentials, error) {
 
 func summarize(p *eda.SyncPlanResponse) string {
 	s := p.Summary
+	// Quiet path: when the diff produced zero ops we don't want to taunt
+	// the user with "Updated: 0" — that read like a regression after we
+	// stopped counting matched-but-unchanged instances. Keep the version
+	// in the toast so they can confirm which design they were synced
+	// against.
+	if s.Updated == 0 && s.Added == 0 && s.Removed == 0 && s.Swapped == 0 && s.FlaggedStale == 0 {
+		return fmt.Sprintf("Already up to date @ v%d", p.DesignVersion)
+	}
 	out := fmt.Sprintf("Synced @ v%d\n\nUpdated:  %d\nAdded:    %d\nRemoved:  %d\nSwapped:  %d",
 		p.DesignVersion, s.Updated, s.Added, s.Removed, s.Swapped)
 	if s.FlaggedStale > 0 {

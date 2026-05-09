@@ -29,7 +29,11 @@ type Footprint struct {
 	Reference     string
 	Value         string
 	FootprintName string // KiCad library:name → name only
-	Pads          []Pad
+	// MPN custom field as KiCad currently has it. Empty when not set.
+	// Sent up to the server so it can diff against the design's `(mpn …)`
+	// property and emit a one-shot set_field op when they drift.
+	MPN  string
+	Pads []Pad
 }
 
 // PadDef describes one pad of a footprint we're about to instantiate via

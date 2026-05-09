@@ -61,6 +61,7 @@ func toBoardFps(fps []kicad.Footprint) []eda.BoardFp {
 			Ref:           fp.Reference,
 			Value:         fp.Value,
 			FootprintName: fp.FootprintName,
+			MPN:           fp.MPN,
 			Pads:          pads,
 		})
 	}

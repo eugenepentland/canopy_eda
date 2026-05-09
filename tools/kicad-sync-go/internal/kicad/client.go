@@ -159,8 +159,11 @@ func footprintToNeutral(fp *board_types.FootprintInstance) Footprint {
 		}
 		var field board_types.Field
 		if err := item.UnmarshalTo(&field); err == nil {
-			if field.GetName() == fieldCanopyUUID {
+			switch field.GetName() {
+			case fieldCanopyUUID:
 				out.UUID = field.GetText().GetText().GetText()
+			case fieldMPN:
+				out.MPN = field.GetText().GetText().GetText()
 			}
 			continue
 		}
@@ -173,6 +176,11 @@ func footprintToNeutral(fp *board_types.FootprintInstance) Footprint {
 // emits 8-char hex; legacy boards from the Python plugin carry full 36-char
 // UUIDs. The sync server treats both as opaque strings.
 const fieldCanopyUUID = "canopy_uuid"
+
+// fieldMPN is the manufacturer part-number custom field. KiCad's BOM tools
+// surface this column natively, so writing it from the design's `(mpn …)`
+// property keeps the schematic and the PCB views in sync.
+const fieldMPN = "MPN"
 
 // ── Write side ────────────────────────────────────────────────────────
 

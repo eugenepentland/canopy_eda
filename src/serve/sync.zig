@@ -23,6 +23,7 @@ const model_mod = @import("../export_kicad_model.zig");
 const bom = @import("../bom.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const env_mod_node = @import("../sexpr/ast.zig");
+const env_mod = @import("../eval/env.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
@@ -62,6 +63,11 @@ const BoardFp = struct {
     ref: []const u8,
     value: []const u8,
     footprint_name: []const u8,
+    /// MPN custom field as the agent reads it from the board. Empty when the
+    /// footprint hasn't received an MPN sync yet. Diffed against the design's
+    /// `mpn` property so a one-shot set_field op restores the field after a
+    /// manual placement, a swap, or a part-number bump in the BOM.
+    mpn: []const u8,
     pads: []const PadAssign,
 };
 
@@ -107,6 +113,7 @@ fn parseBoardEntry(arena: std.mem.Allocator, entry: std.json.Value) std.mem.Allo
         .ref = jsonStr(o.get("ref")),
         .value = jsonStr(o.get("value")),
         .footprint_name = jsonStr(o.get("footprint_name")),
+        .mpn = jsonStr(o.get("mpn")),
         .pads = pads,
     };
 }
@@ -476,7 +483,7 @@ fn heuristicKey(arena: std.mem.Allocator, parent: []const u8, _: []const u8, val
     return std.fmt.allocPrint(arena, "{s}|{s}", .{ parent, value });
 }
 
-fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, first: *bool) !?BoardFp {
+fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, first: *bool, ops_emitted: *u32) !?BoardFp {
     if (d.by_uuid.get(inst.uuid)) |m| return m;
     if (inst.ref_des.len > 0) {
         if (d.by_ref.get(inst.ref_des)) |m| {
@@ -490,6 +497,7 @@ fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, f
                     .{ "field", "canopy_uuid" },
                     .{ "value", inst.uuid },
                 });
+                ops_emitted.* += 1;
             }
             return m;
         }
@@ -570,7 +578,7 @@ fn lessByDesignRef(_: void, a: export_kicad.FlatInstance, b: export_kicad.FlatIn
     return std.mem.lessThan(u8, a.ref_des, b.ref_des);
 }
 
-fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, fp_name_short: []const u8, w: anytype, first: *bool) !void {
+fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, fp_name_short: []const u8, w: anytype, first: *bool, ops_emitted: *u32) !void {
     // Track matches by KiCad-internal UUID — that field is always
     // populated, whereas canopy_uuid is empty for ref-des-fallback
     // matches until the backfill op lands on a future sync.
@@ -581,6 +589,7 @@ fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, f
             const fp_def = loadFootprintDef(d.spc, fp_name_short);
             try emitSwapOp(w, first, target, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map);
             d.summary.swapped += 1;
+            ops_emitted.* += 1;
         }
     }
     if (!std.mem.eql(u8, m.ref, inst.ref_des)) {
@@ -589,6 +598,7 @@ fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, f
             .{ "field", "reference" },
             .{ "value", inst.ref_des },
         });
+        ops_emitted.* += 1;
     }
     if (!std.mem.eql(u8, m.value, inst.value)) {
         try emitOp(w, first, OP_SET_FIELD, .{
@@ -596,6 +606,7 @@ fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, f
             .{ "field", "value" },
             .{ "value", inst.value },
         });
+        ops_emitted.* += 1;
     }
     // Align canopy_uuid whenever it drifted (legacy long-form, --migrate
     // pairing, etc.). After this op lands, the next sync UUID-matches
@@ -606,21 +617,53 @@ fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, f
             .{ "field", "canopy_uuid" },
             .{ "value", inst.uuid },
         });
+        ops_emitted.* += 1;
     }
-    try emitPadNetOps(w, first, target, inst.ref_des, d.pad_net_map, m.pads);
-    d.summary.updated += 1;
+    // Surface MPN onto the KiCad footprint as a custom field so the BOM
+    // editor and KiCad's "Edit Symbol Fields" view both pick it up. Only
+    // emit when the design carries an `(mpn …)` property AND the board's
+    // current value differs — keeps repeat syncs quiet when MPN is already
+    // aligned. Manufacturer/datasheet follow the same pattern by reusing
+    // findProperty when we wire those in later.
+    if (findProperty(inst.properties, "mpn")) |design_mpn| {
+        if (!std.mem.eql(u8, m.mpn, design_mpn)) {
+            try emitOp(w, first, OP_SET_FIELD, .{
+                .{ "uuid", target },
+                .{ "field", "MPN" },
+                .{ "value", design_mpn },
+            });
+            ops_emitted.* += 1;
+        }
+    }
+    ops_emitted.* += try emitPadNetOps(w, first, target, inst.ref_des, d.pad_net_map, m.pads);
 }
 
 fn handleInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, first: *bool) !void {
     const fp_name_short = stripLibPrefix(inst.footprint);
-    if (try matchInstance(d, inst, w, first)) |m| {
-        try handleMatched(d, inst, m, fp_name_short, w, first);
+    var ops_emitted: u32 = 0;
+    if (try matchInstance(d, inst, w, first, &ops_emitted)) |m| {
+        try handleMatched(d, inst, m, fp_name_short, w, first, &ops_emitted);
+        // Only count as "updated" when at least one op was actually
+        // emitted — otherwise every no-diff sync would still surface
+        // "Updated: N" to the user even though nothing changed.
+        if (ops_emitted > 0) d.summary.updated += 1;
         return;
     }
     const kmod = loadKicadMod(d.spc, fp_name_short, inst.component) orelse return;
     const fp_def = loadFootprintDef(d.spc, fp_name_short);
     try emitAddOp(w, first, inst, fp_name_short, kmod, fp_def, d.pad_net_map);
     d.summary.added += 1;
+}
+
+/// Locate a property by key on a flattened design instance. Returns null
+/// when the design doesn't carry that key for this instance — caller
+/// shouldn't emit a set_field op against an empty value (KiCad would
+/// surface a blank field rather than skipping).
+fn findProperty(properties: []const env_mod.Property, key: []const u8) ?[]const u8 {
+    for (properties) |p| {
+        if (std.mem.eql(u8, p.key, key)) return p.value;
+    }
+    return null;
 }
 
 fn emitOp(w: anytype, first: *bool, op: []const u8, fields: anytype) !void {
@@ -696,7 +739,9 @@ fn emitSwapOp(
 
 /// Emit one `set_pad_net` op per pad whose net assignment differs from
 /// what the client reported. Pads only on one side (e.g. NC pads or pads
-/// the client didn't list) are skipped.
+/// the client didn't list) are skipped. Returns the number of ops emitted
+/// so the caller can decide whether the surrounding instance counts as
+/// "updated" — a no-diff sync should be silent in the user-facing toast.
 fn emitPadNetOps(
     w: anytype,
     first: *bool,
@@ -704,8 +749,9 @@ fn emitPadNetOps(
     ref_des: []const u8,
     pad_net_map: *std.StringHashMap([]const u8),
     client_pads: []const PadAssign,
-) !void {
+) !u32 {
     var key_buf: [256]u8 = undefined;
+    var emitted: u32 = 0;
     for (client_pads) |cp| {
         const key = std.fmt.bufPrint(&key_buf, "{s}|{s}", .{ ref_des, cp.number }) catch continue;
         const want = pad_net_map.get(key) orelse continue;
@@ -715,7 +761,9 @@ fn emitPadNetOps(
             .{ "pad", cp.number },
             .{ "net", want },
         });
+        emitted += 1;
     }
+    return emitted;
 }
 
 fn writePadNetsArray(

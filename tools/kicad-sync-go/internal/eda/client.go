@@ -35,7 +35,13 @@ type BoardFp struct {
 	Ref           string      `json:"ref"`
 	Value         string      `json:"value"`
 	FootprintName string      `json:"footprint_name"`
-	Pads          []PadAssign `json:"pads"`
+	// MPN as the user's KiCad currently records it. Empty when the
+	// footprint hasn't received an MPN from a prior sync. Server diffs
+	// against the design's `(mpn …)` property and emits a set_field op
+	// when they drift, so the BOM column in KiCad stays aligned with the
+	// schematic source of truth without re-emitting on every sync.
+	MPN  string      `json:"mpn,omitempty"`
+	Pads []PadAssign `json:"pads"`
 }
 
 // SyncPlanRequest is the JSON body posted to /api/sync-plan/:name.
