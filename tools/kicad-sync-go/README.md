@@ -37,7 +37,7 @@ Requires Go 1.23+ on PATH. Generated protobuf bindings are committed to
 the repo, so no `protoc` / KiCad source clone is needed for installs.
 
 ```bash
-go install github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/cmd/eda-kicad-sync@latest
+go install github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/cmd/eda-kicad-sync@latest
 eda-kicad-sync --install-kicad-plugin
 ```
 
@@ -69,8 +69,8 @@ re-run `--install-kicad-plugin` to refresh the copied binary.
 ### From source (contributors)
 
 ```bash
-git clone https://github.com/eugenepentland/canvas_eda
-cd canvas_eda/tools/kicad-sync-go
+git clone https://github.com/eugenepentland/canopy_eda
+cd canopy_eda/tools/kicad-sync-go
 make install                    # builds + symlinks the entire repo dir
 ```
 

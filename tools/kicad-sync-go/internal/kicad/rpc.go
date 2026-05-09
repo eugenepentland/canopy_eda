@@ -7,7 +7,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 
-	envelope "github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad/proto/common/envelope"
+	envelope "github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad/proto/common/envelope"
 )
 
 // clientName goes in every ApiRequestHeader so KiCad's debug logs can tell

@@ -1,4 +1,4 @@
-module github.com/eugenepentland/canvas_eda/tools/kicad-sync-go
+module github.com/eugenepentland/canopy_eda/tools/kicad-sync-go
 
 go 1.23
 

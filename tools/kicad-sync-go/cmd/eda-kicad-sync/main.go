@@ -14,14 +14,14 @@ import (
 	"fmt"
 	"os"
 
-	kicadsync "github.com/eugenepentland/canvas_eda/tools/kicad-sync-go"
-	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/config"
-	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/eda"
-	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad"
-	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/notify"
-	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/oauth"
-	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/setup"
-	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/sync"
+	kicadsync "github.com/eugenepentland/canopy_eda/tools/kicad-sync-go"
+	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/config"
+	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/eda"
+	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad"
+	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/notify"
+	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/oauth"
+	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/setup"
+	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/sync"
 )
 
 func main() {

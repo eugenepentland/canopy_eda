@@ -24,7 +24,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/config"
+	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/config"
 )
 
 //go:embed setup.html

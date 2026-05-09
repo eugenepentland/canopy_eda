@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/config"
+	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/config"
 )
 
 // AuthServerMetadata is the subset of the RFC 8414 document we care about.

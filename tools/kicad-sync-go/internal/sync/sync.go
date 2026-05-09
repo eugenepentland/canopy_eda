@@ -5,8 +5,8 @@ package sync
 import (
 	"fmt"
 
-	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/eda"
-	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/kicad"
+	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/eda"
+	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad"
 )
 
 // Options bundles per-click flags so additions don't churn the Run

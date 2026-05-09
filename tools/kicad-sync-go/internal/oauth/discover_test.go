@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/eugenepentland/canvas_eda/tools/kicad-sync-go/internal/config"
+	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/config"
 )
 
 // fakeAuthServer mimics the EDA server's RFC 8414 metadata + RFC 7591
