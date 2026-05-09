@@ -130,6 +130,11 @@ func openBoard(boardArg string) (string, kicad.Client, error) {
 		return "", nil, err
 	}
 	if boardArg != "" {
+		// KiCad's GetOpenDocuments returns the bare filename on Windows;
+		// stash the orchestrator's authoritative absolute path so per-
+		// board library staging writes the .kicad_mod next to the
+		// project instead of to the agent's CWD.
+		kc.SetBoardPath(boardArg)
 		return boardArg, kc, nil
 	}
 	path, err := kc.BoardPath()

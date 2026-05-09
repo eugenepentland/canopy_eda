@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"go.nanomsg.org/mangos/v3"
 	"go.nanomsg.org/mangos/v3/protocol/req"
@@ -65,6 +66,12 @@ type realClient struct {
 	// in subsequent calls.
 	doc *base_types.DocumentSpecifier
 
+	// boardPathAbs holds the absolute board path the orchestrator passed
+	// in via SetBoardPath. KiCad's IPC GetOpenDocuments returns the bare
+	// filename on Windows, so per-board library staging can't derive the
+	// project directory from BoardPath() alone.
+	boardPathAbs string
+
 	// uuid -> live FootprintInstance proto. Mutations from SetField /
 	// SetPadNet edit the in-memory copy; Push flushes them all in one
 	// UpdateItems batch so KiCad records the sync as a single undo.
@@ -100,7 +107,26 @@ func (c *realClient) BoardPath() (string, error) {
 	}
 	doc := resp.GetDocuments()[0]
 	c.doc = doc
-	return doc.GetBoardFilename(), nil
+	// Prefer an explicit override from SetBoardPath. Otherwise fall
+	// back to combining the project directory (when KiCad populates it)
+	// with the bare filename — KiCad on Windows returns just the
+	// basename for BoardFilename, and per-board library staging needs
+	// the full path.
+	if c.boardPathAbs != "" {
+		return c.boardPathAbs, nil
+	}
+	name := doc.GetBoardFilename()
+	if dir := doc.GetProject().GetPath(); dir != "" && !filepath.IsAbs(name) {
+		return filepath.Join(dir, name), nil
+	}
+	return name, nil
+}
+
+// SetBoardPath records the orchestrator's absolute board path. Subsequent
+// BoardPath calls + per-board library staging use it instead of KiCad's
+// IPC-reported BoardFilename, which is just the basename on Windows.
+func (c *realClient) SetBoardPath(absPath string) {
+	c.boardPathAbs = absPath
 }
 
 func (c *realClient) ListFootprints() ([]Footprint, error) {
@@ -426,14 +452,21 @@ func (c *realClient) SwapFootprint(uuid, kicadMod, entryName string, padNets [][
 // resolves to a real on-disk library — so this staging step is what
 // makes a freshly-synced footprint actually render with pads.
 func (c *realClient) stageLibraryAndCheck(kicadMod, entryName string) error {
-	if c.doc == nil {
-		if _, err := c.BoardPath(); err != nil {
+	boardPath := c.boardPathAbs
+	if boardPath == "" {
+		var err error
+		boardPath, err = c.BoardPath()
+		if err != nil {
 			return fmt.Errorf("locate board path: %w", err)
 		}
 	}
-	boardPath := c.doc.GetBoardFilename()
-	if boardPath == "" {
-		return errors.New("KiCad reported no board path; cannot stage footprint library")
+	if !filepath.IsAbs(boardPath) {
+		// KiCad on Windows returns just the bare filename via
+		// GetOpenDocuments. Without an absolute path, library staging
+		// would write `eda-sync.pretty/` to the agent's CWD where
+		// KiCad's library lookup never finds it — surface a clear
+		// error instead of silently corrupting state.
+		return fmt.Errorf("stageLibraryAndCheck: board path %q is not absolute (KiCad's GetOpenDocuments returned just the basename — orchestrator must call SetBoardPath with the full path)", boardPath)
 	}
 	synclog.Logf("stage library footprint entry=%q board=%q kicad_mod_len=%d",
 		entryName, boardPath, len(kicadMod))

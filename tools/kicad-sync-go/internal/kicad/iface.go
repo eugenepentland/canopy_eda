@@ -7,9 +7,18 @@ package kicad
 // Mutations are buffered between Begin and Push so KiCad records the whole
 // sync as a single undoable commit.
 type Client interface {
-	// BoardPath returns the filename of the currently-open PCB. Used to
-	// load the per-board config file.
+	// BoardPath returns the absolute path of the currently-open PCB.
+	// On Windows KiCad's GetOpenDocuments returns just the bare
+	// filename; the orchestrator threads the absolute path in via
+	// SetBoardPath when it has one (i.e. when called with --board).
 	BoardPath() (string, error)
+
+	// SetBoardPath records the orchestrator's authoritative absolute
+	// board path. Used by per-board library staging since
+	// `filepath.Dir("foo.kicad_pcb")` is just "." and would write
+	// `eda-sync.pretty/` to the agent's CWD instead of next to the
+	// project. No-op when called with an empty string.
+	SetBoardPath(absPath string)
 
 	// ListFootprints returns every footprint on the open board.
 	ListFootprints() ([]Footprint, error)

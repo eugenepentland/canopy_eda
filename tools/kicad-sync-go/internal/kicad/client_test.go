@@ -58,13 +58,11 @@ func TestSwapFootprintReplacesViaDeleteAndAdd(t *testing.T) {
 	}
 
 	// SwapFootprint now stages the kicad_mod into a per-board library
-	// dir before calling CreateItems. That requires a writable
-	// `c.doc.GetBoardFilename()` so KiCad's library lookup resolves —
-	// point it at a tempdir for this unit test.
+	// dir before calling CreateItems. That needs an absolute board path
+	// — set it via the SetBoardPath path the orchestrator uses in
+	// production, not by mutating c.doc directly.
 	tmpBoard := t.TempDir() + "/board.kicad_pcb"
-	c.doc = &base_types.DocumentSpecifier{
-		Identifier: &base_types.DocumentSpecifier_BoardFilename{BoardFilename: tmpBoard},
-	}
+	c.boardPathAbs = tmpBoard
 	const kicadMod = `(footprint "NEW_FOOTPRINT" (version 20221018) (generator pcbnew) (layer "F.Cu"))`
 	if err := c.SwapFootprint(kid, kicadMod, "NEW_FOOTPRINT", [][2]string{{"1", "VDD"}}); err != nil {
 		t.Fatalf("SwapFootprint: %v", err)

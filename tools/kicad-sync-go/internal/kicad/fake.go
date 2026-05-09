@@ -32,6 +32,15 @@ func NewFake(boardFile string, fps []Footprint) *Fake {
 
 func (f *Fake) BoardPath() (string, error) { return f.BoardFile, nil }
 
+// SetBoardPath updates the path BoardPath returns. The Fake doesn't do
+// per-board library staging, so this is just here to satisfy the
+// Client interface and let tests override the path mid-test if needed.
+func (f *Fake) SetBoardPath(absPath string) {
+	if absPath != "" {
+		f.BoardFile = absPath
+	}
+}
+
 func (f *Fake) ListFootprints() ([]Footprint, error) {
 	out := make([]Footprint, len(f.Footprints))
 	copy(out, f.Footprints)
