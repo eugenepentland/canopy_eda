@@ -25,16 +25,20 @@ type Client interface {
 	// SetPadNet sets the net assignment of one pad on `uuid`.
 	SetPadNet(uuid, padNumber, netName string) error
 
-	// AddFootprint instantiates a footprint from the structured `def`,
-	// places it at the origin, sets uuid/ref/value/pad-nets, and stages
-	// it for commit.
-	AddFootprint(def *FootprintDef, uuid, ref, value string, padNets [][2]string) error
+	// AddFootprint instantiates a footprint at the origin from the proto-
+	// canonical JSON `defJSON` (a `kiapi.board.types.Footprint` message),
+	// stamps the canopy uuid as the KiCad-internal Id, applies pad-net
+	// assignments, and stages it for commit. Decoding is handled via
+	// protojson so this function carries no geometry-aware code — adding
+	// new pad shapes / types / layers is a server-only change.
+	AddFootprint(defJSON []byte, uuid, ref, value string, padNets [][2]string) error
 
-	// SwapFootprint replaces the footprint for uuid with one built from
-	// `def`. v2 implements as Remove + AddFootprint internally to keep
-	// the proto builder reusable; KiCad records both halves as one undo
-	// step via the surrounding commit.
-	SwapFootprint(uuid string, def *FootprintDef, padNets [][2]string) error
+	// SwapFootprint replaces the Definition on uuid in place with one
+	// decoded from `defJSON`, preserving the cached fp's identity (KiCad
+	// UUID, ref, value, position, custom Field entries like canopy_uuid).
+	// Pad-net assignments are stamped onto the decoded pads after
+	// deserialization.
+	SwapFootprint(uuid string, defJSON []byte, padNets [][2]string) error
 
 	// Remove stages the footprint for deletion in this commit.
 	Remove(uuid string) error

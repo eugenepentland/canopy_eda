@@ -41,24 +41,8 @@ type Footprint struct {
 	Pads   []Pad
 }
 
-// PadDef describes one pad of a footprint we're about to instantiate via
-// IPC CreateItems. Coordinates are millimetres; rotation degrees. Mirrors
-// the wire shape (eda.FootprintPad) but lives in the kicad package so the
-// orchestrator can keep eda → kicad as a one-way dependency.
-type PadDef struct {
-	Number   string
-	Type     string // smd | thru_hole | np_thru_hole
-	Shape    string // rect | circle | oval | roundrect
-	Pos      [2]float64
-	Size     [2]float64
-	Drill    float64
-	Rotation float64
-	Layers   []string
-}
-
-// FootprintDef is the input to AddFootprint / SwapFootprint — enough info
-// to construct a KiCad FootprintInstance proto with valid pad geometry.
-type FootprintDef struct {
-	Name string
-	Pads []PadDef
-}
+// AddFootprint / SwapFootprint take their footprint geometry as
+// proto-canonical JSON bytes (a `kiapi.board.types.Footprint` message)
+// rather than a Go-side struct — see iface.go. The previous PadDef /
+// FootprintDef helper structs went away when we moved geometry encoding
+// to the server.

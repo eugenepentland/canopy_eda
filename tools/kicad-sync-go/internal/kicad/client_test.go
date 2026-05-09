@@ -48,14 +48,14 @@ func TestSwapFootprintMutatesInPlace(t *testing.T) {
 		removed: map[string]struct{}{},
 	}
 
-	def := &FootprintDef{
-		Name: "NEW_FOOTPRINT",
-		Pads: []PadDef{
-			{Number: "1", Type: "smd", Shape: "rect", Pos: [2]float64{-1, 0}, Size: [2]float64{1, 1}},
-			{Number: "2", Type: "smd", Shape: "rect", Pos: [2]float64{1, 0}, Size: [2]float64{1, 1}},
-		},
-	}
-	if err := c.SwapFootprint(kid, def, [][2]string{{"1", "VDD"}, {"2", "GND"}}); err != nil {
+	defJSON := []byte(`{
+		"id": {"libraryNickname": "eda-sync", "entryName": "NEW_FOOTPRINT"},
+		"items": [
+			{"@type":"type.googleapis.com/kiapi.board.types.Pad","id":{},"number":"1","type":"PT_SMD","position":{"xNm":-1000000,"yNm":0},"padStack":{"type":"PST_NORMAL","layers":["BL_F_Cu","BL_F_Paste","BL_F_Mask"],"copperLayers":[{"layer":"BL_F_Cu","shape":"PSS_RECTANGLE","size":{"xNm":1000000,"yNm":1000000}}],"angle":{"valueDegrees":0}}},
+			{"@type":"type.googleapis.com/kiapi.board.types.Pad","id":{},"number":"2","type":"PT_SMD","position":{"xNm":1000000,"yNm":0},"padStack":{"type":"PST_NORMAL","layers":["BL_F_Cu","BL_F_Paste","BL_F_Mask"],"copperLayers":[{"layer":"BL_F_Cu","shape":"PSS_RECTANGLE","size":{"xNm":1000000,"yNm":1000000}}],"angle":{"valueDegrees":0}}}
+		]
+	}`)
+	if err := c.SwapFootprint(kid, defJSON, [][2]string{{"1", "VDD"}, {"2", "GND"}}); err != nil {
 		t.Fatalf("SwapFootprint: %v", err)
 	}
 

@@ -2,6 +2,7 @@ package sync_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,6 +11,18 @@ import (
 	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad"
 	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/sync"
 )
+
+// protoFootprintJSON returns a minimal proto-canonical Footprint message
+// (the geometry payload `add` / `swap_footprint` ops carry) with the
+// supplied library entry name. Tests only inspect FootprintName via the
+// Fake, so we omit pads and rely on the agent's protojson decode + the
+// Fake's JSON-peek extractor.
+func protoFootprintJSON(entryName string) []byte {
+	return []byte(fmt.Sprintf(
+		`{"id":{"libraryNickname":"eda-sync","entryName":%q},"items":[]}`,
+		entryName,
+	))
+}
 
 // fakeServer hands back the canned response and records the body it received.
 func fakeServer(t *testing.T, resp eda.SyncPlanResponse, gotReq *eda.SyncPlanRequest) *httptest.Server {
@@ -143,14 +156,8 @@ func TestAddOpInsertsFootprint(t *testing.T) {
 		Ops: []eda.Op{
 			{Op: "add", UUID: "u-c1", Ref: "C1", Value: "100nF",
 				FootprintName: "C_0402",
-				FootprintDef: &eda.FootprintDef{
-					Name: "C_0402",
-					Pads: []eda.FootprintPad{
-						{Number: "1", Type: "smd", Shape: "rect", Pos: [2]float64{-0.5, 0}, Size: [2]float64{0.5, 0.6}},
-						{Number: "2", Type: "smd", Shape: "rect", Pos: [2]float64{0.5, 0}, Size: [2]float64{0.5, 0.6}},
-					},
-				},
-				PadNets: [][2]string{{"1", "VDD"}, {"2", "GND"}}},
+				FootprintDef:  protoFootprintJSON("C_0402"),
+				PadNets:       [][2]string{{"1", "VDD"}, {"2", "GND"}}},
 		},
 	}
 	var gotReq eda.SyncPlanRequest
@@ -179,14 +186,8 @@ func TestSwapOpReplacesFootprint(t *testing.T) {
 		Summary: eda.Summary{Swapped: 1},
 		Ops: []eda.Op{
 			{Op: "swap_footprint", UUID: "u-r1", NewFootprintName: "R_0805",
-				FootprintDef: &eda.FootprintDef{
-					Name: "R_0805",
-					Pads: []eda.FootprintPad{
-						{Number: "1", Type: "smd", Shape: "rect", Pos: [2]float64{-1, 0}, Size: [2]float64{1, 1}},
-						{Number: "2", Type: "smd", Shape: "rect", Pos: [2]float64{1, 0}, Size: [2]float64{1, 1}},
-					},
-				},
-				PadNets: [][2]string{{"1", "VDD"}, {"2", "GND"}}},
+				FootprintDef: protoFootprintJSON("R_0805"),
+				PadNets:      [][2]string{{"1", "VDD"}, {"2", "GND"}}},
 		},
 	}
 	var gotReq eda.SyncPlanRequest

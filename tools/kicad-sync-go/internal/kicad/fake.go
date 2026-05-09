@@ -1,6 +1,7 @@
 package kicad
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -90,20 +91,16 @@ func (f *Fake) SetPadNet(uuid, pad, net string) error {
 	return fmt.Errorf("SetPadNet: pad %q not on uuid %q", pad, uuid)
 }
 
-func (f *Fake) AddFootprint(def *FootprintDef, uuid, ref, value string, padNets [][2]string) error {
+func (f *Fake) AddFootprint(defJSON []byte, uuid, ref, value string, padNets [][2]string) error {
 	pads := make([]Pad, 0, len(padNets))
 	for _, kv := range padNets {
 		pads = append(pads, Pad{Number: kv[0], Net: kv[1]})
-	}
-	name := ""
-	if def != nil {
-		name = def.Name
 	}
 	fp := Footprint{
 		UUID:          uuid,
 		Reference:     ref,
 		Value:         value,
-		FootprintName: name,
+		FootprintName: extractEntryName(defJSON),
 		Pads:          pads,
 	}
 	f.pendingAdded = append(f.pendingAdded, fp)
@@ -111,7 +108,7 @@ func (f *Fake) AddFootprint(def *FootprintDef, uuid, ref, value string, padNets 
 	return nil
 }
 
-func (f *Fake) SwapFootprint(uuid string, def *FootprintDef, padNets [][2]string) error {
+func (f *Fake) SwapFootprint(uuid string, defJSON []byte, padNets [][2]string) error {
 	i, ok := f.findIdx(uuid)
 	if !ok {
 		return fmt.Errorf("SwapFootprint: uuid %q not found", uuid)
@@ -120,12 +117,31 @@ func (f *Fake) SwapFootprint(uuid string, def *FootprintDef, padNets [][2]string
 	for _, kv := range padNets {
 		pads = append(pads, Pad{Number: kv[0], Net: kv[1]})
 	}
-	if def != nil {
-		f.Footprints[i].FootprintName = def.Name
+	if name := extractEntryName(defJSON); name != "" {
+		f.Footprints[i].FootprintName = name
 	}
 	f.Footprints[i].Pads = pads
 	f.pendingDirty[uuid] = struct{}{}
 	return nil
+}
+
+// extractEntryName fishes the library footprint name out of a proto-
+// canonical Footprint JSON ({"id":{"libraryNickname":"...","entryName":"NAME"},...}).
+// The fake doesn't decode the full proto — tests only inspect the name —
+// so a small JSON peek beats pulling protojson into the test surface.
+func extractEntryName(defJSON []byte) string {
+	if len(defJSON) == 0 {
+		return ""
+	}
+	var shell struct {
+		Id struct {
+			EntryName string `json:"entryName"`
+		} `json:"id"`
+	}
+	if err := json.Unmarshal(defJSON, &shell); err != nil {
+		return ""
+	}
+	return shell.Id.EntryName
 }
 
 func (f *Fake) Remove(uuid string) error {

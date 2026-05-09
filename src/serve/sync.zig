@@ -200,16 +200,16 @@ fn loadKicadMod(
     ) catch null;
 }
 
-/// Build a structured JSON description of `fp_name` for the Go IPC agent.
-/// Returns the JSON text or null when no `.sexp` source exists (vendor-only
-/// footprints in `lib/sources/` aren't covered by v2). The JSON shape:
+/// Build a proto-canonical JSON description of `fp_name` matching the
+/// shape that Go's protojson.Unmarshal expects for a
+/// `kiapi.board.types.Footprint` message. The agent feeds this directly
+/// into `*board_types.Footprint` without any geometry-aware code on its
+/// side — adding a new pad shape, type, or layer is a server-only
+/// change.
 ///
-///   {"name":"R_0402","pads":[{"number":"1","type":"smd","shape":"rect",
-///                              "pos":[x,y],"size":[w,h],"rotation":N,
-///                              "drill":D,"layers":["F.Cu",...]}, ...]}
-///
-/// All distances in mm. Layers default to standard SMD/thru-hole sets when
-/// the source doesn't list them explicitly.
+/// Returns the JSON text or null when no `.sexp` source exists. Pad nets
+/// are NOT baked in here; the surrounding op carries `pad_nets` so the
+/// per-instance assignment travels separately from the (shared) geometry.
 fn loadFootprintDef(
     spc: *SyncPlanContext,
     fp_name: []const u8,
@@ -231,26 +231,60 @@ fn loadFootprintDefImpl(
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(spc.arena);
-    try w.writeAll("{\"name\":");
+    try w.writeAll("{\"id\":{\"libraryNickname\":\"eda-sync\",\"entryName\":");
     try writeJsonString(w, fp_name);
-    try w.writeAll(",\"pads\":[");
+    try w.writeAll("},\"items\":[");
     var first_pad = true;
     for (children[2..]) |child| {
         if (!child.isForm("pad")) continue;
-        try writePadJson(spc.arena, w, child, &first_pad);
+        try writePadProtoJson(spc.arena, w, child, &first_pad);
     }
     try w.writeAll("]}");
     return buf.items;
 }
 
-/// Emit one pad entry as JSON. Schema:
-///   {"number":"1","type":"smd","shape":"roundrect",
-///    "pos":[x,y],"size":[w,h],"rotation":N,"drill":D,"layers":[...]}
-/// Mirrors the field names the Go agent expects in eda.FootprintPad.
-fn writePadJson(arena: std.mem.Allocator, w: anytype, pad: env_mod_node.Node, first: *bool) !void {
+// Proto enum string names — these must match the `protobuf:"...,enum=..."`
+// values the generated Go .pb.go expects for protojson decoding. Adding a
+// new shape/type/layer is one line here on the server, with NO agent change.
+const PROTO_TYPE_URL_PAD = "type.googleapis.com/kiapi.board.types.Pad";
+const PROTO_PADTYPE_SMD = "PT_SMD";
+const PROTO_PADTYPE_PTH = "PT_PTH";
+const PROTO_PADTYPE_NPTH = "PT_NPTH";
+const PROTO_PADSTACK_NORMAL = "PST_NORMAL";
+
+fn protoPadType(short: []const u8) []const u8 {
+    if (std.mem.eql(u8, short, "smd")) return PROTO_PADTYPE_SMD;
+    if (std.mem.eql(u8, short, "thru_hole") or std.mem.eql(u8, short, "thru")) return PROTO_PADTYPE_PTH;
+    if (std.mem.eql(u8, short, "np_thru_hole") or std.mem.eql(u8, short, "np_thru")) return PROTO_PADTYPE_NPTH;
+    return PROTO_PADTYPE_SMD;
+}
+
+fn protoPadShape(short: []const u8) []const u8 {
+    if (std.mem.eql(u8, short, "rect")) return "PSS_RECTANGLE";
+    if (std.mem.eql(u8, short, "circle")) return "PSS_CIRCLE";
+    if (std.mem.eql(u8, short, "oval")) return "PSS_OVAL";
+    if (std.mem.eql(u8, short, "roundrect")) return "PSS_ROUNDRECT";
+    return "PSS_RECTANGLE";
+}
+
+fn protoBoardLayer(short: []const u8) []const u8 {
+    if (std.mem.eql(u8, short, "F.Cu")) return "BL_F_Cu";
+    if (std.mem.eql(u8, short, "B.Cu")) return "BL_B_Cu";
+    if (std.mem.eql(u8, short, "F.Paste")) return "BL_F_Paste";
+    if (std.mem.eql(u8, short, "F.Mask")) return "BL_F_Mask";
+    if (std.mem.eql(u8, short, "B.Mask")) return "BL_B_Mask";
+    if (std.mem.eql(u8, short, "F.SilkS")) return "BL_F_SilkS";
+    if (std.mem.eql(u8, short, "B.SilkS")) return "BL_B_SilkS";
+    return "BL_F_Cu";
+}
+
+/// Emit one pad as a proto-canonical Any-wrapped Pad message. The shape is
+/// what `protojson.Unmarshal` expects for `kiapi.board.types.Pad`:
+/// camelCase field names, string enum values, and a `@type` field that
+/// makes the decode resolve into `*board_types.Pad` on the agent side.
+fn writePadProtoJson(arena: std.mem.Allocator, w: anytype, pad: env_mod_node.Node, first: *bool) !void {
     const nodes = pad.asList() orelse return;
     if (nodes.len < 4) return;
-    // (pad <num> <type> <shape> ...)
     const num = padNumberText(arena, nodes[1]) orelse return;
     const ptype = nodes[2].asAtom() orelse return;
     const shape = nodes[3].asAtom() orelse return;
@@ -284,28 +318,48 @@ fn writePadJson(arena: std.mem.Allocator, w: anytype, pad: env_mod_node.Node, fi
 
     if (!first.*) try w.writeAll(",");
     first.* = false;
-    // Normalise the EDA-format short type names into KiCad-format full names
-    // so the Go agent gets a stable vocabulary.
-    const ptype_norm = if (std.mem.eql(u8, ptype, "thru")) "thru_hole" else if (std.mem.eql(u8, ptype, "np_thru")) "np_thru_hole" else ptype;
-    try w.writeAll("{\"number\":");
-    try writeJsonString(w, num);
-    try w.writeAll(",\"type\":");
-    try writeJsonString(w, ptype_norm);
-    try w.writeAll(",\"shape\":");
-    try writeJsonString(w, shape);
-    try w.print(",\"pos\":[{d},{d}]", .{ pos_x, pos_y });
-    try w.print(",\"size\":[{d},{d}]", .{ size_w, size_h });
-    if (pos_rot != 0) try w.print(",\"rotation\":{d}", .{pos_rot});
-    if (drill_d != 0) try w.print(",\"drill\":{d}", .{drill_d});
+    const proto_type = protoPadType(ptype);
+    const proto_shape = protoPadShape(shape);
 
-    // Default layer sets — the EDA `.sexp` format doesn't carry them per-pad.
-    if (std.mem.eql(u8, ptype_norm, "smd")) {
-        try w.writeAll(",\"layers\":[\"F.Cu\",\"F.Paste\",\"F.Mask\"]");
+    try w.writeAll("{\"@type\":\"" ++ PROTO_TYPE_URL_PAD ++ "\",\"id\":{},\"number\":");
+    try writeJsonString(w, num);
+    try w.print(",\"type\":\"{s}\"", .{proto_type});
+    try w.print(",\"position\":{{\"xNm\":{d},\"yNm\":{d}}}", .{ mmToNm(pos_x), mmToNm(pos_y) });
+    try w.writeAll(",\"padStack\":{");
+    try w.writeAll("\"type\":\"" ++ PROTO_PADSTACK_NORMAL ++ "\",");
+    // Standard layer sets per pad type — KiCad's IPC needs both the
+    // top-level `layers` array (which physical layers the pad lives on)
+    // and a `copperLayers[]` describing the shape on each copper layer.
+    if (std.mem.eql(u8, proto_type, PROTO_PADTYPE_SMD)) {
+        try w.writeAll("\"layers\":[\"BL_F_Cu\",\"BL_F_Paste\",\"BL_F_Mask\"],");
     } else {
-        // thru_hole, np_thru_hole — multilayer.
-        try w.writeAll(",\"layers\":[\"F.Cu\",\"B.Cu\",\"F.Mask\",\"B.Mask\"]");
+        try w.writeAll("\"layers\":[\"BL_F_Cu\",\"BL_B_Cu\",\"BL_F_Mask\",\"BL_B_Mask\"],");
     }
-    try w.writeAll("}");
+    try w.writeAll("\"copperLayers\":[{");
+    try w.print("\"layer\":\"{s}\",\"shape\":\"{s}\"", .{ protoBoardLayer("F.Cu"), proto_shape });
+    try w.print(",\"size\":{{\"xNm\":{d},\"yNm\":{d}}}", .{ mmToNm(size_w), mmToNm(size_h) });
+    if (std.mem.eql(u8, proto_shape, "PSS_ROUNDRECT")) {
+        try w.writeAll(",\"cornerRoundingRatio\":0.25");
+    }
+    try w.writeAll("}]");
+    try w.print(",\"angle\":{{\"valueDegrees\":{d}}}", .{pos_rot});
+    if (drill_d > 0) {
+        const d_nm = mmToNm(drill_d);
+        try w.writeAll(",\"drill\":{\"startLayer\":\"BL_F_Cu\",\"endLayer\":\"BL_B_Cu\",");
+        try w.print("\"diameter\":{{\"xNm\":{d},\"yNm\":{d}}}}}", .{ d_nm, d_nm });
+    }
+    try w.writeAll("}}");
+}
+
+/// KiCad's IPC measures distances in nanometres (1 mm = 1e6 nm). Used
+/// when emitting Vector2 messages in proto-canonical JSON.
+const NM_PER_MM: f64 = 1_000_000.0;
+
+/// Convert a millimetre value to nanometres (KiCad's wire unit). Returns
+/// signed i64 because pad positions are negative on the left half of a
+/// footprint.
+fn mmToNm(mm: f64) i64 {
+    return @intFromFloat(mm * NM_PER_MM);
 }
 
 /// Pad numbers in EDA `.sexp` come in three flavors:

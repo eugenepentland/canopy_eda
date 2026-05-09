@@ -91,9 +91,9 @@ func applyOp(kc kicad.Client, op eda.Op) error {
 	case "set_pad_net":
 		return kc.SetPadNet(op.UUID, op.Pad, op.Net)
 	case "add":
-		return kc.AddFootprint(toKicadDef(op.FootprintDef), op.UUID, op.Ref, op.Value, op.PadNets)
+		return kc.AddFootprint(op.FootprintDef, op.UUID, op.Ref, op.Value, op.PadNets)
 	case "swap_footprint":
-		return kc.SwapFootprint(op.UUID, toKicadDef(op.FootprintDef), op.PadNets)
+		return kc.SwapFootprint(op.UUID, op.FootprintDef, op.PadNets)
 	case "remove":
 		return kc.Remove(op.UUID)
 	case "flag_stale":
@@ -105,28 +105,4 @@ func applyOp(kc kicad.Client, op eda.Op) error {
 		// extend the protocol in ways the older client doesn't know yet.
 		return nil
 	}
-}
-
-// toKicadDef translates the wire type into the IPC builder's input. Returns
-// nil when the server didn't ship a footprint_def — older builds, or
-// vendor-only footprints where we can't construct geometry. The IPC client
-// then surfaces a clear "missing footprint_def" error per op.
-func toKicadDef(d *eda.FootprintDef) *kicad.FootprintDef {
-	if d == nil {
-		return nil
-	}
-	pads := make([]kicad.PadDef, 0, len(d.Pads))
-	for _, p := range d.Pads {
-		pads = append(pads, kicad.PadDef{
-			Number:   p.Number,
-			Type:     p.Type,
-			Shape:    p.Shape,
-			Pos:      p.Pos,
-			Size:     p.Size,
-			Drill:    p.Drill,
-			Rotation: p.Rotation,
-			Layers:   p.Layers,
-		})
-	}
-	return &kicad.FootprintDef{Name: d.Name, Pads: pads}
 }

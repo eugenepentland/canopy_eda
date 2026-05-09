@@ -9,6 +9,7 @@ import (
 	"go.nanomsg.org/mangos/v3/protocol/req"
 	_ "go.nanomsg.org/mangos/v3/transport/ipc" // Unix socket / Windows named pipe
 	_ "go.nanomsg.org/mangos/v3/transport/tcp"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/anypb"
 
 	board_types "github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad/proto/board/board_types"
@@ -334,17 +335,34 @@ func (c *realClient) SetPadNet(uuid, padNumber, netName string) error {
 	return nil
 }
 
-func (c *realClient) AddFootprint(def *FootprintDef, uuid, ref, value string, padNets [][2]string) error {
-	if def == nil {
-		return errors.New("AddFootprint: server returned no footprint_def — make sure the EDA server is running a build with structured-fp emission")
+func (c *realClient) AddFootprint(defJSON []byte, uuid, ref, value string, padNets [][2]string) error {
+	if len(defJSON) == 0 {
+		return errors.New("AddFootprint: server returned no footprint_def — server build is too old (pre-proto-canonical encoding)")
 	}
-	fp := buildFootprintInstance(def, uuid, ref, value, padNets)
+	def, err := decodeFootprintDef(defJSON)
+	if err != nil {
+		return fmt.Errorf("AddFootprint: %w", err)
+	}
+	stampPadNets(def, padNets)
+	fp := &board_types.FootprintInstance{
+		Id:          &base_types.KIID{Value: uuid},
+		Position:    &base_types.Vector2{},
+		Orientation: &base_types.Angle{ValueDegrees: 0},
+		Layer:       board_types.BoardLayer_BL_F_Cu,
+		Definition:  def,
+	}
+	if ref != "" {
+		ensureBoardTextString(ensureField(&fp.ReferenceField)).Text = ref
+	}
+	if value != "" {
+		ensureBoardTextString(ensureField(&fp.ValueField)).Text = value
+	}
 	c.added = append(c.added, fp)
 	return nil
 }
 
-func (c *realClient) SwapFootprint(uuid string, def *FootprintDef, padNets [][2]string) error {
-	if def == nil {
+func (c *realClient) SwapFootprint(uuid string, defJSON []byte, padNets [][2]string) error {
+	if len(defJSON) == 0 {
 		return errors.New("SwapFootprint: server returned no footprint_def")
 	}
 	fp, ok := c.cache[uuid]
@@ -357,25 +375,74 @@ func (c *realClient) SwapFootprint(uuid string, def *FootprintDef, padNets [][2]
 	// CreateItems with a colliding UUID, leaving DeleteItems to remove the
 	// original with no replacement (that's how the connectors disappeared
 	// on the second sync). UpdateItems handles the swap atomically.
-	//
+	def, err := decodeFootprintDef(defJSON)
+	if err != nil {
+		return fmt.Errorf("SwapFootprint: %w", err)
+	}
+	stampPadNets(def, padNets)
 	// Preserve canopy_uuid and any other Field entries — they live in
 	// Definition.Items as Any-wrapped Fields and would be wiped by a
 	// wholesale Definition overwrite, breaking UUID-based matching on the
 	// next sync.
-	var preservedFields []*anypb.Any
 	if oldDef := fp.GetDefinition(); oldDef != nil {
 		for _, item := range oldDef.Items {
 			var f board_types.Field
 			if err := item.UnmarshalTo(&f); err == nil && f.GetName() != "" {
-				preservedFields = append(preservedFields, item)
+				def.Items = append(def.Items, item)
 			}
 		}
 	}
-	template := buildFootprintInstance(def, "", "", "", padNets)
-	template.Definition.Items = append(template.Definition.Items, preservedFields...)
-	fp.Definition = template.Definition
+	fp.Definition = def
 	c.dirty[fp.GetId().GetValue()] = struct{}{}
 	return nil
+}
+
+// decodeFootprintDef parses a proto-canonical JSON message of type
+// `kiapi.board.types.Footprint` into a Footprint proto. protojson handles
+// camelCase field names, string enum values, and `@type`-tagged Any items
+// — so the agent has no schema-aware decoding code; it's all inferred
+// from the generated .pb.go bindings.
+func decodeFootprintDef(defJSON []byte) (*board_types.Footprint, error) {
+	var def board_types.Footprint
+	opts := protojson.UnmarshalOptions{DiscardUnknown: true}
+	if err := opts.Unmarshal(defJSON, &def); err != nil {
+		return nil, fmt.Errorf("decode footprint_def: %w", err)
+	}
+	return &def, nil
+}
+
+// stampPadNets walks the Definition's Pad items and overwrites their
+// Net.Name with the per-instance assignment from `padNets`. The geometry
+// JSON the server ships is shared across all instances of a footprint;
+// pad-to-net mapping is per-instance and travels in `op.PadNets`.
+func stampPadNets(def *board_types.Footprint, padNets [][2]string) {
+	if def == nil || len(padNets) == 0 {
+		return
+	}
+	netByPad := map[string]string{}
+	for _, kv := range padNets {
+		netByPad[kv[0]] = kv[1]
+	}
+	for i, item := range def.Items {
+		var pad board_types.Pad
+		if err := item.UnmarshalTo(&pad); err != nil {
+			continue
+		}
+		netName, ok := netByPad[pad.GetNumber()]
+		if !ok || netName == "" {
+			continue
+		}
+		if pad.Net == nil {
+			pad.Net = &board_types.Net{}
+		}
+		pad.Net.Name = netName
+		repacked, err := anypb.New(&pad)
+		if err != nil {
+			continue
+		}
+		def.Items[i].TypeUrl = repacked.TypeUrl
+		def.Items[i].Value = repacked.Value
+	}
 }
 
 func (c *realClient) Remove(uuid string) error {
