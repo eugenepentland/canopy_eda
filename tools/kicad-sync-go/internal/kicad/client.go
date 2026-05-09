@@ -11,6 +11,7 @@ import (
 	"go.nanomsg.org/mangos/v3/protocol/req"
 	_ "go.nanomsg.org/mangos/v3/transport/ipc" // Unix socket / Windows named pipe
 	_ "go.nanomsg.org/mangos/v3/transport/tcp"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/anypb"
 
 	board_types "github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad/proto/board/board_types"
@@ -380,11 +381,28 @@ func (c *realClient) SetPadNet(uuid, padNumber, netName string) error {
 	return nil
 }
 
-func (c *realClient) AddFootprint(kicadMod, entryName, uuid, ref, value string, padNets [][2]string) error {
+func (c *realClient) AddFootprint(defJSON []byte, kicadMod, entryName, uuid, ref, value string, padNets [][2]string) error {
 	if err := c.stageLibraryAndCheck(kicadMod, entryName); err != nil {
 		return fmt.Errorf("AddFootprint: %w", err)
 	}
-	fp := buildLibraryFootprintInstance(uuid, entryName, ref, value)
+	def, err := decodeFootprintDef(defJSON, entryName)
+	if err != nil {
+		return fmt.Errorf("AddFootprint: %w", err)
+	}
+	stampPadNets(def, padNets)
+	fp := &board_types.FootprintInstance{
+		Id:          &base_types.KIID{Value: uuid},
+		Position:    &base_types.Vector2{},
+		Orientation: &base_types.Angle{ValueDegrees: 0},
+		Layer:       board_types.BoardLayer_BL_F_Cu,
+		Definition:  def,
+	}
+	if ref != "" {
+		ensureBoardTextString(ensureField(&fp.ReferenceField)).Text = ref
+	}
+	if value != "" {
+		ensureBoardTextString(ensureField(&fp.ValueField)).Text = value
+	}
 	c.added = append(c.added, fp)
 	c.isNew[fp] = struct{}{}
 	if c.cache == nil {
@@ -394,15 +412,19 @@ func (c *realClient) AddFootprint(kicadMod, entryName, uuid, ref, value string, 
 	return nil
 }
 
-func (c *realClient) SwapFootprint(uuid, kicadMod, entryName string, padNets [][2]string) error {
+func (c *realClient) SwapFootprint(uuid string, defJSON []byte, kicadMod, entryName string, padNets [][2]string) error {
 	old, ok := c.cache[uuid]
 	if !ok {
-		// Nothing to swap — caller is targeting an unknown footprint.
 		return nil
 	}
 	if err := c.stageLibraryAndCheck(kicadMod, entryName); err != nil {
 		return fmt.Errorf("SwapFootprint: %w", err)
 	}
+	def, err := decodeFootprintDef(defJSON, entryName)
+	if err != nil {
+		return fmt.Errorf("SwapFootprint: %w", err)
+	}
+	stampPadNets(def, padNets)
 
 	oldKid := old.GetId().GetValue()
 	newKid := newKIID()
@@ -411,12 +433,7 @@ func (c *realClient) SwapFootprint(uuid, kicadMod, entryName string, padNets [][
 		Position:    old.GetPosition(),
 		Orientation: old.GetOrientation(),
 		Layer:       old.GetLayer(),
-		Definition: &board_types.Footprint{
-			Id: &base_types.LibraryIdentifier{
-				LibraryNickname: edaSyncLibName,
-				EntryName:       entryName,
-			},
-		},
+		Definition:  def,
 	}
 	if t := old.GetReferenceField().GetText().GetText().GetText(); t != "" {
 		ensureBoardTextString(ensureField(&newFp.ReferenceField)).Text = t
@@ -438,11 +455,76 @@ func (c *realClient) SwapFootprint(uuid, kicadMod, entryName string, padNets [][
 	c.removed[oldKid] = struct{}{}
 	c.added = append(c.added, newFp)
 	c.isNew[newFp] = struct{}{}
-	// Re-key the cache so any follow-up SetField / SetPadNet ops in this
-	// commit land on the new fp.
 	c.cache[oldKid] = newFp
 	c.cache[newKid] = newFp
 	return nil
+}
+
+// decodeFootprintDef parses the server's proto-canonical JSON for a
+// `kiapi.board.types.Footprint` message into a Footprint proto. Returns
+// a minimal Definition (just the LibraryIdentifier, no Items) if the
+// server didn't ship a footprint_def — the staged kicad_mod + library
+// reference still gets KiCad to render the right name in the BOM, just
+// without inline pads until the user triggers an Update Footprint
+// action manually.
+func decodeFootprintDef(defJSON []byte, entryName string) (*board_types.Footprint, error) {
+	if len(defJSON) == 0 {
+		return &board_types.Footprint{
+			Id: &base_types.LibraryIdentifier{
+				LibraryNickname: edaSyncLibName,
+				EntryName:       entryName,
+			},
+		}, nil
+	}
+	var def board_types.Footprint
+	opts := protojson.UnmarshalOptions{DiscardUnknown: true}
+	if err := opts.Unmarshal(defJSON, &def); err != nil {
+		return nil, fmt.Errorf("decode footprint_def: %w", err)
+	}
+	// Force the LibraryIdentifier even if the server omitted it — we
+	// need a resolvable library reference so KiCad's read-back populates
+	// FootprintName for the next sync's diff.
+	if def.Id == nil || def.Id.GetEntryName() == "" {
+		def.Id = &base_types.LibraryIdentifier{
+			LibraryNickname: edaSyncLibName,
+			EntryName:       entryName,
+		}
+	}
+	return &def, nil
+}
+
+// stampPadNets walks the Definition's Pad items and overwrites their
+// Net.Name with the per-instance assignment from `padNets`. The
+// geometry JSON is shared across every instance of a given footprint
+// name; pad-to-net mapping is per-instance and travels in op.PadNets.
+func stampPadNets(def *board_types.Footprint, padNets [][2]string) {
+	if def == nil || len(padNets) == 0 {
+		return
+	}
+	netByPad := map[string]string{}
+	for _, kv := range padNets {
+		netByPad[kv[0]] = kv[1]
+	}
+	for i, item := range def.Items {
+		var pad board_types.Pad
+		if err := item.UnmarshalTo(&pad); err != nil {
+			continue
+		}
+		netName, ok := netByPad[pad.GetNumber()]
+		if !ok || netName == "" {
+			continue
+		}
+		if pad.Net == nil {
+			pad.Net = &board_types.Net{}
+		}
+		pad.Net.Name = netName
+		repacked, err := anypb.New(&pad)
+		if err != nil {
+			continue
+		}
+		def.Items[i].TypeUrl = repacked.TypeUrl
+		def.Items[i].Value = repacked.Value
+	}
 }
 
 // stageLibraryAndCheck writes the server-supplied kicad_mod text into the
@@ -476,32 +558,6 @@ func (c *realClient) stageLibraryAndCheck(kicadMod, entryName string) error {
 	}
 	synclog.Logf("stage library OK")
 	return nil
-}
-
-// buildLibraryFootprintInstance creates a minimal FootprintInstance proto
-// pointing at the eda-sync library entry named `entryName`. Geometry
-// comes from the .kicad_mod the agent staged via stageLibraryFootprint;
-// KiCad reads it on CreateItems and fills in pads / drawings / silk.
-func buildLibraryFootprintInstance(uuid, entryName, ref, value string) *board_types.FootprintInstance {
-	fp := &board_types.FootprintInstance{
-		Id:          &base_types.KIID{Value: uuid},
-		Position:    &base_types.Vector2{},
-		Orientation: &base_types.Angle{ValueDegrees: 0},
-		Layer:       board_types.BoardLayer_BL_F_Cu,
-		Definition: &board_types.Footprint{
-			Id: &base_types.LibraryIdentifier{
-				LibraryNickname: edaSyncLibName,
-				EntryName:       entryName,
-			},
-		},
-	}
-	if ref != "" {
-		ensureBoardTextString(ensureField(&fp.ReferenceField)).Text = ref
-	}
-	if value != "" {
-		ensureBoardTextString(ensureField(&fp.ValueField)).Text = value
-	}
-	return fp
 }
 
 // tryRefreshFootprints fires KiCad's "Update Footprints from Library"

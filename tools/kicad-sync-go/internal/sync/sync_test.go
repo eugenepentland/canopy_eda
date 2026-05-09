@@ -20,6 +20,14 @@ func stubKicadMod(entryName string) string {
 	return fmt.Sprintf(`(footprint %q (version 20221018) (generator pcbnew) (layer "F.Cu"))`, entryName)
 }
 
+// stubFootprintDef returns the proto-canonical JSON shape the agent
+// expects on `add` / `swap_footprint` ops — minimal Footprint message
+// with no Items. The Fake's AddFootprint/SwapFootprint don't actually
+// decode it; this is just here so the wire round-trips cleanly.
+func stubFootprintDef(entryName string) []byte {
+	return fmt.Appendf(nil, `{"id":{"libraryNickname":"eda-sync","entryName":%q},"items":[]}`, entryName)
+}
+
 // fakeServer hands back the canned response and records the body it received.
 func fakeServer(t *testing.T, resp eda.SyncPlanResponse, gotReq *eda.SyncPlanRequest) *httptest.Server {
 	t.Helper()
@@ -153,6 +161,7 @@ func TestAddOpInsertsFootprint(t *testing.T) {
 			{Op: "add", UUID: "u-c1", Ref: "C1", Value: "100nF",
 				FootprintName: "C_0402",
 				KicadMod:      stubKicadMod("C_0402"),
+				FootprintDef:  stubFootprintDef("C_0402"),
 				PadNets:       [][2]string{{"1", "VDD"}, {"2", "GND"}}},
 		},
 	}
@@ -182,8 +191,9 @@ func TestSwapOpReplacesFootprint(t *testing.T) {
 		Summary: eda.Summary{Swapped: 1},
 		Ops: []eda.Op{
 			{Op: "swap_footprint", UUID: "u-r1", NewFootprintName: "R_0805",
-				KicadMod: stubKicadMod("R_0805"),
-				PadNets:  [][2]string{{"1", "VDD"}, {"2", "GND"}}},
+				KicadMod:     stubKicadMod("R_0805"),
+				FootprintDef: stubFootprintDef("R_0805"),
+				PadNets:      [][2]string{{"1", "VDD"}, {"2", "GND"}}},
 		},
 	}
 	var gotReq eda.SyncPlanRequest

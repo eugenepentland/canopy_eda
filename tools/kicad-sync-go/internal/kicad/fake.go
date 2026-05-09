@@ -99,7 +99,7 @@ func (f *Fake) SetPadNet(uuid, pad, net string) error {
 	return fmt.Errorf("SetPadNet: pad %q not on uuid %q", pad, uuid)
 }
 
-func (f *Fake) AddFootprint(kicadMod, entryName, uuid, ref, value string, padNets [][2]string) error {
+func (f *Fake) AddFootprint(defJSON []byte, kicadMod, entryName, uuid, ref, value string, padNets [][2]string) error {
 	pads := make([]Pad, 0, len(padNets))
 	for _, kv := range padNets {
 		pads = append(pads, Pad{Number: kv[0], Net: kv[1]})
@@ -116,7 +116,7 @@ func (f *Fake) AddFootprint(kicadMod, entryName, uuid, ref, value string, padNet
 	return nil
 }
 
-func (f *Fake) SwapFootprint(uuid, kicadMod, entryName string, padNets [][2]string) error {
+func (f *Fake) SwapFootprint(uuid string, defJSON []byte, kicadMod, entryName string, padNets [][2]string) error {
 	i, ok := f.findIdx(uuid)
 	if !ok {
 		return fmt.Errorf("SwapFootprint: uuid %q not found", uuid)

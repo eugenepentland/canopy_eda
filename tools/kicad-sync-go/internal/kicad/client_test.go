@@ -64,7 +64,8 @@ func TestSwapFootprintReplacesViaDeleteAndAdd(t *testing.T) {
 	tmpBoard := t.TempDir() + "/board.kicad_pcb"
 	c.boardPathAbs = tmpBoard
 	const kicadMod = `(footprint "NEW_FOOTPRINT" (version 20221018) (generator pcbnew) (layer "F.Cu"))`
-	if err := c.SwapFootprint(kid, kicadMod, "NEW_FOOTPRINT", [][2]string{{"1", "VDD"}}); err != nil {
+	defJSON := []byte(`{"id":{"libraryNickname":"eda-sync","entryName":"NEW_FOOTPRINT"},"items":[]}`)
+	if err := c.SwapFootprint(kid, defJSON, kicadMod, "NEW_FOOTPRINT", [][2]string{{"1", "VDD"}}); err != nil {
 		t.Fatalf("SwapFootprint: %v", err)
 	}
 

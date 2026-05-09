@@ -59,24 +59,33 @@ type SyncPlanRequest struct {
 // KicadMod is the verbatim `(footprint …)` S-expression source for an
 // `add` / `swap_footprint` op. The agent stages it into the board's
 // per-project `eda-sync.pretty` directory (and registers eda-sync in
-// fp-lib-table) before calling KiCad's IPC CreateItems — KiCad's
-// CreateItems silently drops inline Definition.Items when the
-// LibraryIdentifier doesn't resolve to a real on-disk library, so the
-// staging step is what makes a freshly-added footprint render with
-// pads. Pad nets travel separately in PadNets and arrive via the
-// surrounding set_pad_net ops the server emits after the create.
+// fp-lib-table) so KiCad's library lookup resolves at CreateItems time.
+//
+// FootprintDef is proto-canonical JSON for the same Footprint message —
+// `kiapi.board.types.Footprint` with its Items list (Any-wrapped Pads).
+// The agent decodes it via protojson and uses it as the inline
+// Definition on CreateItems so KiCad doesn't need a separate "Update
+// Footprint(s) From Library" action to populate the pad geometry.
+// Empirically (KiCad 10), CreateItems with a resolvable LibraryIdentifier
+// alone produces a placeholder fp with `pads=0`; inline Items is the
+// only way we found to make pads appear in the same commit.
+//
+// PadNets carries per-instance net assignments (the geometry JSON is
+// shared across every instance of a footprint name); the agent stamps
+// them onto the decoded Pad messages after Unmarshal.
 type Op struct {
-	Op               string      `json:"op"`
-	UUID             string      `json:"uuid,omitempty"`
-	Field            string      `json:"field,omitempty"`
-	Value            string      `json:"value,omitempty"`
-	Pad              string      `json:"pad,omitempty"`
-	Net              string      `json:"net,omitempty"`
-	Ref              string      `json:"ref,omitempty"`
-	FootprintName    string      `json:"footprint_name,omitempty"`
-	NewFootprintName string      `json:"new_footprint_name,omitempty"`
-	KicadMod         string      `json:"kicad_mod,omitempty"`
-	PadNets          [][2]string `json:"pad_nets,omitempty"`
+	Op               string          `json:"op"`
+	UUID             string          `json:"uuid,omitempty"`
+	Field            string          `json:"field,omitempty"`
+	Value            string          `json:"value,omitempty"`
+	Pad              string          `json:"pad,omitempty"`
+	Net              string          `json:"net,omitempty"`
+	Ref              string          `json:"ref,omitempty"`
+	FootprintName    string          `json:"footprint_name,omitempty"`
+	NewFootprintName string          `json:"new_footprint_name,omitempty"`
+	KicadMod         string          `json:"kicad_mod,omitempty"`
+	FootprintDef     json.RawMessage `json:"footprint_def,omitempty"`
+	PadNets          [][2]string     `json:"pad_nets,omitempty"`
 }
 
 // Summary is the counts the server tracked while building the plan.
