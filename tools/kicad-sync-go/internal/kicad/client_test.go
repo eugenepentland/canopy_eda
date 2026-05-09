@@ -9,16 +9,23 @@ import (
 	base_types "github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad/proto/common/types/base_types"
 )
 
-// TestSwapFootprintMutatesInPlace pins the fix for the bug that wiped
-// J1/J4 from the cyclops breakout on the second sync click: SwapFootprint
-// used to queue both a delete and a create on the SAME KiCad UUID, which
-// KiCad's IPC handles inconsistently — one path removed the original and
-// dropped the canopy_uuid custom field, leaving the next sync with a
-// footprint that couldn't be UUID-matched and (eventually) made the
-// design appear stale. The correct behavior is to update the cached
-// footprint's Definition in place so Push flushes a single UpdateItems
-// call.
-func TestSwapFootprintMutatesInPlace(t *testing.T) {
+// TestSwapFootprintReplacesViaDeleteAndAdd pins the post-bug-discovery
+// behaviour: KiCad's IPC UpdateItems silently no-ops Definition changes,
+// so SwapFootprint has to delete the old fp and create a fresh one with
+// the new geometry, using a freshly-minted KiCad UUID to dodge the
+// CreateItems / DeleteItems collision that wiped J1/J4 in the original
+// implementation.
+//
+// Required invariants exercised here:
+//   - old kicad uuid lands in c.removed (so DeleteItems flushes it)
+//   - exactly one new fp lands in c.added (CreateItems flushes it)
+//   - the new fp has a different kicad uuid than the old one
+//   - canopy_uuid is preserved on the new fp's Definition.Items
+//   - cache aliases the old kicad uuid to the new fp so subsequent
+//     set_field / set_pad_net ops in the same commit land on the new fp
+//   - newly-created fp is NOT marked dirty (UpdateItems against a
+//     UUID KiCad hasn't seen would error out)
+func TestSwapFootprintReplacesViaDeleteAndAdd(t *testing.T) {
 	const kid = "k-uuid-1"
 	const cid = "canopy-uuid-1"
 
@@ -46,37 +53,49 @@ func TestSwapFootprintMutatesInPlace(t *testing.T) {
 		cache:   map[string]*board_types.FootprintInstance{kid: fp, cid: fp},
 		dirty:   map[string]struct{}{},
 		removed: map[string]struct{}{},
+		isNew:   map[*board_types.FootprintInstance]struct{}{},
 	}
 
 	defJSON := []byte(`{
 		"id": {"libraryNickname": "eda-sync", "entryName": "NEW_FOOTPRINT"},
 		"items": [
-			{"@type":"type.googleapis.com/kiapi.board.types.Pad","id":{},"number":"1","type":"PT_SMD","position":{"xNm":-1000000,"yNm":0},"padStack":{"type":"PST_NORMAL","layers":["BL_F_Cu","BL_F_Paste","BL_F_Mask"],"copperLayers":[{"layer":"BL_F_Cu","shape":"PSS_RECTANGLE","size":{"xNm":1000000,"yNm":1000000}}],"angle":{"valueDegrees":0}}},
-			{"@type":"type.googleapis.com/kiapi.board.types.Pad","id":{},"number":"2","type":"PT_SMD","position":{"xNm":1000000,"yNm":0},"padStack":{"type":"PST_NORMAL","layers":["BL_F_Cu","BL_F_Paste","BL_F_Mask"],"copperLayers":[{"layer":"BL_F_Cu","shape":"PSS_RECTANGLE","size":{"xNm":1000000,"yNm":1000000}}],"angle":{"valueDegrees":0}}}
+			{"@type":"type.googleapis.com/kiapi.board.types.Pad","id":{},"number":"1","type":"PT_SMD","position":{"xNm":-1000000,"yNm":0},"padStack":{"type":"PST_NORMAL","layers":["BL_F_Cu","BL_F_Paste","BL_F_Mask"],"copperLayers":[{"layer":"BL_F_Cu","shape":"PSS_RECTANGLE","size":{"xNm":1000000,"yNm":1000000}}],"angle":{"valueDegrees":0}}}
 		]
 	}`)
-	if err := c.SwapFootprint(kid, defJSON, [][2]string{{"1", "VDD"}, {"2", "GND"}}); err != nil {
+	if err := c.SwapFootprint(kid, defJSON, [][2]string{{"1", "VDD"}}); err != nil {
 		t.Fatalf("SwapFootprint: %v", err)
 	}
 
-	if _, ok := c.removed[kid]; ok {
-		t.Errorf("expected no entry in c.removed for kicad UUID %q after swap; the bug deletes-and-recreates on the same UUID", kid)
+	if _, ok := c.removed[kid]; !ok {
+		t.Errorf("expected old kicad uuid %q in c.removed so DeleteItems flushes it", kid)
 	}
-	if len(c.added) != 0 {
-		t.Errorf("expected no entries in c.added after swap, got %d", len(c.added))
+	if len(c.added) != 1 {
+		t.Fatalf("expected exactly 1 new fp in c.added, got %d", len(c.added))
 	}
-	if _, ok := c.dirty[kid]; !ok {
-		t.Errorf("expected c.dirty to contain kicad UUID %q so Push flushes the in-place update", kid)
+	newFp := c.added[0]
+	if newFp.GetId().GetValue() == "" {
+		t.Error("new fp must have a fresh KiCad UUID — CreateItems against an empty id is undefined")
+	}
+	if newFp.GetId().GetValue() == kid {
+		t.Errorf("new fp reused the deleted kicad uuid %q — that's the original collision bug", kid)
+	}
+	if _, dirtyMarked := c.dirty[newFp.GetId().GetValue()]; dirtyMarked {
+		t.Error("new fp's kicad uuid must not be in c.dirty — UpdateItems against a not-yet-created UUID errors out")
+	}
+	if c.cache[kid] != newFp {
+		t.Errorf("cache[%q] should alias to the new fp so set_field/set_pad_net follow-ups land on the swap target", kid)
+	}
+	if c.cache[newFp.GetId().GetValue()] != newFp {
+		t.Errorf("cache[%q] should point at the new fp", newFp.GetId().GetValue())
 	}
 
-	gotName := fp.GetDefinition().GetId().GetEntryName()
+	gotName := newFp.GetDefinition().GetId().GetEntryName()
 	if gotName != "NEW_FOOTPRINT" {
-		t.Errorf("library entry name not updated: got %q, want %q", gotName, "NEW_FOOTPRINT")
+		t.Errorf("library entry name on new fp: got %q, want %q", gotName, "NEW_FOOTPRINT")
 	}
-
-	canopyAfter := readCanopyUUID(t, fp)
+	canopyAfter := readCanopyUUID(t, newFp)
 	if canopyAfter != cid {
-		t.Errorf("canopy_uuid lost during swap: got %q, want %q — next sync would fail UUID match and treat the footprint as stale", canopyAfter, cid)
+		t.Errorf("canopy_uuid lost in swap: got %q, want %q", canopyAfter, cid)
 	}
 }
 

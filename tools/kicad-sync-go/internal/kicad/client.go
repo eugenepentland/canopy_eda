@@ -1,6 +1,7 @@
 package kicad
 
 import (
+	crand "crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -66,9 +67,15 @@ type realClient struct {
 	// UpdateItems batch so KiCad records the sync as a single undo.
 	cache map[string]*board_types.FootprintInstance
 
-	dirty   map[string]struct{}                // uuids of mutated FPs
-	removed map[string]struct{}                // uuids to delete
-	added   []*board_types.FootprintInstance   // staged new footprints
+	dirty   map[string]struct{}              // uuids of mutated FPs
+	removed map[string]struct{}              // uuids to delete
+	added   []*board_types.FootprintInstance // staged new footprints
+	// isNew flags fps that were synthesized by SwapFootprint / AddFootprint
+	// in the current commit so SetField / SetPadNet don't mark them dirty
+	// (they'll already be flushed via CreateItems with whatever in-place
+	// mutations landed). Without this an UpdateItems against a UUID that
+	// KiCad hasn't seen yet trips a "no such item" rpc error.
+	isNew map[*board_types.FootprintInstance]struct{}
 
 	commitID      *base_types.KIID
 	commitMessage string
@@ -192,6 +199,7 @@ func (c *realClient) Begin(message string) error {
 	c.dirty = map[string]struct{}{}
 	c.removed = map[string]struct{}{}
 	c.added = nil
+	c.isNew = map[*board_types.FootprintInstance]struct{}{}
 	c.commitMessage = message
 	if c.doc == nil {
 		if _, err := c.BoardPath(); err != nil {
@@ -233,11 +241,19 @@ func (c *realClient) SetField(uuid, field, value string) error {
 			return err
 		}
 	}
-	// Look up the cached entry's "canonical" KiCad-internal UUID so we mark
-	// the right footprint dirty even when the caller targeted us by an
-	// alias key (canopy_uuid).
-	c.dirty[fp.GetId().GetValue()] = struct{}{}
+	c.markDirtyIfExisting(fp)
 	return nil
+}
+
+// markDirtyIfExisting flags fp for UpdateItems unless it was synthesized
+// in this commit (SwapFootprint, AddFootprint). Newly-created fps go out
+// via CreateItems with their in-place mutations already baked in, and an
+// UpdateItems against a UUID KiCad hasn't seen yet would error out.
+func (c *realClient) markDirtyIfExisting(fp *board_types.FootprintInstance) {
+	if _, isNew := c.isNew[fp]; isNew {
+		return
+	}
+	c.dirty[fp.GetId().GetValue()] = struct{}{}
 }
 
 // setOrAppendCustomField rewrites an existing Field.Text.Text.Text inside
@@ -329,7 +345,7 @@ func (c *realClient) SetPadNet(uuid, padNumber, netName string) error {
 		}
 		item.TypeUrl = repacked.TypeUrl
 		item.Value = repacked.Value
-		c.dirty[fp.GetId().GetValue()] = struct{}{}
+		c.markDirtyIfExisting(fp)
 		return nil
 	}
 	return nil
@@ -358,6 +374,14 @@ func (c *realClient) AddFootprint(defJSON []byte, uuid, ref, value string, padNe
 		ensureBoardTextString(ensureField(&fp.ValueField)).Text = value
 	}
 	c.added = append(c.added, fp)
+	c.isNew[fp] = struct{}{}
+	// Cache the new fp under its assigned KiCad UUID so set_field /
+	// set_pad_net ops the server emits in the same commit (canopy_uuid
+	// backfill, etc.) resolve to it.
+	if c.cache == nil {
+		c.cache = map[string]*board_types.FootprintInstance{}
+	}
+	c.cache[uuid] = fp
 	return nil
 }
 
@@ -365,26 +389,21 @@ func (c *realClient) SwapFootprint(uuid string, defJSON []byte, padNets [][2]str
 	if len(defJSON) == 0 {
 		return errors.New("SwapFootprint: server returned no footprint_def")
 	}
-	fp, ok := c.cache[uuid]
+	old, ok := c.cache[uuid]
 	if !ok {
 		// Nothing to swap — caller is targeting an unknown footprint.
 		return nil
 	}
-	// Mutate the existing footprint's Definition in place rather than
-	// queuing a delete+create on the same KiCad UUID — KiCad's IPC rejects
-	// CreateItems with a colliding UUID, leaving DeleteItems to remove the
-	// original with no replacement (that's how the connectors disappeared
-	// on the second sync). UpdateItems handles the swap atomically.
 	def, err := decodeFootprintDef(defJSON)
 	if err != nil {
 		return fmt.Errorf("SwapFootprint: %w", err)
 	}
 	stampPadNets(def, padNets)
-	// Preserve canopy_uuid and any other Field entries — they live in
-	// Definition.Items as Any-wrapped Fields and would be wiped by a
-	// wholesale Definition overwrite, breaking UUID-based matching on the
-	// next sync.
-	if oldDef := fp.GetDefinition(); oldDef != nil {
+
+	// Carry custom Fields (canopy_uuid, MPN, …) from the old fp onto the
+	// new Definition so UUID-based matching keeps working on the next sync
+	// and KiCad's BOM view doesn't drop columns the user has populated.
+	if oldDef := old.GetDefinition(); oldDef != nil {
 		for _, item := range oldDef.Items {
 			var f board_types.Field
 			if err := item.UnmarshalTo(&f); err == nil && f.GetName() != "" {
@@ -392,9 +411,58 @@ func (c *realClient) SwapFootprint(uuid string, defJSON []byte, padNets [][2]str
 			}
 		}
 	}
-	fp.Definition = def
-	c.dirty[fp.GetId().GetValue()] = struct{}{}
+
+	// KiCad's UpdateItems doesn't actually replace a FootprintInstance's
+	// Definition — geometry stays whatever the library footprint had at
+	// CreateItems time. So a swap has to be delete + create. Use a FRESH
+	// KiCad UUID for the new fp so we don't collide with the deleted one
+	// (the previous bug that wiped J1/J4 on the second sync); the canopy
+	// uuid carried in Definition.Items keeps the server's by_uuid match
+	// stable across the swap.
+	oldKid := old.GetId().GetValue()
+	newKid := newKIID()
+	newFp := &board_types.FootprintInstance{
+		Id:          &base_types.KIID{Value: newKid},
+		Position:    old.GetPosition(),
+		Orientation: old.GetOrientation(),
+		Layer:       old.GetLayer(),
+		Definition:  def,
+	}
+	if t := old.GetReferenceField().GetText().GetText().GetText(); t != "" {
+		ensureBoardTextString(ensureField(&newFp.ReferenceField)).Text = t
+	}
+	if t := old.GetValueField().GetText().GetText().GetText(); t != "" {
+		ensureBoardTextString(ensureField(&newFp.ValueField)).Text = t
+	}
+
+	c.removed[oldKid] = struct{}{}
+	c.added = append(c.added, newFp)
+	c.isNew[newFp] = struct{}{}
+
+	// Re-key the cache so any follow-up SetField / SetPadNet ops in this
+	// commit (the server emits set_field canopy_uuid + per-pad sets after
+	// a swap) land on the new fp instead of the now-doomed old one.
+	// The old kicad_uuid alias survives until the next ListFootprints
+	// rebuild, so the agent stays consistent for the rest of this commit.
+	c.cache[oldKid] = newFp
+	c.cache[newKid] = newFp
 	return nil
+}
+
+// newKIID mints a fresh RFC 4122 v4 UUID string suitable for KiCad's
+// `kiapi.common.types.KIID.value`. Used by SwapFootprint to avoid a
+// CreateItems / DeleteItems collision on the same UUID.
+func newKIID() string {
+	var b [16]byte
+	if _, err := crand.Read(b[:]); err != nil {
+		// Falling back to a zero UUID is safer than panicking — the
+		// surrounding rpc will fail loudly with an obvious "duplicate
+		// id" if two zero UUIDs ever collide in the same commit.
+		return "00000000-0000-0000-0000-000000000000"
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // decodeFootprintDef parses a proto-canonical JSON message of type
