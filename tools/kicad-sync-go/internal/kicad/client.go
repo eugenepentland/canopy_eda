@@ -336,32 +336,34 @@ func (c *realClient) SwapFootprint(uuid string, def *FootprintDef, padNets [][2]
 	if def == nil {
 		return errors.New("SwapFootprint: server returned no footprint_def")
 	}
-	// Swap = delete old + create new. KiCad records both halves as one
-	// undo step thanks to the surrounding commit.
-	old, ok := c.cache[uuid]
+	fp, ok := c.cache[uuid]
 	if !ok {
 		// Nothing to swap — caller is targeting an unknown footprint.
 		return nil
 	}
-	kicadUUID := old.GetId().GetValue()
-	c.removed[kicadUUID] = struct{}{}
-	fp := buildFootprintInstance(def, kicadUUID, "", "", padNets)
-	// Carry over the old ref/value if they were on the cached footprint.
-	if t := old.GetReferenceField().GetText().GetText().GetText(); t != "" {
-		ensureBoardTextString(ensureField(&fp.ReferenceField)).Text = t
+	// Mutate the existing footprint's Definition in place rather than
+	// queuing a delete+create on the same KiCad UUID — KiCad's IPC rejects
+	// CreateItems with a colliding UUID, leaving DeleteItems to remove the
+	// original with no replacement (that's how the connectors disappeared
+	// on the second sync). UpdateItems handles the swap atomically.
+	//
+	// Preserve canopy_uuid and any other Field entries — they live in
+	// Definition.Items as Any-wrapped Fields and would be wiped by a
+	// wholesale Definition overwrite, breaking UUID-based matching on the
+	// next sync.
+	var preservedFields []*anypb.Any
+	if oldDef := fp.GetDefinition(); oldDef != nil {
+		for _, item := range oldDef.Items {
+			var f board_types.Field
+			if err := item.UnmarshalTo(&f); err == nil && f.GetName() != "" {
+				preservedFields = append(preservedFields, item)
+			}
+		}
 	}
-	if t := old.GetValueField().GetText().GetText().GetText(); t != "" {
-		ensureBoardTextString(ensureField(&fp.ValueField)).Text = t
-	}
-	// Preserve placement.
-	if old.Position != nil {
-		fp.Position = old.Position
-	}
-	if old.Orientation != nil {
-		fp.Orientation = old.Orientation
-	}
-	fp.Layer = old.Layer
-	c.added = append(c.added, fp)
+	template := buildFootprintInstance(def, "", "", "", padNets)
+	template.Definition.Items = append(template.Definition.Items, preservedFields...)
+	fp.Definition = template.Definition
+	c.dirty[fp.GetId().GetValue()] = struct{}{}
 	return nil
 }
 
