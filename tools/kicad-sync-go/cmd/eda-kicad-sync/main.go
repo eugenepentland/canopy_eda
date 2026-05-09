@@ -31,6 +31,7 @@ func main() {
 		boardArg     = flag.String("board", "", "explicit path to .kicad_pcb (otherwise: ask IPC)")
 		prune        = flag.Bool("prune", false, "remove footprints whose canopy_uuid is no longer in the netlist")
 		migrate      = flag.Bool("migrate", false, "one-shot heuristic remap: when ref_des doesn't match the design, rename board footprints whose (parent, footprint, value) is uniquely identifiable on both sides. Use this once after upgrading from the legacy Python plugin so existing placements stay attached to the new schematic.")
+		dryRun       = flag.Bool("dry-run", false, "fetch the plan and log every op, but skip the apply step. Use this on a finished board to confirm a sync won't move/add/remove footprints before committing.")
 		installPlug  = flag.Bool("install-kicad-plugin", false, "drop plugin.json and a symlink to this binary into KiCad's per-user plugin folder, then exit. Set EDA_KICAD_PLUGIN_DIR to override the destination.")
 	)
 	flag.Parse()
@@ -43,13 +44,13 @@ func main() {
 		return
 	}
 
-	synclog.Logf("startup args=%v setup=%v board=%q prune=%v migrate=%v",
-		os.Args[1:], *setupMode, *boardArg, *prune, *migrate)
+	synclog.Logf("startup args=%v setup=%v board=%q prune=%v migrate=%v dry_run=%v",
+		os.Args[1:], *setupMode, *boardArg, *prune, *migrate, *dryRun)
 	synclog.Logf("env KICAD_API_SOCKET=%q KICAD_API_TOKEN=%s",
 		os.Getenv("KICAD_API_SOCKET"),
 		synclog.Redact(os.Getenv("KICAD_API_TOKEN")))
 
-	if err := run(*setupMode, *boardArg, *prune, *migrate); err != nil {
+	if err := run(*setupMode, *boardArg, *prune, *migrate, *dryRun); err != nil {
 		synclog.Logf("FATAL run error: %v", err)
 		notify.Show("EDA Sync — error",
 			fmt.Sprintf("%s\n\nLog: %s", err.Error(), synclog.Path()))
@@ -58,7 +59,7 @@ func main() {
 	synclog.Logf("run completed cleanly")
 }
 
-func run(setupMode bool, boardArg string, prune, migrate bool) error {
+func run(setupMode bool, boardArg string, prune, migrate, dryRun bool) error {
 	boardPath, kc, err := openBoard(boardArg)
 	if err != nil {
 		return err
@@ -93,7 +94,7 @@ func run(setupMode bool, boardArg string, prune, migrate bool) error {
 	}
 
 	client := eda.New(cfg.ServerURL, token.AccessToken)
-	opts := sync.Options{Prune: prune, MigrateHeuristic: migrate}
+	opts := sync.Options{Prune: prune, MigrateHeuristic: migrate, DryRun: dryRun}
 	plan, err := sync.Run(client, kc, cfg.Design, opts)
 	if errors.Is(err, eda.ErrUnauthorized) {
 		// Token revoked — force re-auth once.
@@ -109,9 +110,11 @@ func run(setupMode bool, boardArg string, prune, migrate bool) error {
 		return err
 	}
 
-	cfg.LastSyncedVersion = plan.DesignVersion
-	_ = config.SaveBoard(boardPath, cfg)
-	notify.Show("EDA Sync", summarize(plan))
+	if !dryRun {
+		cfg.LastSyncedVersion = plan.DesignVersion
+		_ = config.SaveBoard(boardPath, cfg)
+	}
+	notify.Show("EDA Sync", summarize(plan, dryRun))
 	return nil
 }
 
@@ -187,20 +190,30 @@ func resolveClient(cfg config.BoardConfig) (config.ClientCredentials, error) {
 	return oauth.EnsureClient(cfg.ServerURL, nil)
 }
 
-func summarize(p *eda.SyncPlanResponse) string {
+func summarize(p *eda.SyncPlanResponse, dryRun bool) string {
 	s := p.Summary
+	verb := "Synced"
+	if dryRun {
+		verb = "Dry run"
+	}
 	// Quiet path: when the diff produced zero ops we don't want to taunt
 	// the user with "Updated: 0" — that read like a regression after we
 	// stopped counting matched-but-unchanged instances. Keep the version
 	// in the toast so they can confirm which design they were synced
 	// against.
 	if s.Updated == 0 && s.Added == 0 && s.Removed == 0 && s.Swapped == 0 && s.FlaggedStale == 0 {
+		if dryRun {
+			return fmt.Sprintf("Dry run: already up to date @ v%d", p.DesignVersion)
+		}
 		return fmt.Sprintf("Already up to date @ v%d", p.DesignVersion)
 	}
-	out := fmt.Sprintf("Synced @ v%d\n\nUpdated:  %d\nAdded:    %d\nRemoved:  %d\nSwapped:  %d",
-		p.DesignVersion, s.Updated, s.Added, s.Removed, s.Swapped)
+	out := fmt.Sprintf("%s @ v%d\n\nUpdated:  %d\nAdded:    %d\nRemoved:  %d\nSwapped:  %d",
+		verb, p.DesignVersion, s.Updated, s.Added, s.Removed, s.Swapped)
 	if s.FlaggedStale > 0 {
 		out += fmt.Sprintf("\nStale (kept): %d", s.FlaggedStale)
+	}
+	if dryRun {
+		out += "\n\n(no ops applied; see log)"
 	}
 	return out
 }

@@ -23,12 +23,16 @@ type Options struct {
 	// repair when a legacy board's ref-des numbering has drifted away
 	// from the current schematic.
 	MigrateHeuristic bool
+	// DryRun fetches the plan and logs every op via synclog but skips the
+	// IPC apply step. Lets the user inspect a finished-board diff before
+	// any add / swap_footprint / remove can disturb existing placements.
+	DryRun bool
 }
 
 // Run pulls board state, asks the server for a plan, and applies the ops.
 // Returns the parsed response so the caller can show a result toast.
 func Run(client *eda.Client, kc kicad.Client, design string, opts Options) (*eda.SyncPlanResponse, error) {
-	synclog.Logf("Run design=%q prune=%v migrate=%v", design, opts.Prune, opts.MigrateHeuristic)
+	synclog.Logf("Run design=%q prune=%v migrate=%v dry_run=%v", design, opts.Prune, opts.MigrateHeuristic, opts.DryRun)
 	fps, err := kc.ListFootprints()
 	if err != nil {
 		synclog.Logf("ListFootprints failed: %v", err)
@@ -57,6 +61,11 @@ func Run(client *eda.Client, kc kicad.Client, design string, opts Options) (*eda
 		synclog.Logf("  op[%d] %s uuid=%q ref=%q field=%q value=%q pad=%q net=%q fp_name=%q new_name=%q kicad_mod_len=%d pad_nets=%d",
 			i, op.Op, op.UUID, op.Ref, op.Field, op.Value, op.Pad, op.Net,
 			op.FootprintName, op.NewFootprintName, len(op.KicadMod), len(op.PadNets))
+	}
+
+	if opts.DryRun {
+		synclog.Logf("dry-run: skipping apply of %d ops", len(plan.Ops))
+		return plan, nil
 	}
 
 	if err := apply(kc, design, plan); err != nil {
