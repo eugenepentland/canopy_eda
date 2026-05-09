@@ -1310,7 +1310,8 @@ pub fn removeInstanceCore(
 
 /// Append a new `(instance …)` form to the design (or, when `section` is
 /// non-empty, into the matching named section), wired up with the supplied
-/// `pins`. Used by both the HTTP `addInstanceApi` and MCP `add_component`.
+/// `pins`. Used by the HTTP `addInstanceApi`. (No MCP wrapper — agents
+/// add instances by editing the `.sexp` file via `edit_file`/`write_file`.)
 pub fn addInstanceCore(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -1366,7 +1367,8 @@ pub fn addInstanceCore(
 
 /// Replace one instance's component family at its evaluator-recorded
 /// `source_offset`, then add the new family to the `(import …)` form if
-/// it is not yet imported. Backs the MCP `swap_component` tool.
+/// it is not yet imported. (Used by the HTTP swap-component handler;
+/// no MCP wrapper — agents swap components via `edit_file`.)
 pub fn swapComponentCore(
     allocator: std.mem.Allocator,
     project_dir: []const u8,

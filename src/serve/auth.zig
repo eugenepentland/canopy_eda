@@ -703,6 +703,30 @@ pub fn validateBearerToken(ctx: *Handler, req: *httpz.Request) bool {
     return tok != null;
 }
 
+/// Reply to an unauthenticated `/mcp` request with the RFC 9728 challenge
+/// the MCP spec requires. Without this, MCP connectors that follow the
+/// 303 to `/auth/login` get HTML, conclude there is no OAuth, and report
+/// the server as connected with an empty tool list. Always returns
+/// `false` so the middleware caller knows the response is fully written.
+fn mcpUnauthorized(req: *httpz.Request, res: *httpz.Response) HandlerError!bool {
+    const host = req.header("host") orelse HOST_LOCALHOST;
+    const is_https = if (req.header("x-forwarded-proto")) |p|
+        std.mem.eql(u8, p, URL_SCHEME_HTTPS)
+    else
+        false;
+    const scheme = if (is_https) URL_SCHEME_HTTPS else URL_SCHEME_HTTP;
+    const challenge = try std.fmt.allocPrint(
+        req.arena,
+        "Bearer resource_metadata=\"" ++ URL_SCHEME_TEMPLATE ++ "/.well-known/oauth-protected-resource\"",
+        .{ scheme, host },
+    );
+    res.status = 401;
+    res.content_type = .JSON;
+    res.header("www-authenticate", challenge);
+    res.body = "{\"error\":\"unauthorized\",\"error_description\":\"missing or invalid bearer token\"}";
+    return false;
+}
+
 /// True when the `Authorization: Bearer …` header matches a plugin-issued
 /// token from `plugin_tokens`. Plugin tokens live alongside OAuth tokens
 /// but are scoped to read-only schematic/PCB consumers.
@@ -801,8 +825,15 @@ pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
         std.mem.startsWith(u8, req.url.path, "/oauth/register")) return true;
 
     // MCP endpoints accept OAuth bearer tokens issued via /oauth/token.
+    // When unauthenticated we MUST return 401 with a WWW-Authenticate
+    // challenge advertising the protected-resource metadata URL — that's
+    // how an MCP connector discovers our OAuth flow (RFC 9728). Falling
+    // through to the generic /auth/login redirect serves HTML to the
+    // connector, which then reports the server as "connected" but
+    // surfaces zero tools because tools/list never authenticates.
     if (std.mem.startsWith(u8, req.url.path, "/mcp")) {
         if (validateBearerToken(ctx, req)) return true;
+        return mcpUnauthorized(req, res);
     }
 
     // KiCad-sync endpoint accepts either a plugin bearer token or an OAuth

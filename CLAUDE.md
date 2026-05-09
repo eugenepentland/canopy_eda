@@ -199,21 +199,32 @@ eda build --project-dir projects/designs --push stm32n6
 ### MCP server (Claude Code integration)
 
 `eda serve` exposes an MCP server so Claude Code can pull schematics, edit
-them (values, add/remove instances, rewire pins), and have the browser viewer
-update live. Two transports:
+the underlying `.sexp` files, and have the browser viewer update live. Two
+transports:
 
 - **`POST /mcp`** — streamable HTTP, the transport Claude Code's remote MCP
   connector uses. Claude Code authenticates via OAuth 2.0 (authorization code
   + PKCE).
 - **`GET /mcp`** — WebSocket upgrade, for local testing and any stdio bridge.
 
-Tools exposed: `list_designs`, `get_schematic`, `get_version`, `edit_value`,
-`swap_component`, `add_component`, `remove_component`, `rewire_pin`,
-`run_checks`, `generate_review`. Defined in `src/serve/mcp_tools.zig`; each
-mutation tool calls a `…Core` function in `src/serve/edit.zig` and returns
-the new `live_version`, so the browser picks up changes via its existing
-2 s poll of `/api/version/:name`. `generate_review` is read-only and returns
-the full review-doc JSON (matching `GET /api/review/:name`).
+Tools exposed (defined in `src/serve/mcp_tools.zig`):
+
+- **Project / introspection (read-only)**: `list_designs`, `list_library`,
+  `list_history`, `list_instances`, `list_free_pins`, `get_net`,
+  `describe_component`, `get_schematic`, `get_version`, `run_checks`,
+  `generate_review`.
+- **VFS file ops**: `read_file`, `list_dir`, `glob` (read-only);
+  `write_file`, `edit_file`, `delete_file`, `move_file` (mutation).
+- **Build / state**: `build`, `regenerate_pinout`, `restore_version`.
+
+There is **no** granular `add_component` / `swap_component` / `edit_value` /
+`rewire_pin` / `remove_component` tool — schematic edits go through
+`read_file` → `edit_file` (or `write_file`) on the design's `.sexp` file,
+then `build` to push the new version. There is no "requirements" concept;
+this MCP server only models S-expression schematic capture. Mutation tools
+return the new `live_version`, so the browser picks up changes via its
+existing 2 s poll of `/api/version/:name`. `generate_review` is read-only
+and returns the full review-doc JSON (matching `GET /api/review/:name`).
 
 OAuth endpoints (implemented in `src/serve/oauth.zig`, store in
 `src/serve/oauth_store.zig`):
