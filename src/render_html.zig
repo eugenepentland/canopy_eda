@@ -182,6 +182,10 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
     try w.writeAll(".sexp</code></div></div>");
     try w.print("<div class=\"{s}\">{s}</div>", .{ banner_class, banner_label });
     try w.writeAll("<div class=\"head-links\">");
+    try w.writeAll(
+        "<button class=\"head-link head-btn\" id=\"reload-btn\" type=\"button\" " ++
+            "title=\"Re-read the .sexp source from disk and rebuild\">\u{21BB} Reload</button>",
+    );
     try w.writeAll("<button class=\"head-link head-btn\" id=\"erc-btn\" type=\"button\">ERC</button>");
     try w.writeAll("<div class=\"kicad-menu\">");
     try w.writeAll("<button class=\"head-link head-btn\" id=\"kicad-btn\" type=\"button\">KiCad \u{25BE}</button>");

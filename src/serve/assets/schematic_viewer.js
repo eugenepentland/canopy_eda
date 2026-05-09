@@ -804,6 +804,29 @@
     return a < b ? -1 : a > b ? 1 : 0;
   }
 
+  // ---- Reload from disk ----
+  // POSTs /api/push/:name so the server re-reads the .sexp source and bumps
+  // live_version; the version poll below picks that up and reloads the page.
+  var reloadBtn = document.getElementById('reload-btn');
+  if (reloadBtn) {
+    reloadBtn.addEventListener('click', function () {
+      if (reloadBtn.dataset.busy === '1') return;
+      reloadBtn.dataset.busy = '1';
+      var original = reloadBtn.textContent;
+      reloadBtn.textContent = 'Reloading…';
+      fetch('/api/push/' + DESIGN_NAME, { method: 'POST' }).then(function (r) {
+        if (!r.ok) throw new Error('push failed: ' + r.status);
+        // Force an immediate refresh — the version poll would catch up within
+        // ~2 s, but the user clicked, so don't make them wait.
+        window.location.reload();
+      }).catch(function (e) {
+        reloadBtn.textContent = original;
+        reloadBtn.dataset.busy = '';
+        alert('Reload failed: ' + e);
+      });
+    });
+  }
+
   // ---- ERC panel ----
   // Fetches /api/erc/:name and renders violations in the sidebar. Clicking a
   // violation with a ref_des jumps to that component; clicking one with only a
