@@ -572,7 +572,18 @@ func (c *realClient) stageLibraryAndCheck(kicadMod, entryName string) error {
 // we'll need to update the list.
 func (c *realClient) tryRefreshFootprints() {
 	candidates := []string{
-		// Most likely names based on KiCad's action namespace.
+		// "Update Footprint(s) From Library" — the right-click menu item
+		// that fixes the geometry when the user does it manually. Names
+		// match KiCad source's TOOL_ACTION declarations across namespaces.
+		"pcbnew.EditFrame.updateFootprintsFromLibrary",
+		"pcbnew.EditFrame.updateFootprintFromLibrary",
+		"pcbnew.EditorControl.updateFootprintsFromLibrary",
+		"pcbnew.EditorControl.updateFootprintFromLibrary",
+		"pcbnew.PCBControl.updateFootprintsFromLibrary",
+		"pcbnew.PCBControl.updateFootprintFromLibrary",
+		"pcbnew.EditTool.updateFootprintsFromLibrary",
+		"pcbnew.EditTool.updateFootprintFromLibrary",
+		// Older guesses kept as fallback in case the action got renamed.
 		"pcbnew.EditorControl.updateFootprints",
 		"pcbnew.EditorControl.updateFootprint",
 		"pcbnew.EditFrame.updateFootprints",

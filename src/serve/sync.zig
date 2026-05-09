@@ -37,6 +37,7 @@ const ERR_BUILD_ERROR = "Build error";
 const ERR_NOT_A_DESIGN = "Not a design";
 const PATH_FMT_FP_SEXP = "{s}/lib/footprints/{s}.sexp";
 const OP_SET_FIELD = "set_field";
+const FIELD_CANOPY_UUID = "canopy_uuid";
 
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
@@ -214,12 +215,27 @@ fn loadFootprintDef(
     spc: *SyncPlanContext,
     fp_name: []const u8,
 ) ?[]const u8 {
-    return loadFootprintDefImpl(spc, fp_name) catch null;
+    return loadFootprintDefImpl(spc, fp_name, null) catch null;
+}
+
+/// Like loadFootprintDef but also bakes per-instance Field items
+/// (canopy_uuid + design properties like MPN / Manufacturer) into the
+/// proto-canonical JSON. Used by `add` ops so KiCad records the custom
+/// fields on the first CreateItems — without this the agent would
+/// need a follow-up sync to land set_field ops on every freshly-added
+/// fp, and the user sees the "press sync twice" bug.
+fn loadFootprintDefForInstance(
+    spc: *SyncPlanContext,
+    fp_name: []const u8,
+    inst: export_kicad.FlatInstance,
+) ?[]const u8 {
+    return loadFootprintDefImpl(spc, fp_name, inst) catch null;
 }
 
 fn loadFootprintDefImpl(
     spc: *SyncPlanContext,
     fp_name: []const u8,
+    inst_opt: ?export_kicad.FlatInstance,
 ) !?[]const u8 {
     const fp_path = try std.fmt.allocPrint(spc.arena, PATH_FMT_FP_SEXP, .{ spc.project_dir, fp_name });
     const fp_source = infra_fs.cwd().readFileAlloc(spc.arena, fp_path, MAX_FOOTPRINT_BYTES) catch return null;
@@ -234,13 +250,36 @@ fn loadFootprintDefImpl(
     try w.writeAll("{\"id\":{\"libraryNickname\":\"eda-sync\",\"entryName\":");
     try writeJsonString(w, fp_name);
     try w.writeAll("},\"items\":[");
-    var first_pad = true;
+    var first_item = true;
     for (children[2..]) |child| {
         if (!child.isForm("pad")) continue;
-        try writePadProtoJson(spc.arena, w, child, &first_pad);
+        try writePadProtoJson(spc.arena, w, child, &first_item);
+    }
+    if (inst_opt) |inst| {
+        try writeFieldProtoJson(w, FIELD_CANOPY_UUID, inst.uuid, &first_item);
+        for (inst.properties) |p| {
+            if (skipDesignProperty(p.key)) continue;
+            if (p.value.len == 0) continue;
+            try writeFieldProtoJson(w, canonicalFieldName(p.key), p.value, &first_item);
+        }
     }
     try w.writeAll("]}");
     return buf.items;
+}
+
+/// Emit one custom Field as an Any-wrapped proto-canonical JSON object.
+/// Used to bake canopy_uuid + design properties (MPN / Manufacturer / …)
+/// into the FootprintInstance.Definition.Items list on `add` ops, so the
+/// agent's first CreateItems already carries them and we don't need a
+/// second sync round trip to land set_field ops.
+fn writeFieldProtoJson(w: anytype, name: []const u8, value: []const u8, first: *bool) !void {
+    if (!first.*) try w.writeAll(",");
+    first.* = false;
+    try w.writeAll("{\"@type\":\"type.googleapis.com/kiapi.board.types.Field\",\"name\":");
+    try writeJsonString(w, name);
+    try w.writeAll(",\"text\":{\"text\":{\"text\":");
+    try writeJsonString(w, value);
+    try w.writeAll("}}}");
 }
 
 // Proto enum string names — these must match the `protobuf:"...,enum=..."`
@@ -586,7 +625,7 @@ fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, f
                 // cache resolves even before canopy_uuid is set.
                 try emitOp(w, first, OP_SET_FIELD, .{
                     .{ "uuid", opTargetUuid(m) },
-                    .{ "field", "canopy_uuid" },
+                    .{ "field", FIELD_CANOPY_UUID },
                     .{ "value", inst.uuid },
                 });
                 ops_emitted.* += 1;
@@ -706,7 +745,7 @@ fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, f
     if (m.uuid.len > 0 and !std.mem.eql(u8, m.uuid, inst.uuid)) {
         try emitOp(w, first, OP_SET_FIELD, .{
             .{ "uuid", target },
-            .{ "field", "canopy_uuid" },
+            .{ "field", FIELD_CANOPY_UUID },
             .{ "value", inst.uuid },
         });
         ops_emitted.* += 1;
@@ -769,7 +808,11 @@ fn handleInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, 
         return;
     }
     const kmod = loadKicadMod(d.spc, fp_name_short, inst.component) orelse return;
-    const fp_def = loadFootprintDef(d.spc, fp_name_short);
+    // Pass the instance so canopy_uuid + design properties get baked
+    // into the inline Items as Field entries on the first add — without
+    // this the user sees "press sync twice" because canopy_uuid + MPN
+    // would only land via follow-up set_field ops on the second sync.
+    const fp_def = loadFootprintDefForInstance(d.spc, fp_name_short, inst);
     try emitAddOp(w, first, inst, fp_name_short, kmod, fp_def, d.pad_net_map);
     d.summary.added += 1;
 }
