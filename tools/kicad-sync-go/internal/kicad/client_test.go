@@ -1,6 +1,7 @@
 package kicad
 
 import (
+	"os"
 	"testing"
 
 	"google.golang.org/protobuf/types/known/anypb"
@@ -56,13 +57,16 @@ func TestSwapFootprintReplacesViaDeleteAndAdd(t *testing.T) {
 		isNew:   map[*board_types.FootprintInstance]struct{}{},
 	}
 
-	defJSON := []byte(`{
-		"id": {"libraryNickname": "eda-sync", "entryName": "NEW_FOOTPRINT"},
-		"items": [
-			{"@type":"type.googleapis.com/kiapi.board.types.Pad","id":{},"number":"1","type":"PT_SMD","position":{"xNm":-1000000,"yNm":0},"padStack":{"type":"PST_NORMAL","layers":["BL_F_Cu","BL_F_Paste","BL_F_Mask"],"copperLayers":[{"layer":"BL_F_Cu","shape":"PSS_RECTANGLE","size":{"xNm":1000000,"yNm":1000000}}],"angle":{"valueDegrees":0}}}
-		]
-	}`)
-	if err := c.SwapFootprint(kid, defJSON, [][2]string{{"1", "VDD"}}); err != nil {
+	// SwapFootprint now stages the kicad_mod into a per-board library
+	// dir before calling CreateItems. That requires a writable
+	// `c.doc.GetBoardFilename()` so KiCad's library lookup resolves —
+	// point it at a tempdir for this unit test.
+	tmpBoard := t.TempDir() + "/board.kicad_pcb"
+	c.doc = &base_types.DocumentSpecifier{
+		Identifier: &base_types.DocumentSpecifier_BoardFilename{BoardFilename: tmpBoard},
+	}
+	const kicadMod = `(footprint "NEW_FOOTPRINT" (version 20221018) (generator pcbnew) (layer "F.Cu"))`
+	if err := c.SwapFootprint(kid, kicadMod, "NEW_FOOTPRINT", [][2]string{{"1", "VDD"}}); err != nil {
 		t.Fatalf("SwapFootprint: %v", err)
 	}
 
@@ -93,9 +97,20 @@ func TestSwapFootprintReplacesViaDeleteAndAdd(t *testing.T) {
 	if gotName != "NEW_FOOTPRINT" {
 		t.Errorf("library entry name on new fp: got %q, want %q", gotName, "NEW_FOOTPRINT")
 	}
+	gotLib := newFp.GetDefinition().GetId().GetLibraryNickname()
+	if gotLib != edaSyncLibName {
+		t.Errorf("library nickname on new fp: got %q, want %q", gotLib, edaSyncLibName)
+	}
 	canopyAfter := readCanopyUUID(t, newFp)
 	if canopyAfter != cid {
 		t.Errorf("canopy_uuid lost in swap: got %q, want %q", canopyAfter, cid)
+	}
+	// The kicad_mod must have landed in the per-board library dir so
+	// KiCad's CreateItems can resolve the LibraryIdentifier — without
+	// this file, the swap renders an empty footprint.
+	staged := tmpBoard[:len(tmpBoard)-len("/board.kicad_pcb")] + "/" + edaSyncLibDir + "/NEW_FOOTPRINT.kicad_mod"
+	if _, err := os.Stat(staged); err != nil {
+		t.Errorf("expected staged kicad_mod at %s: %v", staged, err)
 	}
 }
 

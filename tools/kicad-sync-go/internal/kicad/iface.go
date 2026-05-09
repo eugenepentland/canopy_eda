@@ -25,20 +25,29 @@ type Client interface {
 	// SetPadNet sets the net assignment of one pad on `uuid`.
 	SetPadNet(uuid, padNumber, netName string) error
 
-	// AddFootprint instantiates a footprint at the origin from the proto-
-	// canonical JSON `defJSON` (a `kiapi.board.types.Footprint` message),
-	// stamps the canopy uuid as the KiCad-internal Id, applies pad-net
-	// assignments, and stages it for commit. Decoding is handled via
-	// protojson so this function carries no geometry-aware code — adding
-	// new pad shapes / types / layers is a server-only change.
-	AddFootprint(defJSON []byte, uuid, ref, value string, padNets [][2]string) error
+	// AddFootprint stages the supplied `kicad_mod` text into the board's
+	// per-project library directory, registers eda-sync in fp-lib-table
+	// if needed, then asks KiCad to instantiate the footprint via IPC
+	// CreateItems with a LibraryIdentifier referencing that library.
+	// `entryName` is the library entry the proto's LibraryIdentifier
+	// will point at.
+	//
+	// We tried sending Definition.Items inline in the FootprintInstance
+	// proto (the proto-canonical path); KiCad's CreateItems silently
+	// drops the inline geometry when the LibraryIdentifier doesn't
+	// resolve to a real library, leaving an empty footprint on the
+	// board. Staging the .kicad_mod first is the only reliable way to
+	// get a freshly-added fp to render with pads.
+	AddFootprint(kicadMod, entryName, uuid, ref, value string, padNets [][2]string) error
 
-	// SwapFootprint replaces the Definition on uuid in place with one
-	// decoded from `defJSON`, preserving the cached fp's identity (KiCad
-	// UUID, ref, value, position, custom Field entries like canopy_uuid).
-	// Pad-net assignments are stamped onto the decoded pads after
-	// deserialization.
-	SwapFootprint(uuid string, defJSON []byte, padNets [][2]string) error
+	// SwapFootprint replaces the existing footprint at `uuid` with a
+	// fresh instance of `entryName` (also staged from the supplied
+	// kicad_mod text). Carries over canopy_uuid + custom Fields, ref,
+	// value, position, orientation, and layer from the old fp; uses a
+	// freshly-minted KiCad UUID so the delete and the new create don't
+	// collide. Pad-net assignments arrive via the surrounding set_pad_net
+	// ops the server emits after the swap.
+	SwapFootprint(uuid, kicadMod, entryName string, padNets [][2]string) error
 
 	// Remove stages the footprint for deletion in this commit.
 	Remove(uuid string) error

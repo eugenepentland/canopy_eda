@@ -12,16 +12,12 @@ import (
 	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/sync"
 )
 
-// protoFootprintJSON returns a minimal proto-canonical Footprint message
-// (the geometry payload `add` / `swap_footprint` ops carry) with the
+// stubKicadMod returns a minimal `(footprint …)` S-expression with the
 // supplied library entry name. Tests only inspect FootprintName via the
-// Fake, so we omit pads and rely on the agent's protojson decode + the
-// Fake's JSON-peek extractor.
-func protoFootprintJSON(entryName string) []byte {
-	return []byte(fmt.Sprintf(
-		`{"id":{"libraryNickname":"eda-sync","entryName":%q},"items":[]}`,
-		entryName,
-	))
+// Fake, so we don't need real geometry — the agent's add / swap path
+// just stages this verbatim into the per-board library dir.
+func stubKicadMod(entryName string) string {
+	return fmt.Sprintf(`(footprint %q (version 20221018) (generator pcbnew) (layer "F.Cu"))`, entryName)
 }
 
 // fakeServer hands back the canned response and records the body it received.
@@ -156,7 +152,7 @@ func TestAddOpInsertsFootprint(t *testing.T) {
 		Ops: []eda.Op{
 			{Op: "add", UUID: "u-c1", Ref: "C1", Value: "100nF",
 				FootprintName: "C_0402",
-				FootprintDef:  protoFootprintJSON("C_0402"),
+				KicadMod:      stubKicadMod("C_0402"),
 				PadNets:       [][2]string{{"1", "VDD"}, {"2", "GND"}}},
 		},
 	}
@@ -186,8 +182,8 @@ func TestSwapOpReplacesFootprint(t *testing.T) {
 		Summary: eda.Summary{Swapped: 1},
 		Ops: []eda.Op{
 			{Op: "swap_footprint", UUID: "u-r1", NewFootprintName: "R_0805",
-				FootprintDef: protoFootprintJSON("R_0805"),
-				PadNets:      [][2]string{{"1", "VDD"}, {"2", "GND"}}},
+				KicadMod: stubKicadMod("R_0805"),
+				PadNets:  [][2]string{{"1", "VDD"}, {"2", "GND"}}},
 		},
 	}
 	var gotReq eda.SyncPlanRequest
