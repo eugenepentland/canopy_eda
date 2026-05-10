@@ -797,7 +797,7 @@ fn isApiPath(path: []const u8) bool {
     return std.mem.startsWith(u8, path, "/api/");
 }
 
-/// Gate every incoming request: allow localhost, auth/SPA routes, and
+/// Gate every incoming request: allow localhost, auth routes, and
 /// requests carrying a valid session cookie or bearer token; redirect
 /// others to `/auth/login`. Returns `true` to continue dispatch, `false`
 /// when the response has already been written by the middleware.
@@ -807,11 +807,6 @@ pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 
     // Exempt auth paths
     if (std.mem.startsWith(u8, req.url.path, "/auth/")) return true;
-
-    // SPA shell + its assets are public; the APIs it calls still enforce auth
-    // at their own check points.
-    if (std.mem.eql(u8, req.url.path, "/v2") or
-        std.mem.startsWith(u8, req.url.path, "/v2/")) return true;
 
     // OAuth discovery + token/authorize endpoints must be reachable without
     // a logged-in session — Claude Code fetches these before it has a token.

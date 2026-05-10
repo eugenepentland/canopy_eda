@@ -529,12 +529,6 @@ src/serve/plugin_tokens.zig::validate fn
 src/serve/schematic_page.zig::HandlerError value
 src/serve/schematic_page.zig::schematicPage fn
 src/serve/schematic_viewer_js.zig::SCHEMATIC_VIEWER_JS value
-src/serve/spa_bundle.zig::HandlerError value
-src/serve/spa_bundle.zig::SPA_CSS value
-src/serve/spa_bundle.zig::SPA_JS value
-src/serve/spa_bundle.zig::cssApi fn
-src/serve/spa_bundle.zig::jsApi fn
-src/serve/spa_shell.zig::shellApi fn
 src/serve/sync.zig::HandlerError value
 src/serve/sync.zig::syncPlanApi fn
 src/serve/upload.zig::HandlerError value

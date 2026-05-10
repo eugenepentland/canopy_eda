@@ -340,9 +340,6 @@ src/serve/pdf_viewer.zig::pdfViewerPage | fn pdfViewerPage(ctx: *Handler, req: *
 src/serve/plugin_tokens.zig::mint | fn mint(allocator: std.mem.Allocator, auth_dir: []const u8, label: []const u8) std.mem.Allocator.Error![]const u8
 src/serve/plugin_tokens.zig::validate | fn validate(allocator: std.mem.Allocator, auth_dir: []const u8, raw: []const u8) bool
 src/serve/schematic_page.zig::schematicPage | fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/spa_bundle.zig::cssApi | fn cssApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/spa_bundle.zig::jsApi | fn jsApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/spa_shell.zig::shellApi | fn shellApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) error{}!void
 src/serve/sync.zig::syncPlanApi | fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/upload.zig::extractFootprintName | fn extractFootprintName(allocator: std.mem.Allocator, footprint: []const u8) ?[]const u8
 src/serve/upload.zig::extractPackageName | fn extractPackageName(sym_data: []const u8) []const u8

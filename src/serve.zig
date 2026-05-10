@@ -27,8 +27,6 @@ const mcp = @import("serve/mcp.zig");
 const oauth = @import("serve/oauth.zig");
 const account_page = @import("serve/account_page.zig");
 const sync = @import("serve/sync.zig");
-const spa_shell = @import("serve/spa_shell.zig");
-const spa_bundle = @import("serve/spa_bundle.zig");
 
 // ── Global live state ──────────────────────────────────────────────────
 
@@ -165,13 +163,6 @@ pub fn serve(
     router.post("/auth/password/login", auth.passwordLoginApi, .{});
     router.post("/auth/password/set", auth.passwordSetApi, .{});
     router.get("/auth/password/status", auth.passwordStatusApi, .{});
-
-    // Lustre SPA (v2) — single-page app served under /v2/*. The bundle is
-    // produced by `make -C frontend build` and embedded into the Zig binary.
-    router.get("/v2/spa.js", spa_bundle.jsApi, .{});
-    router.get("/v2/spa.css", spa_bundle.cssApi, .{});
-    router.get("/v2", spa_shell.shellApi, .{});
-    router.get("/v2/*", spa_shell.shellApi, .{});
 
     // Pages
     router.get("/", pages.indexPage, .{});
