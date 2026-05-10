@@ -86,6 +86,10 @@ pub const Evaluator = struct {
     auto_refdes: std.AutoHashMapUnmanaged(u8, u32),
     /// Forms that need (id ...) auto-inserted: (source_offset, generated_id)
     pending_ids: std.ArrayListUnmanaged(PendingId),
+    /// True once `loadPassivesPrelude` has run. Guards against re-entering
+    /// the prelude when a module load itself triggers another module load,
+    /// and lets `evalFile` skip the work after the first design.
+    passives_prelude_loaded: bool = false,
 
     pub const PendingId = struct {
         /// Byte offset of the opening paren of the form
@@ -152,6 +156,7 @@ pub const Evaluator = struct {
             .symbol_alt_cache = .empty,
             .auto_refdes = .empty,
             .pending_ids = .empty,
+            .passives_prelude_loaded = false,
         };
     }
 
@@ -173,6 +178,7 @@ pub const Evaluator = struct {
         const nodes = builders.loadDesignFile(self, path) orelse return EvalError.ImportError;
         var env = Env.init(self.allocator, null);
         defer env.deinit();
+        modules.loadPassivesPrelude(self, &env);
         return self.evalNodes(nodes, &env);
     }
 
@@ -385,6 +391,159 @@ test "eval assert-range fail" {
 
     // Clean up allocated message
     alloc.free(eval.assertions.items[0].message);
+}
+
+// ── Passives-prelude fixtures ─────────────────────────────────────────
+
+const passives_prelude_files = [_]struct { name: []const u8, body: []const u8 }{
+    .{ .name = "cap-0201", .body = "(component-family \"cap-0201\" (symbol generic-cap) (footprint c-0201) (parameter \"value\" capacitance))" },
+    .{ .name = "cap-0402", .body = "(component-family \"cap-0402\" (symbol generic-cap) (footprint c-0402) (parameter \"value\" capacitance))" },
+    .{ .name = "cap-0603", .body = "(component-family \"cap-0603\" (symbol generic-cap) (footprint c-0603) (parameter \"value\" capacitance))" },
+    .{ .name = "cap-0805", .body = "(component-family \"cap-0805\" (symbol generic-cap) (footprint c-0805) (parameter \"value\" capacitance))" },
+    .{ .name = "res-0201", .body = "(component-family \"res-0201\" (symbol generic-res) (footprint r-0201) (parameter \"value\" resistance))" },
+    .{ .name = "res-0402", .body = "(component-family \"res-0402\" (symbol generic-res) (footprint r-0402) (parameter \"value\" resistance))" },
+    .{ .name = "res-0603", .body = "(component-family \"res-0603\" (symbol generic-res) (footprint r-0603) (parameter \"value\" resistance))" },
+    .{ .name = "res-0805", .body = "(component-family \"res-0805\" (symbol generic-res) (footprint r-0805) (parameter \"value\" resistance))" },
+    .{ .name = "ind-0201", .body = "(component-family \"ind-0201\" (symbol generic-ind) (footprint l-0201) (parameter \"value\" inductance))" },
+    .{ .name = "ind-0402", .body = "(component-family \"ind-0402\" (symbol generic-ind) (footprint l-0402) (parameter \"value\" inductance))" },
+    .{ .name = "ind-0603", .body = "(component-family \"ind-0603\" (symbol generic-ind) (footprint l-0603) (parameter \"value\" inductance))" },
+    .{ .name = "ind-0805", .body = "(component-family \"ind-0805\" (symbol generic-ind) (footprint l-0805) (parameter \"value\" inductance))" },
+    .{ .name = "ind-1616", .body = "(component-family \"ind-1616\" (symbol generic-ind) (footprint l-1616) (parameter \"value\" inductance))" },
+    .{ .name = "ind-2016", .body = "(component-family \"ind-2016\" (symbol generic-ind) (footprint l-2016) (parameter \"value\" inductance))" },
+    .{ .name = "ferrite-0402", .body = "(component-family \"ferrite-0402\" (symbol generic-ferrite) (footprint fb-0402) (parameter \"value\" string))" },
+    .{ .name = "led-0402", .body = "(component-family \"led-0402\" (symbol generic-led) (footprint led-0402) (parameter \"color\" string))" },
+};
+
+fn makePassivesTmp(alloc: std.mem.Allocator) !struct { tmp: std.testing.TmpDir, path: []const u8 } {
+    var tmp = std.testing.tmpDir(.{});
+    try tmp.dir.makePath("lib/components");
+    for (passives_prelude_files) |f| {
+        const sub_path = try std.fmt.allocPrint(alloc, "lib/components/{s}.sexp", .{f.name});
+        defer alloc.free(sub_path);
+        try tmp.dir.writeFile(.{ .sub_path = sub_path, .data = f.body });
+    }
+    const path = try tmp.dir.realpathAlloc(alloc, ".");
+    return .{ .tmp = tmp, .path = path };
+}
+
+// spec: eval/evaluator - Passives prelude resolves the standard cap/res/ind/ferrite/led families when their files exist
+test "passives prelude loads all standard families" {
+    // Production code never frees parsed AST or file_content (they back the
+    // component cache for the evaluator's lifetime), so use page_allocator
+    // for the same lifecycle the build uses. testing.allocator would flag
+    // those intentional allocations as leaks.
+    const alloc = std.heap.page_allocator;
+    var fx = try makePassivesTmp(alloc);
+    defer fx.tmp.cleanup();
+    defer alloc.free(fx.path);
+
+    var eval = Evaluator.init(alloc, fx.path);
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    modules.loadPassivesPrelude(&eval, &env);
+
+    for (passives_prelude_files) |f| {
+        try std.testing.expect(eval.component_cache.contains(f.name));
+    }
+}
+
+// spec: eval/evaluator - Passives prelude silently skips library entries whose files are missing instead of failing the build
+test "passives prelude tolerates missing files" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(path);
+
+    // No lib/components dir at all — every prelude entry is unresolvable.
+    var eval = Evaluator.init(alloc, path);
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    modules.loadPassivesPrelude(&eval, &env);
+    try std.testing.expectEqual(@as(u32, 0), eval.component_cache.count());
+}
+
+// spec: eval/evaluator - Explicit import after prelude pre-loads is a no-op (resolveImport short-circuits on cached components)
+test "explicit import after prelude is idempotent" {
+    const alloc = std.heap.page_allocator;
+    var fx = try makePassivesTmp(alloc);
+    defer fx.tmp.cleanup();
+    defer alloc.free(fx.path);
+
+    var eval = Evaluator.init(alloc, fx.path);
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    modules.loadPassivesPrelude(&eval, &env);
+    const after_prelude = eval.component_cache.count();
+
+    try modules.resolveImport(&eval, "cap-0402", &env);
+    try std.testing.expectEqual(after_prelude, eval.component_cache.count());
+}
+
+// spec: eval/evaluator - evalFile auto-imports the standard passives prelude before user nodes run
+test "evalFile auto-imports passives prelude" {
+    const alloc = std.heap.page_allocator;
+    var fx = try makePassivesTmp(alloc);
+    defer fx.tmp.cleanup();
+    defer alloc.free(fx.path);
+
+    // Design uses cap-0402 with no explicit import. If the prelude doesn't
+    // fire before user nodes evaluate, this errors with UnboundVariable.
+    try fx.tmp.dir.makePath("src/sample");
+    try fx.tmp.dir.writeFile(.{
+        .sub_path = "src/sample/sample.sexp",
+        .data =
+        \\(design-block "Sample"
+        \\  (instance "C1" (cap-0402 "100nF")
+        \\    (pin 1 "VDD")
+        \\    (pin 2 "GND")))
+        ,
+    });
+
+    var eval = Evaluator.init(alloc, fx.path);
+    defer eval.deinit();
+
+    const design_path = try std.fmt.allocPrint(alloc, "{s}/src/sample/sample.sexp", .{fx.path});
+    defer alloc.free(design_path);
+
+    _ = try eval.evalFile(design_path);
+    try std.testing.expect(eval.component_cache.contains("cap-0402"));
+}
+
+// spec: eval/evaluator - Module files loaded via resolveImport get the same passives prelude before their body evaluates
+test "module loading triggers passives prelude" {
+    const alloc = std.heap.page_allocator;
+    var fx = try makePassivesTmp(alloc);
+    defer fx.tmp.cleanup();
+    defer alloc.free(fx.path);
+
+    // Module body uses cap-0402 inside its design-block without an explicit
+    // import — only succeeds if module loading runs the prelude first.
+    try fx.tmp.dir.makePath("lib/modules");
+    try fx.tmp.dir.writeFile(.{
+        .sub_path = "lib/modules/sample-mod.sexp",
+        .data =
+        \\(defmodule sample-mod ()
+        \\  (design-block "Sample Module"
+        \\    (instance "C1" (cap-0402 "10nF")
+        \\      (pin 1 "VDD")
+        \\      (pin 2 "GND"))))
+        ,
+    });
+
+    var eval = Evaluator.init(alloc, fx.path);
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    try modules.resolveImport(&eval, "sample-mod", &env);
+    try std.testing.expect(eval.component_cache.contains("cap-0402"));
 }
 
 // Force test runner to pick up sub-module tests

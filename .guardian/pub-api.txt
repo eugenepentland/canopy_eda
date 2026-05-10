@@ -141,6 +141,7 @@ src/eval/modules.zig::evalDefmodule fn
 src/eval/modules.zig::evalImport fn
 src/eval/modules.zig::loadComponent fn
 src/eval/modules.zig::loadComponentFamily fn
+src/eval/modules.zig::loadPassivesPrelude fn
 src/eval/modules.zig::resolveImport fn
 src/eval/net_analysis.zig::baseNetName fn
 src/eval/net_analysis.zig::findMissingDecouplingNets fn

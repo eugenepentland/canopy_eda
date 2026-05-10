@@ -61,6 +61,11 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Evaluates fmt expressions producing formatted strings
 - Evaluates assert-range that passes when value is in bounds
 - Evaluates assert-range that fails when value is out of bounds
+- evalFile auto-imports the standard passives prelude before user nodes run
+- Module files loaded via resolveImport get the same passives prelude before their body evaluates
+- Passives prelude resolves the standard cap/res/ind/ferrite/led families when their files exist
+- Passives prelude silently skips library entries whose files are missing instead of failing the build
+- Explicit import after prelude pre-loads is a no-op (resolveImport short-circuits on cached components)
 - parseId extracts 8-char ID from form children
 - parseId returns null when no ID present
 - deriveChildId produces the same child ID when called with identical inputs

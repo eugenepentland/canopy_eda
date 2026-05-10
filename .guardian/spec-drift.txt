@@ -82,6 +82,7 @@ src/eval/modules.zig::evalDefmodule | fn evalDefmodule(self: *Evaluator, args: [
 src/eval/modules.zig::evalImport | fn evalImport(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/modules.zig::loadComponent | fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!void
 src/eval/modules.zig::loadComponentFamily | fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalError!void
+src/eval/modules.zig::loadPassivesPrelude | fn loadPassivesPrelude(self: *Evaluator, env: *Env) void
 src/eval/modules.zig::resolveImport | fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!void
 src/eval/net_analysis.zig::baseNetName | fn baseNetName(name: []const u8) []const u8
 src/eval/net_analysis.zig::findMissingDecouplingNets | fn findMissingDecouplingNets( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const []const u8

@@ -16,6 +16,34 @@ const ModuleDef = env_mod.ModuleDef;
 // ── Constants ─────────────────────────────────────────────────────
 const FOOTPRINT_FORM = "footprint";
 
+/// Standard passive families auto-imported into every design and module
+/// before their body evaluates. The list mirrors the inventory in
+/// projects/designs/lib/components/ — keep both in sync when adding a new
+/// 04xx/06xx package family.
+const PASSIVES_PRELUDE = [_][]const u8{
+    "cap-0201", "cap-0402", "cap-0603",     "cap-0805",
+    "res-0201", "res-0402", "res-0603",     "res-0805",
+    "ind-0201", "ind-0402", "ind-0603",     "ind-0805",
+    "ind-1616", "ind-2016", "ferrite-0402", "led-0402",
+};
+
+/// Pre-import the standard passive families so design and module files
+/// don't need to list them in `(import …)` headers. Idempotent: the
+/// `passives_prelude_loaded` flag short-circuits subsequent calls, which
+/// also guards against recursion if a module load triggers prelude load
+/// for a name that happens to itself be a module. Failures (missing
+/// library files) are intentionally swallowed — projects that haven't
+/// stocked every package size still build, and the resolver later raises
+/// `UnboundVariable` at the actual use site if a referenced part is
+/// genuinely missing.
+pub fn loadPassivesPrelude(self: *Evaluator, env: *Env) void {
+    if (self.passives_prelude_loaded) return;
+    self.passives_prelude_loaded = true;
+    for (PASSIVES_PRELUDE) |name| {
+        resolveImport(self, name, env) catch continue;
+    }
+}
+
 /// Evaluate `(import name1 name2 …)`, resolving each name against the
 /// project's `lib/components/` and `lib/modules/` folders (project_dir then
 /// lib_dir fallback) and registering the resulting component or module in
@@ -73,6 +101,7 @@ pub fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!vo
                 // Module file — evaluate in a heap-allocated env (must outlive module def)
                 const mod_env = self.allocator.create(Env) catch return EvalError.OutOfMemory;
                 mod_env.* = Env.init(self.allocator, null);
+                loadPassivesPrelude(self, mod_env);
                 _ = self.evalNodes(nodes, mod_env) catch return EvalError.ImportError;
                 // The defmodule should have been registered; copy module binding to caller env
                 if (mod_env.get(name)) |v| {

@@ -128,9 +128,57 @@ Source (.sexp files)
 ### Named grid sections
 
 ```scheme
-(section "USB"          (row 3) (col 1))
-(section "SMPS Power"   (row 0) (col 1))
+(section "USB" "USB 2.0 HS via USB-C — chip details sealed in usb-c-hs module"
+  (row 3) (col 1)
+  ...)
+(section "3.3V Buck" "TPS62823 12V-to-3.3V, 2A"
+  (row 0) (col 1)
+  ...)
 ```
+
+**Section-labeling conventions.** Every section has a *name* (short
+functional role) and an optional *subtitle* (one-line technical summary).
+Both feed the schematic header's system-overview SVG: the renderer in
+`src/render_block_types.zig` `classifyByName` does case-insensitive keyword
+matching on the **name** to pick the section's column + color, then prints
+the **subtitle** as the chip caption.
+
+- **Name** — 1–4 words, capitalized, functional role first. The classifier
+  recognizes these keywords (see `classifyByName`); pick at least one so
+  the chip lands in the right column instead of falling through to the
+  generic peripheral bucket:
+  - **mcu** (blue, hub column): `MCU`, `SoC`, `CPU`, `Core System`,
+    `STM32`, `ESP32`, `nRF`, `Microcontroller`
+  - **power** (red, regulation column): `Buck`, `LDO`, `Regulator`,
+    `Power`, `Charger`, `Converter`, `PMIC`
+  - **memory** (purple): `Flash`, `PSRAM`, `RAM`, `EEPROM`, `SD Card`
+  - **clock** (teal): `Clock`, `HSE`, `LSE`, `Oscillator`, `PLL`,
+    `Crystal`
+  - **comms** (cyan): `USB`, `Ethernet`, `BLE`, `WiFi`, `CAN`, `UART`
+  - **sensor** (green): `IMU`, `ADC`, `Sensor`, `Temperature`,
+    `Accelerometer`, `Gyro`
+  - **analog** (magenta): `Analog`, `DAC`, `Op-Amp`, `Reference`,
+    `Amplifier`
+  - **protection** (grey): `ESD`, `Protection`, `Fuse`, `TVS`
+  - **connector** (yellow, I/O column): `Connector`, `Expansion`,
+    `Header`, `Mounting`, `SWD`, `Debug`, `RJ45`, `B2B`
+- **Subtitle** — one-line technical summary: part number, key spec
+  (voltage / frequency / current), and any "chip details sealed in
+  `<module>` module" pointer for sub-blocks. This is the caption that
+  shows up under the chip in the overview, so prefer concrete numbers
+  ("12V-to-3.3V, 2A") over generic phrases ("buck regulator").
+- **Granularity** — one section per coherent functional block (a single
+  rail, a peripheral, a debug interface). Don't merge unrelated functions
+  into one section; don't split a single rail across two sections. For
+  designs whose body is mostly `(sub-block …)` calls (e.g. power-6v.sexp,
+  the small RF demos), a top-level `(section …)` per sub-block is
+  optional — the system-overview SVG falls back to a synthetic per-design
+  chip when none are declared.
+- **Grid placement** — `(row N) (col N)` positions the section card in
+  the schematic page. Convention used in `stm32n6.sexp` and
+  `som-h563.sexp`: MCU/core in column 0, peripherals + buses in column 1,
+  power rails stacked in column 0–1 at the top, connectors and
+  bring-up/debug in the rightmost column.
 
 ### Hub grid positioning (non-part hubs)
 
