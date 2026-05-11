@@ -252,7 +252,7 @@ Public functions: runChecks, deinit, parseMicroFarads, parseOhms, parseMicroHenr
 
 ## review_html
 
-Public functions: renderToHtml
+Public functions: writePowerTree, writeSummaryTable, writePowerBudget, writePowerSequence, writeTestPoints, writeUnresolved, writeAssertions
 
 ## serve
 

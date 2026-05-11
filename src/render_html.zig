@@ -151,11 +151,9 @@ pub fn renderToHtml(
     try w.writeAll("</div>");
     try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns, check_results, review_doc);
     if (review_doc != null) {
-        // BODY_JS (design-note handlers) reuses DESIGN_NAME — already
-        // declared by writeScripts above.
-        try w.writeAll("<script>");
-        try w.writeAll(review_html.BODY_JS);
-        try w.writeAll("</script>");
+        // review_notes.js (design-note handlers) reuses DESIGN_NAME —
+        // already declared as a global by writeScripts above.
+        try w.writeAll("<script src=\"/static/review_notes.js\"></script>");
     }
     try w.writeAll("</body></html>");
 

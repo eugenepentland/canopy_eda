@@ -14,6 +14,7 @@ const auth_setup_js = @embedFile("assets/auth_setup.js");
 const auth_invite_js = @embedFile("assets/auth_invite.js");
 const auth_manage_js = @embedFile("assets/auth_manage.js");
 const auth_manage_css = @embedFile("assets/auth_manage.css");
+const review_notes_js = @embedFile("assets/review_notes.js");
 
 /// Error set for the static-asset handler: only writer-side errors propagate
 /// to httpz; the lookup itself is fallible only via a 404.
@@ -40,6 +41,7 @@ const REGISTRY = [_]Asset{
     .{ .name = "auth_invite.js", .body = auth_invite_js, .content_type = .JS },
     .{ .name = "auth_manage.js", .body = auth_manage_js, .content_type = .JS },
     .{ .name = "auth_manage.css", .body = auth_manage_css, .content_type = .CSS },
+    .{ .name = "review_notes.js", .body = review_notes_js, .content_type = .JS },
 };
 
 /// GET /static/:name — serve an embedded JS/CSS asset. 404 if the name is

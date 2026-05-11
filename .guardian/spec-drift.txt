@@ -201,8 +201,6 @@ src/review.zig::buildPowerTree | fn buildPowerTree( allocator: std.mem.Allocator
 src/review.zig::buildReview | fn buildReview( allocator: std.mem.Allocator, design_name: []const u8, block: *const DesignBlock, assertions: []const AssertionResult, violations: []const erc_mod.Violation, check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result), ) ReviewError!ReviewDoc
 src/review.zig::isoTimestamp | fn isoTimestamp(allocator: std.mem.Allocator, unix_s: i64) std.mem.Allocator.Error![]const u8
 src/review.zig::slugify | fn slugify(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8
-src/review_html.zig::renderBodyInto | fn renderBodyInto(allocator: std.mem.Allocator, w: anytype, doc: review.ReviewDoc) RenderError!void
-src/review_html.zig::renderToHtml | fn renderToHtml(allocator: std.mem.Allocator, doc: review.ReviewDoc, navbar_css: []const u8) RenderError![]const u8
 src/review_html.zig::writeAssertions | fn writeAssertions(w: anytype, assertions: []const review.AssertionReport) RenderError!void
 src/review_html.zig::writePowerBudget | fn writePowerBudget(w: anytype, rails: []const power_budget.Rail) RenderError!void
 src/review_html.zig::writePowerSequence | fn writePowerSequence(w: anytype, rows: []const power_sequencing.SequenceRow) RenderError!void

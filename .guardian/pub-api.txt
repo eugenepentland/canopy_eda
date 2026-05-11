@@ -352,11 +352,8 @@ src/review.zig::buildReview fn
 src/review.zig::isoTimestamp fn
 src/review.zig::slugify fn
 src/review_html.zig::BODY_CSS value
-src/review_html.zig::BODY_JS value
 src/review_html.zig::RenderError value
 src/review_html.zig::mutedDash value
-src/review_html.zig::renderBodyInto fn
-src/review_html.zig::renderToHtml fn
 src/review_html.zig::writeAssertions fn
 src/review_html.zig::writePowerBudget fn
 src/review_html.zig::writePowerSequence fn

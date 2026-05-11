@@ -3,7 +3,6 @@ const review = @import("review.zig");
 const erc_mod = @import("erc.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
-const env_mod = @import("eval/env.zig");
 const render_power_tree_svg = @import("render_power_tree_svg.zig");
 
 /// Error set for HTML emit helpers in this module — the writers are
@@ -21,50 +20,6 @@ const tdSep: []const u8 = "</td><td>";
 pub const mutedDash: []const u8 = "<span class=\"muted\">—</span>";
 const trCodeOpen: []const u8 = "<tr><td><code>";
 
-/// Render a ReviewDoc as a self-contained HTML page. Inline CSS. One small
-/// inline script powers the design-note add/delete interactions. The header
-/// navbar matches the rest of the EDA web server.
-pub fn renderToHtml(allocator: std.mem.Allocator, doc: review.ReviewDoc, navbar_css: []const u8) RenderError![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const w = buf.writer(allocator);
-
-    try w.writeAll("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
-    try w.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
-    try w.print("<title>{s} — Review</title>", .{doc.title});
-    try w.writeAll("<style>");
-    try w.writeAll(navbar_css);
-    try w.writeAll(REVIEW_CSS);
-    try w.writeAll("</style>");
-    try w.writeAll("</head><body>");
-    try writeNavbar(w);
-    try w.writeAll("<div class=\"review-wrap\">");
-
-    try writeHeader(w, doc);
-    try renderBodyInto(allocator, w, doc);
-
-    try w.writeAll("</div>");
-    try writeScript(w, doc.design_name);
-    try w.writeAll("</body></html>");
-    return buf.items;
-}
-
-/// Write every review section (summary → assertions) into an existing writer,
-/// without any page chrome — nav, <style>, <head>, wrapper div. Lets the
-/// schematic page embed the full review content inline below its section
-/// cards so a single URL (`/schematics/:name`) covers both "here's what we
-/// built" and "here's whether it's correct." The caller is responsible for
-/// including REVIEW_CSS in its <style> and BODY_JS in a <script>.
-pub fn renderBodyInto(allocator: std.mem.Allocator, w: anytype, doc: review.ReviewDoc) RenderError!void {
-    try writeSummaryTable(w, doc.summary);
-    try writeSections(w, doc.sections);
-    try writePowerSequence(w, doc.power_sequence);
-    try writeTestPoints(w, doc.test_points);
-    try writePowerTree(allocator, w, doc.power_tree);
-    try writePowerBudget(w, doc.power_budget);
-    try writeUnresolved(w, doc.unresolved);
-    try writeAssertions(w, doc.assertions);
-}
-
 /// Render the power-tree section as a wrapping `<section>` with the SVG.
 /// Skips rendering when the tree has no nodes — sub-block-less designs
 /// have an empty tree and we don't want an empty section card.
@@ -75,49 +30,10 @@ pub fn writePowerTree(allocator: std.mem.Allocator, w: anytype, tree: review.Pow
     try w.writeAll("</section>");
 }
 
-/// CSS rules for review content. Exposed so the schematic page can include
-/// them when embedding `renderBodyInto`.
-pub const BODY_CSS = REVIEW_CSS;
-
-/// Design-note interaction JS. Exposed for embedding alongside `renderBodyInto`.
-pub const BODY_JS = NOTE_JS;
-
-fn writeNavbar(w: anytype) !void {
-    try w.writeAll("<div class=\"navbar\"><span class=\"brand\">Canopy EDA</span>");
-    try w.writeAll("<a href=\"/\">Designs</a>");
-    try w.writeAll("<a href=\"/library\">Library</a>");
-    try w.writeAll("<a href=\"/account\" style=\"margin-left:auto\">Account</a>");
-    try w.writeAll("</div>");
-}
-
-fn writeHeader(w: anytype, doc: review.ReviewDoc) !void {
-    const banner_class: []const u8 = switch (doc.summary.status) {
-        .pass => "banner banner-pass",
-        .warn => "banner banner-warn",
-        .fail => "banner banner-fail",
-    };
-    const banner_label: []const u8 = switch (doc.summary.status) {
-        .pass => "PASS",
-        .warn => "REVIEW WITH WARNINGS",
-        .fail => "NEEDS ATTENTION",
-    };
-
-    try w.writeAll("<header class=\"review-head\">");
-    try w.writeAll("<div class=\"head-title\"><h1>");
-    try writeHtmlEscaped(w, doc.title);
-    try w.writeAll("</h1><div class=\"subtitle\">Design review for <code>");
-    try writeHtmlEscaped(w, doc.design_name);
-    try w.writeAll(".sexp</code> · generated ");
-    try writeHtmlEscaped(w, doc.generated_at);
-    try w.writeAll("</div></div>");
-
-    try w.print("<div class=\"{s}\">{s}</div>", .{ banner_class, banner_label });
-    try w.writeAll("<div class=\"head-links\">");
-    try w.print("<a class=\"head-link\" href=\"/schematics/{s}\">Schematic</a>", .{doc.design_name});
-    try w.print("<a class=\"head-link\" href=\"/api/review/{s}\">JSON</a>", .{doc.design_name});
-    try w.writeAll("</div>");
-    try w.writeAll("</header>");
-}
+/// CSS rules for review fragments. Embedded inline by `render_html.zig`'s
+/// `<style>` block alongside the schematic page's own CSS so the embedded
+/// review tables match the surrounding chrome without an extra request.
+pub const BODY_CSS = @embedFile("assets/review.css");
 
 /// Render the Summary section: a 4-row table covering counts, ERC
 /// severities, assertion outcomes, and critical-IC requirement coverage,
@@ -610,30 +526,6 @@ pub fn writeAssertions(w: anytype, assertions: []const review.AssertionReport) R
     try w.writeAll(tableSectionClose);
 }
 
-fn writeBom(w: anytype, groups: []const review.BomGroup) !void {
-    if (groups.len == 0) return;
-    try w.writeAll("<section><h2>Bill of Materials</h2>");
-    for (groups) |g| {
-        try w.writeAll("<details class=\"bom-group\"><summary>");
-        try writeHtmlEscaped(w, g.prefix);
-        try w.print(" ({d})</summary>", .{g.entries.len});
-        try w.writeAll("<table><thead><tr><th>Ref</th><th>Component</th><th>Value</th><th>Footprint</th></tr></thead><tbody>");
-        for (g.entries) |e| {
-            try w.writeAll(trCodeOpen);
-            try writeHtmlEscaped(w, e.ref_des);
-            try w.writeAll(codeTdToCode);
-            try writeHtmlEscaped(w, e.component);
-            try w.writeAll(codeTdSep);
-            try writeHtmlEscaped(w, e.value);
-            try w.writeAll("</td><td><code>");
-            try writeHtmlEscaped(w, e.footprint);
-            try w.writeAll("</code></td></tr>");
-        }
-        try w.writeAll("</tbody></table></details>");
-    }
-    try w.writeAll(sectionClose);
-}
-
 fn writeFloatCell(w: anytype, v: ?f64) !void {
     if (v) |f| {
         try w.print("{d:.3}", .{f});
@@ -664,70 +556,3 @@ fn writeUrlEncoded(w: anytype, s: []const u8) !void {
         }
     }
 }
-
-const REVIEW_CSS = @embedFile("assets/review.css");
-
-fn writeScript(w: anytype, design_name: []const u8) !void {
-    try w.writeAll("<script>var DESIGN_NAME=");
-    try writeJsString(w, design_name);
-    try w.writeAll(";");
-    try w.writeAll(NOTE_JS);
-    try w.writeAll("</script>");
-}
-
-fn writeJsString(w: anytype, s: []const u8) !void {
-    try w.writeAll("\"");
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '<' => try w.writeAll("\\u003c"),
-        '>' => try w.writeAll("\\u003e"),
-        '&' => try w.writeAll("\\u0026"),
-        0...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{c}),
-        else => try w.writeByte(c),
-    };
-    try w.writeAll("\"");
-}
-
-const NOTE_JS =
-    \\(function(){
-    \\  function post(path,body){
-    \\    return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
-    \\      .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r;});
-    \\  }
-    \\  function noteBase(){return '/api/section-note/'+encodeURIComponent(DESIGN_NAME);}
-    \\  // Populate the PDF dropdown on every design-note "Add" form from the
-    \\  // list of uploaded datasheets, so reviewers can pin a source link
-    \\  // without editing the .sexp by hand.
-    \\  fetch('/api/datasheets').then(function(r){return r.ok?r.json():{files:[]};}).then(function(j){
-    \\    var files=(j.files||[]).map(function(f){return '<option value="'+f.name+'">'+f.name+'</option>';}).join('');
-    \\    document.querySelectorAll('.note-new-pdf').forEach(function(sel){sel.innerHTML='<option value="">(no datasheet)</option>'+files;});
-    \\  });
-    \\  document.addEventListener('click',function(e){
-    \\    var t=e.target;
-    \\    if(t.classList.contains('note-add-btn')){
-    \\      // Design note add: uses section NAME (not slug) because the editor
-    \\      // splices into the .sexp by "(section \"NAME\"" needle match.
-    \\      var addRow=t.closest('.note-add');
-    \\      var section=addRow.getAttribute('data-section');
-    \\      var text=addRow.querySelector('.note-new-text').value.trim();
-    \\      if(!text)return;
-    \\      var pdf=addRow.querySelector('.note-new-pdf').value||'';
-    \\      var page=parseInt(addRow.querySelector('.note-new-page').value,10)||0;
-    \\      post(noteBase()+'/add',{section:section,text:text,pdf:pdf,page:page}).then(function(){location.reload();})
-    \\        .catch(function(err){alert('Add note failed: '+err.message);});
-    \\    }else if(t.classList.contains('note-del')){
-    \\      var li=t.closest('li');
-    \\      var idx=parseInt(li.getAttribute('data-index'),10);
-    \\      var det=t.closest('details');
-    \\      var addRow=det&&det.querySelector('.note-add');
-    \\      var section=addRow&&addRow.getAttribute('data-section');
-    \\      if(isNaN(idx)||!section)return;
-    \\      post(noteBase()+'/remove',{section:section,index:idx}).then(function(){location.reload();})
-    \\        .catch(function(err){alert('Delete note failed: '+err.message);});
-    \\    }
-    \\  });
-    \\})();
-;
