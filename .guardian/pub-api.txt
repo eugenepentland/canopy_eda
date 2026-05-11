@@ -549,6 +549,8 @@ src/serve/plugin_tokens.zig::validate fn
 src/serve/schematic_page.zig::HandlerError value
 src/serve/schematic_page.zig::schematicPage fn
 src/serve/schematic_viewer_js.zig::SCHEMATIC_VIEWER_JS value
+src/serve/static_assets.zig::HandlerError value
+src/serve/static_assets.zig::staticAsset fn
 src/serve/sync.zig::HandlerError value
 src/serve/sync.zig::syncPlanApi fn
 src/serve/templates/account.zig::Account struct_

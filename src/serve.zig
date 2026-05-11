@@ -26,6 +26,7 @@ const auth = @import("serve/auth.zig");
 const mcp = @import("serve/mcp.zig");
 const oauth = @import("serve/oauth.zig");
 const account_page = @import("serve/account_page.zig");
+const static_assets = @import("serve/static_assets.zig");
 const sync = @import("serve/sync.zig");
 
 // ── Global live state ──────────────────────────────────────────────────
@@ -167,6 +168,7 @@ pub fn serve(
     // Pages
     router.get("/", pages.indexPage, .{});
     router.get("/style.css", pages.cssPage, .{});
+    router.get("/static/:name", static_assets.staticAsset, .{});
     router.get("/schematics/:name", schematic_page.schematicPage, .{});
 
     // API

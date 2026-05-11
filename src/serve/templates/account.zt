@@ -3,12 +3,11 @@ const oauth_store = @import("../oauth_store.zig");
 const users_mod = @import("../users.zig");
 
 // <style> and <script> are zt raw-text elements — expressions inside aren't
-// interpolated, so the head/footer blocks ship as single raw chunks emitted
-// via `{!...}` outside the tags.
-const HEAD_STYLE_BLOCK: []const u8 = "<style>" ++ auth_mod.PAGE_STYLE ++
-    @embedFile("../assets/account_page.css") ++ "</style>";
-const PAGE_SCRIPT_BLOCK: []const u8 = "<script>" ++ auth_mod.B64URL_JS ++
-    @embedFile("../assets/account_page.js") ++ "</script>";
+// interpolated, so the inline auth blocks ship as single raw chunks emitted
+// via `{!...}` outside the tags. The page-specific CSS/JS are linked
+// externally and served by `static_assets.staticAsset` at /static/.
+const AUTH_STYLE_BLOCK: []const u8 = "<style>" ++ auth_mod.PAGE_STYLE ++ "</style>";
+const AUTH_SCRIPT_BLOCK: []const u8 = "<script>" ++ auth_mod.B64URL_JS ++ "</script>";
 
 const ROLE_OPTIONS = [_][]const u8{ "admin", "writer", "reader" };
 
@@ -24,7 +23,8 @@ pub templ Account(
         <head>
             <meta name="viewport" content="width=device-width,initial-scale=1" />
             <title>Account — Canopy EDA</title>
-            {!HEAD_STYLE_BLOCK}
+            {!AUTH_STYLE_BLOCK}
+            <link rel="stylesheet" href="/static/account_page.css" />
         </head>
         <body>
             <div class="wrap">
@@ -47,7 +47,8 @@ pub templ Account(
 
                 @OAuthClientsCard(clients)
             </div>
-            {!PAGE_SCRIPT_BLOCK}
+            {!AUTH_SCRIPT_BLOCK}
+            <script src="/static/account_page.js"></script>
         </body>
     </html>
 }

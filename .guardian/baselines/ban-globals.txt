@@ -1,5 +1,5 @@
 # guardian-snapshot v1
-src/serve.zig:33: pub var (mutable global) outside wiring/main
 src/serve.zig:34: pub var (mutable global) outside wiring/main
-src/serve.zig:55: pub var (mutable global) outside wiring/main
+src/serve.zig:35: pub var (mutable global) outside wiring/main
 src/serve.zig:56: pub var (mutable global) outside wiring/main
+src/serve.zig:57: pub var (mutable global) outside wiring/main
