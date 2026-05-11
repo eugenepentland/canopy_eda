@@ -254,7 +254,7 @@ src/serve/auth.zig::isLocalhostRequest | fn isLocalhostRequest(req: *httpz.Reque
 src/serve/auth.zig::listCredentialsApi | fn listCredentialsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/auth.zig::loginChallengePage | fn loginChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/auth.zig::loginCompletePage | fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/auth.zig::loginPage | fn loginPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/auth.zig::loginPage | fn loginPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/auth.zig::logoutApi | fn logoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/auth.zig::managePage | fn managePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/auth.zig::passwordLoginApi | fn passwordLoginApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void

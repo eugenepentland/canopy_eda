@@ -10,6 +10,7 @@ const plugin_tokens = @import("plugin_tokens.zig");
 const users = @import("users.zig");
 const passwords = @import("passwords.zig");
 const infra_random = @import("../infra/random.zig");
+const auth_template = @import("templates/auth.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const HTTP_NOT_FOUND: u16 = 404;
@@ -1816,125 +1817,13 @@ pub const B64URL_JS =
 
 /// GET /auth/login — render the sign-in HTML: an email field plus a button
 /// that drives the WebAuthn `navigator.credentials.get` flow against the
-/// challenge/complete endpoints.
-pub fn loginPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
+/// challenge/complete endpoints. Markup lives in `templates/auth.zt`; the
+/// per-page JS is served from `/static/auth_login.js`.
+pub fn loginPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    try auth_template.Login.render(.{}, &aw.writer);
     res.content_type = .HTML;
-    res.body =
-        HTML_DOCTYPE_HEAD ++
-        "<title>Login - Canopy EDA</title><style>" ++ PAGE_STYLE ++ HTML_STYLE_HEAD_BODY_OPEN ++
-        HTML_AUTH_CARD_OPEN ++
-        HTML_BRAND_SPAN ++
-        "<h1>Sign In</h1>" ++
-        "<p>Enter your email and use your passkey to authenticate.</p>" ++
-        HTML_EMAIL_INPUT ++
-        HTML_INPUT_STYLE_DARK ++
-        HTML_PASSWORD_INPUT_HIDDEN ++
-        "<button class=\"auth-btn\" id=\"login-btn\">Sign in with Passkey</button>" ++
-        "<a class=\"link\" href=\"#\" id=\"toggle-mode\">Use password instead</a>" ++
-        HTML_STATUS_DIV ++
-        "</div>" ++
-        HTML_SCRIPT_OPEN ++ B64URL_JS ++
-        \\const btn = document.getElementById('login-btn');
-        \\const emailInput = document.getElementById('email');
-        \\const passwordInput = document.getElementById('password');
-        \\const toggle = document.getElementById('toggle-mode');
-        \\const status = document.getElementById('status');
-        \\let mode = 'passkey';
-        \\toggle.addEventListener('click', (e) => {
-        \\  e.preventDefault();
-        \\  if (mode === 'passkey') {
-        \\    mode = 'password';
-        \\    passwordInput.style.display = '';
-        \\    btn.textContent = 'Sign in with Password';
-        \\    toggle.textContent = 'Use passkey instead';
-        \\    passwordInput.focus();
-        \\  } else {
-        \\    mode = 'passkey';
-        \\    passwordInput.style.display = 'none';
-        \\    btn.textContent = 'Sign in with Passkey';
-        \\    toggle.textContent = 'Use password instead';
-        \\  }
-        \\  status.textContent = '';
-        \\});
-        \\async function doPasswordLogin(email) {
-        \\  status.textContent = 'Signing in...';
-        \\  const r = await fetch('/auth/password/login', {
-        \\    method: 'POST',
-        \\    headers: { 'Content-Type': 'application/json' },
-        \\    body: JSON.stringify({ email, password: passwordInput.value })
-        \\  });
-        \\  const j = await r.json();
-        \\  if (j.ok) {
-        \\    status.className = 'status ok';
-        \\    status.textContent = 'Authenticated!';
-        \\    window.location.href = '/';
-        \\  } else {
-        \\    throw new Error(j.error || 'Sign-in failed');
-        \\  }
-        \\}
-        \\btn.addEventListener('click', async () => {
-        \\  const email = emailInput.value.trim();
-        \\  if (!email || !email.includes('@')) {
-        \\    status.className = 'status error';
-        \\    status.textContent = 'Please enter a valid email address';
-        \\    return;
-        \\  }
-        \\  btn.disabled = true;
-        \\  status.className = 'status';
-        \\  try {
-        \\    if (mode === 'password') {
-        \\      await doPasswordLogin(email);
-        \\      return;
-        \\    }
-        \\    status.textContent = 'Requesting challenge...';
-        \\    const challengeRes = await fetch('/auth/login/challenge?email=' + encodeURIComponent(email));
-        \\    const opts = await challengeRes.json();
-        \\    if (!opts.allowCredentials || opts.allowCredentials.length === 0) {
-        \\      throw new Error('No passkey registered for this email on this server. Try "Use password instead" or ask an admin for an invite link.');
-        \\    }
-        \\    const publicKey = {
-        \\      challenge: b64urlToBytes(opts.challenge),
-        \\      rpId: opts.rpId,
-        \\      timeout: opts.timeout,
-        \\      userVerification: opts.userVerification,
-        \\      allowCredentials: (opts.allowCredentials || []).map(c => ({
-        \\        type: c.type,
-        \\        id: b64urlToBytes(c.id)
-        \\      }))
-        \\    };
-        \\    status.textContent = 'Waiting for passkey...';
-        \\    const cred = await navigator.credentials.get({ publicKey });
-        \\    status.textContent = 'Verifying...';
-        \\    const body = JSON.stringify({
-        \\      id: bytesToB64url(cred.rawId),
-        \\      response: {
-        \\        authenticatorData: bytesToB64url(cred.response.authenticatorData),
-        \\        clientDataJSON: bytesToB64url(cred.response.clientDataJSON),
-        \\        signature: bytesToB64url(cred.response.signature)
-        \\      }
-        \\    });
-        \\    const verifyRes = await fetch('/auth/login/complete', {
-        \\      method: 'POST',
-        \\      headers: { 'Content-Type': 'application/json' },
-        \\      body: body
-        \\    });
-        \\    const result = await verifyRes.json();
-        \\    if (result.ok) {
-        \\      status.className = 'status ok';
-        \\      status.textContent = 'Authenticated!';
-        \\      window.location.href = '/';
-        \\    } else {
-        \\      status.className = 'status error';
-        \\      status.textContent = result.error || 'Authentication failed';
-        \\      btn.disabled = false;
-        \\    }
-        \\  } catch (e) {
-        \\    status.className = 'status error';
-        \\    status.textContent = e.message || 'Authentication failed';
-        \\    btn.disabled = false;
-        \\  }
-        \\});
-        ++ HTML_SCRIPT_BODY_CLOSE;
+    res.body = aw.written();
 }
 
 /// GET /auth/setup — first-user bootstrap page. Redirects to `/auth/login`

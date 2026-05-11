@@ -10,6 +10,7 @@ src/serve/templates/account.zig: pub const PasskeysCard (struct_) has no /// doc
 src/serve/templates/account.zig: pub const PasswordCard (struct_) has no /// doc comment
 src/serve/templates/account.zig: pub const UserRow (struct_) has no /// doc comment
 src/serve/templates/account.zig: pub const UsersCard (struct_) has no /// doc comment
+src/serve/templates/auth.zig: pub const Login (struct_) has no /// doc comment
 src/serve/templates/library.zig: pub const ComponentDetails (struct_) has no /// doc comment
 src/serve/templates/library.zig: pub const Library (struct_) has no /// doc comment
 src/serve/templates/library.zig: pub const Row (struct_) has no /// doc comment
