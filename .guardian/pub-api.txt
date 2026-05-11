@@ -439,9 +439,7 @@ src/serve/bom_html.zig::augmentUnconnectedPins fn
 src/serve/bom_html.zig::buildSymbolPinCache fn
 src/serve/bom_html.zig::collectMissing fn
 src/serve/bom_html.zig::footprintHasPads fn
-src/serve/bom_html.zig::getPassivePrefix fn
 src/serve/bom_html.zig::writeBomCsv fn
-src/serve/bom_html.zig::writeBomHtml fn
 src/serve/bom_html.zig::writeComponentsJson fn
 src/serve/bom_html.zig::writeJsonEscaped value
 src/serve/bom_html.zig::writeNetsJson fn

@@ -1,6 +1,4 @@
 # guardian-snapshot v1
-src/serve/bom_html.zig: string literal <td>{s}</td> appears 3 times — extract a const
-src/serve/bom_html.zig: string literal datasheet appears 3 times — extract a const
 src/serve/bom_html.zig: string literal manufacturer appears 3 times — extract a const
 src/serve/edit.zig: string literal {{\"ok\":true,\"version\":{d}}} appears 3 times — extract a const
 src/serve/templates/account.zig: string literal </button> appears 7 times — extract a const

@@ -269,9 +269,7 @@ src/serve/bom_html.zig::augmentUnconnectedPins | fn augmentUnconnectedPins(alloc
 src/serve/bom_html.zig::buildSymbolPinCache | fn buildSymbolPinCache(allocator: std.mem.Allocator, project_dir: []const u8) BomError!SymbolPinCache
 src/serve/bom_html.zig::collectMissing | fn collectMissing( allocator: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, missing_fp: *std.ArrayListUnmanaged([]const u8), missing_model: *std.ArrayListUnmanaged([]const u8), checked_fp: *std.StringHashMap(void), checked_model: *std.StringHashMap(void), ) BomError!void
 src/serve/bom_html.zig::footprintHasPads | fn footprintHasPads(allocator: std.mem.Allocator, project_dir: []const u8, footprint: []const u8) bool
-src/serve/bom_html.zig::getPassivePrefix | fn getPassivePrefix(component: []const u8) []const u8
 src/serve/bom_html.zig::writeBomCsv | fn writeBomCsv(w: anytype, block: *const env_mod.DesignBlock) BomError!void
-src/serve/bom_html.zig::writeBomHtml | fn writeBomHtml(wr: anytype, block: *const env_mod.DesignBlock) BomError!void
 src/serve/bom_html.zig::writeComponentsJson | fn writeComponentsJson( w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8, sym_cache: *const SymbolPinCache, allocator: std.mem.Allocator, project_dir: []const u8, ) BomError!bool
 src/serve/bom_html.zig::writeNetsJson | fn writeNetsJson(w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8) BomError!bool
 src/serve/bom_html.zig::writeSchematicBomHtml | fn writeSchematicBomHtml(wr: anytype, block: *const env_mod.DesignBlock) BomError!void
