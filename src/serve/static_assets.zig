@@ -11,6 +11,7 @@ const pdf_viewer_css = @embedFile("assets/pdf_viewer.css");
 const library_js = @embedFile("assets/library.js");
 const auth_login_js = @embedFile("assets/auth_login.js");
 const auth_setup_js = @embedFile("assets/auth_setup.js");
+const auth_invite_js = @embedFile("assets/auth_invite.js");
 
 /// Error set for the static-asset handler: only writer-side errors propagate
 /// to httpz; the lookup itself is fallible only via a 404.
@@ -34,6 +35,7 @@ const REGISTRY = [_]Asset{
     .{ .name = "library.js", .body = library_js, .content_type = .JS },
     .{ .name = "auth_login.js", .body = auth_login_js, .content_type = .JS },
     .{ .name = "auth_setup.js", .body = auth_setup_js, .content_type = .JS },
+    .{ .name = "auth_invite.js", .body = auth_invite_js, .content_type = .JS },
 };
 
 /// GET /static/:name — serve an embedded JS/CSS asset. 404 if the name is

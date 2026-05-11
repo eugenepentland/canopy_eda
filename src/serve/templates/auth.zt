@@ -36,6 +36,50 @@ pub templ Login() {
     </html>
 }
 
+pub templ InviteExpired() {
+    <!DOCTYPE html>
+    <html>
+        <head>
+            <meta name="viewport" content="width=device-width,initial-scale=1" />
+            <title>Invite - Canopy EDA</title>
+            {!STYLE_BLOCK}
+        </head>
+        <body>
+            <div class="auth-card">
+                <span class="brand">Canopy EDA</span>
+                <h1>Invite Expired</h1>
+                <p>This invite link is invalid or has expired. Ask the person who invited you for a new link.</p>
+                <a class="link" href="/auth/login">Back to sign in</a>
+            </div>
+        </body>
+    </html>
+}
+
+pub templ InviteAccept(token: []const u8) {
+    <!DOCTYPE html>
+    <html>
+        <head>
+            <meta name="viewport" content="width=device-width,initial-scale=1" />
+            <title>Accept Invite - Canopy EDA</title>
+            {!STYLE_BLOCK}
+        </head>
+        <body data-invite-token={token}>
+            <div class="auth-card">
+                <span class="brand">Canopy EDA</span>
+                <h1>Accept Invite</h1>
+                <p>Pick how you'd like to sign in. Passkeys are recommended; passwords are a fallback if your device doesn't support passkeys.</p>
+                <input type="email" id="email" placeholder="Email address" required style={INPUT_DARK_STYLE} />
+                <input type="password" id="password" placeholder="Password" minlength="8" style={PASSWORD_HIDDEN_STYLE} />
+                <button class="auth-btn" id="register-btn">Register Passkey</button>
+                <a class="link" href="#" id="toggle-mode">Use a password instead</a>
+                <div class="status" id="status"></div>
+            </div>
+            {!B64URL_SCRIPT}
+            <script src="/static/auth_invite.js"></script>
+        </body>
+    </html>
+}
+
 pub templ Setup() {
     <!DOCTYPE html>
     <html>

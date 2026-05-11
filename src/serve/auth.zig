@@ -2033,141 +2033,14 @@ pub fn invitePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     }
 
     const found = try findInvite(ctx.allocator, ctx.auth_dir, token);
+    var aw: std.Io.Writer.Allocating = .init(req.arena);
     if (found == null) {
-        res.content_type = .HTML;
-        res.body =
-            HTML_DOCTYPE_HEAD ++
-            "<title>Invite - Canopy EDA</title><style>" ++ PAGE_STYLE ++ HTML_STYLE_HEAD_BODY_OPEN ++
-            HTML_AUTH_CARD_OPEN ++
-            HTML_BRAND_SPAN ++
-            "<h1>Invite Expired</h1>" ++
-            "<p>This invite link is invalid or has expired. Ask the person who invited you for a new link.</p>" ++
-            "<a class=\"link\" href=\"/auth/login\">Back to sign in</a>" ++
-            "</div></body></html>";
-        return;
+        try auth_template.InviteExpired.render(.{}, &aw.writer);
+    } else {
+        try auth_template.InviteAccept.render(.{token}, &aw.writer);
     }
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const w = buf.writer(req.arena);
-    try w.writeAll(
-        HTML_DOCTYPE_HEAD ++
-            "<title>Accept Invite - Canopy EDA</title><style>" ++ PAGE_STYLE ++ HTML_STYLE_HEAD_BODY_OPEN ++
-            HTML_AUTH_CARD_OPEN ++
-            HTML_BRAND_SPAN ++
-            "<h1>Accept Invite</h1>" ++
-            "<p>Pick how you'd like to sign in. Passkeys are recommended; passwords are a fallback if your device doesn't support passkeys.</p>" ++
-            HTML_EMAIL_INPUT ++
-            HTML_INPUT_STYLE_DARK ++
-            HTML_PASSWORD_INPUT_HIDDEN ++
-            "<button class=\"auth-btn\" id=\"register-btn\">Register Passkey</button>" ++
-            "<a class=\"link\" href=\"#\" id=\"toggle-mode\">Use a password instead</a>" ++
-            HTML_STATUS_DIV ++
-            "</div>" ++
-            HTML_SCRIPT_OPEN ++ B64URL_JS,
-    );
-    try w.print("const INVITE_TOKEN = \"{s}\";\n", .{token});
-    try w.writeAll(
-        \\const btn = document.getElementById('register-btn');
-        \\const emailInput = document.getElementById('email');
-        \\const passwordInput = document.getElementById('password');
-        \\const toggle = document.getElementById('toggle-mode');
-        \\const status = document.getElementById('status');
-        \\let mode = 'passkey';
-        \\toggle.addEventListener('click', (e) => {
-        \\  e.preventDefault();
-        \\  if (mode === 'passkey') {
-        \\    mode = 'password';
-        \\    passwordInput.style.display = '';
-        \\    btn.textContent = 'Set Password';
-        \\    toggle.textContent = 'Use a passkey instead';
-        \\  } else {
-        \\    mode = 'passkey';
-        \\    passwordInput.style.display = 'none';
-        \\    btn.textContent = 'Register Passkey';
-        \\    toggle.textContent = 'Use a password instead';
-        \\  }
-        \\  status.textContent = '';
-        \\});
-        \\async function doPasswordSet(email) {
-        \\  if (passwordInput.value.length < 8) {
-        \\    throw new Error('Password must be at least 8 characters');
-        \\  }
-        \\  status.textContent = 'Saving password...';
-        \\  const r = await fetch('/auth/password/set', {
-        \\    method: 'POST',
-        \\    headers: { 'Content-Type': 'application/json' },
-        \\    body: JSON.stringify({ email, password: passwordInput.value, invite: INVITE_TOKEN })
-        \\  });
-        \\  const j = await r.json();
-        \\  if (!j.ok) throw new Error(j.error || 'Failed to set password');
-        \\  status.className = 'status ok';
-        \\  status.textContent = 'Password set!';
-        \\  window.location.href = '/';
-        \\}
-        \\btn.addEventListener('click', async () => {
-        \\  const email = emailInput.value.trim();
-        \\  if (!email || !email.includes('@')) {
-        \\    status.className = 'status error';
-        \\    status.textContent = 'Please enter a valid email address';
-        \\    return;
-        \\  }
-        \\  btn.disabled = true;
-        \\  status.className = 'status';
-        \\  try {
-        \\    if (mode === 'password') {
-        \\      await doPasswordSet(email);
-        \\      return;
-        \\    }
-        \\    status.textContent = 'Requesting challenge...';
-        \\    const url = '/auth/register/challenge?invite=' + encodeURIComponent(INVITE_TOKEN) + '&email=' + encodeURIComponent(email);
-        \\    const challengeRes = await fetch(url);
-        \\    const opts = await challengeRes.json();
-        \\    if (!challengeRes.ok) throw new Error(opts.error || 'Challenge failed');
-        \\    const publicKey = {
-        \\      challenge: b64urlToBytes(opts.challenge),
-        \\      rp: opts.rp,
-        \\      user: { id: b64urlToBytes(opts.user.id), name: opts.user.name, displayName: opts.user.displayName },
-        \\      pubKeyCredParams: opts.pubKeyCredParams,
-        \\      authenticatorSelection: opts.authenticatorSelection,
-        \\      timeout: opts.timeout,
-        \\      excludeCredentials: (opts.excludeCredentials || []).map(c => ({ type: c.type, id: b64urlToBytes(c.id) }))
-        \\    };
-        \\    status.textContent = 'Waiting for passkey...';
-        \\    const cred = await navigator.credentials.create({ publicKey });
-        \\    status.textContent = 'Registering...';
-        \\    const body = JSON.stringify({
-        \\      id: bytesToB64url(cred.rawId),
-        \\      email: email,
-        \\      invite: INVITE_TOKEN,
-        \\      response: {
-        \\        attestationObject: bytesToB64url(cred.response.attestationObject),
-        \\        clientDataJSON: bytesToB64url(cred.response.clientDataJSON)
-        \\      }
-        \\    });
-        \\    const verifyRes = await fetch('/auth/register/complete', {
-        \\      method: 'POST',
-        \\      headers: { 'Content-Type': 'application/json' },
-        \\      body: body
-        \\    });
-        \\    const result = await verifyRes.json();
-        \\    if (result.ok) {
-        \\      status.className = 'status ok';
-        \\      status.textContent = 'Passkey registered!';
-        \\      window.location.href = '/';
-        \\    } else {
-        \\      throw new Error(result.error || 'Registration failed');
-        \\    }
-        \\  } catch (e) {
-        \\    status.className = 'status error';
-        \\    status.textContent = e.message || 'Registration failed';
-        \\    btn.disabled = false;
-        \\  }
-        \\});
-    );
-    try w.writeAll(HTML_SCRIPT_BODY_CLOSE);
-
     res.content_type = .HTML;
-    res.body = buf.items;
+    res.body = aw.written();
 }
 
 /// GET /auth/manage — signed-in account page for listing the user's
