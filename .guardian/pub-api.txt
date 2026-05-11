@@ -63,12 +63,16 @@ src/eval/builtins.zig::BuiltinError value
 src/eval/builtins.zig::evalBuiltin fn
 src/eval/builtins.zig::isBuiltin fn
 src/eval/design_block.zig::evalDesignBlock fn
+src/eval/electrical.zig::parse fn
 src/eval/env.zig::AssertionResult struct_
 src/eval/env.zig::BlockRole enum_
 src/eval/env.zig::CalcBlock struct_
 src/eval/env.zig::CalcResult struct_
 src/eval/env.zig::Check value
 src/eval/env.zig::DesignBlock struct_
+src/eval/env.zig::Drive enum_
+src/eval/env.zig::ElectricalDecl struct_
+src/eval/env.zig::ElectricalType enum_
 src/eval/env.zig::Env struct_
 src/eval/env.zig::Group struct_
 src/eval/env.zig::Instance struct_

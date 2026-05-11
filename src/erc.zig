@@ -39,6 +39,7 @@ pub const ViolationKind = enum {
     source_unused,
     rail_voltage_unresolved,
     sequence_cycle,
+    voltage_domain_incompatible,
 };
 
 /// One electrical-rule-check finding. `kind` selects the rule, `severity`
@@ -74,9 +75,97 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkTestPointCoverage(allocator, block, &violations);
     try checkPowerTreeIntegrity(allocator, block, &violations);
     try checkSequencingCycles(allocator, block, &violations);
+    try checkVoltageDomainCompat(allocator, block, &violations);
     if (project_dir.len > 0) try checkPinFunctions(allocator, block, project_dir, &violations);
 
     return violations.items;
+}
+
+/// For each net, gather pins whose component library declared electrical
+/// levels and compare driver outputs against receiver thresholds. Flags
+/// nets where the worst driver high (lowest v_oh_typ across drivers)
+/// can't meet the worst receiver high threshold (highest v_ih_min across
+/// receivers). Pins without electrical metadata are silently skipped so
+/// the check starts low-noise and grows useful as the library is
+/// annotated.
+fn checkVoltageDomainCompat(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayListUnmanaged(Violation),
+) !void {
+    // Build ref_des → electrical lookup so we can resolve a pin's
+    // declarations in O(1) inside the net-walk below. Skips instances
+    // without electrical data — most of the library, for now.
+    var ref_to_elec: std.StringHashMapUnmanaged([]const env_mod.ElectricalDecl) = .empty;
+    defer ref_to_elec.deinit(allocator);
+    for (block.instances) |inst| {
+        if (inst.electrical.len == 0) continue;
+        try ref_to_elec.put(allocator, inst.ref_des, inst.electrical);
+    }
+    if (ref_to_elec.count() == 0) return;
+
+    for (block.nets) |net| {
+        // Skip GND / power-only nets — the driver/receiver distinction
+        // doesn't apply.
+        const base = na.baseNetName(net.name);
+        if (std.mem.eql(u8, base, "GND")) continue;
+
+        var worst_driver_high: ?f64 = null;
+        var worst_receiver_high_threshold: ?f64 = null;
+
+        for (net.pins) |pin| {
+            const elec = ref_to_elec.get(pin.ref_des) orelse continue;
+            const decl = findPinDecl(elec, pin.pin) orelse continue;
+            const t = decl.electrical_type orelse continue;
+
+            const is_driver = t == .output or t == .io or t == .power_out;
+            const is_receiver = t == .input or t == .io or t == .power_in;
+
+            if (is_driver) {
+                if (decl.v_oh_typ) |v| {
+                    if (worst_driver_high == null or v < worst_driver_high.?) {
+                        worst_driver_high = v;
+                    }
+                }
+            }
+            if (is_receiver) {
+                if (decl.v_ih_min) |v| {
+                    if (worst_receiver_high_threshold == null or v > worst_receiver_high_threshold.?) {
+                        worst_receiver_high_threshold = v;
+                    }
+                }
+            }
+        }
+
+        if (worst_driver_high) |drv| {
+            if (worst_receiver_high_threshold) |rcv| {
+                if (drv < rcv) {
+                    const msg = std.fmt.allocPrint(
+                        allocator,
+                        "Net \"{s}\": driver high level {d:.2}V is below receiver high threshold {d:.2}V — a level shifter is required",
+                        .{ base, drv, rcv },
+                    ) catch continue;
+                    try violations.append(allocator, .{
+                        .kind = .voltage_domain_incompatible,
+                        .severity = .@"error",
+                        .message = msg,
+                        .net = base,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Linear scan to find an `ElectricalDecl` whose `pin` field matches the
+/// given pin id. Pin counts on most parts are O(<200), so the linear
+/// scan is fine; if a hot path ever needs faster lookup, build a temp
+/// hashmap in `checkVoltageDomainCompat`.
+fn findPinDecl(decls: []const env_mod.ElectricalDecl, pin_id: []const u8) ?env_mod.ElectricalDecl {
+    for (decls) |d| {
+        if (std.mem.eql(u8, d.pin, pin_id)) return d;
+    }
+    return null;
 }
 
 /// Detect cycles in the per-rail enable-net dependency graph emitted by
@@ -1416,6 +1505,91 @@ test "power tree integrity clean rail emits nothing" {
     for (violations.items) |v| {
         try std.testing.expect(v.kind != .source_unused);
         try std.testing.expect(v.kind != .rail_voltage_unresolved);
+    }
+}
+
+// Build a single-net DesignBlock with two pins whose ElectricalDecls are
+// configured by the caller, for voltage-domain compatibility tests.
+fn makeDomainBlock(
+    alloc: std.mem.Allocator,
+    net_name: []const u8,
+    driver_oh_typ: f64,
+    receiver_ih_min: f64,
+) !DesignBlock {
+    const drv_elec = try alloc.alloc(env_mod.ElectricalDecl, 1);
+    drv_elec[0] = .{
+        .pin = "1",
+        .electrical_type = .output,
+        .v_oh_typ = driver_oh_typ,
+    };
+    const rcv_elec = try alloc.alloc(env_mod.ElectricalDecl, 1);
+    rcv_elec[0] = .{
+        .pin = "1",
+        .electrical_type = .input,
+        .v_ih_min = receiver_ih_min,
+    };
+    const insts = try alloc.alloc(env_mod.Instance, 2);
+    insts[0] = .{
+        .ref_des = "U1",
+        .component = "drv",
+        .value = "",
+        .footprint = "",
+        .symbol = "",
+        .electrical = drv_elec,
+    };
+    insts[1] = .{
+        .ref_des = "U2",
+        .component = "rcv",
+        .value = "",
+        .footprint = "",
+        .symbol = "",
+        .electrical = rcv_elec,
+    };
+    const pins = try alloc.alloc(env_mod.PinRef, 2);
+    pins[0] = .{ .ref_des = "U1", .pin = "1" };
+    pins[1] = .{ .ref_des = "U2", .pin = "1" };
+    const nets = try alloc.alloc(env_mod.Net, 1);
+    nets[0] = .{ .name = net_name, .pins = pins };
+    return .{
+        .name = "domain-fixture",
+        .instances = insts,
+        .nets = nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+}
+
+// spec: erc - Flags a net where the worst driver high level is below the worst receiver high threshold
+test "voltage-domain incompatibility flagged" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // 1V8 CMOS driver (v_oh_typ 1.7V) into 3V3 CMOS receiver (v_ih_min 2.31V).
+    const block = try makeDomainBlock(alloc, "SIG", 1.7, 2.31);
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkVoltageDomainCompat(alloc, &block, &violations);
+    var hit = false;
+    for (violations.items) |v| {
+        if (v.kind == .voltage_domain_incompatible and std.mem.eql(u8, v.net, "SIG")) hit = true;
+    }
+    try std.testing.expect(hit);
+}
+
+// spec: erc - Emits no voltage-domain violation when driver and receiver levels are compatible
+test "voltage-domain compatible levels pass" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // 3V3 CMOS driver (v_oh_typ 3.1V) into 1V8 CMOS receiver (v_ih_min 1.17V).
+    const block = try makeDomainBlock(alloc, "SIG", 3.1, 1.17);
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkVoltageDomainCompat(alloc, &block, &violations);
+    for (violations.items) |v| {
+        try std.testing.expect(v.kind != .voltage_domain_incompatible);
     }
 }
 

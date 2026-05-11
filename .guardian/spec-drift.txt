@@ -45,6 +45,7 @@ src/eval/builders.zig::processPinForm | fn processPinForm( self: *Evaluator, pin
 src/eval/builtins.zig::evalBuiltin | fn evalBuiltin(op: []const u8, args: []const Value) BuiltinError!Value
 src/eval/builtins.zig::isBuiltin | fn isBuiltin(name: []const u8) bool
 src/eval/design_block.zig::evalDesignBlock | fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
+src/eval/electrical.zig::parse | fn parse(form_children: []const Node) ?ElectricalDecl
 src/eval/env.zig::parseCheck | fn parseCheck(node: ast.Node) ?Check
 src/eval/env.zig::parseNoteRef | fn parseNoteRef(node: ast.Node) ?NoteRef
 src/eval/env.zig::requirementIdForText | fn requirementIdForText(allocator: std.mem.Allocator, text: []const u8) std.mem.Allocator.Error![]const u8

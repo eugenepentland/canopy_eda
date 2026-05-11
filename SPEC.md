@@ -139,6 +139,8 @@ Public functions: renderSchematic
 - Flags a power rail whose nominal voltage cannot be resolved
 - Emits no integrity violation on a fully-resolved rail with consumers
 - Flags a sequencing cycle by emitting sequence_cycle per affected rail
+- Flags a net where the worst driver high level is below the worst receiver high threshold
+- Emits no voltage-domain violation when driver and receiver levels are compatible
 
 ## eval/power_budget
 
@@ -162,6 +164,16 @@ Public functions: parse
 - Parses (required-for ...) sub-form recognizing bring-up power clock reset debug and signal tags
 - Returns null when ref-des or net positional arguments are missing
 - Ignores unknown sub-forms and unknown required-for tags
+
+## eval/electrical
+
+Public functions: parse
+
+- Parses pin function name from the first positional argument
+- Returns null when the pin function name is missing
+- Recognises every electrical-type enum atom
+- Parses voltage level fields v-ih-min v-il-max v-oh-typ v-ol-typ max-voltage
+- Ignores unknown sub-forms and unrecognised enum atoms
 
 ## eval/power_config
 

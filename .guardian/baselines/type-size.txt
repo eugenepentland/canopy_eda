@@ -1,2 +1,3 @@
 # guardian-snapshot v1
-src/erc.zig: pub const ViolationKind (enum_) has 18 fields (cap 16)
+src/erc.zig: pub const ViolationKind (enum_) has 19 fields (cap 16)
+src/eval/env.zig: pub const Instance (struct_) has 17 fields (cap 16)

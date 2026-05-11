@@ -535,6 +535,11 @@ pub const Instance = struct {
     /// parts that don't need a requirement check (mounting hardware, debug
     /// headers, etc.). Read by the review summary's missing-requirements list.
     requirements_ignored: bool = false,
+    /// Per-pin electrical-level metadata, copied from the library component's
+    /// `(electrical …)` declarations. Sparse on purpose — pins without a
+    /// matching declaration just aren't in the slice. Phase 2A's
+    /// voltage-domain compatibility ERC reads this.
+    electrical: []const ElectricalDecl = &.{},
     /// Schematic-level attributes (e.g., "np0", "x7r" for dielectric type)
     attrs: []const []const u8 = &.{},
     /// Optional multi-part breakdown. Empty = single-part (render as one hub).
@@ -649,6 +654,51 @@ pub const BlockRole = enum { auto, input, output };
 
 /// A net-tie pair: merge net `b` into net `a`.
 pub const NetTie = struct { a: []const u8, b: []const u8 };
+
+/// Electrical role of a pin, declared on a library component. Drives
+/// Phase 2A's voltage-domain compatibility ERC (driver vs receiver
+/// classification) and is the foundation for future signal-integrity
+/// analyses.
+pub const ElectricalType = enum {
+    input,
+    output,
+    io,
+    power_in,
+    power_out,
+    passive,
+    nc,
+};
+
+/// Drive strength / output-style for an `output` or `io` pin. Open-drain
+/// outputs require an external pull-up to swing high — Phase 2A's ERC
+/// flags rails missing one.
+pub const Drive = enum {
+    push_pull,
+    open_drain,
+    open_emitter,
+};
+
+/// Electrical-level metadata for one pin of a library component. Indexed
+/// by the pin's *function name* (matches the second positional in
+/// `lib/pinouts/<part>.sexp`'s `(pin <num> "FN")`) so it survives pinout
+/// regeneration. Every field is optional — sparse annotation is fine and
+/// downstream consumers skip pins they don't have data for.
+pub const ElectricalDecl = struct {
+    /// Pin function name as it appears in the pinout file.
+    pin: []const u8,
+    electrical_type: ?ElectricalType = null,
+    drive: ?Drive = null,
+    v_ih_min: ?f64 = null,
+    v_il_max: ?f64 = null,
+    v_oh_typ: ?f64 = null,
+    v_ol_typ: ?f64 = null,
+    /// Absolute-maximum voltage rating for this pin.
+    max_voltage: ?f64 = null,
+    /// Power-domain tag (matches `PowerDomain.name`). Empty when the part
+    /// doesn't declare a domain — most parts are single-domain so this is
+    /// usually omitted.
+    domain: []const u8 = "",
+};
 
 /// Categories a test point can declare itself as required for. Drives the
 /// Phase 2E coverage check ("every power rail must have a `power` test point",

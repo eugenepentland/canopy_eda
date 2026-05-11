@@ -138,6 +138,12 @@ pub const Evaluator = struct {
         /// hardware, simple debug headers, etc.) so they don't show up in
         /// the schematic-summary "missing requirements" list.
         requirements_ignored: bool = false,
+        /// Per-pin electrical-level metadata declared via
+        /// `(electrical "PIN_FN" (type X) (v-ih-min Y) …)` inside the
+        /// `(component …)` file. Sparse on purpose — Phase 2A's ERC
+        /// silently skips pins without electrical data so the library
+        /// can grow annotations incrementally.
+        electrical: []const env_mod.ElectricalDecl = &.{},
     };
 
     pub fn init(allocator: std.mem.Allocator, project_dir: []const u8) Evaluator {

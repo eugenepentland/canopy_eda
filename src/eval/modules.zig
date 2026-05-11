@@ -3,6 +3,7 @@ const infra_fs = @import("../infra/fs.zig");
 const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const env_mod = @import("env.zig");
+const electrical_mod = @import("electrical.zig");
 const Evaluator = @import("evaluator.zig").Evaluator;
 const EvalError = @import("evaluator.zig").EvalError;
 const ComponentData = Evaluator.ComponentData;
@@ -131,13 +132,14 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
         "parameter",           "component-family",
         "bus",                 "note",
         "datasheet",           "requirement",
-        "ignore-requirements",
+        "ignore-requirements", "electrical",
     };
 
     var props: std.ArrayListUnmanaged(env_mod.Property) = .empty;
     var buses: std.ArrayListUnmanaged(BusDef) = .empty;
     var datasheets: std.ArrayListUnmanaged([]const u8) = .empty;
     var requirements: std.ArrayListUnmanaged(env_mod.Requirement) = .empty;
+    var electrical: std.ArrayListUnmanaged(env_mod.ElectricalDecl) = .empty;
     var requirements_ignored = false;
 
     for (children[1..]) |child| {
@@ -199,6 +201,10 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
             else
                 env_mod.requirementIdForText(self.allocator, text) catch "";
             requirements.append(self.allocator, .{ .text = text, .ref = ref, .check = chk, .id = rid }) catch continue;
+        } else if (std.mem.eql(u8, field, "electrical")) {
+            if (electrical_mod.parse(cl)) |d| {
+                electrical.append(self.allocator, d) catch continue;
+            }
         } else if (std.mem.eql(u8, field, "bus")) {
             // (bus "name" pin1 pin2 pin3 ...)
             const bus_name = cl[1].asString() orelse (cl[1].asAtom() orelse continue);
@@ -239,6 +245,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
         .datasheets = datasheets.toOwnedSlice(self.allocator) catch &.{},
         .requirements = requirements.toOwnedSlice(self.allocator) catch &.{},
         .requirements_ignored = requirements_ignored,
+        .electrical = electrical.toOwnedSlice(self.allocator) catch &.{},
     });
 }
 

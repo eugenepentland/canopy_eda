@@ -1,1 +1,2 @@
 # guardian-snapshot v1
+src/eval/env.zig:686: pub struct 'ElectricalDecl' is 77% optional (7/9 fields)

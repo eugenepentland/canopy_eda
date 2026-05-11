@@ -38,6 +38,7 @@ pub const ResolvedComponent = struct {
     datasheets: []const []const u8 = &.{},
     requirements: []const env_mod.Requirement = &.{},
     requirements_ignored: bool = false,
+    electrical: []const env_mod.ElectricalDecl = &.{},
 };
 
 /// Extract component metadata from a Value. Returns null when the Value isn't a
@@ -70,6 +71,7 @@ pub fn resolveComponent(self: *Evaluator, val: Value) ?ResolvedComponent {
             .datasheets = cd.datasheets,
             .requirements = cd.requirements,
             .requirements_ignored = cd.requirements_ignored,
+            .electrical = cd.electrical,
         };
     }
     return .{
@@ -126,6 +128,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
         .datasheets = resolved.datasheets,
         .requirements = resolved.requirements,
         .requirements_ignored = resolved.requirements_ignored,
+        .electrical = resolved.electrical,
         .source_offset = comp_offset,
         .id = inst_id,
     };
@@ -313,6 +316,7 @@ pub fn instanceFromValue(self: *Evaluator, val: Value, ref_des: []const u8, sour
         .datasheets = resolved.datasheets,
         .requirements = resolved.requirements,
         .requirements_ignored = resolved.requirements_ignored,
+        .electrical = resolved.electrical,
         .source_offset = source_offset,
         .id = id,
     };
