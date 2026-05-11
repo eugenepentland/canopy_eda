@@ -237,7 +237,6 @@ src/serve/api.zig::pushApi | fn pushApi(ctx: *Handler, req: *httpz.Request, res:
 src/serve/api.zig::removeComponentDatasheetApi | fn removeComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::removeSectionNoteApi | fn removeSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::reviewJsonApi | fn reviewJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::reviewPage | fn reviewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::sceneGraphApi | fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::versionApi | fn versionApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/assets_css.zig::writeNavbar | fn writeNavbar(w: anytype, active: []const u8) (std.mem.Allocator.Error || std.Io.Writer.Error)!void

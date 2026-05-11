@@ -686,19 +686,6 @@ fn writeJsonString(w: anytype, s: []const u8) !void {
     try w.writeAll("\"");
 }
 
-/// Legacy `/review/:name` route — the schematic page now embeds every review
-/// section inline, so we 301-redirect here. Old bookmarks and PR links keep
-/// working; scroll anchors (`#sec-<slug>`) are preserved by the browser.
-pub fn reviewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
-        return;
-    };
-    const location = try std.fmt.allocPrint(ctx.allocator, "/schematics/{s}", .{name});
-    res.status = 301;
-    res.header("location", location);
-}
-
 /// Shared build path: evaluate, resolve BOM identities, run ERC, package
 /// the ReviewDoc. Returns an opaque error on build failure.
 fn buildDocForName(

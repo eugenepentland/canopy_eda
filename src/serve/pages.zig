@@ -109,9 +109,8 @@ pub fn indexPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handler
         try w.print(
             "<div class=\"design-card-links\">" ++
                 "<a class=\"design-card-link\" href=\"/schematics/{s}\">Schematic</a>" ++
-                "<a class=\"design-card-link\" href=\"/review/{s}\">Review</a>" ++
                 "</div></div>",
-            .{ s.name, s.name },
+            .{s.name},
         );
     }
     if (summaries.len == 0) {

@@ -399,7 +399,6 @@ src/serve/api.zig::pushApi fn
 src/serve/api.zig::removeComponentDatasheetApi fn
 src/serve/api.zig::removeSectionNoteApi fn
 src/serve/api.zig::reviewJsonApi fn
-src/serve/api.zig::reviewPage fn
 src/serve/api.zig::sceneGraphApi fn
 src/serve/api.zig::versionApi fn
 src/serve/assets_css.zig::DESIGN_CSS value

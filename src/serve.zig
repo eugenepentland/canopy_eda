@@ -168,7 +168,6 @@ pub fn serve(
     router.get("/", pages.indexPage, .{});
     router.get("/style.css", pages.cssPage, .{});
     router.get("/schematics/:name", schematic_page.schematicPage, .{});
-    router.get("/review/:name", api.reviewPage, .{});
 
     // API
     router.post("/api/push/:name", api.pushApi, .{});
