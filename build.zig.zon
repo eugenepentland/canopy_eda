@@ -39,6 +39,10 @@
         .guardian = .{
             .path = "../guardian-zig",
         },
+        .zt = .{
+            .url = "git+https://github.com/lalinsky/zt#b40829fc06a69504f1d51db25ab5a688a3fb41c2",
+            .hash = "zt-0.0.0-oSxxLHUWAgBRX_4qFpIbURNBtGasSCYdqcnRjcnItmT0",
+        },
     },
     .paths = .{
         "build.zig",

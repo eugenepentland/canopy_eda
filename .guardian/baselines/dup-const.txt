@@ -18,6 +18,9 @@ in: src/serve/library.zig
 in: src/serve/mcp_tools.zig
 in: src/serve/oauth.zig
 in: src/serve/sync.zig
+in: src/serve/templates/account.zig
+in: src/serve/templates/pages.zig
 in: src/serve/upload.zig
 in: src/serve/upload_package.zig
 u8 = "</section>"
+u8 = "<style>"

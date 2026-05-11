@@ -1,0 +1,151 @@
+const mcp_tools = @import("../mcp_tools.zig");
+const DesignSummary = mcp_tools.DesignSummary;
+
+// zt treats `<style>` as a raw-text element — expressions inside are NOT
+// interpolated, so the entire `<style>…</style>` block ships as a single raw
+// chunk emitted via `{!HOME_STYLE_BLOCK}` in the head.
+const HOME_STYLE_BLOCK: []const u8 = "<style>" ++ @embedFile("../assets/navbar.css") ++
+    \\.designs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;padding:16px}
+    \\.design-card{background:#161b22;border:1px solid #21262d;
+    \\border-radius:10px;padding:18px 20px;display:flex;flex-direction:column;
+    \\gap:10px;transition:border-color 0.15s}
+    \\.design-card:hover{border-color:#58a6ff}
+    \\.design-card-header{display:flex;flex-direction:column;gap:2px}
+    \\.design-card-title{color:#f0f6fc;font-size:1.05rem;font-weight:600;line-height:1.3}
+    \\.design-card-name{color:#6e7681;font-size:12px;font-family:monospace}
+    \\.design-card-stats{display:flex;gap:8px;font-size:12px;color:#8b949e;align-items:center;flex-wrap:wrap}
+    \\.design-card-stats .sep{color:#30363d}
+    \\.design-card-stats .warn{color:#d29922}
+    \\.design-card-sections{display:flex;flex-wrap:wrap;gap:4px}
+    \\.section-chip{background:#1a1a2e;color:#8b949e;font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid #21262d}
+    \\.section-chip-more{color:#6e7681;font-size:11px;padding:2px 4px}
+    \\.design-card-links{display:flex;gap:8px;margin-top:auto;padding-top:4px}
+    \\.design-card-link{color:#8b949e;font-size:13px;padding:6px 14px;
+    \\border:1px solid #30363d;border-radius:6px;text-decoration:none;
+    \\text-align:center;flex:1}
+    \\.design-card-link:hover{border-color:#58a6ff;color:#c9d1d9}
+    \\.empty-hint{color:#6e7681;font-size:13px;padding:24px;text-align:center}
+    \\@media(max-width:600px){.designs-grid{grid-template-columns:1fr;padding:12px;gap:10px}.design-card{padding:16px}}
+++ "</style>";
+
+const SECONDS_PER_MINUTE: i64 = 60;
+const SECONDS_PER_HOUR: i64 = 3600;
+const SECONDS_PER_DAY: i64 = 86400;
+const DAYS_PER_MONTH_APPROX: i64 = 30;
+
+const MAX_CHIPS: usize = 6;
+
+const RelTime = struct {
+    age_sec: i64,
+
+    pub fn formatHtml(self: RelTime, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const a = self.age_sec;
+        if (a < SECONDS_PER_MINUTE) {
+            try w.writeAll("just now");
+            return;
+        }
+        if (a < SECONDS_PER_HOUR) {
+            try w.print("{d}m ago", .{@divTrunc(a, SECONDS_PER_MINUTE)});
+            return;
+        }
+        if (a < SECONDS_PER_DAY) {
+            try w.print("{d}h ago", .{@divTrunc(a, SECONDS_PER_HOUR)});
+            return;
+        }
+        if (a < DAYS_PER_MONTH_APPROX * SECONDS_PER_DAY) {
+            try w.print("{d}d ago", .{@divTrunc(a, SECONDS_PER_DAY)});
+            return;
+        }
+        try w.print("{d}mo ago", .{@divTrunc(a, DAYS_PER_MONTH_APPROX * SECONDS_PER_DAY)});
+    }
+};
+
+fn relTime(age_sec: i64) RelTime {
+    return .{ .age_sec = if (age_sec < 0) 0 else age_sec };
+}
+
+fn pluralS(n: usize) []const u8 {
+    return if (n == 1) "" else "s";
+}
+
+fn hasOwnTitle(s: DesignSummary) bool {
+    return s.title.len > 0 and !std.mem.eql(u8, s.title, s.name);
+}
+
+fn chipsShown(n: usize) usize {
+    return if (n < MAX_CHIPS) n else MAX_CHIPS;
+}
+
+pub templ Navbar(active: []const u8) {
+    <div class="navbar">
+        <span class="brand">Canopy EDA</span>
+        <a href="/" class={if (std.mem.eql(u8, active, "designs")) "active" else null}>Designs</a>
+        <a href="/library" class={if (std.mem.eql(u8, active, "library")) "active" else null}>Library</a>
+        <a href="/account" style="margin-left:auto">Account</a>
+    </div>
+}
+
+pub templ DesignCard(s: DesignSummary, now_sec: i64) {
+    <div class="design-card">
+        <div class="design-card-header">
+            if (hasOwnTitle(s)) {
+                <div class="design-card-title">{s.title}</div>
+                <div class="design-card-name">{s.name}.sexp</div>
+            } else {
+                <div class="design-card-title">{s.name}</div>
+            }
+        </div>
+        <div class="design-card-stats">
+            if (s.build_ok) {
+                <span>{s.instance_count} part{pluralS(s.instance_count)}</span>
+                <span class="sep">·</span>
+                <span>{s.net_count} net{pluralS(s.net_count)}</span>
+            } else {
+                <span class="warn">build failed</span>
+            }
+            if (s.mtime_sec > 0) {
+                <span class="sep">·</span>
+                <span>{relTime(now_sec - s.mtime_sec)}</span>
+            }
+        </div>
+        if (s.sections.len > 0) {
+            <div class="design-card-sections">
+                for (s.sections[0..chipsShown(s.sections.len)]) |sec| {
+                    <span class="section-chip">{sec}</span>
+                }
+                if (s.sections.len > MAX_CHIPS) {
+                    <span class="section-chip-more">+{s.sections.len - MAX_CHIPS} more</span>
+                }
+            </div>
+        }
+        <div class="design-card-links">
+            <a class="design-card-link" href="/schematics/{s.name}">Schematic</a>
+        </div>
+    </div>
+}
+
+pub templ Home(summaries: []const DesignSummary, now_sec: i64) {
+    <!DOCTYPE html>
+    <html>
+        <head>
+            <meta name="viewport" content="width=device-width,initial-scale=1" />
+            <title>EDA Designs</title>
+            <link rel="stylesheet" href="/style.css" />
+            {!HOME_STYLE_BLOCK}
+        </head>
+        <body>
+            @Navbar("designs")
+            <div style="max-width:960px;margin:0 auto">
+                <h1 style="padding:16px 16px 0;color:#f0f6fc">Designs</h1>
+                <div class="designs-grid">
+                    for (summaries) |s| {
+                        @DesignCard(s, now_sec)
+                    }
+                    if (summaries.len == 0) {
+                        <div class="empty-hint">No designs found in src/.</div>
+                    }
+                </div>
+            </div>
+        </body>
+    </html>
+}
