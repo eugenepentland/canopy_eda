@@ -67,91 +67,7 @@ const HEADER_SET_COOKIE = "set-cookie";
 const PATH_AUTH_LOGIN = "/auth/login";
 const HOST_LOCALHOST = "localhost";
 
-const HTML_DOCTYPE_HEAD = "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
 const SESSION_COOKIE_FMT = "session={s}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800";
-const HTML_STYLE_HEAD_BODY_OPEN = "</style></head><body>";
-const HTML_AUTH_CARD_OPEN = "<div class=\"auth-card\">";
-const HTML_STATUS_DIV = "<div class=\"status\" id=\"status\"></div>";
-const HTML_BRAND_SPAN = "<span class=\"brand\">Canopy EDA</span>";
-const HTML_EMAIL_INPUT = "<input type=\"email\" id=\"email\" placeholder=\"Email address\" required ";
-const HTML_INPUT_STYLE_DARK =
-    "style=\"width:100%;box-sizing:border-box;padding:10px 12px;" ++
-    "background:#0d1117;border:1px solid #30363d;border-radius:6px;" ++
-    "color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none\" />";
-const HTML_INPUT_STYLE_MID =
-    "style=\"width:100%;box-sizing:border-box;padding:10px 12px;" ++
-    "background:#161b22;border:1px solid #30363d;border-radius:6px;" ++
-    "color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none\" />";
-
-// Password <input> markup. The login + invite pages start hidden and are
-// revealed by the "Use password" toggle; the manage page leaves it visible.
-const HTML_PASSWORD_INPUT_HIDDEN =
-    "<input type=\"password\" id=\"password\" placeholder=\"Password\" minlength=\"8\" " ++
-    "style=\"display:none;width:100%;box-sizing:border-box;padding:10px 12px;" ++
-    "background:#0d1117;border:1px solid #30363d;border-radius:6px;" ++
-    "color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none\" />";
-const HTML_PASSWORD_INPUT_VISIBLE =
-    "<input type=\"password\" id=\"pw-input\" placeholder=\"New password (min 8 chars)\" minlength=\"8\" " ++
-    "style=\"width:100%;box-sizing:border-box;padding:10px 12px;background:#0d1117;" ++
-    "border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:8px;outline:none\" />";
-
-// JS for the manage page's password section. Pulled out as a constant so
-// `managePage` stays under Guardian's function-length cap.
-const MANAGE_PASSWORD_JS =
-    \\async function refreshPasswordStatus() {
-    \\  try {
-    \\    const r = await fetch('/auth/password/status');
-    \\    if (!r.ok) return;
-    \\    const j = await r.json();
-    \\    document.getElementById('pw-btn').textContent = j.set ? 'Change password' : 'Set password';
-    \\    document.getElementById('pw-help').textContent = j.set
-    \\      ? 'A password is set. You can sign in with it if you lose your passkey.'
-    \\      : 'Set a password as a fallback in case your passkey is lost.';
-    \\  } catch (e) { /* noop */ }
-    \\}
-    \\document.getElementById('pw-btn').onclick = async () => {
-    \\  const pw = document.getElementById('pw-input').value;
-    \\  if (pw.length < 8) {
-    \\    status.className = 'status error';
-    \\    status.textContent = 'Password must be at least 8 characters';
-    \\    return;
-    \\  }
-    \\  const r = await fetch('/auth/password/set', {
-    \\    method: 'POST',
-    \\    headers: { 'Content-Type': 'application/json' },
-    \\    body: JSON.stringify({ password: pw })
-    \\  });
-    \\  const j = await r.json();
-    \\  if (j.ok) {
-    \\    status.className = 'status ok';
-    \\    status.textContent = 'Password saved.';
-    \\    document.getElementById('pw-input').value = '';
-    \\    refreshPasswordStatus();
-    \\  } else {
-    \\    status.className = 'status error';
-    \\    status.textContent = j.error || 'Failed to save password';
-    \\  }
-    \\};
-;
-
-const MANAGE_PAGE_EXTRA_CSS =
-    "\n.row { display:flex; justify-content:space-between; align-items:center;" ++
-    " padding:10px 12px; border:1px solid #21262d; border-radius:6px; margin-bottom:8px; }" ++
-    "\n.row .meta { color:#8b949e; font-size:0.85rem; }" ++
-    "\n.row button { background:#21262d; color:#f85149; border:1px solid #30363d;" ++
-    " border-radius:4px; padding:4px 10px; cursor:pointer; font-size:0.8rem; }" ++
-    "\n.row button:hover { background:#2d333b; }" ++
-    "\n.section-title { color:#8b949e; font-size:0.8rem; text-transform:uppercase;" ++
-    " letter-spacing:0.05em; margin:1.5rem 0 0.5rem; }" ++
-    "\n.btn-sec { background:#21262d; border:1px solid #30363d; color:#c9d1d9; }" ++
-    "\n.btn-sec:hover { background:#2d333b; }" ++
-    "\n.invite-box { background:#0d1117; border:1px solid #30363d; border-radius:6px;" ++
-    " padding:10px; margin-top:8px; font-size:0.8rem; word-break:break-all; }" ++
-    "\n.user-bar { display:flex; justify-content:space-between; align-items:center;" ++
-    " margin-bottom:1rem; padding-bottom:1rem; border-bottom:1px solid #21262d; }" ++
-    "\n.user-bar .email { color:#8b949e; font-size:0.85rem; }";
-const HTML_SCRIPT_OPEN = "<script>";
-const HTML_SCRIPT_BODY_CLOSE = "</script></body></html>";
 
 const ERR_INVALID_EMAIL_JSON = "{\"error\":\"invalid email\"}";
 const ERR_INVALID_JSON_JSON = "{\"error\":\"invalid json\"}";
@@ -2046,6 +1962,9 @@ pub fn invitePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
 /// GET /auth/manage — signed-in account page for listing the user's
 /// passkeys, adding another device, generating invite links, and signing
 /// out. Redirects to `/auth/login` when the request lacks a valid session.
+/// Markup lives in `templates/auth.zt`; the JS bundle is served from
+/// `/static/auth_manage.js` and page-specific CSS from
+/// `/static/auth_manage.css`.
 pub fn managePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const tok = getSessionToken(req) orelse {
         res.status = 303;
@@ -2058,161 +1977,8 @@ pub fn managePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
         return;
     }
 
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    try auth_template.Manage.render(.{}, &aw.writer);
     res.content_type = .HTML;
-    res.body =
-        HTML_DOCTYPE_HEAD ++
-        "<title>Manage - Canopy EDA</title><style>" ++ PAGE_STYLE ++
-        "\n.auth-card { max-width: 520px; text-align: left; }" ++
-        "\n.auth-card h1 { text-align: center; }" ++
-        MANAGE_PAGE_EXTRA_CSS ++
-        HTML_STYLE_HEAD_BODY_OPEN ++
-        HTML_AUTH_CARD_OPEN ++
-        HTML_BRAND_SPAN ++
-        "<h1>Manage Passkeys</h1>" ++
-        "<div class=\"user-bar\"><span class=\"email\" id=\"user-email\"></span>" ++
-        "<button class=\"btn-sec\" id=\"logout-btn\" " ++
-        "style=\"padding:4px 10px;font-size:0.8rem;border-radius:4px;cursor:pointer\">" ++
-        "Sign out</button></div>" ++
-        "<div class=\"section-title\">Your Passkeys</div>" ++
-        "<div id=\"passkey-list\"></div>" ++
-        "<button class=\"auth-btn\" id=\"add-btn\" style=\"margin-top:8px\">Add passkey on this device</button>" ++
-        "<div class=\"section-title\">Password</div>" ++
-        "<p style=\"color:#8b949e;font-size:0.85rem;margin-bottom:8px\" id=\"pw-help\">" ++
-        "Set a password as a fallback in case your passkey is lost.</p>" ++
-        HTML_PASSWORD_INPUT_VISIBLE ++
-        "<button class=\"btn-sec auth-btn\" id=\"pw-btn\">Set password</button>" ++
-        "<div class=\"section-title\">Invite a new user</div>" ++
-        "<p style=\"color:#8b949e;font-size:0.85rem;margin-bottom:8px\">" ++
-        "Generate a one-time link (valid 7 days). " ++
-        "The same link works on your other devices to add passkeys to your own account.</p>" ++
-        "<button class=\"btn-sec auth-btn\" id=\"invite-btn\">Create invite link</button>" ++
-        "<div id=\"invite-out\"></div>" ++
-        HTML_STATUS_DIV ++
-        "<a class=\"link\" href=\"/\">Back to designs</a>" ++
-        "</div>" ++
-        HTML_SCRIPT_OPEN ++ B64URL_JS ++
-        \\const status = document.getElementById('status');
-        \\function fmtDate(ts) {
-        \\  if (!ts) return 'Unknown';
-        \\  const d = new Date(ts * 1000);
-        \\  return d.toLocaleString();
-        \\}
-        \\async function refresh() {
-        \\  const r = await fetch('/auth/credentials/list');
-        \\  if (!r.ok) { window.location.href = '/auth/login'; return; }
-        \\  const data = await r.json();
-        \\  document.getElementById('user-email').textContent = data.email;
-        \\  const list = document.getElementById('passkey-list');
-        \\  list.innerHTML = '';
-        \\  for (const c of data.credentials) {
-        \\    const row = document.createElement('div');
-        \\    row.className = 'row';
-        \\    const meta = document.createElement('div');
-        \\    const added = document.createElement('div');
-        \\    added.className = 'meta';
-        \\    added.textContent = 'Added ' + fmtDate(c.created_at);
-        \\    const title = document.createElement('div');
-        \\    title.textContent = 'Passkey';
-        \\    meta.appendChild(title);
-        \\    meta.appendChild(added);
-        \\    const btn = document.createElement('button');
-        \\    btn.textContent = 'Delete';
-        \\    btn.onclick = async () => {
-        \\      if (data.credentials.length <= 1) {
-        \\        status.className = 'status error';
-        \\        status.textContent = 'Cannot delete your only passkey. Add another first.';
-        \\        return;
-        \\      }
-        \\      if (!confirm('Delete this passkey?')) return;
-        \\      const rr = await fetch('/auth/credentials/delete', {
-        \\        method: 'POST',
-        \\        headers: { 'Content-Type': 'application/json' },
-        \\        body: JSON.stringify({ id: c.id })
-        \\      });
-        \\      const j = await rr.json();
-        \\      if (j.ok) { refresh(); } else {
-        \\        status.className = 'status error';
-        \\        status.textContent = j.error || 'Delete failed';
-        \\      }
-        \\    };
-        \\    row.appendChild(meta);
-        \\    row.appendChild(btn);
-        \\    list.appendChild(row);
-        \\  }
-        \\}
-        \\document.getElementById('logout-btn').onclick = async () => {
-        \\  await fetch('/auth/logout', { method: 'POST' });
-        \\  window.location.href = '/auth/login';
-        \\};
-        ++ MANAGE_PASSWORD_JS ++
-        \\document.getElementById('add-btn').onclick = async () => {
-        \\  status.className = 'status';
-        \\  status.textContent = 'Requesting challenge...';
-        \\  try {
-        \\    const challengeRes = await fetch('/auth/register/challenge');
-        \\    const opts = await challengeRes.json();
-        \\    if (!challengeRes.ok) throw new Error(opts.error || 'Challenge failed');
-        \\    const publicKey = {
-        \\      challenge: b64urlToBytes(opts.challenge),
-        \\      rp: opts.rp,
-        \\      user: { id: b64urlToBytes(opts.user.id), name: opts.user.name, displayName: opts.user.displayName },
-        \\      pubKeyCredParams: opts.pubKeyCredParams,
-        \\      authenticatorSelection: opts.authenticatorSelection,
-        \\      timeout: opts.timeout,
-        \\      excludeCredentials: (opts.excludeCredentials || []).map(c => ({ type: c.type, id: b64urlToBytes(c.id) }))
-        \\    };
-        \\    status.textContent = 'Waiting for passkey...';
-        \\    const cred = await navigator.credentials.create({ publicKey });
-        \\    status.textContent = 'Registering...';
-        \\    const body = JSON.stringify({
-        \\      id: bytesToB64url(cred.rawId),
-        \\      response: {
-        \\        attestationObject: bytesToB64url(cred.response.attestationObject),
-        \\        clientDataJSON: bytesToB64url(cred.response.clientDataJSON)
-        \\      }
-        \\    });
-        \\    const verifyRes = await fetch('/auth/register/complete', {
-        \\      method: 'POST',
-        \\      headers: { 'Content-Type': 'application/json' },
-        \\      body: body
-        \\    });
-        \\    const result = await verifyRes.json();
-        \\    if (result.ok) {
-        \\      status.className = 'status ok';
-        \\      status.textContent = 'Passkey added.';
-        \\      refresh();
-        \\    } else {
-        \\      status.className = 'status error';
-        \\      status.textContent = result.error || 'Registration failed';
-        \\    }
-        \\  } catch (e) {
-        \\    status.className = 'status error';
-        \\    status.textContent = e.message || 'Registration failed';
-        \\  }
-        \\};
-        \\document.getElementById('invite-btn').onclick = async () => {
-        \\  const r = await fetch('/auth/invite/create', { method: 'POST' });
-        \\  const j = await r.json();
-        \\  if (j.ok) {
-        \\    const fullUrl = window.location.origin + j.path;
-        \\    const out = document.getElementById('invite-out');
-        \\    out.innerHTML = '';
-        \\    const box = document.createElement('div');
-        \\    box.className = 'invite-box';
-        \\    box.textContent = fullUrl;
-        \\    const note = document.createElement('div');
-        \\    note.style.color = '#8b949e';
-        \\    note.style.fontSize = '0.8rem';
-        \\    note.style.marginTop = '6px';
-        \\    note.textContent = 'Valid for 7 days. One-time use.';
-        \\    out.appendChild(box);
-        \\    out.appendChild(note);
-        \\  } else {
-        \\    status.className = 'status error';
-        \\    status.textContent = j.error || 'Failed to create invite';
-        \\  }
-        \\};
-        \\refresh();
-        \\refreshPasswordStatus();
-        ++ HTML_SCRIPT_BODY_CLOSE;
+    res.body = aw.written();
 }

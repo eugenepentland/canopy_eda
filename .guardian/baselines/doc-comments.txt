@@ -13,6 +13,7 @@ src/serve/templates/account.zig: pub const UsersCard (struct_) has no /// doc co
 src/serve/templates/auth.zig: pub const InviteAccept (struct_) has no /// doc comment
 src/serve/templates/auth.zig: pub const InviteExpired (struct_) has no /// doc comment
 src/serve/templates/auth.zig: pub const Login (struct_) has no /// doc comment
+src/serve/templates/auth.zig: pub const Manage (struct_) has no /// doc comment
 src/serve/templates/auth.zig: pub const Setup (struct_) has no /// doc comment
 src/serve/templates/library.zig: pub const ComponentDetails (struct_) has no /// doc comment
 src/serve/templates/library.zig: pub const Library (struct_) has no /// doc comment

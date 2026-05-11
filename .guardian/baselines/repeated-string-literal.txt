@@ -1,5 +1,4 @@
 # guardian-snapshot v1
-src/serve/auth.zig: string literal color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none\" /> appears 3 times — extract a const
 src/serve/bom_html.zig: string literal <td>{s}</td> appears 3 times — extract a const
 src/serve/bom_html.zig: string literal datasheet appears 3 times — extract a const
 src/serve/bom_html.zig: string literal manufacturer appears 3 times — extract a const
@@ -10,18 +9,21 @@ src/serve/templates/account.zig: string literal </option> appears 4 times — ex
 src/serve/templates/account.zig: string literal <div class=\"card\"> appears 5 times — extract a const
 src/serve/templates/account.zig: string literal <p class=\"muted\"> appears 5 times — extract a const
 src/serve/templates/auth.zig: string literal  id=\"email\" appears 3 times — extract a const
+src/serve/templates/auth.zig: string literal  minlength=\"8\" appears 3 times — extract a const
 src/serve/templates/auth.zig: string literal  placeholder=\"Email address\" appears 3 times — extract a const
 src/serve/templates/auth.zig: string literal  required appears 3 times — extract a const
 src/serve/templates/auth.zig: string literal  type=\"email\" appears 3 times — extract a const
-src/serve/templates/auth.zig: string literal <!DOCTYPE html> appears 4 times — extract a const
-src/serve/templates/auth.zig: string literal </button> appears 3 times — extract a const
-src/serve/templates/auth.zig: string literal </script> appears 4 times — extract a const
-src/serve/templates/auth.zig: string literal </title> appears 4 times — extract a const
-src/serve/templates/auth.zig: string literal <div class=\"auth-card\"> appears 4 times — extract a const
-src/serve/templates/auth.zig: string literal <div class=\"status\" id=\"status\"> appears 3 times — extract a const
-src/serve/templates/auth.zig: string literal <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"> appears 4 times — extract a const
-src/serve/templates/auth.zig: string literal <span class=\"brand\"> appears 4 times — extract a const
-src/serve/templates/auth.zig: string literal Canopy EDA appears 4 times — extract a const
+src/serve/templates/auth.zig: string literal  type=\"password\" appears 3 times — extract a const
+src/serve/templates/auth.zig: string literal <!DOCTYPE html> appears 5 times — extract a const
+src/serve/templates/auth.zig: string literal </button> appears 7 times — extract a const
+src/serve/templates/auth.zig: string literal </script> appears 5 times — extract a const
+src/serve/templates/auth.zig: string literal </title> appears 5 times — extract a const
+src/serve/templates/auth.zig: string literal <div class=\"auth-card\"> appears 5 times — extract a const
+src/serve/templates/auth.zig: string literal <div class=\"section-title\"> appears 3 times — extract a const
+src/serve/templates/auth.zig: string literal <div class=\"status\" id=\"status\"> appears 4 times — extract a const
+src/serve/templates/auth.zig: string literal <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"> appears 5 times — extract a const
+src/serve/templates/auth.zig: string literal <span class=\"brand\"> appears 5 times — extract a const
+src/serve/templates/auth.zig: string literal Canopy EDA appears 5 times — extract a const
 src/serve/templates/library.zig: string literal <span class=\"meta\"> appears 5 times — extract a const
 src/serve/templates/oauth.zig: string literal  type=\"hidden\" appears 5 times — extract a const
 src/serve/templates/oauth.zig: string literal </strong> appears 3 times — extract a const

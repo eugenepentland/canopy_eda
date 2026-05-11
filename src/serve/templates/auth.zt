@@ -80,6 +80,51 @@ pub templ InviteAccept(token: []const u8) {
     </html>
 }
 
+const PASSWORD_VISIBLE_STYLE: []const u8 = "width:100%;box-sizing:border-box;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:8px;outline:none";
+
+const LOGOUT_BTN_STYLE: []const u8 = "padding:4px 10px;font-size:0.8rem;border-radius:4px;cursor:pointer";
+
+pub templ Manage() {
+    <!DOCTYPE html>
+    <html>
+        <head>
+            <meta name="viewport" content="width=device-width,initial-scale=1" />
+            <title>Manage - Canopy EDA</title>
+            {!STYLE_BLOCK}
+            <link rel="stylesheet" href="/static/auth_manage.css" />
+        </head>
+        <body>
+            <div class="auth-card">
+                <span class="brand">Canopy EDA</span>
+                <h1>Manage Passkeys</h1>
+                <div class="user-bar">
+                    <span class="email" id="user-email"></span>
+                    <button class="btn-sec" id="logout-btn" style={LOGOUT_BTN_STYLE}>Sign out</button>
+                </div>
+                <div class="section-title">Your Passkeys</div>
+                <div id="passkey-list"></div>
+                <button class="auth-btn" id="add-btn" style="margin-top:8px">Add passkey on this device</button>
+                <div class="section-title">Password</div>
+                <p style="color:#8b949e;font-size:0.85rem;margin-bottom:8px" id="pw-help">
+                    Set a password as a fallback in case your passkey is lost.
+                </p>
+                <input type="password" id="pw-input" placeholder="New password (min 8 chars)" minlength="8" style={PASSWORD_VISIBLE_STYLE} />
+                <button class="btn-sec auth-btn" id="pw-btn">Set password</button>
+                <div class="section-title">Invite a new user</div>
+                <p style="color:#8b949e;font-size:0.85rem;margin-bottom:8px">
+                    Generate a one-time link (valid 7 days). The same link works on your other devices to add passkeys to your own account.
+                </p>
+                <button class="btn-sec auth-btn" id="invite-btn">Create invite link</button>
+                <div id="invite-out"></div>
+                <div class="status" id="status"></div>
+                <a class="link" href="/">Back to designs</a>
+            </div>
+            {!B64URL_SCRIPT}
+            <script src="/static/auth_manage.js"></script>
+        </body>
+    </html>
+}
+
 pub templ Setup() {
     <!DOCTYPE html>
     <html>

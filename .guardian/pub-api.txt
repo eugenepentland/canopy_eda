@@ -566,6 +566,7 @@ src/serve/templates/account.zig::UsersCard struct_
 src/serve/templates/auth.zig::InviteAccept struct_
 src/serve/templates/auth.zig::InviteExpired struct_
 src/serve/templates/auth.zig::Login struct_
+src/serve/templates/auth.zig::Manage struct_
 src/serve/templates/auth.zig::Setup struct_
 src/serve/templates/library.zig::ComponentDetails struct_
 src/serve/templates/library.zig::Library struct_
