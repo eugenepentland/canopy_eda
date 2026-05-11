@@ -90,12 +90,14 @@ src/eval/net_analysis.zig::refDesLocalPrefix | fn refDesLocalPrefix(ref_des: []c
 src/eval/net_analysis.zig::subBlockNetHasCap | fn subBlockNetHasCap(block: *const DesignBlock, net_path: []const u8) bool
 src/eval/power_budget.zig::analyze | fn analyze( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const Rail
 src/eval/power_sequencing.zig::analyze | fn analyze( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const SequenceRow
+src/eval/rails.zig::build | fn build( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const PowerRail
 src/eval/special_forms.zig::evalAssert | fn evalAssert(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalAssertRange | fn evalAssertRange(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalCond | fn evalCond(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalFmt | fn evalFmt(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalIf | fn evalIf(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalLet | fn evalLet(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
+src/eval/test_point.zig::parse | fn parse( allocator: std.mem.Allocator, form_children: []const Node, ) std.mem.Allocator.Error!?TestPoint
 src/eval/validate.zig::trackNetFormSource | fn trackNetFormSource(self: *Evaluator, form_children: []const Node, env: *Env, sources: *std.StringHashMapUnmanaged(u32)) void
 src/eval/validate.zig::validateDesign | fn validateDesign(self: *Evaluator, block: *const DesignBlock) EvalError!void
 src/eval/validate.zig::warnCombinableNets | fn warnCombinableNets(self: *Evaluator, sources: *std.StringHashMapUnmanaged(u32)) EvalError!void

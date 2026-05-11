@@ -83,6 +83,8 @@ src/eval/env.zig::PinGroup struct_
 src/eval/env.zig::PinRef struct_
 src/eval/env.zig::Port struct_
 src/eval/env.zig::PortDirection enum_
+src/eval/env.zig::PowerDomain struct_
+src/eval/env.zig::PowerRail struct_
 src/eval/env.zig::Property struct_
 src/eval/env.zig::Requirement struct_
 src/eval/env.zig::Section struct_
@@ -92,6 +94,8 @@ src/eval/env.zig::SectionStatus enum_
 src/eval/env.zig::SeriesKind enum_
 src/eval/env.zig::SignalType enum_
 src/eval/env.zig::SubBlock struct_
+src/eval/env.zig::TestPoint struct_
+src/eval/env.zig::TestPointTag enum_
 src/eval/env.zig::Value value
 src/eval/env.zig::Verification struct_
 src/eval/env.zig::parseCheck fn
@@ -154,12 +158,14 @@ src/eval/power_budget.zig::analyze fn
 src/eval/power_sequencing.zig::SequenceRow struct_
 src/eval/power_sequencing.zig::SequenceStatus enum_
 src/eval/power_sequencing.zig::analyze fn
+src/eval/rails.zig::build fn
 src/eval/special_forms.zig::evalAssert fn
 src/eval/special_forms.zig::evalAssertRange fn
 src/eval/special_forms.zig::evalCond fn
 src/eval/special_forms.zig::evalFmt fn
 src/eval/special_forms.zig::evalIf fn
 src/eval/special_forms.zig::evalLet fn
+src/eval/test_point.zig::parse fn
 src/eval/validate.zig::trackNetFormSource fn
 src/eval/validate.zig::validateDesign fn
 src/eval/validate.zig::warnCombinableNets fn

@@ -34,6 +34,7 @@ pub const ViolationKind = enum {
     pin_function_unsupported,
     pin_function_required,
     power_budget,
+    test_point_missing,
 };
 
 /// One electrical-rule-check finding. `kind` selects the rule, `severity`
@@ -66,9 +67,67 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkUnconnectedPowerPins(allocator, block, &violations);
     try checkConceptSections(allocator, block, &violations);
     try checkPowerBudget(allocator, block, &violations);
+    try checkTestPointCoverage(allocator, block, &violations);
     if (project_dir.len > 0) try checkPinFunctions(allocator, block, project_dir, &violations);
 
     return violations.items;
+}
+
+/// Flag any `PowerRail` in `block.rails` that has no test point on its net
+/// (or any of its ferrite-bridged aliases). Considers both first-class
+/// `(test-point …)` declarations and legacy `(instance "TPx" testpoint …)`
+/// instances so the migration window between the two sources is seamless.
+///
+/// Severity is `warning` — a missing rail test point isn't an electrical
+/// fault, but it makes bring-up harder, so reviewers should see it on the
+/// review page.
+fn checkTestPointCoverage(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayListUnmanaged(Violation),
+) !void {
+    // Collect the set of nets that have a test point on them, from both
+    // sources (first-class form + legacy testpoint-component instances).
+    var tp_nets: std.StringHashMapUnmanaged(void) = .empty;
+    defer tp_nets.deinit(allocator);
+
+    for (block.test_points) |tp| {
+        try tp_nets.put(allocator, tp.net, {});
+    }
+    for (block.instances) |inst| {
+        if (!std.mem.eql(u8, inst.component, "testpoint")) continue;
+        for (block.nets) |net| {
+            for (net.pins) |pin| {
+                if (!std.mem.eql(u8, pin.ref_des, inst.ref_des)) continue;
+                if (!std.mem.eql(u8, pin.pin, "1")) continue;
+                try tp_nets.put(allocator, net.name, {});
+            }
+        }
+    }
+
+    for (block.rails) |rail| {
+        if (tp_nets.contains(rail.name)) continue;
+        var covered_via_alias = false;
+        for (rail.aliases) |alias| {
+            if (tp_nets.contains(alias)) {
+                covered_via_alias = true;
+                break;
+            }
+        }
+        if (covered_via_alias) continue;
+
+        const msg = std.fmt.allocPrint(
+            allocator,
+            "Power rail \"{s}\" has no test point — add (test-point \"TPx\" \"{s}\") to ease bring-up",
+            .{ rail.name, rail.name },
+        ) catch continue;
+        try violations.append(allocator, .{
+            .kind = .test_point_missing,
+            .severity = .warning,
+            .message = msg,
+            .net = rail.name,
+        });
+    }
 }
 
 /// Check for duplicate reference designators across the full flattened design.
@@ -870,7 +929,9 @@ fn makeBudgetBlock(
 
 // spec: erc - Emits power_budget error when load max exceeds source max
 test "power budget over-max" {
-    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     const block = try makeBudgetBlock(alloc, "VDD", "buck", 2.0, 2.0, &.{
         .{ .ref = "U1", .typ = 1.0, .max = 1.5 },
         .{ .ref = "U2", .typ = 1.0, .max = 1.5 },
@@ -886,7 +947,9 @@ test "power budget over-max" {
 
 // spec: erc - Emits power_budget warning when typ load is above 80 percent of source typ
 test "power budget tight margin" {
-    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     const block = try makeBudgetBlock(alloc, "VDD", "buck", 2.0, 2.5, &.{
         .{ .ref = "U1", .typ = 1.7, .max = 2.0 },
     });
@@ -905,7 +968,9 @@ test "power budget tight margin" {
 
 // spec: erc - Emits no power_budget violation when load is well below source capacity
 test "power budget within budget" {
-    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     const block = try makeBudgetBlock(alloc, "VDD", "buck", 2.0, 2.5, &.{
         .{ .ref = "U1", .typ = 0.4, .max = 0.6 },
     });
@@ -974,7 +1039,9 @@ fn makePinoutTmp(alloc: std.mem.Allocator) !struct { tmp: std.testing.TmpDir, pa
 
 // spec: erc - Requires pin function assertion when pinout defines alternates
 test "pin function required when alts exist" {
-    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     var fx = try makePinoutTmp(alloc);
     defer fx.tmp.cleanup();
     defer alloc.free(fx.path);
@@ -992,7 +1059,9 @@ test "pin function required when alts exist" {
 
 // spec: erc - Allows pins without alternates to omit (as ...)
 test "pin function not required when no alts" {
-    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     var fx = try makePinoutTmp(alloc);
     defer fx.tmp.cleanup();
     defer alloc.free(fx.path);
@@ -1009,7 +1078,9 @@ test "pin function not required when no alts" {
 
 // spec: erc - Accepts multiple asserted functions on a single pin
 test "pin function multi assertion validated" {
-    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     var fx = try makePinoutTmp(alloc);
     defer fx.tmp.cleanup();
     defer alloc.free(fx.path);
@@ -1027,7 +1098,9 @@ test "pin function multi assertion validated" {
 
 // spec: erc - Rejects asserted function that is not in the pinout
 test "pin function unsupported across slice" {
-    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     var fx = try makePinoutTmp(alloc);
     defer fx.tmp.cleanup();
     defer alloc.free(fx.path);
@@ -1042,4 +1115,101 @@ test "pin function unsupported across slice" {
         if (v.kind == .pin_function_unsupported and std.mem.indexOf(u8, v.message, "UART9_TX") != null) hit = true;
     }
     try std.testing.expect(hit);
+}
+
+// Build a minimal DesignBlock carrying a single PowerRail and optional
+// test-point sources for exercising the coverage check.
+fn makeRailBlock(
+    alloc: std.mem.Allocator,
+    rail_name: []const u8,
+    aliases: []const []const u8,
+    tps: []const env_mod.TestPoint,
+    legacy_tp_nets: []const []const u8,
+) !DesignBlock {
+    const rails = try alloc.alloc(env_mod.PowerRail, 1);
+    rails[0] = .{
+        .name = rail_name,
+        .aliases = aliases,
+        .source_ref_des = "buck",
+        .source_port = "VOUT",
+    };
+    // Legacy test points show up as instances + nets connecting them.
+    const insts = try alloc.alloc(env_mod.Instance, legacy_tp_nets.len);
+    const nets = try alloc.alloc(env_mod.Net, legacy_tp_nets.len);
+    for (legacy_tp_nets, 0..) |net_name, i| {
+        const ref = try std.fmt.allocPrint(alloc, "TP{d}", .{i + 1});
+        insts[i] = .{
+            .ref_des = ref,
+            .component = "testpoint",
+            .value = "",
+            .footprint = "",
+            .symbol = "",
+        };
+        const pins = try alloc.alloc(env_mod.PinRef, 1);
+        pins[0] = .{ .ref_des = ref, .pin = "1" };
+        nets[i] = .{ .name = net_name, .pins = pins };
+    }
+    return .{
+        .name = "test",
+        .instances = insts,
+        .nets = nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .rails = rails,
+        .test_points = tps,
+    };
+}
+
+// spec: erc - Flags a power rail with no test point on its net or any alias
+test "test point missing on rail" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const block = try makeRailBlock(alloc, "VDD_3V3", &.{}, &.{}, &.{});
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkTestPointCoverage(alloc, &block, &violations);
+    var hit = false;
+    for (violations.items) |v| {
+        if (v.kind == .test_point_missing and std.mem.eql(u8, v.net, "VDD_3V3")) hit = true;
+    }
+    try std.testing.expect(hit);
+}
+
+// spec: erc - Recognises test points declared via the test-point form
+test "test point coverage from first-class form" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const tps = [_]env_mod.TestPoint{.{ .ref_des = "TP1", .net = "VDD_3V3" }};
+    const block = try makeRailBlock(alloc, "VDD_3V3", &.{}, &tps, &.{});
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkTestPointCoverage(alloc, &block, &violations);
+    for (violations.items) |v| try std.testing.expect(v.kind != .test_point_missing);
+}
+
+// spec: erc - Recognises legacy testpoint component instances as test points
+test "test point coverage from legacy testpoint instance" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const legacy = [_][]const u8{"VDD_3V3"};
+    const block = try makeRailBlock(alloc, "VDD_3V3", &.{}, &.{}, &legacy);
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkTestPointCoverage(alloc, &block, &violations);
+    for (violations.items) |v| try std.testing.expect(v.kind != .test_point_missing);
+}
+
+// spec: erc - Emits no test point violation when every rail has a test point
+test "test point coverage via ferrite-bridged alias" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const aliases = [_][]const u8{"VDDA18USB"};
+    const tps = [_]env_mod.TestPoint{.{ .ref_des = "TP1", .net = "VDDA18USB" }};
+    const block = try makeRailBlock(alloc, "V1P8", &aliases, &tps, &.{});
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkTestPointCoverage(alloc, &block, &violations);
+    for (violations.items) |v| try std.testing.expect(v.kind != .test_point_missing);
 }

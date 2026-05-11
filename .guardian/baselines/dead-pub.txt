@@ -1,5 +1,6 @@
 # guardian-snapshot v1
 src/commands.zig::cmdServe: unused public declaration
+src/eval/env.zig::PowerDomain: unused public declaration
 src/eval/ids.zig::getSymbolAlts: unused public declaration
 src/eval/ids.zig::validateSymbolAgainstPinout: unused public declaration
 src/render_svg/bom_table.zig::renderBomTable: unused public declaration

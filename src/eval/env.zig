@@ -650,6 +650,89 @@ pub const BlockRole = enum { auto, input, output };
 /// A net-tie pair: merge net `b` into net `a`.
 pub const NetTie = struct { a: []const u8, b: []const u8 };
 
+/// Categories a test point can declare itself as required for. Drives the
+/// Phase 2E coverage check ("every power rail must have a `power` test point",
+/// "every clock section needs a `clock` test point", etc.).
+pub const TestPointTag = enum {
+    bring_up,
+    power,
+    clock,
+    reset,
+    debug,
+    signal,
+};
+
+/// A test point declared via the first-class `(test-point …)` form. Distinct
+/// from the legacy `(instance "TP1" testpoint …)` convention — both sources
+/// coexist; the Phase 2E coverage check (and the review) will merge them.
+pub const TestPoint = struct {
+    ref_des: []const u8,
+    net: []const u8,
+    purpose: []const u8 = "",
+    required_for: []const TestPointTag = &.{},
+};
+
+/// A named voltage domain — the partition a rail or pin belongs to from a
+/// noise / isolation / level-shifting perspective. Two pins in different
+/// domains can't drive each other electrically without explicit translation.
+///
+/// Phase 1A landed the type only; no consumer populates `PowerRail.domain`
+/// today. Phase 2A's voltage-domain compatibility ERC is the first consumer,
+/// and that's when attribution logic lands.
+pub const PowerDomain = struct {
+    /// Canonical domain name (e.g. `"digital"`, `"analog"`, `"rf"`, `"noisy"`).
+    name: []const u8,
+    /// When true, cross-domain connections to this domain require an
+    /// explicit level shifter or isolation barrier — flagged by ERC.
+    is_isolated: bool = false,
+    /// Parent domain when this is a sub-domain (e.g. `"analog_1v8"`'s parent
+    /// is `"analog"`). Null at the top of the hierarchy.
+    parent: ?[]const u8 = null,
+};
+
+/// A first-class power rail in the design, derived in a post-eval pass by
+/// `eval/rails.build` from sub-block output ports + ferrite-bead union-find.
+/// Persisted on `DesignBlock` so every downstream analysis (power_budget,
+/// power_sequencing, ERC checks, tree visualisation) sees the same canonical
+/// rail set instead of recomputing rail identity from emergent topology.
+pub const PowerRail = struct {
+    /// Canonical top-level net name on the source side (e.g. "V1P8").
+    /// When ferrite beads bridge nets, this is the source-side name; the
+    /// bridged downstream names appear in `aliases`.
+    name: []const u8,
+    /// Alternate net names that resolve to this rail through ferrite bridging.
+    /// Empty when no ferrite collapses onto this rail.
+    aliases: []const []const u8 = &.{},
+    /// Nominal voltage (V), resolved by `eval/rails` in this order:
+    ///   1. Sub-block output port `nominal`.
+    ///   2. Section power port `voltage` for the same rail name.
+    ///   3. Top-level design port `nominal` or `(rated min max)` midpoint.
+    /// Null when no declarer supplied a voltage.
+    nominal: ?f64 = null,
+    /// Sub-block name that sources this rail (e.g. "buck"). Empty when the
+    /// rail enters from a board-edge port rather than a regulator.
+    source_ref_des: []const u8 = "",
+    /// Output port name on the source (e.g. "VOUT").
+    source_port: []const u8 = "",
+    /// Concatenated sub-block path (e.g. "buck/VOUT") matching the existing
+    /// `power_budget.Rail.source_label` so downstream consumers don't have
+    /// to reconstruct it.
+    source_path: []const u8 = "",
+    /// Typical deliverable current (A) declared by the source port. Null
+    /// when the source didn't declare it.
+    capacity_typ: ?f64 = null,
+    /// Absolute-max deliverable current (A) declared by the source port.
+    capacity_max: ?f64 = null,
+    /// Net that gates this rail's bring-up (from `(enable …)` on the source
+    /// port). Empty when the rail is always-on or driven by a PG signal.
+    enable_net: []const u8 = "",
+    /// Upstream rail name when this rail's source's input rail is itself a
+    /// derived rail (e.g. 5V → 3V3 → 1V8). Always null in Phase 1A — the
+    /// field is reserved for Phase 2C's cascaded-budget propagation, which
+    /// is the first consumer that needs it.
+    upstream_rail: ?[]const u8 = null,
+};
+
 /// The result of evaluating a design-block form.
 pub const DesignBlock = struct {
     name: []const u8,
@@ -665,6 +748,15 @@ pub const DesignBlock = struct {
     /// Design-side `(verifies …)` sign-offs that answer library requirements
     /// the netlist alone can't verify.
     verifications: []const Verification = &.{},
+    /// Derived power rails, populated by `eval/rails.build` at the tail of
+    /// `evalDesignBlock`. Empty for blocks with no regulator sub-blocks or
+    /// board-edge power ports.
+    rails: []const PowerRail = &.{},
+    /// Test points declared via the first-class `(test-point …)` form.
+    /// Legacy `(instance "TP1" testpoint …)` instances continue to be
+    /// collected through the existing review pipeline; Phase 2E merges the
+    /// two sources for the coverage check.
+    test_points: []const TestPoint = &.{},
 };
 
 /// Assertion result.

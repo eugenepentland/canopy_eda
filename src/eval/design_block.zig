@@ -10,6 +10,8 @@ const ids = @import("ids.zig");
 const validate = @import("validate.zig");
 const instance_mod = @import("instance.zig");
 const builders = @import("builders.zig");
+const rails_mod = @import("rails.zig");
+const test_point_mod = @import("test_point.zig");
 
 const Node = ast.Node;
 const Value = env_mod.Value;
@@ -51,6 +53,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var net_ties: std.ArrayListUnmanaged(NetTie) = .empty;
     var sub_blocks: std.ArrayListUnmanaged(SubBlock) = .empty;
     var verifications: std.ArrayListUnmanaged(env_mod.Verification) = .empty;
+    var test_points: std.ArrayListUnmanaged(env_mod.TestPoint) = .empty;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
 
     // Pre-scan: register all explicit ref-des to avoid auto-counter collisions
@@ -98,6 +101,10 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             if (parseVerifies(self, form_children, env)) |v| {
                 try verifications.append(self.allocator, v);
             }
+        } else if (std.mem.eql(u8, form_name, "test-point")) {
+            if (try test_point_mod.parse(self.allocator, form_children)) |tp| {
+                try test_points.append(self.allocator, tp);
+            }
         }
         // Ignore config and other unknown forms for now
     }
@@ -127,6 +134,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .sections = sections.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .net_ties = block_ties.toOwnedSlice(self.allocator) catch &.{},
         .verifications = verifications.toOwnedSlice(self.allocator) catch &.{},
+        .test_points = test_points.toOwnedSlice(self.allocator) catch &.{},
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -137,6 +145,12 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
 
     // Validate: warn about dead-end nets, etc.
     try validate.validateDesign(self, block);
+
+    // Derive first-class power-rail entries from sub-block output ports +
+    // ferrite-bead union-find. Downstream analyses (power_budget,
+    // power_sequencing, ERC integrity checks) consume `block.rails`
+    // instead of recomputing rail identity from emergent topology.
+    block.rails = rails_mod.build(self.allocator, block) catch return EvalError.OutOfMemory;
 
     return .{ .design_block = block };
 }

@@ -3,6 +3,8 @@ const env_mod = @import("env.zig");
 const na = @import("net_analysis.zig");
 const DesignBlock = env_mod.DesignBlock;
 
+const SUB_PATH_BUF_LEN: usize = 256;
+
 /// Resolution status for one rail's `(enable …)` declaration. `ok` means
 /// the enable net traces back to a known upstream rail; `unresolved` flags
 /// dangling enables a debugger needs to look at; `always_on` marks rails
@@ -58,6 +60,7 @@ pub fn analyze(
     // it's tied to. `sub_to_rail` drives both row construction and rail-name
     // validation for enable resolution.
     var sub_to_rail: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer sub_to_rail.deinit(allocator);
     for (block.net_ties) |nt| {
         if (std.mem.indexOfScalar(u8, nt.a, '/')) |_| {
             try sub_to_rail.put(allocator, nt.a, na.baseNetName(nt.b));
@@ -71,19 +74,23 @@ pub fn analyze(
     // actually drives it. A sub-block can declare multiple power outputs;
     // we take the first declaration order (rare to have more than one).
     var primary_rail_of: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer primary_rail_of.deinit(allocator);
     // `signal_source[net]` = sub-block driving that top-level net via a
     // non-power output (e.g. PG_3V3 → "buck"). Used to translate a PG-style
     // enable into the underlying rail.
     var signal_source: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer signal_source.deinit(allocator);
     // `power_rail_set` = top-level rails that are actually sourced by a
     // power output (not signal/PG). These are the "known power rails" for
     // enable validation.
     var power_rail_set: std.StringHashMapUnmanaged(void) = .empty;
+    defer power_rail_set.deinit(allocator);
 
+    var path_buf: [SUB_PATH_BUF_LEN]u8 = undefined;
     for (block.sub_blocks) |sb| {
         for (sb.block.ports) |port| {
             if (!std.mem.eql(u8, port.direction, "out")) continue;
-            const out_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, port.name }) catch continue;
+            const out_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ sb.name, port.name }) catch continue;
             const rail = sub_to_rail.get(out_path) orelse continue;
             if (isPowerPort(port)) {
                 if (!primary_rail_of.contains(sb.name)) {
@@ -102,7 +109,7 @@ pub fn analyze(
             if (!std.mem.eql(u8, port.direction, "out")) continue;
             if (!isPowerPort(port)) continue;
 
-            const out_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, port.name }) catch continue;
+            const out_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ sb.name, port.name }) catch continue;
             const rail = sub_to_rail.get(out_path) orelse continue;
 
             if (port.enable_net.len == 0) {
@@ -114,7 +121,7 @@ pub fn analyze(
                 continue;
             }
 
-            const resolved = resolveEnable(allocator, block, &power_rail_set, &signal_source, &primary_rail_of, sb.name, port.enable_net);
+            const resolved = resolveEnable(block, &power_rail_set, &signal_source, &primary_rail_of, sb.name, port.enable_net);
             try rows.append(allocator, .{
                 .rail = rail,
                 .source = sb.name,
@@ -156,7 +163,6 @@ const Resolution = struct {
 ///      power rail → depends_on = that rail, via = the signal net.
 ///   4. Otherwise unresolved.
 fn resolveEnable(
-    allocator: std.mem.Allocator,
     block: *const DesignBlock,
     power_rails: *const std.StringHashMapUnmanaged(void),
     signal_source: *const std.StringHashMapUnmanaged([]const u8),
@@ -164,7 +170,8 @@ fn resolveEnable(
     sb_name: []const u8,
     enable_name: []const u8,
 ) Resolution {
-    const path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb_name, enable_name }) catch return .{};
+    var path_buf: [SUB_PATH_BUF_LEN]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ sb_name, enable_name }) catch return .{};
     var target: []const u8 = "";
     for (block.net_ties) |nt| {
         if (std.mem.eql(u8, nt.a, path)) {
@@ -242,7 +249,8 @@ test "analyze marks rail with no enable as always_on" {
         .sub_blocks = &sbs,
         .net_ties = &ties,
     };
-    const rows = analyze(alloc, &outer);
+    const rows = try analyze(alloc, &outer);
+    defer alloc.free(rows);
     try std.testing.expectEqual(@as(usize, 1), rows.len);
     try std.testing.expectEqual(SequenceStatus.always_on, rows[0].status);
     try std.testing.expectEqualStrings("VDD", rows[0].rail);
@@ -293,7 +301,8 @@ test "analyze orders dependent rail after enable source" {
         .sub_blocks = &sbs,
         .net_ties = &ties,
     };
-    const rows = analyze(alloc, &outer);
+    const rows = try analyze(alloc, &outer);
+    defer alloc.free(rows);
     try std.testing.expectEqual(@as(usize, 2), rows.len);
     try std.testing.expectEqualStrings("VDD", rows[0].rail);
     try std.testing.expectEqual(@as(u32, 0), rows[0].order);
@@ -333,7 +342,8 @@ test "analyze flags unresolved when depends_on rail does not exist" {
         .sub_blocks = &sbs,
         .net_ties = &ties,
     };
-    const rows = analyze(alloc, &outer);
+    const rows = try analyze(alloc, &outer);
+    defer alloc.free(rows);
     try std.testing.expectEqual(@as(usize, 1), rows.len);
     try std.testing.expectEqual(SequenceStatus.unresolved, rows[0].status);
     try std.testing.expectEqualStrings("", rows[0].depends_on);
@@ -389,7 +399,8 @@ test "analyze routes enable through PG signal to source rail" {
         .sub_blocks = &sbs,
         .net_ties = &ties,
     };
-    const rows = analyze(alloc, &outer);
+    const rows = try analyze(alloc, &outer);
+    defer alloc.free(rows);
     // Only power outputs get rows — buck/VOUT and ldo/VOUT. buck/PG is
     // signal-only, used only to route the enable.
     try std.testing.expectEqual(@as(usize, 2), rows.len);

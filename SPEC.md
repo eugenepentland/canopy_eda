@@ -131,6 +131,10 @@ Public functions: renderSchematic
 - Allows pins without alternates to omit (as ...)
 - Accepts multiple asserted functions on a single pin
 - Rejects asserted function that is not in the pinout
+- Flags a power rail with no test point on its net or any alias
+- Recognises test points declared via the test-point form
+- Recognises legacy testpoint component instances as test points
+- Emits no test point violation when every rail has a test point
 
 ## eval/power_budget
 
@@ -144,6 +148,29 @@ Public functions: analyze
 - Orders dependent rail after its enable source
 - Flags enable that never resolves to a known rail
 - Routes enable through PG signal to source rail
+
+## eval/test_point
+
+Public functions: parse
+
+- Parses ref-des and net from the first two positional arguments
+- Parses an optional (purpose "...") sub-form into the purpose field
+- Parses (required-for ...) sub-form recognizing bring-up power clock reset debug and signal tags
+- Returns null when ref-des or net positional arguments are missing
+- Ignores unknown sub-forms and unknown required-for tags
+
+## eval/rails
+
+Public functions: build
+
+- Derives one PowerRail per sub-block output port marked power direction out
+- Collapses ferrite-bead-bridged nets into a single rail via union-find
+- Resolves rail voltage from sub-block output port nominal first
+- Falls back to section power port voltage when sub-block port nominal absent
+- Falls back to top-level design port nominal when neither sub-block nor section voltage declared
+- Excludes GND from the derived rail set
+- Records source_ref_des and source_port on each rail from the source instance
+- Returns empty slice when design declares no rails
 
 ## review
 
