@@ -135,6 +135,10 @@ Public functions: renderSchematic
 - Recognises test points declared via the test-point form
 - Recognises legacy testpoint component instances as test points
 - Emits no test point violation when every rail has a test point
+- Flags a power rail with a declared source but no consumer pins
+- Flags a power rail whose nominal voltage cannot be resolved
+- Emits no integrity violation on a fully-resolved rail with consumers
+- Flags a sequencing cycle by emitting sequence_cycle per affected rail
 
 ## eval/power_budget
 
@@ -158,6 +162,15 @@ Public functions: parse
 - Parses (required-for ...) sub-form recognizing bring-up power clock reset debug and signal tags
 - Returns null when ref-des or net positional arguments are missing
 - Ignores unknown sub-forms and unknown required-for tags
+
+## eval/power_config
+
+Public functions: parse
+
+- Parses (power-config (derating R)) into a fractional derating value
+- Returns null when the form has no derating sub-form
+- Clamps derating to the (0, 1] range
+- Ignores unknown sub-forms
 
 ## eval/rails
 

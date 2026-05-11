@@ -380,6 +380,7 @@ test {
     _ = @import("eval/evaluator.zig");
     _ = @import("eval/rails.zig");
     _ = @import("eval/test_point.zig");
+    _ = @import("eval/power_config.zig");
     _ = @import("eval/power_budget.zig");
     _ = @import("eval/power_sequencing.zig");
     _ = @import("erc.zig");

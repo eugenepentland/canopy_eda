@@ -14,7 +14,10 @@ const ZERO_VOLTAGE: f64 = 0.0;
 const CURRENT_CONVERGENCE_A: f64 = 1e-9;
 const PERCENT_FULL: f64 = 100.0;
 const PERCENT_FRACTION_BASE: f64 = 1.0;
-const TIGHT_LOAD_RATIO: f64 = 0.8;
+/// Default derating fraction — typical-load threshold at which a rail
+/// flips to `.tight`. Overridable per-design via `(power-config (derating
+/// X))`, surfaced on `DesignBlock.derating`.
+const DEFAULT_DERATING: f64 = 0.8;
 const RATING_MIDPOINT: f64 = 0.5;
 const SENTINEL_CURRENT: f64 = 1.0;
 
@@ -284,6 +287,7 @@ pub fn analyze(
     var rails: std.ArrayListUnmanaged(Rail) = .empty;
     var emitted_roots: std.StringHashMapUnmanaged(void) = .empty;
 
+    const derating = block.derating orelse DEFAULT_DERATING;
     var src_iter = sources.iterator();
     while (src_iter.next()) |entry| {
         const root = entry.key_ptr.*;
@@ -300,6 +304,7 @@ pub fn analyze(
             load.any_typ,
             load.any_max,
             consumers,
+            derating,
         );
         try rails.append(allocator, rail);
         try emitted_roots.put(allocator, root, {});
@@ -313,7 +318,7 @@ pub fn analyze(
         if (std.mem.eql(u8, root, "GND")) continue;
         if (emitted_roots.contains(root)) continue;
         const consumers = try buildConsumers(allocator, load.group_keys.items, &consumer_groups);
-        const rail = buildRail(load.first_name, "", null, null, load.sum_typ, load.sum_max, load.any_typ, load.any_max, consumers);
+        const rail = buildRail(load.first_name, "", null, null, load.sum_typ, load.sum_max, load.any_typ, load.any_max, consumers, derating);
         try rails.append(allocator, rail);
     }
 
@@ -363,6 +368,7 @@ fn buildRail(
     any_typ: bool,
     any_max: bool,
     consumers: []const RailConsumer,
+    derating: f64,
 ) Rail {
     var status: RailStatus = .ok;
     var margin: ?f64 = null;
@@ -379,7 +385,7 @@ fn buildRail(
         if (source_typ) |styp| {
             if (any_typ) {
                 margin = PERCENT_FULL * (PERCENT_FRACTION_BASE - load_typ / styp);
-                if (load_typ > TIGHT_LOAD_RATIO * styp) status = .tight;
+                if (load_typ > derating * styp) status = .tight;
             }
         }
     } else if (status == .over) {

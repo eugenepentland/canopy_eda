@@ -1,1 +1,2 @@
 # guardian-snapshot v1
+src/erc.zig: pub const ViolationKind (enum_) has 18 fields (cap 16)

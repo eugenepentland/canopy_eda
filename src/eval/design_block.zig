@@ -12,6 +12,7 @@ const instance_mod = @import("instance.zig");
 const builders = @import("builders.zig");
 const rails_mod = @import("rails.zig");
 const test_point_mod = @import("test_point.zig");
+const power_config_mod = @import("power_config.zig");
 
 const Node = ast.Node;
 const Value = env_mod.Value;
@@ -54,6 +55,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var sub_blocks: std.ArrayListUnmanaged(SubBlock) = .empty;
     var verifications: std.ArrayListUnmanaged(env_mod.Verification) = .empty;
     var test_points: std.ArrayListUnmanaged(env_mod.TestPoint) = .empty;
+    var derating: ?f64 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
 
     // Pre-scan: register all explicit ref-des to avoid auto-counter collisions
@@ -105,6 +107,10 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             if (try test_point_mod.parse(self.allocator, form_children)) |tp| {
                 try test_points.append(self.allocator, tp);
             }
+        } else if (std.mem.eql(u8, form_name, "power-config")) {
+            if (power_config_mod.parse(form_children)) |cfg| {
+                if (cfg.derating) |d| derating = d;
+            }
         }
         // Ignore config and other unknown forms for now
     }
@@ -135,6 +141,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .net_ties = block_ties.toOwnedSlice(self.allocator) catch &.{},
         .verifications = verifications.toOwnedSlice(self.allocator) catch &.{},
         .test_points = test_points.toOwnedSlice(self.allocator) catch &.{},
+        .derating = derating,
     };
 
     // Auto-assign ref_des for instances with descriptive labels

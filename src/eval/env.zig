@@ -757,6 +757,10 @@ pub const DesignBlock = struct {
     /// collected through the existing review pipeline; Phase 2E merges the
     /// two sources for the coverage check.
     test_points: []const TestPoint = &.{},
+    /// Configured power-budget derating from `(power-config (derating R))`.
+    /// Null → consumers use their built-in default (0.8 today). Applied by
+    /// `power_budget.analyze` to scale the tight-margin threshold.
+    derating: ?f64 = null,
 };
 
 /// Assertion result.

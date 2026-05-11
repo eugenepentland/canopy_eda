@@ -3,6 +3,7 @@ const infra_fs = @import("infra/fs.zig");
 const env_mod = @import("eval/env.zig");
 const na = @import("eval/net_analysis.zig");
 const power_budget = @import("eval/power_budget.zig");
+const power_sequencing = @import("eval/power_sequencing.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const json_writer = @import("json_writer.zig");
 const checks = @import("checks.zig");
@@ -35,6 +36,9 @@ pub const ViolationKind = enum {
     pin_function_required,
     power_budget,
     test_point_missing,
+    source_unused,
+    rail_voltage_unresolved,
+    sequence_cycle,
 };
 
 /// One electrical-rule-check finding. `kind` selects the rule, `severity`
@@ -68,9 +72,132 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkConceptSections(allocator, block, &violations);
     try checkPowerBudget(allocator, block, &violations);
     try checkTestPointCoverage(allocator, block, &violations);
+    try checkPowerTreeIntegrity(allocator, block, &violations);
+    try checkSequencingCycles(allocator, block, &violations);
     if (project_dir.len > 0) try checkPinFunctions(allocator, block, project_dir, &violations);
 
     return violations.items;
+}
+
+/// Detect cycles in the per-rail enable-net dependency graph emitted by
+/// `power_sequencing.analyze`. The existing assignOrder uses a fixed-point
+/// iteration with an 8-pass cap, so cycles silently produce stale ordering
+/// instead of failing — this check fills that gap by chasing each rail's
+/// dependency chain and reporting any rail that participates in a cycle.
+fn checkSequencingCycles(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayListUnmanaged(Violation),
+) !void {
+    const rows = try power_sequencing.analyze(allocator, block);
+    defer allocator.free(rows);
+
+    // Build rail → depends_on lookup. Rails with no dependency contribute
+    // nothing to a cycle and can be skipped during chain traversal.
+    var deps: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer deps.deinit(allocator);
+    for (rows) |r| {
+        if (r.depends_on.len == 0) continue;
+        try deps.put(allocator, r.rail, r.depends_on);
+    }
+
+    var reported: std.StringHashMapUnmanaged(void) = .empty;
+    defer reported.deinit(allocator);
+
+    for (rows) |r| {
+        if (r.depends_on.len == 0) continue;
+        if (reported.contains(r.rail)) continue;
+
+        var visited: std.StringHashMapUnmanaged(void) = .empty;
+        defer visited.deinit(allocator);
+
+        var cur = r.rail;
+        try visited.put(allocator, cur, {});
+        while (deps.get(cur)) |next| {
+            if (visited.contains(next)) {
+                const msg = std.fmt.allocPrint(
+                    allocator,
+                    "Power-sequencing cycle reaches rail \"{s}\" — review (enable …) declarations on regulators feeding back into this loop",
+                    .{r.rail},
+                ) catch break;
+                try violations.append(allocator, .{
+                    .kind = .sequence_cycle,
+                    .severity = .@"error",
+                    .message = msg,
+                    .net = r.rail,
+                });
+                try reported.put(allocator, r.rail, {});
+                break;
+            }
+            try visited.put(allocator, next, {});
+            cur = next;
+        }
+    }
+}
+
+/// Walk the derived `block.rails` graph and report rails whose declarations
+/// are incomplete or inconsistent. Phase 2B covers two checks — the other
+/// two listed in the plan (orphan_rail and regulator_loop) require
+/// extensions to `eval/rails.build` (consumer-only rail emission and
+/// `upstream_rail` population) that land alongside Phase 2C.
+fn checkPowerTreeIntegrity(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayListUnmanaged(Violation),
+) !void {
+    for (block.rails) |rail| {
+        // source_unused: rail has a declared regulator but no downstream
+        // pins on its net or any ferrite-bridged alias.
+        if (rail.source_ref_des.len > 0) {
+            const has_consumer = railHasConsumer(block, rail);
+            if (!has_consumer) {
+                const msg = std.fmt.allocPrint(
+                    allocator,
+                    "Rail \"{s}\" sourced by {s} has no downstream pin connections — verify the regulator output is actually wired up",
+                    .{ rail.name, rail.source_ref_des },
+                ) catch continue;
+                try violations.append(allocator, .{
+                    .kind = .source_unused,
+                    .severity = .warning,
+                    .message = msg,
+                    .net = rail.name,
+                });
+            }
+        }
+
+        // rail_voltage_unresolved: nothing in the fallback cascade declared
+        // a nominal voltage. Information-level — analyses that need
+        // voltage (power-budget back-compute, voltage-domain ERC) will
+        // skip the rail, so reviewers should know about it.
+        if (rail.nominal == null) {
+            const msg = std.fmt.allocPrint(
+                allocator,
+                "Rail \"{s}\" has no declared nominal voltage — add (nominal V) on the source port or a section power port",
+                .{rail.name},
+            ) catch continue;
+            try violations.append(allocator, .{
+                .kind = .rail_voltage_unresolved,
+                .severity = .info,
+                .message = msg,
+                .net = rail.name,
+            });
+        }
+    }
+}
+
+/// True iff any pin in `block.nets` connects to the rail's canonical name
+/// or any of its ferrite-bridged aliases. Empty rail names are treated as
+/// absent (no consumer possible).
+fn railHasConsumer(block: *const DesignBlock, rail: env_mod.PowerRail) bool {
+    for (block.nets) |net| {
+        if (net.pins.len == 0) continue;
+        const base = na.baseNetName(net.name);
+        if (std.mem.eql(u8, base, rail.name)) return true;
+        for (rail.aliases) |alias| {
+            if (std.mem.eql(u8, base, alias)) return true;
+        }
+    }
+    return false;
 }
 
 /// Flag any `PowerRail` in `block.rails` that has no test point on its net
@@ -1212,4 +1339,151 @@ test "test point coverage via ferrite-bridged alias" {
     var violations: std.ArrayListUnmanaged(Violation) = .empty;
     try checkTestPointCoverage(alloc, &block, &violations);
     for (violations.items) |v| try std.testing.expect(v.kind != .test_point_missing);
+}
+
+// Build a DesignBlock with a single sourced rail and a configurable set of
+// consumer pins + nominal voltage, for the power-tree integrity checks.
+fn makeIntegrityBlock(
+    alloc: std.mem.Allocator,
+    rail_name: []const u8,
+    source_ref: []const u8,
+    nominal: ?f64,
+    consumer_nets: []const []const u8,
+) !DesignBlock {
+    const rails = try alloc.alloc(env_mod.PowerRail, 1);
+    rails[0] = .{
+        .name = rail_name,
+        .source_ref_des = source_ref,
+        .source_port = "VOUT",
+        .nominal = nominal,
+    };
+    const nets = try alloc.alloc(env_mod.Net, consumer_nets.len);
+    for (consumer_nets, 0..) |n, i| {
+        const pins = try alloc.alloc(env_mod.PinRef, 1);
+        pins[0] = .{ .ref_des = "U1", .pin = "1" };
+        nets[i] = .{ .name = n, .pins = pins };
+    }
+    return .{
+        .name = "integrity-fixture",
+        .instances = &.{},
+        .nets = nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .rails = rails,
+    };
+}
+
+// spec: erc - Flags a power rail with a declared source but no consumer pins
+test "power tree integrity flags source_unused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const block = try makeIntegrityBlock(alloc, "VDD_3V3", "buck", 3.3, &.{});
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkPowerTreeIntegrity(alloc, &block, &violations);
+    var hit = false;
+    for (violations.items) |v| {
+        if (v.kind == .source_unused and std.mem.eql(u8, v.net, "VDD_3V3")) hit = true;
+    }
+    try std.testing.expect(hit);
+}
+
+// spec: erc - Flags a power rail whose nominal voltage cannot be resolved
+test "power tree integrity flags rail_voltage_unresolved" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const block = try makeIntegrityBlock(alloc, "VDD_3V3", "buck", null, &.{"VDD_3V3"});
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkPowerTreeIntegrity(alloc, &block, &violations);
+    var hit = false;
+    for (violations.items) |v| {
+        if (v.kind == .rail_voltage_unresolved and std.mem.eql(u8, v.net, "VDD_3V3")) hit = true;
+    }
+    try std.testing.expect(hit);
+}
+
+// spec: erc - Emits no integrity violation on a fully-resolved rail with consumers
+test "power tree integrity clean rail emits nothing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const block = try makeIntegrityBlock(alloc, "VDD_3V3", "buck", 3.3, &.{"VDD_3V3"});
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkPowerTreeIntegrity(alloc, &block, &violations);
+    for (violations.items) |v| {
+        try std.testing.expect(v.kind != .source_unused);
+        try std.testing.expect(v.kind != .rail_voltage_unresolved);
+    }
+}
+
+// spec: erc - Flags a sequencing cycle by emitting sequence_cycle per affected rail
+test "sequencing cycle detected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Build two sub-blocks whose enables form a cycle: A.enable = "VB",
+    // B.enable = "VA". Both rails are power outputs with declared nominal.
+    const a_ports = try alloc.alloc(env_mod.Port, 1);
+    a_ports[0] = .{
+        .name = "VOUT",
+        .net = "VOUT",
+        .direction = "out",
+        .nominal = 3.3,
+        .enable_net = "VB",
+    };
+    const a_block = try alloc.create(DesignBlock);
+    a_block.* = .{
+        .name = "a",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = a_ports,
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const b_ports = try alloc.alloc(env_mod.Port, 1);
+    b_ports[0] = .{
+        .name = "VOUT",
+        .net = "VOUT",
+        .direction = "out",
+        .nominal = 1.8,
+        .enable_net = "VA",
+    };
+    const b_block = try alloc.create(DesignBlock);
+    b_block.* = .{
+        .name = "b",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = b_ports,
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const sbs = try alloc.alloc(env_mod.SubBlock, 2);
+    sbs[0] = .{ .name = "a", .block = a_block };
+    sbs[1] = .{ .name = "b", .block = b_block };
+    const ties = try alloc.alloc(env_mod.NetTie, 2);
+    ties[0] = .{ .a = "a/VOUT", .b = "VA" };
+    ties[1] = .{ .a = "b/VOUT", .b = "VB" };
+    const block: DesignBlock = .{
+        .name = "cycle-fixture",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = sbs,
+        .net_ties = ties,
+    };
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkSequencingCycles(alloc, &block, &violations);
+    var hit = false;
+    for (violations.items) |v| {
+        if (v.kind == .sequence_cycle) hit = true;
+    }
+    try std.testing.expect(hit);
 }

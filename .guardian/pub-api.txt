@@ -155,6 +155,8 @@ src/eval/power_budget.zig::Rail struct_
 src/eval/power_budget.zig::RailConsumer struct_
 src/eval/power_budget.zig::RailStatus enum_
 src/eval/power_budget.zig::analyze fn
+src/eval/power_config.zig::PowerConfig struct_
+src/eval/power_config.zig::parse fn
 src/eval/power_sequencing.zig::SequenceRow struct_
 src/eval/power_sequencing.zig::SequenceStatus enum_
 src/eval/power_sequencing.zig::analyze fn
