@@ -19,6 +19,7 @@ pub fn build(b: *std.Build) void {
     const templates_step = zt.addTemplates(b, zt_dep, &.{
         b.path("src/serve/templates/pages.zt"),
         b.path("src/serve/templates/account.zt"),
+        b.path("src/serve/templates/pdf_viewer.zt"),
     });
 
     // Main executable

@@ -1,0 +1,32 @@
+// PDF.js datasheet viewer. The actual CSS + JS module live in
+// `/static/pdf_viewer.{css,js}` so this template only carries the bare HTML
+// skeleton and a `data-pdf="…"` hook the script reads on load.
+
+pub templ Page(filename: []const u8) {
+    <!DOCTYPE html>
+    <html lang="en">
+        <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width,initial-scale=1" />
+            <title>{filename}</title>
+            <link rel="stylesheet" href="/static/pdf_viewer.css" />
+        </head>
+        <body data-pdf={filename}>
+            <div id="toolbar">
+                <a id="back" href="javascript:history.back()">← back</a>
+                <span class="filename" id="filenameLabel"></span>
+                <span id="quoteLabel" class="quote-label" hidden></span>
+                <span id="matchCtrls" hidden>
+                    <button id="prev" title="Previous match">▲</button>
+                    <button id="next" title="Next match">▼</button>
+                    <span id="count" class="match-count"></span>
+                </span>
+                <span class="spacer"></span>
+                <a id="rawLink" target="_blank" rel="noopener">Open raw PDF ↗</a>
+            </div>
+            <div id="viewer"></div>
+            <div id="status">Loading…</div>
+            <script type="module" src="/static/pdf_viewer.js"></script>
+        </body>
+    </html>
+}

@@ -565,6 +565,7 @@ src/serve/templates/account.zig::UsersCard struct_
 src/serve/templates/pages.zig::DesignCard struct_
 src/serve/templates/pages.zig::Home struct_
 src/serve/templates/pages.zig::Navbar struct_
+src/serve/templates/pdf_viewer.zig::Page struct_
 src/serve/upload.zig::HandlerError value
 src/serve/upload.zig::extractFootprintName fn
 src/serve/upload.zig::extractPackageName fn
