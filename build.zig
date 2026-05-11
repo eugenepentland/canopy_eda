@@ -20,6 +20,7 @@ pub fn build(b: *std.Build) void {
         b.path("src/serve/templates/pages.zt"),
         b.path("src/serve/templates/account.zt"),
         b.path("src/serve/templates/pdf_viewer.zt"),
+        b.path("src/serve/templates/oauth.zt"),
     });
 
     // Main executable

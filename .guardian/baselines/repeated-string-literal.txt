@@ -9,3 +9,6 @@ src/serve/templates/account.zig: string literal </label> appears 3 times — ext
 src/serve/templates/account.zig: string literal </option> appears 4 times — extract a const
 src/serve/templates/account.zig: string literal <div class=\"card\"> appears 5 times — extract a const
 src/serve/templates/account.zig: string literal <p class=\"muted\"> appears 5 times — extract a const
+src/serve/templates/oauth.zig: string literal  type=\"hidden\" appears 5 times — extract a const
+src/serve/templates/oauth.zig: string literal </strong> appears 3 times — extract a const
+src/serve/templates/oauth.zig: string literal <strong> appears 3 times — extract a const

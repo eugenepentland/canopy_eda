@@ -562,6 +562,7 @@ src/serve/templates/account.zig::PasskeysCard struct_
 src/serve/templates/account.zig::PasswordCard struct_
 src/serve/templates/account.zig::UserRow struct_
 src/serve/templates/account.zig::UsersCard struct_
+src/serve/templates/oauth.zig::Authorize struct_
 src/serve/templates/pages.zig::DesignCard struct_
 src/serve/templates/pages.zig::Home struct_
 src/serve/templates/pages.zig::Navbar struct_

@@ -5,6 +5,7 @@ const server_mod = @import("../serve.zig");
 const Handler = server_mod.Handler;
 const auth = @import("auth.zig");
 const store = @import("oauth_store.zig");
+const oauth_template = @import("templates/oauth.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const HEADER_CORS_ALLOW_ORIGIN = "access-control-allow-origin";
@@ -185,54 +186,18 @@ pub fn authorizePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 
     const signed_in_email: ?[]const u8 = auth.currentEmail(ctx, req);
 
+    var aw: std.Io.Writer.Allocating = .init(req.arena);
+    try oauth_template.Authorize.render(.{
+        client.name,
+        signed_in_email,
+        scope,
+        client_id,
+        redirect_uri,
+        state,
+        code_challenge,
+    }, &aw.writer);
     res.content_type = .HTML;
-    if (signed_in_email == null) {
-        res.body = try std.fmt.allocPrint(req.arena,
-            \\<!DOCTYPE html><html><head><title>Authorize — Canopy EDA</title>
-            \\<style>body{{font-family:system-ui,sans-serif;
-            \\background:#0d1117;color:#c9d1d9;
-            \\max-width:520px;margin:80px auto;padding:24px;line-height:1.5}}
-            \\a{{color:#58a6ff}}
-            \\.card{{background:#161b22;border:1px solid #30363d;
-            \\border-radius:8px;padding:20px 24px}}</style>
-            \\</head><body><div class="card"><h1>Sign in required</h1>
-            \\<p>The MCP client <strong>{s}</strong> wants to access this server on your behalf.</p>
-            \\<p>Please <a href="/auth/login">sign in</a>, then re-open this page to continue.</p>
-            \\</div></body></html>
-        , .{client.name});
-        return;
-    }
-
-    const email = signed_in_email.?;
-    // Render consent page. All authorize params are echoed as hidden inputs so
-    // the POST /oauth/authorize/approve has everything it needs.
-    res.body = try std.fmt.allocPrint(req.arena,
-        \\<!DOCTYPE html><html><head><title>Authorize {s} — Canopy EDA</title>
-        \\<style>body{{font-family:system-ui,sans-serif;
-        \\background:#0d1117;color:#c9d1d9;max-width:560px;margin:80px auto;
-        \\padding:24px;line-height:1.5}}
-        \\.card{{background:#161b22;border:1px solid #30363d;
-        \\border-radius:8px;padding:20px 24px}}
-        \\button{{cursor:pointer;border-radius:6px;padding:10px 18px;
-        \\font-size:14px;border:1px solid #30363d;margin-right:8px}}
-        \\.btn-primary{{background:#238636;color:white;border-color:#2ea043}}
-        \\.btn-deny{{background:#21262d;color:#c9d1d9}}
-        \\.muted{{color:#8b949e;font-size:13px}}</style>
-        \\</head><body><div class="card">
-        \\<h1>Authorize access</h1>
-        \\<p><strong>{s}</strong> wants permission to read and modify your designs on this server.</p>
-        \\<p class="muted">Signed in as <strong>{s}</strong> · scope: <code>{s}</code></p>
-        \\<form method="POST" action="/oauth/authorize/approve">
-        \\<input type="hidden" name="client_id" value="{s}">
-        \\<input type="hidden" name="redirect_uri" value="{s}">
-        \\<input type="hidden" name="state" value="{s}">
-        \\<input type="hidden" name="code_challenge" value="{s}">
-        \\<input type="hidden" name="scope" value="{s}">
-        \\<button type="submit" class="btn-primary">Authorize</button>
-        \\<a href="/"><button type="button" class="btn-deny">Cancel</button></a>
-        \\</form>
-        \\</div></body></html>
-    , .{ client.name, client.name, email, scope, client_id, redirect_uri, state, code_challenge, scope });
+    res.body = aw.written();
 }
 
 /// POST /oauth/authorize/approve
