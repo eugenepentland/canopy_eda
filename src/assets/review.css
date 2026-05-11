@@ -74,3 +74,11 @@ details[open]>.rail-sum>.rail-caret{transform:rotate(90deg);}
 .sec-reqs .req-group{margin:8px 0;padding-left:12px;border-left:2px solid #30363d;}
 .sec-reqs .req-head{font-size:0.85rem;color:#8b949e;margin-bottom:4px;}
 .sec-reqs code{background:#21262d;padding:1px 6px;border-radius:3px;font-size:0.82rem;}
+.power-tree-section{margin:18px 0;}
+.power-tree{background:#0a0e14;border:1px solid #21262d;border-radius:8px;padding:12px;overflow-x:auto;}
+.power-tree-svg{display:block;width:100%;height:auto;}
+.pt-node{fill:#161b22;stroke:#30363d;stroke-width:1;}
+.pt-node-label{fill:#f0f6fc;font-family:"SF Mono","Fira Code",monospace;font-size:13px;font-weight:600;}
+.pt-node-voltage{fill:#8b949e;font-family:"SF Mono","Fira Code",monospace;font-size:11px;}
+.pt-layer-title{fill:#6e7681;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:10px;text-transform:uppercase;letter-spacing:0.05em;}
+.pt-edge{stroke:#58a6ff;stroke-width:1.5;opacity:0.7;}
