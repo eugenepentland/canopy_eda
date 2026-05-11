@@ -240,6 +240,8 @@ fn writeSection(w: anytype, s: review.SectionReport) !void {
     }
     try w.writeAll("]");
 
+    try writeBoundaryContracts(w, s.ports);
+
     try w.writeAll(",\"violations\":[");
     for (s.violations, 0..) |v, i| {
         if (i > 0) try w.writeAll(",");
@@ -248,6 +250,41 @@ fn writeSection(w: anytype, s: review.SectionReport) !void {
     try w.writeAll("]");
 
     try w.writeAll("}");
+}
+
+/// Emit a `boundary_contracts` array containing one object per port that
+/// declared `(electrical ...)` on its `(port …)` form. Matches the
+/// "Boundary contracts" table in the review HTML — filters out ports
+/// without electrical metadata so consumers don't have to walk the full
+/// port list. Always emits the key (empty array when none) so JSON
+/// schema stays stable.
+fn writeBoundaryContracts(w: anytype, ports: []const review.PortSummary) !void {
+    try w.writeAll(",\"boundary_contracts\":[");
+    var first = true;
+    for (ports) |p| {
+        const e = p.electrical orelse continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.writeAll("{\"port\":");
+        try writeJsonString(w, p.name);
+        try w.print(",\"direction\":\"{s}\"", .{p.direction});
+        if (e.electrical_type) |t| try w.print(",\"type\":\"{s}\"", .{@tagName(t)}) else try w.writeAll(",\"type\":null");
+        if (e.drive) |d| try w.print(",\"drive\":\"{s}\"", .{@tagName(d)}) else try w.writeAll(",\"drive\":null");
+        try w.writeAll(",\"v_oh_typ\":");
+        try writeFloatOrNull(w, e.v_oh_typ);
+        try w.writeAll(",\"v_ol_typ\":");
+        try writeFloatOrNull(w, e.v_ol_typ);
+        try w.writeAll(",\"v_ih_min\":");
+        try writeFloatOrNull(w, e.v_ih_min);
+        try w.writeAll(",\"v_il_max\":");
+        try writeFloatOrNull(w, e.v_il_max);
+        try w.writeAll(",\"max_voltage\":");
+        try writeFloatOrNull(w, e.max_voltage);
+        try w.writeAll(",\"domain\":");
+        if (e.domain.len > 0) try writeJsonString(w, e.domain) else try w.writeAll("null");
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
 }
 
 fn writePowerTreeNode(w: anytype, n: review.PowerTreeNode) !void {

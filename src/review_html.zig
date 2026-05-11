@@ -461,6 +461,8 @@ fn writeSections(w: anytype, sections: []const review.SectionReport) !void {
             try w.writeAll("</ul></details>");
         }
 
+        try writeBoundaryContracts(w, s.ports);
+
         // Design-specific notes: stored inline in the design's .sexp as
         // `(note "..." (ref "foo.pdf" (page N)))`. Editable from the GUI —
         // add/delete hit /api/section-note/:name/(add|remove) which splices
@@ -526,6 +528,71 @@ fn writeSections(w: anytype, sections: []const review.SectionReport) !void {
         try w.writeAll("</div>");
     }
     try w.writeAll(sectionClose);
+}
+
+/// Render the per-section "Boundary contracts" table — one row per port
+/// that declared `(electrical ...)` on its `(port …)` form. Lists the
+/// logic levels, drive type, and domain so reviewers can see what voltage
+/// contract the section commits to at each boundary. Skipped entirely
+/// when no port on the section carries electrical metadata.
+fn writeBoundaryContracts(w: anytype, ports: []const review.PortSummary) !void {
+    var any = false;
+    for (ports) |p| {
+        if (p.electrical != null) {
+            any = true;
+            break;
+        }
+    }
+    if (!any) return;
+
+    try w.writeAll("<details open class=\"sec-contracts\"><summary>Boundary contracts</summary>");
+    try w.writeAll("<table class=\"contracts\"><thead><tr>");
+    try w.writeAll("<th>Port</th><th>Dir</th><th>Type</th>");
+    try w.writeAll("<th>V<sub>OH</sub></th><th>V<sub>OL</sub></th>");
+    try w.writeAll("<th>V<sub>IH</sub></th><th>V<sub>IL</sub></th>");
+    try w.writeAll("<th>V<sub>max</sub></th><th>Drive</th><th>Domain</th>");
+    try w.writeAll("</tr></thead><tbody>");
+    for (ports) |p| {
+        const e = p.electrical orelse continue;
+        try w.writeAll("<tr><td><code>");
+        try writeHtmlEscaped(w, p.name);
+        try w.print("</code></td><td>{s}</td><td>", .{p.direction});
+        if (e.electrical_type) |t| {
+            try writeHtmlEscaped(w, @tagName(t));
+        } else {
+            try w.writeAll("—");
+        }
+        try w.writeAll("</td>");
+        try writeVoltCell(w, e.v_oh_typ);
+        try writeVoltCell(w, e.v_ol_typ);
+        try writeVoltCell(w, e.v_ih_min);
+        try writeVoltCell(w, e.v_il_max);
+        try writeVoltCell(w, e.max_voltage);
+        try w.writeAll("<td>");
+        if (e.drive) |d| {
+            try writeHtmlEscaped(w, @tagName(d));
+        } else {
+            try w.writeAll("—");
+        }
+        try w.writeAll("</td><td>");
+        if (e.domain.len > 0) {
+            try writeHtmlEscaped(w, e.domain);
+        } else {
+            try w.writeAll("—");
+        }
+        try w.writeAll(tdTrClose);
+    }
+    try w.writeAll("</tbody></table></details>");
+}
+
+fn writeVoltCell(w: anytype, v: ?f64) !void {
+    try w.writeAll("<td>");
+    if (v) |x| {
+        try w.print("{d:.2}", .{x});
+    } else {
+        try w.writeAll("—");
+    }
+    try w.writeAll("</td>");
 }
 
 /// Render the Assertions section — one row per `(assert …)` /

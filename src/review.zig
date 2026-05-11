@@ -85,6 +85,10 @@ pub const PortSummary = struct {
     voltage: ?f64 = null,
     role: []const u8 = "",
     protocol: []const u8 = "",
+    /// Boundary-contract electrical levels declared via `(electrical ...)`
+    /// on the port. Surfaced as a "Boundary contracts" table in the review
+    /// page and a `boundary_contracts` key in the review JSON.
+    electrical: ?env_mod.ElectricalDecl = null,
 };
 
 /// Per-section review entry: title, slug for HTML anchors, status, design
@@ -583,6 +587,7 @@ fn reportFromSection(
             .voltage = p.voltage,
             .role = p.role,
             .protocol = p.protocol,
+            .electrical = p.electrical,
         });
     }
 
