@@ -141,8 +141,15 @@ fn lessThanRail(_: void, a: PowerRail, b: PowerRail) bool {
     return std.mem.order(u8, a.name, b.name) == .lt;
 }
 
+/// A sub-block output port qualifies as a rail source when it declares
+/// any power-related metadata: nominal voltage, rated range, current
+/// capacity, or efficiency. Mirrors `power_sequencing.isPowerPort` so the
+/// two analyses agree on which sub-block outputs are real rails.
 fn isPowerSource(port: Port) bool {
-    return port.current_typ != null or port.current_max != null;
+    return port.nominal != null or
+        port.rated_min != null or port.rated_max != null or
+        port.current_typ != null or port.current_max != null or
+        port.efficiency != null or port.efficiency_linear;
 }
 
 /// Find the top-level net tied to a sub-block path like `"buck/VOUT"`.

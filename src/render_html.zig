@@ -96,6 +96,11 @@ pub fn renderToHtml(
             try review_html.writeTestPoints(w, doc.test_points);
             try w.writeAll("</div>");
         }
+        if (doc.power_tree.nodes.len > 0) {
+            try w.writeAll("<div id=\"page-power-tree\" class=\"page-anchor\">");
+            try review_html.writePowerTree(allocator, w, doc.power_tree);
+            try w.writeAll("</div>");
+        }
         if (doc.power_budget.len > 0) {
             try w.writeAll("<div id=\"page-power-budget\" class=\"page-anchor\">");
             try review_html.writePowerBudget(w, doc.power_budget);

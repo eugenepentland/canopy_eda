@@ -144,6 +144,7 @@ src/render_html.zig::renderHubSvg | fn renderHubSvg( ctx: *RenderCtx, w: anytype
 src/render_html.zig::renderToHtml | fn renderToHtml( allocator: Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, navbar_css: []const u8, status: review.Status, review_doc: ?review.ReviewDoc, check_results: *const CheckResultMap, ) RenderError![]const u8
 src/render_html.zig::setupRenderCtx | fn setupRenderCtx(allocator: Allocator, block: *const DesignBlock) std.mem.Allocator.Error!RenderCtx
 src/render_json.zig::renderSceneGraph | fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project_dir: []const u8) RenderError![]const u8
+src/render_power_tree_svg.zig::render | fn render( allocator: Allocator, tree: PowerTree, w: anytype, ) std.mem.Allocator.Error!void
 src/render_svg/bom_table.zig::collectAllInstances | fn collectAllInstances(allocator: Allocator, block: *const DesignBlock, out: *std.ArrayListUnmanaged(env_mod.Instance)) RenderError!void
 src/render_svg/bom_table.zig::renderBomTable | fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBlock, y_start: f64, table_width: f64) RenderError!f64
 src/render_svg/branch.zig::drawBranchTreeLeft | fn drawBranchTreeLeft(self: *RenderCtx, w: anytype, junction_x: f64, center_y: f64, branches: []const Branch, junction_net: []const u8) RenderError!void
@@ -195,14 +196,16 @@ src/req_checks.zig::parseMicroFarads | fn parseMicroFarads(s: []const u8) ?f64
 src/req_checks.zig::parseMicroHenries | fn parseMicroHenries(s: []const u8) ?f64
 src/req_checks.zig::parseOhms | fn parseOhms(s: []const u8) ?f64
 src/req_checks.zig::runChecks | fn runChecks( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, ) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]Result)
+src/review.zig::buildPowerTree | fn buildPowerTree( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error!PowerTree
 src/review.zig::buildReview | fn buildReview( allocator: std.mem.Allocator, design_name: []const u8, block: *const DesignBlock, assertions: []const AssertionResult, violations: []const erc_mod.Violation, check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result), ) ReviewError!ReviewDoc
 src/review.zig::isoTimestamp | fn isoTimestamp(allocator: std.mem.Allocator, unix_s: i64) std.mem.Allocator.Error![]const u8
 src/review.zig::slugify | fn slugify(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8
-src/review_html.zig::renderBodyInto | fn renderBodyInto(w: anytype, doc: review.ReviewDoc) RenderError!void
+src/review_html.zig::renderBodyInto | fn renderBodyInto(allocator: std.mem.Allocator, w: anytype, doc: review.ReviewDoc) RenderError!void
 src/review_html.zig::renderToHtml | fn renderToHtml(allocator: std.mem.Allocator, doc: review.ReviewDoc, navbar_css: []const u8) RenderError![]const u8
 src/review_html.zig::writeAssertions | fn writeAssertions(w: anytype, assertions: []const review.AssertionReport) RenderError!void
 src/review_html.zig::writePowerBudget | fn writePowerBudget(w: anytype, rails: []const power_budget.Rail) RenderError!void
 src/review_html.zig::writePowerSequence | fn writePowerSequence(w: anytype, rows: []const power_sequencing.SequenceRow) RenderError!void
+src/review_html.zig::writePowerTree | fn writePowerTree(allocator: std.mem.Allocator, w: anytype, tree: review.PowerTree) RenderError!void
 src/review_html.zig::writeSummaryTable | fn writeSummaryTable(w: anytype, s: review.Summary) RenderError!void
 src/review_html.zig::writeTestPoints | fn writeTestPoints(w: anytype, tps: []const review.TestPointEntry) RenderError!void
 src/review_html.zig::writeUnresolved | fn writeUnresolved(w: anytype, vs: []const erc_mod.Violation) RenderError!void

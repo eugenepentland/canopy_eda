@@ -248,6 +248,7 @@ src/render_html.zig::setupRenderCtx fn
 src/render_json.zig::RenderCtx value
 src/render_json.zig::RenderError value
 src/render_json.zig::renderSceneGraph fn
+src/render_power_tree_svg.zig::render fn
 src/render_svg/bom_table.zig::collectAllInstances fn
 src/render_svg/bom_table.zig::renderBomTable fn
 src/render_svg/branch.zig::drawBranchTreeLeft fn
@@ -336,12 +337,16 @@ src/review.zig::ComponentRequirementEntry struct_
 src/review.zig::MissingMpn struct_
 src/review.zig::MissingRequirement struct_
 src/review.zig::PortSummary struct_
+src/review.zig::PowerTree struct_
+src/review.zig::PowerTreeEdge struct_
+src/review.zig::PowerTreeNode struct_
 src/review.zig::ReviewDoc struct_
 src/review.zig::ReviewError value
 src/review.zig::SectionReport struct_
 src/review.zig::Status enum_
 src/review.zig::Summary struct_
 src/review.zig::TestPointEntry struct_
+src/review.zig::buildPowerTree fn
 src/review.zig::buildReview fn
 src/review.zig::isoTimestamp fn
 src/review.zig::slugify fn
@@ -353,6 +358,7 @@ src/review_html.zig::renderToHtml fn
 src/review_html.zig::writeAssertions fn
 src/review_html.zig::writePowerBudget fn
 src/review_html.zig::writePowerSequence fn
+src/review_html.zig::writePowerTree fn
 src/review_html.zig::writeSummaryTable fn
 src/review_html.zig::writeTestPoints fn
 src/review_html.zig::writeUnresolved fn

@@ -4,6 +4,7 @@ const erc_mod = @import("erc.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const env_mod = @import("eval/env.zig");
+const render_power_tree_svg = @import("render_power_tree_svg.zig");
 
 /// Error set for HTML emit helpers in this module — the writers are
 /// `ArrayListUnmanaged(u8).writer()`, so only `OutOfMemory` propagates.
@@ -39,7 +40,7 @@ pub fn renderToHtml(allocator: std.mem.Allocator, doc: review.ReviewDoc, navbar_
     try w.writeAll("<div class=\"review-wrap\">");
 
     try writeHeader(w, doc);
-    try renderBodyInto(w, doc);
+    try renderBodyInto(allocator, w, doc);
 
     try w.writeAll("</div>");
     try writeScript(w, doc.design_name);
@@ -53,14 +54,25 @@ pub fn renderToHtml(allocator: std.mem.Allocator, doc: review.ReviewDoc, navbar_
 /// cards so a single URL (`/schematics/:name`) covers both "here's what we
 /// built" and "here's whether it's correct." The caller is responsible for
 /// including REVIEW_CSS in its <style> and BODY_JS in a <script>.
-pub fn renderBodyInto(w: anytype, doc: review.ReviewDoc) RenderError!void {
+pub fn renderBodyInto(allocator: std.mem.Allocator, w: anytype, doc: review.ReviewDoc) RenderError!void {
     try writeSummaryTable(w, doc.summary);
     try writeSections(w, doc.sections);
     try writePowerSequence(w, doc.power_sequence);
     try writeTestPoints(w, doc.test_points);
+    try writePowerTree(allocator, w, doc.power_tree);
     try writePowerBudget(w, doc.power_budget);
     try writeUnresolved(w, doc.unresolved);
     try writeAssertions(w, doc.assertions);
+}
+
+/// Render the power-tree section as a wrapping `<section>` with the SVG.
+/// Skips rendering when the tree has no nodes — sub-block-less designs
+/// have an empty tree and we don't want an empty section card.
+pub fn writePowerTree(allocator: std.mem.Allocator, w: anytype, tree: review.PowerTree) RenderError!void {
+    if (tree.nodes.len == 0) return;
+    try w.writeAll("<section class=\"power-tree-section\"><h2>Power Tree</h2>");
+    try render_power_tree_svg.render(allocator, tree, w);
+    try w.writeAll("</section>");
 }
 
 /// CSS rules for review content. Exposed so the schematic page can include

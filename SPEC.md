@@ -197,8 +197,18 @@ Public functions: build
 - Records source_ref_des and source_port on each rail from the source instance
 - Returns empty slice when design declares no rails
 
+## render_power_tree_svg
+
+Public functions: render
+
+- Lays out one column per topological layer of the rail DAG
+- Renders a rounded-rect node per rail with name and nominal voltage
+- Returns immediately on a block with zero declared rails
+
 ## review
 
+- buildPowerTree assigns each rail to a topological layer rooted at upstream sources
+- buildPowerTree emits an empty tree when the block declares no rails
 - slugify converts section titles to anchor-safe identifiers
 - isoTimestamp formats epoch seconds as ISO-8601 UTC
 - buildSummary marks status=pass when no errors or warnings

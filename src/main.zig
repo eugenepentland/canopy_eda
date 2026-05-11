@@ -382,6 +382,7 @@ test {
     _ = @import("eval/test_point.zig");
     _ = @import("eval/power_config.zig");
     _ = @import("eval/electrical.zig");
+    _ = @import("render_power_tree_svg.zig");
     _ = @import("eval/power_budget.zig");
     _ = @import("eval/power_sequencing.zig");
     _ = @import("erc.zig");

@@ -41,6 +41,18 @@ pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) std.mem
     }
     try w.writeAll("]");
 
+    try w.writeAll(",\"power_tree\":{\"nodes\":[");
+    for (doc.power_tree.nodes, 0..) |n, i| {
+        if (i > 0) try w.writeAll(",");
+        try writePowerTreeNode(w, n);
+    }
+    try w.writeAll("],\"edges\":[");
+    for (doc.power_tree.edges, 0..) |e, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("{{\"from\":\"{s}\",\"to\":\"{s}\"}}", .{ e.from, e.to });
+    }
+    try w.writeAll("]}");
+
     try w.writeAll(",\"power_sequence\":[");
     for (doc.power_sequence, 0..) |r, i| {
         if (i > 0) try w.writeAll(",");
@@ -235,6 +247,13 @@ fn writeSection(w: anytype, s: review.SectionReport) !void {
     }
     try w.writeAll("]");
 
+    try w.writeAll("}");
+}
+
+fn writePowerTreeNode(w: anytype, n: review.PowerTreeNode) !void {
+    try w.print("{{\"rail\":\"{s}\",\"layer\":{d}", .{ n.rail, n.layer });
+    if (n.nominal) |v| try w.print(",\"nominal\":{d}", .{v});
+    if (n.source_ref_des.len > 0) try w.print(",\"source_ref_des\":\"{s}\"", .{n.source_ref_des});
     try w.writeAll("}");
 }
 

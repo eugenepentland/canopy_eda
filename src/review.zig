@@ -165,6 +165,29 @@ pub const TestPointEntry = struct {
 /// `/review/:name` HTML and `/api/review/:name` JSON endpoints need to
 /// render. Aggregates the summary, per-section reports, power-budget /
 /// sequencing tables, BOM, assertions, and unresolved violations.
+/// One node in the power-tree visualization. `layer` is the topological
+/// distance from a rail with no upstream (board input or top-level
+/// regulator) — feeds the column placement in `render_power_tree_svg`.
+pub const PowerTreeNode = struct {
+    rail: []const u8,
+    nominal: ?f64,
+    source_ref_des: []const u8 = "",
+    layer: u32 = 0,
+};
+
+/// One directed edge from an upstream rail to a downstream rail.
+pub const PowerTreeEdge = struct {
+    from: []const u8,
+    to: []const u8,
+};
+
+/// Topologically-arranged view of `block.rails` for visualisation. Empty
+/// when the block declares no rails.
+pub const PowerTree = struct {
+    nodes: []const PowerTreeNode = &.{},
+    edges: []const PowerTreeEdge = &.{},
+};
+
 pub const ReviewDoc = struct {
     design_name: []const u8,
     title: []const u8,
@@ -172,6 +195,7 @@ pub const ReviewDoc = struct {
     summary: Summary,
     sections: []const SectionReport,
     power_budget: []const power_budget.Rail,
+    power_tree: PowerTree = .{},
     power_sequence: []const power_sequencing.SequenceRow,
     test_points: []const TestPointEntry,
     bom: []const BomGroup,
@@ -206,6 +230,7 @@ pub fn buildReview(
     const sub_reqs = try collectSubblockRequirements(allocator, block, check_results);
     const rails = try power_budget.analyze(allocator, block);
     const rails_sorted = try sortRailsByTightness(allocator, rails);
+    const power_tree = try buildPowerTree(allocator, block);
     const sequence = try power_sequencing.analyze(allocator, block);
     const test_points = try buildTestPoints(allocator, block);
     const bom = try buildBom(allocator, block);
@@ -222,6 +247,7 @@ pub fn buildReview(
         .summary = summary,
         .sections = sections,
         .power_budget = rails_sorted,
+        .power_tree = power_tree,
         .power_sequence = sequence,
         .test_points = test_points,
         .bom = bom,
@@ -762,6 +788,195 @@ fn filterUnresolved(allocator: std.mem.Allocator, violations: []const erc_mod.Vi
     return out.items;
 }
 
+/// Compute a topologically-layered view of the rail graph for the
+/// power-tree visualisation. Upstream is derived on-the-fly: a rail R
+/// sourced by sub-block S has its upstream identified by walking S's
+/// `direction == "in"` ports, following `net_ties` to top-level names,
+/// and matching those against other rails in `block.rails`. Layer
+/// assignment is BFS from rails with no resolved upstream.
+///
+/// The empty case (block.rails.len == 0) returns an empty `PowerTree`.
+pub fn buildPowerTree(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+) std.mem.Allocator.Error!PowerTree {
+    if (block.rails.len == 0) return .{};
+
+    // Map rail name → index for fast existence checks.
+    var rail_index: std.StringHashMapUnmanaged(usize) = .empty;
+    defer rail_index.deinit(allocator);
+    for (block.rails, 0..) |r, i| {
+        try rail_index.put(allocator, r.name, i);
+    }
+
+    // For each rail, derive its upstream rail name. The walk is bounded:
+    // few sub-blocks, few input ports per sub-block, few net-ties.
+    var upstream = try allocator.alloc(?[]const u8, block.rails.len);
+    @memset(upstream, null);
+    for (block.rails, 0..) |rail, i| {
+        if (rail.source_ref_des.len == 0) continue;
+        const sb = findSubBlock(block, rail.source_ref_des) orelse continue;
+        for (sb.block.ports) |port| {
+            if (!std.mem.eql(u8, port.direction, "in")) continue;
+            const top_net = findTopNetForPort(block, sb.name, port.name) orelse continue;
+            if (rail_index.contains(top_net)) {
+                upstream[i] = top_net;
+                break;
+            }
+        }
+    }
+
+    // BFS layer assignment. Rails with null upstream are layer 0; rails
+    // whose upstream sits at layer L become layer L+1. The fixed-point
+    // loop converges in (max-depth) iterations; for typical trees that's
+    // 3-4 passes.
+    var layers = try allocator.alloc(u32, block.rails.len);
+    @memset(layers, 0);
+    var pass: u32 = 0;
+    while (pass < block.rails.len + 1) : (pass += 1) {
+        var changed = false;
+        for (block.rails, 0..) |_, i| {
+            const up = upstream[i] orelse continue;
+            const up_idx = rail_index.get(up) orelse continue;
+            const wanted = layers[up_idx] + 1;
+            if (layers[i] != wanted) {
+                layers[i] = wanted;
+                changed = true;
+            }
+        }
+        if (!changed) break;
+    }
+
+    // Build nodes + edges.
+    const nodes = try allocator.alloc(PowerTreeNode, block.rails.len);
+    for (block.rails, 0..) |rail, i| {
+        nodes[i] = .{
+            .rail = rail.name,
+            .nominal = rail.nominal,
+            .source_ref_des = rail.source_ref_des,
+            .layer = layers[i],
+        };
+    }
+
+    var edges: std.ArrayListUnmanaged(PowerTreeEdge) = .empty;
+    for (block.rails, 0..) |rail, i| {
+        if (upstream[i]) |up| try edges.append(allocator, .{ .from = up, .to = rail.name });
+    }
+
+    return .{
+        .nodes = nodes,
+        .edges = try edges.toOwnedSlice(allocator),
+    };
+}
+
+fn findSubBlock(block: *const DesignBlock, name: []const u8) ?env_mod.SubBlock {
+    for (block.sub_blocks) |sb| {
+        if (std.mem.eql(u8, sb.name, name)) return sb;
+    }
+    return null;
+}
+
+fn findTopNetForPort(block: *const DesignBlock, sb_name: []const u8, port_name: []const u8) ?[]const u8 {
+    var path_buf: [256]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ sb_name, port_name }) catch return null;
+    for (block.net_ties) |nt| {
+        if (std.mem.eql(u8, nt.a, path)) return nt.b;
+        if (std.mem.eql(u8, nt.b, path)) return nt.a;
+    }
+    return null;
+}
+
+// spec: review - buildPowerTree assigns each rail to a topological layer rooted at upstream sources
+test "buildPowerTree layers cascade correctly" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // 5V (layer 0) → 3V3 (layer 1) → 1V8 (layer 2)
+    const buck_ports = try alloc.alloc(env_mod.Port, 2);
+    buck_ports[0] = .{ .name = "VIN", .net = "VIN", .direction = "in" };
+    buck_ports[1] = .{ .name = "VOUT", .net = "VOUT", .direction = "out", .nominal = 3.3, .current_max = 2.0 };
+    const buck_block = try alloc.create(DesignBlock);
+    buck_block.* = .{
+        .name = "buck",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = buck_ports,
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const ldo_ports = try alloc.alloc(env_mod.Port, 2);
+    ldo_ports[0] = .{ .name = "VIN", .net = "VIN", .direction = "in" };
+    ldo_ports[1] = .{ .name = "VOUT", .net = "VOUT", .direction = "out", .nominal = 1.8, .current_max = 0.5 };
+    const ldo_block = try alloc.create(DesignBlock);
+    ldo_block.* = .{
+        .name = "ldo",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = ldo_ports,
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const sbs = try alloc.alloc(env_mod.SubBlock, 2);
+    sbs[0] = .{ .name = "buck", .block = buck_block };
+    sbs[1] = .{ .name = "ldo", .block = ldo_block };
+    const ties = try alloc.alloc(env_mod.NetTie, 4);
+    ties[0] = .{ .a = "buck/VIN", .b = "V5V" };
+    ties[1] = .{ .a = "buck/VOUT", .b = "V3V3" };
+    ties[2] = .{ .a = "ldo/VIN", .b = "V3V3" };
+    ties[3] = .{ .a = "ldo/VOUT", .b = "V1V8" };
+    const rails_data = try alloc.alloc(env_mod.PowerRail, 2);
+    rails_data[0] = .{ .name = "V3V3", .source_ref_des = "buck", .nominal = 3.3 };
+    rails_data[1] = .{ .name = "V1V8", .source_ref_des = "ldo", .nominal = 1.8 };
+    const block: DesignBlock = .{
+        .name = "tree-fixture",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = sbs,
+        .net_ties = ties,
+        .rails = rails_data,
+    };
+    const tree = try buildPowerTree(alloc, &block);
+    try std.testing.expectEqual(@as(usize, 2), tree.nodes.len);
+
+    var v3v3_layer: u32 = 0;
+    var v1v8_layer: u32 = 0;
+    for (tree.nodes) |n| {
+        if (std.mem.eql(u8, n.rail, "V3V3")) v3v3_layer = n.layer;
+        if (std.mem.eql(u8, n.rail, "V1V8")) v1v8_layer = n.layer;
+    }
+    try std.testing.expectEqual(@as(u32, 0), v3v3_layer);
+    try std.testing.expectEqual(@as(u32, 1), v1v8_layer);
+
+    try std.testing.expectEqual(@as(usize, 1), tree.edges.len);
+    try std.testing.expectEqualStrings("V3V3", tree.edges[0].from);
+    try std.testing.expectEqualStrings("V1V8", tree.edges[0].to);
+}
+
+// spec: review - buildPowerTree emits an empty tree when the block declares no rails
+test "buildPowerTree empty block produces empty tree" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const block: DesignBlock = .{
+        .name = "empty",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const tree = try buildPowerTree(alloc, &block);
+    try std.testing.expectEqual(@as(usize, 0), tree.nodes.len);
+    try std.testing.expectEqual(@as(usize, 0), tree.edges.len);
+}
+
 fn sortRailsByTightness(allocator: std.mem.Allocator, rails: []const power_budget.Rail) ![]const power_budget.Rail {
     const out = try allocator.dupe(power_budget.Rail, rails);
     std.mem.sort(power_budget.Rail, out, {}, lessThanRailMargin);
@@ -844,7 +1059,9 @@ pub fn slugify(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Er
 
 // spec: review - slugify converts section titles to anchor-safe identifiers
 test "slugify basic" {
-    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     const s1 = try slugify(alloc, "USB");
     defer alloc.free(s1);
     try std.testing.expectEqualStrings("usb", s1);
@@ -864,7 +1081,9 @@ test "slugify basic" {
 
 // spec: review - isoTimestamp formats epoch seconds as ISO-8601 UTC
 test "isoTimestamp formats epoch seconds" {
-    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     // Unix epoch 0 is 1970-01-01T00:00:00Z.
     const s = try isoTimestamp(alloc, 0);
     defer alloc.free(s);
@@ -873,7 +1092,9 @@ test "isoTimestamp formats epoch seconds" {
 
 // spec: review - buildSummary marks status=pass when no errors or warnings
 test "buildSummary status pass" {
-    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     const block: DesignBlock = .{
         .name = "test",
         .instances = &.{},
@@ -889,7 +1110,9 @@ test "buildSummary status pass" {
 
 // spec: review - buildSummary marks status=warn on warning-level violations
 test "buildSummary status warn" {
-    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     const block: DesignBlock = .{
         .name = "test",
         .instances = &.{},
@@ -908,7 +1131,9 @@ test "buildSummary status warn" {
 
 // spec: review - buildTestPoints collects testpoint instances with pin 1 net
 test "buildTestPoints collects testpoint instances" {
-    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     const pins = [_]env_mod.PinRef{.{ .ref_des = "TP1", .pin = "1" }};
     const nets = [_]env_mod.Net{.{ .name = "VDD", .pins = &pins }};
     const insts = [_]Instance{.{
@@ -937,7 +1162,9 @@ test "buildTestPoints collects testpoint instances" {
 
 // spec: review - buildTestPoints ignores non-testpoints
 test "buildTestPoints ignores non-testpoints" {
-    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     const insts = [_]Instance{.{
         .ref_des = "U1",
         .component = "stm32n657l0h3q",
@@ -960,7 +1187,9 @@ test "buildTestPoints ignores non-testpoints" {
 
 // spec: review - buildSummary marks status=fail on error-level violations
 test "buildSummary status fail" {
-    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     const block: DesignBlock = .{
         .name = "test",
         .instances = &.{},
@@ -979,7 +1208,9 @@ test "buildSummary status fail" {
 
 // spec: review - buildSummary counts critical hub instances and lists those missing requirements
 test "buildSummary tracks critical-component requirement coverage" {
-    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     const reqs = [_]env_mod.Requirement{.{ .text = "VDD must be 3V3" }};
     const insts = [_]Instance{
         .{ .ref_des = "U1", .component = "stm32", .value = "", .footprint = "", .symbol = "", .requirements = &reqs },
@@ -1013,7 +1244,9 @@ test "buildSummary tracks critical-component requirement coverage" {
 
 // spec: review - buildSummary skips instances whose component sets ignore-requirements
 test "buildSummary respects requirements_ignored opt-out" {
-    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     const insts = [_]Instance{
         .{ .ref_des = "U1", .component = "stm32", .value = "", .footprint = "", .symbol = "" },
         // Mounting hardware: shows up as a hub (H prefix → critical) but the
