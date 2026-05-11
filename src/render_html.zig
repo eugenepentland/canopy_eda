@@ -25,6 +25,8 @@ const bom_html = @import("serve/bom_html.zig");
 const isHub = draw.isHub;
 const pinOrder = draw.pinOrder;
 
+const MUTED_EM_DASH = review_html.mutedDash;
+
 const Allocator = std.mem.Allocator;
 
 /// Error set for HTML emit helpers. The writers in this module are
@@ -464,6 +466,7 @@ fn writeSection(
     }
 
     try writeSectionPorts(w, sec);
+    try writeSectionBoundaryContracts(w, sec);
 
     // Collect hubs in this section
     var hub_refs: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -831,7 +834,7 @@ fn writeSectionPorts(w: anytype, sec: Section) !void {
         try w.writeAll("<tr><td><code>");
         try writeHtmlEscaped(w, p.name);
         try w.print("</code></td><td>{s}</td><td>{s}</td><td>", .{ @tagName(p.direction), @tagName(p.signal_type) });
-        if (p.voltage) |v| try w.print("{d}V", .{v}) else try w.writeAll("<span class=\"muted\">—</span>");
+        if (p.voltage) |v| try w.print("{d}V", .{v}) else try w.writeAll(MUTED_EM_DASH);
         try w.writeAll("</td><td>");
         if (p.protocol.len > 0) {
             try w.writeAll("<code>");
@@ -842,10 +845,77 @@ fn writeSectionPorts(w: anytype, sec: Section) !void {
             if (p.protocol.len > 0) try w.writeAll(" · ");
             try writeHtmlEscaped(w, p.role);
         }
-        if (p.protocol.len == 0 and p.role.len == 0) try w.writeAll("<span class=\"muted\">—</span>");
+        if (p.protocol.len == 0 and p.role.len == 0) try w.writeAll(MUTED_EM_DASH);
         try w.writeAll("</td></tr>");
     }
     try w.writeAll("</tbody></table>");
+}
+
+/// Render the per-section "Boundary contracts" block on the schematic page —
+/// one row per `(port …)` that declared an `(electrical ...)` sub-clause.
+/// Skipped entirely when no port on the section carries electrical data, so
+/// sections without boundary contracts stay uncluttered. Same renderer
+/// shape as `review_html.writeBoundaryContracts` but reads
+/// `env_mod.SectionPort` directly (the schematic page never builds the
+/// flattened `PortSummary` view).
+fn writeSectionBoundaryContracts(w: anytype, sec: Section) !void {
+    var any = false;
+    for (sec.ports) |p| {
+        if (p.electrical != null) {
+            any = true;
+            break;
+        }
+    }
+    if (!any) return;
+
+    try w.writeAll("<details open class=\"sec-contracts\"><summary>Boundary contracts</summary>");
+    try w.writeAll("<table class=\"contracts\"><thead><tr>");
+    try w.writeAll("<th>Port</th><th>Dir</th><th>Type</th>");
+    try w.writeAll("<th>V<sub>OH</sub></th><th>V<sub>OL</sub></th>");
+    try w.writeAll("<th>V<sub>IH</sub></th><th>V<sub>IL</sub></th>");
+    try w.writeAll("<th>V<sub>max</sub></th><th>Drive</th><th>Domain</th>");
+    try w.writeAll("</tr></thead><tbody>");
+    for (sec.ports) |p| {
+        const e = p.electrical orelse continue;
+        try w.writeAll("<tr><td><code>");
+        try writeHtmlEscaped(w, p.name);
+        try w.print("</code></td><td>{s}</td><td>", .{@tagName(p.direction)});
+        if (e.electrical_type) |t| {
+            try writeHtmlEscaped(w, @tagName(t));
+        } else {
+            try w.writeAll(MUTED_EM_DASH);
+        }
+        try w.writeAll("</td>");
+        try writeContractVoltCell(w, e.v_oh_typ);
+        try writeContractVoltCell(w, e.v_ol_typ);
+        try writeContractVoltCell(w, e.v_ih_min);
+        try writeContractVoltCell(w, e.v_il_max);
+        try writeContractVoltCell(w, e.max_voltage);
+        try w.writeAll("<td>");
+        if (e.drive) |d| {
+            try writeHtmlEscaped(w, @tagName(d));
+        } else {
+            try w.writeAll(MUTED_EM_DASH);
+        }
+        try w.writeAll("</td><td>");
+        if (e.domain.len > 0) {
+            try writeHtmlEscaped(w, e.domain);
+        } else {
+            try w.writeAll(MUTED_EM_DASH);
+        }
+        try w.writeAll("</td></tr>");
+    }
+    try w.writeAll("</tbody></table></details>");
+}
+
+fn writeContractVoltCell(w: anytype, v: ?f64) !void {
+    try w.writeAll("<td>");
+    if (v) |x| {
+        try w.print("{d:.2}", .{x});
+    } else {
+        try w.writeAll(MUTED_EM_DASH);
+    }
+    try w.writeAll("</td>");
 }
 
 fn writeNotes(w: anytype, notes: []const env_mod.SectionNote) !void {

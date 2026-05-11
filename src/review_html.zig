@@ -18,7 +18,7 @@ const spanSpanSep: []const u8 = "</span><span>";
 const tableSectionClose: []const u8 = "</tbody></table></section>";
 const tdTrClose: []const u8 = "</td></tr>";
 const tdSep: []const u8 = "</td><td>";
-const mutedDash: []const u8 = "<span class=\"muted\">—</span>";
+pub const mutedDash: []const u8 = "<span class=\"muted\">—</span>";
 const trCodeOpen: []const u8 = "<tr><td><code>";
 
 /// Render a ReviewDoc as a self-contained HTML page. Inline CSS. One small
