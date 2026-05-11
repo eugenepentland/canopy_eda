@@ -1,0 +1,110 @@
+// Component-library browser. The data side stays in `library.zig`
+// (`collectRows` walks `lib/components/`, `lib/pinouts/`, `lib/footprints/`
+// and yields a `LibraryRow` slice); this template just turns it into HTML.
+
+const library_mod = @import("../library.zig");
+const assets_css = @import("../assets_css.zig");
+const home_tmpl = @import("pages.zig");
+const LibraryRow = library_mod.LibraryRow;
+
+const STYLE_BLOCK: []const u8 = "<style>" ++
+    assets_css.NAVBAR_CSS ++
+    @embedFile("../assets/library.css") ++
+    "</style>";
+
+const UPLOAD_BLOCK: []const u8 = @embedFile("../assets/library_upload.html");
+
+pub templ Library(rows: []const LibraryRow) {
+    <!DOCTYPE html>
+    <html>
+        <head>
+            <title>Component Library</title>
+            {!STYLE_BLOCK}
+        </head>
+        <body>
+            @home_tmpl.Navbar("library")
+            <div class="lib-content">
+                <h1>Component Library</h1>
+                {!UPLOAD_BLOCK}
+                <input
+                    type="text" class="search-box" id="lib-search"
+                    placeholder="Search components, footprints, pinouts..." autofocus />
+                <div class="count-info" id="count-info"></div>
+                <table id="lib-table">
+                    <thead>
+                        <tr><th>Name</th><th>Type</th><th>Details</th></tr>
+                    </thead>
+                    <tbody>
+                        for (rows) |row| {
+                            @Row(row)
+                        }
+                    </tbody>
+                </table>
+                <div class="pagination" id="pagination">
+                    <button id="page-prev">&larr; Prev</button>
+                    <span class="page-info" id="page-info"></span>
+                    <button id="page-next">Next &rarr;</button>
+                </div>
+            </div>
+            <script src="/static/library.js"></script>
+        </body>
+    </html>
+}
+
+pub templ Row(row: LibraryRow) {
+    <tr data-search={row.search_text}>
+        <td>{row.name}</td>
+        <td>
+            switch (row.kind) {
+                .family => {
+                    <span class="tag tag-family">family</span>
+                },
+                .component => {
+                    <span class="tag tag-component">component</span>
+                },
+                .pinout => {
+                    <span class="tag tag-pinout">pinout</span>
+                },
+                .footprint => {
+                    <span class="tag tag-footprint">footprint</span>
+                },
+            }
+        </td>
+        <td>
+            switch (row.kind) {
+                .family, .component => {
+                    @ComponentDetails(row)
+                },
+                .pinout => {
+                    if (row.pin_count) |pc| {
+                        <span class="meta">{pc} pins</span>
+                    }
+                },
+                .footprint => {},
+            }
+        </td>
+    </tr>
+}
+
+pub templ ComponentDetails(row: LibraryRow) {
+    if (row.description) |d| {
+        <span class="desc">{d}</span><br />
+    }
+    if (row.footprint) |fp| {
+        <span class="meta">footprint: </span>
+        <span class="tag tag-footprint">{fp}</span>
+        if (row.has_3d_model) {
+            <span class="meta" style="font-size:0.8rem;">3D</span>
+        }
+    }
+    if (row.pinout) |po| {
+        <span class="meta">pinout: </span>
+        <span class="tag tag-pinout">{po}</span>
+    }
+    if (row.manufacturer) |m| {
+        <span class="meta">mfr: {m}</span>
+    }
+    if (row.mpn) |m| {
+        <span class="meta">mpn: {m}</span>
+    }
+}
