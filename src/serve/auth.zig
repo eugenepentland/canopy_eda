@@ -1828,7 +1828,8 @@ pub fn loginPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handler
 
 /// GET /auth/setup — first-user bootstrap page. Redirects to `/auth/login`
 /// when at least one credential already exists; otherwise renders the
-/// passkey-registration UI for the initial admin account.
+/// passkey-registration UI for the initial admin account. Markup lives in
+/// `templates/auth.zt`; per-page JS is served from `/static/auth_setup.js`.
 pub fn setupPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const existing = try loadCredentials(ctx.allocator, ctx.auth_dir);
     if (existing.len > 0) {
@@ -1836,82 +1837,10 @@ pub fn setupPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handler
         res.header(HEADER_LOCATION, PATH_AUTH_LOGIN);
         return;
     }
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    try auth_template.Setup.render(.{}, &aw.writer);
     res.content_type = .HTML;
-    res.body =
-        HTML_DOCTYPE_HEAD ++
-        "<title>Setup - Canopy EDA</title><style>" ++ PAGE_STYLE ++ HTML_STYLE_HEAD_BODY_OPEN ++
-        HTML_AUTH_CARD_OPEN ++
-        HTML_BRAND_SPAN ++
-        "<h1>Setup Passkey</h1>" ++
-        "<p>Register a passkey to secure remote access to your EDA server.</p>" ++
-        HTML_EMAIL_INPUT ++
-        HTML_INPUT_STYLE_MID ++
-        "<button class=\"auth-btn\" id=\"register-btn\">Register Passkey</button>" ++
-        HTML_STATUS_DIV ++
-        "<a class=\"link\" href=\"/auth/login\">Already registered? Sign in</a>" ++
-        "</div>" ++
-        HTML_SCRIPT_OPEN ++ B64URL_JS ++
-        \\const btn = document.getElementById('register-btn');
-        \\const emailInput = document.getElementById('email');
-        \\const status = document.getElementById('status');
-        \\btn.addEventListener('click', async () => {
-        \\  const email = emailInput.value.trim();
-        \\  if (!email || !email.includes('@')) {
-        \\    status.className = 'status error';
-        \\    status.textContent = 'Please enter a valid email address';
-        \\    return;
-        \\  }
-        \\  btn.disabled = true;
-        \\  status.className = 'status';
-        \\  status.textContent = 'Requesting challenge...';
-        \\  try {
-        \\    const challengeRes = await fetch('/auth/register/challenge?email=' + encodeURIComponent(email));
-        \\    const opts = await challengeRes.json();
-        \\    const publicKey = {
-        \\      challenge: b64urlToBytes(opts.challenge),
-        \\      rp: opts.rp,
-        \\      user: {
-        \\        id: b64urlToBytes(opts.user.id),
-        \\        name: opts.user.name,
-        \\        displayName: opts.user.displayName
-        \\      },
-        \\      pubKeyCredParams: opts.pubKeyCredParams,
-        \\      authenticatorSelection: opts.authenticatorSelection,
-        \\      timeout: opts.timeout
-        \\    };
-        \\    status.textContent = 'Waiting for passkey...';
-        \\    const cred = await navigator.credentials.create({ publicKey });
-        \\    status.textContent = 'Registering...';
-        \\    const body = JSON.stringify({
-        \\      id: bytesToB64url(cred.rawId),
-        \\      email: email,
-        \\      response: {
-        \\        attestationObject: bytesToB64url(cred.response.attestationObject),
-        \\        clientDataJSON: bytesToB64url(cred.response.clientDataJSON)
-        \\      }
-        \\    });
-        \\    const verifyRes = await fetch('/auth/register/complete', {
-        \\      method: 'POST',
-        \\      headers: { 'Content-Type': 'application/json' },
-        \\      body: body
-        \\    });
-        \\    const result = await verifyRes.json();
-        \\    if (result.ok) {
-        \\      status.className = 'status ok';
-        \\      status.textContent = 'Passkey registered!';
-        \\      window.location.href = '/';
-        \\    } else {
-        \\      status.className = 'status error';
-        \\      status.textContent = result.error || 'Registration failed';
-        \\      btn.disabled = false;
-        \\    }
-        \\  } catch (e) {
-        \\    status.className = 'status error';
-        \\    status.textContent = e.message || 'Registration failed';
-        \\    btn.disabled = false;
-        \\  }
-        \\});
-        ++ HTML_SCRIPT_BODY_CLOSE;
+    res.body = aw.written();
 }
 
 // ── Session / account management ─────────────────────────────────────
