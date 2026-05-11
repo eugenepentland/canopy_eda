@@ -124,6 +124,13 @@ pub const Port = struct {
     enable_net: []const u8 = "",
     /// Whether this port is optional (no ERC error if unconnected).
     optional: bool = false,
+    /// Optional electrical character carried by this port — declared via an
+    /// `(electrical (type ...) (v-oh-typ ...) ...)` sub-clause on a top-level
+    /// `(port …)`. Used by `checkVoltageDomainCompat` as a virtual
+    /// driver/receiver on the port's net so cross-board interface contracts
+    /// (e.g. "this mezzanine pin is 3.3 V CMOS") show up in ERC even when the
+    /// far-side device lives in a different design.
+    electrical: ?ElectricalDecl = null,
 };
 
 /// A note annotation.
@@ -595,6 +602,13 @@ pub const SectionPort = struct {
     protocol: []const u8 = "",
     /// Whether this port is optional (no ERC error if unconnected).
     optional: bool = false,
+    /// Optional electrical character carried by this port — declared via an
+    /// `(electrical (type ...) (v-oh-typ ...) ...)` sub-clause inside the
+    /// `(port …)` form. Same role as `Port.electrical`: feeds
+    /// `checkVoltageDomainCompat` so signals crossing a section boundary
+    /// (typical case: a mezzanine connector section declaring 3.3 V CMOS)
+    /// participate in driver/receiver compatibility checks.
+    electrical: ?ElectricalDecl = null,
 };
 
 /// A named calculation block with computed values.

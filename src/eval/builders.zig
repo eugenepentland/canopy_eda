@@ -11,6 +11,7 @@ const PinNetDecl = evaluator_mod.PinNetDecl;
 const NetTie = Evaluator.NetTie;
 const ids = @import("ids.zig");
 const instance_mod = @import("instance.zig");
+const electrical = @import("electrical.zig");
 
 const Node = ast.Node;
 const Value = env_mod.Value;
@@ -38,9 +39,20 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
     var group_list: std.ArrayListUnmanaged([]const u8) = .empty;
     var is_optional: bool = false;
 
+    var elec: ?env_mod.ElectricalDecl = null;
     var si: usize = 1;
     while (si < sf_children.len) : (si += 1) {
         const arg = sf_children[si];
+        if (arg.isForm("electrical")) {
+            const ec = arg.asList().?;
+            // The port form has no positional pin-name argument — the port's
+            // own name fills that role for ERC purposes. Caller sets `.pin`
+            // below once we know `port_name`.
+            var decl = env_mod.ElectricalDecl{ .pin = "" };
+            electrical.parseSubForms(&decl, ec[1..]);
+            elec = decl;
+            continue;
+        }
         if (arg.asAtom()) |atom| {
             if (std.mem.eql(u8, atom, "role")) {
                 si += 1;
@@ -102,6 +114,7 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
         }
     }
     if (port_name.len == 0) return null;
+    if (elec) |*d| d.pin = port_name;
     return .{
         .name = port_name,
         .direction = direction,
@@ -111,6 +124,7 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
         .role = role,
         .protocol = protocol,
         .optional = is_optional,
+        .electrical = elec,
     };
 }
 
@@ -496,7 +510,15 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
     var efficiency_linear: bool = false;
     var enable_net: []const u8 = "";
     var is_optional: bool = false;
+    var elec: ?env_mod.ElectricalDecl = null;
     for (args[dir_idx + 1 ..]) |arg| {
+        if (arg.isForm("electrical")) {
+            const ec = arg.asList().?;
+            var decl = env_mod.ElectricalDecl{ .pin = name };
+            electrical.parseSubForms(&decl, ec[1..]);
+            elec = decl;
+            continue;
+        }
         if (arg.isForm("rated")) {
             const rated_children = arg.asList().?;
             if (rated_children.len >= 3) {
@@ -549,6 +571,7 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
         .efficiency_linear = efficiency_linear,
         .enable_net = enable_net,
         .optional = is_optional,
+        .electrical = elec,
     };
 }
 

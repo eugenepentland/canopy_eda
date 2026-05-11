@@ -1,6 +1,6 @@
 # guardian-snapshot v1
-src/eval/env.zig:358: hardcoded std.heap.page_allocator outside main/test
-src/eval/env.zig:380: hardcoded std.heap.page_allocator outside main/test
+src/eval/env.zig:365: hardcoded std.heap.page_allocator outside main/test
+src/eval/env.zig:387: hardcoded std.heap.page_allocator outside main/test
 src/eval/power_budget.zig:453: hardcoded std.heap.page_allocator outside main/test
 src/eval/power_budget.zig:454: hardcoded std.heap.page_allocator outside main/test
 src/render_html.zig:595: hardcoded std.heap.page_allocator outside main/test

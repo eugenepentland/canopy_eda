@@ -64,6 +64,7 @@ src/eval/builtins.zig::evalBuiltin fn
 src/eval/builtins.zig::isBuiltin fn
 src/eval/design_block.zig::evalDesignBlock fn
 src/eval/electrical.zig::parse fn
+src/eval/electrical.zig::parseSubForms fn
 src/eval/env.zig::AssertionResult struct_
 src/eval/env.zig::BlockRole enum_
 src/eval/env.zig::CalcBlock struct_

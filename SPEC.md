@@ -141,6 +141,8 @@ Public functions: renderSchematic
 - Flags a sequencing cycle by emitting sequence_cycle per affected rail
 - Flags a net where the worst driver high level is below the worst receiver high threshold
 - Emits no voltage-domain violation when driver and receiver levels are compatible
+- Treats a section port with electrical metadata as a virtual driver and receiver on its net
+- Treats a top-level design port with electrical metadata as a virtual driver and receiver on its net
 
 ## eval/power_budget
 
@@ -167,13 +169,16 @@ Public functions: parse
 
 ## eval/electrical
 
-Public functions: parse
+Public functions: parse, parseSubForms
 
 - Parses pin function name from the first positional argument
 - Returns null when the pin function name is missing
 - Recognises every electrical-type enum atom
 - Parses voltage level fields v-ih-min v-il-max v-oh-typ v-ol-typ max-voltage
 - Ignores unknown sub-forms and unrecognised enum atoms
+- parseSubForms fills the electrical sub-fields on a caller-supplied ElectricalDecl
+- parseSubForms is used by the port parser to read inline (electrical ...) clauses
+- Port-level electrical declarations describe the logic levels carried by a net at a board boundary
 
 ## eval/power_config
 

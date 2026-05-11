@@ -26,7 +26,19 @@ pub fn parse(form_children: []const Node) ?ElectricalDecl {
     const pin_name = form_children[1].asString() orelse return null;
 
     var decl = ElectricalDecl{ .pin = pin_name };
-    for (form_children[2..]) |sub| {
+    parseSubForms(&decl, form_children[2..]);
+    return decl;
+}
+
+/// Fill the optional electrical fields on a caller-supplied
+/// `ElectricalDecl` from a slice of `(type ...)` / `(v-oh-typ ...)` /
+/// `(drive ...)` / etc. sub-form nodes. Shared between the library-level
+/// `(electrical "PIN" ...)` form and the inline `(electrical ...)` clause
+/// supported on top-level and section ports — the port form has no
+/// positional pin-name argument, so the call site sets `decl.pin` to
+/// the port name before invoking this helper.
+pub fn parseSubForms(decl: *ElectricalDecl, subs: []const Node) void {
+    for (subs) |sub| {
         const sub_list = sub.asList() orelse continue;
         if (sub_list.len < 2) continue;
         const head = sub_list[0].asAtom() orelse continue;
@@ -52,7 +64,6 @@ pub fn parse(form_children: []const Node) ?ElectricalDecl {
         }
         // Unknown sub-forms ignored.
     }
-    return decl;
 }
 
 fn parseElectricalType(s: []const u8) ?ElectricalType {
@@ -141,6 +152,44 @@ test "parse captures voltage levels" {
     try std.testing.expectApproxEqAbs(@as(f64, 0.4), decl.v_ol_typ.?, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 3.6), decl.max_voltage.?, 1e-9);
     try std.testing.expectEqualStrings("digital", decl.domain);
+}
+
+// spec: eval/electrical - parseSubForms fills the electrical sub-fields on a caller-supplied ElectricalDecl
+// spec: eval/electrical - parseSubForms is used by the port parser to read inline (electrical ...) clauses
+test "parseSubForms fills caller-supplied decl from sub-form list" {
+    const alloc = std.testing.allocator;
+    const src = "(electrical (type io) (drive push-pull) (v-oh-typ 3.1) (v-ih-min 2.31) (max-voltage 3.6) (domain digital))";
+    const nodes = try parser.parse(alloc, src);
+    defer parser.freeNodes(alloc, nodes);
+    const form = nodes[0].asList().?;
+    // Mimic the port-parser call: pin name is set by the caller (port name),
+    // then parseSubForms fills every other field.
+    var decl = ElectricalDecl{ .pin = "RF_SPI_SCK" };
+    parseSubForms(&decl, form[1..]);
+    try std.testing.expectEqualStrings("RF_SPI_SCK", decl.pin);
+    try std.testing.expectEqual(ElectricalType.io, decl.electrical_type.?);
+    try std.testing.expectEqual(Drive.push_pull, decl.drive.?);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.1), decl.v_oh_typ.?, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.31), decl.v_ih_min.?, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.6), decl.max_voltage.?, 1e-9);
+    try std.testing.expectEqualStrings("digital", decl.domain);
+}
+
+// spec: eval/electrical - Port-level electrical declarations describe the logic levels carried by a net at a board boundary
+test "port-level electrical decl carries boundary logic levels" {
+    // The port form has no positional pin-name argument — the port's own
+    // name fills that role. Verify parseSubForms preserves a caller-set
+    // pin slot and treats every following node as a sub-form.
+    const alloc = std.testing.allocator;
+    const src = "(electrical (type output) (v-oh-typ 3.1))";
+    const nodes = try parser.parse(alloc, src);
+    defer parser.freeNodes(alloc, nodes);
+    const form = nodes[0].asList().?;
+    var decl = ElectricalDecl{ .pin = "VBAT_MEZZ_OUT" };
+    parseSubForms(&decl, form[1..]);
+    try std.testing.expectEqualStrings("VBAT_MEZZ_OUT", decl.pin);
+    try std.testing.expectEqual(ElectricalType.output, decl.electrical_type.?);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.1), decl.v_oh_typ.?, 1e-9);
 }
 
 // spec: eval/electrical - Ignores unknown sub-forms and unrecognised enum atoms

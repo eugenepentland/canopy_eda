@@ -102,7 +102,38 @@ fn checkVoltageDomainCompat(
         if (inst.electrical.len == 0) continue;
         try ref_to_elec.put(allocator, inst.ref_des, inst.electrical);
     }
-    if (ref_to_elec.count() == 0) return;
+
+    // Build net → list-of-port-electrical-decls so each net's compatibility
+    // check folds in boundary-port declarations alongside component pins.
+    // Section ports use port.name as the net identifier; top-level ports
+    // carry an explicit `net` field. Both feed the same map.
+    var net_to_port_elec: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(env_mod.ElectricalDecl)) = .empty;
+    defer {
+        var it = net_to_port_elec.valueIterator();
+        while (it.next()) |list| list.deinit(allocator);
+        net_to_port_elec.deinit(allocator);
+    }
+
+    for (block.ports) |p| {
+        const e = p.electrical orelse continue;
+        if (e.electrical_type == null) continue;
+        const base = na.baseNetName(p.net);
+        const gop = try net_to_port_elec.getOrPut(allocator, base);
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        try gop.value_ptr.append(allocator, e);
+    }
+    for (block.sections) |sec| {
+        for (sec.ports) |sp| {
+            const e = sp.electrical orelse continue;
+            if (e.electrical_type == null) continue;
+            const base = na.baseNetName(sp.name);
+            const gop = try net_to_port_elec.getOrPut(allocator, base);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.append(allocator, e);
+        }
+    }
+
+    if (ref_to_elec.count() == 0 and net_to_port_elec.count() == 0) return;
 
     for (block.nets) |net| {
         // Skip GND / power-only nets — the driver/receiver distinction
@@ -116,24 +147,12 @@ fn checkVoltageDomainCompat(
         for (net.pins) |pin| {
             const elec = ref_to_elec.get(pin.ref_des) orelse continue;
             const decl = findPinDecl(elec, pin.pin) orelse continue;
-            const t = decl.electrical_type orelse continue;
+            applyDecl(decl, &worst_driver_high, &worst_receiver_high_threshold);
+        }
 
-            const is_driver = t == .output or t == .io or t == .power_out;
-            const is_receiver = t == .input or t == .io or t == .power_in;
-
-            if (is_driver) {
-                if (decl.v_oh_typ) |v| {
-                    if (worst_driver_high == null or v < worst_driver_high.?) {
-                        worst_driver_high = v;
-                    }
-                }
-            }
-            if (is_receiver) {
-                if (decl.v_ih_min) |v| {
-                    if (worst_receiver_high_threshold == null or v > worst_receiver_high_threshold.?) {
-                        worst_receiver_high_threshold = v;
-                    }
-                }
+        if (net_to_port_elec.get(base)) |port_decls| {
+            for (port_decls.items) |decl| {
+                applyDecl(decl, &worst_driver_high, &worst_receiver_high_threshold);
             }
         }
 
@@ -152,6 +171,31 @@ fn checkVoltageDomainCompat(
                         .net = base,
                     });
                 }
+            }
+        }
+    }
+}
+
+/// Fold one electrical declaration into the running worst-driver / worst-
+/// receiver tallies for a net. Pins and ports share this logic so port-level
+/// boundary contracts (e.g. "this mezz pin is 3.3 V CMOS") participate in the
+/// same driver-meets-threshold compare as component pins.
+fn applyDecl(decl: env_mod.ElectricalDecl, worst_driver_high: *?f64, worst_receiver_high_threshold: *?f64) void {
+    const t = decl.electrical_type orelse return;
+    const is_driver = t == .output or t == .io or t == .power_out;
+    const is_receiver = t == .input or t == .io or t == .power_in;
+
+    if (is_driver) {
+        if (decl.v_oh_typ) |v| {
+            if (worst_driver_high.* == null or v < worst_driver_high.*.?) {
+                worst_driver_high.* = v;
+            }
+        }
+    }
+    if (is_receiver) {
+        if (decl.v_ih_min) |v| {
+            if (worst_receiver_high_threshold.* == null or v > worst_receiver_high_threshold.*.?) {
+                worst_receiver_high_threshold.* = v;
             }
         }
     }
@@ -1591,6 +1635,113 @@ test "voltage-domain compatible levels pass" {
     for (violations.items) |v| {
         try std.testing.expect(v.kind != .voltage_domain_incompatible);
     }
+}
+
+// spec: erc - Treats a section port with electrical metadata as a virtual driver and receiver on its net
+test "section port electrical decl flags incompatible receiver" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // A bare receiver pin on net "SIG" with v_ih_min=2.31 V (3.3 V CMOS).
+    // No component driver — the driver is a section port that declares
+    // v_oh_typ=1.7 V (1.8 V CMOS). Check that the port acts as the virtual
+    // driver and the pair gets flagged.
+    const rcv_elec = try alloc.alloc(env_mod.ElectricalDecl, 1);
+    rcv_elec[0] = .{ .pin = "1", .electrical_type = .input, .v_ih_min = 2.31 };
+    const insts = try alloc.alloc(env_mod.Instance, 1);
+    insts[0] = .{
+        .ref_des = "U1",
+        .component = "rcv",
+        .value = "",
+        .footprint = "",
+        .symbol = "",
+        .electrical = rcv_elec,
+    };
+    const pins = try alloc.alloc(env_mod.PinRef, 1);
+    pins[0] = .{ .ref_des = "U1", .pin = "1" };
+    const nets = try alloc.alloc(env_mod.Net, 1);
+    nets[0] = .{ .name = "SIG", .pins = pins };
+
+    const sec_ports = try alloc.alloc(env_mod.SectionPort, 1);
+    sec_ports[0] = .{
+        .name = "SIG",
+        .direction = .out,
+        .electrical = .{ .pin = "SIG", .electrical_type = .output, .v_oh_typ = 1.7 },
+    };
+    const secs = try alloc.alloc(env_mod.Section, 1);
+    secs[0] = .{ .name = "Mezz", .ports = sec_ports };
+
+    const block: DesignBlock = .{
+        .name = "port-fixture",
+        .instances = insts,
+        .nets = nets,
+        .ports = &.{},
+        .sections = secs,
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkVoltageDomainCompat(alloc, &block, &violations);
+    var hit = false;
+    for (violations.items) |v| {
+        if (v.kind == .voltage_domain_incompatible and std.mem.eql(u8, v.net, "SIG")) hit = true;
+    }
+    try std.testing.expect(hit);
+}
+
+// spec: erc - Treats a top-level design port with electrical metadata as a virtual driver and receiver on its net
+test "top-level port electrical decl flags incompatible receiver" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Mirror of the section-port test, but the boundary contract lives on
+    // a top-level `(port …)` instead of a section port. Net resolves via
+    // the port's explicit `net` field.
+    const rcv_elec = try alloc.alloc(env_mod.ElectricalDecl, 1);
+    rcv_elec[0] = .{ .pin = "1", .electrical_type = .input, .v_ih_min = 2.31 };
+    const insts = try alloc.alloc(env_mod.Instance, 1);
+    insts[0] = .{
+        .ref_des = "U1",
+        .component = "rcv",
+        .value = "",
+        .footprint = "",
+        .symbol = "",
+        .electrical = rcv_elec,
+    };
+    const pins = try alloc.alloc(env_mod.PinRef, 1);
+    pins[0] = .{ .ref_des = "U1", .pin = "1" };
+    const nets = try alloc.alloc(env_mod.Net, 1);
+    nets[0] = .{ .name = "BUS", .pins = pins };
+
+    const top_ports = try alloc.alloc(env_mod.Port, 1);
+    top_ports[0] = .{
+        .name = "BUS_OUT",
+        .net = "BUS",
+        .direction = "out",
+        .electrical = .{ .pin = "BUS_OUT", .electrical_type = .output, .v_oh_typ = 1.7 },
+    };
+
+    const block: DesignBlock = .{
+        .name = "top-port-fixture",
+        .instances = insts,
+        .nets = nets,
+        .ports = top_ports,
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkVoltageDomainCompat(alloc, &block, &violations);
+    var hit = false;
+    for (violations.items) |v| {
+        if (v.kind == .voltage_domain_incompatible and std.mem.eql(u8, v.net, "BUS")) hit = true;
+    }
+    try std.testing.expect(hit);
 }
 
 // spec: erc - Flags a sequencing cycle by emitting sequence_cycle per affected rail
