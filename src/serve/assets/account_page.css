@@ -1,5 +1,5 @@
-body{display:block;align-items:initial;justify-content:initial;padding:40px 16px}
-.wrap{max-width:760px;margin:0 auto}
+body{display:block;align-items:initial;justify-content:initial;padding:0}
+.wrap{max-width:760px;margin:0 auto;padding:32px 16px 40px}
 h1,h2{color:#f0f6fc}
 h2{font-size:1.1rem;margin:0 0 10px 0}
 .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:20px 24px;margin-bottom:20px}

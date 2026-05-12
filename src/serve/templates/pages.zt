@@ -81,7 +81,7 @@ pub templ Navbar(active: []const u8) {
         <span class="brand">Canopy EDA</span>
         <a href="/" class={if (std.mem.eql(u8, active, "designs")) "active" else null}>Designs</a>
         <a href="/library" class={if (std.mem.eql(u8, active, "library")) "active" else null}>Library</a>
-        <a href="/account" style="margin-left:auto">Account</a>
+        <a href="/account" style="margin-left:auto" class={if (std.mem.eql(u8, active, "account")) "active" else null}>Account</a>
     </div>
 }
 

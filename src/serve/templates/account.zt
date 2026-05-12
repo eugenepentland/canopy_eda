@@ -1,12 +1,14 @@
 const auth_mod = @import("../auth.zig");
 const oauth_store = @import("../oauth_store.zig");
 const users_mod = @import("../users.zig");
+const assets_css = @import("../assets_css.zig");
+const home_tmpl = @import("pages.zig");
 
 // <style> and <script> are zt raw-text elements — expressions inside aren't
 // interpolated, so the inline auth blocks ship as single raw chunks emitted
 // via `{!...}` outside the tags. The page-specific CSS/JS are linked
 // externally and served by `static_assets.staticAsset` at /static/.
-const AUTH_STYLE_BLOCK: []const u8 = "<style>" ++ auth_mod.PAGE_STYLE ++ "</style>";
+const AUTH_STYLE_BLOCK: []const u8 = "<style>" ++ auth_mod.PAGE_STYLE ++ assets_css.NAVBAR_CSS ++ "</style>";
 const AUTH_SCRIPT_BLOCK: []const u8 = "<script>" ++ auth_mod.B64URL_JS ++ "</script>";
 
 const ROLE_OPTIONS = [_][]const u8{ "admin", "writer", "reader" };
@@ -27,10 +29,11 @@ pub templ Account(
             <link rel="stylesheet" href="/static/account_page.css" />
         </head>
         <body>
+            @home_tmpl.Navbar("account")
             <div class="wrap">
                 <div class="user-bar">
                     <span class="email">
-                        <a href="/">← Designs</a> · Signed in as {email}
+                        Signed in as {email}
                         <span class="role-pill role-{role.toString()}">{role.toString()}</span>
                     </span>
                     <button id="logout-btn">Sign out</button>
