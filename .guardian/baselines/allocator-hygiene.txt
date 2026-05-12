@@ -3,7 +3,7 @@ src/eval/env.zig:365: hardcoded std.heap.page_allocator outside main/test
 src/eval/env.zig:387: hardcoded std.heap.page_allocator outside main/test
 src/eval/power_budget.zig:453: hardcoded std.heap.page_allocator outside main/test
 src/eval/power_budget.zig:454: hardcoded std.heap.page_allocator outside main/test
-src/render_html.zig:596: hardcoded std.heap.page_allocator outside main/test
+src/render_html.zig:589: hardcoded std.heap.page_allocator outside main/test
 src/render_svg/context.zig:236: hardcoded std.heap.page_allocator outside main/test
 src/review_md.zig:310: hardcoded std.heap.page_allocator outside main/test
 src/serve.zig:43: hardcoded std.heap.page_allocator outside main/test

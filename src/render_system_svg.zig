@@ -56,7 +56,7 @@ pub fn renderSystemOverviewSvg(
     allocator: Allocator,
     block: *const DesignBlock,
     w: anytype,
-) std.mem.Allocator.Error!void {
+) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     var cols: [4]std.ArrayListUnmanaged(Chip) = .{ .empty, .empty, .empty, .empty };
     defer for (&cols) |*c| c.deinit(allocator);
 

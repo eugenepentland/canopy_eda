@@ -37,8 +37,10 @@ const endpointEql = draw.endpointEql;
 const Allocator = std.mem.Allocator;
 
 /// Error set for the JSON scene-graph emitter — uses the same
-/// `ArrayListUnmanaged(u8).writer()` pattern, so just `Allocator.Error`.
-pub const RenderError = std.mem.Allocator.Error;
+/// `ArrayListUnmanaged(u8).writer()` (only OOM) plus `*std.Io.Writer`
+/// (adds `WriteFailed`) — `draw.RenderError` propagates the same union
+/// up through `mergeAwareHubHeight` → `renderSceneGraph`.
+pub const RenderError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
 // ── Layout constants ──────────────────────────────────────────────
 const HALF_DIVISOR: f64 = 2.0;

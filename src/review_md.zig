@@ -37,7 +37,7 @@ pub fn renderToMarkdown(
     doc: review.ReviewDoc,
     source: []const u8,
     check_results: *const CheckResultMap,
-) std.mem.Allocator.Error![]const u8 {
+) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
     var ctx = try render_html.setupRenderCtx(allocator, block);
     ctx.project_dir = project_dir;
 

@@ -5,9 +5,10 @@ const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const render_power_tree_svg = @import("render_power_tree_svg.zig");
 
-/// Error set for HTML emit helpers in this module — the writers are
-/// `ArrayListUnmanaged(u8).writer()`, so only `OutOfMemory` propagates.
-pub const RenderError = std.mem.Allocator.Error;
+/// Error set for HTML emit helpers in this module. Covers both writer
+/// shapes the schematic page uses: an `ArrayListUnmanaged.writer()`
+/// (only `OutOfMemory`) and a `*std.Io.Writer` (adds `WriteFailed`).
+pub const RenderError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
 // ── Repeated string literals ──────────────────────────────────────
 const codeTdSep: []const u8 = "</code></td><td>";

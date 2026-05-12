@@ -5,9 +5,10 @@ const Endpoint = ctx_mod.Endpoint;
 
 const Allocator = std.mem.Allocator;
 
-/// Error set for SVG-emit helpers — every writer used here is an
-/// `ArrayListUnmanaged(u8).writer()` whose only failure is `OutOfMemory`.
-pub const RenderError = std.mem.Allocator.Error;
+/// Error set for SVG-emit helpers. Covers both writer shapes the schematic
+/// page calls into: an `ArrayListUnmanaged.writer()` (only `OutOfMemory`)
+/// and a `*std.Io.Writer` (adds `WriteFailed`).
+pub const RenderError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
 // ── Layout Constants (re-exported for sub-modules) ────────────────────
 pub const hub_width: f64 = 180.0;

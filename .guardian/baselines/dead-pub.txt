@@ -13,6 +13,7 @@ src/render_svg/hub.zig::renderHub: unused public declaration
 src/render_svg/hub.zig::renderHubPart: unused public declaration
 src/render_svg/section_inset.zig::partitionGroups: unused public declaration
 src/serve/assets_css.zig::DESIGN_CSS: unused public declaration
+src/serve/assets_css.zig::writeNavbar: unused public declaration
 src/serve/auth.zig::managePage: unused public declaration
 src/serve/edit.zig::addInstanceCore: unused public declaration
 src/serve/edit.zig::removeInstanceCore: unused public declaration

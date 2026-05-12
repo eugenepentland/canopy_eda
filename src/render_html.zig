@@ -22,6 +22,7 @@ const section_inset = @import("render_svg/section_inset.zig");
 const system_svg = @import("render_system_svg.zig");
 const rb = @import("render_block_types.zig");
 const bom_html = @import("serve/bom_html.zig");
+const pages_tmpl = @import("serve/templates/pages.zig");
 const isHub = draw.isHub;
 const pinOrder = draw.pinOrder;
 
@@ -60,8 +61,8 @@ pub fn renderToHtml(
     var asserted_fns: std.StringHashMapUnmanaged([]const u8) = .empty;
     try appendAssertedFromBlock(allocator, &asserted_fns, block);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const w = buf.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    const w = &aw.writer;
 
     try w.writeAll("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
     try w.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
@@ -72,7 +73,7 @@ pub fn renderToHtml(
     if (review_doc != null) try w.writeAll(review_html.BODY_CSS);
     try w.writeAll("</style></head><body>");
 
-    try writeNavbar(w);
+    try pages_tmpl.Navbar.render(.{""}, w);
     try w.writeAll("<div class=\"sch-layout\">");
     try w.writeAll("<div class=\"sch-wrap\">");
     try writeHeader(w, block.name, design_name, status);
@@ -157,15 +158,7 @@ pub fn renderToHtml(
     }
     try w.writeAll("</body></html>");
 
-    return buf.items;
-}
-
-fn writeNavbar(w: anytype) !void {
-    try w.writeAll("<div class=\"navbar\"><span class=\"brand\">Canopy EDA</span>");
-    try w.writeAll("<a href=\"/\">Designs</a>");
-    try w.writeAll("<a href=\"/library\">Library</a>");
-    try w.writeAll("<a href=\"/account\" style=\"margin-left:auto\">Account</a>");
-    try w.writeAll("</div>");
+    return aw.written();
 }
 
 fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: review.Status) !void {

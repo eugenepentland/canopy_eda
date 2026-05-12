@@ -28,7 +28,7 @@ pub fn render(
     allocator: Allocator,
     tree: PowerTree,
     w: anytype,
-) std.mem.Allocator.Error!void {
+) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     if (tree.nodes.len == 0) return;
 
     // Group nodes by layer to compute placement.

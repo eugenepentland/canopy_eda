@@ -145,7 +145,7 @@ src/render_html.zig::renderHubSvg | fn renderHubSvg( ctx: *RenderCtx, w: anytype
 src/render_html.zig::renderToHtml | fn renderToHtml( allocator: Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, navbar_css: []const u8, status: review.Status, review_doc: ?review.ReviewDoc, check_results: *const CheckResultMap, ) RenderError![]const u8
 src/render_html.zig::setupRenderCtx | fn setupRenderCtx(allocator: Allocator, block: *const DesignBlock) std.mem.Allocator.Error!RenderCtx
 src/render_json.zig::renderSceneGraph | fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project_dir: []const u8) RenderError![]const u8
-src/render_power_tree_svg.zig::render | fn render( allocator: Allocator, tree: PowerTree, w: anytype, ) std.mem.Allocator.Error!void
+src/render_power_tree_svg.zig::render | fn render( allocator: Allocator, tree: PowerTree, w: anytype, ) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
 src/render_svg/bom_table.zig::collectAllInstances | fn collectAllInstances(allocator: Allocator, block: *const DesignBlock, out: *std.ArrayListUnmanaged(env_mod.Instance)) RenderError!void
 src/render_svg/bom_table.zig::renderBomTable | fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBlock, y_start: f64, table_width: f64) RenderError!f64
 src/render_svg/branch.zig::drawBranchTreeLeft | fn drawBranchTreeLeft(self: *RenderCtx, w: anytype, junction_x: f64, center_y: f64, branches: []const Branch, junction_net: []const u8) RenderError!void
@@ -190,7 +190,7 @@ src/render_svg/hub.zig::renderHubPart | fn renderHubPart(self: *RenderCtx, w: an
 src/render_svg/section_inset.zig::partitionGroups | fn partitionGroups( allocator: std.mem.Allocator, ctx: *RenderCtx, hub_ref: []const u8, groups: []const PinGroup, ) RenderError!Partition
 src/render_svg/section_inset.zig::renderHubAllPins | fn renderHubAllPins( ctx: *RenderCtx, w: anytype, hub: FlatInst, groups: []const PinGroup, ) RenderError!void
 src/render_system_svg.zig::columnFor | fn columnFor(cat: rb.Category) Column
-src/render_system_svg.zig::renderSystemOverviewSvg | fn renderSystemOverviewSvg( allocator: Allocator, block: *const DesignBlock, w: anytype, ) std.mem.Allocator.Error!void
+src/render_system_svg.zig::renderSystemOverviewSvg | fn renderSystemOverviewSvg( allocator: Allocator, block: *const DesignBlock, w: anytype, ) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
 src/req_checks.zig::applyVerifications | fn applyVerifications( map: *std.StringHashMapUnmanaged([]Result), block: *const DesignBlock, instances: []const Instance, ) void
 src/req_checks.zig::deinit | fn deinit( allocator: std.mem.Allocator, m: *std.StringHashMapUnmanaged([]Result), ) void
 src/req_checks.zig::parseMicroFarads | fn parseMicroFarads(s: []const u8) ?f64
@@ -209,7 +209,7 @@ src/review_html.zig::writeSummaryTable | fn writeSummaryTable(w: anytype, s: rev
 src/review_html.zig::writeTestPoints | fn writeTestPoints(w: anytype, tps: []const review.TestPointEntry) RenderError!void
 src/review_html.zig::writeUnresolved | fn writeUnresolved(w: anytype, vs: []const erc_mod.Violation) RenderError!void
 src/review_json.zig::renderToJson | fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) std.mem.Allocator.Error![]const u8
-src/review_md.zig::renderToMarkdown | fn renderToMarkdown( allocator: Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, doc: review.ReviewDoc, source: []const u8, check_results: *const CheckResultMap, ) std.mem.Allocator.Error![]const u8
+src/review_md.zig::renderToMarkdown | fn renderToMarkdown( allocator: Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, doc: review.ReviewDoc, source: []const u8, check_results: *const CheckResultMap, ) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
 src/serve.zig::bumpLiveVersion | fn bumpLiveVersion(name: []const u8) u32
 src/serve.zig::getLiveVersion | fn getLiveVersion(name: []const u8) u32
 src/serve.zig::serve | fn serve( allocator: std.mem.Allocator, port: u16, project_dir: []const u8, auth_dir: ?[]const u8, ) ServeError!void
