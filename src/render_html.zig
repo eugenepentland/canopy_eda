@@ -66,9 +66,9 @@ pub fn renderToHtml(
     try w.writeAll("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
     try w.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     try w.print("<title>{s} — Schematic</title>", .{block.name});
+    try w.writeAll("<link rel=\"stylesheet\" href=\"/static/schematic.css\">");
     try w.writeAll("<style>");
     try w.writeAll(navbar_css);
-    try w.writeAll(SCHEMATIC_CSS);
     if (review_doc != null) try w.writeAll(review_html.BODY_CSS);
     try w.writeAll("</style></head><body>");
 
@@ -1057,9 +1057,7 @@ fn writeScripts(
     try w.writeAll(";var SCH_AUDIT=");
     try writeAuditSummary(w, review_doc);
     try w.writeAll(";</script>");
-    try w.writeAll("<script>");
-    try w.writeAll(SCHEMATIC_VIEWER_JS);
-    try w.writeAll("</script>");
+    try w.writeAll("<script src=\"/static/schematic_viewer.js\"></script>");
 }
 
 /// Emit the small JSON object the sidebar's "Audit" block reads to label
@@ -1079,7 +1077,10 @@ fn writeAuditSummary(w: anytype, review_doc: ?review.ReviewDoc) !void {
     }
 }
 
-const SCHEMATIC_VIEWER_JS = @import("serve/schematic_viewer_js.zig").SCHEMATIC_VIEWER_JS;
+/// JS bundle for the schematic viewer (sidebar search, click handlers, live
+/// reload). Served verbatim from `/static/schematic_viewer.js` — exposed pub
+/// so `static_assets.zig` can register it without a second `@embedFile`.
+pub const SCHEMATIC_VIEWER_JS = @import("serve/schematic_viewer_js.zig").SCHEMATIC_VIEWER_JS;
 
 /// Walk the design and emit a JSON object the sidebar JS uses for search +
 /// inspection. Shape:
@@ -1400,4 +1401,8 @@ fn writeUrlEncoded(w: anytype, s: []const u8) !void {
     }
 }
 
-const SCHEMATIC_CSS = @embedFile("assets/schematic_inline.css") ++ system_svg.SYSTEM_OVERVIEW_CSS;
+/// Schematic-page CSS bundle: per-page layout + the system-overview block
+/// classifier's column styles. Served from `/static/schematic.css` — exposed
+/// pub so `static_assets.zig` can register it without re-`@embedFile`-ing
+/// the source file.
+pub const SCHEMATIC_CSS = @embedFile("assets/schematic_inline.css") ++ system_svg.SYSTEM_OVERVIEW_CSS;

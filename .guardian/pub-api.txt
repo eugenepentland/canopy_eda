@@ -242,6 +242,8 @@ src/render_block_types.zig::classifySection fn
 src/render_block_types.zig::containsCI fn
 src/render_block_types.zig::toLower fn
 src/render_html.zig::RenderError value
+src/render_html.zig::SCHEMATIC_CSS value
+src/render_html.zig::SCHEMATIC_VIEWER_JS value
 src/render_html.zig::STATIC_SVG_CSS value
 src/render_html.zig::renderHubSvg fn
 src/render_html.zig::renderToHtml fn

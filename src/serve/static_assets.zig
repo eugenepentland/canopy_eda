@@ -16,6 +16,14 @@ const auth_manage_js = @embedFile("assets/auth_manage.js");
 const auth_manage_css = @embedFile("assets/auth_manage.css");
 const review_notes_js = @embedFile("assets/review_notes.js");
 
+// Schematic page assets — pub-imported from render_html so we don't
+// re-`@embedFile` the underlying byte slices (the JS lives under
+// `serve/assets/` already, but the CSS is the concatenation of
+// `assets/schematic_inline.css` and `system_svg.SYSTEM_OVERVIEW_CSS`).
+const render_html = @import("../render_html.zig");
+const schematic_viewer_js = render_html.SCHEMATIC_VIEWER_JS;
+const schematic_css = render_html.SCHEMATIC_CSS;
+
 /// Error set for the static-asset handler: only writer-side errors propagate
 /// to httpz; the lookup itself is fallible only via a 404.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
@@ -42,6 +50,8 @@ const REGISTRY = [_]Asset{
     .{ .name = "auth_manage.js", .body = auth_manage_js, .content_type = .JS },
     .{ .name = "auth_manage.css", .body = auth_manage_css, .content_type = .CSS },
     .{ .name = "review_notes.js", .body = review_notes_js, .content_type = .JS },
+    .{ .name = "schematic_viewer.js", .body = schematic_viewer_js, .content_type = .JS },
+    .{ .name = "schematic.css", .body = schematic_css, .content_type = .CSS },
 };
 
 /// GET /static/:name — serve an embedded JS/CSS asset. 404 if the name is
