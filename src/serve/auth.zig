@@ -725,6 +725,13 @@ pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     // Exempt auth paths
     if (std.mem.startsWith(u8, req.url.path, "/auth/")) return true;
 
+    // Exempt /static/* — the auth pages themselves pull their JS/CSS from
+    // there (e.g. /static/auth_login.js). Gating these on a session would
+    // 303 them back to /auth/login and the page would render with no
+    // event handlers attached. The registry in static_assets.zig is a
+    // curated allowlist, so this exempts only assets we explicitly ship.
+    if (std.mem.startsWith(u8, req.url.path, "/static/")) return true;
+
     // OAuth discovery + token/authorize endpoints must be reachable without
     // a logged-in session — Claude Code fetches these before it has a token.
     // RFC 7591 dynamic client registration is in the exempt set: the agent
