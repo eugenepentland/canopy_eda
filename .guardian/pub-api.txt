@@ -41,6 +41,16 @@ src/convert/symbol_helpers.zig::computeBodyBBox fn
 src/convert/symbol_helpers.zig::emitPinGroup fn
 src/convert/symbol_helpers.zig::emitSymbol fn
 src/convert/symbol_helpers.zig::mapElectricalType fn
+src/coverage.zig::CategoryCounts struct_
+src/coverage.zig::CheckCategory enum_
+src/coverage.zig::CheckResult struct_
+src/coverage.zig::ComponentClass enum_
+src/coverage.zig::InstanceCoverage struct_
+src/coverage.zig::OverallCoverage struct_
+src/coverage.zig::SectionCoverage struct_
+src/coverage.zig::computeInstanceCoverage fn
+src/coverage.zig::computeOverallCoverage fn
+src/coverage.zig::computeSectionCoverage fn
 src/emit.zig::emitResolved fn
 src/erc.zig::Severity value
 src/erc.zig::Violation struct_
@@ -360,6 +370,7 @@ src/review_html.zig::writeAssertions fn
 src/review_html.zig::writePowerBudget fn
 src/review_html.zig::writePowerSequence fn
 src/review_html.zig::writePowerTree fn
+src/review_html.zig::writeSectionCoverage fn
 src/review_html.zig::writeSummaryTable fn
 src/review_html.zig::writeTestPoints fn
 src/review_html.zig::writeUnresolved fn

@@ -122,14 +122,23 @@
         push({ kind: 'section', label: s.name, sub: s.description, slug: s.slug, category: s.category || '' });
       }
     });
-    // Components (hubs + passives)
+    // Components (hubs + passives) — match on ref, family, value, MPN,
+    // or manufacturer so designers can find a part by typing the
+    // manufacturer part number from the BOM.
     (SCH_INDEX.components || []).forEach(function (c) {
-      if (c.ref.toLowerCase().indexOf(q) !== -1 ||
+      var mpn = (c.mpn || '').toLowerCase();
+      var mfr = (c.manufacturer || '').toLowerCase();
+      var matched = c.ref.toLowerCase().indexOf(q) !== -1 ||
           (c.component || '').toLowerCase().indexOf(q) !== -1 ||
-          (c.value || '').toLowerCase().indexOf(q) !== -1) {
-        var sub = (c.component || '') + (c.value ? ' · ' + c.value : '');
-        push({ kind: 'comp', label: c.ref, sub: sub, ref: c.ref });
+          (c.value || '').toLowerCase().indexOf(q) !== -1 ||
+          mpn.indexOf(q) !== -1 ||
+          mfr.indexOf(q) !== -1;
+      if (!matched) return;
+      var sub = (c.component || '') + (c.value ? ' · ' + c.value : '');
+      if (mpn && (mpn.indexOf(q) !== -1 || mfr.indexOf(q) !== -1)) {
+        sub += ' · ' + (c.manufacturer ? c.manufacturer + ' ' : '') + c.mpn;
       }
+      push({ kind: 'comp', label: c.ref, sub: sub, ref: c.ref });
     });
     // Nets
     (SCH_INDEX.nets || []).forEach(function (n) {

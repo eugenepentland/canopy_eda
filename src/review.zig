@@ -3,6 +3,7 @@ const clock = @import("infra/clock.zig");
 const env_mod = @import("eval/env.zig");
 const erc_mod = @import("erc.zig");
 const req_checks = @import("req_checks.zig");
+const coverage = @import("coverage.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const DesignBlock = env_mod.DesignBlock;
@@ -51,6 +52,11 @@ pub const Summary = struct {
     bom_with_mpn: usize = 0,
     /// Path-qualified instances still missing an MPN. Sorted by ref_des.
     bom_missing_mpn: []const MissingMpn = &.{},
+    /// Whole-design coverage roll-up: how many placed components have
+    /// every required field filled in (value/footprint always; plus
+    /// MPN/manufacturer/datasheet/requirements-verified for ICs).
+    /// Feeds the summary-banner pill ("87% complete · 4 missing").
+    overall_coverage: coverage.OverallCoverage = .{},
 };
 
 /// One instance in the design that doesn't yet have an MPN. Surfaced in the
@@ -111,6 +117,10 @@ pub const SectionReport = struct {
     /// section (and nested sub-sections). Read-only in the review UI; edited
     /// by changing `lib/components/<name>.sexp`. Sorted by ref_des.
     component_requirements: []const ComponentRequirementEntry = &.{},
+    /// Per-section completeness roll-up: counts of instances checked,
+    /// instances fully complete, plus per-category filled/expected
+    /// tallies that drive the "MPN N/M" breakdown in the section card.
+    coverage: coverage.SectionCoverage = .{},
 };
 
 /// One component's set of library-declared requirements as seen from a
@@ -241,7 +251,7 @@ pub fn buildReview(
     const asserts = try buildAssertionReports(allocator, assertions);
     const unresolved = try filterUnresolved(allocator, violations);
 
-    const summary = try buildSummary(allocator, block, sections.len, violations, assertions);
+    const summary = try buildSummary(allocator, block, sections.len, violations, assertions, check_results);
     const generated_at = try isoTimestampNow(allocator);
 
     return .{
@@ -366,6 +376,7 @@ fn buildSummary(
     section_count: usize,
     violations: []const erc_mod.Violation,
     assertions: []const AssertionResult,
+    check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
 ) !Summary {
     var err: usize = 0;
     var warn: usize = 0;
@@ -407,6 +418,8 @@ fn buildSummary(
     try collectMpnCoverage(allocator, block, "", &bom_total, &bom_with_mpn, &bom_missing);
     std.mem.sort(MissingMpn, bom_missing.items, {}, lessThanMissingMpn);
 
+    const overall = try coverage.computeOverallCoverage(allocator, block, check_results);
+
     return .{
         .status = status,
         .section_count = section_count,
@@ -424,6 +437,7 @@ fn buildSummary(
         .bom_total = bom_total,
         .bom_with_mpn = bom_with_mpn,
         .bom_missing_mpn = bom_missing.items,
+        .overall_coverage = overall,
     };
 }
 
@@ -592,6 +606,7 @@ fn reportFromSection(
     }
 
     const comp_reqs = try collectComponentRequirements(allocator, block, sec, &refs, check_results);
+    const sec_coverage = try coverage.computeSectionCoverage(allocator, block, sec, check_results);
 
     return .{
         .name = sec.name,
@@ -603,6 +618,7 @@ fn reportFromSection(
         .instance_count = countSectionInstances(sec),
         .violations = filtered.items,
         .component_requirements = comp_reqs,
+        .coverage = sec_coverage,
     };
 }
 
@@ -1109,7 +1125,7 @@ test "buildSummary status pass" {
         .groups = &.{},
         .sub_blocks = &.{},
     };
-    const summary = try buildSummary(alloc, &block, 0, &.{}, &.{});
+    const summary = try buildSummary(alloc, &block, 0, &.{}, &.{}, null);
     try std.testing.expectEqual(Status.pass, summary.status);
 }
 
@@ -1130,7 +1146,7 @@ test "buildSummary status warn" {
     const violations = [_]erc_mod.Violation{
         .{ .kind = .missing_decoupling, .severity = .warning, .message = "x" },
     };
-    const summary = try buildSummary(alloc, &block, 0, &violations, &.{});
+    const summary = try buildSummary(alloc, &block, 0, &violations, &.{}, null);
     try std.testing.expectEqual(Status.warn, summary.status);
 }
 
@@ -1207,7 +1223,7 @@ test "buildSummary status fail" {
     const violations = [_]erc_mod.Violation{
         .{ .kind = .duplicate_refdes, .severity = .@"error", .message = "x" },
     };
-    const summary = try buildSummary(alloc, &block, 0, &violations, &.{});
+    const summary = try buildSummary(alloc, &block, 0, &violations, &.{}, null);
     try std.testing.expectEqual(Status.fail, summary.status);
 }
 
@@ -1235,7 +1251,7 @@ test "buildSummary tracks critical-component requirement coverage" {
         .groups = &.{},
         .sub_blocks = &.{},
     };
-    const summary = try buildSummary(alloc, &block, 0, &.{}, &.{});
+    const summary = try buildSummary(alloc, &block, 0, &.{}, &.{}, null);
     defer {
         for (summary.critical_missing_requirements) |m| alloc.free(m.ref_des);
         alloc.free(summary.critical_missing_requirements);
@@ -1267,7 +1283,7 @@ test "buildSummary respects requirements_ignored opt-out" {
         .groups = &.{},
         .sub_blocks = &.{},
     };
-    const summary = try buildSummary(alloc, &block, 0, &.{}, &.{});
+    const summary = try buildSummary(alloc, &block, 0, &.{}, &.{}, null);
     defer {
         for (summary.critical_missing_requirements) |m| alloc.free(m.ref_des);
         alloc.free(summary.critical_missing_requirements);

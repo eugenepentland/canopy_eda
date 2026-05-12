@@ -4,6 +4,7 @@ const erc_mod = @import("erc.zig");
 const review = @import("review.zig");
 const review_html = @import("review_html.zig");
 const req_checks = @import("req_checks.zig");
+const coverage = @import("coverage.zig");
 const CheckResultMap = std.StringHashMapUnmanaged([]req_checks.Result);
 const DesignBlock = env_mod.DesignBlock;
 const Section = env_mod.Section;
@@ -119,7 +120,7 @@ pub fn renderToHtml(
     try bom_html.writeSchematicBomHtml(w, block);
     try w.writeAll("</details>");
 
-    for (block.sections) |sec| try writeSection(&ctx, w, allocator, sec, 0, check_results);
+    for (block.sections) |sec| try writeSection(&ctx, w, allocator, block, sec, 0, check_results);
 
     // Designs without sections (typical of sub-block-only or flat hub+passives
     // designs like power-6v, pma3-14ln) still deserve a rendering. Emit a
@@ -309,7 +310,7 @@ fn writeSidebar(w: anytype, review_doc: ?review.ReviewDoc) !void {
     try w.writeAll("</nav>");
     try w.writeAll(
         \\<div class="sb-search">
-        \\<input type="search" id="sch-search" placeholder="Search net, ref, pin…" autocomplete="off" spellcheck="false">
+        \\<input type="search" id="sch-search" placeholder="Search net, ref, pin, MPN…" autocomplete="off" spellcheck="false">
         \\<div id="sb-results" class="sb-results"></div>
         \\</div>
         \\<div id="sb-detail" class="sb-detail"></div>
@@ -431,6 +432,7 @@ fn writeSection(
     ctx: *RenderCtx,
     w: anytype,
     allocator: Allocator,
+    block: *const DesignBlock,
     sec: Section,
     depth: u8,
     check_results: *const CheckResultMap,
@@ -448,6 +450,14 @@ fn writeSection(
     try w.writeAll("<div class=\"sec-head\"><h2>");
     try writeHtmlEscaped(w, sec.name);
     try w.print("</h2><span class=\"pill {s}\">{s}</span>", .{ status_pill, @tagName(sec.status) });
+    const sec_cov = try coverage.computeSectionCoverage(allocator, block, sec, check_results);
+    if (sec_cov.checked > 0) {
+        const cov_class: []const u8 = if (sec_cov.complete == sec_cov.checked) "pill-pass" else "pill-warn";
+        try w.print(
+            "<span class=\"pill {s}\" title=\"Click 'Coverage' below to see what's checked and what's missing\">{d}/{d} complete</span>",
+            .{ cov_class, sec_cov.complete, sec_cov.checked },
+        );
+    }
     try w.writeAll("</div>");
 
     if (sec.description.len > 0) {
@@ -455,6 +465,8 @@ fn writeSection(
         try writeHtmlEscaped(w, sec.description);
         try w.writeAll("</p>");
     }
+
+    try review_html.writeSectionCoverage(w, sec_cov);
 
     try writeSectionPorts(w, sec);
     try writeSectionBoundaryContracts(w, sec);
@@ -485,13 +497,45 @@ fn writeSection(
         try hub_refs.append(allocator, inst.ref_des);
     }
 
+    // Notes + requirements ride above the SVGs so the reviewer reads the
+    // design rationale + datasheet rules before drilling into pin-level
+    // wiring. Both blocks are collapsed by default to keep the section
+    // card scannable; each hub's <details> says "Requirements (N)".
+    if (sec.notes.len > 0) try writeNotes(w, sec.notes);
+    try writeSectionRequirements(ctx, w, allocator, sec.pin_groups, hub_refs.items, check_results);
+
     try writeSectionHubs(ctx, w, allocator, sec.pin_groups, hub_refs.items, check_results);
 
-    if (sec.notes.len > 0) try writeNotes(w, sec.notes);
-
-    for (sec.sub_sections) |sub| try writeSection(ctx, w, allocator, sub, depth + 1, check_results);
+    for (sec.sub_sections) |sub| try writeSection(ctx, w, allocator, block, sub, depth + 1, check_results);
 
     try w.writeAll(sectionClose);
+}
+
+/// Per-section requirements panel: walks every hub in the section and
+/// emits its `<details class="hub-reqs">` block. Rendered above the
+/// SVGs so the reviewer sees the datasheet-derived rules before they
+/// drill into pin-level wiring.
+fn writeSectionRequirements(
+    ctx: *RenderCtx,
+    w: anytype,
+    allocator: Allocator,
+    pin_groups: []const env_mod.PinGroup,
+    hub_refs: []const []const u8,
+    check_results: *const CheckResultMap,
+) !void {
+    for (hub_refs) |hub_ref| {
+        if (try analyzeHub(ctx, allocator, pin_groups, hub_ref)) |a| {
+            if (a.inst.requirements.len > 0) {
+                try w.print("<div class=\"sec-hub-reqs\" data-ref=\"{s}\"><h4 class=\"sec-hub-reqs-head\"><code>", .{a.inst.ref_des});
+                try writeHtmlEscaped(w, a.inst.ref_des);
+                try w.writeAll("</code> · ");
+                try writeHtmlEscaped(w, a.inst.component);
+                try w.writeAll("</h4>");
+                try writeHubRequirements(w, a, check_results);
+                try w.writeAll("</div>");
+            }
+        }
+    }
 }
 
 const HubAnalysis = struct {
@@ -540,7 +584,9 @@ fn writeHubCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, h: HubAnalysi
     try w.writeAll("<div class=\"hub-inset-wrap\">");
     try renderGroupedHubSvgs(ctx, w, allocator, h);
     try w.writeAll("</div>");
-    try writeHubRequirements(w, h, check_results);
+    // Requirements now render once per section (above the SVGs) via
+    // writeSectionRequirements — don't duplicate them inside each hub card.
+    _ = check_results;
     try w.writeAll("</div>");
 }
 
@@ -820,6 +866,10 @@ fn firstNet(g: PinGroup) []const u8 {
 
 fn writeSectionPorts(w: anytype, sec: Section) !void {
     if (sec.ports.len == 0) return;
+    try w.print(
+        "<details class=\"sec-ports\"><summary>Ports · {d}</summary>",
+        .{sec.ports.len},
+    );
     try w.writeAll("<table class=\"ports\"><thead><tr><th>Port</th><th>Dir</th><th>Type</th><th>Voltage</th><th>Role/Protocol</th></tr></thead><tbody>");
     for (sec.ports) |p| {
         try w.writeAll("<tr><td><code>");
@@ -839,7 +889,7 @@ fn writeSectionPorts(w: anytype, sec: Section) !void {
         if (p.protocol.len == 0 and p.role.len == 0) try w.writeAll(MUTED_EM_DASH);
         try w.writeAll("</td></tr>");
     }
-    try w.writeAll("</tbody></table>");
+    try w.writeAll("</tbody></table></details>");
 }
 
 /// Render the per-section "Boundary contracts" block on the schematic page —
@@ -859,7 +909,7 @@ fn writeSectionBoundaryContracts(w: anytype, sec: Section) !void {
     }
     if (!any) return;
 
-    try w.writeAll("<details open class=\"sec-contracts\"><summary>Boundary contracts</summary>");
+    try w.writeAll("<details class=\"sec-contracts\"><summary>Boundary contracts</summary>");
     try w.writeAll("<table class=\"contracts\"><thead><tr>");
     try w.writeAll("<th>Port</th><th>Dir</th><th>Type</th>");
     try w.writeAll("<th>V<sub>OH</sub></th><th>V<sub>OL</sub></th>");
@@ -1298,6 +1348,10 @@ fn emitComponentEntry(
     try writeJsString(w, inst.component);
     try w.writeAll(",\"value\":");
     try writeJsString(w, inst.value);
+    try w.writeAll(",\"mpn\":");
+    try writeJsString(w, inst.mpn);
+    try w.writeAll(",\"manufacturer\":");
+    try writeJsString(w, inst.manufacturer);
     try w.writeAll(",\"kind\":");
     try writeJsString(w, kind);
     try w.writeAll(",\"section\":");

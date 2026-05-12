@@ -4,6 +4,7 @@ const erc_mod = @import("erc.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const render_power_tree_svg = @import("render_power_tree_svg.zig");
+const coverage = @import("coverage.zig");
 
 /// Error set for HTML emit helpers in this module. Covers both writer
 /// shapes the schematic page uses: an `ArrayListUnmanaged.writer()`
@@ -20,6 +21,13 @@ const tdTrClose: []const u8 = "</td></tr>";
 const tdSep: []const u8 = "</td><td>";
 pub const mutedDash: []const u8 = "<span class=\"muted\">—</span>";
 const trCodeOpen: []const u8 = "<tr><td><code>";
+
+/// Coverage-pill thresholds for the summary banner. Green at ≥95%, amber
+/// at 70–94%, red below 70%. Picked so a near-perfect design lands green,
+/// a typical work-in-progress lands amber, and a barely-started design
+/// reads red at a glance.
+const COVERAGE_PASS_PCT: u8 = 95;
+const COVERAGE_WARN_PCT: u8 = 70;
 
 /// Render the power-tree section as a wrapping `<section>` with the SVG.
 /// Skips rendering when the tree has no nodes — sub-block-less designs
@@ -89,6 +97,12 @@ pub fn writeSummaryTable(w: anytype, s: review.Summary) RenderError!void {
             if (missing_mpn_n > 0) "warn" else "",
             missing_mpn_n,
         },
+    );
+    const oc = s.overall_coverage;
+    const oc_pill = coveragePillClass(oc.checked, oc.percent);
+    try w.print(
+        "<tr><th>Coverage</th><td colspan=\"5\"><span class=\"pill {s}\">{d}% complete</span> · {d} of {d} components fully filled in · {d} missing</td></tr>",
+        .{ oc_pill, oc.percent, oc.complete, oc.checked, oc.missing_total },
     );
     try w.writeAll("</table>");
     if (missing_n > 0) {
@@ -358,6 +372,8 @@ fn writeSections(w: anytype, sections: []const review.SectionReport) !void {
             try w.writeAll("</p>");
         }
 
+        try writeSectionCoverage(w, s.coverage);
+
         if (s.ports.len > 0) {
             try w.writeAll("<details open class=\"sec-ports\"><summary>Ports</summary><ul>");
             for (s.ports) |p| {
@@ -462,7 +478,7 @@ fn writeBoundaryContracts(w: anytype, ports: []const review.PortSummary) !void {
     }
     if (!any) return;
 
-    try w.writeAll("<details open class=\"sec-contracts\"><summary>Boundary contracts</summary>");
+    try w.writeAll("<details class=\"sec-contracts\"><summary>Boundary contracts</summary>");
     try w.writeAll("<table class=\"contracts\"><thead><tr>");
     try w.writeAll("<th>Port</th><th>Dir</th><th>Type</th>");
     try w.writeAll("<th>V<sub>OH</sub></th><th>V<sub>OL</sub></th>");
@@ -510,6 +526,97 @@ fn writeVoltCell(w: anytype, v: ?f64) !void {
         try w.writeAll("—");
     }
     try w.writeAll("</td>");
+}
+
+/// Render the per-section "Coverage" details block — a per-category
+/// breakdown of what's filled, plus a list of incomplete components and
+/// which specific fields they're missing. Collapsed by default so it
+/// doesn't clutter the section card. Skipped entirely when no checkable
+/// instances live in the section.
+pub fn writeSectionCoverage(w: anytype, c: coverage.SectionCoverage) RenderError!void {
+    if (c.checked == 0) return;
+    const incomplete = c.checked - c.complete;
+    try w.print(
+        "<details class=\"sec-coverage\"><summary>Coverage · {d}/{d} components fully filled in",
+        .{ c.complete, c.checked },
+    );
+    if (incomplete > 0) try w.print(" · {d} incomplete", .{incomplete});
+    try w.writeAll("</summary>");
+    try w.writeAll(
+        "<p class=\"hint\">Each placed component is checked for these fields. " ++
+            "Passives (R/C/L/F/D) need only <strong>value</strong> and <strong>footprint</strong>. " ++
+            "ICs additionally need <strong>MPN</strong>, <strong>manufacturer</strong>, <strong>datasheet</strong>, " ++
+            "and (when the library declares <code>(requirement …)</code> rules) every requirement <strong>verified</strong>.</p>",
+    );
+    try w.writeAll("<table class=\"coverage\"><thead><tr><th>Category</th><th>Filled</th></tr></thead><tbody>");
+    try writeCoverageRow(w, "Value", c.filled.value, c.expected.value);
+    try writeCoverageRow(w, "Footprint", c.filled.footprint, c.expected.footprint);
+    try writeCoverageRow(w, "MPN", c.filled.mpn, c.expected.mpn);
+    try writeCoverageRow(w, "Manufacturer", c.filled.manufacturer, c.expected.manufacturer);
+    try writeCoverageRow(w, "Datasheet", c.filled.datasheet, c.expected.datasheet);
+    try writeCoverageRow(w, "Requirements verified", c.filled.requirements_verified, c.expected.requirements_verified);
+    try w.writeAll("</tbody></table>");
+    try writeIncompleteInstances(w, c.instances);
+    try w.writeAll("</details>");
+}
+
+fn coveragePillClass(checked: usize, percent: u8) []const u8 {
+    if (checked == 0) return "pill-info";
+    if (percent >= COVERAGE_PASS_PCT) return "pill-pass";
+    if (percent >= COVERAGE_WARN_PCT) return "pill-warn";
+    return "pill-fail";
+}
+
+fn writeCoverageRow(w: anytype, label: []const u8, filled: usize, expected: usize) !void {
+    if (expected == 0) return;
+    const cls: []const u8 = if (filled == expected) "pass" else if (filled * 2 >= expected) "warn" else "fail";
+    try w.print(
+        "<tr><th>{s}</th><td class=\"{s}\">{d} / {d}</td></tr>",
+        .{ label, cls, filled, expected },
+    );
+}
+
+fn writeIncompleteInstances(w: anytype, instances: []const coverage.InstanceCoverage) !void {
+    var any = false;
+    for (instances) |ic| {
+        if (!ic.complete) {
+            any = true;
+            break;
+        }
+    }
+    if (!any) return;
+    try w.writeAll(
+        "<p class=\"hint\">Incomplete components:</p>" ++
+            "<table class=\"coverage-missing\"><thead><tr><th>Ref</th><th>Component</th><th>Missing</th></tr></thead><tbody>",
+    );
+    for (instances) |ic| {
+        if (ic.complete) continue;
+        try w.writeAll(trCodeOpen);
+        try writeHtmlEscaped(w, ic.ref_des);
+        try w.writeAll(codeTdToCode);
+        try writeHtmlEscaped(w, ic.component);
+        try w.writeAll(codeTdSep);
+        var first = true;
+        for (ic.checks) |chk| {
+            if (chk.ok) continue;
+            if (!first) try w.writeAll(", ");
+            first = false;
+            try writeHtmlEscaped(w, categoryLabel(chk.category));
+        }
+        try w.writeAll(tdTrClose);
+    }
+    try w.writeAll("</tbody></table>");
+}
+
+fn categoryLabel(c: coverage.CheckCategory) []const u8 {
+    return switch (c) {
+        .value => "value",
+        .footprint => "footprint",
+        .mpn => "MPN",
+        .manufacturer => "manufacturer",
+        .datasheet => "datasheet",
+        .requirements_verified => "requirements verified",
+    };
 }
 
 /// Render the Assertions section — one row per `(assert …)` /

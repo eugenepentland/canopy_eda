@@ -27,6 +27,9 @@ src/convert/symbol_helpers.zig::computeBodyBBox | fn computeBodyBBox(children: [
 src/convert/symbol_helpers.zig::emitPinGroup | fn emitPinGroup(w: anytype, pin_list: []const PinInfo, side: []const u8) std.mem.Allocator.Error!void
 src/convert/symbol_helpers.zig::emitSymbol | fn emitSymbol(allocator: std.mem.Allocator, w: anytype, sym_children: []const Node, sym_name: []const u8) std.mem.Allocator.Error!void
 src/convert/symbol_helpers.zig::mapElectricalType | fn mapElectricalType(kicad: []const u8) []const u8
+src/coverage.zig::computeInstanceCoverage | fn computeInstanceCoverage( allocator: std.mem.Allocator, inst: Instance, req_results: []const req_checks.Result, ) std.mem.Allocator.Error!?InstanceCoverage
+src/coverage.zig::computeOverallCoverage | fn computeOverallCoverage( allocator: std.mem.Allocator, block: *const DesignBlock, check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result), ) std.mem.Allocator.Error!OverallCoverage
+src/coverage.zig::computeSectionCoverage | fn computeSectionCoverage( allocator: std.mem.Allocator, block: *const DesignBlock, sec: Section, check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result), ) std.mem.Allocator.Error!SectionCoverage
 src/emit.zig::emitResolved | fn emitResolved(allocator: std.mem.Allocator, block: *const DesignBlock) std.mem.Allocator.Error![]const u8
 src/erc.zig::runErc | fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8) std.mem.Allocator.Error![]const Violation
 src/erc.zig::writeViolationsJson | fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Violation) std.mem.Allocator.Error![]const u8
@@ -205,6 +208,7 @@ src/review_html.zig::writeAssertions | fn writeAssertions(w: anytype, assertions
 src/review_html.zig::writePowerBudget | fn writePowerBudget(w: anytype, rails: []const power_budget.Rail) RenderError!void
 src/review_html.zig::writePowerSequence | fn writePowerSequence(w: anytype, rows: []const power_sequencing.SequenceRow) RenderError!void
 src/review_html.zig::writePowerTree | fn writePowerTree(allocator: std.mem.Allocator, w: anytype, tree: review.PowerTree) RenderError!void
+src/review_html.zig::writeSectionCoverage | fn writeSectionCoverage(w: anytype, c: coverage.SectionCoverage) RenderError!void
 src/review_html.zig::writeSummaryTable | fn writeSummaryTable(w: anytype, s: review.Summary) RenderError!void
 src/review_html.zig::writeTestPoints | fn writeTestPoints(w: anytype, tps: []const review.TestPointEntry) RenderError!void
 src/review_html.zig::writeUnresolved | fn writeUnresolved(w: anytype, vs: []const erc_mod.Violation) RenderError!void

@@ -190,7 +190,17 @@ fn writeSummary(w: anytype, s: review.Summary) !void {
         try writeJsonString(w, m.component);
         try w.writeAll("}");
     }
-    try w.writeAll("]}}");
+    try w.writeAll("]}");
+    try w.print(
+        ",\"overall_coverage\":{{\"checked\":{d},\"complete\":{d},\"missing\":{d},\"percent\":{d}}}",
+        .{
+            s.overall_coverage.checked,
+            s.overall_coverage.complete,
+            s.overall_coverage.missing_total,
+            s.overall_coverage.percent,
+        },
+    );
+    try w.writeAll("}");
 }
 
 fn writeSection(w: anytype, s: review.SectionReport) !void {
@@ -249,6 +259,43 @@ fn writeSection(w: anytype, s: review.SectionReport) !void {
     }
     try w.writeAll("]");
 
+    try writeSectionCoverage(w, s.coverage);
+
+    try w.writeAll("}");
+}
+
+/// Emit the per-section `"coverage"` block: a `checked`/`complete` pair
+/// plus per-category `filled`/`expected` maps so consumers can render
+/// "MPN N/M" tables without re-walking instances. Always emits the key
+/// (zero-counts when no checkable instances) so JSON schema stays
+/// stable.
+fn writeSectionCoverage(w: anytype, c: @import("coverage.zig").SectionCoverage) !void {
+    try w.print(
+        ",\"coverage\":{{\"checked\":{d},\"complete\":{d}",
+        .{ c.checked, c.complete },
+    );
+    try w.print(
+        ",\"filled\":{{\"value\":{d},\"footprint\":{d},\"mpn\":{d},\"manufacturer\":{d},\"datasheet\":{d},\"requirements_verified\":{d}}}",
+        .{
+            c.filled.value,
+            c.filled.footprint,
+            c.filled.mpn,
+            c.filled.manufacturer,
+            c.filled.datasheet,
+            c.filled.requirements_verified,
+        },
+    );
+    try w.print(
+        ",\"expected\":{{\"value\":{d},\"footprint\":{d},\"mpn\":{d},\"manufacturer\":{d},\"datasheet\":{d},\"requirements_verified\":{d}}}",
+        .{
+            c.expected.value,
+            c.expected.footprint,
+            c.expected.mpn,
+            c.expected.manufacturer,
+            c.expected.datasheet,
+            c.expected.requirements_verified,
+        },
+    );
     try w.writeAll("}");
 }
 

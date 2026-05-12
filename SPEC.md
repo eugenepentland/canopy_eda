@@ -210,6 +210,17 @@ Public functions: render
 - Renders a rounded-rect node per rail with name and nominal voltage
 - Returns immediately on a block with zero declared rails
 
+## coverage
+
+Public functions: computeInstanceCoverage, computeSectionCoverage, computeOverallCoverage
+
+- computeInstanceCoverage classifies passives by ref-des prefix and requires only value+footprint
+- computeInstanceCoverage requires MPN, manufacturer, datasheet, and verified requirements for ICs
+- computeInstanceCoverage honours requirements_ignored opt-out
+- computeSectionCoverage rolls instance results into checked/complete counts per category
+- computeOverallCoverage aggregates every section plus orphan sub-block instances
+- computeOverallCoverage returns 100% when the design has zero checkable instances
+
 ## review
 
 - buildPowerTree assigns each rail to a topological layer rooted at upstream sources
@@ -252,7 +263,7 @@ Public functions: runChecks, deinit, parseMicroFarads, parseOhms, parseMicroHenr
 
 ## review_html
 
-Public functions: writePowerTree, writeSummaryTable, writePowerBudget, writePowerSequence, writeTestPoints, writeUnresolved, writeAssertions
+Public functions: writePowerTree, writeSummaryTable, writePowerBudget, writePowerSequence, writeTestPoints, writeUnresolved, writeAssertions, writeSectionCoverage
 
 ## serve
 

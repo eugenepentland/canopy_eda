@@ -40,7 +40,21 @@ pub const FlatInst = struct {
     /// eval time. Lets the schematic renderer emit a per-hub "Requirements"
     /// dropdown without a second library parse.
     requirements: []const env_mod.Requirement = &.{},
+    /// Manufacturer part number lookup from `(property "mpn" "...")` —
+    /// surfaced in the sidebar search index so designers can find an
+    /// instance by typing an MPN substring (e.g. "STM32N657").
+    mpn: []const u8 = "",
+    /// Manufacturer name from `(property "manufacturer" "...")` —
+    /// also fed to the search index.
+    manufacturer: []const u8 = "",
 };
+
+fn propertyValue(props: []const env_mod.Property, key: []const u8) []const u8 {
+    for (props) |p| {
+        if (std.mem.eql(u8, p.key, key)) return p.value;
+    }
+    return "";
+}
 
 /// Schematic-renderer view of a net after sub-block flattening — name plus
 /// the list of pin refs that touch it. Equivalent of `env_mod.Net` once
@@ -270,6 +284,8 @@ pub const RenderCtx = struct {
                 .symbol = inst.symbol,
                 .parts = inst.parts,
                 .requirements = inst.requirements,
+                .mpn = propertyValue(inst.properties, "mpn"),
+                .manufacturer = propertyValue(inst.properties, "manufacturer"),
             };
             try self.instances.append(self.allocator, flat);
             try self.inst_map.put(self.allocator, rd, flat);

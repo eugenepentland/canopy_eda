@@ -82,10 +82,31 @@ details[open]>.rail-sum>.rail-caret{transform:rotate(90deg);}
 .pt-node-voltage{fill:#8b949e;font-family:"SF Mono","Fira Code",monospace;font-size:11px;}
 .pt-layer-title{fill:#6e7681;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:10px;text-transform:uppercase;letter-spacing:0.05em;}
 .pt-edge{stroke:#58a6ff;stroke-width:1.5;opacity:0.7;}
-.sec-contracts{margin:8px 0;}
-.sec-contracts>summary{color:#8b949e;font-size:0.85rem;cursor:pointer;padding:4px 0;}
-.sec-contracts>summary:hover{color:#c9d1d9;}
+.sec-contracts,.sec-notes{margin:8px 0;background:#0a0e14;border:1px solid #21262d;border-radius:6px;padding:8px 12px;}
+.sec-contracts>summary,.sec-notes>summary{color:#8b949e;font-size:0.85rem;cursor:pointer;padding:4px 0;font-weight:600;}
+.sec-contracts>summary:hover,.sec-notes>summary:hover{color:#c9d1d9;}
+.sec-contracts[open]>summary,.sec-notes[open]>summary{border-bottom:1px solid #21262d;margin-bottom:8px;padding-bottom:6px;}
 table.contracts{font-size:0.85rem;margin:6px 0 4px;}
 table.contracts th{font-size:0.7rem;background:transparent;letter-spacing:0.04em;color:#6e7681;}
 table.contracts td{font-family:"SF Mono","Fira Code",monospace;color:#c9d1d9;padding:5px 8px;}
 table.contracts td:nth-child(1),table.contracts td:nth-child(2),table.contracts td:nth-child(3),table.contracts td:nth-child(9),table.contracts td:nth-child(10){color:#8b949e;}
+.sec-hub-reqs{margin:8px 0;}
+.sec-hub-reqs-head{margin:0 0 4px;font-size:0.8rem;color:#8b949e;font-weight:600;letter-spacing:0.02em;}
+.sec-hub-reqs-head code{font-size:0.78rem;background:#21262d;padding:1px 6px;border-radius:3px;color:#c9d1d9;}
+.sec-ports{margin:8px 0;background:#0a0e14;border:1px solid #21262d;border-radius:6px;padding:8px 12px;}
+.sec-ports>summary{color:#8b949e;font-size:0.85rem;cursor:pointer;padding:4px 0;font-weight:600;}
+.sec-ports>summary:hover{color:#c9d1d9;}
+.sec-ports[open]>summary{border-bottom:1px solid #21262d;margin-bottom:8px;padding-bottom:6px;}
+.sec-coverage{margin:8px 0;background:#0a0e14;border:1px solid #21262d;border-radius:6px;padding:8px 12px;}
+.sec-coverage>summary{color:#8b949e;font-size:0.85rem;cursor:pointer;padding:4px 0;font-weight:600;}
+.sec-coverage>summary:hover{color:#c9d1d9;}
+.sec-coverage[open]>summary{border-bottom:1px solid #21262d;margin-bottom:8px;padding-bottom:6px;}
+.sec-coverage .hint{margin:6px 0 8px;line-height:1.5;}
+.sec-coverage .hint strong{color:#c9d1d9;font-weight:600;}
+table.coverage{font-size:0.85rem;margin:6px 0 10px;max-width:340px;}
+table.coverage th{font-size:0.72rem;background:transparent;letter-spacing:0.04em;color:#6e7681;text-transform:uppercase;width:auto;}
+table.coverage td{font-family:"SF Mono","Fira Code",monospace;color:#c9d1d9;padding:5px 10px;}
+table.coverage-missing{font-size:0.85rem;margin:6px 0 4px;}
+table.coverage-missing th{font-size:0.72rem;background:transparent;letter-spacing:0.04em;color:#6e7681;text-transform:uppercase;}
+table.coverage-missing td{font-family:"SF Mono","Fira Code",monospace;color:#c9d1d9;padding:5px 10px;}
+table.coverage-missing td:last-child{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#d29922;}
