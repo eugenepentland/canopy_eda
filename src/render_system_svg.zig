@@ -52,15 +52,23 @@ const svg_w: f64 = col_count * col_w + (col_count - 1) * col_gap;
 /// Render the system overview as an inline SVG. Each chip is one section
 /// (or sub-block) from the design, placed into one of four columns by its
 /// classified category. Clicking a chip jumps to that section's card below.
+///
+/// `sub_attachments[i]` is non-null when sub-block `i` was adopted by a
+/// section (see `render_html.computeSubBlockAttachments`). Adopted
+/// sub-blocks are folded into their section's chip so the overview shows
+/// one entry per functional block — e.g. section "USB" + sub-block "usb"
+/// collapses to a single USB chip — and so the chip link doesn't dangle
+/// at `#sec-<sub-name>` (the attached card uses `#sub-<slug>`).
 pub fn renderSystemOverviewSvg(
     allocator: Allocator,
     block: *const DesignBlock,
+    sub_attachments: []const ?usize,
     w: anytype,
 ) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     var cols: [4]std.ArrayListUnmanaged(Chip) = .{ .empty, .empty, .empty, .empty };
     defer for (&cols) |*c| c.deinit(allocator);
 
-    try collectChips(allocator, block, &cols);
+    try collectChips(allocator, block, sub_attachments, &cols);
 
     var any = false;
     for (cols) |c| if (c.items.len > 0) {
@@ -229,10 +237,18 @@ fn writeHtmlEscaped(w: anytype, s: []const u8) !void {
 fn collectChips(
     allocator: Allocator,
     block: *const DesignBlock,
+    sub_attachments: []const ?usize,
     cols: *[4]std.ArrayListUnmanaged(Chip),
 ) !void {
     for (block.sections) |sec| try addSection(allocator, sec, cols);
-    for (block.sub_blocks) |sb| try addSubBlock(allocator, sb, cols);
+    for (block.sub_blocks, 0..) |sb, sb_idx| {
+        // Skip sub-blocks that fold into a section's card — the section's
+        // chip already represents them and the standalone chip's
+        // `#sec-<slug>` link would dangle (the attached card uses
+        // `#sub-<slug>` instead).
+        if (sb_idx < sub_attachments.len and sub_attachments[sb_idx] != null) continue;
+        try addSubBlock(allocator, sb, cols);
+    }
 
     // Designs without any explicit `(section …)` still render one synthetic
     // card whose anchor is `#sec-design` (see render_html.writeFlatHubs). Emit
@@ -358,7 +374,7 @@ test "sections become chips in their mapped column" {
 
     var cols: [4]std.ArrayListUnmanaged(Chip) = .{ .empty, .empty, .empty, .empty };
     defer for (&cols) |*c| c.deinit(testing.allocator);
-    try collectChips(testing.allocator, &block, &cols);
+    try collectChips(testing.allocator, &block, &.{}, &cols);
 
     try testing.expectEqual(@as(usize, 1), cols[@intFromEnum(Column.hub)].items.len);
     try testing.expectEqual(@as(usize, 1), cols[@intFromEnum(Column.regulation)].items.len);
@@ -387,7 +403,7 @@ test "sub-sections produce their own chips" {
 
     var cols: [4]std.ArrayListUnmanaged(Chip) = .{ .empty, .empty, .empty, .empty };
     defer for (&cols) |*c| c.deinit(testing.allocator);
-    try collectChips(testing.allocator, &block, &cols);
+    try collectChips(testing.allocator, &block, &.{}, &cols);
 
     // Parent + two children, all classified as power → regulation column.
     try testing.expectEqual(@as(usize, 3), cols[@intFromEnum(Column.regulation)].items.len);
@@ -407,10 +423,54 @@ test "sub-blocks produce chips classified by name" {
 
     var cols: [4]std.ArrayListUnmanaged(Chip) = .{ .empty, .empty, .empty, .empty };
     defer for (&cols) |*c| c.deinit(testing.allocator);
-    try collectChips(testing.allocator, &block, &cols);
+    try collectChips(testing.allocator, &block, &.{}, &cols);
 
     try testing.expectEqual(@as(usize, 1), cols[@intFromEnum(Column.regulation)].items.len);
     try testing.expectEqual(@as(usize, 1), cols[@intFromEnum(Column.peripheral)].items.len);
+}
+
+// spec: render_system_svg - Folds adopted sub-blocks into their section chip
+test "attached sub-blocks are folded into their section chip" {
+    const sections = [_]Section{
+        .{ .name = "USB", .description = "USB 2.0 HS" },
+        .{ .name = "XSPI2 NOR Flash", .description = "1Gbit OctoSPI" },
+    };
+    var usb_design = emptyBlock("usb-c-hs");
+    var flash_design = emptyBlock("mx66uw-flash");
+    var imu_design = emptyBlock("bno08x-imu");
+    const sub_blocks = [_]SubBlock{
+        .{ .name = "usb", .block = &usb_design },
+        .{ .name = "flash", .block = &flash_design },
+        // Unattached sub-block keeps its own chip — the overview still
+        // needs an entry for IMU because no section adopted it.
+        .{ .name = "imu", .block = &imu_design },
+    };
+    var block = emptyBlock("demo");
+    block.sections = &sections;
+    block.sub_blocks = &sub_blocks;
+
+    // Mirror computeSubBlockAttachments: usb→sec0, flash→sec1, imu unattached.
+    const attachments = [_]?usize{ 0, 1, null };
+
+    var cols: [4]std.ArrayListUnmanaged(Chip) = .{ .empty, .empty, .empty, .empty };
+    defer for (&cols) |*c| c.deinit(testing.allocator);
+    try collectChips(testing.allocator, &block, &attachments, &cols);
+
+    var total: usize = 0;
+    var saw_usb = false;
+    var saw_flash = false;
+    for (cols) |c| {
+        total += c.items.len;
+        for (c.items) |chip| {
+            if (std.mem.eql(u8, chip.label, "usb")) saw_usb = true;
+            if (std.mem.eql(u8, chip.label, "flash")) saw_flash = true;
+        }
+    }
+    // Two section chips + one unattached sub-block chip; the "usb" and
+    // "flash" sub-blocks fold away.
+    try testing.expectEqual(@as(usize, 3), total);
+    try testing.expect(!saw_usb);
+    try testing.expect(!saw_flash);
 }
 
 // spec: render_system_svg - Falls back to one synthetic chip when a design has no sections
@@ -427,7 +487,7 @@ test "flat design with only top-level hubs produces a synthetic chip" {
 
     var cols: [4]std.ArrayListUnmanaged(Chip) = .{ .empty, .empty, .empty, .empty };
     defer for (&cols) |*c| c.deinit(testing.allocator);
-    try collectChips(testing.allocator, &block, &cols);
+    try collectChips(testing.allocator, &block, &.{}, &cols);
 
     var total: usize = 0;
     for (cols) |c| total += c.items.len;

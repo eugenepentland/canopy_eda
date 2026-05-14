@@ -22,6 +22,7 @@ const upload_datasheet = @import("serve/upload_datasheet.zig");
 const pdf_viewer = @import("serve/pdf_viewer.zig");
 const footprint_preview = @import("serve/footprint_preview.zig");
 const schematic_page = @import("serve/schematic_page.zig");
+const modules_page = @import("serve/modules.zig");
 const auth = @import("serve/auth.zig");
 const mcp = @import("serve/mcp.zig");
 const oauth = @import("serve/oauth.zig");
@@ -170,9 +171,12 @@ pub fn serve(
     router.get("/style.css", pages.cssPage, .{});
     router.get("/static/:name", static_assets.staticAsset, .{});
     router.get("/schematics/:name", schematic_page.schematicPage, .{});
+    router.get("/modules", modules_page.modulesListPage, .{});
+    router.get("/modules/:name", modules_page.moduleViewPage, .{});
 
     // API
     router.post("/api/push/:name", api.pushApi, .{});
+    router.get("/api/module-source", modules_page.moduleSourceApi, .{});
     router.get("/api/version/:name", api.versionApi, .{});
     router.get("/api/export-kicad/:name", api.exportKicadApi, .{});
     router.get("/api/export-netlist/:name", api.exportNetlistApi, .{});

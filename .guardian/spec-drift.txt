@@ -144,6 +144,7 @@ src/render_block_types.zig::classifyByName | fn classifyByName(name: []const u8,
 src/render_block_types.zig::classifySection | fn classifySection(sec: env_mod.Section) Category
 src/render_block_types.zig::containsCI | fn containsCI(haystack: []const u8, needle: []const u8) bool
 src/render_block_types.zig::toLower | fn toLower(c: u8) u8
+src/render_html.zig::computeSubBlockAttachments | fn computeSubBlockAttachments( allocator: Allocator, block: *const DesignBlock, ) ![]?usize
 src/render_html.zig::renderHubSvg | fn renderHubSvg( ctx: *RenderCtx, w: anytype, allocator: Allocator, pin_groups: []const env_mod.PinGroup, hub_ref: []const u8, ) RenderError!bool
 src/render_html.zig::renderToHtml | fn renderToHtml( allocator: Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, navbar_css: []const u8, status: review.Status, review_doc: ?review.ReviewDoc, check_results: *const CheckResultMap, ) RenderError![]const u8
 src/render_html.zig::setupRenderCtx | fn setupRenderCtx(allocator: Allocator, block: *const DesignBlock) std.mem.Allocator.Error!RenderCtx
@@ -190,10 +191,11 @@ src/render_svg/hub.zig::groupHeights | fn groupHeights(self: *RenderCtx, groups:
 src/render_svg/hub.zig::groupHubPins | fn groupHubPins( self: *RenderCtx, pins: []const []const u8, adj_entries: []const AdjEntry, pin_names: *const std.StringHashMapUnmanaged([]const u8), ) RenderError![]const PinGroup
 src/render_svg/hub.zig::renderHub | fn renderHub(self: *RenderCtx, w: anytype, hub: FlatInst, y_start: f64) RenderError!f64
 src/render_svg/hub.zig::renderHubPart | fn renderHubPart(self: *RenderCtx, w: anytype, hub: FlatInst, part: env_mod.Part, y_start: f64) RenderError!f64
+src/render_svg/hub.zig::splitGroupsByHeight | fn splitGroupsByHeight( self: *RenderCtx, all_groups: []const PinGroup, hub_ref: []const u8, ) RenderError!SplitGroups
 src/render_svg/section_inset.zig::partitionGroups | fn partitionGroups( allocator: std.mem.Allocator, ctx: *RenderCtx, hub_ref: []const u8, groups: []const PinGroup, ) RenderError!Partition
 src/render_svg/section_inset.zig::renderHubAllPins | fn renderHubAllPins( ctx: *RenderCtx, w: anytype, hub: FlatInst, groups: []const PinGroup, ) RenderError!void
 src/render_system_svg.zig::columnFor | fn columnFor(cat: rb.Category) Column
-src/render_system_svg.zig::renderSystemOverviewSvg | fn renderSystemOverviewSvg( allocator: Allocator, block: *const DesignBlock, w: anytype, ) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
+src/render_system_svg.zig::renderSystemOverviewSvg | fn renderSystemOverviewSvg( allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize, w: anytype, ) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
 src/req_checks.zig::applyVerifications | fn applyVerifications( map: *std.StringHashMapUnmanaged([]Result), block: *const DesignBlock, instances: []const Instance, ) void
 src/req_checks.zig::deinit | fn deinit( allocator: std.mem.Allocator, m: *std.StringHashMapUnmanaged([]Result), ) void
 src/req_checks.zig::parseMicroFarads | fn parseMicroFarads(s: []const u8) ?f64
@@ -318,6 +320,9 @@ src/serve/mcp_tools.zig::listDesignNames | fn listDesignNames(allocator: std.mem
 src/serve/mcp_tools.zig::listDesignSummaries | fn listDesignSummaries( allocator: std.mem.Allocator, project_dir: []const u8, ) ToolError![]DesignSummary
 src/serve/mcp_tools.zig::listFreePins | fn listFreePins( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, filter: ?[]const u8, w: anytype, ) ToolError!bool
 src/serve/mcp_tools.zig::renderSceneGraph | fn renderSceneGraph( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) ToolError![]const u8
+src/serve/modules.zig::moduleSourceApi | fn moduleSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/modules.zig::moduleViewPage | fn moduleViewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/modules.zig::modulesListPage | fn modulesListPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/oauth.zig::authorizeApprove | fn authorizeApprove(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/oauth.zig::authorizePage | fn authorizePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/oauth.zig::metadataAuthServer | fn metadataAuthServer(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void

@@ -281,28 +281,11 @@ pub fn renderHubAllPins(
     }
     try applyMergeAnnotations(ctx, hub.ref_des, groups, &saved);
 
-    var left_list: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var right_list: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var left_pc: usize = 0;
-    var right_pc: usize = 0;
-    for (groups) |g| {
-        var n: usize = 0;
-        var it = std.mem.splitScalar(u8, g.pin_numbers, ',');
-        while (it.next()) |_| n += 1;
-        if (left_pc <= right_pc) {
-            try left_list.append(ctx.allocator, g);
-            left_pc += n;
-        } else {
-            try right_list.append(ctx.allocator, g);
-            right_pc += n;
-        }
-    }
-
-    const left_groups = left_list.items;
-    const right_groups = right_list.items;
-
-    const left_heights = try hub_mod.groupHeights(ctx, left_groups, hub.ref_des);
-    const right_heights = try hub_mod.groupHeights(ctx, right_groups, hub.ref_des);
+    const split = try hub_mod.splitGroupsByHeight(ctx, groups, hub.ref_des);
+    const left_groups = split.left;
+    const right_groups = split.right;
+    const left_heights = split.left_heights;
+    const right_heights = split.right_heights;
 
     var left_total: f64 = 0;
     for (left_heights) |h| left_total += h;

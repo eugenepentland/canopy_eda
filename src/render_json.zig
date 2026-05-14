@@ -414,6 +414,56 @@ fn mergeAwareGroupHeights(ctx: *RenderCtx, allocator: Allocator, groups: []const
     return heights;
 }
 
+/// Mirror of `hub_mod.SplitGroups` for the merge-aware path.
+const MergeAwareSplit = struct {
+    left: []const PinGroup,
+    right: []const PinGroup,
+    left_heights: []f64,
+    right_heights: []f64,
+};
+
+/// Balance hub pin groups into left/right columns by visual height
+/// (merge-aware variant). Mirrors `hub_mod.splitGroupsByHeight` but
+/// uses `mergeAwareGroupHeights` so identical single-passive spokes
+/// (e.g. a row of decoupling caps tied to the same rail) collapse to
+/// one slot. Greedy: walks groups in their `groupHubPins` order and
+/// assigns each to whichever column is currently shorter.
+fn splitGroupsByMergeAwareHeight(
+    ctx: *RenderCtx,
+    allocator: Allocator,
+    all_groups: []const PinGroup,
+    hub_ref: []const u8,
+) !MergeAwareSplit {
+    const all_heights = try mergeAwareGroupHeights(ctx, allocator, all_groups, hub_ref);
+    defer allocator.free(all_heights);
+
+    var left: std.ArrayListUnmanaged(PinGroup) = .empty;
+    var right: std.ArrayListUnmanaged(PinGroup) = .empty;
+    var left_h: std.ArrayListUnmanaged(f64) = .empty;
+    var right_h: std.ArrayListUnmanaged(f64) = .empty;
+    var left_total: f64 = 0;
+    var right_total: f64 = 0;
+
+    for (all_groups, all_heights) |group, h| {
+        if (left_total <= right_total) {
+            try left.append(allocator, group);
+            try left_h.append(allocator, h);
+            left_total += h;
+        } else {
+            try right.append(allocator, group);
+            try right_h.append(allocator, h);
+            right_total += h;
+        }
+    }
+
+    return .{
+        .left = try left.toOwnedSlice(allocator),
+        .right = try right.toOwnedSlice(allocator),
+        .left_heights = try left_h.toOwnedSlice(allocator),
+        .right_heights = try right_h.toOwnedSlice(allocator),
+    };
+}
+
 /// Compute hub height using merge-aware group heights.
 fn mergeAwareHubHeight(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, part: ?env_mod.Part) !f64 {
     const adj_entries = if (ctx.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
@@ -451,28 +501,9 @@ fn mergeAwareHubHeight(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, par
     defer pn_map.deinit(allocator);
 
     const all_groups = try hub_mod.groupHubPins(ctx, all_pins_list.items, adj_entries, &pn_map);
-    var left_groups_list: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var right_groups_list: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var left_pc: usize = 0;
-    var right_pc: usize = 0;
-
-    for (all_groups) |group| {
-        var n: usize = 0;
-        var it = std.mem.splitScalar(u8, group.pin_numbers, ',');
-        while (it.next()) |_| n += 1;
-        if (left_pc <= right_pc) {
-            try left_groups_list.append(allocator, group);
-            left_pc += n;
-        } else {
-            try right_groups_list.append(allocator, group);
-            right_pc += n;
-        }
-    }
-
-    const left_groups = left_groups_list.toOwnedSlice(allocator) catch &[_]PinGroup{};
-    const right_groups = right_groups_list.toOwnedSlice(allocator) catch &[_]PinGroup{};
-    const left_heights = try mergeAwareGroupHeights(ctx, allocator, left_groups, hub.ref_des);
-    const right_heights = try mergeAwareGroupHeights(ctx, allocator, right_groups, hub.ref_des);
+    const split = try splitGroupsByMergeAwareHeight(ctx, allocator, all_groups, hub.ref_des);
+    const left_heights = split.left_heights;
+    const right_heights = split.right_heights;
 
     var left_total: f64 = 0;
     for (left_heights) |h| left_total += h;
@@ -808,28 +839,11 @@ fn collectHubData(
     defer pn_map.deinit(allocator);
 
     const all_groups = try hub_mod.groupHubPins(ctx, all_pins_list.items, adj_entries, &pn_map);
-    var left_groups_list: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var right_groups_list: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var left_pc: usize = 0;
-    var right_pc: usize = 0;
-
-    for (all_groups) |group| {
-        var n: usize = 0;
-        var it = std.mem.splitScalar(u8, group.pin_numbers, ',');
-        while (it.next()) |_| n += 1;
-        if (left_pc <= right_pc) {
-            try left_groups_list.append(allocator, group);
-            left_pc += n;
-        } else {
-            try right_groups_list.append(allocator, group);
-            right_pc += n;
-        }
-    }
-
-    const left_groups = left_groups_list.toOwnedSlice(allocator) catch &[_]PinGroup{};
-    const right_groups = right_groups_list.toOwnedSlice(allocator) catch &[_]PinGroup{};
-    const left_heights = try mergeAwareGroupHeights(ctx, allocator, left_groups, hub.ref_des);
-    const right_heights = try mergeAwareGroupHeights(ctx, allocator, right_groups, hub.ref_des);
+    const split = try splitGroupsByMergeAwareHeight(ctx, allocator, all_groups, hub.ref_des);
+    const left_groups = split.left;
+    const right_groups = split.right;
+    const left_heights = split.left_heights;
+    const right_heights = split.right_heights;
 
     var left_total: f64 = 0;
     for (left_heights) |h| left_total += h;

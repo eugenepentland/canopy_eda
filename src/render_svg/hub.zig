@@ -53,28 +53,11 @@ pub fn renderHubPart(self: *RenderCtx, w: anytype, hub: FlatInst, part: env_mod.
     defer pn_map.deinit(self.allocator);
 
     const all_groups = try groupHubPins(self, all_pins.items, adj_entries, &pn_map);
-    var left_groups_list: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var right_groups_list: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var left_pin_count: usize = 0;
-    var right_pin_count: usize = 0;
-
-    for (all_groups) |group| {
-        var n: usize = 0;
-        var iter = std.mem.splitScalar(u8, group.pin_numbers, ',');
-        while (iter.next()) |_| n += 1;
-        if (left_pin_count <= right_pin_count) {
-            try left_groups_list.append(self.allocator, group);
-            left_pin_count += n;
-        } else {
-            try right_groups_list.append(self.allocator, group);
-            right_pin_count += n;
-        }
-    }
-
-    const left_groups = left_groups_list.toOwnedSlice(self.allocator) catch &[_]PinGroup{};
-    const right_groups = right_groups_list.toOwnedSlice(self.allocator) catch &[_]PinGroup{};
-    const left_heights = try groupHeights(self, left_groups, hub.ref_des);
-    const right_heights = try groupHeights(self, right_groups, hub.ref_des);
+    const split = try splitGroupsByHeight(self, all_groups, hub.ref_des);
+    const left_groups = split.left;
+    const right_groups = split.right;
+    const left_heights = split.left_heights;
+    const right_heights = split.right_heights;
 
     var left_total: f64 = 0;
     for (left_heights) |h| left_total += h;
@@ -150,27 +133,11 @@ pub fn renderHub(self: *RenderCtx, w: anytype, hub: FlatInst, y_start: f64) Rend
     defer pn_map.deinit(self.allocator);
 
     const all_groups = try groupHubPins(self, all_pins, adj_entries, &pn_map);
-    var left_groups_list: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var right_groups_list: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var left_pc: usize = 0;
-    var right_pc: usize = 0;
-    for (all_groups) |group| {
-        var n: usize = 0;
-        var it = std.mem.splitScalar(u8, group.pin_numbers, ',');
-        while (it.next()) |_| n += 1;
-        if (left_pc <= right_pc) {
-            try left_groups_list.append(self.allocator, group);
-            left_pc += n;
-        } else {
-            try right_groups_list.append(self.allocator, group);
-            right_pc += n;
-        }
-    }
-    const left_groups = left_groups_list.toOwnedSlice(self.allocator) catch &[_]PinGroup{};
-    const right_groups = right_groups_list.toOwnedSlice(self.allocator) catch &[_]PinGroup{};
-
-    const left_heights = try groupHeights(self, left_groups, hub.ref_des);
-    const right_heights = try groupHeights(self, right_groups, hub.ref_des);
+    const split = try splitGroupsByHeight(self, all_groups, hub.ref_des);
+    const left_groups = split.left;
+    const right_groups = split.right;
+    const left_heights = split.left_heights;
+    const right_heights = split.right_heights;
 
     var left_total: f64 = 0;
     for (left_heights) |h| left_total += h;
@@ -384,6 +351,59 @@ fn dedupConns(self: *RenderCtx, conns: []const AdjEntry) ![]const AdjEntry {
         }
     }
     return result.toOwnedSlice(self.allocator);
+}
+
+/// Result of splitting hub pin groups into left/right columns.
+pub const SplitGroups = struct {
+    left: []const PinGroup,
+    right: []const PinGroup,
+    left_heights: []f64,
+    right_heights: []f64,
+};
+
+/// Split hub pin groups into left/right columns, balancing by visual
+/// height (per-group branch slots from `groupHeights`) instead of raw
+/// pin count. Walks groups in order — preserving the alphabetical-by-net
+/// order from `groupHubPins` — and assigns each to whichever column has
+/// less accumulated height. Pin-count balancing was misleading: a single
+/// merged GND group with N pins renders as one short row, while N
+/// single-pin signal groups stack into N tall rows, so equal pin counts
+/// could leave one side a full chip-height taller than the other (most
+/// visible on parts like AD7380-4 where signals/inputs cluster on one
+/// physical side of the IC).
+pub fn splitGroupsByHeight(
+    self: *RenderCtx,
+    all_groups: []const PinGroup,
+    hub_ref: []const u8,
+) RenderError!SplitGroups {
+    const all_heights = try groupHeights(self, all_groups, hub_ref);
+    defer self.allocator.free(all_heights);
+
+    var left: std.ArrayListUnmanaged(PinGroup) = .empty;
+    var right: std.ArrayListUnmanaged(PinGroup) = .empty;
+    var left_h: std.ArrayListUnmanaged(f64) = .empty;
+    var right_h: std.ArrayListUnmanaged(f64) = .empty;
+    var left_total: f64 = 0;
+    var right_total: f64 = 0;
+
+    for (all_groups, all_heights) |group, h| {
+        if (left_total <= right_total) {
+            try left.append(self.allocator, group);
+            try left_h.append(self.allocator, h);
+            left_total += h;
+        } else {
+            try right.append(self.allocator, group);
+            try right_h.append(self.allocator, h);
+            right_total += h;
+        }
+    }
+
+    return .{
+        .left = try left.toOwnedSlice(self.allocator),
+        .right = try right.toOwnedSlice(self.allocator),
+        .left_heights = try left_h.toOwnedSlice(self.allocator),
+        .right_heights = try right_h.toOwnedSlice(self.allocator),
+    };
 }
 
 /// Calculate per-group heights based on connection count and branch estimates.

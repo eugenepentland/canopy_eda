@@ -40,6 +40,7 @@ pub const ViolationKind = enum {
     rail_voltage_unresolved,
     sequence_cycle,
     voltage_domain_incompatible,
+    main_ic_in_design,
 };
 
 /// One electrical-rule-check finding. `kind` selects the rule, `severity`
@@ -76,9 +77,46 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkPowerTreeIntegrity(allocator, block, &violations);
     try checkSequencingCycles(allocator, block, &violations);
     try checkVoltageDomainCompat(allocator, block, &violations);
+    try checkMainIcsInDesign(allocator, block, &violations);
     if (project_dir.len > 0) try checkPinFunctions(allocator, block, project_dir, &violations);
 
     return violations.items;
+}
+
+/// Flag "main ICs" instantiated directly in the top-level design instead of
+/// being sealed inside a `(defmodule …)` and brought in via `(sub-block …)`.
+/// The design file should read as a wiring harness between modules: each
+/// functional IC's pin-level implementation belongs in `lib/modules/` so it
+/// can be reviewed, reused, and revised on its own. A "main IC" here is an
+/// instance whose ref-des prefix is `U` (the IC prefix from `ids.componentPrefix`)
+/// that is neither an `(ignore-requirements)` support part — debug headers,
+/// mounting hardware, and board-to-board connectors that fall through to the
+/// `U` prefix all set this — nor a passive-class part (ESD arrays, EMI
+/// filters). `block.instances` already excludes sub-block contents, so
+/// iterating it inspects only what the design file instantiates directly.
+fn checkMainIcsInDesign(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayListUnmanaged(Violation),
+) !void {
+    for (collectBlockInstances(allocator, block)) |inst| {
+        if (inst.ref_des.len == 0) continue;
+        if (na.refDesLocalPrefix(inst.ref_des) != 'U') continue;
+        if (inst.requirements_ignored) continue;
+        if (isPassiveComponent(inst.component)) continue;
+        const msg = std.fmt.allocPrint(
+            allocator,
+            "Main IC \"{s}\" ({s}) is instantiated directly in the design — " ++
+                "seal it in a (defmodule …) under lib/modules/ and bring it in via (sub-block …)",
+            .{ inst.ref_des, inst.component },
+        ) catch continue;
+        try violations.append(allocator, .{
+            .kind = .main_ic_in_design,
+            .severity = .@"error",
+            .message = msg,
+            .ref_des = inst.ref_des,
+        });
+    }
 }
 
 /// For each net, gather pins whose component library declared electrical
@@ -1811,4 +1849,120 @@ test "sequencing cycle detected" {
         if (v.kind == .sequence_cycle) hit = true;
     }
     try std.testing.expect(hit);
+}
+
+// spec: erc - Flags a main IC instantiated directly in the design instead of via a sub-block
+test "main IC instantiated directly in design is flagged" {
+    const instances = [_]Instance{.{
+        .ref_des = "U8",
+        .component = "stm32n657l0h3q",
+        .value = "",
+        .footprint = "bga-223",
+        .symbol = "",
+    }};
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &instances,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkMainIcsInDesign(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    var hit = false;
+    for (violations.items) |v| {
+        if (v.kind == .main_ic_in_design and std.mem.eql(u8, v.ref_des, "U8")) hit = true;
+    }
+    try std.testing.expect(hit);
+}
+
+// spec: erc - Allows ignore-requirements support parts and passives to be instantiated directly in the design
+test "support parts and passives instantiated directly in design are allowed" {
+    const instances = [_]Instance{
+        // Board-to-board connector that falls through to the `U` prefix but
+        // declares (ignore-requirements).
+        .{
+            .ref_des = "U9",
+            .component = "204928-0601",
+            .value = "",
+            .footprint = "2049280601",
+            .symbol = "",
+            .requirements_ignored = true,
+        },
+        // ESD array — `U` prefix but passive-class.
+        .{
+            .ref_des = "U10",
+            .component = "ecmf04-4hsm10",
+            .value = "",
+            .footprint = "",
+            .symbol = "",
+        },
+        // Crystal — non-`U` prefix.
+        .{
+            .ref_des = "Y1",
+            .component = "abm8",
+            .value = "",
+            .footprint = "",
+            .symbol = "",
+        },
+    };
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &instances,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkMainIcsInDesign(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 0), violations.items.len);
+}
+
+// spec: erc - Does not flag main ICs that are wrapped in sub-blocks
+test "main IC wrapped in a sub-block is not flagged" {
+    const sub_instances = [_]Instance{.{
+        .ref_des = "U1",
+        .component = "stm32n657l0h3q",
+        .value = "",
+        .footprint = "bga-223",
+        .symbol = "",
+    }};
+    var sub_block: DesignBlock = .{
+        .name = "stm32-core",
+        .instances = &sub_instances,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const sbs = [_]env_mod.SubBlock{.{ .name = "core", .block = &sub_block }};
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &sbs,
+    };
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkMainIcsInDesign(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 0), violations.items.len);
 }

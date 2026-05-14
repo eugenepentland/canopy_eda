@@ -1,1 +1,4 @@
 # guardian-snapshot v1
+pub const MyError = error{ Foo, Bar };
+pub fn run(...) MyError!void { ... }
+src/render_html.zig: pub fn computeSubBlockAttachments uses inferred error set `!T` (use `MyErr!T`)

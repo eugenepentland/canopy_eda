@@ -136,6 +136,43 @@ Source (.sexp files)
   ...)
 ```
 
+**When to create a section.** A design file reads as a wiring harness:
+the main IC sits at the center, and each `(section …)` is one *functional
+subsystem* hanging off it. `stm32n6.sexp` is the reference — work through
+these four cases to decide whether something becomes a section:
+
+1. **Peripheral with a distinct main-IC pin interface** (a bus, a clutch
+   of GPIO control lines, dedicated clock pins). Make a section. Inside
+   it, declare the main-IC-side mapping with `(pins "<ic>" (group "…")
+   (pin …) …)`, plus `(role …)`, `(protocol …)`, and `(note …)` entries
+   for firmware contracts and datasheet rationale. The peripheral's own
+   pin-level implementation is sealed in a `(defmodule …)` under
+   `lib/modules/` and brought in as a `(sub-block …)` — see the ERC
+   `main_ic_in_design` check. **Structural constraint:** `(sub-block …)`
+   forms are *not* evaluated inside `(section …)`; place the sub-block at
+   design-block top level immediately after its section (e.g. `(section
+   "USB" …)` then `(sub-block "usb" (usb-c-hs))`).
+2. **Self-contained hardware with no main-IC interface** — test points,
+   mounting standoffs, fiducials. Make a section that directly
+   `(instance …)`s the parts; there is no pin map and no sub-block.
+3. **The main IC's own support infrastructure** — power rails, boot/reset,
+   on-chip clocks, debug. This is *one* section ("… Core System"),
+   subdivided with `(pins "<ic>" (group "VDD Power") …)`, `(group "Boot &
+   Reset")`, `(group "SWD Debug")`, etc. Crystals and the debug header are
+   simple enough to `(instance …)` directly inside this section alongside
+   their `(decouple …)` / `(series …)` passives.
+4. **Power-delivery blocks that only produce rails** — battery, charger,
+   buck, LDO, voltage references. These get *no* section. Declare them as
+   top-level `(sub-block …)`s and wire them with consolidated `(net …)`
+   forms (one `(net …)` per rail so the validator doesn't flag a rail as
+   split across sections). They surface in the system-overview diagram as
+   their own synthetic chips.
+
+One section per coherent subsystem — don't merge unrelated functions, and
+don't split one subsystem (or one rail) across two sections. Section
+bodies may also carry `(port …)` boundary declarations, `(calc …)` design
+math, and `(bus …)` multi-bit shorthand; see `stm32n6.sexp` for each.
+
 **Section-labeling conventions.** Every section has a *name* (short
 functional role) and an optional *subtitle* (one-line technical summary).
 Both feed the schematic header's system-overview SVG: the renderer in

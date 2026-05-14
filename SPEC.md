@@ -143,6 +143,9 @@ Public functions: renderSchematic
 - Emits no voltage-domain violation when driver and receiver levels are compatible
 - Treats a section port with electrical metadata as a virtual driver and receiver on its net
 - Treats a top-level design port with electrical metadata as a virtual driver and receiver on its net
+- Flags a main IC instantiated directly in the design instead of via a sub-block
+- Allows ignore-requirements support parts and passives to be instantiated directly in the design
+- Does not flag main ICs that are wrapped in sub-blocks
 
 ## eval/power_budget
 
@@ -241,6 +244,7 @@ Public functions: computeInstanceCoverage, computeSectionCoverage, computeOveral
 - Builds one chip per section classified by name
 - Recurses into sub-sections to expose each as its own chip
 - Emits a chip per sub-block classified by its name
+- Folds adopted sub-blocks into their section chip
 - Falls back to one synthetic chip when a design has no sections
 
 ## review_json

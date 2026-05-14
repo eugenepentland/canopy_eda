@@ -5,7 +5,7 @@ const review = @import("review.zig");
 const review_html = @import("review_html.zig");
 const req_checks = @import("req_checks.zig");
 const coverage = @import("coverage.zig");
-const CheckResultMap = std.StringHashMapUnmanaged([]req_checks.Result);
+pub const CheckResultMap = std.StringHashMapUnmanaged([]req_checks.Result);
 const DesignBlock = env_mod.DesignBlock;
 const Section = env_mod.Section;
 const Instance = env_mod.Instance;
@@ -41,6 +41,7 @@ pub const RenderError = bom_html.BomError;
 // ── Repeated string literals ──────────────────────────────────────
 const hubsArrayPrefix: []const u8 = ",\"hubs\":[";
 const sectionClose: []const u8 = "</section>";
+const secDescOpen: []const u8 = "<p class=\"sec-desc\">";
 
 /// Render a design as a self-contained HTML schematic page. Mirrors the
 /// review page's style: inline CSS, navbar, status banner, then a stack of
@@ -79,11 +80,22 @@ pub fn renderToHtml(
     try w.writeAll("<div class=\"sch-wrap\">");
     try writeHeader(w, block.name, design_name, status);
 
+    // Pair top-level `(sub-block …)` declarations with the section that wires
+    // them (e.g. `(section "XSPI2 NOR Flash" …)` adopts `(sub-block "flash" …)`)
+    // so the section's pin-table and the sub-block's internal hubs render as
+    // one card instead of two unrelated cards on the page. Computed up front
+    // so the system-overview SVG can suppress chips for adopted sub-blocks
+    // (otherwise the overview would show e.g. both "USB" and "usb" chips, and
+    // the "usb" chip's `#sec-usb` link would dangle since the attached card
+    // sits under the section's `#sec-USB` anchor instead).
+    const sub_attachments = try computeSubBlockAttachments(allocator, block);
+    defer allocator.free(sub_attachments);
+
     // Top-of-page overview: block diagram, then the review summary + power/
     // test-point tables. These are read-only dashboards, so they sit above
     // the per-section schematics where the user does the detailed work.
     try w.writeAll("<div id=\"page-block-diagram\" class=\"page-anchor\">");
-    try system_svg.renderSystemOverviewSvg(allocator, block, w);
+    try system_svg.renderSystemOverviewSvg(allocator, block, sub_attachments, w);
     try w.writeAll("</div>");
     if (review_doc) |doc| {
         try w.writeAll("<div class=\"review-embed review-wrap\">");
@@ -120,13 +132,25 @@ pub fn renderToHtml(
     try bom_html.writeSchematicBomHtml(w, block);
     try w.writeAll("</details>");
 
-    for (block.sections) |sec| try writeSection(&ctx, w, allocator, block, sec, 0, check_results);
+    for (block.sections, 0..) |sec, sec_idx| {
+        var attached: std.ArrayListUnmanaged(env_mod.SubBlock) = .empty;
+        defer attached.deinit(allocator);
+        for (block.sub_blocks, 0..) |sb, sb_idx| {
+            if (sub_attachments[sb_idx]) |idx| {
+                if (idx == sec_idx) try attached.append(allocator, sb);
+            }
+        }
+        try writeSection(&ctx, w, allocator, block, sec, 0, check_results, attached.items);
+    }
 
     // Designs without sections (typical of sub-block-only or flat hub+passives
     // designs like power-6v, pma3-14ln) still deserve a rendering. Emit a
-    // synthetic card per sub-block, plus one flat card if any hubs live at
-    // the top level outside any section.
-    for (block.sub_blocks) |sb| try writeSubBlockCard(&ctx, w, allocator, sb, check_results);
+    // synthetic card per sub-block that didn't attach to a section, plus one
+    // flat card if any hubs live at the top level outside any section.
+    for (block.sub_blocks, 0..) |sb, sb_idx| {
+        if (sub_attachments[sb_idx] != null) continue;
+        try writeSubBlockCard(&ctx, w, allocator, sb, check_results, .standalone);
+    }
 
     if (block.sections.len == 0 and hasTopLevelHubs(block)) {
         try writeFlatHubs(&ctx, w, allocator, block, check_results);
@@ -184,6 +208,10 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
     try w.writeAll(
         "<button class=\"head-link head-btn\" id=\"reload-btn\" type=\"button\" " ++
             "title=\"Re-read the .sexp source from disk and rebuild\">\u{21BB} Reload</button>",
+    );
+    try w.writeAll(
+        "<button class=\"head-link head-btn\" id=\"copy-src-btn\" type=\"button\" " ++
+            "title=\"Copy the raw .sexp source to the clipboard\">\u{1F4CB} Copy SRC</button>",
     );
     try w.writeAll("<button class=\"head-link head-btn\" id=\"erc-btn\" type=\"button\">ERC</button>");
     try w.writeAll("<div class=\"kicad-menu\">");
@@ -436,6 +464,7 @@ fn writeSection(
     sec: Section,
     depth: u8,
     check_results: *const CheckResultMap,
+    attached_subs: []const env_mod.SubBlock,
 ) !void {
     const indent_class: []const u8 = if (depth == 0) "sch-section" else "sch-section sch-subsection";
     const slug = try review.slugify(allocator, sec.name);
@@ -461,7 +490,7 @@ fn writeSection(
     try w.writeAll("</div>");
 
     if (sec.description.len > 0) {
-        try w.writeAll("<p class=\"sec-desc\">");
+        try w.writeAll(secDescOpen);
         try writeHtmlEscaped(w, sec.description);
         try w.writeAll("</p>");
     }
@@ -506,7 +535,9 @@ fn writeSection(
 
     try writeSectionHubs(ctx, w, allocator, sec.pin_groups, hub_refs.items, check_results);
 
-    for (sec.sub_sections) |sub| try writeSection(ctx, w, allocator, block, sub, depth + 1, check_results);
+    for (sec.sub_sections) |sub| try writeSection(ctx, w, allocator, block, sub, depth + 1, check_results, &.{});
+
+    for (attached_subs) |sb| try writeSubBlockCard(ctx, w, allocator, sb, check_results, .attached);
 
     try w.writeAll(sectionClose);
 }
@@ -987,24 +1018,62 @@ fn writeNotes(w: anytype, notes: []const env_mod.SectionNote) !void {
     try w.writeAll("</ul></details>");
 }
 
-/// Synthetic section card for a sub-block instance (e.g. `(sub-block "buck"
-/// (tpsm84338 …))`). Lists every hub that the sub-block's DesignBlock declares
-/// and feeds them through the same writeHubCard path. The block's nets are
-/// already flattened into `ctx` via `collectFlat`, so adjacency works.
+const SubBlockMode = enum {
+    /// Standalone top-level card for sub-blocks that don't fit under a section
+    /// (power chain, vref, fallback for section-less designs).
+    standalone,
+    /// Inline nested card rendered inside the section that adopts this
+    /// sub-block (e.g. flash inside "XSPI2 NOR Flash").
+    attached,
+};
+
+/// Render a sub-block's hubs as a card. In `standalone` mode the card is its
+/// own `<section>` (used by section-less designs and floating sub-blocks); in
+/// `attached` mode it's a `<div>` nested inside the adopting section's frame,
+/// with the heading demoted to `<h3>`.
 fn writeSubBlockCard(
     ctx: *RenderCtx,
     w: anytype,
     allocator: Allocator,
     sb: env_mod.SubBlock,
     check_results: *const CheckResultMap,
+    mode: SubBlockMode,
 ) !void {
     const slug = try review.slugify(allocator, sb.name);
-    try w.print("<section class=\"sch-section\" id=\"sec-{s}\" data-slug=\"{s}\">", .{ slug, slug });
-    try w.writeAll("<div class=\"sec-head\"><h2>");
+    switch (mode) {
+        .standalone => try w.print("<section class=\"sch-section\" id=\"sec-{s}\" data-slug=\"{s}\">", .{ slug, slug }),
+        // Use the `sub-` prefix to avoid id collisions when a section and an
+        // attached sub-block share a slug (e.g. section "USB" + sub-block "usb").
+        .attached => try w.print("<div class=\"sch-attached-sub\" id=\"sub-{s}\" data-slug=\"{s}\">", .{ slug, slug }),
+    }
+    try w.writeAll(switch (mode) {
+        .standalone => "<div class=\"sec-head\"><h2>",
+        .attached => "<div class=\"sec-head\"><h3>",
+    });
     try writeHtmlEscaped(w, sb.name);
-    try w.writeAll("</h2><span class=\"pill pill-ok\">sub-block</span>");
+    try w.writeAll(switch (mode) {
+        .standalone => "</h2>",
+        .attached => "</h3>",
+    });
+    try w.writeAll("<span class=\"pill pill-ok\">sub-block</span>");
+    // "Copy source" pulls the underlying module/file text via
+    // /api/module-source; "View" opens the standalone /modules viewer. Both
+    // need the sub-block's source provenance — skip them when it's unknown.
+    // The `/modules/:name` route can't carry a slashed path, so only
+    // module-name sources (no `/`) get the View link; path-based sub-blocks
+    // still get the copy button (the API takes the raw path via query).
+    if (sb.source.len > 0) {
+        try w.writeAll("<button type=\"button\" class=\"copy-src-btn\" data-src=\"");
+        try writeHtmlEscaped(w, sb.source);
+        try w.writeAll("\">Copy source</button>");
+        if (std.mem.indexOfScalar(u8, sb.source, '/') == null) {
+            try w.writeAll("<a class=\"view-src-link\" href=\"/modules/");
+            try writeUrlEncoded(w, sb.source);
+            try w.writeAll("\">View \u{2197}</a>");
+        }
+    }
     try w.writeAll("</div>");
-    try w.writeAll("<p class=\"sec-desc\">");
+    try w.writeAll(secDescOpen);
     try writeHtmlEscaped(w, sb.block.name);
     try w.writeAll("</p>");
 
@@ -1028,7 +1097,99 @@ fn writeSubBlockCard(
 
     try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items, check_results);
 
-    try w.writeAll(sectionClose);
+    try w.writeAll(switch (mode) {
+        .standalone => sectionClose,
+        .attached => "</div>",
+    });
+}
+
+/// Match each top-level `(sub-block …)` to the section that wires it. The
+/// heuristic counts "specific" shared nets: a net counts when its `net_ties`
+/// reference exactly one sub-block name. That filters out shared rails
+/// (VBATT/VDD/GND tie to many sub-blocks) so power blocks stay floating
+/// while functional sub-blocks (`flash`, `usb`, `imu`, `adc1..3`) merge into
+/// the section whose pin-group or port nets they tie to. Returns a slice
+/// indexed by sub-block index; entries are the matched section index or
+/// null when the sub-block didn't share any specific net with any section.
+pub fn computeSubBlockAttachments(
+    allocator: Allocator,
+    block: *const DesignBlock,
+) ![]?usize {
+    const result = try allocator.alloc(?usize, block.sub_blocks.len);
+    for (result) |*r| r.* = null;
+    if (block.sub_blocks.len == 0 or block.sections.len == 0) return result;
+
+    var net_to_subs: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(void)) = .empty;
+    defer {
+        var it = net_to_subs.iterator();
+        while (it.next()) |e| e.value_ptr.deinit(allocator);
+        net_to_subs.deinit(allocator);
+    }
+
+    for (block.net_ties) |nt| {
+        const a_slash = std.mem.indexOfScalar(u8, nt.a, '/');
+        const b_slash = std.mem.indexOfScalar(u8, nt.b, '/');
+        var parent: []const u8 = "";
+        var sub: []const u8 = "";
+        if (a_slash == null and b_slash != null) {
+            parent = nt.a;
+            sub = nt.b[0..b_slash.?];
+        } else if (b_slash == null and a_slash != null) {
+            parent = nt.b;
+            sub = nt.a[0..a_slash.?];
+        } else continue;
+
+        const gop = try net_to_subs.getOrPut(allocator, parent);
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        _ = try gop.value_ptr.getOrPut(allocator, sub);
+    }
+
+    var sb_name_to_idx: std.StringHashMapUnmanaged(usize) = .empty;
+    defer sb_name_to_idx.deinit(allocator);
+    for (block.sub_blocks, 0..) |sb, idx| {
+        try sb_name_to_idx.put(allocator, sb.name, idx);
+    }
+
+    const sec_count = block.sections.len;
+    const sb_count = block.sub_blocks.len;
+    const counts = try allocator.alloc(usize, sb_count * sec_count);
+    defer allocator.free(counts);
+    @memset(counts, 0);
+
+    for (block.sections, 0..) |sec, sec_idx| {
+        var sec_nets: std.StringHashMapUnmanaged(void) = .empty;
+        defer sec_nets.deinit(allocator);
+        for (sec.pin_groups) |pg| {
+            for (pg.pins) |p| try sec_nets.put(allocator, p.net, {});
+        }
+        for (sec.ports) |port| {
+            try sec_nets.put(allocator, port.name, {});
+        }
+
+        var it = sec_nets.iterator();
+        while (it.next()) |entry| {
+            const subs_ptr = net_to_subs.getPtr(entry.key_ptr.*) orelse continue;
+            if (subs_ptr.count() != 1) continue;
+            var sub_it = subs_ptr.keyIterator();
+            const sub_name = sub_it.next().?.*;
+            const sb_idx = sb_name_to_idx.get(sub_name) orelse continue;
+            counts[sb_idx * sec_count + sec_idx] += 1;
+        }
+    }
+
+    for (block.sub_blocks, 0..) |_, sb_idx| {
+        var best_idx: ?usize = null;
+        var best_count: usize = 0;
+        for (block.sections, 0..) |_, sec_idx| {
+            const c = counts[sb_idx * sec_count + sec_idx];
+            if (c > best_count) {
+                best_count = c;
+                best_idx = sec_idx;
+            }
+        }
+        if (best_count >= 1) result[sb_idx] = best_idx;
+    }
+    return result;
 }
 
 /// Fallback rendering for designs that declare instances directly in

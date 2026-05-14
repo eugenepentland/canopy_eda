@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
+const parser_mod = @import("../sexpr/parser.zig");
 const env_mod = @import("env.zig");
 const builtins = @import("builtins.zig");
 
@@ -182,6 +183,19 @@ pub const Evaluator = struct {
     /// before evaluation.
     pub fn evalFile(self: *Evaluator, path: []const u8) EvalError!Value {
         const nodes = builders.loadDesignFile(self, path) orelse return EvalError.ImportError;
+        var env = Env.init(self.allocator, null);
+        defer env.deinit();
+        modules.loadPassivesPrelude(self, &env);
+        return self.evalNodes(nodes, &env);
+    }
+
+    /// Evaluate raw S-expression source text in a fresh top-level env, with
+    /// the passives prelude loaded — the same setup as `evalFile` but for an
+    /// in-memory string rather than a file, and without the `.checks.sexp`
+    /// autoloader. Used by the `/modules` viewer to instantiate a
+    /// zero-parameter module inside a synthetic one-line `design-block`.
+    pub fn evalSource(self: *Evaluator, source: []const u8) EvalError!Value {
+        const nodes = parser_mod.parse(self.allocator, source) catch return EvalError.ImportError;
         var env = Env.init(self.allocator, null);
         defer env.deinit();
         modules.loadPassivesPrelude(self, &env);

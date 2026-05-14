@@ -76,11 +76,35 @@
   }
   function scrollTo(el) {
     if (!el) return;
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.scrollIntoView({ behavior: 'auto', block: 'center' });
   }
 
   // ---- Body click handlers (delegate from document) ----
   document.addEventListener('click', function (e) {
+    // "Copy source" on a sub-block card: fetch the module/file text and put
+    // it on the clipboard. data-src is a module name or a project-relative
+    // path; the API resolves either via the ?src= query param.
+    var copyBtn = e.target.closest && e.target.closest('.copy-src-btn');
+    if (copyBtn && copyBtn.dataset.src) {
+      e.preventDefault();
+      var origLabel = copyBtn.textContent;
+      fetch('/api/module-source?src=' + encodeURIComponent(copyBtn.dataset.src))
+        .then(function (r) { if (!r.ok) throw new Error('not found'); return r.text(); })
+        .then(function (text) { return navigator.clipboard.writeText(text); })
+        .then(function () {
+          copyBtn.textContent = 'Copied ✓';
+          copyBtn.classList.add('copied');
+          setTimeout(function () {
+            copyBtn.textContent = origLabel;
+            copyBtn.classList.remove('copied');
+          }, 1500);
+        })
+        .catch(function () {
+          copyBtn.textContent = 'Copy failed';
+          setTimeout(function () { copyBtn.textContent = origLabel; }, 1500);
+        });
+      return;
+    }
     // Clicking a component box (hub or passive) opens its sidebar entry.
     // Check this BEFORE .net so a passive symbol drawn above a wire wins.
     var compEl = e.target.closest && e.target.closest('svg .component');
@@ -354,7 +378,11 @@
     var sec = sectionBySlug[slug];
     if (!sec) return;
     if (doScroll) {
-      var anchor = document.getElementById('sec-' + slug);
+      // Sub-blocks attached inside a section render with id="sub-{slug}" to
+      // avoid colliding with a section that happens to share the same slug
+      // ("USB" / "usb"). Prefer the section anchor when both exist so the
+      // user lands on the parent card; fall back to the sub-block anchor.
+      var anchor = document.getElementById('sec-' + slug) || document.getElementById('sub-' + slug);
       if (anchor) { scrollTo(anchor); flash(anchor); }
     }
     var html = '<span class="sb-back">← All sections</span>' +
@@ -833,6 +861,57 @@
         reloadBtn.dataset.busy = '';
         alert('Reload failed: ' + e);
       });
+    });
+  }
+
+  // ---- Copy SRC ----
+  // Fetches the raw .sexp source via /api/source/:name and writes it to the
+  // clipboard. Falls back to a hidden textarea + execCommand when the async
+  // Clipboard API is unavailable (older browsers, non-HTTPS contexts).
+  var copySrcBtn = document.getElementById('copy-src-btn');
+  if (copySrcBtn) {
+    copySrcBtn.addEventListener('click', function () {
+      if (copySrcBtn.dataset.busy === '1') return;
+      copySrcBtn.dataset.busy = '1';
+      var original = copySrcBtn.textContent;
+      copySrcBtn.textContent = 'Copying…';
+      fetch('/api/source/' + DESIGN_NAME).then(function (r) {
+        if (!r.ok) throw new Error('fetch failed: ' + r.status);
+        return r.json();
+      }).then(function (j) {
+        var src = (j && typeof j.source === 'string') ? j.source : '';
+        if (!src) throw new Error('empty source');
+        return copyToClipboard(src);
+      }).then(function () {
+        copySrcBtn.textContent = '✓ Copied';
+        setTimeout(function () {
+          copySrcBtn.textContent = original;
+          copySrcBtn.dataset.busy = '';
+        }, 1200);
+      }).catch(function (e) {
+        copySrcBtn.textContent = original;
+        copySrcBtn.dataset.busy = '';
+        alert('Copy failed: ' + e);
+      });
+    });
+  }
+
+  function copyToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        var ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (ok) resolve(); else reject(new Error('execCommand returned false'));
+      } catch (e) { reject(e); }
     });
   }
 

@@ -632,13 +632,23 @@ pub fn buildSubBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!
     // deterministic derivation from the sub-block's name and the instance's
     // module-local ref_des so UUIDs are stable across builds.
     const pending_pre = self.pending_ids.items.len;
+    // Track where the sub-block came from so the schematic page can offer a
+    // "copy source" button and `/modules` can locate the file: a project-
+    // relative path for the string form, or the module name for a call form.
+    var source: []const u8 = "";
     const block = blk: {
         if (args[1].asString()) |file_path_raw| {
+            source = file_path_raw;
             const full_path = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.project_dir, file_path_raw }) catch return EvalError.OutOfMemory;
             const result = self.evalFile(full_path) catch return EvalError.ImportError;
             switch (result) {
                 .design_block => |b| break :blk b,
                 else => return EvalError.TypeError,
+            }
+        }
+        if (args[1].asList()) |call_children| {
+            if (call_children.len > 0) {
+                if (call_children[0].asAtom()) |mod_name| source = mod_name;
             }
         }
         const call_val = try self.evalNode(args[1], env);
@@ -653,6 +663,7 @@ pub fn buildSubBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!
     return SubBlock{
         .name = name,
         .block = block,
+        .source = source,
     };
 }
 

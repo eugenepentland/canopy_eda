@@ -95,7 +95,9 @@ fn writeSummary(w: anytype, s: review.Summary) !void {
 
 fn writeSystemDiagram(allocator: Allocator, w: anytype, block: *const DesignBlock) !void {
     try w.writeAll("## System Block Diagram\n\n");
-    try system_svg.renderSystemOverviewSvg(allocator, block, w);
+    const sub_attachments = try render_html.computeSubBlockAttachments(allocator, block);
+    defer allocator.free(sub_attachments);
+    try system_svg.renderSystemOverviewSvg(allocator, block, sub_attachments, w);
     try w.writeAll("\n\n");
 }
 

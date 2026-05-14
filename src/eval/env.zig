@@ -563,6 +563,13 @@ pub const Instance = struct {
 pub const SubBlock = struct {
     name: []const u8,
     block: *DesignBlock,
+    /// Where the sub-block's implementation lives, so the schematic page can
+    /// offer a "copy source" affordance and the `/modules` viewer can find
+    /// the file. For `(sub-block "x" (module-name …))` this is the module
+    /// name (resolved to `lib/modules/<name>.sexp`); for `(sub-block "x"
+    /// "path/to/file.sexp")` it is that project-relative path. Empty when the
+    /// sub-block was constructed without source provenance (e.g. tests).
+    source: []const u8 = "",
 };
 
 /// A pin group referencing a top-level instance's pins within a section.

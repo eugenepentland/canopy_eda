@@ -1,5 +1,5 @@
 # guardian-snapshot v1
-src/render_html.zig:1117: line is 171 chars (cap 160)
+src/render_html.zig:1278: line is 171 chars (cap 160)
 src/serve/templates/account.zig:180: line is 162 chars (cap 160)
 src/serve/templates/account.zig:21: line is 194 chars (cap 160)
 src/serve/templates/account.zig:286: line is 220 chars (cap 160)

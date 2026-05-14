@@ -28,10 +28,19 @@ h3{color:#f0f6fc;font-size:0.95rem;margin:0;}
 .kicad-row-btn:hover{background:#30363d;border-color:#58a6ff;}
 .sch-section{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:14px 16px;margin-bottom:16px;}
 .sch-subsection{margin-left:14px;margin-top:12px;background:#12161d;}
+.sch-attached-sub{margin:14px 0 4px;padding:10px 12px;background:#12161d;border:1px solid #21262d;border-radius:6px;}
+.sch-attached-sub>.sec-head{margin-bottom:4px;}
+.sch-attached-sub>.sec-desc{margin:2px 0 8px;}
 .sch-section.flash,.sch-hub.flash{outline:2px solid #58a6ff;outline-offset:-2px;transition:outline-color .25s;}
 .sec-head{display:flex;align-items:center;gap:10px;margin-bottom:8px;}
 .sec-desc{margin:4px 0 10px;color:#8b949e;font-size:0.9rem;}
 .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;}
+.copy-src-btn{margin-left:auto;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;padding:3px 10px;font-size:0.75rem;cursor:pointer;font-family:inherit;}
+.copy-src-btn:hover{background:#30363d;border-color:#58a6ff;}
+.copy-src-btn.copied{color:#3fb950;border-color:#238636;}
+.view-src-link{color:#8b949e;font-size:0.75rem;text-decoration:none;border:1px solid #30363d;border-radius:5px;padding:3px 10px;}
+.view-src-link:hover{color:#c9d1d9;border-color:#58a6ff;}
+.copy-src-btn+.view-src-link{margin-left:0;}
 .pill-ok{background:#0d3a1f;color:#3fb950;}
 .pill-warn{background:#3a2e0d;color:#d29922;}
 .pill-concept{background:#24232e;color:#a89eff;}
