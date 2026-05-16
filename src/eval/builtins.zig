@@ -1,6 +1,8 @@
 const std = @import("std");
 const env_mod = @import("env.zig");
+const forms = @import("forms.zig");
 const Value = env_mod.Value;
+const Builtin = forms.Builtin;
 
 pub const BuiltinError = error{
     TypeError,
@@ -11,29 +13,32 @@ pub const BuiltinError = error{
 // ── Constants ─────────────────────────────────────────────────────
 const ZERO_DIVISOR: f64 = 0.0;
 
-/// Evaluate an arithmetic or logic builtin given the operator name and evaluated arguments.
-pub fn evalBuiltin(op: []const u8, args: []const Value) BuiltinError!Value {
-    // Arithmetic: +, -, *, /, %
-    if (std.mem.eql(u8, op, "+")) return arithmetic(args, .add);
-    if (std.mem.eql(u8, op, "-")) return arithmetic(args, .sub);
-    if (std.mem.eql(u8, op, "*")) return arithmetic(args, .mul);
-    if (std.mem.eql(u8, op, "/")) return arithmetic(args, .div);
-    if (std.mem.eql(u8, op, "%")) return arithmetic(args, .mod);
+/// Evaluate a builtin given its enum tag (preferred path — the evaluator
+/// has already resolved the head atom via `Builtin.fromAtom`).
+pub fn evalBuiltinOp(op: Builtin, args: []const Value) BuiltinError!Value {
+    return switch (op) {
+        .add => arithmetic(args, .add),
+        .sub => arithmetic(args, .sub),
+        .mul => arithmetic(args, .mul),
+        .div => arithmetic(args, .div),
+        .mod => arithmetic(args, .mod),
+        .gt => comparison(args, .gt),
+        .gte => comparison(args, .gte),
+        .lt => comparison(args, .lt),
+        .lte => comparison(args, .lte),
+        .eq => equality(args, true),
+        .neq => equality(args, false),
+        .and_ => logicAnd(args),
+        .or_ => logicOr(args),
+        .not_ => logicNot(args),
+    };
+}
 
-    // Comparison: >, >=, <, <=, ==, !=
-    if (std.mem.eql(u8, op, ">")) return comparison(args, .gt);
-    if (std.mem.eql(u8, op, ">=")) return comparison(args, .gte);
-    if (std.mem.eql(u8, op, "<")) return comparison(args, .lt);
-    if (std.mem.eql(u8, op, "<=")) return comparison(args, .lte);
-    if (std.mem.eql(u8, op, "==")) return equality(args, true);
-    if (std.mem.eql(u8, op, "!=")) return equality(args, false);
-
-    // Logic: and, or, not
-    if (std.mem.eql(u8, op, "and")) return logicAnd(args);
-    if (std.mem.eql(u8, op, "or")) return logicOr(args);
-    if (std.mem.eql(u8, op, "not")) return logicNot(args);
-
-    return BuiltinError.TypeError;
+/// Name-based dispatch — kept private for the tests in this file. The
+/// evaluator goes straight to `evalBuiltinOp` via `Builtin.fromAtom`.
+fn evalBuiltin(op: []const u8, args: []const Value) BuiltinError!Value {
+    const tag = Builtin.fromAtom(op) orelse return BuiltinError.TypeError;
+    return evalBuiltinOp(tag, args);
 }
 
 const ArithOp = enum { add, sub, mul, div, mod };
@@ -102,19 +107,6 @@ fn logicOr(args: []const Value) BuiltinError!Value {
 fn logicNot(args: []const Value) BuiltinError!Value {
     if (args.len != 1) return BuiltinError.ArityError;
     return .{ .boolean = !args[0].isTruthy() };
-}
-
-/// Check if a name is a builtin operator.
-pub fn isBuiltin(name: []const u8) bool {
-    const builtins = [_][]const u8{
-        "+",  "-",   "*",  "/",   "%",
-        ">",  ">=",  "<",  "<=",  "==",
-        "!=", "and", "or", "not",
-    };
-    for (builtins) |b| {
-        if (std.mem.eql(u8, name, b)) return true;
-    }
-    return false;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@ const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const parser = @import("sexpr/parser.zig");
 const printer = @import("sexpr/printer.zig");
+const eval_forms = @import("eval/forms.zig");
 const footprint_conv = @import("convert/footprint.zig");
 const symbol_conv = @import("convert/symbol.zig");
 const alt_functions = @import("convert/alt_functions.zig");
@@ -139,6 +140,9 @@ pub fn main() !void {
         try cmdMintInvite(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "set-password")) {
         try cmdSetPassword(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "gen-language-docs")) {
+        const out_path = optionalArg(args[2..], "--output") orelse "docs/language-forms.md";
+        try cmdGenLanguageDocs(allocator, out_path);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
         try printUsage();
     } else {
@@ -146,6 +150,25 @@ pub fn main() !void {
         try printUsage();
         std.process.exit(1);
     }
+}
+
+/// Regenerate the auto-generated language reference. Walks every form
+/// registered in `src/eval/forms.zig` and writes a Markdown table to
+/// `out_path` (default `docs/language-forms.md`). A drift test in
+/// `forms.zig` re-runs the renderer and fails the build if the
+/// committed file no longer matches — so editing the registry without
+/// re-running this command is a CI error.
+fn cmdGenLanguageDocs(allocator: std.mem.Allocator, out_path: []const u8) !void {
+    const rendered = try eval_forms.renderLanguageReference(allocator);
+    defer allocator.free(rendered);
+
+    const file = infra_fs.cwd().createFile(out_path, .{ .truncate = true }) catch |err| {
+        std.debug.print("Error opening {s}: {}\n", .{ out_path, err });
+        std.process.exit(1);
+    };
+    defer file.close();
+    try file.writeAll(rendered);
+    std.debug.print("Wrote {s} ({d} bytes)\n", .{ out_path, rendered.len });
 }
 
 fn cmdParse(allocator: std.mem.Allocator, path: []const u8) !void {
@@ -363,6 +386,7 @@ fn printUsage() !void {
         \\  eda convert-symbol <file> [--filter <name>]  Convert KiCad .kicad_sym to .sexp
         \\  eda convert-pinout <file> [--filter <name>]  Generate pinout from KiCad .kicad_sym
         \\  eda merge-alt-functions <pinout.sexp> <alts.csv|alts.xml> [--write]  Merge alt functions (CSV or ST open-pin-data XML)
+        \\  eda gen-language-docs [--output <path>]  Regenerate docs/language-forms.md from src/eval/forms.zig
         \\  eda help                            Show this help
         \\
     );

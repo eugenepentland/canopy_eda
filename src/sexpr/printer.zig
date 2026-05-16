@@ -51,16 +51,15 @@ fn printNode(writer: anytype, node: Node, indent: u32) !void {
         },
         .atom => |a| try writer.writeAll(a),
         .string => |s| {
+            // `Node.string` only ever carries the raw source slice the
+            // tokenizer captured between the quotes (see
+            // `parser.parseNode`), which is already escape-encoded for
+            // the grammar. Writing it verbatim round-trips exactly;
+            // re-escaping here was the cause of the printer doubling
+            // `\"` to `\\\"` and breaking the parse → print → parse
+            // fixed point for any note containing escaped quotes.
             try writer.writeByte('"');
-            for (s) |c| {
-                if (c == '"') {
-                    try writer.writeAll("\\\"");
-                } else if (c == '\\') {
-                    try writer.writeAll("\\\\");
-                } else {
-                    try writer.writeByte(c);
-                }
-            }
+            try writer.writeAll(s);
             try writer.writeByte('"');
         },
         .int => |i| try writer.print("{d}", .{i}),
@@ -225,4 +224,61 @@ fn expectNodesEqual(a: Node, b: Node) !void {
             else => return error.TestExpectedEqual,
         }, NODE_EQ_FLOAT_TOLERANCE),
     }
+}
+
+// spec: sexpr/printer - Round-trips every .sexp file under projects/designs through parse → print → parse with structurally equal AST
+test "round-trip every project .sexp file" {
+    const alloc = std.testing.allocator;
+    const parser = @import("parser.zig");
+
+    // Tests are normally invoked with the project root as CWD. When
+    // that's not true (some sandboxes detach the runner from a real
+    // working tree) the directory just isn't here — skip silently so
+    // the unit-test step keeps working on its own.
+    var dir = std.fs.cwd().openDir("projects/designs", .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    var walker = try dir.walk(alloc);
+    defer walker.deinit();
+
+    var count: usize = 0;
+    while (try walker.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".sexp")) continue;
+
+        const file = try dir.openFile(entry.path, .{});
+        defer file.close();
+        // 16 MiB cap protects the test from accidentally pointing at a
+        // checked-in binary; every real .sexp in this tree is well
+        // under that.
+        const src = try file.readToEndAlloc(alloc, 16 * 1024 * 1024);
+        defer alloc.free(src);
+
+        const nodes1 = parser.parse(alloc, src) catch |err| {
+            std.debug.print("parse failed for {s}: {s}\n", .{ entry.path, @errorName(err) });
+            return err;
+        };
+        defer parser.freeNodes(alloc, nodes1);
+
+        const printed = try print(alloc, nodes1);
+        defer alloc.free(printed);
+
+        const nodes2 = parser.parse(alloc, printed) catch |err| {
+            std.debug.print("re-parse of printed output failed for {s}: {s}\n", .{ entry.path, @errorName(err) });
+            return err;
+        };
+        defer parser.freeNodes(alloc, nodes2);
+
+        try std.testing.expectEqual(nodes1.len, nodes2.len);
+        for (nodes1, nodes2) |a, b| {
+            expectNodesEqual(a, b) catch |err| {
+                std.debug.print("AST mismatch in {s}\n", .{entry.path});
+                return err;
+            };
+        }
+        count += 1;
+    }
+
+    // Sanity: the walk should have found at least one design.
+    try std.testing.expect(count > 0);
 }

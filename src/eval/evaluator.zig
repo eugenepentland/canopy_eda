@@ -10,6 +10,9 @@ const modules = @import("modules.zig");
 const design_block = @import("design_block.zig");
 const instance_mod = @import("instance.zig");
 const builders = @import("builders.zig");
+const forms = @import("forms.zig");
+const SpecialForm = forms.SpecialForm;
+const Builtin = forms.Builtin;
 pub const ids = @import("ids.zig");
 
 const Node = ast.Node;
@@ -25,6 +28,18 @@ const Group = env_mod.Group;
 const SubBlock = env_mod.SubBlock;
 const ModuleDef = env_mod.ModuleDef;
 const AssertionResult = env_mod.AssertionResult;
+
+/// Source-located explanation for the most recent `EvalError`. Zig
+/// error sets can't carry data, so the evaluator stashes the location
+/// + a short borrowed message here. Callers (CLI / server) read
+/// `Evaluator.last_error` after a failed eval and render a diagnostic
+/// like `port form at sexp:42:7: expected atom, got list`.
+pub const EvalDiagnostic = struct {
+    span: ast.Span,
+    /// Human-readable summary. Borrowed; lives as long as the source
+    /// buffer or the static string the caller passed in.
+    message: []const u8,
+};
 
 pub const EvalError = error{
     TypeError,
@@ -91,6 +106,10 @@ pub const Evaluator = struct {
     /// the prelude when a module load itself triggers another module load,
     /// and lets `evalFile` skip the work after the first design.
     passives_prelude_loaded: bool = false,
+    /// Span + short message describing the most recent `EvalError`.
+    /// Populated by the form handlers when they return an error so the
+    /// CLI / server can render a diagnostic that points at the source.
+    last_error: ?EvalDiagnostic = null,
 
     pub const PendingId = struct {
         /// Byte offset of the opening paren of the form
@@ -232,35 +251,46 @@ pub const Evaluator = struct {
         }
     }
 
+    /// Record a source-located diagnostic for the most recent error.
+    /// The message slice is borrowed; pass a static string or a slice
+    /// that outlives the next `evalNode` call.
+    pub fn setError(self: *Evaluator, span: ast.Span, message: []const u8) void {
+        self.last_error = .{ .span = span, .message = message };
+    }
+
     fn evalForm(self: *Evaluator, children: []const Node, env: *Env) EvalError!Value {
         const head = children[0];
         const head_name = head.asAtom() orelse {
             // Head is not an atom -- could be a computed form
+            self.setError(head.span, "form head must be an atom");
             return EvalError.InvalidForm;
         };
         const args = children[1..];
 
         // Special forms (don't evaluate arguments eagerly)
-        if (std.mem.eql(u8, head_name, "let")) return special_forms.evalLet(self, args, env);
-        if (std.mem.eql(u8, head_name, "if")) return special_forms.evalIf(self, args, env);
-        if (std.mem.eql(u8, head_name, "cond")) return special_forms.evalCond(self, args, env);
-        if (std.mem.eql(u8, head_name, "import")) return modules.evalImport(self, args, env);
-        if (std.mem.eql(u8, head_name, "defmodule")) return modules.evalDefmodule(self, args, env);
-        if (std.mem.eql(u8, head_name, "design-block")) return design_block.evalDesignBlock(self, args, env);
-        if (std.mem.eql(u8, head_name, "assert")) return special_forms.evalAssert(self, args, env);
-        if (std.mem.eql(u8, head_name, "assert-range")) return special_forms.evalAssertRange(self, args, env);
-        if (std.mem.eql(u8, head_name, "fmt")) return special_forms.evalFmt(self, args, env);
-        if (std.mem.eql(u8, head_name, "id")) return .nil;
+        if (SpecialForm.fromAtom(head_name)) |sf| return switch (sf) {
+            .let => special_forms.evalLet(self, args, env),
+            .if_ => special_forms.evalIf(self, args, env),
+            .cond => special_forms.evalCond(self, args, env),
+            .import => modules.evalImport(self, args, env),
+            .defmodule => modules.evalDefmodule(self, args, env),
+            .design_block => design_block.evalDesignBlock(self, args, env),
+            .assert_ => special_forms.evalAssert(self, args, env),
+            .assert_range => special_forms.evalAssertRange(self, args, env),
+            .fmt_ => special_forms.evalFmt(self, args, env),
+            .id_ => .nil,
+        };
 
-        // Builtins (evaluate arguments first)
-        if (builtins.isBuiltin(head_name)) {
+        // Builtins (evaluate arguments first). Looking the operator up
+        // once skips the second name match `evalBuiltin` would do.
+        if (Builtin.fromAtom(head_name)) |op| {
             var eval_args: std.ArrayListUnmanaged(Value) = .empty;
             defer eval_args.deinit(self.allocator);
             for (args) |arg| {
                 const v = try self.evalNode(arg, env);
                 try eval_args.append(self.allocator, v);
             }
-            return builtins.evalBuiltin(head_name, eval_args.items) catch |err| switch (err) {
+            return builtins.evalBuiltinOp(op, eval_args.items) catch |err| switch (err) {
                 error.TypeError => return EvalError.TypeError,
                 error.ArityError => return EvalError.ArityError,
                 error.DivisionByZero => return EvalError.DivisionByZero,
@@ -295,6 +325,10 @@ pub const Evaluator = struct {
             return .{ .component = head_name };
         }
 
+        // Nothing in the dispatch table, no module, no component — the
+        // head atom is undefined. Stash it so the caller can render
+        // "unknown form `foo` at sexp:42:7" instead of a bare error.
+        self.setError(head.span, head_name);
         return EvalError.UnboundVariable;
     }
 
@@ -306,6 +340,50 @@ pub const Evaluator = struct {
 };
 
 // ── Tests ──────────────────────────────────────────────────────────────
+
+// spec: eval/evaluator - last_error records the source span of an unknown form so callers can report file:line:col
+test "unknown form populates last_error with span" {
+    const alloc = std.testing.allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    // Put the bogus form on its own line so the recorded span is non-trivial.
+    const nodes = try parser.parse(alloc,
+        \\(let x 1)
+        \\(definitely-not-a-form 1 2)
+    );
+    defer parser.freeNodes(alloc, nodes);
+
+    const result = eval.evalNodes(nodes, &env);
+    try std.testing.expectError(EvalError.UnboundVariable, result);
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try std.testing.expectEqual(@as(u32, 2), diag.span.line);
+    try std.testing.expectEqualStrings("definitely-not-a-form", diag.message);
+}
+
+// spec: eval/evaluator - last_error records the source span of an arity mismatch in a special form
+test "arity error populates last_error with span" {
+    const alloc = std.testing.allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    // `let` needs exactly 2 args; this gives it 3. Span should point at
+    // the first argument's position.
+    const nodes = try parser.parse(alloc, "(let x 1 2)");
+    defer parser.freeNodes(alloc, nodes);
+
+    const result = eval.evalNodes(nodes, &env);
+    try std.testing.expectError(EvalError.ArityError, result);
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try std.testing.expect(diag.span.line == 1 and diag.span.col > 1);
+    try std.testing.expectEqualStrings("wrong number of arguments", diag.message);
+}
 
 // spec: eval/evaluator - Evaluates arithmetic expressions from S-expression AST
 test "eval arithmetic" {
@@ -574,4 +652,5 @@ test {
     _ = design_block;
     _ = instance_mod;
     _ = builders;
+    _ = forms;
 }

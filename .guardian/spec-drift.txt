@@ -48,8 +48,7 @@ src/eval/builders.zig::loadFile | fn loadFile(self: *Evaluator, path: []const u8
 src/eval/builders.zig::parseSectionCalc | fn parseSectionCalc(self: *Evaluator, sf_children: []const Node, env: *env_mod.Env) EvalError!?env_mod.CalcBlock
 src/eval/builders.zig::parseSectionPort | fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod.Env) EvalError!?env_mod.SectionPort
 src/eval/builders.zig::processPinForm | fn processPinForm( self: *Evaluator, pin_form: Node, pins_ref: []const u8, pin_func_map: ?*const std.StringHashMapUnmanaged([]const u8), env: *env_mod.Env, all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl), pg_pins: *std.ArrayListUnmanaged(env_mod.PartPin), net_ties: *std.ArrayListUnmanaged(NetTie), ) EvalError!void
-src/eval/builtins.zig::evalBuiltin | fn evalBuiltin(op: []const u8, args: []const Value) BuiltinError!Value
-src/eval/builtins.zig::isBuiltin | fn isBuiltin(name: []const u8) bool
+src/eval/builtins.zig::evalBuiltinOp | fn evalBuiltinOp(op: Builtin, args: []const Value) BuiltinError!Value
 src/eval/design_block.zig::evalDesignBlock | fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/electrical.zig::parse | fn parse(form_children: []const Node) ?ElectricalDecl
 src/eval/electrical.zig::parseSubForms | fn parseSubForms(decl: *ElectricalDecl, subs: []const Node) void
@@ -57,6 +56,9 @@ src/eval/env.zig::parseCheck | fn parseCheck(node: ast.Node) ?Check
 src/eval/env.zig::parseNoteRef | fn parseNoteRef(node: ast.Node) ?NoteRef
 src/eval/env.zig::requirementIdForText | fn requirementIdForText(allocator: std.mem.Allocator, text: []const u8) std.mem.Allocator.Error![]const u8
 src/eval/fmt.zig::format | fn format(allocator: std.mem.Allocator, template: []const u8, args: []const Value) FmtError![]const u8
+src/eval/forms.zig::renderLanguageReference | fn renderLanguageReference(allocator: std.mem.Allocator) std.mem.Allocator.Error![]const u8
+src/eval/forms.zig::schemaFor | fn schemaFor(sf: SpecialForm) ?FormSchema
+src/eval/forms.zig::validateArity | fn validateArity(schema: FormSchema, arg_count: usize) ?ArityViolation
 src/eval/ids.zig::autoAssignRefDes | fn autoAssignRefDes(self: *Evaluator, block: *DesignBlock) EvalError!void
 src/eval/ids.zig::autoAssignSubBlockRefDes | fn autoAssignSubBlockRefDes(self: *Evaluator, block: *DesignBlock) EvalError!void
 src/eval/ids.zig::componentPrefix | fn componentPrefix(family: []const u8) u8

@@ -14,6 +14,8 @@ const rails_mod = @import("rails.zig");
 const test_point_mod = @import("test_point.zig");
 const power_config_mod = @import("power_config.zig");
 const pin_enrichment = @import("pin_enrichment.zig");
+const forms_mod = @import("forms.zig");
+const ScopeForm = forms_mod.ScopeForm;
 
 const Node = ast.Node;
 const Value = env_mod.Value;
@@ -68,57 +70,51 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         if (form_children.len == 0) continue;
         const form_name = form_children[0].asAtom() orelse continue;
 
-        if (std.mem.eql(u8, form_name, INSTANCE_FORM)) {
-            const result = try instance_mod.buildInstance(self, form_children, env);
-            ids.registerRefDes(self, result.instance.ref_des);
-            try instances.append(self.allocator, result.instance);
-            for (result.pin_nets) |pn| {
-                try all_pin_nets.append(self.allocator, pn);
-            }
-            for (result.inline_notes) |note| {
+        const sf = ScopeForm.fromAtom(form_name) orelse continue;
+        switch (sf) {
+            .instance => {
+                const result = try instance_mod.buildInstance(self, form_children, env);
+                ids.registerRefDes(self, result.instance.ref_des);
+                try instances.append(self.allocator, result.instance);
+                for (result.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
+                for (result.inline_notes) |note| try notes.append(self.allocator, note);
+                try appendAutoAliases(self, result.instance, result.pin_nets, &net_ties);
+            },
+            .port => {
+                const port = try builders.buildPort(self, form_children[1..], env);
+                try ports.append(self.allocator, port);
+            },
+            .bus_port => try builders.expandTopLevelBusPort(self, form_children, env, &ports),
+            .note => {
+                const note = try builders.buildNote(self, form_children[1..], env);
                 try notes.append(self.allocator, note);
-            }
-            // Auto pin aliases: if package/symbol has pin names, create net-ties
-            try appendAutoAliases(self, result.instance, result.pin_nets, &net_ties);
-        } else if (std.mem.eql(u8, form_name, "port")) {
-            const port = try builders.buildPort(self, form_children[1..], env);
-            try ports.append(self.allocator, port);
-        } else if (std.mem.eql(u8, form_name, BUS_PORT_FORM)) {
-            try builders.expandTopLevelBusPort(self, form_children, env, &ports);
-        } else if (std.mem.eql(u8, form_name, "note")) {
-            const note = try builders.buildNote(self, form_children[1..], env);
-            try notes.append(self.allocator, note);
-        } else if (std.mem.eql(u8, form_name, "group")) {
-            const group = try builders.buildGroup(self, form_children[1..], env);
-            try groups.append(self.allocator, group);
-        } else if (std.mem.eql(u8, form_name, "sub-block")) {
-            const sb = try builders.buildSubBlock(self, form_children[1..], env);
-            try sub_blocks.append(self.allocator, sb);
-        } else if (std.mem.eql(u8, form_name, "section")) {
-            try evalSection(self, form_children, env, &instances, &all_pin_nets, &notes, &net_ties, &sections);
-        } else if (std.mem.eql(u8, form_name, "net")) {
-            try evalNetForm(self, form_children, env, &net_ties);
-            validate.trackNetFormSource(self, form_children, env, &net_form_sources);
-        } else if (std.mem.eql(u8, form_name, "bus-net")) {
-            try evalBusNetForm(self, form_children, env, &net_ties);
-        } else if (std.mem.eql(u8, form_name, "series")) {
-            try instance_mod.evalSeriesForm(self, form_children, env, &instances, &all_pin_nets, &notes);
-        } else if (std.mem.eql(u8, form_name, DECOUPLE_FORM)) {
-            try evalDecoupleForm(self, form_children, env, &instances, &all_pin_nets);
-        } else if (std.mem.eql(u8, form_name, "verifies")) {
-            if (parseVerifies(self, form_children, env)) |v| {
-                try verifications.append(self.allocator, v);
-            }
-        } else if (std.mem.eql(u8, form_name, "test-point")) {
-            if (try test_point_mod.parse(self.allocator, form_children)) |tp| {
-                try test_points.append(self.allocator, tp);
-            }
-        } else if (std.mem.eql(u8, form_name, "power-config")) {
-            if (power_config_mod.parse(form_children)) |cfg| {
+            },
+            .group => {
+                const group = try builders.buildGroup(self, form_children[1..], env);
+                try groups.append(self.allocator, group);
+            },
+            .sub_block => {
+                const sb = try builders.buildSubBlock(self, form_children[1..], env);
+                try sub_blocks.append(self.allocator, sb);
+            },
+            .section => try evalSection(self, form_children, env, &instances, &all_pin_nets, &notes, &net_ties, &sections),
+            .net => {
+                try evalNetForm(self, form_children, env, &net_ties);
+                validate.trackNetFormSource(self, form_children, env, &net_form_sources);
+            },
+            .bus_net => try evalBusNetForm(self, form_children, env, &net_ties),
+            .series => try instance_mod.evalSeriesForm(self, form_children, env, &instances, &all_pin_nets, &notes),
+            .decouple => try evalDecoupleForm(self, form_children, env, &instances, &all_pin_nets),
+            .verifies => if (parseVerifies(self, form_children, env)) |v| try verifications.append(self.allocator, v),
+            .test_point => if (try test_point_mod.parse(self.allocator, form_children)) |tp| try test_points.append(self.allocator, tp),
+            .power_config => if (power_config_mod.parse(form_children)) |cfg| {
                 if (cfg.derating) |d| derating = d;
-            }
+            },
+            // Section-only forms are silently ignored at the top level —
+            // a design-block body shouldn't carry status/description/pins
+            // directly. The exhaustive switch is the contract.
+            .pins, .protocol, .calc, .description, .status, .role, .diagram => {},
         }
-        // Ignore config and other unknown forms for now
     }
 
     try validate.warnCombinableNets(self, &net_form_sources);
@@ -295,6 +291,86 @@ fn evalDecoupleForm(
     }
 }
 
+/// Mutable bag of pointers to the per-section accumulators that
+/// `processSharedSectionForm` writes into. Bundling them lets both
+/// `evalSection` and `evalSubSection` reuse the exact same handler for
+/// the forms whose semantics are identical between the two scopes
+/// (`status`, `description`, `note`, `port`, `protocol`, `calc`).
+const SectionScope = struct {
+    description: *[]const u8,
+    notes: *std.ArrayListUnmanaged(env_mod.SectionNote),
+    ports: *std.ArrayListUnmanaged(env_mod.SectionPort),
+    protocols: *std.ArrayListUnmanaged([]const u8),
+    calcs: *std.ArrayListUnmanaged(env_mod.CalcBlock),
+    explicit_status: *?env_mod.SectionStatus,
+};
+
+/// Process a form whose handling is identical between a section and a
+/// nested sub-section. Returns true when the form was consumed; the
+/// caller's switch then has nothing to do for that variant.
+fn processSharedSectionForm(
+    self: *Evaluator,
+    sf: ScopeForm,
+    sf_children: []const Node,
+    env: *Env,
+    scope: SectionScope,
+) EvalError!bool {
+    switch (sf) {
+        .status => {
+            if (sf_children.len >= 2) {
+                if (sf_children[1].asAtom()) |status_str| {
+                    scope.explicit_status.* = parseSectionStatus(status_str);
+                }
+            }
+            return true;
+        },
+        .description => {
+            if (sf_children.len >= 2) {
+                const dv = try self.evalNode(sf_children[1], env);
+                scope.description.* = dv.asString() orelse "";
+            }
+            return true;
+        },
+        .note => {
+            if (sf_children.len >= 2) {
+                const nv = try self.evalNode(sf_children[1], env);
+                if (nv.asString()) |text| {
+                    var ref: ?env_mod.NoteRef = null;
+                    for (sf_children[2..]) |extra| {
+                        if (env_mod.parseNoteRef(extra)) |r| {
+                            ref = r;
+                            break;
+                        }
+                    }
+                    try scope.notes.append(self.allocator, .{ .text = text, .ref = ref });
+                }
+            }
+            return true;
+        },
+        .port => {
+            if (try builders.parseSectionPort(self, sf_children, env)) |p| {
+                try scope.ports.append(self.allocator, p);
+            }
+            return true;
+        },
+        .protocol => {
+            if (sf_children.len >= 2) {
+                if (sf_children[1].asAtom()) |proto| {
+                    try scope.protocols.append(self.allocator, proto);
+                }
+            }
+            return true;
+        },
+        .calc => {
+            if (try builders.parseSectionCalc(self, sf_children, env)) |c| {
+                try scope.calcs.append(self.allocator, c);
+            }
+            return true;
+        },
+        else => return false,
+    }
+}
+
 /// Evaluate a section form and its children.
 fn evalSection(
     self: *Evaluator,
@@ -330,91 +406,70 @@ fn evalSection(
         }
     }
 
+    const scope = SectionScope{
+        .description = &sec_description,
+        .notes = &sec_notes,
+        .ports = &sec_ports,
+        .protocols = &sec_protocols,
+        .calcs = &sec_calcs,
+        .explicit_status = &explicit_status,
+    };
+
     for (form_children[child_start..]) |sf| {
         const sf_children = sf.asList() orelse continue;
         if (sf_children.len == 0) continue;
         const sf_name = sf_children[0].asAtom() orelse continue;
+        const sft = ScopeForm.fromAtom(sf_name) orelse continue;
 
-        if (std.mem.eql(u8, sf_name, "status")) {
-            if (sf_children.len >= 2) {
-                if (sf_children[1].asAtom()) |status_str| {
-                    explicit_status = parseSectionStatus(status_str);
-                }
-            }
-        } else if (std.mem.eql(u8, sf_name, "role")) {
-            if (sf_children.len >= 2) {
-                if (sf_children[1].asAtom()) |role_str| {
-                    if (std.mem.eql(u8, role_str, "input")) block_role = .input else if (std.mem.eql(u8, role_str, "output")) block_role = .output;
-                }
-            }
-        } else if (std.mem.eql(u8, sf_name, "diagram")) {
-            // `(diagram hidden)` — opt this section out of the
-            // block-diagram view. The schematic card still renders.
-            if (sf_children.len >= 2) {
-                if (sf_children[1].asAtom()) |mode| {
-                    if (std.mem.eql(u8, mode, "hidden")) diagram_hidden = true;
-                }
-            }
-        } else if (std.mem.eql(u8, sf_name, "description")) {
-            if (sf_children.len >= 2) {
-                const desc_val = try self.evalNode(sf_children[1], env);
-                sec_description = desc_val.asString() orelse "";
-            }
-        } else if (std.mem.eql(u8, sf_name, "note")) {
-            if (sf_children.len >= 2) {
-                const note_val = try self.evalNode(sf_children[1], env);
-                if (note_val.asString()) |text| {
-                    var ref: ?env_mod.NoteRef = null;
-                    for (sf_children[2..]) |extra| {
-                        if (env_mod.parseNoteRef(extra)) |r| {
-                            ref = r;
-                            break;
+        if (try processSharedSectionForm(self, sft, sf_children, env, scope)) continue;
+
+        switch (sft) {
+            .role => {
+                if (sf_children.len >= 2) {
+                    if (sf_children[1].asAtom()) |role_str| {
+                        if (std.mem.eql(u8, role_str, "input")) {
+                            block_role = .input;
+                        } else if (std.mem.eql(u8, role_str, "output")) {
+                            block_role = .output;
                         }
                     }
-                    try sec_notes.append(self.allocator, .{ .text = text, .ref = ref });
                 }
-            }
-        } else if (std.mem.eql(u8, sf_name, "port")) {
-            const port = try builders.parseSectionPort(self, sf_children, env);
-            if (port) |p| try sec_ports.append(self.allocator, p);
-        } else if (std.mem.eql(u8, sf_name, BUS_PORT_FORM)) {
-            try builders.expandSectionBusPort(self, sf_children, env, &sec_ports);
-        } else if (std.mem.eql(u8, sf_name, "protocol")) {
-            if (sf_children.len >= 2) {
-                if (sf_children[1].asAtom()) |proto| {
-                    try sec_protocols.append(self.allocator, proto);
+            },
+            .diagram => {
+                if (sf_children.len >= 2) {
+                    if (sf_children[1].asAtom()) |mode| {
+                        if (std.mem.eql(u8, mode, "hidden")) diagram_hidden = true;
+                    }
                 }
-            }
-        } else if (std.mem.eql(u8, sf_name, "calc")) {
-            const calc = try builders.parseSectionCalc(self, sf_children, env);
-            if (calc) |c| try sec_calcs.append(self.allocator, c);
-        } else if (std.mem.eql(u8, sf_name, INSTANCE_FORM)) {
-            const result = try instance_mod.buildInstance(self, sf_children, env);
-            ids.registerRefDes(self, result.instance.ref_des);
-            try instances.append(self.allocator, result.instance);
-            try sec_instances.append(self.allocator, result.instance);
-            for (result.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
-            for (result.inline_notes) |note| try notes.append(self.allocator, note);
-            // Auto pin aliases
-            try appendAutoAliases(self, result.instance, result.pin_nets, net_ties);
-        } else if (std.mem.eql(u8, sf_name, "pins")) {
-            try evalPinsForm(self, sf_children, sec_name, env, instances, all_pin_nets, net_ties, &sec_pin_groups);
-        } else if (std.mem.eql(u8, sf_name, DECOUPLE_FORM)) {
-            const pre_count = instances.items.len;
-            try evalSectionDecouple(self, sf_children, env, instances, all_pin_nets);
-            // Add newly created instances to section
-            for (instances.items[pre_count..]) |new_inst| {
-                try sec_instances.append(self.allocator, new_inst);
-            }
-        } else if (std.mem.eql(u8, sf_name, "series")) {
-            const pre_s = instances.items.len;
-            try instance_mod.evalSeriesForm(self, sf_children, env, instances, all_pin_nets, notes);
-            for (instances.items[pre_s..]) |new_inst| try sec_instances.append(self.allocator, new_inst);
-        } else if (std.mem.eql(u8, sf_name, "net")) {
-            try evalNetForm(self, sf_children, env, net_ties);
-        } else if (std.mem.eql(u8, sf_name, "section")) {
-            // Nested sub-section
-            try evalSubSection(self, sf_children, env, instances, all_pin_nets, notes, net_ties, &sec_instances, &sec_sub_sections);
+            },
+            .bus_port => try builders.expandSectionBusPort(self, sf_children, env, &sec_ports),
+            .instance => {
+                const result = try instance_mod.buildInstance(self, sf_children, env);
+                ids.registerRefDes(self, result.instance.ref_des);
+                try instances.append(self.allocator, result.instance);
+                try sec_instances.append(self.allocator, result.instance);
+                for (result.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
+                for (result.inline_notes) |note| try notes.append(self.allocator, note);
+                try appendAutoAliases(self, result.instance, result.pin_nets, net_ties);
+            },
+            .pins => try evalPinsForm(self, sf_children, sec_name, env, instances, all_pin_nets, net_ties, &sec_pin_groups),
+            .decouple => {
+                const pre_count = instances.items.len;
+                try evalSectionDecouple(self, sf_children, env, instances, all_pin_nets);
+                for (instances.items[pre_count..]) |new_inst| try sec_instances.append(self.allocator, new_inst);
+            },
+            .series => {
+                const pre_s = instances.items.len;
+                try instance_mod.evalSeriesForm(self, sf_children, env, instances, all_pin_nets, notes);
+                for (instances.items[pre_s..]) |new_inst| try sec_instances.append(self.allocator, new_inst);
+            },
+            .net => try evalNetForm(self, sf_children, env, net_ties),
+            .bus_net => try evalBusNetForm(self, sf_children, env, net_ties),
+            .section => try evalSubSection(self, sf_children, env, instances, all_pin_nets, notes, net_ties, &sec_instances, &sec_sub_sections),
+            // Shared-form variants are consumed above by
+            // `processSharedSectionForm`; top-level-only forms are
+            // silently ignored inside a section body.
+            .status, .description, .note, .port, .protocol, .calc, .group, .sub_block, .verifies, .test_point, .power_config => {},
         }
     }
 
@@ -552,87 +607,69 @@ fn evalSubSection(
 
     var explicit_status: ?env_mod.SectionStatus = null;
 
+    const sub_scope = SectionScope{
+        .description = &sub_description,
+        .notes = &sub_notes,
+        .ports = &sub_ports,
+        .protocols = &sub_protocols,
+        .calcs = &sub_calcs,
+        .explicit_status = &explicit_status,
+    };
+
     for (sf_children[2..]) |ssf| {
         const ssf_children = ssf.asList() orelse continue;
         if (ssf_children.len == 0) continue;
         const ssf_name = ssf_children[0].asAtom() orelse continue;
+        const sft = ScopeForm.fromAtom(ssf_name) orelse continue;
 
-        if (std.mem.eql(u8, ssf_name, "status")) {
-            if (ssf_children.len >= 2) {
-                if (ssf_children[1].asAtom()) |status_str| {
-                    explicit_status = parseSectionStatus(status_str);
+        if (try processSharedSectionForm(self, sft, ssf_children, env, sub_scope)) continue;
+
+        switch (sft) {
+            .bus_port => try builders.expandSectionBusPort(self, ssf_children, env, &sub_ports),
+            .instance => {
+                const result = try instance_mod.buildInstance(self, ssf_children, env);
+                ids.registerRefDes(self, result.instance.ref_des);
+                try instances.append(self.allocator, result.instance);
+                try sec_instances.append(self.allocator, result.instance);
+                try sub_instances.append(self.allocator, result.instance);
+                for (result.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
+                for (result.inline_notes) |note| try notes.append(self.allocator, note);
+            },
+            .pins => {
+                if (ssf_children.len < 2) continue;
+                const pins_ref_val = try self.evalNode(ssf_children[1], env);
+                const pins_ref = pins_ref_val.asString() orelse continue;
+                const pin_func_map2 = builders.findPinFuncMap(self, instances.items, pins_ref);
+                var pg_pins2: std.ArrayListUnmanaged(env_mod.PartPin) = .empty;
+                for (ssf_children[2..]) |pin_form| {
+                    try builders.processPinForm(self, pin_form, pins_ref, pin_func_map2, env, all_pin_nets, &pg_pins2, net_ties);
                 }
-            }
-        } else if (std.mem.eql(u8, ssf_name, "description")) {
-            if (ssf_children.len >= 2) {
-                const dv = try self.evalNode(ssf_children[1], env);
-                sub_description = dv.asString() orelse "";
-            }
-        } else if (std.mem.eql(u8, ssf_name, "note")) {
-            if (ssf_children.len >= 2) {
-                const nv = try self.evalNode(ssf_children[1], env);
-                if (nv.asString()) |text| {
-                    var ref: ?env_mod.NoteRef = null;
-                    for (ssf_children[2..]) |extra| {
-                        if (env_mod.parseNoteRef(extra)) |r| {
-                            ref = r;
-                            break;
-                        }
-                    }
-                    try sub_notes.append(self.allocator, .{ .text = text, .ref = ref });
+                const pg_slice2 = pg_pins2.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
+                try sub_pin_groups.append(self.allocator, .{ .ref_des = pins_ref, .pins = pg_slice2 });
+                try builders.addPartToInstance(self, instances.items, pins_ref, sub_name, pg_slice2);
+            },
+            .decouple => {
+                const pre_count = instances.items.len;
+                try evalSectionDecouple(self, ssf_children, env, instances, all_pin_nets);
+                for (instances.items[pre_count..]) |new_inst| {
+                    try sec_instances.append(self.allocator, new_inst);
+                    try sub_instances.append(self.allocator, new_inst);
                 }
-            }
-        } else if (std.mem.eql(u8, ssf_name, "port")) {
-            const port = try builders.parseSectionPort(self, ssf_children, env);
-            if (port) |p| try sub_ports.append(self.allocator, p);
-        } else if (std.mem.eql(u8, ssf_name, BUS_PORT_FORM)) {
-            try builders.expandSectionBusPort(self, ssf_children, env, &sub_ports);
-        } else if (std.mem.eql(u8, ssf_name, "protocol")) {
-            if (ssf_children.len >= 2) {
-                if (ssf_children[1].asAtom()) |proto| {
-                    try sub_protocols.append(self.allocator, proto);
+            },
+            .series => {
+                const pre_s = instances.items.len;
+                try instance_mod.evalSeriesForm(self, ssf_children, env, instances, all_pin_nets, notes);
+                for (instances.items[pre_s..]) |new_inst| {
+                    try sec_instances.append(self.allocator, new_inst);
+                    try sub_instances.append(self.allocator, new_inst);
                 }
-            }
-        } else if (std.mem.eql(u8, ssf_name, "calc")) {
-            const calc = try builders.parseSectionCalc(self, ssf_children, env);
-            if (calc) |c| try sub_calcs.append(self.allocator, c);
-        } else if (std.mem.eql(u8, ssf_name, INSTANCE_FORM)) {
-            const result = try instance_mod.buildInstance(self, ssf_children, env);
-            ids.registerRefDes(self, result.instance.ref_des);
-            try instances.append(self.allocator, result.instance);
-            try sec_instances.append(self.allocator, result.instance);
-            try sub_instances.append(self.allocator, result.instance);
-            for (result.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
-            for (result.inline_notes) |note| try notes.append(self.allocator, note);
-        } else if (std.mem.eql(u8, ssf_name, "pins")) {
-            // Reuse parent section's pins handling
-            if (ssf_children.len < 2) continue;
-            const pins_ref_val = try self.evalNode(ssf_children[1], env);
-            const pins_ref = pins_ref_val.asString() orelse continue;
-            const pin_func_map2 = builders.findPinFuncMap(self, instances.items, pins_ref);
-            var pg_pins2: std.ArrayListUnmanaged(env_mod.PartPin) = .empty;
-            for (ssf_children[2..]) |pin_form| {
-                try builders.processPinForm(self, pin_form, pins_ref, pin_func_map2, env, all_pin_nets, &pg_pins2, net_ties);
-            }
-            const pg_slice2 = pg_pins2.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
-            try sub_pin_groups.append(self.allocator, .{ .ref_des = pins_ref, .pins = pg_slice2 });
-            try builders.addPartToInstance(self, instances.items, pins_ref, sub_name, pg_slice2);
-        } else if (std.mem.eql(u8, ssf_name, DECOUPLE_FORM)) {
-            const pre_count = instances.items.len;
-            try evalSectionDecouple(self, ssf_children, env, instances, all_pin_nets);
-            for (instances.items[pre_count..]) |new_inst| {
-                try sec_instances.append(self.allocator, new_inst);
-                try sub_instances.append(self.allocator, new_inst);
-            }
-        } else if (std.mem.eql(u8, ssf_name, "series")) {
-            const pre_s = instances.items.len;
-            try instance_mod.evalSeriesForm(self, ssf_children, env, instances, all_pin_nets, notes);
-            for (instances.items[pre_s..]) |new_inst| {
-                try sec_instances.append(self.allocator, new_inst);
-                try sub_instances.append(self.allocator, new_inst);
-            }
-        } else if (std.mem.eql(u8, ssf_name, "net")) {
-            try evalNetForm(self, ssf_children, env, net_ties);
+            },
+            .net => try evalNetForm(self, ssf_children, env, net_ties),
+            .bus_net => try evalBusNetForm(self, ssf_children, env, net_ties),
+            // Sub-sections don't recurse, don't carry top-level-only
+            // forms, and don't have `role`/`diagram`. Shared-form
+            // variants went through `processSharedSectionForm` above.
+            .status, .description, .note, .port, .protocol, .calc, .role, .diagram, .section, .group, .sub_block, .verifies, .test_point, .power_config => {},
         }
     }
     const final_sub_instances = sub_instances.toOwnedSlice(self.allocator) catch &.{};

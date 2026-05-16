@@ -27,6 +27,7 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Prints short nested lists inline on one line
 - Prints long nested lists with multiline indentation
 - Round-trips parse to print to parse producing identical AST
+- Round-trips every .sexp file under projects/designs through parse → print → parse with structurally equal AST
 
 ## sexpr/ast
 
@@ -38,6 +39,16 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Evaluates a voltage divider formula combining arithmetic operators
 - Evaluates comparison operations returning boolean results
 - Evaluates logic operations on boolean values
+
+## eval/forms
+
+- SpecialForm.fromAtom resolves every head atom the evaluator dispatches on
+- SpecialForm.fromAtom rejects atoms that aren't registered special forms
+- Builtin.fromAtom resolves every operator name
+- ScopeForm.fromAtom resolves every form name that can appear in a design-block / section / subsection
+- validateArity flags too-few and too-many arguments and accepts in-range counts
+- schemaFor returns the schema for every special form whose arity is fixed
+- renderLanguageReference output matches the committed docs/language-forms.md so docs can never lag the registry
 
 ## eval/fmt
 
@@ -76,6 +87,8 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - deriveChildId produces unique child IDs across different index values
 - generateId produces 8-char hex starting with letter
 - isStandardRefDes distinguishes standard from descriptive labels
+- last_error records the source span of an unknown form so callers can report file:line:col
+- last_error records the source span of an arity mismatch in a special form
 
 ## id_insert
 
