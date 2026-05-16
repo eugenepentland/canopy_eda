@@ -784,6 +784,19 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     var matched_uuids = std.StringHashMap(void).init(req.arena);
     var canonical_fp_name = std.StringHashMap([]const u8).init(req.arena);
 
+    // Pre-walk instances to find every board fp that some design instance
+    // will claim via its canopy_uuid. The by_ref tier in matchInstance
+    // must refuse to claim any of these — otherwise two design instances
+    // collide on one fp (one via by_uuid, the other via by_ref) and emit
+    // contradictory set_field ops, producing the flip-flop where every
+    // sync rewrites the same fp's reference and canopy_uuid.
+    var reserved_kicad_uuids = std.StringHashMap(void).init(req.arena);
+    for (instances.items) |inst| {
+        if (by_uuid.get(inst.uuid)) |m| {
+            if (m.kicad_uuid.len > 0) try reserved_kicad_uuids.put(m.kicad_uuid, {});
+        }
+    }
+
     try w.writeAll("[");
 
     var applied_ops_local = parsed.applied_ops;
@@ -792,6 +805,7 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         .by_ref = &by_ref,
         .by_migration = &by_migration,
         .by_netsig = &by_netsig,
+        .reserved_kicad_uuids = &reserved_kicad_uuids,
         .pad_net_map = &pad_net_map,
         .matched_uuids = &matched_uuids,
         .canonical_fp_name = &canonical_fp_name,
@@ -842,6 +856,11 @@ const DiffContext = struct {
     /// cross-hierarchy moves like top-level `Q1` → `disp/Q3`. Gated on
     /// --migrate alongside the migration index.
     by_netsig: *std.StringHashMap(BoardFp),
+    /// Set of board fp kicad_uuids that some design instance will claim
+    /// via its canopy_uuid (by_uuid tier). matchInstance's by_ref fallback
+    /// refuses to return any fp whose kicad_uuid is in this set, so two
+    /// instances can't collide on one fp via different tiers.
+    reserved_kicad_uuids: *std.StringHashMap(void),
     pad_net_map: *std.StringHashMap([]const u8),
     matched_uuids: *std.StringHashMap(void),
     /// short EDA footprint name ("c-0201") → canonical KiCad name inside
@@ -979,6 +998,39 @@ fn heuristicKey(arena: std.mem.Allocator, parent: []const u8, _: []const u8, val
     return std.fmt.allocPrint(arena, "{s}|{s}", .{ parent, value });
 }
 
+/// Decide which board fp a design instance pairs with, using the two
+/// non-heuristic tiers (canopy uuid, then reference). Refuses any
+/// match — including by_uuid — for a fp that another instance has
+/// already claimed in this walk, and refuses by_ref matches whose fp
+/// is reserved by some other instance's canopy_uuid. Without those
+/// guards, legacy boards (where Reference/canopy_uuid disagree on the
+/// same physical fp, or two design instances share a canopy_uuid)
+/// produce two design instances both writing to one fp and emit
+/// contradictory ops every sync. Pure function; extracted from
+/// `matchInstance` so the collision rules are directly testable.
+fn pickByUuidOrRef(
+    inst_uuid: []const u8,
+    inst_ref: []const u8,
+    by_uuid: *std.StringHashMap(BoardFp),
+    by_ref: *std.StringHashMap(BoardFp),
+    reserved_kicad_uuids: *std.StringHashMap(void),
+    already_claimed: *std.StringHashMap(void),
+) ?BoardFp {
+    if (by_uuid.get(inst_uuid)) |m| {
+        if (!already_claimed.contains(m.kicad_uuid)) return m;
+    }
+    if (inst_ref.len > 0) {
+        if (by_ref.get(inst_ref)) |m| {
+            if (!reserved_kicad_uuids.contains(m.kicad_uuid) and
+                !already_claimed.contains(m.kicad_uuid))
+            {
+                return m;
+            }
+        }
+    }
+    return null;
+}
+
 fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, first: *bool, ops_emitted: *u32) !?BoardFp {
     // Net-signature relink wins over canopy uuid: the relink builder
     // only populates a pairing when there's an orphan board fp with the
@@ -992,25 +1044,24 @@ fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, f
     if (d.migrate_heuristic) {
         if (d.by_netsig.get(inst.uuid)) |m| return m;
     }
-    if (d.by_uuid.get(inst.uuid)) |m| return m;
-    if (inst.ref_des.len > 0) {
-        if (d.by_ref.get(inst.ref_des)) |m| {
-            if (m.uuid.len == 0) {
-                // Backfill the canopy_uuid custom field on this footprint
-                // so the next sync UUID-matches without falling back to
-                // ref_des. Target by KiCad-internal UUID so the agent's
-                // cache resolves even before canopy_uuid is set.
-                const target = opTargetUuid(m);
-                if (try emitOpUnlessApplied(d, w, first, OP_SET_FIELD, .{
-                    .{ "uuid", target },
-                    .{ "field", FIELD_CANOPY_UUID },
-                    .{ "value", inst.uuid },
-                }, target, FIELD_CANOPY_UUID, inst.uuid)) {
-                    ops_emitted.* += 1;
-                }
+    if (pickByUuidOrRef(inst.uuid, inst.ref_des, d.by_uuid, d.by_ref, d.reserved_kicad_uuids, d.matched_uuids)) |m| {
+        if (m.uuid.len == 0) {
+            // by_ref match against a board fp with no canopy_uuid yet:
+            // backfill so next sync UUID-matches directly. Target by
+            // KiCad-internal UUID so the agent's cache resolves before
+            // canopy_uuid is set. by_uuid matches always have m.uuid !=
+            // "" (the key of the map), so this branch only runs for
+            // by_ref pairings.
+            const target = opTargetUuid(m);
+            if (try emitOpUnlessApplied(d, w, first, OP_SET_FIELD, .{
+                .{ "uuid", target },
+                .{ "field", FIELD_CANOPY_UUID },
+                .{ "value", inst.uuid },
+            }, target, FIELD_CANOPY_UUID, inst.uuid)) {
+                ops_emitted.* += 1;
             }
-            return m;
         }
+        return m;
     }
     if (heuristicMatch(d, inst)) |m| {
         // Migration tier: rename the matched board footprint to the
@@ -1570,4 +1621,126 @@ fn writeJsonString(w: anytype, s: []const u8) !void {
         else => try w.writeByte(ch),
     };
     try w.writeAll("\"");
+}
+
+// ── tests ──────────────────────────────────────────────────────────
+
+fn testFp(uuid: []const u8, kicad_uuid: []const u8, ref: []const u8) BoardFp {
+    return .{
+        .uuid = uuid,
+        .kicad_uuid = kicad_uuid,
+        .ref = ref,
+        .value = "",
+        .footprint_name = "",
+        .fields = .{},
+        .pads = &.{},
+        .locked = false,
+    };
+}
+
+test "pickByUuidOrRef returns the by_uuid match when canopy_uuid is on the board" {
+    // spec: serve/sync - pickByUuidOrRef returns the by_uuid match when the instance's canopy_uuid is on the board
+    var by_uuid = std.StringHashMap(BoardFp).init(std.testing.allocator);
+    defer by_uuid.deinit();
+    var by_ref = std.StringHashMap(BoardFp).init(std.testing.allocator);
+    defer by_ref.deinit();
+    var reserved = std.StringHashMap(void).init(std.testing.allocator);
+    defer reserved.deinit();
+    var claimed = std.StringHashMap(void).init(std.testing.allocator);
+    defer claimed.deinit();
+
+    const fp = testFp("aa000001", "kid-A", "charger/C156");
+    try by_uuid.put("aa000001", fp);
+    try by_ref.put("charger/C156", fp);
+
+    const got = pickByUuidOrRef("aa000001", "charger/C156", &by_uuid, &by_ref, &reserved, &claimed);
+    try std.testing.expect(got != null);
+    try std.testing.expectEqualStrings("kid-A", got.?.kicad_uuid);
+}
+
+test "pickByUuidOrRef falls back to by_ref when canopy_uuid is missing and the fp is not reserved" {
+    // spec: serve/sync - pickByUuidOrRef falls back to by_ref when canopy_uuid is missing and the fp is not reserved
+    var by_uuid = std.StringHashMap(BoardFp).init(std.testing.allocator);
+    defer by_uuid.deinit();
+    var by_ref = std.StringHashMap(BoardFp).init(std.testing.allocator);
+    defer by_ref.deinit();
+    var reserved = std.StringHashMap(void).init(std.testing.allocator);
+    defer reserved.deinit();
+    var claimed = std.StringHashMap(void).init(std.testing.allocator);
+    defer claimed.deinit();
+
+    // Board fp has no canopy_uuid yet — by_ref is the only path.
+    const fp = testFp("", "kid-B", "charger/C157");
+    try by_ref.put("charger/C157", fp);
+
+    const got = pickByUuidOrRef("bb000002", "charger/C157", &by_uuid, &by_ref, &reserved, &claimed);
+    try std.testing.expect(got != null);
+    try std.testing.expectEqualStrings("kid-B", got.?.kicad_uuid);
+}
+
+test "pickByUuidOrRef refuses a by_ref match whose fp is reserved by another instance's canopy_uuid" {
+    // spec: serve/sync - pickByUuidOrRef refuses a by_ref match whose fp is reserved by another instance's canopy_uuid
+    // The Cyclops Digital scenario: one physical board fp carries
+    // Reference="charger/C157" but canopy_uuid pointing at C156's
+    // identity. Without the reservation guard, design instance C156
+    // would claim it via by_uuid AND design instance C157 would also
+    // claim it via by_ref — contradictory ops every sync.
+    var by_uuid = std.StringHashMap(BoardFp).init(std.testing.allocator);
+    defer by_uuid.deinit();
+    var by_ref = std.StringHashMap(BoardFp).init(std.testing.allocator);
+    defer by_ref.deinit();
+    var reserved = std.StringHashMap(void).init(std.testing.allocator);
+    defer reserved.deinit();
+    var claimed = std.StringHashMap(void).init(std.testing.allocator);
+    defer claimed.deinit();
+
+    const fp_collision = testFp("aa000001", "kid-X", "charger/C157");
+    try by_uuid.put("aa000001", fp_collision);
+    try by_ref.put("charger/C157", fp_collision);
+    // C156 already reserved this fp via its canopy_uuid earlier in the pre-walk.
+    try reserved.put("kid-X", {});
+
+    // C157 (uuid bb000002) tries to claim the same fp via by_ref — refused.
+    const got = pickByUuidOrRef("bb000002", "charger/C157", &by_uuid, &by_ref, &reserved, &claimed);
+    try std.testing.expect(got == null);
+}
+
+test "pickByUuidOrRef refuses a by_uuid match whose fp another instance already claimed" {
+    // spec: serve/sync - pickByUuidOrRef refuses a by_uuid match whose fp another instance already claimed in this walk
+    // Legacy BOM corruption: two design instances ended up sharing the
+    // same canopy_uuid. Both their by_uuid lookups return the same fp.
+    // The second to be processed must be refused so it doesn't emit
+    // contradictory ops on top of the first claim.
+    var by_uuid = std.StringHashMap(BoardFp).init(std.testing.allocator);
+    defer by_uuid.deinit();
+    var by_ref = std.StringHashMap(BoardFp).init(std.testing.allocator);
+    defer by_ref.deinit();
+    var reserved = std.StringHashMap(void).init(std.testing.allocator);
+    defer reserved.deinit();
+    var claimed = std.StringHashMap(void).init(std.testing.allocator);
+    defer claimed.deinit();
+
+    const fp = testFp("aa000001", "kid-Y", "adc1/C169");
+    try by_uuid.put("aa000001", fp);
+    // First instance has already locked in this fp.
+    try claimed.put("kid-Y", {});
+
+    // Second instance with the same canopy_uuid arrives — refused.
+    const got = pickByUuidOrRef("aa000001", "adc3/C193", &by_uuid, &by_ref, &reserved, &claimed);
+    try std.testing.expect(got == null);
+}
+
+test "pickByUuidOrRef returns null when neither tier matches" {
+    // spec: serve/sync - pickByUuidOrRef returns null when neither tier matches
+    var by_uuid = std.StringHashMap(BoardFp).init(std.testing.allocator);
+    defer by_uuid.deinit();
+    var by_ref = std.StringHashMap(BoardFp).init(std.testing.allocator);
+    defer by_ref.deinit();
+    var reserved = std.StringHashMap(void).init(std.testing.allocator);
+    defer reserved.deinit();
+    var claimed = std.StringHashMap(void).init(std.testing.allocator);
+    defer claimed.deinit();
+
+    const got = pickByUuidOrRef("cc000003", "charger/C99", &by_uuid, &by_ref, &reserved, &claimed);
+    try std.testing.expect(got == null);
 }

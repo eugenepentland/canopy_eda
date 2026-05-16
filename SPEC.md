@@ -278,6 +278,14 @@ Public functions: writePowerTree, writeSummaryTable, writePowerBudget, writePowe
 
 Public functions: notFound, serve
 
+## serve/sync
+
+- pickByUuidOrRef returns the by_uuid match when the instance's canopy_uuid is on the board
+- pickByUuidOrRef falls back to by_ref when canopy_uuid is missing and the fp is not reserved
+- pickByUuidOrRef refuses a by_ref match whose fp is reserved by another instance's canopy_uuid
+- pickByUuidOrRef refuses a by_uuid match whose fp another instance already claimed in this walk
+- pickByUuidOrRef returns null when neither tier matches
+
 ## serve/vfs
 
 Public functions: readFile, writeFile, editFile, listDir, glob, deleteFile, moveFile, dirtyDesignsForPath

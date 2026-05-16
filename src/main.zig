@@ -392,6 +392,7 @@ test {
     _ = @import("convert/alt_functions.zig");
     _ = @import("export_kicad.zig");
     _ = @import("serve.zig");
+    _ = @import("serve/sync.zig");
     _ = @import("render_json.zig");
     _ = @import("json_writer.zig");
     _ = @import("checks.zig");
