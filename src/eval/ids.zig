@@ -66,8 +66,16 @@ pub fn autoAssignRefDes(self: *Evaluator, block: *DesignBlock) EvalError!void {
         }
     }
 
+    // Phase C.1: walk the instances in a stable (source_offset, insertion_index)
+    // order before assigning auto-refs. The slice itself is already source-
+    // ordered today, but pinning the iteration through `stableRefAssignOrder`
+    // means a future hash-map-iterated builder can't perturb numbering.
+    const order = try stableRefAssignOrder(self.allocator, insts);
+    defer self.allocator.free(order);
+
     // Second pass: assign new ref_des for non-standard labels
-    for (insts) |*inst| {
+    for (order) |i| {
+        const inst = &insts[i];
         if (!isStandardRefDes(inst.ref_des)) {
             const prefix = componentPrefix(inst.component);
             const new_ref = nextRefDes(self, prefix) catch continue;
@@ -125,8 +133,15 @@ fn assignSubBlockRefDes(self: *Evaluator, block: *DesignBlock) !void {
 
     const insts: []Instance = @constCast(block.instances);
 
+    // Phase C.1: assign in stable (source_offset, insertion_index) order so a
+    // sub-block's global ref-des numbering can't drift run-to-run if a builder
+    // ever appends instances out of source order.
+    const order = try stableRefAssignOrder(self.allocator, insts);
+    defer self.allocator.free(order);
+
     // Assign new global ref_des for all instances
-    for (insts) |*inst| {
+    for (order) |i| {
+        const inst = &insts[i];
         const prefix = componentPrefix(inst.component);
         const new_ref = nextRefDes(self, prefix) catch continue;
         if (!std.mem.eql(u8, inst.ref_des, new_ref)) {
@@ -241,6 +256,30 @@ pub fn componentPrefix(family: []const u8) u8 {
     // Everything else is an IC
     if (family.len > 0) return 'U';
     return 'X';
+}
+
+/// Phase C.1: produce a stable iteration order for `nextRefDes` assignment.
+/// Sort key is `(source_offset, original_index)`: source offset preserves the
+/// "instance N appears at line L" intuition for direct `(instance …)` forms,
+/// and the original index breaks ties for builder-synthesised siblings
+/// (decouple/series) that all share the call site's offset. Today the slice
+/// is already source-ordered, so this sort is a no-op for production designs
+/// — but pinning it down means a future hash-map-iterated builder can't
+/// silently flip the C5/C7 assignment between consecutive evals.
+fn stableRefAssignOrder(allocator: std.mem.Allocator, insts: []const Instance) std.mem.Allocator.Error![]usize {
+    const order = try allocator.alloc(usize, insts.len);
+    for (order, 0..) |*ix, i| ix.* = i;
+    const Ctx = struct {
+        insts: []const Instance,
+        fn lt(ctx: @This(), a: usize, b: usize) bool {
+            const ao = ctx.insts[a].source_offset;
+            const bo = ctx.insts[b].source_offset;
+            if (ao != bo) return ao < bo;
+            return a < b;
+        }
+    };
+    std.mem.sortUnstable(usize, order, Ctx{ .insts = insts }, Ctx.lt);
+    return order;
 }
 
 /// Scan form children for (id xxxxxxxx) and return the 8-char hex string, or null.

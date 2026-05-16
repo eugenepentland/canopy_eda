@@ -202,53 +202,22 @@ pub fn resolveIdentities(
         try result_map.put(info.ref_des, uuid);
     }
 
-    // Pass 3.5: correct UUID assignments by net matching
-    {
-        var old_by_netsig = std.StringHashMap(usize).init(allocator);
-        defer old_by_netsig.deinit();
-        for (old_entries, 0..) |old, idx| {
-            if (old.nets.len == 0) continue;
-            const sig = bom_mod.netSignature(allocator, old.nets) catch continue;
-            try old_by_netsig.put(sig, idx);
-        }
-
-        for (flat_list.items) |info| {
-            if (info.nets.len == 0) continue;
-            const assigned_uuid = result_map.get(info.ref_des) orelse continue;
-
-            var assigned_old_idx: ?usize = null;
-            for (old_entries, 0..) |old, idx| {
-                if (std.mem.eql(u8, old.uuid, assigned_uuid)) {
-                    assigned_old_idx = idx;
-                    break;
-                }
-            }
-            const old_idx = assigned_old_idx orelse continue;
-            const old = old_entries[old_idx];
-            if (old.nets.len == 0) continue;
-
-            if (bom_mod.netOverlap(info.nets, old.nets) >= STRONG_NET_MATCH_RATIO) continue;
-
-            const new_sig = bom_mod.netSignature(allocator, info.nets) catch continue;
-            const correct_old_idx = old_by_netsig.get(new_sig) orelse continue;
-            const correct_uuid = old_entries[correct_old_idx].uuid;
-
-            var other_ref: ?[]const u8 = null;
-            for (flat_list.items) |other| {
-                if (std.mem.eql(u8, other.ref_des, info.ref_des)) continue;
-                const other_uuid = result_map.get(other.ref_des) orelse continue;
-                if (std.mem.eql(u8, other_uuid, correct_uuid)) {
-                    other_ref = other.ref_des;
-                    break;
-                }
-            }
-
-            if (other_ref) |oref| {
-                result_map.putAssumeCapacity(info.ref_des, try allocator.dupe(u8, correct_uuid));
-                result_map.putAssumeCapacity(oref, try allocator.dupe(u8, assigned_uuid));
-            }
-        }
-    }
+    // Pass 3.5: correct UUID assignments by net matching.
+    //
+    // Phase C.2: collect every proposed swap first, then apply in one go.
+    // The previous implementation mutated `result_map` as it iterated, which
+    // meant a swap A↔B done early could enable a follow-on B↔C swap that
+    // would have been wrong with the original state — the pass produced
+    // different terminal states depending on visit order, and on the next
+    // eval it would re-fire the inverse correction, causing the user-visible
+    // `set_pad_net` flip-flop documented in docs/kicad-sync-phase-c.md.
+    //
+    // The fix: stage swaps in a list, then drop any cluster where one
+    // ref_des wants to swap with two distinct partners (a sign that net
+    // signatures don't bijectively partition the candidates — applying a
+    // partial chain would leave the BOM worse off than skipping). Apply the
+    // remaining bijective swaps in one pass.
+    try runPass35Swaps(allocator, &result_map, flat_list.items, old_entries);
 
     // Pass 4: auto-resolve manufacturer + MPN from parts DB
     var parts_db = parts_mod.PartsDb.init(allocator, project_dir);
@@ -303,6 +272,151 @@ pub fn resolveIdentities(
 
     try applyBom(allocator, block, &result_map, &props_map, "");
     try saveBom(allocator, bom_path, flat_list.items, &result_map, &props_map);
+}
+
+/// Phase C.2: Pass 3.5 reimplemented as a fixed-point swap collector.
+///
+/// Step 1: for every instance whose currently-assigned UUID has a weak net
+/// overlap with its old BOM entry, look up the UUID whose old-BOM net
+/// signature matches the instance's new signature. If some *other* ref_des
+/// in the new flat list currently holds that UUID, record a proposed swap
+/// `(a_ref ↔ b_ref)`.
+///
+/// Step 2: walk the swap list once and build a partner map. If a ref_des
+/// is named in two swaps with different partners, log a warning and mark
+/// the whole cluster as ambiguous — those swaps will not fire.
+///
+/// Step 3: apply every non-ambiguous bijective swap exactly once.
+///
+/// Step 4: re-check each instance against its old-by-uuid entry; if a
+/// weak-overlap mismatch survived (no swap candidate or the swap was
+/// dropped as ambiguous), log a warning. Repeated `eda kicad-sync` calls
+/// will re-emit the same correction at this point — failing loud beats
+/// silent flip-flop.
+fn runPass35Swaps(
+    allocator: std.mem.Allocator,
+    result_map: *std.StringHashMap([]const u8),
+    flat: []const FlatInfo,
+    old_entries: []const bom_mod.BomEntry,
+) ResolveError!void {
+    var old_by_netsig = std.StringHashMap(usize).init(allocator);
+    defer old_by_netsig.deinit();
+    for (old_entries, 0..) |old, idx| {
+        if (old.nets.len == 0) continue;
+        const sig = bom_mod.netSignature(allocator, old.nets) catch continue;
+        try old_by_netsig.put(sig, idx);
+    }
+
+    const Swap = struct { a_ref: []const u8, b_ref: []const u8 };
+    var swaps: std.ArrayListUnmanaged(Swap) = .empty;
+    defer swaps.deinit(allocator);
+
+    for (flat) |info| {
+        if (info.nets.len == 0) continue;
+        const assigned_uuid = result_map.get(info.ref_des) orelse continue;
+
+        var assigned_old_idx: ?usize = null;
+        for (old_entries, 0..) |old, idx| {
+            if (std.mem.eql(u8, old.uuid, assigned_uuid)) {
+                assigned_old_idx = idx;
+                break;
+            }
+        }
+        const old_idx = assigned_old_idx orelse continue;
+        const old = old_entries[old_idx];
+        if (old.nets.len == 0) continue;
+
+        if (bom_mod.netOverlap(info.nets, old.nets) >= STRONG_NET_MATCH_RATIO) continue;
+
+        const new_sig = bom_mod.netSignature(allocator, info.nets) catch continue;
+        const correct_old_idx = old_by_netsig.get(new_sig) orelse continue;
+        const correct_uuid = old_entries[correct_old_idx].uuid;
+
+        var other_ref: ?[]const u8 = null;
+        for (flat) |other| {
+            if (std.mem.eql(u8, other.ref_des, info.ref_des)) continue;
+            const other_uuid = result_map.get(other.ref_des) orelse continue;
+            if (std.mem.eql(u8, other_uuid, correct_uuid)) {
+                other_ref = other.ref_des;
+                break;
+            }
+        }
+
+        if (other_ref) |oref| {
+            try swaps.append(allocator, .{ .a_ref = info.ref_des, .b_ref = oref });
+        }
+    }
+
+    // Cycle detection: if any ref_des appears in two swaps with distinct
+    // partners, the bijection assumption is broken — drop the whole cluster.
+    var partner = std.StringHashMap([]const u8).init(allocator);
+    defer partner.deinit();
+    var ambiguous = std.StringHashMap(void).init(allocator);
+    defer ambiguous.deinit();
+
+    for (swaps.items) |sw| {
+        try recordPartner(&partner, &ambiguous, sw.a_ref, sw.b_ref);
+        try recordPartner(&partner, &ambiguous, sw.b_ref, sw.a_ref);
+    }
+
+    // Apply bijective swaps once. The `applied` set keeps a swap from being
+    // executed twice when both endpoints appear as `info.ref_des` in the
+    // collection pass.
+    var applied = std.StringHashMap(void).init(allocator);
+    defer applied.deinit();
+    for (swaps.items) |sw| {
+        if (ambiguous.contains(sw.a_ref) or ambiguous.contains(sw.b_ref)) continue;
+        if (applied.contains(sw.a_ref)) continue;
+        const a_uuid = result_map.get(sw.a_ref) orelse continue;
+        const b_uuid = result_map.get(sw.b_ref) orelse continue;
+        const a_dup = try allocator.dupe(u8, a_uuid);
+        const b_dup = try allocator.dupe(u8, b_uuid);
+        result_map.putAssumeCapacity(sw.a_ref, b_dup);
+        result_map.putAssumeCapacity(sw.b_ref, a_dup);
+        try applied.put(sw.a_ref, {});
+        try applied.put(sw.b_ref, {});
+    }
+
+    // Residual check: any ref_des that proposed a swap but was dropped as
+    // ambiguous (cluster cycle) will keep its weak-overlap UUID and re-fire
+    // the same correction next sync. Warn loudly — failing visible beats
+    // silent flip-flop. No-op swaps (both endpoints already have the same
+    // uuid because the legacy BOM has duplicates) are intentionally quiet:
+    // they're stable across rebuilds and re-warning every eval just adds
+    // noise — the underlying duplicate-uuid cleanup belongs to Phase C.3.
+    for (swaps.items) |sw| {
+        if (!ambiguous.contains(sw.a_ref) and !ambiguous.contains(sw.b_ref)) continue;
+        const assigned_uuid = result_map.get(sw.a_ref) orelse continue;
+        log.warn(
+            "Pass 3.5: {s} kept assigned uuid={s} — swap with {s} dropped as ambiguous; re-sync will re-emit",
+            .{ sw.a_ref, assigned_uuid, sw.b_ref },
+        );
+    }
+}
+
+fn recordPartner(
+    partner: *std.StringHashMap([]const u8),
+    ambiguous: *std.StringHashMap(void),
+    ref: []const u8,
+    other: []const u8,
+) std.mem.Allocator.Error!void {
+    if (ambiguous.contains(ref)) {
+        try ambiguous.put(other, {});
+        return;
+    }
+    const existing = partner.get(ref);
+    if (existing) |prev| {
+        if (std.mem.eql(u8, prev, other)) return;
+        log.warn(
+            "Pass 3.5: {s} appears in conflicting swaps ({s} vs {s}) — skipping cluster",
+            .{ ref, prev, other },
+        );
+        try ambiguous.put(ref, {});
+        try ambiguous.put(prev, {});
+        try ambiguous.put(other, {});
+        return;
+    }
+    try partner.put(ref, other);
 }
 
 fn applyBom(
@@ -515,4 +629,178 @@ pub fn setBomProperty(
     }
 
     try writeBomEntries(allocator, bom_path, out.items);
+}
+
+// ── Phase C.2 tests ────────────────────────────────────────────────
+
+const test_evaluator = @import("eval/evaluator.zig");
+
+// spec: bom-resolve - Pass 3.5 is a fixed point: two consecutive resolveIdentities calls produce a byte-identical BOM
+test "resolveIdentities idempotent across two consecutive evaluations" {
+    const alloc = std.heap.page_allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(project_dir);
+
+    try tmp.dir.makePath("lib/components");
+    try tmp.dir.writeFile(.{
+        .sub_path = "lib/components/cap.sexp",
+        .data =
+        \\(component-family cap
+        \\  (param-type capacitance)
+        \\  (footprint "0402"))
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "lib/components/0402.sexp",
+        .data =
+        \\(component 0402 (footprint "0402.kicad_mod"))
+        ,
+    });
+
+    try tmp.dir.makePath("src/sample");
+    try tmp.dir.writeFile(.{
+        .sub_path = "src/sample/sample.sexp",
+        .data =
+        \\(design-block "Sample"
+        \\  (instance "C1" (cap "100nF")
+        \\    (pin 1 "VDD")
+        \\    (pin 2 "GND"))
+        \\  (instance "C2" (cap "100nF")
+        \\    (pin 1 "VDD")
+        \\    (pin 2 "GND"))
+        \\  (instance "C3" (cap "100nF")
+        \\    (pin 1 "V3V3")
+        \\    (pin 2 "GND")))
+        ,
+    });
+
+    const design_path = try std.fmt.allocPrint(alloc, "{s}/src/sample/sample.sexp", .{project_dir});
+    defer alloc.free(design_path);
+    const bom_path = try std.fmt.allocPrint(alloc, "{s}/src/sample/sample.bom", .{project_dir});
+    defer alloc.free(bom_path);
+
+    // Run 1: build from empty BOM
+    {
+        var eval = test_evaluator.Evaluator.init(alloc, project_dir);
+        defer eval.deinit();
+        const result = try eval.evalFile(design_path);
+        const block = switch (result) {
+            .design_block => |b| b,
+            else => return error.TestExpectedDesignBlock,
+        };
+        try resolveIdentities(alloc, block, bom_path, project_dir);
+    }
+    const bom1 = try infra_fs.cwd().readFileAlloc(alloc, bom_path, 1024 * 1024);
+    defer alloc.free(bom1);
+
+    // Run 2: with the BOM from run 1 already on disk
+    {
+        var eval = test_evaluator.Evaluator.init(alloc, project_dir);
+        defer eval.deinit();
+        const result = try eval.evalFile(design_path);
+        const block = switch (result) {
+            .design_block => |b| b,
+            else => return error.TestExpectedDesignBlock,
+        };
+        try resolveIdentities(alloc, block, bom_path, project_dir);
+    }
+    const bom2 = try infra_fs.cwd().readFileAlloc(alloc, bom_path, 1024 * 1024);
+    defer alloc.free(bom2);
+
+    try std.testing.expectEqualStrings(bom1, bom2);
+}
+
+// spec: bom-resolve - Pass 3.5 with a forced two-instance UUID swap converges on the first call and stays put on the second
+test "Pass 3.5 swap converges in one call" {
+    const alloc = std.heap.page_allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(project_dir);
+
+    try tmp.dir.makePath("lib/components");
+    try tmp.dir.writeFile(.{
+        .sub_path = "lib/components/cap.sexp",
+        .data =
+        \\(component-family cap
+        \\  (param-type capacitance)
+        \\  (footprint "0402"))
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "lib/components/0402.sexp",
+        .data =
+        \\(component 0402 (footprint "0402.kicad_mod"))
+        ,
+    });
+
+    try tmp.dir.makePath("src/swap");
+    try tmp.dir.writeFile(.{
+        .sub_path = "src/swap/swap.sexp",
+        .data =
+        \\(design-block "Swap"
+        \\  (instance "C10" (cap "100nF")
+        \\    (id aa000001)
+        \\    (pin 1 "RAIL_A")
+        \\    (pin 2 "GND"))
+        \\  (instance "C11" (cap "100nF")
+        \\    (id aa000002)
+        \\    (pin 1 "RAIL_B")
+        \\    (pin 2 "GND")))
+        ,
+    });
+
+    const design_path = try std.fmt.allocPrint(alloc, "{s}/src/swap/swap.sexp", .{project_dir});
+    defer alloc.free(design_path);
+    const bom_path = try std.fmt.allocPrint(alloc, "{s}/src/swap/swap.bom", .{project_dir});
+    defer alloc.free(bom_path);
+
+    // Hand-craft a BOM that ties each ref_des to the OTHER instance's UUID
+    // (a deliberately swapped state) so Pass 3.5 has to perform exactly one
+    // bijective correction.
+    try infra_fs.cwd().writeFile(.{
+        .sub_path = bom_path,
+        .data =
+        \\(part "C10" "11111111-1111-5111-9111-111111111111" "cap"
+        \\  (id "aa000001")
+        \\  (nets "GND" "RAIL_B"))
+        \\(part "C11" "22222222-2222-5222-9222-222222222222" "cap"
+        \\  (id "aa000002")
+        \\  (nets "GND" "RAIL_A"))
+        ,
+    });
+
+    // First resolve — Pass 3.5 should swap once.
+    {
+        var eval = test_evaluator.Evaluator.init(alloc, project_dir);
+        defer eval.deinit();
+        const result = try eval.evalFile(design_path);
+        const block = switch (result) {
+            .design_block => |b| b,
+            else => return error.TestExpectedDesignBlock,
+        };
+        try resolveIdentities(alloc, block, bom_path, project_dir);
+    }
+    const bom1 = try infra_fs.cwd().readFileAlloc(alloc, bom_path, 1024 * 1024);
+    defer alloc.free(bom1);
+
+    // Second resolve — must be a no-op now that the swap converged.
+    {
+        var eval = test_evaluator.Evaluator.init(alloc, project_dir);
+        defer eval.deinit();
+        const result = try eval.evalFile(design_path);
+        const block = switch (result) {
+            .design_block => |b| b,
+            else => return error.TestExpectedDesignBlock,
+        };
+        try resolveIdentities(alloc, block, bom_path, project_dir);
+    }
+    const bom2 = try infra_fs.cwd().readFileAlloc(alloc, bom_path, 1024 * 1024);
+    defer alloc.free(bom2);
+
+    try std.testing.expectEqualStrings(bom1, bom2);
 }

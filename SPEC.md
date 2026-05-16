@@ -113,6 +113,11 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Loads an empty BOM file without error
 - Detects net overlap between components
 
+## bom-resolve
+
+- Pass 3.5 is a fixed point: two consecutive resolveIdentities calls produce a byte-identical BOM
+- Pass 3.5 with a forced two-instance UUID swap converges on the first call and stays put on the second
+
 ## render_svg
 
 Public functions: renderSchematic

@@ -2,7 +2,7 @@
 src/eval/builtins.zig:15: fn 'evalBuiltin' has 15 return statements (cap 12)
 src/eval/env.zig:302: fn 'parseCheck' has 79 return statements (cap 12)
 src/eval/fmt.zig:25: fn 'format' has 15 return statements (cap 12)
-src/eval/ids.zig:211: fn 'componentPrefix' has 17 return statements (cap 12)
+src/eval/ids.zig:226: fn 'componentPrefix' has 17 return statements (cap 12)
 src/render_svg/connection.zig:323: fn 'tryChainConns' has 14 return statements (cap 12)
 src/serve/auth.zig:1282: fn 'loginCompletePage' has 26 return statements (cap 12)
 src/serve/auth.zig:403: fn 'decodeCborArg' has 15 return statements (cap 12)
