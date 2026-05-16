@@ -356,6 +356,61 @@ func TestStaleSidecarOverwritesClean(t *testing.T) {
 	}
 }
 
+// TestSetLockedOpAppliesPadlock covers the set_locked op the server emits
+// alongside flag_stale so an orphan fp gets KiCad's padlock overlay in
+// the PCB editor. The agent applies it via SetLocked and the fp ends up
+// with Locked=true on the next board read.
+func TestSetLockedOpAppliesPadlock(t *testing.T) {
+	board := []kicad.Footprint{
+		{UUID: "canopy-x9", KicadUUID: "kicad-x9", Reference: "X9",
+			Value: "10R", FootprintName: "R_0402", Locked: false},
+	}
+	kc := kicad.NewFake("/tmp/test.kicad_pcb", board)
+	lockedTrue := true
+	planResp := eda.SyncPlanResponse{
+		Summary: eda.Summary{FlaggedStale: 1},
+		Ops: []eda.Op{
+			{Op: "flag_stale", UUID: "kicad-x9", Ref: "X9"},
+			{Op: "set_locked", UUID: "kicad-x9", Locked: &lockedTrue},
+		},
+	}
+	var gotReq eda.SyncPlanRequest
+	srv := fakeServer(t, planResp, &gotReq)
+	defer srv.Close()
+
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "", "demo", sync.Options{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !kc.Footprints[0].Locked {
+		t.Errorf("expected fp X9 to be locked after set_locked op, got Locked=%v",
+			kc.Footprints[0].Locked)
+	}
+}
+
+// TestBoardFpLockedSentInRequest covers the wire-format addition: the
+// agent must include each fp's current Locked state so the server can
+// skip emitting a redundant set_locked when the fp is already padlocked.
+func TestBoardFpLockedSentInRequest(t *testing.T) {
+	board := []kicad.Footprint{
+		{UUID: "u-1", KicadUUID: "k-1", Reference: "R1", Locked: true},
+		{UUID: "u-2", KicadUUID: "k-2", Reference: "R2", Locked: false},
+	}
+	kc := kicad.NewFake("/tmp/test.kicad_pcb", board)
+	var gotReq eda.SyncPlanRequest
+	srv := fakeServer(t, eda.SyncPlanResponse{}, &gotReq)
+	defer srv.Close()
+
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "", "demo", sync.Options{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !gotReq.Board[0].Locked {
+		t.Errorf("R1 locked state lost on wire: got %v, want true", gotReq.Board[0].Locked)
+	}
+	if gotReq.Board[1].Locked {
+		t.Errorf("R2 should be unlocked, got %v", gotReq.Board[1].Locked)
+	}
+}
+
 func TestEmptyPlanSkipsCommit(t *testing.T) {
 	kc := kicad.NewFake("/tmp/test.kicad_pcb", nil)
 	planResp := eda.SyncPlanResponse{}

@@ -181,6 +181,7 @@ func toBoardFps(fps []kicad.Footprint) []eda.BoardFp {
 			FootprintName: fp.FootprintName,
 			Fields:        fp.Fields,
 			Pads:          pads,
+			Locked:        fp.Locked,
 		})
 	}
 	return out
@@ -214,9 +215,16 @@ func applyOp(kc kicad.Client, op eda.Op) error {
 		return kc.SwapFootprint(op.UUID, op.FootprintDef, op.KicadMod, op.NewFootprintName, op.PadNets)
 	case "remove":
 		return kc.Remove(op.UUID)
+	case "set_locked":
+		if op.Locked == nil {
+			return nil
+		}
+		return kc.SetLocked(op.UUID, *op.Locked)
 	case "flag_stale":
 		// Informational only — no IPC mutation. The caller surfaces these
-		// via the result notification.
+		// via the result notification + the <board>.stale.json sidecar.
+		// Visual flagging happens via the separate set_locked op the
+		// server emits alongside flag_stale.
 		return nil
 	default:
 		// Unknown ops are skipped rather than aborted: the server may

@@ -39,6 +39,12 @@ type Footprint struct {
 	// the server's `by_uuid` matching index keys on it directly.
 	Fields map[string]string
 	Pads   []Pad
+	// Locked mirrors KiCad's "Lock footprint" toggle (the little padlock
+	// overlay in the PCB editor). Surfaced to the server so it can avoid
+	// re-locking a fp the user has manually unlocked — once a stale fp
+	// has been visually flagged via SetLocked, unlocking it expresses
+	// "I want to keep this," and the next sync should respect that.
+	Locked bool
 }
 
 // AddFootprint / SwapFootprint take their footprint geometry as

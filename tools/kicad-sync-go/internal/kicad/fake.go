@@ -143,6 +143,16 @@ func (f *Fake) Remove(uuid string) error {
 	return nil
 }
 
+func (f *Fake) SetLocked(uuid string, locked bool) error {
+	i, ok := f.findIdx(uuid)
+	if !ok {
+		return fmt.Errorf("SetLocked: uuid %q not found", uuid)
+	}
+	f.Footprints[i].Locked = locked
+	f.pendingDirty[uuid] = struct{}{}
+	return nil
+}
+
 func (f *Fake) Push() error {
 	if f.pendingMessage == "" {
 		return errors.New("Push without Begin")

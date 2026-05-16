@@ -44,6 +44,11 @@ type BoardFp struct {
 	// by_uuid matching index.
 	Fields map[string]string `json:"fields,omitempty"`
 	Pads   []PadAssign       `json:"pads"`
+	// Locked mirrors KiCad's "Lock footprint" toggle. Sent so the server
+	// can skip emitting a redundant set_locked op when the fp is already
+	// locked, and (in future) respect a user's manual unlock by not
+	// re-locking on subsequent stale flagging.
+	Locked bool `json:"locked,omitempty"`
 }
 
 // SyncPlanRequest is the JSON body posted to /api/sync-plan/:name.
@@ -86,6 +91,11 @@ type Op struct {
 	KicadMod         string          `json:"kicad_mod,omitempty"`
 	FootprintDef     json.RawMessage `json:"footprint_def,omitempty"`
 	PadNets          [][2]string     `json:"pad_nets,omitempty"`
+	// Locked is the desired KiCad lock state for the `set_locked` op.
+	// Pointer so we can tell a zero-value omit ({"locked": false} on
+	// the wire) from an unset value. Used to visually flag stale fps
+	// via the PCB editor's padlock overlay.
+	Locked *bool `json:"locked,omitempty"`
 }
 
 // Summary is the counts the server tracked while building the plan.

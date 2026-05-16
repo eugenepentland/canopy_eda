@@ -71,6 +71,13 @@ const BoardFp = struct {
     /// server-side change.
     fields: std.StringHashMapUnmanaged([]const u8),
     pads: []const PadAssign,
+    /// Mirror of KiCad's "Lock footprint" toggle. Lets the stale loop
+    /// skip emitting a redundant set_locked op for fps that are
+    /// already padlocked from a previous sync. A future pass could use
+    /// the same signal to respect a manual unlock as "keep this," but
+    /// would need a separate marker to distinguish that from "never
+    /// locked in the first place."
+    locked: bool,
 };
 
 /// Pick the UUID the agent should use to find this footprint in its cache.
@@ -130,6 +137,7 @@ fn parseBoardEntry(arena: std.mem.Allocator, entry: std.json.Value) std.mem.Allo
         .footprint_name = jsonStr(o.get("footprint_name")),
         .fields = fields,
         .pads = pads,
+        .locked = jsonBool(o.get("locked")),
     };
 }
 
@@ -765,6 +773,18 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         } else {
             try emitOp(&w, &first_op, "flag_stale", .{ .{ "uuid", target }, .{ "ref", bfp.ref } });
             summary.flagged_stale += 1;
+            // Visually flag the stale fp via KiCad's padlock overlay.
+            // Skip when already locked so we don't churn ops + cycle
+            // the dirty bit on every sync; and (intent for later)
+            // skip when the user has manually unlocked it as a "keep
+            // this" signal — that'd need a separate "manually
+            // unlocked while stale" marker the agent ships back.
+            if (!bfp.locked) {
+                try w.print(
+                    ",{{\"op\":\"set_locked\",\"uuid\":\"{s}\",\"locked\":true}}",
+                    .{target},
+                );
+            }
         }
     }
 

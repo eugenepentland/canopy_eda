@@ -196,6 +196,7 @@ func footprintToNeutral(fp *board_types.FootprintInstance) Footprint {
 		Reference:     fp.GetReferenceField().GetText().GetText().GetText(),
 		Value:         fp.GetValueField().GetText().GetText().GetText(),
 		FootprintName: fp.GetDefinition().GetId().GetEntryName(),
+		Locked:        fp.GetLocked() == base_types.LockedState_LS_LOCKED,
 	}
 	for _, item := range fp.GetDefinition().GetItems() {
 		var pad board_types.Pad
@@ -688,6 +689,23 @@ func (c *realClient) Remove(uuid string) error {
 	// Unknown UUID — record it anyway. Either a stale-prune from the
 	// server or a uuid we never read; KiCad will just no-op the delete.
 	c.removed[uuid] = struct{}{}
+	return nil
+}
+
+func (c *realClient) SetLocked(uuid string, locked bool) error {
+	fp, ok := c.cache[uuid]
+	if !ok {
+		// No-op on an unknown UUID. KiCad would error and abort the
+		// commit, which is much worse than silently skipping a stale
+		// lock op on a fp we never saw.
+		return nil
+	}
+	if locked {
+		fp.Locked = base_types.LockedState_LS_LOCKED
+	} else {
+		fp.Locked = base_types.LockedState_LS_UNLOCKED
+	}
+	c.markDirtyIfExisting(fp)
 	return nil
 }
 

@@ -59,6 +59,12 @@ type Client interface {
 	// Remove stages the footprint for deletion in this commit.
 	Remove(uuid string) error
 
+	// SetLocked toggles KiCad's "Lock footprint" flag (the padlock
+	// overlay in the PCB editor). The sync server emits set_locked=true
+	// alongside flag_stale so orphan footprints are visually obvious in
+	// the board view; the user can unlock + delete from there.
+	SetLocked(uuid string, locked bool) error
+
 	// Push commits the transaction. After this, KiCad records the change
 	// as one undo step.
 	Push() error
