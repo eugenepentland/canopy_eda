@@ -113,6 +113,92 @@ func TestSwapFootprintReplacesViaDeleteAndAdd(t *testing.T) {
 	}
 }
 
+// TestSwapFootprintCreatesAtOriginAndQueuesMove pins the create-at-origin
+// strategy that dodges KiCad's IPC bug. On CreateItems with a
+// FootprintInstance whose Position is non-zero, inline Pad / Field /
+// BoardGraphicShape positions get treated as ABSOLUTE board coords —
+// proto docs claim "relative to the parent footprint's origin" but the
+// implementation disagrees. Working around the bug per-item-type would
+// take 100+ lines and a math.Sin call; creating at (0, 0) lets KiCad
+// store every inner item with the correct relative coord on first pass.
+// A follow-up UpdateItems in Push() snaps the new fp to the swapped-out
+// fp's placement, and KiCad shifts every inner item along for the ride
+// while keeping their now-correct relatives intact.
+func TestSwapFootprintCreatesAtOriginAndQueuesMove(t *testing.T) {
+	const kid = "k-uuid-old"
+	const (
+		oldX  int64 = 144_500_000
+		oldY  int64 = 180_000_000
+		oldDeg       = 90.0
+	)
+
+	originalPad := mustWrapPad(t, &board_types.Pad{
+		Number:   "1",
+		Position: &base_types.Vector2{XNm: -780_000, YNm: 0},
+	})
+	old := &board_types.FootprintInstance{
+		Id:          &base_types.KIID{Value: kid},
+		Position:    &base_types.Vector2{XNm: oldX, YNm: oldY},
+		Orientation: &base_types.Angle{ValueDegrees: oldDeg},
+		Layer:       board_types.BoardLayer_BL_B_Cu,
+		Definition: &board_types.Footprint{
+			Id:    &base_types.LibraryIdentifier{LibraryNickname: "old-lib", EntryName: "OLD"},
+			Items: []*anypb.Any{originalPad},
+		},
+	}
+	c := &realClient{
+		cache:   map[string]*board_types.FootprintInstance{kid: old},
+		dirty:   map[string]struct{}{},
+		removed: map[string]struct{}{},
+		isNew:   map[*board_types.FootprintInstance]struct{}{},
+	}
+	tmpBoard := t.TempDir() + "/board.kicad_pcb"
+	c.boardPathAbs = tmpBoard
+
+	const kicadMod = `(footprint "NEW" (version 20221018) (generator pcbnew) (layer "F.Cu"))`
+	defJSON := []byte(`{"id":{"libraryNickname":"eda-sync","entryName":"NEW"},"items":[]}`)
+	if err := c.SwapFootprint(kid, defJSON, kicadMod, "NEW", [][2]string{{"1", "VDD"}}); err != nil {
+		t.Fatalf("SwapFootprint: %v", err)
+	}
+
+	if len(c.added) != 1 {
+		t.Fatalf("expected 1 new fp in c.added, got %d", len(c.added))
+	}
+	newFp := c.added[0]
+
+	// Invariant 1: new fp goes into CreateItems with Position(0, 0) and
+	// Orientation(0). Send-as-zero is what lets KiCad store inline item
+	// relative coords correctly on first pass.
+	if px := newFp.GetPosition().GetXNm(); px != 0 {
+		t.Errorf("new fp Position.X should be 0 at CreateItems time, got %d", px)
+	}
+	if py := newFp.GetPosition().GetYNm(); py != 0 {
+		t.Errorf("new fp Position.Y should be 0 at CreateItems time, got %d", py)
+	}
+	if deg := newFp.GetOrientation().GetValueDegrees(); deg != 0 {
+		t.Errorf("new fp Orientation should be 0 at CreateItems time, got %v", deg)
+	}
+
+	// Invariant 2: layer carries over verbatim — we don't trigger a
+	// B.Cu→F.Cu round-trip that would re-mirror everything.
+	if newFp.GetLayer() != board_types.BoardLayer_BL_B_Cu {
+		t.Errorf("layer should carry over from old fp, got %v", newFp.GetLayer())
+	}
+
+	// Invariant 3: target placement is queued for the post-CreateItems
+	// UpdateItems pass — old position and orientation, exactly.
+	place, ok := c.pendingPlacements[newFp]
+	if !ok {
+		t.Fatalf("SwapFootprint did not queue a pending placement for the new fp")
+	}
+	if place.position.GetXNm() != oldX || place.position.GetYNm() != oldY {
+		t.Errorf("queued placement position = %+v, want (%d, %d)", place.position, oldX, oldY)
+	}
+	if place.orientation.GetValueDegrees() != oldDeg {
+		t.Errorf("queued placement orientation = %v, want %v", place.orientation.GetValueDegrees(), oldDeg)
+	}
+}
+
 func readCanopyUUID(t *testing.T, fp *board_types.FootprintInstance) string {
 	t.Helper()
 	for _, item := range fp.GetDefinition().GetItems() {

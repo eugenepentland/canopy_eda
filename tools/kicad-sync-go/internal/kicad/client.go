@@ -17,6 +17,7 @@ import (
 	board_types "github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad/proto/board/board_types"
 	base_commands "github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad/proto/common/commands/base_commands"
 	editor_commands "github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad/proto/common/commands/editor_commands"
+	project_commands "github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad/proto/common/commands/project_commands"
 	base_types "github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad/proto/common/types/base_types"
 	enums "github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad/proto/common/types/enums"
 	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/synclog"
@@ -87,6 +88,16 @@ type realClient struct {
 	// mutations landed). Without this an UpdateItems against a UUID that
 	// KiCad hasn't seen yet trips a "no such item" rpc error.
 	isNew map[*board_types.FootprintInstance]struct{}
+	// pendingPlacements records target (Position, Orientation) for each
+	// freshly-added fp so Push can issue a follow-up UpdateItems to MOVE
+	// them after CreateItems. Workaround for a KiCad IPC quirk: on
+	// CreateItems with a FootprintInstance whose Position is non-zero,
+	// inline Pad / Field / BoardGraphicShape positions are treated as
+	// absolute board coords (proto docs say relative) — so we always
+	// create at (0, 0) and move after. The UpdateItems pass also keeps
+	// ADDs locked at (0, 0) when KiCad's auto-placement tries to move
+	// the fp toward connected net endpoints.
+	pendingPlacements map[*board_types.FootprintInstance]pendingPlacement
 
 	commitID      *base_types.KIID
 	commitMessage string
@@ -409,6 +420,15 @@ func (c *realClient) AddFootprint(defJSON []byte, kicadMod, entryName, uuid, ref
 		c.cache = map[string]*board_types.FootprintInstance{}
 	}
 	c.cache[uuid] = fp
+	// Lock the new fp at (0, 0): KiCad's auto-placement sometimes drags
+	// a freshly-created fp toward its connected net endpoints during the
+	// CreateItems pass, and any inline Pad / Field / silkscreen item
+	// gets its relative position re-stored as (proto_value - new_position)
+	// — scattering the fp across the board. A follow-up UpdateItems to
+	// (0, 0) snaps the fp back, KiCad recomputes inner-item relatives
+	// once more (correctly now), and the user finds the freshly-synced
+	// part stacked at the origin where they can place it manually.
+	c.recordPendingPlacement(fp, &base_types.Vector2{}, &base_types.Angle{ValueDegrees: 0})
 	return nil
 }
 
@@ -428,10 +448,19 @@ func (c *realClient) SwapFootprint(uuid string, defJSON []byte, kicadMod, entryN
 
 	oldKid := old.GetId().GetValue()
 	newKid := newKIID()
+	// Create at (0, 0) orientation 0 so KiCad treats every inline item's
+	// position as already-relative (proto_value - 0 = relative). A
+	// follow-up UpdateItems below moves the fp to the swapped-out fp's
+	// position. If we created the fp at old.Position directly, KiCad's
+	// CreateItems would interpret Pad / Field / BoardGraphicShape
+	// positions as absolute board coords (despite the proto comment) and
+	// store relative = (proto - old.Position) — scattering pads, text,
+	// silkscreen 100+ mm from the fp origin. Create-then-move sidesteps
+	// the bug for every item type at once.
 	newFp := &board_types.FootprintInstance{
 		Id:          &base_types.KIID{Value: newKid},
-		Position:    old.GetPosition(),
-		Orientation: old.GetOrientation(),
+		Position:    &base_types.Vector2{},
+		Orientation: &base_types.Angle{ValueDegrees: 0},
 		Layer:       old.GetLayer(),
 		Definition:  def,
 	}
@@ -457,7 +486,20 @@ func (c *realClient) SwapFootprint(uuid string, defJSON []byte, kicadMod, entryN
 	c.isNew[newFp] = struct{}{}
 	c.cache[oldKid] = newFp
 	c.cache[newKid] = newFp
+	// Schedule the post-CreateItems UpdateItems that moves newFp from
+	// (0, 0) to the swapped-out fp's placement. KiCad shifts every inner
+	// item along with the fp, preserving the now-correct relative coords.
+	c.recordPendingPlacement(newFp, old.GetPosition(), old.GetOrientation())
 	return nil
+}
+
+// recordPendingPlacement queues a (Position, Orientation) move that Push
+// applies via UpdateItems after CreateItems lands the new fp.
+func (c *realClient) recordPendingPlacement(fp *board_types.FootprintInstance, pos *base_types.Vector2, orient *base_types.Angle) {
+	if c.pendingPlacements == nil {
+		c.pendingPlacements = map[*board_types.FootprintInstance]pendingPlacement{}
+	}
+	c.pendingPlacements[fp] = pendingPlacement{position: pos, orientation: orient}
 }
 
 // decodeFootprintDef parses the server's proto-canonical JSON for a
@@ -497,6 +539,15 @@ func decodeFootprintDef(defJSON []byte, entryName string) (*board_types.Footprin
 // Net.Name with the per-instance assignment from `padNets`. The
 // geometry JSON is shared across every instance of a given footprint
 // name; pad-to-net mapping is per-instance and travels in op.PadNets.
+// pendingPlacement is the target position/orientation a freshly-added fp
+// gets re-set to via UpdateItems immediately after CreateItems. See the
+// realClient.pendingPlacements field comment for why we don't just set
+// these on the FootprintInstance going into CreateItems directly.
+type pendingPlacement struct {
+	position    *base_types.Vector2
+	orientation *base_types.Angle
+}
+
 func stampPadNets(def *board_types.Footprint, padNets [][2]string) {
 	if def == nil || len(padNets) == 0 {
 		return
@@ -704,6 +755,35 @@ func (c *realClient) Push() error {
 		// action names; KiCad's RunAction returns RAS_INVALID for
 		// names it doesn't recognise and we just keep going.
 		c.tryRefreshFootprints()
+
+		// 2b. UpdateItems to move every freshly-added fp to its target
+		// placement. We created at (0, 0) to dodge the IPC absolute-
+		// position bug; this snaps each fp to where the user actually
+		// wants it (the swapped-out fp's old position for swap, or
+		// (0, 0) lock for adds that KiCad's auto-place might shift).
+		// Inner items move with the fp, preserving their now-correct
+		// relative coords.
+		if len(c.pendingPlacements) > 0 {
+			moves := make([]*anypb.Any, 0, len(c.pendingPlacements))
+			for fp, place := range c.pendingPlacements {
+				fp.Position = place.position
+				fp.Orientation = place.orientation
+				any, err := anypb.New(fp)
+				if err != nil {
+					return fmt.Errorf("pack placement %s: %w", fp.GetId().GetValue(), err)
+				}
+				moves = append(moves, any)
+			}
+			synclog.Logf("UpdateItems (placements): moving %d new fps to their targets", len(moves))
+			if _, err := c.rpc(&editor_commands.UpdateItems{
+				Header: &base_types.ItemHeader{Document: c.doc},
+				Items:  moves,
+			}); err != nil {
+				synclog.Logf("UpdateItems (placements) failed: %v", err)
+				return fmt.Errorf("UpdateItems (placements): %w", err)
+			}
+			synclog.Logf("UpdateItems (placements) OK")
+		}
 	}
 
 	// 3. DeleteItems — flush removals.
@@ -735,10 +815,25 @@ func (c *realClient) Push() error {
 	}
 	synclog.Logf("EndCommit OK; sync complete")
 
+	// 5. SaveDocument — persist to disk. EndCommit only updates KiCad's
+	// in-memory model; without this the .kicad_pcb on disk is unchanged
+	// and the sync's effect dies when pcbnew exits. KiCad's GUI prompts
+	// "Save changes?" on close; headless mode (eda-kicad-headless) just
+	// SIGTERMs pcbnew and any unsaved edits are lost. Calling save here
+	// makes the agent behave like the user explicitly hit File→Save.
+	if _, err := c.rpc(&project_commands.SaveDocument{
+		Document: c.doc,
+	}); err != nil {
+		synclog.Logf("SaveDocument failed: %v", err)
+		return fmt.Errorf("SaveDocument: %w", err)
+	}
+	synclog.Logf("SaveDocument OK; written to disk")
+
 	c.commitID = nil
 	c.dirty = nil
 	c.removed = nil
 	c.added = nil
+	c.pendingPlacements = nil
 	return nil
 }
 

@@ -170,6 +170,23 @@ fn stripLibPrefix(s: []const u8) []const u8 {
     return s;
 }
 
+/// Return the last `/`-delimited segment of a net name. Used to ask
+/// "what would this net be called if I dropped the sub-block prefix?"
+/// before deciding whether the bare form is safe to use.
+fn bareNetName(name: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, name, '/')) |i| return name[i + 1 ..];
+    return name;
+}
+
+/// Collapse a `(decouple …)`-generated per-pin sub-net (`VDD.U18.IN`) to
+/// its rail (`VDD`). Sub-nets are an EDA routing-organisation aid and the
+/// design author's intent is that they share the rail's electrical net.
+/// Names without a `.` pass through unchanged.
+fn collapseDotSubNet(name: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, name, '.')) |i| return name[0..i];
+    return name;
+}
+
 const SyncPlanContext = struct {
     arena: std.mem.Allocator,
     project_dir: []const u8,
@@ -633,12 +650,39 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     try export_kicad.flattenAndMergeNets(req.arena, block, &nets);
 
     // (ref, pin) -> net_name. Empty net names are excluded (NC pads).
+    //
+    // Two-stage name normalisation runs before we map pins → nets:
+    //
+    //  1. Dot-collapse: `(decouple …)` generates per-pin sub-nets of the
+    //     form `<rail>.<refdes>.<pin>` (e.g. `VDD.U18.IN`) as a routing
+    //     organisation aid. The design author's intent is that they
+    //     share the rail's electrical net; collapse unconditionally to
+    //     the part before the first `.`.
+    //  2. Slash-strip: sub-block path prefixes (e.g. `adc1/REGCAP`)
+    //     come from `collectNets` walking sub_blocks. Strip when the
+    //     bare name is globally unique across the post-dot-collapse
+    //     netlist, keep when it would collide. `adc1/REGCAP`,
+    //     `adc2/REGCAP`, `adc3/REGCAP` are three physically distinct
+    //     decoupling rails that must NOT merge, so all three keep
+    //     their prefix.
+    var bare_counts = std.StringHashMap(u32).init(req.arena);
+    for (nets.items) |net| {
+        if (net.name.len == 0) continue;
+        const post_dot = collapseDotSubNet(net.name);
+        const bare = bareNetName(post_dot);
+        const e = try bare_counts.getOrPut(bare);
+        if (!e.found_existing) e.value_ptr.* = 0;
+        e.value_ptr.* += 1;
+    }
     var pad_net_map = std.StringHashMap([]const u8).init(req.arena);
     for (nets.items) |net| {
         if (net.name.len == 0) continue;
+        const post_dot = collapseDotSubNet(net.name);
+        const bare = bareNetName(post_dot);
+        const display = if ((bare_counts.get(bare) orelse 0) == 1) bare else post_dot;
         for (net.pins) |pin| {
             const key = try std.fmt.allocPrint(req.arena, "{s}|{s}", .{ pin.ref_des, pin.pin });
-            try pad_net_map.put(key, net.name);
+            try pad_net_map.put(key, display);
         }
     }
 
@@ -656,8 +700,25 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     // group is deterministic-by-ref so the user gets a reproducible
     // shuffle even when individual identities can't be recovered.
     var by_migration = std.StringHashMap(BoardFp).init(req.arena);
+    var by_netsig = std.StringHashMap(BoardFp).init(req.arena);
     if (parsed.migrate_heuristic) {
         try buildMigrationIndex(req.arena, parsed.board, instances.items, &by_migration);
+        // Net-signature relink runs after (parent_path, value) migration so
+        // it only considers the orphans that group-size matching couldn't
+        // pair — typically board fps the design author moved across the
+        // hierarchy (top-level `Q1` → `disp/Q3`). Both tiers are gated on
+        // --migrate so the agent's default sync stays conservative.
+        try buildNetSignatureRelinkIndex(
+            req.arena,
+            ctx.project_dir,
+            parsed.board,
+            instances.items,
+            &by_uuid,
+            &by_ref,
+            &by_migration,
+            &pad_net_map,
+            &by_netsig,
+        );
     }
 
     var model_cfg = export_kicad.loadModelConfig(req.arena, ctx.project_dir);
@@ -669,6 +730,7 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     var first_op = true;
     var summary = SyncSummary{};
     var matched_uuids = std.StringHashMap(void).init(req.arena);
+    var canonical_fp_name = std.StringHashMap([]const u8).init(req.arena);
 
     try w.writeAll("[");
 
@@ -676,8 +738,10 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         .by_uuid = &by_uuid,
         .by_ref = &by_ref,
         .by_migration = &by_migration,
+        .by_netsig = &by_netsig,
         .pad_net_map = &pad_net_map,
         .matched_uuids = &matched_uuids,
+        .canonical_fp_name = &canonical_fp_name,
         .spc = &spc,
         .summary = &summary,
         .migrate_heuristic = parsed.migrate_heuristic,
@@ -729,12 +793,61 @@ const DiffContext = struct {
     /// placement from. Populated by `buildMigrationIndex`; empty when
     /// --migrate is off.
     by_migration: *std.StringHashMap(BoardFp),
+    /// Net-signature relink: design instance uuid → BoardFp it should
+    /// adopt. Populated by `buildNetSignatureRelinkIndex` for orphans the
+    /// (parent_path, value) migration tier couldn't pair — typically
+    /// cross-hierarchy moves like top-level `Q1` → `disp/Q3`. Gated on
+    /// --migrate alongside the migration index.
+    by_netsig: *std.StringHashMap(BoardFp),
     pad_net_map: *std.StringHashMap([]const u8),
     matched_uuids: *std.StringHashMap(void),
+    /// short EDA footprint name ("c-0201") → canonical KiCad name inside
+    /// the lib/footprints/<short>.sexp file ("C_0201_0603Metric"). Used to
+    /// skip swap_footprint ops when a manually-placed board fp carries the
+    /// KiCad-canonical name but resolves to the same physical footprint as
+    /// the design's short name. Populated lazily on first lookup.
+    canonical_fp_name: *std.StringHashMap([]const u8),
     spc: *SyncPlanContext,
     summary: *SyncSummary,
     migrate_heuristic: bool,
 };
+
+/// Treat a board footprint's name as matching the design's short name when
+/// it equals either the short name itself or the canonical KiCad name
+/// declared inside `lib/footprints/<short>.sexp`. Legacy boards routinely
+/// carry the KiCad-canonical name (`C_0201_0603Metric`) because they were
+/// laid out from a `kicad-cli`-exported netlist — without this aliasing
+/// every such fp would emit a spurious swap_footprint on the first sync.
+fn footprintNameMatches(d: *DiffContext, board_name: []const u8, short: []const u8) bool {
+    if (std.mem.eql(u8, board_name, short)) return true;
+    const canonical = canonicalFootprintName(d, short) orelse return false;
+    return std.mem.eql(u8, board_name, canonical);
+}
+
+/// Resolve the KiCad-canonical name for `short` ("c-0201" → "C_0201_0603Metric"),
+/// cached per-request. Returns null when the .sexp file is missing or
+/// doesn't parse as a footprint form.
+fn canonicalFootprintName(d: *DiffContext, short: []const u8) ?[]const u8 {
+    return canonicalFootprintNameImpl(d, short) catch null;
+}
+
+fn canonicalFootprintNameImpl(d: *DiffContext, short: []const u8) !?[]const u8 {
+    if (d.canonical_fp_name.get(short)) |cached| {
+        if (cached.len == 0) return null;
+        return cached;
+    }
+    const fp_path = try std.fmt.allocPrint(d.spc.arena, PATH_FMT_FP_SEXP, .{ d.spc.project_dir, short });
+    const fp_source = infra_fs.cwd().readFileAlloc(d.spc.arena, fp_path, MAX_FOOTPRINT_BYTES) catch {
+        try d.canonical_fp_name.put(short, "");
+        return null;
+    };
+    const name = netlist_mod.extractFootprintName(d.spc.arena, fp_source) catch {
+        try d.canonical_fp_name.put(short, "");
+        return null;
+    };
+    try d.canonical_fp_name.put(short, name);
+    return name;
+}
 
 /// Extract the parent-path prefix of a hierarchical ref-des. Returns the
 /// empty string for a top-level ref. e.g. `"adc1/C146"` → `"adc1/"`,
@@ -755,6 +868,18 @@ fn heuristicKey(arena: std.mem.Allocator, parent: []const u8, _: []const u8, val
 }
 
 fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, first: *bool, ops_emitted: *u32) !?BoardFp {
+    // Net-signature relink wins over canopy uuid: the relink builder
+    // only populates a pairing when there's an orphan board fp with the
+    // same wiring + footprint AND no other claimant. When that fires
+    // for a design instance whose canopy uuid happens to also point at
+    // a (likely agent-created duplicate at origin) by_uuid entry, the
+    // netsig pair wins and the duplicate falls into stale — exactly
+    // what the user wants when running --migrate to recover a board
+    // where a hierarchy move (top-level `Q1` → `disp/Q3`) caused the
+    // sync to create a clone instead of relinking the existing fp.
+    if (d.migrate_heuristic) {
+        if (d.by_netsig.get(inst.uuid)) |m| return m;
+    }
     if (d.by_uuid.get(inst.uuid)) |m| return m;
     if (inst.ref_des.len > 0) {
         if (d.by_ref.get(inst.ref_des)) |m| {
@@ -784,12 +909,218 @@ fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, f
     return null;
 }
 
-/// Migration-mode lookup. Returns the board footprint paired with this
-/// design instance during `buildMigrationIndex`; null when no pairing was
-/// possible (e.g. group sizes differ between board and design).
+/// Migration-mode lookup for (parent_path, value) pairings. Gated on
+/// --migrate. Net-signature relink is checked separately in
+/// `matchInstance` (it must beat by_uuid to recover from agent-created
+/// duplicates) so it lives outside this helper.
 fn heuristicMatch(d: *DiffContext, inst: export_kicad.FlatInstance) ?BoardFp {
     if (!d.migrate_heuristic) return null;
     return d.by_migration.get(inst.uuid);
+}
+
+/// Build a sortable signature string of a design instance's pad-net
+/// assignments, derived from the diff loop's `pad_net_map`. Format is
+/// `<pad1>=<net1>;<pad2>=<net2>;…` with pads sorted lexicographically so
+/// two instances with identical wiring produce identical strings.
+/// Returns "" when the instance has no pads on named nets (NC-only),
+/// signalling the caller to skip it for relinking.
+fn designInstanceNetSig(
+    arena: std.mem.Allocator,
+    inst_ref_des: []const u8,
+    pad_net_map: *std.StringHashMap([]const u8),
+) ![]const u8 {
+    var pairs: std.ArrayListUnmanaged(struct { pad: []const u8, net: []const u8 }) = .empty;
+    var it = pad_net_map.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const sep = std.mem.indexOfScalar(u8, key, '|') orelse continue;
+        if (!std.mem.eql(u8, key[0..sep], inst_ref_des)) continue;
+        try pairs.append(arena, .{ .pad = key[sep + 1 ..], .net = entry.value_ptr.* });
+    }
+    if (pairs.items.len == 0) return "";
+    std.mem.sort(@TypeOf(pairs.items[0]), pairs.items, {}, struct {
+        fn lessThan(_: void, a: @TypeOf(pairs.items[0]), b: @TypeOf(pairs.items[0])) bool {
+            return std.mem.lessThan(u8, a.pad, b.pad);
+        }
+    }.lessThan);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(arena);
+    for (pairs.items) |p| try w.print("{s}={s};", .{ p.pad, p.net });
+    return buf.items;
+}
+
+/// Same signature format as `designInstanceNetSig`, computed from the
+/// pad list the agent reported for a board fp. Empty when the fp has no
+/// pads on named nets.
+fn boardFpNetSig(arena: std.mem.Allocator, bfp: BoardFp) ![]const u8 {
+    var pairs: std.ArrayListUnmanaged(struct { pad: []const u8, net: []const u8 }) = .empty;
+    for (bfp.pads) |p| {
+        if (p.net.len == 0) continue;
+        try pairs.append(arena, .{ .pad = p.number, .net = p.net });
+    }
+    if (pairs.items.len == 0) return "";
+    std.mem.sort(@TypeOf(pairs.items[0]), pairs.items, {}, struct {
+        fn lessThan(_: void, a: @TypeOf(pairs.items[0]), b: @TypeOf(pairs.items[0])) bool {
+            return std.mem.lessThan(u8, a.pad, b.pad);
+        }
+    }.lessThan);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(arena);
+    for (pairs.items) |p| try w.print("{s}={s};", .{ p.pad, p.net });
+    return buf.items;
+}
+
+/// Pair orphan board fps with orphan design instances by exact net
+/// signature. "Orphan" = won't pair via canopy_uuid match, ref-des
+/// match, or the (parent_path, value) migration tier. Only emits a pair
+/// when the signature is unique on BOTH sides — if two board fps have
+/// the same signature, or two design instances do, we skip both rather
+/// than guess. The footprint name must also match (canonical or short).
+///
+/// Output keyed by design instance uuid so heuristicMatch resolves in O(1).
+fn buildNetSignatureRelinkIndex(
+    arena: std.mem.Allocator,
+    project_dir: []const u8,
+    board: []const BoardFp,
+    instances: []const export_kicad.FlatInstance,
+    by_uuid: *std.StringHashMap(BoardFp),
+    _: *std.StringHashMap(BoardFp), // by_ref — unused since the netsig tier
+    // deliberately considers insts that already match by_ref so it can
+    // pair them with an orphan instead of an agent-created duplicate.
+    by_migration: *std.StringHashMap(BoardFp),
+    pad_net_map: *std.StringHashMap([]const u8),
+    out: *std.StringHashMap(BoardFp),
+) !void {
+    // The migration index is keyed by design uuid → BoardFp; mark which
+    // board fps it already claimed so we don't double-pair them.
+    var migration_claimed_kids = std.StringHashMap(void).init(arena);
+    var mit = by_migration.iterator();
+    while (mit.next()) |entry| {
+        const m = entry.value_ptr.*;
+        if (m.kicad_uuid.len > 0) try migration_claimed_kids.put(m.kicad_uuid, {});
+    }
+
+    // Bucket orphan board fps by netsig (with footprint name appended so
+    // a stray `c-0201`-vs-`r-0201` collision on pads can't pair).
+    var board_by_sig = std.StringHashMap(std.ArrayListUnmanaged(BoardFp)).init(arena);
+    for (board) |bfp| {
+        if (bfp.uuid.len == 0) continue;
+        if (migration_claimed_kids.contains(bfp.kicad_uuid)) continue;
+        // Skip board fps whose canopy uuid already pairs with a design
+        // instance directly — those are reachable via by_uuid and not
+        // orphans at all.
+        if (by_uuid.contains(bfp.uuid) and matchesUuidExactlyInDesign(bfp.uuid, instances)) continue;
+        const sig = try boardFpNetSig(arena, bfp);
+        if (sig.len == 0) continue;
+        const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ bfp.footprint_name, sig });
+        const e = try board_by_sig.getOrPut(key);
+        if (!e.found_existing) e.value_ptr.* = .empty;
+        try e.value_ptr.append(arena, bfp);
+    }
+
+    // Bucket design instances by netsig. We don't skip insts that match
+    // by_uuid or by_ref — those matches may be to an agent-created
+    // duplicate at the origin (same canopy_uuid AND same ref-des as the
+    // design instance because the previous sync created it from the
+    // design state, but at the wrong physical location). Letting netsig
+    // consider this instance lets it pair with the genuine orphan
+    // board fp instead, dropping the duplicate into stale.
+    //
+    // Migration-tier matches are already a deterministic pairing so we
+    // skip those — netsig overriding them would just churn.
+    var design_by_sig = std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatInstance)).init(arena);
+    // We don't skip ANY insts (not by_uuid, by_ref, or by_migration) so
+    // netsig can override every other tier when it finds a unique
+    // matching orphan. The pair only fires when the signature is unique
+    // on both sides — if migration's pair is a legit physical match
+    // they'd share the signature with the orphan and the resulting
+    // ambiguity (2 board fps, 1 design inst) skips the pair.
+    for (instances) |inst| {
+        const sig = try designInstanceNetSig(arena, inst.ref_des, pad_net_map);
+        if (sig.len == 0) continue;
+        const fp_short = stripLibPrefix(inst.footprint);
+        const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ fp_short, sig });
+        const e = try design_by_sig.getOrPut(key);
+        if (!e.found_existing) e.value_ptr.* = .empty;
+        try e.value_ptr.append(arena, inst);
+    }
+
+    // For each design signature with exactly one orphan instance AND
+    // exactly one orphan board fp on the same signature, pair them.
+    // Footprint-name in the key uses the EDA short name for the design
+    // side and the KiCad-canonical name for the board side. We compare
+    // by trying both forms when looking up — if the board's canonical
+    // form maps back to the same short name, the signatures match.
+    var dit = design_by_sig.iterator();
+    while (dit.next()) |entry| {
+        if (entry.value_ptr.items.len != 1) continue;
+        const inst = entry.value_ptr.items[0];
+        const sig_after_pipe = std.mem.indexOfScalar(u8, entry.key_ptr.*, '|') orelse continue;
+        const sig = entry.key_ptr.*[sig_after_pipe + 1 ..];
+
+        // Try matching the board side first by EDA short name (same key),
+        // then by walking all board buckets whose sig matches and whose
+        // footprint name canonicalises to the same short form.
+        var found_board: ?BoardFp = null;
+        var ambiguous = false;
+        if (board_by_sig.get(entry.key_ptr.*)) |bucket| {
+            if (bucket.items.len == 1) found_board = bucket.items[0];
+            if (bucket.items.len > 1) ambiguous = true;
+        }
+        if (found_board == null and !ambiguous) {
+            // Fall back: scan all board buckets, accepting any whose
+            // signature suffix matches and whose footprint name is the
+            // KiCad-canonical alias of the design's short name.
+            const fp_short = stripLibPrefix(inst.footprint);
+            var bit = board_by_sig.iterator();
+            while (bit.next()) |bentry| {
+                const bkey = bentry.key_ptr.*;
+                const bsep = std.mem.indexOfScalar(u8, bkey, '|') orelse continue;
+                if (!std.mem.eql(u8, bkey[bsep + 1 ..], sig)) continue;
+                const board_fp_name = bkey[0..bsep];
+                if (!std.mem.eql(u8, board_fp_name, fp_short) and
+                    !boardFpNameAliasesShort(arena, project_dir, board_fp_name, fp_short))
+                    continue;
+                if (bentry.value_ptr.items.len != 1) {
+                    ambiguous = true;
+                    break;
+                }
+                if (found_board != null) {
+                    ambiguous = true;
+                    break;
+                }
+                found_board = bentry.value_ptr.items[0];
+            }
+        }
+        if (ambiguous) continue;
+        const board_fp = found_board orelse continue;
+        try out.put(inst.uuid, board_fp);
+    }
+}
+
+/// Return true when at least one design instance carries `uuid` as its
+/// canopy uuid — used by net-signature relink to skip board fps that
+/// already pair through the by_uuid index.
+fn matchesUuidExactlyInDesign(uuid: []const u8, instances: []const export_kicad.FlatInstance) bool {
+    for (instances) |inst| {
+        if (std.mem.eql(u8, inst.uuid, uuid)) return true;
+    }
+    return false;
+}
+
+/// True when `board_name` is the KiCad-canonical alias of EDA short name
+/// `short` (e.g. `C_0201_0603Metric` ↔ `c-0201`). Reads
+/// `lib/footprints/<short>.sexp` on demand; failures degrade to false so
+/// a missing library doesn't pair the wrong fp.
+fn boardFpNameAliasesShort(arena: std.mem.Allocator, project_dir: []const u8, board_name: []const u8, short: []const u8) bool {
+    if (std.mem.eql(u8, board_name, short)) return true;
+    // Re-read the .sexp on demand — this is called during relink-index
+    // construction (once per sync), not per-instance in the diff loop,
+    // so the cost is fine.
+    const fp_path = std.fmt.allocPrint(arena, PATH_FMT_FP_SEXP, .{ project_dir, short }) catch return false;
+    const fp_source = infra_fs.cwd().readFileAlloc(arena, fp_path, MAX_FOOTPRINT_BYTES) catch return false;
+    const canonical = netlist_mod.extractFootprintName(arena, fp_source) catch return false;
+    return std.mem.eql(u8, board_name, canonical);
 }
 
 /// Pair board footprints with design instances by (parent_path,
@@ -855,7 +1186,7 @@ fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, f
     // matches until the backfill op lands on a future sync.
     if (m.kicad_uuid.len > 0) try d.matched_uuids.put(m.kicad_uuid, {});
     const target = opTargetUuid(m);
-    if (!std.mem.eql(u8, m.footprint_name, fp_name_short)) {
+    if (!footprintNameMatches(d, m.footprint_name, fp_name_short)) {
         if (loadKicadMod(d.spc, fp_name_short, inst.component)) |kmod| {
             const fp_def = loadFootprintDef(d.spc, fp_name_short);
             try emitSwapOp(w, first, target, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map);
