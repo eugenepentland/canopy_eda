@@ -214,6 +214,22 @@ Declare an external port on a design block. The rendered name is `"name"`. If yo
 (port "VOUT" vout-str  out  (rated 0.6 16.0))
 ```
 
+### `(bus-port "PREFIX" START END [(suffixes A B …)] direction [signal-type] [modifiers…])`
+
+Shorthand for an indexed run of `(port …)` declarations. Expands to one port per index in `[START, END]`, optionally crossed with a suffix list. Direction and any trailing modifiers (signal type, voltage, `(rated …)`, etc.) apply to every generated port. Valid both as a top-level form and inside a `(section …)`.
+
+```scheme
+;; Differential pairs with P/N suffixes
+(bus-port "ADF_CH" 1 10 (suffixes P N) in differential)
+;; → (port "ADF_CH1P" in differential) (port "ADF_CH1N" in differential)
+;;   …
+;;   (port "ADF_CH10P" in differential) (port "ADF_CH10N" in differential)
+
+;; Index-only — no suffix list
+(bus-port "VDDIO" 1 5 in power 3.3)
+;; → (port "VDDIO1" in power 3.3) … (port "VDDIO5" in power 3.3)
+```
+
 ### `(net "alias-a" "alias-b" …)`
 
 Tie two or more net names together. Used to merge nets that came in under different names (e.g. across sub-blocks).
@@ -221,6 +237,21 @@ Tie two or more net names together. Used to merge nets that came in under differ
 ```scheme
 (net "VBUS" "USB_5V")
 ```
+
+### `(bus-net "PREFIX" START END "SUB")`
+
+Shorthand for an indexed run of `(net …)` ties when a parent net name always equals a sub-block port name and only the index differs. Expands to one net-tie per index in the inclusive range `[START, END]`.
+
+```scheme
+(bus-net "FLASH_IO" 0 7 "flash")
+;; Expands to:
+;;   (net "FLASH_IO0" "flash/FLASH_IO0")
+;;   (net "FLASH_IO1" "flash/FLASH_IO1")
+;;   …
+;;   (net "FLASH_IO7" "flash/FLASH_IO7")
+```
+
+Use it instead of typing 8 or 16 near-identical `(net …)` lines for FLASH/PSRAM/data buses that pass through a sub-block boundary.
 
 ### `(note "REF-DES" "text")`
 
@@ -245,7 +276,7 @@ Visual grouping in the schematic — labels a cluster of related parts.
 
 Group circuitry into a named, grid-positioned subdivision. Sections drive both the schematic layout and the auto-classified system-overview SVG in the page header (see §8).
 
-A section's body can contain `(status …)`, `(description …)`, `(role …)`, `(protocol …)`, `(calc …)`, `(note …)`, `(port …)`, `(instance …)`, `(pins …)`, `(decouple …)`, `(series …)`, `(net …)`, and nested `(section …)`.
+A section's body can contain `(status …)`, `(description …)`, `(role …)`, `(protocol …)`, `(calc …)`, `(note …)`, `(port …)`, `(bus-port …)`, `(instance …)`, `(pins …)`, `(decouple …)`, `(series …)`, `(net …)`, `(diagram hidden)`, and nested `(section …)`.
 
 ```scheme
 (section "3.3V Buck" "TPSM84338, 12V→3.3V, 2A"
@@ -256,6 +287,14 @@ A section's body can contain `(status …)`, `(description …)`, `(role …)`, 
 ```
 
 Section status values: `concept`, `design`, `implemented`, `review`. The ERC `concept_remaining` check flags any section still marked `concept`.
+
+**`(diagram hidden)`** — opt the section out of the block-diagram view at the top of the schematic page. Use for sections like `"Test Points"`, `"Mounting"`, or `"Fiducials"` that aren't part of the design's signal/power topology and would clutter the diagram. The section still renders in the schematic body and review report as normal.
+
+```scheme
+(section "Test Points" "1mm SMD probe points for bring-up"
+  (diagram hidden)
+  …)
+```
 
 ### `(sub-block "prefix" expr)`
 
@@ -387,11 +426,13 @@ Inside a `(pin …)` form:
 
 - `(i-typ X)` — typical current the instance draws on this pin (amps).
 - `(i-max Y)` — maximum current the pin is rated for (amps).
-- `(as "FN1" "FN2" …)` — assert the alternate functions the pin is being used for (verified by the `pin_function_*` ERC checks).
+- `(as "FN1" "FN2" …)` — assert the alternate functions the pin is being used for (verified by the `pin_function_*` ERC checks). **Required** for any pin whose pinout entry lists ≥ 2 alternate functions — the build fails with `pin_function_required` otherwise, citing the available alternatives. Pins with exactly one alt auto-resolve to that alt (no `(as …)` needed); pure power/GND pins with no alts don't need one either. The pin id can be either the BGA position (`H4`) or the logical name (`PC13`) — both resolve.
 
 ```scheme
 (pin 4 "VOUT" (i-typ 0.5) (i-max 1.5))
 (pin 12 "I2C_SDA" (as "I2C2_SDA"))
+;; STM32 pin with 5+ alts — must pick one explicitly:
+(pin H4 (as "PC13" "PWR_WKUP3") "PWR_BTN")
 ```
 
 ### `(note "text")`
@@ -435,7 +476,7 @@ The form is order-tolerant for modifiers; positional args (name, optional net-na
 
 ## 8. Section conventions
 
-Sections are how you tell the renderer the shape of the design. The system-overview SVG (the strip at the top of every schematic page) classifies each section by its **name keyword** and assigns it a column + colour. The classifier is case-insensitive substring matching against this table:
+Sections are how you tell the renderer the shape of the design. The block-diagram view at the top of every schematic page (and the chip strip in the review report) classifies each section by its **name keyword** and assigns it a colour + a compass region around the MCU hub (power producers west, connectors & comms north, memory south, sensors & peripherals east). The classifier is case-insensitive substring matching against this table:
 
 | Category | Keywords |
 | --- | --- |

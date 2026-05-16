@@ -26,7 +26,7 @@ The intended workflow is text-first and live: edit a `.sexp` file → run `eda b
 | **Instance** | A placed component with a stable 8-char hex ID (e.g. `(id ab12cd34)`), a ref-des (`R1`, `C2`, `U3` — auto-assigned by prefix if not given), and pin-to-net connections. |
 | **Net** | An electrical connection inferred from the union of pins that name it. Nets are not declared; they emerge from `(pin … "NET")` connections. `(net …)` exists only to tie two names together. |
 | **Port** | A design block's external interface — direction (`in`/`out`/`bidi`), signal type (`power`/`signal`/`clock`/…), voltage rating, role, protocol. |
-| **Section** | A named, grid-positioned subdivision of a design — has a status (`concept`/`design`/`implemented`/`review`), a description, and a list of forms it owns. Drives both the schematic page layout *and* the auto-categorised system-overview SVG in the page header. |
+| **Section** | A named, grid-positioned subdivision of a design — has a status (`concept`/`design`/`implemented`/`review`), a description, and a list of forms it owns. Drives both the schematic page layout *and* the auto-categorised block-diagram view in the page header. Set `(diagram hidden)` to exclude a section (e.g. test points, fiducials) from the block diagram. |
 | **Sub-block** | An instance of another `.sexp` file. If that file is a `defmodule`, it takes parameters; otherwise it's a plain composition. |
 | **Component vs component-family** | `component` is a fixed part (`res-0402`, `tpsm84338rcjr`). `component-family` is a parameterised template (`(cap "100nF")`, `(res "10k")`). |
 | **Hubs vs spokes** | A rendering convention. Hubs are ICs/connectors/transistors (ref-des `U/J/P/X/Q`) — they get drawn as boxes on a grid. Spokes are R/C/L/F/D — they're rendered inline on the connection between two hubs. |
@@ -48,26 +48,30 @@ evaluate          (recursive: special forms, builtins, lexical scope,
    │              ─ accumulates assertions
    ▼
 post-build        (insert auto-generated 8-char hex IDs back into source,
-   │               assign ref-deses by prefix counter, resolve BOM data,
-   │               tie nets, build power-budget graph)
+   │               assign ref-deses deterministically by source order,
+   │               resolve BOM data with Pass 3.5 fixed-point UUID-swap
+   │               correction, enrich single-alt pin functions, tie nets,
+   │               build power-budget graph)
    ▼
 DesignBlock       (instances, nets, ports, sections, sub-blocks, assertions,
    │               power-budget edges, requirement coverage)
    │
-   ├── render_html / render_svg  →  schematic page (hub-and-spoke SVG)
-   ├── render_system_svg         →  system-overview header SVG
-   ├── render_json               →  scene-graph JSON  (live-push channel)
-   ├── review                    →  HTML + JSON design-review report
-   ├── erc                       →  electrical-rule violations
-   ├── emit                      →  flattened post-eval .sexp
-   └── export_kicad              →  netlist + footprints + STEP models
+   ├── render_html / render_svg          →  schematic page (hub-and-spoke SVG)
+   ├── render_block_diagram_svg          →  compass block diagram (page header)
+   ├── render_system_svg                 →  chip strip (review report header)
+   ├── render_json                       →  scene-graph JSON  (live-push channel)
+   ├── review                            →  HTML + JSON design-review report
+   ├── erc                               →  electrical-rule violations
+   ├── emit                              →  flattened post-eval .sexp
+   └── export_kicad                      →  netlist + footprints + STEP models
 ```
 
-Three observations worth flagging:
+Four observations worth flagging:
 
 - **Spans survive the whole pipeline.** Every error and every auto-inserted ID points back at a (line, col, byte) in the source file. The printer is round-trip safe — IDs get grafted in place without lexical drift.
 - **Assertions never abort the build.** `(assert …)` and `(assert-range …)` accumulate pass/fail entries that surface in the review report. A failing assertion is a finding, not a stop.
 - **The live-push pipeline runs scene-graph JSON, not HTML.** `eda build --push` increments a per-design version counter on the running server. Browsers poll `/api/version/:name` every 2 s; on a bump they re-fetch the JSON scene graph and re-render. The server-side HTML page is canonical for first load and review-mode.
+- **Post-build is deterministic and idempotent.** Ref-deses are assigned by walking instances in source-offset order (so repeated evaluations produce byte-identical BOMs). BOM resolution has a Pass 3.5 fixed-point step that converges UUID-swap corrections in one call. The `pin_enrichment` pass auto-fills `(as …)` for any pin whose pinout entry has exactly one alt, so downstream consumers (renderer, KiCad export, ERC) see the unique alt as if it had been typed.
 
 ## 4. Capability inventory
 
@@ -82,7 +86,10 @@ The schematic source language. Full reference in [`sexp-language.md`](sexp-langu
 - `import` system that searches `lib/components/` then `lib/modules/`, project-local then shared.
 - Stable identity via auto-generated 8-char hex `(id …)` markers, flushed back to disk on build.
 - Bus shorthand for wide pin groups (`(bus "FLASH_IO" T19 P19 V19 …)` → `FLASH_IO0`, `FLASH_IO1`, …).
+- Indexed net-tie shorthand (`(bus-net "FLASH_IO" 0 7 "flash")` → 8 `(net …)` ties across a sub-block boundary).
+- Indexed port shorthand (`(bus-port "ADF_CH" 1 10 (suffixes P N) in differential)` → 20 differential-pair ports).
 - Decoupling shorthand (`(decouple …)` auto-generates per-pin sub-nets and cap instances).
+- Section opt-out from the block-diagram view: `(diagram hidden)` for sections like test points and fiducials.
 
 ### Schematic rendering
 
@@ -91,7 +98,7 @@ Server-rendered HTML page with inline SVG.
 - **Hub-and-spoke topology.** ICs/connectors/transistors are hubs (rendered as boxes on a row/col grid). Passives (R/C/L/F/D) are spokes — drawn inline on the wire between two hubs.
 - **Multi-part symbols.** A single MCU can spread across multiple grid cells via `(part "name" (row N) (col N) …)` blocks, each with its own pin set.
 - **Named grid sections.** A `section` declares its own row/col placement (or accepts whatever is implicit from declaration order).
-- **System-overview SVG.** Auto-generated header strip that classifies sections by name keyword and assigns column + colour. The classifier (`render_block_types.classifyByName`) recognises 9 categories:
+- **Block-diagram view.** Auto-generated SVG at the top of every schematic page. Classifies each section by name keyword (table below) and lays it out in a compass around the MCU hub: power producers west, connectors + comms north, memory south, sensors + peripherals east. Voltage rails are labelled inside each block (consumed in red, produced in green); inter-block wires carry a short bus tag (the first word of the section name plus the protocol if declared, e.g. `XSPI2 · OctoSPI`). Sections marked `(diagram hidden)` are skipped. The chip strip in the review-report header still uses the older flat-strip classifier (`render_block_types.classifyByName`). Both share the keyword table:
 
 | Category | Color | Keywords matched (case-insensitive) |
 | --- | --- | --- |
@@ -111,6 +118,10 @@ If no keyword matches and the section's first instance has a ref-des starting wi
 - **Scene-graph JSON.** A serialisable representation of the schematic at `GET /api/scene-graph/:name` — used by the live-push channel and any future UI client.
 - **Sidebar.** Notes, BOM info, datasheet links, requirement-coverage hints, ERC violations attached to ref-deses.
 
+### Design notes
+
+A structured per-design TODO log, stored as `<design>.notes.md` next to the design source. Each note carries an 8-char hex ID, body text, UTC `created_at` / `completed_at` timestamps, and an open/done state. Surfaced in the schematic viewer's notes panel and through MCP tools (`list_design_notes`, `add_design_note`, `complete_design_note`, `reopen_design_note`, `remove_design_note`). Distinct from `(note …)` forms inside `.sexp` source — design notes are a workflow scratchpad outside the netlist, meant for "follow up before tape-out" items that wouldn't make sense as ref-des-attached annotations.
+
 ### Electrical-rule checks (ERC)
 
 A post-build pass over the resolved design block. 12 checks ship today:
@@ -127,8 +138,8 @@ A post-build pass over the resolved design block. 12 checks ship today:
 | `voltage_mismatch` | A pin's expected voltage doesn't match the net's voltage rating. |
 | `concept_remaining` | A section still marked `concept` — design-readiness reminder. |
 | `power_budget` | A net's current draw exceeds a declared rating. |
-| `pin_function_unsupported` | Pin routed to a net that doesn't match any of its alternate-function entries from the pinout. |
-| `pin_function_required` | Pinout declares the pin supports only specific functions, but it's connected to something else. |
+| `pin_function_unsupported` | A pin's `(as "FN")` assertion names a function that isn't in the pinout's primary + alts list. |
+| `pin_function_required` | A pin whose pinout entry has ≥ 2 alts was wired without an `(as …)` to disambiguate. (Pins with exactly one alt auto-fill via `pin_enrichment` and don't trigger this; pins with no alts don't need one.) The pinout lookup is dual-keyed by BGA position *and* logical name, so `(pin H4 …)` and `(pin PC13 …)` both resolve. |
 
 Two more violation kinds (`multiple_drivers`, `power_no_cap`) exist in the enum but aren't currently invoked from the runner.
 
@@ -191,6 +202,7 @@ Exposes the project to Claude Code as a tool surface. Tools fall into five bucke
 | **VFS reads** | `read_file`, `list_dir`, `glob` |
 | **VFS writes** | `write_file`, `edit_file`, `delete_file`, `move_file` |
 | **Build / state** | `build`, `regenerate_pinout`, `restore_version` |
+| **Design notes** | `list_design_notes`, `add_design_note`, `complete_design_note`, `reopen_design_note`, `remove_design_note` |
 
 Two design choices worth calling out:
 
@@ -205,6 +217,8 @@ A separate Go agent at `tools/kicad-sync-go/`, registered as a KiCad 10 plugin. 
 - **Trigger.** User clicks **EDA Sync** in the KiCad toolbar (or runs the agent CLI for headless syncs).
 - **Protocol.** Agent reads the live board state from KiCad over IPC (NNG protobuf), POSTs it to `/api/sync-plan/:name`, server returns ops (`add`, `set_field`, `set_pad_net`, `swap_footprint`, `remove`, `flag_stale`), agent applies them as a single Ctrl+Z-able commit.
 - **What's preserved.** Footprint UUIDs, pad netlists, field values, board origin, placement coordinates. New instances land at the board origin until the user places them.
+- **Sidecars next to the `.kicad_pcb`.** `<board>.applied_ops.json` fingerprints the state-asserting ops (`set_field`, `set_pad_net`, `set_locked`) the agent just pushed so the server can suppress re-emission on idempotent re-syncs; `<board>.stale.json` lists every footprint the server flagged as no-longer-in-the-design (with ref, kicad_uuid, canopy_uuid, footprint name, value) so the user can inspect orphans before pruning.
+- **Strict mode.** If any IPC degradation occurs (e.g. KiCad rejects every TOOL_ACTION name we try for the post-CreateItems geometry refresh), the agent exits non-zero and skips writing `applied_ops.json` — the next sync re-evaluates the affected footprints instead of treating them as already-applied. `--best-effort` opts back into the legacy log-and-continue behaviour.
 - **Auth.** OAuth client auto-registered via RFC 7591 dynamic client registration. Tokens cached at `~/.config/eda-kicad-sync/tokens.json` (mode 0600). Per-board config in `<board>.eda-sync.json`.
 
 ### Conversion tools
@@ -239,7 +253,8 @@ A project directory passed via `--project-dir` looks like:
 projects/designs/
 ├── src/                          # designs (one directory per design)
 │   ├── stm32n6/
-│   │   └── stm32n6.sexp
+│   │   ├── stm32n6.sexp
+│   │   └── stm32n6.notes.md      # per-design TODO log (see Design notes)
 │   ├── power-6v/
 │   │   └── power-6v.sexp
 │   └── …
@@ -255,6 +270,17 @@ projects/designs/
     ├── oauth_tokens.json         # access-token store (hashed)
     ├── plugin_tokens.json        # KiCad-agent bearer tokens
     └── users.json                # passkey + password credentials
+```
+
+KiCad sync sidecars live next to the `.kicad_pcb` (not in `projects/designs/`):
+
+```
+<board-dir>/
+├── Board.kicad_pcb
+├── Board.kicad_pcb.applied_ops.json   # state-asserting op fingerprints
+├── Board.kicad_pcb.stale.json         # orphan-footprint inventory
+├── Board.kicad_pcb.eda-sync.json      # per-board agent config (server URL, design name)
+└── ~Board.kicad_{pcb,pro}.lck         # KiCad's project lock files (transient)
 ```
 
 **`(import …)` resolution.** Each name is resolved as `lib/components/<name>.sexp` then `lib/modules/<name>.sexp`, in `--project-dir` first then in the shared library directory (if configured). A file is identified as a *component* iff its first top-level form is `(component …)` or `(component-family …)` — otherwise it's a *module*. The same name can't be both.
@@ -329,6 +355,8 @@ projects/designs/
 | GET | `/api/export-netlist/:name` | KiCad netlist only. |
 | GET | `/api/export-bom/:name` | BOM as CSV. |
 | GET | `/api/export-review/:name` | Review package (.zip or .md+.csv). |
+| GET | `/api/notes/:name` | Design notes as raw markdown. |
+| GET | `/api/notes/:name/tasks` | Structured TODO entries + scratchpad. |
 
 #### Mutation APIs
 | Method | Path | Purpose |
@@ -343,6 +371,11 @@ projects/designs/
 | POST | `/api/upload-symbol` | Upload a KiCad symbol to the project library. |
 | POST | `/api/upload-footprint` | Upload a KiCad footprint. |
 | POST | `/api/sync-plan/:name` | KiCad sync orchestration (server-side diff). |
+| PUT | `/api/notes/:name` | Overwrite design notes markdown. |
+| POST | `/api/notes/:name/tasks/add` | Append a TODO entry. |
+| POST | `/api/notes/:name/tasks/complete` | Mark a TODO entry done. |
+| POST | `/api/notes/:name/tasks/reopen` | Re-open a completed entry. |
+| POST | `/api/notes/:name/tasks/remove` | Delete a TODO entry. |
 
 #### MCP transport
 | Method | Path | Purpose |
@@ -380,3 +413,8 @@ projects/designs/
 | `build` | Re-evaluate a design; auto-insert IDs; bump version. |
 | `regenerate_pinout` | Re-derive a component's pinout from its KiCad source. |
 | `restore_version` | Revert a design to an earlier revision. |
+| `list_design_notes` | List open / done TODO entries for a design. |
+| `add_design_note` | Append a new TODO entry to `<design>.notes.md`. |
+| `complete_design_note` | Mark a TODO entry done (stamps `completed_at`). |
+| `reopen_design_note` | Re-open a completed entry. |
+| `remove_design_note` | Delete a TODO entry by id. |
