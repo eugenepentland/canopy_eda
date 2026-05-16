@@ -31,6 +31,7 @@ src/coverage.zig::computeInstanceCoverage | fn computeInstanceCoverage( allocato
 src/coverage.zig::computeOverallCoverage | fn computeOverallCoverage( allocator: std.mem.Allocator, block: *const DesignBlock, check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result), ) std.mem.Allocator.Error!OverallCoverage
 src/coverage.zig::computeSectionCoverage | fn computeSectionCoverage( allocator: std.mem.Allocator, block: *const DesignBlock, sec: Section, check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result), ) std.mem.Allocator.Error!SectionCoverage
 src/emit.zig::emitResolved | fn emitResolved(allocator: std.mem.Allocator, block: *const DesignBlock) std.mem.Allocator.Error![]const u8
+src/erc.zig::loadPinoutMap | fn loadPinoutMap(allocator: std.mem.Allocator, path: []const u8) ?std.StringHashMapUnmanaged(PinoutEntry)
 src/erc.zig::runErc | fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8) std.mem.Allocator.Error![]const Violation
 src/erc.zig::writeViolationsJson | fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Violation) std.mem.Allocator.Error![]const u8
 src/eval/builders.zig::addPartToInstance | fn addPartToInstance(self: *Evaluator, instances: []Instance, ref_des: []const u8, part_name: []const u8, pins: []const env_mod.PartPin) EvalError!void
@@ -39,6 +40,8 @@ src/eval/builders.zig::buildNote | fn buildNote(self: *Evaluator, args: []const 
 src/eval/builders.zig::buildPort | fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
 src/eval/builders.zig::buildSubBlock | fn buildSubBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!SubBlock
 src/eval/builders.zig::emitDecoupleItems | fn emitDecoupleItems( self: *Evaluator, items: []const Node, net_name: []const u8, env: *Env, instances: *std.ArrayListUnmanaged(Instance), all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl), decouple_id: []const u8, child_counter: *usize, ) EvalError!void
+src/eval/builders.zig::expandSectionBusPort | fn expandSectionBusPort( self: *Evaluator, bp_children: []const Node, env: *env_mod.Env, out: *std.ArrayListUnmanaged(env_mod.SectionPort), ) EvalError!void
+src/eval/builders.zig::expandTopLevelBusPort | fn expandTopLevelBusPort( self: *Evaluator, bp_children: []const Node, env: *Env, out: *std.ArrayListUnmanaged(Port), ) EvalError!void
 src/eval/builders.zig::findPinFuncMap | fn findPinFuncMap(self: *Evaluator, inst_items: []const Instance, pins_ref: []const u8) ?*const std.StringHashMapUnmanaged([]const u8)
 src/eval/builders.zig::loadDesignFile | fn loadDesignFile(self: *Evaluator, path: []const u8) ?[]const Node
 src/eval/builders.zig::loadFile | fn loadFile(self: *Evaluator, path: []const u8) ?[]const Node
@@ -93,6 +96,7 @@ src/eval/net_analysis.zig::baseNetName | fn baseNetName(name: []const u8) []cons
 src/eval/net_analysis.zig::findMissingDecouplingNets | fn findMissingDecouplingNets( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const []const u8
 src/eval/net_analysis.zig::refDesLocalPrefix | fn refDesLocalPrefix(ref_des: []const u8) u8
 src/eval/net_analysis.zig::subBlockNetHasCap | fn subBlockNetHasCap(block: *const DesignBlock, net_path: []const u8) bool
+src/eval/pin_enrichment.zig::enrichPinFunctions | fn enrichPinFunctions( allocator: Allocator, block: *DesignBlock, project_dir: []const u8, ) Allocator.Error!void
 src/eval/power_budget.zig::analyze | fn analyze( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const Rail
 src/eval/power_config.zig::parse | fn parse(form_children: []const Node) ?PowerConfig
 src/eval/power_sequencing.zig::analyze | fn analyze( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const SequenceRow
@@ -139,6 +143,9 @@ src/json_writer.zig::writeString | fn writeString(w: anytype, s: []const u8) Wri
 src/main.zig::main | fn main() !void
 src/paths.zig::designSiblingPath | fn designSiblingPath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ext: []const u8, ) std.mem.Allocator.Error![]u8
 src/paths.zig::designSourcePath | fn designSourcePath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) std.mem.Allocator.Error![]u8
+src/render_block_diagram_svg.zig::collectBlockDiagram | fn collectBlockDiagram( allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize, ) Allocator.Error!Diagram
+src/render_block_diagram_svg.zig::renderBlockDiagramSvg | fn renderBlockDiagramSvg( allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize, w: anytype, ) (Allocator.Error || std.Io.Writer.Error)!void
+src/render_block_diagram_svg.zig::renderDiagramSvg | fn renderDiagramSvg( allocator: Allocator, diagram: Diagram, w: anytype, ) (Allocator.Error || std.Io.Writer.Error)!void
 src/render_block_types.zig::categoryColor | fn categoryColor(cat: Category) []const u8
 src/render_block_types.zig::classifyByName | fn classifyByName(name: []const u8, instances: []const env_mod.Instance) Category
 src/render_block_types.zig::classifySection | fn classifySection(sec: env_mod.Section) Category

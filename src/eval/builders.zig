@@ -128,6 +128,125 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
     };
 }
 
+/// Expand `(bus-port "PREFIX" START END [(suffixes A B)] …)` into a list
+/// of fully-built `SectionPort`s. The trailing modifiers (direction,
+/// signal-type, voltage, role, etc.) are reused verbatim across every
+/// generated port so the user pays one line for what used to be N×M
+/// `(port …)` declarations. When the optional `(suffixes …)` form is
+/// missing, one port per index is generated.
+pub fn expandSectionBusPort(
+    self: *Evaluator,
+    bp_children: []const Node,
+    env: *env_mod.Env,
+    out: *std.ArrayListUnmanaged(env_mod.SectionPort),
+) EvalError!void {
+    const exp = try parseBusPortHeader(self, bp_children, env) orelse return;
+    var idx: i64 = exp.start;
+    while (idx <= exp.end) : (idx += 1) {
+        for (exp.suffixes) |suf| {
+            const name = std.fmt.allocPrint(self.allocator, "{s}{d}{s}", .{ exp.prefix, idx, suf }) catch return EvalError.OutOfMemory;
+            // parseSectionPort treats children[0] as the leading form
+            // atom (`port`) and skips it; prepend a dummy atom to match.
+            const children = try synthesizeSectionPortChildren(self.allocator, name, exp.rest);
+            if (try parseSectionPort(self, children, env)) |p| {
+                try out.append(self.allocator, p);
+            }
+        }
+    }
+}
+
+/// Top-level variant of `expandSectionBusPort` — calls `buildPort` per
+/// synthesized name so the resulting ports plug into a design-block
+/// top-level `ports` list.
+pub fn expandTopLevelBusPort(
+    self: *Evaluator,
+    bp_children: []const Node,
+    env: *Env,
+    out: *std.ArrayListUnmanaged(Port),
+) EvalError!void {
+    const exp = try parseBusPortHeader(self, bp_children, env) orelse return;
+    var idx: i64 = exp.start;
+    while (idx <= exp.end) : (idx += 1) {
+        for (exp.suffixes) |suf| {
+            const name = std.fmt.allocPrint(self.allocator, "{s}{d}{s}", .{ exp.prefix, idx, suf }) catch return EvalError.OutOfMemory;
+            // buildPort takes `args` with the name at args[0], no
+            // leading `port` atom.
+            const args = try synthesizeBuildPortArgs(self.allocator, name, exp.rest);
+            const port = try buildPort(self, args, env);
+            try out.append(self.allocator, port);
+        }
+    }
+}
+
+const BusPortExpansion = struct {
+    prefix: []const u8,
+    start: i64,
+    end: i64,
+    /// Suffix list — single empty string when caller omitted `(suffixes …)`
+    /// so the expansion loop emits one port per index.
+    suffixes: []const []const u8,
+    /// All port modifier children (direction, signal-type, voltage, etc.)
+    /// to splice in after the synthesized name.
+    rest: []const Node,
+};
+
+fn parseBusPortHeader(self: *Evaluator, bp_children: []const Node, env: *Env) EvalError!?BusPortExpansion {
+    // bp_children[0] is the "bus-port" atom; positional 1..3 are prefix,
+    // start, end. Position 4 is the optional `(suffixes A B)` form OR
+    // the first port modifier.
+    if (bp_children.len < 4) return null;
+    const prefix_val = try self.evalNode(bp_children[1], env);
+    const prefix = prefix_val.asString() orelse return null;
+    const start_val = try self.evalNode(bp_children[2], env);
+    const end_val = try self.evalNode(bp_children[3], env);
+    const start_f = start_val.asNumber() orelse return null;
+    const end_f = end_val.asNumber() orelse return null;
+    if (end_f < start_f) return null;
+
+    var rest_start: usize = 4;
+    var suffixes: []const []const u8 = &.{""};
+    if (bp_children.len > 4 and bp_children[4].isForm("suffixes")) {
+        const sf = bp_children[4].asList().?;
+        var suf_buf: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (sf[1..]) |s| {
+            const text = s.asAtom() orelse s.asString() orelse continue;
+            try suf_buf.append(self.allocator, text);
+        }
+        if (suf_buf.items.len > 0) {
+            suffixes = suf_buf.toOwnedSlice(self.allocator) catch &.{""};
+        }
+        rest_start = 5;
+    }
+    return .{
+        .prefix = prefix,
+        .start = @intFromFloat(start_f),
+        .end = @intFromFloat(end_f),
+        .suffixes = suffixes,
+        .rest = bp_children[rest_start..],
+    };
+}
+
+/// Build a children slice for `parseSectionPort`: leading dummy `port`
+/// atom (the parser skips index 0), then the synthesized name, then the
+/// shared modifier children.
+fn synthesizeSectionPortChildren(allocator: std.mem.Allocator, name: []const u8, rest: []const Node) EvalError![]Node {
+    var buf: std.ArrayListUnmanaged(Node) = .empty;
+    try buf.append(allocator, Node.atom(ast.Span.zero, "port"));
+    try buf.append(allocator, Node.string(ast.Span.zero, name));
+    for (rest) |n| try buf.append(allocator, n);
+    return buf.toOwnedSlice(allocator) catch EvalError.OutOfMemory;
+}
+
+/// Build an args slice for `buildPort`: the synthesized name at args[0]
+/// (no leading `port` atom — buildPort's contract differs from
+/// parseSectionPort's), then the shared modifier children.
+fn synthesizeBuildPortArgs(allocator: std.mem.Allocator, name: []const u8, rest: []const Node) EvalError![]Node {
+    var buf: std.ArrayListUnmanaged(Node) = .empty;
+    try buf.append(allocator, Node.string(ast.Span.zero, name));
+    for (rest) |n| try buf.append(allocator, n);
+    return buf.toOwnedSlice(allocator) catch EvalError.OutOfMemory;
+}
+
 /// Parse (calc "name" (let ...) ...) block.
 pub fn parseSectionCalc(self: *Evaluator, sf_children: []const Node, env: *env_mod.Env) EvalError!?env_mod.CalcBlock {
     if (sf_children.len < 2) return null;

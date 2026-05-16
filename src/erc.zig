@@ -947,7 +947,12 @@ fn collectOptionalPortNets(
     for (sec.sub_sections) |sub| try collectOptionalPortNets(allocator, map, sub);
 }
 
-const PinoutEntry = struct {
+/// One row of a parsed pinout file: the canonical name of a physical
+/// pin plus every alternative peripheral function it can drive. Returned
+/// from `loadPinoutMap` and consumed by `checkPinFunctions` here and by
+/// `eval/pin_enrichment.enrichPinFunctions` to auto-fill single-alt
+/// assertions before validation runs.
+pub const PinoutEntry = struct {
     /// Primary function name (always valid).
     primary: []const u8,
     /// Additional valid function names for this physical pin.
@@ -956,7 +961,7 @@ const PinoutEntry = struct {
 
 /// Load a pinout file and return pin_id -> {primary, alts}. Returns null if the file is missing
 /// or malformed. Allocator is used both for the parse tree (kept until end of ERC) and the map.
-fn loadPinoutMap(allocator: std.mem.Allocator, path: []const u8) ?std.StringHashMapUnmanaged(PinoutEntry) {
+pub fn loadPinoutMap(allocator: std.mem.Allocator, path: []const u8) ?std.StringHashMapUnmanaged(PinoutEntry) {
     const content = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 256) catch return null;
     const nodes = parser_mod.parse(allocator, content) catch return null;
     if (nodes.len == 0) return null;
@@ -983,10 +988,19 @@ fn loadPinoutMap(allocator: std.mem.Allocator, path: []const u8) ?std.StringHash
             const alt_name = al[1].asString() orelse (al[1].asAtom() orelse continue);
             alts.append(allocator, alt_name) catch continue;
         }
-        map.put(allocator, pin_id, .{
+        const entry = PinoutEntry{
             .primary = primary,
             .alts = alts.toOwnedSlice(allocator) catch &.{},
-        }) catch continue;
+        };
+        // Dual-key: BGA position ("P16") AND logical name ("PN1") both
+        // resolve to the same entry. The design file mixes both styles
+        // (`(pin H4 …)` uses BGA; `(pin PN1 …)` uses logical), and
+        // before this dual indexing the logical-name lookups missed the
+        // map entirely and `checkPinFunctions` silently skipped them.
+        map.put(allocator, pin_id, entry) catch continue;
+        if (!std.mem.eql(u8, pin_id, primary)) {
+            map.put(allocator, primary, entry) catch continue;
+        }
     }
     return map;
 }
@@ -1044,9 +1058,12 @@ fn checkPinFunctions(
 
             const entry = pinout_map.get(pin.pin) orelse continue;
 
-            // Rule 2: pin has alts but no (as ...). Skip pure-power pads (no alts).
+            // Rule 2: pin has 2+ alts but no (as ...). Skip pure-power
+            // pads (no alts) AND single-alt pins (which the build-time
+            // enrichment pass auto-resolves to their one option) — only
+            // genuinely ambiguous pins demand an explicit `as`.
             if (pin.asserted_fns.len == 0) {
-                if (entry.alts.len == 0) continue;
+                if (entry.alts.len < 2) continue;
                 const seen_key = std.fmt.allocPrint(allocator, "{s}|{s}", .{ pin.ref_des, pin.pin }) catch continue;
                 if (required_seen.contains(seen_key)) continue;
                 try required_seen.put(allocator, seen_key, {});
@@ -1322,6 +1339,8 @@ const pinout_fixture =
     \\    (alt "SPI1_MOSI" io)
     \\    (alt "TIM1_CH1" io))
     \\  (pin B1 "VDD")
+    \\  (pin C1 "PC1"
+    \\    (alt "USART2_TX" io))
     \\)
 ;
 
@@ -1390,6 +1409,51 @@ test "pin function multi assertion validated" {
 
     for (violations.items) |v| {
         try std.testing.expect(v.kind != .pin_function_unsupported);
+        try std.testing.expect(v.kind != .pin_function_required);
+    }
+}
+
+// spec: erc - Resolves pin lookup by logical name when source uses logical pin id
+test "pin function lookup resolves by logical name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var fx = try makePinoutTmp(alloc);
+    defer fx.tmp.cleanup();
+    defer alloc.free(fx.path);
+
+    // "PA1" is the logical name for BGA-position "A1". Before the
+    // dual-key fix, looking up "PA1" missed the map entirely and the
+    // check silently passed — so the assertion is that the check now
+    // *fires* (PA1 has 2 alts, no `as`) instead of no-oping.
+    const block = try makePinFunctionBlock(alloc, "PA1", &.{});
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkPinFunctions(alloc, &block, fx.path, &violations);
+
+    var hit = false;
+    for (violations.items) |v| {
+        if (v.kind == .pin_function_required) hit = true;
+    }
+    try std.testing.expect(hit);
+}
+
+// spec: erc - Skips pin function required check for single alt pins
+test "pin function not required when single alt" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var fx = try makePinoutTmp(alloc);
+    defer fx.tmp.cleanup();
+    defer alloc.free(fx.path);
+
+    // C1 has exactly one alt (USART2_TX). With the >= 2 threshold the
+    // pin doesn't need an explicit `as` — the auto-fill pass will pick
+    // the unique alt for downstream consumers.
+    const block = try makePinFunctionBlock(alloc, "C1", &.{});
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkPinFunctions(alloc, &block, fx.path, &violations);
+
+    for (violations.items) |v| {
         try std.testing.expect(v.kind != .pin_function_required);
     }
 }

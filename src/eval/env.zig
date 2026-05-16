@@ -668,6 +668,12 @@ pub const Section = struct {
     status: SectionStatus = .implemented,
     /// Block diagram role: input (power source), output (power sink), or auto (inferred).
     block_role: BlockRole = .auto,
+    /// Suppress this section from the block-diagram view at the top of
+    /// the schematic page. Set via `(diagram hidden)` in the section
+    /// body. Use for mechanical-only sections (mounting, fiducials) or
+    /// passive instrumentation (test points) whose presence in the
+    /// connectivity diagram adds noise without conveying connectivity.
+    diagram_hidden: bool = false,
 };
 
 /// Block diagram placement role for sections.

@@ -52,9 +52,11 @@ src/coverage.zig::computeInstanceCoverage fn
 src/coverage.zig::computeOverallCoverage fn
 src/coverage.zig::computeSectionCoverage fn
 src/emit.zig::emitResolved fn
+src/erc.zig::PinoutEntry struct_
 src/erc.zig::Severity value
 src/erc.zig::Violation struct_
 src/erc.zig::ViolationKind enum_
+src/erc.zig::loadPinoutMap fn
 src/erc.zig::runErc fn
 src/erc.zig::writeViolationsJson fn
 src/eval/builders.zig::addPartToInstance fn
@@ -63,6 +65,8 @@ src/eval/builders.zig::buildNote fn
 src/eval/builders.zig::buildPort fn
 src/eval/builders.zig::buildSubBlock fn
 src/eval/builders.zig::emitDecoupleItems fn
+src/eval/builders.zig::expandSectionBusPort fn
+src/eval/builders.zig::expandTopLevelBusPort fn
 src/eval/builders.zig::findPinFuncMap fn
 src/eval/builders.zig::loadDesignFile fn
 src/eval/builders.zig::loadFile fn
@@ -166,6 +170,7 @@ src/eval/net_analysis.zig::baseNetName fn
 src/eval/net_analysis.zig::findMissingDecouplingNets fn
 src/eval/net_analysis.zig::refDesLocalPrefix fn
 src/eval/net_analysis.zig::subBlockNetHasCap fn
+src/eval/pin_enrichment.zig::enrichPinFunctions fn
 src/eval/power_budget.zig::Rail struct_
 src/eval/power_budget.zig::RailConsumer struct_
 src/eval/power_budget.zig::RailStatus enum_
@@ -245,6 +250,16 @@ src/parts.zig::PartEntry struct_
 src/parts.zig::PartsDb struct_
 src/paths.zig::designSiblingPath fn
 src/paths.zig::designSourcePath fn
+src/render_block_diagram_svg.zig::BLOCK_DIAGRAM_CSS value
+src/render_block_diagram_svg.zig::BusEdge struct_
+src/render_block_diagram_svg.zig::Diagram struct_
+src/render_block_diagram_svg.zig::Node struct_
+src/render_block_diagram_svg.zig::NodeKind enum_
+src/render_block_diagram_svg.zig::RailEdge struct_
+src/render_block_diagram_svg.zig::RailEnd struct_
+src/render_block_diagram_svg.zig::collectBlockDiagram fn
+src/render_block_diagram_svg.zig::renderBlockDiagramSvg fn
+src/render_block_diagram_svg.zig::renderDiagramSvg fn
 src/render_block_types.zig::Category enum_
 src/render_block_types.zig::categoryColor fn
 src/render_block_types.zig::classifyByName fn

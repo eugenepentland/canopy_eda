@@ -13,6 +13,7 @@ const builders = @import("builders.zig");
 const rails_mod = @import("rails.zig");
 const test_point_mod = @import("test_point.zig");
 const power_config_mod = @import("power_config.zig");
+const pin_enrichment = @import("pin_enrichment.zig");
 
 const Node = ast.Node;
 const Value = env_mod.Value;
@@ -28,6 +29,7 @@ const SubBlock = env_mod.SubBlock;
 
 // ── Constants ─────────────────────────────────────────────────────
 const DECOUPLE_FORM = "decouple";
+const BUS_PORT_FORM = "bus-port";
 const INSTANCE_FORM = "instance";
 const DECOUPLE_MULTI_NET_MIN_ARITY: usize = 6;
 const DECOUPLE_MULTI_NET_NET_OFFSET: usize = 5;
@@ -81,6 +83,8 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         } else if (std.mem.eql(u8, form_name, "port")) {
             const port = try builders.buildPort(self, form_children[1..], env);
             try ports.append(self.allocator, port);
+        } else if (std.mem.eql(u8, form_name, BUS_PORT_FORM)) {
+            try builders.expandTopLevelBusPort(self, form_children, env, &ports);
         } else if (std.mem.eql(u8, form_name, "note")) {
             const note = try builders.buildNote(self, form_children[1..], env);
             try notes.append(self.allocator, note);
@@ -95,6 +99,8 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         } else if (std.mem.eql(u8, form_name, "net")) {
             try evalNetForm(self, form_children, env, &net_ties);
             validate.trackNetFormSource(self, form_children, env, &net_form_sources);
+        } else if (std.mem.eql(u8, form_name, "bus-net")) {
+            try evalBusNetForm(self, form_children, env, &net_ties);
         } else if (std.mem.eql(u8, form_name, "series")) {
             try instance_mod.evalSeriesForm(self, form_children, env, &instances, &all_pin_nets, &notes);
         } else if (std.mem.eql(u8, form_name, DECOUPLE_FORM)) {
@@ -150,6 +156,12 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     // Auto-assign global ref_des for sub-block instances
     try ids.autoAssignSubBlockRefDes(self, block);
 
+    // Resolve single-alt pin functions before validation so the renderer,
+    // KiCad export, and ERC's own assertion check all see the auto-filled
+    // `asserted_fns` slices. Multi-alt pins remain empty and trigger
+    // `pin_function_required` in ERC.
+    pin_enrichment.enrichPinFunctions(self.allocator, block, self.project_dir) catch return EvalError.OutOfMemory;
+
     // Validate: warn about dead-end nets, etc.
     try validate.validateDesign(self, block);
 
@@ -195,6 +207,36 @@ fn evalNetForm(self: *Evaluator, form_children: []const Node, env: *Env, net_tie
             try net_ties.append(self.allocator, .{ .a = src, .b = dst });
         }
     }
+}
+
+/// Evaluate `(bus-net "PREFIX" START END "SUB")` — shorthand for one
+/// `(net "PREFIX<i>" "SUB/PREFIX<i>")` per index in `[START, END]`. Lets
+/// `(bus-net "FLASH_IO" 0 7 "flash")` replace 8 verbatim net-tie lines
+/// at the bottom of a design file. Bounds are inclusive on both ends so
+/// the index range mirrors the underlying signal numbering.
+fn evalBusNetForm(self: *Evaluator, form_children: []const Node, env: *Env, net_ties: *std.ArrayListUnmanaged(NetTie)) EvalError!void {
+    if (form_children.len < 5) return;
+    const prefix = (try self.evalNode(form_children[1], env)).asString() orelse return;
+    const start_val = try self.evalNode(form_children[2], env);
+    const end_val = try self.evalNode(form_children[3], env);
+    const sub = (try self.evalNode(form_children[4], env)).asString() orelse return;
+
+    const start = numberAsUsize(start_val) orelse return;
+    const end = numberAsUsize(end_val) orelse return;
+    if (end < start) return;
+
+    var i: usize = start;
+    while (i <= end) : (i += 1) {
+        const parent = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ prefix, i }) catch return EvalError.OutOfMemory;
+        const child = std.fmt.allocPrint(self.allocator, "{s}/{s}{d}", .{ sub, prefix, i }) catch return EvalError.OutOfMemory;
+        try net_ties.append(self.allocator, .{ .a = parent, .b = child });
+    }
+}
+
+fn numberAsUsize(v: env_mod.Value) ?usize {
+    const f = v.asNumber() orelse return null;
+    if (f < 0) return null;
+    return @intFromFloat(f);
 }
 
 /// Evaluate a top-level (decouple ...) form.
@@ -277,6 +319,7 @@ fn evalSection(
     var sec_sub_sections: std.ArrayListUnmanaged(env_mod.Section) = .empty;
     var explicit_status: ?env_mod.SectionStatus = null;
     var block_role: env_mod.BlockRole = .auto;
+    var diagram_hidden = false;
 
     // Check for optional description as 2nd positional string arg
     var child_start: usize = 2;
@@ -304,6 +347,14 @@ fn evalSection(
                     if (std.mem.eql(u8, role_str, "input")) block_role = .input else if (std.mem.eql(u8, role_str, "output")) block_role = .output;
                 }
             }
+        } else if (std.mem.eql(u8, sf_name, "diagram")) {
+            // `(diagram hidden)` — opt this section out of the
+            // block-diagram view. The schematic card still renders.
+            if (sf_children.len >= 2) {
+                if (sf_children[1].asAtom()) |mode| {
+                    if (std.mem.eql(u8, mode, "hidden")) diagram_hidden = true;
+                }
+            }
         } else if (std.mem.eql(u8, sf_name, "description")) {
             if (sf_children.len >= 2) {
                 const desc_val = try self.evalNode(sf_children[1], env);
@@ -326,6 +377,8 @@ fn evalSection(
         } else if (std.mem.eql(u8, sf_name, "port")) {
             const port = try builders.parseSectionPort(self, sf_children, env);
             if (port) |p| try sec_ports.append(self.allocator, p);
+        } else if (std.mem.eql(u8, sf_name, BUS_PORT_FORM)) {
+            try builders.expandSectionBusPort(self, sf_children, env, &sec_ports);
         } else if (std.mem.eql(u8, sf_name, "protocol")) {
             if (sf_children.len >= 2) {
                 if (sf_children[1].asAtom()) |proto| {
@@ -387,6 +440,7 @@ fn evalSection(
         .sub_sections = final_sub_sections,
         .status = status,
         .block_role = block_role,
+        .diagram_hidden = diagram_hidden,
     });
 }
 
@@ -531,6 +585,8 @@ fn evalSubSection(
         } else if (std.mem.eql(u8, ssf_name, "port")) {
             const port = try builders.parseSectionPort(self, ssf_children, env);
             if (port) |p| try sub_ports.append(self.allocator, p);
+        } else if (std.mem.eql(u8, ssf_name, BUS_PORT_FORM)) {
+            try builders.expandSectionBusPort(self, ssf_children, env, &sub_ports);
         } else if (std.mem.eql(u8, ssf_name, "protocol")) {
             if (ssf_children.len >= 2) {
                 if (ssf_children[1].asAtom()) |proto| {
@@ -735,4 +791,56 @@ fn parseVerifies(self: *Evaluator, form_children: []const Node, env: *Env) ?env_
         .signed_by = signed_by,
         .date = date_str,
     };
+}
+
+// ── Tests ─────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+// spec: eval/design_block - bus-net expands one net tie per index in the inclusive range
+test "evalBusNetForm expands inclusive index range" {
+    // Drive the parser directly: build the (bus-net …) AST, hand it to
+    // evalBusNetForm, and read net_ties. Skips the full evalFile pipeline
+    // so the test doesn't need a project_dir + pinout fixture.
+    const a = std.heap.page_allocator;
+    const src = "(bus-net \"FLASH_IO\" 0 2 \"flash\")";
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    var net_ties: std.ArrayListUnmanaged(NetTie) = .empty;
+    try evalBusNetForm(&eval, form_children, &env, &net_ties);
+
+    try testing.expectEqual(@as(usize, 3), net_ties.items.len);
+    try testing.expectEqualStrings("FLASH_IO0", net_ties.items[0].a);
+    try testing.expectEqualStrings("flash/FLASH_IO0", net_ties.items[0].b);
+    try testing.expectEqualStrings("FLASH_IO2", net_ties.items[2].a);
+    try testing.expectEqualStrings("flash/FLASH_IO2", net_ties.items[2].b);
+}
+
+// spec: eval/design_block - bus-port expands one port per index times optional suffix list
+test "expandSectionBusPort expands index x suffix matrix" {
+    const a = std.heap.page_allocator;
+    const src = "(bus-port \"ADF_CH\" 1 3 (suffixes P N) in differential)";
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    var ports: std.ArrayListUnmanaged(env_mod.SectionPort) = .empty;
+    try builders.expandSectionBusPort(&eval, form_children, &env, &ports);
+
+    try testing.expectEqual(@as(usize, 6), ports.items.len);
+    try testing.expectEqualStrings("ADF_CH1P", ports.items[0].name);
+    try testing.expectEqualStrings("ADF_CH1N", ports.items[1].name);
+    try testing.expectEqualStrings("ADF_CH3N", ports.items[5].name);
+    try testing.expectEqual(env_mod.PortDirection.in, ports.items[0].direction);
+    try testing.expectEqual(env_mod.SignalType.differential, ports.items[0].signal_type);
 }

@@ -53,6 +53,10 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Stores and retrieves values by name in an environment
 - Resolves names through a parent environment chain
 
+## eval/pin_enrichment
+
+- Fills a pin's asserted_fns with the unique alt when the pinout has exactly one alternative
+
 ## eval/evaluator
 
 - Evaluates arithmetic expressions from S-expression AST
@@ -118,6 +122,16 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Pass 3.5 is a fixed point: two consecutive resolveIdentities calls produce a byte-identical BOM
 - Pass 3.5 with a forced two-instance UUID swap converges on the first call and stays put on the second
 
+## render_block_diagram_svg
+
+Public functions: collectBlockDiagram, renderBlockDiagramSvg, renderDiagramSvg
+
+- Builds one node per section and one per unattached sub-block
+- Infers a bus edge per non-hub section whose pin_groups reference the hub ref-des
+- Matches a section's `in power` port against a producer sub-block's `out power` to draw a rail edge
+- Renders nothing when the design has no nodes
+- Renders an SVG containing the node label and bus label for a hub→peripheral link
+
 ## render_svg
 
 Public functions: renderSchematic
@@ -136,6 +150,8 @@ Public functions: renderSchematic
 - Allows pins without alternates to omit (as ...)
 - Accepts multiple asserted functions on a single pin
 - Rejects asserted function that is not in the pinout
+- Resolves pin lookup by logical name when source uses logical pin id
+- Skips pin function required check for single alt pins
 - Flags a power rail with no test point on its net or any alias
 - Recognises test points declared via the test-point form
 - Recognises legacy testpoint component instances as test points
@@ -164,6 +180,11 @@ Public functions: analyze
 - Orders dependent rail after its enable source
 - Flags enable that never resolves to a known rail
 - Routes enable through PG signal to source rail
+
+## eval/design_block
+
+- bus-net expands one net tie per index in the inclusive range
+- bus-port expands one port per index times optional suffix list
 
 ## eval/test_point
 

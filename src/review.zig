@@ -1061,6 +1061,7 @@ pub fn isoTimestamp(allocator: std.mem.Allocator, unix_s: i64) std.mem.Allocator
 /// Used for HTML anchor ids like "#sec-usb".
 pub fn slugify(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
     var last_hyphen = true; // suppresses leading hyphens
     for (s) |c| {
         if (std.ascii.isAlphanumeric(c)) {
@@ -1073,7 +1074,11 @@ pub fn slugify(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Er
     }
     while (buf.items.len > 0 and buf.items[buf.items.len - 1] == '-') buf.items.len -= 1;
     if (buf.items.len == 0) try buf.append(allocator, '_');
-    return buf.items;
+    // Return an owned slice (capacity shrunk to items.len) so callers
+    // that aren't operating against an arena can safely free it. Callers
+    // already on arenas remain unaffected — the arena cleans up either
+    // way.
+    return buf.toOwnedSlice(allocator);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
