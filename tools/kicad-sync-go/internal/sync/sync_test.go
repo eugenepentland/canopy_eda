@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/eda"
@@ -63,7 +65,7 @@ func TestRequestCarriesBothUUIDs(t *testing.T) {
 	srv := fakeServer(t, eda.SyncPlanResponse{}, &gotReq)
 	defer srv.Close()
 
-	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", sync.Options{}); err != nil {
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "", "demo", sync.Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(gotReq.Board) != 2 {
@@ -104,7 +106,7 @@ func TestSetFieldByKicadUUIDResolves(t *testing.T) {
 	srv := fakeServer(t, planResp, &gotReq)
 	defer srv.Close()
 
-	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", sync.Options{}); err != nil {
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "", "demo", sync.Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if kc.Footprints[0].UUID != "abc12345" {
@@ -134,7 +136,7 @@ func TestPureUpdateAppliesSetField(t *testing.T) {
 	defer srv.Close()
 
 	client := eda.New(srv.URL, "test-token")
-	plan, err := sync.Run(client, kc, "demo", sync.Options{})
+	plan, err := sync.Run(client, kc, "", "demo", sync.Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -169,7 +171,7 @@ func TestAddOpInsertsFootprint(t *testing.T) {
 	srv := fakeServer(t, planResp, &gotReq)
 	defer srv.Close()
 
-	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", sync.Options{}); err != nil {
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "", "demo", sync.Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(kc.Added) != 1 || kc.Added[0].UUID != "u-c1" {
@@ -200,7 +202,7 @@ func TestSwapOpReplacesFootprint(t *testing.T) {
 	srv := fakeServer(t, planResp, &gotReq)
 	defer srv.Close()
 
-	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", sync.Options{}); err != nil {
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "", "demo", sync.Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if kc.Footprints[0].FootprintName != "R_0805" {
@@ -225,7 +227,7 @@ func TestRemoveOpDeletesFootprint(t *testing.T) {
 	srv := fakeServer(t, planResp, &gotReq)
 	defer srv.Close()
 
-	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", sync.Options{Prune: true}); err != nil {
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "", "demo", sync.Options{Prune: true}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(kc.Removed) != 1 || kc.Removed[0] != "u-stale" {
@@ -251,7 +253,7 @@ func TestFlagStaleIsInformational(t *testing.T) {
 	srv := fakeServer(t, planResp, &gotReq)
 	defer srv.Close()
 
-	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", sync.Options{}); err != nil {
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "", "demo", sync.Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(kc.Removed) != 0 {
@@ -262,6 +264,98 @@ func TestFlagStaleIsInformational(t *testing.T) {
 	}
 }
 
+// TestStaleSidecarWritten covers `<board>.stale.json` — the user-facing
+// list of orphans the next sync would either keep flagged or prune. Each
+// entry needs enough identifying info (ref + KiCad UUID + footprint name
+// + value) that the user can locate the part in KiCad and decide whether
+// to delete. The sidecar is rewritten in full every sync (including dry
+// runs) so an empty list after a clean sync replaces a stale file from
+// a previous run instead of going out-of-date.
+func TestStaleSidecarWritten(t *testing.T) {
+	tmp := t.TempDir()
+	boardPath := filepath.Join(tmp, "demo.kicad_pcb")
+	board := []kicad.Footprint{
+		{UUID: "canopy-x9", KicadUUID: "kicad-x9", Reference: "X9",
+			Value: "10R", FootprintName: "R_0402"},
+		{UUID: "canopy-r1", KicadUUID: "kicad-r1", Reference: "R1",
+			Value: "1k", FootprintName: "R_0402"},
+	}
+	kc := kicad.NewFake(boardPath, board)
+	planResp := eda.SyncPlanResponse{
+		Summary: eda.Summary{FlaggedStale: 1},
+		Ops:     []eda.Op{{Op: "flag_stale", UUID: "kicad-x9", Ref: "X9"}},
+	}
+	var gotReq eda.SyncPlanRequest
+	srv := fakeServer(t, planResp, &gotReq)
+	defer srv.Close()
+
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, boardPath, "demo", sync.Options{DryRun: true}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	sidecarPath := boardPath + ".stale.json"
+	body, err := os.ReadFile(sidecarPath)
+	if err != nil {
+		t.Fatalf("expected sidecar at %s: %v", sidecarPath, err)
+	}
+	var got sync.StaleSidecar
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode sidecar: %v", err)
+	}
+	if got.Design != "demo" {
+		t.Errorf("design: got %q, want demo", got.Design)
+	}
+	if !got.DryRun {
+		t.Errorf("DryRun should be true for a --dry-run invocation")
+	}
+	if got.Total != 1 || len(got.Stale) != 1 {
+		t.Fatalf("expected exactly 1 stale entry, got %+v", got)
+	}
+	e := got.Stale[0]
+	// Cross-reference from kid into the board fp must enrich the entry
+	// with footprint name + value — the ref alone isn't enough to
+	// disambiguate when several fps share the same prefix.
+	if e.Ref != "X9" || e.KicadUUID != "kicad-x9" ||
+		e.CanopyUUID != "canopy-x9" || e.FootprintName != "R_0402" ||
+		e.Value != "10R" {
+		t.Errorf("entry not enriched from board state: %+v", e)
+	}
+	if got.LastSync == "" {
+		t.Errorf("LastSync should be set to current time, got empty")
+	}
+}
+
+// TestStaleSidecarOverwritesClean: a sync with zero flag_stale ops
+// must rewrite the sidecar with an empty list so a previously-stale
+// file from an older sync doesn't lie about the current state.
+func TestStaleSidecarOverwritesClean(t *testing.T) {
+	tmp := t.TempDir()
+	boardPath := filepath.Join(tmp, "demo.kicad_pcb")
+	// Seed an old sidecar with a stale entry that shouldn't exist anymore.
+	prior := `{"design":"demo","stale_count":1,"stale":[{"ref":"OLD","kicad_uuid":"kicad-old"}]}` + "\n"
+	if err := os.WriteFile(boardPath+".stale.json", []byte(prior), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	kc := kicad.NewFake(boardPath, nil)
+	planResp := eda.SyncPlanResponse{} // no ops, no stale
+	var gotReq eda.SyncPlanRequest
+	srv := fakeServer(t, planResp, &gotReq)
+	defer srv.Close()
+
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, boardPath, "demo", sync.Options{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	body, _ := os.ReadFile(boardPath + ".stale.json")
+	var got sync.StaleSidecar
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode sidecar after clean sync: %v", err)
+	}
+	if got.Total != 0 || len(got.Stale) != 0 {
+		t.Errorf("clean sync should overwrite sidecar with empty list, got %+v", got)
+	}
+}
+
 func TestEmptyPlanSkipsCommit(t *testing.T) {
 	kc := kicad.NewFake("/tmp/test.kicad_pcb", nil)
 	planResp := eda.SyncPlanResponse{}
@@ -269,7 +363,7 @@ func TestEmptyPlanSkipsCommit(t *testing.T) {
 	srv := fakeServer(t, planResp, &gotReq)
 	defer srv.Close()
 
-	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "demo", sync.Options{}); err != nil {
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, "", "demo", sync.Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(kc.CommitMessages) != 0 {

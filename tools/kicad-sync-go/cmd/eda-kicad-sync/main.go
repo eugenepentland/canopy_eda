@@ -95,7 +95,7 @@ func run(setupMode bool, boardArg string, prune, migrate, dryRun bool) error {
 
 	client := eda.New(cfg.ServerURL, token.AccessToken)
 	opts := sync.Options{Prune: prune, MigrateHeuristic: migrate, DryRun: dryRun}
-	plan, err := sync.Run(client, kc, cfg.Design, opts)
+	plan, err := sync.Run(client, kc, boardPath, cfg.Design, opts)
 	if errors.Is(err, eda.ErrUnauthorized) {
 		// Token revoked — force re-auth once.
 		fresh, err2 := oauth.Authorize(cfg.ServerURL, creds.ClientID, creds.ClientSecret)
@@ -104,7 +104,7 @@ func run(setupMode bool, boardArg string, prune, migrate, dryRun bool) error {
 		}
 		_ = config.DefaultTokenStore().Put(fresh)
 		client = eda.New(cfg.ServerURL, fresh.AccessToken)
-		plan, err = sync.Run(client, kc, cfg.Design, opts)
+		plan, err = sync.Run(client, kc, boardPath, cfg.Design, opts)
 	}
 	if err != nil {
 		return err

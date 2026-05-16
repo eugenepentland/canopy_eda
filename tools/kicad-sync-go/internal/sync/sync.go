@@ -3,7 +3,10 @@
 package sync
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"time"
 
 	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/eda"
 	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/kicad"
@@ -29,9 +32,37 @@ type Options struct {
 	DryRun bool
 }
 
+// StaleEntry is one row in the `<board>.stale.json` sidecar: a board
+// footprint the server flagged as no-longer-in-the-design, with enough
+// identifying info that the user can locate it in KiCad and decide
+// whether to delete it.
+type StaleEntry struct {
+	Ref           string `json:"ref"`
+	KicadUUID     string `json:"kicad_uuid"`
+	CanopyUUID    string `json:"canopy_uuid,omitempty"`
+	FootprintName string `json:"footprint_name,omitempty"`
+	Value         string `json:"value,omitempty"`
+}
+
+// StaleSidecar is the on-disk shape of `<board>.stale.json`. Written
+// next to the .kicad_pcb on every sync (including --dry-run) so the user
+// always has an up-to-date "what's no longer in the design" list. The
+// file is rewritten in full each time — an empty Stale slice with a
+// fresh timestamp signals "everything matches" without needing a
+// separate "clean" sentinel.
+type StaleSidecar struct {
+	Design     string       `json:"design"`
+	LastSync   string       `json:"last_sync_at"`
+	DryRun     bool         `json:"dry_run"`
+	Total      int          `json:"stale_count"`
+	Stale      []StaleEntry `json:"stale"`
+}
+
 // Run pulls board state, asks the server for a plan, and applies the ops.
 // Returns the parsed response so the caller can show a result toast.
-func Run(client *eda.Client, kc kicad.Client, design string, opts Options) (*eda.SyncPlanResponse, error) {
+// boardPath is used to write the `<board>.stale.json` sidecar listing
+// every footprint the server flagged as no-longer-in-the-design.
+func Run(client *eda.Client, kc kicad.Client, boardPath, design string, opts Options) (*eda.SyncPlanResponse, error) {
 	synclog.Logf("Run design=%q prune=%v migrate=%v dry_run=%v", design, opts.Prune, opts.MigrateHeuristic, opts.DryRun)
 	fps, err := kc.ListFootprints()
 	if err != nil {
@@ -63,6 +94,15 @@ func Run(client *eda.Client, kc kicad.Client, design string, opts Options) (*eda
 			op.FootprintName, op.NewFootprintName, len(op.KicadMod), len(op.PadNets))
 	}
 
+	// Write the stale sidecar BEFORE applying — even a failed apply
+	// shouldn't lose the orphan list, and a dry-run still wants the
+	// sidecar so the user can inspect what would be flagged.
+	if boardPath != "" {
+		if err := writeStaleSidecar(boardPath, design, plan, fps, opts.DryRun); err != nil {
+			synclog.Logf("WriteStaleSidecar failed (non-fatal): %v", err)
+		}
+	}
+
 	if opts.DryRun {
 		synclog.Logf("dry-run: skipping apply of %d ops", len(plan.Ops))
 		return plan, nil
@@ -74,6 +114,56 @@ func Run(client *eda.Client, kc kicad.Client, design string, opts Options) (*eda
 	}
 	synclog.Logf("apply ops completed")
 	return plan, nil
+}
+
+// writeStaleSidecar rewrites `<boardPath>.stale.json` with the current
+// orphan list. Failures are logged but never abort the sync — losing a
+// sidecar write is annoying, not catastrophic, and a sync that aborted
+// mid-apply because of a disk issue on a sidecar would be worse than
+// just continuing.
+func writeStaleSidecar(boardPath, design string, plan *eda.SyncPlanResponse, fps []kicad.Footprint, dryRun bool) error {
+	// Build kid → board fp map for op→entry enrichment (footprint name,
+	// value, canopy_uuid). The server's flag_stale op only carries the
+	// kicad uuid + ref, which alone isn't enough to disambiguate a list
+	// of "C81" candidates by eye.
+	byKid := make(map[string]kicad.Footprint, len(fps))
+	for _, fp := range fps {
+		byKid[fp.KicadUUID] = fp
+	}
+	var stale []StaleEntry
+	for _, op := range plan.Ops {
+		if op.Op != "flag_stale" {
+			continue
+		}
+		entry := StaleEntry{Ref: op.Ref, KicadUUID: op.UUID}
+		if bfp, ok := byKid[op.UUID]; ok {
+			entry.CanopyUUID = bfp.UUID
+			entry.FootprintName = bfp.FootprintName
+			entry.Value = bfp.Value
+		}
+		stale = append(stale, entry)
+	}
+	if stale == nil {
+		stale = []StaleEntry{}
+	}
+	sidecar := StaleSidecar{
+		Design:   design,
+		LastSync: time.Now().UTC().Format(time.RFC3339),
+		DryRun:   dryRun,
+		Total:    len(stale),
+		Stale:    stale,
+	}
+	body, err := json.MarshalIndent(sidecar, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal stale sidecar: %w", err)
+	}
+	body = append(body, '\n')
+	path := boardPath + ".stale.json"
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	synclog.Logf("wrote stale sidecar: %s (%d entries)", path, len(stale))
+	return nil
 }
 
 func toBoardFps(fps []kicad.Footprint) []eda.BoardFp {
