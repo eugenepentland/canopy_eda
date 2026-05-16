@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/eda"
@@ -30,6 +31,15 @@ type Options struct {
 	// IPC apply step. Lets the user inspect a finished-board diff before
 	// any add / swap_footprint / remove can disturb existing placements.
 	DryRun bool
+	// BestEffort opts out of strict-mode failure on warnings. Default
+	// (zero value = strict) is to treat any kicad.Client.Warnings()
+	// entry — typically all RunAction candidates being rejected, leaving
+	// new footprints with unrefreshed library geometry — as a failed
+	// sync: skip writing the applied_ops sidecar, surface the warnings
+	// to the caller via the returned error so the toast + exit code
+	// reflect partial success. Set to true to fall back to the legacy
+	// "log and continue" behaviour.
+	BestEffort bool
 }
 
 // StaleEntry is one row in the `<board>.stale.json` sidecar: a board
@@ -132,14 +142,34 @@ func Run(client *eda.Client, kc kicad.Client, boardPath, design string, opts Opt
 	}
 	synclog.Logf("apply ops completed")
 
-	// Persist the just-applied state-asserting ops so the next sync
-	// can suppress re-emission. Failures are logged but non-fatal —
-	// losing the sidecar means the next sync re-emits a bunch of
-	// already-applied ops (annoying), not a corrupted board.
-	if boardPath != "" {
+	// Collect any non-fatal degradations the IPC client recorded during
+	// the just-finished Push (e.g. KiCad rejected every TOOL_ACTION name
+	// we tried for "Update Footprint(s) From Library"). Strict mode
+	// treats these as a failed sync; best-effort logs and continues.
+	warnings := kc.Warnings()
+	for _, w := range warnings {
+		synclog.Logf("WARNING: %s", w)
+	}
+
+	// Persist the just-applied state-asserting ops so the next sync can
+	// suppress re-emission. Skip when warnings exist: the apply was
+	// structurally complete (placements landed) but a follow-on step
+	// degraded silently, and we want the next sync to re-evaluate the
+	// affected footprints rather than treat them as already-applied.
+	// Failures are otherwise logged but non-fatal — losing the sidecar
+	// means the next sync re-emits a bunch of already-applied ops
+	// (annoying), not a corrupted board.
+	if boardPath != "" && len(warnings) == 0 {
 		if err := writeAppliedOpsSidecar(boardPath, design, plan); err != nil {
 			synclog.Logf("WriteAppliedOpsSidecar failed (non-fatal): %v", err)
 		}
+	} else if boardPath != "" {
+		synclog.Logf("skipping applied_ops sidecar write: %d warning(s) — next sync will re-evaluate", len(warnings))
+	}
+
+	if len(warnings) > 0 && !opts.BestEffort {
+		return plan, fmt.Errorf("sync completed with %d warning(s) — strict mode failed:\n  - %s",
+			len(warnings), strings.Join(warnings, "\n  - "))
 	}
 	return plan, nil
 }

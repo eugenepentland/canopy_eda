@@ -19,6 +19,11 @@ type Fake struct {
 	CommitMessages []string
 	Added          []Footprint
 	Removed        []string
+
+	// Warns is the slice Warnings() returns. Tests inject values here to
+	// exercise the orchestrator's strict-mode handling without standing
+	// up the real KiCad IPC.
+	Warns []string
 }
 
 // NewFake returns a Fake seeded with `fps`.
@@ -168,6 +173,10 @@ func (f *Fake) Push() error {
 }
 
 func (f *Fake) Close() error { return nil }
+
+// Warnings returns any test-injected degradations. Tests that exercise
+// strict-mode handling set Warns directly before calling sync.Run.
+func (f *Fake) Warnings() []string { return f.Warns }
 
 // extractFpName grabs the first quoted name after `(footprint` or `(module`.
 // Matches the Python plugin's tiny extractor — used by the Fake to populate

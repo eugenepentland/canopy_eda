@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/internal/eda"
@@ -543,5 +544,86 @@ func TestEmptyPlanSkipsCommit(t *testing.T) {
 	}
 	if len(kc.CommitMessages) != 0 {
 		t.Errorf("expected no commit for empty plan, got %v", kc.CommitMessages)
+	}
+}
+
+// TestStrictModeReturnsErrorOnWarning exercises the post-apply gate:
+// when the IPC client reports a non-fatal degradation (here: a stubbed
+// "all RunAction candidates rejected" warning), the default strict mode
+// turns it into an error so the agent's exit code + toast reflect that
+// the board is in a partial-success state. Best-effort mode preserves
+// the legacy behaviour: log and return success.
+func TestStrictModeReturnsErrorOnWarning(t *testing.T) {
+	board := []kicad.Footprint{
+		{UUID: "u-r1", Reference: "R1", Value: "1k", FootprintName: "R_0402"},
+	}
+	kc := kicad.NewFake("/tmp/test.kicad_pcb", board)
+	kc.Warns = []string{"KiCad rejected every Update Footprint(s) From Library action"}
+
+	planResp := eda.SyncPlanResponse{
+		DesignVersion: 1,
+		Summary:       eda.Summary{Updated: 1},
+		Ops:           []eda.Op{{Op: "set_field", UUID: "u-r1", Field: "value", Value: "10k"}},
+	}
+	srv := fakeServer(t, planResp, &eda.SyncPlanRequest{})
+	defer srv.Close()
+	client := eda.New(srv.URL, "test-token")
+
+	// Strict (default): warnings → error
+	_, err := sync.Run(client, kc, "", "demo", sync.Options{})
+	if err == nil {
+		t.Fatal("strict mode: expected error from Run when warnings present, got nil")
+	}
+	if !strings.Contains(err.Error(), "strict mode failed") {
+		t.Errorf("strict mode error should mention strict-mode failure, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Update Footprint(s)") {
+		t.Errorf("strict mode error should include the warning text, got: %v", err)
+	}
+
+	// Best-effort: warnings logged but Run returns success
+	kc2 := kicad.NewFake("/tmp/test.kicad_pcb", board)
+	kc2.Warns = []string{"some degradation"}
+	plan, err := sync.Run(client, kc2, "", "demo", sync.Options{BestEffort: true})
+	if err != nil {
+		t.Fatalf("best-effort mode: expected nil error despite warnings, got: %v", err)
+	}
+	if plan == nil || plan.Summary.Updated != 1 {
+		t.Errorf("best-effort: expected plan.Summary.Updated=1, got: %+v", plan)
+	}
+}
+
+// TestSidecarSkippedOnWarning confirms that when warnings exist the
+// applied_ops sidecar is NOT written — even in best-effort mode — so
+// the next sync re-evaluates the affected footprints instead of
+// suppressing them as "already applied".
+func TestSidecarSkippedOnWarning(t *testing.T) {
+	dir := t.TempDir()
+	boardPath := dir + "/test.kicad_pcb"
+	if err := os.WriteFile(boardPath, []byte("(kicad_pcb)"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	board := []kicad.Footprint{
+		{UUID: "u-r1", Reference: "R1", Value: "1k", FootprintName: "R_0402"},
+	}
+	kc := kicad.NewFake(boardPath, board)
+	kc.Warns = []string{"refresh failed"}
+
+	planResp := eda.SyncPlanResponse{
+		DesignVersion: 1,
+		Summary:       eda.Summary{Updated: 1},
+		Ops:           []eda.Op{{Op: "set_field", UUID: "u-r1", Field: "value", Value: "10k"}},
+	}
+	srv := fakeServer(t, planResp, &eda.SyncPlanRequest{})
+	defer srv.Close()
+	client := eda.New(srv.URL, "test-token")
+
+	// Best-effort so Run returns nil and we get to the sidecar check
+	_, err := sync.Run(client, kc, boardPath, "demo", sync.Options{BestEffort: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, statErr := os.Stat(boardPath + ".applied_ops.json"); !os.IsNotExist(statErr) {
+		t.Errorf("applied_ops sidecar should not exist when warnings present (stat: %v)", statErr)
 	}
 }

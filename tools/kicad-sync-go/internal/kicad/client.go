@@ -101,6 +101,12 @@ type realClient struct {
 
 	commitID      *base_types.KIID
 	commitMessage string
+
+	// warnings accumulates non-fatal degradations during the current
+	// Begin/Push transaction (e.g. all RunAction candidates rejected by
+	// KiCad, so library-geometry refresh didn't fire). Cleared on Begin
+	// and surfaced to the orchestrator via Warnings() after Push.
+	warnings []string
 }
 
 // ── Read side ─────────────────────────────────────────────────────────
@@ -237,7 +243,15 @@ const fieldCanopyUUID = "canopy_uuid"
 
 // ── Write side ────────────────────────────────────────────────────────
 
+// Warnings returns and resets nothing — it just reads the accumulated
+// slice. Cleared by Begin (per-transaction lifecycle). Caller (sync
+// orchestrator) gates strict-mode behaviour on whether this is empty.
+func (c *realClient) Warnings() []string {
+	return c.warnings
+}
+
 func (c *realClient) Begin(message string) error {
+	c.warnings = nil
 	c.dirty = map[string]struct{}{}
 	c.removed = map[string]struct{}{}
 	c.added = nil
@@ -662,6 +676,15 @@ func (c *realClient) tryRefreshFootprints() {
 		}
 	}
 	synclog.Logf("RunAction: none of the candidates were accepted; user may need to right-click → Update Footprint(s) From Library")
+	// Surface as a warning so the orchestrator can report partial-success
+	// instead of "Synced @ vN" (which today's pre-fix behaviour did,
+	// leaving freshly-added footprints with stale library geometry that
+	// the user never knew about). Detailed candidate list is in the log.
+	c.warnings = append(c.warnings,
+		"KiCad rejected every \"Update Footprint(s) From Library\" action name. "+
+			"Newly-added footprints are placed but their geometry was not refreshed against the library — "+
+			"right-click each in pcbnew → Update Footprint(s) From Library to fix. "+
+			"If KiCad bumped a version recently, the action name may have changed and this agent needs updating.")
 }
 
 // newKIID mints a fresh RFC 4122 v4 UUID string suitable for KiCad's

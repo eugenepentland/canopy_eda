@@ -33,6 +33,7 @@ func main() {
 		migrate      = flag.Bool("migrate", false, "one-shot heuristic remap: when ref_des doesn't match the design, rename board footprints whose (parent, footprint, value) is uniquely identifiable on both sides. Use this once after upgrading from the legacy Python plugin so existing placements stay attached to the new schematic.")
 		dryRun       = flag.Bool("dry-run", false, "fetch the plan and log every op, but skip the apply step. Use this on a finished board to confirm a sync won't move/add/remove footprints before committing.")
 		installPlug  = flag.Bool("install-kicad-plugin", false, "drop plugin.json and a symlink to this binary into KiCad's per-user plugin folder, then exit. Set EDA_KICAD_PLUGIN_DIR to override the destination.")
+		bestEffort   = flag.Bool("best-effort", false, "downgrade KiCad IPC degradations (e.g. all RunAction candidates rejected, leaving footprints with unrefreshed library geometry) from sync failures to warnings. Default: strict — any such degradation fails the sync, skips writing the applied_ops sidecar, and exits non-zero so the user knows the board is in a partial-success state.")
 	)
 	flag.Parse()
 
@@ -44,13 +45,13 @@ func main() {
 		return
 	}
 
-	synclog.Logf("startup args=%v setup=%v board=%q prune=%v migrate=%v dry_run=%v",
-		os.Args[1:], *setupMode, *boardArg, *prune, *migrate, *dryRun)
+	synclog.Logf("startup args=%v setup=%v board=%q prune=%v migrate=%v dry_run=%v best_effort=%v",
+		os.Args[1:], *setupMode, *boardArg, *prune, *migrate, *dryRun, *bestEffort)
 	synclog.Logf("env KICAD_API_SOCKET=%q KICAD_API_TOKEN=%s",
 		os.Getenv("KICAD_API_SOCKET"),
 		synclog.Redact(os.Getenv("KICAD_API_TOKEN")))
 
-	if err := run(*setupMode, *boardArg, *prune, *migrate, *dryRun); err != nil {
+	if err := run(*setupMode, *boardArg, *prune, *migrate, *dryRun, *bestEffort); err != nil {
 		synclog.Logf("FATAL run error: %v", err)
 		notify.Show("EDA Sync — error",
 			fmt.Sprintf("%s\n\nLog: %s", err.Error(), synclog.Path()))
@@ -59,7 +60,7 @@ func main() {
 	synclog.Logf("run completed cleanly")
 }
 
-func run(setupMode bool, boardArg string, prune, migrate, dryRun bool) error {
+func run(setupMode bool, boardArg string, prune, migrate, dryRun, bestEffort bool) error {
 	boardPath, kc, err := openBoard(boardArg)
 	if err != nil {
 		return err
@@ -94,7 +95,7 @@ func run(setupMode bool, boardArg string, prune, migrate, dryRun bool) error {
 	}
 
 	client := eda.New(cfg.ServerURL, token.AccessToken)
-	opts := sync.Options{Prune: prune, MigrateHeuristic: migrate, DryRun: dryRun}
+	opts := sync.Options{Prune: prune, MigrateHeuristic: migrate, DryRun: dryRun, BestEffort: bestEffort}
 	plan, err := sync.Run(client, kc, boardPath, cfg.Design, opts)
 	if errors.Is(err, eda.ErrUnauthorized) {
 		// Token revoked — force re-auth once.

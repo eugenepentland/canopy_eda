@@ -281,6 +281,43 @@ eda build --project-dir projects/designs --push stm32n6
 # Browser auto-updates within 500ms
 ```
 
+### Headless KiCad sync (verifying source changes don't move the board)
+
+`eda-kicad-sync` normally runs from a button inside KiCad's PCB editor,
+but you can drive it from the CLI under Xvfb when no human is at the
+machine — useful after refactors like the `(bus-net …)` / `(bus-port …)`
+rewrites for verifying the change produces zero netlist-driven ops.
+
+```bash
+# 1. Headless display
+Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+export DISPLAY=:99
+
+# 2. Launch pcbnew DIRECTLY on the .kicad_pcb. Launching the project
+#    manager (`kicad …kicad_pro`) and then spawning a sibling pcbnew
+#    leaves the API in AS_NOT_READY / AS_UNHANDLED — the IPC handlers
+#    are registered by whichever process owns /tmp/kicad/api.sock first,
+#    and you want that to be pcbnew so GetOpenDocuments + ListFootprints
+#    resolve.
+nohup pcbnew "/path/to/Board.kicad_pcb" >/tmp/pcbnew.log 2>&1 &
+until ! xwininfo -root -tree 2>&1 | grep -q "Load PCB"; do sleep 2; done
+
+# 3. Run the agent against the running KiCad
+export KICAD_API_SOCKET=/tmp/kicad/api.sock
+~/go/bin/eda-kicad-sync --dry-run --board "/path/to/Board.kicad_pcb"
+
+# 4. Cleanup — pcbnew's lock files survive if you kill -9; remove them
+pkill pcbnew Xvfb
+rm -f /tmp/kicad/api.sock /tmp/kicad/api.lock
+rm -f "/path/to/~Board.kicad_pcb.lck" "/path/to/~Board.kicad_pro.lck"
+```
+
+If the project is currently open by another user/machine, the lock file
+holds `{"hostname": …, "username": …}` — only remove it after confirming
+the other session is genuinely gone. Concurrent saves corrupt the board.
+The board file is on the NAS at
+`/mnt/nas/Cyclops/Cyclops Digital/Cyclops Digital.kicad_pcb`.
+
 ### MCP server (Claude Code integration)
 
 `eda serve` exposes an MCP server so Claude Code can pull schematics, edit

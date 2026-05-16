@@ -72,4 +72,13 @@ type Client interface {
 	// Close releases any held resources (NNG socket, etc.). Safe to call
 	// multiple times.
 	Close() error
+
+	// Warnings returns non-fatal degradations that occurred during the
+	// most recent Push — primarily TOOL_ACTION names KiCad rejected (e.g.
+	// "Update Footprint(s) From Library" renamed in a KiCad bump), where
+	// the apply succeeded *structurally* but a follow-on refresh that
+	// keeps the board in lockstep with the design didn't fire. Strict
+	// mode treats a non-empty result as a failed sync so silent staleness
+	// doesn't accumulate across versions. Cleared by the next Begin.
+	Warnings() []string
 }
