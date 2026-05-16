@@ -17,6 +17,7 @@ const review_mod = @import("../review.zig");
 const review_json_mod = @import("../review_json.zig");
 const req_checks = @import("../req_checks.zig");
 const component_info = @import("component_info.zig");
+const notes = @import("notes.zig");
 const symbol_conv = @import("../convert/symbol.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -79,6 +80,14 @@ const tools = [_]ToolEntry{
     .{ .name = "build", .is_mutation = true },
     // KiCad-source-driven regeneration of an auto-generated pinout file.
     .{ .name = "regenerate_pinout", .is_mutation = true },
+    // Per-design TODO notes (sidecar `<design>.notes.md`). Lets agents
+    // log follow-ups for the next revision and mark them complete with
+    // a date stamp once the design has been updated.
+    .{ .name = "list_design_notes", .is_mutation = false },
+    .{ .name = "add_design_note", .is_mutation = true },
+    .{ .name = "complete_design_note", .is_mutation = true },
+    .{ .name = "reopen_design_note", .is_mutation = true },
+    .{ .name = "remove_design_note", .is_mutation = true },
 };
 
 /// Tools that mutate .sexp files — gated to writer/admin roles.
@@ -129,6 +138,7 @@ fn callInner(
     if (try dispatchProject(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchInfo(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchReview(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
+    if (try dispatchNotes(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
 
     const w = out.writer(allocator);
     try w.print("error: unknown tool \"{s}\"", .{tool_name});
@@ -184,6 +194,104 @@ fn dispatchReview(
 ) !?bool {
     if (std.mem.eql(u8, tool_name, "restore_version")) return try toolRestoreVersion(allocator, project_dir, args_val, out);
     return null;
+}
+
+/// Per-design TODO notes — sidecar markdown file edited via structured
+/// tools so the agent can record follow-ups and stamp completion dates.
+fn dispatchNotes(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    tool_name: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayListUnmanaged(u8),
+) !?bool {
+    if (std.mem.eql(u8, tool_name, "list_design_notes")) return try toolListDesignNotes(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "add_design_note")) return try toolAddDesignNote(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "complete_design_note")) return try toolMutateDesignNote(allocator, project_dir, args_val, out, notes.TaskMutation.complete);
+    if (std.mem.eql(u8, tool_name, "reopen_design_note")) return try toolMutateDesignNote(allocator, project_dir, args_val, out, notes.TaskMutation.reopen);
+    if (std.mem.eql(u8, tool_name, "remove_design_note")) return try toolMutateDesignNote(allocator, project_dir, args_val, out, notes.TaskMutation.remove);
+    return null;
+}
+
+fn toolListDesignNotes(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    var raw: ?[]u8 = null;
+    const parsed = notes.loadNotes(allocator, project_dir, name, &raw) catch |e| {
+        const w = out.writer(allocator);
+        try w.print("error: cannot read notes: {s}", .{@errorName(e)});
+        return false;
+    };
+    defer if (raw) |d| allocator.free(d);
+    const w = out.writer(allocator);
+    try w.writeAll("{\"tasks\":[");
+    for (parsed.tasks, 0..) |t, i| {
+        if (i > 0) try w.writeAll(",");
+        try writeNoteJsonMcp(w, t);
+    }
+    try w.writeAll("],\"scratchpad\":");
+    try writeJsonString(w, parsed.scratchpad);
+    try w.writeAll("}");
+    return true;
+}
+
+fn toolAddDesignNote(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const text = requireString(args_val, "text") orelse return missingArg(out, allocator, "text");
+    if (text.len == 0) {
+        const w = out.writer(allocator);
+        try w.writeAll("error: text must be a non-empty string");
+        return false;
+    }
+    const new_task = notes.addTaskCore(allocator, project_dir, name, text) catch |e| {
+        const w = out.writer(allocator);
+        try w.print("error: add failed: {s}", .{@errorName(e)});
+        return false;
+    };
+    const w = out.writer(allocator);
+    try w.writeAll("{\"ok\":true,\"task\":");
+    try writeNoteJsonMcp(w, new_task);
+    try w.writeAll("}");
+    return true;
+}
+
+fn toolMutateDesignNote(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayListUnmanaged(u8),
+    mode: notes.TaskMutation,
+) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const id = requireString(args_val, "id") orelse return missingArg(out, allocator, "id");
+    const result = notes.mutateTaskCore(allocator, project_dir, name, id, mode) catch |e| {
+        const w = out.writer(allocator);
+        try w.print("error: mutate failed: {s}", .{@errorName(e)});
+        return false;
+    };
+    if (result == null) {
+        const w = out.writer(allocator);
+        try w.print("error: task id \"{s}\" not found", .{id});
+        return false;
+    }
+    const w = out.writer(allocator);
+    try w.writeAll("{\"ok\":true}");
+    return true;
+}
+
+fn writeNoteJsonMcp(w: anytype, t: notes.Note) !void {
+    try w.writeAll("{\"id\":");
+    try writeJsonString(w, t.id);
+    try w.writeAll(",\"text\":");
+    try writeJsonString(w, t.text);
+    try w.writeAll(",\"created\":");
+    try writeJsonString(w, t.created);
+    if (t.completed) |c| {
+        try w.writeAll(",\"completed\":");
+        try writeJsonString(w, c);
+    } else {
+        try w.writeAll(",\"completed\":null");
+    }
+    try w.writeAll("}");
 }
 
 fn toolListDesigns(allocator: std.mem.Allocator, project_dir: []const u8, w: anytype) !bool {

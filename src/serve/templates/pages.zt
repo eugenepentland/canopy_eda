@@ -5,6 +5,7 @@ const DesignSummary = mcp_tools.DesignSummary;
 // interpolated, so the entire `<style>…</style>` block ships as a single raw
 // chunk emitted via `{!HOME_STYLE_BLOCK}` in the head.
 const HOME_STYLE_BLOCK: []const u8 = "<style>" ++ @embedFile("../assets/navbar.css") ++
+    \\body{margin:0;background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
     \\.designs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;padding:16px}
     \\.design-card{background:#161b22;border:1px solid #21262d;
     \\border-radius:10px;padding:18px 20px;display:flex;flex-direction:column;
@@ -131,7 +132,6 @@ pub templ Home(summaries: []const DesignSummary, now_sec: i64) {
         <head>
             <meta name="viewport" content="width=device-width,initial-scale=1" />
             <title>EDA Designs</title>
-            <link rel="stylesheet" href="/style.css" />
             {!HOME_STYLE_BLOCK}
         </head>
         <body>

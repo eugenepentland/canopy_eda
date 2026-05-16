@@ -299,6 +299,16 @@ Public functions: describeComponent
 - findSourceComment finds the source-of-truth path
 - parsePinoutBody normalises pin ID shapes
 
+## serve/notes
+
+Public functions: getNotesApi, saveNotesApi, getTasksApi, addTaskApi, completeTaskApi, reopenTaskApi, removeTaskApi, parseNotes, renderNotes, loadNotes, addTaskCore, mutateTaskCore
+
+- Reads and writes `<design>.notes.md` next to the design source file
+- Returns an empty string when no notes file exists yet
+- Rejects bodies larger than 1 MiB
+- Parses open and done task lines and preserves scratchpad
+- Ignores lines that don't match the structured task format
+
 ## serve/upload_datasheet
 
 Public functions: uploadDatasheetApi, listDatasheetsApi, serveDatasheetApi, isPdfMagic, sanitizeFilename, storeDatasheet, storeErrorBody, storeErrorStatus

@@ -132,6 +132,32 @@ pub fn renderToHtml(
     try bom_html.writeSchematicBomHtml(w, block);
     try w.writeAll("</details>");
 
+    // Design notes — structured TODO list backed by `<design>.notes.md`.
+    // The task list + add form drive /api/notes/:name/tasks/*; the
+    // scratchpad textarea round-trips through the raw /api/notes/:name
+    // endpoint and holds anything that isn't a checkbox-format task.
+    // Same file backs the MCP `add_design_note`/`complete_design_note`
+    // tools so agents and humans share state.
+    try w.writeAll(
+        \\<details id="page-notes" class="sch-notes-card page-anchor" open><summary>Design Notes</summary>
+        \\<div class="sch-notes-body">
+        \\<p class="sch-notes-hint muted">Log ERC errors and follow-ups for the next revision. Saved to
+        \\<code>&lt;design&gt;.notes.md</code>; same store as the MCP <code>add_design_note</code> tool.</p>
+        \\<div class="sch-notes-tasks" id="sch-notes-tasks"></div>
+        \\<form class="sch-notes-add" id="sch-notes-add">
+        \\<input type="text" id="sch-notes-add-text" class="sch-notes-add-text"
+        \\placeholder="New TODO for the next revision…" autocomplete="off">
+        \\<button type="submit" class="sch-notes-add-btn">Add</button>
+        \\</form>
+        \\<details class="sch-notes-scratch-wrap"><summary>Scratchpad</summary>
+        \\<textarea id="sch-notes-text" class="sch-notes-text" rows="6"
+        \\spellcheck="false" placeholder="Free-form notes (anything that isn't a structured TODO line)…"></textarea>
+        \\</details>
+        \\<div class="sch-notes-status muted" id="sch-notes-status" aria-live="polite"></div>
+        \\</div>
+        \\</details>
+    );
+
     for (block.sections, 0..) |sec, sec_idx| {
         var attached: std.ArrayListUnmanaged(env_mod.SubBlock) = .empty;
         defer attached.deinit(allocator);
@@ -335,6 +361,7 @@ fn writeSidebar(w: anytype, review_doc: ?review.ReviewDoc) !void {
         if (doc.power_budget.len > 0) try writeTocChip(w, "page-power-budget", "Power budget");
     }
     try writeTocChip(w, "page-bom", "BOM");
+    try writeTocChip(w, "page-notes", "Notes");
     try w.writeAll("</nav>");
     try w.writeAll(
         \\<div class="sb-search">

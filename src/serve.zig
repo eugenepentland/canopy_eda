@@ -29,6 +29,7 @@ const oauth = @import("serve/oauth.zig");
 const account_page = @import("serve/account_page.zig");
 const static_assets = @import("serve/static_assets.zig");
 const sync = @import("serve/sync.zig");
+const notes = @import("serve/notes.zig");
 
 // ── Global live state ──────────────────────────────────────────────────
 
@@ -211,6 +212,13 @@ pub fn serve(
     router.get("/api/design-state/:name", api.designStateApi, .{});
     router.get("/api/source/:name", edit.getSourceApi, .{});
     router.post("/api/source/:name", edit.saveSourceApi, .{});
+    router.get("/api/notes/:name", notes.getNotesApi, .{});
+    router.put("/api/notes/:name", notes.saveNotesApi, .{});
+    router.get("/api/notes/:name/tasks", notes.getTasksApi, .{});
+    router.post("/api/notes/:name/tasks/add", notes.addTaskApi, .{});
+    router.post("/api/notes/:name/tasks/complete", notes.completeTaskApi, .{});
+    router.post("/api/notes/:name/tasks/reopen", notes.reopenTaskApi, .{});
+    router.post("/api/notes/:name/tasks/remove", notes.removeTaskApi, .{});
 
     // Library
     router.get("/library", library.libraryPage, .{});

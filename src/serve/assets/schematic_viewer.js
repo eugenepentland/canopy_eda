@@ -522,7 +522,6 @@
       // library parts to validation steps during schematic review.
       var safe = escapeHtml(componentName);
       var dsList = (data && data.datasheets) || [];
-      var reqList = (data && data.requirements) || [];
       html += '<div class="sb-datasheet" data-component="' + safe + '">';
       html += '<div class="sb-ds-title">Datasheets <span class="sb-ds-count muted">(' + dsList.length + ')</span></div>';
       if (dsList.length) {
@@ -547,20 +546,6 @@
         '<label class="sb-ds-upload-btn">📎 Upload &amp; link new PDF<input type="file" accept="application/pdf" class="sb-ds-upload-input" hidden></label>' +
         '<span class="sb-ds-status muted"></span>' +
         '</div>';
-      if (reqList.length) {
-        html += '<div class="sb-req-title">Requirements</div>' +
-          '<ul class="sb-req-list">' + reqList.map(function (r) {
-            var t = escapeHtml(r.text);
-            if (r.pdf) {
-              var hParts = [];
-              if (r.page) hParts.push('page=' + encodeURIComponent(r.page));
-              if (r.quote) hParts.push('highlight=' + encodeURIComponent(r.quote));
-              var href = '/pdf-view/' + encodeURIComponent(r.pdf) + (hParts.length ? '?' + hParts.join('&') : '');
-              t += ' <a class="sb-req-ref" href="' + href + '" target="_blank" rel="noopener">📄 ' + escapeHtml(r.pdf) + (r.page ? ' p.' + r.page : '') + '</a>';
-            }
-            return '<li>' + t + '</li>';
-          }).join('') + '</ul>';
-      }
       html += '</div>';
       if (error) {
         html += '<div class="sb-empty">' + escapeHtml(error) + '</div>';
@@ -571,14 +556,15 @@
         (data.pins || []).forEach(function (p) { if (wired[p.id]) wiredCount++; });
         html += '<div class="sb-comp-meta">' + data.pins.length + ' pins' +
           (fromRef ? ' · ' + wiredCount + ' wired on ' + escapeHtml(fromRef) : '') + '</div>' +
-          '<input type="text" class="sb-pinout-filter" placeholder="Filter by pin / function (e.g. XSPI)" />' +
+          '<input type="text" class="sb-pinout-filter" placeholder="Filter by pin / function / net (e.g. XSPI, VDD)" />' +
           '<div class="sb-pinout-rows">';
         var sorted = data.pins.slice().sort(function (a, b) { return cmpPin(a.id, b.id); });
         sorted.forEach(function (p) {
           var w = wired[p.id];
           var cls = 'sb-pinout-row' + (w ? ' is-wired' : '');
           var altHay = (p.alts || []).map(function (a) { return a.name; }).join(' ');
-          var hay = (p.id + ' ' + (p.fn || '') + ' ' + altHay).toLowerCase();
+          var netHay = (w && w.net) ? w.net : '';
+          var hay = (p.id + ' ' + (p.fn || '') + ' ' + altHay + ' ' + netHay).toLowerCase();
           html += '<div class="' + cls + '" data-hay="' + escapeHtml(hay) +
             '" data-pin="' + escapeHtml(p.id) +
             '" data-net="' + escapeHtml(w ? (w.net || '') : '') + '">' +
@@ -588,8 +574,11 @@
             (w && w.net ? '<span class="sb-pinout-net" title="Wired to this net">' + escapeHtml(w.net) + '</span>' : '') +
             '</div>';
           if (p.alts && p.alts.length) {
+            var activeAlt = (w && w.alt) ? w.alt : '';
             html += '<div class="sb-pinout-alts">' + p.alts.map(function (a) {
-              return '<span class="sb-pinout-alt" data-type="' + escapeHtml(a.type || '') + '">' +
+              var ac = (a.name === activeAlt) ? ' is-active' : '';
+              var tip = ac ? ' title="In use on this schematic"' : '';
+              return '<span class="sb-pinout-alt' + ac + '" data-type="' + escapeHtml(a.type || '') + '"' + tip + '>' +
                 escapeHtml(a.name) + '</span>';
             }).join('') + '</div>';
           }
@@ -1078,6 +1067,173 @@
   }
   bomEditSetup('sch-bom-mpn-save', 'sch-bom-mpn-edit', 'mpn', '/api/edit-mpn');
   bomEditSetup('sch-bom-mfr-save', 'sch-bom-mfr-edit', 'manufacturer', '/api/edit-mpn');
+
+  // Design-notes panel: structured TODOs + free-form scratchpad. Same
+  // file (`<design>.notes.md`) backs the MCP `add_design_note` /
+  // `complete_design_note` tools, so checking off a task here is
+  // identical to an agent stamping the completion date from a tool
+  // call. Tasks go through /api/notes/:name/tasks/*; the scratchpad
+  // round-trips through the raw GET/PUT /api/notes/:name endpoint.
+  (function () {
+    var taskBox = document.getElementById('sch-notes-tasks');
+    var addForm = document.getElementById('sch-notes-add');
+    var addText = document.getElementById('sch-notes-add-text');
+    var scratchTa = document.getElementById('sch-notes-text');
+    var status = document.getElementById('sch-notes-status');
+    if (!taskBox || !addForm || !addText || !scratchTa || !status) return;
+
+    var base = '/api/notes/' + encodeURIComponent(DESIGN_NAME);
+    var lastScratchSaved = '';
+    var saveTimer = null;
+    var scratchSaving = false;
+    var scratchPending = false;
+
+    function setStatus(msg, isError) {
+      status.textContent = msg;
+      status.classList.toggle('is-error', !!isError);
+    }
+    function fmtTime() {
+      var d = new Date();
+      return d.toTimeString().slice(0, 5);
+    }
+    function escapeHtmlLocal(s) {
+      return (s == null ? '' : String(s))
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function renderTasks(tasks) {
+      if (!tasks || !tasks.length) {
+        taskBox.innerHTML = '<div class="sch-notes-empty muted">No TODOs yet. Add one below or call <code>add_design_note</code> from an MCP client.</div>';
+        return;
+      }
+      // Open tasks first, then completed; preserve server order within each group.
+      var open = [], done = [];
+      tasks.forEach(function (t) { (t.completed ? done : open).push(t); });
+      var rows = open.concat(done);
+      taskBox.innerHTML = rows.map(function (t) {
+        var doneClass = t.completed ? ' is-done' : '';
+        var checked = t.completed ? ' checked' : '';
+        var dateLabel = t.completed
+          ? escapeHtmlLocal(t.created) + ' → ' + escapeHtmlLocal(t.completed)
+          : escapeHtmlLocal(t.created);
+        return '<div class="sch-notes-task' + doneClass + '" data-id="' + escapeHtmlLocal(t.id) + '">' +
+          '<input type="checkbox" class="sch-notes-task-check"' + checked + ' aria-label="Toggle complete">' +
+          '<div class="sch-notes-task-body">' +
+          '<div class="sch-notes-task-text">' + escapeHtmlLocal(t.text) + '</div>' +
+          '<div class="sch-notes-task-meta muted">' + dateLabel + ' · <code>' + escapeHtmlLocal(t.id) + '</code></div>' +
+          '</div>' +
+          '<button type="button" class="sch-notes-task-remove" aria-label="Remove" title="Remove">×</button>' +
+          '</div>';
+      }).join('');
+    }
+
+    function refreshTasks() {
+      return fetch(base + '/tasks').then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      }).then(function (j) {
+        renderTasks(j.tasks || []);
+        // The scratchpad textarea always reflects what's parsed out of the file,
+        // not the raw text — keeps the two views in sync after structured edits.
+        scratchTa.value = j.scratchpad || '';
+        lastScratchSaved = scratchTa.value;
+        setStatus('');
+      }).catch(function (err) {
+        setStatus('could not load notes: ' + err.message, true);
+      });
+    }
+
+    function postJson(path, body) {
+      return fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }).then(function (r) {
+        if (!r.ok) return r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t); });
+        return r.json();
+      });
+    }
+
+    addForm.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var text = addText.value.trim();
+      if (!text) return;
+      setStatus('adding…');
+      postJson(base + '/tasks/add', { text: text }).then(function () {
+        addText.value = '';
+        return refreshTasks();
+      }).then(function () { setStatus('added at ' + fmtTime()); })
+        .catch(function (err) { setStatus('add failed: ' + err.message, true); });
+    });
+
+    taskBox.addEventListener('click', function (e) {
+      var row = e.target.closest('.sch-notes-task');
+      if (!row) return;
+      var id = row.dataset.id;
+      if (e.target.classList.contains('sch-notes-task-check')) {
+        var endpoint = e.target.checked ? '/tasks/complete' : '/tasks/reopen';
+        setStatus('updating…');
+        postJson(base + endpoint, { id: id }).then(refreshTasks)
+          .then(function () { setStatus('updated at ' + fmtTime()); })
+          .catch(function (err) {
+            setStatus('update failed: ' + err.message, true);
+            e.target.checked = !e.target.checked;
+          });
+      } else if (e.target.classList.contains('sch-notes-task-remove')) {
+        setStatus('removing…');
+        postJson(base + '/tasks/remove', { id: id }).then(refreshTasks)
+          .then(function () { setStatus('removed at ' + fmtTime()); })
+          .catch(function (err) { setStatus('remove failed: ' + err.message, true); });
+      }
+    });
+
+    function saveScratch() {
+      if (scratchSaving) { scratchPending = true; return; }
+      var text = scratchTa.value;
+      if (text === lastScratchSaved) return;
+      // Combine current tasks + new scratchpad by writing the full raw file.
+      // The tasks list is the source of truth; we just need to preserve it
+      // while replacing the trailing scratchpad portion.
+      scratchSaving = true;
+      setStatus('saving scratchpad…');
+      fetch(base + '/tasks').then(function (r) { return r.json(); }).then(function (j) {
+        var lines = (j.tasks || []).map(function (t) {
+          if (t.completed) {
+            return '- [x] ' + t.created + ' -> ' + t.completed + ' (' + t.id + ') ' + t.text;
+          }
+          return '- [ ] ' + t.created + ' (' + t.id + ') ' + t.text;
+        });
+        var raw = lines.join('\n');
+        if (text.length > 0) raw = (raw.length ? raw + '\n\n' : '') + text;
+        return fetch(base, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: raw }),
+        });
+      }).then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        lastScratchSaved = text;
+        setStatus('saved at ' + fmtTime());
+      }).catch(function (err) {
+        setStatus('save failed: ' + err.message, true);
+      }).then(function () {
+        scratchSaving = false;
+        if (scratchPending) { scratchPending = false; saveScratch(); }
+      });
+    }
+    function scheduleScratchSave() {
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(saveScratch, 800);
+    }
+    scratchTa.addEventListener('input', scheduleScratchSave);
+    scratchTa.addEventListener('blur', function () {
+      if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+      saveScratch();
+    });
+
+    refreshTasks();
+  })();
 
   // ---- Boot ----
   showSectionList();
