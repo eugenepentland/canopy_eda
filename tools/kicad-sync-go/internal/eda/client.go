@@ -56,6 +56,29 @@ type SyncPlanRequest struct {
 	Board            []BoardFp `json:"board"`
 	PruneStale       bool      `json:"prune_stale"`
 	MigrateHeuristic bool      `json:"migrate_heuristic,omitempty"`
+	// AppliedOps carries the set of state-asserting ops the agent
+	// has already pushed to KiCad in prior syncs. Server uses it to
+	// suppress re-emission of ops the agent already applied — works
+	// around a KiCad IPC quirk where some UpdateItems writes (custom
+	// Field text, pad nets) land on disk but the subsequent GetItems
+	// returns the pre-write value, causing the server to keep
+	// emitting ops it can't tell were already applied.
+	AppliedOps []AppliedOp `json:"applied_ops,omitempty"`
+}
+
+// AppliedOp is one previously-pushed mutation the agent records in the
+// `<board>.applied_ops.json` sidecar and ships in the next sync request.
+// Only state-asserting ops are tracked — `add` / `swap_footprint` /
+// `remove` are state-changing and won't naturally re-emit if KiCad
+// accepted them, so they're skipped.
+//
+// Key disambiguates which sub-thing of the op was set: field name for
+// set_field, pad number for set_pad_net, empty string for set_locked.
+type AppliedOp struct {
+	UUID  string `json:"uuid"`
+	Op    string `json:"op"`
+	Key   string `json:"key,omitempty"`
+	Value string `json:"value"`
 }
 
 // Op is one server-emitted operation. Fields not relevant for a given `op`
@@ -105,6 +128,12 @@ type Summary struct {
 	Removed      int `json:"removed"`
 	Swapped      int `json:"swapped"`
 	FlaggedStale int `json:"flagged_stale"`
+	// Suppressed counts state-asserting ops the server WOULD have
+	// emitted but skipped because the agent's applied_ops sidecar
+	// already had the matching fingerprint. Surfacing it in the
+	// result toast lets the user spot KiCad-IPC-leak situations
+	// without having to read the synclog.
+	Suppressed int `json:"suppressed,omitempty"`
 }
 
 // SyncPlanResponse is the parsed response body.

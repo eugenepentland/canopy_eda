@@ -201,16 +201,29 @@ func summarize(p *eda.SyncPlanResponse, dryRun bool) string {
 	// stopped counting matched-but-unchanged instances. Keep the version
 	// in the toast so they can confirm which design they were synced
 	// against.
-	if s.Updated == 0 && s.Added == 0 && s.Removed == 0 && s.Swapped == 0 && s.FlaggedStale == 0 {
+	quiet := s.Updated == 0 && s.Added == 0 && s.Removed == 0 &&
+		s.Swapped == 0 && s.FlaggedStale == 0
+	if quiet && s.Suppressed == 0 {
 		if dryRun {
 			return fmt.Sprintf("Dry run: already up to date @ v%d", p.DesignVersion)
 		}
 		return fmt.Sprintf("Already up to date @ v%d", p.DesignVersion)
 	}
+	if quiet && s.Suppressed > 0 {
+		// All the would-have-been-emitted ops got skipped via the
+		// applied_ops sidecar — board is in the desired state, sync
+		// is idempotent. Surface the suppression so the user can
+		// tell idempotent-clean from never-emitted-clean.
+		return fmt.Sprintf("Already up to date @ v%d (suppressed %d already-applied ops)",
+			p.DesignVersion, s.Suppressed)
+	}
 	out := fmt.Sprintf("%s @ v%d\n\nUpdated:  %d\nAdded:    %d\nRemoved:  %d\nSwapped:  %d",
 		verb, p.DesignVersion, s.Updated, s.Added, s.Removed, s.Swapped)
 	if s.FlaggedStale > 0 {
 		out += fmt.Sprintf("\nStale (kept): %d", s.FlaggedStale)
+	}
+	if s.Suppressed > 0 {
+		out += fmt.Sprintf("\nSuppressed: %d (already applied last sync)", s.Suppressed)
 	}
 	if dryRun {
 		out += "\n\n(no ops applied; see log)"

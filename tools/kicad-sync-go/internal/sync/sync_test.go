@@ -411,6 +411,126 @@ func TestBoardFpLockedSentInRequest(t *testing.T) {
 	}
 }
 
+// TestAppliedOpsSidecarWrittenAfterPush covers Phase B.1+B.2 of the
+// idempotency fix: every state-asserting op the agent successfully
+// pushes (set_field, set_pad_net, set_locked) lands in
+// `<board>.applied_ops.json`, and the next sync ships those entries
+// back so the server can suppress re-emission of ops that already
+// went out. State-changing ops (add/swap_footprint/remove/flag_stale)
+// are deliberately NOT tracked — they don't suffer the IPC GetItems
+// leak that motivates the sidecar.
+func TestAppliedOpsSidecarWrittenAfterPush(t *testing.T) {
+	tmp := t.TempDir()
+	boardPath := filepath.Join(tmp, "demo.kicad_pcb")
+	board := []kicad.Footprint{
+		{UUID: "u-r1", KicadUUID: "k-r1", Reference: "R1", Value: "1k",
+			FootprintName: "R_0402",
+			Pads:          []kicad.Pad{{Number: "1", Net: "OLD"}, {Number: "2", Net: "GND"}}},
+		{UUID: "u-stale", KicadUUID: "k-stale", Reference: "X9", FootprintName: "Hole"},
+	}
+	kc := kicad.NewFake(boardPath, board)
+	lockedTrue := true
+	planResp := eda.SyncPlanResponse{
+		Summary: eda.Summary{Updated: 1, FlaggedStale: 1},
+		Ops: []eda.Op{
+			{Op: "set_field", UUID: "k-r1", Field: "value", Value: "4.7k"},
+			{Op: "set_pad_net", UUID: "k-r1", Pad: "1", Net: "NEW"},
+			{Op: "set_locked", UUID: "k-stale", Locked: &lockedTrue},
+			{Op: "flag_stale", UUID: "k-stale", Ref: "X9"}, // NOT tracked
+		},
+	}
+	var gotReq eda.SyncPlanRequest
+	srv := fakeServer(t, planResp, &gotReq)
+	defer srv.Close()
+
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, boardPath, "demo", sync.Options{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	body, err := os.ReadFile(boardPath + ".applied_ops.json")
+	if err != nil {
+		t.Fatalf("expected sidecar at %s: %v", boardPath+".applied_ops.json", err)
+	}
+	var sidecar sync.AppliedOpsSidecar
+	if err := json.Unmarshal(body, &sidecar); err != nil {
+		t.Fatalf("decode sidecar: %v", err)
+	}
+	// 3 state-asserting ops tracked, flag_stale omitted.
+	if len(sidecar.Ops) != 3 {
+		t.Fatalf("expected 3 tracked ops (set_field/set_pad_net/set_locked), got %d: %+v",
+			len(sidecar.Ops), sidecar.Ops)
+	}
+	// Verify the fingerprint shape — these must match what the server
+	// will compose to look up against the set.
+	want := map[string]bool{
+		"k-r1|set_field|value|4.7k":   true,
+		"k-r1|set_pad_net|1|NEW":      true,
+		"k-stale|set_locked||true":    true,
+	}
+	for _, op := range sidecar.Ops {
+		key := op.UUID + "|" + op.Op + "|" + op.Key + "|" + op.Value
+		if !want[key] {
+			t.Errorf("unexpected sidecar entry: %s", key)
+		}
+		delete(want, key)
+	}
+	for missing := range want {
+		t.Errorf("missing expected sidecar entry: %s", missing)
+	}
+}
+
+// TestAppliedOpsRoundTripsInNextRequest: the agent must read the
+// sidecar from the previous sync and ship it back in the next
+// SyncPlanRequest.AppliedOps. This is what gives the server the
+// information it needs to skip re-emission.
+func TestAppliedOpsRoundTripsInNextRequest(t *testing.T) {
+	tmp := t.TempDir()
+	boardPath := filepath.Join(tmp, "demo.kicad_pcb")
+	// Pre-seed the sidecar as if a previous sync had successfully
+	// applied a set_field + set_locked.
+	prior := `{"design":"demo","last_sync_at":"2026-01-01T00:00:00Z","ops":[` +
+		`{"uuid":"k-x","op":"set_field","key":"value","value":"4.7k"},` +
+		`{"uuid":"k-y","op":"set_locked","value":"true"}` +
+		`]}` + "\n"
+	if err := os.WriteFile(boardPath+".applied_ops.json", []byte(prior), 0o644); err != nil {
+		t.Fatalf("seed sidecar: %v", err)
+	}
+
+	kc := kicad.NewFake(boardPath, nil)
+	var gotReq eda.SyncPlanRequest
+	srv := fakeServer(t, eda.SyncPlanResponse{}, &gotReq)
+	defer srv.Close()
+
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, boardPath, "demo", sync.Options{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(gotReq.AppliedOps) != 2 {
+		t.Fatalf("expected 2 applied ops shipped in request, got %d: %+v",
+			len(gotReq.AppliedOps), gotReq.AppliedOps)
+	}
+}
+
+// TestMissingSidecarMeansNoSuppression: first sync ever (no sidecar
+// yet) must ship an empty AppliedOps without erroring. This is the
+// also the "user deleted the sidecar to flush" recovery path.
+func TestMissingSidecarMeansNoSuppression(t *testing.T) {
+	tmp := t.TempDir()
+	boardPath := filepath.Join(tmp, "first-sync.kicad_pcb")
+
+	kc := kicad.NewFake(boardPath, nil)
+	var gotReq eda.SyncPlanRequest
+	srv := fakeServer(t, eda.SyncPlanResponse{}, &gotReq)
+	defer srv.Close()
+
+	if _, err := sync.Run(eda.New(srv.URL, "test-token"), kc, boardPath, "demo", sync.Options{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gotReq.AppliedOps) != 0 {
+		t.Errorf("missing sidecar should ship empty AppliedOps, got %+v", gotReq.AppliedOps)
+	}
+}
+
 func TestEmptyPlanSkipsCommit(t *testing.T) {
 	kc := kicad.NewFake("/tmp/test.kicad_pcb", nil)
 	planResp := eda.SyncPlanResponse{}

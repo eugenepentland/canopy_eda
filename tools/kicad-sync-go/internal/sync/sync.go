@@ -58,6 +58,23 @@ type StaleSidecar struct {
 	Stale      []StaleEntry `json:"stale"`
 }
 
+// AppliedOpsSidecar is the on-disk shape of `<board>.applied_ops.json`.
+// Written after every successful Push (not on dry-run) so the next
+// sync can tell the server "I've already pushed these ops — don't
+// keep emitting them." Backstops a KiCad IPC quirk where some
+// UpdateItems mutations land on disk but the next GetItems still
+// returns the pre-write value, causing the server's diff to keep
+// emitting the same set_field / set_pad_net / set_locked indefinitely.
+//
+// User-deletable as an escape hatch: removing the sidecar makes the
+// next sync emit the full diff again (in case the agent's view of
+// "already applied" diverged from the actual board state).
+type AppliedOpsSidecar struct {
+	Design   string          `json:"design"`
+	LastSync string          `json:"last_sync_at"`
+	Ops      []eda.AppliedOp `json:"ops"`
+}
+
 // Run pulls board state, asks the server for a plan, and applies the ops.
 // Returns the parsed response so the caller can show a result toast.
 // boardPath is used to write the `<board>.stale.json` sidecar listing
@@ -79,6 +96,7 @@ func Run(client *eda.Client, kc kicad.Client, boardPath, design string, opts Opt
 		Board:            toBoardFps(fps),
 		PruneStale:       opts.Prune,
 		MigrateHeuristic: opts.MigrateHeuristic,
+		AppliedOps:       readAppliedOpsSidecar(boardPath),
 	}
 	synclog.Logf("POST /api/sync-plan/%s with %d board fps", design, len(req.Board))
 	plan, err := client.SyncPlan(design, req)
@@ -113,7 +131,90 @@ func Run(client *eda.Client, kc kicad.Client, boardPath, design string, opts Opt
 		return plan, fmt.Errorf("apply ops: %w", err)
 	}
 	synclog.Logf("apply ops completed")
+
+	// Persist the just-applied state-asserting ops so the next sync
+	// can suppress re-emission. Failures are logged but non-fatal —
+	// losing the sidecar means the next sync re-emits a bunch of
+	// already-applied ops (annoying), not a corrupted board.
+	if boardPath != "" {
+		if err := writeAppliedOpsSidecar(boardPath, design, plan); err != nil {
+			synclog.Logf("WriteAppliedOpsSidecar failed (non-fatal): %v", err)
+		}
+	}
 	return plan, nil
+}
+
+// readAppliedOpsSidecar returns the ops the agent recorded after the
+// most recent successful Push, or nil if the sidecar doesn't exist
+// (first sync, or user manually flushed by deleting the file).
+func readAppliedOpsSidecar(boardPath string) []eda.AppliedOp {
+	if boardPath == "" {
+		return nil
+	}
+	body, err := os.ReadFile(boardPath + ".applied_ops.json")
+	if err != nil {
+		return nil
+	}
+	var sidecar AppliedOpsSidecar
+	if err := json.Unmarshal(body, &sidecar); err != nil {
+		synclog.Logf("readAppliedOpsSidecar: parse failed (treating as empty): %v", err)
+		return nil
+	}
+	return sidecar.Ops
+}
+
+// writeAppliedOpsSidecar captures the state-asserting ops the agent
+// just pushed (set_field, set_pad_net, set_locked) so the server can
+// suppress re-emission on the next sync. add / swap_footprint / remove
+// aren't tracked — they're state-changing and the next diff naturally
+// won't propose them again if KiCad accepted them.
+func writeAppliedOpsSidecar(boardPath, design string, plan *eda.SyncPlanResponse) error {
+	var ops []eda.AppliedOp
+	for _, op := range plan.Ops {
+		entry, ok := stateAssertingOpToAppliedOp(op)
+		if !ok {
+			continue
+		}
+		ops = append(ops, entry)
+	}
+	sidecar := AppliedOpsSidecar{
+		Design:   design,
+		LastSync: time.Now().UTC().Format(time.RFC3339),
+		Ops:      ops,
+	}
+	body, err := json.MarshalIndent(sidecar, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal applied_ops sidecar: %w", err)
+	}
+	body = append(body, '\n')
+	path := boardPath + ".applied_ops.json"
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	synclog.Logf("wrote applied_ops sidecar: %s (%d entries)", path, len(ops))
+	return nil
+}
+
+// stateAssertingOpToAppliedOp translates one server op into the
+// (uuid, op, key, value) fingerprint the server uses to skip
+// re-emission. Returns (_, false) for op types that aren't state-
+// asserting (add/swap_footprint/remove/flag_stale) and so don't
+// need fingerprint tracking.
+func stateAssertingOpToAppliedOp(op eda.Op) (eda.AppliedOp, bool) {
+	switch op.Op {
+	case "set_field":
+		return eda.AppliedOp{UUID: op.UUID, Op: op.Op, Key: op.Field, Value: op.Value}, true
+	case "set_pad_net":
+		return eda.AppliedOp{UUID: op.UUID, Op: op.Op, Key: op.Pad, Value: op.Net}, true
+	case "set_locked":
+		v := "false"
+		if op.Locked != nil && *op.Locked {
+			v = "true"
+		}
+		return eda.AppliedOp{UUID: op.UUID, Op: op.Op, Value: v}, true
+	default:
+		return eda.AppliedOp{}, false
+	}
 }
 
 // writeStaleSidecar rewrites `<boardPath>.stale.json` with the current

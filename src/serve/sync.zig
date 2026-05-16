@@ -98,6 +98,15 @@ const ParsedSyncPlan = struct {
     /// pair is unique on BOTH the design and the board so we never silently
     /// remap the wrong footprint.
     migrate_heuristic: bool,
+    /// Set of `<uuid>|<op>|<key>|<value>` fingerprints the agent has
+    /// already pushed in prior syncs. Server skips re-emitting any
+    /// state-asserting op whose fingerprint is in this set — works
+    /// around KiCad IPC GetItems returning stale custom-Field and
+    /// pad-net values after the UpdateItems write that set them. The
+    /// agent rewrites this set from `<board>.applied_ops.json` on
+    /// every sync; deleting that sidecar is the user-facing escape
+    /// hatch to force a full re-emit.
+    applied_ops: std.StringHashMap(void),
 };
 
 fn parsePadList(arena: std.mem.Allocator, pv: std.json.Value) std.mem.Allocator.Error![]const PadAssign {
@@ -147,18 +156,47 @@ fn parseSyncPlanBody(arena: std.mem.Allocator, body: []const u8) !ParsedSyncPlan
 
     const prune_stale = jsonBool(parsed.value.object.get("prune_stale"));
     const migrate_heuristic = jsonBool(parsed.value.object.get("migrate_heuristic"));
+    const applied_ops = try parseAppliedOps(arena, parsed.value.object.get("applied_ops"));
 
     var board_list: std.ArrayListUnmanaged(BoardFp) = .empty;
     const bv = parsed.value.object.get("board") orelse {
-        return .{ .board = board_list.items, .prune_stale = prune_stale, .migrate_heuristic = migrate_heuristic };
+        return .{ .board = board_list.items, .prune_stale = prune_stale, .migrate_heuristic = migrate_heuristic, .applied_ops = applied_ops };
     };
-    if (bv != .array) return .{ .board = board_list.items, .prune_stale = prune_stale, .migrate_heuristic = migrate_heuristic };
+    if (bv != .array) return .{ .board = board_list.items, .prune_stale = prune_stale, .migrate_heuristic = migrate_heuristic, .applied_ops = applied_ops };
 
     for (bv.array.items) |entry| {
         const fp = (try parseBoardEntry(arena, entry)) orelse continue;
         try board_list.append(arena, fp);
     }
-    return .{ .board = board_list.items, .prune_stale = prune_stale, .migrate_heuristic = migrate_heuristic };
+    return .{ .board = board_list.items, .prune_stale = prune_stale, .migrate_heuristic = migrate_heuristic, .applied_ops = applied_ops };
+}
+
+/// Build the `<uuid>|<op>|<key>|<value>` fingerprint set the diff loop
+/// consults to skip re-emitting an op the agent has already pushed.
+fn parseAppliedOps(arena: std.mem.Allocator, v: ?std.json.Value) !std.StringHashMap(void) {
+    var out = std.StringHashMap(void).init(arena);
+    const val = v orelse return out;
+    if (val != .array) return out;
+    for (val.array.items) |entry| {
+        if (entry != .object) continue;
+        const o = entry.object;
+        const uuid = jsonStr(o.get("uuid"));
+        const op = jsonStr(o.get("op"));
+        if (uuid.len == 0 or op.len == 0) continue;
+        const key = jsonStr(o.get("key"));
+        const value = jsonStr(o.get("value"));
+        const fp = try std.fmt.allocPrint(arena, "{s}|{s}|{s}|{s}", .{ uuid, op, key, value });
+        try out.put(fp, {});
+    }
+    return out;
+}
+
+/// Compose the fingerprint string used as the key in
+/// `ParsedSyncPlan.applied_ops` (and during emission-suppression
+/// checks). Same layout as `parseAppliedOps` so request-side and
+/// emission-side string lookups round-trip.
+fn appliedOpFingerprint(arena: std.mem.Allocator, uuid: []const u8, op: []const u8, key: []const u8, value: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(arena, "{s}|{s}|{s}|{s}", .{ uuid, op, key, value });
 }
 
 fn jsonBool(v: ?std.json.Value) bool {
@@ -610,6 +648,12 @@ const SyncSummary = struct {
     removed: u32 = 0,
     swapped: u32 = 0,
     flagged_stale: u32 = 0,
+    /// Count of state-asserting ops the diff WOULD have emitted but
+    /// skipped because the agent's applied_ops sidecar said it had
+    /// already pushed an identical (uuid, op, key, value) fingerprint.
+    /// Surfaced to the user via the agent's result toast so they can
+    /// see "the server kept trying to re-do work that already landed."
+    suppressed: u32 = 0,
 };
 
 /// POST /api/sync-plan/:name — compare client board state against the
@@ -742,6 +786,7 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 
     try w.writeAll("[");
 
+    var applied_ops_local = parsed.applied_ops;
     var diff_ctx = DiffContext{
         .by_uuid = &by_uuid,
         .by_ref = &by_ref,
@@ -750,43 +795,14 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         .pad_net_map = &pad_net_map,
         .matched_uuids = &matched_uuids,
         .canonical_fp_name = &canonical_fp_name,
+        .applied_ops = &applied_ops_local,
         .spc = &spc,
         .summary = &summary,
         .migrate_heuristic = parsed.migrate_heuristic,
     };
     for (instances.items) |inst| try handleInstance(&diff_ctx, inst, &w, &first_op);
 
-    // Stale = a board footprint that didn't match any design instance.
-    // We only flag/prune footprints the sync has ever managed (i.e. those
-    // with a canopy_uuid set). Footprints without canopy_uuid are
-    // typically user-placed mechanicals (mounting holes, fiducials,
-    // logos) that we leave alone. Ops target by KiCad-internal UUID so
-    // the agent's apply path resolves regardless of canopy_uuid state.
-    for (parsed.board) |bfp| {
-        if (bfp.uuid.len == 0) continue;
-        if (matched_uuids.contains(bfp.kicad_uuid)) continue;
-        const target = opTargetUuid(bfp);
-        if (target.len == 0) continue;
-        if (parsed.prune_stale) {
-            try emitOp(&w, &first_op, "remove", .{.{ "uuid", target }});
-            summary.removed += 1;
-        } else {
-            try emitOp(&w, &first_op, "flag_stale", .{ .{ "uuid", target }, .{ "ref", bfp.ref } });
-            summary.flagged_stale += 1;
-            // Visually flag the stale fp via KiCad's padlock overlay.
-            // Skip when already locked so we don't churn ops + cycle
-            // the dirty bit on every sync; and (intent for later)
-            // skip when the user has manually unlocked it as a "keep
-            // this" signal — that'd need a separate "manually
-            // unlocked while stale" marker the agent ships back.
-            if (!bfp.locked) {
-                try w.print(
-                    ",{{\"op\":\"set_locked\",\"uuid\":\"{s}\",\"locked\":true}}",
-                    .{target},
-                );
-            }
-        }
-    }
+    try emitStaleOps(req.arena, &diff_ctx, parsed, &matched_uuids, &w, &first_op, &summary);
 
     try w.writeAll("]");
 
@@ -795,8 +811,15 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     const rw = resp_buf.writer(ctx.allocator);
     const version = serve_root.getLiveVersion(name);
     try rw.print(
-        "{{\"design_version\":{d},\"summary\":{{\"updated\":{d},\"added\":{d},\"removed\":{d},\"swapped\":{d},\"flagged_stale\":{d}}},\"ops\":",
-        .{ version, summary.updated, summary.added, summary.removed, summary.swapped, summary.flagged_stale },
+        "{{\"design_version\":{d},\"summary\":{{" ++
+            "\"updated\":{d},\"added\":{d},\"removed\":{d}," ++
+            "\"swapped\":{d},\"flagged_stale\":{d},\"suppressed\":{d}" ++
+            "}},\"ops\":",
+        .{
+            version,            summary.updated, summary.added,
+            summary.removed,    summary.swapped, summary.flagged_stale,
+            summary.suppressed,
+        },
     );
     try rw.writeAll(ops_buf.items);
     try rw.writeAll("}");
@@ -827,10 +850,79 @@ const DiffContext = struct {
     /// KiCad-canonical name but resolves to the same physical footprint as
     /// the design's short name. Populated lazily on first lookup.
     canonical_fp_name: *std.StringHashMap([]const u8),
+    /// Fingerprint set of state-asserting ops the agent already pushed
+    /// in prior syncs. Owned by ParsedSyncPlan; the diff loop consults
+    /// it via the `emitOpUnlessApplied` helper to skip re-emitting ops
+    /// that already landed (some KiCad IPC writes don't round-trip via
+    /// GetItems, which would otherwise cause indefinite re-emission).
+    applied_ops: *std.StringHashMap(void),
     spc: *SyncPlanContext,
     summary: *SyncSummary,
     migrate_heuristic: bool,
 };
+
+/// Walk every board fp that didn't match any design instance and emit
+/// the appropriate orphan-handling op: `remove` when --prune is on,
+/// otherwise `flag_stale` + an optional `set_locked` (padlock overlay
+/// in KiCad). Same applied_ops suppression as the matched path so a
+/// re-sync doesn't keep re-locking fps the user already padlocked.
+fn emitStaleOps(
+    arena: std.mem.Allocator,
+    d: *DiffContext,
+    parsed: ParsedSyncPlan,
+    matched_uuids: *std.StringHashMap(void),
+    w: anytype,
+    first_op: *bool,
+    summary: *SyncSummary,
+) !void {
+    for (parsed.board) |bfp| {
+        if (bfp.uuid.len == 0) continue;
+        if (matched_uuids.contains(bfp.kicad_uuid)) continue;
+        const target = opTargetUuid(bfp);
+        if (target.len == 0) continue;
+        if (parsed.prune_stale) {
+            try emitOp(w, first_op, "remove", .{.{ "uuid", target }});
+            summary.removed += 1;
+            continue;
+        }
+        try emitOp(w, first_op, "flag_stale", .{ .{ "uuid", target }, .{ "ref", bfp.ref } });
+        summary.flagged_stale += 1;
+        if (bfp.locked) continue;
+        const lock_fp = try appliedOpFingerprint(arena, target, "set_locked", "", "true");
+        if (d.applied_ops.contains(lock_fp)) {
+            summary.suppressed += 1;
+            continue;
+        }
+        try w.print(
+            ",{{\"op\":\"set_locked\",\"uuid\":\"{s}\",\"locked\":true}}",
+            .{target},
+        );
+    }
+}
+
+/// Emit a state-asserting op only when the agent hasn't already pushed
+/// the same (uuid, op, key, value) fingerprint. When suppressed,
+/// increments summary.suppressed and returns false so the caller can
+/// avoid bumping its local ops-emitted counter (which would otherwise
+/// flag the instance as "updated" with no actual op to point at).
+fn emitOpUnlessApplied(
+    d: *DiffContext,
+    w: anytype,
+    first: *bool,
+    op: []const u8,
+    fields: anytype,
+    uuid: []const u8,
+    key: []const u8,
+    value: []const u8,
+) !bool {
+    const fp = try appliedOpFingerprint(d.spc.arena, uuid, op, key, value);
+    if (d.applied_ops.contains(fp)) {
+        d.summary.suppressed += 1;
+        return false;
+    }
+    try emitOp(w, first, op, fields);
+    return true;
+}
 
 /// Treat a board footprint's name as matching the design's short name when
 /// it equals either the short name itself or the canonical KiCad name
@@ -908,12 +1000,14 @@ fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, f
                 // so the next sync UUID-matches without falling back to
                 // ref_des. Target by KiCad-internal UUID so the agent's
                 // cache resolves even before canopy_uuid is set.
-                try emitOp(w, first, OP_SET_FIELD, .{
-                    .{ "uuid", opTargetUuid(m) },
+                const target = opTargetUuid(m);
+                if (try emitOpUnlessApplied(d, w, first, OP_SET_FIELD, .{
+                    .{ "uuid", target },
                     .{ "field", FIELD_CANOPY_UUID },
                     .{ "value", inst.uuid },
-                });
-                ops_emitted.* += 1;
+                }, target, FIELD_CANOPY_UUID, inst.uuid)) {
+                    ops_emitted.* += 1;
+                }
             }
             return m;
         }
@@ -1215,31 +1309,34 @@ fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, f
         }
     }
     if (!std.mem.eql(u8, m.ref, inst.ref_des)) {
-        try emitOp(w, first, OP_SET_FIELD, .{
+        if (try emitOpUnlessApplied(d, w, first, OP_SET_FIELD, .{
             .{ "uuid", target },
             .{ "field", "reference" },
             .{ "value", inst.ref_des },
-        });
-        ops_emitted.* += 1;
+        }, target, "reference", inst.ref_des)) {
+            ops_emitted.* += 1;
+        }
     }
     if (!std.mem.eql(u8, m.value, inst.value)) {
-        try emitOp(w, first, OP_SET_FIELD, .{
+        if (try emitOpUnlessApplied(d, w, first, OP_SET_FIELD, .{
             .{ "uuid", target },
             .{ "field", "value" },
             .{ "value", inst.value },
-        });
-        ops_emitted.* += 1;
+        }, target, "value", inst.value)) {
+            ops_emitted.* += 1;
+        }
     }
     // Align canopy_uuid whenever it drifted (legacy long-form, --migrate
     // pairing, etc.). After this op lands, the next sync UUID-matches
     // without falling through to ref-des or migration tiers.
     if (m.uuid.len > 0 and !std.mem.eql(u8, m.uuid, inst.uuid)) {
-        try emitOp(w, first, OP_SET_FIELD, .{
+        if (try emitOpUnlessApplied(d, w, first, OP_SET_FIELD, .{
             .{ "uuid", target },
             .{ "field", FIELD_CANOPY_UUID },
             .{ "value", inst.uuid },
-        });
-        ops_emitted.* += 1;
+        }, target, FIELD_CANOPY_UUID, inst.uuid)) {
+            ops_emitted.* += 1;
+        }
     }
     // Push every design property to KiCad as a custom Field, so adding a
     // new BOM column (manufacturer, datasheet, supplier_pn, …) is a pure
@@ -1254,14 +1351,15 @@ fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, f
         const field_name = canonicalFieldName(p.key);
         const board_value = m.fields.get(field_name) orelse "";
         if (std.mem.eql(u8, board_value, p.value)) continue;
-        try emitOp(w, first, OP_SET_FIELD, .{
+        if (try emitOpUnlessApplied(d, w, first, OP_SET_FIELD, .{
             .{ "uuid", target },
             .{ "field", field_name },
             .{ "value", p.value },
-        });
-        ops_emitted.* += 1;
+        }, target, field_name, p.value)) {
+            ops_emitted.* += 1;
+        }
     }
-    ops_emitted.* += try emitPadNetOps(w, first, target, inst.ref_des, d.pad_net_map, m.pads);
+    ops_emitted.* += try emitPadNetOps(d, w, first, target, inst.ref_des, d.pad_net_map, m.pads);
 }
 
 /// Property keys we deliberately don't push to KiCad as custom fields:
@@ -1385,6 +1483,7 @@ fn emitSwapOp(
 /// so the caller can decide whether the surrounding instance counts as
 /// "updated" — a no-diff sync should be silent in the user-facing toast.
 fn emitPadNetOps(
+    d: *DiffContext,
     w: anytype,
     first: *bool,
     uuid: []const u8,
@@ -1398,12 +1497,13 @@ fn emitPadNetOps(
         const key = std.fmt.bufPrint(&key_buf, "{s}|{s}", .{ ref_des, cp.number }) catch continue;
         const want = pad_net_map.get(key) orelse continue;
         if (std.mem.eql(u8, want, cp.net)) continue;
-        try emitOp(w, first, "set_pad_net", .{
+        if (try emitOpUnlessApplied(d, w, first, "set_pad_net", .{
             .{ "uuid", uuid },
             .{ "pad", cp.number },
             .{ "net", want },
-        });
-        emitted += 1;
+        }, uuid, cp.number, want)) {
+            emitted += 1;
+        }
     }
     return emitted;
 }
