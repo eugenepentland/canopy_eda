@@ -1,1 +1,7 @@
 # guardian-snapshot v1
+add: // spec: serve/notes - Reads and writes `<design>.notes.md` next to the design source file
+add: // spec: serve/notes - Rejects bodies larger than 1 MiB
+add: // spec: serve/notes - Returns an empty string when no notes file exists yet
+unverified: serve/notes - Reads and writes `<design>.notes.md` next to the design source file
+unverified: serve/notes - Rejects bodies larger than 1 MiB
+unverified: serve/notes - Returns an empty string when no notes file exists yet

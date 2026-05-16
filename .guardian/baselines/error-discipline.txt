@@ -2,3 +2,7 @@
 pub const MyError = error{ Foo, Bar };
 pub fn run(...) MyError!void { ... }
 src/render_html.zig: pub fn computeSubBlockAttachments uses inferred error set `!T` (use `MyErr!T`)
+src/serve/notes.zig: pub fn addTaskCore uses inferred error set `!T` (use `MyErr!T`)
+src/serve/notes.zig: pub fn loadNotes uses inferred error set `!T` (use `MyErr!T`)
+src/serve/notes.zig: pub fn mutateTaskCore uses inferred error set `!T` (use `MyErr!T`)
+src/serve/notes.zig: pub fn renderNotes uses inferred error set `!T` (use `MyErr!T`)
