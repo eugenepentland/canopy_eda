@@ -295,13 +295,73 @@ pub fn parseId(children: []const Node) ?[]const u8 {
     return null;
 }
 
-/// Generate a random 8-char hex ID. First char is always a letter (a-f)
-/// to ensure the tokenizer parses it as an atom, not a number.
+/// Number of re-roll attempts `generateId` makes before giving up. At ~30 bits
+/// of entropy and a few hundred components the first draw almost always wins;
+/// this bound just guarantees the loop terminates.
+const ID_GEN_MAX_ATTEMPTS: usize = 1024;
+
+/// Register an 8-char token in the design-wide uniqueness set. Idempotent —
+/// safe to call with a token that is already present. An allocator failure
+/// just returns: a missed registration only risks a (vanishingly unlikely)
+/// future collision, never a crash.
+fn registerId(self: *Evaluator, id: []const u8) void {
+    self.design_ids.put(self.allocator, id, {}) catch return;
+}
+
+/// Recursively register every `(id …)` and `(ids ("k" t) …)` token in `forms`
+/// into the design-wide id set before evaluation, so `generateId` never mints a
+/// token that already exists in source but is only reached later in the walk.
+/// Tolerates the malformed nested `(id … (id …))` residue by registering every
+/// token it finds.
+pub fn prescanIds(self: *Evaluator, forms: []const Node) void {
+    for (forms) |form| {
+        const children = form.asList() orelse continue;
+        if (children.len == 0) continue;
+        if (children[0].asAtom()) |head| {
+            if (std.mem.eql(u8, head, "id")) {
+                if (children.len >= 2) {
+                    if (children[1].asAtom() orelse children[1].asString()) |tok| registerId(self, tok);
+                }
+                prescanIds(self, children[1..]); // catch nested-id residue
+                continue;
+            }
+            if (std.mem.eql(u8, head, "ids")) {
+                for (children[1..]) |pair_node| {
+                    const pair = pair_node.asList() orelse continue;
+                    if (pair.len >= 2) {
+                        if (pair[1].asAtom() orelse pair[1].asString()) |tok| registerId(self, tok);
+                    }
+                }
+                continue;
+            }
+            prescanIds(self, children[1..]);
+        } else {
+            prescanIds(self, children);
+        }
+    }
+}
+
+/// Generate a random 8-char hex ID, re-rolling until it is unique across the
+/// whole design (see `Evaluator.design_ids`). First char is always a letter
+/// (a-f) so the tokenizer parses it as an atom, not a number. The winning token
+/// is registered before it is returned.
 pub fn generateId(self: *Evaluator) EvalError![]const u8 {
-    var bytes: [4]u8 = undefined;
-    infra_random.bytes(&bytes);
-    const first: u8 = (bytes[0] % ID_FIRST_LETTER_RANGE) + 'a'; // ensure first char is a-f letter
-    return std.fmt.allocPrint(self.allocator, "{c}{x:0>2}{x:0>2}{x:0>2}{x:0>1}", .{ first, bytes[1], bytes[2], bytes[3], bytes[0] & 0x0f });
+    var attempt: usize = 0;
+    while (attempt < ID_GEN_MAX_ATTEMPTS) : (attempt += 1) {
+        var bytes: [4]u8 = undefined;
+        infra_random.bytes(&bytes);
+        const first: u8 = (bytes[0] % ID_FIRST_LETTER_RANGE) + 'a'; // ensure first char is a-f letter
+        const id = std.fmt.allocPrint(
+            self.allocator,
+            "{c}{x:0>2}{x:0>2}{x:0>2}{x:0>1}",
+            .{ first, bytes[1], bytes[2], bytes[3], bytes[0] & 0x0f },
+        ) catch return EvalError.OutOfMemory;
+        if (!self.design_ids.contains(id)) {
+            registerId(self, id);
+            return id;
+        }
+    }
+    return EvalError.IdSpaceExhausted;
 }
 
 /// Derive a child ID from a parent ID, net context, and index.
@@ -352,6 +412,52 @@ pub fn getOrCreateFormId(self: *Evaluator, form_children: []const Node) EvalErro
         .id = new_id,
     });
     return new_id;
+}
+
+/// A parsed `(ids ("key" token) …)` child sidecar plus the parent form's
+/// opening-paren offset. Threaded through one shorthand parent (decouple/series)
+/// so its synthesized children get stable, source-resident tokens instead of
+/// ids hashed from volatile net names. See `id_insert.insertPendingIds`.
+pub const ChildIdSidecar = struct {
+    map: std.StringHashMapUnmanaged([]const u8),
+    parent_offset: u32,
+};
+
+/// Parse the `(ids …)` sidecar (if any) out of a parent form's children into a
+/// key→token map, capturing the parent's opening-paren offset for write-back.
+pub fn parseChildIdSidecar(self: *Evaluator, parent_children: []const Node) ChildIdSidecar {
+    var sidecar = ChildIdSidecar{
+        .map = .empty,
+        .parent_offset = if (parent_children.len > 0) parent_children[0].span.offset -| 1 else 0,
+    };
+    for (parent_children) |child| {
+        if (!child.isForm("ids")) continue;
+        const pairs = child.asList() orelse continue;
+        for (pairs[1..]) |pair_node| {
+            const pair = pair_node.asList() orelse continue;
+            if (pair.len < 2) continue;
+            const key = pair[0].asString() orelse (pair[0].asAtom() orelse continue);
+            const tok = pair[1].asAtom() orelse (pair[1].asString() orelse continue);
+            sidecar.map.put(self.allocator, key, tok) catch continue;
+            registerId(self, tok);
+        }
+    }
+    return sidecar;
+}
+
+/// Return the stable child token for `key` from the sidecar, minting and queuing
+/// a fresh one for write-back on a miss. Mutates the in-memory map so a repeated
+/// key in the same eval reuses the just-minted token rather than re-minting.
+pub fn getOrCreateChildId(self: *Evaluator, sidecar: *ChildIdSidecar, key: []const u8) EvalError![]const u8 {
+    if (sidecar.map.get(key)) |tok| return tok;
+    const tok = try generateId(self);
+    try self.pending_child_ids.append(self.allocator, .{
+        .parent_form_offset = sidecar.parent_offset,
+        .key = key,
+        .id = tok,
+    });
+    try sidecar.map.put(self.allocator, key, tok);
+    return tok;
 }
 
 /// For a list like (cap-0402 "100nF"), returns the offset of the first child atom.
@@ -559,4 +665,60 @@ test "isStandardRefDes" {
     try std.testing.expect(isStandardRefDes("stm32") == false);
     try std.testing.expect(isStandardRefDes("flash") == false);
     try std.testing.expect(isStandardRefDes("a") == false);
+}
+
+// spec: eval/evaluator - generateId registers each token so a second call cannot collide
+test "generateId registers each token" {
+    const alloc = std.testing.allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    const a = try generateId(&eval);
+    defer alloc.free(a);
+    const b = try generateId(&eval);
+    defer alloc.free(b);
+    try std.testing.expect(!std.mem.eql(u8, a, b));
+    try std.testing.expect(eval.design_ids.contains(a));
+    try std.testing.expect(eval.design_ids.contains(b));
+}
+
+// spec: eval/evaluator - parseChildIdSidecar reads (ids ("k" t)) pairs into a key-to-token map
+test "parseChildIdSidecar parses pairs" {
+    const alloc = std.testing.allocator;
+    const parser_m = @import("../sexpr/parser.zig");
+    const nodes = try parser_m.parse(alloc, "(decouple x (ids (\"100nF@P7#0\" a1b2c3d4)))");
+    defer parser_m.freeNodes(alloc, nodes);
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    const children = nodes[0].asList().?;
+    var sidecar = parseChildIdSidecar(&eval, children);
+    defer sidecar.map.deinit(alloc);
+    try std.testing.expect(sidecar.map.get("100nF@P7#0") != null);
+    try std.testing.expectEqualStrings("a1b2c3d4", sidecar.map.get("100nF@P7#0").?);
+}
+
+// spec: eval/evaluator - getOrCreateChildId returns the stored token for a known key
+test "getOrCreateChildId returns stored token" {
+    const alloc = std.testing.allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var sidecar = ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
+    defer sidecar.map.deinit(alloc);
+    try sidecar.map.put(alloc, "k", "deadbeef");
+    const tok = try getOrCreateChildId(&eval, &sidecar, "k");
+    try std.testing.expectEqualStrings("deadbeef", tok);
+    try std.testing.expectEqual(@as(usize, 0), eval.pending_child_ids.items.len);
+}
+
+// spec: eval/evaluator - getOrCreateChildId mints and queues a token for an unknown key
+test "getOrCreateChildId mints for unknown key" {
+    const alloc = std.testing.allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var sidecar = ChildIdSidecar{ .map = .empty, .parent_offset = 7 };
+    defer sidecar.map.deinit(alloc);
+    const tok = try getOrCreateChildId(&eval, &sidecar, "newkey");
+    defer alloc.free(tok);
+    try std.testing.expectEqual(@as(usize, 8), tok.len);
+    try std.testing.expectEqual(@as(usize, 1), eval.pending_child_ids.items.len);
+    try std.testing.expectEqual(@as(u32, 7), eval.pending_child_ids.items[0].parent_form_offset);
 }

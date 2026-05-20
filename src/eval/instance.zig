@@ -362,7 +362,7 @@ pub fn parseTrailingArgs(self: *Evaluator, children: []const Node, env: *Env) Ev
         .note = null,
     };
     for (children) |fc| {
-        if (fc.isForm("id")) continue;
+        if (fc.isForm("id") or fc.isForm("ids")) continue;
         if (fc.asList()) |cl| {
             if (cl.len >= 2) {
                 const k = cl[0].asAtom() orelse continue;
@@ -424,18 +424,24 @@ pub fn evalSeriesForm(
     if (first_val == .component or first_val == .component_instance) {
         // Auto ref-des: (series (comp) "NET1" "NET2" ...)
         const comp_offset = ids.componentSourceOffset(form_children[1]);
-        const series_id = series_parsed_id orelse try ids.generateId(self);
+        // Stamp the series form's own (id) anchor; the per-pair children get
+        // stable tokens from the (ids …) sidecar keyed on value#pair-index, so
+        // a net rename no longer rotates their ids.
         if (series_parsed_id == null) {
+            const series_id = try ids.generateId(self);
             try self.pending_ids.append(self.allocator, .{
                 .form_offset = form_children[0].span.offset -| 1,
                 .id = series_id,
             });
         }
+        var sidecar = ids.parseChildIdSidecar(self, form_children);
+        const series_value = if (resolveComponent(self, first_val)) |r| r.value else "";
         const ta = try parseTrailingArgs(self, form_children[2..], env);
         var ni: usize = 0;
         while (ni + 1 < ta.nets.items.len) : (ni += 2) {
             const ref = try ids.nextRefDes(self, ids.componentPrefix(componentFamily(first_val)));
-            const child_id = try ids.deriveChildId(self, series_id, ta.nets.items[ni], ni / 2);
+            const child_key = try std.fmt.allocPrint(self.allocator, "{s}#{d}", .{ series_value, ni / 2 });
+            const child_id = try ids.getOrCreateChildId(self, &sidecar, child_key);
             const inst = instanceFromValue(self, first_val, ref, comp_offset, child_id) orelse continue;
             try instances.append(self.allocator, inst);
             try all_pin_nets.append(self.allocator, .{ .ref_des = ref, .pin = "1", .net = ta.nets.items[ni] });

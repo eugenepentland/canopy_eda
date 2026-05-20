@@ -1031,7 +1031,7 @@ fn pickByUuidOrRef(
     return null;
 }
 
-fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, first: *bool, ops_emitted: *u32) !?BoardFp {
+fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance) ?BoardFp {
     // Net-signature relink wins over canopy uuid: the relink builder
     // only populates a pairing when there's an orphan board fp with the
     // same wiring + footprint AND no other claimant. When that fires
@@ -1044,34 +1044,11 @@ fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, f
     if (d.migrate_heuristic) {
         if (d.by_netsig.get(inst.uuid)) |m| return m;
     }
-    if (pickByUuidOrRef(inst.uuid, inst.ref_des, d.by_uuid, d.by_ref, d.reserved_kicad_uuids, d.matched_uuids)) |m| {
-        if (m.uuid.len == 0) {
-            // by_ref match against a board fp with no canopy_uuid yet:
-            // backfill so next sync UUID-matches directly. Target by
-            // KiCad-internal UUID so the agent's cache resolves before
-            // canopy_uuid is set. by_uuid matches always have m.uuid !=
-            // "" (the key of the map), so this branch only runs for
-            // by_ref pairings.
-            const target = opTargetUuid(m);
-            if (try emitOpUnlessApplied(d, w, first, OP_SET_FIELD, .{
-                .{ "uuid", target },
-                .{ "field", FIELD_CANOPY_UUID },
-                .{ "value", inst.uuid },
-            }, target, FIELD_CANOPY_UUID, inst.uuid)) {
-                ops_emitted.* += 1;
-            }
-        }
-        return m;
-    }
-    if (heuristicMatch(d, inst)) |m| {
-        // Migration tier: rename the matched board footprint to the
-        // design's ref_des and stamp the design's canopy_uuid. The normal
-        // handleMatched path emits the reference + canopy_uuid set_field
-        // ops as part of its diff (since m.ref != inst.ref_des and
-        // m.uuid != inst.uuid), so no extra emission needed here.
-        return m;
-    }
-    return null;
+    if (pickByUuidOrRef(inst.uuid, inst.ref_des, d.by_uuid, d.by_ref, d.reserved_kicad_uuids, d.matched_uuids)) |m| return m;
+    // Migration tier (parent_path/value). canopy_uuid stamping + ref-des
+    // rename are emitted by handleMatched for every match tier (Option G),
+    // so matchInstance no longer emits anything itself.
+    return heuristicMatch(d, inst);
 }
 
 /// Migration-mode lookup for (parent_path, value) pairings. Gated on
@@ -1377,10 +1354,14 @@ fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, f
             ops_emitted.* += 1;
         }
     }
-    // Align canopy_uuid whenever it drifted (legacy long-form, --migrate
-    // pairing, etc.). After this op lands, the next sync UUID-matches
-    // without falling through to ref-des or migration tiers.
-    if (m.uuid.len > 0 and !std.mem.eql(u8, m.uuid, inst.uuid)) {
+    // Stamp/realign canopy_uuid whenever it differs from the design's id —
+    // this covers BOTH the eager case (a matched fp that has no canopy_uuid
+    // yet: by_ref backfill, manual placement, or a migration-tier match) and
+    // the drift case (legacy long-form, --migrate pairing). opTargetUuid falls
+    // back to kicad_uuid so the agent resolves the fp before canopy_uuid is
+    // set. After this op lands, the next sync UUID-matches directly. This is
+    // the single stamping point for every match tier (Option G).
+    if (!std.mem.eql(u8, m.uuid, inst.uuid)) {
         if (try emitOpUnlessApplied(d, w, first, OP_SET_FIELD, .{
             .{ "uuid", target },
             .{ "field", FIELD_CANOPY_UUID },
@@ -1439,7 +1420,7 @@ fn canonicalFieldName(key: []const u8) []const u8 {
 fn handleInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, first: *bool) !void {
     const fp_name_short = stripLibPrefix(inst.footprint);
     var ops_emitted: u32 = 0;
-    if (try matchInstance(d, inst, w, first, &ops_emitted)) |m| {
+    if (matchInstance(d, inst)) |m| {
         try handleMatched(d, inst, m, fp_name_short, w, first, &ops_emitted);
         // Only count as "updated" when at least one op was actually
         // emitted — otherwise every no-diff sync would still surface

@@ -52,6 +52,10 @@ pub const EvalError = error{
     FormatError,
     NotEnoughArgs,
     AssertionFailed,
+    /// `generateId` could not find an unused 8-char token after the bounded
+    /// number of attempts — effectively impossible at ~30 bits of entropy,
+    /// but kept so the re-roll loop has a defined exit.
+    IdSpaceExhausted,
 };
 
 /// One pin-to-net binding gathered while evaluating an instance or
@@ -102,6 +106,16 @@ pub const Evaluator = struct {
     auto_refdes: std.AutoHashMapUnmanaged(u8, u32),
     /// Forms that need (id ...) auto-inserted: (source_offset, generated_id)
     pending_ids: std.ArrayListUnmanaged(PendingId),
+    /// Child-id sidecars that need `(ids ("key" token) …)` written/extended on
+    /// a parent shorthand form (decouple/series). Keyed by the parent's
+    /// `form_offset`; one entry per synthesized child. See `id_insert.zig`.
+    pending_child_ids: std.ArrayListUnmanaged(PendingChildId),
+    /// Every 8-char hex id token seen anywhere in the design tree — existing
+    /// source tokens (registered by `prescanIds`) plus every token
+    /// `generateId` mints this session. `generateId` re-rolls against this set
+    /// so no two components ever share an id (incl. after copy-paste from
+    /// another design built by the same evaluator).
+    design_ids: std.StringHashMapUnmanaged(void),
     /// True once `loadPassivesPrelude` has run. Guards against re-entering
     /// the prelude when a module load itself triggers another module load,
     /// and lets `evalFile` skip the work after the first design.
@@ -115,6 +129,17 @@ pub const Evaluator = struct {
         /// Byte offset of the opening paren of the form
         form_offset: u32,
         /// The generated 8-char hex ID to insert
+        id: []const u8,
+    };
+
+    pub const PendingChildId = struct {
+        /// Byte offset of the opening paren of the PARENT shorthand form
+        /// (decouple/series) the child belongs to.
+        parent_form_offset: u32,
+        /// Stable structural key for this child within the parent
+        /// (e.g. "15uF@P7#0" for decouple, "100nF#1" for series).
+        key: []const u8,
+        /// The generated 8-char hex token for this child.
         id: []const u8,
     };
 
@@ -182,6 +207,8 @@ pub const Evaluator = struct {
             .symbol_alt_cache = .empty,
             .auto_refdes = .empty,
             .pending_ids = .empty,
+            .pending_child_ids = .empty,
+            .design_ids = .empty,
             .passives_prelude_loaded = false,
         };
     }
@@ -194,6 +221,8 @@ pub const Evaluator = struct {
         self.symbol_alt_cache.deinit(self.allocator);
         self.auto_refdes.deinit(self.allocator);
         self.pending_ids.deinit(self.allocator);
+        self.pending_child_ids.deinit(self.allocator);
+        self.design_ids.deinit(self.allocator);
     }
 
     /// Evaluate a file and return the top-level design block. Routes

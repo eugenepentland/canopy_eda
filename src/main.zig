@@ -81,6 +81,8 @@ pub fn main() !void {
         try cmdParse(allocator, args[2]);
     } else if (std.mem.eql(u8, command, "build")) {
         try commands.cmdBuild(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "lint")) {
+        try commands.cmdLint(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "check")) {
         try commands.cmdCheck(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "convert-footprint")) {
@@ -375,6 +377,7 @@ fn printUsage() !void {
         \\Usage:
         \\  eda parse <file>                   Parse and pretty-print an S-expression file
         \\  eda build [--project-dir <d>]       Evaluate and emit resolved design
+        \\  eda lint [--project-dir <d>] <name>  Report id-hygiene issues (legacy residue, bad/duplicate tokens)
         \\  eda check [--project-dir <d>] [--severity <s>] <name>  Run ERC on a design
         \\  eda serve [--project-dir <d>] [--port <n>]  Start web server (default port 7050)
         \\  eda mint-plugin-token [--project-dir <d>] [--label <l>]  Mint a bearer token for the KiCad plugin

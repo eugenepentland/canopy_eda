@@ -11,6 +11,7 @@ src/commands.zig::cmdBuild | fn cmdBuild(allocator: std.mem.Allocator, args: []c
 src/commands.zig::cmdCheck | fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdExportKicad | fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdExportReview | fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
+src/commands.zig::cmdLint | fn cmdLint(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdServe | fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/convert/alt_functions.zig::mergePinoutWithAlts | fn mergePinoutWithAlts( allocator: std.mem.Allocator, pinout_source: []const u8, alts: []const AltEntry, ) AltError![]const u8
 src/convert/alt_functions.zig::parseAltCsv | fn parseAltCsv(allocator: std.mem.Allocator, source: []const u8) AltError![]AltEntry
@@ -39,7 +40,7 @@ src/eval/builders.zig::buildGroup | fn buildGroup(self: *Evaluator, args: []cons
 src/eval/builders.zig::buildNote | fn buildNote(self: *Evaluator, args: []const Node, env: *Env) EvalError!Note
 src/eval/builders.zig::buildPort | fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
 src/eval/builders.zig::buildSubBlock | fn buildSubBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!SubBlock
-src/eval/builders.zig::emitDecoupleItems | fn emitDecoupleItems( self: *Evaluator, items: []const Node, net_name: []const u8, env: *Env, instances: *std.ArrayListUnmanaged(Instance), all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl), decouple_id: []const u8, child_counter: *usize, ) EvalError!void
+src/eval/builders.zig::emitDecoupleItems | fn emitDecoupleItems( self: *Evaluator, items: []const Node, net_name: []const u8, env: *Env, instances: *std.ArrayListUnmanaged(Instance), all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl), sidecar: *ids.ChildIdSidecar, ) EvalError!void
 src/eval/builders.zig::expandSectionBusPort | fn expandSectionBusPort( self: *Evaluator, bp_children: []const Node, env: *env_mod.Env, out: *std.ArrayListUnmanaged(env_mod.SectionPort), ) EvalError!void
 src/eval/builders.zig::expandTopLevelBusPort | fn expandTopLevelBusPort( self: *Evaluator, bp_children: []const Node, env: *Env, out: *std.ArrayListUnmanaged(Port), ) EvalError!void
 src/eval/builders.zig::findPinFuncMap | fn findPinFuncMap(self: *Evaluator, inst_items: []const Instance, pins_ref: []const u8) ?*const std.StringHashMapUnmanaged([]const u8)
@@ -65,14 +66,17 @@ src/eval/ids.zig::componentPrefix | fn componentPrefix(family: []const u8) u8
 src/eval/ids.zig::componentSourceOffset | fn componentSourceOffset(node: Node) u32
 src/eval/ids.zig::deriveChildId | fn deriveChildId(self: *Evaluator, parent_id: []const u8, context: []const u8, index: usize) EvalError![]const u8
 src/eval/ids.zig::generateId | fn generateId(self: *Evaluator) EvalError![]const u8
+src/eval/ids.zig::getOrCreateChildId | fn getOrCreateChildId(self: *Evaluator, sidecar: *ChildIdSidecar, key: []const u8) EvalError![]const u8
 src/eval/ids.zig::getOrCreateFormId | fn getOrCreateFormId(self: *Evaluator, form_children: []const Node) EvalError![]const u8
 src/eval/ids.zig::getSymbolAlts | fn getSymbolAlts(self: *Evaluator, lookup_name: []const u8) ?*const std.StringHashMapUnmanaged([]const AltFunc)
 src/eval/ids.zig::getSymbolPins | fn getSymbolPins(self: *Evaluator, lookup_name: []const u8) ?*const std.StringHashMapUnmanaged([]const u8)
 src/eval/ids.zig::isStandardRefDes | fn isStandardRefDes(ref_des: []const u8) bool
 src/eval/ids.zig::loadPinoutFile | fn loadPinoutFile(self: *Evaluator, path: []const u8) ?LoadedPinout
 src/eval/ids.zig::nextRefDes | fn nextRefDes(self: *Evaluator, prefix: u8) EvalError![]const u8
+src/eval/ids.zig::parseChildIdSidecar | fn parseChildIdSidecar(self: *Evaluator, parent_children: []const Node) ChildIdSidecar
 src/eval/ids.zig::parseId | fn parseId(children: []const Node) ?[]const u8
 src/eval/ids.zig::pinId | fn pinId(self: *Evaluator, node: Node) ?[]const u8
+src/eval/ids.zig::prescanIds | fn prescanIds(self: *Evaluator, forms: []const Node) void
 src/eval/ids.zig::prescanRefDes | fn prescanRefDes(self: *Evaluator, forms: []const Node) void
 src/eval/ids.zig::reassignSubBlockIds | fn reassignSubBlockIds(self: *Evaluator, block: *DesignBlock, sub_name: []const u8) EvalError!void
 src/eval/ids.zig::registerRefDes | fn registerRefDes(self: *Evaluator, ref_des: []const u8) void
@@ -136,12 +140,14 @@ src/export_kicad_netlist.zig::collectNets | fn collectNets( allocator: std.mem.A
 src/export_kicad_netlist.zig::extractFootprintName | fn extractFootprintName(allocator: std.mem.Allocator, source: []const u8) NetlistError![]const u8
 src/export_kicad_netlist.zig::extractPadNames | fn extractPadNames(allocator: std.mem.Allocator, source: []const u8) NetlistError![]const []const u8
 src/export_kicad_netlist.zig::writeNetlist | fn writeNetlist( allocator: std.mem.Allocator, design_name: []const u8, instances: []const FlatInstance, nets: []const FlatNet, fp_name_map: *const std.StringHashMap([]const u8), fp_pad_map: *const std.StringHashMap([]const []const u8), ) std.mem.Allocator.Error![]const u8
-src/id_insert.zig::insertPendingIds | fn insertPendingIds( allocator: std.mem.Allocator, source_path: []const u8, pending: []const Evaluator.PendingId, ) IdInsertError!void
+src/id_insert.zig::applyInserts | fn applyInserts( allocator: std.mem.Allocator, source: []const u8, pending: []const Evaluator.PendingId, pending_child: []const Evaluator.PendingChildId, ) IdInsertError![]u8
+src/id_insert.zig::insertPendingIds | fn insertPendingIds( allocator: std.mem.Allocator, source_path: []const u8, pending: []const Evaluator.PendingId, pending_child: []const Evaluator.PendingChildId, ) IdInsertError!void
 src/infra/log.zig::warn | fn warn(comptime fmt: []const u8, args: anytype) void
 src/infra/random.zig::bytes | fn bytes(buf: []u8) void
 src/json_writer.zig::writeEscaped | fn writeEscaped(w: anytype, s: []const u8) WriteError!void
 src/json_writer.zig::writeField | fn writeField(w: anytype, key: []const u8, value: []const u8) WriteError!void
 src/json_writer.zig::writeString | fn writeString(w: anytype, s: []const u8) WriteError!void
+src/lint.zig::lintFile | fn lintFile(allocator: std.mem.Allocator, path: []const u8) LintError!usize
 src/main.zig::main | fn main() !void
 src/paths.zig::designSiblingPath | fn designSiblingPath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ext: []const u8, ) std.mem.Allocator.Error![]u8
 src/paths.zig::designSourcePath | fn designSourcePath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) std.mem.Allocator.Error![]u8

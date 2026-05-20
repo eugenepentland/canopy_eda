@@ -62,8 +62,10 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var derating: ?f64 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
 
-    // Pre-scan: register all explicit ref-des to avoid auto-counter collisions
+    // Pre-scan: register all explicit ref-des to avoid auto-counter collisions,
+    // and all existing id/ids tokens so generateId never re-mints one.
     ids.prescanRefDes(self, args[1..]);
+    ids.prescanIds(self, args[1..]);
 
     for (args[1..]) |form| {
         const form_children = form.asList() orelse continue;
@@ -245,14 +247,16 @@ fn evalDecoupleForm(
 ) EvalError!void {
     if (form_children.len < 3) return;
     const first_val = try self.evalNode(form_children[1], env);
-    const tl_dec_id = try ids.getOrCreateFormId(self, form_children);
-    var tl_dec_counter: usize = 0;
+    // Stamp the decouple form's own (id) anchor (kept for stability/grep); the
+    // synthesized child caps get stable tokens from the (ids …) sidecar.
+    _ = try ids.getOrCreateFormId(self, form_children);
+    var sidecar = ids.parseChildIdSidecar(self, form_children);
 
     // Multi-net form: (decouple (comp "val") COUNT per-pin REF "NET1" "NET2" ...)
     if (first_val == .component or first_val == .component_instance) {
         if (form_children.len < DECOUPLE_MULTI_NET_MIN_ARITY) return;
         for (form_children[DECOUPLE_MULTI_NET_NET_OFFSET..]) |mn_node| {
-            if (mn_node.isForm("id")) continue;
+            if (mn_node.isForm("id") or mn_node.isForm("ids")) continue;
             const mn_val = try self.evalNode(mn_node, env);
             const mn_net = mn_val.asString() orelse continue;
             try builders.emitDecoupleItems(
@@ -262,8 +266,7 @@ fn evalDecoupleForm(
                 env,
                 instances,
                 all_pin_nets,
-                tl_dec_id,
-                &tl_dec_counter,
+                &sidecar,
             );
         }
     } else {
@@ -282,11 +285,11 @@ fn evalDecoupleForm(
             for (form_children[2..]) |sf| {
                 if (sf.isForm("bulk") or sf.isForm("bypass")) {
                     const sub = sf.asList().?;
-                    try builders.emitDecoupleItems(self, sub[1..], net_name, env, instances, all_pin_nets, tl_dec_id, &tl_dec_counter);
+                    try builders.emitDecoupleItems(self, sub[1..], net_name, env, instances, all_pin_nets, &sidecar);
                 }
             }
         } else {
-            try builders.emitDecoupleItems(self, form_children[2..], net_name, env, instances, all_pin_nets, tl_dec_id, &tl_dec_counter);
+            try builders.emitDecoupleItems(self, form_children[2..], net_name, env, instances, all_pin_nets, &sidecar);
         }
     }
 }
@@ -548,17 +551,18 @@ fn evalSectionDecouple(
 ) EvalError!void {
     if (sf_children.len < 3) return;
     const dec_first_val = try self.evalNode(sf_children[1], env);
-    const dec_id = try ids.getOrCreateFormId(self, sf_children);
-    var dec_counter: usize = 0;
+    // Stamp the decouple form's own (id) anchor; children use the (ids …) sidecar.
+    _ = try ids.getOrCreateFormId(self, sf_children);
+    var sidecar = ids.parseChildIdSidecar(self, sf_children);
 
     // Multi-net form: (decouple (comp "val") COUNT per-pin REF "NET1" "NET2" ...)
     if (dec_first_val == .component or dec_first_val == .component_instance) {
         if (sf_children.len < DECOUPLE_MULTI_NET_MIN_ARITY) return;
         for (sf_children[DECOUPLE_MULTI_NET_NET_OFFSET..]) |mn_node| {
-            if (mn_node.isForm("id")) continue;
+            if (mn_node.isForm("id") or mn_node.isForm("ids")) continue;
             const mn_val = try self.evalNode(mn_node, env);
             const mn_net = mn_val.asString() orelse continue;
-            try builders.emitDecoupleItems(self, sf_children[1..DECOUPLE_MULTI_NET_NET_OFFSET], mn_net, env, instances, all_pin_nets, dec_id, &dec_counter);
+            try builders.emitDecoupleItems(self, sf_children[1..DECOUPLE_MULTI_NET_NET_OFFSET], mn_net, env, instances, all_pin_nets, &sidecar);
         }
     } else {
         const net_name = dec_first_val.asString() orelse return;
@@ -573,11 +577,11 @@ fn evalSectionDecouple(
             for (sf_children[2..]) |ssf| {
                 if (ssf.isForm("bulk") or ssf.isForm("bypass")) {
                     const sub = ssf.asList().?;
-                    try builders.emitDecoupleItems(self, sub[1..], net_name, env, instances, all_pin_nets, dec_id, &dec_counter);
+                    try builders.emitDecoupleItems(self, sub[1..], net_name, env, instances, all_pin_nets, &sidecar);
                 }
             }
         } else {
-            try builders.emitDecoupleItems(self, sf_children[2..], net_name, env, instances, all_pin_nets, dec_id, &dec_counter);
+            try builders.emitDecoupleItems(self, sf_children[2..], net_name, env, instances, all_pin_nets, &sidecar);
         }
     }
 }

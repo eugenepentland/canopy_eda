@@ -19,6 +19,7 @@ src/commands.zig::cmdBuild fn
 src/commands.zig::cmdCheck fn
 src/commands.zig::cmdExportKicad fn
 src/commands.zig::cmdExportReview fn
+src/commands.zig::cmdLint fn
 src/commands.zig::cmdServe fn
 src/convert/alt_functions.zig::AltEntry struct_
 src/convert/alt_functions.zig::AltError value
@@ -141,6 +142,7 @@ src/eval/forms.zig::scope_form_docs value
 src/eval/forms.zig::special_form_docs value
 src/eval/forms.zig::special_form_schema value
 src/eval/forms.zig::validateArity fn
+src/eval/ids.zig::ChildIdSidecar struct_
 src/eval/ids.zig::LoadedPinout struct_
 src/eval/ids.zig::autoAssignRefDes fn
 src/eval/ids.zig::autoAssignSubBlockRefDes fn
@@ -148,14 +150,17 @@ src/eval/ids.zig::componentPrefix fn
 src/eval/ids.zig::componentSourceOffset fn
 src/eval/ids.zig::deriveChildId fn
 src/eval/ids.zig::generateId fn
+src/eval/ids.zig::getOrCreateChildId fn
 src/eval/ids.zig::getOrCreateFormId fn
 src/eval/ids.zig::getSymbolAlts fn
 src/eval/ids.zig::getSymbolPins fn
 src/eval/ids.zig::isStandardRefDes fn
 src/eval/ids.zig::loadPinoutFile fn
 src/eval/ids.zig::nextRefDes fn
+src/eval/ids.zig::parseChildIdSidecar fn
 src/eval/ids.zig::parseId fn
 src/eval/ids.zig::pinId fn
+src/eval/ids.zig::prescanIds fn
 src/eval/ids.zig::prescanRefDes fn
 src/eval/ids.zig::reassignSubBlockIds fn
 src/eval/ids.zig::registerRefDes fn
@@ -246,6 +251,7 @@ src/export_kicad_netlist.zig::extractFootprintName fn
 src/export_kicad_netlist.zig::extractPadNames fn
 src/export_kicad_netlist.zig::writeNetlist fn
 src/id_insert.zig::IdInsertError value
+src/id_insert.zig::applyInserts fn
 src/id_insert.zig::insertPendingIds fn
 src/infra/clock.zig::epoch value
 src/infra/clock.zig::milliTimestamp value
@@ -259,6 +265,8 @@ src/json_writer.zig::WriteError value
 src/json_writer.zig::writeEscaped fn
 src/json_writer.zig::writeField fn
 src/json_writer.zig::writeString fn
+src/lint.zig::LintError value
+src/lint.zig::lintFile fn
 src/main.zig::main fn
 src/parts.zig::PartEntry struct_
 src/parts.zig::PartsDb struct_

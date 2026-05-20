@@ -457,8 +457,7 @@ pub fn emitDecoupleItems(
     env: *Env,
     instances: *std.ArrayListUnmanaged(Instance),
     all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
-    decouple_id: []const u8,
-    child_counter: *usize,
+    sidecar: *ids.ChildIdSidecar,
 ) EvalError!void {
     var idx: usize = 0;
     while (idx + 1 < items.len) {
@@ -539,8 +538,10 @@ pub fn emitDecoupleItems(
             var ci: u32 = 0;
             while (ci < count) : (ci += 1) {
                 const ref = try ids.nextRefDes(self, 'C');
-                const cap_id = try ids.deriveChildId(self, decouple_id, sub_net, ci);
-                child_counter.* += 1;
+                // Stable structural key: value @ host pad # replica. Pad names
+                // don't churn on net rename, so the child token survives it.
+                const child_key = try std.fmt.allocPrint(self.allocator, "{s}@{s}#{d}", .{ resolved.value, target_pin, ci });
+                const cap_id = try ids.getOrCreateChildId(self, sidecar, child_key);
                 try instances.append(self.allocator, .{
                     .ref_des = ref,
                     .component = resolved.family,

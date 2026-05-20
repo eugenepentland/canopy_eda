@@ -86,6 +86,10 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - deriveChildId produces the same child ID when called with identical inputs
 - deriveChildId produces unique child IDs across different index values
 - generateId produces 8-char hex starting with letter
+- generateId registers each token so a second call cannot collide
+- parseChildIdSidecar reads (ids ("k" t)) pairs into a key-to-token map
+- getOrCreateChildId returns the stored token for a known key
+- getOrCreateChildId mints and queues a token for an unknown key
 - isStandardRefDes distinguishes standard from descriptive labels
 - last_error records the source span of an unknown form so callers can report file:line:col
 - last_error records the source span of an arity mismatch in a special form
@@ -94,6 +98,15 @@ CLI-driven electronic design automation for schematic capture using S-expression
 
 - findMatchingClose finds correct closing paren
 - findMatchingClose handles strings containing parens
+- insertPendingIds aborts on a duplicate pending token
+- insertPendingIds writes a child (ids …) sidecar and stays idempotent
+
+## lint
+
+- flags an (id …) form attached to a note or net
+- flags a nested (id (id …)) residue form
+- flags a token that is not 8 hex chars starting a-f
+- flags a duplicate id token within one design
 
 ## convert/footprint
 
