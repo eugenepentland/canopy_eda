@@ -913,11 +913,13 @@ const MAX_PCB_BYTES: usize = 64 * 1024 * 1024;
 
 /// POST /api/sync-kicad-pcb/:name — file-based KiCad sync. Reads the
 /// `.kicad_pcb` declared by the design's `(kicad-pcb "<path>")` form,
-/// computes the diff against the design's flattened netlist, and
-/// returns the same JSON envelope `syncPlanApi` would have produced —
-/// without going through the Go IPC agent. The writer side that
-/// applies the ops to the file in place lands in Phase 3; today
-/// every request is effectively a dry run.
+/// computes the diff against the design's flattened netlist, and applies
+/// the ops to the file in place — without going through the Go IPC agent.
+/// Query flags: `?dry_run=1` returns the JSON envelope `syncPlanApi` would
+/// produce without writing; `?migrate=1` enables the heuristic relink
+/// (parent-path + value + net signature) to recover a board whose
+/// canopy_uuids/ref-des drifted; `?prune=1` turns every `flag_stale` op
+/// into a real `remove`.
 pub fn syncKicadPcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = HTTP_NOT_FOUND;
@@ -925,7 +927,12 @@ pub fn syncKicadPcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     };
     const dry_run = isDryRun(req);
     const prune_stale = isQueryFlagSet(req, "prune");
-    runKicadPcbSync(ctx, req, res, name, dry_run, prune_stale) catch |err| switch (err) {
+    // `?migrate=1` enables the heuristic relink (parent-path + value + net
+    // signature) so a board whose canopy_uuids/ref-des drifted from the
+    // design gets re-linked in place (placement preserved) instead of
+    // churning into add+stale. The conservative default stays off.
+    const migrate = isQueryFlagSet(req, "migrate");
+    runKicadPcbSync(ctx, req, res, name, dry_run, prune_stale, migrate) catch |err| switch (err) {
         error.PcbPathUnset => sendError(res, HTTP_BAD_REQUEST, ERR_NO_PCB_PATH),
         error.PcbReadFailed => sendError(res, HTTP_INTERNAL_ERROR, ERR_PCB_READ_FAILED),
         error.PcbParseFailed => sendError(res, HTTP_INTERNAL_ERROR, ERR_PCB_PARSE_FAILED),
@@ -963,6 +970,7 @@ fn runKicadPcbSync(
     name: []const u8,
     dry_run: bool,
     prune_stale: bool,
+    migrate: bool,
 ) KicadPcbSyncError!void {
     // Resolve the design and its declared PCB path.
     const board_path = try paths.designSourcePath(req.arena, ctx.project_dir, name);
@@ -989,7 +997,7 @@ fn runKicadPcbSync(
     const plan: ParsedSyncPlan = .{
         .board = board,
         .prune_stale = prune_stale,
-        .migrate_heuristic = false,
+        .migrate_heuristic = migrate,
         .applied_ops = std.StringHashMap(void).init(req.arena),
     };
     const run = try runSyncPlan(req.arena, ctx.allocator, ctx.project_dir, name, plan);
