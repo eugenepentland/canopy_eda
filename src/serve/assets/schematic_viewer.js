@@ -853,6 +853,74 @@
     });
   }
 
+  // ---- Push to KiCad PCB ----
+  // POSTs /api/sync-kicad-pcb/:name. The server reads the design's
+  // (kicad-pcb "<path>") form, runs the diff against the current
+  // .kicad_pcb, and writes the updated file in place. pcbnew either
+  // auto-prompts to reload (KiCad 8+) or surfaces the change via
+  // File → Revert (KiCad 7). Shows applied-op counts on success and
+  // the server's error body on failure (e.g. "design has no
+  // (kicad-pcb …) form").
+  var pushPcbBtn = document.getElementById('push-kicad-pcb-btn');
+  var pushPcbPruneBtn = document.getElementById('push-kicad-pcb-prune-btn');
+  var pushPcbStatus = document.getElementById('push-kicad-pcb-status');
+
+  // Shared click handler so the plain Push and Push + Delete Stale
+  // buttons stay in lock-step on busy-state, status text, error
+  // formatting, and the success summary. The only thing that varies
+  // is the URL query (`?prune=1`) and the running-label.
+  function wireKicadPushButton(btn, url, runningLabel) {
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      if (btn.dataset.busy === '1') return;
+      btn.dataset.busy = '1';
+      var original = btn.textContent;
+      btn.textContent = runningLabel;
+      if (pushPcbStatus) {
+        pushPcbStatus.textContent = '';
+        pushPcbStatus.style.color = '';
+      }
+      fetch(url, { method: 'POST' }).then(function (r) {
+        return r.text().then(function (body) { return { ok: r.ok, body: body }; });
+      }).then(function (resp) {
+        btn.textContent = original;
+        btn.dataset.busy = '';
+        if (!resp.ok) {
+          if (pushPcbStatus) {
+            pushPcbStatus.textContent = resp.body || 'Push failed.';
+            pushPcbStatus.style.color = '#f85149';
+          }
+          return;
+        }
+        var j = {};
+        try { j = JSON.parse(resp.body); } catch (_e) {}
+        var a = (j && j.applied) || {};
+        var msg = '✓ Wrote ' +
+          (a.added || 0) + ' added, ' +
+          (a.removed || 0) + ' removed, ' +
+          (a.swapped || 0) + ' swapped, ' +
+          (a.pad_nets_set || 0) + ' pad-nets, ' +
+          (a.fields_set || 0) + ' fields';
+        if (j && j.warning) {
+          msg += ' — ⚠ ' + j.warning;
+          if (pushPcbStatus) pushPcbStatus.style.color = '#d29922';
+        } else if (pushPcbStatus) {
+          pushPcbStatus.style.color = '#3fb950';
+        }
+        if (pushPcbStatus) pushPcbStatus.textContent = msg;
+      }).catch(function (e) {
+        btn.textContent = original;
+        btn.dataset.busy = '';
+        if (pushPcbStatus) {
+          pushPcbStatus.textContent = 'Push failed: ' + e;
+          pushPcbStatus.style.color = '#f85149';
+        }
+      });
+    });
+  }
+  wireKicadPushButton(pushPcbBtn, '/api/sync-kicad-pcb/' + DESIGN_NAME, 'Pushing…');
+  wireKicadPushButton(pushPcbPruneBtn, '/api/sync-kicad-pcb/' + DESIGN_NAME + '?prune=1', 'Pushing + pruning…');
+
   // ---- Copy SRC ----
   // Fetches the raw .sexp source via /api/source/:name and writes it to the
   // clipboard. Falls back to a hidden textarea + execCommand when the async

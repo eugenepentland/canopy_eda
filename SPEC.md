@@ -27,11 +27,31 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Prints short nested lists inline on one line
 - Prints long nested lists with multiline indentation
 - Round-trips parse to print to parse producing identical AST
-- Round-trips every .sexp file under projects/designs through parse → print → parse with structurally equal AST
+- Round-trips every .sexp and .kicad_pcb file under projects/designs through parse → print → parse with structurally equal AST
 
 ## sexpr/ast
 
 - Constructs typed AST nodes for list, atom, string, int, float, and unit values
+
+## kicad_pcb/reader
+
+Public functions: readBoard
+
+- parses footprint reference, value, kicad_uuid, and canopy_uuid from properties
+- parses (locked yes) as locked footprint
+- reads every footprint in a real .kicad_pcb fixture
+
+## kicad_pcb/writer
+
+Public functions: applyOpsToSource, applyOpsToSourceWithStats
+
+- set_pad_net rewrites the (net …) form on the matching pad
+- remove drops the matching footprint from the output
+- set_field upserts a property on the targeted footprint
+- set_locked toggles (locked yes) on the targeted footprint
+- add wires pad nets from the op's [pin, net] array
+- swap_footprint accepts a legacy (module …) kmod
+- preserves pcbnew-style boards: in-element net forms
 
 ## eval/builtins
 
@@ -198,6 +218,7 @@ Public functions: analyze
 
 - bus-net expands one net tie per index in the inclusive range
 - bus-port expands one port per index times optional suffix list
+- kicad-pcb form captures the literal path on the design block
 
 ## eval/test_point
 
@@ -314,11 +335,18 @@ Public functions: notFound, serve
 
 ## serve/sync
 
+Public functions: runSyncPlan, syncKicadPcbApi, syncPlanApi
+
+- runSyncPlan diffs a parsed board state against the design and returns a JSON envelope with version, summary, and the ops list
+- runSyncPlan errors with NotADesign when the source file does not evaluate to a design-block
+- runSyncPlan errors with BuildFailed when the source file fails to evaluate
 - pickByUuidOrRef returns the by_uuid match when the instance's canopy_uuid is on the board
 - pickByUuidOrRef falls back to by_ref when canopy_uuid is missing and the fp is not reserved
 - pickByUuidOrRef refuses a by_ref match whose fp is reserved by another instance's canopy_uuid
 - pickByUuidOrRef refuses a by_uuid match whose fp another instance already claimed in this walk
 - pickByUuidOrRef returns null when neither tier matches
+- pickByKicadUuid adopts an orphan whose KiCad uuid equals the instance's canopy_uuid
+- pickByKicadUuid refuses an fp another instance already claimed in this walk
 
 ## serve/vfs
 

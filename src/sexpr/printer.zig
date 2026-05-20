@@ -226,7 +226,7 @@ fn expectNodesEqual(a: Node, b: Node) !void {
     }
 }
 
-// spec: sexpr/printer - Round-trips every .sexp file under projects/designs through parse → print → parse with structurally equal AST
+// spec: sexpr/printer - Round-trips every .sexp and .kicad_pcb file under projects/designs through parse → print → parse with structurally equal AST
 test "round-trip every project .sexp file" {
     const alloc = std.testing.allocator;
     const parser = @import("parser.zig");
@@ -235,6 +235,14 @@ test "round-trip every project .sexp file" {
     // that's not true (some sandboxes detach the runner from a real
     // working tree) the directory just isn't here — skip silently so
     // the unit-test step keeps working on its own.
+    //
+    // The walk covers both `.sexp` (project source) and `.kicad_pcb`
+    // (KiCad PCB native format — same S-expression dialect, also under
+    // `projects/designs/out/`). The PCB fixtures are the cheapest smoke
+    // test for the file-based KiCad sync that mutates these files in
+    // place; if parse → print → parse loses structure (hex literals like
+    // 0x..._..., unit-suffix floats, layer ordering) it would silently
+    // corrupt the board.
     var dir = std.fs.cwd().openDir("projects/designs", .{ .iterate = true }) catch return;
     defer dir.close();
 
@@ -244,12 +252,14 @@ test "round-trip every project .sexp file" {
     var count: usize = 0;
     while (try walker.next()) |entry| {
         if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.basename, ".sexp")) continue;
+        const is_sexp = std.mem.endsWith(u8, entry.basename, ".sexp");
+        const is_pcb = std.mem.endsWith(u8, entry.basename, ".kicad_pcb");
+        if (!is_sexp and !is_pcb) continue;
 
         const file = try dir.openFile(entry.path, .{});
         defer file.close();
         // 16 MiB cap protects the test from accidentally pointing at a
-        // checked-in binary; every real .sexp in this tree is well
+        // checked-in binary; every real source file in this tree is well
         // under that.
         const src = try file.readToEndAlloc(alloc, 16 * 1024 * 1024);
         defer alloc.free(src);
@@ -279,6 +289,6 @@ test "round-trip every project .sexp file" {
         count += 1;
     }
 
-    // Sanity: the walk should have found at least one design.
+    // Sanity: the walk should have found at least one file.
     try std.testing.expect(count > 0);
 }

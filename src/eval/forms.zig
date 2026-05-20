@@ -109,6 +109,7 @@ pub const ScopeForm = enum {
     verifies,
     test_point,
     power_config,
+    kicad_pcb,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -137,6 +138,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "verifies", .verifies },
     .{ "test-point", .test_point },
     .{ "power-config", .power_config },
+    .{ "kicad-pcb", .kicad_pcb },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -392,6 +394,10 @@ pub const scope_form_docs = blk: {
     t[@intFromEnum(ScopeForm.power_config)] = .{ .scope = tl, .doc = .{
         .syntax = "(power-config (derating N))",
         .summary = "Per-design power-budget configuration knobs.",
+    } };
+    t[@intFromEnum(ScopeForm.kicad_pcb)] = .{ .scope = tl, .doc = .{
+        .syntax = "(kicad-pcb \"absolute/path/to/board.kicad_pcb\")",
+        .summary = "Declare the PCB file the file-based KiCad sync writes board updates to.",
     } };
     break :blk t;
 };

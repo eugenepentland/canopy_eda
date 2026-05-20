@@ -60,6 +60,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var verifications: std.ArrayListUnmanaged(env_mod.Verification) = .empty;
     var test_points: std.ArrayListUnmanaged(env_mod.TestPoint) = .empty;
     var derating: ?f64 = null;
+    var kicad_pcb_path: ?[]const u8 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
 
     // Pre-scan: register all explicit ref-des to avoid auto-counter collisions
@@ -110,6 +111,17 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             .power_config => if (power_config_mod.parse(form_children)) |cfg| {
                 if (cfg.derating) |d| derating = d;
             },
+            .kicad_pcb => {
+                // (kicad-pcb "<absolute path>") — captures the on-disk
+                // PCB the file-based sync endpoint writes to. Only the
+                // literal string form is supported; no env-var or
+                // template expansion (NAS paths are deterministic).
+                if (form_children.len >= 2) {
+                    if (form_children[1].asString()) |p| {
+                        kicad_pcb_path = p;
+                    }
+                }
+            },
             // Section-only forms are silently ignored at the top level —
             // a design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract.
@@ -144,6 +156,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .verifications = verifications.toOwnedSlice(self.allocator) catch &.{},
         .test_points = test_points.toOwnedSlice(self.allocator) catch &.{},
         .derating = derating,
+        .kicad_pcb_path = kicad_pcb_path,
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -469,7 +482,7 @@ fn evalSection(
             // Shared-form variants are consumed above by
             // `processSharedSectionForm`; top-level-only forms are
             // silently ignored inside a section body.
-            .status, .description, .note, .port, .protocol, .calc, .group, .sub_block, .verifies, .test_point, .power_config => {},
+            .status, .description, .note, .port, .protocol, .calc, .group, .sub_block, .verifies, .test_point, .power_config, .kicad_pcb => {},
         }
     }
 
@@ -669,7 +682,9 @@ fn evalSubSection(
             // Sub-sections don't recurse, don't carry top-level-only
             // forms, and don't have `role`/`diagram`. Shared-form
             // variants went through `processSharedSectionForm` above.
-            .status, .description, .note, .port, .protocol, .calc, .role, .diagram, .section, .group, .sub_block, .verifies, .test_point, .power_config => {},
+            // Sub-sections deliberately accept no top-level-only or
+            // section-only forms beyond what's matched above.
+            else => {},
         }
     }
     const final_sub_instances = sub_instances.toOwnedSlice(self.allocator) catch &.{};
@@ -833,6 +848,33 @@ fn parseVerifies(self: *Evaluator, form_children: []const Node, env: *Env) ?env_
 // ── Tests ─────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+// spec: eval/design_block - kicad-pcb form captures the literal path on the design block
+test "design-block captures (kicad-pcb path)" {
+    // Drive the full evaluator with a tiny design-block source: the
+    // form should land on `DesignBlock.kicad_pcb_path` as the literal
+    // string the user typed, with no expansion or canonicalisation.
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (kicad-pcb "/mnt/nas/test.kicad_pcb"))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    const value = try evalDesignBlock(&eval, form_children[1..], &env);
+    const block = switch (value) {
+        .design_block => |b| b,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expect(block.kicad_pcb_path != null);
+    try testing.expectEqualStrings("/mnt/nas/test.kicad_pcb", block.kicad_pcb_path.?);
+}
 
 // spec: eval/design_block - bus-net expands one net tie per index in the inclusive range
 test "evalBusNetForm expands inclusive index range" {
