@@ -1,12 +1,15 @@
-//! Server-side diff endpoint for the local Go IPC sync agent.
+//! Server-side diff and file-based applier for KiCad PCB sync.
 //!
-//!   POST /api/sync-plan/:name — client posts the current state of
-//!   footprints on the open KiCad PCB; server compares against the
-//!   design's flattened netlist and returns ops to apply (set_field /
-//!   set_pad_net / add / swap_footprint / remove / flag_stale).
-//!   `add` / `swap_footprint` carry their `.kicad_mod` text inline.
+//!   POST /api/sync-plan/:name — accepts a board state from a client,
+//!   compares against the design's flattened netlist, and returns ops to
+//!   apply (set_field / set_pad_net / add / swap_footprint / remove /
+//!   flag_stale). `add` / `swap_footprint` carry their `.kicad_mod`
+//!   text inline. Useful as a debug endpoint.
 //!
-//! Companion to `tools/kicad-sync-go/`.
+//!   POST /api/sync-kicad-pcb/:name — reads the design's
+//!   `(kicad-pcb "<path>")` form, runs the diff against the file on
+//!   disk, and writes the updated `.kicad_pcb` in place. This is the
+//!   button-driven path the schematic viewer wires up.
 
 const std = @import("std");
 const httpz = @import("httpz");
@@ -51,9 +54,16 @@ fn warnResolveIdentities(name: []const u8, err: anyerror) void {
 
 // ── /api/sync-plan ──────────────────────────────────────────────────────
 
-const PadAssign = struct { number: []const u8, net: []const u8 };
+/// One (pad number, net name) assignment on a KiCad board footprint —
+/// the granularity the diff loop compares against the design's flattened
+/// netlist when deciding whether to emit a set_pad_net op.
+pub const PadAssign = struct { number: []const u8, net: []const u8 };
 
-const BoardFp = struct {
+/// Snapshot of one footprint as it exists on the user's `.kicad_pcb`.
+/// Built either by the Go IPC agent from KiCad's protobuf socket or by
+/// the file-based reader directly from the on-disk file; both produce
+/// the same shape so `runSyncPlan` doesn't care which path filled it.
+pub const BoardFp = struct {
     /// Project-stable canopy_uuid custom field. Empty when the footprint
     /// has never been synced (or was placed manually in KiCad).
     uuid: []const u8,
@@ -88,7 +98,12 @@ fn opTargetUuid(m: BoardFp) []const u8 {
     return m.uuid;
 }
 
-const ParsedSyncPlan = struct {
+/// Full request payload for `runSyncPlan`: the board's current footprint
+/// list plus the knobs that influence matching (migration heuristics,
+/// stale-prune mode, applied-op suppression). Built from the agent's
+/// JSON body via `parseSyncPlanBody` or directly by the file-based PCB
+/// reader.
+pub const ParsedSyncPlan = struct {
     board: []const BoardFp,
     prune_stale: bool,
     /// When true, after canopy_uuid + ref_des matching, try a third tier
@@ -656,6 +671,198 @@ const SyncSummary = struct {
     suppressed: u32 = 0,
 };
 
+/// Internal result of running the diff against a parsed plan. Holds the
+/// fully-formed response body (envelope + ops list as JSON) plus the
+/// summary counters and design version, so HTTP and file-based callers
+/// can pick the format they need without re-running the diff. Used by
+/// `syncPlanApi` (returns the body verbatim) and by the file-based PCB
+/// sync (parses the ops list back out of `body` to apply locally).
+pub const SyncRunResult = struct {
+    body: []const u8,
+    version: u64,
+    summary: SyncSummary,
+};
+
+/// What went wrong before the diff loop could even start: a missing
+/// design file, a build error, or the file not being a design-block.
+/// Pure failure modes — every successful run returns SyncRunResult.
+pub const SyncRunError = error{ NotADesign, BuildFailed } || HandlerError;
+
+/// Run the sync-plan diff against `parsed` and return the JSON-formatted
+/// response (same shape `syncPlanApi` writes to the HTTP response body).
+/// Extracted from `syncPlanApi` so the file-based KiCad-PCB sync can
+/// share the same diff/op-generation logic without going through HTTP.
+pub fn runSyncPlan(
+    arena: std.mem.Allocator,
+    handler_alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    parsed: ParsedSyncPlan,
+) SyncRunError!SyncRunResult {
+    const board_path = try paths.designSourcePath(arena, project_dir, name);
+    var eval = Evaluator.init(handler_alloc, project_dir);
+    defer eval.deinit();
+    const result = eval.evalFile(board_path) catch return error.BuildFailed;
+    const block = switch (result) {
+        .design_block => |b| b,
+        else => return error.NotADesign,
+    };
+
+    const bom_path = try paths.designSiblingPath(arena, project_dir, name, ".bom");
+    bom.resolveIdentities(handler_alloc, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
+
+    var instances: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
+    try netlist_mod.collectInstances(arena, block, "", &instances);
+    var nets: std.ArrayListUnmanaged(export_kicad.FlatNet) = .empty;
+    try export_kicad.flattenAndMergeNets(arena, block, &nets);
+
+    // (ref, pin) -> net_name. Empty net names are excluded (NC pads).
+    //
+    // Two-stage name normalisation runs before we map pins → nets:
+    //
+    //  1. Dot-collapse: `(decouple …)` generates per-pin sub-nets of the
+    //     form `<rail>.<refdes>.<pin>` (e.g. `VDD.U18.IN`) as a routing
+    //     organisation aid. The design author's intent is that they
+    //     share the rail's electrical net; collapse unconditionally to
+    //     the part before the first `.`.
+    //  2. Slash-strip: sub-block path prefixes (e.g. `adc1/REGCAP`)
+    //     come from `collectNets` walking sub_blocks. Strip when the
+    //     bare name is globally unique across the post-dot-collapse
+    //     netlist, keep when it would collide. `adc1/REGCAP`,
+    //     `adc2/REGCAP`, `adc3/REGCAP` are three physically distinct
+    //     decoupling rails that must NOT merge, so all three keep
+    //     their prefix.
+    var bare_counts = std.StringHashMap(u32).init(arena);
+    for (nets.items) |net| {
+        if (net.name.len == 0) continue;
+        const post_dot = collapseDotSubNet(net.name);
+        const bare = bareNetName(post_dot);
+        const e = try bare_counts.getOrPut(bare);
+        if (!e.found_existing) e.value_ptr.* = 0;
+        e.value_ptr.* += 1;
+    }
+    var pad_net_map = std.StringHashMap([]const u8).init(arena);
+    for (nets.items) |net| {
+        if (net.name.len == 0) continue;
+        const post_dot = collapseDotSubNet(net.name);
+        const bare = bareNetName(post_dot);
+        const display = if ((bare_counts.get(bare) orelse 0) == 1) bare else post_dot;
+        for (net.pins) |pin| {
+            const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ pin.ref_des, pin.pin });
+            try pad_net_map.put(key, display);
+        }
+    }
+
+    var by_uuid = std.StringHashMap(BoardFp).init(arena);
+    var by_ref = std.StringHashMap(BoardFp).init(arena);
+    var by_kicad_uuid = std.StringHashMap(BoardFp).init(arena);
+    for (parsed.board) |bfp| {
+        if (bfp.uuid.len > 0) try by_uuid.put(bfp.uuid, bfp);
+        if (bfp.ref.len > 0) try by_ref.put(bfp.ref, bfp);
+        if (bfp.kicad_uuid.len > 0) try by_kicad_uuid.put(bfp.kicad_uuid, bfp);
+    }
+
+    // Heuristic index for --migrate mode. Maps each design instance's
+    // canopy uuid → the board footprint it should adopt placement from,
+    // when both sides have the same count of footprints with the same
+    // (parent_path, footprint_name, value) signature. Pairing within a
+    // group is deterministic-by-ref so the user gets a reproducible
+    // shuffle even when individual identities can't be recovered.
+    var by_migration = std.StringHashMap(BoardFp).init(arena);
+    var by_netsig = std.StringHashMap(BoardFp).init(arena);
+    if (parsed.migrate_heuristic) {
+        try buildMigrationIndex(arena, parsed.board, instances.items, &by_migration);
+        // Net-signature relink runs after (parent_path, value) migration so
+        // it only considers the orphans that group-size matching couldn't
+        // pair — typically board fps the design author moved across the
+        // hierarchy (top-level `Q1` → `disp/Q3`). Both tiers are gated on
+        // --migrate so the agent's default sync stays conservative.
+        try buildNetSignatureRelinkIndex(
+            arena,
+            project_dir,
+            parsed.board,
+            instances.items,
+            &by_uuid,
+            &by_ref,
+            &by_migration,
+            &pad_net_map,
+            &by_netsig,
+        );
+    }
+
+    var model_cfg = export_kicad.loadModelConfig(arena, project_dir);
+    defer model_cfg.deinit();
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = project_dir, .model_cfg = &model_cfg };
+
+    var ops_buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = ops_buf.writer(arena);
+    var first_op = true;
+    var summary = SyncSummary{};
+    var matched_uuids = std.StringHashMap(void).init(arena);
+    var canonical_fp_name = std.StringHashMap([]const u8).init(arena);
+
+    // Pre-walk instances to find every board fp that some design instance
+    // will claim via its canopy_uuid. The by_ref tier in matchInstance
+    // must refuse to claim any of these — otherwise two design instances
+    // collide on one fp (one via by_uuid, the other via by_ref) and emit
+    // contradictory set_field ops, producing the flip-flop where every
+    // sync rewrites the same fp's reference and canopy_uuid.
+    var reserved_kicad_uuids = std.StringHashMap(void).init(arena);
+    for (instances.items) |inst| {
+        if (by_uuid.get(inst.uuid)) |m| {
+            if (m.kicad_uuid.len > 0) try reserved_kicad_uuids.put(m.kicad_uuid, {});
+        }
+    }
+
+    try w.writeAll("[");
+
+    var applied_ops_local = parsed.applied_ops;
+    var diff_ctx = DiffContext{
+        .by_uuid = &by_uuid,
+        .by_ref = &by_ref,
+        .by_kicad_uuid = &by_kicad_uuid,
+        .by_migration = &by_migration,
+        .by_netsig = &by_netsig,
+        .reserved_kicad_uuids = &reserved_kicad_uuids,
+        .pad_net_map = &pad_net_map,
+        .matched_uuids = &matched_uuids,
+        .canonical_fp_name = &canonical_fp_name,
+        .applied_ops = &applied_ops_local,
+        .spc = &spc,
+        .summary = &summary,
+        .migrate_heuristic = parsed.migrate_heuristic,
+    };
+    for (instances.items) |inst| try handleInstance(&diff_ctx, inst, &w, &first_op);
+
+    try emitStaleOps(arena, &diff_ctx, parsed, &matched_uuids, &w, &first_op, &summary);
+
+    try w.writeAll("]");
+
+    // Final response envelope.
+    var resp_buf: std.ArrayListUnmanaged(u8) = .empty;
+    const rw = resp_buf.writer(handler_alloc);
+    const version = serve_root.getLiveVersion(name);
+    try rw.print(
+        "{{\"design_version\":{d},\"summary\":{{" ++
+            "\"updated\":{d},\"added\":{d},\"removed\":{d}," ++
+            "\"swapped\":{d},\"flagged_stale\":{d},\"suppressed\":{d}" ++
+            "}},\"ops\":",
+        .{
+            version,            summary.updated, summary.added,
+            summary.removed,    summary.swapped, summary.flagged_stale,
+            summary.suppressed,
+        },
+    );
+    try rw.writeAll(ops_buf.items);
+    try rw.writeAll("}");
+
+    return SyncRunResult{
+        .body = resp_buf.items,
+        .version = version,
+        .summary = summary,
+    };
+}
+
 /// POST /api/sync-plan/:name — compare client board state against the
 /// design's flattened netlist and return ops to apply. Auth-gated by
 /// the same OAuth/plugin-token check used for the manifest endpoints.
@@ -676,176 +883,260 @@ pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         return;
     };
 
-    const board_path = try paths.designSourcePath(req.arena, ctx.project_dir, name);
-    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
-    defer eval.deinit();
-    const result = eval.evalFile(board_path) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = ERR_BUILD_ERROR;
-        return;
-    };
-    const block = switch (result) {
-        .design_block => |b| b,
-        else => {
+    const result = runSyncPlan(req.arena, ctx.allocator, ctx.project_dir, name, parsed) catch |err| switch (err) {
+        error.BuildFailed => {
+            res.status = HTTP_INTERNAL_ERROR;
+            res.body = ERR_BUILD_ERROR;
+            return;
+        },
+        error.NotADesign => {
             res.status = HTTP_INTERNAL_ERROR;
             res.body = ERR_NOT_A_DESIGN;
             return;
         },
+        else => |e| return e,
     };
 
-    const bom_path = try paths.designSiblingPath(req.arena, ctx.project_dir, name, ".bom");
-    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| warnResolveIdentities(name, e);
+    res.content_type = .JSON;
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.body = result.body;
+}
 
-    var instances: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
-    try netlist_mod.collectInstances(req.arena, block, "", &instances);
-    var nets: std.ArrayListUnmanaged(export_kicad.FlatNet) = .empty;
-    try export_kicad.flattenAndMergeNets(req.arena, block, &nets);
+const kicad_pcb_reader = @import("../kicad_pcb/reader.zig");
+const kicad_pcb_writer = @import("../kicad_pcb/writer.zig");
 
-    // (ref, pin) -> net_name. Empty net names are excluded (NC pads).
-    //
-    // Two-stage name normalisation runs before we map pins → nets:
-    //
-    //  1. Dot-collapse: `(decouple …)` generates per-pin sub-nets of the
-    //     form `<rail>.<refdes>.<pin>` (e.g. `VDD.U18.IN`) as a routing
-    //     organisation aid. The design author's intent is that they
-    //     share the rail's electrical net; collapse unconditionally to
-    //     the part before the first `.`.
-    //  2. Slash-strip: sub-block path prefixes (e.g. `adc1/REGCAP`)
-    //     come from `collectNets` walking sub_blocks. Strip when the
-    //     bare name is globally unique across the post-dot-collapse
-    //     netlist, keep when it would collide. `adc1/REGCAP`,
-    //     `adc2/REGCAP`, `adc3/REGCAP` are three physically distinct
-    //     decoupling rails that must NOT merge, so all three keep
-    //     their prefix.
-    var bare_counts = std.StringHashMap(u32).init(req.arena);
-    for (nets.items) |net| {
-        if (net.name.len == 0) continue;
-        const post_dot = collapseDotSubNet(net.name);
-        const bare = bareNetName(post_dot);
-        const e = try bare_counts.getOrPut(bare);
-        if (!e.found_existing) e.value_ptr.* = 0;
-        e.value_ptr.* += 1;
-    }
-    var pad_net_map = std.StringHashMap([]const u8).init(req.arena);
-    for (nets.items) |net| {
-        if (net.name.len == 0) continue;
-        const post_dot = collapseDotSubNet(net.name);
-        const bare = bareNetName(post_dot);
-        const display = if ((bare_counts.get(bare) orelse 0) == 1) bare else post_dot;
-        for (net.pins) |pin| {
-            const key = try std.fmt.allocPrint(req.arena, "{s}|{s}", .{ pin.ref_des, pin.pin });
-            try pad_net_map.put(key, display);
-        }
-    }
+const ERR_NO_PCB_PATH =
+    "design has no (kicad-pcb \"<path>\") form — declare the target board file in the .sexp before pushing";
+const ERR_PCB_READ_FAILED = "failed to read the .kicad_pcb file at the declared path";
+const ERR_PCB_PARSE_FAILED = "failed to parse the .kicad_pcb file as S-expression";
+const MAX_PCB_BYTES: usize = 64 * 1024 * 1024;
 
-    var by_uuid = std.StringHashMap(BoardFp).init(req.arena);
-    var by_ref = std.StringHashMap(BoardFp).init(req.arena);
-    for (parsed.board) |bfp| {
-        if (bfp.uuid.len > 0) try by_uuid.put(bfp.uuid, bfp);
-        if (bfp.ref.len > 0) try by_ref.put(bfp.ref, bfp);
-    }
-
-    // Heuristic index for --migrate mode. Maps each design instance's
-    // canopy uuid → the board footprint it should adopt placement from,
-    // when both sides have the same count of footprints with the same
-    // (parent_path, footprint_name, value) signature. Pairing within a
-    // group is deterministic-by-ref so the user gets a reproducible
-    // shuffle even when individual identities can't be recovered.
-    var by_migration = std.StringHashMap(BoardFp).init(req.arena);
-    var by_netsig = std.StringHashMap(BoardFp).init(req.arena);
-    if (parsed.migrate_heuristic) {
-        try buildMigrationIndex(req.arena, parsed.board, instances.items, &by_migration);
-        // Net-signature relink runs after (parent_path, value) migration so
-        // it only considers the orphans that group-size matching couldn't
-        // pair — typically board fps the design author moved across the
-        // hierarchy (top-level `Q1` → `disp/Q3`). Both tiers are gated on
-        // --migrate so the agent's default sync stays conservative.
-        try buildNetSignatureRelinkIndex(
-            req.arena,
-            ctx.project_dir,
-            parsed.board,
-            instances.items,
-            &by_uuid,
-            &by_ref,
-            &by_migration,
-            &pad_net_map,
-            &by_netsig,
-        );
-    }
-
-    var model_cfg = export_kicad.loadModelConfig(req.arena, ctx.project_dir);
-    defer model_cfg.deinit();
-    var spc = SyncPlanContext{ .arena = req.arena, .project_dir = ctx.project_dir, .model_cfg = &model_cfg };
-
-    var ops_buf: std.ArrayListUnmanaged(u8) = .empty;
-    const w = ops_buf.writer(req.arena);
-    var first_op = true;
-    var summary = SyncSummary{};
-    var matched_uuids = std.StringHashMap(void).init(req.arena);
-    var canonical_fp_name = std.StringHashMap([]const u8).init(req.arena);
-
-    // Pre-walk instances to find every board fp that some design instance
-    // will claim via its canopy_uuid. The by_ref tier in matchInstance
-    // must refuse to claim any of these — otherwise two design instances
-    // collide on one fp (one via by_uuid, the other via by_ref) and emit
-    // contradictory set_field ops, producing the flip-flop where every
-    // sync rewrites the same fp's reference and canopy_uuid.
-    var reserved_kicad_uuids = std.StringHashMap(void).init(req.arena);
-    for (instances.items) |inst| {
-        if (by_uuid.get(inst.uuid)) |m| {
-            if (m.kicad_uuid.len > 0) try reserved_kicad_uuids.put(m.kicad_uuid, {});
-        }
-    }
-
-    try w.writeAll("[");
-
-    var applied_ops_local = parsed.applied_ops;
-    var diff_ctx = DiffContext{
-        .by_uuid = &by_uuid,
-        .by_ref = &by_ref,
-        .by_migration = &by_migration,
-        .by_netsig = &by_netsig,
-        .reserved_kicad_uuids = &reserved_kicad_uuids,
-        .pad_net_map = &pad_net_map,
-        .matched_uuids = &matched_uuids,
-        .canonical_fp_name = &canonical_fp_name,
-        .applied_ops = &applied_ops_local,
-        .spc = &spc,
-        .summary = &summary,
-        .migrate_heuristic = parsed.migrate_heuristic,
+/// POST /api/sync-kicad-pcb/:name — file-based KiCad sync. Reads the
+/// `.kicad_pcb` declared by the design's `(kicad-pcb "<path>")` form,
+/// computes the diff against the design's flattened netlist, and
+/// returns the same JSON envelope `syncPlanApi` would have produced —
+/// without going through the Go IPC agent. The writer side that
+/// applies the ops to the file in place lands in Phase 3; today
+/// every request is effectively a dry run.
+pub fn syncKicadPcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = HTTP_NOT_FOUND;
+        return;
     };
-    for (instances.items) |inst| try handleInstance(&diff_ctx, inst, &w, &first_op);
+    const dry_run = isDryRun(req);
+    const prune_stale = isQueryFlagSet(req, "prune");
+    runKicadPcbSync(ctx, req, res, name, dry_run, prune_stale) catch |err| switch (err) {
+        error.PcbPathUnset => sendError(res, HTTP_BAD_REQUEST, ERR_NO_PCB_PATH),
+        error.PcbReadFailed => sendError(res, HTTP_INTERNAL_ERROR, ERR_PCB_READ_FAILED),
+        error.PcbParseFailed => sendError(res, HTTP_INTERNAL_ERROR, ERR_PCB_PARSE_FAILED),
+        error.PcbWriteFailed => sendError(res, HTTP_INTERNAL_ERROR, "failed to write the updated .kicad_pcb to disk"),
+        error.WriterFailed => sendError(res, HTTP_INTERNAL_ERROR, "failed to apply ops to the .kicad_pcb (writer error)"),
+        error.EnvelopeParseFailed => sendError(res, HTTP_INTERNAL_ERROR, "internal: failed to parse sync-plan envelope"),
+        error.BuildFailed => sendError(res, HTTP_INTERNAL_ERROR, ERR_BUILD_ERROR),
+        error.NotADesign => sendError(res, HTTP_INTERNAL_ERROR, ERR_NOT_A_DESIGN),
+        else => |e| return e,
+    };
+}
 
-    try emitStaleOps(req.arena, &diff_ctx, parsed, &matched_uuids, &w, &first_op, &summary);
+const KicadPcbSyncError = error{
+    PcbPathUnset,
+    PcbReadFailed,
+    PcbParseFailed,
+    PcbWriteFailed,
+    WriterFailed,
+    EnvelopeParseFailed,
+} || SyncRunError;
 
-    try w.writeAll("]");
+fn sendError(res: *httpz.Response, status: u16, body: []const u8) void {
+    res.status = status;
+    res.body = body;
+}
 
-    // Final response envelope.
+/// Inner implementation of `syncKicadPcbApi` — uses errors instead of
+/// inline HTTP-response writes so the wrapper can stay under Guardian's
+/// returns-per-function cap. The wrapper translates each error variant
+/// to an HTTP status + body.
+fn runKicadPcbSync(
+    ctx: *Handler,
+    req: *httpz.Request,
+    res: *httpz.Response,
+    name: []const u8,
+    dry_run: bool,
+    prune_stale: bool,
+) KicadPcbSyncError!void {
+    // Resolve the design and its declared PCB path.
+    const board_path = try paths.designSourcePath(req.arena, ctx.project_dir, name);
+    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+    const result_val = eval.evalFile(board_path) catch return error.BuildFailed;
+    const block = switch (result_val) {
+        .design_block => |b| b,
+        else => return error.NotADesign,
+    };
+    const pcb_path = block.kicad_pcb_path orelse return error.PcbPathUnset;
+
+    // Read the PCB file from disk. Absolute paths (NAS mounts) are the
+    // expected form; relative paths resolve from the server's CWD.
+    const src = infra_fs.cwd().readFileAlloc(req.arena, pcb_path, MAX_PCB_BYTES) catch return error.PcbReadFailed;
+
+    const board = kicad_pcb_reader.readBoard(req.arena, src) catch return error.PcbParseFailed;
+
+    // Run the diff. `migrate_heuristic` defaults off for the file-based
+    // path; `prune_stale` is opt-in via `?prune=1` from the
+    // "Push + Delete Stale" button — it flips every `flag_stale` op in
+    // the diff into a real `remove` so orphan footprints (no longer in
+    // the design) get dropped from the file in one shot.
+    const plan: ParsedSyncPlan = .{
+        .board = board,
+        .prune_stale = prune_stale,
+        .migrate_heuristic = false,
+        .applied_ops = std.StringHashMap(void).init(req.arena),
+    };
+    const run = try runSyncPlan(req.arena, ctx.allocator, ctx.project_dir, name, plan);
+
+    // Dry-run mode (?dry_run=1) returns the would-be ops without
+    // writing — useful for the agent-parity comparison and as a
+    // pre-flight from the UI.
+    if (dry_run) {
+        res.content_type = .JSON;
+        res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+        res.body = run.body;
+        return;
+    }
+
+    const ops_json = extractOpsArrayJson(run.body) orelse return error.EnvelopeParseFailed;
+
+    var stats: kicad_pcb_writer.ApplyStats = .{};
+    const new_pcb = kicad_pcb_writer.applyOpsToSourceWithStats(req.arena, src, ops_json, &stats) catch return error.WriterFailed;
+
+    // Detect a sibling KiCad lockfile (`~<basename>.lck`). pcbnew writes
+    // it while a board is open. Per the user's choice we write anyway
+    // and surface the warning in the UI — KiCad 8+ pops "file modified
+    // externally, reload?"; KiCad 7 needs File → Revert. The user must
+    // act before saving in pcbnew or our write loses.
+    const lock_warning = pcbnewLockMessage(req.arena, pcb_path);
+
+    // Skip the disk write when nothing semantically changed. The writer's
+    // helpers each report null for redundant ops (`set_field` with the
+    // existing value, `set_pad_net` with the existing net, `add` for a
+    // canopy_uuid already on the board, etc.); when every stat is zero
+    // the AST is byte-identical to the input and rewriting would just
+    // re-normalise whitespace and bump the mtime, making pcbnew prompt
+    // "file modified, reload?" every push and reporting non-zero changes
+    // to the user forever.
+    const wrote_file = !statsAreZero(stats);
+    if (wrote_file) writeFileAtomic(req.arena, pcb_path, new_pcb) catch return error.PcbWriteFailed;
+
     var resp_buf: std.ArrayListUnmanaged(u8) = .empty;
     const rw = resp_buf.writer(ctx.allocator);
-    const version = serve_root.getLiveVersion(name);
     try rw.print(
-        "{{\"design_version\":{d},\"summary\":{{" ++
-            "\"updated\":{d},\"added\":{d},\"removed\":{d}," ++
-            "\"swapped\":{d},\"flagged_stale\":{d},\"suppressed\":{d}" ++
-            "}},\"ops\":",
+        "{{\"ok\":true,\"design_version\":{d}," ++
+            "\"applied\":{{\"added\":{d},\"removed\":{d},\"swapped\":{d}," ++
+            "\"fields_set\":{d},\"pad_nets_set\":{d},\"locked_changed\":{d}}}",
         .{
-            version,            summary.updated, summary.added,
-            summary.removed,    summary.swapped, summary.flagged_stale,
-            summary.suppressed,
+            run.version,          stats.added,      stats.removed,
+            stats.swapped,        stats.fields_set, stats.pad_nets_set,
+            stats.locked_changed,
         },
     );
-    try rw.writeAll(ops_buf.items);
+    if (lock_warning) |msg| {
+        if (wrote_file) {
+            try rw.writeAll(",\"warning\":");
+            try writeJsonString(rw, msg);
+        }
+    }
     try rw.writeAll("}");
-
     res.content_type = .JSON;
     res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = resp_buf.items;
 }
 
+fn statsAreZero(s: kicad_pcb_writer.ApplyStats) bool {
+    return s.added == 0 and s.removed == 0 and s.swapped == 0 and
+        s.fields_set == 0 and s.pad_nets_set == 0 and s.locked_changed == 0;
+}
+
+/// Returns a user-facing message when pcbnew has the target board open
+/// (a `~<basename>.lck` sibling exists). Null when no lock is detected.
+fn pcbnewLockMessage(arena: std.mem.Allocator, pcb_path: []const u8) ?[]const u8 {
+    const basename = std.fs.path.basename(pcb_path);
+    const dirname = std.fs.path.dirname(pcb_path) orelse return null;
+    const lock_name = std.fmt.allocPrint(arena, "{s}/~{s}.lck", .{ dirname, basename }) catch return null;
+    _ = infra_fs.cwd().statFile(lock_name) catch return null;
+    return "pcbnew has the board open — File \u{2192} Revert (or accept the auto-reload prompt) before saving in pcbnew";
+}
+
+/// Honors `?dry_run=1` (or `=true`) on the request URL.
+fn isDryRun(req: *httpz.Request) bool {
+    return isQueryFlagSet(req, "dry_run");
+}
+
+/// True when the named query param is set to "1" or "true". Used for
+/// the file-based KiCad sync's `?dry_run=1` and `?prune=1` toggles.
+fn isQueryFlagSet(req: *httpz.Request, key: []const u8) bool {
+    const q = req.query() catch return false;
+    const v = q.get(key) orelse return false;
+    return std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true");
+}
+
+/// Strip the `{design_version, summary, ops: [...]}` envelope and return
+/// the raw `[...]` ops array as JSON text. The writer's
+/// `applyOpsToSourceWithStats` expects just the array, not the envelope.
+fn extractOpsArrayJson(envelope: []const u8) ?[]const u8 {
+    const ops_key = "\"ops\":";
+    const idx = std.mem.indexOf(u8, envelope, ops_key) orelse return null;
+    const start = idx + ops_key.len;
+    if (start >= envelope.len or envelope[start] != '[') return null;
+    // The envelope's `}` follows the closing `]` of the array, so trim it.
+    const last_brace = std.mem.lastIndexOfScalar(u8, envelope, '}') orelse return null;
+    if (last_brace <= start) return null;
+    return envelope[start..last_brace];
+}
+
+/// Write `contents` to `path` atomically via tmp file → fsync(file) →
+/// rename. NAS callers concerned about partial visibility through NFS
+/// caches can run `sync` post-hoc; for a human-driven button press the
+/// rename is durable enough in practice.
+fn writeFileAtomic(arena: std.mem.Allocator, path: []const u8, contents: []const u8) !void {
+    // Roll the current file to `<path>.bak` before overwriting so a bad
+    // sync (e.g. an unwanted prune) is one copy away from undo — the board
+    // lives on the NAS, outside git, so this is the only safety net. Abort
+    // the whole write if the backup can't be made; better to fail loudly
+    // than overwrite with no fallback. FileNotFound = first sync, nothing
+    // to back up yet, so proceed.
+    const backup_path = try std.fmt.allocPrint(arena, "{s}.bak", .{path});
+    infra_fs.cwd().copyFile(path, infra_fs.cwd(), backup_path, .{}) catch |e| switch (e) {
+        error.FileNotFound => {},
+        else => return e,
+    };
+
+    const tmp_path = try std.fmt.allocPrint(arena, "{s}.tmp", .{path});
+
+    var tmp = try infra_fs.cwd().createFile(tmp_path, .{ .truncate = true });
+    {
+        defer tmp.close();
+        try tmp.writeAll(contents);
+        // Best-effort durability before the rename. On systems where
+        // fsync isn't supported (in-memory FS in some test sandboxes)
+        // we still want the rename to proceed — surfacing the error
+        // would make the whole sync fail for a non-actionable reason.
+        tmp.sync() catch |e| log.warn("kicad-pcb tmp fsync failed: {s}", .{@errorName(e)});
+    }
+
+    try infra_fs.cwd().rename(tmp_path, path);
+}
+
 const DiffContext = struct {
     by_uuid: *std.StringHashMap(BoardFp),
     by_ref: *std.StringHashMap(BoardFp),
+    /// Board fp KiCad-internal uuid → BoardFp. The add path stamps a new
+    /// footprint's KiCad `(uuid …)` equal to the design's canopy_uuid, so
+    /// when the canopy_uuid *property* later gets stripped (a swap that
+    /// didn't reissue it, a pcbnew round-trip, manual edits) the only
+    /// surviving link back to the design instance is this field. Consulted
+    /// as a last resort in matchInstance to adopt such orphans in place
+    /// instead of spawning a duplicate at the origin.
+    by_kicad_uuid: *std.StringHashMap(BoardFp),
     /// Migration mode: design instance uuid → BoardFp it should adopt
     /// placement from. Populated by `buildMigrationIndex`; empty when
     /// --migrate is off.
@@ -950,9 +1241,14 @@ fn emitOpUnlessApplied(
 /// laid out from a `kicad-cli`-exported netlist — without this aliasing
 /// every such fp would emit a spurious swap_footprint on the first sync.
 fn footprintNameMatches(d: *DiffContext, board_name: []const u8, short: []const u8) bool {
-    if (std.mem.eql(u8, board_name, short)) return true;
+    // Strip the `<lib>:` prefix the legacy Go IPC agent attached to every
+    // footprint it created (`eda-sync:c-0201`). KiCad's own footprints
+    // also carry a library nickname in the same form (`Capacitor_SMD:…`),
+    // and the design-side `short` is always library-bare.
+    const board_bare = stripLibPrefix(board_name);
+    if (std.mem.eql(u8, board_bare, short)) return true;
     const canonical = canonicalFootprintName(d, short) orelse return false;
-    return std.mem.eql(u8, board_name, canonical);
+    return std.mem.eql(u8, board_bare, canonical);
 }
 
 /// Resolve the KiCad-canonical name for `short` ("c-0201" → "C_0201_0603Metric"),
@@ -1031,6 +1327,25 @@ fn pickByUuidOrRef(
     return null;
 }
 
+/// Adopt-in-place fallback: a board fp whose KiCad-internal uuid equals the
+/// design instance's canopy_uuid. That equality only arises for footprints
+/// the add path created (it stamps KiCad uuid := canopy_uuid), so this link
+/// survives even after the canopy_uuid *property* is stripped (a swap that
+/// didn't reissue it, a pcbnew round-trip). KiCad uuids are random and canopy
+/// uuids are SHA-derived, so a coincidental cross-match is impossible — this
+/// strictly recovers our own orphans. Refuses an fp another instance already
+/// claimed in this walk. Pure; extracted from `matchInstance` to be testable.
+fn pickByKicadUuid(
+    inst_uuid: []const u8,
+    by_kicad_uuid: *std.StringHashMap(BoardFp),
+    already_claimed: *std.StringHashMap(void),
+) ?BoardFp {
+    if (by_kicad_uuid.get(inst_uuid)) |m| {
+        if (!already_claimed.contains(m.kicad_uuid)) return m;
+    }
+    return null;
+}
+
 fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance) ?BoardFp {
     // Net-signature relink wins over canopy uuid: the relink builder
     // only populates a pairing when there's an orphan board fp with the
@@ -1045,6 +1360,13 @@ fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance) ?BoardFp {
         if (d.by_netsig.get(inst.uuid)) |m| return m;
     }
     if (pickByUuidOrRef(inst.uuid, inst.ref_des, d.by_uuid, d.by_ref, d.reserved_kicad_uuids, d.matched_uuids)) |m| return m;
+    // Adopt-in-place: a board fp whose KiCad-internal uuid equals this
+    // instance's canopy_uuid — a self-stamped orphan whose canopy_uuid
+    // property was stripped (a swap that didn't reissue it, a pcbnew
+    // round-trip). Preserves the user's placement instead of adding a
+    // duplicate at the origin. handleMatched re-stamps canopy_uuid for
+    // every match tier (Option G), so this tier emits nothing itself.
+    if (pickByKicadUuid(inst.uuid, d.by_kicad_uuid, d.matched_uuids)) |m| return m;
     // Migration tier (parent_path/value). canopy_uuid stamping + ref-des
     // rename are emitted by handleMatched for every match tier (Option G),
     // so matchInstance no longer emits anything itself.
@@ -1723,5 +2045,40 @@ test "pickByUuidOrRef returns null when neither tier matches" {
     defer claimed.deinit();
 
     const got = pickByUuidOrRef("cc000003", "charger/C99", &by_uuid, &by_ref, &reserved, &claimed);
+    try std.testing.expect(got == null);
+}
+
+test "pickByKicadUuid adopts an orphan whose KiCad uuid equals the instance canopy_uuid" {
+    // spec: serve/sync - pickByKicadUuid adopts an orphan whose KiCad uuid equals the instance's canopy_uuid
+    // The Cyclops buck scenario: a swap stripped U17's canopy_uuid property
+    // and left its Reference empty, so by_uuid and by_ref both miss. The
+    // footprint's KiCad (uuid …) field still equals the design's canopy_uuid
+    // because the add path stamped it there. Adopt in place, not duplicate.
+    var by_kicad_uuid = std.StringHashMap(BoardFp).init(std.testing.allocator);
+    defer by_kicad_uuid.deinit();
+    var claimed = std.StringHashMap(void).init(std.testing.allocator);
+    defer claimed.deinit();
+
+    // Orphan: no canopy_uuid property, empty ref, KiCad uuid == canopy uuid.
+    const orphan = testFp("", "28f5c311", "");
+    try by_kicad_uuid.put("28f5c311", orphan);
+
+    const got = pickByKicadUuid("28f5c311", &by_kicad_uuid, &claimed);
+    try std.testing.expect(got != null);
+    try std.testing.expectEqualStrings("28f5c311", got.?.kicad_uuid);
+}
+
+test "pickByKicadUuid refuses an fp another instance already claimed" {
+    // spec: serve/sync - pickByKicadUuid refuses an fp another instance already claimed in this walk
+    var by_kicad_uuid = std.StringHashMap(BoardFp).init(std.testing.allocator);
+    defer by_kicad_uuid.deinit();
+    var claimed = std.StringHashMap(void).init(std.testing.allocator);
+    defer claimed.deinit();
+
+    const orphan = testFp("", "28f5c311", "");
+    try by_kicad_uuid.put("28f5c311", orphan);
+    try claimed.put("28f5c311", {});
+
+    const got = pickByKicadUuid("28f5c311", &by_kicad_uuid, &claimed);
     try std.testing.expect(got == null);
 }

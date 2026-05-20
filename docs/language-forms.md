@@ -77,3 +77,4 @@ where each is accepted: **D** = design-block top level,
 | `(verifies (req "REF" REQID) [rationale])` | D·· | Mark a requirement as satisfied by a specific instance. |
 | `(test-point …)` | D·· | Declare a measurement / bring-up access point. |
 | `(power-config (derating N))` | D·· | Per-design power-budget configuration knobs. |
+| `(kicad-pcb "absolute/path/to/board.kicad_pcb")` | D·· | Declare the PCB file the file-based KiCad sync writes board updates to. |

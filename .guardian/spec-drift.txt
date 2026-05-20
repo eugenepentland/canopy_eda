@@ -147,6 +147,9 @@ src/infra/random.zig::bytes | fn bytes(buf: []u8) void
 src/json_writer.zig::writeEscaped | fn writeEscaped(w: anytype, s: []const u8) WriteError!void
 src/json_writer.zig::writeField | fn writeField(w: anytype, key: []const u8, value: []const u8) WriteError!void
 src/json_writer.zig::writeString | fn writeString(w: anytype, s: []const u8) WriteError!void
+src/kicad_pcb/reader.zig::readBoard | fn readBoard(arena: std.mem.Allocator, source: []const u8) ReadError![]const sync.BoardFp
+src/kicad_pcb/writer.zig::applyOpsToSource | fn applyOpsToSource(arena: std.mem.Allocator, source: []const u8, ops_json: []const u8) WriteError![]const u8
+src/kicad_pcb/writer.zig::applyOpsToSourceWithStats | fn applyOpsToSourceWithStats( arena: std.mem.Allocator, source: []const u8, ops_json: []const u8, stats: *ApplyStats, ) WriteError![]const u8
 src/lint.zig::lintFile | fn lintFile(allocator: std.mem.Allocator, path: []const u8) LintError!usize
 src/main.zig::main | fn main() !void
 src/paths.zig::designSiblingPath | fn designSiblingPath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ext: []const u8, ) std.mem.Allocator.Error![]u8
@@ -381,6 +384,8 @@ src/serve/plugin_tokens.zig::mint | fn mint(allocator: std.mem.Allocator, auth_d
 src/serve/plugin_tokens.zig::validate | fn validate(allocator: std.mem.Allocator, auth_dir: []const u8, raw: []const u8) bool
 src/serve/schematic_page.zig::schematicPage | fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/static_assets.zig::staticAsset | fn staticAsset(_: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/sync.zig::runSyncPlan | fn runSyncPlan( arena: std.mem.Allocator, handler_alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, parsed: ParsedSyncPlan, ) SyncRunError!SyncRunResult
+src/serve/sync.zig::syncKicadPcbApi | fn syncKicadPcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/sync.zig::syncPlanApi | fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/upload.zig::extractFootprintName | fn extractFootprintName(allocator: std.mem.Allocator, footprint: []const u8) ?[]const u8
 src/serve/upload.zig::extractPackageName | fn extractPackageName(sym_data: []const u8) []const u8

@@ -250,6 +250,29 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
             "Download Netlist + Footprints (.zip)</button>",
         .{design_name},
     );
+    // File-based PCB sync — writes directly to the .kicad_pcb declared
+    // by the design's (kicad-pcb "<path>") form. pcbnew either auto-
+    // prompts to reload (KiCad 8+) or surfaces it via File → Revert
+    // (KiCad 7). The button is wired generically; if the design has no
+    // (kicad-pcb …) form the server returns a clear 400 + message
+    // which the JS handler surfaces in the status text.
+    try w.writeAll(
+        "<button class=\"kicad-row-btn\" id=\"push-kicad-pcb-btn\" " ++
+            "title=\"Write updates to the .kicad_pcb declared by (kicad-pcb \u{2026}); " ++
+            "pcbnew will prompt to reload, or use File \u{2192} Revert\">" ++
+            "\u{2192} Push to KiCad PCB</button>",
+    );
+    // Prune variant: same as Push, plus convert every `flag_stale` op into
+    // a real `remove`. The server already supports this via the `prune=1`
+    // query param — exposed here so the user can clean up orphan
+    // footprints accumulated by past failed syncs in one click.
+    try w.writeAll(
+        "<button class=\"kicad-row-btn\" id=\"push-kicad-pcb-prune-btn\" " ++
+            "title=\"Same as Push, but ALSO deletes every footprint flagged stale " ++
+            "(no longer in the design). Use after the design and board have drifted apart.\">" ++
+            "\u{2192} Push + Delete Stale</button>",
+    );
+    try w.writeAll("<span id=\"push-kicad-pcb-status\" class=\"kicad-row-status\"></span>");
     try w.writeAll("</div></div>");
     try w.print("<a class=\"head-link\" href=\"/api/export-bom/{s}\">BOM</a>", .{design_name});
     try w.print("<a class=\"head-link\" href=\"/api/export-netlist/{s}\">Netlist</a>", .{design_name});

@@ -183,6 +183,11 @@ pub fn serve(
     router.get("/api/export-netlist/:name", api.exportNetlistApi, .{});
     // KiCad sync — server-side diff for the local Go IPC agent.
     router.post("/api/sync-plan/:name", sync.syncPlanApi, .{});
+    // File-based KiCad sync — server writes the .kicad_pcb at the
+    // design's (kicad-pcb "<path>") form directly. `?dry_run=1` returns
+    // the would-be ops without writing (Phase 2 — writer lands in
+    // Phase 3).
+    router.post("/api/sync-kicad-pcb/:name", sync.syncKicadPcbApi, .{});
     router.get("/api/export-bom/:name", api.exportBomCsvApi, .{});
     router.get("/api/export-review/:name", api.exportReviewPackageApi, .{});
     router.get("/api/erc/:name", api.ercApi, .{});

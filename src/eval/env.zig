@@ -838,6 +838,11 @@ pub const DesignBlock = struct {
     /// Null → consumers use their built-in default (0.8 today). Applied by
     /// `power_budget.analyze` to scale the tight-margin threshold.
     derating: ?f64 = null,
+    /// Absolute path to the `.kicad_pcb` this design pushes board updates
+    /// to, declared via `(kicad-pcb "<path>")` in the design source. Null
+    /// when the design has no PCB target — the file-based KiCad sync
+    /// endpoint refuses to write without it.
+    kicad_pcb_path: ?[]const u8 = null,
 };
 
 /// Assertion result.

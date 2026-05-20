@@ -422,6 +422,8 @@ test {
     _ = @import("export_kicad.zig");
     _ = @import("serve.zig");
     _ = @import("serve/sync.zig");
+    _ = @import("kicad_pcb/writer.zig");
+    _ = @import("kicad_pcb/reader.zig");
     _ = @import("render_json.zig");
     _ = @import("json_writer.zig");
     _ = @import("checks.zig");
