@@ -167,6 +167,8 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 
 - Pass 3.5 is a fixed point: two consecutive resolveIdentities calls produce a byte-identical BOM
 - Pass 3.5 with a forced two-instance UUID swap converges on the first call and stays put on the second
+- ensureUniqueUuids re-derives a colliding instance's UUID from its own id so no two instances share a UUID
+- ensureUniqueUuids leaves already-distinct UUIDs untouched (idempotent)
 
 ## render_block_diagram_svg
 

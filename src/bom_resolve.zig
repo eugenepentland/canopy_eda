@@ -219,6 +219,9 @@ pub fn resolveIdentities(
     // remaining bijective swaps in one pass.
     try runPass35Swaps(allocator, &result_map, flat_list.items, old_entries);
 
+    // Pass 3.6: guarantee UUID uniqueness across instances.
+    try ensureUniqueUuids(allocator, &result_map, flat_list.items);
+
     // Pass 4: auto-resolve manufacturer + MPN from parts DB
     var parts_db = parts_mod.PartsDb.init(allocator, project_dir);
     defer parts_db.deinit();
@@ -391,6 +394,54 @@ fn runPass35Swaps(
             "Pass 3.5: {s} kept assigned uuid={s} — swap with {s} dropped as ambiguous; re-sync will re-emit",
             .{ sw.a_ref, assigned_uuid, sw.b_ref },
         );
+    }
+}
+
+/// Pass 3.6: guarantee every resolved instance holds a UUID no other instance
+/// shares. A duplicate slips in when the prior `.bom` already carried two parts
+/// on one UUID — identical passives across repeated sub-blocks (e.g. the 68pF
+/// anti-alias caps in three AD7380 channels, or two pull-ups in one IMU block).
+/// Pass 0 then faithfully carries both forward by id, so the duplicate
+/// self-perpetuates and is byte-stable, and the KiCad-sync matcher can't tell
+/// the two apart — one footprint shows `add`, the other `flag_stale`, on every
+/// sync (the placement flicker).
+///
+/// Fix: in each colliding group keep the rightful owner — the instance whose
+/// own `uuidFromId(id)` equals the shared UUID — and re-derive every other
+/// member from its own (unique) id. When no member owns the UUID (it's a
+/// foreign cache value), all members fall to their own derived UUIDs and the
+/// foreign value is dropped. Instance ids are unique, so this terminates with
+/// all-distinct UUIDs; a rebuild then finds no collision and changes nothing
+/// (idempotent — preserves the Pass 3.5 fixed point). Re-scans until stable in
+/// case a re-derived UUID lands on another instance's cached value.
+fn ensureUniqueUuids(
+    allocator: std.mem.Allocator,
+    result_map: *std.StringHashMap([]const u8),
+    flat: []const FlatInfo,
+) ResolveError!void {
+    var pass: usize = 0;
+    while (pass <= flat.len) : (pass += 1) {
+        // Tally how many instances currently hold each UUID.
+        var counts = std.StringHashMap(u32).init(allocator);
+        defer counts.deinit();
+        for (flat) |info| {
+            const uuid = result_map.get(info.ref_des) orelse continue;
+            const gop = try counts.getOrPut(uuid);
+            gop.value_ptr.* = if (gop.found_existing) gop.value_ptr.* + 1 else 1;
+        }
+        // Re-derive every non-owner in a colliding group from its own id.
+        var changed = false;
+        for (flat) |info| {
+            if (info.id.len == 0) continue;
+            const uuid = result_map.get(info.ref_des) orelse continue;
+            if ((counts.get(uuid) orelse 1) <= 1) continue;
+            const natural = try export_kicad.uuidFromId(allocator, info.id);
+            if (!std.mem.eql(u8, natural, uuid)) {
+                try result_map.put(info.ref_des, natural);
+                changed = true;
+            }
+        }
+        if (!changed) break;
     }
 }
 
@@ -803,4 +854,54 @@ test "Pass 3.5 swap converges in one call" {
     defer alloc.free(bom2);
 
     try std.testing.expectEqualStrings(bom1, bom2);
+}
+
+// Minimal FlatInfo for the uniqueness tests — only ref_des + id drive the pass.
+fn uniqTestInfo(ref: []const u8, id: []const u8) FlatInfo {
+    return .{ .ref_des = ref, .component = "x", .footprint = "x", .value = "x", .attrs = &.{}, .nets = &.{}, .properties = &.{}, .id = id };
+}
+
+// spec: bom-resolve - ensureUniqueUuids re-derives a colliding instance's UUID from its own id so no two instances share a UUID
+test "ensureUniqueUuids breaks a shared-UUID collision" {
+    const alloc = std.heap.page_allocator;
+    var result_map = std.StringHashMap([]const u8).init(alloc);
+    defer result_map.deinit();
+    // The baked-in .bom collision: two distinct parts (distinct ids) carried
+    // forward on one shared UUID. uuidFromId of neither id equals it here, so
+    // both fall to their own derived UUIDs.
+    const shared = "740de401-ec6f-5014-a080-2d89e08a8f53";
+    try result_map.put("adc1/C167", shared);
+    try result_map.put("adc3/C193", shared);
+    const flat = [_]FlatInfo{
+        uniqTestInfo("adc1/C167", "b65aa691"),
+        uniqTestInfo("adc3/C193", "d55b54d5"),
+    };
+
+    try ensureUniqueUuids(alloc, &result_map, &flat);
+
+    const a = result_map.get("adc1/C167").?;
+    const b = result_map.get("adc3/C193").?;
+    try std.testing.expect(!std.mem.eql(u8, a, b));
+    const da = try export_kicad.uuidFromId(alloc, "b65aa691");
+    const db = try export_kicad.uuidFromId(alloc, "d55b54d5");
+    try std.testing.expectEqualStrings(da, a);
+    try std.testing.expectEqualStrings(db, b);
+}
+
+// spec: bom-resolve - ensureUniqueUuids leaves already-distinct UUIDs untouched (idempotent)
+test "ensureUniqueUuids leaves distinct UUIDs unchanged" {
+    const alloc = std.heap.page_allocator;
+    var result_map = std.StringHashMap([]const u8).init(alloc);
+    defer result_map.deinit();
+    try result_map.put("R1", "aaaa1111-0000-4000-8000-000000000001");
+    try result_map.put("R2", "bbbb2222-0000-4000-8000-000000000002");
+    const flat = [_]FlatInfo{
+        uniqTestInfo("R1", "aa111111"),
+        uniqTestInfo("R2", "bb222222"),
+    };
+
+    try ensureUniqueUuids(alloc, &result_map, &flat);
+
+    try std.testing.expectEqualStrings("aaaa1111-0000-4000-8000-000000000001", result_map.get("R1").?);
+    try std.testing.expectEqualStrings("bbbb2222-0000-4000-8000-000000000002", result_map.get("R2").?);
 }
