@@ -11,8 +11,6 @@ const export_kicad = @import("export_kicad.zig");
 const FlatInfo = bom_mod.FlatInfo;
 
 // ── Constants ─────────────────────────────────────────────────────
-const MIN_TIE_BREAKER_OVERLAP: f64 = 0.5;
-const STRONG_NET_MATCH_RATIO: f64 = 0.99;
 
 /// Error set for the BOM-resolve pipeline. Combines BOM file IO (open/read/
 /// write the .bom sidecar) with `OutOfMemory` from the various
@@ -107,11 +105,22 @@ pub fn resolveIdentities(
     for (old_entries, 0..) |e, idx| {
         if (e.id.len > 0) try old_by_id.put(e.id, idx);
     }
+    var used_uuids = std.StringHashMap(void).init(allocator);
+    defer used_uuids.deinit();
     for (flat_list.items) |info| {
-        const uuid = if (info.id.len > 0)
-            try export_kicad.uuidFromId(allocator, info.id)
-        else
-            try bom_mod.generateUuid(allocator);
+        const uuid = blk: {
+            if (info.id.len == 0) break :blk try bom_mod.generateUuid(allocator);
+            const primary = try export_kicad.uuidFromId(allocator, info.id);
+            if (!used_uuids.contains(primary)) break :blk primary;
+            // Deterministic collision tiebreak: two stable ids hashed to the
+            // same uuid — re-derive from "id/ref_des". ref_des is itself
+            // deterministic per design, so the result still reproduces exactly.
+            allocator.free(primary);
+            const combined = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ info.id, info.ref_des });
+            defer allocator.free(combined);
+            break :blk try export_kicad.uuidFromId(allocator, combined);
+        };
+        try used_uuids.put(uuid, {});
         try result_map.put(info.ref_des, uuid);
         if (info.id.len > 0) {
             if (old_by_id.get(info.id)) |idx| {
@@ -173,199 +182,6 @@ pub fn resolveIdentities(
 
     try applyBom(allocator, block, &result_map, &props_map, "");
     try saveBom(allocator, bom_path, flat_list.items, &result_map, &props_map);
-}
-
-/// Phase C.2: Pass 3.5 reimplemented as a fixed-point swap collector.
-///
-/// Step 1: for every instance whose currently-assigned UUID has a weak net
-/// overlap with its old BOM entry, look up the UUID whose old-BOM net
-/// signature matches the instance's new signature. If some *other* ref_des
-/// in the new flat list currently holds that UUID, record a proposed swap
-/// `(a_ref ↔ b_ref)`.
-///
-/// Step 2: walk the swap list once and build a partner map. If a ref_des
-/// is named in two swaps with different partners, log a warning and mark
-/// the whole cluster as ambiguous — those swaps will not fire.
-///
-/// Step 3: apply every non-ambiguous bijective swap exactly once.
-///
-/// Step 4: re-check each instance against its old-by-uuid entry; if a
-/// weak-overlap mismatch survived (no swap candidate or the swap was
-/// dropped as ambiguous), log a warning. Repeated `eda kicad-sync` calls
-/// will re-emit the same correction at this point — failing loud beats
-/// silent flip-flop.
-fn runPass35Swaps(
-    allocator: std.mem.Allocator,
-    result_map: *std.StringHashMap([]const u8),
-    flat: []const FlatInfo,
-    old_entries: []const bom_mod.BomEntry,
-) ResolveError!void {
-    var old_by_netsig = std.StringHashMap(usize).init(allocator);
-    defer old_by_netsig.deinit();
-    for (old_entries, 0..) |old, idx| {
-        if (old.nets.len == 0) continue;
-        const sig = bom_mod.netSignature(allocator, old.nets) catch continue;
-        try old_by_netsig.put(sig, idx);
-    }
-
-    const Swap = struct { a_ref: []const u8, b_ref: []const u8 };
-    var swaps: std.ArrayListUnmanaged(Swap) = .empty;
-    defer swaps.deinit(allocator);
-
-    for (flat) |info| {
-        if (info.nets.len == 0) continue;
-        const assigned_uuid = result_map.get(info.ref_des) orelse continue;
-
-        var assigned_old_idx: ?usize = null;
-        for (old_entries, 0..) |old, idx| {
-            if (std.mem.eql(u8, old.uuid, assigned_uuid)) {
-                assigned_old_idx = idx;
-                break;
-            }
-        }
-        const old_idx = assigned_old_idx orelse continue;
-        const old = old_entries[old_idx];
-        if (old.nets.len == 0) continue;
-
-        if (bom_mod.netOverlap(info.nets, old.nets) >= STRONG_NET_MATCH_RATIO) continue;
-
-        const new_sig = bom_mod.netSignature(allocator, info.nets) catch continue;
-        const correct_old_idx = old_by_netsig.get(new_sig) orelse continue;
-        const correct_uuid = old_entries[correct_old_idx].uuid;
-
-        var other_ref: ?[]const u8 = null;
-        for (flat) |other| {
-            if (std.mem.eql(u8, other.ref_des, info.ref_des)) continue;
-            const other_uuid = result_map.get(other.ref_des) orelse continue;
-            if (std.mem.eql(u8, other_uuid, correct_uuid)) {
-                other_ref = other.ref_des;
-                break;
-            }
-        }
-
-        if (other_ref) |oref| {
-            try swaps.append(allocator, .{ .a_ref = info.ref_des, .b_ref = oref });
-        }
-    }
-
-    // Cycle detection: if any ref_des appears in two swaps with distinct
-    // partners, the bijection assumption is broken — drop the whole cluster.
-    var partner = std.StringHashMap([]const u8).init(allocator);
-    defer partner.deinit();
-    var ambiguous = std.StringHashMap(void).init(allocator);
-    defer ambiguous.deinit();
-
-    for (swaps.items) |sw| {
-        try recordPartner(&partner, &ambiguous, sw.a_ref, sw.b_ref);
-        try recordPartner(&partner, &ambiguous, sw.b_ref, sw.a_ref);
-    }
-
-    // Apply bijective swaps once. The `applied` set keeps a swap from being
-    // executed twice when both endpoints appear as `info.ref_des` in the
-    // collection pass.
-    var applied = std.StringHashMap(void).init(allocator);
-    defer applied.deinit();
-    for (swaps.items) |sw| {
-        if (ambiguous.contains(sw.a_ref) or ambiguous.contains(sw.b_ref)) continue;
-        if (applied.contains(sw.a_ref)) continue;
-        const a_uuid = result_map.get(sw.a_ref) orelse continue;
-        const b_uuid = result_map.get(sw.b_ref) orelse continue;
-        const a_dup = try allocator.dupe(u8, a_uuid);
-        const b_dup = try allocator.dupe(u8, b_uuid);
-        result_map.putAssumeCapacity(sw.a_ref, b_dup);
-        result_map.putAssumeCapacity(sw.b_ref, a_dup);
-        try applied.put(sw.a_ref, {});
-        try applied.put(sw.b_ref, {});
-    }
-
-    // Residual check: any ref_des that proposed a swap but was dropped as
-    // ambiguous (cluster cycle) will keep its weak-overlap UUID and re-fire
-    // the same correction next sync. Warn loudly — failing visible beats
-    // silent flip-flop. No-op swaps (both endpoints already have the same
-    // uuid because the legacy BOM has duplicates) are intentionally quiet:
-    // they're stable across rebuilds and re-warning every eval just adds
-    // noise — the underlying duplicate-uuid cleanup belongs to Phase C.3.
-    for (swaps.items) |sw| {
-        if (!ambiguous.contains(sw.a_ref) and !ambiguous.contains(sw.b_ref)) continue;
-        const assigned_uuid = result_map.get(sw.a_ref) orelse continue;
-        log.warn(
-            "Pass 3.5: {s} kept assigned uuid={s} — swap with {s} dropped as ambiguous; re-sync will re-emit",
-            .{ sw.a_ref, assigned_uuid, sw.b_ref },
-        );
-    }
-}
-
-/// Pass 3.6: guarantee every resolved instance holds a UUID no other instance
-/// shares. A duplicate slips in when the prior `.bom` already carried two parts
-/// on one UUID — identical passives across repeated sub-blocks (e.g. the 68pF
-/// anti-alias caps in three AD7380 channels, or two pull-ups in one IMU block).
-/// Pass 0 then faithfully carries both forward by id, so the duplicate
-/// self-perpetuates and is byte-stable, and the KiCad-sync matcher can't tell
-/// the two apart — one footprint shows `add`, the other `flag_stale`, on every
-/// sync (the placement flicker).
-///
-/// Fix: in each colliding group keep the rightful owner — the instance whose
-/// own `uuidFromId(id)` equals the shared UUID — and re-derive every other
-/// member from its own (unique) id. When no member owns the UUID (it's a
-/// foreign cache value), all members fall to their own derived UUIDs and the
-/// foreign value is dropped. Instance ids are unique, so this terminates with
-/// all-distinct UUIDs; a rebuild then finds no collision and changes nothing
-/// (idempotent — preserves the Pass 3.5 fixed point). Re-scans until stable in
-/// case a re-derived UUID lands on another instance's cached value.
-fn ensureUniqueUuids(
-    allocator: std.mem.Allocator,
-    result_map: *std.StringHashMap([]const u8),
-    flat: []const FlatInfo,
-) ResolveError!void {
-    var pass: usize = 0;
-    while (pass <= flat.len) : (pass += 1) {
-        // Tally how many instances currently hold each UUID.
-        var counts = std.StringHashMap(u32).init(allocator);
-        defer counts.deinit();
-        for (flat) |info| {
-            const uuid = result_map.get(info.ref_des) orelse continue;
-            const gop = try counts.getOrPut(uuid);
-            gop.value_ptr.* = if (gop.found_existing) gop.value_ptr.* + 1 else 1;
-        }
-        // Re-derive every non-owner in a colliding group from its own id.
-        var changed = false;
-        for (flat) |info| {
-            if (info.id.len == 0) continue;
-            const uuid = result_map.get(info.ref_des) orelse continue;
-            if ((counts.get(uuid) orelse 1) <= 1) continue;
-            const natural = try export_kicad.uuidFromId(allocator, info.id);
-            if (!std.mem.eql(u8, natural, uuid)) {
-                try result_map.put(info.ref_des, natural);
-                changed = true;
-            }
-        }
-        if (!changed) break;
-    }
-}
-
-fn recordPartner(
-    partner: *std.StringHashMap([]const u8),
-    ambiguous: *std.StringHashMap(void),
-    ref: []const u8,
-    other: []const u8,
-) std.mem.Allocator.Error!void {
-    if (ambiguous.contains(ref)) {
-        try ambiguous.put(other, {});
-        return;
-    }
-    const existing = partner.get(ref);
-    if (existing) |prev| {
-        if (std.mem.eql(u8, prev, other)) return;
-        log.warn(
-            "Pass 3.5: {s} appears in conflicting swaps ({s} vs {s}) — skipping cluster",
-            .{ ref, prev, other },
-        );
-        try ambiguous.put(ref, {});
-        try ambiguous.put(prev, {});
-        try ambiguous.put(other, {});
-        return;
-    }
-    try partner.put(ref, other);
 }
 
 /// Merge component-defined properties with the .bom-resident ones (the .bom
@@ -594,7 +410,7 @@ pub fn setBomProperty(
 
 const test_evaluator = @import("eval/evaluator.zig");
 
-// spec: bom-resolve - Pass 3.5 is a fixed point: two consecutive resolveIdentities calls produce a byte-identical BOM
+// spec: bom-resolve - identity resolution is a fixed point: two consecutive resolveIdentities calls produce a byte-identical BOM
 test "resolveIdentities idempotent across two consecutive evaluations" {
     const alloc = std.heap.page_allocator;
 
@@ -672,8 +488,8 @@ test "resolveIdentities idempotent across two consecutive evaluations" {
     try std.testing.expectEqualStrings(bom1, bom2);
 }
 
-// spec: bom-resolve - Pass 3.5 with a forced two-instance UUID swap converges on the first call and stays put on the second
-test "Pass 3.5 swap converges in one call" {
+// spec: bom-resolve - identity is deterministic: each part takes uuidFromId(its stable id), independent of any prior .bom contents
+test "deterministic identity ignores a stale prior .bom" {
     const alloc = std.heap.page_allocator;
 
     var tmp = std.testing.tmpDir(.{});
@@ -718,9 +534,8 @@ test "Pass 3.5 swap converges in one call" {
     const bom_path = try std.fmt.allocPrint(alloc, "{s}/src/swap/swap.bom", .{project_dir});
     defer alloc.free(bom_path);
 
-    // Hand-craft a BOM that ties each ref_des to the OTHER instance's UUID
-    // (a deliberately swapped state) so Pass 3.5 has to perform exactly one
-    // bijective correction.
+    // Hand-craft a stale/swapped .bom. A deterministic resolver must ignore
+    // it and re-derive each uuid from the part's own stable id.
     try infra_fs.cwd().writeFile(.{
         .sub_path = bom_path,
         .data =
@@ -747,69 +562,13 @@ test "Pass 3.5 swap converges in one call" {
     const bom1 = try infra_fs.cwd().readFileAlloc(alloc, bom_path, 1024 * 1024);
     defer alloc.free(bom1);
 
-    // Second resolve — must be a no-op now that the swap converged.
-    {
-        var eval = test_evaluator.Evaluator.init(alloc, project_dir);
-        defer eval.deinit();
-        const result = try eval.evalFile(design_path);
-        const block = switch (result) {
-            .design_block => |b| b,
-            else => return error.TestExpectedDesignBlock,
-        };
-        try resolveIdentities(alloc, block, bom_path, project_dir);
-    }
-    const bom2 = try infra_fs.cwd().readFileAlloc(alloc, bom_path, 1024 * 1024);
-    defer alloc.free(bom2);
-
-    try std.testing.expectEqualStrings(bom1, bom2);
-}
-
-// Minimal FlatInfo for the uniqueness tests — only ref_des + id drive the pass.
-fn uniqTestInfo(ref: []const u8, id: []const u8) FlatInfo {
-    return .{ .ref_des = ref, .component = "x", .footprint = "x", .value = "x", .attrs = &.{}, .nets = &.{}, .properties = &.{}, .id = id };
-}
-
-// spec: bom-resolve - ensureUniqueUuids re-derives a colliding instance's UUID from its own id so no two instances share a UUID
-test "ensureUniqueUuids breaks a shared-UUID collision" {
-    const alloc = std.heap.page_allocator;
-    var result_map = std.StringHashMap([]const u8).init(alloc);
-    defer result_map.deinit();
-    // The baked-in .bom collision: two distinct parts (distinct ids) carried
-    // forward on one shared UUID. uuidFromId of neither id equals it here, so
-    // both fall to their own derived UUIDs.
-    const shared = "740de401-ec6f-5014-a080-2d89e08a8f53";
-    try result_map.put("adc1/C167", shared);
-    try result_map.put("adc3/C193", shared);
-    const flat = [_]FlatInfo{
-        uniqTestInfo("adc1/C167", "b65aa691"),
-        uniqTestInfo("adc3/C193", "d55b54d5"),
-    };
-
-    try ensureUniqueUuids(alloc, &result_map, &flat);
-
-    const a = result_map.get("adc1/C167").?;
-    const b = result_map.get("adc3/C193").?;
-    try std.testing.expect(!std.mem.eql(u8, a, b));
-    const da = try export_kicad.uuidFromId(alloc, "b65aa691");
-    const db = try export_kicad.uuidFromId(alloc, "d55b54d5");
-    try std.testing.expectEqualStrings(da, a);
-    try std.testing.expectEqualStrings(db, b);
-}
-
-// spec: bom-resolve - ensureUniqueUuids leaves already-distinct UUIDs untouched (idempotent)
-test "ensureUniqueUuids leaves distinct UUIDs unchanged" {
-    const alloc = std.heap.page_allocator;
-    var result_map = std.StringHashMap([]const u8).init(alloc);
-    defer result_map.deinit();
-    try result_map.put("R1", "aaaa1111-0000-4000-8000-000000000001");
-    try result_map.put("R2", "bbbb2222-0000-4000-8000-000000000002");
-    const flat = [_]FlatInfo{
-        uniqTestInfo("R1", "aa111111"),
-        uniqTestInfo("R2", "bb222222"),
-    };
-
-    try ensureUniqueUuids(alloc, &result_map, &flat);
-
-    try std.testing.expectEqualStrings("aaaa1111-0000-4000-8000-000000000001", result_map.get("R1").?);
-    try std.testing.expectEqualStrings("bbbb2222-0000-4000-8000-000000000002", result_map.get("R2").?);
+    // The swapped prior .bom is ignored: each part takes uuidFromId(its own id),
+    // and the stale uuids from the prior .bom are gone.
+    const uid10 = try export_kicad.uuidFromId(alloc, "aa000001");
+    defer alloc.free(uid10);
+    const uid11 = try export_kicad.uuidFromId(alloc, "aa000002");
+    defer alloc.free(uid11);
+    try std.testing.expect(std.mem.indexOf(u8, bom1, uid10) != null);
+    try std.testing.expect(std.mem.indexOf(u8, bom1, uid11) != null);
+    try std.testing.expect(std.mem.indexOf(u8, bom1, "11111111-1111-5111") == null);
 }

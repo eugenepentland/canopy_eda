@@ -201,23 +201,6 @@ pub fn generateUuid(allocator: std.mem.Allocator) std.mem.Allocator.Error![]cons
     });
 }
 
-/// Create a sorted, joined signature string from net names for exact matching.
-pub fn netSignature(allocator: std.mem.Allocator, nets: []const []const u8) std.mem.Allocator.Error![]const u8 {
-    const sorted = try allocator.alloc([]const u8, nets.len);
-    @memcpy(sorted, nets);
-    std.mem.sortUnstable([]const u8, sorted, {}, struct {
-        fn lt(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.order(u8, a, b) == .lt;
-        }
-    }.lt);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    for (sorted, 0..) |net, i| {
-        if (i > 0) try buf.append(allocator, '|');
-        try buf.appendSlice(allocator, net);
-    }
-    return buf.toOwnedSlice(allocator);
-}
-
 /// Jaccard-style overlap of two net lists in [0, 1]: `|a ∩ b| / |a ∪ b|`.
 /// Returns 1.0 when both are empty, 0.0 when exactly one is empty.
 pub fn netOverlap(a: []const []const u8, b: []const []const u8) f64 {

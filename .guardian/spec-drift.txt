@@ -4,7 +4,6 @@ src/bom.zig::collectFlatInstances | fn collectFlatInstances( allocator: std.mem.
 src/bom.zig::generateUuid | fn generateUuid(allocator: std.mem.Allocator) std.mem.Allocator.Error![]const u8
 src/bom.zig::loadBom | fn loadBom(allocator: std.mem.Allocator, bom_path: []const u8) BomError![]const BomEntry
 src/bom.zig::netOverlap | fn netOverlap(a: []const []const u8, b: []const []const u8) f64
-src/bom.zig::netSignature | fn netSignature(allocator: std.mem.Allocator, nets: []const []const u8) std.mem.Allocator.Error![]const u8
 src/bom_resolve.zig::resolveIdentities | fn resolveIdentities( allocator: std.mem.Allocator, block: *const DesignBlock, bom_path: []const u8, project_dir: []const u8, ) ResolveError!void
 src/bom_resolve.zig::setBomProperty | fn setBomProperty( allocator: std.mem.Allocator, bom_path: []const u8, ref_des: []const u8, key: []const u8, value: []const u8, ) SetPropertyError!void
 src/commands.zig::cmdBuild | fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void

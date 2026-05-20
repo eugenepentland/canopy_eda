@@ -7,7 +7,6 @@ src/bom.zig::collectFlatInstances fn
 src/bom.zig::generateUuid fn
 src/bom.zig::loadBom fn
 src/bom.zig::netOverlap fn
-src/bom.zig::netSignature fn
 src/bom.zig::resolveIdentities value
 src/bom_resolve.zig::ResolveError value
 src/bom_resolve.zig::SetPropertyError value
