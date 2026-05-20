@@ -393,9 +393,19 @@ pub fn deriveChildId(self: *Evaluator, parent_id: []const u8, context: []const u
 /// the shared module source would collide across multiple instantiations.
 pub fn reassignSubBlockIds(self: *Evaluator, block: *DesignBlock, sub_name: []const u8) EvalError!void {
     const insts: []Instance = @constCast(block.instances);
-    for (insts) |*inst| {
-        const context = if (inst.ref_des.len > 0) inst.ref_des else inst.label;
-        inst.id = try deriveChildId(self, sub_name, context, 0);
+    // Key off the stable module-source label, not ref_des: by the time the
+    // PCB sync runs, autoAssignSubBlockRefDes has overwritten ref_des with a
+    // GLOBAL number that shifts whenever any like-prefixed part is added
+    // upstream — which rotated every sub-block part's derived id (and thus its
+    // canopy_uuid), churning the board. label is set once by buildInstance and
+    // never rewritten. Anonymous decouple/series passives carry no label, so
+    // they fall back to their fixed source-order index (also renumber-stable).
+    for (insts, 0..) |*inst, i| {
+        if (inst.label.len > 0) {
+            inst.id = try deriveChildId(self, sub_name, inst.label, 0);
+        } else {
+            inst.id = try deriveChildId(self, sub_name, "", i);
+        }
     }
     for (@as([]env_mod.SubBlock, @constCast(block.sub_blocks))) |*sb| {
         const nested = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ sub_name, sb.name });

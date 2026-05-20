@@ -91,136 +91,34 @@ pub fn resolveIdentities(
     defer flat_list.deinit(allocator);
     try bom_mod.collectFlatInstances(allocator, block, "", &flat_list);
 
-    var old_by_ref = std.StringHashMap(usize).init(allocator);
-    defer old_by_ref.deinit();
-    for (old_entries, 0..) |e, i| {
-        try old_by_ref.put(e.ref_des, i);
-    }
-
-    var claimed = try allocator.alloc(bool, old_entries.len);
-    defer allocator.free(claimed);
-    @memset(claimed, false);
-
     var result_map = std.StringHashMap([]const u8).init(allocator);
     defer result_map.deinit();
     var props_map = std.StringHashMap([]const Property).init(allocator);
     defer props_map.deinit();
 
-    // Pass 0: match by (id ...)
+    // PROTOTYPE — deterministic identity (replaces the Pass 0..3.6 matcher).
+    // uuid = uuidFromId(stable id). With sub-block ids now keyed off the stable
+    // module-source label, every part's id is renumber-invariant, so the uuid
+    // is fully determined by the design: it reproduces identically every build
+    // and regenerates from scratch if the .bom is lost. Props (MPN) carry
+    // forward by id from the previous .bom; Pass 4 fills any missing MPN.
     var old_by_id = std.StringHashMap(usize).init(allocator);
     defer old_by_id.deinit();
-    for (old_entries, 0..) |e, i| {
-        if (e.id.len > 0) try old_by_id.put(e.id, i);
+    for (old_entries, 0..) |e, idx| {
+        if (e.id.len > 0) try old_by_id.put(e.id, idx);
     }
     for (flat_list.items) |info| {
-        if (info.id.len > 0) {
-            if (old_by_id.get(info.id)) |idx| {
-                if (!claimed[idx]) {
-                    try result_map.put(info.ref_des, try allocator.dupe(u8, old_entries[idx].uuid));
-                    try carryForwardProps(allocator, &props_map, info, old_entries[idx]);
-                    claimed[idx] = true;
-                }
-            }
-        }
-    }
-
-    // Pass 1: exact ref_des match
-    for (flat_list.items) |info| {
-        if (result_map.contains(info.ref_des)) continue;
-        if (old_by_ref.get(info.ref_des)) |idx| {
-            if (claimed[idx]) continue;
-            try result_map.put(info.ref_des, try allocator.dupe(u8, old_entries[idx].uuid));
-            try carryForwardProps(allocator, &props_map, info, old_entries[idx]);
-            claimed[idx] = true;
-        }
-    }
-
-    // Pass 2: rename detection
-    for (flat_list.items) |info| {
-        if (result_map.contains(info.ref_des)) continue;
-        var best_idx: ?usize = null;
-        var sole_match: ?usize = null;
-        var same_component_count: usize = 0;
-        for (old_entries, 0..) |old, idx| {
-            if (claimed[idx]) continue;
-            if (std.mem.eql(u8, old.component, info.component)) {
-                same_component_count += 1;
-                sole_match = idx;
-            }
-        }
-        if (same_component_count == 1) best_idx = sole_match;
-
-        if (best_idx) |idx| {
-            try result_map.put(info.ref_des, try allocator.dupe(u8, old_entries[idx].uuid));
-            if (old_entries[idx].properties.len > 0) {
-                try props_map.put(info.ref_des, old_entries[idx].properties);
-            }
-            claimed[idx] = true;
-        }
-    }
-
-    // Pass 2.5: match by net overlap
-    for (flat_list.items) |info| {
-        if (result_map.contains(info.ref_des)) continue;
-        if (info.nets.len == 0) continue;
-        var best_idx: ?usize = null;
-        var best_overlap: f64 = 0.0;
-        var best_count: usize = 0;
-        for (old_entries, 0..) |old, idx| {
-            if (claimed[idx]) continue;
-            if (old.nets.len == 0) continue;
-            const overlap = bom_mod.netOverlap(info.nets, old.nets);
-            if (overlap > best_overlap or (overlap == best_overlap and overlap > MIN_TIE_BREAKER_OVERLAP)) {
-                best_overlap = overlap;
-                best_idx = idx;
-                best_count = 0;
-            }
-            if (overlap == best_overlap) best_count += 1;
-        }
-        if (best_idx) |idx| {
-            if (best_overlap >= STRONG_NET_MATCH_RATIO and best_count == 1) {
-                try result_map.put(info.ref_des, try allocator.dupe(u8, old_entries[idx].uuid));
-                if (old_entries[idx].properties.len > 0) {
-                    try props_map.put(info.ref_des, old_entries[idx].properties);
-                }
-                claimed[idx] = true;
-            }
-        }
-    }
-
-    // Pass 3: derive a stable UUID from the instance's stable id. This makes
-    // new UUID assignments deterministic, so a given logical instance always
-    // gets the same UUID regardless of when the BOM first sees it or how
-    // global ref_des numbering shifts across builds. Random generateUuid is
-    // only used as a last resort for instances that somehow lack an id.
-    for (flat_list.items) |info| {
-        if (result_map.contains(info.ref_des)) continue;
         const uuid = if (info.id.len > 0)
             try export_kicad.uuidFromId(allocator, info.id)
         else
             try bom_mod.generateUuid(allocator);
         try result_map.put(info.ref_des, uuid);
+        if (info.id.len > 0) {
+            if (old_by_id.get(info.id)) |idx| {
+                try carryForwardProps(allocator, &props_map, info, old_entries[idx]);
+            }
+        }
     }
-
-    // Pass 3.5: correct UUID assignments by net matching.
-    //
-    // Phase C.2: collect every proposed swap first, then apply in one go.
-    // The previous implementation mutated `result_map` as it iterated, which
-    // meant a swap A↔B done early could enable a follow-on B↔C swap that
-    // would have been wrong with the original state — the pass produced
-    // different terminal states depending on visit order, and on the next
-    // eval it would re-fire the inverse correction, causing the user-visible
-    // `set_pad_net` flip-flop documented in docs/kicad-sync-phase-c.md.
-    //
-    // The fix: stage swaps in a list, then drop any cluster where one
-    // ref_des wants to swap with two distinct partners (a sign that net
-    // signatures don't bijectively partition the candidates — applying a
-    // partial chain would leave the BOM worse off than skipping). Apply the
-    // remaining bijective swaps in one pass.
-    try runPass35Swaps(allocator, &result_map, flat_list.items, old_entries);
-
-    // Pass 3.6: guarantee UUID uniqueness across instances.
-    try ensureUniqueUuids(allocator, &result_map, flat_list.items);
 
     // Pass 4: auto-resolve manufacturer + MPN from parts DB
     var parts_db = parts_mod.PartsDb.init(allocator, project_dir);
@@ -470,6 +368,31 @@ fn recordPartner(
     try partner.put(ref, other);
 }
 
+/// Merge component-defined properties with the .bom-resident ones (the .bom
+/// wins on key collision). Extracted from applyBom to keep its nesting shallow.
+fn mergeProps(
+    allocator: std.mem.Allocator,
+    inst_props: []const Property,
+    bom_props: []const Property,
+) ![]Property {
+    var merged: std.ArrayListUnmanaged(Property) = .empty;
+    for (inst_props) |cp| {
+        var overridden = false;
+        for (bom_props) |ip| {
+            if (std.mem.eql(u8, cp.key, ip.key)) {
+                overridden = true;
+                break;
+            }
+        }
+        if (!overridden) try merged.append(allocator, cp);
+    }
+    for (bom_props) |ip| try merged.append(allocator, .{
+        .key = allocator.dupe(u8, ip.key) catch ip.key,
+        .value = allocator.dupe(u8, ip.value) catch ip.value,
+    });
+    return merged.toOwnedSlice(allocator);
+}
+
 fn applyBom(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
@@ -491,22 +414,7 @@ fn applyBom(
 
         if (props_map.get(key)) |bom_props| {
             if (bom_props.len > 0) {
-                var merged: std.ArrayListUnmanaged(Property) = .empty;
-                for (inst.properties) |cp| {
-                    var overridden = false;
-                    for (bom_props) |ip| {
-                        if (std.mem.eql(u8, cp.key, ip.key)) {
-                            overridden = true;
-                            break;
-                        }
-                    }
-                    if (!overridden) try merged.append(allocator, cp);
-                }
-                for (bom_props) |ip| try merged.append(allocator, .{
-                    .key = allocator.dupe(u8, ip.key) catch ip.key,
-                    .value = allocator.dupe(u8, ip.value) catch ip.value,
-                });
-                inst.properties = try merged.toOwnedSlice(allocator);
+                inst.properties = try mergeProps(allocator, inst.properties, bom_props);
             }
         }
     }
