@@ -2,6 +2,3 @@
 src/eval/env.zig::PowerDomain: unused public declaration
 src/eval/ids.zig::getSymbolAlts: unused public declaration
 src/eval/ids.zig::validateSymbolAgainstPinout: unused public declaration
-src/serve/edit.zig::addInstanceCore: unused public declaration
-src/serve/edit.zig::removeInstanceCore: unused public declaration
-src/serve/edit.zig::swapComponentCore: unused public declaration
