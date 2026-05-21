@@ -4,8 +4,6 @@ const log = @import("infra/log.zig");
 const env_mod = @import("eval/env.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const DesignBlock = env_mod.DesignBlock;
-const Instance = env_mod.Instance;
-const Net = env_mod.Net;
 const Property = env_mod.Property;
 
 const netlist_mod = @import("export_kicad_netlist.zig");

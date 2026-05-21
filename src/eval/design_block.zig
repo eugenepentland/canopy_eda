@@ -30,9 +30,6 @@ const Group = env_mod.Group;
 const SubBlock = env_mod.SubBlock;
 
 // ── Constants ─────────────────────────────────────────────────────
-const DECOUPLE_FORM = "decouple";
-const BUS_PORT_FORM = "bus-port";
-const INSTANCE_FORM = "instance";
 const DECOUPLE_MULTI_NET_MIN_ARITY: usize = 6;
 const DECOUPLE_MULTI_NET_NET_OFFSET: usize = 5;
 

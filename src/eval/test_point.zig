@@ -71,11 +71,6 @@ fn parseTag(s: []const u8) ?TestPointTag {
 
 const parser = @import("../sexpr/parser.zig");
 
-fn parseFirstForm(allocator: std.mem.Allocator, source: []const u8) ![]const Node {
-    const nodes = try parser.parse(allocator, source);
-    return nodes[0].asList().?;
-}
-
 fn freeTestPoint(allocator: std.mem.Allocator, tp: TestPoint) void {
     if (tp.required_for.len > 0) allocator.free(tp.required_for);
 }
