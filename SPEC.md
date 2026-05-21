@@ -111,6 +111,7 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - getOrCreateChildId returns the stored token for a known key
 - getOrCreateChildId mints and queues a token for an unknown key
 - reassignSubBlockIds takes a pinned child id from the (ids …) sidecar and seeds+queues a miss with the legacy derivation
+- reassignSubBlockIdsV4 derives each child id from the sub-block uuid and the child's stable origin_key
 - isStandardRefDes distinguishes standard from descriptive labels
 - last_error records the source span of an unknown form so callers can report file:line:col
 - last_error records the source span of an arity mismatch in a special form

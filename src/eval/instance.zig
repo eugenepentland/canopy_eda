@@ -118,6 +118,9 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     const inst = Instance{
         .ref_des = ref_des,
         .label = ref_des,
+        // Stable module-local identity for hierarchical sub-block ids: the
+        // source name, captured before any global ref-des renumber.
+        .origin_key = ref_des,
         .component = resolved.family,
         .value = resolved.value,
         .footprint = resolved.footprint,
@@ -442,7 +445,8 @@ pub fn evalSeriesForm(
             const ref = try ids.nextRefDes(self, ids.componentPrefix(componentFamily(first_val)));
             const child_key = try std.fmt.allocPrint(self.allocator, "{s}#{d}", .{ series_value, ni / 2 });
             const child_id = try ids.getOrCreateChildId(self, &sidecar, child_key);
-            const inst = instanceFromValue(self, first_val, ref, comp_offset, child_id) orelse continue;
+            var inst = instanceFromValue(self, first_val, ref, comp_offset, child_id) orelse continue;
+            inst.origin_key = child_key; // stable structural key for hierarchical sub-block ids
             try instances.append(self.allocator, inst);
             try all_pin_nets.append(self.allocator, .{ .ref_des = ref, .pin = "1", .net = ta.nets.items[ni] });
             try all_pin_nets.append(self.allocator, .{ .ref_des = ref, .pin = "2", .net = ta.nets.items[ni + 1] });
@@ -463,6 +467,7 @@ pub fn evalSeriesForm(
         const ta = try parseTrailingArgs(self, form_children[3..], env);
         if (ta.nets.items.len < 2) return;
         var s_inst = instanceFromValue(self, s_comp_val, s_ref, s_comp_offset, s_id) orelse return;
+        s_inst.origin_key = s_ref; // stable source name for hierarchical sub-block ids
         try mergeInstanceProperties(self, &s_inst, ta.props.items);
         ids.registerRefDes(self, s_ref);
         try instances.append(self.allocator, s_inst);

@@ -241,6 +241,41 @@ the **subtitle** as the chip caption.
 (sub-block "pwr" (tpsm84338 220000 47000 1000))
 ```
 
+### Sub-block identity: legacy sidecar vs. hierarchical (opt-in)
+
+Every part needs a stable `id` (→ `uuidFromId` → KiCad footprint) that survives
+ref-des renumbering. For parts *inside* a `(sub-block …)` there are two schemes:
+
+- **Legacy (default).** Each `(sub-block …)` carries an enumerated `(ids ("U1"
+  …) ("C106" …) …)` sidecar — one frozen entry per child, keyed on the
+  seed-time ref-des, written at the call site. Verbose (N×M entries for a module
+  used N times with M parts) and the key drifts if a part renumbers because of
+  an edit upstream of the sub-block. This is what `stm32n6.sexp` uses; it stays
+  the default so already-adopted boards never churn.
+
+- **Hierarchical (opt-in, "Option 4").** Add `(hierarchical-ids)` to the
+  design-block body. Then each `(sub-block …)` gets **one** uuid (auto-minted
+  into the design file on first build), and every child's id is
+  `deriveChildId(subblock_uuid, child.origin_key)`, where `origin_key` is the
+  child's stable *module-local* key (the source name for named instances, the
+  `value@pin#index` / `value#index` structural key for `decouple`/`series`
+  children). Both inputs are renumber-proof, so child ids survive sub-block
+  renames *and* global renumbers. The module stays a clean, un-annotated
+  template; storage scales as N+M (one uuid per call + the module written once).
+  Mirrors KiCad's hierarchical-sheet path identity. See `src/adcarray/`.
+
+```scheme
+(design-block "ADC Array"
+  (hierarchical-ids)                 ;; opt in — all sub-blocks below use it
+  (sub-block "adc1" (ad7380-channel 1))   ;; (id …) auto-minted on first build
+  (sub-block "adc2" (ad7380-channel 2))
+  (sub-block "adc3" (ad7380-channel 3)))
+```
+
+The two schemes coexist per-design. Switching an existing design to
+`(hierarchical-ids)` changes its child ids (different derivation), so it is a
+one-time board re-stamp — adopt deliberately, not casually.
+
 ### Ports
 
 ```scheme

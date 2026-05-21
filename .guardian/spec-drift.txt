@@ -78,6 +78,7 @@ src/eval/ids.zig::pinId | fn pinId(self: *Evaluator, node: Node) ?[]const u8
 src/eval/ids.zig::prescanIds | fn prescanIds(self: *Evaluator, forms: []const Node) void
 src/eval/ids.zig::prescanRefDes | fn prescanRefDes(self: *Evaluator, forms: []const Node) void
 src/eval/ids.zig::reassignSubBlockIds | fn reassignSubBlockIds( self: *Evaluator, block: *DesignBlock, sub_name: []const u8, sidecar: *ChildIdSidecar, key_prefix: []const u8, ) EvalError!void
+src/eval/ids.zig::reassignSubBlockIdsV4 | fn reassignSubBlockIdsV4(self: *Evaluator, block: *DesignBlock, subblock_uuid: []const u8) EvalError!void
 src/eval/ids.zig::registerRefDes | fn registerRefDes(self: *Evaluator, ref_des: []const u8) void
 src/eval/ids.zig::renameSectionRefs | fn renameSectionRefs(sections: []env_mod.Section, rename_map: *std.StringHashMapUnmanaged([]const u8)) void
 src/eval/ids.zig::validateSymbolAgainstPinout | fn validateSymbolAgainstPinout(self: *Evaluator, symbol_name: []const u8, sym_pins: *const std.StringHashMapUnmanaged([]const u8)) void

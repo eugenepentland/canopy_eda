@@ -162,6 +162,7 @@ src/eval/ids.zig::pinId fn
 src/eval/ids.zig::prescanIds fn
 src/eval/ids.zig::prescanRefDes fn
 src/eval/ids.zig::reassignSubBlockIds fn
+src/eval/ids.zig::reassignSubBlockIdsV4 fn
 src/eval/ids.zig::registerRefDes fn
 src/eval/ids.zig::renameSectionRefs fn
 src/eval/ids.zig::validateSymbolAgainstPinout fn

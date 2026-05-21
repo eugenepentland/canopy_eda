@@ -544,6 +544,7 @@ pub fn emitDecoupleItems(
                 const cap_id = try ids.getOrCreateChildId(self, sidecar, child_key);
                 try instances.append(self.allocator, .{
                     .ref_des = ref,
+                    .origin_key = child_key, // stable structural key for hierarchical sub-block ids
                     .component = resolved.family,
                     .value = resolved.value,
                     .footprint = resolved.footprint,
@@ -756,6 +757,7 @@ pub fn buildSubBlock(self: *Evaluator, form_children: []const Node, env: *Env) E
     // deterministic derivation from the sub-block's name and the instance's
     // module-local ref_des so UUIDs are stable across builds.
     const pending_pre = self.pending_ids.items.len;
+    const pending_child_pre = self.pending_child_ids.items.len;
     // Track where the sub-block came from so the schematic page can offer a
     // "copy source" button and `/modules` can locate the file: a project-
     // relative path for the string form, or the module name for a call form.
@@ -781,12 +783,25 @@ pub fn buildSubBlock(self: *Evaluator, form_children: []const Node, env: *Env) E
             else => return EvalError.TypeError,
         }
     };
+    // Discard the module-scope id writes the sub-block evaluation pushed (their
+    // offsets point into the module file, which the board-file writer can't
+    // safely touch). The reassign step below stamps deterministic ids instead.
     self.pending_ids.items.len = pending_pre;
-    // Source-resident child ids: read (and extend) the `(ids …)` sidecar on
-    // this `(sub-block …)` form so each part's identity lives in the design
-    // .sexp, keyed by its path within the sub-block.
-    var sidecar = ids.parseChildIdSidecar(self, form_children);
-    try ids.reassignSubBlockIds(self, block, name, &sidecar, "");
+    self.pending_child_ids.items.len = pending_child_pre;
+    // Identity model:
+    //   • design declared `(hierarchical-ids)` → Option 4: one auto-minted uuid
+    //     per sub-block (written to the design file), each child id derived as
+    //     deriveChildId(subblock_uuid, child.origin_key). Modules need no
+    //     annotation — the child's stable key comes from its source.
+    //   • otherwise → legacy `(ids …)` sidecar enumerating every child id at
+    //     this call site (frozen, keyed on the seed-time ref-des).
+    if (self.hierarchical_ids) {
+        const subblock_uuid = try ids.getOrCreateFormId(self, form_children);
+        try ids.reassignSubBlockIdsV4(self, block, subblock_uuid);
+    } else {
+        var sidecar = ids.parseChildIdSidecar(self, form_children);
+        try ids.reassignSubBlockIds(self, block, name, &sidecar, "");
+    }
 
     return SubBlock{
         .name = name,

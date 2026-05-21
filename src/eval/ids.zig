@@ -442,6 +442,39 @@ pub fn reassignSubBlockIds(
     }
 }
 
+/// Option-4 child id derivation. Each part's final id = deriveChildId(subblock_uuid,
+/// component_uuid): the sub-block carries one source-resident uuid in the design file,
+/// and component_uuid is the part's own (id …) pinned in the *module definition*. Both
+/// inputs are source-resident and survive ref-des renumbering, so child ids are stable
+/// across sub-block renames and global renumbers — at the cost of one (id …) per module
+/// part instead of an enumerated (ids …) sidecar at every call site. Two instantiations
+/// of the same module share component_uuids but differ in subblock_uuid, so their parts
+/// land on distinct ids. This mirrors KiCad's hierarchical-sheet path identity.
+pub fn reassignSubBlockIdsV4(self: *Evaluator, block: *DesignBlock, subblock_uuid: []const u8) EvalError!void {
+    const insts: []Instance = @constCast(block.instances);
+    for (insts, 0..) |*inst, i| {
+        // The child's identity is its stable module-local key (source name for
+        // named parts, value@pin#index for decouple/series children), captured
+        // at creation in `origin_key` so it survives ref-des renumbering. Fall
+        // back to ref_des / index only for the (unexpected) keyless instance.
+        const component = if (inst.origin_key.len > 0)
+            inst.origin_key
+        else if (inst.ref_des.len > 0)
+            inst.ref_des
+        else
+            try std.fmt.allocPrint(self.allocator, "#{d}", .{i});
+        inst.id = try deriveChildId(self, subblock_uuid, component, 0);
+    }
+    // Nested sub-blocks compose hierarchically (KiCad sheet-path style): the
+    // nested level's uuid is derived from the parent's + the nested sub-block's
+    // name, then its children hash against that. Re-derives deterministically,
+    // overriding whatever the inner module evaluation assigned.
+    for (@as([]env_mod.SubBlock, @constCast(block.sub_blocks))) |*sb| {
+        const nested = try deriveChildId(self, subblock_uuid, sb.name, 0);
+        try reassignSubBlockIdsV4(self, sb.block, nested);
+    }
+}
+
 /// Get the (id ...) from form children, or generate one and track for insertion.
 pub fn getOrCreateFormId(self: *Evaluator, form_children: []const Node) EvalError![]const u8 {
     if (parseId(form_children)) |existing| return existing;
@@ -787,4 +820,26 @@ test "reassignSubBlockIds is source-resident" {
     const seed = try deriveChildId(&eval, "adc1", "R_FAN", 0);
     try std.testing.expectEqualStrings(seed, insts[1].id);
     try std.testing.expectEqual(before + 1, eval.pending_child_ids.items.len);
+}
+
+// spec: eval/evaluator - reassignSubBlockIdsV4 derives each child id from the sub-block uuid and the child's stable origin_key
+test "reassignSubBlockIdsV4 derives children from sub-block uuid + origin_key" {
+    // page_allocator: derived ids are intentionally never freed (project convention).
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+
+    var insts = [_]Instance{
+        // named part: origin_key is the source name; the renumbered ref_des is ignored
+        .{ .ref_des = "C106", .origin_key = "C_VCC", .component = "cap", .value = "1uF", .footprint = "f", .symbol = "s" },
+        // decouple-style child: origin_key is the value@pin#index structural key
+        .{ .ref_des = "C107", .origin_key = "10uF@4#0", .component = "cap", .value = "10uF", .footprint = "f", .symbol = "s" },
+    };
+    var block = DesignBlock{ .name = "adc", .instances = &insts, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
+
+    try reassignSubBlockIdsV4(&eval, &block, "fade94db");
+
+    // each child id == hash(subblock_uuid, origin_key), independent of ref_des
+    try std.testing.expectEqualStrings(try deriveChildId(&eval, "fade94db", "C_VCC", 0), insts[0].id);
+    try std.testing.expectEqualStrings(try deriveChildId(&eval, "fade94db", "10uF@4#0", 0), insts[1].id);
 }

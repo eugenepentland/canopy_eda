@@ -523,6 +523,13 @@ pub const Instance = struct {
     ref_des: []const u8,
     /// Descriptive label from source (e.g., "stm32", "flash"). Empty for auto-named passives.
     label: []const u8 = "",
+    /// Stable module-local identity, stamped at creation and never rewritten by
+    /// ref-des renumbering: the source name for named instances, the
+    /// `value@pin#index` / `value#index` structural key for decouple/series
+    /// children. Hierarchical (Option-4) sub-block identity hashes the parent
+    /// sub-block's uuid with this, so a child's id survives renames and
+    /// renumbers. Empty for plain top-level instances (which don't use it).
+    origin_key: []const u8 = "",
     component: []const u8,
     value: []const u8,
     footprint: []const u8,

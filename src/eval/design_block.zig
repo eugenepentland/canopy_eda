@@ -36,6 +36,18 @@ const INSTANCE_FORM = "instance";
 const DECOUPLE_MULTI_NET_MIN_ARITY: usize = 6;
 const DECOUPLE_MULTI_NET_NET_OFFSET: usize = 5;
 
+/// True if the design-block body contains a bare `(hierarchical-ids)` form,
+/// which opts into Option-4 sub-block identity.
+fn hasHierarchicalMarker(forms: []const Node) bool {
+    for (forms) |form| {
+        const children = form.asList() orelse continue;
+        if (children.len == 0) continue;
+        const head = children[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "hierarchical-ids")) return true;
+    }
+    return false;
+}
+
 /// Evaluate a `(design-block "name" form…)` form into a heap-allocated
 /// `DesignBlock`. Iterates each child form (instance/port/note/group/section/
 /// sub-block/net/series/decouple/verifies), builds nets from collected
@@ -67,6 +79,13 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     // and all existing id/ids tokens so generateId never re-mints one.
     ids.prescanRefDes(self, args[1..]);
     ids.prescanIds(self, args[1..]);
+
+    // `(hierarchical-ids)` opts this design (and the modules it sub-blocks) into
+    // Option-4 sub-block identity. Inherit from any enclosing design and restore
+    // on exit so the flag follows the design tree, not evaluation order.
+    const saved_hierarchical = self.hierarchical_ids;
+    self.hierarchical_ids = saved_hierarchical or hasHierarchicalMarker(args[1..]);
+    defer self.hierarchical_ids = saved_hierarchical;
 
     for (args[1..]) |form| {
         const form_children = form.asList() orelse continue;

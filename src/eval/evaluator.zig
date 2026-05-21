@@ -120,6 +120,12 @@ pub const Evaluator = struct {
     /// the prelude when a module load itself triggers another module load,
     /// and lets `evalFile` skip the work after the first design.
     passives_prelude_loaded: bool = false,
+    /// Set while evaluating a design-block that declared `(hierarchical-ids)`.
+    /// Switches `buildSubBlock` to Option-4 identity (one auto-minted uuid per
+    /// sub-block, children derived from it + their `origin_key`) instead of the
+    /// legacy `(ids …)` sidecar. Inherited into nested module evaluation and
+    /// restored on exit, so a marked design propagates to its sub-modules.
+    hierarchical_ids: bool = false,
     /// Span + short message describing the most recent `EvalError`.
     /// Populated by the form handlers when they return an error so the
     /// CLI / server can render a diagnostic that points at the source.
