@@ -380,36 +380,65 @@ pub fn deriveChildId(self: *Evaluator, parent_id: []const u8, context: []const u
     return std.fmt.allocPrint(self.allocator, "{c}{x:0>2}{x:0>2}{x:0>2}{x:0>1}", .{ first, hash[1], hash[2], hash[3], hash[0] & 0x0f });
 }
 
-/// Replace every instance ID inside a sub-block's design-block with a
-/// deterministic derivation from the sub-block's name and the instance's
-/// (still module-local) ref_des. Call this from `buildSubBlock` before the
-/// top-level evalDesignBlock runs autoAssignSubBlockRefDes — at that moment
-/// each instance still carries its module-source label ("R_FAP", "U1", …).
+/// Assign every instance ID inside a sub-block's design-block from a
+/// SOURCE-RESIDENT `(ids …)` sidecar on the `(sub-block …)` call site, so a
+/// sub-block's part identities live in the design `.sexp` (like the decouple
+/// sidecar) rather than only in the .bom. Each part is keyed by its path
+/// relative to the sub-block root — the module-source label ("R_FAP", "U1"),
+/// or `#<source-index>` for anonymous decouple/series passives, prefixed by
+/// the nested sub-block name for descendants. All descendants share the
+/// top-level call site's sidecar (a nested `(sub-block …)` lives in the
+/// shared module source, where a per-instance id would collide).
 ///
-/// This replaces the random IDs that buildInstance assigned during module
-/// evaluation. Random IDs inside modules are unusable: they aren't written
-/// back to any file (insertPendingIds only knows how to write to the board
-/// file, and the offsets are in the module file), and persisting them into
-/// the shared module source would collide across multiple instantiations.
-pub fn reassignSubBlockIds(self: *Evaluator, block: *DesignBlock, sub_name: []const u8) EvalError!void {
+/// On a sidecar miss the id is SEEDED with the legacy derivation
+/// `deriveChildId(sub_name, label/index)` and queued for write-back, so
+/// adopting this leaves existing uuids unchanged — the first build merely
+/// pins the already-derived ids into source. Reading from source thereafter
+/// makes them survive a sub-block rename (the sidecar moves with the form).
+pub fn reassignSubBlockIds(
+    self: *Evaluator,
+    block: *DesignBlock,
+    sub_name: []const u8,
+    sidecar: *ChildIdSidecar,
+    key_prefix: []const u8,
+) EvalError!void {
     const insts: []Instance = @constCast(block.instances);
-    // Key off the stable module-source label, not ref_des: by the time the
-    // PCB sync runs, autoAssignSubBlockRefDes has overwritten ref_des with a
-    // GLOBAL number that shifts whenever any like-prefixed part is added
-    // upstream — which rotated every sub-block part's derived id (and thus its
-    // canopy_uuid), churning the board. label is set once by buildInstance and
-    // never rewritten. Anonymous decouple/series passives carry no label, so
-    // they fall back to their fixed source-order index (also renumber-stable).
     for (insts, 0..) |*inst, i| {
-        if (inst.label.len > 0) {
-            inst.id = try deriveChildId(self, sub_name, inst.label, 0);
+        // `context` mirrors the legacy derivation exactly (module-source ref_des,
+        // which equals the label for named parts and the module-local auto-name
+        // for anonymous decouple/series passives) so the seed reproduces the id
+        // an unmodified build already produces — adoption is therefore churn-free
+        // and the seed merely pins what was already there. A `#index` fallback
+        // covers the (unused) case of a part with neither ref_des nor label.
+        const context = if (inst.ref_des.len > 0) inst.ref_des else inst.label;
+        const local = if (context.len > 0)
+            context
+        else
+            try std.fmt.allocPrint(self.allocator, "#{d}", .{i});
+        const key = if (key_prefix.len > 0)
+            try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ key_prefix, local })
+        else
+            local;
+        if (sidecar.map.get(key)) |tok| {
+            inst.id = tok;
         } else {
-            inst.id = try deriveChildId(self, sub_name, "", i);
+            const seed = try deriveChildId(self, sub_name, context, 0);
+            try self.pending_child_ids.append(self.allocator, .{
+                .parent_form_offset = sidecar.parent_offset,
+                .key = key,
+                .id = seed,
+            });
+            try sidecar.map.put(self.allocator, key, seed);
+            inst.id = seed;
         }
     }
     for (@as([]env_mod.SubBlock, @constCast(block.sub_blocks))) |*sb| {
         const nested = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ sub_name, sb.name });
-        try reassignSubBlockIds(self, sb.block, nested);
+        const nested_prefix = if (key_prefix.len > 0)
+            try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ key_prefix, sb.name })
+        else
+            sb.name;
+        try reassignSubBlockIds(self, sb.block, nested, sidecar, nested_prefix);
     }
 }
 
@@ -731,4 +760,31 @@ test "getOrCreateChildId mints for unknown key" {
     try std.testing.expectEqual(@as(usize, 8), tok.len);
     try std.testing.expectEqual(@as(usize, 1), eval.pending_child_ids.items.len);
     try std.testing.expectEqual(@as(u32, 7), eval.pending_child_ids.items[0].parent_form_offset);
+}
+
+// spec: eval/evaluator - reassignSubBlockIds takes a pinned child id from the (ids …) sidecar and seeds+queues a miss with the legacy derivation
+test "reassignSubBlockIds is source-resident" {
+    // page_allocator: seeds/keys are intentionally never freed (project convention).
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+
+    var sidecar = ChildIdSidecar{ .map = .empty, .parent_offset = 7 };
+    try sidecar.map.put(alloc, "R_FAP", "abcdef12"); // pinned in source
+
+    var insts = [_]Instance{
+        .{ .ref_des = "R_FAP", .label = "R_FAP", .component = "res", .value = "33R", .footprint = "f", .symbol = "s" },
+        .{ .ref_des = "R_FAN", .label = "R_FAN", .component = "res", .value = "33R", .footprint = "f", .symbol = "s" },
+    };
+    var block = DesignBlock{ .name = "adc", .instances = &insts, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
+
+    const before = eval.pending_child_ids.items.len;
+    try reassignSubBlockIds(&eval, &block, "adc1", &sidecar, "");
+
+    // a pinned sidecar id is taken verbatim (not re-derived)
+    try std.testing.expectEqualStrings("abcdef12", insts[0].id);
+    // a miss is seeded with the legacy derivation and queued for write-back
+    const seed = try deriveChildId(&eval, "adc1", "R_FAN", 0);
+    try std.testing.expectEqualStrings(seed, insts[1].id);
+    try std.testing.expectEqual(before + 1, eval.pending_child_ids.items.len);
 }

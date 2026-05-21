@@ -97,7 +97,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
                 try groups.append(self.allocator, group);
             },
             .sub_block => {
-                const sb = try builders.buildSubBlock(self, form_children[1..], env);
+                const sb = try builders.buildSubBlock(self, form_children, env);
                 try sub_blocks.append(self.allocator, sb);
             },
             .section => try evalSection(self, form_children, env, &instances, &all_pin_nets, &notes, &net_ties, &sections),

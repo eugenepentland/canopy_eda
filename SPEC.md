@@ -110,6 +110,7 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - parseChildIdSidecar reads (ids ("k" t)) pairs into a key-to-token map
 - getOrCreateChildId returns the stored token for a known key
 - getOrCreateChildId mints and queues a token for an unknown key
+- reassignSubBlockIds takes a pinned child id from the (ids …) sidecar and seeds+queues a miss with the legacy derivation
 - isStandardRefDes distinguishes standard from descriptive labels
 - last_error records the source span of an unknown form so callers can report file:line:col
 - last_error records the source span of an arity mismatch in a special form

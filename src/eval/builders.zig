@@ -731,8 +731,12 @@ pub fn buildGroup(self: *Evaluator, args: []const Node, env: *Env) EvalError!Gro
 /// then re-deriving every nested instance ID from the sub-block's name so
 /// IDs stay stable across rebuilds and never leak into the parent's pending
 /// pending-ID write-back list.
-pub fn buildSubBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!SubBlock {
-    if (args.len != 2) return EvalError.ArityError;
+pub fn buildSubBlock(self: *Evaluator, form_children: []const Node, env: *Env) EvalError!SubBlock {
+    // form_children = the whole `(sub-block "name" (call …) [(ids …)])` form.
+    // args drops the "sub-block" head; an optional trailing `(ids …)` sidecar
+    // carries source-resident child ids (read by parseChildIdSidecar below).
+    const args = form_children[1..];
+    if (args.len < 2) return EvalError.ArityError;
     const name_val = try self.evalNode(args[0], env);
     const name = name_val.asString() orelse return EvalError.TypeError;
 
@@ -778,7 +782,11 @@ pub fn buildSubBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!
         }
     };
     self.pending_ids.items.len = pending_pre;
-    try ids.reassignSubBlockIds(self, block, name);
+    // Source-resident child ids: read (and extend) the `(ids …)` sidecar on
+    // this `(sub-block …)` form so each part's identity lives in the design
+    // .sexp, keyed by its path within the sub-block.
+    var sidecar = ids.parseChildIdSidecar(self, form_children);
+    try ids.reassignSubBlockIds(self, block, name, &sidecar, "");
 
     return SubBlock{
         .name = name,
