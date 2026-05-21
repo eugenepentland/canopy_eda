@@ -38,7 +38,7 @@ src/eval/builders.zig::buildGroup | fn buildGroup(self: *Evaluator, args: []cons
 src/eval/builders.zig::buildNote | fn buildNote(self: *Evaluator, args: []const Node, env: *Env) EvalError!Note
 src/eval/builders.zig::buildPort | fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
 src/eval/builders.zig::buildSubBlock | fn buildSubBlock(self: *Evaluator, form_children: []const Node, env: *Env) EvalError!SubBlock
-src/eval/builders.zig::emitDecoupleItems | fn emitDecoupleItems( self: *Evaluator, items: []const Node, net_name: []const u8, env: *Env, instances: *std.ArrayListUnmanaged(Instance), all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl), sidecar: *ids.ChildIdSidecar, ) EvalError!void
+src/eval/builders.zig::emitDecoupleItems | fn emitDecoupleItems( self: *Evaluator, items: []const Node, net_name: []const u8, env: *Env, instances: *std.ArrayListUnmanaged(Instance), all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl), form_id: []const u8, sidecar: *ids.ChildIdSidecar, ) EvalError!void
 src/eval/builders.zig::expandSectionBusPort | fn expandSectionBusPort( self: *Evaluator, bp_children: []const Node, env: *env_mod.Env, out: *std.ArrayListUnmanaged(env_mod.SectionPort), ) EvalError!void
 src/eval/builders.zig::expandTopLevelBusPort | fn expandTopLevelBusPort( self: *Evaluator, bp_children: []const Node, env: *Env, out: *std.ArrayListUnmanaged(Port), ) EvalError!void
 src/eval/builders.zig::findPinFuncMap | fn findPinFuncMap(self: *Evaluator, inst_items: []const Instance, pins_ref: []const u8) ?*const std.StringHashMapUnmanaged([]const u8)

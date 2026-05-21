@@ -113,6 +113,9 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - reassignSubBlockIds takes a pinned child id from the (ids …) sidecar and seeds+queues a miss with the legacy derivation
 - reassignSubBlockIdsV4 derives each child id from the sub-block uuid and the child's stable origin_key
 - reassignSubBlockIdsV4 composes nested sub-blocks via the parent uuid and the nested name (sheet-path identity)
+- hierarchical-ids derives decouple child ids from the form id instead of the (ids ...) sidecar
+- without hierarchical-ids decouple child ids come from the (ids ...) sidecar
+- hierarchical-ids derives series child ids from the form id instead of the (ids ...) sidecar
 - isStandardRefDes distinguishes standard from descriptive labels
 - last_error records the source span of an unknown form so callers can report file:line:col
 - last_error records the source span of an arity mismatch in a special form

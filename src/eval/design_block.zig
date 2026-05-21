@@ -276,9 +276,10 @@ fn evalDecoupleForm(
 ) EvalError!void {
     if (form_children.len < 3) return;
     const first_val = try self.evalNode(form_children[1], env);
-    // Stamp the decouple form's own (id) anchor (kept for stability/grep); the
-    // synthesized child caps get stable tokens from the (ids …) sidecar.
-    _ = try ids.getOrCreateFormId(self, form_children);
+    // Stamp the decouple form's own (id) anchor. Under (hierarchical-ids) this
+    // single uuid seeds every child cap's derived id; otherwise it is just the
+    // form anchor and the children get pinned tokens from the (ids …) sidecar.
+    const form_id = try ids.getOrCreateFormId(self, form_children);
     var sidecar = ids.parseChildIdSidecar(self, form_children);
 
     // Multi-net form: (decouple (comp "val") COUNT per-pin REF "NET1" "NET2" ...)
@@ -295,6 +296,7 @@ fn evalDecoupleForm(
                 env,
                 instances,
                 all_pin_nets,
+                form_id,
                 &sidecar,
             );
         }
@@ -314,11 +316,11 @@ fn evalDecoupleForm(
             for (form_children[2..]) |sf| {
                 if (sf.isForm("bulk") or sf.isForm("bypass")) {
                     const sub = sf.asList().?;
-                    try builders.emitDecoupleItems(self, sub[1..], net_name, env, instances, all_pin_nets, &sidecar);
+                    try builders.emitDecoupleItems(self, sub[1..], net_name, env, instances, all_pin_nets, form_id, &sidecar);
                 }
             }
         } else {
-            try builders.emitDecoupleItems(self, form_children[2..], net_name, env, instances, all_pin_nets, &sidecar);
+            try builders.emitDecoupleItems(self, form_children[2..], net_name, env, instances, all_pin_nets, form_id, &sidecar);
         }
     }
 }
@@ -580,8 +582,9 @@ fn evalSectionDecouple(
 ) EvalError!void {
     if (sf_children.len < 3) return;
     const dec_first_val = try self.evalNode(sf_children[1], env);
-    // Stamp the decouple form's own (id) anchor; children use the (ids …) sidecar.
-    _ = try ids.getOrCreateFormId(self, sf_children);
+    // Stamp the decouple form's own (id) anchor. Under (hierarchical-ids) it
+    // seeds every child cap's derived id; otherwise children use the (ids …) sidecar.
+    const form_id = try ids.getOrCreateFormId(self, sf_children);
     var sidecar = ids.parseChildIdSidecar(self, sf_children);
 
     // Multi-net form: (decouple (comp "val") COUNT per-pin REF "NET1" "NET2" ...)
@@ -591,7 +594,7 @@ fn evalSectionDecouple(
             if (mn_node.isForm("id") or mn_node.isForm("ids")) continue;
             const mn_val = try self.evalNode(mn_node, env);
             const mn_net = mn_val.asString() orelse continue;
-            try builders.emitDecoupleItems(self, sf_children[1..DECOUPLE_MULTI_NET_NET_OFFSET], mn_net, env, instances, all_pin_nets, &sidecar);
+            try builders.emitDecoupleItems(self, sf_children[1..DECOUPLE_MULTI_NET_NET_OFFSET], mn_net, env, instances, all_pin_nets, form_id, &sidecar);
         }
     } else {
         const net_name = dec_first_val.asString() orelse return;
@@ -606,11 +609,11 @@ fn evalSectionDecouple(
             for (sf_children[2..]) |ssf| {
                 if (ssf.isForm("bulk") or ssf.isForm("bypass")) {
                     const sub = ssf.asList().?;
-                    try builders.emitDecoupleItems(self, sub[1..], net_name, env, instances, all_pin_nets, &sidecar);
+                    try builders.emitDecoupleItems(self, sub[1..], net_name, env, instances, all_pin_nets, form_id, &sidecar);
                 }
             }
         } else {
-            try builders.emitDecoupleItems(self, sf_children[2..], net_name, env, instances, all_pin_nets, &sidecar);
+            try builders.emitDecoupleItems(self, sf_children[2..], net_name, env, instances, all_pin_nets, form_id, &sidecar);
         }
     }
 }

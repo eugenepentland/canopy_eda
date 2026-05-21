@@ -450,6 +450,13 @@ pub fn processPinForm(
 }
 
 /// Emit decoupling cap instances from (comp "val") count/ref pairs.
+///
+/// Each cap's id is keyed on the renumber-proof structural key
+/// `value@pad#replica`. How that key becomes an id depends on the design's
+/// identity mode: under `(hierarchical-ids)` it is derived from the decouple
+/// form's own `(id …)` (`form_id`) — one source uuid covers every child, no
+/// `(ids …)` sidecar — mirroring the Option-4 sub-block path. Otherwise the
+/// child token is taken from / minted into the enumerated `(ids …)` sidecar.
 pub fn emitDecoupleItems(
     self: *Evaluator,
     items: []const Node,
@@ -457,6 +464,7 @@ pub fn emitDecoupleItems(
     env: *Env,
     instances: *std.ArrayListUnmanaged(Instance),
     all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
+    form_id: []const u8,
     sidecar: *ids.ChildIdSidecar,
 ) EvalError!void {
     var idx: usize = 0;
@@ -541,7 +549,13 @@ pub fn emitDecoupleItems(
                 // Stable structural key: value @ host pad # replica. Pad names
                 // don't churn on net rename, so the child token survives it.
                 const child_key = try std.fmt.allocPrint(self.allocator, "{s}@{s}#{d}", .{ resolved.value, target_pin, ci });
-                const cap_id = try ids.getOrCreateChildId(self, sidecar, child_key);
+                // Hierarchical designs derive every child id from the form's own
+                // uuid + this stable key (no sidecar); legacy designs pin the
+                // token in the enumerated (ids …) sidecar.
+                const cap_id = if (self.hierarchical_ids)
+                    try ids.deriveChildId(self, form_id, child_key, 0)
+                else
+                    try ids.getOrCreateChildId(self, sidecar, child_key);
                 try instances.append(self.allocator, .{
                     .ref_des = ref,
                     .origin_key = child_key, // stable structural key for hierarchical sub-block ids
@@ -888,4 +902,68 @@ fn spliceChecksIntoDesignBlock(
     @memcpy(merged_top, nodes);
     merged_top[di] = Node.list(nodes[di].span, merged_children);
     return merged_top;
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+/// Register a minimal component family so `(name "val")` evaluates to a
+/// `component_instance` without needing lib/components/ fixtures on disk.
+fn putTestFamily(eval: *Evaluator, alloc: std.mem.Allocator, name: []const u8) !void {
+    try eval.component_cache.put(alloc, name, .{
+        .name = name,
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "",
+    });
+}
+
+// spec: eval/evaluator - hierarchical-ids derives decouple child ids from the form id instead of the (ids ...) sidecar
+test "hierarchical decouple derives child ids from form id" {
+    // page_allocator: evaluator-allocated keys/ids are intentionally never freed.
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    eval.hierarchical_ids = true;
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    try putTestFamily(&eval, alloc, "cap-0201");
+
+    const nodes = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin U1 7");
+    var instances: std.ArrayListUnmanaged(Instance) = .empty;
+    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
+
+    try emitDecoupleItems(&eval, nodes, "VDD", &env, &instances, &all_pin_nets, "abcd1234", &sidecar);
+
+    try testing.expectEqual(@as(usize, 1), instances.items.len);
+    const expected = try ids.deriveChildId(&eval, "abcd1234", "100nF@7#0", 0);
+    try testing.expectEqualStrings(expected, instances.items[0].id);
+    try testing.expectEqualStrings("100nF@7#0", instances.items[0].origin_key);
+    // Hierarchical mode never consults or writes the sidecar.
+    try testing.expectEqual(@as(usize, 0), eval.pending_child_ids.items.len);
+}
+
+// spec: eval/evaluator - without hierarchical-ids decouple child ids come from the (ids ...) sidecar
+test "legacy decouple takes child ids from the sidecar" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    try putTestFamily(&eval, alloc, "cap-0201");
+
+    const nodes = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin U1 7");
+    var instances: std.ArrayListUnmanaged(Instance) = .empty;
+    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
+    try sidecar.map.put(alloc, "100nF@7#0", "deadbeef");
+
+    try emitDecoupleItems(&eval, nodes, "VDD", &env, &instances, &all_pin_nets, "abcd1234", &sidecar);
+
+    try testing.expectEqual(@as(usize, 1), instances.items.len);
+    // Legacy mode pins the token from the sidecar, not a derivation off the form id.
+    try testing.expectEqualStrings("deadbeef", instances.items[0].id);
 }

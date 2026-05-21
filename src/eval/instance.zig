@@ -427,16 +427,18 @@ pub fn evalSeriesForm(
     if (first_val == .component or first_val == .component_instance) {
         // Auto ref-des: (series (comp) "NET1" "NET2" ...)
         const comp_offset = ids.componentSourceOffset(form_children[1]);
-        // Stamp the series form's own (id) anchor; the per-pair children get
-        // stable tokens from the (ids …) sidecar keyed on value#pair-index, so
-        // a net rename no longer rotates their ids.
-        if (series_parsed_id == null) {
-            const series_id = try ids.generateId(self);
+        // Stamp the series form's own (id) anchor. Under (hierarchical-ids) this
+        // single uuid seeds every per-pair child's derived id; otherwise the
+        // children get pinned tokens from the (ids …) sidecar keyed on
+        // value#pair-index, so a net rename no longer rotates their ids.
+        const series_id = series_parsed_id orelse blk: {
+            const gen = try ids.generateId(self);
             try self.pending_ids.append(self.allocator, .{
                 .form_offset = form_children[0].span.offset -| 1,
-                .id = series_id,
+                .id = gen,
             });
-        }
+            break :blk gen;
+        };
         var sidecar = ids.parseChildIdSidecar(self, form_children);
         const series_value = if (resolveComponent(self, first_val)) |r| r.value else "";
         const ta = try parseTrailingArgs(self, form_children[2..], env);
@@ -444,7 +446,12 @@ pub fn evalSeriesForm(
         while (ni + 1 < ta.nets.items.len) : (ni += 2) {
             const ref = try ids.nextRefDes(self, ids.componentPrefix(componentFamily(first_val)));
             const child_key = try std.fmt.allocPrint(self.allocator, "{s}#{d}", .{ series_value, ni / 2 });
-            const child_id = try ids.getOrCreateChildId(self, &sidecar, child_key);
+            // Same identity split as decouple: derive from the form uuid under
+            // (hierarchical-ids), else take the token from the (ids …) sidecar.
+            const child_id = if (self.hierarchical_ids)
+                try ids.deriveChildId(self, series_id, child_key, 0)
+            else
+                try ids.getOrCreateChildId(self, &sidecar, child_key);
             var inst = instanceFromValue(self, first_val, ref, comp_offset, child_id) orelse continue;
             inst.origin_key = child_key; // stable structural key for hierarchical sub-block ids
             try instances.append(self.allocator, inst);
@@ -475,4 +482,40 @@ pub fn evalSeriesForm(
         try all_pin_nets.append(self.allocator, .{ .ref_des = s_ref, .pin = "2", .net = ta.nets.items[1] });
         if (ta.note) |text| try note_list.append(self.allocator, .{ .ref_des = s_ref, .text = text });
     }
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+const parser_mod = @import("../sexpr/parser.zig");
+
+// spec: eval/evaluator - hierarchical-ids derives series child ids from the form id instead of the (ids ...) sidecar
+test "hierarchical series derives child ids from form id" {
+    // page_allocator: evaluator-allocated keys/ids are intentionally never freed.
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    eval.hierarchical_ids = true;
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    try eval.component_cache.put(alloc, "ind-2016", .{
+        .name = "ind-2016",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "",
+    });
+
+    const nodes = try parser_mod.parse(alloc, "(series (ind-2016 \"1uH\") \"VA\" \"VB\" (id abcd1234))");
+    const form_children = nodes[0].asList().?;
+    var instances: std.ArrayListUnmanaged(Instance) = .empty;
+    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var notes: std.ArrayListUnmanaged(Note) = .empty;
+
+    try evalSeriesForm(&eval, form_children, &env, &instances, &all_pin_nets, &notes);
+
+    try testing.expectEqual(@as(usize, 1), instances.items.len);
+    const expected = try ids.deriveChildId(&eval, "abcd1234", "1uH#0", 0);
+    try testing.expectEqualStrings(expected, instances.items[0].id);
+    try testing.expectEqualStrings("1uH#0", instances.items[0].origin_key);
 }
