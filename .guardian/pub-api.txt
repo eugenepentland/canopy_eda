@@ -150,7 +150,6 @@ src/eval/ids.zig::deriveChildId fn
 src/eval/ids.zig::generateId fn
 src/eval/ids.zig::getOrCreateChildId fn
 src/eval/ids.zig::getOrCreateFormId fn
-src/eval/ids.zig::getSymbolAlts fn
 src/eval/ids.zig::getSymbolPins fn
 src/eval/ids.zig::isStandardRefDes fn
 src/eval/ids.zig::loadPinoutFile fn
@@ -164,7 +163,6 @@ src/eval/ids.zig::reassignSubBlockIds fn
 src/eval/ids.zig::reassignSubBlockIdsV4 fn
 src/eval/ids.zig::registerRefDes fn
 src/eval/ids.zig::renameSectionRefs fn
-src/eval/ids.zig::validateSymbolAgainstPinout fn
 src/eval/instance.zig::InstanceResult struct_
 src/eval/instance.zig::ResolvedComponent struct_
 src/eval/instance.zig::TrailingArgs struct_

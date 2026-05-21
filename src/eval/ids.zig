@@ -555,15 +555,6 @@ pub fn getSymbolPins(self: *Evaluator, lookup_name: []const u8) ?*const std.Stri
     return self.symbol_pin_cache.getPtr(lookup_name);
 }
 
-/// Look up cached alternate-function map for a symbol (pin_id -> []AltFunc). Returns null
-/// if the pinout has not been loaded yet; callers typically invoke `getSymbolPins` first.
-pub fn getSymbolAlts(self: *Evaluator, lookup_name: []const u8) ?*const std.StringHashMapUnmanaged([]const AltFunc) {
-    if (self.symbol_alt_cache.getPtr(lookup_name)) |cached| return cached;
-    // Warm the cache via getSymbolPins; it populates both maps together.
-    _ = getSymbolPins(self, lookup_name) orelse return null;
-    return self.symbol_alt_cache.getPtr(lookup_name);
-}
-
 /// Pinout file load result: the `pin_id → function_name` map plus the
 /// `pin_id → []AltFunc` map of declared alternate pin functions. Both maps
 /// are indexed identically and cached together because `loadPinoutFile`
@@ -612,48 +603,6 @@ pub fn loadPinoutFile(self: *Evaluator, path: []const u8) ?LoadedPinout {
         }
     }
     return .{ .pins = pin_map, .alts = alt_map };
-}
-
-/// Check symbol pins against the pinout (source of truth).
-pub fn validateSymbolAgainstPinout(self: *Evaluator, symbol_name: []const u8, sym_pins: *const std.StringHashMapUnmanaged([]const u8)) void {
-    const pinout_path = std.fmt.allocPrint(self.allocator, "{s}/lib/pinouts/{s}.sexp", .{ self.project_dir, symbol_name }) catch return;
-    const pinout_content = infra_fs.cwd().readFileAlloc(self.allocator, pinout_path, 1024 * 256) catch return;
-    const pinout_nodes = parser_mod.parse(self.allocator, pinout_content) catch return;
-    if (pinout_nodes.len == 0) return;
-    const pinout_top = pinout_nodes[0].asList() orelse return;
-    if (pinout_top.len < 2) return;
-    const head = pinout_top[0].asAtom() orelse return;
-    if (!std.mem.eql(u8, head, "pinout")) return;
-
-    // Build pinout map: pin_id -> function_name
-    var pinout_map: std.StringHashMapUnmanaged([]const u8) = .empty;
-    defer pinout_map.deinit(self.allocator);
-    for (pinout_top[2..]) |child| {
-        const cl = child.asList() orelse continue;
-        if (cl.len < 3) continue;
-        const ch = cl[0].asAtom() orelse continue;
-        if (!std.mem.eql(u8, ch, "pin")) continue;
-        const pin_id_str = pinId(self, cl[1]) orelse continue;
-        const func_name = cl[2].asString() orelse (cl[2].asAtom() orelse continue);
-        pinout_map.put(self.allocator, pin_id_str, func_name) catch continue;
-    }
-
-    // Validate: every symbol pin must exist in pinout with matching name
-    var sym_it = sym_pins.iterator();
-    while (sym_it.next()) |entry| {
-        const pin_id_key = entry.key_ptr.*;
-        const sym_name = entry.value_ptr.*;
-        if (pinout_map.get(pin_id_key)) |pinout_name| {
-            if (!std.mem.eql(u8, sym_name, pinout_name)) {
-                log.warn(
-                    "PINOUT ERROR: symbol '{s}' pin {s}: symbol says \"{s}\" but pinout says \"{s}\"",
-                    .{ symbol_name, pin_id_key, sym_name, pinout_name },
-                );
-            }
-        } else {
-            log.warn("PINOUT ERROR: symbol '{s}' pin {s} (\"{s}\") does not exist in pinout", .{ symbol_name, pin_id_key, sym_name });
-        }
-    }
 }
 
 /// Convert a node to a pin identifier string (number -> "123", atom -> "A1").

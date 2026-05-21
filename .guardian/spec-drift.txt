@@ -66,7 +66,6 @@ src/eval/ids.zig::deriveChildId | fn deriveChildId(self: *Evaluator, parent_id: 
 src/eval/ids.zig::generateId | fn generateId(self: *Evaluator) EvalError![]const u8
 src/eval/ids.zig::getOrCreateChildId | fn getOrCreateChildId(self: *Evaluator, sidecar: *ChildIdSidecar, key: []const u8) EvalError![]const u8
 src/eval/ids.zig::getOrCreateFormId | fn getOrCreateFormId(self: *Evaluator, form_children: []const Node) EvalError![]const u8
-src/eval/ids.zig::getSymbolAlts | fn getSymbolAlts(self: *Evaluator, lookup_name: []const u8) ?*const std.StringHashMapUnmanaged([]const AltFunc)
 src/eval/ids.zig::getSymbolPins | fn getSymbolPins(self: *Evaluator, lookup_name: []const u8) ?*const std.StringHashMapUnmanaged([]const u8)
 src/eval/ids.zig::isStandardRefDes | fn isStandardRefDes(ref_des: []const u8) bool
 src/eval/ids.zig::loadPinoutFile | fn loadPinoutFile(self: *Evaluator, path: []const u8) ?LoadedPinout
@@ -80,7 +79,6 @@ src/eval/ids.zig::reassignSubBlockIds | fn reassignSubBlockIds( self: *Evaluator
 src/eval/ids.zig::reassignSubBlockIdsV4 | fn reassignSubBlockIdsV4(self: *Evaluator, block: *DesignBlock, subblock_uuid: []const u8) EvalError!void
 src/eval/ids.zig::registerRefDes | fn registerRefDes(self: *Evaluator, ref_des: []const u8) void
 src/eval/ids.zig::renameSectionRefs | fn renameSectionRefs(sections: []env_mod.Section, rename_map: *std.StringHashMapUnmanaged([]const u8)) void
-src/eval/ids.zig::validateSymbolAgainstPinout | fn validateSymbolAgainstPinout(self: *Evaluator, symbol_name: []const u8, sym_pins: *const std.StringHashMapUnmanaged([]const u8)) void
 src/eval/instance.zig::buildInstance | fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) EvalError!InstanceResult
 src/eval/instance.zig::componentFamily | fn componentFamily(val: Value) []const u8
 src/eval/instance.zig::evalSeriesForm | fn evalSeriesForm( self: *Evaluator, form_children: []const Node, env: *Env, instances: *std.ArrayListUnmanaged(Instance), all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl), note_list: *std.ArrayListUnmanaged(Note), ) EvalError!void

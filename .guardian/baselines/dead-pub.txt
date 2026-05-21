@@ -1,4 +1,2 @@
 # guardian-snapshot v1
 src/eval/env.zig::PowerDomain: unused public declaration
-src/eval/ids.zig::getSymbolAlts: unused public declaration
-src/eval/ids.zig::validateSymbolAgainstPinout: unused public declaration
