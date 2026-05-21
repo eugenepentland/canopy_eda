@@ -843,3 +843,24 @@ test "reassignSubBlockIdsV4 derives children from sub-block uuid + origin_key" {
     try std.testing.expectEqualStrings(try deriveChildId(&eval, "fade94db", "C_VCC", 0), insts[0].id);
     try std.testing.expectEqualStrings(try deriveChildId(&eval, "fade94db", "10uF@4#0", 0), insts[1].id);
 }
+
+// spec: eval/evaluator - reassignSubBlockIdsV4 composes nested sub-blocks via the parent uuid and the nested name (sheet-path identity)
+test "reassignSubBlockIdsV4 composes nested sub-block paths" {
+    // page_allocator: derived ids are intentionally never freed (project convention).
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+
+    var inner_insts = [_]Instance{
+        .{ .ref_des = "C9", .origin_key = "100nF@B4#0", .component = "cap", .value = "100nF", .footprint = "f", .symbol = "s" },
+    };
+    var inner = DesignBlock{ .name = "inner", .instances = &inner_insts, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
+    var subs = [_]env_mod.SubBlock{.{ .name = "lo", .block = &inner }};
+    var outer = DesignBlock{ .name = "bank", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &subs };
+
+    try reassignSubBlockIdsV4(&eval, &outer, "ebcb7396");
+
+    // nested child id == hash(hash(parent_uuid, nested_name), origin_key)
+    const nested = try deriveChildId(&eval, "ebcb7396", "lo", 0);
+    try std.testing.expectEqualStrings(try deriveChildId(&eval, nested, "100nF@B4#0", 0), inner_insts[0].id);
+}
