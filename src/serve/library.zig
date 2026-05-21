@@ -35,55 +35,6 @@ pub const LibraryRow = struct {
     pub const Kind = enum { family, component, pinout, footprint };
 };
 
-/// Scan lib/components/ for passive families and write a JSON object
-/// mapping type prefixes (cap, res, ind, led) to arrays of family names.
-pub fn writeFamiliesJson(w: anytype, allocator: std.mem.Allocator, project_dir: []const u8) HandlerError!void {
-    const comp_dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/components", .{project_dir});
-    defer allocator.free(comp_dir_path);
-
-    var dir = infra_fs.cwd().openDir(comp_dir_path, .{ .iterate = true }) catch return;
-    defer dir.close();
-
-    const prefixes = [_][]const u8{ "cap", "res", "ind", "led" };
-    var lists: [4]std.ArrayListUnmanaged([]const u8) = .{ .empty, .empty, .empty, .empty };
-
-    var iter = dir.iterate();
-    while (try iter.next()) |entry| {
-        if (entry.kind != .file) continue;
-        const fname = entry.name;
-        if (!std.mem.endsWith(u8, fname, ".sexp")) continue;
-        const base = fname[0 .. fname.len - SEXP_EXT_LEN];
-        for (prefixes, 0..) |pfx, pi| {
-            if (std.mem.startsWith(u8, base, pfx) and base.len > pfx.len and base[pfx.len] == '-') {
-                try lists[pi].append(allocator, try allocator.dupe(u8, base));
-                break;
-            }
-        }
-    }
-
-    var first_prefix = true;
-    for (prefixes, 0..) |pfx, pi| {
-        if (lists[pi].items.len == 0) continue;
-        if (!first_prefix) try w.writeAll(",");
-        first_prefix = false;
-        try w.writeAll("\"");
-        try w.writeAll(pfx);
-        try w.writeAll("\":[");
-        std.mem.sort([]const u8, lists[pi].items, {}, struct {
-            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-                return std.mem.order(u8, a, b) == .lt;
-            }
-        }.lessThan);
-        for (lists[pi].items, 0..) |fam, fi| {
-            if (fi > 0) try w.writeAll(",");
-            try w.writeAll("\"");
-            try w.writeAll(fam);
-            try w.writeAll("\"");
-        }
-        try w.writeAll("]");
-    }
-}
-
 /// Walk `lib/components/`, `lib/pinouts/`, `lib/footprints/` and return
 /// a flat slice of `LibraryRow`s ready to feed the `library.zt` template.
 /// Components come first; standalone pinouts and footprints (not referenced

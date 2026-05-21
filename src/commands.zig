@@ -495,90 +495,6 @@ pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) C
     }
 }
 
-/// CLI entry point for `eda serve` in watcher mode. Polls source files under
-/// the project's `src/`, `lib/components/`, and `lib/modules/` directories
-/// and re-pushes the rebuilt design to a separately-running web server
-/// whenever it sees a change.
-pub fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
-    var project_dir: []const u8 = ".";
-    var server_url: []const u8 = "http://localhost:7050";
-    var slug: []const u8 = "live";
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], PROJECT_DIR_FLAG) and i + 1 < args.len) {
-            project_dir = args[i + 1];
-            i += 1;
-        }
-        if (std.mem.eql(u8, args[i], "--server") and i + 1 < args.len) {
-            server_url = args[i + 1];
-            i += 1;
-        }
-        if (std.mem.eql(u8, args[i], "--name") and i + 1 < args.len) {
-            slug = args[i + 1];
-            i += 1;
-        }
-    }
-
-    std.debug.print("eda serve: watching {s}, pushing to {s}/api/push/{s}\n", .{ project_dir, server_url, slug });
-
-    doServe(allocator, project_dir, server_url, slug) catch |err| {
-        std.debug.print("Initial build failed: {}\n", .{err});
-    };
-
-    var last_mtime: i128 = 0;
-    while (true) {
-        std.Thread.sleep(1 * std.time.ns_per_s);
-
-        const mtime = getNewestMtime(allocator, project_dir) catch continue;
-        if (mtime > last_mtime) {
-            last_mtime = mtime;
-            std.debug.print("Change detected, rebuilding...\n", .{});
-            doServe(allocator, project_dir, server_url, slug) catch |err| {
-                std.debug.print("Build failed: {}\n", .{err});
-                continue;
-            };
-            std.debug.print("Build complete.\n", .{});
-        }
-    }
-}
-
-fn doServe(allocator: std.mem.Allocator, project_dir: []const u8, server_url: []const u8, slug: []const u8) !void {
-    const board_path = try paths.designSourcePath(allocator, project_dir, "board");
-    defer allocator.free(board_path);
-
-    var eval = Evaluator.init(allocator, project_dir);
-    defer eval.deinit();
-
-    const result = try eval.evalFile(board_path);
-
-    for (eval.assertions.items) |assertion| {
-        if (assertion.passed) {
-            std.debug.print("  PASS: {s}\n", .{assertion.message});
-        } else if (assertion.is_warning) {
-            std.debug.print("  WARN: {s}\n", .{assertion.message});
-        } else {
-            std.debug.print("  FAIL: {s}\n", .{assertion.message});
-        }
-    }
-
-    switch (result) {
-        .design_block => |block| {
-            const output = try emit.emitResolved(allocator, block);
-            defer allocator.free(output);
-
-            const url = try std.fmt.allocPrint(allocator, "{s}/api/push/{s}", .{ server_url, slug });
-            defer allocator.free(url);
-
-            pushToServer(allocator, url, output) catch |err| {
-                std.debug.print("  Push failed: {}\n", .{err});
-                return;
-            };
-            std.debug.print("  Pushed {s} to {s}\n", .{ block.name, url });
-        },
-        else => return error.InvalidFormat,
-    }
-}
-
 fn pushToServer(allocator: std.mem.Allocator, url: []const u8, body: []const u8) !void {
     const argv = [_][]const u8{
         "curl", "-s",                       "-X",            "POST",
@@ -598,26 +514,4 @@ fn pushToServer(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
 
     const term = try child.wait();
     if (term.Exited != 0) return error.PushFailed;
-}
-
-fn getNewestMtime(allocator: std.mem.Allocator, project_dir: []const u8) !i128 {
-    var newest: i128 = 0;
-
-    const dirs = [_][]const u8{ "src", "lib/components", "lib/modules" };
-    for (dirs) |sub| {
-        const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ project_dir, sub });
-        defer allocator.free(dir_path);
-
-        var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch continue;
-        defer dir.close();
-
-        var iter = dir.iterate();
-        while (try iter.next()) |entry| {
-            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".sexp")) {
-                const stat = dir.statFile(entry.name) catch continue;
-                if (stat.mtime > newest) newest = stat.mtime;
-            }
-        }
-    }
-    return newest;
 }

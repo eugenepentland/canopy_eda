@@ -1967,27 +1967,3 @@ pub fn invitePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     res.content_type = .HTML;
     res.body = aw.written();
 }
-
-/// GET /auth/manage — signed-in account page for listing the user's
-/// passkeys, adding another device, generating invite links, and signing
-/// out. Redirects to `/auth/login` when the request lacks a valid session.
-/// Markup lives in `templates/auth.zt`; the JS bundle is served from
-/// `/static/auth_manage.js` and page-specific CSS from
-/// `/static/auth_manage.css`.
-pub fn managePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const tok = getSessionToken(req) orelse {
-        res.status = 303;
-        res.header(HEADER_LOCATION, PATH_AUTH_LOGIN);
-        return;
-    };
-    if (validateSession(ctx.allocator, ctx.auth_dir, tok) == null) {
-        res.status = 303;
-        res.header(HEADER_LOCATION, PATH_AUTH_LOGIN);
-        return;
-    }
-
-    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
-    try auth_template.Manage.render(.{}, &aw.writer);
-    res.content_type = .HTML;
-    res.body = aw.written();
-}

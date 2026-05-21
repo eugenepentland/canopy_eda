@@ -19,7 +19,6 @@ src/commands.zig::cmdCheck fn
 src/commands.zig::cmdExportKicad fn
 src/commands.zig::cmdExportReview fn
 src/commands.zig::cmdLint fn
-src/commands.zig::cmdServe fn
 src/convert/alt_functions.zig::AltEntry struct_
 src/convert/alt_functions.zig::AltError value
 src/convert/alt_functions.zig::mergePinoutWithAlts fn
@@ -449,10 +448,8 @@ src/serve/api.zig::removeSectionNoteApi fn
 src/serve/api.zig::reviewJsonApi fn
 src/serve/api.zig::sceneGraphApi fn
 src/serve/api.zig::versionApi fn
-src/serve/assets_css.zig::DESIGN_CSS value
 src/serve/assets_css.zig::INDEX_CSS value
 src/serve/assets_css.zig::NAVBAR_CSS value
-src/serve/assets_css.zig::writeNavbar fn
 src/serve/auth.zig::B64URL_JS value
 src/serve/auth.zig::HandlerError value
 src/serve/auth.zig::PAGE_STYLE value
@@ -472,7 +469,6 @@ src/serve/auth.zig::loginChallengePage fn
 src/serve/auth.zig::loginCompletePage fn
 src/serve/auth.zig::loginPage fn
 src/serve/auth.zig::logoutApi fn
-src/serve/auth.zig::managePage fn
 src/serve/auth.zig::passwordLoginApi fn
 src/serve/auth.zig::passwordSetApi fn
 src/serve/auth.zig::passwordStatusApi fn
@@ -528,9 +524,7 @@ src/serve/edit.zig::swapPinsApi fn
 src/serve/edit.zig::swapPinsCore fn
 src/serve/edit.zig::writeDesignCore fn
 src/serve/footprint_preview.zig::HandlerError value
-src/serve/footprint_preview.zig::footprintPadBounds fn
 src/serve/footprint_preview.zig::footprintSvgApi fn
-src/serve/footprint_preview.zig::listFootprints fn
 src/serve/history.zig::HistoryError value
 src/serve/history.zig::SnapshotInfo struct_
 src/serve/history.zig::listSnapshots fn
@@ -539,7 +533,6 @@ src/serve/history.zig::snapshot fn
 src/serve/library.zig::HandlerError value
 src/serve/library.zig::LibraryRow struct_
 src/serve/library.zig::libraryPage fn
-src/serve/library.zig::writeFamiliesJson fn
 src/serve/mcp.zig::Client struct_
 src/serve/mcp.zig::Context struct_
 src/serve/mcp.zig::HandlerError value
@@ -640,7 +633,6 @@ src/serve/templates/account.zig::UsersCard struct_
 src/serve/templates/auth.zig::InviteAccept struct_
 src/serve/templates/auth.zig::InviteExpired struct_
 src/serve/templates/auth.zig::Login struct_
-src/serve/templates/auth.zig::Manage struct_
 src/serve/templates/auth.zig::Setup struct_
 src/serve/templates/library.zig::ComponentDetails struct_
 src/serve/templates/library.zig::Library struct_
@@ -669,9 +661,7 @@ src/serve/upload_datasheet.zig::storeErrorBody fn
 src/serve/upload_datasheet.zig::storeErrorStatus fn
 src/serve/upload_datasheet.zig::uploadDatasheetApi fn
 src/serve/upload_package.zig::HandlerError value
-src/serve/upload_package.zig::uploadFootprintApi fn
 src/serve/upload_package.zig::uploadPackageApi fn
-src/serve/upload_package.zig::uploadSymbolApi fn
 src/serve/users.zig::Role enum_
 src/serve/users.zig::User struct_
 src/serve/users.zig::deleteUser fn

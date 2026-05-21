@@ -45,16 +45,6 @@ src/commands.zig:482: std.debug.print reference outside allowed paths
 src/commands.zig:488: std.debug.print reference outside allowed paths
 src/commands.zig:493: std.debug.print reference outside allowed paths
 src/commands.zig:494: std.debug.print reference outside allowed paths
-src/commands.zig:522: std.debug.print reference outside allowed paths
-src/commands.zig:525: std.debug.print reference outside allowed paths
-src/commands.zig:535: std.debug.print reference outside allowed paths
-src/commands.zig:537: std.debug.print reference outside allowed paths
-src/commands.zig:540: std.debug.print reference outside allowed paths
-src/commands.zig:556: std.debug.print reference outside allowed paths
-src/commands.zig:558: std.debug.print reference outside allowed paths
-src/commands.zig:560: std.debug.print reference outside allowed paths
-src/commands.zig:573: std.debug.print reference outside allowed paths
-src/commands.zig:576: std.debug.print reference outside allowed paths
 src/commands.zig:83: std.debug.print reference outside allowed paths
 src/commands.zig:93: std.debug.print reference outside allowed paths
 src/commands.zig:99: std.debug.print reference outside allowed paths
@@ -101,5 +91,3 @@ src/serve/upload.zig:240: std.debug.print reference outside allowed paths
 src/serve/upload.zig:345: std.debug.print reference outside allowed paths
 src/serve/upload.zig:371: std.debug.print reference outside allowed paths
 src/serve/upload_package.zig:220: std.debug.print reference outside allowed paths
-src/serve/upload_package.zig:290: std.debug.print reference outside allowed paths
-src/serve/upload_package.zig:353: std.debug.print reference outside allowed paths

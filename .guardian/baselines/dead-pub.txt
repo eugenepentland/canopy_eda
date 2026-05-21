@@ -1,15 +1,7 @@
 # guardian-snapshot v1
-src/commands.zig::cmdServe: unused public declaration
 src/eval/env.zig::PowerDomain: unused public declaration
 src/eval/ids.zig::getSymbolAlts: unused public declaration
 src/eval/ids.zig::validateSymbolAgainstPinout: unused public declaration
-src/serve/assets_css.zig::DESIGN_CSS: unused public declaration
-src/serve/assets_css.zig::writeNavbar: unused public declaration
-src/serve/auth.zig::managePage: unused public declaration
 src/serve/edit.zig::addInstanceCore: unused public declaration
 src/serve/edit.zig::removeInstanceCore: unused public declaration
 src/serve/edit.zig::swapComponentCore: unused public declaration
-src/serve/footprint_preview.zig::listFootprints: unused public declaration
-src/serve/library.zig::writeFamiliesJson: unused public declaration
-src/serve/upload_package.zig::uploadFootprintApi: unused public declaration
-src/serve/upload_package.zig::uploadSymbolApi: unused public declaration
