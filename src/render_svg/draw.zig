@@ -19,8 +19,6 @@ pub const hub_x: f64 = 320.0;
 pub const top_margin: f64 = 80.0;
 pub const passive_bw: f64 = 40.0;
 pub const passive_bh: f64 = 20.0;
-pub const passive_hit_w: f64 = 52.0;
-pub const passive_hit_h: f64 = 38.0;
 pub const branch_spacing: f64 = 40.0;
 pub const per_conn_spacing: f64 = 40.0;
 pub const bus_gap: f64 = 15.0;
@@ -448,30 +446,4 @@ test "compactPinNumbers collapses long merged-pin stubs" {
         "9x pins",
         compactPinNumbers(&buf, "A19,F12,H14,N16,P8,P12,P14,W1,W19"),
     );
-}
-
-/// Minimal HTML/SVG-attribute escaping. Returns the input slice unchanged
-/// when no escapable byte is present so the common path doesn't allocate;
-/// otherwise builds a freshly-owned string with `&`, `<`, `>`, `"` replaced.
-pub fn escapeHtml(allocator: Allocator, s: []const u8) RenderError![]const u8 {
-    var needs_escape = false;
-    for (s) |c| {
-        if (c == '&' or c == '<' or c == '>' or c == '"') {
-            needs_escape = true;
-            break;
-        }
-    }
-    if (!needs_escape) return s;
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    for (s) |c| {
-        switch (c) {
-            '&' => try buf.appendSlice(allocator, "&amp;"),
-            '<' => try buf.appendSlice(allocator, "&lt;"),
-            '>' => try buf.appendSlice(allocator, "&gt;"),
-            '"' => try buf.appendSlice(allocator, "&quot;"),
-            else => try buf.append(allocator, c),
-        }
-    }
-    return buf.toOwnedSlice(allocator);
 }

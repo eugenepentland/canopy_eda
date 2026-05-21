@@ -3,15 +3,6 @@ src/commands.zig::cmdServe: unused public declaration
 src/eval/env.zig::PowerDomain: unused public declaration
 src/eval/ids.zig::getSymbolAlts: unused public declaration
 src/eval/ids.zig::validateSymbolAgainstPinout: unused public declaration
-src/render_svg/bom_table.zig::renderBomTable: unused public declaration
-src/render_svg/branch.zig::inferBlockIcon: unused public declaration
-src/render_svg/branch.zig::renderPortBlock: unused public declaration
-src/render_svg/draw.zig::escapeHtml: unused public declaration
-src/render_svg/draw.zig::passive_hit_h: unused public declaration
-src/render_svg/draw.zig::passive_hit_w: unused public declaration
-src/render_svg/hub.zig::renderHub: unused public declaration
-src/render_svg/hub.zig::renderHubPart: unused public declaration
-src/render_svg/section_inset.zig::partitionGroups: unused public declaration
 src/serve/assets_css.zig::DESIGN_CSS: unused public declaration
 src/serve/assets_css.zig::writeNavbar: unused public declaration
 src/serve/auth.zig::managePage: unused public declaration

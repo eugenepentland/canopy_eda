@@ -310,16 +310,11 @@ src/render_json.zig::RenderCtx value
 src/render_json.zig::RenderError value
 src/render_json.zig::renderSceneGraph fn
 src/render_power_tree_svg.zig::render fn
-src/render_svg/bom_table.zig::collectAllInstances fn
-src/render_svg/bom_table.zig::renderBomTable fn
 src/render_svg/branch.zig::drawBranchTreeLeft fn
 src/render_svg/branch.zig::drawBranchTreeRight fn
-src/render_svg/branch.zig::drawHubIcon fn
 src/render_svg/branch.zig::drawPassiveChainLeft fn
 src/render_svg/branch.zig::drawPassiveChainRight fn
 src/render_svg/branch.zig::drawTerminal fn
-src/render_svg/branch.zig::inferBlockIcon fn
-src/render_svg/branch.zig::renderPortBlock fn
 src/render_svg/connection.zig::ChainResult struct_
 src/render_svg/connection.zig::findSpokeChain fn
 src/render_svg/connection.zig::getConnTerminal fn
@@ -350,7 +345,6 @@ src/render_svg/draw.zig::drawNetWire fn
 src/render_svg/draw.zig::drawSymbolShape fn
 src/render_svg/draw.zig::drawWire fn
 src/render_svg/draw.zig::endpointEql fn
-src/render_svg/draw.zig::escapeHtml fn
 src/render_svg/draw.zig::formatShort fn
 src/render_svg/draw.zig::hub_width value
 src/render_svg/draw.zig::hub_x value
@@ -359,8 +353,6 @@ src/render_svg/draw.zig::isHub fn
 src/render_svg/draw.zig::net_label_gap value
 src/render_svg/draw.zig::passive_bh value
 src/render_svg/draw.zig::passive_bw value
-src/render_svg/draw.zig::passive_hit_h value
-src/render_svg/draw.zig::passive_hit_w value
 src/render_svg/draw.zig::per_conn_spacing value
 src/render_svg/draw.zig::pinOrder fn
 src/render_svg/draw.zig::pin_stub value
@@ -374,11 +366,7 @@ src/render_svg/hub.zig::buildPinNameMap fn
 src/render_svg/hub.zig::estimateBranchCount fn
 src/render_svg/hub.zig::groupHeights fn
 src/render_svg/hub.zig::groupHubPins fn
-src/render_svg/hub.zig::renderHub fn
-src/render_svg/hub.zig::renderHubPart fn
 src/render_svg/hub.zig::splitGroupsByHeight fn
-src/render_svg/section_inset.zig::Partition struct_
-src/render_svg/section_inset.zig::partitionGroups fn
 src/render_svg/section_inset.zig::renderHubAllPins fn
 src/render_system_svg.zig::Column enum_
 src/render_system_svg.zig::SYSTEM_OVERVIEW_CSS value

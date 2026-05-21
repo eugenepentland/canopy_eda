@@ -1,6 +1,5 @@
 const std = @import("std");
 const env_mod = @import("../eval/env.zig");
-const Port = env_mod.Port;
 const ctx_mod = @import("context.zig");
 const RenderCtx = ctx_mod.RenderCtx;
 const FlatInst = ctx_mod.FlatInst;
@@ -25,7 +24,6 @@ const drawSymbolShape = draw.drawSymbolShape;
 const drawGndSymbol = draw.drawGndSymbol;
 const drawBlockIcon = draw.drawBlockIcon;
 const writeDebugPin = draw.writeDebugPin;
-const classifyComponent = draw.classifyComponent;
 const RenderError = draw.RenderError;
 
 // ── Layout constants ──────────────────────────────────────────────
@@ -188,160 +186,6 @@ pub fn drawTerminal(self: *RenderCtx, w: anytype, end_x: f64, cy: f64, term: []c
         , .{ display, label_x, cy + LABEL_BASELINE, anchor, color, display });
     }
     try writeDebugPin(w, end_x, cy);
-}
-
-// ── Hub icon ───────────────────────────────────────────────────────���──
-
-/// Stamp a centred component icon (amplifier, LDO, transistor, …) inside a
-/// hub box when `classifyComponent` matches the part. Quietly does nothing
-/// for hubs without a known icon class so generic ICs render plain boxes.
-pub fn drawHubIcon(self: *RenderCtx, w: anytype, hub: FlatInst, box_y: f64, hub_height: f64) RenderError!void {
-    _ = self;
-    const icon = classifyComponent(hub);
-    if (icon) |icon_name| {
-        const icon_cx = hub_x + hub_width / HALF_DIVISOR;
-        const icon_cy = box_y + hub_height / HALF_DIVISOR + ICON_OFF_Y;
-        try drawBlockIcon(w, icon_name, icon_cx, icon_cy, "#4a9eff");
-    }
-}
-
-/// Infer icon from a block's instances (find the first hub and classify it)
-pub fn inferBlockIcon(self: *RenderCtx, block: *const env_mod.DesignBlock) ?[]const u8 {
-    for (block.instances) |inst| {
-        const fi = self.inst_map.get(inst.ref_des) orelse continue;
-        if (classifyComponent(fi)) |icon| return icon;
-    }
-    for (block.sub_blocks) |sb| {
-        for (sb.block.instances) |inst| {
-            const key = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ sb.name, inst.ref_des }) catch continue;
-            const fi = self.inst_map.get(key) orelse continue;
-            if (classifyComponent(fi)) |icon| return icon;
-        }
-    }
-    return null;
-}
-
-// ── Port block rendering ──────────────────────────────────────────────
-
-/// Render a sub-block as a single dashed-outline box with its declared
-/// ports laid out as labelled stubs on each side. Used when the schematic
-/// embeds a sub-block inline rather than expanding its internals — input
-/// ports stub out the left edge, outputs out the right.
-pub fn renderPortBlock(self: *RenderCtx, w: anytype, name: []const u8, ports: []const Port, y_start: f64, icon: ?[]const u8) RenderError!f64 {
-    _ = self;
-    var left_count: usize = 0;
-    var right_count: usize = 0;
-    for (ports) |port| {
-        if (std.mem.eql(u8, port.direction, "out")) {
-            right_count += 1;
-        } else {
-            left_count += 1;
-        }
-    }
-
-    const port_spacing: f64 = PORT_SPACING;
-    const box_pad: f64 = PORT_BLOCK_PAD;
-    const max_side = @max(@max(left_count, right_count), 1);
-    const block_height = box_pad * HALF_DIVISOR + @as(f64, @floatFromInt(max_side - 1)) * port_spacing;
-    const box_y = y_start;
-
-    try w.print(
-        \\<rect x="{d:.1}" y="{d:.1}" width="{d:.0}" height="{d:.1}" fill="#1a2e1a" stroke="#4a9" stroke-width="2" rx="6" stroke-dasharray="8,4"/>
-        \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="12" font-weight="bold" fill="#4a9">{s}</text>
-        \\
-    , .{
-        hub_x,
-        box_y,
-        hub_width,
-        block_height,
-        hub_x + hub_width / HALF_DIVISOR,
-        box_y + HUB_TITLE_Y,
-        name,
-    });
-
-    if (icon) |icon_name| {
-        const icon_cx = hub_x + hub_width / HALF_DIVISOR;
-        const icon_cy = box_y + block_height / HALF_DIVISOR + ICON_OFF_Y;
-        try drawBlockIcon(w, icon_name, icon_cx, icon_cy, "#4a9");
-    }
-
-    var left_idx: usize = 0;
-    var right_idx: usize = 0;
-    for (ports) |port| {
-        const is_output = std.mem.eql(u8, port.direction, "out");
-        if (is_output) {
-            const py = box_y + box_pad + @as(f64, @floatFromInt(right_idx)) * port_spacing;
-            const edge_x = hub_x + hub_width;
-            const stub_x = edge_x + pin_stub;
-
-            try drawNetWire(w, edge_x, py, stub_x, py, port.net);
-
-            const dir_text: []const u8 = "\xe2\x86\x90 OUT";
-            try w.print(
-                \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="12" fill="#4a9">{s} {s}</text>
-                \\
-            , .{ edge_x - PORT_LABEL_PAD, py + LABEL_BASELINE, port.name, dir_text });
-
-            try w.print(
-                \\<g class="net" data-net="{s}" style="cursor:pointer">
-                \\<text x="{d:.1}" y="{d:.1}" text-anchor="start" font-size="11" font-weight="bold" fill="#4a9eff">{s}</text>
-                \\</g>
-                \\
-            , .{ port.net, stub_x + net_label_gap, py + LABEL_BASELINE, port.net });
-
-            if (port.rated_min != null and port.rated_max != null) {
-                try w.print(
-                    \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="9" fill="#888">{d:.1}V - {d:.1}V</text>
-                    \\
-                , .{ edge_x - PORT_LABEL_PAD, py + RATING_LINE_OFFSET, port.rated_min.?, port.rated_max.? });
-            }
-
-            right_idx += 1;
-        } else {
-            const py = box_y + box_pad + @as(f64, @floatFromInt(left_idx)) * port_spacing;
-            const edge_x = hub_x;
-            const stub_x = edge_x - pin_stub;
-
-            try drawNetWire(w, stub_x, py, edge_x, py, port.net);
-
-            const dir_text: []const u8 = if (std.mem.eql(u8, port.direction, "in"))
-                "\xe2\x86\x92 "
-            else
-                "\xe2\x86\x94 ";
-
-            try w.print(
-                \\<text x="{d:.1}" y="{d:.1}" font-size="12" fill="#4a9">{s}{s}</text>
-                \\
-            , .{ edge_x + PORT_LABEL_PAD, py + LABEL_BASELINE, dir_text, port.name });
-
-            if (isGroundNet(baseNetName(port.net))) {
-                try w.print(
-                    \\<g class="net" data-net="{s}" style="cursor:pointer">
-                    \\
-                , .{port.net});
-                try drawGndSymbol(w, stub_x, py);
-                try w.writeAll("</g>\n");
-            } else {
-                try w.print(
-                    \\<g class="net" data-net="{s}" style="cursor:pointer">
-                    \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="11" font-weight="bold" fill="#4a9eff">{s}</text>
-                    \\</g>
-                    \\
-                , .{ port.net, stub_x - net_label_gap, py + LABEL_BASELINE, port.net });
-            }
-
-            if (port.rated_min != null and port.rated_max != null) {
-                try w.print(
-                    \\<text x="{d:.1}" y="{d:.1}" font-size="9" fill="#888">{d:.1}V - {d:.1}V</text>
-                    \\
-                , .{ edge_x + PORT_LABEL_PAD, py + RATING_LINE_OFFSET, port.rated_min.?, port.rated_max.? });
-            }
-
-            left_idx += 1;
-        }
-    }
-
-    return block_height;
 }
 
 // ── Passive chain drawing ─────────────────────────────────────────────

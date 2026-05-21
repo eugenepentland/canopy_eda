@@ -168,16 +168,11 @@ src/render_html.zig::renderToHtml | fn renderToHtml( allocator: Allocator, block
 src/render_html.zig::setupRenderCtx | fn setupRenderCtx(allocator: Allocator, block: *const DesignBlock) std.mem.Allocator.Error!RenderCtx
 src/render_json.zig::renderSceneGraph | fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project_dir: []const u8) RenderError![]const u8
 src/render_power_tree_svg.zig::render | fn render( allocator: Allocator, tree: PowerTree, w: anytype, ) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
-src/render_svg/bom_table.zig::collectAllInstances | fn collectAllInstances(allocator: Allocator, block: *const DesignBlock, out: *std.ArrayListUnmanaged(env_mod.Instance)) RenderError!void
-src/render_svg/bom_table.zig::renderBomTable | fn renderBomTable(allocator: Allocator, w: anytype, block: *const DesignBlock, y_start: f64, table_width: f64) RenderError!f64
 src/render_svg/branch.zig::drawBranchTreeLeft | fn drawBranchTreeLeft(self: *RenderCtx, w: anytype, junction_x: f64, center_y: f64, branches: []const Branch, junction_net: []const u8) RenderError!void
 src/render_svg/branch.zig::drawBranchTreeRight | fn drawBranchTreeRight(self: *RenderCtx, w: anytype, junction_x: f64, center_y: f64, branches: []const Branch, junction_net: []const u8) RenderError!void
-src/render_svg/branch.zig::drawHubIcon | fn drawHubIcon(self: *RenderCtx, w: anytype, hub: FlatInst, box_y: f64, hub_height: f64) RenderError!void
 src/render_svg/branch.zig::drawPassiveChainLeft | fn drawPassiveChainLeft(_: *RenderCtx, w: anytype, start_x: f64, cy: f64, spokes: []const FlatInst) RenderError!f64
 src/render_svg/branch.zig::drawPassiveChainRight | fn drawPassiveChainRight(_: *RenderCtx, w: anytype, start_x: f64, cy: f64, spokes: []const FlatInst) RenderError!f64
 src/render_svg/branch.zig::drawTerminal | fn drawTerminal(self: *RenderCtx, w: anytype, end_x: f64, cy: f64, term: []const u8, anchor: []const u8) RenderError!void
-src/render_svg/branch.zig::inferBlockIcon | fn inferBlockIcon(self: *RenderCtx, block: *const env_mod.DesignBlock) ?[]const u8
-src/render_svg/branch.zig::renderPortBlock | fn renderPortBlock(self: *RenderCtx, w: anytype, name: []const u8, ports: []const Port, y_start: f64, icon: ?[]const u8) RenderError!f64
 src/render_svg/connection.zig::findSpokeChain | fn findSpokeChain(self: *RenderCtx, ref_des: []const u8, came_from: Endpoint, visited: *std.StringHashMapUnmanaged(void)) error{OutOfMemory}!ChainResult
 src/render_svg/connection.zig::getConnTerminal | fn getConnTerminal(self: *RenderCtx, endpoint: Endpoint, hub_ref: []const u8, from_pin: []const u8) RenderError![]const u8
 src/render_svg/connection.zig::renderConnBody | fn renderConnBody( self: *RenderCtx, w: anytype, endpoint: Endpoint, hub_ref: []const u8, from_pin: []const u8, stub_x: f64, stub_y: f64, cy: f64, side: Side, net_name: []const u8, ) RenderError!f64
@@ -195,7 +190,6 @@ src/render_svg/draw.zig::drawNetWire | fn drawNetWire(w: anytype, x1: f64, y1: f
 src/render_svg/draw.zig::drawSymbolShape | fn drawSymbolShape(w: anytype, bx: f64, bw: f64, cx: f64, cy: f64, inst: FlatInst) RenderError!void
 src/render_svg/draw.zig::drawWire | fn drawWire(w: anytype, x1: f64, y1: f64, x2: f64, y2: f64) RenderError!void
 src/render_svg/draw.zig::endpointEql | fn endpointEql(a: Endpoint, b: Endpoint) bool
-src/render_svg/draw.zig::escapeHtml | fn escapeHtml(allocator: Allocator, s: []const u8) RenderError![]const u8
 src/render_svg/draw.zig::formatShort | fn formatShort(inst: FlatInst) []const u8
 src/render_svg/draw.zig::isGroundNet | fn isGroundNet(name: []const u8) bool
 src/render_svg/draw.zig::isHub | fn isHub(inst: FlatInst) bool
@@ -207,10 +201,7 @@ src/render_svg/hub.zig::buildPinNameMap | fn buildPinNameMap(self: *RenderCtx, p
 src/render_svg/hub.zig::estimateBranchCount | fn estimateBranchCount(self: *RenderCtx, spoke_rd: []const u8, hub_ref: []const u8) u32
 src/render_svg/hub.zig::groupHeights | fn groupHeights(self: *RenderCtx, groups: []const PinGroup, hub_ref: []const u8) RenderError![]f64
 src/render_svg/hub.zig::groupHubPins | fn groupHubPins( self: *RenderCtx, pins: []const []const u8, adj_entries: []const AdjEntry, pin_names: *const std.StringHashMapUnmanaged([]const u8), ) RenderError![]const PinGroup
-src/render_svg/hub.zig::renderHub | fn renderHub(self: *RenderCtx, w: anytype, hub: FlatInst, y_start: f64) RenderError!f64
-src/render_svg/hub.zig::renderHubPart | fn renderHubPart(self: *RenderCtx, w: anytype, hub: FlatInst, part: env_mod.Part, y_start: f64) RenderError!f64
 src/render_svg/hub.zig::splitGroupsByHeight | fn splitGroupsByHeight( self: *RenderCtx, all_groups: []const PinGroup, hub_ref: []const u8, ) RenderError!SplitGroups
-src/render_svg/section_inset.zig::partitionGroups | fn partitionGroups( allocator: std.mem.Allocator, ctx: *RenderCtx, hub_ref: []const u8, groups: []const PinGroup, ) RenderError!Partition
 src/render_svg/section_inset.zig::renderHubAllPins | fn renderHubAllPins( ctx: *RenderCtx, w: anytype, hub: FlatInst, groups: []const PinGroup, ) RenderError!void
 src/render_system_svg.zig::columnFor | fn columnFor(cat: rb.Category) Column
 src/render_system_svg.zig::renderSystemOverviewSvg | fn renderSystemOverviewSvg( allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize, w: anytype, ) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
