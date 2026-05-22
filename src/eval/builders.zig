@@ -24,7 +24,6 @@ const SubBlock = env_mod.SubBlock;
 
 // ── Constants ─────────────────────────────────────────────────────
 const ASSERT_RANGE_ARITY: usize = 5;
-const PIN_DECL_STRIDE_WITH_REF: usize = 5;
 
 /// Parse (port "NET" in/out/io ...) section port declaration.
 pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod.Env) EvalError!?env_mod.SectionPort {
@@ -515,29 +514,31 @@ pub fn emitDecoupleItems(
                 continue;
             });
 
-        // Check for optional pin specifier: ... REF PIN
-        var specific_pin: ?[]const u8 = null;
-        if (idx + 4 < items.len) {
-            if (items[idx + 4].asList() == null) {
-                if (ids.pinId(self, items[idx + 4])) |pid| {
-                    specific_pin = pid;
-                }
-            }
-        }
-
-        const sub_prefix = try std.fmt.allocPrint(self.allocator, "{s}.{s}.", .{ net_name, ref_str });
+        // Explicit pin list after REF: one cap (×COUNT) per listed pin. Pins
+        // are atoms or bare ints; collection stops at the next (comp …) group
+        // or a trailing (id …)/(ids …) form. per-pin no longer auto-discovers
+        // every pin on the net — a power rail shared with a mode-strap or an
+        // SMPS feedback-sense pin (e.g. VFB tied to the core rail) must not
+        // silently get a bypass cap, so the pins are required to be spelled out.
+        // Resolve listed pins the way (pin …) declarations do: a function name
+        // (e.g. "VCC" on a BGA part) maps to its pad via the component pinout;
+        // a bare pad designator (e.g. "J14", "7") isn't a function name so it
+        // passes through unchanged. Keeps the decouple pin list consistent with
+        // how the IC's own pins are declared.
+        const pin_func_map = findPinFuncMap(self, instances.items, ref_str);
         var target_pins: std.ArrayListUnmanaged([]const u8) = .empty;
         defer target_pins.deinit(self.allocator);
-
-        if (specific_pin) |pin| {
-            try target_pins.append(self.allocator, pin);
-        } else {
-            for (all_pin_nets.items) |pn| {
-                if (!std.mem.eql(u8, pn.ref_des, ref_str)) continue;
-                if (std.mem.eql(u8, pn.net, net_name) or std.mem.startsWith(u8, pn.net, sub_prefix)) {
-                    try target_pins.append(self.allocator, pn.pin);
-                }
-            }
+        var pin_idx = idx + 4;
+        while (pin_idx < items.len) : (pin_idx += 1) {
+            if (items[pin_idx].asList() != null) break; // next (comp …) group / (id …)
+            const raw = ids.pinId(self, items[pin_idx]) orelse break;
+            const pid = if (pin_func_map) |pm| (instance_mod.resolvePinName(self, pm, raw) orelse raw) else raw;
+            try target_pins.append(self.allocator, pid);
+        }
+        if (target_pins.items.len == 0) {
+            log.warn("decouple per-pin requires an explicit pin list (net {s}, ref {s})", .{ net_name, ref_str });
+            log.warn("  e.g. (decouple \"{s}\" (comp \"val\") COUNT per-pin {s} PIN1 PIN2 …)", .{ net_name, ref_str });
+            return EvalError.InvalidForm;
         }
 
         for (target_pins.items) |target_pin| {
@@ -582,7 +583,7 @@ pub fn emitDecoupleItems(
                 }
             }
         }
-        idx += if (specific_pin != null) @as(usize, PIN_DECL_STRIDE_WITH_REF) else @as(usize, 4);
+        idx = pin_idx;
     }
 }
 
@@ -966,4 +967,43 @@ test "legacy decouple takes child ids from the sidecar" {
     try testing.expectEqual(@as(usize, 1), instances.items.len);
     // Legacy mode pins the token from the sidecar, not a derivation off the form id.
     try testing.expectEqualStrings("deadbeef", instances.items[0].id);
+}
+
+// spec: eval/evaluator - decouple per-pin emits one cap per explicitly listed pin
+test "decouple per-pin emits a cap for each listed pin" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    try putTestFamily(&eval, alloc, "cap-0201");
+
+    const nodes = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin U1 7 8 9");
+    var instances: std.ArrayListUnmanaged(Instance) = .empty;
+    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
+
+    try emitDecoupleItems(&eval, nodes, "VDD", &env, &instances, &all_pin_nets, "abcd1234", &sidecar);
+    try testing.expectEqual(@as(usize, 3), instances.items.len);
+    // one cap per listed pad, in listed order
+    try testing.expectEqualStrings("100nF@7#0", instances.items[0].origin_key);
+    try testing.expectEqualStrings("100nF@8#0", instances.items[1].origin_key);
+    try testing.expectEqualStrings("100nF@9#0", instances.items[2].origin_key);
+}
+
+// spec: eval/evaluator - decouple per-pin without an explicit pin list is an error
+test "decouple per-pin with no pins errors" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    try putTestFamily(&eval, alloc, "cap-0201");
+
+    const nodes = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin U1");
+    var instances: std.ArrayListUnmanaged(Instance) = .empty;
+    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
+
+    try testing.expectError(error.InvalidForm, emitDecoupleItems(&eval, nodes, "VDD", &env, &instances, &all_pin_nets, "abcd1234", &sidecar));
 }

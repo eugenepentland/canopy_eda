@@ -126,6 +126,8 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - hierarchical-ids derives decouple child ids from the form id instead of the (ids ...) sidecar
 - without hierarchical-ids decouple child ids come from the (ids ...) sidecar
 - hierarchical-ids derives series child ids from the form id instead of the (ids ...) sidecar
+- decouple per-pin emits one cap per explicitly listed pin
+- decouple per-pin without an explicit pin list is an error
 - isStandardRefDes distinguishes standard from descriptive labels
 - last_error records the source span of an unknown form so callers can report file:line:col
 - last_error records the source span of an arity mismatch in a special form

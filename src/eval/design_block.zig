@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
+const log = @import("../infra/log.zig");
 const env_mod = @import("env.zig");
 const evaluator_mod = @import("evaluator.zig");
 const Evaluator = evaluator_mod.Evaluator;
@@ -28,10 +29,6 @@ const Port = env_mod.Port;
 const Note = env_mod.Note;
 const Group = env_mod.Group;
 const SubBlock = env_mod.SubBlock;
-
-// ── Constants ─────────────────────────────────────────────────────
-const DECOUPLE_MULTI_NET_MIN_ARITY: usize = 6;
-const DECOUPLE_MULTI_NET_NET_OFFSET: usize = 5;
 
 /// True if the design-block body contains a bare `(hierarchical-ids)` form,
 /// which opts into Option-4 sub-block identity.
@@ -282,24 +279,14 @@ fn evalDecoupleForm(
     const form_id = try ids.getOrCreateFormId(self, form_children);
     var sidecar = ids.parseChildIdSidecar(self, form_children);
 
-    // Multi-net form: (decouple (comp "val") COUNT per-pin REF "NET1" "NET2" ...)
+    // The multi-net shorthand (decouple (comp) COUNT per-pin REF "NET1" "NET2" …)
+    // auto-applied the cap to every pin of each net — the same auto-discovery
+    // footgun. Removed: write one (decouple "NET" (comp) COUNT per-pin REF
+    // PIN1 PIN2 …) per rail so the decoupled pins are spelled out.
     if (first_val == .component or first_val == .component_instance) {
-        if (form_children.len < DECOUPLE_MULTI_NET_MIN_ARITY) return;
-        for (form_children[DECOUPLE_MULTI_NET_NET_OFFSET..]) |mn_node| {
-            if (mn_node.isForm("id") or mn_node.isForm("ids")) continue;
-            const mn_val = try self.evalNode(mn_node, env);
-            const mn_net = mn_val.asString() orelse continue;
-            try builders.emitDecoupleItems(
-                self,
-                form_children[1..DECOUPLE_MULTI_NET_NET_OFFSET],
-                mn_net,
-                env,
-                instances,
-                all_pin_nets,
-                form_id,
-                &sidecar,
-            );
-        }
+        log.warn("decouple no longer supports the multi-net (comp-first) form; " ++
+            "write one (decouple \"NET\" (comp) COUNT per-pin REF PIN1 PIN2 …) per rail", .{});
+        return EvalError.InvalidForm;
     } else {
         const net_name = first_val.asString() orelse return;
 
@@ -587,15 +574,12 @@ fn evalSectionDecouple(
     const form_id = try ids.getOrCreateFormId(self, sf_children);
     var sidecar = ids.parseChildIdSidecar(self, sf_children);
 
-    // Multi-net form: (decouple (comp "val") COUNT per-pin REF "NET1" "NET2" ...)
+    // Multi-net (comp-first) shorthand removed — see evalDecoupleForm. Spell
+    // out one (decouple "NET" (comp) COUNT per-pin REF PIN…) per rail.
     if (dec_first_val == .component or dec_first_val == .component_instance) {
-        if (sf_children.len < DECOUPLE_MULTI_NET_MIN_ARITY) return;
-        for (sf_children[DECOUPLE_MULTI_NET_NET_OFFSET..]) |mn_node| {
-            if (mn_node.isForm("id") or mn_node.isForm("ids")) continue;
-            const mn_val = try self.evalNode(mn_node, env);
-            const mn_net = mn_val.asString() orelse continue;
-            try builders.emitDecoupleItems(self, sf_children[1..DECOUPLE_MULTI_NET_NET_OFFSET], mn_net, env, instances, all_pin_nets, form_id, &sidecar);
-        }
+        log.warn("decouple no longer supports the multi-net (comp-first) form; " ++
+            "write one (decouple \"NET\" (comp) COUNT per-pin REF PIN1 PIN2 …) per rail", .{});
+        return EvalError.InvalidForm;
     } else {
         const net_name = dec_first_val.asString() orelse return;
         var has_sub_forms = false;
