@@ -175,9 +175,16 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
         if (std.mem.eql(u8, op_name, "set_pad_net")) {
             const pad = jsonStr(op_obj.get("pad"));
             const net = jsonStr(op_obj.get("net"));
-            if (pad.len == 0 or net.len == 0) continue;
-            const id = try resolveNetId(arena, net, &max_net_id, &net_id_by_name, &extra_nets);
-            const updated = try setPadNet(arena, current, pad, id, net) orelse continue;
+            if (pad.len == 0) continue;
+            // An empty net clears the pad: drop its `(net …)` form so the pad
+            // becomes unconnected. Used when a signal moves off a pad (the
+            // design no longer assigns it) so the stale net doesn't linger.
+            const updated = if (net.len == 0)
+                (try clearPadNet(arena, current, pad)) orelse continue
+            else blk: {
+                const id = try resolveNetId(arena, net, &max_net_id, &net_id_by_name, &extra_nets);
+                break :blk (try setPadNet(arena, current, pad, id, net)) orelse continue;
+            };
             try mutated_fp.put(idx, updated);
             stats.pad_nets_set += 1;
             continue;
@@ -319,6 +326,39 @@ fn resolveNetId(
 /// inner `(net …)` we want to retarget. Other pads pass through unchanged.
 /// Returns null when the targeted pad already references `net_name` —
 /// idempotency for repeated pushes against an already-synced board.
+/// Drop the `(net …)` form from the named pad, leaving it unconnected.
+/// Returns null (no-op) if the pad is absent or already has no net.
+fn clearPadNet(arena: std.mem.Allocator, fp: Node, pad_num: []const u8) std.mem.Allocator.Error!?Node {
+    const cl = fp.asList() orelse return fp;
+    var new_children = try arena.alloc(Node, cl.len);
+    var changed = false;
+    for (cl, 0..) |sub, i| {
+        new_children[i] = sub;
+        if (!sub.isForm("pad")) continue;
+        const pl = sub.asList() orelse continue;
+        if (pl.len < 2) continue;
+        const num = fmt_const.padNumberText(arena, pl[1]) orelse continue;
+        if (!std.mem.eql(u8, num, pad_num)) continue;
+        var has_net = false;
+        for (pl) |p| {
+            if (p.isForm(FORM_NET)) {
+                has_net = true;
+                break;
+            }
+        }
+        if (!has_net) continue; // already cleared
+        var kept: std.ArrayListUnmanaged(Node) = .empty;
+        for (pl) |p| {
+            if (p.isForm(FORM_NET)) continue;
+            try kept.append(arena, p);
+        }
+        new_children[i] = Node.list(Span.zero, try kept.toOwnedSlice(arena));
+        changed = true;
+    }
+    if (!changed) return null;
+    return Node.list(Span.zero, new_children);
+}
+
 fn setPadNet(arena: std.mem.Allocator, fp: Node, pad_num: []const u8, net_id: i64, net_name: []const u8) std.mem.Allocator.Error!?Node {
     const cl = fp.asList() orelse return fp;
     var new_children = try arena.alloc(Node, cl.len);
@@ -329,9 +369,10 @@ fn setPadNet(arena: std.mem.Allocator, fp: Node, pad_num: []const u8, net_id: i6
         const pl = sub.asList() orelse continue;
         if (pl.len < 2) continue;
         // Modern .sexp-generated footprints quote the pad name (`(pad "1" …)`);
-        // legacy imported `(module …)` sources leave it bare (`(pad A1 …)`).
-        // Match either, or BGA-style pads never get their nets attached.
-        const num = pl[1].asString() orelse pl[1].asAtom() orelse continue;
+        // legacy `(module …)` sources leave it bare (`(pad A1 …)`); KiCad
+        // re-saves numeric pads as a bare integer (`(pad 1 …)`). padNumberText
+        // matches all three, or those pads never get their nets attached.
+        const num = fmt_const.padNumberText(arena, pl[1]) orelse continue;
         if (!std.mem.eql(u8, num, pad_num)) continue;
         const replaced = try replacePadNet(arena, sub, net_id, net_name);
         if (replaced) |r| {
@@ -539,6 +580,22 @@ fn skipKmodChild(sub: Node) bool {
     const head = subl[0].asAtom() orelse return false;
     if (std.mem.eql(u8, head, "at") or std.mem.eql(u8, head, "uuid") or std.mem.eql(u8, head, "layer")) return true;
     if (std.mem.eql(u8, head, "fp_text")) return true;
+    // Drop legacy KiCad-5 arcs that carry an `(angle …)` child: that is the
+    // deprecated (start=center)(end)(angle) form, and the modern board parser
+    // rejects it with "Expecting 'mid'" (it requires the (start)(mid)(end)
+    // three-point form). These arcs are silkscreen/fab decoration only — no
+    // electrical or mechanical role — and our `.sexp` footprint model never
+    // carried arcs in the first place, so dropping a legacy arc keeps the
+    // embedded footprint parseable without changing the board's behaviour.
+    // Modern (start)(mid)(end) arcs have no `(angle …)` child and pass through.
+    if (std.mem.eql(u8, head, "fp_arc") or std.mem.eql(u8, head, "gr_arc")) {
+        for (subl[1..]) |c| {
+            const cl = c.asList() orelse continue;
+            if (cl.len == 0) continue;
+            const ch = cl[0].asAtom() orelse continue;
+            if (std.mem.eql(u8, ch, "angle")) return true;
+        }
+    }
     return false;
 }
 
@@ -768,6 +825,57 @@ test "applyOpsToSource set_pad_net updates only the targeted pad" {
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "(net 1 \"OLD\")"));
 }
 
+// spec: kicad_pcb/writer - set_pad_net matches a bare-integer pad number
+test "applyOpsToSource set_pad_net wires a bare-integer pad" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    // KiCad re-saves numeric pads with a bare integer and the pad is netless
+    // until wired — exactly the SW1/B3U case. setPadNet must match `1` and
+    // attach the net; before the padNumberText fix it skipped the pad.
+    const src =
+        \\(kicad_pcb
+        \\  (net 0 "")
+        \\  (footprint "SW_B3U"
+        \\    (uuid "fp-1")
+        \\    (pad 1 smd rect (at 1.7 0))))
+    ;
+    const ops =
+        \\[{"op":"set_pad_net","uuid":"fp-1","pad":"1","net":"VDD"}]
+    ;
+    const out = try applyOpsToSource(arena.allocator(), src, ops);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(net \"VDD\")") != null);
+}
+
+// spec: kicad_pcb/writer - set_pad_net with an empty net clears the pad's (net …) form
+test "applyOpsToSource set_pad_net with empty net clears the pad" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (net 0 "")
+        \\  (net 1 "OLD")
+        \\  (footprint "R_0402"
+        \\    (uuid "fp-1")
+        \\    (pad "1" smd roundrect
+        \\      (at 0 0)
+        \\      (net 1 "OLD"))
+        \\    (pad "2" smd roundrect
+        \\      (at 1 0)
+        \\      (net 1 "OLD"))))
+    ;
+    const ops =
+        \\[{"op":"set_pad_net","uuid":"fp-1","pad":"1","net":""}]
+    ;
+    const out = try applyOpsToSource(arena.allocator(), src, ops);
+    // Pad 1's (net …) form is dropped; the reference remains only on pad 2 and
+    // in the top-level declaration, so the substring count falls 3 → 2.
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "(net 1 \"OLD\")"));
+}
+
 // spec: kicad_pcb/writer - remove drops the matching footprint from the output
 test "applyOpsToSource remove deletes the named footprint" {
     const a = std.testing.allocator;
@@ -854,6 +962,35 @@ test "applyOpsToSource add assigns pad nets to the new footprint" {
     // Both pads must reference their nets (name-only, pcbnew v20260206 form).
     try std.testing.expect(std.mem.indexOf(u8, out, "(net \"VBAT\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "(net \"GND\")") != null);
+}
+
+// spec: kicad_pcb/writer - add drops legacy (angle …) arcs the modern board parser rejects
+test "applyOpsToSource add drops legacy angle-form arcs but keeps modern mid-form arcs" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "R_0402"
+        \\    (uuid "fp-1")
+        \\    (property "Reference" "R1")))
+    ;
+    // The kmod carries one legacy (start)(end)(angle) arc — what an imported
+    // KiCad-5 lib/sources/*.kicad_mod yields, and what makes pcbnew bail with
+    // "Expecting 'mid'" — alongside a modern (start)(mid)(end) arc that must
+    // survive untouched.
+    const ops =
+        \\[{"op":"add","uuid":"sw1","ref":"SW1","value":"B3U","footprint_name":"F",
+        \\  "kicad_mod":"(footprint \"F\" (fp_arc (start 0 0) (end 1 0) (angle 90)) (fp_arc (start 1 0) (mid 1 1) (end 0 1)) (pad \"1\" smd (at 0 0)))",
+        \\  "pad_nets":[["1","BOOT0"]]}]
+    ;
+    const out = try applyOpsToSource(arena.allocator(), src, ops);
+    // Legacy angle-form arc dropped; modern mid-form arc preserved.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(angle") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(mid 1 1)") != null);
+    // The real pad still lands with its net so the part stays wired.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(net \"BOOT0\")") != null);
 }
 
 // spec: kicad_pcb/writer - swap_footprint accepts a legacy (module …) kmod

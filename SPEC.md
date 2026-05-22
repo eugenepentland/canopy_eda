@@ -33,6 +33,12 @@ CLI-driven electronic design automation for schematic capture using S-expression
 
 - Constructs typed AST nodes for list, atom, string, int, float, and unit values
 
+## kicad_pcb/format
+
+Public functions: padNumberText
+
+- padNumberText reads quoted, bare-atom, and bare-int pad numbers
+
 ## kicad_pcb/reader
 
 Public functions: readBoard
@@ -40,17 +46,21 @@ Public functions: readBoard
 - parses footprint reference, value, kicad_uuid, and canopy_uuid from properties
 - parses (locked yes) as locked footprint
 - reads every footprint in a real .kicad_pcb fixture
+- reads a bare-integer pad number so the pad still enters the net diff
 
 ## kicad_pcb/writer
 
 Public functions: applyOpsToSource, applyOpsToSourceWithStats
 
 - set_pad_net rewrites the (net …) form on the matching pad
+- set_pad_net matches a bare-integer pad number
+- set_pad_net with an empty net clears the pad's (net …) form
 - remove drops the matching footprint from the output
 - set_field upserts a property on the targeted footprint
 - set_locked toggles (locked yes) on the targeted footprint
 - add wires pad nets from the op's [pin, net] array
 - swap_footprint accepts a legacy (module …) kmod
+- add drops legacy (angle …) arcs the modern board parser rejects
 - preserves pcbnew-style boards: in-element net forms
 
 ## eval/builtins

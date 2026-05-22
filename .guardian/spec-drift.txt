@@ -144,6 +144,7 @@ src/infra/random.zig::bytes | fn bytes(buf: []u8) void
 src/json_writer.zig::writeEscaped | fn writeEscaped(w: anytype, s: []const u8) WriteError!void
 src/json_writer.zig::writeField | fn writeField(w: anytype, key: []const u8, value: []const u8) WriteError!void
 src/json_writer.zig::writeString | fn writeString(w: anytype, s: []const u8) WriteError!void
+src/kicad_pcb/format.zig::padNumberText | fn padNumberText(arena: std.mem.Allocator, n: ast.Node) ?[]const u8
 src/kicad_pcb/reader.zig::readBoard | fn readBoard(arena: std.mem.Allocator, source: []const u8) ReadError![]const sync.BoardFp
 src/kicad_pcb/writer.zig::applyOpsToSource | fn applyOpsToSource(arena: std.mem.Allocator, source: []const u8, ops_json: []const u8) WriteError![]const u8
 src/kicad_pcb/writer.zig::applyOpsToSourceWithStats | fn applyOpsToSourceWithStats( arena: std.mem.Allocator, source: []const u8, ops_json: []const u8, stats: *ApplyStats, ) WriteError![]const u8

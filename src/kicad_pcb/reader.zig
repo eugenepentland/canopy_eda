@@ -118,11 +118,11 @@ fn readPad(
 ) std.mem.Allocator.Error!void {
     const cl = node.asList() orelse return;
     if (cl.len < 2) return;
-    // `(pad "1" smd …)` — numbered pads carry a string number first.
-    // `(pad npth circle …)` — unnumbered NPTH mounting holes have an
-    // atom (pad type) in slot 1 instead of a number. The Go agent's
-    // sync-plan body skips those too (no PadAssign for them).
-    const num = cl[1].asString() orelse return;
+    // Slot 1 is the pad number/name. It may be quoted (`(pad "1" …)`), a bare
+    // atom (`(pad A1 …)` from KiCad-5 sources), or a bare integer (`(pad 1 …)`
+    // as KiCad re-saves numeric pads). padNumberText handles all three so a
+    // bare-numbered pad isn't silently dropped and left unwireable.
+    const num = fmt_const.padNumberText(arena, cl[1]) orelse return;
     var net_name: []const u8 = "";
     for (cl[2..]) |sub| {
         if (!sub.isForm("net")) continue;
@@ -193,6 +193,31 @@ test "readBoard extracts ref/value/uuids from a single footprint" {
     try std.testing.expectEqualStrings("1", fps[0].pads[0].number);
     try std.testing.expectEqualStrings("VDD", fps[0].pads[0].net);
     try std.testing.expectEqual(false, fps[0].locked);
+}
+
+// spec: kicad_pcb/reader - reads a bare-integer pad number so the pad still enters the net diff
+test "readBoard reads a bare-integer, netless pad" {
+    const a = std.testing.allocator;
+    // KiCad re-saves numeric pads with a bare integer (`(pad 1 …)`), and a
+    // pad the design hasn't wired yet has no (net …) form. The reader must
+    // still surface it (number "1", net "") so the diff can attach the net.
+    const src =
+        \\(kicad_pcb
+        \\  (net 0 "")
+        \\  (footprint "SW_B3U"
+        \\    (uuid "sw-1")
+        \\    (property "Reference" "SW1")
+        \\    (pad 1 smd rect (at 1.7 0))
+        \\    (pad 2 smd rect (at -1.7 0))))
+    ;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const fps = try readBoard(arena.allocator(), src);
+    try std.testing.expectEqual(@as(usize, 2), fps[0].pads.len);
+    try std.testing.expectEqualStrings("1", fps[0].pads[0].number);
+    try std.testing.expectEqualStrings("", fps[0].pads[0].net);
+    try std.testing.expectEqualStrings("2", fps[0].pads[1].number);
 }
 
 // spec: kicad_pcb/reader - parses (locked yes) as locked footprint

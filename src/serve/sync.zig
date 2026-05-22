@@ -742,6 +742,10 @@ pub fn runSyncPlan(
         e.value_ptr.* += 1;
     }
     var pad_net_map = std.StringHashMap([]const u8).init(arena);
+    // "ref_des|net" → how many pads of that instance the design puts the net on.
+    // Used to detect a moved single-pad signal so its stale board pad can be
+    // cleared, while leaving multi-pad nets (GND/power) untouched.
+    var net_pad_count = std.StringHashMap(u32).init(arena);
     for (nets.items) |net| {
         if (net.name.len == 0) continue;
         const post_dot = collapseDotSubNet(net.name);
@@ -750,6 +754,10 @@ pub fn runSyncPlan(
         for (net.pins) |pin| {
             const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ pin.ref_des, pin.pin });
             try pad_net_map.put(key, display);
+            const ck = try std.fmt.allocPrint(arena, "{s}|{s}", .{ pin.ref_des, display });
+            const e = try net_pad_count.getOrPut(ck);
+            if (!e.found_existing) e.value_ptr.* = 0;
+            e.value_ptr.* += 1;
         }
     }
 
@@ -825,6 +833,7 @@ pub fn runSyncPlan(
         .by_netsig = &by_netsig,
         .reserved_kicad_uuids = &reserved_kicad_uuids,
         .pad_net_map = &pad_net_map,
+        .net_pad_count = &net_pad_count,
         .matched_uuids = &matched_uuids,
         .canonical_fp_name = &canonical_fp_name,
         .applied_ops = &applied_ops_local,
@@ -1161,6 +1170,10 @@ const DiffContext = struct {
     /// instances can't collide on one fp via different tiers.
     reserved_kicad_uuids: *std.StringHashMap(void),
     pad_net_map: *std.StringHashMap([]const u8),
+    /// "ref_des|net" → count of design pads carrying that net on the instance.
+    /// `emitPadNetOps` clears a stale board pad only when its net is a count==1
+    /// signal the design moved elsewhere, never a multi-pad GND/power net.
+    net_pad_count: *std.StringHashMap(u32),
     matched_uuids: *std.StringHashMap(void),
     /// short EDA footprint name ("c-0201") → canonical KiCad name inside
     /// the lib/footprints/<short>.sexp file ("C_0201_0603Metric"). Used to
@@ -1854,17 +1867,34 @@ fn emitPadNetOps(
     client_pads: []const PadAssign,
 ) !u32 {
     var key_buf: [256]u8 = undefined;
+    var ck_buf: [256]u8 = undefined;
     var emitted: u32 = 0;
     for (client_pads) |cp| {
         const key = std.fmt.bufPrint(&key_buf, "{s}|{s}", .{ ref_des, cp.number }) catch continue;
-        const want = pad_net_map.get(key) orelse continue;
-        if (std.mem.eql(u8, want, cp.net)) continue;
-        if (try emitOpUnlessApplied(d, w, first, "set_pad_net", .{
-            .{ "uuid", uuid },
-            .{ "pad", cp.number },
-            .{ "net", want },
-        }, uuid, cp.number, want)) {
-            emitted += 1;
+        if (pad_net_map.get(key)) |want| {
+            if (std.mem.eql(u8, want, cp.net)) continue;
+            if (try emitOpUnlessApplied(d, w, first, "set_pad_net", .{
+                .{ "uuid", uuid },
+                .{ "pad", cp.number },
+                .{ "net", want },
+            }, uuid, cp.number, want)) {
+                emitted += 1;
+            }
+        } else if (cp.net.len > 0) {
+            // The design no longer assigns this pad, yet the board pad still
+            // carries a net. Clear it only when that net is a single-pad signal
+            // the design now puts on a different pad of this instance (a moved
+            // pin) — never a multi-pad GND/power net or a net the design
+            // doesn't know, which are left untouched.
+            const ck = std.fmt.bufPrint(&ck_buf, "{s}|{s}", .{ ref_des, cp.net }) catch continue;
+            if ((d.net_pad_count.get(ck) orelse 0) != 1) continue;
+            if (try emitOpUnlessApplied(d, w, first, "set_pad_net", .{
+                .{ "uuid", uuid },
+                .{ "pad", cp.number },
+                .{ "net", "" },
+            }, uuid, cp.number, "")) {
+                emitted += 1;
+            }
         }
     }
     return emitted;

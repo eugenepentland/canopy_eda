@@ -265,6 +265,7 @@ src/json_writer.zig::writeString fn
 src/kicad_pcb/format.zig::PROP_CANOPY_UUID value
 src/kicad_pcb/format.zig::PROP_REFERENCE value
 src/kicad_pcb/format.zig::PROP_VALUE value
+src/kicad_pcb/format.zig::padNumberText fn
 src/kicad_pcb/reader.zig::ReadError value
 src/kicad_pcb/reader.zig::readBoard fn
 src/kicad_pcb/writer.zig::ApplyStats struct_
