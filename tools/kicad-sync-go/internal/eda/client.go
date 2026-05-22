@@ -114,6 +114,17 @@ type Op struct {
 	KicadMod         string          `json:"kicad_mod,omitempty"`
 	FootprintDef     json.RawMessage `json:"footprint_def,omitempty"`
 	PadNets          [][2]string     `json:"pad_nets,omitempty"`
+	// X, Y are the staging position (board nanometers) a freshly-added
+	// footprint is moved to after creation, so new parts land in their
+	// per-section staging cluster instead of all at the origin. Zero means
+	// "no staging hint" (place at the origin as before).
+	X int64 `json:"x,omitempty"`
+	Y int64 `json:"y,omitempty"`
+	// Item carries a proto-canonical JSON board object (an Any with @type,
+	// e.g. a BoardGraphicShape rectangle or BoardText label) for the
+	// `create_board_item` op — the agent unmarshals it and creates it on the
+	// board. Used to draw the per-section staging boxes + labels.
+	Item json.RawMessage `json:"item,omitempty"`
 	// Locked is the desired KiCad lock state for the `set_locked` op.
 	// Pointer so we can tell a zero-value omit ({"locked": false} on
 	// the wire) from an unset value. Used to visually flag stale fps

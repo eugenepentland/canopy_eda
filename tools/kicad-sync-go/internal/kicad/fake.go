@@ -19,6 +19,12 @@ type Fake struct {
 	CommitMessages []string
 	Added          []Footprint
 	Removed        []string
+	// AddedPositions records the staging (xNm, yNm) each AddFootprint was
+	// given, keyed by uuid, so tests can assert section-grouped placement.
+	AddedPositions map[string][2]int64
+	// BoardItems collects the raw proto-canonical JSON passed to
+	// CreateBoardItem (section staging boxes + labels).
+	BoardItems [][]byte
 
 	// Warns is the slice Warnings() returns. Tests inject values here to
 	// exercise the orchestrator's strict-mode handling without standing
@@ -104,7 +110,7 @@ func (f *Fake) SetPadNet(uuid, pad, net string) error {
 	return fmt.Errorf("SetPadNet: pad %q not on uuid %q", pad, uuid)
 }
 
-func (f *Fake) AddFootprint(defJSON []byte, kicadMod, entryName, uuid, ref, value string, padNets [][2]string) error {
+func (f *Fake) AddFootprint(defJSON []byte, kicadMod, entryName, uuid, ref, value string, padNets [][2]string, xNm, yNm int64) error {
 	pads := make([]Pad, 0, len(padNets))
 	for _, kv := range padNets {
 		pads = append(pads, Pad{Number: kv[0], Net: kv[1]})
@@ -118,6 +124,18 @@ func (f *Fake) AddFootprint(defJSON []byte, kicadMod, entryName, uuid, ref, valu
 	}
 	f.pendingAdded = append(f.pendingAdded, fp)
 	f.Footprints = append(f.Footprints, fp)
+	if f.AddedPositions == nil {
+		f.AddedPositions = map[string][2]int64{}
+	}
+	f.AddedPositions[uuid] = [2]int64{xNm, yNm}
+	return nil
+}
+
+// CreateBoardItem records the proto-canonical board-item JSON for tests.
+func (f *Fake) CreateBoardItem(itemJSON []byte) error {
+	dup := make([]byte, len(itemJSON))
+	copy(dup, itemJSON)
+	f.BoardItems = append(f.BoardItems, dup)
 	return nil
 }
 

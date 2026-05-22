@@ -40,7 +40,34 @@ const ERR_BUILD_ERROR = "Build error";
 const ERR_NOT_A_DESIGN = "Not a design";
 const PATH_FMT_FP_SEXP = "{s}/lib/footprints/{s}.sexp";
 const OP_SET_FIELD = "set_field";
+const OP_CREATE_BOARD_ITEM = "create_board_item";
 const FIELD_CANOPY_UUID = "canopy_uuid";
+const FIELD_CANOPY_NET = "canopy_net";
+const FIELD_CANOPY_SECTION = "canopy_section";
+
+// ── Section staging layout (mm) ──────────────────────────────────────
+// Newly-added footprints are placed in a staging area off to one side of
+// the board, grouped into a labeled box per design section, so a fresh
+// import lands as readable per-section clusters instead of a pile at the
+// origin. Coordinates are absolute board mm; the staging origin sits well
+// to the right of a typical board (off-sheet placement is valid in KiCad —
+// the user drags each cluster onto the board). Existing/placed footprints
+// are never moved.
+const STAGE_ORIGIN_X_MM: f64 = 300.0;
+const STAGE_ORIGIN_Y_MM: f64 = 25.0;
+const STAGE_PART_PITCH_MM: f64 = 5.0;
+const STAGE_BOX_PAD_MM: f64 = 3.0;
+const STAGE_LABEL_H_MM: f64 = 5.0;
+const STAGE_BOX_GAP_X_MM: f64 = 6.0;
+const STAGE_BOX_GAP_Y_MM: f64 = 8.0;
+const STAGE_SECTIONS_PER_ROW: usize = 4;
+const STAGE_BOX_STROKE_MM: f64 = 0.15;
+const STAGE_LABEL_SIZE_MM: f64 = 2.0;
+const STAGE_HALF: f64 = 0.5; // grid-cell / box centering factor
+const PROTO_LAYER_DWGS_USER = "BL_Dwgs_User";
+const PROTO_TYPE_URL_BOARDTEXT = "type.googleapis.com/kiapi.board.types.BoardText";
+const PROTO_ANY_OPEN = "{\"@type\":\"";
+const BOARD_ITEM_OP_OPEN = "{\"op\":\"" ++ OP_CREATE_BOARD_ITEM ++ "\",\"item\":";
 
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
@@ -293,7 +320,7 @@ fn loadFootprintDef(
     spc: *SyncPlanContext,
     fp_name: []const u8,
 ) ?[]const u8 {
-    return loadFootprintDefImpl(spc, fp_name, null) catch null;
+    return loadFootprintDefImpl(spc, fp_name, null, null, "") catch null;
 }
 
 /// Like loadFootprintDef but also bakes per-instance Field items
@@ -306,14 +333,18 @@ fn loadFootprintDefForInstance(
     spc: *SyncPlanContext,
     fp_name: []const u8,
     inst: export_kicad.FlatInstance,
+    canopy_net: ?[]const u8,
+    section: []const u8,
 ) ?[]const u8 {
-    return loadFootprintDefImpl(spc, fp_name, inst) catch null;
+    return loadFootprintDefImpl(spc, fp_name, inst, canopy_net, section) catch null;
 }
 
 fn loadFootprintDefImpl(
     spc: *SyncPlanContext,
     fp_name: []const u8,
     inst_opt: ?export_kicad.FlatInstance,
+    canopy_net: ?[]const u8,
+    section: []const u8,
 ) !?[]const u8 {
     const fp_path = try std.fmt.allocPrint(spc.arena, PATH_FMT_FP_SEXP, .{ spc.project_dir, fp_name });
     const fp_source = infra_fs.cwd().readFileAlloc(spc.arena, fp_path, MAX_FOOTPRINT_BYTES) catch return null;
@@ -353,6 +384,12 @@ fn loadFootprintDefImpl(
             if (p.value.len == 0) continue;
             try writeFieldProtoJson(w, canonicalFieldName(p.key), p.value, &first_item);
         }
+        // Bake the passive routing hint so it lands on the first CreateItems
+        // rather than waiting for a follow-up set_field on the next sync.
+        if (canopy_net) |cn| {
+            if (cn.len > 0) try writeFieldProtoJson(w, FIELD_CANOPY_NET, cn, &first_item);
+        }
+        if (section.len > 0) try writeFieldProtoJson(w, FIELD_CANOPY_SECTION, section, &first_item);
     }
     try w.writeAll("]}");
     return buf.items;
@@ -442,7 +479,7 @@ fn writeBoardShapeOpen(w: anytype, layer: []const u8, stroke_mm: f64, first: *bo
     if (!first.*) try w.writeAll(",");
     first.* = false;
     const stroke_nm = mmToNm(stroke_mm);
-    try w.writeAll("{\"@type\":\"" ++ PROTO_TYPE_URL_BOARDSHAPE ++ "\",");
+    try w.writeAll(PROTO_ANY_OPEN ++ PROTO_TYPE_URL_BOARDSHAPE ++ "\",");
     try w.print("\"layer\":\"{s}\",", .{layer});
     try w.writeAll("\"shape\":{\"attributes\":{\"stroke\":{\"width\":");
     try w.print("{{\"valueNm\":{d}}},\"style\":\"SLS_DEFAULT\"}},", .{stroke_nm});
@@ -602,7 +639,7 @@ fn writePadProtoJson(arena: std.mem.Allocator, w: anytype, pad: env_mod_node.Nod
     const proto_type = protoPadType(ptype);
     const proto_shape = protoPadShape(shape);
 
-    try w.writeAll("{\"@type\":\"" ++ PROTO_TYPE_URL_PAD ++ "\",\"id\":{},\"number\":");
+    try w.writeAll(PROTO_ANY_OPEN ++ PROTO_TYPE_URL_PAD ++ "\",\"id\":{},\"number\":");
     try writeJsonString(w, num);
     try w.print(",\"type\":\"{s}\"", .{proto_type});
     try w.print(",\"position\":{{\"xNm\":{d},\"yNm\":{d}}}", .{ mmToNm(pos_x), mmToNm(pos_y) });
@@ -688,6 +725,58 @@ pub const SyncRunResult = struct {
 /// Pure failure modes — every successful run returns SyncRunResult.
 pub const SyncRunError = error{ NotADesign, BuildFailed } || HandlerError;
 
+/// Populate the pin→net maps from the flattened netlist in one pass.
+///
+/// Two-stage net-name normalisation runs first:
+///  1. Dot-collapse: `(decouple …)` per-pin sub-nets (`<rail>.<refdes>.<pin>`,
+///     e.g. `VDD.U18.IN`) share the rail's electrical net — collapse to the
+///     part before the first `.`.
+///  2. Slash-strip: sub-block path prefixes (`adc1/REGCAP`) are stripped only
+///     when the bare name is globally unique; `adc1/REGCAP`, `adc2/REGCAP`,
+///     `adc3/REGCAP` are distinct rails and keep their prefix.
+///
+/// Fills: `pad_net_map` ("ref|pin" → display net), `pad_full_net` ("ref|pin"
+/// → pre-collapse net, for the `canopy_net` device-pin lookup), `net_pad_count`
+/// ("ref|net" → pad count, for the stale-pad heuristic), and `net_hub_pins`
+/// (full net → hub pins on it).
+fn populatePadNetMaps(
+    arena: std.mem.Allocator,
+    nets: []const export_kicad.FlatNet,
+    pad_net_map: *std.StringHashMap([]const u8),
+    pad_full_net: *std.StringHashMap([]const u8),
+    net_pad_count: *std.StringHashMap(u32),
+    net_hub_pins: *std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatPin)),
+) !void {
+    var bare_counts = std.StringHashMap(u32).init(arena);
+    for (nets) |net| {
+        if (net.name.len == 0) continue;
+        const bare = bareNetName(collapseDotSubNet(net.name));
+        const e = try bare_counts.getOrPut(bare);
+        if (!e.found_existing) e.value_ptr.* = 0;
+        e.value_ptr.* += 1;
+    }
+    for (nets) |net| {
+        if (net.name.len == 0) continue;
+        const post_dot = collapseDotSubNet(net.name);
+        const bare = bareNetName(post_dot);
+        const display = if ((bare_counts.get(bare) orelse 0) == 1) bare else post_dot;
+        for (net.pins) |pin| {
+            const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ pin.ref_des, pin.pin });
+            try pad_net_map.put(key, display);
+            try pad_full_net.put(key, net.name);
+            const ck = try std.fmt.allocPrint(arena, "{s}|{s}", .{ pin.ref_des, display });
+            const e = try net_pad_count.getOrPut(ck);
+            if (!e.found_existing) e.value_ptr.* = 0;
+            e.value_ptr.* += 1;
+            if (isHubRef(pin.ref_des)) {
+                const he = try net_hub_pins.getOrPut(net.name);
+                if (!he.found_existing) he.value_ptr.* = .empty;
+                try he.value_ptr.append(arena, pin);
+            }
+        }
+    }
+}
+
 /// Run the sync-plan diff against `parsed` and return the JSON-formatted
 /// response (same shape `syncPlanApi` writes to the HTTP response body).
 /// Extracted from `syncPlanApi` so the file-based KiCad-PCB sync can
@@ -716,50 +805,24 @@ pub fn runSyncPlan(
     var nets: std.ArrayListUnmanaged(export_kicad.FlatNet) = .empty;
     try export_kicad.flattenAndMergeNets(arena, block, &nets);
 
-    // (ref, pin) -> net_name. Empty net names are excluded (NC pads).
-    //
-    // Two-stage name normalisation runs before we map pins → nets:
-    //
-    //  1. Dot-collapse: `(decouple …)` generates per-pin sub-nets of the
-    //     form `<rail>.<refdes>.<pin>` (e.g. `VDD.U18.IN`) as a routing
-    //     organisation aid. The design author's intent is that they
-    //     share the rail's electrical net; collapse unconditionally to
-    //     the part before the first `.`.
-    //  2. Slash-strip: sub-block path prefixes (e.g. `adc1/REGCAP`)
-    //     come from `collectNets` walking sub_blocks. Strip when the
-    //     bare name is globally unique across the post-dot-collapse
-    //     netlist, keep when it would collide. `adc1/REGCAP`,
-    //     `adc2/REGCAP`, `adc3/REGCAP` are three physically distinct
-    //     decoupling rails that must NOT merge, so all three keep
-    //     their prefix.
-    var bare_counts = std.StringHashMap(u32).init(arena);
-    for (nets.items) |net| {
-        if (net.name.len == 0) continue;
-        const post_dot = collapseDotSubNet(net.name);
-        const bare = bareNetName(post_dot);
-        const e = try bare_counts.getOrPut(bare);
-        if (!e.found_existing) e.value_ptr.* = 0;
-        e.value_ptr.* += 1;
-    }
+    // Pin→net maps used by the diff loop, the passive `canopy_net` field,
+    // and the stale-pad heuristic. Built in one pass — see `populatePadNetMaps`.
     var pad_net_map = std.StringHashMap([]const u8).init(arena);
-    // "ref_des|net" → how many pads of that instance the design puts the net on.
-    // Used to detect a moved single-pad signal so its stale board pad can be
-    // cleared, while leaving multi-pad nets (GND/power) untouched.
     var net_pad_count = std.StringHashMap(u32).init(arena);
-    for (nets.items) |net| {
-        if (net.name.len == 0) continue;
-        const post_dot = collapseDotSubNet(net.name);
-        const bare = bareNetName(post_dot);
-        const display = if ((bare_counts.get(bare) orelse 0) == 1) bare else post_dot;
-        for (net.pins) |pin| {
-            const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ pin.ref_des, pin.pin });
-            try pad_net_map.put(key, display);
-            const ck = try std.fmt.allocPrint(arena, "{s}|{s}", .{ pin.ref_des, display });
-            const e = try net_pad_count.getOrPut(ck);
-            if (!e.found_existing) e.value_ptr.* = 0;
-            e.value_ptr.* += 1;
-        }
+    var pad_full_net = std.StringHashMap([]const u8).init(arena);
+    var net_hub_pins = std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatPin)).init(arena);
+    try populatePadNetMaps(arena, nets.items, &pad_net_map, &pad_full_net, &net_pad_count, &net_hub_pins);
+
+    // ref-des → section name. Top-level `section.instances` already carries
+    // every nested sub-section + decouple/series child, so one shallow pass
+    // covers the whole design tree. Sub-block parts (ref-des like "usb/U1")
+    // are attributed to their sub-block in `sectionForRef`, not here.
+    var ref_to_section = std.StringHashMap([]const u8).init(arena);
+    for (block.sections) |sec| {
+        if (sec.name.len == 0) continue;
+        for (sec.instances) |si| try ref_to_section.put(si.ref_des, sec.name);
     }
+    var pending_adds: std.ArrayListUnmanaged(PendingAdd) = .empty;
 
     var by_uuid = std.StringHashMap(BoardFp).init(arena);
     var by_ref = std.StringHashMap(BoardFp).init(arena);
@@ -833,6 +896,10 @@ pub fn runSyncPlan(
         .by_netsig = &by_netsig,
         .reserved_kicad_uuids = &reserved_kicad_uuids,
         .pad_net_map = &pad_net_map,
+        .pad_full_net = &pad_full_net,
+        .net_hub_pins = &net_hub_pins,
+        .ref_to_section = &ref_to_section,
+        .pending_adds = &pending_adds,
         .net_pad_count = &net_pad_count,
         .matched_uuids = &matched_uuids,
         .canonical_fp_name = &canonical_fp_name,
@@ -842,6 +909,10 @@ pub fn runSyncPlan(
         .migrate_heuristic = parsed.migrate_heuristic,
     };
     for (instances.items) |inst| try handleInstance(&diff_ctx, inst, &w, &first_op);
+
+    // Adds were buffered during the walk; lay them out grouped by section
+    // (positions + section boxes/labels) now that every match is resolved.
+    try emitStagedAdds(&diff_ctx, &w, &first_op);
 
     try emitStaleOps(arena, &diff_ctx, parsed, &matched_uuids, &w, &first_op, &summary);
 
@@ -1143,6 +1214,16 @@ fn writeFileAtomic(arena: std.mem.Allocator, path: []const u8, contents: []const
     try infra_fs.cwd().rename(tmp_path, path);
 }
 
+/// A deferred `add` op. The diff walk buffers these instead of emitting
+/// inline so `emitStagedAdds` can group them by section and assign each a
+/// staging position before writing the ops.
+const PendingAdd = struct {
+    inst: export_kicad.FlatInstance,
+    fp_name: []const u8,
+    canopy_net: ?[]const u8,
+    section: []const u8,
+};
+
 const DiffContext = struct {
     by_uuid: *std.StringHashMap(BoardFp),
     by_ref: *std.StringHashMap(BoardFp),
@@ -1170,6 +1251,20 @@ const DiffContext = struct {
     /// instances can't collide on one fp via different tiers.
     reserved_kicad_uuids: *std.StringHashMap(void),
     pad_net_map: *std.StringHashMap([]const u8),
+    /// "ref|pin" → full (pre-collapse) net name, and full net → the hub pins
+    /// on it. Together they let a passive's `canopy_net` field name the device
+    /// pin each pad routes to (`U8.C3.VDD33USB / GND`). Passives only.
+    pad_full_net: *std.StringHashMap([]const u8),
+    net_hub_pins: *std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatPin)),
+    /// ref-des → the design `(section …)` it was declared in, for the
+    /// `canopy_section` field and the section-grouped staging layout. Built
+    /// from the design block's top-level sections (whose `.instances` already
+    /// include nested sub-section + decouple/series children).
+    ref_to_section: *std.StringHashMap([]const u8),
+    /// Newly-added instances, buffered during the diff walk so the staging
+    /// pass can lay them out grouped by section (positions + section boxes)
+    /// after every match has been resolved. See `emitStagedAdds`.
+    pending_adds: *std.ArrayListUnmanaged(PendingAdd),
     /// "ref_des|net" → count of design pads carrying that net on the instance.
     /// `emitPadNetOps` clears a stale board pad only when its net is a count==1
     /// signal the design moved elsewhere, never a multi-pad GND/power net.
@@ -1665,7 +1760,17 @@ fn lessByDesignRef(_: void, a: export_kicad.FlatInstance, b: export_kicad.FlatIn
     return std.mem.lessThan(u8, a.ref_des, b.ref_des);
 }
 
-fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, fp_name_short: []const u8, w: anytype, first: *bool, ops_emitted: *u32) !void {
+fn handleMatched(
+    d: *DiffContext,
+    inst: export_kicad.FlatInstance,
+    m: BoardFp,
+    fp_name_short: []const u8,
+    canopy_net: ?[]const u8,
+    section: []const u8,
+    w: anytype,
+    first: *bool,
+    ops_emitted: *u32,
+) !void {
     // Track matches by KiCad-internal UUID — that field is always
     // populated, whereas canopy_uuid is empty for ref-des-fallback
     // matches until the backfill op lands on a future sync.
@@ -1734,6 +1839,33 @@ fn handleMatched(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, f
             ops_emitted.* += 1;
         }
     }
+    // Passive routing hint: each pad's intended (device.pin.net) destination,
+    // so a layout engineer reading a bare cap/resistor sees what it bridges.
+    if (canopy_net) |cn| {
+        const board_value = m.fields.get(FIELD_CANOPY_NET) orelse "";
+        if (!std.mem.eql(u8, board_value, cn)) {
+            if (try emitOpUnlessApplied(d, w, first, OP_SET_FIELD, .{
+                .{ "uuid", target },
+                .{ "field", FIELD_CANOPY_NET },
+                .{ "value", cn },
+            }, target, FIELD_CANOPY_NET, cn)) {
+                ops_emitted.* += 1;
+            }
+        }
+    }
+    // Section provenance: which design `(section …)` this part came from.
+    if (section.len > 0) {
+        const board_value = m.fields.get(FIELD_CANOPY_SECTION) orelse "";
+        if (!std.mem.eql(u8, board_value, section)) {
+            if (try emitOpUnlessApplied(d, w, first, OP_SET_FIELD, .{
+                .{ "uuid", target },
+                .{ "field", FIELD_CANOPY_SECTION },
+                .{ "value", section },
+            }, target, FIELD_CANOPY_SECTION, section)) {
+                ops_emitted.* += 1;
+            }
+        }
+    }
     ops_emitted.* += try emitPadNetOps(d, w, first, target, inst.ref_des, d.pad_net_map, m.pads);
 }
 
@@ -1760,25 +1892,129 @@ fn canonicalFieldName(key: []const u8) []const u8 {
     return key;
 }
 
+/// Strip a "subblock/" path prefix from a ref-des — "ldo/U1" → "U1".
+fn shortRefLocal(ref: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, ref, '/')) |i| return ref[i + 1 ..];
+    return ref;
+}
+
+/// A passive spoke — R/C/L/F/D prefix. Mirrors render_svg `isHub`: only
+/// these carry a meaningful `canopy_net` field (it names the hub pin the
+/// spoke bridges to); everything else is a hub and is skipped.
+fn isPassiveRef(ref: []const u8) bool {
+    const s = shortRefLocal(ref);
+    if (s.len == 0) return false;
+    return switch (s[0]) {
+        'R', 'C', 'L', 'F', 'D' => true,
+        else => false,
+    };
+}
+
+/// A hub — anything that isn't a passive spoke (U/J/P/X/Q ICs/connectors
+/// plus any unknown prefix). These are the endpoints a passive's
+/// `canopy_net` field points at.
+fn isHubRef(ref: []const u8) bool {
+    return !isPassiveRef(ref);
+}
+
+/// One pad of a passive, with both the display net (collapsed, dedup'd —
+/// what set_pad_net assigns) and the full pre-collapse net (used to find
+/// the hub pin the pad routes to).
+const CanopyPad = struct { pin: []const u8, display: []const u8, full: []const u8 };
+
+fn lessByPadNum(_: void, a: CanopyPad, b: CanopyPad) bool {
+    const an = std.fmt.parseInt(u32, a.pin, 10) catch null;
+    const bn = std.fmt.parseInt(u32, b.pin, 10) catch null;
+    if (an != null and bn != null) return an.? < bn.?;
+    return std.mem.lessThan(u8, a.pin, b.pin);
+}
+
+/// Build the `canopy_net` field value for one passive: a ` / `-joined,
+/// pad-ordered list where each pad reads `<destRef>.<destPin>.<net>` when
+/// it sits on exactly one hub pin (e.g. `U8.C3.VDD33USB`), or just `<net>`
+/// when the net has zero or many hub pins (e.g. a `GND` rail). Returns null
+/// when the passive has no connected pads.
+fn buildCanopyNetValue(
+    arena: std.mem.Allocator,
+    ref_des: []const u8,
+    pad_net_map: *std.StringHashMap([]const u8),
+    pad_full_net: *std.StringHashMap([]const u8),
+    net_hub_pins: *std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatPin)),
+) !?[]const u8 {
+    var pads: std.ArrayListUnmanaged(CanopyPad) = .empty;
+    var it = pad_net_map.iterator();
+    while (it.next()) |entry| {
+        const k = entry.key_ptr.*;
+        const sep = std.mem.indexOfScalar(u8, k, '|') orelse continue;
+        if (!std.mem.eql(u8, k[0..sep], ref_des)) continue;
+        const full = pad_full_net.get(k) orelse entry.value_ptr.*;
+        try pads.append(arena, .{ .pin = k[sep + 1 ..], .display = entry.value_ptr.*, .full = full });
+    }
+    if (pads.items.len == 0) return null;
+    std.mem.sort(CanopyPad, pads.items, {}, lessByPadNum);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(arena);
+    for (pads.items, 0..) |p, i| {
+        if (i > 0) try w.writeAll(" / ");
+        // Count the hub pins on this pad's full net (excluding the passive
+        // itself). Exactly one → name that device pin; otherwise the net
+        // alone, since a rail with many pins has no single target.
+        var ep: ?export_kicad.FlatPin = null;
+        var count: u32 = 0;
+        if (net_hub_pins.get(p.full)) |hubs| {
+            for (hubs.items) |hp| {
+                if (std.mem.eql(u8, hp.ref_des, ref_des)) continue;
+                count += 1;
+                if (ep == null) ep = hp;
+            }
+        }
+        if (count == 1) {
+            try w.print("{s}.{s}.{s}", .{ shortRefLocal(ep.?.ref_des), ep.?.pin, p.display });
+        } else {
+            try w.writeAll(p.display);
+        }
+    }
+    return buf.items;
+}
+
 fn handleInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, first: *bool) !void {
     const fp_name_short = stripLibPrefix(inst.footprint);
+    // Only passives carry a canopy_net field (it names the hub pin each pad
+    // bridges to). Computed once here so both the matched set_field path and
+    // the add bake-in path use the same value.
+    const canopy_net = if (isPassiveRef(inst.ref_des))
+        try buildCanopyNetValue(d.spc.arena, inst.ref_des, d.pad_net_map, d.pad_full_net, d.net_hub_pins)
+    else
+        null;
+    const section = sectionForRef(inst.ref_des, d.ref_to_section);
     var ops_emitted: u32 = 0;
     if (matchInstance(d, inst)) |m| {
-        try handleMatched(d, inst, m, fp_name_short, w, first, &ops_emitted);
+        try handleMatched(d, inst, m, fp_name_short, canopy_net, section, w, first, &ops_emitted);
         // Only count as "updated" when at least one op was actually
         // emitted — otherwise every no-diff sync would still surface
         // "Updated: N" to the user even though nothing changed.
         if (ops_emitted > 0) d.summary.updated += 1;
         return;
     }
-    const kmod = loadKicadMod(d.spc, fp_name_short, inst.component) orelse return;
-    // Pass the instance so canopy_uuid + design properties get baked
-    // into the inline Items as Field entries on the first add — without
-    // this the user sees "press sync twice" because canopy_uuid + MPN
-    // would only land via follow-up set_field ops on the second sync.
-    const fp_def = loadFootprintDefForInstance(d.spc, fp_name_short, inst);
-    try emitAddOp(w, first, inst, fp_name_short, kmod, fp_def, d.pad_net_map);
-    d.summary.added += 1;
+    // Defer the add — `emitStagedAdds` lays buffered adds out grouped by
+    // section once the whole walk is done. fp_name / canopy_net / section
+    // are resolved now; kmod + footprint_def are loaded at emit time.
+    try d.pending_adds.append(d.spc.arena, .{
+        .inst = inst,
+        .fp_name = fp_name_short,
+        .canopy_net = canopy_net,
+        .section = section,
+    });
+}
+
+/// Resolve which design section an instance belongs to. Sub-block parts
+/// (hierarchical ref-des like "usb/U1") are attributed to their sub-block
+/// name; top-level parts use the `(section …)` they were declared in;
+/// anything else returns "" (no box, no canopy_section field).
+fn sectionForRef(ref_des: []const u8, ref_to_section: *std.StringHashMap([]const u8)) []const u8 {
+    if (std.mem.indexOfScalar(u8, ref_des, '/')) |i| return ref_des[0..i];
+    return ref_to_section.get(ref_des) orelse "";
 }
 
 fn emitOp(w: anytype, first: *bool, op: []const u8, fields: anytype) !void {
@@ -1803,6 +2039,10 @@ fn emitAddOp(
     kmod: []const u8,
     fp_def_json: ?[]const u8,
     pad_net_map: *std.StringHashMap([]const u8),
+    x_nm: i64,
+    y_nm: i64,
+    canopy_net: ?[]const u8,
+    section: []const u8,
 ) !void {
     if (!first.*) try w.*.writeAll(",");
     first.* = false;
@@ -1820,9 +2060,151 @@ fn emitAddOp(
         try w.*.writeAll(",\"footprint_def\":");
         try w.*.writeAll(def);
     }
+    // canopy_net / canopy_section as top-level op fields too: the IPC agent
+    // reads them from the baked footprint_def above, but the file-based
+    // writer (the webpage button) bakes them onto the fp from these fields
+    // so they land on the first sync rather than waiting for a follow-up.
+    if (canopy_net) |cn| {
+        if (cn.len > 0) {
+            try w.*.writeAll(",\"canopy_net\":");
+            try writeJsonString(w.*, cn);
+        }
+    }
+    if (section.len > 0) {
+        try w.*.writeAll(",\"canopy_section\":");
+        try writeJsonString(w.*, section);
+    }
+    // Staging position (board nm). Both paths move the new fp here; (0,0)
+    // means "no staging hint" (the part stays at the origin).
+    try w.*.print(",\"x\":{d},\"y\":{d}", .{ x_nm, y_nm });
     try w.*.writeAll(",\"pad_nets\":");
     try writePadNetsArray(w.*, inst.ref_des, pad_net_map);
     try w.*.writeAll("}");
+}
+
+fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+/// Number of part columns for a roughly-square box holding `n` parts.
+fn boxCols(n: usize) usize {
+    if (n <= 1) return 1;
+    const c: usize = @intFromFloat(@ceil(@sqrt(@as(f64, @floatFromInt(n)))));
+    return if (c < 1) 1 else c;
+}
+
+/// Build a BoardGraphicShape rectangle (unfilled outline) on Dwgs.User as
+/// an Any-wrapped proto-canonical object string. Mirrors `writeBoardShapeOpen`
+/// + geometry but standalone rather than an inline footprint child.
+fn boardRectItem(arena: std.mem.Allocator, x1: f64, y1: f64, x2: f64, y2: f64) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(arena);
+    try w.writeAll(PROTO_ANY_OPEN ++ PROTO_TYPE_URL_BOARDSHAPE ++ "\",\"layer\":\"" ++ PROTO_LAYER_DWGS_USER ++ "\",");
+    try w.writeAll("\"shape\":{\"attributes\":{\"stroke\":{\"width\":");
+    try w.print("{{\"valueNm\":{d}}},\"style\":\"SLS_DEFAULT\"}},", .{mmToNm(STAGE_BOX_STROKE_MM)});
+    try w.writeAll("\"fill\":{\"fillType\":\"GFT_UNFILLED\"}},");
+    try writeRectGeom(w, x1, y1, x2, y2);
+    try w.writeAll("}}");
+    return buf.items;
+}
+
+/// Build a BoardText label on Dwgs.User as an Any-wrapped proto string.
+fn boardLabelItem(arena: std.mem.Allocator, x: f64, y: f64, text: []const u8) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(arena);
+    try w.writeAll(PROTO_ANY_OPEN ++ PROTO_TYPE_URL_BOARDTEXT ++ "\",\"layer\":\"" ++ PROTO_LAYER_DWGS_USER ++ "\",\"text\":{\"position\":");
+    try writeProtoVec2(w, x, y);
+    try w.writeAll(",\"attributes\":{\"size\":");
+    try writeProtoVec2(w, STAGE_LABEL_SIZE_MM, STAGE_LABEL_SIZE_MM);
+    try w.writeAll("},\"text\":");
+    try writeJsonString(w, text);
+    try w.writeAll("}}");
+    return buf.items;
+}
+
+/// Group buffered section-add indices by section name (sorted for a stable
+/// layout) so `emitStagedAdds` can lay each section out as its own box.
+fn groupAddsBySection(
+    arena: std.mem.Allocator,
+    adds: []const PendingAdd,
+    buckets: *std.StringHashMap(std.ArrayListUnmanaged(usize)),
+    order: *std.ArrayListUnmanaged([]const u8),
+) !void {
+    for (adds, 0..) |pa, i| {
+        const key = if (pa.section.len > 0) pa.section else "(unsectioned)";
+        const e = try buckets.getOrPut(key);
+        if (!e.found_existing) {
+            e.value_ptr.* = .empty;
+            try order.append(arena, key);
+        }
+        try e.value_ptr.append(arena, i);
+    }
+    std.mem.sort([]const u8, order.items, {}, lessThanStr);
+}
+
+/// Lay buffered `add`s out as per-section clusters in a staging area and
+/// emit them: one positioned `add` op per part plus a `create_board_item`
+/// box rect + text label per section. Section order is sorted for a layout
+/// stable across re-runs. Only buffered (newly-added) parts are placed;
+/// existing footprints are never moved. Parts with no footprint source are
+/// skipped, and a section whose parts are all skipped draws no (empty) box.
+fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
+    const arena = d.spc.arena;
+    const adds = d.pending_adds.items;
+    if (adds.len == 0) return;
+
+    var buckets = std.StringHashMap(std.ArrayListUnmanaged(usize)).init(arena);
+    var order: std.ArrayListUnmanaged([]const u8) = .empty;
+    try groupAddsBySection(arena, adds, &buckets, &order);
+
+    // Flow boxes left-to-right, wrapping after STAGE_SECTIONS_PER_ROW; each
+    // row's height is the tallest box in it.
+    var cur_x: f64 = STAGE_ORIGIN_X_MM;
+    var row_top: f64 = STAGE_ORIGIN_Y_MM;
+    var row_h: f64 = 0;
+    var in_row: usize = 0;
+    for (order.items) |sec| {
+        const idxs = (buckets.get(sec) orelse continue).items;
+        const cols = boxCols(idxs.len);
+        const rows = (idxs.len + cols - 1) / cols;
+        const box_w = 2 * STAGE_BOX_PAD_MM + @as(f64, @floatFromInt(cols)) * STAGE_PART_PITCH_MM;
+        const box_h = STAGE_LABEL_H_MM + 2 * STAGE_BOX_PAD_MM + @as(f64, @floatFromInt(rows)) * STAGE_PART_PITCH_MM;
+        if (in_row == STAGE_SECTIONS_PER_ROW) {
+            cur_x = STAGE_ORIGIN_X_MM;
+            row_top += row_h + STAGE_BOX_GAP_Y_MM;
+            row_h = 0;
+            in_row = 0;
+        }
+        var emitted: usize = 0;
+        for (idxs, 0..) |idx, j| {
+            const pa = adds[idx];
+            const kmod = loadKicadMod(d.spc, pa.fp_name, pa.inst.component) orelse continue;
+            const fp_def = loadFootprintDefForInstance(d.spc, pa.fp_name, pa.inst, pa.canopy_net, pa.section);
+            const col: f64 = @floatFromInt(j % cols);
+            const row: f64 = @floatFromInt(j / cols);
+            const px = cur_x + STAGE_BOX_PAD_MM + (col + STAGE_HALF) * STAGE_PART_PITCH_MM;
+            const py = row_top + STAGE_LABEL_H_MM + STAGE_BOX_PAD_MM + (row + STAGE_HALF) * STAGE_PART_PITCH_MM;
+            try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, mmToNm(px), mmToNm(py), pa.canopy_net, pa.section);
+            d.summary.added += 1;
+            emitted += 1;
+        }
+        if (emitted > 0) {
+            const items = [_][]const u8{
+                try boardRectItem(arena, cur_x, row_top, cur_x + box_w, row_top + box_h),
+                try boardLabelItem(arena, cur_x + box_w * STAGE_HALF, row_top + STAGE_LABEL_H_MM * STAGE_HALF, sec),
+            };
+            for (items) |item_json| {
+                if (!first.*) try w.*.writeAll(",");
+                first.* = false;
+                try w.*.writeAll(BOARD_ITEM_OP_OPEN);
+                try w.*.writeAll(item_json);
+                try w.*.writeAll("}");
+            }
+        }
+        cur_x += box_w + STAGE_BOX_GAP_X_MM;
+        if (box_h > row_h) row_h = box_h;
+        in_row += 1;
+    }
 }
 
 fn emitSwapOp(
@@ -2119,4 +2501,106 @@ test "pickByKicadUuid refuses an fp another instance already claimed" {
 
     const got = pickByKicadUuid("28f5c311", &by_kicad_uuid, &claimed);
     try std.testing.expect(got == null);
+}
+
+test "isPassiveRef classifies R/C/L/F/D as spokes and everything else as a hub" {
+    // spec: serve/sync - isPassiveRef classifies R/C/L/F/D ref-des prefixes as passive spokes and everything else as a hub
+    try std.testing.expect(isPassiveRef("C84"));
+    try std.testing.expect(isPassiveRef("R7"));
+    try std.testing.expect(isPassiveRef("disp/C12")); // path prefix stripped first
+    try std.testing.expect(!isPassiveRef("U8"));
+    try std.testing.expect(!isPassiveRef("J4"));
+    try std.testing.expect(!isPassiveRef("Q4"));
+    try std.testing.expect(!isPassiveRef("")); // empty → not a passive
+    // isHubRef is the complement.
+    try std.testing.expect(isHubRef("U8"));
+    try std.testing.expect(!isHubRef("C84"));
+}
+
+test "buildCanopyNetValue names the single hub pin per pad, net name otherwise" {
+    // spec: serve/sync - buildCanopyNetValue renders each passive pad as destRef.destPin.net for a single hub pin, else the bare net name
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    var pad_net_map = std.StringHashMap([]const u8).init(arena);
+    var pad_full_net = std.StringHashMap([]const u8).init(arena);
+    var net_hub_pins = std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatPin)).init(arena);
+
+    // C84: pad 1 decouples U8.C3 (sub-net VDD.stm32.C3 carries only the cap +
+    // that one IC pin); pad 2 → GND, a rail with many pins.
+    try pad_net_map.put("C84|1", "VDD");
+    try pad_net_map.put("C84|2", "GND");
+    try pad_full_net.put("C84|1", "VDD.stm32.C3");
+    try pad_full_net.put("C84|2", "GND");
+
+    var vdd_pins: std.ArrayListUnmanaged(export_kicad.FlatPin) = .empty;
+    try vdd_pins.append(arena, .{ .ref_des = "U8", .pin = "C3" });
+    try net_hub_pins.put("VDD.stm32.C3", vdd_pins);
+    var gnd_pins: std.ArrayListUnmanaged(export_kicad.FlatPin) = .empty;
+    try gnd_pins.append(arena, .{ .ref_des = "U8", .pin = "A1" });
+    try gnd_pins.append(arena, .{ .ref_des = "U8", .pin = "B1" });
+    try net_hub_pins.put("GND", gnd_pins);
+
+    const got = try buildCanopyNetValue(arena, "C84", &pad_net_map, &pad_full_net, &net_hub_pins);
+    try std.testing.expect(got != null);
+    try std.testing.expectEqualStrings("U8.C3.VDD / GND", got.?);
+}
+
+test "buildCanopyNetValue lists pads in numeric order and returns null when unconnected" {
+    // spec: serve/sync - buildCanopyNetValue lists a passive's pads in numeric order joined by ' / ' and returns null when the passive has no connected pads
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    var pad_net_map = std.StringHashMap([]const u8).init(arena);
+    var pad_full_net = std.StringHashMap([]const u8).init(arena);
+    var net_hub_pins = std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatPin)).init(arena);
+
+    // Series resistor R7 between two ICs. Insert pad 2 before pad 1 to prove
+    // the output is sorted by pad number, not insertion/hash order.
+    try pad_net_map.put("R7|2", "SENSE_N");
+    try pad_net_map.put("R7|1", "SENSE_P");
+    try pad_full_net.put("R7|1", "SENSE_P");
+    try pad_full_net.put("R7|2", "SENSE_N");
+    var p_pins: std.ArrayListUnmanaged(export_kicad.FlatPin) = .empty;
+    try p_pins.append(arena, .{ .ref_des = "U1", .pin = "PA0" });
+    try net_hub_pins.put("SENSE_P", p_pins);
+    var n_pins: std.ArrayListUnmanaged(export_kicad.FlatPin) = .empty;
+    try n_pins.append(arena, .{ .ref_des = "U3", .pin = "AIN" });
+    try net_hub_pins.put("SENSE_N", n_pins);
+
+    const got = try buildCanopyNetValue(arena, "R7", &pad_net_map, &pad_full_net, &net_hub_pins);
+    try std.testing.expect(got != null);
+    try std.testing.expectEqualStrings("U1.PA0.SENSE_P / U3.AIN.SENSE_N", got.?);
+
+    // A passive with no pads in the netlist yields no field at all.
+    const none = try buildCanopyNetValue(arena, "C99", &pad_net_map, &pad_full_net, &net_hub_pins);
+    try std.testing.expect(none == null);
+}
+
+test "sectionForRef attributes sub-block parts to their sub-block and top-level parts to their section" {
+    // spec: serve/sync - sectionForRef attributes a sub-block part to its sub-block name and a top-level part to its declared section, else ""
+    var ref_to_section = std.StringHashMap([]const u8).init(std.testing.allocator);
+    defer ref_to_section.deinit();
+    try ref_to_section.put("C84", "STM32N657L0H3Q Core System");
+    try ref_to_section.put("U8", "STM32N657L0H3Q Core System");
+
+    // Sub-block part → first path segment (the sub-block name), never the map.
+    try std.testing.expectEqualStrings("usb", sectionForRef("usb/U1", &ref_to_section));
+    try std.testing.expectEqualStrings("adc1", sectionForRef("adc1/C5", &ref_to_section));
+    // Top-level part declared in a section → that section.
+    try std.testing.expectEqualStrings("STM32N657L0H3Q Core System", sectionForRef("C84", &ref_to_section));
+    // Top-level part in no section → "".
+    try std.testing.expectEqualStrings("", sectionForRef("R999", &ref_to_section));
+}
+
+test "boxCols returns a roughly-square column count" {
+    // spec: serve/sync - boxCols returns a roughly-square (ceil-sqrt) column count for a staging box of N parts
+    try std.testing.expectEqual(@as(usize, 1), boxCols(1));
+    try std.testing.expectEqual(@as(usize, 2), boxCols(2));
+    try std.testing.expectEqual(@as(usize, 2), boxCols(4));
+    try std.testing.expectEqual(@as(usize, 3), boxCols(5));
+    try std.testing.expectEqual(@as(usize, 3), boxCols(9));
+    try std.testing.expectEqual(@as(usize, 4), boxCols(16));
 }
