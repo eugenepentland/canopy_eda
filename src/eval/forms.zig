@@ -341,8 +341,8 @@ pub const scope_form_docs = blk: {
         .summary = "Tie one or more nets to a canonical name (net-merge).",
     } };
     t[@intFromEnum(ScopeForm.bus_net)] = .{ .scope = all, .doc = .{
-        .syntax = "(bus-net \"PREFIX\" width \"OTHER\" …)",
-        .summary = "Tie corresponding lanes of two multi-bit buses together.",
+        .syntax = "(bus-net \"PREFIX\" lo hi \"SUB\") | (bus-net \"PREFIX\" lo hi (suffixes …) (over …) (ports …))",
+        .summary = "Tie a lane range to a sub-block bus (1:1), or strided-fan-out the range across several sub-blocks' ports.",
     } };
 
     t[@intFromEnum(ScopeForm.pins)] = .{ .scope = dsec, .doc = .{

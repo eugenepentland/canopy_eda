@@ -64,7 +64,7 @@ where each is accepted: **D** = design-block top level,
 | `(decouple "NET" item…) | (decouple (cap-0402 "100nF") N per-pin "REF" "NET1" …)` | DSs | Emit decoupling capacitors against a net, in single- or multi-net form. |
 | `(series …)` | DSs | Insert a series element (resistor / ferrite / etc.) between two nets. |
 | `(net "A" "B" …)` | DSs | Tie one or more nets to a canonical name (net-merge). |
-| `(bus-net "PREFIX" width "OTHER" …)` | DSs | Tie corresponding lanes of two multi-bit buses together. |
+| `(bus-net "PREFIX" lo hi "SUB") | (bus-net "PREFIX" lo hi (suffixes …) (over …) (ports …))` | DSs | Tie a lane range to a sub-block bus (1:1), or strided-fan-out the range across several sub-blocks' ports. |
 | `(pins "REF" (group "label") pin-form…)` | ·Ss | Group a main-IC's pin assignments under a sub-section. |
 | `(protocol atom)` | ·Ss | Tag a section with a protocol keyword (e.g. `usb`, `i2c`). |
 | `(calc …)` | ·Ss | Inline design math block, surfaced in the review report. |

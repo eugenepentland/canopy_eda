@@ -248,6 +248,8 @@ Public functions: analyze
 ## eval/design_block
 
 - bus-net expands one net tie per index in the inclusive range
+- bus-net strided form distributes channels across over x ports with suffixes
+- sub-block bridge ties prefixed board nets to module ports with optional rename
 - bus-port expands one port per index times optional suffix list
 - kicad-pcb form captures the literal path on the design block
 
