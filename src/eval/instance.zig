@@ -484,6 +484,53 @@ pub fn evalSeriesForm(
     }
 }
 
+/// Evaluate `(fanout "COMMON" (comp) "NET1" "NET2" … [(id …)])` — place one
+/// `comp` instance between the shared COMMON net and each listed target net.
+/// A star of identical series elements (e.g. ferrite beads from one rail out
+/// to several filtered rails), collapsing N `(series …)` lines into one. Each
+/// branch auto-assigns a ref-des; child ids derive from the form id under
+/// `(hierarchical-ids)`, else from the `(ids …)` sidecar keyed on value#index
+/// — the same identity split `(series …)` uses for its per-pair children.
+pub fn evalFanoutForm(
+    self: *Evaluator,
+    form_children: []const Node,
+    env: *Env,
+    instances: *std.ArrayListUnmanaged(Instance),
+    all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
+) EvalError!void {
+    if (form_children.len < 4) return;
+    const common = (try self.evalNode(form_children[1], env)).asString() orelse return;
+    const comp_val = try self.evalNode(form_children[2], env);
+    if (comp_val != .component and comp_val != .component_instance) return;
+    const comp_offset = ids.componentSourceOffset(form_children[2]);
+
+    const fanout_id = ids.parseId(form_children) orelse blk: {
+        const gen = try ids.generateId(self);
+        try self.pending_ids.append(self.allocator, .{
+            .form_offset = form_children[0].span.offset -| 1,
+            .id = gen,
+        });
+        break :blk gen;
+    };
+    var sidecar = ids.parseChildIdSidecar(self, form_children);
+    const value = if (resolveComponent(self, comp_val)) |r| r.value else "";
+    const ta = try parseTrailingArgs(self, form_children[3..], env);
+
+    for (ta.nets.items, 0..) |target_net, i| {
+        const ref = try ids.nextRefDes(self, ids.componentPrefix(componentFamily(comp_val)));
+        const child_key = try std.fmt.allocPrint(self.allocator, "{s}#{d}", .{ value, i });
+        const child_id = if (self.hierarchical_ids)
+            try ids.deriveChildId(self, fanout_id, child_key, 0)
+        else
+            try ids.getOrCreateChildId(self, &sidecar, child_key);
+        var inst = instanceFromValue(self, comp_val, ref, comp_offset, child_id) orelse continue;
+        inst.origin_key = child_key;
+        try instances.append(self.allocator, inst);
+        try all_pin_nets.append(self.allocator, .{ .ref_des = ref, .pin = "1", .net = common });
+        try all_pin_nets.append(self.allocator, .{ .ref_des = ref, .pin = "2", .net = target_net });
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -518,4 +565,39 @@ test "hierarchical series derives child ids from form id" {
     const expected = try ids.deriveChildId(&eval, "abcd1234", "1uH#0", 0);
     try testing.expectEqualStrings(expected, instances.items[0].id);
     try testing.expectEqualStrings("1uH#0", instances.items[0].origin_key);
+}
+
+// spec: eval/design_block - fanout places one component from COMMON to each listed net
+test "evalFanoutForm stars one component from common to each target net" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    eval.hierarchical_ids = true;
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    try eval.component_cache.put(alloc, "ferrite-0402", .{
+        .name = "ferrite-0402",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "",
+    });
+
+    const nodes = try parser_mod.parse(alloc, "(fanout \"V1P8\" (ferrite-0402 \"600R\") \"VA\" \"VB\" \"VC\" (id abcd1234))");
+    const form_children = nodes[0].asList().?;
+    var instances: std.ArrayListUnmanaged(Instance) = .empty;
+    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+
+    try evalFanoutForm(&eval, form_children, &env, &instances, &all_pin_nets);
+
+    // One component per target net, child key value#index.
+    try testing.expectEqual(@as(usize, 3), instances.items.len);
+    try testing.expectEqualStrings("600R#0", instances.items[0].origin_key);
+    try testing.expectEqualStrings("600R#2", instances.items[2].origin_key);
+    // Every branch ties pin 1 to the shared common net, pin 2 to its target.
+    try testing.expectEqual(@as(usize, 6), all_pin_nets.items.len);
+    try testing.expectEqualStrings("V1P8", all_pin_nets.items[0].net);
+    try testing.expectEqualStrings("VA", all_pin_nets.items[1].net);
+    try testing.expectEqualStrings("V1P8", all_pin_nets.items[2].net);
+    try testing.expectEqualStrings("VC", all_pin_nets.items[5].net);
 }

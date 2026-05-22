@@ -467,34 +467,44 @@ pub fn emitDecoupleItems(
     sidecar: *ids.ChildIdSidecar,
 ) EvalError!void {
     var idx: usize = 0;
-    while (idx + 1 < items.len) {
-        const comp_val = try self.evalNode(items[idx], env);
-        const dec_comp_offset = ids.componentSourceOffset(items[idx]);
-
+    while (idx < items.len) {
+        // ── Component ── an explicit `(comp …)`/atom, or the per-design bypass
+        // default when a bare count leads (component omitted). The default is
+        // consulted only when one was set via `(decouple-defaults (bypass …))`.
+        const comp_omitted = items[idx].asNumber() != null;
+        const comp_node = if (comp_omitted)
+            (self.decouple_defaults.bypass orelse {
+                log.warn("decouple omits its component but no (decouple-defaults (bypass …)) is set (net: {s})", .{net_name});
+                return EvalError.InvalidForm;
+            })
+        else
+            items[idx];
+        const comp_val = try self.evalNode(comp_node, env);
+        const dec_comp_offset = ids.componentSourceOffset(comp_node);
         const resolved = instance_mod.resolveComponent(self, comp_val) orelse {
-            idx += 2;
+            // Unresolvable leading token (e.g. a trailing (id …)) — step past it.
+            idx += 1;
             continue;
         };
+        var c: usize = if (comp_omitted) idx else idx + 1;
 
-        // Syntax: (comp "val") COUNT per-pin REF [PIN]
-        // COUNT is required, per-pin keyword is required
-        const count_val = items[idx + 1].asNumber() orelse {
+        // ── COUNT (required) ──
+        // Syntax: [(comp "val")] COUNT per-pin [REF] PIN…
+        if (c >= items.len) break;
+        const count_val = items[c].asNumber() orelse {
             log.warn("decouple requires a count after component (net: {s})", .{net_name});
             log.warn("  Use: (decouple \"{s}\" (comp \"val\") COUNT per-pin REF)", .{net_name});
             return EvalError.InvalidForm;
         };
         const count: u32 = @intFromFloat(count_val);
-        if (count == 0) {
-            idx += 2;
-            continue;
-        }
+        c += 1;
 
-        // Expect "per-pin" keyword
-        if (idx + 2 >= items.len) {
-            idx += 2;
+        // ── per-pin keyword (required) ──
+        if (c >= items.len) {
+            idx = c;
             continue;
         }
-        const per_pin_kw = items[idx + 2].asAtom() orelse {
+        const per_pin_kw = items[c].asAtom() orelse {
             log.warn("decouple expects 'per-pin' keyword (net: {s})", .{net_name});
             return EvalError.InvalidForm;
         };
@@ -502,17 +512,32 @@ pub fn emitDecoupleItems(
             log.warn("decouple expects 'per-pin', got '{s}' (net: {s})", .{ per_pin_kw, net_name });
             return EvalError.InvalidForm;
         }
+        c += 1;
 
-        // REF
-        if (idx + 3 >= items.len) {
-            idx += 3;
+        // ── Host ref ── an explicit ref, or the per-design default IC. With a
+        // default IC declared, the first post-per-pin token is taken as a pin
+        // unless it equals that ref; with no default the token is always the
+        // ref (legacy positional form, unchanged for designs that set none).
+        if (c >= items.len) {
+            idx = c;
             continue;
         }
-        const ref_str = items[idx + 3].asAtom() orelse
-            (items[idx + 3].asString() orelse {
-                idx += 4;
+        const first_tok: ?[]const u8 = items[c].asAtom() orelse items[c].asString();
+        var ref_str: []const u8 = undefined;
+        if (self.decouple_defaults.ic.len > 0) {
+            if (first_tok != null and std.mem.eql(u8, first_tok.?, self.decouple_defaults.ic)) {
+                ref_str = first_tok.?;
+                c += 1; // explicit ref consumed
+            } else {
+                ref_str = self.decouple_defaults.ic; // token is a pin; ref defaults in
+            }
+        } else {
+            ref_str = first_tok orelse {
+                idx = c + 1;
                 continue;
-            });
+            };
+            c += 1;
+        }
 
         // Explicit pin list after REF: one cap (×COUNT) per listed pin. Pins
         // are atoms or bare ints; collection stops at the next (comp …) group
@@ -528,7 +553,7 @@ pub fn emitDecoupleItems(
         const pin_func_map = findPinFuncMap(self, instances.items, ref_str);
         var target_pins: std.ArrayListUnmanaged([]const u8) = .empty;
         defer target_pins.deinit(self.allocator);
-        var pin_idx = idx + 4;
+        var pin_idx = c;
         while (pin_idx < items.len) : (pin_idx += 1) {
             if (items[pin_idx].asList() != null) break; // next (comp …) group / (id …)
             const raw = ids.pinId(self, items[pin_idx]) orelse break;
@@ -539,6 +564,11 @@ pub fn emitDecoupleItems(
             log.warn("decouple per-pin requires an explicit pin list (net {s}, ref {s})", .{ net_name, ref_str });
             log.warn("  e.g. (decouple \"{s}\" (comp \"val\") COUNT per-pin {s} PIN1 PIN2 …)", .{ net_name, ref_str });
             return EvalError.InvalidForm;
+        }
+        // A zero count emits no caps; advance past the parsed group and skip.
+        if (count == 0) {
+            idx = pin_idx;
+            continue;
         }
 
         for (target_pins.items) |target_pin| {
@@ -1006,4 +1036,57 @@ test "decouple per-pin with no pins errors" {
     var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
 
     try testing.expectError(error.InvalidForm, emitDecoupleItems(&eval, nodes, "VDD", &env, &instances, &all_pin_nets, "abcd1234", &sidecar));
+}
+
+// spec: eval/design_block - decouple-defaults lets decouple omit its component and host ref
+test "decouple uses default bypass and default ic when both omitted" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    eval.hierarchical_ids = true;
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    try putTestFamily(&eval, alloc, "cap-0201");
+
+    // (decouple-defaults (ic "U1") (bypass (cap-0201 "100nF"))) recorded.
+    const bypass_nodes = try parser_mod.parse(alloc, "(cap-0201 \"100nF\")");
+    eval.decouple_defaults = .{ .ic = "U1", .bypass = bypass_nodes[0] };
+
+    // Component omitted (leading count) and host ref omitted (J14 is a pin).
+    const nodes = try parser_mod.parse(alloc, "1 per-pin J14 K14");
+    var instances: std.ArrayListUnmanaged(Instance) = .empty;
+    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
+
+    try emitDecoupleItems(&eval, nodes, "VDD", &env, &instances, &all_pin_nets, "abcd1234", &sidecar);
+
+    // One cap per pin, from the default bypass; key excludes the host ref so
+    // the id stays stable whether or not the ref was spelled out.
+    try testing.expectEqual(@as(usize, 2), instances.items.len);
+    try testing.expectEqualStrings("100nF@J14#0", instances.items[0].origin_key);
+    try testing.expectEqualStrings("100nF@K14#0", instances.items[1].origin_key);
+    // The per-pin split net embeds the defaulted host ref (cap pin 1 side).
+    try testing.expectEqualStrings("VDD.U1.J14", all_pin_nets.items[0].net);
+}
+
+// spec: eval/design_block - decouple with no defaults keeps its legacy explicit form
+test "decouple without defaults treats the post-per-pin token as the ref" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    try putTestFamily(&eval, alloc, "cap-0201");
+
+    // No decouple-defaults declared: U1 is the explicit ref, 7/8 are pins.
+    const nodes = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin U1 7 8");
+    var instances: std.ArrayListUnmanaged(Instance) = .empty;
+    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
+
+    try emitDecoupleItems(&eval, nodes, "VDD", &env, &instances, &all_pin_nets, "abcd1234", &sidecar);
+
+    try testing.expectEqual(@as(usize, 2), instances.items.len);
+    try testing.expectEqualStrings("100nF@7#0", instances.items[0].origin_key);
+    try testing.expectEqualStrings("VDD.U1.7", all_pin_nets.items[0].net);
 }

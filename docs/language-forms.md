@@ -63,6 +63,7 @@ where each is accepted: **D** = design-block top level,
 | `(section "name" ["subtitle"] form…)` | DSs | Functional subsystem card. Inside `(section …)` nests one level into a sub-section. |
 | `(decouple "NET" item…) | (decouple (cap-0402 "100nF") N per-pin "REF" "NET1" …)` | DSs | Emit decoupling capacitors against a net, in single- or multi-net form. |
 | `(series …)` | DSs | Insert a series element (resistor / ferrite / etc.) between two nets. |
+| `(fanout "COMMON" (comp) "NET1" "NET2" … [(id …)])` | DSs | Place one component from a shared COMMON net to each listed net (star of series elements). |
 | `(net "A" "B" …)` | DSs | Tie one or more nets to a canonical name (net-merge). |
 | `(bus-net "PREFIX" lo hi "SUB") | (bus-net "PREFIX" lo hi (suffixes …) (over …) (ports …))` | DSs | Tie a lane range to a sub-block bus (1:1), or strided-fan-out the range across several sub-blocks' ports. |
 | `(pins "REF" (group "label") pin-form…)` | ·Ss | Group a main-IC's pin assignments under a sub-section. |
@@ -77,4 +78,5 @@ where each is accepted: **D** = design-block top level,
 | `(verifies (req "REF" REQID) [rationale])` | D·· | Mark a requirement as satisfied by a specific instance. |
 | `(test-point …)` | D·· | Declare a measurement / bring-up access point. |
 | `(power-config (derating N))` | D·· | Per-design power-budget configuration knobs. |
+| `(decouple-defaults (ic "REF") (bypass (comp)))` | D·· | Set per-design decouple defaults: a fallback IC ref and bypass cap so (decouple …) can omit both. |
 | `(kicad-pcb "absolute/path/to/board.kicad_pcb")` | D·· | Declare the PCB file the file-based KiCad sync writes board updates to. |

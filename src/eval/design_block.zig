@@ -81,6 +81,14 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     self.hierarchical_ids = saved_hierarchical or hasHierarchicalMarker(args[1..]);
     defer self.hierarchical_ids = saved_hierarchical;
 
+    // Decouple defaults are design-block-local: snapshot and clear so a
+    // parent's (decouple-defaults …) never leaks into a nested sub-block
+    // module's own decouples. A (decouple-defaults …) form inside this body
+    // sets them below; the defer restores the enclosing design's on exit.
+    const saved_decouple_defaults = self.decouple_defaults;
+    self.decouple_defaults = .{};
+    defer self.decouple_defaults = saved_decouple_defaults;
+
     for (args[1..]) |form| {
         const form_children = form.asList() orelse continue;
         if (form_children.len == 0) continue;
@@ -121,7 +129,9 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             },
             .bus_net => try evalBusNetForm(self, form_children, env, &net_ties),
             .series => try instance_mod.evalSeriesForm(self, form_children, env, &instances, &all_pin_nets, &notes),
+            .fanout => try instance_mod.evalFanoutForm(self, form_children, env, &instances, &all_pin_nets),
             .decouple => try evalDecoupleForm(self, form_children, env, &instances, &all_pin_nets),
+            .decouple_defaults => try parseDecoupleDefaults(self, form_children, env),
             .verifies => if (parseVerifies(self, form_children, env)) |v| try verifications.append(self.allocator, v),
             .test_point => if (try test_point_mod.parse(self.allocator, form_children)) |tp| try test_points.append(self.allocator, tp),
             .power_config => if (power_config_mod.parse(form_children)) |cfg| {
@@ -391,6 +401,28 @@ fn numberAsUsize(v: env_mod.Value) ?usize {
     return @intFromFloat(f);
 }
 
+/// Evaluate `(decouple-defaults (ic "REF") (bypass (comp)))` — records the
+/// per-design fallback host ref and bypass component on the evaluator. With
+/// these set, a `(decouple …)` may omit its component (a leading count → use
+/// the bypass) and/or its per-pin host ref (the first post-`per-pin` token,
+/// unless it equals the default ref, is taken as a pin and the ref defaults
+/// in). Both sub-forms are optional and either may appear alone.
+fn parseDecoupleDefaults(self: *Evaluator, form_children: []const Node, env: *Env) EvalError!void {
+    for (form_children[1..]) |child| {
+        const cc = child.asList() orelse continue;
+        if (cc.len < 2) continue;
+        const head = cc[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "ic")) {
+            const v = try self.evalNode(cc[1], env);
+            if (v.asString()) |s| self.decouple_defaults.ic = s;
+        } else if (std.mem.eql(u8, head, "bypass")) {
+            // Store the component node verbatim; emitDecoupleItems evals it
+            // in the decoupling site's env when a (decouple …) omits its own.
+            self.decouple_defaults.bypass = cc[1];
+        }
+    }
+}
+
 /// Evaluate a top-level (decouple ...) form.
 fn evalDecoupleForm(
     self: *Evaluator,
@@ -612,13 +644,19 @@ fn evalSection(
                 try instance_mod.evalSeriesForm(self, sf_children, env, instances, all_pin_nets, notes);
                 for (instances.items[pre_s..]) |new_inst| try sec_instances.append(self.allocator, new_inst);
             },
+            .fanout => {
+                const pre_f = instances.items.len;
+                try instance_mod.evalFanoutForm(self, sf_children, env, instances, all_pin_nets);
+                for (instances.items[pre_f..]) |new_inst| try sec_instances.append(self.allocator, new_inst);
+            },
             .net => try evalNetForm(self, sf_children, env, net_ties),
             .bus_net => try evalBusNetForm(self, sf_children, env, net_ties),
             .section => try evalSubSection(self, sf_children, env, instances, all_pin_nets, notes, net_ties, &sec_instances, &sec_sub_sections),
             // Shared-form variants are consumed above by
             // `processSharedSectionForm`; top-level-only forms are
             // silently ignored inside a section body.
-            .status, .description, .note, .port, .protocol, .calc, .group, .sub_block, .verifies, .test_point, .power_config, .kicad_pcb => {},
+            .status, .description, .note, .port, .protocol, .calc => {},
+            .group, .sub_block, .verifies, .test_point, .power_config, .decouple_defaults, .kicad_pcb => {},
         }
     }
 
@@ -808,6 +846,14 @@ fn evalSubSection(
                 const pre_s = instances.items.len;
                 try instance_mod.evalSeriesForm(self, ssf_children, env, instances, all_pin_nets, notes);
                 for (instances.items[pre_s..]) |new_inst| {
+                    try sec_instances.append(self.allocator, new_inst);
+                    try sub_instances.append(self.allocator, new_inst);
+                }
+            },
+            .fanout => {
+                const pre_f = instances.items.len;
+                try instance_mod.evalFanoutForm(self, ssf_children, env, instances, all_pin_nets);
+                for (instances.items[pre_f..]) |new_inst| {
                     try sec_instances.append(self.allocator, new_inst);
                     try sub_instances.append(self.allocator, new_inst);
                 }
