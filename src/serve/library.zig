@@ -31,16 +31,24 @@ pub const LibraryRow = struct {
     manufacturer: ?[]const u8 = null,
     mpn: ?[]const u8 = null,
     pin_count: ?usize = null,
+    requirements: []const []const u8 = &.{},
 
     pub const Kind = enum { family, component, pinout, footprint };
 };
 
+const RowWithMtime = struct {
+    row: LibraryRow,
+    mtime: i128,
+    fn newerFirst(_: void, a: RowWithMtime, b: RowWithMtime) bool {
+        return a.mtime > b.mtime;
+    }
+};
+
 /// Walk `lib/components/`, `lib/pinouts/`, `lib/footprints/` and return
-/// a flat slice of `LibraryRow`s ready to feed the `library.zt` template.
-/// Components come first; standalone pinouts and footprints (not referenced
-/// by any component) come last. Strings are allocator-owned.
+/// a flat slice of `LibraryRow`s sorted newest-first by mtime, ready to
+/// feed the `library.zt` template. Strings are allocator-owned.
 fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerError![]LibraryRow {
-    var rows: std.ArrayListUnmanaged(LibraryRow) = .empty;
+    var buf: std.ArrayListUnmanaged(RowWithMtime) = .empty;
     var referenced_pinouts = std.StringHashMap(void).init(allocator);
     var referenced_footprints = std.StringHashMap(void).init(allocator);
     const model_cfg = export_kicad.loadModelConfig(allocator, project_dir);
@@ -56,6 +64,7 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".sexp")) continue;
             const base = try allocator.dupe(u8, entry.name[0 .. entry.name.len - SEXP_EXT_LEN]);
             const content = dir.readFileAlloc(allocator, entry.name, MAX_LIB_FILE_BYTES) catch continue;
+            const mtime = if (dir.statFile(entry.name)) |s| s.mtime else |_| 0;
 
             const description = extractField(content, "description");
             const footprint = extractField(content, "footprint");
@@ -74,16 +83,20 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
                 break :blk footprint_mod.findModelFile(allocator, project_dir, fp, fp) != null;
             } else false;
 
-            try rows.append(allocator, .{
-                .name = base,
-                .kind = if (is_family) .family else .component,
-                .search_text = try buildSearchText(allocator, base, description, footprint, pinout, manufacturer, mpn),
-                .description = description,
-                .footprint = footprint,
-                .has_3d_model = has_model,
-                .pinout = pinout,
-                .manufacturer = manufacturer,
-                .mpn = mpn,
+            try buf.append(allocator, .{
+                .mtime = mtime,
+                .row = .{
+                    .name = base,
+                    .kind = if (is_family) .family else .component,
+                    .search_text = try buildSearchText(allocator, base, description, footprint, pinout, manufacturer, mpn),
+                    .description = description,
+                    .footprint = footprint,
+                    .has_3d_model = has_model,
+                    .pinout = pinout,
+                    .manufacturer = manufacturer,
+                    .mpn = mpn,
+                    .requirements = try extractRequirements(allocator, content),
+                },
             });
         }
     } else |_| {}
@@ -101,17 +114,21 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
             if (referenced_pinouts.contains(lname_local)) continue;
             const lname = try allocator.dupe(u8, lname_local);
             const content = dir.readFileAlloc(allocator, entry.name, MAX_LIB_FILE_BYTES) catch continue;
+            const mtime = if (dir.statFile(entry.name)) |s| s.mtime else |_| 0;
             var pin_count: usize = 0;
             var pos: usize = 0;
             while (std.mem.indexOfPos(u8, content, pos, "(pin ")) |idx| {
                 pin_count += 1;
                 pos = idx + PIN_FORM_LEN;
             }
-            try rows.append(allocator, .{
-                .name = lname,
-                .kind = .pinout,
-                .search_text = try std.fmt.allocPrint(allocator, "{s} pinout", .{lname}),
-                .pin_count = pin_count,
+            try buf.append(allocator, .{
+                .mtime = mtime,
+                .row = .{
+                    .name = lname,
+                    .kind = .pinout,
+                    .search_text = try std.fmt.allocPrint(allocator, "{s} pinout", .{lname}),
+                    .pin_count = pin_count,
+                },
             });
         }
     } else |_| {}
@@ -128,14 +145,22 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
             const fname_local = entry.name[0 .. entry.name.len - SEXP_EXT_LEN];
             if (referenced_footprints.contains(fname_local)) continue;
             const fname = try allocator.dupe(u8, fname_local);
-            try rows.append(allocator, .{
-                .name = fname,
-                .kind = .footprint,
-                .search_text = try std.fmt.allocPrint(allocator, "{s} footprint", .{fname}),
+            const mtime = if (dir.statFile(entry.name)) |s| s.mtime else |_| 0;
+            try buf.append(allocator, .{
+                .mtime = mtime,
+                .row = .{
+                    .name = fname,
+                    .kind = .footprint,
+                    .search_text = try std.fmt.allocPrint(allocator, "{s} footprint", .{fname}),
+                },
             });
         }
     } else |_| {}
 
+    std.sort.heap(RowWithMtime, buf.items, {}, RowWithMtime.newerFirst);
+
+    var rows: std.ArrayListUnmanaged(LibraryRow) = .empty;
+    for (buf.items) |wm| try rows.append(allocator, wm.row);
     return rows.toOwnedSlice(allocator);
 }
 
@@ -169,6 +194,35 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handl
     try library_template.Library.render(.{rows}, &aw.writer);
     res.body = aw.written();
     res.content_type = .HTML;
+}
+
+/// Scan `content` for `(requirement "...")` forms and return a slice of the
+/// quoted text strings (slices into `content` — no allocation per string).
+fn extractRequirements(allocator: std.mem.Allocator, content: []const u8) ![]const []const u8 {
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    const needle = "(requirement ";
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, content, pos, needle)) |idx| {
+        pos = idx + needle.len;
+        if (pos >= content.len or content[pos] != '"') continue;
+        pos += 1; // skip opening quote
+        const end = findClosingQuote(content, pos) orelse break;
+        try list.append(allocator, content[pos..end]);
+        pos = end + 1;
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+fn findClosingQuote(content: []const u8, start: usize) ?usize {
+    var i = start;
+    while (i < content.len) : (i += 1) {
+        if (content[i] == '\\') {
+            i += 1;
+            continue;
+        }
+        if (content[i] == '"') return i;
+    }
+    return null;
 }
 
 /// Extract a field value from sexp content, e.g. (footprint abc) -> "abc" or (description "foo bar") -> "foo bar"

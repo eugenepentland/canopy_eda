@@ -30,4 +30,22 @@ td { font-family: monospace; font-size: 0.9rem; }
 .pagination button:hover:not(:disabled) { border-color: #58a6ff; color: #58a6ff; }
 .pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
 .pagination .page-info { color: #888; font-size: 0.85rem; font-family: monospace; min-width: 8rem; text-align: center; }
+.comp-name.has-reqs { cursor:pointer; user-select:none; }
+.comp-name.has-reqs::after { content:" ›"; color:#555; font-size:0.8rem; }
+.comp-row.open .comp-name.has-reqs::after { content:" ‹"; color:#4a9eff; }
+.req-panel { display:none; }
+.req-panel td { background:#0d1117; border-top:none; padding:0.25rem 1rem 1rem; }
+.req-card-header { color:#888; font-size:0.78rem; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; margin:0.5rem 0 0.7rem; }
+.req-cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:0.6rem; }
+.req-item { background:#161b22; border:1px solid #21262d; border-left:3px solid #4a9eff; border-radius:6px; padding:0.6rem 0.8rem; font-size:0.85rem; color:#c9d1d9; font-family:system-ui,sans-serif; line-height:1.45; }
+#page-drop-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.75); z-index:1000; align-items:center; justify-content:center; }
+#page-drop-overlay.active { display:flex; }
+#page-drop-inner { border:3px dashed #4a9eff; border-radius:16px; padding:4rem 6rem; text-align:center; color:#4a9eff; pointer-events:none; }
+#page-drop-inner svg { display:block; margin:0 auto 1.5rem; opacity:0.8; }
+#page-drop-inner p { margin:0; font-size:1.4rem; font-weight:600; }
+#upload-toast { display:none; position:fixed; bottom:2rem; left:50%; transform:translateX(-50%); min-width:20rem; max-width:42rem; padding:0.9rem 1.4rem; border-radius:8px; font-family:monospace; font-size:0.9rem; white-space:pre-wrap; z-index:1001; box-shadow:0 4px 20px rgba(0,0,0,0.6); }
+#upload-toast.show { display:block; }
+#upload-toast.ok { background:#1a2e1a; border:1px solid #3fb950; color:#3fb950; }
+#upload-toast.err { background:#2e1a1a; border:1px solid #f85149; color:#f85149; }
+#upload-toast.pending { background:#1a1a2e; border:1px solid #4a9eff; color:#4a9eff; }
 </style></head><body>
