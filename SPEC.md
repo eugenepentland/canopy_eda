@@ -391,6 +391,7 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - buildCanopyNetValue lists a passive's pads in numeric order joined by ' / ' and returns null when the passive has no connected pads
 - sectionForRef attributes a sub-block part to its sub-block name and a top-level part to its declared section, else ""
 - boxCols returns a roughly-square (ceil-sqrt) column count for a staging box of N parts
+- buildStagingLayout gives each part a fixed staging seat from the whole design, independent of push composition
 
 ## serve/vfs
 

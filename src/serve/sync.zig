@@ -718,6 +718,9 @@ pub fn runSyncPlan(
         if (sec.name.len == 0) continue;
         for (sec.instances) |si| try ref_to_section.put(si.ref_des, sec.name);
     }
+    // Fixed staging seats for every part, computed once from the full roster so
+    // a part's staging coordinate doesn't shift with the push's composition.
+    const staging_layout = try buildStagingLayout(arena, instances.items, &ref_to_section);
     var pending_adds: std.ArrayListUnmanaged(PendingAdd) = .empty;
 
     var by_uuid = std.StringHashMap(BoardFp).init(arena);
@@ -795,6 +798,7 @@ pub fn runSyncPlan(
         .pad_full_net = &pad_full_net,
         .net_hub_pins = &net_hub_pins,
         .ref_to_section = &ref_to_section,
+        .staging_layout = &staging_layout,
         .pending_adds = &pending_adds,
         .net_pad_count = &net_pad_count,
         .matched_uuids = &matched_uuids,
@@ -1081,6 +1085,60 @@ const PendingAdd = struct {
     section: []const u8,
 };
 
+/// A part's fixed seat in the staging grid: `gi` is its section's cell index
+/// (sorted-section order, wrapped at STAGE_SECTIONS_PER_ROW), `slot` is the
+/// part's index inside that section's box (sorted-ref order).
+const StagingSlot = struct { gi: usize, slot: usize };
+
+/// Diff-independent staging plan built from the *whole* design roster, so a
+/// part's staging coordinate is a function of its identity, not of which other
+/// parts happen to share the current push. Without this, each push sized and
+/// flow-packed boxes from only the parts being added that run, so a smaller
+/// follow-up push drew differently-sized boxes from the same origin — landing
+/// on top of the still-unplaced boxes from the previous push. `max_n` (the
+/// largest section's part count across the design) drives a uniform box size.
+const StagingLayout = struct {
+    by_ref: std.StringHashMap(StagingSlot),
+    max_n: usize,
+};
+
+/// Assign every design part a fixed staging seat. Groups the full flattened
+/// roster by the same section key `emitStagedAdds` uses (`sectionForRef`, with
+/// "" → "(unsectioned)"), sorts sections and the refs within each, and records
+/// each ref's cell + slot. Pure function of the design — identical across runs
+/// and independent of the board diff.
+fn buildStagingLayout(
+    arena: std.mem.Allocator,
+    insts: []const export_kicad.FlatInstance,
+    ref_to_section: *std.StringHashMap([]const u8),
+) !StagingLayout {
+    var buckets = std.StringHashMap(std.ArrayListUnmanaged([]const u8)).init(arena);
+    var order: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (insts) |inst| {
+        const raw = sectionForRef(inst.ref_des, ref_to_section);
+        const key = if (raw.len > 0) raw else "(unsectioned)";
+        const e = try buckets.getOrPut(key);
+        if (!e.found_existing) {
+            e.value_ptr.* = .empty;
+            try order.append(arena, key);
+        }
+        try e.value_ptr.append(arena, inst.ref_des);
+    }
+    std.mem.sort([]const u8, order.items, {}, lessThanStr);
+
+    var by_ref = std.StringHashMap(StagingSlot).init(arena);
+    var max_n: usize = 0;
+    for (order.items, 0..) |sec, gi| {
+        const refs = buckets.get(sec) orelse continue;
+        std.mem.sort([]const u8, refs.items, {}, lessThanStr);
+        if (refs.items.len > max_n) max_n = refs.items.len;
+        for (refs.items, 0..) |ref, slot| {
+            try by_ref.put(ref, .{ .gi = gi, .slot = slot });
+        }
+    }
+    return .{ .by_ref = by_ref, .max_n = max_n };
+}
+
 const DiffContext = struct {
     by_uuid: *std.StringHashMap(BoardFp),
     by_ref: *std.StringHashMap(BoardFp),
@@ -1118,6 +1176,9 @@ const DiffContext = struct {
     /// from the design block's top-level sections (whose `.instances` already
     /// include nested sub-section + decouple/series children).
     ref_to_section: *std.StringHashMap([]const u8),
+    /// Diff-independent staging seats for every design part, so `emitStagedAdds`
+    /// places a new part at the same coordinate on every push. See StagingLayout.
+    staging_layout: *const StagingLayout,
     /// Newly-added instances, buffered during the diff walk so the staging
     /// pass can lay them out grouped by section (positions + section boxes)
     /// after every match has been resolved. See `emitStagedAdds`.
@@ -2001,10 +2062,13 @@ fn groupAddsBySection(
 
 /// Lay buffered `add`s out as per-section clusters in a staging area and
 /// emit them: one positioned `add` op per part plus a `create_board_item`
-/// box rect + text label per section. Section order is sorted for a layout
-/// stable across re-runs. Only buffered (newly-added) parts are placed;
-/// existing footprints are never moved. Parts with no footprint source are
-/// skipped, and a section whose parts are all skipped draws no (empty) box.
+/// box rect + text label per section. Positions come from the diff-independent
+/// `staging_layout` (built from the whole design), so a part lands at the same
+/// coordinate on every push — a smaller follow-up push reuses the same cells
+/// and box size instead of re-flowing fresh boxes over the previous push's.
+/// Only buffered (newly-added) parts are placed; existing footprints are never
+/// moved. Parts with no footprint source are skipped, and a section whose parts
+/// are all skipped draws no (empty) box.
 fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
     const arena = d.spc.arena;
     const adds = d.pending_adds.items;
@@ -2014,47 +2078,41 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
     var order: std.ArrayListUnmanaged([]const u8) = .empty;
     try groupAddsBySection(arena, adds, &buckets, &order);
 
-    // Uniform box size: size every section box to the largest section so the
-    // staging area reads as a clean, regular grid. Oversized boxes for small
-    // sections are fine — uniformity beats tight packing here.
-    var max_n: usize = 0;
-    for (order.items) |sec| {
-        const n = (buckets.get(sec) orelse continue).items.len;
-        if (n > max_n) max_n = n;
-    }
-    const ucols = boxCols(max_n);
-    const urows = (max_n + ucols - 1) / ucols;
+    // Uniform box size from the largest section across the *whole design* (not
+    // just this push), so the box dimensions are identical on every sync.
+    const ucols = boxCols(d.staging_layout.max_n);
+    const urows = (d.staging_layout.max_n + ucols - 1) / ucols;
     const box_w = 2 * STAGE_BOX_PAD_MM + @as(f64, @floatFromInt(ucols)) * STAGE_PART_PITCH_MM;
     const box_h = STAGE_LABEL_H_MM + 2 * STAGE_BOX_PAD_MM + @as(f64, @floatFromInt(urows)) * STAGE_PART_PITCH_MM;
+    const pitch_x = box_w + STAGE_BOX_GAP_X_MM;
+    const pitch_y = box_h + STAGE_BOX_GAP_Y_MM;
 
-    // Flow uniform boxes left-to-right, wrapping after STAGE_SECTIONS_PER_ROW.
-    var cur_x: f64 = STAGE_ORIGIN_X_MM;
-    var row_top: f64 = STAGE_ORIGIN_Y_MM;
-    var in_row: usize = 0;
     for (order.items) |sec| {
         const idxs = (buckets.get(sec) orelse continue).items;
-        if (in_row == STAGE_SECTIONS_PER_ROW) {
-            cur_x = STAGE_ORIGIN_X_MM;
-            row_top += box_h + STAGE_BOX_GAP_Y_MM;
-            in_row = 0;
-        }
+        if (idxs.len == 0) continue;
+        // Each section owns a fixed grid cell (`gi`), shared by all its parts.
+        const gi = (d.staging_layout.by_ref.get(adds[idxs[0]].inst.ref_des) orelse StagingSlot{ .gi = 0, .slot = 0 }).gi;
+        const cell_x = STAGE_ORIGIN_X_MM + @as(f64, @floatFromInt(gi % STAGE_SECTIONS_PER_ROW)) * pitch_x;
+        const cell_y = STAGE_ORIGIN_Y_MM + @as(f64, @floatFromInt(gi / STAGE_SECTIONS_PER_ROW)) * pitch_y;
+
         var emitted: usize = 0;
-        for (idxs, 0..) |idx, j| {
+        for (idxs) |idx| {
             const pa = adds[idx];
             const kmod = loadKicadMod(d.spc, pa.fp_name, pa.inst.component) orelse continue;
             const fp_def = loadFootprintDefForInstance(d.spc, pa.fp_name, pa.inst, pa.canopy_net, pa.section);
-            const col: f64 = @floatFromInt(j % ucols);
-            const row: f64 = @floatFromInt(j / ucols);
-            const px = cur_x + STAGE_BOX_PAD_MM + (col + STAGE_HALF) * STAGE_PART_PITCH_MM;
-            const py = row_top + STAGE_LABEL_H_MM + STAGE_BOX_PAD_MM + (row + STAGE_HALF) * STAGE_PART_PITCH_MM;
+            const slot = (d.staging_layout.by_ref.get(pa.inst.ref_des) orelse StagingSlot{ .gi = 0, .slot = 0 }).slot;
+            const col: f64 = @floatFromInt(slot % ucols);
+            const row: f64 = @floatFromInt(slot / ucols);
+            const px = cell_x + STAGE_BOX_PAD_MM + (col + STAGE_HALF) * STAGE_PART_PITCH_MM;
+            const py = cell_y + STAGE_LABEL_H_MM + STAGE_BOX_PAD_MM + (row + STAGE_HALF) * STAGE_PART_PITCH_MM;
             try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, mmToNm(px), mmToNm(py), pa.canopy_net, pa.section);
             d.summary.added += 1;
             emitted += 1;
         }
         if (emitted > 0) {
             const items = [_][]const u8{
-                try boardRectItem(arena, cur_x, row_top, cur_x + box_w, row_top + box_h),
-                try boardLabelItem(arena, cur_x + box_w * STAGE_HALF, row_top + STAGE_LABEL_H_MM * STAGE_HALF, sec),
+                try boardRectItem(arena, cell_x, cell_y, cell_x + box_w, cell_y + box_h),
+                try boardLabelItem(arena, cell_x + box_w * STAGE_HALF, cell_y + STAGE_LABEL_H_MM * STAGE_HALF, sec),
             };
             for (items) |item_json| {
                 if (!first.*) try w.*.writeAll(",");
@@ -2064,8 +2122,6 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
                 try w.*.writeAll("}");
             }
         }
-        cur_x += box_w + STAGE_BOX_GAP_X_MM;
-        in_row += 1;
     }
 }
 
@@ -2465,4 +2521,42 @@ test "boxCols returns a roughly-square column count" {
     try std.testing.expectEqual(@as(usize, 3), boxCols(5));
     try std.testing.expectEqual(@as(usize, 3), boxCols(9));
     try std.testing.expectEqual(@as(usize, 4), boxCols(16));
+}
+
+test "buildStagingLayout seats each part by identity, independent of roster order" {
+    // spec: serve/sync - buildStagingLayout gives each part a fixed staging seat from the whole design, independent of push composition
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+
+    var ref_to_section = std.StringHashMap([]const u8).init(arena);
+    try ref_to_section.put("C1", "Alpha");
+    try ref_to_section.put("C2", "Alpha");
+    try ref_to_section.put("R1", "Beta");
+
+    const mk = struct {
+        fn i(ref: []const u8) export_kicad.FlatInstance {
+            return .{ .ref_des = ref, .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" };
+        }
+    }.i;
+
+    // "Alpha" sorts before "Beta" → cells 0 and 1; refs sort within each section.
+    const roster_a = [_]export_kicad.FlatInstance{ mk("C1"), mk("C2"), mk("R1") };
+    const la = try buildStagingLayout(arena, &roster_a, &ref_to_section);
+    try std.testing.expectEqual(@as(usize, 0), la.by_ref.get("C1").?.gi);
+    try std.testing.expectEqual(@as(usize, 0), la.by_ref.get("C1").?.slot);
+    try std.testing.expectEqual(@as(usize, 0), la.by_ref.get("C2").?.gi);
+    try std.testing.expectEqual(@as(usize, 1), la.by_ref.get("C2").?.slot);
+    try std.testing.expectEqual(@as(usize, 1), la.by_ref.get("R1").?.gi);
+    try std.testing.expectEqual(@as(usize, 0), la.by_ref.get("R1").?.slot);
+    try std.testing.expectEqual(@as(usize, 2), la.max_n); // Alpha (2 parts) is the largest
+
+    // A different push (reversed order, and whether or not R1 is present) yields
+    // the same seats — placement is a function of identity, not push composition.
+    const roster_b = [_]export_kicad.FlatInstance{ mk("C2"), mk("C1") };
+    const lb = try buildStagingLayout(arena, &roster_b, &ref_to_section);
+    try std.testing.expectEqual(la.by_ref.get("C1").?.gi, lb.by_ref.get("C1").?.gi);
+    try std.testing.expectEqual(la.by_ref.get("C1").?.slot, lb.by_ref.get("C1").?.slot);
+    try std.testing.expectEqual(la.by_ref.get("C2").?.gi, lb.by_ref.get("C2").?.gi);
+    try std.testing.expectEqual(la.by_ref.get("C2").?.slot, lb.by_ref.get("C2").?.slot);
 }
