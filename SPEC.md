@@ -62,6 +62,9 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - swap_footprint accepts a legacy (module …) kmod
 - add drops legacy (angle …) arcs the modern board parser rejects
 - preserves pcbnew-style boards: in-element net forms
+- add places the new footprint at the op's staging (x, y) and bakes canopy_net / canopy_section properties
+- create_board_item writes a section staging box as a (gr_rect …) on Dwgs.User
+- create_board_item writes a section label as a (gr_text …) on Dwgs.User
 
 ## eval/builtins
 
@@ -378,6 +381,11 @@ Public functions: runSyncPlan, syncKicadPcbApi, syncPlanApi
 - pickByUuidOrRef returns null when neither tier matches
 - pickByKicadUuid adopts an orphan whose KiCad uuid equals the instance's canopy_uuid
 - pickByKicadUuid refuses an fp another instance already claimed in this walk
+- isPassiveRef classifies R/C/L/F/D ref-des prefixes as passive spokes and everything else as a hub
+- buildCanopyNetValue renders each passive pad as destRef.destPin.net for a single hub pin, else the bare net name
+- buildCanopyNetValue lists a passive's pads in numeric order joined by ' / ' and returns null when the passive has no connected pads
+- sectionForRef attributes a sub-block part to its sub-block name and a top-level part to its declared section, else ""
+- boxCols returns a roughly-square (ceil-sqrt) column count for a staging box of N parts
 
 ## serve/vfs
 

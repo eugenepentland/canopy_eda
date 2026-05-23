@@ -341,9 +341,11 @@ func applyOp(kc kicad.Client, op eda.Op) error {
 	case "set_pad_net":
 		return kc.SetPadNet(op.UUID, op.Pad, op.Net)
 	case "add":
-		return kc.AddFootprint(op.FootprintDef, op.KicadMod, op.FootprintName, op.UUID, op.Ref, op.Value, op.PadNets)
+		return kc.AddFootprint(op.FootprintDef, op.KicadMod, op.FootprintName, op.UUID, op.Ref, op.Value, op.PadNets, op.X, op.Y)
 	case "swap_footprint":
 		return kc.SwapFootprint(op.UUID, op.FootprintDef, op.KicadMod, op.NewFootprintName, op.PadNets)
+	case "create_board_item":
+		return kc.CreateBoardItem(op.Item)
 	case "remove":
 		return kc.Remove(op.UUID)
 	case "set_locked":

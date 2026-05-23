@@ -32,6 +32,18 @@ const FORM_LOCKED = "locked";
 const FORM_NET = "net";
 const FORM_PAD = "pad";
 
+// Section-staging board-graphic conversion (proto nm → .kicad_pcb mm).
+const NM_PER_MM: f64 = 1_000_000.0;
+const DEFAULT_STROKE_MM: f64 = 0.15;
+const DEFAULT_TEXT_SIZE_MM: f64 = 2.0;
+const TEXT_THICKNESS_RATIO: f64 = 0.15;
+// UUID 8-4-4-4-12 hex-segment boundaries within the 32-char digest.
+const UUID_SEG_A = 8;
+const UUID_SEG_B = 12;
+const UUID_SEG_C = 16;
+const UUID_SEG_D = 20;
+const UUID_HEX_LEN = 32;
+
 pub const WriteError = error{ InvalidPcbRoot, InvalidOps, InvalidAdd } ||
     std.mem.Allocator.Error ||
     parser.ParseError ||
@@ -65,6 +77,8 @@ pub const ApplyStats = struct {
     fields_set: u32 = 0,
     pad_nets_set: u32 = 0,
     locked_changed: u32 = 0,
+    /// Standalone board graphics written (section staging boxes + labels).
+    board_items: u32 = 0,
 };
 
 /// Same as `applyOpsToSource` but also returns per-category counts.
@@ -133,6 +147,7 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
     var mutated_fp = std.AutoHashMap(usize, Node).init(arena);
     var removed_fp_indices = std.AutoHashMap(usize, void).init(arena);
     var extra_footprints: std.ArrayListUnmanaged(Node) = .empty;
+    var extra_graphics: std.ArrayListUnmanaged(Node) = .empty;
     var extra_nets: std.ArrayListUnmanaged(Node) = .empty;
     const had_top_level_nets = max_net_id >= 0;
 
@@ -165,6 +180,19 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
             try extra_footprints.append(arena, new_fp);
             try existing_canopy_uuids.put(target, {});
             stats.added += 1;
+            continue;
+        }
+
+        if (std.mem.eql(u8, op_name, "create_board_item")) {
+            // Standalone board graphic (section staging box / label). The
+            // `item` is the proto-canonical JSON the IPC agent feeds to KiCad;
+            // here we translate it into a top-level `(gr_rect …)` / `(gr_text …)`.
+            const item_v = op_obj.get("item") orelse continue;
+            if (item_v != .object) continue;
+            if (try buildBoardGraphic(arena, item_v.object)) |node| {
+                try extra_graphics.append(arena, node);
+                stats.board_items += 1;
+            }
             continue;
         }
 
@@ -258,6 +286,8 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
     // a header-only file would land them at the wrong position (before
     // (version …)) and break the parse.
     for (extra_footprints.items) |fp| try new_children.append(arena, fp);
+    // Section staging boxes / labels (Dwgs.User graphics) go last.
+    for (extra_graphics.items) |g| try new_children.append(arena, g);
 
     return Node.list(Span.zero, try new_children.toOwnedSlice(arena));
 }
@@ -272,6 +302,126 @@ fn jsonStr(v: ?std.json.Value) []const u8 {
 fn jsonBool(v: ?std.json.Value) bool {
     const val = v orelse return false;
     return val == .bool and val.bool;
+}
+
+/// Read a JSON number (proto nanometre value) as f64; missing/non-number → 0.
+fn jsonNumNm(v: ?std.json.Value) f64 {
+    const val = v orelse return 0;
+    return switch (val) {
+        .integer => |i| @floatFromInt(i),
+        .float => |f| f,
+        else => 0,
+    };
+}
+
+const Vec2Mm = struct { x: f64, y: f64 };
+
+/// A proto Vector2 ({xNm,yNm}) converted to mm. proto omits zero fields, so
+/// a missing component reads as 0.
+fn jsonVec2Mm(v: ?std.json.Value) ?Vec2Mm {
+    const val = v orelse return null;
+    if (val != .object) return null;
+    return .{
+        .x = jsonNumNm(val.object.get("xNm")) / NM_PER_MM,
+        .y = jsonNumNm(val.object.get("yNm")) / NM_PER_MM,
+    };
+}
+
+/// Map a proto BoardLayer enum string (e.g. "BL_Dwgs_User") to the
+/// `.kicad_pcb` canonical layer name. Section staging graphics only ever
+/// use Dwgs.User; the others are here for completeness.
+fn protoLayerToKicad(proto: []const u8) []const u8 {
+    if (std.mem.eql(u8, proto, "BL_Cmts_User")) return "Cmts.User";
+    if (std.mem.eql(u8, proto, "BL_F_SilkS")) return "F.SilkS";
+    if (std.mem.eql(u8, proto, "BL_B_SilkS")) return "B.SilkS";
+    return "Dwgs.User";
+}
+
+/// Stroke width (mm) from a proto shape's attributes.stroke.width.valueNm,
+/// defaulting to 0.15 mm. Flat to stay under the nesting cap.
+fn jsonStrokeWidthMm(shape: std.json.ObjectMap) f64 {
+    const a = shape.get("attributes") orelse return DEFAULT_STROKE_MM;
+    if (a != .object) return DEFAULT_STROKE_MM;
+    const s = a.object.get("stroke") orelse return DEFAULT_STROKE_MM;
+    if (s != .object) return DEFAULT_STROKE_MM;
+    const wv = s.object.get("width") orelse return DEFAULT_STROKE_MM;
+    if (wv != .object) return DEFAULT_STROKE_MM;
+    const nm = jsonNumNm(wv.object.get("valueNm"));
+    return if (nm > 0) nm / NM_PER_MM else DEFAULT_STROKE_MM;
+}
+
+/// Text size (mm) from a proto text's attributes.size.xNm, default 2.0 mm.
+fn jsonTextSizeMm(text_obj: std.json.ObjectMap) f64 {
+    const a = text_obj.get("attributes") orelse return DEFAULT_TEXT_SIZE_MM;
+    if (a != .object) return DEFAULT_TEXT_SIZE_MM;
+    const sz = jsonVec2Mm(a.object.get("size")) orelse return DEFAULT_TEXT_SIZE_MM;
+    return if (sz.x > 0) sz.x else DEFAULT_TEXT_SIZE_MM;
+}
+
+/// Derive a stable UUID (8-4-4-4-12) from a seed string so re-emitting the
+/// same graphic is deterministic.
+fn boardItemUuid(arena: std.mem.Allocator, seed: []const u8) ![]const u8 {
+    var h: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(seed, &h, .{});
+    const hex = std.fmt.bytesToHex(h[0 .. UUID_HEX_LEN / 2].*, .lower);
+    return std.fmt.allocPrint(arena, "{s}-{s}-{s}-{s}-{s}", .{
+        hex[0..UUID_SEG_A],
+        hex[UUID_SEG_A..UUID_SEG_B],
+        hex[UUID_SEG_B..UUID_SEG_C],
+        hex[UUID_SEG_C..UUID_SEG_D],
+        hex[UUID_SEG_D..UUID_HEX_LEN],
+    });
+}
+
+/// A `(gr_rect …)` node from the proto rectangle. Built as text + reparsed.
+fn buildGrRect(arena: std.mem.Allocator, shape: std.json.ObjectMap, layer: []const u8) WriteError!?Node {
+    const rect_v = shape.get("rectangle") orelse return null;
+    if (rect_v != .object) return null;
+    const tl = jsonVec2Mm(rect_v.object.get("topLeft")) orelse return null;
+    const br = jsonVec2Mm(rect_v.object.get("bottomRight")) orelse return null;
+    const stroke_mm = jsonStrokeWidthMm(shape);
+    const seed = try std.fmt.allocPrint(arena, "rect:{d}:{d}:{d}:{d}", .{ tl.x, tl.y, br.x, br.y });
+    const text = try std.fmt.allocPrint(
+        arena,
+        "(gr_rect (start {d} {d}) (end {d} {d}) (stroke (width {d}) (type default)) (fill no) (layer \"{s}\") (uuid \"{s}\"))",
+        .{ tl.x, tl.y, br.x, br.y, stroke_mm, layer, try boardItemUuid(arena, seed) },
+    );
+    const nodes = try parser.parse(arena, text);
+    return if (nodes.len == 0) null else nodes[0];
+}
+
+/// A `(gr_text …)` node from the proto BoardText. Built as text + reparsed.
+fn buildGrText(arena: std.mem.Allocator, text_obj: std.json.ObjectMap, layer: []const u8) WriteError!?Node {
+    const pos = jsonVec2Mm(text_obj.get("position")) orelse return null;
+    const label = jsonStr(text_obj.get("text"));
+    if (label.len == 0) return null;
+    const size_mm = jsonTextSizeMm(text_obj);
+    const seed = try std.fmt.allocPrint(arena, "text:{s}:{d}:{d}", .{ label, pos.x, pos.y });
+    const text = try std.fmt.allocPrint(
+        arena,
+        "(gr_text \"{s}\" (at {d} {d} 0) (layer \"{s}\") (uuid \"{s}\") (effects (font (size {d} {d}) (thickness {d}))))",
+        .{ label, pos.x, pos.y, layer, try boardItemUuid(arena, seed), size_mm, size_mm, size_mm * TEXT_THICKNESS_RATIO },
+    );
+    const nodes = try parser.parse(arena, text);
+    return if (nodes.len == 0) null else nodes[0];
+}
+
+/// Translate a `create_board_item` proto object into a top-level
+/// `(gr_rect …)` / `(gr_text …)` node. Returns null for shapes not drawn on disk.
+fn buildBoardGraphic(arena: std.mem.Allocator, item: std.json.ObjectMap) WriteError!?Node {
+    const type_url = jsonStr(item.get("@type"));
+    const layer = protoLayerToKicad(jsonStr(item.get("layer")));
+    if (std.mem.endsWith(u8, type_url, "BoardGraphicShape")) {
+        const shape_v = item.get("shape") orelse return null;
+        if (shape_v != .object) return null;
+        return buildGrRect(arena, shape_v.object, layer);
+    }
+    if (std.mem.endsWith(u8, type_url, "BoardText")) {
+        const text_v = item.get("text") orelse return null;
+        if (text_v != .object) return null;
+        return buildGrText(arena, text_v.object, layer);
+    }
+    return null;
 }
 
 fn footprintKicadUuid(fp: Node) ?[]const u8 {
@@ -728,6 +878,12 @@ fn buildAddFootprint(
     const ref = jsonStr(op_obj.get("ref"));
     const value = jsonStr(op_obj.get("value"));
     const canopy_uuid = jsonStr(op_obj.get("uuid"));
+    const canopy_net = jsonStr(op_obj.get("canopy_net"));
+    const canopy_section = jsonStr(op_obj.get("canopy_section"));
+    // Staging position (board nm → mm). Absent / zero leaves the part at
+    // the origin (legacy behaviour), so the user just drags it in.
+    const x_mm = jsonNumNm(op_obj.get("x")) / NM_PER_MM;
+    const y_mm = jsonNumNm(op_obj.get("y")) / NM_PER_MM;
     if (lib_id.len == 0 or kmod.len == 0) return error.InvalidAdd;
 
     const kmod_nodes = try parser.parse(arena, kmod);
@@ -738,7 +894,7 @@ fn buildAddFootprint(
     var children: std.ArrayListUnmanaged(Node) = .empty;
     try children.append(arena, Node.atom(Span.zero, FORM_FOOTPRINT));
     try children.append(arena, Node.string(Span.zero, lib_id));
-    try children.append(arena, try makeAtForm(arena, 0, 0));
+    try children.append(arena, try makeAtForm(arena, x_mm, y_mm));
     try children.append(arena, try makeLayerForm(arena, "F.Cu"));
     // KiCad expects a (uuid …) per footprint; use the canopy_uuid as the
     // KiCad-internal uuid for new adds so the next sync's reader links
@@ -747,6 +903,11 @@ fn buildAddFootprint(
     if (ref.len > 0) try children.append(arena, try makeProperty(arena, PROP_REFERENCE, ref));
     if (value.len > 0) try children.append(arena, try makeProperty(arena, PROP_VALUE, value));
     if (canopy_uuid.len > 0) try children.append(arena, try makeProperty(arena, PROP_CANOPY_UUID, canopy_uuid));
+    // Bake the canopy_net / canopy_section fields on the first sync (the IPC
+    // path bakes these via footprint_def; the file path reads the top-level
+    // op fields the server now also emits).
+    if (canopy_net.len > 0) try children.append(arena, try makeProperty(arena, "canopy_net", canopy_net));
+    if (canopy_section.len > 0) try children.append(arena, try makeProperty(arena, "canopy_section", canopy_section));
     // Inline geometry from .kicad_mod, skipping the placement/identity and
     // legacy ref/value text we inject or reissue separately.
     for (kmod_children[2..]) |sub| {
@@ -1080,4 +1241,84 @@ test "applyOpsToSource preserves pcbnew v20260206 format (no header corruption)"
     try std.testing.expect(std.mem.count(u8, out, "(net \"VBAT\")") == 2);
     try std.testing.expect(std.mem.indexOf(u8, out, "(net 0 \"VBAT\")") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "(net 1 \"VBAT\")") == null);
+}
+
+// spec: kicad_pcb/writer - add places the new footprint at the op's staging (x, y) and bakes canopy_net / canopy_section properties
+test "applyOpsToSource add places at staging position and bakes canopy fields" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "R_0402" (uuid "fp-1") (property "Reference" "R1")))
+    ;
+    const ops =
+        \\[{"op":"add","uuid":"new-uuid","ref":"C84","value":"1uF",
+        \\  "footprint_name":"C_0402",
+        \\  "kicad_mod":"(footprint \"C_0402\" (pad \"1\" smd roundrect (at 0 0)))",
+        \\  "canopy_net":"U8.C3.VDD33USB","canopy_section":"USB Core",
+        \\  "x":305500000,"y":35500000,"pad_nets":[["1","VDD"]]}]
+    ;
+    const out = try applyOpsToSource(arena.allocator(), src, ops);
+    // Footprint placed at the staging position (nm → mm), not the origin.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(at 305.5 35.5)") != null);
+    // canopy_net / canopy_section baked as properties on the first sync.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(property \"canopy_net\" \"U8.C3.VDD33USB\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(property \"canopy_section\" \"USB Core\")") != null);
+}
+
+// spec: kicad_pcb/writer - create_board_item writes a section staging box as a (gr_rect …) on Dwgs.User
+test "applyOpsToSource create_board_item draws a section box rectangle" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "R_0402" (uuid "fp-1") (property "Reference" "R1")))
+    ;
+    // JSON wrapped across lines (Zig joins with \n; JSON ignores whitespace).
+    const ops =
+        \\[{"op":"create_board_item","item":{
+        \\"@type":"type.googleapis.com/kiapi.board.types.BoardGraphicShape",
+        \\"layer":"BL_Dwgs_User",
+        \\"shape":{"attributes":
+        \\{"stroke":{"width":{"valueNm":150000},"style":"SLS_DEFAULT"},
+        \\"fill":{"fillType":"GFT_UNFILLED"}},
+        \\"rectangle":{"topLeft":{"xNm":300000000,"yNm":25000000},
+        \\"bottomRight":{"xNm":321000000,"yNm":46000000}}}}}]
+    ;
+    const out = try applyOpsToSource(arena.allocator(), src, ops);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(gr_rect") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(start 300 25)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(end 321 46)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(layer \"Dwgs.User\")") != null);
+}
+
+// spec: kicad_pcb/writer - create_board_item writes a section label as a (gr_text …) on Dwgs.User
+test "applyOpsToSource create_board_item draws a section label" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "R_0402" (uuid "fp-1") (property "Reference" "R1")))
+    ;
+    const ops =
+        \\[{"op":"create_board_item","item":{
+        \\"@type":"type.googleapis.com/kiapi.board.types.BoardText",
+        \\"layer":"BL_Dwgs_User",
+        \\"text":{"position":{"xNm":310500000,"yNm":27500000},
+        \\"attributes":{"size":{"xNm":2000000,"yNm":2000000}},
+        \\"text":"USB"}}}]
+    ;
+    const out = try applyOpsToSource(arena.allocator(), src, ops);
+    // The printer breaks list children onto their own lines (matching KiCad's
+    // own gr_text style), so check the tokens, not a single-line shape.
+    try std.testing.expect(std.mem.indexOf(u8, out, "gr_text") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"USB\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(at 310.5 27.5 0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(layer \"Dwgs.User\")") != null);
 }

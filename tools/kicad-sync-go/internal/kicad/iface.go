@@ -44,7 +44,16 @@ type Client interface {
 	// the same commit. Without inline Items, KiCad's CreateItems
 	// produces a placeholder with `pads=0` and only fills geometry on
 	// a subsequent "Update Footprint(s) From Library" action.
-	AddFootprint(defJSON []byte, kicadMod, entryName, uuid, ref, value string, padNets [][2]string) error
+	// xNm/yNm is the staging position the new fp is moved to after
+	// CreateItems (0,0 = no hint → stays at the origin).
+	AddFootprint(defJSON []byte, kicadMod, entryName, uuid, ref, value string, padNets [][2]string, xNm, yNm int64) error
+
+	// CreateBoardItem creates a standalone board object from a proto-
+	// canonical JSON Any (with @type), e.g. a BoardGraphicShape rectangle
+	// or a BoardText label. Used to draw the per-section staging boxes +
+	// labels on Dwgs.User. The item is buffered and flushed via CreateItems
+	// in the same commit as the added footprints.
+	CreateBoardItem(itemJSON []byte) error
 
 	// SwapFootprint replaces the existing footprint at `uuid` with a
 	// fresh instance of `entryName`. defJSON carries the new

@@ -82,6 +82,10 @@ type realClient struct {
 	dirty   map[string]struct{}              // uuids of mutated FPs
 	removed map[string]struct{}              // uuids to delete
 	added   []*board_types.FootprintInstance // staged new footprints
+	// extraItems are non-footprint board objects (Any-wrapped board shapes
+	// / text) staged by CreateBoardItem and flushed via CreateItems in the
+	// same commit — the per-section staging boxes + labels.
+	extraItems []*anypb.Any
 	// isNew flags fps that were synthesized by SwapFootprint / AddFootprint
 	// in the current commit so SetField / SetPadNet don't mark them dirty
 	// (they'll already be flushed via CreateItems with whatever in-place
@@ -255,6 +259,7 @@ func (c *realClient) Begin(message string) error {
 	c.dirty = map[string]struct{}{}
 	c.removed = map[string]struct{}{}
 	c.added = nil
+	c.extraItems = nil
 	c.isNew = map[*board_types.FootprintInstance]struct{}{}
 	c.commitMessage = message
 	if c.doc == nil {
@@ -407,7 +412,7 @@ func (c *realClient) SetPadNet(uuid, padNumber, netName string) error {
 	return nil
 }
 
-func (c *realClient) AddFootprint(defJSON []byte, kicadMod, entryName, uuid, ref, value string, padNets [][2]string) error {
+func (c *realClient) AddFootprint(defJSON []byte, kicadMod, entryName, uuid, ref, value string, padNets [][2]string, xNm, yNm int64) error {
 	if err := c.stageLibraryAndCheck(kicadMod, entryName); err != nil {
 		return fmt.Errorf("AddFootprint: %w", err)
 	}
@@ -435,15 +440,32 @@ func (c *realClient) AddFootprint(defJSON []byte, kicadMod, entryName, uuid, ref
 		c.cache = map[string]*board_types.FootprintInstance{}
 	}
 	c.cache[uuid] = fp
-	// Lock the new fp at (0, 0): KiCad's auto-placement sometimes drags
-	// a freshly-created fp toward its connected net endpoints during the
-	// CreateItems pass, and any inline Pad / Field / silkscreen item
-	// gets its relative position re-stored as (proto_value - new_position)
-	// — scattering the fp across the board. A follow-up UpdateItems to
-	// (0, 0) snaps the fp back, KiCad recomputes inner-item relatives
-	// once more (correctly now), and the user finds the freshly-synced
-	// part stacked at the origin where they can place it manually.
-	c.recordPendingPlacement(fp, &base_types.Vector2{}, &base_types.Angle{ValueDegrees: 0})
+	// Always create at (0, 0): KiCad's auto-placement otherwise drags a
+	// freshly-created fp toward its connected net endpoints during the
+	// CreateItems pass, and any inline Pad / Field / silkscreen item gets
+	// its relative position re-stored as (proto_value - new_position),
+	// scattering the fp across the board. The follow-up UpdateItems below
+	// moves it to its staging position (xNm, yNm) after CreateItems lands,
+	// when KiCad recomputes inner-item relatives once more (correctly now).
+	// (0, 0) staging means "no hint" → the part stays at the origin where
+	// the user can place it manually.
+	c.recordPendingPlacement(fp, &base_types.Vector2{XNm: xNm, YNm: yNm}, &base_types.Angle{ValueDegrees: 0})
+	return nil
+}
+
+// CreateBoardItem decodes a proto-canonical JSON Any (BoardGraphicShape /
+// BoardText, with @type) and buffers it for the commit's CreateItems pass.
+// Used for the per-section staging boxes + labels.
+func (c *realClient) CreateBoardItem(itemJSON []byte) error {
+	if len(itemJSON) == 0 {
+		return nil
+	}
+	var any anypb.Any
+	opts := protojson.UnmarshalOptions{DiscardUnknown: true}
+	if err := opts.Unmarshal(itemJSON, &any); err != nil {
+		return fmt.Errorf("CreateBoardItem decode: %w", err)
+	}
+	c.extraItems = append(c.extraItems, &any)
 	return nil
 }
 
@@ -760,9 +782,10 @@ func (c *realClient) Push() error {
 		synclog.Logf("UpdateItems OK")
 	}
 
-	// 2. CreateItems — flush newly-added footprints.
-	if len(c.added) > 0 {
-		items := make([]*anypb.Any, 0, len(c.added))
+	// 2. CreateItems — flush newly-added footprints + standalone board
+	// items (section staging boxes / labels) in the same commit.
+	if len(c.added) > 0 || len(c.extraItems) > 0 {
+		items := make([]*anypb.Any, 0, len(c.added)+len(c.extraItems))
 		for _, fp := range c.added {
 			any, err := anypb.New(fp)
 			if err != nil {
@@ -770,7 +793,10 @@ func (c *realClient) Push() error {
 			}
 			items = append(items, any)
 		}
-		synclog.Logf("CreateItems: sending %d new fps", len(items))
+		// Board shapes/text carry absolute coords already — no placement
+		// fix-up needed, so they go straight into the create batch.
+		items = append(items, c.extraItems...)
+		synclog.Logf("CreateItems: sending %d new fps + %d board items", len(c.added), len(c.extraItems))
 		for _, fp := range c.added {
 			synclog.Logf("  add fp id=%q lib=%q entry=%q ref=%q",
 				fp.GetId().GetValue(),
@@ -874,6 +900,7 @@ func (c *realClient) Push() error {
 	c.dirty = nil
 	c.removed = nil
 	c.added = nil
+	c.extraItems = nil
 	c.pendingPlacements = nil
 	return nil
 }

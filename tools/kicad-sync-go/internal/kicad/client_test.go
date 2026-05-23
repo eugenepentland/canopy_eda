@@ -127,8 +127,8 @@ func TestSwapFootprintReplacesViaDeleteAndAdd(t *testing.T) {
 func TestSwapFootprintCreatesAtOriginAndQueuesMove(t *testing.T) {
 	const kid = "k-uuid-old"
 	const (
-		oldX  int64 = 144_500_000
-		oldY  int64 = 180_000_000
+		oldX   int64 = 144_500_000
+		oldY   int64 = 180_000_000
 		oldDeg       = 90.0
 	)
 
@@ -229,4 +229,53 @@ func mustWrapField(t *testing.T, f *board_types.Field) *anypb.Any {
 		t.Fatalf("wrap field: %v", err)
 	}
 	return a
+}
+
+// TestCreateBoardItemDecodesSectionShapes pins that the proto-canonical
+// JSON the server emits for section staging boxes (BoardGraphicShape) and
+// labels (BoardText) decodes into the right concrete board protos with the
+// expected fields. protojson runs with DiscardUnknown, so a misnamed field
+// would silently vanish — hence we assert decoded values, not just success.
+func TestCreateBoardItemDecodesSectionShapes(t *testing.T) {
+	c := &realClient{}
+	const rectJSON = `{"@type":"type.googleapis.com/kiapi.board.types.BoardGraphicShape","layer":"BL_Dwgs_User","shape":{"attributes":{"stroke":{"width":{"valueNm":150000},"style":"SLS_DEFAULT"},"fill":{"fillType":"GFT_UNFILLED"}},"rectangle":{"topLeft":{"xNm":300000000,"yNm":25000000},"bottomRight":{"xNm":321000000,"yNm":46000000}}}}`
+	const labelJSON = `{"@type":"type.googleapis.com/kiapi.board.types.BoardText","layer":"BL_Dwgs_User","text":{"position":{"xNm":310500000,"yNm":27500000},"attributes":{"size":{"xNm":2000000,"yNm":2000000}},"text":"USB"}}`
+
+	if err := c.CreateBoardItem([]byte(rectJSON)); err != nil {
+		t.Fatalf("rect CreateBoardItem: %v", err)
+	}
+	if err := c.CreateBoardItem([]byte(labelJSON)); err != nil {
+		t.Fatalf("label CreateBoardItem: %v", err)
+	}
+	if len(c.extraItems) != 2 {
+		t.Fatalf("want 2 buffered board items, got %d", len(c.extraItems))
+	}
+
+	var shape board_types.BoardGraphicShape
+	if err := c.extraItems[0].UnmarshalTo(&shape); err != nil {
+		t.Fatalf("decode shape: %v", err)
+	}
+	if shape.GetLayer() != board_types.BoardLayer_BL_Dwgs_User {
+		t.Errorf("shape layer = %v, want BL_Dwgs_User", shape.GetLayer())
+	}
+	if x := shape.GetShape().GetRectangle().GetTopLeft().GetXNm(); x != 300000000 {
+		t.Errorf("rect topLeft.x = %d, want 300000000", x)
+	}
+	if y := shape.GetShape().GetRectangle().GetBottomRight().GetYNm(); y != 46000000 {
+		t.Errorf("rect bottomRight.y = %d, want 46000000", y)
+	}
+
+	var text board_types.BoardText
+	if err := c.extraItems[1].UnmarshalTo(&text); err != nil {
+		t.Fatalf("decode text: %v", err)
+	}
+	if text.GetLayer() != board_types.BoardLayer_BL_Dwgs_User {
+		t.Errorf("text layer = %v, want BL_Dwgs_User", text.GetLayer())
+	}
+	if got := text.GetText().GetText(); got != "USB" {
+		t.Errorf("label text = %q, want %q", got, "USB")
+	}
+	if x := text.GetText().GetPosition().GetXNm(); x != 310500000 {
+		t.Errorf("label position.x = %d, want 310500000", x)
+	}
 }
