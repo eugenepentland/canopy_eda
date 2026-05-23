@@ -117,6 +117,19 @@ function uploadZip(file,resultEl){
       .catch(function(e){resultEl.className='result err';resultEl.textContent='Error: '+e;showToast('err','Error: '+e,8000);});
   };r.readAsArrayBuffer(file);
 }
+function uploadDatasheet(file){
+  showToast('pending','Uploading datasheet '+file.name+'...');
+  var r=new FileReader();r.onload=function(){
+    fetch('/api/upload-datasheet',{method:'POST',headers:{'Content-Type':'application/pdf','X-Filename':file.name},body:r.result})
+      .then(function(r){return r.text().then(function(t){return{ok:r.ok,text:t};});})
+      .then(function(d){
+        var parsed=null;try{parsed=JSON.parse(d.text);}catch(e){}
+        var m=d.ok?('Datasheet uploaded: '+((parsed&&parsed.name)||file.name)):((parsed&&parsed.error)||d.text);
+        showToast(d.ok?'ok':'err',m,d.ok?4000:8000);
+      })
+      .catch(function(e){showToast('err','Error: '+e,8000);});
+  };r.readAsArrayBuffer(file);
+}
 // Page-level drag-and-drop: works even when the upload section is collapsed
 var overlay=document.getElementById('page-drop-overlay');
 var dragDepth=0;
@@ -139,5 +152,8 @@ document.addEventListener('drop',function(e){
   var files=e.dataTransfer?e.dataTransfer.files:null;
   if(!files||files.length===0)return;
   var f=files[0];
-  if(f.name.toLowerCase().endsWith('.zip'))uploadZip(f,toast);
+  var n=f.name.toLowerCase();
+  if(n.endsWith('.zip'))uploadZip(f,toast);
+  else if(n.endsWith('.pdf'))uploadDatasheet(f);
+  else showToast('err','Unsupported file: drop a .zip (component) or .pdf (datasheet)',6000);
 });
