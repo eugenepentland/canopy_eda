@@ -32,7 +32,7 @@ pub templ Library(rows: []const LibraryRow) {
                 <div class="count-info" id="count-info"></div>
                 <table id="lib-table">
                     <thead>
-                        <tr><th>Name</th><th>Type</th><th>Details</th></tr>
+                        <tr><th>Name</th><th>Details</th></tr>
                     </thead>
                     <tbody>
                         for (rows) |row| {
@@ -52,24 +52,8 @@ pub templ Library(rows: []const LibraryRow) {
 }
 
 pub templ Row(row: LibraryRow) {
-    <tr data-search={row.search_text}>
-        <td>{row.name}</td>
-        <td>
-            switch (row.kind) {
-                .family => {
-                    <span class="tag tag-family">family</span>
-                },
-                .component => {
-                    <span class="tag tag-component">component</span>
-                },
-                .pinout => {
-                    <span class="tag tag-pinout">pinout</span>
-                },
-                .footprint => {
-                    <span class="tag tag-footprint">footprint</span>
-                },
-            }
-        </td>
+    <tr class="comp-row" data-search={row.search_text}>
+        <td class={if (row.requirements.len > 0) "comp-name has-reqs" else "comp-name"}>{row.name}</td>
         <td>
             switch (row.kind) {
                 .family, .component => {
@@ -84,6 +68,18 @@ pub templ Row(row: LibraryRow) {
             }
         </td>
     </tr>
+    if (row.requirements.len > 0) {
+        <tr class="req-panel">
+            <td colspan="2">
+                <div class="req-card-header">{row.requirements.len} requirements</div>
+                <div class="req-cards">
+                    for (row.requirements) |req| {
+                        <div class="req-item">{req}</div>
+                    }
+                </div>
+            </td>
+        </tr>
+    }
 }
 
 pub templ ComponentDetails(row: LibraryRow) {

@@ -3,7 +3,6 @@
 A high-level map of what this tool does today. Capability-focused, language-agnostic — the implementation lives in `src/`, but this document deliberately stays out of it.
 
 - For the design language itself, see [`sexp-language.md`](sexp-language.md).
-- For the KiCad sync agent, see [`kicad-sync-architecture.md`](kicad-sync-architecture.md).
 
 ## 1. What the tool is
 
@@ -179,7 +178,7 @@ Default port 7050. Dev URL: `http://localhost:7050`. Production URL: `https://co
 
 **Export APIs.** Listed in the Exports table above.
 
-**KiCad sync orchestration.** `POST /api/sync-plan/:name` — accepts a board state from the local Go agent and returns a list of operations to apply. See [`kicad-sync-architecture.md`](kicad-sync-architecture.md).
+**KiCad sync orchestration.** `POST /api/sync-kicad-pcb/:name` — file-based sync: reads the `.kicad_pcb` at the design's `(kicad-pcb "<path>")` form, diffs it against the flattened netlist, and writes the updated board in place. See the [KiCad sync](#kicad-sync-file-based) section below.
 
 **MCP transport.** `POST /mcp` (streamable HTTP, the transport Claude Code's remote MCP connector uses), `GET /mcp` (WebSocket, for local testing). OAuth via `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource`, `/oauth/authorize`, `/oauth/token`.
 
@@ -209,17 +208,15 @@ Two design choices worth calling out:
 - **No granular schematic-edit tools.** There is no `add_component` / `swap_component` / `rewire_pin`. Edits flow through `read_file` → `edit_file` → `build`. This keeps the source file the single source of truth and avoids divergent representations.
 - **Mutation tools return `live_version`.** The browser's 2-s poll of `/api/version/:name` picks up the change without any extra wiring.
 
-### KiCad sync (`kicad-sync-go`)
+### KiCad sync (file-based)
 
-A separate Go agent at `tools/kicad-sync-go/`, registered as a KiCad 10 plugin. The full design lives in [`kicad-sync-architecture.md`](kicad-sync-architecture.md); summary:
+Schematic → PCB. The schematic is canonical; the server updates the `.kicad_pcb` to match. Implemented entirely server-side in `src/serve/sync.zig`:
 
-- **Direction.** Schematic → PCB. The schematic is canonical; the agent updates the `.kicad_pcb`.
-- **Trigger.** User clicks **EDA Sync** in the KiCad toolbar (or runs the agent CLI for headless syncs).
-- **Protocol.** Agent reads the live board state from KiCad over IPC (NNG protobuf), POSTs it to `/api/sync-plan/:name`, server returns ops (`add`, `set_field`, `set_pad_net`, `swap_footprint`, `remove`, `flag_stale`), agent applies them as a single Ctrl+Z-able commit.
-- **What's preserved.** Footprint UUIDs, pad netlists, field values, board origin, placement coordinates. New instances land at the board origin until the user places them.
-- **Sidecars next to the `.kicad_pcb`.** `<board>.applied_ops.json` fingerprints the state-asserting ops (`set_field`, `set_pad_net`, `set_locked`) the agent just pushed so the server can suppress re-emission on idempotent re-syncs; `<board>.stale.json` lists every footprint the server flagged as no-longer-in-the-design (with ref, kicad_uuid, canopy_uuid, footprint name, value) so the user can inspect orphans before pruning.
-- **Strict mode.** If any IPC degradation occurs (e.g. KiCad rejects every TOOL_ACTION name we try for the post-CreateItems geometry refresh), the agent exits non-zero and skips writing `applied_ops.json` — the next sync re-evaluates the affected footprints instead of treating them as already-applied. `--best-effort` opts back into the legacy log-and-continue behaviour.
-- **Auth.** OAuth client auto-registered via RFC 7591 dynamic client registration. Tokens cached at `~/.config/eda-kicad-sync/tokens.json` (mode 0600). Per-board config in `<board>.eda-sync.json`.
+- **Trigger.** The schematic viewer's **Push to KiCad PCB** button (`POST /api/sync-kicad-pcb/:name`). `?dry_run=1` returns the diff without writing; `?migrate=1` enables the heuristic relink; `?prune=1` turns `flag_stale` into real removals.
+- **Protocol.** The server reads the `.kicad_pcb` declared by the design's `(kicad-pcb "<path>")` form, diffs the on-disk board against the design's flattened netlist (`runSyncPlan`), and applies the resulting ops (`add`, `set_field`, `set_pad_net`, `swap_footprint`, `remove`, `flag_stale`) to the file in place.
+- **What's preserved.** Footprint UUIDs, pad netlists, field values, board origin, placement coordinates. New instances land in a per-section staging area off to the side until the user places them.
+
+> A standalone Go IPC agent (driven from inside KiCad over an NNG protobuf socket, posting to a now-removed `/api/sync-plan` endpoint) previously did this. It was removed in favour of the file-based path above.
 
 ### Conversion tools
 

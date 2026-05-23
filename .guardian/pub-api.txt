@@ -621,7 +621,6 @@ src/serve/sync.zig::SyncRunError value
 src/serve/sync.zig::SyncRunResult struct_
 src/serve/sync.zig::runSyncPlan fn
 src/serve/sync.zig::syncKicadPcbApi fn
-src/serve/sync.zig::syncPlanApi fn
 src/serve/templates/account.zig::Account struct_
 src/serve/templates/account.zig::ClientCreateForm struct_
 src/serve/templates/account.zig::ClientRow struct_

@@ -24,19 +24,14 @@ To rebuild a single design and live-push it to a running server:
 zig build run -- build --project-dir projects/designs --push <design-name>
 ```
 
-## KiCad sync plugin
+## KiCad sync
 
-The Go agent that syncs an open `.kicad_pcb` from a Canopy EDA design
-lives at [`tools/kicad-sync-go/`](tools/kicad-sync-go/) and installs
-without cloning the repo:
-
-```bash
-go install github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/cmd/eda-kicad-sync@latest
-eda-kicad-sync --install-kicad-plugin
-```
-
-See [`tools/kicad-sync-go/README.md`](tools/kicad-sync-go/README.md)
-for the full setup, OAuth flow, and per-OS plugin paths.
+The schematic is canonical; the board is updated to match. Open a design's
+schematic viewer and use the **Push to KiCad PCB** button — the server reads
+the `.kicad_pcb` declared by the design's `(kicad-pcb "<path>")` form, diffs
+it against the flattened netlist, and writes the updated board in place
+(`POST /api/sync-kicad-pcb/:name`). Footprint placements, pad nets, and field
+values are preserved; new instances land in a per-section staging area.
 
 ## Architecture
 

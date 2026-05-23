@@ -755,13 +755,10 @@ pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
         return mcpUnauthorized(req, res);
     }
 
-    // KiCad-sync endpoints accept either a plugin bearer token or an OAuth
-    // bearer token. Plugin tokens are minted once via `eda mint-plugin-token`;
-    // OAuth mirrors the MCP flow. Covers both the raw-diff endpoint
-    // (`/api/sync-plan/`) and the file-based applier (`/api/sync-kicad-pcb/`).
-    if (std.mem.startsWith(u8, req.url.path, "/api/sync-plan/") or
-        std.mem.startsWith(u8, req.url.path, "/api/sync-kicad-pcb/"))
-    {
+    // The file-based KiCad-sync applier (`/api/sync-kicad-pcb/`) accepts
+    // either a plugin bearer token or an OAuth bearer token. Plugin tokens
+    // are minted once via `eda mint-plugin-token`; OAuth mirrors the MCP flow.
+    if (std.mem.startsWith(u8, req.url.path, "/api/sync-kicad-pcb/")) {
         if (validatePluginBearerToken(ctx, req)) return true;
         if (validateBearerToken(ctx, req)) return true;
     }

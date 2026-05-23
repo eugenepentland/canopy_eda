@@ -1,4 +1,0 @@
-/eda-kicad-sync
-/dist/
-# Generated *.pb.go should be committed (see README "Build from source"),
-# not gitignored — they let other users install without protoc.
