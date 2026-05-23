@@ -30,6 +30,7 @@ const account_page = @import("serve/account_page.zig");
 const static_assets = @import("serve/static_assets.zig");
 const sync = @import("serve/sync.zig");
 const notes = @import("serve/notes.zig");
+const mcp_docs = @import("serve/mcp_docs.zig");
 
 // ── Global live state ──────────────────────────────────────────────────
 
@@ -174,6 +175,7 @@ pub fn serve(
     router.get("/schematics/:name", schematic_page.schematicPage, .{});
     router.get("/modules", modules_page.modulesListPage, .{});
     router.get("/modules/:name", modules_page.moduleViewPage, .{});
+    router.get("/mcp-tools", mcp_docs.mcpDocsPage, .{});
 
     // API
     router.post("/api/push/:name", api.pushApi, .{});

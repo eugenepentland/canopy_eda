@@ -491,7 +491,10 @@ src/serve/bom_html.zig::writeJsonEscaped value
 src/serve/bom_html.zig::writeNetsJson fn
 src/serve/bom_html.zig::writeSchematicBomHtml fn
 src/serve/component_info.zig::DescribeError value
+src/serve/component_info.zig::addRequirement fn
 src/serve/component_info.zig::describeComponent fn
+src/serve/component_info.zig::listRequirements fn
+src/serve/component_info.zig::removeRequirement fn
 src/serve/edit.zig::AssertionFailure struct_
 src/serve/edit.zig::BuildReport struct_
 src/serve/edit.zig::EditError value
@@ -534,6 +537,9 @@ src/serve/mcp.zig::HandlerError value
 src/serve/mcp.zig::dispatchFrame fn
 src/serve/mcp.zig::postApi fn
 src/serve/mcp.zig::upgrade fn
+src/serve/mcp_docs.zig::ParamDoc struct_
+src/serve/mcp_docs.zig::ToolDoc struct_
+src/serve/mcp_docs.zig::mcpDocsPage fn
 src/serve/mcp_tools.zig::CallResult struct_
 src/serve/mcp_tools.zig::DesignSummary struct_
 src/serve/mcp_tools.zig::ToolError value
@@ -632,6 +638,9 @@ src/serve/templates/auth.zig::Setup struct_
 src/serve/templates/library.zig::ComponentDetails struct_
 src/serve/templates/library.zig::Library struct_
 src/serve/templates/library.zig::Row struct_
+src/serve/templates/mcp_docs.zig::Mcp struct_
+src/serve/templates/mcp_docs.zig::ParamRow struct_
+src/serve/templates/mcp_docs.zig::ToolCard struct_
 src/serve/templates/oauth.zig::Authorize struct_
 src/serve/templates/pages.zig::DesignCard struct_
 src/serve/templates/pages.zig::Home struct_

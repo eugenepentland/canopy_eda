@@ -21,6 +21,9 @@ src/serve/templates/auth.zig: pub const Setup (struct_) has no /// doc comment
 src/serve/templates/library.zig: pub const ComponentDetails (struct_) has no /// doc comment
 src/serve/templates/library.zig: pub const Library (struct_) has no /// doc comment
 src/serve/templates/library.zig: pub const Row (struct_) has no /// doc comment
+src/serve/templates/mcp_docs.zig: pub const Mcp (struct_) has no /// doc comment
+src/serve/templates/mcp_docs.zig: pub const ParamRow (struct_) has no /// doc comment
+src/serve/templates/mcp_docs.zig: pub const ToolCard (struct_) has no /// doc comment
 src/serve/templates/oauth.zig: pub const Authorize (struct_) has no /// doc comment
 src/serve/templates/pages.zig: pub const DesignCard (struct_) has no /// doc comment
 src/serve/templates/pages.zig: pub const Home (struct_) has no /// doc comment

@@ -399,11 +399,25 @@ Public functions: readFile, writeFile, editFile, listDir, glob, deleteFile, move
 
 ## serve/component_info
 
-Public functions: describeComponent
+Public functions: describeComponent, listRequirements, addRequirement, removeRequirement
 
 - kebab-cases every Check variant tag
 - findSourceComment finds the source-of-truth path
 - parsePinoutBody normalises pin ID shapes
+- listRequirements returns each requirement with its derived id
+- addRequirement appends a requirement form before the component close
+- addRequirement rejects a check clause the checker does not recognize
+- removeRequirement deletes a requirement by id or exact text
+- formEnd skips parens inside string literals
+- add list and remove requirement round-trip on disk
+
+## serve/mcp_docs
+
+Public functions: mcpDocsPage
+
+- buildToolDocs projects each tool from the embedded schema
+- buildToolDocs marks mutating tools and required params
+- buildExample renders an example invocation
 
 ## serve/notes
 
