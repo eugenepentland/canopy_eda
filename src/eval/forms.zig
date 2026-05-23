@@ -93,6 +93,7 @@ pub const ScopeForm = enum {
     section,
     decouple,
     series,
+    fanout,
     net,
     bus_net,
     // Section / sub-section only
@@ -109,6 +110,7 @@ pub const ScopeForm = enum {
     verifies,
     test_point,
     power_config,
+    decouple_defaults,
     kicad_pcb,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
@@ -124,6 +126,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "section", .section },
     .{ "decouple", .decouple },
     .{ "series", .series },
+    .{ "fanout", .fanout },
     .{ "net", .net },
     .{ "bus-net", .bus_net },
     .{ "pins", .pins },
@@ -138,6 +141,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "verifies", .verifies },
     .{ "test-point", .test_point },
     .{ "power-config", .power_config },
+    .{ "decouple-defaults", .decouple_defaults },
     .{ "kicad-pcb", .kicad_pcb },
 });
 
@@ -336,13 +340,17 @@ pub const scope_form_docs = blk: {
         .syntax = "(series …)",
         .summary = "Insert a series element (resistor / ferrite / etc.) between two nets.",
     } };
+    t[@intFromEnum(ScopeForm.fanout)] = .{ .scope = all, .doc = .{
+        .syntax = "(fanout \"COMMON\" (comp) \"NET1\" \"NET2\" … [(id …)])",
+        .summary = "Place one component from a shared COMMON net to each listed net (star of series elements).",
+    } };
     t[@intFromEnum(ScopeForm.net)] = .{ .scope = all, .doc = .{
         .syntax = "(net \"A\" \"B\" …)",
         .summary = "Tie one or more nets to a canonical name (net-merge).",
     } };
     t[@intFromEnum(ScopeForm.bus_net)] = .{ .scope = all, .doc = .{
-        .syntax = "(bus-net \"PREFIX\" width \"OTHER\" …)",
-        .summary = "Tie corresponding lanes of two multi-bit buses together.",
+        .syntax = "(bus-net \"PREFIX\" lo hi \"SUB\") | (bus-net \"PREFIX\" lo hi (suffixes …) (over …) (ports …))",
+        .summary = "Tie a lane range to a sub-block bus (1:1), or strided-fan-out the range across several sub-blocks' ports.",
     } };
 
     t[@intFromEnum(ScopeForm.pins)] = .{ .scope = dsec, .doc = .{
@@ -394,6 +402,10 @@ pub const scope_form_docs = blk: {
     t[@intFromEnum(ScopeForm.power_config)] = .{ .scope = tl, .doc = .{
         .syntax = "(power-config (derating N))",
         .summary = "Per-design power-budget configuration knobs.",
+    } };
+    t[@intFromEnum(ScopeForm.decouple_defaults)] = .{ .scope = tl, .doc = .{
+        .syntax = "(decouple-defaults (ic \"REF\") (bypass (comp)))",
+        .summary = "Set per-design decouple defaults: a fallback IC ref and bypass cap so (decouple …) can omit both.",
     } };
     t[@intFromEnum(ScopeForm.kicad_pcb)] = .{ .scope = tl, .doc = .{
         .syntax = "(kicad-pcb \"absolute/path/to/board.kicad_pcb\")",

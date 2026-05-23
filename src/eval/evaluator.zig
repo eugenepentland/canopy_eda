@@ -82,6 +82,16 @@ pub const AltFunc = struct {
     etype: []const u8 = "",
 };
 
+/// Per-design decouple defaults set by `(decouple-defaults (ic …) (bypass …))`.
+/// `ic` is the fallback host ref a `(decouple …)` per-pin list resolves against
+/// when no explicit ref is given; `bypass` is the component node substituted
+/// when the decouple omits its own. Empty/null means "no default declared", in
+/// which case `(decouple …)` keeps its legacy fully-explicit form.
+pub const DecoupleDefaults = struct {
+    ic: []const u8 = "",
+    bypass: ?ast.Node = null,
+};
+
 /// The S-expression evaluator. Holds the project + library directories,
 /// caches loaded files, parsed library components, and per-symbol pinouts,
 /// and accumulates assertion results plus the pending-ID write-back list
@@ -126,6 +136,10 @@ pub const Evaluator = struct {
     /// legacy `(ids …)` sidecar. Inherited into nested module evaluation and
     /// restored on exit, so a marked design propagates to its sub-modules.
     hierarchical_ids: bool = false,
+    /// Per-design decouple defaults from `(decouple-defaults (ic …) (bypass …))`.
+    /// Design-block-scoped: saved/restored across nested module evaluation in
+    /// `evalDesignBlock` so a parent's defaults never leak into a sub-block module.
+    decouple_defaults: DecoupleDefaults = .{},
     /// Span + short message describing the most recent `EvalError`.
     /// Populated by the form handlers when they return an error so the
     /// CLI / server can render a diagnostic that points at the source.

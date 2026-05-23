@@ -119,6 +119,7 @@ src/eval/env.zig::parseCheck fn
 src/eval/env.zig::parseNoteRef fn
 src/eval/env.zig::requirementIdForText fn
 src/eval/evaluator.zig::AltFunc struct_
+src/eval/evaluator.zig::DecoupleDefaults struct_
 src/eval/evaluator.zig::EvalDiagnostic struct_
 src/eval/evaluator.zig::EvalError value
 src/eval/evaluator.zig::Evaluator struct_
@@ -168,6 +169,7 @@ src/eval/instance.zig::ResolvedComponent struct_
 src/eval/instance.zig::TrailingArgs struct_
 src/eval/instance.zig::buildInstance fn
 src/eval/instance.zig::componentFamily fn
+src/eval/instance.zig::evalFanoutForm fn
 src/eval/instance.zig::evalSeriesForm fn
 src/eval/instance.zig::instanceFromValue fn
 src/eval/instance.zig::mergeInstanceProperties fn

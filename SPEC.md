@@ -251,6 +251,11 @@ Public functions: analyze
 ## eval/design_block
 
 - bus-net expands one net tie per index in the inclusive range
+- bus-net strided form distributes channels across over x ports with suffixes
+- sub-block bridge ties prefixed board nets to module ports with optional rename
+- fanout places one component from COMMON to each listed net
+- decouple-defaults lets decouple omit its component and host ref
+- decouple with no defaults keeps its legacy explicit form
 - bus-port expands one port per index times optional suffix list
 - kicad-pcb form captures the literal path on the design block
 

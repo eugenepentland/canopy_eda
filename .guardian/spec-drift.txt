@@ -81,6 +81,7 @@ src/eval/ids.zig::registerRefDes | fn registerRefDes(self: *Evaluator, ref_des: 
 src/eval/ids.zig::renameSectionRefs | fn renameSectionRefs(sections: []env_mod.Section, rename_map: *std.StringHashMapUnmanaged([]const u8)) void
 src/eval/instance.zig::buildInstance | fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) EvalError!InstanceResult
 src/eval/instance.zig::componentFamily | fn componentFamily(val: Value) []const u8
+src/eval/instance.zig::evalFanoutForm | fn evalFanoutForm( self: *Evaluator, form_children: []const Node, env: *Env, instances: *std.ArrayListUnmanaged(Instance), all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl), ) EvalError!void
 src/eval/instance.zig::evalSeriesForm | fn evalSeriesForm( self: *Evaluator, form_children: []const Node, env: *Env, instances: *std.ArrayListUnmanaged(Instance), all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl), note_list: *std.ArrayListUnmanaged(Note), ) EvalError!void
 src/eval/instance.zig::instanceFromValue | fn instanceFromValue(self: *Evaluator, val: Value, ref_des: []const u8, source_offset: u32, id: []const u8) ?Instance
 src/eval/instance.zig::mergeInstanceProperties | fn mergeInstanceProperties( self: *Evaluator, inst: *Instance, overrides: []const env_mod.Property, ) std.mem.Allocator.Error!void

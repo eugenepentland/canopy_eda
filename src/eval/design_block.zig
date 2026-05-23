@@ -81,6 +81,14 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     self.hierarchical_ids = saved_hierarchical or hasHierarchicalMarker(args[1..]);
     defer self.hierarchical_ids = saved_hierarchical;
 
+    // Decouple defaults are design-block-local: snapshot and clear so a
+    // parent's (decouple-defaults …) never leaks into a nested sub-block
+    // module's own decouples. A (decouple-defaults …) form inside this body
+    // sets them below; the defer restores the enclosing design's on exit.
+    const saved_decouple_defaults = self.decouple_defaults;
+    self.decouple_defaults = .{};
+    defer self.decouple_defaults = saved_decouple_defaults;
+
     for (args[1..]) |form| {
         const form_children = form.asList() orelse continue;
         if (form_children.len == 0) continue;
@@ -111,6 +119,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             },
             .sub_block => {
                 const sb = try builders.buildSubBlock(self, form_children, env);
+                try evalSubBlockBridges(self, form_children, sb.name, &net_ties);
                 try sub_blocks.append(self.allocator, sb);
             },
             .section => try evalSection(self, form_children, env, &instances, &all_pin_nets, &notes, &net_ties, &sections),
@@ -120,7 +129,9 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             },
             .bus_net => try evalBusNetForm(self, form_children, env, &net_ties),
             .series => try instance_mod.evalSeriesForm(self, form_children, env, &instances, &all_pin_nets, &notes),
+            .fanout => try instance_mod.evalFanoutForm(self, form_children, env, &instances, &all_pin_nets),
             .decouple => try evalDecoupleForm(self, form_children, env, &instances, &all_pin_nets),
+            .decouple_defaults => try parseDecoupleDefaults(self, form_children, env),
             .verifies => if (parseVerifies(self, form_children, env)) |v| try verifications.append(self.allocator, v),
             .test_point => if (try test_point_mod.parse(self.allocator, form_children)) |tp| try test_points.append(self.allocator, tp),
             .power_config => if (power_config_mod.parse(form_children)) |cfg| {
@@ -233,22 +244,55 @@ fn evalNetForm(self: *Evaluator, form_children: []const Node, env: *Env, net_tie
     }
 }
 
-/// Evaluate `(bus-net "PREFIX" START END "SUB")` — shorthand for one
-/// `(net "PREFIX<i>" "SUB/PREFIX<i>")` per index in `[START, END]`. Lets
-/// `(bus-net "FLASH_IO" 0 7 "flash")` replace 8 verbatim net-tie lines
-/// at the bottom of a design file. Bounds are inclusive on both ends so
-/// the index range mirrors the underlying signal numbering.
+/// Read the literal text of a node — a quoted string or a bare atom —
+/// without evaluating it. Bridge/bus-net port and sub names are written as
+/// bare atoms (`SCK`, `adc1`) which must not go through `evalNode` (that
+/// would treat them as variable lookups); the prefix is a string literal.
+/// Returns null for lists/numbers.
+fn literalText(node: Node) ?[]const u8 {
+    return node.asString() orelse node.asAtom();
+}
+
+/// Evaluate `(bus-net …)`. Two shapes share the head:
+///
+///   • Legacy 1:1 — `(bus-net "PREFIX" START END "SUB")` expands to one
+///     `(net "PREFIX<i>" "SUB/PREFIX<i>")` per index in `[START, END]`.
+///     `(bus-net "FLASH_IO" 0 7 "flash")` replaces 8 verbatim net ties.
+///
+///   • Strided fan-out — `(bus-net "PREFIX" START END (suffixes A B)
+///     (over "s1" "s2") (ports P0 P1 …))` distributes the index range
+///     across the flattened `(sub × port)` slot list (sub-major), emitting
+///     one tie per `(channel × suffix)`: parent `PREFIX<i><suffix>` ties to
+///     `<sub>/<port><suffix>`. Lets the 20 per-channel ADC analog ties
+///     collapse to one form. Detected by the presence of an `(over …)`.
+///
+/// Bounds are inclusive on both ends so the index range mirrors the
+/// underlying signal numbering.
 fn evalBusNetForm(self: *Evaluator, form_children: []const Node, env: *Env, net_ties: *std.ArrayListUnmanaged(NetTie)) EvalError!void {
     if (form_children.len < 5) return;
     const prefix = (try self.evalNode(form_children[1], env)).asString() orelse return;
-    const start_val = try self.evalNode(form_children[2], env);
-    const end_val = try self.evalNode(form_children[3], env);
-    const sub = (try self.evalNode(form_children[4], env)).asString() orelse return;
-
-    const start = numberAsUsize(start_val) orelse return;
-    const end = numberAsUsize(end_val) orelse return;
+    const start = numberAsUsize(try self.evalNode(form_children[2], env)) orelse return;
+    const end = numberAsUsize(try self.evalNode(form_children[3], env)) orelse return;
     if (end < start) return;
 
+    // Strided mode is opted into by an `(over …)` child; collect its
+    // companion `(ports …)` / optional `(suffixes …)` sub-forms.
+    var over: ?[]const Node = null;
+    var ports: ?[]const Node = null;
+    var suffixes: ?[]const Node = null;
+    for (form_children[4..]) |c| {
+        if (c.isForm("over")) over = c.asList().?[1..];
+        if (c.isForm("ports")) ports = c.asList().?[1..];
+        if (c.isForm("suffixes")) suffixes = c.asList().?[1..];
+    }
+
+    if (over != null and ports != null) {
+        try evalStridedBusNet(self, net_ties, prefix, start, end, over.?, ports.?, suffixes);
+        return;
+    }
+
+    // Legacy 1:1 form: the 5th child is the sub-block name string.
+    const sub = (try self.evalNode(form_children[4], env)).asString() orelse return;
     var i: usize = start;
     while (i <= end) : (i += 1) {
         const parent = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ prefix, i }) catch return EvalError.OutOfMemory;
@@ -257,10 +301,126 @@ fn evalBusNetForm(self: *Evaluator, form_children: []const Node, env: *Env, net_
     }
 }
 
+/// Distribute channels `[start, end]` across the flattened `over × ports`
+/// slot list (sub-major: all of sub0's ports, then sub1's, …). Channel `k`
+/// takes slot `k - start`; for every suffix (or one empty suffix when none
+/// is given) it ties `PREFIX<k><suffix>` to `<sub>/<port><suffix>`.
+/// Channels beyond the available slots are skipped.
+fn evalStridedBusNet(
+    self: *Evaluator,
+    net_ties: *std.ArrayListUnmanaged(NetTie),
+    prefix: []const u8,
+    start: usize,
+    end: usize,
+    over: []const Node,
+    ports: []const Node,
+    suffixes: ?[]const Node,
+) EvalError!void {
+    if (ports.len == 0) return;
+    var k: usize = start;
+    while (k <= end) : (k += 1) {
+        const slot = k - start;
+        const sub_idx = slot / ports.len;
+        const port_idx = slot % ports.len;
+        if (sub_idx >= over.len) break; // ran out of slots
+        const sub = literalText(over[sub_idx]) orelse continue;
+        const port = literalText(ports[port_idx]) orelse continue;
+        if (suffixes) |sfx| {
+            for (sfx) |sf_node| {
+                const suffix = literalText(sf_node) orelse continue;
+                try appendStrideTie(self, net_ties, prefix, k, suffix, sub, port);
+            }
+        } else {
+            try appendStrideTie(self, net_ties, prefix, k, "", sub, port);
+        }
+    }
+}
+
+fn appendStrideTie(
+    self: *Evaluator,
+    net_ties: *std.ArrayListUnmanaged(NetTie),
+    prefix: []const u8,
+    k: usize,
+    suffix: []const u8,
+    sub: []const u8,
+    port: []const u8,
+) EvalError!void {
+    const parent = std.fmt.allocPrint(self.allocator, "{s}{d}{s}", .{ prefix, k, suffix }) catch return EvalError.OutOfMemory;
+    const far = std.fmt.allocPrint(self.allocator, "{s}/{s}{s}", .{ sub, port, suffix }) catch return EvalError.OutOfMemory;
+    try net_ties.append(self.allocator, .{ .a = parent, .b = far });
+}
+
+/// Process any `(bridge "PREFIX" PORT… (rename PORT SUFFIX)…)` children of a
+/// `(sub-block …)` form. Each bridged port P emits one net-tie
+/// `(net "PREFIX<suffix>" "<sub>/P")`, where <suffix> defaults to P unless a
+/// `(rename P SUFFIX)` overrides it (e.g. SPI `CS` → board net `…NCS`).
+/// Collapses the per-port bridging `(net …)` lines a peripheral sub-block
+/// would otherwise need at the design top level. Power/GND ports are simply
+/// left off the list — they stay wired through the consolidated rail forms.
+fn evalSubBlockBridges(
+    self: *Evaluator,
+    form_children: []const Node,
+    sub_name: []const u8,
+    net_ties: *std.ArrayListUnmanaged(NetTie),
+) EvalError!void {
+    for (form_children[1..]) |child| {
+        if (!child.isForm("bridge")) continue;
+        const bc = child.asList().?;
+        if (bc.len < 2) continue;
+        const prefix = literalText(bc[1]) orelse "";
+        for (bc[2..]) |item| {
+            if (item.isForm("rename")) {
+                const rc = item.asList().?;
+                if (rc.len < 3) continue;
+                const port = literalText(rc[1]) orelse continue;
+                const suffix = literalText(rc[2]) orelse continue;
+                try appendBridgeTie(self, net_ties, prefix, suffix, sub_name, port);
+            } else if (literalText(item)) |port| {
+                try appendBridgeTie(self, net_ties, prefix, port, sub_name, port);
+            }
+        }
+    }
+}
+
+fn appendBridgeTie(
+    self: *Evaluator,
+    net_ties: *std.ArrayListUnmanaged(NetTie),
+    prefix: []const u8,
+    suffix: []const u8,
+    sub_name: []const u8,
+    port: []const u8,
+) EvalError!void {
+    const parent = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ prefix, suffix }) catch return EvalError.OutOfMemory;
+    const far = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ sub_name, port }) catch return EvalError.OutOfMemory;
+    try net_ties.append(self.allocator, .{ .a = parent, .b = far });
+}
+
 fn numberAsUsize(v: env_mod.Value) ?usize {
     const f = v.asNumber() orelse return null;
     if (f < 0) return null;
     return @intFromFloat(f);
+}
+
+/// Evaluate `(decouple-defaults (ic "REF") (bypass (comp)))` — records the
+/// per-design fallback host ref and bypass component on the evaluator. With
+/// these set, a `(decouple …)` may omit its component (a leading count → use
+/// the bypass) and/or its per-pin host ref (the first post-`per-pin` token,
+/// unless it equals the default ref, is taken as a pin and the ref defaults
+/// in). Both sub-forms are optional and either may appear alone.
+fn parseDecoupleDefaults(self: *Evaluator, form_children: []const Node, env: *Env) EvalError!void {
+    for (form_children[1..]) |child| {
+        const cc = child.asList() orelse continue;
+        if (cc.len < 2) continue;
+        const head = cc[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "ic")) {
+            const v = try self.evalNode(cc[1], env);
+            if (v.asString()) |s| self.decouple_defaults.ic = s;
+        } else if (std.mem.eql(u8, head, "bypass")) {
+            // Store the component node verbatim; emitDecoupleItems evals it
+            // in the decoupling site's env when a (decouple …) omits its own.
+            self.decouple_defaults.bypass = cc[1];
+        }
+    }
 }
 
 /// Evaluate a top-level (decouple ...) form.
@@ -484,13 +644,19 @@ fn evalSection(
                 try instance_mod.evalSeriesForm(self, sf_children, env, instances, all_pin_nets, notes);
                 for (instances.items[pre_s..]) |new_inst| try sec_instances.append(self.allocator, new_inst);
             },
+            .fanout => {
+                const pre_f = instances.items.len;
+                try instance_mod.evalFanoutForm(self, sf_children, env, instances, all_pin_nets);
+                for (instances.items[pre_f..]) |new_inst| try sec_instances.append(self.allocator, new_inst);
+            },
             .net => try evalNetForm(self, sf_children, env, net_ties),
             .bus_net => try evalBusNetForm(self, sf_children, env, net_ties),
             .section => try evalSubSection(self, sf_children, env, instances, all_pin_nets, notes, net_ties, &sec_instances, &sec_sub_sections),
             // Shared-form variants are consumed above by
             // `processSharedSectionForm`; top-level-only forms are
             // silently ignored inside a section body.
-            .status, .description, .note, .port, .protocol, .calc, .group, .sub_block, .verifies, .test_point, .power_config, .kicad_pcb => {},
+            .status, .description, .note, .port, .protocol, .calc => {},
+            .group, .sub_block, .verifies, .test_point, .power_config, .decouple_defaults, .kicad_pcb => {},
         }
     }
 
@@ -680,6 +846,14 @@ fn evalSubSection(
                 const pre_s = instances.items.len;
                 try instance_mod.evalSeriesForm(self, ssf_children, env, instances, all_pin_nets, notes);
                 for (instances.items[pre_s..]) |new_inst| {
+                    try sec_instances.append(self.allocator, new_inst);
+                    try sub_instances.append(self.allocator, new_inst);
+                }
+            },
+            .fanout => {
+                const pre_f = instances.items.len;
+                try instance_mod.evalFanoutForm(self, ssf_children, env, instances, all_pin_nets);
+                for (instances.items[pre_f..]) |new_inst| {
                     try sec_instances.append(self.allocator, new_inst);
                     try sub_instances.append(self.allocator, new_inst);
                 }
@@ -906,6 +1080,66 @@ test "evalBusNetForm expands inclusive index range" {
     try testing.expectEqualStrings("flash/FLASH_IO0", net_ties.items[0].b);
     try testing.expectEqualStrings("FLASH_IO2", net_ties.items[2].a);
     try testing.expectEqualStrings("flash/FLASH_IO2", net_ties.items[2].b);
+}
+
+// spec: eval/design_block - bus-net strided form distributes channels across over x ports with suffixes
+test "evalBusNetForm strided fan-out distributes channels across subs and ports" {
+    const a = std.heap.page_allocator;
+    // 10 channels over 3 subs x 4 ports (12 slots), sub-major, P/N suffixes.
+    const src =
+        \\(bus-net "ADF_CH" 1 10 (suffixes P N) (over "adc1" "adc2" "adc3")
+        \\         (ports AINA_EXT_ AINB_EXT_ AINC_EXT_ AIND_EXT_))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    var net_ties: std.ArrayListUnmanaged(NetTie) = .empty;
+    try evalBusNetForm(&eval, form_children, &env, &net_ties);
+
+    // 10 channels x 2 suffixes = 20 ties.
+    try testing.expectEqual(@as(usize, 20), net_ties.items.len);
+    // ch1 → adc1 AINA (slot 0); P then N.
+    try testing.expectEqualStrings("ADF_CH1P", net_ties.items[0].a);
+    try testing.expectEqualStrings("adc1/AINA_EXT_P", net_ties.items[0].b);
+    try testing.expectEqualStrings("ADF_CH1N", net_ties.items[1].a);
+    try testing.expectEqualStrings("adc1/AINA_EXT_N", net_ties.items[1].b);
+    // ch5 → adc2 AINA (slot 4 = 1*4 + 0).
+    try testing.expectEqualStrings("ADF_CH5P", net_ties.items[8].a);
+    try testing.expectEqualStrings("adc2/AINA_EXT_P", net_ties.items[8].b);
+    // ch10 → adc3 AINB (slot 9 = 2*4 + 1) — the last routed channel.
+    try testing.expectEqualStrings("ADF_CH10P", net_ties.items[18].a);
+    try testing.expectEqualStrings("adc3/AINB_EXT_P", net_ties.items[18].b);
+}
+
+// spec: eval/design_block - sub-block bridge ties prefixed board nets to module ports with optional rename
+test "evalSubBlockBridges ties PREFIX+port to sub/port and honours rename" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(sub-block "imu" (bno08x-imu)
+        \\  (bridge "IMU_" SCK MOSI MISO (rename CS NCS)))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+
+    var net_ties: std.ArrayListUnmanaged(NetTie) = .empty;
+    try evalSubBlockBridges(&eval, form_children, "imu", &net_ties);
+
+    try testing.expectEqual(@as(usize, 4), net_ties.items.len);
+    try testing.expectEqualStrings("IMU_SCK", net_ties.items[0].a);
+    try testing.expectEqualStrings("imu/SCK", net_ties.items[0].b);
+    try testing.expectEqualStrings("IMU_MISO", net_ties.items[2].a);
+    try testing.expectEqualStrings("imu/MISO", net_ties.items[2].b);
+    // rename: board net keeps the IMU_NCS name, far side stays the CS port.
+    try testing.expectEqualStrings("IMU_NCS", net_ties.items[3].a);
+    try testing.expectEqualStrings("imu/CS", net_ties.items[3].b);
 }
 
 // spec: eval/design_block - bus-port expands one port per index times optional suffix list
