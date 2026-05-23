@@ -1,0 +1,101 @@
+// MCP tool reference page. The data side lives in `mcp_docs.zig`
+// (`buildToolDocs` parses `assets/tools_list_result.json` into a `[]ToolDoc`);
+// this template just turns it into HTML. Reached at `GET /mcp-tools`.
+
+const mcp_docs = @import("../mcp_docs.zig");
+const assets_css = @import("../assets_css.zig");
+const home_tmpl = @import("pages.zig");
+const ToolDoc = mcp_docs.ToolDoc;
+const ParamDoc = mcp_docs.ParamDoc;
+
+const STYLE_BLOCK: []const u8 = "<style>" ++
+    assets_css.NAVBAR_CSS ++
+    @embedFile("../assets/mcp_docs.css") ++
+    "</style>";
+
+const SCRIPT_BLOCK: []const u8 = "<script>" ++
+    @embedFile("../assets/mcp_docs.js") ++
+    "</script>";
+
+pub templ Mcp(tools: []const ToolDoc) {
+    <!DOCTYPE html>
+    <html>
+        <head>
+            <title>MCP Tools</title>
+            {!STYLE_BLOCK}
+        </head>
+        <body>
+            @home_tmpl.Navbar("mcp")
+            <div class="mcp-content">
+                <h1>MCP Tools</h1>
+                <p class="intro">Every tool an MCP client (e.g. Claude Code) can call against this server's <code>/mcp</code> endpoint. Each entry shows the description, whether the tool mutates project files, its parameters, and an example call.</p>
+                <div class="intro">Generated from the same <code>tools/list</code> payload the server advertises, so it always matches what is callable.</div>
+                <input
+                    type="text" class="search-box" id="mcp-search"
+                    placeholder="Search tools by name or description..." autofocus />
+                <div class="count-info" id="count-info"></div>
+                for (tools) |tool| {
+                    @ToolCard(tool)
+                }
+            </div>
+            {!SCRIPT_BLOCK}
+        </body>
+    </html>
+}
+
+pub templ ToolCard(tool: ToolDoc) {
+    <div class="tool" data-search={tool.search_text}>
+        <div class="tool-head">
+            <code class="tool-name">{tool.name}</code>
+            if (tool.is_mutation) {
+                <span class="badge badge-write" title="Writes project files">mutation</span>
+            } else {
+                <span class="badge badge-read" title="Read-only">read-only</span>
+            }
+        </div>
+        <p class="tool-desc">{tool.description}</p>
+        if (tool.params.len > 0) {
+            <table class="params">
+                <thead>
+                    <tr><th>Parameter</th><th>Type</th><th></th><th>Description</th></tr>
+                </thead>
+                <tbody>
+                    for (tool.params) |p| {
+                        @ParamRow(p)
+                    }
+                </tbody>
+            </table>
+        } else {
+            <p class="no-params">No parameters.</p>
+        }
+        <div class="example-wrap">
+            <span class="example-label">Example</span>
+            <pre class="example">{tool.example}</pre>
+        </div>
+    </div>
+}
+
+pub templ ParamRow(p: ParamDoc) {
+    <tr>
+        <td><code class="param-name">{p.name}</code></td>
+        <td><span class="param-type">{p.type_str}</span></td>
+        <td>
+            if (p.required) {
+                <span class="req">required</span>
+            } else {
+                <span class="opt">optional</span>
+            }
+        </td>
+        <td>
+            {p.description}
+            if (p.enum_values.len > 0) {
+                <div class="enum">
+                    <span class="enum-label">one of:</span>
+                    for (p.enum_values) |ev| {
+                        <code>{ev}</code>
+                    }
+                </div>
+            }
+        </td>
+    </tr>
+}

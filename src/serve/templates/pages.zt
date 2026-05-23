@@ -83,6 +83,7 @@ pub templ Navbar(active: []const u8) {
         <a href="/" class={if (std.mem.eql(u8, active, "designs")) "active" else null}>Designs</a>
         <a href="/modules" class={if (std.mem.eql(u8, active, "modules")) "active" else null}>Modules</a>
         <a href="/library" class={if (std.mem.eql(u8, active, "library")) "active" else null}>Library</a>
+        <a href="/mcp-tools" class={if (std.mem.eql(u8, active, "mcp")) "active" else null}>MCP</a>
         <a href="/account" style="margin-left:auto" class={if (std.mem.eql(u8, active, "account")) "active" else null}>Account</a>
     </div>
 }

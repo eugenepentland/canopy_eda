@@ -21,6 +21,10 @@ const MAX_COMPONENT_BYTES: usize = 1 * 1024 * 1024;
 
 const ERR_COMPONENT_NOT_FOUND = "component not found";
 const ERR_COMPONENT_PARSE = "component parse failed";
+const ERR_INVALID_NAME = "invalid component name";
+const FORM_COMPONENT = "component";
+const FORM_COMPONENT_FAMILY = "component-family";
+const FORM_REQUIREMENT = "requirement";
 
 /// Error set for `describeComponent`. Combines allocator/JSON-writer errors
 /// (we synthesize JSON ourselves) with file I/O — a real I/O failure bubbles
@@ -40,11 +44,11 @@ pub fn describeComponent(
     name: []const u8,
     out: *std.ArrayListUnmanaged(u8),
 ) DescribeError!bool {
-    if (name.len == 0 or std.mem.indexOfAny(u8, name, "/\\") != null or std.mem.indexOf(u8, name, "..") != null) {
-        return writeJsonError(allocator, out, "invalid component name");
+    if (!validComponentName(name)) {
+        return writeJsonError(allocator, out, ERR_INVALID_NAME);
     }
 
-    const comp_path = try std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, name });
+    const comp_path = try componentPath(allocator, project_dir, name);
     defer allocator.free(comp_path);
     const comp_src = infra_fs.cwd().readFileAlloc(allocator, comp_path, MAX_COMPONENT_BYTES) catch |e| switch (e) {
         error.FileNotFound => return writeJsonError(allocator, out, ERR_COMPONENT_NOT_FOUND),
@@ -63,8 +67,8 @@ pub fn describeComponent(
     if (root_children.len < 2) return writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
 
     const head = root_children[0].asAtom() orelse return writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
-    const is_family = std.mem.eql(u8, head, "component-family");
-    if (!is_family and !std.mem.eql(u8, head, "component")) {
+    const is_family = std.mem.eql(u8, head, FORM_COMPONENT_FAMILY);
+    if (!is_family and !std.mem.eql(u8, head, FORM_COMPONENT)) {
         return writeJsonError(allocator, out, "not a component or component-family");
     }
 
@@ -307,7 +311,7 @@ fn writeComponentJson(
     try w.writeAll(",\"requested_name\":");
     try writeJsonString(w, requested_name);
     try w.writeAll(",\"kind\":\"");
-    try w.writeAll(if (info.is_family) "component-family" else "component");
+    try w.writeAll(if (info.is_family) FORM_COMPONENT_FAMILY else FORM_COMPONENT);
     try w.writeAll("\",\"is_family\":");
     try w.writeAll(if (info.is_family) "true" else "false");
     try w.writeAll(",\"description\":");
@@ -360,7 +364,7 @@ fn writeComponentJson(
     try w.writeAll(",\"requirements\":[");
     var req_first = true;
     for (root_body) |child| {
-        if (!child.isForm("requirement")) continue;
+        if (!child.isForm(FORM_REQUIREMENT)) continue;
         const cl = child.asList() orelse continue;
         if (cl.len < 2) continue;
         if (!req_first) try w.writeAll(",");
@@ -372,7 +376,10 @@ fn writeComponentJson(
 
 fn writeRequirementJson(w: anytype, cl: []const ast.Node) !void {
     const text = if (cl.len >= 2) (cl[1].asString() orelse cl[1].asAtom() orelse "") else "";
-    try w.writeAll("{\"text\":");
+    try w.writeAll("{\"id\":");
+    var id_buf: [8]u8 = undefined;
+    try writeJsonString(w, requirementId(cl, &id_buf));
+    try w.writeAll(",\"text\":");
     try writeJsonString(w, text);
 
     var ref_pdf: []const u8 = "";
@@ -447,6 +454,381 @@ fn writeJsonString(w: anytype, s: []const u8) !void {
     try w.writeAll("\"");
 }
 
+// ── Requirement editing (list / add / remove) ─────────────────────────
+//
+// `(requirement ...)` forms live on the library component, not the design,
+// so a rule added here is inherited by every design that instantiates the
+// part. These three functions back the MCP tools of the same name. Writes
+// splice the source text directly — rather than re-emitting the AST — so the
+// hand-authored formatting and comments in the component file survive.
+
+/// Error set for the requirement editors. Superset of the read-only
+/// `DescribeError` plus the file-write errors the mutators incur. Kept
+/// unexported — callers (mcp_tools) only ever propagate it via `!bool`.
+const ReqError = std.mem.Allocator.Error || std.Io.Writer.Error ||
+    std.fs.File.OpenError || std.fs.File.ReadError || std.fs.File.WriteError ||
+    std.fs.Dir.StatFileError || error{ FileTooBig, StreamTooLong };
+
+fn validComponentName(name: []const u8) bool {
+    return name.len > 0 and
+        std.mem.indexOfAny(u8, name, "/\\") == null and
+        std.mem.indexOf(u8, name, "..") == null;
+}
+
+fn componentPath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, name });
+}
+
+/// Validate `nodes` is a single `(component ...)` / `(component-family ...)`
+/// form and return its body (children after the declared name). On any
+/// structural problem, writes a JSON error into `out` and returns null.
+fn componentRootBody(nodes: []const ast.Node, allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !?[]const ast.Node {
+    if (nodes.len == 0) {
+        _ = try writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
+        return null;
+    }
+    const rc = nodes[0].asList() orelse {
+        _ = try writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
+        return null;
+    };
+    if (rc.len < 2) {
+        _ = try writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
+        return null;
+    }
+    const head = rc[0].asAtom() orelse {
+        _ = try writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
+        return null;
+    };
+    if (!std.mem.eql(u8, head, FORM_COMPONENT) and !std.mem.eql(u8, head, FORM_COMPONENT_FAMILY)) {
+        _ = try writeJsonError(allocator, out, "not a component or component-family");
+        return null;
+    }
+    return rc[2..];
+}
+
+/// The requirement's id: an explicit `(id ...)` sub-form if present, else the
+/// Crc32 of the requirement text — matching `env.requirementIdForText` so the
+/// value is the same one a `(verifies (req ...))` form references. An explicit
+/// id is returned as a slice into the AST; the derived id is written into
+/// `buf` and returned as a slice of it.
+fn requirementId(cl: []const ast.Node, buf: *[8]u8) []const u8 {
+    for (cl[2..]) |sub| {
+        if (!sub.isForm("id")) continue;
+        const sl = sub.asList() orelse continue;
+        if (sl.len < 2) continue;
+        const explicit = sl[1].asAtom() orelse sl[1].asString() orelse continue;
+        if (explicit.len > 0) return explicit;
+    }
+    const text = if (cl.len >= 2) (cl[1].asString() orelse cl[1].asAtom() orelse "") else "";
+    var hasher = std.hash.Crc32.init();
+    hasher.update(text);
+    return std.fmt.bufPrint(buf, "{x:0>8}", .{hasher.final()}) catch buf[0..0];
+}
+
+fn requirementIdMatches(cl: []const ast.Node, target: []const u8) bool {
+    var buf: [8]u8 = undefined;
+    return std.mem.eql(u8, requirementId(cl, &buf), target);
+}
+
+/// True if requirement `cl`'s stored text equals `plain` once `plain` is
+/// escaped the same way the stored value is (the AST keeps source escapes).
+fn requirementTextMatches(allocator: std.mem.Allocator, cl: []const ast.Node, plain: []const u8) bool {
+    const stored = if (cl.len >= 2) (cl[1].asString() orelse cl[1].asAtom() orelse "") else "";
+    var esc: std.ArrayListUnmanaged(u8) = .empty;
+    defer esc.deinit(allocator);
+    writeSexprEscaped(esc.writer(allocator), plain) catch return false;
+    return std.mem.eql(u8, stored, esc.items);
+}
+
+/// Write `s` escaped for an S-expression string literal (only `"` and `\`
+/// need escaping; the tokenizer treats everything else verbatim).
+fn writeSexprEscaped(w: anytype, s: []const u8) !void {
+    for (s) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        else => try w.writeByte(c),
+    };
+}
+
+/// Parse-and-validate a `(check ...)` clause with the same machinery the
+/// build uses, so an unrecognized check is rejected before it reaches a file.
+fn checkClauseValid(allocator: std.mem.Allocator, cs: []const u8) bool {
+    const nodes = sexpr_parser.parse(allocator, cs) catch return false;
+    defer sexpr_parser.freeNodes(allocator, nodes);
+    if (nodes.len != 1) return false;
+    if (!nodes[0].isForm("check")) return false;
+    return env_mod.parseCheck(nodes[0]) != null;
+}
+
+/// Byte index of the `)` that closes the top-level form — the last `)` in
+/// `src`, since a component file holds one form. Returns null if the last
+/// non-whitespace byte isn't `)`.
+fn lastParenIndex(src: []const u8) ?usize {
+    var i = src.len;
+    while (i > 0) {
+        i -= 1;
+        switch (src[i]) {
+            ' ', '\t', '\r', '\n' => continue,
+            ')' => return i,
+            else => return null,
+        }
+    }
+    return null;
+}
+
+/// Byte index one past the `)` closing the list that begins at `start` (where
+/// `src[start] == '('`). Respects string literals and `\` escapes so parens
+/// inside requirement text don't skew the count. Returns null if unbalanced.
+fn formEnd(src: []const u8, start: usize) ?usize {
+    var depth: i32 = 0;
+    var in_str = false;
+    var i = start;
+    while (i < src.len) : (i += 1) {
+        const c = src[i];
+        if (in_str) {
+            if (c == '\\') {
+                i += 1;
+                continue;
+            }
+            if (c == '"') in_str = false;
+            continue;
+        }
+        switch (c) {
+            '"' => in_str = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if (depth == 0) return i + 1;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// Insert `form` as the final child of the component, just before its closing
+/// paren, preserving existing formatting. Returns null if there is no `)`.
+/// Caller owns the result.
+fn spliceRequirement(allocator: std.mem.Allocator, src: []const u8, form: []const u8) !?[]u8 {
+    const close = lastParenIndex(src) orelse return null;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, src[0..close]);
+    try buf.appendSlice(allocator, "\n  ");
+    try buf.appendSlice(allocator, form);
+    try buf.appendSlice(allocator, src[close..]);
+    return try buf.toOwnedSlice(allocator);
+}
+
+/// Delete the requirement form beginning at byte `start`, along with the
+/// preceding newline + indentation so no blank line is left behind. When the
+/// removed form was the last child, the component's trailing `)` (on the same
+/// line) is preserved and reattaches to the prior line. Returns null if the
+/// form is unbalanced. Caller owns the result.
+fn removeFormSrc(allocator: std.mem.Allocator, src: []const u8, start: usize) !?[]u8 {
+    const end = formEnd(src, start) orelse return null;
+    const del_start = std.mem.lastIndexOfScalar(u8, src[0..start], '\n') orelse start;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, src[0..del_start]);
+    try buf.appendSlice(allocator, src[end..]);
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn writeComponentFile(path: []const u8, contents: []const u8) !void {
+    const file = try infra_fs.cwd().createFile(path, .{});
+    defer file.close();
+    try file.writeAll(contents);
+}
+
+/// List the `(requirement ...)` forms on `lib/components/<name>.sexp`. Emits
+/// `{ok:true, name, requirements:[{id, text, ref, check_kind}]}`.
+pub fn listRequirements(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    out: *std.ArrayListUnmanaged(u8),
+) ReqError!bool {
+    if (!validComponentName(name)) return writeJsonError(allocator, out, ERR_INVALID_NAME);
+    const path = try componentPath(allocator, project_dir, name);
+    defer allocator.free(path);
+    const src = infra_fs.cwd().readFileAlloc(allocator, path, MAX_COMPONENT_BYTES) catch |e| switch (e) {
+        error.FileNotFound => return writeJsonError(allocator, out, ERR_COMPONENT_NOT_FOUND),
+        else => return e,
+    };
+    defer allocator.free(src);
+    const nodes = sexpr_parser.parse(allocator, src) catch return writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
+    defer sexpr_parser.freeNodes(allocator, nodes);
+    const body = (try componentRootBody(nodes, allocator, out)) orelse return false;
+
+    const w = out.writer(allocator);
+    try w.writeAll("{\"ok\":true,\"name\":");
+    try writeJsonString(w, name);
+    try w.writeAll(",\"requirements\":[");
+    var first = true;
+    for (body) |child| {
+        if (!child.isForm(FORM_REQUIREMENT)) continue;
+        const cl = child.asList() orelse continue;
+        if (cl.len < 2) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try writeRequirementJson(w, cl);
+    }
+    try w.writeAll("]}");
+    return true;
+}
+
+/// Append a `(requirement ...)` form to `lib/components/<name>.sexp`. The
+/// optional `check_src` is a full `(check ...)` S-expression, validated before
+/// writing. Rejects a duplicate (same derived id). Emits `{ok:true,id,text}`.
+pub fn addRequirement(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    text: []const u8,
+    ref_pdf: ?[]const u8,
+    ref_page: ?u32,
+    ref_quote: ?[]const u8,
+    check_src: ?[]const u8,
+    out: *std.ArrayListUnmanaged(u8),
+) ReqError!bool {
+    if (!validComponentName(name)) return writeJsonError(allocator, out, ERR_INVALID_NAME);
+    if (text.len == 0) return writeJsonError(allocator, out, "text must be a non-empty string");
+    if (check_src) |cs| {
+        if (cs.len > 0 and !checkClauseValid(allocator, cs))
+            return writeJsonError(allocator, out, "check must be a single (check ...) form recognized by the checker");
+    }
+
+    const path = try componentPath(allocator, project_dir, name);
+    defer allocator.free(path);
+    const src = infra_fs.cwd().readFileAlloc(allocator, path, MAX_COMPONENT_BYTES) catch |e| switch (e) {
+        error.FileNotFound => return writeJsonError(allocator, out, ERR_COMPONENT_NOT_FOUND),
+        else => return e,
+    };
+    defer allocator.free(src);
+    const nodes = sexpr_parser.parse(allocator, src) catch return writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
+    defer sexpr_parser.freeNodes(allocator, nodes);
+    const body = (try componentRootBody(nodes, allocator, out)) orelse return false;
+
+    // Escaped inner text — what is stored between the quotes, and what the id
+    // derives from (so it matches env.requirementIdForText downstream).
+    var esc: std.ArrayListUnmanaged(u8) = .empty;
+    defer esc.deinit(allocator);
+    try writeSexprEscaped(esc.writer(allocator), text);
+    var hasher = std.hash.Crc32.init();
+    hasher.update(esc.items);
+    const id_hex = try std.fmt.allocPrint(allocator, "{x:0>8}", .{hasher.final()});
+    defer allocator.free(id_hex);
+
+    for (body) |child| {
+        if (!child.isForm(FORM_REQUIREMENT)) continue;
+        const cl = child.asList() orelse continue;
+        if (cl.len < 2) continue;
+        if (!requirementIdMatches(cl, id_hex)) continue;
+        const msg = try std.fmt.allocPrint(allocator, "requirement already exists (id {s})", .{id_hex});
+        defer allocator.free(msg);
+        return writeJsonError(allocator, out, msg);
+    }
+
+    var form: std.ArrayListUnmanaged(u8) = .empty;
+    defer form.deinit(allocator);
+    const fw = form.writer(allocator);
+    try fw.print("(requirement \"{s}\"", .{esc.items});
+    if (ref_pdf) |pdf| {
+        if (pdf.len > 0) {
+            try fw.writeAll(" (ref \"");
+            try writeSexprEscaped(fw, pdf);
+            try fw.writeAll("\"");
+            if (ref_page) |pg| try fw.print(" (page {d})", .{pg});
+            if (ref_quote) |q| {
+                if (q.len > 0) {
+                    try fw.writeAll(" (quote \"");
+                    try writeSexprEscaped(fw, q);
+                    try fw.writeAll("\")");
+                }
+            }
+            try fw.writeAll(")");
+        }
+    }
+    if (check_src) |cs| {
+        if (cs.len > 0) {
+            try fw.writeByte(' ');
+            try fw.writeAll(std.mem.trim(u8, cs, " \t\r\n"));
+        }
+    }
+    try fw.writeAll(")");
+
+    const new_src = (try spliceRequirement(allocator, src, form.items)) orelse
+        return writeJsonError(allocator, out, "component file has no closing paren");
+    defer allocator.free(new_src);
+    try writeComponentFile(path, new_src);
+
+    const w = out.writer(allocator);
+    try w.writeAll("{\"ok\":true,\"id\":");
+    try writeJsonString(w, id_hex);
+    try w.writeAll(",\"text\":");
+    try writeJsonString(w, text);
+    try w.writeAll("}");
+    return true;
+}
+
+/// Remove a `(requirement ...)` form from `lib/components/<name>.sexp`,
+/// matched by `target_id` (preferred) or exact `target_text`. Emits
+/// `{ok:true,removed_id}`.
+pub fn removeRequirement(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    target_id: ?[]const u8,
+    target_text: ?[]const u8,
+    out: *std.ArrayListUnmanaged(u8),
+) ReqError!bool {
+    if (!validComponentName(name)) return writeJsonError(allocator, out, ERR_INVALID_NAME);
+    const has_id = target_id != null and target_id.?.len > 0;
+    const has_text = target_text != null and target_text.?.len > 0;
+    if (!has_id and !has_text) return writeJsonError(allocator, out, "must supply id or text");
+
+    const path = try componentPath(allocator, project_dir, name);
+    defer allocator.free(path);
+    const src = infra_fs.cwd().readFileAlloc(allocator, path, MAX_COMPONENT_BYTES) catch |e| switch (e) {
+        error.FileNotFound => return writeJsonError(allocator, out, ERR_COMPONENT_NOT_FOUND),
+        else => return e,
+    };
+    defer allocator.free(src);
+    const nodes = sexpr_parser.parse(allocator, src) catch return writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
+    defer sexpr_parser.freeNodes(allocator, nodes);
+    const body = (try componentRootBody(nodes, allocator, out)) orelse return false;
+
+    var found = false;
+    var matched_start: usize = 0;
+    var id_buf: [8]u8 = undefined;
+    var removed_id: []const u8 = "";
+    for (body) |child| {
+        if (!child.isForm(FORM_REQUIREMENT)) continue;
+        const cl = child.asList() orelse continue;
+        if (cl.len < 2) continue;
+        const is_match = (has_id and requirementIdMatches(cl, target_id.?)) or
+            (has_text and requirementTextMatches(allocator, cl, target_text.?));
+        if (!is_match) continue;
+        found = true;
+        matched_start = child.span.offset;
+        removed_id = requirementId(cl, &id_buf);
+        break;
+    }
+    if (!found) return writeJsonError(allocator, out, "no requirement matches the given id or text");
+
+    const new_src = (try removeFormSrc(allocator, src, matched_start)) orelse
+        return writeJsonError(allocator, out, "requirement form is unbalanced");
+    defer allocator.free(new_src);
+    try writeComponentFile(path, new_src);
+
+    const w = out.writer(allocator);
+    try w.writeAll("{\"ok\":true,\"removed_id\":");
+    try writeJsonString(w, removed_id);
+    try w.writeAll("}");
+    return true;
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────
 
 test "parsePinoutBody handles integer, atom, and string pin IDs" {
@@ -510,4 +892,121 @@ test "writeCheckKindName dasherizes underscored variant names" {
     try w.writeByte(',');
     try writeCheckKindName(w, variants[2]);
     try std.testing.expectEqualStrings("connected,pullup-range,pin-not-floating", buf.items);
+}
+
+test "requirementId derives the Crc32 id and honors an explicit id" {
+    // spec: serve/component_info - listRequirements returns each requirement with its derived id
+    const alloc = std.testing.allocator;
+
+    const derived = try sexpr_parser.parse(alloc, "(requirement \"VBAT must connect to VDD\")");
+    defer sexpr_parser.freeNodes(alloc, derived);
+    var buf: [8]u8 = undefined;
+    const want = try env_mod.requirementIdForText(alloc, "VBAT must connect to VDD");
+    defer alloc.free(want);
+    try std.testing.expectEqualStrings(want, requirementId(derived[0].asList().?, &buf));
+
+    const explicit = try sexpr_parser.parse(alloc, "(requirement \"x\" (id deadbeef))");
+    defer sexpr_parser.freeNodes(alloc, explicit);
+    try std.testing.expectEqualStrings("deadbeef", requirementId(explicit[0].asList().?, &buf));
+}
+
+test "spliceRequirement inserts a new form before the component close" {
+    // spec: serve/component_info - addRequirement appends a requirement form before the component close
+    const alloc = std.testing.allocator;
+    const src = "(component \"x\"\n  (footprint y)\n  (requirement \"first\"))\n";
+    const out = (try spliceRequirement(alloc, src, "(requirement \"second\")")).?;
+    defer alloc.free(out);
+    const expected = "(component \"x\"\n  (footprint y)\n  (requirement \"first\")\n  (requirement \"second\"))\n";
+    try std.testing.expectEqualStrings(expected, out);
+}
+
+test "checkClauseValid accepts a known check and rejects others" {
+    // spec: serve/component_info - addRequirement rejects a check clause the checker does not recognize
+    const alloc = std.testing.allocator;
+    try std.testing.expect(checkClauseValid(alloc, "(check (connected (pin \"A\") (pin \"B\")))"));
+    // Missing the (check ...) wrapper.
+    try std.testing.expect(!checkClauseValid(alloc, "(connected (pin \"A\") (pin \"B\"))"));
+    // Unknown primitive inside an otherwise well-formed check.
+    try std.testing.expect(!checkClauseValid(alloc, "(check (no-such-rule (pin \"A\")))"));
+    // Not even parseable.
+    try std.testing.expect(!checkClauseValid(alloc, "(check (connected"));
+}
+
+test "removeFormSrc deletes a middle requirement and reattaches the close on the last" {
+    // spec: serve/component_info - removeRequirement deletes a requirement by id or exact text
+    const alloc = std.testing.allocator;
+    const src = "(component \"x\"\n  (requirement \"a\")\n  (requirement \"b\")\n  (requirement \"c\"))\n";
+
+    // Remove the middle one ("b" at its '(' offset).
+    const b_start = std.mem.indexOf(u8, src, "(requirement \"b\")").?;
+    const mid = (try removeFormSrc(alloc, src, b_start)).?;
+    defer alloc.free(mid);
+    try std.testing.expectEqualStrings(
+        "(component \"x\"\n  (requirement \"a\")\n  (requirement \"c\"))\n",
+        mid,
+    );
+
+    // Remove the last one ("c") — the component's trailing ')' must survive
+    // and reattach to the prior requirement's line.
+    const c_start = std.mem.indexOf(u8, src, "(requirement \"c\")").?;
+    const last = (try removeFormSrc(alloc, src, c_start)).?;
+    defer alloc.free(last);
+    try std.testing.expectEqualStrings(
+        "(component \"x\"\n  (requirement \"a\")\n  (requirement \"b\"))\n",
+        last,
+    );
+}
+
+test "formEnd ignores parens inside string literals" {
+    // spec: serve/component_info - formEnd skips parens inside string literals
+    const src = "(requirement \"text with ) paren\") trailing";
+    const end = formEnd(src, 0).?;
+    try std.testing.expectEqualStrings("(requirement \"text with ) paren\")", src[0..end]);
+}
+
+test "add/list/remove requirement round-trips through the component file on disk" {
+    // spec: serve/component_info - add list and remove requirement round-trip on disk
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("lib/components");
+    try tmp.dir.writeFile(.{ .sub_path = "lib/components/foo.sexp", .data = "(component \"foo\"\n  (footprint x))\n" });
+    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(proj);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(alloc);
+
+    // Add — with a datasheet ref and a validated (check ...) clause.
+    const check = "(check (connected (pin \"1\") (pin \"GND\")))";
+    try std.testing.expect(try addRequirement(alloc, proj, "foo", "Pin 1 must be tied to GND", "ds.pdf", 3, "tie to GND", check, &out));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"ok\":true") != null);
+    const want_id = try env_mod.requirementIdForText(alloc, "Pin 1 must be tied to GND");
+    defer alloc.free(want_id);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, want_id) != null);
+
+    // The file gained the form, ref, and check — and still parses.
+    const after = try tmp.dir.readFileAlloc(alloc, "lib/components/foo.sexp", 1 << 20);
+    defer alloc.free(after);
+    try std.testing.expect(std.mem.indexOf(u8, after, "(requirement \"Pin 1 must be tied to GND\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after, "(check (connected (pin \"1\") (pin \"GND\")))") != null);
+    const reparsed = try sexpr_parser.parse(alloc, after);
+    sexpr_parser.freeNodes(alloc, reparsed);
+
+    // List surfaces it with its id.
+    out.clearRetainingCapacity();
+    try std.testing.expect(try listRequirements(alloc, proj, "foo", &out));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, want_id) != null);
+
+    // A duplicate add (same derived id) is rejected.
+    out.clearRetainingCapacity();
+    try std.testing.expect(!try addRequirement(alloc, proj, "foo", "Pin 1 must be tied to GND", null, null, null, null, &out));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "already exists") != null);
+
+    // Remove by id, then the list is empty again.
+    out.clearRetainingCapacity();
+    try std.testing.expect(try removeRequirement(alloc, proj, "foo", want_id, null, &out));
+    out.clearRetainingCapacity();
+    try std.testing.expect(try listRequirements(alloc, proj, "foo", &out));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"requirements\":[]") != null);
 }

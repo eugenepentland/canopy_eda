@@ -284,7 +284,10 @@ src/serve/bom_html.zig::writeBomCsv | fn writeBomCsv(w: anytype, block: *const e
 src/serve/bom_html.zig::writeComponentsJson | fn writeComponentsJson( w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8, sym_cache: *const SymbolPinCache, allocator: std.mem.Allocator, project_dir: []const u8, ) BomError!bool
 src/serve/bom_html.zig::writeNetsJson | fn writeNetsJson(w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8) BomError!bool
 src/serve/bom_html.zig::writeSchematicBomHtml | fn writeSchematicBomHtml(wr: anytype, block: *const env_mod.DesignBlock) BomError!void
+src/serve/component_info.zig::addRequirement | fn addRequirement( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, text: []const u8, ref_pdf: ?[]const u8, ref_page: ?u32, ref_quote: ?[]const u8, check_src: ?[]const u8, out: *std.ArrayListUnmanaged(u8), ) ReqError!bool
 src/serve/component_info.zig::describeComponent | fn describeComponent( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, out: *std.ArrayListUnmanaged(u8), ) DescribeError!bool
+src/serve/component_info.zig::listRequirements | fn listRequirements( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, out: *std.ArrayListUnmanaged(u8), ) ReqError!bool
+src/serve/component_info.zig::removeRequirement | fn removeRequirement( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, target_id: ?[]const u8, target_text: ?[]const u8, out: *std.ArrayListUnmanaged(u8), ) ReqError!bool
 src/serve/edit.zig::addComponentDatasheetCore | fn addComponentDatasheetCore( allocator: std.mem.Allocator, project_dir: []const u8, component_name: []const u8, pdf: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::addInstanceApi | fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::addSectionNoteCore | fn addSectionNoteCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, section_name: []const u8, text: []const u8, pdf: []const u8, page: u32, ) EditError!MutationResult
@@ -313,6 +316,7 @@ src/serve/library.zig::libraryPage | fn libraryPage(ctx: *Handler, _: *httpz.Req
 src/serve/mcp.zig::dispatchFrame | fn dispatchFrame( allocator: std.mem.Allocator, project_dir: []const u8, data: []const u8, role: users.Role, ) HandlerError!?[]const u8
 src/serve/mcp.zig::postApi | fn postApi(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/mcp.zig::upgrade | fn upgrade(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/mcp_docs.zig::mcpDocsPage | fn mcpDocsPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/mcp_tools.zig::call | fn call( allocator: std.mem.Allocator, project_dir: []const u8, tool_name: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), ) CallResult
 src/serve/mcp_tools.zig::isMutationTool | fn isMutationTool(name: []const u8) bool
 src/serve/mcp_tools.zig::listDesignNames | fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) ToolError![][]const u8

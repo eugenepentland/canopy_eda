@@ -23,6 +23,7 @@ pub fn build(b: *std.Build) void {
         b.path("src/serve/templates/oauth.zt"),
         b.path("src/serve/templates/library.zt"),
         b.path("src/serve/templates/auth.zt"),
+        b.path("src/serve/templates/mcp_docs.zt"),
     });
 
     // Main executable

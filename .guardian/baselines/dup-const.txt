@@ -23,6 +23,8 @@ in: src/serve/templates/account.zig
 in: src/serve/templates/auth.zig
 in: src/serve/templates/auth.zig
 in: src/serve/templates/library.zig
+in: src/serve/templates/mcp_docs.zig
+in: src/serve/templates/mcp_docs.zig
 in: src/serve/templates/oauth.zig
 in: src/serve/templates/pages.zig
 in: src/serve/upload.zig
