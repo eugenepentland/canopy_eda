@@ -371,7 +371,6 @@ src/serve/schematic_page.zig::schematicPage | fn schematicPage(ctx: *Handler, re
 src/serve/static_assets.zig::staticAsset | fn staticAsset(_: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/sync.zig::runSyncPlan | fn runSyncPlan( arena: std.mem.Allocator, handler_alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, parsed: ParsedSyncPlan, ) SyncRunError!SyncRunResult
 src/serve/sync.zig::syncKicadPcbApi | fn syncKicadPcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/sync.zig::syncPlanApi | fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/upload.zig::extractFootprintName | fn extractFootprintName(allocator: std.mem.Allocator, footprint: []const u8) ?[]const u8
 src/serve/upload.zig::extractPackageName | fn extractPackageName(sym_data: []const u8) []const u8
 src/serve/upload.zig::sanitizeName | fn sanitizeName(allocator: std.mem.Allocator, name: []const u8) []const u8

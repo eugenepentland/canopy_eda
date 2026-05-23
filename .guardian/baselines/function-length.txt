@@ -1,5 +1,5 @@
 # guardian-snapshot v1
 src/eval/power_budget.zig:74: fn analyze is 253 lines (cap 200)
 src/render_json.zig:522: fn renderSceneGraph is 251 lines (cap 200)
-src/serve/auth.zig:1284: fn loginCompletePage is 230 lines (cap 200)
-src/serve/auth.zig:905: fn registerCompletePage is 333 lines (cap 200)
+src/serve/auth.zig:1281: fn loginCompletePage is 230 lines (cap 200)
+src/serve/auth.zig:902: fn registerCompletePage is 333 lines (cap 200)

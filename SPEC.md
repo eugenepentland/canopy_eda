@@ -369,7 +369,7 @@ Public functions: notFound, serve
 
 ## serve/sync
 
-Public functions: runSyncPlan, syncKicadPcbApi, syncPlanApi
+Public functions: runSyncPlan, syncKicadPcbApi
 
 - runSyncPlan diffs a parsed board state against the design and returns a JSON envelope with version, summary, and the ops list
 - runSyncPlan errors with NotADesign when the source file does not evaluate to a design-block

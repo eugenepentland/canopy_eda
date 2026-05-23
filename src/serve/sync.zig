@@ -1,11 +1,5 @@
 //! Server-side diff and file-based applier for KiCad PCB sync.
 //!
-//!   POST /api/sync-plan/:name — accepts a board state from a client,
-//!   compares against the design's flattened netlist, and returns ops to
-//!   apply (set_field / set_pad_net / add / swap_footprint / remove /
-//!   flag_stale). `add` / `swap_footprint` carry their `.kicad_mod`
-//!   text inline. Useful as a debug endpoint.
-//!
 //!   POST /api/sync-kicad-pcb/:name — reads the design's
 //!   `(kicad-pcb "<path>")` form, runs the diff against the file on
 //!   disk, and writes the updated `.kicad_pcb` in place. This is the
@@ -79,7 +73,7 @@ fn warnResolveIdentities(name: []const u8, err: anyerror) void {
     log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(err) });
 }
 
-// ── /api/sync-plan ──────────────────────────────────────────────────────
+// ── Board-state types (shared by the diff engine) ───────────────────────
 
 /// One (pad number, net name) assignment on a KiCad board footprint —
 /// the granularity the diff loop compares against the design's flattened
@@ -127,9 +121,8 @@ fn opTargetUuid(m: BoardFp) []const u8 {
 
 /// Full request payload for `runSyncPlan`: the board's current footprint
 /// list plus the knobs that influence matching (migration heuristics,
-/// stale-prune mode, applied-op suppression). Built from the agent's
-/// JSON body via `parseSyncPlanBody` or directly by the file-based PCB
-/// reader.
+/// stale-prune mode, applied-op suppression). Built by the file-based PCB
+/// reader from the on-disk `.kicad_pcb`.
 pub const ParsedSyncPlan = struct {
     board: []const BoardFp,
     prune_stale: bool,
@@ -151,104 +144,10 @@ pub const ParsedSyncPlan = struct {
     applied_ops: std.StringHashMap(void),
 };
 
-fn parsePadList(arena: std.mem.Allocator, pv: std.json.Value) std.mem.Allocator.Error![]const PadAssign {
-    var pads_list: std.ArrayListUnmanaged(PadAssign) = .empty;
-    if (pv != .array) return pads_list.items;
-    for (pv.array.items) |p| {
-        if (p != .object) continue;
-        const num = jsonStr(p.object.get("number"));
-        if (num.len == 0) continue;
-        try pads_list.append(arena, .{ .number = num, .net = jsonStr(p.object.get("net")) });
-    }
-    return pads_list.items;
-}
-
-fn parseFieldsMap(arena: std.mem.Allocator, fv: std.json.Value) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]const u8) {
-    var fields: std.StringHashMapUnmanaged([]const u8) = .empty;
-    if (fv != .object) return fields;
-    var it = fv.object.iterator();
-    while (it.next()) |entry| {
-        const key = entry.key_ptr.*;
-        const val = jsonStr(entry.value_ptr.*);
-        try fields.put(arena, key, val);
-    }
-    return fields;
-}
-
-fn parseBoardEntry(arena: std.mem.Allocator, entry: std.json.Value) std.mem.Allocator.Error!?BoardFp {
-    if (entry != .object) return null;
-    const o = entry.object;
-    const pads = if (o.get("pads")) |pv| try parsePadList(arena, pv) else &[_]PadAssign{};
-    const fields = if (o.get("fields")) |fv| try parseFieldsMap(arena, fv) else std.StringHashMapUnmanaged([]const u8){};
-    return BoardFp{
-        .uuid = jsonStr(o.get("uuid")),
-        .kicad_uuid = jsonStr(o.get("kicad_uuid")),
-        .ref = jsonStr(o.get("ref")),
-        .value = jsonStr(o.get("value")),
-        .footprint_name = jsonStr(o.get("footprint_name")),
-        .fields = fields,
-        .pads = pads,
-        .locked = jsonBool(o.get("locked")),
-    };
-}
-
-fn parseSyncPlanBody(arena: std.mem.Allocator, body: []const u8) !ParsedSyncPlan {
-    const parsed = try std.json.parseFromSlice(std.json.Value, arena, body, .{});
-    if (parsed.value != .object) return error.NotObject;
-
-    const prune_stale = jsonBool(parsed.value.object.get("prune_stale"));
-    const migrate_heuristic = jsonBool(parsed.value.object.get("migrate_heuristic"));
-    const applied_ops = try parseAppliedOps(arena, parsed.value.object.get("applied_ops"));
-
-    var board_list: std.ArrayListUnmanaged(BoardFp) = .empty;
-    const bv = parsed.value.object.get("board") orelse {
-        return .{ .board = board_list.items, .prune_stale = prune_stale, .migrate_heuristic = migrate_heuristic, .applied_ops = applied_ops };
-    };
-    if (bv != .array) return .{ .board = board_list.items, .prune_stale = prune_stale, .migrate_heuristic = migrate_heuristic, .applied_ops = applied_ops };
-
-    for (bv.array.items) |entry| {
-        const fp = (try parseBoardEntry(arena, entry)) orelse continue;
-        try board_list.append(arena, fp);
-    }
-    return .{ .board = board_list.items, .prune_stale = prune_stale, .migrate_heuristic = migrate_heuristic, .applied_ops = applied_ops };
-}
-
-/// Build the `<uuid>|<op>|<key>|<value>` fingerprint set the diff loop
-/// consults to skip re-emitting an op the agent has already pushed.
-fn parseAppliedOps(arena: std.mem.Allocator, v: ?std.json.Value) !std.StringHashMap(void) {
-    var out = std.StringHashMap(void).init(arena);
-    const val = v orelse return out;
-    if (val != .array) return out;
-    for (val.array.items) |entry| {
-        if (entry != .object) continue;
-        const o = entry.object;
-        const uuid = jsonStr(o.get("uuid"));
-        const op = jsonStr(o.get("op"));
-        if (uuid.len == 0 or op.len == 0) continue;
-        const key = jsonStr(o.get("key"));
-        const value = jsonStr(o.get("value"));
-        const fp = try std.fmt.allocPrint(arena, "{s}|{s}|{s}|{s}", .{ uuid, op, key, value });
-        try out.put(fp, {});
-    }
-    return out;
-}
-
 /// Compose the fingerprint string used as the key in
-/// `ParsedSyncPlan.applied_ops` (and during emission-suppression
-/// checks). Same layout as `parseAppliedOps` so request-side and
-/// emission-side string lookups round-trip.
+/// `ParsedSyncPlan.applied_ops` during emission-suppression checks.
 fn appliedOpFingerprint(arena: std.mem.Allocator, uuid: []const u8, op: []const u8, key: []const u8, value: []const u8) ![]const u8 {
     return std.fmt.allocPrint(arena, "{s}|{s}|{s}|{s}", .{ uuid, op, key, value });
-}
-
-fn jsonBool(v: ?std.json.Value) bool {
-    const val = v orelse return false;
-    return val == .bool and val.bool;
-}
-
-fn jsonStr(v: ?std.json.Value) []const u8 {
-    const val = v orelse return "";
-    return if (val == .string) val.string else "";
 }
 
 /// Strip the `lib:` prefix that netlist footprint specs carry (`"lib:R_0402"`
@@ -710,10 +609,8 @@ const SyncSummary = struct {
 
 /// Internal result of running the diff against a parsed plan. Holds the
 /// fully-formed response body (envelope + ops list as JSON) plus the
-/// summary counters and design version, so HTTP and file-based callers
-/// can pick the format they need without re-running the diff. Used by
-/// `syncPlanApi` (returns the body verbatim) and by the file-based PCB
-/// sync (parses the ops list back out of `body` to apply locally).
+/// summary counters and design version. The file-based PCB sync parses
+/// the ops list back out of `body` to apply them locally.
 pub const SyncRunResult = struct {
     body: []const u8,
     version: u64,
@@ -778,9 +675,8 @@ fn populatePadNetMaps(
 }
 
 /// Run the sync-plan diff against `parsed` and return the JSON-formatted
-/// response (same shape `syncPlanApi` writes to the HTTP response body).
-/// Extracted from `syncPlanApi` so the file-based KiCad-PCB sync can
-/// share the same diff/op-generation logic without going through HTTP.
+/// response (envelope + ops list). The file-based KiCad-PCB sync calls
+/// this directly to get the ops it then applies to the `.kicad_pcb`.
 pub fn runSyncPlan(
     arena: std.mem.Allocator,
     handler_alloc: std.mem.Allocator,
@@ -943,45 +839,6 @@ pub fn runSyncPlan(
     };
 }
 
-/// POST /api/sync-plan/:name — compare client board state against the
-/// design's flattened netlist and return ops to apply. Auth-gated by
-/// the same OAuth/plugin-token check used for the manifest endpoints.
-pub fn syncPlanApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
-        return;
-    };
-    const body = req.body() orelse {
-        res.status = HTTP_BAD_REQUEST;
-        res.body = "missing body";
-        return;
-    };
-
-    const parsed = parseSyncPlanBody(req.arena, body) catch {
-        res.status = HTTP_BAD_REQUEST;
-        res.body = "invalid request body";
-        return;
-    };
-
-    const result = runSyncPlan(req.arena, ctx.allocator, ctx.project_dir, name, parsed) catch |err| switch (err) {
-        error.BuildFailed => {
-            res.status = HTTP_INTERNAL_ERROR;
-            res.body = ERR_BUILD_ERROR;
-            return;
-        },
-        error.NotADesign => {
-            res.status = HTTP_INTERNAL_ERROR;
-            res.body = ERR_NOT_A_DESIGN;
-            return;
-        },
-        else => |e| return e,
-    };
-
-    res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
-    res.body = result.body;
-}
-
 const kicad_pcb_reader = @import("../kicad_pcb/reader.zig");
 const kicad_pcb_writer = @import("../kicad_pcb/writer.zig");
 
@@ -994,8 +851,8 @@ const MAX_PCB_BYTES: usize = 64 * 1024 * 1024;
 /// POST /api/sync-kicad-pcb/:name — file-based KiCad sync. Reads the
 /// `.kicad_pcb` declared by the design's `(kicad-pcb "<path>")` form,
 /// computes the diff against the design's flattened netlist, and applies
-/// the ops to the file in place — without going through the Go IPC agent.
-/// Query flags: `?dry_run=1` returns the JSON envelope `syncPlanApi` would
+/// the ops to the file in place.
+/// Query flags: `?dry_run=1` returns the JSON envelope the diff would
 /// produce without writing; `?migrate=1` enables the heuristic relink
 /// (parent-path + value + net signature) to recover a board whose
 /// canopy_uuids/ref-des drifted; `?prune=1` turns every `flag_stale` op

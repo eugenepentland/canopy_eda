@@ -1,5 +1,0 @@
-# guardian-snapshot v1
-fixmes 0
-panics 0
-todos 0
-unreachables 0
