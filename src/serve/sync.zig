@@ -56,7 +56,7 @@ const STAGE_BOX_GAP_X_MM: f64 = 6.0;
 const STAGE_BOX_GAP_Y_MM: f64 = 8.0;
 const STAGE_SECTIONS_PER_ROW: usize = 4;
 const STAGE_BOX_STROKE_MM: f64 = 0.15;
-const STAGE_LABEL_SIZE_MM: f64 = 2.0;
+const STAGE_LABEL_SIZE_MM: f64 = 1.5;
 const STAGE_HALF: f64 = 0.5; // grid-cell / box centering factor
 const PROTO_LAYER_DWGS_USER = "BL_Dwgs_User";
 const PROTO_TYPE_URL_BOARDTEXT = "type.googleapis.com/kiapi.board.types.BoardText";
@@ -2014,22 +2014,28 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
     var order: std.ArrayListUnmanaged([]const u8) = .empty;
     try groupAddsBySection(arena, adds, &buckets, &order);
 
-    // Flow boxes left-to-right, wrapping after STAGE_SECTIONS_PER_ROW; each
-    // row's height is the tallest box in it.
+    // Uniform box size: size every section box to the largest section so the
+    // staging area reads as a clean, regular grid. Oversized boxes for small
+    // sections are fine — uniformity beats tight packing here.
+    var max_n: usize = 0;
+    for (order.items) |sec| {
+        const n = (buckets.get(sec) orelse continue).items.len;
+        if (n > max_n) max_n = n;
+    }
+    const ucols = boxCols(max_n);
+    const urows = (max_n + ucols - 1) / ucols;
+    const box_w = 2 * STAGE_BOX_PAD_MM + @as(f64, @floatFromInt(ucols)) * STAGE_PART_PITCH_MM;
+    const box_h = STAGE_LABEL_H_MM + 2 * STAGE_BOX_PAD_MM + @as(f64, @floatFromInt(urows)) * STAGE_PART_PITCH_MM;
+
+    // Flow uniform boxes left-to-right, wrapping after STAGE_SECTIONS_PER_ROW.
     var cur_x: f64 = STAGE_ORIGIN_X_MM;
     var row_top: f64 = STAGE_ORIGIN_Y_MM;
-    var row_h: f64 = 0;
     var in_row: usize = 0;
     for (order.items) |sec| {
         const idxs = (buckets.get(sec) orelse continue).items;
-        const cols = boxCols(idxs.len);
-        const rows = (idxs.len + cols - 1) / cols;
-        const box_w = 2 * STAGE_BOX_PAD_MM + @as(f64, @floatFromInt(cols)) * STAGE_PART_PITCH_MM;
-        const box_h = STAGE_LABEL_H_MM + 2 * STAGE_BOX_PAD_MM + @as(f64, @floatFromInt(rows)) * STAGE_PART_PITCH_MM;
         if (in_row == STAGE_SECTIONS_PER_ROW) {
             cur_x = STAGE_ORIGIN_X_MM;
-            row_top += row_h + STAGE_BOX_GAP_Y_MM;
-            row_h = 0;
+            row_top += box_h + STAGE_BOX_GAP_Y_MM;
             in_row = 0;
         }
         var emitted: usize = 0;
@@ -2037,8 +2043,8 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
             const pa = adds[idx];
             const kmod = loadKicadMod(d.spc, pa.fp_name, pa.inst.component) orelse continue;
             const fp_def = loadFootprintDefForInstance(d.spc, pa.fp_name, pa.inst, pa.canopy_net, pa.section);
-            const col: f64 = @floatFromInt(j % cols);
-            const row: f64 = @floatFromInt(j / cols);
+            const col: f64 = @floatFromInt(j % ucols);
+            const row: f64 = @floatFromInt(j / ucols);
             const px = cur_x + STAGE_BOX_PAD_MM + (col + STAGE_HALF) * STAGE_PART_PITCH_MM;
             const py = row_top + STAGE_LABEL_H_MM + STAGE_BOX_PAD_MM + (row + STAGE_HALF) * STAGE_PART_PITCH_MM;
             try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, mmToNm(px), mmToNm(py), pa.canopy_net, pa.section);
@@ -2059,7 +2065,6 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
             }
         }
         cur_x += box_w + STAGE_BOX_GAP_X_MM;
-        if (box_h > row_h) row_h = box_h;
         in_row += 1;
     }
 }
