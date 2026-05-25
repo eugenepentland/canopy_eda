@@ -863,6 +863,7 @@
   // (kicad-pcb …) form").
   var pushPcbBtn = document.getElementById('push-kicad-pcb-btn');
   var pushPcbPruneBtn = document.getElementById('push-kicad-pcb-prune-btn');
+  var pushPcbDotBtn = document.getElementById('push-kicad-pcb-dotnets-btn');
   var pushPcbStatus = document.getElementById('push-kicad-pcb-status');
 
   // Shared click handler so the plain Push and Push + Delete Stale
@@ -921,6 +922,7 @@
   }
   wireKicadPushButton(pushPcbBtn, '/api/sync-kicad-pcb/' + DESIGN_NAME, 'Pushing…');
   wireKicadPushButton(pushPcbPruneBtn, '/api/sync-kicad-pcb/' + DESIGN_NAME + '?prune=1', 'Pushing + pruning…');
+  wireKicadPushButton(pushPcbDotBtn, '/api/sync-kicad-pcb/' + DESIGN_NAME + '?dot_nets=1', 'Pushing (per-pin nets)…');
 
   // ---- Copy SRC ----
   // Fetches the raw .sexp source via /api/source/:name and writes it to the

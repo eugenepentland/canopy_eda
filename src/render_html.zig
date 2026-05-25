@@ -278,6 +278,17 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
             "(no longer in the design). Use after the design and board have drifted apart.\">" ++
             "\u{2192} Push + Delete Stale</button>",
     );
+    // Dot-net variant: keeps each `(decouple …)` per-pin sub-net (VDD.U18.IN)
+    // as the pad net instead of collapsing to the bare rail (?dot_nets=1), so
+    // the board shows which bypass cap pairs with which pin. Those become
+    // electrically-distinct nets — the user rejoins them with copper/zone.
+    try w.writeAll(
+        "<button class=\"kicad-row-btn\" id=\"push-kicad-pcb-dotnets-btn\" " ++
+            "title=\"Same as Push, but keeps per-pin decoupling sub-nets (e.g. VDD.U18.IN) " ++
+            "as distinct pad nets so each bypass cap shows which pin it belongs to. " ++
+            "Rejoin them with copper/zone since the ratsnest won't tie them.\">" ++
+            "\u{2192} Push (per-pin nets)</button>",
+    );
     try w.writeAll("<span id=\"push-kicad-pcb-status\" class=\"kicad-row-status\"></span>");
     try w.writeAll("</div></div>");
     try w.print("<a class=\"head-link\" href=\"/api/export-bom/{s}\">BOM</a>", .{design_name});

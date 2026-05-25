@@ -131,6 +131,12 @@ pub const ParsedSyncPlan = struct {
     /// pair is unique on BOTH the design and the board so we never silently
     /// remap the wrong footprint.
     migrate_heuristic: bool,
+    /// When true, the per-pin `(decouple …)` sub-nets (`<rail>.<ref>.<pin>`,
+    /// e.g. `VDD.U18.IN`) are kept as the pad's net instead of collapsing to
+    /// the bare rail. Lets the board show exactly which bypass cap belongs to
+    /// which pin. The caps then sit on electrically-distinct nets, so the user
+    /// rejoins them with copper/zone (or a net-tie). Opt-in via `?dot_nets=1`.
+    dot_nets: bool,
     /// Set of `<uuid>|<op>|<key>|<value>` fingerprints the agent has
     /// already pushed in prior syncs. Server skips re-emitting any
     /// state-asserting op whose fingerprint is in this set — works
@@ -170,6 +176,13 @@ fn bareNetName(name: []const u8) []const u8 {
 fn collapseDotSubNet(name: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, name, '.')) |i| return name[0..i];
     return name;
+}
+
+/// Dot-collapse a net name unless the caller opted to keep per-pin sub-nets.
+/// Normal sync folds `VDD.U18.IN` → `VDD`; dot-net mode (`?dot_nets=1`) passes
+/// it through so each bypass cap keeps its own pad net on the board.
+fn maybeCollapseDotSubNet(name: []const u8, dot_nets: bool) []const u8 {
+    return if (dot_nets) name else collapseDotSubNet(name);
 }
 
 const SyncPlanContext = struct {
@@ -641,18 +654,19 @@ fn populatePadNetMaps(
     pad_full_net: *std.StringHashMap([]const u8),
     net_pad_count: *std.StringHashMap(u32),
     net_hub_pins: *std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatPin)),
+    dot_nets: bool,
 ) !void {
     var bare_counts = std.StringHashMap(u32).init(arena);
     for (nets) |net| {
         if (net.name.len == 0) continue;
-        const bare = bareNetName(collapseDotSubNet(net.name));
+        const bare = bareNetName(maybeCollapseDotSubNet(net.name, dot_nets));
         const e = try bare_counts.getOrPut(bare);
         if (!e.found_existing) e.value_ptr.* = 0;
         e.value_ptr.* += 1;
     }
     for (nets) |net| {
         if (net.name.len == 0) continue;
-        const post_dot = collapseDotSubNet(net.name);
+        const post_dot = maybeCollapseDotSubNet(net.name, dot_nets);
         const bare = bareNetName(post_dot);
         const display = if ((bare_counts.get(bare) orelse 0) == 1) bare else post_dot;
         for (net.pins) |pin| {
@@ -705,7 +719,7 @@ pub fn runSyncPlan(
     var net_pad_count = std.StringHashMap(u32).init(arena);
     var pad_full_net = std.StringHashMap([]const u8).init(arena);
     var net_hub_pins = std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatPin)).init(arena);
-    try populatePadNetMaps(arena, nets.items, &pad_net_map, &pad_full_net, &net_pad_count, &net_hub_pins);
+    try populatePadNetMaps(arena, nets.items, &pad_net_map, &pad_full_net, &net_pad_count, &net_hub_pins, parsed.dot_nets);
 
     // ref-des → section name. Top-level `section.instances` already carries
     // every nested sub-section + decouple/series child, so one shallow pass
@@ -858,7 +872,9 @@ const MAX_PCB_BYTES: usize = 64 * 1024 * 1024;
 /// produce without writing; `?migrate=1` enables the heuristic relink
 /// (parent-path + value + net signature) to recover a board whose
 /// canopy_uuids/ref-des drifted; `?prune=1` turns every `flag_stale` op
-/// into a real `remove`.
+/// into a real `remove`; `?dot_nets=1` keeps the per-pin `(decouple …)`
+/// sub-nets (`VDD.U18.IN`) as pad nets instead of collapsing to the rail,
+/// so each bypass cap shows which pin it belongs to.
 pub fn syncKicadPcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = HTTP_NOT_FOUND;
@@ -871,7 +887,9 @@ pub fn syncKicadPcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     // design gets re-linked in place (placement preserved) instead of
     // churning into add+stale. The conservative default stays off.
     const migrate = isQueryFlagSet(req, "migrate");
-    runKicadPcbSync(ctx, req, res, name, dry_run, prune_stale, migrate) catch |err| switch (err) {
+    // `?dot_nets=1` keeps each decoupling cap on its own per-pin sub-net.
+    const dot_nets = isQueryFlagSet(req, "dot_nets");
+    runKicadPcbSync(ctx, req, res, name, dry_run, prune_stale, migrate, dot_nets) catch |err| switch (err) {
         error.PcbPathUnset => sendError(res, HTTP_BAD_REQUEST, ERR_NO_PCB_PATH),
         error.PcbReadFailed => sendError(res, HTTP_INTERNAL_ERROR, ERR_PCB_READ_FAILED),
         error.PcbParseFailed => sendError(res, HTTP_INTERNAL_ERROR, ERR_PCB_PARSE_FAILED),
@@ -910,6 +928,7 @@ fn runKicadPcbSync(
     dry_run: bool,
     prune_stale: bool,
     migrate: bool,
+    dot_nets: bool,
 ) KicadPcbSyncError!void {
     // Resolve the design and its declared PCB path.
     const board_path = try paths.designSourcePath(req.arena, ctx.project_dir, name);
@@ -937,6 +956,7 @@ fn runKicadPcbSync(
         .board = board,
         .prune_stale = prune_stale,
         .migrate_heuristic = migrate,
+        .dot_nets = dot_nets,
         .applied_ops = std.StringHashMap(void).init(req.arena),
     };
     const run = try runSyncPlan(req.arena, ctx.allocator, ctx.project_dir, name, plan);
@@ -2547,4 +2567,17 @@ test "buildStagingLayout seats each part by identity, independent of roster orde
     try std.testing.expectEqual(la.by_ref.get("C1").?.slot, lb.by_ref.get("C1").?.slot);
     try std.testing.expectEqual(la.by_ref.get("C2").?.gi, lb.by_ref.get("C2").?.gi);
     try std.testing.expectEqual(la.by_ref.get("C2").?.slot, lb.by_ref.get("C2").?.slot);
+}
+
+test "maybeCollapseDotSubNet keeps the sub-net in dot-net mode, folds it otherwise" {
+    // spec: serve/sync - maybeCollapseDotSubNet folds a per-pin sub-net to its rail by default but keeps it verbatim in dot-net mode
+    // Default sync: the per-pin sub-net collapses to its rail so every cap on
+    // the rail shares one electrical net.
+    try std.testing.expectEqualStrings("VDD", maybeCollapseDotSubNet("VDD.U18.IN", false));
+    // Dot-net mode (?dot_nets=1): the per-pin sub-net passes through so each
+    // bypass cap keeps its own pad net on the board.
+    try std.testing.expectEqualStrings("VDD.U18.IN", maybeCollapseDotSubNet("VDD.U18.IN", true));
+    // A plain rail has no '.' and is unaffected by either mode.
+    try std.testing.expectEqualStrings("GND", maybeCollapseDotSubNet("GND", false));
+    try std.testing.expectEqualStrings("GND", maybeCollapseDotSubNet("GND", true));
 }

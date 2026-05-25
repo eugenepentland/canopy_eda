@@ -65,8 +65,8 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - add places the new footprint at the op's staging (x, y) and bakes canopy_net / canopy_section properties
 - create_board_item writes a section staging box as a (gr_rect …) on Dwgs.User
 - create_board_item writes a section label as a (gr_text …) on Dwgs.User
-- hides pre-existing visible canopy_* fields and counts them
-- leaves already-hidden canopy fields untouched (idempotent)
+- hides every pre-existing visible property (Reference/refdes included) and counts them
+- leaves an already-hidden property untouched (idempotent)
 
 ## eval/builtins
 
@@ -403,6 +403,7 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - sectionForRef attributes a sub-block part to its sub-block name and a top-level part to its declared section, else ""
 - boxCols returns a roughly-square (ceil-sqrt) column count for a staging box of N parts
 - buildStagingLayout gives each part a fixed staging seat from the whole design, independent of push composition
+- maybeCollapseDotSubNet folds a per-pin sub-net to its rail by default but keeps it verbatim in dot-net mode
 
 ## serve/vfs
 
