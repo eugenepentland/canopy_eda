@@ -7,6 +7,10 @@ const Span = ast.Span;
 
 // ── Constants ─────────────────────────────────────────────────────
 const SHAPE_ROUNDRECT = "roundrect";
+const SILK_HEADER = "  (silkscreen\n";
+const FAB_HEADER = "  (fab\n";
+const LAYER_SILK = "F.SilkS";
+const LAYER_FAB = "F.Fab";
 const FULL_TURN_DEG: f64 = 360.0;
 const ROT_45_DEG: f64 = 45.0;
 const ROT_135_DEG: f64 = 135.0;
@@ -63,8 +67,11 @@ pub fn convertFootprint(allocator: std.mem.Allocator, source: []const u8) Conver
     // Extract courtyard from fp_rect on F.CrtYd layer
     try emitCourtyard(w, children[2..]);
 
-    // Extract silkscreen lines and circles
-    try emitSilkscreen(w, children[2..]);
+    // Extract silkscreen and fabrication-layer geometry (lines, circles,
+    // rects, polys). F.Fab carries the package body outline + pin-1 marker —
+    // the richest preview geometry — which earlier conversions dropped.
+    try emitLayerGeom(w, children[2..], LAYER_SILK, SILK_HEADER);
+    try emitLayerGeom(w, children[2..], LAYER_FAB, FAB_HEADER);
 
     try w.writeAll(")\n");
     return buf.toOwnedSlice(allocator);
@@ -251,42 +258,88 @@ fn accumulateBBox(x: f64, y: f64, min_x: *f64, min_y: *f64, max_x: *f64, max_y: 
     if (y > max_y.*) max_y.* = y;
 }
 
-fn emitSilkscreen(w: anytype, children: []const Node) !void {
-    var has_silk = false;
+/// Emit every graphic on `layer_name` (silkscreen or fabrication) as a single
+/// block opened by `header`. fp_line/fp_circle/fp_rect/fp_poly map to
+/// (line …)/(circle …)/(rect …)/(poly …); the block is only opened if at
+/// least one matching graphic exists.
+fn emitLayerGeom(w: anytype, children: []const Node, layer_name: []const u8, header: []const u8) !void {
+    var open = false;
     for (children) |child| {
-        try emitSilkLine(w, child, &has_silk);
-        try emitSilkCircle(w, child, &has_silk);
+        try emitGeomLine(w, child, layer_name, &open, header);
+        try emitGeomCircle(w, child, layer_name, &open, header);
+        try emitGeomRect(w, child, layer_name, &open, header);
+        try emitGeomPoly(w, child, layer_name, &open, header);
     }
-    if (has_silk) try w.writeAll("  )\n");
+    if (open) try w.writeAll("  )\n");
 }
 
-fn emitSilkLine(w: anytype, child: Node, has_silk: *bool) !void {
+fn ensureBlockOpen(w: anytype, open: *bool, header: []const u8) !void {
+    if (open.*) return;
+    try w.writeAll(header);
+    open.* = true;
+}
+
+fn emitGeomLine(w: anytype, child: Node, layer_name: []const u8, open: *bool, header: []const u8) !void {
     if (!child.isForm("fp_line")) return;
     const cl = child.asList() orelse return;
-    if (!std.mem.eql(u8, getLayer(cl[1..]), "F.SilkS")) return;
+    if (!std.mem.eql(u8, getLayer(cl[1..]), layer_name)) return;
     const start = readPair(cl[1..], "start") orelse return;
     const end = readPair(cl[1..], "end") orelse return;
-    try ensureSilkOpen(w, has_silk);
+    try ensureBlockOpen(w, open, header);
     try w.print("    (line ({d:.2} {d:.2}) ({d:.2} {d:.2}))\n", .{ start.x, start.y, end.x, end.y });
 }
 
-fn emitSilkCircle(w: anytype, child: Node, has_silk: *bool) !void {
+fn emitGeomCircle(w: anytype, child: Node, layer_name: []const u8, open: *bool, header: []const u8) !void {
     if (!child.isForm("fp_circle")) return;
     const cl = child.asList() orelse return;
-    if (!std.mem.eql(u8, getLayer(cl[1..]), "F.SilkS")) return;
+    if (!std.mem.eql(u8, getLayer(cl[1..]), layer_name)) return;
     const center = readPair(cl[1..], "center") orelse return;
     const end = readPair(cl[1..], "end") orelse return;
     const dx = end.x - center.x;
     const dy = end.y - center.y;
     const radius = @sqrt(dx * dx + dy * dy);
-    try ensureSilkOpen(w, has_silk);
+    try ensureBlockOpen(w, open, header);
     try w.print("    (circle ({d:.2} {d:.2}) {d:.2})\n", .{ center.x, center.y, radius });
 }
 
-fn ensureSilkOpen(w: anytype, has_silk: *bool) !void {
-    if (has_silk.*) return;
-    try w.writeAll("  (silkscreen\n");
-    has_silk.* = true;
+fn emitGeomRect(w: anytype, child: Node, layer_name: []const u8, open: *bool, header: []const u8) !void {
+    if (!child.isForm("fp_rect")) return;
+    const cl = child.asList() orelse return;
+    if (!std.mem.eql(u8, getLayer(cl[1..]), layer_name)) return;
+    const start = readPair(cl[1..], "start") orelse return;
+    const end = readPair(cl[1..], "end") orelse return;
+    try ensureBlockOpen(w, open, header);
+    try w.print("    (rect {d:.2} {d:.2} {d:.2} {d:.2})\n", .{ start.x, start.y, end.x, end.y });
+}
+
+fn emitGeomPoly(w: anytype, child: Node, layer_name: []const u8, open: *bool, header: []const u8) !void {
+    if (!child.isForm("fp_poly")) return;
+    const cl = child.asList() orelse return;
+    if (!std.mem.eql(u8, getLayer(cl[1..]), layer_name)) return;
+    const pts = findFormItems(cl[1..], "pts") orelse return;
+    try ensureBlockOpen(w, open, header);
+    try w.writeAll("    (poly");
+    for (pts) |pt| {
+        if (!pt.isForm("xy")) continue;
+        const pl = pt.asList() orelse continue;
+        if (pl.len < 3) continue;
+        const x = pl[1].asNumber() orelse continue;
+        const y = pl[2].asNumber() orelse continue;
+        try w.print(" ({d:.2} {d:.2})", .{ x, y });
+    }
+    try w.writeAll(")\n");
+}
+
+/// Return the children (excluding the head atom) of the first `name` form
+/// found in `items`, or null. Used to reach the `(xy …)` list inside `(pts …)`.
+fn findFormItems(items: []const Node, name: []const u8) ?[]const Node {
+    for (items) |it| {
+        if (it.isForm(name)) {
+            const l = it.asList() orelse return null;
+            return l[1..];
+        }
+    }
+    return null;
 }
 
 fn getLayer(items: []const Node) []const u8 {
@@ -367,4 +420,25 @@ test "convert simple footprint" {
     try std.testing.expect(std.mem.indexOf(u8, output, "\"R_0402_1005Metric\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "(pad 1 smd roundrect") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "(courtyard") != null);
+}
+
+// spec: convert/footprint - Captures F.Fab body outline and silkscreen polygons into the footprint
+test "convert captures F.Fab body outline and silkscreen polys" {
+    const alloc = std.testing.allocator;
+    const input =
+        \\(footprint "X"
+        \\  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+        \\  (fp_line (start -1 -1) (end 1 -1) (layer "F.Fab") (width 0.1))
+        \\  (fp_poly (pts (xy -1 -1) (xy -1 1) (xy 1 1)) (layer "F.SilkS") (width 0) (fill solid))
+        \\  (fp_circle (center 0 0) (end 0.5 0) (layer "F.Fab"))
+        \\)
+    ;
+    const output = try convertFootprint(alloc, input);
+    defer alloc.free(output);
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "(fab\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(line (-1.00 -1.00) (1.00 -1.00))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(circle (0.00 0.00) 0.50)") != null);
+    // F.SilkS poly lands inside the silkscreen block, not the fab block.
+    try std.testing.expect(std.mem.indexOf(u8, output, "(poly (-1.00 -1.00) (-1.00 1.00) (1.00 1.00))") != null);
 }

@@ -155,6 +155,7 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 ## convert/footprint
 
 - Converts a KiCad footprint file into S-expression format
+- Captures F.Fab body outline and silkscreen polygons into the footprint
 
 ## convert/symbol
 
