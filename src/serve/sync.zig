@@ -102,12 +102,10 @@ pub const BoardFp = struct {
     /// server-side change.
     fields: std.StringHashMapUnmanaged([]const u8),
     pads: []const PadAssign,
-    /// Mirror of KiCad's "Lock footprint" toggle. Lets the stale loop
-    /// skip emitting a redundant set_locked op for fps that are
-    /// already padlocked from a previous sync. A future pass could use
-    /// the same signal to respect a manual unlock as "keep this," but
-    /// would need a separate marker to distinguish that from "never
-    /// locked in the first place."
+    /// Mirror of KiCad's "Lock footprint" toggle, parsed from the board's
+    /// `(locked yes)`. The sync no longer locks or unlocks footprints —
+    /// locking is left entirely to the user — so this is now informational
+    /// only (still surfaced by the reader, not acted on by the diff).
     locked: bool,
 };
 
@@ -814,7 +812,7 @@ pub fn runSyncPlan(
     // (positions + section boxes/labels) now that every match is resolved.
     try emitStagedAdds(&diff_ctx, &w, &first_op);
 
-    try emitStaleOps(arena, &diff_ctx, parsed, &matched_uuids, &w, &first_op, &summary);
+    try emitStaleOps(parsed, &matched_uuids, &w, &first_op, &summary);
 
     try w.writeAll("]");
 
@@ -981,11 +979,12 @@ fn runKicadPcbSync(
     try rw.print(
         "{{\"ok\":true,\"design_version\":{d}," ++
             "\"applied\":{{\"added\":{d},\"removed\":{d},\"swapped\":{d}," ++
-            "\"fields_set\":{d},\"pad_nets_set\":{d},\"locked_changed\":{d}}}",
+            "\"fields_set\":{d},\"pad_nets_set\":{d},\"locked_changed\":{d}," ++
+            "\"fields_hidden\":{d}}}",
         .{
-            run.version,          stats.added,      stats.removed,
-            stats.swapped,        stats.fields_set, stats.pad_nets_set,
-            stats.locked_changed,
+            run.version,          stats.added,         stats.removed,
+            stats.swapped,        stats.fields_set,    stats.pad_nets_set,
+            stats.locked_changed, stats.fields_hidden,
         },
     );
     if (lock_warning) |msg| {
@@ -1002,7 +1001,8 @@ fn runKicadPcbSync(
 
 fn statsAreZero(s: kicad_pcb_writer.ApplyStats) bool {
     return s.added == 0 and s.removed == 0 and s.swapped == 0 and
-        s.fields_set == 0 and s.pad_nets_set == 0 and s.locked_changed == 0;
+        s.fields_set == 0 and s.pad_nets_set == 0 and s.locked_changed == 0 and
+        s.fields_hidden == 0;
 }
 
 /// Returns a user-facing message when pcbnew has the target board open
@@ -1205,14 +1205,12 @@ const DiffContext = struct {
     migrate_heuristic: bool,
 };
 
-/// Walk every board fp that didn't match any design instance and emit
-/// the appropriate orphan-handling op: `remove` when --prune is on,
-/// otherwise `flag_stale` + an optional `set_locked` (padlock overlay
-/// in KiCad). Same applied_ops suppression as the matched path so a
-/// re-sync doesn't keep re-locking fps the user already padlocked.
+/// Walk every board fp that didn't match any design instance and emit the
+/// appropriate orphan-handling op: `remove` when --prune is on, otherwise an
+/// informational `flag_stale`. The sync deliberately does NOT lock stale
+/// footprints — footprint locking is left entirely to the user in KiCad, so a
+/// sync never flips the padlock on (or off) a part.
 fn emitStaleOps(
-    arena: std.mem.Allocator,
-    d: *DiffContext,
     parsed: ParsedSyncPlan,
     matched_uuids: *std.StringHashMap(void),
     w: anytype,
@@ -1231,16 +1229,6 @@ fn emitStaleOps(
         }
         try emitOp(w, first_op, "flag_stale", .{ .{ "uuid", target }, .{ "ref", bfp.ref } });
         summary.flagged_stale += 1;
-        if (bfp.locked) continue;
-        const lock_fp = try appliedOpFingerprint(arena, target, "set_locked", "", "true");
-        if (d.applied_ops.contains(lock_fp)) {
-            summary.suppressed += 1;
-            continue;
-        }
-        try w.print(
-            ",{{\"op\":\"set_locked\",\"uuid\":\"{s}\",\"locked\":true}}",
-            .{target},
-        );
     }
 }
 

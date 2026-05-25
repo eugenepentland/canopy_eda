@@ -79,6 +79,9 @@ pub const ApplyStats = struct {
     locked_changed: u32 = 0,
     /// Standalone board graphics written (section staging boxes + labels).
     board_items: u32 = 0,
+    /// canopy_* metadata fields that were visible on the board and got a
+    /// `(hide yes)` added this sync — keeps our cross-sync tags off F.Fab.
+    fields_hidden: u32 = 0,
 };
 
 /// Same as `applyOpsToSource` but also returns per-category counts.
@@ -271,7 +274,12 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
     }
     for (root_children, 0..) |child, i| {
         if (removed_fp_indices.contains(i)) continue;
-        const out_child = mutated_fp.get(i) orelse child;
+        var out_child = mutated_fp.get(i) orelse child;
+        // Retroactively hide any visible canopy_* metadata fields already on
+        // the board (e.g. bare `(property "canopy_net" "…")` from older syncs).
+        if (out_child.isForm(FORM_FOOTPRINT)) {
+            if (try hideCanopyFields(arena, out_child, &stats.fields_hidden)) |hidden| out_child = hidden;
+        }
         try new_children.append(arena, out_child);
         if (last_net_idx) |lni| {
             if (i == lni and !inserted_extra_nets) {
@@ -285,7 +293,13 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
     // in-element references; inserting `(net N "name")` declarations into
     // a header-only file would land them at the wrong position (before
     // (version …)) and break the parse.
-    for (extra_footprints.items) |fp| try new_children.append(arena, fp);
+    // New footprints are born hidden via makeProperty, so this is a no-op for
+    // them; kept for any add path that injects a canopy field another way.
+    for (extra_footprints.items) |fp| {
+        var out_fp = fp;
+        if (try hideCanopyFields(arena, fp, &stats.fields_hidden)) |hidden| out_fp = hidden;
+        try new_children.append(arena, out_fp);
+    }
     // Section staging boxes / labels (Dwgs.User graphics) go last.
     for (extra_graphics.items) |g| try new_children.append(arena, g);
 
@@ -650,11 +664,86 @@ fn canonicalPropertyKey(key: []const u8) []const u8 {
 }
 
 fn makeProperty(arena: std.mem.Allocator, key: []const u8, value: []const u8) std.mem.Allocator.Error!Node {
-    var children = try arena.alloc(Node, 3);
+    // canopy_* fields are cross-sync metadata, never meant to be drawn — emit
+    // them hidden so KiCad doesn't render the bare property as text on F.Fab.
+    const n: usize = if (isCanopyField(key)) 4 else 3;
+    var children = try arena.alloc(Node, n);
     children[0] = Node.atom(Span.zero, FORM_PROPERTY);
     children[1] = Node.string(Span.zero, key);
     children[2] = Node.string(Span.zero, value);
+    if (n == 4) children[3] = try makeHideForm(arena);
     return Node.list(Span.zero, children);
+}
+
+/// canopy's own cross-sync metadata fields (canopy_uuid / canopy_net /
+/// canopy_section). They carry identity + diagnostics, not board graphics, so
+/// the writer keeps them hidden; a bare `(property "canopy_net" "…")` is
+/// otherwise rendered as visible text at the footprint origin on F.Fab.
+fn isCanopyField(key: []const u8) bool {
+    return std.mem.startsWith(u8, key, "canopy_");
+}
+
+/// `(hide yes)` — mirrors `makeLockedForm`'s `(locked yes)` idiom.
+fn makeHideForm(arena: std.mem.Allocator) std.mem.Allocator.Error!Node {
+    var children = try arena.alloc(Node, 2);
+    children[0] = Node.atom(Span.zero, "hide");
+    children[1] = Node.atom(Span.zero, "yes");
+    return Node.list(Span.zero, children);
+}
+
+/// True when a `(property …)` child list already carries a `(hide yes)` form.
+fn propertyHidden(pl: []const Node) bool {
+    if (pl.len < 4) return false;
+    for (pl[3..]) |sub| {
+        if (sub.isForm("hide") and formAtomChildEqualsLocal(sub, "yes")) return true;
+    }
+    return false;
+}
+
+/// Copy a `(property key value …)` list, inserting `(hide yes)` right after
+/// the value slot (KiCad parses property sub-forms order-independently).
+fn withHideForm(arena: std.mem.Allocator, pl: []const Node) std.mem.Allocator.Error!Node {
+    var children = try arena.alloc(Node, pl.len + 1);
+    children[0] = pl[0];
+    children[1] = pl[1];
+    children[2] = pl[2];
+    children[3] = try makeHideForm(arena);
+    for (pl[3..], 4..) |x, i| children[i] = x;
+    return Node.list(Span.zero, children);
+}
+
+/// Ensure every `canopy_*` property on `fp` is hidden, adding `(hide yes)` to
+/// any that lacks it. Adds `hidden_count` for each field newly hidden and
+/// returns the rewritten footprint; returns null (and leaves the counter
+/// alone) when every canopy field is already hidden, so the caller can keep
+/// the original node and skip a redundant rewrite.
+fn hideCanopyFields(arena: std.mem.Allocator, fp: Node, hidden_count: *u32) std.mem.Allocator.Error!?Node {
+    const cl = fp.asList() orelse return null;
+    var local: u32 = 0;
+    var new_children: std.ArrayListUnmanaged(Node) = .empty;
+    for (cl) |sub| {
+        if (canopyFieldNeedsHide(sub)) |pl| {
+            try new_children.append(arena, try withHideForm(arena, pl));
+            local += 1;
+        } else {
+            try new_children.append(arena, sub);
+        }
+    }
+    if (local == 0) return null;
+    hidden_count.* += local;
+    return Node.list(Span.zero, try new_children.toOwnedSlice(arena));
+}
+
+/// When `sub` is a *visible* `canopy_*` property, return its child list so the
+/// caller can reissue it with `(hide yes)`. Null for anything else (non-property,
+/// non-canopy, or already hidden).
+fn canopyFieldNeedsHide(sub: Node) ?[]const Node {
+    if (!sub.isForm(FORM_PROPERTY)) return null;
+    const pl = sub.asList() orelse return null;
+    if (pl.len < 3) return null;
+    const key = pl[1].asString() orelse return null;
+    if (!isCanopyField(key) or propertyHidden(pl)) return null;
+    return pl;
 }
 
 /// Toggle a footprint's lock state. KiCad 7+ stores the bit as a
@@ -1077,7 +1166,51 @@ test "applyOpsToSource set_field adds canopy_uuid when missing" {
         \\[{"op":"set_field","uuid":"fp-1","field":"canopy_uuid","value":"newcanopy"}]
     ;
     const out = try applyOpsToSource(arena.allocator(), src, ops);
-    try std.testing.expect(std.mem.indexOf(u8, out, "(property \"canopy_uuid\" \"newcanopy\")") != null);
+    // canopy_* fields are emitted hidden so KiCad doesn't draw them on F.Fab.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(property \"canopy_uuid\" \"newcanopy\" (hide yes))") != null);
+}
+
+// spec: kicad_pcb/writer - hides pre-existing visible canopy_* fields and counts them
+test "applyOpsToSource hides a pre-existing bare canopy field" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    // A bare `(property "canopy_net" "…")` from an older sync — KiCad renders
+    // it as visible text on F.Fab. No ops at all: it must still be hidden, and
+    // the change counted so the sync layer knows the file changed and writes.
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "R_0402"
+        \\    (uuid "fp-1")
+        \\    (property "Reference" "R1")
+        \\    (property "canopy_net" "VBAT / GND")))
+    ;
+    var stats: ApplyStats = .{};
+    const out = try applyOpsToSourceWithStats(arena.allocator(), src, "[]", &stats);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(property \"canopy_net\" \"VBAT / GND\" (hide yes))") != null);
+    try std.testing.expectEqual(@as(u32, 1), stats.fields_hidden);
+    // Reference is left visible and untouched.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(property \"Reference\" \"R1\")") != null);
+}
+
+// spec: kicad_pcb/writer - leaves already-hidden canopy fields untouched (idempotent)
+test "applyOpsToSource does not re-hide an already-hidden canopy field" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "R_0402"
+        \\    (uuid "fp-1")
+        \\    (property "canopy_uuid" "abc" (at 0 0 0) (layer "F.Fab") (hide yes))))
+    ;
+    var stats: ApplyStats = .{};
+    const out = try applyOpsToSourceWithStats(arena.allocator(), src, "[]", &stats);
+    try std.testing.expectEqual(@as(u32, 0), stats.fields_hidden);
+    // Still exactly one hide form — not doubled up.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "(hide yes)"));
 }
 
 // spec: kicad_pcb/writer - set_locked toggles (locked yes) on the targeted footprint
@@ -1263,9 +1396,10 @@ test "applyOpsToSource add places at staging position and bakes canopy fields" {
     const out = try applyOpsToSource(arena.allocator(), src, ops);
     // Footprint placed at the staging position (nm → mm), not the origin.
     try std.testing.expect(std.mem.indexOf(u8, out, "(at 305.5 35.5)") != null);
-    // canopy_net / canopy_section baked as properties on the first sync.
-    try std.testing.expect(std.mem.indexOf(u8, out, "(property \"canopy_net\" \"U8.C3.VDD33USB\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "(property \"canopy_section\" \"USB Core\")") != null);
+    // canopy_net / canopy_section baked as properties on the first sync,
+    // hidden so they don't render as text on the fab layer.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(property \"canopy_net\" \"U8.C3.VDD33USB\" (hide yes))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(property \"canopy_section\" \"USB Core\" (hide yes))") != null);
 }
 
 // spec: kicad_pcb/writer - create_board_item writes a section staging box as a (gr_rect …) on Dwgs.User
