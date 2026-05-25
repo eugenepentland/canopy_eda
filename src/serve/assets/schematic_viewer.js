@@ -903,6 +903,7 @@
           (a.pad_nets_set || 0) + ' pad-nets, ' +
           (a.fields_set || 0) + ' fields';
         if (a.fields_hidden) msg += ', ' + a.fields_hidden + ' fields hidden';
+        if (a.fields_shown) msg += ', ' + a.fields_shown + ' fields shown';
         if (j && j.warning) {
           msg += ' — ⚠ ' + j.warning;
           if (pushPcbStatus) pushPcbStatus.style.color = '#d29922';

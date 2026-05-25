@@ -1000,11 +1000,11 @@ fn runKicadPcbSync(
         "{{\"ok\":true,\"design_version\":{d}," ++
             "\"applied\":{{\"added\":{d},\"removed\":{d},\"swapped\":{d}," ++
             "\"fields_set\":{d},\"pad_nets_set\":{d},\"locked_changed\":{d}," ++
-            "\"fields_hidden\":{d}}}",
+            "\"fields_hidden\":{d},\"fields_shown\":{d}}}",
         .{
             run.version,          stats.added,         stats.removed,
             stats.swapped,        stats.fields_set,    stats.pad_nets_set,
-            stats.locked_changed, stats.fields_hidden,
+            stats.locked_changed, stats.fields_hidden, stats.fields_shown,
         },
     );
     if (lock_warning) |msg| {
@@ -1022,7 +1022,7 @@ fn runKicadPcbSync(
 fn statsAreZero(s: kicad_pcb_writer.ApplyStats) bool {
     return s.added == 0 and s.removed == 0 and s.swapped == 0 and
         s.fields_set == 0 and s.pad_nets_set == 0 and s.locked_changed == 0 and
-        s.fields_hidden == 0;
+        s.fields_hidden == 0 and s.fields_shown == 0;
 }
 
 /// Returns a user-facing message when pcbnew has the target board open

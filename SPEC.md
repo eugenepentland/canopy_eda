@@ -65,8 +65,9 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - add places the new footprint at the op's staging (x, y) and bakes canopy_net / canopy_section properties
 - create_board_item writes a section staging box as a (gr_rect …) on Dwgs.User
 - create_board_item writes a section label as a (gr_text …) on Dwgs.User
-- hides every pre-existing visible property (Reference/refdes included) and counts them
-- leaves an already-hidden property untouched (idempotent)
+- hides metadata properties but keeps Reference and Value visible
+- un-hides a previously hidden Reference or Value
+- leaves already-correct property visibility untouched (idempotent)
 
 ## eval/builtins
 
