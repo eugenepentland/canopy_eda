@@ -18,9 +18,9 @@ src/serve/templates/auth.zig: pub const InviteAccept (struct_) has no /// doc co
 src/serve/templates/auth.zig: pub const InviteExpired (struct_) has no /// doc comment
 src/serve/templates/auth.zig: pub const Login (struct_) has no /// doc comment
 src/serve/templates/auth.zig: pub const Setup (struct_) has no /// doc comment
+src/serve/templates/library.zig: pub const Card (struct_) has no /// doc comment
 src/serve/templates/library.zig: pub const ComponentDetails (struct_) has no /// doc comment
 src/serve/templates/library.zig: pub const Library (struct_) has no /// doc comment
-src/serve/templates/library.zig: pub const Row (struct_) has no /// doc comment
 src/serve/templates/mcp_docs.zig: pub const Mcp (struct_) has no /// doc comment
 src/serve/templates/mcp_docs.zig: pub const ParamRow (struct_) has no /// doc comment
 src/serve/templates/mcp_docs.zig: pub const ToolCard (struct_) has no /// doc comment

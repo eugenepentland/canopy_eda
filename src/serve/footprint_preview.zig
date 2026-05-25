@@ -26,13 +26,18 @@ const COLOR_PAD = "#c4a000";
 const COLOR_SILK = "#888";
 const COLOR_FAB = "#5b7089";
 const COLOR_COURTYARD = "#9d5fb0";
+// Pad-number label: dark text on the gold pad, sized to ~0.62× the pad's
+// short side for a single character and shrunk for longer ids (e.g. "A12").
+const COLOR_PAD_LABEL = "#161b22";
+const PAD_LABEL_FONT_FRAC: f64 = 0.62;
+const PAD_LABEL_MULTI: f64 = 1.5;
 
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
 const Layer = enum { silk, fab };
 
-const Pad = struct { x: f64, y: f64, w: f64, h: f64, shape: []const u8 };
+const Pad = struct { id: []const u8, x: f64, y: f64, w: f64, h: f64, shape: []const u8 };
 const Point = struct { x: f64, y: f64 };
 const Seg = struct { x1: f64, y1: f64, x2: f64, y2: f64, layer: Layer };
 const Circ = struct { cx: f64, cy: f64, r: f64, layer: Layer };
@@ -115,7 +120,7 @@ pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 fn collectShapes(allocator: std.mem.Allocator, children: []const Node, shapes: *Shapes) HandlerError!void {
     for (children) |child| {
         if (child.isForm("pad")) {
-            if (parsePad(child)) |p| try shapes.pads.append(allocator, p);
+            if (parsePad(allocator, child)) |p| try shapes.pads.append(allocator, p);
         } else if (child.isForm("courtyard")) {
             const cl = child.asList() orelse continue;
             try parseCourtyard(allocator, cl[1..], shapes);
@@ -129,9 +134,13 @@ fn collectShapes(allocator: std.mem.Allocator, children: []const Node, shapes: *
     }
 }
 
-fn parsePad(child: Node) ?Pad {
+fn parsePad(allocator: std.mem.Allocator, child: Node) ?Pad {
     const cl = child.asList() orelse return null;
     if (cl.len < 4) return null;
+    const id: []const u8 = cl[1].asAtom() orelse cl[1].asString() orelse blk: {
+        const n = cl[1].asNumber() orelse break :blk "";
+        break :blk std.fmt.allocPrint(allocator, "{d}", .{@as(i64, @intFromFloat(n))}) catch "";
+    };
     const shape: []const u8 = cl[3].asAtom() orelse "rect";
     var px: f64 = 0;
     var py: f64 = 0;
@@ -153,7 +162,7 @@ fn parsePad(child: Node) ?Pad {
             }
         }
     }
-    return .{ .x = px, .y = py, .w = pw, .h = ph, .shape = shape };
+    return .{ .id = id, .x = px, .y = py, .w = pw, .h = ph, .shape = shape };
 }
 
 /// Parse the children of a `(silkscreen …)` or `(fab …)` block: `(line …)`,
@@ -372,4 +381,22 @@ fn emitPad(w: anytype, p: Pad) HandlerError!void {
             .{ p.x - p.w / 2, p.y - p.h / 2, p.w, p.h },
         );
     }
+    try emitPadLabel(w, p);
+}
+
+/// Draw the pad's id centred in the pad, scaled to the pad's short side so it
+/// stays inside the copper. Multi-character ids (BGA balls like "A12") shrink
+/// so they don't overflow.
+fn emitPadLabel(w: anytype, p: Pad) HandlerError!void {
+    if (p.id.len == 0) return;
+    const base = @min(p.w, p.h);
+    if (base <= 0) return;
+    const len_f: f64 = @floatFromInt(p.id.len);
+    var fs = base * PAD_LABEL_FONT_FRAC;
+    if (len_f > 1) fs = fs * PAD_LABEL_MULTI / len_f;
+    try w.print(
+        "<text x=\"{d:.3}\" y=\"{d:.3}\" font-size=\"{d:.3}\" fill=\"" ++ COLOR_PAD_LABEL ++ "\" " ++
+            "text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"sans-serif\">{s}</text>",
+        .{ p.x, p.y, fs, p.id },
+    );
 }

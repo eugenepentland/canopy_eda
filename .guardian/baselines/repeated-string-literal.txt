@@ -20,7 +20,6 @@ src/serve/templates/auth.zig: string literal <div class=\"status\" id=\"status\"
 src/serve/templates/auth.zig: string literal <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"> appears 4 times — extract a const
 src/serve/templates/auth.zig: string literal <span class=\"brand\"> appears 4 times — extract a const
 src/serve/templates/auth.zig: string literal Canopy EDA appears 4 times — extract a const
-src/serve/templates/library.zig: string literal <span class=\"meta\"> appears 5 times — extract a const
 src/serve/templates/oauth.zig: string literal  type=\"hidden\" appears 5 times — extract a const
 src/serve/templates/oauth.zig: string literal </strong> appears 3 times — extract a const
 src/serve/templates/oauth.zig: string literal <strong> appears 3 times — extract a const

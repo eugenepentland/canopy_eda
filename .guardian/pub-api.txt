@@ -656,9 +656,9 @@ src/serve/templates/auth.zig::InviteAccept struct_
 src/serve/templates/auth.zig::InviteExpired struct_
 src/serve/templates/auth.zig::Login struct_
 src/serve/templates/auth.zig::Setup struct_
+src/serve/templates/library.zig::Card struct_
 src/serve/templates/library.zig::ComponentDetails struct_
 src/serve/templates/library.zig::Library struct_
-src/serve/templates/library.zig::Row struct_
 src/serve/templates/mcp_docs.zig::Mcp struct_
 src/serve/templates/mcp_docs.zig::ParamRow struct_
 src/serve/templates/mcp_docs.zig::ToolCard struct_

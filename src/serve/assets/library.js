@@ -1,27 +1,22 @@
 (function(){
   var input=document.getElementById('lib-search');
-  var rows=Array.prototype.slice.call(document.querySelectorAll('#lib-table tbody tr.comp-row'));
+  var cards=Array.prototype.slice.call(document.querySelectorAll('#lib-grid .comp-card'));
   var info=document.getElementById('count-info');
   var pageInfo=document.getElementById('page-info');
   var prevBtn=document.getElementById('page-prev');
   var nextBtn=document.getElementById('page-next');
   var pager=document.getElementById('pagination');
-  var PAGE_SIZE=50;
+  var PAGE_SIZE=60;
   var page=0;
-  var filtered=rows.slice();
-  function reqPanel(tr){var n=tr.nextElementSibling;return(n&&n.classList.contains('req-panel'))?n:null;}
+  var filtered=cards.slice();
   function render(){
     var total=filtered.length;
     var pages=Math.max(1,Math.ceil(total/PAGE_SIZE));
     if(page>=pages)page=pages-1;
     if(page<0)page=0;
     var start=page*PAGE_SIZE,end=start+PAGE_SIZE;
-    for(var i=0;i<rows.length;i++){rows[i].style.display='none';var rp=reqPanel(rows[i]);if(rp)rp.style.display='none';}
-    for(var j=start;j<end&&j<total;j++){
-      filtered[j].style.display='';
-      var rp=reqPanel(filtered[j]);
-      if(rp&&filtered[j].classList.contains('open'))rp.style.display='table-row';
-    }
+    for(var i=0;i<cards.length;i++)cards[i].style.display='none';
+    for(var j=start;j<end&&j<total;j++)filtered[j].style.display='';
     pageInfo.textContent='Page '+(page+1)+' of '+pages;
     prevBtn.disabled=page<=0;
     nextBtn.disabled=page>=pages-1;
@@ -31,13 +26,13 @@
     var q=input.value.toLowerCase().trim();
     var terms=q.split(/\s+/);
     filtered=[];
-    for(var i=0;i<rows.length;i++){
-      var s=rows[i].getAttribute('data-search').toLowerCase();
+    for(var i=0;i<cards.length;i++){
+      var s=cards[i].getAttribute('data-search').toLowerCase();
       var match=true;
       for(var t=0;t<terms.length;t++){if(terms[t]&&s.indexOf(terms[t])<0){match=false;break;}}
-      if(match)filtered.push(rows[i]);
+      if(match)filtered.push(cards[i]);
     }
-    info.textContent=q?(filtered.length+' of '+rows.length+' items'):(rows.length+' items');
+    info.textContent=q?(filtered.length+' of '+cards.length+' items'):(cards.length+' items');
     page=0;
     render();
   }
@@ -45,22 +40,19 @@
   prevBtn.addEventListener('click',function(){page--;render();});
   nextBtn.addEventListener('click',function(){page++;render();});
   applyFilter();
-  // Toggle requirements panel on name click
-  document.querySelectorAll('#lib-table .comp-name.has-reqs').forEach(function(td){
-    td.addEventListener('click',function(){
-      var tr=td.closest('tr');
-      var rp=reqPanel(tr);
-      if(!rp)return;
-      var open=!tr.classList.contains('open');
-      tr.classList.toggle('open',open);
-      rp.style.display=open?'table-row':'none';
+
+  // Expand/collapse a card's requirements list.
+  document.querySelectorAll('#lib-grid .req-toggle').forEach(function(t){
+    t.addEventListener('click',function(){
+      var card=t.closest('.comp-card');
+      if(card)card.classList.toggle('open');
     });
   });
 
-  // Footprint preview: click the footprint tag (component rows) or the
-  // "preview" chip (standalone footprint rows) to expand an inline SVG drawn
-  // by /api/footprint/:name from lib/footprints/<fp>.sexp. The SVG is fetched
-  // once per tag, then cached in the panel for subsequent toggles.
+  // Footprint preview: click the footprint tag (component cards) or the
+  // "show preview" chip (standalone footprint cards) to expand an inline SVG
+  // drawn by /api/footprint/:name from lib/footprints/<fp>.sexp. The SVG is
+  // fetched once per tag, then cached in the panel for subsequent toggles.
   function loadFootprint(box,fp){
     if(box.dataset.loaded==='1')return;
     box.dataset.loaded='1';
@@ -72,17 +64,17 @@
       if(svg.indexOf('<svg')===-1)throw new Error('not svg');
       box.innerHTML=svg;
       var s=box.querySelector('svg');
-      if(s){s.style.width='100%';s.style.height='auto';s.style.maxHeight='200px';s.style.display='block';}
+      if(s){s.style.width='100%';s.style.height='auto';s.style.maxHeight='240px';s.style.display='block';}
     }).catch(function(){
       box.innerHTML='<span class="fp-empty">No footprint preview available.</span>';
     });
   }
-  document.querySelectorAll('#lib-table .fp-toggle').forEach(function(tag){
+  document.querySelectorAll('#lib-grid .fp-toggle').forEach(function(tag){
     tag.addEventListener('click',function(e){
       e.stopPropagation();
       var fp=tag.dataset.fp;
-      var cell=tag.closest('td');
-      var box=cell&&cell.querySelector('.fp-preview');
+      var card=tag.closest('.comp-card');
+      var box=card&&card.querySelector('.fp-preview');
       if(!box||!fp)return;
       var open=!box.classList.contains('open');
       box.classList.toggle('open',open);

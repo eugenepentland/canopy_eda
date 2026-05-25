@@ -30,16 +30,11 @@ pub templ Library(rows: []const LibraryRow) {
                     type="text" class="search-box" id="lib-search"
                     placeholder="Search components, footprints, pinouts..." autofocus />
                 <div class="count-info" id="count-info"></div>
-                <table id="lib-table">
-                    <thead>
-                        <tr><th>Name</th><th>Details</th></tr>
-                    </thead>
-                    <tbody>
-                        for (rows) |row| {
-                            @Row(row)
-                        }
-                    </tbody>
-                </table>
+                <div class="card-grid" id="lib-grid">
+                    for (rows) |row| {
+                        @Card(row)
+                    }
+                </div>
                 <div class="pagination" id="pagination">
                     <button id="page-prev">&larr; Prev</button>
                     <span class="page-info" id="page-info"></span>
@@ -51,70 +46,73 @@ pub templ Library(rows: []const LibraryRow) {
     </html>
 }
 
-pub templ Row(row: LibraryRow) {
-    <tr class="comp-row" data-search={row.search_text}>
-        <td class={if (row.requirements.len > 0) "comp-name has-reqs" else "comp-name"}>{row.name}</td>
-        <td>
+pub templ Card(row: LibraryRow) {
+    <div class="comp-card" data-search={row.search_text}>
+        <div class="card-head">
+            <span class="card-name">{row.name}</span>
             switch (row.kind) {
-                .family, .component => {
-                    @ComponentDetails(row)
-                },
-                .pinout => {
-                    if (row.pin_count) |pc| {
-                        <span class="meta">{pc} pins</span>
-                    }
-                },
-                .footprint => {
-                    <span class="tag tag-footprint fp-toggle" data-fp={row.name} title="Show footprint preview">preview ›</span>
-                    <div class="fp-preview" data-fp={row.name}></div>
-                },
+                .component => { <span class="tag tag-component">component</span> },
+                .family => { <span class="tag tag-family">family</span> },
+                .pinout => { <span class="tag tag-pinout">pinout</span> },
+                .footprint => { <span class="tag tag-footprint">footprint</span> },
             }
-        </td>
-    </tr>
-    if (row.requirements.len > 0) {
-        <tr class="req-panel">
-            <td colspan="2">
-                <div class="req-card-header">{row.requirements.len} requirements</div>
-                <div class="req-cards">
-                    for (row.requirements) |req| {
-                        <div class="req-item">{req}</div>
-                    }
-                </div>
-            </td>
-        </tr>
-    }
+        </div>
+        switch (row.kind) {
+            .family, .component => {
+                @ComponentDetails(row)
+            },
+            .pinout => {
+                if (row.pin_count) |pc| {
+                    <div class="card-desc">{pc} pins</div>
+                }
+            },
+            .footprint => {
+                <span class="tag tag-footprint fp-toggle" data-fp={row.name} title="Show footprint preview">show preview ›</span>
+                <div class="fp-preview" data-fp={row.name}></div>
+            },
+        }
+        if (row.requirements.len > 0) {
+            <span class="req-toggle">⚑ {row.requirements.len} requirements ›</span>
+            <div class="req-cards">
+                for (row.requirements) |req| {
+                    <div class="req-item">{req}</div>
+                }
+            </div>
+        }
+    </div>
 }
 
 pub templ ComponentDetails(row: LibraryRow) {
     if (row.description) |d| {
-        <span class="desc">{d}</span><br />
+        <div class="card-desc">{d}</div>
     }
-    if (row.footprint) |fp| {
-        <span class="meta">footprint: </span>
-        <span class="tag tag-footprint fp-toggle" data-fp={fp} title="Show footprint preview">{fp}</span>
-        if (row.has_3d_model) {
-            <span class="meta" style="font-size:0.8rem;">3D</span>
-        }
-    }
-    if (row.pinout) |po| {
-        <span class="meta">pinout: </span>
-        <span class="tag tag-pinout">{po}</span>
-    }
-    if (row.manufacturer) |m| {
-        <span class="meta">mfr: {m}</span>
-    }
-    if (row.mpn) |m| {
-        <span class="meta">mpn: {m}</span>
-    }
-    if (row.datasheets.len > 0) {
-        <br />
-        for (row.datasheets) |ds| {
-            if (ds.present) {
-                <a class="tag tag-datasheet" href="/datasheets/{ds.name}" target="_blank" rel="noopener" title="Open PDF">📄 {ds.name}</a>
-            } else {
-                <span class="tag tag-datasheet-missing" title="PDF declared but not uploaded">📄 {ds.name} (missing)</span>
+    <div class="card-tags">
+        if (row.footprint) |fp| {
+            <span class="tag tag-footprint fp-toggle" data-fp={fp} title="Show footprint preview">{fp}</span>
+            if (row.has_3d_model) {
+                <span class="badge-3d" title="3D model available">3D</span>
             }
         }
+        if (row.pinout) |po| {
+            <span class="tag tag-pinout">{po}</span>
+        }
+    </div>
+    if (row.manufacturer) |m| {
+        <div class="card-meta">{m}</div>
+    }
+    if (row.mpn) |m| {
+        <div class="card-meta">{m}</div>
+    }
+    if (row.datasheets.len > 0) {
+        <div class="card-tags">
+            for (row.datasheets) |ds| {
+                if (ds.present) {
+                    <a class="tag tag-datasheet" href="/datasheets/{ds.name}" target="_blank" rel="noopener" title="Open PDF">📄 {ds.name}</a>
+                } else {
+                    <span class="tag tag-datasheet-missing" title="PDF declared but not uploaded">📄 {ds.name} (missing)</span>
+                }
+            }
+        </div>
     }
     if (row.footprint) |fp| {
         <div class="fp-preview" data-fp={fp}></div>
