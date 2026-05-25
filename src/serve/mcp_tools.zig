@@ -19,6 +19,9 @@ const req_checks = @import("../req_checks.zig");
 const component_info = @import("component_info.zig");
 const notes = @import("notes.zig");
 const symbol_conv = @import("../convert/symbol.zig");
+const config = @import("../config.zig");
+const component_search = @import("component_search.zig");
+const upload = @import("upload.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const NAME_FIELD_PREFIX = "{\"name\":";
@@ -31,6 +34,11 @@ const ERR_BUILD_FAILED = "error: build failed";
 const ERR_LINE_TEMPLATE = "error: {s}";
 const VERSION_SNAPSHOT_TEMPLATE = "{{\"ok\":true,\"version\":{d},\"snapshot\":";
 const JSON_NET_KEY = ",\"net\":";
+const JSON_MANUFACTURER_KEY = ",\"manufacturer\":";
+const KEY_PART_NUMBER = "part_number";
+// search_components `limit` arg: default and hard cap.
+const SEARCH_LIMIT_DEFAULT: usize = 10;
+const SEARCH_LIMIT_MAX: u64 = 50;
 
 const EvalError = @import("../eval/evaluator.zig").EvalError;
 const RenderError = render_json.RenderError;
@@ -80,6 +88,15 @@ const tools = [_]ToolEntry{
     .{ .name = "build", .is_mutation = true },
     // KiCad-source-driven regeneration of an auto-generated pinout file.
     .{ .name = "regenerate_pinout", .is_mutation = true },
+    // Fetch a part's ECAD model ZIP from Component Search Engine and import
+    // it into the library (component + footprint + pinout + 3D model).
+    .{ .name = "download_footprint", .is_mutation = true },
+    // Fetch a part's datasheet PDF from Component Search Engine into
+    // lib/datasheets/, where read_datasheet can then extract its text.
+    .{ .name = "download_datasheet", .is_mutation = true },
+    // Search Component Search Engine and return candidate parts (read-only).
+    // Pairs with download_footprint / download_datasheet to import a chosen one.
+    .{ .name = "search_components", .is_mutation = false },
     // Per-design TODO notes (sidecar `<design>.notes.md`). Lets agents
     // log follow-ups for the next revision and mark them complete with
     // a date stamp once the design has been updated.
@@ -94,6 +111,7 @@ const tools = [_]ToolEntry{
     .{ .name = "list_component_requirements", .is_mutation = false },
     .{ .name = "add_component_requirement", .is_mutation = true },
     .{ .name = "remove_component_requirement", .is_mutation = true },
+    .{ .name = "read_datasheet", .is_mutation = false },
 };
 
 /// Tools that mutate .sexp files — gated to writer/admin roles.
@@ -187,6 +205,8 @@ fn dispatchInfo(
     if (std.mem.eql(u8, tool_name, "get_version")) return try toolGetVersion(args_val, out, allocator);
     if (std.mem.eql(u8, tool_name, "run_checks")) return try toolRunChecks(allocator, project_dir, args_val, out, w);
     if (std.mem.eql(u8, tool_name, "generate_review")) return try toolGenerateReview(allocator, project_dir, args_val, w, out);
+    if (std.mem.eql(u8, tool_name, "read_datasheet")) return try toolReadDatasheet(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "search_components")) return try toolSearchComponents(allocator, args_val, out);
     return null;
 }
 
@@ -486,6 +506,8 @@ fn dispatchVfs(
     if (std.mem.eql(u8, tool_name, "move_file")) return try toolMoveFile(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "build")) return try toolBuild(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "regenerate_pinout")) return try toolRegeneratePinout(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "download_footprint")) return try toolDownloadFootprint(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "download_datasheet")) return try toolDownloadDatasheet(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     return null;
 }
 
@@ -535,6 +557,155 @@ fn toolBuild(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?s
     const report = edit.rebuildDesign(allocator, project_dir, name);
     const w = out.writer(allocator);
     try writeBuildReport(w, report);
+    return true;
+}
+
+/// Fetch a part's ECAD model ZIP from Component Search Engine and run it
+/// through the same import pipeline as the `/api/upload-zip` route, creating
+/// `lib/{components,footprints,pinouts,models}` entries. The `connect.sid`
+/// session cookie is read server-side from `CSE_CONNECT_SID` (via
+/// `config.cseConnectSid`) — never passed over MCP. Returns the created
+/// library names on success, or `{ok:false,error}` if search, download
+/// (expired cookie), or import fails.
+fn toolDownloadFootprint(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const part_number = requireString(args_val, KEY_PART_NUMBER) orelse return missingArg(out, allocator, KEY_PART_NUMBER);
+    const manufacturer = optionalString(args_val, "manufacturer");
+    const w = out.writer(allocator);
+
+    const sid = config.cseConnectSid(allocator) orelse {
+        try w.writeAll("{\"ok\":false,\"error\":\"CSE_CONNECT_SID is not set on the server; cannot authenticate to Component Search Engine\"}");
+        return false;
+    };
+
+    const dl = component_search.downloadFootprint(allocator, part_number, manufacturer, sid) catch |err| {
+        try w.writeAll("{\"ok\":false,\"stage\":\"download\",\"error\":");
+        try writeJsonString(w, component_search.errorMessage(err));
+        try w.writeAll("}");
+        return false;
+    };
+
+    const imp = upload.importZipBytes(allocator, project_dir, dl.zip_bytes, dl.suggested_filename) catch |err| {
+        try w.writeAll("{\"ok\":false,\"stage\":\"import\",\"downloaded\":");
+        try writeJsonString(w, dl.suggested_filename);
+        try w.writeAll(",\"error\":");
+        try writeJsonString(w, upload.importErrorMessage(err));
+        try w.writeAll("}");
+        return false;
+    };
+
+    try w.writeAll("{\"ok\":true,\"part_name\":");
+    try writeJsonString(w, dl.part_name);
+    try w.writeAll(JSON_MANUFACTURER_KEY);
+    try writeJsonString(w, dl.manufacturer);
+    try w.writeAll(",\"samac_id\":");
+    try writeJsonString(w, dl.samac_id);
+    try w.writeAll(",\"zip\":");
+    try writeJsonString(w, dl.suggested_filename);
+    try w.print(",\"zip_size\":{d},\"component\":", .{dl.zip_bytes.len});
+    try writeJsonString(w, imp.component_name);
+    try w.writeAll(",\"footprint\":");
+    try writeJsonString(w, imp.footprint_name);
+    try w.writeAll(",\"pinout\":");
+    try writeJsonString(w, imp.pinout_name);
+    try w.print(",\"has_3d_model\":{s}}}", .{if (imp.has_3d) "true" else "false"});
+    return true;
+}
+
+/// Fetch a part's datasheet PDF from Component Search Engine and store it under
+/// `lib/datasheets/`, where `read_datasheet` can extract its text. Scrapes the
+/// datasheet link off the CSE part page using `CSE_CONNECT_SID` (read
+/// server-side from env/`.env` — never over MCP). Returns the stored file +
+/// datasheet URL, or `{ok:false,error}`.
+fn toolDownloadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const part_number = requireString(args_val, KEY_PART_NUMBER) orelse return missingArg(out, allocator, KEY_PART_NUMBER);
+    const manufacturer = optionalString(args_val, "manufacturer");
+    const w = out.writer(allocator);
+
+    const sid = config.cseConnectSid(allocator) orelse {
+        try w.writeAll("{\"ok\":false,\"error\":\"CSE_CONNECT_SID is not set on the server; add it to .env\"}");
+        return false;
+    };
+
+    const ds = component_search.downloadDatasheet(allocator, part_number, manufacturer, sid) catch |err| {
+        try w.writeAll("{\"ok\":false,\"error\":");
+        try writeJsonString(w, component_search.datasheetErrorMessage(err));
+        try w.writeAll("}");
+        return false;
+    };
+    return finishDatasheet(w, allocator, project_dir, "componentsearchengine", ds.filename, ds.pdf_bytes, ds.part_name, ds.manufacturer, ds.source_url);
+}
+
+/// Store a fetched datasheet PDF and emit the success envelope.
+fn finishDatasheet(
+    w: anytype,
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    source: []const u8,
+    filename: []const u8,
+    pdf_bytes: []const u8,
+    part: []const u8,
+    manufacturer: []const u8,
+    url: []const u8,
+) !bool {
+    const upload_datasheet = @import("upload_datasheet.zig");
+    const stored = upload_datasheet.storeDatasheet(allocator, project_dir, filename, pdf_bytes) catch |err| {
+        // Reuse the HTTP route's error→JSON mapping; null means OutOfMemory.
+        try w.writeAll(upload_datasheet.storeErrorBody(err) orelse return err);
+        return false;
+    };
+    try w.writeAll("{\"ok\":true,\"source\":");
+    try writeJsonString(w, source);
+    try w.writeAll(",\"file\":");
+    try writeJsonString(w, stored.name);
+    try w.print(",\"size\":{d},\"part\":", .{stored.size});
+    try writeJsonString(w, part);
+    try w.writeAll(JSON_MANUFACTURER_KEY);
+    try writeJsonString(w, manufacturer);
+    try w.writeAll(",\"datasheet_url\":");
+    try writeJsonString(w, url);
+    try w.writeAll("}");
+    return true;
+}
+
+/// Search Component Search Engine and return candidate parts without importing
+/// anything — the read-only counterpart to `download_footprint`. The agent
+/// searches here, then passes a chosen `part_number` (with the reported
+/// `manufacturer` to disambiguate) to download_footprint/download_datasheet.
+/// `CSE_CONNECT_SID` is read server-side (never over MCP). Returns
+/// `{ok:true,query,count,results:[{part_number,manufacturer,has_model,has_datasheet}]}`,
+/// or `{ok:false,error}` on a network/auth failure.
+fn toolSearchComponents(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const query = requireString(args_val, "query") orelse return missingArg(out, allocator, "query");
+    const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, SEARCH_LIMIT_MAX)) else SEARCH_LIMIT_DEFAULT;
+    const w = out.writer(allocator);
+
+    const sid = config.cseConnectSid(allocator) orelse {
+        try w.writeAll("{\"ok\":false,\"error\":\"CSE_CONNECT_SID is not set on the server; add it to .env\"}");
+        return false;
+    };
+
+    const hits = component_search.searchComponents(allocator, query, sid, limit) catch |err| {
+        try w.writeAll("{\"ok\":false,\"error\":");
+        try writeJsonString(w, component_search.searchErrorMessage(err));
+        try w.writeAll("}");
+        return false;
+    };
+
+    try w.writeAll("{\"ok\":true,\"query\":");
+    try writeJsonString(w, query);
+    try w.print(",\"count\":{d},\"results\":[", .{hits.len});
+    for (hits, 0..) |h, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"part_number\":");
+        try writeJsonString(w, h.part_name);
+        try w.writeAll(JSON_MANUFACTURER_KEY);
+        try writeJsonString(w, h.manufacturer);
+        try w.print(",\"has_model\":{s},\"has_datasheet\":{s}}}", .{
+            if (h.samac_id != null) "true" else "false",
+            if (h.datasheet_url != null) "true" else "false",
+        });
+    }
+    try w.writeAll("]}");
     return true;
 }
 
@@ -1167,7 +1338,11 @@ fn getNet(
             }
             // Flag passives for the `passives` array below.
             const c0 = if (inst.ref_des.len > 0) inst.ref_des[0] else 0;
-            if (c0 == 'R' or c0 == 'L' or c0 == 'C' or c0 == 'F' or c0 == 'D') {
+            const is_passive = switch (c0) {
+                'R', 'L', 'C', 'F', 'D' => true,
+                else => false,
+            };
+            if (is_passive) {
                 try passive_refs.put(allocator, inst.ref_des, {});
             }
             break;
@@ -1485,4 +1660,47 @@ pub fn renderSceneGraph(
     bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
     return render_json.renderSceneGraph(allocator, block, project_dir);
+}
+
+fn toolReadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const raw_name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const w = out.writer(allocator);
+
+    const upload_datasheet = @import("upload_datasheet.zig");
+    const sanitized = upload_datasheet.sanitizeFilename(allocator, raw_name) catch |e| {
+        try w.print("{{\"ok\":false,\"error\":\"invalid name: {s}\"}}", .{@errorName(e)});
+        return false;
+    };
+    defer allocator.free(sanitized);
+
+    const path = try std.fmt.allocPrint(allocator, "{s}/lib/datasheets/{s}", .{ project_dir, sanitized });
+    defer allocator.free(path);
+
+    // Check if the file exists
+    infra_fs.cwd().access(path, .{}) catch {
+        try w.writeAll("{\"ok\":false,\"error\":\"datasheet not found\"}");
+        return false;
+    };
+
+    const run_res = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &[_][]const u8{ "ps2ascii", path },
+    }) catch |err| {
+        try w.print("{{\"ok\":false,\"error\":\"failed to run ps2ascii: {s}\"}}", .{@errorName(err)});
+        return false;
+    };
+    defer {
+        allocator.free(run_res.stdout);
+        allocator.free(run_res.stderr);
+    }
+
+    if (run_res.term != .Exited or run_res.term.Exited != 0) {
+        try w.writeAll("{\"ok\":false,\"error\":\"ps2ascii returned error\"}");
+        return false;
+    }
+
+    try w.writeAll("{\"ok\":true,\"content\":");
+    try writeJsonString(w, run_res.stdout);
+    try w.writeAll("}");
+    return true;
 }

@@ -1,6 +1,15 @@
 <div id="page-drop-overlay"><div id="page-drop-inner"><svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg><p>Drop a .zip (component) or .pdf (datasheet) to upload</p></div></div>
 <div id="upload-toast"></div>
-<details id="upload-section" style="margin-bottom:2rem;"><summary style="color:#58a6ff;font-size:0.95rem;cursor:pointer;">Upload New Component</summary>
+<details id="upload-section" style="margin-bottom:2rem;" open><summary style="color:#58a6ff;font-size:0.95rem;cursor:pointer;">Add a Component</summary>
+<div class="upload-box" id="cse-box" style="margin:1rem 0;">
+<p style="font-size:0.85rem;">Fetch from Component Search Engine by part number &mdash; adds the footprint (KiCad symbol + footprint + 3D model) and the datasheet to the library.</p>
+<div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;margin-top:0.5rem;">
+<input type="text" id="cse-part" placeholder="Part number (e.g. LMX2595RHAT)" style="flex:2;min-width:180px;padding:0.45rem;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;">
+<input type="text" id="cse-mfr" placeholder="Manufacturer (optional)" style="flex:1;min-width:140px;padding:0.45rem;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;">
+<button id="cse-submit" class="upload-btn">Fetch from CSE</button>
+</div>
+<div id="cse-result" style="white-space:pre-line;"></div>
+</div>
 <div class="upload-box" id="zip-drop" style="margin:1rem 0;">
 <p style="font-size:0.85rem;">Drop a component .zip (auto-extracts KiCad symbol, footprint, and 3D model)</p>
 <label class="upload-btn">Choose .zip<input type="file" id="zip-file" accept=".zip"></label>

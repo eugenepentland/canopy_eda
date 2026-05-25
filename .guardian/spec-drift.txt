@@ -11,6 +11,7 @@ src/commands.zig::cmdCheck | fn cmdCheck(allocator: std.mem.Allocator, args: []c
 src/commands.zig::cmdExportKicad | fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdExportReview | fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdLint | fn cmdLint(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
+src/config.zig::cseConnectSid | fn cseConnectSid(allocator: std.mem.Allocator) ?[]u8
 src/convert/alt_functions.zig::mergePinoutWithAlts | fn mergePinoutWithAlts( allocator: std.mem.Allocator, pinout_source: []const u8, alts: []const AltEntry, ) AltError![]const u8
 src/convert/alt_functions.zig::parseAltCsv | fn parseAltCsv(allocator: std.mem.Allocator, source: []const u8) AltError![]AltEntry
 src/convert/alt_functions.zig::parseAltSource | fn parseAltSource(allocator: std.mem.Allocator, source: []const u8) AltError![]AltEntry
@@ -289,6 +290,12 @@ src/serve/component_info.zig::addRequirement | fn addRequirement( allocator: std
 src/serve/component_info.zig::describeComponent | fn describeComponent( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, out: *std.ArrayListUnmanaged(u8), ) DescribeError!bool
 src/serve/component_info.zig::listRequirements | fn listRequirements( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, out: *std.ArrayListUnmanaged(u8), ) ReqError!bool
 src/serve/component_info.zig::removeRequirement | fn removeRequirement( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, target_id: ?[]const u8, target_text: ?[]const u8, out: *std.ArrayListUnmanaged(u8), ) ReqError!bool
+src/serve/component_search.zig::datasheetErrorMessage | fn datasheetErrorMessage(err: DatasheetError) []const u8
+src/serve/component_search.zig::downloadDatasheet | fn downloadDatasheet( allocator: std.mem.Allocator, part_number: []const u8, manufacturer: ?[]const u8, connect_sid: []const u8, ) DatasheetError!DatasheetResult
+src/serve/component_search.zig::downloadFootprint | fn downloadFootprint( allocator: std.mem.Allocator, part_number: []const u8, manufacturer: ?[]const u8, connect_sid: []const u8, ) DownloadError!DownloadResult
+src/serve/component_search.zig::errorMessage | fn errorMessage(err: DownloadError) []const u8
+src/serve/component_search.zig::searchComponents | fn searchComponents( allocator: std.mem.Allocator, query: []const u8, connect_sid: []const u8, limit: usize, ) SearchError![]SearchHit
+src/serve/component_search.zig::searchErrorMessage | fn searchErrorMessage(err: SearchError) []const u8
 src/serve/edit.zig::addComponentDatasheetCore | fn addComponentDatasheetCore( allocator: std.mem.Allocator, project_dir: []const u8, component_name: []const u8, pdf: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::addInstanceApi | fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::addSectionNoteCore | fn addSectionNoteCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, section_name: []const u8, text: []const u8, pdf: []const u8, page: u32, ) EditError!MutationResult
@@ -313,6 +320,7 @@ src/serve/footprint_preview.zig::footprintSvgApi | fn footprintSvgApi(ctx: *Hand
 src/serve/history.zig::listSnapshots | fn listSnapshots( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) HistoryError![]SnapshotInfo
 src/serve/history.zig::restore | fn restore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, id: []const u8, ) HistoryError!void
 src/serve/history.zig::snapshot | fn snapshot( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, description: ?[]const u8, ) HistoryError!?[]const u8
+src/serve/library.zig::cseFetchApi | fn cseFetchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/library.zig::libraryPage | fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/mcp.zig::dispatchFrame | fn dispatchFrame( allocator: std.mem.Allocator, project_dir: []const u8, data: []const u8, role: users.Role, ) HandlerError!?[]const u8
 src/serve/mcp.zig::postApi | fn postApi(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -374,6 +382,9 @@ src/serve/sync.zig::runSyncPlan | fn runSyncPlan( arena: std.mem.Allocator, hand
 src/serve/sync.zig::syncKicadPcbApi | fn syncKicadPcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/upload.zig::extractFootprintName | fn extractFootprintName(allocator: std.mem.Allocator, footprint: []const u8) ?[]const u8
 src/serve/upload.zig::extractPackageName | fn extractPackageName(sym_data: []const u8) []const u8
+src/serve/upload.zig::importErrorMessage | fn importErrorMessage(e: ImportError) []const u8
+src/serve/upload.zig::importErrorStatus | fn importErrorStatus(e: ImportError) u16
+src/serve/upload.zig::importZipBytes | fn importZipBytes( allocator: std.mem.Allocator, project_dir: []const u8, zip_bytes: []const u8, filename: []const u8, ) ImportError!ImportResult
 src/serve/upload.zig::sanitizeName | fn sanitizeName(allocator: std.mem.Allocator, name: []const u8) []const u8
 src/serve/upload.zig::saveSourceFile | fn saveSourceFile(allocator: std.mem.Allocator, project_dir: []const u8, filename: []const u8, body_data: []const u8) void
 src/serve/upload.zig::uploadZipApi | fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void

@@ -31,3 +31,6 @@ projects/designs/history/
 
 # Stray Guardian artifacts inside library directories
 projects/designs/lib/components/.guardian/
+
+# Local credentials for outbound part-data APIs (see .env.example)
+.env

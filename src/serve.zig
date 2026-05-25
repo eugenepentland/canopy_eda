@@ -232,6 +232,8 @@ pub fn serve(
     router.post("/api/upload-package", upload_package.uploadPackageApi, .{});
     router.get("/api/footprint/:name", footprint_preview.footprintSvgApi, .{});
     router.post("/api/upload-zip", upload.uploadZipApi, .{});
+    // Fetch a part's footprint + datasheet from Component Search Engine.
+    router.post("/api/cse-fetch", library.cseFetchApi, .{});
 
     // MCP — POST /mcp is the streamable-HTTP transport Claude Code connects
     // to via its remote-MCP connector. GET /mcp upgrades to WebSocket, used

@@ -130,6 +130,42 @@ function uploadDatasheet(file){
       .catch(function(e){showToast('err','Error: '+e,8000);});
   };r.readAsArrayBuffer(file);
 }
+// Fetch a part's footprint + datasheet from Component Search Engine by part number.
+var csePart=document.getElementById('cse-part'),cseMfr=document.getElementById('cse-mfr'),
+    cseSubmit=document.getElementById('cse-submit'),cseResult=document.getElementById('cse-result');
+function cseFetch(){
+  var pn=(csePart.value||'').trim();
+  if(!pn){cseResult.className='result err';cseResult.textContent='Enter a part number.';return;}
+  var mfr=(cseMfr.value||'').trim();
+  var bodyObj={part_number:pn};if(mfr)bodyObj.manufacturer=mfr;
+  var label=cseSubmit.textContent;
+  cseSubmit.disabled=true;cseSubmit.textContent='Fetching...';
+  cseResult.className='result';cseResult.textContent='Searching Component Search Engine for '+pn+'...';
+  showToast('pending','Fetching '+pn+' from CSE...');
+  fetch('/api/cse-fetch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(bodyObj)})
+    .then(function(r){return r.text();})
+    .then(function(t){
+      var d=null;try{d=JSON.parse(t);}catch(e){}
+      if(!d){cseResult.className='result err';cseResult.textContent=t||'Empty response';showToast('err','CSE fetch failed',8000);return;}
+      var fp=d.footprint,ds=d.datasheet,lines=[];
+      if(fp&&fp.ok)lines.push('✓ Footprint: '+fp.component+' (footprint '+fp.footprint+(fp.has_3d_model?' + 3D':'')+')');
+      else lines.push('✗ Footprint: '+((fp&&fp.error)||'failed'));
+      if(ds&&ds.ok)lines.push('✓ Datasheet: '+ds.file+' (via '+ds.source+')');
+      else lines.push('✗ Datasheet: '+((ds&&ds.error)||'failed'));
+      var anyOk=(fp&&fp.ok)||(ds&&ds.ok);
+      cseResult.className='result '+(anyOk?'ok':'err');
+      cseResult.textContent=lines.join('\n');
+      showToast(anyOk?'ok':'err',lines.join('  |  '),anyOk?5000:9000);
+      if(anyOk)setTimeout(function(){location.reload();},2000);
+    })
+    .catch(function(e){cseResult.className='result err';cseResult.textContent='Error: '+e;showToast('err','Error: '+e,8000);})
+    .then(function(){cseSubmit.disabled=false;cseSubmit.textContent=label;});
+}
+if(cseSubmit){
+  cseSubmit.addEventListener('click',cseFetch);
+  csePart.addEventListener('keydown',function(e){if(e.key==='Enter')cseFetch();});
+  cseMfr.addEventListener('keydown',function(e){if(e.key==='Enter')cseFetch();});
+}
 // Page-level drag-and-drop: works even when the upload section is collapsed
 var overlay=document.getElementById('page-drop-overlay');
 var dragDepth=0;

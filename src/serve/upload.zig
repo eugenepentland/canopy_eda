@@ -25,10 +25,174 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
     error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence, ReadOnlyFileSystem, LinkQuotaExceeded };
 
+/// What `importZipBytes` created. Names are the library basenames written
+/// under `lib/{components,footprints,pinouts,models}`. All slices are owned
+/// by the allocator passed to `importZipBytes`.
+pub const ImportResult = struct {
+    package_name: []const u8,
+    component_name: []const u8,
+    footprint_name: []const u8,
+    pinout_name: []const u8,
+    has_3d: bool,
+};
+
+/// Failure modes of `importZipBytes`. `NoKicadFiles` is the only client
+/// mistake (maps to HTTP 400); the rest are environment/IO failures (500).
+pub const ImportError = error{
+    WriteFailed,
+    ExtractFailed,
+    ScanFailed,
+    NoKicadFiles,
+    ReadFailed,
+    ConvertFailed,
+} || std.mem.Allocator.Error;
+
+/// Short user-facing message for an `ImportError`. Shared by the HTTP route
+/// and the MCP `download_footprint` tool so the two transports stay in sync.
+pub fn importErrorMessage(e: ImportError) []const u8 {
+    return switch (e) {
+        error.WriteFailed => "could not write temp/library files",
+        error.ExtractFailed => "zip extraction failed (is unzip installed?)",
+        error.ScanFailed => "could not scan extracted files",
+        error.NoKicadFiles => "zip must contain a .kicad_sym and a .kicad_mod file",
+        error.ReadFailed => "could not read KiCad files from the zip",
+        error.ConvertFailed => "footprint/pinout conversion failed",
+        error.OutOfMemory => "out of memory",
+    };
+}
+
+/// HTTP status for an `ImportError`: 400 for the one client mistake, 500
+/// otherwise.
+pub fn importErrorStatus(e: ImportError) u16 {
+    return if (e == error.NoKicadFiles) HTTP_BAD_REQUEST else HTTP_INTERNAL_ERROR;
+}
+
+/// Convert a KiCad library ZIP (already in memory) into library entries:
+/// write the bytes to a temp file, extract via the system `unzip`, locate
+/// the `.kicad_sym` / `.kicad_mod` / optional STEP, convert them, and write
+/// `lib/{components,footprints,pinouts,models}`. Shared by the `/api/upload-zip`
+/// route and the MCP `download_footprint` tool. `filename` is only used to
+/// name the temp file, so it must be path-safe.
+pub fn importZipBytes(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    zip_bytes: []const u8,
+    filename: []const u8,
+) ImportError!ImportResult {
+    const tmp_zip = try std.fmt.allocPrint(allocator, TMP_ZIP_TEMPLATE, .{filename});
+    {
+        const f = infra_fs.cwd().createFile(tmp_zip, .{}) catch return error.WriteFailed;
+        defer f.close();
+        f.writeAll(zip_bytes) catch return error.WriteFailed;
+    }
+
+    const tmp_dir = try std.fmt.allocPrint(allocator, TMP_EXTRACT_TEMPLATE, .{clock.milliTimestamp()});
+    const unzip_result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "unzip", "-o", "-q", tmp_zip, "-d", tmp_dir },
+    }) catch return error.ExtractFailed;
+    if (unzip_result.term != .Exited or unzip_result.term.Exited != 0) return error.ExtractFailed;
+
+    const find_result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "find", tmp_dir, "-type", "f" },
+    }) catch return error.ScanFailed;
+
+    var sym_path: ?[]const u8 = null;
+    var fp_path: ?[]const u8 = null;
+    var step_path: ?[]const u8 = null;
+    var line_iter = std.mem.splitScalar(u8, find_result.stdout, '\n');
+    while (line_iter.next()) |line| {
+        if (line.len == 0) continue;
+        if (std.mem.endsWith(u8, line, ".kicad_sym")) sym_path = line;
+        if (std.mem.endsWith(u8, line, ".kicad_mod")) fp_path = line;
+        if (std.mem.endsWith(u8, line, ".stp") or std.mem.endsWith(u8, line, ".step")) step_path = line;
+    }
+    if (sym_path == null or fp_path == null) return error.NoKicadFiles;
+
+    const sym_data = infra_fs.cwd().readFileAlloc(allocator, sym_path.?, MAX_KICAD_FILE_BYTES) catch
+        return error.ReadFailed;
+    const fp_data = infra_fs.cwd().readFileAlloc(allocator, fp_path.?, MAX_KICAD_FILE_BYTES) catch
+        return error.ReadFailed;
+    const step_data: ?[]const u8 = if (step_path) |sp|
+        (infra_fs.cwd().readFileAlloc(allocator, sp, MAX_STEP_FILE_BYTES) catch null)
+    else
+        null;
+
+    const pkg_name = extractPackageName(sym_data);
+    saveSourceFile(allocator, project_dir, std.fs.path.basename(sym_path.?), sym_data);
+    saveSourceFile(allocator, project_dir, std.fs.path.basename(fp_path.?), fp_data);
+    if (step_data != null and step_path != null) {
+        saveSourceFile(allocator, project_dir, std.fs.path.basename(step_path.?), step_data.?);
+    }
+
+    const symbol_conv = @import("../convert/symbol.zig");
+    const pinout = symbol_conv.generatePinout(allocator, sym_data, null) catch return error.ConvertFailed;
+    const footprint_conv = @import("../convert/footprint.zig");
+    const footprint = footprint_conv.convertFootprint(allocator, fp_data) catch return error.ConvertFailed;
+
+    const safe_name = sanitizeName(allocator, pkg_name);
+    const fp_name_final = extractFootprintName(allocator, footprint) orelse safe_name;
+    try writeSexpFile(allocator, project_dir, "pinouts", safe_name, pinout);
+    try writeSexpFile(allocator, project_dir, "footprints", fp_name_final, footprint);
+    writeComponentFile(allocator, project_dir, safe_name, safe_name, fp_name_final, sym_data);
+    if (step_data) |sd| try writeModelFile(allocator, project_dir, safe_name, sd);
+
+    infra_fs.cwd().deleteFile(tmp_zip) catch |e| switch (e) {
+        error.FileNotFound => {},
+        else => log.warn("deleting {s}: {s}", .{ tmp_zip, @errorName(e) }),
+    };
+    _ = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "rm", "-rf", tmp_dir },
+    }) catch |e| log.warn("cleanup {s}: {s}", .{ tmp_dir, @errorName(e) });
+
+    return .{
+        .package_name = pkg_name,
+        .component_name = safe_name,
+        .footprint_name = fp_name_final,
+        .pinout_name = safe_name,
+        .has_3d = step_data != null,
+    };
+}
+
+/// makePath(`lib/<subdir>`) + write `<name>.sexp` into it. Write failures
+/// surface as `ImportError.WriteFailed`.
+fn writeSexpFile(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    subdir: []const u8,
+    name: []const u8,
+    content: []const u8,
+) ImportError!void {
+    const dir = try std.fmt.allocPrint(allocator, "{s}/lib/{s}", .{ project_dir, subdir });
+    infra_fs.cwd().makePath(dir) catch return error.WriteFailed;
+    const path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ dir, name });
+    const f = infra_fs.cwd().createFile(path, .{}) catch return error.WriteFailed;
+    defer f.close();
+    f.writeAll(content) catch return error.WriteFailed;
+}
+
+/// makePath(`lib/models`) + write the raw STEP bytes to `<name>.step`.
+fn writeModelFile(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    data: []const u8,
+) ImportError!void {
+    const dir = try std.fmt.allocPrint(allocator, "{s}/lib/models", .{project_dir});
+    infra_fs.cwd().makePath(dir) catch return error.WriteFailed;
+    const path = try std.fmt.allocPrint(allocator, "{s}/{s}.step", .{ dir, name });
+    const f = infra_fs.cwd().createFile(path, .{}) catch return error.WriteFailed;
+    defer f.close();
+    f.writeAll(data) catch return error.WriteFailed;
+}
+
 /// POST /api/upload-zip — accept a KiCad library zip (must contain a
 /// `.kicad_sym` plus a `.kicad_mod`, optionally a STEP), unpack via the
 /// system `unzip`, convert each part, and write `lib/components`,
 /// `lib/footprints`, `lib/pinouts`, and `lib/models` entries for it.
+/// The heavy lifting lives in `importZipBytes`, shared with the MCP path.
 pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = HTTP_BAD_REQUEST;
@@ -37,187 +201,19 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     };
     const filename = req.header("x-filename") orelse "upload.zip";
 
-    const tmp_zip = std.fmt.allocPrint(ctx.allocator, TMP_ZIP_TEMPLATE, .{filename}) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        return;
-    };
-    defer ctx.allocator.free(tmp_zip);
-    {
-        const f = infra_fs.cwd().createFile(tmp_zip, .{}) catch {
-            res.status = HTTP_INTERNAL_ERROR;
-            res.body = "Cannot write temp file";
-            return;
-        };
-        defer f.close();
-        f.writeAll(body) catch {
-            res.status = HTTP_INTERNAL_ERROR;
-            return;
-        };
-    }
-
-    const tmp_dir = std.fmt.allocPrint(ctx.allocator, TMP_EXTRACT_TEMPLATE, .{clock.milliTimestamp()}) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        return;
-    };
-    defer ctx.allocator.free(tmp_dir);
-
-    const unzip_result = std.process.Child.run(.{
-        .allocator = ctx.allocator,
-        .argv = &.{ "unzip", "-o", "-q", tmp_zip, "-d", tmp_dir },
-    }) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = "Failed to extract zip (is unzip installed?)";
-        return;
-    };
-    if (unzip_result.term.Exited != 0) {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = "Zip extraction failed";
-        return;
-    }
-
-    var sym_path: ?[]const u8 = null;
-    var fp_path: ?[]const u8 = null;
-    var step_path: ?[]const u8 = null;
-
-    const find_result = std.process.Child.run(.{
-        .allocator = ctx.allocator,
-        .argv = &.{ "find", tmp_dir, "-type", "f" },
-    }) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = "Failed to scan extracted files";
+    const result = importZipBytes(ctx.allocator, ctx.project_dir, body, filename) catch |e| {
+        if (e == error.OutOfMemory) return error.OutOfMemory;
+        res.status = importErrorStatus(e);
+        res.body = importErrorMessage(e);
         return;
     };
 
-    var line_iter = std.mem.splitScalar(u8, find_result.stdout, '\n');
-    while (line_iter.next()) |line| {
-        if (line.len == 0) continue;
-        if (std.mem.endsWith(u8, line, ".kicad_sym")) sym_path = line;
-        if (std.mem.endsWith(u8, line, ".kicad_mod")) fp_path = line;
-        if (std.mem.endsWith(u8, line, ".stp") or std.mem.endsWith(u8, line, ".step")) step_path = line;
-    }
-
-    if (sym_path == null or fp_path == null) {
-        res.status = HTTP_BAD_REQUEST;
-        const msg = std.fmt.allocPrint(ctx.allocator, "Zip must contain a .kicad_sym and .kicad_mod file (found sym={s}, fp={s})", .{
-            if (sym_path) |s| s else "none",
-            if (fp_path) |f| f else "none",
-        }) catch "Missing KiCad files in zip";
-        res.body = msg;
-        return;
-    }
-
-    const sym_data = infra_fs.cwd().readFileAlloc(ctx.allocator, sym_path.?, MAX_KICAD_FILE_BYTES) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = "Cannot read symbol from zip";
-        return;
-    };
-    const fp_data = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path.?, MAX_KICAD_FILE_BYTES) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = "Cannot read footprint from zip";
-        return;
-    };
-    const step_data: ?[]const u8 = if (step_path) |sp|
-        (infra_fs.cwd().readFileAlloc(ctx.allocator, sp, MAX_STEP_FILE_BYTES) catch null)
-    else
-        null;
-
-    const sym_basename = std.fs.path.basename(sym_path.?);
-    const fp_basename = std.fs.path.basename(fp_path.?);
-
-    const pkg_name = extractPackageName(sym_data);
-
-    saveSourceFile(ctx.allocator, ctx.project_dir, sym_basename, sym_data);
-    saveSourceFile(ctx.allocator, ctx.project_dir, fp_basename, fp_data);
-    if (step_data != null and step_path != null) {
-        saveSourceFile(ctx.allocator, ctx.project_dir, std.fs.path.basename(step_path.?), step_data.?);
-    }
-
-    const symbol_conv = @import("../convert/symbol.zig");
-    const pinout = symbol_conv.generatePinout(ctx.allocator, sym_data, null) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = "Pinout generation failed";
-        return;
-    };
-
-    const footprint_conv = @import("../convert/footprint.zig");
-    const footprint = footprint_conv.convertFootprint(ctx.allocator, fp_data) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = "Footprint conversion failed";
-        return;
-    };
-
-    const safe_name = sanitizeName(ctx.allocator, pkg_name);
-
-    // Write pinout
-    {
-        const dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/pinouts", .{ctx.project_dir}) catch {
-            res.status = HTTP_INTERNAL_ERROR;
-            return;
-        };
-        try infra_fs.cwd().makePath(dir);
-        const path = std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ dir, safe_name }) catch {
-            res.status = HTTP_INTERNAL_ERROR;
-            return;
-        };
-        const f = infra_fs.cwd().createFile(path, .{}) catch {
-            res.status = HTTP_INTERNAL_ERROR;
-            return;
-        };
-        defer f.close();
-        try f.writeAll(pinout);
-    }
-
-    // Write footprint
-    const fp_name_final = extractFootprintName(ctx.allocator, footprint) orelse safe_name;
-    {
-        const dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints", .{ctx.project_dir}) catch {
-            res.status = HTTP_INTERNAL_ERROR;
-            return;
-        };
-        try infra_fs.cwd().makePath(dir);
-        const path = std.fmt.allocPrint(ctx.allocator, SEXP_PATH_TEMPLATE, .{ dir, fp_name_final }) catch {
-            res.status = HTTP_INTERNAL_ERROR;
-            return;
-        };
-        const f = infra_fs.cwd().createFile(path, .{}) catch {
-            res.status = HTTP_INTERNAL_ERROR;
-            return;
-        };
-        defer f.close();
-        try f.writeAll(footprint);
-    }
-
-    // Write component definition (links pinout + footprint + MPN/manufacturer)
-    writeComponentFile(ctx.allocator, ctx.project_dir, safe_name, safe_name, fp_name_final, sym_data);
-
-    // Write STEP model
-    if (step_data) |sd| {
-        const dir = std.fmt.allocPrint(ctx.allocator, "{s}/lib/models", .{ctx.project_dir}) catch "";
-        if (dir.len > 0) {
-            try infra_fs.cwd().makePath(dir);
-            const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}.step", .{ dir, safe_name }) catch "";
-            if (path.len > 0) {
-                const f = infra_fs.cwd().createFile(path, .{}) catch null;
-                if (f) |file| {
-                    defer file.close();
-                    try file.writeAll(sd);
-                }
-            }
-        }
-    }
-
-    // Clean up temp files
-    infra_fs.cwd().deleteFile(tmp_zip) catch |e| switch (e) {
-        error.FileNotFound => {},
-        else => log.warn("deleting {s}: {s}", .{ tmp_zip, @errorName(e) }),
-    };
-    _ = std.process.Child.run(.{
-        .allocator = ctx.allocator,
-        .argv = &.{ "rm", "-rf", tmp_dir },
-    }) catch |e| log.warn("cleanup {s}: {s}", .{ tmp_dir, @errorName(e) });
-
-    const step_msg: []const u8 = if (step_data != null) " + 3D model" else "";
-    const msg = std.fmt.allocPrint(ctx.allocator, "Created pinout + footprint{s} for \"{s}\" (sources saved)", .{ step_msg, pkg_name }) catch {
+    const step_msg: []const u8 = if (result.has_3d) " + 3D model" else "";
+    const msg = std.fmt.allocPrint(
+        ctx.allocator,
+        "Created pinout + footprint{s} for \"{s}\" (sources saved)",
+        .{ step_msg, result.package_name },
+    ) catch {
         res.body = "OK";
         return;
     };

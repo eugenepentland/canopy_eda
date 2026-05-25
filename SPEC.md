@@ -452,6 +452,23 @@ Public functions: uploadDatasheetApi, listDatasheetsApi, serveDatasheetApi, isPd
 - sanitize replaces unsafe chars
 - isPdfMagic gates non-PDF input
 
+## serve/component_search
+
+Public functions: downloadFootprint, errorMessage, searchComponents, searchErrorMessage
+
+- percentEncode escapes spaces and reserved chars
+- looksLikeZip detects the ZIP magic bytes
+- safeFilename builds a path-safe LIB_<part>.zip
+- searchVariants relaxes the part number
+- parses part id and datasheet url from a suggestion
+- collectHits maps suggestions to search hits
+
+## config
+
+Public functions: cseConnectSid
+
+- stripQuotes removes one layer of matching quotes
+
 ## paths
 
 Public functions: designSourcePath, designSiblingPath

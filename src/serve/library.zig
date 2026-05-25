@@ -196,6 +196,50 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handl
     res.content_type = .HTML;
 }
 
+/// POST /api/cse-fetch — body `{part_number, manufacturer?}`. Fetches the
+/// part's footprint (ECAD model → library entries) and datasheet from
+/// Component Search Engine in one shot by proxying the MCP `download_footprint`
+/// and `download_datasheet` tools (which read CSE_CONNECT_SID from env/.env).
+/// Returns `{"footprint":<tool result>,"datasheet":<tool result>}`,
+/// each the tool's own JSON (or null on a non-JSON internal error). The heavy
+/// allocations (zip + PDF, several MB) go through a dedicated arena freed at
+/// return, mirroring the `/mcp` POST handler.
+pub fn cseFetchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mcp_tools = @import("mcp_tools.zig");
+    res.content_type = .JSON;
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"missing body\"}";
+        return;
+    };
+
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    const parsed = std.json.parseFromSlice(std.json.Value, aa, body, .{}) catch {
+        res.status = 400;
+        res.body = "{\"error\":\"invalid JSON body\"}";
+        return;
+    };
+    const args = parsed.value;
+
+    var fp_buf: std.ArrayListUnmanaged(u8) = .empty;
+    _ = mcp_tools.call(aa, ctx.project_dir, "download_footprint", args, &fp_buf);
+    var ds_buf: std.ArrayListUnmanaged(u8) = .empty;
+    _ = mcp_tools.call(aa, ctx.project_dir, "download_datasheet", args, &ds_buf);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    const w = out.writer(aa);
+    try w.writeAll("{\"footprint\":");
+    try w.writeAll(if (fp_buf.items.len > 0 and fp_buf.items[0] == '{') fp_buf.items else "null");
+    try w.writeAll(",\"datasheet\":");
+    try w.writeAll(if (ds_buf.items.len > 0 and ds_buf.items[0] == '{') ds_buf.items else "null");
+    try w.writeAll("}");
+
+    res.body = try req.arena.dupe(u8, out.items);
+}
+
 /// Scan `content` for `(requirement "...")` forms and return a slice of the
 /// quoted text strings (slices into `content` — no allocation per string).
 fn extractRequirements(allocator: std.mem.Allocator, content: []const u8) ![]const []const u8 {
