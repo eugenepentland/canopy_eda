@@ -245,15 +245,63 @@ pub fn cseFetchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     var ds_buf: std.ArrayListUnmanaged(u8) = .empty;
     _ = mcp_tools.call(aa, ctx.project_dir, "download_datasheet", args, &ds_buf);
 
+    // download_footprint creates the component and download_datasheet saves the
+    // PDF, but neither links them — so splice the datasheet into the new
+    // component's .sexp, the same link the drag-to-card flow performs.
+    const linked = linkCseDatasheet(aa, ctx.project_dir, fp_buf.items, ds_buf.items);
+
     var out: std.ArrayListUnmanaged(u8) = .empty;
     const w = out.writer(aa);
     try w.writeAll("{\"footprint\":");
     try w.writeAll(if (fp_buf.items.len > 0 and fp_buf.items[0] == '{') fp_buf.items else "null");
     try w.writeAll(",\"datasheet\":");
     try w.writeAll(if (ds_buf.items.len > 0 and ds_buf.items[0] == '{') ds_buf.items else "null");
-    try w.writeAll("}");
+    try w.print(",\"linked\":{s}}}", .{if (linked) "true" else "false"});
 
     res.body = try req.arena.dupe(u8, out.items);
+}
+
+/// After a CSE fetch, splice the just-downloaded datasheet into the
+/// just-created component's `.sexp` so the part and its PDF are linked the same
+/// way the drag-a-PDF-onto-a-card flow does. Returns true when linked (or it was
+/// already linked); false when either download failed or the result fields are
+/// absent. Best-effort: a failure here never fails the fetch.
+fn linkCseDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, fp_json: []const u8, ds_json: []const u8) bool {
+    const edit_mod = @import("edit.zig");
+    const fp = jsonObj(allocator, fp_json) orelse return false;
+    const ds = jsonObj(allocator, ds_json) orelse return false;
+    if (!objBool(fp, "ok") or !objBool(ds, "ok")) return false;
+    const comp = objStr(fp, "component") orelse return false;
+    const file = objStr(ds, "file") orelse return false;
+    _ = edit_mod.addComponentDatasheetCore(allocator, project_dir, comp, file) catch |err| {
+        return err == error.DuplicateImport;
+    };
+    return true;
+}
+
+fn jsonObj(allocator: std.mem.Allocator, json: []const u8) ?std.json.ObjectMap {
+    if (json.len == 0 or json[0] != '{') return null;
+    const v = std.json.parseFromSliceLeaky(std.json.Value, allocator, json, .{}) catch return null;
+    return switch (v) {
+        .object => |o| o,
+        else => null,
+    };
+}
+
+fn objBool(obj: std.json.ObjectMap, key: []const u8) bool {
+    const f = obj.get(key) orelse return false;
+    return switch (f) {
+        .bool => |b| b,
+        else => false,
+    };
+}
+
+fn objStr(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const f = obj.get(key) orelse return null;
+    return switch (f) {
+        .string => |s| s,
+        else => null,
+    };
 }
 
 /// Scan `content` for `(requirement "...")` forms and return a slice of the
@@ -346,4 +394,29 @@ fn extractField(content: []const u8, field: []const u8) ?[]const u8 {
         pos = needle_start + 1;
     }
     return null;
+}
+
+test "linkCseDatasheet splices the downloaded datasheet into the component" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("lib/components");
+    try tmp.dir.writeFile(.{ .sub_path = "lib/components/foo.sexp", .data = "(component \"foo\"\n  (footprint x))\n" });
+    const proj = try tmp.dir.realpathAlloc(aa, ".");
+
+    // Both downloads ok → the datasheet is spliced into the component.
+    try std.testing.expect(linkCseDatasheet(aa, proj, "{\"ok\":true,\"component\":\"foo\"}", "{\"ok\":true,\"file\":\"foo.pdf\"}"));
+    const after = try tmp.dir.readFileAlloc(alloc, "lib/components/foo.sexp", 1 << 20);
+    defer alloc.free(after);
+    try std.testing.expect(std.mem.indexOf(u8, after, "(datasheet \"foo.pdf\")") != null);
+
+    // Re-linking the same PDF is idempotent (DuplicateImport still counts as linked).
+    try std.testing.expect(linkCseDatasheet(aa, proj, "{\"ok\":true,\"component\":\"foo\"}", "{\"ok\":true,\"file\":\"foo.pdf\"}"));
+
+    // A failed footprint download links nothing.
+    try std.testing.expect(!linkCseDatasheet(aa, proj, "{\"ok\":false}", "{\"ok\":true,\"file\":\"foo.pdf\"}"));
 }

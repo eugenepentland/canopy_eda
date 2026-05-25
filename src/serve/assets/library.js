@@ -178,6 +178,8 @@ function cseFetch(){
       else lines.push('✗ Footprint: '+((fp&&fp.error)||'failed'));
       if(ds&&ds.ok)lines.push('✓ Datasheet: '+ds.file+' (via '+ds.source+')');
       else lines.push('✗ Datasheet: '+((ds&&ds.error)||'failed'));
+      if(d.linked)lines.push('✓ Linked datasheet to '+((fp&&fp.component)||'component'));
+      else if(fp&&fp.ok&&ds&&ds.ok)lines.push('⚠ Datasheet downloaded but not linked to component');
       var anyOk=(fp&&fp.ok)||(ds&&ds.ok);
       cseResult.className='result '+(anyOk?'ok':'err');
       cseResult.textContent=lines.join('\n');
