@@ -182,6 +182,7 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - Generates a KiCad netlist from a resolved design
 - Exports a KiCad footprint mod file from footprint data
 - Emits a footprint's (fab …) body outline as fp_line/fp_circle on the F.Fab layer
+- Emits silkscreen/fab (poly …) as a filled fp_poly and (rect …) as fp_rect on the target layer
 
 ## bom
 
@@ -413,6 +414,7 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - buildStagingLayout gives each part a fixed staging seat from the whole design, independent of push composition
 - protoBoardLayer maps F.Fab and B.Fab to their KiCad board-layer enums
 - loadFootprintDefImpl ships a footprint's fab geometry on F.Fab so the synced part keeps its outline
+- writeGeomBlockProtoJson traces a (poly …) outline as boundary segments and emits (rect …) on the block's layer
 - maybeCollapseDotSubNet folds a per-pin sub-net to its rail by default but keeps it verbatim in dot-net mode
 
 ## serve/vfs

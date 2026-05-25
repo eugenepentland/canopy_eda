@@ -137,6 +137,15 @@ pub const ParsedSyncPlan = struct {
     /// which pin. The caps then sit on electrically-distinct nets, so the user
     /// rejoins them with copper/zone (or a net-tie). Opt-in via `?dot_nets=1`.
     dot_nets: bool,
+    /// When true, re-bake the footprint geometry of every matched
+    /// (already-placed) part by emitting a same-name `swap_footprint` with a
+    /// freshly-generated definition. `swapFootprint` preserves `at`/`uuid`/
+    /// `layer`/`locked`/custom properties and re-applies pad nets, so the
+    /// part keeps its position, identity, and routing while picking up any
+    /// new silkscreen/fab geometry. Opt-in via `?refresh=1`; the default sync
+    /// leaves placed footprints' geometry untouched. Lets a board built
+    /// before the silk/fab fixes backfill outlines without moving anything.
+    refresh: bool = false,
     /// Set of `<uuid>|<op>|<key>|<value>` fingerprints the agent has
     /// already pushed in prior syncs. Server skips re-emitting any
     /// state-asserting op whose fingerprint is in this set — works
@@ -341,6 +350,7 @@ const COURTYARD_STROKE_MM: f64 = 0.05;
 const SILK_STROKE_MM: f64 = 0.12;
 const FAB_STROKE_MM: f64 = 0.1;
 const RECT_NODE_MIN_CHILDREN: usize = 5;
+const POLY_MIN_POINTS: usize = 3;
 const DEFAULT_ROUNDRECT_RRATIO: f64 = 0.25;
 
 fn protoPadType(short: []const u8) []const u8 {
@@ -496,6 +506,36 @@ fn writeGeomBlockProtoJson(w: anytype, node: env_mod_node.Node, layer: []const u
             try writeBoardShapeOpen(w, layer, stroke_mm, first);
             try writeCircleGeom(w, c.cx, c.cy, c.r);
             try w.writeAll("}}");
+        } else if (child.isForm("rect")) {
+            const cl = child.asList() orelse continue;
+            if (cl.len < RECT_NODE_MIN_CHILDREN) continue;
+            const x1 = cl[1].asNumber() orelse continue;
+            const y1 = cl[2].asNumber() orelse continue;
+            const x2 = cl[3].asNumber() orelse continue;
+            const y2 = cl[4].asNumber() orelse continue;
+            try writeBoardShapeOpen(w, layer, stroke_mm, first);
+            try writeRectGeom(w, x1, y1, x2, y2);
+            try w.writeAll("}}");
+        } else if (child.isForm("poly")) {
+            // The proto BoardGraphicShape path has no polygon-fill geometry,
+            // so trace the outline as one segment per edge, closing back to
+            // the first point. (The file-based sync writes the real fp_poly
+            // via the .kicad_mod; this only covers the legacy IPC agent.)
+            const pts = child.asList() orelse continue;
+            if (pts.len < 1 + POLY_MIN_POINTS) continue;
+            const verts = pts[1..];
+            for (verts, 0..) |a_node, i| {
+                const a = a_node.asList() orelse continue;
+                const b = verts[(i + 1) % verts.len].asList() orelse continue;
+                if (a.len < 2 or b.len < 2) continue;
+                const ax = a[0].asNumber() orelse continue;
+                const ay = a[1].asNumber() orelse continue;
+                const bx = b[0].asNumber() orelse continue;
+                const by = b[1].asNumber() orelse continue;
+                try writeBoardShapeOpen(w, layer, stroke_mm, first);
+                try writeSegmentGeom(w, ax, ay, bx, by);
+                try w.writeAll("}}");
+            }
         }
     }
 }
@@ -831,6 +871,7 @@ pub fn runSyncPlan(
         .spc = &spc,
         .summary = &summary,
         .migrate_heuristic = parsed.migrate_heuristic,
+        .refresh = parsed.refresh,
     };
     for (instances.items) |inst| try handleInstance(&diff_ctx, inst, &w, &first_op);
 
@@ -886,7 +927,9 @@ const MAX_PCB_BYTES: usize = 64 * 1024 * 1024;
 /// canopy_uuids/ref-des drifted; `?prune=1` turns every `flag_stale` op
 /// into a real `remove`; `?dot_nets=1` keeps the per-pin `(decouple …)`
 /// sub-nets (`VDD.U18.IN`) as pad nets instead of collapsing to the rail,
-/// so each bypass cap shows which pin it belongs to.
+/// so each bypass cap shows which pin it belongs to; `?refresh=1` re-bakes
+/// every matched part's footprint geometry (same-name swap) so an existing
+/// board backfills new silkscreen/fab outlines without moving anything.
 pub fn syncKicadPcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = HTTP_NOT_FOUND;
@@ -901,7 +944,10 @@ pub fn syncKicadPcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     const migrate = isQueryFlagSet(req, "migrate");
     // `?dot_nets=1` keeps each decoupling cap on its own per-pin sub-net.
     const dot_nets = isQueryFlagSet(req, "dot_nets");
-    runKicadPcbSync(ctx, req, res, name, dry_run, prune_stale, migrate, dot_nets) catch |err| switch (err) {
+    // `?refresh=1` re-bakes every matched part's footprint geometry (same-name
+    // swap) so a board backfills new silkscreen/fab without moving anything.
+    const refresh = isQueryFlagSet(req, "refresh");
+    runKicadPcbSync(ctx, req, res, name, dry_run, prune_stale, migrate, dot_nets, refresh) catch |err| switch (err) {
         error.PcbPathUnset => sendError(res, HTTP_BAD_REQUEST, ERR_NO_PCB_PATH),
         error.PcbReadFailed => sendError(res, HTTP_INTERNAL_ERROR, ERR_PCB_READ_FAILED),
         error.PcbParseFailed => sendError(res, HTTP_INTERNAL_ERROR, ERR_PCB_PARSE_FAILED),
@@ -941,6 +987,7 @@ fn runKicadPcbSync(
     prune_stale: bool,
     migrate: bool,
     dot_nets: bool,
+    refresh: bool,
 ) KicadPcbSyncError!void {
     // Resolve the design and its declared PCB path.
     const board_path = try paths.designSourcePath(req.arena, ctx.project_dir, name);
@@ -969,6 +1016,7 @@ fn runKicadPcbSync(
         .prune_stale = prune_stale,
         .migrate_heuristic = migrate,
         .dot_nets = dot_nets,
+        .refresh = refresh,
         .applied_ops = std.StringHashMap(void).init(req.arena),
     };
     const run = try runSyncPlan(req.arena, ctx.allocator, ctx.project_dir, name, plan);
@@ -1235,6 +1283,8 @@ const DiffContext = struct {
     spc: *SyncPlanContext,
     summary: *SyncSummary,
     migrate_heuristic: bool,
+    /// Re-bake matched parts' geometry via a same-name swap (see ParsedSyncPlan.refresh).
+    refresh: bool,
 };
 
 /// Walk every board fp that didn't match any design instance and emit the
@@ -1715,6 +1765,17 @@ fn handleMatched(
     if (m.kicad_uuid.len > 0) try d.matched_uuids.put(m.kicad_uuid, {});
     const target = opTargetUuid(m);
     if (!footprintNameMatches(d, m.footprint_name, fp_name_short)) {
+        if (loadKicadMod(d.spc, fp_name_short, inst.component)) |kmod| {
+            const fp_def = loadFootprintDef(d.spc, fp_name_short);
+            try emitSwapOp(w, first, target, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map);
+            d.summary.swapped += 1;
+            ops_emitted.* += 1;
+        }
+    } else if (d.refresh) {
+        // Force-refresh: the footprint name already matches, but `?refresh=1`
+        // re-bakes the geometry so a board built before the silk/fab fixes
+        // picks up the outlines. swapFootprint preserves at/uuid/layer/locked
+        // + custom properties and re-applies pad nets, so nothing moves.
         if (loadKicadMod(d.spc, fp_name_short, inst.component)) |kmod| {
             const fp_def = loadFootprintDef(d.spc, fp_name_short);
             try emitSwapOp(w, first, target, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map);
@@ -2617,4 +2678,20 @@ test "writeGeomBlockProtoJson ships a fab block on the F.Fab layer" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "BL_F_Fab") != null);
     // … with the segment endpoints converted to nanometres (3.05 mm → 3050000 nm).
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "3050000") != null);
+}
+
+test "writeGeomBlockProtoJson traces a poly as one segment per edge" {
+    // spec: serve/sync - writeGeomBlockProtoJson traces a (poly …) outline as boundary segments and emits (rect …) on the block's layer
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    // A 4-vertex polygon → 4 boundary segments (closing back to vertex 0).
+    const nodes = try parser_mod.parse(arena, "(silkscreen (poly (0 0) (1 0) (1 1) (0 1)))");
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(arena);
+    var first = true;
+    try writeGeomBlockProtoJson(w, nodes[0], PROTO_LAYER_F_SILK, SILK_STROKE_MM, &first);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "BL_F_SilkS") != null);
+    // One BoardGraphicShape per edge — four vertices close into four segments.
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, buf.items, "BL_F_SilkS"));
 }

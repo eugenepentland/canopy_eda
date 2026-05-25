@@ -12,8 +12,12 @@ pub const FootprintError = std.mem.Allocator.Error || parser_mod.ParseError || e
 // ── Constants ─────────────────────────────────────────────────────
 const PAD_MIN_CHILDREN: usize = 5;
 const RECT_MIN_CHILDREN: usize = 5;
+const POLY_MIN_POINTS: usize = 3;
 const DEFAULT_ROUNDRECT_RRATIO: f64 = 0.25;
 const KICAD_FILL_NONE = "    (fill none)\n";
+// Shared `.kicad_mod` line fragments for graphic primitives (layer + stroke).
+const KICAD_LAYER_FMT = "    (layer \"{s}\")\n";
+const KICAD_STROKE_FMT = "    (stroke (width {d:.2}) (type default))\n";
 // KiCad default stroke widths (mm) for the documentation layers.
 const SILK_STROKE_MM: f64 = 0.12;
 const FAB_STROKE_MM: f64 = 0.1;
@@ -378,12 +382,48 @@ fn emitKicadCourtyard(w: anytype, node: ast.Node) !void {
     }
 }
 
-/// Emit a `(line …)`/`(circle …)` geometry block onto `layer` with the given
-/// stroke `width`. The `silkscreen` (F.SilkS) and `fab` (F.Fab) blocks share
-/// the same shape grammar, so both route through here.
+/// Emit a `(line …)`/`(circle …)`/`(rect …)`/`(poly …)` geometry block onto
+/// `layer` with the given stroke `width`. The `silkscreen` (F.SilkS) and `fab`
+/// (F.Fab) blocks share the same shape grammar, so both route through here.
+/// `(poly …)` covers filled pin-1 markers, which fine-pitch parts (LGA/QFN)
+/// carry on F.SilkS — dropping them left those parts with no orientation mark.
 fn emitKicadGeomBlock(w: anytype, node: ast.Node, layer: []const u8, width: f64) !void {
     const children = node.asList() orelse return;
     for (children[1..]) |child| {
+        if (child.isForm("rect")) {
+            const cl = child.asList() orelse continue;
+            // (rect X1 Y1 X2 Y2)
+            if (cl.len >= RECT_MIN_CHILDREN) {
+                const x1 = cl[1].asNumber() orelse continue;
+                const y1 = cl[2].asNumber() orelse continue;
+                const x2 = cl[3].asNumber() orelse continue;
+                const y2 = cl[4].asNumber() orelse continue;
+                try w.print("  (fp_rect (start {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ x1, y1, x2, y2 });
+                try w.print(KICAD_STROKE_FMT, .{width});
+                try w.writeAll(KICAD_FILL_NONE);
+                try w.print(KICAD_LAYER_FMT, .{layer});
+                try w.writeAll("  )\n");
+            }
+        }
+        if (child.isForm("poly")) {
+            const cl = child.asList() orelse continue;
+            // (poly (X Y) (X Y) …) — a filled outline (pin-1 marker, body shape)
+            if (cl.len >= POLY_MIN_POINTS + 1) {
+                try w.writeAll("  (fp_poly\n    (pts");
+                for (cl[1..]) |pt| {
+                    const p = pt.asList() orelse continue;
+                    if (p.len < 2) continue;
+                    const x = p[0].asNumber() orelse continue;
+                    const y = p[1].asNumber() orelse continue;
+                    try w.print(" (xy {d:.2} {d:.2})", .{ x, y });
+                }
+                try w.writeAll(")\n");
+                try w.print(KICAD_STROKE_FMT, .{width});
+                try w.writeAll("    (fill solid)\n");
+                try w.print(KICAD_LAYER_FMT, .{layer});
+                try w.writeAll("  )\n");
+            }
+        }
         if (child.isForm("line")) {
             const cl = child.asList() orelse continue;
             // (line (X1 Y1) (X2 Y2))
@@ -396,8 +436,8 @@ fn emitKicadGeomBlock(w: anytype, node: ast.Node, layer: []const u8, width: f64)
                     const ex = end[0].asNumber() orelse continue;
                     const ey = end[1].asNumber() orelse continue;
                     try w.print("  (fp_line (start {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ sx, sy, ex, ey });
-                    try w.print("    (stroke (width {d:.2}) (type default))\n", .{width});
-                    try w.print("    (layer \"{s}\")\n", .{layer});
+                    try w.print(KICAD_STROKE_FMT, .{width});
+                    try w.print(KICAD_LAYER_FMT, .{layer});
                     try w.writeAll("  )\n");
                 }
             }
@@ -413,9 +453,9 @@ fn emitKicadGeomBlock(w: anytype, node: ast.Node, layer: []const u8, width: f64)
                     const r = cl[2].asNumber() orelse continue;
                     // KiCad uses center + end point
                     try w.print("  (fp_circle (center {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ cx, cy, cx + r, cy });
-                    try w.print("    (stroke (width {d:.2}) (type default))\n", .{width});
+                    try w.print(KICAD_STROKE_FMT, .{width});
                     try w.writeAll(KICAD_FILL_NONE);
-                    try w.print("    (layer \"{s}\")\n", .{layer});
+                    try w.print(KICAD_LAYER_FMT, .{layer});
                     try w.writeAll("  )\n");
                 }
             }
@@ -603,4 +643,23 @@ test "exportFootprintMod emits fab geometry on F.Fab and keeps silkscreen on F.S
     try std.testing.expect(std.mem.indexOf(u8, out, "(fp_circle (center 0.00 0.00) (end 0.50 0.00)") != null);
     // Silkscreen still routes to F.SilkS — fab emission must not displace it.
     try std.testing.expect(std.mem.indexOf(u8, out, "(layer \"F.SilkS\")") != null);
+}
+
+test "exportFootprintMod emits silkscreen poly + rect (pin-1 markers must not be dropped)" {
+    // spec: export_kicad - Emits silkscreen/fab (poly …) as a filled fp_poly and (rect …) as fp_rect on the target layer
+    const src =
+        \\(footprint "T"
+        \\  (pad 1 smd rect (pos 0 0) (size 1 1))
+        \\  (silkscreen
+        \\    (poly (-3.40 1.81) (-3.40 2.19) (-3.15 2.19) (-3.15 1.81))
+        \\    (rect -1 -1 1 1)))
+    ;
+    const out = try exportFootprintMod(std.testing.allocator, src, null, null, null);
+    defer std.testing.allocator.free(out);
+    // The pin-1 marker poly becomes a filled fp_poly on F.SilkS.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(fp_poly") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(xy -3.40 1.81)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(fill solid)") != null);
+    // The rect becomes an fp_rect.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(fp_rect (start -1.00 -1.00) (end 1.00 1.00)") != null);
 }

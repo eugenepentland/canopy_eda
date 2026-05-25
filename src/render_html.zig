@@ -292,6 +292,18 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
             "Rejoin them with copper/zone since the ratsnest won't tie them.\">" ++
             "\u{2192} Push (per-pin nets)</button>",
     );
+    // Refresh variant: re-bake every placed part's footprint geometry via a
+    // same-name swap (?refresh=1). Position, identity, and routing are
+    // preserved — only the silkscreen/fab/courtyard graphics update. Use after
+    // the footprint library gains new outlines (e.g. recovered silk/fab) to
+    // backfill them onto a board built before the fix.
+    try w.writeAll(
+        "<button class=\"kicad-row-btn\" id=\"push-kicad-pcb-refresh-btn\" " ++
+            "title=\"Re-bake every placed footprint's silkscreen/fab/courtyard geometry from the library " ++
+            "without moving anything (same-name swap; position, identity, and pad nets preserved). " ++
+            "Use to backfill recovered outlines onto an existing board.\">" ++
+            "\u{2192} Refresh Footprints</button>",
+    );
     try w.writeAll("<span id=\"push-kicad-pcb-status\" class=\"kicad-row-status\"></span>");
     try w.writeAll("</div></div>");
     try w.print("<a class=\"head-link\" href=\"/api/export-bom/{s}\">BOM</a>", .{design_name});
