@@ -70,6 +70,7 @@ pub fn renderToHtml(
     try w.writeAll("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
     try w.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     try w.print("<title>{s} — Schematic</title>", .{block.name});
+    try w.writeAll("<link rel=\"stylesheet\" href=\"/static/codemirror.css\">");
     try w.writeAll("<link rel=\"stylesheet\" href=\"/static/schematic.css\">");
     try w.writeAll("<style>");
     try w.writeAll(navbar_css);
@@ -543,6 +544,15 @@ fn writeSection(
             "<span class=\"pill {s}\" title=\"Click 'Coverage' below to see what's checked and what's missing\">{d}/{d} complete</span>",
             .{ cov_class, sec_cov.complete, sec_cov.checked },
         );
+    }
+    // Per-section "Edit src" — opens the raw `(section …)` form in a modal so
+    // the user can rename a net or swap a passive's footprint in place. Only
+    // top-level sections map 1:1 to an editable source span; sub-sections and
+    // synthetic sub-block cards are skipped.
+    if (depth == 0) {
+        try w.writeAll("<button type=\"button\" class=\"sec-edit-src\" data-section=\"");
+        try writeHtmlEscaped(w, sec.name);
+        try w.writeAll("\" title=\"Edit this section's S-expression source\">Edit src</button>");
     }
     try w.writeAll("</div>");
 
@@ -1318,6 +1328,9 @@ fn writeScripts(
     try w.writeAll(";var SCH_AUDIT=");
     try writeAuditSummary(w, review_doc);
     try w.writeAll(";</script>");
+    // CodeMirror (vendored) must load before schematic_viewer.js so the
+    // global is available when the source editor initialises.
+    try w.writeAll("<script src=\"/static/codemirror.bundle.js\"></script>");
     try w.writeAll("<script src=\"/static/schematic_viewer.js\"></script>");
 }
 

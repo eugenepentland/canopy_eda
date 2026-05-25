@@ -42,6 +42,43 @@ h3{color:#f0f6fc;font-size:0.95rem;margin:0;}
 .view-src-link{color:#8b949e;font-size:0.75rem;text-decoration:none;border:1px solid #30363d;border-radius:5px;padding:3px 10px;}
 .view-src-link:hover{color:#c9d1d9;border-color:#58a6ff;}
 .copy-src-btn+.view-src-link{margin-left:0;}
+/* Per-section "Edit src" button — pushed to the right edge of the header.
+   Opens the full-file CodeMirror editor scrolled to this section. */
+.sec-edit-src{margin-left:auto;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;padding:3px 10px;font-size:0.75rem;cursor:pointer;font-family:inherit;}
+.sec-edit-src:hover{background:#30363d;border-color:#58a6ff;}
+/* Full-file source editor (CodeMirror) overlay. */
+.src-edit-overlay{position:fixed;inset:0;background:rgba(1,4,9,0.7);display:flex;align-items:center;justify-content:center;z-index:1000;}
+.src-edit-box{background:#0d1117;border:1px solid #30363d;border-radius:8px;width:min(1100px,95vw);height:86vh;display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,0.5);}
+.src-edit-head{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #21262d;}
+.src-edit-head h3{margin:0;font-size:0.95rem;color:#c9d1d9;font-family:system-ui,sans-serif;}
+.src-edit-head .src-edit-sec{color:#58a6ff;font-family:ui-monospace,monospace;}
+.src-edit-hint{margin-left:auto;color:#6e7681;font-size:0.75rem;font-family:system-ui,sans-serif;}
+.src-edit-cm{flex:1;min-height:0;overflow:hidden;border-bottom:1px solid #21262d;}
+.src-edit-cm .CodeMirror{height:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.82rem;line-height:1.5;}
+.src-edit-foot{display:flex;align-items:center;gap:10px;padding:10px 16px;}
+.src-edit-err{color:#f85149;font-size:0.8rem;flex:1;min-height:1em;font-family:system-ui,sans-serif;}
+.src-edit-btn{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;padding:5px 14px;font-size:0.8rem;cursor:pointer;font-family:inherit;}
+.src-edit-btn:hover{background:#30363d;border-color:#58a6ff;}
+.src-edit-btn.primary{background:#238636;border-color:#2ea043;color:#fff;}
+.src-edit-btn.primary:hover{background:#2ea043;}
+.src-edit-btn:disabled{opacity:0.5;cursor:default;}
+/* CodeMirror "eda-dark" theme — matches the GitHub-dark page palette. */
+.cm-s-eda-dark.CodeMirror{background:#0d1117;color:#c9d1d9;}
+.cm-s-eda-dark .CodeMirror-gutters{background:#0d1117;border-right:1px solid #21262d;}
+.cm-s-eda-dark .CodeMirror-linenumber{color:#484f58;}
+.cm-s-eda-dark .CodeMirror-cursor{border-left:1px solid #c9d1d9;}
+.cm-s-eda-dark div.CodeMirror-selected{background:#264f78;}
+.cm-s-eda-dark .CodeMirror-line::selection,.cm-s-eda-dark .CodeMirror-line>span::selection{background:#264f78;}
+.cm-s-eda-dark .cm-comment{color:#6e7681;}
+.cm-s-eda-dark .cm-string{color:#a5d6ff;}
+.cm-s-eda-dark .cm-number,.cm-s-eda-dark .cm-atom{color:#79c0ff;}
+.cm-s-eda-dark .cm-keyword{color:#ff7b72;}
+.cm-s-eda-dark .cm-builtin,.cm-s-eda-dark .cm-def{color:#d2a8ff;}
+.cm-s-eda-dark .cm-variable,.cm-s-eda-dark .cm-variable-2,.cm-s-eda-dark .cm-property{color:#c9d1d9;}
+.cm-s-eda-dark .CodeMirror-matchingbracket{color:#3fb950 !important;font-weight:bold;text-decoration:underline;}
+.cm-s-eda-dark .CodeMirror-activeline-background{background:rgba(110,118,129,0.1);}
+/* Brief flash on the section the editor scrolled to. */
+.cm-section-flash{background:rgba(88,166,255,0.18);}
 .pill-ok{background:#0d3a1f;color:#3fb950;}
 .pill-warn{background:#3a2e0d;color:#d29922;}
 .pill-concept{background:#24232e;color:#a89eff;}

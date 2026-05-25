@@ -16,6 +16,13 @@ const auth_manage_js = @embedFile("assets/auth_manage.js");
 const auth_manage_css = @embedFile("assets/auth_manage.css");
 const review_notes_js = @embedFile("assets/review_notes.js");
 
+// Vendored CodeMirror 5 (MIT) — core + scheme mode + matchbrackets/
+// closebrackets addons concatenated into one bundle. Backs the full-file
+// `.sexp` source editor on the schematic page. Self-hosted so the editor
+// works offline and behind the OAuth wall.
+const codemirror_js = @embedFile("assets/codemirror.bundle.js");
+const codemirror_css = @embedFile("assets/codemirror.css");
+
 // Schematic page assets — pub-imported from render_html so we don't
 // re-`@embedFile` the underlying byte slices (the JS lives under
 // `serve/assets/` already, but the CSS is the concatenation of
@@ -52,6 +59,8 @@ const REGISTRY = [_]Asset{
     .{ .name = "review_notes.js", .body = review_notes_js, .content_type = .JS },
     .{ .name = "schematic_viewer.js", .body = schematic_viewer_js, .content_type = .JS },
     .{ .name = "schematic.css", .body = schematic_css, .content_type = .CSS },
+    .{ .name = "codemirror.bundle.js", .body = codemirror_js, .content_type = .JS },
+    .{ .name = "codemirror.css", .body = codemirror_css, .content_type = .CSS },
 };
 
 /// GET /static/:name — serve an embedded JS/CSS asset. 404 if the name is

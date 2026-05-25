@@ -901,6 +901,7 @@
           (a.swapped || 0) + ' swapped, ' +
           (a.pad_nets_set || 0) + ' pad-nets, ' +
           (a.fields_set || 0) + ' fields';
+        if (a.fields_hidden) msg += ', ' + a.fields_hidden + ' fields hidden';
         if (j && j.warning) {
           msg += ' — ⚠ ' + j.warning;
           if (pushPcbStatus) pushPcbStatus.style.color = '#d29922';
@@ -1302,6 +1303,124 @@
 
     refreshTasks();
   })();
+
+  // ---- Full-file source editor ----
+  // A single CodeMirror editor over the whole .sexp file. Each section's
+  // "Edit src" button opens it (loading /api/source once) and scrolls to that
+  // section's (section "…") line. Save POSTs the whole file to /api/source;
+  // the server validates + snapshots + rebuilds, and the page reloads.
+  var srcEditor = null; // { overlay, cm, errEl, secEl, saveBtn, loaded, loadPromise }
+
+  function buildSourceEditor() {
+    var overlay = document.createElement('div');
+    overlay.className = 'src-edit-overlay';
+    overlay.innerHTML =
+      '<div class="src-edit-box">' +
+        '<div class="src-edit-head"><h3>Edit source <span class="src-edit-sec"></span></h3>' +
+          '<span class="src-edit-hint">Whole-file editor · ⌘/Ctrl-S to save</span></div>' +
+        '<div class="src-edit-cm"></div>' +
+        '<div class="src-edit-foot">' +
+          '<span class="src-edit-err"></span>' +
+          '<button type="button" class="src-edit-btn src-edit-cancel">Close</button>' +
+          '<button type="button" class="src-edit-btn primary src-edit-save">Save</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    var cm = CodeMirror(overlay.querySelector('.src-edit-cm'), {
+      value: 'Loading…',
+      mode: 'scheme',
+      theme: 'eda-dark',
+      lineNumbers: true,
+      matchBrackets: true,
+      autoCloseBrackets: true,
+      lineWrapping: false,
+      indentUnit: 2,
+      tabSize: 2
+    });
+
+    var state = {
+      overlay: overlay,
+      cm: cm,
+      errEl: overlay.querySelector('.src-edit-err'),
+      secEl: overlay.querySelector('.src-edit-sec'),
+      saveBtn: overlay.querySelector('.src-edit-save'),
+      loaded: false,
+      loadPromise: null
+    };
+
+    function close() {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      srcEditor = null;
+    }
+    overlay.querySelector('.src-edit-cancel').addEventListener('click', close);
+    overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) close(); });
+
+    function save() {
+      state.errEl.textContent = '';
+      state.saveBtn.disabled = true;
+      state.saveBtn.textContent = 'Saving…';
+      fetch('/api/source/' + DESIGN_NAME, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: cm.getValue() })
+      })
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+        .then(function (res) {
+          if (!res.ok || !res.j.ok) throw new Error((res.j && res.j.error) || 'save failed');
+          window.location.reload();
+        })
+        .catch(function (e) {
+          state.errEl.textContent = e.message;
+          state.saveBtn.disabled = false;
+          state.saveBtn.textContent = 'Save';
+        });
+    }
+    state.saveBtn.addEventListener('click', save);
+    cm.setOption('extraKeys', { 'Cmd-S': save, 'Ctrl-S': save });
+
+    state.loadPromise = fetch('/api/source/' + DESIGN_NAME)
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        cm.setValue(typeof j.source === 'string' ? j.source : '');
+        state.loaded = true;
+        setTimeout(function () { cm.refresh(); }, 0);
+      })
+      .catch(function (e) { state.errEl.textContent = 'Load failed: ' + e.message; });
+
+    return state;
+  }
+
+  function scrollEditorToSection(state, sectionName) {
+    function go() {
+      state.secEl.textContent = sectionName ? '· ' + sectionName : '';
+      if (!sectionName) { state.cm.focus(); return; }
+      var doc = state.cm.getValue();
+      var idx = doc.indexOf('(section "' + sectionName + '"');
+      if (idx < 0) { state.cm.focus(); return; }
+      var line = doc.slice(0, idx).split('\n').length - 1;
+      state.cm.focus();
+      state.cm.setCursor({ line: line, ch: 0 });
+      var top = state.cm.charCoords({ line: line, ch: 0 }, 'local').top;
+      state.cm.scrollTo(null, top - state.cm.getScrollInfo().clientHeight / 2);
+      state.cm.addLineClass(line, 'background', 'cm-section-flash');
+      setTimeout(function () { state.cm.removeLineClass(line, 'background', 'cm-section-flash'); }, 1500);
+    }
+    if (state.loaded) go(); else state.loadPromise.then(go);
+  }
+
+  function openSourceEditor(sectionName) {
+    if (!window.CodeMirror) { alert('Source editor failed to load (CodeMirror missing)'); return; }
+    if (!srcEditor) srcEditor = buildSourceEditor();
+    scrollEditorToSection(srcEditor, sectionName);
+  }
+
+  document.addEventListener('click', function (e) {
+    var btn = (e.target && e.target.closest) ? e.target.closest('.sec-edit-src') : null;
+    if (!btn) return;
+    e.preventDefault();
+    openSourceEditor(btn.getAttribute('data-section'));
+  });
 
   // ---- Boot ----
   showSectionList();
