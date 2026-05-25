@@ -191,7 +191,7 @@ fn dispatchProject(
 ) !?bool {
     const w = out.writer(allocator);
     if (std.mem.eql(u8, tool_name, "list_designs")) return try toolListDesigns(allocator, project_dir, w);
-    if (std.mem.eql(u8, tool_name, "list_library")) return try toolListLibrary(allocator, project_dir, w);
+    if (std.mem.eql(u8, tool_name, "list_library")) return try toolListLibrary(allocator, project_dir, args_val, w);
     if (std.mem.eql(u8, tool_name, "list_history")) return try toolListHistory(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "list_instances")) return try toolListInstances(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "list_free_pins")) return try toolListFreePins(allocator, project_dir, args_val, out);
@@ -468,7 +468,14 @@ fn toolListDesigns(allocator: std.mem.Allocator, project_dir: []const u8, w: any
     return true;
 }
 
-fn toolListLibrary(allocator: std.mem.Allocator, project_dir: []const u8, w: anytype) !bool {
+fn toolListLibrary(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, w: anytype) !bool {
+    // A blank/whitespace-only query is treated as "no filter" so callers can
+    // pass an empty box without accidentally hiding the whole library.
+    const query: ?[]const u8 = blk: {
+        const q = optionalString(args_val, "query") orelse break :blk null;
+        const trimmed = std.mem.trim(u8, q, " \t\r\n");
+        break :blk if (trimmed.len == 0) null else trimmed;
+    };
     try w.writeAll("{");
     const kinds = [_]struct { field: []const u8, sub: []const u8 }{
         .{ .field = KEY_COMPONENTS, .sub = KEY_COMPONENTS },
@@ -479,7 +486,7 @@ fn toolListLibrary(allocator: std.mem.Allocator, project_dir: []const u8, w: any
     for (kinds, 0..) |k, i| {
         if (i > 0) try w.writeAll(",");
         try w.print("\"{s}\":", .{k.field});
-        try listLibrarySubdir(allocator, project_dir, k.sub, w);
+        try listLibrarySubdir(allocator, project_dir, k.sub, query, w);
     }
     try w.writeAll("}");
     return true;
@@ -902,13 +909,99 @@ fn extractFileContent(allocator: std.mem.Allocator, json_str: []const u8) ![]u8 
     return allocator.dupe(u8, v.string);
 }
 
+/// One scored library entry, used when `list_library` is given a `query`.
+/// Names are duped because the directory iterator reuses its name buffer
+/// across `next()` calls.
+const LibMatch = struct {
+    name: []const u8,
+    description: ?[]const u8,
+    score: u32,
+
+    /// Higher score first; ties broken alphabetically so output is stable.
+    fn better(_: void, a: LibMatch, b: LibMatch) bool {
+        if (a.score != b.score) return a.score > b.score;
+        return std.mem.lessThan(u8, a.name, b.name);
+    }
+};
+
+// Fuzzy-match scoring weights for `fuzzyScore` / `libEntryScore`. A
+// contiguous substring lands in the ~1000+ band; a scattered subsequence
+// stays well below it. Magnitudes only matter relative to each other — they
+// decide ranking order, never a pass/fail threshold.
+const substring_base: u32 = 1000; // any contiguous hit
+const prefix_bonus: u32 = 500; // hit at index 0
+const word_boundary_bonus: u32 = 250; // hit right after a non-alphanumeric
+const proximity_credit: u32 = 600; // budget the position/length penalties eat into
+const max_pos_penalty: u32 = 400; // cap on the later-in-string penalty
+const max_len_penalty: u32 = 200; // cap on the longer-haystack penalty
+const len_penalty_divisor: u32 = 4; // 1 penalty point per 4 chars of haystack
+const subsequence_base: u32 = 100; // floor for an in-order subsequence hit
+const subsequence_run_bonus: u32 = 10; // per char of the longest contiguous run
+const name_weight: u32 = 4; // a name hit outweighs a description-only hit
+
+/// Case-insensitive fuzzy score of `needle` against `haystack`. Returns 0
+/// for no match; higher is a better match. A contiguous (substring) hit
+/// outranks a scattered subsequence hit, a hit at the start or on a word
+/// boundary outranks one buried mid-token, and a shorter haystack outranks
+/// a longer one for the same hit. This lets `list_library` rank "stm32" →
+/// "stm32n657l0h3q" first without the caller needing an exact name.
+fn fuzzyScore(needle: []const u8, haystack: []const u8) u32 {
+    if (needle.len == 0) return 1;
+    if (haystack.len == 0) return 0;
+
+    // Contiguous substring is the strong signal.
+    if (std.ascii.indexOfIgnoreCase(haystack, needle)) |pos| {
+        var score: u32 = substring_base;
+        if (pos == 0) {
+            score += prefix_bonus;
+        } else if (!std.ascii.isAlphanumeric(haystack[pos - 1])) {
+            score += word_boundary_bonus;
+        }
+        const pos_penalty: u32 = @min(@as(u32, @intCast(pos)), max_pos_penalty);
+        const len_penalty: u32 = @min(@as(u32, @intCast(haystack.len)) / len_penalty_divisor, max_len_penalty);
+        return score + proximity_credit - pos_penalty - len_penalty;
+    }
+
+    // Subsequence fallback: needle chars appear in order but not adjacent.
+    // Greedy left-to-right matching correctly decides subsequence existence.
+    var ni: usize = 0;
+    var run: u32 = 0;
+    var best_run: u32 = 0;
+    for (haystack) |hc| {
+        if (ni >= needle.len) break;
+        if (std.ascii.toLower(hc) == std.ascii.toLower(needle[ni])) {
+            ni += 1;
+            run += 1;
+            best_run = @max(best_run, run);
+        } else {
+            run = 0;
+        }
+    }
+    if (ni < needle.len) return 0; // not every needle char was consumed
+    // Always below any substring hit; longer contiguous runs rank higher.
+    return subsequence_base + best_run * subsequence_run_bonus;
+}
+
+/// Combine name + description scores. The name dominates (×4) so a name
+/// match always outranks a description-only match, but description text
+/// still surfaces a part whose name doesn't contain the query.
+fn libEntryScore(query: []const u8, name: []const u8, description: ?[]const u8) u32 {
+    const name_score = fuzzyScore(query, name);
+    const desc_score = if (description) |d| fuzzyScore(query, d) else 0;
+    return name_score *| name_weight +| desc_score;
+}
+
 /// Write a JSON array of {name, description} objects for every .sexp file
 /// in `{project_dir}/lib/{sub}/`. Description is extracted from the first
 /// top-level (description "...") form in the file, or empty if absent.
+/// With a non-null `query`, only entries whose name or description fuzzily
+/// match are emitted, ranked best-first; with null `query`, every entry is
+/// emitted in directory order.
 fn listLibrarySubdir(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     sub: []const u8,
+    query: ?[]const u8,
     w: anytype,
 ) !void {
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/{s}", .{ project_dir, sub });
@@ -920,8 +1013,30 @@ fn listLibrarySubdir(
     };
     defer dir.close();
 
-    try w.writeAll("[");
-    var first = true;
+    const q = query orelse {
+        // No filter — stream every entry in directory order.
+        try w.writeAll("[");
+        var first = true;
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .file and entry.kind != .sym_link) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".sexp")) continue;
+            const base = entry.name[0 .. entry.name.len - ".sexp".len];
+            const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
+            defer allocator.free(full_path);
+            const description = extractDescription(allocator, full_path);
+            defer if (description) |d| allocator.free(d);
+
+            if (!first) try w.writeAll(",");
+            first = false;
+            try writeLibEntry(w, base, description);
+        }
+        try w.writeAll("]");
+        return;
+    };
+
+    // Filtered — score every entry, keep matches, emit ranked best-first.
+    var matches: std.ArrayListUnmanaged(LibMatch) = .empty;
     var it = dir.iterate();
     while (try it.next()) |entry| {
         if (entry.kind != .file and entry.kind != .sym_link) continue;
@@ -930,17 +1045,35 @@ fn listLibrarySubdir(
         const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
         defer allocator.free(full_path);
         const description = extractDescription(allocator, full_path);
-        defer if (description) |d| allocator.free(d);
 
-        if (!first) try w.writeAll(",");
-        first = false;
-        try w.writeAll(NAME_FIELD_PREFIX);
-        try writeJsonString(w, base);
-        try w.writeAll(",\"description\":");
-        if (description) |d| try writeJsonString(w, d) else try w.writeAll("\"\"");
-        try w.writeAll("}");
+        const score = libEntryScore(q, base, description);
+        if (score == 0) {
+            if (description) |d| allocator.free(d);
+            continue;
+        }
+        try matches.append(allocator, .{
+            .name = try allocator.dupe(u8, base),
+            .description = description,
+            .score = score,
+        });
+    }
+    std.sort.heap(LibMatch, matches.items, {}, LibMatch.better);
+
+    try w.writeAll("[");
+    for (matches.items, 0..) |m, i| {
+        if (i > 0) try w.writeAll(",");
+        try writeLibEntry(w, m.name, m.description);
     }
     try w.writeAll("]");
+}
+
+/// Emit one `{"name":..,"description":..}` library entry.
+fn writeLibEntry(w: anytype, name: []const u8, description: ?[]const u8) !void {
+    try w.writeAll(NAME_FIELD_PREFIX);
+    try writeJsonString(w, name);
+    try w.writeAll(",\"description\":");
+    if (description) |d| try writeJsonString(w, d) else try w.writeAll("\"\"");
+    try w.writeAll("}");
 }
 
 /// Find the first `(description "...")` form in the file and return its
@@ -1799,4 +1932,82 @@ fn toolReadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, args
     try writeJsonString(w, run_res.stdout);
     try w.writeAll("}");
     return true;
+}
+
+// ── Tests ─────────────────────────────────────────────────────────
+
+test "fuzzyScore returns 0 for a non-match" {
+    // spec: serve/mcp_tools - fuzzyScore returns 0 when the needle does not match the haystack as a substring or subsequence
+    try std.testing.expectEqual(@as(u32, 0), fuzzyScore("xyz", "stm32n6"));
+    // 'q' and 'z' never appear, so not even a subsequence.
+    try std.testing.expectEqual(@as(u32, 0), fuzzyScore("qz", "buck"));
+}
+
+test "fuzzyScore ranks a substring above a subsequence" {
+    // spec: serve/mcp_tools - fuzzyScore ranks a contiguous substring hit above a scattered subsequence hit
+    const contiguous = fuzzyScore("stm32", "stm32n657l0h3q"); // substring (prefix)
+    const scattered = fuzzyScore("s3q", "stm32n657l0h3q"); // subsequence only
+    try std.testing.expect(scattered > 0);
+    try std.testing.expect(contiguous > scattered);
+}
+
+test "fuzzyScore ranks a prefix above a mid-token hit" {
+    // spec: serve/mcp_tools - fuzzyScore ranks a prefix hit above a mid-token hit for the same needle
+    const prefix = fuzzyScore("cap", "cap-0402"); // hit at index 0
+    const mid = fuzzyScore("cap", "decap-tool"); // hit mid-token (after 'e')
+    try std.testing.expect(mid > 0);
+    try std.testing.expect(prefix > mid);
+}
+
+test "libEntryScore ranks a name match above a description-only match" {
+    // spec: serve/mcp_tools - libEntryScore ranks a name match above a description-only match
+    const name_hit = libEntryScore("buck", "buck-converter", "a power thing");
+    const desc_hit = libEntryScore("buck", "tps62823", "12V-to-3.3V buck regulator");
+    try std.testing.expect(desc_hit > 0);
+    try std.testing.expect(name_hit > desc_hit);
+}
+
+test "list_library query returns only matching entries ranked best-first" {
+    // spec: serve/mcp_tools - list_library with a query returns only fuzzily-matching entries ranked best-first
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("lib/components");
+    try tmp.dir.writeFile(.{ .sub_path = "lib/components/stm32n657l0h3q.sexp", .data = "(component \"stm32n657l0h3q\" (description \"STM32 MCU\"))\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "lib/components/cap-0402.sexp", .data = "(component \"cap-0402\" (description \"100nF cap\"))\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "lib/components/lt3045.sexp", .data = "(component \"lt3045\" (description \"LDO designed for STM32 rails\"))\n" });
+    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    try listLibrarySubdir(alloc, proj, "components", "stm32", out.writer(alloc));
+
+    // The matching part appears; the unrelated cap is filtered out.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "stm32n657l0h3q") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "cap-0402") == null);
+    // lt3045 matches only via its description, so it ranks after the name hit.
+    const name_pos = std.mem.indexOf(u8, out.items, "stm32n657l0h3q").?;
+    const desc_pos = std.mem.indexOf(u8, out.items, "lt3045").?;
+    try std.testing.expect(name_pos < desc_pos);
+}
+
+test "list_library without a query lists every entry" {
+    // spec: serve/mcp_tools - list_library without a query (or a blank one) lists every entry
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("lib/components");
+    try tmp.dir.writeFile(.{ .sub_path = "lib/components/aaa.sexp", .data = "(component \"aaa\")\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "lib/components/bbb.sexp", .data = "(component \"bbb\")\n" });
+    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    try listLibrarySubdir(alloc, proj, "components", null, out.writer(alloc));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "aaa") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "bbb") != null);
 }

@@ -487,6 +487,17 @@ Public functions: downloadFootprint, errorMessage, searchComponents, searchError
 - parses part id and datasheet url from a suggestion
 - collectHits maps suggestions to search hits
 
+## serve/mcp_tools
+
+Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesignSummaries, renderSceneGraph
+
+- fuzzyScore returns 0 when the needle does not match the haystack as a substring or subsequence
+- fuzzyScore ranks a contiguous substring hit above a scattered subsequence hit
+- fuzzyScore ranks a prefix hit above a mid-token hit for the same needle
+- libEntryScore ranks a name match above a description-only match
+- list_library with a query returns only fuzzily-matching entries ranked best-first
+- list_library without a query (or a blank one) lists every entry
+
 ## config
 
 Public functions: cseConnectSid
