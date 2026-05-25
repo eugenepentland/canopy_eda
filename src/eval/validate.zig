@@ -10,12 +10,19 @@ const Env = env_mod.Env;
 
 // ── Constants ─────────────────────────────────────────────────────
 const VOLTAGE_MISMATCH_TOLERANCE_V: f64 = 0.01;
+/// A section description is a one-line, high-level summary of what the block
+/// is *for* — not a parts list. Anything longer than this (counted in Unicode
+/// codepoints, so the em-dashes and arrows these summaries favour aren't
+/// over-counted) should move to `;;` comments on the source. Warned, not
+/// enforced, so already-verbose designs keep building.
+const SECTION_DESCRIPTION_MAX_CHARS: usize = 100;
 
 /// Run post-build validations on a design block and its sub-blocks.
 pub fn validateDesign(self: *Evaluator, block: *const DesignBlock) EvalError!void {
     try checkSinglePinNets(self, block);
     try checkVoltageMismatches(self, block);
     try checkMissingDecoupling(self, block);
+    try checkSectionDescriptionLength(self, block);
 }
 
 /// Warn about nets that have only a single pin (dead-end connections).
@@ -142,6 +149,41 @@ fn checkMissingDecoupling(self: *Evaluator, block: *const DesignBlock) !void {
     }
 }
 
+/// Count a description's length in Unicode codepoints, falling back to byte
+/// length on invalid UTF-8. The em-dashes and arrows these summaries favour
+/// are one character each, so a multi-byte glyph doesn't inflate the count.
+fn descriptionCharCount(desc: []const u8) usize {
+    return std.unicode.utf8CountCodepoints(desc) catch desc.len;
+}
+
+/// Warn when a section (or sub-section) description runs long. A description
+/// should say *what the block is for* at a high level; part numbers, bus
+/// addresses, and implementation detail belong in `;;` comments on the
+/// source. Non-fatal — the existing verbose descriptions still build.
+fn checkSectionDescriptionLength(self: *Evaluator, block: *const DesignBlock) !void {
+    for (block.sections) |sec| {
+        try warnIfDescriptionLong(self, sec.name, sec.description);
+        for (sec.sub_sections) |sub| {
+            try warnIfDescriptionLong(self, sub.name, sub.description);
+        }
+    }
+}
+
+/// Append the over-limit warning for one section when its description exceeds
+/// `SECTION_DESCRIPTION_MAX_CHARS` codepoints. Empty descriptions never warn.
+fn warnIfDescriptionLong(self: *Evaluator, name: []const u8, description: []const u8) !void {
+    const count = descriptionCharCount(description);
+    if (count <= SECTION_DESCRIPTION_MAX_CHARS) return;
+    const msg = std.fmt.allocPrint(
+        self.allocator,
+        "Section \"{s}\" description is {d} chars (limit {d}) — keep it high-level " ++
+            "(what the block does); move part numbers / addresses / implementation " ++
+            "detail to ;; comments in the .sexp",
+        .{ name, count, SECTION_DESCRIPTION_MAX_CHARS },
+    ) catch return;
+    try self.assertions.append(self.allocator, .{ .passed = false, .message = msg, .is_warning = true });
+}
+
 /// Track the first argument of a (net ...) form for combinability warnings.
 pub fn trackNetFormSource(self: *Evaluator, form_children: []const Node, env: *Env, sources: *std.StringHashMapUnmanaged(u32)) void {
     if (form_children.len < 3) return;
@@ -168,4 +210,14 @@ pub fn warnCombinableNets(self: *Evaluator, sources: *std.StringHashMapUnmanaged
             try self.assertions.append(self.allocator, .{ .passed = false, .message = msg, .is_warning = true });
         }
     }
+}
+
+test "descriptionCharCount counts codepoints, not bytes" {
+    // Plain ASCII: byte length and codepoint count agree.
+    try std.testing.expectEqual(@as(usize, 5), descriptionCharCount("ABCDE"));
+    // An em-dash (U+2014) is three UTF-8 bytes but one character — the
+    // section-description limit counts it once so dashed summaries aren't
+    // penalised relative to their on-screen length.
+    try std.testing.expectEqual(@as(usize, 3), descriptionCharCount("A—B"));
+    try std.testing.expectEqual(@as(usize, 5), "A—B".len);
 }
