@@ -41,7 +41,7 @@ td { font-family: monospace; font-size: 0.9rem; }
 .req-card-header { color:#888; font-size:0.78rem; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; margin:0.5rem 0 0.7rem; }
 .req-cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:0.6rem; }
 .req-item { background:#161b22; border:1px solid #21262d; border-left:3px solid #4a9eff; border-radius:6px; padding:0.6rem 0.8rem; font-size:0.85rem; color:#c9d1d9; font-family:system-ui,sans-serif; line-height:1.45; }
-#page-drop-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.75); z-index:1000; align-items:center; justify-content:center; }
+#page-drop-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:1000; align-items:center; justify-content:center; pointer-events:none; }
 #page-drop-overlay.active { display:flex; }
 #page-drop-inner { border:3px dashed #4a9eff; border-radius:16px; padding:4rem 6rem; text-align:center; color:#4a9eff; pointer-events:none; }
 #page-drop-inner svg { display:block; margin:0 auto 1.5rem; opacity:0.8; }
@@ -73,4 +73,8 @@ td { font-family: monospace; font-size: 0.9rem; }
 .req-toggle:hover { color:#e3b341; }
 .comp-card .req-cards { display:none; grid-template-columns:1fr; gap:0.4rem; margin-top:0.1rem; }
 .comp-card.open .req-cards { display:grid; }
+/* PDF drag-to-link: raise the hovered card above the page overlay so its
+   highlight is visible, and show where the datasheet will attach. */
+.comp-card.drag-over { position:relative; z-index:1001; outline:2px dashed #58a6ff; outline-offset:3px; background:#1c2333; }
+.comp-card.drag-over::after { content:"Drop PDF to link datasheet"; position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#58a6ff; font-size:0.85rem; font-weight:600; background:rgba(13,17,23,0.82); border-radius:8px; pointer-events:none; }
 </style></head><body>

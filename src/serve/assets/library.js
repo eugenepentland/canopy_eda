@@ -203,19 +203,55 @@ document.addEventListener('dragenter',function(e){
   overlay.classList.add('active');
   e.preventDefault();
 });
+// Track which component card the pointer is over so a dropped PDF links to it.
+var dragCard=null;
+function clearDragCard(){if(dragCard){dragCard.classList.remove('drag-over');dragCard=null;}}
 document.addEventListener('dragleave',function(e){
   dragDepth--;
-  if(dragDepth<=0){dragDepth=0;overlay.classList.remove('active');}
+  if(dragDepth<=0){dragDepth=0;overlay.classList.remove('active');clearDragCard();}
 });
-document.addEventListener('dragover',function(e){e.preventDefault();});
+document.addEventListener('dragover',function(e){
+  e.preventDefault();
+  var card=(e.target&&e.target.closest)?e.target.closest('.comp-card[data-component]'):null;
+  if(card!==dragCard){clearDragCard();dragCard=card;if(card)card.classList.add('drag-over');}
+});
 document.addEventListener('drop',function(e){
   e.preventDefault();
   dragDepth=0;overlay.classList.remove('active');
+  var card=(e.target&&e.target.closest)?e.target.closest('.comp-card[data-component]'):null;
+  clearDragCard();
   var files=e.dataTransfer?e.dataTransfer.files:null;
   if(!files||files.length===0)return;
   var f=files[0];
   var n=f.name.toLowerCase();
+  // Dropping a PDF on a component card links it to that component.
+  if(n.endsWith('.pdf')&&card){linkDatasheet(f,card.getAttribute('data-component'));return;}
   if(n.endsWith('.zip'))uploadZip(f,toast);
   else if(n.endsWith('.pdf'))uploadDatasheet(f);
   else showToast('err','Unsupported file: drop a .zip (component) or .pdf (datasheet)',6000);
 });
+// Upload a PDF to lib/datasheets/ then splice (datasheet "...") into the
+// component's lib/components/<name>.sexp, then reload to show the new link.
+function linkDatasheet(file,component){
+  if(file.size>64*1024*1024){showToast('err','PDF too large (64MB limit)',6000);return;}
+  showToast('pending','Linking '+file.name+' to '+component+'…');
+  var r=new FileReader();
+  r.onload=function(){
+    fetch('/api/upload-datasheet',{method:'POST',headers:{'Content-Type':'application/pdf','X-Filename':file.name},body:r.result})
+      .then(function(res){return res.json();})
+      .then(function(j){
+        if(!j.ok)throw new Error(j.error||'upload failed');
+        return fetch('/api/component-datasheet/'+encodeURIComponent(component)+'/add',
+          {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pdf:j.name})})
+          .then(function(r2){return r2.json();});
+      })
+      .then(function(j){
+        if(!j.ok&&j.error!=='DuplicateImport')throw new Error(j.error||'link failed');
+        var dup=(j.error==='DuplicateImport');
+        showToast('ok',(dup?'Already linked to ':'Linked to ')+component,3500);
+        if(!dup)setTimeout(function(){location.reload();},1200);
+      })
+      .catch(function(e){showToast('err','Link failed: '+e.message,8000);});
+  };
+  r.readAsArrayBuffer(file);
+}

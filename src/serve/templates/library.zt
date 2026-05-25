@@ -47,7 +47,7 @@ pub templ Library(rows: []const LibraryRow) {
 }
 
 pub templ Card(row: LibraryRow) {
-    <div class="comp-card" data-search={row.search_text}>
+    <div class="comp-card" data-search={row.search_text} data-component={if (row.kind == .component or row.kind == .family) row.name else null}>
         <div class="card-head">
             <span class="card-name">{row.name}</span>
             switch (row.kind) {
