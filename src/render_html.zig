@@ -109,6 +109,9 @@ pub fn renderToHtml(
             try review_html.writeTraceability(w, doc.traceability);
             try w.writeAll("</div>");
         }
+        if (doc.subblock_requirements.len > 0) {
+            try writeSubblockRequirements(w, doc.subblock_requirements);
+        }
         if (doc.power_sequence.len > 0) {
             try w.writeAll("<div id=\"page-power-sequence\" class=\"page-anchor\">");
             try review_html.writePowerSequence(w, doc.power_sequence);
@@ -398,6 +401,7 @@ fn writeSidebar(w: anytype, review_doc: ?review.ReviewDoc) !void {
     if (review_doc) |doc| {
         try writeTocChip(w, "page-summary", "Summary");
         if (doc.traceability.rows.len > 0) try writeTocChip(w, "page-traceability", "Traceability");
+        if (doc.subblock_requirements.len > 0) try writeTocChip(w, "page-subblock-reqs", "Sub-block reqs");
         if (doc.power_sequence.len > 0) try writeTocChip(w, "page-power-sequence", "Power sequencing");
         if (doc.test_points.len > 0) try writeTocChip(w, "page-test-points", "Test points");
         if (doc.power_budget.len > 0) try writeTocChip(w, "page-power-budget", "Power budget");
@@ -715,9 +719,8 @@ fn statusSortKey(status: req_checks.Status, has_verification: bool) u8 {
     };
 }
 
-fn writeHubRequirements(w: anytype, h: HubAnalysis, check_results: *const CheckResultMap) !void {
-    if (h.inst.requirements.len == 0) return;
-    const results: []const req_checks.Result = check_results.get(h.inst.ref_des) orelse &.{};
+fn writeRequirementsDetails(w: anytype, requirements: []const env_mod.Requirement, results: []const req_checks.Result) !void {
+    if (requirements.len == 0) return;
 
     var pass_ct: usize = 0;
     var fail_ct: usize = 0;
@@ -733,21 +736,21 @@ fn writeHubRequirements(w: anytype, h: HubAnalysis, check_results: *const CheckR
     // section cards read clean. The summary keeps the fail/ok/verified badges,
     // so status is visible at a glance and the reviewer expands on demand.
     try w.print("<details class=\"{s}\"", .{header_class});
-    try w.print("><summary>Requirements ({d})", .{h.inst.requirements.len});
+    try w.print("><summary>Requirements ({d})", .{requirements.len});
     if (fail_ct > 0) try w.print(" <span class=\"req-badge fail\">{d} failing</span>", .{fail_ct});
     if (pass_ct > 0) try w.print(" <span class=\"req-badge pass\">{d} ok</span>", .{pass_ct});
     if (verified_ct > 0) try w.print(" <span class=\"req-badge verified\">{d} verified</span>", .{verified_ct});
     try w.writeAll("</summary><ul>");
 
-    // Build a sorted index into h.inst.requirements so the rendered list
+    // Build a sorted index into requirements so the rendered list
     // reads worst → best regardless of the order entries appear in
     // `lib/components/<part>.sexp`.
     const SortItem = struct { idx: usize, key: u8 };
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var sorted = a.alloc(SortItem, h.inst.requirements.len) catch return;
-    for (h.inst.requirements, 0..) |_, i| {
+    var sorted = a.alloc(SortItem, requirements.len) catch return;
+    for (requirements, 0..) |_, i| {
         const status: req_checks.Status = if (i < results.len) results[i].status else .na;
         const has_v = (i < results.len) and (results[i].verification != null);
         sorted[i] = .{ .idx = i, .key = statusSortKey(status, has_v) };
@@ -761,7 +764,7 @@ fn writeHubRequirements(w: anytype, h: HubAnalysis, check_results: *const CheckR
 
     for (sorted) |it| {
         const i = it.idx;
-        const r = h.inst.requirements[i];
+        const r = requirements[i];
         const status: req_checks.Status = if (i < results.len) results[i].status else .na;
         const msg: []const u8 = if (i < results.len) results[i].message else "";
         const verification: ?env_mod.Verification = if (i < results.len) results[i].verification else null;
@@ -843,6 +846,33 @@ fn writeHubRequirements(w: anytype, h: HubAnalysis, check_results: *const CheckR
         try w.writeAll("</li>");
     }
     try w.writeAll("</ul></details>");
+}
+
+/// Per-hub Requirements dropdown — looks up the hub's check results by
+/// ref_des and hands them to the shared `writeRequirementsDetails` renderer.
+fn writeHubRequirements(w: anytype, h: HubAnalysis, check_results: *const CheckResultMap) !void {
+    const results: []const req_checks.Result = check_results.get(h.inst.ref_des) orelse &.{};
+    try writeRequirementsDetails(w, h.inst.requirements, results);
+}
+
+/// Requirements for parts placed inside sub-blocks (sealed modules). The
+/// per-section hub dropdowns only cover top-level hubs, so a sub-block hub —
+/// like the PMA3 LNA inside `pma3-lna` — would otherwise have nowhere to show
+/// its requirements even though they're parsed and checked. One labeled
+/// dropdown per sub-block instance, reusing the same renderer as the hubs.
+fn writeSubblockRequirements(w: anytype, entries: []const review.ComponentRequirementEntry) !void {
+    try w.writeAll("<div id=\"page-subblock-reqs\" class=\"page-anchor sch-subblock-reqs\">");
+    try w.writeAll("<h3>Sub-block Requirements</h3>");
+    for (entries) |e| {
+        try w.writeAll("<div class=\"subblock-req\"><div class=\"subblock-req-head\">");
+        try writeHtmlEscaped(w, e.ref_des);
+        try w.writeAll(" · ");
+        try writeHtmlEscaped(w, e.component);
+        try w.writeAll("</div>");
+        try writeRequirementsDetails(w, e.requirements, e.req_results);
+        try w.writeAll("</div>");
+    }
+    try w.writeAll("</div>");
 }
 
 /// Bucket a hub's pin-groups by `(group "label")` feature label and render
