@@ -8,8 +8,11 @@ zig-out/
 __pycache__/
 *.pyc
 
-# Runtime auth/session data (OAuth clients, tokens, sessions, users)
-projects/designs/auth/
+# Board-specific design data — the user's projects, not the eda tool itself.
+# Everything under projects/ (designs, libraries, history, reviews, OAuth
+# state, edit history) lives on disk but is not tracked. The tracked tool is
+# src/, build.zig, SPEC.md, docs/, etc.
+/projects/
 
 # Guardian runtime database
 guardian_runtime.db
@@ -20,17 +23,6 @@ guardian_runtime.db
 
 # Claude Code worktree metadata (per-machine; not part of the project)
 .claude/worktrees/
-
-# OAuth client registrations and tokens (user-specific, contain secret hashes)
-projects/designs/oauth_clients.json
-projects/designs/auth/oauth_clients.json
-projects/designs/auth/oauth_tokens.json
-
-# Auto-generated edit history (every save snapshots; grows unboundedly)
-projects/designs/history/
-
-# Stray Guardian artifacts inside library directories
-projects/designs/lib/components/.guardian/
 
 # Local credentials for outbound part-data APIs (see .env.example)
 .env
