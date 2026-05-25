@@ -56,6 +56,40 @@
       rp.style.display=open?'table-row':'none';
     });
   });
+
+  // Footprint preview: click the footprint tag (component rows) or the
+  // "preview" chip (standalone footprint rows) to expand an inline SVG drawn
+  // by /api/footprint/:name from lib/footprints/<fp>.sexp. The SVG is fetched
+  // once per tag, then cached in the panel for subsequent toggles.
+  function loadFootprint(box,fp){
+    if(box.dataset.loaded==='1')return;
+    box.dataset.loaded='1';
+    box.innerHTML='<span class="fp-empty">Loading preview…</span>';
+    fetch('/api/footprint/'+encodeURIComponent(fp)).then(function(r){
+      if(!r.ok)throw new Error('no preview');
+      return r.text();
+    }).then(function(svg){
+      if(svg.indexOf('<svg')===-1)throw new Error('not svg');
+      box.innerHTML=svg;
+      var s=box.querySelector('svg');
+      if(s){s.style.width='100%';s.style.height='auto';s.style.maxHeight='200px';s.style.display='block';}
+    }).catch(function(){
+      box.innerHTML='<span class="fp-empty">No footprint preview available.</span>';
+    });
+  }
+  document.querySelectorAll('#lib-table .fp-toggle').forEach(function(tag){
+    tag.addEventListener('click',function(e){
+      e.stopPropagation();
+      var fp=tag.dataset.fp;
+      var cell=tag.closest('td');
+      var box=cell&&cell.querySelector('.fp-preview');
+      if(!box||!fp)return;
+      var open=!box.classList.contains('open');
+      box.classList.toggle('open',open);
+      tag.classList.toggle('fp-toggle-open',open);
+      if(open)loadFootprint(box,fp);
+    });
+  });
 })();
 var symData=null,fpData=null,stepData=null,symFilename='',fpFilename='',stepFilename='';
 function setupDrop(dropId,fileId,nameId,ext,onFile){

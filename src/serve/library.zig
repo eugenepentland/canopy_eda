@@ -32,8 +32,20 @@ pub const LibraryRow = struct {
     mpn: ?[]const u8 = null,
     pin_count: ?usize = null,
     requirements: []const []const u8 = &.{},
+    /// PDF documents declared by the component via `(datasheet "…")`, rendered
+    /// as links to `/datasheets/<name>` on the library page. Empty when the
+    /// component declares none.
+    datasheets: []const Datasheet = &.{},
 
     pub const Kind = enum { family, component, pinout, footprint };
+
+    /// One declared datasheet. `present` is false when the PDF is referenced
+    /// but not actually in `lib/datasheets/`, so the template can flag it as
+    /// missing instead of rendering a dead link.
+    pub const Datasheet = struct {
+        name: []const u8,
+        present: bool,
+    };
 };
 
 const RowWithMtime = struct {
@@ -71,6 +83,7 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
             const pinout = extractField(content, "pinout");
             const manufacturer = extractField(content, "manufacturer");
             const mpn = extractField(content, "mpn");
+            const datasheets = try extractDatasheets(allocator, project_dir, content);
             const is_family = std.mem.indexOf(u8, content, "(component-family ") != null;
 
             if (footprint) |fp| try referenced_footprints.put(fp, {});
@@ -88,7 +101,7 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
                 .row = .{
                     .name = base,
                     .kind = if (is_family) .family else .component,
-                    .search_text = try buildSearchText(allocator, base, description, footprint, pinout, manufacturer, mpn),
+                    .search_text = try buildSearchText(allocator, base, description, footprint, pinout, manufacturer, mpn, datasheets),
                     .description = description,
                     .footprint = footprint,
                     .has_3d_model = has_model,
@@ -96,6 +109,7 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
                     .manufacturer = manufacturer,
                     .mpn = mpn,
                     .requirements = try extractRequirements(allocator, content),
+                    .datasheets = datasheets,
                 },
             });
         }
@@ -172,6 +186,7 @@ fn buildSearchText(
     pinout: ?[]const u8,
     manufacturer: ?[]const u8,
     mpn: ?[]const u8,
+    datasheets: []const LibraryRow.Datasheet,
 ) ![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
@@ -181,6 +196,7 @@ fn buildSearchText(
     if (pinout) |po| try w.print(" {s}", .{po});
     if (manufacturer) |m| try w.print(" {s}", .{m});
     if (mpn) |m| try w.print(" {s}", .{m});
+    for (datasheets) |ds| try w.print(" {s}", .{ds.name});
     return buf.items;
 }
 
@@ -255,6 +271,39 @@ fn extractRequirements(allocator: std.mem.Allocator, content: []const u8) ![]con
         pos = end + 1;
     }
     return list.toOwnedSlice(allocator);
+}
+
+/// Scan `content` for `(datasheet "...")` forms and return the quoted PDF
+/// filenames (slices into `content`) paired with whether the file actually
+/// exists in `lib/datasheets/`. A component may declare several, so this
+/// collects every match rather than stopping at the first like `extractField`.
+fn extractDatasheets(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    content: []const u8,
+) ![]const LibraryRow.Datasheet {
+    var list: std.ArrayListUnmanaged(LibraryRow.Datasheet) = .empty;
+    const needle = "(datasheet ";
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, content, pos, needle)) |idx| {
+        pos = idx + needle.len;
+        if (pos >= content.len or content[pos] != '"') continue;
+        pos += 1; // skip opening quote
+        const end = findClosingQuote(content, pos) orelse break;
+        const name = content[pos..end];
+        pos = end + 1;
+        try list.append(allocator, .{ .name = name, .present = datasheetExists(allocator, project_dir, name) });
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+/// True when `lib/datasheets/<name>` exists on disk — lets the library page
+/// flag a declared-but-unuploaded PDF instead of rendering a 404 link.
+fn datasheetExists(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) bool {
+    const path = std.fmt.allocPrint(allocator, "{s}/lib/datasheets/{s}", .{ project_dir, name }) catch return false;
+    defer allocator.free(path);
+    _ = infra_fs.cwd().statFile(path) catch return false;
+    return true;
 }
 
 fn findClosingQuote(content: []const u8, start: usize) ?usize {

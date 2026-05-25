@@ -35,6 +35,10 @@ pub const FlatInst = struct {
     component: []const u8,
     value: []const u8,
     symbol: []const u8,
+    /// Footprint name (matches `lib/footprints/<name>.sexp`), copied off the
+    /// Instance so the sidebar can fetch a footprint-preview SVG without a
+    /// second library parse. Empty for synthetic sub-block hubs.
+    footprint: []const u8 = "",
     parts: []const env_mod.Part = &.{},
     /// Library-declared rules for using this part, copied off the Instance at
     /// eval time. Lets the schematic renderer emit a per-hub "Requirements"
@@ -282,6 +286,7 @@ pub const RenderCtx = struct {
                 .component = inst.component,
                 .value = inst.value,
                 .symbol = inst.symbol,
+                .footprint = inst.footprint,
                 .parts = inst.parts,
                 .requirements = inst.requirements,
                 .mpn = propertyValue(inst.properties, "mpn"),

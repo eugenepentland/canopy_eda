@@ -18,9 +18,9 @@ const SVG_BBOX_PAD: f64 = 0.5;
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
-/// GET /api/footprint-svg/:name — render a `lib/footprints/<name>.sexp`
+/// GET /api/footprint/:name — render a `lib/footprints/<name>.sexp`
 /// as an inline SVG (pads, silkscreen lines and circles) for the library
-/// page's preview thumbnails and the swap-component dialog.
+/// page's footprint-preview panel and the schematic sidebar's component view.
 pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = HTTP_NOT_FOUND;

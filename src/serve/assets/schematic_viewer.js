@@ -427,6 +427,7 @@
           escapeHtml(c.component) + '</span>' : '') +
         (c.value ? ' · ' + escapeHtml(c.value) : '') +
       '</div>';
+    if (c.footprint) html += footprintPreviewHtml(c.footprint);
     if (c.kind !== 'hub') {
       // Passives: show the nets they sit on, derived from SCH_INDEX.nets.
       var rows = [];
@@ -463,6 +464,7 @@
       });
     }
     detailBox.innerHTML = html;
+    loadFootprintPreview(detailBox);
     var back = detailBox.querySelector('.sb-back');
     back.addEventListener('click', function () {
       var target = back.dataset.back;
@@ -828,6 +830,49 @@
     var nb = parseInt(rb[2] || '0', 10);
     if (na !== nb) return na - nb;
     return a < b ? -1 : a > b ? 1 : 0;
+  }
+
+  // ---- Footprint preview ----
+  // Builds the preview shell up front (so layout doesn't jump) and lets
+  // loadFootprintPreview fetch the SVG lazily once the panel is in the DOM.
+  // /api/footprint/:name draws pads + silkscreen from lib/footprints/<fp>.sexp.
+  function footprintPreviewHtml(fp) {
+    return '<div class="sb-fp-preview" data-fp="' + escapeHtml(fp) + '">' +
+      '<div class="sb-fp-title">Footprint <span class="muted">' + escapeHtml(fp) + '</span></div>' +
+      '<div class="sb-fp-svg"><span class="sb-fp-empty muted">Loading preview…</span></div>' +
+      '</div>';
+  }
+
+  var fpSvgCache = {};
+  function loadFootprintPreview(scope) {
+    var box = scope.querySelector('.sb-fp-preview');
+    if (!box) return;
+    var fp = box.dataset.fp;
+    var target = box.querySelector('.sb-fp-svg');
+    if (!fp || !target) return;
+    function fill(svg) {
+      target.innerHTML = svg;
+      var s = target.querySelector('svg');
+      if (s) { s.style.width = '100%'; s.style.height = 'auto'; s.style.maxHeight = '220px'; s.style.display = 'block'; }
+    }
+    function fail() {
+      target.innerHTML = '<span class="sb-fp-empty muted">No footprint preview available.</span>';
+    }
+    if (fpSvgCache[fp] !== undefined) {
+      if (fpSvgCache[fp]) fill(fpSvgCache[fp]); else fail();
+      return;
+    }
+    fetch('/api/footprint/' + encodeURIComponent(fp)).then(function (r) {
+      if (!r.ok) throw new Error('no preview');
+      return r.text();
+    }).then(function (svg) {
+      if (svg.indexOf('<svg') === -1) throw new Error('not svg');
+      fpSvgCache[fp] = svg;
+      fill(svg);
+    }).catch(function () {
+      fpSvgCache[fp] = '';
+      fail();
+    });
   }
 
   // ---- Reload from disk ----

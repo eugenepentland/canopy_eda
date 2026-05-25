@@ -64,7 +64,10 @@ pub templ Row(row: LibraryRow) {
                         <span class="meta">{pc} pins</span>
                     }
                 },
-                .footprint => {},
+                .footprint => {
+                    <span class="tag tag-footprint fp-toggle" data-fp={row.name} title="Show footprint preview">preview ›</span>
+                    <div class="fp-preview" data-fp={row.name}></div>
+                },
             }
         </td>
     </tr>
@@ -88,7 +91,7 @@ pub templ ComponentDetails(row: LibraryRow) {
     }
     if (row.footprint) |fp| {
         <span class="meta">footprint: </span>
-        <span class="tag tag-footprint">{fp}</span>
+        <span class="tag tag-footprint fp-toggle" data-fp={fp} title="Show footprint preview">{fp}</span>
         if (row.has_3d_model) {
             <span class="meta" style="font-size:0.8rem;">3D</span>
         }
@@ -102,5 +105,18 @@ pub templ ComponentDetails(row: LibraryRow) {
     }
     if (row.mpn) |m| {
         <span class="meta">mpn: {m}</span>
+    }
+    if (row.datasheets.len > 0) {
+        <br />
+        for (row.datasheets) |ds| {
+            if (ds.present) {
+                <a class="tag tag-datasheet" href="/datasheets/{ds.name}" target="_blank" rel="noopener" title="Open PDF">📄 {ds.name}</a>
+            } else {
+                <span class="tag tag-datasheet-missing" title="PDF declared but not uploaded">📄 {ds.name} (missing)</span>
+            }
+        }
+    }
+    if (row.footprint) |fp| {
+        <div class="fp-preview" data-fp={fp}></div>
     }
 }

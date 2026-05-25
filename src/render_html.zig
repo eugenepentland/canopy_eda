@@ -1626,6 +1626,8 @@ fn emitComponentEntry(
     try writeJsString(w, inst.mpn);
     try w.writeAll(",\"manufacturer\":");
     try writeJsString(w, inst.manufacturer);
+    try w.writeAll(",\"footprint\":");
+    try writeJsString(w, inst.footprint);
     try w.writeAll(",\"kind\":");
     try writeJsString(w, kind);
     try w.writeAll(",\"section\":");
