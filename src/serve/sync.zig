@@ -274,17 +274,22 @@ fn loadFootprintDefImpl(
         if (!child.isForm("pad")) continue;
         try writePadProtoJson(spc.arena, w, child, &first_item);
     }
-    // Courtyard / silkscreen graphics ship inline alongside Pads. Without
-    // these the wurth WA-SMSI mounting spacer renders without its F.CrtYd
-    // boundary because KiCad treats our partial Definition.Items as
+    // Courtyard / silkscreen / fab graphics ship inline alongside Pads.
+    // Without these the wurth WA-SMSI mounting spacer renders without its
+    // F.CrtYd boundary because KiCad treats our partial Definition.Items as
     // authoritative and never reads the staged library. RunAction "Update
     // Footprint From Library" was the intended escape hatch but every
     // candidate name returned RAS_INVALID, so we ship the geometry directly.
+    // `fab` is the package body outline + pin-1 marker (F.Fab) — many parts
+    // (e.g. fine-pitch LGA/QFN like lga-cc-40-7-adi) carry their outline only
+    // on fab, so dropping it left the synced footprint with no body at all.
     for (children[2..]) |child| {
         if (child.isForm("courtyard")) {
             try writeCourtyardProtoJson(w, child, &first_item);
         } else if (child.isForm("silkscreen")) {
-            try writeSilkscreenProtoJson(w, child, &first_item);
+            try writeGeomBlockProtoJson(w, child, PROTO_LAYER_F_SILK, SILK_STROKE_MM, &first_item);
+        } else if (child.isForm("fab")) {
+            try writeGeomBlockProtoJson(w, child, PROTO_LAYER_F_FAB, FAB_STROKE_MM, &first_item);
         }
     }
     if (inst_opt) |inst| {
@@ -331,8 +336,10 @@ const PROTO_PADTYPE_NPTH = "PT_NPTH";
 const PROTO_PADSTACK_NORMAL = "PST_NORMAL";
 const PROTO_LAYER_F_CRTYD = "BL_F_CrtYd";
 const PROTO_LAYER_F_SILK = "BL_F_SilkS";
+const PROTO_LAYER_F_FAB = "BL_F_Fab";
 const COURTYARD_STROKE_MM: f64 = 0.05;
 const SILK_STROKE_MM: f64 = 0.12;
+const FAB_STROKE_MM: f64 = 0.1;
 const RECT_NODE_MIN_CHILDREN: usize = 5;
 const DEFAULT_ROUNDRECT_RRATIO: f64 = 0.25;
 
@@ -374,6 +381,8 @@ fn protoBoardLayer(short: []const u8) []const u8 {
     if (std.mem.eql(u8, short, "B.SilkS")) return "BL_B_SilkS";
     if (std.mem.eql(u8, short, "F.CrtYd")) return "BL_F_CrtYd";
     if (std.mem.eql(u8, short, "B.CrtYd")) return "BL_B_CrtYd";
+    if (std.mem.eql(u8, short, "F.Fab")) return "BL_F_Fab";
+    if (std.mem.eql(u8, short, "B.Fab")) return "BL_B_Fab";
     return "BL_F_Cu";
 }
 
@@ -470,18 +479,21 @@ fn writeCourtyardProtoJson(w: anytype, node: env_mod_node.Node, first: *bool) !v
     }
 }
 
-/// Emit a `(silkscreen …)` form as BoardGraphicShape items on F.SilkS.
-fn writeSilkscreenProtoJson(w: anytype, node: env_mod_node.Node, first: *bool) !void {
+/// Emit a `(line …)`/`(circle …)` geometry block (`silkscreen` or `fab`) as
+/// BoardGraphicShape items on the given board layer. Both block types carry
+/// the same shape grammar, so the silkscreen (F.SilkS) and fab (F.Fab) call
+/// sites share this writer — differing only in target layer + stroke width.
+fn writeGeomBlockProtoJson(w: anytype, node: env_mod_node.Node, layer: []const u8, stroke_mm: f64, first: *bool) !void {
     const children = node.asList() orelse return;
     for (children[1..]) |child| {
         if (child.isForm("line")) {
             const seg = parseSegmentPoints(child) orelse continue;
-            try writeBoardShapeOpen(w, PROTO_LAYER_F_SILK, SILK_STROKE_MM, first);
+            try writeBoardShapeOpen(w, layer, stroke_mm, first);
             try writeSegmentGeom(w, seg.sx, seg.sy, seg.ex, seg.ey);
             try w.writeAll("}}");
         } else if (child.isForm("circle")) {
             const c = parseCirclePoints(child) orelse continue;
-            try writeBoardShapeOpen(w, PROTO_LAYER_F_SILK, SILK_STROKE_MM, first);
+            try writeBoardShapeOpen(w, layer, stroke_mm, first);
             try writeCircleGeom(w, c.cx, c.cy, c.r);
             try w.writeAll("}}");
         }
@@ -2580,4 +2592,29 @@ test "maybeCollapseDotSubNet keeps the sub-net in dot-net mode, folds it otherwi
     // A plain rail has no '.' and is unaffected by either mode.
     try std.testing.expectEqualStrings("GND", maybeCollapseDotSubNet("GND", false));
     try std.testing.expectEqualStrings("GND", maybeCollapseDotSubNet("GND", true));
+}
+
+test "protoBoardLayer maps F.Fab and B.Fab to their board-layer enums" {
+    // spec: serve/sync - protoBoardLayer maps F.Fab and B.Fab to their KiCad board-layer enums
+    try std.testing.expectEqualStrings("BL_F_Fab", protoBoardLayer("F.Fab"));
+    try std.testing.expectEqualStrings("BL_B_Fab", protoBoardLayer("B.Fab"));
+    // Existing layers are unaffected by the new mappings.
+    try std.testing.expectEqualStrings("BL_F_SilkS", protoBoardLayer("F.SilkS"));
+    try std.testing.expectEqualStrings("BL_F_CrtYd", protoBoardLayer("F.CrtYd"));
+}
+
+test "writeGeomBlockProtoJson ships a fab block on the F.Fab layer" {
+    // spec: serve/sync - loadFootprintDefImpl ships a footprint's fab geometry on F.Fab so the synced part keeps its outline
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    const nodes = try parser_mod.parse(arena, "(fab (line (-3.05 3.05) (3.05 3.05)))");
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(arena);
+    var first = true;
+    try writeGeomBlockProtoJson(w, nodes[0], PROTO_LAYER_F_FAB, FAB_STROKE_MM, &first);
+    // Shape lands on the fab board layer …
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "BL_F_Fab") != null);
+    // … with the segment endpoints converted to nanometres (3.05 mm → 3050000 nm).
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "3050000") != null);
 }

@@ -14,6 +14,9 @@ const PAD_MIN_CHILDREN: usize = 5;
 const RECT_MIN_CHILDREN: usize = 5;
 const DEFAULT_ROUNDRECT_RRATIO: f64 = 0.25;
 const KICAD_FILL_NONE = "    (fill none)\n";
+// KiCad default stroke widths (mm) for the documentation layers.
+const SILK_STROKE_MM: f64 = 0.12;
+const FAB_STROKE_MM: f64 = 0.1;
 const STEP_EXT_LEN: usize = 5;
 // ZIP file format constants (PKZIP appnote.txt)
 const ZIP_VERSION_NEEDED: u16 = 20;
@@ -129,8 +132,9 @@ fn writeModelBlock(w: anytype, model_name: []const u8, model_offset: ?[3]f64, mo
 // --- Footprint .sexp -> .kicad_mod ---
 
 /// Render a project `(footprint …)` source into a KiCad `.kicad_mod` file:
-/// emits the version header, every pad, the courtyard, silkscreen geometry,
-/// and an optional `(model …)` reference to a STEP file under `models/`.
+/// emits the version header, every pad, the courtyard, silkscreen + fab
+/// geometry, and an optional `(model …)` reference to a STEP file under
+/// `models/`.
 pub fn exportFootprintMod(
     allocator: std.mem.Allocator,
     source: []const u8,
@@ -188,7 +192,16 @@ pub fn exportFootprintMod(
     // Silkscreen
     for (children[2..]) |child| {
         if (child.isForm("silkscreen")) {
-            try emitKicadSilkscreen(w, child);
+            try emitKicadGeomBlock(w, child, "F.SilkS", SILK_STROKE_MM);
+        }
+    }
+
+    // Fab (package body outline + pin-1 marker). Same shape grammar as
+    // silkscreen; many footprints carry their outline only here, so it must
+    // round-trip to F.Fab rather than being dropped.
+    for (children[2..]) |child| {
+        if (child.isForm("fab")) {
+            try emitKicadGeomBlock(w, child, "F.Fab", FAB_STROKE_MM);
         }
     }
 
@@ -365,7 +378,10 @@ fn emitKicadCourtyard(w: anytype, node: ast.Node) !void {
     }
 }
 
-fn emitKicadSilkscreen(w: anytype, node: ast.Node) !void {
+/// Emit a `(line …)`/`(circle …)` geometry block onto `layer` with the given
+/// stroke `width`. The `silkscreen` (F.SilkS) and `fab` (F.Fab) blocks share
+/// the same shape grammar, so both route through here.
+fn emitKicadGeomBlock(w: anytype, node: ast.Node, layer: []const u8, width: f64) !void {
     const children = node.asList() orelse return;
     for (children[1..]) |child| {
         if (child.isForm("line")) {
@@ -380,8 +396,8 @@ fn emitKicadSilkscreen(w: anytype, node: ast.Node) !void {
                     const ex = end[0].asNumber() orelse continue;
                     const ey = end[1].asNumber() orelse continue;
                     try w.print("  (fp_line (start {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ sx, sy, ex, ey });
-                    try w.writeAll("    (stroke (width 0.12) (type default))\n");
-                    try w.writeAll("    (layer \"F.SilkS\")\n");
+                    try w.print("    (stroke (width {d:.2}) (type default))\n", .{width});
+                    try w.print("    (layer \"{s}\")\n", .{layer});
                     try w.writeAll("  )\n");
                 }
             }
@@ -397,9 +413,9 @@ fn emitKicadSilkscreen(w: anytype, node: ast.Node) !void {
                     const r = cl[2].asNumber() orelse continue;
                     // KiCad uses center + end point
                     try w.print("  (fp_circle (center {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ cx, cy, cx + r, cy });
-                    try w.writeAll("    (stroke (width 0.12) (type default))\n");
+                    try w.print("    (stroke (width {d:.2}) (type default))\n", .{width});
                     try w.writeAll(KICAD_FILL_NONE);
-                    try w.writeAll("    (layer \"F.SilkS\")\n");
+                    try w.print("    (layer \"{s}\")\n", .{layer});
                     try w.writeAll("  )\n");
                 }
             }
@@ -569,4 +585,22 @@ fn crc32(data: []const u8) u32 {
         }
     }
     return crc ^ 0xFFFFFFFF;
+}
+
+test "exportFootprintMod emits fab geometry on F.Fab and keeps silkscreen on F.SilkS" {
+    // spec: export_kicad - Emits a footprint's (fab …) body outline as fp_line/fp_circle on the F.Fab layer
+    const src =
+        \\(footprint "T"
+        \\  (pad 1 smd rect (pos 0 0) (size 1 1))
+        \\  (silkscreen (line (-1 -1) (1 -1)))
+        \\  (fab (line (-2 -2) (2 -2)) (circle (0 0) 0.5)))
+    ;
+    const out = try exportFootprintMod(std.testing.allocator, src, null, null, null);
+    defer std.testing.allocator.free(out);
+    // The fab line + circle land on F.Fab (previously dropped entirely).
+    try std.testing.expect(std.mem.indexOf(u8, out, "(layer \"F.Fab\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(fp_line (start -2.00 -2.00) (end 2.00 -2.00)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(fp_circle (center 0.00 0.00) (end 0.50 0.00)") != null);
+    // Silkscreen still routes to F.SilkS — fab emission must not displace it.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(layer \"F.SilkS\")") != null);
 }

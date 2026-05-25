@@ -181,6 +181,7 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 
 - Generates a KiCad netlist from a resolved design
 - Exports a KiCad footprint mod file from footprint data
+- Emits a footprint's (fab …) body outline as fp_line/fp_circle on the F.Fab layer
 
 ## bom
 
@@ -410,6 +411,8 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - sectionForRef attributes a sub-block part to its sub-block name and a top-level part to its declared section, else ""
 - boxCols returns a roughly-square (ceil-sqrt) column count for a staging box of N parts
 - buildStagingLayout gives each part a fixed staging seat from the whole design, independent of push composition
+- protoBoardLayer maps F.Fab and B.Fab to their KiCad board-layer enums
+- loadFootprintDefImpl ships a footprint's fab geometry on F.Fab so the synced part keeps its outline
 - maybeCollapseDotSubNet folds a per-pin sub-net to its rail by default but keeps it verbatim in dot-net mode
 
 ## serve/vfs
