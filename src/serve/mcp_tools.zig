@@ -16,7 +16,9 @@ const ids = @import("../eval/ids.zig");
 const review_mod = @import("../review.zig");
 const review_json_mod = @import("../review_json.zig");
 const req_checks = @import("../req_checks.zig");
+const traceability_mod = @import("../traceability.zig");
 const component_info = @import("component_info.zig");
+const design_doc = @import("design_doc.zig");
 const notes = @import("notes.zig");
 const symbol_conv = @import("../convert/symbol.zig");
 const config = @import("../config.zig");
@@ -112,6 +114,12 @@ const tools = [_]ToolEntry{
     .{ .name = "add_component_requirement", .is_mutation = true },
     .{ .name = "remove_component_requirement", .is_mutation = true },
     .{ .name = "read_datasheet", .is_mutation = false },
+    // Design-document traceability — the up-front `(design-doc …)` list of
+    // critical ICs and each one's footprint/datasheet/requirements/placed
+    // lifecycle status. list is read-only; add/remove splice the design .sexp.
+    .{ .name = "list_critical_ics", .is_mutation = false },
+    .{ .name = "add_critical_ic", .is_mutation = true },
+    .{ .name = "remove_critical_ic", .is_mutation = true },
 };
 
 /// Tools that mutate .sexp files — gated to writer/admin roles.
@@ -164,6 +172,7 @@ fn callInner(
     if (try dispatchReview(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchNotes(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchRequirements(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
+    if (try dispatchCriticalIcs(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
 
     const w = out.writer(allocator);
     try w.print("error: unknown tool \"{s}\"", .{tool_name});
@@ -288,6 +297,72 @@ fn toolRemoveComponentRequirement(allocator: std.mem.Allocator, project_dir: []c
         optionalString(args_val, "text"),
         out,
     );
+}
+
+/// Design-document traceability — list the design's declared critical ICs
+/// with each one's lifecycle status, and add/remove `(critical-ic …)` entries
+/// in its `(design-doc …)` form (source-spliced via `design_doc`).
+fn dispatchCriticalIcs(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    tool_name: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayListUnmanaged(u8),
+) !?bool {
+    if (std.mem.eql(u8, tool_name, "list_critical_ics")) return try toolListCriticalIcs(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "add_critical_ic")) return try toolAddCriticalIc(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "remove_critical_ic")) return try toolRemoveCriticalIc(allocator, project_dir, args_val, out);
+    return null;
+}
+
+fn toolListCriticalIcs(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const path = try paths.designSourcePath(allocator, project_dir, name);
+    defer allocator.free(path);
+
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    const result = eval.evalFile(path) catch {
+        try out.writer(allocator).writeAll(ERR_BUILD_FAILED);
+        return false;
+    };
+    const block: *const env_mod.DesignBlock = switch (result) {
+        .design_block => |b| b,
+        else => {
+            try out.writer(allocator).writeAll(ERR_NOT_DESIGN);
+            return false;
+        },
+    };
+
+    // Same checks the schematic page runs so "placed + verified" matches.
+    var check_results = req_checks.runChecks(allocator, &eval, block) catch
+        std.StringHashMapUnmanaged([]req_checks.Result).empty;
+    req_checks.applyVerifications(&check_results, block, block.instances);
+    const trace = try traceability_mod.build(allocator, block, project_dir, &check_results);
+
+    try review_json_mod.writeTraceability(out.writer(allocator), trace);
+    return true;
+}
+
+fn toolAddCriticalIc(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const component = requireString(args_val, "component") orelse return missingArg(out, allocator, "component");
+    return design_doc.addCriticalIc(
+        allocator,
+        project_dir,
+        name,
+        component,
+        optionalString(args_val, "role"),
+        optionalString(args_val, "rationale"),
+        optionalString(args_val, "mpn"),
+        out,
+    );
+}
+
+fn toolRemoveCriticalIc(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const component = requireString(args_val, "component") orelse return missingArg(out, allocator, "component");
+    return design_doc.removeCriticalIc(allocator, project_dir, name, component, out);
 }
 
 fn toolListDesignNotes(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
@@ -1031,7 +1106,7 @@ fn generateReview(
     var check_results = req_checks.runChecks(allocator, &eval, block) catch
         std.StringHashMapUnmanaged([]req_checks.Result).empty;
     req_checks.applyVerifications(&check_results, block, block.instances);
-    const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, &check_results);
+    const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, &check_results, project_dir);
     const json = try review_json_mod.renderToJson(allocator, doc);
     try w.writeAll(json);
     return true;
@@ -1527,6 +1602,13 @@ pub const DesignSummary = struct {
     mtime_sec: i64,
     /// Whether the file evaluated cleanly.
     build_ok: bool,
+    /// Number of `(critical-ic …)` entries declared in the design's
+    /// `(design-doc …)` form. 0 when the design declares none.
+    critical_declared: usize = 0,
+    /// Subset of `critical_declared` whose four lifecycle stages are all
+    /// satisfied (footprint + datasheet imported, requirements defined,
+    /// placed + verified). Feeds the home dashboard's "N/M ICs ready" chip.
+    critical_complete: usize = 0,
 };
 
 /// Count instances flattened across a design plus every sub-block. Does NOT
@@ -1611,6 +1693,20 @@ pub fn listDesignSummaries(
                 summary.instance_count = countInstances(block);
                 summary.net_count = countNets(block);
                 summary.build_ok = true;
+
+                // Traceability roll-up for the home dashboard. Run the same
+                // requirement checks the schematic page does so "placed +
+                // verified" matches — keyed by the in-memory block's ref-des,
+                // so no .bom resolution is needed. Degrade to an empty map on
+                // failure rather than dropping the whole summary.
+                if (block.critical_ics.len > 0) {
+                    var check_results = req_checks.runChecks(allocator, &eval, block) catch
+                        std.StringHashMapUnmanaged([]req_checks.Result).empty;
+                    req_checks.applyVerifications(&check_results, block, block.instances);
+                    const trace = traceability_mod.build(allocator, block, project_dir, &check_results) catch traceability_mod.Traceability{};
+                    summary.critical_declared = trace.declared;
+                    summary.critical_complete = trace.complete;
+                }
             }
         } else |_| {}
 

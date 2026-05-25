@@ -1,5 +1,6 @@
 const std = @import("std");
 const review = @import("review.zig");
+const traceability_mod = @import("traceability.zig");
 const erc_mod = @import("erc.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
@@ -95,8 +96,48 @@ pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) std.mem
     try w.writeAll(",\"subblock_requirements\":");
     try writeComponentRequirements(w, doc.subblock_requirements);
 
+    try w.writeAll(",\"traceability\":");
+    try writeTraceability(w, doc.traceability);
+
     try w.writeAll("}");
     return buf.items;
+}
+
+/// Serialize the design-document traceability roll-up. Each row carries the
+/// declared component, its prose, the placed flag, and the four lifecycle
+/// stage booleans keyed by name so consumers don't depend on array order.
+/// Public so the `list_critical_ics` MCP tool can reuse the exact schema the
+/// review JSON emits.
+pub fn writeTraceability(w: anytype, trace: traceability_mod.Traceability) std.mem.Allocator.Error!void {
+    try w.print("{{\"declared\":{d},\"complete\":{d},\"rows\":[", .{ trace.declared, trace.complete });
+    for (trace.rows, 0..) |row, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"component\":");
+        try writeJsonString(w, row.component);
+        try w.writeAll(",\"role\":");
+        try writeJsonString(w, row.role);
+        try w.writeAll(",\"rationale\":");
+        try writeJsonString(w, row.rationale);
+        try w.writeAll(",\"mpn\":");
+        try writeJsonString(w, row.mpn);
+        try w.print(
+            ",\"placed\":{s},\"complete\":{s}," ++
+                "\"stages\":{{\"footprint\":{s},\"datasheet\":{s},\"requirements\":{s},\"placed_verified\":{s}}}}}",
+            .{
+                boolStr(row.placed),
+                boolStr(row.complete),
+                boolStr(row.stages[@intFromEnum(traceability_mod.TraceStage.footprint)]),
+                boolStr(row.stages[@intFromEnum(traceability_mod.TraceStage.datasheet)]),
+                boolStr(row.stages[@intFromEnum(traceability_mod.TraceStage.requirements)]),
+                boolStr(row.stages[@intFromEnum(traceability_mod.TraceStage.placed_verified)]),
+            },
+        );
+    }
+    try w.writeAll("]}");
+}
+
+fn boolStr(b: bool) []const u8 {
+    return if (b) "true" else "false";
 }
 
 fn writeComponentRequirements(

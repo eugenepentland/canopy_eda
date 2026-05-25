@@ -108,6 +108,7 @@ pub const ScopeForm = enum {
     group,
     sub_block,
     verifies,
+    design_doc,
     test_point,
     power_config,
     decouple_defaults,
@@ -139,6 +140,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "group", .group },
     .{ "sub-block", .sub_block },
     .{ "verifies", .verifies },
+    .{ "design-doc", .design_doc },
     .{ "test-point", .test_point },
     .{ "power-config", .power_config },
     .{ "decouple-defaults", .decouple_defaults },
@@ -394,6 +396,10 @@ pub const scope_form_docs = blk: {
     t[@intFromEnum(ScopeForm.verifies)] = .{ .scope = tl, .doc = .{
         .syntax = "(verifies (req \"REF\" REQID) [rationale])",
         .summary = "Mark a requirement as satisfied by a specific instance.",
+    } };
+    t[@intFromEnum(ScopeForm.design_doc)] = .{ .scope = tl, .doc = .{
+        .syntax = "(design-doc (critical-ic comp (role \"…\") (rationale \"…\") (mpn \"…\")) …)",
+        .summary = "Up-front critical-IC lifecycle / traceability declaration for the design.",
     } };
     t[@intFromEnum(ScopeForm.test_point)] = .{ .scope = tl, .doc = .{
         .syntax = "(test-point …)",

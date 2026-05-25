@@ -212,7 +212,7 @@ src/req_checks.zig::parseMicroHenries | fn parseMicroHenries(s: []const u8) ?f64
 src/req_checks.zig::parseOhms | fn parseOhms(s: []const u8) ?f64
 src/req_checks.zig::runChecks | fn runChecks( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, ) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]Result)
 src/review.zig::buildPowerTree | fn buildPowerTree( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error!PowerTree
-src/review.zig::buildReview | fn buildReview( allocator: std.mem.Allocator, design_name: []const u8, block: *const DesignBlock, assertions: []const AssertionResult, violations: []const erc_mod.Violation, check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result), ) ReviewError!ReviewDoc
+src/review.zig::buildReview | fn buildReview( allocator: std.mem.Allocator, design_name: []const u8, block: *const DesignBlock, assertions: []const AssertionResult, violations: []const erc_mod.Violation, check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result), project_dir: []const u8, ) ReviewError!ReviewDoc
 src/review.zig::isoTimestamp | fn isoTimestamp(allocator: std.mem.Allocator, unix_s: i64) std.mem.Allocator.Error![]const u8
 src/review.zig::slugify | fn slugify(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8
 src/review_html.zig::writeAssertions | fn writeAssertions(w: anytype, assertions: []const review.AssertionReport) RenderError!void
@@ -222,8 +222,10 @@ src/review_html.zig::writePowerTree | fn writePowerTree(allocator: std.mem.Alloc
 src/review_html.zig::writeSectionCoverage | fn writeSectionCoverage(w: anytype, c: coverage.SectionCoverage) RenderError!void
 src/review_html.zig::writeSummaryTable | fn writeSummaryTable(w: anytype, s: review.Summary) RenderError!void
 src/review_html.zig::writeTestPoints | fn writeTestPoints(w: anytype, tps: []const review.TestPointEntry) RenderError!void
+src/review_html.zig::writeTraceability | fn writeTraceability(w: anytype, trace: traceability_mod.Traceability) RenderError!void
 src/review_html.zig::writeUnresolved | fn writeUnresolved(w: anytype, vs: []const erc_mod.Violation) RenderError!void
 src/review_json.zig::renderToJson | fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) std.mem.Allocator.Error![]const u8
+src/review_json.zig::writeTraceability | fn writeTraceability(w: anytype, trace: traceability_mod.Traceability) std.mem.Allocator.Error!void
 src/review_md.zig::renderToMarkdown | fn renderToMarkdown( allocator: Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, doc: review.ReviewDoc, source: []const u8, check_results: *const CheckResultMap, ) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
 src/serve.zig::bumpLiveVersion | fn bumpLiveVersion(name: []const u8) u32
 src/serve.zig::getLiveVersion | fn getLiveVersion(name: []const u8) u32
@@ -296,6 +298,8 @@ src/serve/component_search.zig::downloadFootprint | fn downloadFootprint( alloca
 src/serve/component_search.zig::errorMessage | fn errorMessage(err: DownloadError) []const u8
 src/serve/component_search.zig::searchComponents | fn searchComponents( allocator: std.mem.Allocator, query: []const u8, connect_sid: []const u8, limit: usize, ) SearchError![]SearchHit
 src/serve/component_search.zig::searchErrorMessage | fn searchErrorMessage(err: SearchError) []const u8
+src/serve/design_doc.zig::addCriticalIc | fn addCriticalIc( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, component: []const u8, role: ?[]const u8, rationale: ?[]const u8, mpn: ?[]const u8, out: *std.ArrayListUnmanaged(u8), ) EditError!bool
+src/serve/design_doc.zig::removeCriticalIc | fn removeCriticalIc( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, component: []const u8, out: *std.ArrayListUnmanaged(u8), ) EditError!bool
 src/serve/edit.zig::addComponentDatasheetCore | fn addComponentDatasheetCore( allocator: std.mem.Allocator, project_dir: []const u8, component_name: []const u8, pdf: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::addInstanceApi | fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::addSectionNoteCore | fn addSectionNoteCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, section_name: []const u8, text: []const u8, pdf: []const u8, page: u32, ) EditError!MutationResult
@@ -414,3 +418,4 @@ src/serve/vfs.zig::writeFile | fn writeFile( allocator: std.mem.Allocator, proje
 src/sexpr/parser.zig::freeNodes | fn freeNodes(allocator: std.mem.Allocator, nodes: []const Node) void
 src/sexpr/parser.zig::parse | fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError![]const Node
 src/sexpr/printer.zig::print | fn print(allocator: std.mem.Allocator, nodes: []const Node) std.mem.Allocator.Error![]const u8
+src/traceability.zig::build | fn build( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result), ) std.mem.Allocator.Error!Traceability

@@ -718,7 +718,7 @@ fn buildDocForName(
         std.StringHashMapUnmanaged([]req_checks.Result).empty;
     req_checks.applyVerifications(&check_results, block, block.instances);
 
-    const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, &check_results);
+    const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, &check_results, project_dir);
     return doc;
 }
 

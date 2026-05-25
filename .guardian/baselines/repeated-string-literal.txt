@@ -1,6 +1,7 @@
 # guardian-snapshot v1
 src/serve/bom_html.zig: string literal manufacturer appears 3 times — extract a const
 src/serve/edit.zig: string literal {{\"ok\":true,\"version\":{d}}} appears 3 times — extract a const
+src/serve/mcp_tools.zig: string literal component appears 4 times — extract a const
 src/serve/templates/account.zig: string literal </button> appears 7 times — extract a const
 src/serve/templates/account.zig: string literal </label> appears 3 times — extract a const
 src/serve/templates/account.zig: string literal </option> appears 4 times — extract a const
@@ -23,3 +24,4 @@ src/serve/templates/library.zig: string literal <span class=\"meta\"> appears 5 
 src/serve/templates/oauth.zig: string literal  type=\"hidden\" appears 5 times — extract a const
 src/serve/templates/oauth.zig: string literal </strong> appears 3 times — extract a const
 src/serve/templates/oauth.zig: string literal <strong> appears 3 times — extract a const
+src/serve/templates/pages.zig: string literal <span class=\"sep\"> appears 3 times — extract a const

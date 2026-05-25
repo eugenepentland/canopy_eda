@@ -444,7 +444,7 @@ pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) C
         std.StringHashMapUnmanaged([]req_checks.Result).empty;
     req_checks.applyVerifications(&check_results, block, block.instances);
 
-    const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, &check_results);
+    const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, &check_results, project_dir);
 
     const source = infra_fs.cwd().readFileAlloc(allocator, board_path, 16 * 1024 * 1024) catch &[_]u8{};
 

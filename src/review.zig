@@ -4,6 +4,7 @@ const env_mod = @import("eval/env.zig");
 const erc_mod = @import("erc.zig");
 const req_checks = @import("req_checks.zig");
 const coverage = @import("coverage.zig");
+const traceability_mod = @import("traceability.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const DesignBlock = env_mod.DesignBlock;
@@ -223,6 +224,11 @@ pub const ReviewDoc = struct {
     /// review JSON / HTML so power-chain ICs (charger, buck, LDO, ADCs in
     /// modules, …) get the same coverage as top-level parts.
     subblock_requirements: []const ComponentRequirementEntry = &.{},
+    /// Per-IC design-document traceability: each `(critical-ic …)` declared in
+    /// the design's `(design-doc …)` form joined against the library, the
+    /// placed instances, and the requirement checks. Empty when the design
+    /// declares no `(design-doc …)`.
+    traceability: traceability_mod.Traceability = .{},
 };
 
 /// Build a review document for a design block. `assertions` comes from the
@@ -239,6 +245,7 @@ pub fn buildReview(
     assertions: []const AssertionResult,
     violations: []const erc_mod.Violation,
     check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
+    project_dir: []const u8,
 ) ReviewError!ReviewDoc {
     const sections = try buildSectionReports(allocator, block, violations, check_results);
     const sub_reqs = try collectSubblockRequirements(allocator, block, check_results);
@@ -252,6 +259,7 @@ pub fn buildReview(
     const unresolved = try filterUnresolved(allocator, violations);
 
     const summary = try buildSummary(allocator, block, sections.len, violations, assertions, check_results);
+    const trace = try traceability_mod.build(allocator, block, project_dir, check_results);
     const generated_at = try isoTimestampNow(allocator);
 
     return .{
@@ -268,6 +276,7 @@ pub fn buildReview(
         .assertions = asserts,
         .unresolved = unresolved,
         .subblock_requirements = sub_reqs,
+        .traceability = trace,
     };
 }
 

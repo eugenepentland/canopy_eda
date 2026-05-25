@@ -5,6 +5,7 @@ const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const render_power_tree_svg = @import("render_power_tree_svg.zig");
 const coverage = @import("coverage.zig");
+const traceability_mod = @import("traceability.zig");
 
 /// Error set for HTML emit helpers in this module. Covers both writer
 /// shapes the schematic page uses: an `ArrayListUnmanaged.writer()`
@@ -118,6 +119,60 @@ pub fn writeSummaryTable(w: anytype, s: review.Summary) RenderError!void {
         try w.writeAll("</ul>");
     }
     try w.writeAll(sectionClose);
+}
+
+/// Render the Traceability section: one row per critical IC declared in the
+/// design's `(design-doc …)` form, with a ✓/✗ for each of the four lifecycle
+/// stages (footprint imported, datasheet imported, requirements defined,
+/// placed + verified) and an "N/M ICs ready" roll-up pill. Skips rendering
+/// entirely when the design declares no critical ICs.
+pub fn writeTraceability(w: anytype, trace: traceability_mod.Traceability) RenderError!void {
+    if (trace.rows.len == 0) return;
+    const pill: []const u8 = if (trace.complete == trace.declared)
+        "pass"
+    else if (trace.complete == 0)
+        "fail"
+    else
+        "warn";
+    try w.writeAll("<section><h2>Traceability</h2>");
+    try w.print(
+        "<p class=\"hint\">Critical-IC lifecycle from the <code>(design-doc …)</code> declaration: " ++
+            "import the footprint &amp; datasheet, add component requirements, then place &amp; verify. " ++
+            "<span class=\"pill {s}\">{d}/{d} ICs ready</span></p>",
+        .{ pill, trace.complete, trace.declared },
+    );
+    try w.writeAll("<table class=\"summary\"><thead><tr>" ++
+        "<th>Critical IC</th><th>Footprint</th><th>Datasheet</th><th>Requirements</th><th>Placed + verified</th>" ++
+        "</tr></thead><tbody>");
+    for (trace.rows) |row| {
+        try w.writeAll(trCodeOpen);
+        try writeHtmlEscaped(w, row.component);
+        try w.writeAll("</code>");
+        if (row.role.len > 0) {
+            try w.writeAll("<br><span class=\"muted\">");
+            try writeHtmlEscaped(w, row.role);
+            try w.writeAll("</span>");
+        }
+        if (!row.placed) {
+            try w.writeAll("<br><span class=\"muted\">not yet placed</span>");
+        }
+        try w.writeAll("</td>");
+        try writeStageCell(w, row.stages[@intFromEnum(traceability_mod.TraceStage.footprint)]);
+        try writeStageCell(w, row.stages[@intFromEnum(traceability_mod.TraceStage.datasheet)]);
+        try writeStageCell(w, row.stages[@intFromEnum(traceability_mod.TraceStage.requirements)]);
+        try writeStageCell(w, row.stages[@intFromEnum(traceability_mod.TraceStage.placed_verified)]);
+        try w.writeAll("</tr>");
+    }
+    try w.writeAll(tableSectionClose);
+}
+
+/// One lifecycle-stage cell: green ✓ when satisfied, muted ✗ otherwise.
+fn writeStageCell(w: anytype, ok: bool) RenderError!void {
+    if (ok) {
+        try w.writeAll("<td class=\"pass\">✓</td>");
+    } else {
+        try w.writeAll("<td class=\"muted\">✗</td>");
+    }
 }
 
 /// Render the Power Budget section: one collapsible row per rail, sorted

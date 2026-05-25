@@ -83,6 +83,7 @@ src/eval/env.zig::BlockRole enum_
 src/eval/env.zig::CalcBlock struct_
 src/eval/env.zig::CalcResult struct_
 src/eval/env.zig::Check value
+src/eval/env.zig::CriticalIc struct_
 src/eval/env.zig::DesignBlock struct_
 src/eval/env.zig::Drive enum_
 src/eval/env.zig::ElectricalDecl struct_
@@ -412,8 +413,10 @@ src/review_html.zig::writePowerTree fn
 src/review_html.zig::writeSectionCoverage fn
 src/review_html.zig::writeSummaryTable fn
 src/review_html.zig::writeTestPoints fn
+src/review_html.zig::writeTraceability fn
 src/review_html.zig::writeUnresolved fn
 src/review_json.zig::renderToJson fn
+src/review_json.zig::writeTraceability fn
 src/review_md.zig::renderToMarkdown fn
 src/serve.zig::Handler struct_
 src/serve.zig::ServeError value
@@ -510,6 +513,9 @@ src/serve/component_search.zig::downloadFootprint fn
 src/serve/component_search.zig::errorMessage fn
 src/serve/component_search.zig::searchComponents fn
 src/serve/component_search.zig::searchErrorMessage fn
+src/serve/design_doc.zig::EditError value
+src/serve/design_doc.zig::addCriticalIc fn
+src/serve/design_doc.zig::removeCriticalIc fn
 src/serve/edit.zig::AssertionFailure struct_
 src/serve/edit.zig::BuildReport struct_
 src/serve/edit.zig::EditError value
@@ -713,3 +719,7 @@ src/sexpr/printer.zig::print fn
 src/sexpr/tokenizer.zig::Token struct_
 src/sexpr/tokenizer.zig::TokenTag enum_
 src/sexpr/tokenizer.zig::Tokenizer struct_
+src/traceability.zig::TraceRow struct_
+src/traceability.zig::TraceStage enum_
+src/traceability.zig::Traceability struct_
+src/traceability.zig::build fn

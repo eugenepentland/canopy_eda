@@ -65,6 +65,8 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - add places the new footprint at the op's staging (x, y) and bakes canopy_net / canopy_section properties
 - create_board_item writes a section staging box as a (gr_rect …) on Dwgs.User
 - create_board_item writes a section label as a (gr_text …) on Dwgs.User
+- hides pre-existing visible canopy_* fields and counts them
+- leaves already-hidden canopy fields untouched (idempotent)
 
 ## eval/builtins
 
@@ -323,6 +325,15 @@ Public functions: computeInstanceCoverage, computeSectionCoverage, computeOveral
 - computeOverallCoverage aggregates every section plus orphan sub-block instances
 - computeOverallCoverage returns 100% when the design has zero checkable instances
 
+## traceability
+
+Public functions: build
+
+- build marks all four stages green for a placed IC with footprint, datasheet, requirements, and passing checks
+- build leaves placed_verified false when a placed IC has an unverified (na) requirement
+- build reports a declared IC with no matching instance as not placed
+- build finds an instance placed inside a sub-block
+
 ## review
 
 - buildPowerTree assigns each rail to a topological layer rooted at upstream sources
@@ -424,6 +435,15 @@ Public functions: describeComponent, listRequirements, addRequirement, removeReq
 - removeRequirement deletes a requirement by id or exact text
 - formEnd skips parens inside string literals
 - add list and remove requirement round-trip on disk
+
+## serve/design_doc
+
+Public functions: addCriticalIc, removeCriticalIc
+
+- formatCriticalIc renders bare-atom component with optional quoted clauses
+- formatCriticalIc quotes a component name that isn't a bare atom
+- spliceIntoForm inserts a new child before the form's closing paren
+- removeFormSrc deletes a form and its preceding indentation
 
 ## serve/mcp_docs
 
