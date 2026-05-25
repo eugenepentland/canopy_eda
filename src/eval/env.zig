@@ -181,7 +181,14 @@ pub const SectionNote = struct {
 /// `verified`.
 pub const Verification = struct {
     /// Reference designator of the target instance (e.g. "U1", "U_VREF").
-    ref_des: []const u8,
+    /// Empty when the sign-off targets a part by stable id instead (see
+    /// `target_id`). Exactly one of `ref_des` / `target_id` is non-empty.
+    ref_des: []const u8 = "",
+    /// Stable 8-char instance id (the `(id <hex>)` token) of the target part.
+    /// When non-empty, `applyVerifications` matches on `Instance.id` instead
+    /// of `Instance.ref_des`, so the sign-off survives ref-des renumbering and
+    /// sub-block renames. Set by the `(verifies (req (id <hex>) …) …)` form.
+    target_id: []const u8 = "",
     /// Requirement ID — either explicit `(id …)` from the component file or
     /// the CRC32-derived fallback. Matched against `Requirement.id`.
     req_id: []const u8,

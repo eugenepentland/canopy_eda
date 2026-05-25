@@ -973,15 +973,46 @@ fn parseSectionStatus(str: []const u8) ?env_mod.SectionStatus {
 /// Both the short form (single trailing string) and the long form with
 /// `(rationale "...")` / `(signed-off-by "...")` / `(date "...")` sub-clauses
 /// are accepted. Returns null when the form is malformed.
+///
+/// The target may be addressed two ways:
+///   - `(req "U6" REQID)` — by ref-des (legacy; breaks on renumber).
+///   - `(req (id b894897b) REQID)` — by the part's stable `(id …)` token,
+///     which survives ref-des renumbering and sub-block renames. Sets
+///     `Verification.target_id` and leaves `ref_des` empty.
+/// The target of a `(verifies (req <target> …) …)` form: exactly one field is
+/// non-empty. `(id <hex>)` selects by stable instance id; anything else is a
+/// ref-des string.
+const VerifyTarget = struct { ref_des: []const u8 = "", target_id: []const u8 = "" };
+
+/// Parse the `<target>` node of a `(req <target> REQID)` clause. Returns null
+/// when the node is a malformed `(id …)` form or a non-string ref-des. Uses the
+/// same atom-or-string id tokenisation as `ids.parseId` (all-digit hex ids must
+/// be quoted in source).
+fn parseVerifyTarget(self: *Evaluator, node: Node, env: *Env) ?VerifyTarget {
+    if (node.asList()) |id_form| {
+        if (id_form.len < 2) return null;
+        const id_head = id_form[0].asAtom() orelse return null;
+        if (!std.mem.eql(u8, id_head, "id")) return null;
+        const tok = id_form[1].asAtom() orelse id_form[1].asString() orelse return null;
+        return .{ .target_id = tok };
+    }
+    const v = self.evalNode(node, env) catch return null;
+    return .{ .ref_des = v.asString() orelse return null };
+}
+
 fn parseVerifies(self: *Evaluator, form_children: []const Node, env: *Env) ?env_mod.Verification {
     if (form_children.len < 2) return null;
-    // form_children[0] = "verifies"; form_children[1] = (req "REFDES" REQID)
+    // form_children[0] = "verifies"; form_children[1] = (req <target> REQID)
     const req_form = form_children[1].asList() orelse return null;
     if (req_form.len < 3) return null;
     const req_head = req_form[0].asAtom() orelse return null;
     if (!std.mem.eql(u8, req_head, "req")) return null;
-    const ref_des_val = self.evalNode(req_form[1], env) catch return null;
-    const ref_des = ref_des_val.asString() orelse return null;
+
+    // Target selector: `(id <hex>)` sub-form matches by stable instance id;
+    // anything else is a ref-des string (see `parseVerifyTarget`).
+    const target = parseVerifyTarget(self, req_form[1], env) orelse return null;
+    const ref_des = target.ref_des;
+    const target_id = target.target_id;
     // Accept atom (`b68c3fa5`) or string ("b68c3fa5"). All-digit hex ids
     // like "41510609" must be quoted as a string in the source — bare
     // digits would be tokenised as a decimal int and the AST has no way
@@ -1022,6 +1053,7 @@ fn parseVerifies(self: *Evaluator, form_children: []const Node, env: *Env) ?env_
 
     return .{
         .ref_des = ref_des,
+        .target_id = target_id,
         .req_id = req_id,
         .rationale = rationale,
         .signed_by = signed_by,
@@ -1212,4 +1244,48 @@ test "expandSectionBusPort expands index x suffix matrix" {
     try testing.expectEqualStrings("ADF_CH3N", ports.items[5].name);
     try testing.expectEqual(env_mod.PortDirection.in, ports.items[0].direction);
     try testing.expectEqual(env_mod.SignalType.differential, ports.items[0].signal_type);
+}
+
+// spec: eval/design_block - verifies req with an (id …) target parses as a stable-id sign-off leaving ref-des empty
+test "parseVerifies reads an (id …) target as a stable-id sign-off" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(verifies (req (id b894897b) deadbeef)
+        \\  (rationale "checked against datasheet")
+        \\  (signed-off-by "me" (date "2026-05-25")))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    const v = parseVerifies(&eval, form_children, &env) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("b894897b", v.target_id);
+    try testing.expectEqualStrings("", v.ref_des);
+    try testing.expectEqualStrings("deadbeef", v.req_id);
+    try testing.expectEqualStrings("checked against datasheet", v.rationale);
+    try testing.expectEqualStrings("me", v.signed_by);
+    try testing.expectEqualStrings("2026-05-25", v.date);
+}
+
+// spec: eval/design_block - verifies req with a ref-des target parses as a ref-des sign-off leaving target-id empty
+test "parseVerifies reads a ref-des target as a ref-des sign-off" {
+    const a = std.heap.page_allocator;
+    const src = "(verifies (req \"U6\" deadbeef) \"looks good\")";
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    const v = parseVerifies(&eval, form_children, &env) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("U6", v.ref_des);
+    try testing.expectEqualStrings("", v.target_id);
+    try testing.expectEqualStrings("deadbeef", v.req_id);
+    try testing.expectEqualStrings("looks good", v.rationale);
 }

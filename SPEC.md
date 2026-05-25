@@ -262,6 +262,8 @@ Public functions: analyze
 - decouple with no defaults keeps its legacy explicit form
 - bus-port expands one port per index times optional suffix list
 - kicad-pcb form captures the literal path on the design block
+- verifies req with an (id …) target parses as a stable-id sign-off leaving ref-des empty
+- verifies req with a ref-des target parses as a ref-des sign-off leaving target-id empty
 
 ## eval/test_point
 
@@ -377,6 +379,8 @@ Public functions: runChecks, deinit, parseMicroFarads, parseOhms, parseMicroHenr
 - parseMicroFarads handles SI-suffixed cap values
 - parseOhms handles SI prefixes for resistor values
 - parseMicroHenries handles SI-suffixed inductor values
+- applyVerifications matches a verifies form to an instance by stable id when target-id is set
+- applyVerifications matches a verifies form to an instance by ref-des when target-id is empty
 
 ## review_html
 

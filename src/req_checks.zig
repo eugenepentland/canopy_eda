@@ -50,7 +50,9 @@ pub const Result = struct {
 /// `(verifies (req "REFDES" id) …)` resolves against any instance reachable
 /// from the design (top-level instances and every nested sub-block), so a
 /// design can sign off a requirement on a part inside a power-supply module
-/// without the module file having to know it.
+/// without the module file having to know it. The target may instead be a
+/// stable instance id — `(verifies (req (id <hex>) id) …)` — which matches on
+/// `Instance.id` so the sign-off survives ref-des renumbering and renames.
 ///
 /// Resolution rules (see Verification doc-comment):
 ///   na + match → verified, rationale attached
@@ -71,8 +73,14 @@ fn applyOneVerification(
     v: env_mod.Verification,
 ) void {
     // Try this block's own instances first, then recurse into sub-blocks.
+    // A verifies form addresses its target either by stable instance id
+    // (`(req (id …) …)`, renumber-proof) or by ref-des (`(req "U6" …)`).
     for (block.instances) |inst| {
-        if (!std.mem.eql(u8, inst.ref_des, v.ref_des)) continue;
+        const matched = if (v.target_id.len > 0)
+            std.mem.eql(u8, inst.id, v.target_id)
+        else
+            std.mem.eql(u8, inst.ref_des, v.ref_des);
+        if (!matched) continue;
         var req_idx: ?usize = null;
         for (inst.requirements, 0..) |r, ri| {
             if (std.mem.eql(u8, r.id, v.req_id)) {
@@ -840,4 +848,65 @@ test "parseMicroHenries" {
     try std.testing.expectApproxEqAbs(@as(f64, 2.2), parseMicroHenries("2.2µH").?, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 0.1), parseMicroHenries("100nH").?, 1e-9);
     try std.testing.expect(parseMicroHenries("garbage") == null);
+}
+
+// Build a one-instance design + a single-requirement results map for the
+// verifies-matching tests below. The instance carries ref-des "U6" and stable
+// id "b894897b"; its lone requirement has id "r1" and starts out `na`.
+fn verifyFixture(
+    a: std.mem.Allocator,
+    verifs: []const env_mod.Verification,
+) !struct { block: DesignBlock, results: []Result, map: std.StringHashMapUnmanaged([]Result) } {
+    const reqs = try a.dupe(env_mod.Requirement, &.{.{ .text = "rule", .id = "r1" }});
+    const insts = try a.dupe(Instance, &.{.{
+        .ref_des = "U6",
+        .component = "x",
+        .value = "",
+        .footprint = "",
+        .symbol = "",
+        .id = "b894897b",
+        .requirements = reqs,
+    }});
+    const results = try a.dupe(Result, &.{.{ .status = .na }});
+    var map: std.StringHashMapUnmanaged([]Result) = .empty;
+    try map.put(a, "U6", results);
+    return .{
+        .block = .{
+            .name = "t",
+            .instances = insts,
+            .nets = &.{},
+            .ports = &.{},
+            .notes = &.{},
+            .groups = &.{},
+            .sub_blocks = &.{},
+            .verifications = verifs,
+        },
+        .results = results,
+        .map = map,
+    };
+}
+
+// spec: req_checks - applyVerifications matches a verifies form to an instance by stable id when target-id is set
+test "applyVerifications matches by stable id" {
+    const a = std.heap.page_allocator;
+    // Target by id; the ref-des is deliberately left empty to prove the match
+    // does not lean on it.
+    var fx = try verifyFixture(a, &.{.{ .target_id = "b894897b", .req_id = "r1", .rationale = "checked" }});
+    applyVerifications(&fx.map, &fx.block, fx.block.instances);
+    try std.testing.expectEqual(Status.verified, fx.results[0].status);
+    try std.testing.expect(fx.results[0].verification != null);
+
+    // A non-matching id leaves the requirement untouched at `na`.
+    var fx2 = try verifyFixture(a, &.{.{ .target_id = "deadbeef", .req_id = "r1", .rationale = "x" }});
+    applyVerifications(&fx2.map, &fx2.block, fx2.block.instances);
+    try std.testing.expectEqual(Status.na, fx2.results[0].status);
+}
+
+// spec: req_checks - applyVerifications matches a verifies form to an instance by ref-des when target-id is empty
+test "applyVerifications matches by ref-des fallback" {
+    const a = std.heap.page_allocator;
+    var fx = try verifyFixture(a, &.{.{ .ref_des = "U6", .req_id = "r1", .rationale = "checked" }});
+    applyVerifications(&fx.map, &fx.block, fx.block.instances);
+    try std.testing.expectEqual(Status.verified, fx.results[0].status);
+    try std.testing.expect(fx.results[0].verification != null);
 }
