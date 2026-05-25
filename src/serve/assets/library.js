@@ -180,11 +180,17 @@ function cseFetch(){
       else lines.push('✗ Datasheet: '+((ds&&ds.error)||'failed'));
       if(d.linked)lines.push('✓ Linked datasheet to '+((fp&&fp.component)||'component'));
       else if(fp&&fp.ok&&ds&&ds.ok)lines.push('⚠ Datasheet downloaded but not linked to component');
+      // CSE fuzzy-matches: warn loudly when it resolved a different part than asked.
+      var resolved=(fp&&fp.part_name)||'';
+      var mismatch=resolved&&pn&&resolved.toUpperCase()!==pn.toUpperCase().replace(/\s+/g,'');
+      if(mismatch)
+        lines.unshift('⚠ CSE had no exact match for "'+pn+'" — imported "'+resolved+'" instead. For the exact part, drag its PDF onto the card.');
       var anyOk=(fp&&fp.ok)||(ds&&ds.ok);
-      cseResult.className='result '+(anyOk?'ok':'err');
+      cseResult.className='result '+(mismatch?'err':(anyOk?'ok':'err'));
       cseResult.textContent=lines.join('\n');
-      showToast(anyOk?'ok':'err',lines.join('  |  '),anyOk?5000:9000);
-      if(anyOk)setTimeout(function(){location.reload();},2000);
+      showToast(mismatch?'err':(anyOk?'ok':'err'),lines.join('  |  '),anyOk?6000:9000);
+      // Reload to surface the new card — but not on a mismatch, so the warning stays readable.
+      if(anyOk&&!mismatch)setTimeout(function(){location.reload();},2000);
     })
     .catch(function(e){cseResult.className='result err';cseResult.textContent='Error: '+e;showToast('err','Error: '+e,8000);})
     .then(function(){cseSubmit.disabled=false;cseSubmit.textContent=label;});

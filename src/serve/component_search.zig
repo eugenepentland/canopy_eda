@@ -34,6 +34,7 @@ const MAX_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 // Repeated literals, hoisted so the suggestion parsers and error tables share one copy.
 const FIELD_MANUFACTURER = "manufacturer";
+const FIELD_PART_NAME = "part_name";
 const OOM_MSG = "out of memory";
 
 /// Outcome of a successful footprint fetch. All slices are owned by the
@@ -235,9 +236,9 @@ fn suggestQuery(
 
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return null;
     defer parsed.deinit();
-    const chosen = pickSuggestion(parsed.value, manufacturer) orelse return null;
+    const chosen = pickSuggestion(parsed.value, term, manufacturer) orelse return null;
 
-    const pn = strField(chosen, "part_name") orelse return null;
+    const pn = strField(chosen, FIELD_PART_NAME) orelse return null;
     const mfg = strField(chosen, FIELD_MANUFACTURER) orelse "";
     const enc_name = try percentEncode(allocator, pn);
     const enc_mfg = try percentEncode(allocator, mfg);
@@ -266,8 +267,24 @@ fn suggestionsArray(root: std.json.Value) ?[]std.json.Value {
 /// Choose a suggestion from `data.suggestions`: the first whose manufacturer
 /// matches `manufacturer` (case-insensitive substring) when given, else the
 /// first. Returns the chosen `Value` (a slice into the parsed tree).
-fn pickSuggestion(root: std.json.Value, manufacturer: ?[]const u8) ?std.json.Value {
+fn pickSuggestion(root: std.json.Value, term: []const u8, manufacturer: ?[]const u8) ?std.json.Value {
     const items = suggestionsArray(root) orelse return null;
+    // Prefer a suggestion whose part_name exactly matches the query so a search
+    // for "TXS0108EPWR" isn't silently resolved to the more popular
+    // "TXS0108EDGSR" that CSE happens to list first. The manufacturer filter,
+    // when given, still applies among the exact matches.
+    var first_exact: ?std.json.Value = null;
+    for (items) |s| {
+        const pn = strField(s, FIELD_PART_NAME) orelse continue;
+        if (!std.ascii.eqlIgnoreCase(pn, term)) continue;
+        if (first_exact == null) first_exact = s;
+        if (manufacturer) |want| {
+            const mfg = strField(s, FIELD_MANUFACTURER) orelse "";
+            if (std.ascii.indexOfIgnoreCase(mfg, want) != null) return s;
+        } else return s;
+    }
+    if (first_exact) |s| return s;
+    // No exact part match — fall back to the manufacturer filter, else the first.
     const want = manufacturer orelse return items[0];
     for (items) |s| {
         const mfg = strField(s, FIELD_MANUFACTURER) orelse continue;
@@ -302,7 +319,7 @@ fn collectHits(allocator: std.mem.Allocator, root: std.json.Value, limit: usize)
     var list: std.ArrayListUnmanaged(SearchHit) = .empty;
     for (items) |s| {
         if (list.items.len >= limit) break;
-        const pn = strField(s, "part_name") orelse continue;
+        const pn = strField(s, FIELD_PART_NAME) orelse continue;
         const mfg = strField(s, FIELD_MANUFACTURER) orelse "";
         const samac = extractPartId(s);
         const ds = suggestionDatasheetUrl(s);
@@ -524,19 +541,22 @@ test "suggestion parsing picks the part, id and datasheet url" {
     var parsed = try std.json.parseFromSlice(std.json.Value, a, json, .{});
     defer parsed.deinit();
 
-    const chosen = pickSuggestion(parsed.value, "winbond").?;
+    // Non-matching query term ("") → manufacturer filter selects the part.
+    const chosen = pickSuggestion(parsed.value, "", "winbond").?;
     try std.testing.expectEqualStrings("W25Q128FVPIG", strField(chosen, "part_name").?);
     try std.testing.expectEqualStrings("231980", extractPartId(chosen).?);
     try std.testing.expectEqualStrings("ds.pdf", suggestionDatasheetUrl(chosen).?);
 
-    // No manufacturer (and an unmatched one) fall back to the first suggestion.
-    try std.testing.expectEqualStrings("OTHER", strField(pickSuggestion(parsed.value, null).?, "part_name").?);
-    try std.testing.expectEqualStrings("OTHER", strField(pickSuggestion(parsed.value, "nope").?, "part_name").?);
+    // An exact part_name match wins over the first suggestion and over mfr.
+    try std.testing.expectEqualStrings("W25Q128FVPIG", strField(pickSuggestion(parsed.value, "w25q128fvpig", null).?, "part_name").?);
 
-    try std.testing.expect(pickSuggestion(parsed.value, "winbond") != null);
+    // No manufacturer (and an unmatched one) fall back to the first suggestion.
+    try std.testing.expectEqualStrings("OTHER", strField(pickSuggestion(parsed.value, "", null).?, "part_name").?);
+    try std.testing.expectEqualStrings("OTHER", strField(pickSuggestion(parsed.value, "", "nope").?, "part_name").?);
+
     var empty = try std.json.parseFromSlice(std.json.Value, a, "{\"data\":{\"suggestions\":[]}}", .{});
     defer empty.deinit();
-    try std.testing.expect(pickSuggestion(empty.value, null) == null);
+    try std.testing.expect(pickSuggestion(empty.value, "", null) == null);
 }
 
 test "looksLikeZip gates on PK magic" {
