@@ -729,8 +729,10 @@ fn writeHubRequirements(w: anytype, h: HubAnalysis, check_results: *const CheckR
         .na => {},
     };
     const header_class: []const u8 = if (fail_ct > 0) "hub-reqs has-fail" else if (pass_ct > 0) "hub-reqs" else "hub-reqs";
+    // Requirements stay collapsed by default — even when failing — so the
+    // section cards read clean. The summary keeps the fail/ok/verified badges,
+    // so status is visible at a glance and the reviewer expands on demand.
     try w.print("<details class=\"{s}\"", .{header_class});
-    if (fail_ct > 0) try w.writeAll(" open");
     try w.print("><summary>Requirements ({d})", .{h.inst.requirements.len});
     if (fail_ct > 0) try w.print(" <span class=\"req-badge fail\">{d} failing</span>", .{fail_ct});
     if (pass_ct > 0) try w.print(" <span class=\"req-badge pass\">{d} ok</span>", .{pass_ct});
