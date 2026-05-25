@@ -334,6 +334,7 @@ Public functions: build
 - build leaves placed_verified false when a placed IC has an unverified (na) requirement
 - build reports a declared IC with no matching instance as not placed
 - build finds an instance placed inside a sub-block
+- build orders rows most-complete first
 
 ## review
 

@@ -80,11 +80,28 @@ pub fn build(
         if (row.complete) complete += 1;
         try rows.append(allocator, row);
     }
+    // Order most-complete first so the panel reads top-down from done to
+    // not-started. Stable, so equally-complete ICs keep declaration order.
+    std.mem.sort(TraceRow, rows.items, {}, moreComplete);
     return .{
         .rows = rows.items,
         .declared = rows.items.len,
         .complete = complete,
     };
+}
+
+/// Count of green lifecycle stages (0–4) — the row's completion score.
+fn greenStages(row: TraceRow) usize {
+    var n: usize = 0;
+    for (row.stages) |s| {
+        if (s) n += 1;
+    }
+    return n;
+}
+
+/// Stable sort predicate: rows with more green stages come first.
+fn moreComplete(_: void, a: TraceRow, b: TraceRow) bool {
+    return greenStages(a) > greenStages(b);
 }
 
 fn buildRow(
@@ -393,4 +410,39 @@ test "build matches an instance inside a sub-block" {
     // But requirements stage is false (none declared), so not complete.
     try std.testing.expect(!row.stages[@intFromEnum(TraceStage.requirements)]);
     try std.testing.expect(!row.complete);
+}
+
+// spec: traceability - build orders rows most-complete first
+test "build sorts rows by completion descending" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // A fully-traced placed IC and an unplaced IC, declared least-complete
+    // first; build must reorder the complete one to the front.
+    const reqs = [_]env_mod.Requirement{.{ .text = "x", .id = "id1" }};
+    const done_inst = Instance{
+        .ref_des = "U1",
+        .component = "done_ic",
+        .value = "v",
+        .footprint = "fp",
+        .symbol = "",
+        .datasheets = &[_][]const u8{"d.pdf"},
+        .requirements = &reqs,
+    };
+    const insts = [_]Instance{done_inst};
+    const cics = [_]CriticalIc{
+        .{ .component = "not_imported_yet" }, // unplaced → 0 green stages
+        .{ .component = "done_ic" }, // placed + verified → 4 green stages
+    };
+    var block = emptyBlock("t", &insts, &.{});
+    block.critical_ics = &cics;
+
+    var map: std.StringHashMapUnmanaged([]req_checks.Result) = .empty;
+    var results = [_]req_checks.Result{.{ .status = .pass, .message = "" }};
+    try map.put(alloc, "U1", &results);
+
+    const trace = try build(alloc, &block, "/nonexistent", &map);
+    try std.testing.expectEqualStrings("done_ic", trace.rows[0].component);
+    try std.testing.expectEqualStrings("not_imported_yet", trace.rows[1].component);
 }
