@@ -2073,6 +2073,28 @@ fn emitAddOp(
         try w.*.writeAll(",\"canopy_section\":");
         try writeJsonString(w.*, section);
     }
+    // Design properties (MPN, Manufacturer, Datasheet, … — every BOM column
+    // except KiCad built-ins) baked into the add so they land on the FIRST
+    // sync. The IPC agent reads these from footprint_def above; the file-based
+    // writer reads this array. Without it the file path created the fp with
+    // only ref/value/canopy_*, and the rest didn't appear until a 2nd sync
+    // emitted set_field ops against the now-existing part ("press sync twice").
+    // Filtering mirrors the update path (skipDesignProperty + canonicalFieldName)
+    // so the first sync bakes exactly what the second would set — no residual diff.
+    try w.*.writeAll(",\"properties\":[");
+    var prop_first = true;
+    for (inst.properties) |p| {
+        if (skipDesignProperty(p.key)) continue;
+        if (p.value.len == 0) continue;
+        if (!prop_first) try w.*.writeAll(",");
+        prop_first = false;
+        try w.*.writeAll("{\"key\":");
+        try writeJsonString(w.*, canonicalFieldName(p.key));
+        try w.*.writeAll(",\"value\":");
+        try writeJsonString(w.*, p.value);
+        try w.*.writeAll("}");
+    }
+    try w.*.writeAll("]");
     // Staging position (board nm). Both paths move the new fp here; (0,0)
     // means "no staging hint" (the part stays at the origin).
     try w.*.print(",\"x\":{d},\"y\":{d}", .{ x_nm, y_nm });

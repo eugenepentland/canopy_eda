@@ -1039,6 +1039,22 @@ fn buildAddFootprint(
     // op fields the server now also emits).
     if (canopy_net.len > 0) try children.append(arena, try makeProperty(arena, "canopy_net", canopy_net));
     if (canopy_section.len > 0) try children.append(arena, try makeProperty(arena, "canopy_section", canopy_section));
+    // Design properties (MPN, Manufacturer, Datasheet, …) baked on the first
+    // add so they don't wait for a 2nd sync. The op's "properties" array
+    // already carries canonical field names + values (filtered server-side);
+    // makeProperty emits them hidden (metadata, not Value). Library .sexp
+    // footprints carry no (property …) forms, so there's nothing to collide with.
+    if (op_obj.get("properties")) |props_val| {
+        if (props_val == .array) {
+            for (props_val.array.items) |pv| {
+                if (pv != .object) continue;
+                const pk = jsonStr(pv.object.get("key"));
+                const pvv = jsonStr(pv.object.get("value"));
+                if (pk.len == 0 or pvv.len == 0) continue;
+                try children.append(arena, try makeProperty(arena, pk, pvv));
+            }
+        }
+    }
     // Inline geometry from .kicad_mod, skipping the placement/identity and
     // legacy ref/value text we inject or reissue separately.
     for (kmod_children[2..]) |sub| {
@@ -1472,6 +1488,31 @@ test "applyOpsToSource add places at staging position and bakes canopy fields" {
     // hidden so they don't render as text on the fab layer.
     try std.testing.expect(std.mem.indexOf(u8, out, "(property \"canopy_net\" \"U8.C3.VDD33USB\" (hide yes))") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "(property \"canopy_section\" \"USB Core\" (hide yes))") != null);
+}
+
+// spec: kicad_pcb/writer - add bakes design properties (MPN, Manufacturer, …) on the first sync
+test "applyOpsToSource add bakes design properties from the op's properties array" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "R_0402" (uuid "fp-1") (property "Reference" "R1")))
+    ;
+    // Without baking these into the add, the MPN/Manufacturer fields wouldn't
+    // appear until a 2nd sync emitted set_field ops on the now-existing part.
+    const ops =
+        \\[{"op":"add","uuid":"new-uuid","ref":"C84","value":"1uF",
+        \\  "footprint_name":"C_0402",
+        \\  "kicad_mod":"(footprint \"C_0402\" (pad \"1\" smd roundrect (at 0 0)))",
+        \\  "properties":[{"key":"MPN","value":"GRM155R71C104"},{"key":"Manufacturer","value":"Murata"}],
+        \\  "x":0,"y":0,"pad_nets":[]}]
+    ;
+    const out = try applyOpsToSource(arena.allocator(), src, ops);
+    // Baked on the first sync, hidden so they don't render as fab/silk text.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(property \"MPN\" \"GRM155R71C104\" (hide yes))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(property \"Manufacturer\" \"Murata\" (hide yes))") != null);
 }
 
 // spec: kicad_pcb/writer - create_board_item writes a section staging box as a (gr_rect …) on Dwgs.User
