@@ -30,6 +30,18 @@ src/convert/symbol_helpers.zig::mapElectricalType | fn mapElectricalType(kicad: 
 src/coverage.zig::computeInstanceCoverage | fn computeInstanceCoverage( allocator: std.mem.Allocator, inst: Instance, req_results: []const req_checks.Result, ) std.mem.Allocator.Error!?InstanceCoverage
 src/coverage.zig::computeOverallCoverage | fn computeOverallCoverage( allocator: std.mem.Allocator, block: *const DesignBlock, check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result), ) std.mem.Allocator.Error!OverallCoverage
 src/coverage.zig::computeSectionCoverage | fn computeSectionCoverage( allocator: std.mem.Allocator, block: *const DesignBlock, sec: Section, check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result), ) std.mem.Allocator.Error!SectionCoverage
+src/diagram/classify.zig::buildPortClassMap | fn buildPortClassMap(allocator: Allocator, block: *const DesignBlock) Allocator.Error!PortClassMap
+src/diagram/classify.zig::netClass | fn netClass(name: []const u8, port_map: *const PortClassMap) NetClass
+src/diagram/collect.zig::collectGraph | fn collectGraph( allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize, ) Allocator.Error!Graph
+src/diagram/diagram.zig::renderBlockDiagramTabs | fn renderBlockDiagramTabs( allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize, w: *Writer, ) (Allocator.Error || Writer.Error)!void
+src/diagram/layout.zig::computeLayout | fn computeLayout(arena: Allocator, graph: *const Graph, view: View) Allocator.Error!?Layout
+src/diagram/membership.zig::build | fn build( allocator: Allocator, block: *const DesignBlock, sec_node: []const ?u32, sub_node: []const ?u32, sub_attachments: []const ?usize, ) Allocator.Error!Membership
+src/diagram/render.zig::renderTabs | fn renderTabs(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void
+src/diagram/types.zig::viewColor | fn viewColor(v: View) []const u8
+src/diagram/types.zig::viewId | fn viewId(v: View) []const u8
+src/diagram/types.zig::viewLabel | fn viewLabel(v: View) []const u8
+src/diagram/types.zig::viewOf | fn viewOf(c: NetClass) ?View
+src/diagram/types.zig::viewSlug | fn viewSlug(v: View) []const u8
 src/emit.zig::emitResolved | fn emitResolved(allocator: std.mem.Allocator, block: *const DesignBlock) std.mem.Allocator.Error![]const u8
 src/erc.zig::loadPinoutMap | fn loadPinoutMap(allocator: std.mem.Allocator, path: []const u8) ?std.StringHashMapUnmanaged(PinoutEntry)
 src/erc.zig::runErc | fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8) std.mem.Allocator.Error![]const Violation
@@ -154,9 +166,6 @@ src/lint.zig::lintFile | fn lintFile(allocator: std.mem.Allocator, path: []const
 src/main.zig::main | fn main() !void
 src/paths.zig::designSiblingPath | fn designSiblingPath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ext: []const u8, ) std.mem.Allocator.Error![]u8
 src/paths.zig::designSourcePath | fn designSourcePath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) std.mem.Allocator.Error![]u8
-src/render_block_diagram_svg.zig::collectBlockDiagram | fn collectBlockDiagram( allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize, ) Allocator.Error!Diagram
-src/render_block_diagram_svg.zig::renderBlockDiagramSvg | fn renderBlockDiagramSvg( allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize, w: anytype, ) (Allocator.Error || std.Io.Writer.Error)!void
-src/render_block_diagram_svg.zig::renderDiagramSvg | fn renderDiagramSvg( allocator: Allocator, diagram: Diagram, w: anytype, ) (Allocator.Error || std.Io.Writer.Error)!void
 src/render_block_types.zig::categoryColor | fn categoryColor(cat: Category) []const u8
 src/render_block_types.zig::classifyByName | fn classifyByName(name: []const u8, instances: []const env_mod.Instance) Category
 src/render_block_types.zig::classifySection | fn classifySection(sec: env_mod.Section) Category

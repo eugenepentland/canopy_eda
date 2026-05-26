@@ -21,7 +21,7 @@ const hub_mod = @import("render_svg/hub.zig");
 const draw = @import("render_svg/draw.zig");
 const section_inset = @import("render_svg/section_inset.zig");
 const system_svg = @import("render_system_svg.zig");
-const block_diagram = @import("render_block_diagram_svg.zig");
+const block_diagram = @import("diagram/diagram.zig");
 const rb = @import("render_block_types.zig");
 const bom_html = @import("serve/bom_html.zig");
 const pages_tmpl = @import("serve/templates/pages.zig");
@@ -97,7 +97,7 @@ pub fn renderToHtml(
     // test-point tables. These are read-only dashboards, so they sit above
     // the per-section schematics where the user does the detailed work.
     try w.writeAll("<div id=\"page-block-diagram\" class=\"page-anchor\">");
-    try block_diagram.renderBlockDiagramSvg(allocator, block, sub_attachments, w);
+    try block_diagram.renderBlockDiagramTabs(allocator, block, sub_attachments, w);
     try w.writeAll("</div>");
     if (review_doc) |doc| {
         try w.writeAll("<div class=\"review-embed review-wrap\">");
@@ -1740,4 +1740,4 @@ fn writeUrlEncoded(w: anytype, s: []const u8) !void {
 /// classifier's column styles. Served from `/static/schematic.css` — exposed
 /// pub so `static_assets.zig` can register it without re-`@embedFile`-ing
 /// the source file.
-pub const SCHEMATIC_CSS = @embedFile("assets/schematic_inline.css") ++ system_svg.SYSTEM_OVERVIEW_CSS ++ block_diagram.BLOCK_DIAGRAM_CSS;
+pub const SCHEMATIC_CSS = @embedFile("assets/schematic_inline.css") ++ system_svg.SYSTEM_OVERVIEW_CSS ++ block_diagram.DIAGRAM_CSS;

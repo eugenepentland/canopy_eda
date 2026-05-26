@@ -195,15 +195,44 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - identity resolution is a fixed point: two consecutive resolveIdentities calls produce a byte-identical BOM
 - identity is deterministic: each part takes uuidFromId(its stable id), independent of any prior .bom contents
 
-## render_block_diagram_svg
+## diagram/types
 
-Public functions: collectBlockDiagram, renderBlockDiagramSvg, renderDiagramSvg
+Public functions: viewLabel, viewId, viewSlug, viewColor, viewOf
 
-- Builds one node per section and one per unattached sub-block
-- Infers a bus edge per non-hub section whose pin_groups reference the hub ref-des
-- Matches a section's `in power` port against a producer sub-block's `out power` to draw a rail edge
-- Renders nothing when the design has no nodes
-- Renders an SVG containing the node label and bus label for a hub→peripheral link
+## diagram/membership
+
+Public functions: build
+
+## diagram/classify
+
+Public functions: buildPortClassMap, netClass
+
+- Classifies power, ground, clock, control, and RF nets by name
+- Honors an explicit section-port signal type over the name heuristic
+
+## diagram/collect
+
+Public functions: collectGraph
+
+- Derives inter-block edges from the flattened netlist rather than an MCU hub
+- Excludes ground nets and collapses parallel or differential nets into one edge
+
+## diagram/layout
+
+Public functions: computeLayout
+
+- Returns null for a view with no edges
+- Ranks nodes left-to-right by signal flow, breaking cycles for layering
+
+## diagram/render
+
+Public functions: renderTabs
+
+- Renders a tab per non-empty view and nothing when no view has edges
+
+## diagram/diagram
+
+Public functions: renderBlockDiagramTabs
 
 ## render_svg
 
