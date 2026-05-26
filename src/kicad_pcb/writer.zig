@@ -82,9 +82,9 @@ pub const ApplyStats = struct {
     /// Metadata properties hidden this sync — Datasheet, Description, and the
     /// canopy_* tags get `(hide yes)` so F.Fab/F.SilkS stay clean.
     fields_hidden: u32 = 0,
-    /// Properties un-hidden this sync — Reference (refdes) + Value stay
-    /// visible so parts are identifiable, so any `(hide yes)` a prior sync
-    /// added to them is stripped back off.
+    /// Properties un-hidden this sync — Value stays visible so parts are
+    /// identifiable, so any `(hide yes)` a prior sync added to it is stripped
+    /// back off. (Reference/refdes is hidden by default — see propertyStaysVisible.)
     fields_shown: u32 = 0,
 };
 
@@ -280,8 +280,8 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
         if (removed_fp_indices.contains(i)) continue;
         var out_child = mutated_fp.get(i) orelse child;
         // Normalise property visibility on every board footprint: hide the
-        // metadata (Datasheet, Description, bare canopy_* tags from older
-        // syncs) and un-hide Reference + Value so parts stay identifiable.
+        // refdes (Reference) and metadata (Datasheet, Description, bare canopy_*
+        // tags from older syncs); keep Value visible so parts stay identifiable.
         if (out_child.isForm(FORM_FOOTPRINT)) {
             if (try normalizePropertyVisibility(arena, out_child, &stats.fields_hidden, &stats.fields_shown)) |fixed| out_child = fixed;
         }
@@ -670,9 +670,9 @@ fn canonicalPropertyKey(key: []const u8) []const u8 {
 }
 
 fn makeProperty(arena: std.mem.Allocator, key: []const u8, value: []const u8) std.mem.Allocator.Error!Node {
-    // Reference (refdes) and Value stay visible so parts are identifiable on
-    // the board; every other synced property is metadata, not board graphics,
-    // and is emitted hidden so KiCad doesn't draw it as text on F.Fab.
+    // Value stays visible so parts are identifiable on the board; the Reference
+    // (refdes) and every other synced property (metadata, not board graphics)
+    // are emitted hidden so KiCad doesn't draw them as text on F.Fab/F.SilkS.
     const n: usize = if (propertyStaysVisible(key)) 3 else 4;
     var children = try arena.alloc(Node, n);
     children[0] = Node.atom(Span.zero, FORM_PROPERTY);
@@ -682,12 +682,13 @@ fn makeProperty(arena: std.mem.Allocator, key: []const u8, value: []const u8) st
     return Node.list(Span.zero, children);
 }
 
-/// Reference (refdes) and Value are kept visible on the board so every part
-/// is identifiable by designator + value; every other property (Datasheet,
-/// Description, canopy_* metadata, custom BOM fields) is hidden to keep the
-/// fab/silk layers clean.
+/// Value is kept visible on the board so each part is identifiable by its
+/// value text; the Reference (refdes) is hidden by default on sync (it clutters
+/// the silk/fab and is recoverable from the BOM / canopy_uuid), and every other
+/// property (Datasheet, Description, canopy_* metadata, custom BOM fields) is
+/// hidden to keep the fab/silk layers clean.
 fn propertyStaysVisible(key: []const u8) bool {
-    return std.mem.eql(u8, key, PROP_REFERENCE) or std.mem.eql(u8, key, PROP_VALUE);
+    return std.mem.eql(u8, key, PROP_VALUE);
 }
 
 /// `(hide yes)` — mirrors `makeLockedForm`'s `(locked yes)` idiom.
@@ -731,8 +732,8 @@ fn withoutHideForm(arena: std.mem.Allocator, pl: []const Node) std.mem.Allocator
     return Node.list(Span.zero, try children.toOwnedSlice(arena));
 }
 
-/// Normalise property visibility on `fp`: hide metadata still showing
-/// (Datasheet, Description, canopy_* …) and un-hide Reference (refdes) +
+/// Normalise property visibility on `fp`: hide the refdes (Reference) and
+/// metadata still showing (Datasheet, Description, canopy_* …), and un-hide
 /// Value so parts stay identifiable. Bumps `hidden` per field newly hidden
 /// and `shown` per field un-hidden; returns the rewritten footprint, or null
 /// when nothing changed so the caller keeps the original node and skips a
@@ -768,8 +769,9 @@ fn propertyChildList(sub: Node) ?[]const Node {
     return pl;
 }
 
-/// When `sub` is a *visible* metadata property (anything but Reference/Value)
-/// return its child list so the caller can add `(hide yes)`. Null otherwise.
+/// When `sub` is a *visible* property that should be hidden (anything but
+/// Value — i.e. the refdes and all metadata) return its child list so the
+/// caller can add `(hide yes)`. Null otherwise.
 fn propertyNeedsHide(sub: Node) ?[]const Node {
     const pl = propertyChildList(sub) orelse return null;
     if (propertyStaysVisible(pl[1].asString().?)) return null;
@@ -777,8 +779,8 @@ fn propertyNeedsHide(sub: Node) ?[]const Node {
     return pl;
 }
 
-/// When `sub` is a *hidden* Reference/Value property return its child list so
-/// the caller can strip the `(hide yes)` and make it render. Null otherwise.
+/// When `sub` is a *hidden* Value property return its child list so the caller
+/// can strip the `(hide yes)` and make it render. Null otherwise.
 fn propertyNeedsUnhide(sub: Node) ?[]const Node {
     const pl = propertyChildList(sub) orelse return null;
     if (!propertyStaysVisible(pl[1].asString().?)) return null;
@@ -1210,15 +1212,15 @@ test "applyOpsToSource set_field adds canopy_uuid when missing" {
     try std.testing.expect(std.mem.indexOf(u8, out, "(property \"canopy_uuid\" \"newcanopy\" (hide yes))") != null);
 }
 
-// spec: kicad_pcb/writer - hides metadata properties but keeps Reference and Value visible
-test "applyOpsToSource hides metadata but keeps Reference and Value visible" {
+// spec: kicad_pcb/writer - hides the refdes and metadata but keeps Value visible
+test "applyOpsToSource hides refdes + metadata but keeps Value visible" {
     const a = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
 
     // A bare canopy_net from an older sync renders as visible text on F.Fab —
-    // it must be hidden. Reference (refdes) and Value identify the part, so
-    // they stay visible. No ops at all: the normalize pass still runs.
+    // it must be hidden. The Reference (refdes) is hidden by default too; only
+    // Value stays visible to identify the part. No ops: the normalize pass runs.
     const src =
         \\(kicad_pcb
         \\  (footprint "R_0402"
@@ -1230,10 +1232,10 @@ test "applyOpsToSource hides metadata but keeps Reference and Value visible" {
     var stats: ApplyStats = .{};
     const out = try applyOpsToSourceWithStats(arena.allocator(), src, "[]", &stats);
     try std.testing.expect(std.mem.indexOf(u8, out, "(property \"canopy_net\" \"VBAT / GND\" (hide yes))") != null);
-    // Refdes + value stay visible — no hide form added.
-    try std.testing.expect(std.mem.indexOf(u8, out, "(property \"Reference\" \"R1\")") != null);
+    // Refdes is now hidden by default; only the value stays visible.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(property \"Reference\" \"R1\" (hide yes))") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "(property \"Value\" \"10k\")") != null);
-    try std.testing.expectEqual(@as(u32, 1), stats.fields_hidden);
+    try std.testing.expectEqual(@as(u32, 2), stats.fields_hidden);
     try std.testing.expectEqual(@as(u32, 0), stats.fields_shown);
 }
 
@@ -1265,20 +1267,22 @@ test "applyOpsToSource leaves already-correct visibility untouched" {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
 
-    // Reference already visible, canopy_uuid already hidden — both correct, so
-    // the pass changes nothing and the single hide form is not doubled up.
+    // Reference already hidden, Value already visible, canopy_uuid already
+    // hidden — all correct under the refdes-hidden policy, so the pass changes
+    // nothing and the two hide forms are not doubled up.
     const src =
         \\(kicad_pcb
         \\  (footprint "R_0402"
         \\    (uuid "fp-1")
-        \\    (property "Reference" "R1")
+        \\    (property "Reference" "R1" (at 0 0 0) (layer "F.SilkS") (hide yes))
+        \\    (property "Value" "10k")
         \\    (property "canopy_uuid" "abc" (at 0 0 0) (layer "F.Fab") (hide yes))))
     ;
     var stats: ApplyStats = .{};
     const out = try applyOpsToSourceWithStats(arena.allocator(), src, "[]", &stats);
     try std.testing.expectEqual(@as(u32, 0), stats.fields_hidden);
     try std.testing.expectEqual(@as(u32, 0), stats.fields_shown);
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "(hide yes)"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "(hide yes)"));
 }
 
 // spec: kicad_pcb/writer - set_locked toggles (locked yes) on the targeted footprint
