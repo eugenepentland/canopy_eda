@@ -13,7 +13,7 @@ const Graph = types.Graph;
 const View = types.View;
 const Writer = std.Io.Writer;
 
-const all_views = [_]View{ .power, .clocks, .control, .rf };
+const all_views = [_]View{ .power, .clocks, .rf };
 
 const viewId = types.viewId;
 const viewSlug = types.viewSlug;
@@ -67,21 +67,16 @@ fn renderView(allocator: Allocator, graph: *const Graph, view: View, w: *Writer)
         "<svg viewBox=\"0 0 {d:.0} {d:.0}\" class=\"dg-svg\" xmlns=\"http://www.w3.org/2000/svg\">",
         .{ lay.width, lay.height },
     );
-    // Z-ordered passes: voltage bands behind everything, then wires (node rects
-    // paint over their ends), then nodes, then net-label pills last (opaque, so
-    // they stay legible where wires cross).
-    for (lay.bands) |b| {
-        const bv: ?f64 = if (std.math.isNan(b.v)) null else b.v;
-        try writeBand(w, b, edgeColor(view, palette, bv));
-    }
-    for (lay.routes) |r| try writeEdgeWire(w, r, edgeColor(view, palette, r.voltage));
-    for (lay.nodes) |n| try writeNode(arena, w, graph.nodes[n.gid], n.x, n.y);
-    // One label per (source, rail). A rail fanning out to many consumers is a
-    // single net, so its name is drawn once on the trunk, not once per branch —
-    // this is what de-clutters the power tree (V_RF_3P3 ×6 → ×1).
-    // Banded views (power) carry the rail name on the band heading, so they
-    // skip the per-edge label pass.
-    if (lay.bands.len == 0) {
+    if (view == .power) {
+        try renderPowerView(arena, w, graph, lay, palette);
+    } else {
+        // Z-ordered passes: wires first (node rects paint over their ends), then
+        // nodes, then net-label pills last (opaque, so they stay legible where
+        // wires cross).
+        for (lay.routes) |r| try writeEdgeWire(w, r, edgeColor(view, palette, r.voltage));
+        for (lay.nodes) |n| try writeNode(arena, w, graph.nodes[n.gid], n.x, n.y);
+        // One label per (source, rail). A rail fanning out to many consumers is a
+        // single net, so its name is drawn once on the trunk, not once per branch.
         var labeled: std.StringHashMapUnmanaged(void) = .empty;
         for (lay.routes) |r| {
             const key = try std.fmt.allocPrint(arena, "{d}|{s}", .{ r.from_gid, r.label });
@@ -94,20 +89,20 @@ fn renderView(allocator: Allocator, graph: *const Graph, view: View, w: *Writer)
 
 // ── nodes ──────────────────────────────────────────────────────────────
 
-const pad_x: f64 = 10;
-const label_char_w: f64 = 6.6;
-const sub_char_w: f64 = 5.6;
-const label_y_off: f64 = 18; // title baseline from node top
-const sub_y_off: f64 = 34; // subtitle baseline from node top
+const pad_x: f64 = 11;
+const label_char_w: f64 = 9.2;
+const sub_char_w: f64 = 7.8;
+const label_y_off: f64 = 24; // title baseline from node top
+const sub_y_off: f64 = 46; // subtitle baseline from node top
 const min_label_chars: usize = 8;
 const min_sub_chars: usize = 10;
-const arrow_len: f64 = 7; // arrowhead length along the wire
-const arrow_half: f64 = 4; // arrowhead half-height
-const pill_char_w: f64 = 5.8; // edge-label width per character
-const pill_pad_x: f64 = 10; // edge-label horizontal padding
-const pill_h: f64 = 14; // edge-label pill height
-const pill_half_h: f64 = 7; // half of pill_h, also the pill corner radius
-const label_dy: f64 = 3; // edge-label text baseline nudge
+const arrow_len: f64 = 8; // arrowhead length along the wire
+const arrow_half: f64 = 5; // arrowhead half-height
+const pill_char_w: f64 = 8.4; // edge-label width per character
+const pill_pad_x: f64 = 12; // edge-label horizontal padding
+const pill_h: f64 = 20; // edge-label pill height
+const pill_half_h: f64 = 10; // half of pill_h, also the pill corner radius
+const label_dy: f64 = 4; // edge-label text baseline nudge
 
 fn writeNode(arena: Allocator, w: *Writer, node: types.Node, x: f64, y: f64) (Allocator.Error || Writer.Error)!void {
     const color = rb.categoryColor(node.category);
@@ -236,32 +231,130 @@ fn edgeColor(view: View, palette: ?[]const VoltColor, voltage: ?f64) []const u8 
     return volt_unspecified;
 }
 
-const band_label_dx: f64 = 12; // heading inset from the band's left
-const band_label_dy: f64 = 16; // heading baseline below the band's top
+// ── power view: source → regulators → load buckets ──────────────────────
 
-/// A voltage-band background: a tinted rounded rect in the rail color plus a
-/// rail-colored "X.X V" heading (or "Other" for the unresolved band).
-fn writeBand(w: *Writer, b: layout.Band, color: []const u8) Writer.Error!void {
+const pbox_pad: f64 = 15; // inner padding for source / regulator cards
+const pbox_title_dy: f64 = 32; // card title baseline
+const pbox_sub_dy: f64 = 56; // card subtitle baseline
+const pbox_info_dy: f64 = 90; // card info-line baseline
+const pbox_accent_w: f64 = 5; // left rail-color accent bar
+const head_label_dx: f64 = 16; // bucket heading inset
+const head_label_dy: f64 = 28; // bucket heading baseline
+const pill_text_rise: f64 = 10; // pill text baseline above the pill bottom
+const curve_swing: f64 = 0.5; // horizontal control-point fraction for edge curves
+const edge_dot_r: f64 = 2.4; // terminal dot radius at each edge end
+
+/// A power edge as a smooth horizontal cubic Bézier with a small terminal dot
+/// at each end (no arrowhead) — matching the supply-tree design's connectors.
+fn writePowerCurve(w: *Writer, r: layout.Route, color: []const u8) Writer.Error!void {
+    const a = r.pts[0];
+    const b = r.pts[r.pts.len - 1];
+    const ddx = b.x - a.x;
+    const c1x = a.x + ddx * curve_swing;
+    const c2x = b.x - ddx * curve_swing;
     try w.print(
-        "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\" rx=\"8\"" ++
-            " fill=\"{s}\" fill-opacity=\"0.07\" stroke=\"{s}\" stroke-opacity=\"0.55\" class=\"dg-band\"/>",
-        .{ b.x, b.y, b.w, b.h, color, color },
+        "<path d=\"M {d:.1} {d:.1} C {d:.1} {d:.1}, {d:.1} {d:.1}, {d:.1} {d:.1}\" class=\"dg-edge\" stroke=\"{s}\"/>",
+        .{ a.x, a.y, c1x, a.y, c2x, b.y, b.x, b.y, color },
     );
-    const lx = if (b.label_x >= 0) b.label_x else b.x + band_label_dx;
-    try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-band-label\" fill=\"{s}\">", .{ lx, b.y + band_label_dy, color });
-    if (std.math.isNan(b.v)) {
-        try w.writeAll("Other");
-    } else {
-        try w.print("{d:.1} V", .{b.v});
-    }
-    try w.writeAll("</text>");
+    try w.print("<circle cx=\"{d:.1}\" cy=\"{d:.1}\" r=\"{d:.1}\" fill=\"{s}\"/>", .{ a.x, a.y, edge_dot_r, color });
+    try w.print("<circle cx=\"{d:.1}\" cy=\"{d:.1}\" r=\"{d:.1}\" fill=\"{s}\"/>", .{ b.x, b.y, edge_dot_r, color });
 }
 
-/// True when voltage `v` is actually painted in this view — on a band or an
+/// Draws the power supply tree: rail-colored wires first, then the source /
+/// regulator cards and the per-rail load buckets on top.
+fn renderPowerView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout, palette: ?[]const VoltColor) (Allocator.Error || Writer.Error)!void {
+    for (lay.routes) |r| try writePowerCurve(w, r, edgeColor(.power, palette, r.voltage));
+    for (lay.power_boxes) |b| {
+        const bv: ?f64 = if (std.math.isNan(b.v)) null else b.v;
+        const color = edgeColor(.power, palette, bv);
+        switch (b.kind) {
+            .source => try writePowerCard(arena, w, graph.nodes[b.gid], b, color, try voltLine(arena, "VBATT", b.v)),
+            .regulator => try writePowerCard(arena, w, graph.nodes[b.gid], b, color, try voltLine(arena, "\u{2192}", b.v)),
+            .bucket => try writePowerBucket(arena, w, graph, b, color),
+        }
+    }
+}
+
+fn voltLine(arena: Allocator, prefix: []const u8, v: f64) Allocator.Error![]const u8 {
+    if (std.math.isNan(v)) return "";
+    return std.fmt.allocPrint(arena, "{s} {d:.2} V", .{ prefix, v });
+}
+
+/// A source or regulator card: dark rounded rect, left rail-color accent bar,
+/// title (block label), subtitle (part / module), and an info line (rail V).
+fn writePowerCard(
+    arena: Allocator,
+    w: *Writer,
+    node: types.Node,
+    b: layout.PowerBox,
+    color: []const u8,
+    info: []const u8,
+) (Allocator.Error || Writer.Error)!void {
+    try w.print(
+        "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\" rx=\"6\" class=\"dg-pcard\" stroke=\"{s}\"/>",
+        .{ b.x, b.y, b.w, b.h, color },
+    );
+    try w.print(
+        "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\" rx=\"2\" fill=\"{s}\"/>",
+        .{ b.x, b.y, pbox_accent_w, b.h, color },
+    );
+    const max_chars: usize = @max(min_label_chars, @as(usize, @intFromFloat((b.w - pbox_pad * 2) / label_char_w)));
+    try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-label\">", .{ b.x + pbox_pad, b.y + pbox_title_dy });
+    try writeEscaped(w, try truncate(arena, node.label, max_chars));
+    try w.writeAll("</text>");
+    if (node.subtitle.len > 0) {
+        const sub_max: usize = @max(min_sub_chars, @as(usize, @intFromFloat((b.w - pbox_pad * 2) / sub_char_w)));
+        try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-sub\">", .{ b.x + pbox_pad, b.y + pbox_sub_dy });
+        try writeEscaped(w, try truncate(arena, node.subtitle, sub_max));
+        try w.writeAll("</text>");
+    }
+    if (info.len > 0) {
+        try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-pinfo\" fill=\"{s}\">", .{ b.x + pbox_pad, b.y + pbox_info_dy, color });
+        try writeEscaped(w, info);
+        try w.writeAll("</text>");
+    }
+}
+
+/// A load bucket: rail-color outlined box, "X.X V · N loads" heading, then one
+/// truncated pill per consuming block in a fixed two-column grid.
+fn writePowerBucket(arena: Allocator, w: *Writer, graph: *const Graph, b: layout.PowerBox, color: []const u8) (Allocator.Error || Writer.Error)!void {
+    try w.print(
+        "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\" rx=\"6\"" ++
+            " fill=\"{s}\" fill-opacity=\"0.05\" stroke=\"{s}\" stroke-opacity=\"0.6\" class=\"dg-bucket\"/>",
+        .{ b.x, b.y, b.w, b.h, color, color },
+    );
+    try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-band-label\" fill=\"{s}\">", .{ b.x + head_label_dx, b.y + head_label_dy, color });
+    if (std.math.isNan(b.v)) {
+        try w.print("Other \u{00b7} {d} loads", .{b.members.len});
+    } else {
+        try w.print("{d:.1} V \u{00b7} {d} loads", .{ b.v, b.members.len });
+    }
+    try w.writeAll("</text>");
+
+    const cols = layout.pw_pill_cols;
+    const fcols: f64 = @floatFromInt(cols);
+    const pill_w = (b.w - 2 * layout.pw_bucket_pad - (fcols - 1) * layout.pw_pill_gap) / fcols;
+    const pill_chars: usize = @max(min_sub_chars, @as(usize, @intFromFloat((pill_w - pbox_pad) / sub_char_w)));
+    for (b.members, 0..) |gid, k| {
+        const col: f64 = @floatFromInt(k % cols);
+        const row: f64 = @floatFromInt(k / cols);
+        const px = b.x + layout.pw_bucket_pad + col * (pill_w + layout.pw_pill_gap);
+        const py = b.y + layout.pw_head_h + row * (layout.pw_pill_h + layout.pw_pill_gap);
+        try w.print(
+            "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\" rx=\"4\" class=\"dg-pill\" stroke=\"{s}\"/>",
+            .{ px, py, pill_w, layout.pw_pill_h, color },
+        );
+        try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-pilltext\">", .{ px + pbox_pad / 2, py + layout.pw_pill_h - pill_text_rise });
+        try writeEscaped(w, try truncate(arena, graph.nodes[gid].label, pill_chars));
+        try w.writeAll("</text>");
+    }
+}
+
+/// True when voltage `v` is actually painted in this view — on a bucket or an
 /// edge. Lets the legend list only voltages the reader can see, even though the
 /// palette keeps a stable color per voltage across the whole design.
 fn voltageRendered(v: f64, lay: layout.Layout) bool {
-    for (lay.bands) |b| {
+    for (lay.power_boxes) |b| {
         if (!std.math.isNan(b.v) and @abs(b.v - v) < volt_eps) return true;
     }
     for (lay.routes) |r| {
@@ -308,32 +401,34 @@ pub const CSS =
     \\.dg-wrap{margin:12px 0 4px;padding:10px;background:#0d1117;border:1px solid #21262d;border-radius:8px;}
     \\.dg-radio{position:absolute;width:0;height:0;opacity:0;pointer-events:none;}
     \\.dg-tabs{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;}
-    \\.dg-tab{cursor:pointer;color:#8b949e;padding:5px 12px;border:1px solid #30363d;border-radius:6px;user-select:none;
-    \\font:600 12px -apple-system,BlinkMacSystemFont,sans-serif;}
+    \\.dg-tab{cursor:pointer;color:#8b949e;padding:6px 14px;border:1px solid #30363d;border-radius:6px;user-select:none;
+    \\font:600 17px -apple-system,BlinkMacSystemFont,sans-serif;}
     \\.dg-tab:hover{color:#c9d1d9;border-color:#484f58;}
     \\.dg-panel{display:none;overflow-x:auto;}
-    \\.dg-svg{display:block;width:100%;max-width:1280px;height:auto;}
+    \\.dg-svg{display:block;width:100%;max-width:1536px;height:auto;}
     \\#dg-tab-power:checked ~ .dg-panels .dg-panel-power,
     \\#dg-tab-clocks:checked ~ .dg-panels .dg-panel-clocks,
-    \\#dg-tab-control:checked ~ .dg-panels .dg-panel-control,
     \\#dg-tab-rf:checked ~ .dg-panels .dg-panel-rf{display:block;}
     \\#dg-tab-power:checked ~ .dg-tabs .dg-tab-power{color:#fff;background:#da3633;border-color:#da3633;}
     \\#dg-tab-clocks:checked ~ .dg-tabs .dg-tab-clocks{color:#fff;background:#4ab3a3;border-color:#4ab3a3;}
-    \\#dg-tab-control:checked ~ .dg-tabs .dg-tab-control{color:#fff;background:#2196f3;border-color:#2196f3;}
     \\#dg-tab-rf:checked ~ .dg-tabs .dg-tab-rf{color:#fff;background:#e040fb;border-color:#e040fb;}
     \\.dg-rect{fill:#0d1117;stroke-width:1.5;}
     \\.dg-node:hover .dg-rect{fill:#161b22;}
     \\.dg-node-link{cursor:pointer;}
-    \\.dg-label{fill:#c9d1d9;font:600 12px -apple-system,BlinkMacSystemFont,sans-serif;}
-    \\.dg-sub{fill:#8b949e;font:10px -apple-system,BlinkMacSystemFont,sans-serif;}
-    \\.dg-edge{fill:none;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round;}
+    \\.dg-label{fill:#c9d1d9;font:600 18px -apple-system,BlinkMacSystemFont,sans-serif;}
+    \\.dg-sub{fill:#8b949e;font:15px -apple-system,BlinkMacSystemFont,sans-serif;}
+    \\.dg-edge{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round;}
     \\.dg-pill{fill:#161b22;stroke-width:1;}
-    \\.dg-edge-label{font:600 10px "SF Mono","Fira Code",monospace;text-anchor:middle;}
-    \\.dg-legend{display:flex;gap:14px;flex-wrap:wrap;margin:0 0 9px 2px;
-    \\font:600 11px "SF Mono","Fira Code",monospace;color:#8b949e;}
-    \\.dg-leg{display:inline-flex;align-items:center;gap:5px;}
-    \\.dg-sw{width:12px;height:12px;display:inline-block;}
-    \\.dg-band-label{font:700 11px "SF Mono","Fira Code",monospace;}
+    \\.dg-edge-label{font:600 15px "SF Mono","Fira Code",monospace;text-anchor:middle;}
+    \\.dg-legend{display:flex;gap:16px;flex-wrap:wrap;margin:0 0 10px 2px;
+    \\font:600 16px "SF Mono","Fira Code",monospace;color:#8b949e;}
+    \\.dg-leg{display:inline-flex;align-items:center;gap:6px;}
+    \\.dg-sw{width:16px;height:16px;display:inline-block;}
+    \\.dg-band-label{font:700 17px "SF Mono","Fira Code",monospace;}
+    \\.dg-pcard{fill:#0d1117;stroke-width:1.8;}
+    \\.dg-pinfo{font:600 16px "SF Mono","Fira Code",monospace;}
+    \\.dg-bucket{stroke-width:1.8;}
+    \\.dg-pilltext{fill:#c9d1d9;font:500 15px "SF Mono","Fira Code",monospace;}
 ;
 
 // ── tests ──────────────────────────────────────────────────────────────
@@ -398,8 +493,8 @@ test "renderTabs draws one label for a net fanned to many consumers" {
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, aw.written(), "class=\"dg-pill\""));
 }
 
-// spec: diagram/render - Draws voltage-band backgrounds with rail-colored headings in the power view
-test "renderTabs draws voltage bands in the power view" {
+// spec: diagram/render - Draws per-rail load buckets with rail-colored headings in the power view
+test "renderTabs draws load buckets in the power view" {
     var nodes = [_]types.Node{ mkNode("REG"), mkNode("A") };
     var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = .power, .label = "v", .voltage = 3.3 }};
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
@@ -407,7 +502,7 @@ test "renderTabs draws voltage bands in the power view" {
     defer aw.deinit();
     try renderTabs(testing.allocator, &graph, &aw.writer);
     const out = aw.written();
-    try testing.expect(std.mem.indexOf(u8, out, "class=\"dg-band\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "class=\"dg-bucket\"") != null);
     try testing.expect(std.mem.indexOf(u8, out, "dg-band-label") != null);
     try testing.expect(std.mem.indexOf(u8, out, "3.3 V") != null);
 }

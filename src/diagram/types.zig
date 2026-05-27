@@ -14,15 +14,15 @@ const std = @import("std");
 const rb = @import("../render_block_types.zig");
 const Allocator = std.mem.Allocator;
 
-/// A diagram tab. Declaration order is the tab order on the page.
-pub const View = enum { power, clocks, control, rf };
+/// A diagram tab. Declaration order is the tab order on the page. (Control nets
+/// are still classified — see `NetClass` — but get no view, so no Control tab.)
+pub const View = enum { power, clocks, rf };
 
 /// Human label for a view's tab.
 pub fn viewLabel(v: View) []const u8 {
     return switch (v) {
         .power => "Power",
         .clocks => "Clocks",
-        .control => "Control",
         .rf => "RF / Analog",
     };
 }
@@ -32,7 +32,6 @@ pub fn viewId(v: View) []const u8 {
     return switch (v) {
         .power => "dg-tab-power",
         .clocks => "dg-tab-clocks",
-        .control => "dg-tab-control",
         .rf => "dg-tab-rf",
     };
 }
@@ -42,7 +41,6 @@ pub fn viewSlug(v: View) []const u8 {
     return switch (v) {
         .power => "power",
         .clocks => "clocks",
-        .control => "control",
         .rf => "rf",
     };
 }
@@ -52,7 +50,6 @@ pub fn viewColor(v: View) []const u8 {
     return switch (v) {
         .power => "#da3633",
         .clocks => "#4ab3a3",
-        .control => "#2196f3",
         .rf => "#e040fb",
     };
 }
@@ -63,12 +60,14 @@ pub fn viewColor(v: View) []const u8 {
 pub const NetClass = enum { ground, power, clock, control, rf };
 
 /// Which view a class routes to, or null when the class draws no edges.
+/// `control` (like `ground`) maps to no view: those nets are classified but not
+/// drawn, so there is no Control tab.
 pub fn viewOf(c: NetClass) ?View {
     return switch (c) {
         .ground => null,
         .power => .power,
         .clock => .clocks,
-        .control => .control,
+        .control => null,
         .rf => .rf,
     };
 }

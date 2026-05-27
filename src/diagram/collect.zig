@@ -37,6 +37,16 @@ pub fn collectGraph(
 
     const sub_port_to_net = try buildSubPortToNet(scratch, block);
 
+    // Diagram-local attachments: a power-*producer* sub-block (a buck/LDO/
+    // regulator) must never fold into a section that merely consumes its rail
+    // — otherwise it vanishes as a producer node and a consumer gets mis-elected
+    // as the rail's driver. So un-adopt power sub-blocks for the graph only; the
+    // schematic-card adoption (render_html) is unaffected.
+    const dg_attach = try scratch.dupe(?usize, sub_attachments);
+    for (block.sub_blocks, 0..) |sb, i| {
+        if (i < dg_attach.len and dg_attach[i] != null and isPowerSubBlock(sb)) dg_attach[i] = null;
+    }
+
     var nodes: std.ArrayListUnmanaged(Node) = .empty;
     errdefer {
         for (nodes.items) |n| freeNode(allocator, n);
@@ -50,20 +60,20 @@ pub fn collectGraph(
     defer allocator.free(sub_node);
     @memset(sub_node, null);
 
-    // Reverse of sub_attachments: section index → adopted sub-block index.
+    // Reverse of dg_attach: section index → adopted sub-block index.
     const sec_to_sub = try allocator.alloc(?usize, block.sections.len);
     defer allocator.free(sec_to_sub);
     @memset(sec_to_sub, null);
-    for (sub_attachments, 0..) |maybe_sec, sb_idx| {
+    for (dg_attach, 0..) |maybe_sec, sb_idx| {
         if (maybe_sec) |sec_idx| if (sec_idx < sec_to_sub.len) {
             sec_to_sub[sec_idx] = sb_idx;
         };
     }
 
     try buildSectionNodes(allocator, scratch, block, &sub_port_to_net, sec_to_sub, &nodes, sec_node);
-    try buildSubBlockNodes(allocator, scratch, block, &sub_port_to_net, sub_attachments, &nodes, sub_node);
+    try buildSubBlockNodes(allocator, scratch, block, &sub_port_to_net, dg_attach, &nodes, sub_node);
 
-    var mem = try membership.build(allocator, block, sec_node, sub_node, sub_attachments);
+    var mem = try membership.build(allocator, block, sec_node, sub_node, dg_attach);
     defer mem.deinit(allocator);
     var port_map = try classify.buildPortClassMap(allocator, block);
     defer port_map.deinit(allocator);
@@ -193,6 +203,12 @@ fn buildSubBlockNodes(
         });
         sub_node[sb_idx] = @intCast(nodes.items.len - 1);
     }
+}
+
+/// A sub-block classified as a power block (buck / LDO / regulator) — it
+/// produces a rail and must stay its own producer node in the diagram graph.
+fn isPowerSubBlock(sb: SubBlock) bool {
+    return rb.classifyByName(sb.name, sb.block.instances) == .power;
 }
 
 fn dupeRails(allocator: Allocator, items: []const RailEnd) Allocator.Error![]RailEnd {
@@ -383,6 +399,16 @@ fn pickDriver(
         if (producer_by_net.get(clean)) |p| {
             for (touched) |t| if (t == p) return p;
         }
+        // No declared producer: prefer a power-category node that *outputs* this
+        // rail (i.e. does not list it as an input) over one that merely consumes
+        // it — so a buck/LDO wins over a downstream regulator sharing the rail.
+        var prod: ?u32 = null;
+        for (touched) |t| {
+            if (nodes[t].category != .power) continue;
+            if (railEndsHave(nodes[t].inputs, clean)) continue;
+            if (prod == null or t < prod.?) prod = t;
+        }
+        if (prod) |p| return p;
     }
     var best = touched[0];
     var best_rank = sourceRank(nodes[best], cls);
@@ -436,6 +462,11 @@ fn rfRank(n: []const u8, cat: rb.Category) u8 {
     if (rb.containsCI(n, "MIXER") or rb.containsCI(n, "RX")) return rank_mid;
     if (cat == .connector) return rank_sink; // IF outputs land on the connector
     return rank_mid;
+}
+
+fn railEndsHave(ends: []const RailEnd, net: []const u8) bool {
+    for (ends) |e| if (std.mem.eql(u8, e.net, net)) return true;
+    return false;
 }
 
 fn producerVoltage(nodes: []const Node, driver: u32, net: []const u8) ?f64 {

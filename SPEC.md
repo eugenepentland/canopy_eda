@@ -227,10 +227,11 @@ Public functions: computeLayout
 - Returns null for a view with no edges
 - Ranks nodes left-to-right by signal flow, breaking cycles for layering
 - Routes edges sharing a source through one common vertical trunk
-- Groups power consumers into voltage bands fed from the left
-- Groups a multi-rail consumer under its highest rail
-- Flows power producers left-to-right from source to regulators
-- Places a dual-rail consumer in the 1.8 V / 3.3 V overlap
+- Flows the power source left of the regulators it feeds
+- Groups power consumers into one load bucket per rail
+- Lists a dual-rail consumer in both of its rail buckets
+- Shows a cascade LDO that re-regulates a rail in its own column
+- Folds a pass-through filter stage and feeds its rail from the parent regulator
 
 ## diagram/render
 
@@ -240,7 +241,7 @@ Public functions: renderTabs
 - Draws all edge labels after all wires so net pills stay legible
 - Draws each rail label once per source, not once per fanout branch
 - Colors power edges by voltage and renders a voltage legend
-- Draws voltage-band backgrounds with rail-colored headings in the power view
+- Draws per-rail load buckets with rail-colored headings in the power view
 
 ## diagram/diagram
 

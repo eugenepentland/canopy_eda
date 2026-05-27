@@ -57,9 +57,10 @@ src/diagram/classify.zig::netClass fn
 src/diagram/collect.zig::collectGraph fn
 src/diagram/diagram.zig::DIAGRAM_CSS value
 src/diagram/diagram.zig::renderBlockDiagramTabs fn
-src/diagram/layout.zig::Band struct_
 src/diagram/layout.zig::LNode struct_
 src/diagram/layout.zig::Layout struct_
+src/diagram/layout.zig::PowerBox struct_
+src/diagram/layout.zig::PowerKind enum_
 src/diagram/layout.zig::Route struct_
 src/diagram/layout.zig::computeLayout fn
 src/diagram/layout.zig::dummy_h value
@@ -67,6 +68,11 @@ src/diagram/layout.zig::h_gap value
 src/diagram/layout.zig::node_h value
 src/diagram/layout.zig::node_w value
 src/diagram/layout.zig::pad value
+src/diagram/layout.zig::pw_bucket_pad value
+src/diagram/layout.zig::pw_head_h value
+src/diagram/layout.zig::pw_pill_cols value
+src/diagram/layout.zig::pw_pill_gap value
+src/diagram/layout.zig::pw_pill_h value
 src/diagram/layout.zig::v_gap value
 src/diagram/membership.zig::Membership struct_
 src/diagram/membership.zig::build fn
