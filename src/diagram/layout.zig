@@ -99,7 +99,7 @@ pub fn computeLayout(arena: Allocator, graph: *const Graph, view: View) Allocato
     const dims = assignCoords(verts.items, layers);
 
     // 7. Routing + materialise nodes.
-    const routes = try routeChains(arena, graph, verts.items, rank, chains, max_rank);
+    const routes = try routeChains(arena, graph, verts.items, rank, chains, max_rank, view);
     const nodes = try arena.alloc(LNode, m);
     for (0..m) |i| nodes[i] = .{ .gid = gids.items[i], .x = colX(verts.items[i].rank), .y = verts.items[i].y };
 
@@ -326,30 +326,75 @@ fn cy(v: Vertex) f64 {
 
 // ── orthogonal routing with per-channel lanes ──────────────────────────
 
-fn routeChains(arena: Allocator, graph: *const Graph, verts: []const Vertex, rank: []const u32, chains: []const Chain, max_rank: u32) Allocator.Error![]Route {
+const LaneKey = struct { r: u32, k: u64 };
+const LanePair = struct { k: u64, ord: f64 };
+
+const volt_bucket_scale: f64 = 100; // 10 mV grouping resolution for voltages
+const unspec_key_base: u64 = 1_000_000; // power edge w/o voltage → its own track
+const unspec_ord: f64 = 1_000_000; // …ordered to the right of all real voltages
+
+/// Lane *group* key for a segment. Power groups by rail voltage (each voltage
+/// shares one track); other views group by source vertex (the shared-source
+/// fanout trunk). Same key ⇒ same vertical track in the channel.
+fn laneKey(view: View, edge: types.Edge, src_vid: u32) u64 {
+    if (view == .power) {
+        if (edge.voltage) |v| return @intFromFloat(@round(v * volt_bucket_scale));
+        return unspec_key_base + @as(u64, src_vid);
+    }
+    return src_vid;
+}
+
+/// Ordering value placing a channel's lane groups left→right: ascending voltage
+/// in the power view, first-appearance order elsewhere.
+fn laneOrd(view: View, edge: types.Edge, enc: usize) f64 {
+    if (view == .power) {
+        if (edge.voltage) |v| return v;
+        return unspec_ord + @as(f64, @floatFromInt(enc));
+    }
+    return @floatFromInt(enc);
+}
+
+fn cmpLaneOrd(_: void, a: LanePair, b: LanePair) bool {
+    return a.ord < b.ord;
+}
+
+fn routeChains(
+    arena: Allocator,
+    graph: *const Graph,
+    verts: []const Vertex,
+    rank: []const u32,
+    chains: []const Chain,
+    max_rank: u32,
+    view: View,
+) Allocator.Error![]Route {
     _ = rank;
-    // Assign each channel segment a vertical lane *keyed by its source vertex*,
-    // not per-segment. Every edge leaving the same node in a channel then shares
-    // one trunk x, so a fanout reads as a clean comb (one stub → one trunk →
-    // branches) instead of a staircase of separate bends. `lane_of` is indexed
-    // by (channel rank × vertex-count + source vertex); `distinct` counts the
-    // distinct sources per channel (the trunk slots to spread across the gap).
-    const slots = verts.len;
-    const lane_of = try arena.alloc(i32, (max_rank + 1) * slots);
-    @memset(lane_of, -1);
-    const distinct = try arena.alloc(u32, max_rank + 1);
-    @memset(distinct, 0);
+    // Per-channel vertical-lane assignment. Collect each channel's distinct lane
+    // *groups*, order them, then map (channel, group) → lane index so every
+    // segment in a group shares one trunk x. Grouping is view-dependent (see
+    // laneKey/laneOrd): the power view groups by rail voltage — each voltage
+    // gets its own track ordered low→high, so different-voltage rails never
+    // share a vertical and read as cleanly separated colored buses; other views
+    // group by source vertex (the shared-source fanout trunk).
+    var seen = std.AutoHashMapUnmanaged(LaneKey, void){};
+    const chan = try arena.alloc(std.ArrayListUnmanaged(LanePair), max_rank + 1);
+    for (chan) |*c| c.* = .empty;
     for (chains) |c| {
         var i: usize = 0;
         while (i + 1 < c.verts.len) : (i += 1) {
-            const src = c.verts[i];
-            const r = verts[src].rank;
-            const key = r * slots + src;
-            if (lane_of[key] < 0) {
-                lane_of[key] = @intCast(distinct[r]);
-                distinct[r] += 1;
+            const r = verts[c.verts[i]].rank;
+            const k = laneKey(view, graph.edges[c.eidx], c.verts[i]);
+            if (!(try seen.getOrPut(arena, .{ .r = r, .k = k })).found_existing) {
+                const ord = laneOrd(view, graph.edges[c.eidx], chan[r].items.len);
+                try chan[r].append(arena, .{ .k = k, .ord = ord });
             }
         }
+    }
+    var lane_of = std.AutoHashMapUnmanaged(LaneKey, u32){};
+    const distinct = try arena.alloc(u32, max_rank + 1);
+    for (chan, 0..) |*list, r| {
+        std.mem.sort(LanePair, list.items, {}, cmpLaneOrd);
+        for (list.items, 0..) |p, idx| try lane_of.put(arena, .{ .r = @intCast(r), .k = p.k }, @intCast(idx));
+        distinct[r] = @intCast(list.items.len);
     }
 
     const routes = try arena.alloc(Route, chains.len);
@@ -362,7 +407,8 @@ fn routeChains(arena: Allocator, graph: *const Graph, verts: []const Vertex, ran
             const a = verts[c.verts[i]];
             const b = verts[c.verts[i + 1]];
             const r = a.rank;
-            const lane: u32 = @intCast(lane_of[r * slots + c.verts[i]]);
+            const k = laneKey(view, graph.edges[c.eidx], c.verts[i]);
+            const lane = lane_of.get(.{ .r = r, .k = k }).?;
             const frac = (@as(f64, @floatFromInt(lane)) + 1) / (@as(f64, @floatFromInt(distinct[r])) + 1);
             const chx = colX(r) + node_w + frac * h_gap;
             try pts.append(arena, .{ .x = chx, .y = cy(a) });
@@ -441,4 +487,22 @@ test "computeLayout gives a shared-source fanout one common bend x" {
         try testing.expect(r.pts.len >= 4);
         try testing.expectApproxEqAbs(bend, r.pts[1].x, 0.01);
     }
+}
+
+// spec: diagram/layout - Groups power-view channel lanes by voltage so different rails separate
+test "computeLayout separates power lanes by voltage" {
+    var nodes = [_]types.Node{ mkNode("SRC"), mkNode("A"), mkNode("B"), mkNode("C") };
+    var edges = [_]types.Edge{
+        .{ .from = 0, .to = 1, .class = .power, .label = "a", .voltage = 1.8 },
+        .{ .from = 0, .to = 2, .class = .power, .label = "b", .voltage = 1.8 }, // same V as edge 0
+        .{ .from = 0, .to = 3, .class = .power, .label = "c", .voltage = 3.3 }, // different V
+    };
+    const graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeLayout(arena.allocator(), &graph, .power)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 3), lay.routes.len);
+    // Bend x is the trunk track: equal voltages share it, different voltages split.
+    try testing.expectApproxEqAbs(lay.routes[0].pts[1].x, lay.routes[1].pts[1].x, 0.01);
+    try testing.expect(@abs(lay.routes[0].pts[1].x - lay.routes[2].pts[1].x) > 0.5);
 }

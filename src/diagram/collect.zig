@@ -255,7 +255,10 @@ fn deriveEdges(
         if (touched.items.len < 2) continue;
 
         const driver = pickDriver(cls, clean, touched.items, nodes, producer_by_net);
-        const voltage: ?f64 = if (cls == .power) producerVoltage(nodes, driver, clean) else null;
+        const voltage: ?f64 = if (cls == .power)
+            (producerVoltage(nodes, driver, clean) orelse railVoltageAny(nodes, clean) orelse voltageFromName(clean))
+        else
+            null;
         for (touched.items) |other| {
             if (other == driver) continue;
             try accumulate(scratch, &acc, &key_to_idx, driver, other, cls, clean, voltage);
@@ -384,6 +387,46 @@ fn producerVoltage(nodes: []const Node, driver: u32, net: []const u8) ?f64 {
     return null;
 }
 
+/// Fall back to any block that declares the rail (producer output or consumer
+/// input) when the chosen driver carries no explicit voltage — e.g. V_RF_3P3
+/// has no on-board regulator port but every consumer rates it 3.3 V. Keeps the
+/// edge label's voltage now that the in-box rail tags are gone.
+fn railVoltageAny(nodes: []const Node, net: []const u8) ?f64 {
+    for (nodes) |n| {
+        for (n.outputs) |o| if (o.voltage != null and std.mem.eql(u8, o.net, net)) return o.voltage;
+        for (n.inputs) |in| if (in.voltage != null and std.mem.eql(u8, in.net, net)) return in.voltage;
+    }
+    return null;
+}
+
+/// Last-resort: parse a rail voltage from the `V<d>P<d>` naming convention
+/// (V5P0→5.0, V1P8_RF→1.8, V_RX_2P5→2.5). The `P` stands in for the decimal
+/// point. Returns null when the name has no digit-`P`-digit run. Only consulted
+/// for power nets, whose names follow this convention.
+fn voltageFromName(name: []const u8) ?f64 {
+    if (name.len < 3) return null;
+    var i: usize = 1;
+    while (i + 1 < name.len) : (i += 1) {
+        if (name[i] != 'P') continue;
+        if (!isDigit(name[i - 1]) or !isDigit(name[i + 1])) continue;
+        var lo = i;
+        while (lo > 0 and isDigit(name[lo - 1])) lo -= 1;
+        var hi = i + 1;
+        while (hi < name.len and isDigit(name[hi])) hi += 1;
+        const whole = std.fmt.parseInt(u32, name[lo..i], 10) catch return null;
+        const frac_str = name[i + 1 .. hi];
+        const frac = std.fmt.parseInt(u32, frac_str, 10) catch return null;
+        var scale: f64 = 1;
+        for (frac_str) |_| scale *= 10;
+        return @as(f64, @floatFromInt(whole)) + @as(f64, @floatFromInt(frac)) / scale;
+    }
+    return null;
+}
+
+fn isDigit(c: u8) bool {
+    return c >= '0' and c <= '9';
+}
+
 // ── label helpers ──────────────────────────────────────────────────────
 
 /// Strip a per-pin micro-net suffix (`<base>.<ref>.<pin>` → `<base>`).
@@ -454,4 +497,35 @@ test "collectGraph drops ground and merges a differential pair" {
     try testing.expectEqual(@as(usize, 1), g.edges.len);
     try testing.expectEqual(@as(u16, 2), g.edges[0].fanout);
     try testing.expectEqualStrings("ADF_CH1", g.edges[0].label);
+}
+
+// spec: diagram/collect - Resolves a power edge's voltage from any block that declares the rail
+test "collectGraph resolves rail voltage from a consumer when no producer declares it" {
+    const pg0 = [_]env_mod.PinGroup{.{ .ref_des = "U1", .pins = &.{} }};
+    const pg1 = [_]env_mod.PinGroup{.{ .ref_des = "U2", .pins = &.{} }};
+    // The load declares the rail (3.3 V) as a consumer input; no node produces it.
+    const load_ports = [_]env_mod.SectionPort{.{ .name = "V_RF_3P3", .direction = .in, .signal_type = .power, .voltage = 3.3 }};
+    const secs = [_]Section{
+        .{ .name = "Buck Regulator", .pin_groups = &pg0 },
+        .{ .name = "ADF5904 RX", .pin_groups = &pg1, .ports = &load_ports },
+    };
+    const pins = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "U2", .pin = "2" } };
+    const nets = [_]env_mod.Net{.{ .name = "V_RF_3P3", .pins = &pins }};
+    var block = emptyBlock("pwr");
+    block.sections = &secs;
+    block.nets = &nets;
+    var g = try collectGraph(testing.allocator, &block, &.{});
+    defer g.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), g.edges.len);
+    try testing.expectEqual(NetClass.power, g.edges[0].class);
+    try testing.expect(g.edges[0].voltage != null);
+    try testing.expectApproxEqAbs(@as(f64, 3.3), g.edges[0].voltage.?, 0.01);
+}
+
+// spec: diagram/collect - Parses a rail voltage from its V<d>P<d> name when no port declares one
+test "voltageFromName parses the V<d>P<d> convention" {
+    try testing.expectApproxEqAbs(@as(f64, 5.0), voltageFromName("V5P0").?, 0.001);
+    try testing.expectApproxEqAbs(@as(f64, 1.8), voltageFromName("V1P8_RF").?, 0.001);
+    try testing.expectApproxEqAbs(@as(f64, 2.5), voltageFromName("V_RX_2P5").?, 0.001);
+    try testing.expect(voltageFromName("VBATT") == null);
 }

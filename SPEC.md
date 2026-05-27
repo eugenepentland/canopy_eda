@@ -216,6 +216,8 @@ Public functions: collectGraph
 
 - Derives inter-block edges from the flattened netlist rather than an MCU hub
 - Excludes ground nets and collapses parallel or differential nets into one edge
+- Resolves a power edge's voltage from any block that declares the rail
+- Parses a rail voltage from its V<d>P<d> name when no port declares one
 
 ## diagram/layout
 
@@ -224,6 +226,7 @@ Public functions: computeLayout
 - Returns null for a view with no edges
 - Ranks nodes left-to-right by signal flow, breaking cycles for layering
 - Routes edges sharing a source through one common vertical trunk
+- Groups power-view channel lanes by voltage so different rails separate
 
 ## diagram/render
 
@@ -231,6 +234,8 @@ Public functions: renderTabs
 
 - Renders a tab per non-empty view and nothing when no view has edges
 - Draws all edge labels after all wires so net pills stay legible
+- Draws each rail label once per source, not once per fanout branch
+- Colors power edges by voltage and renders a voltage legend
 
 ## diagram/diagram
 

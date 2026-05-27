@@ -57,7 +57,12 @@ fn renderView(allocator: Allocator, graph: *const Graph, view: View, w: *Writer)
 
     const lay = (try layout.computeLayout(arena, graph, view)) orelse return;
 
+    // Power edges are colored per rail voltage (with a legend above the SVG);
+    // every other view uses its single accent color.
+    const palette: ?[]const VoltColor = if (view == .power) try buildVoltPalette(arena, graph) else null;
+
     try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{viewSlug(view)});
+    if (palette) |p| try writeLegend(w, p);
     try w.print(
         "<svg viewBox=\"0 0 {d:.0} {d:.0}\" class=\"dg-svg\" xmlns=\"http://www.w3.org/2000/svg\">",
         .{ lay.width, lay.height },
@@ -66,9 +71,17 @@ fn renderView(allocator: Allocator, graph: *const Graph, view: View, w: *Writer)
     // ends), then nodes, then the net-label pills last of all. The pills are
     // opaque, so drawing them above every wire keeps the net name readable
     // even where several lines cross the label.
-    for (lay.routes) |r| try writeEdgeWire(w, r, view);
-    for (lay.nodes) |n| try writeNode(arena, w, graph.nodes[n.gid], n.x, n.y, view);
-    for (lay.routes) |r| try writeEdgeLabel(arena, w, r, viewColor(view));
+    for (lay.routes) |r| try writeEdgeWire(w, r, edgeColor(view, palette, r.voltage));
+    for (lay.nodes) |n| try writeNode(arena, w, graph.nodes[n.gid], n.x, n.y);
+    // One label per (source, rail). A rail fanning out to many consumers is a
+    // single net, so its name is drawn once on the trunk, not once per branch —
+    // this is what de-clutters the power tree (V_RF_3P3 ×6 → ×1).
+    var labeled: std.StringHashMapUnmanaged(void) = .empty;
+    for (lay.routes) |r| {
+        const key = try std.fmt.allocPrint(arena, "{d}|{s}", .{ r.from_gid, r.label });
+        if ((try labeled.getOrPut(arena, key)).found_existing) continue;
+        try writeEdgeLabel(arena, w, r, edgeColor(view, palette, r.voltage));
+    }
     try w.writeAll("</svg></div>");
 }
 
@@ -77,11 +90,8 @@ fn renderView(allocator: Allocator, graph: *const Graph, view: View, w: *Writer)
 const pad_x: f64 = 10;
 const label_char_w: f64 = 6.6;
 const sub_char_w: f64 = 5.6;
-const rail_char_w: f64 = 5.6;
 const label_y_off: f64 = 18; // title baseline from node top
 const sub_y_off: f64 = 34; // subtitle baseline from node top
-const rail_y_off: f64 = 7; // rail-tag baseline up from node bottom
-const rail_gap: f64 = 6; // gap between consecutive rail tags
 const min_label_chars: usize = 8;
 const min_sub_chars: usize = 10;
 const arrow_len: f64 = 7; // arrowhead length along the wire
@@ -92,7 +102,7 @@ const pill_h: f64 = 14; // edge-label pill height
 const pill_half_h: f64 = 7; // half of pill_h, also the pill corner radius
 const label_dy: f64 = 3; // edge-label text baseline nudge
 
-fn writeNode(arena: Allocator, w: *Writer, node: types.Node, x: f64, y: f64, view: View) (Allocator.Error || Writer.Error)!void {
+fn writeNode(arena: Allocator, w: *Writer, node: types.Node, x: f64, y: f64) (Allocator.Error || Writer.Error)!void {
     const color = rb.categoryColor(node.category);
     const has_link = node.slug.len > 0;
     if (has_link) try w.print("<a href=\"#sec-{s}\" class=\"dg-node-link\">", .{node.slug});
@@ -111,36 +121,15 @@ fn writeNode(arena: Allocator, w: *Writer, node: types.Node, x: f64, y: f64, vie
         try writeEscaped(w, try truncate(arena, node.subtitle, sub_max));
         try w.writeAll("</text>");
     }
-    if (view == .power) try writeRailTags(arena, w, node, x, y);
     try w.writeAll("</g>");
     if (has_link) try w.writeAll("</a>");
-}
-
-fn writeRailTags(arena: Allocator, w: *Writer, node: types.Node, x: f64, y: f64) (Allocator.Error || Writer.Error)!void {
-    var tag_x = x + pad_x;
-    const ty = y + layout.node_h - rail_y_off;
-    for (node.inputs) |in| {
-        const tag = try formatRail(arena, in.net, in.voltage, true);
-        try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-rail-in\">", .{ tag_x, ty });
-        try writeEscaped(w, tag);
-        try w.writeAll("</text>");
-        tag_x += @as(f64, @floatFromInt(tag.len)) * rail_char_w + rail_gap;
-    }
-    for (node.outputs) |out| {
-        const tag = try formatRail(arena, out.net, out.voltage, false);
-        try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-rail-out\">", .{ tag_x, ty });
-        try writeEscaped(w, tag);
-        try w.writeAll("</text>");
-        tag_x += @as(f64, @floatFromInt(tag.len)) * rail_char_w + rail_gap;
-    }
 }
 
 // ── edges ──────────────────────────────────────────────────────────────
 
 /// Wire + arrowhead only. The net-label pill is emitted in a separate later
 /// pass (see `renderView`) so it always paints on top of every wire.
-fn writeEdgeWire(w: *Writer, r: layout.Route, view: View) Writer.Error!void {
-    const color = viewColor(view);
+fn writeEdgeWire(w: *Writer, r: layout.Route, color: []const u8) Writer.Error!void {
     try w.print("<polyline points=\"", .{});
     for (r.pts, 0..) |p, i| {
         if (i > 0) try w.writeAll(" ");
@@ -197,13 +186,63 @@ fn edgeLabelAnchor(pts: []const types.Pt) types.Pt {
     return pts[pts.len / 2];
 }
 
-// ── text helpers ───────────────────────────────────────────────────────
+// ── power-view voltage coloring + legend ────────────────────────────────
 
-fn formatRail(arena: Allocator, net: []const u8, voltage: ?f64, is_input: bool) Allocator.Error![]const u8 {
-    const arrow: []const u8 = if (is_input) "\u{2192} " else "\u{2190} ";
-    if (voltage) |v| return std.fmt.allocPrint(arena, "{s}{s} {d:.1}V", .{ arrow, net, v });
-    return std.fmt.allocPrint(arena, "{s}{s}", .{ arrow, net });
+/// A distinct rail voltage paired with the color used for its edges + legend.
+const VoltColor = struct { v: f64, color: []const u8 };
+
+const volt_eps: f64 = 0.05; // group voltages within 50 mV as one rail level
+const volt_unspecified: []const u8 = "#8b949e"; // edge with no resolved voltage
+// Cool→warm ramp, indexed by ascending voltage: low rails read cool, high warm.
+const volt_palette = [_][]const u8{
+    "#58a6ff", "#39c5cf", "#3fb950", "#d29922", "#e3742f", "#f85149", "#bc8cff", "#db61a2",
+};
+
+/// Distinct power-edge voltages (ascending) each assigned a palette color, so
+/// the wires and the legend stay in lock-step.
+fn buildVoltPalette(arena: Allocator, graph: *const Graph) Allocator.Error![]const VoltColor {
+    var vs: std.ArrayListUnmanaged(f64) = .empty;
+    for (graph.edges) |e| {
+        if (e.class != .power) continue;
+        const v = e.voltage orelse continue;
+        var seen = false;
+        for (vs.items) |x| {
+            if (@abs(x - v) < volt_eps) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) try vs.append(arena, v);
+    }
+    std.mem.sort(f64, vs.items, {}, std.sort.asc(f64));
+    const out = try arena.alloc(VoltColor, vs.items.len);
+    for (vs.items, 0..) |v, i| out[i] = .{ .v = v, .color = volt_palette[i % volt_palette.len] };
+    return out;
 }
+
+/// Stroke color for an edge: palette-by-voltage in the power view, the view's
+/// accent color elsewhere. Power edges with no resolved voltage fall to grey.
+fn edgeColor(view: View, palette: ?[]const VoltColor, voltage: ?f64) []const u8 {
+    const p = palette orelse return viewColor(view);
+    const v = voltage orelse return volt_unspecified;
+    for (p) |pc| if (@abs(pc.v - v) < volt_eps) return pc.color;
+    return volt_unspecified;
+}
+
+fn writeLegend(w: *Writer, palette: []const VoltColor) Writer.Error!void {
+    if (palette.len == 0) return;
+    try w.writeAll("<div class=\"dg-legend\">");
+    for (palette) |pc| {
+        // Swatch is a tiny inline SVG (fill attribute is CSP-safe, unlike style=).
+        try w.print(
+            "<span class=\"dg-leg\"><svg class=\"dg-sw\" viewBox=\"0 0 12 12\"><rect width=\"12\" height=\"12\" rx=\"2\" fill=\"{s}\"/></svg>{d:.1} V</span>",
+            .{ pc.color, pc.v },
+        );
+    }
+    try w.writeAll("</div>");
+}
+
+// ── text helpers ───────────────────────────────────────────────────────
 
 fn truncate(arena: Allocator, s: []const u8, max: usize) Allocator.Error![]const u8 {
     if (s.len <= max) return s;
@@ -245,11 +284,13 @@ pub const CSS =
     \\.dg-node-link{cursor:pointer;}
     \\.dg-label{fill:#c9d1d9;font:600 12px -apple-system,BlinkMacSystemFont,sans-serif;}
     \\.dg-sub{fill:#8b949e;font:10px -apple-system,BlinkMacSystemFont,sans-serif;}
-    \\.dg-rail-in{fill:#f85149;font:600 9px "SF Mono","Fira Code",monospace;}
-    \\.dg-rail-out{fill:#3fb950;font:600 9px "SF Mono","Fira Code",monospace;}
     \\.dg-edge{fill:none;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round;}
     \\.dg-pill{fill:#161b22;stroke-width:1;}
     \\.dg-edge-label{font:600 10px "SF Mono","Fira Code",monospace;text-anchor:middle;}
+    \\.dg-legend{display:flex;gap:14px;flex-wrap:wrap;margin:0 0 9px 2px;
+    \\font:600 11px "SF Mono","Fira Code",monospace;color:#8b949e;}
+    \\.dg-leg{display:inline-flex;align-items:center;gap:5px;}
+    \\.dg-sw{width:12px;height:12px;display:inline-block;}
 ;
 
 // ── tests ──────────────────────────────────────────────────────────────
@@ -297,4 +338,38 @@ test "renderTabs draws edge-label pills after every wire" {
     const last_wire = std.mem.lastIndexOf(u8, out, "class=\"dg-edge\"").?;
     const first_pill = std.mem.indexOf(u8, out, "class=\"dg-pill\"").?;
     try testing.expect(last_wire < first_pill);
+}
+
+// spec: diagram/render - Draws each rail label once per source, not once per fanout branch
+test "renderTabs draws one label for a rail fanned to many consumers" {
+    var nodes = [_]types.Node{ mkNode("REG"), mkNode("A"), mkNode("B") };
+    var edges = [_]types.Edge{
+        .{ .from = 0, .to = 1, .class = .power, .label = "V_RF_3P3" },
+        .{ .from = 0, .to = 2, .class = .power, .label = "V_RF_3P3" },
+    };
+    var graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try renderTabs(testing.allocator, &graph, &aw.writer);
+    // Both edges are the same rail from the same source ⇒ a single label pill.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, aw.written(), "class=\"dg-pill\""));
+}
+
+// spec: diagram/render - Colors power edges by voltage and renders a voltage legend
+test "renderTabs colors power edges by voltage with a legend" {
+    var nodes = [_]types.Node{ mkNode("REG"), mkNode("A"), mkNode("B") };
+    var edges = [_]types.Edge{
+        .{ .from = 0, .to = 1, .class = .power, .label = "V3P3", .voltage = 3.3 },
+        .{ .from = 0, .to = 2, .class = .power, .label = "V1P8", .voltage = 1.8 },
+    };
+    var graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try renderTabs(testing.allocator, &graph, &aw.writer);
+    const out = aw.written();
+    try testing.expect(std.mem.indexOf(u8, out, "dg-legend") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1.8 V") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "3.3 V") != null);
+    // Lowest voltage gets the first (cool) palette color on its wire stroke.
+    try testing.expect(std.mem.indexOf(u8, out, "stroke=\"#58a6ff\"") != null);
 }
