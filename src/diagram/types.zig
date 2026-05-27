@@ -95,6 +95,10 @@ pub const Node = struct {
     slug: []const u8,
     inputs: []RailEnd,
     outputs: []RailEnd,
+    /// Primary supply rail (volts): the rail powering the most of this block's
+    /// pins, used to group it into the power view's voltage band. -1 ⇒ unset
+    /// (the layout falls back to declared ports / edges).
+    power_rail: f64 = -1,
 };
 
 /// A directed inter-block connection. `from` is the driver/producer side so

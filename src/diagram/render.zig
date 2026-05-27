@@ -62,7 +62,7 @@ fn renderView(allocator: Allocator, graph: *const Graph, view: View, w: *Writer)
     const palette: ?[]const VoltColor = if (view == .power) try buildVoltPalette(arena, graph) else null;
 
     try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{viewSlug(view)});
-    if (palette) |p| try writeLegend(w, p);
+    if (palette) |p| try writeLegend(w, p, lay);
     try w.print(
         "<svg viewBox=\"0 0 {d:.0} {d:.0}\" class=\"dg-svg\" xmlns=\"http://www.w3.org/2000/svg\">",
         .{ lay.width, lay.height },
@@ -256,10 +256,24 @@ fn writeBand(w: *Writer, b: layout.Band, color: []const u8) Writer.Error!void {
     try w.writeAll("</text>");
 }
 
-fn writeLegend(w: *Writer, palette: []const VoltColor) Writer.Error!void {
+/// True when voltage `v` is actually painted in this view — on a band or an
+/// edge. Lets the legend list only voltages the reader can see, even though the
+/// palette keeps a stable color per voltage across the whole design.
+fn voltageRendered(v: f64, lay: layout.Layout) bool {
+    for (lay.bands) |b| {
+        if (!std.math.isNan(b.v) and @abs(b.v - v) < volt_eps) return true;
+    }
+    for (lay.routes) |r| {
+        if (r.voltage) |rv| if (@abs(rv - v) < volt_eps) return true;
+    }
+    return false;
+}
+
+fn writeLegend(w: *Writer, palette: []const VoltColor, lay: layout.Layout) Writer.Error!void {
     if (palette.len == 0) return;
     try w.writeAll("<div class=\"dg-legend\">");
     for (palette) |pc| {
+        if (!voltageRendered(pc.v, lay)) continue;
         // Swatch is a tiny inline SVG (fill attribute is CSP-safe, unlike style=).
         try w.print(
             "<span class=\"dg-leg\"><svg class=\"dg-sw\" viewBox=\"0 0 12 12\"><rect width=\"12\" height=\"12\" rx=\"2\" fill=\"{s}\"/></svg>{d:.1} V</span>",

@@ -75,8 +75,47 @@ pub fn collectGraph(
 
     const flat = try buildFlatNets(scratch, block);
     const edges = try deriveEdges(allocator, scratch, flat, &mem, &port_map, &producer_by_net, nodes.items);
+    try assignPrimaryRails(scratch, flat, &mem, &port_map, nodes.items);
 
     return .{ .nodes = try nodes.toOwnedSlice(allocator), .edges = edges };
+}
+
+/// Set each node's `power_rail` to the rail powering the most of its pins (ties
+/// → highest), so the power view groups a multi-rail part under its primary
+/// (analog) rail rather than a housekeeping one — counted from the flattened
+/// netlist, which carries every pin, not the collapsed edge list.
+fn assignPrimaryRails(
+    scratch: Allocator,
+    flat: []const export_kicad.FlatNet,
+    mem: *const membership.Membership,
+    port_map: *const classify.PortClassMap,
+    nodes: []Node,
+) Allocator.Error!void {
+    const Key = struct { node: u32, vb: i64 };
+    var counts: std.AutoHashMapUnmanaged(Key, u32) = .empty;
+    for (flat) |net| {
+        const clean = cleanNetName(net.name);
+        if (classify.netClass(clean, port_map) != .power) continue;
+        const v = railVoltageAny(nodes, clean) orelse voltageFromName(clean) orelse continue;
+        const vb: i64 = @intFromFloat(@round(v * 100));
+        for (net.pins) |p| {
+            const nid = mem.resolve(p.ref_des) orelse continue;
+            const gop = try counts.getOrPut(scratch, .{ .node = nid, .vb = vb });
+            gop.value_ptr.* = (if (gop.found_existing) gop.value_ptr.* else 0) + 1;
+        }
+    }
+    const best = try scratch.alloc(u32, nodes.len);
+    @memset(best, 0);
+    var it = counts.iterator();
+    while (it.next()) |e| {
+        const nid = e.key_ptr.node;
+        const v = @as(f64, @floatFromInt(e.key_ptr.vb)) / 100;
+        const cnt = e.value_ptr.*;
+        if (cnt > best[nid] or (cnt == best[nid] and v > nodes[nid].power_rail)) {
+            best[nid] = cnt;
+            nodes[nid].power_rail = v;
+        }
+    }
 }
 
 // ── node construction ──────────────────────────────────────────────────
@@ -520,6 +559,26 @@ test "collectGraph resolves rail voltage from a consumer when no producer declar
     try testing.expectEqual(NetClass.power, g.edges[0].class);
     try testing.expect(g.edges[0].voltage != null);
     try testing.expectApproxEqAbs(@as(f64, 3.3), g.edges[0].voltage.?, 0.01);
+}
+
+// spec: diagram/collect - Picks each block's primary supply rail by pin count
+test "collectGraph picks the primary rail by pin count" {
+    const pg = [_]env_mod.PinGroup{.{ .ref_des = "U1", .pins = &.{} }};
+    const secs = [_]Section{.{ .name = "DUAL", .pin_groups = &pg }};
+    // U1 has two pins on the 3.3 V rail and one on 1.8 V ⇒ primary is 3.3 V.
+    const v3 = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "U1", .pin = "2" } };
+    const v1 = [_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "3" }};
+    const nets = [_]env_mod.Net{
+        .{ .name = "V3P3", .pins = &v3 },
+        .{ .name = "V1P8", .pins = &v1 },
+    };
+    var block = emptyBlock("d");
+    block.sections = &secs;
+    block.nets = &nets;
+    var g = try collectGraph(testing.allocator, &block, &.{});
+    defer g.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), g.nodes.len);
+    try testing.expectApproxEqAbs(@as(f64, 3.3), g.nodes[0].power_rail, 0.01);
 }
 
 // spec: diagram/collect - Parses a rail voltage from its V<d>P<d> name when no port declares one

@@ -218,6 +218,7 @@ Public functions: collectGraph
 - Excludes ground nets and collapses parallel or differential nets into one edge
 - Resolves a power edge's voltage from any block that declares the rail
 - Parses a rail voltage from its V<d>P<d> name when no port declares one
+- Picks each block's primary supply rail by pin count
 
 ## diagram/layout
 
@@ -227,6 +228,7 @@ Public functions: computeLayout
 - Ranks nodes left-to-right by signal flow, breaking cycles for layering
 - Routes edges sharing a source through one common vertical trunk
 - Groups power consumers into voltage bands fed from the left
+- Groups a multi-rail consumer under its highest rail
 
 ## diagram/render
 

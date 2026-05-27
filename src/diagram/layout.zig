@@ -538,24 +538,23 @@ fn powerLayout(arena: Allocator, graph: *const Graph) Allocator.Error!?Layout {
     return .{ .nodes = try lnodes.toOwnedSlice(arena), .routes = routes, .bands = bands, .width = width, .height = height };
 }
 
-/// The rail voltage a consumer mostly runs on: the incoming power voltage
-/// carried by the most edges (ties broken toward the lowest). NaN ⇒ none resolved.
+/// The band a consumer groups under. Prefers the node's `power_rail` (the rail
+/// powering the most of its pins — a dual-rail part like ADF4159 lands under its
+/// primary 3.3 V analog rail, while a part dominated by 2.5 V stays at 2.5 V).
+/// Falls back to the highest declared port / incoming edge when `power_rail` is
+/// unset (e.g. in unit tests). NaN ⇒ no voltage resolved.
 fn consumerVoltage(graph: *const Graph, node: u32) f64 {
+    if (graph.nodes[node].power_rail >= 0) return graph.nodes[node].power_rail;
     var best_v: f64 = std.math.nan(f64);
-    var best_count: u32 = 0;
+    for (graph.nodes[node].inputs) |in| {
+        if (in.voltage) |v| {
+            if (std.math.isNan(best_v) or v > best_v) best_v = v;
+        }
+    }
     for (graph.edges) |e| {
         if (e.class != .power or e.to != node) continue;
         const v = e.voltage orelse continue;
-        var c: u32 = 0;
-        for (graph.edges) |f| {
-            if (f.class == .power and f.to == node and f.voltage != null) {
-                if (@abs(f.voltage.? - v) < volt_eps) c += 1;
-            }
-        }
-        if (c > best_count or (c == best_count and (std.math.isNan(best_v) or v < best_v))) {
-            best_count = c;
-            best_v = v;
-        }
+        if (std.math.isNan(best_v) or v > best_v) best_v = v;
     }
     return best_v;
 }
@@ -718,4 +717,20 @@ test "computeLayout groups power consumers into voltage bands" {
     try testing.expect(lay.bands[1].y > lay.bands[0].y);
     // All five nodes (2 regulators + 3 consumers) placed.
     try testing.expectEqual(@as(usize, 5), lay.nodes.len);
+}
+
+// spec: diagram/layout - Groups a multi-rail consumer under its highest rail
+test "computeLayout groups a multi-rail consumer under its highest rail" {
+    var nodes = [_]types.Node{ mkNode("REG18"), mkNode("REG33"), mkNode("DUAL") };
+    var edges = [_]types.Edge{
+        .{ .from = 0, .to = 2, .class = .power, .label = "v18", .voltage = 1.8 },
+        .{ .from = 1, .to = 2, .class = .power, .label = "v33", .voltage = 3.3 },
+    };
+    const graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeLayout(arena.allocator(), &graph, .power)) orelse return error.TestUnexpectedResult;
+    // DUAL runs on both 1.8 V and 3.3 V ⇒ a single band at the higher rail.
+    try testing.expectEqual(@as(usize, 1), lay.bands.len);
+    try testing.expectApproxEqAbs(@as(f64, 3.3), lay.bands[0].v, 0.01);
 }
