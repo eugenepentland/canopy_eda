@@ -49,7 +49,9 @@ pub const Route = struct {
 
 /// A voltage band in the power view: a tinted background strip grouping all
 /// consumers of one rail level. `v` is the rail voltage (NaN ⇒ "Other").
-pub const Band = struct { v: f64, x: f64, y: f64, w: f64, h: f64 };
+/// `label_x` overrides the heading x (-1 ⇒ default inset) so the overlapping
+/// 1.8 V / 3.3 V headings can sit on opposite sides.
+pub const Band = struct { v: f64, x: f64, y: f64, w: f64, h: f64, label_x: f64 = -1 };
 
 /// A laid-out view: placed real nodes, routed edges, the SVG canvas size, and
 /// (power view only) the voltage bands consumers are grouped into.
@@ -398,21 +400,52 @@ fn routeChains(arena: Allocator, graph: *const Graph, verts: []const Vertex, ran
     return routes;
 }
 
-// ── power view: voltage-band layout ─────────────────────────────────────
+// ── power view: voltage-band supply tree ────────────────────────────────
 //
-// The power view is laid out as a supply *tree*, not a signal-flow graph:
-// producers (any node that sources a power edge — battery, regulators, the pi
-// filter) sit in layered columns on the left; pure consumers are grouped into
-// stacked, tinted voltage *bands* on the right, one band per rail level.
+// Producers (battery, regulators, filter) flow left→right in two columns — the
+// source feeds the regulators — and pure consumers are grouped into voltage
+// bands on the right. The 1.8 V and 3.3 V bands are drawn as an overlapping
+// pair: a part using *both* rails sits in their shared zone.
 
 const volt_eps: f64 = 0.05; // group voltages within 50 mV as one band
-const power_channel: f64 = 120; // gap between the producer column and the bands
-const power_supply_margin: f64 = 52; // left margin for producer→producer supply links
+const power_channel: f64 = 120; // gap between the producer columns and the bands
+const power_supply_margin: f64 = 52; // left margin for return (back-edge) supply links
 const band_pad: f64 = 14;
 const band_heading_h: f64 = 24;
 const band_gap: f64 = 22;
 const cell_gx: f64 = 24; // horizontal gap between boxes inside a band
 const cell_gy: f64 = v_gap; // vertical gap between band rows
+const zone_gap: f64 = 34; // gap between zones inside the overlap super-band
+const overlap_lo: f64 = 1.8; // the lower rail of the overlapping band pair
+const overlap_hi: f64 = 3.3; // the higher rail of the overlapping band pair
+const band_label_w: f64 = 44; // approx heading width, to right-align the 3.3 V label
+
+const zone_lo: u8 = 0; // 1.8 V-only
+const zone_ov: u8 = 1; // uses both 1.8 V and 3.3 V (the overlap)
+const zone_hi: u8 = 2; // 3.3 V-only
+const zone_norm: u8 = 3; // a single-voltage band (2.5 V, 5.0 V, …) or unspecified
+
+const InfraEdge = struct { from: u32, to: u32 };
+const RowDims = struct { cols: usize, w: f64, h: f64 };
+
+fn railsHas(rails: []const f64, v: f64) bool {
+    for (rails) |r| if (@abs(r - v) < volt_eps) return true;
+    return false;
+}
+
+/// Grid footprint (columns + inner width/height) for `count` boxes.
+fn gridDims(count: usize) RowDims {
+    if (count == 0) return .{ .cols = 0, .w = 0, .h = 0 };
+    const cols = powerColsFor(count);
+    const rows = (count + cols - 1) / cols;
+    const fc: f64 = @floatFromInt(cols);
+    const fr: f64 = @floatFromInt(rows);
+    return .{ .cols = cols, .w = fc * node_w + (fc - 1) * cell_gx, .h = fr * node_h + (fr - 1) * cell_gy };
+}
+
+fn cmpAscF64(_: void, a: f64, b: f64) bool {
+    return a < b;
+}
 
 fn powerLayout(arena: Allocator, graph: *const Graph) Allocator.Error!?Layout {
     const n = graph.nodes.len;
@@ -430,119 +463,113 @@ fn powerLayout(arena: Allocator, graph: *const Graph) Allocator.Error!?Layout {
     }
     if (!any) return null;
 
-    // Each consumer's band = the incoming power voltage it mostly runs on.
-    const band_v = try arena.alloc(f64, n);
-    for (band_v) |*x| x.* = std.math.nan(f64);
-    for (0..n) |i| {
-        if (participates[i] and !is_producer[i]) band_v[i] = consumerVoltage(graph, @intCast(i));
-    }
-
-    // Distinct band voltages (ascending) + a trailing "Other" band for unresolved.
-    var bvs: std.ArrayListUnmanaged(f64) = .empty;
-    var has_unspec = false;
-    for (0..n) |i| {
-        if (!participates[i] or is_producer[i]) continue;
-        if (std.math.isNan(band_v[i])) {
-            has_unspec = true;
-            continue;
-        }
-        var seen = false;
-        for (bvs.items) |x| if (@abs(x - band_v[i]) < volt_eps) {
-            seen = true;
-            break;
-        };
-        if (!seen) try bvs.append(arena, band_v[i]);
-    }
-    std.mem.sort(f64, bvs.items, {}, std.sort.asc(f64));
-    const band_count = bvs.items.len + @as(usize, @intFromBool(has_unspec));
-
-    // Tally consumers per band.
-    const band_of = try arena.alloc(usize, n);
-    @memset(band_of, 0);
-    const counts = try arena.alloc(usize, band_count);
-    @memset(counts, 0);
-    var max_band: usize = 0;
-    for (0..n) |i| {
-        if (!participates[i] or is_producer[i]) continue;
-        const bi = bandIndexOf(bvs.items, band_v[i]);
-        band_of[i] = bi;
-        counts[bi] += 1;
-        max_band = @max(max_band, counts[bi]);
-    }
-
     const px = try arena.alloc(f64, n);
     const py = try arena.alloc(f64, n);
     const has_pos = try arena.alloc(bool, n);
     @memset(has_pos, false);
 
-    // Producers (battery, regulators, filter) stack in one left column. A left
-    // margin holds the supply links between them, drawn as tidy brackets, so the
-    // connector↔regulator feedback loop never forces a backward hook.
-    var has_supply = false;
-    for (graph.edges) |e| {
-        if (e.class == .power and e.from != e.to and is_producer[e.from] and is_producer[e.to]) {
-            has_supply = true;
-            break;
-        }
-    }
-    const supply_margin: f64 = if (has_supply) power_supply_margin else 0;
-    const col_x = pad + supply_margin;
+    // Producers: two columns (source → regulators), stacked within each.
+    const pc = try producerColumns(arena, graph, is_producer);
+    const ret_margin: f64 = if (pc.has_back) power_supply_margin else 0;
+    const col_base = pad + ret_margin;
+    var max_pcol: u8 = 0;
+    for (0..n) |i| if (is_producer[i]) {
+        max_pcol = @max(max_pcol, pc.col[i]);
+    };
+    const col_count = try arena.alloc(usize, @as(usize, max_pcol) + 1);
+    @memset(col_count, 0);
     var infra_bottom: f64 = pad;
-    var stack_idx: usize = 0;
     for (0..n) |i| {
         if (!is_producer[i]) continue;
-        px[i] = col_x;
-        py[i] = pad + @as(f64, @floatFromInt(stack_idx)) * (node_h + v_gap);
-        stack_idx += 1;
+        const c = pc.col[i];
+        px[i] = col_base + @as(f64, @floatFromInt(c)) * (node_w + h_gap);
+        py[i] = pad + @as(f64, @floatFromInt(col_count[c])) * (node_h + v_gap);
+        col_count[c] += 1;
         has_pos[i] = true;
         infra_bottom = @max(infra_bottom, py[i] + node_h);
     }
+    const bands_x = col_base + @as(f64, @floatFromInt(max_pcol)) * (node_w + h_gap) + node_w + power_channel;
 
-    const bands_x = col_x + node_w + power_channel;
-
-    // Band geometry: a fixed grid width, bands stacked top→bottom by voltage.
-    const cols = powerColsFor(max_band);
-    const fcols: f64 = @floatFromInt(cols);
-    const band_w = fcols * node_w + (fcols - 1) * cell_gx + 2 * band_pad;
-    const bands = try arena.alloc(Band, band_count);
-    const seat = try arena.alloc(usize, band_count);
-    @memset(seat, 0);
-    var ycur = pad;
-    for (0..band_count) |bi| {
-        const rows = @max((counts[bi] + cols - 1) / cols, 1);
-        const frows: f64 = @floatFromInt(rows);
-        const bh = band_heading_h + frows * node_h + (frows - 1) * cell_gy + band_pad;
-        const bv: f64 = if (bi < bvs.items.len) bvs.items[bi] else std.math.nan(f64);
-        bands[bi] = .{ .v = bv, .x = bands_x, .y = ycur, .w = band_w, .h = bh };
-        ycur += bh + band_gap;
-    }
-    const bands_bottom = if (band_count > 0) ycur - band_gap else pad;
-
-    // Seat consumers into their band's grid.
+    // Classify each consumer into a band zone.
+    const zone = try arena.alloc(u8, n);
+    const norm_v = try arena.alloc(f64, n);
+    @memset(zone, zone_norm);
+    for (norm_v) |*x| x.* = std.math.nan(f64);
     for (0..n) |i| {
         if (!participates[i] or is_producer[i]) continue;
-        const bi = band_of[i];
-        const k = seat[bi];
-        seat[bi] += 1;
-        px[i] = bands_x + band_pad + @as(f64, @floatFromInt(k % cols)) * (node_w + cell_gx);
-        py[i] = bands[bi].y + band_heading_h + @as(f64, @floatFromInt(k / cols)) * (node_h + cell_gy);
-        has_pos[i] = true;
+        zone[i] = consumerZone(graph, @intCast(i), &norm_v[i]);
     }
+
+    // Distinct normal-band voltages (ascending) + the overlap super-band.
+    var nvs: std.ArrayListUnmanaged(f64) = .empty;
+    var has_unspec = false;
+    for (0..n) |i| {
+        if (zone[i] != zone_norm or !participates[i] or is_producer[i]) continue;
+        if (std.math.isNan(norm_v[i])) {
+            has_unspec = true;
+            continue;
+        }
+        if (!railsHas(nvs.items, norm_v[i])) try nvs.append(arena, norm_v[i]);
+    }
+    std.mem.sort(f64, nvs.items, {}, cmpAscF64);
+    var c_lo: usize = 0;
+    var c_ov: usize = 0;
+    var c_hi: usize = 0;
+    for (0..n) |i| switch (zone[i]) {
+        zone_lo => c_lo += 1,
+        zone_ov => c_ov += 1,
+        zone_hi => c_hi += 1,
+        else => {},
+    };
+    const super_exists = c_lo + c_ov + c_hi > 0;
+
+    var bands: std.ArrayListUnmanaged(Band) = .empty;
+    var ycur = pad;
+    var content_right = bands_x;
+
+    // Band units stacked by voltage; the super-band sits at its 3.3 V slot.
+    var super_placed = false;
+    for (nvs.items) |v| {
+        if (super_exists and !super_placed and v > overlap_hi) {
+            try placeSuper(arena, graph, zone, bands_x, &ycur, &bands, px, py, has_pos, &content_right, .{ c_lo, c_ov, c_hi });
+            super_placed = true;
+        }
+        try placeNormalBand(arena, graph, zone, norm_v, v, bands_x, &ycur, &bands, px, py, has_pos, &content_right);
+    }
+    if (super_exists and !super_placed) {
+        try placeSuper(arena, graph, zone, bands_x, &ycur, &bands, px, py, has_pos, &content_right, .{ c_lo, c_ov, c_hi });
+    }
+    if (has_unspec) try placeUnspecBand(arena, graph, zone, norm_v, bands_x, &ycur, &bands, px, py, has_pos, &content_right);
 
     var lnodes: std.ArrayListUnmanaged(LNode) = .empty;
     for (0..n) |i| if (has_pos[i]) try lnodes.append(arena, .{ .gid = @intCast(i), .x = px[i], .y = py[i] });
-    const routes = try buildPowerRoutes(arena, graph, is_producer, band_of, bands, band_v, px, py, bands_x, supply_margin);
+    const routes = try buildPowerRoutes(arena, graph, is_producer, pc.col, bands.items, px, py, bands_x, ret_margin);
 
-    const width = if (band_count > 0) bands_x + band_w + pad else col_x + node_w + pad;
-    const height = @max(infra_bottom, bands_bottom) + pad;
-    return .{ .nodes = try lnodes.toOwnedSlice(arena), .routes = routes, .bands = bands, .width = width, .height = height };
+    const bands_bottom = if (ycur > pad) ycur - band_gap else pad;
+    return .{
+        .nodes = try lnodes.toOwnedSlice(arena),
+        .routes = routes,
+        .bands = try bands.toOwnedSlice(arena),
+        .width = content_right + pad,
+        .height = @max(infra_bottom, bands_bottom) + pad,
+    };
 }
 
-/// The band a consumer groups under. Prefers the node's `power_rail` (the rail
-/// powering the most of its pins — a dual-rail part like ADF4159 lands under its
-/// primary 3.3 V analog rail, while a part dominated by 2.5 V stays at 2.5 V).
-/// Falls back to the highest declared port / incoming edge when `power_rail` is
-/// unset (e.g. in unit tests). NaN ⇒ no voltage resolved.
+/// Which band zone a consumer belongs to. Uses both rails → overlap; else its
+/// primary rail (most pins) decides — 1.8 V / 3.3 V join the super-band, any
+/// other voltage is a normal band (its voltage written to `out_norm`).
+fn consumerZone(graph: *const Graph, node: u32, out_norm: *f64) u8 {
+    const prim = consumerVoltage(graph, node);
+    const rails = graph.nodes[node].rails;
+    if (railsHas(rails, overlap_lo) and railsHas(rails, overlap_hi)) return zone_ov;
+    if (!std.math.isNan(prim) and @abs(prim - overlap_lo) < volt_eps) return zone_lo;
+    if (!std.math.isNan(prim) and @abs(prim - overlap_hi) < volt_eps) return zone_hi;
+    out_norm.* = prim;
+    return zone_norm;
+}
+
+/// The band a consumer groups under: its `power_rail` (most-pinned rail), or the
+/// highest declared port / incoming edge when `power_rail` is unset (unit tests).
 fn consumerVoltage(graph: *const Graph, node: u32) f64 {
     if (graph.nodes[node].power_rail >= 0) return graph.nodes[node].power_rail;
     var best_v: f64 = std.math.nan(f64);
@@ -559,83 +586,254 @@ fn consumerVoltage(graph: *const Graph, node: u32) f64 {
     return best_v;
 }
 
-fn bandIndexOf(bvs: []const f64, v: f64) usize {
-    if (std.math.isNan(v)) return bvs.len; // the trailing "Other" band
-    for (bvs, 0..) |x, i| if (@abs(x - v) < volt_eps) return i;
-    return 0;
+/// Roughly-square column count for a band's grid, capped at 4 wide.
+fn powerColsFor(count: usize) usize {
+    var cols: usize = 1;
+    while (cols * cols < count) cols += 1;
+    return @max(1, @min(cols, 4));
 }
 
-/// Roughly-square column count for a band's grid, capped at 4 wide.
-fn powerColsFor(max_band: usize) usize {
-    var cols: usize = 1;
-    while (cols * cols < max_band) cols += 1;
-    return @max(1, @min(cols, 4));
+fn seatInGrid(px: []f64, py: []f64, has_pos: []bool, gid: usize, gx: f64, gy: f64, cols: usize, k: usize) void {
+    px[gid] = gx + @as(f64, @floatFromInt(k % cols)) * (node_w + cell_gx);
+    py[gid] = gy + @as(f64, @floatFromInt(k / cols)) * (node_h + cell_gy);
+    has_pos[gid] = true;
+}
+
+/// Place a single-voltage band: a grid of its consumers under one tinted rect.
+fn placeNormalBand(
+    arena: Allocator,
+    graph: *const Graph,
+    zone: []const u8,
+    norm_v: []const f64,
+    v: f64,
+    bands_x: f64,
+    ycur: *f64,
+    bands: *std.ArrayListUnmanaged(Band),
+    px: []f64,
+    py: []f64,
+    has_pos: []bool,
+    content_right: *f64,
+) Allocator.Error!void {
+    var count: usize = 0;
+    for (graph.nodes, 0..) |_, i| {
+        if (zone[i] == zone_norm and !std.math.isNan(norm_v[i]) and @abs(norm_v[i] - v) < volt_eps) count += 1;
+    }
+    const d = gridDims(count);
+    const gy = ycur.* + band_heading_h;
+    var slot: usize = 0;
+    for (graph.nodes, 0..) |_, i| {
+        if (zone[i] != zone_norm or std.math.isNan(norm_v[i]) or @abs(norm_v[i] - v) >= volt_eps) continue;
+        seatInGrid(px, py, has_pos, i, bands_x + band_pad, gy, d.cols, slot);
+        slot += 1;
+    }
+    const bh = band_heading_h + d.h + band_pad;
+    try bands.append(arena, .{ .v = v, .x = bands_x, .y = ycur.*, .w = d.w + 2 * band_pad, .h = bh });
+    content_right.* = @max(content_right.*, bands_x + d.w + 2 * band_pad);
+    ycur.* += bh + band_gap;
+}
+
+fn placeUnspecBand(
+    arena: Allocator,
+    graph: *const Graph,
+    zone: []const u8,
+    norm_v: []const f64,
+    bands_x: f64,
+    ycur: *f64,
+    bands: *std.ArrayListUnmanaged(Band),
+    px: []f64,
+    py: []f64,
+    has_pos: []bool,
+    content_right: *f64,
+) Allocator.Error!void {
+    var count: usize = 0;
+    for (graph.nodes, 0..) |_, i| {
+        if (zone[i] == zone_norm and std.math.isNan(norm_v[i])) count += 1;
+    }
+    if (count == 0) return;
+    const d = gridDims(count);
+    const gy = ycur.* + band_heading_h;
+    var slot: usize = 0;
+    for (graph.nodes, 0..) |_, i| {
+        if (zone[i] != zone_norm or !std.math.isNan(norm_v[i])) continue;
+        seatInGrid(px, py, has_pos, i, bands_x + band_pad, gy, d.cols, slot);
+        slot += 1;
+    }
+    const bh = band_heading_h + d.h + band_pad;
+    try bands.append(arena, .{ .v = std.math.nan(f64), .x = bands_x, .y = ycur.*, .w = d.w + 2 * band_pad, .h = bh });
+    content_right.* = @max(content_right.*, bands_x + d.w + 2 * band_pad);
+    ycur.* += bh + band_gap;
+}
+
+/// Place the overlapping 1.8 V / 3.3 V super-band: three zones side by side
+/// (1.8-only | overlap | 3.3-only) under two overlapping tinted rects.
+fn placeSuper(
+    arena: Allocator,
+    graph: *const Graph,
+    zone: []const u8,
+    bands_x: f64,
+    ycur: *f64,
+    bands: *std.ArrayListUnmanaged(Band),
+    px: []f64,
+    py: []f64,
+    has_pos: []bool,
+    content_right: *f64,
+    cnt: [3]usize,
+) Allocator.Error!void {
+    const c_lo = cnt[0];
+    const c_ov = cnt[1];
+    const c_hi = cnt[2];
+    const dlo = gridDims(c_lo);
+    const dov = gridDims(c_ov);
+    const dhi = gridDims(c_hi);
+    const inner_h = @max(@max(dlo.h, dov.h), dhi.h);
+    const bh = band_heading_h + inner_h + band_pad;
+    const gy = ycur.* + band_heading_h;
+    const lo_x = bands_x + band_pad;
+    const ov_x = lo_x + (if (c_lo > 0) dlo.w + zone_gap else 0);
+    const hi_x = ov_x + (if (c_ov > 0) dov.w + zone_gap else 0);
+    seatZone(graph, zone, zone_lo, px, py, has_pos, lo_x, gy, dlo.cols);
+    seatZone(graph, zone, zone_ov, px, py, has_pos, ov_x, gy, dov.cols);
+    seatZone(graph, zone, zone_hi, px, py, has_pos, hi_x, gy, dhi.cols);
+
+    // 1.8 V rect spans 1.8-only + overlap; 3.3 V rect spans overlap + 3.3-only.
+    const lo_left = lo_x - band_pad;
+    const lo_right = (if (c_ov > 0) ov_x + dov.w else lo_x + dlo.w) + band_pad;
+    const hi_left = (if (c_ov > 0) ov_x else hi_x) - band_pad;
+    const hi_right = hi_x + dhi.w + band_pad;
+    if (c_lo > 0 or c_ov > 0) {
+        try bands.append(arena, .{ .v = overlap_lo, .x = lo_left, .y = ycur.*, .w = lo_right - lo_left, .h = bh, .label_x = lo_left + band_pad });
+    }
+    if (c_hi > 0 or c_ov > 0) {
+        try bands.append(arena, .{ .v = overlap_hi, .x = hi_left, .y = ycur.*, .w = hi_right - hi_left, .h = bh, .label_x = hi_right - band_label_w });
+    }
+    content_right.* = @max(content_right.*, hi_right);
+    ycur.* += bh + band_gap;
+}
+
+fn seatZone(graph: *const Graph, zone: []const u8, want: u8, px: []f64, py: []f64, has_pos: []bool, gx: f64, gy: f64, cols: usize) void {
+    if (cols == 0) return;
+    var k: usize = 0;
+    for (graph.nodes, 0..) |_, i| {
+        if (zone[i] != want) continue;
+        seatInGrid(px, py, has_pos, i, gx, gy, cols, k);
+        k += 1;
+    }
+}
+
+fn dfsBack(u: u32, elist: []const InfraEdge, adj: []const std.ArrayListUnmanaged(u32), color: []u8, back: []bool) void {
+    color[u] = 1;
+    for (adj[u].items) |ei| {
+        const v = elist[ei].to;
+        if (color[v] == 1) {
+            back[ei] = true;
+        } else if (color[v] == 0) {
+            dfsBack(v, elist, adj, color, back);
+        }
+    }
+    color[u] = 2;
+}
+
+const ProducerCols = struct { col: []u8, has_back: bool };
+
+/// Column per producer: 0 for sources (fed by nothing), 1 for regulators (fed
+/// by a forward supply edge). Cycle-broken so a rail flowing back into the
+/// source (2.5 V → mezzanine) doesn't demote the source out of column 0.
+fn producerColumns(arena: Allocator, graph: *const Graph, is_producer: []const bool) Allocator.Error!ProducerCols {
+    const n = is_producer.len;
+    var elist: std.ArrayListUnmanaged(InfraEdge) = .empty;
+    for (graph.edges) |e| {
+        if (e.class != .power or e.from == e.to) continue;
+        if (!is_producer[e.from] or !is_producer[e.to]) continue;
+        try elist.append(arena, .{ .from = e.from, .to = e.to });
+    }
+    const adj = try arena.alloc(std.ArrayListUnmanaged(u32), n);
+    for (adj) |*a| a.* = .empty;
+    for (elist.items, 0..) |ed, i| try adj[ed.from].append(arena, @intCast(i));
+    const back = try arena.alloc(bool, elist.items.len);
+    @memset(back, false);
+    const color = try arena.alloc(u8, n);
+    @memset(color, 0);
+    for (0..n) |s| if (is_producer[s] and color[s] == 0) dfsBack(@intCast(s), elist.items, adj, color, back);
+    const col = try arena.alloc(u8, n);
+    @memset(col, 0);
+    var has_back = false;
+    for (elist.items, 0..) |ed, i| {
+        if (back[i]) {
+            has_back = true;
+        } else {
+            col[ed.to] = 1;
+        }
+    }
+    return .{ .col = col, .has_back = has_back };
 }
 
 fn mkPowerRoute(from: u32, to: u32, v: ?f64, pts: []Pt) Route {
     return .{ .from_gid = from, .to_gid = to, .class = .power, .label = "", .voltage = v, .fanout = 1, .pts = pts, .arrow_at_start = false };
 }
 
+/// The band rect whose voltage matches `v` (NaN matches the unspecified band).
+fn bandForVoltage(bands: []const Band, v: ?f64) ?usize {
+    const want = v orelse return null;
+    for (bands, 0..) |b, i| {
+        if (!std.math.isNan(b.v) and @abs(b.v - want) < volt_eps) return i;
+    }
+    return null;
+}
+
 const PRouteKey = struct { kind: u8, a: u32, b: u32 };
 
-/// Edges for the banded power view: producer→producer supply links routed as
-/// brackets in the left margin, and one feeder per (producer, band) into the
-/// band's left edge. Each distinct link/feeder is drawn once.
+/// Edges for the banded power view: producer→producer supply links (forward in
+/// the column gap, back-edges via the left return margin) and one feeder per
+/// (producer, band) into the matching band's left edge.
 fn buildPowerRoutes(
     arena: Allocator,
     graph: *const Graph,
     is_producer: []const bool,
-    band_of: []const usize,
+    pcol: []const u8,
     bands: []const Band,
-    band_v: []const f64,
     px: []const f64,
     py: []const f64,
     bands_x: f64,
-    supply_margin: f64,
+    ret_margin: f64,
 ) Allocator.Error![]Route {
-    // Pre-assign each distinct supply link a left-margin lane so they don't overlap.
-    var lane_of = std.AutoHashMapUnmanaged(PRouteKey, u32){};
-    var lanes: u32 = 0;
-    for (graph.edges) |e| {
-        if (e.class != .power or e.from == e.to or !is_producer[e.to]) continue;
-        const gop = try lane_of.getOrPut(arena, .{ .kind = 0, .a = e.from, .b = e.to });
-        if (!gop.found_existing) {
-            gop.value_ptr.* = lanes;
-            lanes += 1;
-        }
-    }
-    const ntotal: f64 = @floatFromInt(@max(lanes, 1));
-    const nb: f64 = @floatFromInt(@max(bands.len, 1));
-
     var routes: std.ArrayListUnmanaged(Route) = .empty;
     var drawn = std.AutoHashMapUnmanaged(PRouteKey, void){};
     for (graph.edges) |e| {
-        if (e.class != .power) continue;
+        if (e.class != .power or e.from == e.to) continue;
         const fcyv = py[e.from] + node_h / 2;
+        const tcyv = py[e.to] + node_h / 2;
         var pts: std.ArrayListUnmanaged(Pt) = .empty;
         if (is_producer[e.to]) {
             const key = PRouteKey{ .kind = 0, .a = e.from, .b = e.to };
-            if (e.from == e.to or (try drawn.getOrPut(arena, key)).found_existing) continue;
-            const lane: f64 = @floatFromInt(lane_of.get(key).?);
-            const mx = pad + (lane + 1) / (ntotal + 1) * supply_margin;
-            const tcyv = py[e.to] + node_h / 2;
-            try pts.append(arena, .{ .x = px[e.from], .y = fcyv });
-            try pts.append(arena, .{ .x = mx, .y = fcyv });
-            try pts.append(arena, .{ .x = mx, .y = tcyv });
-            try pts.append(arena, .{ .x = px[e.to], .y = tcyv });
+            if ((try drawn.getOrPut(arena, key)).found_existing) continue;
+            if (pcol[e.from] < pcol[e.to]) {
+                // forward supply link: elbow in the column gap.
+                const midx = px[e.from] + node_w + h_gap / 2;
+                try pts.append(arena, .{ .x = px[e.from] + node_w, .y = fcyv });
+                try pts.append(arena, .{ .x = midx, .y = fcyv });
+                try pts.append(arena, .{ .x = midx, .y = tcyv });
+                try pts.append(arena, .{ .x = px[e.to], .y = tcyv });
+            } else {
+                // return link (e.g. 2.5 V back to the source): bracket in the left margin.
+                const mx = pad + ret_margin / 2;
+                try pts.append(arena, .{ .x = px[e.from], .y = fcyv });
+                try pts.append(arena, .{ .x = mx, .y = fcyv });
+                try pts.append(arena, .{ .x = mx, .y = tcyv });
+                try pts.append(arena, .{ .x = px[e.to], .y = tcyv });
+            }
             try routes.append(arena, mkPowerRoute(e.from, e.to, e.voltage, try pts.toOwnedSlice(arena)));
         } else {
-            const bi = band_of[e.to];
+            const v = if (e.voltage) |ev| ev else consumerVoltage(graph, e.to);
+            const bi = bandForVoltage(bands, v) orelse continue;
             if ((try drawn.getOrPut(arena, .{ .kind = 1, .a = e.from, .b = @intCast(bi) })).found_existing) continue;
             const band = bands[bi];
             const bcy = band.y + band.h / 2;
-            const chx = bands_x - power_channel + (@as(f64, @floatFromInt(bi)) + 1) / (nb + 1) * power_channel;
+            const chx = bands_x - power_channel / 2;
             try pts.append(arena, .{ .x = px[e.from] + node_w, .y = fcyv });
             try pts.append(arena, .{ .x = chx, .y = fcyv });
             try pts.append(arena, .{ .x = chx, .y = bcy });
             try pts.append(arena, .{ .x = band.x, .y = bcy });
-            const v: ?f64 = if (std.math.isNan(band_v[e.to])) null else band_v[e.to];
-            try routes.append(arena, mkPowerRoute(e.from, e.to, v, try pts.toOwnedSlice(arena)));
+            try routes.append(arena, mkPowerRoute(e.from, e.to, if (std.math.isNan(v)) null else v, try pts.toOwnedSlice(arena)));
         }
     }
     return routes.toOwnedSlice(arena);
@@ -710,13 +908,57 @@ test "computeLayout groups power consumers into voltage bands" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const lay = (try computeLayout(arena.allocator(), &graph, .power)) orelse return error.TestUnexpectedResult;
-    // Two bands (1.8 V, 3.3 V) sorted ascending; 3.3 V band sits below 1.8 V.
+    // The 1.8 V / 3.3 V pair renders as two side-by-side bands (3.3 V to the right).
     try testing.expectEqual(@as(usize, 2), lay.bands.len);
     try testing.expectApproxEqAbs(@as(f64, 1.8), lay.bands[0].v, 0.01);
     try testing.expectApproxEqAbs(@as(f64, 3.3), lay.bands[1].v, 0.01);
-    try testing.expect(lay.bands[1].y > lay.bands[0].y);
+    try testing.expect(lay.bands[1].x > lay.bands[0].x);
     // All five nodes (2 regulators + 3 consumers) placed.
     try testing.expectEqual(@as(usize, 5), lay.nodes.len);
+}
+
+// spec: diagram/layout - Places a dual-rail consumer in the 1.8 V / 3.3 V overlap
+test "computeLayout overlaps the 1.8 and 3.3 bands for a dual-rail part" {
+    var dual = mkNode("DUAL");
+    dual.rails = &[_]f64{ 1.8, 3.3 };
+    dual.power_rail = 3.3;
+    var nodes = [_]types.Node{ mkNode("REG"), dual };
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = .power, .label = "v", .voltage = 3.3 }};
+    const graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeLayout(arena.allocator(), &graph, .power)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), lay.bands.len);
+    var lo: ?Band = null;
+    var hi: ?Band = null;
+    for (lay.bands) |b| {
+        if (@abs(b.v - 1.8) < 0.01) lo = b;
+        if (@abs(b.v - 3.3) < 0.01) hi = b;
+    }
+    try testing.expect(lo != null and hi != null);
+    // The two band rects overlap (share the dual-rail part's zone).
+    try testing.expect(hi.?.x < lo.?.x + lo.?.w);
+}
+
+// spec: diagram/layout - Flows power producers left-to-right from source to regulators
+test "computeLayout puts the power source left of the regulators it feeds" {
+    var nodes = [_]types.Node{ mkNode("MEZZ"), mkNode("REG"), mkNode("LOAD") };
+    var edges = [_]types.Edge{
+        .{ .from = 0, .to = 1, .class = .power, .label = "VBATT", .voltage = 3.7 }, // source → regulator
+        .{ .from = 1, .to = 2, .class = .power, .label = "v5", .voltage = 5.0 }, // regulator → load
+    };
+    const graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeLayout(arena.allocator(), &graph, .power)) orelse return error.TestUnexpectedResult;
+    var mx: f64 = -1;
+    var rx: f64 = -1;
+    for (lay.nodes) |ln| {
+        if (ln.gid == 0) mx = ln.x;
+        if (ln.gid == 1) rx = ln.x;
+    }
+    try testing.expect(mx >= 0 and rx >= 0);
+    try testing.expect(mx < rx); // source column is left of the regulator column
 }
 
 // spec: diagram/layout - Groups a multi-rail consumer under its highest rail

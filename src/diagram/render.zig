@@ -247,7 +247,8 @@ fn writeBand(w: *Writer, b: layout.Band, color: []const u8) Writer.Error!void {
             " fill=\"{s}\" fill-opacity=\"0.07\" stroke=\"{s}\" stroke-opacity=\"0.55\" class=\"dg-band\"/>",
         .{ b.x, b.y, b.w, b.h, color, color },
     );
-    try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-band-label\" fill=\"{s}\">", .{ b.x + band_label_dx, b.y + band_label_dy, color });
+    const lx = if (b.label_x >= 0) b.label_x else b.x + band_label_dx;
+    try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-band-label\" fill=\"{s}\">", .{ lx, b.y + band_label_dy, color });
     if (std.math.isNan(b.v)) {
         try w.writeAll("Other");
     } else {

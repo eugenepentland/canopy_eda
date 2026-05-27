@@ -99,6 +99,10 @@ pub const Node = struct {
     /// pins, used to group it into the power view's voltage band. -1 ⇒ unset
     /// (the layout falls back to declared ports / edges).
     power_rail: f64 = -1,
+    /// All distinct supply rails (volts) this block uses, ascending. Lets the
+    /// power view place a dual-rail part in the overlap of two bands. Owned;
+    /// freed by `Graph.deinit`. Empty ⇒ unknown.
+    rails: []const f64 = &.{},
 };
 
 /// A directed inter-block connection. `from` is the driver/producer side so
@@ -127,6 +131,7 @@ pub const Graph = struct {
         for (self.nodes) |n| {
             allocator.free(n.inputs);
             allocator.free(n.outputs);
+            if (n.rails.len > 0) allocator.free(n.rails);
             if (n.slug.len > 0) allocator.free(n.slug);
         }
         allocator.free(self.nodes);

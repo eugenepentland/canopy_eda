@@ -75,16 +75,21 @@ pub fn collectGraph(
 
     const flat = try buildFlatNets(scratch, block);
     const edges = try deriveEdges(allocator, scratch, flat, &mem, &port_map, &producer_by_net, nodes.items);
-    try assignPrimaryRails(scratch, flat, &mem, &port_map, nodes.items);
+    try assignRails(allocator, scratch, flat, &mem, &port_map, nodes.items);
 
     return .{ .nodes = try nodes.toOwnedSlice(allocator), .edges = edges };
 }
 
-/// Set each node's `power_rail` to the rail powering the most of its pins (ties
-/// → highest), so the power view groups a multi-rail part under its primary
-/// (analog) rail rather than a housekeeping one — counted from the flattened
-/// netlist, which carries every pin, not the collapsed edge list.
-fn assignPrimaryRails(
+const RailCount = struct { v: f64, c: u32 };
+
+/// Record, for each block, the supply rails it touches: `power_rail` is the rail
+/// powering the most pins (ties → highest), and `rails` is the full ascending
+/// set. Counted from the flattened netlist (every pin), not the collapsed edge
+/// list — so a dual-rail part's secondary rail and a folded producer's rail are
+/// both seen. The power view uses `power_rail` to pick a band and `rails` to
+/// place a dual-rail part in an overlap.
+fn assignRails(
+    allocator: Allocator,
     scratch: Allocator,
     flat: []const export_kicad.FlatNet,
     mem: *const membership.Membership,
@@ -104,18 +109,32 @@ fn assignPrimaryRails(
             gop.value_ptr.* = (if (gop.found_existing) gop.value_ptr.* else 0) + 1;
         }
     }
-    const best = try scratch.alloc(u32, nodes.len);
-    @memset(best, 0);
+    // Bucket rail counts per node.
+    const per_node = try scratch.alloc(std.ArrayListUnmanaged(RailCount), nodes.len);
+    for (per_node) |*l| l.* = .empty;
     var it = counts.iterator();
     while (it.next()) |e| {
-        const nid = e.key_ptr.node;
         const v = @as(f64, @floatFromInt(e.key_ptr.vb)) / 100;
-        const cnt = e.value_ptr.*;
-        if (cnt > best[nid] or (cnt == best[nid] and v > nodes[nid].power_rail)) {
-            best[nid] = cnt;
-            nodes[nid].power_rail = v;
-        }
+        try per_node[e.key_ptr.node].append(scratch, .{ .v = v, .c = e.value_ptr.* });
     }
+    for (per_node, 0..) |*list, i| {
+        if (list.items.len == 0) continue;
+        std.mem.sort(RailCount, list.items, {}, cmpRailVolt);
+        const rails = try allocator.alloc(f64, list.items.len);
+        var best_c: u32 = 0;
+        for (list.items, 0..) |rc, j| {
+            rails[j] = rc.v;
+            if (rc.c > best_c or (rc.c == best_c and rc.v > nodes[i].power_rail)) {
+                best_c = rc.c;
+                nodes[i].power_rail = rc.v;
+            }
+        }
+        nodes[i].rails = rails;
+    }
+}
+
+fn cmpRailVolt(_: void, a: RailCount, b: RailCount) bool {
+    return a.v < b.v;
 }
 
 // ── node construction ──────────────────────────────────────────────────
@@ -561,7 +580,7 @@ test "collectGraph resolves rail voltage from a consumer when no producer declar
     try testing.expectApproxEqAbs(@as(f64, 3.3), g.edges[0].voltage.?, 0.01);
 }
 
-// spec: diagram/collect - Picks each block's primary supply rail by pin count
+// spec: diagram/collect - Picks each block's primary supply rail by pin count and records its full rail set
 test "collectGraph picks the primary rail by pin count" {
     const pg = [_]env_mod.PinGroup{.{ .ref_des = "U1", .pins = &.{} }};
     const secs = [_]Section{.{ .name = "DUAL", .pin_groups = &pg }};
@@ -579,6 +598,10 @@ test "collectGraph picks the primary rail by pin count" {
     defer g.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), g.nodes.len);
     try testing.expectApproxEqAbs(@as(f64, 3.3), g.nodes[0].power_rail, 0.01);
+    // Full rail set is recorded ascending (1.8 V and 3.3 V).
+    try testing.expectEqual(@as(usize, 2), g.nodes[0].rails.len);
+    try testing.expectApproxEqAbs(@as(f64, 1.8), g.nodes[0].rails[0], 0.01);
+    try testing.expectApproxEqAbs(@as(f64, 3.3), g.nodes[0].rails[1], 0.01);
 }
 
 // spec: diagram/collect - Parses a rail voltage from its V<d>P<d> name when no port declares one
