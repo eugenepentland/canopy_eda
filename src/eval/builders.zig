@@ -625,7 +625,10 @@ fn isDirectionKeyword(s: []const u8) bool {
 /// Parse a `(port "NAME" [net] dir ...)` form into a `Port`. Accepts the
 /// short form (net = name) and the long form with explicit net string, plus
 /// the optional `(rated …)`, `(nominal …)`, `(current …)`, `(efficiency …)`,
-/// and `(enable …)` sub-clauses that drive the power-budget analyzer.
+/// and `(enable …)` sub-clauses that drive the power-budget analyzer. A bare
+/// trailing number (e.g. `(port "X" out power 2.5)`) is read as the nominal
+/// voltage — matching `parseSectionPort` — with an explicit `(nominal …)`
+/// taking precedence.
 pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port {
     if (args.len < 2) return EvalError.ArityError;
     const name_val = try self.evalNode(args[0], env);
@@ -721,6 +724,10 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
             }
         } else if (arg.asAtom()) |kw| {
             if (std.mem.eql(u8, kw, "optional")) is_optional = true;
+        } else if (arg.asNumber()) |n| {
+            // Bare trailing number is the nominal voltage, matching
+            // parseSectionPort; an explicit (nominal …) form still wins.
+            if (nominal == null) nominal = n;
         }
     }
 
@@ -1036,6 +1043,26 @@ test "decouple per-pin with no pins errors" {
     var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
 
     try testing.expectError(error.InvalidForm, emitDecoupleItems(&eval, nodes, "VDD", &env, &instances, &all_pin_nets, "abcd1234", &sidecar));
+}
+
+// spec: eval/design_block - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
+test "buildPort reads a bare trailing number as nominal, (nominal) overrides" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    // Bare positional number after direction + signal-type → nominal voltage.
+    const bare = try parser_mod.parse(alloc, "(port \"V_RX_2P5\" out power 2.5)");
+    const bare_port = try buildPort(&eval, bare[0].asList().?[1..], &env);
+    try testing.expect(bare_port.nominal != null);
+    try testing.expectEqual(@as(f64, 2.5), bare_port.nominal.?);
+
+    // An explicit (nominal 3.3) still wins over a bare number on the same port.
+    const override = try parser_mod.parse(alloc, "(port \"V_RX_2P5\" out power 2.5 (nominal 3.3))");
+    const override_port = try buildPort(&eval, override[0].asList().?[1..], &env);
+    try testing.expectEqual(@as(f64, 3.3), override_port.nominal.?);
 }
 
 // spec: eval/design_block - decouple-defaults lets decouple omit its component and host ref
