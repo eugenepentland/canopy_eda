@@ -161,7 +161,7 @@ fn writeArrow(w: *Writer, r: layout.Route, color: []const u8) Writer.Error!void 
 }
 
 fn writeEdgeLabel(arena: Allocator, w: *Writer, r: layout.Route, color: []const u8) (Allocator.Error || Writer.Error)!void {
-    const mid = r.pts[r.pts.len / 2];
+    const mid = edgeLabelAnchor(r.pts);
     const text = try edgeLabelText(arena, r);
     if (text.len == 0) return;
     const pill_w = @as(f64, @floatFromInt(text.len)) * pill_char_w + pill_pad_x;
@@ -182,6 +182,14 @@ fn edgeLabelText(arena: Allocator, r: layout.Route) Allocator.Error![]const u8 {
         return std.fmt.allocPrint(arena, "{s} \u{00d7}{d}", .{ r.label, r.fanout });
     }
     return r.label;
+}
+
+/// Anchor the label on the first vertical channel segment (pts[1]→pts[2]),
+/// which always sits in the gap between columns — clear of node boxes. Falls
+/// back to the geometric middle for degenerate polylines.
+fn edgeLabelAnchor(pts: []const types.Pt) types.Pt {
+    if (pts.len >= 3) return .{ .x = pts[1].x, .y = (pts[1].y + pts[2].y) / 2 };
+    return pts[pts.len / 2];
 }
 
 // ── text helpers ───────────────────────────────────────────────────────

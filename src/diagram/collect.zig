@@ -305,9 +305,12 @@ fn accumulate(
     }
 }
 
-/// Choose the driver (edge `from`) for a net. Power nets use the rail
-/// producer; everything else uses a category-based driver priority, breaking
-/// ties toward the lowest node id for stability.
+/// Choose the driver (edge `from`) for a net so the edge points source→sink.
+/// Power nets use the rail producer; everything else uses a role-based
+/// `sourceRank` (oscillator/host/regulator outrank PLL/mixer/chip sinks),
+/// breaking ties toward the lowest node id for stability. Components here
+/// don't declare pin electrical types, so role is inferred from the block's
+/// name + category — grounded in the real Cyclops part names.
 fn pickDriver(
     cls: NetClass,
     clean: []const u8,
@@ -321,33 +324,57 @@ fn pickDriver(
         }
     }
     var best = touched[0];
-    var best_pri = driverPriority(nodes[best].category, cls);
+    var best_rank = sourceRank(nodes[best], cls);
     for (touched[1..]) |t| {
-        const pri = driverPriority(nodes[t].category, cls);
-        if (pri > best_pri or (pri == best_pri and t < best)) {
+        const r = sourceRank(nodes[t], cls);
+        if (r > best_rank or (r == best_rank and t < best)) {
             best = t;
-            best_pri = pri;
+            best_rank = r;
         }
     }
     return best;
 }
 
-/// Category-based driver priority for a net class — used to orient an edge
-/// (the highest-priority touched node becomes `from`). Written as if-chains
-/// rather than nested switches to keep the enum's switch surface in one file.
-fn driverPriority(cat: rb.Category, cls: NetClass) u8 {
-    if (cls == .power) return if (cat == .power) 3 else 1;
-    if (cls == .control) {
-        if (cat == .mcu) return 4;
-        if (cat == .connector) return 3;
-        return 1;
-    }
-    if (cls == .clock) {
-        if (cat == .clock) return 3;
-        if (cat == .connector or cat == .mcu) return 2;
-        return 1;
-    }
-    return 1; // rf, ground
+/// How source-like a block is for a given net class (higher ⇒ closer to the
+/// signal origin). Drives edge orientation and, transitively, left→right
+/// layering. Keyword tests run on the block label; `cat` is the fallback.
+// Source-rank tiers (higher ⇒ closer to the signal origin). Named so the
+// orientation logic stays readable and free of bare magic numbers.
+const rank_origin: u8 = 5; // signal origin: oscillator / host / regulator
+const rank_drive: u8 = 4; // active driver: fanout, LNA, VCO/LO/PLL, expander
+const rank_relay: u8 = 3; // pass-through: level shifter
+const rank_mid: u8 = 2; // mixer / generic
+const rank_sink: u8 = 1; // PLL ref input, connector IF, plain chip
+
+fn sourceRank(node: Node, cls: NetClass) u8 {
+    const n = node.label;
+    if (cls == .power) return if (node.category == .power) rank_origin else rank_sink;
+    if (cls == .clock) return clockRank(n, node.category);
+    if (cls == .control) return controlRank(n, node.category);
+    if (cls == .rf) return rfRank(n, node.category);
+    return rank_sink; // ground
+}
+
+fn clockRank(n: []const u8, cat: rb.Category) u8 {
+    if (rb.containsCI(n, "TCXO") or rb.containsCI(n, "OSC") or rb.containsCI(n, "XTAL")) return rank_origin;
+    if (rb.containsCI(n, "PLL") or rb.containsCI(n, "SYNTH")) return rank_sink; // ref consumer
+    if (rb.containsCI(n, "FANOUT") or rb.containsCI(n, "BUFFER") or cat == .clock) return rank_drive;
+    return rank_mid;
+}
+
+fn controlRank(n: []const u8, cat: rb.Category) u8 {
+    if (cat == .mcu or cat == .connector) return rank_origin; // host side
+    if (rb.containsCI(n, "EXPANDER") or rb.containsCI(n, "GPIO") or rb.containsCI(n, "PCAL")) return rank_drive;
+    if (rb.containsCI(n, "LEVEL") or rb.containsCI(n, "SHIFT") or rb.containsCI(n, "TXS")) return rank_relay;
+    return rank_sink;
+}
+
+fn rfRank(n: []const u8, cat: rb.Category) u8 {
+    if (rb.containsCI(n, "LNA")) return rank_drive; // antenna → LNA → mixer
+    if (rb.containsCI(n, "VCO") or rb.containsCI(n, "LMX") or rb.containsCI(n, "PLL") or rb.containsCI(n, "SYNTH")) return rank_drive;
+    if (rb.containsCI(n, "MIXER") or rb.containsCI(n, "RX")) return rank_mid;
+    if (cat == .connector) return rank_sink; // IF outputs land on the connector
+    return rank_mid;
 }
 
 fn producerVoltage(nodes: []const Node, driver: u32, net: []const u8) ?f64 {

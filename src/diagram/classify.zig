@@ -69,8 +69,8 @@ const control_sub = [_][]const u8{ "_SPI_", "_EN_", "TXEN", "_FAULT", "MUXOUT", 
 const control_suf = [_][]const u8{ "_EN", "ADV", "RST" };
 const control_eq = [_][]const u8{ "CHIRP_START", "CNV_MASTER" };
 
-const rf_pre = [_][]const u8{ "LO_", "BEAM", "ADF_CH", "TX1_", "TX2_" };
-const rf_sub = [_][]const u8{ "RFIN", "RFOUT", "LNAOUT", "_LO_", "LO_OUT", "CPOUT", "EMVS", "VTUNE", "VARAC", "_RF" };
+const rf_pre = [_][]const u8{ "LO_", "BEAM", "ADF_CH", "TX1_", "TX2_", "LF" };
+const rf_sub = [_][]const u8{ "RFIN", "RFOUT", "LNAOUT", "_LO_", "LO_OUT", "CPOUT", "EMVS", "VTUNE", "VARAC", "_RF", "_LF" };
 
 fn isGround(n: []const u8) bool {
     return anyEq(n, &ground_eq) or anySuffix(n, &ground_suf);

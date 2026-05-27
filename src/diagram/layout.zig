@@ -19,8 +19,8 @@ const Pt = types.Pt;
 // ── geometry (shared with render.zig) ──────────────────────────────────
 pub const node_w: f64 = 200;
 pub const node_h: f64 = 56;
-pub const h_gap: f64 = 96;
-pub const v_gap: f64 = 22;
+pub const h_gap: f64 = 132;
+pub const v_gap: f64 = 30;
 pub const pad: f64 = 20;
 pub const dummy_h: f64 = 14;
 
