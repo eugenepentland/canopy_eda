@@ -356,17 +356,45 @@ fn checkPowerTreeIntegrity(
     }
 }
 
-/// True iff any pin in `block.nets` connects to the rail's canonical name
-/// or any of its ferrite-bridged aliases. Empty rail names are treated as
-/// absent (no consumer possible).
+/// True iff the rail reaches at least one downstream consumer. A consumer is
+/// either (a) a direct component pin on the rail's net (or a ferrite-bridged
+/// alias), or (b) a sub-block input port the rail is wired into — e.g. a rail
+/// that only feeds an LDO's VIN inside another sub-block. Empty rail names are
+/// treated as absent (no consumer possible).
 fn railHasConsumer(block: *const DesignBlock, rail: env_mod.PowerRail) bool {
+    // (a) Direct component pins on the rail's net or a ferrite alias.
     for (block.nets) |net| {
         if (net.pins.len == 0) continue;
         const base = na.baseNetName(net.name);
-        if (std.mem.eql(u8, base, rail.name)) return true;
-        for (rail.aliases) |alias| {
-            if (std.mem.eql(u8, base, alias)) return true;
-        }
+        if (railNameMatches(rail, base)) return true;
+    }
+    // (b) Sub-block port consumers. A `(net "<rail>" "<sub>/<port>")` form is
+    // stored as a NetTie linking the rail name to the sub-block port path; such
+    // a net carries no direct PinRef, so the loop above misses it. A tie to a
+    // port path *other than the rail's own source port* means the rail is wired
+    // into a downstream sub-block (the regulator output is genuinely used).
+    for (block.net_ties) |nt| {
+        const port_path = if (railNameMatches(rail, na.baseNetName(nt.a)))
+            nt.b
+        else if (railNameMatches(rail, na.baseNetName(nt.b)))
+            nt.a
+        else
+            continue;
+        // Only a sub-block port path (contains '/') counts here; plain-net ties
+        // are already covered by the direct-pin loop above.
+        if (std.mem.indexOfScalar(u8, port_path, '/') == null) continue;
+        // Skip the rail's own source port — that is the producer, not a load.
+        if (rail.source_path.len > 0 and std.mem.eql(u8, port_path, rail.source_path)) continue;
+        return true;
+    }
+    return false;
+}
+
+/// True iff `base` equals the rail's canonical name or any ferrite-bridged alias.
+fn railNameMatches(rail: env_mod.PowerRail, base: []const u8) bool {
+    if (std.mem.eql(u8, base, rail.name)) return true;
+    for (rail.aliases) |alias| {
+        if (std.mem.eql(u8, base, alias)) return true;
     }
     return false;
 }
@@ -775,6 +803,7 @@ fn checkBlockPowerPins(
         const is_gnd = std.mem.eql(u8, base, "GND") or std.mem.eql(u8, base, "VSS") or
             std.mem.eql(u8, base, "AGND") or std.mem.eql(u8, base, "DGND") or
             std.mem.eql(u8, base, "PGND") or std.mem.eql(u8, base, "EP") or
+            std.mem.startsWith(u8, base, "GND") or
             std.mem.endsWith(u8, base, "GND") or std.mem.endsWith(u8, base, "VSS");
         const is_vdd = std.mem.startsWith(u8, base, "VDD") or std.mem.startsWith(u8, base, "VCC") or
             std.mem.startsWith(u8, base, "VBAT") or std.mem.startsWith(u8, base, "V3P3") or
@@ -782,6 +811,9 @@ fn checkBlockPowerPins(
             std.mem.startsWith(u8, base, "VBUS") or std.mem.startsWith(u8, base, "VIN") or
             std.mem.startsWith(u8, base, "VOUT") or std.mem.startsWith(u8, base, "AVDD") or
             std.mem.startsWith(u8, base, "DVDD") or std.mem.startsWith(u8, base, "V+") or
+            // VREF: auto-direction level translators (LSF0108, TXS0108, …) have no
+            // VDD/VCC pin — they are supplied through their VREF_A / VREF_B rails.
+            std.mem.startsWith(u8, base, "VREF") or
             std.mem.startsWith(u8, base, "VS");
 
         for (net.pins) |pin| {
@@ -798,6 +830,9 @@ fn checkBlockPowerPins(
         if (prefix != 'U') continue;
         // Skip passive components that got U prefix (LEDs, inductors, filters, crystals)
         if (isPassiveComponent(inst.component)) continue;
+        // Skip ICs that intentionally have no ground reference pin (float with
+        // their input rail) — flagging them for "no ground" is a false positive.
+        if (isGroundlessIc(inst.component)) continue;
 
         if (!has_gnd.contains(inst.ref_des)) {
             const msg = std.fmt.allocPrint(allocator, "{s}: IC has no ground connection", .{inst.ref_des}) catch continue;
@@ -926,11 +961,25 @@ fn collectBlockInstances(_: std.mem.Allocator, block: *const DesignBlock) []cons
 fn isPassiveComponent(component: []const u8) bool {
     // LED, inductor, ferrite, crystal, diode, EMC filter, connector, switch, fuse
     const passive_prefixes = [_][]const u8{
-        "led",  "ind",   "ferrite", "xfl",      "abm",
-        "fc-",  "diode", "ecmf",    "esd",      "tvs",
-        "fuse", "ntc",   "ptc",     "varistor", "sw-",
+        "led",     "ind",   "ferrite", "xfl",      "abm",
+        "fc-",     "diode", "ecmf",    "esd",      "tvs",
+        "fuse",    "ntc",   "ptc",     "varistor", "sw-",
+        "crystal", "xtal",
     };
     for (passive_prefixes) |pfx| {
+        if (component.len >= pfx.len and std.ascii.eqlIgnoreCase(component[0..pfx.len], pfx)) return true;
+    }
+    return false;
+}
+
+/// ICs that intentionally have no ground reference pin — they float with their
+/// input rail (e.g. the LM74610 ideal-diode controller has no GND terminal),
+/// so the "IC has no ground connection" check does not apply to them.
+fn isGroundlessIc(component: []const u8) bool {
+    const groundless_prefixes = [_][]const u8{
+        "lm74610",
+    };
+    for (groundless_prefixes) |pfx| {
         if (component.len >= pfx.len and std.ascii.eqlIgnoreCase(component[0..pfx.len], pfx)) return true;
     }
     return false;
@@ -1652,6 +1701,129 @@ test "power tree integrity clean rail emits nothing" {
         try std.testing.expect(v.kind != .source_unused);
         try std.testing.expect(v.kind != .rail_voltage_unresolved);
     }
+}
+
+// Build a rail whose only consumers are sub-block ports reached through
+// net-ties (no direct component pin on the top-level rail net) — mirrors a
+// regulator feeding another sub-block's input port (e.g. iso-DCDC → LDO VIN).
+fn makeTiedRailBlock(
+    alloc: std.mem.Allocator,
+    rail_name: []const u8,
+    source_path: []const u8,
+    ties: []const env_mod.NetTie,
+) !DesignBlock {
+    const rails = try alloc.alloc(env_mod.PowerRail, 1);
+    rails[0] = .{
+        .name = rail_name,
+        .source_ref_des = "iso_dmm",
+        .source_port = "VOUT_ISO",
+        .source_path = source_path,
+        .nominal = 5.0,
+    };
+    return .{
+        .name = "tied-rail-fixture",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .net_ties = ties,
+        .rails = rails,
+    };
+}
+
+// spec: erc - Treats a sub-block input port wired via net-tie as a rail consumer
+test "power tree integrity counts sub-block port consumer" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // Source tie + a genuine downstream consumer tie (dmm_ldo/VIN).
+    const ties = [_]env_mod.NetTie{
+        .{ .a = "VDD5_ISO", .b = "iso_dmm/VOUT_ISO" },
+        .{ .a = "VDD5_ISO", .b = "dmm_ldo/VIN" },
+    };
+    const block = try makeTiedRailBlock(alloc, "VDD5_ISO", "iso_dmm/VOUT_ISO", &ties);
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkPowerTreeIntegrity(alloc, &block, &violations);
+    for (violations.items) |v| try std.testing.expect(v.kind != .source_unused);
+}
+
+// spec: erc - Flags a rail whose only net-tie is its own source port (no consumer)
+test "power tree integrity flags rail tied only to its own source" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // Only the source tie — the regulator output genuinely goes nowhere.
+    const ties = [_]env_mod.NetTie{
+        .{ .a = "VDD5_ISO", .b = "iso_dmm/VOUT_ISO" },
+    };
+    const block = try makeTiedRailBlock(alloc, "VDD5_ISO", "iso_dmm/VOUT_ISO", &ties);
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkPowerTreeIntegrity(alloc, &block, &violations);
+    var hit = false;
+    for (violations.items) |v| {
+        if (v.kind == .source_unused and std.mem.eql(u8, v.net, "VDD5_ISO")) hit = true;
+    }
+    try std.testing.expect(hit);
+}
+
+// Build a block with a single IC instance and a caller-chosen power-pin net,
+// for the IC-power-presence heuristic (checkUnconnectedPowerPins).
+fn makePowerPinBlock(
+    alloc: std.mem.Allocator,
+    component: []const u8,
+    power_net: []const u8,
+) !DesignBlock {
+    const insts = try alloc.alloc(Instance, 1);
+    insts[0] = .{ .ref_des = "U1", .component = component, .value = "", .footprint = "", .symbol = "" };
+    const nets = try alloc.alloc(Net, 2);
+    const gnd_pins = try alloc.alloc(env_mod.PinRef, 1);
+    gnd_pins[0] = .{ .ref_des = "U1", .pin = "1" };
+    const pwr_pins = try alloc.alloc(env_mod.PinRef, 1);
+    pwr_pins[0] = .{ .ref_des = "U1", .pin = "2" };
+    nets[0] = .{ .name = "GND", .pins = gnd_pins };
+    nets[1] = .{ .name = power_net, .pins = pwr_pins };
+    return .{
+        .name = "power-pin-fixture",
+        .instances = insts,
+        .nets = nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+}
+
+// spec: erc - Recognises a VREF-supplied level translator as powered (no false positive)
+test "power pins VREF-supplied translator is not flagged" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // LSF0108 has no VDD/VCC pin — it is supplied through VREF_A/VREF_B.
+    const block = try makePowerPinBlock(alloc, "lsf0108rksr", "VREF_A");
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkUnconnectedPowerPins(alloc, &block, &violations);
+    for (violations.items) |v| {
+        try std.testing.expect(!std.mem.eql(u8, v.message, "U1: IC has no power connection"));
+    }
+}
+
+// spec: erc - Still flags an IC with a ground pin but no recognised power net
+test "power pins missing supply still flagged" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // "SIGNAL" is not a power-net name → the IC has ground but no power.
+    const block = try makePowerPinBlock(alloc, "someic", "SIGNAL");
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkUnconnectedPowerPins(alloc, &block, &violations);
+    var hit = false;
+    for (violations.items) |v| {
+        if (v.kind == .unconnected_pin and std.mem.eql(u8, v.ref_des, "U1") and
+            std.mem.indexOf(u8, v.message, "no power connection") != null) hit = true;
+    }
+    try std.testing.expect(hit);
 }
 
 // Build a single-net DesignBlock with two pins whose ElectricalDecls are
