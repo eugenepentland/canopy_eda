@@ -72,8 +72,13 @@ fn renderView(allocator: Allocator, graph: *const Graph, view: View, w: *Writer)
     } else {
         // Z-ordered passes: wires first (node rects paint over their ends), then
         // nodes, then net-label pills last (opaque, so they stay legible where
-        // wires cross).
-        for (lay.routes) |r| try writeEdgeWire(w, r, edgeColor(view, palette, r.voltage));
+        // wires cross). Clocks uses the curved connector style (its edges are all
+        // adjacent-column hops); RF keeps the lane-routed orthogonal wires.
+        const curved = view == .clocks;
+        for (lay.routes) |r| {
+            const color = edgeColor(view, palette, r.voltage);
+            if (curved) try writeCurveEdge(w, r, color) else try writeEdgeWire(w, r, color);
+        }
         for (lay.nodes) |n| try writeNode(arena, w, graph.nodes[n.gid], n.x, n.y);
         // One label per (source, rail). A rail fanning out to many consumers is a
         // single net, so its name is drawn once on the trunk, not once per branch.
@@ -244,9 +249,11 @@ const pill_text_rise: f64 = 10; // pill text baseline above the pill bottom
 const curve_swing: f64 = 0.5; // horizontal control-point fraction for edge curves
 const edge_dot_r: f64 = 2.4; // terminal dot radius at each edge end
 
-/// A power edge as a smooth horizontal cubic Bézier with a small terminal dot
-/// at each end (no arrowhead) — matching the supply-tree design's connectors.
-fn writePowerCurve(w: *Writer, r: layout.Route, color: []const u8) Writer.Error!void {
+/// An edge as a smooth horizontal cubic Bézier between its end anchors, with a
+/// small terminal dot at each end (no arrowhead) — the design's connector style,
+/// used by the power supply tree and the clock fanout. Safe for adjacent-column
+/// hops (the routed waypoints in between are ignored).
+fn writeCurveEdge(w: *Writer, r: layout.Route, color: []const u8) Writer.Error!void {
     const a = r.pts[0];
     const b = r.pts[r.pts.len - 1];
     const ddx = b.x - a.x;
@@ -263,7 +270,7 @@ fn writePowerCurve(w: *Writer, r: layout.Route, color: []const u8) Writer.Error!
 /// Draws the power supply tree: rail-colored wires first, then the source /
 /// regulator cards and the per-rail load buckets on top.
 fn renderPowerView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout, palette: ?[]const VoltColor) (Allocator.Error || Writer.Error)!void {
-    for (lay.routes) |r| try writePowerCurve(w, r, edgeColor(.power, palette, r.voltage));
+    for (lay.routes) |r| try writeCurveEdge(w, r, edgeColor(.power, palette, r.voltage));
     for (lay.power_boxes) |b| {
         const bv: ?f64 = if (std.math.isNan(b.v)) null else b.v;
         const color = edgeColor(.power, palette, bv);
