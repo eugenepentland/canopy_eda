@@ -67,20 +67,27 @@ fn renderView(allocator: Allocator, graph: *const Graph, view: View, w: *Writer)
         "<svg viewBox=\"0 0 {d:.0} {d:.0}\" class=\"dg-svg\" xmlns=\"http://www.w3.org/2000/svg\">",
         .{ lay.width, lay.height },
     );
-    // Three z-ordered passes: wires first (node rects then paint over their
-    // ends), then nodes, then the net-label pills last of all. The pills are
-    // opaque, so drawing them above every wire keeps the net name readable
-    // even where several lines cross the label.
+    // Z-ordered passes: voltage bands behind everything, then wires (node rects
+    // paint over their ends), then nodes, then net-label pills last (opaque, so
+    // they stay legible where wires cross).
+    for (lay.bands) |b| {
+        const bv: ?f64 = if (std.math.isNan(b.v)) null else b.v;
+        try writeBand(w, b, edgeColor(view, palette, bv));
+    }
     for (lay.routes) |r| try writeEdgeWire(w, r, edgeColor(view, palette, r.voltage));
     for (lay.nodes) |n| try writeNode(arena, w, graph.nodes[n.gid], n.x, n.y);
     // One label per (source, rail). A rail fanning out to many consumers is a
     // single net, so its name is drawn once on the trunk, not once per branch —
     // this is what de-clutters the power tree (V_RF_3P3 ×6 → ×1).
-    var labeled: std.StringHashMapUnmanaged(void) = .empty;
-    for (lay.routes) |r| {
-        const key = try std.fmt.allocPrint(arena, "{d}|{s}", .{ r.from_gid, r.label });
-        if ((try labeled.getOrPut(arena, key)).found_existing) continue;
-        try writeEdgeLabel(arena, w, r, edgeColor(view, palette, r.voltage));
+    // Banded views (power) carry the rail name on the band heading, so they
+    // skip the per-edge label pass.
+    if (lay.bands.len == 0) {
+        var labeled: std.StringHashMapUnmanaged(void) = .empty;
+        for (lay.routes) |r| {
+            const key = try std.fmt.allocPrint(arena, "{d}|{s}", .{ r.from_gid, r.label });
+            if ((try labeled.getOrPut(arena, key)).found_existing) continue;
+            try writeEdgeLabel(arena, w, r, edgeColor(view, palette, r.voltage));
+        }
     }
     try w.writeAll("</svg></div>");
 }
@@ -229,6 +236,26 @@ fn edgeColor(view: View, palette: ?[]const VoltColor, voltage: ?f64) []const u8 
     return volt_unspecified;
 }
 
+const band_label_dx: f64 = 12; // heading inset from the band's left
+const band_label_dy: f64 = 16; // heading baseline below the band's top
+
+/// A voltage-band background: a tinted rounded rect in the rail color plus a
+/// rail-colored "X.X V" heading (or "Other" for the unresolved band).
+fn writeBand(w: *Writer, b: layout.Band, color: []const u8) Writer.Error!void {
+    try w.print(
+        "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\" rx=\"8\"" ++
+            " fill=\"{s}\" fill-opacity=\"0.07\" stroke=\"{s}\" stroke-opacity=\"0.55\" class=\"dg-band\"/>",
+        .{ b.x, b.y, b.w, b.h, color, color },
+    );
+    try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-band-label\" fill=\"{s}\">", .{ b.x + band_label_dx, b.y + band_label_dy, color });
+    if (std.math.isNan(b.v)) {
+        try w.writeAll("Other");
+    } else {
+        try w.print("{d:.1} V", .{b.v});
+    }
+    try w.writeAll("</text>");
+}
+
 fn writeLegend(w: *Writer, palette: []const VoltColor) Writer.Error!void {
     if (palette.len == 0) return;
     try w.writeAll("<div class=\"dg-legend\">");
@@ -291,6 +318,7 @@ pub const CSS =
     \\font:600 11px "SF Mono","Fira Code",monospace;color:#8b949e;}
     \\.dg-leg{display:inline-flex;align-items:center;gap:5px;}
     \\.dg-sw{width:12px;height:12px;display:inline-block;}
+    \\.dg-band-label{font:700 11px "SF Mono","Fira Code",monospace;}
 ;
 
 // ── tests ──────────────────────────────────────────────────────────────
@@ -341,18 +369,32 @@ test "renderTabs draws edge-label pills after every wire" {
 }
 
 // spec: diagram/render - Draws each rail label once per source, not once per fanout branch
-test "renderTabs draws one label for a rail fanned to many consumers" {
-    var nodes = [_]types.Node{ mkNode("REG"), mkNode("A"), mkNode("B") };
+test "renderTabs draws one label for a net fanned to many consumers" {
+    var nodes = [_]types.Node{ mkNode("HUB"), mkNode("A"), mkNode("B") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = .power, .label = "V_RF_3P3" },
-        .{ .from = 0, .to = 2, .class = .power, .label = "V_RF_3P3" },
+        .{ .from = 0, .to = 1, .class = .rf, .label = "LO_OUT" },
+        .{ .from = 0, .to = 2, .class = .rf, .label = "LO_OUT" },
     };
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     try renderTabs(testing.allocator, &graph, &aw.writer);
-    // Both edges are the same rail from the same source ⇒ a single label pill.
+    // Both edges are the same net from the same source ⇒ a single label pill.
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, aw.written(), "class=\"dg-pill\""));
+}
+
+// spec: diagram/render - Draws voltage-band backgrounds with rail-colored headings in the power view
+test "renderTabs draws voltage bands in the power view" {
+    var nodes = [_]types.Node{ mkNode("REG"), mkNode("A") };
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = .power, .label = "v", .voltage = 3.3 }};
+    var graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try renderTabs(testing.allocator, &graph, &aw.writer);
+    const out = aw.written();
+    try testing.expect(std.mem.indexOf(u8, out, "class=\"dg-band\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "dg-band-label") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "3.3 V") != null);
 }
 
 // spec: diagram/render - Colors power edges by voltage and renders a voltage legend

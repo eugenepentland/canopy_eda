@@ -6,6 +6,10 @@
 //! routing through per-channel lanes. Long edges get *dummy* vertices at each
 //! intermediate rank so their horizontal runs sit in a free row and never
 //! cross a node body. Everything is allocated in the caller-supplied arena.
+//!
+//! The power view is the exception: it uses `powerLayout`, a supply-tree layout
+//! that keeps producers (battery, regulators) in left columns and groups pure
+//! consumers into stacked, voltage-tinted bands on the right.
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -43,12 +47,18 @@ pub const Route = struct {
     arrow_at_start: bool,
 };
 
-/// A laid-out view: placed real nodes, routed edges, and the SVG canvas size.
+/// A voltage band in the power view: a tinted background strip grouping all
+/// consumers of one rail level. `v` is the rail voltage (NaN ⇒ "Other").
+pub const Band = struct { v: f64, x: f64, y: f64, w: f64, h: f64 };
+
+/// A laid-out view: placed real nodes, routed edges, the SVG canvas size, and
+/// (power view only) the voltage bands consumers are grouped into.
 pub const Layout = struct {
     nodes: []LNode,
     routes: []Route,
     width: f64,
     height: f64,
+    bands: []const Band = &.{},
 };
 
 const Vertex = struct {
@@ -63,7 +73,11 @@ const RawEdge = struct { from_l: u32, to_l: u32, eidx: usize };
 const Chain = struct { verts: []u32, eidx: usize, arrow_at_start: bool };
 
 /// Compute the layout for `view`. Returns `null` when the view has no edges.
+/// The power view uses a dedicated voltage-band layout (`powerLayout`); the
+/// other views use the layered/Sugiyama pipeline below.
 pub fn computeLayout(arena: Allocator, graph: *const Graph, view: View) Allocator.Error!?Layout {
+    if (view == .power) return powerLayout(arena, graph);
+
     // 1. Filter edges to this view + collect participating nodes.
     var local_of = std.AutoHashMapUnmanaged(u32, u32){};
     var gids: std.ArrayListUnmanaged(u32) = .empty;
@@ -99,7 +113,7 @@ pub fn computeLayout(arena: Allocator, graph: *const Graph, view: View) Allocato
     const dims = assignCoords(verts.items, layers);
 
     // 7. Routing + materialise nodes.
-    const routes = try routeChains(arena, graph, verts.items, rank, chains, max_rank, view);
+    const routes = try routeChains(arena, graph, verts.items, rank, chains, max_rank);
     const nodes = try arena.alloc(LNode, m);
     for (0..m) |i| nodes[i] = .{ .gid = gids.items[i], .x = colX(verts.items[i].rank), .y = verts.items[i].y };
 
@@ -326,75 +340,28 @@ fn cy(v: Vertex) f64 {
 
 // ── orthogonal routing with per-channel lanes ──────────────────────────
 
-const LaneKey = struct { r: u32, k: u64 };
-const LanePair = struct { k: u64, ord: f64 };
-
-const volt_bucket_scale: f64 = 100; // 10 mV grouping resolution for voltages
-const unspec_key_base: u64 = 1_000_000; // power edge w/o voltage → its own track
-const unspec_ord: f64 = 1_000_000; // …ordered to the right of all real voltages
-
-/// Lane *group* key for a segment. Power groups by rail voltage (each voltage
-/// shares one track); other views group by source vertex (the shared-source
-/// fanout trunk). Same key ⇒ same vertical track in the channel.
-fn laneKey(view: View, edge: types.Edge, src_vid: u32) u64 {
-    if (view == .power) {
-        if (edge.voltage) |v| return @intFromFloat(@round(v * volt_bucket_scale));
-        return unspec_key_base + @as(u64, src_vid);
-    }
-    return src_vid;
-}
-
-/// Ordering value placing a channel's lane groups left→right: ascending voltage
-/// in the power view, first-appearance order elsewhere.
-fn laneOrd(view: View, edge: types.Edge, enc: usize) f64 {
-    if (view == .power) {
-        if (edge.voltage) |v| return v;
-        return unspec_ord + @as(f64, @floatFromInt(enc));
-    }
-    return @floatFromInt(enc);
-}
-
-fn cmpLaneOrd(_: void, a: LanePair, b: LanePair) bool {
-    return a.ord < b.ord;
-}
-
-fn routeChains(
-    arena: Allocator,
-    graph: *const Graph,
-    verts: []const Vertex,
-    rank: []const u32,
-    chains: []const Chain,
-    max_rank: u32,
-    view: View,
-) Allocator.Error![]Route {
+fn routeChains(arena: Allocator, graph: *const Graph, verts: []const Vertex, rank: []const u32, chains: []const Chain, max_rank: u32) Allocator.Error![]Route {
     _ = rank;
-    // Per-channel vertical-lane assignment. Collect each channel's distinct lane
-    // *groups*, order them, then map (channel, group) → lane index so every
-    // segment in a group shares one trunk x. Grouping is view-dependent (see
-    // laneKey/laneOrd): the power view groups by rail voltage — each voltage
-    // gets its own track ordered low→high, so different-voltage rails never
-    // share a vertical and read as cleanly separated colored buses; other views
-    // group by source vertex (the shared-source fanout trunk).
-    var seen = std.AutoHashMapUnmanaged(LaneKey, void){};
-    const chan = try arena.alloc(std.ArrayListUnmanaged(LanePair), max_rank + 1);
-    for (chan) |*c| c.* = .empty;
+    // Vertical lane per channel, keyed by source vertex: every edge leaving the
+    // same node shares one trunk x, so a fanout reads as a clean comb. `lane_of`
+    // is indexed by (channel rank × vertex-count + source vertex); `distinct`
+    // counts the distinct sources per channel.
+    const slots = verts.len;
+    const lane_of = try arena.alloc(i32, (max_rank + 1) * slots);
+    @memset(lane_of, -1);
+    const distinct = try arena.alloc(u32, max_rank + 1);
+    @memset(distinct, 0);
     for (chains) |c| {
         var i: usize = 0;
         while (i + 1 < c.verts.len) : (i += 1) {
-            const r = verts[c.verts[i]].rank;
-            const k = laneKey(view, graph.edges[c.eidx], c.verts[i]);
-            if (!(try seen.getOrPut(arena, .{ .r = r, .k = k })).found_existing) {
-                const ord = laneOrd(view, graph.edges[c.eidx], chan[r].items.len);
-                try chan[r].append(arena, .{ .k = k, .ord = ord });
+            const src = c.verts[i];
+            const r = verts[src].rank;
+            const key = r * slots + src;
+            if (lane_of[key] < 0) {
+                lane_of[key] = @intCast(distinct[r]);
+                distinct[r] += 1;
             }
         }
-    }
-    var lane_of = std.AutoHashMapUnmanaged(LaneKey, u32){};
-    const distinct = try arena.alloc(u32, max_rank + 1);
-    for (chan, 0..) |*list, r| {
-        std.mem.sort(LanePair, list.items, {}, cmpLaneOrd);
-        for (list.items, 0..) |p, idx| try lane_of.put(arena, .{ .r = @intCast(r), .k = p.k }, @intCast(idx));
-        distinct[r] = @intCast(list.items.len);
     }
 
     const routes = try arena.alloc(Route, chains.len);
@@ -407,8 +374,7 @@ fn routeChains(
             const a = verts[c.verts[i]];
             const b = verts[c.verts[i + 1]];
             const r = a.rank;
-            const k = laneKey(view, graph.edges[c.eidx], c.verts[i]);
-            const lane = lane_of.get(.{ .r = r, .k = k }).?;
+            const lane: u32 = @intCast(lane_of[r * slots + c.verts[i]]);
             const frac = (@as(f64, @floatFromInt(lane)) + 1) / (@as(f64, @floatFromInt(distinct[r])) + 1);
             const chx = colX(r) + node_w + frac * h_gap;
             try pts.append(arena, .{ .x = chx, .y = cy(a) });
@@ -430,6 +396,250 @@ fn routeChains(
         };
     }
     return routes;
+}
+
+// ── power view: voltage-band layout ─────────────────────────────────────
+//
+// The power view is laid out as a supply *tree*, not a signal-flow graph:
+// producers (any node that sources a power edge — battery, regulators, the pi
+// filter) sit in layered columns on the left; pure consumers are grouped into
+// stacked, tinted voltage *bands* on the right, one band per rail level.
+
+const volt_eps: f64 = 0.05; // group voltages within 50 mV as one band
+const power_channel: f64 = 120; // gap between the producer column and the bands
+const power_supply_margin: f64 = 52; // left margin for producer→producer supply links
+const band_pad: f64 = 14;
+const band_heading_h: f64 = 24;
+const band_gap: f64 = 22;
+const cell_gx: f64 = 24; // horizontal gap between boxes inside a band
+const cell_gy: f64 = v_gap; // vertical gap between band rows
+
+fn powerLayout(arena: Allocator, graph: *const Graph) Allocator.Error!?Layout {
+    const n = graph.nodes.len;
+    const is_producer = try arena.alloc(bool, n);
+    const participates = try arena.alloc(bool, n);
+    @memset(is_producer, false);
+    @memset(participates, false);
+    var any = false;
+    for (graph.edges) |e| {
+        if (e.class != .power) continue;
+        any = true;
+        is_producer[e.from] = true;
+        participates[e.from] = true;
+        participates[e.to] = true;
+    }
+    if (!any) return null;
+
+    // Each consumer's band = the incoming power voltage it mostly runs on.
+    const band_v = try arena.alloc(f64, n);
+    for (band_v) |*x| x.* = std.math.nan(f64);
+    for (0..n) |i| {
+        if (participates[i] and !is_producer[i]) band_v[i] = consumerVoltage(graph, @intCast(i));
+    }
+
+    // Distinct band voltages (ascending) + a trailing "Other" band for unresolved.
+    var bvs: std.ArrayListUnmanaged(f64) = .empty;
+    var has_unspec = false;
+    for (0..n) |i| {
+        if (!participates[i] or is_producer[i]) continue;
+        if (std.math.isNan(band_v[i])) {
+            has_unspec = true;
+            continue;
+        }
+        var seen = false;
+        for (bvs.items) |x| if (@abs(x - band_v[i]) < volt_eps) {
+            seen = true;
+            break;
+        };
+        if (!seen) try bvs.append(arena, band_v[i]);
+    }
+    std.mem.sort(f64, bvs.items, {}, std.sort.asc(f64));
+    const band_count = bvs.items.len + @as(usize, @intFromBool(has_unspec));
+
+    // Tally consumers per band.
+    const band_of = try arena.alloc(usize, n);
+    @memset(band_of, 0);
+    const counts = try arena.alloc(usize, band_count);
+    @memset(counts, 0);
+    var max_band: usize = 0;
+    for (0..n) |i| {
+        if (!participates[i] or is_producer[i]) continue;
+        const bi = bandIndexOf(bvs.items, band_v[i]);
+        band_of[i] = bi;
+        counts[bi] += 1;
+        max_band = @max(max_band, counts[bi]);
+    }
+
+    const px = try arena.alloc(f64, n);
+    const py = try arena.alloc(f64, n);
+    const has_pos = try arena.alloc(bool, n);
+    @memset(has_pos, false);
+
+    // Producers (battery, regulators, filter) stack in one left column. A left
+    // margin holds the supply links between them, drawn as tidy brackets, so the
+    // connector↔regulator feedback loop never forces a backward hook.
+    var has_supply = false;
+    for (graph.edges) |e| {
+        if (e.class == .power and e.from != e.to and is_producer[e.from] and is_producer[e.to]) {
+            has_supply = true;
+            break;
+        }
+    }
+    const supply_margin: f64 = if (has_supply) power_supply_margin else 0;
+    const col_x = pad + supply_margin;
+    var infra_bottom: f64 = pad;
+    var stack_idx: usize = 0;
+    for (0..n) |i| {
+        if (!is_producer[i]) continue;
+        px[i] = col_x;
+        py[i] = pad + @as(f64, @floatFromInt(stack_idx)) * (node_h + v_gap);
+        stack_idx += 1;
+        has_pos[i] = true;
+        infra_bottom = @max(infra_bottom, py[i] + node_h);
+    }
+
+    const bands_x = col_x + node_w + power_channel;
+
+    // Band geometry: a fixed grid width, bands stacked top→bottom by voltage.
+    const cols = powerColsFor(max_band);
+    const fcols: f64 = @floatFromInt(cols);
+    const band_w = fcols * node_w + (fcols - 1) * cell_gx + 2 * band_pad;
+    const bands = try arena.alloc(Band, band_count);
+    const seat = try arena.alloc(usize, band_count);
+    @memset(seat, 0);
+    var ycur = pad;
+    for (0..band_count) |bi| {
+        const rows = @max((counts[bi] + cols - 1) / cols, 1);
+        const frows: f64 = @floatFromInt(rows);
+        const bh = band_heading_h + frows * node_h + (frows - 1) * cell_gy + band_pad;
+        const bv: f64 = if (bi < bvs.items.len) bvs.items[bi] else std.math.nan(f64);
+        bands[bi] = .{ .v = bv, .x = bands_x, .y = ycur, .w = band_w, .h = bh };
+        ycur += bh + band_gap;
+    }
+    const bands_bottom = if (band_count > 0) ycur - band_gap else pad;
+
+    // Seat consumers into their band's grid.
+    for (0..n) |i| {
+        if (!participates[i] or is_producer[i]) continue;
+        const bi = band_of[i];
+        const k = seat[bi];
+        seat[bi] += 1;
+        px[i] = bands_x + band_pad + @as(f64, @floatFromInt(k % cols)) * (node_w + cell_gx);
+        py[i] = bands[bi].y + band_heading_h + @as(f64, @floatFromInt(k / cols)) * (node_h + cell_gy);
+        has_pos[i] = true;
+    }
+
+    var lnodes: std.ArrayListUnmanaged(LNode) = .empty;
+    for (0..n) |i| if (has_pos[i]) try lnodes.append(arena, .{ .gid = @intCast(i), .x = px[i], .y = py[i] });
+    const routes = try buildPowerRoutes(arena, graph, is_producer, band_of, bands, band_v, px, py, bands_x, supply_margin);
+
+    const width = if (band_count > 0) bands_x + band_w + pad else col_x + node_w + pad;
+    const height = @max(infra_bottom, bands_bottom) + pad;
+    return .{ .nodes = try lnodes.toOwnedSlice(arena), .routes = routes, .bands = bands, .width = width, .height = height };
+}
+
+/// The rail voltage a consumer mostly runs on: the incoming power voltage
+/// carried by the most edges (ties broken toward the lowest). NaN ⇒ none resolved.
+fn consumerVoltage(graph: *const Graph, node: u32) f64 {
+    var best_v: f64 = std.math.nan(f64);
+    var best_count: u32 = 0;
+    for (graph.edges) |e| {
+        if (e.class != .power or e.to != node) continue;
+        const v = e.voltage orelse continue;
+        var c: u32 = 0;
+        for (graph.edges) |f| {
+            if (f.class == .power and f.to == node and f.voltage != null) {
+                if (@abs(f.voltage.? - v) < volt_eps) c += 1;
+            }
+        }
+        if (c > best_count or (c == best_count and (std.math.isNan(best_v) or v < best_v))) {
+            best_count = c;
+            best_v = v;
+        }
+    }
+    return best_v;
+}
+
+fn bandIndexOf(bvs: []const f64, v: f64) usize {
+    if (std.math.isNan(v)) return bvs.len; // the trailing "Other" band
+    for (bvs, 0..) |x, i| if (@abs(x - v) < volt_eps) return i;
+    return 0;
+}
+
+/// Roughly-square column count for a band's grid, capped at 4 wide.
+fn powerColsFor(max_band: usize) usize {
+    var cols: usize = 1;
+    while (cols * cols < max_band) cols += 1;
+    return @max(1, @min(cols, 4));
+}
+
+fn mkPowerRoute(from: u32, to: u32, v: ?f64, pts: []Pt) Route {
+    return .{ .from_gid = from, .to_gid = to, .class = .power, .label = "", .voltage = v, .fanout = 1, .pts = pts, .arrow_at_start = false };
+}
+
+const PRouteKey = struct { kind: u8, a: u32, b: u32 };
+
+/// Edges for the banded power view: producer→producer supply links routed as
+/// brackets in the left margin, and one feeder per (producer, band) into the
+/// band's left edge. Each distinct link/feeder is drawn once.
+fn buildPowerRoutes(
+    arena: Allocator,
+    graph: *const Graph,
+    is_producer: []const bool,
+    band_of: []const usize,
+    bands: []const Band,
+    band_v: []const f64,
+    px: []const f64,
+    py: []const f64,
+    bands_x: f64,
+    supply_margin: f64,
+) Allocator.Error![]Route {
+    // Pre-assign each distinct supply link a left-margin lane so they don't overlap.
+    var lane_of = std.AutoHashMapUnmanaged(PRouteKey, u32){};
+    var lanes: u32 = 0;
+    for (graph.edges) |e| {
+        if (e.class != .power or e.from == e.to or !is_producer[e.to]) continue;
+        const gop = try lane_of.getOrPut(arena, .{ .kind = 0, .a = e.from, .b = e.to });
+        if (!gop.found_existing) {
+            gop.value_ptr.* = lanes;
+            lanes += 1;
+        }
+    }
+    const ntotal: f64 = @floatFromInt(@max(lanes, 1));
+    const nb: f64 = @floatFromInt(@max(bands.len, 1));
+
+    var routes: std.ArrayListUnmanaged(Route) = .empty;
+    var drawn = std.AutoHashMapUnmanaged(PRouteKey, void){};
+    for (graph.edges) |e| {
+        if (e.class != .power) continue;
+        const fcyv = py[e.from] + node_h / 2;
+        var pts: std.ArrayListUnmanaged(Pt) = .empty;
+        if (is_producer[e.to]) {
+            const key = PRouteKey{ .kind = 0, .a = e.from, .b = e.to };
+            if (e.from == e.to or (try drawn.getOrPut(arena, key)).found_existing) continue;
+            const lane: f64 = @floatFromInt(lane_of.get(key).?);
+            const mx = pad + (lane + 1) / (ntotal + 1) * supply_margin;
+            const tcyv = py[e.to] + node_h / 2;
+            try pts.append(arena, .{ .x = px[e.from], .y = fcyv });
+            try pts.append(arena, .{ .x = mx, .y = fcyv });
+            try pts.append(arena, .{ .x = mx, .y = tcyv });
+            try pts.append(arena, .{ .x = px[e.to], .y = tcyv });
+            try routes.append(arena, mkPowerRoute(e.from, e.to, e.voltage, try pts.toOwnedSlice(arena)));
+        } else {
+            const bi = band_of[e.to];
+            if ((try drawn.getOrPut(arena, .{ .kind = 1, .a = e.from, .b = @intCast(bi) })).found_existing) continue;
+            const band = bands[bi];
+            const bcy = band.y + band.h / 2;
+            const chx = bands_x - power_channel + (@as(f64, @floatFromInt(bi)) + 1) / (nb + 1) * power_channel;
+            try pts.append(arena, .{ .x = px[e.from] + node_w, .y = fcyv });
+            try pts.append(arena, .{ .x = chx, .y = fcyv });
+            try pts.append(arena, .{ .x = chx, .y = bcy });
+            try pts.append(arena, .{ .x = band.x, .y = bcy });
+            const v: ?f64 = if (std.math.isNan(band_v[e.to])) null else band_v[e.to];
+            try routes.append(arena, mkPowerRoute(e.from, e.to, v, try pts.toOwnedSlice(arena)));
+        }
+    }
+    return routes.toOwnedSlice(arena);
 }
 
 // ── tests ──────────────────────────────────────────────────────────────
@@ -489,20 +699,23 @@ test "computeLayout gives a shared-source fanout one common bend x" {
     }
 }
 
-// spec: diagram/layout - Groups power-view channel lanes by voltage so different rails separate
-test "computeLayout separates power lanes by voltage" {
-    var nodes = [_]types.Node{ mkNode("SRC"), mkNode("A"), mkNode("B"), mkNode("C") };
+// spec: diagram/layout - Groups power consumers into voltage bands fed from the left
+test "computeLayout groups power consumers into voltage bands" {
+    var nodes = [_]types.Node{ mkNode("REG18"), mkNode("REG33"), mkNode("A"), mkNode("B"), mkNode("C") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = .power, .label = "a", .voltage = 1.8 },
-        .{ .from = 0, .to = 2, .class = .power, .label = "b", .voltage = 1.8 }, // same V as edge 0
-        .{ .from = 0, .to = 3, .class = .power, .label = "c", .voltage = 3.3 }, // different V
+        .{ .from = 0, .to = 2, .class = .power, .label = "v18", .voltage = 1.8 },
+        .{ .from = 1, .to = 3, .class = .power, .label = "v33", .voltage = 3.3 },
+        .{ .from = 1, .to = 4, .class = .power, .label = "v33b", .voltage = 3.3 },
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const lay = (try computeLayout(arena.allocator(), &graph, .power)) orelse return error.TestUnexpectedResult;
-    try testing.expectEqual(@as(usize, 3), lay.routes.len);
-    // Bend x is the trunk track: equal voltages share it, different voltages split.
-    try testing.expectApproxEqAbs(lay.routes[0].pts[1].x, lay.routes[1].pts[1].x, 0.01);
-    try testing.expect(@abs(lay.routes[0].pts[1].x - lay.routes[2].pts[1].x) > 0.5);
+    // Two bands (1.8 V, 3.3 V) sorted ascending; 3.3 V band sits below 1.8 V.
+    try testing.expectEqual(@as(usize, 2), lay.bands.len);
+    try testing.expectApproxEqAbs(@as(f64, 1.8), lay.bands[0].v, 0.01);
+    try testing.expectApproxEqAbs(@as(f64, 3.3), lay.bands[1].v, 0.01);
+    try testing.expect(lay.bands[1].y > lay.bands[0].y);
+    // All five nodes (2 regulators + 3 consumers) placed.
+    try testing.expectEqual(@as(usize, 5), lay.nodes.len);
 }

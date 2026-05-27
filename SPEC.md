@@ -226,7 +226,7 @@ Public functions: computeLayout
 - Returns null for a view with no edges
 - Ranks nodes left-to-right by signal flow, breaking cycles for layering
 - Routes edges sharing a source through one common vertical trunk
-- Groups power-view channel lanes by voltage so different rails separate
+- Groups power consumers into voltage bands fed from the left
 
 ## diagram/render
 
@@ -236,6 +236,7 @@ Public functions: renderTabs
 - Draws all edge labels after all wires so net pills stay legible
 - Draws each rail label once per source, not once per fanout branch
 - Colors power edges by voltage and renders a voltage legend
+- Draws voltage-band backgrounds with rail-colored headings in the power view
 
 ## diagram/diagram
 

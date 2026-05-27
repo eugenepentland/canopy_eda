@@ -57,6 +57,7 @@ src/diagram/classify.zig::netClass fn
 src/diagram/collect.zig::collectGraph fn
 src/diagram/diagram.zig::DIAGRAM_CSS value
 src/diagram/diagram.zig::renderBlockDiagramTabs fn
+src/diagram/layout.zig::Band struct_
 src/diagram/layout.zig::LNode struct_
 src/diagram/layout.zig::Layout struct_
 src/diagram/layout.zig::Route struct_
