@@ -66,8 +66,7 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - add bakes design properties (MPN, Manufacturer, …) on the first sync
 - create_board_item writes a section staging box as a (gr_rect …) on Dwgs.User
 - create_board_item writes a section label as a (gr_text …) on Dwgs.User
-- hides the refdes and metadata but keeps Value visible
-- un-hides a previously hidden Reference or Value
+- hides the refdes, value, and metadata so the silk/fab carries no auto-generated text
 - leaves already-correct property visibility untouched (idempotent)
 
 ## eval/builtins
