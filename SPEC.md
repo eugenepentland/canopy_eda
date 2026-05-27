@@ -232,6 +232,10 @@ Public functions: renderSchematic
 - Flags a power rail with a declared source but no consumer pins
 - Flags a power rail whose nominal voltage cannot be resolved
 - Emits no integrity violation on a fully-resolved rail with consumers
+- Treats a sub-block input port wired via net-tie as a rail consumer
+- Flags a rail whose only net-tie is its own source port (no consumer)
+- Recognises a VREF-supplied level translator as powered (no false positive)
+- Still flags an IC with a ground pin but no recognised power net
 - Flags a sequencing cycle by emitting sequence_cycle per affected rail
 - Flags a net where the worst driver high level is below the worst receiver high threshold
 - Emits no voltage-domain violation when driver and receiver levels are compatible
