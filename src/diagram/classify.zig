@@ -45,6 +45,10 @@ pub fn netClass(name: []const u8, port_map: *const PortClassMap) NetClass {
     if (port_map.get(name)) |c| return c;
     if (isGround(name)) return .ground;
     if (isPowerRail(name)) return .power;
+    // An enable strobe is a control GPIO no matter which subsystem it gates,
+    // so it must win over the clock substring match: TCXO_EN gates the TCXO
+    // but is driven by the PCAL6534 expander, not a clock copy.
+    if (isEnable(name)) return .control;
     if (isClock(name)) return .clock;
     if (isControl(name)) return .control;
     if (isRf(name)) return .rf;
@@ -69,6 +73,11 @@ const control_sub = [_][]const u8{ "_SPI_", "_EN_", "TXEN", "_FAULT", "MUXOUT", 
 const control_suf = [_][]const u8{ "_EN", "ADV", "RST" };
 const control_eq = [_][]const u8{ "CHIRP_START", "CNV_MASTER" };
 
+// Enable strobes: a dedicated suffix table so enable-ness can outrank a clock
+// substring match (TCXO_EN, PLL_EN, …) without reordering the whole control
+// category. `_EN` also lives in control_suf for the post-clock control pass.
+const enable_suf = [_][]const u8{"_EN"};
+
 const rf_pre = [_][]const u8{ "LO_", "BEAM", "ADF_CH", "TX1_", "TX2_", "LF" };
 const rf_sub = [_][]const u8{ "RFIN", "RFOUT", "LNAOUT", "_LO_", "LO_OUT", "CPOUT", "EMVS", "VTUNE", "VARAC", "_RF", "_LF" };
 
@@ -91,6 +100,12 @@ fn isClock(n: []const u8) bool {
 fn isControl(n: []const u8) bool {
     return anyPrefix(n, &control_pre) or anyContains(n, &control_sub) or
         anySuffix(n, &control_suf) or anyEq(n, &control_eq);
+}
+
+/// An enable strobe (`*_EN`). Checked ahead of the clock heuristic so a net
+/// named for the clock it gates (TCXO_EN) classifies as control, not clock.
+fn isEnable(n: []const u8) bool {
+    return anySuffix(n, &enable_suf);
 }
 
 fn isRf(n: []const u8) bool {
@@ -138,6 +153,11 @@ test "netClass classifies real Cyclops net names" {
     try testing.expectEqual(NetClass.clock, netClass("REF_4159_1_AC", &pm));
     try testing.expectEqual(NetClass.control, netClass("CS_ADF4159_1", &pm));
     try testing.expectEqual(NetClass.control, netClass("RF_SPI_SCK", &pm));
+    // Enable strobes are expander GPIO (control), even when named for the
+    // clock/PLL they gate — TCXO_EN must not land in the clocks view.
+    try testing.expectEqual(NetClass.control, netClass("TCXO_EN", &pm));
+    try testing.expectEqual(NetClass.control, netClass("PLL_EN", &pm));
+    try testing.expectEqual(NetClass.clock, netClass("RADAR_REF_TCXO", &pm));
     try testing.expectEqual(NetClass.rf, netClass("CPOUT_1", &pm));
     try testing.expectEqual(NetClass.rf, netClass("BEAM1_RFIN", &pm));
     try testing.expectEqual(NetClass.rf, netClass("ADF_CH1P", &pm));

@@ -62,9 +62,13 @@ fn renderView(allocator: Allocator, graph: *const Graph, view: View, w: *Writer)
         "<svg viewBox=\"0 0 {d:.0} {d:.0}\" class=\"dg-svg\" xmlns=\"http://www.w3.org/2000/svg\">",
         .{ lay.width, lay.height },
     );
-    // Edges first so node rects paint on top of the wires.
-    for (lay.routes) |r| try writeEdge(arena, w, r, view);
+    // Three z-ordered passes: wires first (node rects then paint over their
+    // ends), then nodes, then the net-label pills last of all. The pills are
+    // opaque, so drawing them above every wire keeps the net name readable
+    // even where several lines cross the label.
+    for (lay.routes) |r| try writeEdgeWire(w, r, view);
     for (lay.nodes) |n| try writeNode(arena, w, graph.nodes[n.gid], n.x, n.y, view);
+    for (lay.routes) |r| try writeEdgeLabel(arena, w, r, viewColor(view));
     try w.writeAll("</svg></div>");
 }
 
@@ -133,7 +137,9 @@ fn writeRailTags(arena: Allocator, w: *Writer, node: types.Node, x: f64, y: f64)
 
 // ── edges ──────────────────────────────────────────────────────────────
 
-fn writeEdge(arena: Allocator, w: *Writer, r: layout.Route, view: View) (Allocator.Error || Writer.Error)!void {
+/// Wire + arrowhead only. The net-label pill is emitted in a separate later
+/// pass (see `renderView`) so it always paints on top of every wire.
+fn writeEdgeWire(w: *Writer, r: layout.Route, view: View) Writer.Error!void {
     const color = viewColor(view);
     try w.print("<polyline points=\"", .{});
     for (r.pts, 0..) |p, i| {
@@ -142,7 +148,6 @@ fn writeEdge(arena: Allocator, w: *Writer, r: layout.Route, view: View) (Allocat
     }
     try w.print("\" class=\"dg-edge\" stroke=\"{s}\"/>", .{color});
     try writeArrow(w, r, color);
-    try writeEdgeLabel(arena, w, r, color);
 }
 
 fn writeArrow(w: *Writer, r: layout.Route, color: []const u8) Writer.Error!void {
@@ -273,4 +278,23 @@ test "renderTabs emits only tabs for views that have edges" {
     defer aw2.deinit();
     try renderTabs(testing.allocator, &empty, &aw2.writer);
     try testing.expectEqual(@as(usize, 0), aw2.written().len);
+}
+
+// spec: diagram/render - Draws all edge labels after all wires so net pills stay legible
+test "renderTabs draws edge-label pills after every wire" {
+    var nodes = [_]types.Node{ mkNode("A"), mkNode("B"), mkNode("C") };
+    var edges = [_]types.Edge{
+        .{ .from = 0, .to = 1, .class = .rf, .label = "N1" },
+        .{ .from = 0, .to = 2, .class = .rf, .label = "N2" },
+    };
+    var graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try renderTabs(testing.allocator, &graph, &aw.writer);
+    const out = aw.written();
+    // The last wire polyline must precede the first label pill, so no wire is
+    // ever painted over a net pill.
+    const last_wire = std.mem.lastIndexOf(u8, out, "class=\"dg-edge\"").?;
+    const first_pill = std.mem.indexOf(u8, out, "class=\"dg-pill\"").?;
+    try testing.expect(last_wire < first_pill);
 }

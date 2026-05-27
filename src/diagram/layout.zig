@@ -328,17 +328,29 @@ fn cy(v: Vertex) f64 {
 
 fn routeChains(arena: Allocator, graph: *const Graph, verts: []const Vertex, rank: []const u32, chains: []const Chain, max_rank: u32) Allocator.Error![]Route {
     _ = rank;
-    // Count segments per channel (channel r sits between column r and r+1).
-    const count = try arena.alloc(u32, max_rank + 1);
-    @memset(count, 0);
+    // Assign each channel segment a vertical lane *keyed by its source vertex*,
+    // not per-segment. Every edge leaving the same node in a channel then shares
+    // one trunk x, so a fanout reads as a clean comb (one stub → one trunk →
+    // branches) instead of a staircase of separate bends. `lane_of` is indexed
+    // by (channel rank × vertex-count + source vertex); `distinct` counts the
+    // distinct sources per channel (the trunk slots to spread across the gap).
+    const slots = verts.len;
+    const lane_of = try arena.alloc(i32, (max_rank + 1) * slots);
+    @memset(lane_of, -1);
+    const distinct = try arena.alloc(u32, max_rank + 1);
+    @memset(distinct, 0);
     for (chains) |c| {
         var i: usize = 0;
         while (i + 1 < c.verts.len) : (i += 1) {
-            count[verts[c.verts[i]].rank] += 1;
+            const src = c.verts[i];
+            const r = verts[src].rank;
+            const key = r * slots + src;
+            if (lane_of[key] < 0) {
+                lane_of[key] = @intCast(distinct[r]);
+                distinct[r] += 1;
+            }
         }
     }
-    const used = try arena.alloc(u32, max_rank + 1);
-    @memset(used, 0);
 
     const routes = try arena.alloc(Route, chains.len);
     for (chains, 0..) |c, ci| {
@@ -350,9 +362,8 @@ fn routeChains(arena: Allocator, graph: *const Graph, verts: []const Vertex, ran
             const a = verts[c.verts[i]];
             const b = verts[c.verts[i + 1]];
             const r = a.rank;
-            const lane = used[r];
-            used[r] += 1;
-            const frac = (@as(f64, @floatFromInt(lane)) + 1) / (@as(f64, @floatFromInt(count[r])) + 1);
+            const lane: u32 = @intCast(lane_of[r * slots + c.verts[i]]);
+            const frac = (@as(f64, @floatFromInt(lane)) + 1) / (@as(f64, @floatFromInt(distinct[r])) + 1);
             const chx = colX(r) + node_w + frac * h_gap;
             try pts.append(arena, .{ .x = chx, .y = cy(a) });
             try pts.append(arena, .{ .x = chx, .y = cy(b) });
@@ -408,4 +419,26 @@ test "computeLayout breaks a cycle and ranks across columns" {
     try testing.expectEqual(@as(usize, 3), lay.nodes.len);
     // Three ranks ⇒ at least three columns wide.
     try testing.expect(lay.width > node_w * 2);
+}
+
+// spec: diagram/layout - Routes edges sharing a source through one common vertical trunk
+test "computeLayout gives a shared-source fanout one common bend x" {
+    var nodes = [_]types.Node{ mkNode("SRC"), mkNode("A"), mkNode("B"), mkNode("C") };
+    var edges = [_]types.Edge{
+        .{ .from = 0, .to = 1, .class = .clock, .label = "r1" },
+        .{ .from = 0, .to = 2, .class = .clock, .label = "r2" },
+        .{ .from = 0, .to = 3, .class = .clock, .label = "r3" },
+    };
+    const graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeLayout(arena.allocator(), &graph, .clocks)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 3), lay.routes.len);
+    // The first vertical channel segment is pts[1]→pts[2]; its x is the bend.
+    // All three edges leave the same source, so they must share one trunk x.
+    const bend = lay.routes[0].pts[1].x;
+    for (lay.routes) |r| {
+        try testing.expect(r.pts.len >= 4);
+        try testing.expectApproxEqAbs(bend, r.pts[1].x, 0.01);
+    }
 }

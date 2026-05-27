@@ -223,12 +223,14 @@ Public functions: computeLayout
 
 - Returns null for a view with no edges
 - Ranks nodes left-to-right by signal flow, breaking cycles for layering
+- Routes edges sharing a source through one common vertical trunk
 
 ## diagram/render
 
 Public functions: renderTabs
 
 - Renders a tab per non-empty view and nothing when no view has edges
+- Draws all edge labels after all wires so net pills stay legible
 
 ## diagram/diagram
 
