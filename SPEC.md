@@ -219,6 +219,7 @@ Public functions: collectGraph
 - Resolves a power edge's voltage from any block that declares the rail
 - Parses a rail voltage from its V<d>P<d> name when no port declares one
 - Picks each block's primary supply rail by pin count and records its full rail set
+- Synthesises an antenna endpoint for a board-edge RF net touching one block
 
 ## diagram/layout
 
@@ -242,6 +243,7 @@ Public functions: renderTabs
 - Draws each rail label once per source, not once per fanout branch
 - Colors power edges by voltage and renders a voltage legend
 - Draws per-rail load buckets with rail-colored headings in the power view
+- Tints RF edges returning to the connector distinctly from the forward chain
 
 ## diagram/diagram
 

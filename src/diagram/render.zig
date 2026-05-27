@@ -70,15 +70,12 @@ fn renderView(allocator: Allocator, graph: *const Graph, view: View, w: *Writer)
     if (view == .power) {
         try renderPowerView(arena, w, graph, lay, palette);
     } else {
-        // Z-ordered passes: wires first (node rects paint over their ends), then
+        // Z-ordered passes: edges first (node rects paint over their ends), then
         // nodes, then net-label pills last (opaque, so they stay legible where
-        // wires cross). Clocks uses the curved connector style (its edges are all
-        // adjacent-column hops); RF keeps the lane-routed orthogonal wires.
-        const curved = view == .clocks;
-        for (lay.routes) |r| {
-            const color = edgeColor(view, palette, r.voltage);
-            if (curved) try writeCurveEdge(w, r, color) else try writeEdgeWire(w, r, color);
-        }
+        // edges cross). Both non-power views use the same smooth end-to-end
+        // Bézier connector as the power tree — lane alignment keeps chains on one
+        // row, so the curves run clean.
+        for (lay.routes) |r| try writeCurveEdge(w, r, nonPowerEdgeColor(view, graph, r));
         for (lay.nodes) |n| try writeNode(arena, w, graph.nodes[n.gid], n.x, n.y);
         // One label per (source, rail). A rail fanning out to many consumers is a
         // single net, so its name is drawn once on the trunk, not once per branch.
@@ -86,7 +83,7 @@ fn renderView(allocator: Allocator, graph: *const Graph, view: View, w: *Writer)
         for (lay.routes) |r| {
             const key = try std.fmt.allocPrint(arena, "{d}|{s}", .{ r.from_gid, r.label });
             if ((try labeled.getOrPut(arena, key)).found_existing) continue;
-            try writeEdgeLabel(arena, w, r, edgeColor(view, palette, r.voltage));
+            try writeEdgeLabel(arena, w, r, nonPowerEdgeColor(view, graph, r));
         }
     }
     try w.writeAll("</svg></div>");
@@ -101,8 +98,7 @@ const label_y_off: f64 = 24; // title baseline from node top
 const sub_y_off: f64 = 46; // subtitle baseline from node top
 const min_label_chars: usize = 8;
 const min_sub_chars: usize = 10;
-const arrow_len: f64 = 8; // arrowhead length along the wire
-const arrow_half: f64 = 5; // arrowhead half-height
+const rf_if_color: []const u8 = "#e3742f"; // RF edges returning to the connector (IF lines)
 const pill_char_w: f64 = 8.4; // edge-label width per character
 const pill_pad_x: f64 = 12; // edge-label horizontal padding
 const pill_h: f64 = 20; // edge-label pill height
@@ -114,9 +110,11 @@ fn writeNode(arena: Allocator, w: *Writer, node: types.Node, x: f64, y: f64) (Al
     const has_link = node.slug.len > 0;
     if (has_link) try w.print("<a href=\"#sec-{s}\" class=\"dg-node-link\">", .{node.slug});
     try w.writeAll("<g class=\"dg-node\">");
+    // Board-edge endpoints (antennas / EMVS cells) get a dashed border.
+    const rect_class = if (node.is_boundary) "dg-rect dg-boundary" else "dg-rect";
     try w.print(
-        "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.0}\" height=\"{d:.0}\" rx=\"6\" class=\"dg-rect\" stroke=\"{s}\"/>",
-        .{ x, y, layout.node_w, layout.node_h, color },
+        "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.0}\" height=\"{d:.0}\" rx=\"6\" class=\"{s}\" stroke=\"{s}\"/>",
+        .{ x, y, layout.node_w, layout.node_h, rect_class, color },
     );
     const label_max: usize = @max(min_label_chars, @as(usize, @intFromFloat((layout.node_w - pad_x * 2) / label_char_w)));
     try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-label\">", .{ x + pad_x, y + label_y_off });
@@ -134,31 +132,16 @@ fn writeNode(arena: Allocator, w: *Writer, node: types.Node, x: f64, y: f64) (Al
 
 // ── edges ──────────────────────────────────────────────────────────────
 
-/// Wire + arrowhead only. The net-label pill is emitted in a separate later
-/// pass (see `renderView`) so it always paints on top of every wire.
-fn writeEdgeWire(w: *Writer, r: layout.Route, color: []const u8) Writer.Error!void {
-    try w.print("<polyline points=\"", .{});
-    for (r.pts, 0..) |p, i| {
-        if (i > 0) try w.writeAll(" ");
-        try w.print("{d:.1},{d:.1}", .{ p.x, p.y });
-    }
-    try w.print("\" class=\"dg-edge\" stroke=\"{s}\"/>", .{color});
-    try writeArrow(w, r, color);
+/// A small filled terminal dot where an edge meets a block.
+fn writeDot(w: *Writer, p: types.Pt, color: []const u8) Writer.Error!void {
+    try w.print("<circle cx=\"{d:.1}\" cy=\"{d:.1}\" r=\"{d:.1}\" fill=\"{s}\"/>", .{ p.x, p.y, edge_dot_r, color });
 }
 
-fn writeArrow(w: *Writer, r: layout.Route, color: []const u8) Writer.Error!void {
-    const n = r.pts.len;
-    if (n < 2) return;
-    // Arrow tip is the connection point at the logical `to` end. Approach
-    // segments are horizontal, so the triangle points left or right.
-    const tip = if (r.arrow_at_start) r.pts[0] else r.pts[n - 1];
-    const prev = if (r.arrow_at_start) r.pts[1] else r.pts[n - 2];
-    const points_left = tip.x < prev.x;
-    const dx: f64 = if (points_left) arrow_len else -arrow_len;
-    try w.print(
-        "<polygon points=\"{d:.1},{d:.1} {d:.1},{d:.1} {d:.1},{d:.1}\" fill=\"{s}\" class=\"dg-arrow\"/>",
-        .{ tip.x, tip.y, tip.x + dx, tip.y - arrow_half, tip.x + dx, tip.y + arrow_half, color },
-    );
+/// Edge stroke for the non-power views: an RF edge returning to the connector
+/// (an IF line) gets a distinct warm tone; everything else uses the view accent.
+fn nonPowerEdgeColor(view: View, graph: *const Graph, r: layout.Route) []const u8 {
+    if (view == .rf and graph.nodes[r.to_gid].category == .connector) return rf_if_color;
+    return viewColor(view);
 }
 
 fn writeEdgeLabel(arena: Allocator, w: *Writer, r: layout.Route, color: []const u8) (Allocator.Error || Writer.Error)!void {
@@ -263,8 +246,8 @@ fn writeCurveEdge(w: *Writer, r: layout.Route, color: []const u8) Writer.Error!v
         "<path d=\"M {d:.1} {d:.1} C {d:.1} {d:.1}, {d:.1} {d:.1}, {d:.1} {d:.1}\" class=\"dg-edge\" stroke=\"{s}\"/>",
         .{ a.x, a.y, c1x, a.y, c2x, b.y, b.x, b.y, color },
     );
-    try w.print("<circle cx=\"{d:.1}\" cy=\"{d:.1}\" r=\"{d:.1}\" fill=\"{s}\"/>", .{ a.x, a.y, edge_dot_r, color });
-    try w.print("<circle cx=\"{d:.1}\" cy=\"{d:.1}\" r=\"{d:.1}\" fill=\"{s}\"/>", .{ b.x, b.y, edge_dot_r, color });
+    try writeDot(w, a, color);
+    try writeDot(w, b, color);
 }
 
 /// Draws the power supply tree: rail-colored wires first, then the source /
@@ -420,6 +403,7 @@ pub const CSS =
     \\#dg-tab-clocks:checked ~ .dg-tabs .dg-tab-clocks{color:#fff;background:#4ab3a3;border-color:#4ab3a3;}
     \\#dg-tab-rf:checked ~ .dg-tabs .dg-tab-rf{color:#fff;background:#e040fb;border-color:#e040fb;}
     \\.dg-rect{fill:#0d1117;stroke-width:1.5;}
+    \\.dg-boundary{stroke-dasharray:5 4;}
     \\.dg-node:hover .dg-rect{fill:#161b22;}
     \\.dg-node-link{cursor:pointer;}
     \\.dg-label{fill:#c9d1d9;font:600 18px -apple-system,BlinkMacSystemFont,sans-serif;}
@@ -531,4 +515,18 @@ test "renderTabs colors power edges by voltage with a legend" {
     try testing.expect(std.mem.indexOf(u8, out, "3.3 V") != null);
     // Lowest voltage gets the first (cool) palette color on its wire stroke.
     try testing.expect(std.mem.indexOf(u8, out, "stroke=\"#58a6ff\"") != null);
+}
+
+// spec: diagram/render - Tints RF edges returning to the connector distinctly from the forward chain
+test "renderTabs tints RF connector-return edges" {
+    var j1 = mkNode("J1");
+    j1.category = .connector;
+    var nodes = [_]types.Node{ mkNode("MIX"), j1 };
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = .rf, .label = "ADF_CH1" }};
+    var graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try renderTabs(testing.allocator, &graph, &aw.writer);
+    // The IF-return edge (to the connector) uses the warm IF tone, not magenta.
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "stroke=\"#e3742f\"") != null);
 }

@@ -84,10 +84,19 @@ pub fn collectGraph(
     }
 
     const flat = try buildFlatNets(scratch, block);
-    const edges = try deriveEdges(allocator, scratch, flat, &mem, &port_map, &producer_by_net, nodes.items);
+
+    var edge_list: std.ArrayListUnmanaged(Edge) = .empty;
+    errdefer {
+        for (edge_list.items) |e| allocator.free(e.label);
+        edge_list.deinit(allocator);
+    }
+    try deriveEdges(allocator, scratch, flat, &mem, &port_map, &producer_by_net, nodes.items, &edge_list);
+    // Board-edge antennas / EMVS cells: synthesise an endpoint node + edge for
+    // each RF net that reaches only one on-board block. Appends to both lists.
+    try antennaPass(allocator, scratch, block, flat, &mem, &port_map, &nodes, &edge_list);
     try assignRails(allocator, scratch, flat, &mem, &port_map, nodes.items);
 
-    return .{ .nodes = try nodes.toOwnedSlice(allocator), .edges = edges };
+    return .{ .nodes = try nodes.toOwnedSlice(allocator), .edges = try edge_list.toOwnedSlice(allocator) };
 }
 
 const RailCount = struct { v: f64, c: u32 };
@@ -221,6 +230,7 @@ fn freeNode(allocator: Allocator, n: Node) void {
     allocator.free(n.inputs);
     allocator.free(n.outputs);
     if (n.slug.len > 0) allocator.free(n.slug);
+    if (n.is_boundary and n.label.len > 0) allocator.free(n.label);
 }
 
 // ── rail collection (ported from the old hub diagram) ──────────────────
@@ -308,7 +318,8 @@ fn deriveEdges(
     port_map: *const classify.PortClassMap,
     producer_by_net: *const std.StringHashMapUnmanaged(u32),
     nodes: []const Node,
-) Allocator.Error![]Edge {
+    edge_list: *std.ArrayListUnmanaged(Edge),
+) Allocator.Error!void {
     var acc: std.ArrayListUnmanaged(AccEdge) = .empty;
     var key_to_idx: std.StringHashMapUnmanaged(usize) = .empty;
     var touched_set: std.AutoHashMapUnmanaged(u32, void) = .empty;
@@ -339,19 +350,144 @@ fn deriveEdges(
         }
     }
 
-    const edges = try allocator.alloc(Edge, acc.items.len);
-    errdefer allocator.free(edges);
-    for (acc.items, 0..) |a, i| {
-        edges[i] = .{
+    for (acc.items) |a| {
+        try edge_list.append(allocator, .{
             .from = a.from,
             .to = a.to,
             .class = a.class,
             .label = try allocator.dupe(u8, a.label),
             .voltage = a.voltage,
             .fanout = a.fanout,
-        };
+        });
     }
-    return edges;
+}
+
+// ── board-edge antennas / EMVS cells ────────────────────────────────────
+
+/// True for an RF net that names a board boundary (antenna / EMVS cell): a
+/// `_RFIN` / `_RFOUT` feed (exact suffix, so the internal `LMX_RFOUTB_SE` LO
+/// output is excluded), a numbered/differential cell leg (`RX1_RFIN3+`), or a
+/// `TX_EMVS_*` cell drive. The leading underscore also excludes `RFINB_4159_1`.
+fn isBoundaryName(name: []const u8) bool {
+    if (std.mem.startsWith(u8, name, "TX_EMVS")) return true;
+    if (std.mem.endsWith(u8, name, "_RFOUT") or std.mem.endsWith(u8, name, "_RFIN")) return true;
+    const at = std.mem.indexOf(u8, name, "_RFIN") orelse return false;
+    const after = at + "_RFIN".len;
+    return after < name.len and isDigit(name[after]);
+}
+
+/// Group key for a boundary net, so a cell's many legs collapse to one node:
+/// `TX_EMVS_*` → `TX_EMVS`, `BEAM1_RFIN` → `BEAM1`, `RX1_RFIN3+` → `RX1`.
+fn antennaBase(name: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, name, "TX_EMVS")) return "TX_EMVS";
+    if (std.mem.indexOf(u8, name, "_RFOUT")) |i| return name[0..i];
+    if (std.mem.indexOf(u8, name, "_RFIN")) |i| return name[0..i];
+    return name;
+}
+
+/// Display label for a synthesised endpoint (allocated; freed by deinit).
+fn antennaLabel(allocator: Allocator, base: []const u8) Allocator.Error![]const u8 {
+    if (std.mem.eql(u8, base, "TX_EMVS")) return allocator.dupe(u8, "TX-EMVS cell");
+    if (std.mem.startsWith(u8, base, "RX")) return std.fmt.allocPrint(allocator, "{s} EMVS cell", .{base});
+    return std.fmt.allocPrint(allocator, "{s} antenna", .{base});
+}
+
+/// Net-name fallback for whether the *chip* drives a boundary net (so the
+/// antenna is the sink): transmit feeds (`*_RFOUT`, `TX*`) drive outward.
+fn nameDrivesOut(name: []const u8) bool {
+    return std.mem.endsWith(u8, name, "_RFOUT") or std.mem.startsWith(u8, name, "TX");
+}
+
+/// `port name → declared as an output` for every section port, so an antenna
+/// edge points the right way (chip→antenna when the chip's port is an output).
+fn buildRfPortDir(scratch: Allocator, block: *const DesignBlock) Allocator.Error!std.StringHashMapUnmanaged(bool) {
+    var m: std.StringHashMapUnmanaged(bool) = .empty;
+    for (block.sections) |sec| {
+        for (sec.ports) |p| try m.put(scratch, p.name, p.direction == .out);
+        for (sec.sub_sections) |ss| {
+            for (ss.ports) |p| try m.put(scratch, p.name, p.direction == .out);
+        }
+    }
+    return m;
+}
+
+/// Synthesise an endpoint node + edge for each RF boundary net that reaches
+/// exactly one on-board block. Antennas grouped by `antennaBase`; the four
+/// `TX_EMVS_*` legs collapse onto one cell with a fanout count.
+fn antennaPass(
+    allocator: Allocator,
+    scratch: Allocator,
+    block: *const DesignBlock,
+    flat: []const export_kicad.FlatNet,
+    mem: *const membership.Membership,
+    port_map: *const classify.PortClassMap,
+    nodes: *std.ArrayListUnmanaged(Node),
+    edge_list: *std.ArrayListUnmanaged(Edge),
+) Allocator.Error!void {
+    const dir = try buildRfPortDir(scratch, block);
+    var ant_id: std.StringHashMapUnmanaged(u32) = .empty;
+    var pair_idx: std.AutoHashMapUnmanaged(u64, usize) = .empty;
+    var touched_set: std.AutoHashMapUnmanaged(u32, void) = .empty;
+
+    for (flat) |net| {
+        const clean = cleanNetName(net.name);
+        if (!isBoundaryName(clean)) continue;
+        if (classify.netClass(clean, port_map) != .rf) continue;
+
+        touched_set.clearRetainingCapacity();
+        var chip: ?u32 = null;
+        var count: usize = 0;
+        for (net.pins) |p| {
+            const nid = mem.resolve(p.ref_des) orelse continue;
+            const gop = try touched_set.getOrPut(scratch, nid);
+            if (!gop.found_existing) {
+                count += 1;
+                chip = nid;
+            }
+        }
+        if (count != 1) continue; // a 2-block net is a real edge, not a boundary
+        // A real antenna terminates on an RF chip, never on the mezzanine. If a
+        // boundary net resolves only to the connector it's an attachment
+        // artifact (the chip's sub-block folded into the connector), so skip it.
+        if (nodes.items[chip.?].category == .connector) continue;
+
+        const base = antennaBase(clean);
+        const aid = blk: {
+            const gop = try ant_id.getOrPut(scratch, base);
+            if (gop.found_existing) break :blk gop.value_ptr.*;
+            try nodes.append(allocator, .{
+                .label = try antennaLabel(allocator, base),
+                .subtitle = "off-board",
+                .category = .analog,
+                .slug = "",
+                .inputs = &.{},
+                .outputs = &.{},
+                .is_boundary = true,
+            });
+            const id: u32 = @intCast(nodes.items.len - 1);
+            gop.value_ptr.* = id;
+            break :blk id;
+        };
+
+        const chip_out = dir.get(clean) orelse nameDrivesOut(clean);
+        const from = if (chip_out) chip.? else aid;
+        const to = if (chip_out) aid else chip.?;
+        const key = (@as(u64, from) << 32) | to;
+        const pg = try pair_idx.getOrPut(scratch, key);
+        if (pg.found_existing) {
+            edge_list.items[pg.value_ptr.*].fanout +|= 1;
+            continue;
+        }
+        pg.value_ptr.* = edge_list.items.len;
+        try edge_list.append(allocator, .{
+            .from = from,
+            .to = to,
+            .class = .rf,
+            .label = try allocator.dupe(u8, base),
+            .voltage = null,
+            .fanout = 1,
+        });
+    }
 }
 
 fn accumulate(
@@ -641,4 +777,27 @@ test "voltageFromName parses the V<d>P<d> convention" {
     try testing.expectApproxEqAbs(@as(f64, 1.8), voltageFromName("V1P8_RF").?, 0.001);
     try testing.expectApproxEqAbs(@as(f64, 2.5), voltageFromName("V_RX_2P5").?, 0.001);
     try testing.expect(voltageFromName("VBATT") == null);
+}
+
+// spec: diagram/collect - Synthesises an antenna endpoint for a board-edge RF net touching one block
+test "collectGraph adds an antenna node for a one-sided RF boundary net" {
+    const pg = [_]env_mod.PinGroup{.{ .ref_des = "U9", .pins = &.{} }};
+    const ports = [_]env_mod.SectionPort{.{ .name = "TX1_RFOUT", .direction = .out }};
+    const secs = [_]Section{.{ .name = "HMC1131 MPA", .pin_groups = &pg, .ports = &ports }};
+    // TX1_RFOUT reaches only U9's chip on-board; its other end is the antenna.
+    const pins = [_]env_mod.PinRef{.{ .ref_des = "U9", .pin = "2" }};
+    const nets = [_]env_mod.Net{.{ .name = "TX1_RFOUT", .pins = &pins }};
+    var block = emptyBlock("rf");
+    block.sections = &secs;
+    block.nets = &nets;
+    var g = try collectGraph(testing.allocator, &block, &.{});
+    defer g.deinit(testing.allocator);
+    // The chip section plus one synthesised antenna endpoint (appended last).
+    try testing.expectEqual(@as(usize, 2), g.nodes.len);
+    const ant: u32 = @intCast(g.nodes.len - 1);
+    try testing.expect(g.nodes[ant].is_boundary);
+    try testing.expectEqual(@as(usize, 1), g.edges.len);
+    try testing.expectEqual(NetClass.rf, g.edges[0].class);
+    // A chip *output* port drives the net, so the antenna is the sink.
+    try testing.expectEqual(ant, g.edges[0].to);
 }

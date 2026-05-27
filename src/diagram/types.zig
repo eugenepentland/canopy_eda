@@ -102,6 +102,10 @@ pub const Node = struct {
     /// power view place a dual-rail part in the overlap of two bands. Owned;
     /// freed by `Graph.deinit`. Empty ⇒ unknown.
     rails: []const f64 = &.{},
+    /// True for a synthesised board-edge endpoint (antenna / EMVS cell) rather
+    /// than a real on-board block. Rendered with a dashed border; its `label`
+    /// is owned and freed by `Graph.deinit`.
+    is_boundary: bool = false,
 };
 
 /// A directed inter-block connection. `from` is the driver/producer side so
@@ -132,6 +136,7 @@ pub const Graph = struct {
             allocator.free(n.outputs);
             if (n.rails.len > 0) allocator.free(n.rails);
             if (n.slug.len > 0) allocator.free(n.slug);
+            if (n.is_boundary and n.label.len > 0) allocator.free(n.label);
         }
         allocator.free(self.nodes);
         for (self.edges) |e| allocator.free(e.label);

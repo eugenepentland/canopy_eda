@@ -124,7 +124,7 @@ pub fn computeLayout(arena: Allocator, graph: *const Graph, view: View) Allocato
 
     // 5. Crossing reduction + 6. coordinates.
     try orderLayers(arena, verts.items, layers, chains);
-    const dims = assignCoords(verts.items, layers);
+    const dims = try assignCoords(arena, verts.items, layers, chains);
 
     // 7. Routing + materialise nodes.
     const routes = try routeChains(arena, graph, verts.items, rank, chains, max_rank);
@@ -325,7 +325,14 @@ fn colX(rank: u32) f64 {
 
 const Dims = struct { w: f64, h: f64 };
 
-fn assignCoords(verts: []Vertex, layers: []std.ArrayListUnmanaged(u32)) Dims {
+/// Per-vertex coordinate assignment. Stacks each layer in its crossing-reduced
+/// order, then straightens with a single top-down sweep: each vertex is pulled
+/// to the median centre of its neighbours in the *previous* column, then the
+/// layer is packed downward (greedy — a vertex is only ever pushed down to clear
+/// the one above it, never up). So a vertex fed 1-to-1 lands exactly on its
+/// predecessor's row and a series chain (and long-edge dummies) renders as one
+/// straight horizontal run, anchored to the source column.
+fn assignCoords(arena: Allocator, verts: []Vertex, layers: []std.ArrayListUnmanaged(u32), chains: []const Chain) Allocator.Error!Dims {
     var max_h: f64 = node_h;
     for (layers) |l| {
         var sum: f64 = 0;
@@ -343,9 +350,94 @@ fn assignCoords(verts: []Vertex, layers: []std.ArrayListUnmanaged(u32)) Dims {
             cursor += verts[v].h + v_gap;
         }
     }
+
+    // Cross-layer adjacency (consecutive chain vertices touch).
+    const adj = try arena.alloc(std.ArrayListUnmanaged(u32), verts.len);
+    for (adj) |*a| a.* = .empty;
+    for (chains) |c| {
+        var i: usize = 0;
+        while (i + 1 < c.verts.len) : (i += 1) {
+            try adj[c.verts[i]].append(arena, c.verts[i + 1]);
+            try adj[c.verts[i + 1]].append(arena, c.verts[i]);
+        }
+    }
+
+    // Lane assignment: a vertex with a single lower-rank neighbour (fed 1-to-1)
+    // inherits that neighbour's exact centre, so a whole series chain — and any
+    // long-edge dummies along it — sits on one straight row anchored to its
+    // source column. A vertex with several feeders centres on their mean.
+    const ctr = try arena.alloc(f64, verts.len); // working centre per vertex (filled per rank below)
+    for (layers, 0..) |layer, r| {
+        for (layer.items) |v| {
+            if (r == 0) {
+                ctr[v] = verts[v].y + verts[v].h / 2;
+                continue;
+            }
+            // Centre on *direct* feeders (real lower-rank neighbours): a single
+            // one ⇒ exact 1-to-1 alignment, several ⇒ midpoint between them.
+            // Long-edge dummies (a re-routed signal like an LO passing through)
+            // only anchor a vertex that has no direct feeder, so they neither
+            // bend a chain nor drag a multi-feed node toward the routed input.
+            var rs: f64 = 0;
+            var rc: f64 = 0;
+            var ds: f64 = 0;
+            var dc: f64 = 0;
+            for (adj[v].items) |nb| {
+                if (verts[nb].rank >= verts[v].rank) continue;
+                if (verts[nb].is_dummy) {
+                    ds += ctr[nb];
+                    dc += 1;
+                } else {
+                    rs += ctr[nb];
+                    rc += 1;
+                }
+            }
+            ctr[v] = if (rc > 0) rs / rc else if (dc > 0) ds / dc else verts[v].y + verts[v].h / 2;
+        }
+        // Keep this column's *real* boxes from overlapping after lane snapping;
+        // thin routing dummies are left to ride their lane.
+        resolveRankOverlap(verts, layer.items, ctr);
+        for (layer.items) |v| verts[v].y = ctr[v] - verts[v].h / 2;
+    }
+
+    // Shift everything below the top pad; size from the lowest box.
+    var min_y: f64 = std.math.floatMax(f64);
+    var max_b: f64 = 0;
+    for (verts) |v| {
+        min_y = @min(min_y, v.y);
+        max_b = @max(max_b, v.y + v.h);
+    }
+    for (verts) |*v| v.y += pad - min_y;
+
     const cols: f64 = @floatFromInt(layers.len);
     const w = pad * 2 + cols * node_w + @max(0, cols - 1) * h_gap;
-    return .{ .w = w, .h = pad * 2 + max_h };
+    return .{ .w = w, .h = (max_b - min_y) + pad * 2 };
+}
+
+/// Push apart any *real* boxes in one column whose lane-snapped centres overlap,
+/// in ascending-centre order (min gap `v_gap`). Well-separated lanes need no
+/// push, so straight chains are preserved; only a crowded feeder gets nudged.
+/// Thin long-edge dummies are excluded — they ride their lane as routing points.
+fn resolveRankOverlap(verts: []Vertex, layer: []const u32, ctr: []f64) void {
+    var ord_buf: [256]u32 = undefined;
+    var n: usize = 0;
+    for (layer) |v| {
+        if (verts[v].is_dummy or n >= ord_buf.len) continue;
+        ord_buf[n] = v;
+        n += 1;
+    }
+    if (n < 2) return;
+    const ord = ord_buf[0..n];
+    std.mem.sort(u32, ord, @as([]const f64, ctr), cmpByCenter);
+    var i: usize = 1;
+    while (i < n) : (i += 1) {
+        const floor = ctr[ord[i - 1]] + verts[ord[i - 1]].h / 2 + v_gap + verts[ord[i]].h / 2;
+        if (ctr[ord[i]] < floor) ctr[ord[i]] = floor;
+    }
+}
+
+fn cmpByCenter(ctr: []const f64, a: u32, b: u32) bool {
+    return ctr[a] < ctr[b];
 }
 
 fn cy(v: Vertex) f64 {

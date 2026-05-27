@@ -1302,11 +1302,20 @@ pub fn computeSubBlockAttachments(
     for (block.sub_blocks, 0..) |_, sb_idx| {
         var best_idx: ?usize = null;
         var best_count: usize = 0;
-        for (block.sections, 0..) |_, sec_idx| {
+        var best_is_conn: bool = true;
+        for (block.sections, 0..) |sec, sec_idx| {
             const c = counts[sb_idx * sec_count + sec_idx];
-            if (c > best_count) {
+            if (c == 0) continue;
+            const is_conn = rb.classifyByName(sec.name, sec.instances) == .connector;
+            // Highest net-tie count wins; on a tie prefer a non-connector
+            // section. A functional sub-block belongs with its subsystem, not
+            // the connector it merely routes I/O through (the ADAR2004 RX
+            // mixers tie their RFIN array against the mezzanine's ADC channels).
+            const better = c > best_count or (c == best_count and best_is_conn and !is_conn);
+            if (better) {
                 best_count = c;
                 best_idx = sec_idx;
+                best_is_conn = is_conn;
             }
         }
         if (best_count >= 1) result[sb_idx] = best_idx;
@@ -1400,7 +1409,10 @@ fn writeAuditSummary(w: anytype, review_doc: ?review.ReviewDoc) !void {
         for (doc.assertions) |a| {
             if (a.status == .fail) assertion_fail += 1;
         }
-        try w.print("{{\"present\":true,\"unresolved\":{d},\"assertion_total\":{d},\"assertion_fail\":{d}}}", .{ doc.unresolved.len, doc.assertions.len, assertion_fail });
+        try w.print(
+            "{{\"present\":true,\"unresolved\":{d},\"assertion_total\":{d},\"assertion_fail\":{d}}}",
+            .{ doc.unresolved.len, doc.assertions.len, assertion_fail },
+        );
     } else {
         try w.writeAll("{\"present\":false}");
     }
