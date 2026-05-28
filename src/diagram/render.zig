@@ -13,7 +13,7 @@ const Graph = types.Graph;
 const View = types.View;
 const Writer = std.Io.Writer;
 
-const all_views = [_]View{ .power, .clocks, .rf };
+const all_views = [_]View{ .power, .clocks, .control, .rf };
 
 const viewId = types.viewId;
 const viewSlug = types.viewSlug;
@@ -398,9 +398,11 @@ pub const CSS =
     \\.dg-svg{display:block;width:100%;max-width:1536px;height:auto;}
     \\#dg-tab-power:checked ~ .dg-panels .dg-panel-power,
     \\#dg-tab-clocks:checked ~ .dg-panels .dg-panel-clocks,
+    \\#dg-tab-control:checked ~ .dg-panels .dg-panel-control,
     \\#dg-tab-rf:checked ~ .dg-panels .dg-panel-rf{display:block;}
     \\#dg-tab-power:checked ~ .dg-tabs .dg-tab-power{color:#fff;background:#da3633;border-color:#da3633;}
     \\#dg-tab-clocks:checked ~ .dg-tabs .dg-tab-clocks{color:#fff;background:#4ab3a3;border-color:#4ab3a3;}
+    \\#dg-tab-control:checked ~ .dg-tabs .dg-tab-control{color:#fff;background:#388bfd;border-color:#388bfd;}
     \\#dg-tab-rf:checked ~ .dg-tabs .dg-tab-rf{color:#fff;background:#e040fb;border-color:#e040fb;}
     \\.dg-rect{fill:#0d1117;stroke-width:1.5;}
     \\.dg-boundary{stroke-dasharray:5 4;}
@@ -442,6 +444,15 @@ test "renderTabs emits only tabs for views that have edges" {
     const out = aw.written();
     try testing.expect(std.mem.indexOf(u8, out, "dg-tab-rf") != null);
     try testing.expect(std.mem.indexOf(u8, out, "dg-tab-power") == null);
+
+    // A control-class edge (e.g. an I2C/SPI/GPIO net) gets its own Control tab.
+    var cnodes = [_]types.Node{ mkNode("MCU"), mkNode("Sensor") };
+    var cedges = [_]types.Edge{.{ .from = 0, .to = 1, .class = .control, .label = "I2C_SDA" }};
+    var cgraph = Graph{ .nodes = &cnodes, .edges = &cedges };
+    var caw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer caw.deinit();
+    try renderTabs(testing.allocator, &cgraph, &caw.writer);
+    try testing.expect(std.mem.indexOf(u8, caw.written(), "dg-tab-control") != null);
 
     var empty = Graph{ .nodes = &nodes, .edges = &.{} };
     var aw2: std.Io.Writer.Allocating = .init(testing.allocator);

@@ -61,8 +61,12 @@ pub fn netClass(name: []const u8, port_map: *const PortClassMap) NetClass {
 
 const ground_eq = [_][]const u8{ "GND", "AGND", "DGND", "PGND" };
 const ground_suf = [_][]const u8{ "_GND", "GND" };
+// Named/derived grounds keep their `GND` stem as a prefix: an isolated barrier
+// ground (`GND_ISO`), a digital/analog split (`GND_A`). Treated as ground so it
+// stays a shared reference rather than a spurious control edge.
+const ground_pre = [_][]const u8{ "GND_", "AGND_", "DGND_", "PGND_" };
 
-const power_pre = [_][]const u8{ "VDD", "VCC", "AVDD", "DVDD", "VBAT", "VREG", "VPOS", "VBUS", "VSS", "VLX", "V_" };
+const power_pre = [_][]const u8{ "VDD", "VCC", "AVDD", "DVDD", "VBAT", "VREG", "VPOS", "VBUS", "VPWR", "VSS", "VLX", "V_" };
 
 const clock_pre = [_][]const u8{ "REF_", "OSC" };
 const clock_sub = [_][]const u8{ "_REF_", "REFIN", "RADAR_REF", "_OSC", "MHZ", "TCXO", "XTAL", "SWCLK" };
@@ -82,7 +86,7 @@ const rf_pre = [_][]const u8{ "LO_", "BEAM", "ADF_CH", "TX1_", "TX2_", "LF" };
 const rf_sub = [_][]const u8{ "RFIN", "RFOUT", "LNAOUT", "_LO_", "LO_OUT", "CPOUT", "EMVS", "VTUNE", "VARAC", "_RF", "_LF" };
 
 fn isGround(n: []const u8) bool {
-    return anyEq(n, &ground_eq) or anySuffix(n, &ground_suf);
+    return anyEq(n, &ground_eq) or anySuffix(n, &ground_suf) or anyPrefix(n, &ground_pre);
 }
 
 /// A net is a supply rail when its name reads like one. Structural so it
@@ -161,6 +165,10 @@ test "netClass classifies real Cyclops net names" {
     try testing.expectEqual(NetClass.rf, netClass("CPOUT_1", &pm));
     try testing.expectEqual(NetClass.rf, netClass("BEAM1_RFIN", &pm));
     try testing.expectEqual(NetClass.rf, netClass("ADF_CH1P", &pm));
+    // Input power rails and named/isolated grounds — common on a power supply
+    // board; without these they leak into the control view as spurious edges.
+    try testing.expectEqual(NetClass.power, netClass("VPWR_IN_RAW", &pm));
+    try testing.expectEqual(NetClass.ground, netClass("GND_ISO", &pm));
 }
 
 // spec: diagram/classify - Honors an explicit section-port signal type over the name heuristic
