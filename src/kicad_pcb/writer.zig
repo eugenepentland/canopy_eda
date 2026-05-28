@@ -282,8 +282,8 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
         if (removed_fp_indices.contains(i)) continue;
         var out_child = mutated_fp.get(i) orelse child;
         // Normalise property visibility on every board footprint: hide the
-        // refdes (Reference) and metadata (Datasheet, Description, bare canopy_*
-        // tags from older syncs); keep Value visible so parts stay identifiable.
+        // refdes (Reference), Value, and metadata (Datasheet, Description, bare
+        // canopy_* tags) so the silk/fab carry no auto-generated text.
         if (out_child.isForm(FORM_FOOTPRINT)) {
             if (try normalizePropertyVisibility(arena, out_child, &stats.fields_hidden, &stats.fields_shown)) |fixed| out_child = fixed;
         }
@@ -738,12 +738,13 @@ fn withoutHideForm(arena: std.mem.Allocator, pl: []const Node) std.mem.Allocator
     return Node.list(Span.zero, try children.toOwnedSlice(arena));
 }
 
-/// Normalise property visibility on `fp`: hide the refdes (Reference) and
-/// metadata still showing (Datasheet, Description, canopy_* …), and un-hide
-/// Value so parts stay identifiable. Bumps `hidden` per field newly hidden
-/// and `shown` per field un-hidden; returns the rewritten footprint, or null
-/// when nothing changed so the caller keeps the original node and skips a
-/// redundant rewrite.
+/// Normalise property visibility on `fp`: hide every synced property still
+/// showing — Reference (refdes), Value, and metadata (Datasheet, Description,
+/// canopy_* …) — so the silk/fab carry no auto-generated text (see
+/// `propertyStaysVisible`). Bumps `hidden` per field newly hidden and `shown`
+/// per field un-hidden (currently always 0); returns the rewritten footprint,
+/// or null when nothing changed so the caller keeps the original node and
+/// skips a redundant rewrite.
 fn normalizePropertyVisibility(arena: std.mem.Allocator, fp: Node, hidden: *u32, shown: *u32) std.mem.Allocator.Error!?Node {
     const cl = fp.asList() orelse return null;
     var changed = false;
