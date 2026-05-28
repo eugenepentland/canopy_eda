@@ -222,6 +222,7 @@ Public functions: collectGraph
 - Synthesises an antenna endpoint for a board-edge RF net touching one block
 - Labels an unattached sub-block by its module's design-block title
 - Surfaces an on-board crystal as a clock source feeding its block
+- Carries a programmable rail's rated span onto the producer node
 
 ## diagram/layout
 
@@ -235,6 +236,7 @@ Public functions: computeLayout
 - Lists a dual-rail consumer in both of its rail buckets
 - Shows a cascade LDO that re-regulates a rail in its own column
 - Folds a pass-through filter stage and feeds its rail from the parent regulator
+- Treats test-point and mechanical nodes as instrumentation, excluded from load buckets
 
 ## diagram/render
 

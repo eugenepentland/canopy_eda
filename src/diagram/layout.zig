@@ -907,6 +907,15 @@ fn stackHeight(count: usize, item_h: f64, gap: f64) f64 {
     return c * item_h + (c - 1) * gap;
 }
 
+/// A test-point / mechanical / debug node — instrumentation that taps a rail to
+/// measure or access it, not a real load. Kept out of the power view's load
+/// buckets so they don't inflate the consumer count with non-loads.
+fn isInstrumentation(label: []const u8) bool {
+    const kw = [_][]const u8{ "Test Point", "Mounting", "Fiducial", "Standoff", "Bring-up", "Debug" };
+    for (kw) |k| if (std.ascii.indexOfIgnoreCase(label, k) != null) return true;
+    return false;
+}
+
 const Bucket = struct { v: f64, members: []const u32, h: f64 };
 
 /// One bucket per rail voltage (in `rails` order): its consuming nodes and the
@@ -918,6 +927,7 @@ fn buildBuckets(arena: Allocator, graph: *const Graph, is_producer: []const bool
         var members: std.ArrayListUnmanaged(u32) = .empty;
         for (0..n) |i| {
             if (is_producer[i]) continue;
+            if (isInstrumentation(graph.nodes[i].label)) continue;
             if (railsHas(graph.nodes[i].rails, v) or hasInEdgeVolt(graph, @intCast(i), v)) try members.append(arena, @intCast(i));
         }
         if (members.items.len == 0) continue;
@@ -934,6 +944,15 @@ const testing = std.testing;
 
 fn mkNode(label: []const u8) types.Node {
     return .{ .label = label, .subtitle = "", .category = .peripheral, .slug = "", .inputs = &.{}, .outputs = &.{} };
+}
+
+// spec: diagram/layout - Treats test-point and mechanical nodes as instrumentation, excluded from load buckets
+test "isInstrumentation flags test-point and mechanical nodes" {
+    try testing.expect(isInstrumentation("Test Points"));
+    try testing.expect(isInstrumentation("Mounting"));
+    try testing.expect(isInstrumentation("Bring-up & Debug"));
+    try testing.expect(!isInstrumentation("RP2350B Core"));
+    try testing.expect(!isInstrumentation("Channel 1 PSU"));
 }
 
 // spec: diagram/layout - Returns null for a view with no edges

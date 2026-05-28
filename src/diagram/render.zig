@@ -257,16 +257,51 @@ fn renderPowerView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layou
     for (lay.power_boxes) |b| {
         const bv: ?f64 = if (std.math.isNan(b.v)) null else b.v;
         const color = edgeColor(.power, palette, bv);
+        const node = graph.nodes[b.gid];
+        const rail = outputRail(node, b.v);
         switch (b.kind) {
-            .source => try writePowerCard(arena, w, graph.nodes[b.gid], b, color, try voltLine(arena, "VBATT", b.v)),
-            .regulator => try writePowerCard(arena, w, graph.nodes[b.gid], b, color, try voltLine(arena, "\u{2192}", b.v)),
+            // Source card: name the actual input rail (VBATT, VPWR_IN, …) rather
+            // than assuming a battery — a USB-C/barrel board has no VBATT.
+            .source => {
+                const name = if (rail) |r| r.net else "IN";
+                try writePowerCard(arena, w, node, b, color, try voltLine(arena, name, b.v));
+            },
+            // Regulator card: show a programmable rail's span ("1.8–3.3 V").
+            .regulator => try writePowerCard(arena, w, node, b, color, try voltRangeLine(arena, "\u{2192}", rail, b.v)),
             .bucket => try writePowerBucket(arena, w, graph, b, color),
         }
     }
 }
 
+/// The producer's output rail at (≈) voltage `v` — its net name and optional
+/// lower bound. Falls back to the first declared output.
+/// Tolerance for matching a rail's stored voltage to a box voltage (both come
+/// from the same source data, so an exact 10 mV window is plenty).
+const volt_match_eps: f64 = 0.01;
+
+fn outputRail(node: types.Node, v: f64) ?types.RailEnd {
+    var first: ?types.RailEnd = null;
+    for (node.outputs) |o| {
+        if (first == null) first = o;
+        if (o.voltage) |ov| {
+            if (@abs(ov - v) < volt_match_eps) return o;
+        }
+    }
+    return first;
+}
+
 fn voltLine(arena: Allocator, prefix: []const u8, v: f64) Allocator.Error![]const u8 {
     if (std.math.isNan(v)) return "";
+    return std.fmt.allocPrint(arena, "{s} {d:.2} V", .{ prefix, v });
+}
+
+/// Like `voltLine`, but renders a programmable rail (`rail.v_lo` set) as a span
+/// "lo–v V"; otherwise a single figure.
+fn voltRangeLine(arena: Allocator, prefix: []const u8, rail: ?types.RailEnd, v: f64) Allocator.Error![]const u8 {
+    if (std.math.isNan(v)) return "";
+    if (rail) |r| {
+        if (r.v_lo) |lo| return std.fmt.allocPrint(arena, "{s} {d:.1}\u{2013}{d:.1} V", .{ prefix, lo, v });
+    }
     return std.fmt.allocPrint(arena, "{s} {d:.2} V", .{ prefix, v });
 }
 

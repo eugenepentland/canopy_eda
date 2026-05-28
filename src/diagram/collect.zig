@@ -284,12 +284,18 @@ fn collectSubBlockRails(
 ) Allocator.Error!void {
     for (sb.block.ports) |p| {
         const v = p.nominal orelse p.rated_max orelse continue;
+        // A programmable rail (`(rated lo hi)` with no fixed nominal) keeps its
+        // lower bound so the producer card can show the span "lo–hi V".
+        const v_lo: ?f64 = if (p.nominal == null) blk: {
+            const lo = p.rated_min orelse break :blk null;
+            break :blk if (lo < v) lo else null;
+        } else null;
         const key = try std.fmt.allocPrint(scratch, "{s}/{s}", .{ sb.name, p.name });
         const net = sub_port_to_net.get(key) orelse (if (p.net.len > 0) p.net else p.name);
         if (std.mem.eql(u8, p.direction, "in")) {
             try inputs.append(scratch, .{ .net = net, .voltage = v });
         } else if (std.mem.eql(u8, p.direction, "out")) {
-            try outputs.append(scratch, .{ .net = net, .voltage = v });
+            try outputs.append(scratch, .{ .net = net, .voltage = v, .v_lo = v_lo });
         }
     }
 }
@@ -782,6 +788,22 @@ test "collectGraph labels an unattached sub-block by its module title" {
     defer g.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), g.nodes.len);
     try testing.expectEqualStrings("ESP32-S3 UI", g.nodes[0].label);
+}
+
+// spec: diagram/collect - Carries a programmable rail's rated span onto the producer node
+test "collectGraph keeps a programmable rail's lower bound" {
+    const ports = [_]env_mod.Port{.{ .name = "VBANK", .net = "", .direction = "out", .rated_min = 1.8, .rated_max = 3.3 }};
+    var module = emptyBlock("DUT Bank Rail");
+    module.ports = &ports;
+    const subs = [_]SubBlock{.{ .name = "bank_a", .block = &module }};
+    var block = emptyBlock("board");
+    block.sub_blocks = &subs;
+    var g = try collectGraph(testing.allocator, &block, &.{});
+    defer g.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), g.nodes.len);
+    try testing.expectEqual(@as(usize, 1), g.nodes[0].outputs.len);
+    try testing.expectApproxEqAbs(@as(f64, 1.8), g.nodes[0].outputs[0].v_lo.?, 0.001);
+    try testing.expectApproxEqAbs(@as(f64, 3.3), g.nodes[0].outputs[0].voltage.?, 0.001);
 }
 
 // spec: diagram/collect - Surfaces an on-board crystal as a clock source feeding its block

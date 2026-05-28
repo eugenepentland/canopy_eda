@@ -82,9 +82,13 @@ pub const Pt = struct { x: f64, y: f64 };
 
 /// One end of a power rail: net name and (optional) voltage. Mirrors the field
 /// the old hub-diagram used so the Power view can keep showing in-box V tags.
+/// `v_lo` is set only for a *programmable* rail declared with a `(rated lo hi)`
+/// span where `lo != voltage`; the producer card then shows "lo–voltage V"
+/// (e.g. a DUT bank rail's "1.8–3.3 V") instead of a single figure.
 pub const RailEnd = struct {
     net: []const u8,
     voltage: ?f64 = null,
+    v_lo: ?f64 = null,
 };
 
 /// One block in the diagram — one per `(section …)` and one per unattached
