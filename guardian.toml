@@ -1,6 +1,11 @@
 spec_file = "SPEC.md"
 max_file_lines = 10000
 
+# Checks skipped entirely (matched by registry name). spec-drift is redundant
+# with pub-api-surface (both snapshot the public API), and magic-number is
+# pure noise against this codebase's SVG/geometry/electrical constants.
+disabled = ["spec-drift", "magic-number"]
+
 # Baseline mode: every check records its current violations into
 # .guardian/baselines/<check>.txt on the first build and only fails
 # when NEW violations are introduced. This lets us turn on Guardian's
