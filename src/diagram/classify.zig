@@ -66,7 +66,7 @@ const ground_suf = [_][]const u8{ "_GND", "GND" };
 // stays a shared reference rather than a spurious control edge.
 const ground_pre = [_][]const u8{ "GND_", "AGND_", "DGND_", "PGND_" };
 
-const power_pre = [_][]const u8{ "VDD", "VCC", "AVDD", "DVDD", "VBAT", "VREG", "VPOS", "VBUS", "VPWR", "VSS", "VLX", "V_" };
+const power_pre = [_][]const u8{ "VDD", "VCC", "AVDD", "DVDD", "VBAT", "VREG", "VPOS", "VBUS", "VSS", "VLX", "V_" };
 
 const clock_pre = [_][]const u8{ "REF_", "OSC" };
 const clock_sub = [_][]const u8{ "_REF_", "REFIN", "RADAR_REF", "_OSC", "MHZ", "TCXO", "XTAL", "SWCLK" };
@@ -165,9 +165,8 @@ test "netClass classifies real Cyclops net names" {
     try testing.expectEqual(NetClass.rf, netClass("CPOUT_1", &pm));
     try testing.expectEqual(NetClass.rf, netClass("BEAM1_RFIN", &pm));
     try testing.expectEqual(NetClass.rf, netClass("ADF_CH1P", &pm));
-    // Input power rails and named/isolated grounds — common on a power supply
-    // board; without these they leak into the control view as spurious edges.
-    try testing.expectEqual(NetClass.power, netClass("VPWR_IN_RAW", &pm));
+    // Named/isolated grounds are recognized so they stay a shared reference
+    // instead of leaking into the control view as spurious edges.
     try testing.expectEqual(NetClass.ground, netClass("GND_ISO", &pm));
 }
 
