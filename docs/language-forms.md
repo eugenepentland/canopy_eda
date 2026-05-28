@@ -73,6 +73,7 @@ where each is accepted: **D** = design-block top level,
 | `(status concept|implemented|review)` | ·Ss | Section completion status. Inferred when omitted. |
 | `(role input|output)` | ·S· | Tag a section as a block input or output for the overview diagram. |
 | `(diagram hidden)` | ·S· | Opt this section out of the block-diagram view (schematic card still renders). |
+| `(hosts "sub1" "sub2" …)` | ·S· | Fold the named sub-blocks into this section's block-diagram node (explicit attachment). |
 | `(group …)` | D·· | Visual group annotation rendered in the schematic. |
 | `(sub-block "name" (module-call args…))` | D·· | Instantiate a parameterised module inside the design. |
 | `(verifies (req "REF" REQID) [rationale])` | D·· | Mark a requirement as satisfied by a specific instance. |

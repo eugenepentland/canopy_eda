@@ -1272,6 +1272,19 @@ pub fn computeSubBlockAttachments(
         try sb_name_to_idx.put(allocator, sb.name, idx);
     }
 
+    // Explicit `(hosts "sub" …)` bindings are authoritative — they override the
+    // net-count heuristic so a multi-sub subsystem (e.g. a PSU regulator + its
+    // INA monitor) folds into one named section node regardless of how its
+    // nets happen to tie. First declaration wins if two sections both claim it.
+    var explicit_host: std.StringHashMapUnmanaged(usize) = .empty;
+    defer explicit_host.deinit(allocator);
+    for (block.sections, 0..) |sec, sec_idx| {
+        for (sec.hosts) |host_name| {
+            const gop = try explicit_host.getOrPut(allocator, host_name);
+            if (!gop.found_existing) gop.value_ptr.* = sec_idx;
+        }
+    }
+
     const sec_count = block.sections.len;
     const sb_count = block.sub_blocks.len;
     const counts = try allocator.alloc(usize, sb_count * sec_count);
@@ -1299,7 +1312,11 @@ pub fn computeSubBlockAttachments(
         }
     }
 
-    for (block.sub_blocks, 0..) |_, sb_idx| {
+    for (block.sub_blocks, 0..) |sb, sb_idx| {
+        if (explicit_host.get(sb.name)) |sec_idx| {
+            result[sb_idx] = sec_idx;
+            continue;
+        }
         var best_idx: ?usize = null;
         var best_count: usize = 0;
         var best_is_conn: bool = true;

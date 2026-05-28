@@ -709,6 +709,12 @@ pub const Section = struct {
     /// passive instrumentation (test points) whose presence in the
     /// connectivity diagram adds noise without conveying connectivity.
     diagram_hidden: bool = false,
+    /// Sub-block instance names this section owns, declared via
+    /// `(hosts "psu1" "mon_ch1")`. The block-diagram resolver folds each
+    /// named sub-block into this section's node (so it carries the
+    /// section's label and edges) — an explicit, layout-independent
+    /// alternative to the net-count attachment heuristic.
+    hosts: []const []const u8 = &.{},
 };
 
 /// Block diagram placement role for sections.

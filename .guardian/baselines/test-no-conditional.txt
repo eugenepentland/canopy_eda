@@ -1,5 +1,5 @@
 # guardian-snapshot v1
-src/eval/design_block.zig:1133: switch at top level of test body
+src/eval/design_block.zig:1140: switch at top level of test body
 src/render_system_svg.zig:462: more than one top-level for loop
 src/render_system_svg.zig:493: more than one top-level for loop
 src/sexpr/printer.zig:253: while at top level of test body

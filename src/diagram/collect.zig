@@ -201,12 +201,17 @@ fn buildSubBlockNodes(
         var input_buf: std.ArrayListUnmanaged(RailEnd) = .empty;
         var output_buf: std.ArrayListUnmanaged(RailEnd) = .empty;
         try collectSubBlockRails(scratch, sb, sub_port_to_net, &input_buf, &output_buf);
-        const label = if (sb.name.len > 0) sb.name else sb.block.name;
+        // Prefer the module's design-block title ("ESP32-S3 UI", "3.272V Buck
+        // (TPS62933)") over the bare instance handle ("esp32", "buck_3v3") —
+        // it's what a reader recognizes at a glance. Fall back to the handle
+        // for an untitled module. The slug stays keyed on the handle so the
+        // node's `#sec-<slug>` link still resolves to the schematic card.
+        const label = if (sb.block.name.len > 0) sb.block.name else sb.name;
         try nodes.append(allocator, .{
             .label = label,
-            .subtitle = sb.block.name,
+            .subtitle = "",
             .category = rb.classifyByName(sb.name, sb.block.instances),
-            .slug = try review.slugify(allocator, label),
+            .slug = try review.slugify(allocator, sb.name),
             .inputs = try dupeRails(allocator, input_buf.items),
             .outputs = try dupeRails(allocator, output_buf.items),
         });
@@ -696,6 +701,18 @@ test "collectGraph connects two non-MCU sections via a shared net" {
     try testing.expectEqual(@as(usize, 2), g.nodes.len);
     try testing.expect(g.edges.len >= 1);
     try testing.expectEqual(NetClass.rf, g.edges[0].class);
+}
+
+// spec: diagram/collect - Labels an unattached sub-block by its module's design-block title
+test "collectGraph labels an unattached sub-block by its module title" {
+    var module = emptyBlock("ESP32-S3 UI"); // the module's design-block title
+    const subs = [_]SubBlock{.{ .name = "esp32", .block = &module }};
+    var block = emptyBlock("board");
+    block.sub_blocks = &subs;
+    var g = try collectGraph(testing.allocator, &block, &.{});
+    defer g.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), g.nodes.len);
+    try testing.expectEqualStrings("ESP32-S3 UI", g.nodes[0].label);
 }
 
 // spec: diagram/collect - Excludes ground nets and collapses parallel or differential nets into one edge

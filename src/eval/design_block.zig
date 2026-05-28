@@ -153,7 +153,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             // Section-only forms are silently ignored at the top level —
             // a design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract.
-            .pins, .protocol, .calc, .description, .status, .role, .diagram => {},
+            .pins, .protocol, .calc, .description, .status, .role, .diagram, .hosts => {},
         }
     }
 
@@ -580,6 +580,7 @@ fn evalSection(
     var explicit_status: ?env_mod.SectionStatus = null;
     var block_role: env_mod.BlockRole = .auto;
     var diagram_hidden = false;
+    var sec_hosts: std.ArrayListUnmanaged([]const u8) = .empty;
 
     // Check for optional description as 2nd positional string arg
     var child_start: usize = 2;
@@ -624,6 +625,11 @@ fn evalSection(
                     if (sf_children[1].asAtom()) |mode| {
                         if (std.mem.eql(u8, mode, "hidden")) diagram_hidden = true;
                     }
+                }
+            },
+            .hosts => {
+                for (sf_children[1..]) |h| {
+                    if (h.asString()) |sub_name| try sec_hosts.append(self.allocator, sub_name);
                 }
             },
             .bus_port => try builders.expandSectionBusPort(self, sf_children, env, &sec_ports),
@@ -686,6 +692,7 @@ fn evalSection(
         .status = status,
         .block_role = block_role,
         .diagram_hidden = diagram_hidden,
+        .hosts = sec_hosts.toOwnedSlice(self.allocator) catch &.{},
     });
 }
 
@@ -1136,6 +1143,29 @@ test "design-block captures (kicad-pcb path)" {
     };
     try testing.expect(block.kicad_pcb_path != null);
     try testing.expectEqualStrings("/mnt/nas/test.kicad_pcb", block.kicad_pcb_path.?);
+}
+
+// spec: eval/design_block - hosts form records the sub-block instance names a section owns
+test "section (hosts …) records owned sub-block names" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (section "PSU" (hosts "psu1" "mon_ch1")))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    const value = try evalDesignBlock(&eval, form_children[1..], &env);
+    const block = value.design_block;
+    try testing.expectEqual(@as(usize, 1), block.sections.len);
+    try testing.expectEqual(@as(usize, 2), block.sections[0].hosts.len);
+    try testing.expectEqualStrings("psu1", block.sections[0].hosts[0]);
+    try testing.expectEqualStrings("mon_ch1", block.sections[0].hosts[1]);
 }
 
 // spec: eval/design_block - bus-net expands one net tie per index in the inclusive range

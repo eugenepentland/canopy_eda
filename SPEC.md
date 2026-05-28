@@ -220,6 +220,7 @@ Public functions: collectGraph
 - Parses a rail voltage from its V<d>P<d> name when no port declares one
 - Picks each block's primary supply rail by pin count and records its full rail set
 - Synthesises an antenna endpoint for a board-edge RF net touching one block
+- Labels an unattached sub-block by its module's design-block title
 
 ## diagram/layout
 
@@ -313,6 +314,7 @@ Public functions: analyze
 - bus-port expands one port per index times optional suffix list
 - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
 - kicad-pcb form captures the literal path on the design block
+- hosts form records the sub-block instance names a section owns
 - verifies req with an (id …) target parses as a stable-id sign-off leaving ref-des empty
 - verifies req with a ref-des target parses as a ref-des sign-off leaving target-id empty
 
