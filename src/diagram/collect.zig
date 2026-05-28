@@ -94,6 +94,9 @@ pub fn collectGraph(
     // Board-edge antennas / EMVS cells: synthesise an endpoint node + edge for
     // each RF net that reaches only one on-board block. Appends to both lists.
     try antennaPass(allocator, scratch, block, flat, &mem, &port_map, &nodes, &edge_list);
+    // On-board crystals feeding their block — makes the Clocks view useful on
+    // MCU boards whose oscillator is sealed inside a module.
+    try crystalPass(allocator, scratch, block, &mem, &nodes, &edge_list);
     try assignRails(allocator, scratch, flat, &mem, &port_map, nodes.items);
 
     return .{ .nodes = try nodes.toOwnedSlice(allocator), .edges = try edge_list.toOwnedSlice(allocator) };
@@ -495,6 +498,72 @@ fn antennaPass(
     }
 }
 
+// ── on-board clock sources ──────────────────────────────────────────────
+
+/// A 2-pin crystal / XTAL by its library component name. Excludes TCXO/oscillator
+/// *chips*, which are modelled as their own sections (e.g. cyclops's SiT5157),
+/// so we don't double-count them.
+fn isCrystalComponent(component: []const u8) bool {
+    return std.ascii.indexOfIgnoreCase(component, "crystal") != null or
+        std.ascii.indexOfIgnoreCase(component, "xtal") != null;
+}
+
+/// Surface an on-board crystal as a synthesized clock-source node feeding the
+/// block it lives in. The crystal's XI/XO nets are block-internal, so they never
+/// form an inter-block edge — without this the Clocks view of an MCU board whose
+/// oscillator is sealed in a `*-core` module shows nothing. One source per host.
+fn crystalPass(
+    allocator: Allocator,
+    scratch: Allocator,
+    block: *const DesignBlock,
+    mem: *const membership.Membership,
+    nodes: *std.ArrayListUnmanaged(Node),
+    edge_list: *std.ArrayListUnmanaged(Edge),
+) Allocator.Error!void {
+    var host_seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    for (block.instances) |inst| {
+        if (!isCrystalComponent(inst.component)) continue;
+        const host = mem.resolve(inst.ref_des) orelse continue;
+        try emitCrystal(allocator, scratch, &host_seen, nodes, edge_list, host);
+    }
+    for (block.sub_blocks) |sb| {
+        for (sb.block.instances) |inst| {
+            if (!isCrystalComponent(inst.component)) continue;
+            const key = try std.fmt.allocPrint(scratch, "{s}/{s}", .{ sb.name, inst.ref_des });
+            const host = mem.resolve(key) orelse continue;
+            try emitCrystal(allocator, scratch, &host_seen, nodes, edge_list, host);
+        }
+    }
+}
+
+fn emitCrystal(
+    allocator: Allocator,
+    scratch: Allocator,
+    host_seen: *std.AutoHashMapUnmanaged(u32, void),
+    nodes: *std.ArrayListUnmanaged(Node),
+    edge_list: *std.ArrayListUnmanaged(Edge),
+    host: u32,
+) Allocator.Error!void {
+    if ((try host_seen.getOrPut(scratch, host)).found_existing) return;
+    try nodes.append(allocator, .{
+        .label = "Crystal", // static; not freed by deinit (is_boundary = false)
+        .subtitle = "",
+        .category = .clock,
+        .slug = "",
+        .inputs = &.{},
+        .outputs = &.{},
+    });
+    const xid: u32 = @intCast(nodes.items.len - 1);
+    try edge_list.append(allocator, .{
+        .from = xid,
+        .to = host,
+        .class = .clock,
+        .label = try allocator.dupe(u8, "XTAL"),
+        .voltage = null,
+        .fanout = 1,
+    });
+}
+
 fn accumulate(
     scratch: Allocator,
     acc: *std.ArrayListUnmanaged(AccEdge),
@@ -713,6 +782,22 @@ test "collectGraph labels an unattached sub-block by its module title" {
     defer g.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), g.nodes.len);
     try testing.expectEqualStrings("ESP32-S3 UI", g.nodes[0].label);
+}
+
+// spec: diagram/collect - Surfaces an on-board crystal as a clock source feeding its block
+test "collectGraph surfaces a module crystal as a clock source" {
+    const xtal = [_]env_mod.Instance{.{ .ref_des = "X1", .component = "crystal", .value = "", .footprint = "", .symbol = "" }};
+    var module = emptyBlock("RP2350B Core");
+    module.instances = &xtal;
+    const subs = [_]SubBlock{.{ .name = "mcu", .block = &module }};
+    var block = emptyBlock("board");
+    block.sub_blocks = &subs;
+    var g = try collectGraph(testing.allocator, &block, &.{});
+    defer g.deinit(testing.allocator);
+    // The mcu block node + the synthesized Crystal source, joined by a clock edge.
+    try testing.expectEqual(@as(usize, 2), g.nodes.len);
+    try testing.expectEqual(@as(usize, 1), g.edges.len);
+    try testing.expectEqual(NetClass.clock, g.edges[0].class);
 }
 
 // spec: diagram/collect - Excludes ground nets and collapses parallel or differential nets into one edge

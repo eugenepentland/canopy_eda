@@ -221,6 +221,7 @@ Public functions: collectGraph
 - Picks each block's primary supply rail by pin count and records its full rail set
 - Synthesises an antenna endpoint for a board-edge RF net touching one block
 - Labels an unattached sub-block by its module's design-block title
+- Surfaces an on-board crystal as a clock source feeding its block
 
 ## diagram/layout
 
