@@ -63,7 +63,6 @@ pub fn build(
     for (block.sub_blocks) |sb| {
         for (sb.block.ports) |port| {
             if (!std.mem.eql(u8, port.direction, "out")) continue;
-            if (!isPowerSource(port)) continue;
 
             const path_temp = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ sb.name, port.name }) catch continue;
             const top_net = findTopNet(block, path_temp) orelse continue;
@@ -71,6 +70,15 @@ pub fn build(
             if (std.mem.eql(u8, base, GND_NAME)) continue;
             const root = findRoot(&net_parent, base);
             if (std.mem.eql(u8, root, GND_NAME)) continue;
+
+            // A rail source is an output port that either declares power specs
+            // OR is tied to a net that reads like a supply rail. The name path
+            // lets a bare `(port "VOUT" out)` on a generic buck/LDO/OR module
+            // register its rail (VDD5, VDD3V3, VPWR_IN_RAW): without it the
+            // supply tree loses its trunk and only spec-annotated leaf rails
+            // survive. Electrical specs stay enrichment for the budget, not a
+            // gate on recognition.
+            if (!isPowerSource(port) and !looksLikeRail(base)) continue;
 
             const nominal = port.nominal orelse resolveRailVoltage(block, base);
             const existing_cap = if (by_root.get(root)) |existing|
@@ -151,6 +159,23 @@ fn isPowerSource(port: Port) bool {
         port.current_typ != null or port.current_max != null or
         port.efficiency != null or port.efficiency_linear;
 }
+
+/// Heuristic: does a net name read like a supply rail? Lets a regulator's bare
+/// `(port "VOUT" out)` (no declared specs) still register as a rail source.
+/// Mirrors the diagram classifier's power-name prefixes; deliberately narrow
+/// (a `V` + prefix or `V` + digit) so signal outputs like NRST/FAULT/MUXOUT —
+/// and V-initial signal names like VSYNC — don't become phantom rails.
+fn looksLikeRail(name: []const u8) bool {
+    if (name.len >= 2 and name[0] == 'V' and name[1] >= '0' and name[1] <= '9') return true;
+    for (rail_prefixes) |p| {
+        if (std.mem.startsWith(u8, name, p)) return true;
+    }
+    return false;
+}
+
+const rail_prefixes = [_][]const u8{
+    "VDD", "VCC", "VOUT", "VBUS", "VPWR", "VREG", "VBAT", "VSYS", "VRAW", "V_",
+};
 
 /// Find the top-level net tied to a sub-block path like `"buck/VOUT"`.
 fn findTopNet(block: *const DesignBlock, path: []const u8) ?[]const u8 {
@@ -259,6 +284,45 @@ test "build derives one rail per power output port" {
     defer freeRails(alloc, rails);
     try std.testing.expectEqual(@as(usize, 1), rails.len);
     try std.testing.expectEqualStrings("VDD", rails[0].name);
+}
+
+// spec: eval/rails - Recognizes a spec-less regulator output tied to a rail-named net
+test "build recognizes a bare VOUT tied to a rail-named net" {
+    const alloc = std.testing.allocator;
+    // Generic buck/OR modules declare a bare `(port "VOUT" out)` with no specs.
+    // VOUT ties to a rail-named net (recognized); PG ties to a signal net (not).
+    var inner: DesignBlock = .{
+        .name = "buck",
+        .instances = &.{},
+        .nets = &.{},
+        // Bare out ports — no nominal/current/efficiency, like a generic buck.
+        .ports = &[_]Port{
+            .{ .name = "VOUT", .net = "VOUT", .direction = "out" },
+            .{ .name = "PG", .net = "PG", .direction = "out" },
+        },
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const sbs = [_]env_mod.SubBlock{.{ .name = "buck", .block = &inner }};
+    const ties = [_]env_mod.NetTie{
+        .{ .a = "buck/VOUT", .b = "VDD5" },
+        .{ .a = "buck/PG", .b = "PG_3V3" },
+    };
+    const outer: DesignBlock = .{
+        .name = "outer",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &sbs,
+        .net_ties = &ties,
+    };
+    const rails = try build(alloc, &outer);
+    defer freeRails(alloc, rails);
+    try std.testing.expectEqual(@as(usize, 1), rails.len);
+    try std.testing.expectEqualStrings("VDD5", rails[0].name);
 }
 
 // spec: eval/rails - Collapses ferrite-bead-bridged nets into a single rail via union-find

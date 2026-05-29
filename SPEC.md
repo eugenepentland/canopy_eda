@@ -361,6 +361,7 @@ Public functions: parse
 Public functions: build
 
 - Derives one PowerRail per sub-block output port marked power direction out
+- Recognizes a spec-less regulator output tied to a rail-named net
 - Collapses ferrite-bead-bridged nets into a single rail via union-find
 - Resolves rail voltage from sub-block output port nominal first
 - Falls back to section power port voltage when sub-block port nominal absent
