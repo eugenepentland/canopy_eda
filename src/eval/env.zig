@@ -651,6 +651,11 @@ pub const SectionPort = struct {
     role: []const u8 = "",
     /// Protocol annotation (e.g., "SPI", "USB2.0-HS").
     protocol: []const u8 = "",
+    /// Explicit diagram signal-class key (e.g. "power", "clock", "audio"),
+    /// declared via `(class <key>)`. Authoritative for diagram edge
+    /// classification — overrides both `signal_type` and net-name heuristics.
+    /// Empty ⇒ fall back to `signal_type` then name heuristics.
+    class: []const u8 = "",
     /// Whether this port is optional (no ERC error if unconnected).
     optional: bool = false,
     /// Optional electrical character carried by this port — declared via an
@@ -692,6 +697,11 @@ pub const Section = struct {
     name: []const u8,
     /// Optional description shown under the section title.
     description: []const u8 = "",
+    /// Explicit diagram category key (e.g. "mcu", "power", "rf"), declared via
+    /// `(category <key>)`. Authoritative for the system-overview node identity
+    /// and column placement — overrides the keyword `classifyByName` heuristic.
+    /// Empty ⇒ fall back to `block_role` then the name heuristic.
+    category: []const u8 = "",
     /// Design notes shown at the bottom of the section. Each carries optional
     /// datasheet page references so reviewers can jump from a note to the
     /// exact page in `lib/datasheets/` that backs the decision.

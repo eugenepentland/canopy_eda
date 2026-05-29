@@ -35,6 +35,7 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
     var voltage: ?f64 = null;
     var role: []const u8 = "";
     var protocol: []const u8 = "";
+    var class_key: []const u8 = "";
     var group_list: std.ArrayListUnmanaged([]const u8) = .empty;
     var is_optional: bool = false;
 
@@ -60,6 +61,10 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
             } else if (std.mem.eql(u8, atom, "protocol")) {
                 si += 1;
                 if (si < sf_children.len) protocol = sf_children[si].asText() orelse "";
+                continue;
+            } else if (std.mem.eql(u8, atom, "class")) {
+                si += 1;
+                if (si < sf_children.len) class_key = sf_children[si].asText() orelse "";
                 continue;
             }
             // Direction keywords
@@ -122,6 +127,7 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
         .group = group_list.toOwnedSlice(self.allocator) catch &.{},
         .role = role,
         .protocol = protocol,
+        .class = class_key,
         .optional = is_optional,
         .electrical = elec,
     };

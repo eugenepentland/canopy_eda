@@ -153,7 +153,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             // Section-only forms are silently ignored at the top level —
             // a design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract.
-            .pins, .protocol, .calc, .description, .status, .role, .diagram, .hosts => {},
+            .pins, .protocol, .calc, .description, .status, .role, .diagram, .hosts, .category => {},
         }
     }
 
@@ -580,6 +580,7 @@ fn evalSection(
     var explicit_status: ?env_mod.SectionStatus = null;
     var block_role: env_mod.BlockRole = .auto;
     var diagram_hidden = false;
+    var sec_category: []const u8 = "";
     var sec_hosts: std.ArrayListUnmanaged([]const u8) = .empty;
 
     // Check for optional description as 2nd positional string arg
@@ -631,6 +632,9 @@ fn evalSection(
                 for (sf_children[1..]) |h| {
                     if (h.asString()) |sub_name| try sec_hosts.append(self.allocator, sub_name);
                 }
+            },
+            .category => {
+                if (sf_children.len >= 2) sec_category = sf_children[1].asText() orelse "";
             },
             .bus_port => try builders.expandSectionBusPort(self, sf_children, env, &sec_ports),
             .instance => {
@@ -692,6 +696,7 @@ fn evalSection(
         .status = status,
         .block_role = block_role,
         .diagram_hidden = diagram_hidden,
+        .category = sec_category,
         .hosts = sec_hosts.toOwnedSlice(self.allocator) catch &.{},
     });
 }

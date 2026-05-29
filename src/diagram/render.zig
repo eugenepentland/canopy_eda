@@ -10,47 +10,58 @@ const rb = @import("../render_block_types.zig");
 
 const Allocator = std.mem.Allocator;
 const Graph = types.Graph;
-const View = types.View;
+const ClassId = types.ClassId;
 const Writer = std.Io.Writer;
 
-const all_views = [_]View{ .power, .clocks, .control, .rf };
-
-const viewId = types.viewId;
-const viewSlug = types.viewSlug;
-const viewColor = types.viewColor;
-
-/// Render the whole tabbed diagram. Emits nothing when no view has edges.
+/// Render the whole tabbed diagram. Emits nothing when no view has edges. The
+/// set of tabs is data-driven — one per non-reference class that has edges, in
+/// registry order (built-ins first, then designer-declared classes). The
+/// radio→panel toggle and per-tab accent rules are emitted into a scoped
+/// `<style>`, so a brand-new declared class needs no hand-written CSS.
 pub fn renderTabs(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void {
-    var first_view: ?View = null;
-    for (all_views) |v| {
-        if (graph.hasView(v)) {
-            first_view = v;
+    var first: ?ClassId = null;
+    for (graph.classes, 0..) |_, i| {
+        const id: ClassId = @intCast(i);
+        if (graph.isView(id)) {
+            first = id;
             break;
         }
     }
-    if (first_view == null) return;
+    if (first == null) return;
 
-    try w.writeAll("<div class=\"dg-wrap\">");
+    try w.writeAll("<div class=\"dg-wrap\"><style>");
+    // Per-view rules: the checked radio shows its panel and lights its tab.
+    for (graph.classes, 0..) |c, i| {
+        if (!graph.isView(@intCast(i))) continue;
+        try w.print(
+            "#dg-tab-{s}:checked~.dg-panels .dg-panel-{s}{{display:block;}}" ++
+                "#dg-tab-{s}:checked~.dg-tabs .dg-tab-{s}{{color:#fff;background:{s};border-color:{s};}}",
+            .{ c.key, c.key, c.key, c.key, c.color, c.color },
+        );
+    }
+    try w.writeAll("</style>");
     // Radios first so the `:checked ~` sibling selectors can reach the panels.
-    for (all_views) |v| {
-        if (!graph.hasView(v)) continue;
-        const checked = if (v == first_view.?) " checked" else "";
-        try w.print("<input type=\"radio\" name=\"dg-view\" id=\"{s}\" class=\"dg-radio\"{s}>", .{ viewId(v), checked });
+    for (graph.classes, 0..) |c, i| {
+        const id: ClassId = @intCast(i);
+        if (!graph.isView(id)) continue;
+        const checked = if (id == first.?) " checked" else "";
+        try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\"{s}>", .{ c.key, checked });
     }
     try w.writeAll("<div class=\"dg-tabs\">");
-    for (all_views) |v| {
-        if (!graph.hasView(v)) continue;
-        try w.print("<label for=\"{s}\" class=\"dg-tab dg-tab-{s}\">{s}</label>", .{ viewId(v), viewSlug(v), types.viewLabel(v) });
+    for (graph.classes, 0..) |c, i| {
+        if (!graph.isView(@intCast(i))) continue;
+        try w.print("<label for=\"dg-tab-{s}\" class=\"dg-tab dg-tab-{s}\">{s}</label>", .{ c.key, c.key, c.label });
     }
     try w.writeAll("</div><div class=\"dg-panels\">");
-    for (all_views) |v| {
-        if (!graph.hasView(v)) continue;
-        try renderView(allocator, graph, v, w);
+    for (graph.classes, 0..) |_, i| {
+        const id: ClassId = @intCast(i);
+        if (!graph.isView(id)) continue;
+        try renderView(allocator, graph, id, w);
     }
     try w.writeAll("</div></div>");
 }
 
-fn renderView(allocator: Allocator, graph: *const Graph, view: View, w: *Writer) (Allocator.Error || Writer.Error)!void {
+fn renderView(allocator: Allocator, graph: *const Graph, view: ClassId, w: *Writer) (Allocator.Error || Writer.Error)!void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -59,15 +70,15 @@ fn renderView(allocator: Allocator, graph: *const Graph, view: View, w: *Writer)
 
     // Power edges are colored per rail voltage (with a legend above the SVG);
     // every other view uses its single accent color.
-    const palette: ?[]const VoltColor = if (view == .power) try buildVoltPalette(arena, graph) else null;
+    const palette: ?[]const VoltColor = if (view == types.CLASS_POWER) try buildVoltPalette(arena, graph) else null;
 
-    try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{viewSlug(view)});
+    try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{graph.classes[view].key});
     if (palette) |p| try writeLegend(w, p, lay);
     try w.print(
         "<svg viewBox=\"0 0 {d:.0} {d:.0}\" class=\"dg-svg\" xmlns=\"http://www.w3.org/2000/svg\">",
         .{ lay.width, lay.height },
     );
-    if (view == .power) {
+    if (view == types.CLASS_POWER) {
         try renderPowerView(arena, w, graph, lay, palette);
     } else {
         // Z-ordered passes: edges first (node rects paint over their ends), then
@@ -139,9 +150,9 @@ fn writeDot(w: *Writer, p: types.Pt, color: []const u8) Writer.Error!void {
 
 /// Edge stroke for the non-power views: an RF edge returning to the connector
 /// (an IF line) gets a distinct warm tone; everything else uses the view accent.
-fn nonPowerEdgeColor(view: View, graph: *const Graph, r: layout.Route) []const u8 {
-    if (view == .rf and graph.nodes[r.to_gid].category == .connector) return rf_if_color;
-    return viewColor(view);
+fn nonPowerEdgeColor(view: ClassId, graph: *const Graph, r: layout.Route) []const u8 {
+    if (view == types.CLASS_RF and graph.nodes[r.to_gid].category == .connector) return rf_if_color;
+    return graph.classes[view].color;
 }
 
 fn writeEdgeLabel(arena: Allocator, w: *Writer, r: layout.Route, color: []const u8) (Allocator.Error || Writer.Error)!void {
@@ -193,7 +204,7 @@ const volt_palette = [_][]const u8{
 fn buildVoltPalette(arena: Allocator, graph: *const Graph) Allocator.Error![]const VoltColor {
     var vs: std.ArrayListUnmanaged(f64) = .empty;
     for (graph.edges) |e| {
-        if (e.class != .power) continue;
+        if (e.class != types.CLASS_POWER) continue;
         const v = e.voltage orelse continue;
         var seen = false;
         for (vs.items) |x| {
@@ -212,8 +223,8 @@ fn buildVoltPalette(arena: Allocator, graph: *const Graph) Allocator.Error![]con
 
 /// Stroke color for an edge: palette-by-voltage in the power view, the view's
 /// accent color elsewhere. Power edges with no resolved voltage fall to grey.
-fn edgeColor(view: View, palette: ?[]const VoltColor, voltage: ?f64) []const u8 {
-    const p = palette orelse return viewColor(view);
+fn edgeColor(fallback: []const u8, palette: ?[]const VoltColor, voltage: ?f64) []const u8 {
+    const p = palette orelse return fallback;
     const v = voltage orelse return volt_unspecified;
     for (p) |pc| if (@abs(pc.v - v) < volt_eps) return pc.color;
     return volt_unspecified;
@@ -253,10 +264,11 @@ fn writeCurveEdge(w: *Writer, r: layout.Route, color: []const u8) Writer.Error!v
 /// Draws the power supply tree: rail-colored wires first, then the source /
 /// regulator cards and the per-rail load buckets on top.
 fn renderPowerView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout, palette: ?[]const VoltColor) (Allocator.Error || Writer.Error)!void {
-    for (lay.routes) |r| try writeCurveEdge(w, r, edgeColor(.power, palette, r.voltage));
+    const power_color = graph.classes[types.CLASS_POWER].color;
+    for (lay.routes) |r| try writeCurveEdge(w, r, edgeColor(power_color, palette, r.voltage));
     for (lay.power_boxes) |b| {
         const bv: ?f64 = if (std.math.isNan(b.v)) null else b.v;
-        const color = edgeColor(.power, palette, bv);
+        const color = edgeColor(power_color, palette, bv);
         const node = graph.nodes[b.gid];
         const rail = outputRail(node, b.v);
         switch (b.kind) {
@@ -431,14 +443,6 @@ pub const CSS =
     \\.dg-tab:hover{color:#c9d1d9;border-color:#484f58;}
     \\.dg-panel{display:none;overflow-x:auto;}
     \\.dg-svg{display:block;width:100%;max-width:1536px;height:auto;}
-    \\#dg-tab-power:checked ~ .dg-panels .dg-panel-power,
-    \\#dg-tab-clocks:checked ~ .dg-panels .dg-panel-clocks,
-    \\#dg-tab-control:checked ~ .dg-panels .dg-panel-control,
-    \\#dg-tab-rf:checked ~ .dg-panels .dg-panel-rf{display:block;}
-    \\#dg-tab-power:checked ~ .dg-tabs .dg-tab-power{color:#fff;background:#da3633;border-color:#da3633;}
-    \\#dg-tab-clocks:checked ~ .dg-tabs .dg-tab-clocks{color:#fff;background:#4ab3a3;border-color:#4ab3a3;}
-    \\#dg-tab-control:checked ~ .dg-tabs .dg-tab-control{color:#fff;background:#388bfd;border-color:#388bfd;}
-    \\#dg-tab-rf:checked ~ .dg-tabs .dg-tab-rf{color:#fff;background:#e040fb;border-color:#e040fb;}
     \\.dg-rect{fill:#0d1117;stroke-width:1.5;}
     \\.dg-boundary{stroke-dasharray:5 4;}
     \\.dg-node:hover .dg-rect{fill:#161b22;}
@@ -470,7 +474,7 @@ fn mkNode(label: []const u8) types.Node {
 // spec: diagram/render - Renders a tab per non-empty view and nothing when no view has edges
 test "renderTabs emits only tabs for views that have edges" {
     var nodes = [_]types.Node{ mkNode("A"), mkNode("B") };
-    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = .rf, .label = "CPOUT_1" }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_RF, .label = "CPOUT_1" }};
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -482,7 +486,7 @@ test "renderTabs emits only tabs for views that have edges" {
 
     // A control-class edge (e.g. an I2C/SPI/GPIO net) gets its own Control tab.
     var cnodes = [_]types.Node{ mkNode("MCU"), mkNode("Sensor") };
-    var cedges = [_]types.Edge{.{ .from = 0, .to = 1, .class = .control, .label = "I2C_SDA" }};
+    var cedges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "I2C_SDA" }};
     var cgraph = Graph{ .nodes = &cnodes, .edges = &cedges };
     var caw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer caw.deinit();
@@ -496,12 +500,30 @@ test "renderTabs emits only tabs for views that have edges" {
     try testing.expectEqual(@as(usize, 0), aw2.written().len);
 }
 
+// spec: diagram/render - A designer-declared class renders its own view
+test "renderTabs emits a tab for a designer-declared class" {
+    // A brand-new declared class (not a built-in) renders its own tab — the
+    // headline: representing a circuit the tool has never seen, no code change.
+    const classes = types.builtin_classes ++ [_]types.ClassDef{
+        .{ .key = "audio", .label = "Audio", .color = "#ff8800" },
+    };
+    const audio_id: types.ClassId = @intCast(classes.len - 1);
+    var nodes = [_]types.Node{ mkNode("MIC"), mkNode("CODEC") };
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = audio_id, .label = "MIC_OUT" }};
+    var graph = Graph{ .nodes = &nodes, .edges = &edges, .classes = &classes };
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try renderTabs(testing.allocator, &graph, &aw.writer);
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "dg-tab-audio") != null);
+    try testing.expect(std.mem.indexOf(u8, aw.written(), ">Audio<") != null);
+}
+
 // spec: diagram/render - Draws all edge labels after all wires so net pills stay legible
 test "renderTabs draws edge-label pills after every wire" {
     var nodes = [_]types.Node{ mkNode("A"), mkNode("B"), mkNode("C") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = .rf, .label = "N1" },
-        .{ .from = 0, .to = 2, .class = .rf, .label = "N2" },
+        .{ .from = 0, .to = 1, .class = types.CLASS_RF, .label = "N1" },
+        .{ .from = 0, .to = 2, .class = types.CLASS_RF, .label = "N2" },
     };
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -519,8 +541,8 @@ test "renderTabs draws edge-label pills after every wire" {
 test "renderTabs draws one label for a net fanned to many consumers" {
     var nodes = [_]types.Node{ mkNode("HUB"), mkNode("A"), mkNode("B") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = .rf, .label = "LO_OUT" },
-        .{ .from = 0, .to = 2, .class = .rf, .label = "LO_OUT" },
+        .{ .from = 0, .to = 1, .class = types.CLASS_RF, .label = "LO_OUT" },
+        .{ .from = 0, .to = 2, .class = types.CLASS_RF, .label = "LO_OUT" },
     };
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -533,7 +555,7 @@ test "renderTabs draws one label for a net fanned to many consumers" {
 // spec: diagram/render - Draws per-rail load buckets with rail-colored headings in the power view
 test "renderTabs draws load buckets in the power view" {
     var nodes = [_]types.Node{ mkNode("REG"), mkNode("A") };
-    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = .power, .label = "v", .voltage = 3.3 }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "v", .voltage = 3.3 }};
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
@@ -548,8 +570,8 @@ test "renderTabs draws load buckets in the power view" {
 test "renderTabs colors power edges by voltage with a legend" {
     var nodes = [_]types.Node{ mkNode("REG"), mkNode("A"), mkNode("B") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = .power, .label = "V3P3", .voltage = 3.3 },
-        .{ .from = 0, .to = 2, .class = .power, .label = "V1P8", .voltage = 1.8 },
+        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "V3P3", .voltage = 3.3 },
+        .{ .from = 0, .to = 2, .class = types.CLASS_POWER, .label = "V1P8", .voltage = 1.8 },
     };
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -568,7 +590,7 @@ test "renderTabs tints RF connector-return edges" {
     var j1 = mkNode("J1");
     j1.category = .connector;
     var nodes = [_]types.Node{ mkNode("MIX"), j1 };
-    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = .rf, .label = "ADF_CH1" }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_RF, .label = "ADF_CH1" }};
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();

@@ -16,8 +16,7 @@ const types = @import("types.zig");
 
 const Allocator = std.mem.Allocator;
 const Graph = types.Graph;
-const View = types.View;
-const NetClass = types.NetClass;
+const ClassId = types.ClassId;
 const Pt = types.Pt;
 
 // ── geometry (shared with render.zig) ──────────────────────────────────
@@ -37,7 +36,7 @@ pub const LNode = struct { gid: u32, x: f64, y: f64 };
 pub const Route = struct {
     from_gid: u32,
     to_gid: u32,
-    class: NetClass,
+    class: ClassId,
     label: []const u8,
     voltage: ?f64,
     fanout: u16,
@@ -89,15 +88,15 @@ const Chain = struct { verts: []u32, eidx: usize, arrow_at_start: bool };
 /// Compute the layout for `view`. Returns `null` when the view has no edges.
 /// The power view uses a dedicated voltage-band layout (`powerLayout`); the
 /// other views use the layered/Sugiyama pipeline below.
-pub fn computeLayout(arena: Allocator, graph: *const Graph, view: View) Allocator.Error!?Layout {
-    if (view == .power) return powerLayout(arena, graph);
+pub fn computeLayout(arena: Allocator, graph: *const Graph, view: ClassId) Allocator.Error!?Layout {
+    if (view == types.CLASS_POWER) return powerLayout(arena, graph);
 
     // 1. Filter edges to this view + collect participating nodes.
     var local_of = std.AutoHashMapUnmanaged(u32, u32){};
     var gids: std.ArrayListUnmanaged(u32) = .empty;
     var raw: std.ArrayListUnmanaged(RawEdge) = .empty;
     for (graph.edges, 0..) |e, eidx| {
-        if (types.viewOf(e.class) != view) continue;
+        if (e.class != view) continue;
         const fl = try internNode(arena, &local_of, &gids, e.from);
         const tl = try internNode(arena, &local_of, &gids, e.to);
         if (fl == tl) continue;
@@ -550,7 +549,7 @@ fn railsHas(rails: []const f64, v: f64) bool {
 /// True when `node` has an incoming power edge carrying voltage `v`.
 fn hasInEdgeVolt(graph: *const Graph, node: u32, v: f64) bool {
     for (graph.edges) |e| {
-        if (e.class != .power or e.to != node) continue;
+        if (e.class != types.CLASS_POWER or e.to != node) continue;
         if (e.voltage) |ev| {
             if (@abs(ev - v) < volt_eps) return true;
         }
@@ -581,7 +580,7 @@ fn producerDepths(arena: Allocator, graph: *const Graph, is_producer: []const bo
     const n = is_producer.len;
     var elist: std.ArrayListUnmanaged(InfraEdge) = .empty;
     for (graph.edges) |e| {
-        if (e.class != .power or e.from == e.to) continue;
+        if (e.class != types.CLASS_POWER or e.from == e.to) continue;
         if (!is_producer[e.from] or !is_producer[e.to]) continue;
         try elist.append(arena, .{ .from = e.from, .to = e.to });
     }
@@ -628,7 +627,7 @@ fn producerDepths(arena: Allocator, graph: *const Graph, is_producer: []const bo
     }
     var battery_v: f64 = std.math.nan(f64);
     for (graph.edges) |e| {
-        if (e.class != .power) continue;
+        if (e.class != types.CLASS_POWER) continue;
         if (!is_producer[e.from] or !is_producer[e.to]) continue;
         if (depth[e.from] == 0 and depth[e.to] == 1) {
             if (e.voltage) |ev| battery_v = ev;
@@ -646,7 +645,7 @@ const role_hidden: u8 = 3; // pass-through filter (folded; rail feeds from paren
 /// Voltage of the incoming producer→`p` power edge (the rail feeding `p`).
 fn producerInVolt(graph: *const Graph, is_producer: []const bool, p: u32) f64 {
     for (graph.edges) |e| {
-        if (e.class != .power or e.to != p or !is_producer[e.from]) continue;
+        if (e.class != types.CLASS_POWER or e.to != p or !is_producer[e.from]) continue;
         if (e.voltage) |ev| return ev;
     }
     return std.math.nan(f64);
@@ -691,7 +690,7 @@ fn shownAncestor(info: ProducerInfo, roles: []const u8, p: u32) u32 {
 /// edge). NaN when it drives nothing.
 fn producerOutVolt(graph: *const Graph, g: u32) f64 {
     for (graph.edges) |e| {
-        if (e.class != .power or e.from != g) continue;
+        if (e.class != types.CLASS_POWER or e.from != g) continue;
         if (e.voltage) |ev| return ev;
     }
     return std.math.nan(f64);
@@ -715,7 +714,7 @@ fn railFeeder(graph: *const Graph, is_producer: []const bool, info: ProducerInfo
     var best: ?u32 = null;
     var best_depth: i32 = -1;
     for (graph.edges) |e| {
-        if (e.class != .power or !is_producer[e.from]) continue;
+        if (e.class != types.CLASS_POWER or !is_producer[e.from]) continue;
         const ev = e.voltage orelse continue;
         if (@abs(ev - v) >= volt_eps) continue;
         if (@as(i32, info.depth[e.from]) > best_depth) {
@@ -738,7 +737,7 @@ fn addVolt(arena: Allocator, list: *std.ArrayListUnmanaged(f64), v: f64, battery
 fn collectConsumerVolts(arena: Allocator, graph: *const Graph, node: u32, battery_v: f64, list: *std.ArrayListUnmanaged(f64)) Allocator.Error!void {
     for (graph.nodes[node].rails) |r| try addVolt(arena, list, r, battery_v);
     for (graph.edges) |e| {
-        if (e.class != .power or e.to != node) continue;
+        if (e.class != types.CLASS_POWER or e.to != node) continue;
         if (e.voltage) |ev| try addVolt(arena, list, ev, battery_v);
     }
 }
@@ -757,7 +756,7 @@ fn pwRoute(from: u32, to: u32, v: f64, pts: []Pt) Route {
     return .{
         .from_gid = from,
         .to_gid = to,
-        .class = .power,
+        .class = types.CLASS_POWER,
         .label = "",
         .voltage = if (std.math.isNan(v)) null else v,
         .fanout = 1,
@@ -772,7 +771,7 @@ fn powerLayout(arena: Allocator, graph: *const Graph) Allocator.Error!?Layout {
     @memset(is_producer, false);
     var any = false;
     for (graph.edges) |e| {
-        if (e.class != .power) continue;
+        if (e.class != types.CLASS_POWER) continue;
         any = true;
         is_producer[e.from] = true;
     }
@@ -961,7 +960,7 @@ test "computeLayout returns null when the view has no edges" {
     const graph = Graph{ .nodes = &nodes, .edges = &.{} };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const lay = try computeLayout(arena.allocator(), &graph, .rf);
+    const lay = try computeLayout(arena.allocator(), &graph, types.CLASS_RF);
     try testing.expect(lay == null);
 }
 
@@ -969,14 +968,14 @@ test "computeLayout returns null when the view has no edges" {
 test "computeLayout breaks a cycle and ranks across columns" {
     var nodes = [_]types.Node{ mkNode("A"), mkNode("B"), mkNode("C") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = .rf, .label = "x" },
-        .{ .from = 1, .to = 2, .class = .rf, .label = "y" },
-        .{ .from = 2, .to = 0, .class = .rf, .label = "z" }, // back-edge → cycle
+        .{ .from = 0, .to = 1, .class = types.CLASS_RF, .label = "x" },
+        .{ .from = 1, .to = 2, .class = types.CLASS_RF, .label = "y" },
+        .{ .from = 2, .to = 0, .class = types.CLASS_RF, .label = "z" }, // back-edge → cycle
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const lay = (try computeLayout(arena.allocator(), &graph, .rf)) orelse return error.TestUnexpectedResult;
+    const lay = (try computeLayout(arena.allocator(), &graph, types.CLASS_RF)) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 3), lay.nodes.len);
     // Three ranks ⇒ at least three columns wide.
     try testing.expect(lay.width > node_w * 2);
@@ -986,14 +985,14 @@ test "computeLayout breaks a cycle and ranks across columns" {
 test "computeLayout gives a shared-source fanout one common bend x" {
     var nodes = [_]types.Node{ mkNode("SRC"), mkNode("A"), mkNode("B"), mkNode("C") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = .clock, .label = "r1" },
-        .{ .from = 0, .to = 2, .class = .clock, .label = "r2" },
-        .{ .from = 0, .to = 3, .class = .clock, .label = "r3" },
+        .{ .from = 0, .to = 1, .class = types.CLASS_CLOCK, .label = "r1" },
+        .{ .from = 0, .to = 2, .class = types.CLASS_CLOCK, .label = "r2" },
+        .{ .from = 0, .to = 3, .class = types.CLASS_CLOCK, .label = "r3" },
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const lay = (try computeLayout(arena.allocator(), &graph, .clocks)) orelse return error.TestUnexpectedResult;
+    const lay = (try computeLayout(arena.allocator(), &graph, types.CLASS_CLOCK)) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 3), lay.routes.len);
     // The first vertical channel segment is pts[1]→pts[2]; its x is the bend.
     // All three edges leave the same source, so they must share one trunk x.
@@ -1008,13 +1007,13 @@ test "computeLayout gives a shared-source fanout one common bend x" {
 test "computeLayout puts the power source left of the regulators it feeds" {
     var nodes = [_]types.Node{ mkNode("MEZZ"), mkNode("REG"), mkNode("LOAD") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = .power, .label = "VBATT", .voltage = 3.7 },
-        .{ .from = 1, .to = 2, .class = .power, .label = "v5", .voltage = 5.0 },
+        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "VBATT", .voltage = 3.7 },
+        .{ .from = 1, .to = 2, .class = types.CLASS_POWER, .label = "v5", .voltage = 5.0 },
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const lay = (try computeLayout(arena.allocator(), &graph, .power)) orelse return error.TestUnexpectedResult;
+    const lay = (try computeLayout(arena.allocator(), &graph, types.CLASS_POWER)) orelse return error.TestUnexpectedResult;
     var sx: f64 = -1;
     var rx: f64 = -1;
     var bx: f64 = -1;
@@ -1032,14 +1031,14 @@ test "computeLayout puts the power source left of the regulators it feeds" {
 test "computeLayout groups power consumers into per-rail buckets" {
     var nodes = [_]types.Node{ mkNode("REG18"), mkNode("REG33"), mkNode("A"), mkNode("B"), mkNode("C") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 2, .class = .power, .label = "v18", .voltage = 1.8 },
-        .{ .from = 1, .to = 3, .class = .power, .label = "v33", .voltage = 3.3 },
-        .{ .from = 1, .to = 4, .class = .power, .label = "v33b", .voltage = 3.3 },
+        .{ .from = 0, .to = 2, .class = types.CLASS_POWER, .label = "v18", .voltage = 1.8 },
+        .{ .from = 1, .to = 3, .class = types.CLASS_POWER, .label = "v33", .voltage = 3.3 },
+        .{ .from = 1, .to = 4, .class = types.CLASS_POWER, .label = "v33b", .voltage = 3.3 },
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const lay = (try computeLayout(arena.allocator(), &graph, .power)) orelse return error.TestUnexpectedResult;
+    const lay = (try computeLayout(arena.allocator(), &graph, types.CLASS_POWER)) orelse return error.TestUnexpectedResult;
     var n18: usize = 0;
     var n33: usize = 0;
     var buckets: usize = 0;
@@ -1060,11 +1059,11 @@ test "computeLayout lists a dual-rail consumer in both rail buckets" {
     dual.rails = &[_]f64{ 1.8, 3.3 };
     dual.power_rail = 3.3;
     var nodes = [_]types.Node{ mkNode("REG"), dual };
-    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = .power, .label = "v", .voltage = 3.3 }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "v", .voltage = 3.3 }};
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const lay = (try computeLayout(arena.allocator(), &graph, .power)) orelse return error.TestUnexpectedResult;
+    const lay = (try computeLayout(arena.allocator(), &graph, types.CLASS_POWER)) orelse return error.TestUnexpectedResult;
     var in18 = false;
     var in33 = false;
     for (lay.power_boxes) |pb| {
@@ -1079,14 +1078,14 @@ test "computeLayout lists a dual-rail consumer in both rail buckets" {
 test "computeLayout shows a voltage-changing cascade LDO" {
     var nodes = [_]types.Node{ mkNode("MEZZ"), mkNode("BUCK33"), mkNode("LDO18"), mkNode("LOAD") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = .power, .label = "VBATT", .voltage = 3.7 },
-        .{ .from = 1, .to = 2, .class = .power, .label = "V3P3", .voltage = 3.3 }, // buck → LDO (3.3 V in)
-        .{ .from = 2, .to = 3, .class = .power, .label = "V1P8", .voltage = 1.8 }, // LDO → load (1.8 V out)
+        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "VBATT", .voltage = 3.7 },
+        .{ .from = 1, .to = 2, .class = types.CLASS_POWER, .label = "V3P3", .voltage = 3.3 }, // buck → LDO (3.3 V in)
+        .{ .from = 2, .to = 3, .class = types.CLASS_POWER, .label = "V1P8", .voltage = 1.8 }, // LDO → load (1.8 V out)
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const lay = (try computeLayout(arena.allocator(), &graph, .power)) orelse return error.TestUnexpectedResult;
+    const lay = (try computeLayout(arena.allocator(), &graph, types.CLASS_POWER)) orelse return error.TestUnexpectedResult;
     // The LDO changes voltage (3.3 → 1.8) so it is shown — two regulator cards
     // (BUCK33 + LDO18) at different columns, plus the 1.8 V bucket.
     var regs: usize = 0;
@@ -1108,14 +1107,14 @@ test "computeLayout shows a voltage-changing cascade LDO" {
 test "computeLayout folds a same-voltage filter stage" {
     var nodes = [_]types.Node{ mkNode("MEZZ"), mkNode("BUCK5"), mkNode("FILTER"), mkNode("LOAD") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = .power, .label = "VBATT", .voltage = 3.7 },
-        .{ .from = 1, .to = 2, .class = .power, .label = "V5RAW", .voltage = 5.0 }, // buck → filter (5 V)
-        .{ .from = 2, .to = 3, .class = .power, .label = "V5", .voltage = 5.0 }, // filter → load (still 5 V)
+        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "VBATT", .voltage = 3.7 },
+        .{ .from = 1, .to = 2, .class = types.CLASS_POWER, .label = "V5RAW", .voltage = 5.0 }, // buck → filter (5 V)
+        .{ .from = 2, .to = 3, .class = types.CLASS_POWER, .label = "V5", .voltage = 5.0 }, // filter → load (still 5 V)
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const lay = (try computeLayout(arena.allocator(), &graph, .power)) orelse return error.TestUnexpectedResult;
+    const lay = (try computeLayout(arena.allocator(), &graph, types.CLASS_POWER)) orelse return error.TestUnexpectedResult;
     // The filter passes 5 V through unchanged, so it is folded: only BUCK5 shows.
     var regs: usize = 0;
     var has5bucket = false;

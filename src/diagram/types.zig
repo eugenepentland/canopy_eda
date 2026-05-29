@@ -14,67 +14,53 @@ const std = @import("std");
 const rb = @import("../render_block_types.zig");
 const Allocator = std.mem.Allocator;
 
-/// A diagram tab. Declaration order is the tab order on the page. Empty views
-/// are omitted, so an RF board with no control bus shows no Control tab and a
-/// digital board with no RF chain shows no RF tab.
-pub const View = enum { power, clocks, control, rf };
+/// Identifier for a signal class. The first `builtin_classes.len` ids are the
+/// built-ins (stable, named below); a design that declares a novel
+/// `(class <key>)` on a port gets a fresh id appended to its per-design
+/// registry — that is how a brand-new circuit gets its own view with no code
+/// change. A class is also a *view* unless it is a reference class (ground).
+pub const ClassId = u8;
+pub const CLASS_GROUND: ClassId = 0;
+pub const CLASS_POWER: ClassId = 1;
+pub const CLASS_CLOCK: ClassId = 2;
+pub const CLASS_CONTROL: ClassId = 3;
+pub const CLASS_RF: ClassId = 4;
 
-/// Human label for a view's tab.
-pub fn viewLabel(v: View) []const u8 {
-    return switch (v) {
-        .power => "Power",
-        .clocks => "Clocks",
-        .control => "Control",
-        .rf => "RF / Analog",
-    };
-}
+/// Metadata for one signal class: its source key, the tab label, the edge
+/// accent color, and whether it is a reference (drawn as a shared node, never
+/// as edges — so it gets no view/tab). `key`/`label`/`color` are borrowed
+/// slices (string literals for built-ins, source slices for declared keys),
+/// so no `ClassDef` needs freeing.
+pub const ClassDef = struct {
+    key: []const u8,
+    label: []const u8,
+    color: []const u8,
+    is_reference: bool = false,
+};
 
-/// Stable element id for a view's radio (one diagram per page → static ids).
-pub fn viewId(v: View) []const u8 {
-    return switch (v) {
-        .power => "dg-tab-power",
-        .clocks => "dg-tab-clocks",
-        .control => "dg-tab-control",
-        .rf => "dg-tab-rf",
-    };
-}
+/// Built-in classes, indexed by the `CLASS_*` ids above. A design's registry
+/// (`Graph.classes`) starts from these and appends any novel declared keys.
+/// `ground` is a reference class: GND touches every block, so drawing it would
+/// produce an unreadable clique — it is a shared reference, not edges.
+pub const builtin_classes = [_]ClassDef{
+    .{ .key = "ground", .label = "Ground", .color = "#6e7681", .is_reference = true },
+    .{ .key = "power", .label = "Power", .color = "#da3633" },
+    .{ .key = "clock", .label = "Clocks", .color = "#4ab3a3" },
+    .{ .key = "control", .label = "Control", .color = "#388bfd" },
+    .{ .key = "rf", .label = "RF / Analog", .color = "#e040fb" },
+};
 
-/// Short class-suffix slug for a view (`dg-panel-<slug>`, `dg-tab-<slug>`).
-pub fn viewSlug(v: View) []const u8 {
-    return switch (v) {
-        .power => "power",
-        .clocks => "clocks",
-        .control => "control",
-        .rf => "rf",
-    };
-}
+/// Accent colors cycled for designer-declared classes that aren't built-ins.
+pub const discovered_palette = [_][]const u8{
+    "#ff8800", "#00b894", "#a29bfe", "#fdcb6e", "#fd79a8", "#55efc4",
+};
 
-/// Edge/accent color for a view.
-pub fn viewColor(v: View) []const u8 {
-    return switch (v) {
-        .power => "#da3633",
-        .clocks => "#4ab3a3",
-        .control => "#388bfd",
-        .rf => "#e040fb",
-    };
-}
-
-/// Classification of a net, deciding which view (if any) its edges appear in.
-/// `ground` maps to no view — GND touches every block, so drawing it would
-/// produce an unreadable clique; it is surfaced as a shared reference, not edges.
-pub const NetClass = enum { ground, power, clock, control, rf };
-
-/// Which view a class routes to, or null when the class draws no edges.
-/// `ground` maps to no view (GND is a shared reference, not an edge); every
-/// other class has a view, though empty views are omitted at render time.
-pub fn viewOf(c: NetClass) ?View {
-    return switch (c) {
-        .ground => null,
-        .power => .power,
-        .clock => .clocks,
-        .control => .control,
-        .rf => .rf,
-    };
+/// Find a class id by key in a registry, or null if absent.
+pub fn findClass(classes: []const ClassDef, key: []const u8) ?ClassId {
+    for (classes, 0..) |c, i| {
+        if (std.mem.eql(u8, c.key, key)) return @intCast(i);
+    }
+    return null;
 }
 
 /// 2-D point for routed-edge polylines.
@@ -125,7 +111,7 @@ pub const Node = struct {
 pub const Edge = struct {
     from: u32,
     to: u32,
-    class: NetClass,
+    class: ClassId,
     label: []const u8,
     voltage: ?f64 = null,
     /// Number of parallel nets this edge stands in for after differential-pair
@@ -133,11 +119,16 @@ pub const Edge = struct {
     fanout: u16 = 1,
 };
 
-/// Owned node + edge lists for a whole design. Views are produced by filtering
+/// Owned node + edge lists for a whole design, plus the per-design class
+/// registry (`classes`, indexed by `ClassId`). Views are produced by filtering
 /// `edges` on `class`. Caller must call `deinit`.
 pub const Graph = struct {
     nodes: []Node,
     edges: []Edge,
+    /// Class registry: `builtin_classes` plus any designer-declared keys. The
+    /// slice is owned (allocated by `collect`); the `ClassDef` fields inside
+    /// are borrowed, so only the slice itself is freed.
+    classes: []const ClassDef = &builtin_classes,
 
     pub fn deinit(self: *Graph, allocator: Allocator) void {
         for (self.nodes) |n| {
@@ -150,15 +141,22 @@ pub const Graph = struct {
         allocator.free(self.nodes);
         for (self.edges) |e| allocator.free(e.label);
         allocator.free(self.edges);
+        // Free the registry only when it isn't the static built-in array.
+        const builtin_ptr: [*]const ClassDef = &builtin_classes;
+        if (self.classes.ptr != builtin_ptr) allocator.free(self.classes);
     }
 
-    /// True when at least one edge routes to `view`.
-    pub fn hasView(self: *const Graph, view: View) bool {
+    /// True when at least one edge carries class `id`.
+    pub fn classHasEdge(self: *const Graph, id: ClassId) bool {
         for (self.edges) |e| {
-            if (viewOf(e.class)) |v| {
-                if (v == view) return true;
-            }
+            if (e.class == id) return true;
         }
         return false;
+    }
+
+    /// True when class `id` should render as a view: it is not a reference
+    /// class and at least one edge carries it.
+    pub fn isView(self: *const Graph, id: ClassId) bool {
+        return id < self.classes.len and !self.classes[id].is_reference and self.classHasEdge(id);
     }
 };

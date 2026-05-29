@@ -29,10 +29,34 @@ pub fn categoryColor(cat: Category) []const u8 {
     };
 }
 
-/// Pick the best-fitting `Category` for a section. Thin wrapper around
-/// `classifyByName` that passes the section's name and instances so the
-/// keyword + ref-des heuristics can both fire.
+/// Map an explicit `(category <key>)` declaration to a `Category`. Returns
+/// null for an unrecognized key so the caller falls back to the name
+/// heuristic (and, once the diagram engine is data-driven, an unknown key
+/// can mint its own category).
+fn categoryFromKey(key: []const u8) ?Category {
+    return category_keys.get(key);
+}
+
+const category_keys = std.StaticStringMap(Category).initComptime(.{
+    .{ "mcu", .mcu },
+    .{ "power", .power },
+    .{ "memory", .memory },
+    .{ "peripheral", .peripheral },
+    .{ "connector", .connector },
+    .{ "clock", .clock },
+    .{ "comms", .comms },
+    .{ "sensor", .sensor },
+    .{ "analog", .analog },
+    .{ "protection", .protection },
+});
+
+/// Pick the best-fitting `Category` for a section. An explicit
+/// `(category <key>)` declaration is authoritative; otherwise fall back to
+/// the `classifyByName` keyword + ref-des heuristics.
 pub fn classifySection(sec: env_mod.Section) Category {
+    if (sec.category.len > 0) {
+        if (categoryFromKey(sec.category)) |c| return c;
+    }
     return classifyByName(sec.name, sec.instances);
 }
 

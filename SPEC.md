@@ -209,6 +209,8 @@ Public functions: buildPortClassMap, netClass
 
 - Classifies power, ground, clock, control, and RF nets by name
 - Honors an explicit section-port signal type over the name heuristic
+- An explicit port (class …) overrides signal-type and name heuristics
+- A declared (class …) key extends the registry with a new class
 
 ## diagram/collect
 
@@ -243,6 +245,7 @@ Public functions: computeLayout
 Public functions: renderTabs
 
 - Renders a tab per non-empty view and nothing when no view has edges
+- A designer-declared class renders its own view
 - Draws all edge labels after all wires so net pills stay legible
 - Draws each rail label once per source, not once per fanout branch
 - Colors power edges by voltage and renders a voltage legend

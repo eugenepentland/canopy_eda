@@ -105,6 +105,7 @@ pub const ScopeForm = enum {
     role,
     diagram,
     hosts,
+    category,
     // Top-level only (design-block scope)
     group,
     sub_block,
@@ -139,6 +140,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "role", .role },
     .{ "diagram", .diagram },
     .{ "hosts", .hosts },
+    .{ "category", .category },
     .{ "group", .group },
     .{ "sub-block", .sub_block },
     .{ "verifies", .verifies },
@@ -389,6 +391,10 @@ pub const scope_form_docs = blk: {
     t[@intFromEnum(ScopeForm.hosts)] = .{ .scope = sec, .doc = .{
         .syntax = "(hosts \"sub1\" \"sub2\" …)",
         .summary = "Fold the named sub-blocks into this section's block-diagram node (explicit attachment).",
+    } };
+    t[@intFromEnum(ScopeForm.category)] = .{ .scope = sec, .doc = .{
+        .syntax = "(category <key>)",
+        .summary = "Set this section's diagram category (e.g. mcu, power, rf), overriding the name heuristic.",
     } };
 
     t[@intFromEnum(ScopeForm.group)] = .{ .scope = tl, .doc = .{
