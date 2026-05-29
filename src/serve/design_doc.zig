@@ -9,6 +9,7 @@
 //! so the import → requirements → place progression has something to track.
 
 const std = @import("std");
+const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
 const paths = @import("../paths.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
@@ -86,7 +87,7 @@ pub fn addCriticalIc(
     try writeFile(path, new_src);
     const w = out.writer(allocator);
     try w.writeAll("{\"ok\":true,\"component\":");
-    try writeJsonString(w, component);
+    try json_writer.writeString(w, component);
     try w.print(",\"created_design_doc\":{s}}}", .{if (created_design_doc) "true" else "false"});
     return true;
 }
@@ -141,7 +142,7 @@ pub fn removeCriticalIc(
     try writeFile(path, new_src);
     const w = out.writer(allocator);
     try w.writeAll("{\"ok\":true,\"component\":");
-    try writeJsonString(w, component);
+    try json_writer.writeString(w, component);
     try w.writeAll("}");
     return true;
 }
@@ -340,22 +341,9 @@ fn writeFile(path: []const u8, contents: []const u8) !void {
 fn writeJsonError(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), msg: []const u8) !bool {
     const w = out.writer(allocator);
     try w.writeAll("{\"ok\":false,\"error\":");
-    try writeJsonString(w, msg);
+    try json_writer.writeString(w, msg);
     try w.writeAll("}");
     return false;
-}
-
-fn writeJsonString(w: anytype, s: []const u8) !void {
-    try w.writeByte('"');
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        else => try w.writeByte(c),
-    };
-    try w.writeByte('"');
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────

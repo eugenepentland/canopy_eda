@@ -1,5 +1,6 @@
 const std = @import("std");
 const env_mod = @import("eval/env.zig");
+const asserted_fns_mod = @import("asserted_fns.zig");
 const erc_mod = @import("erc.zig");
 const review = @import("review.zig");
 const review_html = @import("review_html.zig");
@@ -61,8 +62,7 @@ pub fn renderToHtml(
     var ctx = try setupRenderCtx(allocator, block);
     ctx.project_dir = project_dir;
 
-    var asserted_fns: std.StringHashMapUnmanaged([]const u8) = .empty;
-    try appendAssertedFromBlock(allocator, &asserted_fns, block);
+    var asserted_fns = try asserted_fns_mod.buildMap(allocator, block);
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     const w = &aw.writer;
@@ -440,34 +440,6 @@ fn writeTocChip(w: anytype, anchor_id: []const u8, label: []const u8) !void {
 /// Build a map of (ref_des|pin_id) -> asserted alt-function names (e.g. "SPI4_SCK",
 /// or "TIM1_CH1, GPIO" when the pin declared multiple roles) from all
 /// `(pin X (as "FN" ...) ...)` declarations in the design tree.
-fn appendAssertedFromBlock(
-    allocator: Allocator,
-    map: *std.StringHashMapUnmanaged([]const u8),
-    block: *const DesignBlock,
-) std.mem.Allocator.Error!void {
-    for (block.nets) |net| {
-        for (net.pins) |p| {
-            if (p.asserted_fns.len == 0) continue;
-            const key = std.fmt.allocPrint(allocator, "{s}|{s}", .{ p.ref_des, p.pin }) catch continue;
-            const joined = joinAssertedFns(allocator, p.asserted_fns) orelse continue;
-            try map.put(allocator, key, joined);
-        }
-    }
-    for (block.sub_blocks) |sb| try appendAssertedFromBlock(allocator, map, sb.block);
-}
-
-fn joinAssertedFns(allocator: Allocator, fns: []const []const u8) ?[]const u8 {
-    if (fns.len == 0) return null;
-    if (fns.len == 1) return fns[0];
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const w = buf.writer(allocator);
-    for (fns, 0..) |f, i| {
-        if (i > 0) w.writeAll(", ") catch return null;
-        w.writeAll(f) catch return null;
-    }
-    return buf.toOwnedSlice(allocator) catch null;
-}
-
 /// Build a fully-populated `RenderCtx` for `block`. Same setup the schematic
 /// page does — flatten instances, build pin/net maps, classify, build
 /// adjacency, etc. — exposed so static exporters (markdown review package)
@@ -1007,14 +979,6 @@ fn analyzeHub(
         .inst = hub_inst,
         .groups = try all_groups.toOwnedSlice(allocator),
     };
-}
-
-fn firstNet(g: PinGroup) []const u8 {
-    for (g.conns) |c| switch (c.endpoint) {
-        .net => |n| return n,
-        .pin => {},
-    };
-    return "";
 }
 
 fn writeSectionPorts(w: anytype, sec: Section) !void {

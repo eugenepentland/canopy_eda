@@ -12,6 +12,7 @@
 //! check-kind labels stay in sync with what the review actually verifies.
 
 const std = @import("std");
+const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
 const ast = @import("../sexpr/ast.zig");
@@ -307,32 +308,32 @@ fn writeComponentJson(
 ) !void {
     const pin_entries: ?[]const PinEntry = loaded.pins;
     try w.writeAll("{\"ok\":true,\"name\":");
-    try writeJsonString(w, info.name);
+    try json_writer.writeString(w, info.name);
     try w.writeAll(",\"requested_name\":");
-    try writeJsonString(w, requested_name);
+    try json_writer.writeString(w, requested_name);
     try w.writeAll(",\"kind\":\"");
     try w.writeAll(if (info.is_family) FORM_COMPONENT_FAMILY else FORM_COMPONENT);
     try w.writeAll("\",\"is_family\":");
     try w.writeAll(if (info.is_family) "true" else "false");
     try w.writeAll(",\"description\":");
-    try writeJsonString(w, info.description);
+    try json_writer.writeString(w, info.description);
     try w.writeAll(",\"footprint\":");
-    try writeJsonString(w, info.footprint);
+    try json_writer.writeString(w, info.footprint);
     try w.writeAll(",\"pinout_ref\":");
-    try writeJsonString(w, info.pinout_ref);
+    try json_writer.writeString(w, info.pinout_ref);
     try w.writeAll(",\"pinout_source\":");
-    if (loaded.source) |s| try writeJsonString(w, s) else try w.writeAll("null");
+    if (loaded.source) |s| try json_writer.writeString(w, s) else try w.writeAll("null");
     try w.writeAll(",\"symbol_ref\":");
-    try writeJsonString(w, info.symbol_ref);
+    try json_writer.writeString(w, info.symbol_ref);
     try w.writeAll(",\"manufacturer\":");
-    try writeJsonString(w, info.manufacturer);
+    try json_writer.writeString(w, info.manufacturer);
     try w.writeAll(",\"mpn\":");
-    try writeJsonString(w, info.mpn);
+    try json_writer.writeString(w, info.mpn);
 
     try w.writeAll(",\"datasheets\":[");
     for (datasheets, 0..) |d, i| {
         if (i > 0) try w.writeAll(",");
-        try writeJsonString(w, d);
+        try json_writer.writeString(w, d);
     }
     try w.writeAll("]");
 
@@ -342,16 +343,16 @@ fn writeComponentJson(
         for (pe, 0..) |p, i| {
             if (i > 0) try w.writeAll(",");
             try w.writeAll("{\"id\":");
-            try writeJsonString(w, p.id);
+            try json_writer.writeString(w, p.id);
             try w.writeAll(",\"function\":");
-            try writeJsonString(w, p.function);
+            try json_writer.writeString(w, p.function);
             try w.writeAll(",\"alts\":[");
             for (p.alts, 0..) |a, ai| {
                 if (ai > 0) try w.writeAll(",");
                 try w.writeAll("{\"name\":");
-                try writeJsonString(w, a.name);
+                try json_writer.writeString(w, a.name);
                 try w.writeAll(",\"kind\":");
-                try writeJsonString(w, a.kind);
+                try json_writer.writeString(w, a.kind);
                 try w.writeAll("}");
             }
             try w.writeAll("]}");
@@ -378,9 +379,9 @@ fn writeRequirementJson(w: anytype, cl: []const ast.Node) !void {
     const text = if (cl.len >= 2) (cl[1].asString() orelse cl[1].asAtom() orelse "") else "";
     try w.writeAll("{\"id\":");
     var id_buf: [8]u8 = undefined;
-    try writeJsonString(w, requirementId(cl, &id_buf));
+    try json_writer.writeString(w, requirementId(cl, &id_buf));
     try w.writeAll(",\"text\":");
-    try writeJsonString(w, text);
+    try json_writer.writeString(w, text);
 
     var ref_pdf: []const u8 = "";
     var ref_page: u32 = 0;
@@ -403,10 +404,10 @@ fn writeRequirementJson(w: anytype, cl: []const ast.Node) !void {
         try w.writeAll("null");
     } else {
         try w.writeAll("{\"pdf\":");
-        try writeJsonString(w, ref_pdf);
+        try json_writer.writeString(w, ref_pdf);
         try w.print(",\"page\":{d}", .{ref_page});
         try w.writeAll(",\"quote\":");
-        if (ref_quote.len == 0) try w.writeAll("null") else try writeJsonString(w, ref_quote);
+        if (ref_quote.len == 0) try w.writeAll("null") else try json_writer.writeString(w, ref_quote);
         try w.writeAll("}");
     }
     try w.writeAll(",\"check_kind\":");
@@ -435,23 +436,9 @@ fn writeJsonError(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)
     out.clearRetainingCapacity();
     const w = out.writer(allocator);
     try w.writeAll("{\"ok\":false,\"error\":");
-    try writeJsonString(w, msg);
+    try json_writer.writeString(w, msg);
     try w.writeAll("}");
     return false;
-}
-
-fn writeJsonString(w: anytype, s: []const u8) !void {
-    try w.writeAll("\"");
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        0...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{c}),
-        else => try w.writeByte(c),
-    };
-    try w.writeAll("\"");
 }
 
 // ── Requirement editing (list / add / remove) ─────────────────────────
@@ -663,7 +650,7 @@ pub fn listRequirements(
 
     const w = out.writer(allocator);
     try w.writeAll("{\"ok\":true,\"name\":");
-    try writeJsonString(w, name);
+    try json_writer.writeString(w, name);
     try w.writeAll(",\"requirements\":[");
     var first = true;
     for (body) |child| {
@@ -765,9 +752,9 @@ pub fn addRequirement(
 
     const w = out.writer(allocator);
     try w.writeAll("{\"ok\":true,\"id\":");
-    try writeJsonString(w, id_hex);
+    try json_writer.writeString(w, id_hex);
     try w.writeAll(",\"text\":");
-    try writeJsonString(w, text);
+    try json_writer.writeString(w, text);
     try w.writeAll("}");
     return true;
 }
@@ -824,7 +811,7 @@ pub fn removeRequirement(
 
     const w = out.writer(allocator);
     try w.writeAll("{\"ok\":true,\"removed_id\":");
-    try writeJsonString(w, removed_id);
+    try json_writer.writeString(w, removed_id);
     try w.writeAll("}");
     return true;
 }

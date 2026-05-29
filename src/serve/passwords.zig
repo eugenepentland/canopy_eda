@@ -1,4 +1,5 @@
 const std = @import("std");
+const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
 const clock = @import("../infra/clock.zig");
 const log = @import("../infra/log.zig");
@@ -79,9 +80,9 @@ fn save(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     for (rows.items, 0..) |r, i| {
         if (i > 0) w.writeAll(",") catch return;
         w.writeAll("{\"email\":") catch return;
-        writeJsonString(w, r.email) catch return;
+        json_writer.writeString(w, r.email) catch return;
         w.writeAll(",\"hash\":") catch return;
-        writeJsonString(w, r.hash) catch return;
+        json_writer.writeString(w, r.hash) catch return;
         w.print(",\"updated_at\":{d}}}", .{r.updated_at}) catch return;
     }
     w.writeAll("]") catch return;
@@ -180,18 +181,4 @@ pub fn purge(allocator: std.mem.Allocator, auth_dir: []const u8, email: []const 
         i += 1;
     }
     save(allocator, auth_dir);
-}
-
-fn writeJsonString(w: anytype, s: []const u8) !void {
-    try w.writeAll("\"");
-    for (s) |ch| switch (ch) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{ch}),
-        else => try w.writeByte(ch),
-    };
-    try w.writeAll("\"");
 }

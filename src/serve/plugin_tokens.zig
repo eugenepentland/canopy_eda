@@ -1,4 +1,5 @@
 const std = @import("std");
+const json_writer = @import("../json_writer.zig");
 const clock = @import("../infra/clock.zig");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
@@ -70,7 +71,7 @@ fn save(allocator: std.mem.Allocator, auth_dir: []const u8) void {
         w.writeAll("{\"hash\":\"") catch return;
         w.writeAll(t.hash) catch return;
         w.writeAll("\",\"label\":") catch return;
-        writeJsonString(w, t.label) catch return;
+        json_writer.writeString(w, t.label) catch return;
         w.print(",\"created_at\":{d}}}", .{t.created_at}) catch return;
     }
     w.writeAll("]") catch return;
@@ -138,18 +139,4 @@ fn randomHex(allocator: std.mem.Allocator, n_chars: usize) ![]u8 {
         out[i] = if (i % 2 == 0) hex[byte >> 4] else hex[byte & 0x0f];
     }
     return out;
-}
-
-fn writeJsonString(w: anytype, s: []const u8) !void {
-    try w.writeAll("\"");
-    for (s) |ch| switch (ch) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{ch}),
-        else => try w.writeByte(ch),
-    };
-    try w.writeAll("\"");
 }

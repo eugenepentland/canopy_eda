@@ -211,17 +211,7 @@ pub fn exportFootprintMod(
 
     // 3D model reference
     if (model_name) |mname| {
-        const off = model_offset orelse [3]f64{ 0, 0, 0 };
-        const rot = model_rotation orelse [3]f64{ 0, 0, 0 };
-        try w.writeAll("  (model \"${KIPRJMOD}/models/");
-        try w.writeAll(mname);
-        try w.writeAll("\"\n");
-        try w.print("    (offset (xyz {d:.4} {d:.4} {d:.4}))\n", .{ -off[0], -off[1], -off[2] });
-        try w.writeAll("    (scale (xyz 1 1 1))\n");
-        // See note in writeModelBlock — KiCad negates X rotation vs. the in-tool
-        // viewer's right-handed convention.
-        try w.print("    (rotate (xyz {d:.4} {d:.4} {d:.4}))\n", .{ -rot[0], rot[1], rot[2] });
-        try w.writeAll("  )\n");
+        try writeModelBlock(w, mname, model_offset, model_rotation);
     }
 
     try w.writeAll(")\n");

@@ -1,4 +1,5 @@
 const std = @import("std");
+const json_writer = @import("../json_writer.zig");
 const httpz = @import("httpz");
 const websocket = httpz.websocket;
 const log = @import("../infra/log.zig");
@@ -130,7 +131,7 @@ fn handleToolCall(
         var result: std.ArrayListUnmanaged(u8) = .empty;
         const rw = result.writer(allocator);
         try rw.writeAll("{\"content\":[{\"type\":\"text\",\"text\":");
-        try writeJsonStringTo(rw, msg.items);
+        try json_writer.writeString(rw, msg.items);
         try rw.writeAll("}],\"isError\":true}");
         return resultEnvelope(allocator, id_val, result.items);
     }
@@ -143,7 +144,7 @@ fn handleToolCall(
     var result: std.ArrayListUnmanaged(u8) = .empty;
     const rw = result.writer(allocator);
     try rw.writeAll("{\"content\":[{\"type\":\"text\",\"text\":");
-    try writeJsonStringTo(rw, content_buf.items);
+    try json_writer.writeString(rw, content_buf.items);
     try rw.writeAll("}]");
     if (!call_result.ok) try rw.writeAll(",\"isError\":true");
     try rw.writeAll("}");
@@ -201,7 +202,7 @@ fn handleResourcesRead(
         try w.writeAll("{\"contents\":[{\"uri\":\"");
         try w.writeAll(uri);
         try w.writeAll("\",\"mimeType\":\"text/markdown\",\"text\":");
-        try writeJsonStringTo(w, workspace_doc);
+        try json_writer.writeString(w, workspace_doc);
         try w.writeAll("}]}");
         return resultEnvelope(allocator, id_val, buf.items);
     }
@@ -220,7 +221,7 @@ fn handleResourcesRead(
     try w.writeAll("{\"contents\":[{\"uri\":\"");
     try w.writeAll(uri);
     try w.writeAll("\",\"mimeType\":\"application/json\",\"text\":");
-    try writeJsonStringTo(w, graph);
+    try json_writer.writeString(w, graph);
     try w.writeAll("}]}");
     return resultEnvelope(allocator, id_val, buf.items);
 }
@@ -244,7 +245,7 @@ fn errorEnvelope(allocator: std.mem.Allocator, id_val: ?std.json.Value, code: i3
     try w.writeAll(JSONRPC_ENVELOPE_PREFIX);
     try writeIdTo(w, id_val);
     try w.print(",\"error\":{{\"code\":{d},\"message\":", .{code});
-    try writeJsonStringTo(w, msg);
+    try json_writer.writeString(w, msg);
     try w.writeAll("}}");
     return buf.items;
 }
@@ -255,7 +256,7 @@ fn errorEnvelopeRawId(allocator: std.mem.Allocator, raw_id: []const u8, code: i3
     try w.writeAll(JSONRPC_ENVELOPE_PREFIX);
     try w.writeAll(raw_id);
     try w.print(",\"error\":{{\"code\":{d},\"message\":", .{code});
-    try writeJsonStringTo(w, msg);
+    try json_writer.writeString(w, msg);
     try w.writeAll("}}");
     return buf.items;
 }
@@ -273,26 +274,10 @@ fn writeIdTo(w: anytype, id_val: ?std.json.Value) !void {
     };
     switch (id) {
         .integer => |i| try w.print("{d}", .{i}),
-        .string => |s| try writeJsonStringTo(w, s),
+        .string => |s| try json_writer.writeString(w, s),
         .null => try w.writeAll("null"),
         else => try w.writeAll("null"),
     }
-}
-
-fn writeJsonStringTo(w: anytype, s: []const u8) !void {
-    try w.writeAll("\"");
-    for (s) |ch| {
-        switch (ch) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{ch}),
-            else => try w.writeByte(ch),
-        }
-    }
-    try w.writeAll("\"");
 }
 
 // ── WebSocket transport ────────────────────────────────────────────────

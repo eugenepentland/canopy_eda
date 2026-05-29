@@ -35,36 +35,11 @@ pub fn format(allocator: std.mem.Allocator, template: []const u8, args: []const 
             i += 2;
             switch (spec) {
                 '~' => writer.writeByte('~') catch return FmtError.OutOfMemory,
-                'V' => {
-                    if (arg_idx >= args.len) return FmtError.NotEnoughArgs;
-                    const v = args[arg_idx].asNumber() orelse return FmtError.TypeError;
-                    arg_idx += 1;
-                    try formatVoltage(writer, v);
-                },
-                'R' => {
-                    if (arg_idx >= args.len) return FmtError.NotEnoughArgs;
-                    const v = args[arg_idx].asNumber() orelse return FmtError.TypeError;
-                    arg_idx += 1;
-                    try formatResistance(writer, v);
-                },
-                'C' => {
-                    if (arg_idx >= args.len) return FmtError.NotEnoughArgs;
-                    const v = args[arg_idx].asNumber() orelse return FmtError.TypeError;
-                    arg_idx += 1;
-                    try formatCapacitance(writer, v);
-                },
-                'A' => {
-                    if (arg_idx >= args.len) return FmtError.NotEnoughArgs;
-                    const v = args[arg_idx].asNumber() orelse return FmtError.TypeError;
-                    arg_idx += 1;
-                    try formatAmperage(writer, v);
-                },
-                'S' => {
-                    if (arg_idx >= args.len) return FmtError.NotEnoughArgs;
-                    const v = args[arg_idx].asString() orelse return FmtError.TypeError;
-                    arg_idx += 1;
-                    writer.writeAll(v) catch return FmtError.OutOfMemory;
-                },
+                'V' => try formatVoltage(writer, try nextNumber(args, &arg_idx)),
+                'R' => try formatResistance(writer, try nextNumber(args, &arg_idx)),
+                'C' => try formatCapacitance(writer, try nextNumber(args, &arg_idx)),
+                'A' => try formatAmperage(writer, try nextNumber(args, &arg_idx)),
+                'S' => writer.writeAll(try nextString(args, &arg_idx)) catch return FmtError.OutOfMemory,
                 else => return FmtError.FormatError,
             }
         } else {
@@ -73,6 +48,24 @@ pub fn format(allocator: std.mem.Allocator, template: []const u8, args: []const 
         }
     }
     return buf.toOwnedSlice(allocator);
+}
+
+/// Take the next argument as a number, advancing `idx`. Errors if the args are
+/// exhausted or the value isn't numeric.
+fn nextNumber(args: []const Value, idx: *usize) FmtError!f64 {
+    if (idx.* >= args.len) return FmtError.NotEnoughArgs;
+    const v = args[idx.*].asNumber() orelse return FmtError.TypeError;
+    idx.* += 1;
+    return v;
+}
+
+/// Take the next argument as a string, advancing `idx`. Errors if the args are
+/// exhausted or the value isn't a string.
+fn nextString(args: []const Value, idx: *usize) FmtError![]const u8 {
+    if (idx.* >= args.len) return FmtError.NotEnoughArgs;
+    const v = args[idx.*].asString() orelse return FmtError.TypeError;
+    idx.* += 1;
+    return v;
 }
 
 fn formatVoltage(writer: anytype, v: f64) !void {

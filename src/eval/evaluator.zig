@@ -362,7 +362,7 @@ pub const Evaluator = struct {
                 // Collect additional args as schematic attributes
                 var attrs: std.ArrayListUnmanaged([]const u8) = .empty;
                 for (args[1..]) |attr_node| {
-                    const attr = attr_node.asAtom() orelse (attr_node.asString() orelse continue);
+                    const attr = attr_node.asText() orelse continue;
                     attrs.append(self.allocator, attr) catch continue;
                 }
                 return .{ .component_instance = .{

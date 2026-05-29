@@ -1,4 +1,5 @@
 const std = @import("std");
+const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
 const clock = @import("../infra/clock.zig");
 const log = @import("../infra/log.zig");
@@ -176,9 +177,9 @@ fn saveClients(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     for (clients_list.items, 0..) |c, i| {
         if (i > 0) w.writeAll(",") catch return;
         w.print("{{\"id\":\"{s}\",\"secret_hash\":\"{s}\",\"name\":", .{ c.id, c.secret_hash }) catch return;
-        writeJsonStringTo(w, c.name) catch return;
+        json_writer.writeString(w, c.name) catch return;
         w.print(",\"email\":\"{s}\",\"redirect_uri\":", .{c.email}) catch return;
-        writeJsonStringTo(w, c.redirect_uri) catch return;
+        json_writer.writeString(w, c.redirect_uri) catch return;
         w.print(",\"created_at\":{d},\"revoked\":{}}}", .{ c.created_at, c.revoked }) catch return;
     }
     w.writeAll("]") catch return;
@@ -592,20 +593,4 @@ fn randomHex(allocator: std.mem.Allocator, n_chars: usize) ![]u8 {
         out[i] = if (i % 2 == 0) hex[byte >> 4] else hex[byte & 0x0f];
     }
     return out;
-}
-
-fn writeJsonStringTo(w: anytype, s: []const u8) !void {
-    try w.writeAll("\"");
-    for (s) |ch| {
-        switch (ch) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{ch}),
-            else => try w.writeByte(ch),
-        }
-    }
-    try w.writeAll("\"");
 }

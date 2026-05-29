@@ -2,6 +2,7 @@ const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const env_mod = @import("eval/env.zig");
 const json_writer = @import("json_writer.zig");
+const asserted_fns_mod = @import("asserted_fns.zig");
 const DesignBlock = env_mod.DesignBlock;
 
 const ctx_mod = @import("render_svg/context.zig");
@@ -140,44 +141,6 @@ fn loadPinoutAlts(allocator: Allocator, map: *PinoutAltMap, project_dir: []const
         }
     }
     try map.put(allocator, symbol, by_pin);
-}
-
-/// Build a map of (ref_des|pin_id) -> asserted_fn from all nets. Keys are allocator-owned.
-fn buildAssertedFnMap(
-    allocator: Allocator,
-    block: *const DesignBlock,
-) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]const u8) {
-    var map: std.StringHashMapUnmanaged([]const u8) = .empty;
-    try appendAssertedFromBlock(allocator, &map, block);
-    return map;
-}
-
-fn appendAssertedFromBlock(
-    allocator: Allocator,
-    map: *std.StringHashMapUnmanaged([]const u8),
-    block: *const DesignBlock,
-) std.mem.Allocator.Error!void {
-    for (block.nets) |net| {
-        for (net.pins) |p| {
-            if (p.asserted_fns.len == 0) continue;
-            const key = std.fmt.allocPrint(allocator, "{s}|{s}", .{ p.ref_des, p.pin }) catch continue;
-            const joined = joinAssertedFns(allocator, p.asserted_fns) orelse continue;
-            try map.put(allocator, key, joined);
-        }
-    }
-    for (block.sub_blocks) |sb| try appendAssertedFromBlock(allocator, map, sb.block);
-}
-
-fn joinAssertedFns(allocator: Allocator, fns: []const []const u8) ?[]const u8 {
-    if (fns.len == 0) return null;
-    if (fns.len == 1) return fns[0];
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const w = buf.writer(allocator);
-    for (fns, 0..) |f, i| {
-        if (i > 0) w.writeAll(", ") catch return null;
-        w.writeAll(f) catch return null;
-    }
-    return buf.toOwnedSlice(allocator) catch null;
 }
 
 const JsonWire = struct {
@@ -574,7 +537,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     scene.design_name = block.name;
 
     var alt_map: PinoutAltMap = .empty;
-    var asserted_fns = try buildAssertedFnMap(allocator, block);
+    var asserted_fns = try asserted_fns_mod.buildMap(allocator, block);
 
     // Build grid cells from sections (same as render_svg.zig)
     const GridCell = struct {

@@ -55,11 +55,11 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
         if (arg.asAtom()) |atom| {
             if (std.mem.eql(u8, atom, "role")) {
                 si += 1;
-                if (si < sf_children.len) role = sf_children[si].asAtom() orelse (sf_children[si].asString() orelse "");
+                if (si < sf_children.len) role = sf_children[si].asText() orelse "";
                 continue;
             } else if (std.mem.eql(u8, atom, "protocol")) {
                 si += 1;
-                if (si < sf_children.len) protocol = sf_children[si].asAtom() orelse (sf_children[si].asString() orelse "");
+                if (si < sf_children.len) protocol = sf_children[si].asText() orelse "";
                 continue;
             }
             // Direction keywords
@@ -208,7 +208,7 @@ fn parseBusPortHeader(self: *Evaluator, bp_children: []const Node, env: *Env) Ev
         const sf = bp_children[4].asList().?;
         var suf_buf: std.ArrayListUnmanaged([]const u8) = .empty;
         for (sf[1..]) |s| {
-            const text = s.asAtom() orelse s.asString() orelse continue;
+            const text = s.asText() orelse continue;
             try suf_buf.append(self.allocator, text);
         }
         if (suf_buf.items.len > 0) {
@@ -522,7 +522,7 @@ pub fn emitDecoupleItems(
             idx = c;
             continue;
         }
-        const first_tok: ?[]const u8 = items[c].asAtom() orelse items[c].asString();
+        const first_tok: ?[]const u8 = items[c].asText();
         var ref_str: []const u8 = undefined;
         if (self.decouple_defaults.ic.len > 0) {
             if (first_tok != null and std.mem.eql(u8, first_tok.?, self.decouple_defaults.ic)) {

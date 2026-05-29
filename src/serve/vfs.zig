@@ -13,6 +13,7 @@
 //! via the `!bool` signature so the MCP dispatcher can wrap them.
 
 const std = @import("std");
+const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
 
 const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
@@ -372,11 +373,11 @@ fn writeSandboxError(
     out.clearRetainingCapacity();
     const w = out.writer(allocator);
     try w.writeAll("{\"error\":");
-    try writeJsonString(w, sandboxErrorMsg(err));
+    try json_writer.writeString(w, sandboxErrorMsg(err));
     if (err == error.PermissionDenied) {
         if (denialHint(rel_path, mode)) |hint| {
             try w.writeAll(",\"hint\":");
-            try writeJsonString(w, hint);
+            try json_writer.writeString(w, hint);
         }
     }
     try w.writeAll("}");
@@ -387,23 +388,9 @@ fn writeError(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, ms
     out.clearRetainingCapacity();
     const w = out.writer(allocator);
     try w.writeAll("{\"error\":");
-    try writeJsonString(w, msg);
+    try json_writer.writeString(w, msg);
     try w.writeAll("}");
     return false;
-}
-
-fn writeJsonString(w: anytype, s: []const u8) !void {
-    try w.writeAll("\"");
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        0...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{c}),
-        else => try w.writeByte(c),
-    };
-    try w.writeAll("\"");
 }
 
 fn sha256Hex(content: []const u8, out_buf: *[64]u8) void {
@@ -459,7 +446,7 @@ pub fn readFile(
 
     const w = out.writer(allocator);
     try w.writeAll(JSON_PATH_OPEN);
-    try writeJsonString(w, resolved.rel);
+    try json_writer.writeString(w, resolved.rel);
     try w.print(",\"size\":{d},\"sha256\":\"{s}\",\"truncated\":{s}", .{
         content.len,
         hash_hex[0..],
@@ -477,7 +464,7 @@ pub fn readFile(
         try w.writeAll("\"}");
     } else {
         try w.writeAll(",\"binary\":false,\"content\":");
-        try writeJsonString(w, slice);
+        try json_writer.writeString(w, slice);
         try w.writeAll("}");
     }
     return true;
@@ -546,7 +533,7 @@ pub fn writeFile(
 
     const w = out.writer(allocator);
     try w.writeAll(JSON_PATH_OPEN);
-    try writeJsonString(w, resolved.rel);
+    try json_writer.writeString(w, resolved.rel);
     try w.print(",\"bytes_written\":{d},\"sha256\":\"{s}\",\"dirty_designs\":", .{ content.len, hash_hex[0..] });
     try writeDirtyDesigns(w, allocator, project_dir, resolved.rel);
     try w.writeAll(JSON_LIBRARY_CHANGES_KEY);
@@ -665,7 +652,7 @@ pub fn editFile(
 
     const w = out.writer(allocator);
     try w.writeAll(JSON_PATH_OPEN);
-    try writeJsonString(w, resolved.rel);
+    try json_writer.writeString(w, resolved.rel);
     try w.print(",\"replacements\":{d},\"sha256\":\"{s}\",\"dirty_designs\":", .{ replacements, hash_hex[0..] });
     try writeDirtyDesigns(w, allocator, project_dir, resolved.rel);
     try w.writeAll(JSON_LIBRARY_CHANGES_KEY);
@@ -730,7 +717,7 @@ pub fn listDir(
 
     const w = out.writer(allocator);
     try w.writeAll(JSON_PATH_OPEN);
-    try writeJsonString(w, canonical);
+    try json_writer.writeString(w, canonical);
     try w.writeAll(",\"entries\":[");
 
     var emitted: usize = 0;
@@ -788,7 +775,7 @@ pub fn listDir(
 
 fn emitListEntry(w: anytype, path: []const u8, kind: []const u8, size: u64, mtime_sec: i64) !void {
     try w.writeAll("{\"path\":");
-    try writeJsonString(w, path);
+    try json_writer.writeString(w, path);
     try w.print(",\"kind\":\"{s}\",\"size\":{d},\"mtime\":{d}}}", .{ kind, size, mtime_sec });
 }
 
@@ -852,7 +839,7 @@ pub fn glob(
     try w.writeAll("{\"matches\":[");
     for (matches.items, 0..) |m, i| {
         if (i > 0) try w.writeAll(",");
-        try writeJsonString(w, m);
+        try json_writer.writeString(w, m);
     }
     try w.print("],\"count\":{d}}}", .{matches.items.len});
     return true;
@@ -935,7 +922,7 @@ pub fn deleteFile(
 
     const w = out.writer(allocator);
     try w.writeAll(JSON_PATH_OPEN);
-    try writeJsonString(w, resolved.rel);
+    try json_writer.writeString(w, resolved.rel);
     try w.writeAll(",\"deleted\":true,\"dirty_designs\":");
     try writeDirtyDesigns(w, allocator, project_dir, resolved.rel);
     try w.writeAll(JSON_LIBRARY_CHANGES_KEY);
@@ -978,9 +965,9 @@ pub fn moveFile(
 
     const w = out.writer(allocator);
     try w.writeAll("{\"from\":");
-    try writeJsonString(w, from.rel);
+    try json_writer.writeString(w, from.rel);
     try w.writeAll(",\"to\":");
-    try writeJsonString(w, to.rel);
+    try json_writer.writeString(w, to.rel);
     try w.writeAll(",\"dirty_designs\":");
     try writeDirtyDesigns(w, allocator, project_dir, to.rel);
     try w.writeAll(JSON_LIBRARY_CHANGES_KEY);
@@ -1005,9 +992,9 @@ fn writeLibraryChanges(w: anytype, rel_path: []const u8) !void {
         try w.writeAll("{\"kind\":\"");
         try w.writeAll(entity.kind);
         try w.writeAll("\",\"name\":");
-        try writeJsonString(w, entity.name);
+        try json_writer.writeString(w, entity.name);
         try w.writeAll(",\"path\":");
-        try writeJsonString(w, rel_path);
+        try json_writer.writeString(w, rel_path);
         try w.writeAll("}");
     }
     try w.writeAll("]");
@@ -1065,7 +1052,7 @@ fn writeDirtyDesigns(
     try w.writeAll("[");
     for (dirty, 0..) |d, i| {
         if (i > 0) try w.writeAll(",");
-        try writeJsonString(w, d);
+        try json_writer.writeString(w, d);
     }
     try w.writeAll("]");
 }

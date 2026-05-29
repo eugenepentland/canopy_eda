@@ -393,7 +393,7 @@ pub fn parseCheck(node: ast.Node) ?Check {
         const allocator = std.heap.page_allocator;
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
         for (pins_form[1..]) |pn| {
-            const s = pn.asString() orelse pn.asAtom() orelse continue;
+            const s = pn.asText() orelse continue;
             list.append(allocator, s) catch return null;
         }
         if (list.items.len < 2) return null;
@@ -406,7 +406,7 @@ pub fn parseCheck(node: ast.Node) ?Check {
         if (rp_form.len < 2) return null;
         const rp_head = rp_form[0].asAtom() orelse return null;
         if (!std.mem.eql(u8, rp_head, "return-pin")) return null;
-        const return_pin = rp_form[1].asString() orelse rp_form[1].asAtom() orelse return null;
+        const return_pin = rp_form[1].asText() orelse return null;
 
         const pins_form = body_children[2].asList() orelse return null;
         if (pins_form.len < 2) return null;
@@ -415,7 +415,7 @@ pub fn parseCheck(node: ast.Node) ?Check {
         const allocator = std.heap.page_allocator;
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
         for (pins_form[1..]) |pn| {
-            const s = pn.asString() orelse pn.asAtom() orelse continue;
+            const s = pn.asText() orelse continue;
             list.append(allocator, s) catch return null;
         }
         if (list.items.len == 0) return null;
@@ -447,7 +447,7 @@ pub fn parseCheck(node: ast.Node) ?Check {
         if (tn_form.len < 2) return null;
         const tn_head = tn_form[0].asAtom() orelse return null;
         if (!std.mem.eql(u8, tn_head, "target-net")) return null;
-        const target_net = tn_form[1].asString() orelse tn_form[1].asAtom() orelse return null;
+        const target_net = tn_form[1].asText() orelse return null;
         const lo = namedNumberArg(body_children[4], "min") orelse return null;
         const hi = namedNumberArg(body_children[SERIES_ELEMENT_MAX_INDEX], "max") orelse return null;
         return .{ .series_element = .{
@@ -461,12 +461,21 @@ pub fn parseCheck(node: ast.Node) ?Check {
     return null;
 }
 
+/// True if `needle` exactly equals any string in `haystack`. Used to test a
+/// field/form key against a fixed set of known/structural keywords.
+pub fn containsString(haystack: []const []const u8, needle: []const u8) bool {
+    for (haystack) |item| {
+        if (std.mem.eql(u8, item, needle)) return true;
+    }
+    return false;
+}
+
 fn pinArg(node: ast.Node) ?[]const u8 {
     const c = node.asList() orelse return null;
     if (c.len < 2) return null;
     const h = c[0].asAtom() orelse return null;
     if (!std.mem.eql(u8, h, "pin")) return null;
-    return c[1].asString() orelse c[1].asAtom();
+    return c[1].asText();
 }
 
 fn netArg(node: ast.Node) ?[]const u8 {
@@ -474,7 +483,7 @@ fn netArg(node: ast.Node) ?[]const u8 {
     if (c.len < 2) return null;
     const h = c[0].asAtom() orelse return null;
     if (!std.mem.eql(u8, h, "net")) return null;
-    return c[1].asString() orelse c[1].asAtom();
+    return c[1].asText();
 }
 
 fn namedNumberArg(node: ast.Node, name: []const u8) ?f64 {

@@ -6,6 +6,7 @@
 //!   button-driven path the schematic viewer wires up.
 
 const std = @import("std");
+const json_writer = @import("../json_writer.zig");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
@@ -276,7 +277,7 @@ fn loadFootprintDefImpl(
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(spc.arena);
     try w.writeAll("{\"id\":{\"libraryNickname\":\"eda-sync\",\"entryName\":");
-    try writeJsonString(w, fp_name);
+    try json_writer.writeString(w, fp_name);
     try w.writeAll("},\"items\":[");
     var first_item = true;
     for (children[2..]) |child| {
@@ -328,9 +329,9 @@ fn writeFieldProtoJson(w: anytype, name: []const u8, value: []const u8, first: *
     if (!first.*) try w.writeAll(",");
     first.* = false;
     try w.writeAll("{\"@type\":\"type.googleapis.com/kiapi.board.types.Field\",\"name\":");
-    try writeJsonString(w, name);
+    try json_writer.writeString(w, name);
     try w.writeAll(",\"text\":{\"text\":{\"text\":");
-    try writeJsonString(w, value);
+    try json_writer.writeString(w, value);
     try w.writeAll("}}}");
 }
 
@@ -602,7 +603,7 @@ fn writePadProtoJson(arena: std.mem.Allocator, w: anytype, pad: env_mod_node.Nod
     const proto_shape = protoPadShape(shape);
 
     try w.writeAll(PROTO_ANY_OPEN ++ PROTO_TYPE_URL_PAD ++ "\",\"id\":{},\"number\":");
-    try writeJsonString(w, num);
+    try json_writer.writeString(w, num);
     try w.print(",\"type\":\"{s}\"", .{proto_type});
     try w.print(",\"position\":{{\"xNm\":{d},\"yNm\":{d}}}", .{ mmToNm(pos_x), mmToNm(pos_y) });
     try w.writeAll(",\"padStack\":{");
@@ -1070,7 +1071,7 @@ fn runKicadPcbSync(
     if (lock_warning) |msg| {
         if (wrote_file) {
             try rw.writeAll(",\"warning\":");
-            try writeJsonString(rw, msg);
+            try json_writer.writeString(rw, msg);
         }
     }
     try rw.writeAll("}");
@@ -2025,7 +2026,7 @@ fn emitOp(w: anytype, first: *bool, op: []const u8, fields: anytype) !void {
     inline for (fields) |kv| {
         try w.*.writeAll(",");
         try w.*.print("\"{s}\":", .{kv[0]});
-        try writeJsonString(w.*, kv[1]);
+        try json_writer.writeString(w.*, kv[1]);
     }
     try w.*.writeAll("}");
 }
@@ -2046,15 +2047,15 @@ fn emitAddOp(
     if (!first.*) try w.*.writeAll(",");
     first.* = false;
     try w.*.writeAll("{\"op\":\"add\",\"uuid\":");
-    try writeJsonString(w.*, inst.uuid);
+    try json_writer.writeString(w.*, inst.uuid);
     try w.*.writeAll(",\"ref\":");
-    try writeJsonString(w.*, inst.ref_des);
+    try json_writer.writeString(w.*, inst.ref_des);
     try w.*.writeAll(",\"value\":");
-    try writeJsonString(w.*, inst.value);
+    try json_writer.writeString(w.*, inst.value);
     try w.*.writeAll(",\"footprint_name\":");
-    try writeJsonString(w.*, fp_name);
+    try json_writer.writeString(w.*, fp_name);
     try w.*.writeAll(",\"kicad_mod\":");
-    try writeJsonString(w.*, kmod);
+    try json_writer.writeString(w.*, kmod);
     if (fp_def_json) |def| {
         try w.*.writeAll(",\"footprint_def\":");
         try w.*.writeAll(def);
@@ -2066,12 +2067,12 @@ fn emitAddOp(
     if (canopy_net) |cn| {
         if (cn.len > 0) {
             try w.*.writeAll(",\"canopy_net\":");
-            try writeJsonString(w.*, cn);
+            try json_writer.writeString(w.*, cn);
         }
     }
     if (section.len > 0) {
         try w.*.writeAll(",\"canopy_section\":");
-        try writeJsonString(w.*, section);
+        try json_writer.writeString(w.*, section);
     }
     // Design properties (MPN, Manufacturer, Datasheet, … — every BOM column
     // except KiCad built-ins) baked into the add so they land on the FIRST
@@ -2089,9 +2090,9 @@ fn emitAddOp(
         if (!prop_first) try w.*.writeAll(",");
         prop_first = false;
         try w.*.writeAll("{\"key\":");
-        try writeJsonString(w.*, canonicalFieldName(p.key));
+        try json_writer.writeString(w.*, canonicalFieldName(p.key));
         try w.*.writeAll(",\"value\":");
-        try writeJsonString(w.*, p.value);
+        try json_writer.writeString(w.*, p.value);
         try w.*.writeAll("}");
     }
     try w.*.writeAll("]");
@@ -2138,7 +2139,7 @@ fn boardLabelItem(arena: std.mem.Allocator, x: f64, y: f64, text: []const u8) ![
     try w.writeAll(",\"attributes\":{\"size\":");
     try writeProtoVec2(w, STAGE_LABEL_SIZE_MM, STAGE_LABEL_SIZE_MM);
     try w.writeAll("},\"text\":");
-    try writeJsonString(w, text);
+    try json_writer.writeString(w, text);
     try w.writeAll("}}");
     return buf.items;
 }
@@ -2241,11 +2242,11 @@ fn emitSwapOp(
     if (!first.*) try w.*.writeAll(",");
     first.* = false;
     try w.*.writeAll("{\"op\":\"swap_footprint\",\"uuid\":");
-    try writeJsonString(w.*, uuid);
+    try json_writer.writeString(w.*, uuid);
     try w.*.writeAll(",\"new_footprint_name\":");
-    try writeJsonString(w.*, fp_name);
+    try json_writer.writeString(w.*, fp_name);
     try w.*.writeAll(",\"kicad_mod\":");
-    try writeJsonString(w.*, kmod);
+    try json_writer.writeString(w.*, kmod);
     if (fp_def_json) |def| {
         try w.*.writeAll(",\"footprint_def\":");
         try w.*.writeAll(def);
@@ -2319,9 +2320,9 @@ fn writePadNetsArray(
         if (!first) try w.writeAll(",");
         first = false;
         try w.writeAll("[");
-        try writeJsonString(w, k[sep + 1 ..]);
+        try json_writer.writeString(w, k[sep + 1 ..]);
         try w.writeAll(",");
-        try writeJsonString(w, entry.value_ptr.*);
+        try json_writer.writeString(w, entry.value_ptr.*);
         try w.writeAll("]");
     }
     try w.writeAll("]");
@@ -2351,20 +2352,6 @@ fn sha256Hex(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
         out[i * 2 + 1] = hex[b & 0x0f];
     }
     return out;
-}
-
-fn writeJsonString(w: anytype, s: []const u8) !void {
-    try w.writeAll("\"");
-    for (s) |ch| switch (ch) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{ch}),
-        else => try w.writeByte(ch),
-    };
-    try w.writeAll("\"");
 }
 
 // ── tests ──────────────────────────────────────────────────────────

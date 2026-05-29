@@ -145,6 +145,14 @@ pub fn extractFootprintName(allocator: std.mem.Allocator, source: []const u8) Ne
 
 // --- Hierarchy flattening ---
 
+/// Join `prefix` and `name` with a `/`, or duplicate `name` alone when there
+/// is no prefix. The unit of hierarchy-path qualification for ref-des and net
+/// names as the flattener descends into sub-blocks.
+fn prefixed(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8) std.mem.Allocator.Error![]const u8 {
+    if (prefix.len == 0) return allocator.dupe(u8, name);
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name });
+}
+
 /// Walk the design tree and append a `FlatInstance` for every component,
 /// joining `prefix` onto each ref-des as it descends into sub-blocks so
 /// references stay unique. Each instance carries the BOM-assigned UUID
@@ -156,10 +164,7 @@ pub fn collectInstances(
     list: *std.ArrayListUnmanaged(FlatInstance),
 ) std.mem.Allocator.Error!void {
     for (block.instances) |inst| {
-        const ref = if (prefix.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, inst.ref_des })
-        else
-            try allocator.dupe(u8, inst.ref_des);
+        const ref = try prefixed(allocator, prefix, inst.ref_des);
 
         // Use BOM-assigned UUID if available, otherwise derive from ID
         const effective_uuid = if (inst.uuid.len > 0)
@@ -179,10 +184,7 @@ pub fn collectInstances(
         });
     }
     for (block.sub_blocks) |sb| {
-        const sub_prefix = if (prefix.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, sb.name })
-        else
-            try allocator.dupe(u8, sb.name);
+        const sub_prefix = try prefixed(allocator, prefix, sb.name);
         try collectInstances(allocator, sb.block, sub_prefix, list);
     }
 }
@@ -198,18 +200,12 @@ pub fn collectNets(
     list: *std.ArrayListUnmanaged(FlatNet),
 ) std.mem.Allocator.Error!void {
     for (block.nets) |net| {
-        const net_name = if (prefix.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, net.name })
-        else
-            try allocator.dupe(u8, net.name);
+        const net_name = try prefixed(allocator, prefix, net.name);
 
         var pins = try allocator.alloc(FlatPin, net.pins.len);
         for (net.pins, 0..) |pin, i| {
             pins[i] = .{
-                .ref_des = if (prefix.len > 0)
-                    try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, pin.ref_des })
-                else
-                    try allocator.dupe(u8, pin.ref_des),
+                .ref_des = try prefixed(allocator, prefix, pin.ref_des),
                 .pin = pin.pin,
             };
         }
@@ -220,10 +216,7 @@ pub fn collectNets(
         });
     }
     for (block.sub_blocks) |sb| {
-        const sub_prefix = if (prefix.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, sb.name })
-        else
-            try allocator.dupe(u8, sb.name);
+        const sub_prefix = try prefixed(allocator, prefix, sb.name);
         try collectNets(allocator, sb.block, sub_prefix, list);
     }
 }
@@ -247,21 +240,12 @@ pub fn collectNetTies(
     list: *std.ArrayListUnmanaged(FlatTie),
 ) std.mem.Allocator.Error!void {
     for (block.net_ties) |t| {
-        const a = if (prefix.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, t.a })
-        else
-            try allocator.dupe(u8, t.a);
-        const b = if (prefix.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, t.b })
-        else
-            try allocator.dupe(u8, t.b);
+        const a = try prefixed(allocator, prefix, t.a);
+        const b = try prefixed(allocator, prefix, t.b);
         try list.append(allocator, .{ .a = a, .b = b });
     }
     for (block.sub_blocks) |sb| {
-        const sub_prefix = if (prefix.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, sb.name })
-        else
-            try allocator.dupe(u8, sb.name);
+        const sub_prefix = try prefixed(allocator, prefix, sb.name);
         try collectNetTies(allocator, sb.block, sub_prefix, list);
     }
 }

@@ -161,16 +161,16 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
             // Surface the library description on every instance that uses
             // this component so downstream renderers (schematic overview,
             // review doc, BOM) can show it without re-reading lib files.
-            const val = cl[1].asString() orelse (cl[1].asAtom() orelse continue);
+            const val = cl[1].asText() orelse continue;
             props.append(self.allocator, .{ .key = "description", .value = val }) catch continue;
         } else if (std.mem.eql(u8, field, "symbol")) {
-            symbol_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
+            symbol_name = cl[1].asText() orelse "";
         } else if (std.mem.eql(u8, field, FOOTPRINT_FORM)) {
-            footprint_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
+            footprint_name = cl[1].asText() orelse "";
         } else if (std.mem.eql(u8, field, "pinout")) {
-            pinout_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
+            pinout_name = cl[1].asText() orelse "";
         } else if (std.mem.eql(u8, field, "datasheet")) {
-            const ds = cl[1].asString() orelse (cl[1].asAtom() orelse continue);
+            const ds = cl[1].asText() orelse continue;
             datasheets.append(self.allocator, ds) catch continue;
         } else if (std.mem.eql(u8, field, "requirement")) {
             const text = cl[1].asString() orelse continue;
@@ -186,9 +186,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
                     if (sub.len >= 2) {
                         if (sub[0].asAtom()) |sub_head| {
                             if (std.mem.eql(u8, sub_head, "id")) {
-                                if (sub[1].asAtom()) |id_str| {
-                                    explicit_id = id_str;
-                                } else if (sub[1].asString()) |id_str| {
+                                if (sub[1].asText()) |id_str| {
                                     explicit_id = id_str;
                                 }
                             }
@@ -207,29 +205,20 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
             }
         } else if (std.mem.eql(u8, field, "bus")) {
             // (bus "name" pin1 pin2 pin3 ...)
-            const bus_name = cl[1].asString() orelse (cl[1].asAtom() orelse continue);
+            const bus_name = cl[1].asText() orelse continue;
             var bus_pins: std.ArrayListUnmanaged([]const u8) = .empty;
             for (cl[2..]) |pin_node| {
-                const pin_name = pin_node.asAtom() orelse (pin_node.asString() orelse continue);
+                const pin_name = pin_node.asText() orelse continue;
                 bus_pins.append(self.allocator, pin_name) catch continue;
             }
             buses.append(self.allocator, .{
                 .name = bus_name,
                 .pins = bus_pins.toOwnedSlice(self.allocator) catch &.{},
             }) catch continue;
-        } else {
-            // Check if it's a known structural field
-            var is_structural = false;
-            for (skip_fields) |sf| {
-                if (std.mem.eql(u8, field, sf)) {
-                    is_structural = true;
-                    break;
-                }
-            }
-            if (!is_structural) {
-                const val = cl[1].asString() orelse (cl[1].asAtom() orelse continue);
-                props.append(self.allocator, .{ .key = field, .value = val }) catch continue;
-            }
+        } else if (!env_mod.containsString(&skip_fields, field)) {
+            // Unknown, non-structural field -- treat as inline property.
+            const val = cl[1].asText() orelse continue;
+            props.append(self.allocator, .{ .key = field, .value = val }) catch continue;
         }
     }
 
@@ -261,15 +250,15 @@ pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalE
     for (children[1..]) |child| {
         if (child.isForm("symbol")) {
             const cl = child.asList().?;
-            if (cl.len >= 2) symbol_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
+            if (cl.len >= 2) symbol_name = cl[1].asText() orelse "";
         }
         if (child.isForm(FOOTPRINT_FORM)) {
             const cl = child.asList().?;
-            if (cl.len >= 2) footprint_name = cl[1].asAtom() orelse cl[1].asString() orelse "";
+            if (cl.len >= 2) footprint_name = cl[1].asText() orelse "";
         }
         if (child.isForm("parameter")) {
             const cl = child.asList().?;
-            if (cl.len >= 3) param_type = cl[2].asAtom() orelse cl[2].asString() orelse "";
+            if (cl.len >= 3) param_type = cl[2].asText() orelse "";
         }
     }
 

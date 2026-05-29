@@ -87,6 +87,13 @@ pub const Node = struct {
         };
     }
 
+    /// Get the literal text of a node — a quoted string or a bare atom —
+    /// without evaluating it. Returns null for lists, numbers, etc. Strings
+    /// and atoms are mutually exclusive tags, so the lookup order is irrelevant.
+    pub fn asText(self: Node) ?[]const u8 {
+        return self.asString() orelse self.asAtom();
+    }
+
     /// Get numeric value as f64 (works for int, float, and unit_val).
     pub fn asNumber(self: Node) ?f64 {
         return switch (self.tag) {

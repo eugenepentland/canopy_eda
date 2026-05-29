@@ -253,7 +253,7 @@ fn evalNetForm(self: *Evaluator, form_children: []const Node, env: *Env, net_tie
 /// would treat them as variable lookups); the prefix is a string literal.
 /// Returns null for lists/numbers.
 fn literalText(node: Node) ?[]const u8 {
-    return node.asString() orelse node.asAtom();
+    return node.asText();
 }
 
 /// Evaluate `(bus-net …)`. Two shapes share the head:
@@ -1000,7 +1000,7 @@ fn parseVerifyTarget(self: *Evaluator, node: Node, env: *Env) ?VerifyTarget {
         if (id_form.len < 2) return null;
         const id_head = id_form[0].asAtom() orelse return null;
         if (!std.mem.eql(u8, id_head, "id")) return null;
-        const tok = id_form[1].asAtom() orelse id_form[1].asString() orelse return null;
+        const tok = id_form[1].asText() orelse return null;
         return .{ .target_id = tok };
     }
     const v = self.evalNode(node, env) catch return null;

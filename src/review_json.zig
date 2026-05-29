@@ -1,4 +1,5 @@
 const std = @import("std");
+const json_writer = @import("json_writer.zig");
 const review = @import("review.zig");
 const traceability_mod = @import("traceability.zig");
 const erc_mod = @import("erc.zig");
@@ -19,11 +20,11 @@ pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) std.mem
     const w = buf.writer(allocator);
 
     try w.writeAll("{\"design_name\":");
-    try writeJsonString(w, doc.design_name);
+    try json_writer.writeString(w, doc.design_name);
     try w.writeAll(",\"title\":");
-    try writeJsonString(w, doc.title);
+    try json_writer.writeString(w, doc.title);
     try w.writeAll(",\"generated_at\":");
-    try writeJsonString(w, doc.generated_at);
+    try json_writer.writeString(w, doc.generated_at);
 
     try w.writeAll(",\"summary\":");
     try writeSummary(w, doc.summary);
@@ -79,7 +80,7 @@ pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) std.mem
     for (doc.assertions, 0..) |a, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"message\":");
-        try writeJsonString(w, a.message);
+        try json_writer.writeString(w, a.message);
         try w.writeAll(",\"status\":\"");
         try w.writeAll(@tagName(a.status));
         try w.writeAll("\"}");
@@ -113,13 +114,13 @@ pub fn writeTraceability(w: anytype, trace: traceability_mod.Traceability) std.m
     for (trace.rows, 0..) |row, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"component\":");
-        try writeJsonString(w, row.component);
+        try json_writer.writeString(w, row.component);
         try w.writeAll(",\"role\":");
-        try writeJsonString(w, row.role);
+        try json_writer.writeString(w, row.role);
         try w.writeAll(",\"rationale\":");
-        try writeJsonString(w, row.rationale);
+        try json_writer.writeString(w, row.rationale);
         try w.writeAll(",\"mpn\":");
-        try writeJsonString(w, row.mpn);
+        try json_writer.writeString(w, row.mpn);
         try w.print(
             ",\"placed\":{s},\"complete\":{s}," ++
                 "\"stages\":{{\"footprint\":{s},\"datasheet\":{s},\"requirements\":{s},\"placed_verified\":{s}}}}}",
@@ -148,21 +149,21 @@ fn writeComponentRequirements(
     for (entries, 0..) |entry, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll(REF_DES_OPEN);
-        try writeJsonString(w, entry.ref_des);
+        try json_writer.writeString(w, entry.ref_des);
         try w.writeAll(COMPONENT_KEY);
-        try writeJsonString(w, entry.component);
+        try json_writer.writeString(w, entry.component);
         try w.writeAll(",\"requirements\":[");
         for (entry.requirements, 0..) |r, j| {
             if (j > 0) try w.writeAll(",");
             try w.writeAll("{\"text\":");
-            try writeJsonString(w, r.text);
+            try json_writer.writeString(w, r.text);
             if (r.id.len > 0) {
                 try w.writeAll(",\"id\":");
-                try writeJsonString(w, r.id);
+                try json_writer.writeString(w, r.id);
             }
             if (r.ref) |ref| {
                 try w.writeAll(",\"pdf\":");
-                try writeJsonString(w, ref.pdf);
+                try json_writer.writeString(w, ref.pdf);
                 try w.print(",\"page\":{d}", .{ref.page});
             }
             const status_tag: []const u8 = if (j < entry.req_results.len)
@@ -174,21 +175,21 @@ fn writeComponentRequirements(
                 const rr = entry.req_results[j];
                 if (rr.message.len > 0) {
                     try w.writeAll(",\"check_message\":");
-                    try writeJsonString(w, rr.message);
+                    try json_writer.writeString(w, rr.message);
                 }
                 if (rr.verification) |v| {
                     if (rr.status == .fail) {
                         try w.writeAll(",\"overridden_by_note\":true");
                     }
                     try w.writeAll(",\"verified_by\":{\"rationale\":");
-                    try writeJsonString(w, v.rationale);
+                    try json_writer.writeString(w, v.rationale);
                     if (v.signed_by.len > 0) {
                         try w.writeAll(",\"signed_by\":");
-                        try writeJsonString(w, v.signed_by);
+                        try json_writer.writeString(w, v.signed_by);
                     }
                     if (v.date.len > 0) {
                         try w.writeAll(",\"date\":");
-                        try writeJsonString(w, v.date);
+                        try json_writer.writeString(w, v.date);
                     }
                     try w.writeAll("}");
                 }
@@ -226,9 +227,9 @@ fn writeSummary(w: anytype, s: review.Summary) !void {
     for (s.critical_missing_requirements, 0..) |m, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll(REF_DES_OPEN);
-        try writeJsonString(w, m.ref_des);
+        try json_writer.writeString(w, m.ref_des);
         try w.writeAll(COMPONENT_KEY);
-        try writeJsonString(w, m.component);
+        try json_writer.writeString(w, m.component);
         try w.writeAll("}");
     }
     try w.writeAll("]}");
@@ -246,22 +247,22 @@ fn writeSummary(w: anytype, s: review.Summary) !void {
 
 fn writeSection(w: anytype, s: review.SectionReport) !void {
     try w.writeAll("{\"name\":");
-    try writeJsonString(w, s.name);
+    try json_writer.writeString(w, s.name);
     try w.writeAll(",\"slug\":");
-    try writeJsonString(w, s.slug);
+    try json_writer.writeString(w, s.slug);
     try w.print(STATUS_FMT, .{@tagName(s.status)});
     try w.writeAll(",\"description\":");
-    try writeJsonString(w, s.description);
+    try json_writer.writeString(w, s.description);
     try w.print(",\"instance_count\":{d}", .{s.instance_count});
 
     try w.writeAll(",\"notes\":[");
     for (s.notes, 0..) |n, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"text\":");
-        try writeJsonString(w, n.text);
+        try json_writer.writeString(w, n.text);
         if (n.ref) |r| {
             try w.writeAll(",\"pdf\":");
-            try writeJsonString(w, r.pdf);
+            try json_writer.writeString(w, r.pdf);
             try w.print(",\"page\":{d}", .{r.page});
         }
         try w.writeAll("}");
@@ -275,17 +276,17 @@ fn writeSection(w: anytype, s: review.SectionReport) !void {
     for (s.ports, 0..) |p, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"name\":");
-        try writeJsonString(w, p.name);
+        try json_writer.writeString(w, p.name);
         try w.print(",\"direction\":\"{s}\"", .{p.direction});
         try w.print(",\"signal_type\":\"{s}\"", .{p.signal_type});
         if (p.voltage) |v| try w.print(",\"voltage\":{d}", .{v}) else try w.writeAll(",\"voltage\":null");
         if (p.role.len > 0) {
             try w.writeAll(",\"role\":");
-            try writeJsonString(w, p.role);
+            try json_writer.writeString(w, p.role);
         }
         if (p.protocol.len > 0) {
             try w.writeAll(",\"protocol\":");
-            try writeJsonString(w, p.protocol);
+            try json_writer.writeString(w, p.protocol);
         }
         try w.writeAll("}");
     }
@@ -354,7 +355,7 @@ fn writeBoundaryContracts(w: anytype, ports: []const review.PortSummary) !void {
         if (!first) try w.writeAll(",");
         first = false;
         try w.writeAll("{\"port\":");
-        try writeJsonString(w, p.name);
+        try json_writer.writeString(w, p.name);
         try w.print(",\"direction\":\"{s}\"", .{p.direction});
         if (e.electrical_type) |t| try w.print(",\"type\":\"{s}\"", .{@tagName(t)}) else try w.writeAll(",\"type\":null");
         if (e.drive) |d| try w.print(",\"drive\":\"{s}\"", .{@tagName(d)}) else try w.writeAll(",\"drive\":null");
@@ -369,7 +370,7 @@ fn writeBoundaryContracts(w: anytype, ports: []const review.PortSummary) !void {
         try w.writeAll(",\"max_voltage\":");
         try writeFloatOrNull(w, e.max_voltage);
         try w.writeAll(",\"domain\":");
-        if (e.domain.len > 0) try writeJsonString(w, e.domain) else try w.writeAll("null");
+        if (e.domain.len > 0) try json_writer.writeString(w, e.domain) else try w.writeAll("null");
         try w.writeAll("}");
     }
     try w.writeAll("]");
@@ -384,9 +385,9 @@ fn writePowerTreeNode(w: anytype, n: review.PowerTreeNode) !void {
 
 fn writeRail(w: anytype, r: power_budget.Rail) !void {
     try w.writeAll("{\"net\":");
-    try writeJsonString(w, r.net);
+    try json_writer.writeString(w, r.net);
     try w.writeAll(",\"source\":");
-    if (r.source_label.len > 0) try writeJsonString(w, r.source_label) else try w.writeAll("null");
+    if (r.source_label.len > 0) try json_writer.writeString(w, r.source_label) else try w.writeAll("null");
     try w.writeAll(",\"source_typ_a\":");
     try writeFloatOrNull(w, r.source_typ_a);
     try w.writeAll(",\"source_max_a\":");
@@ -399,13 +400,13 @@ fn writeRail(w: anytype, r: power_budget.Rail) !void {
     for (r.consumers, 0..) |c, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"ref\":");
-        try writeJsonString(w, c.ref_des);
+        try json_writer.writeString(w, c.ref_des);
         try w.writeAll(NET_KEY);
-        try writeJsonString(w, c.net);
+        try json_writer.writeString(w, c.net);
         try w.writeAll(",\"pins\":[");
         for (c.pins, 0..) |p, j| {
             if (j > 0) try w.writeAll(",");
-            try writeJsonString(w, p);
+            try json_writer.writeString(w, p);
         }
         try w.writeAll("],\"i_typ\":");
         try writeFloatOrNull(w, c.i_typ);
@@ -418,42 +419,42 @@ fn writeRail(w: anytype, r: power_budget.Rail) !void {
 
 fn writeSequenceRow(w: anytype, r: power_sequencing.SequenceRow) !void {
     try w.writeAll("{\"rail\":");
-    try writeJsonString(w, r.rail);
+    try json_writer.writeString(w, r.rail);
     try w.writeAll(",\"source\":");
-    try writeJsonString(w, r.source);
+    try json_writer.writeString(w, r.source);
     try w.writeAll(",\"enable\":");
-    if (r.enable.len > 0) try writeJsonString(w, r.enable) else try w.writeAll("null");
+    if (r.enable.len > 0) try json_writer.writeString(w, r.enable) else try w.writeAll("null");
     try w.writeAll(",\"depends_on\":");
-    if (r.depends_on.len > 0) try writeJsonString(w, r.depends_on) else try w.writeAll("null");
+    if (r.depends_on.len > 0) try json_writer.writeString(w, r.depends_on) else try w.writeAll("null");
     try w.writeAll(",\"via\":");
-    if (r.via.len > 0) try writeJsonString(w, r.via) else try w.writeAll("null");
+    if (r.via.len > 0) try json_writer.writeString(w, r.via) else try w.writeAll("null");
     try w.print(",\"order\":{d},\"status\":\"{s}\"}}", .{ r.order, @tagName(r.status) });
 }
 
 fn writeTestPoint(w: anytype, tp: review.TestPointEntry) !void {
     try w.writeAll(REF_DES_OPEN);
-    try writeJsonString(w, tp.ref_des);
+    try json_writer.writeString(w, tp.ref_des);
     try w.writeAll(NET_KEY);
-    if (tp.net.len > 0) try writeJsonString(w, tp.net) else try w.writeAll("null");
+    if (tp.net.len > 0) try json_writer.writeString(w, tp.net) else try w.writeAll("null");
     try w.writeAll(",\"purpose\":");
-    if (tp.purpose.len > 0) try writeJsonString(w, tp.purpose) else try w.writeAll("null");
+    if (tp.purpose.len > 0) try json_writer.writeString(w, tp.purpose) else try w.writeAll("null");
     try w.writeAll("}");
 }
 
 fn writeBomGroup(w: anytype, g: review.BomGroup) !void {
     try w.writeAll("{\"prefix\":");
-    try writeJsonString(w, g.prefix);
+    try json_writer.writeString(w, g.prefix);
     try w.writeAll(",\"entries\":[");
     for (g.entries, 0..) |e, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll(REF_DES_OPEN);
-        try writeJsonString(w, e.ref_des);
+        try json_writer.writeString(w, e.ref_des);
         try w.writeAll(COMPONENT_KEY);
-        try writeJsonString(w, e.component);
+        try json_writer.writeString(w, e.component);
         try w.writeAll(",\"value\":");
-        try writeJsonString(w, e.value);
+        try json_writer.writeString(w, e.value);
         try w.writeAll(",\"footprint\":");
-        try writeJsonString(w, e.footprint);
+        try json_writer.writeString(w, e.footprint);
         try w.writeAll("}");
     }
     try w.writeAll("]}");
@@ -465,14 +466,14 @@ fn writeViolation(w: anytype, v: erc_mod.Violation) !void {
     try w.writeAll("\",\"severity\":\"");
     try w.writeAll(@tagName(v.severity));
     try w.writeAll("\",\"message\":");
-    try writeJsonString(w, v.message);
+    try json_writer.writeString(w, v.message);
     if (v.ref_des.len > 0) {
         try w.writeAll(",\"ref\":");
-        try writeJsonString(w, v.ref_des);
+        try json_writer.writeString(w, v.ref_des);
     }
     if (v.net.len > 0) {
         try w.writeAll(NET_KEY);
-        try writeJsonString(w, v.net);
+        try json_writer.writeString(w, v.net);
     }
     try w.writeAll("}");
 }
@@ -483,18 +484,4 @@ fn writeFloatOrNull(w: anytype, v: ?f64) !void {
     } else {
         try w.writeAll("null");
     }
-}
-
-fn writeJsonString(w: anytype, s: []const u8) !void {
-    try w.writeAll("\"");
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        0...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{c}),
-        else => try w.writeByte(c),
-    };
-    try w.writeAll("\"");
 }

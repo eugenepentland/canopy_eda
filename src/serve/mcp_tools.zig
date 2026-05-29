@@ -1,4 +1,5 @@
 const std = @import("std");
+const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
 const paths = @import("../paths.zig");
 const edit = @import("edit.zig");
@@ -381,7 +382,7 @@ fn toolListDesignNotes(allocator: std.mem.Allocator, project_dir: []const u8, ar
         try writeNoteJsonMcp(w, t);
     }
     try w.writeAll("],\"scratchpad\":");
-    try writeJsonString(w, parsed.scratchpad);
+    try json_writer.writeString(w, parsed.scratchpad);
     try w.writeAll("}");
     return true;
 }
@@ -432,14 +433,14 @@ fn toolMutateDesignNote(
 
 fn writeNoteJsonMcp(w: anytype, t: notes.Note) !void {
     try w.writeAll("{\"id\":");
-    try writeJsonString(w, t.id);
+    try json_writer.writeString(w, t.id);
     try w.writeAll(",\"text\":");
-    try writeJsonString(w, t.text);
+    try json_writer.writeString(w, t.text);
     try w.writeAll(",\"created\":");
-    try writeJsonString(w, t.created);
+    try json_writer.writeString(w, t.created);
     if (t.completed) |c| {
         try w.writeAll(",\"completed\":");
-        try writeJsonString(w, c);
+        try json_writer.writeString(w, c);
     } else {
         try w.writeAll(",\"completed\":null");
     }
@@ -452,13 +453,13 @@ fn toolListDesigns(allocator: std.mem.Allocator, project_dir: []const u8, w: any
     for (summaries, 0..) |s, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll(NAME_FIELD_PREFIX);
-        try writeJsonString(w, s.name);
+        try json_writer.writeString(w, s.name);
         try w.writeAll(",\"title\":");
-        try writeJsonString(w, s.title);
+        try json_writer.writeString(w, s.title);
         try w.writeAll(",\"sections\":[");
         for (s.sections, 0..) |sec, si| {
             if (si > 0) try w.writeAll(",");
-            try writeJsonString(w, sec);
+            try json_writer.writeString(w, sec);
         }
         try w.print("],\"instance_count\":{d},\"net_count\":{d},\"mtime\":{d},\"build_ok\":{s}}}", .{
             s.instance_count, s.net_count, s.mtime_sec, if (s.build_ok) "true" else "false",
@@ -500,9 +501,9 @@ fn toolListHistory(allocator: std.mem.Allocator, project_dir: []const u8, args_v
     for (snaps, 0..) |s, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"id\":");
-        try writeJsonString(w, s.id);
+        try json_writer.writeString(w, s.id);
         try w.writeAll(",\"description\":");
-        if (s.description) |d| try writeJsonString(w, d) else try w.writeAll("null");
+        if (s.description) |d| try json_writer.writeString(w, d) else try w.writeAll("null");
         try w.writeAll("}");
     }
     try w.writeAll("]}");
@@ -561,7 +562,7 @@ fn toolRestoreVersion(allocator: std.mem.Allocator, project_dir: []const u8, arg
     const result = edit.restoreDesignCore(allocator, project_dir, name, id) catch |err| return editErrorMsg(out, allocator, err);
     const w = out.writer(allocator);
     try w.print(VERSION_SNAPSHOT_TEMPLATE, .{result.version});
-    if (result.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
+    if (result.snapshot) |s| try json_writer.writeString(w, s) else try w.writeAll("null");
     try w.writeAll("}");
     return true;
 }
@@ -661,34 +662,34 @@ fn toolDownloadFootprint(allocator: std.mem.Allocator, project_dir: []const u8, 
 
     const dl = component_search.downloadFootprint(allocator, part_number, manufacturer, sid) catch |err| {
         try w.writeAll("{\"ok\":false,\"stage\":\"download\",\"error\":");
-        try writeJsonString(w, component_search.errorMessage(err));
+        try json_writer.writeString(w, component_search.errorMessage(err));
         try w.writeAll("}");
         return false;
     };
 
     const imp = upload.importZipBytes(allocator, project_dir, dl.zip_bytes, dl.suggested_filename) catch |err| {
         try w.writeAll("{\"ok\":false,\"stage\":\"import\",\"downloaded\":");
-        try writeJsonString(w, dl.suggested_filename);
+        try json_writer.writeString(w, dl.suggested_filename);
         try w.writeAll(",\"error\":");
-        try writeJsonString(w, upload.importErrorMessage(err));
+        try json_writer.writeString(w, upload.importErrorMessage(err));
         try w.writeAll("}");
         return false;
     };
 
     try w.writeAll("{\"ok\":true,\"part_name\":");
-    try writeJsonString(w, dl.part_name);
+    try json_writer.writeString(w, dl.part_name);
     try w.writeAll(JSON_MANUFACTURER_KEY);
-    try writeJsonString(w, dl.manufacturer);
+    try json_writer.writeString(w, dl.manufacturer);
     try w.writeAll(",\"samac_id\":");
-    try writeJsonString(w, dl.samac_id);
+    try json_writer.writeString(w, dl.samac_id);
     try w.writeAll(",\"zip\":");
-    try writeJsonString(w, dl.suggested_filename);
+    try json_writer.writeString(w, dl.suggested_filename);
     try w.print(",\"zip_size\":{d},\"component\":", .{dl.zip_bytes.len});
-    try writeJsonString(w, imp.component_name);
+    try json_writer.writeString(w, imp.component_name);
     try w.writeAll(",\"footprint\":");
-    try writeJsonString(w, imp.footprint_name);
+    try json_writer.writeString(w, imp.footprint_name);
     try w.writeAll(",\"pinout\":");
-    try writeJsonString(w, imp.pinout_name);
+    try json_writer.writeString(w, imp.pinout_name);
     try w.print(",\"has_3d_model\":{s}}}", .{if (imp.has_3d) "true" else "false"});
     return true;
 }
@@ -710,7 +711,7 @@ fn toolDownloadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, 
 
     const ds = component_search.downloadDatasheet(allocator, part_number, manufacturer, sid) catch |err| {
         try w.writeAll("{\"ok\":false,\"error\":");
-        try writeJsonString(w, component_search.datasheetErrorMessage(err));
+        try json_writer.writeString(w, component_search.datasheetErrorMessage(err));
         try w.writeAll("}");
         return false;
     };
@@ -736,15 +737,15 @@ fn finishDatasheet(
         return false;
     };
     try w.writeAll("{\"ok\":true,\"source\":");
-    try writeJsonString(w, source);
+    try json_writer.writeString(w, source);
     try w.writeAll(",\"file\":");
-    try writeJsonString(w, stored.name);
+    try json_writer.writeString(w, stored.name);
     try w.print(",\"size\":{d},\"part\":", .{stored.size});
-    try writeJsonString(w, part);
+    try json_writer.writeString(w, part);
     try w.writeAll(JSON_MANUFACTURER_KEY);
-    try writeJsonString(w, manufacturer);
+    try json_writer.writeString(w, manufacturer);
     try w.writeAll(",\"datasheet_url\":");
-    try writeJsonString(w, url);
+    try json_writer.writeString(w, url);
     try w.writeAll("}");
     return true;
 }
@@ -768,20 +769,20 @@ fn toolSearchComponents(allocator: std.mem.Allocator, args_val: ?std.json.Value,
 
     const hits = component_search.searchComponents(allocator, query, sid, limit) catch |err| {
         try w.writeAll("{\"ok\":false,\"error\":");
-        try writeJsonString(w, component_search.searchErrorMessage(err));
+        try json_writer.writeString(w, component_search.searchErrorMessage(err));
         try w.writeAll("}");
         return false;
     };
 
     try w.writeAll("{\"ok\":true,\"query\":");
-    try writeJsonString(w, query);
+    try json_writer.writeString(w, query);
     try w.print(",\"count\":{d},\"results\":[", .{hits.len});
     for (hits, 0..) |h, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"part_number\":");
-        try writeJsonString(w, h.part_name);
+        try json_writer.writeString(w, h.part_name);
         try w.writeAll(JSON_MANUFACTURER_KEY);
-        try writeJsonString(w, h.manufacturer);
+        try json_writer.writeString(w, h.manufacturer);
         try w.print(",\"has_model\":{s},\"has_datasheet\":{s}}}", .{
             if (h.samac_id != null) "true" else "false",
             if (h.datasheet_url != null) "true" else "false",
@@ -890,7 +891,7 @@ fn toolRegeneratePinout(
         return true;
     }
     try w.writeAll("{\"ok\":true,\"source\":");
-    try writeJsonString(w, source);
+    try json_writer.writeString(w, source);
     try w.writeAll(",");
     try w.writeAll(write_buf.items[1..]);
     return true;
@@ -1070,9 +1071,9 @@ fn listLibrarySubdir(
 /// Emit one `{"name":..,"description":..}` library entry.
 fn writeLibEntry(w: anytype, name: []const u8, description: ?[]const u8) !void {
     try w.writeAll(NAME_FIELD_PREFIX);
-    try writeJsonString(w, name);
+    try json_writer.writeString(w, name);
     try w.writeAll(",\"description\":");
-    if (description) |d| try writeJsonString(w, d) else try w.writeAll("\"\"");
+    if (description) |d| try json_writer.writeString(w, d) else try w.writeAll("\"\"");
     try w.writeAll("}");
 }
 
@@ -1160,7 +1161,7 @@ fn runChecks(
         while (it.next()) |e| {
             if (!first) try w.writeAll(",");
             first = false;
-            try writeJsonString(w, e.key_ptr.*);
+            try json_writer.writeString(w, e.key_ptr.*);
         }
         try w.writeAll("],\"changed_nets\":[");
         var it2 = changed_nets.iterator();
@@ -1168,7 +1169,7 @@ fn runChecks(
         while (it2.next()) |e| {
             if (!first) try w.writeAll(",");
             first = false;
-            try writeJsonString(w, e.key_ptr.*);
+            try json_writer.writeString(w, e.key_ptr.*);
         }
         try w.writeAll("]");
     }
@@ -1190,14 +1191,14 @@ fn runChecks(
         try w.writeAll("\",\"severity\":\"");
         try w.writeAll(@tagName(v.severity));
         try w.writeAll("\",\"message\":");
-        try writeJsonString(w, v.message);
+        try json_writer.writeString(w, v.message);
         if (v.ref_des.len > 0) {
             try w.writeAll(",\"ref\":");
-            try writeJsonString(w, v.ref_des);
+            try json_writer.writeString(w, v.ref_des);
         }
         if (v.net.len > 0) {
             try w.writeAll(JSON_NET_KEY);
-            try writeJsonString(w, v.net);
+            try json_writer.writeString(w, v.net);
         }
         try w.writeAll("}");
     }
@@ -1359,15 +1360,15 @@ fn listInstances(
     for (block.instances, 0..) |inst, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll(REF_DES_FIELD_PREFIX);
-        try writeJsonString(w, inst.ref_des);
+        try json_writer.writeString(w, inst.ref_des);
         try w.writeAll(",\"label\":");
-        try writeJsonString(w, inst.label);
+        try json_writer.writeString(w, inst.label);
         try w.writeAll(",\"component\":");
-        try writeJsonString(w, inst.component);
+        try json_writer.writeString(w, inst.component);
         try w.writeAll(",\"symbol\":");
-        try writeJsonString(w, inst.symbol);
+        try json_writer.writeString(w, inst.symbol);
         try w.writeAll(",\"value\":");
-        try writeJsonString(w, inst.value);
+        try json_writer.writeString(w, inst.value);
 
         // Pin count: prefer explicit parts if present (multi-part symbol);
         // else fall back to the symbol's pinout map size.
@@ -1461,9 +1462,9 @@ pub fn listFreePins(
         if (!first) try w.writeAll(",");
         first = false;
         try w.writeAll("{\"pin\":");
-        try writeJsonString(w, pin_id);
+        try json_writer.writeString(w, pin_id);
         try w.writeAll(FUNCTION_FIELD);
-        try writeJsonString(w, fname);
+        try json_writer.writeString(w, fname);
         try w.print(",\"category\":\"{s}\"}}", .{categoryName(cat)});
     }
     try w.writeAll("],\"assigned_pins\":[");
@@ -1478,11 +1479,11 @@ pub fn listFreePins(
         if (!first2) try w.writeAll(",");
         first2 = false;
         try w.writeAll("{\"pin\":");
-        try writeJsonString(w, pin_id);
+        try json_writer.writeString(w, pin_id);
         try w.writeAll(FUNCTION_FIELD);
-        try writeJsonString(w, fname);
+        try json_writer.writeString(w, fname);
         try w.writeAll(JSON_NET_KEY);
-        try writeJsonString(w, net_name);
+        try json_writer.writeString(w, net_name);
         try w.print(",\"category\":\"{s}\"}}", .{categoryName(cat)});
     }
     try w.writeAll("]}");
@@ -1528,7 +1529,7 @@ fn getNet(
     const net = target.?;
 
     try w.writeAll(NAME_FIELD_PREFIX);
-    try writeJsonString(w, net.name);
+    try json_writer.writeString(w, net.name);
     try w.writeAll(",\"pins\":[");
 
     var passive_refs: std.StringHashMapUnmanaged(void) = .empty;
@@ -1556,11 +1557,11 @@ fn getNet(
             break;
         }
         try w.writeAll(REF_DES_FIELD_PREFIX);
-        try writeJsonString(w, p.ref_des);
+        try json_writer.writeString(w, p.ref_des);
         try w.writeAll(",\"pin\":");
-        try writeJsonString(w, p.pin);
+        try json_writer.writeString(w, p.pin);
         try w.writeAll(FUNCTION_FIELD);
-        try writeJsonString(w, fname);
+        try json_writer.writeString(w, fname);
         try w.writeAll("}");
     }
     try w.writeAll("],\"passives\":[");
@@ -1573,11 +1574,11 @@ fn getNet(
             if (!first) try w.writeAll(",");
             first = false;
             try w.writeAll(REF_DES_FIELD_PREFIX);
-            try writeJsonString(w, inst.ref_des);
+            try json_writer.writeString(w, inst.ref_des);
             try w.writeAll(",\"component\":");
-            try writeJsonString(w, inst.component);
+            try json_writer.writeString(w, inst.component);
             try w.writeAll(",\"value\":");
-            try writeJsonString(w, inst.value);
+            try json_writer.writeString(w, inst.value);
             try w.writeAll("}");
             break;
         }
@@ -1644,14 +1645,14 @@ fn writeBuildReport(w: anytype, report: edit.BuildReport) !void {
         if (report.eval_ok) "true" else "false",
     });
     try w.writeAll(",\"snapshot\":");
-    if (report.snapshot) |s| try writeJsonString(w, s) else try w.writeAll("null");
+    if (report.snapshot) |s| try json_writer.writeString(w, s) else try w.writeAll("null");
     try w.writeAll(",\"error\":");
-    if (report.error_message) |m| try writeJsonString(w, m) else try w.writeAll("null");
+    if (report.error_message) |m| try json_writer.writeString(w, m) else try w.writeAll("null");
     try w.writeAll(",\"assertion_failures\":[");
     for (report.assertion_failures, 0..) |a, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"message\":");
-        try writeJsonString(w, a.message);
+        try json_writer.writeString(w, a.message);
         try w.print(",\"is_warning\":{s}}}", .{if (a.is_warning) "true" else "false"});
     }
     try w.writeAll("],\"erc\":[");
@@ -1662,14 +1663,14 @@ fn writeBuildReport(w: anytype, report: edit.BuildReport) !void {
         try w.writeAll("\",\"severity\":\"");
         try w.writeAll(@tagName(v.severity));
         try w.writeAll("\",\"message\":");
-        try writeJsonString(w, v.message);
+        try json_writer.writeString(w, v.message);
         if (v.ref_des.len > 0) {
             try w.writeAll(",\"ref\":");
-            try writeJsonString(w, v.ref_des);
+            try json_writer.writeString(w, v.ref_des);
         }
         if (v.net.len > 0) {
             try w.writeAll(JSON_NET_KEY);
-            try writeJsonString(w, v.net);
+            try json_writer.writeString(w, v.net);
         }
         try w.writeAll("}");
     }
@@ -1677,20 +1678,6 @@ fn writeBuildReport(w: anytype, report: edit.BuildReport) !void {
 }
 
 /// Write `s` as a JSON string literal (with escapes) to `w`.
-fn writeJsonString(w: anytype, s: []const u8) !void {
-    try w.writeAll("\"");
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        0...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{c}),
-        else => try w.writeByte(c),
-    };
-    try w.writeAll("\"");
-}
-
 /// Scan `{project_dir}/src/` recursively and return the basename of every
 /// file whose top-level form is a `(design-block …)`. Helper for the MCP
 /// `list_designs` tool and the index page's design list. Sibling
@@ -1929,7 +1916,7 @@ fn toolReadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, args
     }
 
     try w.writeAll("{\"ok\":true,\"content\":");
-    try writeJsonString(w, run_res.stdout);
+    try json_writer.writeString(w, run_res.stdout);
     try w.writeAll("}");
     return true;
 }

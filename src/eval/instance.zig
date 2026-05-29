@@ -194,14 +194,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
             const fc = form.asList() orelse continue;
             if (fc.len >= 2) {
                 const key = fc[0].asAtom() orelse continue;
-                var is_known = false;
-                for (known_forms) |kf| {
-                    if (std.mem.eql(u8, key, kf)) {
-                        is_known = true;
-                        break;
-                    }
-                }
-                if (!is_known) {
+                if (!env_mod.containsString(&known_forms, key)) {
                     const val = (try self.evalNode(fc[1], env)).asString() orelse continue;
                     try inline_props.append(self.allocator, .{ .key = key, .value = val });
                 }

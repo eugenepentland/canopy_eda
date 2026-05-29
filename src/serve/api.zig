@@ -1,4 +1,5 @@
 const std = @import("std");
+const json_writer = @import("../json_writer.zig");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
@@ -71,30 +72,11 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
 /// live scene-graph JSON, and bump the version counter so the browser viewer
 /// picks up the rebuild on its next `/api/version/:name` poll.
 pub fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
-        return;
-    };
-
-    const board_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
-    defer ctx.allocator.free(board_path);
-
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
-
-    const result = eval.evalFile(board_path) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = ERR_BUILD;
-        return;
-    };
-
-    const block = switch (result) {
-        .design_block => |b| b,
-        else => {
-            res.status = HTTP_INTERNAL_ERROR;
-            return;
-        },
-    };
+    const target = (try evalDesignForExport(ctx, req, res, &eval)) orelse return;
+    const name = target.name;
+    const block = target.block;
 
     const new_layout = render_json.renderSceneGraph(ctx.allocator, block, ctx.project_dir) catch null;
     serve_root.setLiveLayoutJson(new_layout);
@@ -174,7 +156,7 @@ pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     const w = buf.writer(ctx.allocator);
 
     try w.writeAll("{\"component\":");
-    try writeJsonString(w, name);
+    try json_writer.writeString(w, name);
     try writeComponentLibInfo(ctx.allocator, w, ctx.project_dir, name);
     try w.writeAll(",\"pins\":[");
 
@@ -195,9 +177,9 @@ pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
                         if (!first_pin) try w.writeAll(",");
                         first_pin = false;
                         try w.writeAll("{\"id\":");
-                        try writeJsonString(w, pin_id);
+                        try json_writer.writeString(w, pin_id);
                         try w.writeAll(",\"fn\":");
-                        try writeJsonString(w, fn_name);
+                        try json_writer.writeString(w, fn_name);
                         try w.writeAll(",\"alts\":[");
 
                         var first_alt = true;
@@ -213,9 +195,9 @@ pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
                                 if (!first_alt) try w.writeAll(",");
                                 first_alt = false;
                                 try w.writeAll(NAME_FIELD_PREFIX);
-                                try writeJsonString(w, alt_name);
+                                try json_writer.writeString(w, alt_name);
                                 try w.writeAll(",\"type\":");
-                                try writeJsonString(w, etype);
+                                try json_writer.writeString(w, etype);
                                 try w.writeAll("}");
                             }
                         }
@@ -275,7 +257,7 @@ fn writeComponentLibInfo(
         first_ds = false;
         const size = datasheetSize(allocator, project_dir, ds);
         try w.writeAll(NAME_FIELD_PREFIX);
-        try writeJsonString(w, ds);
+        try json_writer.writeString(w, ds);
         try w.print(",\"size\":{d}}}", .{size});
     }
     try w.writeAll("]");
@@ -291,15 +273,15 @@ fn writeComponentLibInfo(
         if (!first_r) try w.writeAll(",");
         first_r = false;
         try w.writeAll("{\"text\":");
-        try writeJsonString(w, text);
+        try json_writer.writeString(w, text);
         for (cl[2..]) |extra| {
             if (env_mod.parseNoteRef(extra)) |r| {
                 try w.writeAll(",\"pdf\":");
-                try writeJsonString(w, r.pdf);
+                try json_writer.writeString(w, r.pdf);
                 try w.print(",\"page\":{d}", .{r.page});
                 if (r.quote) |q| {
                     try w.writeAll(",\"quote\":");
-                    try writeJsonString(w, q);
+                    try json_writer.writeString(w, q);
                 }
                 break;
             }
@@ -324,31 +306,50 @@ fn datasheetSize(allocator: std.mem.Allocator, project_dir: []const u8, name: []
 /// GET /api/export-kicad/:name — build the design, resolve BOM identities,
 /// and stream back a `<name>-kicad.zip` containing the KiCad schematic,
 /// netlist, and per-instance footprint files.
-pub fn exportKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+const ExportTarget = struct { name: []const u8, block: *env_mod.DesignBlock };
+
+/// Shared export prologue: resolve `:name` to its `.sexp`, evaluate it, and
+/// return the design block plus the name. On missing param / build failure /
+/// non-design result, sets res.status (and body) and returns null. `eval` is
+/// owned by the caller so the returned block outlives this call.
+fn evalDesignForExport(
+    ctx: *Handler,
+    req: *httpz.Request,
+    res: *httpz.Response,
+    eval: *Evaluator,
+) HandlerError!?ExportTarget {
     const name = req.param("name") orelse {
         res.status = HTTP_NOT_FOUND;
-        return;
+        return null;
     };
 
     const board_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(board_path);
 
-    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
-    defer eval.deinit();
-
     const result = eval.evalFile(board_path) catch {
         res.status = HTTP_INTERNAL_ERROR;
         res.body = ERR_BUILD;
-        return;
+        return null;
     };
 
-    const block = switch (result) {
-        .design_block => |b| b,
+    return switch (result) {
+        .design_block => |b| .{ .name = name, .block = b },
         else => {
             res.status = HTTP_INTERNAL_ERROR;
-            return;
+            return null;
         },
     };
+}
+
+/// GET /api/export-kicad/:name — build the design and return a zip bundling the
+/// KiCad netlist, generated footprints, and STEP models for hand-off to the PCB
+/// editor.
+pub fn exportKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+    const target = (try evalDesignForExport(ctx, req, res, &eval)) orelse return;
+    const name = target.name;
+    const block = target.block;
 
     const bom_path = paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, ".bom") catch {
         res.status = HTTP_INTERNAL_ERROR;
@@ -376,30 +377,11 @@ pub fn exportKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// KiCad `.net` file (no footprints, no zip). Used by external tools that
 /// only care about connectivity for routing or simulation.
 pub fn exportNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
-        return;
-    };
-
-    const board_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
-    defer ctx.allocator.free(board_path);
-
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
-
-    const result = eval.evalFile(board_path) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = ERR_BUILD;
-        return;
-    };
-
-    const block = switch (result) {
-        .design_block => |b| b,
-        else => {
-            res.status = HTTP_INTERNAL_ERROR;
-            return;
-        },
-    };
+    const target = (try evalDesignForExport(ctx, req, res, &eval)) orelse return;
+    const name = target.name;
+    const block = target.block;
 
     const bom_path = paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, ".bom") catch {
         res.status = HTTP_INTERNAL_ERROR;
@@ -427,30 +409,11 @@ pub fn exportNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 /// list as `<name>-bom.csv`. Same column layout as the BOM table on the
 /// review page; suitable for hand-off to procurement.
 pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
-        return;
-    };
-
-    const board_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
-    defer ctx.allocator.free(board_path);
-
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
-
-    const result = eval.evalFile(board_path) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = ERR_BUILD;
-        return;
-    };
-
-    const block = switch (result) {
-        .design_block => |b| b,
-        else => {
-            res.status = HTTP_INTERNAL_ERROR;
-            return;
-        },
-    };
+    const target = (try evalDesignForExport(ctx, req, res, &eval)) orelse return;
+    const name = target.name;
+    const block = target.block;
 
     // Merge in the persisted BOM (manual MPN, manufacturer, datasheet edits
     // from the schematic page). Without this the CSV reflects only what the
@@ -653,13 +616,13 @@ pub fn designsApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handle
     for (summaries, 0..) |s, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll(NAME_FIELD_PREFIX);
-        try writeJsonString(w, s.name);
+        try json_writer.writeString(w, s.name);
         try w.writeAll(",\"title\":");
-        try writeJsonString(w, s.title);
+        try json_writer.writeString(w, s.title);
         try w.writeAll(",\"sections\":[");
         for (s.sections, 0..) |sec, si| {
             if (si > 0) try w.writeAll(",");
-            try writeJsonString(w, sec);
+            try json_writer.writeString(w, sec);
         }
         try w.print("],\"instance_count\":{d},\"net_count\":{d},\"mtime\":{d},\"build_ok\":{s}}}", .{
             s.instance_count,
@@ -670,20 +633,6 @@ pub fn designsApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handle
     }
     try w.writeAll("]");
     res.body = buf.items;
-}
-
-fn writeJsonString(w: anytype, s: []const u8) !void {
-    try w.writeAll("\"");
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        0...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{c}),
-        else => try w.writeByte(c),
-    };
-    try w.writeAll("\"");
 }
 
 /// Shared build path: evaluate, resolve BOM identities, run ERC, package

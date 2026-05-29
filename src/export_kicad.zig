@@ -101,6 +101,29 @@ pub const FlatPin = struct {
     pin: []const u8,
 };
 
+/// Build the footprint -> pad-name-list map used for NC-pin handling, reading
+/// and parsing each unique footprint once. Footprints that fail to read or
+/// parse are skipped. The caller owns the returned map's `deinit`.
+fn buildPadMap(
+    allocator: std.mem.Allocator,
+    instances: []const FlatInstance,
+    project_dir: []const u8,
+) ExportError!std.StringHashMap([]const []const u8) {
+    var fp_pad_map = std.StringHashMap([]const []const u8).init(allocator);
+    errdefer fp_pad_map.deinit();
+    for (instances) |inst| {
+        if (inst.footprint.len == 0) continue;
+        if (fp_pad_map.contains(inst.footprint)) continue;
+        const fp_path = try std.fmt.allocPrint(allocator, FOOTPRINT_PATH_TEMPLATE, .{ project_dir, inst.footprint });
+        defer allocator.free(fp_path);
+        const fp_src = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
+        defer allocator.free(fp_src);
+        const pad_names = extractPadNames(allocator, fp_src) catch continue;
+        try fp_pad_map.put(inst.footprint, pad_names);
+    }
+    return fp_pad_map;
+}
+
 /// Export a resolved design to KiCad format: netlist + footprints + STEP models.
 pub fn exportKicad(
     allocator: std.mem.Allocator,
@@ -222,18 +245,8 @@ pub fn exportKicad(
     defer allocator.free(net_path);
 
     // Build footprint pad map for NC pin handling
-    var fp_pad_map = std.StringHashMap([]const []const u8).init(allocator);
+    var fp_pad_map = try buildPadMap(allocator, instances.items, project_dir);
     defer fp_pad_map.deinit();
-    for (instances.items) |inst| {
-        if (inst.footprint.len == 0) continue;
-        if (fp_pad_map.contains(inst.footprint)) continue;
-        const fp_path2 = try std.fmt.allocPrint(allocator, FOOTPRINT_PATH_TEMPLATE, .{ project_dir, inst.footprint });
-        defer allocator.free(fp_path2);
-        const fp_src = infra_fs.cwd().readFileAlloc(allocator, fp_path2, 1024 * 1024) catch continue;
-        defer allocator.free(fp_src);
-        const pad_names = extractPadNames(allocator, fp_src) catch continue;
-        try fp_pad_map.put(inst.footprint, pad_names);
-    }
 
     const netlist = try writeNetlist(allocator, design_name, instances.items, nets.items, &fp_name_map, &fp_pad_map);
     defer allocator.free(netlist);
@@ -283,18 +296,8 @@ pub fn exportNetlistOnly(
     }
 
     // Build footprint pad map for NC pin handling
-    var fp_pad_map = std.StringHashMap([]const []const u8).init(allocator);
+    var fp_pad_map = try buildPadMap(allocator, instances.items, project_dir);
     defer fp_pad_map.deinit();
-    for (instances.items) |inst| {
-        if (inst.footprint.len == 0) continue;
-        if (fp_pad_map.contains(inst.footprint)) continue;
-        const fp_path = try std.fmt.allocPrint(allocator, FOOTPRINT_PATH_TEMPLATE, .{ project_dir, inst.footprint });
-        defer allocator.free(fp_path);
-        const fp_src = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
-        defer allocator.free(fp_src);
-        const pad_names = extractPadNames(allocator, fp_src) catch continue;
-        try fp_pad_map.put(inst.footprint, pad_names);
-    }
 
     return writeNetlist(allocator, design_name, instances.items, nets.items, &fp_name_map, &fp_pad_map);
 }
@@ -376,18 +379,8 @@ pub fn exportKicadZip(
     }
 
     // Build footprint pad map for NC pin handling
-    var fp_pad_map = std.StringHashMap([]const []const u8).init(allocator);
+    var fp_pad_map = try buildPadMap(allocator, instances.items, project_dir);
     defer fp_pad_map.deinit();
-    for (instances.items) |inst| {
-        if (inst.footprint.len == 0) continue;
-        if (fp_pad_map.contains(inst.footprint)) continue;
-        const fp_path = try std.fmt.allocPrint(allocator, FOOTPRINT_PATH_TEMPLATE, .{ project_dir, inst.footprint });
-        defer allocator.free(fp_path);
-        const fp_src = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
-        defer allocator.free(fp_src);
-        const pad_names = extractPadNames(allocator, fp_src) catch continue;
-        try fp_pad_map.put(inst.footprint, pad_names);
-    }
 
     // Netlist
     const netlist = try writeNetlist(allocator, design_name, instances.items, nets.items, &fp_name_map, &fp_pad_map);
