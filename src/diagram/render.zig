@@ -139,6 +139,7 @@ const sys_arrow_sz: f64 = 13; // signal-edge arrowhead size (px)
 /// (thin/faint, undirected, unlabeled) — the rail fan is the main clutter and
 /// its voltages live in the focused Power tab.
 fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout) (Allocator.Error || Writer.Error)!void {
+    try writeStageBands(w, lay);
     for (lay.routes) |r| {
         const color = classColor(graph, r.class);
         if (r.class == types.CLASS_POWER) {
@@ -176,6 +177,36 @@ fn writeArrowhead(w: *Writer, r: layout.Route, color: []const u8) Writer.Error!v
         "<path d=\"M {d:.1} {d:.1} L {d:.1} {d:.1} L {d:.1} {d:.1} Z\" fill=\"{s}\"/>",
         .{ tip.x, tip.y, bx, tip.y - sys_arrow_sz * 0.55, bx, tip.y + sys_arrow_sz * 0.55, color },
     );
+}
+
+const band_inset: f64 = 14; // band tint extends this far past the node box
+const band_tint: []const u8 = "#11161d"; // faint column wash behind a stage
+const band_label_color = system_color; // muted neutral header text (same grey)
+const band_label_y: f64 = 31; // header baseline within the reserved strip
+
+/// Draw the System view's functional-region bands: a faint full-height wash
+/// behind each stage column plus a centered header ("POWER IN", "CORE", …), so
+/// the diagram reads as labeled architectural regions rather than a flat graph.
+/// Drawn first (before edges/nodes) so it sits behind the content.
+fn writeStageBands(w: *Writer, lay: layout.Layout) Writer.Error!void {
+    for (lay.stage_labels, 0..) |label, r| {
+        const col_x = layout.pad + @as(f64, @floatFromInt(r)) * (layout.node_w + layout.h_gap);
+        try w.print(
+            "<rect x=\"{d:.1}\" y=\"0\" width=\"{d:.1}\" height=\"{d:.1}\" rx=\"10\" fill=\"{s}\"/>",
+            .{ col_x - band_inset, layout.node_w + band_inset * 2, lay.height, band_tint },
+        );
+        try w.print(
+            "<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-band-label\" fill=\"{s}\" text-anchor=\"middle\">",
+            .{ col_x + layout.node_w / 2, band_label_y, band_label_color },
+        );
+        for (label) |c| switch (c) {
+            '&' => try w.writeAll("&amp;"),
+            '<' => try w.writeAll("&lt;"),
+            '>' => try w.writeAll("&gt;"),
+            else => try w.writeByte(std.ascii.toUpper(c)),
+        };
+        try w.writeAll("</text>");
+    }
 }
 
 /// The accent color for a class id, guarding against an out-of-range id.
@@ -254,7 +285,9 @@ const pad_x: f64 = 11;
 const label_char_w: f64 = 9.2;
 const sub_char_w: f64 = 7.8;
 const label_y_off: f64 = 24; // title baseline from node top
-const sub_y_off: f64 = 46; // subtitle baseline from node top
+const sub_y_off: f64 = 45; // first subtitle line baseline from node top
+const sub_line_h: f64 = 18; // subtitle line advance
+const sub_lines: usize = 2; // subtitle wraps to at most this many lines
 const min_label_chars: usize = 8;
 const min_sub_chars: usize = 10;
 const rf_if_color: []const u8 = "#e3742f"; // RF edges returning to the connector (IF lines)
@@ -281,9 +314,15 @@ fn writeNode(arena: Allocator, w: *Writer, node: types.Node, x: f64, y: f64) (Al
     try w.writeAll("</text>");
     if (node.subtitle.len > 0) {
         const sub_max: usize = @max(min_sub_chars, @as(usize, @intFromFloat((layout.node_w - pad_x * 2) / sub_char_w)));
-        try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-sub\">", .{ x + pad_x, y + sub_y_off });
-        try writeEscaped(w, try truncate(arena, node.subtitle, sub_max));
-        try w.writeAll("</text>");
+        const lines = try wrapText(arena, node.subtitle, sub_max, sub_lines);
+        for (lines, 0..) |line, li| {
+            try w.print(
+                "<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-sub\">",
+                .{ x + pad_x, y + sub_y_off + @as(f64, @floatFromInt(li)) * sub_line_h },
+            );
+            try writeEscaped(w, line);
+            try w.writeAll("</text>");
+        }
     }
     try w.writeAll("</g>");
     if (has_link) try w.writeAll("</a>");
@@ -582,6 +621,44 @@ fn truncate(arena: Allocator, s: []const u8, max: usize) Allocator.Error![]const
     return std.fmt.allocPrint(arena, "{s}\u{2026}", .{s[0 .. max - 1]});
 }
 
+/// Greedy word-wrap `s` into at most `max_lines` lines of ~`max` chars each, so
+/// a block's description reads in full instead of truncating at the first line.
+/// Words longer than `max` are hard-split; overflow past the last line is
+/// ellipsised onto it. Returns the line slices (all borrowed from `s` except a
+/// possibly-allocated ellipsised final line).
+fn wrapText(arena: Allocator, s: []const u8, max: usize, max_lines: usize) Allocator.Error![][]const u8 {
+    var lines: std.ArrayListUnmanaged([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < s.len and lines.items.len < max_lines) {
+        while (i < s.len and s[i] == ' ') i += 1; // skip leading spaces
+        if (i >= s.len) break;
+        const last_line = lines.items.len + 1 == max_lines;
+        // Extend the line word by word while it still fits.
+        var end = i;
+        var brk = i; // last word boundary that fit
+        while (end < s.len) {
+            var we = end;
+            while (we < s.len and s[we] != ' ') we += 1; // word [end..we)
+            if (we - i <= max or end == i) {
+                brk = we;
+                end = we;
+                while (end < s.len and s[end] == ' ') end += 1;
+                if (we - i > max) break; // a single oversize word — take it, then stop
+            } else break;
+        }
+        if (last_line and brk < s.len) {
+            // Tail won't fit — ellipsise whatever remains onto the final line.
+            try lines.append(arena, try truncate(arena, std.mem.trimRight(u8, s[i..], " "), max));
+            break;
+        }
+        // truncate() is a no-op for a normal line; it only bites a single word
+        // longer than the box (which forms its own line).
+        try lines.append(arena, try truncate(arena, std.mem.trimRight(u8, s[i..brk], " "), max));
+        i = brk;
+    }
+    return lines.toOwnedSlice(arena);
+}
+
 fn writeEscaped(w: *Writer, s: []const u8) Writer.Error!void {
     for (s) |c| switch (c) {
         '<' => try w.writeAll("&lt;"),
@@ -807,4 +884,45 @@ test "renderTabs System view combines all classes color-coded with a legend" {
     try testing.expect(std.mem.indexOf(u8, sys, "dg-legend") != null);
     try testing.expect(std.mem.indexOf(u8, sys, "Power") != null);
     try testing.expect(std.mem.indexOf(u8, sys, "Control") != null);
+}
+
+// spec: diagram/render - System view labels functional bands so it reads as an architecture
+test "renderTabs System view draws functional band headers" {
+    // A power block, an MCU, and a sensor: the System view groups them into
+    // labeled POWER / CORE / PERIPHERALS bands, drawn left→right.
+    var nodes = [_]types.Node{
+        .{ .label = "Buck", .subtitle = "", .category = .power, .slug = "", .inputs = &.{}, .outputs = &.{} },
+        .{ .label = "MCU", .subtitle = "", .category = .mcu, .slug = "", .inputs = &.{}, .outputs = &.{} },
+        .{ .label = "Sensor", .subtitle = "", .category = .sensor, .slug = "", .inputs = &.{}, .outputs = &.{} },
+    };
+    var edges = [_]types.Edge{
+        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "3V3", .voltage = 3.3 },
+        .{ .from = 1, .to = 2, .class = types.CLASS_CONTROL, .label = "I2C" },
+    };
+    var graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try renderTabs(testing.allocator, &graph, &aw.writer);
+    const out = aw.written();
+    const sys = out[std.mem.lastIndexOf(u8, out, "dg-panel-system").?..std.mem.lastIndexOf(u8, out, "dg-panel-power").?];
+    try testing.expect(std.mem.indexOf(u8, sys, "dg-band-label") != null);
+    try testing.expect(std.mem.indexOf(u8, sys, ">POWER<") != null);
+    try testing.expect(std.mem.indexOf(u8, sys, ">CORE<") != null);
+    try testing.expect(std.mem.indexOf(u8, sys, "PERIPHERALS &amp; I/O") != null);
+}
+
+// spec: diagram/render - Wraps a block's description onto multiple lines instead of truncating at one
+test "wrapText word-wraps to a line budget" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Fits on two lines, broken at a word boundary.
+    const two = try wrapText(a, "alpha beta gamma delta", 12, 2);
+    try testing.expectEqual(@as(usize, 2), two.len);
+    try testing.expectEqualStrings("alpha beta", two[0]);
+    try testing.expectEqualStrings("gamma delta", two[1]);
+    // Overflow past the last allowed line is ellipsised, never dropped silently.
+    const cut = try wrapText(a, "alpha beta gamma delta epsilon", 12, 2);
+    try testing.expectEqual(@as(usize, 2), cut.len);
+    try testing.expect(std.mem.endsWith(u8, cut[1], "\u{2026}"));
 }

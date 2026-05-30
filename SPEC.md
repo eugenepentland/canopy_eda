@@ -240,6 +240,7 @@ Public functions: computeLayout, hasSystemView, computeSystemLayout
 - Folds a pass-through filter stage and feeds its rail from the parent regulator
 - Treats test-point and mechanical nodes as instrumentation, excluded from load buckets
 - System layout combines edges from every class in one diagram
+- System view flows blocks by functional stage: Power → Core → Peripherals
 - Falls back to isolated block boxes when there are no connections
 - Omits an unconnected block from the System view when edges exist
 
@@ -256,6 +257,8 @@ Public functions: renderTabs
 - Tints RF edges returning to the connector distinctly from the forward chain
 - Puts the combined System view first and selects it by default
 - System view draws every class's edges at once, colored by class, with a class legend
+- System view labels functional bands so it reads as an architecture
+- Wraps a block's description onto multiple lines instead of truncating at one
 
 ## diagram/diagram
 

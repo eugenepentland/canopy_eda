@@ -20,12 +20,17 @@ const ClassId = types.ClassId;
 const Pt = types.Pt;
 
 // ── geometry (shared with render.zig) ──────────────────────────────────
-pub const node_w: f64 = 250;
-pub const node_h: f64 = 74;
+// Boxes are wide + tall enough to carry a title plus a two-line wrapped
+// description (what the hardware *is*), so a block reads without a tooltip.
+pub const node_w: f64 = 300;
+pub const node_h: f64 = 84;
 pub const h_gap: f64 = 132;
 pub const v_gap: f64 = 34;
 pub const pad: f64 = 20;
 pub const dummy_h: f64 = 14;
+/// Vertical room reserved above the columns for the System view's functional
+/// band headers ("Power In", "Core", …). Internal to the System layout.
+const band_h: f64 = 46;
 
 /// A placed real node: its global graph id and top-left corner (width/height
 /// are the module `node_w`/`node_h` constants).
@@ -72,6 +77,10 @@ pub const Layout = struct {
     width: f64,
     height: f64,
     power_boxes: []const PowerBox = &.{},
+    /// System view only: one functional-region label per column (indexed by
+    /// rank), drawn as a band header above the diagram. Empty for the focused
+    /// per-class views, which have no functional banding.
+    stage_labels: []const []const u8 = &.{},
 };
 
 const Vertex = struct {
@@ -103,7 +112,7 @@ pub fn computeLayout(arena: Allocator, graph: *const Graph, view: ClassId) Alloc
         try raw.append(arena, .{ .from_l = fl, .to_l = tl, .eidx = eidx });
     }
     if (raw.items.len == 0) return null;
-    return try layeredLayout(arena, graph, gids.items, raw.items);
+    return try layeredLayout(arena, graph, gids.items, raw.items, null);
 }
 
 /// True for a real on-page block (it has a card slug). Synthesised endpoints
@@ -121,11 +130,46 @@ pub fn hasSystemView(graph: *const Graph) bool {
     return false;
 }
 
-/// The combined **System** view: one layered block diagram over *every* signal
-/// class at once (each edge keeps its own class, so the renderer can color it).
-/// Shows every block that participates in a connection. When the design has no
-/// inter-block edge at all, it falls back to the real blocks as isolated boxes
-/// so the view isn't blank. Returns null only when there is nothing to draw.
+// ── System view: functional-flow staging ────────────────────────────────
+//
+// The combined System view does not rank by raw signal flow (which, on a
+// partial design, scatters blocks by whatever happens to be wired). Instead it
+// places every block into a fixed *functional stage* and flows the stages
+// left→right, so the diagram reads as an architecture: power on the left feeds
+// the compute core, which fans out to peripherals and I/O on the right.
+
+/// Functional stages, in left→right order. A block's column is its stage; the
+/// header above the column is the matching label. Unused stages are compacted
+/// out so a design with no power blocks (or no MCU) shows no empty column.
+const StageLabel = struct { idx: u8, label: []const u8 };
+const stages = [_]StageLabel{
+    .{ .idx = 0, .label = "Power" },
+    .{ .idx = 1, .label = "Core" },
+    .{ .idx = 2, .label = "Peripherals & I/O" },
+};
+
+/// Place one block into a functional stage from its declared category:
+///   - power delivery (sources, regulators, converters — `category == .power`)
+///     → Power, the left band;
+///   - the compute cluster (MCU + its crystal + boot memory) → Core;
+///   - everything else (comms, sensors, analog, connectors, protection) → I/O.
+/// Category alone is used (not power-port direction): on a partial design a
+/// source and a regulator carry indistinguishable port sets, and the user's
+/// mental model groups all power delivery into one region anyway.
+fn systemStage(n: types.Node) u8 {
+    if (n.category == .power) return 0;
+    return switch (n.category) {
+        .mcu, .clock, .memory => 1,
+        else => 2,
+    };
+}
+
+/// The combined **System** view: one block diagram over *every* signal class at
+/// once (each edge keeps its own class, so the renderer can color it), laid out
+/// by functional stage (`systemStage`) rather than raw signal flow. Shows every
+/// block that participates in a connection; when the design has no inter-block
+/// edge at all, it falls back to the real blocks as isolated boxes so the view
+/// isn't blank. Returns null only when there is nothing to draw.
 pub fn computeSystemLayout(arena: Allocator, graph: *const Graph) Allocator.Error!?Layout {
     var local_of = std.AutoHashMapUnmanaged(u32, u32){};
     var gids: std.ArrayListUnmanaged(u32) = .empty;
@@ -142,18 +186,54 @@ pub fn computeSystemLayout(arena: Allocator, graph: *const Graph) Allocator.Erro
         }
         if (gids.items.len == 0) return null;
     }
-    return try layeredLayout(arena, graph, gids.items, raw.items);
+
+    // Stage each block, then compact the *used* stages to consecutive columns
+    // (rank) so empty stages leave no gap. `col_label[rank]` is that column's
+    // band header.
+    var used = [_]bool{false} ** stages.len;
+    const raw_stage = try arena.alloc(u8, gids.items.len);
+    for (gids.items, 0..) |gid, i| {
+        raw_stage[i] = systemStage(graph.nodes[gid]);
+        used[raw_stage[i]] = true;
+    }
+    var col_of_stage = [_]u32{0} ** stages.len;
+    var col_label: std.ArrayListUnmanaged([]const u8) = .empty;
+    var ncols: u32 = 0;
+    for (stages) |s| {
+        if (!used[s.idx]) continue;
+        col_of_stage[s.idx] = ncols;
+        ncols += 1;
+        try col_label.append(arena, s.label);
+    }
+    const ranks = try arena.alloc(u32, gids.items.len);
+    for (raw_stage, 0..) |s, i| ranks[i] = col_of_stage[s];
+
+    var lay = try layeredLayout(arena, graph, gids.items, raw.items, ranks);
+    // Reserve a header strip above the columns and hang the band labels off it.
+    for (lay.nodes) |*n| n.y += band_h;
+    for (lay.routes) |r| for (r.pts) |*p| {
+        p.y += band_h;
+    };
+    lay.height += band_h;
+    lay.stage_labels = try col_label.toOwnedSlice(arena);
+    return lay;
 }
 
 /// The shared layered/Sugiyama pipeline: cycle-break → longest-path ranks →
 /// crossing reduction → coordinate assignment → orthogonal routing. `gids` is
-/// the participating node set; `raw` the edges among them (local indices).
-fn layeredLayout(arena: Allocator, graph: *const Graph, gids: []const u32, raw: []const RawEdge) Allocator.Error!Layout {
+/// the participating node set; `raw` the edges among them (local indices). When
+/// `fixed_ranks` is non-null it supplies each node's column directly (the System
+/// view's functional staging), bypassing the flow-based ranking; routing still
+/// inserts dummies for any edge that spans more than one column.
+fn layeredLayout(arena: Allocator, graph: *const Graph, gids: []const u32, raw: []const RawEdge, fixed_ranks: ?[]const u32) Allocator.Error!Layout {
     const m: u32 = @intCast(gids.len);
 
-    // Cycle break → effective DAG; longest-path ranks.
-    const reversed = try breakCycles(arena, m, raw);
-    const rank = try assignRanks(arena, m, raw, reversed);
+    // Cycle break → effective DAG; longest-path ranks. A caller-supplied stage
+    // assignment (fixed_ranks) overrides both.
+    const rank = fixed_ranks orelse blk: {
+        const reversed = try breakCycles(arena, m, raw);
+        break :blk try assignRanks(arena, m, raw, reversed);
+    };
     var max_rank: u32 = 0;
     for (rank) |r| max_rank = @max(max_rank, r);
 
@@ -1195,6 +1275,36 @@ test "computeSystemLayout includes edges of all classes at once" {
         if (r.class == types.CLASS_CLOCK) has_clock = true;
     }
     try testing.expect(has_power and has_clock);
+}
+
+// spec: diagram/layout - System view flows blocks by functional stage: Power → Core → Peripherals
+test "computeSystemLayout stages blocks power→core→peripheral left to right" {
+    var nodes = [_]types.Node{
+        .{ .label = "Buck", .subtitle = "", .category = .power, .slug = "", .inputs = &.{}, .outputs = &.{} },
+        .{ .label = "MCU", .subtitle = "", .category = .mcu, .slug = "", .inputs = &.{}, .outputs = &.{} },
+        .{ .label = "Sensor", .subtitle = "", .category = .sensor, .slug = "", .inputs = &.{}, .outputs = &.{} },
+    };
+    var edges = [_]types.Edge{
+        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "3V3", .voltage = 3.3 },
+        .{ .from = 1, .to = 2, .class = types.CLASS_CONTROL, .label = "I2C" },
+    };
+    const graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeSystemLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    // Three used stages, labeled left→right.
+    try testing.expectEqual(@as(usize, 3), lay.stage_labels.len);
+    try testing.expectEqualStrings("Power", lay.stage_labels[0]);
+    try testing.expectEqualStrings("Core", lay.stage_labels[1]);
+    try testing.expectEqualStrings("Peripherals & I/O", lay.stage_labels[2]);
+    // Nodes are placed in intern order (edge endpoints first seen): gid 0 power,
+    // 1 mcu, 2 sensor. Each sits in its stage's column — power left of core left
+    // of peripheral.
+    try testing.expectEqual(@as(u32, 0), lay.nodes[0].gid);
+    try testing.expectEqual(@as(u32, 1), lay.nodes[1].gid);
+    try testing.expectEqual(@as(u32, 2), lay.nodes[2].gid);
+    try testing.expect(lay.nodes[0].x < lay.nodes[1].x);
+    try testing.expect(lay.nodes[1].x < lay.nodes[2].x);
 }
 
 // spec: diagram/layout - Falls back to isolated block boxes when there are no connections
