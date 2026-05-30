@@ -3,7 +3,6 @@ const review = @import("review.zig");
 const erc_mod = @import("erc.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
-const render_power_tree_svg = @import("render_power_tree_svg.zig");
 const coverage = @import("coverage.zig");
 const traceability_mod = @import("traceability.zig");
 
@@ -29,16 +28,6 @@ const trCodeOpen: []const u8 = "<tr><td><code>";
 /// reads red at a glance.
 const COVERAGE_PASS_PCT: u8 = 95;
 const COVERAGE_WARN_PCT: u8 = 70;
-
-/// Render the power-tree section as a wrapping `<section>` with the SVG.
-/// Skips rendering when the tree has no nodes — sub-block-less designs
-/// have an empty tree and we don't want an empty section card.
-pub fn writePowerTree(allocator: std.mem.Allocator, w: anytype, tree: review.PowerTree) RenderError!void {
-    if (tree.nodes.len == 0) return;
-    try w.writeAll("<section class=\"power-tree-section\"><h2>Power Tree</h2>");
-    try render_power_tree_svg.render(allocator, tree, w);
-    try w.writeAll("</section>");
-}
 
 /// CSS rules for review fragments. Embedded inline by `render_html.zig`'s
 /// `<style>` block alongside the schematic page's own CSS so the embedded

@@ -58,7 +58,9 @@ src/diagram/classify.zig::buildRegistry fn
 src/diagram/classify.zig::netClass fn
 src/diagram/collect.zig::collectGraph fn
 src/diagram/diagram.zig::DIAGRAM_CSS value
+src/diagram/diagram.zig::OVERVIEW_CSS value
 src/diagram/diagram.zig::renderBlockDiagramTabs fn
+src/diagram/diagram.zig::renderOverviewSvg fn
 src/diagram/layout.zig::LNode struct_
 src/diagram/layout.zig::Layout struct_
 src/diagram/layout.zig::PowerBox struct_
@@ -78,6 +80,18 @@ src/diagram/layout.zig::pw_pill_h value
 src/diagram/layout.zig::v_gap value
 src/diagram/membership.zig::Membership struct_
 src/diagram/membership.zig::build fn
+src/diagram/overview.zig::Box struct_
+src/diagram/overview.zig::CSS value
+src/diagram/overview.zig::Column enum_
+src/diagram/overview.zig::Layout struct_
+src/diagram/overview.zig::columnFor fn
+src/diagram/overview.zig::layout fn
+src/diagram/overview.zig::present fn
+src/diagram/overview.zig::renderInner fn
+src/diagram/overview.zig::renderStandaloneSvg fn
+src/diagram/overview.zig::tab_color value
+src/diagram/overview.zig::tab_key value
+src/diagram/overview.zig::tab_label value
 src/diagram/render.zig::CSS value
 src/diagram/render.zig::renderTabs fn
 src/diagram/types.zig::CLASS_CLOCK value
@@ -346,7 +360,6 @@ src/render_html.zig::setupRenderCtx fn
 src/render_json.zig::RenderCtx value
 src/render_json.zig::RenderError value
 src/render_json.zig::renderSceneGraph fn
-src/render_power_tree_svg.zig::render fn
 src/render_svg/branch.zig::drawBranchTreeLeft fn
 src/render_svg/branch.zig::drawBranchTreeRight fn
 src/render_svg/branch.zig::drawPassiveChainLeft fn
@@ -405,10 +418,6 @@ src/render_svg/hub.zig::groupHeights fn
 src/render_svg/hub.zig::groupHubPins fn
 src/render_svg/hub.zig::splitGroupsByHeight fn
 src/render_svg/section_inset.zig::renderHubAllPins fn
-src/render_system_svg.zig::Column enum_
-src/render_system_svg.zig::SYSTEM_OVERVIEW_CSS value
-src/render_system_svg.zig::columnFor fn
-src/render_system_svg.zig::renderSystemOverviewSvg fn
 src/req_checks.zig::Result struct_
 src/req_checks.zig::Status enum_
 src/req_checks.zig::applyVerifications fn
@@ -444,7 +453,6 @@ src/review_html.zig::mutedDash value
 src/review_html.zig::writeAssertions fn
 src/review_html.zig::writePowerBudget fn
 src/review_html.zig::writePowerSequence fn
-src/review_html.zig::writePowerTree fn
 src/review_html.zig::writeSectionCoverage fn
 src/review_html.zig::writeSummaryTable fn
 src/review_html.zig::writeTestPoints fn

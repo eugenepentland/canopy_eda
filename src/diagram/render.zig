@@ -6,6 +6,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const layout = @import("layout.zig");
+const overview = @import("overview.zig");
 const rb = @import("../render_block_types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -13,52 +14,86 @@ const Graph = types.Graph;
 const ClassId = types.ClassId;
 const Writer = std.Io.Writer;
 
-/// Render the whole tabbed diagram. Emits nothing when no view has edges. The
-/// set of tabs is data-driven — one per non-reference class that has edges, in
-/// registry order (built-ins first, then designer-declared classes). The
-/// radio→panel toggle and per-tab accent rules are emitted into a scoped
-/// `<style>`, so a brand-new declared class needs no hand-written CSS.
+/// Render the whole tabbed diagram. The first tab is always the **Overview**
+/// (every block as a category-grouped chip, no edges) when the graph has any
+/// real block; it is followed by one signal tab per non-reference class that
+/// has edges, in registry order (built-ins first, then designer-declared
+/// classes). Emits nothing when the graph has neither a block nor a signal
+/// edge. The radio→panel toggle and per-tab accent rules are emitted into a
+/// scoped `<style>`, so a brand-new declared class needs no hand-written CSS.
 pub fn renderTabs(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void {
-    var first: ?ClassId = null;
+    const has_overview = overview.present(graph);
+    var first_signal: ?ClassId = null;
     for (graph.classes, 0..) |_, i| {
         const id: ClassId = @intCast(i);
         if (graph.isView(id)) {
-            first = id;
+            first_signal = id;
             break;
         }
     }
-    if (first == null) return;
+    if (!has_overview and first_signal == null) return;
 
     try w.writeAll("<div class=\"dg-wrap\"><style>");
     // Per-view rules: the checked radio shows its panel and lights its tab.
+    // Overview is just another keyed view, with a neutral accent.
+    if (has_overview) try writeToggleRule(w, overview.tab_key, overview.tab_color);
     for (graph.classes, 0..) |c, i| {
         if (!graph.isView(@intCast(i))) continue;
-        try w.print(
-            "#dg-tab-{s}:checked~.dg-panels .dg-panel-{s}{{display:block;}}" ++
-                "#dg-tab-{s}:checked~.dg-tabs .dg-tab-{s}{{color:#fff;background:{s};border-color:{s};}}",
-            .{ c.key, c.key, c.key, c.key, c.color, c.color },
-        );
+        try writeToggleRule(w, c.key, c.color);
     }
     try w.writeAll("</style>");
     // Radios first so the `:checked ~` sibling selectors can reach the panels.
+    // Overview is the default-checked tab when present; otherwise the first
+    // signal view is.
+    if (has_overview) try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\" checked>", .{overview.tab_key});
     for (graph.classes, 0..) |c, i| {
         const id: ClassId = @intCast(i);
         if (!graph.isView(id)) continue;
-        const checked = if (id == first.?) " checked" else "";
+        const checked = if (!has_overview and id == first_signal.?) " checked" else "";
         try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\"{s}>", .{ c.key, checked });
     }
     try w.writeAll("<div class=\"dg-tabs\">");
+    if (has_overview) try w.print(
+        "<label for=\"dg-tab-{s}\" class=\"dg-tab dg-tab-{s}\">{s}</label>",
+        .{ overview.tab_key, overview.tab_key, overview.tab_label },
+    );
     for (graph.classes, 0..) |c, i| {
         if (!graph.isView(@intCast(i))) continue;
         try w.print("<label for=\"dg-tab-{s}\" class=\"dg-tab dg-tab-{s}\">{s}</label>", .{ c.key, c.key, c.label });
     }
     try w.writeAll("</div><div class=\"dg-panels\">");
+    if (has_overview) try renderOverviewPanel(allocator, graph, w);
     for (graph.classes, 0..) |_, i| {
         const id: ClassId = @intCast(i);
         if (!graph.isView(id)) continue;
         try renderView(allocator, graph, id, w);
     }
     try w.writeAll("</div></div>");
+}
+
+/// The checked-radio → show-panel + light-tab CSS pair for one keyed view.
+fn writeToggleRule(w: *Writer, key: []const u8, color: []const u8) Writer.Error!void {
+    try w.print(
+        "#dg-tab-{s}:checked~.dg-panels .dg-panel-{s}{{display:block;}}" ++
+            "#dg-tab-{s}:checked~.dg-tabs .dg-tab-{s}{{color:#fff;background:{s};border-color:{s};}}",
+        .{ key, key, key, key, color, color },
+    );
+}
+
+/// The Overview tab's panel: the category-grouped chip silhouette as one inline
+/// SVG. Built from the same nodes the signal views share.
+fn renderOverviewPanel(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const lay = (try overview.layout(arena, graph)) orelse return;
+    try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{overview.tab_key});
+    try w.print(
+        "<svg viewBox=\"0 0 {d:.0} {d:.0}\" class=\"dg-svg\" xmlns=\"http://www.w3.org/2000/svg\">",
+        .{ lay.width, lay.height },
+    );
+    try overview.renderInner(arena, w, graph, lay);
+    try w.writeAll("</svg></div>");
 }
 
 fn renderView(allocator: Allocator, graph: *const Graph, view: ClassId, w: *Writer) (Allocator.Error || Writer.Error)!void {
@@ -597,4 +632,30 @@ test "renderTabs tints RF connector-return edges" {
     try renderTabs(testing.allocator, &graph, &aw.writer);
     // The IF-return edge (to the connector) uses the warm IF tone, not magenta.
     try testing.expect(std.mem.indexOf(u8, aw.written(), "stroke=\"#e3742f\"") != null);
+}
+
+// spec: diagram/render - Puts the Overview silhouette first and selects it by default
+test "renderTabs prepends a default-checked Overview tab" {
+    // Real blocks carry a card slug; that's what makes the Overview non-empty.
+    var mcu = mkNode("MCU");
+    mcu.slug = "mcu";
+    mcu.category = .mcu;
+    var sensor = mkNode("Sensor");
+    sensor.slug = "sensor";
+    sensor.category = .sensor;
+    var nodes = [_]types.Node{ mcu, sensor };
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "I2C_SDA" }};
+    var graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try renderTabs(testing.allocator, &graph, &aw.writer);
+    const out = aw.written();
+    // Overview is present and is the default-checked radio…
+    try testing.expect(std.mem.indexOf(u8, out, "id=\"dg-tab-overview\" class=\"dg-radio\" checked") != null);
+    // …the signal view is not also checked (single default)…
+    try testing.expect(std.mem.indexOf(u8, out, "id=\"dg-tab-control\" class=\"dg-radio\" checked") == null);
+    // …and the Overview tab label precedes the Control tab label.
+    const ov_label = std.mem.indexOf(u8, out, ">Overview</label>").?;
+    const ctrl_label = std.mem.indexOf(u8, out, ">Control</label>").?;
+    try testing.expect(ov_label < ctrl_label);
 }

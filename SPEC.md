@@ -251,10 +251,21 @@ Public functions: renderTabs
 - Colors power edges by voltage and renders a voltage legend
 - Draws per-rail load buckets with rail-colored headings in the power view
 - Tints RF edges returning to the connector distinctly from the forward chain
+- Puts the Overview silhouette first and selects it by default
+
+## diagram/overview
+
+Public functions: columnFor, present, layout, renderInner, renderStandaloneSvg
+
+- Maps each block category to one of four macro columns
+- Places one chip per real block, grouped by column
+- Skips synthesised endpoints (no card slug) from the silhouette
+- Returns no layout when the graph has no real block
+- Renders a clickable chip linking to the block's section card
 
 ## diagram/diagram
 
-Public functions: renderBlockDiagramTabs
+Public functions: renderBlockDiagramTabs, renderOverviewSvg
 
 ## render_svg
 
@@ -370,14 +381,6 @@ Public functions: build
 - Records source_ref_des and source_port on each rail from the source instance
 - Returns empty slice when design declares no rails
 
-## render_power_tree_svg
-
-Public functions: render
-
-- Lays out one column per topological layer of the rail DAG
-- Renders a rounded-rect node per rail with name and nominal voltage
-- Returns immediately on a block with zero declared rails
-
 ## coverage
 
 Public functions: computeInstanceCoverage, computeSectionCoverage, computeOverallCoverage
@@ -413,15 +416,6 @@ Public functions: build
 - buildTestPoints collects testpoint instances with pin 1 net
 - buildTestPoints ignores non-testpoints
 
-## render_system_svg
-
-- Maps section categories to macro columns
-- Builds one chip per section classified by name
-- Recurses into sub-sections to expose each as its own chip
-- Emits a chip per sub-block classified by its name
-- Folds adopted sub-blocks into their section chip
-- Falls back to one synthetic chip when a design has no sections
-
 ## review_json
 
 Public functions: renderToJson
@@ -444,7 +438,7 @@ Public functions: runChecks, deinit, parseMicroFarads, parseOhms, parseMicroHenr
 
 ## review_html
 
-Public functions: writePowerTree, writeSummaryTable, writePowerBudget, writePowerSequence, writeTestPoints, writeUnresolved, writeAssertions, writeSectionCoverage
+Public functions: writeSummaryTable, writePowerBudget, writePowerSequence, writeTestPoints, writeUnresolved, writeAssertions, writeSectionCoverage
 
 ## serve
 

@@ -14,7 +14,7 @@ const review = @import("review.zig");
 const req_checks = @import("req_checks.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
-const system_svg = @import("render_system_svg.zig");
+const block_diagram = @import("diagram/diagram.zig");
 const render_html = @import("render_html.zig");
 
 const DesignBlock = env_mod.DesignBlock;
@@ -53,7 +53,7 @@ pub fn renderToMarkdown(
     try w.writeAll("<style>\n");
     try w.writeAll(render_html.STATIC_SVG_CSS);
     try w.writeAll("\n");
-    try w.writeAll(system_svg.SYSTEM_OVERVIEW_CSS);
+    try w.writeAll(block_diagram.OVERVIEW_CSS);
     try w.writeAll("\n</style>\n\n");
 
     try writeSummary(w, doc.summary);
@@ -97,7 +97,12 @@ fn writeSystemDiagram(allocator: Allocator, w: anytype, block: *const DesignBloc
     try w.writeAll("## System Block Diagram\n\n");
     const sub_attachments = try render_html.computeSubBlockAttachments(allocator, block);
     defer allocator.free(sub_attachments);
-    try system_svg.renderSystemOverviewSvg(allocator, block, sub_attachments, w);
+    // The engine renderer writes to a `*std.Io.Writer`; bridge to this module's
+    // ArrayList writer through a scratch Allocating buffer.
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try block_diagram.renderOverviewSvg(allocator, block, sub_attachments, &aw.writer);
+    try w.writeAll(aw.written());
     try w.writeAll("\n\n");
 }
 

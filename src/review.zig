@@ -180,9 +180,11 @@ pub const TestPointEntry = struct {
 /// `/review/:name` HTML and `/api/review/:name` JSON endpoints need to
 /// render. Aggregates the summary, per-section reports, power-budget /
 /// sequencing tables, BOM, assertions, and unresolved violations.
-/// One node in the power-tree visualization. `layer` is the topological
+/// One node in the power-tree data model. `layer` is the topological
 /// distance from a rail with no upstream (board input or top-level
-/// regulator) — feeds the column placement in `render_power_tree_svg`.
+/// regulator). Exposed through the `/api/review/:name` JSON only — the
+/// on-page power view is now rendered by the unified diagram engine
+/// (`diagram/`), so this struct no longer drives any SVG.
 pub const PowerTreeNode = struct {
     rail: []const u8,
     nominal: ?f64,

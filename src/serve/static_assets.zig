@@ -26,7 +26,7 @@ const codemirror_css = @embedFile("assets/codemirror.css");
 // Schematic page assets — pub-imported from render_html so we don't
 // re-`@embedFile` the underlying byte slices (the JS lives under
 // `serve/assets/` already, but the CSS is the concatenation of
-// `assets/schematic_inline.css` and `system_svg.SYSTEM_OVERVIEW_CSS`).
+// `assets/schematic_inline.css` and the diagram engine's `DIAGRAM_CSS`).
 const render_html = @import("../render_html.zig");
 const schematic_viewer_js = render_html.SCHEMATIC_VIEWER_JS;
 const schematic_css = render_html.SCHEMATIC_CSS;

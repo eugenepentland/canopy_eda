@@ -21,7 +21,6 @@ const PinGroup = ctx_mod.PinGroup;
 const hub_mod = @import("render_svg/hub.zig");
 const draw = @import("render_svg/draw.zig");
 const section_inset = @import("render_svg/section_inset.zig");
-const system_svg = @import("render_system_svg.zig");
 const block_diagram = @import("diagram/diagram.zig");
 const rb = @import("render_block_types.zig");
 const bom_html = @import("serve/bom_html.zig");
@@ -120,11 +119,6 @@ pub fn renderToHtml(
         if (doc.test_points.len > 0) {
             try w.writeAll("<div id=\"page-test-points\" class=\"page-anchor\">");
             try review_html.writeTestPoints(w, doc.test_points);
-            try w.writeAll("</div>");
-        }
-        if (doc.power_tree.nodes.len > 0) {
-            try w.writeAll("<div id=\"page-power-tree\" class=\"page-anchor\">");
-            try review_html.writePowerTree(allocator, w, doc.power_tree);
             try w.writeAll("</div>");
         }
         if (doc.power_budget.len > 0) {
@@ -1733,4 +1727,4 @@ fn writeUrlEncoded(w: anytype, s: []const u8) !void {
 /// classifier's column styles. Served from `/static/schematic.css` — exposed
 /// pub so `static_assets.zig` can register it without re-`@embedFile`-ing
 /// the source file.
-pub const SCHEMATIC_CSS = @embedFile("assets/schematic_inline.css") ++ system_svg.SYSTEM_OVERVIEW_CSS ++ block_diagram.DIAGRAM_CSS;
+pub const SCHEMATIC_CSS = @embedFile("assets/schematic_inline.css") ++ block_diagram.DIAGRAM_CSS;
