@@ -882,6 +882,9 @@ pub const FunctionGroup = struct {
     subtitle: []const u8 = "",
     verb: []const u8 = "",
     includes: []const []const u8 = &.{},
+    /// `(stack N)`: render this block as N offset cards to show it's N identical
+    /// channels (e.g. a 2-channel PSU). 1 ⇒ a single box.
+    stack: u8 = 1,
 };
 
 /// The fully-evaluated result of a `(design-block …)`: the flattened netlist

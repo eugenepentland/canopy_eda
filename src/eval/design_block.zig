@@ -1132,6 +1132,7 @@ fn parseFunction(self: *Evaluator, form_children: []const Node) EvalError!?env_m
     const name = form_children[1].asString() orelse return null;
     var subtitle: []const u8 = "";
     var verb: []const u8 = "";
+    var stack: u8 = 1;
     var includes: std.ArrayListUnmanaged([]const u8) = .empty;
     for (form_children[2..]) |node| {
         if (node.asString()) |s| {
@@ -1143,6 +1144,10 @@ fn parseFunction(self: *Evaluator, form_children: []const Node) EvalError!?env_m
         const head = lst[0].asAtom() orelse continue;
         if (std.mem.eql(u8, head, "verb")) {
             if (lst.len >= 2) verb = lst[1].asString() orelse lst[1].asAtom() orelse "";
+        } else if (std.mem.eql(u8, head, "stack")) {
+            if (lst.len >= 2) {
+                if (lst[1].asNumber()) |n| stack = @intFromFloat(@max(1, @min(9, n)));
+            }
         } else if (std.mem.eql(u8, head, "includes")) {
             for (lst[1..]) |inc| {
                 const s = inc.asString() orelse inc.asAtom() orelse continue;
@@ -1154,6 +1159,7 @@ fn parseFunction(self: *Evaluator, form_children: []const Node) EvalError!?env_m
         .name = name,
         .subtitle = subtitle,
         .verb = verb,
+        .stack = stack,
         .includes = includes.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
     };
 }
@@ -1196,6 +1202,7 @@ test "design-block parses a (function …) group" {
         \\(design-block "test"
         \\  (function "Measurement" "isolated DMM"
         \\    (verb "measures V/R")
+        \\    (stack 2)
         \\    (includes "DMM Analog Front-End" "DMM Cal EEPROM")))
     ;
     const nodes = try @import("../sexpr/parser.zig").parse(a, src);
@@ -1213,6 +1220,7 @@ test "design-block parses a (function …) group" {
     try testing.expectEqualStrings("Measurement", f.name);
     try testing.expectEqualStrings("isolated DMM", f.subtitle);
     try testing.expectEqualStrings("measures V/R", f.verb);
+    try testing.expectEqual(@as(u8, 2), f.stack);
     try testing.expectEqual(@as(usize, 2), f.includes.len);
     try testing.expectEqualStrings("DMM Analog Front-End", f.includes[0]);
 }

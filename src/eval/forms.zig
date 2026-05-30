@@ -432,7 +432,7 @@ pub const scope_form_docs = blk: {
         .summary = "Declare the PCB file the file-based KiCad sync writes board updates to.",
     } };
     t[@intFromEnum(ScopeForm.function)] = .{ .scope = tl, .doc = .{
-        .syntax = "(function \"Name\" [\"subtitle\"] [(verb \"…\")] (includes \"section\"…))",
+        .syntax = "(function \"Name\" [\"subtitle\"] [(verb \"…\")] [(stack N)] (includes \"section\"…))",
         .summary = "Declare a high-level functional subsystem for the Function (\"what it does\") view.",
     } };
     break :blk t;

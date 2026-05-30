@@ -174,9 +174,9 @@ fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layo
     for (lay.routes) |r| {
         const color = classColor(graph, r.class);
         if (r.class == types.CLASS_POWER) {
-            try writeCurveEdgeStyled(w, r, color, sys_power_width, sys_power_opacity);
+            try writeRoutedEdge(w, r, color, sys_power_width, sys_power_opacity);
         } else {
-            try writeCurveEdge(w, r, color);
+            try writeRoutedEdge(w, r, color, null, null);
         }
     }
     for (lay.nodes) |n| try writeNode(arena, w, graph.nodes[n.gid], n.x, n.y);
@@ -201,7 +201,10 @@ fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layo
 fn writeArrowhead(w: *Writer, r: layout.Route, color: []const u8) Writer.Error!void {
     const last = r.pts.len - 1;
     const tip = if (r.arrow_at_start) r.pts[0] else r.pts[last];
-    const nb = if (r.arrow_at_start) r.pts[last] else r.pts[0];
+    // Angle off the *adjacent* waypoint (the last routed segment), not the far
+    // endpoint, so the head aligns with how the wire actually arrives and sits
+    // flush on the box edge instead of overlapping the body at a slant.
+    const nb = if (r.arrow_at_start) r.pts[1] else r.pts[last - 1];
     const dir: f64 = if (tip.x >= nb.x) 1 else -1; // box lies beyond the tip
     const bx = tip.x - dir * sys_arrow_sz;
     try w.print(
@@ -321,6 +324,8 @@ const sub_line_h: f64 = 18; // subtitle line advance
 const sub_lines: usize = 2; // subtitle wraps to at most this many lines
 const min_label_chars: usize = 8;
 const min_sub_chars: usize = 10;
+const stack_offset: f64 = 7; // per-card offset for a multi-channel stacked block
+const stack_back_opacity: f64 = 0.5; // dimmer stroke on the cards behind the front one
 const rf_if_color: []const u8 = "#e3742f"; // RF edges returning to the connector (IF lines)
 const pill_char_w: f64 = 8.4; // edge-label width per character
 const pill_pad_x: f64 = 12; // edge-label horizontal padding
@@ -335,6 +340,18 @@ fn writeNode(arena: Allocator, w: *Writer, node: types.Node, x: f64, y: f64) (Al
     try w.writeAll("<g class=\"dg-node\">");
     // Board-edge endpoints (antennas / EMVS cells) get a dashed border.
     const rect_class = if (node.is_boundary) "dg-rect dg-boundary" else "dg-rect";
+    // Multi-channel block: draw offset cards behind the main box (back-to-front)
+    // so it reads as N stacked identical channels.
+    if (node.stack > 1) {
+        var k: usize = node.stack - 1;
+        while (k >= 1) : (k -= 1) {
+            const off = @as(f64, @floatFromInt(k)) * stack_offset;
+            try w.print(
+                "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.0}\" height=\"{d:.0}\" rx=\"6\" class=\"{s}\" stroke=\"{s}\" stroke-opacity=\"{d:.2}\"/>",
+                .{ x + off, y - off, layout.node_w, layout.node_h, rect_class, color, stack_back_opacity },
+            );
+        }
+    }
     try w.print(
         "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.0}\" height=\"{d:.0}\" rx=\"6\" class=\"{s}\" stroke=\"{s}\"/>",
         .{ x, y, layout.node_w, layout.node_h, rect_class, color },
@@ -506,6 +523,38 @@ fn writeCurveEdgeStyled(w: *Writer, r: layout.Route, color: []const u8, width: ?
         try writeDot(w, a, color);
         try writeDot(w, b, color);
     }
+}
+
+/// Draw an edge that *follows its routed waypoints* — a smooth path threaded
+/// through the lane points the layout placed to dodge box bodies — instead of a
+/// straight box-to-box Bézier. A 2-point hop falls back to the plain curve;
+/// longer routes round each corner (line to each segment midpoint, the waypoint
+/// as the quadratic control). The horizontal final segment means an arrowhead
+/// lands flush on the destination's edge. Used by the stage-banded System and
+/// Function views, where multi-column edges would otherwise cut across the
+/// columns between their endpoints.
+fn writeRoutedEdge(w: *Writer, r: layout.Route, color: []const u8, width: ?f64, opacity: ?f64) Writer.Error!void {
+    const pts = r.pts;
+    if (pts.len <= 2) return writeCurveEdgeStyled(w, r, color, width, opacity);
+    try w.print("<path d=\"M {d:.1} {d:.1}", .{ pts[0].x, pts[0].y });
+    // Straight into the first segment's midpoint, round every interior corner,
+    // then straight out to the final anchor.
+    const m1 = midpoint(pts[0], pts[1]);
+    try w.print(" L {d:.1} {d:.1}", .{ m1.x, m1.y });
+    var i: usize = 1;
+    while (i + 1 < pts.len) : (i += 1) {
+        const m = midpoint(pts[i], pts[i + 1]);
+        try w.print(" Q {d:.1} {d:.1}, {d:.1} {d:.1}", .{ pts[i].x, pts[i].y, m.x, m.y });
+    }
+    try w.print(" L {d:.1} {d:.1}\" class=\"dg-edge\" stroke=\"{s}\"", .{ pts[pts.len - 1].x, pts[pts.len - 1].y, color });
+    if (width) |sw| try w.print(" stroke-width=\"{d:.1}\"", .{sw});
+    if (opacity) |op| try w.print(" stroke-opacity=\"{d:.2}\"", .{op});
+    try w.writeAll("/>");
+    if (opacity == null) try writeDot(w, pts[0], color); // source dot; arrowhead marks the sink
+}
+
+fn midpoint(a: types.Pt, b: types.Pt) types.Pt {
+    return .{ .x = (a.x + b.x) / 2, .y = (a.y + b.y) / 2 };
 }
 
 /// Draws the power supply tree: rail-colored wires first, then the source /

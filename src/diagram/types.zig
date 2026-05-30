@@ -107,6 +107,10 @@ pub const Node = struct {
     /// for ordinary nodes. Owned by the Function graph's arena (never
     /// `Graph.deinit`-ed), so `deinit` ignores it.
     members: []const []const u8 = &.{},
+    /// Multiplicity for a multi-channel Function block (a `(function … (stack
+    /// N))`): rendered as N offset cards stacked behind the box to show "×N
+    /// identical channels" (e.g. a 2-channel programmable PSU). 1 ⇒ a single box.
+    stack: u8 = 1,
 };
 
 /// A directed inter-block connection. `from` is the driver/producer side so

@@ -218,18 +218,20 @@ fn superNode(funcs: []const env_mod.FunctionGroup, auto: []const Template, ndecl
     var label: []const u8 = undefined;
     var verb: []const u8 = undefined;
     var cat: Category = undefined;
+    var stack: u8 = 1;
     if (gi < ndecl) {
         const f = funcs[gi];
         label = f.name;
         verb = if (f.verb.len > 0) f.verb else f.subtitle;
         cat = modalCategory(votes);
+        stack = f.stack;
     } else {
         const t = auto[gi - ndecl];
         label = t.name;
         verb = t.verb;
         cat = t.cat;
     }
-    return .{ .label = label, .subtitle = verb, .category = cat, .slug = "", .inputs = &.{}, .outputs = &.{} };
+    return .{ .label = label, .subtitle = verb, .category = cat, .slug = "", .inputs = &.{}, .outputs = &.{}, .stack = stack };
 }
 
 /// Collapse the detail edges into one super-edge per ordered (from,to) group
