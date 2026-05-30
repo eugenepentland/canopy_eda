@@ -228,7 +228,7 @@ Public functions: collectGraph
 
 ## diagram/layout
 
-Public functions: computeLayout
+Public functions: computeLayout, hasSystemView, computeSystemLayout
 
 - Returns null for a view with no edges
 - Ranks nodes left-to-right by signal flow, breaking cycles for layering
@@ -239,6 +239,9 @@ Public functions: computeLayout
 - Shows a cascade LDO that re-regulates a rail in its own column
 - Folds a pass-through filter stage and feeds its rail from the parent regulator
 - Treats test-point and mechanical nodes as instrumentation, excluded from load buckets
+- System layout combines edges from every class in one diagram
+- Falls back to isolated block boxes when there are no connections
+- Omits an unconnected block from the System view when edges exist
 
 ## diagram/render
 
@@ -251,21 +254,12 @@ Public functions: renderTabs
 - Colors power edges by voltage and renders a voltage legend
 - Draws per-rail load buckets with rail-colored headings in the power view
 - Tints RF edges returning to the connector distinctly from the forward chain
-- Puts the Overview silhouette first and selects it by default
-
-## diagram/overview
-
-Public functions: columnFor, present, layout, renderInner, renderStandaloneSvg
-
-- Maps each block category to one of four macro columns
-- Places one chip per real block, grouped by column
-- Skips synthesised endpoints (no card slug) from the silhouette
-- Returns no layout when the graph has no real block
-- Renders a clickable chip linking to the block's section card
+- Puts the combined System view first and selects it by default
+- System view draws every class's edges at once, colored by class, with a class legend
 
 ## diagram/diagram
 
-Public functions: renderBlockDiagramTabs, renderOverviewSvg
+Public functions: renderBlockDiagramTabs, renderSystemSvg
 
 ## render_svg
 

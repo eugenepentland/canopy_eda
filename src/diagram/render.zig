@@ -6,7 +6,6 @@
 const std = @import("std");
 const types = @import("types.zig");
 const layout = @import("layout.zig");
-const overview = @import("overview.zig");
 const rb = @import("../render_block_types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -14,15 +13,24 @@ const Graph = types.Graph;
 const ClassId = types.ClassId;
 const Writer = std.Io.Writer;
 
-/// Render the whole tabbed diagram. The first tab is always the **Overview**
-/// (every block as a category-grouped chip, no edges) when the graph has any
-/// real block; it is followed by one signal tab per non-reference class that
-/// has edges, in registry order (built-ins first, then designer-declared
+/// Tab metadata for the combined **System** view — every block + every
+/// inter-block connection at once, color-coded by signal class. It is not a
+/// signal class itself, so it lives outside `Graph.classes`; it's prepended as
+/// the first (default) tab.
+pub const system_key: []const u8 = "system";
+pub const system_label: []const u8 = "System";
+pub const system_color: []const u8 = "#768390"; // neutral accent (shows all classes)
+
+/// Render the whole tabbed diagram. The first tab is always the **System**
+/// view — one block diagram showing every block and every inter-block
+/// connection at once, color-coded by signal class — when the graph has
+/// anything to draw; it is followed by one focused signal tab per non-reference
+/// class that has edges, in registry order (built-ins first, then declared
 /// classes). Emits nothing when the graph has neither a block nor a signal
 /// edge. The radio→panel toggle and per-tab accent rules are emitted into a
 /// scoped `<style>`, so a brand-new declared class needs no hand-written CSS.
 pub fn renderTabs(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void {
-    const has_overview = overview.present(graph);
+    const has_system = layout.hasSystemView(graph);
     var first_signal: ?ClassId = null;
     for (graph.classes, 0..) |_, i| {
         const id: ClassId = @intCast(i);
@@ -31,38 +39,38 @@ pub fn renderTabs(allocator: Allocator, graph: *const Graph, w: *Writer) (Alloca
             break;
         }
     }
-    if (!has_overview and first_signal == null) return;
+    if (!has_system and first_signal == null) return;
 
     try w.writeAll("<div class=\"dg-wrap\"><style>");
     // Per-view rules: the checked radio shows its panel and lights its tab.
-    // Overview is just another keyed view, with a neutral accent.
-    if (has_overview) try writeToggleRule(w, overview.tab_key, overview.tab_color);
+    // System is just another keyed view, with a neutral accent.
+    if (has_system) try writeToggleRule(w, system_key, system_color);
     for (graph.classes, 0..) |c, i| {
         if (!graph.isView(@intCast(i))) continue;
         try writeToggleRule(w, c.key, c.color);
     }
     try w.writeAll("</style>");
     // Radios first so the `:checked ~` sibling selectors can reach the panels.
-    // Overview is the default-checked tab when present; otherwise the first
+    // System is the default-checked tab when present; otherwise the first
     // signal view is.
-    if (has_overview) try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\" checked>", .{overview.tab_key});
+    if (has_system) try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\" checked>", .{system_key});
     for (graph.classes, 0..) |c, i| {
         const id: ClassId = @intCast(i);
         if (!graph.isView(id)) continue;
-        const checked = if (!has_overview and id == first_signal.?) " checked" else "";
+        const checked = if (!has_system and id == first_signal.?) " checked" else "";
         try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\"{s}>", .{ c.key, checked });
     }
     try w.writeAll("<div class=\"dg-tabs\">");
-    if (has_overview) try w.print(
+    if (has_system) try w.print(
         "<label for=\"dg-tab-{s}\" class=\"dg-tab dg-tab-{s}\">{s}</label>",
-        .{ overview.tab_key, overview.tab_key, overview.tab_label },
+        .{ system_key, system_key, system_label },
     );
     for (graph.classes, 0..) |c, i| {
         if (!graph.isView(@intCast(i))) continue;
         try w.print("<label for=\"dg-tab-{s}\" class=\"dg-tab dg-tab-{s}\">{s}</label>", .{ c.key, c.key, c.label });
     }
     try w.writeAll("</div><div class=\"dg-panels\">");
-    if (has_overview) try renderOverviewPanel(allocator, graph, w);
+    if (has_system) try renderSystemPanel(allocator, graph, w);
     for (graph.classes, 0..) |_, i| {
         const id: ClassId = @intCast(i);
         if (!graph.isView(id)) continue;
@@ -80,20 +88,87 @@ fn writeToggleRule(w: *Writer, key: []const u8, color: []const u8) Writer.Error!
     );
 }
 
-/// The Overview tab's panel: the category-grouped chip silhouette as one inline
-/// SVG. Built from the same nodes the signal views share.
-fn renderOverviewPanel(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void {
+/// The System tab's panel: a toggled `dg-panel` wrapping the combined diagram.
+fn renderSystemPanel(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const lay = (try overview.layout(arena, graph)) orelse return;
-    try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{overview.tab_key});
+    const lay = (try layout.computeSystemLayout(arena, graph)) orelse return;
+    try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{system_key});
+    try renderSystemBody(arena, w, graph, lay);
+    try w.writeAll("</div>");
+}
+
+/// Render the combined System diagram as a standalone always-visible block (a
+/// class legend + one inline SVG) — the static form the markdown/zip export
+/// embeds. Returns false when there is nothing to draw.
+pub fn renderSystemStandalone(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!bool {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const lay = (try layout.computeSystemLayout(arena, graph)) orelse return false;
+    try w.writeAll("<div class=\"dg-wrap\">");
+    try renderSystemBody(arena, w, graph, lay);
+    try w.writeAll("</div>");
+    return true;
+}
+
+/// The class legend + one inline SVG, shared by the tab panel and the export's
+/// standalone block.
+fn renderSystemBody(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout) (Allocator.Error || Writer.Error)!void {
+    try writeClassLegend(w, graph, lay);
     try w.print(
         "<svg viewBox=\"0 0 {d:.0} {d:.0}\" class=\"dg-svg\" xmlns=\"http://www.w3.org/2000/svg\">",
         .{ lay.width, lay.height },
     );
-    try overview.renderInner(arena, w, graph, lay);
-    try w.writeAll("</svg></div>");
+    try renderSystemView(arena, w, graph, lay);
+    try w.writeAll("</svg>");
+}
+
+/// Draw the combined view: every wire colored by *its* signal class (not a
+/// single view accent), every block as a box, then the net labels last so they
+/// stay legible over crossings. Block boxes carry their category color (what a
+/// block *is*); wires carry their class color (what a connection *carries*).
+fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout) (Allocator.Error || Writer.Error)!void {
+    for (lay.routes) |r| try writeCurveEdge(w, r, classColor(graph, r.class));
+    for (lay.nodes) |n| try writeNode(arena, w, graph.nodes[n.gid], n.x, n.y);
+    var labeled: std.StringHashMapUnmanaged(void) = .empty;
+    for (lay.routes) |r| {
+        const key = try std.fmt.allocPrint(arena, "{d}|{s}", .{ r.from_gid, r.label });
+        if ((try labeled.getOrPut(arena, key)).found_existing) continue;
+        try writeEdgeLabel(arena, w, r, classColor(graph, r.class));
+    }
+}
+
+/// The accent color for a class id, guarding against an out-of-range id.
+fn classColor(graph: *const Graph, id: ClassId) []const u8 {
+    return if (id < graph.classes.len) graph.classes[id].color else volt_unspecified;
+}
+
+/// A legend mapping each present wire color to its signal-class label, in
+/// registry order. Lets the reader decode the combined view's colors.
+fn writeClassLegend(w: *Writer, graph: *const Graph, lay: layout.Layout) Writer.Error!void {
+    var any = false;
+    for (graph.classes, 0..) |c, i| {
+        const cid: ClassId = @intCast(i);
+        var present = false;
+        for (lay.routes) |r| {
+            if (r.class == cid) {
+                present = true;
+                break;
+            }
+        }
+        if (!present) continue;
+        if (!any) {
+            try w.writeAll("<div class=\"dg-legend\">");
+            any = true;
+        }
+        try w.print(
+            "<span class=\"dg-leg\"><svg class=\"dg-sw\" viewBox=\"0 0 12 12\"><rect width=\"12\" height=\"12\" rx=\"2\" fill=\"{s}\"/></svg>{s}</span>",
+            .{ c.color, c.label },
+        );
+    }
+    if (any) try w.writeAll("</div>");
 }
 
 fn renderView(allocator: Allocator, graph: *const Graph, view: ClassId, w: *Writer) (Allocator.Error || Writer.Error)!void {
@@ -565,10 +640,13 @@ test "renderTabs draws edge-label pills after every wire" {
     defer aw.deinit();
     try renderTabs(testing.allocator, &graph, &aw.writer);
     const out = aw.written();
+    // Scope to the System panel — the wire-then-pill z-order is a per-panel
+    // property, and the page now emits a System panel ahead of the RF one.
+    const sys = out[std.mem.lastIndexOf(u8, out, "dg-panel-system").?..std.mem.lastIndexOf(u8, out, "dg-panel-rf").?];
     // The last wire polyline must precede the first label pill, so no wire is
     // ever painted over a net pill.
-    const last_wire = std.mem.lastIndexOf(u8, out, "class=\"dg-edge\"").?;
-    const first_pill = std.mem.indexOf(u8, out, "class=\"dg-pill\"").?;
+    const last_wire = std.mem.lastIndexOf(u8, sys, "class=\"dg-edge\"").?;
+    const first_pill = std.mem.indexOf(u8, sys, "class=\"dg-pill\"").?;
     try testing.expect(last_wire < first_pill);
 }
 
@@ -583,8 +661,11 @@ test "renderTabs draws one label for a net fanned to many consumers" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     try renderTabs(testing.allocator, &graph, &aw.writer);
-    // Both edges are the same net from the same source ⇒ a single label pill.
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, aw.written(), "class=\"dg-pill\""));
+    const out = aw.written();
+    // Both edges are the same net from the same source ⇒ a single label pill
+    // (checked within the System panel; the RF panel draws its own copy).
+    const sys = out[std.mem.lastIndexOf(u8, out, "dg-panel-system").?..std.mem.lastIndexOf(u8, out, "dg-panel-rf").?];
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sys, "class=\"dg-pill\""));
 }
 
 // spec: diagram/render - Draws per-rail load buckets with rail-colored headings in the power view
@@ -634,28 +715,46 @@ test "renderTabs tints RF connector-return edges" {
     try testing.expect(std.mem.indexOf(u8, aw.written(), "stroke=\"#e3742f\"") != null);
 }
 
-// spec: diagram/render - Puts the Overview silhouette first and selects it by default
-test "renderTabs prepends a default-checked Overview tab" {
-    // Real blocks carry a card slug; that's what makes the Overview non-empty.
-    var mcu = mkNode("MCU");
-    mcu.slug = "mcu";
-    mcu.category = .mcu;
-    var sensor = mkNode("Sensor");
-    sensor.slug = "sensor";
-    sensor.category = .sensor;
-    var nodes = [_]types.Node{ mcu, sensor };
+// spec: diagram/render - Puts the combined System view first and selects it by default
+test "renderTabs prepends a default-checked System tab" {
+    var nodes = [_]types.Node{ mkNode("MCU"), mkNode("Sensor") };
     var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "I2C_SDA" }};
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     try renderTabs(testing.allocator, &graph, &aw.writer);
     const out = aw.written();
-    // Overview is present and is the default-checked radio…
-    try testing.expect(std.mem.indexOf(u8, out, "id=\"dg-tab-overview\" class=\"dg-radio\" checked") != null);
+    // System is present and is the default-checked radio…
+    try testing.expect(std.mem.indexOf(u8, out, "id=\"dg-tab-system\" class=\"dg-radio\" checked") != null);
     // …the signal view is not also checked (single default)…
     try testing.expect(std.mem.indexOf(u8, out, "id=\"dg-tab-control\" class=\"dg-radio\" checked") == null);
-    // …and the Overview tab label precedes the Control tab label.
-    const ov_label = std.mem.indexOf(u8, out, ">Overview</label>").?;
+    // …and the System tab label precedes the Control tab label.
+    const sys_label = std.mem.indexOf(u8, out, ">System</label>").?;
     const ctrl_label = std.mem.indexOf(u8, out, ">Control</label>").?;
-    try testing.expect(ov_label < ctrl_label);
+    try testing.expect(sys_label < ctrl_label);
+}
+
+// spec: diagram/render - System view draws every class's edges at once, colored by class, with a class legend
+test "renderTabs System view combines all classes color-coded with a legend" {
+    // A power net and a control net between the same two blocks: the System
+    // view shows both, each wire in its own class color, plus a class legend.
+    var nodes = [_]types.Node{ mkNode("REG"), mkNode("MCU"), mkNode("Sensor") };
+    var edges = [_]types.Edge{
+        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "V3P3", .voltage = 3.3 },
+        .{ .from = 1, .to = 2, .class = types.CLASS_CONTROL, .label = "I2C" },
+    };
+    var graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try renderTabs(testing.allocator, &graph, &aw.writer);
+    const out = aw.written();
+    // Scope to the System panel (first panel, before the Power panel).
+    const sys = out[std.mem.lastIndexOf(u8, out, "dg-panel-system").?..std.mem.lastIndexOf(u8, out, "dg-panel-power").?];
+    // Power wire painted red, control wire painted blue — the class colors.
+    try testing.expect(std.mem.indexOf(u8, sys, "stroke=\"#da3633\"") != null);
+    try testing.expect(std.mem.indexOf(u8, sys, "stroke=\"#388bfd\"") != null);
+    // A class legend naming both signal types.
+    try testing.expect(std.mem.indexOf(u8, sys, "dg-legend") != null);
+    try testing.expect(std.mem.indexOf(u8, sys, "Power") != null);
+    try testing.expect(std.mem.indexOf(u8, sys, "Control") != null);
 }

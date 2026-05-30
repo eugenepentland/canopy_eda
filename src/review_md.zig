@@ -53,7 +53,7 @@ pub fn renderToMarkdown(
     try w.writeAll("<style>\n");
     try w.writeAll(render_html.STATIC_SVG_CSS);
     try w.writeAll("\n");
-    try w.writeAll(block_diagram.OVERVIEW_CSS);
+    try w.writeAll(block_diagram.DIAGRAM_CSS);
     try w.writeAll("\n</style>\n\n");
 
     try writeSummary(w, doc.summary);
@@ -101,7 +101,7 @@ fn writeSystemDiagram(allocator: Allocator, w: anytype, block: *const DesignBloc
     // ArrayList writer through a scratch Allocating buffer.
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    try block_diagram.renderOverviewSvg(allocator, block, sub_attachments, &aw.writer);
+    try block_diagram.renderSystemSvg(allocator, block, sub_attachments, &aw.writer);
     try w.writeAll(aw.written());
     try w.writeAll("\n\n");
 }

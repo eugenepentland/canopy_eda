@@ -91,7 +91,7 @@ const Chain = struct { verts: []u32, eidx: usize, arrow_at_start: bool };
 pub fn computeLayout(arena: Allocator, graph: *const Graph, view: ClassId) Allocator.Error!?Layout {
     if (view == types.CLASS_POWER) return powerLayout(arena, graph);
 
-    // 1. Filter edges to this view + collect participating nodes.
+    // Filter edges to this view + collect participating nodes.
     var local_of = std.AutoHashMapUnmanaged(u32, u32){};
     var gids: std.ArrayListUnmanaged(u32) = .empty;
     var raw: std.ArrayListUnmanaged(RawEdge) = .empty;
@@ -103,32 +103,78 @@ pub fn computeLayout(arena: Allocator, graph: *const Graph, view: ClassId) Alloc
         try raw.append(arena, .{ .from_l = fl, .to_l = tl, .eidx = eidx });
     }
     if (raw.items.len == 0) return null;
-    const m: u32 = @intCast(gids.items.len);
+    return try layeredLayout(arena, graph, gids.items, raw.items);
+}
 
-    // 2. Cycle break → effective DAG; 3. longest-path ranks.
-    const reversed = try breakCycles(arena, m, raw.items);
-    const rank = try assignRanks(arena, m, raw.items, reversed);
+/// True for a real on-page block (it has a card slug). Synthesised endpoints
+/// (antennas / crystals) carry no slug; they still join the System view when
+/// an edge reaches them, but never seed it as isolated boxes.
+fn isBlock(n: types.Node) bool {
+    return n.slug.len > 0 and !n.is_boundary;
+}
+
+/// True when the combined System view has anything to draw — any inter-block
+/// edge, or (failing that) any real block to show as a box.
+pub fn hasSystemView(graph: *const Graph) bool {
+    if (graph.edges.len > 0) return true;
+    for (graph.nodes) |n| if (isBlock(n)) return true;
+    return false;
+}
+
+/// The combined **System** view: one layered block diagram over *every* signal
+/// class at once (each edge keeps its own class, so the renderer can color it).
+/// Shows every block that participates in a connection. When the design has no
+/// inter-block edge at all, it falls back to the real blocks as isolated boxes
+/// so the view isn't blank. Returns null only when there is nothing to draw.
+pub fn computeSystemLayout(arena: Allocator, graph: *const Graph) Allocator.Error!?Layout {
+    var local_of = std.AutoHashMapUnmanaged(u32, u32){};
+    var gids: std.ArrayListUnmanaged(u32) = .empty;
+    var raw: std.ArrayListUnmanaged(RawEdge) = .empty;
+    for (graph.edges, 0..) |e, eidx| {
+        const fl = try internNode(arena, &local_of, &gids, e.from);
+        const tl = try internNode(arena, &local_of, &gids, e.to);
+        if (fl == tl) continue;
+        try raw.append(arena, .{ .from_l = fl, .to_l = tl, .eidx = eidx });
+    }
+    if (raw.items.len == 0) {
+        for (graph.nodes, 0..) |n, i| {
+            if (isBlock(n)) _ = try internNode(arena, &local_of, &gids, @intCast(i));
+        }
+        if (gids.items.len == 0) return null;
+    }
+    return try layeredLayout(arena, graph, gids.items, raw.items);
+}
+
+/// The shared layered/Sugiyama pipeline: cycle-break → longest-path ranks →
+/// crossing reduction → coordinate assignment → orthogonal routing. `gids` is
+/// the participating node set; `raw` the edges among them (local indices).
+fn layeredLayout(arena: Allocator, graph: *const Graph, gids: []const u32, raw: []const RawEdge) Allocator.Error!Layout {
+    const m: u32 = @intCast(gids.len);
+
+    // Cycle break → effective DAG; longest-path ranks.
+    const reversed = try breakCycles(arena, m, raw);
+    const rank = try assignRanks(arena, m, raw, reversed);
     var max_rank: u32 = 0;
     for (rank) |r| max_rank = @max(max_rank, r);
 
-    // 4. Vertices (reals + dummies) and per-edge waypoint chains, bucketed
-    //    into layers.
+    // Vertices (reals + dummies) and per-edge waypoint chains, bucketed into
+    // layers.
     var verts: std.ArrayListUnmanaged(Vertex) = .empty;
-    for (gids.items, 0..) |gid, i| try verts.append(arena, .{ .is_dummy = false, .gid = gid, .rank = rank[i], .h = node_h });
+    for (gids, 0..) |gid, i| try verts.append(arena, .{ .is_dummy = false, .gid = gid, .rank = rank[i], .h = node_h });
     var layers = try arena.alloc(std.ArrayListUnmanaged(u32), max_rank + 1);
     for (layers) |*l| l.* = .empty;
     for (0..m) |i| try layers[rank[i]].append(arena, @intCast(i));
 
-    const chains = try buildChains(arena, raw.items, rank, &verts, layers);
+    const chains = try buildChains(arena, raw, rank, &verts, layers);
 
-    // 5. Crossing reduction + 6. coordinates.
+    // Crossing reduction + coordinates.
     try orderLayers(arena, verts.items, layers, chains);
     const dims = try assignCoords(arena, verts.items, layers, chains);
 
-    // 7. Routing + materialise nodes.
+    // Routing + materialise nodes.
     const routes = try routeChains(arena, graph, verts.items, rank, chains, max_rank);
     const nodes = try arena.alloc(LNode, m);
-    for (0..m) |i| nodes[i] = .{ .gid = gids.items[i], .x = colX(verts.items[i].rank), .y = verts.items[i].y };
+    for (0..m) |i| nodes[i] = .{ .gid = gids[i], .x = colX(verts.items[i].rank), .y = verts.items[i].y };
 
     return .{ .nodes = nodes, .routes = routes, .width = dims.w, .height = dims.h };
 }
@@ -1124,4 +1170,54 @@ test "computeLayout folds a same-voltage filter stage" {
     }
     try testing.expectEqual(@as(usize, 1), regs);
     try testing.expect(has5bucket);
+}
+
+fn mkBlock(label: []const u8, slug: []const u8) types.Node {
+    return .{ .label = label, .subtitle = "", .category = .peripheral, .slug = slug, .inputs = &.{}, .outputs = &.{} };
+}
+
+// spec: diagram/layout - System layout combines edges from every class in one diagram
+test "computeSystemLayout includes edges of all classes at once" {
+    var nodes = [_]types.Node{ mkNode("A"), mkNode("B"), mkNode("C") };
+    var edges = [_]types.Edge{
+        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "v", .voltage = 3.3 },
+        .{ .from = 1, .to = 2, .class = types.CLASS_CLOCK, .label = "clk" },
+    };
+    const graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeSystemLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), lay.routes.len);
+    var has_power = false;
+    var has_clock = false;
+    for (lay.routes) |r| {
+        if (r.class == types.CLASS_POWER) has_power = true;
+        if (r.class == types.CLASS_CLOCK) has_clock = true;
+    }
+    try testing.expect(has_power and has_clock);
+}
+
+// spec: diagram/layout - Falls back to isolated block boxes when there are no connections
+test "computeSystemLayout shows isolated blocks when there are no edges" {
+    var nodes = [_]types.Node{ mkBlock("Block A", "a"), mkBlock("Block B", "b") };
+    const graph = Graph{ .nodes = &nodes, .edges = &.{} };
+    try testing.expect(hasSystemView(&graph));
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeSystemLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), lay.nodes.len);
+    try testing.expectEqual(@as(usize, 0), lay.routes.len);
+}
+
+// spec: diagram/layout - Omits an unconnected block from the System view when edges exist
+test "computeSystemLayout omits an unconnected block when edges exist" {
+    var nodes = [_]types.Node{ mkBlock("A", "a"), mkBlock("B", "b"), mkBlock("Lonely", "lonely") };
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "x" }};
+    const graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeSystemLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    // Only the two connected blocks are placed; the lonely one (gid 2) is omitted.
+    try testing.expectEqual(@as(usize, 2), lay.nodes.len);
+    for (lay.nodes) |n| try testing.expect(n.gid != 2);
 }
