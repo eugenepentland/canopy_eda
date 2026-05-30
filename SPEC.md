@@ -267,6 +267,7 @@ Public functions: buildFunctionGraph
 
 - Auto-groups undeclared sections by category into functional blocks
 - Declared (function …) groups claim their member sections by name
+- Function blocks list their cleaned member part labels
 - A signal link outranks a power link when subsystems share both
 
 ## diagram/diagram

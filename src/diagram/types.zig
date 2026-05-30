@@ -101,6 +101,12 @@ pub const Node = struct {
     /// than a real on-board block. Rendered with a dashed border; its `label`
     /// is owned and freed by `Graph.deinit`.
     is_boundary: bool = false,
+    /// For a coarsened **Function**-view super-node: the cleaned labels of the
+    /// member blocks it rolled up (RP2350, the two DUT connectors, …), listed
+    /// inside the box so the high-level view still names its key parts. Empty
+    /// for ordinary nodes. Owned by the Function graph's arena (never
+    /// `Graph.deinit`-ed), so `deinit` ignores it.
+    members: []const []const u8 = &.{},
 };
 
 /// A directed inter-block connection. `from` is the driver/producer side so

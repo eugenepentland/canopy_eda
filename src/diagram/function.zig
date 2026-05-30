@@ -91,6 +91,41 @@ fn pickClass(existing: types.ClassId, new: types.ClassId) types.ClassId {
     return existing;
 }
 
+/// The leading word of `s` (up to the first space), or all of `s`.
+fn firstWord(s: []const u8) []const u8 {
+    const sp = std.mem.indexOfScalar(u8, s, ' ') orelse s.len;
+    return s[0..sp];
+}
+
+/// Shorten a member block label for the in-box parts list: drop a trailing
+/// "(part number)" parenthetical, and a leading word it shares with the group
+/// name (so "DUT Fixture Connector" reads as "Fixture Connector" inside the
+/// "DUT Interface" block). Returns a slice borrowed from `label`.
+fn cleanMember(group_name: []const u8, label: []const u8) []const u8 {
+    var s = label;
+    if (std.mem.indexOf(u8, s, " (")) |p| s = s[0..p];
+    const fw = firstWord(group_name);
+    if (fw.len == 0 or s.len <= fw.len + 1) return s;
+    if (s[fw.len] != ' ') return s;
+    if (!std.ascii.eqlIgnoreCase(s[0..fw.len], fw)) return s;
+    const rest = s[fw.len + 1 ..];
+    // Don't strip if it would leave a dangling fragment ("Bring-up & Debug" must
+    // not become "& Debug") — keep the original unless a real word follows.
+    if (rest.len == 0 or !std.ascii.isAlphanumeric(rest[0])) return s;
+    return rest;
+}
+
+/// True when `s` is substring-related to a label already in `list` — used to
+/// dedup the parts list so a section and the sub-block inside it (e.g.
+/// "ESP32-S3 UI" and "ESP32-S3 UI Co-processor") collapse to one entry.
+fn relatedLabel(list: []const []const u8, s: []const u8) bool {
+    for (list) |x| {
+        if (ciContains(x, s)) return true;
+        if (ciContains(s, x)) return true;
+    }
+    return false;
+}
+
 /// Build the coarsened Function graph from the detailed connectivity `g` and
 /// the design's declared `(function …)` groups. Returns null when there's
 /// nothing to coarsen or it collapses to fewer than two blocks (then the
@@ -123,6 +158,18 @@ pub fn buildFunctionGraph(arena: Allocator, block: *const env_mod.DesignBlock, g
         votes[group_of[i]][@intFromEnum(n.category)] += 1;
     }
 
+    // Collect each group's member labels (cleaned + deduped, in node order) so
+    // the super-node can list its key parts.
+    const group_name = try arena.alloc([]const u8, ngroup);
+    for (0..ngroup) |gi| group_name[gi] = if (gi < ndecl) funcs[gi].name else auto.items[gi - ndecl].name;
+    const mlist = try arena.alloc(std.ArrayListUnmanaged([]const u8), ngroup);
+    for (mlist) |*m| m.* = .empty;
+    for (g.nodes, 0..) |n, i| {
+        const gi = group_of[i];
+        const cleaned = cleanMember(group_name[gi], n.label);
+        if (!relatedLabel(mlist[gi].items, cleaned)) try mlist[gi].append(arena, cleaned);
+    }
+
     // Materialise the surviving (non-empty) groups as super-nodes.
     const final_of = try arena.alloc(i32, ngroup);
     var nodes: std.ArrayListUnmanaged(Node) = .empty;
@@ -132,7 +179,9 @@ pub fn buildFunctionGraph(arena: Allocator, block: *const env_mod.DesignBlock, g
             continue;
         }
         final_of[gi] = @intCast(nodes.items.len);
-        try nodes.append(arena, superNode(funcs, auto.items, ndecl, gi, &votes[gi]));
+        var node = superNode(funcs, auto.items, ndecl, gi, &votes[gi]);
+        node.members = try mlist[gi].toOwnedSlice(arena);
+        try nodes.append(arena, node);
     }
     if (nodes.items.len < 2) return null;
 
@@ -266,6 +315,29 @@ test "buildFunctionGraph honors a declared function group" {
     // The control edge MCU→DMM survives as one super-edge between the 2 blocks.
     try testing.expectEqual(@as(usize, 1), fg.edges.len);
     try testing.expectEqual(types.CLASS_CONTROL, fg.edges[0].class);
+}
+
+// spec: diagram/function - Function blocks list their cleaned member part labels
+test "buildFunctionGraph lists cleaned member parts" {
+    var nodes = [_]Node{
+        tNode("DUT Fixture Connector", .connector),
+        tNode("DUT Bench Header", .connector),
+        tNode("STM32 Core", .mcu),
+    };
+    var edges = [_]Edge{.{ .from = 2, .to = 0, .class = types.CLASS_CONTROL, .label = "IO" }};
+    const g = Graph{ .nodes = &nodes, .edges = &edges };
+    var includes = [_][]const u8{"DUT"};
+    var funcs = [_]env_mod.FunctionGroup{.{ .name = "DUT Interface", .verb = "talks to the DUT", .includes = &includes }};
+    var block = empty_block;
+    block.functions = &funcs;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const fg = (try buildFunctionGraph(arena.allocator(), &block, &g)) orelse return error.TestUnexpectedResult;
+    // The DUT block lists its two connectors, with the shared "DUT" prefix dropped.
+    try testing.expectEqualStrings("DUT Interface", fg.nodes[0].label);
+    try testing.expectEqual(@as(usize, 2), fg.nodes[0].members.len);
+    try testing.expectEqualStrings("Fixture Connector", fg.nodes[0].members[0]);
+    try testing.expectEqualStrings("Bench Header", fg.nodes[0].members[1]);
 }
 
 // spec: diagram/function - A signal link outranks a power link when subsystems share both
