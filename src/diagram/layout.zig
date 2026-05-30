@@ -209,6 +209,10 @@ pub fn computeSystemLayout(arena: Allocator, graph: *const Graph) Allocator.Erro
     for (raw_stage, 0..) |s, i| ranks[i] = col_of_stage[s];
 
     var lay = try layeredLayout(arena, graph, gids.items, raw.items, ranks);
+    // The layered pipeline ordered the columns well, but its left→right lane
+    // routing loops same-column edges and crosses boxes on long hops. Re-route
+    // every edge from the side of its source nearest the target (`routeSystemEdges`).
+    lay.routes = try routeSystemEdges(arena, graph, lay.nodes, lay.height);
     // Reserve a header strip above the columns and hang the band labels off it.
     for (lay.nodes) |*n| n.y += band_h;
     for (lay.routes) |r| for (r.pts) |*p| {
@@ -217,6 +221,208 @@ pub fn computeSystemLayout(arena: Allocator, graph: *const Graph) Allocator.Erro
     lay.height += band_h;
     lay.stage_labels = try col_label.toOwnedSlice(arena);
     return lay;
+}
+
+// ── System view: side-aware orthogonal edge routing ─────────────────────
+//
+// The stage layout fixes each block's column, so connected blocks routinely sit
+// in the *same* column (a rail above its PSU) or several columns apart (power
+// feeding a far peripheral). A single right→left anchor then loops a same-column
+// edge out into the gap and back, or drags a long hop straight across the boxes
+// between its endpoints. Instead, attach each edge to the face of its source
+// nearest the target and the matching face of the target:
+//   - same column      → exit bottom/top into the facing top/bottom (a short
+//     vertical); if a block sits between them, hop into the right-hand gap lane
+//     and back (a ⊐) so nothing is crossed;
+//   - adjacent columns → exit right/left, one jog in the gap, enter the facing side;
+//   - columns apart     → exit into the first gap, cross in a *free* horizontal
+//     band (clear of every block in the columns between), drop into the gap
+//     before the target, enter its facing side.
+// Ports fan out along each face so edges sharing a side read as a comb.
+
+// Which face of a box an edge attaches to.
+const side_r: u8 = 0;
+const side_l: u8 = 1;
+const side_t: u8 = 2;
+const side_b: u8 = 3;
+
+/// One placed edge resolved to its attachment geometry: endpoint graph ids, the
+/// face each end attaches to, and the columns the two endpoints sit in.
+const SideEdge = struct { eidx: usize, from: u32, to: u32, ss: u8, ts: u8, cs: u32, ct: u32 };
+
+fn colLeftX(col: u32) f64 {
+    return pad + @as(f64, @floatFromInt(col)) * (node_w + h_gap);
+}
+fn colRightX(col: u32) f64 {
+    return colLeftX(col) + node_w;
+}
+fn colOf(x: f64) u32 {
+    return @intFromFloat(@round((x - pad) / (node_w + h_gap)));
+}
+fn absDiff(a: u32, b: u32) u32 {
+    return if (a > b) a - b else b - a;
+}
+
+/// A port point on the box with top-left `(bx,by)`: `side` picks the face,
+/// `frac` the position along it (so a fanned bundle spreads instead of stacking).
+fn portPoint(bx: f64, by: f64, side: u8, frac: f64) Pt {
+    if (side == side_r) return .{ .x = bx + node_w, .y = by + frac * node_h };
+    if (side == side_l) return .{ .x = bx, .y = by + frac * node_h };
+    if (side == side_t) return .{ .x = bx + frac * node_w, .y = by };
+    return .{ .x = bx + frac * node_w, .y = by + node_h };
+}
+
+fn portFrac(idx: u16, cnt: u16) f64 {
+    return (@as(f64, @floatFromInt(idx)) + 1) / (@as(f64, @floatFromInt(cnt)) + 1);
+}
+
+/// True when another box in the same column sits vertically between the two
+/// box tops `fy`/`ty` — so a straight vertical edge between them would cross it.
+fn blockedVert(tops: []const f64, fy: f64, ty: f64) bool {
+    const lo = @min(fy, ty);
+    const hi = @max(fy, ty);
+    for (tops) |o| if (o > lo + 1 and o < hi - 1) return true;
+    return false;
+}
+
+/// True when horizontal line `y` would clip any box in columns `lo_col..hi_col`
+/// (a small margin keeps the run off box edges).
+fn bandBlocked(col_tops: []const std.ArrayListUnmanaged(f64), lo_col: u32, hi_col: u32, y: f64) bool {
+    var c = lo_col;
+    while (c <= hi_col) : (c += 1) {
+        for (col_tops[c].items) |t| if (y > t - band_clear and y < t + node_h + band_clear) return true;
+    }
+    return false;
+}
+
+const band_clear: f64 = 14; // vertical margin a cross-column run keeps off a box
+
+/// A horizontal-run y clear of every box in the spanned middle columns, as close
+/// to `preferred` as possible (so a long edge crosses through a gap between
+/// block rows, not over them). Falls back to `preferred` if nothing is free.
+fn freeBandY(col_tops: []const std.ArrayListUnmanaged(f64), lo_col: u32, hi_col: u32, preferred: f64, lo: f64, hi: f64) f64 {
+    if (!bandBlocked(col_tops, lo_col, hi_col, preferred)) return preferred;
+    var d: f64 = 10;
+    while (d < hi - lo) : (d += 10) {
+        const dn = preferred + d;
+        const up = preferred - d;
+        if (dn <= hi and !bandBlocked(col_tops, lo_col, hi_col, dn)) return dn;
+        if (up >= lo and !bandBlocked(col_tops, lo_col, hi_col, up)) return up;
+    }
+    return preferred;
+}
+
+/// Build the orthogonal polyline for one resolved edge: vertical for a
+/// same-column hop, a single gap jog for adjacent columns, a free-band staircase
+/// for columns apart. `content_h` bounds the free-band search.
+fn buildSidePts(arena: Allocator, col_tops: []const std.ArrayListUnmanaged(f64), se: SideEdge, sp: Pt, tp: Pt, content_h: f64) Allocator.Error![]Pt {
+    var pts: std.ArrayListUnmanaged(Pt) = .empty;
+    try pts.append(arena, sp);
+    if (se.cs == se.ct) {
+        if (se.ss == side_r) {
+            // Blocked vertical: ⊐ out into the right-hand gap and back.
+            const lanex = colRightX(se.cs) + h_gap * 0.45;
+            try pts.append(arena, .{ .x = lanex, .y = sp.y });
+            try pts.append(arena, .{ .x = lanex, .y = tp.y });
+        } else {
+            const midy = (sp.y + tp.y) / 2;
+            try pts.append(arena, .{ .x = sp.x, .y = midy });
+            try pts.append(arena, .{ .x = tp.x, .y = midy });
+        }
+    } else if (absDiff(se.cs, se.ct) == 1) {
+        const jx = (sp.x + tp.x) / 2;
+        try pts.append(arena, .{ .x = jx, .y = sp.y });
+        try pts.append(arena, .{ .x = jx, .y = tp.y });
+    } else {
+        const right = se.ct > se.cs;
+        const jx1 = if (right) colRightX(se.cs) + h_gap * 0.5 else colLeftX(se.cs) - h_gap * 0.5;
+        const jx2 = if (right) colLeftX(se.ct) - h_gap * 0.5 else colRightX(se.ct) + h_gap * 0.5;
+        const lo_col = @min(se.cs, se.ct) + 1;
+        const hi_col = @max(se.cs, se.ct) - 1;
+        const band = freeBandY(col_tops, lo_col, hi_col, tp.y, pad, content_h - pad);
+        try pts.append(arena, .{ .x = jx1, .y = sp.y });
+        try pts.append(arena, .{ .x = jx1, .y = band });
+        try pts.append(arena, .{ .x = jx2, .y = band });
+        try pts.append(arena, .{ .x = jx2, .y = tp.y });
+    }
+    try pts.append(arena, tp);
+    return pts.toOwnedSlice(arena);
+}
+
+/// Re-route every System/Function edge from the box face nearest its target
+/// (see the section header above). Replaces the layered pipeline's left→right
+/// lane routes with side-aware orthogonal paths over the final box geometry.
+fn routeSystemEdges(arena: Allocator, graph: *const Graph, nodes: []const LNode, content_h: f64) Allocator.Error![]Route {
+    const n = graph.nodes.len;
+    const present = try arena.alloc(bool, n);
+    @memset(present, false);
+    const nx = try arena.alloc(f64, n);
+    const ny = try arena.alloc(f64, n);
+    var maxcol: u32 = 0;
+    for (nodes) |ln| {
+        present[ln.gid] = true;
+        nx[ln.gid] = ln.x;
+        ny[ln.gid] = ln.y;
+        maxcol = @max(maxcol, colOf(ln.x));
+    }
+    const col_tops = try arena.alloc(std.ArrayListUnmanaged(f64), maxcol + 1);
+    for (col_tops) |*c| c.* = .empty;
+    for (nodes) |ln| try col_tops[colOf(ln.x)].append(arena, ln.y);
+
+    // Pass 1: resolve each placed edge to its attachment faces and tally the
+    // per-(box,face) fanout so the ports can spread.
+    var edges_l: std.ArrayListUnmanaged(SideEdge) = .empty;
+    const side_n = try arena.alloc(u16, n * 4);
+    @memset(side_n, 0);
+    for (graph.edges, 0..) |e, eidx| {
+        if (e.from == e.to) continue;
+        if (!present[e.from] or !present[e.to]) continue;
+        const cs = colOf(nx[e.from]);
+        const ct = colOf(nx[e.to]);
+        var ss: u8 = side_r;
+        var ts: u8 = side_l;
+        if (cs == ct) {
+            if (blockedVert(col_tops[cs].items, ny[e.from], ny[e.to])) {
+                ss = side_r;
+                ts = side_r;
+            } else {
+                const down = ny[e.to] > ny[e.from];
+                ss = if (down) side_b else side_t;
+                ts = if (down) side_t else side_b;
+            }
+        } else if (ct < cs) {
+            ss = side_l;
+            ts = side_r;
+        }
+        try edges_l.append(arena, .{ .eidx = eidx, .from = e.from, .to = e.to, .ss = ss, .ts = ts, .cs = cs, .ct = ct });
+        side_n[e.from * 4 + ss] += 1;
+        side_n[e.to * 4 + ts] += 1;
+    }
+
+    // Pass 2: build the routed polyline for each, spreading ports by face index.
+    const side_i = try arena.alloc(u16, n * 4);
+    @memset(side_i, 0);
+    const routes = try arena.alloc(Route, edges_l.items.len);
+    for (edges_l.items, 0..) |se, ri| {
+        const sk = se.from * 4 + se.ss;
+        const tk = se.to * 4 + se.ts;
+        const sp = portPoint(nx[se.from], ny[se.from], se.ss, portFrac(side_i[sk], side_n[sk]));
+        const tp = portPoint(nx[se.to], ny[se.to], se.ts, portFrac(side_i[tk], side_n[tk]));
+        side_i[sk] += 1;
+        side_i[tk] += 1;
+        const e = graph.edges[se.eidx];
+        routes[ri] = .{
+            .from_gid = e.from,
+            .to_gid = e.to,
+            .class = e.class,
+            .label = e.label,
+            .voltage = e.voltage,
+            .fanout = e.fanout,
+            .pts = try buildSidePts(arena, col_tops, se, sp, tp, content_h),
+            .arrow_at_start = false,
+        };
+    }
+    return routes;
 }
 
 /// The shared layered/Sugiyama pipeline: cycle-break → longest-path ranks →
@@ -1305,6 +1511,45 @@ test "computeSystemLayout stages blocks power→core→peripheral left to right"
     try testing.expectEqual(@as(u32, 2), lay.nodes[2].gid);
     try testing.expect(lay.nodes[0].x < lay.nodes[1].x);
     try testing.expect(lay.nodes[1].x < lay.nodes[2].x);
+}
+
+// spec: diagram/layout - Attaches a same-column edge to a vertical face so it does not loop into the gap
+test "computeSystemLayout routes a same-column edge on a vertical face" {
+    // Two peripherals share a stage (column); the edge between them must attach
+    // top/bottom and arrive vertically, not loop out into the column gap.
+    var nodes = [_]types.Node{ mkNode("A"), mkNode("B") };
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "x" }};
+    const graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeSystemLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), lay.routes.len);
+    const pts = lay.routes[0].pts;
+    const last = pts.len - 1;
+    // The final segment is vertical: it shares an x with the prior waypoint.
+    try testing.expectApproxEqAbs(pts[last].x, pts[last - 1].x, 0.5);
+    // The source port sits along the box top/bottom (an x strictly inside the
+    // box), never on the right face (which would loop into the gap).
+    try testing.expect(pts[0].x < lay.nodes[0].x + node_w - 0.5);
+}
+
+// spec: diagram/layout - Attaches a cross-column edge to the source's horizontal face nearest the target
+test "computeSystemLayout routes a cross-column edge on a horizontal face" {
+    var nodes = [_]types.Node{
+        .{ .label = "Buck", .subtitle = "", .category = .power, .slug = "", .inputs = &.{}, .outputs = &.{} },
+        .{ .label = "MCU", .subtitle = "", .category = .mcu, .slug = "", .inputs = &.{}, .outputs = &.{} },
+    };
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "x" }};
+    const graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeSystemLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    const pts = lay.routes[0].pts;
+    // Power is left of core, so the source exits its right face toward the target.
+    try testing.expectApproxEqAbs(pts[0].x, lay.nodes[0].x + node_w, 0.5);
+    // The edge arrives horizontally on the target's left face.
+    const last = pts.len - 1;
+    try testing.expectApproxEqAbs(pts[last].y, pts[last - 1].y, 0.5);
 }
 
 // spec: diagram/layout - Falls back to isolated block boxes when there are no connections

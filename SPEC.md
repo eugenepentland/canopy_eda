@@ -241,6 +241,8 @@ Public functions: computeLayout, hasSystemView, computeSystemLayout
 - Treats test-point and mechanical nodes as instrumentation, excluded from load buckets
 - System layout combines edges from every class in one diagram
 - System view flows blocks by functional stage: Power → Core → Peripherals
+- Attaches a same-column edge to a vertical face so it does not loop into the gap
+- Attaches a cross-column edge to the source's horizontal face nearest the target
 - Falls back to isolated block boxes when there are no connections
 - Omits an unconnected block from the System view when edges exist
 
