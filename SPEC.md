@@ -245,6 +245,7 @@ Public functions: computeLayout, hasSystemView, computeSystemLayout
 - Attaches a cross-column edge to the source's horizontal face nearest the target
 - Falls back to isolated block boxes when there are no connections
 - Omits an unconnected block from the System view when edges exist
+- Keeps a force-shown block in the layout even when it has no edges
 
 ## diagram/render
 
@@ -270,6 +271,7 @@ Public functions: buildFunctionGraph
 - Auto-groups undeclared sections by category into functional blocks
 - Declared (function …) groups claim their member sections by name
 - Function blocks list their cleaned member part labels
+- A declared subtitle becomes the box caption and the verb the tooltip
 - A signal link outranks a power link when subsystems share both
 
 ## diagram/diagram

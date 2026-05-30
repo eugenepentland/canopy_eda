@@ -111,6 +111,17 @@ pub const Node = struct {
     /// N))`): rendered as N offset cards stacked behind the box to show "×N
     /// identical channels" (e.g. a 2-channel programmable PSU). 1 ⇒ a single box.
     stack: u8 = 1,
+    /// A Function super-node's explicit caption (the `(function …)` subtitle): a
+    /// concrete spec like "0–18 V · 3 A per channel" or a connector type, shown
+    /// in the box *instead of* the auto member-part list. Empty ⇒ show members.
+    /// The verb stays in `subtitle` as the hover tooltip. Arena-owned like
+    /// `members` (never `Graph.deinit`-ed).
+    caption: []const u8 = "",
+    /// Force this block into the System/Function layout even with no edges. Set
+    /// for a *declared* `(function …)` super-node so it shows whether or not its
+    /// members are wired (an author who declared a subsystem wants it drawn);
+    /// ordinary nodes leave it false and are omitted when isolated.
+    force_show: bool = false,
 };
 
 /// A directed inter-block connection. `from` is the driver/producer side so

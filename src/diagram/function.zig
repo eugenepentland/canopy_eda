@@ -181,6 +181,7 @@ pub fn buildFunctionGraph(arena: Allocator, block: *const env_mod.DesignBlock, g
         final_of[gi] = @intCast(nodes.items.len);
         var node = superNode(funcs, auto.items, ndecl, gi, &votes[gi]);
         node.members = try mlist[gi].toOwnedSlice(arena);
+        node.force_show = gi < ndecl; // a declared function shows even if unwired
         try nodes.append(arena, node);
     }
     if (nodes.items.len < 2) return null;
@@ -211,18 +212,20 @@ fn autoIndex(
     return ndecl + gop.value_ptr.*;
 }
 
-/// Build one super-node for group `gi`: a declared function uses its name +
-/// verb (falling back to its subtitle) and its modal member category; an auto
-/// group uses its template.
+/// Build one super-node for group `gi`: a declared function uses its name, verb
+/// (the tooltip) and its modal member category, plus an optional subtitle shown
+/// as the box caption; an auto group uses its template.
 fn superNode(funcs: []const env_mod.FunctionGroup, auto: []const Template, ndecl: usize, gi: usize, votes: *const [n_cat]u16) Node {
     var label: []const u8 = undefined;
     var verb: []const u8 = undefined;
+    var caption: []const u8 = "";
     var cat: Category = undefined;
     var stack: u8 = 1;
     if (gi < ndecl) {
         const f = funcs[gi];
         label = f.name;
-        verb = if (f.verb.len > 0) f.verb else f.subtitle;
+        verb = f.verb;
+        caption = f.subtitle; // explicit box caption (concrete spec / connector type)
         cat = modalCategory(votes);
         stack = f.stack;
     } else {
@@ -231,7 +234,7 @@ fn superNode(funcs: []const env_mod.FunctionGroup, auto: []const Template, ndecl
         verb = t.verb;
         cat = t.cat;
     }
-    return .{ .label = label, .subtitle = verb, .category = cat, .slug = "", .inputs = &.{}, .outputs = &.{}, .stack = stack };
+    return .{ .label = label, .subtitle = verb, .caption = caption, .category = cat, .slug = "", .inputs = &.{}, .outputs = &.{}, .stack = stack };
 }
 
 /// Collapse the detail edges into one super-edge per ordered (from,to) group
@@ -340,6 +343,26 @@ test "buildFunctionGraph lists cleaned member parts" {
     try testing.expectEqual(@as(usize, 2), fg.nodes[0].members.len);
     try testing.expectEqualStrings("Fixture Connector", fg.nodes[0].members[0]);
     try testing.expectEqualStrings("Bench Header", fg.nodes[0].members[1]);
+}
+
+// spec: diagram/function - A declared subtitle becomes the box caption and the verb the tooltip
+test "buildFunctionGraph uses a declared subtitle as the box caption" {
+    var nodes = [_]Node{
+        tNode("DUT Fixture Connector", .connector),
+        tNode("STM32 Core", .mcu),
+    };
+    var edges = [_]Edge{.{ .from = 1, .to = 0, .class = types.CLASS_CONTROL, .label = "IO" }};
+    const g = Graph{ .nodes = &nodes, .edges = &edges };
+    var includes = [_][]const u8{"DUT"};
+    var funcs = [_]env_mod.FunctionGroup{.{ .name = "DUT Fixture", .subtitle = "2x25 latching shroud", .verb = "logic I/O to the DUT", .includes = &includes }};
+    var block = empty_block;
+    block.functions = &funcs;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const fg = (try buildFunctionGraph(arena.allocator(), &block, &g)) orelse return error.TestUnexpectedResult;
+    // The explicit subtitle drives the box caption; the verb stays the tooltip.
+    try testing.expectEqualStrings("2x25 latching shroud", fg.nodes[0].caption);
+    try testing.expectEqualStrings("logic I/O to the DUT", fg.nodes[0].subtitle);
 }
 
 // spec: diagram/function - A signal link outranks a power link when subsystems share both

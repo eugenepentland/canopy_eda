@@ -180,7 +180,12 @@ pub fn computeSystemLayout(arena: Allocator, graph: *const Graph) Allocator.Erro
         if (fl == tl) continue;
         try raw.append(arena, .{ .from_l = fl, .to_l = tl, .eidx = eidx });
     }
-    if (raw.items.len == 0) {
+    // A declared function box is shown even with no edges (force_show), so an
+    // author-declared subsystem appears whether or not its parts are wired yet.
+    for (graph.nodes, 0..) |n, i| {
+        if (n.force_show) _ = try internNode(arena, &local_of, &gids, @intCast(i));
+    }
+    if (gids.items.len == 0) {
         for (graph.nodes, 0..) |n, i| {
             if (isBlock(n)) _ = try internNode(arena, &local_of, &gids, @intCast(i));
         }
@@ -1575,4 +1580,23 @@ test "computeSystemLayout omits an unconnected block when edges exist" {
     // Only the two connected blocks are placed; the lonely one (gid 2) is omitted.
     try testing.expectEqual(@as(usize, 2), lay.nodes.len);
     for (lay.nodes) |n| try testing.expect(n.gid != 2);
+}
+
+// spec: diagram/layout - Keeps a force-shown block in the layout even when it has no edges
+test "computeSystemLayout keeps a force-shown isolated block" {
+    var lonely = mkBlock("Declared", "declared");
+    lonely.force_show = true; // a declared function box, unwired
+    var nodes = [_]types.Node{ mkBlock("A", "a"), mkBlock("B", "b"), lonely };
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "x" }};
+    const graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeSystemLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    // All three are placed: the two wired blocks plus the force-shown one (gid 2).
+    try testing.expectEqual(@as(usize, 3), lay.nodes.len);
+    var saw_forced = false;
+    for (lay.nodes) |n| {
+        if (n.gid == 2) saw_forced = true;
+    }
+    try testing.expect(saw_forced);
 }

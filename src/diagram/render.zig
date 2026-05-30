@@ -371,17 +371,18 @@ fn writeNode(arena: Allocator, w: *Writer, node: types.Node, x: f64, y: f64) (Al
     const sub_max: usize = @max(min_sub_chars, @as(usize, @intFromFloat((layout.node_w - pad_x * 2) / sub_char_w)));
     const tx = x + pad_x;
     const ty = y + sub_y_off;
-    if (node.members.len > 0) {
-        // A Function super-node: list its key member parts (RP2350, the two DUT
-        // connectors, …) so the high-level view still names concrete hardware.
-        // Its verb ("what it does") moves to a hover tooltip.
+    if (node.caption.len > 0 or node.members.len > 0) {
+        // A Function super-node. Its verb ("what it does") moves to a hover
+        // tooltip; the box body shows the explicit caption (a concrete spec /
+        // connector type) when declared, else its key member parts (RP2350, the
+        // DUT connectors, …) so the high-level view still names real hardware.
         if (node.subtitle.len > 0) {
             try w.writeAll("<title>");
             try writeEscaped(w, node.subtitle);
             try w.writeAll("</title>");
         }
-        const joined = try std.mem.join(arena, " · ", node.members);
-        try writeSubLines(w, tx, ty, try wrapText(arena, joined, sub_max, sub_lines));
+        const body = if (node.caption.len > 0) node.caption else try std.mem.join(arena, " · ", node.members);
+        try writeSubLines(w, tx, ty, try wrapText(arena, body, sub_max, sub_lines));
     } else if (node.subtitle.len > 0) {
         try writeSubLines(w, tx, ty, try wrapText(arena, node.subtitle, sub_max, sub_lines));
     }
