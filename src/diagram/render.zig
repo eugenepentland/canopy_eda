@@ -533,25 +533,25 @@ fn writeCurveEdgeStyled(w: *Writer, r: layout.Route, color: []const u8, width: ?
     }
 }
 
-/// Draw an edge that *follows its routed waypoints* — the orthogonal path the
-/// layout placed to attach on the nearest box face and dodge box bodies —
-/// instead of a straight box-to-box Bézier. A 2-point hop falls back to the
-/// plain curve; longer routes run straight between corners with a small fixed
-/// fillet at each (`segPoint`/`corner_r`), so the wire reads as right-angle
-/// routing. The final segment meets the box square-on, so the arrowhead lands
-/// flush. Used by the stage-banded System and Function views.
+/// Draw an edge that *follows its routed waypoints* — the path the layout placed
+/// to attach on the nearest box face and dodge box bodies — as one flowing
+/// Bézier rather than a straight box-to-box curve. A 2-point hop falls back to
+/// the plain curve; longer routes run straight from the source to the first
+/// segment's midpoint, then a quadratic rounds every interior waypoint (midpoint
+/// → waypoint control → next midpoint), then straight out to the sink. Because
+/// the first and last segments are the perpendicular stubs off each box face,
+/// the curve still meets each block square-on and the arrowhead lands flush.
+/// Used by the stage-banded System and Function views.
 fn writeRoutedEdge(w: *Writer, r: layout.Route, color: []const u8, width: ?f64, opacity: ?f64) Writer.Error!void {
     const pts = r.pts;
     if (pts.len <= 2) return writeCurveEdgeStyled(w, r, color, width, opacity);
     try w.print("<path d=\"M {d:.1} {d:.1}", .{ pts[0].x, pts[0].y });
-    // Crisp orthogonal run: straight between corners, each interior corner
-    // rounded by a small fixed radius (a tiny fillet, not a sweeping curve) so a
-    // long route reads as right-angle wiring rather than a balloon.
+    const m0 = midpoint(pts[0], pts[1]);
+    try w.print(" L {d:.1} {d:.1}", .{ m0.x, m0.y });
     var i: usize = 1;
     while (i + 1 < pts.len) : (i += 1) {
-        const pin = segPoint(pts[i], pts[i - 1], corner_r); // back off toward the prev pt
-        const pout = segPoint(pts[i], pts[i + 1], corner_r); // step toward the next pt
-        try w.print(" L {d:.1} {d:.1} Q {d:.1} {d:.1}, {d:.1} {d:.1}", .{ pin.x, pin.y, pts[i].x, pts[i].y, pout.x, pout.y });
+        const m = midpoint(pts[i], pts[i + 1]);
+        try w.print(" Q {d:.1} {d:.1}, {d:.1} {d:.1}", .{ pts[i].x, pts[i].y, m.x, m.y });
     }
     try w.print(" L {d:.1} {d:.1}\" class=\"dg-edge\" stroke=\"{s}\"", .{ pts[pts.len - 1].x, pts[pts.len - 1].y, color });
     if (width) |sw| try w.print(" stroke-width=\"{d:.1}\"", .{sw});
@@ -560,17 +560,8 @@ fn writeRoutedEdge(w: *Writer, r: layout.Route, color: []const u8, width: ?f64, 
     if (opacity == null) try writeDot(w, pts[0], color); // source dot; arrowhead marks the sink
 }
 
-const corner_r: f64 = 9; // fixed corner fillet radius for routed orthogonal edges
-
-/// The point a distance `d` (capped at half the segment) from `from` toward
-/// `to` — used to back a routed corner off to each side for a small fillet.
-fn segPoint(from: types.Pt, to: types.Pt, d: f64) types.Pt {
-    const dx = to.x - from.x;
-    const dy = to.y - from.y;
-    const len = @sqrt(dx * dx + dy * dy);
-    if (len < 0.001) return from;
-    const t = @min(d, len / 2) / len;
-    return .{ .x = from.x + dx * t, .y = from.y + dy * t };
+fn midpoint(a: types.Pt, b: types.Pt) types.Pt {
+    return .{ .x = (a.x + b.x) / 2, .y = (a.y + b.y) / 2 };
 }
 
 /// Draws the power supply tree: rail-colored wires first, then the source /
