@@ -125,19 +125,57 @@ fn renderSystemBody(arena: Allocator, w: *Writer, graph: *const Graph, lay: layo
     try w.writeAll("</svg>");
 }
 
+// System view: power wires are drawn thin + faint so the (usually sparser)
+// signal flow reads clearly on top of the dense power-distribution fan.
+const sys_power_width: f64 = 1.1;
+const sys_power_opacity: f64 = 0.35;
+const sys_arrow_sz: f64 = 13; // signal-edge arrowhead size (px)
+
 /// Draw the combined view: every wire colored by *its* signal class (not a
-/// single view accent), every block as a box, then the net labels last so they
-/// stay legible over crossings. Block boxes carry their category color (what a
-/// block *is*); wires carry their class color (what a connection *carries*).
+/// single view accent), every block as a box, signal arrowheads showing flow
+/// direction, then the signal-net labels last so they stay legible over
+/// crossings. Block boxes carry their category color (what a block *is*); wires
+/// carry their class color (what a connection *carries*). Power wires recede
+/// (thin/faint, undirected, unlabeled) — the rail fan is the main clutter and
+/// its voltages live in the focused Power tab.
 fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout) (Allocator.Error || Writer.Error)!void {
-    for (lay.routes) |r| try writeCurveEdge(w, r, classColor(graph, r.class));
+    for (lay.routes) |r| {
+        const color = classColor(graph, r.class);
+        if (r.class == types.CLASS_POWER) {
+            try writeCurveEdgeStyled(w, r, color, sys_power_width, sys_power_opacity);
+        } else {
+            try writeCurveEdge(w, r, color);
+        }
+    }
     for (lay.nodes) |n| try writeNode(arena, w, graph.nodes[n.gid], n.x, n.y);
+    // Arrowheads after the boxes so they sit on top of the block border and
+    // read as "drives into this block". Signal edges only.
+    for (lay.routes) |r| {
+        if (r.class == types.CLASS_POWER) continue;
+        try writeArrowhead(w, r, classColor(graph, r.class));
+    }
     var labeled: std.StringHashMapUnmanaged(void) = .empty;
     for (lay.routes) |r| {
+        if (r.class == types.CLASS_POWER) continue;
         const key = try std.fmt.allocPrint(arena, "{d}|{s}", .{ r.from_gid, r.label });
         if ((try labeled.getOrPut(arena, key)).found_existing) continue;
         try writeEdgeLabel(arena, w, r, classColor(graph, r.class));
     }
+}
+
+/// A filled triangle at the edge's destination end, pointing into the driven
+/// block, so the System view shows signal-flow direction. The tip sits where
+/// the wire meets the box; the base backs off toward the wire.
+fn writeArrowhead(w: *Writer, r: layout.Route, color: []const u8) Writer.Error!void {
+    const last = r.pts.len - 1;
+    const tip = if (r.arrow_at_start) r.pts[0] else r.pts[last];
+    const nb = if (r.arrow_at_start) r.pts[last] else r.pts[0];
+    const dir: f64 = if (tip.x >= nb.x) 1 else -1; // box lies beyond the tip
+    const bx = tip.x - dir * sys_arrow_sz;
+    try w.print(
+        "<path d=\"M {d:.1} {d:.1} L {d:.1} {d:.1} L {d:.1} {d:.1} Z\" fill=\"{s}\"/>",
+        .{ tip.x, tip.y, bx, tip.y - sys_arrow_sz * 0.55, bx, tip.y + sys_arrow_sz * 0.55, color },
+    );
 }
 
 /// The accent color for a class id, guarding against an out-of-range id.
@@ -358,17 +396,29 @@ const edge_dot_r: f64 = 2.4; // terminal dot radius at each edge end
 /// used by the power supply tree and the clock fanout. Safe for adjacent-column
 /// hops (the routed waypoints in between are ignored).
 fn writeCurveEdge(w: *Writer, r: layout.Route, color: []const u8) Writer.Error!void {
+    try writeCurveEdgeStyled(w, r, color, null, null);
+}
+
+/// Like `writeCurveEdge`, but with an optional explicit stroke `width` and
+/// `opacity` (null ⇒ inherit the `.dg-edge` CSS default). The System view uses
+/// this to draw power wires thin and faint so the signal flow reads on top.
+fn writeCurveEdgeStyled(w: *Writer, r: layout.Route, color: []const u8, width: ?f64, opacity: ?f64) Writer.Error!void {
     const a = r.pts[0];
     const b = r.pts[r.pts.len - 1];
     const ddx = b.x - a.x;
     const c1x = a.x + ddx * curve_swing;
     const c2x = b.x - ddx * curve_swing;
     try w.print(
-        "<path d=\"M {d:.1} {d:.1} C {d:.1} {d:.1}, {d:.1} {d:.1}, {d:.1} {d:.1}\" class=\"dg-edge\" stroke=\"{s}\"/>",
+        "<path d=\"M {d:.1} {d:.1} C {d:.1} {d:.1}, {d:.1} {d:.1}, {d:.1} {d:.1}\" class=\"dg-edge\" stroke=\"{s}\"",
         .{ a.x, a.y, c1x, a.y, c2x, b.y, b.x, b.y, color },
     );
-    try writeDot(w, a, color);
-    try writeDot(w, b, color);
+    if (width) |sw| try w.print(" stroke-width=\"{d:.1}\"", .{sw});
+    if (opacity) |op| try w.print(" stroke-opacity=\"{d:.2}\"", .{op});
+    try w.writeAll("/>");
+    if (opacity == null) {
+        try writeDot(w, a, color);
+        try writeDot(w, b, color);
+    }
 }
 
 /// Draws the power supply tree: rail-colored wires first, then the source /
