@@ -66,6 +66,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var verifications: std.ArrayListUnmanaged(env_mod.Verification) = .empty;
     var critical_ics: std.ArrayListUnmanaged(env_mod.CriticalIc) = .empty;
     var test_points: std.ArrayListUnmanaged(env_mod.TestPoint) = .empty;
+    var functions: std.ArrayListUnmanaged(env_mod.FunctionGroup) = .empty;
     var derating: ?f64 = null;
     var kicad_pcb_path: ?[]const u8 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
@@ -150,6 +151,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
                     }
                 }
             },
+            .function => if (try parseFunction(self, form_children)) |f| try functions.append(self.allocator, f),
             // Section-only forms are silently ignored at the top level —
             // a design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract.
@@ -186,6 +188,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .test_points = test_points.toOwnedSlice(self.allocator) catch &.{},
         .derating = derating,
         .kicad_pcb_path = kicad_pcb_path,
+        .functions = functions.toOwnedSlice(self.allocator) catch &.{},
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -669,7 +672,7 @@ fn evalSection(
             // `processSharedSectionForm`; top-level-only forms are
             // silently ignored inside a section body.
             .status, .description, .note, .port, .protocol, .calc => {},
-            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb => {},
+            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function => {},
         }
     }
 
@@ -1119,6 +1122,42 @@ fn parseDesignDoc(
     }
 }
 
+/// Parse one `(function "Name" "Subtitle"? (verb "…")? (includes "a" "b" …)?)`
+/// form into a `FunctionGroup` for the high-level Function view. The first
+/// string after the head is the name, an optional second string is the
+/// subtitle; `(verb …)` is the action phrase and `(includes …)` lists the
+/// member section / sub-block names. Returns null when there's no name.
+fn parseFunction(self: *Evaluator, form_children: []const Node) EvalError!?env_mod.FunctionGroup {
+    if (form_children.len < 2) return null;
+    const name = form_children[1].asString() orelse return null;
+    var subtitle: []const u8 = "";
+    var verb: []const u8 = "";
+    var includes: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (form_children[2..]) |node| {
+        if (node.asString()) |s| {
+            if (subtitle.len == 0) subtitle = s;
+            continue;
+        }
+        const lst = node.asList() orelse continue;
+        if (lst.len < 1) continue;
+        const head = lst[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "verb")) {
+            if (lst.len >= 2) verb = lst[1].asString() orelse lst[1].asAtom() orelse "";
+        } else if (std.mem.eql(u8, head, "includes")) {
+            for (lst[1..]) |inc| {
+                const s = inc.asString() orelse inc.asAtom() orelse continue;
+                includes.append(self.allocator, s) catch return EvalError.OutOfMemory;
+            }
+        }
+    }
+    return env_mod.FunctionGroup{
+        .name = name,
+        .subtitle = subtitle,
+        .verb = verb,
+        .includes = includes.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
+    };
+}
+
 // ── Tests ─────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -1148,6 +1187,34 @@ test "design-block captures (kicad-pcb path)" {
     };
     try testing.expect(block.kicad_pcb_path != null);
     try testing.expectEqualStrings("/mnt/nas/test.kicad_pcb", block.kicad_pcb_path.?);
+}
+
+// spec: eval/design_block - function form parses a named functional group with a verb and member sections
+test "design-block parses a (function …) group" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (function "Measurement" "isolated DMM"
+        \\    (verb "measures V/R")
+        \\    (includes "DMM Analog Front-End" "DMM Cal EEPROM")))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    // Always a design_block here — access the payload directly (no branch).
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 1), block.functions.len);
+    const f = block.functions[0];
+    try testing.expectEqualStrings("Measurement", f.name);
+    try testing.expectEqualStrings("isolated DMM", f.subtitle);
+    try testing.expectEqualStrings("measures V/R", f.verb);
+    try testing.expectEqual(@as(usize, 2), f.includes.len);
+    try testing.expectEqualStrings("DMM Analog Front-End", f.includes[0]);
 }
 
 // spec: eval/design_block - hosts form records the sub-block instance names a section owns

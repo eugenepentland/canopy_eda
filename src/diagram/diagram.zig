@@ -9,6 +9,7 @@ const rb = @import("../render_block_types.zig");
 const collect = @import("collect.zig");
 const render = @import("render.zig");
 const types = @import("types.zig");
+const function = @import("function.zig");
 
 const DesignBlock = env_mod.DesignBlock;
 const Allocator = std.mem.Allocator;
@@ -27,7 +28,13 @@ pub fn renderBlockDiagramTabs(
 ) (Allocator.Error || Writer.Error)!void {
     var graph = try collect.collectGraph(allocator, block, sub_attachments);
     defer graph.deinit(allocator);
-    try render.renderTabs(allocator, &graph, w);
+    // The coarsened Function view ("what does it do") is built off the same
+    // graph and prepended as the default tab. Arena-owned (borrows `graph`'s
+    // class registry), so it's freed wholesale, never `Graph.deinit`-ed.
+    var fn_arena = std.heap.ArenaAllocator.init(allocator);
+    defer fn_arena.deinit();
+    const fg = try function.buildFunctionGraph(fn_arena.allocator(), block, &graph);
+    try render.renderTabsWithFunction(allocator, &graph, if (fg) |*f| f else null, w);
 }
 
 /// Render the combined System block diagram as a standalone inline SVG — the
@@ -82,6 +89,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = collect;
     _ = render;
+    _ = function;
     _ = @import("types.zig");
     _ = @import("classify.zig");
     _ = @import("membership.zig");

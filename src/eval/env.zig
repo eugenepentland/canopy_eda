@@ -871,6 +871,23 @@ pub const PowerRail = struct {
 };
 
 /// The result of evaluating a design-block form.
+/// A declared high-level functional subsystem for the **Function** view — the
+/// glanceable "what does the system do" abstraction. `name` is the short
+/// functional title ("Measurement"), `subtitle` an optional one-liner, `verb`
+/// the action phrase shown on the block ("measures V/R, 3 kV isolated"), and
+/// `includes` the section / sub-block names that roll up into this function.
+/// Sections named by no `FunctionGroup` auto-group by category in the diagram.
+pub const FunctionGroup = struct {
+    name: []const u8,
+    subtitle: []const u8 = "",
+    verb: []const u8 = "",
+    includes: []const []const u8 = &.{},
+};
+
+/// The fully-evaluated result of a `(design-block …)`: the flattened netlist
+/// (instances + nets + ports), the section/sub-block tree, and the design-doc
+/// metadata (critical ICs, verifications, rails, functions) the review and
+/// diagram layers consume.
 pub const DesignBlock = struct {
     name: []const u8,
     instances: []const Instance,
@@ -908,6 +925,10 @@ pub const DesignBlock = struct {
     /// when the design has no PCB target — the file-based KiCad sync
     /// endpoint refuses to write without it.
     kicad_pcb_path: ?[]const u8 = null,
+    /// Declared functional subsystems for the high-level Function view, from
+    /// top-level `(function …)` forms. Empty ⇒ the Function view auto-groups
+    /// every section by category instead.
+    functions: []const FunctionGroup = &.{},
 };
 
 /// Assertion result.

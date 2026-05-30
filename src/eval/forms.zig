@@ -115,6 +115,7 @@ pub const ScopeForm = enum {
     power_config,
     decouple_defaults,
     kicad_pcb,
+    function,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -149,6 +150,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "power-config", .power_config },
     .{ "decouple-defaults", .decouple_defaults },
     .{ "kicad-pcb", .kicad_pcb },
+    .{ "function", .function },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -428,6 +430,10 @@ pub const scope_form_docs = blk: {
     t[@intFromEnum(ScopeForm.kicad_pcb)] = .{ .scope = tl, .doc = .{
         .syntax = "(kicad-pcb \"absolute/path/to/board.kicad_pcb\")",
         .summary = "Declare the PCB file the file-based KiCad sync writes board updates to.",
+    } };
+    t[@intFromEnum(ScopeForm.function)] = .{ .scope = tl, .doc = .{
+        .syntax = "(function \"Name\" [\"subtitle\"] [(verb \"…\")] (includes \"section\"…))",
+        .summary = "Declare a high-level functional subsystem for the Function (\"what it does\") view.",
     } };
     break :blk t;
 };

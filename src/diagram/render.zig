@@ -21,6 +21,14 @@ pub const system_key: []const u8 = "system";
 pub const system_label: []const u8 = "System";
 pub const system_color: []const u8 = "#768390"; // neutral accent (shows all classes)
 
+/// Tab metadata for the high-level **Function** view — the glanceable "what
+/// does the system do" abstraction (a handful of verb-labeled functional
+/// subsystems). When present it is the first, default-selected tab, above the
+/// detailed System view. Rendered from a separately-built coarsened graph.
+const function_key: []const u8 = "function";
+const function_label: []const u8 = "Function";
+const function_color: []const u8 = "#3fb950"; // green accent, distinct from the class colors
+
 /// Render the whole tabbed diagram. The first tab is always the **System**
 /// view — one block diagram showing every block and every inter-block
 /// connection at once, color-coded by signal class — when the graph has
@@ -30,6 +38,15 @@ pub const system_color: []const u8 = "#768390"; // neutral accent (shows all cla
 /// edge. The radio→panel toggle and per-tab accent rules are emitted into a
 /// scoped `<style>`, so a brand-new declared class needs no hand-written CSS.
 pub fn renderTabs(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void {
+    return renderTabsWithFunction(allocator, graph, null, w);
+}
+
+/// As `renderTabs`, but with an optional pre-built coarsened **Function** graph
+/// prepended as the first, default-selected tab. `func_graph` is the high-level
+/// "what does it do" view (built by `diagram/function.zig`); pass null to show
+/// just the System + per-class tabs (the plain `renderTabs` entry).
+pub fn renderTabsWithFunction(allocator: Allocator, graph: *const Graph, func_graph: ?*const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void {
+    const has_function = func_graph != null;
     const has_system = layout.hasSystemView(graph);
     var first_signal: ?ClassId = null;
     for (graph.classes, 0..) |_, i| {
@@ -39,11 +56,14 @@ pub fn renderTabs(allocator: Allocator, graph: *const Graph, w: *Writer) (Alloca
             break;
         }
     }
-    if (!has_system and first_signal == null) return;
+    if (!has_function and !has_system) {
+        if (first_signal == null) return;
+    }
 
     try w.writeAll("<div class=\"dg-wrap\"><style>");
     // Per-view rules: the checked radio shows its panel and lights its tab.
-    // System is just another keyed view, with a neutral accent.
+    // Function and System are just keyed views with neutral accents.
+    if (has_function) try writeToggleRule(w, function_key, function_color);
     if (has_system) try writeToggleRule(w, system_key, system_color);
     for (graph.classes, 0..) |c, i| {
         if (!graph.isView(@intCast(i))) continue;
@@ -51,32 +71,41 @@ pub fn renderTabs(allocator: Allocator, graph: *const Graph, w: *Writer) (Alloca
     }
     try w.writeAll("</style>");
     // Radios first so the `:checked ~` sibling selectors can reach the panels.
-    // System is the default-checked tab when present; otherwise the first
-    // signal view is.
-    if (has_system) try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\" checked>", .{system_key});
+    // Default-selected tab: Function if present, else System, else first signal.
+    if (has_function) try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\" checked>", .{function_key});
+    if (has_system) {
+        const checked = if (!has_function) " checked" else "";
+        try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\"{s}>", .{ system_key, checked });
+    }
+    // A signal view is the default only when neither coarse view is present.
+    const signal_default = !has_function and !has_system;
     for (graph.classes, 0..) |c, i| {
         const id: ClassId = @intCast(i);
         if (!graph.isView(id)) continue;
-        const checked = if (!has_system and id == first_signal.?) " checked" else "";
+        const checked = if (signal_default and id == first_signal.?) " checked" else "";
         try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\"{s}>", .{ c.key, checked });
     }
     try w.writeAll("<div class=\"dg-tabs\">");
-    if (has_system) try w.print(
-        "<label for=\"dg-tab-{s}\" class=\"dg-tab dg-tab-{s}\">{s}</label>",
-        .{ system_key, system_key, system_label },
-    );
+    if (has_function) try writeTabLabel(w, function_key, function_label);
+    if (has_system) try writeTabLabel(w, system_key, system_label);
     for (graph.classes, 0..) |c, i| {
         if (!graph.isView(@intCast(i))) continue;
-        try w.print("<label for=\"dg-tab-{s}\" class=\"dg-tab dg-tab-{s}\">{s}</label>", .{ c.key, c.key, c.label });
+        try writeTabLabel(w, c.key, c.label);
     }
     try w.writeAll("</div><div class=\"dg-panels\">");
-    if (has_system) try renderSystemPanel(allocator, graph, w);
+    if (func_graph) |fg| try renderCoarsePanel(allocator, fg, function_key, w);
+    if (has_system) try renderCoarsePanel(allocator, graph, system_key, w);
     for (graph.classes, 0..) |_, i| {
         const id: ClassId = @intCast(i);
         if (!graph.isView(id)) continue;
         try renderView(allocator, graph, id, w);
     }
     try w.writeAll("</div></div>");
+}
+
+/// The clickable `<label>` that selects one keyed view's radio.
+fn writeTabLabel(w: *Writer, key: []const u8, label: []const u8) Writer.Error!void {
+    try w.print("<label for=\"dg-tab-{s}\" class=\"dg-tab dg-tab-{s}\">{s}</label>", .{ key, key, label });
 }
 
 /// The checked-radio → show-panel + light-tab CSS pair for one keyed view.
@@ -88,13 +117,15 @@ fn writeToggleRule(w: *Writer, key: []const u8, color: []const u8) Writer.Error!
     );
 }
 
-/// The System tab's panel: a toggled `dg-panel` wrapping the combined diagram.
-fn renderSystemPanel(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void {
+/// A toggled `dg-panel` wrapping a stage-laid-out diagram for `graph` under the
+/// given tab `key`. Both the detailed System view and the coarsened Function
+/// view share this — they differ only in the graph fed in and the panel key.
+fn renderCoarsePanel(allocator: Allocator, graph: *const Graph, key: []const u8, w: *Writer) (Allocator.Error || Writer.Error)!void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const lay = (try layout.computeSystemLayout(arena, graph)) orelse return;
-    try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{system_key});
+    try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{key});
     try renderSystemBody(arena, w, graph, lay);
     try w.writeAll("</div>");
 }
@@ -157,7 +188,7 @@ fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layo
     }
     var labeled: std.StringHashMapUnmanaged(void) = .empty;
     for (lay.routes) |r| {
-        if (r.class == types.CLASS_POWER) continue;
+        if (r.class == types.CLASS_POWER or r.label.len == 0) continue;
         const key = try std.fmt.allocPrint(arena, "{d}|{s}", .{ r.from_gid, r.label });
         if ((try labeled.getOrPut(arena, key)).found_existing) continue;
         try writeEdgeLabel(arena, w, r, classColor(graph, r.class));
@@ -909,6 +940,28 @@ test "renderTabs System view draws functional band headers" {
     try testing.expect(std.mem.indexOf(u8, sys, ">POWER<") != null);
     try testing.expect(std.mem.indexOf(u8, sys, ">CORE<") != null);
     try testing.expect(std.mem.indexOf(u8, sys, "PERIPHERALS &amp; I/O") != null);
+}
+
+// spec: diagram/render - Function view is the default first tab above the System view when one is supplied
+test "renderTabsWithFunction prepends a default-checked Function tab" {
+    var nodes = [_]types.Node{ mkNode("A"), mkNode("B") };
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "x" }};
+    var graph = Graph{ .nodes = &nodes, .edges = &edges };
+    // A minimal coarsened graph stands in for the Function view.
+    var fnodes = [_]types.Node{ mkNode("Power"), mkNode("Controller") };
+    var fedges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "" }};
+    var fgraph = Graph{ .nodes = &fnodes, .edges = &fedges };
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try renderTabsWithFunction(testing.allocator, &graph, &fgraph, &aw.writer);
+    const out = aw.written();
+    // The Function radio is checked by default and the System radio (present)
+    // is not — and the Function radio is emitted before the System one. Match
+    // the radio `<input>`s specifically (the `class="dg-radio"` marker), not the
+    // `#dg-tab-system` that also appears earlier in the <style> toggle rules.
+    const fn_radio = std.mem.indexOf(u8, out, "id=\"dg-tab-function\" class=\"dg-radio\" checked").?;
+    const sys_radio = std.mem.indexOf(u8, out, "id=\"dg-tab-system\" class=\"dg-radio\">").?;
+    try testing.expect(fn_radio < sys_radio);
 }
 
 // spec: diagram/render - Wraps a block's description onto multiple lines instead of truncating at one

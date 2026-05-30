@@ -259,6 +259,15 @@ Public functions: renderTabs
 - System view draws every class's edges at once, colored by class, with a class legend
 - System view labels functional bands so it reads as an architecture
 - Wraps a block's description onto multiple lines instead of truncating at one
+- Function view is the default first tab above the System view when one is supplied
+
+## diagram/function
+
+Public functions: buildFunctionGraph
+
+- Auto-groups undeclared sections by category into functional blocks
+- Declared (function …) groups claim their member sections by name
+- A signal link outranks a power link when subsystems share both
 
 ## diagram/diagram
 
@@ -328,6 +337,7 @@ Public functions: analyze
 - bus-port expands one port per index times optional suffix list
 - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
 - kicad-pcb form captures the literal path on the design block
+- function form parses a named functional group with a verb and member sections
 - hosts form records the sub-block instance names a section owns
 - verifies req with an (id …) target parses as a stable-id sign-off leaving ref-des empty
 - verifies req with a ref-des target parses as a ref-des sign-off leaving target-id empty

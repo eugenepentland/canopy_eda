@@ -60,6 +60,7 @@ src/diagram/collect.zig::collectGraph fn
 src/diagram/diagram.zig::DIAGRAM_CSS value
 src/diagram/diagram.zig::renderBlockDiagramTabs fn
 src/diagram/diagram.zig::renderSystemSvg fn
+src/diagram/function.zig::buildFunctionGraph fn
 src/diagram/layout.zig::LNode struct_
 src/diagram/layout.zig::Layout struct_
 src/diagram/layout.zig::PowerBox struct_
@@ -84,6 +85,7 @@ src/diagram/membership.zig::build fn
 src/diagram/render.zig::CSS value
 src/diagram/render.zig::renderSystemStandalone fn
 src/diagram/render.zig::renderTabs fn
+src/diagram/render.zig::renderTabsWithFunction fn
 src/diagram/render.zig::system_color value
 src/diagram/render.zig::system_key value
 src/diagram/render.zig::system_label value
@@ -140,6 +142,7 @@ src/eval/env.zig::Drive enum_
 src/eval/env.zig::ElectricalDecl struct_
 src/eval/env.zig::ElectricalType enum_
 src/eval/env.zig::Env struct_
+src/eval/env.zig::FunctionGroup struct_
 src/eval/env.zig::Group struct_
 src/eval/env.zig::Instance struct_
 src/eval/env.zig::ModuleDef struct_
