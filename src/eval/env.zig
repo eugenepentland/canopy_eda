@@ -885,6 +885,12 @@ pub const FunctionGroup = struct {
     /// `(stack N)`: render this block as N offset cards to show it's N identical
     /// channels (e.g. a 2-channel PSU). 1 ⇒ a single box.
     stack: u8 = 1,
+    /// `(chain <pos> "<label>")`: this block's place in the Signal Chain view —
+    /// `pos` orders the narrative stages (blocks sharing a pos group into one
+    /// stage), `label` names the stage. -1 ⇒ not in the chain (the view buckets
+    /// it under "Other"); the Signal Chain tab only appears when some block sets it.
+    chain_pos: f64 = -1,
+    chain_label: []const u8 = "",
 };
 
 /// The fully-evaluated result of a `(design-block …)`: the flattened netlist

@@ -138,15 +138,10 @@ pub fn hasSystemView(graph: *const Graph) bool {
 // left→right, so the diagram reads as an architecture: power on the left feeds
 // the compute core, which fans out to peripherals and I/O on the right.
 
-/// Functional stages, in left→right order. A block's column is its stage; the
-/// header above the column is the matching label. Unused stages are compacted
-/// out so a design with no power blocks (or no MCU) shows no empty column.
-const StageLabel = struct { idx: u8, label: []const u8 };
-const stages = [_]StageLabel{
-    .{ .idx = 0, .label = "Power" },
-    .{ .idx = 1, .label = "Core" },
-    .{ .idx = 2, .label = "Peripherals & I/O" },
-};
+/// The System view's functional-stage band labels, in left→right order; a
+/// block's column is its `systemStage` index into this. Unused stages are
+/// compacted out so a design with no power blocks (or no MCU) shows no gap.
+const system_labels = [_][]const u8{ "Power", "Core", "Peripherals & I/O" };
 
 /// Place one block into a functional stage from its declared category:
 ///   - power delivery (sources, regulators, converters — `category == .power`)
@@ -174,49 +169,112 @@ pub fn computeSystemLayout(arena: Allocator, graph: *const Graph) Allocator.Erro
     var local_of = std.AutoHashMapUnmanaged(u32, u32){};
     var gids: std.ArrayListUnmanaged(u32) = .empty;
     var raw: std.ArrayListUnmanaged(RawEdge) = .empty;
+    if (!try internStaged(arena, graph, &local_of, &gids, &raw)) return null;
+    const raw_stage = try arena.alloc(u8, gids.items.len);
+    for (gids.items, 0..) |gid, i| raw_stage[i] = systemStage(graph.nodes[gid]);
+    return try finishStagedLayout(arena, graph, gids.items, raw.items, raw_stage, &system_labels);
+}
+
+/// One narrative stage of the **Signal Chain** view: a band `label` and the
+/// super-node labels (function names) that belong in it. Built from the design's
+/// `(function … (chain pos "label"))` declarations (`diagram.zig`).
+pub const StageSpec = struct { label: []const u8, members: []const []const u8 };
+
+/// The **Signal Chain** view: the same coarsened blocks as the Function view,
+/// but laid out by a *declared narrative order* (`stages`) instead of by
+/// category — power-in → control → stimulus → DUT → measure → … so the diagram
+/// reads as the instrument's story. A block not named by any stage falls into a
+/// trailing "Other" band. Returns null when there's nothing to draw.
+pub fn computeChainLayout(arena: Allocator, graph: *const Graph, stages: []const StageSpec) Allocator.Error!?Layout {
+    var local_of = std.AutoHashMapUnmanaged(u32, u32){};
+    var gids: std.ArrayListUnmanaged(u32) = .empty;
+    var raw: std.ArrayListUnmanaged(RawEdge) = .empty;
+    if (!try internStaged(arena, graph, &local_of, &gids, &raw)) return null;
+
+    // Stage each node by matching its label to a declared stage; unmatched nodes
+    // share a trailing "Other" band (only labelled when something lands there).
+    const other: u8 = @intCast(stages.len);
+    var any_other = false;
+    const raw_stage = try arena.alloc(u8, gids.items.len);
+    for (gids.items, 0..) |gid, i| {
+        raw_stage[i] = chainStageOf(graph.nodes[gid].label, stages) orelse blk: {
+            any_other = true;
+            break :blk other;
+        };
+    }
+    var labels: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (stages) |s| try labels.append(arena, s.label);
+    if (any_other) try labels.append(arena, "Other");
+    return try finishStagedLayout(arena, graph, gids.items, raw.items, raw_stage, labels.items);
+}
+
+/// The stage index of the first declared stage that lists `label` as a member
+/// (exact match), or null when none does.
+fn chainStageOf(label: []const u8, stages: []const StageSpec) ?u8 {
+    for (stages, 0..) |s, i| {
+        for (s.members) |m| if (std.mem.eql(u8, label, m)) return @intCast(i);
+    }
+    return null;
+}
+
+/// Shared front half of the staged layouts: intern every edge endpoint, plus any
+/// `force_show` block (so a declared-but-unwired subsystem still appears), then
+/// fall back to the isolated real blocks when there are no edges at all. Returns
+/// false (nothing to draw) only when not a single node was interned.
+fn internStaged(
+    arena: Allocator,
+    graph: *const Graph,
+    local_of: *std.AutoHashMapUnmanaged(u32, u32),
+    gids: *std.ArrayListUnmanaged(u32),
+    raw: *std.ArrayListUnmanaged(RawEdge),
+) Allocator.Error!bool {
     for (graph.edges, 0..) |e, eidx| {
-        const fl = try internNode(arena, &local_of, &gids, e.from);
-        const tl = try internNode(arena, &local_of, &gids, e.to);
+        const fl = try internNode(arena, local_of, gids, e.from);
+        const tl = try internNode(arena, local_of, gids, e.to);
         if (fl == tl) continue;
         try raw.append(arena, .{ .from_l = fl, .to_l = tl, .eidx = eidx });
     }
-    // A declared function box is shown even with no edges (force_show), so an
-    // author-declared subsystem appears whether or not its parts are wired yet.
     for (graph.nodes, 0..) |n, i| {
-        if (n.force_show) _ = try internNode(arena, &local_of, &gids, @intCast(i));
+        if (n.force_show) _ = try internNode(arena, local_of, gids, @intCast(i));
     }
     if (gids.items.len == 0) {
         for (graph.nodes, 0..) |n, i| {
-            if (isBlock(n)) _ = try internNode(arena, &local_of, &gids, @intCast(i));
+            if (isBlock(n)) _ = try internNode(arena, local_of, gids, @intCast(i));
         }
-        if (gids.items.len == 0) return null;
     }
+    return gids.items.len > 0;
+}
 
-    // Stage each block, then compact the *used* stages to consecutive columns
-    // (rank) so empty stages leave no gap. `col_label[rank]` is that column's
-    // band header.
-    var used = [_]bool{false} ** stages.len;
-    const raw_stage = try arena.alloc(u8, gids.items.len);
-    for (gids.items, 0..) |gid, i| {
-        raw_stage[i] = systemStage(graph.nodes[gid]);
-        used[raw_stage[i]] = true;
-    }
-    var col_of_stage = [_]u32{0} ** stages.len;
+/// Shared back half: compact the *used* stages to consecutive columns (so empty
+/// stages leave no gap), lay the blocks out with those fixed ranks, route the
+/// edges nearest-side, and hang the (compacted) stage labels as band headers.
+fn finishStagedLayout(
+    arena: Allocator,
+    graph: *const Graph,
+    gids: []const u32,
+    raw: []const RawEdge,
+    raw_stage: []const u8,
+    all_labels: []const []const u8,
+) Allocator.Error!Layout {
+    const used = try arena.alloc(bool, all_labels.len);
+    @memset(used, false);
+    for (raw_stage) |s| used[s] = true;
+    const col_of_stage = try arena.alloc(u32, all_labels.len);
     var col_label: std.ArrayListUnmanaged([]const u8) = .empty;
     var ncols: u32 = 0;
-    for (stages) |s| {
-        if (!used[s.idx]) continue;
-        col_of_stage[s.idx] = ncols;
+    for (all_labels, 0..) |label, s| {
+        if (!used[s]) continue;
+        col_of_stage[s] = ncols;
         ncols += 1;
-        try col_label.append(arena, s.label);
+        try col_label.append(arena, label);
     }
-    const ranks = try arena.alloc(u32, gids.items.len);
+    const ranks = try arena.alloc(u32, gids.len);
     for (raw_stage, 0..) |s, i| ranks[i] = col_of_stage[s];
 
-    var lay = try layeredLayout(arena, graph, gids.items, raw.items, ranks);
+    var lay = try layeredLayout(arena, graph, gids, raw, ranks);
     // The layered pipeline ordered the columns well, but its left→right lane
     // routing loops same-column edges and crosses boxes on long hops. Re-route
-    // every edge from the side of its source nearest the target (`routeSystemEdges`).
+    // every edge from the side of its source nearest the target.
     lay.routes = try routeSystemEdges(arena, graph, lay.nodes, lay.height);
     // Reserve a header strip above the columns and hang the band labels off it.
     for (lay.nodes) |*n| n.y += band_h;
@@ -1599,4 +1657,42 @@ test "computeSystemLayout keeps a force-shown isolated block" {
         if (n.gid == 2) saw_forced = true;
     }
     try testing.expect(saw_forced);
+}
+
+// spec: diagram/layout - Signal Chain layout orders blocks by declared narrative stage instead of category
+test "computeChainLayout orders blocks by declared narrative stage" {
+    // Declare a chain B → A → C — NOT the nodes' gid/category order — so the
+    // narrative ranking, not the layout default, must drive the columns.
+    var a = mkNode("A");
+    var b = mkNode("B");
+    var c = mkNode("C");
+    a.force_show = true;
+    b.force_show = true;
+    c.force_show = true;
+    var nodes = [_]types.Node{ a, b, c };
+    const graph = Graph{ .nodes = &nodes, .edges = &.{} };
+    const m_b = [_][]const u8{"B"};
+    const m_a = [_][]const u8{"A"};
+    const m_c = [_][]const u8{"C"};
+    const stage_specs = [_]StageSpec{
+        .{ .label = "First", .members = &m_b },
+        .{ .label = "Second", .members = &m_a },
+        .{ .label = "Third", .members = &m_c },
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeChainLayout(arena.allocator(), &graph, &stage_specs)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 3), lay.stage_labels.len);
+    try testing.expectEqualStrings("First", lay.stage_labels[0]);
+    try testing.expectEqualStrings("Third", lay.stage_labels[2]);
+    var x_a: f64 = -1;
+    var x_b: f64 = -1;
+    var x_c: f64 = -1;
+    for (lay.nodes) |n| {
+        if (n.gid == 0) x_a = n.x;
+        if (n.gid == 1) x_b = n.x;
+        if (n.gid == 2) x_c = n.x;
+    }
+    try testing.expect(x_b < x_a); // B (stage 0) sits left of A (stage 1)
+    try testing.expect(x_a < x_c); // A (stage 1) sits left of C (stage 2)
 }

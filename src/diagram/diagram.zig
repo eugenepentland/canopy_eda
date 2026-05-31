@@ -10,6 +10,7 @@ const collect = @import("collect.zig");
 const render = @import("render.zig");
 const types = @import("types.zig");
 const function = @import("function.zig");
+const layout = @import("layout.zig");
 
 const DesignBlock = env_mod.DesignBlock;
 const Allocator = std.mem.Allocator;
@@ -34,7 +35,49 @@ pub fn renderBlockDiagramTabs(
     var fn_arena = std.heap.ArenaAllocator.init(allocator);
     defer fn_arena.deinit();
     const fg = try function.buildFunctionGraph(fn_arena.allocator(), block, &graph);
-    try render.renderTabsWithFunction(allocator, &graph, if (fg) |*f| f else null, w);
+    // The Signal Chain view reuses the Function blocks, ordered by the design's
+    // declared narrative stages. Empty (no `(chain …)` declared) ⇒ no such tab.
+    const chain = try buildChainStages(fn_arena.allocator(), block);
+    try render.renderTabsWithFunction(allocator, &graph, if (fg) |*f| f else null, chain, w);
+}
+
+/// One narrative stage being assembled from the design's `(function …)` chain
+/// declarations: a position (for ordering), a label, and the member function
+/// names that share that position.
+const ChainGroup = struct { pos: f64, label: []const u8, members: std.ArrayListUnmanaged([]const u8) };
+
+fn cmpChainPos(_: void, a: ChainGroup, b: ChainGroup) bool {
+    return a.pos < b.pos;
+}
+
+/// Group the design's `(function … (chain pos "label"))` declarations into
+/// ordered Signal-Chain stages: functions sharing a `pos` form one stage,
+/// stages sort by `pos`, the first non-empty `label` names each. Returns an
+/// empty slice when no function declares a chain position (⇒ no Signal Chain tab).
+fn buildChainStages(arena: Allocator, block: *const DesignBlock) Allocator.Error![]layout.StageSpec {
+    var groups: std.ArrayListUnmanaged(ChainGroup) = .empty;
+    for (block.functions) |f| {
+        if (f.chain_pos < 0) continue;
+        var existing: ?*ChainGroup = null;
+        for (groups.items) |*cand| {
+            if (@abs(cand.pos - f.chain_pos) < 0.001) {
+                existing = cand;
+                break;
+            }
+        }
+        if (existing) |g| {
+            try g.members.append(arena, f.name);
+            if (g.label.len == 0) g.label = f.chain_label;
+        } else {
+            var members: std.ArrayListUnmanaged([]const u8) = .empty;
+            try members.append(arena, f.name);
+            try groups.append(arena, .{ .pos = f.chain_pos, .label = f.chain_label, .members = members });
+        }
+    }
+    std.sort.block(ChainGroup, groups.items, {}, cmpChainPos);
+    const out = try arena.alloc(layout.StageSpec, groups.items.len);
+    for (groups.items, 0..) |g, i| out[i] = .{ .label = g.label, .members = g.members.items };
+    return out;
 }
 
 /// Render the combined System block diagram as a standalone inline SVG — the

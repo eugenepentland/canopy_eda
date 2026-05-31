@@ -83,4 +83,4 @@ where each is accepted: **D** = design-block top level,
 | `(power-config (derating N))` | D·· | Per-design power-budget configuration knobs. |
 | `(decouple-defaults (ic "REF") (bypass (comp)))` | D·· | Set per-design decouple defaults: a fallback IC ref and bypass cap so (decouple …) can omit both. |
 | `(kicad-pcb "absolute/path/to/board.kicad_pcb")` | D·· | Declare the PCB file the file-based KiCad sync writes board updates to. |
-| `(function "Name" ["subtitle"] [(verb "…")] [(stack N)] (includes "section"…))` | D·· | Declare a high-level functional subsystem for the Function ("what it does") view. |
+| `(function "Name" ["subtitle"] [(verb "…")] [(stack N)] [(chain pos "stage")] (includes "section"…))` | D·· | Declare a high-level functional subsystem for the Function view; (chain …) also places it on the Signal Chain view's narrative spine. |

@@ -1133,6 +1133,8 @@ fn parseFunction(self: *Evaluator, form_children: []const Node) EvalError!?env_m
     var subtitle: []const u8 = "";
     var verb: []const u8 = "";
     var stack: u8 = 1;
+    var chain_pos: f64 = -1;
+    var chain_label: []const u8 = "";
     var includes: std.ArrayListUnmanaged([]const u8) = .empty;
     for (form_children[2..]) |node| {
         if (node.asString()) |s| {
@@ -1148,6 +1150,12 @@ fn parseFunction(self: *Evaluator, form_children: []const Node) EvalError!?env_m
             if (lst.len >= 2) {
                 if (lst[1].asNumber()) |n| stack = @intFromFloat(@max(1, @min(9, n)));
             }
+        } else if (std.mem.eql(u8, head, "chain")) {
+            // (chain <pos> "<label>"): narrative-stage position + name.
+            if (lst.len >= 2) {
+                if (lst[1].asNumber()) |n| chain_pos = n;
+            }
+            if (lst.len >= 3) chain_label = lst[2].asString() orelse lst[2].asAtom() orelse "";
         } else if (std.mem.eql(u8, head, "includes")) {
             for (lst[1..]) |inc| {
                 const s = inc.asString() orelse inc.asAtom() orelse continue;
@@ -1160,6 +1168,8 @@ fn parseFunction(self: *Evaluator, form_children: []const Node) EvalError!?env_m
         .subtitle = subtitle,
         .verb = verb,
         .stack = stack,
+        .chain_pos = chain_pos,
+        .chain_label = chain_label,
         .includes = includes.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
     };
 }

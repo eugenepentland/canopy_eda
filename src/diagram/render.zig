@@ -29,6 +29,14 @@ const function_key: []const u8 = "function";
 const function_label: []const u8 = "Function";
 const function_color: []const u8 = "#3fb950"; // green accent, distinct from the class colors
 
+/// Tab metadata for the **Signal Chain** view — the same coarse blocks as the
+/// Function view, but ordered by the design's declared narrative stages
+/// (`(function … (chain pos "label"))`) so the diagram reads as the system's
+/// story. Only present when the design declares a chain.
+const chain_key: []const u8 = "chain";
+const chain_label: []const u8 = "Signal Chain";
+const chain_color: []const u8 = "#d29922"; // amber accent, distinct from Function/System
+
 /// Render the whole tabbed diagram. The first tab is always the **System**
 /// view — one block diagram showing every block and every inter-block
 /// connection at once, color-coded by signal class — when the graph has
@@ -38,15 +46,24 @@ const function_color: []const u8 = "#3fb950"; // green accent, distinct from the
 /// edge. The radio→panel toggle and per-tab accent rules are emitted into a
 /// scoped `<style>`, so a brand-new declared class needs no hand-written CSS.
 pub fn renderTabs(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void {
-    return renderTabsWithFunction(allocator, graph, null, w);
+    return renderTabsWithFunction(allocator, graph, null, &.{}, w);
 }
 
 /// As `renderTabs`, but with an optional pre-built coarsened **Function** graph
 /// prepended as the first, default-selected tab. `func_graph` is the high-level
 /// "what does it do" view (built by `diagram/function.zig`); pass null to show
 /// just the System + per-class tabs (the plain `renderTabs` entry).
-pub fn renderTabsWithFunction(allocator: Allocator, graph: *const Graph, func_graph: ?*const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void {
+pub fn renderTabsWithFunction(
+    allocator: Allocator,
+    graph: *const Graph,
+    func_graph: ?*const Graph,
+    chain_stages: []const layout.StageSpec,
+    w: *Writer,
+) (Allocator.Error || Writer.Error)!void {
     const has_function = func_graph != null;
+    // The Signal Chain view reuses the Function super-nodes, ordered by the
+    // design's declared narrative stages — present only when both exist.
+    const has_chain = has_function and chain_stages.len > 0;
     const has_system = layout.hasSystemView(graph);
     var first_signal: ?ClassId = null;
     for (graph.classes, 0..) |_, i| {
@@ -64,6 +81,7 @@ pub fn renderTabsWithFunction(allocator: Allocator, graph: *const Graph, func_gr
     // Per-view rules: the checked radio shows its panel and lights its tab.
     // Function and System are just keyed views with neutral accents.
     if (has_function) try writeToggleRule(w, function_key, function_color);
+    if (has_chain) try writeToggleRule(w, chain_key, chain_color);
     if (has_system) try writeToggleRule(w, system_key, system_color);
     for (graph.classes, 0..) |c, i| {
         if (!graph.isView(@intCast(i))) continue;
@@ -73,6 +91,7 @@ pub fn renderTabsWithFunction(allocator: Allocator, graph: *const Graph, func_gr
     // Radios first so the `:checked ~` sibling selectors can reach the panels.
     // Default-selected tab: Function if present, else System, else first signal.
     if (has_function) try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\" checked>", .{function_key});
+    if (has_chain) try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\">", .{chain_key});
     if (has_system) {
         const checked = if (!has_function) " checked" else "";
         try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\"{s}>", .{ system_key, checked });
@@ -87,6 +106,7 @@ pub fn renderTabsWithFunction(allocator: Allocator, graph: *const Graph, func_gr
     }
     try w.writeAll("<div class=\"dg-tabs\">");
     if (has_function) try writeTabLabel(w, function_key, function_label);
+    if (has_chain) try writeTabLabel(w, chain_key, chain_label);
     if (has_system) try writeTabLabel(w, system_key, system_label);
     for (graph.classes, 0..) |c, i| {
         if (!graph.isView(@intCast(i))) continue;
@@ -94,6 +114,7 @@ pub fn renderTabsWithFunction(allocator: Allocator, graph: *const Graph, func_gr
     }
     try w.writeAll("</div><div class=\"dg-panels\">");
     if (func_graph) |fg| try renderCoarsePanel(allocator, fg, function_key, w);
+    if (has_chain) try renderChainPanel(allocator, func_graph.?, chain_stages, chain_key, w);
     if (has_system) try renderCoarsePanel(allocator, graph, system_key, w);
     for (graph.classes, 0..) |_, i| {
         const id: ClassId = @intCast(i);
@@ -117,14 +138,35 @@ fn writeToggleRule(w: *Writer, key: []const u8, color: []const u8) Writer.Error!
     );
 }
 
-/// A toggled `dg-panel` wrapping a stage-laid-out diagram for `graph` under the
-/// given tab `key`. Both the detailed System view and the coarsened Function
-/// view share this — they differ only in the graph fed in and the panel key.
+/// A toggled `dg-panel` wrapping the stage-banded System/Function layout of
+/// `graph`. The detailed System view and the coarsened Function view share it —
+/// they differ only in the graph fed in and the panel key.
 fn renderCoarsePanel(allocator: Allocator, graph: *const Graph, key: []const u8, w: *Writer) (Allocator.Error || Writer.Error)!void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const lay = (try layout.computeSystemLayout(arena, graph)) orelse return;
+    try writeCoarsePanel(arena, graph, lay, key, w);
+}
+
+/// Like `renderCoarsePanel`, but laid out by the declared narrative `stages`
+/// (the Signal Chain view) rather than by category.
+fn renderChainPanel(
+    allocator: Allocator,
+    graph: *const Graph,
+    stages: []const layout.StageSpec,
+    key: []const u8,
+    w: *Writer,
+) (Allocator.Error || Writer.Error)!void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const lay = (try layout.computeChainLayout(arena, graph, stages)) orelse return;
+    try writeCoarsePanel(arena, graph, lay, key, w);
+}
+
+/// Wrap a precomputed coarse `lay` of `graph` in its toggled `dg-panel`.
+fn writeCoarsePanel(arena: Allocator, graph: *const Graph, lay: layout.Layout, key: []const u8, w: *Writer) (Allocator.Error || Writer.Error)!void {
     try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{key});
     try renderSystemBody(arena, w, graph, lay);
     try w.writeAll("</div>");
@@ -1027,7 +1069,7 @@ test "renderTabsWithFunction prepends a default-checked Function tab" {
     var fgraph = Graph{ .nodes = &fnodes, .edges = &fedges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try renderTabsWithFunction(testing.allocator, &graph, &fgraph, &aw.writer);
+    try renderTabsWithFunction(testing.allocator, &graph, &fgraph, &.{}, &aw.writer);
     const out = aw.written();
     // The Function radio is checked by default and the System radio (present)
     // is not — and the Function radio is emitted before the System one. Match

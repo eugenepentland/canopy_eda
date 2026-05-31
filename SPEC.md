@@ -228,7 +228,7 @@ Public functions: collectGraph
 
 ## diagram/layout
 
-Public functions: computeLayout, hasSystemView, computeSystemLayout
+Public functions: computeLayout, hasSystemView, computeSystemLayout, computeChainLayout
 
 - Returns null for a view with no edges
 - Ranks nodes left-to-right by signal flow, breaking cycles for layering
@@ -243,6 +243,7 @@ Public functions: computeLayout, hasSystemView, computeSystemLayout
 - System view flows blocks by functional stage: Power → Core → Peripherals
 - Attaches a same-column edge to a vertical face so it does not loop into the gap
 - Attaches a cross-column edge to the source's horizontal face nearest the target
+- Signal Chain layout orders blocks by declared narrative stage instead of category
 - Falls back to isolated block boxes when there are no connections
 - Omits an unconnected block from the System view when edges exist
 - Keeps a force-shown block in the layout even when it has no edges

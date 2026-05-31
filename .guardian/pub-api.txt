@@ -66,6 +66,8 @@ src/diagram/layout.zig::Layout struct_
 src/diagram/layout.zig::PowerBox struct_
 src/diagram/layout.zig::PowerKind enum_
 src/diagram/layout.zig::Route struct_
+src/diagram/layout.zig::StageSpec struct_
+src/diagram/layout.zig::computeChainLayout fn
 src/diagram/layout.zig::computeLayout fn
 src/diagram/layout.zig::computeSystemLayout fn
 src/diagram/layout.zig::dummy_h value
