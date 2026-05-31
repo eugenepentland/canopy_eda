@@ -24,6 +24,7 @@ const notes = @import("notes.zig");
 const symbol_conv = @import("../convert/symbol.zig");
 const config = @import("../config.zig");
 const component_search = @import("component_search.zig");
+const digikey = @import("digikey.zig");
 const upload = @import("upload.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -38,6 +39,8 @@ const ERR_LINE_TEMPLATE = "error: {s}";
 const VERSION_SNAPSHOT_TEMPLATE = "{{\"ok\":true,\"version\":{d},\"snapshot\":";
 const JSON_NET_KEY = ",\"net\":";
 const JSON_MANUFACTURER_KEY = ",\"manufacturer\":";
+const JSON_DESCRIPTION_KEY = ",\"description\":";
+const JSON_ERR_OPEN = "{\"ok\":false,\"error\":";
 const KEY_PART_NUMBER = "part_number";
 // search_components `limit` arg: default and hard cap.
 const SEARCH_LIMIT_DEFAULT: usize = 10;
@@ -100,6 +103,10 @@ const tools = [_]ToolEntry{
     // Search Component Search Engine and return candidate parts (read-only).
     // Pairs with download_footprint / download_datasheet to import a chosen one.
     .{ .name = "search_components", .is_mutation = false },
+    // Resolve a fuzzy query to real manufacturer part numbers (+ datasheet
+    // URLs) via the DigiKey Product Information API (read-only). Feed a chosen
+    // MPN to search_components / download_footprint / download_datasheet.
+    .{ .name = "resolve_mpn", .is_mutation = false },
     // Per-design TODO notes (sidecar `<design>.notes.md`). Lets agents
     // log follow-ups for the next revision and mark them complete with
     // a date stamp once the design has been updated.
@@ -217,6 +224,7 @@ fn dispatchInfo(
     if (std.mem.eql(u8, tool_name, "generate_review")) return try toolGenerateReview(allocator, project_dir, args_val, w, out);
     if (std.mem.eql(u8, tool_name, "read_datasheet")) return try toolReadDatasheet(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "search_components")) return try toolSearchComponents(allocator, args_val, out);
+    if (std.mem.eql(u8, tool_name, "resolve_mpn")) return try toolResolveMpn(allocator, args_val, out);
     return null;
 }
 
@@ -502,7 +510,7 @@ fn toolListHistory(allocator: std.mem.Allocator, project_dir: []const u8, args_v
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"id\":");
         try json_writer.writeString(w, s.id);
-        try w.writeAll(",\"description\":");
+        try w.writeAll(JSON_DESCRIPTION_KEY);
         if (s.description) |d| try json_writer.writeString(w, d) else try w.writeAll("null");
         try w.writeAll("}");
     }
@@ -710,7 +718,7 @@ fn toolDownloadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, 
     };
 
     const ds = component_search.downloadDatasheet(allocator, part_number, manufacturer, sid) catch |err| {
-        try w.writeAll("{\"ok\":false,\"error\":");
+        try w.writeAll(JSON_ERR_OPEN);
         try json_writer.writeString(w, component_search.datasheetErrorMessage(err));
         try w.writeAll("}");
         return false;
@@ -768,7 +776,7 @@ fn toolSearchComponents(allocator: std.mem.Allocator, args_val: ?std.json.Value,
     };
 
     const hits = component_search.searchComponents(allocator, query, sid, limit) catch |err| {
-        try w.writeAll("{\"ok\":false,\"error\":");
+        try w.writeAll(JSON_ERR_OPEN);
         try json_writer.writeString(w, component_search.searchErrorMessage(err));
         try w.writeAll("}");
         return false;
@@ -790,6 +798,68 @@ fn toolSearchComponents(allocator: std.mem.Allocator, args_val: ?std.json.Value,
     }
     try w.writeAll("]}");
     return true;
+}
+
+/// Resolve a fuzzy query (vague description or partial part number) to real
+/// manufacturer part numbers via the DigiKey Product Information API v4 —
+/// read-only, imports nothing. Pairs with `search_components` /
+/// `download_footprint` / `download_datasheet`: take a returned `mpn` and pass
+/// it on. Credentials (`DIGIKEY_CLIENT_ID` / `DIGIKEY_CLIENT_SECRET`, optional
+/// `DIGIKEY_API_BASE` for the sandbox) are read server-side, never over MCP.
+/// Returns `{ok:true,query,count,results:[{mpn,manufacturer,description,
+/// datasheet_url,product_url,digikey_part_number}]}` or `{ok:false,error}`.
+fn toolResolveMpn(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const query = requireString(args_val, "query") orelse return missingArg(out, allocator, "query");
+    const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, SEARCH_LIMIT_MAX)) else SEARCH_LIMIT_DEFAULT;
+    const w = out.writer(allocator);
+
+    const client_id = config.digikeyClientId(allocator) orelse {
+        try w.writeAll("{\"ok\":false,\"error\":\"DIGIKEY_CLIENT_ID is not set on the server; add it to .env\"}");
+        return false;
+    };
+    const client_secret = config.digikeyClientSecret(allocator) orelse {
+        try w.writeAll("{\"ok\":false,\"error\":\"DIGIKEY_CLIENT_SECRET is not set on the server; add it to .env\"}");
+        return false;
+    };
+    const base: []const u8 = config.digikeyApiBase(allocator) orelse digikey.default_base;
+
+    const products = digikey.resolveMpn(allocator, base, client_id, client_secret, query, limit) catch |err| {
+        try w.writeAll(JSON_ERR_OPEN);
+        try json_writer.writeString(w, digikey.searchErrorMessage(err));
+        try w.writeAll("}");
+        return false;
+    };
+
+    try w.writeAll("{\"ok\":true,\"query\":");
+    try json_writer.writeString(w, query);
+    try w.print(",\"count\":{d},\"results\":[", .{products.len});
+    for (products, 0..) |p, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"mpn\":");
+        try json_writer.writeString(w, p.mpn);
+        try w.writeAll(JSON_MANUFACTURER_KEY);
+        try json_writer.writeString(w, p.manufacturer);
+        try w.writeAll(JSON_DESCRIPTION_KEY);
+        try json_writer.writeString(w, p.description);
+        try w.writeAll(",\"datasheet_url\":");
+        try writeOptString(w, p.datasheet_url);
+        try w.writeAll(",\"product_url\":");
+        try writeOptString(w, p.product_url);
+        try w.writeAll(",\"digikey_part_number\":");
+        try writeOptString(w, p.digikey_part_number);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]}");
+    return true;
+}
+
+/// Emit a JSON string, or `null` when the optional is absent.
+fn writeOptString(w: anytype, s: ?[]const u8) !void {
+    if (s) |v| {
+        try json_writer.writeString(w, v);
+    } else {
+        try w.writeAll("null");
+    }
 }
 
 /// Regenerate `lib/pinouts/<name>.sexp` from `<source>` (a `.kicad_sym`
@@ -1072,7 +1142,7 @@ fn listLibrarySubdir(
 fn writeLibEntry(w: anytype, name: []const u8, description: ?[]const u8) !void {
     try w.writeAll(NAME_FIELD_PREFIX);
     try json_writer.writeString(w, name);
-    try w.writeAll(",\"description\":");
+    try w.writeAll(JSON_DESCRIPTION_KEY);
     if (description) |d| try json_writer.writeString(w, d) else try w.writeAll("\"\"");
     try w.writeAll("}");
 }

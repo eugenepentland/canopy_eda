@@ -21,6 +21,9 @@ src/commands.zig::cmdExportKicad fn
 src/commands.zig::cmdExportReview fn
 src/commands.zig::cmdLint fn
 src/config.zig::cseConnectSid fn
+src/config.zig::digikeyApiBase fn
+src/config.zig::digikeyClientId fn
+src/config.zig::digikeyClientSecret fn
 src/convert/alt_functions.zig::AltEntry struct_
 src/convert/alt_functions.zig::AltError value
 src/convert/alt_functions.zig::mergePinoutWithAlts fn
@@ -557,6 +560,11 @@ src/serve/component_search.zig::searchErrorMessage fn
 src/serve/design_doc.zig::EditError value
 src/serve/design_doc.zig::addCriticalIc fn
 src/serve/design_doc.zig::removeCriticalIc fn
+src/serve/digikey.zig::Product struct_
+src/serve/digikey.zig::SearchError value
+src/serve/digikey.zig::default_base value
+src/serve/digikey.zig::resolveMpn fn
+src/serve/digikey.zig::searchErrorMessage fn
 src/serve/edit.zig::AssertionFailure struct_
 src/serve/edit.zig::BuildReport struct_
 src/serve/edit.zig::EditError value

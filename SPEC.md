@@ -561,6 +561,13 @@ Public functions: downloadFootprint, errorMessage, searchComponents, searchError
 - parses part id and datasheet url from a suggestion
 - collectHits maps suggestions to search hits
 
+## serve/digikey
+
+Public functions: resolveMpn, searchErrorMessage
+
+- parseAccessToken extracts the bearer token from the OAuth response
+- collectProducts maps the Products array to resolved parts
+
 ## serve/mcp_tools
 
 Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesignSummaries, renderSceneGraph
@@ -574,7 +581,7 @@ Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesig
 
 ## config
 
-Public functions: cseConnectSid
+Public functions: cseConnectSid, digikeyClientId, digikeyClientSecret, digikeyApiBase
 
 - stripQuotes removes one layer of matching quotes
 

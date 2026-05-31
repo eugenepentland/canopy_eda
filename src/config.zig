@@ -17,6 +17,23 @@ pub fn cseConnectSid(allocator: std.mem.Allocator) ?[]u8 {
     return lookup(allocator, "CSE_CONNECT_SID");
 }
 
+/// DigiKey Product Information API OAuth2 client id, for `resolve_mpn`.
+/// From `DIGIKEY_CLIENT_ID`.
+pub fn digikeyClientId(allocator: std.mem.Allocator) ?[]u8 {
+    return lookup(allocator, "DIGIKEY_CLIENT_ID");
+}
+
+/// DigiKey OAuth2 client secret, for `resolve_mpn`. From `DIGIKEY_CLIENT_SECRET`.
+pub fn digikeyClientSecret(allocator: std.mem.Allocator) ?[]u8 {
+    return lookup(allocator, "DIGIKEY_CLIENT_SECRET");
+}
+
+/// Optional DigiKey API base-URL override (e.g. the sandbox host) for
+/// `resolve_mpn`. From `DIGIKEY_API_BASE`; null falls back to the production host.
+pub fn digikeyApiBase(allocator: std.mem.Allocator) ?[]u8 {
+    return lookup(allocator, "DIGIKEY_API_BASE");
+}
+
 /// Resolve `key` from the real environment first, then from `.env`. Returns
 /// null when unset or empty. Caller owns the slice.
 fn lookup(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {
