@@ -67,6 +67,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var critical_ics: std.ArrayListUnmanaged(env_mod.CriticalIc) = .empty;
     var test_points: std.ArrayListUnmanaged(env_mod.TestPoint) = .empty;
     var functions: std.ArrayListUnmanaged(env_mod.FunctionGroup) = .empty;
+    var parts: std.ArrayListUnmanaged(env_mod.PlaceholderPart) = .empty;
     var derating: ?f64 = null;
     var kicad_pcb_path: ?[]const u8 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
@@ -152,6 +153,12 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
                 }
             },
             .function => if (try parseFunction(self, form_children)) |f| try functions.append(self.allocator, f),
+            .stub => if (try parseStub(self, form_children)) |p| {
+                ids.registerRefDes(self, p.part.ref_des);
+                try instances.append(self.allocator, p.instance);
+                for (p.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
+                try parts.append(self.allocator, p.part);
+            },
             // Section-only forms are silently ignored at the top level —
             // a design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract.
@@ -189,6 +196,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .derating = derating,
         .kicad_pcb_path = kicad_pcb_path,
         .functions = functions.toOwnedSlice(self.allocator) catch &.{},
+        .parts = parts.toOwnedSlice(self.allocator) catch &.{},
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -672,7 +680,7 @@ fn evalSection(
             // `processSharedSectionForm`; top-level-only forms are
             // silently ignored inside a section body.
             .status, .description, .note, .port, .protocol, .calc => {},
-            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function => {},
+            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function, .stub => {},
         }
     }
 
@@ -1120,6 +1128,115 @@ fn parseDesignDoc(
             .mpn = mpn,
         }) catch return EvalError.OutOfMemory;
     }
+}
+
+/// The product of evaluating one `(stub …)` form: the metadata record plus a
+/// synthesised placeholder `Instance` (so the part flows through the existing
+/// net/diagram/export machinery) and the pin-net declarations its signals
+/// produce (so it participates in the flattened netlist that drives diagram
+/// edges).
+const StubResult = struct {
+    part: env_mod.PlaceholderPart,
+    instance: Instance,
+    pin_nets: []const PinNetDecl,
+};
+
+/// Parse a top-level `(stub "name" (role "…") (mpn "…") (category <key>)
+/// (size W H) (ref "REF") (signal "name" class "net") …)` placeholder-part
+/// form. Auto-assigns a ref-des from the category prefix (overridden by an
+/// explicit `(ref …)`), stamps a stable id (inserted into source on first
+/// build), and turns each `(signal …)` into a `PinNetDecl` keyed by the signal
+/// name so the stub wires into the diagram. Returns null when the stub has no
+/// name. The synthesised instance carries `placeholder = true` and an empty
+/// footprint — downstream ERC/export branch on that.
+fn parseStub(self: *Evaluator, form_children: []const Node) EvalError!?StubResult {
+    if (form_children.len < 2) return null;
+    const name = form_children[1].asString() orelse form_children[1].asAtom() orelse return null;
+
+    var role: []const u8 = "";
+    var mpn: []const u8 = "";
+    var category: []const u8 = "";
+    var explicit_ref: []const u8 = "";
+    var width: f64 = 0;
+    var height: f64 = 0;
+    var signals: std.ArrayListUnmanaged(env_mod.PartSignal) = .empty;
+
+    for (form_children[2..]) |sub_node| {
+        const sub = sub_node.asList() orelse continue;
+        if (sub.len < 2) continue;
+        const head = sub[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "role")) {
+            role = sub[1].asString() orelse sub[1].asAtom() orelse "";
+        } else if (std.mem.eql(u8, head, "mpn")) {
+            mpn = sub[1].asString() orelse sub[1].asAtom() orelse "";
+        } else if (std.mem.eql(u8, head, "category")) {
+            category = sub[1].asAtom() orelse sub[1].asString() orelse "";
+        } else if (std.mem.eql(u8, head, "ref")) {
+            explicit_ref = sub[1].asString() orelse sub[1].asAtom() orelse "";
+        } else if (std.mem.eql(u8, head, "size")) {
+            if (sub.len >= 3) {
+                width = sub[1].asNumber() orelse 0;
+                height = sub[2].asNumber() orelse 0;
+            }
+        } else if (std.mem.eql(u8, head, "signal")) {
+            // (signal "NAME" class "NET") — class optional in the middle slot.
+            const sig_name = sub[1].asString() orelse sub[1].asAtom() orelse continue;
+            var sig_class: []const u8 = "";
+            var sig_net: []const u8 = "";
+            if (sub.len >= 4) {
+                sig_class = sub[2].asAtom() orelse sub[2].asString() orelse "";
+                sig_net = sub[3].asString() orelse sub[3].asAtom() orelse "";
+            } else if (sub.len == 3) {
+                sig_net = sub[2].asString() orelse sub[2].asAtom() orelse "";
+            }
+            if (sig_net.len == 0) continue;
+            try signals.append(self.allocator, .{ .name = sig_name, .class = sig_class, .net = sig_net });
+        }
+    }
+
+    const ref_des = if (explicit_ref.len > 0)
+        explicit_ref
+    else
+        try ids.nextRefDes(self, ids.categoryPrefix(category));
+
+    const part_id = try ids.getOrCreateFormId(self, form_children);
+
+    const sig_slice = signals.toOwnedSlice(self.allocator) catch &.{};
+
+    // One PinNetDecl per signal — the signal name is the virtual pin, so the
+    // part participates in net-membership without a real pinout.
+    var pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    for (sig_slice) |sig| {
+        try pin_nets.append(self.allocator, .{ .ref_des = ref_des, .pin = sig.name, .net = sig.net });
+    }
+
+    const inst = Instance{
+        .ref_des = ref_des,
+        .label = ref_des,
+        .origin_key = name,
+        .component = name,
+        .value = mpn,
+        .footprint = "",
+        .symbol = "",
+        .id = part_id,
+        .placeholder = true,
+    };
+
+    return .{
+        .part = .{
+            .ref_des = ref_des,
+            .name = name,
+            .role = role,
+            .mpn = mpn,
+            .category = category,
+            .width = width,
+            .height = height,
+            .id = part_id,
+            .signals = sig_slice,
+        },
+        .instance = inst,
+        .pin_nets = pin_nets.toOwnedSlice(self.allocator) catch &.{},
+    };
 }
 
 /// Parse one `(function "Name" "Subtitle"? (verb "…")? (includes "a" "b" …)?)`

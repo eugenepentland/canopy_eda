@@ -73,7 +73,18 @@ pub fn collectGraph(
     try buildSectionNodes(allocator, scratch, block, &sub_port_to_net, sec_to_sub, &nodes, sec_node);
     try buildSubBlockNodes(allocator, scratch, block, &sub_port_to_net, dg_attach, &nodes, sub_node);
 
+    // Placeholder `(stub …)` parts: one node each, categorised by the stub's
+    // declared category. Record ref-des → node so the netlist (built from the
+    // stub's signals) resolves edges to it below.
+    const stub_node = try allocator.alloc(?u32, block.parts.len);
+    defer allocator.free(stub_node);
+    @memset(stub_node, null);
+    try buildStubNodes(allocator, block, &nodes, stub_node);
+
     var mem = try membership.build(allocator, block, sec_node, sub_node, dg_attach);
+    for (block.parts, 0..) |p, i| {
+        if (stub_node[i]) |nid| try mem.ref_to_node.put(allocator, p.ref_des, nid);
+    }
     defer mem.deinit(allocator);
     const registry = try classify.buildRegistry(allocator, block);
     errdefer allocator.free(registry);
@@ -221,6 +232,31 @@ fn buildSubBlockNodes(
             .outputs = try dupeRails(allocator, output_buf.items),
         });
         sub_node[sb_idx] = @intCast(nodes.items.len - 1);
+    }
+}
+
+/// Append one diagram node per placeholder `(stub …)` part. The node's column
+/// and colour come from the stub's declared `(category …)` (falling back to the
+/// name heuristic); the label prefers the stub's role, then its name; the mpn
+/// becomes the subtitle. Labels/subtitles borrow from the design (not freed),
+/// so `is_boundary` stays false. Records each stub's node id in `stub_node`.
+fn buildStubNodes(
+    allocator: Allocator,
+    block: *const DesignBlock,
+    nodes: *std.ArrayListUnmanaged(Node),
+    stub_node: []?u32,
+) Allocator.Error!void {
+    for (block.parts, 0..) |p, i| {
+        const label = if (p.role.len > 0) p.role else p.name;
+        try nodes.append(allocator, .{
+            .label = label,
+            .subtitle = p.mpn,
+            .category = rb.classifyCategoryKey(p.category, p.name),
+            .slug = "",
+            .inputs = &.{},
+            .outputs = &.{},
+        });
+        stub_node[i] = @intCast(nodes.items.len - 1);
     }
 }
 

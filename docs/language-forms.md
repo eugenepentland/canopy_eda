@@ -84,3 +84,4 @@ where each is accepted: **D** = design-block top level,
 | `(decouple-defaults (ic "REF") (bypass (comp)))` | D·· | Set per-design decouple defaults: a fallback IC ref and bypass cap so (decouple …) can omit both. |
 | `(kicad-pcb "absolute/path/to/board.kicad_pcb")` | D·· | Declare the PCB file the file-based KiCad sync writes board updates to. |
 | `(function "Name" ["subtitle"] [(verb "…")] [(stack N)] (includes "section"…))` | D·· | Declare a high-level functional subsystem for the Function ("what it does") view. |
+| `(stub "name" [(role …)] [(mpn …)] [(category key)] [(size W H)] [(ref "REF")] (signal "name" class "net")…)` | D·· | Declare a placeholder part — auto-placed, sized bounding box, signal-wired — for design-phase diagrams before a real component exists. |

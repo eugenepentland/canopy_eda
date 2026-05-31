@@ -116,6 +116,7 @@ pub const ScopeForm = enum {
     decouple_defaults,
     kicad_pcb,
     function,
+    stub,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -151,6 +152,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "decouple-defaults", .decouple_defaults },
     .{ "kicad-pcb", .kicad_pcb },
     .{ "function", .function },
+    .{ "stub", .stub },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -434,6 +436,10 @@ pub const scope_form_docs = blk: {
     t[@intFromEnum(ScopeForm.function)] = .{ .scope = tl, .doc = .{
         .syntax = "(function \"Name\" [\"subtitle\"] [(verb \"…\")] [(stack N)] (includes \"section\"…))",
         .summary = "Declare a high-level functional subsystem for the Function (\"what it does\") view.",
+    } };
+    t[@intFromEnum(ScopeForm.stub)] = .{ .scope = tl, .doc = .{
+        .syntax = "(stub \"name\" [(role …)] [(mpn …)] [(category key)] [(size W H)] [(ref \"REF\")] (signal \"name\" class \"net\")…)",
+        .summary = "Declare a placeholder part — auto-placed, sized bounding box, signal-wired — for design-phase diagrams before a real component exists.",
     } };
     break :blk t;
 };
