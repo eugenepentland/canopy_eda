@@ -29,6 +29,10 @@ const function_key: []const u8 = "function";
 const function_label: []const u8 = "Function";
 const function_color: []const u8 = "#3fb950"; // green accent, distinct from the class colors
 
+const layout_key: []const u8 = "layout";
+const layout_label: []const u8 = "Layout";
+const layout_color: []const u8 = "#d29922"; // amber accent — the author-placed free view
+
 /// Render the whole tabbed diagram. The first tab is always the **System**
 /// view — one block diagram showing every block and every inter-block
 /// connection at once, color-coded by signal class — when the graph has
@@ -48,6 +52,7 @@ pub fn renderTabs(allocator: Allocator, graph: *const Graph, w: *Writer) (Alloca
 pub fn renderTabsWithFunction(allocator: Allocator, graph: *const Graph, func_graph: ?*const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void {
     const has_function = func_graph != null;
     const has_system = layout.hasSystemView(graph);
+    const has_layout = layout.hasFreeLayout(graph);
     var first_signal: ?ClassId = null;
     for (graph.classes, 0..) |_, i| {
         const id: ClassId = @intCast(i);
@@ -56,13 +61,14 @@ pub fn renderTabsWithFunction(allocator: Allocator, graph: *const Graph, func_gr
             break;
         }
     }
-    if (!has_function and !has_system) {
+    if (!has_function and !has_system and !has_layout) {
         if (first_signal == null) return;
     }
 
     try w.writeAll("<div class=\"dg-wrap\"><style>");
     // Per-view rules: the checked radio shows its panel and lights its tab.
     // Function and System are just keyed views with neutral accents.
+    if (has_layout) try writeToggleRule(w, layout_key, layout_color);
     if (has_function) try writeToggleRule(w, function_key, function_color);
     if (has_system) try writeToggleRule(w, system_key, system_color);
     for (graph.classes, 0..) |c, i| {
@@ -71,14 +77,19 @@ pub fn renderTabsWithFunction(allocator: Allocator, graph: *const Graph, func_gr
     }
     try w.writeAll("</style>");
     // Radios first so the `:checked ~` sibling selectors can reach the panels.
-    // Default-selected tab: Function if present, else System, else first signal.
-    if (has_function) try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\" checked>", .{function_key});
+    // Default-selected tab: Layout if the author declared one (they're actively
+    // placing blocks), else Function, else System, else the first signal view.
+    if (has_layout) try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\" checked>", .{layout_key});
+    if (has_function) {
+        const checked = if (!has_layout) " checked" else "";
+        try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\"{s}>", .{ function_key, checked });
+    }
     if (has_system) {
-        const checked = if (!has_function) " checked" else "";
+        const checked = if (!has_layout and !has_function) " checked" else "";
         try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\"{s}>", .{ system_key, checked });
     }
-    // A signal view is the default only when neither coarse view is present.
-    const signal_default = !has_function and !has_system;
+    // A signal view is the default only when no coarse view is present.
+    const signal_default = !has_layout and !has_function and !has_system;
     for (graph.classes, 0..) |c, i| {
         const id: ClassId = @intCast(i);
         if (!graph.isView(id)) continue;
@@ -86,6 +97,7 @@ pub fn renderTabsWithFunction(allocator: Allocator, graph: *const Graph, func_gr
         try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\"{s}>", .{ c.key, checked });
     }
     try w.writeAll("<div class=\"dg-tabs\">");
+    if (has_layout) try writeTabLabel(w, layout_key, layout_label);
     if (has_function) try writeTabLabel(w, function_key, function_label);
     if (has_system) try writeTabLabel(w, system_key, system_label);
     for (graph.classes, 0..) |c, i| {
@@ -93,6 +105,7 @@ pub fn renderTabsWithFunction(allocator: Allocator, graph: *const Graph, func_gr
         try writeTabLabel(w, c.key, c.label);
     }
     try w.writeAll("</div><div class=\"dg-panels\">");
+    if (has_layout) try renderFreePanel(allocator, graph, w);
     if (func_graph) |fg| try renderCoarsePanel(allocator, fg, function_key, w);
     if (has_system) try renderCoarsePanel(allocator, graph, system_key, w);
     for (graph.classes, 0..) |_, i| {
@@ -126,6 +139,20 @@ fn renderCoarsePanel(allocator: Allocator, graph: *const Graph, key: []const u8,
     const arena = arena_state.allocator();
     const lay = (try layout.computeSystemLayout(arena, graph)) orelse return;
     try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{key});
+    try renderSystemBody(arena, w, graph, lay);
+    try w.writeAll("</div>");
+}
+
+/// The **Layout** tab panel: the author-declared free-floating view. Built from
+/// `computeFreeLayout` (relative `(place …)` directives → absolute box
+/// positions) and drawn through the same body as the System view, so blocks and
+/// class-colored edges look identical — only the placement differs.
+fn renderFreePanel(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const lay = (try layout.computeFreeLayout(arena, graph)) orelse return;
+    try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{layout_key});
     try renderSystemBody(arena, w, graph, lay);
     try w.writeAll("</div>");
 }

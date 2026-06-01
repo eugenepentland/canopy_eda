@@ -68,6 +68,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var test_points: std.ArrayListUnmanaged(env_mod.TestPoint) = .empty;
     var functions: std.ArrayListUnmanaged(env_mod.FunctionGroup) = .empty;
     var parts: std.ArrayListUnmanaged(env_mod.PlaceholderPart) = .empty;
+    var layout_spec: env_mod.LayoutSpec = .{};
     var derating: ?f64 = null;
     var kicad_pcb_path: ?[]const u8 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
@@ -159,6 +160,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
                 for (p.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
                 try parts.append(self.allocator, p.part);
             },
+            .layout => layout_spec = try parseLayout(self, form_children),
             // Section-only forms are silently ignored at the top level —
             // a design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract.
@@ -197,6 +199,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .kicad_pcb_path = kicad_pcb_path,
         .functions = functions.toOwnedSlice(self.allocator) catch &.{},
         .parts = parts.toOwnedSlice(self.allocator) catch &.{},
+        .layout = layout_spec,
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -680,7 +683,7 @@ fn evalSection(
             // `processSharedSectionForm`; top-level-only forms are
             // silently ignored inside a section body.
             .status, .description, .note, .port, .protocol, .calc => {},
-            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function, .stub => {},
+            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function, .stub, .layout => {},
         }
     }
 
@@ -1239,6 +1242,50 @@ fn parseStub(self: *Evaluator, form_children: []const Node) EvalError!?StubResul
     };
 }
 
+/// Parse a top-level `(layout (anchor "name") (place "name" (rel "ref"))…)`
+/// form into a `LayoutSpec`. `(anchor "x")` is shorthand for a pinned root
+/// (`rel = .anchor`, no reference); `(place "x" (right-of "y"))` positions x
+/// relative to y. Unknown relation keywords and malformed directives are
+/// skipped so a typo can't abort the build. Directive order is preserved — the
+/// layout solver resolves dependencies, not source order.
+fn parseLayout(self: *Evaluator, form_children: []const Node) EvalError!env_mod.LayoutSpec {
+    var placements: std.ArrayListUnmanaged(env_mod.Placement) = .empty;
+    for (form_children[1..]) |child| {
+        const c = child.asList() orelse continue;
+        if (c.len < 2) continue;
+        const head = c[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "anchor")) {
+            const name = c[1].asString() orelse c[1].asAtom() orelse continue;
+            try placements.append(self.allocator, .{ .name = name, .rel = .anchor });
+        } else if (std.mem.eql(u8, head, "place")) {
+            // (place "name" (rel "ref"))
+            const name = c[1].asString() orelse c[1].asAtom() orelse continue;
+            if (c.len < 3) {
+                // Bare (place "name") with no relation → treat as an anchor.
+                try placements.append(self.allocator, .{ .name = name, .rel = .anchor });
+                continue;
+            }
+            const rel_form = c[2].asList() orelse continue;
+            if (rel_form.len < 2) continue;
+            const rel_head = rel_form[0].asAtom() orelse continue;
+            const rel = relFromAtom(rel_head) orelse continue;
+            const ref = rel_form[1].asString() orelse rel_form[1].asAtom() orelse continue;
+            try placements.append(self.allocator, .{ .name = name, .rel = rel, .reference = ref });
+        }
+    }
+    return .{ .placements = placements.toOwnedSlice(self.allocator) catch &.{} };
+}
+
+/// Map a `(place …)` relation keyword to a `PlaceRel`. Returns null for an
+/// unrecognised keyword so `parseLayout` can skip the directive.
+fn relFromAtom(atom: []const u8) ?env_mod.PlaceRel {
+    if (std.mem.eql(u8, atom, "right-of")) return .right_of;
+    if (std.mem.eql(u8, atom, "left-of")) return .left_of;
+    if (std.mem.eql(u8, atom, "above")) return .above;
+    if (std.mem.eql(u8, atom, "below")) return .below;
+    return null;
+}
+
 /// Parse one `(function "Name" "Subtitle"? (verb "…")? (includes "a" "b" …)?)`
 /// form into a `FunctionGroup` for the high-level Function view. The first
 /// string after the head is the name, an optional second string is the
@@ -1363,6 +1410,58 @@ test "section (hosts …) records owned sub-block names" {
     try testing.expectEqual(@as(usize, 2), block.sections[0].hosts.len);
     try testing.expectEqualStrings("psu1", block.sections[0].hosts[0]);
     try testing.expectEqualStrings("mon_ch1", block.sections[0].hosts[1]);
+}
+
+// spec: eval/design_block - layout form parses (anchor "name") roots and (place "name" (rel "ref")) directives
+test "design-block parses a (layout …) form with anchor and place" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (layout
+        \\    (anchor "rp2350")
+        \\    (place "esp32" (right-of "rp2350"))))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 2), block.layout.placements.len);
+    try testing.expectEqualStrings("rp2350", block.layout.placements[0].name);
+    try testing.expectEqual(env_mod.PlaceRel.anchor, block.layout.placements[0].rel);
+    try testing.expectEqualStrings("esp32", block.layout.placements[1].name);
+    try testing.expectEqualStrings("rp2350", block.layout.placements[1].reference);
+}
+
+// spec: eval/design_block - layout place resolves right-of/left-of/above/below into a relative offset from the referenced block
+test "layout place parses each relation keyword" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (layout
+        \\    (place "b" (right-of "a"))
+        \\    (place "c" (left-of "a"))
+        \\    (place "d" (above "a"))
+        \\    (place "e" (below "a"))))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 4), block.layout.placements.len);
+    try testing.expectEqual(env_mod.PlaceRel.right_of, block.layout.placements[0].rel);
+    try testing.expectEqual(env_mod.PlaceRel.left_of, block.layout.placements[1].rel);
+    try testing.expectEqual(env_mod.PlaceRel.above, block.layout.placements[2].rel);
+    try testing.expectEqual(env_mod.PlaceRel.below, block.layout.placements[3].rel);
 }
 
 // spec: eval/design_block - bus-net expands one net tie per index in the inclusive range

@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const types = @import("types.zig");
+const env_mod = @import("../eval/env.zig");
 
 const Allocator = std.mem.Allocator;
 const Graph = types.Graph;
@@ -31,6 +32,12 @@ pub const dummy_h: f64 = 14;
 /// Vertical room reserved above the columns for the System view's functional
 /// band headers ("Power In", "Core", …). Internal to the System layout.
 const band_h: f64 = 46;
+/// Row spacing for the free (Mermaid-style) Layout view. Looser than the column
+/// views' `v_gap` so above/below stacks read as deliberate vertical steps.
+const free_v_gap: f64 = 60;
+/// Column gap between independent `(anchor …)` roots in the free layout, so two
+/// unrelated placement trees don't collide. Wide enough to clear a few cells.
+const anchor_col_stride: i32 = 6;
 
 /// A placed real node: its global graph id and top-left corner (width/height
 /// are the module `node_w`/`node_h` constants).
@@ -226,6 +233,209 @@ pub fn computeSystemLayout(arena: Allocator, graph: *const Graph) Allocator.Erro
     lay.height += band_h;
     lay.stage_labels = try col_label.toOwnedSlice(arena);
     return lay;
+}
+
+// ── Free (Mermaid-style) layout: relative `(place …)` directives ─────────
+//
+// The author positions blocks relative to one another with `(layout (anchor
+// "a") (place "b" (right-of "a")) …)`. We resolve each block to an absolute
+// grid cell (col, row) in dependency order — an anchor at (0,0), and each
+// placed block one cell off its reference's cell — then convert cells to x,y
+// with the same box+gap spacing the column views use. Blocks the author didn't
+// place (and ones whose reference is missing or cyclic) flow into a fallback
+// row beneath the placed cluster, so nothing silently disappears.
+
+/// True when the design declared a `(layout …)` with at least one placement —
+/// gates whether the **Layout** tab renders.
+pub fn hasFreeLayout(graph: *const Graph) bool {
+    return graph.layout.placements.len > 0;
+}
+
+const Cell = struct { col: i32, row: i32 };
+
+/// Resolve `(place …)` directives into absolute cells. `cell_of[i]` is node i's
+/// cell once resolved; `placed[i]` marks it. Iterates to a fixed point so a
+/// directive whose reference resolves later still lands (bounded by placement
+/// count, which also breaks cycles). A directive naming an unknown block, or
+/// one stuck in a cycle, simply never resolves → caller flows it into the
+/// fallback row.
+fn resolvePlacements(
+    graph: *const Graph,
+    cell_of: []Cell,
+    placed: []bool,
+) void {
+    const ps = graph.layout.placements;
+    // Anchors first: each is its own root at a distinct column so independent
+    // trees don't overlap.
+    var next_anchor_col: i32 = 0;
+    for (ps) |p| {
+        if (p.rel != .anchor) continue;
+        const gi = nodeByKey(graph, p.name) orelse continue;
+        if (placed[gi]) continue;
+        cell_of[gi] = .{ .col = next_anchor_col, .row = 0 };
+        placed[gi] = true;
+        next_anchor_col += anchor_col_stride;
+    }
+    // Relative placements: sweep until no further progress (≤ placements.len
+    // passes resolves any acyclic chain; a cycle just stops making progress).
+    var pass: usize = 0;
+    while (pass <= ps.len) : (pass += 1) {
+        var progressed = false;
+        for (ps) |p| {
+            if (p.rel == .anchor) continue;
+            const gi = nodeByKey(graph, p.name) orelse continue;
+            if (placed[gi]) continue;
+            const ri = nodeByKey(graph, p.reference) orelse continue;
+            if (!placed[ri]) continue;
+            cell_of[gi] = offsetCell(cell_of[ri], p.rel);
+            placed[gi] = true;
+            progressed = true;
+        }
+        if (!progressed) break;
+    }
+}
+
+/// Offset a reference cell by one step in the directive's direction.
+fn offsetCell(ref: Cell, rel: env_mod.PlaceRel) Cell {
+    return switch (rel) {
+        .right_of => .{ .col = ref.col + 1, .row = ref.row },
+        .left_of => .{ .col = ref.col - 1, .row = ref.row },
+        .above => .{ .col = ref.col, .row = ref.row - 1 },
+        .below => .{ .col = ref.col, .row = ref.row + 1 },
+        .anchor => ref,
+    };
+}
+
+/// First graph node whose authoring `key` equals `name`, or null. Placeable
+/// nodes (sections, sub-blocks, stubs) carry a key; synthesised ones don't.
+fn nodeByKey(graph: *const Graph, name: []const u8) ?u32 {
+    for (graph.nodes, 0..) |nd, i| {
+        if (nd.key.len > 0 and std.mem.eql(u8, nd.key, name)) return @intCast(i);
+    }
+    return null;
+}
+
+/// The free **Layout** view: place blocks at the cells their `(place …)`
+/// directives imply, convert to pixels, route edges face-to-face, and flow any
+/// un-placed block into a row below. Returns null when no `(layout …)` was
+/// declared or there are no placeable blocks.
+pub fn computeFreeLayout(arena: Allocator, graph: *const Graph) Allocator.Error!?Layout {
+    if (graph.layout.placements.len == 0) return null;
+    const n = graph.nodes.len;
+    const cell_of = try arena.alloc(Cell, n);
+    const placed = try arena.alloc(bool, n);
+    @memset(placed, false);
+    resolvePlacements(graph, cell_of, placed);
+
+    // Normalise placed cells so the minimum col/row is 0 (anchors/left-of can
+    // go negative), then find the fallback row (one below the lowest placed).
+    var min_col: i32 = std.math.maxInt(i32);
+    var min_row: i32 = std.math.maxInt(i32);
+    var max_row: i32 = std.math.minInt(i32);
+    var any_placed = false;
+    for (graph.nodes, 0..) |_, i| {
+        if (!placed[i]) continue;
+        any_placed = true;
+        min_col = @min(min_col, cell_of[i].col);
+        min_row = @min(min_row, cell_of[i].row);
+        max_row = @max(max_row, cell_of[i].row);
+    }
+    if (!any_placed) {
+        min_col = 0;
+        min_row = 0;
+        max_row = -1; // fallback row becomes 0
+    }
+
+    // Lay out: placed nodes at their normalised cell; un-placed (and un-keyed
+    // real) blocks flow left-to-right along the fallback row beneath them.
+    var lnodes: std.ArrayListUnmanaged(LNode) = .empty;
+    const fallback_row = max_row - min_row + 1;
+    var fallback_col: i32 = 0;
+    var max_x: f64 = 0;
+    var max_y: f64 = 0;
+    for (graph.nodes, 0..) |nd, i| {
+        if (!isBlock(nd) and nd.key.len == 0) continue; // skip antennas etc.
+        var col: i32 = undefined;
+        var row: i32 = undefined;
+        if (placed[i]) {
+            col = cell_of[i].col - min_col;
+            row = cell_of[i].row - min_row;
+        } else {
+            col = fallback_col;
+            row = fallback_row;
+            fallback_col += 1;
+        }
+        const x = pad + @as(f64, @floatFromInt(col)) * (node_w + h_gap);
+        const y = pad + @as(f64, @floatFromInt(row)) * (node_h + free_v_gap);
+        try lnodes.append(arena, .{ .gid = @intCast(i), .x = x, .y = y });
+        max_x = @max(max_x, x + node_w);
+        max_y = @max(max_y, y + node_h);
+    }
+    if (lnodes.items.len == 0) return null;
+
+    const nodes = try lnodes.toOwnedSlice(arena);
+    const routes = try routeFreeEdges(arena, graph, nodes);
+    return .{
+        .nodes = nodes,
+        .routes = routes,
+        .width = max_x + pad,
+        .height = max_y + pad,
+    };
+}
+
+/// Route every edge whose endpoints are both placed as a simple face-to-face
+/// connection: exit the source on the side facing the target, enter the target
+/// on its facing side. No lane packing — the free view trusts the author's
+/// placement, so a short two-point stub per edge keeps it legible.
+fn routeFreeEdges(arena: Allocator, graph: *const Graph, nodes: []const LNode) Allocator.Error![]Route {
+    const n = graph.nodes.len;
+    const present = try arena.alloc(bool, n);
+    @memset(present, false);
+    const px = try arena.alloc(f64, n);
+    const py = try arena.alloc(f64, n);
+    for (nodes) |ln| {
+        present[ln.gid] = true;
+        px[ln.gid] = ln.x;
+        py[ln.gid] = ln.y;
+    }
+    var routes: std.ArrayListUnmanaged(Route) = .empty;
+    for (graph.edges) |e| {
+        if (e.from == e.to) continue;
+        if (!present[e.from] or !present[e.to]) continue;
+        const a = boxCenter(px[e.from], py[e.from]);
+        const b = boxCenter(px[e.to], py[e.to]);
+        // Attach on the dominant axis: horizontal if the boxes are further apart
+        // in x than y, else vertical. Endpoints sit on the facing faces.
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        var sp: Pt = undefined;
+        var tp: Pt = undefined;
+        if (@abs(dx) >= @abs(dy)) {
+            sp = portPoint(px[e.from], py[e.from], if (dx >= 0) side_r else side_l, 0.5);
+            tp = portPoint(px[e.to], py[e.to], if (dx >= 0) side_l else side_r, 0.5);
+        } else {
+            sp = portPoint(px[e.from], py[e.from], if (dy >= 0) side_b else side_t, 0.5);
+            tp = portPoint(px[e.to], py[e.to], if (dy >= 0) side_t else side_b, 0.5);
+        }
+        const pts = try arena.alloc(Pt, 2);
+        pts[0] = sp;
+        pts[1] = tp;
+        try routes.append(arena, .{
+            .from_gid = e.from,
+            .to_gid = e.to,
+            .class = e.class,
+            .label = e.label,
+            .voltage = e.voltage,
+            .fanout = e.fanout,
+            .pts = pts,
+            .arrow_at_start = false,
+        });
+    }
+    return routes.toOwnedSlice(arena);
+}
+
+fn boxCenter(x: f64, y: f64) Pt {
+    return .{ .x = x + node_w / 2, .y = y + node_h / 2 };
 }
 
 // ── System view: side-aware orthogonal edge routing ─────────────────────
@@ -1465,6 +1675,88 @@ test "computeLayout folds a same-voltage filter stage" {
 
 fn mkBlock(label: []const u8, slug: []const u8) types.Node {
     return .{ .label = label, .subtitle = "", .category = .peripheral, .slug = slug, .inputs = &.{}, .outputs = &.{} };
+}
+
+/// A placeable block with a layout key (its authoring name), used by the free
+/// layout tests where `(place …)` matches on `key`.
+fn mkKeyed(key: []const u8) types.Node {
+    return .{ .label = key, .subtitle = "", .category = .peripheral, .slug = key, .key = key, .inputs = &.{}, .outputs = &.{} };
+}
+
+// spec: diagram/layout - computeFreeLayout pins each anchor and resolves placed blocks in dependency order
+test "computeFreeLayout resolves relative placements from an anchor" {
+    var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("b"), mkKeyed("c") };
+    const placements = [_]env_mod.Placement{
+        .{ .name = "a", .rel = .anchor },
+        // declared out of dependency order: c depends on b, b depends on a.
+        .{ .name = "c", .rel = .below, .reference = "b" },
+        .{ .name = "b", .rel = .right_of, .reference = "a" },
+    };
+    const graph = Graph{ .nodes = &nodes, .edges = &.{}, .layout = .{ .placements = &placements } };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeFreeLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 3), lay.nodes.len);
+    const xy = nodeXY(lay.nodes);
+    // a at origin cell; b one column right of a; c one row below b.
+    try testing.expectApproxEqAbs(xy[0].x + node_w + h_gap, xy[1].x, 0.5);
+    try testing.expectApproxEqAbs(xy[0].y, xy[1].y, 0.5);
+    try testing.expectApproxEqAbs(xy[1].x, xy[2].x, 0.5);
+    try testing.expect(xy[2].y > xy[1].y);
+}
+
+// spec: diagram/layout - computeFreeLayout flows un-placed blocks into a fallback row below the placed cluster
+test "computeFreeLayout flows an un-placed block into the fallback row" {
+    var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("orphan") };
+    const placements = [_]env_mod.Placement{.{ .name = "a", .rel = .anchor }};
+    const graph = Graph{ .nodes = &nodes, .edges = &.{}, .layout = .{ .placements = &placements } };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeFreeLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), lay.nodes.len);
+    const xy = nodeXY(lay.nodes);
+    // The un-placed "orphan" (gid 1) sits in a row below the placed "a" (gid 0).
+    try testing.expect(xy[1].y > xy[0].y);
+}
+
+// spec: diagram/layout - computeFreeLayout places a block with a missing reference into the fallback row without aborting
+test "computeFreeLayout tolerates a placement naming an unknown reference" {
+    var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("b") };
+    const placements = [_]env_mod.Placement{
+        .{ .name = "a", .rel = .anchor },
+        .{ .name = "b", .rel = .right_of, .reference = "ghost" }, // no such block
+    };
+    const graph = Graph{ .nodes = &nodes, .edges = &.{}, .layout = .{ .placements = &placements } };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeFreeLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    // b never resolved (ghost reference) → it flows to the fallback row, below a.
+    try testing.expectEqual(@as(usize, 2), lay.nodes.len);
+    const xy = nodeXY(lay.nodes);
+    try testing.expect(xy[1].y > xy[0].y);
+}
+
+// spec: diagram/layout - computeFreeLayout breaks a placement cycle instead of looping forever
+test "computeFreeLayout breaks a placement cycle" {
+    var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("b") };
+    // a right-of b, b right-of a — a cycle with no anchor; neither can resolve.
+    const placements = [_]env_mod.Placement{
+        .{ .name = "a", .rel = .right_of, .reference = "b" },
+        .{ .name = "b", .rel = .right_of, .reference = "a" },
+    };
+    const graph = Graph{ .nodes = &nodes, .edges = &.{}, .layout = .{ .placements = &placements } };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // Terminates (no infinite loop) and still emits both blocks via the fallback.
+    const lay = (try computeFreeLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), lay.nodes.len);
+}
+
+/// Map placed nodes back to (x,y) indexed by their graph id, for assertions.
+fn nodeXY(nodes: []const LNode) [8]Pt {
+    var out = [_]Pt{.{ .x = 0, .y = 0 }} ** 8;
+    for (nodes) |n| out[n.gid] = .{ .x = n.x, .y = n.y };
+    return out;
 }
 
 // spec: diagram/layout - System layout combines edges from every class in one diagram

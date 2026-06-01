@@ -66,10 +66,12 @@ src/diagram/layout.zig::Layout struct_
 src/diagram/layout.zig::PowerBox struct_
 src/diagram/layout.zig::PowerKind enum_
 src/diagram/layout.zig::Route struct_
+src/diagram/layout.zig::computeFreeLayout fn
 src/diagram/layout.zig::computeLayout fn
 src/diagram/layout.zig::computeSystemLayout fn
 src/diagram/layout.zig::dummy_h value
 src/diagram/layout.zig::h_gap value
+src/diagram/layout.zig::hasFreeLayout fn
 src/diagram/layout.zig::hasSystemView fn
 src/diagram/layout.zig::node_h value
 src/diagram/layout.zig::node_w value
@@ -145,6 +147,7 @@ src/eval/env.zig::Env struct_
 src/eval/env.zig::FunctionGroup struct_
 src/eval/env.zig::Group struct_
 src/eval/env.zig::Instance struct_
+src/eval/env.zig::LayoutSpec struct_
 src/eval/env.zig::ModuleDef struct_
 src/eval/env.zig::Net struct_
 src/eval/env.zig::NetTie struct_
@@ -155,7 +158,9 @@ src/eval/env.zig::PartPin struct_
 src/eval/env.zig::PartSignal struct_
 src/eval/env.zig::PinGroup struct_
 src/eval/env.zig::PinRef struct_
+src/eval/env.zig::PlaceRel enum_
 src/eval/env.zig::PlaceholderPart struct_
+src/eval/env.zig::Placement struct_
 src/eval/env.zig::Port struct_
 src/eval/env.zig::PortDirection enum_
 src/eval/env.zig::PowerDomain struct_

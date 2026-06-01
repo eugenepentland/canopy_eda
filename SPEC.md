@@ -228,8 +228,12 @@ Public functions: collectGraph
 
 ## diagram/layout
 
-Public functions: computeLayout, hasSystemView, computeSystemLayout
+Public functions: computeLayout, hasSystemView, computeSystemLayout, computeFreeLayout, hasFreeLayout
 
+- computeFreeLayout pins each anchor and resolves placed blocks in dependency order
+- computeFreeLayout flows un-placed blocks into a fallback row below the placed cluster
+- computeFreeLayout places a block with a missing reference into the fallback row without aborting
+- computeFreeLayout breaks a placement cycle instead of looping forever
 - Returns null for a view with no edges
 - Ranks nodes left-to-right by signal flow, breaking cycles for layering
 - Routes edges sharing a source through one common vertical trunk
@@ -343,6 +347,8 @@ Public functions: analyze
 - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
 - kicad-pcb form captures the literal path on the design block
 - function form parses a named functional group with a verb and member sections
+- layout form parses (anchor "name") roots and (place "name" (rel "ref")) directives
+- layout place resolves right-of/left-of/above/below into a relative offset from the referenced block
 - hosts form records the sub-block instance names a section owns
 - verifies req with an (id …) target parses as a stable-id sign-off leaving ref-des empty
 - verifies req with a ref-des target parses as a ref-des sign-off leaving target-id empty

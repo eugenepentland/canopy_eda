@@ -85,3 +85,4 @@ where each is accepted: **D** = design-block top level,
 | `(kicad-pcb "absolute/path/to/board.kicad_pcb")` | D·· | Declare the PCB file the file-based KiCad sync writes board updates to. |
 | `(function "Name" ["subtitle"] [(verb "…")] [(stack N)] (includes "section"…))` | D·· | Declare a high-level functional subsystem for the Function ("what it does") view. |
 | `(stub "name" [(role …)] [(mpn …)] [(category key)] [(size W H)] [(ref "REF")] (signal "name" class "net")…)` | D·· | Declare a placeholder part — auto-placed, sized bounding box, signal-wired — for design-phase diagrams before a real component exists. |
+| `(layout (anchor "name") (place "name" (right-of|left-of|above|below "ref"))…)` | D·· | Declare a Mermaid-style free-floating block-diagram layout by positioning blocks relative to one another. |

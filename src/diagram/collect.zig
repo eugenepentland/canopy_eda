@@ -112,7 +112,7 @@ pub fn collectGraph(
     try crystalPass(allocator, scratch, block, &mem, &nodes, &edge_list);
     try assignRails(allocator, scratch, flat, &mem, &port_map, nodes.items);
 
-    return .{ .nodes = try nodes.toOwnedSlice(allocator), .edges = try edge_list.toOwnedSlice(allocator), .classes = registry };
+    return .{ .nodes = try nodes.toOwnedSlice(allocator), .edges = try edge_list.toOwnedSlice(allocator), .classes = registry, .layout = block.layout };
 }
 
 const RailCount = struct { v: f64, c: u32 };
@@ -196,6 +196,7 @@ fn buildSectionNodes(
             .subtitle = sec.description,
             .category = rb.classifySection(sec),
             .slug = try review.slugify(allocator, sec.name),
+            .key = sec.name,
             .inputs = try dupeRails(allocator, input_buf.items),
             .outputs = try dupeRails(allocator, output_buf.items),
         });
@@ -228,6 +229,7 @@ fn buildSubBlockNodes(
             .subtitle = "",
             .category = rb.classifyByName(sb.name, sb.block.instances),
             .slug = try review.slugify(allocator, sb.name),
+            .key = sb.name,
             .inputs = try dupeRails(allocator, input_buf.items),
             .outputs = try dupeRails(allocator, output_buf.items),
         });
@@ -253,6 +255,7 @@ fn buildStubNodes(
             .subtitle = p.mpn,
             .category = rb.classifyCategoryKey(p.category, p.name),
             .slug = "",
+            .key = p.name,
             .inputs = &.{},
             .outputs = &.{},
         });

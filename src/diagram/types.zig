@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const rb = @import("../render_block_types.zig");
+const env_mod = @import("../eval/env.zig");
 const Allocator = std.mem.Allocator;
 
 /// Identifier for a signal class. The first `builtin_classes.len` ids are the
@@ -87,6 +88,11 @@ pub const Node = struct {
     category: rb.Category,
     /// On-page anchor slug — empty when the node has no card to link to.
     slug: []const u8,
+    /// Stable authoring key for `(layout (place "key" …))` matching: the section
+    /// name, the sub-block handle, or the stub name — whatever the author typed,
+    /// independent of the display `label`. Unowned slice into the source design;
+    /// empty for synthesised nodes (antennas, crystals) that can't be placed.
+    key: []const u8 = "",
     inputs: []RailEnd,
     outputs: []RailEnd,
     /// Primary supply rail (volts): the rail powering the most of this block's
@@ -150,6 +156,10 @@ pub const Graph = struct {
     /// slice is owned (allocated by `collect`); the `ClassDef` fields inside
     /// are borrowed, so only the slice itself is freed.
     classes: []const ClassDef = &builtin_classes,
+    /// Declarative `(layout …)` directives, borrowed from the source
+    /// `DesignBlock`. Empty `placements` ⇒ no free layout, so only the
+    /// category-column views render. `computeFreeLayout` consumes it.
+    layout: env_mod.LayoutSpec = .{},
 
     pub fn deinit(self: *Graph, allocator: Allocator) void {
         for (self.nodes) |n| {

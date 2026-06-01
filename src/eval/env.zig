@@ -932,6 +932,28 @@ pub const FunctionGroup = struct {
     stack: u8 = 1,
 };
 
+/// How a `(place …)` directive positions a block relative to another one.
+/// `anchor` is the pinned-root case (no reference); the four directions each
+/// offset by one box-plus-gap from the referenced block.
+pub const PlaceRel = enum { anchor, right_of, left_of, above, below };
+
+/// One `(place "name" (rel "ref"))` directive from a `(layout …)` form: position
+/// the block whose diagram key is `name` relative to the block keyed `ref`. For
+/// `rel == .anchor`, `reference` is empty and the block is a fixed root.
+pub const Placement = struct {
+    name: []const u8,
+    rel: PlaceRel,
+    reference: []const u8 = "",
+};
+
+/// A declarative, Mermaid-style block-diagram layout from a top-level
+/// `(layout …)` form: a list of relative `(place …)` directives the diagram's
+/// `computeFreeLayout` resolves into absolute box positions. Empty `placements`
+/// ⇒ no free layout declared, so the diagram keeps its category-column views.
+pub const LayoutSpec = struct {
+    placements: []const Placement = &.{},
+};
+
 /// The fully-evaluated result of a `(design-block …)`: the flattened netlist
 /// (instances + nets + ports), the section/sub-block tree, and the design-doc
 /// metadata (critical ICs, verifications, rails, functions) the review and
@@ -983,6 +1005,11 @@ pub const DesignBlock = struct {
     /// outlines, and appear in the traceability table as "needs real
     /// footprint". Empty for designs with no `(stub …)` forms.
     parts: []const PlaceholderPart = &.{},
+    /// Declarative Mermaid-style layout from a top-level `(layout …)` form. Its
+    /// `(place …)` directives position diagram blocks relative to one another;
+    /// the diagram's `computeFreeLayout` resolves them into a free-floating view.
+    /// Empty `placements` ⇒ no layout declared, so the category-column views stand.
+    layout: LayoutSpec = .{},
 };
 
 /// Assertion result.
