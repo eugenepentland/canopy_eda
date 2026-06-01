@@ -229,7 +229,7 @@ Public functions: collectGraph
 
 ## diagram/layout
 
-Public functions: computeLayout, hasSystemView, computeSystemLayout, computeChainLayout, computeFreeLayout, hasFreeLayout
+Public functions: computeLayout, hasSystemView, computeSystemLayout, computeChainLayout, computeFreeLayout, computeGroupsLayout, hasFreeLayout
 
 - computeFreeLayout pins each anchor and resolves placed blocks in dependency order
 - computeFreeLayout positions a block from several references at once
@@ -241,6 +241,7 @@ Public functions: computeLayout, hasSystemView, computeSystemLayout, computeChai
 - computeFreeLayout pins edge-directive blocks to the column just outside the rest of the content
 - computeFreeLayout routes each edge as an orthogonal polyline around any group box neither endpoint belongs to
 - computeFreeLayout spreads wires sharing a corridor into parallel lanes instead of overlapping
+- computeGroupsLayout shows only the group boxes with one connector per pair of groups a net crosses, and no individual nodes
 - Returns null for a view with no edges
 - Ranks nodes left-to-right by signal flow, breaking cycles for layering
 - Routes edges sharing a source through one common vertical trunk
@@ -591,6 +592,14 @@ Public functions: resolveMpn, searchErrorMessage, downloadDatasheet, datasheetEr
 - keywordVariants drops trailing keywords for graceful relaxation
 - normalizeDatasheetUrl unwraps a gotoUrl interstitial
 
+## serve/rate_limiter
+
+Public functions: init, acquire, release
+
+- acquire/release pair leaves no slots held
+- acquire spaces successive call starts by the minimum interval
+- acquire blocks a caller once max_in_flight is reached until a release
+
 ## serve/mcp_tools
 
 Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesignSummaries, renderSceneGraph
@@ -604,7 +613,7 @@ Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesig
 
 ## config
 
-Public functions: cseConnectSid, digikeyClientId, digikeyClientSecret, digikeyApiBase
+Public functions: cseConnectSid, digikeyClientId, digikeyClientSecret, digikeyApiBase, cseMinIntervalMs, cseMaxInFlight, digikeyMinIntervalMs, digikeyMaxInFlight
 
 - stripQuotes removes one layer of matching quotes
 

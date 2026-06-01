@@ -1,5 +1,7 @@
 # guardian-snapshot v1
-src/serve.zig:37: pub var (mutable global) outside wiring/main
 src/serve.zig:38: pub var (mutable global) outside wiring/main
-src/serve.zig:59: pub var (mutable global) outside wiring/main
+src/serve.zig:39: pub var (mutable global) outside wiring/main
 src/serve.zig:60: pub var (mutable global) outside wiring/main
+src/serve.zig:61: pub var (mutable global) outside wiring/main
+src/serve/rate_limiter.zig:64: pub var (mutable global) outside wiring/main
+src/serve/rate_limiter.zig:68: pub var (mutable global) outside wiring/main

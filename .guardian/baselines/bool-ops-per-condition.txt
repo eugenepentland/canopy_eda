@@ -1,5 +1,5 @@
 # guardian-snapshot v1
-src/diagram/render.zig:83: condition has 5 boolean ops (cap 3)
+src/diagram/render.zig:92: condition has 5 boolean ops (cap 3)
 src/eval/ids.zig:249: condition has 6 boolean ops (cap 3)
 src/render_block_types.zig:102: condition has 4 boolean ops (cap 3)
 src/render_block_types.zig:108: condition has 7 boolean ops (cap 3)

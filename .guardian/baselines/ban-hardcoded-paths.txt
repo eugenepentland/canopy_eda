@@ -1,6 +1,6 @@
 # guardian-snapshot v1
 src/commands.zig:169: hardcoded literal (hardcoded http URL)
-src/serve/component_search.zig:19: hardcoded literal (hardcoded https URL)
-src/serve/digikey.zig:20: hardcoded literal (hardcoded https URL)
+src/serve/component_search.zig:20: hardcoded literal (hardcoded https URL)
+src/serve/digikey.zig:21: hardcoded literal (hardcoded https URL)
 src/serve/templates/account.zig:594: hardcoded literal (hardcoded https URL)
 src/serve/templates/account.zig:599: hardcoded literal (hardcoded http URL)

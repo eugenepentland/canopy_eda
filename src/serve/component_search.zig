@@ -14,6 +14,7 @@
 //! handled outside Zig. `downloadFootprint`'s ZIP is fed to
 //! `upload.importZipBytes`; `downloadDatasheet`'s PDF to `storeDatasheet`.
 const std = @import("std");
+const rate_limiter = @import("rate_limiter.zig");
 
 // ── Endpoints / headers ───────────────────────────────────────────
 const HOST = "https://componentsearchengine.com";
@@ -432,6 +433,8 @@ fn httpGet(
     max_bytes: usize,
     timeout_secs: []const u8,
 ) ?[]u8 {
+    rate_limiter.cse.acquire();
+    defer rate_limiter.cse.release();
     var argv: std.ArrayListUnmanaged([]const u8) = .empty;
     argv.appendSlice(allocator, &.{
         "curl", "-sS",      "-L", "--max-time",   timeout_secs,

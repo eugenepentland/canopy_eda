@@ -13,6 +13,7 @@
 //! server-side by the caller (via `config`) and never travel over MCP.
 const std = @import("std");
 const json_writer = @import("../json_writer.zig");
+const rate_limiter = @import("rate_limiter.zig");
 
 // ── Endpoints / tunables ──────────────────────────────────────────
 /// Production host. A deployment can point at the sandbox by setting
@@ -285,6 +286,8 @@ fn dupeOpt(allocator: std.mem.Allocator, s: ?[]const u8) std.mem.Allocator.Error
 /// on a spawn failure or non-zero exit. The body is returned regardless of HTTP
 /// status (no `-f`), so the JSON parsers can distinguish error bodies.
 fn curl(allocator: std.mem.Allocator, extra: []const []const u8, timeout_secs: []const u8, max_bytes: usize) ?[]u8 {
+    rate_limiter.digikey.acquire();
+    defer rate_limiter.digikey.release();
     var argv: std.ArrayListUnmanaged([]const u8) = .empty;
     argv.appendSlice(allocator, &.{ "curl", "-sS", "--max-time", timeout_secs }) catch return null;
     argv.appendSlice(allocator, extra) catch return null;

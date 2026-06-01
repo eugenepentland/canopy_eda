@@ -604,6 +604,68 @@ pub fn computeFreeLayout(arena: Allocator, graph: *const Graph) Allocator.Error!
     };
 }
 
+/// The **Groups** view: the free-layout group boxes with the individual blocks
+/// removed, plus one synthetic connector per pair of groups that any net crosses
+/// (deduplicated, drawn centroid-to-centroid). Reuses `computeFreeLayout` so the
+/// boxes keep their Layout-view positions. Returns null when no groups exist.
+///
+/// `base.groups` indices are NOT `graph.layout.groups` indices — empty groups
+/// are dropped by `computeGroupBoxes` — so boxes are keyed by `color_idx`, which
+/// `computeGroupBoxes` set to the original group index.
+pub fn computeGroupsLayout(arena: Allocator, graph: *const Graph) Allocator.Error!?Layout {
+    const base = (try computeFreeLayout(arena, graph)) orelse return null;
+    if (base.groups.len == 0) return null;
+
+    // gid → original group index (first declaring group wins).
+    var gid_group: std.AutoHashMapUnmanaged(u32, usize) = .{};
+    for (graph.layout.groups, 0..) |g, gi| {
+        for (g.members) |name| {
+            if (nodeByKey(graph, name)) |gid| {
+                const gop = try gid_group.getOrPut(arena, gid);
+                if (!gop.found_existing) gop.value_ptr.* = gi;
+            }
+        }
+    }
+    // original group index → its drawn box (only groups that survived).
+    var box_of: std.AutoHashMapUnmanaged(usize, GroupBox) = .{};
+    for (base.groups) |gb| try box_of.put(arena, gb.color_idx, gb);
+
+    var routes: std.ArrayListUnmanaged(Route) = .empty;
+    var seen: std.AutoHashMapUnmanaged(u64, void) = .{};
+    for (graph.edges) |e| {
+        if (e.from == e.to) continue;
+        const fg = gid_group.get(e.from) orelse continue;
+        const tg = gid_group.get(e.to) orelse continue;
+        if (fg == tg) continue;
+        const lo = @min(fg, tg);
+        const hi = @max(fg, tg);
+        const key = (@as(u64, lo) << 32) | @as(u64, hi);
+        if ((try seen.getOrPut(arena, key)).found_existing) continue;
+        const ba = box_of.get(lo) orelse continue;
+        const bb = box_of.get(hi) orelse continue;
+        const pts = try arena.alloc(Pt, 2);
+        pts[0] = .{ .x = ba.x + ba.w / 2, .y = ba.y + ba.h / 2 };
+        pts[1] = .{ .x = bb.x + bb.w / 2, .y = bb.y + bb.h / 2 };
+        try routes.append(arena, .{
+            .from_gid = @intCast(lo),
+            .to_gid = @intCast(hi),
+            .class = e.class,
+            .label = "",
+            .voltage = e.voltage,
+            .fanout = e.fanout,
+            .pts = pts,
+            .arrow_at_start = false,
+        });
+    }
+    return .{
+        .nodes = &.{},
+        .routes = try routes.toOwnedSlice(arena),
+        .width = base.width,
+        .height = base.height,
+        .groups = base.groups,
+    };
+}
+
 /// One LNode by graph id, or null when not laid out.
 fn lnodeOf(nodes: []const LNode, gid: u32) ?LNode {
     for (nodes) |ln| if (ln.gid == gid) return ln;
@@ -2368,6 +2430,34 @@ test "computeFreeLayout lanes parallel wires apart" {
     const y0 = lay.routes[0].pts[lay.routes[0].pts.len / 2].y;
     const y1 = lay.routes[1].pts[lay.routes[1].pts.len / 2].y;
     try testing.expect(@abs(y0 - y1) > 1);
+}
+
+// spec: diagram/layout - computeGroupsLayout shows only the group boxes with one connector per pair of groups a net crosses, and no individual nodes
+test "computeGroupsLayout boxes-only with one connector per crossing pair" {
+    // a in group G1; b,c in group G2. Edge a→b crosses groups; edge b→c is
+    // within G2. Expect 2 boxes, 0 nodes, exactly 1 inter-group connector.
+    var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("b"), mkKeyed("c") };
+    const b_right_a = [_]env_mod.PlaceConstraint{.{ .rel = .right_of, .reference = "a" }};
+    const c_right_b = [_]env_mod.PlaceConstraint{.{ .rel = .right_of, .reference = "b" }};
+    const placements = [_]env_mod.Placement{
+        .{ .name = "a" },
+        .{ .name = "b", .constraints = &b_right_a },
+        .{ .name = "c", .constraints = &c_right_b },
+    };
+    const g1mem = [_][]const u8{"a"};
+    const g2mem = [_][]const u8{ "b", "c" };
+    const groups = [_]env_mod.LayoutGroup{ .{ .label = "G1", .members = &g1mem }, .{ .label = "G2", .members = &g2mem } };
+    var edges = [_]types.Edge{
+        .{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "x" }, // a→b crosses G1↔G2
+        .{ .from = 1, .to = 2, .class = types.CLASS_RF, .label = "y" }, // b→c within G2
+    };
+    const graph = Graph{ .nodes = &nodes, .edges = &edges, .layout = .{ .placements = &placements, .groups = &groups } };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeGroupsLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 0), lay.nodes.len);
+    try testing.expectEqual(@as(usize, 2), lay.groups.len);
+    try testing.expectEqual(@as(usize, 1), lay.routes.len); // only the crossing pair
 }
 
 // spec: diagram/layout - computeFreeLayout pins edge-directive blocks to the column just outside the rest of the content

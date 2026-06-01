@@ -34,6 +34,34 @@ pub fn digikeyApiBase(allocator: std.mem.Allocator) ?[]u8 {
     return lookup(allocator, "DIGIKEY_API_BASE");
 }
 
+/// Minimum interval (ms) between Component Search Engine API calls — the rate
+/// limiter spaces call starts at least this far apart. From `CSE_MIN_INTERVAL_MS`.
+pub fn cseMinIntervalMs(allocator: std.mem.Allocator) u64 {
+    return lookupU64(allocator, "CSE_MIN_INTERVAL_MS", 200);
+}
+
+/// Max concurrent CSE API calls allowed in flight. From `CSE_MAX_IN_FLIGHT`.
+pub fn cseMaxInFlight(allocator: std.mem.Allocator) u32 {
+    return @intCast(lookupU64(allocator, "CSE_MAX_IN_FLIGHT", 2));
+}
+
+/// Minimum interval (ms) between DigiKey API calls. From `DIGIKEY_MIN_INTERVAL_MS`.
+pub fn digikeyMinIntervalMs(allocator: std.mem.Allocator) u64 {
+    return lookupU64(allocator, "DIGIKEY_MIN_INTERVAL_MS", 250);
+}
+
+/// Max concurrent DigiKey API calls allowed in flight. From `DIGIKEY_MAX_IN_FLIGHT`.
+pub fn digikeyMaxInFlight(allocator: std.mem.Allocator) u32 {
+    return @intCast(lookupU64(allocator, "DIGIKEY_MAX_IN_FLIGHT", 2));
+}
+
+/// Resolve `key` as a u64, falling back to `default` when unset or unparseable.
+fn lookupU64(allocator: std.mem.Allocator, key: []const u8, default: u64) u64 {
+    const v = lookup(allocator, key) orelse return default;
+    defer allocator.free(v);
+    return std.fmt.parseInt(u64, std.mem.trim(u8, v, WHITESPACE), 10) catch default;
+}
+
 /// Resolve `key` from the real environment first, then from `.env`. Returns
 /// null when unset or empty. Caller owns the slice.
 fn lookup(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {

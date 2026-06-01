@@ -30,6 +30,7 @@ const account_page = @import("serve/account_page.zig");
 const static_assets = @import("serve/static_assets.zig");
 const sync = @import("serve/sync.zig");
 const notes = @import("serve/notes.zig");
+const rate_limiter = @import("serve/rate_limiter.zig");
 const mcp_docs = @import("serve/mcp_docs.zig");
 
 // ── Global live state ──────────────────────────────────────────────────
@@ -130,6 +131,9 @@ pub fn serve(
     project_dir: []const u8,
     auth_dir: ?[]const u8,
 ) ServeError!void {
+    // Set the CSE/DigiKey rate limits from env/.env once, before any request
+    // thread can touch the limiters.
+    rate_limiter.configureFromEnv(allocator);
     const effective_auth: []const u8 = if (auth_dir) |d| d else try std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir});
     var handler = Handler{ .allocator = allocator, .project_dir = project_dir, .auth_dir = effective_auth };
     var server = try httpz.Server(*Handler).init(allocator, .{

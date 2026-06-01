@@ -1472,6 +1472,88 @@
     openSourceEditor(btn.getAttribute('data-section'));
   });
 
+  // ---- Diagram pan / zoom ----
+  // Wheel zooms toward the cursor, drag pans, double-click (or the ⟲ button)
+  // resets to fit. Drives each diagram SVG's viewBox so it stays crisp at any
+  // zoom. A drag past a small threshold suppresses the follow-up click so the
+  // node links keep working on a plain click.
+  function setupDiagramZoom(svg) {
+    var vb = (svg.getAttribute('viewBox') || '').trim().split(/[ ,]+/).map(Number);
+    if (vb.length !== 4 || vb.some(isNaN)) return;
+    var base = { x: vb[0], y: vb[1], w: vb[2], h: vb[3] };
+    var cur = { x: base.x, y: base.y, w: base.w, h: base.h };
+    var minW = base.w / 16, maxW = base.w * 1.2;
+
+    function apply() { svg.setAttribute('viewBox', cur.x + ' ' + cur.y + ' ' + cur.w + ' ' + cur.h); }
+    function reset() { cur.x = base.x; cur.y = base.y; cur.w = base.w; cur.h = base.h; apply(); }
+
+    // Zoom by `factor` (>1 zooms out) keeping the point under (cx,cy) fixed.
+    function zoomAt(factor, cx, cy) {
+      var rect = svg.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      if (cur.w * factor > maxW) factor = maxW / cur.w;
+      if (cur.w * factor < minW) factor = minW / cur.w;
+      var px = (cx - rect.left) / rect.width;
+      var py = (cy - rect.top) / rect.height;
+      var sx = cur.x + px * cur.w, sy = cur.y + py * cur.h; // svg coord under cursor
+      cur.w *= factor; cur.h *= factor;
+      cur.x = sx - px * cur.w; cur.y = sy - py * cur.h;
+      apply();
+    }
+
+    svg.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      zoomAt(e.deltaY < 0 ? 0.85 : 1 / 0.85, e.clientX, e.clientY);
+    }, { passive: false });
+
+    var dragging = false, sx0 = 0, sy0 = 0, ox = 0, oy = 0, moved = false;
+    svg.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0) return;
+      dragging = true; moved = false; sx0 = e.clientX; sy0 = e.clientY; ox = cur.x; oy = cur.y;
+      try { svg.setPointerCapture(e.pointerId); } catch (_) {}
+    });
+    svg.addEventListener('pointermove', function (e) {
+      if (!dragging) return;
+      var rect = svg.getBoundingClientRect();
+      if (!rect.width) return;
+      cur.x = ox - (e.clientX - sx0) / rect.width * cur.w;
+      cur.y = oy - (e.clientY - sy0) / rect.height * cur.h;
+      if (Math.abs(e.clientX - sx0) + Math.abs(e.clientY - sy0) > 4) moved = true;
+      apply();
+    });
+    function endDrag(e) { if (!dragging) return; dragging = false; try { svg.releasePointerCapture(e.pointerId); } catch (_) {} }
+    svg.addEventListener('pointerup', endDrag);
+    svg.addEventListener('pointercancel', endDrag);
+    // Capture-phase: swallow the click that follows a real drag.
+    svg.addEventListener('click', function (e) {
+      if (moved) { e.stopImmediatePropagation(); e.preventDefault(); moved = false; }
+    }, true);
+    svg.addEventListener('dblclick', function (e) { e.preventDefault(); reset(); });
+
+    // Wrap the SVG so the zoom buttons can sit over its top-right corner.
+    var wrap = document.createElement('div');
+    wrap.className = 'dg-view';
+    svg.parentNode.insertBefore(wrap, svg);
+    wrap.appendChild(svg);
+    var bar = document.createElement('div');
+    bar.className = 'dg-zoom';
+    function centerZoom(factor) {
+      var r = svg.getBoundingClientRect();
+      zoomAt(factor, r.left + r.width / 2, r.top + r.height / 2);
+    }
+    function mkBtn(label, title, fn) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.textContent = label; b.title = title;
+      b.addEventListener('click', function (e) { e.preventDefault(); fn(); });
+      bar.appendChild(b);
+    }
+    mkBtn('+', 'Zoom in', function () { centerZoom(0.8); });
+    mkBtn('−', 'Zoom out', function () { centerZoom(1 / 0.8); });
+    mkBtn('⟲', 'Reset view', reset);
+    wrap.appendChild(bar);
+  }
+  document.querySelectorAll('.dg-svg').forEach(setupDiagramZoom);
+
   // ---- Boot ----
   showSectionList();
 })();

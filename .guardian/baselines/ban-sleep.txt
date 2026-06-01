@@ -1,1 +1,2 @@
 # guardian-snapshot v1
+src/infra/clock.zig:33: std.Thread.sleep reference outside allowed paths

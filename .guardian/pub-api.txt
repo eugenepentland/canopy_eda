@@ -21,9 +21,13 @@ src/commands.zig::cmdExportKicad fn
 src/commands.zig::cmdExportReview fn
 src/commands.zig::cmdLint fn
 src/config.zig::cseConnectSid fn
+src/config.zig::cseMaxInFlight fn
+src/config.zig::cseMinIntervalMs fn
 src/config.zig::digikeyApiBase fn
 src/config.zig::digikeyClientId fn
 src/config.zig::digikeyClientSecret fn
+src/config.zig::digikeyMaxInFlight fn
+src/config.zig::digikeyMinIntervalMs fn
 src/convert/alt_functions.zig::AltEntry struct_
 src/convert/alt_functions.zig::AltError value
 src/convert/alt_functions.zig::mergePinoutWithAlts fn
@@ -73,6 +77,7 @@ src/diagram/layout.zig::Route struct_
 src/diagram/layout.zig::StageSpec struct_
 src/diagram/layout.zig::computeChainLayout fn
 src/diagram/layout.zig::computeFreeLayout fn
+src/diagram/layout.zig::computeGroupsLayout fn
 src/diagram/layout.zig::computeLayout fn
 src/diagram/layout.zig::computeSystemLayout fn
 src/diagram/layout.zig::dummy_h value
@@ -331,7 +336,9 @@ src/id_insert.zig::insertPendingIds fn
 src/infra/clock.zig::epoch value
 src/infra/clock.zig::milliTimestamp value
 src/infra/clock.zig::nanoTimestamp value
+src/infra/clock.zig::ns_per_ms value
 src/infra/clock.zig::ns_per_s value
+src/infra/clock.zig::sleep fn
 src/infra/clock.zig::timestamp value
 src/infra/fs.zig::cwd value
 src/infra/log.zig::warn fn
@@ -698,6 +705,10 @@ src/serve/pdf_viewer.zig::pdfViewerPage fn
 src/serve/plugin_tokens.zig::Token struct_
 src/serve/plugin_tokens.zig::mint fn
 src/serve/plugin_tokens.zig::validate fn
+src/serve/rate_limiter.zig::RateLimiter struct_
+src/serve/rate_limiter.zig::configureFromEnv fn
+src/serve/rate_limiter.zig::cse value
+src/serve/rate_limiter.zig::digikey value
 src/serve/schematic_page.zig::HandlerError value
 src/serve/schematic_page.zig::schematicPage fn
 src/serve/schematic_viewer_js.zig::SCHEMATIC_VIEWER_JS value

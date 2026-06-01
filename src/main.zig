@@ -423,6 +423,7 @@ test {
     _ = @import("serve/sync.zig");
     _ = @import("serve/component_search.zig");
     _ = @import("serve/digikey.zig");
+    _ = @import("serve/rate_limiter.zig");
     _ = @import("serve/library.zig");
     _ = @import("config.zig");
     _ = @import("kicad_pcb/writer.zig");

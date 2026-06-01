@@ -43,6 +43,13 @@ const layout_key: []const u8 = "layout";
 const layout_label: []const u8 = "Layout";
 const layout_color: []const u8 = "#e3742f"; // orange accent — the author-placed free view
 
+/// Tab metadata for the **Groups** view — a coarse overview of the same author
+/// placement showing only the `(group …)` boxes + one connector per pair of
+/// groups any net crosses, with the individual parts hidden. Never default.
+const groups_key: []const u8 = "groups";
+const groups_label: []const u8 = "Groups";
+const groups_color: []const u8 = "#a371f7"; // purple accent
+
 /// Render the whole tabbed diagram. The first tab is always the **System**
 /// view — one block diagram showing every block and every inter-block
 /// connection at once, color-coded by signal class — when the graph has
@@ -72,6 +79,8 @@ pub fn renderTabsWithFunction(
     const has_chain = has_function and chain_stages.len > 0;
     const has_system = layout.hasSystemView(graph);
     const has_layout = layout.hasFreeLayout(graph);
+    // The Groups view is a coarsening of the Layout view's `(group …)` boxes.
+    const has_groups = has_layout and graph.layout.groups.len > 0;
     var first_signal: ?ClassId = null;
     for (graph.classes, 0..) |_, i| {
         const id: ClassId = @intCast(i);
@@ -88,6 +97,7 @@ pub fn renderTabsWithFunction(
     // Per-view rules: the checked radio shows its panel and lights its tab.
     // Function and System are just keyed views with neutral accents.
     if (has_layout) try writeToggleRule(w, layout_key, layout_color);
+    if (has_groups) try writeToggleRule(w, groups_key, groups_color);
     if (has_function) try writeToggleRule(w, function_key, function_color);
     if (has_chain) try writeToggleRule(w, chain_key, chain_color);
     if (has_system) try writeToggleRule(w, system_key, system_color);
@@ -101,6 +111,7 @@ pub fn renderTabsWithFunction(
     // placing blocks), else Function, else System, else the first signal view.
     // The Signal Chain view is an alternate to Function and is never the default.
     if (has_layout) try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\" checked>", .{layout_key});
+    if (has_groups) try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\">", .{groups_key});
     if (has_function) {
         const checked = if (!has_layout) " checked" else "";
         try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\"{s}>", .{ function_key, checked });
@@ -120,6 +131,7 @@ pub fn renderTabsWithFunction(
     }
     try w.writeAll("<div class=\"dg-tabs\">");
     if (has_layout) try writeTabLabel(w, layout_key, layout_label);
+    if (has_groups) try writeTabLabel(w, groups_key, groups_label);
     if (has_function) try writeTabLabel(w, function_key, function_label);
     if (has_chain) try writeTabLabel(w, chain_key, chain_label);
     if (has_system) try writeTabLabel(w, system_key, system_label);
@@ -129,6 +141,7 @@ pub fn renderTabsWithFunction(
     }
     try w.writeAll("</div><div class=\"dg-panels\">");
     if (has_layout) try renderFreePanel(allocator, graph, w);
+    if (has_groups) try renderGroupsPanel(allocator, graph, w);
     if (func_graph) |fg| try renderCoarsePanel(allocator, fg, function_key, w);
     if (has_chain) try renderChainPanel(allocator, func_graph.?, chain_stages, chain_key, w);
     if (has_system) try renderCoarsePanel(allocator, graph, system_key, w);
@@ -143,6 +156,16 @@ pub fn renderTabsWithFunction(
 /// The clickable `<label>` that selects one keyed view's radio.
 fn writeTabLabel(w: *Writer, key: []const u8, label: []const u8) Writer.Error!void {
     try w.print("<label for=\"dg-tab-{s}\" class=\"dg-tab dg-tab-{s}\">{s}</label>", .{ key, key, label });
+}
+
+/// Open a `dg-panel` div for one keyed view (shared by every panel renderer).
+fn writePanelOpen(w: *Writer, key: []const u8) Writer.Error!void {
+    try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{key});
+}
+
+/// Open the diagram `<svg>` sized to the layout's canvas (shared by every view).
+fn writeSvgOpen(w: *Writer, width: f64, height: f64) Writer.Error!void {
+    try w.print("<svg viewBox=\"0 0 {d:.0} {d:.0}\" class=\"dg-svg\" xmlns=\"http://www.w3.org/2000/svg\">", .{ width, height });
 }
 
 /// The checked-radio → show-panel + light-tab CSS pair for one keyed view.
@@ -183,7 +206,7 @@ fn renderChainPanel(
 
 /// Wrap a precomputed coarse `lay` of `graph` in its toggled `dg-panel`.
 fn writeCoarsePanel(arena: Allocator, graph: *const Graph, lay: layout.Layout, key: []const u8, w: *Writer) (Allocator.Error || Writer.Error)!void {
-    try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{key});
+    try writePanelOpen(w, key);
     try renderSystemBody(arena, w, graph, lay, false);
     try w.writeAll("</div>");
 }
@@ -197,9 +220,26 @@ fn renderFreePanel(allocator: Allocator, graph: *const Graph, w: *Writer) (Alloc
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const lay = (try layout.computeFreeLayout(arena, graph)) orelse return;
-    try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{layout_key});
+    try writePanelOpen(w, layout_key);
     try renderSystemBody(arena, w, graph, lay, true);
     try w.writeAll("</div>");
+}
+
+/// The **Groups** tab panel: only the `(group …)` boxes plus one connector per
+/// pair of groups any net crosses — the parts inside are hidden, so a busy
+/// design reads as a handful of labeled regions. Reuses the Layout placement so
+/// the boxes sit exactly where they do in the Layout view.
+fn renderGroupsPanel(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const lay = (try layout.computeGroupsLayout(arena, graph)) orelse return;
+    try writePanelOpen(w, groups_key);
+    try writeSvgOpen(w, lay.width, lay.height);
+    try writeGroupBoxes(w, lay);
+    // One class-colored orthogonal connector per crossing group pair (no parts).
+    for (lay.routes) |r| try drawSysEdge(w, r, classColor(graph, r.class), null, null, true);
+    try w.writeAll("</svg></div>");
 }
 
 /// Render the combined System diagram as a standalone always-visible block (a
@@ -220,10 +260,7 @@ pub fn renderSystemStandalone(allocator: Allocator, graph: *const Graph, w: *Wri
 /// standalone block.
 fn renderSystemBody(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout, rail_mode: bool) (Allocator.Error || Writer.Error)!void {
     try writeClassLegend(w, graph, lay);
-    try w.print(
-        "<svg viewBox=\"0 0 {d:.0} {d:.0}\" class=\"dg-svg\" xmlns=\"http://www.w3.org/2000/svg\">",
-        .{ lay.width, lay.height },
-    );
+    try writeSvgOpen(w, lay.width, lay.height);
     try renderSystemView(arena, w, graph, lay, rail_mode);
     try w.writeAll("</svg>");
 }
@@ -415,12 +452,9 @@ fn renderView(allocator: Allocator, graph: *const Graph, view: ClassId, w: *Writ
     // every other view uses its single accent color.
     const palette: ?[]const VoltColor = if (view == types.CLASS_POWER) try buildVoltPalette(arena, graph) else null;
 
-    try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{graph.classes[view].key});
+    try writePanelOpen(w, graph.classes[view].key);
     if (palette) |p| try writeLegend(w, p, lay);
-    try w.print(
-        "<svg viewBox=\"0 0 {d:.0} {d:.0}\" class=\"dg-svg\" xmlns=\"http://www.w3.org/2000/svg\">",
-        .{ lay.width, lay.height },
-    );
+    try writeSvgOpen(w, lay.width, lay.height);
     if (view == types.CLASS_POWER) {
         try renderPowerView(arena, w, graph, lay, palette);
     } else {
@@ -985,7 +1019,13 @@ pub const CSS =
     \\font:600 17px -apple-system,BlinkMacSystemFont,sans-serif;}
     \\.dg-tab:hover{color:#c9d1d9;border-color:#484f58;}
     \\.dg-panel{display:none;overflow-x:auto;}
-    \\.dg-svg{display:block;width:100%;max-width:1536px;height:auto;}
+    \\.dg-svg{display:block;width:100%;max-width:1536px;height:auto;cursor:grab;touch-action:none;}
+    \\.dg-svg:active{cursor:grabbing;}
+    \\.dg-view{position:relative;}
+    \\.dg-zoom{position:absolute;top:8px;right:8px;display:flex;gap:4px;z-index:5;}
+    \\.dg-zoom button{width:28px;height:28px;font:600 16px -apple-system,BlinkMacSystemFont,sans-serif;line-height:1;
+    \\cursor:pointer;background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;}
+    \\.dg-zoom button:hover{background:#21262d;color:#fff;border-color:#484f58;}
     \\.dg-rect{fill:#0d1117;stroke-width:1.5;}
     \\.dg-boundary{stroke-dasharray:5 4;}
     \\.dg-node:hover .dg-rect{fill:#161b22;}
