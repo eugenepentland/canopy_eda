@@ -702,28 +702,84 @@ fn toolDownloadFootprint(allocator: std.mem.Allocator, project_dir: []const u8, 
     return true;
 }
 
-/// Fetch a part's datasheet PDF from Component Search Engine and store it under
-/// `lib/datasheets/`, where `read_datasheet` can extract its text. Scrapes the
-/// datasheet link off the CSE part page using `CSE_CONNECT_SID` (read
-/// server-side from env/`.env` — never over MCP). Returns the stored file +
-/// datasheet URL, or `{ok:false,error}`.
+/// Fetch a part's datasheet PDF and store it under `lib/datasheets/`, where
+/// `read_datasheet` can extract its text. Tries Component Search Engine first
+/// (scraping the datasheet link via `CSE_CONNECT_SID`); if CSE has no datasheet
+/// on file (or isn't configured), falls back to DigiKey's `datasheet_url`
+/// (`DIGIKEY_CLIENT_ID` / `DIGIKEY_CLIENT_SECRET`), unwrapping any manufacturer
+/// interstitial and validating the `%PDF` magic. All credentials are read
+/// server-side, never over MCP. The success envelope's `source` says which
+/// provider supplied it; when both fail, `{ok:false,error,cse_error,digikey_error}`.
 fn toolDownloadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
     const part_number = requireString(args_val, KEY_PART_NUMBER) orelse return missingArg(out, allocator, KEY_PART_NUMBER);
     const manufacturer = optionalString(args_val, "manufacturer");
     const w = out.writer(allocator);
 
-    const sid = config.cseConnectSid(allocator) orelse {
-        try w.writeAll("{\"ok\":false,\"error\":\"CSE_CONNECT_SID is not set on the server; add it to .env\"}");
-        return false;
-    };
+    var cse_msg: []const u8 = "";
+    switch (try tryCseDatasheet(w, allocator, project_dir, part_number, manufacturer)) {
+        .ok => return true,
+        .store_failed => return false,
+        .unavailable => |m| cse_msg = m,
+    }
 
-    const ds = component_search.downloadDatasheet(allocator, part_number, manufacturer, sid) catch |err| {
-        try w.writeAll(JSON_ERR_OPEN);
-        try json_writer.writeString(w, component_search.datasheetErrorMessage(err));
-        try w.writeAll("}");
-        return false;
-    };
-    return finishDatasheet(w, allocator, project_dir, "componentsearchengine", ds.filename, ds.pdf_bytes, ds.part_name, ds.manufacturer, ds.source_url);
+    var dk_msg: []const u8 = "";
+    switch (try tryDigikeyDatasheet(w, allocator, project_dir, part_number, manufacturer)) {
+        .ok => return true,
+        .store_failed => return false,
+        .unavailable => |m| dk_msg = m,
+    }
+
+    try w.writeAll(JSON_ERR_OPEN);
+    try json_writer.writeString(w, "no datasheet found via Component Search Engine or DigiKey");
+    try w.writeAll(",\"cse_error\":");
+    try json_writer.writeString(w, cse_msg);
+    try w.writeAll(",\"digikey_error\":");
+    try json_writer.writeString(w, dk_msg);
+    try w.writeAll("}");
+    return false;
+}
+
+/// Outcome of one datasheet provider: `ok`/`store_failed` mean the envelope is
+/// already written (success / a terminal store error); `unavailable` carries a
+/// reason and means "try the next provider".
+const DatasheetOutcome = union(enum) {
+    ok,
+    store_failed,
+    unavailable: []const u8,
+};
+
+/// Try Component Search Engine. `unavailable` when `CSE_CONNECT_SID` is unset or
+/// CSE has no datasheet for the part.
+fn tryCseDatasheet(
+    w: anytype,
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    part_number: []const u8,
+    manufacturer: ?[]const u8,
+) !DatasheetOutcome {
+    const sid = config.cseConnectSid(allocator) orelse return .{ .unavailable = "CSE_CONNECT_SID not set" };
+    const ds = component_search.downloadDatasheet(allocator, part_number, manufacturer, sid) catch |err|
+        return .{ .unavailable = component_search.datasheetErrorMessage(err) };
+    const ok = try finishDatasheet(w, allocator, project_dir, "componentsearchengine", ds.filename, ds.pdf_bytes, ds.part_name, ds.manufacturer, ds.source_url);
+    return if (ok) .ok else .store_failed;
+}
+
+/// Try DigiKey's `datasheet_url`. `unavailable` when DigiKey credentials are
+/// unset or it has no resolvable datasheet PDF for the part.
+fn tryDigikeyDatasheet(
+    w: anytype,
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    part_number: []const u8,
+    manufacturer: ?[]const u8,
+) !DatasheetOutcome {
+    const client_id = config.digikeyClientId(allocator) orelse return .{ .unavailable = "DIGIKEY_CLIENT_ID not set" };
+    const client_secret = config.digikeyClientSecret(allocator) orelse return .{ .unavailable = "DIGIKEY_CLIENT_SECRET not set" };
+    const base: []const u8 = config.digikeyApiBase(allocator) orelse digikey.default_base;
+    const ds = digikey.downloadDatasheet(allocator, base, client_id, client_secret, part_number, manufacturer) catch |err|
+        return .{ .unavailable = digikey.datasheetErrorMessage(err) };
+    const ok = try finishDatasheet(w, allocator, project_dir, "digikey", ds.mpn, ds.pdf_bytes, ds.mpn, ds.manufacturer, ds.source_url);
+    return if (ok) .ok else .store_failed;
 }
 
 /// Store a fetched datasheet PDF and emit the success envelope.

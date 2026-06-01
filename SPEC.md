@@ -563,11 +563,12 @@ Public functions: downloadFootprint, errorMessage, searchComponents, searchError
 
 ## serve/digikey
 
-Public functions: resolveMpn, searchErrorMessage
+Public functions: resolveMpn, searchErrorMessage, downloadDatasheet, datasheetErrorMessage
 
 - parseAccessToken extracts the bearer token from the OAuth response
 - collectProducts maps the Products array to resolved parts
 - keywordVariants drops trailing keywords for graceful relaxation
+- normalizeDatasheetUrl unwraps a gotoUrl interstitial
 
 ## serve/mcp_tools
 

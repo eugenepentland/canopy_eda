@@ -1,4 +1,5 @@
 # guardian-snapshot v1
+DOWNLOAD_TIMEOUT_SECS = "60"
 HEADER_CORS_ALLOW_ORIGIN = "access-control-allow-origin"
 NAME_FIELD_PREFIX = "{\"name\":"
 OK_JSON_TRUE = "{\"ok\":true}"
@@ -11,6 +12,8 @@ in: src/serve/api.zig
 in: src/serve/api.zig
 in: src/serve/api.zig
 in: src/serve/auth.zig
+in: src/serve/component_search.zig
+in: src/serve/digikey.zig
 in: src/serve/edit.zig
 in: src/serve/edit.zig
 in: src/serve/footprint_preview.zig

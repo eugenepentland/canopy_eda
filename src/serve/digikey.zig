@@ -22,7 +22,12 @@ const TOKEN_PATH = "/v1/oauth2/token";
 const KEYWORD_PATH = "/products/v4/search/keyword";
 const TOKEN_TIMEOUT_SECS = "20";
 const SEARCH_TIMEOUT_SECS = "30";
-const MAX_BYTES: usize = 4 * 1024 * 1024;
+const DOWNLOAD_TIMEOUT_SECS = "60";
+/// JSON responses are small; datasheet PDFs are not.
+const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
+const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " ++
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 
 /// One resolved catalog match. All slices are owned by the allocator passed to
 /// `resolveMpn` (a request arena on the MCP path). `datasheet_url`,
@@ -41,6 +46,36 @@ pub const SearchError = error{
     TokenFailed,
     SearchFailed,
 } || std.mem.Allocator.Error;
+
+/// A datasheet PDF fetched via DigiKey. `pdf_bytes` and the strings are owned by
+/// the allocator. `source_url` is the URL actually downloaded (after unwrapping
+/// any manufacturer interstitial), for traceability.
+pub const DatasheetResult = struct {
+    pdf_bytes: []const u8,
+    mpn: []const u8,
+    manufacturer: []const u8,
+    source_url: []const u8,
+};
+
+pub const DatasheetError = error{
+    TokenFailed,
+    NotFound,
+    NoDatasheet,
+    DownloadFailed,
+    NotPdf,
+} || std.mem.Allocator.Error;
+
+/// Stable, user-facing message for a `DatasheetError`.
+pub fn datasheetErrorMessage(err: DatasheetError) []const u8 {
+    return switch (err) {
+        error.TokenFailed => "DigiKey OAuth token request failed (check DIGIKEY_CLIENT_ID / DIGIKEY_CLIENT_SECRET)",
+        error.NotFound => "DigiKey found no part matching this number",
+        error.NoDatasheet => "DigiKey has no datasheet URL on file for this part",
+        error.DownloadFailed => "datasheet download request failed (network error)",
+        error.NotPdf => "the DigiKey datasheet URL did not resolve to a PDF",
+        error.OutOfMemory => "out of memory",
+    };
+}
 
 /// Stable, user-facing message for a `SearchError`, for the MCP envelope.
 pub fn searchErrorMessage(err: SearchError) []const u8 {
@@ -122,7 +157,7 @@ fn fetchToken(allocator: std.mem.Allocator, base: []const u8, client_id: []const
         "grant_type=client_credentials", FORM_FIELD,
         id_arg,                          FORM_FIELD,
         secret_arg,
-    }, TOKEN_TIMEOUT_SECS) orelse return null;
+    }, TOKEN_TIMEOUT_SECS, MAX_RESPONSE_BYTES) orelse return null;
     return parseAccessToken(allocator, body);
 }
 
@@ -168,7 +203,7 @@ fn keywordSearch(
         JSON_ACCEPT,  "-H",
         JSON_CONTENT, "--data-binary",
         body.items,
-    }, SEARCH_TIMEOUT_SECS);
+    }, SEARCH_TIMEOUT_SECS, MAX_RESPONSE_BYTES);
 }
 
 const JSON_ACCEPT = "Accept: application/json";
@@ -249,7 +284,7 @@ fn dupeOpt(allocator: std.mem.Allocator, s: ?[]const u8) std.mem.Allocator.Error
 /// Run `curl -sS --max-time <t> <extra…>`, returning the response body or null
 /// on a spawn failure or non-zero exit. The body is returned regardless of HTTP
 /// status (no `-f`), so the JSON parsers can distinguish error bodies.
-fn curl(allocator: std.mem.Allocator, extra: []const []const u8, timeout_secs: []const u8) ?[]u8 {
+fn curl(allocator: std.mem.Allocator, extra: []const []const u8, timeout_secs: []const u8, max_bytes: usize) ?[]u8 {
     var argv: std.ArrayListUnmanaged([]const u8) = .empty;
     argv.appendSlice(allocator, &.{ "curl", "-sS", "--max-time", timeout_secs }) catch return null;
     argv.appendSlice(allocator, extra) catch return null;
@@ -257,10 +292,112 @@ fn curl(allocator: std.mem.Allocator, extra: []const []const u8, timeout_secs: [
     const res = std.process.Child.run(.{
         .allocator = allocator,
         .argv = argv.items,
-        .max_output_bytes = MAX_BYTES,
+        .max_output_bytes = max_bytes,
     }) catch return null;
     if (res.term != .Exited or res.term.Exited != 0) return null;
     return res.stdout;
+}
+
+// ── Datasheet download (fallback source for download_datasheet) ────
+
+/// Resolve `part_number` via the keyword search, pick the best match, unwrap any
+/// manufacturer interstitial on its `datasheet_url`, download the PDF (following
+/// redirects), and validate the `%PDF` magic. The DigiKey-side counterpart to
+/// `component_search.downloadDatasheet`, used as a fallback when CSE has no
+/// datasheet on file.
+pub fn downloadDatasheet(
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    client_id: []const u8,
+    client_secret: []const u8,
+    part_number: []const u8,
+    manufacturer: ?[]const u8,
+) DatasheetError!DatasheetResult {
+    const products = resolveMpn(allocator, base, client_id, client_secret, part_number, 5) catch |err| switch (err) {
+        error.TokenFailed => return error.TokenFailed,
+        error.SearchFailed => return error.NotFound,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    const product = pickProduct(products, part_number, manufacturer) orelse return error.NotFound;
+    const raw = product.datasheet_url orelse return error.NoDatasheet;
+
+    const url = try normalizeDatasheetUrl(allocator, raw);
+    const pdf = downloadPdf(allocator, url) orelse return error.DownloadFailed;
+    if (!looksLikePdf(pdf)) return error.NotPdf;
+
+    return .{
+        .pdf_bytes = pdf,
+        .mpn = product.mpn,
+        .manufacturer = product.manufacturer,
+        .source_url = url,
+    };
+}
+
+/// Choose the product whose MPN matches `part_number` exactly (case-insensitive),
+/// preferring one whose manufacturer matches `manufacturer` when given; falls
+/// back to the first product. Null only when the list is empty.
+fn pickProduct(products: []const Product, part_number: []const u8, manufacturer: ?[]const u8) ?Product {
+    if (products.len == 0) return null;
+    var first_exact: ?Product = null;
+    for (products) |p| {
+        if (!std.ascii.eqlIgnoreCase(p.mpn, part_number)) continue;
+        if (first_exact == null) first_exact = p;
+        if (manufacturer) |want| {
+            if (std.ascii.indexOfIgnoreCase(p.manufacturer, want) != null) return p;
+        }
+    }
+    return first_exact orelse products[0];
+}
+
+const GOTO_MARKER = "gotoUrl=";
+
+/// Some DigiKey `datasheet_url`s point at a manufacturer interstitial that wraps
+/// the real target in a `gotoUrl=<percent-encoded url>` query param (e.g. TI's
+/// `suppproductinfo.tsp`). Return that decoded target when present, else the URL
+/// unchanged. Following redirects on the result reaches the actual PDF.
+fn normalizeDatasheetUrl(allocator: std.mem.Allocator, url: []const u8) std.mem.Allocator.Error![]u8 {
+    const idx = std.mem.indexOf(u8, url, GOTO_MARKER) orelse return allocator.dupe(u8, url);
+    const start = idx + GOTO_MARKER.len;
+    var end = start;
+    while (end < url.len and url[end] != '&') : (end += 1) {}
+    return percentDecode(allocator, url[start..end]);
+}
+
+/// Percent-decode `%XX` escapes; non-escapes pass through verbatim.
+fn percentDecode(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < s.len) {
+        const hi = if (s[i] == '%' and i + 2 < s.len) hexVal(s[i + 1]) else null;
+        const lo = if (hi != null) hexVal(s[i + 2]) else null;
+        if (lo) |l| {
+            try out.append(allocator, (hi.? << 4) | l);
+            i += 3;
+        } else {
+            try out.append(allocator, s[i]);
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn hexVal(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
+/// GET `url` as a browser, following redirects, into a byte buffer.
+fn downloadPdf(allocator: std.mem.Allocator, url: []const u8) ?[]u8 {
+    return curl(allocator, &.{ "-L", "-A", BROWSER_UA, url }, DOWNLOAD_TIMEOUT_SECS, MAX_DOWNLOAD_BYTES);
+}
+
+/// PDF magic — distinguishes a real datasheet from an HTML interstitial page.
+fn looksLikePdf(bytes: []const u8) bool {
+    return bytes.len >= 4 and std.mem.eql(u8, bytes[0..4], "%PDF");
 }
 
 // ── Tests ─────────────────────────────────────────────────────────
@@ -292,6 +429,24 @@ test "keywordVariants drops trailing keywords for graceful relaxation" {
     defer freeVariants(a, one);
     try std.testing.expectEqual(@as(usize, 1), one.len);
     try std.testing.expectEqualStrings("INA228", one[0]);
+}
+
+test "normalizeDatasheetUrl unwraps a gotoUrl interstitial" {
+    // spec: serve/digikey - normalizeDatasheetUrl unwraps a gotoUrl interstitial
+    const a = std.testing.allocator;
+    const wrapped = "https://www.ti.com/general/docs/suppproductinfo.tsp?distId=10&gotoUrl=http%3A%2F%2Fwww.ti.com%2Flit%2Fgpn%2Fina228";
+    const u = try normalizeDatasheetUrl(a, wrapped);
+    defer a.free(u);
+    try std.testing.expectEqualStrings("http://www.ti.com/lit/gpn/ina228", u);
+
+    // A plain URL passes through unchanged.
+    const p = try normalizeDatasheetUrl(a, "https://example.com/ds.pdf");
+    defer a.free(p);
+    try std.testing.expectEqualStrings("https://example.com/ds.pdf", p);
+
+    // PDF magic gates a real datasheet vs. an HTML interstitial.
+    try std.testing.expect(looksLikePdf("%PDF-1.7\nrest"));
+    try std.testing.expect(!looksLikePdf("<!DOCTYPE html>"));
 }
 
 test "collectProducts maps the Products array to resolved parts" {
