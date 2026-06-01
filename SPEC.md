@@ -239,6 +239,8 @@ Public functions: computeLayout, hasSystemView, computeSystemLayout, computeChai
 - computeFreeLayout lays each layout row as a horizontal band, stacking bands top-to-bottom
 - computeFreeLayout boxes each layout group around its members with a labeled top strip
 - computeFreeLayout pins edge-directive blocks to the column just outside the rest of the content
+- computeFreeLayout routes each edge as an orthogonal polyline around any group box neither endpoint belongs to
+- computeFreeLayout spreads wires sharing a corridor into parallel lanes instead of overlapping
 - Returns null for a view with no edges
 - Ranks nodes left-to-right by signal flow, breaking cycles for layering
 - Routes edges sharing a source through one common vertical trunk

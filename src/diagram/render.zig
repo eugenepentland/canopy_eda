@@ -247,15 +247,18 @@ fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layo
     // In rail mode (the Layout view) each power net gets its own color + label so
     // rails are traceable; otherwise power recedes as one faint anonymous color.
     const rails: ?[]const RailColor = if (rail_mode) try buildRailPalette(arena, graph) else null;
+    // The Layout view (rail_mode) routes its own obstacle-dodging orthogonal
+    // paths, so draw them as sharp right-angle polylines (`sharp`); the staged
+    // System / Function views keep the flowing-Bézier style over lane routes.
     for (lay.routes) |r| {
         if (r.class == types.CLASS_POWER) {
             if (rails) |p| {
-                try writeRoutedEdge(w, r, railColor(p, r.label), sys_rail_width, sys_rail_opacity);
+                try drawSysEdge(w, r, railColor(p, r.label), sys_rail_width, sys_rail_opacity, rail_mode);
             } else {
-                try writeRoutedEdge(w, r, classColor(graph, r.class), sys_power_width, sys_power_opacity);
+                try drawSysEdge(w, r, classColor(graph, r.class), sys_power_width, sys_power_opacity, rail_mode);
             }
         } else {
-            try writeRoutedEdge(w, r, classColor(graph, r.class), null, null);
+            try drawSysEdge(w, r, classColor(graph, r.class), null, null, rail_mode);
         }
     }
     for (lay.nodes) |n| try writeNode(arena, w, graph.nodes[n.gid], n.x, n.y);
@@ -697,9 +700,7 @@ fn writeCurveEdgeStyled(w: *Writer, r: layout.Route, color: []const u8, width: ?
         "<path d=\"M {d:.1} {d:.1} C {d:.1} {d:.1}, {d:.1} {d:.1}, {d:.1} {d:.1}\" class=\"dg-edge\" stroke=\"{s}\"",
         .{ a.x, a.y, c1x, a.y, c2x, b.y, b.x, b.y, color },
     );
-    if (width) |sw| try w.print(" stroke-width=\"{d:.1}\"", .{sw});
-    if (opacity) |op| try w.print(" stroke-opacity=\"{d:.2}\"", .{op});
-    try w.writeAll("/>");
+    try writeEdgeStrokeClose(w, width, opacity);
     if (opacity == null) {
         try writeDot(w, a, color);
         try writeDot(w, b, color);
@@ -727,14 +728,42 @@ fn writeRoutedEdge(w: *Writer, r: layout.Route, color: []const u8, width: ?f64, 
         try w.print(" Q {d:.1} {d:.1}, {d:.1} {d:.1}", .{ pts[i].x, pts[i].y, m.x, m.y });
     }
     try w.print(" L {d:.1} {d:.1}\" class=\"dg-edge\" stroke=\"{s}\"", .{ pts[pts.len - 1].x, pts[pts.len - 1].y, color });
-    if (width) |sw| try w.print(" stroke-width=\"{d:.1}\"", .{sw});
-    if (opacity) |op| try w.print(" stroke-opacity=\"{d:.2}\"", .{op});
-    try w.writeAll("/>");
+    try writeEdgeStrokeClose(w, width, opacity);
     if (opacity == null) try writeDot(w, pts[0], color); // source dot; arrowhead marks the sink
 }
 
 fn midpoint(a: types.Pt, b: types.Pt) types.Pt {
     return .{ .x = (a.x + b.x) / 2, .y = (a.y + b.y) / 2 };
+}
+
+/// Emit the optional `stroke-width`/`stroke-opacity` attributes and close an
+/// edge `<path>` — shared by every edge drawer so the attribute literals live
+/// in one place.
+fn writeEdgeStrokeClose(w: *Writer, width: ?f64, opacity: ?f64) Writer.Error!void {
+    if (width) |sw| try w.print(" stroke-width=\"{d:.1}\"", .{sw});
+    if (opacity) |op| try w.print(" stroke-opacity=\"{d:.2}\"", .{op});
+    try w.writeAll("/>");
+}
+
+/// Draw one System/Layout-view edge: a sharp orthogonal polyline when `sharp`
+/// (the Layout view, whose router already dodges obstacles), else the staged
+/// views' flowing Bézier.
+fn drawSysEdge(w: *Writer, r: layout.Route, color: []const u8, width: ?f64, opacity: ?f64, sharp: bool) Writer.Error!void {
+    if (sharp) try writeOrthEdge(w, r, color, width, opacity) else try writeRoutedEdge(w, r, color, width, opacity);
+}
+
+/// Draw a route as a sharp orthogonal polyline — straight `L` segments with
+/// right-angle bends (softened only by the `.dg-edge` `stroke-linejoin:round`).
+/// Used by the free Layout view, whose router already dodges blocks and foreign
+/// groups, so the wires should read as clean right angles, not flowing Béziers.
+fn writeOrthEdge(w: *Writer, r: layout.Route, color: []const u8, width: ?f64, opacity: ?f64) Writer.Error!void {
+    const pts = r.pts;
+    try w.print("<path d=\"M {d:.1} {d:.1}", .{ pts[0].x, pts[0].y });
+    var i: usize = 1;
+    while (i < pts.len) : (i += 1) try w.print(" L {d:.1} {d:.1}", .{ pts[i].x, pts[i].y });
+    try w.print("\" class=\"dg-edge\" stroke=\"{s}\"", .{color});
+    try writeEdgeStrokeClose(w, width, opacity);
+    if (opacity == null) try writeDot(w, pts[0], color);
 }
 
 /// Draws the power supply tree: rail-colored wires first, then the source /
