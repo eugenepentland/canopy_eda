@@ -185,8 +185,8 @@ fn renderSystemBody(arena: Allocator, w: *Writer, graph: *const Graph, lay: layo
 
 // System view: power wires are drawn thin + faint so the (usually sparser)
 // signal flow reads clearly on top of the dense power-distribution fan.
-const sys_power_width: f64 = 1.1;
-const sys_power_opacity: f64 = 0.35;
+const sys_power_width: f64 = 1.0;
+const sys_power_opacity: f64 = 0.2;
 const sys_arrow_sz: f64 = 13; // signal-edge arrowhead size (px)
 
 /// Draw the combined view: every wire colored by *its* signal class (not a
@@ -198,6 +198,7 @@ const sys_arrow_sz: f64 = 13; // signal-edge arrowhead size (px)
 /// its voltages live in the focused Power tab.
 fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout) (Allocator.Error || Writer.Error)!void {
     try writeStageBands(w, lay);
+    try writeGroupBoxes(w, lay);
     for (lay.routes) |r| {
         const color = classColor(graph, r.class);
         if (r.class == types.CLASS_POWER) {
@@ -273,6 +274,41 @@ fn writeStageBands(w: *Writer, lay: layout.Layout) Writer.Error!void {
             '<' => try w.writeAll("&lt;"),
             '>' => try w.writeAll("&gt;"),
             else => try w.writeByte(std.ascii.toUpper(c)),
+        };
+        try w.writeAll("</text>");
+    }
+}
+
+// Palette cycled across `(group …)` boxes so adjacent regions read as distinct.
+const group_palette = [_][]const u8{
+    "#58a6ff", // blue
+    "#d29922", // amber
+    "#3fb950", // green
+    "#bc8cff", // purple
+    "#39c5cf", // teal
+    "#f0883e", // orange
+};
+
+/// Draw the free Layout view's `(group …)` regions: a faint tinted rounded box
+/// behind the member blocks with the group label in its top-left, each in a
+/// cycled palette color. Drawn before edges/nodes so it sits behind them.
+fn writeGroupBoxes(w: *Writer, lay: layout.Layout) Writer.Error!void {
+    for (lay.groups) |g| {
+        const color = group_palette[g.color_idx % group_palette.len];
+        try w.print(
+            "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\" rx=\"12\" " ++
+                "fill=\"{s}\" fill-opacity=\"0.05\" stroke=\"{s}\" stroke-opacity=\"0.55\" stroke-width=\"1.5\"/>",
+            .{ g.x, g.y, g.w, g.h, color, color },
+        );
+        try w.print(
+            "<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-group-label\" fill=\"{s}\">",
+            .{ g.x + 14, g.y + 21, color },
+        );
+        for (g.label) |c| switch (c) {
+            '&' => try w.writeAll("&amp;"),
+            '<' => try w.writeAll("&lt;"),
+            '>' => try w.writeAll("&gt;"),
+            else => try w.writeByte(c),
         };
         try w.writeAll("</text>");
     }
@@ -839,6 +875,7 @@ pub const CSS =
     \\.dg-leg{display:inline-flex;align-items:center;gap:6px;}
     \\.dg-sw{width:16px;height:16px;display:inline-block;}
     \\.dg-band-label{font:700 17px "SF Mono","Fira Code",monospace;}
+    \\.dg-group-label{font:700 15px "SF Mono","Fira Code",monospace;letter-spacing:0.04em;}
     \\.dg-pcard{fill:#0d1117;stroke-width:1.8;}
     \\.dg-pinfo{font:600 16px "SF Mono","Fira Code",monospace;}
     \\.dg-bucket{stroke-width:1.8;}

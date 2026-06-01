@@ -61,6 +61,7 @@ src/diagram/diagram.zig::DIAGRAM_CSS value
 src/diagram/diagram.zig::renderBlockDiagramTabs fn
 src/diagram/diagram.zig::renderSystemSvg fn
 src/diagram/function.zig::buildFunctionGraph fn
+src/diagram/layout.zig::GroupBox struct_
 src/diagram/layout.zig::LNode struct_
 src/diagram/layout.zig::Layout struct_
 src/diagram/layout.zig::PowerBox struct_
@@ -141,12 +142,16 @@ src/eval/env.zig::Check value
 src/eval/env.zig::CriticalIc struct_
 src/eval/env.zig::DesignBlock struct_
 src/eval/env.zig::Drive enum_
+src/eval/env.zig::EdgeSide enum_
 src/eval/env.zig::ElectricalDecl struct_
 src/eval/env.zig::ElectricalType enum_
 src/eval/env.zig::Env struct_
 src/eval/env.zig::FunctionGroup struct_
 src/eval/env.zig::Group struct_
 src/eval/env.zig::Instance struct_
+src/eval/env.zig::LayoutEdge struct_
+src/eval/env.zig::LayoutGroup struct_
+src/eval/env.zig::LayoutRow struct_
 src/eval/env.zig::LayoutSpec struct_
 src/eval/env.zig::ModuleDef struct_
 src/eval/env.zig::Net struct_

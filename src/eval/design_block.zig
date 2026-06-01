@@ -1259,10 +1259,52 @@ fn parseStub(self: *Evaluator, form_children: []const Node) EvalError!?StubResul
 /// resolves by dependency, not source order.
 fn parseLayout(self: *Evaluator, form_children: []const Node) EvalError!env_mod.LayoutSpec {
     var placements: std.ArrayListUnmanaged(env_mod.Placement) = .empty;
+    var rows: std.ArrayListUnmanaged(env_mod.LayoutRow) = .empty;
+    var groups: std.ArrayListUnmanaged(env_mod.LayoutGroup) = .empty;
+    var edges: std.ArrayListUnmanaged(env_mod.LayoutEdge) = .empty;
     for (form_children[1..]) |child| {
         const c = child.asList() orelse continue;
         if (c.len < 2) continue;
         const head = c[0].asAtom() orelse continue;
+        // (edge left|right "a" "b" …) — pin blocks to the diagram's L/R edge.
+        if (std.mem.eql(u8, head, "edge")) {
+            const side_atom = c[1].asAtom() orelse c[1].asString() orelse continue;
+            const side: env_mod.EdgeSide = if (std.mem.eql(u8, side_atom, "right")) .right else .left;
+            var members: std.ArrayListUnmanaged([]const u8) = .empty;
+            for (c[2..]) |m| {
+                const nm = m.asString() orelse m.asAtom() orelse continue;
+                try members.append(self.allocator, nm);
+            }
+            try edges.append(self.allocator, .{
+                .side = side,
+                .members = members.toOwnedSlice(self.allocator) catch &.{},
+            });
+            continue;
+        }
+        // (row "a" "b" …) — an ordered horizontal band of block keys.
+        if (std.mem.eql(u8, head, "row")) {
+            var members: std.ArrayListUnmanaged([]const u8) = .empty;
+            for (c[1..]) |m| {
+                const nm = m.asString() orelse m.asAtom() orelse continue;
+                try members.append(self.allocator, nm);
+            }
+            try rows.append(self.allocator, .{ .members = members.toOwnedSlice(self.allocator) catch &.{} });
+            continue;
+        }
+        // (group "Label" "a" "b" …) — a labeled visual region over its members.
+        if (std.mem.eql(u8, head, "group")) {
+            const label = c[1].asString() orelse c[1].asAtom() orelse "";
+            var members: std.ArrayListUnmanaged([]const u8) = .empty;
+            for (c[2..]) |m| {
+                const nm = m.asString() orelse m.asAtom() orelse continue;
+                try members.append(self.allocator, nm);
+            }
+            try groups.append(self.allocator, .{
+                .label = label,
+                .members = members.toOwnedSlice(self.allocator) catch &.{},
+            });
+            continue;
+        }
         const is_anchor = std.mem.eql(u8, head, "anchor");
         if (!is_anchor and !std.mem.eql(u8, head, "place")) continue;
         const name = c[1].asString() orelse c[1].asAtom() orelse continue;
@@ -1286,7 +1328,12 @@ fn parseLayout(self: *Evaluator, form_children: []const Node) EvalError!env_mod.
             .constraints = constraints.toOwnedSlice(self.allocator) catch &.{},
         });
     }
-    return .{ .placements = placements.toOwnedSlice(self.allocator) catch &.{} };
+    return .{
+        .placements = placements.toOwnedSlice(self.allocator) catch &.{},
+        .rows = rows.toOwnedSlice(self.allocator) catch &.{},
+        .groups = groups.toOwnedSlice(self.allocator) catch &.{},
+        .edges = edges.toOwnedSlice(self.allocator) catch &.{},
+    };
 }
 
 /// Map a `(place …)` relation keyword to a `PlaceRel`. Returns null for an
@@ -1596,6 +1643,84 @@ test "layout place collects multiple constraints" {
     try testing.expectEqualStrings("b", cons[0].reference);
     try testing.expectEqual(env_mod.PlaceRel.below, cons[1].rel);
     try testing.expectEqualStrings("a", cons[1].reference);
+}
+
+// spec: eval/design_block - layout row form parses an ordered band of block keys
+test "layout row parses an ordered band of block keys" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (layout
+        \\    (row "mcu" "esp32" "screen")
+        \\    (row "buck5v" "buck3v3")))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 2), block.layout.rows.len);
+    try testing.expectEqual(@as(usize, 3), block.layout.rows[0].members.len);
+    try testing.expectEqualStrings("mcu", block.layout.rows[0].members[0]);
+    try testing.expectEqualStrings("screen", block.layout.rows[0].members[2]);
+    try testing.expectEqual(@as(usize, 2), block.layout.rows[1].members.len);
+    try testing.expectEqualStrings("buck3v3", block.layout.rows[1].members[1]);
+}
+
+// spec: eval/design_block - layout group form parses a labeled region over member block keys
+test "layout group parses a labeled region over member keys" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (layout
+        \\    (group "Brains" "mcu" "esp32")
+        \\    (group "Power" "buck5v" "buck3v3" "or_diode")))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 2), block.layout.groups.len);
+    try testing.expectEqualStrings("Brains", block.layout.groups[0].label);
+    try testing.expectEqual(@as(usize, 2), block.layout.groups[0].members.len);
+    try testing.expectEqualStrings("mcu", block.layout.groups[0].members[0]);
+    try testing.expectEqualStrings("Power", block.layout.groups[1].label);
+    try testing.expectEqual(@as(usize, 3), block.layout.groups[1].members.len);
+}
+
+// spec: eval/design_block - layout edge form parses left/right edge-pinned block keys
+test "layout edge parses left and right pinned blocks" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (layout
+        \\    (edge left "usbc_host" "barrel")
+        \\    (edge right "banana")))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 2), block.layout.edges.len);
+    try testing.expectEqual(env_mod.EdgeSide.left, block.layout.edges[0].side);
+    try testing.expectEqual(@as(usize, 2), block.layout.edges[0].members.len);
+    try testing.expectEqualStrings("usbc_host", block.layout.edges[0].members[0]);
+    try testing.expectEqual(env_mod.EdgeSide.right, block.layout.edges[1].side);
+    try testing.expectEqualStrings("banana", block.layout.edges[1].members[0]);
 }
 
 // spec: eval/design_block - bus-net expands one net tie per index in the inclusive range

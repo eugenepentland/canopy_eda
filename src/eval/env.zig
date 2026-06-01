@@ -958,12 +958,45 @@ pub const Placement = struct {
     constraints: []const PlaceConstraint = &.{},
 };
 
+/// One `(row "a" "b" …)` directive from a `(layout …)` form: an ordered list of
+/// block keys that share a horizontal band. Rows stack top-to-bottom in
+/// declaration order; members lay left-to-right in list order.
+pub const LayoutRow = struct {
+    members: []const []const u8 = &.{},
+};
+
+/// One `(group "Label" "a" "b" …)` directive from a `(layout …)` form: a named
+/// visual region drawn as a labeled translucent box behind its member blocks
+/// (their bounding box, padded). Purely cosmetic — it groups already-placed
+/// blocks so a dense diagram reads as labeled sections; it does not move them.
+pub const LayoutGroup = struct {
+    label: []const u8,
+    members: []const []const u8 = &.{},
+};
+
+/// Which side of the diagram an `(edge …)` directive pins its blocks to.
+pub const EdgeSide = enum { left, right };
+
+/// One `(edge left|right "a" "b" …)` directive: pins its blocks to the far
+/// left/right column of the diagram (just outside everything else), stacked
+/// vertically and centered on the content. Unlike `(place …)`, the column is
+/// resolved *after* the rest of the layout, so the blocks stay on the edge no
+/// matter what is added between them.
+pub const LayoutEdge = struct {
+    side: EdgeSide,
+    members: []const []const u8 = &.{},
+};
+
 /// A declarative, Mermaid-style block-diagram layout from a top-level
-/// `(layout …)` form: a list of relative `(place …)` directives the diagram's
-/// `computeFreeLayout` resolves into absolute box positions. Empty `placements`
-/// ⇒ no free layout declared, so the diagram keeps its category-column views.
+/// `(layout …)` form: either relative `(place …)` directives or `(row …)` bands
+/// (or both) that the diagram's `computeFreeLayout` resolves into absolute box
+/// positions. Empty `placements` *and* `rows` ⇒ no free layout declared, so the
+/// diagram keeps its category-column views.
 pub const LayoutSpec = struct {
     placements: []const Placement = &.{},
+    rows: []const LayoutRow = &.{},
+    groups: []const LayoutGroup = &.{},
+    edges: []const LayoutEdge = &.{},
 };
 
 /// The fully-evaluated result of a `(design-block …)`: the flattened netlist

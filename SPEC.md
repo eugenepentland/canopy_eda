@@ -236,6 +236,9 @@ Public functions: computeLayout, hasSystemView, computeSystemLayout, computeFree
 - computeFreeLayout flows un-placed blocks into a fallback row below the placed cluster
 - computeFreeLayout places a block with a missing reference into the fallback row without aborting
 - computeFreeLayout breaks a placement cycle instead of looping forever
+- computeFreeLayout lays each layout row as a horizontal band, stacking bands top-to-bottom
+- computeFreeLayout boxes each layout group around its members with a labeled top strip
+- computeFreeLayout pins edge-directive blocks to the column just outside the rest of the content
 - Returns null for a view with no edges
 - Ranks nodes left-to-right by signal flow, breaking cycles for layering
 - Routes edges sharing a source through one common vertical trunk
@@ -356,6 +359,9 @@ Public functions: analyze
 - layout form parses (anchor "name") roots and (place "name" (rel "ref")) directives
 - layout place resolves right-of/left-of/above/below into a relative offset from the referenced block
 - layout place collects multiple constraints so a block is positioned by several references
+- layout row form parses an ordered band of block keys
+- layout group form parses a labeled region over member block keys
+- layout edge form parses left/right edge-pinned block keys
 - hosts form records the sub-block instance names a section owns
 - verifies req with an (id …) target parses as a stable-id sign-off leaving ref-des empty
 - verifies req with a ref-des target parses as a ref-des sign-off leaving target-id empty
