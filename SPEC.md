@@ -567,6 +567,7 @@ Public functions: resolveMpn, searchErrorMessage
 
 - parseAccessToken extracts the bearer token from the OAuth response
 - collectProducts maps the Products array to resolved parts
+- keywordVariants drops trailing keywords for graceful relaxation
 
 ## serve/mcp_tools
 

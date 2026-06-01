@@ -51,10 +51,15 @@ pub fn searchErrorMessage(err: SearchError) []const u8 {
     };
 }
 
-/// Full pipeline: fetch an OAuth token, run a keyword search, map the
-/// `Products` array to owned `Product`s (capped at `limit`). An empty slice
-/// means DigiKey matched nothing; `error.SearchFailed` means the search request
-/// itself failed or returned no `Products` (e.g. a rejected token).
+/// Full pipeline: fetch an OAuth token (once), then run the keyword search,
+/// relaxing the query when it comes up empty. DigiKey's KeywordSearch is a
+/// keyword AND-match, so a long parametric query ("buck converter 2A 12V input")
+/// can over-constrain to zero hits; `keywordVariants` drops trailing keywords
+/// one at a time ("buck converter 2A 12V" → … → "buck") and the first variant
+/// with results wins. Mirrors the part-number relaxation `component_search`
+/// does for CSE. An empty slice means every variant matched nothing;
+/// `error.SearchFailed` means no search request succeeded (e.g. a rejected
+/// token); `error.TokenFailed` means the OAuth grant failed.
 pub fn resolveMpn(
     allocator: std.mem.Allocator,
     base: []const u8,
@@ -64,11 +69,42 @@ pub fn resolveMpn(
     limit: usize,
 ) SearchError![]Product {
     const token = fetchToken(allocator, base, client_id, client_secret) orelse return error.TokenFailed;
-    const body = keywordSearch(allocator, base, client_id, token, query, limit) orelse return error.SearchFailed;
 
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return error.SearchFailed;
-    defer parsed.deinit();
-    return collectProducts(allocator, parsed.value, limit);
+    var any_ok = false;
+    for (try keywordVariants(allocator, query)) |term| {
+        const body = keywordSearch(allocator, base, client_id, token, term, limit) orelse continue;
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch continue;
+        defer parsed.deinit();
+        const items = productsArray(parsed.value) orelse continue;
+        any_ok = true;
+        if (items.len == 0) continue;
+        return try mapProducts(allocator, items, limit);
+    }
+    if (!any_ok) return error.SearchFailed;
+    return &.{};
+}
+
+/// Ordered, relaxed search terms: the full query first, then each prefix with
+/// one more trailing whitespace-delimited keyword dropped, down to the first
+/// keyword alone. Internal whitespace is normalised to single spaces. A blank
+/// query yields a single empty term (the server then matches nothing). Caller
+/// owns the slice and every joined term.
+fn keywordVariants(allocator: std.mem.Allocator, query: []const u8) std.mem.Allocator.Error![]const []const u8 {
+    var toks: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer toks.deinit(allocator); // token slices point into `query`; only the list buffer is owned
+    var it = std.mem.tokenizeAny(u8, query, " \t\r\n");
+    while (it.next()) |t| try toks.append(allocator, t);
+
+    var out: std.ArrayListUnmanaged([]const u8) = .empty;
+    if (toks.items.len == 0) {
+        try out.append(allocator, try allocator.dupe(u8, query));
+        return out.toOwnedSlice(allocator);
+    }
+    var k = toks.items.len;
+    while (k >= 1) : (k -= 1) {
+        try out.append(allocator, try std.mem.join(allocator, " ", toks.items[0..k]));
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 // ── OAuth2 (client-credentials) ───────────────────────────────────
@@ -140,12 +176,17 @@ const JSON_CONTENT = "Content-Type: application/json";
 
 // ── Response mapping ──────────────────────────────────────────────
 
-/// Map the `Products` array of a keyword-search response to owned `Product`s,
-/// capped at `limit`. Products without a `ManufacturerProductNumber` are
-/// skipped. A missing `Products` key (e.g. an auth-error body) is
+/// Resolve the `Products` array from a response root and map it to owned
+/// `Product`s. A missing `Products` key (e.g. an auth-error body) is
 /// `error.SearchFailed`; a present-but-empty array yields an empty slice.
 fn collectProducts(allocator: std.mem.Allocator, root: std.json.Value, limit: usize) SearchError![]Product {
     const items = productsArray(root) orelse return error.SearchFailed;
+    return mapProducts(allocator, items, limit);
+}
+
+/// Map a `Products` array to owned `Product`s, capped at `limit`. Entries
+/// without a `ManufacturerProductNumber` are skipped.
+fn mapProducts(allocator: std.mem.Allocator, items: []std.json.Value, limit: usize) std.mem.Allocator.Error![]Product {
     var list: std.ArrayListUnmanaged(Product) = .empty;
     for (items) |item| {
         if (list.items.len >= limit) break;
@@ -234,6 +275,25 @@ test "parseAccessToken extracts the bearer token from the OAuth response" {
     try std.testing.expect(parseAccessToken(a, "not json") == null);
 }
 
+test "keywordVariants drops trailing keywords for graceful relaxation" {
+    // spec: serve/digikey - keywordVariants drops trailing keywords for graceful relaxation
+    const a = std.testing.allocator;
+    const v = try keywordVariants(a, "buck converter 2A 12V input");
+    defer freeVariants(a, v);
+    try std.testing.expectEqual(@as(usize, 5), v.len);
+    try std.testing.expectEqualStrings("buck converter 2A 12V input", v[0]);
+    try std.testing.expectEqualStrings("buck converter 2A 12V", v[1]);
+    try std.testing.expectEqualStrings("buck converter 2A", v[2]);
+    try std.testing.expectEqualStrings("buck converter", v[3]);
+    try std.testing.expectEqualStrings("buck", v[4]);
+
+    // A single keyword has nothing to relax; extra whitespace is normalised.
+    const one = try keywordVariants(a, "  INA228  ");
+    defer freeVariants(a, one);
+    try std.testing.expectEqual(@as(usize, 1), one.len);
+    try std.testing.expectEqualStrings("INA228", one[0]);
+}
+
 test "collectProducts maps the Products array to resolved parts" {
     // spec: serve/digikey - collectProducts maps the Products array to resolved parts
     const a = std.testing.allocator;
@@ -275,6 +335,12 @@ test "collectProducts maps the Products array to resolved parts" {
     const none = try collectProducts(a, empty.value, 10);
     defer a.free(none);
     try std.testing.expectEqual(@as(usize, 0), none.len);
+}
+
+/// Test-only: free the joined terms + backing slice of a variant list.
+fn freeVariants(a: std.mem.Allocator, variants: []const []const u8) void {
+    for (variants) |v| a.free(v);
+    a.free(variants);
 }
 
 /// Test-only: free the owned strings + backing slice of a `Product` list.
