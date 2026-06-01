@@ -139,7 +139,7 @@ fn renderCoarsePanel(allocator: Allocator, graph: *const Graph, key: []const u8,
     const arena = arena_state.allocator();
     const lay = (try layout.computeSystemLayout(arena, graph)) orelse return;
     try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{key});
-    try renderSystemBody(arena, w, graph, lay);
+    try renderSystemBody(arena, w, graph, lay, false);
     try w.writeAll("</div>");
 }
 
@@ -153,7 +153,7 @@ fn renderFreePanel(allocator: Allocator, graph: *const Graph, w: *Writer) (Alloc
     const arena = arena_state.allocator();
     const lay = (try layout.computeFreeLayout(arena, graph)) orelse return;
     try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{layout_key});
-    try renderSystemBody(arena, w, graph, lay);
+    try renderSystemBody(arena, w, graph, lay, true);
     try w.writeAll("</div>");
 }
 
@@ -166,20 +166,20 @@ pub fn renderSystemStandalone(allocator: Allocator, graph: *const Graph, w: *Wri
     const arena = arena_state.allocator();
     const lay = (try layout.computeSystemLayout(arena, graph)) orelse return false;
     try w.writeAll("<div class=\"dg-wrap\">");
-    try renderSystemBody(arena, w, graph, lay);
+    try renderSystemBody(arena, w, graph, lay, false);
     try w.writeAll("</div>");
     return true;
 }
 
 /// The class legend + one inline SVG, shared by the tab panel and the export's
 /// standalone block.
-fn renderSystemBody(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout) (Allocator.Error || Writer.Error)!void {
+fn renderSystemBody(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout, rail_mode: bool) (Allocator.Error || Writer.Error)!void {
     try writeClassLegend(w, graph, lay);
     try w.print(
         "<svg viewBox=\"0 0 {d:.0} {d:.0}\" class=\"dg-svg\" xmlns=\"http://www.w3.org/2000/svg\">",
         .{ lay.width, lay.height },
     );
-    try renderSystemView(arena, w, graph, lay);
+    try renderSystemView(arena, w, graph, lay, rail_mode);
     try w.writeAll("</svg>");
 }
 
@@ -196,15 +196,21 @@ const sys_arrow_sz: f64 = 13; // signal-edge arrowhead size (px)
 /// carry their class color (what a connection *carries*). Power wires recede
 /// (thin/faint, undirected, unlabeled) — the rail fan is the main clutter and
 /// its voltages live in the focused Power tab.
-fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout) (Allocator.Error || Writer.Error)!void {
+fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout, rail_mode: bool) (Allocator.Error || Writer.Error)!void {
     try writeStageBands(w, lay);
     try writeGroupBoxes(w, lay);
+    // In rail mode (the Layout view) each power net gets its own color + label so
+    // rails are traceable; otherwise power recedes as one faint anonymous color.
+    const rails: ?[]const RailColor = if (rail_mode) try buildRailPalette(arena, graph) else null;
     for (lay.routes) |r| {
-        const color = classColor(graph, r.class);
         if (r.class == types.CLASS_POWER) {
-            try writeRoutedEdge(w, r, color, sys_power_width, sys_power_opacity);
+            if (rails) |p| {
+                try writeRoutedEdge(w, r, railColor(p, r.label), sys_rail_width, sys_rail_opacity);
+            } else {
+                try writeRoutedEdge(w, r, classColor(graph, r.class), sys_power_width, sys_power_opacity);
+            }
         } else {
-            try writeRoutedEdge(w, r, color, null, null);
+            try writeRoutedEdge(w, r, classColor(graph, r.class), null, null);
         }
     }
     for (lay.nodes) |n| try writeNode(arena, w, graph.nodes[n.gid], n.x, n.y);
@@ -214,12 +220,17 @@ fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layo
         if (r.class == types.CLASS_POWER) continue;
         try writeArrowhead(w, r, classColor(graph, r.class));
     }
+    // Labels: signal edges always; power edges too in rail mode (so each rail is
+    // named), each in its own color.
     var labeled: std.StringHashMapUnmanaged(void) = .empty;
     for (lay.routes) |r| {
-        if (r.class == types.CLASS_POWER or r.label.len == 0) continue;
+        if (r.label.len == 0) continue;
+        const is_power = r.class == types.CLASS_POWER;
+        if (is_power and rails == null) continue;
+        const color = if (is_power) railColor(rails.?, r.label) else classColor(graph, r.class);
         const key = try std.fmt.allocPrint(arena, "{d}|{s}", .{ r.from_gid, r.label });
         if ((try labeled.getOrPut(arena, key)).found_existing) continue;
-        try writeEdgeLabel(arena, w, r, classColor(graph, r.class));
+        try writeEdgeLabel(arena, w, r, color);
     }
 }
 
@@ -527,6 +538,46 @@ fn edgeLabelAnchor(pts: []const types.Pt) types.Pt {
 // ── power-view voltage coloring + legend ────────────────────────────────
 
 /// A distinct rail voltage paired with the color used for its edges + legend.
+// Layout-view power rails: each net drawn in its own color at this weight, so a
+// rail is followable end-to-end while still reading lighter than the bold
+// full-weight signal edges.
+const sys_rail_width: f64 = 1.6;
+const sys_rail_opacity: f64 = 0.7;
+
+const RailColor = struct { name: []const u8, color: []const u8 };
+
+/// Assign each distinct power-net name a palette color. Stub rails carry no
+/// resolved voltage, so voltage-coloring can't tell them apart — coloring by
+/// net name gives every rail its own traceable hue. Sorted for stable colors.
+fn buildRailPalette(arena: Allocator, graph: *const Graph) Allocator.Error![]const RailColor {
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (graph.edges) |e| {
+        if (e.class != types.CLASS_POWER or e.label.len == 0) continue;
+        var seen = false;
+        for (names.items) |x| {
+            if (std.mem.eql(u8, x, e.label)) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) try names.append(arena, e.label);
+    }
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+    const out = try arena.alloc(RailColor, names.items.len);
+    for (names.items, 0..) |nm, i| out[i] = .{ .name = nm, .color = volt_palette[i % volt_palette.len] };
+    return out;
+}
+
+/// The assigned color for a power net, or grey if unknown.
+fn railColor(palette: []const RailColor, name: []const u8) []const u8 {
+    for (palette) |rc| if (std.mem.eql(u8, rc.name, name)) return rc.color;
+    return volt_unspecified;
+}
+
 const VoltColor = struct { v: f64, color: []const u8 };
 
 const volt_eps: f64 = 0.05; // group voltages within 50 mV as one rail level
