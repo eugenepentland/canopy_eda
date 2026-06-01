@@ -256,6 +256,7 @@ fn buildStubNodes(
             .category = rb.classifyCategoryKey(p.category, p.name),
             .slug = "",
             .key = p.name,
+            .stack = p.channels,
             .inputs = &.{},
             .outputs = &.{},
         });
@@ -797,6 +798,25 @@ const testing = std.testing;
 
 fn emptyBlock(name: []const u8) DesignBlock {
     return .{ .name = name, .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
+}
+
+// spec: diagram/collect - Emits one diagram node per stub categorised by its declared category
+test "collectGraph emits a categorised node for each stub" {
+    const parts = [_]env_mod.PlaceholderPart{
+        .{ .ref_des = "U1", .name = "my-mcu", .role = "MCU", .category = "mcu", .signals = &.{} },
+        .{ .ref_des = "J1", .name = "usb", .role = "USB-C", .category = "connector", .channels = 4, .signals = &.{} },
+    };
+    var block = emptyBlock("t");
+    block.parts = &parts;
+    var g = try collectGraph(testing.allocator, &block, &.{});
+    defer g.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), g.nodes.len);
+    // Node category comes from the stub's declared (category …); channels → stack.
+    try testing.expect(g.nodes[0].category == .mcu);
+    try testing.expect(g.nodes[1].category == .connector);
+    try testing.expectEqual(@as(u8, 4), g.nodes[1].stack);
+    // Authoring key is the stub name, for (layout (place "key" …)) matching.
+    try testing.expectEqualStrings("my-mcu", g.nodes[0].key);
 }
 
 // spec: diagram/collect - Derives inter-block edges from the flattened netlist rather than an MCU hub

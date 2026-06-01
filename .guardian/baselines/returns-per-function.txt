@@ -1,5 +1,5 @@
 # guardian-snapshot v1
-src/eval/env.zig:370: fn 'parseCheck' has 79 return statements (cap 12)
+src/eval/env.zig:374: fn 'parseCheck' has 79 return statements (cap 12)
 src/eval/ids.zig:226: fn 'componentPrefix' has 17 return statements (cap 12)
 src/render_svg/connection.zig:323: fn 'tryChainConns' has 14 return statements (cap 12)
 src/serve/auth.zig:1281: fn 'loginCompletePage' has 26 return statements (cap 12)

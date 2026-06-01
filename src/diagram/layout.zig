@@ -38,6 +38,13 @@ const free_v_gap: f64 = 60;
 /// Column gap between independent `(anchor …)` roots in the free layout, so two
 /// unrelated placement trees don't collide. Wide enough to clear a few cells.
 const anchor_col_stride: i32 = 6;
+/// Per-card offset of a multi-channel stacked block — mirrors render.zig's
+/// `stack_offset`. The free layout reserves canvas margin for the cards a stack
+/// pushes up and to the right so the "×N" badge and rear cards never clip.
+const stack_card_offset: f64 = 7;
+/// Vertical room the "×N" badge needs above the rearmost stacked card (font
+/// height + gap) — mirrors render.zig's badge font-size + `stack_badge_gap`.
+const stack_badge_h: f64 = 22;
 
 /// A placed real node: its global graph id and top-left corner (width/height
 /// are the module `node_w`/`node_h` constants).
@@ -383,6 +390,13 @@ pub fn computeFreeLayout(arena: Allocator, graph: *const Graph) Allocator.Error!
     // Lay out: placed nodes at their normalised cell; un-placed (and un-keyed
     // real) blocks flow left-to-right along the fallback row beneath them.
     var lnodes: std.ArrayListUnmanaged(LNode) = .empty;
+    // Reserve room at the top for the tallest stacked block's offset cards +
+    // its "×N" badge, which extend above the front box. The whole layout shifts
+    // down by this so nothing clips the canvas top.
+    var top_reserve: f64 = 0;
+    for (graph.nodes) |nd| {
+        if (nd.stack > 1) top_reserve = @max(top_reserve, stackTopExtent(nd.stack));
+    }
     const fallback_row = max_row - min_row + 1;
     var fallback_col: i32 = 0;
     var max_x: f64 = 0;
@@ -400,9 +414,14 @@ pub fn computeFreeLayout(arena: Allocator, graph: *const Graph) Allocator.Error!
             fallback_col += 1;
         }
         const x = pad + @as(f64, @floatFromInt(col)) * (node_w + h_gap);
-        const y = pad + @as(f64, @floatFromInt(row)) * (node_h + free_v_gap);
+        const y = pad + top_reserve + @as(f64, @floatFromInt(row)) * (node_h + free_v_gap);
         try lnodes.append(arena, .{ .gid = @intCast(i), .x = x, .y = y });
-        max_x = @max(max_x, x + node_w);
+        // A stacked block's cards extend right by (stack-1)*offset.
+        const right_extent: f64 = if (nd.stack > 1)
+            @as(f64, @floatFromInt(nd.stack - 1)) * stack_card_offset
+        else
+            0;
+        max_x = @max(max_x, x + node_w + right_extent);
         max_y = @max(max_y, y + node_h);
     }
     if (lnodes.items.len == 0) return null;
@@ -415,6 +434,13 @@ pub fn computeFreeLayout(arena: Allocator, graph: *const Graph) Allocator.Error!
         .width = max_x + pad,
         .height = max_y + pad,
     };
+}
+
+/// How far a stacked block's rearmost card + its "×N" badge reach above the
+/// front box's top — kept in sync with render.zig's `stack_offset` /
+/// `stack_badge_gap` and the badge font height.
+fn stackTopExtent(stack: u8) f64 {
+    return @as(f64, @floatFromInt(stack - 1)) * stack_card_offset + stack_badge_h;
 }
 
 /// Route every edge whose endpoints are both placed as a simple face-to-face

@@ -225,6 +225,7 @@ Public functions: collectGraph
 - Labels an unattached sub-block by its module's design-block title
 - Surfaces an on-board crystal as a clock source feeding its block
 - Carries a programmable rail's rated span onto the producer node
+- Emits one diagram node per stub categorised by its declared category
 
 ## diagram/layout
 
@@ -338,6 +339,10 @@ Public functions: analyze
 
 ## eval/design_block
 
+- stub form parses a placeholder part with role, mpn, category, and size
+- stub auto-assigns a ref-des from the category prefix when ref is omitted
+- stub signal contributes a named virtual pin tied to a net so the stub joins the netlist
+- stub channels count stacks the block as N identical channels in the diagram
 - bus-net expands one net tie per index in the inclusive range
 - bus-net strided form distributes channels across over x ports with suffixes
 - sub-block bridge ties prefixed board nets to module ports with optional rename

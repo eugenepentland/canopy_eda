@@ -361,6 +361,7 @@ const min_label_chars: usize = 8;
 const min_sub_chars: usize = 10;
 const stack_offset: f64 = 7; // per-card offset for a multi-channel stacked block
 const stack_back_opacity: f64 = 0.5; // dimmer stroke on the cards behind the front one
+const stack_badge_gap: f64 = 5; // gap between the rearmost card top and the ×N badge
 const rf_if_color: []const u8 = "#e3742f"; // RF edges returning to the connector (IF lines)
 const pill_char_w: f64 = 8.4; // edge-label width per character
 const pill_pad_x: f64 = 12; // edge-label horizontal padding
@@ -386,6 +387,14 @@ fn writeNode(arena: Allocator, w: *Writer, node: types.Node, x: f64, y: f64) (Al
                 .{ x + off, y - off, layout.node_w, layout.node_h, rect_class, color, stack_back_opacity },
             );
         }
+        // "×N" channel-count badge above the top-right of the rearmost card, so
+        // a stack reads as "this many identical channels" at a glance.
+        const back_off = @as(f64, @floatFromInt(node.stack - 1)) * stack_offset;
+        try w.print(
+            "<text x=\"{d:.1}\" y=\"{d:.1}\" text-anchor=\"end\" " ++
+                "font-family=\"monospace\" font-weight=\"700\" font-size=\"17\" fill=\"{s}\">×{d}</text>",
+            .{ x + layout.node_w + back_off, y - back_off - stack_badge_gap, color, node.stack },
+        );
     }
     try w.print(
         "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.0}\" height=\"{d:.0}\" rx=\"6\" class=\"{s}\" stroke=\"{s}\"/>",

@@ -1162,6 +1162,7 @@ fn parseStub(self: *Evaluator, form_children: []const Node) EvalError!?StubResul
     var explicit_ref: []const u8 = "";
     var width: f64 = 0;
     var height: f64 = 0;
+    var channels: u8 = 1;
     var signals: std.ArrayListUnmanaged(env_mod.PartSignal) = .empty;
 
     for (form_children[2..]) |sub_node| {
@@ -1180,6 +1181,11 @@ fn parseStub(self: *Evaluator, form_children: []const Node) EvalError!?StubResul
             if (sub.len >= 3) {
                 width = sub[1].asNumber() orelse 0;
                 height = sub[2].asNumber() orelse 0;
+            }
+        } else if (std.mem.eql(u8, head, "channels")) {
+            // (channels N) — this stub stands for N identical channels.
+            if (sub[1].asNumber()) |nf| {
+                if (nf >= 1 and nf <= 255) channels = @intFromFloat(nf);
             }
         } else if (std.mem.eql(u8, head, "signal")) {
             // (signal "NAME" class "NET") — class optional in the middle slot.
@@ -1235,6 +1241,7 @@ fn parseStub(self: *Evaluator, form_children: []const Node) EvalError!?StubResul
             .width = width,
             .height = height,
             .id = part_id,
+            .channels = channels,
             .signals = sig_slice,
         },
         .instance = inst,
@@ -1416,6 +1423,97 @@ test "section (hosts …) records owned sub-block names" {
     try testing.expectEqual(@as(usize, 2), block.sections[0].hosts.len);
     try testing.expectEqualStrings("psu1", block.sections[0].hosts[0]);
     try testing.expectEqualStrings("mon_ch1", block.sections[0].hosts[1]);
+}
+
+// spec: eval/design_block - stub form parses a placeholder part with role, mpn, category, and size
+test "stub form parses role mpn category and size" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (stub "my-mcu" (role "Host MCU") (mpn "STM32H563") (category mcu) (size 9 9)))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 1), block.parts.len);
+    const p = block.parts[0];
+    try testing.expectEqualStrings("my-mcu", p.name);
+    try testing.expectEqualStrings("Host MCU", p.role);
+    try testing.expectEqualStrings("STM32H563", p.mpn);
+    try testing.expectEqualStrings("mcu", p.category);
+    try testing.expectEqual(@as(f64, 9), p.width);
+    try testing.expectEqual(@as(f64, 9), p.height);
+    // It also auto-places: a placeholder instance with the part's ref-des.
+    try testing.expectEqual(@as(usize, 1), block.instances.len);
+    try testing.expect(block.instances[0].placeholder);
+}
+
+// spec: eval/design_block - stub auto-assigns a ref-des from the category prefix when ref is omitted
+test "stub auto-assigns a ref-des from the category prefix" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (stub "j" (category connector))
+        \\  (stub "u" (category mcu))
+        \\  (stub "x" (category power) (ref "U7")))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 3), block.parts.len);
+    try testing.expectEqual(@as(u8, 'J'), block.parts[0].ref_des[0]); // connector → J
+    try testing.expectEqual(@as(u8, 'U'), block.parts[1].ref_des[0]); // mcu → U
+    try testing.expectEqualStrings("U7", block.parts[2].ref_des); // explicit (ref) wins
+}
+
+// spec: eval/design_block - stub signal contributes a named virtual pin tied to a net so the stub joins the netlist
+test "stub signal contributes net membership" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (stub "a" (category mcu) (signal "SCL" i2c "I2C"))
+        \\  (stub "b" (category sensor) (signal "SCL" i2c "I2C")))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    // Both stubs' "SCL" signal joins the shared "I2C" net → 2 pins on it.
+    var pins_on_i2c: usize = 0;
+    for (block.nets) |net| {
+        if (std.mem.eql(u8, net.name, "I2C")) pins_on_i2c = net.pins.len;
+    }
+    try testing.expectEqual(@as(usize, 2), pins_on_i2c);
+}
+
+// spec: eval/design_block - stub channels count stacks the block as N identical channels in the diagram
+test "stub channels count is recorded on the part" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (stub "psu" (category power) (channels 2))
+        \\  (stub "solo" (category power)))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(u8, 2), block.parts[0].channels);
+    try testing.expectEqual(@as(u8, 1), block.parts[1].channels); // default
 }
 
 // spec: eval/design_block - layout form parses (anchor "name") roots and (place "name" (rel "ref")) directives

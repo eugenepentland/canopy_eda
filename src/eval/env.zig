@@ -257,6 +257,10 @@ pub const PlaceholderPart = struct {
     /// Stable 8-char id, auto-inserted into source on first build. Survives
     /// promotion so the KiCad footprint identity (uuidFromId) is preserved.
     id: []const u8 = "",
+    /// `(channels N)`: this stub stands for N identical channels, drawn as N
+    /// offset cards stacked behind one box (e.g. a 2-channel PSU, 4 banana
+    /// jacks). Its signals wire one representative channel. 1 ⇒ a single box.
+    channels: u8 = 1,
     /// Named virtual pins wired to nets — the part's diagram interface.
     signals: []const PartSignal = &.{},
 };

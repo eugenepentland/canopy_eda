@@ -440,8 +440,8 @@ pub const scope_form_docs = blk: {
         .summary = "Declare a high-level functional subsystem for the Function (\"what it does\") view.",
     } };
     t[@intFromEnum(ScopeForm.stub)] = .{ .scope = tl, .doc = .{
-        .syntax = "(stub \"name\" [(role …)] [(mpn …)] [(category key)] [(size W H)] [(ref \"REF\")] (signal \"name\" class \"net\")…)",
-        .summary = "Declare a placeholder part — auto-placed, sized bounding box, signal-wired — for design-phase diagrams before a real component exists.",
+        .syntax = "(stub \"name\" [(role …)] [(mpn …)] [(category key)] [(size W H)] [(channels N)] [(ref \"REF\")] (signal \"name\" class \"net\")…)",
+        .summary = "Declare a placeholder part — auto-placed, sized bounding box, signal-wired, optionally N stacked channels — for design-phase diagrams before a real component exists.",
     } };
     t[@intFromEnum(ScopeForm.layout)] = .{ .scope = tl, .doc = .{
         .syntax = "(layout (anchor \"name\") (place \"name\" (right-of|left-of|above|below \"ref\"))…)",
