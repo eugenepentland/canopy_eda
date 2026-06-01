@@ -254,11 +254,16 @@ pub fn hasFreeLayout(graph: *const Graph) bool {
 const Cell = struct { col: i32, row: i32 };
 
 /// Resolve `(place …)` directives into absolute cells. `cell_of[i]` is node i's
-/// cell once resolved; `placed[i]` marks it. Iterates to a fixed point so a
-/// directive whose reference resolves later still lands (bounded by placement
-/// count, which also breaks cycles). A directive naming an unknown block, or
-/// one stuck in a cycle, simply never resolves → caller flows it into the
-/// fallback row.
+/// cell once resolved; `placed[i]` marks it. A placement with no constraints is
+/// a pinned anchor; one with constraints resolves only when *every* block it
+/// references is already placed — so a block can be positioned by several
+/// neighbours at once (e.g. `(right-of "a") (below "b")` takes its column from a
+/// and its row from b). Horizontal constraints (right/left) drive the column,
+/// vertical (above/below) the row; the last of each axis wins. The sweep runs to
+/// a fixed point (≤ placements.len passes resolves any acyclic dependency
+/// graph), so a directive whose references resolve later still lands. A
+/// placement referencing an unknown block, or stuck in a cycle, never resolves →
+/// caller flows it into the fallback row.
 fn resolvePlacements(
     graph: *const Graph,
     cell_of: []Cell,
@@ -269,40 +274,69 @@ fn resolvePlacements(
     // trees don't overlap.
     var next_anchor_col: i32 = 0;
     for (ps) |p| {
-        if (p.rel != .anchor) continue;
+        if (p.constraints.len != 0) continue;
         const gi = nodeByKey(graph, p.name) orelse continue;
         if (placed[gi]) continue;
         cell_of[gi] = .{ .col = next_anchor_col, .row = 0 };
         placed[gi] = true;
         next_anchor_col += anchor_col_stride;
     }
-    // Relative placements: sweep until no further progress (≤ placements.len
-    // passes resolves any acyclic chain; a cycle just stops making progress).
+    // Constrained placements: sweep until no further progress.
     var pass: usize = 0;
     while (pass <= ps.len) : (pass += 1) {
         var progressed = false;
         for (ps) |p| {
-            if (p.rel == .anchor) continue;
+            if (p.constraints.len == 0) continue;
             const gi = nodeByKey(graph, p.name) orelse continue;
             if (placed[gi]) continue;
-            const ri = nodeByKey(graph, p.reference) orelse continue;
-            if (!placed[ri]) continue;
-            cell_of[gi] = offsetCell(cell_of[ri], p.rel);
-            placed[gi] = true;
-            progressed = true;
+            if (resolveConstraints(graph, p.constraints, cell_of, placed)) |cell| {
+                cell_of[gi] = cell;
+                placed[gi] = true;
+                progressed = true;
+            }
         }
         if (!progressed) break;
     }
 }
 
-/// Offset a reference cell by one step in the directive's direction.
+/// Combine a placement's constraints into one cell, or null if any referenced
+/// block isn't placed yet (so the caller retries next sweep) or every reference
+/// is unknown (so it never resolves → fallback row). Each constraint offsets the
+/// cell of its reference by one step; a horizontal constraint (right/left) owns
+/// the column, a vertical one (above/below) owns the row — so two constraints on
+/// different axes pin both independently. An axis with *no* owning constraint
+/// inherits from the last constraint's offset, so a lone `(right-of "a")` keeps
+/// a's row (and `(below "b")` keeps b's column) — single-reference behaviour.
+fn resolveConstraints(
+    graph: *const Graph,
+    constraints: []const env_mod.PlaceConstraint,
+    cell_of: []const Cell,
+    placed: []const bool,
+) ?Cell {
+    var col: ?i32 = null;
+    var row: ?i32 = null;
+    var last: ?Cell = null; // last resolved constraint's full offset (axis fallback)
+    for (constraints) |con| {
+        const ri = nodeByKey(graph, con.reference) orelse continue; // unknown ref: ignore
+        if (!placed[ri]) return null; // a real reference isn't ready yet → retry
+        const off = offsetCell(cell_of[ri], con.rel);
+        last = off;
+        switch (con.rel) {
+            .right_of, .left_of => col = off.col,
+            .above, .below => row = off.row,
+        }
+    }
+    const base = last orelse return null; // every reference was unknown
+    return .{ .col = col orelse base.col, .row = row orelse base.row };
+}
+
+/// Offset a reference cell by one step in the constraint's direction.
 fn offsetCell(ref: Cell, rel: env_mod.PlaceRel) Cell {
     return switch (rel) {
         .right_of => .{ .col = ref.col + 1, .row = ref.row },
         .left_of => .{ .col = ref.col - 1, .row = ref.row },
         .above => .{ .col = ref.col, .row = ref.row - 1 },
         .below => .{ .col = ref.col, .row = ref.row + 1 },
-        .anchor => ref,
     };
 }
 
@@ -1686,11 +1720,14 @@ fn mkKeyed(key: []const u8) types.Node {
 // spec: diagram/layout - computeFreeLayout pins each anchor and resolves placed blocks in dependency order
 test "computeFreeLayout resolves relative placements from an anchor" {
     var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("b"), mkKeyed("c") };
+    // Constraint arrays are stack consts so the slices stay valid for the call.
+    const c_below_b = [_]env_mod.PlaceConstraint{.{ .rel = .below, .reference = "b" }};
+    const b_right_a = [_]env_mod.PlaceConstraint{.{ .rel = .right_of, .reference = "a" }};
     const placements = [_]env_mod.Placement{
-        .{ .name = "a", .rel = .anchor },
+        .{ .name = "a" }, // anchor: no constraints
         // declared out of dependency order: c depends on b, b depends on a.
-        .{ .name = "c", .rel = .below, .reference = "b" },
-        .{ .name = "b", .rel = .right_of, .reference = "a" },
+        .{ .name = "c", .constraints = &c_below_b },
+        .{ .name = "b", .constraints = &b_right_a },
     };
     const graph = Graph{ .nodes = &nodes, .edges = &.{}, .layout = .{ .placements = &placements } };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1698,17 +1735,43 @@ test "computeFreeLayout resolves relative placements from an anchor" {
     const lay = (try computeFreeLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 3), lay.nodes.len);
     const xy = nodeXY(lay.nodes);
-    // a at origin cell; b one column right of a; c one row below b.
+    // a at origin cell; b one column right of a (same row); c one row below b.
     try testing.expectApproxEqAbs(xy[0].x + node_w + h_gap, xy[1].x, 0.5);
     try testing.expectApproxEqAbs(xy[0].y, xy[1].y, 0.5);
     try testing.expectApproxEqAbs(xy[1].x, xy[2].x, 0.5);
     try testing.expect(xy[2].y > xy[1].y);
 }
 
+// spec: diagram/layout - computeFreeLayout positions a block from several references at once
+test "computeFreeLayout places a block from two references" {
+    // c takes its column from b (right-of) and its row from a (below): the
+    // recursive multi-reference case — c is pinned by two different neighbours.
+    var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("b"), mkKeyed("c") };
+    const b_right_a = [_]env_mod.PlaceConstraint{.{ .rel = .right_of, .reference = "a" }};
+    const c_two = [_]env_mod.PlaceConstraint{
+        .{ .rel = .right_of, .reference = "b" },
+        .{ .rel = .below, .reference = "a" },
+    };
+    const placements = [_]env_mod.Placement{
+        .{ .name = "a" },
+        .{ .name = "b", .constraints = &b_right_a }, // one col right of a, same row
+        .{ .name = "c", .constraints = &c_two },
+    };
+    const graph = Graph{ .nodes = &nodes, .edges = &.{}, .layout = .{ .placements = &placements } };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeFreeLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    const xy = nodeXY(lay.nodes);
+    // c's column == right-of b == b.x + one step; c's row == below a == a.y + one step.
+    try testing.expectApproxEqAbs(xy[1].x + node_w + h_gap, xy[2].x, 0.5);
+    try testing.expect(xy[2].y > xy[0].y);
+    try testing.expectApproxEqAbs(xy[0].y + node_h + free_v_gap, xy[2].y, 0.5);
+}
+
 // spec: diagram/layout - computeFreeLayout flows un-placed blocks into a fallback row below the placed cluster
 test "computeFreeLayout flows an un-placed block into the fallback row" {
     var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("orphan") };
-    const placements = [_]env_mod.Placement{.{ .name = "a", .rel = .anchor }};
+    const placements = [_]env_mod.Placement{.{ .name = "a" }};
     const graph = Graph{ .nodes = &nodes, .edges = &.{}, .layout = .{ .placements = &placements } };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1722,9 +1785,10 @@ test "computeFreeLayout flows an un-placed block into the fallback row" {
 // spec: diagram/layout - computeFreeLayout places a block with a missing reference into the fallback row without aborting
 test "computeFreeLayout tolerates a placement naming an unknown reference" {
     var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("b") };
+    const b_right_ghost = [_]env_mod.PlaceConstraint{.{ .rel = .right_of, .reference = "ghost" }};
     const placements = [_]env_mod.Placement{
-        .{ .name = "a", .rel = .anchor },
-        .{ .name = "b", .rel = .right_of, .reference = "ghost" }, // no such block
+        .{ .name = "a" },
+        .{ .name = "b", .constraints = &b_right_ghost }, // no such block
     };
     const graph = Graph{ .nodes = &nodes, .edges = &.{}, .layout = .{ .placements = &placements } };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1740,9 +1804,11 @@ test "computeFreeLayout tolerates a placement naming an unknown reference" {
 test "computeFreeLayout breaks a placement cycle" {
     var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("b") };
     // a right-of b, b right-of a — a cycle with no anchor; neither can resolve.
+    const a_right_b = [_]env_mod.PlaceConstraint{.{ .rel = .right_of, .reference = "b" }};
+    const b_right_a = [_]env_mod.PlaceConstraint{.{ .rel = .right_of, .reference = "a" }};
     const placements = [_]env_mod.Placement{
-        .{ .name = "a", .rel = .right_of, .reference = "b" },
-        .{ .name = "b", .rel = .right_of, .reference = "a" },
+        .{ .name = "a", .constraints = &a_right_b },
+        .{ .name = "b", .constraints = &b_right_a },
     };
     const graph = Graph{ .nodes = &nodes, .edges = &.{}, .layout = .{ .placements = &placements } };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

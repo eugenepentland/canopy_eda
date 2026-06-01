@@ -158,6 +158,7 @@ src/eval/env.zig::PartPin struct_
 src/eval/env.zig::PartSignal struct_
 src/eval/env.zig::PinGroup struct_
 src/eval/env.zig::PinRef struct_
+src/eval/env.zig::PlaceConstraint struct_
 src/eval/env.zig::PlaceRel enum_
 src/eval/env.zig::PlaceholderPart struct_
 src/eval/env.zig::Placement struct_

@@ -231,6 +231,7 @@ Public functions: collectGraph
 Public functions: computeLayout, hasSystemView, computeSystemLayout, computeFreeLayout, hasFreeLayout
 
 - computeFreeLayout pins each anchor and resolves placed blocks in dependency order
+- computeFreeLayout positions a block from several references at once
 - computeFreeLayout flows un-placed blocks into a fallback row below the placed cluster
 - computeFreeLayout places a block with a missing reference into the fallback row without aborting
 - computeFreeLayout breaks a placement cycle instead of looping forever
@@ -349,6 +350,7 @@ Public functions: analyze
 - function form parses a named functional group with a verb and member sections
 - layout form parses (anchor "name") roots and (place "name" (rel "ref")) directives
 - layout place resolves right-of/left-of/above/below into a relative offset from the referenced block
+- layout place collects multiple constraints so a block is positioned by several references
 - hosts form records the sub-block instance names a section owns
 - verifies req with an (id …) target parses as a stable-id sign-off leaving ref-des empty
 - verifies req with a ref-des target parses as a ref-des sign-off leaving target-id empty

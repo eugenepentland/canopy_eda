@@ -932,18 +932,26 @@ pub const FunctionGroup = struct {
     stack: u8 = 1,
 };
 
-/// How a `(place …)` directive positions a block relative to another one.
-/// `anchor` is the pinned-root case (no reference); the four directions each
-/// offset by one box-plus-gap from the referenced block.
-pub const PlaceRel = enum { anchor, right_of, left_of, above, below };
+/// One direction a `(place …)` constraint offsets a block in: horizontal
+/// (`right_of`/`left_of`) constraints set the column, vertical (`above`/`below`)
+/// set the row — so two constraints on different axes pin a block on both.
+pub const PlaceRel = enum { right_of, left_of, above, below };
 
-/// One `(place "name" (rel "ref"))` directive from a `(layout …)` form: position
-/// the block whose diagram key is `name` relative to the block keyed `ref`. For
-/// `rel == .anchor`, `reference` is empty and the block is a fixed root.
+/// One `(rel "ref")` sub-clause of a `(place …)` directive: position the block
+/// one box-plus-gap in direction `rel` from the block keyed `reference`.
+pub const PlaceConstraint = struct {
+    rel: PlaceRel,
+    reference: []const u8,
+};
+
+/// One `(place "name" (rel "ref")…)` directive from a `(layout …)` form. With no
+/// constraints the block is a pinned anchor (a fixed root). With one or more,
+/// each constraint positions `name` relative to a referenced block; the
+/// placement resolves only once *every* referenced block is itself placed, so a
+/// block can be positioned by several others (recursive relative placement).
 pub const Placement = struct {
     name: []const u8,
-    rel: PlaceRel,
-    reference: []const u8 = "",
+    constraints: []const PlaceConstraint = &.{},
 };
 
 /// A declarative, Mermaid-style block-diagram layout from a top-level

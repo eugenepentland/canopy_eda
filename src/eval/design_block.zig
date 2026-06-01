@@ -1242,36 +1242,42 @@ fn parseStub(self: *Evaluator, form_children: []const Node) EvalError!?StubResul
     };
 }
 
-/// Parse a top-level `(layout (anchor "name") (place "name" (rel "ref"))…)`
-/// form into a `LayoutSpec`. `(anchor "x")` is shorthand for a pinned root
-/// (`rel = .anchor`, no reference); `(place "x" (right-of "y"))` positions x
-/// relative to y. Unknown relation keywords and malformed directives are
-/// skipped so a typo can't abort the build. Directive order is preserved — the
-/// layout solver resolves dependencies, not source order.
+/// Parse a top-level `(layout (anchor "name") (place "name" (rel "ref")…)…)`
+/// form into a `LayoutSpec`. `(anchor "x")` and a bare `(place "x")` are pinned
+/// roots (no constraints). `(place "x" (right-of "a") (below "b"))` carries
+/// *several* constraints — x is positioned relative to every listed block, so a
+/// block can be placed by more than one neighbour (recursive relative
+/// placement). Unknown relation keywords and malformed sub-clauses are skipped
+/// so a typo can't abort the build. Directive order is irrelevant — the solver
+/// resolves by dependency, not source order.
 fn parseLayout(self: *Evaluator, form_children: []const Node) EvalError!env_mod.LayoutSpec {
     var placements: std.ArrayListUnmanaged(env_mod.Placement) = .empty;
     for (form_children[1..]) |child| {
         const c = child.asList() orelse continue;
         if (c.len < 2) continue;
         const head = c[0].asAtom() orelse continue;
-        if (std.mem.eql(u8, head, "anchor")) {
-            const name = c[1].asString() orelse c[1].asAtom() orelse continue;
-            try placements.append(self.allocator, .{ .name = name, .rel = .anchor });
-        } else if (std.mem.eql(u8, head, "place")) {
-            // (place "name" (rel "ref"))
-            const name = c[1].asString() orelse c[1].asAtom() orelse continue;
-            if (c.len < 3) {
-                // Bare (place "name") with no relation → treat as an anchor.
-                try placements.append(self.allocator, .{ .name = name, .rel = .anchor });
-                continue;
-            }
-            const rel_form = c[2].asList() orelse continue;
+        const is_anchor = std.mem.eql(u8, head, "anchor");
+        if (!is_anchor and !std.mem.eql(u8, head, "place")) continue;
+        const name = c[1].asString() orelse c[1].asAtom() orelse continue;
+        // (anchor "x") and bare (place "x") are pinned roots — no constraints.
+        if (is_anchor) {
+            try placements.append(self.allocator, .{ .name = name });
+            continue;
+        }
+        // (place "x" (rel "ref") …) — collect every well-formed constraint.
+        var constraints: std.ArrayListUnmanaged(env_mod.PlaceConstraint) = .empty;
+        for (c[2..]) |rel_node| {
+            const rel_form = rel_node.asList() orelse continue;
             if (rel_form.len < 2) continue;
             const rel_head = rel_form[0].asAtom() orelse continue;
             const rel = relFromAtom(rel_head) orelse continue;
             const ref = rel_form[1].asString() orelse rel_form[1].asAtom() orelse continue;
-            try placements.append(self.allocator, .{ .name = name, .rel = rel, .reference = ref });
+            try constraints.append(self.allocator, .{ .rel = rel, .reference = ref });
         }
+        try placements.append(self.allocator, .{
+            .name = name,
+            .constraints = constraints.toOwnedSlice(self.allocator) catch &.{},
+        });
     }
     return .{ .placements = placements.toOwnedSlice(self.allocator) catch &.{} };
 }
@@ -1431,10 +1437,14 @@ test "design-block parses a (layout …) form with anchor and place" {
 
     const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
     try testing.expectEqual(@as(usize, 2), block.layout.placements.len);
+    // Anchor: a placement with no constraints.
     try testing.expectEqualStrings("rp2350", block.layout.placements[0].name);
-    try testing.expectEqual(env_mod.PlaceRel.anchor, block.layout.placements[0].rel);
+    try testing.expectEqual(@as(usize, 0), block.layout.placements[0].constraints.len);
+    // Relative: one constraint, right-of rp2350.
     try testing.expectEqualStrings("esp32", block.layout.placements[1].name);
-    try testing.expectEqualStrings("rp2350", block.layout.placements[1].reference);
+    try testing.expectEqual(@as(usize, 1), block.layout.placements[1].constraints.len);
+    try testing.expectEqual(env_mod.PlaceRel.right_of, block.layout.placements[1].constraints[0].rel);
+    try testing.expectEqualStrings("rp2350", block.layout.placements[1].constraints[0].reference);
 }
 
 // spec: eval/design_block - layout place resolves right-of/left-of/above/below into a relative offset from the referenced block
@@ -1458,10 +1468,36 @@ test "layout place parses each relation keyword" {
 
     const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
     try testing.expectEqual(@as(usize, 4), block.layout.placements.len);
-    try testing.expectEqual(env_mod.PlaceRel.right_of, block.layout.placements[0].rel);
-    try testing.expectEqual(env_mod.PlaceRel.left_of, block.layout.placements[1].rel);
-    try testing.expectEqual(env_mod.PlaceRel.above, block.layout.placements[2].rel);
-    try testing.expectEqual(env_mod.PlaceRel.below, block.layout.placements[3].rel);
+    try testing.expectEqual(env_mod.PlaceRel.right_of, block.layout.placements[0].constraints[0].rel);
+    try testing.expectEqual(env_mod.PlaceRel.left_of, block.layout.placements[1].constraints[0].rel);
+    try testing.expectEqual(env_mod.PlaceRel.above, block.layout.placements[2].constraints[0].rel);
+    try testing.expectEqual(env_mod.PlaceRel.below, block.layout.placements[3].constraints[0].rel);
+}
+
+// spec: eval/design_block - layout place collects multiple constraints so a block is positioned by several references
+test "layout place collects multiple constraints" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (layout
+        \\    (place "c" (right-of "b") (below "a"))))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 1), block.layout.placements.len);
+    const cons = block.layout.placements[0].constraints;
+    try testing.expectEqual(@as(usize, 2), cons.len);
+    try testing.expectEqual(env_mod.PlaceRel.right_of, cons[0].rel);
+    try testing.expectEqualStrings("b", cons[0].reference);
+    try testing.expectEqual(env_mod.PlaceRel.below, cons[1].rel);
+    try testing.expectEqualStrings("a", cons[1].reference);
 }
 
 // spec: eval/design_block - bus-net expands one net tie per index in the inclusive range
