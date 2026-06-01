@@ -481,6 +481,10 @@ fn edgeLabelText(arena: Allocator, r: layout.Route) Allocator.Error![]const u8 {
 /// back to the geometric middle for degenerate polylines.
 fn edgeLabelAnchor(pts: []const types.Pt) types.Pt {
     if (pts.len >= 3) return .{ .x = pts[1].x, .y = (pts[1].y + pts[2].y) / 2 };
+    // A 2-point edge (the free Layout view's face-to-face stub): anchor the
+    // label at the true midpoint so it sits in the open span between boxes,
+    // not at an endpoint where it would land on the box border / its text.
+    if (pts.len == 2) return .{ .x = (pts[0].x + pts[1].x) / 2, .y = (pts[0].y + pts[1].y) / 2 };
     return pts[pts.len / 2];
 }
 
