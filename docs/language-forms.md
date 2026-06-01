@@ -84,3 +84,5 @@ where each is accepted: **D** = design-block top level,
 | `(decouple-defaults (ic "REF") (bypass (comp)))` | D·· | Set per-design decouple defaults: a fallback IC ref and bypass cap so (decouple …) can omit both. |
 | `(kicad-pcb "absolute/path/to/board.kicad_pcb")` | D·· | Declare the PCB file the file-based KiCad sync writes board updates to. |
 | `(function "Name" ["subtitle"] [(verb "…")] [(stack N)] [(chain pos "stage")] (includes "section"…))` | D·· | Declare a high-level functional subsystem for the Function view; (chain …) also places it on the Signal Chain view's narrative spine. |
+| `(stub "name" [(role …)] [(mpn …)] [(category key)] [(size W H)] [(channels N)] [(ref "REF")] (signal "name" class "net")…)` | D·· | Declare a placeholder part — auto-placed, sized bounding box, signal-wired, optionally N stacked channels — for design-phase diagrams before a real component exists. |
+| `(layout (anchor "name") (place "name" (right-of|left-of|above|below "ref"))…)` | D·· | Declare a Mermaid-style free-floating block-diagram layout by positioning blocks relative to one another. |

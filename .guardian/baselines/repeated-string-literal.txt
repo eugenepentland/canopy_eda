@@ -1,4 +1,7 @@
 # guardian-snapshot v1
+src/diagram/render.zig: string literal  checked appears 3 times — extract a const
+src/diagram/render.zig: string literal <div class=\"dg-panel dg-panel-{s}\"> appears 3 times — extract a const
+src/diagram/render.zig: string literal <input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\"{s}> appears 3 times — extract a const
 src/serve/bom_html.zig: string literal manufacturer appears 3 times — extract a const
 src/serve/edit.zig: string literal {{\"ok\":true,\"version\":{d}}} appears 3 times — extract a const
 src/serve/mcp_tools.zig: string literal component appears 4 times — extract a const

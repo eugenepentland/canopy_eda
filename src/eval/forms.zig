@@ -116,6 +116,8 @@ pub const ScopeForm = enum {
     decouple_defaults,
     kicad_pcb,
     function,
+    stub,
+    layout,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -151,6 +153,8 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "decouple-defaults", .decouple_defaults },
     .{ "kicad-pcb", .kicad_pcb },
     .{ "function", .function },
+    .{ "stub", .stub },
+    .{ "layout", .layout },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -434,6 +438,14 @@ pub const scope_form_docs = blk: {
     t[@intFromEnum(ScopeForm.function)] = .{ .scope = tl, .doc = .{
         .syntax = "(function \"Name\" [\"subtitle\"] [(verb \"…\")] [(stack N)] [(chain pos \"stage\")] (includes \"section\"…))",
         .summary = "Declare a high-level functional subsystem for the Function view; (chain …) also places it on the Signal Chain view's narrative spine.",
+    } };
+    t[@intFromEnum(ScopeForm.stub)] = .{ .scope = tl, .doc = .{
+        .syntax = "(stub \"name\" [(role …)] [(mpn …)] [(category key)] [(size W H)] [(channels N)] [(ref \"REF\")] (signal \"name\" class \"net\")…)",
+        .summary = "Declare a placeholder part — auto-placed, sized bounding box, signal-wired, optionally N stacked channels — for design-phase diagrams before a real component exists.",
+    } };
+    t[@intFromEnum(ScopeForm.layout)] = .{ .scope = tl, .doc = .{
+        .syntax = "(layout (anchor \"name\") (place \"name\" (right-of|left-of|above|below \"ref\"))…)",
+        .summary = "Declare a Mermaid-style free-floating block-diagram layout by positioning blocks relative to one another.",
     } };
     break :blk t;
 };

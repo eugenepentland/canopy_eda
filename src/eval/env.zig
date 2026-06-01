@@ -221,6 +221,50 @@ pub const CriticalIc = struct {
     mpn: []const u8 = "",
 };
 
+/// A named virtual pin on a placeholder `(stub …)`. A stub declares its
+/// interface by *signal* (a logical name on a net) rather than by physical
+/// pin number — the placeholder has no real pinout yet. `class` is a diagram
+/// wire-class key (e.g. "i2c", "power", "clock"); `net` is the net the signal
+/// sits on, so two parts naming the same net get a diagram edge.
+pub const PartSignal = struct {
+    name: []const u8,
+    class: []const u8 = "",
+    net: []const u8,
+};
+
+/// A placeholder component declared up front with `(stub "name" …)`, before a
+/// real library component exists. It auto-places (gets a ref-des + stable id,
+/// no `(instance …)` line), renders as a categorised diagram node wired by its
+/// signals, and exports to KiCad as a pad-less bounding-box footprint sized
+/// `width`×`height` mm for floor-planning. A real `(import "name")` of the same
+/// key later supersedes it — promotion to a fully specified part.
+pub const PlaceholderPart = struct {
+    /// Auto-assigned (or `(ref …)`-overridden) reference designator, e.g. "U1".
+    ref_des: []const u8,
+    /// The declared key — the same name a later `(instance …)`/`(import …)` uses.
+    name: []const u8,
+    /// Short functional role, e.g. "Host MCU". Empty when undeclared.
+    role: []const u8 = "",
+    /// Manufacturer part number for the BOM + datasheet match. Empty when undeclared.
+    mpn: []const u8 = "",
+    /// Diagram category key (mcu/power/memory/clock/comms/sensor/analog/
+    /// protection/connector). Empty ⇒ classifier falls back to name heuristics.
+    category: []const u8 = "",
+    /// Bounding-box width in mm for the KiCad placeholder footprint. 0 ⇒ unset.
+    width: f64 = 0,
+    /// Bounding-box height in mm. 0 ⇒ unset.
+    height: f64 = 0,
+    /// Stable 8-char id, auto-inserted into source on first build. Survives
+    /// promotion so the KiCad footprint identity (uuidFromId) is preserved.
+    id: []const u8 = "",
+    /// `(channels N)`: this stub stands for N identical channels, drawn as N
+    /// offset cards stacked behind one box (e.g. a 2-channel PSU, 4 banana
+    /// jacks). Its signals wire one representative channel. 1 ⇒ a single box.
+    channels: u8 = 1,
+    /// Named virtual pins wired to nets — the part's diagram interface.
+    signals: []const PartSignal = &.{},
+};
+
 /// A library-level rule for using a component correctly. Stored in the
 /// component's `lib/components/<name>.sexp` via
 /// `(requirement "text" (ref "file.pdf" (page N)))`. Used to validate that
@@ -601,6 +645,11 @@ pub const Instance = struct {
     id: []const u8 = "",
     /// Full UUID for PCB/KiCad export (derived from id or assigned by BOM).
     uuid: []const u8 = "",
+    /// True when this instance was synthesised from a placeholder `(stub …)`
+    /// form rather than a real library component. Downstream consumers skip
+    /// pin-level geometry checks and pad-net emission for it, and ERC warns
+    /// (never errors) that it needs a real component before fab.
+    placeholder: bool = false,
 };
 
 /// A sub-block reference.
@@ -893,6 +942,69 @@ pub const FunctionGroup = struct {
     chain_label: []const u8 = "",
 };
 
+/// One direction a `(place …)` constraint offsets a block in: horizontal
+/// (`right_of`/`left_of`) constraints set the column, vertical (`above`/`below`)
+/// set the row — so two constraints on different axes pin a block on both.
+pub const PlaceRel = enum { right_of, left_of, above, below };
+
+/// One `(rel "ref")` sub-clause of a `(place …)` directive: position the block
+/// one box-plus-gap in direction `rel` from the block keyed `reference`.
+pub const PlaceConstraint = struct {
+    rel: PlaceRel,
+    reference: []const u8,
+};
+
+/// One `(place "name" (rel "ref")…)` directive from a `(layout …)` form. With no
+/// constraints the block is a pinned anchor (a fixed root). With one or more,
+/// each constraint positions `name` relative to a referenced block; the
+/// placement resolves only once *every* referenced block is itself placed, so a
+/// block can be positioned by several others (recursive relative placement).
+pub const Placement = struct {
+    name: []const u8,
+    constraints: []const PlaceConstraint = &.{},
+};
+
+/// One `(row "a" "b" …)` directive from a `(layout …)` form: an ordered list of
+/// block keys that share a horizontal band. Rows stack top-to-bottom in
+/// declaration order; members lay left-to-right in list order.
+pub const LayoutRow = struct {
+    members: []const []const u8 = &.{},
+};
+
+/// One `(group "Label" "a" "b" …)` directive from a `(layout …)` form: a named
+/// visual region drawn as a labeled translucent box behind its member blocks
+/// (their bounding box, padded). Purely cosmetic — it groups already-placed
+/// blocks so a dense diagram reads as labeled sections; it does not move them.
+pub const LayoutGroup = struct {
+    label: []const u8,
+    members: []const []const u8 = &.{},
+};
+
+/// Which side of the diagram an `(edge …)` directive pins its blocks to.
+pub const EdgeSide = enum { left, right };
+
+/// One `(edge left|right "a" "b" …)` directive: pins its blocks to the far
+/// left/right column of the diagram (just outside everything else), stacked
+/// vertically and centered on the content. Unlike `(place …)`, the column is
+/// resolved *after* the rest of the layout, so the blocks stay on the edge no
+/// matter what is added between them.
+pub const LayoutEdge = struct {
+    side: EdgeSide,
+    members: []const []const u8 = &.{},
+};
+
+/// A declarative, Mermaid-style block-diagram layout from a top-level
+/// `(layout …)` form: either relative `(place …)` directives or `(row …)` bands
+/// (or both) that the diagram's `computeFreeLayout` resolves into absolute box
+/// positions. Empty `placements` *and* `rows` ⇒ no free layout declared, so the
+/// diagram keeps its category-column views.
+pub const LayoutSpec = struct {
+    placements: []const Placement = &.{},
+    rows: []const LayoutRow = &.{},
+    groups: []const LayoutGroup = &.{},
+    edges: []const LayoutEdge = &.{},
+};
+
 /// The fully-evaluated result of a `(design-block …)`: the flattened netlist
 /// (instances + nets + ports), the section/sub-block tree, and the design-doc
 /// metadata (critical ICs, verifications, rails, functions) the review and
@@ -938,6 +1050,17 @@ pub const DesignBlock = struct {
     /// top-level `(function …)` forms. Empty ⇒ the Function view auto-groups
     /// every section by category instead.
     functions: []const FunctionGroup = &.{},
+    /// Placeholder parts declared via top-level `(stub …)` forms — sketched
+    /// components with a bounding box and named signals but no real library
+    /// footprint yet. They render as diagram nodes, export as pad-less KiCad
+    /// outlines, and appear in the traceability table as "needs real
+    /// footprint". Empty for designs with no `(stub …)` forms.
+    parts: []const PlaceholderPart = &.{},
+    /// Declarative Mermaid-style layout from a top-level `(layout …)` form. Its
+    /// `(place …)` directives position diagram blocks relative to one another;
+    /// the diagram's `computeFreeLayout` resolves them into a free-floating view.
+    /// Empty `placements` ⇒ no layout declared, so the category-column views stand.
+    layout: LayoutSpec = .{},
 };
 
 /// Assertion result.

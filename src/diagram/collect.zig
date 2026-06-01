@@ -73,7 +73,18 @@ pub fn collectGraph(
     try buildSectionNodes(allocator, scratch, block, &sub_port_to_net, sec_to_sub, &nodes, sec_node);
     try buildSubBlockNodes(allocator, scratch, block, &sub_port_to_net, dg_attach, &nodes, sub_node);
 
+    // Placeholder `(stub …)` parts: one node each, categorised by the stub's
+    // declared category. Record ref-des → node so the netlist (built from the
+    // stub's signals) resolves edges to it below.
+    const stub_node = try allocator.alloc(?u32, block.parts.len);
+    defer allocator.free(stub_node);
+    @memset(stub_node, null);
+    try buildStubNodes(allocator, block, &nodes, stub_node);
+
     var mem = try membership.build(allocator, block, sec_node, sub_node, dg_attach);
+    for (block.parts, 0..) |p, i| {
+        if (stub_node[i]) |nid| try mem.ref_to_node.put(allocator, p.ref_des, nid);
+    }
     defer mem.deinit(allocator);
     const registry = try classify.buildRegistry(allocator, block);
     errdefer allocator.free(registry);
@@ -101,7 +112,7 @@ pub fn collectGraph(
     try crystalPass(allocator, scratch, block, &mem, &nodes, &edge_list);
     try assignRails(allocator, scratch, flat, &mem, &port_map, nodes.items);
 
-    return .{ .nodes = try nodes.toOwnedSlice(allocator), .edges = try edge_list.toOwnedSlice(allocator), .classes = registry };
+    return .{ .nodes = try nodes.toOwnedSlice(allocator), .edges = try edge_list.toOwnedSlice(allocator), .classes = registry, .layout = block.layout };
 }
 
 const RailCount = struct { v: f64, c: u32 };
@@ -185,6 +196,7 @@ fn buildSectionNodes(
             .subtitle = sec.description,
             .category = rb.classifySection(sec),
             .slug = try review.slugify(allocator, sec.name),
+            .key = sec.name,
             .inputs = try dupeRails(allocator, input_buf.items),
             .outputs = try dupeRails(allocator, output_buf.items),
         });
@@ -217,10 +229,38 @@ fn buildSubBlockNodes(
             .subtitle = "",
             .category = rb.classifyByName(sb.name, sb.block.instances),
             .slug = try review.slugify(allocator, sb.name),
+            .key = sb.name,
             .inputs = try dupeRails(allocator, input_buf.items),
             .outputs = try dupeRails(allocator, output_buf.items),
         });
         sub_node[sb_idx] = @intCast(nodes.items.len - 1);
+    }
+}
+
+/// Append one diagram node per placeholder `(stub …)` part. The node's column
+/// and colour come from the stub's declared `(category …)` (falling back to the
+/// name heuristic); the label prefers the stub's role, then its name; the mpn
+/// becomes the subtitle. Labels/subtitles borrow from the design (not freed),
+/// so `is_boundary` stays false. Records each stub's node id in `stub_node`.
+fn buildStubNodes(
+    allocator: Allocator,
+    block: *const DesignBlock,
+    nodes: *std.ArrayListUnmanaged(Node),
+    stub_node: []?u32,
+) Allocator.Error!void {
+    for (block.parts, 0..) |p, i| {
+        const label = if (p.role.len > 0) p.role else p.name;
+        try nodes.append(allocator, .{
+            .label = label,
+            .subtitle = p.mpn,
+            .category = rb.classifyCategoryKey(p.category, p.name),
+            .slug = "",
+            .key = p.name,
+            .stack = p.channels,
+            .inputs = &.{},
+            .outputs = &.{},
+        });
+        stub_node[i] = @intCast(nodes.items.len - 1);
     }
 }
 
@@ -758,6 +798,25 @@ const testing = std.testing;
 
 fn emptyBlock(name: []const u8) DesignBlock {
     return .{ .name = name, .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
+}
+
+// spec: diagram/collect - Emits one diagram node per stub categorised by its declared category
+test "collectGraph emits a categorised node for each stub" {
+    const parts = [_]env_mod.PlaceholderPart{
+        .{ .ref_des = "U1", .name = "my-mcu", .role = "MCU", .category = "mcu", .signals = &.{} },
+        .{ .ref_des = "J1", .name = "usb", .role = "USB-C", .category = "connector", .channels = 4, .signals = &.{} },
+    };
+    var block = emptyBlock("t");
+    block.parts = &parts;
+    var g = try collectGraph(testing.allocator, &block, &.{});
+    defer g.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), g.nodes.len);
+    // Node category comes from the stub's declared (category …); channels → stack.
+    try testing.expect(g.nodes[0].category == .mcu);
+    try testing.expect(g.nodes[1].category == .connector);
+    try testing.expectEqual(@as(u8, 4), g.nodes[1].stack);
+    // Authoring key is the stub name, for (layout (place "key" …)) matching.
+    try testing.expectEqualStrings("my-mcu", g.nodes[0].key);
 }
 
 // spec: diagram/collect - Derives inter-block edges from the flattened netlist rather than an MCU hub

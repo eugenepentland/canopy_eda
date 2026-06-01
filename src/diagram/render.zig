@@ -37,6 +37,12 @@ const chain_key: []const u8 = "chain";
 const chain_label: []const u8 = "Signal Chain";
 const chain_color: []const u8 = "#d29922"; // amber accent, distinct from Function/System
 
+/// Tab metadata for the **Layout** view — the author-placed free-floating view
+/// (`(layout …)` directives). Default-selected when present.
+const layout_key: []const u8 = "layout";
+const layout_label: []const u8 = "Layout";
+const layout_color: []const u8 = "#e3742f"; // orange accent — the author-placed free view
+
 /// Render the whole tabbed diagram. The first tab is always the **System**
 /// view — one block diagram showing every block and every inter-block
 /// connection at once, color-coded by signal class — when the graph has
@@ -65,6 +71,7 @@ pub fn renderTabsWithFunction(
     // design's declared narrative stages — present only when both exist.
     const has_chain = has_function and chain_stages.len > 0;
     const has_system = layout.hasSystemView(graph);
+    const has_layout = layout.hasFreeLayout(graph);
     var first_signal: ?ClassId = null;
     for (graph.classes, 0..) |_, i| {
         const id: ClassId = @intCast(i);
@@ -73,13 +80,14 @@ pub fn renderTabsWithFunction(
             break;
         }
     }
-    if (!has_function and !has_system) {
+    if (!has_function and !has_system and !has_layout) {
         if (first_signal == null) return;
     }
 
     try w.writeAll("<div class=\"dg-wrap\"><style>");
     // Per-view rules: the checked radio shows its panel and lights its tab.
     // Function and System are just keyed views with neutral accents.
+    if (has_layout) try writeToggleRule(w, layout_key, layout_color);
     if (has_function) try writeToggleRule(w, function_key, function_color);
     if (has_chain) try writeToggleRule(w, chain_key, chain_color);
     if (has_system) try writeToggleRule(w, system_key, system_color);
@@ -89,15 +97,21 @@ pub fn renderTabsWithFunction(
     }
     try w.writeAll("</style>");
     // Radios first so the `:checked ~` sibling selectors can reach the panels.
-    // Default-selected tab: Function if present, else System, else first signal.
-    if (has_function) try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\" checked>", .{function_key});
+    // Default-selected tab: Layout if the author declared one (they're actively
+    // placing blocks), else Function, else System, else the first signal view.
+    // The Signal Chain view is an alternate to Function and is never the default.
+    if (has_layout) try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\" checked>", .{layout_key});
+    if (has_function) {
+        const checked = if (!has_layout) " checked" else "";
+        try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\"{s}>", .{ function_key, checked });
+    }
     if (has_chain) try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\">", .{chain_key});
     if (has_system) {
-        const checked = if (!has_function) " checked" else "";
+        const checked = if (!has_layout and !has_function) " checked" else "";
         try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\"{s}>", .{ system_key, checked });
     }
-    // A signal view is the default only when neither coarse view is present.
-    const signal_default = !has_function and !has_system;
+    // A signal view is the default only when no coarse view is present.
+    const signal_default = !has_layout and !has_function and !has_system;
     for (graph.classes, 0..) |c, i| {
         const id: ClassId = @intCast(i);
         if (!graph.isView(id)) continue;
@@ -105,6 +119,7 @@ pub fn renderTabsWithFunction(
         try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\"{s}>", .{ c.key, checked });
     }
     try w.writeAll("<div class=\"dg-tabs\">");
+    if (has_layout) try writeTabLabel(w, layout_key, layout_label);
     if (has_function) try writeTabLabel(w, function_key, function_label);
     if (has_chain) try writeTabLabel(w, chain_key, chain_label);
     if (has_system) try writeTabLabel(w, system_key, system_label);
@@ -113,6 +128,7 @@ pub fn renderTabsWithFunction(
         try writeTabLabel(w, c.key, c.label);
     }
     try w.writeAll("</div><div class=\"dg-panels\">");
+    if (has_layout) try renderFreePanel(allocator, graph, w);
     if (func_graph) |fg| try renderCoarsePanel(allocator, fg, function_key, w);
     if (has_chain) try renderChainPanel(allocator, func_graph.?, chain_stages, chain_key, w);
     if (has_system) try renderCoarsePanel(allocator, graph, system_key, w);
@@ -168,7 +184,21 @@ fn renderChainPanel(
 /// Wrap a precomputed coarse `lay` of `graph` in its toggled `dg-panel`.
 fn writeCoarsePanel(arena: Allocator, graph: *const Graph, lay: layout.Layout, key: []const u8, w: *Writer) (Allocator.Error || Writer.Error)!void {
     try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{key});
-    try renderSystemBody(arena, w, graph, lay);
+    try renderSystemBody(arena, w, graph, lay, false);
+    try w.writeAll("</div>");
+}
+
+/// The **Layout** tab panel: the author-declared free-floating view. Built from
+/// `computeFreeLayout` (relative `(place …)` directives → absolute box
+/// positions) and drawn through the same body as the System view, so blocks and
+/// class-colored edges look identical — only the placement differs.
+fn renderFreePanel(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const lay = (try layout.computeFreeLayout(arena, graph)) orelse return;
+    try w.print("<div class=\"dg-panel dg-panel-{s}\">", .{layout_key});
+    try renderSystemBody(arena, w, graph, lay, true);
     try w.writeAll("</div>");
 }
 
@@ -181,27 +211,27 @@ pub fn renderSystemStandalone(allocator: Allocator, graph: *const Graph, w: *Wri
     const arena = arena_state.allocator();
     const lay = (try layout.computeSystemLayout(arena, graph)) orelse return false;
     try w.writeAll("<div class=\"dg-wrap\">");
-    try renderSystemBody(arena, w, graph, lay);
+    try renderSystemBody(arena, w, graph, lay, false);
     try w.writeAll("</div>");
     return true;
 }
 
 /// The class legend + one inline SVG, shared by the tab panel and the export's
 /// standalone block.
-fn renderSystemBody(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout) (Allocator.Error || Writer.Error)!void {
+fn renderSystemBody(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout, rail_mode: bool) (Allocator.Error || Writer.Error)!void {
     try writeClassLegend(w, graph, lay);
     try w.print(
         "<svg viewBox=\"0 0 {d:.0} {d:.0}\" class=\"dg-svg\" xmlns=\"http://www.w3.org/2000/svg\">",
         .{ lay.width, lay.height },
     );
-    try renderSystemView(arena, w, graph, lay);
+    try renderSystemView(arena, w, graph, lay, rail_mode);
     try w.writeAll("</svg>");
 }
 
 // System view: power wires are drawn thin + faint so the (usually sparser)
 // signal flow reads clearly on top of the dense power-distribution fan.
-const sys_power_width: f64 = 1.1;
-const sys_power_opacity: f64 = 0.35;
+const sys_power_width: f64 = 1.0;
+const sys_power_opacity: f64 = 0.2;
 const sys_arrow_sz: f64 = 13; // signal-edge arrowhead size (px)
 
 /// Draw the combined view: every wire colored by *its* signal class (not a
@@ -211,14 +241,21 @@ const sys_arrow_sz: f64 = 13; // signal-edge arrowhead size (px)
 /// carry their class color (what a connection *carries*). Power wires recede
 /// (thin/faint, undirected, unlabeled) — the rail fan is the main clutter and
 /// its voltages live in the focused Power tab.
-fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout) (Allocator.Error || Writer.Error)!void {
+fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout, rail_mode: bool) (Allocator.Error || Writer.Error)!void {
     try writeStageBands(w, lay);
+    try writeGroupBoxes(w, lay);
+    // In rail mode (the Layout view) each power net gets its own color + label so
+    // rails are traceable; otherwise power recedes as one faint anonymous color.
+    const rails: ?[]const RailColor = if (rail_mode) try buildRailPalette(arena, graph) else null;
     for (lay.routes) |r| {
-        const color = classColor(graph, r.class);
         if (r.class == types.CLASS_POWER) {
-            try writeRoutedEdge(w, r, color, sys_power_width, sys_power_opacity);
+            if (rails) |p| {
+                try writeRoutedEdge(w, r, railColor(p, r.label), sys_rail_width, sys_rail_opacity);
+            } else {
+                try writeRoutedEdge(w, r, classColor(graph, r.class), sys_power_width, sys_power_opacity);
+            }
         } else {
-            try writeRoutedEdge(w, r, color, null, null);
+            try writeRoutedEdge(w, r, classColor(graph, r.class), null, null);
         }
     }
     for (lay.nodes) |n| try writeNode(arena, w, graph.nodes[n.gid], n.x, n.y);
@@ -228,12 +265,17 @@ fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layo
         if (r.class == types.CLASS_POWER) continue;
         try writeArrowhead(w, r, classColor(graph, r.class));
     }
+    // Labels: signal edges always; power edges too in rail mode (so each rail is
+    // named), each in its own color.
     var labeled: std.StringHashMapUnmanaged(void) = .empty;
     for (lay.routes) |r| {
-        if (r.class == types.CLASS_POWER or r.label.len == 0) continue;
+        if (r.label.len == 0) continue;
+        const is_power = r.class == types.CLASS_POWER;
+        if (is_power and rails == null) continue;
+        const color = if (is_power) railColor(rails.?, r.label) else classColor(graph, r.class);
         const key = try std.fmt.allocPrint(arena, "{d}|{s}", .{ r.from_gid, r.label });
         if ((try labeled.getOrPut(arena, key)).found_existing) continue;
-        try writeEdgeLabel(arena, w, r, classColor(graph, r.class));
+        try writeEdgeLabel(arena, w, r, color);
     }
 }
 
@@ -288,6 +330,41 @@ fn writeStageBands(w: *Writer, lay: layout.Layout) Writer.Error!void {
             '<' => try w.writeAll("&lt;"),
             '>' => try w.writeAll("&gt;"),
             else => try w.writeByte(std.ascii.toUpper(c)),
+        };
+        try w.writeAll("</text>");
+    }
+}
+
+// Palette cycled across `(group …)` boxes so adjacent regions read as distinct.
+const group_palette = [_][]const u8{
+    "#58a6ff", // blue
+    "#d29922", // amber
+    "#3fb950", // green
+    "#bc8cff", // purple
+    "#39c5cf", // teal
+    "#f0883e", // orange
+};
+
+/// Draw the free Layout view's `(group …)` regions: a faint tinted rounded box
+/// behind the member blocks with the group label in its top-left, each in a
+/// cycled palette color. Drawn before edges/nodes so it sits behind them.
+fn writeGroupBoxes(w: *Writer, lay: layout.Layout) Writer.Error!void {
+    for (lay.groups) |g| {
+        const color = group_palette[g.color_idx % group_palette.len];
+        try w.print(
+            "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\" rx=\"12\" " ++
+                "fill=\"{s}\" fill-opacity=\"0.05\" stroke=\"{s}\" stroke-opacity=\"0.55\" stroke-width=\"1.5\"/>",
+            .{ g.x, g.y, g.w, g.h, color, color },
+        );
+        try w.print(
+            "<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-group-label\" fill=\"{s}\">",
+            .{ g.x + 14, g.y + 21, color },
+        );
+        for (g.label) |c| switch (c) {
+            '&' => try w.writeAll("&amp;"),
+            '<' => try w.writeAll("&lt;"),
+            '>' => try w.writeAll("&gt;"),
+            else => try w.writeByte(c),
         };
         try w.writeAll("</text>");
     }
@@ -376,6 +453,7 @@ const min_label_chars: usize = 8;
 const min_sub_chars: usize = 10;
 const stack_offset: f64 = 7; // per-card offset for a multi-channel stacked block
 const stack_back_opacity: f64 = 0.5; // dimmer stroke on the cards behind the front one
+const stack_badge_gap: f64 = 5; // gap between the rearmost card top and the ×N badge
 const rf_if_color: []const u8 = "#e3742f"; // RF edges returning to the connector (IF lines)
 const pill_char_w: f64 = 8.4; // edge-label width per character
 const pill_pad_x: f64 = 12; // edge-label horizontal padding
@@ -401,6 +479,14 @@ fn writeNode(arena: Allocator, w: *Writer, node: types.Node, x: f64, y: f64) (Al
                 .{ x + off, y - off, layout.node_w, layout.node_h, rect_class, color, stack_back_opacity },
             );
         }
+        // "×N" channel-count badge above the top-right of the rearmost card, so
+        // a stack reads as "this many identical channels" at a glance.
+        const back_off = @as(f64, @floatFromInt(node.stack - 1)) * stack_offset;
+        try w.print(
+            "<text x=\"{d:.1}\" y=\"{d:.1}\" text-anchor=\"end\" " ++
+                "font-family=\"monospace\" font-weight=\"700\" font-size=\"17\" fill=\"{s}\">×{d}</text>",
+            .{ x + layout.node_w + back_off, y - back_off - stack_badge_gap, color, node.stack },
+        );
     }
     try w.print(
         "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.0}\" height=\"{d:.0}\" rx=\"6\" class=\"{s}\" stroke=\"{s}\"/>",
@@ -487,12 +573,56 @@ fn edgeLabelText(arena: Allocator, r: layout.Route) Allocator.Error![]const u8 {
 /// back to the geometric middle for degenerate polylines.
 fn edgeLabelAnchor(pts: []const types.Pt) types.Pt {
     if (pts.len >= 3) return .{ .x = pts[1].x, .y = (pts[1].y + pts[2].y) / 2 };
+    // A 2-point edge (the free Layout view's face-to-face stub): anchor the
+    // label at the true midpoint so it sits in the open span between boxes,
+    // not at an endpoint where it would land on the box border / its text.
+    if (pts.len == 2) return .{ .x = (pts[0].x + pts[1].x) / 2, .y = (pts[0].y + pts[1].y) / 2 };
     return pts[pts.len / 2];
 }
 
 // ── power-view voltage coloring + legend ────────────────────────────────
 
 /// A distinct rail voltage paired with the color used for its edges + legend.
+// Layout-view power rails: each net drawn in its own color at this weight, so a
+// rail is followable end-to-end while still reading lighter than the bold
+// full-weight signal edges.
+const sys_rail_width: f64 = 1.6;
+const sys_rail_opacity: f64 = 0.7;
+
+const RailColor = struct { name: []const u8, color: []const u8 };
+
+/// Assign each distinct power-net name a palette color. Stub rails carry no
+/// resolved voltage, so voltage-coloring can't tell them apart — coloring by
+/// net name gives every rail its own traceable hue. Sorted for stable colors.
+fn buildRailPalette(arena: Allocator, graph: *const Graph) Allocator.Error![]const RailColor {
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (graph.edges) |e| {
+        if (e.class != types.CLASS_POWER or e.label.len == 0) continue;
+        var seen = false;
+        for (names.items) |x| {
+            if (std.mem.eql(u8, x, e.label)) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) try names.append(arena, e.label);
+    }
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+    const out = try arena.alloc(RailColor, names.items.len);
+    for (names.items, 0..) |nm, i| out[i] = .{ .name = nm, .color = volt_palette[i % volt_palette.len] };
+    return out;
+}
+
+/// The assigned color for a power net, or grey if unknown.
+fn railColor(palette: []const RailColor, name: []const u8) []const u8 {
+    for (palette) |rc| if (std.mem.eql(u8, rc.name, name)) return rc.color;
+    return volt_unspecified;
+}
+
 const VoltColor = struct { v: f64, color: []const u8 };
 
 const volt_eps: f64 = 0.05; // group voltages within 50 mV as one rail level
@@ -841,6 +971,7 @@ pub const CSS =
     \\.dg-leg{display:inline-flex;align-items:center;gap:6px;}
     \\.dg-sw{width:16px;height:16px;display:inline-block;}
     \\.dg-band-label{font:700 17px "SF Mono","Fira Code",monospace;}
+    \\.dg-group-label{font:700 15px "SF Mono","Fira Code",monospace;letter-spacing:0.04em;}
     \\.dg-pcard{fill:#0d1117;stroke-width:1.8;}
     \\.dg-pinfo{font:600 16px "SF Mono","Fira Code",monospace;}
     \\.dg-bucket{stroke-width:1.8;}

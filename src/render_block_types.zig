@@ -60,6 +60,16 @@ pub fn classifySection(sec: env_mod.Section) Category {
     return classifyByName(sec.name, sec.instances);
 }
 
+/// Classify a placeholder `(stub …)` for its diagram column/colour. An explicit
+/// `(category <key>)` is authoritative; otherwise fall back to the name
+/// heuristic. Mirrors `classifySection` for parts that aren't sections.
+pub fn classifyCategoryKey(category: []const u8, name: []const u8) Category {
+    if (category.len > 0) {
+        if (categoryFromKey(category)) |c| return c;
+    }
+    return classifyByName(name, &.{});
+}
+
 /// Classify a section/sub-block into a `Category` from a section name and
 /// its instances. Order matters — the MCU keywords run first so a "STM32
 /// Core System" section that happens to embed a debug header still lands

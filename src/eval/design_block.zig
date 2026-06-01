@@ -67,6 +67,8 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var critical_ics: std.ArrayListUnmanaged(env_mod.CriticalIc) = .empty;
     var test_points: std.ArrayListUnmanaged(env_mod.TestPoint) = .empty;
     var functions: std.ArrayListUnmanaged(env_mod.FunctionGroup) = .empty;
+    var parts: std.ArrayListUnmanaged(env_mod.PlaceholderPart) = .empty;
+    var layout_spec: env_mod.LayoutSpec = .{};
     var derating: ?f64 = null;
     var kicad_pcb_path: ?[]const u8 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
@@ -152,6 +154,13 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
                 }
             },
             .function => if (try parseFunction(self, form_children)) |f| try functions.append(self.allocator, f),
+            .stub => if (try parseStub(self, form_children)) |p| {
+                ids.registerRefDes(self, p.part.ref_des);
+                try instances.append(self.allocator, p.instance);
+                for (p.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
+                try parts.append(self.allocator, p.part);
+            },
+            .layout => layout_spec = try parseLayout(self, form_children),
             // Section-only forms are silently ignored at the top level —
             // a design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract.
@@ -189,6 +198,8 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .derating = derating,
         .kicad_pcb_path = kicad_pcb_path,
         .functions = functions.toOwnedSlice(self.allocator) catch &.{},
+        .parts = parts.toOwnedSlice(self.allocator) catch &.{},
+        .layout = layout_spec,
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -672,7 +683,7 @@ fn evalSection(
             // `processSharedSectionForm`; top-level-only forms are
             // silently ignored inside a section body.
             .status, .description, .note, .port, .protocol, .calc => {},
-            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function => {},
+            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function, .stub, .layout => {},
         }
     }
 
@@ -1122,6 +1133,219 @@ fn parseDesignDoc(
     }
 }
 
+/// The product of evaluating one `(stub …)` form: the metadata record plus a
+/// synthesised placeholder `Instance` (so the part flows through the existing
+/// net/diagram/export machinery) and the pin-net declarations its signals
+/// produce (so it participates in the flattened netlist that drives diagram
+/// edges).
+const StubResult = struct {
+    part: env_mod.PlaceholderPart,
+    instance: Instance,
+    pin_nets: []const PinNetDecl,
+};
+
+/// Parse a top-level `(stub "name" (role "…") (mpn "…") (category <key>)
+/// (size W H) (ref "REF") (signal "name" class "net") …)` placeholder-part
+/// form. Auto-assigns a ref-des from the category prefix (overridden by an
+/// explicit `(ref …)`), stamps a stable id (inserted into source on first
+/// build), and turns each `(signal …)` into a `PinNetDecl` keyed by the signal
+/// name so the stub wires into the diagram. Returns null when the stub has no
+/// name. The synthesised instance carries `placeholder = true` and an empty
+/// footprint — downstream ERC/export branch on that.
+fn parseStub(self: *Evaluator, form_children: []const Node) EvalError!?StubResult {
+    if (form_children.len < 2) return null;
+    const name = form_children[1].asString() orelse form_children[1].asAtom() orelse return null;
+
+    var role: []const u8 = "";
+    var mpn: []const u8 = "";
+    var category: []const u8 = "";
+    var explicit_ref: []const u8 = "";
+    var width: f64 = 0;
+    var height: f64 = 0;
+    var channels: u8 = 1;
+    var signals: std.ArrayListUnmanaged(env_mod.PartSignal) = .empty;
+
+    for (form_children[2..]) |sub_node| {
+        const sub = sub_node.asList() orelse continue;
+        if (sub.len < 2) continue;
+        const head = sub[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "role")) {
+            role = sub[1].asString() orelse sub[1].asAtom() orelse "";
+        } else if (std.mem.eql(u8, head, "mpn")) {
+            mpn = sub[1].asString() orelse sub[1].asAtom() orelse "";
+        } else if (std.mem.eql(u8, head, "category")) {
+            category = sub[1].asAtom() orelse sub[1].asString() orelse "";
+        } else if (std.mem.eql(u8, head, "ref")) {
+            explicit_ref = sub[1].asString() orelse sub[1].asAtom() orelse "";
+        } else if (std.mem.eql(u8, head, "size")) {
+            if (sub.len >= 3) {
+                width = sub[1].asNumber() orelse 0;
+                height = sub[2].asNumber() orelse 0;
+            }
+        } else if (std.mem.eql(u8, head, "channels")) {
+            // (channels N) — this stub stands for N identical channels.
+            if (sub[1].asNumber()) |nf| {
+                if (nf >= 1 and nf <= 255) channels = @intFromFloat(nf);
+            }
+        } else if (std.mem.eql(u8, head, "signal")) {
+            // (signal "NAME" class "NET") — class optional in the middle slot.
+            const sig_name = sub[1].asString() orelse sub[1].asAtom() orelse continue;
+            var sig_class: []const u8 = "";
+            var sig_net: []const u8 = "";
+            if (sub.len >= 4) {
+                sig_class = sub[2].asAtom() orelse sub[2].asString() orelse "";
+                sig_net = sub[3].asString() orelse sub[3].asAtom() orelse "";
+            } else if (sub.len == 3) {
+                sig_net = sub[2].asString() orelse sub[2].asAtom() orelse "";
+            }
+            if (sig_net.len == 0) continue;
+            try signals.append(self.allocator, .{ .name = sig_name, .class = sig_class, .net = sig_net });
+        }
+    }
+
+    const ref_des = if (explicit_ref.len > 0)
+        explicit_ref
+    else
+        try ids.nextRefDes(self, ids.categoryPrefix(category));
+
+    const part_id = try ids.getOrCreateFormId(self, form_children);
+
+    const sig_slice = signals.toOwnedSlice(self.allocator) catch &.{};
+
+    // One PinNetDecl per signal — the signal name is the virtual pin, so the
+    // part participates in net-membership without a real pinout.
+    var pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    for (sig_slice) |sig| {
+        try pin_nets.append(self.allocator, .{ .ref_des = ref_des, .pin = sig.name, .net = sig.net });
+    }
+
+    const inst = Instance{
+        .ref_des = ref_des,
+        .label = ref_des,
+        .origin_key = name,
+        .component = name,
+        .value = mpn,
+        .footprint = "",
+        .symbol = "",
+        .id = part_id,
+        .placeholder = true,
+    };
+
+    return .{
+        .part = .{
+            .ref_des = ref_des,
+            .name = name,
+            .role = role,
+            .mpn = mpn,
+            .category = category,
+            .width = width,
+            .height = height,
+            .id = part_id,
+            .channels = channels,
+            .signals = sig_slice,
+        },
+        .instance = inst,
+        .pin_nets = pin_nets.toOwnedSlice(self.allocator) catch &.{},
+    };
+}
+
+/// Parse a top-level `(layout (anchor "name") (place "name" (rel "ref")…)…)`
+/// form into a `LayoutSpec`. `(anchor "x")` and a bare `(place "x")` are pinned
+/// roots (no constraints). `(place "x" (right-of "a") (below "b"))` carries
+/// *several* constraints — x is positioned relative to every listed block, so a
+/// block can be placed by more than one neighbour (recursive relative
+/// placement). Unknown relation keywords and malformed sub-clauses are skipped
+/// so a typo can't abort the build. Directive order is irrelevant — the solver
+/// resolves by dependency, not source order.
+fn parseLayout(self: *Evaluator, form_children: []const Node) EvalError!env_mod.LayoutSpec {
+    var placements: std.ArrayListUnmanaged(env_mod.Placement) = .empty;
+    var rows: std.ArrayListUnmanaged(env_mod.LayoutRow) = .empty;
+    var groups: std.ArrayListUnmanaged(env_mod.LayoutGroup) = .empty;
+    var edges: std.ArrayListUnmanaged(env_mod.LayoutEdge) = .empty;
+    for (form_children[1..]) |child| {
+        const c = child.asList() orelse continue;
+        if (c.len < 2) continue;
+        const head = c[0].asAtom() orelse continue;
+        // (edge left|right "a" "b" …) — pin blocks to the diagram's L/R edge.
+        if (std.mem.eql(u8, head, "edge")) {
+            const side_atom = c[1].asAtom() orelse c[1].asString() orelse continue;
+            const side: env_mod.EdgeSide = if (std.mem.eql(u8, side_atom, "right")) .right else .left;
+            var members: std.ArrayListUnmanaged([]const u8) = .empty;
+            for (c[2..]) |m| {
+                const nm = m.asString() orelse m.asAtom() orelse continue;
+                try members.append(self.allocator, nm);
+            }
+            try edges.append(self.allocator, .{
+                .side = side,
+                .members = members.toOwnedSlice(self.allocator) catch &.{},
+            });
+            continue;
+        }
+        // (row "a" "b" …) — an ordered horizontal band of block keys.
+        if (std.mem.eql(u8, head, "row")) {
+            var members: std.ArrayListUnmanaged([]const u8) = .empty;
+            for (c[1..]) |m| {
+                const nm = m.asString() orelse m.asAtom() orelse continue;
+                try members.append(self.allocator, nm);
+            }
+            try rows.append(self.allocator, .{ .members = members.toOwnedSlice(self.allocator) catch &.{} });
+            continue;
+        }
+        // (group "Label" "a" "b" …) — a labeled visual region over its members.
+        if (std.mem.eql(u8, head, "group")) {
+            const label = c[1].asString() orelse c[1].asAtom() orelse "";
+            var members: std.ArrayListUnmanaged([]const u8) = .empty;
+            for (c[2..]) |m| {
+                const nm = m.asString() orelse m.asAtom() orelse continue;
+                try members.append(self.allocator, nm);
+            }
+            try groups.append(self.allocator, .{
+                .label = label,
+                .members = members.toOwnedSlice(self.allocator) catch &.{},
+            });
+            continue;
+        }
+        const is_anchor = std.mem.eql(u8, head, "anchor");
+        if (!is_anchor and !std.mem.eql(u8, head, "place")) continue;
+        const name = c[1].asString() orelse c[1].asAtom() orelse continue;
+        // (anchor "x") and bare (place "x") are pinned roots — no constraints.
+        if (is_anchor) {
+            try placements.append(self.allocator, .{ .name = name });
+            continue;
+        }
+        // (place "x" (rel "ref") …) — collect every well-formed constraint.
+        var constraints: std.ArrayListUnmanaged(env_mod.PlaceConstraint) = .empty;
+        for (c[2..]) |rel_node| {
+            const rel_form = rel_node.asList() orelse continue;
+            if (rel_form.len < 2) continue;
+            const rel_head = rel_form[0].asAtom() orelse continue;
+            const rel = relFromAtom(rel_head) orelse continue;
+            const ref = rel_form[1].asString() orelse rel_form[1].asAtom() orelse continue;
+            try constraints.append(self.allocator, .{ .rel = rel, .reference = ref });
+        }
+        try placements.append(self.allocator, .{
+            .name = name,
+            .constraints = constraints.toOwnedSlice(self.allocator) catch &.{},
+        });
+    }
+    return .{
+        .placements = placements.toOwnedSlice(self.allocator) catch &.{},
+        .rows = rows.toOwnedSlice(self.allocator) catch &.{},
+        .groups = groups.toOwnedSlice(self.allocator) catch &.{},
+        .edges = edges.toOwnedSlice(self.allocator) catch &.{},
+    };
+}
+
+/// Map a `(place …)` relation keyword to a `PlaceRel`. Returns null for an
+/// unrecognised keyword so `parseLayout` can skip the directive.
+fn relFromAtom(atom: []const u8) ?env_mod.PlaceRel {
+    if (std.mem.eql(u8, atom, "right-of")) return .right_of;
+    if (std.mem.eql(u8, atom, "left-of")) return .left_of;
+    if (std.mem.eql(u8, atom, "above")) return .above;
+    if (std.mem.eql(u8, atom, "below")) return .below;
+    return null;
+}
+
 /// Parse one `(function "Name" "Subtitle"? (verb "…")? (includes "a" "b" …)?)`
 /// form into a `FunctionGroup` for the high-level Function view. The first
 /// string after the head is the name, an optional second string is the
@@ -1256,6 +1480,257 @@ test "section (hosts …) records owned sub-block names" {
     try testing.expectEqual(@as(usize, 2), block.sections[0].hosts.len);
     try testing.expectEqualStrings("psu1", block.sections[0].hosts[0]);
     try testing.expectEqualStrings("mon_ch1", block.sections[0].hosts[1]);
+}
+
+// spec: eval/design_block - stub form parses a placeholder part with role, mpn, category, and size
+test "stub form parses role mpn category and size" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (stub "my-mcu" (role "Host MCU") (mpn "STM32H563") (category mcu) (size 9 9)))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 1), block.parts.len);
+    const p = block.parts[0];
+    try testing.expectEqualStrings("my-mcu", p.name);
+    try testing.expectEqualStrings("Host MCU", p.role);
+    try testing.expectEqualStrings("STM32H563", p.mpn);
+    try testing.expectEqualStrings("mcu", p.category);
+    try testing.expectEqual(@as(f64, 9), p.width);
+    try testing.expectEqual(@as(f64, 9), p.height);
+    // It also auto-places: a placeholder instance with the part's ref-des.
+    try testing.expectEqual(@as(usize, 1), block.instances.len);
+    try testing.expect(block.instances[0].placeholder);
+}
+
+// spec: eval/design_block - stub auto-assigns a ref-des from the category prefix when ref is omitted
+test "stub auto-assigns a ref-des from the category prefix" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (stub "j" (category connector))
+        \\  (stub "u" (category mcu))
+        \\  (stub "x" (category power) (ref "U7")))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 3), block.parts.len);
+    try testing.expectEqual(@as(u8, 'J'), block.parts[0].ref_des[0]); // connector → J
+    try testing.expectEqual(@as(u8, 'U'), block.parts[1].ref_des[0]); // mcu → U
+    try testing.expectEqualStrings("U7", block.parts[2].ref_des); // explicit (ref) wins
+}
+
+// spec: eval/design_block - stub signal contributes a named virtual pin tied to a net so the stub joins the netlist
+test "stub signal contributes net membership" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (stub "a" (category mcu) (signal "SCL" i2c "I2C"))
+        \\  (stub "b" (category sensor) (signal "SCL" i2c "I2C")))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    // Both stubs' "SCL" signal joins the shared "I2C" net → 2 pins on it.
+    var pins_on_i2c: usize = 0;
+    for (block.nets) |net| {
+        if (std.mem.eql(u8, net.name, "I2C")) pins_on_i2c = net.pins.len;
+    }
+    try testing.expectEqual(@as(usize, 2), pins_on_i2c);
+}
+
+// spec: eval/design_block - stub channels count stacks the block as N identical channels in the diagram
+test "stub channels count is recorded on the part" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (stub "psu" (category power) (channels 2))
+        \\  (stub "solo" (category power)))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(u8, 2), block.parts[0].channels);
+    try testing.expectEqual(@as(u8, 1), block.parts[1].channels); // default
+}
+
+// spec: eval/design_block - layout form parses (anchor "name") roots and (place "name" (rel "ref")) directives
+test "design-block parses a (layout …) form with anchor and place" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (layout
+        \\    (anchor "rp2350")
+        \\    (place "esp32" (right-of "rp2350"))))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 2), block.layout.placements.len);
+    // Anchor: a placement with no constraints.
+    try testing.expectEqualStrings("rp2350", block.layout.placements[0].name);
+    try testing.expectEqual(@as(usize, 0), block.layout.placements[0].constraints.len);
+    // Relative: one constraint, right-of rp2350.
+    try testing.expectEqualStrings("esp32", block.layout.placements[1].name);
+    try testing.expectEqual(@as(usize, 1), block.layout.placements[1].constraints.len);
+    try testing.expectEqual(env_mod.PlaceRel.right_of, block.layout.placements[1].constraints[0].rel);
+    try testing.expectEqualStrings("rp2350", block.layout.placements[1].constraints[0].reference);
+}
+
+// spec: eval/design_block - layout place resolves right-of/left-of/above/below into a relative offset from the referenced block
+test "layout place parses each relation keyword" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (layout
+        \\    (place "b" (right-of "a"))
+        \\    (place "c" (left-of "a"))
+        \\    (place "d" (above "a"))
+        \\    (place "e" (below "a"))))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 4), block.layout.placements.len);
+    try testing.expectEqual(env_mod.PlaceRel.right_of, block.layout.placements[0].constraints[0].rel);
+    try testing.expectEqual(env_mod.PlaceRel.left_of, block.layout.placements[1].constraints[0].rel);
+    try testing.expectEqual(env_mod.PlaceRel.above, block.layout.placements[2].constraints[0].rel);
+    try testing.expectEqual(env_mod.PlaceRel.below, block.layout.placements[3].constraints[0].rel);
+}
+
+// spec: eval/design_block - layout place collects multiple constraints so a block is positioned by several references
+test "layout place collects multiple constraints" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (layout
+        \\    (place "c" (right-of "b") (below "a"))))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 1), block.layout.placements.len);
+    const cons = block.layout.placements[0].constraints;
+    try testing.expectEqual(@as(usize, 2), cons.len);
+    try testing.expectEqual(env_mod.PlaceRel.right_of, cons[0].rel);
+    try testing.expectEqualStrings("b", cons[0].reference);
+    try testing.expectEqual(env_mod.PlaceRel.below, cons[1].rel);
+    try testing.expectEqualStrings("a", cons[1].reference);
+}
+
+// spec: eval/design_block - layout row form parses an ordered band of block keys
+test "layout row parses an ordered band of block keys" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (layout
+        \\    (row "mcu" "esp32" "screen")
+        \\    (row "buck5v" "buck3v3")))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 2), block.layout.rows.len);
+    try testing.expectEqual(@as(usize, 3), block.layout.rows[0].members.len);
+    try testing.expectEqualStrings("mcu", block.layout.rows[0].members[0]);
+    try testing.expectEqualStrings("screen", block.layout.rows[0].members[2]);
+    try testing.expectEqual(@as(usize, 2), block.layout.rows[1].members.len);
+    try testing.expectEqualStrings("buck3v3", block.layout.rows[1].members[1]);
+}
+
+// spec: eval/design_block - layout group form parses a labeled region over member block keys
+test "layout group parses a labeled region over member keys" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (layout
+        \\    (group "Brains" "mcu" "esp32")
+        \\    (group "Power" "buck5v" "buck3v3" "or_diode")))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 2), block.layout.groups.len);
+    try testing.expectEqualStrings("Brains", block.layout.groups[0].label);
+    try testing.expectEqual(@as(usize, 2), block.layout.groups[0].members.len);
+    try testing.expectEqualStrings("mcu", block.layout.groups[0].members[0]);
+    try testing.expectEqualStrings("Power", block.layout.groups[1].label);
+    try testing.expectEqual(@as(usize, 3), block.layout.groups[1].members.len);
+}
+
+// spec: eval/design_block - layout edge form parses left/right edge-pinned block keys
+test "layout edge parses left and right pinned blocks" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (layout
+        \\    (edge left "usbc_host" "barrel")
+        \\    (edge right "banana")))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(@as(usize, 2), block.layout.edges.len);
+    try testing.expectEqual(env_mod.EdgeSide.left, block.layout.edges[0].side);
+    try testing.expectEqual(@as(usize, 2), block.layout.edges[0].members.len);
+    try testing.expectEqualStrings("usbc_host", block.layout.edges[0].members[0]);
+    try testing.expectEqual(env_mod.EdgeSide.right, block.layout.edges[1].side);
+    try testing.expectEqualStrings("banana", block.layout.edges[1].members[0]);
 }
 
 // spec: eval/design_block - bus-net expands one net tie per index in the inclusive range

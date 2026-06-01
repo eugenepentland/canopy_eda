@@ -258,6 +258,16 @@ pub fn componentPrefix(family: []const u8) u8 {
     return 'X';
 }
 
+/// Ref-des prefix for a placeholder `(part …)` declared with a diagram
+/// `(category …)`. Connectors get `J`, protection devices `D`, everything else
+/// the generic IC prefix `U`. Used by `parseStub` to auto-assign a ref-des when
+/// the part omits an explicit `(ref …)`.
+pub fn categoryPrefix(category: []const u8) u8 {
+    if (std.mem.eql(u8, category, "connector")) return 'J';
+    if (std.mem.eql(u8, category, "protection")) return 'D';
+    return 'U';
+}
+
 /// Phase C.1: produce a stable iteration order for `nextRefDes` assignment.
 /// Sort key is `(source_offset, original_index)`: source offset preserves the
 /// "instance N appears at line L" intuition for direct `(instance …)` forms,
