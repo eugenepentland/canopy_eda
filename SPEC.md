@@ -89,6 +89,7 @@ Public functions: solve
 - loop legs measure edge-to-edge to the nearest hub pad
 - reserves a breakout corridor only for single-component nets
 - pairs matched halves across an IN/OUT mirror
+- ground-return selection keeps real grounds over straps, with a never-empty fallback
 
 ## placement/router
 
@@ -103,6 +104,13 @@ Public functions: check
 
 - flags a via that crowds a foreign pad's clearance
 - passes a via that shares the pad's net
+
+## placement/pin_roles
+
+Public functions: load, isGroundFn
+
+- groundy function names are recognised, straps are not
+- electrical type overrides the name heuristic; signal types demote to strap
 
 ## eval/builtins
 

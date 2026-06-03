@@ -38,6 +38,7 @@ const env = @import("../eval/env.zig");
 const export_kicad = @import("../export_kicad.zig");
 const netlist_mod = @import("../export_kicad_netlist.zig");
 const geometry = @import("geometry.zig");
+const pin_roles = @import("pin_roles.zig");
 
 const DesignBlock = env.DesignBlock;
 const FlatNet = export_kicad.FlatNet;
@@ -270,14 +271,27 @@ pub fn solve(
         }
     }
 
+    // Per-part pin classification (real ground/supply pins vs config straps),
+    // keyed by component so a part type loaded N times parses its lib files
+    // once. Only hubs are classified — a passive's pads are always real, and an
+    // IC's GND/rail nets are the ones that also carry straps.
+    var roles = try arena.alloc(pin_roles.PartRoles, instances.len);
+    var roles_cache = std.StringHashMap(pin_roles.PartRoles).init(arena);
+
     var parts = try arena.alloc(Part, instances.len);
     var idx_of = std.StringHashMap(usize).init(arena);
     for (instances, 0..) |inst, i| {
         const hint = pin_counts.get(inst.ref_des) orelse 2;
         const g = geometry.load(arena, project_dir, inst.footprint, hint);
+        const is_hub = isHub(inst.ref_des);
+        if (is_hub) {
+            const gop = try roles_cache.getOrPut(inst.component);
+            if (!gop.found_existing) gop.value_ptr.* = pin_roles.load(arena, project_dir, inst.component);
+            roles[i] = gop.value_ptr.*;
+        } else roles[i] = .{};
         parts[i] = .{
             .ref_des = inst.ref_des,
-            .kind = if (isHub(inst.ref_des)) .hub else .passive,
+            .kind = if (is_hub) .hub else .passive,
             // Round courtyard half-extents up to the grid so that — with grid-
             // snapped centres — every courtyard edge lands on a 0.2 mm line and
             // parts abut cleanly. Rounding *up* never shrinks below the real
@@ -293,7 +307,7 @@ pub fn solve(
         try idx_of.put(inst.ref_des, i);
     }
 
-    const built = try buildSprings(arena, nets, parts, &idx_of);
+    const built = try buildSprings(arena, nets, parts, &idx_of, roles);
     classify(parts, built.loops, params.cap_w_max);
 
     // Reserve a breakout corridor in front of every "unaccounted" pad (a net
@@ -1166,7 +1180,7 @@ fn isolationPenalty(parts: []const Part) f64 {
     return total;
 }
 
-const Endpoint = struct { idx: usize, px: f64, py: f64, pw: f64, ph: f64, is_hub: bool };
+const Endpoint = struct { idx: usize, pin: []const u8, px: f64, py: f64, pw: f64, ph: f64, is_hub: bool };
 
 /// Build the force list from the netlist:
 ///   • A net touching exactly one *hub component* (even across several of its
@@ -1184,8 +1198,9 @@ fn buildSprings(
     nets: []const FlatNet,
     parts: []const Part,
     idx_of: *std.StringHashMap(usize),
+    roles: []const pin_roles.PartRoles,
 ) std.mem.Allocator.Error!Built {
-    const gnd = try groundPads(arena, nets, parts, idx_of);
+    const gnd = try groundPads(arena, nets, parts, idx_of, roles);
     var springs: std.ArrayListUnmanaged(Spring) = .empty;
     var loops: std.ArrayListUnmanaged(Loop) = .empty;
 
@@ -1204,13 +1219,13 @@ fn buildSprings(
                     if (h != i) multi_hub = true;
                 } else hub_idx = i;
             }
-            try eps.append(arena, .{ .idx = i, .px = pad.x, .py = pad.y, .pw = pad.w, .ph = pad.h, .is_hub = is_hub });
+            try eps.append(arena, .{ .idx = i, .pin = pr.pin, .px = pad.x, .py = pad.y, .pw = pad.w, .ph = pad.h, .is_hub = is_hub });
         }
         if (eps.items.len < 2) continue;
 
         const single_hub = hub_idx != null and !multi_hub;
         if (single_hub) {
-            try hugToHub(arena, &springs, &loops, eps.items, hub_idx.?, gnd);
+            try hugToHub(arena, &springs, &loops, eps.items, hub_idx.?, gnd, roles);
         } else {
             try weakCluster(arena, &springs, eps.items);
         }
@@ -1252,23 +1267,32 @@ fn hugToHub(
     eps: []const Endpoint,
     hub: usize,
     gnd: []const []const PadRect,
+    roles: []const pin_roles.PartRoles,
 ) std.mem.Allocator.Error!void {
-    // The hub's pads on this (power) net, and their centroid for the non-
-    // decoupling spring target.
-    var hub_pwr: std.ArrayListUnmanaged(PadRect) = .empty;
+    // The hub's pads on this (power) net. Config straps tied to the rail (a
+    // declared `input`/`output`/`io` pin such as EN/UV or PGFB) are dropped so
+    // the bypass cap hugs the real supply pins, not a control pin that merely
+    // shares the net. If every hub pad is a strap we keep them all, so a rail is
+    // never left without a target.
+    var hub_all: std.ArrayListUnmanaged(PadRect) = .empty;
+    var hub_real: std.ArrayListUnmanaged(PadRect) = .empty;
+    for (eps) |e| {
+        if (e.idx != hub) continue;
+        const rect = PadRect{ .x = e.px, .y = e.py, .w = e.pw, .h = e.ph };
+        try hub_all.append(arena, rect);
+        if (roles[hub].classOf(e.pin) != .strap) try hub_real.append(arena, rect);
+    }
+    if (hub_all.items.len == 0) return;
+    const hub_pwr_s = if (hub_real.items.len > 0) try hub_real.toOwnedSlice(arena) else try hub_all.toOwnedSlice(arena);
+    // Centroid of the chosen pads — the non-decoupling spring target.
     var hx: f64 = 0;
     var hy: f64 = 0;
-    for (eps) |e| {
-        if (e.idx == hub) {
-            try hub_pwr.append(arena, .{ .x = e.px, .y = e.py, .w = e.pw, .h = e.ph });
-            hx += e.px;
-            hy += e.py;
-        }
+    for (hub_pwr_s) |p| {
+        hx += p.x;
+        hy += p.y;
     }
-    if (hub_pwr.items.len == 0) return;
-    const hn: f64 = @floatFromInt(hub_pwr.items.len);
+    const hn: f64 = @floatFromInt(hub_pwr_s.len);
     const ht = Pt{ .x = hx / hn, .y = hy / hn };
-    const hub_pwr_s = try hub_pwr.toOwnedSlice(arena);
 
     for (eps) |e| {
         if (e.idx == hub or e.is_hub) continue;
@@ -1302,28 +1326,56 @@ fn weakCluster(
     }
 }
 
-/// Per-part list of its ground pads (footprint-local rects), empty if none.
-/// Drives both the decoupling test (cap & hub both have ground pads) and the
-/// edge-aware ground leg (the nearest of these is the return target).
+/// A ground-net pad plus its placement class, used to pick a hub's *real*
+/// return pads over config straps that merely happen to be tied to GND.
+const TaggedPad = struct { rect: PadRect, cls: pin_roles.PinClass };
+
+/// Per-part list of its ground-return pads (footprint-local rects), empty if
+/// none. Drives both the decoupling test (cap & hub both have ground pads) and
+/// the edge-aware ground leg (the nearest of these is the return target).
+///
+/// A hub's pads on a GND net are filtered to the real returns: a strap declared
+/// `input`/`output`/`io` is dropped, and when any genuinely groundy-named pad
+/// exists the non-groundy ones (e.g. an `ILIM` strap tied to GND) are dropped
+/// too — so the loop never closes on a config pin. Passive pads (a cap's own
+/// ground pad) are always kept. The selection never empties a part that had any
+/// GND pad, so the decoupling test and fallback behaviour are preserved.
 fn groundPads(
     arena: std.mem.Allocator,
     nets: []const FlatNet,
     parts: []const Part,
     idx_of: *std.StringHashMap(usize),
+    roles: []const pin_roles.PartRoles,
 ) std.mem.Allocator.Error![]const []const PadRect {
-    var lists = try arena.alloc(std.ArrayListUnmanaged(PadRect), parts.len);
+    var lists = try arena.alloc(std.ArrayListUnmanaged(TaggedPad), parts.len);
     for (lists) |*l| l.* = .empty;
     for (nets) |net| {
         if (!isGroundName(shortName(net.name))) continue;
         for (net.pins) |pr| {
             const i = idx_of.get(pr.ref_des) orelse continue;
             const pad = padLocal(parts[i], pr.pin);
-            try lists[i].append(arena, .{ .x = pad.x, .y = pad.y, .w = pad.w, .h = pad.h });
+            // A passive's ground pad is always real; only a hub's GND net also
+            // carries straps, so only hubs consult their pin roles.
+            const cls = if (parts[i].kind == .hub) roles[i].classOf(pr.pin) else .ground;
+            try lists[i].append(arena, .{ .rect = .{ .x = pad.x, .y = pad.y, .w = pad.w, .h = pad.h }, .cls = cls });
         }
     }
     var out = try arena.alloc([]const PadRect, parts.len);
-    for (lists, 0..) |*l, i| out[i] = try l.toOwnedSlice(arena);
+    for (lists, 0..) |*l, i| out[i] = try selectGroundPads(arena, l.items);
     return out;
+}
+
+/// Pick a part's return pads from its tagged GND pads, in tiers: real grounds
+/// first; failing that, anything not a strap; failing that (every pad was a
+/// strap), all of them — so a part with GND pads is never left empty.
+fn selectGroundPads(arena: std.mem.Allocator, tagged: []const TaggedPad) std.mem.Allocator.Error![]const PadRect {
+    var out: std.ArrayListUnmanaged(PadRect) = .empty;
+    for (tagged) |t| if (t.cls == .ground) try out.append(arena, t.rect);
+    if (out.items.len > 0) return out.toOwnedSlice(arena);
+    for (tagged) |t| if (t.cls != .strap) try out.append(arena, t.rect);
+    if (out.items.len > 0) return out.toOwnedSlice(arena);
+    for (tagged) |t| try out.append(arena, t.rect);
+    return out.toOwnedSlice(arena);
 }
 
 /// HPWL over signal nets + total power/ground airwire length of the
@@ -1923,4 +1975,43 @@ test "rectGap and nearestHubPad measure edge-to-edge to the closest pad" {
         .{ .x = 0, .y = -1, .w = 3.0, .h = 3.0 }, // big but far: edge at y=0.5
     };
     try testing.expectApproxEqAbs(@as(f64, 0.4), nearestHubPad(cap_rect, hub, &pads).gap, 1e-9);
+}
+
+// spec: placement/optimizer - ground-return selection keeps real grounds over straps, with a never-empty fallback
+test "selectGroundPads prefers real grounds, then non-straps, then anything" {
+    const g = PadRect{ .x = 0, .y = 0, .w = 0.3, .h = 0.3 };
+    const ilim = PadRect{ .x = 1, .y = 0, .w = 0.3, .h = 0.3 };
+    const strap = PadRect{ .x = 2, .y = 0, .w = 0.3, .h = 0.3 };
+
+    // A real ground (pin 8/11) wins over an unannotated non-groundy pin (ILIM)
+    // and an annotated strap — the loop closes on the GND_x pad, not the strap.
+    {
+        const tagged = [_]TaggedPad{
+            .{ .rect = ilim, .cls = .other },
+            .{ .rect = g, .cls = .ground },
+            .{ .rect = strap, .cls = .strap },
+        };
+        const out = try selectGroundPads(testing.allocator, &tagged);
+        defer testing.allocator.free(out);
+        try testing.expectEqual(@as(usize, 1), out.len);
+        try testing.expectApproxEqAbs(@as(f64, 0), out[0].x, 1e-12);
+    }
+    // No groundy name available: keep everything that isn't a strap.
+    {
+        const tagged = [_]TaggedPad{
+            .{ .rect = ilim, .cls = .other },
+            .{ .rect = strap, .cls = .strap },
+        };
+        const out = try selectGroundPads(testing.allocator, &tagged);
+        defer testing.allocator.free(out);
+        try testing.expectEqual(@as(usize, 1), out.len);
+        try testing.expectApproxEqAbs(@as(f64, 1), out[0].x, 1e-12);
+    }
+    // Degenerate: every pad is a strap → fall back to all (never empty).
+    {
+        const tagged = [_]TaggedPad{.{ .rect = strap, .cls = .strap }};
+        const out = try selectGroundPads(testing.allocator, &tagged);
+        defer testing.allocator.free(out);
+        try testing.expectEqual(@as(usize, 1), out.len);
+    }
 }

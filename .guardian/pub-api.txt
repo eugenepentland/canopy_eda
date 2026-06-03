@@ -388,6 +388,10 @@ src/placement/optimizer.zig::Score struct_
 src/placement/optimizer.zig::Stub struct_
 src/placement/optimizer.zig::solve fn
 src/placement/optimizer.zig::worldPadCenter fn
+src/placement/pin_roles.zig::PartRoles struct_
+src/placement/pin_roles.zig::PinClass enum_
+src/placement/pin_roles.zig::isGroundFn fn
+src/placement/pin_roles.zig::load fn
 src/placement/router.zig::PadObs struct_
 src/placement/router.zig::RouteParams struct_
 src/placement/router.zig::RouteResult struct_
