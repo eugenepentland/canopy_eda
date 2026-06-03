@@ -30,17 +30,12 @@ const PIN_NUMBER_INSET_LEFT: f64 = 38.0;
 const PIN_NUMBER_INSET_RIGHT: f64 = 36.0;
 const PIN_NUMBER_BASELINE: f64 = 1.0;
 
-/// Most pins of one net we draw as individual labeled stubs before
-/// collapsing the rest into a single "+N more" summary stub. Keeps a busy
-/// power/ground net (10+ pins on a big MCU) from blowing up the hub height
-/// while still showing the exact tie for typical analog/power parts.
-const STUB_CAP: usize = 8;
-
-/// How many stubs a group renders given `stub_count` distinct stubs: capped at
-/// `STUB_CAP`, with one extra `+N more` summary stub past the cap.
+/// How many stubs a group renders given `stub_count` distinct stubs. Every
+/// distinct stub is drawn in full (stem-folding in `buildStubs` already keeps
+/// busy power/ground nets compact), so this is just the count with an empty
+/// group reserving one row.
 fn displayedStubCount(stub_count: usize) usize {
-    if (stub_count == 0) return 1;
-    return if (stub_count <= STUB_CAP) stub_count else STUB_CAP + 1;
+    return @max(stub_count, 1);
 }
 
 /// Stem of a pin function name: the name with trailing digits and one optional

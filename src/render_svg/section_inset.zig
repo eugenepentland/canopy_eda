@@ -29,9 +29,6 @@ const PIN_LABEL_PAD_Y: f64 = 4.0;
 const PIN_NUMBER_INSET_LEFT: f64 = 38.0;
 const PIN_NUMBER_INSET_RIGHT: f64 = 36.0;
 const PIN_NUMBER_BASELINE: f64 = 1.0;
-/// Pins of one net drawn individually before collapsing into a `+N more`
-/// summary stub. Must match `hub.STUB_CAP`, which sizes the group height.
-const STUB_CAP: usize = 8;
 
 /// A spoke instance whose `inst_map` entry was temporarily rewritten to add a
 /// count prefix (e.g. value `"100nF"` → `"3× 100nF"`). Restored by
@@ -198,7 +195,7 @@ pub fn renderHubAllPins(
     for (left_groups, 0..) |group, gi| {
         const h = left_heights[gi];
         const cy = py_left + h / HALF_DIVISOR;
-        try renderPinStub(ctx.allocator, w, .left, hub_x, cy, group, hub.ref_des);
+        try renderPinStub(w, .left, hub_x, cy, group, hub.ref_des);
         try connection.renderGroupedConnections(ctx, w, hub.ref_des, group, hub_x - pin_stub, cy, .left);
         py_left += h;
     }
@@ -207,7 +204,7 @@ pub fn renderHubAllPins(
     for (right_groups, 0..) |group, gi| {
         const h = right_heights[gi];
         const cy = py_right + h / HALF_DIVISOR;
-        try renderPinStub(ctx.allocator, w, .right, hub_x + hub_width, cy, group, hub.ref_des);
+        try renderPinStub(w, .right, hub_x + hub_width, cy, group, hub.ref_des);
         try connection.renderGroupedConnections(ctx, w, hub.ref_des, group, hub_x + hub_width + pin_stub, cy, .right);
         py_right += h;
     }
@@ -221,18 +218,17 @@ pub fn renderHubAllPins(
 /// are stacked across the group's vertical band `h` (centred on `py`) and tied
 /// together with a vertical bus so it's obvious which pins share the net. Pins
 /// that share a function-name stem (GND_1, GND_2, …) collapse into one
-/// "<stem>_(<N>)" stub (see `hub.buildStubs`); past `STUB_CAP` distinct stubs
-/// the remainder folds into one `+N more` stub. The net itself is labelled out
-/// at the wire's terminal by `renderGroupedConnections`.
-fn renderPinStub(alloc: std.mem.Allocator, w: anytype, side: ctx_mod.Side, px: f64, py: f64, group: PinGroup, hub_ref: []const u8) !void {
+/// "<stem>_(<N>)" stub (see `hub.buildStubs`); every distinct stub past that is
+/// drawn in full — there's no `+N more` summary, since stem-folding already
+/// keeps busy power/ground nets compact and each remaining stub is meaningful.
+/// The net itself is labelled out at the wire's terminal by
+/// `renderGroupedConnections`.
+fn renderPinStub(w: anytype, side: ctx_mod.Side, px: f64, py: f64, group: PinGroup, hub_ref: []const u8) !void {
     const labels = group.stub_labels;
     const pin_lists = group.stub_pins;
     if (labels.len == 0) return;
 
-    const cap = STUB_CAP;
-    const real = @min(labels.len, cap);
-    const has_summary = labels.len > cap;
-    const displayed = real + @as(usize, if (has_summary) 1 else 0);
+    const displayed = labels.len;
 
     const stub_x = switch (side) {
         .left => px - pin_stub,
@@ -243,7 +239,7 @@ fn renderPinStub(alloc: std.mem.Allocator, w: anytype, side: ctx_mod.Side, px: f
     const gap: f64 = per_conn_spacing;
     const first_y = py - @as(f64, @floatFromInt(displayed - 1)) / HALF_DIVISOR * gap;
 
-    for (labels[0..real], 0..) |label, i| {
+    for (labels, 0..) |label, i| {
         const pins = pin_lists[i];
         const y = first_y + @as(f64, @floatFromInt(i)) * gap;
         // A collapsed stub (multiple pins → a comma in `pins`) carries its
@@ -252,20 +248,6 @@ fn renderPinStub(alloc: std.mem.Allocator, w: anytype, side: ctx_mod.Side, px: f
         const collapsed = std.mem.indexOfScalar(u8, pins, ',') != null;
         const num_text: []const u8 = if (collapsed) "" else pins;
         try renderOneStub(w, side, px, stub_x, y, label, num_text, pins, hub_ref);
-    }
-    if (has_summary) {
-        const y = first_y + @as(f64, @floatFromInt(displayed - 1)) * gap;
-        var more_buf: [24]u8 = undefined;
-        const more = std.fmt.bufPrint(&more_buf, "+{d} more", .{labels.len - cap}) catch "+ more";
-        // Comma-join the hidden stubs' pins so the sidebar can still route to
-        // them via the summary stub's data-pin.
-        var rest: std.ArrayListUnmanaged(u8) = .empty;
-        defer rest.deinit(alloc);
-        for (pin_lists[cap..], 0..) |pins, i| {
-            if (i > 0) try rest.append(alloc, ',');
-            try rest.appendSlice(alloc, pins);
-        }
-        try renderOneStub(w, side, px, stub_x, y, more, "", rest.items, hub_ref);
     }
 
     // Vertical bus tying every stub on this group to the same node, so it's
