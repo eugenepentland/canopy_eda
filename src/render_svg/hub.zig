@@ -30,6 +30,83 @@ const PIN_NUMBER_INSET_LEFT: f64 = 38.0;
 const PIN_NUMBER_INSET_RIGHT: f64 = 36.0;
 const PIN_NUMBER_BASELINE: f64 = 1.0;
 
+/// Most pins of one net we draw as individual labeled stubs before
+/// collapsing the rest into a single "+N more" summary stub. Keeps a busy
+/// power/ground net (10+ pins on a big MCU) from blowing up the hub height
+/// while still showing the exact tie for typical analog/power parts.
+const STUB_CAP: usize = 8;
+
+/// How many stubs a group renders given `stub_count` distinct stubs: capped at
+/// `STUB_CAP`, with one extra `+N more` summary stub past the cap.
+fn displayedStubCount(stub_count: usize) usize {
+    if (stub_count == 0) return 1;
+    return if (stub_count <= STUB_CAP) stub_count else STUB_CAP + 1;
+}
+
+/// Stem of a pin function name: the name with trailing digits and one optional
+/// `_`/`-` separator stripped. "GND_1" → "GND", "VSS3" → "VSS", "EN/UV" stays.
+fn stemOf(name: []const u8) []const u8 {
+    var end = name.len;
+    while (end > 0 and name[end - 1] >= '0' and name[end - 1] <= '9') end -= 1;
+    if (end == name.len or end == 0) return name; // no trailing digits, or all digits
+    if (name[end - 1] == '_' or name[end - 1] == '-') end -= 1;
+    return if (end == 0) name else name[0..end];
+}
+
+/// Collapse a group's pins into render stubs. Pins are already on one net, so
+/// folding those that share a function-name stem (GND_1, GND_2, …) into a
+/// single "<stem>_(<N>)" stub is safe; uniquely-named pins — and pins with no
+/// pinout name (labelled by their id) — each get their own. Order follows
+/// first appearance.
+const StubLists = struct { labels: []const []const u8, pins: []const []const u8 };
+
+fn buildStubs(
+    self: *RenderCtx,
+    pins: []const []const u8,
+    pin_names: *const std.StringHashMapUnmanaged([]const u8),
+) RenderError!StubLists {
+    const Slot = struct { stem: []const u8, pins: std.ArrayListUnmanaged([]const u8), named: bool };
+    var slots: std.ArrayListUnmanaged(Slot) = .empty;
+    var stem_index: std.StringHashMapUnmanaged(usize) = .empty;
+
+    for (pins) |pn| {
+        if (pin_names.get(pn)) |fname| {
+            const stem = stemOf(fname);
+            if (stem_index.get(stem)) |idx| {
+                try slots.items[idx].pins.append(self.allocator, pn);
+            } else {
+                try stem_index.put(self.allocator, stem, slots.items.len);
+                var lst: std.ArrayListUnmanaged([]const u8) = .empty;
+                try lst.append(self.allocator, pn);
+                try slots.append(self.allocator, .{ .stem = stem, .pins = lst, .named = true });
+            }
+        } else {
+            // No pinout name: stands alone, labelled by its pin id.
+            var lst: std.ArrayListUnmanaged([]const u8) = .empty;
+            try lst.append(self.allocator, pn);
+            try slots.append(self.allocator, .{ .stem = pn, .pins = lst, .named = false });
+        }
+    }
+
+    var labels: std.ArrayListUnmanaged([]const u8) = .empty;
+    var pin_lists: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (slots.items) |slot| {
+        var pj: std.ArrayListUnmanaged(u8) = .empty;
+        for (slot.pins.items, 0..) |p, i| {
+            if (i > 0) try pj.append(self.allocator, ',');
+            try pj.appendSlice(self.allocator, p);
+        }
+        try pin_lists.append(self.allocator, try pj.toOwnedSlice(self.allocator));
+        if (slot.pins.items.len == 1) {
+            const lbl = if (slot.named) (pin_names.get(slot.pins.items[0]) orelse slot.pins.items[0]) else slot.pins.items[0];
+            try labels.append(self.allocator, lbl);
+        } else {
+            try labels.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s}_({d})", .{ slot.stem, slot.pins.items.len }));
+        }
+    }
+    return .{ .labels = try labels.toOwnedSlice(self.allocator), .pins = try pin_lists.toOwnedSlice(self.allocator) };
+}
+
 /// Build a pin_id -> pin_name map from PartPin data.
 pub fn buildPinNameMap(self: *RenderCtx, parts: []const env_mod.Part) std.StringHashMapUnmanaged([]const u8) {
     var map: std.StringHashMapUnmanaged([]const u8) = .empty;
@@ -170,11 +247,14 @@ fn finishGroup(
         try num_buf.appendSlice(self.allocator, pn);
     }
 
+    const stubs = try buildStubs(self, pins.items, pin_names);
     const deduped = try dedupConns(self, conns.items);
 
     return PinGroup{
         .display_name = display_name,
         .pin_numbers = try num_buf.toOwnedSlice(self.allocator),
+        .stub_labels = stubs.labels,
+        .stub_pins = stubs.pins,
         .conns = deduped,
     };
 }
@@ -271,8 +351,13 @@ pub fn groupHeights(self: *RenderCtx, groups: []const PinGroup, hub_ref: []const
                 },
             }
         }
+        // Each pin in the group now draws its own stub, so the group must be
+        // tall enough for whichever is larger: its connection slots or its
+        // (capped) pin-stub count.
+        const stubs: i32 = @intCast(displayedStubCount(group.stub_labels.len));
+        const rows = @max(total_slots, stubs);
         const base: f64 = 40.0;
-        heights[i] = base + @as(f64, @floatFromInt(@max(total_slots, 1) - 1)) * per_conn_spacing;
+        heights[i] = base + @as(f64, @floatFromInt(@max(rows, 1) - 1)) * per_conn_spacing;
     }
     return heights;
 }

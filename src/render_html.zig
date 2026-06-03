@@ -1,5 +1,8 @@
 const std = @import("std");
 const env_mod = @import("eval/env.zig");
+const parser_mod = @import("sexpr/parser.zig");
+const infra_fs = @import("infra/fs.zig");
+const ast = @import("sexpr/ast.zig");
 const asserted_fns_mod = @import("asserted_fns.zig");
 const erc_mod = @import("erc.zig");
 const review = @import("review.zig");
@@ -895,6 +898,62 @@ fn renderGroupedHubSvgs(
     }
 }
 
+/// Build the pin_id -> function-name map for a hub. Part-level names exist only
+/// on `(part …)`/`(pins …)` instances; flat `(pin …)` instances (e.g. the
+/// LT3045) carry none, so supplement from the component's pinout file
+/// (`lib/pinouts/<pinout>.sexp`). Without this, hub blocks label pins by the
+/// net they reach instead of the component's own pin name.
+fn pinNameMapFor(ctx: *RenderCtx, allocator: Allocator, inst: FlatInst) std.StringHashMapUnmanaged([]const u8) {
+    var map = hub_mod.buildPinNameMap(ctx, inst.parts);
+    if (ctx.project_dir.len == 0) return map;
+    // The pinout key is often dropped when a sub-block is flattened, so try it
+    // first then fall back to the symbol/component name — the same chain the
+    // evaluator uses to locate `lib/pinouts/<x>.sexp`. The component family
+    // name survives flattening, so it's the reliable last resort.
+    const candidates = [_][]const u8{ inst.pinout, inst.symbol, inst.component };
+    for (candidates) |cand| {
+        if (cand.len == 0) continue;
+        const path = std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ ctx.project_dir, cand }) catch continue;
+        defer allocator.free(path);
+        var pinmap = loadPinoutNames(allocator, path) orelse continue;
+        var it = pinmap.iterator();
+        while (it.next()) |kv| {
+            if (!map.contains(kv.key_ptr.*)) map.put(allocator, kv.key_ptr.*, kv.value_ptr.*) catch return map;
+        }
+        if (map.count() > 0) break;
+    }
+    return map;
+}
+
+/// Parse `lib/pinouts/<x>.sexp` into a pin_id -> function-name map. Mirrors the
+/// evaluator's loader (numeric pin ids stringify to "5", "11", …); ERC's loader
+/// only handles atom/string ids and so drops every numeric pin.
+fn loadPinoutNames(allocator: Allocator, path: []const u8) ?std.StringHashMapUnmanaged([]const u8) {
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, 1 << 18) catch return null;
+    const nodes = parser_mod.parse(allocator, content) catch return null;
+    if (nodes.len == 0) return null;
+    const top = nodes[0].asList() orelse return null;
+    if (top.len < 2 or !std.mem.eql(u8, top[0].asAtom() orelse "", "pinout")) return null;
+    var map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    for (top[2..]) |child| {
+        const cl = child.asList() orelse continue;
+        if (cl.len < 3 or !std.mem.eql(u8, cl[0].asAtom() orelse "", "pin")) continue;
+        const id = pinIdStr(allocator, cl[1]) orelse continue;
+        const name = cl[2].asString() orelse (cl[2].asAtom() orelse continue);
+        map.put(allocator, id, name) catch continue;
+    }
+    return map;
+}
+
+/// Pin identifier as a string: bare number -> "5", atom/string -> itself.
+fn pinIdStr(allocator: Allocator, node: ast.Node) ?[]const u8 {
+    if (node.asNumber()) |n| {
+        const i: i64 = @intFromFloat(n);
+        return std.fmt.allocPrint(allocator, "{d}", .{i}) catch null;
+    }
+    return node.asAtom() orelse node.asString();
+}
+
 fn analyzeHub(
     ctx: *RenderCtx,
     allocator: Allocator,
@@ -944,7 +1003,7 @@ fn analyzeHub(
     if (buckets.count() == 0) return null;
 
     const adj_entries = if (ctx.adjacency.get(hub_ref)) |list| list.items else &[_]AdjEntry{};
-    var pn_map = hub_mod.buildPinNameMap(ctx, hub_inst.parts);
+    var pn_map = pinNameMapFor(ctx, allocator, hub_inst);
     defer pn_map.deinit(allocator);
 
     var all_groups: std.ArrayListUnmanaged(PinGroup) = .empty;
@@ -1638,7 +1697,7 @@ fn emitComponentEntry(
     }
 
     try w.writeAll(",\"pins\":[");
-    var pn_map = hub_mod.buildPinNameMap(ctx, inst.parts);
+    var pn_map = pinNameMapFor(ctx, allocator, inst);
     defer pn_map.deinit(allocator);
 
     var seen_pin: std.StringHashMapUnmanaged(void) = .empty;

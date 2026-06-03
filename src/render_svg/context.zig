@@ -39,6 +39,11 @@ pub const FlatInst = struct {
     /// Instance so the sidebar can fetch a footprint-preview SVG without a
     /// second library parse. Empty for synthetic sub-block hubs.
     footprint: []const u8 = "",
+    /// Pinout name (matches `lib/pinouts/<name>.sexp`), copied off the
+    /// Instance so the hub renderer can label pins by their component
+    /// function name even for flat `(pin …)` instances that carry no
+    /// part-level pin names. Empty for synthetic sub-block hubs.
+    pinout: []const u8 = "",
     parts: []const env_mod.Part = &.{},
     /// Library-declared rules for using this part, copied off the Instance at
     /// eval time. Lets the schematic renderer emit a per-hub "Requirements"
@@ -105,6 +110,14 @@ pub const BranchBody = struct {
 pub const PinGroup = struct {
     display_name: []const u8,
     pin_numbers: []const u8,
+    /// One label per rendered stub, parallel to `stub_pins`. A uniquely-named
+    /// pin's label is its component function name; pins sharing a function-name
+    /// stem on this net (GND_1, GND_2, …) collapse into one "<stem>_(<N>)"
+    /// label. Pins with no pinout name (label == pin id) never collapse.
+    stub_labels: []const []const u8 = &.{},
+    /// Comma-joined physical pin ids backing each stub (parallel to
+    /// `stub_labels`); a comma means the stub stands for several pins.
+    stub_pins: []const []const u8 = &.{},
     conns: []const AdjEntry,
     /// Feature-group label propagated from `(pins ref (group "X") ...)`.
     /// Only the HTML unified card uses this; empty for ungrouped pins.
@@ -287,6 +300,7 @@ pub const RenderCtx = struct {
                 .value = inst.value,
                 .symbol = inst.symbol,
                 .footprint = inst.footprint,
+                .pinout = inst.pinout,
                 .parts = inst.parts,
                 .requirements = inst.requirements,
                 .mpn = propertyValue(inst.properties, "mpn"),

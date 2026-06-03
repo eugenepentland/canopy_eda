@@ -12,6 +12,7 @@ const draw = @import("draw.zig");
 const hub_width = draw.hub_width;
 const hub_x = draw.hub_x;
 const pin_stub = draw.pin_stub;
+const per_conn_spacing = draw.per_conn_spacing;
 const shortRef = draw.shortRef;
 const displayValue = draw.displayValue;
 const RenderError = draw.RenderError;
@@ -28,6 +29,9 @@ const PIN_LABEL_PAD_Y: f64 = 4.0;
 const PIN_NUMBER_INSET_LEFT: f64 = 38.0;
 const PIN_NUMBER_INSET_RIGHT: f64 = 36.0;
 const PIN_NUMBER_BASELINE: f64 = 1.0;
+/// Pins of one net drawn individually before collapsing into a `+N more`
+/// summary stub. Must match `hub.STUB_CAP`, which sizes the group height.
+const STUB_CAP: usize = 8;
 
 /// A spoke instance whose `inst_map` entry was temporarily rewritten to add a
 /// count prefix (e.g. value `"100nF"` → `"3× 100nF"`). Restored by
@@ -194,7 +198,7 @@ pub fn renderHubAllPins(
     for (left_groups, 0..) |group, gi| {
         const h = left_heights[gi];
         const cy = py_left + h / HALF_DIVISOR;
-        try renderPinStub(w, .left, hub_x, cy, group, hub.ref_des);
+        try renderPinStub(ctx.allocator, w, .left, hub_x, cy, group, hub.ref_des);
         try connection.renderGroupedConnections(ctx, w, hub.ref_des, group, hub_x - pin_stub, cy, .left);
         py_left += h;
     }
@@ -203,7 +207,7 @@ pub fn renderHubAllPins(
     for (right_groups, 0..) |group, gi| {
         const h = right_heights[gi];
         const cy = py_right + h / HALF_DIVISOR;
-        try renderPinStub(w, .right, hub_x + hub_width, cy, group, hub.ref_des);
+        try renderPinStub(ctx.allocator, w, .right, hub_x + hub_width, cy, group, hub.ref_des);
         try connection.renderGroupedConnections(ctx, w, hub.ref_des, group, hub_x + hub_width + pin_stub, cy, .right);
         py_right += h;
     }
@@ -211,48 +215,113 @@ pub fn renderHubAllPins(
     try w.writeAll("</svg>");
 }
 
-fn renderPinStub(w: anytype, side: ctx_mod.Side, px: f64, py: f64, group: PinGroup, hub_ref: []const u8) !void {
-    // Wrap the stub in a <g class="pin-stub"> with data-ref/data-pin so the
-    // sidebar can scrollIntoView() to a specific pin and attach hover/click
-    // behavior. Pin numbers stay comma-separated; the JS splits as needed.
+/// Draw a hub pin group's stubs. Each pin renders as its own labeled stub —
+/// the label is the component's pin function name (`IN_1`, `GND_2`, …) and a
+/// small pin-number tag, mirroring the original single-stub layout. The stubs
+/// are stacked across the group's vertical band `h` (centred on `py`) and tied
+/// together with a vertical bus so it's obvious which pins share the net. Pins
+/// that share a function-name stem (GND_1, GND_2, …) collapse into one
+/// "<stem>_(<N>)" stub (see `hub.buildStubs`); past `STUB_CAP` distinct stubs
+/// the remainder folds into one `+N more` stub. The net itself is labelled out
+/// at the wire's terminal by `renderGroupedConnections`.
+fn renderPinStub(alloc: std.mem.Allocator, w: anytype, side: ctx_mod.Side, px: f64, py: f64, group: PinGroup, hub_ref: []const u8) !void {
+    const labels = group.stub_labels;
+    const pin_lists = group.stub_pins;
+    if (labels.len == 0) return;
+
+    const cap = STUB_CAP;
+    const real = @min(labels.len, cap);
+    const has_summary = labels.len > cap;
+    const displayed = real + @as(usize, if (has_summary) 1 else 0);
+
+    const stub_x = switch (side) {
+        .left => px - pin_stub,
+        .right => px + pin_stub,
+    };
+    // Spread the stubs across the band, one `per_conn_spacing` apart, centred
+    // on `py`. The group height (set by groupHeights) is sized to hold them.
+    const gap: f64 = per_conn_spacing;
+    const first_y = py - @as(f64, @floatFromInt(displayed - 1)) / HALF_DIVISOR * gap;
+
+    for (labels[0..real], 0..) |label, i| {
+        const pins = pin_lists[i];
+        const y = first_y + @as(f64, @floatFromInt(i)) * gap;
+        // A collapsed stub (multiple pins → a comma in `pins`) carries its
+        // count in the label, so leave the small pin-number tag empty; a single
+        // pin shows its id.
+        const collapsed = std.mem.indexOfScalar(u8, pins, ',') != null;
+        const num_text: []const u8 = if (collapsed) "" else pins;
+        try renderOneStub(w, side, px, stub_x, y, label, num_text, pins, hub_ref);
+    }
+    if (has_summary) {
+        const y = first_y + @as(f64, @floatFromInt(displayed - 1)) * gap;
+        var more_buf: [24]u8 = undefined;
+        const more = std.fmt.bufPrint(&more_buf, "+{d} more", .{labels.len - cap}) catch "+ more";
+        // Comma-join the hidden stubs' pins so the sidebar can still route to
+        // them via the summary stub's data-pin.
+        var rest: std.ArrayListUnmanaged(u8) = .empty;
+        defer rest.deinit(alloc);
+        for (pin_lists[cap..], 0..) |pins, i| {
+            if (i > 0) try rest.append(alloc, ',');
+            try rest.appendSlice(alloc, pins);
+        }
+        try renderOneStub(w, side, px, stub_x, y, more, "", rest.items, hub_ref);
+    }
+
+    // Vertical bus tying every stub on this group to the same node, so it's
+    // visible exactly which pins are connected together before the wire heads
+    // out to the net.
+    if (displayed > 1) {
+        const last_y = first_y + @as(f64, @floatFromInt(displayed - 1)) * gap;
+        try w.print(
+            \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#6e7681" stroke-width="1.5"/>
+            \\
+        , .{ stub_x, first_y, stub_x, last_y });
+    }
+}
+
+/// One pin stub: the short edge line, the function-name label inside the box,
+/// and a small pin-number tag on the stub. `num_text` is the tag (empty for a
+/// summary stub); `data_pin` is what the sidebar matches on (a single pin id,
+/// or the comma list of collapsed pins for a summary stub).
+fn renderOneStub(
+    w: anytype,
+    side: ctx_mod.Side,
+    px: f64,
+    stub_x: f64,
+    y: f64,
+    label: []const u8,
+    num_text: []const u8,
+    data_pin: []const u8,
+    hub_ref: []const u8,
+) !void {
     try w.print(
         \\<g class="pin-stub" data-ref="{s}" data-pin="{s}">
         \\
-    , .{ hub_ref, group.pin_numbers });
-    // Long GND/VSS chains can have 9+ pins; spelling them all out blows past
-    // the hub's column width, so collapse ≥4 into "Nx pins" for display.
-    // `data-pin` above still carries the full list for click routing.
-    var pin_label_buf: [16]u8 = undefined;
-    const pin_label = draw.compactPinNumbers(&pin_label_buf, group.pin_numbers);
+    , .{ hub_ref, data_pin });
     switch (side) {
-        .left => {
-            const stub_x = px - pin_stub;
-            try w.print(
-                \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#666" stroke-width="1.5"/>
-                \\<text x="{d:.1}" y="{d:.1}" font-size="12" fill="#aaa">{s}</text>
-                \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="10" fill="#666">{s}</text>
-                \\
-            , .{
-                stub_x,             py,                             px,
-                py,                 px + PIN_LABEL_PAD_X,           py + PIN_LABEL_PAD_Y,
-                group.display_name, stub_x + PIN_NUMBER_INSET_LEFT, py - PIN_NUMBER_BASELINE,
-                pin_label,
-            });
-        },
-        .right => {
-            const stub_x = px + pin_stub;
-            try w.print(
-                \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#666" stroke-width="1.5"/>
-                \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="12" fill="#aaa">{s}</text>
-                \\<text x="{d:.1}" y="{d:.1}" font-size="10" fill="#666">{s}</text>
-                \\
-            , .{
-                px,                 py,                              stub_x,
-                py,                 px - PIN_LABEL_PAD_X,            py + PIN_LABEL_PAD_Y,
-                group.display_name, stub_x - PIN_NUMBER_INSET_RIGHT, py - PIN_NUMBER_BASELINE,
-                pin_label,
-            });
-        },
+        .left => try w.print(
+            \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#666" stroke-width="1.5"/>
+            \\<text x="{d:.1}" y="{d:.1}" font-size="12" fill="#aaa">{s}</text>
+            \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="10" fill="#666">{s}</text>
+            \\
+        , .{
+            stub_x,   y,                              px,
+            y,        px + PIN_LABEL_PAD_X,           y + PIN_LABEL_PAD_Y,
+            label,    stub_x + PIN_NUMBER_INSET_LEFT, y - PIN_NUMBER_BASELINE,
+            num_text,
+        }),
+        .right => try w.print(
+            \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#666" stroke-width="1.5"/>
+            \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="12" fill="#aaa">{s}</text>
+            \\<text x="{d:.1}" y="{d:.1}" font-size="10" fill="#666">{s}</text>
+            \\
+        , .{
+            px,       y,                               stub_x,
+            y,        px - PIN_LABEL_PAD_X,            y + PIN_LABEL_PAD_Y,
+            label,    stub_x - PIN_NUMBER_INSET_RIGHT, y - PIN_NUMBER_BASELINE,
+            num_text,
+        }),
     }
     try w.writeAll("</g>\n");
 }
