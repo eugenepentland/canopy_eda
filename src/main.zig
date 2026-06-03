@@ -431,4 +431,9 @@ test {
     _ = @import("render_json.zig");
     _ = @import("json_writer.zig");
     _ = @import("checks.zig");
+    _ = @import("placement/geometry.zig");
+    _ = @import("placement/optimizer.zig");
+    _ = @import("placement/router.zig");
+    _ = @import("placement/drc.zig");
+    _ = @import("serve/pcb_layout_page.zig");
 }

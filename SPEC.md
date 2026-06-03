@@ -69,6 +69,41 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - hides the refdes, value, and metadata so the silk/fab carries no auto-generated text
 - leaves already-correct property visibility untouched (idempotent)
 
+## placement/geometry
+
+Public functions: load
+
+- parses pads and courtyard half-extents from a footprint sexp
+- synthesizes a fallback box sized by pin count when the footprint is missing
+- parses silkscreen lines and circles from a footprint sexp
+
+## placement/optimizer
+
+Public functions: solve
+
+- classifies hub vs passive ref-des, handling hierarchical paths
+- excludes ground nets from spring forces
+- legalization separates two overlapping courtyards
+- rotates footprint-local offsets in right-angle steps matching the page
+- rotation refine picks the orientation that shortens the decoupling loop
+- loop legs measure edge-to-edge to the nearest hub pad
+- reserves a breakout corridor only for single-component nets
+- pairs matched halves across an IN/OUT mirror
+
+## placement/router
+
+Public functions: route
+
+- maze-routes a two-pad net into connected track segments
+- routes corners as 45° diagonals rather than 90° bends
+
+## placement/drc
+
+Public functions: check
+
+- flags a via that crowds a foreign pad's clearance
+- passes a via that shares the pad's net
+
 ## eval/builtins
 
 - Evaluates arithmetic operations on numeric values

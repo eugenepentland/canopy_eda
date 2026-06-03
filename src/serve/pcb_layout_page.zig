@@ -1,0 +1,1294 @@
+//! GET /pcb-layout/:name — interactive force-directed placement preview.
+//!
+//! The server evaluates the design, runs the optimizer, and emits the result
+//! as JSON plus a small client renderer. The board is drawn client-side so
+//! parts can be **dragged** (snapping to the 0.2 mm grid) and the layout
+//! **score** (HPWL + decoupling-loop length) recomputes live — letting you
+//! compare a hand placement against the auto one. A sidebar lists every
+//! component and the net on each pin; hovering cross-highlights, and hovering
+//! a pad (or net chip) reds every pad on that net.
+
+const std = @import("std");
+const httpz = @import("httpz");
+const paths = @import("../paths.zig");
+const infra_fs = @import("../infra/fs.zig");
+const Evaluator = @import("../eval/evaluator.zig").Evaluator;
+const env_mod = @import("../eval/env.zig");
+const optimizer = @import("../placement/optimizer.zig");
+const geometry = @import("../placement/geometry.zig");
+const router = @import("../placement/router.zig");
+const drc = @import("../placement/drc.zig");
+const modules_mod = @import("modules.zig");
+const assets_css = @import("assets_css.zig");
+const pages_tmpl = @import("templates/pages.zig");
+const serve_root = @import("../serve.zig");
+const Handler = serve_root.Handler;
+
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
+
+// SVG framing.
+const SCALE_MIN: f64 = 6.0; // px per mm
+const SCALE_MAX: f64 = 48.0;
+const TARGET_PX: f64 = 1000.0; // desired content width/height
+const MARGIN_MM: f64 = 2.0;
+
+/// Sidecar holding a hand-saved placement (ref → x/y/rot), next to the design.
+const SAVED_EXT = ".placement.json";
+
+/// Sidecar caching the auto-generated layout, so the (expensive) optimizer
+/// runs once and later loads read this instead. Regenerated on `?regen=1`.
+const AUTO_EXT = ".autolayout.json";
+
+/// A saved part placement: centre (mm) + rotation (deg).
+const SavedPos = struct { x: f64, y: f64, rot: f64 };
+
+/// JSON key prefix shared by every `{"ref": …}` record we emit.
+const REF_OPEN = "{\"ref\":";
+
+/// GET /pcb-layout/:name — evaluate the design, run the optimizer, and return
+/// the interactive (drag + live-score) inline-SVG preview with a sidebar.
+pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+
+    // Resolve `name` to a renderable block: a design under `src/` first, else
+    // a reusable module under `lib/modules/` (so the modules page can preview
+    // each module's auto-layout, not just designs).
+    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |mr| {
+        mr.eval.deinit();
+        ctx.allocator.destroy(mr.eval);
+    };
+    const block: *env_mod.DesignBlock = resolveBlock(ctx, name, &eval, &module_res) orelse {
+        res.status = 500;
+        res.body = "No design or module by that name";
+        return;
+    };
+
+    // Tuning weights come from the query (?w_align=… etc) — any present (or
+    // ?regen=1) forces a fresh solve; otherwise the cached layout is reused.
+    const tune = parseTuning(req);
+    const cached = if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
+    const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params) catch {
+        res.status = 500;
+        res.body = "Placement error";
+        return;
+    };
+    // Persist the layout + its weights whenever the optimizer ran (miss /
+    // stale / regen / tune), so later loads are instant and the controls show
+    // the weights that actually produced the layout on screen.
+    if (placement.generated) writeAutoCache(ctx.allocator, ctx.project_dir, name, placement, tune.params);
+    const shown = if (tune.tuned) tune.params else (readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{});
+
+    // Routing runs only on demand (the Route button → ?route=1), on whatever
+    // placement is loaded — it's not part of every page load.
+    const ro = parseRoute(req);
+    const routed: ?router.RouteResult = if (ro.run) (router.route(ctx.allocator, placement, ro.params) catch null) else null;
+    const violations: []const drc.Violation = if (routed) |r|
+        (drc.check(ctx.allocator, placement, r, ro.params.clearance) catch &.{})
+    else
+        &.{};
+
+    const view = View.init(placement);
+    const saved = readSaved(ctx.allocator, ctx.project_dir, name);
+
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &aw.writer;
+
+    try w.writeAll("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
+    try w.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+    try w.print("<title>{s} — PCB Layout</title>", .{block.name});
+    try w.writeAll("<style>");
+    try w.writeAll(assets_css.NAVBAR_CSS);
+    try w.writeAll(PAGE_CSS);
+    try w.writeAll("</style></head><body>");
+    try pages_tmpl.Navbar.render(.{""}, w);
+
+    try w.writeAll("<div class=\"pcb-layout\">");
+    try writeSidebar(w, ctx.allocator, placement);
+    try w.writeAll("<main class=\"pcb-main\">");
+    try w.print("<h1>{s} — PCB Layout <span class=\"pcb-sub\">(force-directed · drag to edit)</span></h1>", .{block.name});
+    try writeScorebar(w, placement, saved != null, name);
+    try writeTuning(w, shown);
+    try writeRoutePanel(w, ro.params, routed, violations.len);
+    try writeLegend(w, placement);
+    try w.print(
+        "<svg id=\"pcb-svg\" class=\"pcb-svg\" viewBox=\"0 0 {d:.0} {d:.0}\" width=\"{d:.0}\" height=\"{d:.0}\" xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+        .{ view.width, view.height, view.width, view.height },
+    );
+    try w.writeAll(COURTYARD_MODAL);
+    try writePcbData(w, ctx.allocator, placement, view, name, saved, routed, ro.params.clearance, violations);
+    try w.writeAll(BOARD_JS);
+    try w.writeAll("</main></div></body></html>");
+
+    res.content_type = .HTML;
+    res.body = aw.written();
+}
+
+/// Resolve `name` to a renderable design block. Preference: a design source
+/// under `src/` (evaluated with `eval`). Fallback: a reusable module under
+/// `lib/modules/` (via `modules_mod.resolveModuleBlock`, whose evaluator is
+/// stashed in `module_res` for the caller to free). Null if neither exists.
+fn resolveBlock(
+    ctx: *Handler,
+    name: []const u8,
+    eval: *Evaluator,
+    module_res: *?modules_mod.ResolvedBlock,
+) ?*env_mod.DesignBlock {
+    if (paths.designSourcePath(ctx.allocator, ctx.project_dir, name)) |path| {
+        defer ctx.allocator.free(path);
+        if (eval.evalFile(path)) |result| {
+            switch (result) {
+                .design_block => |b| return b,
+                else => {},
+            }
+        } else |_| {}
+    } else |_| {}
+    module_res.* = modules_mod.resolveModuleBlock(ctx.allocator, ctx.project_dir, name);
+    if (module_res.*) |mr| return mr.block;
+    return null;
+}
+
+/// POST /api/pcb-layout/:name — persist a hand placement to the design's
+/// `.placement.json` sidecar. Body: `{"parts":[{"ref","x","y","rot"}, …]}`.
+pub fn savePcbLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
+        res.status = 400;
+        res.body = "bad json";
+        return;
+    };
+    if (root != .object) {
+        res.status = 400;
+        return;
+    }
+    const parts = root.object.get("parts") orelse {
+        res.status = 400;
+        return;
+    };
+    if (parts != .array) {
+        res.status = 400;
+        return;
+    }
+
+    // Re-serialize a normalized record (defends against junk in the body).
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &aw.writer;
+    try w.writeAll("{\"parts\":[");
+    var first = true;
+    for (parts.array.items) |it| {
+        if (it != .object) continue;
+        const ref = it.object.get("ref") orelse continue;
+        if (ref != .string) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.writeAll(REF_OPEN);
+        try writeJsonStr(w, ref.string);
+        try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d}}}", .{ jsonNum(it.object.get("x")), jsonNum(it.object.get("y")), jsonNum(it.object.get("rot")) });
+    }
+    try w.writeAll("]}");
+
+    const path = paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, SAVED_EXT) catch {
+        res.status = 500;
+        return;
+    };
+    defer ctx.allocator.free(path);
+    writeFileAll(path, aw.written()) catch {
+        res.status = 500;
+        res.body = "write failed";
+        return;
+    };
+    res.content_type = .JSON;
+    res.body = "{\"ok\":true}";
+}
+
+fn writeFileAll(path: []const u8, data: []const u8) !void {
+    const f = try infra_fs.cwd().createFile(path, .{});
+    defer f.close();
+    try f.writeAll(data);
+}
+
+const MAX_FP_BYTES: usize = 1024 * 1024;
+
+/// POST /api/courtyard/:name — rewrite a footprint's courtyard. Body:
+/// `{"fp":"c-0402","hw":1.2,"hh":0.8}` where hw/hh are the *effective* courtyard
+/// half-extents (what the layout draws). We invert the loader's margin so the
+/// written rect reloads to exactly those extents, then re-pack via `?regen=1`.
+pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
+        res.status = 400;
+        res.body = "bad json";
+        return;
+    };
+    if (root != .object) {
+        res.status = 400;
+        return;
+    }
+    const fp_v = root.object.get("fp") orelse {
+        res.status = 400;
+        return;
+    };
+    if (fp_v != .string or !safeFootprintName(fp_v.string)) {
+        res.status = 400;
+        res.body = "bad footprint name";
+        return;
+    }
+    const margin = geometry.BBOX_MARGIN_MM;
+    const rw = @max(jsonNum(root.object.get("hw")) - margin, 0.05);
+    const rh = @max(jsonNum(root.object.get("hh")) - margin, 0.05);
+
+    const path = std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints/{s}.sexp", .{ ctx.project_dir, fp_v.string }) catch {
+        res.status = 500;
+        return;
+    };
+    defer ctx.allocator.free(path);
+    const src = infra_fs.cwd().readFileAlloc(ctx.allocator, path, MAX_FP_BYTES) catch {
+        res.status = 404;
+        res.body = "footprint not found";
+        return;
+    };
+    const updated = rewriteCourtyard(ctx.allocator, src, rw, rh) catch {
+        res.status = 500;
+        res.body = "rewrite failed";
+        return;
+    };
+    writeFileAll(path, updated) catch {
+        res.status = 500;
+        res.body = "write failed";
+        return;
+    };
+    res.content_type = .JSON;
+    res.body = "{\"ok\":true}";
+}
+
+/// A footprint name must be a bare file stem — no path separators or `..`, so a
+/// request can't escape `lib/footprints/`.
+fn safeFootprintName(fp: []const u8) bool {
+    if (fp.len == 0 or fp.len > 128) return false;
+    if (std.mem.indexOfScalar(u8, fp, '/') != null) return false;
+    if (std.mem.indexOfScalar(u8, fp, '\\') != null) return false;
+    if (std.mem.indexOf(u8, fp, "..") != null) return false;
+    return true;
+}
+
+/// Return `src` with its `(courtyard …)` form replaced by an origin-centred
+/// rect of the given half-extents, inserting one before the footprint's closing
+/// paren if none exists.
+fn rewriteCourtyard(alloc: std.mem.Allocator, src: []const u8, rw: f64, rh: f64) HandlerError![]u8 {
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    const w = &buf.writer;
+    const form = try std.fmt.allocPrint(alloc, "(courtyard (rect {d:.3} {d:.3} {d:.3} {d:.3}))", .{ -rw, -rh, rw, rh });
+    if (std.mem.indexOf(u8, src, "(courtyard")) |start| {
+        var depth: i32 = 0;
+        var i: usize = start;
+        var end: usize = src.len;
+        while (i < src.len) : (i += 1) {
+            if (src[i] == '(') depth += 1;
+            if (src[i] == ')') {
+                depth -= 1;
+                if (depth == 0) {
+                    end = i + 1;
+                    break;
+                }
+            }
+        }
+        try w.writeAll(src[0..start]);
+        try w.writeAll(form);
+        try w.writeAll(src[end..]);
+    } else {
+        const last = std.mem.lastIndexOfScalar(u8, src, ')') orelse {
+            try w.writeAll(src);
+            return buf.written();
+        };
+        try w.writeAll(src[0..last]);
+        try w.writeAll("  ");
+        try w.writeAll(form);
+        try w.writeAll("\n");
+        try w.writeAll(src[last..]);
+    }
+    return buf.written();
+}
+
+fn jsonNum(v: ?std.json.Value) f64 {
+    const val = v orelse return 0;
+    return switch (val) {
+        .integer => |i| @floatFromInt(i),
+        .float => |f| f,
+        else => 0,
+    };
+}
+
+/// Read the `.placement.json` sidecar into a ref → SavedPos map, or null if
+/// absent/unreadable. Strings are owned by `alloc` (request lifetime).
+fn readSaved(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?std.StringHashMap(SavedPos) {
+    const path = paths.designSiblingPath(alloc, project_dir, name, SAVED_EXT) catch return null;
+    defer alloc.free(path);
+    const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20) catch return null;
+    const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{}) catch return null;
+    if (root != .object) return null;
+    const parts = root.object.get("parts") orelse return null;
+    if (parts != .array) return null;
+    var m = std.StringHashMap(SavedPos).init(alloc);
+    for (parts.array.items) |it| {
+        if (it != .object) continue;
+        const ref = it.object.get("ref") orelse continue;
+        if (ref != .string) continue;
+        m.put(ref.string, .{
+            .x = jsonNum(it.object.get("x")),
+            .y = jsonNum(it.object.get("y")),
+            .rot = jsonNum(it.object.get("rot")),
+        }) catch return m;
+    }
+    return m;
+}
+
+/// Read the `.autolayout.json` cache into a slice of `RefPose`, or null if
+/// absent/unreadable. Strings are owned by `alloc` (request lifetime), which
+/// outlives the `solve` call that consumes them.
+fn readAutoPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?[]const optimizer.RefPose {
+    const path = paths.designSiblingPath(alloc, project_dir, name, AUTO_EXT) catch return null;
+    defer alloc.free(path);
+    const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20) catch return null;
+    const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{}) catch return null;
+    if (root != .object) return null;
+    const parts = root.object.get("parts") orelse return null;
+    if (parts != .array) return null;
+    var list: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
+    for (parts.array.items) |it| {
+        if (it != .object) continue;
+        const ref = it.object.get("ref") orelse continue;
+        if (ref != .string) continue;
+        list.append(alloc, .{
+            .ref = ref.string,
+            .x = jsonNum(it.object.get("x")),
+            .y = jsonNum(it.object.get("y")),
+            .rot = jsonNum(it.object.get("rot")),
+        }) catch return null;
+    }
+    return list.toOwnedSlice(alloc) catch null;
+}
+
+/// Persist the generated layout (its tuning weights + ref/x/y/rot per part) to
+/// `.autolayout.json`. Best-effort: a write failure just means a regenerate.
+fn writeAutoCache(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, p: optimizer.Placement, params: optimizer.Params) void {
+    const path = paths.designSiblingPath(alloc, project_dir, name, AUTO_EXT) catch return;
+    defer alloc.free(path);
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    const w = &aw.writer;
+    writeCacheJson(w, p, params) catch return;
+    writeFileAll(path, aw.written()) catch return;
+}
+
+/// Serialize to `{"params":{…},"parts":[{ref,x,y,rot}, …]}` — the weights so
+/// the controls reflect what produced the layout, the parts for the cache.
+fn writeCacheJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimizer.Params) std.Io.Writer.Error!void {
+    try w.print("{{\"params\":{{\"loop_w\":{d},\"w_isolate\":{d},\"w_align\":{d},\"cap_w_max\":{d},\"grid\":{s}}},", .{
+        params.loop_w,                                   params.w_isolate, params.w_align, params.cap_w_max,
+        if (params.grid_courtyards) "true" else "false",
+    });
+    try w.writeAll("\"parts\":[");
+    for (p.parts, 0..) |pt, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll(REF_OPEN);
+        try writeJsonStr(w, pt.ref_des);
+        try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d}}}", .{ pt.x, pt.y, pt.rot });
+    }
+    try w.writeAll("]}");
+}
+
+/// Read the tuning weights stored alongside a cached layout, or null if absent.
+fn readAutoParams(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?optimizer.Params {
+    const path = paths.designSiblingPath(alloc, project_dir, name, AUTO_EXT) catch return null;
+    defer alloc.free(path);
+    const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20) catch return null;
+    const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{}) catch return null;
+    if (root != .object) return null;
+    const po = root.object.get("params") orelse return null;
+    if (po != .object) return null;
+    var p = optimizer.Params{};
+    if (po.object.get("loop_w")) |v| p.loop_w = jsonNum(v);
+    if (po.object.get("w_isolate")) |v| p.w_isolate = jsonNum(v);
+    if (po.object.get("w_align")) |v| p.w_align = jsonNum(v);
+    if (po.object.get("cap_w_max")) |v| p.cap_w_max = jsonNum(v);
+    if (po.object.get("grid")) |v| p.grid_courtyards = v == .bool and v.bool;
+    return p;
+}
+
+/// Tuning weights parsed from the request query, plus whether any were present
+/// (`tuned`) and whether a fresh solve is required (`regen` = tuned or `?regen`).
+const Tuning = struct { params: optimizer.Params, tuned: bool, regen: bool };
+
+fn parseTuning(req: *httpz.Request) Tuning {
+    var p = optimizer.Params{};
+    var tuned = false;
+    var regen = false;
+    const q = req.query() catch return .{ .params = p, .tuned = false, .regen = false };
+    if (q.get("regen") != null) regen = true;
+    if (q.get("loop_w")) |v| {
+        p.loop_w = parseF(v, p.loop_w);
+        tuned = true;
+    }
+    if (q.get("w_isolate")) |v| {
+        p.w_isolate = parseF(v, p.w_isolate);
+        tuned = true;
+    }
+    if (q.get("w_align")) |v| {
+        p.w_align = parseF(v, p.w_align);
+        tuned = true;
+    }
+    if (q.get("cap_w_max")) |v| {
+        p.cap_w_max = parseF(v, p.cap_w_max);
+        tuned = true;
+    }
+    if (q.get("grid")) |v| {
+        p.grid_courtyards = !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false"));
+        tuned = true;
+    }
+    return .{ .params = p, .tuned = tuned, .regen = regen or tuned };
+}
+
+fn parseF(s: []const u8, dflt: f64) f64 {
+    return std.fmt.parseFloat(f64, std.mem.trim(u8, s, " ")) catch dflt;
+}
+
+/// Routing DRC parsed from the query, and whether routing was requested
+/// (`?route=1`, set by the Route button).
+const RouteOpts = struct { params: router.RouteParams, run: bool };
+
+fn parseRoute(req: *httpz.Request) RouteOpts {
+    var p = router.RouteParams{};
+    const q = req.query() catch return .{ .params = p, .run = false };
+    if (q.get("track_width")) |v| p.track_width = parseF(v, p.track_width);
+    if (q.get("clearance")) |v| p.clearance = parseF(v, p.clearance);
+    if (q.get("via_drill")) |v| p.via_drill = parseF(v, p.via_drill);
+    if (q.get("via_dia")) |v| p.via_dia = parseF(v, p.via_dia);
+    return .{ .params = p, .run = q.get("route") != null };
+}
+
+// ── View transform ───────────────────────────────────────────────────────
+
+const View = struct {
+    scale: f64,
+    minx: f64,
+    miny: f64,
+    width: f64,
+    height: f64,
+
+    fn init(p: optimizer.Placement) View {
+        const cw = @max(p.maxx - p.minx, 1.0) + 2 * MARGIN_MM;
+        const ch = @max(p.maxy - p.miny, 1.0) + 2 * MARGIN_MM;
+        const s = std.math.clamp(TARGET_PX / @max(cw, ch), SCALE_MIN, SCALE_MAX);
+        return .{ .scale = s, .minx = p.minx, .miny = p.miny, .width = cw * s, .height = ch * s };
+    }
+};
+
+// ── Score bar + legend ───────────────────────────────────────────────────
+
+fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, has_saved: bool, name: []const u8) std.Io.Writer.Error!void {
+    try w.writeAll("<div class=\"pcb-bar\">");
+    try w.print("<span class=\"score\" id=\"sc-hpwl\">HPWL {d:.1} mm</span>", .{p.score.hpwl_mm});
+    try w.writeAll("<span class=\"delta\" id=\"sc-hpwl-d\"></span>");
+    try w.print("<span class=\"score\" id=\"sc-loop\">loop {d:.1} mm · {d} cap(s)</span>", .{ p.score.loop_mm, p.score.loop_caps });
+    try w.writeAll("<span class=\"delta\" id=\"sc-loop-d\"></span>");
+    // Stored layout is reused on load; this re-runs the optimizer and overwrites it.
+    try w.writeAll("<a class=\"btn\" href=\"/pcb-layout/");
+    try writeAttr(w, name);
+    try w.writeAll("?regen=1\" title=\"Re-run the optimizer and store the result\">Regenerate</a>");
+    try w.writeAll("<button class=\"btn\" id=\"pcb-save\">Save layout</button>");
+    try w.writeAll("<button class=\"btn\" id=\"pcb-load\"");
+    if (!has_saved) try w.writeAll(" disabled");
+    try w.writeAll(">Load saved</button>");
+    try w.writeAll("<button class=\"btn\" id=\"pcb-reset\">Reset to auto</button>");
+    try w.writeAll("<span class=\"zoom-grp\"><button class=\"btn\" id=\"z-out\" title=\"Zoom out\">−</button>");
+    try w.writeAll("<button class=\"btn\" id=\"z-in\" title=\"Zoom in\">+</button>");
+    try w.writeAll("<button class=\"btn\" id=\"z-fit\" title=\"Reset zoom\">Fit</button></span>");
+    try w.writeAll("<span class=\"savemsg\" id=\"pcb-savemsg\"></span>");
+    try w.writeAll("<span class=\"muted\">drag part to move · hover + R to rotate · scroll to zoom · drag background to pan · snaps to ");
+    try w.print("{d} mm</span>", .{optimizer.GRID_MM});
+    try w.writeAll("</div>");
+}
+
+/// Tuning panel: number inputs for the steering weights + a grid toggle and an
+/// Apply button (wired in BOARD_JS to reload with the values as query params,
+/// which forces a regenerate). Values reflect the weights behind the layout.
+fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!void {
+    try w.writeAll("<div class=\"pcb-tune\"><span class=\"tune-h\">Tuning</span>");
+    try w.print("<label>Align <input id=\"t-align\" type=\"number\" step=\"0.1\" min=\"0\" value=\"{d}\"></label>", .{params.w_align});
+    try w.print("<label>Isolate <input id=\"t-iso\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.w_isolate});
+    try w.print("<label>Loop <input id=\"t-loop\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.loop_w});
+    try w.writeAll("<label class=\"tune-chk\"><input id=\"t-grid\" type=\"checkbox\"");
+    if (params.grid_courtyards) try w.writeAll(" checked");
+    try w.writeAll("> Grid edges</label>");
+    try w.writeAll("<button class=\"btn\" id=\"t-apply\">Apply &amp; regenerate</button>");
+    try w.writeAll("<span class=\"muted\">re-runs the optimizer with these weights</span></div>");
+}
+
+/// Routing panel: DRC inputs (mm) + a Route button (wired in BOARD_JS to
+/// reload with `?route=1&…`). Shows the routed/total tally + DRC result.
+fn writeRoutePanel(w: *std.Io.Writer, params: router.RouteParams, routed: ?router.RouteResult, n_drc: usize) std.Io.Writer.Error!void {
+    try w.writeAll("<div class=\"pcb-route\"><span class=\"tune-h\">Route</span>");
+    try w.print("<label>Track <input id=\"r-tw\" type=\"number\" step=\"0.05\" min=\"0.05\" value=\"{d}\"></label>", .{params.track_width});
+    try w.print("<label>Clearance <input id=\"r-cl\" type=\"number\" step=\"0.05\" min=\"0.05\" value=\"{d}\"></label>", .{params.clearance});
+    try w.print("<label>Via drill <input id=\"r-vd\" type=\"number\" step=\"0.05\" min=\"0.1\" value=\"{d}\"></label>", .{params.via_drill});
+    try w.print("<label>Via Ø <input id=\"r-va\" type=\"number\" step=\"0.05\" min=\"0.2\" value=\"{d}\"></label>", .{params.via_dia});
+    try w.writeAll("<button class=\"btn\" id=\"r-go\">Route</button>");
+    try w.writeAll("<label class=\"tune-chk\"><input id=\"r-clr-show\" type=\"checkbox\"> show clearance</label>");
+    try w.writeAll("<label class=\"tune-chk\"><input id=\"r-drc-show\" type=\"checkbox\" checked> show DRC</label>");
+    if (routed) |r| {
+        const cls = if (r.routed == r.total) "ok" else "warn";
+        try w.print("<span class=\"route-stat {s}\">routed {d}/{d} nets · {d} vias</span>", .{ cls, r.routed, r.total, r.vias.len });
+        if (n_drc == 0) {
+            try w.writeAll("<span class=\"route-stat ok\">DRC clean ✓</span>");
+        } else {
+            try w.print("<span class=\"route-stat err\">{d} DRC violation(s)</span>", .{n_drc});
+        }
+    } else {
+        try w.writeAll("<span class=\"muted\">4-layer: top/GND/PWR/bottom · GND→plane vias</span>");
+    }
+    try w.writeAll("</div>");
+}
+
+fn writeLegend(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!void {
+    var fallback_count: usize = 0;
+    for (p.parts) |part| {
+        if (part.fallback) fallback_count += 1;
+    }
+    try w.writeAll("<div class=\"pcb-legend\">");
+    try w.writeAll("<span class=\"sw prox\"></span> proximity (hug pin)");
+    try w.writeAll("<span class=\"sw gnd\"></span> ground return");
+    try w.writeAll("<span class=\"sw sig\"></span> signal");
+    try w.writeAll("<span class=\"sw esc\"></span> escape trace (signal breakout)");
+    if (fallback_count > 0) {
+        try w.print("<span class=\"note\">{d} part(s) using a placeholder box (no library footprint) — shown dashed</span>", .{fallback_count});
+    }
+    try w.writeAll("</div>");
+}
+
+// ── Sidebar (component → pin/net list) ───────────────────────────────────
+
+const PinNet = struct { pin: []const u8, net: []const u8 };
+
+fn writeSidebar(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement) HandlerError!void {
+    var by_ref = std.StringHashMap(std.ArrayListUnmanaged(PinNet)).init(alloc);
+    for (p.nets) |net| {
+        for (net.pins) |pin| {
+            const gop = try by_ref.getOrPut(pin.ref_des);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.append(alloc, .{ .pin = pin.pin, .net = net.name });
+        }
+    }
+
+    try w.writeAll("<aside class=\"pcb-side\">");
+    try w.print("<div class=\"side-h\">Components <span class=\"side-n\">{d}</span></div>", .{p.instances.len});
+    try w.writeAll("<ul class=\"comp-list\">");
+    for (p.instances) |inst| {
+        try w.writeAll("<li class=\"comp\" data-ref=\"");
+        try writeAttr(w, inst.ref_des);
+        try w.writeAll("\"><div class=\"comp-top\"><span class=\"comp-ref\">");
+        try writeEscaped(w, shortName(inst.ref_des));
+        try w.writeAll("</span><span class=\"comp-val\">");
+        try writeEscaped(w, instLabel(inst));
+        try w.writeAll("</span></div>");
+        if (inst.footprint.len > 0) {
+            try w.writeAll("<button class=\"comp-fp court-edit\" data-court-ref=\"");
+            try writeAttr(w, inst.ref_des);
+            try w.writeAll("\" title=\"Edit footprint courtyard\">▢ ");
+            try writeEscaped(w, inst.footprint);
+            try w.writeAll("</button>");
+        }
+        if (by_ref.getPtr(inst.ref_des)) |pins| {
+            std.mem.sort(PinNet, pins.items, {}, lessPin);
+            try w.writeAll("<div class=\"comp-pins\">");
+            for (pins.items) |pn| {
+                try w.writeAll("<span class=\"pn\" data-net=\"");
+                try writeAttr(w, netKey(pn.net));
+                try w.writeAll("\"><b>");
+                try writeEscaped(w, pn.pin);
+                try w.writeAll("</b>");
+                try writeEscaped(w, netLabel(pn.net));
+                try w.writeAll("</span>");
+            }
+            try w.writeAll("</div>");
+        }
+        try w.writeAll("</li>");
+    }
+    try w.writeAll("</ul></aside>");
+}
+
+// ── Embedded board data (consumed by BOARD_JS) ───────────────────────────
+
+const LocalPt = struct { x: f64, y: f64 };
+
+fn writePcbData(
+    w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    p: optimizer.Placement,
+    v: View,
+    name: []const u8,
+    saved: ?std.StringHashMap(SavedPos),
+    routed: ?router.RouteResult,
+    clearance: f64,
+    violations: []const drc.Violation,
+) HandlerError!void {
+    // ref → part index, and "ref|pin" → collapsed net (for pad tags).
+    var idx = std.StringHashMap(usize).init(alloc);
+    for (p.parts, 0..) |pt, i| try idx.put(pt.ref_des, i);
+    // ref → footprint name (for the courtyard editor).
+    var fp_of = std.StringHashMap([]const u8).init(alloc);
+    for (p.instances) |inst| try fp_of.put(inst.ref_des, inst.footprint);
+    var pin_net = std.StringHashMap([]const u8).init(alloc);
+    for (p.nets) |net| {
+        for (net.pins) |pin| {
+            const key = try std.fmt.allocPrint(alloc, "{s}|{s}", .{ pin.ref_des, pin.pin });
+            try pin_net.put(key, netKey(net.name));
+        }
+    }
+
+    try w.writeAll("<script>const PCB=");
+    try w.print("{{\"scale\":{d},\"minx\":{d},\"miny\":{d},", .{ v.scale, v.minx, v.miny });
+    try w.print("\"margin\":{d},\"grid\":{d},\"w\":{d},\"h\":{d},", .{ MARGIN_MM, optimizer.GRID_MM, v.width, v.height });
+    try w.print("\"blockPen\":{d},", .{optimizer.BLOCK_PENALTY_MM});
+    try w.print("\"clr\":{d},\"cmargin\":{d},", .{ clearance, geometry.BBOX_MARGIN_MM });
+    try w.print("\"auto\":{{\"hpwl\":{d},\"loop\":{d},\"caps\":{d}}},", .{ p.score.hpwl_mm, p.score.loop_mm, p.score.loop_caps });
+    try w.writeAll("\"name\":");
+    try writeJsonStr(w, name);
+    try w.writeAll(",");
+    try writeSavedJson(w, saved);
+
+    // Parts.
+    try w.writeAll("\"parts\":[");
+    for (p.parts, 0..) |pt, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll(REF_OPEN);
+        try writeJsonStr(w, pt.ref_des);
+        try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"kind\":\"{s}\",\"fb\":{s},", .{
+            pt.x,                                 pt.y,  pt.rot,
+            pt.hw,                                pt.hh, if (pt.kind == .hub) "hub" else "passive",
+            if (pt.fallback) "true" else "false",
+        });
+        try w.writeAll("\"fp\":");
+        try writeJsonStr(w, fp_of.get(pt.ref_des) orelse "");
+        try w.writeAll(",\"pads\":[");
+        for (pt.pads, 0..) |pad, j| {
+            if (j > 0) try w.writeAll(",");
+            try w.print("{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}", .{ pad.x, pad.y, pad.w, pad.h });
+            const pkey = try std.fmt.allocPrint(alloc, "{s}|{s}", .{ pt.ref_des, pad.number });
+            if (pin_net.get(pkey)) |nk| {
+                try w.writeAll(",\"net\":");
+                try writeJsonStr(w, nk);
+            }
+            try w.writeAll("}");
+        }
+        try w.writeAll("],\"silk\":{\"l\":[");
+        for (pt.silk_lines, 0..) |s, j| {
+            if (j > 0) try w.writeAll(",");
+            try w.print("[{d},{d},{d},{d}]", .{ s.x1, s.y1, s.x2, s.y2 });
+        }
+        try w.writeAll("],\"c\":[");
+        for (pt.silk_circles, 0..) |c, j| {
+            if (j > 0) try w.writeAll(",");
+            try w.print("[{d},{d},{d}]", .{ c.cx, c.cy, c.r });
+        }
+        try w.writeAll("]}}");
+    }
+    try w.writeAll("],");
+
+    // Airwires.
+    try w.writeAll("\"links\":[");
+    for (p.links, 0..) |l, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("{{\"a\":{d},\"ax\":{d},\"ay\":{d},", .{ l.a, l.ax, l.ay });
+        try w.print("\"b\":{d},\"bx\":{d},\"by\":{d},\"k\":\"{s}\"}}", .{ l.b, l.bx, l.by, kindStr(l.kind) });
+    }
+    try w.writeAll("],");
+
+    // Escape stubs: reserved breakout corridors on single-pin signal pads
+    // (footprint-local pad centre → 2 mm tip), drawn as hints + reflected in
+    // the part's keepout so the placer kept them clear.
+    try w.writeAll("\"stubs\":[");
+    for (p.stubs, 0..) |st, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("{{\"p\":{d},\"ax\":{d},\"ay\":{d},\"bx\":{d},\"by\":{d}}}", .{ st.part, st.ax, st.ay, st.bx, st.by });
+    }
+    try w.writeAll("],");
+
+    // Decoupling loops: cap power/ground pads + the hub's candidate power/
+    // ground pads. The client measures each leg edge-to-edge to the nearest
+    // hub pad (matching the server's `scoreLayout`).
+    try w.writeAll("\"loops\":[");
+    for (p.loops, 0..) |lp, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("{{\"cap\":{d},\"hub\":{d},\"cp\":", .{ lp.cap, lp.hub });
+        try writePadRect(w, lp.cap_pwr);
+        try w.writeAll(",\"cg\":");
+        try writePadRect(w, lp.cap_gnd);
+        try w.writeAll(",\"hp\":");
+        try writePadRectList(w, lp.hub_pwr);
+        try w.writeAll(",\"hg\":");
+        try writePadRectList(w, lp.hub_gnd);
+        try w.writeAll("}");
+    }
+    try w.writeAll("],");
+
+    // Signal nets (for the HPWL score) — same set the server scored.
+    try w.writeAll("\"nets\":[");
+    var first_net = true;
+    for (p.nets) |net| {
+        if (isGroundNet(net.name)) continue;
+        if (!first_net) try w.writeAll(",");
+        first_net = false;
+        try w.writeAll("[");
+        var first_pin = true;
+        for (net.pins) |pin| {
+            const i = idx.get(pin.ref_des) orelse continue;
+            const loc = padLocalPage(p.parts[i], pin.pin);
+            if (!first_pin) try w.writeAll(",");
+            first_pin = false;
+            try w.print("{{\"p\":{d},\"x\":{d},\"y\":{d}}}", .{ i, loc.x, loc.y });
+        }
+        try w.writeAll("]");
+    }
+    try w.writeAll("],");
+
+    // Routed copper (world mm). layer 0=top, 1=bottom.
+    try w.writeAll("\"tracks\":[");
+    if (routed) |r| {
+        for (r.tracks, 0..) |t, i| {
+            if (i > 0) try w.writeAll(",");
+            try w.print("{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d}}}", .{ t.x1, t.y1, t.x2, t.y2, t.layer, t.width });
+        }
+    }
+    try w.writeAll("],\"vias\":[");
+    if (routed) |r| {
+        for (r.vias, 0..) |vi, i| {
+            if (i > 0) try w.writeAll(",");
+            try w.print("{{\"x\":{d},\"y\":{d},\"d\":{d}}}", .{ vi.x, vi.y, vi.dia });
+        }
+    }
+    // DRC violations: world point + how short the gap is vs. the rule.
+    try w.writeAll("],\"drc\":[");
+    for (violations, 0..) |vio, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("{{\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\"}}", .{ vio.x, vio.y, vio.gap, vio.clearance, drcKindStr(vio.kind) });
+    }
+    try w.writeAll("]};</script>");
+}
+
+/// Short label for a DRC violation kind (shown in the marker tooltip).
+fn drcKindStr(k: drc.Kind) []const u8 {
+    return switch (k) {
+        .via_pad => "via↔pad",
+        .via_via => "via↔via",
+        .via_track => "via↔track",
+        .pad_pad => "pad↔pad",
+    };
+}
+
+// ── Small helpers ────────────────────────────────────────────────────────
+
+/// Emit `"saved":` followed by the saved placement map (ref → {x,y,rot}), or
+/// `null` when no sidecar exists. Trailing comma included.
+fn writeSavedJson(w: *std.Io.Writer, saved: ?std.StringHashMap(SavedPos)) std.Io.Writer.Error!void {
+    try w.writeAll("\"saved\":");
+    if (saved) |m| {
+        try w.writeAll("{");
+        var it = m.iterator();
+        var first = true;
+        while (it.next()) |e| {
+            if (!first) try w.writeAll(",");
+            first = false;
+            try writeJsonStr(w, e.key_ptr.*);
+            try w.print(":{{\"x\":{d},\"y\":{d},\"rot\":{d}}}", .{ e.value_ptr.x, e.value_ptr.y, e.value_ptr.rot });
+        }
+        try w.writeAll("}");
+    } else {
+        try w.writeAll("null");
+    }
+    try w.writeAll(",");
+}
+
+fn padLocalPage(part: optimizer.Part, pin: []const u8) LocalPt {
+    for (part.pads) |pd| {
+        if (std.mem.eql(u8, pd.number, pin)) return .{ .x = pd.x, .y = pd.y };
+    }
+    return .{ .x = 0, .y = 0 };
+}
+
+/// Emit a pad rect as `{"x","y","w","h"}` (footprint-local mm).
+fn writePadRect(w: *std.Io.Writer, pr: optimizer.PadRect) std.Io.Writer.Error!void {
+    try w.print("{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}}", .{ pr.x, pr.y, pr.w, pr.h });
+}
+
+/// Emit a list of pad rects as a JSON array.
+fn writePadRectList(w: *std.Io.Writer, list: []const optimizer.PadRect) std.Io.Writer.Error!void {
+    try w.writeByte('[');
+    for (list, 0..) |pr, i| {
+        if (i > 0) try w.writeByte(',');
+        try writePadRect(w, pr);
+    }
+    try w.writeByte(']');
+}
+
+fn kindStr(k: optimizer.RatKind) []const u8 {
+    return switch (k) {
+        .proximity => "proximity",
+        .ground => "ground",
+        .signal => "signal",
+    };
+}
+
+fn instLabel(inst: anytype) []const u8 {
+    if (inst.value.len > 0) return inst.value;
+    for (inst.properties) |prop| {
+        if (std.mem.eql(u8, prop.key, "value") and prop.value.len > 0) return prop.value;
+    }
+    return inst.component;
+}
+
+fn lessPin(_: void, a: PinNet, b: PinNet) bool {
+    const an = std.fmt.parseInt(u32, a.pin, 10) catch null;
+    const bn = std.fmt.parseInt(u32, b.pin, 10) catch null;
+    if (an != null and bn != null) return an.? < bn.?;
+    return std.mem.lessThan(u8, a.pin, b.pin);
+}
+
+fn shortName(s: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| return s[i + 1 ..];
+    return s;
+}
+
+/// Net grouping key — dot-collapsed to the rail, sub-block prefix kept.
+fn netKey(name: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, name, '.')) |i| return name[0..i];
+    return name;
+}
+
+/// Poured net name shown to the user: collapsed rail, prefix stripped.
+fn netLabel(name: []const u8) []const u8 {
+    return shortName(netKey(name));
+}
+
+/// Mirrors the optimizer's ground-net set, so the page's HPWL net groups
+/// match the server-computed baseline exactly.
+fn isGroundNet(name: []const u8) bool {
+    const grounds = [_][]const u8{ "GND", "GNDA", "AGND", "PGND", "DGND", "GNDD", "VSS", "VSSA" };
+    const s = shortName(name);
+    for (grounds) |g| {
+        if (std.mem.eql(u8, s, g)) return true;
+    }
+    return false;
+}
+
+fn writeEscaped(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
+    for (s) |c| switch (c) {
+        '&' => try w.writeAll("&amp;"),
+        '<' => try w.writeAll("&lt;"),
+        '>' => try w.writeAll("&gt;"),
+        else => try w.writeByte(c),
+    };
+}
+
+fn writeAttr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
+    for (s) |c| switch (c) {
+        '&' => try w.writeAll("&amp;"),
+        '<' => try w.writeAll("&lt;"),
+        '>' => try w.writeAll("&gt;"),
+        '"' => try w.writeAll("&quot;"),
+        else => try w.writeByte(c),
+    };
+}
+
+/// Emit `s` as a quoted, JSON-escaped string to a `std.Io.Writer`.
+fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
+    try w.writeByte('"');
+    for (s) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '\n' => try w.writeAll("\\n"),
+        '\r' => try w.writeAll("\\r"),
+        '\t' => try w.writeAll("\\t"),
+        else => if (c < 0x20) try w.print("\\u{x:0>4}", .{c}) else try w.writeByte(c),
+    };
+    try w.writeByte('"');
+}
+
+// ── Courtyard editor modal ───────────────────────────────────────────────
+
+/// Hidden-by-default overlay; populated + shown by BOARD_JS when a sidebar
+/// footprint button is clicked. Edits the courtyard half-extents on the grid.
+const COURTYARD_MODAL =
+    \\<div id="court-modal" class="court-modal" hidden><div class="court-dialog">
+    \\<div class="court-h"><span id="court-title">Courtyard</span><button id="court-x" class="court-x" title="Close">×</button></div>
+    \\<svg id="court-svg" class="court-svg" viewBox="0 0 260 220" xmlns="http://www.w3.org/2000/svg"></svg>
+    \\<div class="court-fields">
+    \\<label>½-width <input id="court-hw" type="number" step="0.2" min="0"> mm</label>
+    \\<label>½-height <input id="court-hh" type="number" step="0.2" min="0"> mm</label>
+    \\<span id="court-full" class="court-full"></span></div>
+    \\<div class="court-note" id="court-note">Half-extents from the part centre;
+    \\ edges stay on the 0.2 mm grid. Saving rewrites the footprint file and applies to every design that uses it.</div>
+    \\<div class="court-actions"><button id="court-save" class="btn">Save courtyard</button>
+    \\<button id="court-cancel" class="btn">Cancel</button><span id="court-msg" class="savemsg"></span></div>
+    \\</div></div>
+;
+
+// ── Styles + client renderer ─────────────────────────────────────────────
+
+const PAGE_CSS =
+    \\.pcb-layout{display:flex;gap:16px;align-items:flex-start;max-width:1500px;margin:0 auto;padding:12px 18px;font-family:system-ui,sans-serif}
+    \\.pcb-main{flex:1;min-width:0}
+    \\.pcb-main h1{font-size:18px;font-weight:600;margin:4px 0}
+    \\.pcb-sub{font-size:13px;font-weight:400;color:#94a3b8}
+    \\.pcb-bar{display:flex;gap:10px;align-items:center;margin:8px 0;flex-wrap:wrap}
+    \\.pcb-bar .score{font-weight:600;color:#1e293b;background:#f1f5f9;border-radius:4px;padding:2px 8px}
+    \\.pcb-bar .delta{font-size:12px;font-weight:600;min-width:34px}
+    \\.pcb-bar .delta.up{color:#dc2626}
+    \\.pcb-bar .delta.down{color:#16a34a}
+    \\.pcb-bar .btn{font:inherit;font-size:12px;border:1px solid #cbd5e1;background:#fff;border-radius:5px;
+    \\  padding:3px 9px;cursor:pointer;text-decoration:none;color:#1e293b;display:inline-block}
+    \\.pcb-bar .btn:hover{background:#f8fafc}
+    \\.pcb-bar .btn:disabled{opacity:.45;cursor:default}
+    \\.pcb-bar .zoom-grp{display:inline-flex;gap:4px}
+    \\.pcb-bar .zoom-grp .btn{min-width:26px;text-align:center;padding:3px 7px}
+    \\.pcb-bar .savemsg{font-size:12px;color:#16a34a;font-weight:600}
+    \\.pcb-bar .muted{font-size:11.5px;color:#94a3b8}
+    \\.pcb-tune{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#475569}
+    \\.pcb-tune .tune-h{font-weight:700;color:#1e293b}
+    \\.pcb-tune label{display:flex;gap:4px;align-items:center}
+    \\.pcb-tune input[type=number]{width:54px;font:inherit;font-size:12px;border:1px solid #cbd5e1;border-radius:4px;padding:2px 4px}
+    \\.pcb-tune .muted{font-size:11px;color:#94a3b8}
+    \\.pcb-route{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#475569}
+    \\.pcb-route .tune-h{font-weight:700;color:#1e293b}
+    \\.pcb-route label{display:flex;gap:4px;align-items:center}
+    \\.pcb-route input[type=number]{width:54px;font:inherit;font-size:12px;border:1px solid #cbd5e1;border-radius:4px;padding:2px 4px}
+    \\.pcb-route .muted{font-size:11px;color:#94a3b8}
+    \\.pcb-route .route-stat{font-weight:600}
+    \\.pcb-route .route-stat.ok{color:#16a34a}
+    \\.pcb-route .route-stat.warn{color:#dc2626}
+    \\.pcb-route .route-stat.err{color:#fff;background:#ef4444;border-radius:4px;padding:1px 7px}
+    \\.pcb-legend{display:flex;gap:14px;align-items:center;font-size:12px;color:#475569;margin:4px 0 12px;flex-wrap:wrap}
+    \\.pcb-legend .sw{display:inline-block;width:18px;height:0;border-top-width:3px;border-top-style:solid;vertical-align:middle}
+    \\.pcb-legend .sw.prox{border-color:#ea580c}
+    \\.pcb-legend .sw.gnd{border-color:#0891b2}
+    \\.pcb-legend .sw.sig{border-color:#cbd5e1}
+    \\.pcb-legend .sw.esc{border-color:#dc2626}
+    \\.pcb-legend .note{color:#b45309}
+    \\.pcb-svg{background:#fff;border:1px solid #e2e8f0;border-radius:8px;max-width:100%;height:auto;touch-action:none}
+    \\.pcb-ref{font:600 9px system-ui,sans-serif;text-anchor:middle;pointer-events:none;user-select:none}
+    \\.part{cursor:grab}
+    \\.part .court{transition:filter .08s}
+    \\.part.hl .court{filter:drop-shadow(0 0 3px rgba(37,99,235,.7))}
+    \\.pad{transition:fill .08s}
+    \\.pad.net-hl{fill:#dc2626}
+    \\.pn.net-hl{background:#fecaca;color:#991b1b}
+    \\.pcb-side{width:288px;flex:none;position:sticky;top:8px;max-height:calc(100vh - 16px);
+    \\  overflow:auto;border:1px solid #e2e8f0;border-radius:8px;background:#fff}
+    \\.side-h{font-size:13px;font-weight:600;padding:10px 12px;border-bottom:1px solid #eef2f7;position:sticky;top:0;background:#fff}
+    \\.side-n{color:#94a3b8;font-weight:400}
+    \\.comp-list{list-style:none;margin:0;padding:0}
+    \\.comp{padding:8px 12px;border-bottom:1px solid #f1f5f9;cursor:default}
+    \\.comp.hl{background:#eff6ff}
+    \\.comp-top{display:flex;gap:8px;align-items:baseline}
+    \\.comp-ref{font-weight:600;font-size:13px;color:#1e293b}
+    \\.comp-val{font-size:12px;color:#475569;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    \\.comp-fp{font-size:10.5px;color:#94a3b8;margin:1px 0 4px}
+    \\.comp-fp.court-edit{display:block;width:100%;text-align:left;background:none;border:0;padding:1px 0 4px;
+    \\  cursor:pointer;font-family:inherit}
+    \\.comp-fp.court-edit:hover{color:#2563eb;text-decoration:underline}
+    \\.comp-pins{display:flex;flex-wrap:wrap;gap:3px 5px}
+    \\.pn{font-size:11px;color:#334155;background:#f1f5f9;border-radius:3px;padding:0 5px;white-space:nowrap}
+    \\.pn b{color:#0f172a;font-weight:600;margin-right:3px}
+    \\.court-modal{position:fixed;inset:0;background:rgba(15,23,42,0.55);display:flex;
+    \\  align-items:center;justify-content:center;z-index:200}
+    \\.court-modal[hidden]{display:none}
+    \\.court-dialog{background:#fff;border-radius:10px;padding:16px 18px;width:320px;
+    \\  box-shadow:0 12px 40px rgba(0,0,0,0.3);font-family:system-ui,sans-serif}
+    \\.court-h{display:flex;align-items:center;justify-content:space-between;font-weight:600;
+    \\  color:#0f172a;font-size:14px;margin-bottom:8px}
+    \\.court-x{border:0;background:none;font-size:20px;line-height:1;cursor:pointer;color:#64748b}
+    \\.court-svg{width:100%;height:200px;background:#0d1117;border-radius:6px;display:block}
+    \\.court-fields{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0 6px;font-size:12px;color:#334155}
+    \\.court-fields input{width:64px;font:inherit}
+    \\.court-full{color:#64748b}
+    \\.court-note{font-size:11px;color:#94a3b8;line-height:1.4;margin-bottom:10px}
+    \\.court-actions{display:flex;gap:8px;align-items:center}
+    \\.court-dialog .btn{font:inherit;font-size:12px;border:1px solid #cbd5e1;background:#fff;
+    \\  border-radius:5px;padding:4px 11px;cursor:pointer;color:#1e293b}
+    \\.court-dialog .btn:hover{background:#f8fafc}
+    \\.court-dialog .btn:disabled{opacity:.45;cursor:default}
+;
+
+const BOARD_JS =
+    \\<script>(function(){
+    \\const NS="http://www.w3.org/2000/svg";
+    \\const S=PCB.scale,MX=PCB.minx,MY=PCB.miny,M=PCB.margin,G=PCB.grid;
+    \\const P=PCB.parts, orig=P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0};});
+    \\const X=function(mm){return (mm-MX+M)*S;}, Y=function(mm){return (mm-MY+M)*S;};
+    \\const svg=document.getElementById("pcb-svg");
+    \\const gP=document.createElementNS(NS,"g"), gR=document.createElementNS(NS,"g");
+    \\const gT=document.createElementNS(NS,"g"), gC=document.createElementNS(NS,"g"), gD=document.createElementNS(NS,"g");
+    \\svg.appendChild(gP); svg.appendChild(gC); svg.appendChild(gT); svg.appendChild(gR); svg.appendChild(gD);
+    \\gT.style.pointerEvents="none"; gR.style.pointerEvents="none"; gC.style.pointerEvents="none"; gD.style.pointerEvents="none";
+    \\const els=[], bodies=[];
+    \\function el(n,a){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);return e;}
+    \\function wpt(i,lx,ly){var p=P[i],a=(p.rot||0)*Math.PI/180,c=Math.cos(a),s=Math.sin(a);
+    \\ return {x:p.x+lx*c-ly*s,y:p.y+lx*s+ly*c};}
+    \\function wrect(i,pad){var p=P[i],c=wpt(i,pad.x,pad.y),q=(((p.rot||0)%360)+360)%360;
+    \\ var hw=(q==90||q==270)?pad.h/2:pad.w/2, hh=(q==90||q==270)?pad.w/2:pad.h/2;
+    \\ return {x0:c.x-hw,y0:c.y-hh,x1:c.x+hw,y1:c.y+hh};}
+    \\function rgap(a,b){var gx=Math.max(0,Math.max(a.x0-b.x1,b.x0-a.x1)),
+    \\ gy=Math.max(0,Math.max(a.y0-b.y1,b.y0-a.y1));return Math.hypot(gx,gy);}
+    \\function nspan(a0,a1,b0,b1){if(a1<b0)return[a1,b0];if(b1<a0)return[a0,b1];
+    \\ var m=(Math.max(a0,b0)+Math.min(a1,b1))/2;return[m,m];}
+    \\function npts(a,b){var sx=nspan(a.x0,a.x1,b.x0,b.x1),sy=nspan(a.y0,a.y1,b.y0,b.y1);
+    \\ return [{x:sx[0],y:sy[0]},{x:sx[1],y:sy[1]}];}
+    \\function shitsRect(a,b,r){var t0=0,t1=1,p=[a.x-b.x,b.x-a.x,a.y-b.y,b.y-a.y],
+    \\ q=[a.x-r.x0,r.x1-a.x,a.y-r.y0,r.y1-a.y];
+    \\ for(var i=0;i<4;i++){if(p[i]===0){if(q[i]<0)return false;}else{var t=q[i]/p[i];
+    \\  if(p[i]<0){if(t>t1)return false;if(t>t0)t0=t;}else{if(t<t0)return false;if(t<t1)t1=t;}}}
+    \\ return t0<t1;}
+    \\function rclose(a,b){return Math.abs(a.x0-b.x0)<1e-6&&Math.abs(a.y0-b.y0)<1e-6&&
+    \\ Math.abs(a.x1-b.x1)<1e-6&&Math.abs(a.y1-b.y1)<1e-6;}
+    \\function blocked(capIdx,a,b,target){var e=0.02;
+    \\ for(var pi=0;pi<P.length;pi++){if(pi===capIdx)continue;var pads=P[pi].pads;
+    \\  for(var k=0;k<pads.length;k++){var r0=wrect(pi,pads[k]);if(rclose(r0,target))continue;
+    \\   var r={x0:r0.x0+e,y0:r0.y0+e,x1:r0.x1-e,y1:r0.y1-e};if(r.x1<=r.x0||r.y1<=r.y0)continue;
+    \\   if(shitsRect(a,b,r))return true;}}return false;}
+    \\function nhub(cr,capIdx,hubIdx,pads){var best=Infinity,br=cr;
+    \\ pads.forEach(function(pr){var hr=wrect(hubIdx,pr),np=npts(cr,hr),
+    \\  cost=rgap(cr,hr)+(blocked(capIdx,np[0],np[1],hr)?PCB.blockPen:0);
+    \\  if(cost<best){best=cost;br=hr;}});
+    \\ return {rect:br,gap:best};}
+    \\function setT(i){var p=P[i];
+    \\ els[i].setAttribute("transform","translate("+X(p.x).toFixed(1)+","+Y(p.y).toFixed(1)+")");
+    \\ bodies[i].setAttribute("transform","rotate("+(p.rot||0)+")");}
+    \\P.forEach(function(p,i){
+    \\ var g=el("g",{"class":"part","data-ref":p.ref});
+    \\ var body=el("g",{"class":"body"});
+    \\ body.appendChild(el("rect",{"class":"court",x:(-p.hw*S).toFixed(1),y:(-p.hh*S).toFixed(1),
+    \\   width:(2*p.hw*S).toFixed(1),height:(2*p.hh*S).toFixed(1),rx:2,fill:"#f1f5f9",
+    \\   stroke:p.kind=="hub"?"#2563eb":"#64748b","stroke-width":1.3,
+    \\   "stroke-dasharray":p.fb?"4 3":"0"}));
+    \\ if(p.silk){
+    \\  p.silk.l.forEach(function(s){body.appendChild(el("line",{x1:(s[0]*S).toFixed(1),y1:(s[1]*S).toFixed(1),
+    \\    x2:(s[2]*S).toFixed(1),y2:(s[3]*S).toFixed(1),stroke:"#94a3b8","stroke-width":0.8,"stroke-linecap":"round"}));});
+    \\  p.silk.c.forEach(function(c){body.appendChild(el("circle",{cx:(c[0]*S).toFixed(1),cy:(c[1]*S).toFixed(1),
+    \\    r:Math.max(c[2]*S,1).toFixed(1),fill:"none",stroke:"#94a3b8","stroke-width":0.8}));});}
+    \\ p.pads.forEach(function(pad){
+    \\   var pw=Math.max(pad.w*S,1.5),ph=Math.max(pad.h*S,1.5);
+    \\   var a={"class":"pad",x:(pad.x*S-pw/2).toFixed(1),y:(pad.y*S-ph/2).toFixed(1),
+    \\     width:pw.toFixed(1),height:ph.toFixed(1),rx:0.5,fill:"#0f172a"};
+    \\   if(pad.net)a["data-net"]=pad.net;
+    \\   body.appendChild(el("rect",a));});
+    \\ g.appendChild(body);
+    \\ var t=el("text",{"class":"pcb-ref",x:0,y:(-p.hh*S-2).toFixed(1),fill:p.kind=="hub"?"#2563eb":"#64748b"});
+    \\ t.textContent=p.ref; g.appendChild(t);
+    \\ gP.appendChild(g); els.push(g); bodies.push(body);
+    \\ setT(i);
+    \\});
+    \\function aw(a,b,col,sw,op){gR.appendChild(el("line",{x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),
+    \\ x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),stroke:col,"stroke-width":sw,opacity:op}));}
+    \\function rats(){
+    \\ while(gR.firstChild)gR.removeChild(gR.firstChild);
+    \\ PCB.links.forEach(function(l){
+    \\   var a=wpt(l.a,l.ax,l.ay),b=wpt(l.b,l.bx,l.by);
+    \\   var col=l.k=="proximity"?"#ea580c":(l.k=="ground"?"#0891b2":"#cbd5e1");
+    \\   aw(a,b,col,l.k=="signal"?0.7:1.3,l.k=="signal"?0.55:0.9);});
+    \\ PCB.loops.forEach(function(L){
+    \\   var cp=wrect(L.cap,L.cp),p1=npts(cp,nhub(cp,L.cap,L.hub,L.hp).rect); aw(p1[0],p1[1],"#ea580c",1.3,0.9);
+    \\   var cg=wrect(L.cap,L.cg),p2=npts(cg,nhub(cg,L.cap,L.hub,L.hg).rect); aw(p2[0],p2[1],"#0891b2",1.3,0.9);});
+    \\ if(!((PCB.tracks||[]).length)){var tw=parseFloat((document.getElementById("r-tw")||{}).value)||0.15;
+    \\  (PCB.stubs||[]).forEach(function(st){var a=wpt(st.p,st.ax,st.ay),b=wpt(st.p,st.bx,st.by);
+    \\   var ln=el("line",{x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),
+    \\     stroke:"#dc2626","stroke-width":Math.max(tw*S,1.5).toFixed(1),"stroke-linecap":"round",opacity:0.9});
+    \\   var t=el("title",{}); t.textContent="signal breakout (escape trace)"; ln.appendChild(t); gR.appendChild(ln);});}
+    \\}
+    \\function delta(id,cur,base){
+    \\ var e=document.getElementById(id),d=cur-base;
+    \\ if(Math.abs(d)<0.05){e.textContent="=";e.className="delta";}
+    \\ else{e.textContent=(d>0?"+":"")+d.toFixed(1);e.className="delta "+(d>0?"up":"down");}
+    \\}
+    \\function score(){
+    \\ var hpwl=0;
+    \\ PCB.nets.forEach(function(net){
+    \\   if(net.length<2)return;
+    \\   var mnx=1e9,mny=1e9,mxx=-1e9,mxy=-1e9;
+    \\   net.forEach(function(q){var w=wpt(q.p,q.x,q.y);
+    \\     if(w.x<mnx)mnx=w.x;if(w.y<mny)mny=w.y;if(w.x>mxx)mxx=w.x;if(w.y>mxy)mxy=w.y;});
+    \\   hpwl+=(mxx-mnx)+(mxy-mny);});
+    \\ var loop=0;
+    \\ PCB.loops.forEach(function(L){
+    \\   loop+=nhub(wrect(L.cap,L.cp),L.cap,L.hub,L.hp).gap;
+    \\   loop+=nhub(wrect(L.cap,L.cg),L.cap,L.hub,L.hg).gap;});
+    \\ document.getElementById("sc-hpwl").textContent="HPWL "+hpwl.toFixed(1)+" mm";
+    \\ document.getElementById("sc-loop").textContent="loop "+loop.toFixed(1)+" mm · "+PCB.loops.length+" cap(s)";
+    \\ delta("sc-hpwl-d",hpwl,PCB.auto.hpwl); delta("sc-loop-d",loop,PCB.auto.loop);
+    \\}
+    \\function mm(ev){var r=svg.getBoundingClientRect(),vb=svg.viewBox.baseVal;
+    \\ var sx=vb.x+(ev.clientX-r.left)*(vb.width/r.width);
+    \\ var sy=vb.y+(ev.clientY-r.top)*(vb.height/r.height);
+    \\ return {x:sx/S+MX-M,y:sy/S+MY-M};}
+    \\var drag=null, cur=-1;
+    \\els.forEach(function(g,i){
+    \\ g.addEventListener("mouseenter",function(){cur=i;});
+    \\ g.addEventListener("mouseleave",function(){if(cur===i)cur=-1;});
+    \\ g.addEventListener("pointerdown",function(ev){ev.preventDefault();var m=mm(ev);
+    \\   drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});
+    \\ g.addEventListener("pointermove",function(ev){if(!drag||drag.i!==i)return;var m=mm(ev);
+    \\   P[i].x=Math.round((m.x+drag.ox)/G)*G;P[i].y=Math.round((m.y+drag.oy)/G)*G;
+    \\   setT(i);rats();score();drawClr();});
+    \\ g.addEventListener("pointerup",function(ev){drag=null;g.style.cursor="grab";
+    \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}});
+    \\});
+    \\document.addEventListener("keydown",function(ev){
+    \\ if((ev.key=="r"||ev.key=="R")&&cur>=0){ev.preventDefault();
+    \\   P[cur].rot=((((P[cur].rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;
+    \\   setT(cur);rats();score();drawClr();}});
+    \\function applyAll(){P.forEach(function(p,i){setT(i);});rats();score();drawClr();}
+    \\document.getElementById("pcb-reset").addEventListener("click",function(){
+    \\ P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;});applyAll();});
+    \\document.getElementById("t-apply").addEventListener("click",function(){
+    \\ var v=function(id){return encodeURIComponent(document.getElementById(id).value);};
+    \\ var g=document.getElementById("t-grid").checked?1:0;
+    \\ window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?w_align="+v("t-align")+
+    \\  "&w_isolate="+v("t-iso")+"&loop_w="+v("t-loop")+"&grid="+g;});
+    \\var loadBtn=document.getElementById("pcb-load");
+    \\loadBtn.addEventListener("click",function(){if(!PCB.saved)return;
+    \\ P.forEach(function(p){var s=PCB.saved[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;}});applyAll();});
+    \\document.getElementById("pcb-save").addEventListener("click",function(){
+    \\ var msg=document.getElementById("pcb-savemsg");
+    \\ var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};})};
+    \\ fetch("/api/pcb-layout/"+encodeURIComponent(PCB.name),{method:"POST",
+    \\   headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
+    \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
+    \\  .then(function(){msg.style.color="#16a34a";msg.textContent="saved ✓";
+    \\    PCB.saved={};P.forEach(function(p){PCB.saved[p.ref]={x:p.x,y:p.y,rot:p.rot||0};});
+    \\    loadBtn.disabled=false;setTimeout(function(){msg.textContent="";},2000);})
+    \\  .catch(function(){msg.style.color="#dc2626";msg.textContent="save failed";});});
+    \\function hlBy(at,v,cls,on){document.querySelectorAll("["+at+"]").forEach(function(e){
+    \\ if(e.getAttribute(at)===v)e.classList.toggle(cls,on);});}
+    \\function wire(at,cls){document.querySelectorAll("["+at+"]").forEach(function(e){
+    \\ e.addEventListener("mouseenter",function(){hlBy(at,e.getAttribute(at),cls,true);});
+    \\ e.addEventListener("mouseleave",function(){hlBy(at,e.getAttribute(at),cls,false);});});}
+    \\wire("data-ref","hl"); wire("data-net","net-hl");
+    \\var VBW=PCB.w,VBH=PCB.h,vb={x:0,y:0,w:VBW,h:VBH};
+    \\function setVB(){svg.setAttribute("viewBox",vb.x.toFixed(1)+" "+vb.y.toFixed(1)+" "+vb.w.toFixed(1)+" "+vb.h.toFixed(1));}
+    \\function zoomAt(cx,cy,f){if((f<1&&vb.w<VBW*0.08)||(f>1&&vb.w>VBW*8))return;
+    \\ var r=svg.getBoundingClientRect();
+    \\ var px=vb.x+(cx-r.left)*(vb.w/r.width),py=vb.y+(cy-r.top)*(vb.h/r.height);
+    \\ vb.x=px-(px-vb.x)*f; vb.y=py-(py-vb.y)*f; vb.w*=f; vb.h*=f; setVB();}
+    \\svg.addEventListener("wheel",function(ev){ev.preventDefault();zoomAt(ev.clientX,ev.clientY,ev.deltaY>0?1.1:0.9);},{passive:false});
+    \\function zc(f){var r=svg.getBoundingClientRect();zoomAt(r.left+r.width/2,r.top+r.height/2,f);}
+    \\var zi=document.getElementById("z-in");if(zi)zi.addEventListener("click",function(){zc(0.8);});
+    \\var zo=document.getElementById("z-out");if(zo)zo.addEventListener("click",function(){zc(1.25);});
+    \\var zf=document.getElementById("z-fit");if(zf)zf.addEventListener("click",function(){vb={x:0,y:0,w:VBW,h:VBH};setVB();});
+    \\var pan=null;
+    \\svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.preventDefault();
+    \\ pan={cx:ev.clientX,cy:ev.clientY,vx:vb.x,vy:vb.y};svg.setPointerCapture(ev.pointerId);svg.style.cursor="grabbing";});
+    \\svg.addEventListener("pointermove",function(ev){if(!pan)return;var r=svg.getBoundingClientRect();
+    \\ vb.x=pan.vx-(ev.clientX-pan.cx)*(vb.w/r.width);vb.y=pan.vy-(ev.clientY-pan.cy)*(vb.h/r.height);setVB();});
+    \\svg.addEventListener("pointerup",function(ev){pan=null;svg.style.cursor="";try{svg.releasePointerCapture(ev.pointerId);}catch(e){}});
+    \\function drawRoute(){while(gT.firstChild)gT.removeChild(gT.firstChild);
+    \\ (PCB.tracks||[]).forEach(function(t){gT.appendChild(el("line",{x1:X(t.x1).toFixed(1),y1:Y(t.y1).toFixed(1),
+    \\   x2:X(t.x2).toFixed(1),y2:Y(t.y2).toFixed(1),stroke:t.l==0?"#dc2626":"#2563eb",
+    \\   "stroke-width":Math.max(t.w*S,1.2).toFixed(1),"stroke-linecap":"round","stroke-linejoin":"round",opacity:0.85}));});
+    \\ (PCB.vias||[]).forEach(function(v){var r=Math.max(v.d/2*S,2.5);
+    \\   gT.appendChild(el("circle",{cx:X(v.x).toFixed(1),cy:Y(v.y).toFixed(1),r:r.toFixed(1),fill:"#ca8a04"}));
+    \\   gT.appendChild(el("circle",{cx:X(v.x).toFixed(1),cy:Y(v.y).toFixed(1),r:(r*0.45).toFixed(1),fill:"#fff"}));});}
+    \\function clrVal(){var ci=document.getElementById("r-cl"),c=ci?parseFloat(ci.value):NaN;
+    \\ return (c>0)?c:(PCB.clr||0.127);}
+    \\function drawClr(){while(gC.firstChild)gC.removeChild(gC.firstChild);
+    \\ var cb=document.getElementById("r-clr-show"); if(!cb||!cb.checked)return;
+    \\ var clr=clrVal();
+    \\ P.forEach(function(p,i){p.pads.forEach(function(pad){var r=wrect(i,pad);
+    \\   gC.appendChild(el("rect",{x:X(r.x0-clr).toFixed(1),y:Y(r.y0-clr).toFixed(1),
+    \\     width:((r.x1-r.x0+2*clr)*S).toFixed(1),height:((r.y1-r.y0+2*clr)*S).toFixed(1),
+    \\     rx:(clr*S).toFixed(1),fill:"rgba(217,119,6,0.07)",stroke:"#d97706","stroke-width":0.8,"stroke-dasharray":"3 2"}));});});
+    \\ (PCB.vias||[]).forEach(function(v){gC.appendChild(el("circle",{cx:X(v.x).toFixed(1),cy:Y(v.y).toFixed(1),
+    \\   r:((v.d/2+clr)*S).toFixed(1),fill:"rgba(217,119,6,0.07)",stroke:"#d97706","stroke-width":0.8,"stroke-dasharray":"3 2"}));});
+    \\ (PCB.tracks||[]).forEach(function(t){gC.appendChild(el("line",{x1:X(t.x1).toFixed(1),y1:Y(t.y1).toFixed(1),
+    \\   x2:X(t.x2).toFixed(1),y2:Y(t.y2).toFixed(1),stroke:"#d97706","stroke-opacity":0.18,
+    \\   "stroke-width":((t.w+2*clr)*S).toFixed(1),"stroke-linecap":"round"}));});}
+    \\var clrCb=document.getElementById("r-clr-show");
+    \\if(clrCb)clrCb.addEventListener("change",drawClr);
+    \\var clrIn=document.getElementById("r-cl");
+    \\if(clrIn)clrIn.addEventListener("input",drawClr);
+    \\function drawDrc(){while(gD.firstChild)gD.removeChild(gD.firstChild);
+    \\ var cb=document.getElementById("r-drc-show"); if(cb&&!cb.checked)return;
+    \\ (PCB.drc||[]).forEach(function(d){var cx=X(d.x),cy=Y(d.y);
+    \\   var t=el("title",{}); t.textContent=d.k+" — gap "+d.gap.toFixed(3)+" mm < "+d.clr+" mm";
+    \\   var c=el("circle",{cx:cx.toFixed(1),cy:cy.toFixed(1),r:8,fill:"none",stroke:"#ef4444","stroke-width":2}); c.appendChild(t);
+    \\   gD.appendChild(c);
+    \\   gD.appendChild(el("circle",{cx:cx.toFixed(1),cy:cy.toFixed(1),r:2.4,fill:"#ef4444"}));});}
+    \\var drcCb=document.getElementById("r-drc-show");
+    \\if(drcCb)drcCb.addEventListener("change",drawDrc);
+    \\var courtState=null;
+    \\function partByRef(ref){for(var i=0;i<P.length;i++)if(P[i].ref===ref)return P[i];return null;}
+    \\function gceil(v){return Math.ceil(v/G-1e-9)*G;}
+    \\function padExt(p){var hw=0,hh=0;p.pads.forEach(function(pd){
+    \\ hw=Math.max(hw,Math.abs(pd.x)+pd.w/2);hh=Math.max(hh,Math.abs(pd.y)+pd.h/2);});return {hw:hw,hh:hh};}
+    \\function courtDraw(p,hw,hh){var s=document.getElementById("court-svg");while(s.firstChild)s.removeChild(s.firstChild);
+    \\ var VB=260,VH=220,pd=28,sc=Math.min((VB-pd)/(2*hw),(VH-pd)/(2*hh)),cx=VB/2,cy=VH/2;
+    \\ s.appendChild(el("rect",{x:(cx-hw*sc).toFixed(1),y:(cy-hh*sc).toFixed(1),width:(2*hw*sc).toFixed(1),height:(2*hh*sc).toFixed(1),
+    \\   rx:3,fill:"none",stroke:p.kind=="hub"?"#3b82f6":"#94a3b8","stroke-width":1.4,"stroke-dasharray":"5 3"}));
+    \\ p.pads.forEach(function(pad){var pw=Math.max(pad.w*sc,2),ph=Math.max(pad.h*sc,2);
+    \\   s.appendChild(el("rect",{x:(cx+pad.x*sc-pw/2).toFixed(1),y:(cy+pad.y*sc-ph/2).toFixed(1),
+    \\     width:pw.toFixed(1),height:ph.toFixed(1),rx:1,fill:"#b08d57"}));});}
+    \\function courtRefresh(){if(!courtState)return;courtDraw(courtState.p,courtState.hw,courtState.hh);
+    \\ document.getElementById("court-full").textContent="full "+(2*courtState.hw).toFixed(1)+" × "+(2*courtState.hh).toFixed(1)+" mm";}
+    \\function openCourt(ref){var p=partByRef(ref);if(!p)return;var ext=padExt(p),cm=PCB.cmargin||0.15;
+    \\ var min={hw:gceil(ext.hw+cm),hh:gceil(ext.hh+cm)};
+    \\ courtState={p:p,fp:p.fp,hw:p.hw,hh:p.hh,min:min};
+    \\ document.getElementById("court-title").textContent=p.fp+"  ·  "+p.ref;
+    \\ var hwI=document.getElementById("court-hw"),hhI=document.getElementById("court-hh");
+    \\ var sv=document.getElementById("court-save"),note=document.getElementById("court-note"),msg=document.getElementById("court-msg");
+    \\ msg.textContent="";hwI.value=p.hw.toFixed(1);hhI.value=p.hh.toFixed(1);hwI.min=min.hw;hhI.min=min.hh;
+    \\ var fab=p.fb||!p.fp;sv.disabled=fab;hwI.disabled=fab;hhI.disabled=fab;
+    \\ note.textContent=fab?"Synthesized placeholder box (no footprint file) — courtyard can't be edited.":
+    \\  "Half-extents from the part centre; edges stay on the 0.2 mm grid. Saving rewrites lib/footprints/"+p.fp+".sexp and applies to every design using it.";
+    \\ courtRefresh();document.getElementById("court-modal").hidden=false;}
+    \\function courtClose(){document.getElementById("court-modal").hidden=true;courtState=null;}
+    \\document.querySelectorAll("[data-court-ref]").forEach(function(b){
+    \\ b.addEventListener("click",function(){openCourt(b.getAttribute("data-court-ref"));});});
+    \\var cxBtn=document.getElementById("court-x"),ccBtn=document.getElementById("court-cancel"),modalBg=document.getElementById("court-modal");
+    \\if(cxBtn)cxBtn.addEventListener("click",courtClose);
+    \\if(ccBtn)ccBtn.addEventListener("click",courtClose);
+    \\if(modalBg)modalBg.addEventListener("click",function(ev){if(ev.target===modalBg)courtClose();});
+    \\function courtInput(which){if(!courtState)return;var inp=document.getElementById(which=="hw"?"court-hw":"court-hh");
+    \\ var v=Math.round(parseFloat(inp.value)/G)*G;if(!(v>0))v=courtState.min[which];
+    \\ v=Math.max(v,courtState.min[which]);courtState[which]=v;inp.value=v.toFixed(1);courtRefresh();}
+    \\var hwI2=document.getElementById("court-hw"),hhI2=document.getElementById("court-hh");
+    \\if(hwI2)hwI2.addEventListener("change",function(){courtInput("hw");});
+    \\if(hhI2)hhI2.addEventListener("change",function(){courtInput("hh");});
+    \\var csv=document.getElementById("court-save");
+    \\if(csv)csv.addEventListener("click",function(){if(!courtState||!courtState.fp)return;
+    \\ var msg=document.getElementById("court-msg");msg.style.color="#64748b";msg.textContent="saving…";
+    \\ fetch("/api/courtyard/"+encodeURIComponent(PCB.name),{method:"POST",headers:{"Content-Type":"application/json"},
+    \\   body:JSON.stringify({fp:courtState.fp,hw:courtState.hw,hh:courtState.hh})})
+    \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
+    \\  .then(function(){msg.style.color="#16a34a";msg.textContent="saved ✓ — rebuilding";
+    \\    window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?regen=1";})
+    \\  .catch(function(){msg.style.color="#dc2626";msg.textContent="save failed";});});
+    \\var rgo=document.getElementById("r-go");
+    \\if(rgo)rgo.addEventListener("click",function(){var v=function(id){return encodeURIComponent(document.getElementById(id).value);};
+    \\ window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?route=1&track_width="+v("r-tw")+
+    \\  "&clearance="+v("r-cl")+"&via_drill="+v("r-vd")+"&via_dia="+v("r-va");});
+    \\rats(); score(); drawRoute(); drawClr(); drawDrc();
+    \\})();</script>
+;

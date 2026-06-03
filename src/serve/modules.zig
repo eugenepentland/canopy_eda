@@ -272,6 +272,9 @@ pub fn modulesListPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) H
             try w.writeAll("<a class=\"mod-card-link\" href=\"/modules/");
             try writeUrlEncoded(w, e.name);
             try w.writeAll("\">View schematic</a>");
+            try w.writeAll("<a class=\"mod-card-link\" href=\"/pcb-layout/");
+            try writeUrlEncoded(w, e.name);
+            try w.writeAll("\">PCB layout</a>");
             try w.writeAll("<button type=\"button\" class=\"copy-src-btn\" data-src=\"");
             try writeHtmlEscaped(w, e.name);
             try w.writeAll("\">Copy source</button>");
@@ -306,12 +309,15 @@ fn findSubBlockBlock(block: *const env_mod.DesignBlock, module_name: []const u8)
 /// `*Evaluator` that produced the block is returned alongside it because the
 /// block borrows the evaluator's arena — the caller must keep it alive until
 /// rendering is done.
-const ResolvedBlock = struct {
+pub const ResolvedBlock = struct {
     block: *env_mod.DesignBlock,
     eval: *Evaluator,
 };
 
-fn resolveModuleBlock(
+/// Resolve `module_name` to a renderable block (real usage in a design first,
+/// else a zero-arg instantiation). The returned `eval` owns the block's arena
+/// — the caller must `deinit` + `destroy` it once done. Null if unresolvable.
+pub fn resolveModuleBlock(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     module_name: []const u8,

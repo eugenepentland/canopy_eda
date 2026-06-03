@@ -22,6 +22,7 @@ const upload_datasheet = @import("serve/upload_datasheet.zig");
 const pdf_viewer = @import("serve/pdf_viewer.zig");
 const footprint_preview = @import("serve/footprint_preview.zig");
 const schematic_page = @import("serve/schematic_page.zig");
+const pcb_layout_page = @import("serve/pcb_layout_page.zig");
 const modules_page = @import("serve/modules.zig");
 const auth = @import("serve/auth.zig");
 const mcp = @import("serve/mcp.zig");
@@ -177,6 +178,9 @@ pub fn serve(
     router.get("/style.css", pages.cssPage, .{});
     router.get("/static/:name", static_assets.staticAsset, .{});
     router.get("/schematics/:name", schematic_page.schematicPage, .{});
+    router.get("/pcb-layout/:name", pcb_layout_page.pcbLayoutPage, .{});
+    router.post("/api/pcb-layout/:name", pcb_layout_page.savePcbLayoutApi, .{});
+    router.post("/api/courtyard/:name", pcb_layout_page.savePcbCourtyardApi, .{});
     router.get("/modules", modules_page.modulesListPage, .{});
     router.get("/modules/:name", modules_page.moduleViewPage, .{});
     router.get("/mcp-tools", mcp_docs.mcpDocsPage, .{});
