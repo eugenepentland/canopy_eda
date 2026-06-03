@@ -222,13 +222,25 @@ fn writeFileAll(path: []const u8, data: []const u8) !void {
 
 const MAX_FP_BYTES: usize = 1024 * 1024;
 
+/// Round a courtyard half-extent up so the *overall* dimension (2×) lands on
+/// the placement grid: full = ceil(2·half / GRID) · GRID, then halved. The
+/// epsilon keeps a box already on-grid from jumping to the next step. The
+/// pad-offset sizing mode uses this so a user-entered offset that yields, say,
+/// a 2.88 mm box rounds out to the next 0.2 mm step (3.0 mm) instead of sitting
+/// off-grid — the offset is treated as a *minimum* gap that grows to fit.
+fn gridCeilFull(half: f64) f64 {
+    const g = optimizer.GRID_MM;
+    return std.math.ceil(half * 2 / g - 1e-9) * g / 2;
+}
+
 /// POST /api/courtyard/:name — rewrite a footprint's courtyard. Two modes:
 ///   `{"fp":"c-0402","mode":"size","hw":1.2,"hh":0.8}` — hw/hh are the
 ///     *effective* courtyard half-extents (what the layout draws); we invert
 ///     the loader's air-gap margin so the written rect reloads to exactly those.
 ///   `{"fp":"c-0402","mode":"offset","offset":0.2}` — grow the courtyard a
-///     uniform gap beyond the pad bounding box; the rect is sized off the
-///     footprint's own pads and the optimizer margin stays out of the file.
+///     uniform gap beyond the pad bounding box, then round the overall box up
+///     to the next 0.2 mm grid step (see `gridCeilFull`). The rect is sized off
+///     the footprint's own pads and the optimizer margin stays out of the file.
 /// Mode defaults to "size" when absent. Then re-pack via `?regen=1`.
 pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
@@ -291,8 +303,10 @@ pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
             res.body = "footprint has no pads to offset from";
             return;
         }
-        rw = ehw + off;
-        rh = ehh + off;
+        // The offset is a minimum gap; round the overall box up to the next
+        // grid step so the courtyard edges stay on the 0.2 mm grid.
+        rw = gridCeilFull(ehw + off);
+        rh = gridCeilFull(ehh + off);
     } else {
         const margin = geometry.BBOX_MARGIN_MM;
         rw = @max(jsonNum(root.object.get("hw")) - margin, 0.05);
@@ -1293,7 +1307,7 @@ const BOARD_JS =
     \\ p.pads.forEach(function(pad){var pw=Math.max(pad.w*sc,2),ph=Math.max(pad.h*sc,2);
     \\   s.appendChild(el("rect",{x:(cx+pad.x*sc-pw/2).toFixed(1),y:(cy+pad.y*sc-ph/2).toFixed(1),
     \\     width:pw.toFixed(1),height:ph.toFixed(1),rx:1,fill:"#b08d57"}));});}
-    \\function courtBox(){var c=courtState;return c.mode=="offset"?{hw:c.ext.hw+c.offset,hh:c.ext.hh+c.offset}:{hw:c.hw,hh:c.hh};}
+    \\function courtBox(){var c=courtState;return c.mode=="offset"?{hw:gceil(2*(c.ext.hw+c.offset))/2,hh:gceil(2*(c.ext.hh+c.offset))/2}:{hw:c.hw,hh:c.hh};}
     \\function courtRefresh(){if(!courtState)return;var b=courtBox();courtDraw(courtState.p,b.hw,b.hh);
     \\ document.getElementById("court-full").textContent="full "+(2*b.hw).toFixed(2)+" × "+(2*b.hh).toFixed(2)+" mm";}
     \\function courtSetMode(m){if(!courtState)return;courtState.mode=m;
@@ -1311,8 +1325,9 @@ const BOARD_JS =
     \\ document.querySelectorAll("input[name=court-mode]").forEach(function(r){r.checked=(r.value=="size");r.disabled=fab||(r.value=="offset"&&noPads);});
     \\ courtSetMode("size");
     \\ note.textContent=fab?"Synthesized placeholder box (no footprint file) — courtyard can't be edited.":
-    \\  "Overall size sets the half-extents directly; Pad offset grows the courtyard a fixed gap "+
-    \\  "beyond the pad bounding box. Saving rewrites lib/footprints/"+p.fp+".sexp and applies to every design using it.";
+    \\  "Overall size sets the half-extents directly; Pad offset grows the courtyard at least the given gap "+
+    \\  "beyond the pad bounding box, rounding the overall box up to the next 0.2 mm step. "+
+    \\  "Saving rewrites lib/footprints/"+p.fp+".sexp and applies to every design using it.";
     \\ document.getElementById("court-modal").hidden=false;}
     \\function courtClose(){document.getElementById("court-modal").hidden=true;courtState=null;}
     \\document.querySelectorAll("[data-court-ref]").forEach(function(b){
