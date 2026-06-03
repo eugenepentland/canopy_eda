@@ -811,9 +811,14 @@ fn snapToGrid(parts: []Part) void {
     }
 }
 
-/// Round a length up to the next `GRID_MM` multiple.
+/// Round a length up to the next `GRID_MM` multiple. The `1e-9` slack keeps a
+/// length already on the grid from being bumped a whole step by float error —
+/// it matters when the input is constructed to land exactly on a grid line
+/// (e.g. the courtyard editor's offset mode stores `ceilToGrid(gap) - margin`,
+/// so `stored + margin` reloads back onto the grid). The editor mirrors this
+/// rule with its own `courtCeilGrid` so its preview matches what the placer draws.
 fn ceilToGrid(v: f64) f64 {
-    return @ceil(v / GRID_MM) * GRID_MM;
+    return @ceil(v / GRID_MM - 1e-9) * GRID_MM;
 }
 
 /// Extra clearance the final legalization leaves between courtyards, so the

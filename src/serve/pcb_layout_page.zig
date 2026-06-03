@@ -222,25 +222,25 @@ fn writeFileAll(path: []const u8, data: []const u8) !void {
 
 const MAX_FP_BYTES: usize = 1024 * 1024;
 
-/// Round a courtyard half-extent up so the *overall* dimension (2×) lands on
-/// the placement grid: full = ceil(2·half / GRID) · GRID, then halved. The
-/// epsilon keeps a box already on-grid from jumping to the next step. The
-/// pad-offset sizing mode uses this so a user-entered offset that yields, say,
-/// a 2.88 mm box rounds out to the next 0.2 mm step (3.0 mm) instead of sitting
-/// off-grid — the offset is treated as a *minimum* gap that grows to fit.
-fn gridCeilFull(half: f64) f64 {
+/// Round a courtyard half-extent up to the placement grid, the same rule the
+/// optimizer draws with (`optimizer.ceilToGrid`) and the modal preview mirrors
+/// (`gceil` in BOARD_JS). The `1e-9` slack stops a half-extent already on the
+/// grid from being bumped a whole step by float error — which matters because
+/// offset mode constructs a value designed to land exactly on a grid line.
+fn courtCeilGrid(v: f64) f64 {
     const g = optimizer.GRID_MM;
-    return std.math.ceil(half * 2 / g - 1e-9) * g / 2;
+    return std.math.ceil(v / g - 1e-9) * g;
 }
 
 /// POST /api/courtyard/:name — rewrite a footprint's courtyard. Two modes:
 ///   `{"fp":"c-0402","mode":"size","hw":1.2,"hh":0.8}` — hw/hh are the
 ///     *effective* courtyard half-extents (what the layout draws); we invert
 ///     the loader's air-gap margin so the written rect reloads to exactly those.
-///   `{"fp":"c-0402","mode":"offset","offset":0.2}` — grow the courtyard a
-///     uniform gap beyond the pad bounding box, then round the overall box up
-///     to the next 0.2 mm grid step (see `gridCeilFull`). The rect is sized off
-///     the footprint's own pads and the optimizer margin stays out of the file.
+///   `{"fp":"c-0402","mode":"offset","offset":0.2}` — the offset is the literal
+///     gap from the pad bounding box to the courtyard edge. Sized off the
+///     footprint's own pads, snapped to the placer grid, then (like "size") with
+///     the loader's air-margin stripped back out, so the drawn courtyard is
+///     exactly `pad-bbox + offset` on the grid — no extra margin on top.
 /// Mode defaults to "size" when absent. Then re-pack via `?regen=1`.
 pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
@@ -277,11 +277,11 @@ pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
         return;
     };
 
-    // Two ways to size the rect (see the doc comment). "offset" grows the
-    // courtyard a uniform gap beyond the pad bounding box, parsed from the
-    // footprint's own pads — the optimizer's air-gap margin is added back at
-    // load time, so it never lands in the stored rect. "size" (the default)
-    // carries the effective half-extents, so we strip that margin back out.
+    // Two ways to size the rect (see the doc comment). Both store an effective
+    // half-extent with the loader's air-gap margin stripped out, so geometry.load
+    // adds it back to exactly the intended courtyard. "offset" derives that
+    // effective extent from the footprint's own pads (pad-bbox + gap, snapped);
+    // "size" (the default) takes it straight from the hw/hh fields.
     const is_offset = blk: {
         const mv = root.object.get("mode") orelse break :blk false;
         if (mv != .string) break :blk false;
@@ -303,10 +303,14 @@ pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
             res.body = "footprint has no pads to offset from";
             return;
         }
-        // The offset is a minimum gap; round the overall box up to the next
-        // grid step so the courtyard edges stay on the 0.2 mm grid.
-        rw = gridCeilFull(ehw + off);
-        rh = gridCeilFull(ehh + off);
+        // The offset is the literal gap from the pad bounding box to the
+        // courtyard edge. Snap that target half-extent to the grid the placer
+        // draws on, then strip the loader's air-margin (geometry.load adds it
+        // back) so the rendered courtyard is exactly the grid-snapped gap — no
+        // extra margin stacked on top.
+        const margin = geometry.BBOX_MARGIN_MM;
+        rw = @max(courtCeilGrid(ehw + off) - margin, 0.05);
+        rh = @max(courtCeilGrid(ehh + off) - margin, 0.05);
     } else {
         const margin = geometry.BBOX_MARGIN_MM;
         rw = @max(jsonNum(root.object.get("hw")) - margin, 0.05);
@@ -1307,7 +1311,7 @@ const BOARD_JS =
     \\ p.pads.forEach(function(pad){var pw=Math.max(pad.w*sc,2),ph=Math.max(pad.h*sc,2);
     \\   s.appendChild(el("rect",{x:(cx+pad.x*sc-pw/2).toFixed(1),y:(cy+pad.y*sc-ph/2).toFixed(1),
     \\     width:pw.toFixed(1),height:ph.toFixed(1),rx:1,fill:"#b08d57"}));});}
-    \\function courtBox(){var c=courtState;return c.mode=="offset"?{hw:gceil(2*(c.ext.hw+c.offset))/2,hh:gceil(2*(c.ext.hh+c.offset))/2}:{hw:c.hw,hh:c.hh};}
+    \\function courtBox(){var c=courtState;return c.mode=="offset"?{hw:gceil(c.ext.hw+c.offset),hh:gceil(c.ext.hh+c.offset)}:{hw:c.hw,hh:c.hh};}
     \\function courtRefresh(){if(!courtState)return;var b=courtBox();courtDraw(courtState.p,b.hw,b.hh);
     \\ document.getElementById("court-full").textContent="full "+(2*b.hw).toFixed(2)+" × "+(2*b.hh).toFixed(2)+" mm";}
     \\function courtSetMode(m){if(!courtState)return;courtState.mode=m;
@@ -1325,8 +1329,8 @@ const BOARD_JS =
     \\ document.querySelectorAll("input[name=court-mode]").forEach(function(r){r.checked=(r.value=="size");r.disabled=fab||(r.value=="offset"&&noPads);});
     \\ courtSetMode("size");
     \\ note.textContent=fab?"Synthesized placeholder box (no footprint file) — courtyard can't be edited.":
-    \\  "Overall size sets the half-extents directly; Pad offset grows the courtyard at least the given gap "+
-    \\  "beyond the pad bounding box, rounding the overall box up to the next 0.2 mm step. "+
+    \\  "Overall size sets the half-extents directly; Pad offset puts the courtyard edge that gap "+
+    \\  "outside the pad bounding box, snapped to the 0.2 mm grid. "+
     \\  "Saving rewrites lib/footprints/"+p.fp+".sexp and applies to every design using it.";
     \\ document.getElementById("court-modal").hidden=false;}
     \\function courtClose(){document.getElementById("court-modal").hidden=true;courtState=null;}
