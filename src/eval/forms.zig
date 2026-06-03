@@ -118,6 +118,7 @@ pub const ScopeForm = enum {
     function,
     stub,
     layout,
+    placement_order,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -155,6 +156,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "function", .function },
     .{ "stub", .stub },
     .{ "layout", .layout },
+    .{ "placement-order", .placement_order },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -446,6 +448,10 @@ pub const scope_form_docs = blk: {
     t[@intFromEnum(ScopeForm.layout)] = .{ .scope = tl, .doc = .{
         .syntax = "(layout (anchor \"name\") (place \"name\" (right-of|left-of|above|below \"ref\"))…)",
         .summary = "Declare a Mermaid-style free-floating block-diagram layout by positioning blocks relative to one another.",
+    } };
+    t[@intFromEnum(ScopeForm.placement_order)] = .{ .scope = tl, .doc = .{
+        .syntax = "(placement-order \"HUB\" \"REF\"… | (near <pin> \"REF\")…)",
+        .summary = "Order the passives around a hub for PCB auto-placement (first = highest priority); (near …) also pins which hub pad a cap's loop targets.",
     } };
     break :blk t;
 };

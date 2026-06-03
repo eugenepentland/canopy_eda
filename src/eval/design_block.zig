@@ -68,6 +68,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var test_points: std.ArrayListUnmanaged(env_mod.TestPoint) = .empty;
     var functions: std.ArrayListUnmanaged(env_mod.FunctionGroup) = .empty;
     var parts: std.ArrayListUnmanaged(env_mod.PlaceholderPart) = .empty;
+    var placement_orders: std.ArrayListUnmanaged(env_mod.PlacementOrder) = .empty;
     var layout_spec: env_mod.LayoutSpec = .{};
     var derating: ?f64 = null;
     var kicad_pcb_path: ?[]const u8 = null;
@@ -161,6 +162,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
                 try parts.append(self.allocator, p.part);
             },
             .layout => layout_spec = try parseLayout(self, form_children),
+            .placement_order => try parsePlacementOrder(self, form_children, &placement_orders),
             // Section-only forms are silently ignored at the top level —
             // a design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract.
@@ -200,6 +202,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .functions = functions.toOwnedSlice(self.allocator) catch &.{},
         .parts = parts.toOwnedSlice(self.allocator) catch &.{},
         .layout = layout_spec,
+        .placement_order = placement_orders.toOwnedSlice(self.allocator) catch &.{},
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -683,7 +686,7 @@ fn evalSection(
             // `processSharedSectionForm`; top-level-only forms are
             // silently ignored inside a section body.
             .status, .description, .note, .port, .protocol, .calc => {},
-            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function, .stub, .layout => {},
+            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function, .stub, .layout, .placement_order => {},
         }
     }
 
@@ -1131,6 +1134,42 @@ fn parseDesignDoc(
             .mpn = mpn,
         }) catch return EvalError.OutOfMemory;
     }
+}
+
+/// Parse a top-level `(placement-order <hub> …)` form into a `PlacementOrder`.
+/// `<hub>` is the IC the passives are ordered around; each following entry is
+/// either a bare ref-des (priority by list position) or a `(near <pin> <ref>)`
+/// long form that *also* pins the exact hub pad the cap's loop should target.
+/// Index 0 of `entries` is the highest priority.
+fn parsePlacementOrder(
+    self: *Evaluator,
+    form_children: []const Node,
+    out: *std.ArrayListUnmanaged(env_mod.PlacementOrder),
+) EvalError!void {
+    if (form_children.len < 2) return;
+    const hub = form_children[1].asString() orelse form_children[1].asAtom() orelse return;
+    var entries: std.ArrayListUnmanaged(env_mod.PlacementEntry) = .empty;
+    for (form_children[2..]) |child| {
+        if (child.asList()) |cl| {
+            // (near <pin> <ref>) — pin id may be a bare int (`(near 1 …)`), an
+            // atom, or a string; `tokenText` renders all three to the decimal
+            // string footprint pad numbers use.
+            if (cl.len < 3) continue;
+            const head = cl[0].asAtom() orelse continue;
+            if (!std.mem.eql(u8, head, "near")) continue;
+            const pin = cl[1].tokenText(self.allocator) orelse continue;
+            const ref = cl[2].asText() orelse continue;
+            entries.append(self.allocator, .{ .ref = ref, .pin = pin }) catch return EvalError.OutOfMemory;
+        } else {
+            // Bare ref-des: priority by position, geometric pin choice.
+            const ref = child.asString() orelse child.asAtom() orelse continue;
+            entries.append(self.allocator, .{ .ref = ref }) catch return EvalError.OutOfMemory;
+        }
+    }
+    out.append(self.allocator, .{
+        .hub = hub,
+        .entries = entries.toOwnedSlice(self.allocator) catch &.{},
+    }) catch return EvalError.OutOfMemory;
 }
 
 /// The product of evaluating one `(stub …)` form: the metadata record plus a

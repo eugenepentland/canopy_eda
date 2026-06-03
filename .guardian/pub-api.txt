@@ -177,6 +177,8 @@ src/eval/env.zig::PlaceConstraint struct_
 src/eval/env.zig::PlaceRel enum_
 src/eval/env.zig::PlaceholderPart struct_
 src/eval/env.zig::Placement struct_
+src/eval/env.zig::PlacementEntry struct_
+src/eval/env.zig::PlacementOrder struct_
 src/eval/env.zig::Port struct_
 src/eval/env.zig::PortDirection enum_
 src/eval/env.zig::PowerDomain struct_
@@ -374,6 +376,7 @@ src/placement/geometry.zig::SilkCircle struct_
 src/placement/geometry.zig::SilkLine struct_
 src/placement/geometry.zig::load fn
 src/placement/optimizer.zig::BLOCK_PENALTY_MM value
+src/placement/optimizer.zig::Breakdown struct_
 src/placement/optimizer.zig::GRID_MM value
 src/placement/optimizer.zig::Link struct_
 src/placement/optimizer.zig::Loop struct_
@@ -386,8 +389,10 @@ src/placement/optimizer.zig::RatKind enum_
 src/placement/optimizer.zig::RefPose struct_
 src/placement/optimizer.zig::Score struct_
 src/placement/optimizer.zig::Stub struct_
+src/placement/optimizer.zig::scorePoses fn
 src/placement/optimizer.zig::solve fn
 src/placement/optimizer.zig::worldPadCenter fn
+src/placement/router.zig::LoopRouter struct_
 src/placement/router.zig::PadObs struct_
 src/placement/router.zig::RouteParams struct_
 src/placement/router.zig::RouteResult struct_
@@ -733,7 +738,9 @@ src/serve/passwords.zig::purge fn
 src/serve/passwords.zig::set fn
 src/serve/passwords.zig::verify fn
 src/serve/pcb_layout_page.zig::HandlerError value
+src/serve/pcb_layout_page.zig::pcbLayoutJsonApi fn
 src/serve/pcb_layout_page.zig::pcbLayoutPage fn
+src/serve/pcb_layout_page.zig::pcbScoreApi fn
 src/serve/pcb_layout_page.zig::savePcbCourtyardApi fn
 src/serve/pcb_layout_page.zig::savePcbLayoutApi fn
 src/serve/pdf_viewer.zig::HandlerError value

@@ -177,6 +177,9 @@ pub fn collectInstances(
         try list.append(allocator, .{
             .ref_des = ref,
             .component = inst.component,
+            .symbol = inst.symbol,
+            .pinout = inst.pinout,
+            .origin_key = inst.origin_key,
             .value = inst.value,
             .footprint = inst.footprint,
             .properties = inst.properties,

@@ -79,6 +79,18 @@ pub fn uuidFromId(allocator: std.mem.Allocator, id: []const u8) std.mem.Allocato
 pub const FlatInstance = struct {
     ref_des: []const u8,
     component: []const u8,
+    /// Pinout lookup keys (`lib/pinouts/<key>.sexp`), carried from the source
+    /// instance so post-flatten consumers — e.g. the placement optimizer's
+    /// supply-pin detection — can resolve pin functions. Default "" so the
+    /// netlist/export paths that build `FlatInstance` literals may omit them.
+    symbol: []const u8 = "",
+    pinout: []const u8 = "",
+    /// The instance's stable source name (the first arg of `(instance …)`),
+    /// carried through ref-des renumbering. Lets post-flatten consumers — e.g.
+    /// the placement optimizer's `(placement-order …)` resolution — match a part
+    /// by the name the design author wrote, not its volatile auto-assigned
+    /// ref-des. Default "" so literal builders may omit it.
+    origin_key: []const u8 = "",
     value: []const u8,
     footprint: []const u8,
     properties: []const Property,

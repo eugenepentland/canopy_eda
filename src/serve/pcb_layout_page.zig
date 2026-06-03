@@ -44,6 +44,11 @@ const SavedPos = struct { x: f64, y: f64, rot: f64 };
 
 /// JSON key prefix shared by every `{"ref": …}` record we emit.
 const REF_OPEN = "{\"ref\":";
+/// JSON key + open bracket shared by the layout/cache/export part arrays.
+const PARTS_OPEN = "\"parts\":[";
+/// Error bodies shared across the layout handlers.
+const NO_BLOCK_MSG = "No design or module by that name";
+const BAD_JSON_MSG = "bad json";
 
 /// GET /pcb-layout/:name — evaluate the design, run the optimizer, and return
 /// the interactive (drag + live-score) inline-SVG preview with a sidebar.
@@ -65,7 +70,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     };
     const block: *env_mod.DesignBlock = resolveBlock(ctx, name, &eval, &module_res) orelse {
         res.status = 500;
-        res.body = "No design or module by that name";
+        res.body = NO_BLOCK_MSG;
         return;
     };
 
@@ -121,7 +126,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         .{ view.width, view.height, view.width, view.height },
     );
     try w.writeAll(COURTYARD_MODAL);
-    try writePcbData(w, ctx.allocator, placement, view, name, saved, routed, ro.params.clearance, violations);
+    try writePcbData(w, ctx.allocator, placement, shown, view, name, saved, routed, ro.params.clearance, violations);
     try w.writeAll(BOARD_JS);
     try w.writeAll("</main></div></body></html>");
 
@@ -153,6 +158,162 @@ fn resolveBlock(
     return null;
 }
 
+/// GET /api/pcb-layout/:name — export the solved placement as JSON: per-part
+/// positions plus the full objective breakdown. The on-screen score bar only
+/// shows HPWL + *raw* loop length; this also surfaces the value-weighted loop,
+/// isolation, and alignment terms the optimizer actually minimises, so a layout
+/// that looks worse on the visible metric but wins on the true objective can be
+/// told apart. Honours the same ?regen / tuning query as the page.
+pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |mr| {
+        mr.eval.deinit();
+        ctx.allocator.destroy(mr.eval);
+    };
+    const block: *env_mod.DesignBlock = resolveBlock(ctx, name, &eval, &module_res) orelse {
+        res.status = 500;
+        res.body = NO_BLOCK_MSG;
+        return;
+    };
+
+    const tune = parseTuning(req);
+    const cached = if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
+    const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params) catch {
+        res.status = 500;
+        res.body = "Placement error";
+        return;
+    };
+    if (placement.generated) writeAutoCache(ctx.allocator, ctx.project_dir, name, placement, tune.params);
+    const shown = if (tune.tuned) tune.params else (readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{});
+
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    try writePlacementJson(&aw.writer, placement, shown, name);
+    res.content_type = .JSON;
+    res.body = aw.written();
+}
+
+/// Serialize a placement for the JSON export: name, generated flag, the steering
+/// weights, the visible `score`, the full objective `breakdown` (raw terms plus
+/// their weighted contributions and the summed objective), the bounding box, and
+/// each part's `ref/kind/x/y/rot/hw/hh`.
+fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimizer.Params, name: []const u8) std.Io.Writer.Error!void {
+    const b = p.breakdown;
+    try w.writeAll("{\"name\":");
+    try writeJsonStr(w, name);
+    try w.print(",\"generated\":{s},", .{if (p.generated) "true" else "false"});
+    try w.print("\"params\":{{\"loop_w\":{d},\"w_isolate\":{d},\"w_align\":{d},\"cap_w_max\":{d},\"grid\":{s}}},", .{
+        params.loop_w, params.w_isolate, params.w_align, params.cap_w_max, if (params.grid_courtyards) "true" else "false",
+    });
+    try w.print("\"score\":{{\"hpwl_mm\":{d},\"loop_mm\":{d},\"loop_caps\":{d}}},", .{ p.score.hpwl_mm, p.score.loop_mm, p.score.loop_caps });
+    try w.writeAll("\"breakdown\":");
+    try writeBreakdownJson(w, b, params);
+    try w.print(",\"bbox\":{{\"minx\":{d},\"miny\":{d},\"maxx\":{d},\"maxy\":{d}}},", .{ p.minx, p.miny, p.maxx, p.maxy });
+    try w.writeAll(PARTS_OPEN);
+    for (p.parts, 0..) |pt, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"ref\":");
+        try writeJsonStr(w, pt.ref_des);
+        try w.print(",\"kind\":\"{s}\",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"fallback\":{s}}}", .{
+            if (pt.kind == .hub) "hub" else "passive",
+            pt.x,
+            pt.y,
+            pt.rot,
+            pt.hw,
+            pt.hh,
+            if (pt.fallback) "true" else "false",
+        });
+    }
+    try w.writeAll("]}");
+}
+
+/// Emit the objective `breakdown` as a JSON object: the raw terms, each term's
+/// weighted contribution, and the summed `objective`. Shared by the GET export
+/// and the POST score endpoint so both report the same shape.
+fn writeBreakdownJson(w: *std.Io.Writer, b: optimizer.Breakdown, params: optimizer.Params) std.Io.Writer.Error!void {
+    try w.print("{{\"hpwl\":{d},\"loop_raw\":{d},\"loop_weighted\":{d},\"isolation\":{d},\"alignment\":{d},", .{
+        b.hpwl, b.loop_raw, b.loop_weighted, b.isolation, b.alignment,
+    });
+    try w.print("\"loop_term\":{d},\"isolation_term\":{d},\"alignment_term\":{d},\"objective\":{d}}}", .{
+        params.loop_w * b.loop_weighted, params.w_isolate * b.isolation, params.w_align * b.alignment, b.objective,
+    });
+}
+
+/// POST /api/pcb-score/:name — score an arbitrary hand layout *on the server*,
+/// reusing the optimizer's own objective code (no metric duplicated in JS). Body
+/// is the same `{"parts":[{ref,x,y,rot}, …]}` the save endpoint takes; returns
+/// the full breakdown for those exact positions. Honours the ?tuning query.
+pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
+        res.status = 400;
+        res.body = BAD_JSON_MSG;
+        return;
+    };
+    if (root != .object) {
+        res.status = 400;
+        return;
+    }
+    const parts_v = root.object.get("parts") orelse {
+        res.status = 400;
+        return;
+    };
+    if (parts_v != .array) {
+        res.status = 400;
+        return;
+    }
+    var poses: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
+    for (parts_v.array.items) |it| {
+        if (it != .object) continue;
+        const ref = it.object.get("ref") orelse continue;
+        if (ref != .string) continue;
+        try poses.append(ctx.allocator, .{
+            .ref = ref.string,
+            .x = jsonNum(it.object.get("x")),
+            .y = jsonNum(it.object.get("y")),
+            .rot = jsonNum(it.object.get("rot")),
+        });
+    }
+
+    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |mr| {
+        mr.eval.deinit();
+        ctx.allocator.destroy(mr.eval);
+    };
+    const block: *env_mod.DesignBlock = resolveBlock(ctx, name, &eval, &module_res) orelse {
+        res.status = 500;
+        res.body = NO_BLOCK_MSG;
+        return;
+    };
+
+    const tune = parseTuning(req);
+    const bd = optimizer.scorePoses(ctx.allocator, block, ctx.project_dir, poses.items, tune.params) catch {
+        res.status = 500;
+        res.body = "score error";
+        return;
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    try writeBreakdownJson(&aw.writer, bd, tune.params);
+    res.content_type = .JSON;
+    res.body = aw.written();
+}
+
 /// POST /api/pcb-layout/:name — persist a hand placement to the design's
 /// `.placement.json` sidecar. Body: `{"parts":[{"ref","x","y","rot"}, …]}`.
 pub fn savePcbLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
@@ -167,7 +328,7 @@ pub fn savePcbLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     };
     const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
         res.status = 400;
-        res.body = "bad json";
+        res.body = BAD_JSON_MSG;
         return;
     };
     if (root != .object) {
@@ -250,7 +411,7 @@ pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
     };
     const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
         res.status = 400;
-        res.body = "bad json";
+        res.body = BAD_JSON_MSG;
         return;
     };
     if (root != .object) {
@@ -452,7 +613,7 @@ fn writeCacheJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimizer.P
         params.loop_w,                                   params.w_isolate, params.w_align, params.cap_w_max,
         if (params.grid_courtyards) "true" else "false",
     });
-    try w.writeAll("\"parts\":[");
+    try w.writeAll(PARTS_OPEN);
     for (p.parts, 0..) |pt, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll(REF_OPEN);
@@ -552,14 +713,29 @@ const View = struct {
 
 fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, has_saved: bool, name: []const u8) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-bar\">");
-    try w.print("<span class=\"score\" id=\"sc-hpwl\">HPWL {d:.1} mm</span>", .{p.score.hpwl_mm});
+    // The weighted objective the optimizer actually minimises, then its terms.
+    // All filled/updated by showScore() — server-computed, never re-derived in JS.
+    try w.writeAll("<span class=\"score\" id=\"sc-obj\" title=\"weighted objective the optimizer minimizes\">objective ");
+    try w.print("{d:.1}</span>", .{p.breakdown.objective});
+    try w.writeAll("<span class=\"delta\" id=\"sc-obj-d\"></span>");
+    try w.print("<span class=\"score sc-sub\" id=\"sc-hpwl\" title=\"signal half-perimeter wirelength (mm)\">HPWL {d:.1}</span>", .{p.breakdown.hpwl});
     try w.writeAll("<span class=\"delta\" id=\"sc-hpwl-d\"></span>");
-    try w.print("<span class=\"score\" id=\"sc-loop\">loop {d:.1} mm · {d} cap(s)</span>", .{ p.score.loop_mm, p.score.loop_caps });
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-loop\" title=\"weighted decoupling-loop term (loop_w × value-weighted loop length)\">loop …</span>");
     try w.writeAll("<span class=\"delta\" id=\"sc-loop-d\"></span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-align\" title=\"row/column alignment term (w_align × penalty)\">align …</span>");
+    try w.writeAll("<span class=\"delta\" id=\"sc-align-d\"></span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-iso\" title=\"sensitive↔aggressor isolation term (w_isolate × penalty)\">iso …</span>");
+    try w.writeAll("<span class=\"delta\" id=\"sc-iso-d\"></span>");
+    try w.writeAll("<button class=\"btn\" id=\"pcb-score\" title=\"Recompute the objective on the server for the current positions\">Score</button>");
     // Stored layout is reused on load; this re-runs the optimizer and overwrites it.
     try w.writeAll("<a class=\"btn\" href=\"/pcb-layout/");
     try writeAttr(w, name);
     try w.writeAll("?regen=1\" title=\"Re-run the optimizer and store the result\">Regenerate</a>");
+    // Export the solved positions + full score breakdown (incl. the loop/
+    // isolation/alignment terms the bar above hides) for offline inspection.
+    try w.writeAll("<a class=\"btn\" href=\"/api/pcb-layout/");
+    try writeAttr(w, name);
+    try w.writeAll("\" target=\"_blank\" title=\"Download positions + full score breakdown as JSON\">Export JSON</a>");
     try w.writeAll("<button class=\"btn\" id=\"pcb-save\">Save layout</button>");
     try w.writeAll("<button class=\"btn\" id=\"pcb-load\"");
     if (!has_saved) try w.writeAll(" disabled");
@@ -689,6 +865,7 @@ fn writePcbData(
     w: *std.Io.Writer,
     alloc: std.mem.Allocator,
     p: optimizer.Placement,
+    params: optimizer.Params,
     v: View,
     name: []const u8,
     saved: ?std.StringHashMap(SavedPos),
@@ -715,14 +892,17 @@ fn writePcbData(
     try w.print("\"margin\":{d},\"grid\":{d},\"w\":{d},\"h\":{d},", .{ MARGIN_MM, optimizer.GRID_MM, v.width, v.height });
     try w.print("\"blockPen\":{d},", .{optimizer.BLOCK_PENALTY_MM});
     try w.print("\"clr\":{d},\"cmargin\":{d},", .{ clearance, geometry.BBOX_MARGIN_MM });
-    try w.print("\"auto\":{{\"hpwl\":{d},\"loop\":{d},\"caps\":{d}}},", .{ p.score.hpwl_mm, p.score.loop_mm, p.score.loop_caps });
-    try w.writeAll("\"name\":");
+    // Server-computed objective breakdown of the layout on screen — the baseline
+    // the live score deltas against. Same shape the /api/pcb-score endpoint returns.
+    try w.print("\"caps\":{d},\"auto\":", .{p.score.loop_caps});
+    try writeBreakdownJson(w, p.breakdown, params);
+    try w.writeAll(",\"name\":");
     try writeJsonStr(w, name);
     try w.writeAll(",");
     try writeSavedJson(w, saved);
 
     // Parts.
-    try w.writeAll("\"parts\":[");
+    try w.writeAll(PARTS_OPEN);
     for (p.parts, 0..) |pt, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll(REF_OPEN);
@@ -1011,6 +1191,7 @@ const PAGE_CSS =
     \\.pcb-sub{font-size:13px;font-weight:400;color:#94a3b8}
     \\.pcb-bar{display:flex;gap:10px;align-items:center;margin:8px 0;flex-wrap:wrap}
     \\.pcb-bar .score{font-weight:600;color:#1e293b;background:#f1f5f9;border-radius:4px;padding:2px 8px}
+    \\.pcb-bar .sc-sub{font-weight:500;font-size:12px;color:#475569;background:#f8fafc}
     \\.pcb-bar .delta{font-size:12px;font-weight:600;min-width:34px}
     \\.pcb-bar .delta.up{color:#dc2626}
     \\.pcb-bar .delta.down{color:#16a34a}
@@ -1181,21 +1362,28 @@ const BOARD_JS =
     \\ if(Math.abs(d)<0.05){e.textContent="=";e.className="delta";}
     \\ else{e.textContent=(d>0?"+":"")+d.toFixed(1);e.className="delta "+(d>0?"up":"down");}
     \\}
-    \\function score(){
-    \\ var hpwl=0;
-    \\ PCB.nets.forEach(function(net){
-    \\   if(net.length<2)return;
-    \\   var mnx=1e9,mny=1e9,mxx=-1e9,mxy=-1e9;
-    \\   net.forEach(function(q){var w=wpt(q.p,q.x,q.y);
-    \\     if(w.x<mnx)mnx=w.x;if(w.y<mny)mny=w.y;if(w.x>mxx)mxx=w.x;if(w.y>mxy)mxy=w.y;});
-    \\   hpwl+=(mxx-mnx)+(mxy-mny);});
-    \\ var loop=0;
-    \\ PCB.loops.forEach(function(L){
-    \\   loop+=nhub(wrect(L.cap,L.cp),L.cap,L.hub,L.hp).gap;
-    \\   loop+=nhub(wrect(L.cap,L.cg),L.cap,L.hub,L.hg).gap;});
-    \\ document.getElementById("sc-hpwl").textContent="HPWL "+hpwl.toFixed(1)+" mm";
-    \\ document.getElementById("sc-loop").textContent="loop "+loop.toFixed(1)+" mm · "+PCB.loops.length+" cap(s)";
-    \\ delta("sc-hpwl-d",hpwl,PCB.auto.hpwl); delta("sc-loop-d",loop,PCB.auto.loop);
+    \\function setSc(id,t){document.getElementById(id).textContent=t;}
+    \\function showScore(b){
+    \\ setSc("sc-obj","objective "+b.objective.toFixed(1));
+    \\ setSc("sc-hpwl","HPWL "+b.hpwl.toFixed(1));
+    \\ setSc("sc-loop","loop "+b.loop_term.toFixed(1)+" · "+PCB.caps+" cap");
+    \\ setSc("sc-align","align "+b.alignment_term.toFixed(1));
+    \\ setSc("sc-iso","iso "+b.isolation_term.toFixed(1));
+    \\ delta("sc-obj-d",b.objective,PCB.auto.objective);
+    \\ delta("sc-hpwl-d",b.hpwl,PCB.auto.hpwl);
+    \\ delta("sc-loop-d",b.loop_term,PCB.auto.loop_term);
+    \\ delta("sc-align-d",b.alignment_term,PCB.auto.alignment_term);
+    \\ delta("sc-iso-d",b.isolation_term,PCB.auto.isolation_term);
+    \\}
+    \\var scoreReq=0;
+    \\function fetchScore(){
+    \\ setSc("sc-obj","objective …");var seq=++scoreReq;
+    \\ var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};})};
+    \\ fetch("/api/pcb-score/"+encodeURIComponent(PCB.name),{method:"POST",
+    \\   headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
+    \\  .then(function(r){return r.json();})
+    \\  .then(function(b){if(seq===scoreReq)showScore(b);})
+    \\  .catch(function(){if(seq===scoreReq)setSc("sc-obj","objective —");});
     \\}
     \\function mm(ev){var r=svg.getBoundingClientRect(),vb=svg.viewBox.baseVal;
     \\ var sx=vb.x+(ev.clientX-r.left)*(vb.width/r.width);
@@ -1209,17 +1397,18 @@ const BOARD_JS =
     \\   drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});
     \\ g.addEventListener("pointermove",function(ev){if(!drag||drag.i!==i)return;var m=mm(ev);
     \\   P[i].x=Math.round((m.x+drag.ox)/G)*G;P[i].y=Math.round((m.y+drag.oy)/G)*G;
-    \\   setT(i);rats();score();drawClr();});
-    \\ g.addEventListener("pointerup",function(ev){drag=null;g.style.cursor="grab";
-    \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}});
+    \\   drag.moved=true;setT(i);rats();drawClr();});
+    \\ g.addEventListener("pointerup",function(ev){var mv=drag&&drag.moved;drag=null;g.style.cursor="grab";
+    \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(mv)fetchScore();});
     \\});
     \\document.addEventListener("keydown",function(ev){
     \\ if((ev.key=="r"||ev.key=="R")&&cur>=0){ev.preventDefault();
     \\   P[cur].rot=((((P[cur].rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;
-    \\   setT(cur);rats();score();drawClr();}});
-    \\function applyAll(){P.forEach(function(p,i){setT(i);});rats();score();drawClr();}
+    \\   setT(cur);rats();fetchScore();drawClr();}});
+    \\function applyAll(){P.forEach(function(p,i){setT(i);});rats();fetchScore();drawClr();}
     \\document.getElementById("pcb-reset").addEventListener("click",function(){
     \\ P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;});applyAll();});
+    \\document.getElementById("pcb-score").addEventListener("click",fetchScore);
     \\document.getElementById("t-apply").addEventListener("click",function(){
     \\ var v=function(id){return encodeURIComponent(document.getElementById(id).value);};
     \\ var g=document.getElementById("t-grid").checked?1:0;
@@ -1362,6 +1551,6 @@ const BOARD_JS =
     \\if(rgo)rgo.addEventListener("click",function(){var v=function(id){return encodeURIComponent(document.getElementById(id).value);};
     \\ window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?route=1&track_width="+v("r-tw")+
     \\  "&clearance="+v("r-cl")+"&via_drill="+v("r-vd")+"&via_dia="+v("r-va");});
-    \\rats(); score(); drawRoute(); drawClr(); drawDrc();
+    \\rats(); showScore(PCB.auto); drawRoute(); drawClr(); drawDrc();
     \\})();</script>
 ;

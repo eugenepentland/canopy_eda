@@ -96,6 +96,7 @@ Public functions: route
 
 - maze-routes a two-pad net into connected track segments
 - routes corners as 45° diagonals rather than 90° bends
+- LoopRouter measures a real per-leg trace length that detours foreign pads
 
 ## placement/drc
 
