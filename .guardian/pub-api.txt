@@ -737,9 +737,10 @@ src/serve/passwords.zig::purge fn
 src/serve/passwords.zig::set fn
 src/serve/passwords.zig::verify fn
 src/serve/pcb_layout_page.zig::HandlerError value
+src/serve/pcb_layout_page.zig::deleteNamedLayoutApi fn
 src/serve/pcb_layout_page.zig::pcbLayoutPage fn
+src/serve/pcb_layout_page.zig::saveNamedLayoutApi fn
 src/serve/pcb_layout_page.zig::savePcbCourtyardApi fn
-src/serve/pcb_layout_page.zig::savePcbLayoutApi fn
 src/serve/pdf_viewer.zig::HandlerError value
 src/serve/pdf_viewer.zig::pdfViewerPage fn
 src/serve/plugin_tokens.zig::Token struct_

@@ -12,6 +12,7 @@ const std = @import("std");
 const httpz = @import("httpz");
 const paths = @import("../paths.zig");
 const infra_fs = @import("../infra/fs.zig");
+const clock = @import("../infra/clock.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const env_mod = @import("../eval/env.zig");
 const optimizer = @import("../placement/optimizer.zig");
@@ -44,6 +45,40 @@ const SavedPos = struct { x: f64, y: f64, rot: f64 };
 
 /// JSON key prefix shared by every `{"ref": …}` record we emit.
 const REF_OPEN = "{\"ref\":";
+
+/// Success body returned by the mutating layout/courtyard endpoints.
+const OK_JSON_TRUE = "{\"ok\":true}";
+
+/// Sidecar holding every *named* saved layout for a design — manual snapshots
+/// the user named, plus an auto-recorded history of optimizer runs. Supersedes
+/// the single-slot `.placement.json` (migrated in on first read).
+const LAYOUTS_EXT = ".layouts.json";
+
+/// Layout `kind` tags. `manual` = a snapshot the user saved by name; `auto` =
+/// one recorded automatically each time the optimizer regenerated.
+const KIND_MANUAL = "manual";
+const KIND_AUTO = "auto";
+
+/// Cap on auto-recorded entries kept per design. On each record the oldest
+/// auto entries past this are pruned; manual snapshots are never auto-pruned.
+const MAX_AUTO_LAYOUTS: usize = 12;
+
+/// One placed part within a saved layout: ref-des + centre (mm) + rotation.
+const PartPose = struct { ref: []const u8, x: f64, y: f64, rot: f64 };
+
+/// HPWL + decoupling-loop score stored with a layout, so the list shows
+/// "better/worse" at a glance without re-running the optimizer.
+const LayoutScore = struct { hpwl: f64, loop: f64, caps: usize };
+
+/// A named saved layout: name, kind, capture time (unix s, 0 = unknown),
+/// optional score, and the placement itself (newest first within a file).
+const SavedLayout = struct {
+    name: []const u8,
+    kind: []const u8,
+    ts: i64,
+    score: ?LayoutScore,
+    parts: []const PartPose,
+};
 
 /// GET /pcb-layout/:name — evaluate the design, run the optimizer, and return
 /// the interactive (drag + live-score) inline-SVG preview with a sidebar.
@@ -80,8 +115,13 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     };
     // Persist the layout + its weights whenever the optimizer ran (miss /
     // stale / regen / tune), so later loads are instant and the controls show
-    // the weights that actually produced the layout on screen.
-    if (placement.generated) writeAutoCache(ctx.allocator, ctx.project_dir, name, placement, tune.params);
+    // the weights that actually produced the layout on screen. Each run is also
+    // appended to the named-layout history so the user can review whether the
+    // auto placement got better or worse over time.
+    if (placement.generated) {
+        writeAutoCache(ctx.allocator, ctx.project_dir, name, placement, tune.params);
+        recordAutoLayout(ctx.allocator, ctx.project_dir, name, placement);
+    }
     const shown = if (tune.tuned) tune.params else (readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{});
 
     // Routing runs only on demand (the Route button → ?route=1), on whatever
@@ -94,7 +134,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         &.{};
 
     const view = View.init(placement);
-    const saved = readSaved(ctx.allocator, ctx.project_dir, name);
+    const layouts = readLayouts(ctx.allocator, ctx.project_dir, name);
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     const w = &aw.writer;
@@ -112,7 +152,8 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     try writeSidebar(w, ctx.allocator, placement);
     try w.writeAll("<main class=\"pcb-main\">");
     try w.print("<h1>{s} — PCB Layout <span class=\"pcb-sub\">(force-directed · drag to edit)</span></h1>", .{block.name});
-    try writeScorebar(w, placement, saved != null, name);
+    try writeScorebar(w, placement, name);
+    try writeLayoutsPanel(w, layouts, .{ .hpwl = placement.score.hpwl_mm, .loop = placement.score.loop_mm, .caps = placement.score.loop_caps });
     try writeTuning(w, shown);
     try writeRoutePanel(w, ro.params, routed, violations.len);
     try writeLegend(w, placement);
@@ -121,7 +162,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         .{ view.width, view.height, view.width, view.height },
     );
     try w.writeAll(COURTYARD_MODAL);
-    try writePcbData(w, ctx.allocator, placement, view, name, saved, routed, ro.params.clearance, violations);
+    try writePcbData(w, ctx.allocator, placement, view, name, layouts, routed, ro.params.clearance, violations);
     try w.writeAll(BOARD_JS);
     try w.writeAll("</main></div></body></html>");
 
@@ -153,65 +194,103 @@ fn resolveBlock(
     return null;
 }
 
-/// POST /api/pcb-layout/:name — persist a hand placement to the design's
-/// `.placement.json` sidecar. Body: `{"parts":[{"ref","x","y","rot"}, …]}`.
-pub fn savePcbLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+/// POST /api/pcb-layouts/:name — save a named layout snapshot (kind "manual").
+/// Body: `{"name","hpwl","loop","caps","parts":[{"ref","x","y","rot"}, …]}`.
+/// Upserts by name (re-saving a name overwrites in place); a new name is
+/// prepended so the newest sits at the top of the list.
+pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
     };
+    const root = parseJsonObject(req, res) orelse return;
+    const nm_v = root.object.get("name") orelse {
+        res.status = 400;
+        res.body = "no name";
+        return;
+    };
+    if (nm_v != .string) {
+        res.status = 400;
+        return;
+    }
+    const nm = std.mem.trim(u8, nm_v.string, " \t\n\r");
+    if (nm.len == 0 or nm.len > 80) {
+        res.status = 400;
+        res.body = "bad name";
+        return;
+    }
+    const parts = parsePartPoses(req.arena, root.object.get("parts")) orelse {
+        res.status = 400;
+        res.body = "no parts";
+        return;
+    };
+    var score: ?LayoutScore = null;
+    if (root.object.get("hpwl")) |_| score = .{
+        .hpwl = jsonNum(root.object.get("hpwl")),
+        .loop = jsonNum(root.object.get("loop")),
+        .caps = @intFromFloat(@max(@floor(jsonNum(root.object.get("caps"))), 0)),
+    };
+
+    const entry = SavedLayout{ .name = nm, .kind = KIND_MANUAL, .ts = clock.timestamp(), .score = score, .parts = parts };
+    const existing = readLayouts(req.arena, ctx.project_dir, name);
+    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    var replaced = false;
+    for (existing) |L| {
+        if (!replaced and std.mem.eql(u8, L.name, nm)) {
+            try out.append(req.arena, entry);
+            replaced = true;
+        } else try out.append(req.arena, L);
+    }
+    if (!replaced) try out.insert(req.arena, 0, entry);
+    writeLayouts(req.arena, ctx.project_dir, name, out.items);
+    res.content_type = .JSON;
+    res.body = OK_JSON_TRUE;
+}
+
+/// POST /api/pcb-layouts/:name/delete — drop a named layout. Body: `{"name"}`.
+pub fn deleteNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const root = parseJsonObject(req, res) orelse return;
+    const nm_v = root.object.get("name") orelse {
+        res.status = 400;
+        return;
+    };
+    if (nm_v != .string) {
+        res.status = 400;
+        return;
+    }
+    const existing = readLayouts(req.arena, ctx.project_dir, name);
+    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    for (existing) |L| {
+        if (std.mem.eql(u8, L.name, nm_v.string)) continue;
+        try out.append(req.arena, L);
+    }
+    writeLayouts(req.arena, ctx.project_dir, name, out.items);
+    res.content_type = .JSON;
+    res.body = OK_JSON_TRUE;
+}
+
+/// Parse the request body as a JSON object, setting a 400 and returning null on
+/// any failure (missing body / malformed JSON / non-object root).
+fn parseJsonObject(req: *httpz.Request, res: *httpz.Response) ?std.json.Value {
     const body = req.body() orelse {
         res.status = 400;
         res.body = "no body";
-        return;
+        return null;
     };
     const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
         res.status = 400;
         res.body = "bad json";
-        return;
+        return null;
     };
     if (root != .object) {
         res.status = 400;
-        return;
+        return null;
     }
-    const parts = root.object.get("parts") orelse {
-        res.status = 400;
-        return;
-    };
-    if (parts != .array) {
-        res.status = 400;
-        return;
-    }
-
-    // Re-serialize a normalized record (defends against junk in the body).
-    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
-    const w = &aw.writer;
-    try w.writeAll("{\"parts\":[");
-    var first = true;
-    for (parts.array.items) |it| {
-        if (it != .object) continue;
-        const ref = it.object.get("ref") orelse continue;
-        if (ref != .string) continue;
-        if (!first) try w.writeAll(",");
-        first = false;
-        try w.writeAll(REF_OPEN);
-        try writeJsonStr(w, ref.string);
-        try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d}}}", .{ jsonNum(it.object.get("x")), jsonNum(it.object.get("y")), jsonNum(it.object.get("rot")) });
-    }
-    try w.writeAll("]}");
-
-    const path = paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, SAVED_EXT) catch {
-        res.status = 500;
-        return;
-    };
-    defer ctx.allocator.free(path);
-    writeFileAll(path, aw.written()) catch {
-        res.status = 500;
-        res.body = "write failed";
-        return;
-    };
-    res.content_type = .JSON;
-    res.body = "{\"ok\":true}";
+    return root;
 }
 
 fn writeFileAll(path: []const u8, data: []const u8) !void {
@@ -328,7 +407,7 @@ pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
         return;
     };
     res.content_type = .JSON;
-    res.body = "{\"ok\":true}";
+    res.body = OK_JSON_TRUE;
 }
 
 /// A footprint name must be a bare file stem — no path separators or `..`, so a
@@ -410,6 +489,199 @@ fn readSaved(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8
         }) catch return m;
     }
     return m;
+}
+
+/// Read every saved layout for `name` from its `.layouts.json` sidecar
+/// (newest first). When that file is absent, migrate the legacy single-slot
+/// `.placement.json` into a one-entry list so the historic hand placement is
+/// not lost. Returns an empty slice when neither exists or on parse failure;
+/// allocations live on `alloc` (request lifetime).
+fn readLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) []const SavedLayout {
+    if (paths.designSiblingPath(alloc, project_dir, name, LAYOUTS_EXT)) |path| {
+        defer alloc.free(path);
+        if (infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20)) |data| {
+            if (parseLayouts(alloc, data)) |list| return list;
+        } else |_| {}
+    } else |_| {}
+    return migrateSaved(alloc, project_dir, name);
+}
+
+/// Parse a `.layouts.json` body (`{"layouts":[…]}`) into a slice of
+/// `SavedLayout`. Each entry needs a `name`; `kind` defaults to auto, `score`
+/// is present only when an `hpwl` field is. Null on malformed top-level JSON.
+fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout {
+    const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{}) catch return null;
+    if (root != .object) return null;
+    const arr = root.object.get("layouts") orelse return null;
+    if (arr != .array) return null;
+    var list: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    for (arr.array.items) |it| {
+        if (it != .object) continue;
+        const nm = it.object.get("name") orelse continue;
+        if (nm != .string) continue;
+        const kind: []const u8 = blk: {
+            const k = it.object.get("kind") orelse break :blk KIND_AUTO;
+            break :blk if (k == .string and std.mem.eql(u8, k.string, KIND_MANUAL)) KIND_MANUAL else KIND_AUTO;
+        };
+        var score: ?LayoutScore = null;
+        if (it.object.get("hpwl")) |_| score = .{
+            .hpwl = jsonNum(it.object.get("hpwl")),
+            .loop = jsonNum(it.object.get("loop")),
+            .caps = @intFromFloat(@max(@floor(jsonNum(it.object.get("caps"))), 0)),
+        };
+        const parts = parsePartPoses(alloc, it.object.get("parts")) orelse &[_]PartPose{};
+        list.append(alloc, .{
+            .name = nm.string,
+            .kind = kind,
+            .ts = @intFromFloat(jsonNum(it.object.get("ts"))),
+            .score = score,
+            .parts = parts,
+        }) catch return list.items;
+    }
+    return list.toOwnedSlice(alloc) catch null;
+}
+
+/// Parse a `[{"ref","x","y","rot"}, …]` JSON array into `PartPose`s. Null when
+/// the value is missing or not an array; bad elements are skipped.
+fn parsePartPoses(alloc: std.mem.Allocator, v: ?std.json.Value) ?[]const PartPose {
+    const arr = v orelse return null;
+    if (arr != .array) return null;
+    var list: std.ArrayListUnmanaged(PartPose) = .empty;
+    for (arr.array.items) |it| {
+        if (it != .object) continue;
+        const ref = it.object.get("ref") orelse continue;
+        if (ref != .string) continue;
+        list.append(alloc, .{
+            .ref = ref.string,
+            .x = jsonNum(it.object.get("x")),
+            .y = jsonNum(it.object.get("y")),
+            .rot = jsonNum(it.object.get("rot")),
+        }) catch return list.items;
+    }
+    return list.toOwnedSlice(alloc) catch null;
+}
+
+/// Build a one-entry layout list from the legacy `.placement.json` slot (kind
+/// "manual", name "saved", no score). Empty slice when no legacy file exists.
+fn migrateSaved(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) []const SavedLayout {
+    const m = readSaved(alloc, project_dir, name) orelse return &[_]SavedLayout{};
+    var parts: std.ArrayListUnmanaged(PartPose) = .empty;
+    var it = m.iterator();
+    while (it.next()) |e| parts.append(alloc, .{
+        .ref = e.key_ptr.*,
+        .x = e.value_ptr.x,
+        .y = e.value_ptr.y,
+        .rot = e.value_ptr.rot,
+    }) catch break;
+    if (parts.items.len == 0) return &[_]SavedLayout{};
+    const one = alloc.alloc(SavedLayout, 1) catch return &[_]SavedLayout{};
+    one[0] = .{ .name = "saved", .kind = KIND_MANUAL, .ts = 0, .score = null, .parts = parts.items };
+    return one;
+}
+
+/// Persist the layout list to `.layouts.json`. Best-effort: a write failure
+/// just means the list reverts to what was last on disk.
+fn writeLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout) void {
+    const path = paths.designSiblingPath(alloc, project_dir, name, LAYOUTS_EXT) catch return;
+    defer alloc.free(path);
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    const w = &aw.writer;
+    writeLayoutsFileJson(w, layouts) catch return;
+    writeFileAll(path, aw.written()) catch return;
+}
+
+/// Serialize the layout list to the `.layouts.json` on-disk shape: score fields
+/// (hpwl/loop/caps) are flattened onto each entry and omitted when unscored.
+fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writer.Error!void {
+    try w.writeAll("{\"layouts\":[");
+    for (layouts, 0..) |L, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try writeJsonStr(w, L.name);
+        try w.writeAll(",\"kind\":");
+        try writeJsonStr(w, L.kind);
+        try w.print(",\"ts\":{d}", .{L.ts});
+        if (L.score) |s| try w.print(",\"hpwl\":{d},\"loop\":{d},\"caps\":{d}", .{ s.hpwl, s.loop, s.caps });
+        try w.writeAll(",\"parts\":[");
+        for (L.parts, 0..) |pt, j| {
+            if (j > 0) try w.writeAll(",");
+            try w.writeAll(REF_OPEN);
+            try writeJsonStr(w, pt.ref);
+            try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d}}}", .{ pt.x, pt.y, pt.rot });
+        }
+        try w.writeAll("]}");
+    }
+    try w.writeAll("]}");
+}
+
+/// Append an auto-recorded snapshot of the just-generated `placement` to the
+/// layout history. Skips when the newest entry is an identical auto run (same
+/// score + part count), then prunes auto entries past `MAX_AUTO_LAYOUTS`.
+fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, p: optimizer.Placement) void {
+    const existing = readLayouts(alloc, project_dir, name);
+    const score = LayoutScore{ .hpwl = p.score.hpwl_mm, .loop = p.score.loop_mm, .caps = p.score.loop_caps };
+    if (existing.len > 0 and std.mem.eql(u8, existing[0].kind, KIND_AUTO)) {
+        if (existing[0].score) |s0| {
+            if (existing[0].parts.len == p.parts.len and scoreApproxEq(s0, score)) return;
+        }
+    }
+    const parts = alloc.alloc(PartPose, p.parts.len) catch return;
+    for (p.parts, 0..) |pt, i| parts[i] = .{ .ref = pt.ref_des, .x = pt.x, .y = pt.y, .rot = pt.rot };
+    const now = clock.timestamp();
+    const entry = SavedLayout{
+        .name = fmtAutoName(alloc, now) catch return,
+        .kind = KIND_AUTO,
+        .ts = now,
+        .score = score,
+        .parts = parts,
+    };
+    // Newest first; keep every manual entry but only the most-recent autos.
+    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    out.append(alloc, entry) catch return;
+    var autos: usize = 1;
+    for (existing) |L| {
+        if (std.mem.eql(u8, L.kind, KIND_AUTO)) {
+            if (autos >= MAX_AUTO_LAYOUTS) continue;
+            autos += 1;
+        }
+        out.append(alloc, L) catch break;
+    }
+    writeLayouts(alloc, project_dir, name, out.items);
+}
+
+/// Two scores are "the same layout" for dedup when caps match and both
+/// continuous metrics agree to within 0.05 mm.
+fn scoreApproxEq(a: LayoutScore, b: LayoutScore) bool {
+    return a.caps == b.caps and @abs(a.hpwl - b.hpwl) < 0.05 and @abs(a.loop - b.loop) < 0.05;
+}
+
+/// Name for an auto-recorded entry: `auto · Mon D HH:MM:SS` (UTC). The seconds
+/// keep two same-minute regenerations distinct.
+fn fmtAutoName(alloc: std.mem.Allocator, ts: i64) std.mem.Allocator.Error![]const u8 {
+    const es = clock.epoch.EpochSeconds{ .secs = @intCast(ts) };
+    const ds = es.getDaySeconds();
+    const md = es.getEpochDay().calculateYearDay().calculateMonthDay();
+    return std.fmt.allocPrint(alloc, "auto · {s} {d} {d:0>2}:{d:0>2}:{d:0>2}", .{
+        monthAbbrev(md.month),   md.day_index + 1,          ds.getHoursIntoDay(),
+        ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
+    });
+}
+
+fn monthAbbrev(m: clock.epoch.Month) []const u8 {
+    return switch (m) {
+        .jan => "Jan",
+        .feb => "Feb",
+        .mar => "Mar",
+        .apr => "Apr",
+        .may => "May",
+        .jun => "Jun",
+        .jul => "Jul",
+        .aug => "Aug",
+        .sep => "Sep",
+        .oct => "Oct",
+        .nov => "Nov",
+        .dec => "Dec",
+    };
 }
 
 /// Read the `.autolayout.json` cache into a slice of `RefPose`, or null if
@@ -554,20 +826,18 @@ const View = struct {
 
 // ── Score bar + legend ───────────────────────────────────────────────────
 
-fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, has_saved: bool, name: []const u8) std.Io.Writer.Error!void {
+fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-bar\">");
     try w.print("<span class=\"score\" id=\"sc-hpwl\">HPWL {d:.1} mm</span>", .{p.score.hpwl_mm});
     try w.writeAll("<span class=\"delta\" id=\"sc-hpwl-d\"></span>");
     try w.print("<span class=\"score\" id=\"sc-loop\">loop {d:.1} mm · {d} cap(s)</span>", .{ p.score.loop_mm, p.score.loop_caps });
     try w.writeAll("<span class=\"delta\" id=\"sc-loop-d\"></span>");
-    // Stored layout is reused on load; this re-runs the optimizer and overwrites it.
+    // Stored layout is reused on load; this re-runs the optimizer, overwrites
+    // the cache, and records the result into the saved-layout history below.
     try w.writeAll("<a class=\"btn\" href=\"/pcb-layout/");
     try writeAttr(w, name);
-    try w.writeAll("?regen=1\" title=\"Re-run the optimizer and store the result\">Regenerate</a>");
-    try w.writeAll("<button class=\"btn\" id=\"pcb-save\">Save layout</button>");
-    try w.writeAll("<button class=\"btn\" id=\"pcb-load\"");
-    if (!has_saved) try w.writeAll(" disabled");
-    try w.writeAll(">Load saved</button>");
+    try w.writeAll("?regen=1\" title=\"Re-run the optimizer and record the result\">Regenerate</a>");
+    try w.writeAll("<button class=\"btn\" id=\"pcb-saveas\" title=\"Save the current placement under a name\">Save as…</button>");
     try w.writeAll("<button class=\"btn\" id=\"pcb-reset\">Reset to auto</button>");
     try w.writeAll("<span class=\"zoom-grp\"><button class=\"btn\" id=\"z-out\" title=\"Zoom out\">−</button>");
     try w.writeAll("<button class=\"btn\" id=\"z-in\" title=\"Zoom in\">+</button>");
@@ -576,6 +846,54 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, has_saved: bool, nam
     try w.writeAll("<span class=\"muted\">drag part to move · hover + R to rotate · scroll to zoom · drag background to pan · snaps to ");
     try w.print("{d} mm</span>", .{optimizer.GRID_MM});
     try w.writeAll("</div>");
+}
+
+/// Saved-layouts panel: the named history (manual snapshots + auto-recorded
+/// optimizer runs), newest first, each row showing its kind, score, and delta
+/// of (HPWL+loop) versus the layout currently on screen (`auto`). The Load /
+/// delete buttons carry the layout name in data attributes for BOARD_JS.
+fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: LayoutScore) std.Io.Writer.Error!void {
+    try w.writeAll("<div class=\"pcb-saved\"><div class=\"saved-h\">Saved layouts <span class=\"saved-n\">");
+    try w.print("{d}</span></div>", .{layouts.len});
+    if (layouts.len == 0) {
+        try w.writeAll("<div class=\"saved-empty\">None yet — drag parts then <b>Save as…</b>, or hit Regenerate to record one.</div></div>");
+        return;
+    }
+    try w.writeAll("<div class=\"saved-list\">");
+    for (layouts) |L| {
+        try w.writeAll("<div class=\"lay-row\"><span class=\"lay-kind ");
+        try w.writeAll(if (std.mem.eql(u8, L.kind, KIND_MANUAL)) "k-man\">manual" else "k-auto\">auto");
+        try w.writeAll("</span><span class=\"lay-name\">");
+        try writeEscaped(w, L.name);
+        try w.writeAll("</span><span class=\"lay-score\">");
+        if (L.score) |s| {
+            try w.print("HPWL {d:.1} · loop {d:.1}", .{ s.hpwl, s.loop });
+            try w.writeAll("</span>");
+            try writeLayDelta(w, s, auto);
+        } else try w.writeAll("—</span><span class=\"lay-d\"></span>");
+        try w.writeAll("<button class=\"btn lay-go\" data-lay-load=\"");
+        try writeAttr(w, L.name);
+        try w.writeAll("\">Load</button><button class=\"btn lay-del\" title=\"Delete\" data-lay-del=\"");
+        try writeAttr(w, L.name);
+        try w.writeAll("\">✕</button></div>");
+    }
+    try w.writeAll("</div></div>");
+}
+
+/// Delta of a saved layout's combined (HPWL+loop) cost versus the on-screen
+/// auto baseline. Positive (red) = worse, negative (green) = better — matching
+/// the live score-bar deltas.
+fn writeLayDelta(w: *std.Io.Writer, s: LayoutScore, auto: LayoutScore) std.Io.Writer.Error!void {
+    const d = (s.hpwl + s.loop) - (auto.hpwl + auto.loop);
+    if (@abs(d) < 0.05) {
+        try w.writeAll("<span class=\"lay-d\">=</span>");
+        return;
+    }
+    try w.print("<span class=\"lay-d {s}\">{s}{d:.1}</span>", .{
+        if (d > 0) "up" else "down",
+        if (d > 0) "+" else "",
+        d,
+    });
 }
 
 /// Tuning panel: number inputs for the steering weights + a grid toggle and an
@@ -695,7 +1013,7 @@ fn writePcbData(
     p: optimizer.Placement,
     v: View,
     name: []const u8,
-    saved: ?std.StringHashMap(SavedPos),
+    layouts: []const SavedLayout,
     routed: ?router.RouteResult,
     clearance: f64,
     violations: []const drc.Violation,
@@ -723,7 +1041,7 @@ fn writePcbData(
     try w.writeAll("\"name\":");
     try writeJsonStr(w, name);
     try w.writeAll(",");
-    try writeSavedJson(w, saved);
+    try writeLayoutsJson(w, layouts);
 
     // Parts.
     try w.writeAll("\"parts\":[");
@@ -856,25 +1174,29 @@ fn drcKindStr(k: drc.Kind) []const u8 {
 
 // ── Small helpers ────────────────────────────────────────────────────────
 
-/// Emit `"saved":` followed by the saved placement map (ref → {x,y,rot}), or
-/// `null` when no sidecar exists. Trailing comma included.
-fn writeSavedJson(w: *std.Io.Writer, saved: ?std.StringHashMap(SavedPos)) std.Io.Writer.Error!void {
-    try w.writeAll("\"saved\":");
-    if (saved) |m| {
-        try w.writeAll("{");
-        var it = m.iterator();
-        var first = true;
-        while (it.next()) |e| {
-            if (!first) try w.writeAll(",");
-            first = false;
-            try writeJsonStr(w, e.key_ptr.*);
-            try w.print(":{{\"x\":{d},\"y\":{d},\"rot\":{d}}}", .{ e.value_ptr.x, e.value_ptr.y, e.value_ptr.rot });
+/// Emit `"layouts":[ … ],` — the saved-layout history for the client. Each
+/// entry carries its name, kind, optional score, and `parts` as a ref → {x,y,
+/// rot} map so a Load just reads positions by ref. Trailing comma included.
+fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writer.Error!void {
+    try w.writeAll("\"layouts\":[");
+    for (layouts, 0..) |L, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try writeJsonStr(w, L.name);
+        try w.writeAll(",\"kind\":");
+        try writeJsonStr(w, L.kind);
+        if (L.score) |s| {
+            try w.print(",\"score\":{{\"hpwl\":{d},\"loop\":{d},\"caps\":{d}}}", .{ s.hpwl, s.loop, s.caps });
+        } else try w.writeAll(",\"score\":null");
+        try w.writeAll(",\"parts\":{");
+        for (L.parts, 0..) |pt, j| {
+            if (j > 0) try w.writeAll(",");
+            try writeJsonStr(w, pt.ref);
+            try w.print(":{{\"x\":{d},\"y\":{d},\"rot\":{d}}}", .{ pt.x, pt.y, pt.rot });
         }
-        try w.writeAll("}");
-    } else {
-        try w.writeAll("null");
+        try w.writeAll("}}");
     }
-    try w.writeAll(",");
+    try w.writeAll("],");
 }
 
 fn padLocalPage(part: optimizer.Part, pin: []const u8) LocalPt {
@@ -1026,6 +1348,24 @@ const PAGE_CSS =
     \\.pcb-bar .zoom-grp .btn{min-width:26px;text-align:center;padding:3px 7px}
     \\.pcb-bar .savemsg{font-size:12px;color:#16a34a;font-weight:600}
     \\.pcb-bar .muted{font-size:11.5px;color:#94a3b8}
+    \\.pcb-saved{margin:2px 0 10px;border:1px solid #e2e8f0;border-radius:8px;background:#fff;overflow:hidden}
+    \\.pcb-saved .saved-h{font-size:12px;font-weight:700;color:#1e293b;padding:6px 10px;background:#f8fafc;border-bottom:1px solid #eef2f7}
+    \\.pcb-saved .saved-n{color:#94a3b8;font-weight:400}
+    \\.pcb-saved .saved-empty{font-size:12px;color:#94a3b8;padding:8px 10px}
+    \\.saved-list{display:flex;flex-direction:column;max-height:220px;overflow:auto}
+    \\.lay-row{display:flex;gap:8px;align-items:center;padding:5px 10px;border-bottom:1px solid #f1f5f9;font-size:12px}
+    \\.lay-row:last-child{border-bottom:0}
+    \\.lay-kind{font-size:9.5px;font-weight:700;border-radius:3px;padding:1px 5px;letter-spacing:.03em}
+    \\.lay-kind.k-man{background:#dbeafe;color:#1d4ed8}
+    \\.lay-kind.k-auto{background:#f1f5f9;color:#64748b}
+    \\.lay-name{font-weight:600;color:#1e293b;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    \\.lay-score{color:#475569;white-space:nowrap}
+    \\.lay-d{font-weight:600;min-width:36px;text-align:right}
+    \\.lay-d.up{color:#dc2626}
+    \\.lay-d.down{color:#16a34a}
+    \\.lay-row .btn{font:inherit;font-size:11px;border:1px solid #cbd5e1;background:#fff;border-radius:5px;padding:2px 8px;cursor:pointer;color:#1e293b}
+    \\.lay-row .btn:hover{background:#f8fafc}
+    \\.lay-row .lay-del{color:#dc2626;border-color:#fca5a5;padding:2px 7px}
     \\.pcb-tune{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#475569}
     \\.pcb-tune .tune-h{font-weight:700;color:#1e293b}
     \\.pcb-tune label{display:flex;gap:4px;align-items:center}
@@ -1200,6 +1540,7 @@ const BOARD_JS =
     \\ document.getElementById("sc-hpwl").textContent="HPWL "+hpwl.toFixed(1)+" mm";
     \\ document.getElementById("sc-loop").textContent="loop "+loop.toFixed(1)+" mm · "+PCB.loops.length+" cap(s)";
     \\ delta("sc-hpwl-d",hpwl,PCB.auto.hpwl); delta("sc-loop-d",loop,PCB.auto.loop);
+    \\ return {hpwl:hpwl,loop:loop,caps:PCB.loops.length};
     \\}
     \\function mm(ev){var r=svg.getBoundingClientRect(),vb=svg.viewBox.baseVal;
     \\ var sx=vb.x+(ev.clientX-r.left)*(vb.width/r.width);
@@ -1229,19 +1570,31 @@ const BOARD_JS =
     \\ var g=document.getElementById("t-grid").checked?1:0;
     \\ window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?w_align="+v("t-align")+
     \\  "&w_isolate="+v("t-iso")+"&loop_w="+v("t-loop")+"&grid="+g;});
-    \\var loadBtn=document.getElementById("pcb-load");
-    \\loadBtn.addEventListener("click",function(){if(!PCB.saved)return;
-    \\ P.forEach(function(p){var s=PCB.saved[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;}});applyAll();});
-    \\document.getElementById("pcb-save").addEventListener("click",function(){
-    \\ var msg=document.getElementById("pcb-savemsg");
-    \\ var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};})};
-    \\ fetch("/api/pcb-layout/"+encodeURIComponent(PCB.name),{method:"POST",
+    \\function pad2(n){return (n<10?"0":"")+n;}
+    \\function stamp(){var d=new Date();return pad2(d.getMonth()+1)+"-"+pad2(d.getDate())+" "+pad2(d.getHours())+":"+pad2(d.getMinutes());}
+    \\document.getElementById("pcb-saveas").addEventListener("click",function(){
+    \\ var nm=window.prompt("Name this layout:","layout "+stamp());
+    \\ if(nm===null)return; nm=nm.trim(); if(!nm)return;
+    \\ var sc=score(),msg=document.getElementById("pcb-savemsg");
+    \\ var payload={name:nm,hpwl:sc.hpwl,loop:sc.loop,caps:sc.caps,
+    \\   parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};})};
+    \\ msg.style.color="#64748b";msg.textContent="saving…";
+    \\ fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name),{method:"POST",
     \\   headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
     \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
     \\  .then(function(){msg.style.color="#16a34a";msg.textContent="saved ✓";
-    \\    PCB.saved={};P.forEach(function(p){PCB.saved[p.ref]={x:p.x,y:p.y,rot:p.rot||0};});
-    \\    loadBtn.disabled=false;setTimeout(function(){msg.textContent="";},2000);})
+    \\    setTimeout(function(){window.location.reload();},300);})
     \\  .catch(function(){msg.style.color="#dc2626";msg.textContent="save failed";});});
+    \\function layByName(nm){var Ls=PCB.layouts||[];for(var i=0;i<Ls.length;i++)if(Ls[i].name===nm)return Ls[i];return null;}
+    \\document.querySelectorAll("[data-lay-load]").forEach(function(b){
+    \\ b.addEventListener("click",function(){var L=layByName(b.getAttribute("data-lay-load"));if(!L)return;
+    \\   P.forEach(function(p){var s=L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;}});applyAll();});});
+    \\document.querySelectorAll("[data-lay-del]").forEach(function(b){
+    \\ b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-del");
+    \\   if(!window.confirm("Delete layout \""+nm+"\"?"))return;
+    \\   fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+"/delete",{method:"POST",
+    \\     headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm})})
+    \\    .then(function(r){if(!r.ok)throw 0;window.location.reload();}).catch(function(){});});});
     \\function hlBy(at,v,cls,on){document.querySelectorAll("["+at+"]").forEach(function(e){
     \\ if(e.getAttribute(at)===v)e.classList.toggle(cls,on);});}
     \\function wire(at,cls){document.querySelectorAll("["+at+"]").forEach(function(e){
