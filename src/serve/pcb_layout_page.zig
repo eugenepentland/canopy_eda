@@ -222,10 +222,14 @@ fn writeFileAll(path: []const u8, data: []const u8) !void {
 
 const MAX_FP_BYTES: usize = 1024 * 1024;
 
-/// POST /api/courtyard/:name — rewrite a footprint's courtyard. Body:
-/// `{"fp":"c-0402","hw":1.2,"hh":0.8}` where hw/hh are the *effective* courtyard
-/// half-extents (what the layout draws). We invert the loader's margin so the
-/// written rect reloads to exactly those extents, then re-pack via `?regen=1`.
+/// POST /api/courtyard/:name — rewrite a footprint's courtyard. Two modes:
+///   `{"fp":"c-0402","mode":"size","hw":1.2,"hh":0.8}` — hw/hh are the
+///     *effective* courtyard half-extents (what the layout draws); we invert
+///     the loader's air-gap margin so the written rect reloads to exactly those.
+///   `{"fp":"c-0402","mode":"offset","offset":0.2}` — grow the courtyard a
+///     uniform gap beyond the pad bounding box; the rect is sized off the
+///     footprint's own pads and the optimizer margin stays out of the file.
+/// Mode defaults to "size" when absent. Then re-pack via `?regen=1`.
 pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = 400;
@@ -250,10 +254,6 @@ pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
         res.body = "bad footprint name";
         return;
     }
-    const margin = geometry.BBOX_MARGIN_MM;
-    const rw = @max(jsonNum(root.object.get("hw")) - margin, 0.05);
-    const rh = @max(jsonNum(root.object.get("hh")) - margin, 0.05);
-
     const path = std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints/{s}.sexp", .{ ctx.project_dir, fp_v.string }) catch {
         res.status = 500;
         return;
@@ -264,6 +264,41 @@ pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
         res.body = "footprint not found";
         return;
     };
+
+    // Two ways to size the rect (see the doc comment). "offset" grows the
+    // courtyard a uniform gap beyond the pad bounding box, parsed from the
+    // footprint's own pads — the optimizer's air-gap margin is added back at
+    // load time, so it never lands in the stored rect. "size" (the default)
+    // carries the effective half-extents, so we strip that margin back out.
+    const is_offset = blk: {
+        const mv = root.object.get("mode") orelse break :blk false;
+        if (mv != .string) break :blk false;
+        break :blk std.mem.eql(u8, mv.string, "offset");
+    };
+    var rw: f64 = undefined;
+    var rh: f64 = undefined;
+    if (is_offset) {
+        const off = @max(jsonNum(root.object.get("offset")), 0);
+        const g = geometry.load(req.arena, ctx.project_dir, fp_v.string, 0);
+        var ehw: f64 = 0;
+        var ehh: f64 = 0;
+        for (g.pads) |p| {
+            ehw = @max(ehw, @abs(p.x) + p.w / 2);
+            ehh = @max(ehh, @abs(p.y) + p.h / 2);
+        }
+        if (g.pads.len == 0 or (ehw <= 0 and ehh <= 0)) {
+            res.status = 400;
+            res.body = "footprint has no pads to offset from";
+            return;
+        }
+        rw = ehw + off;
+        rh = ehh + off;
+    } else {
+        const margin = geometry.BBOX_MARGIN_MM;
+        rw = @max(jsonNum(root.object.get("hw")) - margin, 0.05);
+        rh = @max(jsonNum(root.object.get("hh")) - margin, 0.05);
+    }
+
     const updated = rewriteCourtyard(ctx.allocator, src, rw, rh) catch {
         res.status = 500;
         res.body = "rewrite failed";
@@ -937,10 +972,15 @@ const COURTYARD_MODAL =
     \\<div id="court-modal" class="court-modal" hidden><div class="court-dialog">
     \\<div class="court-h"><span id="court-title">Courtyard</span><button id="court-x" class="court-x" title="Close">×</button></div>
     \\<svg id="court-svg" class="court-svg" viewBox="0 0 260 220" xmlns="http://www.w3.org/2000/svg"></svg>
-    \\<div class="court-fields">
+    \\<div class="court-mode" id="court-mode">
+    \\<label><input type="radio" name="court-mode" value="size" checked> Overall size</label>
+    \\<label><input type="radio" name="court-mode" value="offset"> Pad offset</label></div>
+    \\<div class="court-fields" id="court-fields-size">
     \\<label>½-width <input id="court-hw" type="number" step="0.2" min="0"> mm</label>
-    \\<label>½-height <input id="court-hh" type="number" step="0.2" min="0"> mm</label>
-    \\<span id="court-full" class="court-full"></span></div>
+    \\<label>½-height <input id="court-hh" type="number" step="0.2" min="0"> mm</label></div>
+    \\<div class="court-fields" id="court-fields-offset" hidden>
+    \\<label>Offset from pads <input id="court-off" type="number" step="0.05" min="0"> mm</label></div>
+    \\<div id="court-full" class="court-full"></div>
     \\<div class="court-note" id="court-note">Half-extents from the part centre;
     \\ edges stay on the 0.2 mm grid. Saving rewrites the footprint file and applies to every design that uses it.</div>
     \\<div class="court-actions"><button id="court-save" class="btn">Save courtyard</button>
@@ -1023,9 +1063,12 @@ const PAGE_CSS =
     \\  color:#0f172a;font-size:14px;margin-bottom:8px}
     \\.court-x{border:0;background:none;font-size:20px;line-height:1;cursor:pointer;color:#64748b}
     \\.court-svg{width:100%;height:200px;background:#0d1117;border-radius:6px;display:block}
-    \\.court-fields{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0 6px;font-size:12px;color:#334155}
+    \\.court-mode{display:flex;gap:14px;align-items:center;margin:10px 0 4px;font-size:12px;color:#334155}
+    \\.court-mode label{display:flex;gap:4px;align-items:center;cursor:pointer}
+    \\.court-fields{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:4px 0 4px;font-size:12px;color:#334155}
+    \\.court-fields[hidden]{display:none}
     \\.court-fields input{width:64px;font:inherit}
-    \\.court-full{color:#64748b}
+    \\.court-full{color:#64748b;font-size:12px;margin:2px 0 8px}
     \\.court-note{font-size:11px;color:#94a3b8;line-height:1.4;margin-bottom:10px}
     \\.court-actions{display:flex;gap:8px;align-items:center}
     \\.court-dialog .btn{font:inherit;font-size:12px;border:1px solid #cbd5e1;background:#fff;
@@ -1250,19 +1293,27 @@ const BOARD_JS =
     \\ p.pads.forEach(function(pad){var pw=Math.max(pad.w*sc,2),ph=Math.max(pad.h*sc,2);
     \\   s.appendChild(el("rect",{x:(cx+pad.x*sc-pw/2).toFixed(1),y:(cy+pad.y*sc-ph/2).toFixed(1),
     \\     width:pw.toFixed(1),height:ph.toFixed(1),rx:1,fill:"#b08d57"}));});}
-    \\function courtRefresh(){if(!courtState)return;courtDraw(courtState.p,courtState.hw,courtState.hh);
-    \\ document.getElementById("court-full").textContent="full "+(2*courtState.hw).toFixed(1)+" × "+(2*courtState.hh).toFixed(1)+" mm";}
+    \\function courtBox(){var c=courtState;return c.mode=="offset"?{hw:c.ext.hw+c.offset,hh:c.ext.hh+c.offset}:{hw:c.hw,hh:c.hh};}
+    \\function courtRefresh(){if(!courtState)return;var b=courtBox();courtDraw(courtState.p,b.hw,b.hh);
+    \\ document.getElementById("court-full").textContent="full "+(2*b.hw).toFixed(2)+" × "+(2*b.hh).toFixed(2)+" mm";}
+    \\function courtSetMode(m){if(!courtState)return;courtState.mode=m;
+    \\ document.getElementById("court-fields-size").hidden=(m!="size");
+    \\ document.getElementById("court-fields-offset").hidden=(m!="offset");courtRefresh();}
     \\function openCourt(ref){var p=partByRef(ref);if(!p)return;var ext=padExt(p),cm=PCB.cmargin||0.15;
     \\ var min={hw:gceil(ext.hw+cm),hh:gceil(ext.hh+cm)};
-    \\ courtState={p:p,fp:p.fp,hw:p.hw,hh:p.hh,min:min};
+    \\ courtState={p:p,fp:p.fp,mode:"size",hw:p.hw,hh:p.hh,offset:0.2,ext:ext,min:min};
     \\ document.getElementById("court-title").textContent=p.fp+"  ·  "+p.ref;
-    \\ var hwI=document.getElementById("court-hw"),hhI=document.getElementById("court-hh");
+    \\ var hwI=document.getElementById("court-hw"),hhI=document.getElementById("court-hh"),offI=document.getElementById("court-off");
     \\ var sv=document.getElementById("court-save"),note=document.getElementById("court-note"),msg=document.getElementById("court-msg");
-    \\ msg.textContent="";hwI.value=p.hw.toFixed(1);hhI.value=p.hh.toFixed(1);hwI.min=min.hw;hhI.min=min.hh;
-    \\ var fab=p.fb||!p.fp;sv.disabled=fab;hwI.disabled=fab;hhI.disabled=fab;
+    \\ msg.textContent="";hwI.value=p.hw.toFixed(1);hhI.value=p.hh.toFixed(1);hwI.min=min.hw;hhI.min=min.hh;offI.value=(0.2).toFixed(2);
+    \\ var fab=p.fb||!p.fp,noPads=!(ext.hw>0||ext.hh>0);
+    \\ sv.disabled=fab;hwI.disabled=fab;hhI.disabled=fab;offI.disabled=fab||noPads;
+    \\ document.querySelectorAll("input[name=court-mode]").forEach(function(r){r.checked=(r.value=="size");r.disabled=fab||(r.value=="offset"&&noPads);});
+    \\ courtSetMode("size");
     \\ note.textContent=fab?"Synthesized placeholder box (no footprint file) — courtyard can't be edited.":
-    \\  "Half-extents from the part centre; edges stay on the 0.2 mm grid. Saving rewrites lib/footprints/"+p.fp+".sexp and applies to every design using it.";
-    \\ courtRefresh();document.getElementById("court-modal").hidden=false;}
+    \\  "Overall size sets the half-extents directly; Pad offset grows the courtyard a fixed gap "+
+    \\  "beyond the pad bounding box. Saving rewrites lib/footprints/"+p.fp+".sexp and applies to every design using it.";
+    \\ document.getElementById("court-modal").hidden=false;}
     \\function courtClose(){document.getElementById("court-modal").hidden=true;courtState=null;}
     \\document.querySelectorAll("[data-court-ref]").forEach(function(b){
     \\ b.addEventListener("click",function(){openCourt(b.getAttribute("data-court-ref"));});});
@@ -1270,17 +1321,24 @@ const BOARD_JS =
     \\if(cxBtn)cxBtn.addEventListener("click",courtClose);
     \\if(ccBtn)ccBtn.addEventListener("click",courtClose);
     \\if(modalBg)modalBg.addEventListener("click",function(ev){if(ev.target===modalBg)courtClose();});
+    \\document.querySelectorAll("input[name=court-mode]").forEach(function(r){
+    \\ r.addEventListener("change",function(){if(r.checked)courtSetMode(r.value);});});
     \\function courtInput(which){if(!courtState)return;var inp=document.getElementById(which=="hw"?"court-hw":"court-hh");
     \\ var v=Math.round(parseFloat(inp.value)/G)*G;if(!(v>0))v=courtState.min[which];
     \\ v=Math.max(v,courtState.min[which]);courtState[which]=v;inp.value=v.toFixed(1);courtRefresh();}
     \\var hwI2=document.getElementById("court-hw"),hhI2=document.getElementById("court-hh");
     \\if(hwI2)hwI2.addEventListener("change",function(){courtInput("hw");});
     \\if(hhI2)hhI2.addEventListener("change",function(){courtInput("hh");});
+    \\var offI2=document.getElementById("court-off");
+    \\if(offI2)offI2.addEventListener("change",function(){if(!courtState)return;var v=parseFloat(offI2.value);
+    \\ if(!(v>=0))v=0;v=Math.round(v/0.05)*0.05;courtState.offset=v;offI2.value=v.toFixed(2);courtRefresh();});
     \\var csv=document.getElementById("court-save");
     \\if(csv)csv.addEventListener("click",function(){if(!courtState||!courtState.fp)return;
     \\ var msg=document.getElementById("court-msg");msg.style.color="#64748b";msg.textContent="saving…";
+    \\ var body=courtState.mode=="offset"?{fp:courtState.fp,mode:"offset",offset:courtState.offset}
+    \\   :{fp:courtState.fp,mode:"size",hw:courtState.hw,hh:courtState.hh};
     \\ fetch("/api/courtyard/"+encodeURIComponent(PCB.name),{method:"POST",headers:{"Content-Type":"application/json"},
-    \\   body:JSON.stringify({fp:courtState.fp,hw:courtState.hw,hh:courtState.hh})})
+    \\   body:JSON.stringify(body)})
     \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
     \\  .then(function(){msg.style.color="#16a34a";msg.textContent="saved ✓ — rebuilding";
     \\    window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?regen=1";})
