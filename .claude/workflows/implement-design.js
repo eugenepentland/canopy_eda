@@ -173,7 +173,11 @@ const VERIFY_SCHEMA = {
 }
 
 // ── Parameters ────────────────────────────────────────────────────
-const design = (args && typeof args === 'object' && args.design) || (typeof args === 'string' && args) || null
+// args may arrive as an object, a bare string ("barracuda"), or a JSON string
+// ('{"design":"barracuda"}') depending on how the runtime serialized it — normalize all three.
+let _a = args
+if (typeof _a === 'string') { try { const p = JSON.parse(_a); if (p && typeof p === 'object') _a = p } catch (_e) { /* bare string design name */ } }
+const design = (_a && typeof _a === 'object' && _a.design) || (typeof _a === 'string' && _a) || null
 if (!design) throw new Error('implement-design: pass the design name, e.g. { args: { design: "barracuda" } }')
 
 const tool_note =
