@@ -47,19 +47,20 @@ const FlatNet = export_kicad.FlatNet;
 const K_DECOUPLE: f64 = 0.95; // power/decoupling cap hug + ground-return (highest priority)
 const K_PROX: f64 = 0.6; // single-hub signal passive hug (feedback divider, etc.)
 const K_SIG: f64 = 0.12; // generic wirelength pull
-const ITERS: usize = 600; // relaxation steps
+const ITERS: usize = 600; // relaxation steps (cooling schedule length)
+const RELAX_CONVERGE_MM: f64 = 0.01; // stop relaxing once the largest per-step move is this small
 const LEGALIZE_ITERS: usize = 2000; // overlap-removal-only steps
 const MAX_DISP_MM: f64 = 0.6; // per-step displacement clamp
 const HUB_MASS: f64 = 4.0; // hubs move less → act as anchors
 const PASSIVE_MASS: f64 = 1.0;
 const SEED_GAP_MM: f64 = 1.5; // extra gap between seed grid cells
-const ROT_ROUNDS: usize = 4; // rotation-refine ↔ relax coordinate-descent rounds
+const ROT_ROUNDS: usize = 2; // rotation-refine ↔ relax coordinate-descent rounds
 const LOOP_W: f64 = 3.0; // weight on loop length in the objective
 const K_COMPACT: f64 = 0.10; // pull toward the cluster centroid (keeps HPWL tight)
 const STARTS: usize = 48; // multi-start seeds; keep the lowest-scoring arrangement
 const MULTISTART_MAX_PARTS: usize = 32; // above this, single start (bound O(n²·starts))
 const POLISH_SWEEPS: usize = 4; // greedy per-part tightening sweeps
-const POLISH_CELLS: i64 = 12; // half-window (grid cells) the polish search scans
+const POLISH_CELLS: i64 = 6; // half-window (grid cells) the polish search scans
 const W_ISOLATE: f64 = 1.5; // keep-away penalty: sensitive nets ✗ high-current/switch parts
 const ISO_FALLOFF_MM: f64 = 4.0; // distance scale of the isolation penalty (falls to ~0 beyond)
 const CAP_W_MAX: f64 = 3.0; // max value-priority boost for the smallest cap on a rail
@@ -379,10 +380,10 @@ fn anyCourtOverlap(parts: []const Part) bool {
 /// large whole-board layouts take a single grid-seeded relax with no rotation
 /// (they blob together regardless — per-module grouping is future work).
 fn optimize(parts: []Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet, built: Built, params: Params) void {
+    if (parts.len == 0 or parts.len > maxParts) return;
     const small = parts.len <= MULTISTART_MAX_PARTS;
     const starts: usize = if (small) STARTS else 1;
     const rounds: usize = if (small) ROT_ROUNDS else 0;
-    if (parts.len == 0 or parts.len > maxParts) return;
     var best: [maxParts]Pose = undefined;
     var best_cost: f64 = std.math.inf(f64);
     var s: usize = 0;
@@ -845,7 +846,11 @@ fn rotateLocal(lx: f64, ly: f64, rot: f64) Pt {
 }
 
 /// World position of a footprint-local point on `p`, honouring its rotation.
+/// Rotation is one of {0,90,180,270}; the `rot == 0` identity is by far the
+/// commonest case (every hub, and unrotated passives) and the inner loops call
+/// this millions of times, so it skips `rotateLocal`'s `@mod`/`@round`/switch.
 fn worldPt(p: Part, lx: f64, ly: f64) Pt {
+    if (p.rot == 0) return .{ .x = p.x + lx, .y = p.y + ly };
     const r = rotateLocal(lx, ly, p.rot);
     return .{ .x = p.x + r.x, .y = p.y + r.y };
 }
@@ -858,8 +863,15 @@ pub fn worldPadCenter(p: Part, lx: f64, ly: f64) [2]f64 {
 }
 
 /// World-space axis-aligned rectangle of pad `pr` on part `p` (its size swaps
-/// on a quarter turn; right-angle rotation keeps it axis-aligned).
+/// on a quarter turn; right-angle rotation keeps it axis-aligned). The `rot == 0`
+/// identity is the hot case (hub pads — the loop-leg scan's inner term), so it
+/// bypasses `worldPt`/`isQuarter` entirely.
 fn worldRect(p: Part, pr: PadRect) Rect {
+    if (p.rot == 0) {
+        const hw0 = pr.w / 2;
+        const hh0 = pr.h / 2;
+        return .{ .x0 = p.x + pr.x - hw0, .y0 = p.y + pr.y - hh0, .x1 = p.x + pr.x + hw0, .y1 = p.y + pr.y + hh0 };
+    }
     const c = worldPt(p, pr.x, pr.y);
     const hw = if (isQuarter(p.rot)) pr.h / 2 else pr.w / 2;
     const hh = if (isQuarter(p.rot)) pr.w / 2 else pr.h / 2;
@@ -964,14 +976,29 @@ fn legBlocked(parts: []const Part, cap_idx: usize, a: Pt, b: Pt, target: Rect) b
 /// Nearest *routable* hub pad to cap rect `cr`: edge-to-edge gap plus a detour
 /// penalty when the straight leg is blocked, so the optimizer prefers a pad it
 /// can actually run a clean trace to (and the reported loop reflects reality).
+///
+/// `legBlocked` (a scan over every other pad) is the optimizer's hottest leaf,
+/// so two *exact* prunes skip it for pads that cannot win — the result (min
+/// cost + its rect, first-in-order on ties) is unchanged:
+///   • a pad whose bare gap already ≥ the best cost so far can't improve it,
+///     since the detour penalty only adds (`cost = gap + pen ≥ gap`);
+///   • a pad whose gap exceeds `gmin + BLOCK_PENALTY` can't beat the closest
+///     pad even if that one is blocked, so it's never the minimum.
+/// On a big IC (a dozen-plus ground pads per leg) this drops the per-leg
+/// `legBlocked` count from O(pads) to ~1–2.
 fn nearestReachable(cr: Rect, parts: []const Part, cap_idx: usize, hub_idx: usize, hub_pads: []const PadRect) struct { rect: Rect, gap: f64 } {
+    var gmin: f64 = std.math.inf(f64);
+    for (hub_pads) |pr| gmin = @min(gmin, rectGap(cr, worldRect(parts[hub_idx], pr)));
+    const gcut = gmin + BLOCK_PENALTY_MM;
+
     var best: f64 = std.math.inf(f64);
     var best_rect: Rect = cr;
     for (hub_pads) |pr| {
         const hr = worldRect(parts[hub_idx], pr);
+        const gap = rectGap(cr, hr);
+        if (gap >= best or gap > gcut) continue; // can't beat the current/closest best
         const np = nearestPoints(cr, hr);
-        const pen: f64 = if (legBlocked(parts, cap_idx, np.a, np.b, hr)) BLOCK_PENALTY_MM else 0;
-        const cost = rectGap(cr, hr) + pen;
+        const cost = gap + (if (legBlocked(parts, cap_idx, np.a, np.b, hr)) BLOCK_PENALTY_MM else 0);
         if (cost < best) {
             best = cost;
             best_rect = hr;
@@ -1135,7 +1162,7 @@ fn objectiveCost(
     loops: []const Loop,
     params: Params,
 ) f64 {
-    const hpwl = scoreLayout(parts, idx_of, nets, loops).hpwl_mm;
+    const hpwl = hpwlScore(parts, idx_of, nets);
     return hpwl + params.loop_w * weightedLoop(parts, loops) +
         params.w_isolate * isolationPenalty(parts) + params.w_align * alignmentPenalty(parts);
 }
@@ -1383,14 +1410,13 @@ fn selectGroundPads(arena: std.mem.Allocator, tagged: []const TaggedPad) std.mem
     return out.toOwnedSlice(arena);
 }
 
-/// HPWL over signal nets + total power/ground airwire length of the
-/// decoupling loops, measured on the settled placement.
-fn scoreLayout(
-    parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
-    nets: []const FlatNet,
-    loops: []const Loop,
-) Score {
+/// Half-perimeter wirelength over signal nets (ground excluded). This is the
+/// only part of the score the inner search (`objectiveCost`) needs, so it is
+/// split out from `scoreLayout`: the routing-aware loop measure below is
+/// expensive (`nearestReachable` → `legBlocked`) and the search gets its loop
+/// term from `weightedLoop` instead, so folding the loop scan into every
+/// objective eval would compute — and discard — it tens of thousands of times.
+fn hpwlScore(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet) f64 {
     var hpwl: f64 = 0;
     for (nets) |net| {
         if (isGroundName(shortName(net.name))) continue;
@@ -1411,7 +1437,20 @@ fn scoreLayout(
         }
         if (cnt >= 2) hpwl += (maxx - minx) + (maxy - miny);
     }
+    return hpwl;
+}
 
+/// HPWL over signal nets + total power/ground airwire length of the
+/// decoupling loops, measured on the settled placement. The loop term uses the
+/// routing-aware `nearestReachable`, so this is the *display* score — compute
+/// it once on the final layout, not inside the search loop.
+fn scoreLayout(
+    parts: []const Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    loops: []const Loop,
+) Score {
+    const hpwl = hpwlScore(parts, idx_of, nets);
     var loop_mm: f64 = 0;
     for (loops) |lp| {
         const cap = parts[lp.cap];
@@ -1425,13 +1464,16 @@ fn scoreLayout(
 /// repulsion, with a cooling step.
 fn relax(parts: []Part, springs: []const Spring, loops: []const Loop) void {
     const n = parts.len;
-    if (n == 0) return;
+    if (n == 0 or n > maxParts) return;
+    // Rotation is fixed across the call, so the keepout boxes are too — compute
+    // them once instead of re-deriving per pair per iteration.
+    var boxes: [maxParts]KeepBox = undefined;
+    fillKeepBoxes(parts, boxes[0..n]);
     var it: usize = 0;
     while (it < ITERS) : (it += 1) {
         const cool = 1.0 - @as(f64, @floatFromInt(it)) / @as(f64, @floatFromInt(ITERS));
         const step = 0.1 + 0.7 * cool;
 
-        if (n > maxParts) return; // safety: bounded accumulators
         var ax: [maxParts]f64 = undefined;
         var ay: [maxParts]f64 = undefined;
         for (0..n) |i| {
@@ -1452,13 +1494,23 @@ fn relax(parts: []Part, springs: []const Spring, loops: []const Loop) void {
 
         accumulateLoops(parts, loops, &ax, &ay);
         accumulateCompaction(parts, &ax, &ay);
-        _ = accumulateRepulsion(parts, &ax, &ay, 0);
+        _ = accumulateRepulsion(parts, boxes[0..n], &ax, &ay, 0);
 
+        var maxdisp: f64 = 0;
         for (0..n) |i| {
             const mass = if (parts[i].kind == .hub) HUB_MASS else PASSIVE_MASS;
-            parts[i].x += clampDisp(step * ax[i] / mass);
-            parts[i].y += clampDisp(step * ay[i] / mass);
+            const dx = clampDisp(step * ax[i] / mass);
+            const dy = clampDisp(step * ay[i] / mass);
+            parts[i].x += dx;
+            parts[i].y += dy;
+            maxdisp = @max(maxdisp, @max(@abs(dx), @abs(dy)));
         }
+        // The relaxation is damped + cooled, so once the largest per-step move
+        // falls well under the grid it has settled and further iterations only
+        // jitter sub-grid — stop early. (Fixed 600 iters for a ~dozen parts is
+        // mostly spent here, after equilibrium.) The cooling schedule still
+        // keys on the full ITERS, so the early iterations are unchanged.
+        if (maxdisp < RELAX_CONVERGE_MM) break;
     }
 }
 
@@ -1501,6 +1553,8 @@ fn accumulateLeg(
 fn legalize(parts: []Part, clearance: f64) void {
     const n = parts.len;
     if (n == 0 or n > maxParts) return;
+    var boxes: [maxParts]KeepBox = undefined;
+    fillKeepBoxes(parts, boxes[0..n]);
     var it: usize = 0;
     while (it < LEGALIZE_ITERS) : (it += 1) {
         var ax: [maxParts]f64 = undefined;
@@ -1509,7 +1563,7 @@ fn legalize(parts: []Part, clearance: f64) void {
             ax[i] = 0;
             ay[i] = 0;
         }
-        const moved = accumulateRepulsion(parts, &ax, &ay, clearance);
+        const moved = accumulateRepulsion(parts, boxes[0..n], &ax, &ay, clearance);
         if (!moved) break;
         for (0..n) |i| {
             parts[i].x += ax[i];
@@ -1569,20 +1623,44 @@ fn accumulateCompaction(parts: []const Part, ax: []f64, ay: []f64) void {
     }
 }
 
+/// A part's collision box reduced to position-independent terms, so the O(n²)
+/// repulsion inner loop is pure arithmetic. `cxo`/`cyo` are the rotated keepout
+/// centre offset (world centre = `part.x + cxo`); `hw`/`hh` the rotation-aware
+/// half-extents. All four depend only on rotation + footprint, which are fixed
+/// across a relax/legalize call — recomputing `keepCx`/`keepHw` (each a branch
+/// + `isQuarter`'s `@mod`/`@round`) for every pair every iteration was the bulk
+/// of the relaxation's cost. Mirrors `keepCx`/`keepCy`/`keepHw`/`keepHh` exactly.
+const KeepBox = struct { cxo: f64, cyo: f64, hw: f64, hh: f64 };
+
+fn keepBoxOf(p: Part) KeepBox {
+    const q = isQuarter(p.rot);
+    if (p.keep.hw < 0) return .{ .cxo = 0, .cyo = 0, .hw = if (q) p.hh else p.hw, .hh = if (q) p.hw else p.hh };
+    const off = rotateLocal(p.keep.ox, p.keep.oy, p.rot);
+    return .{ .cxo = off.x, .cyo = off.y, .hw = if (q) p.keep.hh else p.keep.hw, .hh = if (q) p.keep.hw else p.keep.hh };
+}
+
+/// Fill `out[0..parts.len]` with each part's precomputed keepout box.
+fn fillKeepBoxes(parts: []const Part, out: []KeepBox) void {
+    for (parts, 0..) |p, i| out[i] = keepBoxOf(p);
+}
+
 /// Add separation forces for every overlapping courtyard pair (rotation-aware
 /// extents, plus a `clearance` margin) along the axis of least penetration.
+/// `boxes[i]` is `parts[i]`'s precomputed keepout (see `fillKeepBoxes`).
 /// Returns true if any pair overlapped.
-fn accumulateRepulsion(parts: []const Part, ax: []f64, ay: []f64, clearance: f64) bool {
+fn accumulateRepulsion(parts: []const Part, boxes: []const KeepBox, ax: []f64, ay: []f64, clearance: f64) bool {
     const n = parts.len;
     var any = false;
     var i: usize = 0;
     while (i < n) : (i += 1) {
+        const cxi = parts[i].x + boxes[i].cxo;
+        const cyi = parts[i].y + boxes[i].cyo;
         var j: usize = i + 1;
         while (j < n) : (j += 1) {
-            const dx = keepCx(parts[i]) - keepCx(parts[j]);
-            const dy = keepCy(parts[i]) - keepCy(parts[j]);
-            const ox = (keepHw(parts[i]) + keepHw(parts[j]) + clearance) - @abs(dx);
-            const oy = (keepHh(parts[i]) + keepHh(parts[j]) + clearance) - @abs(dy);
+            const dx = cxi - (parts[j].x + boxes[j].cxo);
+            const dy = cyi - (parts[j].y + boxes[j].cyo);
+            const ox = (boxes[i].hw + boxes[j].hw + clearance) - @abs(dx);
+            const oy = (boxes[i].hh + boxes[j].hh + clearance) - @abs(dy);
             if (ox <= 0 or oy <= 0) continue;
             any = true;
             // Push apart along the axis of least overlap; split evenly.
