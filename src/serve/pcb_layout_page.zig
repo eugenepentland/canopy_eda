@@ -890,6 +890,46 @@ fn readAutoPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []cons
     return list.toOwnedSlice(alloc) catch null;
 }
 
+/// One placed part exported to the KiCad sync: centre (mm) + rotation (deg,
+/// CCW). The sync stamps these onto a footprint it inserts for the first time.
+pub const SyncPose = struct { x: f64, y: f64, rot: f64 };
+
+/// Load the design's premade placement-tool layout for the KiCad sync's
+/// first-insertion path, as a ref-des → pose map (mm + degrees), or null when
+/// the design has no saved layout at all. Preference, newest-wins: a manual
+/// (named) snapshot the user deliberately saved, else the most recent recorded
+/// layout of any kind, else the raw `.autolayout.json` optimizer cache. The
+/// returned map and its keys live on `alloc` (request lifetime). Only positions
+/// are exported — never the routed loops/stubs the optimizer scores with — so a
+/// sync that consults this still emits footprints only, no traces or vias.
+pub fn loadSyncLayout(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+) ?std.StringHashMap(SyncPose) {
+    const layouts = readLayouts(alloc, project_dir, name);
+    const chosen: ?[]const PartPose = blk: {
+        for (layouts) |L| {
+            if (std.mem.eql(u8, L.kind, KIND_MANUAL) and L.parts.len > 0) break :blk L.parts;
+        }
+        for (layouts) |L| {
+            if (L.parts.len > 0) break :blk L.parts;
+        }
+        break :blk null;
+    };
+    if (chosen) |parts| {
+        var m = std.StringHashMap(SyncPose).init(alloc);
+        for (parts) |pt| m.put(pt.ref, .{ .x = pt.x, .y = pt.y, .rot = pt.rot }) catch return m;
+        return m;
+    }
+    // No named/recorded layouts — fall back to the bare optimizer cache.
+    const poses = readAutoPoses(alloc, project_dir, name) orelse return null;
+    if (poses.len == 0) return null;
+    var m = std.StringHashMap(SyncPose).init(alloc);
+    for (poses) |p| m.put(p.ref, .{ .x = p.x, .y = p.y, .rot = p.rot }) catch return m;
+    return m;
+}
+
 /// Persist the generated layout (its tuning weights + ref/x/y/rot per part) to
 /// `.autolayout.json`. Best-effort: a write failure just means a regenerate.
 fn writeAutoCache(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, p: optimizer.Placement, params: optimizer.Params) void {

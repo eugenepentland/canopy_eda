@@ -24,6 +24,7 @@ const env_mod_node = @import("../sexpr/ast.zig");
 const env_mod = @import("../eval/env.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
+const pcb_layout = @import("pcb_layout_page.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const HTTP_NOT_FOUND: u16 = 404;
@@ -786,6 +787,10 @@ pub fn runSyncPlan(
     // Fixed staging seats for every part, computed once from the full roster so
     // a part's staging coordinate doesn't shift with the push's composition.
     const staging_layout = try buildStagingLayout(arena, instances.items, &ref_to_section);
+    // The design's premade placement-tool layout, if any. First-insert parts it
+    // names land at that exact pose (below) so a fresh import reproduces the
+    // tool's layout instead of a staging pile. Null → every add stages as before.
+    const premade_layout = pcb_layout.loadSyncLayout(arena, project_dir, name);
     var pending_adds: std.ArrayListUnmanaged(PendingAdd) = .empty;
 
     var by_uuid = std.StringHashMap(BoardFp).init(arena);
@@ -864,6 +869,7 @@ pub fn runSyncPlan(
         .net_hub_pins = &net_hub_pins,
         .ref_to_section = &ref_to_section,
         .staging_layout = &staging_layout,
+        .premade_layout = premade_layout,
         .pending_adds = &pending_adds,
         .net_pad_count = &net_pad_count,
         .matched_uuids = &matched_uuids,
@@ -1260,6 +1266,12 @@ const DiffContext = struct {
     /// Diff-independent staging seats for every design part, so `emitStagedAdds`
     /// places a new part at the same coordinate on every push. See StagingLayout.
     staging_layout: *const StagingLayout,
+    /// The design's premade placement-tool layout (ref-des → x/y/rot in mm/deg),
+    /// or null when it has none. A part inserted for the FIRST time whose ref the
+    /// layout names is placed at that exact pose instead of the staging grid;
+    /// parts the layout omits still fall back to staging. Existing/matched
+    /// footprints are never moved. See `loadSyncLayout` and `emitStagedAdds`.
+    premade_layout: ?std.StringHashMap(pcb_layout.SyncPose),
     /// Newly-added instances, buffered during the diff walk so the staging
     /// pass can lay them out grouped by section (positions + section boxes)
     /// after every match has been resolved. See `emitStagedAdds`.
@@ -2041,6 +2053,7 @@ fn emitAddOp(
     pad_net_map: *std.StringHashMap([]const u8),
     x_nm: i64,
     y_nm: i64,
+    rot_deg: f64,
     canopy_net: ?[]const u8,
     section: []const u8,
 ) !void {
@@ -2099,6 +2112,9 @@ fn emitAddOp(
     // Staging position (board nm). Both paths move the new fp here; (0,0)
     // means "no staging hint" (the part stays at the origin).
     try w.*.print(",\"x\":{d},\"y\":{d}", .{ x_nm, y_nm });
+    // Orientation (deg, CCW). Only emitted for a premade-layout placement; the
+    // staging grid passes 0, leaving the writer's bare `(at x y)` form.
+    if (rot_deg != 0) try w.*.print(",\"rot\":{d}", .{rot_deg});
     try w.*.writeAll(",\"pad_nets\":");
     try writePadNetsArray(w.*, inst.ref_des, pad_net_map);
     try w.*.writeAll("}");
@@ -2164,18 +2180,46 @@ fn groupAddsBySection(
     std.mem.sort([]const u8, order.items, {}, lessThanStr);
 }
 
-/// Lay buffered `add`s out as per-section clusters in a staging area and
-/// emit them: one positioned `add` op per part plus a `create_board_item`
-/// box rect + text label per section. Positions come from the diff-independent
-/// `staging_layout` (built from the whole design), so a part lands at the same
-/// coordinate on every push — a smaller follow-up push reuses the same cells
-/// and box size instead of re-flowing fresh boxes over the previous push's.
-/// Only buffered (newly-added) parts are placed; existing footprints are never
-/// moved. Parts with no footprint source are skipped, and a section whose parts
-/// are all skipped draws no (empty) box.
+/// Emit every buffered `add`, choosing each part's placement. When the design
+/// has a premade placement-tool layout (`premade_layout`) that names the part,
+/// it lands at that exact (x, y, rot) so a first-time import reproduces the
+/// tool's layout — no staging box, and since the sync only ever writes
+/// footprints, no traces or vias. Parts the layout doesn't name (or all parts,
+/// when there is no layout) fall back to the section-staging grid below.
+/// Existing/matched footprints are never moved either way.
 fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
     const arena = d.spc.arena;
     const adds = d.pending_adds.items;
+    if (adds.len == 0) return;
+
+    const layout = d.premade_layout orelse return emitStagingGrid(d, w, first, adds);
+
+    // Place every layout-named part at its exact pose; collect the rest for the
+    // staging grid so a partial layout still lands its unknown parts somewhere.
+    var leftover: std.ArrayListUnmanaged(PendingAdd) = .empty;
+    for (adds) |pa| {
+        const pose = layout.get(pa.inst.ref_des) orelse {
+            try leftover.append(arena, pa);
+            continue;
+        };
+        const kmod = loadKicadMod(d.spc, pa.fp_name, pa.inst.component) orelse continue;
+        const fp_def = loadFootprintDefForInstance(d.spc, pa.fp_name, pa.inst, pa.canopy_net, pa.section);
+        try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, mmToNm(pose.x), mmToNm(pose.y), pose.rot, pa.canopy_net, pa.section);
+        d.summary.added += 1;
+    }
+    return emitStagingGrid(d, w, first, leftover.items);
+}
+
+/// Lay `adds` out as per-section clusters in a staging area and emit them: one
+/// positioned `add` op per part plus a `create_board_item` box rect + text
+/// label per section. Positions come from the diff-independent `staging_layout`
+/// (built from the whole design), so a part lands at the same coordinate on
+/// every push — a smaller follow-up push reuses the same cells and box size
+/// instead of re-flowing fresh boxes over the previous push's. Parts with no
+/// footprint source are skipped, and a section whose parts are all skipped
+/// draws no (empty) box.
+fn emitStagingGrid(d: *DiffContext, w: anytype, first: *bool, adds: []const PendingAdd) !void {
+    const arena = d.spc.arena;
     if (adds.len == 0) return;
 
     var buckets = std.StringHashMap(std.ArrayListUnmanaged(usize)).init(arena);
@@ -2209,7 +2253,7 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
             const row: f64 = @floatFromInt(slot / ucols);
             const px = cell_x + STAGE_BOX_PAD_MM + (col + STAGE_HALF) * STAGE_PART_PITCH_MM;
             const py = cell_y + STAGE_LABEL_H_MM + STAGE_BOX_PAD_MM + (row + STAGE_HALF) * STAGE_PART_PITCH_MM;
-            try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, mmToNm(px), mmToNm(py), pa.canopy_net, pa.section);
+            try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, mmToNm(px), mmToNm(py), 0, pa.canopy_net, pa.section);
             d.summary.added += 1;
             emitted += 1;
         }
