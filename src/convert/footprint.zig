@@ -152,6 +152,15 @@ fn emitPad(w: anytype, node: Node) !void {
         }
     }
 
+    // Custom pads carry their real copper shape in (primitives (gr_poly …)),
+    // not the tiny anchor (size …). Emit the polygon (and a bbox-derived
+    // pos/size for the rect-based consumers) instead of the anchor dot.
+    if (std.mem.eql(u8, shape, "custom")) {
+        if (findCustomPolyPts(children[4..])) |pts| {
+            if (try emitCustomPolyPad(w, num_str, out_type, pts, x, y, rotation, has_drill, drill_x)) return;
+        }
+    }
+
     // Apply pad rotation: 90° or 270° swaps width and height
     const rot_mod = @mod(rotation, FULL_TURN_DEG);
     const is_rotated = (rot_mod > ROT_45_DEG and rot_mod < ROT_135_DEG) or (rot_mod > ROT_225_DEG and rot_mod < ROT_315_DEG);
@@ -175,6 +184,89 @@ fn emitPad(w: anytype, node: Node) !void {
         try w.print(" (roundrect_rratio {d:.3})", .{rratio});
     }
     try w.writeAll(")\n");
+}
+
+/// Find the `(pts …)` of the first `(gr_poly …)` inside a pad's
+/// `(primitives …)` block. KiCad stores a custom pad's true copper outline
+/// there (relative to the pad's `(at …)`); the anchor `(size …)` is just a
+/// placeholder dot. Returns the `(xy …)` nodes, or null when the pad has no
+/// polygon primitive.
+fn findCustomPolyPts(pad_items: []const Node) ?[]const Node {
+    for (pad_items) |it| {
+        if (!it.isForm("primitives")) continue;
+        const pl = it.asList() orelse continue;
+        for (pl[1..]) |prim| {
+            if (!prim.isForm("gr_poly")) continue;
+            const gl = prim.asList() orelse continue;
+            if (findFormItems(gl[1..], "pts")) |pts| return pts;
+        }
+    }
+    return null;
+}
+
+/// Rotate a pad-local point by `rot_deg` (CCW) and translate by the pad
+/// origin `(tx, ty)`, yielding footprint-absolute coordinates.
+fn rotTranslate(lx: f64, ly: f64, rot_deg: f64, tx: f64, ty: f64) struct { x: f64, y: f64 } {
+    if (rot_deg == 0) return .{ .x = lx + tx, .y = ly + ty };
+    const rad = rot_deg * std.math.pi / 180.0;
+    const c = @cos(rad);
+    const s = @sin(rad);
+    return .{ .x = lx * c - ly * s + tx, .y = lx * s + ly * c + ty };
+}
+
+/// Emit a custom pad as its real polygon: a bbox-derived `(pos …)`/`(size …)`
+/// for the rectangle-based renderer/placement/router, plus a `(poly …)` of the
+/// footprint-absolute outline points for polygon-aware consumers (footprint
+/// preview, KiCad export). Returns false (caller falls back to the anchor) when
+/// the primitive has fewer than 3 points.
+fn emitCustomPolyPad(
+    w: anytype,
+    num_str: []const u8,
+    out_type: []const u8,
+    pts: []const Node,
+    tx: f64,
+    ty: f64,
+    rotation: f64,
+    has_drill: bool,
+    drill: f64,
+) !bool {
+    var min_x: f64 = std.math.inf(f64);
+    var min_y: f64 = std.math.inf(f64);
+    var max_x: f64 = -std.math.inf(f64);
+    var max_y: f64 = -std.math.inf(f64);
+    var count: usize = 0;
+    for (pts) |pt| {
+        const p = xyPoint(pt, rotation, tx, ty) orelse continue;
+        accumulateBBox(p.x, p.y, &min_x, &min_y, &max_x, &max_y);
+        count += 1;
+    }
+    if (count < 3) return false;
+
+    const cx = (min_x + max_x) / 2.0;
+    const cy = (min_y + max_y) / 2.0;
+    try w.print("  (pad {s} {s} custom (pos {d:.3} {d:.3}) (size {d:.3} {d:.3})", .{
+        num_str, out_type, cx, cy, max_x - min_x, max_y - min_y,
+    });
+    if (has_drill) try w.print(" (drill {d:.2})", .{drill});
+    try w.writeAll("\n    (poly");
+    for (pts) |pt| {
+        const p = xyPoint(pt, rotation, tx, ty) orelse continue;
+        try w.print(" ({d:.3} {d:.3})", .{ p.x, p.y });
+    }
+    try w.writeAll("))\n");
+    return true;
+}
+
+/// Decode an `(xy LX LY)` node into a footprint-absolute point (after the
+/// pad's rotation + translation), or null if it isn't a 2-coordinate `xy`.
+fn xyPoint(pt: Node, rotation: f64, tx: f64, ty: f64) ?struct { x: f64, y: f64 } {
+    if (!pt.isForm("xy")) return null;
+    const pl = pt.asList() orelse return null;
+    if (pl.len < 3) return null;
+    const lx = pl[1].asNumber() orelse return null;
+    const ly = pl[2].asNumber() orelse return null;
+    const p = rotTranslate(lx, ly, rotation, tx, ty);
+    return .{ .x = p.x, .y = p.y };
 }
 
 /// Read a `(name X Y …)` form returning the first two numeric children, or
@@ -441,4 +533,29 @@ test "convert captures F.Fab body outline and silkscreen polys" {
     try std.testing.expect(std.mem.indexOf(u8, output, "(circle (0.00 0.00) 0.50)") != null);
     // F.SilkS poly lands inside the silkscreen block, not the fab block.
     try std.testing.expect(std.mem.indexOf(u8, output, "(poly (-1.00 -1.00) (-1.00 1.00) (1.00 1.00))") != null);
+}
+
+// spec: convert/footprint - Expands a custom pad's gr_poly primitive into a real polygon outline with bbox-derived pos/size
+test "convert custom pad expands gr_poly into polygon + bbox" {
+    const alloc = std.testing.allocator;
+    const input =
+        \\(footprint "X"
+        \\  (pad "1" smd custom
+        \\    (at 1 1)
+        \\    (size 0.25 0.25)
+        \\    (layers "F.Cu" "F.Mask" "F.Paste")
+        \\    (options (clearance outline) (anchor rect))
+        \\    (primitives
+        \\      (gr_poly (pts (xy -1 -1) (xy 1 -1) (xy 1 1) (xy -1 1)) (width 0))
+        \\    )
+        \\  )
+        \\)
+    ;
+    const output = try convertFootprint(alloc, input);
+    defer alloc.free(output);
+    // The tiny 0.25×0.25 anchor is replaced by the polygon's bbox: 2×2 centred
+    // on the pad origin (1,1) — local pts (±1,±1) + at(1,1) → abs (0..2, 0..2).
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 1 smd custom (pos 1.000 1.000) (size 2.000 2.000)") != null);
+    // Outline is preserved in footprint-absolute coordinates.
+    try std.testing.expect(std.mem.indexOf(u8, output, "(poly (0.000 0.000) (2.000 0.000) (2.000 2.000) (0.000 2.000))") != null);
 }

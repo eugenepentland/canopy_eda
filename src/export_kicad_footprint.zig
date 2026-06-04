@@ -14,6 +14,9 @@ const PAD_MIN_CHILDREN: usize = 5;
 const RECT_MIN_CHILDREN: usize = 5;
 const POLY_MIN_POINTS: usize = 3;
 const DEFAULT_ROUNDRECT_RRATIO: f64 = 0.25;
+// Anchor-rect size for an emitted custom pad: kept small (and inside the
+// polygon) so the anchor∪primitives union is just the polygon outline.
+const CUSTOM_PAD_ANCHOR_MM: f64 = 0.25;
 const KICAD_FILL_NONE = "    (fill none)\n";
 // Shared `.kicad_mod` line fragments for graphic primitives (layer + stroke).
 const KICAD_LAYER_FMT = "    (layer \"{s}\")\n";
@@ -240,6 +243,7 @@ fn emitKicadPad(w: anytype, node: ast.Node) !void {
     var is_oval_drill = false;
     var mask_margin: ?f64 = null;
     var no_paste = false;
+    var poly_node: ?ast.Node = null;
     // rratio defaults match KiCad's library default; override via
     // `(roundrect_rratio R)` on the .sexp pad form. 0.5 turns a square
     // pad into a circle (used by mounting-spacer footprints).
@@ -268,6 +272,7 @@ fn emitKicadPad(w: anytype, node: ast.Node) !void {
             const cl = child.asList().?;
             if (cl.len >= 2) mask_margin = cl[1].asNumber();
         }
+        if (child.isForm("poly")) poly_node = child;
         if (child.asAtom()) |a| {
             if (std.mem.eql(u8, a, "no-paste")) no_paste = true;
         }
@@ -289,15 +294,21 @@ fn emitKicadPad(w: anytype, node: ast.Node) !void {
         }
     }
 
-    // Write pad name - handle atom, string, or numeric names
-    if (children[1].asAtom() orelse children[1].asString()) |pn| {
-        try w.print("  (pad \"{s}\" {s} {s}\n", .{ pn, kicad_type, kicad_shape });
-    } else if (children[1].asNumber()) |num| {
-        const inum: i64 = @intFromFloat(num);
-        try w.print("  (pad \"{d}\" {s} {s}\n", .{ inum, kicad_type, kicad_shape });
-    } else {
-        return;
+    // Resolve the pad name once (atom, string, or numeric).
+    var name_buf: [64]u8 = undefined;
+    const pad_name = padName(children[1], &name_buf) orelse return;
+
+    // A `custom` pad carries its real copper outline in `(poly …)`; emit it as
+    // a valid KiCad custom pad with `(primitives (gr_poly …))`. A `custom` pad
+    // with no polygon would be invalid in KiCad, so fall back to `rect`.
+    if (std.mem.eql(u8, pad_shape_internal, "custom")) {
+        if (poly_node) |pn| {
+            try emitKicadCustomPad(w, pad_name, kicad_type, x, y, sx, sy, pn, no_paste);
+            return;
+        }
     }
+    const emit_shape = if (std.mem.eql(u8, kicad_shape, "custom")) "rect" else kicad_shape;
+    try w.print("  (pad \"{s}\" {s} {s}\n", .{ pad_name, kicad_type, emit_shape });
 
     try w.print("    (at {d:.2} {d:.2})\n", .{ x, y });
     try w.print("    (size {d:.2} {d:.2})\n", .{ sx, sy });
@@ -335,6 +346,54 @@ fn emitKicadPad(w: anytype, node: ast.Node) !void {
 
     if (mask_margin) |m| try w.print("    (solder_mask_margin {d:.3})\n", .{m});
 
+    try w.writeAll("  )\n");
+}
+
+/// Resolve a pad-name node (atom / string / numeric) into a string, writing a
+/// numeric name into `buf`. Returns null if the node is none of those.
+fn padName(node: ast.Node, buf: []u8) ?[]const u8 {
+    if (node.asAtom() orelse node.asString()) |s| return s;
+    if (node.asNumber()) |num| {
+        return std.fmt.bufPrint(buf, "{d}", .{@as(i64, @intFromFloat(num))}) catch null;
+    }
+    return null;
+}
+
+/// Emit a KiCad custom pad. The `.sexp` stores the outline in `(poly …)` as
+/// footprint-absolute points with `(pos …)` at the polygon's bbox center; KiCad
+/// wants pad-local points, so each is rewritten relative to `(at x y)`. A small
+/// anchor rect sits inside the polygon so the union is exactly the outline.
+fn emitKicadCustomPad(
+    w: anytype,
+    pad_name: []const u8,
+    kicad_type: []const u8,
+    x: f64,
+    y: f64,
+    bw: f64,
+    bh: f64,
+    poly_node: ast.Node,
+    no_paste: bool,
+) !void {
+    const anchor = @min(@min(bw, bh) * 0.5, CUSTOM_PAD_ANCHOR_MM);
+    try w.print("  (pad \"{s}\" {s} custom\n", .{ pad_name, kicad_type });
+    try w.print("    (at {d:.3} {d:.3})\n", .{ x, y });
+    try w.print("    (size {d:.3} {d:.3})\n", .{ anchor, anchor });
+    if (no_paste) {
+        try w.writeAll("    (layers \"F.Cu\" \"F.Mask\")\n");
+    } else {
+        try w.writeAll("    (layers \"F.Cu\" \"F.Mask\" \"F.Paste\")\n");
+    }
+    try w.writeAll("    (options (clearance outline) (anchor rect))\n");
+    try w.writeAll("    (primitives\n      (gr_poly\n        (pts\n");
+    const pl = poly_node.asList() orelse return;
+    for (pl[1..]) |pt| {
+        const ptl = pt.asList() orelse continue;
+        if (ptl.len < 2) continue;
+        const ax = ptl[0].asNumber() orelse continue;
+        const ay = ptl[1].asNumber() orelse continue;
+        try w.print("          (xy {d:.3} {d:.3})\n", .{ ax - x, ay - y });
+    }
+    try w.writeAll("        )\n        (width 0)\n        (fill yes)\n      )\n    )\n");
     try w.writeAll("  )\n");
 }
 
@@ -652,4 +711,22 @@ test "exportFootprintMod emits silkscreen poly + rect (pin-1 markers must not be
     try std.testing.expect(std.mem.indexOf(u8, out, "(fill solid)") != null);
     // The rect becomes an fp_rect.
     try std.testing.expect(std.mem.indexOf(u8, out, "(fp_rect (start -1.00 -1.00) (end 1.00 1.00)") != null);
+}
+
+test "exportFootprintMod emits a custom pad's polygon as KiCad (primitives (gr_poly …))" {
+    // spec: export_kicad - Emits a custom pad's (poly …) outline as a valid KiCad custom pad with (primitives (gr_poly …)) in pad-local coords
+    const src =
+        \\(footprint "T"
+        \\  (pad 1 smd custom (pos 1.000 1.000) (size 2.000 2.000)
+        \\    (poly (0.000 0.000) (2.000 0.000) (2.000 2.000) (0.000 2.000))))
+    ;
+    const out = try exportFootprintMod(std.testing.allocator, src, null, null, null);
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "smd custom") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(primitives") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(gr_poly") != null);
+    // Footprint-absolute (0,0) is rewritten pad-local relative to (at 1 1) → (-1,-1).
+    try std.testing.expect(std.mem.indexOf(u8, out, "(xy -1.000 -1.000)") != null);
+    // The anchor stays small so anchor∪primitives is exactly the polygon.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(size 0.250 0.250)") != null);
 }
