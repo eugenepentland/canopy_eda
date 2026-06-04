@@ -71,6 +71,14 @@ const LOOP_W: f64 = 6.0; // weight on the loop *inductance* term (nH; see
 const K_COMPACT: f64 = 0.10; // pull toward the cluster centroid (keeps HPWL tight)
 const STARTS: usize = 48; // multi-start seeds; keep the lowest-scoring arrangement
 const MULTISTART_MAX_PARTS: usize = 32; // above this, single start (bound O(n²·starts))
+// The once-per-solve quality passes — rotation refine, the greedy `polish` local
+// search, and the priority-cap tuck — are cheap (linear-ish, fixed-pad surrogate,
+// run once on the winning arrangement, *not* per multi-start seed). They can cover
+// boards well above MULTISTART_MAX_PARTS. Without this, a 33–64-part block (e.g. an
+// MCU sub-block with ~30 decoupling caps) fell off the multi-start cliff to a bare
+// grid-seed + one relax — i.e. looked unplaced. Keep the expensive multi-start
+// gated at MULTISTART_MAX_PARTS; let the finishing passes run up to here.
+const POLISH_MAX_PARTS: usize = 64;
 // Real routed-trace loop scoring maze-routes every decoupling loop — accurate
 // but superlinear in board size (a 223-part board takes minutes). Above this
 // part count the *displayed* score keeps the continuous fixed-pad surrogate the
@@ -78,6 +86,11 @@ const MULTISTART_MAX_PARTS: usize = 32; // above this, single start (bound O(n²
 const ROUTED_SCORE_MAX_PARTS: usize = 48;
 const POLISH_SWEEPS: usize = 4; // greedy per-part tightening sweeps
 const POLISH_CELLS: i64 = 6; // half-window (grid cells) the polish search scans
+// Tighter polish window for the single-start band above MULTISTART_MAX_PARTS:
+// each cell is a full-board objective eval, so the (2c+1)² cost dominates a
+// large-board regen. ±3 cells (≈±0.6 mm) is a local tuck on an already-relaxed
+// part — ~3.4× fewer evals than ±6 with nearly all the quality.
+const POLISH_CELLS_LARGE: i64 = 3;
 // Routed-aware finishing polish (small boards only): a final local search that
 // scores each candidate (position × rotation) with the *real* maze-routed loop
 // length instead of the fixed-pad surrogate, so a cap settles at the rotation/
@@ -845,7 +858,10 @@ fn optimize(parts: []Part, idx_of: *std.StringHashMap(usize), nets: []const Flat
     if (parts.len == 0 or parts.len > maxParts) return;
     const small = parts.len <= MULTISTART_MAX_PARTS;
     const starts: usize = if (small) STARTS else 1;
-    const rounds: usize = if (small) ROT_ROUNDS else 0;
+    // Rotation refine is part of the cheap finishing work — keep it on for the
+    // single-start band above MULTISTART_MAX_PARTS, where seed quality is lower
+    // and a flipped cap matters more, not less.
+    const rounds: usize = if (parts.len <= POLISH_MAX_PARTS) ROT_ROUNDS else 0;
     var best: [maxParts]Pose = undefined;
     var best_cost: f64 = std.math.inf(f64);
     var s: usize = 0;
@@ -953,7 +969,7 @@ const TIGHTEN_CELLS: i64 = 14;
 /// would drop a net, so tightening can never reduce routability. No-op on big
 /// boards / when nothing is ranked.
 fn tightenPriorityLoops(arena: std.mem.Allocator, parts: []Part, loops: []const Loop, nets: []const FlatNet, priority: []const u32) void {
-    if (parts.len < 2 or parts.len > MULTISTART_MAX_PARTS) return;
+    if (parts.len < 2 or parts.len > POLISH_MAX_PARTS) return;
     if (loops.len > maxParts) return;
     // Nothing ranked ⇒ skip entirely (don't even pay for the baseline route).
     var any = false;
@@ -1247,13 +1263,20 @@ fn polish(
     loops: []const Loop,
     params: Params,
 ) void {
-    if (parts.len < 2 or parts.len > MULTISTART_MAX_PARTS) return;
+    if (parts.len < 2 or parts.len > POLISH_MAX_PARTS) return;
+    // Each candidate cell costs a full-board objective eval (no incremental
+    // precompute yet), so the per-part window is (2·cells+1)² evals. On the
+    // single-start band above MULTISTART_MAX_PARTS that quadratic times tens of
+    // extra parts is what makes a regen drag, and the relax pass has already
+    // brought every part within ~a grid cell of its spot — so a tighter local
+    // tuck recovers nearly all the quality at a fraction of the evals.
+    const cells: i64 = if (parts.len <= MULTISTART_MAX_PARTS) POLISH_CELLS else POLISH_CELLS_LARGE;
     var sweep: usize = 0;
     while (sweep < POLISH_SWEEPS) : (sweep += 1) {
         var improved = false;
         for (parts, 0..) |*p, i| {
             if (p.kind == .hub) continue;
-            if (polishPart(parts, idx_of, nets, loops, i, params)) improved = true;
+            if (polishPart(parts, idx_of, nets, loops, i, cells, params)) improved = true;
         }
         if (!improved) break;
     }
@@ -1267,6 +1290,7 @@ fn polishPart(
     nets: []const FlatNet,
     loops: []const Loop,
     i: usize,
+    cells: i64,
     params: Params,
 ) bool {
     const p = &parts[i];
@@ -1278,10 +1302,10 @@ fn polishPart(
     var best_rot = p.rot;
     var improved = false;
     for (ROT_CAND) |r| {
-        var dy: i64 = -POLISH_CELLS;
-        while (dy <= POLISH_CELLS) : (dy += 1) {
-            var dx: i64 = -POLISH_CELLS;
-            while (dx <= POLISH_CELLS) : (dx += 1) {
+        var dy: i64 = -cells;
+        while (dy <= cells) : (dy += 1) {
+            var dx: i64 = -cells;
+            while (dx <= cells) : (dx += 1) {
                 p.rot = r;
                 p.x = ox + @as(f64, @floatFromInt(dx)) * GRID_MM;
                 p.y = oy + @as(f64, @floatFromInt(dy)) * GRID_MM;
@@ -3343,7 +3367,11 @@ fn isHub(ref: []const u8) bool {
     const s = shortName(ref);
     if (s.len == 0) return true;
     return switch (s[0]) {
-        'R', 'C', 'L', 'F', 'D' => false,
+        // Passives that hang off a hub, never anchor the layout. 'Y' is a crystal/
+        // oscillator: a 2-pin part wired to an IC's XTAL pins with its own load
+        // caps — treating it as a hub strands an extra anchor that pulls the cap
+        // cluster away from the real IC (see bcuda-mcu-w55rp20).
+        'R', 'C', 'L', 'F', 'D', 'Y' => false,
         else => true,
     };
 }
@@ -3373,6 +3401,7 @@ test "isHub classifies passives and hubs, including sub-block paths" {
     try testing.expect(!isHub("C1"));
     try testing.expect(!isHub("pwr/R2"));
     try testing.expect(!isHub("L7"));
+    try testing.expect(!isHub("Y1")); // crystal — passive, hangs off the IC
 }
 
 // spec: placement/optimizer - excludes ground nets from spring forces
