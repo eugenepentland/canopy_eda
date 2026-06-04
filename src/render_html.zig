@@ -224,10 +224,11 @@ pub fn renderToHtml(
 }
 
 fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: review.Status, schematic_path: []const u8) !void {
-    // The Schematic⇄PCB toggle that consumed `schematic_path` was removed (the
-    // whole-design PCB layout is no longer offered from this page). The
-    // parameter is kept so renderToHtml's call site stays stable.
-    _ = schematic_path;
+    // `schematic_path` is "/modules/" for a reusable module, "/schematics/" for
+    // a full design. Modules get the Schematic ⇄ PCB Layout switcher (small
+    // enough that the whole-block PCB layout is fast and useful); full designs
+    // intentionally omit it — see the head-links comment below.
+    const is_module = std.mem.eql(u8, schematic_path, "/modules/");
     const banner_class: []const u8 = switch (status) {
         .pass => "banner banner-pass",
         .warn => "banner banner-warn",
@@ -246,11 +247,21 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
     try w.writeAll(".sexp</code></div></div>");
     try w.print("<div class=\"{s}\">{s}</div>", .{ banner_class, banner_label });
     try w.writeAll("<div class=\"head-links\">");
-    // The whole-design PCB layout is intentionally not linked from here: it
-    // places every component at once, which is too slow to be useful. Instead
-    // each sub-block previews its own PCB layout on demand — see the global
-    // "PCB Layout settings" bar (writePcbGlobals) and the per-sub-block "PCB
-    // Layout" panels (writeSubBlockPcb).
+    // A module gets the Schematic ⇄ PCB Layout switcher (the PCB layout page
+    // links back here), so the two views toggle symmetrically.
+    if (is_module) {
+        try w.print(
+            "<nav class=\"viewtoggle\" aria-label=\"View\">" ++
+                "<a class=\"active\" href=\"/modules/{s}\">Schematic</a>" ++
+                "<a href=\"/pcb-layout/{s}\">PCB Layout</a></nav>",
+            .{ design_name, design_name },
+        );
+    }
+    // For a full design the whole-design PCB layout is intentionally not linked
+    // from here: it places every component at once, which is too slow to be
+    // useful. Instead each sub-block previews its own PCB layout on demand — see
+    // the global "PCB Layout settings" bar (writePcbGlobals) and the per-sub-
+    // block "PCB Layout" panels (writeSubBlockPcb).
     try w.writeAll(
         "<button class=\"head-link head-btn\" id=\"reload-btn\" type=\"button\" " ++
             "title=\"Re-read the .sexp source from disk and rebuild\">\u{21BB} Reload</button>",
