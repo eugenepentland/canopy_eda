@@ -61,7 +61,11 @@ const HUB_MASS: f64 = 4.0; // hubs move less → act as anchors
 const PASSIVE_MASS: f64 = 1.0;
 const SEED_GAP_MM: f64 = 1.5; // extra gap between seed grid cells
 const ROT_ROUNDS: usize = 2; // rotation-refine ↔ relax coordinate-descent rounds
-const LOOP_W: f64 = 3.0; // weight on loop length in the objective
+const LOOP_W: f64 = 3.0; // weight on loop length in the objective. On a solid GND
+// plane the loop length is dominated by the power-leg (L1) trace — the ground
+// return images directly under it (`loopGroundSpan` carries no lateral term) — so
+// minimising this minimises the real loop area (= power-leg length × dielectric
+// height). The displayed loop AREA is reported as exactly that product.
 const K_COMPACT: f64 = 0.10; // pull toward the cluster centroid (keeps HPWL tight)
 const STARTS: usize = 48; // multi-start seeds; keep the lowest-scoring arrangement
 const MULTISTART_MAX_PARTS: usize = 32; // above this, single start (bound O(n²·starts))
@@ -72,6 +76,35 @@ const MULTISTART_MAX_PARTS: usize = 32; // above this, single start (bound O(n²
 const ROUTED_SCORE_MAX_PARTS: usize = 48;
 const POLISH_SWEEPS: usize = 4; // greedy per-part tightening sweeps
 const POLISH_CELLS: i64 = 6; // half-window (grid cells) the polish search scans
+// Routed-aware finishing polish (small boards only): a final local search that
+// scores each candidate (position × rotation) with the *real* maze-routed loop
+// length instead of the fixed-pad surrogate, so a cap settles at the rotation/
+// offset that shortens the actual trace — the surrogate-driven `polish` optimises
+// a straight-gap proxy and can pick a different rotation/side than the router.
+const ROUTED_POLISH_SWEEPS: usize = 2;
+const ROUTED_POLISH_CELLS: i64 = 3; // ±0.6 mm window — local tuck/flip, not a re-place
+// Routed polish routes once per candidate cell, so its cost grows with
+// caps × window × loops. Cap it well below `ROUTED_SCORE_MAX_PARTS` (which only
+// gates a single end-of-solve route) so a mid-size module can't make an
+// on-demand regenerate take tens of seconds. Small power modules — the case this
+// helps most — sit comfortably under it.
+const ROUTED_POLISH_MAX_PARTS: usize = 16;
+// Top-K rerank (small boards, `rerankSolve`): the multi-start ranks arrangements
+// by the fixed-pad surrogate, but the surrogate-best global arrangement isn't
+// always the routed-best — and `routedPolish`'s small window can only tuck a cap,
+// not move it to a different side of the IC. So keep the K lowest-surrogate
+// candidates, finish each fully, and pick the one with the lowest *routed*
+// objective. K is scaled down with part count to bound the per-candidate finish
+// cost (each runs polish + compaction); `RERANK_BUDGET/parts` ≈ a fixed work cap.
+const RERANK_K: usize = 12;
+const RERANK_BUDGET: usize = 120;
+// The rerank path can afford a much larger seed pool than the default `STARTS`:
+// it only runs on ≤16-part boards (relax is cheap there) and — because the
+// candidates are reranked on the *routed* metric — a wider, more diverse pool can
+// only surface a better arrangement, never a worse one (unlike raising the global
+// `STARTS`, which would re-feed the surrogate-only path on mid-size boards and
+// just slow them down). So the higher count is scoped to here.
+const RERANK_STARTS: usize = 128;
 const W_ISOLATE: f64 = 1.5; // keep-away penalty: sensitive nets ✗ high-current/switch parts
 const ISO_FALLOFF_MM: f64 = 4.0; // distance scale of the isolation penalty (falls to ~0 beyond)
 const CAP_W_MAX: f64 = 3.0; // max value-priority boost for the smallest cap on a rail
@@ -192,7 +225,9 @@ const LoopSums = struct { raw: f64, weighted: f64 };
 pub const Breakdown = struct {
     hpwl: f64, // total signal HPWL (mm); objective weight 1
     loop_raw: f64, // summed unweighted hot-loop length (mm) = Score.loop_mm
-    loop_weighted: f64, // value-priority-weighted loop sum (what the objective uses)
+    loop_weighted: f64, // value-priority-weighted loop-length sum
+    area_raw: f64 = 0, // enclosed loop area (mm²) = loop length × dielectric height (GND-plane model)
+    area_weighted: f64 = 0, // value-weighted loop area (mm²); reported, not a separate objective term
     isolation: f64, // raw sensitive↔aggressor keep-away penalty
     alignment: f64, // raw row/column tidiness penalty
     objective: f64, // the weighted total the multi-start/polish minimize
@@ -297,16 +332,29 @@ const Built = struct {
     loops: []Loop,
 };
 
+/// How `solve` treats an applied `cached` layout.
+pub const SeedMode = enum {
+    /// Apply `cached` verbatim when it covers every part (no optimization, fast);
+    /// otherwise place from scratch. The normal load/regenerate path.
+    place,
+    /// Seed from `cached` and run only the local routed tuck (`routedPolish`) on
+    /// it — improve an existing (e.g. hand) layout in place without re-placing.
+    refine,
+};
+
 /// Build a placement for `block`. When `cached` covers every part, its poses
 /// are applied directly (no optimization — fast); otherwise the optimizer runs
 /// and `Placement.generated` is set so the caller can persist a fresh cache.
-/// All output is allocated in `arena`.
+/// In `.refine` mode an applied cached layout is given the local routed tuck
+/// (`routedPolish`) instead of being left as-is; `generated` stays false so the
+/// caller leaves the auto cache untouched. All output is in `arena`.
 pub fn solve(
     arena: std.mem.Allocator,
     block: *const DesignBlock,
     project_dir: []const u8,
     cached: ?[]const RefPose,
     params: Params,
+    mode: SeedMode,
 ) std.mem.Allocator.Error!Placement {
     var prep = try prepare(arena, block, project_dir, params);
     const parts = prep.parts;
@@ -322,20 +370,35 @@ pub fn solve(
 
     const generated = !applyCached(parts, cached);
     if (generated) {
-        optimize(parts, &prep.idx_of, nets, built, params);
-        // Mirror matched halves (e.g. a symmetric amp's input/output sections)
-        // when the design is genuinely symmetric; a no-op otherwise.
-        try symmetrize(arena, parts, &prep.idx_of, nets, built, params);
-        // Final pull-together: dock any part still held off by the snap-safety
-        // gap so every courtyard abuts at least one neighbour (provably tight),
-        // highest placement-order priority docking first.
-        compactToContact(parts, prep.priority);
+        if (parts.len >= 2 and parts.len <= ROUTED_POLISH_MAX_PARTS and built.loops.len > 0) {
+            // Small board with decoupling loops: pick the global arrangement on the
+            // real routed metric (rerank the top-K multi-start candidates), then the
+            // local routed tuck. This is what closes the surrogate↔routed gap that a
+            // single surrogate-selected arrangement + local polish leaves on the table.
+            try rerankSolve(arena, parts, &prep.idx_of, nets, built, params, prep.priority);
+        } else {
+            optimize(parts, &prep.idx_of, nets, built, params);
+            // Mirror matched halves (e.g. a symmetric amp's input/output sections)
+            // when the design is genuinely symmetric; a no-op otherwise.
+            try symmetrize(arena, parts, &prep.idx_of, nets, built, params);
+            // Final pull-together: dock any part still held off by the snap-safety
+            // gap so every courtyard abuts at least one neighbour (provably tight),
+            // highest placement-order priority docking first.
+            compactToContact(parts, prep.priority);
+        }
         // Then tuck each *declared-priority* decoupling cap onto its IC pin: a
-        // per-cap wide-window search the global optimizer's balanced objective
-        // (and the polish's small window) can't do — so an author-ranked bypass
-        // cap actually hugs its power pin instead of settling a millimetre off.
-        // Each tuck is re-routed and reverted if it would drop a net, so the
-        // tightening can never make routing worse.
+        // per-cap wide-window search neither the global optimizer's balanced
+        // objective nor the polish's small window can do — so an author-ranked
+        // bypass cap actually hugs its power pin. Each tuck is re-routed and
+        // reverted if it would drop a net, so it never makes routing worse;
+        // self-no-ops when nothing is ranked or there are no loops.
+        tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
+    } else if (mode == .refine and parts.len >= 2 and parts.len <= ROUTED_POLISH_MAX_PARTS and built.loops.len > 0) {
+        // Seeded from an existing layout: keep its global arrangement, just run the
+        // local routed tuck on it (the same monotonic, safety-netted pass the auto
+        // solve finishes with), then the same priority-cap tuck. Lets a good hand
+        // layout be improved without losing it.
+        routedPolish(arena, parts, &prep.idx_of, nets, built.loops, params);
         tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
     }
 
@@ -534,6 +597,11 @@ fn breakdownWith(parts: []const Part, params: Params, score: Score, loop_weighte
         .hpwl = score.hpwl_mm,
         .loop_raw = score.loop_mm,
         .loop_weighted = loop_weighted,
+        // On a GND plane the loop area = loop length × the L1→L2 dielectric height
+        // (the return images under the power trace). Reported for the inductance
+        // framing; it is exactly proportional to the loop term the objective uses.
+        .area_raw = score.loop_mm * LAYER_GAP_MM,
+        .area_weighted = loop_weighted * LAYER_GAP_MM,
         .isolation = iso,
         .alignment = al,
         .objective = score.hpwl_mm + params.loop_w * loop_weighted +
@@ -569,6 +637,39 @@ fn routedLoops(
         weighted += lp.weight * total;
     }
     return .{ .raw = raw, .weighted = weighted };
+}
+
+/// Weighted routed-loop length over a *subset* of `loops`: `match=true` sums only
+/// the loops owned by cap index `cap`, `match=false` sums all the others. Same
+/// routing as `routedLoops` (the grid is built from every part, so a leg still
+/// detours around the whole board) — it just sums a slice. `routedPolish` re-routes
+/// only the cap it is currently moving (`match=true`) each candidate, and adds the
+/// others' length as a baseline measured once per part — cutting the routes per
+/// candidate from "every loop" to "this cap's loop(s)". A moved cap obstructing a
+/// foreign loop is a second-order effect, re-measured when the next part is polished.
+fn routedSubsetWeighted(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    loops: []const Loop,
+    cap: usize,
+    match: bool,
+) f64 {
+    var weighted: f64 = 0;
+    var lr_opt: ?router.LoopRouter = router.LoopRouter.init(arena, parts, nets, idx_of, .{}) catch null;
+    const ready = if (lr_opt) |lr| lr.ready else false;
+    for (loops) |lp| {
+        if ((lp.cap == cap) != match) continue;
+        const pwr = if (ready) blk: {
+            const cap_c = worldPadCenter(parts[lp.cap], lp.cap_pwr.x, lp.cap_pwr.y);
+            const hub_c = worldPadCenter(parts[lp.hub], lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
+            const routed = lr_opt.?.legLen(cap_c, hub_c, lp.pwr_net) catch null;
+            break :blk if (routed) |r| r else surrogatePwrLeg(parts, lp) + UNROUTABLE_PENALTY_MM;
+        } else surrogatePwrLeg(parts, lp);
+        weighted += lp.weight * (pwr + loopGroundSpan(parts, lp));
+    }
+    return weighted;
 }
 
 /// Apply a cached layout to `parts` when it covers every one (matched by
@@ -614,6 +715,84 @@ fn anyCourtOverlap(parts: []const Part) bool {
         }
     }
     return false;
+}
+
+/// Small-board solve that picks the global arrangement on the *routed* metric.
+/// The multi-start ranks arrangements by the fixed-pad surrogate, but the
+/// surrogate-best isn't always the routed-best, and `routedPolish`'s ±0.6mm
+/// window can only tuck a cap, not move it to the other side of the IC — so a
+/// poor side-assignment survives. Here we keep the K lowest-surrogate relaxed
+/// candidates, finish each one fully (polish → legalize → symmetrise → compact),
+/// score the finished arrangement by the real routed objective, keep the best,
+/// then run the local routed tuck on it. The surrogate-best is always among the
+/// K, so the result is never worse than the single-arrangement path. K scales
+/// down with part count to bound the per-candidate finish cost.
+fn rerankSolve(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    built: Built,
+    params: Params,
+    priority: []const u32,
+) std.mem.Allocator.Error!void {
+    // rerankSolve only runs on small boards (≤ ROUTED_POLISH_MAX_PARTS ≤
+    // MULTISTART_MAX_PARTS), so the multi-start + rotation refine always apply.
+    const starts: usize = RERANK_STARTS;
+    const rounds: usize = ROT_ROUNDS;
+    const k = std.math.clamp(RERANK_BUDGET / parts.len, 2, RERANK_K);
+
+    // Keep the K lowest-surrogate relaxed arrangements (poses flattened K×n).
+    var cand = try arena.alloc(Pose, k * parts.len);
+    const cand_cost = try arena.alloc(f64, k);
+    for (cand_cost) |*c| c.* = std.math.inf(f64);
+    var s: usize = 0;
+    while (s < starts) : (s += 1) {
+        runStart(parts, idx_of, nets, built, s, rounds, params);
+        const cost = objectiveCost(parts, idx_of, nets, built.loops, params);
+        var worst: usize = 0;
+        for (cand_cost, 0..) |c, i| {
+            if (c > cand_cost[worst]) worst = i;
+        }
+        if (cost < cand_cost[worst]) {
+            cand_cost[worst] = cost;
+            for (parts, 0..) |p, j| cand[worst * parts.len + j] = .{ .x = p.x, .y = p.y, .rot = p.rot };
+        }
+    }
+
+    // Finish each kept candidate and keep the routed-best finished arrangement.
+    var scratch = std.heap.ArenaAllocator.init(arena);
+    defer scratch.deinit();
+    const best = try arena.alloc(Pose, parts.len);
+    var best_cost: f64 = std.math.inf(f64);
+    var have = false;
+    for (0..k) |c| {
+        if (cand_cost[c] == std.math.inf(f64)) continue;
+        for (parts, 0..) |*p, j| {
+            p.x = cand[c * parts.len + j].x;
+            p.y = cand[c * parts.len + j].y;
+            p.rot = cand[c * parts.len + j].rot;
+        }
+        polish(parts, idx_of, nets, built.loops, params);
+        legalizeFinal(parts);
+        try symmetrize(arena, parts, idx_of, nets, built, params);
+        compactToContact(parts, priority);
+        _ = scratch.reset(.retain_capacity);
+        const sc = routedObjectiveCost(scratch.allocator(), parts, idx_of, nets, built.loops, params);
+        if (!have or sc < best_cost) {
+            best_cost = sc;
+            have = true;
+            for (parts, 0..) |p, j| best[j] = .{ .x = p.x, .y = p.y, .rot = p.rot };
+        }
+    }
+    if (have) for (parts, 0..) |*p, j| {
+        p.x = best[j].x;
+        p.y = best[j].y;
+        p.rot = best[j].rot;
+    };
+
+    // Local routed tuck on the chosen global arrangement.
+    routedPolish(arena, parts, idx_of, nets, built.loops, params);
 }
 
 /// Run the placer: multi-start seeds → keep the lowest-scoring arrangement →
@@ -1066,6 +1245,139 @@ fn polishPart(
                 p.y = oy + @as(f64, @floatFromInt(dy)) * GRID_MM;
                 if (overlapsAny(parts, p)) continue;
                 const c = objectiveCost(parts, idx_of, nets, loops, params);
+                if (c < best_cost - 1e-9) {
+                    best_cost = c;
+                    best_x = p.x;
+                    best_y = p.y;
+                    best_rot = r;
+                    improved = true;
+                }
+            }
+        }
+    }
+    p.x = best_x;
+    p.y = best_y;
+    p.rot = best_rot;
+    return improved;
+}
+
+/// Final refinement on the *routed* objective. Mirrors `polish` (greedy per-part
+/// position × rotation grid search, several sweeps) but scores every candidate
+/// with `routedObjectiveCost` — the real maze-routed loop length, the same metric
+/// the headline reports. The surrogate-driven `polish` tucks parts by a straight
+/// edge-to-edge gap, which can settle a cap on a rotation/side the router then
+/// routes long; this pass re-tucks each part to what actually routes short. Runs
+/// once on the finished layout, small boards only (one layout, so the router cost
+/// is bounded — one route per candidate cell). The window is deliberately small
+/// (`ROUTED_POLISH_CELLS`): a local tuck/flip, not a re-place, so it never undoes
+/// the global arrangement the multi-start already chose.
+fn routedPolish(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    loops: []const Loop,
+    params: Params,
+) void {
+    if (parts.len < 2 or parts.len > ROUTED_POLISH_MAX_PARTS or loops.len == 0) return;
+    // Only the decoupling caps (parts that own a loop) drive the routed term, so
+    // those are the only parts worth the per-candidate route. Resistors/other
+    // passives are left where the surrogate polish + compaction placed them.
+    var in_loop = [_]bool{false} ** maxParts;
+    for (loops) |lp| in_loop[lp.cap] = true;
+    var scratch = std.heap.ArenaAllocator.init(arena);
+    defer scratch.deinit();
+
+    // Snapshot the finished layout + its true routed objective. The greedy sweeps
+    // below only accept improving moves, but the closing snap/legalize can nudge a
+    // part off its chosen cell; the gate at the end reverts the whole pass if that
+    // ever leaves the board worse than it started, so routedPolish is never harmful.
+    var before: [maxParts]Pose = undefined;
+    for (parts, 0..) |p, i| before[i] = .{ .x = p.x, .y = p.y, .rot = p.rot };
+    _ = scratch.reset(.retain_capacity);
+    const before_cost = routedObjectiveCost(scratch.allocator(), parts, idx_of, nets, loops, params);
+
+    var sweep: usize = 0;
+    while (sweep < ROUTED_POLISH_SWEEPS) : (sweep += 1) {
+        var improved = false;
+        for (parts, 0..) |*p, i| {
+            if (p.kind == .hub or !in_loop[i]) continue;
+            if (routedPolishPart(&scratch, parts, idx_of, nets, loops, i, params)) improved = true;
+        }
+        if (!improved) break;
+    }
+    snapToGrid(parts);
+    legalizeOnGrid(parts);
+
+    _ = scratch.reset(.retain_capacity);
+    const after_cost = routedObjectiveCost(scratch.allocator(), parts, idx_of, nets, loops, params);
+    if (after_cost > before_cost + 1e-6) {
+        for (parts, 0..) |*p, i| {
+            p.x = before[i].x;
+            p.y = before[i].y;
+            p.rot = before[i].rot;
+        }
+    }
+}
+
+/// The routed objective `routedPolishPart` minimises for one candidate: HPWL +
+/// isolation + alignment over the live positions, plus the loop term split into
+/// the fixed `others_w` baseline and the freshly-routed loops owned by cap `cap`.
+/// `scratch` is reset before the route so the per-candidate router grid is freed.
+fn routedPolishCost(
+    scratch: *std.heap.ArenaAllocator,
+    parts: []const Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    loops: []const Loop,
+    params: Params,
+    cap: usize,
+    others_w: f64,
+) f64 {
+    _ = scratch.reset(.retain_capacity);
+    const focus_w = routedSubsetWeighted(scratch.allocator(), parts, idx_of, nets, loops, cap, true);
+    return hpwlScore(parts, idx_of, nets) + params.loop_w * (others_w + focus_w) +
+        params.w_isolate * isolationPenalty(parts) + params.w_align * alignmentPenalty(parts);
+}
+
+/// `polishPart` for the routed objective: pick the (position, rotation) over a
+/// small grid window that most lowers the routed objective, holding the others
+/// fixed. For speed it re-routes only the loop(s) owned by the moved cap `i` per
+/// candidate (`routedSubsetWeighted` with `match=true`) and adds the other loops'
+/// length (`others_w`) as a baseline measured once — the others don't move, so
+/// the only thing that changes cell-to-cell is this cap's own leg.
+fn routedPolishPart(
+    scratch: *std.heap.ArenaAllocator,
+    parts: []Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    loops: []const Loop,
+    i: usize,
+    params: Params,
+) bool {
+    const p = &parts[i];
+    const ox = p.x;
+    const oy = p.y;
+    // The loops not owned by `i`, routed once at `i`'s current position — the fixed
+    // part of the objective while `i` is tucked. (A moved `i` obstructing one of
+    // these is second-order; it is re-measured when the next part is polished.)
+    _ = scratch.reset(.retain_capacity);
+    const others_w = routedSubsetWeighted(scratch.allocator(), parts, idx_of, nets, loops, i, false);
+    var best_cost = routedPolishCost(scratch, parts, idx_of, nets, loops, params, i, others_w);
+    var best_x = ox;
+    var best_y = oy;
+    var best_rot = p.rot;
+    var improved = false;
+    for (ROT_CAND) |r| {
+        var dy: i64 = -ROUTED_POLISH_CELLS;
+        while (dy <= ROUTED_POLISH_CELLS) : (dy += 1) {
+            var dx: i64 = -ROUTED_POLISH_CELLS;
+            while (dx <= ROUTED_POLISH_CELLS) : (dx += 1) {
+                p.rot = r;
+                p.x = ox + @as(f64, @floatFromInt(dx)) * GRID_MM;
+                p.y = oy + @as(f64, @floatFromInt(dy)) * GRID_MM;
+                if (overlapsAny(parts, p)) continue;
+                const c = routedPolishCost(scratch, parts, idx_of, nets, loops, params, i, others_w);
                 if (c < best_cost - 1e-9) {
                     best_cost = c;
                     best_x = p.x;
@@ -1789,6 +2101,29 @@ fn objectiveCost(
         params.w_isolate * isolationPenalty(parts) + params.w_align * alignmentPenalty(parts);
 }
 
+/// The same objective as `objectiveCost`, but the loop term is the *real*
+/// maze-routed trace length (`routedLoops`) instead of the fixed-pad surrogate.
+/// The surrogate measures a straight edge-to-edge gap to the pinned hub pad; the
+/// router has to detour around foreign pads, so the two diverge — a layout whose
+/// cap sits a slightly-shorter gap away on one side can route longer than the
+/// other side. The surrogate-driven relax/polish therefore can't see which
+/// rotation/side actually routes short; `routedPolish` uses this to re-tuck on
+/// the metric the headline reports. `scratch` is a resettable arena the caller
+/// wipes between evaluations (the router allocates a fresh grid per call).
+fn routedObjectiveCost(
+    scratch: std.mem.Allocator,
+    parts: []const Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    loops: []const Loop,
+    params: Params,
+) f64 {
+    const hpwl = hpwlScore(parts, idx_of, nets);
+    const loop_weighted = routedLoops(scratch, parts, idx_of, nets, loops).weighted;
+    return hpwl + params.loop_w * loop_weighted +
+        params.w_isolate * isolationPenalty(parts) + params.w_align * alignmentPenalty(parts);
+}
+
 /// Tidiness reward (as a penalty to minimize): for each part pair, the smaller
 /// of their x/y offsets, clamped to `ALIGN_CLAMP_MM`. Driving it down lines
 /// parts up into shared rows/columns; the clamp means only near-aligned pairs
@@ -1820,18 +2155,19 @@ fn surrogatePwrLeg(parts: []const Part, lp: Loop) f64 {
     return fixedReachable(worldRect(cap, lp.cap_pwr), parts, lp.cap, worldRect(parts[lp.hub], lp.hub_pwr_pin));
 }
 
-/// The non-power half of the physical loop (mm): the cap's own pad-to-pad span
-/// (its body) + the ground return — cap GND pad → via↓ → GND plane → via↑ → the
-/// pinned IC GND pad. The plane lateral has no obstacles, so it's a straight
-/// edge-to-edge gap (not routed); the two `LAYER_GAP_MM` vias close it
-/// vertically. Shared by the surrogate and the real-trace score — only the power
-/// leg is ever maze-routed, the ground return runs in the solid plane.
+/// The non-power half of the physical loop (mm), modelled for a *solid adjacent
+/// GND plane* (the board's L2): the cap's own pad-to-pad span (its body) + the
+/// two `LAYER_GAP_MM` via transitions (cap GND pad → plane, plane → IC GND pad).
+/// There is NO lateral ground-return term: on a plane the return current images
+/// directly under the power trace (path of least inductance), so the loop area is
+/// set by the power-leg length, not by how far the cap's GND pad sits from the IC
+/// GND *pin*. (For a board with a discrete routed return instead of a plane, that
+/// lateral distance would matter — not this design; see the design's `(kicad-pcb)`
+/// stackup, always plane-on-L2.)
 fn loopGroundSpan(parts: []const Part, lp: Loop) f64 {
     const cap = parts[lp.cap];
-    const cap_gnd = worldRect(cap, lp.cap_gnd);
-    const span = rectGap(worldRect(cap, lp.cap_pwr), cap_gnd);
-    const ret = 2 * LAYER_GAP_MM + rectGap(cap_gnd, worldRect(parts[lp.hub], lp.hub_gnd_pin));
-    return span + ret;
+    const span = rectGap(worldRect(cap, lp.cap_pwr), worldRect(cap, lp.cap_gnd));
+    return span + 2 * LAYER_GAP_MM;
 }
 
 /// Analytic loop sums (raw + value-weighted) from the fixed-pad surrogate: the

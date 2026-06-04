@@ -116,9 +116,14 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 
     // Tuning weights come from the query (?w_align=… etc) — any present (or
     // ?regen=1) forces a fresh solve; otherwise the cached layout is reused.
+    // ?refine=<layout> seeds the solve from a named saved layout and runs only the
+    // routed tuck on it (improve a hand layout in place; the auto cache is left as-is).
     const tune = parseTuning(req);
-    const cached = if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
-    const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params) catch {
+    const refine_name: ?[]const u8 = if (req.query()) |q| q.get("refine") else |_| null;
+    const cached = if (refine_name) |rn|
+        readLayoutPoses(ctx.allocator, ctx.project_dir, name, rn)
+    else if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
+    const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place) catch {
         res.status = 500;
         res.body = PLACEMENT_ERR_MSG;
         return;
@@ -247,8 +252,11 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     };
 
     const tune = parseTuning(req);
-    const cached = if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
-    const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params) catch {
+    const refine_name: ?[]const u8 = if (req.query()) |q| q.get("refine") else |_| null;
+    const cached = if (refine_name) |rn|
+        readLayoutPoses(ctx.allocator, ctx.project_dir, name, rn)
+    else if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
+    const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place) catch {
         res.status = 500;
         res.body = PLACEMENT_ERR_MSG;
         return;
@@ -300,8 +308,8 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
 /// weighted contribution, and the summed `objective`. Shared by the GET export
 /// and the POST score endpoint so both report the same shape.
 fn writeBreakdownJson(w: *std.Io.Writer, b: optimizer.Breakdown, params: optimizer.Params) std.Io.Writer.Error!void {
-    try w.print("{{\"hpwl\":{d},\"loop_raw\":{d},\"loop_weighted\":{d},\"isolation\":{d},\"alignment\":{d},", .{
-        b.hpwl, b.loop_raw, b.loop_weighted, b.isolation, b.alignment,
+    try w.print("{{\"hpwl\":{d},\"loop_raw\":{d},\"loop_weighted\":{d},\"area_raw\":{d},\"isolation\":{d},\"alignment\":{d},", .{
+        b.hpwl, b.loop_raw, b.loop_weighted, b.area_raw, b.isolation, b.alignment,
     });
     try w.print("\"loop_term\":{d},\"isolation_term\":{d},\"alignment_term\":{d},\"objective\":{d}}}", .{
         params.loop_w * b.loop_weighted, params.w_isolate * b.isolation, params.w_align * b.alignment, b.objective,
@@ -854,6 +862,21 @@ fn readSaved(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8
     return m;
 }
 
+/// The poses of a single named saved layout (`?refine=<layout>`), as `RefPose`s
+/// ready to seed `solve`. Null when no layout by that name exists. Used to refine
+/// a specific hand layout with the routed tuck rather than re-placing from scratch.
+fn readLayoutPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, want: []const u8) ?[]const optimizer.RefPose {
+    for (readLayouts(alloc, project_dir, name)) |lay| {
+        if (!std.mem.eql(u8, lay.name, want)) continue;
+        var list: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
+        for (lay.parts) |pp| {
+            list.append(alloc, .{ .ref = pp.ref, .x = pp.x, .y = pp.y, .rot = pp.rot }) catch return null;
+        }
+        return list.toOwnedSlice(alloc) catch null;
+    }
+    return null;
+}
+
 /// Read every saved layout for `name` from its `.layouts.json` sidecar
 /// (newest first). When that file is absent, migrate the legacy single-slot
 /// `.placement.json` into a one-entry list so the historic hand placement is
@@ -1261,6 +1284,8 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8) st
     try w.writeAll("<span class=\"delta\" id=\"sc-hpwl-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-loop\" title=\"weighted decoupling-loop term (loop_w × value-weighted loop length)\">loop …</span>");
     try w.writeAll("<span class=\"delta\" id=\"sc-loop-d\"></span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-area\" title=\"enclosed loop area (mm²) = loop length × dielectric height\">loop area …</span>");
+    try w.writeAll("<span class=\"delta\" id=\"sc-area-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-align\" title=\"row/column alignment term (w_align × penalty)\">align …</span>");
     try w.writeAll("<span class=\"delta\" id=\"sc-align-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-iso\" title=\"sensitive↔aggressor isolation term (w_isolate × penalty)\">iso …</span>");
@@ -1399,8 +1424,9 @@ fn writeLegend(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!vo
         if (part.fallback) fallback_count += 1;
     }
     try w.writeAll("<div class=\"pcb-legend\">");
-    try w.writeAll("<span class=\"sw prox\"></span> proximity (hug pin)");
-    try w.writeAll("<span class=\"sw gnd\"></span> ground return");
+    try w.writeAll("<span class=\"sw prox\"></span> power leg (L1)");
+    try w.writeAll("<span class=\"sw l2gnd\"></span> GND return (images under trace, L2 plane)");
+    try w.writeAll("<span class=\"sw viadot\"></span> GND via (L1↔L2, Ø from route params)");
     try w.writeAll("<span class=\"sw sig\"></span> signal");
     try w.writeAll("<span class=\"sw esc\"></span> escape trace (signal breakout)");
     if (fallback_count > 0) {
@@ -1562,8 +1588,9 @@ fn writePcbData(
     try w.writeAll("],");
 
     // Decoupling loops: cap power/ground pads + the hub's candidate power/
-    // ground pads. The client measures each leg edge-to-edge to the nearest
-    // hub pad (matching the server's `scoreLayout`).
+    // ground pads, plus the *pinned* hub power/ground pads (`pp`/`gp`) the score
+    // actually uses — the client draws the exact scored loop (power leg, L2 ground
+    // return to `gp`, and the enclosed-area polygon) from those.
     try w.writeAll("\"loops\":[");
     for (p.loops, 0..) |lp, i| {
         if (i > 0) try w.writeAll(",");
@@ -1571,6 +1598,10 @@ fn writePcbData(
         try writePadRect(w, lp.cap_pwr);
         try w.writeAll(",\"cg\":");
         try writePadRect(w, lp.cap_gnd);
+        try w.writeAll(",\"pp\":");
+        try writePadRect(w, lp.hub_pwr_pin);
+        try w.writeAll(",\"gp\":");
+        try writePadRect(w, lp.hub_gnd_pin);
         try w.writeAll(",\"hp\":");
         try writePadRectList(w, lp.hub_pwr);
         try w.writeAll(",\"hg\":");
@@ -1862,6 +1893,8 @@ const PAGE_CSS =
     \\.pcb-legend .sw{display:inline-block;width:18px;height:0;border-top-width:3px;border-top-style:solid;vertical-align:middle}
     \\.pcb-legend .sw.prox{border-color:#ea580c}
     \\.pcb-legend .sw.gnd{border-color:#22b8cf}
+    \\.pcb-legend .sw.l2gnd{border-color:#58a6ff;border-top-style:dashed}
+    \\.pcb-legend .sw.viadot{border:0;height:9px;width:9px;border-radius:50%;background:radial-gradient(circle,#fff 0 1.5px,#ca8a04 1.5px)}
     \\.pcb-legend .sw.sig{border-color:#9aa7b4}
     \\.pcb-legend .sw.esc{border-color:#f85149}
     \\.pcb-legend .note{color:#d29922}
@@ -1990,8 +2023,14 @@ const BOARD_JS =
     \\   var col=l.k=="proximity"?"#ea580c":(l.k=="ground"?"#22b8cf":"#9aa7b4");
     \\   aw(a,b,col,l.k=="signal"?0.7:1.3,l.k=="signal"?0.55:0.9);});
     \\ PCB.loops.forEach(function(L){
-    \\   var cp=wrect(L.cap,L.cp),p1=npts(cp,nhub(cp,L.cap,L.hub,L.hp).rect); aw(p1[0],p1[1],"#ea580c",1.3,0.9);
-    \\   var cg=wrect(L.cap,L.cg),p2=npts(cg,nhub(cg,L.cap,L.hub,L.hg).rect); aw(p2[0],p2[1],"#22b8cf",1.3,0.9);});
+    \\   var A=wpt(L.hub,L.pp.x,L.pp.y), B=wpt(L.cap,L.cp.x,L.cp.y),
+    \\       C=wpt(L.cap,L.cg.x,L.cg.y), D=wpt(L.hub,L.gp.x,L.gp.y);
+    \\   aw(B,A,"#ea580c",1.3,0.95);
+    \\   var rp=[C,B,A,D].map(function(q){return X(q.x).toFixed(1)+","+Y(q.y).toFixed(1);}).join(" ");
+    \\   var pl=el("polyline",{points:rp,fill:"none",stroke:"#58a6ff","stroke-width":1.3,opacity:0.85,"stroke-dasharray":"4 2"});
+    \\   var gt=el("title",{}); gt.textContent="GND return images under the power trace on the L2 plane (drops at the GND pads)"; pl.appendChild(gt);
+    \\   gR.appendChild(pl);
+    \\   [C,D].forEach(function(v){drawVia(gR,v.x,v.y,viaGeo().dia,viaGeo().drill);});});
     \\ if(!((PCB.tracks||[]).length)){var tw=parseFloat((document.getElementById("r-tw")||{}).value)||0.15;
     \\  (PCB.stubs||[]).forEach(function(st){var a=wpt(st.p,st.ax,st.ay),b=wpt(st.p,st.bx,st.by);
     \\   var ln=el("line",{x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),
@@ -2008,11 +2047,13 @@ const BOARD_JS =
     \\ setSc("sc-obj","objective "+b.objective.toFixed(1));
     \\ setSc("sc-hpwl","HPWL "+b.hpwl.toFixed(1));
     \\ setSc("sc-loop","loop "+b.loop_term.toFixed(1)+" · "+PCB.caps+" cap");
+    \\ setSc("sc-area","loop area "+(b.area_raw||0).toFixed(2)+" mm²");
     \\ setSc("sc-align","align "+b.alignment_term.toFixed(1));
     \\ setSc("sc-iso","iso "+b.isolation_term.toFixed(1));
     \\ delta("sc-obj-d",b.objective,PCB.auto.objective);
     \\ delta("sc-hpwl-d",b.hpwl,PCB.auto.hpwl);
     \\ delta("sc-loop-d",b.loop_term,PCB.auto.loop_term);
+    \\ delta("sc-area-d",b.area_raw||0,PCB.auto.area_raw||0);
     \\ delta("sc-align-d",b.alignment_term,PCB.auto.alignment_term);
     \\ delta("sc-iso-d",b.isolation_term,PCB.auto.isolation_term);
     \\}
@@ -2109,13 +2150,16 @@ const BOARD_JS =
     \\svg.addEventListener("pointermove",function(ev){if(!pan)return;var r=svg.getBoundingClientRect();
     \\ vb.x=pan.vx-(ev.clientX-pan.cx)*(vb.w/r.width);vb.y=pan.vy-(ev.clientY-pan.cy)*(vb.h/r.height);setVB();});
     \\svg.addEventListener("pointerup",function(ev){pan=null;svg.style.cursor="";try{svg.releasePointerCapture(ev.pointerId);}catch(e){}});
+    \\function viaGeo(){var va=parseFloat((document.getElementById("r-va")||{}).value),
+    \\ vd=parseFloat((document.getElementById("r-vd")||{}).value);return {dia:va>0?va:0.4,drill:vd>0?vd:0.2};}
+    \\function drawVia(g,wx,wy,dia,drill){var r=Math.max(dia/2*S,2.5),rh=Math.min(Math.max(drill/2*S,1),r*0.7);
+    \\ g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:r.toFixed(1),fill:"#ca8a04"}));
+    \\ g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:rh.toFixed(1),fill:"#fff"}));}
     \\function drawRoute(){while(gT.firstChild)gT.removeChild(gT.firstChild);
     \\ (PCB.tracks||[]).forEach(function(t){gT.appendChild(el("line",{x1:X(t.x1).toFixed(1),y1:Y(t.y1).toFixed(1),
     \\   x2:X(t.x2).toFixed(1),y2:Y(t.y2).toFixed(1),stroke:t.l==0?"#f85149":"#388bfd",
     \\   "stroke-width":Math.max(t.w*S,1.2).toFixed(1),"stroke-linecap":"round","stroke-linejoin":"round",opacity:0.85}));});
-    \\ (PCB.vias||[]).forEach(function(v){var r=Math.max(v.d/2*S,2.5);
-    \\   gT.appendChild(el("circle",{cx:X(v.x).toFixed(1),cy:Y(v.y).toFixed(1),r:r.toFixed(1),fill:"#ca8a04"}));
-    \\   gT.appendChild(el("circle",{cx:X(v.x).toFixed(1),cy:Y(v.y).toFixed(1),r:(r*0.45).toFixed(1),fill:"#fff"}));});}
+    \\ (PCB.vias||[]).forEach(function(v){drawVia(gT,v.x,v.y,v.d,viaGeo().drill);});}
     \\function clrVal(){var ci=document.getElementById("r-cl"),c=ci?parseFloat(ci.value):NaN;
     \\ return (c>0)?c:(PCB.clr||0.127);}
     \\function drawClr(){while(gC.firstChild)gC.removeChild(gC.firstChild);
