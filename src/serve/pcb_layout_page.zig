@@ -1490,6 +1490,29 @@ fn writeSidebar(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placem
 
 const LocalPt = struct { x: f64, y: f64 };
 
+/// World position of the GND-plane via covering the pad centred at (`cx`,`cy`),
+/// or that pad centre itself when no via is near (big board / no route). The
+/// loop overlay drops its GND via here so the previewed via is the DRC-safe one
+/// routing will use — never a second via beside it. A via belonging to this pad
+/// sits within the fan-out radius; anything past `VIA_MATCH_MM` is a neighbour's.
+const VIA_MATCH_MM: f64 = 3.0;
+/// Only run the pass-1 GND-via preview on boards small enough that the page
+/// already pays for routed scoring (mirrors the optimizer's ROUTED_SCORE_MAX_PARTS);
+/// bigger boards skip it and the overlay falls back to the pad centre.
+const ROUTED_VIA_PREVIEW_MAX_PARTS: usize = 48;
+fn dropViaPos(vias: []const router.Via, cx: f64, cy: f64) LocalPt {
+    var best_d2: f64 = VIA_MATCH_MM * VIA_MATCH_MM;
+    var found: ?LocalPt = null;
+    for (vias) |vi| {
+        const d2 = (vi.x - cx) * (vi.x - cx) + (vi.y - cy) * (vi.y - cy);
+        if (d2 <= best_d2) {
+            best_d2 = d2;
+            found = .{ .x = vi.x, .y = vi.y };
+        }
+    }
+    return found orelse .{ .x = cx, .y = cy };
+}
+
 fn writePcbData(
     w: *std.Io.Writer,
     alloc: std.mem.Allocator,
@@ -1590,7 +1613,20 @@ fn writePcbData(
     // Decoupling loops: cap power/ground pads + the hub's candidate power/
     // ground pads, plus the *pinned* hub power/ground pads (`pp`/`gp`) the score
     // actually uses — the client draws the exact scored loop (power leg, L2 ground
-    // return to `gp`, and the enclosed-area polygon) from those.
+    // return to `gp`) from those. `cgv`/`gpv` are the DRC-safe via drop points.
+    //
+    // The GND vias the loop overlay draws: the routed set when a route is present,
+    // else `route`'s pass-1 placement on small boards — so the previewed loop via
+    // is exactly the one routing will drop (no preview-via + real-via doubling),
+    // and it always meets clearance. Big boards (no routed scoring) fall back to
+    // the raw pad centre inside `dropViaPos`.
+    const drop_vias: []const router.Via = if (routed) |r|
+        r.vias
+    else if (p.parts.len <= ROUTED_VIA_PREVIEW_MAX_PARTS)
+        (router.groundVias(alloc, p, .{}) catch &.{})
+    else
+        &.{};
+
     try w.writeAll("\"loops\":[");
     for (p.loops, 0..) |lp, i| {
         if (i > 0) try w.writeAll(",");
@@ -1606,6 +1642,13 @@ fn writePcbData(
         try writePadRectList(w, lp.hub_pwr);
         try w.writeAll(",\"hg\":");
         try writePadRectList(w, lp.hub_gnd);
+        // DRC-safe via drop points (world mm) where the L2 ground return punches to
+        // the plane: the cap's GND pad and the IC's pinned GND pin.
+        const cg_c = optimizer.worldPadCenter(p.parts[lp.cap], lp.cap_gnd.x, lp.cap_gnd.y);
+        const gp_c = optimizer.worldPadCenter(p.parts[lp.hub], lp.hub_gnd_pin.x, lp.hub_gnd_pin.y);
+        const cgv = dropViaPos(drop_vias, cg_c[0], cg_c[1]);
+        const gpv = dropViaPos(drop_vias, gp_c[0], gp_c[1]);
+        try w.print(",\"cgv\":{{\"x\":{d},\"y\":{d}}},\"gpv\":{{\"x\":{d},\"y\":{d}}}", .{ cgv.x, cgv.y, gpv.x, gpv.y });
         try w.writeAll("}");
     }
     try w.writeAll("],");
@@ -2022,15 +2065,16 @@ const BOARD_JS =
     \\   var a=wpt(l.a,l.ax,l.ay),b=wpt(l.b,l.bx,l.by);
     \\   var col=l.k=="proximity"?"#ea580c":(l.k=="ground"?"#22b8cf":"#9aa7b4");
     \\   aw(a,b,col,l.k=="signal"?0.7:1.3,l.k=="signal"?0.55:0.9);});
+    \\ var routedNow=((PCB.tracks||[]).length>0);
     \\ PCB.loops.forEach(function(L){
     \\   var A=wpt(L.hub,L.pp.x,L.pp.y), B=wpt(L.cap,L.cp.x,L.cp.y),
-    \\       C=wpt(L.cap,L.cg.x,L.cg.y), D=wpt(L.hub,L.gp.x,L.gp.y);
+    \\       C=L.cgv||wpt(L.cap,L.cg.x,L.cg.y), D=L.gpv||wpt(L.hub,L.gp.x,L.gp.y);
     \\   aw(B,A,"#ea580c",1.3,0.95);
     \\   var rp=[C,B,A,D].map(function(q){return X(q.x).toFixed(1)+","+Y(q.y).toFixed(1);}).join(" ");
     \\   var pl=el("polyline",{points:rp,fill:"none",stroke:"#58a6ff","stroke-width":1.3,opacity:0.85,"stroke-dasharray":"4 2"});
-    \\   var gt=el("title",{}); gt.textContent="GND return images under the power trace on the L2 plane (drops at the GND pads)"; pl.appendChild(gt);
+    \\   var gt=el("title",{}); gt.textContent="GND return images under the power trace on the L2 plane (drops at the DRC-safe GND vias)"; pl.appendChild(gt);
     \\   gR.appendChild(pl);
-    \\   [C,D].forEach(function(v){drawVia(gR,v.x,v.y,viaGeo().dia,viaGeo().drill);});});
+    \\   if(!routedNow)[C,D].forEach(function(v){drawVia(gR,v.x,v.y,viaGeo().dia,viaGeo().drill);});});
     \\ if(!((PCB.tracks||[]).length)){var tw=parseFloat((document.getElementById("r-tw")||{}).value)||0.15;
     \\  (PCB.stubs||[]).forEach(function(st){var a=wpt(st.p,st.ax,st.ay),b=wpt(st.p,st.bx,st.by);
     \\   var ln=el("line",{x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),
