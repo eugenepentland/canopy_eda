@@ -114,14 +114,15 @@ const CAP_W_MAX: f64 = 3.0; // max value-priority boost for the smallest cap on 
 // are pulled tighter than generic / output decoupling. Applied only when an
 // inductor marks the design a switcher. PROVISIONAL — magnitude wants tuning.
 const INPUT_LOOP_BOOST: f64 = 2.0;
-// Weight on the compactness term (`compactnessTerm` — bbox area or protrusion).
-// DEFAULT 0: compactness is OFF, so the objective is purely loop + wirelength +
-// congestion. A 12-design sweep found *either* compactness metric raises hot-loop
-// inductance ~10-13% (up to +88% on a buck) — it drags caps off their IC power
-// pins — and only helped one board, so it's opt-in, not a default. Raise it (the
-// "Compact w" tuning input) to trade loop for a tighter envelope on a board where
-// that's worth it; bbox is the gentler/better of the two metrics.
-const W_ALIGN: f64 = 0.0;
+// Weight on the placement-regularizer term (`compactnessTerm`, default `.tidiness`).
+// 0.5 is the long-shipped tidiness weight: the row/column alignment reward keeps
+// large boards compact (aligned parts route shorter — load-bearing on 200+ part
+// designs) while staying a gentle nudge on small ones. The `.bbox` / `.protrusion`
+// area modes are opt-in alternatives; a 12-design sweep showed THEY raise hot-loop
+// inductance ~10-13% (up to +88% on a buck) by dragging caps off their IC power
+// pins and do nothing for large-board row alignment — so they are not the default.
+const ALIGN_CLAMP_MM: f64 = 1.5; // only finish near-alignments within this offset (no long pulls)
+const W_ALIGN: f64 = 0.5;
 // Weight on the routing-congestion penalty (`congestionPenalty`). HPWL/RSMT alone
 // does not predict routability — local congestion must be traded off against it
 // (Spindler & Johannes RUDY; UCLA mPL). The penalty is ~0 until a region's
@@ -133,19 +134,19 @@ const GRID_COURTYARDS = true; // round courtyard half-extents to GRID_MM so edge
 const COMPACT_MIN_OVERLAP: f64 = GRID_MM; // min shared-edge length when docking a floating part
 const COMPACT_EPS: f64 = 1e-4; // courtyard-gap tolerance for the "touching" test
 
-/// Which compactness metric `w_align` weights when compactness is enabled
-/// (`w_align > 0`; it is OFF by default — see `W_ALIGN`). The old pairwise
-/// tidiness reward is gone; this is its opt-in replacement.
-///   • `bbox` (default) — area of the whole-module courtyard bounding box (mm²).
-///     The gentler metric: only the *outermost* parts feel it, so it compacts the
-///     envelope without dragging interior caps off their pins. Lower loop + tighter
-///     footprint than protrusion across a 12-design sweep.
+/// Which placement-regularizer `w_align` weights.
+///   • `tidiness` (default) — the long-shipped pairwise row/column alignment reward
+///     (`tidinessPenalty`): for each part pair, the smaller of their x/y offsets,
+///     clamped to `ALIGN_CLAMP_MM`. Driving it down lines parts into shared rows /
+///     columns, which keeps routing short — essential on large boards (a 301-part
+///     design's wirelength ~doubled with it removed) and a gentle nudge on small ones.
+///   • `bbox` — area of the whole-module courtyard bounding box (mm²). Only the
+///     *outermost* parts feel it, so it does nothing for large-board row alignment.
 ///   • `protrusion` — Σ per-part squared reach from the cluster centroid to its
-///     courtyard's far corner (mm²). *Every* part feels an inward + orient pull, so
-///     it can tuck caps' GND inward — but it fights the loop (≈+10-13%, up to +88%)
-///     and often grows the board, so it lost the sweep. Kept selectable for the odd
-///     board where a maximally-tight cluster matters more than the loop.
-pub const CompactMode = enum { bbox, protrusion };
+///     courtyard's far corner (mm²). Tucks caps' GND inward but fights the hot loop
+///     (≈+10-13%, up to +88% on a buck), so it lost the small-board sweep.
+/// `bbox`/`protrusion` are opt-in alternatives via the "Compact" dropdown / `?compact=`.
+pub const CompactMode = enum { tidiness, bbox, protrusion };
 
 /// Runtime-tunable weights (the consts above are the defaults). Passed to
 /// `solve` so the UI can adjust placement without a rebuild. Only the steering
@@ -156,7 +157,7 @@ pub const Params = struct {
     w_congest: f64 = W_CONGEST,
     cap_w_max: f64 = CAP_W_MAX,
     grid_courtyards: bool = GRID_COURTYARDS,
-    compact_mode: CompactMode = .bbox,
+    compact_mode: CompactMode = .tidiness,
 };
 
 /// Placement grid: final positions snap to this (mm). The interactive page
@@ -2224,9 +2225,27 @@ fn compactnessProtrusion(parts: []const Part) f64 {
 /// in mm² so the weight stays on a comparable scale across the two.
 fn compactnessTerm(parts: []const Part, mode: CompactMode) f64 {
     return switch (mode) {
+        .tidiness => tidinessPenalty(parts),
         .bbox => compactnessArea(parts),
         .protrusion => compactnessProtrusion(parts),
     };
+}
+
+/// Tidiness reward (as a penalty to minimize): for each part pair, the smaller of
+/// their x/y offsets, clamped to `ALIGN_CLAMP_MM`. Driving it down lines parts up
+/// into shared rows / columns; the clamp means only near-aligned pairs feel a pull,
+/// so distant parts aren't dragged together. The long-shipped default regularizer —
+/// cheap, and on large boards aligned rows route far shorter (the `.bbox`/
+/// `.protrusion` area modes do not align, so they can't substitute here).
+fn tidinessPenalty(parts: []const Part) f64 {
+    var total: f64 = 0;
+    for (parts, 0..) |a, i| {
+        for (parts[i + 1 ..]) |b| {
+            const off = @min(@abs(a.x - b.x), @abs(a.y - b.y));
+            total += @min(off, ALIGN_CLAMP_MM);
+        }
+    }
+    return total;
 }
 
 const CONGEST_BINS: usize = 8; // congestion grid resolution per axis

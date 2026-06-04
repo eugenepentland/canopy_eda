@@ -1356,9 +1356,7 @@ fn readAutoParams(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
     if (po.object.get("cap_w_max")) |v| p.cap_w_max = jsonNum(v);
     if (po.object.get("grid")) |v| p.grid_courtyards = v == .bool and v.bool;
     if (po.object.get("compact")) |v| {
-        // Explicit both ways: the default is now protrusion, so a cache that chose
-        // bbox must restore bbox rather than fall through to the default.
-        if (v == .string) p.compact_mode = if (std.mem.eql(u8, v.string, "bbox")) .bbox else .protrusion;
+        if (v == .string) p.compact_mode = parseCompactMode(v.string);
     }
     return p;
 }
@@ -1394,10 +1392,17 @@ fn parseTuning(req: *httpz.Request) Tuning {
         tuned = true;
     }
     if (q.get("compact")) |v| {
-        p.compact_mode = if (std.mem.eql(u8, v, "protrusion")) .protrusion else .bbox;
+        p.compact_mode = parseCompactMode(v);
         tuned = true;
     }
     return .{ .params = p, .tuned = tuned, .regen = regen or tuned };
+}
+
+/// Map the `compact` query/cache string to a `CompactMode` (default `.tidiness`).
+fn parseCompactMode(s: []const u8) optimizer.CompactMode {
+    if (std.mem.eql(u8, s, "bbox")) return .bbox;
+    if (std.mem.eql(u8, s, "protrusion")) return .protrusion;
+    return .tidiness;
 }
 
 fn parseF(s: []const u8, dflt: f64) f64 {
@@ -1546,12 +1551,18 @@ fn writeLayDelta(w: *std.Io.Writer, s: LayoutScore, auto: LayoutScore) std.Io.Wr
 /// Apply button (wired in BOARD_JS to reload with the values as query params,
 /// which forces a regenerate). Values reflect the weights behind the layout.
 fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!void {
-    const prot = params.compact_mode == .protrusion;
+    const sel = struct {
+        fn s(active: bool) []const u8 {
+            return if (active) " selected" else "";
+        }
+    }.s;
+    const m = params.compact_mode;
     try w.writeAll("<div class=\"pcb-tune\"><span class=\"tune-h\">Tuning</span>");
-    try w.print("<label title=\"compactness metric\">Compact <select id=\"t-compact\">" ++
+    try w.print("<label title=\"placement regularizer\">Compact <select id=\"t-compact\">" ++
+        "<option value=\"tidiness\"{s}>tidiness (row/col)</option>" ++
         "<option value=\"bbox\"{s}>bbox area</option>" ++
         "<option value=\"protrusion\"{s}>protrusion</option></select></label>", .{
-        if (prot) "" else " selected", if (prot) " selected" else "",
+        sel(m == .tidiness), sel(m == .bbox), sel(m == .protrusion),
     });
     try w.print("<label>Compact w <input id=\"t-align\" type=\"number\" step=\"0.05\" min=\"0\" value=\"{d}\"></label>", .{params.w_align});
     try w.print("<label>Loop <input id=\"t-loop\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.loop_w});
