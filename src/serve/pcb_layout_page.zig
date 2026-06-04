@@ -1426,7 +1426,7 @@ fn writeLegend(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!vo
     try w.writeAll("<div class=\"pcb-legend\">");
     try w.writeAll("<span class=\"sw prox\"></span> power leg (L1)");
     try w.writeAll("<span class=\"sw l2gnd\"></span> GND return (images under trace, L2 plane)");
-    try w.writeAll("<span class=\"sw viadot\"></span> GND via (L1↔L2)");
+    try w.writeAll("<span class=\"sw viadot\"></span> GND via (L1↔L2, Ø from route params)");
     try w.writeAll("<span class=\"sw sig\"></span> signal");
     try w.writeAll("<span class=\"sw esc\"></span> escape trace (signal breakout)");
     if (fallback_count > 0) {
@@ -1894,7 +1894,7 @@ const PAGE_CSS =
     \\.pcb-legend .sw.prox{border-color:#ea580c}
     \\.pcb-legend .sw.gnd{border-color:#22b8cf}
     \\.pcb-legend .sw.l2gnd{border-color:#58a6ff;border-top-style:dashed}
-    \\.pcb-legend .sw.viadot{border:0;height:9px;width:9px;border-radius:50%;background:#fff;box-shadow:0 0 0 1.5px #58a6ff;vertical-align:middle}
+    \\.pcb-legend .sw.viadot{border:0;height:9px;width:9px;border-radius:50%;background:radial-gradient(circle,#fff 0 1.5px,#ca8a04 1.5px)}
     \\.pcb-legend .sw.sig{border-color:#9aa7b4}
     \\.pcb-legend .sw.esc{border-color:#f85149}
     \\.pcb-legend .note{color:#d29922}
@@ -2030,8 +2030,7 @@ const BOARD_JS =
     \\   var pl=el("polyline",{points:rp,fill:"none",stroke:"#58a6ff","stroke-width":1.3,opacity:0.85,"stroke-dasharray":"4 2"});
     \\   var gt=el("title",{}); gt.textContent="GND return images under the power trace on the L2 plane (drops at the GND pads)"; pl.appendChild(gt);
     \\   gR.appendChild(pl);
-    \\   [C,D].forEach(function(v){gR.appendChild(el("circle",
-    \\     {cx:X(v.x).toFixed(1),cy:Y(v.y).toFixed(1),r:3,fill:"#fff",stroke:"#58a6ff","stroke-width":1.2}));});});
+    \\   [C,D].forEach(function(v){drawVia(gR,v.x,v.y,viaGeo().dia,viaGeo().drill);});});
     \\ if(!((PCB.tracks||[]).length)){var tw=parseFloat((document.getElementById("r-tw")||{}).value)||0.15;
     \\  (PCB.stubs||[]).forEach(function(st){var a=wpt(st.p,st.ax,st.ay),b=wpt(st.p,st.bx,st.by);
     \\   var ln=el("line",{x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),
@@ -2151,13 +2150,16 @@ const BOARD_JS =
     \\svg.addEventListener("pointermove",function(ev){if(!pan)return;var r=svg.getBoundingClientRect();
     \\ vb.x=pan.vx-(ev.clientX-pan.cx)*(vb.w/r.width);vb.y=pan.vy-(ev.clientY-pan.cy)*(vb.h/r.height);setVB();});
     \\svg.addEventListener("pointerup",function(ev){pan=null;svg.style.cursor="";try{svg.releasePointerCapture(ev.pointerId);}catch(e){}});
+    \\function viaGeo(){var va=parseFloat((document.getElementById("r-va")||{}).value),
+    \\ vd=parseFloat((document.getElementById("r-vd")||{}).value);return {dia:va>0?va:0.4,drill:vd>0?vd:0.2};}
+    \\function drawVia(g,wx,wy,dia,drill){var r=Math.max(dia/2*S,2.5),rh=Math.min(Math.max(drill/2*S,1),r*0.7);
+    \\ g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:r.toFixed(1),fill:"#ca8a04"}));
+    \\ g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:rh.toFixed(1),fill:"#fff"}));}
     \\function drawRoute(){while(gT.firstChild)gT.removeChild(gT.firstChild);
     \\ (PCB.tracks||[]).forEach(function(t){gT.appendChild(el("line",{x1:X(t.x1).toFixed(1),y1:Y(t.y1).toFixed(1),
     \\   x2:X(t.x2).toFixed(1),y2:Y(t.y2).toFixed(1),stroke:t.l==0?"#f85149":"#388bfd",
     \\   "stroke-width":Math.max(t.w*S,1.2).toFixed(1),"stroke-linecap":"round","stroke-linejoin":"round",opacity:0.85}));});
-    \\ (PCB.vias||[]).forEach(function(v){var r=Math.max(v.d/2*S,2.5);
-    \\   gT.appendChild(el("circle",{cx:X(v.x).toFixed(1),cy:Y(v.y).toFixed(1),r:r.toFixed(1),fill:"#ca8a04"}));
-    \\   gT.appendChild(el("circle",{cx:X(v.x).toFixed(1),cy:Y(v.y).toFixed(1),r:(r*0.45).toFixed(1),fill:"#fff"}));});}
+    \\ (PCB.vias||[]).forEach(function(v){drawVia(gT,v.x,v.y,v.d,viaGeo().drill);});}
     \\function clrVal(){var ci=document.getElementById("r-cl"),c=ci?parseFloat(ci.value):NaN;
     \\ return (c>0)?c:(PCB.clr||0.127);}
     \\function drawClr(){while(gC.firstChild)gC.removeChild(gC.firstChild);
