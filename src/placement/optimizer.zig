@@ -908,6 +908,14 @@ fn compactToContact(parts: []Part, priority: []const u32) void {
     if (!has_anchor) settled[centralIndex(parts)] = true;
     growSettled(parts, settled);
 
+    // Spatial hash over the (static-within-a-pass) part keepouts, so the
+    // per-dock `overlapsAny` test is ~O(1) instead of O(n). Rebuilt after each
+    // commit (the only point a part actually moves); bit-identical to the dense
+    // scan because the query is a pure boolean OR (see CompactGrid). On the big
+    // single-start boards this docking loop is the dominant cost.
+    var grid: CompactGrid = undefined;
+    grid.build(parts);
+
     // Attach the rest highest-priority first (so declared parts claim the space
     // nearest the hub before the rest fill in), each at its own cheapest dock —
     // so the mass stays connected and every move is as small as it can be. With
@@ -919,7 +927,7 @@ fn compactToContact(parts: []Part, priority: []const u32) void {
         var best_d2: f64 = std.math.inf(f64);
         for (parts, 0..) |_, i| {
             if (settled[i]) continue;
-            const d = bestDock(parts, i, settled) orelse continue;
+            const d = bestDock(parts, i, settled, &grid) orelse continue;
             const take = pick == null or priority[i] > best_pri or
                 (priority[i] == best_pri and d.d2 < best_d2 - 1e-12);
             if (take) {
@@ -934,6 +942,7 @@ fn compactToContact(parts: []Part, priority: []const u32) void {
         parts[i].y = pick_pt.y;
         settled[i] = true;
         growSettled(parts, settled);
+        grid.build(parts); // the docked part moved → refresh the hash
     }
 }
 
@@ -1159,11 +1168,14 @@ const Dock = struct { pt: Pt, d2: f64 };
 /// every settled part, preserving `i`'s perpendicular coordinate (clamped just
 /// enough to keep a `COMPACT_MIN_OVERLAP` shared edge). Null when none is
 /// reachable (e.g. every dock would overlap a third part).
-fn bestDock(parts: []Part, i: usize, settled: []const bool) ?Dock {
+fn bestDock(parts: []Part, i: usize, settled: []const bool, grid: ?*const CompactGrid) ?Dock {
     const ox = parts[i].x;
     const oy = parts[i].y;
     const phw = effHw(parts[i]);
     const phh = effHh(parts[i]);
+    // The trial part's keepout box is position-independent (rot is fixed during
+    // the dock), so compute it once for the grid-accelerated overlap test.
+    const tbox = keepBoxOf(parts[i]);
     var best: ?Pt = null;
     var best_d2: f64 = std.math.inf(f64);
     for (parts, 0..) |o, j| {
@@ -1173,13 +1185,13 @@ fn bestDock(parts: []Part, i: usize, settled: []const bool) ?Dock {
         // Left / right of o: slide along x, keep y (clamped into the overlap band).
         const ylim = @max(0.0, sumh - COMPACT_MIN_OVERLAP);
         const cy = std.math.clamp(oy, o.y - ylim, o.y + ylim);
-        considerDock(parts, i, o.x + sumw, cy, ox, oy, &best, &best_d2);
-        considerDock(parts, i, o.x - sumw, cy, ox, oy, &best, &best_d2);
+        considerDock(parts, i, o.x + sumw, cy, ox, oy, &best, &best_d2, grid, tbox);
+        considerDock(parts, i, o.x - sumw, cy, ox, oy, &best, &best_d2, grid, tbox);
         // Above / below o: slide along y, keep x (clamped into the overlap band).
         const xlim = @max(0.0, sumw - COMPACT_MIN_OVERLAP);
         const cx = std.math.clamp(ox, o.x - xlim, o.x + xlim);
-        considerDock(parts, i, cx, o.y + sumh, ox, oy, &best, &best_d2);
-        considerDock(parts, i, cx, o.y - sumh, ox, oy, &best, &best_d2);
+        considerDock(parts, i, cx, o.y + sumh, ox, oy, &best, &best_d2, grid, tbox);
+        considerDock(parts, i, cx, o.y - sumh, ox, oy, &best, &best_d2, grid, tbox);
     }
     if (best) |pt| return .{ .pt = pt, .d2 = best_d2 };
     return null;
@@ -1188,14 +1200,21 @@ fn bestDock(parts: []Part, i: usize, settled: []const bool) ?Dock {
 /// Evaluate one candidate dock centre for part `i`: snap to grid, reject if its
 /// keepout overlaps anything, else keep it when it is the closest valid dock so
 /// far. Restores `i`'s position before returning (the caller commits the winner).
-fn considerDock(parts: []Part, i: usize, cx: f64, cy: f64, ox: f64, oy: f64, best: *?Pt, best_d2: *f64) void {
+/// With a `grid`, the overlap test is the O(1) spatial-hash query (bit-identical
+/// to the dense `overlapsAny`); `tbox` is `parts[i]`'s precomputed keepout.
+fn considerDock(parts: []Part, i: usize, cx: f64, cy: f64, ox: f64, oy: f64, best: *?Pt, best_d2: *f64, grid: ?*const CompactGrid, tbox: KeepBox) void {
     const sx = @round(cx / GRID_MM) * GRID_MM;
     const sy = @round(cy / GRID_MM) * GRID_MM;
-    parts[i].x = sx;
-    parts[i].y = sy;
-    const bad = overlapsAny(parts, &parts[i]);
-    parts[i].x = ox;
-    parts[i].y = oy;
+    const bad = if (grid) |g|
+        g.overlaps(i, tbox, sx + tbox.cxo, sy + tbox.cyo)
+    else blk: {
+        parts[i].x = sx;
+        parts[i].y = sy;
+        const b = overlapsAny(parts, &parts[i]);
+        parts[i].x = ox;
+        parts[i].y = oy;
+        break :blk b;
+    };
     if (bad) return;
     const d2 = (sx - ox) * (sx - ox) + (sy - oy) * (sy - oy);
     if (d2 < best_d2.* - 1e-12) {
@@ -3063,6 +3082,147 @@ fn accumulateRepulsion(parts: []const Part, boxes: []const KeepBox, ax: []f64, a
     }
     return any;
 }
+
+/// Max hash buckets (must be a power of two and >= bucketCount(maxParts)).
+const GRID_MAX_BUCKETS: usize = 8192;
+
+/// Bucket count for `n` parts: next power of two of 2n, clamped to
+/// [16, GRID_MAX_BUCKETS]. Keeps load factor < 1 while keeping the per-iter
+/// clear cheap on small boards.
+fn bucketCount(n: usize) u64 {
+    var b: u64 = 16;
+    const want = 2 * n;
+    while (b < want and b < GRID_MAX_BUCKETS) b <<= 1;
+    return b;
+}
+
+/// Hash a signed cell coordinate pair into a bucket index space. Mixing keeps
+/// adjacent cells from clustering in the same bucket.
+inline fn cellHash(cx: i64, cy: i64) u64 {
+    const ux: u64 = @bitCast(cx);
+    const uy: u64 = @bitCast(cy);
+    var h: u64 = ux *% 0x9E3779B97F4A7C15;
+    h ^= uy *% 0xC2B2AE3D27D4EB4F;
+    h ^= h >> 29;
+    h *%= 0xBF58476D1CE4E5B9;
+    h ^= h >> 32;
+    return h;
+}
+
+/// Uniform spatial hash over every part's collision keepout, used to make the
+/// `overlapsAny` boolean query ~O(1) instead of O(n). `compactToContact` is the
+/// dominant cost on large single-start boards (an O(n⁴)-ish blob-dock that calls
+/// `overlapsAny` for every trial dock of every floating part); the parts are
+/// static across one docking pass, so the grid is built once per pass and reused
+/// for all queries in it.
+///
+/// `overlapsAny` returns "does *any* other courtyard overlap" — a pure boolean
+/// OR, so it is order-independent: a grid that misses no truly-overlapping part
+/// returns the identical boolean. (False positives are impossible — the exact
+/// overlap test is still applied — and the cell size guarantees no false
+/// negatives, so this is bit-for-bit equivalent to the dense scan.) Because the
+/// answer is order-free we needn't sort or de-dup candidates: scanning a part
+/// twice (via a hash collision) or in any order yields the same boolean.
+const CompactGrid = struct {
+    n: usize,
+    box: [maxParts]KeepBox, // rotation-aware keepout (position-independent offsets)
+    wcx: [maxParts]f64, // world keepout centre x (= part.x + box.cxo)
+    wcy: [maxParts]f64,
+    minx: f64,
+    miny: f64,
+    inv_cell: f64,
+    mask: u64,
+    bstart: [GRID_MAX_BUCKETS + 1]u32,
+    items: [maxParts]u32,
+
+    /// (Re)build from the current part positions. Cheap O(n) — call once per
+    /// docking pass (positions are static within a pass).
+    fn build(g: *CompactGrid, parts: []const Part) void {
+        const n = parts.len;
+        g.n = n;
+        if (n == 0) return;
+        var max_half: f64 = 0;
+        var minx: f64 = std.math.floatMax(f64);
+        var miny: f64 = std.math.floatMax(f64);
+        var k: usize = 0;
+        while (k < n) : (k += 1) {
+            const b = keepBoxOf(parts[k]);
+            g.box[k] = b;
+            const cx = parts[k].x + b.cxo;
+            const cy = parts[k].y + b.cyo;
+            g.wcx[k] = cx;
+            g.wcy[k] = cy;
+            if (b.hw > max_half) max_half = b.hw;
+            if (b.hh > max_half) max_half = b.hh;
+            if (cx < minx) minx = cx;
+            if (cy < miny) miny = cy;
+        }
+        // Overlap needs |Δcx| < hw_i+hw_j ≤ 2·max_half on each axis, so a cell
+        // of 2·max_half puts any overlapping pair within one cell (3×3 cover).
+        const cell = 2 * max_half + 1e-9;
+        g.inv_cell = 1.0 / cell;
+        g.minx = minx;
+        g.miny = miny;
+
+        const nbuckets = bucketCount(n);
+        g.mask = nbuckets - 1;
+        var b: usize = 0;
+        while (b <= nbuckets) : (b += 1) g.bstart[b] = 0;
+        // Histogram cells into bucket counts.
+        var pbucket: [maxParts]u32 = undefined;
+        k = 0;
+        while (k < n) : (k += 1) {
+            const key: u32 = @intCast(g.cellKey(g.wcx[k], g.wcy[k]));
+            pbucket[k] = key;
+            g.bstart[key + 1] += 1;
+        }
+        b = 0;
+        while (b < nbuckets) : (b += 1) g.bstart[b + 1] += g.bstart[b];
+        var cursor: [GRID_MAX_BUCKETS]u32 = undefined;
+        b = 0;
+        while (b < nbuckets) : (b += 1) cursor[b] = g.bstart[b];
+        k = 0;
+        while (k < n) : (k += 1) {
+            const key = pbucket[k];
+            g.items[cursor[key]] = @intCast(k);
+            cursor[key] += 1;
+        }
+    }
+
+    inline fn cellOf(g: *const CompactGrid, wx: f64, wy: f64) struct { cx: i64, cy: i64 } {
+        return .{
+            .cx = @intFromFloat(@floor((wx - g.minx) * g.inv_cell)),
+            .cy = @intFromFloat(@floor((wy - g.miny) * g.inv_cell)),
+        };
+    }
+
+    inline fn cellKey(g: *const CompactGrid, wx: f64, wy: f64) u64 {
+        const c = g.cellOf(wx, wy);
+        return cellHash(c.cx, c.cy) & g.mask;
+    }
+
+    /// True iff any part other than `self` overlaps a keepout box `tbox` centred
+    /// at world `(twcx,twcy)`. Mirrors `overlapsAny`'s exact float test so the
+    /// boolean matches bit-for-bit.
+    fn overlaps(g: *const CompactGrid, self: usize, tbox: KeepBox, twcx: f64, twcy: f64) bool {
+        const c = g.cellOf(twcx, twcy);
+        var dgy: i64 = -1;
+        while (dgy <= 1) : (dgy += 1) {
+            var dgx: i64 = -1;
+            while (dgx <= 1) : (dgx += 1) {
+                const key: u32 = @intCast(cellHash(c.cx + dgx, c.cy + dgy) & g.mask);
+                const slice = g.items[g.bstart[key]..g.bstart[key + 1]];
+                for (slice) |o| {
+                    if (o == self) continue;
+                    const ox = (tbox.hw + g.box[o].hw) - @abs(twcx - g.wcx[o]);
+                    const oy = (tbox.hh + g.box[o].hh) - @abs(twcy - g.wcy[o]);
+                    if (ox > 1e-9 and oy > 1e-9) return true;
+                }
+            }
+        }
+        return false;
+    }
+};
 
 /// Deterministic separation direction; breaks exact ties by index parity.
 fn signNudge(d: f64, i: usize, j: usize) f64 {
