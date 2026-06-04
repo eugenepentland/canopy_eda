@@ -1356,7 +1356,9 @@ fn readAutoParams(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
     if (po.object.get("cap_w_max")) |v| p.cap_w_max = jsonNum(v);
     if (po.object.get("grid")) |v| p.grid_courtyards = v == .bool and v.bool;
     if (po.object.get("compact")) |v| {
-        if (v == .string and std.mem.eql(u8, v.string, "protrusion")) p.compact_mode = .protrusion;
+        // Explicit both ways: the default is now protrusion, so a cache that chose
+        // bbox must restore bbox rather than fall through to the default.
+        if (v == .string) p.compact_mode = if (std.mem.eql(u8, v.string, "bbox")) .bbox else .protrusion;
     }
     return p;
 }

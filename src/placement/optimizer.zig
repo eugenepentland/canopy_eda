@@ -133,14 +133,15 @@ const GRID_COURTYARDS = true; // round courtyard half-extents to GRID_MM so edge
 const COMPACT_MIN_OVERLAP: f64 = GRID_MM; // min shared-edge length when docking a floating part
 const COMPACT_EPS: f64 = 1e-4; // courtyard-gap tolerance for the "touching" test
 
-/// Which compactness metric `w_align` weights (prototype — compare the two):
-///   • `bbox`       — area of the whole-module courtyard bounding box (mm²).
-///     Coarse: only the *outermost* parts feel it, so interior caps have no
-///     gradient.
-///   • `protrusion` — Σ per-part squared reach from the cluster centroid to its
-///     courtyard's far corner (mm²). *Every* part feels an inward + orient pull,
-///     so caps rotate to present their short axis outward (GND tucked alongside
-///     the IC rather than pointing away).
+/// Which compactness metric `w_align` weights (replaces the old tidiness reward):
+///   • `protrusion` (default) — Σ per-part squared reach from the cluster centroid
+///     to its courtyard's far corner (mm²). *Every* part feels an inward + orient
+///     pull, so caps rotate to present their short axis outward (GND tucked
+///     alongside the IC rather than pointing away). Beat bbox on the test boards
+///     (bcuda-ldo5v −17% area & −5% loop; lt3045 a wash), both DRC-clean.
+///   • `bbox` — area of the whole-module courtyard bounding box (mm²). Coarser:
+///     only the *outermost* parts feel it, so interior caps have no gradient.
+///     Kept selectable via the "Compact" dropdown / `?compact=bbox`.
 pub const CompactMode = enum { bbox, protrusion };
 
 /// Runtime-tunable weights (the consts above are the defaults). Passed to
@@ -152,7 +153,7 @@ pub const Params = struct {
     w_congest: f64 = W_CONGEST,
     cap_w_max: f64 = CAP_W_MAX,
     grid_courtyards: bool = GRID_COURTYARDS,
-    compact_mode: CompactMode = .bbox,
+    compact_mode: CompactMode = .protrusion,
 };
 
 /// Placement grid: final positions snap to this (mm). The interactive page
