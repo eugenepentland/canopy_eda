@@ -375,6 +375,7 @@ src/placement/geometry.zig::SilkLine struct_
 src/placement/geometry.zig::load fn
 src/placement/optimizer.zig::BLOCK_PENALTY_MM value
 src/placement/optimizer.zig::Breakdown struct_
+src/placement/optimizer.zig::CompactMode enum_
 src/placement/optimizer.zig::GRID_MM value
 src/placement/optimizer.zig::Link struct_
 src/placement/optimizer.zig::Loop struct_
