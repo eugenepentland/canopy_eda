@@ -5,8 +5,6 @@ NAME_FIELD_PREFIX = "{\"name\":"
 OK_JSON_TRUE = "{\"ok\":true}"
 SEXP_EXT_LEN = ".sexp"
 SEXP_PATH_TEMPLATE = "{s}/{s}.sexp"
-in: src/diagram/render.zig
-in: src/diagram/render.zig
 in: src/render_html.zig
 in: src/review_html.zig
 in: src/serve/account_page.zig
@@ -35,7 +33,6 @@ in: src/serve/templates/oauth.zig
 in: src/serve/templates/pages.zig
 in: src/serve/upload.zig
 in: src/serve/upload_package.zig
-u8 = "#e3742f"
 u8 = "</section>"
 u8 = "<script>"
 u8 = "<style>"

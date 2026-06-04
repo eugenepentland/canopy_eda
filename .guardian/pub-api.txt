@@ -67,7 +67,6 @@ src/diagram/collect.zig::collectGraph fn
 src/diagram/diagram.zig::DIAGRAM_CSS value
 src/diagram/diagram.zig::renderBlockDiagramTabs fn
 src/diagram/diagram.zig::renderSystemSvg fn
-src/diagram/function.zig::buildFunctionGraph fn
 src/diagram/layout.zig::GroupBox struct_
 src/diagram/layout.zig::LNode struct_
 src/diagram/layout.zig::Layout struct_
@@ -98,7 +97,6 @@ src/diagram/membership.zig::build fn
 src/diagram/render.zig::CSS value
 src/diagram/render.zig::renderSystemStandalone fn
 src/diagram/render.zig::renderTabs fn
-src/diagram/render.zig::renderTabsWithFunction fn
 src/diagram/render.zig::system_color value
 src/diagram/render.zig::system_key value
 src/diagram/render.zig::system_label value

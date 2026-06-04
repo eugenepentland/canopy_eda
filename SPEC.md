@@ -316,22 +316,11 @@ Public functions: renderTabs
 - Draws each rail label once per source, not once per fanout branch
 - Colors power edges by voltage and renders a voltage legend
 - Draws per-rail load buckets with rail-colored headings in the power view
-- Tints RF edges returning to the connector distinctly from the forward chain
+- RF signal edges get no tab of their own; the flow shows in the Layout/System view
 - Puts the combined System view first and selects it by default
 - System view draws every class's edges at once, colored by class, with a class legend
 - System view labels functional bands so it reads as an architecture
 - Wraps a block's description onto multiple lines instead of truncating at one
-- Function view is the default first tab above the System view when one is supplied
-
-## diagram/function
-
-Public functions: buildFunctionGraph
-
-- Auto-groups undeclared sections by category into functional blocks
-- Declared (function …) groups claim their member sections by name
-- Function blocks list their cleaned member part labels
-- A declared subtitle becomes the box caption and the verb the tooltip
-- A signal link outranks a power link when subsystems share both
 
 ## diagram/diagram
 
