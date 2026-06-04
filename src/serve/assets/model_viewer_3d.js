@@ -156,7 +156,12 @@
 
   function deg2rad(d) { return d * Math.PI / 180; }
   function applyTransform() {
-    modelGroup.rotation.set(deg2rad(rot[0]), deg2rad(rot[1]), deg2rad(rot[2]), "XYZ");
+    // KiCad renders the model rotation as the INVERSE of Three.js' XYZ order —
+    // it applies the (xyz) values in Z·Y·X order with the angles negated, which
+    // equals tjsXYZ(rot)ᵀ. Match it so the preview is faithful for EVERY
+    // rotation, not just the ones whose matrix happens to be symmetric (a 90°
+    // Y-flip like the barrel jack exposed the difference; a 180° one didn't).
+    modelGroup.rotation.set(deg2rad(-rot[0]), deg2rad(-rot[1]), deg2rad(-rot[2]), "ZYX");
     modelGroup.position.set(off[0], off[1], off[2]);
     markDirty();
   }
