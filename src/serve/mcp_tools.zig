@@ -698,7 +698,10 @@ fn toolDownloadFootprint(allocator: std.mem.Allocator, project_dir: []const u8, 
     try json_writer.writeString(w, imp.footprint_name);
     try w.writeAll(",\"pinout\":");
     try json_writer.writeString(w, imp.pinout_name);
-    try w.print(",\"has_3d_model\":{s}}}", .{if (imp.has_3d) "true" else "false"});
+    try w.print(",\"has_3d_model\":{s}", .{if (imp.has_3d) "true" else "false"});
+    try w.writeAll(",\"component_action\":");
+    try json_writer.writeString(w, @tagName(imp.component));
+    try w.writeAll("}");
     return true;
 }
 

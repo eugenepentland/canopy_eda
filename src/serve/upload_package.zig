@@ -190,8 +190,8 @@ pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         };
     }
 
-    // Write component definition
-    upload.writeComponentFile(ctx.allocator, ctx.project_dir, safe_name, safe_name, fp_name_final, sym_data.?);
+    // Write component definition (overwrites any existing one — see contract)
+    _ = upload.writeComponentFile(ctx.allocator, ctx.project_dir, safe_name, safe_name, fp_name_final, sym_data.?);
 
     // Save STEP model to lib/models/ if provided
     if (step_data) |sd| {
