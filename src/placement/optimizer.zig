@@ -115,11 +115,13 @@ const CAP_W_MAX: f64 = 3.0; // max value-priority boost for the smallest cap on 
 // inductor marks the design a switcher. PROVISIONAL — magnitude wants tuning.
 const INPUT_LOOP_BOOST: f64 = 2.0;
 // Weight on the compactness term (`compactnessArea`): the sub-module's courtyard
-// bounding-box area (mm²) — replaces the old pairwise tidiness reward. Scaled so a
-// few mm² of envelope growth costs ~the same as a fraction of a mm of wirelength;
-// PROVISIONAL — the area term grows quadratically with board size, so this default
-// is tuned for the small power/RF sub-blocks and should be swept per design.
-const W_ALIGN: f64 = 0.2;
+// bounding-box area (mm²) — replaces the old pairwise tidiness reward. At ~1.0 the
+// area term sits at ~40% of the loop term on the small power/RF sub-blocks, enough
+// to flip boundary caps inward (GND tucked alongside the IC) and shrink the
+// envelope ~10-16% for ≲1% loop cost, without overriding the electrical loop.
+// PROVISIONAL — the area term grows quadratically with board size, so sweep it per
+// design (the "Area" tuning input regenerates with a custom weight).
+const W_ALIGN: f64 = 1.0;
 // Weight on the routing-congestion penalty (`congestionPenalty`). HPWL/RSMT alone
 // does not predict routability — local congestion must be traded off against it
 // (Spindler & Johannes RUDY; UCLA mPL). The penalty is ~0 until a region's
