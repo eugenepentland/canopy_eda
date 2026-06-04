@@ -37,7 +37,9 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
 const Layer = enum { silk, fab };
 
-const Pad = struct { id: []const u8, x: f64, y: f64, w: f64, h: f64, shape: []const u8 };
+// `pts` carries a custom pad's real copper outline (footprint coords); when
+// present it's drawn as a filled polygon instead of the pos/size rectangle.
+const Pad = struct { id: []const u8, x: f64, y: f64, w: f64, h: f64, shape: []const u8, pts: ?[]const Point = null };
 const Point = struct { x: f64, y: f64 };
 const Seg = struct { x1: f64, y1: f64, x2: f64, y2: f64, layer: Layer };
 const Circ = struct { cx: f64, cy: f64, r: f64, layer: Layer };
@@ -146,6 +148,7 @@ fn parsePad(allocator: std.mem.Allocator, child: Node) ?Pad {
     var py: f64 = 0;
     var pw: f64 = 0;
     var ph: f64 = 0;
+    var pts: ?[]const Point = null;
     for (cl[4..]) |sub| {
         if (sub.isForm("pos")) {
             const sl = sub.asList().?;
@@ -161,8 +164,9 @@ fn parsePad(allocator: std.mem.Allocator, child: Node) ?Pad {
                 ph = sl[2].asNumber() orelse 0;
             }
         }
+        if (sub.isForm("poly")) pts = readPolyPts(allocator, sub) catch null;
     }
-    return .{ .id = id, .x = px, .y = py, .w = pw, .h = ph, .shape = shape };
+    return .{ .id = id, .x = px, .y = py, .w = pw, .h = ph, .shape = shape, .pts = pts };
 }
 
 /// Parse the children of a `(silkscreen …)` or `(fab …)` block: `(line …)`,
@@ -233,7 +237,9 @@ fn readRect(node: Node, layer: Layer) ?RectS {
     };
 }
 
-fn readPoly(allocator: std.mem.Allocator, node: Node, layer: Layer) HandlerError!?Poly {
+/// Parse a `(poly (x y) (x y) …)` form into its point slice (≥3 points), or
+/// null. Shared by silk/fab polygons and custom-pad copper outlines.
+fn readPolyPts(allocator: std.mem.Allocator, node: Node) HandlerError!?[]const Point {
     const sl = node.asList() orelse return null;
     if (sl.len < 4) return null; // need ≥3 points to be a polygon
     var pts: std.ArrayListUnmanaged(Point) = .empty;
@@ -243,7 +249,12 @@ fn readPoly(allocator: std.mem.Allocator, node: Node, layer: Layer) HandlerError
         try pts.append(allocator, .{ .x = pl[0].asNumber() orelse 0, .y = pl[1].asNumber() orelse 0 });
     }
     if (pts.items.len < 3) return null;
-    return .{ .pts = try pts.toOwnedSlice(allocator), .layer = layer };
+    return try pts.toOwnedSlice(allocator);
+}
+
+fn readPoly(allocator: std.mem.Allocator, node: Node, layer: Layer) HandlerError!?Poly {
+    const pts = try readPolyPts(allocator, node) orelse return null;
+    return .{ .pts = pts, .layer = layer };
 }
 
 const BBox = struct { min_x: f64, min_y: f64, max_x: f64, max_y: f64 };
@@ -366,6 +377,14 @@ fn emitPoly(w: anytype, poly: Poly) HandlerError!void {
 }
 
 fn emitPad(w: anytype, p: Pad) HandlerError!void {
+    if (p.pts) |pts| {
+        // Custom pad: draw the real copper outline rather than its bbox.
+        try w.writeAll("<polygon points=\"");
+        for (pts) |pt| try w.print("{d:.3},{d:.3} ", .{ pt.x, pt.y });
+        try w.print("\" fill=\"" ++ COLOR_PAD ++ "\"/>", .{});
+        try emitPadLabel(w, p);
+        return;
+    }
     if (std.mem.eql(u8, p.shape, "circle")) {
         try w.print("<circle cx=\"{d:.3}\" cy=\"{d:.3}\" r=\"{d:.3}\" fill=\"" ++ COLOR_PAD ++ "\"/>", .{ p.x, p.y, @min(p.w, p.h) / 2 });
     } else if (std.mem.eql(u8, p.shape, "oval")) {

@@ -420,6 +420,7 @@ test {
     _ = @import("convert/symbol.zig");
     _ = @import("convert/alt_functions.zig");
     _ = @import("export_kicad.zig");
+    _ = @import("export_kicad_footprint.zig");
     _ = @import("serve.zig");
     _ = @import("serve/sync.zig");
     _ = @import("serve/component_search.zig");

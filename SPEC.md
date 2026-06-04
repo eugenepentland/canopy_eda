@@ -208,6 +208,7 @@ Public functions: load, isGroundFn
 
 - Converts a KiCad footprint file into S-expression format
 - Captures F.Fab body outline and silkscreen polygons into the footprint
+- Expands a custom pad's gr_poly primitive into a real polygon outline with bbox-derived pos/size
 
 ## convert/symbol
 
@@ -235,6 +236,7 @@ Public functions: load, isGroundFn
 - Exports a KiCad footprint mod file from footprint data
 - Emits a footprint's (fab …) body outline as fp_line/fp_circle on the F.Fab layer
 - Emits silkscreen/fab (poly …) as a filled fp_poly and (rect …) as fp_rect on the target layer
+- Emits a custom pad's (poly …) outline as a valid KiCad custom pad with (primitives (gr_poly …)) in pad-local coords
 
 ## bom
 
