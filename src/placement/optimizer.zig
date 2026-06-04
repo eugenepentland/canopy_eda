@@ -321,16 +321,29 @@ const Built = struct {
     loops: []Loop,
 };
 
+/// How `solve` treats an applied `cached` layout.
+pub const SeedMode = enum {
+    /// Apply `cached` verbatim when it covers every part (no optimization, fast);
+    /// otherwise place from scratch. The normal load/regenerate path.
+    place,
+    /// Seed from `cached` and run only the local routed tuck (`routedPolish`) on
+    /// it — improve an existing (e.g. hand) layout in place without re-placing.
+    refine,
+};
+
 /// Build a placement for `block`. When `cached` covers every part, its poses
 /// are applied directly (no optimization — fast); otherwise the optimizer runs
 /// and `Placement.generated` is set so the caller can persist a fresh cache.
-/// All output is allocated in `arena`.
+/// In `.refine` mode an applied cached layout is given the local routed tuck
+/// (`routedPolish`) instead of being left as-is; `generated` stays false so the
+/// caller leaves the auto cache untouched. All output is in `arena`.
 pub fn solve(
     arena: std.mem.Allocator,
     block: *const DesignBlock,
     project_dir: []const u8,
     cached: ?[]const RefPose,
     params: Params,
+    mode: SeedMode,
 ) std.mem.Allocator.Error!Placement {
     var prep = try prepare(arena, block, project_dir, params);
     const parts = prep.parts;
@@ -362,6 +375,11 @@ pub fn solve(
             // highest placement-order priority docking first.
             compactToContact(parts, prep.priority);
         }
+    } else if (mode == .refine and parts.len >= 2 and parts.len <= ROUTED_POLISH_MAX_PARTS and built.loops.len > 0) {
+        // Seeded from an existing layout: keep its global arrangement, just run the
+        // local routed tuck on it (the same monotonic, safety-netted pass the auto
+        // solve finishes with). Lets a good hand layout be improved without losing it.
+        routedPolish(arena, parts, &prep.idx_of, nets, built.loops, params);
     }
 
     // Headline score's loop length: the *real* routed-trace sum on interactive

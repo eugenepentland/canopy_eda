@@ -113,9 +113,14 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 
     // Tuning weights come from the query (?w_align=… etc) — any present (or
     // ?regen=1) forces a fresh solve; otherwise the cached layout is reused.
+    // ?refine=<layout> seeds the solve from a named saved layout and runs only the
+    // routed tuck on it (improve a hand layout in place; the auto cache is left as-is).
     const tune = parseTuning(req);
-    const cached = if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
-    const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params) catch {
+    const refine_name: ?[]const u8 = if (req.query()) |q| q.get("refine") else |_| null;
+    const cached = if (refine_name) |rn|
+        readLayoutPoses(ctx.allocator, ctx.project_dir, name, rn)
+    else if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
+    const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place) catch {
         res.status = 500;
         res.body = "Placement error";
         return;
@@ -226,8 +231,11 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     };
 
     const tune = parseTuning(req);
-    const cached = if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
-    const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params) catch {
+    const refine_name: ?[]const u8 = if (req.query()) |q| q.get("refine") else |_| null;
+    const cached = if (refine_name) |rn|
+        readLayoutPoses(ctx.allocator, ctx.project_dir, name, rn)
+    else if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
+    const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place) catch {
         res.status = 500;
         res.body = "Placement error";
         return;
@@ -669,6 +677,21 @@ fn readSaved(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8
         }) catch return m;
     }
     return m;
+}
+
+/// The poses of a single named saved layout (`?refine=<layout>`), as `RefPose`s
+/// ready to seed `solve`. Null when no layout by that name exists. Used to refine
+/// a specific hand layout with the routed tuck rather than re-placing from scratch.
+fn readLayoutPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, want: []const u8) ?[]const optimizer.RefPose {
+    for (readLayouts(alloc, project_dir, name)) |lay| {
+        if (!std.mem.eql(u8, lay.name, want)) continue;
+        var list: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
+        for (lay.parts) |pp| {
+            list.append(alloc, .{ .ref = pp.ref, .x = pp.x, .y = pp.y, .rot = pp.rot }) catch return null;
+        }
+        return list.toOwnedSlice(alloc) catch null;
+    }
+    return null;
 }
 
 /// Read every saved layout for `name` from its `.layouts.json` sidecar

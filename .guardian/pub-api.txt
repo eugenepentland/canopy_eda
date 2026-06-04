@@ -388,6 +388,7 @@ src/placement/optimizer.zig::Placement struct_
 src/placement/optimizer.zig::RatKind enum_
 src/placement/optimizer.zig::RefPose struct_
 src/placement/optimizer.zig::Score struct_
+src/placement/optimizer.zig::SeedMode enum_
 src/placement/optimizer.zig::Stub struct_
 src/placement/optimizer.zig::scorePoses fn
 src/placement/optimizer.zig::solve fn
