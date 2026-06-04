@@ -127,6 +127,15 @@ pub const BoardFp = struct {
     /// locking is left entirely to the user — so this is now informational
     /// only (still surfaced by the reader, not acted on by the diff).
     locked: bool,
+    /// The current `(model …)` 3D-model placement on the board, parsed from
+    /// `(offset (xyz …))` / `(rotate (xyz …))`. Lets the diff detect when a
+    /// footprint's model orientation drifted from `model-config.json` and
+    /// re-bake just that part (the 3D-alignment workflow), instead of either
+    /// re-baking every part (`?refresh=1`) or never updating placed models.
+    /// `has_model` is false when the board footprint carries no `(model …)`.
+    has_model: bool = false,
+    model_offset: [3]f64 = .{ 0, 0, 0 },
+    model_rotate: [3]f64 = .{ 0, 0, 0 },
 };
 
 /// Pick the UUID the agent should use to find this footprint in its cache.
@@ -2036,11 +2045,15 @@ fn handleMatched(
             d.summary.swapped += 1;
             ops_emitted.* += 1;
         }
-    } else if (d.refresh) {
-        // Force-refresh: the footprint name already matches, but `?refresh=1`
-        // re-bakes the geometry so a board built before the silk/fab fixes
-        // picks up the outlines. swapFootprint preserves at/uuid/layer/locked
-        // + custom properties and re-applies pad nets, so nothing moves.
+    } else if (d.refresh or modelDrifted(d, inst, m, fp_name_short)) {
+        // Same-name re-bake. Triggered by `?refresh=1` (re-bake every part's
+        // geometry so a board built before a silk/fab fix picks up the
+        // outlines) OR, on a normal push, when this part's 3D-model orientation
+        // drifted from `model-config.json` — the 3D-alignment workflow: realign
+        // in the viewer → Save → next push re-bakes just the drifted parts.
+        // swapFootprint preserves at/uuid/layer/locked + custom properties and
+        // re-applies pad nets, so nothing moves; only the geometry (incl. the
+        // `(model …)` block via buildKicadMod) is refreshed.
         if (loadKicadMod(d.spc, fp_name_short, inst.component)) |kmod| {
             const fp_def = loadFootprintDef(d.spc, fp_name_short);
             try emitSwapOp(w, first, target, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map);
@@ -2240,6 +2253,42 @@ fn buildCanopyNetValue(
         }
     }
     return buf.items;
+}
+
+/// Float tolerance for comparing on-board model offset/rotation (mm / deg)
+/// against the desired values — KiCad stores them at 4 decimals, so anything
+/// under a milli-unit is "equal".
+const MODEL_DRIFT_EPS: f64 = 1e-3;
+
+/// True when board footprint `m`'s 3D-model orientation no longer matches what
+/// `model-config.json` specifies for `fp_name_short` — i.e. the user realigned
+/// the model in the viewer and a normal push should re-bake just this part.
+///
+/// Only the offset/rotation (the alignment) is compared, and only when the
+/// design actually resolves a model for the footprint; a name-only difference
+/// or a board model the design has no opinion on is left untouched so a
+/// manually-chosen model is never clobbered. A missing `(model …)` block that
+/// the design *should* have is treated as drift (one-time backfill). The board
+/// stores `writeModelBlock`'s negated form — offset `= -config`, rotate
+/// `= (-rotX, rotY, rotZ)` — so the comparison negates the config to match.
+fn modelDrifted(d: *DiffContext, inst: export_kicad.FlatInstance, m: BoardFp, fp_name_short: []const u8) bool {
+    const mcfg = d.spc.model_cfg.get(fp_name_short);
+    const resolves_model = if (mcfg) |c|
+        (c.model != null or fp_mod.findModelFile(d.spc.arena, d.spc.project_dir, fp_name_short, inst.component) != null)
+    else
+        fp_mod.findModelFile(d.spc.arena, d.spc.project_dir, fp_name_short, inst.component) != null;
+    if (!resolves_model) return false;
+    if (!m.has_model) return true; // should carry a model but doesn't → backfill
+
+    const cfg_off = if (mcfg) |c| c.offset else [3]f64{ 0, 0, 0 };
+    const cfg_rot = if (mcfg) |c| c.rotation else [3]f64{ 0, 0, 0 };
+    const want_off = [3]f64{ -cfg_off[0], -cfg_off[1], -cfg_off[2] };
+    const want_rot = [3]f64{ -cfg_rot[0], cfg_rot[1], cfg_rot[2] };
+    for (0..3) |i| {
+        if (@abs(m.model_offset[i] - want_off[i]) > MODEL_DRIFT_EPS) return true;
+        if (@abs(m.model_rotate[i] - want_rot[i]) > MODEL_DRIFT_EPS) return true;
+    }
+    return false;
 }
 
 fn handleInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, first: *bool) !void {

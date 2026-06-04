@@ -1,0 +1,47 @@
+<div id="panel">
+  <div class="grp">
+    <h3>Rotation (°)</h3>
+    <div class="ctl"><label>X</label><input type="range" id="rot-x-r" min="-180" max="180" step="1" value="0"><input type="number" id="rot-x-n" step="1" value="0"></div>
+    <div class="ctl"><label>Y</label><input type="range" id="rot-y-r" min="-180" max="180" step="1" value="0"><input type="number" id="rot-y-n" step="1" value="0"></div>
+    <div class="ctl"><label>Z</label><input type="range" id="rot-z-r" min="-180" max="180" step="1" value="0"><input type="number" id="rot-z-n" step="1" value="0"></div>
+    <div class="quick">
+      <button data-rot="x" data-deg="90">X +90</button>
+      <button data-rot="y" data-deg="90">Y +90</button>
+      <button data-rot="z" data-deg="90">Z +90</button>
+      <button data-rot="z" data-deg="180">Z +180</button>
+    </div>
+  </div>
+
+  <div class="grp">
+    <h3>Offset (mm)</h3>
+    <div class="ctl"><label>X</label><input type="range" id="off-x-r" min="-15" max="15" step="0.05" value="0"><input type="number" id="off-x-n" step="0.05" value="0"></div>
+    <div class="ctl"><label>Y</label><input type="range" id="off-y-r" min="-15" max="15" step="0.05" value="0"><input type="number" id="off-y-n" step="0.05" value="0"></div>
+    <div class="ctl"><label>Z</label><input type="range" id="off-z-r" min="-15" max="15" step="0.05" value="0"><input type="number" id="off-z-n" step="0.05" value="0"></div>
+  </div>
+
+  <div class="grp">
+    <h3>View</h3>
+    <div class="toggles">
+      <label><input type="checkbox" id="t-model" checked> Model</label>
+      <label><input type="checkbox" id="t-pads" checked> Pads</label>
+      <label><input type="checkbox" id="t-board" checked> Board</label>
+      <label><input type="checkbox" id="t-axes" checked> Axes</label>
+    </div>
+    <div class="quick">
+      <button id="view-top">Top</button>
+      <button id="view-iso">Iso</button>
+      <button id="view-front">Front</button>
+      <button id="view-side">Side</button>
+    </div>
+  </div>
+
+  <div class="grp">
+    <div class="act">
+      <button id="reset">Reset</button>
+      <button id="save">Save to KiCad config</button>
+    </div>
+    <div class="hint">Saves <code>offset</code>/<code>rotation</code> to <code>model-config.json</code>.
+      The next <b>Push to KiCad PCB</b> applies it to every instance of this footprint.
+      Verify one part in KiCad's 3D view; if an axis looks mirrored, flip its sign here.</div>
+  </div>
+</div>

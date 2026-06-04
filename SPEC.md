@@ -47,6 +47,7 @@ Public functions: readBoard
 - parses (locked yes) as locked footprint
 - reads every footprint in a real .kicad_pcb fixture
 - reads a bare-integer pad number so the pad still enters the net diff
+- parses the (model …) offset/rotate so the diff can detect 3D-model drift
 
 ## kicad_pcb/writer
 

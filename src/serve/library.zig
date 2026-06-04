@@ -1,15 +1,19 @@
 const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
+const log = @import("../infra/log.zig");
 const export_kicad = @import("../export_kicad.zig");
 const footprint_mod = @import("../export_kicad_footprint.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 const library_template = @import("templates/library.zig");
 const footprint_preview = @import("footprint_preview.zig");
+const upload = @import("upload.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const SEXP_EXT_LEN: usize = ".sexp".len;
+/// The `(footprint …)` field name / the `footprint` card kind — same token.
+const FOOTPRINT = "footprint";
 const PIN_FORM_LEN: usize = "(pin ".len;
 const MAX_LIB_FILE_BYTES: usize = 256 * 1024;
 
@@ -79,7 +83,7 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
             const mtime = if (dir.statFile(entry.name)) |s| s.mtime else |_| 0;
 
             const description = extractField(content, "description");
-            const footprint = extractField(content, "footprint");
+            const footprint = extractField(content, FOOTPRINT);
             const pinout = extractField(content, "pinout");
             const manufacturer = extractField(content, "manufacturer");
             const mpn = extractField(content, "mpn");
@@ -160,12 +164,19 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
             if (referenced_footprints.contains(fname_local)) continue;
             const fname = try allocator.dupe(u8, fname_local);
             const mtime = if (dir.statFile(entry.name)) |s| s.mtime else |_| 0;
+            const fp_has_model = blk: {
+                if (model_cfg.get(fname_local)) |c| {
+                    if (c.model != null) break :blk true;
+                }
+                break :blk footprint_mod.findModelFile(allocator, project_dir, fname_local, fname_local) != null;
+            };
             try buf.append(allocator, .{
                 .mtime = mtime,
                 .row = .{
                     .name = fname,
                     .kind = .footprint,
                     .search_text = try std.fmt.allocPrint(allocator, "{s} footprint", .{fname}),
+                    .has_3d_model = fp_has_model,
                 },
             });
         }
@@ -259,6 +270,118 @@ pub fn cseFetchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     try w.print(",\"linked\":{s}}}", .{if (linked) "true" else "false"});
 
     res.body = try req.arena.dupe(u8, out.items);
+}
+
+// ── 3D-model attach + library delete ───────────────────────────────
+
+/// True when `name` is a safe single library basename — rejects path traversal
+/// and separators so the model/delete endpoints can't escape `lib/` via a
+/// crafted `:name`/`:kind` param.
+fn isSafeLibName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 128) return false;
+    if (std.mem.indexOf(u8, name, "..") != null) return false;
+    for (name) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '.' or c == '-' or c == '_';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+fn sendErr(res: *httpz.Response, status: u16, json_body: []const u8) void {
+    res.status = status;
+    res.content_type = .JSON;
+    res.body = json_body;
+}
+
+/// POST /api/upload-model/:name — body is a raw zip (filename in `X-Filename`).
+/// Pulls the first STEP out of the zip and writes it as
+/// `lib/models/<footprint>.step`, so `findModelFile` resolves it for that part
+/// (add-or-replace). The drop target is a component or footprint card: for a
+/// component, the footprint is read from its `.sexp`; for a footprint card,
+/// `:name` is itself the footprint.
+pub fn uploadModelApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    res.content_type = .JSON;
+    const name = req.param("name") orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"missing name\"}");
+    if (!isSafeLibName(name)) return sendErr(res, 400, "{\"ok\":false,\"error\":\"invalid name\"}");
+    const body = req.body() orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"missing body\"}");
+
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    const filename = req.header("x-filename") orelse "model.zip";
+    // Accept either a raw .step/.stp file (the body IS the model) or a .zip
+    // containing one (extract it). Case-insensitive, so .STEP/.STP/.ZIP work.
+    const is_raw = std.ascii.endsWithIgnoreCase(filename, ".step") or std.ascii.endsWithIgnoreCase(filename, ".stp");
+    const step: []const u8 = if (is_raw)
+        body
+    else
+        (upload.extractStepBytes(aa, body, filename) orelse
+            return sendErr(res, 400, "{\"ok\":false,\"error\":\"no .step/.stp model found in the zip\"}"));
+
+    const fp = resolveFootprintName(aa, ctx.project_dir, name);
+    if (!isSafeLibName(fp)) return sendErr(res, 400, "{\"ok\":false,\"error\":\"resolved footprint name is invalid\"}");
+    writeModelStep(aa, ctx.project_dir, fp, step) catch |e| {
+        log.warn("upload-model {s}: {s}", .{ fp, @errorName(e) });
+        return sendErr(res, 500, "{\"ok\":false,\"error\":\"failed to write model file\"}");
+    };
+    res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"footprint\":\"{s}\",\"bytes\":{d}}}", .{ fp, step.len });
+}
+
+/// Resolve the footprint a model should be keyed under: if
+/// `lib/components/<name>.sexp` exists and declares `(footprint X)`, return X;
+/// otherwise `name` is itself a footprint (the drop landed on a footprint card).
+fn resolveFootprintName(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) []const u8 {
+    const path = std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, name }) catch return name;
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, MAX_LIB_FILE_BYTES) catch return name;
+    return extractField(content, FOOTPRINT) orelse name;
+}
+
+/// Write raw STEP bytes to `lib/models/<fp>.step` (creating the dir), replacing
+/// any existing file of that name.
+fn writeModelStep(allocator: std.mem.Allocator, project_dir: []const u8, fp: []const u8, data: []const u8) !void {
+    const dir = try std.fmt.allocPrint(allocator, "{s}/lib/models", .{project_dir});
+    try infra_fs.cwd().makePath(dir);
+    const path = try std.fmt.allocPrint(allocator, "{s}/{s}.step", .{ dir, fp });
+    const f = try infra_fs.cwd().createFile(path, .{ .truncate = true });
+    defer f.close();
+    try f.writeAll(data);
+}
+
+/// POST /api/library-delete/:kind/:name — soft-delete a library entry by moving
+/// `lib/<subdir>/<name>.sexp` into `lib/<subdir>/.deleted/` (recoverable, and
+/// not scanned by the listing). `kind` ∈ component|family|footprint|pinout.
+pub fn deleteLibraryEntryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    res.content_type = .JSON;
+    const kind = req.param("kind") orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"missing kind\"}");
+    const name = req.param("name") orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"missing name\"}");
+    if (!isSafeLibName(name)) return sendErr(res, 400, "{\"ok\":false,\"error\":\"invalid name\"}");
+    const subdir = subdirForKind(kind) orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"invalid kind\"}");
+
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    const src = try std.fmt.allocPrint(aa, "{s}/lib/{s}/{s}.sexp", .{ ctx.project_dir, subdir, name });
+    const trash_dir = try std.fmt.allocPrint(aa, "{s}/lib/{s}/.deleted", .{ ctx.project_dir, subdir });
+    infra_fs.cwd().makePath(trash_dir) catch return sendErr(res, 500, "{\"ok\":false,\"error\":\"failed to prepare trash\"}");
+    const dst = try std.fmt.allocPrint(aa, "{s}/{s}.sexp", .{ trash_dir, name });
+    infra_fs.cwd().rename(src, dst) catch |e| {
+        if (e == error.FileNotFound) return sendErr(res, 404, "{\"ok\":false,\"error\":\"not found\"}");
+        log.warn("delete {s}: {s}", .{ src, @errorName(e) });
+        return sendErr(res, 500, "{\"ok\":false,\"error\":\"delete failed\"}");
+    };
+    res.body = "{\"ok\":true}";
+}
+
+/// Map a library card `kind` to its `lib/` subdir. Families live alongside
+/// components. Unknown kinds return null (rejected as a 400).
+fn subdirForKind(kind: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, kind, "component") or std.mem.eql(u8, kind, "family")) return "components";
+    if (std.mem.eql(u8, kind, FOOTPRINT)) return "footprints";
+    if (std.mem.eql(u8, kind, "pinout")) return "pinouts";
+    return null;
 }
 
 /// After a CSE fetch, splice the just-downloaded datasheet into the

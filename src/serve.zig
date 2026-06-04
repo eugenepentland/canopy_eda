@@ -16,6 +16,7 @@ const pages = @import("serve/pages.zig");
 const api = @import("serve/api.zig");
 const edit = @import("serve/edit.zig");
 const library = @import("serve/library.zig");
+const library_3d = @import("serve/library_3d.zig");
 const upload = @import("serve/upload.zig");
 const upload_package = @import("serve/upload_package.zig");
 const upload_datasheet = @import("serve/upload_datasheet.zig");
@@ -241,6 +242,10 @@ pub fn serve(
 
     // Library
     router.get("/library", library.libraryPage, .{});
+    // 3D model alignment viewer + its STEP stream + transform persistence.
+    router.get("/library/3d/:footprint", library_3d.viewerPage, .{});
+    router.get("/api/model-file/:footprint", library_3d.modelFileApi, .{});
+    router.post("/api/model-transform/:footprint", library_3d.saveTransformApi, .{});
 
     // Upload
     router.post("/api/upload-package", upload_package.uploadPackageApi, .{});
@@ -248,6 +253,9 @@ pub fn serve(
     router.post("/api/upload-zip", upload.uploadZipApi, .{});
     // Fetch a part's footprint + datasheet from Component Search Engine.
     router.post("/api/cse-fetch", library.cseFetchApi, .{});
+    // Drop a zip onto a card → attach/replace its STEP 3D model; delete a card.
+    router.post("/api/upload-model/:name", library.uploadModelApi, .{});
+    router.post("/api/library-delete/:kind/:name", library.deleteLibraryEntryApi, .{});
 
     // MCP — POST /mcp is the streamable-HTTP transport Claude Code connects
     // to via its remote-MCP connector. GET /mcp upgrades to WebSocket, used

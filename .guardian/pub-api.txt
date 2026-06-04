@@ -669,7 +669,13 @@ src/serve/history.zig::snapshot fn
 src/serve/library.zig::HandlerError value
 src/serve/library.zig::LibraryRow struct_
 src/serve/library.zig::cseFetchApi fn
+src/serve/library.zig::deleteLibraryEntryApi fn
 src/serve/library.zig::libraryPage fn
+src/serve/library.zig::uploadModelApi fn
+src/serve/library_3d.zig::HandlerError value
+src/serve/library_3d.zig::modelFileApi fn
+src/serve/library_3d.zig::saveTransformApi fn
+src/serve/library_3d.zig::viewerPage fn
 src/serve/mcp.zig::Client struct_
 src/serve/mcp.zig::Context struct_
 src/serve/mcp.zig::HandlerError value
@@ -807,6 +813,7 @@ src/serve/upload.zig::ImportError value
 src/serve/upload.zig::ImportResult struct_
 src/serve/upload.zig::extractFootprintName fn
 src/serve/upload.zig::extractPackageName fn
+src/serve/upload.zig::extractStepBytes fn
 src/serve/upload.zig::importErrorMessage fn
 src/serve/upload.zig::importErrorStatus fn
 src/serve/upload.zig::importZipBytes fn

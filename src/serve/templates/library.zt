@@ -47,7 +47,7 @@ pub templ Library(rows: []const LibraryRow) {
 }
 
 pub templ Card(row: LibraryRow) {
-    <div class="comp-card" data-search={row.search_text} data-component={if (row.kind == .component or row.kind == .family) row.name else null}>
+    <div class="comp-card" data-search={row.search_text} data-kind={@tagName(row.kind)} data-name={row.name} data-component={if (row.kind == .component or row.kind == .family) row.name else null}>
         <div class="card-head">
             <span class="card-name">{row.name}</span>
             switch (row.kind) {
@@ -56,6 +56,7 @@ pub templ Card(row: LibraryRow) {
                 .pinout => { <span class="tag tag-pinout">pinout</span> },
                 .footprint => { <span class="tag tag-footprint">footprint</span> },
             }
+            <span class="card-del" title="Delete from library">×</span>
         </div>
         switch (row.kind) {
             .family, .component => {
@@ -68,6 +69,9 @@ pub templ Card(row: LibraryRow) {
             },
             .footprint => {
                 <span class="tag tag-footprint fp-toggle" data-fp={row.name} title="Show footprint preview">show preview ›</span>
+                if (row.has_3d_model) {
+                    <a class="badge-3d" href="/library/3d/{row.name}" title="Align 3D model orientation">3D</a>
+                }
                 <div class="fp-preview" data-fp={row.name}></div>
             },
         }
@@ -90,7 +94,7 @@ pub templ ComponentDetails(row: LibraryRow) {
         if (row.footprint) |fp| {
             <span class="tag tag-footprint fp-toggle" data-fp={fp} title="Show footprint preview">{fp}</span>
             if (row.has_3d_model) {
-                <span class="badge-3d" title="3D model available">3D</span>
+                <a class="badge-3d" href="/library/3d/{fp}" title="Align 3D model orientation">3D</a>
             }
         }
         if (row.pinout) |po| {

@@ -23,6 +23,16 @@ const review_notes_js = @embedFile("assets/review_notes.js");
 const codemirror_js = @embedFile("assets/codemirror.bundle.js");
 const codemirror_css = @embedFile("assets/codemirror.css");
 
+// 3D model alignment viewer (/library/3d/:footprint). Self-hosted Three.js
+// r128 (MIT) + its OrbitControls, OpenCASCADE's occt-import-js (Apache-2.0:
+// .js loader + .wasm kernel) for parsing STEP in-browser, and our viewer glue.
+// All offline/embedded like CodeMirror so the viewer works behind the OAuth wall.
+const three_js = @embedFile("assets/three.min.js");
+const orbit_controls_js = @embedFile("assets/OrbitControls.js");
+const occt_import_js = @embedFile("assets/occt-import-js.js");
+const occt_import_wasm = @embedFile("assets/occt-import-js.wasm");
+const model_viewer_3d_js = @embedFile("assets/model_viewer_3d.js");
+
 // Schematic page assets — pub-imported from render_html so we don't
 // re-`@embedFile` the underlying byte slices (the JS lives under
 // `serve/assets/` already, but the CSS is the concatenation of
@@ -61,6 +71,11 @@ const REGISTRY = [_]Asset{
     .{ .name = "schematic.css", .body = schematic_css, .content_type = .CSS },
     .{ .name = "codemirror.bundle.js", .body = codemirror_js, .content_type = .JS },
     .{ .name = "codemirror.css", .body = codemirror_css, .content_type = .CSS },
+    .{ .name = "three.min.js", .body = three_js, .content_type = .JS },
+    .{ .name = "OrbitControls.js", .body = orbit_controls_js, .content_type = .JS },
+    .{ .name = "occt-import-js.js", .body = occt_import_js, .content_type = .JS },
+    .{ .name = "occt-import-js.wasm", .body = occt_import_wasm, .content_type = .WASM },
+    .{ .name = "model_viewer_3d.js", .body = model_viewer_3d_js, .content_type = .JS },
 };
 
 /// GET /static/:name — serve an embedded JS/CSS asset. 404 if the name is
