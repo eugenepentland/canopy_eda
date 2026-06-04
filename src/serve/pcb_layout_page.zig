@@ -1440,7 +1440,7 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8) st
     try w.writeAll("<span class=\"delta\" id=\"sc-loop-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-ind\" title=\"hot-loop connection inductance (nH) — the scored loop metric\">loop … nH</span>");
     try w.writeAll("<span class=\"delta\" id=\"sc-ind-d\"></span>");
-    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-align\" title=\"row/column alignment term (w_align × penalty)\">align …</span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-align\" title=\"sub-module courtyard bounding-box area (mm²) — compactness term\">area …</span>");
     try w.writeAll("<span class=\"delta\" id=\"sc-align-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-cong\" title=\"routing congestion (w_congest × RUDY overflow)\">cong …</span>");
     try w.writeAll("<span class=\"delta\" id=\"sc-cong-d\"></span>");
@@ -1537,7 +1537,7 @@ fn writeLayDelta(w: *std.Io.Writer, s: LayoutScore, auto: LayoutScore) std.Io.Wr
 /// which forces a regenerate). Values reflect the weights behind the layout.
 fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-tune\"><span class=\"tune-h\">Tuning</span>");
-    try w.print("<label>Align <input id=\"t-align\" type=\"number\" step=\"0.1\" min=\"0\" value=\"{d}\"></label>", .{params.w_align});
+    try w.print("<label>Area <input id=\"t-align\" type=\"number\" step=\"0.05\" min=\"0\" value=\"{d}\"></label>", .{params.w_align});
     try w.print("<label>Loop <input id=\"t-loop\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.loop_w});
     try w.print("<label>Congest <input id=\"t-cong\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.w_congest});
     try w.writeAll("<label class=\"tune-chk\"><input id=\"t-grid\" type=\"checkbox\"");
@@ -1557,7 +1557,7 @@ fn writeScoreView(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Err
     try w.writeAll("<div class=\"pcb-tune pcb-scoreview\"><span class=\"tune-h\">Score view</span>");
     try svRow(w, "wire", "Wire", 1.0);
     try svRow(w, "loop", "Loop", params.loop_w);
-    try svRow(w, "align", "Align", params.w_align);
+    try svRow(w, "align", "Area", params.w_align);
     try svRow(w, "cong", "Congest", params.w_congest);
     try w.writeAll("<button class=\"btn\" id=\"sv-reset\" title=\"Restore engine weights, all metrics enabled\">Reset</button>");
     try w.writeAll("<span class=\"muted\">recomputes the headline — doesn't move parts</span></div>");
@@ -1617,7 +1617,7 @@ fn writeEmbedBar(w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-hpwl\">HPWL …</span><span class=\"delta\" id=\"sc-hpwl-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-loop\">loop …</span><span class=\"delta\" id=\"sc-loop-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-area\">loop area …</span><span class=\"delta\" id=\"sc-area-d\"></span>");
-    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-align\">align …</span><span class=\"delta\" id=\"sc-align-d\"></span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-align\">area …</span><span class=\"delta\" id=\"sc-align-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-iso\">iso …</span><span class=\"delta\" id=\"sc-iso-d\"></span>");
     try w.writeAll("<span class=\"zoom-grp\"><button class=\"btn\" id=\"z-out\" title=\"Zoom out\">−</button>");
     try w.writeAll("<button class=\"btn\" id=\"z-in\" title=\"Zoom in\">+</button>");
@@ -2371,13 +2371,13 @@ const BOARD_JS =
     \\ setSc("sc-hpwl","wire "+(b.hpwl||0).toFixed(1));
     \\ setSc("sc-loop","loop "+t.loop.toFixed(1)+" · "+PCB.caps+" cap");
     \\ setSc("sc-ind","loop "+(b.loop_nh||0).toFixed(2)+" nH");
-    \\ setSc("sc-align","align "+t.align.toFixed(1));
+    \\ setSc("sc-align","area "+(b.alignment||0).toFixed(1)+" mm²");
     \\ setSc("sc-cong","cong "+t.cong.toFixed(1));
     \\ delta("sc-obj-d",t.obj,a.obj);
     \\ delta("sc-hpwl-d",b.hpwl||0,PCB.auto.hpwl||0);
     \\ delta("sc-loop-d",t.loop,a.loop);
     \\ delta("sc-ind-d",b.loop_nh||0,PCB.auto.loop_nh||0);
-    \\ delta("sc-align-d",t.align,a.align);
+    \\ delta("sc-align-d",b.alignment||0,PCB.auto.alignment||0);
     \\ delta("sc-cong-d",t.cong,a.cong);
     \\ svOff("sc-hpwl",!t.s.wire.on);svOff("sc-hpwl-d",!t.s.wire.on);
     \\ svOff("sc-loop",!t.s.loop.on);svOff("sc-loop-d",!t.s.loop.on);
