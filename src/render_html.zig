@@ -1320,6 +1320,14 @@ const SUB_PCB_SCRIPT =
 /// the section whose pin-group or port nets they tie to. Returns a slice
 /// indexed by sub-block index; entries are the matched section index or
 /// null when the sub-block didn't share any specific net with any section.
+///
+/// Power-classified nets (`(port … in/out power V)`) are excluded from the
+/// count. A rail produced by one sub-block (e.g. a buck regulator's VOUT)
+/// ties to exactly that sub-block, so a *consumer* section that declares an
+/// `in power` port for the rail would otherwise look like the producer's
+/// home — adopting the regulator card into, say, an LDO section. Dropping
+/// power nets leaves adoption driven by signal nets (the peripheral's real
+/// interface), so power producers stay floating as their own top-level card.
 pub fn computeSubBlockAttachments(
     allocator: Allocator,
     block: *const DesignBlock,
@@ -1372,6 +1380,19 @@ pub fn computeSubBlockAttachments(
         }
     }
 
+    // Every net declared as a power port anywhere (`(port … power V)`) is a
+    // shared rail, not a peripheral interface. Collect them up front so the
+    // affinity count below ignores them — otherwise a regulator sub-block
+    // gets adopted into whichever consumer section declares the matching
+    // `in power` port.
+    var power_nets: std.StringHashMapUnmanaged(void) = .empty;
+    defer power_nets.deinit(allocator);
+    for (block.sections) |sec| {
+        for (sec.ports) |port| {
+            if (port.signal_type == .power) try power_nets.put(allocator, port.name, {});
+        }
+    }
+
     const sec_count = block.sections.len;
     const sb_count = block.sub_blocks.len;
     const counts = try allocator.alloc(usize, sb_count * sec_count);
@@ -1390,6 +1411,7 @@ pub fn computeSubBlockAttachments(
 
         var it = sec_nets.iterator();
         while (it.next()) |entry| {
+            if (power_nets.contains(entry.key_ptr.*)) continue;
             const subs_ptr = net_to_subs.getPtr(entry.key_ptr.*) orelse continue;
             if (subs_ptr.count() != 1) continue;
             var sub_it = subs_ptr.keyIterator();
@@ -1425,6 +1447,68 @@ pub fn computeSubBlockAttachments(
         if (best_count >= 1) result[sb_idx] = best_idx;
     }
     return result;
+}
+
+/// Minimal DesignBlock for attachment tests — all collections empty so the
+/// test only populates the fields it exercises.
+fn emptyAttachBlock(name: []const u8) DesignBlock {
+    return .{
+        .name = name,
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+}
+
+// spec: render_html - Excludes power-classified nets so a power-producer sub-block is not adopted into a consuming section
+test "computeSubBlockAttachments keeps a power producer out of a consuming section" {
+    // Mirrors cyclops-analog: the "1.8 V LDO" section *consumes* V_RF_3P3
+    // via `(port "V_RF_3P3" in power 3.3)`, while the buck33 sub-block
+    // *produces* that rail. A separate USB section consumes a buck-
+    // independent signal from the usb sub-block. Adoption must follow the
+    // signal net, not the shared power rail.
+    const ldo_ports = [_]env_mod.SectionPort{
+        .{ .name = "V_RF_3P3", .direction = .in, .signal_type = .power, .voltage = 3.3 },
+    };
+    const usb_ports = [_]env_mod.SectionPort{
+        .{ .name = "USB_DP", .direction = .io, .signal_type = .differential },
+    };
+    const sections = [_]Section{
+        .{ .name = "TPS7A2018 1.8 V LDO", .ports = &ldo_ports },
+        .{ .name = "USB", .ports = &usb_ports },
+    };
+
+    var buck_design = emptyAttachBlock("tps63806-rail");
+    var usb_design = emptyAttachBlock("usb-c-hs");
+    const sub_blocks = [_]env_mod.SubBlock{
+        .{ .name = "buck33", .block = &buck_design },
+        .{ .name = "usb", .block = &usb_design },
+    };
+
+    // Net-ties as the evaluator materialises bridge / consolidated-net
+    // wiring: one side carries the `<sub>/<port>` prefix, the other the
+    // parent net the design wires it to.
+    const net_ties = [_]env_mod.NetTie{
+        .{ .a = "buck33/VOUT", .b = "V_RF_3P3" }, // buck33 produces the rail
+        .{ .a = "usb/DP", .b = "USB_DP" }, // usb drives the signal
+    };
+
+    var block = emptyAttachBlock("cyclops-analog");
+    block.sections = &sections;
+    block.sub_blocks = &sub_blocks;
+    block.net_ties = &net_ties;
+
+    const attachments = try computeSubBlockAttachments(std.testing.allocator, &block);
+    defer std.testing.allocator.free(attachments);
+
+    // buck33 shares only the power rail with the LDO section → not adopted,
+    // so it renders as its own top-level synthetic card.
+    try std.testing.expectEqual(@as(?usize, null), attachments[0]);
+    // usb shares a signal net with the USB section (idx 1) → still adopted.
+    try std.testing.expectEqual(@as(?usize, 1), attachments[1]);
 }
 
 /// Fallback rendering for designs that declare instances directly in

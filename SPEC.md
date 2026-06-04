@@ -246,6 +246,12 @@ Public functions: load, isGroundFn
 - identity resolution is a fixed point: two consecutive resolveIdentities calls produce a byte-identical BOM
 - identity is deterministic: each part takes uuidFromId(its stable id), independent of any prior .bom contents
 
+## render_html
+
+Public functions: renderToHtml, setupRenderCtx, renderHubSvg, computeSubBlockAttachments
+
+- Excludes power-classified nets so a power-producer sub-block is not adopted into a consuming section
+
 ## diagram/types
 
 Public functions: viewLabel, viewId, viewSlug, viewColor, viewOf
