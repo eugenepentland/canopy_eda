@@ -25,6 +25,13 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
     error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence, ReadOnlyFileSystem, LinkQuotaExceeded };
 
+/// Outcome of `writeComponentFile`: whether the import minted a new
+/// component, overwrote an existing one, or failed to write. Lets the import
+/// routes report a replacement instead of silently leaving a stale (and
+/// possibly dangling) component definition behind — the footgun that made a
+/// re-import look like "footprint + 3D model but no component".
+const ComponentWrite = enum { created, replaced, write_failed };
+
 /// What `importZipBytes` created. Names are the library basenames written
 /// under `lib/{components,footprints,pinouts,models}`. All slices are owned
 /// by the allocator passed to `importZipBytes`.
@@ -34,6 +41,9 @@ pub const ImportResult = struct {
     footprint_name: []const u8,
     pinout_name: []const u8,
     has_3d: bool,
+    /// Whether the component file was freshly created or replaced an
+    /// existing one (or the write failed).
+    component: ComponentWrite,
 };
 
 /// Failure modes of `importZipBytes`. `NoKicadFiles` is the only client
@@ -135,7 +145,7 @@ pub fn importZipBytes(
     const fp_name_final = extractFootprintName(allocator, footprint) orelse safe_name;
     try writeSexpFile(allocator, project_dir, "pinouts", safe_name, pinout);
     try writeSexpFile(allocator, project_dir, "footprints", fp_name_final, footprint);
-    writeComponentFile(allocator, project_dir, safe_name, safe_name, fp_name_final, sym_data);
+    const component = writeComponentFile(allocator, project_dir, safe_name, safe_name, fp_name_final, sym_data);
     if (step_data) |sd| try writeModelFile(allocator, project_dir, safe_name, sd);
 
     infra_fs.cwd().deleteFile(tmp_zip) catch |e| switch (e) {
@@ -153,6 +163,7 @@ pub fn importZipBytes(
         .footprint_name = fp_name_final,
         .pinout_name = safe_name,
         .has_3d = step_data != null,
+        .component = component,
     };
 }
 
@@ -250,15 +261,20 @@ pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     };
 
     const step_msg: []const u8 = if (result.has_3d) " + 3D model" else "";
+    const comp_msg: []const u8 = switch (result.component) {
+        .created => "component + pinout + footprint",
+        .replaced => "component (replaced existing) + pinout + footprint",
+        .write_failed => "pinout + footprint (WARNING: component write failed)",
+    };
     const msg = std.fmt.allocPrint(
         ctx.allocator,
-        "Created pinout + footprint{s} for \"{s}\" (sources saved)",
-        .{ step_msg, result.package_name },
+        "Imported {s}{s} for \"{s}\" (sources saved)",
+        .{ comp_msg, step_msg, result.package_name },
     ) catch {
         res.body = "OK";
         return;
     };
-    std.debug.print("Zip upload: {s}\n", .{msg});
+    log.warn("zip upload: {s}", .{msg});
     res.body = msg;
 }
 
@@ -274,7 +290,7 @@ pub fn saveSourceFile(allocator: std.mem.Allocator, project_dir: []const u8, fil
     const file = infra_fs.cwd().createFile(out_path, .{}) catch return;
     defer file.close();
     file.writeAll(body_data) catch return;
-    std.debug.print("Saved source: lib/sources/{s}\n", .{filename});
+    log.warn("saved source: lib/sources/{s}", .{filename});
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────
@@ -358,10 +374,95 @@ fn extractProperty(sym_data: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
-/// Write a `(component ...)` definition to lib/components/<safe_name>.sexp.
-/// Extracts description / manufacturer / MPN from the KiCad symbol properties
-/// when present. `pinout_name` and `footprint_name` are bare atoms referenced
-/// from the component; they must already have been written.
+/// Like `extractProperty`, but try each key in order and return the first
+/// non-empty hit. KiCad/SnapEDA symbols name the same field inconsistently
+/// (e.g. manufacturer lives under `Manufacturer_Name`, `Manufacturer`,
+/// `MANUFACTURER`, or `MF` depending on the export), so a single key drops
+/// metadata a re-import should preserve.
+fn extractFirstProperty(sym_data: []const u8, keys: []const []const u8) ?[]const u8 {
+    for (keys) |k| {
+        if (extractProperty(sym_data, k)) |v| return v;
+    }
+    return null;
+}
+
+/// Collapse a raw KiCad property value into a single tidy line: literal
+/// escape sequences (`\n`, `\t`, `\r`) and runs of real whitespace become one
+/// space, and leading/trailing whitespace is trimmed. SnapEDA descriptions
+/// arrive wrapped in newlines and indentation that otherwise land verbatim in
+/// the `(description "…")` field.
+/// True for a literal two-char escape (`\n`, `\t`, `\r`) starting at `raw[i]`.
+fn isEscapedWhitespace(raw: []const u8, i: usize) bool {
+    if (raw[i] != '\\' or i + 1 >= raw.len) return false;
+    return switch (raw[i + 1]) {
+        'n', 't', 'r' => true,
+        else => false,
+    };
+}
+
+fn cleanDescription(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]const u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    var sep = false;
+    while (i < raw.len) {
+        const c = raw[i];
+        if (isEscapedWhitespace(raw, i)) {
+            sep = true;
+            i += 2;
+            continue;
+        }
+        if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
+            sep = true;
+            i += 1;
+            continue;
+        }
+        if (sep and out.items.len > 0) try out.append(allocator, ' ');
+        sep = false;
+        try out.append(allocator, c);
+        i += 1;
+    }
+    return out.items;
+}
+
+/// Render the `(component …)` S-expression body for an imported part, pulling
+/// description / manufacturer / MPN from the KiCad symbol properties (across
+/// the common key aliases) when present.
+fn renderComponentSexp(
+    allocator: std.mem.Allocator,
+    safe_name: []const u8,
+    pinout_name: []const u8,
+    footprint_name: []const u8,
+    sym_data: []const u8,
+) std.mem.Allocator.Error![]const u8 {
+    const raw_desc = extractFirstProperty(sym_data, &.{ "ki_description", "Description", "Value" }) orelse safe_name;
+    const description = try cleanDescription(allocator, raw_desc);
+    const manufacturer = extractFirstProperty(sym_data, &.{ "Manufacturer_Name", "Manufacturer", "MANUFACTURER", "MF" });
+    const mpn = extractFirstProperty(sym_data, &.{ "Manufacturer_Part_Number", "MPN", "MP" });
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(allocator);
+    try w.print("(component \"{s}\"\n", .{safe_name});
+    try w.print("  (description \"{s}\")\n", .{description});
+    // Names are always quoted: purely-numeric names (e.g. "2049280301") would
+    // otherwise tokenize as an int and fail field resolution.
+    try w.print("  (pinout \"{s}\")\n", .{pinout_name});
+    try w.print("  (footprint \"{s}\")", .{footprint_name});
+    if (manufacturer) |m| try w.print("\n  (manufacturer \"{s}\")", .{m});
+    if (mpn) |m| try w.print("\n  (mpn \"{s}\")", .{m});
+    try w.writeAll(")\n");
+    return buf.items;
+}
+
+/// Write a `(component ...)` definition to lib/components/<safe_name>.sexp,
+/// referencing the pinout + footprint this same import just wrote.
+///
+/// An existing component is **overwritten** so a re-import yields a component
+/// consistent with the freshly-imported pinout/footprint/model — the previous
+/// skip-if-exists guard left a stale (often dangling) definition in place and
+/// silently dropped the new one, which read as "footprint + 3D but no
+/// component". The return value tells the caller whether it created a new file
+/// or replaced one so the HTTP/MCP responses can say so instead of staying
+/// silent.
 pub fn writeComponentFile(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -369,41 +470,23 @@ pub fn writeComponentFile(
     pinout_name: []const u8,
     footprint_name: []const u8,
     sym_data: []const u8,
-) void {
-    const dir = std.fmt.allocPrint(allocator, "{s}/lib/components", .{project_dir}) catch return;
+) ComponentWrite {
+    const dir = std.fmt.allocPrint(allocator, "{s}/lib/components", .{project_dir}) catch return .write_failed;
     defer allocator.free(dir);
-    infra_fs.cwd().makePath(dir) catch return;
+    infra_fs.cwd().makePath(dir) catch return .write_failed;
 
-    const path = std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ dir, safe_name }) catch return;
+    const path = std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ dir, safe_name }) catch return .write_failed;
     defer allocator.free(path);
 
-    // Skip if a hand-authored component already exists.
-    if (infra_fs.cwd().access(path, .{})) |_| {
-        std.debug.print("Component exists, skipping: lib/components/{s}.sexp\n", .{safe_name});
-        return;
-    } else |_| {}
+    // Note (not skip) whether we're replacing an existing component, so the
+    // import can report it rather than silently leaving a stale definition.
+    const existed = if (infra_fs.cwd().access(path, .{})) |_| true else |_| false;
 
-    const description = extractProperty(sym_data, "ki_description") orelse
-        extractProperty(sym_data, "Description") orelse
-        extractProperty(sym_data, "Value") orelse
-        safe_name;
-    const manufacturer = extractProperty(sym_data, "Manufacturer_Name");
-    const mpn = extractProperty(sym_data, "Manufacturer_Part_Number");
+    const body = renderComponentSexp(allocator, safe_name, pinout_name, footprint_name, sym_data) catch return .write_failed;
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const w = buf.writer(allocator);
-    w.print("(component \"{s}\"\n", .{safe_name}) catch return;
-    w.print("  (description \"{s}\")\n", .{description}) catch return;
-    // Names are always quoted: purely-numeric names (e.g. "2049280301") would
-    // otherwise tokenize as an int and fail field resolution.
-    w.print("  (pinout \"{s}\")\n", .{pinout_name}) catch return;
-    w.print("  (footprint \"{s}\")", .{footprint_name}) catch return;
-    if (manufacturer) |m| w.print("\n  (manufacturer \"{s}\")", .{m}) catch return;
-    if (mpn) |m| w.print("\n  (mpn \"{s}\")", .{m}) catch return;
-    w.writeAll(")\n") catch return;
-
-    const f = infra_fs.cwd().createFile(path, .{}) catch return;
+    const f = infra_fs.cwd().createFile(path, .{}) catch return .write_failed;
     defer f.close();
-    f.writeAll(buf.items) catch return;
-    std.debug.print("Wrote component: lib/components/{s}.sexp\n", .{safe_name});
+    f.writeAll(body) catch return .write_failed;
+
+    return if (existed) .replaced else .created;
 }
