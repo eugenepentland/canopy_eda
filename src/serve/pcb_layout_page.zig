@@ -287,11 +287,11 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
 /// weighted contribution, and the summed `objective`. Shared by the GET export
 /// and the POST score endpoint so both report the same shape.
 fn writeBreakdownJson(w: *std.Io.Writer, b: optimizer.Breakdown, params: optimizer.Params) std.Io.Writer.Error!void {
-    try w.print("{{\"hpwl\":{d},\"loop_raw\":{d},\"loop_weighted\":{d},\"isolation\":{d},\"alignment\":{d},", .{
-        b.hpwl, b.loop_raw, b.loop_weighted, b.isolation, b.alignment,
+    try w.print("{{\"hpwl\":{d},\"loop_raw\":{d},\"loop_weighted\":{d},\"area_raw\":{d},\"area_weighted\":{d},\"isolation\":{d},\"alignment\":{d},", .{
+        b.hpwl, b.loop_raw, b.loop_weighted, b.area_raw, b.area_weighted, b.isolation, b.alignment,
     });
-    try w.print("\"loop_term\":{d},\"isolation_term\":{d},\"alignment_term\":{d},\"objective\":{d}}}", .{
-        params.loop_w * b.loop_weighted, params.w_isolate * b.isolation, params.w_align * b.alignment, b.objective,
+    try w.print("\"loop_term\":{d},\"area_term\":{d},\"isolation_term\":{d},\"alignment_term\":{d},\"objective\":{d}}}", .{
+        params.loop_w * b.loop_weighted, params.area_w * b.area_weighted, params.w_isolate * b.isolation, params.w_align * b.alignment, b.objective,
     });
 }
 
@@ -973,6 +973,10 @@ fn parseTuning(req: *httpz.Request) Tuning {
         p.loop_w = parseF(v, p.loop_w);
         tuned = true;
     }
+    if (q.get("area_w")) |v| {
+        p.area_w = parseF(v, p.area_w);
+        tuned = true;
+    }
     if (q.get("w_isolate")) |v| {
         p.w_isolate = parseF(v, p.w_isolate);
         tuned = true;
@@ -1040,6 +1044,8 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8) st
     try w.writeAll("<span class=\"delta\" id=\"sc-hpwl-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-loop\" title=\"weighted decoupling-loop term (loop_w × value-weighted loop length)\">loop …</span>");
     try w.writeAll("<span class=\"delta\" id=\"sc-loop-d\"></span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-area\" title=\"enclosed-loop-area term (area_w × weighted loop area, mm²)\">area …</span>");
+    try w.writeAll("<span class=\"delta\" id=\"sc-area-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-align\" title=\"row/column alignment term (w_align × penalty)\">align …</span>");
     try w.writeAll("<span class=\"delta\" id=\"sc-align-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-iso\" title=\"sensitive↔aggressor isolation term (w_isolate × penalty)\">iso …</span>");
@@ -1160,8 +1166,9 @@ fn writeLegend(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!vo
         if (part.fallback) fallback_count += 1;
     }
     try w.writeAll("<div class=\"pcb-legend\">");
-    try w.writeAll("<span class=\"sw prox\"></span> proximity (hug pin)");
-    try w.writeAll("<span class=\"sw gnd\"></span> ground return");
+    try w.writeAll("<span class=\"sw prox\"></span> power leg (L1)");
+    try w.writeAll("<span class=\"sw l2gnd\"></span> GND return (L2 plane)");
+    try w.writeAll("<span class=\"sw areafill\"></span> enclosed loop area");
     try w.writeAll("<span class=\"sw sig\"></span> signal");
     try w.writeAll("<span class=\"sw esc\"></span> escape trace (signal breakout)");
     if (fallback_count > 0) {
@@ -1323,8 +1330,9 @@ fn writePcbData(
     try w.writeAll("],");
 
     // Decoupling loops: cap power/ground pads + the hub's candidate power/
-    // ground pads. The client measures each leg edge-to-edge to the nearest
-    // hub pad (matching the server's `scoreLayout`).
+    // ground pads, plus the *pinned* hub power/ground pads (`pp`/`gp`) the score
+    // actually uses — the client draws the exact scored loop (power leg, L2 ground
+    // return to `gp`, and the enclosed-area polygon) from those.
     try w.writeAll("\"loops\":[");
     for (p.loops, 0..) |lp, i| {
         if (i > 0) try w.writeAll(",");
@@ -1332,6 +1340,10 @@ fn writePcbData(
         try writePadRect(w, lp.cap_pwr);
         try w.writeAll(",\"cg\":");
         try writePadRect(w, lp.cap_gnd);
+        try w.writeAll(",\"pp\":");
+        try writePadRect(w, lp.hub_pwr_pin);
+        try w.writeAll(",\"gp\":");
+        try writePadRect(w, lp.hub_gnd_pin);
         try w.writeAll(",\"hp\":");
         try writePadRectList(w, lp.hub_pwr);
         try w.writeAll(",\"hg\":");
@@ -1607,6 +1619,8 @@ const PAGE_CSS =
     \\.pcb-legend .sw{display:inline-block;width:18px;height:0;border-top-width:3px;border-top-style:solid;vertical-align:middle}
     \\.pcb-legend .sw.prox{border-color:#ea580c}
     \\.pcb-legend .sw.gnd{border-color:#0891b2}
+    \\.pcb-legend .sw.l2gnd{border-color:#2563eb;border-top-style:dashed}
+    \\.pcb-legend .sw.areafill{border:0;height:11px;width:16px;background:#f59e0b;opacity:0.3;border-radius:2px}
     \\.pcb-legend .sw.sig{border-color:#cbd5e1}
     \\.pcb-legend .sw.esc{border-color:#dc2626}
     \\.pcb-legend .note{color:#b45309}
@@ -1735,8 +1749,15 @@ const BOARD_JS =
     \\   var col=l.k=="proximity"?"#ea580c":(l.k=="ground"?"#0891b2":"#cbd5e1");
     \\   aw(a,b,col,l.k=="signal"?0.7:1.3,l.k=="signal"?0.55:0.9);});
     \\ PCB.loops.forEach(function(L){
-    \\   var cp=wrect(L.cap,L.cp),p1=npts(cp,nhub(cp,L.cap,L.hub,L.hp).rect); aw(p1[0],p1[1],"#ea580c",1.3,0.9);
-    \\   var cg=wrect(L.cap,L.cg),p2=npts(cg,nhub(cg,L.cap,L.hub,L.hg).rect); aw(p2[0],p2[1],"#0891b2",1.3,0.9);});
+    \\   var A=wpt(L.hub,L.pp.x,L.pp.y), B=wpt(L.cap,L.cp.x,L.cp.y),
+    \\       C=wpt(L.cap,L.cg.x,L.cg.y), D=wpt(L.hub,L.gp.x,L.gp.y);
+    \\   var poly=[A,B,C,D].map(function(q){return X(q.x).toFixed(1)+","+Y(q.y).toFixed(1);}).join(" ");
+    \\   gR.appendChild(el("polygon",{points:poly,fill:"#f59e0b","fill-opacity":0.15,stroke:"none"}));
+    \\   aw(B,A,"#ea580c",1.3,0.95);
+    \\   var gl=el("line",{x1:X(C.x).toFixed(1),y1:Y(C.y).toFixed(1),x2:X(D.x).toFixed(1),y2:Y(D.y).toFixed(1),
+    \\     stroke:"#2563eb","stroke-width":1.6,opacity:0.9,"stroke-dasharray":"4 2"});
+    \\   var gt=el("title",{}); gt.textContent="GND return on L2 (plane) — fill = enclosed loop area"; gl.appendChild(gt);
+    \\   gR.appendChild(gl);});
     \\ if(!((PCB.tracks||[]).length)){var tw=parseFloat((document.getElementById("r-tw")||{}).value)||0.15;
     \\  (PCB.stubs||[]).forEach(function(st){var a=wpt(st.p,st.ax,st.ay),b=wpt(st.p,st.bx,st.by);
     \\   var ln=el("line",{x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),
@@ -1753,11 +1774,13 @@ const BOARD_JS =
     \\ setSc("sc-obj","objective "+b.objective.toFixed(1));
     \\ setSc("sc-hpwl","HPWL "+b.hpwl.toFixed(1));
     \\ setSc("sc-loop","loop "+b.loop_term.toFixed(1)+" · "+PCB.caps+" cap");
+    \\ setSc("sc-area","area "+(b.area_term||0).toFixed(1)+" ("+(b.area_raw||0).toFixed(1)+"mm²)");
     \\ setSc("sc-align","align "+b.alignment_term.toFixed(1));
     \\ setSc("sc-iso","iso "+b.isolation_term.toFixed(1));
     \\ delta("sc-obj-d",b.objective,PCB.auto.objective);
     \\ delta("sc-hpwl-d",b.hpwl,PCB.auto.hpwl);
     \\ delta("sc-loop-d",b.loop_term,PCB.auto.loop_term);
+    \\ delta("sc-area-d",b.area_term||0,PCB.auto.area_term||0);
     \\ delta("sc-align-d",b.alignment_term,PCB.auto.alignment_term);
     \\ delta("sc-iso-d",b.isolation_term,PCB.auto.isolation_term);
     \\}

@@ -62,6 +62,15 @@ const PASSIVE_MASS: f64 = 1.0;
 const SEED_GAP_MM: f64 = 1.5; // extra gap between seed grid cells
 const ROT_ROUNDS: usize = 2; // rotation-refine ↔ relax coordinate-descent rounds
 const LOOP_W: f64 = 3.0; // weight on loop length in the objective
+const AREA_W: f64 = 2.0; // weight on enclosed loop AREA (mm²) — the inductance-
+// dominant term; with the default it outvotes the length term so the optimizer
+// prefers the *smallest enclosed loop*, not just the shortest summed legs.
+// A loop already this tight (mm²) is "good enough" — the objective floors each
+// loop's area contribution here so shrinking further earns nothing. Without it,
+// the area term rewards unbounded thinness, pushing caps collinear with their
+// pins (a degenerate near-zero-area sliver) at the cost of longer legs; the floor
+// keeps the term ranking *large* loops worse while leaving tight ones alone.
+const AREA_FLOOR_MM2: f64 = 1.0;
 const K_COMPACT: f64 = 0.10; // pull toward the cluster centroid (keeps HPWL tight)
 const STARTS: usize = 48; // multi-start seeds; keep the lowest-scoring arrangement
 const MULTISTART_MAX_PARTS: usize = 32; // above this, single start (bound O(n²·starts))
@@ -115,6 +124,7 @@ const COMPACT_EPS: f64 = 1e-4; // courtyard-gap tolerance for the "touching" tes
 /// weights are exposed; the structural tunables (iters, starts) stay fixed.
 pub const Params = struct {
     loop_w: f64 = LOOP_W,
+    area_w: f64 = AREA_W,
     w_isolate: f64 = W_ISOLATE,
     w_align: f64 = W_ALIGN,
     cap_w_max: f64 = CAP_W_MAX,
@@ -221,7 +231,9 @@ const LoopSums = struct { raw: f64, weighted: f64 };
 pub const Breakdown = struct {
     hpwl: f64, // total signal HPWL (mm); objective weight 1
     loop_raw: f64, // summed unweighted hot-loop length (mm) = Score.loop_mm
-    loop_weighted: f64, // value-priority-weighted loop sum (what the objective uses)
+    loop_weighted: f64, // value-priority-weighted loop-length sum
+    area_raw: f64 = 0, // summed unweighted enclosed loop area (mm²)
+    area_weighted: f64 = 0, // value-priority-weighted loop-area sum (drives the objective)
     isolation: f64, // raw sensitive↔aggressor keep-away penalty
     alignment: f64, // raw row/column tidiness penalty
     objective: f64, // the weighted total the multi-start/polish minimize
@@ -392,7 +404,7 @@ pub fn solve(
         score.loop_mm = routed.raw;
         break :blk routed.weighted;
     } else surrogateLoops(parts, built.loops).weighted;
-    const bd = breakdownWith(parts, params, score, loop_weighted);
+    const bd = breakdownWith(parts, params, score, loop_weighted, built.loops);
     return finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, score, bd, generated);
 }
 
@@ -417,7 +429,7 @@ pub fn scorePoses(
         score.loop_mm = routed.raw;
         break :blk routed.weighted;
     } else surrogateLoops(prep.parts, prep.built.loops).weighted;
-    return breakdownWith(prep.parts, params, score, loop_weighted);
+    return breakdownWith(prep.parts, params, score, loop_weighted, prep.built.loops);
 }
 
 /// The design model `solve` and `scorePoses` share: the flattened parts (with
@@ -541,16 +553,19 @@ fn prepare(
 /// the score export. `loop_weighted` is supplied by the caller — the real
 /// routed-trace value-weighted sum on the score path — and the objective is
 /// rebuilt from it, so the headline number matches the loop length shown.
-fn breakdownWith(parts: []const Part, params: Params, score: Score, loop_weighted: f64) Breakdown {
+fn breakdownWith(parts: []const Part, params: Params, score: Score, loop_weighted: f64, loops: []const Loop) Breakdown {
     const iso = isolationPenalty(parts);
     const al = alignmentPenalty(parts);
+    const area = loopAreaSum(parts, loops);
     return .{
         .hpwl = score.hpwl_mm,
         .loop_raw = score.loop_mm,
         .loop_weighted = loop_weighted,
+        .area_raw = area.raw,
+        .area_weighted = area.weighted,
         .isolation = iso,
         .alignment = al,
-        .objective = score.hpwl_mm + params.loop_w * loop_weighted +
+        .objective = score.hpwl_mm + params.loop_w * loop_weighted + params.area_w * area.weighted +
             params.w_isolate * iso + params.w_align * al,
     };
 }
@@ -1131,6 +1146,7 @@ fn routedPolishCost(
     _ = scratch.reset(.retain_capacity);
     const focus_w = routedSubsetWeighted(scratch.allocator(), parts, idx_of, nets, loops, cap, true);
     return hpwlScore(parts, idx_of, nets) + params.loop_w * (others_w + focus_w) +
+        params.area_w * loopAreaSum(parts, loops).weighted +
         params.w_isolate * isolationPenalty(parts) + params.w_align * alignmentPenalty(parts);
 }
 
@@ -1891,7 +1907,7 @@ fn objectiveCost(
     params: Params,
 ) f64 {
     const hpwl = hpwlScore(parts, idx_of, nets);
-    return hpwl + params.loop_w * weightedLoop(parts, loops) +
+    return hpwl + params.loop_w * weightedLoop(parts, loops) + params.area_w * loopAreaSum(parts, loops).weighted +
         params.w_isolate * isolationPenalty(parts) + params.w_align * alignmentPenalty(parts);
 }
 
@@ -1914,7 +1930,7 @@ fn routedObjectiveCost(
 ) f64 {
     const hpwl = hpwlScore(parts, idx_of, nets);
     const loop_weighted = routedLoops(scratch, parts, idx_of, nets, loops).weighted;
-    return hpwl + params.loop_w * loop_weighted +
+    return hpwl + params.loop_w * loop_weighted + params.area_w * loopAreaSum(parts, loops).weighted +
         params.w_isolate * isolationPenalty(parts) + params.w_align * alignmentPenalty(parts);
 }
 
@@ -1961,6 +1977,40 @@ fn loopGroundSpan(parts: []const Part, lp: Loop) f64 {
     const span = rectGap(worldRect(cap, lp.cap_pwr), cap_gnd);
     const ret = 2 * LAYER_GAP_MM + rectGap(cap_gnd, worldRect(parts[lp.hub], lp.hub_gnd_pin));
     return span + ret;
+}
+
+/// Enclosed AREA (mm²) of one decoupling loop: the polygon hub-power-pin →
+/// cap-power-pad → cap-ground-pad → hub-ground-pin (pad centres). Loop inductance
+/// is ∝ this area, which the summed-length metric misses — a flip that shortens
+/// the routed power leg but flings the ground pad to the far side *enlarges* the
+/// enclosed loop even as total leg length drops. Shoelace over the four centres;
+/// the L1 power path goes out one side, the L2 plane return comes back the other,
+/// and the area between them is what couples. Geometric (no router) → cheap.
+fn loopArea(parts: []const Part, lp: Loop) f64 {
+    const hub = parts[lp.hub];
+    const cap = parts[lp.cap];
+    const a = worldPadCenter(hub, lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
+    const b = worldPadCenter(cap, lp.cap_pwr.x, lp.cap_pwr.y);
+    const c = worldPadCenter(cap, lp.cap_gnd.x, lp.cap_gnd.y);
+    const d = worldPadCenter(hub, lp.hub_gnd_pin.x, lp.hub_gnd_pin.y);
+    const s = (a[0] * b[1] - b[0] * a[1]) + (b[0] * c[1] - c[0] * b[1]) +
+        (c[0] * d[1] - d[0] * c[1]) + (d[0] * a[1] - a[0] * d[1]);
+    return @abs(s) * 0.5;
+}
+
+/// Loop-area sums: `raw` is the true total area (mm², for display); `weighted`
+/// is the value-weighted sum the objective minimises, with each loop floored at
+/// `AREA_FLOOR_MM2` so a loop already tight earns nothing further (no incentive to
+/// spread caps collinear for a degenerate sliver — see `AREA_FLOOR_MM2`).
+fn loopAreaSum(parts: []const Part, loops: []const Loop) LoopSums {
+    var raw: f64 = 0;
+    var weighted: f64 = 0;
+    for (loops) |lp| {
+        const ar = loopArea(parts, lp);
+        raw += ar;
+        weighted += lp.weight * @max(ar, AREA_FLOOR_MM2);
+    }
+    return .{ .raw = raw, .weighted = weighted };
 }
 
 /// Analytic loop sums (raw + value-weighted) from the fixed-pad surrogate: the
