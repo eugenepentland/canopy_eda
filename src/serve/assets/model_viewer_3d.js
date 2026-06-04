@@ -113,6 +113,14 @@
       var wall = new THREE.Mesh(new THREE.CylinderGeometry(p.drill / 2, p.drill / 2, BOARD_T, 24, 1, true), isNpth(p) ? npthMat : barrelMat);
       wall.rotation.x = Math.PI / 2; wall.position.set(sx, sy, -BOARD_T / 2);
       padGroup.add(wall);
+    } else if (p.poly && p.poly.length >= 3) {
+      // Custom pad: extrude the real copper polygon, not its bounding box.
+      // Points are footprint-absolute; flip Y into the scene frame.
+      var ps = new THREE.Shape();
+      ps.moveTo(p.poly[0][0], -p.poly[0][1]);
+      for (var i = 1; i < p.poly.length; i++) ps.lineTo(p.poly[i][0], -p.poly[i][1]);
+      ps.lineTo(p.poly[0][0], -p.poly[0][1]);
+      padGroup.add(new THREE.Mesh(new THREE.ExtrudeGeometry(ps, { depth: PAD_T, bevelEnabled: false }), padMat));
     } else if (p.shape === "circle") {
       var cm = new THREE.Mesh(new THREE.CylinderGeometry(Math.max(p.w, p.h) / 2, Math.max(p.w, p.h) / 2, PAD_T, 24), padMat);
       cm.rotation.x = Math.PI / 2; cm.position.set(sx, sy, PAD_T / 2); padGroup.add(cm);

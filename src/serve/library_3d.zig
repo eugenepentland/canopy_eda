@@ -210,6 +210,7 @@ fn writePadJson(w: *std.Io.Writer, pad: ast.Node, first: *bool) !void {
     var h_mm: f64 = 0;
     var drill: f64 = 0;
     var has_pos = false;
+    var poly_node: ?ast.Node = null;
     for (nodes[shape_idx + 1 ..]) |n| {
         if (n.isForm("pos")) {
             const pl = n.asList().?;
@@ -231,6 +232,8 @@ fn writePadJson(w: *std.Io.Writer, pad: ast.Node, first: *bool) !void {
             if (dl.len >= 2) {
                 drill = dl[1].asNumber() orelse (if (dl.len >= 3) dl[2].asNumber() orelse 0 else 0);
             }
+        } else if (n.isForm("poly")) {
+            poly_node = n;
         }
     }
     if (!has_pos) return;
@@ -238,9 +241,30 @@ fn writePadJson(w: *std.Io.Writer, pad: ast.Node, first: *bool) !void {
     if (!first.*) try w.writeAll(",");
     first.* = false;
     try w.print(
-        "{{\"x\":{d:.4},\"y\":{d:.4},\"w\":{d:.4},\"h\":{d:.4},\"shape\":\"{s}\",\"type\":\"{s}\",\"drill\":{d:.4}}}",
+        "{{\"x\":{d:.4},\"y\":{d:.4},\"w\":{d:.4},\"h\":{d:.4},\"shape\":\"{s}\",\"type\":\"{s}\",\"drill\":{d:.4}",
         .{ x, y, w_mm, h_mm, shape, ptype, drill },
     );
+    // A custom pad's real copper outline (footprint-absolute coords) so the
+    // viewer extrudes the polygon instead of the size bounding box.
+    if (poly_node) |pn| try writePadPolyJson(w, pn);
+    try w.writeAll("}");
+}
+
+/// Emit a pad's `(poly (x y) …)` outline as `,"poly":[[x,y],…]`.
+fn writePadPolyJson(w: *std.Io.Writer, poly_node: ast.Node) !void {
+    const pl = poly_node.asList() orelse return;
+    try w.writeAll(",\"poly\":[");
+    var first = true;
+    for (pl[1..]) |pt| {
+        const ptl = pt.asList() orelse continue;
+        if (ptl.len < 2) continue;
+        const px = ptl[0].asNumber() orelse continue;
+        const py = ptl[1].asNumber() orelse continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.print("[{d:.4},{d:.4}]", .{ px, py });
+    }
+    try w.writeAll("]");
 }
 
 /// Emit a `(courtyard (rect X1 Y1 X2 Y2))` as `{x1,y1,x2,y2}`. A circular
