@@ -63,6 +63,7 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - add drops legacy (angle …) arcs the modern board parser rejects
 - preserves pcbnew-style boards: in-element net forms
 - add places the new footprint at the op's staging (x, y) and bakes canopy_net / canopy_section properties
+- add places the new footprint at the premade layout's (x, y, rotation)
 - add bakes design properties (MPN, Manufacturer, …) on the first sync
 - create_board_item writes a section staging box as a (gr_rect …) on Dwgs.User
 - create_board_item writes a section label as a (gr_text …) on Dwgs.User
@@ -105,6 +106,7 @@ Public functions: check
 
 - flags a via that crowds a foreign pad's clearance
 - passes a via that shares the pad's net
+- a routed module with a crowded ground pad has no clearance violations
 
 ## placement/pin_roles
 
@@ -314,22 +316,11 @@ Public functions: renderTabs
 - Draws each rail label once per source, not once per fanout branch
 - Colors power edges by voltage and renders a voltage legend
 - Draws per-rail load buckets with rail-colored headings in the power view
-- Tints RF edges returning to the connector distinctly from the forward chain
+- RF signal edges get no tab of their own; the flow shows in the Layout/System view
 - Puts the combined System view first and selects it by default
 - System view draws every class's edges at once, colored by class, with a class legend
 - System view labels functional bands so it reads as an architecture
 - Wraps a block's description onto multiple lines instead of truncating at one
-- Function view is the default first tab above the System view when one is supplied
-
-## diagram/function
-
-Public functions: buildFunctionGraph
-
-- Auto-groups undeclared sections by category into functional blocks
-- Declared (function …) groups claim their member sections by name
-- Function blocks list their cleaned member part labels
-- A declared subtitle becomes the box caption and the verb the tooltip
-- A signal link outranks a power link when subsystems share both
 
 ## diagram/diagram
 

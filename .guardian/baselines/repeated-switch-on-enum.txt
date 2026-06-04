@@ -1,5 +1,5 @@
 # guardian-snapshot v1
-switch on prongs (@"error",info,warning) appears in 3 files
+switch on prongs (@"error",info,warning) appears in 2 files
 switch on prongs (atom,float,int,list,string,unit_val) appears in 2 files
 switch on prongs (concept,implemented,review) appears in 2 files
 switch on prongs (datasheet,footprint,manufacturer,mpn,requirements_verified,value) appears in 2 files

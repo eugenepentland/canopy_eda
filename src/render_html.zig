@@ -60,6 +60,10 @@ pub fn renderToHtml(
     status: review.Status,
     review_doc: ?review.ReviewDoc,
     check_results: *const CheckResultMap,
+    // Route prefix for *this* schematic view ("/schematics/" for designs,
+    // "/modules/" for reusable modules). Drives the active link in the
+    // Schematic ⇄ PCB Layout switcher; the PCB side is always "/pcb-layout/".
+    schematic_path: []const u8,
 ) RenderError![]const u8 {
     var ctx = try setupRenderCtx(allocator, block);
     ctx.project_dir = project_dir;
@@ -82,7 +86,7 @@ pub fn renderToHtml(
     try pages_tmpl.Navbar.render(.{""}, w);
     try w.writeAll("<div class=\"sch-layout\">");
     try w.writeAll("<div class=\"sch-wrap\">");
-    try writeHeader(w, block.name, design_name, status);
+    try writeHeader(w, block.name, design_name, status, schematic_path);
 
     // Pair top-level `(sub-block …)` declarations with the section that wires
     // them (e.g. `(section "XSPI2 NOR Flash" …)` adopts `(sub-block "flash" …)`)
@@ -95,24 +99,20 @@ pub fn renderToHtml(
     const sub_attachments = try computeSubBlockAttachments(allocator, block);
     defer allocator.free(sub_attachments);
 
-    // Top-of-page overview: block diagram, then the review summary + power/
-    // test-point tables. These are read-only dashboards, so they sit above
-    // the per-section schematics where the user does the detailed work.
+    // Top-of-page overview: block diagram, then the power/test-point tables.
+    // These are read-only dashboards, so they sit above the per-section
+    // schematics where the user does the detailed work. The summary table and
+    // sub-block-requirements list were dropped from this page — the audit
+    // counts live on the ERC button + sidebar instead.
     try w.writeAll("<div id=\"page-block-diagram\" class=\"page-anchor\">");
     try block_diagram.renderBlockDiagramTabs(allocator, block, sub_attachments, w);
     try w.writeAll("</div>");
     if (review_doc) |doc| {
         try w.writeAll("<div class=\"review-embed review-wrap\">");
-        try w.writeAll("<div id=\"page-summary\" class=\"page-anchor\">");
-        try review_html.writeSummaryTable(w, doc.summary);
-        try w.writeAll("</div>");
         if (doc.traceability.rows.len > 0) {
             try w.writeAll("<div id=\"page-traceability\" class=\"page-anchor\">");
             try review_html.writeTraceability(w, doc.traceability);
             try w.writeAll("</div>");
-        }
-        if (doc.subblock_requirements.len > 0) {
-            try writeSubblockRequirements(w, doc.subblock_requirements);
         }
         if (doc.power_sequence.len > 0) {
             try w.writeAll("<div id=\"page-power-sequence\" class=\"page-anchor\">");
@@ -133,9 +133,15 @@ pub fn renderToHtml(
     }
 
     // Editable BOM table — sits between the review dashboards and the
-    // per-section schematic cards. <details open> so it's visible by
-    // default but the user can collapse it on long pages.
-    try w.writeAll("<details id=\"page-bom\" class=\"sch-bom-card page-anchor\" open><summary>Bill of Materials</summary>");
+    // per-section schematic cards. Collapsed by default to keep the page
+    // scannable; the <summary> carries a unique/total part count so the
+    // headline number is visible without expanding.
+    const bom_counts = try bom_html.countBom(allocator, block);
+    try w.print(
+        "<details id=\"page-bom\" class=\"sch-bom-card page-anchor\"><summary>Bill of Materials " ++
+            "<span class=\"sch-card-sub muted\">{d} unique · {d} total parts</span></summary>",
+        .{ bom_counts.unique, bom_counts.total },
+    );
     try bom_html.writeSchematicBomHtml(w, block);
     try w.writeAll("</details>");
 
@@ -146,7 +152,8 @@ pub fn renderToHtml(
     // Same file backs the MCP `add_design_note`/`complete_design_note`
     // tools so agents and humans share state.
     try w.writeAll(
-        \\<details id="page-notes" class="sch-notes-card page-anchor" open><summary>Design Notes</summary>
+        \\<details id="page-notes" class="sch-notes-card page-anchor">
+        \\<summary>Design Notes <span class="sch-card-sub muted" id="sch-notes-count"></span></summary>
         \\<div class="sch-notes-body">
         \\<p class="sch-notes-hint muted">Log ERC errors and follow-ups for the next revision. Saved to
         \\<code>&lt;design&gt;.notes.md</code>; same store as the MCP <code>add_design_note</code> tool.</p>
@@ -189,21 +196,9 @@ pub fn renderToHtml(
         try writeFlatHubs(&ctx, w, allocator, block, check_results);
     }
 
-    // Bottom-of-page audit trail: ERC violations and assertions. Repeated
-    // below the schematic so a reviewer who scrolls through can stamp
-    // approvals and then see the outstanding issues without jumping back.
-    if (review_doc) |doc| {
-        try w.writeAll("<div class=\"review-embed review-wrap\">");
-        try w.writeAll("<div id=\"page-unresolved\" class=\"page-anchor\">");
-        try review_html.writeUnresolved(w, doc.unresolved);
-        try w.writeAll("</div>");
-        if (doc.assertions.len > 0) {
-            try w.writeAll("<div id=\"page-assertions\" class=\"page-anchor\">");
-            try review_html.writeAssertions(w, doc.assertions);
-            try w.writeAll("</div>");
-        }
-        try w.writeAll("</div>");
-    }
+    // ERC violations and assertions no longer render at the bottom of the
+    // page — they surface in the sidebar via the ERC button (which now also
+    // lists the design's assertions). Keeps the page tail clean.
 
     try w.writeAll("</div>");
     try writeSidebar(w, review_doc);
@@ -219,7 +214,7 @@ pub fn renderToHtml(
     return aw.written();
 }
 
-fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: review.Status) !void {
+fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: review.Status, schematic_path: []const u8) !void {
     const banner_class: []const u8 = switch (status) {
         .pass => "banner banner-pass",
         .warn => "banner banner-warn",
@@ -238,6 +233,14 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
     try w.writeAll(".sexp</code></div></div>");
     try w.print("<div class=\"{s}\">{s}</div>", .{ banner_class, banner_label });
     try w.writeAll("<div class=\"head-links\">");
+    // Schematic ⇄ PCB Layout switcher (Schematic active here). Same control
+    // the PCB page renders, so the two views feel like one screen.
+    try w.print(
+        "<nav class=\"viewtoggle\" aria-label=\"View\">" ++
+            "<a class=\"active\" href=\"{s}{s}\">Schematic</a>" ++
+            "<a href=\"/pcb-layout/{s}\">PCB Layout</a></nav>",
+        .{ schematic_path, design_name, design_name },
+    );
     try w.writeAll(
         "<button class=\"head-link head-btn\" id=\"reload-btn\" type=\"button\" " ++
             "title=\"Re-read the .sexp source from disk and rebuild\">\u{21BB} Reload</button>",
@@ -408,9 +411,7 @@ fn writeSidebar(w: anytype, review_doc: ?review.ReviewDoc) !void {
     try w.writeAll("<nav class=\"sb-toc\" aria-label=\"Page contents\">");
     try writeTocChip(w, "page-block-diagram", "Block diagram");
     if (review_doc) |doc| {
-        try writeTocChip(w, "page-summary", "Summary");
         if (doc.traceability.rows.len > 0) try writeTocChip(w, "page-traceability", "Traceability");
-        if (doc.subblock_requirements.len > 0) try writeTocChip(w, "page-subblock-reqs", "Sub-block reqs");
         if (doc.power_sequence.len > 0) try writeTocChip(w, "page-power-sequence", "Power sequencing");
         if (doc.test_points.len > 0) try writeTocChip(w, "page-test-points", "Test points");
         if (doc.power_budget.len > 0) try writeTocChip(w, "page-power-budget", "Power budget");
@@ -834,26 +835,6 @@ fn writeRequirementsDetails(w: anytype, requirements: []const env_mod.Requiremen
 fn writeHubRequirements(w: anytype, h: HubAnalysis, check_results: *const CheckResultMap) !void {
     const results: []const req_checks.Result = check_results.get(h.inst.ref_des) orelse &.{};
     try writeRequirementsDetails(w, h.inst.requirements, results);
-}
-
-/// Requirements for parts placed inside sub-blocks (sealed modules). The
-/// per-section hub dropdowns only cover top-level hubs, so a sub-block hub —
-/// like the PMA3 LNA inside `pma3-lna` — would otherwise have nowhere to show
-/// its requirements even though they're parsed and checked. One labeled
-/// dropdown per sub-block instance, reusing the same renderer as the hubs.
-fn writeSubblockRequirements(w: anytype, entries: []const review.ComponentRequirementEntry) !void {
-    try w.writeAll("<div id=\"page-subblock-reqs\" class=\"page-anchor sch-subblock-reqs\">");
-    try w.writeAll("<h3>Sub-block Requirements</h3>");
-    for (entries) |e| {
-        try w.writeAll("<div class=\"subblock-req\"><div class=\"subblock-req-head\">");
-        try writeHtmlEscaped(w, e.ref_des);
-        try w.writeAll(" · ");
-        try writeHtmlEscaped(w, e.component);
-        try w.writeAll("</div>");
-        try writeRequirementsDetails(w, e.requirements, e.req_results);
-        try w.writeAll("</div>");
-    }
-    try w.writeAll("</div>");
 }
 
 /// Bucket a hub's pin-groups by `(group "label")` feature label and render
@@ -1425,6 +1406,8 @@ fn writeScripts(
     try writeSearchIndex(w, allocator, block, ctx, asserted_fns, check_results);
     try w.writeAll(";var SCH_AUDIT=");
     try writeAuditSummary(w, review_doc);
+    try w.writeAll(";var SCH_ASSERTIONS=");
+    try writeAssertionsJson(w, review_doc);
     try w.writeAll(";</script>");
     // CodeMirror (vendored) must load before schematic_viewer.js so the
     // global is available when the source editor initialises.
@@ -1450,6 +1433,23 @@ fn writeAuditSummary(w: anytype, review_doc: ?review.ReviewDoc) !void {
     } else {
         try w.writeAll("{\"present\":false}");
     }
+}
+
+/// Emit the full assertions list as a JSON array so the ERC sidebar panel can
+/// render each `(assert …)` result alongside the ERC violations — the page no
+/// longer shows an Assertions table at the bottom. Empty array when no
+/// review-doc is attached.
+fn writeAssertionsJson(w: anytype, review_doc: ?review.ReviewDoc) !void {
+    try w.writeAll("[");
+    if (review_doc) |doc| {
+        for (doc.assertions, 0..) |a, i| {
+            if (i > 0) try w.writeAll(",");
+            try w.print("{{\"status\":\"{s}\",\"message\":", .{@tagName(a.status)});
+            try writeJsString(w, a.message);
+            try w.writeAll("}");
+        }
+    }
+    try w.writeAll("]");
 }
 
 /// JS bundle for the schematic viewer (sidebar search, click handlers, live

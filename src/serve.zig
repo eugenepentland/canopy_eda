@@ -182,7 +182,9 @@ pub fn serve(
     router.get("/api/pcb-layout/:name", pcb_layout_page.pcbLayoutJsonApi, .{});
     router.post("/api/pcb-layouts/:name", pcb_layout_page.saveNamedLayoutApi, .{});
     router.post("/api/pcb-layouts/:name/delete", pcb_layout_page.deleteNamedLayoutApi, .{});
+    router.post("/api/pcb-rescore/:name", pcb_layout_page.rescoreLayoutsApi, .{});
     router.post("/api/pcb-score/:name", pcb_layout_page.pcbScoreApi, .{});
+    router.post("/api/pcb-route/:name", pcb_layout_page.pcbRouteApi, .{});
     router.post("/api/courtyard/:name", pcb_layout_page.savePcbCourtyardApi, .{});
     router.get("/modules", modules_page.modulesListPage, .{});
     router.get("/modules/:name", modules_page.moduleViewPage, .{});

@@ -82,6 +82,7 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         status,
         review_doc,
         &check_results,
+        "/schematics/",
     ) catch |err| {
         res.status = 500;
         res.body = try std.fmt.allocPrint(ctx.allocator, "Render error: {s}", .{@errorName(err)});

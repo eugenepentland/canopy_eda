@@ -407,6 +407,7 @@ pub fn moduleViewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
             .pass,
             null,
             &empty_checks,
+            "/modules/",
         ) catch {
             // Fall through to the source view on a render failure.
             try writeSourceOnlyPage(ctx, res, name, src_path, true);

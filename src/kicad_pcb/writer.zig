@@ -1022,6 +1022,11 @@ fn buildAddFootprint(
     // the origin (legacy behaviour), so the user just drags it in.
     const x_mm = jsonNumNm(op_obj.get("x")) / NM_PER_MM;
     const y_mm = jsonNumNm(op_obj.get("y")) / NM_PER_MM;
+    // Orientation (degrees, CCW). Non-zero only when the server placed this
+    // first-insert part at the design's premade placement-tool pose; the
+    // staging grid and legacy origin placement leave it 0. Read raw — it is a
+    // plain angle, not an nm-scaled length.
+    const rot_deg = jsonNumNm(op_obj.get("rot"));
     if (lib_id.len == 0 or kmod.len == 0) return error.InvalidAdd;
 
     const kmod_nodes = try parser.parse(arena, kmod);
@@ -1032,7 +1037,7 @@ fn buildAddFootprint(
     var children: std.ArrayListUnmanaged(Node) = .empty;
     try children.append(arena, Node.atom(Span.zero, FORM_FOOTPRINT));
     try children.append(arena, Node.string(Span.zero, lib_id));
-    try children.append(arena, try makeAtForm(arena, x_mm, y_mm));
+    try children.append(arena, try makeAtForm(arena, x_mm, y_mm, rot_deg));
     try children.append(arena, try makeLayerForm(arena, "F.Cu"));
     // KiCad expects a (uuid …) per footprint; use the canopy_uuid as the
     // KiCad-internal uuid for new adds so the next sync's reader links
@@ -1078,11 +1083,16 @@ fn buildAddFootprint(
     return fp;
 }
 
-fn makeAtForm(arena: std.mem.Allocator, x: f64, y: f64) std.mem.Allocator.Error!Node {
-    var children = try arena.alloc(Node, 3);
+fn makeAtForm(arena: std.mem.Allocator, x: f64, y: f64, rot: f64) std.mem.Allocator.Error!Node {
+    // KiCad's `(at x y)` takes an optional third angle token. Emit it only when
+    // the rotation is non-zero so zero-rotation adds keep the bare two-number
+    // form pcbnew writes by default (and existing round-trip tests expect).
+    const n: usize = if (rot != 0) 4 else 3;
+    var children = try arena.alloc(Node, n);
     children[0] = Node.atom(Span.zero, "at");
     children[1] = Node.float(Span.zero, x);
     children[2] = Node.float(Span.zero, y);
+    if (rot != 0) children[3] = Node.float(Span.zero, rot);
     return Node.list(Span.zero, children);
 }
 
@@ -1473,6 +1483,29 @@ test "applyOpsToSource add places at staging position and bakes canopy fields" {
     // hidden so they don't render as text on the fab layer.
     try std.testing.expect(std.mem.indexOf(u8, out, "(property \"canopy_net\" \"U8.C3.VDD33USB\" (hide yes))") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "(property \"canopy_section\" \"USB Core\" (hide yes))") != null);
+}
+
+// spec: kicad_pcb/writer - add places the new footprint at the premade layout's (x, y, rotation)
+test "applyOpsToSource add applies the premade-layout rotation" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "R_0402" (uuid "fp-1") (property "Reference" "R1")))
+    ;
+    // x/y in board nm (12.4 / 8.2 mm); rot a raw angle in degrees (90, CCW).
+    const ops =
+        \\[{"op":"add","uuid":"new-uuid","ref":"C84","value":"1uF",
+        \\  "footprint_name":"C_0402",
+        \\  "kicad_mod":"(footprint \"C_0402\" (pad \"1\" smd roundrect (at 0 0)))",
+        \\  "x":12400000,"y":8200000,"rot":90,"pad_nets":[]}]
+    ;
+    const out = try applyOpsToSource(arena.allocator(), src, ops);
+    // The angle lands as the third token of the footprint's (at …) form, so a
+    // fresh import reproduces the placement tool's orientation, not just x/y.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(at 12.4 8.2 90") != null);
 }
 
 // spec: kicad_pcb/writer - add bakes design properties (MPN, Manufacturer, …) on the first sync

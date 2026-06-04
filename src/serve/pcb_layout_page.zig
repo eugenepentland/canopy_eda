@@ -52,6 +52,7 @@ const PARTS_OPEN = "\"parts\":[";
 /// Error bodies shared across the layout handlers.
 const NO_BLOCK_MSG = "No design or module by that name";
 const BAD_JSON_MSG = "bad json";
+const PLACEMENT_ERR_MSG = "Placement error";
 
 /// Success body returned by the mutating layout/courtyard endpoints.
 const OK_JSON_TRUE = "{\"ok\":true}";
@@ -73,9 +74,11 @@ const MAX_AUTO_LAYOUTS: usize = 12;
 /// One placed part within a saved layout: ref-des + centre (mm) + rotation.
 const PartPose = struct { ref: []const u8, x: f64, y: f64, rot: f64 };
 
-/// HPWL + decoupling-loop score stored with a layout, so the list shows
-/// "better/worse" at a glance without re-running the optimizer.
-const LayoutScore = struct { hpwl: f64, loop: f64, caps: usize };
+/// The weighted `objective` the optimizer minimizes plus its visible HPWL +
+/// decoupling-loop terms, stored with a layout so the list shows "better/worse"
+/// at a glance without re-running the optimizer. `objective` is 0 for legacy
+/// entries saved before it was recorded.
+const LayoutScore = struct { hpwl: f64, loop: f64, caps: usize, objective: f64 = 0 };
 
 /// A named saved layout: name, kind, capture time (unix s, 0 = unknown),
 /// optional score, and the placement itself (newest first within a file).
@@ -122,7 +125,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     else if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
     const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place) catch {
         res.status = 500;
-        res.body = "Placement error";
+        res.body = PLACEMENT_ERR_MSG;
         return;
     };
     // Persist the layout + its weights whenever the optimizer ran (miss /
@@ -163,9 +166,27 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     try w.writeAll("<div class=\"pcb-layout\">");
     try writeSidebar(w, ctx.allocator, placement);
     try w.writeAll("<main class=\"pcb-main\">");
-    try w.print("<h1>{s} — PCB Layout <span class=\"pcb-sub\">(force-directed · drag to edit)</span></h1>", .{block.name});
+    // Header row: title + the Schematic ⇄ PCB Layout switcher (PCB active).
+    // `name` resolves as a design under src/ first, else a reusable module —
+    // so the Schematic link points at the matching viewer.
+    const schematic_path: []const u8 = if (module_res != null) "/modules/" else "/schematics/";
+    try w.writeAll("<div class=\"pcb-head\">");
+    try w.print("<h1>{s} <span class=\"pcb-sub\">PCB Layout · force-directed · drag to edit</span></h1>", .{block.name});
+    try w.print(
+        "<nav class=\"viewtoggle\" aria-label=\"View\">" ++
+            "<a href=\"{s}{s}\">Schematic</a>" ++
+            "<a class=\"active\" href=\"/pcb-layout/{s}\">PCB Layout</a></nav>",
+        .{ schematic_path, name, name },
+    );
+    try w.writeAll("</div>");
     try writeScorebar(w, placement, name);
-    try writeLayoutsPanel(w, layouts, .{ .hpwl = placement.score.hpwl_mm, .loop = placement.score.loop_mm, .caps = placement.score.loop_caps });
+    const auto_score = LayoutScore{
+        .hpwl = placement.score.hpwl_mm,
+        .loop = placement.score.loop_mm,
+        .caps = placement.score.loop_caps,
+        .objective = placement.breakdown.objective,
+    };
+    try writeLayoutsPanel(w, layouts, auto_score);
     try writeTuning(w, shown);
     try writeRoutePanel(w, ro.params, routed, violations.len);
     try writeLegend(w, placement);
@@ -237,7 +258,7 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     else if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
     const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place) catch {
         res.status = 500;
-        res.body = "Placement error";
+        res.body = PLACEMENT_ERR_MSG;
         return;
     };
     if (placement.generated) writeAutoCache(ctx.allocator, ctx.project_dir, name, placement, tune.params);
@@ -365,6 +386,103 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     res.body = aw.written();
 }
 
+/// POST /api/pcb-route/:name — route the design at the *current on-screen* poses
+/// (a loaded saved layout, or hand-dragged parts) rather than the auto-generated
+/// placement, and return the copper as JSON. Body is the score endpoint's
+/// `{"parts":[{ref,x,y,rot}, …]}` plus optional route params `track_width`,
+/// `clearance`, `via_drill`, `via_dia` (mm; absent/0 → the router default).
+/// Response `{tracks, vias, drc, routed, total}` is the same routed-copper shape
+/// the page embeds, so the client redraws in place — no page reload, which is
+/// what used to snap the layout back to auto.
+pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
+        res.status = 400;
+        res.body = BAD_JSON_MSG;
+        return;
+    };
+    if (root != .object) {
+        res.status = 400;
+        return;
+    }
+    const parts_v = root.object.get("parts") orelse {
+        res.status = 400;
+        return;
+    };
+    if (parts_v != .array) {
+        res.status = 400;
+        return;
+    }
+    var poses: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
+    for (parts_v.array.items) |it| {
+        if (it != .object) continue;
+        const ref = it.object.get("ref") orelse continue;
+        if (ref != .string) continue;
+        try poses.append(ctx.allocator, .{
+            .ref = ref.string,
+            .x = jsonNum(it.object.get("x")),
+            .y = jsonNum(it.object.get("y")),
+            .rot = jsonNum(it.object.get("rot")),
+        });
+    }
+
+    // Route params from the body (mm); a missing or non-positive field keeps the
+    // router default — the same fields the GET ?route=1 query carries.
+    var rp = router.RouteParams{};
+    const tw = jsonNum(root.object.get("track_width"));
+    if (tw > 0) rp.track_width = tw;
+    const cl = jsonNum(root.object.get("clearance"));
+    if (cl > 0) rp.clearance = cl;
+    const vd = jsonNum(root.object.get("via_drill"));
+    if (vd > 0) rp.via_drill = vd;
+    const va = jsonNum(root.object.get("via_dia"));
+    if (va > 0) rp.via_dia = va;
+
+    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |mr| {
+        mr.eval.deinit();
+        ctx.allocator.destroy(mr.eval);
+    };
+    const block: *env_mod.DesignBlock = resolveBlock(ctx, name, &eval, &module_res) orelse {
+        res.status = 500;
+        res.body = NO_BLOCK_MSG;
+        return;
+    };
+
+    // Build the placement at the supplied poses (never re-optimized), route it,
+    // and DRC-check — exactly the GET ?route=1 pipeline, but on the client's
+    // layout instead of the cached auto one.
+    const placement = optimizer.placeFromPoses(ctx.allocator, block, ctx.project_dir, poses.items, optimizer.Params{}) catch {
+        res.status = 500;
+        res.body = PLACEMENT_ERR_MSG;
+        return;
+    };
+    const routed = router.route(ctx.allocator, placement, rp) catch {
+        res.status = 500;
+        res.body = "Routing error";
+        return;
+    };
+    const violations: []const drc.Violation = drc.check(ctx.allocator, placement, routed, rp.clearance) catch &.{};
+
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &aw.writer;
+    try w.writeAll("{");
+    try writeRoutedArrays(w, routed, violations);
+    try w.print(",\"routed\":{d},\"total\":{d}}}", .{ routed.routed, routed.total });
+    res.content_type = .JSON;
+    res.body = aw.written();
+}
+
 /// POST /api/pcb-layouts/:name — save a named layout snapshot (kind "manual").
 /// Body: `{"name","parts":[{ref,x,y,rot}, …]}`; the score is computed on the
 /// server (no client-side metric). Upserts by name (re-save overwrites in
@@ -414,7 +532,7 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
             const poses = try req.arena.alloc(optimizer.RefPose, parts.len);
             for (parts, 0..) |p, i| poses[i] = .{ .ref = p.ref, .x = p.x, .y = p.y, .rot = p.rot };
             if (optimizer.scorePoses(ctx.allocator, block, ctx.project_dir, poses, params)) |bd| {
-                score = .{ .hpwl = bd.hpwl, .loop = bd.loop_raw, .caps = 0 };
+                score = .{ .hpwl = bd.hpwl, .loop = bd.loop_raw, .caps = 0, .objective = bd.objective };
             } else |_| {}
         }
     }
@@ -459,6 +577,71 @@ pub fn deleteNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     writeLayouts(req.arena, ctx.project_dir, name, out.items);
     res.content_type = .JSON;
     res.body = OK_JSON_TRUE;
+}
+
+/// POST /api/pcb-rescore/:name — recompute every saved layout's objective with
+/// the *current* engine and persist the refreshed scores to `.layouts.json`.
+///
+/// Each saved layout stores the score the engine produced when it was captured;
+/// after the placement/scoring code changes those numbers go stale, so the
+/// panel's "Δ vs auto" compares an old-engine saved score against a fresh-engine
+/// auto baseline (the page-load `solve` always re-scores the auto layout). This
+/// re-runs `scorePoses` on each layout's stored part positions so every entry is
+/// measured by the live engine again, making the column comparable. Body is
+/// ignored; returns `{"ok":true,"rescored":N}`. A layout with no stored parts,
+/// or one whose scoring fails, keeps its previous score.
+pub fn rescoreLayoutsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const existing = readLayouts(req.arena, ctx.project_dir, name);
+    if (existing.len == 0) {
+        res.content_type = .JSON;
+        res.body = "{\"ok\":true,\"rescored\":0}";
+        return;
+    }
+
+    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |mr| {
+        mr.eval.deinit();
+        ctx.allocator.destroy(mr.eval);
+    };
+    const block: *env_mod.DesignBlock = resolveBlock(ctx, name, &eval, &module_res) orelse {
+        res.status = 500;
+        res.body = NO_BLOCK_MSG;
+        return;
+    };
+
+    // Same weights the on-screen auto baseline uses, so the refreshed saved
+    // scores are directly comparable to it (the panel's delta is auto-relative).
+    const params = readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{};
+
+    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    var n: usize = 0;
+    for (existing) |L| {
+        var updated = L;
+        if (L.parts.len > 0) {
+            const poses = try req.arena.alloc(optimizer.RefPose, L.parts.len);
+            for (L.parts, 0..) |p, i| poses[i] = .{ .ref = p.ref, .x = p.x, .y = p.y, .rot = p.rot };
+            if (optimizer.scorePoses(req.arena, block, ctx.project_dir, poses, params)) |bd| {
+                updated.score = .{
+                    .hpwl = bd.hpwl,
+                    .loop = bd.loop_raw,
+                    .caps = if (L.score) |s| s.caps else 0,
+                    .objective = bd.objective,
+                };
+                n += 1;
+            } else |_| {}
+        }
+        try out.append(req.arena, updated);
+    }
+    writeLayouts(req.arena, ctx.project_dir, name, out.items);
+
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"rescored\":{d}}}", .{n});
 }
 
 /// Parse the request body as a JSON object, setting a 400 and returning null on
@@ -731,6 +914,7 @@ fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout
             .hpwl = jsonNum(it.object.get("hpwl")),
             .loop = jsonNum(it.object.get("loop")),
             .caps = @intFromFloat(@max(@floor(jsonNum(it.object.get("caps"))), 0)),
+            .objective = jsonNum(it.object.get("objective")), // 0 for legacy entries
         };
         const parts = parsePartPoses(alloc, it.object.get("parts")) orelse &[_]PartPose{};
         list.append(alloc, .{
@@ -804,7 +988,7 @@ fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.
         try w.writeAll(",\"kind\":");
         try writeJsonStr(w, L.kind);
         try w.print(",\"ts\":{d}", .{L.ts});
-        if (L.score) |s| try w.print(",\"hpwl\":{d},\"loop\":{d},\"caps\":{d}", .{ s.hpwl, s.loop, s.caps });
+        if (L.score) |s| try w.print(",\"hpwl\":{d},\"loop\":{d},\"caps\":{d},\"objective\":{d}", .{ s.hpwl, s.loop, s.caps, s.objective });
         try w.writeAll(",\"parts\":[");
         for (L.parts, 0..) |pt, j| {
             if (j > 0) try w.writeAll(",");
@@ -822,10 +1006,17 @@ fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.
 /// score + part count), then prunes auto entries past `MAX_AUTO_LAYOUTS`.
 fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, p: optimizer.Placement) void {
     const existing = readLayouts(alloc, project_dir, name);
-    const score = LayoutScore{ .hpwl = p.score.hpwl_mm, .loop = p.score.loop_mm, .caps = p.score.loop_caps };
+    const score = LayoutScore{ .hpwl = p.score.hpwl_mm, .loop = p.score.loop_mm, .caps = p.score.loop_caps, .objective = p.breakdown.objective };
     if (existing.len > 0 and std.mem.eql(u8, existing[0].kind, KIND_AUTO)) {
         if (existing[0].score) |s0| {
-            if (existing[0].parts.len == p.parts.len and scoreApproxEq(s0, score)) return;
+            if (existing[0].parts.len == p.parts.len and scoreApproxEq(s0, score)) {
+                // Same layout as the newest auto entry. If it predates the
+                // objective field, backfill it in place; otherwise it's a true
+                // duplicate and there's nothing new to record.
+                if (s0.objective > 0) return;
+                backfillNewestScore(alloc, project_dir, name, existing, score);
+                return;
+            }
         }
     }
     const parts = alloc.alloc(PartPose, p.parts.len) catch return;
@@ -856,6 +1047,19 @@ fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []c
 /// continuous metrics agree to within 0.05 mm.
 fn scoreApproxEq(a: LayoutScore, b: LayoutScore) bool {
     return a.caps == b.caps and @abs(a.hpwl - b.hpwl) < 0.05 and @abs(a.loop - b.loop) < 0.05;
+}
+
+/// Rewrite the layout list with `score` patched onto the newest entry — used to
+/// backfill the objective onto a pre-objective auto entry a regen re-confirms,
+/// without churning the history with a duplicate row.
+fn backfillNewestScore(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, existing: []const SavedLayout, score: LayoutScore) void {
+    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    for (existing, 0..) |L, i| {
+        var e = L;
+        if (i == 0) e.score = score;
+        out.append(alloc, e) catch return;
+    }
+    writeLayouts(alloc, project_dir, name, out.items);
 }
 
 /// Name for an auto-recorded entry: `auto · Mon D HH:MM:SS` (UTC). The seconds
@@ -911,6 +1115,46 @@ fn readAutoPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []cons
         }) catch return null;
     }
     return list.toOwnedSlice(alloc) catch null;
+}
+
+/// One placed part exported to the KiCad sync: centre (mm) + rotation (deg,
+/// CCW). The sync stamps these onto a footprint it inserts for the first time.
+pub const SyncPose = struct { x: f64, y: f64, rot: f64 };
+
+/// Load the design's premade placement-tool layout for the KiCad sync's
+/// first-insertion path, as a ref-des → pose map (mm + degrees), or null when
+/// the design has no saved layout at all. Preference, newest-wins: a manual
+/// (named) snapshot the user deliberately saved, else the most recent recorded
+/// layout of any kind, else the raw `.autolayout.json` optimizer cache. The
+/// returned map and its keys live on `alloc` (request lifetime). Only positions
+/// are exported — never the routed loops/stubs the optimizer scores with — so a
+/// sync that consults this still emits footprints only, no traces or vias.
+pub fn loadSyncLayout(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+) ?std.StringHashMap(SyncPose) {
+    const layouts = readLayouts(alloc, project_dir, name);
+    const chosen: ?[]const PartPose = blk: {
+        for (layouts) |L| {
+            if (std.mem.eql(u8, L.kind, KIND_MANUAL) and L.parts.len > 0) break :blk L.parts;
+        }
+        for (layouts) |L| {
+            if (L.parts.len > 0) break :blk L.parts;
+        }
+        break :blk null;
+    };
+    if (chosen) |parts| {
+        var m = std.StringHashMap(SyncPose).init(alloc);
+        for (parts) |pt| m.put(pt.ref, .{ .x = pt.x, .y = pt.y, .rot = pt.rot }) catch return m;
+        return m;
+    }
+    // No named/recorded layouts — fall back to the bare optimizer cache.
+    const poses = readAutoPoses(alloc, project_dir, name) orelse return null;
+    if (poses.len == 0) return null;
+    var m = std.StringHashMap(SyncPose).init(alloc);
+    for (poses) |p| m.put(p.ref, .{ .x = p.x, .y = p.y, .rot = p.rot }) catch return m;
+    return m;
 }
 
 /// Persist the generated layout (its tuning weights + ref/x/y/rot per part) to
@@ -1073,8 +1317,17 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8) st
 /// of (HPWL+loop) versus the layout currently on screen (`auto`). The Load /
 /// delete buttons carry the layout name in data attributes for BOARD_JS.
 fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: LayoutScore) std.Io.Writer.Error!void {
-    try w.writeAll("<div class=\"pcb-saved\"><div class=\"saved-h\">Saved layouts <span class=\"saved-n\">");
-    try w.print("{d}</span></div>", .{layouts.len});
+    try w.writeAll("<div class=\"pcb-saved\"><div class=\"saved-h\"><span>Saved layouts <span class=\"saved-n\">");
+    try w.print("{d}</span></span>", .{layouts.len});
+    if (layouts.len > 0) {
+        try w.writeAll(
+            "<button class=\"saved-rescore\" id=\"pcb-rescore\" " ++
+                "title=\"Recompute every saved layout's objective with the current engine — " ++
+                "use after changing the placement/scoring code to see how old layouts score now\">" ++
+                "↻ Rescore all</button>",
+        );
+    }
+    try w.writeAll("</div>");
     if (layouts.len == 0) {
         try w.writeAll("<div class=\"saved-empty\">None yet — drag parts then <b>Save as…</b>, or hit Regenerate to record one.</div></div>");
         return;
@@ -1087,6 +1340,7 @@ fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: Layo
         try writeEscaped(w, L.name);
         try w.writeAll("</span><span class=\"lay-score\">");
         if (L.score) |s| {
+            if (s.objective > 0) try w.print("obj {d:.1} · ", .{s.objective});
             try w.print("HPWL {d:.1} · loop {d:.1}", .{ s.hpwl, s.loop });
             try w.writeAll("</span>");
             try writeLayDelta(w, s, auto);
@@ -1100,11 +1354,15 @@ fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: Layo
     try w.writeAll("</div></div>");
 }
 
-/// Delta of a saved layout's combined (HPWL+loop) cost versus the on-screen
-/// auto baseline. Positive (red) = worse, negative (green) = better — matching
-/// the live score-bar deltas.
+/// Delta of a saved layout's cost versus the on-screen auto baseline, on the
+/// weighted objective when both have one (legacy entries with no objective fall
+/// back to the combined HPWL+loop). Positive (red) = worse, negative (green) =
+/// better — matching the live score-bar deltas.
 fn writeLayDelta(w: *std.Io.Writer, s: LayoutScore, auto: LayoutScore) std.Io.Writer.Error!void {
-    const d = (s.hpwl + s.loop) - (auto.hpwl + auto.loop);
+    const d = if (s.objective > 0 and auto.objective > 0)
+        s.objective - auto.objective
+    else
+        (s.hpwl + s.loop) - (auto.hpwl + auto.loop);
     if (@abs(d) < 0.05) {
         try w.writeAll("<span class=\"lay-d\">=</span>");
         return;
@@ -1142,16 +1400,20 @@ fn writeRoutePanel(w: *std.Io.Writer, params: router.RouteParams, routed: ?route
     try w.writeAll("<button class=\"btn\" id=\"r-go\">Route</button>");
     try w.writeAll("<label class=\"tune-chk\"><input id=\"r-clr-show\" type=\"checkbox\"> show clearance</label>");
     try w.writeAll("<label class=\"tune-chk\"><input id=\"r-drc-show\" type=\"checkbox\" checked> show DRC</label>");
+    // Status spans, updated in place by the Route button's POST (no reload, so
+    // the on-screen layout stays put); pre-filled here for a direct ?route=1 GET.
     if (routed) |r| {
         const cls = if (r.routed == r.total) "ok" else "warn";
-        try w.print("<span class=\"route-stat {s}\">routed {d}/{d} nets · {d} vias</span>", .{ cls, r.routed, r.total, r.vias.len });
+        try w.print("<span class=\"route-stat {s}\" id=\"r-stat\">routed {d}/{d} nets · {d} vias</span>", .{ cls, r.routed, r.total, r.vias.len });
         if (n_drc == 0) {
-            try w.writeAll("<span class=\"route-stat ok\">DRC clean ✓</span>");
+            try w.writeAll("<span class=\"route-stat ok\" id=\"r-drc\">DRC clean ✓</span>");
         } else {
-            try w.print("<span class=\"route-stat err\">{d} DRC violation(s)</span>", .{n_drc});
+            try w.print("<span class=\"route-stat err\" id=\"r-drc\">{d} DRC violation(s)</span>", .{n_drc});
         }
     } else {
-        try w.writeAll("<span class=\"muted\">4-layer: top/GND/PWR/bottom · GND→plane vias</span>");
+        try w.writeAll("<span class=\"route-stat\" id=\"r-stat\"></span>");
+        try w.writeAll("<span class=\"route-stat\" id=\"r-drc\"></span>");
+        try w.writeAll("<span class=\"muted\" id=\"r-hint\">4-layer: top/GND/PWR/bottom · GND→plane vias</span>");
     }
     try w.writeAll("</div>");
 }
@@ -1368,28 +1630,32 @@ fn writePcbData(
     }
     try w.writeAll("],");
 
-    // Routed copper (world mm). layer 0=top, 1=bottom.
+    // Routed copper + DRC markers — emitted in the same shape the
+    // /api/pcb-route endpoint returns so drawRoute/drawClr/drawDrc read either.
+    try writeRoutedArrays(w, routed, violations);
+    try w.writeAll("};</script>");
+}
+
+/// Emit `"tracks":[…],"vias":[…],"drc":[…]` (world mm; track layer 0=top,
+/// 1=bottom). Shared by the page's embedded PCB blob and the /api/pcb-route
+/// response so both speak one routed-copper shape the client redraws from.
+fn writeRoutedArrays(w: *std.Io.Writer, routed: ?router.RouteResult, violations: []const drc.Violation) std.Io.Writer.Error!void {
     try w.writeAll("\"tracks\":[");
-    if (routed) |r| {
-        for (r.tracks, 0..) |t, i| {
-            if (i > 0) try w.writeAll(",");
-            try w.print("{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d}}}", .{ t.x1, t.y1, t.x2, t.y2, t.layer, t.width });
-        }
-    }
+    if (routed) |r| for (r.tracks, 0..) |t, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d}}}", .{ t.x1, t.y1, t.x2, t.y2, t.layer, t.width });
+    };
     try w.writeAll("],\"vias\":[");
-    if (routed) |r| {
-        for (r.vias, 0..) |vi, i| {
-            if (i > 0) try w.writeAll(",");
-            try w.print("{{\"x\":{d},\"y\":{d},\"d\":{d}}}", .{ vi.x, vi.y, vi.dia });
-        }
-    }
-    // DRC violations: world point + how short the gap is vs. the rule.
+    if (routed) |r| for (r.vias, 0..) |vi, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("{{\"x\":{d},\"y\":{d},\"d\":{d}}}", .{ vi.x, vi.y, vi.dia });
+    };
     try w.writeAll("],\"drc\":[");
     for (violations, 0..) |vio, i| {
         if (i > 0) try w.writeAll(",");
         try w.print("{{\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\"}}", .{ vio.x, vio.y, vio.gap, vio.clearance, drcKindStr(vio.kind) });
     }
-    try w.writeAll("]};</script>");
+    try w.writeAll("]");
 }
 
 /// Short label for a DRC violation kind (shown in the marker tooltip).
@@ -1416,7 +1682,7 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writ
         try w.writeAll(",\"kind\":");
         try writeJsonStr(w, L.kind);
         if (L.score) |s| {
-            try w.print(",\"score\":{{\"hpwl\":{d},\"loop\":{d},\"caps\":{d}}}", .{ s.hpwl, s.loop, s.caps });
+            try w.print(",\"score\":{{\"hpwl\":{d},\"loop\":{d},\"caps\":{d},\"objective\":{d}}}", .{ s.hpwl, s.loop, s.caps, s.objective });
         } else try w.writeAll(",\"score\":null");
         try w.writeAll(",\"parts\":{");
         for (L.parts, 0..) |pt, j| {
@@ -1561,110 +1827,122 @@ const COURTYARD_MODAL =
 // ── Styles + client renderer ─────────────────────────────────────────────
 
 const PAGE_CSS =
-    \\.pcb-layout{display:flex;gap:16px;align-items:flex-start;max-width:1500px;margin:0 auto;padding:12px 18px;font-family:system-ui,sans-serif}
+    \\html,body{margin:0;background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    \\a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}
+    \\.pcb-layout{display:flex;gap:16px;align-items:flex-start;max-width:1500px;margin:0 auto;padding:12px 18px}
     \\.pcb-main{flex:1;min-width:0}
-    \\.pcb-main h1{font-size:18px;font-weight:600;margin:4px 0}
-    \\.pcb-sub{font-size:13px;font-weight:400;color:#94a3b8}
+    \\.pcb-head{display:flex;align-items:center;gap:12px;margin:6px 0 2px;flex-wrap:wrap}
+    \\.pcb-head h1{flex:1;min-width:0}
+    \\.pcb-main h1{font-size:18px;font-weight:600;margin:4px 0;color:#f0f6fc}
+    \\.pcb-sub{font-size:13px;font-weight:400;color:#8b949e}
     \\.pcb-bar{display:flex;gap:10px;align-items:center;margin:8px 0;flex-wrap:wrap}
-    \\.pcb-bar .score{font-weight:600;color:#1e293b;background:#f1f5f9;border-radius:4px;padding:2px 8px}
-    \\.pcb-bar .sc-sub{font-weight:500;font-size:12px;color:#475569;background:#f8fafc}
+    \\.pcb-bar .score{font-weight:600;color:#e6edf3;background:#161b22;border:1px solid #21262d;border-radius:4px;padding:2px 8px}
+    \\.pcb-bar .sc-sub{font-weight:500;font-size:12px;color:#8b949e;background:#0d1117}
     \\.pcb-bar .delta{font-size:12px;font-weight:600;min-width:34px}
-    \\.pcb-bar .delta.up{color:#dc2626}
-    \\.pcb-bar .delta.down{color:#16a34a}
-    \\.pcb-bar .btn{font:inherit;font-size:12px;border:1px solid #cbd5e1;background:#fff;border-radius:5px;
-    \\  padding:3px 9px;cursor:pointer;text-decoration:none;color:#1e293b;display:inline-block}
-    \\.pcb-bar .btn:hover{background:#f8fafc}
+    \\.pcb-bar .delta.up{color:#f85149}
+    \\.pcb-bar .delta.down{color:#3fb950}
+    \\.pcb-bar .btn{font:inherit;font-size:12px;border:1px solid #30363d;background:#21262d;border-radius:5px;
+    \\  padding:3px 9px;cursor:pointer;text-decoration:none;color:#c9d1d9;display:inline-block}
+    \\.pcb-bar .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
     \\.pcb-bar .btn:disabled{opacity:.45;cursor:default}
     \\.pcb-bar .zoom-grp{display:inline-flex;gap:4px}
     \\.pcb-bar .zoom-grp .btn{min-width:26px;text-align:center;padding:3px 7px}
-    \\.pcb-bar .savemsg{font-size:12px;color:#16a34a;font-weight:600}
-    \\.pcb-bar .muted{font-size:11.5px;color:#94a3b8}
-    \\.pcb-saved{margin:2px 0 10px;border:1px solid #e2e8f0;border-radius:8px;background:#fff;overflow:hidden}
-    \\.pcb-saved .saved-h{font-size:12px;font-weight:700;color:#1e293b;padding:6px 10px;background:#f8fafc;border-bottom:1px solid #eef2f7}
-    \\.pcb-saved .saved-n{color:#94a3b8;font-weight:400}
-    \\.pcb-saved .saved-empty{font-size:12px;color:#94a3b8;padding:8px 10px}
+    \\.pcb-bar .savemsg{font-size:12px;color:#3fb950;font-weight:600}
+    \\.pcb-bar .muted{font-size:11.5px;color:#6e7681}
+    \\.pcb-saved{margin:2px 0 10px;border:1px solid #21262d;border-radius:8px;background:#161b22;overflow:hidden}
+    \\.pcb-saved .saved-h{font-size:12px;font-weight:700;color:#f0f6fc;padding:6px 10px;background:#0d1117;border-bottom:1px solid #21262d;
+    \\  display:flex;align-items:center;justify-content:space-between;gap:8px}
+    \\.saved-rescore{font:inherit;font-size:11px;font-weight:600;border:1px solid #30363d;background:#21262d;color:#c9d1d9;
+    \\  border-radius:5px;padding:2px 9px;cursor:pointer}
+    \\.saved-rescore:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
+    \\.saved-rescore:disabled{opacity:.5;cursor:default}
+    \\.pcb-saved .saved-n{color:#8b949e;font-weight:400}
+    \\.pcb-saved .saved-empty{font-size:12px;color:#8b949e;padding:8px 10px}
     \\.saved-list{display:flex;flex-direction:column;max-height:220px;overflow:auto}
-    \\.lay-row{display:flex;gap:8px;align-items:center;padding:5px 10px;border-bottom:1px solid #f1f5f9;font-size:12px}
+    \\.lay-row{display:flex;gap:8px;align-items:center;padding:5px 10px;border-bottom:1px solid #21262d;font-size:12px}
     \\.lay-row:last-child{border-bottom:0}
     \\.lay-kind{font-size:9.5px;font-weight:700;border-radius:3px;padding:1px 5px;letter-spacing:.03em}
-    \\.lay-kind.k-man{background:#dbeafe;color:#1d4ed8}
-    \\.lay-kind.k-auto{background:#f1f5f9;color:#64748b}
-    \\.lay-name{font-weight:600;color:#1e293b;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    \\.lay-score{color:#475569;white-space:nowrap}
+    \\.lay-kind.k-man{background:#14365c;color:#79c0ff}
+    \\.lay-kind.k-auto{background:#21262d;color:#8b949e}
+    \\.lay-name{font-weight:600;color:#e6edf3;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    \\.lay-score{color:#8b949e;white-space:nowrap}
     \\.lay-d{font-weight:600;min-width:36px;text-align:right}
-    \\.lay-d.up{color:#dc2626}
-    \\.lay-d.down{color:#16a34a}
-    \\.lay-row .btn{font:inherit;font-size:11px;border:1px solid #cbd5e1;background:#fff;border-radius:5px;padding:2px 8px;cursor:pointer;color:#1e293b}
-    \\.lay-row .btn:hover{background:#f8fafc}
-    \\.lay-row .lay-del{color:#dc2626;border-color:#fca5a5;padding:2px 7px}
-    \\.pcb-tune{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#475569}
-    \\.pcb-tune .tune-h{font-weight:700;color:#1e293b}
+    \\.lay-d.up{color:#f85149}
+    \\.lay-d.down{color:#3fb950}
+    \\.lay-row .btn{font:inherit;font-size:11px;border:1px solid #30363d;background:#21262d;border-radius:5px;padding:2px 8px;cursor:pointer;color:#c9d1d9}
+    \\.lay-row .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
+    \\.lay-row .lay-del{color:#f85149;border-color:#5b1e28;padding:2px 7px}
+    \\.lay-row .lay-del:hover{background:#30363d;border-color:#f85149;color:#ffa198}
+    \\.pcb-tune{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#8b949e}
+    \\.pcb-tune .tune-h{font-weight:700;color:#f0f6fc}
     \\.pcb-tune label{display:flex;gap:4px;align-items:center}
-    \\.pcb-tune input[type=number]{width:54px;font:inherit;font-size:12px;border:1px solid #cbd5e1;border-radius:4px;padding:2px 4px}
-    \\.pcb-tune .muted{font-size:11px;color:#94a3b8}
-    \\.pcb-route{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#475569}
-    \\.pcb-route .tune-h{font-weight:700;color:#1e293b}
+    \\.pcb-tune input[type=number]{width:54px;font:inherit;font-size:12px;border:1px solid #30363d;
+    \\  background:#0d1117;color:#c9d1d9;border-radius:4px;padding:2px 4px}
+    \\.pcb-tune .muted{font-size:11px;color:#6e7681}
+    \\.pcb-route{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#8b949e}
+    \\.pcb-route .tune-h{font-weight:700;color:#f0f6fc}
     \\.pcb-route label{display:flex;gap:4px;align-items:center}
-    \\.pcb-route input[type=number]{width:54px;font:inherit;font-size:12px;border:1px solid #cbd5e1;border-radius:4px;padding:2px 4px}
-    \\.pcb-route .muted{font-size:11px;color:#94a3b8}
+    \\.pcb-route input[type=number]{width:54px;font:inherit;font-size:12px;border:1px solid #30363d;
+    \\  background:#0d1117;color:#c9d1d9;border-radius:4px;padding:2px 4px}
+    \\.pcb-route .muted{font-size:11px;color:#6e7681}
     \\.pcb-route .route-stat{font-weight:600}
-    \\.pcb-route .route-stat.ok{color:#16a34a}
-    \\.pcb-route .route-stat.warn{color:#dc2626}
-    \\.pcb-route .route-stat.err{color:#fff;background:#ef4444;border-radius:4px;padding:1px 7px}
-    \\.pcb-legend{display:flex;gap:14px;align-items:center;font-size:12px;color:#475569;margin:4px 0 12px;flex-wrap:wrap}
+    \\.pcb-route .route-stat.ok{color:#3fb950}
+    \\.pcb-route .route-stat.warn{color:#f85149}
+    \\.pcb-route .route-stat.err{color:#fff;background:#da3633;border-radius:4px;padding:1px 7px}
+    \\.pcb-legend{display:flex;gap:14px;align-items:center;font-size:12px;color:#8b949e;margin:4px 0 12px;flex-wrap:wrap}
     \\.pcb-legend .sw{display:inline-block;width:18px;height:0;border-top-width:3px;border-top-style:solid;vertical-align:middle}
     \\.pcb-legend .sw.prox{border-color:#ea580c}
-    \\.pcb-legend .sw.gnd{border-color:#0891b2}
-    \\.pcb-legend .sw.l2gnd{border-color:#2563eb;border-top-style:dashed}
-    \\.pcb-legend .sw.viadot{border:0;height:9px;width:9px;border-radius:50%;background:#fff;box-shadow:0 0 0 1.5px #2563eb;vertical-align:middle}
-    \\.pcb-legend .sw.sig{border-color:#cbd5e1}
-    \\.pcb-legend .sw.esc{border-color:#dc2626}
-    \\.pcb-legend .note{color:#b45309}
-    \\.pcb-svg{background:#fff;border:1px solid #e2e8f0;border-radius:8px;max-width:100%;height:auto;touch-action:none}
+    \\.pcb-legend .sw.gnd{border-color:#22b8cf}
+    \\.pcb-legend .sw.l2gnd{border-color:#58a6ff;border-top-style:dashed}
+    \\.pcb-legend .sw.viadot{border:0;height:9px;width:9px;border-radius:50%;background:#fff;box-shadow:0 0 0 1.5px #58a6ff;vertical-align:middle}
+    \\.pcb-legend .sw.sig{border-color:#9aa7b4}
+    \\.pcb-legend .sw.esc{border-color:#f85149}
+    \\.pcb-legend .note{color:#d29922}
+    \\.pcb-svg{background:#010409;border:1px solid #30363d;border-radius:8px;max-width:100%;height:auto;touch-action:none}
     \\.pcb-ref{font:600 9px system-ui,sans-serif;text-anchor:middle;pointer-events:none;user-select:none}
     \\.part{cursor:grab}
     \\.part .court{transition:filter .08s}
-    \\.part.hl .court{filter:drop-shadow(0 0 3px rgba(37,99,235,.7))}
+    \\.part.hl .court{filter:drop-shadow(0 0 3px rgba(88,166,255,.75))}
     \\.pad{transition:fill .08s}
-    \\.pad.net-hl{fill:#dc2626}
-    \\.pn.net-hl{background:#fecaca;color:#991b1b}
+    \\.pad.net-hl{fill:#f85149}
+    \\.pn.net-hl{background:#5b1e28;color:#ffa198}
     \\.pcb-side{width:288px;flex:none;position:sticky;top:8px;max-height:calc(100vh - 16px);
-    \\  overflow:auto;border:1px solid #e2e8f0;border-radius:8px;background:#fff}
-    \\.side-h{font-size:13px;font-weight:600;padding:10px 12px;border-bottom:1px solid #eef2f7;position:sticky;top:0;background:#fff}
-    \\.side-n{color:#94a3b8;font-weight:400}
+    \\  overflow:auto;border:1px solid #21262d;border-radius:8px;background:#161b22}
+    \\.side-h{font-size:13px;font-weight:600;padding:10px 12px;border-bottom:1px solid #21262d;position:sticky;top:0;background:#161b22;color:#f0f6fc}
+    \\.side-n{color:#8b949e;font-weight:400}
     \\.comp-list{list-style:none;margin:0;padding:0}
-    \\.comp{padding:8px 12px;border-bottom:1px solid #f1f5f9;cursor:default}
-    \\.comp.hl{background:#eff6ff}
+    \\.comp{padding:8px 12px;border-bottom:1px solid #21262d;cursor:default}
+    \\.comp.hl{background:#1c2230}
     \\.comp-top{display:flex;gap:8px;align-items:baseline}
-    \\.comp-ref{font-weight:600;font-size:13px;color:#1e293b}
-    \\.comp-val{font-size:12px;color:#475569;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    \\.comp-fp{font-size:10.5px;color:#94a3b8;margin:1px 0 4px}
+    \\.comp-ref{font-weight:600;font-size:13px;color:#e6edf3}
+    \\.comp-val{font-size:12px;color:#8b949e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    \\.comp-fp{font-size:10.5px;color:#6e7681;margin:1px 0 4px}
     \\.comp-fp.court-edit{display:block;width:100%;text-align:left;background:none;border:0;padding:1px 0 4px;
     \\  cursor:pointer;font-family:inherit}
-    \\.comp-fp.court-edit:hover{color:#2563eb;text-decoration:underline}
+    \\.comp-fp.court-edit:hover{color:#58a6ff;text-decoration:underline}
     \\.comp-pins{display:flex;flex-wrap:wrap;gap:3px 5px}
-    \\.pn{font-size:11px;color:#334155;background:#f1f5f9;border-radius:3px;padding:0 5px;white-space:nowrap}
-    \\.pn b{color:#0f172a;font-weight:600;margin-right:3px}
-    \\.court-modal{position:fixed;inset:0;background:rgba(15,23,42,0.55);display:flex;
+    \\.pn{font-size:11px;color:#c9d1d9;background:#21262d;border-radius:3px;padding:0 5px;white-space:nowrap}
+    \\.pn b{color:#e6edf3;font-weight:600;margin-right:3px}
+    \\.court-modal{position:fixed;inset:0;background:rgba(1,4,9,0.7);display:flex;
     \\  align-items:center;justify-content:center;z-index:200}
     \\.court-modal[hidden]{display:none}
-    \\.court-dialog{background:#fff;border-radius:10px;padding:16px 18px;width:320px;
-    \\  box-shadow:0 12px 40px rgba(0,0,0,0.3);font-family:system-ui,sans-serif}
+    \\.court-dialog{background:#161b22;border:1px solid #30363d;color:#c9d1d9;border-radius:10px;padding:16px 18px;width:320px;
+    \\  box-shadow:0 12px 40px rgba(0,0,0,0.5);font-family:system-ui,sans-serif}
     \\.court-h{display:flex;align-items:center;justify-content:space-between;font-weight:600;
-    \\  color:#0f172a;font-size:14px;margin-bottom:8px}
-    \\.court-x{border:0;background:none;font-size:20px;line-height:1;cursor:pointer;color:#64748b}
-    \\.court-svg{width:100%;height:200px;background:#0d1117;border-radius:6px;display:block}
-    \\.court-mode{display:flex;gap:14px;align-items:center;margin:10px 0 4px;font-size:12px;color:#334155}
+    \\  color:#f0f6fc;font-size:14px;margin-bottom:8px}
+    \\.court-x{border:0;background:none;font-size:20px;line-height:1;cursor:pointer;color:#8b949e}
+    \\.court-svg{width:100%;height:200px;background:#010409;border-radius:6px;display:block}
+    \\.court-mode{display:flex;gap:14px;align-items:center;margin:10px 0 4px;font-size:12px;color:#c9d1d9}
     \\.court-mode label{display:flex;gap:4px;align-items:center;cursor:pointer}
-    \\.court-fields{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:4px 0 4px;font-size:12px;color:#334155}
+    \\.court-fields{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:4px 0 4px;font-size:12px;color:#c9d1d9}
     \\.court-fields[hidden]{display:none}
-    \\.court-fields input{width:64px;font:inherit}
-    \\.court-full{color:#64748b;font-size:12px;margin:2px 0 8px}
-    \\.court-note{font-size:11px;color:#94a3b8;line-height:1.4;margin-bottom:10px}
+    \\.court-fields input{width:64px;font:inherit;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:2px 4px}
+    \\.court-full{color:#8b949e;font-size:12px;margin:2px 0 8px}
+    \\.court-note{font-size:11px;color:#6e7681;line-height:1.4;margin-bottom:10px}
     \\.court-actions{display:flex;gap:8px;align-items:center}
-    \\.court-dialog .btn{font:inherit;font-size:12px;border:1px solid #cbd5e1;background:#fff;
-    \\  border-radius:5px;padding:4px 11px;cursor:pointer;color:#1e293b}
-    \\.court-dialog .btn:hover{background:#f8fafc}
+    \\.court-dialog .btn{font:inherit;font-size:12px;border:1px solid #30363d;background:#21262d;
+    \\  border-radius:5px;padding:4px 11px;cursor:pointer;color:#c9d1d9}
+    \\.court-dialog .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
     \\.court-dialog .btn:disabled{opacity:.45;cursor:default}
 ;
 
@@ -1716,22 +1994,22 @@ const BOARD_JS =
     \\ var g=el("g",{"class":"part","data-ref":p.ref});
     \\ var body=el("g",{"class":"body"});
     \\ body.appendChild(el("rect",{"class":"court",x:(-p.hw*S).toFixed(1),y:(-p.hh*S).toFixed(1),
-    \\   width:(2*p.hw*S).toFixed(1),height:(2*p.hh*S).toFixed(1),rx:2,fill:"#f1f5f9",
-    \\   stroke:p.kind=="hub"?"#2563eb":"#64748b","stroke-width":1.3,
+    \\   width:(2*p.hw*S).toFixed(1),height:(2*p.hh*S).toFixed(1),rx:2,fill:"#161b22",
+    \\   stroke:p.kind=="hub"?"#58a6ff":"#8b949e","stroke-width":1.3,
     \\   "stroke-dasharray":p.fb?"4 3":"0"}));
     \\ if(p.silk){
     \\  p.silk.l.forEach(function(s){body.appendChild(el("line",{x1:(s[0]*S).toFixed(1),y1:(s[1]*S).toFixed(1),
-    \\    x2:(s[2]*S).toFixed(1),y2:(s[3]*S).toFixed(1),stroke:"#94a3b8","stroke-width":0.8,"stroke-linecap":"round"}));});
+    \\    x2:(s[2]*S).toFixed(1),y2:(s[3]*S).toFixed(1),stroke:"#8b949e","stroke-width":0.8,"stroke-linecap":"round"}));});
     \\  p.silk.c.forEach(function(c){body.appendChild(el("circle",{cx:(c[0]*S).toFixed(1),cy:(c[1]*S).toFixed(1),
-    \\    r:Math.max(c[2]*S,1).toFixed(1),fill:"none",stroke:"#94a3b8","stroke-width":0.8}));});}
+    \\    r:Math.max(c[2]*S,1).toFixed(1),fill:"none",stroke:"#8b949e","stroke-width":0.8}));});}
     \\ p.pads.forEach(function(pad){
     \\   var pw=Math.max(pad.w*S,1.5),ph=Math.max(pad.h*S,1.5);
     \\   var a={"class":"pad",x:(pad.x*S-pw/2).toFixed(1),y:(pad.y*S-ph/2).toFixed(1),
-    \\     width:pw.toFixed(1),height:ph.toFixed(1),rx:0.5,fill:"#0f172a"};
+    \\     width:pw.toFixed(1),height:ph.toFixed(1),rx:0.5,fill:"#b08d57"};
     \\   if(pad.net)a["data-net"]=pad.net;
     \\   body.appendChild(el("rect",a));});
     \\ g.appendChild(body);
-    \\ var t=el("text",{"class":"pcb-ref",x:0,y:(-p.hh*S-2).toFixed(1),fill:p.kind=="hub"?"#2563eb":"#64748b"});
+    \\ var t=el("text",{"class":"pcb-ref",x:0,y:(-p.hh*S-2).toFixed(1),fill:p.kind=="hub"?"#58a6ff":"#8b949e"});
     \\ t.textContent=p.ref; g.appendChild(t);
     \\ gP.appendChild(g); els.push(g); bodies.push(body);
     \\ setT(i);
@@ -1742,22 +2020,22 @@ const BOARD_JS =
     \\ while(gR.firstChild)gR.removeChild(gR.firstChild);
     \\ PCB.links.forEach(function(l){
     \\   var a=wpt(l.a,l.ax,l.ay),b=wpt(l.b,l.bx,l.by);
-    \\   var col=l.k=="proximity"?"#ea580c":(l.k=="ground"?"#0891b2":"#cbd5e1");
+    \\   var col=l.k=="proximity"?"#ea580c":(l.k=="ground"?"#22b8cf":"#9aa7b4");
     \\   aw(a,b,col,l.k=="signal"?0.7:1.3,l.k=="signal"?0.55:0.9);});
     \\ PCB.loops.forEach(function(L){
     \\   var A=wpt(L.hub,L.pp.x,L.pp.y), B=wpt(L.cap,L.cp.x,L.cp.y),
     \\       C=wpt(L.cap,L.cg.x,L.cg.y), D=wpt(L.hub,L.gp.x,L.gp.y);
     \\   aw(B,A,"#ea580c",1.3,0.95);
     \\   var rp=[C,B,A,D].map(function(q){return X(q.x).toFixed(1)+","+Y(q.y).toFixed(1);}).join(" ");
-    \\   var pl=el("polyline",{points:rp,fill:"none",stroke:"#2563eb","stroke-width":1.3,opacity:0.85,"stroke-dasharray":"4 2"});
+    \\   var pl=el("polyline",{points:rp,fill:"none",stroke:"#58a6ff","stroke-width":1.3,opacity:0.85,"stroke-dasharray":"4 2"});
     \\   var gt=el("title",{}); gt.textContent="GND return images under the power trace on the L2 plane (drops at the GND pads)"; pl.appendChild(gt);
     \\   gR.appendChild(pl);
     \\   [C,D].forEach(function(v){gR.appendChild(el("circle",
-    \\     {cx:X(v.x).toFixed(1),cy:Y(v.y).toFixed(1),r:3,fill:"#fff",stroke:"#2563eb","stroke-width":1.2}));});});
+    \\     {cx:X(v.x).toFixed(1),cy:Y(v.y).toFixed(1),r:3,fill:"#fff",stroke:"#58a6ff","stroke-width":1.2}));});});
     \\ if(!((PCB.tracks||[]).length)){var tw=parseFloat((document.getElementById("r-tw")||{}).value)||0.15;
     \\  (PCB.stubs||[]).forEach(function(st){var a=wpt(st.p,st.ax,st.ay),b=wpt(st.p,st.bx,st.by);
     \\   var ln=el("line",{x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),
-    \\     stroke:"#dc2626","stroke-width":Math.max(tw*S,1.5).toFixed(1),"stroke-linecap":"round",opacity:0.9});
+    \\     stroke:"#f85149","stroke-width":Math.max(tw*S,1.5).toFixed(1),"stroke-linecap":"round",opacity:0.9});
     \\   var t=el("title",{}); t.textContent="signal breakout (escape trace)"; ln.appendChild(t); gR.appendChild(ln);});}
     \\}
     \\function delta(id,cur,base){
@@ -1802,15 +2080,15 @@ const BOARD_JS =
     \\   drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});
     \\ g.addEventListener("pointermove",function(ev){if(!drag||drag.i!==i)return;var m=mm(ev);
     \\   P[i].x=Math.round((m.x+drag.ox)/G)*G;P[i].y=Math.round((m.y+drag.oy)/G)*G;
-    \\   drag.moved=true;setT(i);rats();drawClr();});
+    \\   if(!drag.moved){drag.moved=true;clearRoute();}setT(i);rats();drawClr();});
     \\ g.addEventListener("pointerup",function(ev){var mv=drag&&drag.moved;drag=null;g.style.cursor="grab";
     \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(mv)fetchScore();});
     \\});
     \\document.addEventListener("keydown",function(ev){
     \\ if((ev.key=="r"||ev.key=="R")&&cur>=0){ev.preventDefault();
     \\   P[cur].rot=((((P[cur].rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;
-    \\   setT(cur);rats();fetchScore();drawClr();}});
-    \\function applyAll(){P.forEach(function(p,i){setT(i);});rats();fetchScore();drawClr();}
+    \\   setT(cur);clearRoute();rats();fetchScore();}});
+    \\function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetchScore();}
     \\document.getElementById("pcb-reset").addEventListener("click",function(){
     \\ P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;});applyAll();});
     \\document.getElementById("pcb-score").addEventListener("click",fetchScore);
@@ -1826,13 +2104,13 @@ const BOARD_JS =
     \\ if(nm===null)return; nm=nm.trim(); if(!nm)return;
     \\ var msg=document.getElementById("pcb-savemsg");
     \\ var payload={name:nm,parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};})};
-    \\ msg.style.color="#64748b";msg.textContent="saving…";
+    \\ msg.style.color="#8b949e";msg.textContent="saving…";
     \\ fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name),{method:"POST",
     \\   headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
     \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
-    \\  .then(function(){msg.style.color="#16a34a";msg.textContent="saved ✓";
+    \\  .then(function(){msg.style.color="#3fb950";msg.textContent="saved ✓";
     \\    setTimeout(function(){window.location.reload();},300);})
-    \\  .catch(function(){msg.style.color="#dc2626";msg.textContent="save failed";});});
+    \\  .catch(function(){msg.style.color="#f85149";msg.textContent="save failed";});});
     \\function layByName(nm){var Ls=PCB.layouts||[];for(var i=0;i<Ls.length;i++)if(Ls[i].name===nm)return Ls[i];return null;}
     \\document.querySelectorAll("[data-lay-load]").forEach(function(b){
     \\ b.addEventListener("click",function(){var L=layByName(b.getAttribute("data-lay-load"));if(!L)return;
@@ -1843,6 +2121,13 @@ const BOARD_JS =
     \\   fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+"/delete",{method:"POST",
     \\     headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm})})
     \\    .then(function(r){if(!r.ok)throw 0;window.location.reload();}).catch(function(){});});});
+    \\var rescoreBtn=document.getElementById("pcb-rescore");
+    \\if(rescoreBtn)rescoreBtn.addEventListener("click",function(){
+    \\ rescoreBtn.disabled=true;rescoreBtn.textContent="Rescoring…";
+    \\ fetch("/api/pcb-rescore/"+encodeURIComponent(PCB.name),{method:"POST"})
+    \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
+    \\  .then(function(){window.location.reload();})
+    \\  .catch(function(){rescoreBtn.disabled=false;rescoreBtn.textContent="↻ Rescore all";});});
     \\function hlBy(at,v,cls,on){document.querySelectorAll("["+at+"]").forEach(function(e){
     \\ if(e.getAttribute(at)===v)e.classList.toggle(cls,on);});}
     \\function wire(at,cls){document.querySelectorAll("["+at+"]").forEach(function(e){
@@ -1868,7 +2153,7 @@ const BOARD_JS =
     \\svg.addEventListener("pointerup",function(ev){pan=null;svg.style.cursor="";try{svg.releasePointerCapture(ev.pointerId);}catch(e){}});
     \\function drawRoute(){while(gT.firstChild)gT.removeChild(gT.firstChild);
     \\ (PCB.tracks||[]).forEach(function(t){gT.appendChild(el("line",{x1:X(t.x1).toFixed(1),y1:Y(t.y1).toFixed(1),
-    \\   x2:X(t.x2).toFixed(1),y2:Y(t.y2).toFixed(1),stroke:t.l==0?"#dc2626":"#2563eb",
+    \\   x2:X(t.x2).toFixed(1),y2:Y(t.y2).toFixed(1),stroke:t.l==0?"#f85149":"#388bfd",
     \\   "stroke-width":Math.max(t.w*S,1.2).toFixed(1),"stroke-linecap":"round","stroke-linejoin":"round",opacity:0.85}));});
     \\ (PCB.vias||[]).forEach(function(v){var r=Math.max(v.d/2*S,2.5);
     \\   gT.appendChild(el("circle",{cx:X(v.x).toFixed(1),cy:Y(v.y).toFixed(1),r:r.toFixed(1),fill:"#ca8a04"}));
@@ -1881,11 +2166,11 @@ const BOARD_JS =
     \\ P.forEach(function(p,i){p.pads.forEach(function(pad){var r=wrect(i,pad);
     \\   gC.appendChild(el("rect",{x:X(r.x0-clr).toFixed(1),y:Y(r.y0-clr).toFixed(1),
     \\     width:((r.x1-r.x0+2*clr)*S).toFixed(1),height:((r.y1-r.y0+2*clr)*S).toFixed(1),
-    \\     rx:(clr*S).toFixed(1),fill:"rgba(217,119,6,0.07)",stroke:"#d97706","stroke-width":0.8,"stroke-dasharray":"3 2"}));});});
+    \\     rx:(clr*S).toFixed(1),fill:"rgba(210,153,34,0.13)",stroke:"#d29922","stroke-width":0.8,"stroke-dasharray":"3 2"}));});});
     \\ (PCB.vias||[]).forEach(function(v){gC.appendChild(el("circle",{cx:X(v.x).toFixed(1),cy:Y(v.y).toFixed(1),
-    \\   r:((v.d/2+clr)*S).toFixed(1),fill:"rgba(217,119,6,0.07)",stroke:"#d97706","stroke-width":0.8,"stroke-dasharray":"3 2"}));});
+    \\   r:((v.d/2+clr)*S).toFixed(1),fill:"rgba(210,153,34,0.13)",stroke:"#d29922","stroke-width":0.8,"stroke-dasharray":"3 2"}));});
     \\ (PCB.tracks||[]).forEach(function(t){gC.appendChild(el("line",{x1:X(t.x1).toFixed(1),y1:Y(t.y1).toFixed(1),
-    \\   x2:X(t.x2).toFixed(1),y2:Y(t.y2).toFixed(1),stroke:"#d97706","stroke-opacity":0.18,
+    \\   x2:X(t.x2).toFixed(1),y2:Y(t.y2).toFixed(1),stroke:"#d29922","stroke-opacity":0.20,
     \\   "stroke-width":((t.w+2*clr)*S).toFixed(1),"stroke-linecap":"round"}));});}
     \\var clrCb=document.getElementById("r-clr-show");
     \\if(clrCb)clrCb.addEventListener("change",drawClr);
@@ -1900,6 +2185,10 @@ const BOARD_JS =
     \\   gD.appendChild(el("circle",{cx:cx.toFixed(1),cy:cy.toFixed(1),r:2.4,fill:"#ef4444"}));});}
     \\var drcCb=document.getElementById("r-drc-show");
     \\if(drcCb)drcCb.addEventListener("change",drawDrc);
+    \\function setStat(id,cls,txt){var e=document.getElementById(id);
+    \\ if(e){e.className="route-stat"+(cls?" "+cls:"");e.textContent=txt;}}
+    \\function clearRoute(){if(!(PCB.tracks&&PCB.tracks.length)&&!(PCB.vias&&PCB.vias.length)&&!(PCB.drc&&PCB.drc.length))return;
+    \\ PCB.tracks=[];PCB.vias=[];PCB.drc=[];drawRoute();drawClr();drawDrc();setStat("r-stat","","");setStat("r-drc","","");}
     \\var courtState=null;
     \\function partByRef(ref){for(var i=0;i<P.length;i++)if(P[i].ref===ref)return P[i];return null;}
     \\function gceil(v){return Math.ceil(v/G-1e-9)*G;}
@@ -1908,7 +2197,7 @@ const BOARD_JS =
     \\function courtDraw(p,hw,hh){var s=document.getElementById("court-svg");while(s.firstChild)s.removeChild(s.firstChild);
     \\ var VB=260,VH=220,pd=28,sc=Math.min((VB-pd)/(2*hw),(VH-pd)/(2*hh)),cx=VB/2,cy=VH/2;
     \\ s.appendChild(el("rect",{x:(cx-hw*sc).toFixed(1),y:(cy-hh*sc).toFixed(1),width:(2*hw*sc).toFixed(1),height:(2*hh*sc).toFixed(1),
-    \\   rx:3,fill:"none",stroke:p.kind=="hub"?"#3b82f6":"#94a3b8","stroke-width":1.4,"stroke-dasharray":"5 3"}));
+    \\   rx:3,fill:"none",stroke:p.kind=="hub"?"#58a6ff":"#8b949e","stroke-width":1.4,"stroke-dasharray":"5 3"}));
     \\ p.pads.forEach(function(pad){var pw=Math.max(pad.w*sc,2),ph=Math.max(pad.h*sc,2);
     \\   s.appendChild(el("rect",{x:(cx+pad.x*sc-pw/2).toFixed(1),y:(cy+pad.y*sc-ph/2).toFixed(1),
     \\     width:pw.toFixed(1),height:ph.toFixed(1),rx:1,fill:"#b08d57"}));});}
@@ -1954,19 +2243,32 @@ const BOARD_JS =
     \\ if(!(v>=0))v=0;v=Math.round(v/0.05)*0.05;courtState.offset=v;offI2.value=v.toFixed(2);courtRefresh();});
     \\var csv=document.getElementById("court-save");
     \\if(csv)csv.addEventListener("click",function(){if(!courtState||!courtState.fp)return;
-    \\ var msg=document.getElementById("court-msg");msg.style.color="#64748b";msg.textContent="saving…";
+    \\ var msg=document.getElementById("court-msg");msg.style.color="#8b949e";msg.textContent="saving…";
     \\ var body=courtState.mode=="offset"?{fp:courtState.fp,mode:"offset",offset:courtState.offset}
     \\   :{fp:courtState.fp,mode:"size",hw:courtState.hw,hh:courtState.hh};
     \\ fetch("/api/courtyard/"+encodeURIComponent(PCB.name),{method:"POST",headers:{"Content-Type":"application/json"},
     \\   body:JSON.stringify(body)})
     \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
-    \\  .then(function(){msg.style.color="#16a34a";msg.textContent="saved ✓ — rebuilding";
+    \\  .then(function(){msg.style.color="#3fb950";msg.textContent="saved ✓ — rebuilding";
     \\    window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?regen=1";})
-    \\  .catch(function(){msg.style.color="#dc2626";msg.textContent="save failed";});});
+    \\  .catch(function(){msg.style.color="#f85149";msg.textContent="save failed";});});
     \\var rgo=document.getElementById("r-go");
-    \\if(rgo)rgo.addEventListener("click",function(){var v=function(id){return encodeURIComponent(document.getElementById(id).value);};
-    \\ window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?route=1&track_width="+v("r-tw")+
-    \\  "&clearance="+v("r-cl")+"&via_drill="+v("r-vd")+"&via_dia="+v("r-va");});
+    \\if(rgo)rgo.addEventListener("click",function(){
+    \\ var nf=function(id){return parseFloat(document.getElementById(id).value);};
+    \\ var hint=document.getElementById("r-hint");if(hint)hint.style.display="none";
+    \\ setStat("r-stat","","routing…");setStat("r-drc","","");rgo.disabled=true;
+    \\ var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};}),
+    \\   track_width:nf("r-tw"),clearance:nf("r-cl"),via_drill:nf("r-vd"),via_dia:nf("r-va")};
+    \\ fetch("/api/pcb-route/"+encodeURIComponent(PCB.name),{method:"POST",
+    \\   headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
+    \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
+    \\  .then(function(j){PCB.tracks=j.tracks||[];PCB.vias=j.vias||[];PCB.drc=j.drc||[];
+    \\    if(payload.clearance>0)PCB.clr=payload.clearance;drawRoute();drawClr();drawDrc();
+    \\    var ok=(j.routed===j.total);
+    \\    setStat("r-stat",ok?"ok":"warn","routed "+j.routed+"/"+j.total+" nets · "+((j.vias||[]).length)+" vias");
+    \\    setStat("r-drc",(j.drc||[]).length?"err":"ok",(j.drc||[]).length?(j.drc.length+" DRC violation(s)"):"DRC clean ✓");
+    \\    rgo.disabled=false;})
+    \\  .catch(function(){setStat("r-stat","err","route failed");rgo.disabled=false;});});
     \\rats(); showScore(PCB.auto); drawRoute(); drawClr(); drawDrc();
     \\})();</script>
 ;

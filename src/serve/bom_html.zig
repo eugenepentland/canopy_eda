@@ -732,3 +732,51 @@ pub fn writeNetsJson(w: anytype, block: *const env_mod.DesignBlock, prefix: []co
 }
 
 pub const writeJsonEscaped = json_writer.writeEscaped;
+
+/// Unique BOM lines vs. total placed parts. `unique` counts distinct
+/// component/value/footprint/attrs combinations (one BOM row each); `total`
+/// counts every placed instance. Test points are excluded from both, matching
+/// `writeSchematicBomHtml`.
+pub const BomCounts = struct { unique: u32 = 0, total: u32 = 0 };
+
+/// Count BOM lines + total parts without rendering the table — used for the
+/// collapsed BOM card's `<summary>` count. Mirrors `writeSchematicBomHtml`'s
+/// dedup keys exactly so the headline numbers match the expanded table.
+pub fn countBom(allocator: std.mem.Allocator, block: *const env_mod.DesignBlock) BomError!BomCounts {
+    var all: std.ArrayListUnmanaged(env_mod.Instance) = .empty;
+    try bomCollectInstancesHierarchical(allocator, block, "", &all);
+
+    const Key = struct {
+        component: []const u8,
+        value: []const u8,
+        footprint: []const u8,
+        attrs: []const []const u8,
+    };
+    var keys: std.ArrayListUnmanaged(Key) = .empty;
+    var counts: BomCounts = .{};
+    for (all.items) |inst| {
+        if (isTestPoint(inst.component)) continue;
+        counts.total += 1;
+        var found = false;
+        for (keys.items) |k| {
+            if (std.mem.eql(u8, k.component, inst.component) and
+                std.mem.eql(u8, k.value, inst.value) and
+                std.mem.eql(u8, k.footprint, inst.footprint) and
+                attrsEqual(k.attrs, inst.attrs))
+            {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            try keys.append(allocator, .{
+                .component = inst.component,
+                .value = inst.value,
+                .footprint = inst.footprint,
+                .attrs = inst.attrs,
+            });
+            counts.unique += 1;
+        }
+    }
+    return counts;
+}

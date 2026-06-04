@@ -3,3 +3,12 @@
 .navbar a:hover{color:#e0e0e0;}
 .navbar a.active{color:#e0e0e0;border-bottom-color:#58a6ff;}
 .navbar .brand{color:#58a6ff;font-weight:600;font-size:0.9rem;margin-right:0.3rem;}
+/* Segmented Schematic ⇄ PCB Layout switcher — shared by both views so a
+   design/module flips between them in one click. Same control on each page,
+   only the active segment differs. */
+.viewtoggle{display:inline-flex;border:1px solid #30363d;border-radius:6px;overflow:hidden;flex:none;}
+.viewtoggle a{color:#8b949e;text-decoration:none;padding:5px 14px;font-size:0.85rem;line-height:1.2;display:inline-flex;align-items:center;gap:5px;background:#161b22;border-right:1px solid #30363d;}
+.viewtoggle a:last-child{border-right:0;}
+.viewtoggle a:hover{color:#e6edf3;background:#1c2230;text-decoration:none;}
+.viewtoggle a.active{color:#fff;background:#1f6feb;}
+.viewtoggle a.active:hover{background:#388bfd;color:#fff;}

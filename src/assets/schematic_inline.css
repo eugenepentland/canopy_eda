@@ -278,6 +278,9 @@ details li{margin:3px 0;font-size:0.88rem;color:#c9d1d9;line-height:1.45;}
 .sch-notes-card>summary::-webkit-details-marker{display:none;}
 .sch-notes-card>summary::before{content:"▾ ";color:#58a6ff;font-size:0.85em;}
 .sch-notes-card:not([open])>summary::before{content:"▸ ";}
+/* Headline count shown inline in a collapsed card's <summary> (BOM part
+   counts, open-TODO count) — lighter + smaller than the card title. */
+.sch-card-sub{font-size:0.8rem;font-weight:400;margin-left:6px;}
 .sch-notes-body{margin-top:8px;display:flex;flex-direction:column;gap:6px;}
 .sch-notes-hint{margin:0;font-size:0.78rem;}
 .sch-notes-hint code{background:#161b22;border:1px solid #21262d;border-radius:3px;padding:0 4px;font-size:0.74rem;}

@@ -368,8 +368,10 @@
   function wireAuditClicks() {
     detailBox.querySelectorAll('.sb-audit-item[data-anchor]').forEach(function (el) {
       el.addEventListener('click', function () {
-        var anchor = document.getElementById(el.dataset.anchor);
-        if (anchor) { scrollTo(anchor); flash(anchor); }
+        // The bottom-of-page audit sections (Unresolved issues / Assertions)
+        // were removed; both audit items now open the ERC panel, which lists
+        // the ERC violations and the design's assertions together.
+        showErc();
       });
     });
   }
@@ -1068,6 +1070,34 @@
     });
   }
 
+  // Assertions block for the ERC panel — the design's `(assert …)` results,
+  // read from the SCH_ASSERTIONS global injected by render_html.zig. Failing
+  // and warning assertions render as items; passing ones collapse to a count
+  // so the panel stays scannable. Returns '' when the design has none.
+  function assertionsHtml() {
+    var list = (typeof SCH_ASSERTIONS !== 'undefined') ? SCH_ASSERTIONS : [];
+    if (!list || !list.length) return '';
+    var fails = [], warns = [], passes = [];
+    list.forEach(function (a) {
+      if (a.status === 'fail') fails.push(a);
+      else if (a.status === 'warn') warns.push(a);
+      else passes.push(a);
+    });
+    var cls = fails.length ? 'err' : (warns.length ? 'warn' : 'info');
+    var out = '<div class="erc-group-head ' + cls + '">Assertions (' + list.length + ')</div>';
+    function items(arr, c) {
+      arr.forEach(function (a) {
+        out += '<div class="erc-item erc-' + c + '">' + escapeHtml(a.message) + '</div>';
+      });
+    }
+    items(fails, 'err');
+    items(warns, 'warn');
+    if (passes.length) {
+      out += '<div class="erc-item erc-info">✓ ' + passes.length + ' passing</div>';
+    }
+    return out;
+  }
+
   function renderErcPanel(violations) {
     var errs = [], warns = [], infos = [];
     (violations || []).forEach(function (v) {
@@ -1098,6 +1128,7 @@
     html += group('Errors', 'err', errs);
     html += group('Warnings', 'warn', warns);
     html += group('Info', 'info', infos);
+    html += assertionsHtml();
     html += '<button class="kicad-row-btn" id="erc-rerun" style="margin-top:10px">Re-run ERC</button>';
     detailBox.innerHTML = html;
     detailBox.querySelector('.sb-back').addEventListener('click', showSectionList);
@@ -1199,7 +1230,18 @@
     var addText = document.getElementById('sch-notes-add-text');
     var scratchTa = document.getElementById('sch-notes-text');
     var status = document.getElementById('sch-notes-status');
+    var notesCount = document.getElementById('sch-notes-count');
     if (!taskBox || !addForm || !addText || !scratchTa || !status) return;
+
+    // Headline count shown in the collapsed Design Notes <summary>: how many
+    // TODOs are still open. Cleared when the design has no tasks at all.
+    function setNotesCount(openN, total) {
+      if (!notesCount) return;
+      if (!total) { notesCount.textContent = ''; return; }
+      notesCount.textContent = openN > 0
+        ? openN + ' to complete'
+        : 'all ' + total + ' done';
+    }
 
     var base = '/api/notes/' + encodeURIComponent(DESIGN_NAME);
     var lastScratchSaved = '';
@@ -1223,12 +1265,14 @@
 
     function renderTasks(tasks) {
       if (!tasks || !tasks.length) {
+        setNotesCount(0, 0);
         taskBox.innerHTML = '<div class="sch-notes-empty muted">No TODOs yet. Add one below or call <code>add_design_note</code> from an MCP client.</div>';
         return;
       }
       // Open tasks first, then completed; preserve server order within each group.
       var open = [], done = [];
       tasks.forEach(function (t) { (t.completed ? done : open).push(t); });
+      setNotesCount(open.length, tasks.length);
       var rows = open.concat(done);
       taskBox.innerHTML = rows.map(function (t) {
         var doneClass = t.completed ? ' is-done' : '';
