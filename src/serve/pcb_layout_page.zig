@@ -287,11 +287,11 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
 /// weighted contribution, and the summed `objective`. Shared by the GET export
 /// and the POST score endpoint so both report the same shape.
 fn writeBreakdownJson(w: *std.Io.Writer, b: optimizer.Breakdown, params: optimizer.Params) std.Io.Writer.Error!void {
-    try w.print("{{\"hpwl\":{d},\"loop_raw\":{d},\"loop_weighted\":{d},\"area_raw\":{d},\"area_weighted\":{d},\"isolation\":{d},\"alignment\":{d},", .{
-        b.hpwl, b.loop_raw, b.loop_weighted, b.area_raw, b.area_weighted, b.isolation, b.alignment,
+    try w.print("{{\"hpwl\":{d},\"loop_raw\":{d},\"loop_weighted\":{d},\"area_raw\":{d},\"isolation\":{d},\"alignment\":{d},", .{
+        b.hpwl, b.loop_raw, b.loop_weighted, b.area_raw, b.isolation, b.alignment,
     });
-    try w.print("\"loop_term\":{d},\"area_term\":{d},\"isolation_term\":{d},\"alignment_term\":{d},\"objective\":{d}}}", .{
-        params.loop_w * b.loop_weighted, params.area_w * b.area_weighted, params.w_isolate * b.isolation, params.w_align * b.alignment, b.objective,
+    try w.print("\"loop_term\":{d},\"isolation_term\":{d},\"alignment_term\":{d},\"objective\":{d}}}", .{
+        params.loop_w * b.loop_weighted, params.w_isolate * b.isolation, params.w_align * b.alignment, b.objective,
     });
 }
 
@@ -973,10 +973,6 @@ fn parseTuning(req: *httpz.Request) Tuning {
         p.loop_w = parseF(v, p.loop_w);
         tuned = true;
     }
-    if (q.get("area_w")) |v| {
-        p.area_w = parseF(v, p.area_w);
-        tuned = true;
-    }
     if (q.get("w_isolate")) |v| {
         p.w_isolate = parseF(v, p.w_isolate);
         tuned = true;
@@ -1044,7 +1040,7 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8) st
     try w.writeAll("<span class=\"delta\" id=\"sc-hpwl-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-loop\" title=\"weighted decoupling-loop term (loop_w × value-weighted loop length)\">loop …</span>");
     try w.writeAll("<span class=\"delta\" id=\"sc-loop-d\"></span>");
-    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-area\" title=\"enclosed-loop-area term (area_w × weighted loop area, mm²)\">area …</span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-area\" title=\"enclosed loop area (mm²) = loop length × dielectric height\">loop area …</span>");
     try w.writeAll("<span class=\"delta\" id=\"sc-area-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-align\" title=\"row/column alignment term (w_align × penalty)\">align …</span>");
     try w.writeAll("<span class=\"delta\" id=\"sc-align-d\"></span>");
@@ -1167,8 +1163,8 @@ fn writeLegend(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!vo
     }
     try w.writeAll("<div class=\"pcb-legend\">");
     try w.writeAll("<span class=\"sw prox\"></span> power leg (L1)");
-    try w.writeAll("<span class=\"sw l2gnd\"></span> GND return (L2 plane)");
-    try w.writeAll("<span class=\"sw areafill\"></span> enclosed loop area");
+    try w.writeAll("<span class=\"sw l2gnd\"></span> GND return (images under trace, L2 plane)");
+    try w.writeAll("<span class=\"sw viadot\"></span> GND via (L1↔L2)");
     try w.writeAll("<span class=\"sw sig\"></span> signal");
     try w.writeAll("<span class=\"sw esc\"></span> escape trace (signal breakout)");
     if (fallback_count > 0) {
@@ -1620,7 +1616,7 @@ const PAGE_CSS =
     \\.pcb-legend .sw.prox{border-color:#ea580c}
     \\.pcb-legend .sw.gnd{border-color:#0891b2}
     \\.pcb-legend .sw.l2gnd{border-color:#2563eb;border-top-style:dashed}
-    \\.pcb-legend .sw.areafill{border:0;height:11px;width:16px;background:#f59e0b;opacity:0.3;border-radius:2px}
+    \\.pcb-legend .sw.viadot{border:0;height:9px;width:9px;border-radius:50%;background:#fff;box-shadow:0 0 0 1.5px #2563eb;vertical-align:middle}
     \\.pcb-legend .sw.sig{border-color:#cbd5e1}
     \\.pcb-legend .sw.esc{border-color:#dc2626}
     \\.pcb-legend .note{color:#b45309}
@@ -1751,13 +1747,13 @@ const BOARD_JS =
     \\ PCB.loops.forEach(function(L){
     \\   var A=wpt(L.hub,L.pp.x,L.pp.y), B=wpt(L.cap,L.cp.x,L.cp.y),
     \\       C=wpt(L.cap,L.cg.x,L.cg.y), D=wpt(L.hub,L.gp.x,L.gp.y);
-    \\   var poly=[A,B,C,D].map(function(q){return X(q.x).toFixed(1)+","+Y(q.y).toFixed(1);}).join(" ");
-    \\   gR.appendChild(el("polygon",{points:poly,fill:"#f59e0b","fill-opacity":0.15,stroke:"none"}));
     \\   aw(B,A,"#ea580c",1.3,0.95);
-    \\   var gl=el("line",{x1:X(C.x).toFixed(1),y1:Y(C.y).toFixed(1),x2:X(D.x).toFixed(1),y2:Y(D.y).toFixed(1),
-    \\     stroke:"#2563eb","stroke-width":1.6,opacity:0.9,"stroke-dasharray":"4 2"});
-    \\   var gt=el("title",{}); gt.textContent="GND return on L2 (plane) — fill = enclosed loop area"; gl.appendChild(gt);
-    \\   gR.appendChild(gl);});
+    \\   var rp=[C,B,A,D].map(function(q){return X(q.x).toFixed(1)+","+Y(q.y).toFixed(1);}).join(" ");
+    \\   var pl=el("polyline",{points:rp,fill:"none",stroke:"#2563eb","stroke-width":1.3,opacity:0.85,"stroke-dasharray":"4 2"});
+    \\   var gt=el("title",{}); gt.textContent="GND return images under the power trace on the L2 plane (drops at the GND pads)"; pl.appendChild(gt);
+    \\   gR.appendChild(pl);
+    \\   [C,D].forEach(function(v){gR.appendChild(el("circle",
+    \\     {cx:X(v.x).toFixed(1),cy:Y(v.y).toFixed(1),r:3,fill:"#fff",stroke:"#2563eb","stroke-width":1.2}));});});
     \\ if(!((PCB.tracks||[]).length)){var tw=parseFloat((document.getElementById("r-tw")||{}).value)||0.15;
     \\  (PCB.stubs||[]).forEach(function(st){var a=wpt(st.p,st.ax,st.ay),b=wpt(st.p,st.bx,st.by);
     \\   var ln=el("line",{x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),
@@ -1774,13 +1770,13 @@ const BOARD_JS =
     \\ setSc("sc-obj","objective "+b.objective.toFixed(1));
     \\ setSc("sc-hpwl","HPWL "+b.hpwl.toFixed(1));
     \\ setSc("sc-loop","loop "+b.loop_term.toFixed(1)+" · "+PCB.caps+" cap");
-    \\ setSc("sc-area","area "+(b.area_term||0).toFixed(1)+" ("+(b.area_raw||0).toFixed(1)+"mm²)");
+    \\ setSc("sc-area","loop area "+(b.area_raw||0).toFixed(2)+" mm²");
     \\ setSc("sc-align","align "+b.alignment_term.toFixed(1));
     \\ setSc("sc-iso","iso "+b.isolation_term.toFixed(1));
     \\ delta("sc-obj-d",b.objective,PCB.auto.objective);
     \\ delta("sc-hpwl-d",b.hpwl,PCB.auto.hpwl);
     \\ delta("sc-loop-d",b.loop_term,PCB.auto.loop_term);
-    \\ delta("sc-area-d",b.area_term||0,PCB.auto.area_term||0);
+    \\ delta("sc-area-d",b.area_raw||0,PCB.auto.area_raw||0);
     \\ delta("sc-align-d",b.alignment_term,PCB.auto.alignment_term);
     \\ delta("sc-iso-d",b.isolation_term,PCB.auto.isolation_term);
     \\}
