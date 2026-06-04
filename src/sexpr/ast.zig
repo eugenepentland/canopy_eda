@@ -94,6 +94,19 @@ pub const Node = struct {
         return self.asString() orelse self.asAtom();
     }
 
+    /// Like `asText`, but also renders an integer node (`1` → "1"), so a pin or
+    /// pad number written bare (`(pin 1 …)`), quoted (`"1"`), or alphanumeric
+    /// (`A1`) all resolve to the same string. Allocates only for the int case;
+    /// null for lists / floats / unit values.
+    pub fn tokenText(self: Node, arena: std.mem.Allocator) ?[]const u8 {
+        return switch (self.tag) {
+            .atom => |a| a,
+            .string => |s| s,
+            .int => |v| std.fmt.allocPrint(arena, "{d}", .{v}) catch null,
+            else => null,
+        };
+    }
+
     /// Get numeric value as f64 (works for int, float, and unit_val).
     pub fn asNumber(self: Node) ?f64 {
         return switch (self.tag) {

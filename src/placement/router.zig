@@ -130,6 +130,91 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     };
 }
 
+/// A reusable maze-router context over a *fixed* set of placed parts: the grid
+/// and pad-obstacle list are built once, then individual two-pad legs are routed
+/// against it. The placement optimizer's score path uses this to measure each
+/// decoupling loop's *real* trace length (cap pad → its pinned hub pin), instead
+/// of a straight-line ratline — a foreign pad in the way makes the trace (and so
+/// the score) genuinely longer. Cheap enough for the score path (one build + a
+/// Dijkstra per loop); never use it in the optimizer's inner loop.
+pub const LoopRouter = struct {
+    ctx: Ctx,
+    /// False when the board couldn't be gridded (degenerate/oversize) — callers
+    /// fall back to the analytic surrogate.
+    ready: bool,
+
+    pub fn init(
+        arena: std.mem.Allocator,
+        parts: []const Part,
+        nets: []const FlatNet,
+        idx_of: *std.StringHashMap(usize),
+        params: RouteParams,
+    ) std.mem.Allocator.Error!LoopRouter {
+        // Bounding box over part courtyards (pads live inside), rotation-aware,
+        // then the same grid pitch + 1 mm margin `route` uses.
+        var minx: f64 = std.math.inf(f64);
+        var miny: f64 = std.math.inf(f64);
+        var maxx: f64 = -std.math.inf(f64);
+        var maxy: f64 = -std.math.inf(f64);
+        for (parts) |p| {
+            const q = @mod(@round(p.rot), 360);
+            const quarter = (q == 90 or q == 270);
+            const ehw = if (quarter) p.hh else p.hw;
+            const ehh = if (quarter) p.hw else p.hh;
+            minx = @min(minx, p.x - ehw);
+            miny = @min(miny, p.y - ehh);
+            maxx = @max(maxx, p.x + ehw);
+            maxy = @max(maxy, p.y + ehh);
+        }
+        if (!std.math.isFinite(minx)) return .{ .ctx = undefined, .ready = false };
+
+        const g = @max(params.track_width + params.clearance, 0.05);
+        const margin = 1.0;
+        const ox = minx - margin;
+        const oy = miny - margin;
+        const nx: usize = @intFromFloat(@ceil((maxx - minx + 2 * margin) / g) + 1);
+        const ny: usize = @intFromFloat(@ceil((maxy - miny + 2 * margin) / g) + 1);
+        if (nx * ny == 0 or nx * ny > MAX_NODES) return .{ .ctx = undefined, .ready = false };
+        const grid = Grid{ .ox = ox, .oy = oy, .g = g, .nx = nx, .ny = ny };
+
+        const occ = [2][]i32{ try arena.alloc(i32, nx * ny), try arena.alloc(i32, nx * ny) };
+
+        // Every pad is an obstacle tagged with its net — same indexing as `route`
+        // (absolute position in `nets`), so a leg routed on net N treats N's pads
+        // as passable (its own copper) and all others as obstacles to detour.
+        var obs: std.ArrayListUnmanaged(PadObs) = .empty;
+        for (nets, 0..) |net, net_i| {
+            for (net.pins) |pin| {
+                const pi = idx_of.get(pin.ref_des) orelse continue;
+                const r = padWorldRect(parts[pi], pin.pin) orelse continue;
+                try obs.append(arena, .{ .x0 = r.x0, .y0 = r.y0, .x1 = r.x1, .y1 = r.y1, .net = @intCast(net_i) });
+            }
+        }
+
+        const reach = params.track_width / 2 + params.clearance;
+        return .{
+            .ctx = .{ .arena = arena, .grid = grid, .obs = try obs.toOwnedSlice(arena), .reach = reach, .occ = occ, .params = params },
+            .ready = true,
+        };
+    }
+
+    /// Real routed copper length (mm) from world point `cap_c` to `hub_c` on net
+    /// `net_id` (their shared rail), detouring foreign pads. Null when the maze
+    /// can't connect them (boxed in) or the router isn't ready.
+    pub fn legLen(self: *LoopRouter, cap_c: [2]f64, hub_c: [2]f64, net_id: i32) std.mem.Allocator.Error!?f64 {
+        if (!self.ready or net_id < 0) return null;
+        @memset(self.ctx.occ[0], EMPTY);
+        @memset(self.ctx.occ[1], EMPTY);
+        var tracks: std.ArrayListUnmanaged(Track) = .empty;
+        var vias: std.ArrayListUnmanaged(Via) = .empty;
+        var pts = [_][2]f64{ cap_c, hub_c };
+        if (!try routeNet(&self.ctx, net_id, &pts, &tracks, &vias)) return null;
+        var len: f64 = 0;
+        for (tracks.items) |t| len += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
+        return len;
+    }
+};
+
 // ── Grid + helpers ─────────────────────────────────────────────────────────
 
 const Grid = struct {
@@ -504,6 +589,49 @@ test "route connects a simple two-pad net" {
     try testing.expectEqual(@as(usize, 1), r.total);
     try testing.expectEqual(@as(usize, 1), r.routed);
     try testing.expect(r.tracks.len >= 1);
+}
+
+// spec: placement/router - LoopRouter measures a real per-leg trace length that detours foreign pads
+test "LoopRouter.legLen lengthens a leg that must route around an obstacle" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const G = @import("geometry.zig");
+    const pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    const sig = [_]export_kicad.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" } };
+
+    // Clear board: R1 → R2, 4 mm apart on net SIG (index 0). The real trace is
+    // ~straight, so its length is close to the 4 mm separation.
+    var clear_parts = [_]Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 4, .y = 0 },
+    };
+    const clear_nets = [_]FlatNet{.{ .name = "SIG", .pins = &sig }};
+    var clear_idx = std.StringHashMap(usize).init(arena);
+    try clear_idx.put("R1", 0);
+    try clear_idx.put("R2", 1);
+    var lr_clear = try LoopRouter.init(arena, &clear_parts, &clear_nets, &clear_idx, .{});
+    const len_clear = (try lr_clear.legLen(.{ 0, 0 }, .{ 4, 0 }, 0)).?;
+    try testing.expect(len_clear >= 3.5 and len_clear < 6.0);
+
+    // Same endpoints, but a foreign pad (net OTHER, index 1) straddles the direct
+    // path — the trace must detour around it, so the measured length grows.
+    const blk_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1.2, .h = 1.2 }};
+    var blk_parts = [_]Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 4, .y = 0 },
+        .{ .ref_des = "U9", .kind = .hub, .hw = 0.8, .hh = 0.8, .pads = &blk_pad, .fallback = false, .x = 2, .y = 0 },
+    };
+    const other = [_]export_kicad.FlatPin{.{ .ref_des = "U9", .pin = "1" }};
+    const blk_nets = [_]FlatNet{ .{ .name = "SIG", .pins = &sig }, .{ .name = "OTHER", .pins = &other } };
+    var blk_idx = std.StringHashMap(usize).init(arena);
+    try blk_idx.put("R1", 0);
+    try blk_idx.put("R2", 1);
+    try blk_idx.put("U9", 2);
+    var lr_blk = try LoopRouter.init(arena, &blk_parts, &blk_nets, &blk_idx, .{});
+    const len_blk = (try lr_blk.legLen(.{ 0, 0 }, .{ 4, 0 }, 0)).?;
+    try testing.expect(len_blk > len_clear + 0.5);
 }
 
 // spec: placement/router - routes corners as 45° diagonals rather than 90° bends

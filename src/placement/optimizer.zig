@@ -27,9 +27,12 @@
 //!      tightest non-overlapping spot against its pin (the relaxation leaves
 //!      resistors a millimetre loose).
 //!
-//! After a final grid-aware legalization, no two courtyards overlap. Large
-//! whole-board layouts skip steps 1–3 (they blob together regardless) and take
-//! a single grid-seeded relax. It is deterministic — seeds derive from the
+//! After a final grid-aware legalization, no two courtyards overlap. A closing
+//! compaction then docks every passive still held off by the snap-safety gap
+//! against its nearest neighbour, so each courtyard abuts at least one other
+//! (hubs stay put as anchors) — the layout is provably as tight as it packs.
+//! Large whole-board layouts skip steps 1–3 (they blob together regardless) and
+//! take a single grid-seeded relax. It is deterministic — seeds derive from the
 //! start index, not an RNG — so a design always yields the same layout.
 //! Coordinates are millimetres, y-down (KiCad convention).
 
@@ -39,6 +42,9 @@ const export_kicad = @import("../export_kicad.zig");
 const netlist_mod = @import("../export_kicad_netlist.zig");
 const geometry = @import("geometry.zig");
 const pin_roles = @import("pin_roles.zig");
+const router = @import("router.zig");
+const parser = @import("../sexpr/parser.zig");
+const infra_fs = @import("../infra/fs.zig");
 
 const DesignBlock = env.DesignBlock;
 const FlatNet = export_kicad.FlatNet;
@@ -59,6 +65,11 @@ const LOOP_W: f64 = 3.0; // weight on loop length in the objective
 const K_COMPACT: f64 = 0.10; // pull toward the cluster centroid (keeps HPWL tight)
 const STARTS: usize = 48; // multi-start seeds; keep the lowest-scoring arrangement
 const MULTISTART_MAX_PARTS: usize = 32; // above this, single start (bound O(n²·starts))
+// Real routed-trace loop scoring maze-routes every decoupling loop — accurate
+// but superlinear in board size (a 223-part board takes minutes). Above this
+// part count the *displayed* score keeps the continuous fixed-pad surrogate the
+// optimizer already minimised, so large boards still load in well under a second.
+const ROUTED_SCORE_MAX_PARTS: usize = 48;
 const POLISH_SWEEPS: usize = 4; // greedy per-part tightening sweeps
 const POLISH_CELLS: i64 = 6; // half-window (grid cells) the polish search scans
 const W_ISOLATE: f64 = 1.5; // keep-away penalty: sensitive nets ✗ high-current/switch parts
@@ -67,6 +78,8 @@ const CAP_W_MAX: f64 = 3.0; // max value-priority boost for the smallest cap on 
 const W_ALIGN: f64 = 0.5; // tidiness reward: nudge parts to share a row / column
 const ALIGN_CLAMP_MM: f64 = 1.5; // only finish near-alignments within this offset (no long pulls)
 const GRID_COURTYARDS = true; // round courtyard half-extents to GRID_MM so edges land on-grid
+const COMPACT_MIN_OVERLAP: f64 = GRID_MM; // min shared-edge length when docking a floating part
+const COMPACT_EPS: f64 = 1e-4; // courtyard-gap tolerance for the "touching" test
 
 /// Runtime-tunable weights (the consts above are the defaults). Passed to
 /// `solve` so the UI can adjust placement without a rebuild. Only the steering
@@ -164,6 +177,27 @@ pub const Score = struct {
     loop_caps: usize,
 };
 
+/// Decoupling-loop length totals: `raw` is the plain sum, `weighted` scales each
+/// loop by its value/priority weight. Produced by both the analytic surrogate
+/// (`surrogateLoops`) and the real router (`routedLoops`) — a named type so the
+/// two are interchangeable (anonymous structs would be distinct types).
+const LoopSums = struct { raw: f64, weighted: f64 };
+
+/// Full decomposition of the objective the optimizer actually minimizes — the
+/// on-screen score bar only shows `hpwl` + the *raw* loop length, so this
+/// surfaces the terms it hides (value-weighted loop, isolation, alignment) for
+/// the JSON export, so a layout that looks "worse" on the visible metric but
+/// wins on the true objective can be told apart. `objective` is the weighted
+/// sum: `hpwl + loop_w·loop_weighted + w_isolate·isolation + w_align·alignment`.
+pub const Breakdown = struct {
+    hpwl: f64, // total signal HPWL (mm); objective weight 1
+    loop_raw: f64, // summed unweighted hot-loop length (mm) = Score.loop_mm
+    loop_weighted: f64, // value-priority-weighted loop sum (what the objective uses)
+    isolation: f64, // raw sensitive↔aggressor keep-away penalty
+    alignment: f64, // raw row/column tidiness penalty
+    objective: f64, // the weighted total the multi-start/polish minimize
+};
+
 /// A connection to draw as a ratsnest airwire: part indices plus each end's
 /// footprint-local pad offset (mm), so the client can recompute endpoints as
 /// parts are dragged. `a`/`b` index into `Placement.parts`.
@@ -190,6 +224,9 @@ pub const Placement = struct {
     instances: []const export_kicad.FlatInstance,
     nets: []const FlatNet,
     score: Score,
+    /// Full objective decomposition (defaults to zero so test fixtures that
+    /// build a `Placement` directly needn't supply it).
+    breakdown: Breakdown = .{ .hpwl = 0, .loop_raw = 0, .loop_weighted = 0, .isolation = 0, .alignment = 0, .objective = 0 },
     minx: f64,
     miny: f64,
     maxx: f64,
@@ -226,10 +263,26 @@ pub const Loop = struct {
     hub: usize,
     cap_pwr: PadRect,
     cap_gnd: PadRect,
+    /// All of the hub's supply pads on this rail — kept as a slice only so
+    /// `classify` can group caps that share a rail (by pointer identity).
     hub_pwr: []const PadRect,
+    /// The *one* hub pad the power leg targets (a fixed pad — no per-eval argmin,
+    /// so the cost is continuous in the cap's position). Chosen in `hugToHub`:
+    /// the explicitly-pinned pin (`(near <pin> …)`) if any, else the lowest-
+    /// numbered true-supply pad. Footprint-local.
+    hub_pwr_pin: PadRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     hub_gnd: []const PadRect,
+    /// The *one* hub ground pad the ground return targets (the GND pad nearest the
+    /// power pin — a fixed pad, no argmin flip). The return runs cap GND pad →
+    /// via → plane → via → this pad; its lateral leg is measured to it. Set in
+    /// `hugToHub`. Footprint-local.
+    hub_gnd_pin: PadRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    /// Flattened-net index of the power rail (into the `nets` slice scoring uses),
+    /// so the score path can route a real trace on it. -1 ⇒ unset (test fixtures).
+    pwr_net: i32 = -1,
     /// Value-priority weight (≥1): boosts the smaller of several caps sharing
-    /// a rail toward the pin. 1 for a lone cap (no change). Set in `solve`.
+    /// a rail toward the pin, and is raised further by a declared
+    /// `(placement-order …)` rank. 1 for a lone, unranked cap. Set in `classify`.
     weight: f64 = 1,
 };
 
@@ -250,6 +303,106 @@ pub fn solve(
     cached: ?[]const RefPose,
     params: Params,
 ) std.mem.Allocator.Error!Placement {
+    var prep = try prepare(arena, block, project_dir, params);
+    const parts = prep.parts;
+    const nets = prep.nets;
+    const built = prep.built;
+
+    // Reserve a breakout corridor in front of every "unaccounted" pad (a net
+    // touching only this part — a single-pin signal that leaves the board), so
+    // the placer doesn't drop a neighbour over the escape route. This grows the
+    // collision keepout only; the rendered courtyard is unchanged.
+    const stubs = try buildEscapeStubs(arena, nets, parts, &prep.idx_of);
+    applyKeepout(parts, stubs);
+
+    const generated = !applyCached(parts, cached);
+    if (generated) {
+        optimize(parts, &prep.idx_of, nets, built, params);
+        // Mirror matched halves (e.g. a symmetric amp's input/output sections)
+        // when the design is genuinely symmetric; a no-op otherwise.
+        try symmetrize(arena, parts, &prep.idx_of, nets, built, params);
+        // Final pull-together: dock any part still held off by the snap-safety
+        // gap so every courtyard abuts at least one neighbour (provably tight),
+        // highest placement-order priority docking first.
+        compactToContact(parts, prep.priority);
+    }
+
+    // Headline score's loop length: the *real* routed-trace sum on interactive
+    // boards, the fixed-pad surrogate above ROUTED_SCORE_MAX_PARTS (the router is
+    // too slow on big boards to run on every load). `scoreLayout` already left
+    // the surrogate in `score.loop_mm`; the router overrides it when affordable.
+    var score = scoreLayout(parts, &prep.idx_of, nets, built.loops);
+    const loop_weighted = if (parts.len <= ROUTED_SCORE_MAX_PARTS) blk: {
+        const routed = routedLoops(arena, parts, &prep.idx_of, nets, built.loops);
+        score.loop_mm = routed.raw;
+        break :blk routed.weighted;
+    } else surrogateLoops(parts, built.loops).weighted;
+    const bd = breakdownWith(parts, params, score, loop_weighted);
+    return finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, score, bd, generated);
+}
+
+/// Score an arbitrary set of part poses with the optimizer's *own* objective —
+/// the single source of truth, so callers (the layout page's server-side score
+/// button) needn't reimplement HPWL / loop / isolation / alignment in JS. Builds
+/// the design exactly as `solve` does, applies `poses` verbatim (overlaps
+/// allowed — this only measures, never moves), and returns the full breakdown.
+/// Parts not named in `poses` stay at the origin, so `poses` should cover all.
+pub fn scorePoses(
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    poses: []const RefPose,
+    params: Params,
+) std.mem.Allocator.Error!Breakdown {
+    var prep = try prepare(arena, block, project_dir, params);
+    _ = applyCached(prep.parts, poses);
+    var score = scoreLayout(prep.parts, &prep.idx_of, prep.nets, prep.built.loops);
+    const loop_weighted = if (prep.parts.len <= ROUTED_SCORE_MAX_PARTS) blk: {
+        const routed = routedLoops(arena, prep.parts, &prep.idx_of, prep.nets, prep.built.loops);
+        score.loop_mm = routed.raw;
+        break :blk routed.weighted;
+    } else surrogateLoops(prep.parts, prep.built.loops).weighted;
+    return breakdownWith(prep.parts, params, score, loop_weighted);
+}
+
+/// The design model `solve` and `scorePoses` share: the flattened parts (with
+/// footprint geometry + grid-rounded courtyards), the ref→index map, the merged
+/// signal nets, and the springs/decoupling-loops — already classified
+/// (sensitive/aggressor flags + per-loop value weights). Everything the scoring
+/// reads, minus the placed positions.
+const Prepared = struct {
+    parts: []Part,
+    idx_of: std.StringHashMap(usize),
+    instances: []const export_kicad.FlatInstance,
+    nets: []const FlatNet,
+    built: Built,
+    /// Per-part placement-order rank (0 = unranked, higher = earlier in the
+    /// declared order) — drives compaction docking order in `solve`.
+    priority: []const u32,
+};
+
+/// Resolve a `(placement-order …)` name to a flattened part index. Matches the
+/// name the author wrote — the stable `origin_key` (survives ref-des renumbering,
+/// so "C_VIN" still resolves after it is auto-assigned "C188") or the final
+/// `ref_des` — then a `parent/child` suffix so a bare "C1" finds sub-block
+/// "pwr/C1". Null when no part matches. `instances` is index-aligned with `parts`.
+fn resolvePart(instances: []const export_kicad.FlatInstance, ref: []const u8) ?usize {
+    for (instances, 0..) |inst, i| {
+        if (std.mem.eql(u8, inst.origin_key, ref) or std.mem.eql(u8, inst.ref_des, ref)) return i;
+    }
+    for (instances, 0..) |inst, i| {
+        const rd = inst.ref_des;
+        if (rd.len > ref.len and rd[rd.len - ref.len - 1] == '/' and std.mem.endsWith(u8, rd, ref)) return i;
+    }
+    return null;
+}
+
+fn prepare(
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    params: Params,
+) std.mem.Allocator.Error!Prepared {
     // Flatten the hierarchy exactly as the KiCad sync does, so parts inside
     // `(sub-block …)`s (hierarchical ref-des like "pwr/U1") and their merged
     // nets are included — a buck design is one sub-block, so `block.instances`
@@ -308,26 +461,73 @@ pub fn solve(
         try idx_of.put(inst.ref_des, i);
     }
 
-    const built = try buildSprings(arena, nets, parts, &idx_of, roles);
-    classify(parts, built.loops, params.cap_w_max);
-
-    // Reserve a breakout corridor in front of every "unaccounted" pad (a net
-    // touching only this part — a single-pin signal that leaves the board), so
-    // the placer doesn't drop a neighbour over the escape route. This grows the
-    // collision keepout only; the rendered courtyard is unchanged.
-    const stubs = try buildEscapeStubs(arena, nets, parts, &idx_of);
-    applyKeepout(parts, stubs);
-
-    const generated = !applyCached(parts, cached);
-    if (generated) {
-        optimize(parts, &idx_of, nets, built, params);
-        // Mirror matched halves (e.g. a symmetric amp's input/output sections)
-        // when the design is genuinely symmetric; a no-op otherwise.
-        try symmetrize(arena, parts, &idx_of, nets, built, params);
+    // Resolve declared `(placement-order …)` into per-part data: a priority rank
+    // (0 = unranked; higher = earlier in the list) that tightens the loop weight
+    // and orders compaction, plus the explicit hub pin a cap's loop should target.
+    const priority = try arena.alloc(u32, instances.len);
+    @memset(priority, 0);
+    const explicit_pin = try arena.alloc([]const u8, instances.len);
+    for (explicit_pin) |*e| e.* = "";
+    for (block.placement_order) |po| {
+        const k: u32 = @intCast(po.entries.len);
+        for (po.entries, 0..) |ent, pos| {
+            const pi = resolvePart(instances, ent.ref) orelse continue;
+            priority[pi] = k - @as(u32, @intCast(pos)); // first listed = highest
+            if (ent.pin.len > 0) explicit_pin[pi] = ent.pin;
+        }
     }
 
-    const score = scoreLayout(parts, &idx_of, nets, built.loops);
-    return finalize(arena, parts, built.springs, built.loops, stubs, instances, nets, score, generated);
+    const built = try buildSprings(arena, nets, parts, &idx_of, roles, explicit_pin);
+    classify(parts, built.loops, params.cap_w_max, priority);
+    return .{ .parts = parts, .idx_of = idx_of, .instances = instances, .nets = nets, .built = built, .priority = priority };
+}
+
+/// Decompose the objective for already-placed parts, surfaced term-by-term for
+/// the score export. `loop_weighted` is supplied by the caller — the real
+/// routed-trace value-weighted sum on the score path — and the objective is
+/// rebuilt from it, so the headline number matches the loop length shown.
+fn breakdownWith(parts: []const Part, params: Params, score: Score, loop_weighted: f64) Breakdown {
+    const iso = isolationPenalty(parts);
+    const al = alignmentPenalty(parts);
+    return .{
+        .hpwl = score.hpwl_mm,
+        .loop_raw = score.loop_mm,
+        .loop_weighted = loop_weighted,
+        .isolation = iso,
+        .alignment = al,
+        .objective = score.hpwl_mm + params.loop_w * loop_weighted +
+            params.w_isolate * iso + params.w_align * al,
+    };
+}
+
+/// Real routed-trace loop sums (raw + value-weighted) via the maze router — the
+/// **score path only**, never the inner loop. Builds one grid over the placement,
+/// then routes each loop's power leg as actual copper (cap pad → its pinned hub
+/// pin) detouring foreign pads; the cap span + ground return (`loopGroundSpan`)
+/// add the rest of the physical loop. Falls back to the analytic surrogate when a
+/// leg is unroutable or the board is too large to grid, so a score is always produced.
+fn routedLoops(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    loops: []const Loop,
+) LoopSums {
+    if (loops.len == 0) return .{ .raw = 0, .weighted = 0 };
+    var lr = router.LoopRouter.init(arena, parts, nets, idx_of, .{}) catch return surrogateLoops(parts, loops);
+    if (!lr.ready) return surrogateLoops(parts, loops);
+    var raw: f64 = 0;
+    var weighted: f64 = 0;
+    for (loops) |lp| {
+        const cap_c = worldPadCenter(parts[lp.cap], lp.cap_pwr.x, lp.cap_pwr.y);
+        const hub_c = worldPadCenter(parts[lp.hub], lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
+        const routed = lr.legLen(cap_c, hub_c, lp.pwr_net) catch null;
+        const pwr = if (routed) |r| r else surrogatePwrLeg(parts, lp) + UNROUTABLE_PENALTY_MM;
+        const total = pwr + loopGroundSpan(parts, lp);
+        raw += total;
+        weighted += lp.weight * total;
+    }
+    return .{ .raw = raw, .weighted = weighted };
 }
 
 /// Apply a cached layout to `parts` when it covers every one (matched by
@@ -413,6 +613,181 @@ fn legalizeFinal(parts: []Part) void {
     legalize(parts, FINAL_CLEAR);
     snapToGrid(parts);
     legalizeOnGrid(parts);
+}
+
+/// Final tightening: pull every part into one connected mass so each courtyard
+/// abuts at least one neighbour — the layout is then provably as compact as it
+/// packs. The optimizer/polish leave a snap-safety gap (`FINAL_CLEAR`) around
+/// parts; this pass grows a single blob outward from the hubs (the anchors,
+/// which never move): any passive already flush against the blob stays put, then
+/// each remaining floating part is docked — cheapest move first — onto the blob,
+/// keeping its perpendicular position where it can. Growing from one seed
+/// (rather than docking to any nearest neighbour) is what keeps it from leaving
+/// disconnected islands. Courtyards already bake in `BBOX_MARGIN_MM`, so abutting
+/// them is DRC-clean; overlap is still tested against the (escape-stub-aware)
+/// keepout, so a part with a reserved breakout corridor may not reach the blob —
+/// best effort, never an overlap.
+fn compactToContact(parts: []Part, priority: []const u32) void {
+    const n = parts.len;
+    if (n < 2 or n > maxParts) return;
+    var settled_buf: [maxParts]bool = undefined;
+    const settled = settled_buf[0..n];
+    for (settled) |*s| s.* = false;
+
+    // Seed the blob with the hubs (anchors). With no hub, seed the part nearest
+    // the cluster centroid so the blob still grows from the middle.
+    var has_anchor = false;
+    for (parts, 0..) |p, i| {
+        if (p.kind == .hub) {
+            settled[i] = true;
+            has_anchor = true;
+        }
+    }
+    if (!has_anchor) settled[centralIndex(parts)] = true;
+    growSettled(parts, settled);
+
+    // Attach the rest highest-priority first (so declared parts claim the space
+    // nearest the hub before the rest fill in), each at its own cheapest dock —
+    // so the mass stays connected and every move is as small as it can be. With
+    // uniform priority this is exactly the prior cheapest-first packing.
+    while (true) {
+        var pick: ?usize = null;
+        var pick_pt: Pt = undefined;
+        var best_pri: u32 = 0;
+        var best_d2: f64 = std.math.inf(f64);
+        for (parts, 0..) |_, i| {
+            if (settled[i]) continue;
+            const d = bestDock(parts, i, settled) orelse continue;
+            const take = pick == null or priority[i] > best_pri or
+                (priority[i] == best_pri and d.d2 < best_d2 - 1e-12);
+            if (take) {
+                best_pri = priority[i];
+                best_d2 = d.d2;
+                pick = i;
+                pick_pt = d.pt;
+            }
+        }
+        const i = pick orelse break;
+        parts[i].x = pick_pt.x;
+        parts[i].y = pick_pt.y;
+        settled[i] = true;
+        growSettled(parts, settled);
+    }
+}
+
+/// Index of the part closest to the cluster centroid — the blob seed when a
+/// design has no hub to anchor on.
+fn centralIndex(parts: []const Part) usize {
+    var cx: f64 = 0;
+    var cy: f64 = 0;
+    for (parts) |p| {
+        cx += p.x;
+        cy += p.y;
+    }
+    const inv = 1.0 / @as(f64, @floatFromInt(parts.len));
+    cx *= inv;
+    cy *= inv;
+    var best: usize = 0;
+    var best_d2: f64 = std.math.inf(f64);
+    for (parts, 0..) |p, i| {
+        const d2 = (p.x - cx) * (p.x - cx) + (p.y - cy) * (p.y - cy);
+        if (d2 < best_d2) {
+            best_d2 = d2;
+            best = i;
+        }
+    }
+    return best;
+}
+
+/// Transitively settle every part whose courtyard already abuts a settled one,
+/// so parts the optimizer placed flush against the blob aren't needlessly moved.
+fn growSettled(parts: []const Part, settled: []bool) void {
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (parts, 0..) |_, i| {
+            if (settled[i]) continue;
+            for (parts, 0..) |_, j| {
+                if (i == j or !settled[j]) continue;
+                if (courtyardEdge(parts[i], parts[j])) {
+                    settled[i] = true;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// True when two courtyards share an *edge* (not just a corner): a zero gap on
+/// one axis with a positive projection overlap on the other. Rendered courtyard
+/// (`effHw`/`effHh` about the centre).
+fn courtyardEdge(a: Part, b: Part) bool {
+    const gx = @abs(a.x - b.x) - (effHw(a) + effHw(b));
+    const gy = @abs(a.y - b.y) - (effHh(a) + effHh(b));
+    return (@abs(gx) <= COMPACT_EPS and gy < -COMPACT_EPS) or
+        (@abs(gy) <= COMPACT_EPS and gx < -COMPACT_EPS);
+}
+
+/// True when part `i`'s courtyard shares an edge with any other part's.
+fn courtyardTouchesAny(parts: []const Part, i: usize) bool {
+    for (parts, 0..) |_, j| {
+        if (j != i and courtyardEdge(parts[i], parts[j])) return true;
+    }
+    return false;
+}
+
+/// A dock candidate: the grid-aligned centre and its squared displacement.
+const Dock = struct { pt: Pt, d2: f64 };
+
+/// Minimum-displacement grid-aligned centre that makes part `i`'s courtyard abut
+/// a *settled* part, with its keepout overlapping nothing. Tries each side of
+/// every settled part, preserving `i`'s perpendicular coordinate (clamped just
+/// enough to keep a `COMPACT_MIN_OVERLAP` shared edge). Null when none is
+/// reachable (e.g. every dock would overlap a third part).
+fn bestDock(parts: []Part, i: usize, settled: []const bool) ?Dock {
+    const ox = parts[i].x;
+    const oy = parts[i].y;
+    const phw = effHw(parts[i]);
+    const phh = effHh(parts[i]);
+    var best: ?Pt = null;
+    var best_d2: f64 = std.math.inf(f64);
+    for (parts, 0..) |o, j| {
+        if (j == i or !settled[j]) continue;
+        const sumw = phw + effHw(o);
+        const sumh = phh + effHh(o);
+        // Left / right of o: slide along x, keep y (clamped into the overlap band).
+        const ylim = @max(0.0, sumh - COMPACT_MIN_OVERLAP);
+        const cy = std.math.clamp(oy, o.y - ylim, o.y + ylim);
+        considerDock(parts, i, o.x + sumw, cy, ox, oy, &best, &best_d2);
+        considerDock(parts, i, o.x - sumw, cy, ox, oy, &best, &best_d2);
+        // Above / below o: slide along y, keep x (clamped into the overlap band).
+        const xlim = @max(0.0, sumw - COMPACT_MIN_OVERLAP);
+        const cx = std.math.clamp(ox, o.x - xlim, o.x + xlim);
+        considerDock(parts, i, cx, o.y + sumh, ox, oy, &best, &best_d2);
+        considerDock(parts, i, cx, o.y - sumh, ox, oy, &best, &best_d2);
+    }
+    if (best) |pt| return .{ .pt = pt, .d2 = best_d2 };
+    return null;
+}
+
+/// Evaluate one candidate dock centre for part `i`: snap to grid, reject if its
+/// keepout overlaps anything, else keep it when it is the closest valid dock so
+/// far. Restores `i`'s position before returning (the caller commits the winner).
+fn considerDock(parts: []Part, i: usize, cx: f64, cy: f64, ox: f64, oy: f64, best: *?Pt, best_d2: *f64) void {
+    const sx = @round(cx / GRID_MM) * GRID_MM;
+    const sy = @round(cy / GRID_MM) * GRID_MM;
+    parts[i].x = sx;
+    parts[i].y = sy;
+    const bad = overlapsAny(parts, &parts[i]);
+    parts[i].x = ox;
+    parts[i].y = oy;
+    if (bad) return;
+    const d2 = (sx - ox) * (sx - ox) + (sy - oy) * (sy - oy);
+    if (d2 < best_d2.* - 1e-12) {
+        best_d2.* = d2;
+        best.* = .{ .x = sx, .y = sy };
+    }
 }
 
 /// A solved pose snapshot (used to retain the best multi-start arrangement).
@@ -924,29 +1299,57 @@ fn nearestHubPad(cr: Rect, hub: Part, hub_pads: []const PadRect) struct { rect: 
 /// in sync with the page (emitted as `blockPen`).
 pub const BLOCK_PENALTY_MM: f64 = 5.0;
 
-/// Does segment a→b pass through axis-aligned rect `r`? Liang–Barsky clip;
-/// true only for a positive-length crossing of the interior (grazing an edge
-/// doesn't count — callers also inset obstacles to be safe).
-fn segIntersectsRect(a: Pt, b: Pt, r: Rect) bool {
+/// Chord length (mm a loop leg cuts through an obstacle pad) at which the block
+/// penalty reaches its full `BLOCK_PENALTY_MM`. Ramping the penalty over this —
+/// rather than a hard in/out toggle — keeps the loop term *continuous* as a cap
+/// slides past a pad. A binary toggle put `5 mm × loop_w × weight` (up to ~45)
+/// cliffs into the objective over a single 0.2 mm step, which read as erratic
+/// scoring and trapped the placer; the ramp turns each cliff into a slope.
+const BLOCK_RAMP_MM: f64 = 1.0;
+
+/// Top signal layer → GND plane (L1→L2) spacing in mm. The decoupling loop's
+/// ground return drops from the cap's GND pad through a via to the plane, runs
+/// laterally in the plane, and rises through a via at the IC's GND pad — so the
+/// loop counts this twice (one via down at the cap, one up at the IC). Per the
+/// 4-layer stackup the router assumes; tune to the real board's L1→L2 prepreg.
+const LAYER_GAP_MM: f64 = 0.2;
+
+/// Penalty (mm) added to a loop's power leg when the maze router can't connect
+/// the cap to its pinned hub pin (a fully blocked or boxed-in placement). Keeps
+/// an unroutable loop visibly worse than any routable one in the score.
+const UNROUTABLE_PENALTY_MM: f64 = 10.0;
+
+/// Per-rank loop-weight step from a `(placement-order …)`: a cap at priority
+/// rank `r` (1 = last listed, K = first listed) gets weight ≥ `1 + r·STEP`, so a
+/// declared order dominates the value-based weighting and pulls the first-listed
+/// caps tightest. Unranked caps (rank 0) keep their value weight.
+const PRIORITY_STEP: f64 = 0.5;
+
+/// Length of segment a→b that lies inside axis-aligned rect `r` (0 if it misses
+/// or only grazes an edge). Liang–Barsky clip: the clipped parameter span
+/// `t1 − t0` times the segment length. Drives the *continuous* block penalty —
+/// the deeper a loop leg cuts a pad, the worse, with no in/out cliff.
+fn segRectChord(a: Pt, b: Pt, r: Rect) f64 {
     var t0: f64 = 0;
     var t1: f64 = 1;
     const p = [_]f64{ a.x - b.x, b.x - a.x, a.y - b.y, b.y - a.y };
     const q = [_]f64{ a.x - r.x0, r.x1 - a.x, a.y - r.y0, r.y1 - a.y };
     for (0..4) |i| {
         if (p[i] == 0) {
-            if (q[i] < 0) return false;
+            if (q[i] < 0) return 0;
         } else {
             const t = q[i] / p[i];
             if (p[i] < 0) {
-                if (t > t1) return false;
+                if (t > t1) return 0;
                 if (t > t0) t0 = t;
             } else {
-                if (t < t0) return false;
+                if (t < t0) return 0;
                 if (t < t1) t1 = t;
             }
         }
     }
-    return t0 < t1;
+    if (t1 <= t0) return 0;
+    return (t1 - t0) * std.math.hypot(b.x - a.x, b.y - a.y);
 }
 
 fn rectsClose(a: Rect, b: Rect) bool {
@@ -954,12 +1357,13 @@ fn rectsClose(a: Rect, b: Rect) bool {
         @abs(a.x1 - b.x1) < 1e-6 and @abs(a.y1 - b.y1) < 1e-6;
 }
 
-/// True if a straight trace from `a` to `b` crosses any pad other than the
-/// cap's own pads (`cap_idx`) and the `target` pad it connects to — i.e. the
-/// leg isn't routable as drawn (it cuts through the IC's pins / the EP / a
-/// neighbour). Obstacles are inset slightly so running along an edge is fine.
-fn legBlocked(parts: []const Part, cap_idx: usize, a: Pt, b: Pt, target: Rect) bool {
+/// Deepest cut (mm) the straight trace a→b makes through any pad other than the
+/// cap's own (`cap_idx`) or the `target` it connects to — 0 when the leg is
+/// cleanly routable. Obstacles are inset slightly so running along an edge is
+/// free. Drives the continuous block penalty in `nearestReachable`.
+fn legPenetration(parts: []const Part, cap_idx: usize, a: Pt, b: Pt, target: Rect) f64 {
     const eps = 0.02;
+    var worst: f64 = 0;
     for (parts, 0..) |part, pi| {
         if (pi == cap_idx) continue;
         for (part.pads) |pad| {
@@ -967,10 +1371,31 @@ fn legBlocked(parts: []const Part, cap_idx: usize, a: Pt, b: Pt, target: Rect) b
             if (rectsClose(r0, target)) continue;
             const r = Rect{ .x0 = r0.x0 + eps, .y0 = r0.y0 + eps, .x1 = r0.x1 - eps, .y1 = r0.y1 - eps };
             if (r.x1 <= r.x0 or r.y1 <= r.y0) continue;
-            if (segIntersectsRect(a, b, r)) return true;
+            worst = @max(worst, segRectChord(a, b, r));
         }
     }
-    return false;
+    return worst;
+}
+
+/// Surrogate power-leg cost to a loop's *fixed* (pinned) hub pad `target`: the
+/// edge-to-edge gap plus the continuous block-penetration ramp. Unlike
+/// `nearestReachable` there is no argmin over hub pads — the target never flips —
+/// so the cost is continuous in the cap's position (no pin-flip cliffs). This is
+/// the inner-loop stand-in for the real routed trace the score path measures.
+fn fixedReachable(cr: Rect, parts: []const Part, cap_idx: usize, target: Rect) f64 {
+    const np = nearestPoints(cr, target);
+    const chord = legPenetration(parts, cap_idx, np.a, np.b, target);
+    const pen = BLOCK_PENALTY_MM * @min(chord / BLOCK_RAMP_MM, 1.0);
+    return rectGap(cr, target) + pen;
+}
+
+/// Order two pad numbers: numerically when both parse as integers (so "2" < "10"),
+/// else lexicographically (BGA "A1"/"B2"). Picks the default pinned supply pad.
+fn pinLess(a: []const u8, b: []const u8) bool {
+    const ai: ?i64 = std.fmt.parseInt(i64, a, 10) catch null;
+    const bi: ?i64 = std.fmt.parseInt(i64, b, 10) catch null;
+    if (ai != null and bi != null) return ai.? < bi.?;
+    return std.mem.lessThan(u8, a, b);
 }
 
 /// Nearest *routable* hub pad to cap rect `cr`: edge-to-edge gap plus a detour
@@ -998,7 +1423,11 @@ fn nearestReachable(cr: Rect, parts: []const Part, cap_idx: usize, hub_idx: usiz
         const gap = rectGap(cr, hr);
         if (gap >= best or gap > gcut) continue; // can't beat the current/closest best
         const np = nearestPoints(cr, hr);
-        const cost = gap + (if (legBlocked(parts, cap_idx, np.a, np.b, hr)) BLOCK_PENALTY_MM else 0);
+        // Continuous detour cost: ramps with how deeply the leg cuts an
+        // obstacle pad, reaching full BLOCK_PENALTY_MM at BLOCK_RAMP_MM chord.
+        const chord = legPenetration(parts, cap_idx, np.a, np.b, hr);
+        const pen = BLOCK_PENALTY_MM * @min(chord / BLOCK_RAMP_MM, 1.0);
+        const cost = gap + pen;
         if (cost < best) {
             best = cost;
             best_rect = hr;
@@ -1183,16 +1612,48 @@ fn alignmentPenalty(parts: []const Part) f64 {
 }
 
 /// Hot-loop length with each cap's leg sum scaled by its value-priority
-/// `weight` — so on a multi-cap rail the smaller cap is pulled closest.
+/// `weight` — so on a multi-cap rail the smaller cap is pulled closest. Uses the
+/// continuous fixed-pad surrogate (no argmin flip); the score path replaces this
+/// with the real routed-trace sum (see `routedLoops`).
 fn weightedLoop(parts: []const Part, loops: []const Loop) f64 {
-    var total: f64 = 0;
+    return surrogateLoops(parts, loops).weighted;
+}
+
+/// One loop's surrogate power-leg cost: the fixed-pad gap (+ block ramp) from the
+/// cap's power pad to its pinned hub pin. The rest of the loop (the cap's body
+/// span + the ground return) is added by `loopGroundSpan`.
+fn surrogatePwrLeg(parts: []const Part, lp: Loop) f64 {
+    const cap = parts[lp.cap];
+    return fixedReachable(worldRect(cap, lp.cap_pwr), parts, lp.cap, worldRect(parts[lp.hub], lp.hub_pwr_pin));
+}
+
+/// The non-power half of the physical loop (mm): the cap's own pad-to-pad span
+/// (its body) + the ground return — cap GND pad → via↓ → GND plane → via↑ → the
+/// pinned IC GND pad. The plane lateral has no obstacles, so it's a straight
+/// edge-to-edge gap (not routed); the two `LAYER_GAP_MM` vias close it
+/// vertically. Shared by the surrogate and the real-trace score — only the power
+/// leg is ever maze-routed, the ground return runs in the solid plane.
+fn loopGroundSpan(parts: []const Part, lp: Loop) f64 {
+    const cap = parts[lp.cap];
+    const cap_gnd = worldRect(cap, lp.cap_gnd);
+    const span = rectGap(worldRect(cap, lp.cap_pwr), cap_gnd);
+    const ret = 2 * LAYER_GAP_MM + rectGap(cap_gnd, worldRect(parts[lp.hub], lp.hub_gnd_pin));
+    return span + ret;
+}
+
+/// Analytic loop sums (raw + value-weighted) from the fixed-pad surrogate: the
+/// power leg to the pinned pin + the cap span + the ground return
+/// (`loopGroundSpan`). Drives the inner-loop objective and is the score path's
+/// fallback when routing a leg fails or the board is too large to grid.
+fn surrogateLoops(parts: []const Part, loops: []const Loop) LoopSums {
+    var raw: f64 = 0;
+    var weighted: f64 = 0;
     for (loops) |lp| {
-        const cap = parts[lp.cap];
-        const legs = nearestReachable(worldRect(cap, lp.cap_pwr), parts, lp.cap, lp.hub, lp.hub_pwr).gap +
-            nearestReachable(worldRect(cap, lp.cap_gnd), parts, lp.cap, lp.hub, lp.hub_gnd).gap;
-        total += lp.weight * legs;
+        const total = surrogatePwrLeg(parts, lp) + loopGroundSpan(parts, lp);
+        raw += total;
+        weighted += lp.weight * total;
     }
-    return total;
+    return .{ .raw = raw, .weighted = weighted };
 }
 
 /// Keep-away penalty: high when a sensitive part (feedback/reference net) sits
@@ -1231,12 +1692,13 @@ fn buildSprings(
     parts: []const Part,
     idx_of: *std.StringHashMap(usize),
     roles: []const pin_roles.PartRoles,
+    explicit_pin: []const []const u8,
 ) std.mem.Allocator.Error!Built {
     const gnd = try groundPads(arena, nets, parts, idx_of, roles);
     var springs: std.ArrayListUnmanaged(Spring) = .empty;
     var loops: std.ArrayListUnmanaged(Loop) = .empty;
 
-    for (nets) |net| {
+    for (nets, 0..) |net, net_i| {
         if (isGroundName(shortName(net.name))) continue;
 
         var eps: std.ArrayListUnmanaged(Endpoint) = .empty;
@@ -1257,7 +1719,7 @@ fn buildSprings(
 
         const single_hub = hub_idx != null and !multi_hub;
         if (single_hub) {
-            try hugToHub(arena, &springs, &loops, eps.items, hub_idx.?, gnd, roles);
+            try hugToHub(arena, &springs, &loops, eps.items, hub_idx.?, gnd, roles, explicit_pin, @intCast(net_i));
         } else {
             try weakCluster(arena, &springs, eps.items);
         }
@@ -1271,22 +1733,62 @@ fn buildSprings(
 ///   • sensitive = any other signal passive (feedback / reference network),
 ///   • loop.weight = boost the smaller of several caps sharing a power rail
 ///     toward the pin (rails identified by a shared `hub_pwr` slice); a lone
-///     cap keeps weight 1, so single-cap rails are unaffected.
-fn classify(parts: []Part, loops: []Loop, cap_w_max: f64) void {
+///     cap keeps weight 1, so single-cap rails are unaffected. A declared
+///     `(placement-order …)` rank (`priority[cap]`, 0 = unranked) raises the
+///     weight further — `@max` so the order can only *tighten*, never loosen.
+fn classify(parts: []Part, loops: []Loop, cap_w_max: f64, priority: []const u32) void {
     for (loops) |lp| parts[lp.cap].aggressor = true;
     for (parts) |*p| {
         if (isInductor(p.ref_des)) p.aggressor = true;
         if (p.kind == .passive and !p.aggressor) p.sensitive = true;
     }
     for (loops) |*lp| {
+        var w_val: f64 = 1;
         const v = capValueFarads(parts[lp.cap].value);
-        if (v <= 0) continue;
-        var vref = v;
-        for (loops) |o| {
-            if (o.hub_pwr.ptr == lp.hub_pwr.ptr) vref = @max(vref, capValueFarads(parts[o.cap].value));
+        if (v > 0) {
+            var vref = v;
+            for (loops) |o| {
+                if (o.hub_pwr.ptr == lp.hub_pwr.ptr) vref = @max(vref, capValueFarads(parts[o.cap].value));
+            }
+            w_val = std.math.clamp(@sqrt(vref / v), 1.0, cap_w_max);
         }
-        lp.weight = std.math.clamp(@sqrt(vref / v), 1.0, cap_w_max);
+        lp.weight = @max(w_val, priorityWeight(priority[lp.cap]));
     }
+}
+
+/// Loop-tightness weight from a `(placement-order …)` rank: rank 0 (unranked) is
+/// neutral (1.0); a higher rank (earlier in the list) pulls the cap tighter.
+fn priorityWeight(rank: u32) f64 {
+    if (rank == 0) return 1.0;
+    return 1.0 + PRIORITY_STEP * @as(f64, @floatFromInt(rank));
+}
+
+/// The pad in `pads` whose centre is nearest `to`'s centre (footprint-local) —
+/// picks the hub ground pad a loop's return targets (the one closest to the
+/// power pin). `pads` must be non-empty.
+fn nearestPad(pads: []const PadRect, to: PadRect) PadRect {
+    var best = pads[0];
+    var best_d2 = std.math.inf(f64);
+    for (pads) |p| {
+        const d2 = (p.x - to.x) * (p.x - to.x) + (p.y - to.y) * (p.y - to.y);
+        if (d2 < best_d2) {
+            best_d2 = d2;
+            best = p;
+        }
+    }
+    return best;
+}
+
+/// The hub pad whose pin matches `want` (a cap's explicitly-named target pin),
+/// as a footprint-local rect, or null when `want` is empty / not on this net.
+fn findHubPin(eps: []const Endpoint, hub: usize, want: []const u8) ?PadRect {
+    if (want.len == 0) return null;
+    for (eps) |h| {
+        if (h.idx == hub and std.mem.eql(u8, h.pin, want)) {
+            return .{ .x = h.px, .y = h.py, .w = h.pw, .h = h.ph };
+        }
+    }
+    return null;
 }
 
 /// For each passive on a single-hub net: a decoupling cap (it also has a
@@ -1300,19 +1802,32 @@ fn hugToHub(
     hub: usize,
     gnd: []const []const PadRect,
     roles: []const pin_roles.PartRoles,
+    explicit_pin: []const []const u8,
+    net_i: i32,
 ) std.mem.Allocator.Error!void {
-    // The hub's pads on this (power) net. Config straps tied to the rail (a
-    // declared `input`/`output`/`io` pin such as EN/UV or PGFB) are dropped so
-    // the bypass cap hugs the real supply pins, not a control pin that merely
-    // shares the net. If every hub pad is a strap we keep them all, so a rail is
-    // never left without a target.
+    // The hub's pads on this (power) net seed the loop target / hug centroid.
+    // Config straps tied to the rail (a declared `input`/`output`/`io` pin such
+    // as EN/UV or PGFB) are dropped so the bypass cap hugs the real supply pins,
+    // not a control pin that merely shares the net. If every hub pad is a strap
+    // we keep them all, so a rail is never left without a target.
     var hub_all: std.ArrayListUnmanaged(PadRect) = .empty;
     var hub_real: std.ArrayListUnmanaged(PadRect) = .empty;
+    // Lowest-numbered real supply pad — the default pinned target for a cap that
+    // doesn't name an explicit pin (`(near <pin> …)`). Fixing it removes the
+    // per-eval argmin flip that made the score jump on a small nudge.
+    var def_rect: ?PadRect = null;
+    var def_pin: []const u8 = "";
     for (eps) |e| {
         if (e.idx != hub) continue;
         const rect = PadRect{ .x = e.px, .y = e.py, .w = e.pw, .h = e.ph };
         try hub_all.append(arena, rect);
-        if (roles[hub].classOf(e.pin) != .strap) try hub_real.append(arena, rect);
+        if (roles[hub].classOf(e.pin) != .strap) {
+            try hub_real.append(arena, rect);
+            if (def_rect == null or pinLess(e.pin, def_pin)) {
+                def_rect = rect;
+                def_pin = e.pin;
+            }
+        }
     }
     if (hub_all.items.len == 0) return;
     const hub_pwr_s = if (hub_real.items.len > 0) try hub_real.toOwnedSlice(arena) else try hub_all.toOwnedSlice(arena);
@@ -1325,18 +1840,31 @@ fn hugToHub(
     }
     const hn: f64 = @floatFromInt(hub_pwr_s.len);
     const ht = Pt{ .x = hx / hn, .y = hy / hn };
+    // Default pinned target: the lowest-numbered real supply pad, or the first
+    // hub pad when every pad was a strap (kept above so the rail isn't dropped).
+    const default_pin_rect = def_rect orelse hub_pwr_s[0];
 
     for (eps) |e| {
         if (e.idx == hub or e.is_hub) continue;
         const decouple = gnd[e.idx].len > 0 and gnd[hub].len > 0;
         if (decouple) {
+            // Pin the power leg to one hub pad — the cap's explicitly-named pin
+            // (`(near <pin> …)`) if it's on this net, else the lowest-numbered
+            // supply pad. Fixing the target removes the per-eval argmin flip.
+            const pin_rect = findHubPin(eps, hub, explicit_pin[e.idx]) orelse default_pin_rect;
+            // The ground return targets the hub GND pad nearest that power pin —
+            // also fixed (no flip), so the loop is a coherent local pin pair.
+            const gnd_rect = nearestPad(gnd[hub], pin_rect);
             try loops.append(arena, .{
                 .cap = e.idx,
                 .hub = hub,
                 .cap_pwr = .{ .x = e.px, .y = e.py, .w = e.pw, .h = e.ph },
                 .cap_gnd = gnd[e.idx][0],
                 .hub_pwr = hub_pwr_s,
+                .hub_pwr_pin = pin_rect,
                 .hub_gnd = gnd[hub],
+                .hub_gnd_pin = gnd_rect,
+                .pwr_net = net_i,
             });
         } else {
             // Non-decoupling single-hub passive: hug the hub's pad centroid.
@@ -1410,12 +1938,9 @@ fn selectGroundPads(arena: std.mem.Allocator, tagged: []const TaggedPad) std.mem
     return out.toOwnedSlice(arena);
 }
 
-/// Half-perimeter wirelength over signal nets (ground excluded). This is the
-/// only part of the score the inner search (`objectiveCost`) needs, so it is
-/// split out from `scoreLayout`: the routing-aware loop measure below is
-/// expensive (`nearestReachable` → `legBlocked`) and the search gets its loop
-/// term from `weightedLoop` instead, so folding the loop scan into every
-/// objective eval would compute — and discard — it tens of thousands of times.
+/// Half-perimeter wirelength over signal nets (ground excluded). The hot part of
+/// the inner-loop objective (`objectiveCost`), so it's split out; the display
+/// loop term lives in `scoreLayout` via the fixed-pad `surrogateLoops`.
 fn hpwlScore(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet) f64 {
     var hpwl: f64 = 0;
     for (nets) |net| {
@@ -1440,24 +1965,21 @@ fn hpwlScore(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []con
     return hpwl;
 }
 
-/// HPWL over signal nets + total power/ground airwire length of the
-/// decoupling loops, measured on the settled placement. The loop term uses the
-/// routing-aware `nearestReachable`, so this is the *display* score — compute
-/// it once on the final layout, not inside the search loop.
+/// HPWL over signal nets + the decoupling loops' length. The loop term here is
+/// the fixed-pad *surrogate* (power leg to the pinned pin + cap span + ground
+/// return); the score path overrides `loop_mm` with the real routed power-leg
+/// sum (`routedLoops`).
 fn scoreLayout(
     parts: []const Part,
     idx_of: *std.StringHashMap(usize),
     nets: []const FlatNet,
     loops: []const Loop,
 ) Score {
-    const hpwl = hpwlScore(parts, idx_of, nets);
-    var loop_mm: f64 = 0;
-    for (loops) |lp| {
-        const cap = parts[lp.cap];
-        loop_mm += nearestReachable(worldRect(cap, lp.cap_pwr), parts, lp.cap, lp.hub, lp.hub_pwr).gap;
-        loop_mm += nearestReachable(worldRect(cap, lp.cap_gnd), parts, lp.cap, lp.hub, lp.hub_gnd).gap;
-    }
-    return .{ .hpwl_mm = hpwl, .loop_mm = loop_mm, .loop_caps = loops.len };
+    return .{
+        .hpwl_mm = hpwlScore(parts, idx_of, nets),
+        .loop_mm = surrogateLoops(parts, loops).raw,
+        .loop_caps = loops.len,
+    };
 }
 
 /// Spring relaxation: springs + edge-aware decoupling-loop pulls + courtyard
@@ -1520,8 +2042,13 @@ fn relax(parts: []Part, springs: []const Spring, loops: []const Loop) void {
 /// final clearance. This replaces the old centroid power/ground springs.
 fn accumulateLoops(parts: []const Part, loops: []const Loop, ax: []f64, ay: []f64) void {
     for (loops) |lp| {
-        accumulateLeg(parts, lp.cap, lp.cap_pwr, lp.hub, lp.hub_pwr, ax, ay);
-        accumulateLeg(parts, lp.cap, lp.cap_gnd, lp.hub, lp.hub_gnd, ax, ay);
+        // Both legs pull toward their *pinned* hub pads (matching the score), so a
+        // cap settles with each pad facing its assigned pin — power pad to the
+        // supply pin, ground pad to the nearby ground pin — not the nearest of each.
+        const pwr_pin = [_]PadRect{lp.hub_pwr_pin};
+        const gnd_pin = [_]PadRect{lp.hub_gnd_pin};
+        accumulateLeg(parts, lp.cap, lp.cap_pwr, lp.hub, &pwr_pin, ax, ay);
+        accumulateLeg(parts, lp.cap, lp.cap_gnd, lp.hub, &gnd_pin, ax, ay);
     }
 }
 
@@ -1765,6 +2292,7 @@ fn finalize(
     instances: []const export_kicad.FlatInstance,
     nets: []const FlatNet,
     score: Score,
+    breakdown: Breakdown,
     generated: bool,
 ) std.mem.Allocator.Error!Placement {
     var minx: f64 = std.math.inf(f64);
@@ -1807,6 +2335,7 @@ fn finalize(
         .instances = instances,
         .nets = nets,
         .score = score,
+        .breakdown = breakdown,
         .minx = minx,
         .miny = miny,
         .maxx = maxx,
@@ -1861,6 +2390,92 @@ fn capValueFarads(s: []const u8) f64 {
         else => return 0,
     };
     return num * mult;
+}
+
+/// Pinout lookup key for `lib/pinouts/<key>.sexp`: the explicit `pinout`, else
+/// the `symbol`, else the component name (mirrors the ERC's resolution order).
+fn pinoutKey(inst: export_kicad.FlatInstance) []const u8 {
+    if (inst.pinout.len > 0) return inst.pinout;
+    if (inst.symbol.len > 0) return inst.symbol;
+    return inst.component;
+}
+
+/// Space-delimited control / feedback / sense pin tokens. A pin whose function
+/// contains one of these ties to a rail for configuration rather than carrying
+/// bulk current, so a bypass cap should not hug it. Matched pad-bounded (each
+/// token framed by spaces) so "IN" never matches inside "INT"/"INH".
+const AUX_TOKENS =
+    " EN UV UVLO PG PGOOD PGFB FB ILIM SET SS COMP SYNC MODE ADJ TRIM BYP " ++
+    "BYPASS NC REF SENSE CTRL CTL INH DLY RT FREQ FSW SLEEP FAULT RESET NRST INT ";
+
+/// True when `tok` (already uppercased) names a control/feedback/sense function.
+fn isAuxToken(tok: []const u8) bool {
+    var needle: [32]u8 = undefined;
+    if (tok.len + 2 > needle.len) return false;
+    needle[0] = ' ';
+    @memcpy(needle[1 .. 1 + tok.len], tok);
+    needle[1 + tok.len] = ' ';
+    return std.mem.indexOf(u8, AUX_TOKENS, needle[0 .. tok.len + 2]) != null;
+}
+
+/// Classify a pin's primary function name as an auxiliary rail tie. Tokenises on
+/// non-letters (so "EN/UV" → EN, UV and "IN_1" → IN), flagging the pin if any
+/// token is a known control/feedback function or ends in "FB" (PGFB, VFB, IFB).
+/// True supply pins (IN, VIN, VDD, VCC, OUT, OUTS, …) classify as non-aux.
+fn isAuxRailPin(primary: []const u8) bool {
+    var buf: [24]u8 = undefined;
+    var i: usize = 0;
+    while (i < primary.len) {
+        var n: usize = 0;
+        while (i < primary.len and std.ascii.isAlphabetic(primary[i])) : (i += 1) {
+            if (n < buf.len) {
+                buf[n] = std.ascii.toUpper(primary[i]);
+                n += 1;
+            }
+        }
+        if (n == 0) {
+            i += 1;
+            continue;
+        }
+        const tok = buf[0..n];
+        if (isAuxToken(tok)) return true;
+        if (n >= 2 and std.mem.eql(u8, tok[n - 2 .. n], "FB")) return true;
+    }
+    return false;
+}
+
+/// Load `lib/pinouts/<key>.sexp` and return the set of footprint pad numbers
+/// whose pin function is an auxiliary rail tie (see `isAuxRailPin`). Empty when
+/// the file is missing or unparseable, so a part with no pinout keeps the prior
+/// all-pads loop behaviour.
+fn loadAuxPads(
+    arena: std.mem.Allocator,
+    project_dir: []const u8,
+    key: []const u8,
+) std.mem.Allocator.Error!std.StringHashMapUnmanaged(void) {
+    var set: std.StringHashMapUnmanaged(void) = .empty;
+    if (key.len == 0) return set;
+    const path = std.fmt.allocPrint(arena, "{s}/lib/pinouts/{s}.sexp", .{ project_dir, key }) catch return set;
+    const content = infra_fs.cwd().readFileAlloc(arena, path, 256 * 1024) catch return set;
+    const nodes = parser.parse(arena, content) catch return set;
+    if (nodes.len == 0) return set;
+    const top = nodes[0].asList() orelse return set;
+    if (top.len < 2) return set;
+    const head = top[0].asAtom() orelse return set;
+    if (!std.mem.eql(u8, head, "pinout")) return set;
+    for (top[2..]) |child| {
+        const cl = child.asList() orelse continue;
+        if (cl.len < 3) continue;
+        const ch = cl[0].asAtom() orelse continue;
+        if (!std.mem.eql(u8, ch, "pin")) continue;
+        // Pin id may be a bare int (`(pin 1 …)` on a QFN/DFN) or an atom/string
+        // (`(pin H4 …)` BGA, `(pin PN1 …)` logical); `tokenText` renders all to
+        // the decimal string `geometry.Pad.number` uses.
+        const pin_id = cl[1].tokenText(arena) orelse continue;
+        const primary = cl[2].asText() orelse continue;
+        if (isAuxRailPin(primary)) try set.put(arena, pin_id, {});
+    }
+    return set;
 }
 
 /// A part is a hub unless its ref-des prefix is a passive (R/C/L/F/D),
@@ -1922,6 +2537,32 @@ test "legalize removes overlap between two parts" {
     try testing.expect(dx >= (parts[0].hw + parts[1].hw) - 1e-2 or dy >= (parts[0].hh + parts[1].hh) - 1e-2);
 }
 
+test "compactToContact docks floating parts so every courtyard abuts a neighbour" {
+    // Hub U1 (anchor) with two caps each left a 0.2 mm snap-safety gap — C1 off
+    // the right edge (2.0+0.4+0.2), C2 off the bottom. All extents are grid
+    // multiples so docking lands exactly on the courtyard edge. Compaction must
+    // close both gaps, leaving every part touching and nothing overlapping.
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2.0, .hh = 2.0, .pads = &.{}, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.4, .hh = 0.4, .pads = &.{}, .fallback = false, .x = 2.6, .y = 0 },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 0.4, .hh = 0.4, .pads = &.{}, .fallback = false, .x = 0, .y = 2.6 },
+    };
+    // Precondition: the passives start floating (0.2 mm gap to the hub).
+    try testing.expect(!courtyardTouchesAny(&parts, 1));
+    try testing.expect(!courtyardTouchesAny(&parts, 2));
+
+    const prio = [_]u32{ 0, 0, 0 }; // unranked → cheapest-first docking
+    compactToContact(&parts, &prio);
+
+    for (0..parts.len) |i| try testing.expect(courtyardTouchesAny(&parts, i));
+    try testing.expect(!anyOverlap(&parts));
+    // The anchor hub did not move; the caps pulled in to its edges.
+    try testing.expectEqual(@as(f64, 0), parts[0].x);
+    try testing.expectEqual(@as(f64, 0), parts[0].y);
+    try testing.expectApproxEqAbs(@as(f64, 2.4), parts[1].x, 1e-9); // 2.0 + 0.4, abutting
+    try testing.expectApproxEqAbs(@as(f64, 2.4), parts[2].y, 1e-9);
+}
+
 // spec: placement/optimizer - rotates footprint-local offsets in right-angle steps matching the page
 test "rotateLocal applies exact right-angle turns" {
     const r90 = rotateLocal(1, 0, 90);
@@ -1936,25 +2577,27 @@ test "rotateLocal applies exact right-angle turns" {
 }
 
 // spec: placement/optimizer - rotation refine picks the orientation that shortens the decoupling loop
-test "optimizeRotations flips a cap to face its hub power and ground pads" {
-    // Hub U1 at origin: power pad on the left (-0.5,-1), ground pad on the
-    // right (0.5,-1). Cap C1 just below at (0,-1.6) with its power pad on the
-    // right (+0.5) and ground on the left (-0.5) — *crossed* at rot 0. A 180°
-    // turn uncrosses them so each cap pad sits directly under its hub pad,
-    // collapsing the edge-to-edge legs (≈1.27 mm → ≈0.4 mm).
+test "optimizeRotations flips a cap to face both its pinned power and ground pins" {
+    // Hub U1 at origin: supply pad left (-0.5,-1), ground pad right (0.5,-1). Cap
+    // C1 below at (0,-2) with its pads CROSSED at rot 0 (power right, ground left).
+    // A 180° turn uncrosses them so the power pad faces the supply pin AND the
+    // ground pad faces the ground pin — minimizing the FULL loop (both legs + cap
+    // span + the two GND vias), not just the power leg.
     var parts = [_]Part{
         .{ .ref_des = "U1", .kind = .hub, .hw = 1.2, .hh = 0.8, .pads = &.{}, .fallback = false, .x = 0, .y = 0 },
-        .{ .ref_des = "C1", .kind = .passive, .hw = 0.8, .hh = 0.4, .pads = &.{}, .fallback = false, .x = 0, .y = -1.6 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.8, .hh = 0.4, .pads = &.{}, .fallback = false, .x = 0, .y = -2 },
     };
     const hub_pwr = [_]PadRect{.{ .x = -0.5, .y = -1, .w = 0.4, .h = 0.4 }};
     const hub_gnd = [_]PadRect{.{ .x = 0.5, .y = -1, .w = 0.4, .h = 0.4 }};
     const loops = [_]Loop{.{
         .cap = 1,
         .hub = 0,
-        .cap_pwr = .{ .x = 0.5, .y = 0, .w = 0.4, .h = 0.4 },
-        .cap_gnd = .{ .x = -0.5, .y = 0, .w = 0.4, .h = 0.4 },
+        .cap_pwr = .{ .x = 0.5, .y = -0.5, .w = 0.4, .h = 0.4 },
+        .cap_gnd = .{ .x = -0.5, .y = -0.5, .w = 0.4, .h = 0.4 },
         .hub_pwr = &hub_pwr,
+        .hub_pwr_pin = .{ .x = -0.5, .y = -1, .w = 0.4, .h = 0.4 },
         .hub_gnd = &hub_gnd,
+        .hub_gnd_pin = .{ .x = 0.5, .y = -1, .w = 0.4, .h = 0.4 },
     }};
 
     var idx = std.StringHashMap(usize).init(testing.allocator);
@@ -1965,8 +2608,8 @@ test "optimizeRotations flips a cap to face its hub power and ground pads" {
     const before = scoreLayout(&parts, &idx, &.{}, &loops).loop_mm;
     optimizeRotations(&parts, &idx, &.{}, &loops, .{});
     const after = scoreLayout(&parts, &idx, &.{}, &loops).loop_mm;
-    try testing.expectEqual(@as(f64, 180), parts[1].rot); // uncrossed orientation
-    try testing.expect(after < before - 0.3); // and it shortened the loop
+    try testing.expectEqual(@as(f64, 180), parts[1].rot); // uncrossed — both pads face their pins
+    try testing.expect(after < before - 0.3); // and it shortened the full loop
 }
 
 // spec: placement/optimizer - pairs matched halves across an IN/OUT mirror

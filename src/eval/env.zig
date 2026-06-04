@@ -221,6 +221,29 @@ pub const CriticalIc = struct {
     mpn: []const u8 = "",
 };
 
+/// One `(placement-order <hub> …)` declaration: the priority order in which the
+/// passives around `hub` should claim the space next to it (first listed =
+/// highest priority). Consumed by the PCB auto-placer to set each decoupling
+/// loop's tightness weight, the pinned IC pad its loop targets, and the final
+/// compaction docking order. Entries are either a bare ref-des (priority by
+/// position) or `(near <pin> <ref>)` (which *also* pins the exact hub pad).
+pub const PlacementOrder = struct {
+    /// Hub ref-des the passives are ordered around (e.g. "U1").
+    hub: []const u8,
+    /// Passives in priority order — index 0 is the highest priority.
+    entries: []const PlacementEntry,
+};
+
+/// One entry in a `(placement-order …)`: the passive's ref-des and, optionally,
+/// the specific hub pin its decoupling loop should target (from the
+/// `(near <pin> <ref>)` long form).
+pub const PlacementEntry = struct {
+    ref: []const u8,
+    /// Explicit hub pad number to pin the loop's power leg to; empty ⇒ the
+    /// placer defaults to the lowest-numbered true-supply pad on the rail.
+    pin: []const u8 = "",
+};
+
 /// A named virtual pin on a placeholder `(stub …)`. A stub declares its
 /// interface by *signal* (a logical name on a net) rather than by physical
 /// pin number — the placeholder has no real pinout yet. `class` is a diagram
@@ -1061,6 +1084,11 @@ pub const DesignBlock = struct {
     /// the diagram's `computeFreeLayout` resolves them into a free-floating view.
     /// Empty `placements` ⇒ no layout declared, so the category-column views stand.
     layout: LayoutSpec = .{},
+    /// Declared component placement priority from top-level `(placement-order …)`
+    /// forms — one per hub. Orders how passives claim the space next to each hub
+    /// and (via `(near <pin> …)`) pins which IC pad a decoupling loop targets.
+    /// Empty ⇒ the auto-placer uses value-based weighting + geometric pin choice.
+    placement_order: []const PlacementOrder = &.{},
 };
 
 /// Assertion result.
