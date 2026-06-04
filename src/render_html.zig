@@ -1596,6 +1596,9 @@ fn writeScripts(
     // CodeMirror (vendored) must load before schematic_viewer.js so the
     // global is available when the source editor initialises.
     try w.writeAll("<script src=\"/static/codemirror.bundle.js\"></script>");
+    // Shared footprint engine must load before schematic_viewer.js (its sidebar
+    // footprint preview calls FP.drawFootprint).
+    try w.writeAll("<script src=\"/static/footprint_svg.js\"></script>");
     try w.writeAll("<script src=\"/static/schematic_viewer.js\"></script>");
 }
 

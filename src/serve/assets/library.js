@@ -50,21 +50,22 @@
   });
 
   // Footprint preview: click the footprint tag (component cards) or the
-  // "show preview" chip (standalone footprint cards) to expand an inline SVG
-  // drawn by /api/footprint/:name from lib/footprints/<fp>.sexp. The SVG is
-  // fetched once per tag, then cached in the panel for subsequent toggles.
+  // "show preview" chip (standalone footprint cards) to expand an inline SVG.
+  // /api/footprint/:name returns a JSON description (lib/footprints/<fp>.sexp);
+  // the shared FP engine draws it. Fetched once per tag, cached in the panel.
   function loadFootprint(box,fp){
     if(box.dataset.loaded==='1')return;
     box.dataset.loaded='1';
     box.innerHTML='<span class="fp-empty">Loading preview…</span>';
     fetch('/api/footprint/'+encodeURIComponent(fp)).then(function(r){
       if(!r.ok)throw new Error('no preview');
-      return r.text();
-    }).then(function(svg){
-      if(svg.indexOf('<svg')===-1)throw new Error('not svg');
-      box.innerHTML=svg;
-      var s=box.querySelector('svg');
-      if(s){s.style.width='100%';s.style.height='auto';s.style.maxHeight='240px';s.style.display='block';}
+      return r.json();
+    }).then(function(data){
+      if(!data||!data.pads)throw new Error('empty');
+      var s=FP.el('svg',{});
+      FP.drawFootprint(s,data);
+      s.style.width='100%';s.style.height='auto';s.style.maxHeight='240px';s.style.display='block';s.style.borderRadius='4px';
+      box.innerHTML='';box.appendChild(s);
     }).catch(function(){
       box.innerHTML='<span class="fp-empty">No footprint preview available.</span>';
     });

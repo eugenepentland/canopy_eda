@@ -660,7 +660,7 @@ src/serve/edit.zig::swapPinsApi fn
 src/serve/edit.zig::swapPinsCore fn
 src/serve/edit.zig::writeDesignCore fn
 src/serve/footprint_preview.zig::HandlerError value
-src/serve/footprint_preview.zig::footprintSvgApi fn
+src/serve/footprint_preview.zig::footprintApi fn
 src/serve/history.zig::HistoryError value
 src/serve/history.zig::SnapshotInfo struct_
 src/serve/history.zig::listSnapshots fn

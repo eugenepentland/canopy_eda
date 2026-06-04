@@ -249,7 +249,7 @@ pub fn serve(
 
     // Upload
     router.post("/api/upload-package", upload_package.uploadPackageApi, .{});
-    router.get("/api/footprint/:name", footprint_preview.footprintSvgApi, .{});
+    router.get("/api/footprint/:name", footprint_preview.footprintApi, .{});
     router.post("/api/upload-zip", upload.uploadZipApi, .{});
     // Fetch a part's footprint + datasheet from Component Search Engine.
     router.post("/api/cse-fetch", library.cseFetchApi, .{});

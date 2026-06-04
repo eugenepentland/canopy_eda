@@ -18,19 +18,11 @@ const FAR_AWAY: f64 = 999;
 const SVG_BBOX_PAD: f64 = 0.5;
 // A `(rect x0 y0 x1 y1)` form is the head atom plus four coordinates.
 const RECT_FORM_ITEMS: usize = 5;
+// JSON `[a,b,c,d]` of four 3-decimal coords — rects + line segments.
+const JSON_F4 = "[{d:.3},{d:.3},{d:.3},{d:.3}]";
 
-// Layer palette: pads gold, silkscreen dim grey, fab (body outline) blue-grey,
-// courtyard a dashed magenta boundary — mirrors KiCad's layer colours so a
-// preview reads the same as the board editor.
-const COLOR_PAD = "#c4a000";
-const COLOR_SILK = "#888";
-const COLOR_FAB = "#5b7089";
-const COLOR_COURTYARD = "#9d5fb0";
-// Pad-number label: dark text on the gold pad, sized to ~0.62× the pad's
-// short side for a single character and shrunk for longer ids (e.g. "A12").
-const COLOR_PAD_LABEL = "#161b22";
-const PAD_LABEL_FONT_FRAC: f64 = 0.62;
-const PAD_LABEL_MULTI: f64 = 1.5;
+// The layer palette + pad-label sizing now live in the shared client renderer
+// (`assets/footprint_svg.js`); this module only describes the geometry as JSON.
 
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
@@ -66,11 +58,12 @@ const Shapes = struct {
     }
 };
 
-/// GET /api/footprint/:name — render a `lib/footprints/<name>.sexp`
-/// as an inline SVG (pads, courtyard, silkscreen + fabrication geometry) for
-/// the library page's footprint-preview panel and the schematic sidebar's
-/// component view.
-pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+/// GET /api/footprint/:name — return a `lib/footprints/<name>.sexp` as a JSON
+/// footprint description (pads incl. custom polygons, courtyard, silkscreen +
+/// fabrication geometry). The shared client renderer `/static/footprint_svg.js`
+/// draws it — one engine for the library preview, the schematic sidebar, and
+/// the PCB-layout page — so a pad-shape change lands in exactly one place.
+pub fn footprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = HTTP_NOT_FOUND;
         return;
@@ -111,10 +104,10 @@ pub fn footprintSvgApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     }
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    try emitSvg(buf.writer(ctx.allocator), shapes);
+    try emitFootprintJson(buf.writer(ctx.allocator), shapes);
 
     res.body = buf.toOwnedSlice(ctx.allocator) catch "";
-    res.content_type = .HTML;
+    res.content_type = .JSON;
 }
 
 /// Walk the footprint's top-level forms into `shapes`: pads, `(courtyard …)`,
@@ -296,126 +289,109 @@ fn grow(b: *BBox, x: f64, y: f64) void {
     if (y > b.max_y) b.max_y = y;
 }
 
-fn layerColor(l: Layer) []const u8 {
-    return switch (l) {
-        .silk => COLOR_SILK,
-        .fab => COLOR_FAB,
-    };
-}
-
-/// Emit the SVG: courtyard (dashed) first, then fab + silkscreen geometry,
-/// with pads on top so copper reads clearly over the outlines.
-fn emitSvg(w: anytype, shapes: Shapes) HandlerError!void {
+/// Emit the footprint as a JSON description for the shared client renderer:
+/// `{bbox, pads, silk, fab, courtyard}`. The renderer draws courtyard (dashed)
+/// behind fab + silkscreen, with pads (polygon/circle/oval/rect + id label) on
+/// top — see `/static/footprint_svg.js`.
+fn emitFootprintJson(w: anytype, shapes: Shapes) HandlerError!void {
     var b = computeBBox(shapes);
     b.min_x -= SVG_BBOX_PAD;
     b.min_y -= SVG_BBOX_PAD;
     b.max_x += SVG_BBOX_PAD;
     b.max_y += SVG_BBOX_PAD;
 
-    try w.print(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" " ++
-            "viewBox=\"{d:.2} {d:.2} {d:.2} {d:.2}\" " ++
-            "style=\"background:#161b22;border-radius:4px;\">",
-        .{ b.min_x, b.min_y, b.max_x - b.min_x, b.max_y - b.min_y },
-    );
+    try w.print("{{\"bbox\":{{\"x\":{d:.3},\"y\":{d:.3},\"w\":{d:.3},\"h\":{d:.3}}}", .{
+        b.min_x, b.min_y, b.max_x - b.min_x, b.max_y - b.min_y,
+    });
 
-    // Courtyard boundary (dashed) sits behind the rest.
-    for (shapes.court_rects.items) |r| {
-        try w.print(
-            "<rect x=\"{d:.3}\" y=\"{d:.3}\" width=\"{d:.3}\" height=\"{d:.3}\" fill=\"none\" " ++
-                "stroke=\"" ++ COLOR_COURTYARD ++ "\" stroke-width=\"0.05\" stroke-dasharray=\"0.2 0.12\"/>",
-            .{ @min(r.x0, r.x1), @min(r.y0, r.y1), @abs(r.x1 - r.x0), @abs(r.y1 - r.y0) },
-        );
+    try w.writeAll(",\"pads\":[");
+    for (shapes.pads.items, 0..) |p, i| {
+        if (i != 0) try w.writeAll(",");
+        try w.writeAll("{\"id\":");
+        try writeJsonStr(w, p.id);
+        try w.print(",\"x\":{d:.3},\"y\":{d:.3},\"w\":{d:.3},\"h\":{d:.3},\"shape\":", .{ p.x, p.y, p.w, p.h });
+        try writeJsonStr(w, p.shape);
+        if (p.pts) |pts| {
+            try w.writeAll(",\"poly\":");
+            try writePtsJson(w, pts);
+        }
+        try w.writeAll("}");
     }
-    for (shapes.court_circs.items) |c| {
-        try w.print(
-            "<circle cx=\"{d:.3}\" cy=\"{d:.3}\" r=\"{d:.3}\" fill=\"none\" " ++
-                "stroke=\"" ++ COLOR_COURTYARD ++ "\" stroke-width=\"0.05\" stroke-dasharray=\"0.2 0.12\"/>",
-            .{ c.cx, c.cy, c.r },
-        );
+    try w.writeAll("]");
+
+    try w.writeAll(",\"silk\":");
+    try emitLayerJson(w, shapes, .silk);
+    try w.writeAll(",\"fab\":");
+    try emitLayerJson(w, shapes, .fab);
+
+    try w.writeAll(",\"courtyard\":{\"rects\":[");
+    for (shapes.court_rects.items, 0..) |r, i| {
+        if (i != 0) try w.writeAll(",");
+        try w.print(JSON_F4, .{ r.x0, r.y0, r.x1, r.y1 });
     }
-
-    // Fab behind silk; both behind pads.
-    for ([_]Layer{ .fab, .silk }) |layer| {
-        for (shapes.polys.items) |poly| {
-            if (poly.layer != layer) continue;
-            try emitPoly(w, poly);
-        }
-        for (shapes.rects.items) |r| {
-            if (r.layer != layer) continue;
-            try w.print(
-                "<rect x=\"{d:.3}\" y=\"{d:.3}\" width=\"{d:.3}\" height=\"{d:.3}\" fill=\"none\" stroke=\"{s}\" stroke-width=\"0.08\"/>",
-                .{ @min(r.x0, r.x1), @min(r.y0, r.y1), @abs(r.x1 - r.x0), @abs(r.y1 - r.y0), layerColor(layer) },
-            );
-        }
-        for (shapes.circs.items) |c| {
-            if (c.layer != layer) continue;
-            try w.print(
-                "<circle cx=\"{d:.3}\" cy=\"{d:.3}\" r=\"{d:.3}\" fill=\"none\" stroke=\"{s}\" stroke-width=\"0.08\"/>",
-                .{ c.cx, c.cy, c.r, layerColor(layer) },
-            );
-        }
-        for (shapes.segs.items) |s| {
-            if (s.layer != layer) continue;
-            try w.print(
-                "<line x1=\"{d:.3}\" y1=\"{d:.3}\" x2=\"{d:.3}\" y2=\"{d:.3}\" stroke=\"{s}\" stroke-width=\"0.08\" stroke-linecap=\"round\"/>",
-                .{ s.x1, s.y1, s.x2, s.y2, layerColor(layer) },
-            );
-        }
+    try w.writeAll("],\"circles\":[");
+    for (shapes.court_circs.items, 0..) |c, i| {
+        if (i != 0) try w.writeAll(",");
+        try w.print("[{d:.3},{d:.3},{d:.3}]", .{ c.cx, c.cy, c.r });
     }
-
-    for (shapes.pads.items) |p| try emitPad(w, p);
-
-    try w.writeAll("</svg>");
+    try w.writeAll("]}}");
 }
 
-fn emitPoly(w: anytype, poly: Poly) HandlerError!void {
-    const color = layerColor(poly.layer);
-    try w.print("<polygon points=\"", .{});
-    for (poly.pts) |pt| try w.print("{d:.3},{d:.3} ", .{ pt.x, pt.y });
-    try w.print("\" fill=\"{s}\" fill-opacity=\"0.55\" stroke=\"{s}\" stroke-width=\"0.04\"/>", .{ color, color });
+/// Emit one layer's geometry as `{lines:[[x1,y1,x2,y2]…], circles:[[cx,cy,r]…],
+/// rects:[[x0,y0,x1,y1]…], polys:[[[x,y]…]…]}`.
+fn emitLayerJson(w: anytype, shapes: Shapes, layer: Layer) HandlerError!void {
+    try w.writeAll("{\"lines\":[");
+    var first = true;
+    for (shapes.segs.items) |s| {
+        if (s.layer != layer) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.print(JSON_F4, .{ s.x1, s.y1, s.x2, s.y2 });
+    }
+    try w.writeAll("],\"circles\":[");
+    first = true;
+    for (shapes.circs.items) |c| {
+        if (c.layer != layer) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.print("[{d:.3},{d:.3},{d:.3}]", .{ c.cx, c.cy, c.r });
+    }
+    try w.writeAll("],\"rects\":[");
+    first = true;
+    for (shapes.rects.items) |r| {
+        if (r.layer != layer) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.print(JSON_F4, .{ r.x0, r.y0, r.x1, r.y1 });
+    }
+    try w.writeAll("],\"polys\":[");
+    first = true;
+    for (shapes.polys.items) |poly| {
+        if (poly.layer != layer) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try writePtsJson(w, poly.pts);
+    }
+    try w.writeAll("]}");
 }
 
-fn emitPad(w: anytype, p: Pad) HandlerError!void {
-    if (p.pts) |pts| {
-        // Custom pad: draw the real copper outline rather than its bbox.
-        try w.writeAll("<polygon points=\"");
-        for (pts) |pt| try w.print("{d:.3},{d:.3} ", .{ pt.x, pt.y });
-        try w.print("\" fill=\"" ++ COLOR_PAD ++ "\"/>", .{});
-        try emitPadLabel(w, p);
-        return;
+/// Emit a point slice as `[[x,y],[x,y],…]`.
+fn writePtsJson(w: anytype, pts: []const Point) HandlerError!void {
+    try w.writeAll("[");
+    for (pts, 0..) |pt, i| {
+        if (i != 0) try w.writeAll(",");
+        try w.print("[{d:.3},{d:.3}]", .{ pt.x, pt.y });
     }
-    if (std.mem.eql(u8, p.shape, "circle")) {
-        try w.print("<circle cx=\"{d:.3}\" cy=\"{d:.3}\" r=\"{d:.3}\" fill=\"" ++ COLOR_PAD ++ "\"/>", .{ p.x, p.y, @min(p.w, p.h) / 2 });
-    } else if (std.mem.eql(u8, p.shape, "oval")) {
-        const rx = p.w / 2;
-        const ry = p.h / 2;
-        try w.print(
-            "<rect x=\"{d:.3}\" y=\"{d:.3}\" width=\"{d:.3}\" height=\"{d:.3}\" rx=\"{d:.3}\" fill=\"" ++ COLOR_PAD ++ "\"/>",
-            .{ p.x - rx, p.y - ry, p.w, p.h, @min(rx, ry) },
-        );
-    } else {
-        try w.print(
-            "<rect x=\"{d:.3}\" y=\"{d:.3}\" width=\"{d:.3}\" height=\"{d:.3}\" rx=\"0.03\" fill=\"" ++ COLOR_PAD ++ "\"/>",
-            .{ p.x - p.w / 2, p.y - p.h / 2, p.w, p.h },
-        );
-    }
-    try emitPadLabel(w, p);
+    try w.writeAll("]");
 }
 
-/// Draw the pad's id centred in the pad, scaled to the pad's short side so it
-/// stays inside the copper. Multi-character ids (BGA balls like "A12") shrink
-/// so they don't overflow.
-fn emitPadLabel(w: anytype, p: Pad) HandlerError!void {
-    if (p.id.len == 0) return;
-    const base = @min(p.w, p.h);
-    if (base <= 0) return;
-    const len_f: f64 = @floatFromInt(p.id.len);
-    var fs = base * PAD_LABEL_FONT_FRAC;
-    if (len_f > 1) fs = fs * PAD_LABEL_MULTI / len_f;
-    try w.print(
-        "<text x=\"{d:.3}\" y=\"{d:.3}\" font-size=\"{d:.3}\" fill=\"" ++ COLOR_PAD_LABEL ++ "\" " ++
-            "text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"sans-serif\">{s}</text>",
-        .{ p.x, p.y, fs, p.id },
-    );
+/// Write `s` as a minimally-escaped JSON string (quotes + backslashes).
+fn writeJsonStr(w: anytype, s: []const u8) HandlerError!void {
+    try w.writeByte('"');
+    for (s) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        else => try w.writeByte(c),
+    };
+    try w.writeByte('"');
 }

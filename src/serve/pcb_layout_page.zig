@@ -239,6 +239,8 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     );
     if (!embed) try w.writeAll(COURTYARD_MODAL);
     try writePcbData(w, ctx.allocator, placement, shown, view, name, layouts, routed, ro.params.clearance, violations, embed);
+    // Shared footprint engine (FP.padShape) must load before BOARD_JS runs.
+    try w.writeAll("<script src=\"/static/footprint_svg.js\"></script>");
     try w.writeAll(BOARD_JS);
     try w.writeAll("</main></div></body></html>");
 
@@ -1842,7 +1844,18 @@ fn writePcbData(
         try w.writeAll(",\"pads\":[");
         for (pt.pads, 0..) |pad, j| {
             if (j > 0) try w.writeAll(",");
-            try w.print("{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}", .{ pad.x, pad.y, pad.w, pad.h });
+            try w.print("{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d},\"shape\":", .{ pad.x, pad.y, pad.w, pad.h });
+            try writeJsonStr(w, pad.shape);
+            // Custom pad: the real copper outline so the shared FP engine draws
+            // the polygon, not the bounding box.
+            if (pad.poly.len >= 3) {
+                try w.writeAll(",\"poly\":[");
+                for (pad.poly, 0..) |pp, k| {
+                    if (k > 0) try w.writeAll(",");
+                    try w.print("[{d},{d}]", .{ pp[0], pp[1] });
+                }
+                try w.writeAll("]");
+            }
             const pkey = try std.fmt.allocPrint(alloc, "{s}|{s}", .{ pt.ref_des, pad.number });
             if (pin_net.get(pkey)) |nk| {
                 try w.writeAll(",\"net\":");
@@ -2335,11 +2348,8 @@ const BOARD_JS =
     \\  p.silk.c.forEach(function(c){body.appendChild(el("circle",{cx:(c[0]*S).toFixed(1),cy:(c[1]*S).toFixed(1),
     \\    r:Math.max(c[2]*S,1).toFixed(1),fill:"none",stroke:"#8b949e","stroke-width":0.8}));});}
     \\ p.pads.forEach(function(pad){
-    \\   var pw=Math.max(pad.w*S,1.5),ph=Math.max(pad.h*S,1.5);
-    \\   var a={"class":"pad",x:(pad.x*S-pw/2).toFixed(1),y:(pad.y*S-ph/2).toFixed(1),
-    \\     width:pw.toFixed(1),height:ph.toFixed(1),rx:0.5,fill:"#b08d57"};
-    \\   if(pad.net)a["data-net"]=pad.net;
-    \\   body.appendChild(el("rect",a));});
+    \\   var at={fill:"#b08d57"}; if(pad.net)at["data-net"]=pad.net;
+    \\   body.appendChild(FP.padShape(pad,{scale:S,minPx:1.5,cls:"pad",attrs:at}));});
     \\ g.appendChild(body);
     \\ var t=el("text",{"class":"pcb-ref",x:0,y:(-p.hh*S-2).toFixed(1),fill:p.kind=="hub"?"#58a6ff":"#8b949e"});
     \\ t.textContent=p.ref; g.appendChild(t);
@@ -2582,11 +2592,10 @@ const BOARD_JS =
     \\ hw=Math.max(hw,Math.abs(pd.x)+pd.w/2);hh=Math.max(hh,Math.abs(pd.y)+pd.h/2);});return {hw:hw,hh:hh};}
     \\function courtDraw(p,hw,hh){var s=document.getElementById("court-svg");while(s.firstChild)s.removeChild(s.firstChild);
     \\ var VB=260,VH=220,pd=28,sc=Math.min((VB-pd)/(2*hw),(VH-pd)/(2*hh)),cx=VB/2,cy=VH/2;
-    \\ s.appendChild(el("rect",{x:(cx-hw*sc).toFixed(1),y:(cy-hh*sc).toFixed(1),width:(2*hw*sc).toFixed(1),height:(2*hh*sc).toFixed(1),
+    \\ var g=el("g",{transform:"translate("+cx+","+cy+")"});s.appendChild(g);
+    \\ g.appendChild(el("rect",{x:(-hw*sc).toFixed(1),y:(-hh*sc).toFixed(1),width:(2*hw*sc).toFixed(1),height:(2*hh*sc).toFixed(1),
     \\   rx:3,fill:"none",stroke:p.kind=="hub"?"#58a6ff":"#8b949e","stroke-width":1.4,"stroke-dasharray":"5 3"}));
-    \\ p.pads.forEach(function(pad){var pw=Math.max(pad.w*sc,2),ph=Math.max(pad.h*sc,2);
-    \\   s.appendChild(el("rect",{x:(cx+pad.x*sc-pw/2).toFixed(1),y:(cy+pad.y*sc-ph/2).toFixed(1),
-    \\     width:pw.toFixed(1),height:ph.toFixed(1),rx:1,fill:"#b08d57"}));});}
+    \\ p.pads.forEach(function(pad){g.appendChild(FP.padShape(pad,{scale:sc,minPx:2,attrs:{fill:"#b08d57"}}));});}
     \\function courtBox(){var c=courtState;return c.mode=="offset"?{hw:gceil(c.ext.hw+c.offset),hh:gceil(c.ext.hh+c.offset)}:{hw:c.hw,hh:c.hh};}
     \\function courtRefresh(){if(!courtState)return;var b=courtBox();courtDraw(courtState.p,b.hw,b.hh);
     \\ document.getElementById("court-full").textContent="full "+(2*b.hw).toFixed(2)+" × "+(2*b.hh).toFixed(2)+" mm";}

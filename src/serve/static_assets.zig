@@ -9,6 +9,9 @@ const account_page_css = @embedFile("assets/account_page.css");
 const pdf_viewer_js = @embedFile("assets/pdf_viewer.js");
 const pdf_viewer_css = @embedFile("assets/pdf_viewer.css");
 const library_js = @embedFile("assets/library.js");
+// Shared footprint-drawing engine — one renderer for the library preview, the
+// schematic sidebar, and the PCB-layout page (draws from /api/footprint JSON).
+const footprint_svg_js = @embedFile("assets/footprint_svg.js");
 const auth_login_js = @embedFile("assets/auth_login.js");
 const auth_setup_js = @embedFile("assets/auth_setup.js");
 const auth_invite_js = @embedFile("assets/auth_invite.js");
@@ -61,6 +64,7 @@ const REGISTRY = [_]Asset{
     .{ .name = "pdf_viewer.js", .body = pdf_viewer_js, .content_type = .JS },
     .{ .name = "pdf_viewer.css", .body = pdf_viewer_css, .content_type = .CSS },
     .{ .name = "library.js", .body = library_js, .content_type = .JS },
+    .{ .name = "footprint_svg.js", .body = footprint_svg_js, .content_type = .JS },
     .{ .name = "auth_login.js", .body = auth_login_js, .content_type = .JS },
     .{ .name = "auth_setup.js", .body = auth_setup_js, .content_type = .JS },
     .{ .name = "auth_invite.js", .body = auth_invite_js, .content_type = .JS },
