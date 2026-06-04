@@ -1,5 +1,6 @@
 # guardian-snapshot v1
 src/asserted_fns.zig::buildMap fn
+src/bench_layout.zig::main fn
 src/bom.zig::BomEntry struct_
 src/bom.zig::BomError value
 src/bom.zig::FlatInfo struct_

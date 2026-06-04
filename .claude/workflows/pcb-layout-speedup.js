@@ -1,16 +1,19 @@
 // pcb-layout-speedup — head-to-head shootout of single-threaded speedups for the
 // PCB-layout placement optimizer (src/placement/optimizer.zig).
 //
-// Each variant agent works in its OWN git worktree (isolation: 'worktree') so
-// the parallel edits to the same hot file never collide. Every agent:
+// Each variant agent works in its OWN pre-made git worktree (one per variant,
+// passed as an absolute path) so the parallel edits to the same hot file never
+// collide. The caller creates the worktrees from the exact tree to optimize
+// (which already carries the slim bench harness); the agents only edit + build
+// + verify inside their assigned worktree. Every agent:
 //   1. implements ONE optimization technique in optimizer.zig (+ helper files)
 //   2. builds the SLIM bench exe  (zig build bench-layout -Doptimize=ReleaseFast)
-//      — a separate target that pulls in only the optimizer + evaluator (no
+//      — a separate target pulling in only the optimizer + evaluator (no
 //      server/render stack, no Guardian), so it rebuilds in ~25s, not ~2m40s.
 //   3. runs the bench on a few designs and checks the grid-quantized pose
 //      CHECKSUM against the baseline — the correctness gate. A pure perf
-//      refactor MUST reproduce the baseline layout bit-for-bit at grid
-//      resolution; a divergent checksum means the variant changed the result.
+//      refactor MUST reproduce the baseline layout at grid resolution; a
+//      divergent checksum means the variant changed the result.
 //   4. deposits its binary + a git patch in OUT_DIR for the (separate,
 //      contention-free) authoritative timing sweep the caller runs afterward.
 //
@@ -19,19 +22,19 @@
 // BUILD + CORRECTNESS; the caller times each deposited binary serially on a
 // quiet machine. Agents are told to ignore their own timings.
 //
-// Invoke:
+// Invoke (the caller must have created the spd-<variant> worktrees first):
 //   Workflow({ scriptPath: ".../pcb-layout-speedup.js" })                 // defaults below
 //   Workflow({ scriptPath: "...", args: { variants:["soa-relax","fastmath"] } })  // subset
 //
 // Phases:
-//   1 Implement  one agent per variant, in a worktree — edit, build, verify checksum,
+//   1 Implement  one agent per variant, in its worktree — edit, build, verify checksum,
 //                deposit binary+patch.                                          [parallel]
 
 export const meta = {
   name: 'pcb-layout-speedup',
-  description: 'Implement & verify single-threaded SoA/SIMD/algorithmic speedups for the PCB-layout optimizer in parallel worktrees; caller times the deposited binaries serially',
+  description: 'Implement & verify single-threaded SoA/SIMD/algorithmic speedups for the PCB-layout optimizer in parallel pre-made worktrees; caller times the deposited binaries serially',
   phases: [
-    { title: 'Implement', detail: 'one agent per speedup variant, isolated worktree: edit optimizer.zig, build slim bench, verify identical layout checksum, deposit binary+patch' },
+    { title: 'Implement', detail: 'one agent per speedup variant, assigned worktree: edit optimizer.zig, build slim bench, verify identical layout checksum, deposit binary+patch' },
   ],
 }
 
@@ -41,6 +44,8 @@ if (typeof _a === 'string') { try { const p = JSON.parse(_a); if (p && typeof p 
 const PROJECT_DIR = (_a && _a.projectDir) || '/home/epentland/ai/canopy/eda/projects/designs'
 const GUARDIAN_PATH = (_a && _a.guardianPath) || '/home/epentland/ai/canopy/guardian-zig'
 const OUT_DIR = (_a && _a.outDir) || '/tmp/pcb-bench'
+const WT_BASE = (_a && _a.wtBase) || '/home/epentland/ai/canopy/eda/.claude/worktrees'
+const WT_HEAD = (_a && _a.wtHead) || '7fa7868' // expected HEAD of each pre-made worktree
 // Fast designs (each <1s) that exercise both solve paths, with their baseline
 // grid-quantized pose checksums. Agents verify their build reproduces these.
 const CORRECTNESS = (_a && Array.isArray(_a.correctness) && _a.correctness.length) ? _a.correctness : [
@@ -58,12 +63,25 @@ const CORR_TABLE = CORRECTNESS.map((c) => `      ${c.name} = ${c.checksum}`).joi
 
 // ── shared preamble embedded in EVERY agent ──────────────────────────
 const PREAMBLE = `
-You are optimizing a single Zig file in an ISOLATED git worktree (your CWD is the
-worktree root). The project is an S-expression EDA tool; the file under test is
-the PCB auto-placement optimizer.
+You are optimizing a single Zig file. The project is an S-expression EDA tool; the
+file under test is the PCB auto-placement optimizer.
 
 GOAL: make \`pub fn solve\` in src/placement/optimizer.zig run FASTER, single-threaded,
 WITHOUT changing the placement it produces. Same board out, fewer cycles.
+
+═══ YOUR WORKSPACE (work here and ONLY here) ═══
+A clean git worktree has been prepared for you — a checkout of the exact tree to optimize,
+with the benchmark harness already present:
+  __WT__
+RULES:
+  • Begin EVERY shell command with:  cd __WT__ &&   (so a build never touches another worktree)
+  • Edit files by ABSOLUTE path under __WT__  (e.g. __WT__/src/placement/optimizer.zig)
+  • Do NOT edit anything outside __WT__. Do NOT touch sibling spd-* worktrees, build.zig,
+    src/bench_layout.zig, SPEC.md, or anything under ${PROJECT_DIR}.
+FIRST, sanity-check the workspace and STOP if it's wrong:
+  cd __WT__ && git rev-parse --short HEAD            # must print ${WT_HEAD}
+  test -f __WT__/src/bench_layout.zig && grep -q bench-layout __WT__/build.zig && echo WORKSPACE_OK
+If you don't see ${WT_HEAD} and WORKSPACE_OK, report build_ok=false with the reason and stop.
 
 ═══ THE HOT PATH (by function name — line numbers drift, don't trust them) ═══
 \`solve\` → \`optimize\` (or \`rerankSolve\` for tiny boards) → per multi-start (STARTS=48)
@@ -87,33 +105,31 @@ maxParts = 4096 (stack arrays are sized to it; keep using fixed [maxParts] stack
 do NOT heap-allocate per iteration). f64 throughout.
 
 ═══ BUILD (fast, ~25s, NO Guardian) ═══
-  zig build bench-layout -Doptimize=ReleaseFast
-The binary lands at ./zig-out/bin/bench-layout. ALWAYS use ReleaseFast (Debug timings are
+  cd __WT__ && zig build bench-layout -Doptimize=ReleaseFast
+The binary lands at __WT__/zig-out/bin/bench-layout. ALWAYS ReleaseFast (Debug timings are
 meaningless). If the build fails configuring the 'guardian' dependency / can't find
-\`../guardian-zig\`, run this once from the worktree root then rebuild:
-  ln -s ${GUARDIAN_PATH} ../guardian-zig 2>/dev/null; true
-Do NOT edit build.zig, src/bench_layout.zig, SPEC.md, or anything under ${PROJECT_DIR}.
+\`../guardian-zig\`, run once then rebuild:
+  [ -e __WT__/../guardian-zig ] || ln -s ${GUARDIAN_PATH} __WT__/../guardian-zig
 
-═══ CORRECTNESS GATE (this is what determines if your variant is usable) ═══
-Run:
-  ./zig-out/bin/bench-layout --project-dir ${PROJECT_DIR} --reps 1 ${CORR_NAMES}
-Each line prints \`checksum=<hex>\`. It is a hash of every part's grid-snapped (x,y,rot),
-so it is IDENTICAL whenever the final layout is identical — robust to sub-ULP float drift,
-sensitive to any real move. Your checksums MUST equal the baseline:
+═══ CORRECTNESS GATE (decides if your variant is usable) ═══
+  cd __WT__ && ./zig-out/bin/bench-layout --project-dir ${PROJECT_DIR} --reps 1 ${CORR_NAMES}
+Each line prints \`checksum=<hex>\` — a hash of every part's grid-snapped (x,y,rot), identical
+whenever the final layout is identical (robust to sub-ULP float drift, sensitive to any real
+move). Your checksums MUST equal the baseline:
 ${CORR_TABLE}
-If any differ, your change altered the result — DEBUG AND FIX until they match (re-read the
-math you touched; a reordered floating-point accumulation that feeds back into positions
-will compound over 600 iterations and move parts). Bit-identical force accumulation is the
-safe target. (The 'fastmath' variant is the ONE exception — see its brief.)
+If any differ, your change altered the result — DEBUG AND FIX until they match (a reordered
+floating-point accumulation that feeds back into positions compounds over 600 iterations and
+moves parts; bit-identical force accumulation is the safe target). The 'fastmath' variant is
+the ONE exception — see its brief.
 
-IGNORE the median_ms/min_ms your run prints — they are corrupted by other agents building
-in parallel. The caller measures real timings later, serially. Your deliverable is a
-binary that BUILDS and reproduces the baseline checksums.
+IGNORE the median_ms/min_ms your run prints — they're corrupted by other agents building in
+parallel. The caller measures real timings later, serially. Your deliverable is a binary that
+BUILDS and reproduces the baseline checksums.
 
 ═══ DELIVERABLES (do these before you finish — the shootout needs them) ═══
   mkdir -p ${OUT_DIR}
-  cp ./zig-out/bin/bench-layout ${OUT_DIR}/__ID__
-  git add -A && git diff --cached > ${OUT_DIR}/__ID__.patch
+  cp __WT__/zig-out/bin/bench-layout ${OUT_DIR}/__ID__
+  git -C __WT__ add -A && git -C __WT__ diff --cached > ${OUT_DIR}/__ID__.patch
 Then report via the StructuredOutput tool.
 
 CONSTRAINTS: single-threaded only (no std.Thread / no async). Keep \`solve\`'s public
@@ -192,8 +208,7 @@ nearestHubPad, nearestPoints, rectGap. (Put \`@setFloatMode(.optimized);\` as th
 statement of each.) This is the lowest-effort experiment and a useful speed ceiling.
 EXCEPTION TO THE GATE: fast-math reassociation WILL perturb floating-point results, so your
 checksums MAY differ from baseline — that is EXPECTED here, do NOT fight it. Instead REPORT,
-per correctness design, whether the checksum matched, and (your judgment) whether the layout
-looks essentially the same or materially changed. Make all_identical_to_baseline reflect
+per correctness design, whether the checksum matched. Make all_identical_to_baseline reflect
 reality (likely false for some designs). Still must BUILD and RUN.`,
 
   'spatial-grid': `
@@ -246,21 +261,22 @@ const VARIANT_SCHEMA = {
 }
 
 phase('Implement')
-log(`Spawning ${WANT.length} speedup variants in isolated worktrees: ${WANT.join(', ')}`)
+log(`Spawning ${WANT.length} speedup variants in pre-made worktrees: ${WANT.join(', ')}`)
 log(`Each builds the slim bench (~25s) and gates on baseline checksums; timing is measured serially afterward.`)
 
 const results = await parallel(
   WANT.map((id) => () => {
     const brief = BRIEFS[id]
     if (!brief) return Promise.resolve(null)
+    const wt = `${WT_BASE}/spd-${id}`
     const prompt =
-      PREAMBLE.replaceAll('__ID__', id) +
+      PREAMBLE.replaceAll('__ID__', id).replaceAll('__WT__', wt) +
       `\n═══ YOUR VARIANT: ${id} ═══\n` +
       brief +
       `\n\nWork iteratively: read the relevant functions, make the change, build, check checksums, fix, repeat. ` +
       `When done, ensure the binary and patch are in ${OUT_DIR} and fill in the StructuredOutput. ` +
       `Set all_identical_to_baseline honestly. If you cannot get it to build, set build_ok=false and explain in build_error/notes.`
-    return agent(prompt, { label: id, phase: 'Implement', schema: VARIANT_SCHEMA, isolation: 'worktree' })
+    return agent(prompt, { label: id, phase: 'Implement', schema: VARIANT_SCHEMA })
   }),
 )
 

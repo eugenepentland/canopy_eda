@@ -26,6 +26,7 @@ const paths = @import("paths.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 const env = @import("eval/env.zig");
 const optimizer = @import("placement/optimizer.zig");
+const clock = @import("infra/clock.zig");
 
 const DEFAULT_REPS: usize = 5;
 const NS_PER_MS: f64 = 1_000_000.0;
@@ -99,9 +100,9 @@ fn benchOne(
 
     var rep: usize = 0;
     while (rep < reps) : (rep += 1) {
-        var timer = try std.time.Timer.start();
+        const t0 = clock.nanoTimestamp();
         const pl = try optimizer.solve(arena.allocator(), block, project_dir, null, .{}, .place);
-        const ns = timer.read();
+        const ns: u64 = @intCast(clock.nanoTimestamp() - t0);
         std.mem.doNotOptimizeAway(pl.parts.len);
         times[rep] = ns;
         _ = arena.reset(.retain_capacity);
@@ -120,6 +121,9 @@ fn ms(ns: u64) f64 {
     return @as(f64, @floatFromInt(ns)) / NS_PER_MS;
 }
 
+/// CLI entry point: parse `--project-dir`, `--reps`, and the positional design
+/// names, then time `optimizer.solve` on each and print a `BENCH …` line with
+/// median/min wall time, the grid-quantized pose checksum, and the objective.
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
     const args = try std.process.argsAlloc(gpa);
