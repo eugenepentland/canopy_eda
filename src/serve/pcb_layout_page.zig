@@ -748,6 +748,56 @@ pub fn rescoreLayoutsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"rescored\":{d}}}", .{n});
 }
 
+/// POST /api/pcb-score-batch/:name — score every saved layout's stored poses on
+/// the server (the design block is resolved once, then each pose-set scored), so
+/// the page can re-weigh the whole saved-layout panel under the Score-view
+/// weights from a single round-trip. Returns `{"results":[{"name",breakdown}, …]}`
+/// with each layout's full raw breakdown; read-only (unlike `pcb-rescore`, it
+/// persists nothing). The raw terms the client re-weighs are weight-independent,
+/// so the result is stable regardless of `?tuning` (honoured only for parity).
+pub fn pcbScoreBatchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const layouts = readLayouts(req.arena, ctx.project_dir, name);
+
+    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |mr| {
+        mr.eval.deinit();
+        ctx.allocator.destroy(mr.eval);
+    };
+    const block: *env_mod.DesignBlock = resolveBlock(ctx, name, &eval, &module_res) orelse {
+        res.status = 500;
+        res.body = NO_BLOCK_MSG;
+        return;
+    };
+    const tune = parseTuning(req);
+
+    var aw: std.Io.Writer.Allocating = .init(req.arena);
+    const w = &aw.writer;
+    try w.writeAll("{\"results\":[");
+    var first = true;
+    for (layouts) |L| {
+        if (L.parts.len == 0) continue;
+        const poses = try req.arena.alloc(optimizer.RefPose, L.parts.len);
+        for (L.parts, 0..) |p, i| poses[i] = .{ .ref = p.ref, .x = p.x, .y = p.y, .rot = p.rot };
+        const bd = optimizer.scorePoses(req.arena, block, ctx.project_dir, poses, tune.params) catch continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.writeAll("{\"name\":");
+        try writeJsonStr(w, L.name);
+        try w.writeAll(",\"breakdown\":");
+        try writeBreakdownJson(w, bd, tune.params);
+        try w.writeByte('}');
+    }
+    try w.writeAll("]}");
+    res.content_type = .JSON;
+    res.body = aw.written();
+}
+
 /// Parse the request body as a JSON object, setting a 400 and returning null on
 /// any failure (missing body / malformed JSON / non-object root).
 fn parseJsonObject(req: *httpz.Request, res: *httpz.Response) ?std.json.Value {
@@ -1438,7 +1488,11 @@ fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: Layo
     }
     try w.writeAll("<div class=\"saved-list\">");
     for (layouts) |L| {
-        try w.writeAll("<div class=\"lay-row\"><span class=\"lay-kind ");
+        // `data-lay-row` keys the row for the Score-view re-weigh (reweighLayouts
+        // in BOARD_JS rewrites its score + auto-relative delta in place).
+        try w.writeAll("<div class=\"lay-row\" data-lay-row=\"");
+        try writeAttr(w, L.name);
+        try w.writeAll("\"><span class=\"lay-kind ");
         try w.writeAll(if (std.mem.eql(u8, L.kind, KIND_MANUAL)) "k-man\">manual" else "k-auto\">auto");
         try w.writeAll("</span><span class=\"lay-name\">");
         try writeEscaped(w, L.name);
@@ -2331,6 +2385,19 @@ const BOARD_JS =
     \\ svOff("sc-align",!t.s.align.on);svOff("sc-align-d",!t.s.align.on);
     \\ svOff("sc-cong",!t.s.cong.on);svOff("sc-cong-d",!t.s.cong.on);
     \\}
+    \\// Each saved layout's raw breakdown (fetched once via pcb-score-batch), so
+    \\// the panel re-weighs under the Score-view weights with no per-row round-trip.
+    \\var layBreaks={};
+    \\function svApply(){if(lastBreak)showScore(lastBreak);reweighLayouts();}
+    \\function reweighLayouts(){var aobj=svTerms(PCB.auto).obj;
+    \\ document.querySelectorAll(".lay-row").forEach(function(row){
+    \\  var nm=row.getAttribute("data-lay-row"),b=layBreaks[nm];if(!b)return;var t=svTerms(b);
+    \\  var sc=row.querySelector(".lay-score");
+    \\  if(sc)sc.textContent="obj "+t.obj.toFixed(1)+" · HPWL "+(b.hpwl||0).toFixed(1)+" · loop "+(b.loop_raw||0).toFixed(1);
+    \\  var dd=row.querySelector(".lay-d");if(!dd)return;var d=t.obj-aobj;
+    \\  if(Math.abs(d)<0.05){dd.textContent="=";dd.className="lay-d";}
+    \\  else{dd.textContent=(d>0?"+":"")+d.toFixed(1);dd.className="lay-d "+(d>0?"up":"down");}});
+    \\}
     \\var scoreReq=0;
     \\function fetchScore(){
     \\ setSc("sc-obj","objective …");var seq=++scoreReq;
@@ -2373,10 +2440,10 @@ const BOARD_JS =
     \\  "&loop_w="+v("t-loop")+"&w_congest="+v("t-cong")+"&grid="+g;});
     \\(function(){var ids=["sv-en-wire","sv-w-wire","sv-en-loop","sv-w-loop","sv-en-align","sv-w-align","sv-en-cong","sv-w-cong"];
     \\ var def={};ids.forEach(function(id){var e=document.getElementById(id);if(!e)return;
-    \\  def[id]=(e.type=="checkbox")?e.checked:e.value;e.addEventListener("input",function(){if(lastBreak)showScore(lastBreak);});});
+    \\  def[id]=(e.type=="checkbox")?e.checked:e.value;e.addEventListener("input",svApply);});
     \\ var rb=document.getElementById("sv-reset");
     \\ if(rb)rb.addEventListener("click",function(){ids.forEach(function(id){var e=document.getElementById(id);
-    \\   if(e){if(e.type=="checkbox")e.checked=def[id];else e.value=def[id];}});if(lastBreak)showScore(lastBreak);});})();
+    \\   if(e){if(e.type=="checkbox")e.checked=def[id];else e.value=def[id];}});svApply();});})();
     \\function pad2(n){return (n<10?"0":"")+n;}
     \\function stamp(){var d=new Date();return pad2(d.getMonth()+1)+"-"+pad2(d.getDate())+" "+pad2(d.getHours())+":"+pad2(d.getMinutes());}
     \\document.getElementById("pcb-saveas").addEventListener("click",function(){
@@ -2408,6 +2475,13 @@ const BOARD_JS =
     \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
     \\  .then(function(){window.location.reload();})
     \\  .catch(function(){rescoreBtn.disabled=false;rescoreBtn.textContent="↻ Rescore all";});});
+    \\// Fetch each saved layout's raw breakdown once, then re-weigh the panel so its
+    \\// scores/deltas track the Score-view weights alongside the live bar.
+    \\(function(){if(!((PCB.layouts||[]).length))return;
+    \\ fetch("/api/pcb-score-batch/"+encodeURIComponent(PCB.name),{method:"POST"})
+    \\  .then(function(r){return r.json();})
+    \\  .then(function(j){(j.results||[]).forEach(function(it){layBreaks[it.name]=it.breakdown;});reweighLayouts();})
+    \\  .catch(function(){});})();
     \\}
     \\function hlBy(at,v,cls,on){document.querySelectorAll("["+at+"]").forEach(function(e){
     \\ if(e.getAttribute(at)===v)e.classList.toggle(cls,on);});}
