@@ -2235,6 +2235,8 @@ const PAGE_CSS =
     \\.comp-list{list-style:none;margin:0;padding:0}
     \\.comp{padding:8px 12px;border-bottom:1px solid #21262d;cursor:default}
     \\.comp.hl{background:#1c2230}
+    \\.comp.sel{background:#1f2937;box-shadow:inset 3px 0 0 #58a6ff;animation:compflash .7s ease-out}
+    \\@keyframes compflash{from{background:#2d3b52}to{background:#1f2937}}
     \\.comp-top{display:flex;gap:8px;align-items:baseline}
     \\.comp-ref{font-weight:600;font-size:13px;color:#e6edf3}
     \\.comp-val{font-size:12px;color:#8b949e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -2450,16 +2452,23 @@ const BOARD_JS =
     \\ return {x:sx/S+MX-M,y:sy/S+MY-M};}
     \\if(!RO){
     \\var drag=null, cur=-1;
+    \\// Click a part on the board → reveal it in the component sidebar: scroll the
+    \\// matching <li> into view and flash it so you can see what the part is.
+    \\function scrollToComp(ref){var li=document.querySelector('.comp[data-ref="'+ref+'"]');
+    \\ if(!li)return;li.scrollIntoView({behavior:"smooth",block:"center"});
+    \\ document.querySelectorAll(".comp.sel").forEach(function(e){e.classList.remove("sel");});
+    \\ void li.offsetWidth;li.classList.add("sel");}
     \\els.forEach(function(g,i){
     \\ g.addEventListener("mouseenter",function(){cur=i;});
     \\ g.addEventListener("mouseleave",function(){if(cur===i)cur=-1;});
     \\ g.addEventListener("pointerdown",function(ev){ev.preventDefault();var m=mm(ev);
     \\   drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});
     \\ g.addEventListener("pointermove",function(ev){if(!drag||drag.i!==i)return;var m=mm(ev);
-    \\   P[i].x=Math.round((m.x+drag.ox)/G)*G;P[i].y=Math.round((m.y+drag.oy)/G)*G;
+    \\   var nx=Math.round((m.x+drag.ox)/G)*G,ny=Math.round((m.y+drag.oy)/G)*G;
+    \\   if(nx===P[i].x&&ny===P[i].y)return;P[i].x=nx;P[i].y=ny;
     \\   if(!drag.moved){drag.moved=true;clearRoute();}setT(i);rats();drawClr();});
     \\ g.addEventListener("pointerup",function(ev){var mv=drag&&drag.moved;drag=null;g.style.cursor="grab";
-    \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(mv)fetchScore();});
+    \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(mv)fetchScore();else scrollToComp(P[i].ref);});
     \\});
     \\document.addEventListener("keydown",function(ev){
     \\ if((ev.key=="r"||ev.key=="R")&&cur>=0){ev.preventDefault();
