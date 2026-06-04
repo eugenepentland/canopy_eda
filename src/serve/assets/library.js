@@ -220,23 +220,61 @@ document.addEventListener('dragleave',function(e){
 });
 document.addEventListener('dragover',function(e){
   e.preventDefault();
-  var card=(e.target&&e.target.closest)?e.target.closest('.comp-card[data-component]'):null;
+  var card=(e.target&&e.target.closest)?e.target.closest('.comp-card[data-name]'):null;
   if(card!==dragCard){clearDragCard();dragCard=card;if(card)card.classList.add('drag-over');}
 });
 document.addEventListener('drop',function(e){
   e.preventDefault();
   dragDepth=0;overlay.classList.remove('active');
-  var card=(e.target&&e.target.closest)?e.target.closest('.comp-card[data-component]'):null;
+  var card=(e.target&&e.target.closest)?e.target.closest('.comp-card[data-name]'):null;
   clearDragCard();
   var files=e.dataTransfer?e.dataTransfer.files:null;
   if(!files||files.length===0)return;
   var f=files[0];
   var n=f.name.toLowerCase();
-  // Dropping a PDF on a component card links it to that component.
-  if(n.endsWith('.pdf')&&card){linkDatasheet(f,card.getAttribute('data-component'));return;}
-  if(n.endsWith('.zip'))uploadZip(f,toast);
+  // Drop a .zip on a card → extract its STEP and use it as that part's 3D model.
+  if(n.endsWith('.zip')&&card){attachModel(f,card.getAttribute('data-name'));return;}
+  // Drop a PDF on a component card → link it as that component's datasheet.
+  if(n.endsWith('.pdf')&&card&&card.getAttribute('data-component')){linkDatasheet(f,card.getAttribute('data-component'));return;}
+  if(n.endsWith('.zip'))uploadZip(f,toast);          // not over a card → import as a new component
   else if(n.endsWith('.pdf'))uploadDatasheet(f);
-  else showToast('err','Unsupported file: drop a .zip (component) or .pdf (datasheet)',6000);
+  else showToast('err','Unsupported file: drop a .zip or .pdf',6000);
+});
+// Drop a zip onto a component/footprint card → add or replace its STEP 3D model.
+function attachModel(file,name){
+  if(file.size>64*1024*1024){showToast('err','Zip too large (64MB limit)',6000);return;}
+  showToast('pending','Adding 3D model to '+name+'…');
+  var r=new FileReader();
+  r.onload=function(){
+    fetch('/api/upload-model/'+encodeURIComponent(name),
+      {method:'POST',headers:{'Content-Type':'application/octet-stream','X-Filename':file.name},body:r.result})
+      .then(function(res){return res.json();})
+      .then(function(j){
+        if(!j.ok)throw new Error(j.error||'failed');
+        showToast('ok','3D model attached to '+(j.footprint||name),3500);
+        setTimeout(function(){location.reload();},1200);
+      })
+      .catch(function(e){showToast('err','Model attach failed: '+e.message,8000);});
+  };
+  r.readAsArrayBuffer(file);
+}
+// Delete (×) on a card → soft-delete the library entry (moved to .deleted/).
+document.addEventListener('click',function(e){
+  var del=(e.target&&e.target.closest)?e.target.closest('.card-del'):null;
+  if(!del)return;
+  e.stopPropagation();
+  var card=del.closest('.comp-card[data-name]');
+  if(!card)return;
+  var kind=card.getAttribute('data-kind'),name=card.getAttribute('data-name');
+  if(!confirm('Delete '+kind+' "'+name+'" from the library?\n\nIt is moved to a .deleted/ folder (recoverable), not erased.'))return;
+  fetch('/api/library-delete/'+encodeURIComponent(kind)+'/'+encodeURIComponent(name),{method:'POST'})
+    .then(function(res){return res.json();})
+    .then(function(j){
+      if(!j.ok)throw new Error(j.error||'delete failed');
+      card.parentNode.removeChild(card);
+      showToast('ok','Deleted '+name,3000);
+    })
+    .catch(function(e){showToast('err','Delete failed: '+e.message,8000);});
 });
 // Upload a PDF to lib/datasheets/ then splice (datasheet "...") into the
 // component's lib/components/<name>.sexp, then reload to show the new link.

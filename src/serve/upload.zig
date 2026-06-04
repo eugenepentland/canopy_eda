@@ -188,6 +188,47 @@ fn writeModelFile(
     f.writeAll(data) catch return error.WriteFailed;
 }
 
+/// Extract the first STEP/STP file from a zip and return its raw bytes (owned
+/// by `allocator`), or null when the zip has no STEP or extraction fails.
+/// Backs the library page's "drop a zip onto a component" → attach-3D-model
+/// flow, which only needs the model (not the symbol/footprint importZipBytes
+/// requires). Unzips to a temp dir via the system `unzip` and cleans up.
+pub fn extractStepBytes(allocator: std.mem.Allocator, zip_bytes: []const u8, filename: []const u8) ?[]const u8 {
+    const tmp_zip = std.fmt.allocPrint(allocator, TMP_ZIP_TEMPLATE, .{filename}) catch return null;
+    {
+        const f = infra_fs.cwd().createFile(tmp_zip, .{}) catch return null;
+        defer f.close();
+        f.writeAll(zip_bytes) catch return null;
+    }
+    defer infra_fs.cwd().deleteFile(tmp_zip) catch |e| log.warn("rm {s}: {s}", .{ tmp_zip, @errorName(e) });
+
+    const tmp_dir = std.fmt.allocPrint(allocator, TMP_EXTRACT_TEMPLATE, .{clock.milliTimestamp()}) catch return null;
+    defer {
+        _ = std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "rm", "-rf", tmp_dir } }) catch |e|
+            log.warn("cleanup {s}: {s}", .{ tmp_dir, @errorName(e) });
+    }
+
+    const unzip_result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "unzip", "-o", "-q", tmp_zip, "-d", tmp_dir },
+    }) catch return null;
+    if (unzip_result.term != .Exited or unzip_result.term.Exited != 0) return null;
+
+    const find_result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "find", tmp_dir, "-type", "f" },
+    }) catch return null;
+
+    var it = std.mem.splitScalar(u8, find_result.stdout, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        if (std.mem.endsWith(u8, line, ".step") or std.mem.endsWith(u8, line, ".stp")) {
+            return infra_fs.cwd().readFileAlloc(allocator, line, MAX_STEP_FILE_BYTES) catch return null;
+        }
+    }
+    return null;
+}
+
 /// POST /api/upload-zip — accept a KiCad library zip (must contain a
 /// `.kicad_sym` plus a `.kicad_mod`, optionally a STEP), unpack via the
 /// system `unzip`, convert each part, and write `lib/components`,
