@@ -1886,7 +1886,9 @@ fn writePcbData(
     // Decoupling loops: cap power/ground pads + the hub's candidate power/
     // ground pads, plus the *pinned* hub power/ground pads (`pp`/`gp`) the score
     // actually uses — the client draws the exact scored loop (power leg, L2 ground
-    // return to `gp`) from those. `cgv`/`gpv` are the DRC-safe via drop points.
+    // return to `gp`) from those. `cgv`/`gpv` are the DRC-safe via drop points,
+    // valid for the *emitted* pose only — once a part is hand-dragged the client
+    // (BOARD_JS `moved()`) recomputes the via at the live GND pad centre instead.
     //
     // The GND vias the loop overlay draws: the routed set when a route is present,
     // else `route`'s pass-1 placement on small boards — so the previewed loop via
@@ -2293,6 +2295,7 @@ const BOARD_JS =
     \\function el(n,a){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);return e;}
     \\function wpt(i,lx,ly){var p=P[i],a=(p.rot||0)*Math.PI/180,c=Math.cos(a),s=Math.sin(a);
     \\ return {x:p.x+lx*c-ly*s,y:p.y+lx*s+ly*c};}
+    \\function moved(i){return P[i].x!==orig[i].x||P[i].y!==orig[i].y||(P[i].rot||0)!==orig[i].rot;}
     \\function wrect(i,pad){var p=P[i],c=wpt(i,pad.x,pad.y),q=(((p.rot||0)%360)+360)%360;
     \\ var hw=(q==90||q==270)?pad.h/2:pad.w/2, hh=(q==90||q==270)?pad.w/2:pad.h/2;
     \\ return {x0:c.x-hw,y0:c.y-hh,x1:c.x+hw,y1:c.y+hh};}
@@ -2355,9 +2358,14 @@ const BOARD_JS =
     \\   var col=l.k=="proximity"?"#ea580c":(l.k=="ground"?"#22b8cf":"#9aa7b4");
     \\   aw(a,b,col,l.k=="signal"?0.7:1.3,l.k=="signal"?0.55:0.9);});
     \\ var routedNow=((PCB.tracks||[]).length>0);
+    \\ // Use the server's DRC-safe GND-via drop (cgv/gpv) only while the cap/hub is
+    \\ // at its emitted pose; once dragged that world point is stale, so recompute
+    \\ // the via at the live GND pad centre so it follows the part (the prior via is
+    \\ // already cleared with gR above; Route re-derives the exact DRC-safe fan).
     \\ PCB.loops.forEach(function(L){
     \\   var A=wpt(L.hub,L.pp.x,L.pp.y), B=wpt(L.cap,L.cp.x,L.cp.y),
-    \\       C=L.cgv||wpt(L.cap,L.cg.x,L.cg.y), D=L.gpv||wpt(L.hub,L.gp.x,L.gp.y);
+    \\       C=(L.cgv&&!moved(L.cap))?L.cgv:wpt(L.cap,L.cg.x,L.cg.y),
+    \\       D=(L.gpv&&!moved(L.hub))?L.gpv:wpt(L.hub,L.gp.x,L.gp.y);
     \\   aw(B,A,"#ea580c",1.3,0.95);
     \\   var rp=[C,B,A,D].map(function(q){return X(q.x).toFixed(1)+","+Y(q.y).toFixed(1);}).join(" ");
     \\   var pl=el("polyline",{points:rp,fill:"none",stroke:"#58a6ff","stroke-width":1.3,opacity:0.85,"stroke-dasharray":"4 2"});
