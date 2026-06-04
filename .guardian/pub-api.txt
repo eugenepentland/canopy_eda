@@ -751,6 +751,7 @@ src/serve/pcb_layout_page.zig::pcbLayoutJsonApi fn
 src/serve/pcb_layout_page.zig::pcbLayoutPage fn
 src/serve/pcb_layout_page.zig::pcbRouteApi fn
 src/serve/pcb_layout_page.zig::pcbScoreApi fn
+src/serve/pcb_layout_page.zig::pcbScoreBatchApi fn
 src/serve/pcb_layout_page.zig::rescoreLayoutsApi fn
 src/serve/pcb_layout_page.zig::saveNamedLayoutApi fn
 src/serve/pcb_layout_page.zig::savePcbCourtyardApi fn
