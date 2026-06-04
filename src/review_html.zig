@@ -1,6 +1,5 @@
 const std = @import("std");
 const review = @import("review.zig");
-const erc_mod = @import("erc.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const coverage = @import("coverage.zig");
@@ -22,93 +21,10 @@ const tdSep: []const u8 = "</td><td>";
 pub const mutedDash: []const u8 = "<span class=\"muted\">—</span>";
 const trCodeOpen: []const u8 = "<tr><td><code>";
 
-/// Coverage-pill thresholds for the summary banner. Green at ≥95%, amber
-/// at 70–94%, red below 70%. Picked so a near-perfect design lands green,
-/// a typical work-in-progress lands amber, and a barely-started design
-/// reads red at a glance.
-const COVERAGE_PASS_PCT: u8 = 95;
-const COVERAGE_WARN_PCT: u8 = 70;
-
 /// CSS rules for review fragments. Embedded inline by `render_html.zig`'s
 /// `<style>` block alongside the schematic page's own CSS so the embedded
 /// review tables match the surrounding chrome without an extra request.
 pub const BODY_CSS = @embedFile("assets/review.css");
-
-/// Render the Summary section: a 4-row table covering counts, ERC
-/// severities, assertion outcomes, and critical-IC requirement coverage,
-/// followed by a missing-requirements list when the design has
-/// undocumented hubs.
-pub fn writeSummaryTable(w: anytype, s: review.Summary) RenderError!void {
-    try w.writeAll("<section><h2>Summary</h2><table class=\"summary\">");
-    try w.print(
-        "<tr><th>Sections</th><td>{d}</td><th>Components</th><td>{d}</td><th>Nets</th><td>{d}</td></tr>",
-        .{ s.section_count, s.instance_count, s.net_count },
-    );
-    try w.print(
-        "<tr><th>Errors</th><td class=\"{s}\">{d}</td><th>Warnings</th><td class=\"{s}\">{d}</td><th>Info</th><td>{d}</td></tr>",
-        .{
-            if (s.violation_error > 0) "fail" else "",
-            s.violation_error,
-            if (s.violation_warning > 0) "warn" else "",
-            s.violation_warning,
-            s.violation_info,
-        },
-    );
-    try w.print(
-        "<tr><th>Assertions pass</th><td class=\"pass\">{d}</td><th>warn</th><td class=\"{s}\">{d}</td><th>fail</th><td class=\"{s}\">{d}</td></tr>",
-        .{
-            s.assertion_pass,
-            if (s.assertion_warn > 0) "warn" else "",
-            s.assertion_warn,
-            if (s.assertion_fail > 0) "fail" else "",
-            s.assertion_fail,
-        },
-    );
-    const missing_n = s.critical_missing_requirements.len;
-    const cov_class: []const u8 = if (s.critical_count == 0) "" else if (missing_n == 0) "pass" else "warn";
-    try w.print(
-        "<tr><th>Critical ICs</th><td>{d}</td><th>With requirements</th><td class=\"{s}\">{d}</td><th>Missing</th><td class=\"{s}\">{d}</td></tr>",
-        .{
-            s.critical_count,
-            cov_class,
-            s.critical_with_requirements,
-            if (missing_n > 0) "warn" else "",
-            missing_n,
-        },
-    );
-    const missing_mpn_n = s.bom_missing_mpn.len;
-    const mpn_class: []const u8 = if (s.bom_total == 0) "" else if (missing_mpn_n == 0) "pass" else "warn";
-    try w.print(
-        "<tr><th>BOM parts</th><td>{d}</td><th>With MPN</th><td class=\"{s}\">{d}</td><th>Missing MPN</th><td class=\"{s}\">{d}</td></tr>",
-        .{
-            s.bom_total,
-            mpn_class,
-            s.bom_with_mpn,
-            if (missing_mpn_n > 0) "warn" else "",
-            missing_mpn_n,
-        },
-    );
-    const oc = s.overall_coverage;
-    const oc_pill = coveragePillClass(oc.checked, oc.percent);
-    try w.print(
-        "<tr><th>Coverage</th><td colspan=\"5\"><span class=\"pill {s}\">{d}% complete</span> · {d} of {d} components fully filled in · {d} missing</td></tr>",
-        .{ oc_pill, oc.percent, oc.complete, oc.checked, oc.missing_total },
-    );
-    try w.writeAll("</table>");
-    if (missing_n > 0) {
-        try w.writeAll("<p class=\"hint\">Add <code>(requirement \"...\")</code> forms in <code>lib/components/&lt;name&gt;.sexp</code> for:</p>");
-        try w.writeAll("<ul class=\"missing-reqs\">");
-        for (s.critical_missing_requirements) |m| {
-            try w.writeAll("<li><code>");
-            try writeHtmlEscaped(w, m.ref_des);
-            try w.writeAll("</code> — <code>");
-            try writeHtmlEscaped(w, m.component);
-            try w.writeAll("</code></li>");
-        }
-        try w.writeAll("</ul>");
-    }
-    try w.writeAll(sectionClose);
-}
 
 /// Render the Traceability section: one row per critical IC declared in the
 /// design's `(design-doc …)` form, with a ✓/✗ for each of the four lifecycle
@@ -360,40 +276,6 @@ pub fn writeTestPoints(w: anytype, tps: []const review.TestPointEntry) RenderErr
     try w.writeAll(tableSectionClose);
 }
 
-/// Render the Unresolved Issues section — every error+warning ERC violation
-/// the design still carries, severity-styled and with ref_des / net links so
-/// the reviewer can drill into each one. Emits a "clean build" banner when
-/// the slice is empty.
-pub fn writeUnresolved(w: anytype, vs: []const erc_mod.Violation) RenderError!void {
-    if (vs.len == 0) {
-        try w.writeAll("<section><h2>Unresolved issues</h2><p class=\"hint\">No errors or warnings — clean build.</p></section>");
-        return;
-    }
-    try w.writeAll("<section><h2>Unresolved issues</h2>");
-    try w.writeAll("<table><thead><tr><th>Severity</th><th>Kind</th><th>Ref</th><th>Net</th><th>Message</th></tr></thead><tbody>");
-    for (vs) |v| {
-        const row_class: []const u8 = switch (v.severity) {
-            .@"error" => " class=\"row-fail\"",
-            .warning => " class=\"row-warn\"",
-            .info => "",
-        };
-        try w.print("<tr{s}><td><span class=\"pill pill-{s}\">{s}</span></td><td><code>", .{
-            row_class,
-            @tagName(v.severity),
-            @tagName(v.severity),
-        });
-        try writeHtmlEscaped(w, @tagName(v.kind));
-        try w.writeAll(codeTdSep);
-        if (v.ref_des.len > 0) try writeHtmlEscaped(w, v.ref_des) else try w.writeAll(mutedDash);
-        try w.writeAll(tdSep);
-        if (v.net.len > 0) try writeHtmlEscaped(w, v.net) else try w.writeAll(mutedDash);
-        try w.writeAll(tdSep);
-        try writeHtmlEscaped(w, v.message);
-        try w.writeAll(tdTrClose);
-    }
-    try w.writeAll(tableSectionClose);
-}
-
 fn writeSections(w: anytype, sections: []const review.SectionReport) !void {
     if (sections.len == 0) return;
     try w.writeAll("<section><h2>Sections</h2>");
@@ -604,13 +486,6 @@ pub fn writeSectionCoverage(w: anytype, c: coverage.SectionCoverage) RenderError
     try w.writeAll("</details>");
 }
 
-fn coveragePillClass(checked: usize, percent: u8) []const u8 {
-    if (checked == 0) return "pill-info";
-    if (percent >= COVERAGE_PASS_PCT) return "pill-pass";
-    if (percent >= COVERAGE_WARN_PCT) return "pill-warn";
-    return "pill-fail";
-}
-
 fn writeCoverageRow(w: anytype, label: []const u8, filled: usize, expected: usize) !void {
     if (expected == 0) return;
     const cls: []const u8 = if (filled == expected) "pass" else if (filled * 2 >= expected) "warn" else "fail";
@@ -661,21 +536,6 @@ fn categoryLabel(c: coverage.CheckCategory) []const u8 {
         .datasheet => "datasheet",
         .requirements_verified => "requirements verified",
     };
-}
-
-/// Render the Assertions section — one row per `(assert …)` /
-/// `(assert-range …)` outcome the evaluator collected, status-pilled and
-/// shown verbatim. Skipped entirely when the slice is empty.
-pub fn writeAssertions(w: anytype, assertions: []const review.AssertionReport) RenderError!void {
-    if (assertions.len == 0) return;
-    try w.writeAll("<section><h2>Assertions</h2>");
-    try w.writeAll("<table><thead><tr><th>Status</th><th>Message</th></tr></thead><tbody>");
-    for (assertions) |a| {
-        try w.print("<tr><td><span class=\"pill pill-{s}\">{s}</span></td><td>", .{ @tagName(a.status), @tagName(a.status) });
-        try writeHtmlEscaped(w, a.message);
-        try w.writeAll(tdTrClose);
-    }
-    try w.writeAll(tableSectionClose);
 }
 
 fn writeFloatCell(w: anytype, v: ?f64) !void {
