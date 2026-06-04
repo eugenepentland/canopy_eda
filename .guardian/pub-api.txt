@@ -67,7 +67,6 @@ src/diagram/collect.zig::collectGraph fn
 src/diagram/diagram.zig::DIAGRAM_CSS value
 src/diagram/diagram.zig::renderBlockDiagramTabs fn
 src/diagram/diagram.zig::renderSystemSvg fn
-src/diagram/function.zig::buildFunctionGraph fn
 src/diagram/layout.zig::GroupBox struct_
 src/diagram/layout.zig::LNode struct_
 src/diagram/layout.zig::Layout struct_
@@ -98,7 +97,6 @@ src/diagram/membership.zig::build fn
 src/diagram/render.zig::CSS value
 src/diagram/render.zig::renderSystemStandalone fn
 src/diagram/render.zig::renderTabs fn
-src/diagram/render.zig::renderTabsWithFunction fn
 src/diagram/render.zig::system_color value
 src/diagram/render.zig::system_key value
 src/diagram/render.zig::system_label value
@@ -389,6 +387,7 @@ src/placement/optimizer.zig::RatKind enum_
 src/placement/optimizer.zig::RefPose struct_
 src/placement/optimizer.zig::Score struct_
 src/placement/optimizer.zig::Stub struct_
+src/placement/optimizer.zig::placeFromPoses fn
 src/placement/optimizer.zig::scorePoses fn
 src/placement/optimizer.zig::solve fn
 src/placement/optimizer.zig::worldPadCenter fn
@@ -746,6 +745,7 @@ src/serve/pcb_layout_page.zig::deleteNamedLayoutApi fn
 src/serve/pcb_layout_page.zig::loadSyncLayout fn
 src/serve/pcb_layout_page.zig::pcbLayoutJsonApi fn
 src/serve/pcb_layout_page.zig::pcbLayoutPage fn
+src/serve/pcb_layout_page.zig::pcbRouteApi fn
 src/serve/pcb_layout_page.zig::pcbScoreApi fn
 src/serve/pcb_layout_page.zig::rescoreLayoutsApi fn
 src/serve/pcb_layout_page.zig::saveNamedLayoutApi fn
