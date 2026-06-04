@@ -232,13 +232,15 @@ document.addEventListener('drop',function(e){
   if(!files||files.length===0)return;
   var f=files[0];
   var n=f.name.toLowerCase();
-  // Drop a .zip on a card → extract its STEP and use it as that part's 3D model.
-  if(n.endsWith('.zip')&&card){attachModel(f,card.getAttribute('data-name'));return;}
+  // Drop a .zip OR a raw .step/.stp on a card → use it as that part's 3D model.
+  var isModel=n.endsWith('.zip')||n.endsWith('.step')||n.endsWith('.stp');
+  if(isModel&&card){attachModel(f,card.getAttribute('data-name'));return;}
   // Drop a PDF on a component card → link it as that component's datasheet.
   if(n.endsWith('.pdf')&&card&&card.getAttribute('data-component')){linkDatasheet(f,card.getAttribute('data-component'));return;}
   if(n.endsWith('.zip'))uploadZip(f,toast);          // not over a card → import as a new component
   else if(n.endsWith('.pdf'))uploadDatasheet(f);
-  else showToast('err','Unsupported file: drop a .zip or .pdf',6000);
+  else if(n.endsWith('.step')||n.endsWith('.stp'))showToast('err','Drop the .step onto a component or footprint card to use it as that part’s 3D model',6000);
+  else showToast('err','Unsupported file: drop a .zip / .step (3D model) or .pdf (datasheet)',6000);
 });
 // Drop a zip onto a component/footprint card → add or replace its STEP 3D model.
 function attachModel(file,name){

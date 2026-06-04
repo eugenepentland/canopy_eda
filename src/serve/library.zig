@@ -311,8 +311,14 @@ pub fn uploadModelApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     const aa = arena.allocator();
 
     const filename = req.header("x-filename") orelse "model.zip";
-    const step = upload.extractStepBytes(aa, body, filename) orelse
-        return sendErr(res, 400, "{\"ok\":false,\"error\":\"no .step/.stp model found in the zip\"}");
+    // Accept either a raw .step/.stp file (the body IS the model) or a .zip
+    // containing one (extract it). Case-insensitive, so .STEP/.STP/.ZIP work.
+    const is_raw = std.ascii.endsWithIgnoreCase(filename, ".step") or std.ascii.endsWithIgnoreCase(filename, ".stp");
+    const step: []const u8 = if (is_raw)
+        body
+    else
+        (upload.extractStepBytes(aa, body, filename) orelse
+            return sendErr(res, 400, "{\"ok\":false,\"error\":\"no .step/.stp model found in the zip\"}"));
 
     const fp = resolveFootprintName(aa, ctx.project_dir, name);
     if (!isSafeLibName(fp)) return sendErr(res, 400, "{\"ok\":false,\"error\":\"resolved footprint name is invalid\"}");

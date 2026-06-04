@@ -106,7 +106,7 @@ pub fn importZipBytes(
         if (line.len == 0) continue;
         if (std.mem.endsWith(u8, line, ".kicad_sym")) sym_path = line;
         if (std.mem.endsWith(u8, line, ".kicad_mod")) fp_path = line;
-        if (std.mem.endsWith(u8, line, ".stp") or std.mem.endsWith(u8, line, ".step")) step_path = line;
+        if (std.ascii.endsWithIgnoreCase(line, ".stp") or std.ascii.endsWithIgnoreCase(line, ".step")) step_path = line;
     }
     if (sym_path == null or fp_path == null) return error.NoKicadFiles;
 
@@ -222,7 +222,7 @@ pub fn extractStepBytes(allocator: std.mem.Allocator, zip_bytes: []const u8, fil
     var it = std.mem.splitScalar(u8, find_result.stdout, '\n');
     while (it.next()) |line| {
         if (line.len == 0) continue;
-        if (std.mem.endsWith(u8, line, ".step") or std.mem.endsWith(u8, line, ".stp")) {
+        if (std.ascii.endsWithIgnoreCase(line, ".step") or std.ascii.endsWithIgnoreCase(line, ".stp")) {
             return infra_fs.cwd().readFileAlloc(allocator, line, MAX_STEP_FILE_BYTES) catch return null;
         }
     }
