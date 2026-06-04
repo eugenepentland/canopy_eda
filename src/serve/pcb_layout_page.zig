@@ -73,9 +73,11 @@ const MAX_AUTO_LAYOUTS: usize = 12;
 /// One placed part within a saved layout: ref-des + centre (mm) + rotation.
 const PartPose = struct { ref: []const u8, x: f64, y: f64, rot: f64 };
 
-/// HPWL + decoupling-loop score stored with a layout, so the list shows
-/// "better/worse" at a glance without re-running the optimizer.
-const LayoutScore = struct { hpwl: f64, loop: f64, caps: usize };
+/// The weighted `objective` the optimizer minimizes plus its visible HPWL +
+/// decoupling-loop terms, stored with a layout so the list shows "better/worse"
+/// at a glance without re-running the optimizer. `objective` is 0 for legacy
+/// entries saved before it was recorded.
+const LayoutScore = struct { hpwl: f64, loop: f64, caps: usize, objective: f64 = 0 };
 
 /// A named saved layout: name, kind, capture time (unix s, 0 = unknown),
 /// optional score, and the placement itself (newest first within a file).
@@ -160,7 +162,13 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     try w.writeAll("<main class=\"pcb-main\">");
     try w.print("<h1>{s} — PCB Layout <span class=\"pcb-sub\">(force-directed · drag to edit)</span></h1>", .{block.name});
     try writeScorebar(w, placement, name);
-    try writeLayoutsPanel(w, layouts, .{ .hpwl = placement.score.hpwl_mm, .loop = placement.score.loop_mm, .caps = placement.score.loop_caps });
+    const auto_score = LayoutScore{
+        .hpwl = placement.score.hpwl_mm,
+        .loop = placement.score.loop_mm,
+        .caps = placement.score.loop_caps,
+        .objective = placement.breakdown.objective,
+    };
+    try writeLayoutsPanel(w, layouts, auto_score);
     try writeTuning(w, shown);
     try writeRoutePanel(w, ro.params, routed, violations.len);
     try writeLegend(w, placement);
@@ -406,7 +414,7 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
             const poses = try req.arena.alloc(optimizer.RefPose, parts.len);
             for (parts, 0..) |p, i| poses[i] = .{ .ref = p.ref, .x = p.x, .y = p.y, .rot = p.rot };
             if (optimizer.scorePoses(ctx.allocator, block, ctx.project_dir, poses, params)) |bd| {
-                score = .{ .hpwl = bd.hpwl, .loop = bd.loop_raw, .caps = 0 };
+                score = .{ .hpwl = bd.hpwl, .loop = bd.loop_raw, .caps = 0, .objective = bd.objective };
             } else |_| {}
         }
     }
@@ -708,6 +716,7 @@ fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout
             .hpwl = jsonNum(it.object.get("hpwl")),
             .loop = jsonNum(it.object.get("loop")),
             .caps = @intFromFloat(@max(@floor(jsonNum(it.object.get("caps"))), 0)),
+            .objective = jsonNum(it.object.get("objective")), // 0 for legacy entries
         };
         const parts = parsePartPoses(alloc, it.object.get("parts")) orelse &[_]PartPose{};
         list.append(alloc, .{
@@ -781,7 +790,7 @@ fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.
         try w.writeAll(",\"kind\":");
         try writeJsonStr(w, L.kind);
         try w.print(",\"ts\":{d}", .{L.ts});
-        if (L.score) |s| try w.print(",\"hpwl\":{d},\"loop\":{d},\"caps\":{d}", .{ s.hpwl, s.loop, s.caps });
+        if (L.score) |s| try w.print(",\"hpwl\":{d},\"loop\":{d},\"caps\":{d},\"objective\":{d}", .{ s.hpwl, s.loop, s.caps, s.objective });
         try w.writeAll(",\"parts\":[");
         for (L.parts, 0..) |pt, j| {
             if (j > 0) try w.writeAll(",");
@@ -799,10 +808,17 @@ fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.
 /// score + part count), then prunes auto entries past `MAX_AUTO_LAYOUTS`.
 fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, p: optimizer.Placement) void {
     const existing = readLayouts(alloc, project_dir, name);
-    const score = LayoutScore{ .hpwl = p.score.hpwl_mm, .loop = p.score.loop_mm, .caps = p.score.loop_caps };
+    const score = LayoutScore{ .hpwl = p.score.hpwl_mm, .loop = p.score.loop_mm, .caps = p.score.loop_caps, .objective = p.breakdown.objective };
     if (existing.len > 0 and std.mem.eql(u8, existing[0].kind, KIND_AUTO)) {
         if (existing[0].score) |s0| {
-            if (existing[0].parts.len == p.parts.len and scoreApproxEq(s0, score)) return;
+            if (existing[0].parts.len == p.parts.len and scoreApproxEq(s0, score)) {
+                // Same layout as the newest auto entry. If it predates the
+                // objective field, backfill it in place; otherwise it's a true
+                // duplicate and there's nothing new to record.
+                if (s0.objective > 0) return;
+                backfillNewestScore(alloc, project_dir, name, existing, score);
+                return;
+            }
         }
     }
     const parts = alloc.alloc(PartPose, p.parts.len) catch return;
@@ -833,6 +849,19 @@ fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []c
 /// continuous metrics agree to within 0.05 mm.
 fn scoreApproxEq(a: LayoutScore, b: LayoutScore) bool {
     return a.caps == b.caps and @abs(a.hpwl - b.hpwl) < 0.05 and @abs(a.loop - b.loop) < 0.05;
+}
+
+/// Rewrite the layout list with `score` patched onto the newest entry — used to
+/// backfill the objective onto a pre-objective auto entry a regen re-confirms,
+/// without churning the history with a duplicate row.
+fn backfillNewestScore(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, existing: []const SavedLayout, score: LayoutScore) void {
+    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    for (existing, 0..) |L, i| {
+        var e = L;
+        if (i == 0) e.score = score;
+        out.append(alloc, e) catch return;
+    }
+    writeLayouts(alloc, project_dir, name, out.items);
 }
 
 /// Name for an auto-recorded entry: `auto · Mon D HH:MM:SS` (UTC). The seconds
@@ -1102,6 +1131,7 @@ fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: Layo
         try writeEscaped(w, L.name);
         try w.writeAll("</span><span class=\"lay-score\">");
         if (L.score) |s| {
+            if (s.objective > 0) try w.print("obj {d:.1} · ", .{s.objective});
             try w.print("HPWL {d:.1} · loop {d:.1}", .{ s.hpwl, s.loop });
             try w.writeAll("</span>");
             try writeLayDelta(w, s, auto);
@@ -1115,11 +1145,15 @@ fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: Layo
     try w.writeAll("</div></div>");
 }
 
-/// Delta of a saved layout's combined (HPWL+loop) cost versus the on-screen
-/// auto baseline. Positive (red) = worse, negative (green) = better — matching
-/// the live score-bar deltas.
+/// Delta of a saved layout's cost versus the on-screen auto baseline, on the
+/// weighted objective when both have one (legacy entries with no objective fall
+/// back to the combined HPWL+loop). Positive (red) = worse, negative (green) =
+/// better — matching the live score-bar deltas.
 fn writeLayDelta(w: *std.Io.Writer, s: LayoutScore, auto: LayoutScore) std.Io.Writer.Error!void {
-    const d = (s.hpwl + s.loop) - (auto.hpwl + auto.loop);
+    const d = if (s.objective > 0 and auto.objective > 0)
+        s.objective - auto.objective
+    else
+        (s.hpwl + s.loop) - (auto.hpwl + auto.loop);
     if (@abs(d) < 0.05) {
         try w.writeAll("<span class=\"lay-d\">=</span>");
         return;
@@ -1425,7 +1459,7 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writ
         try w.writeAll(",\"kind\":");
         try writeJsonStr(w, L.kind);
         if (L.score) |s| {
-            try w.print(",\"score\":{{\"hpwl\":{d},\"loop\":{d},\"caps\":{d}}}", .{ s.hpwl, s.loop, s.caps });
+            try w.print(",\"score\":{{\"hpwl\":{d},\"loop\":{d},\"caps\":{d},\"objective\":{d}}}", .{ s.hpwl, s.loop, s.caps, s.objective });
         } else try w.writeAll(",\"score\":null");
         try w.writeAll(",\"parts\":{");
         for (L.parts, 0..) |pt, j| {
