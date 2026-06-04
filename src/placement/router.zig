@@ -27,8 +27,8 @@ const FlatNet = export_kicad.FlatNet;
 pub const RouteParams = struct {
     track_width: f64 = 0.127, // 5 mil
     clearance: f64 = 0.127, // 5 mil
-    via_drill: f64 = 0.3,
-    via_dia: f64 = 0.6,
+    via_drill: f64 = 0.2,
+    via_dia: f64 = 0.4,
 };
 
 /// A pad as a routing obstacle: its world rect and the net it belongs to.
@@ -83,43 +83,77 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     @memset(occ[0], EMPTY);
     @memset(occ[1], EMPTY);
 
-    // Pad obstacles: every pad's *rectangle* + its net, so a trace keeps the
-    // clearance from foreign pads (the old point-radius let traces cut across
-    // big pads like the IC's exposed pad).
-    var obs: std.ArrayListUnmanaged(PadObs) = .empty;
-    for (placement.nets, 0..) |net, net_i| {
-        for (net.pins) |pin| {
-            const pi = idx_of.get(pin.ref_des) orelse continue;
-            const r = padWorldRect(placement.parts[pi], pin.pin) orelse continue;
-            try obs.append(arena, .{ .x0 = r.x0, .y0 = r.y0, .x1 = r.x1, .y1 = r.y1, .net = @intCast(net_i) });
-        }
-    }
+    // Pad obstacles: *every* pad's rectangle + its net — including pads on no
+    // net (net −1), so a via/trace keeps clearance from NC/mechanical pads too.
+    // Mirrors `drc.zig`'s pad set exactly, so what the router avoids is exactly
+    // what the DRC checks.
+    const obs = try buildObstacles(arena, placement.parts, placement.nets);
 
     // Route each net. Ground → plane vias; others → maze on the signal layers.
     const reach = params.track_width / 2 + params.clearance;
-    var ctx = Ctx{ .arena = arena, .grid = grid, .obs = obs.items, .reach = reach, .occ = occ, .params = params };
+    var ctx = Ctx{ .arena = arena, .grid = grid, .obs = obs, .reach = reach, .occ = occ, .params = params };
     var routed: usize = 0;
     var total: usize = 0;
+
+    // Pass 1: ground/plane nets. Each ground pad drops a via to the GND plane.
+    // The via is placed where it keeps full via-clearance from every *foreign*
+    // pad (and any via already down) — preferring the pad centre, else fanning
+    // outward into open copper and joining it with a short same-net stub, so the
+    // via can't crowd a neighbouring pad (the classic DFN/QFN via-in-pad fail).
+    // Each placed via's clearance halo is stamped into the routing grid on *both*
+    // signal layers, so the maze pass routes foreign copper around it.
     for (placement.nets, 0..) |net, net_i| {
         const pts = try netPoints(arena, placement, &idx_of, net);
         if (pts.len < 2) continue;
+        if (!isGroundName(shortName(net.name))) continue;
         total += 1;
-        if (isGroundName(shortName(net.name))) {
-            for (pts) |c| try vias.append(arena, .{ .x = c[0], .y = c[1], .dia = params.via_dia, .net = @intCast(net_i) });
-            routed += 1;
-            continue;
+        const ni: i32 = @intCast(net_i);
+        for (pts) |c| {
+            const pos = findGroundVia(&ctx, vias.items, c, ni) orelse continue;
+            try vias.append(arena, .{ .x = pos[0], .y = pos[1], .dia = params.via_dia, .net = ni });
+            if (@abs(pos[0] - c[0]) > 1e-6 or @abs(pos[1] - c[1]) > 1e-6) {
+                try tracks.append(arena, .{ .x1 = c[0], .y1 = c[1], .x2 = pos[0], .y2 = pos[1], .layer = 0, .width = params.track_width, .net = ni });
+                stampStubOcc(&ctx, c, pos, ni);
+            }
+            stampViaOcc(&ctx, pos[0], pos[1], ni);
         }
+        routed += 1;
+    }
+
+    // Pass 2: every other multi-pad net, maze-routed on the two signal layers,
+    // now detouring the ground vias stamped in pass 1. Nets are routed in
+    // declared `(placement-order …)` priority (highest first) so a high-priority
+    // rail claims the short path before a low-priority signal can block it — the
+    // router has no rip-up, so first-routed wins. Ties keep net order.
+    const net_pri = try arena.alloc(u32, placement.nets.len);
+    for (placement.nets, 0..) |net, i| net_pri[i] = netPriority(placement, &idx_of, net);
+    var order: std.ArrayListUnmanaged(usize) = .empty;
+    for (placement.nets, 0..) |net, net_i| {
+        if (isGroundName(shortName(net.name))) continue;
+        try order.append(arena, net_i);
+    }
+    std.sort.pdq(usize, order.items, net_pri, priorityDesc);
+    for (order.items) |net_i| {
+        const pts = try netPoints(arena, placement, &idx_of, placement.nets[net_i]);
+        if (pts.len < 2) continue;
+        total += 1;
         if (try routeNet(&ctx, @intCast(net_i), pts, &tracks, &vias)) routed += 1;
     }
 
     // Escape breakouts: the optimizer reserved a corridor in front of every
-    // single-pin signal pad; emit each as a real 2 mm trace stub so the signal
-    // has actual copper leaving the part (not just a placement hint).
+    // single-pin signal pad; emit each as a real trace stub so the signal has
+    // actual copper leaving the part (not just a placement hint). The stub is a
+    // breakout for a *single-pin* net (nothing to connect to on this board), so
+    // it's trimmed to the longest clear prefix from the pad — never crossing a
+    // foreign via or pad — rather than blindly drawing the full 2 mm and
+    // clobbering clearance (the classic via-in-the-stub-path DRC fail).
     for (placement.stubs) |st| {
         const part = placement.parts[st.part];
         const a = optimizer.worldPadCenter(part, st.ax, st.ay);
         const b = optimizer.worldPadCenter(part, st.bx, st.by);
-        try tracks.append(arena, .{ .x1 = a[0], .y1 = a[1], .x2 = b[0], .y2 = b[1], .layer = 0, .width = params.track_width, .net = st.net });
+        const end = trimStub(&ctx, vias.items, a, b, st.net);
+        if (@abs(end[0] - a[0]) < 1e-6 and @abs(end[1] - a[1]) < 1e-6) continue;
+        try tracks.append(arena, .{ .x1 = a[0], .y1 = a[1], .x2 = end[0], .y2 = end[1], .layer = 0, .width = params.track_width, .net = st.net });
     }
 
     return .{
@@ -150,6 +184,7 @@ pub const LoopRouter = struct {
         idx_of: *std.StringHashMap(usize),
         params: RouteParams,
     ) std.mem.Allocator.Error!LoopRouter {
+        _ = idx_of; // obstacles are built straight off `parts` now
         // Bounding box over part courtyards (pads live inside), rotation-aware,
         // then the same grid pitch + 1 mm margin `route` uses.
         var minx: f64 = std.math.inf(f64);
@@ -182,18 +217,11 @@ pub const LoopRouter = struct {
         // Every pad is an obstacle tagged with its net — same indexing as `route`
         // (absolute position in `nets`), so a leg routed on net N treats N's pads
         // as passable (its own copper) and all others as obstacles to detour.
-        var obs: std.ArrayListUnmanaged(PadObs) = .empty;
-        for (nets, 0..) |net, net_i| {
-            for (net.pins) |pin| {
-                const pi = idx_of.get(pin.ref_des) orelse continue;
-                const r = padWorldRect(parts[pi], pin.pin) orelse continue;
-                try obs.append(arena, .{ .x0 = r.x0, .y0 = r.y0, .x1 = r.x1, .y1 = r.y1, .net = @intCast(net_i) });
-            }
-        }
+        const obs = try buildObstacles(arena, parts, nets);
 
         const reach = params.track_width / 2 + params.clearance;
         return .{
-            .ctx = .{ .arena = arena, .grid = grid, .obs = try obs.toOwnedSlice(arena), .reach = reach, .occ = occ, .params = params },
+            .ctx = .{ .arena = arena, .grid = grid, .obs = obs, .reach = reach, .occ = occ, .params = params },
             .ready = true,
         };
     }
@@ -239,28 +267,68 @@ const Grid = struct {
         const fy = std.math.clamp(@round((y - self.oy) / self.g), 0, @as(f64, @floatFromInt(self.ny - 1)));
         return .{ @intFromFloat(fx), @intFromFloat(fy) };
     }
+    /// World coords of the nearest grid node — snapping a via onto the grid so
+    /// the `copperHalo` exclusion (exact only for on-grid centres) holds.
+    fn snap(self: Grid, x: f64, y: f64) [2]f64 {
+        const nd = self.nearest(x, y);
+        return .{ self.worldX(nd[0]), self.worldY(nd[1]) };
+    }
 };
 
 const Rect = struct { x0: f64, y0: f64, x1: f64, y1: f64 };
-
-/// World rect of `pin` on `part` (rotation-aware), or null if absent.
-fn padWorldRect(part: Part, pin: []const u8) ?Rect {
-    for (part.pads) |pad| {
-        if (!std.mem.eql(u8, pad.number, pin)) continue;
-        const c = optimizer.worldPadCenter(part, pad.x, pad.y);
-        const q = @mod(@round(part.rot), 360);
-        const hw = if (q == 90 or q == 270) pad.h / 2 else pad.w / 2;
-        const hh = if (q == 90 or q == 270) pad.w / 2 else pad.h / 2;
-        return .{ .x0 = c[0] - hw, .y0 = c[1] - hh, .x1 = c[0] + hw, .y1 = c[1] + hh };
-    }
-    return null;
-}
 
 /// Distance from a point to an axis-aligned rect (0 if inside).
 fn distPointRect(px: f64, py: f64, r: Rect) f64 {
     const dx = @max(@max(r.x0 - px, px - r.x1), 0);
     const dy = @max(@max(r.y0 - py, py - r.y1), 0);
     return @sqrt(dx * dx + dy * dy);
+}
+
+/// Build the pad-obstacle list: *every* pad of every part, as a world rect
+/// tagged with its flattened-net index (−1 when the pad is on no net). This is
+/// the exact pad set `drc.zig` checks against, so the router avoids precisely
+/// what the DRC flags — connected pads *and* NC/mechanical pads alike.
+fn buildObstacles(arena: std.mem.Allocator, parts: []const Part, nets: []const FlatNet) std.mem.Allocator.Error![]PadObs {
+    var pin_net = std.StringHashMap(i32).init(arena);
+    for (nets, 0..) |net, ni| {
+        for (net.pins) |pin| {
+            const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ pin.ref_des, pin.pin });
+            try pin_net.put(key, @intCast(ni));
+        }
+    }
+    var obs: std.ArrayListUnmanaged(PadObs) = .empty;
+    for (parts) |part| {
+        const q = @mod(@round(part.rot), 360);
+        for (part.pads) |pad| {
+            const c = optimizer.worldPadCenter(part, pad.x, pad.y);
+            const hw = if (q == 90 or q == 270) pad.h / 2 else pad.w / 2;
+            const hh = if (q == 90 or q == 270) pad.w / 2 else pad.h / 2;
+            const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ part.ref_des, pad.number });
+            const net = pin_net.get(key) orelse -1;
+            try obs.append(arena, .{ .x0 = c[0] - hw, .y0 = c[1] - hh, .x1 = c[0] + hw, .y1 = c[1] + hh, .net = net });
+        }
+    }
+    return obs.toOwnedSlice(arena);
+}
+
+/// A net's routing priority: the highest `(placement-order …)` rank among the
+/// parts it touches (0 when none is ranked). Routing the highest-priority nets
+/// first lets them claim the short path before lower-priority signals block it.
+fn netPriority(placement: optimizer.Placement, idx_of: *std.StringHashMap(usize), net: FlatNet) u32 {
+    if (placement.priority.len == 0) return 0;
+    var best: u32 = 0;
+    for (net.pins) |pin| {
+        const pi = idx_of.get(pin.ref_des) orelse continue;
+        if (pi < placement.priority.len and placement.priority[pi] > best) best = placement.priority[pi];
+    }
+    return best;
+}
+
+/// Sort net indices by descending priority, with the net index itself as a
+/// stable tiebreaker (so equal-priority nets keep their original order).
+fn priorityDesc(pri: []const u32, a: usize, b: usize) bool {
+    if (pri[a] != pri[b]) return pri[a] > pri[b];
+    return a < b;
 }
 
 /// World centres (mm) of every resolvable pad on `net`.
@@ -280,6 +348,259 @@ fn padCenter(part: Part, pin: []const u8) ?[2]f64 {
         if (std.mem.eql(u8, pad.number, pin)) return optimizer.worldPadCenter(part, pad.x, pad.y);
     }
     return null;
+}
+
+// ── Via clearance (DRC-safe via placement) ──────────────────────────────────
+
+/// Via copper radius (mm).
+fn viaR(params: RouteParams) f64 {
+    return params.via_dia / 2;
+}
+
+/// Point→axis-aligned-rect distance from raw corner coords (0 if inside).
+fn distPtRect(px: f64, py: f64, x0: f64, y0: f64, x1: f64, y1: f64) f64 {
+    const dx = @max(@max(x0 - px, px - x1), 0);
+    const dy = @max(@max(y0 - py, py - y1), 0);
+    return @sqrt(dx * dx + dy * dy);
+}
+
+/// True if a via of the configured size centred at (x,y) on net `net` keeps the
+/// copper clearance from every *foreign* pad (the via-in-pad crowding rule).
+fn viaClearsPads(ctx: *Ctx, x: f64, y: f64, net: i32) bool {
+    const need = viaR(ctx.params) + ctx.params.clearance;
+    for (ctx.obs) |p| {
+        if (p.net == net) continue;
+        if (distPtRect(x, y, p.x0, p.y0, p.x1, p.y1) < need - 1e-9) return false;
+    }
+    return true;
+}
+
+/// True if a via at (x,y) on net `net` keeps via-to-via clearance from every
+/// already-placed via on a *different* net.
+fn viaClearsVias(ctx: *Ctx, placed: []const Via, x: f64, y: f64, net: i32) bool {
+    const rr = viaR(ctx.params);
+    for (placed) |v| {
+        if (v.net == net) continue;
+        const need = rr + v.dia / 2 + ctx.params.clearance;
+        if (std.math.hypot(x - v.x, y - v.y) < need - 1e-9) return false;
+    }
+    return true;
+}
+
+/// True if point `p` (a `track_width` trace's centreline) keeps clearance from
+/// every foreign pad.
+fn ptClearsPads(ctx: *Ctx, p: [2]f64, net: i32) bool {
+    const need = ctx.params.track_width / 2 + ctx.params.clearance;
+    for (ctx.obs) |o| {
+        if (o.net == net) continue;
+        if (distPtRect(p[0], p[1], o.x0, o.y0, o.x1, o.y1) < need - 1e-9) return false;
+    }
+    return true;
+}
+
+/// True if the same-net stub segment a→b (a real `track_width` trace) keeps
+/// clearance from every foreign pad along its length (sampled).
+fn segClearsPads(ctx: *Ctx, a: [2]f64, b: [2]f64, net: i32) bool {
+    const len = std.math.hypot(b[0] - a[0], b[1] - a[1]);
+    const steps: usize = @max(1, @as(usize, @intFromFloat(@ceil(len / (ctx.grid.g * 0.5)))));
+    var i: usize = 0;
+    while (i <= steps) : (i += 1) {
+        const t = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(steps));
+        if (!ptClearsPads(ctx, .{ a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]) }, net)) return false;
+    }
+    return true;
+}
+
+/// Longest clear prefix of escape stub a→b on net `net`: the farthest point
+/// from the pad `a` such that the whole sub-segment keeps clearance from every
+/// foreign pad and via. Returns `a` itself when even the first step isn't clear
+/// (the caller then drops the stub) — a single-pin breakout has nothing to
+/// connect to, so trimming it never breaks a real connection.
+fn trimStub(ctx: *Ctx, placed: []const Via, a: [2]f64, b: [2]f64, net: i32) [2]f64 {
+    const len = std.math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (len < 1e-9) return a;
+    const step = ctx.grid.g * 0.2;
+    const n: usize = @max(1, @as(usize, @intFromFloat(@ceil(len / step))));
+    // Inflate the clearance by one sample step so a between-sample dip can't slip
+    // a sub-clearance crossing past the sampling.
+    const need = ctx.params.track_width / 2 + ctx.params.clearance + step;
+    var last = a;
+    var i: usize = 1;
+    while (i <= n) : (i += 1) {
+        const t = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(n));
+        const p = [2]f64{ a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]) };
+        var ok = true;
+        for (ctx.obs) |o| {
+            if (o.net == net) continue;
+            if (distPtRect(p[0], p[1], o.x0, o.y0, o.x1, o.y1) < need) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) for (placed) |v| {
+            if (v.net == net) continue;
+            if (std.math.hypot(p[0] - v.x, p[1] - v.y) - v.dia / 2 < need) {
+                ok = false;
+                break;
+            }
+        };
+        if (!ok) break;
+        last = p;
+    }
+    return last;
+}
+
+/// Outward fan direction for a ground via at pad centre `c`: a unit vector
+/// pointing *away* from nearby foreign pads (so the via escapes into open
+/// copper). Falls back to +y when nothing is close.
+fn groundFanDir(ctx: *Ctx, c: [2]f64, net: i32) [2]f64 {
+    var vx: f64 = 0;
+    var vy: f64 = 0;
+    for (ctx.obs) |p| {
+        if (p.net == net) continue;
+        const cx = (p.x0 + p.x1) / 2;
+        const cy = (p.y0 + p.y1) / 2;
+        const dx = c[0] - cx;
+        const dy = c[1] - cy;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < 1e-9 or d2 > 16.0) continue; // ignore pads > 4 mm away
+        vx += dx / d2;
+        vy += dy / d2;
+    }
+    const m = std.math.hypot(vx, vy);
+    if (m < 1e-9) return .{ 0, 1 };
+    return .{ vx / m, vy / m };
+}
+
+/// Angle offset sequence sweeping out from 0: 0, +30°, −30°, +60°, −60°, …
+/// — so the fan search tries directions nearest the outward heading first.
+fn swivel(k: usize) f64 {
+    const step = std.math.pi / 6.0;
+    const mag: f64 = @floatFromInt((k + 1) / 2);
+    const sign: f64 = if (k % 2 == 1) 1 else -1;
+    return sign * mag * step;
+}
+
+/// Find a DRC-safe spot for a ground via serving pad centre `c` on net `net`.
+/// Prefers the pad centre (true via-in-pad — fine on a large exposed pad); if
+/// that crowds a foreign pad/via, fans the via outward into open copper until it
+/// clears, returning that point (the caller joins it with a same-net stub). Null
+/// when no clear spot is found in the search window — the pad is then left
+/// without a via rather than emitting a guaranteed clearance violation.
+fn findGroundVia(ctx: *Ctx, placed: []const Via, c: [2]f64, net: i32) ?[2]f64 {
+    const grid = ctx.grid;
+    // Candidate 0: the pad centre, snapped to the grid (true via-in-pad when
+    // the pad is large enough to clear its neighbours).
+    {
+        const s = grid.snap(c[0], c[1]);
+        if (viaClearsPads(ctx, s[0], s[1], net) and viaClearsVias(ctx, placed, s[0], s[1], net) and segClearsPads(ctx, c, s, net))
+            return s;
+    }
+    // Otherwise fan outward (away from foreign pads) in growing rings, snapping
+    // each candidate to the grid, until one clears every foreign pad and via.
+    const dir = groundFanDir(ctx, c, net);
+    const ang0 = std.math.atan2(dir[1], dir[0]);
+    var ring: usize = 1;
+    while (ring <= 16) : (ring += 1) {
+        const rad = @as(f64, @floatFromInt(ring)) * grid.g;
+        var k: usize = 0;
+        while (k < 12) : (k += 1) {
+            const a = ang0 + swivel(k);
+            const s = grid.snap(c[0] + rad * @cos(a), c[1] + rad * @sin(a));
+            if (!viaClearsPads(ctx, s[0], s[1], net)) continue;
+            if (!viaClearsVias(ctx, placed, s[0], s[1], net)) continue;
+            if (!segClearsPads(ctx, c, s, net)) continue;
+            return s;
+        }
+    }
+    return null;
+}
+
+/// Claim every empty grid node within `dist` (mm) of (x,y) for `net` — on the
+/// top layer, and on both layers when `both`. Existing copper is never
+/// overwritten. Used to reserve a via/stub's clearance halo so the maze pass
+/// keeps foreign copper away from it.
+fn stampDisc(ctx: *Ctx, x: f64, y: f64, net: i32, dist: f64, both: bool) void {
+    const grid = ctx.grid;
+    const r_nodes: i64 = @intFromFloat(@ceil(dist / grid.g));
+    const c = grid.nearest(x, y);
+    const ci: i64 = @intCast(c[0]);
+    const cj: i64 = @intCast(c[1]);
+    var dj: i64 = -r_nodes;
+    while (dj <= r_nodes) : (dj += 1) {
+        var di: i64 = -r_nodes;
+        while (di <= r_nodes) : (di += 1) {
+            const ix = ci + di;
+            const iy = cj + dj;
+            if (ix < 0 or iy < 0 or ix >= grid.nx or iy >= grid.ny) continue;
+            const wx = grid.worldX(@intCast(ix));
+            const wy = grid.worldY(@intCast(iy));
+            if (std.math.hypot(wx - x, wy - y) > dist) continue;
+            const n = @as(usize, @intCast(iy)) * grid.nx + @as(usize, @intCast(ix));
+            if (ctx.occ[0][n] == EMPTY) ctx.occ[0][n] = net;
+            if (both and ctx.occ[1][n] == EMPTY) ctx.occ[1][n] = net;
+        }
+    }
+}
+
+/// Minimal radius (mm) within which a foreign grid node must be excluded so no
+/// foreign track/via comes closer than `D = viaR + track_half + clearance` to a
+/// via centre. A foreign track between two nodes both at radius R dips to
+/// `√(R²−g²/2)` at its closest, so `R = √(D² + g²/2)` is exactly enough — much
+/// tighter than a flat per-node margin, which is what keeps tight parts routable.
+fn copperHalo(ctx: *Ctx) f64 {
+    const d = viaR(ctx.params) + ctx.params.track_width / 2 + ctx.params.clearance;
+    return @sqrt(d * d + ctx.grid.g * ctx.grid.g * 0.5);
+}
+
+/// Reserve a placed via's clearance halo on both signal layers.
+fn stampViaOcc(ctx: *Ctx, x: f64, y: f64, net: i32) void {
+    stampDisc(ctx, x, y, net, copperHalo(ctx), true);
+}
+
+/// Reserve a top-layer ground-via stub's clearance halo along its length, so a
+/// foreign via can't be dropped on top of the stub.
+fn stampStubOcc(ctx: *Ctx, a: [2]f64, b: [2]f64, net: i32) void {
+    const grid = ctx.grid;
+    const d = copperHalo(ctx);
+    const len = std.math.hypot(b[0] - a[0], b[1] - a[1]);
+    const steps: usize = @max(1, @as(usize, @intFromFloat(@ceil(len / (grid.g * 0.5)))));
+    var s: usize = 0;
+    while (s <= steps) : (s += 1) {
+        const t = @as(f64, @floatFromInt(s)) / @as(f64, @floatFromInt(steps));
+        stampDisc(ctx, a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), net, d, false);
+    }
+}
+
+/// May a layer-changing via be dropped at node `n` for net `net`? It must clear
+/// foreign pads by the via clearance and have no foreign copper within its halo
+/// on either layer — so a maze via can never crowd a pad or an already-routed
+/// foreign track/via.
+fn viaAllowed(ctx: *Ctx, n: usize, net: i32) bool {
+    const grid = ctx.grid;
+    const x = grid.worldX(n % grid.nx);
+    const y = grid.worldY(n / grid.nx);
+    if (!viaClearsPads(ctx, x, y, net)) return false;
+    const dist = copperHalo(ctx);
+    const r_nodes: i64 = @intFromFloat(@ceil(dist / grid.g));
+    const ci: i64 = @intCast(n % grid.nx);
+    const cj: i64 = @intCast(n / grid.nx);
+    var dj: i64 = -r_nodes;
+    while (dj <= r_nodes) : (dj += 1) {
+        var di: i64 = -r_nodes;
+        while (di <= r_nodes) : (di += 1) {
+            const ix = ci + di;
+            const iy = cj + dj;
+            if (ix < 0 or iy < 0 or ix >= grid.nx or iy >= grid.ny) continue;
+            const wx = grid.worldX(@intCast(ix));
+            const wy = grid.worldY(@intCast(iy));
+            if (std.math.hypot(wx - x, wy - y) > dist) continue;
+            const m = @as(usize, @intCast(iy)) * grid.nx + @as(usize, @intCast(ix));
+            if (ctx.occ[0][m] != EMPTY and ctx.occ[0][m] != net) return false;
+            if (ctx.occ[1][m] != EMPTY and ctx.occ[1][m] != net) return false;
+        }
+    }
+    return true;
 }
 
 // ── Maze routing ─────────────────────────────────────────────────────────
@@ -400,8 +721,10 @@ fn dijkstra(ctx: *Ctx, net: i32, goal_key: usize, tracks: *std.ArrayListUnmanage
         try relaxDiag(ctx, &pq, dist, prev, net, it.key, layer, ix, iy, 1, -1);
         try relaxDiag(ctx, &pq, dist, prev, net, it.key, layer, ix, iy, -1, 1);
         try relaxDiag(ctx, &pq, dist, prev, net, it.key, layer, ix, iy, -1, -1);
-        // Via to the other signal layer at the same (ix,iy).
-        try relaxStep(ctx, &pq, dist, prev, net, it.key, 1 - layer, n, grid.g * VIA_COST_MULT);
+        // Via to the other signal layer at the same (ix,iy) — only where a via
+        // of the configured size keeps clearance from foreign pads and copper.
+        if (viaAllowed(ctx, n, net))
+            try relaxStep(ctx, &pq, dist, prev, net, it.key, 1 - layer, n, grid.g * VIA_COST_MULT);
     }
 
     const goal = found_key orelse return false;
@@ -498,7 +821,10 @@ fn emitPath(
         if (cur_layer != prev_layer) {
             try emitSeg(ctx, tracks, ks[run_start], ks[i - 1], net);
             const n = ks[i - 1] % nodes;
-            try vias.append(ctx.arena, .{ .x = grid.worldX(n % grid.nx), .y = grid.worldY(n / grid.nx), .dia = ctx.params.via_dia, .net = net });
+            const vx = grid.worldX(n % grid.nx);
+            const vy = grid.worldY(n / grid.nx);
+            try vias.append(ctx.arena, .{ .x = vx, .y = vy, .dia = ctx.params.via_dia, .net = net });
+            stampViaOcc(ctx, vx, vy, net); // reserve its halo for later nets
             run_start = i;
         } else if (i >= 2 and !sameDir(grid, nodes, ks[i - 2], ks[i - 1], ks[i])) {
             try emitSeg(ctx, tracks, ks[run_start], ks[i - 1], net);

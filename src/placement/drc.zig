@@ -224,3 +224,52 @@ test "check ignores a via on the same net as the pad" {
     const v = try check(arena, placement, routed, 0.127);
     try testing.expectEqual(@as(usize, 0), v.len);
 }
+
+// spec: placement/drc - a routed module with a crowded ground pad has no clearance violations
+test "route then check is clean when a ground pad abuts a foreign pad" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+
+    // A hub whose small GND pad (1) sits at 0.4 mm pitch hard against a foreign
+    // VCC pad (2): a via dropped at the GND pad centre (0.4 mm ⌀ ⇒ 0.2 mm
+    // radius) would crowd the VCC pad. The router must fan the via clear so the
+    // fully routed module passes its own clearance DRC.
+    const u_pads = [_]G.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 0.3, .h = 0.3 },
+        .{ .number = "2", .x = 0.4, .y = 0, .w = 0.3, .h = 0.3 },
+    };
+    const c_pads = [_]G.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 0.3, .h = 0.3 },
+        .{ .number = "2", .x = 0.4, .y = 0, .w = 0.3, .h = 0.3 },
+    };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.6, .hh = 0.6, .pads = &u_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.6, .hh = 0.6, .pads = &c_pads, .fallback = false, .x = 4, .y = 0 },
+    };
+    const gnd = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "2" } };
+    const vcc = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "C1", .pin = "1" } };
+    const nets = [_]FlatNet{ .{ .name = "GND", .pins = &gnd }, .{ .name = "VCC", .pins = &vcc } };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -1,
+        .miny = -1,
+        .maxx = 5,
+        .maxy = 1,
+        .generated = true,
+    };
+
+    const routed = try router.route(arena, placement, .{});
+    // Both GND pads are still served by a via (connectivity preserved)…
+    try testing.expect(routed.vias.len >= 2);
+    // …and the routed module has zero clearance violations.
+    const v = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(@as(usize, 0), v.len);
+}

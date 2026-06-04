@@ -223,6 +223,11 @@ pub const Placement = struct {
     stubs: []const Stub,
     instances: []const export_kicad.FlatInstance,
     nets: []const FlatNet,
+    /// Per-part `(placement-order …)` rank (index-aligned with `parts`/
+    /// `instances`): 0 = unranked, higher = earlier in the declared list. The
+    /// router routes higher-priority nets first so they claim the short path.
+    /// Empty when no order was declared (then the router keeps net order).
+    priority: []const u32 = &.{},
     score: Score,
     /// Full objective decomposition (defaults to zero so test fixtures that
     /// build a `Placement` directly needn't supply it).
@@ -325,6 +330,13 @@ pub fn solve(
         // gap so every courtyard abuts at least one neighbour (provably tight),
         // highest placement-order priority docking first.
         compactToContact(parts, prep.priority);
+        // Then tuck each *declared-priority* decoupling cap onto its IC pin: a
+        // per-cap wide-window search the global optimizer's balanced objective
+        // (and the polish's small window) can't do — so an author-ranked bypass
+        // cap actually hugs its power pin instead of settling a millimetre off.
+        // Each tuck is re-routed and reverted if it would drop a net, so the
+        // tightening can never make routing worse.
+        tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
     }
 
     // Headline score's loop length: the *real* routed-trace sum on interactive
@@ -338,7 +350,7 @@ pub fn solve(
         break :blk routed.weighted;
     } else surrogateLoops(parts, built.loops).weighted;
     const bd = breakdownWith(parts, params, score, loop_weighted);
-    return finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, score, bd, generated);
+    return finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, generated);
 }
 
 /// Score an arbitrary set of part poses with the optimizer's *own* objective —
@@ -673,6 +685,158 @@ fn compactToContact(parts: []Part, priority: []const u32) void {
         settled[i] = true;
         growSettled(parts, settled);
     }
+}
+
+/// Half-window (grid cells) the priority-cap tuck scans — wider than the polish
+/// window so a bypass cap can be pulled the full width of a small IC onto its
+/// pin (±`TIGHTEN_CELLS`·`GRID_MM` ≈ ±2.8 mm).
+const TIGHTEN_CELLS: i64 = 14;
+
+/// Tuck every *declared-priority* decoupling cap onto its IC pin. For each loop
+/// whose cap was ranked in a `(placement-order …)` (priority > 0), greedily
+/// search the cap's (position × rotation) over a wide grid window for the spot
+/// that minimizes *its own* hot loop (power leg + ground return), collision-
+/// checked. Highest-priority caps tuck first, so when several share a rail the
+/// most important one claims the pin and the rest stack behind it. The search
+/// starts from the current pose as the incumbent, so a cap's loop can only get
+/// shorter — never worse. Each accepted tuck is re-routed and reverted if it
+/// would drop a net, so tightening can never reduce routability. No-op on big
+/// boards / when nothing is ranked.
+fn tightenPriorityLoops(arena: std.mem.Allocator, parts: []Part, loops: []const Loop, nets: []const FlatNet, priority: []const u32) void {
+    if (parts.len < 2 or parts.len > MULTISTART_MAX_PARTS) return;
+    if (loops.len > maxParts) return;
+    // Nothing ranked ⇒ skip entirely (don't even pay for the baseline route).
+    var any = false;
+    for (loops) |lp| {
+        if (lp.cap < priority.len and priority[lp.cap] > 0) any = true;
+    }
+    if (!any) return;
+    // Process loops in descending cap priority (highest first).
+    var order_buf: [maxParts]usize = undefined;
+    const order = order_buf[0..loops.len];
+    for (order, 0..) |*o, i| o.* = i;
+    std.sort.pdq(usize, order, LoopPriCtx{ .loops = loops, .priority = priority }, loopPriDesc);
+    var baseline = routedCount(arena, parts, nets);
+    for (order) |li| {
+        const lp = loops[li];
+        if (lp.cap >= priority.len or priority[lp.cap] == 0) continue;
+        const p = &parts[lp.cap];
+        const sx = p.x;
+        const sy = p.y;
+        const sr = p.rot;
+        tuckCap(parts, lp);
+        if (p.x == sx and p.y == sy and p.rot == sr) continue; // no move found
+        const rc = routedCount(arena, parts, nets);
+        if (rc < baseline) {
+            p.x = sx; // the tuck would cost a net — back it out
+            p.y = sy;
+            p.rot = sr;
+        } else {
+            baseline = rc;
+        }
+    }
+}
+
+/// How many multi-pad nets the in-tool router connects for the current part
+/// poses — used to veto a tuck that would drop a net. Builds a throwaway
+/// `Placement` (no links/loops/stubs needed) and routes it; 0 if it can't grid.
+fn routedCount(arena: std.mem.Allocator, parts: []Part, nets: []const FlatNet) usize {
+    var minx: f64 = std.math.inf(f64);
+    var miny: f64 = std.math.inf(f64);
+    var maxx: f64 = -std.math.inf(f64);
+    var maxy: f64 = -std.math.inf(f64);
+    for (parts) |p| {
+        minx = @min(minx, keepCx(p) - keepHw(p));
+        miny = @min(miny, keepCy(p) - keepHh(p));
+        maxx = @max(maxx, keepCx(p) + keepHw(p));
+        maxy = @max(maxy, keepCy(p) + keepHh(p));
+    }
+    if (!std.math.isFinite(minx)) return 0;
+    const pl = Placement{
+        .parts = parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = minx,
+        .miny = miny,
+        .maxx = maxx,
+        .maxy = maxy,
+        .generated = true,
+    };
+    const r = router.route(arena, pl, .{}) catch return 0;
+    return r.routed;
+}
+
+const LoopPriCtx = struct { loops: []const Loop, priority: []const u32 };
+
+/// Order loops by descending cap priority (stable by loop index on ties).
+fn loopPriDesc(ctx: LoopPriCtx, a: usize, b: usize) bool {
+    const pa: u32 = if (ctx.loops[a].cap < ctx.priority.len) ctx.priority[ctx.loops[a].cap] else 0;
+    const pb: u32 = if (ctx.loops[b].cap < ctx.priority.len) ctx.priority[ctx.loops[b].cap] else 0;
+    if (pa != pb) return pa > pb;
+    return a < b;
+}
+
+/// Greedily move `lp`'s cap to the pose (over a wide grid window × the four
+/// rotations) that minimizes its power-leg cost — constrained to be collision-
+/// free *and* still docked against a neighbour, so the cap tightens onto its IC
+/// pin without floating off into a routing channel.
+fn tuckCap(parts: []Part, lp: Loop) void {
+    const p = &parts[lp.cap];
+    const ox = p.x;
+    const oy = p.y;
+    var best = loopLen(parts, lp);
+    var bx = ox;
+    var by = oy;
+    var br = p.rot;
+    for (ROT_CAND) |r| {
+        var dy: i64 = -TIGHTEN_CELLS;
+        while (dy <= TIGHTEN_CELLS) : (dy += 1) {
+            var dx: i64 = -TIGHTEN_CELLS;
+            while (dx <= TIGHTEN_CELLS) : (dx += 1) {
+                p.rot = r;
+                p.x = ox + @as(f64, @floatFromInt(dx)) * GRID_MM;
+                p.y = oy + @as(f64, @floatFromInt(dy)) * GRID_MM;
+                if (overlapsAny(parts, p)) continue;
+                if (!touchesOther(parts, p, lp.cap)) continue; // stay docked
+                const c = loopLen(parts, lp);
+                if (c < best - 1e-9) {
+                    best = c;
+                    bx = p.x;
+                    by = p.y;
+                    br = r;
+                }
+            }
+        }
+    }
+    p.x = bx;
+    p.y = by;
+    p.rot = br;
+}
+
+/// True if part `p` (at its current pose) shares a courtyard edge with some part
+/// other than itself — i.e. it's docked against the blob, not floating.
+fn touchesOther(parts: []const Part, p: *const Part, self_idx: usize) bool {
+    for (parts, 0..) |o, j| {
+        if (j == self_idx) continue;
+        if (courtyardEdge(p.*, o)) return true;
+    }
+    return false;
+}
+
+/// Weight the ground-return span gets in the tuck cost. On this 4-layer stack
+/// the cap's ground return is a *via to the GND plane* (negligible copper), so
+/// the real routed copper the author sees is the power leg — that dominates;
+/// the small ground term only breaks ties toward a sane cap orientation.
+const TUCK_GND_W: f64 = 0.15;
+
+/// Tuck cost for one cap: its power leg (the real routed supply trace, cap power
+/// pad → its pinned IC power pad) plus a light ground-span tiebreaker.
+fn loopLen(parts: []const Part, lp: Loop) f64 {
+    return surrogatePwrLeg(parts, lp) + TUCK_GND_W * loopGroundSpan(parts, lp);
 }
 
 /// Index of the part closest to the cluster centroid — the blob seed when a
@@ -2291,6 +2455,7 @@ fn finalize(
     stubs: []const Stub,
     instances: []const export_kicad.FlatInstance,
     nets: []const FlatNet,
+    priority: []const u32,
     score: Score,
     breakdown: Breakdown,
     generated: bool,
@@ -2334,6 +2499,7 @@ fn finalize(
         .stubs = stubs,
         .instances = instances,
         .nets = nets,
+        .priority = priority,
         .score = score,
         .breakdown = breakdown,
         .minx = minx,

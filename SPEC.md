@@ -105,6 +105,7 @@ Public functions: check
 
 - flags a via that crowds a foreign pad's clearance
 - passes a via that shares the pad's net
+- a routed module with a crowded ground pad has no clearance violations
 
 ## placement/pin_roles
 
