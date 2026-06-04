@@ -188,9 +188,11 @@ fn writePadsAndCourtyard(
     }
 }
 
-/// Emit one `(pad …)` form as `{x,y,w,h,shape,type}`. Handles both the
+/// Emit one `(pad …)` form as `{x,y,w,h,shape,type,drill}`. Handles both the
 /// numbered (`(pad "1" smd rect …)`) and unnumbered (`(pad npth circle …)`)
-/// syntactic forms. Skips pads without a `(pos …)`.
+/// syntactic forms. `drill` is the hole diameter in mm (0 for SMD pads), so
+/// the viewer can cut the board + draw the plating barrel for through-holes.
+/// Skips pads without a `(pos …)`.
 fn writePadJson(w: *std.Io.Writer, pad: ast.Node, first: *bool) !void {
     const nodes = pad.asList() orelse return;
     if (nodes.len < 3) return;
@@ -206,6 +208,7 @@ fn writePadJson(w: *std.Io.Writer, pad: ast.Node, first: *bool) !void {
     var y: f64 = 0;
     var w_mm: f64 = 0;
     var h_mm: f64 = 0;
+    var drill: f64 = 0;
     var has_pos = false;
     for (nodes[shape_idx + 1 ..]) |n| {
         if (n.isForm("pos")) {
@@ -221,6 +224,13 @@ fn writePadJson(w: *std.Io.Writer, pad: ast.Node, first: *bool) !void {
                 w_mm = sl[1].asNumber() orelse 0;
                 h_mm = sl[2].asNumber() orelse 0;
             }
+        } else if (n.isForm("drill")) {
+            const dl = n.asList().?;
+            // `(drill D)` scalar, or `(drill oval X Y)` — use the first numeric
+            // token as the bore diameter (oval bores render as a round hole).
+            if (dl.len >= 2) {
+                drill = dl[1].asNumber() orelse (if (dl.len >= 3) dl[2].asNumber() orelse 0 else 0);
+            }
         }
     }
     if (!has_pos) return;
@@ -228,8 +238,8 @@ fn writePadJson(w: *std.Io.Writer, pad: ast.Node, first: *bool) !void {
     if (!first.*) try w.writeAll(",");
     first.* = false;
     try w.print(
-        "{{\"x\":{d:.4},\"y\":{d:.4},\"w\":{d:.4},\"h\":{d:.4},\"shape\":\"{s}\",\"type\":\"{s}\"}}",
-        .{ x, y, w_mm, h_mm, shape, ptype },
+        "{{\"x\":{d:.4},\"y\":{d:.4},\"w\":{d:.4},\"h\":{d:.4},\"shape\":\"{s}\",\"type\":\"{s}\",\"drill\":{d:.4}}}",
+        .{ x, y, w_mm, h_mm, shape, ptype, drill },
     );
 }
 

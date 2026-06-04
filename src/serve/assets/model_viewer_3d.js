@@ -61,36 +61,66 @@
   function grow(x, y) { if (x < bb.minx) bb.minx = x; if (x > bb.maxx) bb.maxx = x; if (y < bb.miny) bb.miny = y; if (y > bb.maxy) bb.maxy = y; }
 
   var padMat = new THREE.MeshStandardMaterial({ color: 0xd9a441, metalness: 0.85, roughness: 0.35 });
-  var holeMat = new THREE.MeshStandardMaterial({ color: 0x111417, metalness: 0.2, roughness: 0.9 });
+  // Copper plating barrel (PTH) vs bare dark wall (NPTH) lining a drilled bore.
+  var barrelMat = new THREE.MeshStandardMaterial({ color: 0xd9a441, metalness: 0.9, roughness: 0.3, side: THREE.DoubleSide });
+  var npthMat = new THREE.MeshStandardMaterial({ color: 0x0b0e11, metalness: 0.1, roughness: 1.0, side: THREE.DoubleSide });
+  var boardMat = new THREE.MeshStandardMaterial({ color: 0x1c5c33, metalness: 0.1, roughness: 0.8 });
+
+  function isNpth(p) { return p.type === "npth" || p.type === "np_thru" || p.type === "np_thru_hole"; }
+  // Pad copper outline as a THREE.Shape (rect or circle) centred at (sx,sy).
+  function padOutline(p, sx, sy) {
+    var s = new THREE.Shape();
+    if (p.shape === "circle") { s.absarc(sx, sy, Math.max(p.w, p.h) / 2, 0, Math.PI * 2, false); return s; }
+    var hw = p.w / 2, hh = p.h / 2;
+    s.moveTo(sx - hw, sy - hh); s.lineTo(sx + hw, sy - hh); s.lineTo(sx + hw, sy + hh); s.lineTo(sx - hw, sy + hh); s.lineTo(sx - hw, sy - hh);
+    return s;
+  }
+
+  // Pass 1: footprint bounds + collect drilled bores (for cutting the board).
+  var drills = [];
   pads.forEach(function (p) {
     var sx = p.x, sy = -p.y; // flip Y to scene frame
     grow(sx - p.w / 2, sy - p.h / 2); grow(sx + p.w / 2, sy + p.h / 2);
-    var isHole = p.type === "npth" || p.type === "np_thru" || p.type === "np_thru_hole";
-    var geo, mesh;
-    if (p.shape === "circle" || isHole) {
-      geo = new THREE.CylinderGeometry(Math.max(p.w, p.h) / 2, Math.max(p.w, p.h) / 2, PAD_T + 0.02, 24);
-      mesh = new THREE.Mesh(geo, isHole ? holeMat : padMat);
-      mesh.rotation.x = Math.PI / 2; // cylinder axis Y → Z
-    } else {
-      geo = new THREE.BoxGeometry(p.w, p.h, PAD_T);
-      mesh = new THREE.Mesh(geo, padMat);
-    }
-    mesh.position.set(sx, sy, PAD_T / 2);
-    padGroup.add(mesh);
+    if (p.drill > 0) drills.push({ sx: sx, sy: sy, r: p.drill / 2 });
   });
-
-  if (D.courtyard) {
-    var c = D.courtyard;
-    grow(c.x1, -c.y1); grow(c.x2, -c.y2);
-  }
+  if (D.courtyard) { var c = D.courtyard; grow(c.x1, -c.y1); grow(c.x2, -c.y2); }
   if (!isFinite(bb.minx)) { bb = { minx: -2, miny: -2, maxx: 2, maxy: 2 }; }
 
   var bw = Math.max(bb.maxx - bb.minx, 1), bh = Math.max(bb.maxy - bb.miny, 1);
-  var pad = 0.6;
-  var boardGeo = new THREE.BoxGeometry(bw + pad * 2, bh + pad * 2, BOARD_T);
-  var boardMesh = new THREE.Mesh(boardGeo, new THREE.MeshStandardMaterial({ color: 0x1c5c33, metalness: 0.1, roughness: 0.8 }));
-  boardMesh.position.set((bb.minx + bb.maxx) / 2, (bb.miny + bb.maxy) / 2, -BOARD_T / 2);
+  var margin = 0.6;
+  // Board as an extruded outline with a real hole punched per drilled bore.
+  var x0 = bb.minx - margin, y0 = bb.miny - margin, x1 = bb.maxx + margin, y1 = bb.maxy + margin;
+  var boardShape = new THREE.Shape();
+  boardShape.moveTo(x0, y0); boardShape.lineTo(x1, y0); boardShape.lineTo(x1, y1); boardShape.lineTo(x0, y1); boardShape.lineTo(x0, y0);
+  drills.forEach(function (d) {
+    var h = new THREE.Path(); h.absarc(d.sx, d.sy, d.r, 0, Math.PI * 2, true); boardShape.holes.push(h);
+  });
+  var boardGeo = new THREE.ExtrudeGeometry(boardShape, { depth: BOARD_T, bevelEnabled: false, curveSegments: 24 });
+  var boardMesh = new THREE.Mesh(boardGeo, boardMat);
+  boardMesh.position.z = -BOARD_T; // extrude spans 0..BOARD_T → drop so the top sits at z=0
   boardGroup.add(boardMesh);
+
+  // Pass 2: pad copper. SMD = flat disc/box; through-hole = annular ring (with
+  // the bore punched out) + a plating barrel lining the hole through the board.
+  pads.forEach(function (p) {
+    var sx = p.x, sy = -p.y;
+    if (p.drill > 0) {
+      if (!isNpth(p)) { // plated: copper ring on top + copper barrel
+        var ring = padOutline(p, sx, sy);
+        var rh = new THREE.Path(); rh.absarc(sx, sy, p.drill / 2, 0, Math.PI * 2, true); ring.holes.push(rh);
+        padGroup.add(new THREE.Mesh(new THREE.ExtrudeGeometry(ring, { depth: PAD_T, bevelEnabled: false, curveSegments: 24 }), padMat));
+      }
+      var wall = new THREE.Mesh(new THREE.CylinderGeometry(p.drill / 2, p.drill / 2, BOARD_T, 24, 1, true), isNpth(p) ? npthMat : barrelMat);
+      wall.rotation.x = Math.PI / 2; wall.position.set(sx, sy, -BOARD_T / 2);
+      padGroup.add(wall);
+    } else if (p.shape === "circle") {
+      var cm = new THREE.Mesh(new THREE.CylinderGeometry(Math.max(p.w, p.h) / 2, Math.max(p.w, p.h) / 2, PAD_T, 24), padMat);
+      cm.rotation.x = Math.PI / 2; cm.position.set(sx, sy, PAD_T / 2); padGroup.add(cm);
+    } else {
+      var bm = new THREE.Mesh(new THREE.BoxGeometry(p.w, p.h, PAD_T), padMat);
+      bm.position.set(sx, sy, PAD_T / 2); padGroup.add(bm);
+    }
+  });
 
   var center = new THREE.Vector3((bb.minx + bb.maxx) / 2, (bb.miny + bb.maxy) / 2, 0);
   var span = Math.max(bw, bh, 4);
