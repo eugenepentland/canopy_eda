@@ -60,6 +60,10 @@ pub fn renderToHtml(
     status: review.Status,
     review_doc: ?review.ReviewDoc,
     check_results: *const CheckResultMap,
+    // Route prefix for *this* schematic view ("/schematics/" for designs,
+    // "/modules/" for reusable modules). Drives the active link in the
+    // Schematic ⇄ PCB Layout switcher; the PCB side is always "/pcb-layout/".
+    schematic_path: []const u8,
 ) RenderError![]const u8 {
     var ctx = try setupRenderCtx(allocator, block);
     ctx.project_dir = project_dir;
@@ -82,7 +86,7 @@ pub fn renderToHtml(
     try pages_tmpl.Navbar.render(.{""}, w);
     try w.writeAll("<div class=\"sch-layout\">");
     try w.writeAll("<div class=\"sch-wrap\">");
-    try writeHeader(w, block.name, design_name, status);
+    try writeHeader(w, block.name, design_name, status, schematic_path);
 
     // Pair top-level `(sub-block …)` declarations with the section that wires
     // them (e.g. `(section "XSPI2 NOR Flash" …)` adopts `(sub-block "flash" …)`)
@@ -210,7 +214,7 @@ pub fn renderToHtml(
     return aw.written();
 }
 
-fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: review.Status) !void {
+fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: review.Status, schematic_path: []const u8) !void {
     const banner_class: []const u8 = switch (status) {
         .pass => "banner banner-pass",
         .warn => "banner banner-warn",
@@ -229,6 +233,14 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
     try w.writeAll(".sexp</code></div></div>");
     try w.print("<div class=\"{s}\">{s}</div>", .{ banner_class, banner_label });
     try w.writeAll("<div class=\"head-links\">");
+    // Schematic ⇄ PCB Layout switcher (Schematic active here). Same control
+    // the PCB page renders, so the two views feel like one screen.
+    try w.print(
+        "<nav class=\"viewtoggle\" aria-label=\"View\">" ++
+            "<a class=\"active\" href=\"{s}{s}\">Schematic</a>" ++
+            "<a href=\"/pcb-layout/{s}\">PCB Layout</a></nav>",
+        .{ schematic_path, design_name, design_name },
+    );
     try w.writeAll(
         "<button class=\"head-link head-btn\" id=\"reload-btn\" type=\"button\" " ++
             "title=\"Re-read the .sexp source from disk and rebuild\">\u{21BB} Reload</button>",

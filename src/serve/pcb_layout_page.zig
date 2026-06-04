@@ -160,7 +160,19 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     try w.writeAll("<div class=\"pcb-layout\">");
     try writeSidebar(w, ctx.allocator, placement);
     try w.writeAll("<main class=\"pcb-main\">");
-    try w.print("<h1>{s} — PCB Layout <span class=\"pcb-sub\">(force-directed · drag to edit)</span></h1>", .{block.name});
+    // Header row: title + the Schematic ⇄ PCB Layout switcher (PCB active).
+    // `name` resolves as a design under src/ first, else a reusable module —
+    // so the Schematic link points at the matching viewer.
+    const schematic_path: []const u8 = if (module_res != null) "/modules/" else "/schematics/";
+    try w.writeAll("<div class=\"pcb-head\">");
+    try w.print("<h1>{s} <span class=\"pcb-sub\">PCB Layout · force-directed · drag to edit</span></h1>", .{block.name});
+    try w.print(
+        "<nav class=\"viewtoggle\" aria-label=\"View\">" ++
+            "<a href=\"{s}{s}\">Schematic</a>" ++
+            "<a class=\"active\" href=\"/pcb-layout/{s}\">PCB Layout</a></nav>",
+        .{ schematic_path, name, name },
+    );
+    try w.writeAll("</div>");
     try writeScorebar(w, placement, name);
     const auto_score = LayoutScore{
         .hpwl = placement.score.hpwl_mm,
@@ -459,6 +471,71 @@ pub fn deleteNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     writeLayouts(req.arena, ctx.project_dir, name, out.items);
     res.content_type = .JSON;
     res.body = OK_JSON_TRUE;
+}
+
+/// POST /api/pcb-rescore/:name — recompute every saved layout's objective with
+/// the *current* engine and persist the refreshed scores to `.layouts.json`.
+///
+/// Each saved layout stores the score the engine produced when it was captured;
+/// after the placement/scoring code changes those numbers go stale, so the
+/// panel's "Δ vs auto" compares an old-engine saved score against a fresh-engine
+/// auto baseline (the page-load `solve` always re-scores the auto layout). This
+/// re-runs `scorePoses` on each layout's stored part positions so every entry is
+/// measured by the live engine again, making the column comparable. Body is
+/// ignored; returns `{"ok":true,"rescored":N}`. A layout with no stored parts,
+/// or one whose scoring fails, keeps its previous score.
+pub fn rescoreLayoutsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const existing = readLayouts(req.arena, ctx.project_dir, name);
+    if (existing.len == 0) {
+        res.content_type = .JSON;
+        res.body = "{\"ok\":true,\"rescored\":0}";
+        return;
+    }
+
+    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |mr| {
+        mr.eval.deinit();
+        ctx.allocator.destroy(mr.eval);
+    };
+    const block: *env_mod.DesignBlock = resolveBlock(ctx, name, &eval, &module_res) orelse {
+        res.status = 500;
+        res.body = NO_BLOCK_MSG;
+        return;
+    };
+
+    // Same weights the on-screen auto baseline uses, so the refreshed saved
+    // scores are directly comparable to it (the panel's delta is auto-relative).
+    const params = readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{};
+
+    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    var n: usize = 0;
+    for (existing) |L| {
+        var updated = L;
+        if (L.parts.len > 0) {
+            const poses = try req.arena.alloc(optimizer.RefPose, L.parts.len);
+            for (L.parts, 0..) |p, i| poses[i] = .{ .ref = p.ref, .x = p.x, .y = p.y, .rot = p.rot };
+            if (optimizer.scorePoses(req.arena, block, ctx.project_dir, poses, params)) |bd| {
+                updated.score = .{
+                    .hpwl = bd.hpwl,
+                    .loop = bd.loop_raw,
+                    .caps = if (L.score) |s| s.caps else 0,
+                    .objective = bd.objective,
+                };
+                n += 1;
+            } else |_| {}
+        }
+        try out.append(req.arena, updated);
+    }
+    writeLayouts(req.arena, ctx.project_dir, name, out.items);
+
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"rescored\":{d}}}", .{n});
 }
 
 /// Parse the request body as a JSON object, setting a 400 and returning null on
@@ -1117,8 +1194,17 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8) st
 /// of (HPWL+loop) versus the layout currently on screen (`auto`). The Load /
 /// delete buttons carry the layout name in data attributes for BOARD_JS.
 fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: LayoutScore) std.Io.Writer.Error!void {
-    try w.writeAll("<div class=\"pcb-saved\"><div class=\"saved-h\">Saved layouts <span class=\"saved-n\">");
-    try w.print("{d}</span></div>", .{layouts.len});
+    try w.writeAll("<div class=\"pcb-saved\"><div class=\"saved-h\"><span>Saved layouts <span class=\"saved-n\">");
+    try w.print("{d}</span></span>", .{layouts.len});
+    if (layouts.len > 0) {
+        try w.writeAll(
+            "<button class=\"saved-rescore\" id=\"pcb-rescore\" " ++
+                "title=\"Recompute every saved layout's objective with the current engine — " ++
+                "use after changing the placement/scoring code to see how old layouts score now\">" ++
+                "↻ Rescore all</button>",
+        );
+    }
+    try w.writeAll("</div>");
     if (layouts.len == 0) {
         try w.writeAll("<div class=\"saved-empty\">None yet — drag parts then <b>Save as…</b>, or hit Regenerate to record one.</div></div>");
         return;
@@ -1604,108 +1690,120 @@ const COURTYARD_MODAL =
 // ── Styles + client renderer ─────────────────────────────────────────────
 
 const PAGE_CSS =
-    \\.pcb-layout{display:flex;gap:16px;align-items:flex-start;max-width:1500px;margin:0 auto;padding:12px 18px;font-family:system-ui,sans-serif}
+    \\html,body{margin:0;background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    \\a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}
+    \\.pcb-layout{display:flex;gap:16px;align-items:flex-start;max-width:1500px;margin:0 auto;padding:12px 18px}
     \\.pcb-main{flex:1;min-width:0}
-    \\.pcb-main h1{font-size:18px;font-weight:600;margin:4px 0}
-    \\.pcb-sub{font-size:13px;font-weight:400;color:#94a3b8}
+    \\.pcb-head{display:flex;align-items:center;gap:12px;margin:6px 0 2px;flex-wrap:wrap}
+    \\.pcb-head h1{flex:1;min-width:0}
+    \\.pcb-main h1{font-size:18px;font-weight:600;margin:4px 0;color:#f0f6fc}
+    \\.pcb-sub{font-size:13px;font-weight:400;color:#8b949e}
     \\.pcb-bar{display:flex;gap:10px;align-items:center;margin:8px 0;flex-wrap:wrap}
-    \\.pcb-bar .score{font-weight:600;color:#1e293b;background:#f1f5f9;border-radius:4px;padding:2px 8px}
-    \\.pcb-bar .sc-sub{font-weight:500;font-size:12px;color:#475569;background:#f8fafc}
+    \\.pcb-bar .score{font-weight:600;color:#e6edf3;background:#161b22;border:1px solid #21262d;border-radius:4px;padding:2px 8px}
+    \\.pcb-bar .sc-sub{font-weight:500;font-size:12px;color:#8b949e;background:#0d1117}
     \\.pcb-bar .delta{font-size:12px;font-weight:600;min-width:34px}
-    \\.pcb-bar .delta.up{color:#dc2626}
-    \\.pcb-bar .delta.down{color:#16a34a}
-    \\.pcb-bar .btn{font:inherit;font-size:12px;border:1px solid #cbd5e1;background:#fff;border-radius:5px;
-    \\  padding:3px 9px;cursor:pointer;text-decoration:none;color:#1e293b;display:inline-block}
-    \\.pcb-bar .btn:hover{background:#f8fafc}
+    \\.pcb-bar .delta.up{color:#f85149}
+    \\.pcb-bar .delta.down{color:#3fb950}
+    \\.pcb-bar .btn{font:inherit;font-size:12px;border:1px solid #30363d;background:#21262d;border-radius:5px;
+    \\  padding:3px 9px;cursor:pointer;text-decoration:none;color:#c9d1d9;display:inline-block}
+    \\.pcb-bar .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
     \\.pcb-bar .btn:disabled{opacity:.45;cursor:default}
     \\.pcb-bar .zoom-grp{display:inline-flex;gap:4px}
     \\.pcb-bar .zoom-grp .btn{min-width:26px;text-align:center;padding:3px 7px}
-    \\.pcb-bar .savemsg{font-size:12px;color:#16a34a;font-weight:600}
-    \\.pcb-bar .muted{font-size:11.5px;color:#94a3b8}
-    \\.pcb-saved{margin:2px 0 10px;border:1px solid #e2e8f0;border-radius:8px;background:#fff;overflow:hidden}
-    \\.pcb-saved .saved-h{font-size:12px;font-weight:700;color:#1e293b;padding:6px 10px;background:#f8fafc;border-bottom:1px solid #eef2f7}
-    \\.pcb-saved .saved-n{color:#94a3b8;font-weight:400}
-    \\.pcb-saved .saved-empty{font-size:12px;color:#94a3b8;padding:8px 10px}
+    \\.pcb-bar .savemsg{font-size:12px;color:#3fb950;font-weight:600}
+    \\.pcb-bar .muted{font-size:11.5px;color:#6e7681}
+    \\.pcb-saved{margin:2px 0 10px;border:1px solid #21262d;border-radius:8px;background:#161b22;overflow:hidden}
+    \\.pcb-saved .saved-h{font-size:12px;font-weight:700;color:#f0f6fc;padding:6px 10px;background:#0d1117;border-bottom:1px solid #21262d;
+    \\  display:flex;align-items:center;justify-content:space-between;gap:8px}
+    \\.saved-rescore{font:inherit;font-size:11px;font-weight:600;border:1px solid #30363d;background:#21262d;color:#c9d1d9;
+    \\  border-radius:5px;padding:2px 9px;cursor:pointer}
+    \\.saved-rescore:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
+    \\.saved-rescore:disabled{opacity:.5;cursor:default}
+    \\.pcb-saved .saved-n{color:#8b949e;font-weight:400}
+    \\.pcb-saved .saved-empty{font-size:12px;color:#8b949e;padding:8px 10px}
     \\.saved-list{display:flex;flex-direction:column;max-height:220px;overflow:auto}
-    \\.lay-row{display:flex;gap:8px;align-items:center;padding:5px 10px;border-bottom:1px solid #f1f5f9;font-size:12px}
+    \\.lay-row{display:flex;gap:8px;align-items:center;padding:5px 10px;border-bottom:1px solid #21262d;font-size:12px}
     \\.lay-row:last-child{border-bottom:0}
     \\.lay-kind{font-size:9.5px;font-weight:700;border-radius:3px;padding:1px 5px;letter-spacing:.03em}
-    \\.lay-kind.k-man{background:#dbeafe;color:#1d4ed8}
-    \\.lay-kind.k-auto{background:#f1f5f9;color:#64748b}
-    \\.lay-name{font-weight:600;color:#1e293b;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    \\.lay-score{color:#475569;white-space:nowrap}
+    \\.lay-kind.k-man{background:#14365c;color:#79c0ff}
+    \\.lay-kind.k-auto{background:#21262d;color:#8b949e}
+    \\.lay-name{font-weight:600;color:#e6edf3;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    \\.lay-score{color:#8b949e;white-space:nowrap}
     \\.lay-d{font-weight:600;min-width:36px;text-align:right}
-    \\.lay-d.up{color:#dc2626}
-    \\.lay-d.down{color:#16a34a}
-    \\.lay-row .btn{font:inherit;font-size:11px;border:1px solid #cbd5e1;background:#fff;border-radius:5px;padding:2px 8px;cursor:pointer;color:#1e293b}
-    \\.lay-row .btn:hover{background:#f8fafc}
-    \\.lay-row .lay-del{color:#dc2626;border-color:#fca5a5;padding:2px 7px}
-    \\.pcb-tune{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#475569}
-    \\.pcb-tune .tune-h{font-weight:700;color:#1e293b}
+    \\.lay-d.up{color:#f85149}
+    \\.lay-d.down{color:#3fb950}
+    \\.lay-row .btn{font:inherit;font-size:11px;border:1px solid #30363d;background:#21262d;border-radius:5px;padding:2px 8px;cursor:pointer;color:#c9d1d9}
+    \\.lay-row .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
+    \\.lay-row .lay-del{color:#f85149;border-color:#5b1e28;padding:2px 7px}
+    \\.lay-row .lay-del:hover{background:#30363d;border-color:#f85149;color:#ffa198}
+    \\.pcb-tune{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#8b949e}
+    \\.pcb-tune .tune-h{font-weight:700;color:#f0f6fc}
     \\.pcb-tune label{display:flex;gap:4px;align-items:center}
-    \\.pcb-tune input[type=number]{width:54px;font:inherit;font-size:12px;border:1px solid #cbd5e1;border-radius:4px;padding:2px 4px}
-    \\.pcb-tune .muted{font-size:11px;color:#94a3b8}
-    \\.pcb-route{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#475569}
-    \\.pcb-route .tune-h{font-weight:700;color:#1e293b}
+    \\.pcb-tune input[type=number]{width:54px;font:inherit;font-size:12px;border:1px solid #30363d;
+    \\  background:#0d1117;color:#c9d1d9;border-radius:4px;padding:2px 4px}
+    \\.pcb-tune .muted{font-size:11px;color:#6e7681}
+    \\.pcb-route{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#8b949e}
+    \\.pcb-route .tune-h{font-weight:700;color:#f0f6fc}
     \\.pcb-route label{display:flex;gap:4px;align-items:center}
-    \\.pcb-route input[type=number]{width:54px;font:inherit;font-size:12px;border:1px solid #cbd5e1;border-radius:4px;padding:2px 4px}
-    \\.pcb-route .muted{font-size:11px;color:#94a3b8}
+    \\.pcb-route input[type=number]{width:54px;font:inherit;font-size:12px;border:1px solid #30363d;
+    \\  background:#0d1117;color:#c9d1d9;border-radius:4px;padding:2px 4px}
+    \\.pcb-route .muted{font-size:11px;color:#6e7681}
     \\.pcb-route .route-stat{font-weight:600}
-    \\.pcb-route .route-stat.ok{color:#16a34a}
-    \\.pcb-route .route-stat.warn{color:#dc2626}
-    \\.pcb-route .route-stat.err{color:#fff;background:#ef4444;border-radius:4px;padding:1px 7px}
-    \\.pcb-legend{display:flex;gap:14px;align-items:center;font-size:12px;color:#475569;margin:4px 0 12px;flex-wrap:wrap}
+    \\.pcb-route .route-stat.ok{color:#3fb950}
+    \\.pcb-route .route-stat.warn{color:#f85149}
+    \\.pcb-route .route-stat.err{color:#fff;background:#da3633;border-radius:4px;padding:1px 7px}
+    \\.pcb-legend{display:flex;gap:14px;align-items:center;font-size:12px;color:#8b949e;margin:4px 0 12px;flex-wrap:wrap}
     \\.pcb-legend .sw{display:inline-block;width:18px;height:0;border-top-width:3px;border-top-style:solid;vertical-align:middle}
     \\.pcb-legend .sw.prox{border-color:#ea580c}
-    \\.pcb-legend .sw.gnd{border-color:#0891b2}
-    \\.pcb-legend .sw.sig{border-color:#cbd5e1}
-    \\.pcb-legend .sw.esc{border-color:#dc2626}
-    \\.pcb-legend .note{color:#b45309}
-    \\.pcb-svg{background:#fff;border:1px solid #e2e8f0;border-radius:8px;max-width:100%;height:auto;touch-action:none}
+    \\.pcb-legend .sw.gnd{border-color:#22b8cf}
+    \\.pcb-legend .sw.sig{border-color:#9aa7b4}
+    \\.pcb-legend .sw.esc{border-color:#f85149}
+    \\.pcb-legend .note{color:#d29922}
+    \\.pcb-svg{background:#010409;border:1px solid #30363d;border-radius:8px;max-width:100%;height:auto;touch-action:none}
     \\.pcb-ref{font:600 9px system-ui,sans-serif;text-anchor:middle;pointer-events:none;user-select:none}
     \\.part{cursor:grab}
     \\.part .court{transition:filter .08s}
-    \\.part.hl .court{filter:drop-shadow(0 0 3px rgba(37,99,235,.7))}
+    \\.part.hl .court{filter:drop-shadow(0 0 3px rgba(88,166,255,.75))}
     \\.pad{transition:fill .08s}
-    \\.pad.net-hl{fill:#dc2626}
-    \\.pn.net-hl{background:#fecaca;color:#991b1b}
+    \\.pad.net-hl{fill:#f85149}
+    \\.pn.net-hl{background:#5b1e28;color:#ffa198}
     \\.pcb-side{width:288px;flex:none;position:sticky;top:8px;max-height:calc(100vh - 16px);
-    \\  overflow:auto;border:1px solid #e2e8f0;border-radius:8px;background:#fff}
-    \\.side-h{font-size:13px;font-weight:600;padding:10px 12px;border-bottom:1px solid #eef2f7;position:sticky;top:0;background:#fff}
-    \\.side-n{color:#94a3b8;font-weight:400}
+    \\  overflow:auto;border:1px solid #21262d;border-radius:8px;background:#161b22}
+    \\.side-h{font-size:13px;font-weight:600;padding:10px 12px;border-bottom:1px solid #21262d;position:sticky;top:0;background:#161b22;color:#f0f6fc}
+    \\.side-n{color:#8b949e;font-weight:400}
     \\.comp-list{list-style:none;margin:0;padding:0}
-    \\.comp{padding:8px 12px;border-bottom:1px solid #f1f5f9;cursor:default}
-    \\.comp.hl{background:#eff6ff}
+    \\.comp{padding:8px 12px;border-bottom:1px solid #21262d;cursor:default}
+    \\.comp.hl{background:#1c2230}
     \\.comp-top{display:flex;gap:8px;align-items:baseline}
-    \\.comp-ref{font-weight:600;font-size:13px;color:#1e293b}
-    \\.comp-val{font-size:12px;color:#475569;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    \\.comp-fp{font-size:10.5px;color:#94a3b8;margin:1px 0 4px}
+    \\.comp-ref{font-weight:600;font-size:13px;color:#e6edf3}
+    \\.comp-val{font-size:12px;color:#8b949e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    \\.comp-fp{font-size:10.5px;color:#6e7681;margin:1px 0 4px}
     \\.comp-fp.court-edit{display:block;width:100%;text-align:left;background:none;border:0;padding:1px 0 4px;
     \\  cursor:pointer;font-family:inherit}
-    \\.comp-fp.court-edit:hover{color:#2563eb;text-decoration:underline}
+    \\.comp-fp.court-edit:hover{color:#58a6ff;text-decoration:underline}
     \\.comp-pins{display:flex;flex-wrap:wrap;gap:3px 5px}
-    \\.pn{font-size:11px;color:#334155;background:#f1f5f9;border-radius:3px;padding:0 5px;white-space:nowrap}
-    \\.pn b{color:#0f172a;font-weight:600;margin-right:3px}
-    \\.court-modal{position:fixed;inset:0;background:rgba(15,23,42,0.55);display:flex;
+    \\.pn{font-size:11px;color:#c9d1d9;background:#21262d;border-radius:3px;padding:0 5px;white-space:nowrap}
+    \\.pn b{color:#e6edf3;font-weight:600;margin-right:3px}
+    \\.court-modal{position:fixed;inset:0;background:rgba(1,4,9,0.7);display:flex;
     \\  align-items:center;justify-content:center;z-index:200}
     \\.court-modal[hidden]{display:none}
-    \\.court-dialog{background:#fff;border-radius:10px;padding:16px 18px;width:320px;
-    \\  box-shadow:0 12px 40px rgba(0,0,0,0.3);font-family:system-ui,sans-serif}
+    \\.court-dialog{background:#161b22;border:1px solid #30363d;color:#c9d1d9;border-radius:10px;padding:16px 18px;width:320px;
+    \\  box-shadow:0 12px 40px rgba(0,0,0,0.5);font-family:system-ui,sans-serif}
     \\.court-h{display:flex;align-items:center;justify-content:space-between;font-weight:600;
-    \\  color:#0f172a;font-size:14px;margin-bottom:8px}
-    \\.court-x{border:0;background:none;font-size:20px;line-height:1;cursor:pointer;color:#64748b}
-    \\.court-svg{width:100%;height:200px;background:#0d1117;border-radius:6px;display:block}
-    \\.court-mode{display:flex;gap:14px;align-items:center;margin:10px 0 4px;font-size:12px;color:#334155}
+    \\  color:#f0f6fc;font-size:14px;margin-bottom:8px}
+    \\.court-x{border:0;background:none;font-size:20px;line-height:1;cursor:pointer;color:#8b949e}
+    \\.court-svg{width:100%;height:200px;background:#010409;border-radius:6px;display:block}
+    \\.court-mode{display:flex;gap:14px;align-items:center;margin:10px 0 4px;font-size:12px;color:#c9d1d9}
     \\.court-mode label{display:flex;gap:4px;align-items:center;cursor:pointer}
-    \\.court-fields{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:4px 0 4px;font-size:12px;color:#334155}
+    \\.court-fields{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:4px 0 4px;font-size:12px;color:#c9d1d9}
     \\.court-fields[hidden]{display:none}
-    \\.court-fields input{width:64px;font:inherit}
-    \\.court-full{color:#64748b;font-size:12px;margin:2px 0 8px}
-    \\.court-note{font-size:11px;color:#94a3b8;line-height:1.4;margin-bottom:10px}
+    \\.court-fields input{width:64px;font:inherit;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:2px 4px}
+    \\.court-full{color:#8b949e;font-size:12px;margin:2px 0 8px}
+    \\.court-note{font-size:11px;color:#6e7681;line-height:1.4;margin-bottom:10px}
     \\.court-actions{display:flex;gap:8px;align-items:center}
-    \\.court-dialog .btn{font:inherit;font-size:12px;border:1px solid #cbd5e1;background:#fff;
-    \\  border-radius:5px;padding:4px 11px;cursor:pointer;color:#1e293b}
-    \\.court-dialog .btn:hover{background:#f8fafc}
+    \\.court-dialog .btn{font:inherit;font-size:12px;border:1px solid #30363d;background:#21262d;
+    \\  border-radius:5px;padding:4px 11px;cursor:pointer;color:#c9d1d9}
+    \\.court-dialog .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
     \\.court-dialog .btn:disabled{opacity:.45;cursor:default}
 ;
 
@@ -1757,22 +1855,22 @@ const BOARD_JS =
     \\ var g=el("g",{"class":"part","data-ref":p.ref});
     \\ var body=el("g",{"class":"body"});
     \\ body.appendChild(el("rect",{"class":"court",x:(-p.hw*S).toFixed(1),y:(-p.hh*S).toFixed(1),
-    \\   width:(2*p.hw*S).toFixed(1),height:(2*p.hh*S).toFixed(1),rx:2,fill:"#f1f5f9",
-    \\   stroke:p.kind=="hub"?"#2563eb":"#64748b","stroke-width":1.3,
+    \\   width:(2*p.hw*S).toFixed(1),height:(2*p.hh*S).toFixed(1),rx:2,fill:"#161b22",
+    \\   stroke:p.kind=="hub"?"#58a6ff":"#8b949e","stroke-width":1.3,
     \\   "stroke-dasharray":p.fb?"4 3":"0"}));
     \\ if(p.silk){
     \\  p.silk.l.forEach(function(s){body.appendChild(el("line",{x1:(s[0]*S).toFixed(1),y1:(s[1]*S).toFixed(1),
-    \\    x2:(s[2]*S).toFixed(1),y2:(s[3]*S).toFixed(1),stroke:"#94a3b8","stroke-width":0.8,"stroke-linecap":"round"}));});
+    \\    x2:(s[2]*S).toFixed(1),y2:(s[3]*S).toFixed(1),stroke:"#8b949e","stroke-width":0.8,"stroke-linecap":"round"}));});
     \\  p.silk.c.forEach(function(c){body.appendChild(el("circle",{cx:(c[0]*S).toFixed(1),cy:(c[1]*S).toFixed(1),
-    \\    r:Math.max(c[2]*S,1).toFixed(1),fill:"none",stroke:"#94a3b8","stroke-width":0.8}));});}
+    \\    r:Math.max(c[2]*S,1).toFixed(1),fill:"none",stroke:"#8b949e","stroke-width":0.8}));});}
     \\ p.pads.forEach(function(pad){
     \\   var pw=Math.max(pad.w*S,1.5),ph=Math.max(pad.h*S,1.5);
     \\   var a={"class":"pad",x:(pad.x*S-pw/2).toFixed(1),y:(pad.y*S-ph/2).toFixed(1),
-    \\     width:pw.toFixed(1),height:ph.toFixed(1),rx:0.5,fill:"#0f172a"};
+    \\     width:pw.toFixed(1),height:ph.toFixed(1),rx:0.5,fill:"#b08d57"};
     \\   if(pad.net)a["data-net"]=pad.net;
     \\   body.appendChild(el("rect",a));});
     \\ g.appendChild(body);
-    \\ var t=el("text",{"class":"pcb-ref",x:0,y:(-p.hh*S-2).toFixed(1),fill:p.kind=="hub"?"#2563eb":"#64748b"});
+    \\ var t=el("text",{"class":"pcb-ref",x:0,y:(-p.hh*S-2).toFixed(1),fill:p.kind=="hub"?"#58a6ff":"#8b949e"});
     \\ t.textContent=p.ref; g.appendChild(t);
     \\ gP.appendChild(g); els.push(g); bodies.push(body);
     \\ setT(i);
@@ -1783,15 +1881,15 @@ const BOARD_JS =
     \\ while(gR.firstChild)gR.removeChild(gR.firstChild);
     \\ PCB.links.forEach(function(l){
     \\   var a=wpt(l.a,l.ax,l.ay),b=wpt(l.b,l.bx,l.by);
-    \\   var col=l.k=="proximity"?"#ea580c":(l.k=="ground"?"#0891b2":"#cbd5e1");
+    \\   var col=l.k=="proximity"?"#ea580c":(l.k=="ground"?"#22b8cf":"#9aa7b4");
     \\   aw(a,b,col,l.k=="signal"?0.7:1.3,l.k=="signal"?0.55:0.9);});
     \\ PCB.loops.forEach(function(L){
     \\   var cp=wrect(L.cap,L.cp),p1=npts(cp,nhub(cp,L.cap,L.hub,L.hp).rect); aw(p1[0],p1[1],"#ea580c",1.3,0.9);
-    \\   var cg=wrect(L.cap,L.cg),p2=npts(cg,nhub(cg,L.cap,L.hub,L.hg).rect); aw(p2[0],p2[1],"#0891b2",1.3,0.9);});
+    \\   var cg=wrect(L.cap,L.cg),p2=npts(cg,nhub(cg,L.cap,L.hub,L.hg).rect); aw(p2[0],p2[1],"#22b8cf",1.3,0.9);});
     \\ if(!((PCB.tracks||[]).length)){var tw=parseFloat((document.getElementById("r-tw")||{}).value)||0.15;
     \\  (PCB.stubs||[]).forEach(function(st){var a=wpt(st.p,st.ax,st.ay),b=wpt(st.p,st.bx,st.by);
     \\   var ln=el("line",{x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),
-    \\     stroke:"#dc2626","stroke-width":Math.max(tw*S,1.5).toFixed(1),"stroke-linecap":"round",opacity:0.9});
+    \\     stroke:"#f85149","stroke-width":Math.max(tw*S,1.5).toFixed(1),"stroke-linecap":"round",opacity:0.9});
     \\   var t=el("title",{}); t.textContent="signal breakout (escape trace)"; ln.appendChild(t); gR.appendChild(ln);});}
     \\}
     \\function delta(id,cur,base){
@@ -1858,13 +1956,13 @@ const BOARD_JS =
     \\ if(nm===null)return; nm=nm.trim(); if(!nm)return;
     \\ var msg=document.getElementById("pcb-savemsg");
     \\ var payload={name:nm,parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};})};
-    \\ msg.style.color="#64748b";msg.textContent="saving…";
+    \\ msg.style.color="#8b949e";msg.textContent="saving…";
     \\ fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name),{method:"POST",
     \\   headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
     \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
-    \\  .then(function(){msg.style.color="#16a34a";msg.textContent="saved ✓";
+    \\  .then(function(){msg.style.color="#3fb950";msg.textContent="saved ✓";
     \\    setTimeout(function(){window.location.reload();},300);})
-    \\  .catch(function(){msg.style.color="#dc2626";msg.textContent="save failed";});});
+    \\  .catch(function(){msg.style.color="#f85149";msg.textContent="save failed";});});
     \\function layByName(nm){var Ls=PCB.layouts||[];for(var i=0;i<Ls.length;i++)if(Ls[i].name===nm)return Ls[i];return null;}
     \\document.querySelectorAll("[data-lay-load]").forEach(function(b){
     \\ b.addEventListener("click",function(){var L=layByName(b.getAttribute("data-lay-load"));if(!L)return;
@@ -1875,6 +1973,13 @@ const BOARD_JS =
     \\   fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+"/delete",{method:"POST",
     \\     headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm})})
     \\    .then(function(r){if(!r.ok)throw 0;window.location.reload();}).catch(function(){});});});
+    \\var rescoreBtn=document.getElementById("pcb-rescore");
+    \\if(rescoreBtn)rescoreBtn.addEventListener("click",function(){
+    \\ rescoreBtn.disabled=true;rescoreBtn.textContent="Rescoring…";
+    \\ fetch("/api/pcb-rescore/"+encodeURIComponent(PCB.name),{method:"POST"})
+    \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
+    \\  .then(function(){window.location.reload();})
+    \\  .catch(function(){rescoreBtn.disabled=false;rescoreBtn.textContent="↻ Rescore all";});});
     \\function hlBy(at,v,cls,on){document.querySelectorAll("["+at+"]").forEach(function(e){
     \\ if(e.getAttribute(at)===v)e.classList.toggle(cls,on);});}
     \\function wire(at,cls){document.querySelectorAll("["+at+"]").forEach(function(e){
@@ -1900,7 +2005,7 @@ const BOARD_JS =
     \\svg.addEventListener("pointerup",function(ev){pan=null;svg.style.cursor="";try{svg.releasePointerCapture(ev.pointerId);}catch(e){}});
     \\function drawRoute(){while(gT.firstChild)gT.removeChild(gT.firstChild);
     \\ (PCB.tracks||[]).forEach(function(t){gT.appendChild(el("line",{x1:X(t.x1).toFixed(1),y1:Y(t.y1).toFixed(1),
-    \\   x2:X(t.x2).toFixed(1),y2:Y(t.y2).toFixed(1),stroke:t.l==0?"#dc2626":"#2563eb",
+    \\   x2:X(t.x2).toFixed(1),y2:Y(t.y2).toFixed(1),stroke:t.l==0?"#f85149":"#388bfd",
     \\   "stroke-width":Math.max(t.w*S,1.2).toFixed(1),"stroke-linecap":"round","stroke-linejoin":"round",opacity:0.85}));});
     \\ (PCB.vias||[]).forEach(function(v){var r=Math.max(v.d/2*S,2.5);
     \\   gT.appendChild(el("circle",{cx:X(v.x).toFixed(1),cy:Y(v.y).toFixed(1),r:r.toFixed(1),fill:"#ca8a04"}));
@@ -1913,11 +2018,11 @@ const BOARD_JS =
     \\ P.forEach(function(p,i){p.pads.forEach(function(pad){var r=wrect(i,pad);
     \\   gC.appendChild(el("rect",{x:X(r.x0-clr).toFixed(1),y:Y(r.y0-clr).toFixed(1),
     \\     width:((r.x1-r.x0+2*clr)*S).toFixed(1),height:((r.y1-r.y0+2*clr)*S).toFixed(1),
-    \\     rx:(clr*S).toFixed(1),fill:"rgba(217,119,6,0.07)",stroke:"#d97706","stroke-width":0.8,"stroke-dasharray":"3 2"}));});});
+    \\     rx:(clr*S).toFixed(1),fill:"rgba(210,153,34,0.13)",stroke:"#d29922","stroke-width":0.8,"stroke-dasharray":"3 2"}));});});
     \\ (PCB.vias||[]).forEach(function(v){gC.appendChild(el("circle",{cx:X(v.x).toFixed(1),cy:Y(v.y).toFixed(1),
-    \\   r:((v.d/2+clr)*S).toFixed(1),fill:"rgba(217,119,6,0.07)",stroke:"#d97706","stroke-width":0.8,"stroke-dasharray":"3 2"}));});
+    \\   r:((v.d/2+clr)*S).toFixed(1),fill:"rgba(210,153,34,0.13)",stroke:"#d29922","stroke-width":0.8,"stroke-dasharray":"3 2"}));});
     \\ (PCB.tracks||[]).forEach(function(t){gC.appendChild(el("line",{x1:X(t.x1).toFixed(1),y1:Y(t.y1).toFixed(1),
-    \\   x2:X(t.x2).toFixed(1),y2:Y(t.y2).toFixed(1),stroke:"#d97706","stroke-opacity":0.18,
+    \\   x2:X(t.x2).toFixed(1),y2:Y(t.y2).toFixed(1),stroke:"#d29922","stroke-opacity":0.20,
     \\   "stroke-width":((t.w+2*clr)*S).toFixed(1),"stroke-linecap":"round"}));});}
     \\var clrCb=document.getElementById("r-clr-show");
     \\if(clrCb)clrCb.addEventListener("change",drawClr);
@@ -1940,7 +2045,7 @@ const BOARD_JS =
     \\function courtDraw(p,hw,hh){var s=document.getElementById("court-svg");while(s.firstChild)s.removeChild(s.firstChild);
     \\ var VB=260,VH=220,pd=28,sc=Math.min((VB-pd)/(2*hw),(VH-pd)/(2*hh)),cx=VB/2,cy=VH/2;
     \\ s.appendChild(el("rect",{x:(cx-hw*sc).toFixed(1),y:(cy-hh*sc).toFixed(1),width:(2*hw*sc).toFixed(1),height:(2*hh*sc).toFixed(1),
-    \\   rx:3,fill:"none",stroke:p.kind=="hub"?"#3b82f6":"#94a3b8","stroke-width":1.4,"stroke-dasharray":"5 3"}));
+    \\   rx:3,fill:"none",stroke:p.kind=="hub"?"#58a6ff":"#8b949e","stroke-width":1.4,"stroke-dasharray":"5 3"}));
     \\ p.pads.forEach(function(pad){var pw=Math.max(pad.w*sc,2),ph=Math.max(pad.h*sc,2);
     \\   s.appendChild(el("rect",{x:(cx+pad.x*sc-pw/2).toFixed(1),y:(cy+pad.y*sc-ph/2).toFixed(1),
     \\     width:pw.toFixed(1),height:ph.toFixed(1),rx:1,fill:"#b08d57"}));});}
@@ -1986,15 +2091,15 @@ const BOARD_JS =
     \\ if(!(v>=0))v=0;v=Math.round(v/0.05)*0.05;courtState.offset=v;offI2.value=v.toFixed(2);courtRefresh();});
     \\var csv=document.getElementById("court-save");
     \\if(csv)csv.addEventListener("click",function(){if(!courtState||!courtState.fp)return;
-    \\ var msg=document.getElementById("court-msg");msg.style.color="#64748b";msg.textContent="saving…";
+    \\ var msg=document.getElementById("court-msg");msg.style.color="#8b949e";msg.textContent="saving…";
     \\ var body=courtState.mode=="offset"?{fp:courtState.fp,mode:"offset",offset:courtState.offset}
     \\   :{fp:courtState.fp,mode:"size",hw:courtState.hw,hh:courtState.hh};
     \\ fetch("/api/courtyard/"+encodeURIComponent(PCB.name),{method:"POST",headers:{"Content-Type":"application/json"},
     \\   body:JSON.stringify(body)})
     \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
-    \\  .then(function(){msg.style.color="#16a34a";msg.textContent="saved ✓ — rebuilding";
+    \\  .then(function(){msg.style.color="#3fb950";msg.textContent="saved ✓ — rebuilding";
     \\    window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?regen=1";})
-    \\  .catch(function(){msg.style.color="#dc2626";msg.textContent="save failed";});});
+    \\  .catch(function(){msg.style.color="#f85149";msg.textContent="save failed";});});
     \\var rgo=document.getElementById("r-go");
     \\if(rgo)rgo.addEventListener("click",function(){var v=function(id){return encodeURIComponent(document.getElementById(id).value);};
     \\ window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?route=1&track_width="+v("r-tw")+

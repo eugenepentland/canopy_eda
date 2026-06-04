@@ -747,6 +747,7 @@ src/serve/pcb_layout_page.zig::loadSyncLayout fn
 src/serve/pcb_layout_page.zig::pcbLayoutJsonApi fn
 src/serve/pcb_layout_page.zig::pcbLayoutPage fn
 src/serve/pcb_layout_page.zig::pcbScoreApi fn
+src/serve/pcb_layout_page.zig::rescoreLayoutsApi fn
 src/serve/pcb_layout_page.zig::saveNamedLayoutApi fn
 src/serve/pcb_layout_page.zig::savePcbCourtyardApi fn
 src/serve/pdf_viewer.zig::HandlerError value
