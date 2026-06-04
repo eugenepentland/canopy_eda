@@ -377,6 +377,35 @@ pub fn scorePoses(
     return breakdownWith(prep.parts, params, score, loop_weighted);
 }
 
+/// Build a `Placement` at exactly `poses` (no optimization — overlaps allowed),
+/// so a caller can route the user's *on-screen* layout verbatim instead of the
+/// auto-generated one. Same design model as `scorePoses` (and it also builds the
+/// escape stubs the router needs), but it returns the full placement with
+/// `generated = false`. The score fields use the cheap fixed-pad surrogate — the
+/// router re-measures real traces itself, so paying for `routedLoops` here would
+/// just route the board twice. Parts not named in `poses` stay at the origin, so
+/// `poses` should cover every part.
+pub fn placeFromPoses(
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    poses: []const RefPose,
+    params: Params,
+) std.mem.Allocator.Error!Placement {
+    var prep = try prepare(arena, block, project_dir, params);
+    const parts = prep.parts;
+    const nets = prep.nets;
+    const built = prep.built;
+    const stubs = try buildEscapeStubs(arena, nets, parts, &prep.idx_of);
+    // Apply the poses verbatim; unlike `solve`, never fall back to optimizing —
+    // a slightly-overlapping hand-dragged layout must still route as drawn.
+    _ = applyCached(parts, poses);
+    const score = scoreLayout(parts, &prep.idx_of, nets, built.loops);
+    const loop_weighted = surrogateLoops(parts, built.loops).weighted;
+    const bd = breakdownWith(parts, params, score, loop_weighted);
+    return finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
+}
+
 /// The design model `solve` and `scorePoses` share: the flattened parts (with
 /// footprint geometry + grid-rounded courtyards), the ref→index map, the merged
 /// signal nets, and the springs/decoupling-loops — already classified

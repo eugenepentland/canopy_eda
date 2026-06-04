@@ -52,6 +52,7 @@ const PARTS_OPEN = "\"parts\":[";
 /// Error bodies shared across the layout handlers.
 const NO_BLOCK_MSG = "No design or module by that name";
 const BAD_JSON_MSG = "bad json";
+const PLACEMENT_ERR_MSG = "Placement error";
 
 /// Success body returned by the mutating layout/courtyard endpoints.
 const OK_JSON_TRUE = "{\"ok\":true}";
@@ -119,7 +120,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const cached = if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
     const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params) catch {
         res.status = 500;
-        res.body = "Placement error";
+        res.body = PLACEMENT_ERR_MSG;
         return;
     };
     // Persist the layout + its weights whenever the optimizer ran (miss /
@@ -237,7 +238,7 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     const cached = if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
     const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params) catch {
         res.status = 500;
-        res.body = "Placement error";
+        res.body = PLACEMENT_ERR_MSG;
         return;
     };
     if (placement.generated) writeAutoCache(ctx.allocator, ctx.project_dir, name, placement, tune.params);
@@ -361,6 +362,103 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     try writeBreakdownJson(&aw.writer, bd, tune.params);
+    res.content_type = .JSON;
+    res.body = aw.written();
+}
+
+/// POST /api/pcb-route/:name — route the design at the *current on-screen* poses
+/// (a loaded saved layout, or hand-dragged parts) rather than the auto-generated
+/// placement, and return the copper as JSON. Body is the score endpoint's
+/// `{"parts":[{ref,x,y,rot}, …]}` plus optional route params `track_width`,
+/// `clearance`, `via_drill`, `via_dia` (mm; absent/0 → the router default).
+/// Response `{tracks, vias, drc, routed, total}` is the same routed-copper shape
+/// the page embeds, so the client redraws in place — no page reload, which is
+/// what used to snap the layout back to auto.
+pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
+        res.status = 400;
+        res.body = BAD_JSON_MSG;
+        return;
+    };
+    if (root != .object) {
+        res.status = 400;
+        return;
+    }
+    const parts_v = root.object.get("parts") orelse {
+        res.status = 400;
+        return;
+    };
+    if (parts_v != .array) {
+        res.status = 400;
+        return;
+    }
+    var poses: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
+    for (parts_v.array.items) |it| {
+        if (it != .object) continue;
+        const ref = it.object.get("ref") orelse continue;
+        if (ref != .string) continue;
+        try poses.append(ctx.allocator, .{
+            .ref = ref.string,
+            .x = jsonNum(it.object.get("x")),
+            .y = jsonNum(it.object.get("y")),
+            .rot = jsonNum(it.object.get("rot")),
+        });
+    }
+
+    // Route params from the body (mm); a missing or non-positive field keeps the
+    // router default — the same fields the GET ?route=1 query carries.
+    var rp = router.RouteParams{};
+    const tw = jsonNum(root.object.get("track_width"));
+    if (tw > 0) rp.track_width = tw;
+    const cl = jsonNum(root.object.get("clearance"));
+    if (cl > 0) rp.clearance = cl;
+    const vd = jsonNum(root.object.get("via_drill"));
+    if (vd > 0) rp.via_drill = vd;
+    const va = jsonNum(root.object.get("via_dia"));
+    if (va > 0) rp.via_dia = va;
+
+    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |mr| {
+        mr.eval.deinit();
+        ctx.allocator.destroy(mr.eval);
+    };
+    const block: *env_mod.DesignBlock = resolveBlock(ctx, name, &eval, &module_res) orelse {
+        res.status = 500;
+        res.body = NO_BLOCK_MSG;
+        return;
+    };
+
+    // Build the placement at the supplied poses (never re-optimized), route it,
+    // and DRC-check — exactly the GET ?route=1 pipeline, but on the client's
+    // layout instead of the cached auto one.
+    const placement = optimizer.placeFromPoses(ctx.allocator, block, ctx.project_dir, poses.items, optimizer.Params{}) catch {
+        res.status = 500;
+        res.body = PLACEMENT_ERR_MSG;
+        return;
+    };
+    const routed = router.route(ctx.allocator, placement, rp) catch {
+        res.status = 500;
+        res.body = "Routing error";
+        return;
+    };
+    const violations: []const drc.Violation = drc.check(ctx.allocator, placement, routed, rp.clearance) catch &.{};
+
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &aw.writer;
+    try w.writeAll("{");
+    try writeRoutedArrays(w, routed, violations);
+    try w.print(",\"routed\":{d},\"total\":{d}}}", .{ routed.routed, routed.total });
     res.content_type = .JSON;
     res.body = aw.written();
 }
@@ -1191,16 +1289,20 @@ fn writeRoutePanel(w: *std.Io.Writer, params: router.RouteParams, routed: ?route
     try w.writeAll("<button class=\"btn\" id=\"r-go\">Route</button>");
     try w.writeAll("<label class=\"tune-chk\"><input id=\"r-clr-show\" type=\"checkbox\"> show clearance</label>");
     try w.writeAll("<label class=\"tune-chk\"><input id=\"r-drc-show\" type=\"checkbox\" checked> show DRC</label>");
+    // Status spans, updated in place by the Route button's POST (no reload, so
+    // the on-screen layout stays put); pre-filled here for a direct ?route=1 GET.
     if (routed) |r| {
         const cls = if (r.routed == r.total) "ok" else "warn";
-        try w.print("<span class=\"route-stat {s}\">routed {d}/{d} nets · {d} vias</span>", .{ cls, r.routed, r.total, r.vias.len });
+        try w.print("<span class=\"route-stat {s}\" id=\"r-stat\">routed {d}/{d} nets · {d} vias</span>", .{ cls, r.routed, r.total, r.vias.len });
         if (n_drc == 0) {
-            try w.writeAll("<span class=\"route-stat ok\">DRC clean ✓</span>");
+            try w.writeAll("<span class=\"route-stat ok\" id=\"r-drc\">DRC clean ✓</span>");
         } else {
-            try w.print("<span class=\"route-stat err\">{d} DRC violation(s)</span>", .{n_drc});
+            try w.print("<span class=\"route-stat err\" id=\"r-drc\">{d} DRC violation(s)</span>", .{n_drc});
         }
     } else {
-        try w.writeAll("<span class=\"muted\">4-layer: top/GND/PWR/bottom · GND→plane vias</span>");
+        try w.writeAll("<span class=\"route-stat\" id=\"r-stat\"></span>");
+        try w.writeAll("<span class=\"route-stat\" id=\"r-drc\"></span>");
+        try w.writeAll("<span class=\"muted\" id=\"r-hint\">4-layer: top/GND/PWR/bottom · GND→plane vias</span>");
     }
     try w.writeAll("</div>");
 }
@@ -1411,28 +1513,32 @@ fn writePcbData(
     }
     try w.writeAll("],");
 
-    // Routed copper (world mm). layer 0=top, 1=bottom.
+    // Routed copper + DRC markers — emitted in the same shape the
+    // /api/pcb-route endpoint returns so drawRoute/drawClr/drawDrc read either.
+    try writeRoutedArrays(w, routed, violations);
+    try w.writeAll("};</script>");
+}
+
+/// Emit `"tracks":[…],"vias":[…],"drc":[…]` (world mm; track layer 0=top,
+/// 1=bottom). Shared by the page's embedded PCB blob and the /api/pcb-route
+/// response so both speak one routed-copper shape the client redraws from.
+fn writeRoutedArrays(w: *std.Io.Writer, routed: ?router.RouteResult, violations: []const drc.Violation) std.Io.Writer.Error!void {
     try w.writeAll("\"tracks\":[");
-    if (routed) |r| {
-        for (r.tracks, 0..) |t, i| {
-            if (i > 0) try w.writeAll(",");
-            try w.print("{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d}}}", .{ t.x1, t.y1, t.x2, t.y2, t.layer, t.width });
-        }
-    }
+    if (routed) |r| for (r.tracks, 0..) |t, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d}}}", .{ t.x1, t.y1, t.x2, t.y2, t.layer, t.width });
+    };
     try w.writeAll("],\"vias\":[");
-    if (routed) |r| {
-        for (r.vias, 0..) |vi, i| {
-            if (i > 0) try w.writeAll(",");
-            try w.print("{{\"x\":{d},\"y\":{d},\"d\":{d}}}", .{ vi.x, vi.y, vi.dia });
-        }
-    }
-    // DRC violations: world point + how short the gap is vs. the rule.
+    if (routed) |r| for (r.vias, 0..) |vi, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("{{\"x\":{d},\"y\":{d},\"d\":{d}}}", .{ vi.x, vi.y, vi.dia });
+    };
     try w.writeAll("],\"drc\":[");
     for (violations, 0..) |vio, i| {
         if (i > 0) try w.writeAll(",");
         try w.print("{{\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\"}}", .{ vio.x, vio.y, vio.gap, vio.clearance, drcKindStr(vio.kind) });
     }
-    try w.writeAll("]};</script>");
+    try w.writeAll("]");
 }
 
 /// Short label for a DRC violation kind (shown in the marker tooltip).
@@ -1834,15 +1940,15 @@ const BOARD_JS =
     \\   drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});
     \\ g.addEventListener("pointermove",function(ev){if(!drag||drag.i!==i)return;var m=mm(ev);
     \\   P[i].x=Math.round((m.x+drag.ox)/G)*G;P[i].y=Math.round((m.y+drag.oy)/G)*G;
-    \\   drag.moved=true;setT(i);rats();drawClr();});
+    \\   if(!drag.moved){drag.moved=true;clearRoute();}setT(i);rats();drawClr();});
     \\ g.addEventListener("pointerup",function(ev){var mv=drag&&drag.moved;drag=null;g.style.cursor="grab";
     \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(mv)fetchScore();});
     \\});
     \\document.addEventListener("keydown",function(ev){
     \\ if((ev.key=="r"||ev.key=="R")&&cur>=0){ev.preventDefault();
     \\   P[cur].rot=((((P[cur].rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;
-    \\   setT(cur);rats();fetchScore();drawClr();}});
-    \\function applyAll(){P.forEach(function(p,i){setT(i);});rats();fetchScore();drawClr();}
+    \\   setT(cur);clearRoute();rats();fetchScore();}});
+    \\function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetchScore();}
     \\document.getElementById("pcb-reset").addEventListener("click",function(){
     \\ P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;});applyAll();});
     \\document.getElementById("pcb-score").addEventListener("click",fetchScore);
@@ -1932,6 +2038,10 @@ const BOARD_JS =
     \\   gD.appendChild(el("circle",{cx:cx.toFixed(1),cy:cy.toFixed(1),r:2.4,fill:"#ef4444"}));});}
     \\var drcCb=document.getElementById("r-drc-show");
     \\if(drcCb)drcCb.addEventListener("change",drawDrc);
+    \\function setStat(id,cls,txt){var e=document.getElementById(id);
+    \\ if(e){e.className="route-stat"+(cls?" "+cls:"");e.textContent=txt;}}
+    \\function clearRoute(){if(!(PCB.tracks&&PCB.tracks.length)&&!(PCB.vias&&PCB.vias.length)&&!(PCB.drc&&PCB.drc.length))return;
+    \\ PCB.tracks=[];PCB.vias=[];PCB.drc=[];drawRoute();drawClr();drawDrc();setStat("r-stat","","");setStat("r-drc","","");}
     \\var courtState=null;
     \\function partByRef(ref){for(var i=0;i<P.length;i++)if(P[i].ref===ref)return P[i];return null;}
     \\function gceil(v){return Math.ceil(v/G-1e-9)*G;}
@@ -1996,9 +2106,22 @@ const BOARD_JS =
     \\    window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?regen=1";})
     \\  .catch(function(){msg.style.color="#dc2626";msg.textContent="save failed";});});
     \\var rgo=document.getElementById("r-go");
-    \\if(rgo)rgo.addEventListener("click",function(){var v=function(id){return encodeURIComponent(document.getElementById(id).value);};
-    \\ window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?route=1&track_width="+v("r-tw")+
-    \\  "&clearance="+v("r-cl")+"&via_drill="+v("r-vd")+"&via_dia="+v("r-va");});
+    \\if(rgo)rgo.addEventListener("click",function(){
+    \\ var nf=function(id){return parseFloat(document.getElementById(id).value);};
+    \\ var hint=document.getElementById("r-hint");if(hint)hint.style.display="none";
+    \\ setStat("r-stat","","routing…");setStat("r-drc","","");rgo.disabled=true;
+    \\ var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};}),
+    \\   track_width:nf("r-tw"),clearance:nf("r-cl"),via_drill:nf("r-vd"),via_dia:nf("r-va")};
+    \\ fetch("/api/pcb-route/"+encodeURIComponent(PCB.name),{method:"POST",
+    \\   headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
+    \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
+    \\  .then(function(j){PCB.tracks=j.tracks||[];PCB.vias=j.vias||[];PCB.drc=j.drc||[];
+    \\    if(payload.clearance>0)PCB.clr=payload.clearance;drawRoute();drawClr();drawDrc();
+    \\    var ok=(j.routed===j.total);
+    \\    setStat("r-stat",ok?"ok":"warn","routed "+j.routed+"/"+j.total+" nets · "+((j.vias||[]).length)+" vias");
+    \\    setStat("r-drc",(j.drc||[]).length?"err":"ok",(j.drc||[]).length?(j.drc.length+" DRC violation(s)"):"DRC clean ✓");
+    \\    rgo.disabled=false;})
+    \\  .catch(function(){setStat("r-stat","err","route failed");rgo.disabled=false;});});
     \\rats(); showScore(PCB.auto); drawRoute(); drawClr(); drawDrc();
     \\})();</script>
 ;

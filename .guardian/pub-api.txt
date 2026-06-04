@@ -387,6 +387,7 @@ src/placement/optimizer.zig::RatKind enum_
 src/placement/optimizer.zig::RefPose struct_
 src/placement/optimizer.zig::Score struct_
 src/placement/optimizer.zig::Stub struct_
+src/placement/optimizer.zig::placeFromPoses fn
 src/placement/optimizer.zig::scorePoses fn
 src/placement/optimizer.zig::solve fn
 src/placement/optimizer.zig::worldPadCenter fn
@@ -744,6 +745,7 @@ src/serve/pcb_layout_page.zig::deleteNamedLayoutApi fn
 src/serve/pcb_layout_page.zig::loadSyncLayout fn
 src/serve/pcb_layout_page.zig::pcbLayoutJsonApi fn
 src/serve/pcb_layout_page.zig::pcbLayoutPage fn
+src/serve/pcb_layout_page.zig::pcbRouteApi fn
 src/serve/pcb_layout_page.zig::pcbScoreApi fn
 src/serve/pcb_layout_page.zig::saveNamedLayoutApi fn
 src/serve/pcb_layout_page.zig::savePcbCourtyardApi fn
