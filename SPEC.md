@@ -84,6 +84,10 @@ Public functions: solve
 
 - classifies hub vs passive ref-des, handling hierarchical paths
 - excludes ground nets from spring forces
+- multi-pin wirelength uses the rectilinear MST, which equals span when collinear and exceeds HPWL otherwise
+- loop inductance floors at the via mounting inductance and rises with conductor length
+- input-rail names (and raw rails ≥7V) read as the switching hot loop; output/low rails do not
+- routing congestion is zero with no multi-pin nets and positive when nets pile into one region
 - legalization separates two overlapping courtyards
 - rotates footprint-local offsets in right-angle steps matching the page
 - rotation refine picks the orientation that shortens the decoupling loop
@@ -94,11 +98,12 @@ Public functions: solve
 
 ## placement/router
 
-Public functions: route
+Public functions: route, returnPathViolations
 
 - maze-routes a two-pad net into connected track segments
 - routes corners as 45° diagonals rather than 90° bends
 - LoopRouter measures a real per-leg trace length that detours foreign pads
+- counts signal vias lacking a nearby ground stitching via as return-path discontinuities
 
 ## placement/drc
 

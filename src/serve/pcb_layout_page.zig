@@ -188,7 +188,8 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     };
     try writeLayoutsPanel(w, layouts, auto_score);
     try writeTuning(w, shown);
-    try writeRoutePanel(w, ro.params, routed, violations.len);
+    const rp_warn = if (routed) |r| router.returnPathViolations(placement, r, router.RETURN_PATH_RADIUS_MM) else 0;
+    try writeRoutePanel(w, ro.params, routed, violations.len, rp_warn);
     try writeLegend(w, placement);
     try w.print(
         "<svg id=\"pcb-svg\" class=\"pcb-svg\" viewBox=\"0 0 {d:.0} {d:.0}\" width=\"{d:.0}\" height=\"{d:.0}\" xmlns=\"http://www.w3.org/2000/svg\"></svg>",
@@ -229,10 +230,10 @@ fn resolveBlock(
 
 /// GET /api/pcb-layout/:name — export the solved placement as JSON: per-part
 /// positions plus the full objective breakdown. The on-screen score bar only
-/// shows HPWL + *raw* loop length; this also surfaces the value-weighted loop,
-/// isolation, and alignment terms the optimizer actually minimises, so a layout
-/// that looks worse on the visible metric but wins on the true objective can be
-/// told apart. Honours the same ?regen / tuning query as the page.
+/// shows HPWL + *raw* loop length; this also surfaces the value-weighted loop
+/// and alignment terms the optimizer actually minimises, so a layout that looks
+/// worse on the visible metric but wins on the true objective can be told apart.
+/// Honours the same ?regen / tuning query as the page.
 pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -279,8 +280,8 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
     try w.writeAll(NAME_OPEN);
     try writeJsonStr(w, name);
     try w.print(",\"generated\":{s},", .{if (p.generated) "true" else "false"});
-    try w.print("\"params\":{{\"loop_w\":{d},\"w_isolate\":{d},\"w_align\":{d},\"cap_w_max\":{d},\"grid\":{s}}},", .{
-        params.loop_w, params.w_isolate, params.w_align, params.cap_w_max, if (params.grid_courtyards) "true" else "false",
+    try w.print("\"params\":{{\"loop_w\":{d},\"w_align\":{d},\"w_congest\":{d},\"cap_w_max\":{d},\"grid\":{s}}},", .{
+        params.loop_w, params.w_align, params.w_congest, params.cap_w_max, if (params.grid_courtyards) "true" else "false",
     });
     try w.print("\"score\":{{\"hpwl_mm\":{d},\"loop_mm\":{d},\"loop_caps\":{d}}},", .{ p.score.hpwl_mm, p.score.loop_mm, p.score.loop_caps });
     try w.writeAll("\"breakdown\":");
@@ -308,11 +309,11 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
 /// weighted contribution, and the summed `objective`. Shared by the GET export
 /// and the POST score endpoint so both report the same shape.
 fn writeBreakdownJson(w: *std.Io.Writer, b: optimizer.Breakdown, params: optimizer.Params) std.Io.Writer.Error!void {
-    try w.print("{{\"hpwl\":{d},\"loop_raw\":{d},\"loop_weighted\":{d},\"area_raw\":{d},\"isolation\":{d},\"alignment\":{d},", .{
-        b.hpwl, b.loop_raw, b.loop_weighted, b.area_raw, b.isolation, b.alignment,
+    try w.print("{{\"hpwl\":{d},\"loop_raw\":{d},\"loop_weighted\":{d},\"loop_nh\":{d},\"loop_nh_weighted\":{d},\"alignment\":{d},\"congestion\":{d},", .{
+        b.hpwl, b.loop_raw, b.loop_weighted, b.loop_nh, b.loop_nh_weighted, b.alignment, b.congestion,
     });
-    try w.print("\"loop_term\":{d},\"isolation_term\":{d},\"alignment_term\":{d},\"objective\":{d}}}", .{
-        params.loop_w * b.loop_weighted, params.w_isolate * b.isolation, params.w_align * b.alignment, b.objective,
+    try w.print("\"loop_term\":{d},\"alignment_term\":{d},\"congestion_term\":{d},\"objective\":{d}}}", .{
+        params.loop_w * b.loop_nh_weighted, params.w_align * b.alignment, params.w_congest * b.congestion, b.objective,
     });
 }
 
@@ -474,11 +475,13 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     };
     const violations: []const drc.Violation = drc.check(ctx.allocator, placement, routed, rp.clearance) catch &.{};
 
+    const rp_warn = router.returnPathViolations(placement, routed, router.RETURN_PATH_RADIUS_MM);
+
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     const w = &aw.writer;
     try w.writeAll("{");
     try writeRoutedArrays(w, routed, violations);
-    try w.print(",\"routed\":{d},\"total\":{d}}}", .{ routed.routed, routed.total });
+    try w.print(",\"routed\":{d},\"total\":{d},\"return_path\":{d}}}", .{ routed.routed, routed.total, rp_warn });
     res.content_type = .JSON;
     res.body = aw.written();
 }
@@ -1171,8 +1174,8 @@ fn writeAutoCache(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
 /// Serialize to `{"params":{…},"parts":[{ref,x,y,rot}, …]}` — the weights so
 /// the controls reflect what produced the layout, the parts for the cache.
 fn writeCacheJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimizer.Params) std.Io.Writer.Error!void {
-    try w.print("{{\"params\":{{\"loop_w\":{d},\"w_isolate\":{d},\"w_align\":{d},\"cap_w_max\":{d},\"grid\":{s}}},", .{
-        params.loop_w,                                   params.w_isolate, params.w_align, params.cap_w_max,
+    try w.print("{{\"params\":{{\"loop_w\":{d},\"w_align\":{d},\"w_congest\":{d},\"cap_w_max\":{d},\"grid\":{s}}},", .{
+        params.loop_w,                                   params.w_align, params.w_congest, params.cap_w_max,
         if (params.grid_courtyards) "true" else "false",
     });
     try w.writeAll(PARTS_OPEN);
@@ -1196,8 +1199,8 @@ fn readAutoParams(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
     if (po != .object) return null;
     var p = optimizer.Params{};
     if (po.object.get("loop_w")) |v| p.loop_w = jsonNum(v);
-    if (po.object.get("w_isolate")) |v| p.w_isolate = jsonNum(v);
     if (po.object.get("w_align")) |v| p.w_align = jsonNum(v);
+    if (po.object.get("w_congest")) |v| p.w_congest = jsonNum(v);
     if (po.object.get("cap_w_max")) |v| p.cap_w_max = jsonNum(v);
     if (po.object.get("grid")) |v| p.grid_courtyards = v == .bool and v.bool;
     return p;
@@ -1217,12 +1220,12 @@ fn parseTuning(req: *httpz.Request) Tuning {
         p.loop_w = parseF(v, p.loop_w);
         tuned = true;
     }
-    if (q.get("w_isolate")) |v| {
-        p.w_isolate = parseF(v, p.w_isolate);
-        tuned = true;
-    }
     if (q.get("w_align")) |v| {
         p.w_align = parseF(v, p.w_align);
+        tuned = true;
+    }
+    if (q.get("w_congest")) |v| {
+        p.w_congest = parseF(v, p.w_congest);
         tuned = true;
     }
     if (q.get("cap_w_max")) |v| {
@@ -1280,24 +1283,24 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8) st
     try w.writeAll("<span class=\"score\" id=\"sc-obj\" title=\"weighted objective the optimizer minimizes\">objective ");
     try w.print("{d:.1}</span>", .{p.breakdown.objective});
     try w.writeAll("<span class=\"delta\" id=\"sc-obj-d\"></span>");
-    try w.print("<span class=\"score sc-sub\" id=\"sc-hpwl\" title=\"signal half-perimeter wirelength (mm)\">HPWL {d:.1}</span>", .{p.breakdown.hpwl});
+    try w.print("<span class=\"score sc-sub\" id=\"sc-hpwl\" title=\"signal wirelength: RSMT estimate (mm)\">wire {d:.1}</span>", .{p.breakdown.hpwl});
     try w.writeAll("<span class=\"delta\" id=\"sc-hpwl-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-loop\" title=\"weighted decoupling-loop term (loop_w × value-weighted loop length)\">loop …</span>");
     try w.writeAll("<span class=\"delta\" id=\"sc-loop-d\"></span>");
-    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-area\" title=\"enclosed loop area (mm²) = loop length × dielectric height\">loop area …</span>");
-    try w.writeAll("<span class=\"delta\" id=\"sc-area-d\"></span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-ind\" title=\"hot-loop connection inductance (nH) — the scored loop metric\">loop … nH</span>");
+    try w.writeAll("<span class=\"delta\" id=\"sc-ind-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-align\" title=\"row/column alignment term (w_align × penalty)\">align …</span>");
     try w.writeAll("<span class=\"delta\" id=\"sc-align-d\"></span>");
-    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-iso\" title=\"sensitive↔aggressor isolation term (w_isolate × penalty)\">iso …</span>");
-    try w.writeAll("<span class=\"delta\" id=\"sc-iso-d\"></span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-cong\" title=\"routing congestion (w_congest × RUDY overflow)\">cong …</span>");
+    try w.writeAll("<span class=\"delta\" id=\"sc-cong-d\"></span>");
     try w.writeAll("<button class=\"btn\" id=\"pcb-score\" title=\"Recompute the objective on the server for the current positions\">Score</button>");
     // Stored layout is reused on load; this re-runs the optimizer, overwrites the
     // cache, and records the result into the saved-layout history below.
     try w.writeAll("<a class=\"btn\" href=\"/pcb-layout/");
     try writeAttr(w, name);
     try w.writeAll("?regen=1\" title=\"Re-run the optimizer and record the result\">Regenerate</a>");
-    // Export the solved positions + full score breakdown (incl. the loop/
-    // isolation/alignment terms the bar above hides) for offline inspection.
+    // Export the solved positions + full score breakdown (incl. the
+    // value-weighted loop + alignment terms the bar above hides) for inspection.
     try w.writeAll("<a class=\"btn\" href=\"/api/pcb-layout/");
     try writeAttr(w, name);
     try w.writeAll("\" target=\"_blank\" title=\"Download positions + full score breakdown as JSON\">Export JSON</a>");
@@ -1380,8 +1383,8 @@ fn writeLayDelta(w: *std.Io.Writer, s: LayoutScore, auto: LayoutScore) std.Io.Wr
 fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-tune\"><span class=\"tune-h\">Tuning</span>");
     try w.print("<label>Align <input id=\"t-align\" type=\"number\" step=\"0.1\" min=\"0\" value=\"{d}\"></label>", .{params.w_align});
-    try w.print("<label>Isolate <input id=\"t-iso\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.w_isolate});
     try w.print("<label>Loop <input id=\"t-loop\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.loop_w});
+    try w.print("<label>Congest <input id=\"t-cong\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.w_congest});
     try w.writeAll("<label class=\"tune-chk\"><input id=\"t-grid\" type=\"checkbox\"");
     if (params.grid_courtyards) try w.writeAll(" checked");
     try w.writeAll("> Grid edges</label>");
@@ -1391,7 +1394,7 @@ fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!
 
 /// Routing panel: DRC inputs (mm) + a Route button (wired in BOARD_JS to
 /// reload with `?route=1&…`). Shows the routed/total tally + DRC result.
-fn writeRoutePanel(w: *std.Io.Writer, params: router.RouteParams, routed: ?router.RouteResult, n_drc: usize) std.Io.Writer.Error!void {
+fn writeRoutePanel(w: *std.Io.Writer, params: router.RouteParams, routed: ?router.RouteResult, n_drc: usize, n_rp: usize) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-route\"><span class=\"tune-h\">Route</span>");
     try w.print("<label>Track <input id=\"r-tw\" type=\"number\" step=\"0.05\" min=\"0.05\" value=\"{d}\"></label>", .{params.track_width});
     try w.print("<label>Clearance <input id=\"r-cl\" type=\"number\" step=\"0.05\" min=\"0.05\" value=\"{d}\"></label>", .{params.clearance});
@@ -1410,9 +1413,15 @@ fn writeRoutePanel(w: *std.Io.Writer, params: router.RouteParams, routed: ?route
         } else {
             try w.print("<span class=\"route-stat err\" id=\"r-drc\">{d} DRC violation(s)</span>", .{n_drc});
         }
+        if (n_rp == 0) {
+            try w.writeAll("<span class=\"route-stat ok\" id=\"r-rp\">return paths ✓</span>");
+        } else {
+            try w.print("<span class=\"route-stat warn\" id=\"r-rp\">{d} return-path warning(s)</span>", .{n_rp});
+        }
     } else {
         try w.writeAll("<span class=\"route-stat\" id=\"r-stat\"></span>");
         try w.writeAll("<span class=\"route-stat\" id=\"r-drc\"></span>");
+        try w.writeAll("<span class=\"route-stat\" id=\"r-rp\"></span>");
         try w.writeAll("<span class=\"muted\" id=\"r-hint\">4-layer: top/GND/PWR/bottom · GND→plane vias</span>");
     }
     try w.writeAll("</div>");
@@ -2045,17 +2054,17 @@ const BOARD_JS =
     \\function setSc(id,t){document.getElementById(id).textContent=t;}
     \\function showScore(b){
     \\ setSc("sc-obj","objective "+b.objective.toFixed(1));
-    \\ setSc("sc-hpwl","HPWL "+b.hpwl.toFixed(1));
+    \\ setSc("sc-hpwl","wire "+b.hpwl.toFixed(1));
     \\ setSc("sc-loop","loop "+b.loop_term.toFixed(1)+" · "+PCB.caps+" cap");
-    \\ setSc("sc-area","loop area "+(b.area_raw||0).toFixed(2)+" mm²");
+    \\ setSc("sc-ind","loop "+(b.loop_nh||0).toFixed(2)+" nH");
     \\ setSc("sc-align","align "+b.alignment_term.toFixed(1));
-    \\ setSc("sc-iso","iso "+b.isolation_term.toFixed(1));
+    \\ setSc("sc-cong","cong "+(b.congestion_term||0).toFixed(1));
     \\ delta("sc-obj-d",b.objective,PCB.auto.objective);
     \\ delta("sc-hpwl-d",b.hpwl,PCB.auto.hpwl);
     \\ delta("sc-loop-d",b.loop_term,PCB.auto.loop_term);
-    \\ delta("sc-area-d",b.area_raw||0,PCB.auto.area_raw||0);
+    \\ delta("sc-ind-d",b.loop_nh||0,PCB.auto.loop_nh||0);
     \\ delta("sc-align-d",b.alignment_term,PCB.auto.alignment_term);
-    \\ delta("sc-iso-d",b.isolation_term,PCB.auto.isolation_term);
+    \\ delta("sc-cong-d",b.congestion_term||0,PCB.auto.congestion_term||0);
     \\}
     \\var scoreReq=0;
     \\function fetchScore(){
@@ -2095,7 +2104,7 @@ const BOARD_JS =
     \\ var v=function(id){return encodeURIComponent(document.getElementById(id).value);};
     \\ var g=document.getElementById("t-grid").checked?1:0;
     \\ window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?w_align="+v("t-align")+
-    \\  "&w_isolate="+v("t-iso")+"&loop_w="+v("t-loop")+"&grid="+g;});
+    \\  "&loop_w="+v("t-loop")+"&w_congest="+v("t-cong")+"&grid="+g;});
     \\function pad2(n){return (n<10?"0":"")+n;}
     \\function stamp(){var d=new Date();return pad2(d.getMonth()+1)+"-"+pad2(d.getDate())+" "+pad2(d.getHours())+":"+pad2(d.getMinutes());}
     \\document.getElementById("pcb-saveas").addEventListener("click",function(){
@@ -2190,7 +2199,7 @@ const BOARD_JS =
     \\function setStat(id,cls,txt){var e=document.getElementById(id);
     \\ if(e){e.className="route-stat"+(cls?" "+cls:"");e.textContent=txt;}}
     \\function clearRoute(){if(!(PCB.tracks&&PCB.tracks.length)&&!(PCB.vias&&PCB.vias.length)&&!(PCB.drc&&PCB.drc.length))return;
-    \\ PCB.tracks=[];PCB.vias=[];PCB.drc=[];drawRoute();drawClr();drawDrc();setStat("r-stat","","");setStat("r-drc","","");}
+    \\ PCB.tracks=[];PCB.vias=[];PCB.drc=[];drawRoute();drawClr();drawDrc();setStat("r-stat","","");setStat("r-drc","","");setStat("r-rp","","");}
     \\var courtState=null;
     \\function partByRef(ref){for(var i=0;i<P.length;i++)if(P[i].ref===ref)return P[i];return null;}
     \\function gceil(v){return Math.ceil(v/G-1e-9)*G;}
@@ -2269,6 +2278,7 @@ const BOARD_JS =
     \\    var ok=(j.routed===j.total);
     \\    setStat("r-stat",ok?"ok":"warn","routed "+j.routed+"/"+j.total+" nets · "+((j.vias||[]).length)+" vias");
     \\    setStat("r-drc",(j.drc||[]).length?"err":"ok",(j.drc||[]).length?(j.drc.length+" DRC violation(s)"):"DRC clean ✓");
+    \\    var rp=j.return_path||0; setStat("r-rp",rp?"warn":"ok",rp?(rp+" return-path warning(s)"):"return paths ✓");
     \\    rgo.disabled=false;})
     \\  .catch(function(){setStat("r-stat","err","route failed");rgo.disabled=false;});});
     \\rats(); showScore(PCB.auto); drawRoute(); drawClr(); drawDrc();

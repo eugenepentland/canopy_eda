@@ -61,11 +61,13 @@ const HUB_MASS: f64 = 4.0; // hubs move less → act as anchors
 const PASSIVE_MASS: f64 = 1.0;
 const SEED_GAP_MM: f64 = 1.5; // extra gap between seed grid cells
 const ROT_ROUNDS: usize = 2; // rotation-refine ↔ relax coordinate-descent rounds
-const LOOP_W: f64 = 3.0; // weight on loop length in the objective. On a solid GND
-// plane the loop length is dominated by the power-leg (L1) trace — the ground
-// return images directly under it (`loopGroundSpan` carries no lateral term) — so
-// minimising this minimises the real loop area (= power-leg length × dielectric
-// height). The displayed loop AREA is reported as exactly that product.
+const LOOP_W: f64 = 6.0; // weight on the loop *inductance* term (nH; see
+// `loopInductanceNh`). On a solid GND plane the loop is dominated by the power-leg
+// (L1) trace — the return images directly under it (`loopGroundSpan` carries no
+// lateral term) — so minimising the connection inductance minimises both the EMI
+// loop area and the PDN bandwidth limit. The loop nH ≈ 0.5·(loop length mm) + a
+// via floor, so 6.0 keeps this term's magnitude near the old length-based 3.0;
+// PROVISIONAL — the research flags that PCB weights need empirical re-tuning.
 const K_COMPACT: f64 = 0.10; // pull toward the cluster centroid (keeps HPWL tight)
 const STARTS: usize = 48; // multi-start seeds; keep the lowest-scoring arrangement
 const MULTISTART_MAX_PARTS: usize = 32; // above this, single start (bound O(n²·starts))
@@ -105,10 +107,21 @@ const RERANK_BUDGET: usize = 120;
 // `STARTS`, which would re-feed the surrogate-only path on mid-size boards and
 // just slow them down). So the higher count is scoped to here.
 const RERANK_STARTS: usize = 128;
-const W_ISOLATE: f64 = 1.5; // keep-away penalty: sensitive nets ✗ high-current/switch parts
-const ISO_FALLOFF_MM: f64 = 4.0; // distance scale of the isolation penalty (falls to ~0 beyond)
 const CAP_W_MAX: f64 = 3.0; // max value-priority boost for the smallest cap on a rail
+// Extra loop-tightness multiplier for a switching regulator's INPUT decoupling
+// loop (Cin→high-side switch→GND). That loop carries the high-dI/dt current and
+// dominates radiated EMI (E ∝ f²·area·I; Richtek AN045, TI SNVA638A), so its caps
+// are pulled tighter than generic / output decoupling. Applied only when an
+// inductor marks the design a switcher. PROVISIONAL — magnitude wants tuning.
+const INPUT_LOOP_BOOST: f64 = 2.0;
 const W_ALIGN: f64 = 0.5; // tidiness reward: nudge parts to share a row / column
+// Weight on the routing-congestion penalty (`congestionPenalty`). HPWL/RSMT alone
+// does not predict routability — local congestion must be traded off against it
+// (Spindler & Johannes RUDY; UCLA mPL). The penalty is ~0 until a region's
+// estimated wire density exceeds the signal-layer budget, so it only steers parts
+// apart out of genuine hotspots. PROVISIONAL — the research notes the optimal
+// congestion weight is IC-derived and must be swept on real PCBs.
+const W_CONGEST: f64 = 2.0;
 const ALIGN_CLAMP_MM: f64 = 1.5; // only finish near-alignments within this offset (no long pulls)
 const GRID_COURTYARDS = true; // round courtyard half-extents to GRID_MM so edges land on-grid
 const COMPACT_MIN_OVERLAP: f64 = GRID_MM; // min shared-edge length when docking a floating part
@@ -119,8 +132,8 @@ const COMPACT_EPS: f64 = 1e-4; // courtyard-gap tolerance for the "touching" tes
 /// weights are exposed; the structural tunables (iters, starts) stay fixed.
 pub const Params = struct {
     loop_w: f64 = LOOP_W,
-    w_isolate: f64 = W_ISOLATE,
     w_align: f64 = W_ALIGN,
+    w_congest: f64 = W_CONGEST,
     cap_w_max: f64 = CAP_W_MAX,
     grid_courtyards: bool = GRID_COURTYARDS,
 };
@@ -137,8 +150,7 @@ pub const PartKind = enum { hub, passive };
 /// centre position (mm), and a rotation (0/90/180/270°, CCW, matching the
 /// page's `wpt()`). `hw`/`hh` are the *unrotated* half-extents — use `effHw`/
 /// `effHh` for the rotation-aware footprint. `value` is the part value string
-/// (e.g. "100nF") used for value-ordered decoupling; `sensitive`/`aggressor`
-/// flag the part for the keep-away rule (set during `solve`).
+/// (e.g. "100nF") used for value-ordered decoupling.
 pub const Part = struct {
     ref_des: []const u8,
     kind: PartKind,
@@ -147,8 +159,6 @@ pub const Part = struct {
     pads: []const geometry.Pad,
     fallback: bool,
     value: []const u8 = "",
-    sensitive: bool = false,
-    aggressor: bool = false,
     silk_lines: []const geometry.SilkLine = &.{},
     silk_circles: []const geometry.SilkCircle = &.{},
     x: f64 = 0,
@@ -201,35 +211,40 @@ pub const PadRect = struct { x: f64, y: f64, w: f64, h: f64 };
 const Rect = struct { x0: f64, y0: f64, x1: f64, y1: f64 };
 
 /// Layout-quality metrics, recomputed after the relaxation settles.
-/// `hpwl_mm` is total half-perimeter wirelength over signal nets (lower =
-/// shorter routing); `loop_mm` is the summed power+ground airwire length of
-/// the `loop_caps` decoupling caps (lower = tighter hot loops).
+/// `hpwl_mm` is the total signal-net wirelength estimate (HPWL for ≤3-pin nets,
+/// rectilinear MST for larger — see `wireScore`; lower = shorter routing);
+/// `loop_mm` is the summed power+ground airwire length of the `loop_caps`
+/// decoupling caps (lower = tighter hot loops). The field keeps its historical
+/// `hpwl_mm` name though it now carries the RSMT estimate.
 pub const Score = struct {
     hpwl_mm: f64,
     loop_mm: f64,
     loop_caps: usize,
 };
 
-/// Decoupling-loop length totals: `raw` is the plain sum, `weighted` scales each
+/// Decoupling-loop totals over all loops, in two units: `*_mm` is the loop
+/// *length* (displayed) and `*_nh` the loop *inductance* (the scored metric —
+/// see `loopInductanceNh`). `raw_*` is the plain sum, `weighted_*` scales each
 /// loop by its value/priority weight. Produced by both the analytic surrogate
 /// (`surrogateLoops`) and the real router (`routedLoops`) — a named type so the
 /// two are interchangeable (anonymous structs would be distinct types).
-const LoopSums = struct { raw: f64, weighted: f64 };
+const LoopSums = struct { raw_mm: f64, weighted_mm: f64, raw_nh: f64, weighted_nh: f64 };
 
 /// Full decomposition of the objective the optimizer actually minimizes — the
 /// on-screen score bar only shows `hpwl` + the *raw* loop length, so this
-/// surfaces the terms it hides (value-weighted loop, isolation, alignment) for
-/// the JSON export, so a layout that looks "worse" on the visible metric but
-/// wins on the true objective can be told apart. `objective` is the weighted
-/// sum: `hpwl + loop_w·loop_weighted + w_isolate·isolation + w_align·alignment`.
+/// surfaces the terms it hides (value-weighted loop inductance, alignment) for
+/// the JSON export, so a layout that looks "worse" on the visible metric but wins
+/// on the true objective can be told apart. `objective` is the weighted sum:
+/// `hpwl + loop_w·loop_nh_weighted + w_align·alignment` (the loop term is the
+/// value-weighted connection *inductance*, nH — not the length).
 pub const Breakdown = struct {
-    hpwl: f64, // total signal HPWL (mm); objective weight 1
-    loop_raw: f64, // summed unweighted hot-loop length (mm) = Score.loop_mm
-    loop_weighted: f64, // value-priority-weighted loop-length sum
-    area_raw: f64 = 0, // enclosed loop area (mm²) = loop length × dielectric height (GND-plane model)
-    area_weighted: f64 = 0, // value-weighted loop area (mm²); reported, not a separate objective term
-    isolation: f64, // raw sensitive↔aggressor keep-away penalty
+    hpwl: f64, // signal wirelength estimate (mm), RSMT (HPWL ≤3-pin, RMST larger); objective weight 1
+    loop_raw: f64, // summed unweighted hot-loop length (mm) = Score.loop_mm (display only)
+    loop_weighted: f64, // value-priority-weighted loop-length sum (mm, display only)
+    loop_nh: f64 = 0, // summed unweighted hot-loop connection inductance (nH)
+    loop_nh_weighted: f64 = 0, // value-weighted loop inductance (nH) — the scored loop term
     alignment: f64, // raw row/column tidiness penalty
+    congestion: f64 = 0, // RUDY routing-congestion overflow penalty
     objective: f64, // the weighted total the multi-start/polish minimize
 };
 
@@ -266,7 +281,7 @@ pub const Placement = struct {
     score: Score,
     /// Full objective decomposition (defaults to zero so test fixtures that
     /// build a `Placement` directly needn't supply it).
-    breakdown: Breakdown = .{ .hpwl = 0, .loop_raw = 0, .loop_weighted = 0, .isolation = 0, .alignment = 0, .objective = 0 },
+    breakdown: Breakdown = .{ .hpwl = 0, .loop_raw = 0, .loop_weighted = 0, .alignment = 0, .objective = 0 },
     minx: f64,
     miny: f64,
     maxx: f64,
@@ -407,18 +422,18 @@ pub fn solve(
     // too slow on big boards to run on every load). `scoreLayout` already left
     // the surrogate in `score.loop_mm`; the router overrides it when affordable.
     var score = scoreLayout(parts, &prep.idx_of, nets, built.loops);
-    const loop_weighted = if (parts.len <= ROUTED_SCORE_MAX_PARTS) blk: {
+    const lsum = if (parts.len <= ROUTED_SCORE_MAX_PARTS) blk: {
         const routed = routedLoops(arena, parts, &prep.idx_of, nets, built.loops);
-        score.loop_mm = routed.raw;
-        break :blk routed.weighted;
-    } else surrogateLoops(parts, built.loops).weighted;
-    const bd = breakdownWith(parts, params, score, loop_weighted);
+        score.loop_mm = routed.raw_mm;
+        break :blk routed;
+    } else surrogateLoops(parts, built.loops);
+    const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     return finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, generated);
 }
 
 /// Score an arbitrary set of part poses with the optimizer's *own* objective —
 /// the single source of truth, so callers (the layout page's server-side score
-/// button) needn't reimplement HPWL / loop / isolation / alignment in JS. Builds
+/// button) needn't reimplement HPWL / loop / alignment in JS. Builds
 /// the design exactly as `solve` does, applies `poses` verbatim (overlaps
 /// allowed — this only measures, never moves), and returns the full breakdown.
 /// Parts not named in `poses` stay at the origin, so `poses` should cover all.
@@ -432,12 +447,12 @@ pub fn scorePoses(
     var prep = try prepare(arena, block, project_dir, params);
     _ = applyCached(prep.parts, poses);
     var score = scoreLayout(prep.parts, &prep.idx_of, prep.nets, prep.built.loops);
-    const loop_weighted = if (prep.parts.len <= ROUTED_SCORE_MAX_PARTS) blk: {
+    const lsum = if (prep.parts.len <= ROUTED_SCORE_MAX_PARTS) blk: {
         const routed = routedLoops(arena, prep.parts, &prep.idx_of, prep.nets, prep.built.loops);
-        score.loop_mm = routed.raw;
-        break :blk routed.weighted;
-    } else surrogateLoops(prep.parts, prep.built.loops).weighted;
-    return breakdownWith(prep.parts, params, score, loop_weighted);
+        score.loop_mm = routed.raw_mm;
+        break :blk routed;
+    } else surrogateLoops(prep.parts, prep.built.loops);
+    return breakdownWith(prep.parts, &prep.idx_of, prep.nets, params, score, lsum);
 }
 
 /// Build a `Placement` at exactly `poses` (no optimization — overlaps allowed),
@@ -464,15 +479,15 @@ pub fn placeFromPoses(
     // a slightly-overlapping hand-dragged layout must still route as drawn.
     _ = applyCached(parts, poses);
     const score = scoreLayout(parts, &prep.idx_of, nets, built.loops);
-    const loop_weighted = surrogateLoops(parts, built.loops).weighted;
-    const bd = breakdownWith(parts, params, score, loop_weighted);
+    const lsum = surrogateLoops(parts, built.loops);
+    const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     return finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
 }
 
 /// The design model `solve` and `scorePoses` share: the flattened parts (with
 /// footprint geometry + grid-rounded courtyards), the ref→index map, the merged
 /// signal nets, and the springs/decoupling-loops — already classified
-/// (sensitive/aggressor flags + per-loop value weights). Everything the scoring
+/// (per-loop value + input-loop weights). Everything the scoring
 /// reads, minus the placed positions.
 const Prepared = struct {
     parts: []Part,
@@ -582,30 +597,29 @@ fn prepare(
     }
 
     const built = try buildSprings(arena, nets, parts, &idx_of, roles, explicit_pin);
-    classify(parts, built.loops, params.cap_w_max, priority);
+    classify(parts, built.loops, nets, params.cap_w_max, priority);
     return .{ .parts = parts, .idx_of = idx_of, .instances = instances, .nets = nets, .built = built, .priority = priority };
 }
 
 /// Decompose the objective for already-placed parts, surfaced term-by-term for
-/// the score export. `loop_weighted` is supplied by the caller — the real
-/// routed-trace value-weighted sum on the score path — and the objective is
-/// rebuilt from it, so the headline number matches the loop length shown.
-fn breakdownWith(parts: []const Part, params: Params, score: Score, loop_weighted: f64) Breakdown {
-    const iso = isolationPenalty(parts);
+/// the score export. `lsum` is supplied by the caller — the real routed-trace
+/// sums on the score path, the surrogate above ROUTED_SCORE_MAX_PARTS — and the
+/// objective is rebuilt from its inductance term, so the headline matches.
+fn breakdownWith(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet, params: Params, score: Score, lsum: LoopSums) Breakdown {
     const al = alignmentPenalty(parts);
+    const cong = congestionPenalty(parts, idx_of, nets);
     return .{
         .hpwl = score.hpwl_mm,
-        .loop_raw = score.loop_mm,
-        .loop_weighted = loop_weighted,
-        // On a GND plane the loop area = loop length × the L1→L2 dielectric height
-        // (the return images under the power trace). Reported for the inductance
-        // framing; it is exactly proportional to the loop term the objective uses.
-        .area_raw = score.loop_mm * LAYER_GAP_MM,
-        .area_weighted = loop_weighted * LAYER_GAP_MM,
-        .isolation = iso,
+        .loop_raw = score.loop_mm, // = lsum.raw_mm — kept so it matches the headline length
+        .loop_weighted = lsum.weighted_mm,
+        // The scored loop metric: connection inductance (nH), value-weighted. The
+        // objective minimizes this — not the loop length (the length is display only).
+        .loop_nh = lsum.raw_nh,
+        .loop_nh_weighted = lsum.weighted_nh,
         .alignment = al,
-        .objective = score.hpwl_mm + params.loop_w * loop_weighted +
-            params.w_isolate * iso + params.w_align * al,
+        .congestion = cong,
+        .objective = score.hpwl_mm + params.loop_w * lsum.weighted_nh +
+            params.w_align * al + params.w_congest * cong,
     };
 }
 
@@ -622,21 +636,22 @@ fn routedLoops(
     nets: []const FlatNet,
     loops: []const Loop,
 ) LoopSums {
-    if (loops.len == 0) return .{ .raw = 0, .weighted = 0 };
+    if (loops.len == 0) return .{ .raw_mm = 0, .weighted_mm = 0, .raw_nh = 0, .weighted_nh = 0 };
     var lr = router.LoopRouter.init(arena, parts, nets, idx_of, .{}) catch return surrogateLoops(parts, loops);
     if (!lr.ready) return surrogateLoops(parts, loops);
-    var raw: f64 = 0;
-    var weighted: f64 = 0;
+    var s = LoopSums{ .raw_mm = 0, .weighted_mm = 0, .raw_nh = 0, .weighted_nh = 0 };
     for (loops) |lp| {
         const cap_c = worldPadCenter(parts[lp.cap], lp.cap_pwr.x, lp.cap_pwr.y);
         const hub_c = worldPadCenter(parts[lp.hub], lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
         const routed = lr.legLen(cap_c, hub_c, lp.pwr_net) catch null;
         const pwr = if (routed) |r| r else surrogatePwrLeg(parts, lp) + UNROUTABLE_PENALTY_MM;
-        const total = pwr + loopGroundSpan(parts, lp);
-        raw += total;
-        weighted += lp.weight * total;
+        const m = loopMetric(parts, lp, pwr);
+        s.raw_mm += m.mm;
+        s.weighted_mm += lp.weight * m.mm;
+        s.raw_nh += m.nh;
+        s.weighted_nh += lp.weight * m.nh;
     }
-    return .{ .raw = raw, .weighted = weighted };
+    return s;
 }
 
 /// Weighted routed-loop length over a *subset* of `loops`: `match=true` sums only
@@ -667,7 +682,7 @@ fn routedSubsetWeighted(
             const routed = lr_opt.?.legLen(cap_c, hub_c, lp.pwr_net) catch null;
             break :blk if (routed) |r| r else surrogatePwrLeg(parts, lp) + UNROUTABLE_PENALTY_MM;
         } else surrogatePwrLeg(parts, lp);
-        weighted += lp.weight * (pwr + loopGroundSpan(parts, lp));
+        weighted += lp.weight * loopMetric(parts, lp, pwr).nh;
     }
     return weighted;
 }
@@ -1321,8 +1336,8 @@ fn routedPolish(
 }
 
 /// The routed objective `routedPolishPart` minimises for one candidate: HPWL +
-/// isolation + alignment over the live positions, plus the loop term split into
-/// the fixed `others_w` baseline and the freshly-routed loops owned by cap `cap`.
+/// alignment over the live positions, plus the loop term split into the fixed
+/// `others_w` baseline and the freshly-routed loops owned by cap `cap`.
 /// `scratch` is reset before the route so the per-candidate router grid is freed.
 fn routedPolishCost(
     scratch: *std.heap.ArenaAllocator,
@@ -1336,8 +1351,9 @@ fn routedPolishCost(
 ) f64 {
     _ = scratch.reset(.retain_capacity);
     const focus_w = routedSubsetWeighted(scratch.allocator(), parts, idx_of, nets, loops, cap, true);
-    return hpwlScore(parts, idx_of, nets) + params.loop_w * (others_w + focus_w) +
-        params.w_isolate * isolationPenalty(parts) + params.w_align * alignmentPenalty(parts);
+    const cong = if (params.w_congest != 0) params.w_congest * congestionPenalty(parts, idx_of, nets) else 0;
+    return wireScore(parts, idx_of, nets) + params.loop_w * (others_w + focus_w) +
+        params.w_align * alignmentPenalty(parts) + cong;
 }
 
 /// `polishPart` for the routed objective: pick the (position, rotation) over a
@@ -2085,10 +2101,10 @@ fn optimizeRotations(
 }
 
 /// Scalar objective the rotation/polish/multi-start search minimizes:
-/// HPWL + `LOOP_W`·(value-weighted hot-loop length) + `W_ISOLATE`·(keep-away
-/// penalty). The *displayed* score (`scoreLayout`) stays plain HPWL + loop —
-/// these extra rules only steer placement, they don't change the headline
-/// numbers.
+/// wirelength(RSMT) + `LOOP_W`·(value-weighted loop inductance) + `W_ALIGN`·
+/// (alignment) + `W_CONGEST`·(routing congestion). The *displayed* score
+/// (`scoreLayout`) stays plain wirelength + loop length — these extra rules only
+/// steer placement, they don't change the headline numbers.
 fn objectiveCost(
     parts: []const Part,
     idx_of: *std.StringHashMap(usize),
@@ -2096,9 +2112,13 @@ fn objectiveCost(
     loops: []const Loop,
     params: Params,
 ) f64 {
-    const hpwl = hpwlScore(parts, idx_of, nets);
+    const hpwl = wireScore(parts, idx_of, nets);
+    // Congestion is a grid pass over every net — skip it entirely when disabled
+    // (`w_congest == 0`) so a speed-conscious user reclaims it on sparse boards
+    // where it contributes nothing anyway.
+    const cong = if (params.w_congest != 0) params.w_congest * congestionPenalty(parts, idx_of, nets) else 0;
     return hpwl + params.loop_w * weightedLoop(parts, loops) +
-        params.w_isolate * isolationPenalty(parts) + params.w_align * alignmentPenalty(parts);
+        params.w_align * alignmentPenalty(parts) + cong;
 }
 
 /// The same objective as `objectiveCost`, but the loop term is the *real*
@@ -2118,10 +2138,10 @@ fn routedObjectiveCost(
     loops: []const Loop,
     params: Params,
 ) f64 {
-    const hpwl = hpwlScore(parts, idx_of, nets);
-    const loop_weighted = routedLoops(scratch, parts, idx_of, nets, loops).weighted;
-    return hpwl + params.loop_w * loop_weighted +
-        params.w_isolate * isolationPenalty(parts) + params.w_align * alignmentPenalty(parts);
+    const hpwl = wireScore(parts, idx_of, nets);
+    const loop_weighted = routedLoops(scratch, parts, idx_of, nets, loops).weighted_nh;
+    const cong = if (params.w_congest != 0) params.w_congest * congestionPenalty(parts, idx_of, nets) else 0;
+    return hpwl + params.loop_w * loop_weighted + params.w_align * alignmentPenalty(parts) + cong;
 }
 
 /// Tidiness reward (as a penalty to minimize): for each part pair, the smaller
@@ -2139,12 +2159,106 @@ fn alignmentPenalty(parts: []const Part) f64 {
     return total;
 }
 
-/// Hot-loop length with each cap's leg sum scaled by its value-priority
+const CONGEST_BINS: usize = 8; // congestion grid resolution per axis
+const CONGEST_PITCH_MM: f64 = 0.254; // one wire's footprint ≈ track_width + clearance
+const CONGEST_CAP: f64 = 2.0; // routable wire-density per bin (top + bottom signal layers)
+
+/// Routing-congestion penalty (RUDY: Rectangular Uniform wire DensitY). Lays a
+/// coarse grid over the board and, for each signal net, spreads its estimated
+/// wire area (HPWL × wire pitch) uniformly over its bounding box, accumulating a
+/// dimensionless wire-density per bin. The penalty is the summed squared overflow
+/// of each bin above the signal-layer budget `CONGEST_CAP` — zero on a sparse
+/// board, growing where many nets pile into one region. This predicts routability
+/// (whether the board routes clean), which pure wirelength does not — it must be
+/// traded off against HPWL, not minimized in isolation (Spindler & Johannes;
+/// UCLA mPL supply/demand). Ground nets are excluded (they drop to the plane).
+fn congestionPenalty(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet) f64 {
+    if (parts.len == 0) return 0;
+    var minx: f64 = std.math.inf(f64);
+    var miny: f64 = std.math.inf(f64);
+    var maxx: f64 = -std.math.inf(f64);
+    var maxy: f64 = -std.math.inf(f64);
+    for (parts) |p| {
+        minx = @min(minx, p.x - effHw(p));
+        miny = @min(miny, p.y - effHh(p));
+        maxx = @max(maxx, p.x + effHw(p));
+        maxy = @max(maxy, p.y + effHh(p));
+    }
+    const binw = (maxx - minx) / @as(f64, CONGEST_BINS);
+    const binh = (maxy - miny) / @as(f64, CONGEST_BINS);
+    if (binw <= 1e-6 or binh <= 1e-6) return 0;
+    const bin_area = binw * binh;
+
+    var dens = [_]f64{0} ** (CONGEST_BINS * CONGEST_BINS);
+    for (nets) |net| {
+        if (isGroundName(shortName(net.name))) continue;
+        var nminx: f64 = std.math.inf(f64);
+        var nminy: f64 = std.math.inf(f64);
+        var nmaxx: f64 = -std.math.inf(f64);
+        var nmaxy: f64 = -std.math.inf(f64);
+        var cnt: usize = 0;
+        for (net.pins) |pr| {
+            const i = idx_of.get(pr.ref_des) orelse continue;
+            const pad = padLocal(parts[i], pr.pin);
+            const w = worldPt(parts[i], pad.x, pad.y);
+            nminx = @min(nminx, w.x);
+            nminy = @min(nminy, w.y);
+            nmaxx = @max(nmaxx, w.x);
+            nmaxy = @max(nmaxy, w.y);
+            cnt += 1;
+        }
+        if (cnt < 2) continue;
+        const nw = nmaxx - nminx;
+        const nh = nmaxy - nminy;
+        // Effective footprint for spreading: a trace has a finite width, so floor
+        // each axis to one wire pitch. This keeps `na` non-degenerate AND lets a
+        // perfectly horizontal/vertical net still deposit density over its corridor.
+        const ex0 = nminx - @max(0.0, CONGEST_PITCH_MM - nw) / 2;
+        const ex1 = nmaxx + @max(0.0, CONGEST_PITCH_MM - nw) / 2;
+        const ey0 = nminy - @max(0.0, CONGEST_PITCH_MM - nh) / 2;
+        const ey1 = nmaxy + @max(0.0, CONGEST_PITCH_MM - nh) / 2;
+        const na = (ex1 - ex0) * (ey1 - ey0); // = max(nw,pitch)·max(nh,pitch)
+        // RUDY per-net density: wire area (HPWL × pitch) over the bounding-box area.
+        const dn = ((nw + nh) * CONGEST_PITCH_MM) / na;
+        const bx0 = binIndex((ex0 - minx) / binw);
+        const bx1 = binIndex((ex1 - minx) / binw);
+        const by0 = binIndex((ey0 - miny) / binh);
+        const by1 = binIndex((ey1 - miny) / binh);
+        var by = by0;
+        while (by <= by1) : (by += 1) {
+            var bx = bx0;
+            while (bx <= bx1) : (bx += 1) {
+                // Fraction of this bin the net's effective footprint overlaps.
+                const cx0 = minx + @as(f64, @floatFromInt(bx)) * binw;
+                const cy0 = miny + @as(f64, @floatFromInt(by)) * binh;
+                const ow = @max(0.0, @min(ex1, cx0 + binw) - @max(ex0, cx0));
+                const oh = @max(0.0, @min(ey1, cy0 + binh) - @max(ey0, cy0));
+                dens[by * CONGEST_BINS + bx] += dn * (ow * oh) / bin_area;
+            }
+        }
+    }
+    var pen: f64 = 0;
+    for (dens) |d| {
+        const over = d - CONGEST_CAP;
+        if (over > 0) pen += over * over;
+    }
+    return pen;
+}
+
+/// Clamp a fractional bin coordinate to a valid `[0, CONGEST_BINS-1]` index.
+fn binIndex(f: f64) usize {
+    if (f <= 0) return 0;
+    const i: usize = @intFromFloat(@floor(f));
+    return @min(i, CONGEST_BINS - 1);
+}
+
+/// Hot-loop *inductance* (nH) with each cap's loop scaled by its value-priority
 /// `weight` — so on a multi-cap rail the smaller cap is pulled closest. Uses the
 /// continuous fixed-pad surrogate (no argmin flip); the score path replaces this
-/// with the real routed-trace sum (see `routedLoops`).
+/// with the real routed-trace inductance (see `routedLoops`). This is the loop
+/// term the objective minimizes.
 fn weightedLoop(parts: []const Part, loops: []const Loop) f64 {
-    return surrogateLoops(parts, loops).weighted;
+    return surrogateLoops(parts, loops).weighted_nh;
 }
 
 /// One loop's surrogate power-leg cost: the fixed-pad gap (+ block ramp) from the
@@ -2155,51 +2269,81 @@ fn surrogatePwrLeg(parts: []const Part, lp: Loop) f64 {
     return fixedReachable(worldRect(cap, lp.cap_pwr), parts, lp.cap, worldRect(parts[lp.hub], lp.hub_pwr_pin));
 }
 
-/// The non-power half of the physical loop (mm), modelled for a *solid adjacent
-/// GND plane* (the board's L2): the cap's own pad-to-pad span (its body) + the
-/// two `LAYER_GAP_MM` via transitions (cap GND pad → plane, plane → IC GND pad).
-/// There is NO lateral ground-return term: on a plane the return current images
-/// directly under the power trace (path of least inductance), so the loop area is
-/// set by the power-leg length, not by how far the cap's GND pad sits from the IC
-/// GND *pin*. (For a board with a discrete routed return instead of a plane, that
-/// lateral distance would matter — not this design; see the design's `(kicad-pcb)`
-/// stackup, always plane-on-L2.)
-fn loopGroundSpan(parts: []const Part, lp: Loop) f64 {
+/// The cap's own pad-to-pad span (its body), edge-to-edge (mm) — the current
+/// path through the capacitor itself, part of the conducting loop.
+fn capSpan(parts: []const Part, lp: Loop) f64 {
     const cap = parts[lp.cap];
-    const span = rectGap(worldRect(cap, lp.cap_pwr), worldRect(cap, lp.cap_gnd));
-    return span + 2 * LAYER_GAP_MM;
+    return rectGap(worldRect(cap, lp.cap_pwr), worldRect(cap, lp.cap_gnd));
 }
 
-/// Analytic loop sums (raw + value-weighted) from the fixed-pad surrogate: the
-/// power leg to the pinned pin + the cap span + the ground return
-/// (`loopGroundSpan`). Drives the inner-loop objective and is the score path's
-/// fallback when routing a leg fails or the board is too large to grid.
+/// The non-power half of the physical loop *length* (mm), modelled for a *solid
+/// adjacent GND plane* (the board's L2): the cap's own pad-to-pad span (its body)
+/// + the two `LAYER_GAP_MM` via transitions (cap GND pad → plane, plane → IC GND
+/// pad). There is NO lateral ground-return term: on a plane the return current
+/// images directly under the power trace (path of least inductance), so the loop
+/// is set by the power-leg length, not by how far the cap's GND pad sits from the
+/// IC GND *pin*. (For a board with a discrete routed return instead of a plane,
+/// that lateral distance would matter — not this design; see the design's
+/// `(kicad-pcb)` stackup, always plane-on-L2.) Kept as the display *length*; the
+/// scored quantity is the loop *inductance* (`loopInductanceNh`).
+fn loopGroundSpan(parts: []const Part, lp: Loop) f64 {
+    return capSpan(parts, lp) + 2 * LAYER_GAP_MM;
+}
+
+// ── Loop inductance (the scored hot-loop metric) ─────────────────────────────
+// The research verdict: a decoupling cap's connection *inductance* (nH) — not the
+// loop *length* — is what limits its high-frequency current delivery (LearnEMC,
+// "Estimating Connection Inductance"; SRF = 1/(2π√(LC))). So the objective scores
+// inductance. Two pieces of validated physics shape the estimate:
+//   • A trace over its adjacent return plane has a per-unit-length inductance
+//     L' = (μ0/2π)·ln(2h/r_eq), h = the L1→L2 dielectric gap, r_eq ≈ w/4 the
+//     flat-trace equivalent radius. This linear-in-length term is the LearnEMC
+//     "long loop" (w>5h) regime.
+//   • Below w≈5h the linear term alone would drive L→0 as the cap touches the
+//     pin, but the connection inductance floors at the via/mounting inductance —
+//     so we add the series inductance of the two short vias down to the L2 plane
+//     (cap-GND→plane, IC-GND→plane). That floor IS the dominant short-regime
+//     correction the pure-length model misses; a full rectangular-loop closed
+//     form would refine the crossover but the geometry can't pin the absolute nH
+//     anyway (the coefficient is logarithmic), so weights need empirical tuning.
+const MU0_OVER_2PI_NH_PER_MM: f64 = 0.2; // μ0/2π = 2e-7 H/m = 0.2 nH/mm
+const IND_TRACE_W_MM: f64 = 0.127; // ~track width; flat-trace equiv radius = w/4
+const VIA_TO_PLANE_DIA_MM: f64 = 0.4; // via barrel Ø for the GND drop to L2
+const N_LOOP_VIAS: f64 = 2.0; // cap-GND→plane + IC-GND→plane
+/// Per-unit-length inductance of a signal trace over the adjacent return plane.
+const LOOP_PUL_NH_PER_MM: f64 = MU0_OVER_2PI_NH_PER_MM * @log(2.0 * LAYER_GAP_MM / (IND_TRACE_W_MM / 4.0));
+/// Series inductance (nH) of one short via down to the L2 plane: (μ0/2π)·h·(ln(4h/d)+1).
+const VIA_IND_NH: f64 = MU0_OVER_2PI_NH_PER_MM * LAYER_GAP_MM * (@log(4.0 * LAYER_GAP_MM / VIA_TO_PLANE_DIA_MM) + 1.0);
+
+/// Loop connection inductance (nH) from the conducting-path length (power leg +
+/// cap body span, mm): the trace-over-plane term + the two via transitions' floor.
+fn loopInductanceNh(conductor_len_mm: f64) f64 {
+    return N_LOOP_VIAS * VIA_IND_NH + LOOP_PUL_NH_PER_MM * conductor_len_mm;
+}
+
+/// One loop's display *length* (mm) and scored *inductance* (nH) from a power-leg
+/// length (`pwr_len`, mm) — the surrogate gap or the routed trace. The conducting
+/// path is the power leg + the cap body span; the ground return images under it.
+const LoopMetric = struct { mm: f64, nh: f64 };
+fn loopMetric(parts: []const Part, lp: Loop, pwr_len: f64) LoopMetric {
+    const span = capSpan(parts, lp);
+    return .{ .mm = pwr_len + span + 2 * LAYER_GAP_MM, .nh = loopInductanceNh(pwr_len + span) };
+}
+
+/// Analytic loop sums (length + inductance, raw + value-weighted) from the
+/// fixed-pad surrogate: the power leg to the pinned pin, plus the cap span and
+/// via floor folded into `loopMetric`. Drives the inner-loop objective and is the
+/// score path's fallback when routing a leg fails or the board is too large to grid.
 fn surrogateLoops(parts: []const Part, loops: []const Loop) LoopSums {
-    var raw: f64 = 0;
-    var weighted: f64 = 0;
+    var s = LoopSums{ .raw_mm = 0, .weighted_mm = 0, .raw_nh = 0, .weighted_nh = 0 };
     for (loops) |lp| {
-        const total = surrogatePwrLeg(parts, lp) + loopGroundSpan(parts, lp);
-        raw += total;
-        weighted += lp.weight * total;
+        const m = loopMetric(parts, lp, surrogatePwrLeg(parts, lp));
+        s.raw_mm += m.mm;
+        s.weighted_mm += lp.weight * m.mm;
+        s.raw_nh += m.nh;
+        s.weighted_nh += lp.weight * m.nh;
     }
-    return .{ .raw = raw, .weighted = weighted };
-}
-
-/// Keep-away penalty: high when a sensitive part (feedback/reference net) sits
-/// near a high-current/switch part (decoupling cap or inductor), decaying to
-/// ~0 past `ISO_FALLOFF_MM`. Pushes the reference network clear of the noisy
-/// nodes (e.g. a buck's feedback divider away from the switch node/inductor).
-fn isolationPenalty(parts: []const Part) f64 {
-    var total: f64 = 0;
-    for (parts, 0..) |s, i| {
-        if (!s.sensitive) continue;
-        for (parts, 0..) |a, j| {
-            if (i == j or !a.aggressor) continue;
-            const d = std.math.hypot(s.x - a.x, s.y - a.y);
-            total += 1.0 / (1.0 + d / ISO_FALLOFF_MM);
-        }
-    }
-    return total;
+    return s;
 }
 
 const Endpoint = struct { idx: usize, pin: []const u8, px: f64, py: f64, pw: f64, ph: f64, is_hub: bool };
@@ -2256,20 +2400,23 @@ fn buildSprings(
     return .{ .springs = try springs.toOwnedSlice(arena), .loops = try loops.toOwnedSlice(arena) };
 }
 
-/// Tag parts for the new rules, and set each loop's value-priority weight:
-///   • aggressor = a decoupling cap or an inductor (high-current / switch
-///     node) — the keep-away rule pushes sensitive parts away from these,
-///   • sensitive = any other signal passive (feedback / reference network),
+/// Set each loop's value-priority weight:
 ///   • loop.weight = boost the smaller of several caps sharing a power rail
 ///     toward the pin (rails identified by a shared `hub_pwr` slice); a lone
 ///     cap keeps weight 1, so single-cap rails are unaffected. A declared
 ///     `(placement-order …)` rank (`priority[cap]`, 0 = unranked) raises the
 ///     weight further — `@max` so the order can only *tighten*, never loosen.
-fn classify(parts: []Part, loops: []Loop, cap_w_max: f64, priority: []const u32) void {
-    for (loops) |lp| parts[lp.cap].aggressor = true;
-    for (parts) |*p| {
-        if (isInductor(p.ref_des)) p.aggressor = true;
-        if (p.kind == .passive and !p.aggressor) p.sensitive = true;
+///   • when an inductor marks the design a switching regulator, a loop on an
+///     INPUT rail (VIN/PVIN/VBUS/…, see `isInputRailName`) is the high-dI/dt hot
+///     loop and its weight is multiplied by `INPUT_LOOP_BOOST` — pulled tighter
+///     than output/generic decoupling because it dominates EMI.
+fn classify(parts: []Part, loops: []Loop, nets: []const FlatNet, cap_w_max: f64, priority: []const u32) void {
+    var switcher = false;
+    for (parts) |p| {
+        if (isInductor(p.ref_des)) {
+            switcher = true;
+            break;
+        }
     }
     for (loops) |*lp| {
         var w_val: f64 = 1;
@@ -2281,8 +2428,44 @@ fn classify(parts: []Part, loops: []Loop, cap_w_max: f64, priority: []const u32)
             }
             w_val = std.math.clamp(@sqrt(vref / v), 1.0, cap_w_max);
         }
-        lp.weight = @max(w_val, priorityWeight(priority[lp.cap]));
+        var w = @max(w_val, priorityWeight(priority[lp.cap]));
+        if (switcher and lp.pwr_net >= 0) {
+            const ni: usize = @intCast(lp.pwr_net);
+            if (ni < nets.len and isInputRailName(shortName(nets[ni].name))) w *= INPUT_LOOP_BOOST;
+        }
+        lp.weight = w;
     }
+}
+
+/// True when `name` looks like a switching regulator's *input* rail — the
+/// high-dI/dt side whose decoupling loop dominates EMI. Matches common input-rail
+/// names (VIN/PVIN/VBUS/VBAT/VSYS/…) and any raw-voltage rail ≥7 V (e.g. `V_12V`,
+/// `24V`), which on a buck is the input; lower raw rails (3V3, 5V) read as
+/// outputs and are not boosted. Separators stripped, case-insensitive.
+fn isInputRailName(name: []const u8) bool {
+    var buf: [32]u8 = undefined;
+    var n: usize = 0;
+    for (name) |c| switch (c) {
+        '_', '-', '/', '.', ' ', '#' => {},
+        else => {
+            if (n >= buf.len) break;
+            buf[n] = std.ascii.toUpper(c);
+            n += 1;
+        },
+    };
+    const s = buf[0..n];
+    const prefixes = [_][]const u8{ "VIN", "PVIN", "VBUS", "VBAT", "VSYS", "VDCIN", "HVIN" };
+    for (prefixes) |p| if (std.mem.startsWith(u8, s, p)) return true;
+    // Raw-voltage rail: an optional leading 'V' then an integer ≥ 7 V is an input.
+    var t = s;
+    if (t.len > 0 and t[0] == 'V') t = t[1..];
+    var i: usize = 0;
+    while (i < t.len and std.ascii.isDigit(t[i])) i += 1;
+    if (i > 0) {
+        const volts = std.fmt.parseInt(u32, t[0..i], 10) catch return false;
+        return volts >= 7;
+    }
+    return false;
 }
 
 /// Loop-tightness weight from a `(placement-order …)` rank: rank 0 (unranked) is
@@ -2467,11 +2650,22 @@ fn selectGroundPads(arena: std.mem.Allocator, tagged: []const TaggedPad) std.mem
     return out.toOwnedSlice(arena);
 }
 
-/// Half-perimeter wirelength over signal nets (ground excluded). The hot part of
-/// the inner-loop objective (`objectiveCost`), so it's split out; the display
-/// loop term lives in `scoreLayout` via the fixed-pad `surrogateLoops`.
-fn hpwlScore(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet) f64 {
-    var hpwl: f64 = 0;
+/// Largest net (pin count) `wireScore` builds the explicit point set for; bigger
+/// nets fall back to the cheap bounding-box HPWL (a power/ground-ish rail where
+/// the looser estimate is fine). Bounds the per-net RMST work at O(n²) ≤ 64².
+const MAX_WIRE_PTS: usize = 64;
+
+/// Signal-net wirelength estimate (ground excluded) — the wirelength part of the
+/// inner-loop objective (`objectiveCost`), split out so it's cheap to re-evaluate.
+/// HPWL (bounding-box half-perimeter) is *exact* for 2- and 3-pin nets, so those
+/// keep the fast path; for nets of degree ≥4 HPWL systematically under-estimates
+/// the routed tree, so we use the rectilinear minimum spanning tree (`rmstLen`)
+/// — a much closer proxy for routed multi-pin wirelength (Chow & Young; FLUTE).
+/// The `Score.hpwl_mm` / `Breakdown.hpwl` fields keep their historical names but
+/// now carry this RSMT estimate.
+fn wireScore(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet) f64 {
+    var total: f64 = 0;
+    var pts: [MAX_WIRE_PTS]Pt = undefined;
     for (nets) |net| {
         if (isGroundName(shortName(net.name))) continue;
         var minx: f64 = std.math.inf(f64);
@@ -2483,18 +2677,63 @@ fn hpwlScore(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []con
             const i = idx_of.get(pr.ref_des) orelse continue;
             const pad = padLocal(parts[i], pr.pin);
             const w = worldPt(parts[i], pad.x, pad.y);
+            if (cnt < MAX_WIRE_PTS) pts[cnt] = w;
             minx = @min(minx, w.x);
             miny = @min(miny, w.y);
             maxx = @max(maxx, w.x);
             maxy = @max(maxy, w.y);
             cnt += 1;
         }
-        if (cnt >= 2) hpwl += (maxx - minx) + (maxy - miny);
+        if (cnt < 2) continue;
+        // HPWL = RSMT for ≤3 pins (keep the fast path); RMST for the rest.
+        if (cnt <= 3 or cnt > MAX_WIRE_PTS) {
+            total += (maxx - minx) + (maxy - miny);
+        } else {
+            total += rmstLen(pts[0..cnt]);
+        }
     }
-    return hpwl;
+    return total;
 }
 
-/// HPWL over signal nets + the decoupling loops' length. The loop term here is
+/// Rectilinear minimum spanning tree length (Prim, Manhattan metric) over `pts`
+/// — a tighter routed-wirelength estimate than the bounding-box HPWL, which
+/// under-estimates nets of degree >3. RMST bounds the rectilinear Steiner
+/// minimal tree from above (RSMT ≤ RMST ≤ 1.5·RSMT) where HPWL bounds it from
+/// below (HPWL ≤ RSMT), so it is the better placement-steering proxy. `pts.len`
+/// is in [2, MAX_WIRE_PTS]; full FLUTE LUTs would tighten this toward exact RSMT.
+fn rmstLen(pts: []const Pt) f64 {
+    const n = pts.len;
+    var in_tree = [_]bool{false} ** MAX_WIRE_PTS;
+    var best: [MAX_WIRE_PTS]f64 = undefined;
+    in_tree[0] = true;
+    for (1..n) |i| best[i] = manhattan(pts[0], pts[i]);
+    var total: f64 = 0;
+    var added: usize = 1;
+    while (added < n) : (added += 1) {
+        // Nearest not-yet-connected pin to the current tree.
+        var bj: usize = 0;
+        var bd: f64 = std.math.inf(f64);
+        for (1..n) |j| {
+            if (!in_tree[j] and best[j] < bd) {
+                bd = best[j];
+                bj = j;
+            }
+        }
+        in_tree[bj] = true;
+        total += bd;
+        for (1..n) |k| {
+            if (!in_tree[k]) best[k] = @min(best[k], manhattan(pts[bj], pts[k]));
+        }
+    }
+    return total;
+}
+
+/// Manhattan (rectilinear) distance between two points (mm).
+fn manhattan(a: Pt, b: Pt) f64 {
+    return @abs(a.x - b.x) + @abs(a.y - b.y);
+}
+
+/// Signal-net wirelength estimate (`wireScore`) + the decoupling loops' length. The loop term here is
 /// the fixed-pad *surrogate* (power leg to the pinned pin + cap span + ground
 /// return); the score path overrides `loop_mm` with the real routed power-leg
 /// sum (`routedLoops`).
@@ -2505,8 +2744,8 @@ fn scoreLayout(
     loops: []const Loop,
 ) Score {
     return .{
-        .hpwl_mm = hpwlScore(parts, idx_of, nets),
-        .loop_mm = surrogateLoops(parts, loops).raw,
+        .hpwl_mm = wireScore(parts, idx_of, nets),
+        .loop_mm = surrogateLoops(parts, loops).raw_mm,
         .loop_caps = loops.len,
     };
 }
@@ -2889,7 +3128,7 @@ fn padLocal(part: Part, pin: []const u8) geometry.Pad {
 }
 
 /// True if the ref-des is an inductor (prefix `L`) — a switch-node / high-di/dt
-/// part the keep-away rule treats as an aggressor.
+/// part, used to detect a switching regulator for input-hot-loop weighting.
 fn isInductor(ref: []const u8) bool {
     const s = shortName(ref);
     return s.len > 0 and (s[0] == 'L' or s[0] == 'l');
@@ -3271,4 +3510,87 @@ test "selectGroundPads prefers real grounds, then non-straps, then anything" {
         defer testing.allocator.free(out);
         try testing.expectEqual(@as(usize, 1), out.len);
     }
+}
+
+// spec: placement/optimizer - multi-pin wirelength uses the rectilinear MST, which equals span when collinear and exceeds HPWL otherwise
+test "rmstLen is exact on collinear pins and tightens above HPWL for a 4-pin net" {
+    // Collinear pins: the MST is just the span, which also equals HPWL.
+    const line = [_]Pt{ .{ .x = 0, .y = 0 }, .{ .x = 1, .y = 0 }, .{ .x = 2, .y = 0 }, .{ .x = 3, .y = 0 } };
+    try testing.expectApproxEqAbs(@as(f64, 3.0), rmstLen(&line), 1e-12);
+
+    // Unit square: MST is 3 edges of length 1 (= 3.0); HPWL is only 2.0, so the
+    // RMST is the strictly larger — and more faithful — multi-pin estimate.
+    const square = [_]Pt{ .{ .x = 0, .y = 0 }, .{ .x = 1, .y = 0 }, .{ .x = 0, .y = 1 }, .{ .x = 1, .y = 1 } };
+    const hpwl: f64 = 2.0; // (maxx-minx) + (maxy-miny)
+    try testing.expectApproxEqAbs(@as(f64, 3.0), rmstLen(&square), 1e-12);
+    try testing.expect(rmstLen(&square) > hpwl);
+}
+
+// spec: placement/optimizer - loop inductance floors at the via mounting inductance and rises with conductor length
+test "loopInductanceNh floors at the via inductance and grows with length" {
+    // A zero-length connection still has the two GND vias' series inductance — the
+    // floor the pure-length model misses (so L never collapses to 0 as a cap nears
+    // the pin). The floor is small but strictly positive.
+    const floor = loopInductanceNh(0);
+    try testing.expectApproxEqAbs(N_LOOP_VIAS * VIA_IND_NH, floor, 1e-12);
+    try testing.expect(floor > 0);
+    // Longer conductor ⇒ strictly more inductance, linear above the floor.
+    try testing.expect(loopInductanceNh(2.0) > loopInductanceNh(0.5));
+    try testing.expectApproxEqAbs(floor + LOOP_PUL_NH_PER_MM * 2.0, loopInductanceNh(2.0), 1e-9);
+    // Per-unit-length inductance lands in the physically sane ~0.3–0.7 nH/mm band
+    // for a trace over a 0.2 mm-adjacent plane.
+    try testing.expect(LOOP_PUL_NH_PER_MM > 0.3 and LOOP_PUL_NH_PER_MM < 0.7);
+}
+
+// spec: placement/optimizer - input-rail names (and raw rails ≥7V) read as the switching hot loop; output/low rails do not
+test "isInputRailName flags switching input rails, not outputs" {
+    // Named input rails (separator/case-insensitive).
+    try testing.expect(isInputRailName("VIN"));
+    try testing.expect(isInputRailName("PVIN"));
+    try testing.expect(isInputRailName("VBUS"));
+    try testing.expect(isInputRailName("V_IN"));
+    // Raw-voltage rails: ≥7 V is an input on a buck; lower rails are outputs.
+    try testing.expect(isInputRailName("V_12V"));
+    try testing.expect(isInputRailName("24V"));
+    try testing.expect(!isInputRailName("V_3V3"));
+    try testing.expect(!isInputRailName("V_5V"));
+    // Outputs / switch node / ground are not the input hot loop.
+    try testing.expect(!isInputRailName("VOUT"));
+    try testing.expect(!isInputRailName("SW"));
+    try testing.expect(!isInputRailName("GND"));
+}
+
+// spec: placement/optimizer - routing congestion is zero with no multi-pin nets and positive when nets pile into one region
+test "congestionPenalty fires only on dense regions" {
+    const pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.2, .h = 0.2 }};
+    // Four parts at the corners of a ~0.5 mm board.
+    var parts = [_]Part{
+        .{ .ref_des = "A", .kind = .passive, .hw = 0.05, .hh = 0.05, .pads = &pad, .fallback = false, .x = 0.0, .y = 0.0 },
+        .{ .ref_des = "B", .kind = .passive, .hw = 0.05, .hh = 0.05, .pads = &pad, .fallback = false, .x = 0.4, .y = 0.4 },
+        .{ .ref_des = "C", .kind = .passive, .hw = 0.05, .hh = 0.05, .pads = &pad, .fallback = false, .x = 0.4, .y = 0.0 },
+        .{ .ref_des = "D", .kind = .passive, .hw = 0.05, .hh = 0.05, .pads = &pad, .fallback = false, .x = 0.0, .y = 0.4 },
+    };
+    var idx_of = std.StringHashMap(usize).init(testing.allocator);
+    defer idx_of.deinit();
+    for (parts, 0..) |p, i| try idx_of.put(p.ref_des, i);
+
+    // No multi-pin signal net → zero congestion.
+    const lone = [_]export_kicad.FlatPin{.{ .ref_des = "A", .pin = "1" }};
+    const empty_nets = [_]FlatNet{.{ .name = "NET1", .pins = &lone }};
+    try testing.expectEqual(@as(f64, 0), congestionPenalty(&parts, &idx_of, &empty_nets));
+
+    // Three nets each spanning the small board overlap in the centre → congested.
+    const ab = [_]export_kicad.FlatPin{ .{ .ref_des = "A", .pin = "1" }, .{ .ref_des = "B", .pin = "1" } };
+    const cd = [_]export_kicad.FlatPin{ .{ .ref_des = "C", .pin = "1" }, .{ .ref_des = "D", .pin = "1" } };
+    const ad = [_]export_kicad.FlatPin{ .{ .ref_des = "A", .pin = "1" }, .{ .ref_des = "B", .pin = "1" } };
+    const dense_nets = [_]FlatNet{
+        .{ .name = "N1", .pins = &ab },
+        .{ .name = "N2", .pins = &cd },
+        .{ .name = "N3", .pins = &ad },
+    };
+    try testing.expect(congestionPenalty(&parts, &idx_of, &dense_nets) > 0);
+
+    // binIndex clamps out-of-range fractions into [0, CONGEST_BINS-1].
+    try testing.expectEqual(@as(usize, 0), binIndex(-1.5));
+    try testing.expectEqual(CONGEST_BINS - 1, binIndex(999));
 }

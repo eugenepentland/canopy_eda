@@ -398,10 +398,12 @@ src/placement/pin_roles.zig::isGroundFn fn
 src/placement/pin_roles.zig::load fn
 src/placement/router.zig::LoopRouter struct_
 src/placement/router.zig::PadObs struct_
+src/placement/router.zig::RETURN_PATH_RADIUS_MM value
 src/placement/router.zig::RouteParams struct_
 src/placement/router.zig::RouteResult struct_
 src/placement/router.zig::Track struct_
 src/placement/router.zig::Via struct_
+src/placement/router.zig::returnPathViolations fn
 src/placement/router.zig::route fn
 src/render_block_types.zig::Category enum_
 src/render_block_types.zig::categoryColor fn
