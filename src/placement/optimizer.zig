@@ -85,6 +85,22 @@ const ROUTED_POLISH_CELLS: i64 = 3; // ±0.6 mm window — local tuck/flip, not 
 // on-demand regenerate take tens of seconds. Small power modules — the case this
 // helps most — sit comfortably under it.
 const ROUTED_POLISH_MAX_PARTS: usize = 16;
+// Top-K rerank (small boards, `rerankSolve`): the multi-start ranks arrangements
+// by the fixed-pad surrogate, but the surrogate-best global arrangement isn't
+// always the routed-best — and `routedPolish`'s small window can only tuck a cap,
+// not move it to a different side of the IC. So keep the K lowest-surrogate
+// candidates, finish each fully, and pick the one with the lowest *routed*
+// objective. K is scaled down with part count to bound the per-candidate finish
+// cost (each runs polish + compaction); `RERANK_BUDGET/parts` ≈ a fixed work cap.
+const RERANK_K: usize = 12;
+const RERANK_BUDGET: usize = 120;
+// The rerank path can afford a much larger seed pool than the default `STARTS`:
+// it only runs on ≤16-part boards (relax is cheap there) and — because the
+// candidates are reranked on the *routed* metric — a wider, more diverse pool can
+// only surface a better arrangement, never a worse one (unlike raising the global
+// `STARTS`, which would re-feed the surrogate-only path on mid-size boards and
+// just slow them down). So the higher count is scoped to here.
+const RERANK_STARTS: usize = 128;
 const W_ISOLATE: f64 = 1.5; // keep-away penalty: sensitive nets ✗ high-current/switch parts
 const ISO_FALLOFF_MM: f64 = 4.0; // distance scale of the isolation penalty (falls to ~0 beyond)
 const CAP_W_MAX: f64 = 3.0; // max value-priority boost for the smallest cap on a rail
@@ -330,18 +346,22 @@ pub fn solve(
 
     const generated = !applyCached(parts, cached);
     if (generated) {
-        optimize(parts, &prep.idx_of, nets, built, params);
-        // Mirror matched halves (e.g. a symmetric amp's input/output sections)
-        // when the design is genuinely symmetric; a no-op otherwise.
-        try symmetrize(arena, parts, &prep.idx_of, nets, built, params);
-        // Final pull-together: dock any part still held off by the snap-safety
-        // gap so every courtyard abuts at least one neighbour (provably tight),
-        // highest placement-order priority docking first.
-        compactToContact(parts, prep.priority);
-        // Routed-aware tuck: re-settle each cap to the rotation/offset that
-        // shortens the *real* routed trace (the metric the headline reports),
-        // which the surrogate-driven relax/polish can miss. Small boards only.
-        routedPolish(arena, parts, &prep.idx_of, nets, built.loops, params);
+        if (parts.len >= 2 and parts.len <= ROUTED_POLISH_MAX_PARTS and built.loops.len > 0) {
+            // Small board with decoupling loops: pick the global arrangement on the
+            // real routed metric (rerank the top-K multi-start candidates), then the
+            // local routed tuck. This is what closes the surrogate↔routed gap that a
+            // single surrogate-selected arrangement + local polish leaves on the table.
+            try rerankSolve(arena, parts, &prep.idx_of, nets, built, params, prep.priority);
+        } else {
+            optimize(parts, &prep.idx_of, nets, built, params);
+            // Mirror matched halves (e.g. a symmetric amp's input/output sections)
+            // when the design is genuinely symmetric; a no-op otherwise.
+            try symmetrize(arena, parts, &prep.idx_of, nets, built, params);
+            // Final pull-together: dock any part still held off by the snap-safety
+            // gap so every courtyard abuts at least one neighbour (provably tight),
+            // highest placement-order priority docking first.
+            compactToContact(parts, prep.priority);
+        }
     }
 
     // Headline score's loop length: the *real* routed-trace sum on interactive
@@ -623,6 +643,84 @@ fn anyCourtOverlap(parts: []const Part) bool {
         }
     }
     return false;
+}
+
+/// Small-board solve that picks the global arrangement on the *routed* metric.
+/// The multi-start ranks arrangements by the fixed-pad surrogate, but the
+/// surrogate-best isn't always the routed-best, and `routedPolish`'s ±0.6mm
+/// window can only tuck a cap, not move it to the other side of the IC — so a
+/// poor side-assignment survives. Here we keep the K lowest-surrogate relaxed
+/// candidates, finish each one fully (polish → legalize → symmetrise → compact),
+/// score the finished arrangement by the real routed objective, keep the best,
+/// then run the local routed tuck on it. The surrogate-best is always among the
+/// K, so the result is never worse than the single-arrangement path. K scales
+/// down with part count to bound the per-candidate finish cost.
+fn rerankSolve(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    built: Built,
+    params: Params,
+    priority: []const u32,
+) std.mem.Allocator.Error!void {
+    // rerankSolve only runs on small boards (≤ ROUTED_POLISH_MAX_PARTS ≤
+    // MULTISTART_MAX_PARTS), so the multi-start + rotation refine always apply.
+    const starts: usize = RERANK_STARTS;
+    const rounds: usize = ROT_ROUNDS;
+    const k = std.math.clamp(RERANK_BUDGET / parts.len, 2, RERANK_K);
+
+    // Keep the K lowest-surrogate relaxed arrangements (poses flattened K×n).
+    var cand = try arena.alloc(Pose, k * parts.len);
+    const cand_cost = try arena.alloc(f64, k);
+    for (cand_cost) |*c| c.* = std.math.inf(f64);
+    var s: usize = 0;
+    while (s < starts) : (s += 1) {
+        runStart(parts, idx_of, nets, built, s, rounds, params);
+        const cost = objectiveCost(parts, idx_of, nets, built.loops, params);
+        var worst: usize = 0;
+        for (cand_cost, 0..) |c, i| {
+            if (c > cand_cost[worst]) worst = i;
+        }
+        if (cost < cand_cost[worst]) {
+            cand_cost[worst] = cost;
+            for (parts, 0..) |p, j| cand[worst * parts.len + j] = .{ .x = p.x, .y = p.y, .rot = p.rot };
+        }
+    }
+
+    // Finish each kept candidate and keep the routed-best finished arrangement.
+    var scratch = std.heap.ArenaAllocator.init(arena);
+    defer scratch.deinit();
+    const best = try arena.alloc(Pose, parts.len);
+    var best_cost: f64 = std.math.inf(f64);
+    var have = false;
+    for (0..k) |c| {
+        if (cand_cost[c] == std.math.inf(f64)) continue;
+        for (parts, 0..) |*p, j| {
+            p.x = cand[c * parts.len + j].x;
+            p.y = cand[c * parts.len + j].y;
+            p.rot = cand[c * parts.len + j].rot;
+        }
+        polish(parts, idx_of, nets, built.loops, params);
+        legalizeFinal(parts);
+        try symmetrize(arena, parts, idx_of, nets, built, params);
+        compactToContact(parts, priority);
+        _ = scratch.reset(.retain_capacity);
+        const sc = routedObjectiveCost(scratch.allocator(), parts, idx_of, nets, built.loops, params);
+        if (!have or sc < best_cost) {
+            best_cost = sc;
+            have = true;
+            for (parts, 0..) |p, j| best[j] = .{ .x = p.x, .y = p.y, .rot = p.rot };
+        }
+    }
+    if (have) for (parts, 0..) |*p, j| {
+        p.x = best[j].x;
+        p.y = best[j].y;
+        p.rot = best[j].rot;
+    };
+
+    // Local routed tuck on the chosen global arrangement.
+    routedPolish(arena, parts, idx_of, nets, built.loops, params);
 }
 
 /// Run the placer: multi-start seeds → keep the lowest-scoring arrangement →
