@@ -20,6 +20,7 @@ const geometry = @import("../placement/geometry.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
 const modules_mod = @import("modules.zig");
+const review = @import("../review.zig");
 const assets_css = @import("assets_css.zig");
 const pages_tmpl = @import("templates/pages.zig");
 const serve_root = @import("../serve.zig");
@@ -51,11 +52,16 @@ const NAME_OPEN = "{\"name\":";
 const PARTS_OPEN = "\"parts\":[";
 /// Error bodies shared across the layout handlers.
 const NO_BLOCK_MSG = "No design or module by that name";
+/// Returned when `?sub=<slug>` names a sub-block that doesn't exist in the design.
+const NO_SUB_MSG = "No sub-block by that name";
 const BAD_JSON_MSG = "bad json";
 const PLACEMENT_ERR_MSG = "Placement error";
 
 /// Success body returned by the mutating layout/courtyard endpoints.
 const OK_JSON_TRUE = "{\"ok\":true}";
+
+/// The ` checked` HTML attribute fragment, emitted to pre-check a checkbox.
+const CHECKED = " checked";
 
 /// Sidecar holding every *named* saved layout for a design — manual snapshots
 /// the user named, plus an auto-recorded history of optimizer runs. Supersedes
@@ -114,16 +120,34 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         return;
     };
 
+    // A `?sub=<slug>` request scopes the layout to a single sub-block — the
+    // schematic page's per-sub-block preview — so only that sub-block's parts
+    // are placed, never the whole design. `?embed=1` trims the page chrome
+    // (navbar/sidebar/edit controls) for inline display in that preview frame.
+    const sub = subSlug(req);
+    const eff_block: *env_mod.DesignBlock = if (sub) |s|
+        (descendToSub(ctx.allocator, block, s) orelse {
+            res.status = 404;
+            res.body = NO_SUB_MSG;
+            return;
+        })
+    else
+        block;
+    const embed = isEmbed(req);
+
     // Tuning weights come from the query (?w_align=… etc) — any present (or
     // ?regen=1) forces a fresh solve; otherwise the cached layout is reused.
     // ?refine=<layout> seeds the solve from a named saved layout and runs only the
     // routed tuck on it (improve a hand layout in place; the auto cache is left as-is).
+    // Sub-scoped previews never touch the design's layout sidecars: they compute
+    // fresh each time (the sub-block is small, so this is cheap) so a scoped run
+    // can't clobber the whole-design auto cache or its saved-layout history.
     const tune = parseTuning(req);
-    const refine_name: ?[]const u8 = if (req.query()) |q| q.get("refine") else |_| null;
-    const cached = if (refine_name) |rn|
+    const refine_name: ?[]const u8 = if (sub != null) null else if (req.query()) |q| q.get("refine") else |_| null;
+    const cached = if (sub != null) null else if (refine_name) |rn|
         readLayoutPoses(ctx.allocator, ctx.project_dir, name, rn)
     else if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
-    const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place) catch {
+    const placement = optimizer.solve(ctx.allocator, eff_block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place) catch {
         res.status = 500;
         res.body = PLACEMENT_ERR_MSG;
         return;
@@ -132,12 +156,16 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // stale / regen / tune), so later loads are instant and the controls show
     // the weights that actually produced the layout on screen. Each run is also
     // appended to the named-layout history so the user can review whether the
-    // auto placement got better or worse over time.
-    if (placement.generated) {
+    // auto placement got better or worse over time. Scoped sub-block runs skip
+    // this — there's no sidecar key for an individual sub-block yet.
+    if (sub == null and placement.generated) {
         writeAutoCache(ctx.allocator, ctx.project_dir, name, placement, tune.params);
         recordAutoLayout(ctx.allocator, ctx.project_dir, name, placement);
     }
-    const shown = if (tune.tuned) tune.params else (readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{});
+    const shown = if (sub != null or tune.tuned)
+        tune.params
+    else
+        (readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{});
 
     // Routing runs only on demand (the Route button → ?route=1), on whatever
     // placement is loaded — it's not part of every page load.
@@ -149,54 +177,67 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         &.{};
 
     const view = View.init(placement);
-    const layouts = readLayouts(ctx.allocator, ctx.project_dir, name);
+    // The named-layout history is a whole-design concept; scoped previews show none.
+    const layouts: []const SavedLayout = if (sub != null) &.{} else readLayouts(ctx.allocator, ctx.project_dir, name);
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     const w = &aw.writer;
 
     try w.writeAll("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
     try w.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
-    try w.print("<title>{s} — PCB Layout</title>", .{block.name});
+    try w.print("<title>{s} — PCB Layout</title>", .{eff_block.name});
     try w.writeAll("<style>");
     try w.writeAll(assets_css.NAVBAR_CSS);
     try w.writeAll(PAGE_CSS);
-    try w.writeAll("</style></head><body>");
-    try pages_tmpl.Navbar.render(.{""}, w);
+    if (embed) try w.writeAll(EMBED_CSS);
+    try w.writeAll("</style></head><body");
+    if (embed) try w.writeAll(" class=\"embed\"");
+    try w.writeAll(">");
+    if (!embed) try pages_tmpl.Navbar.render(.{""}, w);
 
     try w.writeAll("<div class=\"pcb-layout\">");
-    try writeSidebar(w, ctx.allocator, placement);
+    if (!embed) try writeSidebar(w, ctx.allocator, placement);
     try w.writeAll("<main class=\"pcb-main\">");
-    // Header row: title + the Schematic ⇄ PCB Layout switcher (PCB active).
-    // `name` resolves as a design under src/ first, else a reusable module —
-    // so the Schematic link points at the matching viewer.
-    const schematic_path: []const u8 = if (module_res != null) "/modules/" else "/schematics/";
-    try w.writeAll("<div class=\"pcb-head\">");
-    try w.print("<h1>{s} <span class=\"pcb-sub\">PCB Layout · force-directed · drag to edit</span></h1>", .{block.name});
-    try w.print(
-        "<nav class=\"viewtoggle\" aria-label=\"View\">" ++
-            "<a href=\"{s}{s}\">Schematic</a>" ++
-            "<a class=\"active\" href=\"/pcb-layout/{s}\">PCB Layout</a></nav>",
-        .{ schematic_path, name, name },
-    );
-    try w.writeAll("</div>");
-    try writeScorebar(w, placement, name);
-    const auto_score = LayoutScore{
-        .hpwl = placement.score.hpwl_mm,
-        .loop = placement.score.loop_mm,
-        .caps = placement.score.loop_caps,
-        .objective = placement.breakdown.objective,
-    };
-    try writeLayoutsPanel(w, layouts, auto_score);
-    try writeTuning(w, shown);
-    const rp_warn = if (routed) |r| router.returnPathViolations(placement, r, router.RETURN_PATH_RADIUS_MM) else 0;
-    try writeRoutePanel(w, ro.params, routed, violations.len, rp_warn);
+    if (embed) {
+        // Compact, read-only chrome for the per-sub-block preview embedded in
+        // the schematic page: a score line plus the routed-status + show
+        // clearance/DRC toggles (initial state mirrors the page's globals).
+        const tg = parseToggles(req);
+        try writeEmbedBar(w);
+        try writeEmbedRoute(w, ro.params, routed, violations.len, tg.clr, tg.drc);
+    } else {
+        // Header row: title + the Schematic ⇄ PCB Layout switcher (PCB active).
+        // `name` resolves as a design under src/ first, else a reusable module —
+        // so the Schematic link points at the matching viewer.
+        const schematic_path: []const u8 = if (module_res != null) "/modules/" else "/schematics/";
+        try w.writeAll("<div class=\"pcb-head\">");
+        try w.print("<h1>{s} <span class=\"pcb-sub\">PCB Layout · force-directed · drag to edit</span></h1>", .{eff_block.name});
+        try w.print(
+            "<nav class=\"viewtoggle\" aria-label=\"View\">" ++
+                "<a href=\"{s}{s}\">Schematic</a>" ++
+                "<a class=\"active\" href=\"/pcb-layout/{s}\">PCB Layout</a></nav>",
+            .{ schematic_path, name, name },
+        );
+        try w.writeAll("</div>");
+        try writeScorebar(w, placement, name);
+        const auto_score = LayoutScore{
+            .hpwl = placement.score.hpwl_mm,
+            .loop = placement.score.loop_mm,
+            .caps = placement.score.loop_caps,
+            .objective = placement.breakdown.objective,
+        };
+        try writeLayoutsPanel(w, layouts, auto_score);
+        try writeTuning(w, shown);
+        const rp_warn = if (routed) |r| router.returnPathViolations(placement, r, router.RETURN_PATH_RADIUS_MM) else 0;
+        try writeRoutePanel(w, ro.params, routed, violations.len, rp_warn);
+    }
     try writeLegend(w, placement);
     try w.print(
         "<svg id=\"pcb-svg\" class=\"pcb-svg\" viewBox=\"0 0 {d:.0} {d:.0}\" width=\"{d:.0}\" height=\"{d:.0}\" xmlns=\"http://www.w3.org/2000/svg\"></svg>",
         .{ view.width, view.height, view.width, view.height },
     );
-    try w.writeAll(COURTYARD_MODAL);
-    try writePcbData(w, ctx.allocator, placement, shown, view, name, layouts, routed, ro.params.clearance, violations);
+    if (!embed) try w.writeAll(COURTYARD_MODAL);
+    try writePcbData(w, ctx.allocator, placement, shown, view, name, layouts, routed, ro.params.clearance, violations, embed);
     try w.writeAll(BOARD_JS);
     try w.writeAll("</main></div></body></html>");
 
@@ -226,6 +267,49 @@ fn resolveBlock(
     module_res.* = modules_mod.resolveModuleBlock(ctx.allocator, ctx.project_dir, name);
     if (module_res.*) |mr| return mr.block;
     return null;
+}
+
+/// The `?sub=<slug>` query value (a slugified sub-block name), or null when the
+/// request targets the whole design. Empty values count as absent.
+fn subSlug(req: *httpz.Request) ?[]const u8 {
+    const q = req.query() catch return null;
+    const s = q.get("sub") orelse return null;
+    return if (s.len == 0) null else s;
+}
+
+/// True when `?embed=1` is present — render the trimmed, read-only chrome used
+/// by the schematic page's inline per-sub-block preview frame.
+fn isEmbed(req: *httpz.Request) bool {
+    const q = req.query() catch return false;
+    return q.get("embed") != null;
+}
+
+/// Descend a design block into the top-level sub-block whose slugified name
+/// matches `sub_slug` (the same `review.slugify` the schematic page uses for its
+/// `data-sub` attributes, so the keys line up). Null when none match. Only the
+/// sub-block's parts are then placed/routed — the whole design never is.
+fn descendToSub(
+    allocator: std.mem.Allocator,
+    block: *env_mod.DesignBlock,
+    sub_slug: []const u8,
+) ?*env_mod.DesignBlock {
+    for (block.sub_blocks) |sb| {
+        const slug = review.slugify(allocator, sb.name) catch continue;
+        if (std.mem.eql(u8, slug, sub_slug)) return sb.block;
+    }
+    return null;
+}
+
+/// Initial state of the embed preview's show-clearance / show-DRC toggles,
+/// passed through from the schematic page's global checkboxes as `?clr=` / `?drc=`.
+/// Clearance defaults off and DRC on, mirroring the standalone Route panel.
+const Toggles = struct { clr: bool, drc: bool };
+
+fn parseToggles(req: *httpz.Request) Toggles {
+    const q = req.query() catch return .{ .clr = false, .drc = true };
+    const clr_on = if (q.get("clr")) |v| std.mem.eql(u8, v, "1") else false;
+    const drc_on = if (q.get("drc")) |v| !std.mem.eql(u8, v, "0") else true;
+    return .{ .clr = clr_on, .drc = drc_on };
 }
 
 /// GET /api/pcb-layout/:name — export the solved placement as JSON: per-part
@@ -373,9 +457,17 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         res.body = NO_BLOCK_MSG;
         return;
     };
+    const eff_block = if (subSlug(req)) |s|
+        (descendToSub(ctx.allocator, block, s) orelse {
+            res.status = 404;
+            res.body = NO_SUB_MSG;
+            return;
+        })
+    else
+        block;
 
     const tune = parseTuning(req);
-    const bd = optimizer.scorePoses(ctx.allocator, block, ctx.project_dir, poses.items, tune.params) catch {
+    const bd = optimizer.scorePoses(ctx.allocator, eff_block, ctx.project_dir, poses.items, tune.params) catch {
         res.status = 500;
         res.body = "score error";
         return;
@@ -459,11 +551,19 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         res.body = NO_BLOCK_MSG;
         return;
     };
+    const eff_block = if (subSlug(req)) |s|
+        (descendToSub(ctx.allocator, block, s) orelse {
+            res.status = 404;
+            res.body = NO_SUB_MSG;
+            return;
+        })
+    else
+        block;
 
     // Build the placement at the supplied poses (never re-optimized), route it,
     // and DRC-check — exactly the GET ?route=1 pipeline, but on the client's
     // layout instead of the cached auto one.
-    const placement = optimizer.placeFromPoses(ctx.allocator, block, ctx.project_dir, poses.items, optimizer.Params{}) catch {
+    const placement = optimizer.placeFromPoses(ctx.allocator, eff_block, ctx.project_dir, poses.items, optimizer.Params{}) catch {
         res.status = 500;
         res.body = PLACEMENT_ERR_MSG;
         return;
@@ -1386,7 +1486,7 @@ fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!
     try w.print("<label>Loop <input id=\"t-loop\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.loop_w});
     try w.print("<label>Congest <input id=\"t-cong\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.w_congest});
     try w.writeAll("<label class=\"tune-chk\"><input id=\"t-grid\" type=\"checkbox\"");
-    if (params.grid_courtyards) try w.writeAll(" checked");
+    if (params.grid_courtyards) try w.writeAll(CHECKED);
     try w.writeAll("> Grid edges</label>");
     try w.writeAll("<button class=\"btn\" id=\"t-apply\">Apply &amp; regenerate</button>");
     try w.writeAll("<span class=\"muted\">re-runs the optimizer with these weights</span></div>");
@@ -1423,6 +1523,58 @@ fn writeRoutePanel(w: *std.Io.Writer, params: router.RouteParams, routed: ?route
         try w.writeAll("<span class=\"route-stat\" id=\"r-drc\"></span>");
         try w.writeAll("<span class=\"route-stat\" id=\"r-rp\"></span>");
         try w.writeAll("<span class=\"muted\" id=\"r-hint\">4-layer: top/GND/PWR/bottom · GND→plane vias</span>");
+    }
+    try w.writeAll("</div>");
+}
+
+/// Compact, read-only score line for the embedded per-sub-block preview. Holds
+/// the same `sc-*` spans BOARD_JS's showScore() fills (deltas read "=" since the
+/// baseline is the layout itself) plus the zoom group — no edit buttons.
+fn writeEmbedBar(w: *std.Io.Writer) std.Io.Writer.Error!void {
+    try w.writeAll("<div class=\"pcb-bar\">");
+    try w.writeAll("<span class=\"score\" id=\"sc-obj\">objective …</span><span class=\"delta\" id=\"sc-obj-d\"></span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-hpwl\">HPWL …</span><span class=\"delta\" id=\"sc-hpwl-d\"></span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-loop\">loop …</span><span class=\"delta\" id=\"sc-loop-d\"></span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-area\">loop area …</span><span class=\"delta\" id=\"sc-area-d\"></span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-align\">align …</span><span class=\"delta\" id=\"sc-align-d\"></span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-iso\">iso …</span><span class=\"delta\" id=\"sc-iso-d\"></span>");
+    try w.writeAll("<span class=\"zoom-grp\"><button class=\"btn\" id=\"z-out\" title=\"Zoom out\">−</button>");
+    try w.writeAll("<button class=\"btn\" id=\"z-in\" title=\"Zoom in\">+</button>");
+    try w.writeAll("<button class=\"btn\" id=\"z-fit\" title=\"Reset zoom\">Fit</button></span>");
+    try w.writeAll("</div>");
+}
+
+/// Read-only route status + display toggles for the embedded preview. The
+/// via/track/clearance values the server routed with are emitted as hidden
+/// inputs so BOARD_JS's clearance overlay + via rendering read the right
+/// numbers; the only visible controls are the show-clearance / show-DRC toggles
+/// (their initial state mirrors the schematic page's global checkboxes).
+fn writeEmbedRoute(
+    w: *std.Io.Writer,
+    params: router.RouteParams,
+    routed: ?router.RouteResult,
+    n_drc: usize,
+    show_clr: bool,
+    show_drc: bool,
+) std.Io.Writer.Error!void {
+    try w.writeAll("<div class=\"pcb-route\">");
+    try w.print("<input type=\"hidden\" id=\"r-tw\" value=\"{d}\">", .{params.track_width});
+    try w.print("<input type=\"hidden\" id=\"r-cl\" value=\"{d}\">", .{params.clearance});
+    try w.print("<input type=\"hidden\" id=\"r-vd\" value=\"{d}\">", .{params.via_drill});
+    try w.print("<input type=\"hidden\" id=\"r-va\" value=\"{d}\">", .{params.via_dia});
+    try w.print("<label class=\"tune-chk\"><input id=\"r-clr-show\" type=\"checkbox\"{s}> show clearance</label>", .{if (show_clr) CHECKED else ""});
+    try w.print("<label class=\"tune-chk\"><input id=\"r-drc-show\" type=\"checkbox\"{s}> show DRC</label>", .{if (show_drc) CHECKED else ""});
+    if (routed) |r| {
+        const cls = if (r.routed == r.total) "ok" else "warn";
+        try w.print("<span class=\"route-stat {s}\" id=\"r-stat\">routed {d}/{d} nets · {d} vias</span>", .{ cls, r.routed, r.total, r.vias.len });
+        if (n_drc == 0) {
+            try w.writeAll("<span class=\"route-stat ok\" id=\"r-drc\">DRC clean ✓</span>");
+        } else {
+            try w.print("<span class=\"route-stat err\" id=\"r-drc\">{d} DRC violation(s)</span>", .{n_drc});
+        }
+    } else {
+        try w.writeAll("<span class=\"route-stat\" id=\"r-stat\"></span>");
+        try w.writeAll("<span class=\"route-stat\" id=\"r-drc\"></span>");
     }
     try w.writeAll("</div>");
 }
@@ -1499,6 +1651,29 @@ fn writeSidebar(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placem
 
 const LocalPt = struct { x: f64, y: f64 };
 
+/// World position of the GND-plane via covering the pad centred at (`cx`,`cy`),
+/// or that pad centre itself when no via is near (big board / no route). The
+/// loop overlay drops its GND via here so the previewed via is the DRC-safe one
+/// routing will use — never a second via beside it. A via belonging to this pad
+/// sits within the fan-out radius; anything past `VIA_MATCH_MM` is a neighbour's.
+const VIA_MATCH_MM: f64 = 3.0;
+/// Only run the pass-1 GND-via preview on boards small enough that the page
+/// already pays for routed scoring (mirrors the optimizer's ROUTED_SCORE_MAX_PARTS);
+/// bigger boards skip it and the overlay falls back to the pad centre.
+const ROUTED_VIA_PREVIEW_MAX_PARTS: usize = 48;
+fn dropViaPos(vias: []const router.Via, cx: f64, cy: f64) LocalPt {
+    var best_d2: f64 = VIA_MATCH_MM * VIA_MATCH_MM;
+    var found: ?LocalPt = null;
+    for (vias) |vi| {
+        const d2 = (vi.x - cx) * (vi.x - cx) + (vi.y - cy) * (vi.y - cy);
+        if (d2 <= best_d2) {
+            best_d2 = d2;
+            found = .{ .x = vi.x, .y = vi.y };
+        }
+    }
+    return found orelse .{ .x = cx, .y = cy };
+}
+
 fn writePcbData(
     w: *std.Io.Writer,
     alloc: std.mem.Allocator,
@@ -1510,6 +1685,7 @@ fn writePcbData(
     routed: ?router.RouteResult,
     clearance: f64,
     violations: []const drc.Violation,
+    embed: bool,
 ) HandlerError!void {
     // ref → part index, and "ref|pin" → collapsed net (for pad tags).
     var idx = std.StringHashMap(usize).init(alloc);
@@ -1530,6 +1706,9 @@ fn writePcbData(
     try w.print("\"margin\":{d},\"grid\":{d},\"w\":{d},\"h\":{d},", .{ MARGIN_MM, optimizer.GRID_MM, v.width, v.height });
     try w.print("\"blockPen\":{d},", .{optimizer.BLOCK_PENALTY_MM});
     try w.print("\"clr\":{d},\"cmargin\":{d},", .{ clearance, geometry.BBOX_MARGIN_MM });
+    // Read-only flag for the embedded per-sub-block preview — BOARD_JS skips all
+    // edit wiring (drag/rotate/route/save) when set, leaving a pan/zoom viewer.
+    try w.print("\"ro\":{s},", .{if (embed) "true" else "false"});
     // Server-computed objective breakdown of the layout on screen — the baseline
     // the live score deltas against. Same shape the /api/pcb-score endpoint returns.
     try w.print("\"caps\":{d},\"auto\":", .{p.score.loop_caps});
@@ -1599,7 +1778,20 @@ fn writePcbData(
     // Decoupling loops: cap power/ground pads + the hub's candidate power/
     // ground pads, plus the *pinned* hub power/ground pads (`pp`/`gp`) the score
     // actually uses — the client draws the exact scored loop (power leg, L2 ground
-    // return to `gp`, and the enclosed-area polygon) from those.
+    // return to `gp`) from those. `cgv`/`gpv` are the DRC-safe via drop points.
+    //
+    // The GND vias the loop overlay draws: the routed set when a route is present,
+    // else `route`'s pass-1 placement on small boards — so the previewed loop via
+    // is exactly the one routing will drop (no preview-via + real-via doubling),
+    // and it always meets clearance. Big boards (no routed scoring) fall back to
+    // the raw pad centre inside `dropViaPos`.
+    const drop_vias: []const router.Via = if (routed) |r|
+        r.vias
+    else if (p.parts.len <= ROUTED_VIA_PREVIEW_MAX_PARTS)
+        (router.groundVias(alloc, p, .{}) catch &.{})
+    else
+        &.{};
+
     try w.writeAll("\"loops\":[");
     for (p.loops, 0..) |lp, i| {
         if (i > 0) try w.writeAll(",");
@@ -1615,6 +1807,13 @@ fn writePcbData(
         try writePadRectList(w, lp.hub_pwr);
         try w.writeAll(",\"hg\":");
         try writePadRectList(w, lp.hub_gnd);
+        // DRC-safe via drop points (world mm) where the L2 ground return punches to
+        // the plane: the cap's GND pad and the IC's pinned GND pin.
+        const cg_c = optimizer.worldPadCenter(p.parts[lp.cap], lp.cap_gnd.x, lp.cap_gnd.y);
+        const gp_c = optimizer.worldPadCenter(p.parts[lp.hub], lp.hub_gnd_pin.x, lp.hub_gnd_pin.y);
+        const cgv = dropViaPos(drop_vias, cg_c[0], cg_c[1]);
+        const gpv = dropViaPos(drop_vias, gp_c[0], gp_c[1]);
+        try w.print(",\"cgv\":{{\"x\":{d},\"y\":{d}}},\"gpv\":{{\"x\":{d},\"y\":{d}}}", .{ cgv.x, cgv.y, gpv.x, gpv.y });
         try w.writeAll("}");
     }
     try w.writeAll("],");
@@ -1955,11 +2154,23 @@ const PAGE_CSS =
     \\.court-dialog .btn:disabled{opacity:.45;cursor:default}
 ;
 
+/// Extra rules layered on top of PAGE_CSS only when `?embed=1` — the body gets
+/// the `embed` class. Strips outer padding, lets the board fill the frame
+/// width, and drops the grab cursor (no dragging in the read-only preview).
+const EMBED_CSS =
+    \\body.embed .pcb-layout{padding:8px 10px;max-width:none}
+    \\body.embed .pcb-bar{margin:4px 0}
+    \\body.embed .pcb-route{margin:2px 0 6px}
+    \\body.embed .pcb-svg{width:100%}
+    \\body.embed .part{cursor:default}
+;
+
 const BOARD_JS =
     \\<script>(function(){
     \\const NS="http://www.w3.org/2000/svg";
     \\const S=PCB.scale,MX=PCB.minx,MY=PCB.miny,M=PCB.margin,G=PCB.grid;
     \\const P=PCB.parts, orig=P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0};});
+    \\var RO=!!PCB.ro;
     \\const X=function(mm){return (mm-MX+M)*S;}, Y=function(mm){return (mm-MY+M)*S;};
     \\const svg=document.getElementById("pcb-svg");
     \\const gP=document.createElementNS(NS,"g"), gR=document.createElementNS(NS,"g");
@@ -2031,15 +2242,16 @@ const BOARD_JS =
     \\   var a=wpt(l.a,l.ax,l.ay),b=wpt(l.b,l.bx,l.by);
     \\   var col=l.k=="proximity"?"#ea580c":(l.k=="ground"?"#22b8cf":"#9aa7b4");
     \\   aw(a,b,col,l.k=="signal"?0.7:1.3,l.k=="signal"?0.55:0.9);});
+    \\ var routedNow=((PCB.tracks||[]).length>0);
     \\ PCB.loops.forEach(function(L){
     \\   var A=wpt(L.hub,L.pp.x,L.pp.y), B=wpt(L.cap,L.cp.x,L.cp.y),
-    \\       C=wpt(L.cap,L.cg.x,L.cg.y), D=wpt(L.hub,L.gp.x,L.gp.y);
+    \\       C=L.cgv||wpt(L.cap,L.cg.x,L.cg.y), D=L.gpv||wpt(L.hub,L.gp.x,L.gp.y);
     \\   aw(B,A,"#ea580c",1.3,0.95);
     \\   var rp=[C,B,A,D].map(function(q){return X(q.x).toFixed(1)+","+Y(q.y).toFixed(1);}).join(" ");
     \\   var pl=el("polyline",{points:rp,fill:"none",stroke:"#58a6ff","stroke-width":1.3,opacity:0.85,"stroke-dasharray":"4 2"});
-    \\   var gt=el("title",{}); gt.textContent="GND return images under the power trace on the L2 plane (drops at the GND pads)"; pl.appendChild(gt);
+    \\   var gt=el("title",{}); gt.textContent="GND return images under the power trace on the L2 plane (drops at the DRC-safe GND vias)"; pl.appendChild(gt);
     \\   gR.appendChild(pl);
-    \\   [C,D].forEach(function(v){drawVia(gR,v.x,v.y,viaGeo().dia,viaGeo().drill);});});
+    \\   if(!routedNow)[C,D].forEach(function(v){drawVia(gR,v.x,v.y,viaGeo().dia,viaGeo().drill);});});
     \\ if(!((PCB.tracks||[]).length)){var tw=parseFloat((document.getElementById("r-tw")||{}).value)||0.15;
     \\  (PCB.stubs||[]).forEach(function(st){var a=wpt(st.p,st.ax,st.ay),b=wpt(st.p,st.bx,st.by);
     \\   var ln=el("line",{x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),
@@ -2080,6 +2292,7 @@ const BOARD_JS =
     \\ var sx=vb.x+(ev.clientX-r.left)*(vb.width/r.width);
     \\ var sy=vb.y+(ev.clientY-r.top)*(vb.height/r.height);
     \\ return {x:sx/S+MX-M,y:sy/S+MY-M};}
+    \\if(!RO){
     \\var drag=null, cur=-1;
     \\els.forEach(function(g,i){
     \\ g.addEventListener("mouseenter",function(){cur=i;});
@@ -2136,6 +2349,7 @@ const BOARD_JS =
     \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
     \\  .then(function(){window.location.reload();})
     \\  .catch(function(){rescoreBtn.disabled=false;rescoreBtn.textContent="↻ Rescore all";});});
+    \\}
     \\function hlBy(at,v,cls,on){document.querySelectorAll("["+at+"]").forEach(function(e){
     \\ if(e.getAttribute(at)===v)e.classList.toggle(cls,on);});}
     \\function wire(at,cls){document.querySelectorAll("["+at+"]").forEach(function(e){

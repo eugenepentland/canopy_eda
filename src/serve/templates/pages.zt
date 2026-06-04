@@ -139,9 +139,6 @@ pub templ DesignCard(s: DesignSummary, now_sec: i64) {
         }
         <div class="design-card-links">
             <a class="design-card-link" href="/schematics/{s.name}">Schematic</a>
-            if (s.build_ok) {
-                <a class="design-card-link" href="/pcb-layout/{s.name}">PCB Layout</a>
-            }
         </div>
     </div>
 }

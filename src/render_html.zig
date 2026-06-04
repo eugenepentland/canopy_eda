@@ -88,6 +88,11 @@ pub fn renderToHtml(
     try w.writeAll("<div class=\"sch-wrap\">");
     try writeHeader(w, block.name, design_name, status, schematic_path);
 
+    // Global PCB-layout controls (via/trace/DRC) that feed every per-sub-block
+    // preview below. Shown only when the design has sub-blocks to preview — the
+    // whole-design layout is deliberately never computed from this page.
+    if (block.sub_blocks.len > 0) try writePcbGlobals(w);
+
     // Pair top-level `(sub-block …)` declarations with the section that wires
     // them (e.g. `(section "XSPI2 NOR Flash" …)` adopts `(sub-block "flash" …)`)
     // so the section's pin-table and the sub-block's internal hubs render as
@@ -204,6 +209,10 @@ pub fn renderToHtml(
     try writeSidebar(w, review_doc);
     try w.writeAll("</div>");
     try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns, check_results, review_doc);
+    // Per-sub-block PCB preview wiring — reuses the DESIGN_NAME global declared
+    // by writeScripts, so it must follow that call. Only emitted when there are
+    // sub-blocks (matching the global PCB-settings bar above).
+    if (block.sub_blocks.len > 0) try w.writeAll(SUB_PCB_SCRIPT);
     if (review_doc != null) {
         // review_notes.js (design-note handlers) reuses DESIGN_NAME —
         // already declared as a global by writeScripts above.
@@ -215,6 +224,10 @@ pub fn renderToHtml(
 }
 
 fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: review.Status, schematic_path: []const u8) !void {
+    // The Schematic⇄PCB toggle that consumed `schematic_path` was removed (the
+    // whole-design PCB layout is no longer offered from this page). The
+    // parameter is kept so renderToHtml's call site stays stable.
+    _ = schematic_path;
     const banner_class: []const u8 = switch (status) {
         .pass => "banner banner-pass",
         .warn => "banner banner-warn",
@@ -233,14 +246,11 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
     try w.writeAll(".sexp</code></div></div>");
     try w.print("<div class=\"{s}\">{s}</div>", .{ banner_class, banner_label });
     try w.writeAll("<div class=\"head-links\">");
-    // Schematic ⇄ PCB Layout switcher (Schematic active here). Same control
-    // the PCB page renders, so the two views feel like one screen.
-    try w.print(
-        "<nav class=\"viewtoggle\" aria-label=\"View\">" ++
-            "<a class=\"active\" href=\"{s}{s}\">Schematic</a>" ++
-            "<a href=\"/pcb-layout/{s}\">PCB Layout</a></nav>",
-        .{ schematic_path, design_name, design_name },
-    );
+    // The whole-design PCB layout is intentionally not linked from here: it
+    // places every component at once, which is too slow to be useful. Instead
+    // each sub-block previews its own PCB layout on demand — see the global
+    // "PCB Layout settings" bar (writePcbGlobals) and the per-sub-block "PCB
+    // Layout" panels (writeSubBlockPcb).
     try w.writeAll(
         "<button class=\"head-link head-btn\" id=\"reload-btn\" type=\"button\" " ++
             "title=\"Re-read the .sexp source from disk and rebuild\">\u{21BB} Reload</button>",
@@ -1217,11 +1227,90 @@ fn writeSubBlockCard(
 
     try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items, check_results);
 
+    // Per-sub-block PCB layout preview (read-only, computed on demand). Scoped
+    // to this sub-block via ?sub=<slug> so the whole design is never placed; it
+    // uses the page's global PCB-settings bar for via/clearance/DRC. The iframe
+    // has no src until the user presses Generate, so nothing computes on load.
+    try writeSubBlockPcb(w, slug);
+
     try w.writeAll(switch (mode) {
         .standalone => sectionClose,
         .attached => "</div>",
     });
 }
+
+/// Global PCB-layout controls shared by every sub-block's inline preview. The
+/// whole-design layout is intentionally not offered (it places every component
+/// at once, which is too slow to be useful); each `(sub-block …)` card computes
+/// its own scoped preview on demand using these via/clearance/DRC values. The
+/// number inputs mirror the standalone PCB page's Route panel defaults
+/// (router.RouteParams). Read by SUB_PCB_SCRIPT when building each iframe URL.
+fn writePcbGlobals(w: *std.Io.Writer) !void {
+    try w.writeAll(
+        \\<details class="pcb-globals" id="page-pcb-globals">
+        \\<summary>PCB Layout settings <span class="sch-card-sub muted">via / trace / DRC — used by each sub-block preview</span></summary>
+        \\<div class="pcb-globals-body">
+        \\<label>Track <input id="g-tw" type="number" step="0.05" min="0.05" value="0.127"></label>
+        \\<label>Clearance <input id="g-cl" type="number" step="0.05" min="0.05" value="0.127"></label>
+        \\<label>Via drill <input id="g-vd" type="number" step="0.05" min="0.1" value="0.2"></label>
+        \\<label>Via &Oslash; <input id="g-va" type="number" step="0.05" min="0.2" value="0.4"></label>
+        \\<label class="pcb-globals-chk"><input id="g-clr-show" type="checkbox"> show clearance</label>
+        \\<label class="pcb-globals-chk"><input id="g-drc-show" type="checkbox" checked> show DRC</label>
+        \\<span class="pcb-globals-hint muted">Open a sub-block's &ldquo;PCB Layout&rdquo;
+        \\panel below and press Generate. Changing a value here applies on the next Generate.</span>
+        \\</div>
+        \\</details>
+    );
+}
+
+/// The collapsible "PCB Layout" panel inside a sub-block card: a Generate /
+/// Regenerate button plus a lazily-loaded iframe scoped to this sub-block. The
+/// iframe src is filled in by SUB_PCB_SCRIPT from the global PCB-settings bar,
+/// so nothing is computed until the user opens the panel and presses the button.
+fn writeSubBlockPcb(w: *std.Io.Writer, slug: []const u8) !void {
+    // `slug` is review.slugify output ([a-z0-9-]) — safe in an attribute and a
+    // URL component without further escaping (same value used for data-slug).
+    try w.writeAll("<details class=\"sub-pcb\"><summary>PCB Layout</summary>");
+    try w.writeAll("<div class=\"sub-pcb-body\" data-sub=\"");
+    try w.writeAll(slug);
+    try w.writeAll("\"><div class=\"sub-pcb-controls\">");
+    try w.writeAll("<button type=\"button\" class=\"sub-pcb-gen\">Generate layout</button>");
+    try w.writeAll("<span class=\"sub-pcb-status muted\">Not generated yet</span></div>");
+    try w.writeAll("<div class=\"sub-pcb-frame-wrap\" hidden>");
+    try w.writeAll("<iframe class=\"sub-pcb-frame\" title=\"PCB layout preview\" loading=\"lazy\"></iframe>");
+    try w.writeAll("</div></div></details>");
+}
+
+/// Wires every sub-block "PCB Layout" panel: on Generate, build the scoped,
+/// routed embed URL from the global PCB-settings inputs and (re)load the
+/// iframe. Reuses the `DESIGN_NAME` global declared by writeScripts, so this
+/// must be emitted after it. Nothing runs until a button is pressed, so opening
+/// the schematic page never triggers a placement.
+const SUB_PCB_SCRIPT =
+    \\<script>(function(){
+    \\function gv(id,dflt){var e=document.getElementById(id);var v=e?parseFloat(e.value):NaN;return (v>0)?v:dflt;}
+    \\function gck(id){var e=document.getElementById(id);return (e&&e.checked)?1:0;}
+    \\function url(sub){
+    \\ return "/pcb-layout/"+encodeURIComponent(DESIGN_NAME)+"?sub="+encodeURIComponent(sub)
+    \\  +"&embed=1&route=1&regen=1"
+    \\  +"&track_width="+gv("g-tw",0.127)+"&clearance="+gv("g-cl",0.127)
+    \\  +"&via_drill="+gv("g-vd",0.2)+"&via_dia="+gv("g-va",0.4)
+    \\  +"&clr="+gck("g-clr-show")+"&drc="+gck("g-drc-show");
+    \\}
+    \\document.querySelectorAll(".sub-pcb-body").forEach(function(body){
+    \\ var sub=body.getAttribute("data-sub");
+    \\ var btn=body.querySelector(".sub-pcb-gen");
+    \\ var st=body.querySelector(".sub-pcb-status");
+    \\ var wrap=body.querySelector(".sub-pcb-frame-wrap");
+    \\ var frame=body.querySelector(".sub-pcb-frame");
+    \\ if(!btn||!frame)return;
+    \\ frame.addEventListener("load",function(){if(frame.getAttribute("src"))st.textContent="Generated";});
+    \\ btn.addEventListener("click",function(){
+    \\  st.textContent="Generating…"; wrap.hidden=false;
+    \\  frame.setAttribute("src",url(sub)); btn.textContent="Regenerate";});
+    \\});
+    \\})();</script>
+;
 
 /// Match each top-level `(sub-block …)` to the section that wires it. The
 /// heuristic counts "specific" shared nets: a net counts when its `net_ties`
