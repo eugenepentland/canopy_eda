@@ -21,13 +21,19 @@ const PATH_FMT = "{s}/lib/footprints/{s}.sexp";
 /// courtyard editor can invert it (effective extent ↔ written rect).
 pub const BBOX_MARGIN_MM: f64 = 0.15;
 
-/// One pad, positioned relative to the footprint origin (mm).
+/// One pad, positioned relative to the footprint origin (mm). `shape` and
+/// `poly` are carried only for rendering (the PCB-layout page draws the real
+/// outline via the shared footprint engine); placement/DRC/routing use the
+/// `w`/`h` bounding box. `poly` is the footprint-absolute copper outline of a
+/// custom pad (empty for simple pads).
 pub const Pad = struct {
     number: []const u8,
     x: f64,
     y: f64,
     w: f64,
     h: f64,
+    shape: []const u8 = "rect",
+    poly: []const [2]f64 = &.{},
 };
 
 /// A silkscreen line segment (footprint-local mm).
@@ -152,10 +158,12 @@ fn parsePad(arena: std.mem.Allocator, node: Node) ?Pad {
     const cl = node.asList() orelse return null;
     if (cl.len < 2) return null;
     const number = nodeText(arena, cl[1]);
+    const shape: []const u8 = if (cl.len >= 4) (cl[3].asAtom() orelse "rect") else "rect";
     var x: f64 = 0;
     var y: f64 = 0;
     var w: f64 = 0;
     var h: f64 = 0;
+    var poly: []const [2]f64 = &.{};
     for (cl[2..]) |c| {
         if (c.isForm("pos")) {
             const pl = c.asList() orelse continue;
@@ -165,9 +173,27 @@ fn parsePad(arena: std.mem.Allocator, node: Node) ?Pad {
             const sl = c.asList() orelse continue;
             if (sl.len >= 2) w = sl[1].asNumber() orelse 0;
             if (sl.len >= 3) h = sl[2].asNumber() orelse 0;
+        } else if (c.isForm("poly")) {
+            poly = parsePadPoly(arena, c) orelse poly;
         }
     }
-    return .{ .number = number, .x = x, .y = y, .w = w, .h = h };
+    return .{ .number = number, .x = x, .y = y, .w = w, .h = h, .shape = shape, .poly = poly };
+}
+
+/// Parse a `(poly (x y) …)` form into footprint-absolute points, or null.
+fn parsePadPoly(arena: std.mem.Allocator, node: Node) ?[]const [2]f64 {
+    const cl = node.asList() orelse return null;
+    if (cl.len < 4) return null; // need ≥3 points
+    var pts: std.ArrayListUnmanaged([2]f64) = .empty;
+    for (cl[1..]) |pn| {
+        const pl = pn.asList() orelse continue;
+        if (pl.len < 2) continue;
+        const px = pl[0].asNumber() orelse continue;
+        const py = pl[1].asNumber() orelse continue;
+        pts.append(arena, .{ px, py }) catch return null;
+    }
+    if (pts.items.len < 3) return null;
+    return pts.items;
 }
 
 const Ext = struct { hw: f64, hh: f64 };

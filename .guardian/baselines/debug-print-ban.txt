@@ -86,8 +86,4 @@ src/serve/edit.zig:172: std.debug.print reference outside allowed paths
 src/serve/edit.zig:358: std.debug.print reference outside allowed paths
 src/serve/edit.zig:624: std.debug.print reference outside allowed paths
 src/serve/edit.zig:733: std.debug.print reference outside allowed paths
-src/serve/upload.zig:261: std.debug.print reference outside allowed paths
-src/serve/upload.zig:277: std.debug.print reference outside allowed paths
-src/serve/upload.zig:382: std.debug.print reference outside allowed paths
-src/serve/upload.zig:408: std.debug.print reference outside allowed paths
 src/serve/upload_package.zig:220: std.debug.print reference outside allowed paths

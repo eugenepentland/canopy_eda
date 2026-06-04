@@ -852,10 +852,11 @@
     var fp = box.dataset.fp;
     var target = box.querySelector('.sb-fp-svg');
     if (!fp || !target) return;
-    function fill(svg) {
-      target.innerHTML = svg;
-      var s = target.querySelector('svg');
-      if (s) { s.style.width = '100%'; s.style.height = 'auto'; s.style.maxHeight = '220px'; s.style.display = 'block'; }
+    function fill(data) {
+      var s = FP.el('svg', {});
+      FP.drawFootprint(s, data);
+      s.style.width = '100%'; s.style.height = 'auto'; s.style.maxHeight = '220px'; s.style.display = 'block'; s.style.borderRadius = '4px';
+      target.innerHTML = ''; target.appendChild(s);
     }
     function fail() {
       target.innerHTML = '<span class="sb-fp-empty muted">No footprint preview available.</span>';
@@ -866,11 +867,11 @@
     }
     fetch('/api/footprint/' + encodeURIComponent(fp)).then(function (r) {
       if (!r.ok) throw new Error('no preview');
-      return r.text();
-    }).then(function (svg) {
-      if (svg.indexOf('<svg') === -1) throw new Error('not svg');
-      fpSvgCache[fp] = svg;
-      fill(svg);
+      return r.json();
+    }).then(function (data) {
+      if (!data || !data.pads) throw new Error('empty');
+      fpSvgCache[fp] = data;
+      fill(data);
     }).catch(function () {
       fpSvgCache[fp] = '';
       fail();

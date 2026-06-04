@@ -41,6 +41,7 @@ pub templ Library(rows: []const LibraryRow) {
                     <button id="page-next">Next &rarr;</button>
                 </div>
             </div>
+            <script src="/static/footprint_svg.js"></script>
             <script src="/static/library.js"></script>
         </body>
     </html>
