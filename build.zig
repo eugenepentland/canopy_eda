@@ -50,6 +50,25 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the eda CLI");
     run_step.dependOn(&run_cmd.step);
 
+    // Slim PCB-layout optimizer benchmark. Its module pulls in only the
+    // optimizer + evaluator (no httpz/zt, no serve/render/diagram stack), so an
+    // edit to placement/optimizer.zig rebuilds a fraction of the full `eda`
+    // exe — the fast inner loop for perf experiments. The `bench-layout` step
+    // deliberately does NOT depend on Guardian, fmt-check, or the templates, so
+    // a throwaway SoA/SIMD variant builds cleanly without baseline churn.
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("src/bench_layout.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const bench_exe = b.addExecutable(.{
+        .name = "bench-layout",
+        .root_module = bench_mod,
+    });
+    const bench_install = b.addInstallArtifact(bench_exe, .{});
+    const bench_step = b.step("bench-layout", "Build the slim PCB-layout optimizer benchmark");
+    bench_step.dependOn(&bench_install.step);
+
     // Tests
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -110,5 +129,4 @@ pub fn build(b: *std.Build) void {
     spec_init_run.setCwd(b.path("."));
     const spec_init_step = b.step("spec-init", "Generate starter SPEC.md from pub fn signatures");
     spec_init_step.dependOn(&spec_init_run.step);
-
 }
