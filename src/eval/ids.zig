@@ -244,7 +244,7 @@ pub fn componentPrefix(family: []const u8) u8 {
     if (std.mem.startsWith(u8, family, "ferrite")) return 'L';
     // Known crystal patterns
     if (std.mem.eql(u8, family, "abm8")) return 'Y';
-    if (std.mem.startsWith(u8, family, "fc-")) return 'Y';
+    if (std.mem.startsWith(u8, family, "fc-") or std.mem.startsWith(u8, family, "crystal")) return 'Y';
     // Discrete transistors (MOSFETs + BJTs) — Q prefix
     if (std.mem.startsWith(u8, family, "ao3") or
         std.mem.startsWith(u8, family, "ao4") or
