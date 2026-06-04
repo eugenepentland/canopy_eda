@@ -140,8 +140,18 @@
   viewIso();
 
   // ── Transform state + controls ───────────────────────────────────
-  var rot = (D.rotation || [0, 0, 0]).slice();
-  var off = (D.offset || [0, 0, 0]).slice();
+  // The viewer works in KiCad's *rendered* frame so it's a true WYSIWYG preview.
+  // The stored model-config values are writeModelBlock's INPUT; KiCad renders its
+  // negated output (offset → -offset; rotation X → -X, Y/Z unchanged), applied in
+  // the same Rx·Ry·Rz order this viewer uses. So we map config → viewer on load
+  // and viewer → config on save. The negation is an involution, so one function
+  // serves both directions — what you align here is exactly what KiCad shows.
+  function kicadView(r, o) {
+    return { rot: [-r[0], r[1], r[2]], off: [-o[0], -o[1], -o[2]] };
+  }
+  var _v = kicadView(D.rotation || [0, 0, 0], D.offset || [0, 0, 0]);
+  var rot = _v.rot.slice();
+  var off = _v.off.slice();
   var saved = JSON.stringify([rot, off]);
 
   function deg2rad(d) { return d * Math.PI / 180; }
@@ -205,10 +215,12 @@
   }
   saveBtn.onclick = function () {
     saveBtn.disabled = true; saveState.textContent = "saving…"; saveState.className = "";
+    // Map the on-screen (KiCad-rendered) values back to writeModelBlock's input.
+    var cfg = kicadView(rot, off);
     fetch("/api/model-transform/" + encodeURIComponent(D.footprint), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ offset: off.map(Number), rotation: rot.map(Number) })
+      body: JSON.stringify({ offset: cfg.off.map(Number), rotation: cfg.rot.map(Number) })
     }).then(function (r) { return r.json(); }).then(function (j) {
       if (j && j.ok) { saved = JSON.stringify([rot, off]); saveState.textContent = "saved ✓"; saveState.className = "ok"; markDirty(); }
       else { saveState.textContent = "save failed"; saveState.className = "err"; saveBtn.disabled = false; }
