@@ -114,14 +114,14 @@ const CAP_W_MAX: f64 = 3.0; // max value-priority boost for the smallest cap on 
 // are pulled tighter than generic / output decoupling. Applied only when an
 // inductor marks the design a switcher. PROVISIONAL — magnitude wants tuning.
 const INPUT_LOOP_BOOST: f64 = 2.0;
-// Weight on the compactness term (`compactnessArea`): the sub-module's courtyard
-// bounding-box area (mm²) — replaces the old pairwise tidiness reward. At ~1.0 the
-// area term sits at ~40% of the loop term on the small power/RF sub-blocks, enough
-// to flip boundary caps inward (GND tucked alongside the IC) and shrink the
-// envelope ~10-16% for ≲1% loop cost, without overriding the electrical loop.
-// PROVISIONAL — the area term grows quadratically with board size, so sweep it per
-// design (the "Area" tuning input regenerates with a custom weight).
-const W_ALIGN: f64 = 1.0;
+// Weight on the compactness term (`compactnessTerm` — bbox area or protrusion).
+// DEFAULT 0: compactness is OFF, so the objective is purely loop + wirelength +
+// congestion. A 12-design sweep found *either* compactness metric raises hot-loop
+// inductance ~10-13% (up to +88% on a buck) — it drags caps off their IC power
+// pins — and only helped one board, so it's opt-in, not a default. Raise it (the
+// "Compact w" tuning input) to trade loop for a tighter envelope on a board where
+// that's worth it; bbox is the gentler/better of the two metrics.
+const W_ALIGN: f64 = 0.0;
 // Weight on the routing-congestion penalty (`congestionPenalty`). HPWL/RSMT alone
 // does not predict routability — local congestion must be traded off against it
 // (Spindler & Johannes RUDY; UCLA mPL). The penalty is ~0 until a region's
@@ -133,15 +133,18 @@ const GRID_COURTYARDS = true; // round courtyard half-extents to GRID_MM so edge
 const COMPACT_MIN_OVERLAP: f64 = GRID_MM; // min shared-edge length when docking a floating part
 const COMPACT_EPS: f64 = 1e-4; // courtyard-gap tolerance for the "touching" test
 
-/// Which compactness metric `w_align` weights (replaces the old tidiness reward):
-///   • `protrusion` (default) — Σ per-part squared reach from the cluster centroid
-///     to its courtyard's far corner (mm²). *Every* part feels an inward + orient
-///     pull, so caps rotate to present their short axis outward (GND tucked
-///     alongside the IC rather than pointing away). Beat bbox on the test boards
-///     (bcuda-ldo5v −17% area & −5% loop; lt3045 a wash), both DRC-clean.
-///   • `bbox` — area of the whole-module courtyard bounding box (mm²). Coarser:
-///     only the *outermost* parts feel it, so interior caps have no gradient.
-///     Kept selectable via the "Compact" dropdown / `?compact=bbox`.
+/// Which compactness metric `w_align` weights when compactness is enabled
+/// (`w_align > 0`; it is OFF by default — see `W_ALIGN`). The old pairwise
+/// tidiness reward is gone; this is its opt-in replacement.
+///   • `bbox` (default) — area of the whole-module courtyard bounding box (mm²).
+///     The gentler metric: only the *outermost* parts feel it, so it compacts the
+///     envelope without dragging interior caps off their pins. Lower loop + tighter
+///     footprint than protrusion across a 12-design sweep.
+///   • `protrusion` — Σ per-part squared reach from the cluster centroid to its
+///     courtyard's far corner (mm²). *Every* part feels an inward + orient pull, so
+///     it can tuck caps' GND inward — but it fights the loop (≈+10-13%, up to +88%)
+///     and often grows the board, so it lost the sweep. Kept selectable for the odd
+///     board where a maximally-tight cluster matters more than the loop.
 pub const CompactMode = enum { bbox, protrusion };
 
 /// Runtime-tunable weights (the consts above are the defaults). Passed to
@@ -153,7 +156,7 @@ pub const Params = struct {
     w_congest: f64 = W_CONGEST,
     cap_w_max: f64 = CAP_W_MAX,
     grid_courtyards: bool = GRID_COURTYARDS,
-    compact_mode: CompactMode = .protrusion,
+    compact_mode: CompactMode = .bbox,
 };
 
 /// Placement grid: final positions snap to this (mm). The interactive page
