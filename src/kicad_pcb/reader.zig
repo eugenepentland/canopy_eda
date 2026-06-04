@@ -87,11 +87,46 @@ fn readFootprint(
             try readProperty(arena, sub, &fp);
         } else if (sub.isForm("pad")) {
             try readPad(arena, sub, net_table, &pads);
+        } else if (sub.isForm("model")) {
+            readModel(sub, &fp);
         }
     }
 
     fp.pads = pads.items;
     return fp;
+}
+
+/// Parse a footprint's `(model "<path>" (offset (xyz X Y Z)) (scale …)
+/// (rotate (xyz RX RY RZ)))` into `has_model`/`model_offset`/`model_rotate`.
+/// Missing offset/rotate sub-forms default to zero (KiCad omits a zero block).
+/// Used by the diff to detect 3D-model orientation drift vs `model-config.json`.
+fn readModel(node: Node, fp: *sync.BoardFp) void {
+    const cl = node.asList() orelse return;
+    if (cl.len < 2) return;
+    fp.has_model = true;
+    for (cl[2..]) |sub| {
+        if (sub.isForm("offset")) {
+            fp.model_offset = readXyz(sub);
+        } else if (sub.isForm("rotate")) {
+            fp.model_rotate = readXyz(sub);
+        }
+    }
+}
+
+/// Read the `(xyz X Y Z)` child of an `(offset …)` / `(rotate …)` form into a
+/// `[3]f64`. Returns zeros when the form is malformed or the `xyz` is absent.
+fn readXyz(node: Node) [3]f64 {
+    const cl = node.asList() orelse return .{ 0, 0, 0 };
+    for (cl[1..]) |sub| {
+        const xl = sub.asList() orelse continue;
+        if (xl.len < 4 or !sub.isForm("xyz")) continue;
+        return .{
+            xl[1].asNumber() orelse 0,
+            xl[2].asNumber() orelse 0,
+            xl[3].asNumber() orelse 0,
+        };
+    }
+    return .{ 0, 0, 0 };
 }
 
 fn readProperty(arena: std.mem.Allocator, node: Node, fp: *sync.BoardFp) std.mem.Allocator.Error!void {
@@ -193,6 +228,39 @@ test "readBoard extracts ref/value/uuids from a single footprint" {
     try std.testing.expectEqualStrings("1", fps[0].pads[0].number);
     try std.testing.expectEqualStrings("VDD", fps[0].pads[0].net);
     try std.testing.expectEqual(false, fps[0].locked);
+}
+
+// spec: kicad_pcb/reader - parses the (model …) offset/rotate so the diff can detect 3D-model drift
+test "readBoard parses the footprint model offset + rotation" {
+    const a = std.testing.allocator;
+    const src =
+        \\(kicad_pcb
+        \\  (net 0 "")
+        \\  (footprint "GSB"
+        \\    (uuid "g-1")
+        \\    (property "Reference" "J9")
+        \\    (model "${KIPRJMOD}/models/gsb.step"
+        \\      (offset (xyz -0 -6.85 -1.65))
+        \\      (scale (xyz 1 1 1))
+        \\      (rotate (xyz -90 -180 0))))
+        \\  (footprint "R_0402"
+        \\    (uuid "r-1")
+        \\    (property "Reference" "R1")))
+    ;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const fps = try readBoard(arena.allocator(), src);
+    try std.testing.expectEqual(@as(usize, 2), fps.len);
+    // Footprint with a (model …): flags + parsed offset/rotate.
+    try std.testing.expect(fps[0].has_model);
+    try std.testing.expectApproxEqAbs(@as(f64, -6.85), fps[0].model_offset[1], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, -1.65), fps[0].model_offset[2], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, -90), fps[0].model_rotate[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, -180), fps[0].model_rotate[1], 1e-6);
+    // Footprint without one: has_model stays false, vectors zero.
+    try std.testing.expect(!fps[1].has_model);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), fps[1].model_rotate[0], 1e-6);
 }
 
 // spec: kicad_pcb/reader - reads a bare-integer pad number so the pad still enters the net diff
