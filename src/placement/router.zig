@@ -164,6 +164,53 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     };
 }
 
+/// The DRC-safe GND-plane vias only — `route`'s pass 1 run in isolation. One via
+/// per ground pad, placed (via `findGroundVia`) to clear every foreign pad and
+/// any via already down, in the same net order and with the same grid as `route`,
+/// so each via lands at *exactly* the spot `route` would drop it. The layout view
+/// draws these as the pre-routing GND vias, so the via shown before routing is the
+/// one routing will use — no "preview via at the pad centre + real DRC via beside
+/// it" doubling, and the previewed via always meets clearance. Returns empty when
+/// the grid is too large to build (callers fall back to the raw pad centre).
+/// MUST stay in lockstep with `route`'s grid setup + pass-1 loop above.
+pub fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams) std.mem.Allocator.Error![]Via {
+    var vias: std.ArrayListUnmanaged(Via) = .empty;
+    var idx_of = std.StringHashMap(usize).init(arena);
+    for (placement.parts, 0..) |p, i| try idx_of.put(p.ref_des, i);
+
+    const g = @max(params.track_width + params.clearance, 0.05);
+    const margin = 1.0;
+    const ox = placement.minx - margin;
+    const oy = placement.miny - margin;
+    const nx: usize = @intFromFloat(@ceil((placement.maxx - placement.minx + 2 * margin) / g) + 1);
+    const ny: usize = @intFromFloat(@ceil((placement.maxy - placement.miny + 2 * margin) / g) + 1);
+    if (nx * ny == 0 or nx * ny > MAX_NODES) return &.{};
+    const grid = Grid{ .ox = ox, .oy = oy, .g = g, .nx = nx, .ny = ny };
+
+    const occ = [2][]i32{ try arena.alloc(i32, nx * ny), try arena.alloc(i32, nx * ny) };
+    @memset(occ[0], EMPTY);
+    @memset(occ[1], EMPTY);
+    const obs = try buildObstacles(arena, placement.parts, placement.nets);
+    const reach = params.track_width / 2 + params.clearance;
+    var ctx = Ctx{ .arena = arena, .grid = grid, .obs = obs, .reach = reach, .occ = occ, .params = params };
+
+    for (placement.nets, 0..) |net, net_i| {
+        const pts = try netPoints(arena, placement, &idx_of, net);
+        if (pts.len < 2) continue;
+        if (!isGroundName(shortName(net.name))) continue;
+        const ni: i32 = @intCast(net_i);
+        for (pts) |c| {
+            const pos = findGroundVia(&ctx, vias.items, c, ni) orelse continue;
+            try vias.append(arena, .{ .x = pos[0], .y = pos[1], .dia = params.via_dia, .net = ni });
+            // Stamp the same occupancy `route` would, so the *next* via avoids this
+            // one identically (the via positions depend on placement order).
+            if (@abs(pos[0] - c[0]) > 1e-6 or @abs(pos[1] - c[1]) > 1e-6) stampStubOcc(&ctx, c, pos, ni);
+            stampViaOcc(&ctx, pos[0], pos[1], ni);
+        }
+    }
+    return vias.toOwnedSlice(arena);
+}
+
 /// A reusable maze-router context over a *fixed* set of placed parts: the grid
 /// and pad-obstacle list are built once, then individual two-pad legs are routed
 /// against it. The placement optimizer's score path uses this to measure each

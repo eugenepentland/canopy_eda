@@ -402,6 +402,7 @@ src/placement/router.zig::RouteParams struct_
 src/placement/router.zig::RouteResult struct_
 src/placement/router.zig::Track struct_
 src/placement/router.zig::Via struct_
+src/placement/router.zig::groundVias fn
 src/placement/router.zig::route fn
 src/render_block_types.zig::Category enum_
 src/render_block_types.zig::categoryColor fn
