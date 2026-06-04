@@ -228,6 +228,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         };
         try writeLayoutsPanel(w, layouts, auto_score);
         try writeTuning(w, shown);
+        try writeScoreView(w, shown);
         const rp_warn = if (routed) |r| router.returnPathViolations(placement, r, router.RETURN_PATH_RADIUS_MM) else 0;
         try writeRoutePanel(w, ro.params, routed, violations.len, rp_warn);
     }
@@ -1492,6 +1493,32 @@ fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!
     try w.writeAll("<span class=\"muted\">re-runs the optimizer with these weights</span></div>");
 }
 
+/// Score-view panel: per-metric enable toggles + display weights that recompute
+/// the headline objective *in the browser* from the breakdown's stored raw terms
+/// — no re-placement, no server round-trip. Lets you re-weigh or drop each metric
+/// to see how it moves the total (e.g. disable Wire + Align + Congest to compare
+/// two layouts on pure hot-loop inductance). Defaults mirror the engine weights,
+/// so the headline matches the optimizer's objective until you change something.
+fn writeScoreView(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!void {
+    try w.writeAll("<div class=\"pcb-tune pcb-scoreview\"><span class=\"tune-h\">Score view</span>");
+    try svRow(w, "wire", "Wire", 1.0);
+    try svRow(w, "loop", "Loop", params.loop_w);
+    try svRow(w, "align", "Align", params.w_align);
+    try svRow(w, "cong", "Congest", params.w_congest);
+    try w.writeAll("<button class=\"btn\" id=\"sv-reset\" title=\"Restore engine weights, all metrics enabled\">Reset</button>");
+    try w.writeAll("<span class=\"muted\">recomputes the headline — doesn't move parts</span></div>");
+}
+
+/// One score-view metric row: an enable checkbox (the metric drops out of the
+/// objective entirely when cleared) plus its display weight input.
+fn svRow(w: *std.Io.Writer, key: []const u8, label: []const u8, weight: f64) std.Io.Writer.Error!void {
+    try w.print(
+        "<span class=\"sv-row\"><label class=\"tune-chk\"><input id=\"sv-en-{s}\" type=\"checkbox\" checked> {s}</label>" ++
+            "<label class=\"sv-wl\">×<input id=\"sv-w-{s}\" type=\"number\" step=\"0.1\" min=\"0\" value=\"{d}\"></label></span>",
+        .{ key, label, key, weight },
+    );
+}
+
 /// Routing panel: DRC inputs (mm) + a Route button (wired in BOARD_JS to
 /// reload with `?route=1&…`). Shows the routed/total tally + DRC result.
 fn writeRoutePanel(w: *std.Io.Writer, params: router.RouteParams, routed: ?router.RouteResult, n_drc: usize, n_rp: usize) std.Io.Writer.Error!void {
@@ -2087,6 +2114,10 @@ const PAGE_CSS =
     \\.pcb-tune input[type=number]{width:54px;font:inherit;font-size:12px;border:1px solid #30363d;
     \\  background:#0d1117;color:#c9d1d9;border-radius:4px;padding:2px 4px}
     \\.pcb-tune .muted{font-size:11px;color:#6e7681}
+    \\.pcb-scoreview .sv-row{display:flex;gap:3px;align-items:center}
+    \\.pcb-scoreview .sv-wl{gap:1px}
+    \\.pcb-scoreview input[type=number]{width:44px}
+    \\.pcb-bar .sc-off{opacity:.35;text-decoration:line-through}
     \\.pcb-route{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#8b949e}
     \\.pcb-route .tune-h{font-weight:700;color:#f0f6fc}
     \\.pcb-route label{display:flex;gap:4px;align-items:center}
@@ -2259,24 +2290,46 @@ const BOARD_JS =
     \\   var t=el("title",{}); t.textContent="signal breakout (escape trace)"; ln.appendChild(t); gR.appendChild(ln);});}
     \\}
     \\function delta(id,cur,base){
-    \\ var e=document.getElementById(id),d=cur-base;
+    \\ var e=document.getElementById(id);if(!e)return;var d=cur-base;
     \\ if(Math.abs(d)<0.05){e.textContent="=";e.className="delta";}
     \\ else{e.textContent=(d>0?"+":"")+d.toFixed(1);e.className="delta "+(d>0?"up":"down");}
     \\}
-    \\function setSc(id,t){document.getElementById(id).textContent=t;}
-    \\function showScore(b){
-    \\ setSc("sc-obj","objective "+b.objective.toFixed(1));
-    \\ setSc("sc-hpwl","wire "+b.hpwl.toFixed(1));
-    \\ setSc("sc-loop","loop "+b.loop_term.toFixed(1)+" · "+PCB.caps+" cap");
+    \\function setSc(id,t){var e=document.getElementById(id);if(e)e.textContent=t;}
+    \\// Score view: recompute the headline from the breakdown's raw terms × the
+    \\// per-metric display weights/toggles, so re-weighing is instant and never
+    \\// re-places parts. Defaults equal the engine weights ⇒ matches the server.
+    \\var lastBreak=null;
+    \\function svGet(){
+    \\ function n(id,d){var e=document.getElementById(id);if(!e)return d;var v=parseFloat(e.value);return isFinite(v)?v:d;}
+    \\ function on(id){var e=document.getElementById(id);return e?e.checked:true;}
+    \\ return {wire:{on:on("sv-en-wire"),w:n("sv-w-wire",1)},loop:{on:on("sv-en-loop"),w:n("sv-w-loop",6)},
+    \\  align:{on:on("sv-en-align"),w:n("sv-w-align",0.5)},cong:{on:on("sv-en-cong"),w:n("sv-w-cong",2)}};
+    \\}
+    \\function svTerms(b){var s=svGet();
+    \\ var wire=s.wire.on?s.wire.w*(b.hpwl||0):0,loop=s.loop.on?s.loop.w*(b.loop_nh_weighted||0):0;
+    \\ var align=s.align.on?s.align.w*(b.alignment||0):0,cong=s.cong.on?s.cong.w*(b.congestion||0):0;
+    \\ return {wire:wire,loop:loop,align:align,cong:cong,obj:wire+loop+align+cong,s:s};
+    \\}
+    \\function svOff(id,off){var e=document.getElementById(id);if(e)e.classList.toggle("sc-off",off);}
+    \\function showScore(b){lastBreak=b;
+    \\ var t=svTerms(b),a=svTerms(PCB.auto);
+    \\ setSc("sc-obj","objective "+t.obj.toFixed(1));
+    \\ setSc("sc-hpwl","wire "+(b.hpwl||0).toFixed(1));
+    \\ setSc("sc-loop","loop "+t.loop.toFixed(1)+" · "+PCB.caps+" cap");
     \\ setSc("sc-ind","loop "+(b.loop_nh||0).toFixed(2)+" nH");
-    \\ setSc("sc-align","align "+b.alignment_term.toFixed(1));
-    \\ setSc("sc-cong","cong "+(b.congestion_term||0).toFixed(1));
-    \\ delta("sc-obj-d",b.objective,PCB.auto.objective);
-    \\ delta("sc-hpwl-d",b.hpwl,PCB.auto.hpwl);
-    \\ delta("sc-loop-d",b.loop_term,PCB.auto.loop_term);
+    \\ setSc("sc-align","align "+t.align.toFixed(1));
+    \\ setSc("sc-cong","cong "+t.cong.toFixed(1));
+    \\ delta("sc-obj-d",t.obj,a.obj);
+    \\ delta("sc-hpwl-d",b.hpwl||0,PCB.auto.hpwl||0);
+    \\ delta("sc-loop-d",t.loop,a.loop);
     \\ delta("sc-ind-d",b.loop_nh||0,PCB.auto.loop_nh||0);
-    \\ delta("sc-align-d",b.alignment_term,PCB.auto.alignment_term);
-    \\ delta("sc-cong-d",b.congestion_term||0,PCB.auto.congestion_term||0);
+    \\ delta("sc-align-d",t.align,a.align);
+    \\ delta("sc-cong-d",t.cong,a.cong);
+    \\ svOff("sc-hpwl",!t.s.wire.on);svOff("sc-hpwl-d",!t.s.wire.on);
+    \\ svOff("sc-loop",!t.s.loop.on);svOff("sc-loop-d",!t.s.loop.on);
+    \\ svOff("sc-ind",!t.s.loop.on);svOff("sc-ind-d",!t.s.loop.on);
+    \\ svOff("sc-align",!t.s.align.on);svOff("sc-align-d",!t.s.align.on);
+    \\ svOff("sc-cong",!t.s.cong.on);svOff("sc-cong-d",!t.s.cong.on);
     \\}
     \\var scoreReq=0;
     \\function fetchScore(){
@@ -2318,6 +2371,12 @@ const BOARD_JS =
     \\ var g=document.getElementById("t-grid").checked?1:0;
     \\ window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?w_align="+v("t-align")+
     \\  "&loop_w="+v("t-loop")+"&w_congest="+v("t-cong")+"&grid="+g;});
+    \\(function(){var ids=["sv-en-wire","sv-w-wire","sv-en-loop","sv-w-loop","sv-en-align","sv-w-align","sv-en-cong","sv-w-cong"];
+    \\ var def={};ids.forEach(function(id){var e=document.getElementById(id);if(!e)return;
+    \\  def[id]=(e.type=="checkbox")?e.checked:e.value;e.addEventListener("input",function(){if(lastBreak)showScore(lastBreak);});});
+    \\ var rb=document.getElementById("sv-reset");
+    \\ if(rb)rb.addEventListener("click",function(){ids.forEach(function(id){var e=document.getElementById(id);
+    \\   if(e){if(e.type=="checkbox")e.checked=def[id];else e.value=def[id];}});if(lastBreak)showScore(lastBreak);});})();
     \\function pad2(n){return (n<10?"0":"")+n;}
     \\function stamp(){var d=new Date();return pad2(d.getMonth()+1)+"-"+pad2(d.getDate())+" "+pad2(d.getHours())+":"+pad2(d.getMinutes());}
     \\document.getElementById("pcb-saveas").addEventListener("click",function(){
