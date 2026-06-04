@@ -365,8 +365,8 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
     try w.writeAll(NAME_OPEN);
     try writeJsonStr(w, name);
     try w.print(",\"generated\":{s},", .{if (p.generated) "true" else "false"});
-    try w.print("\"params\":{{\"loop_w\":{d},\"w_align\":{d},\"w_congest\":{d},\"cap_w_max\":{d},\"grid\":{s}}},", .{
-        params.loop_w, params.w_align, params.w_congest, params.cap_w_max, if (params.grid_courtyards) "true" else "false",
+    try w.print("\"params\":{{\"loop_w\":{d},\"w_align\":{d},\"w_congest\":{d},\"cap_w_max\":{d},\"grid\":{s},\"compact\":\"{s}\"}},", .{
+        params.loop_w, params.w_align, params.w_congest, params.cap_w_max, if (params.grid_courtyards) "true" else "false", @tagName(params.compact_mode),
     });
     try w.print("\"score\":{{\"hpwl_mm\":{d},\"loop_mm\":{d},\"loop_caps\":{d}}},", .{ p.score.hpwl_mm, p.score.loop_mm, p.score.loop_caps });
     try w.writeAll("\"breakdown\":");
@@ -394,9 +394,10 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
 /// weighted contribution, and the summed `objective`. Shared by the GET export
 /// and the POST score endpoint so both report the same shape.
 fn writeBreakdownJson(w: *std.Io.Writer, b: optimizer.Breakdown, params: optimizer.Params) std.Io.Writer.Error!void {
-    try w.print("{{\"hpwl\":{d},\"loop_raw\":{d},\"loop_weighted\":{d},\"loop_nh\":{d},\"loop_nh_weighted\":{d},\"alignment\":{d},\"congestion\":{d},", .{
-        b.hpwl, b.loop_raw, b.loop_weighted, b.loop_nh, b.loop_nh_weighted, b.alignment, b.congestion,
+    try w.print("{{\"hpwl\":{d},\"loop_raw\":{d},\"loop_weighted\":{d},\"loop_nh\":{d},\"loop_nh_weighted\":{d},", .{
+        b.hpwl, b.loop_raw, b.loop_weighted, b.loop_nh, b.loop_nh_weighted,
     });
+    try w.print("\"alignment\":{d},\"footprint\":{d},\"congestion\":{d},", .{ b.alignment, b.footprint, b.congestion });
     try w.print("\"loop_term\":{d},\"alignment_term\":{d},\"congestion_term\":{d},\"objective\":{d}}}", .{
         params.loop_w * b.loop_nh_weighted, params.w_align * b.alignment, params.w_congest * b.congestion, b.objective,
     });
@@ -1325,9 +1326,9 @@ fn writeAutoCache(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
 /// Serialize to `{"params":{…},"parts":[{ref,x,y,rot}, …]}` — the weights so
 /// the controls reflect what produced the layout, the parts for the cache.
 fn writeCacheJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimizer.Params) std.Io.Writer.Error!void {
-    try w.print("{{\"params\":{{\"loop_w\":{d},\"w_align\":{d},\"w_congest\":{d},\"cap_w_max\":{d},\"grid\":{s}}},", .{
-        params.loop_w,                                   params.w_align, params.w_congest, params.cap_w_max,
-        if (params.grid_courtyards) "true" else "false",
+    try w.print("{{\"params\":{{\"loop_w\":{d},\"w_align\":{d},\"w_congest\":{d},\"cap_w_max\":{d},\"grid\":{s},\"compact\":\"{s}\"}},", .{
+        params.loop_w,                                   params.w_align,                params.w_congest, params.cap_w_max,
+        if (params.grid_courtyards) "true" else "false", @tagName(params.compact_mode),
     });
     try w.writeAll(PARTS_OPEN);
     for (p.parts, 0..) |pt, i| {
@@ -1354,6 +1355,11 @@ fn readAutoParams(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
     if (po.object.get("w_congest")) |v| p.w_congest = jsonNum(v);
     if (po.object.get("cap_w_max")) |v| p.cap_w_max = jsonNum(v);
     if (po.object.get("grid")) |v| p.grid_courtyards = v == .bool and v.bool;
+    if (po.object.get("compact")) |v| {
+        // Explicit both ways: the default is now protrusion, so a cache that chose
+        // bbox must restore bbox rather than fall through to the default.
+        if (v == .string) p.compact_mode = if (std.mem.eql(u8, v.string, "bbox")) .bbox else .protrusion;
+    }
     return p;
 }
 
@@ -1385,6 +1391,10 @@ fn parseTuning(req: *httpz.Request) Tuning {
     }
     if (q.get("grid")) |v| {
         p.grid_courtyards = !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false"));
+        tuned = true;
+    }
+    if (q.get("compact")) |v| {
+        p.compact_mode = if (std.mem.eql(u8, v, "protrusion")) .protrusion else .bbox;
         tuned = true;
     }
     return .{ .params = p, .tuned = tuned, .regen = regen or tuned };
@@ -1440,7 +1450,7 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8) st
     try w.writeAll("<span class=\"delta\" id=\"sc-loop-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-ind\" title=\"hot-loop connection inductance (nH) — the scored loop metric\">loop … nH</span>");
     try w.writeAll("<span class=\"delta\" id=\"sc-ind-d\"></span>");
-    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-align\" title=\"row/column alignment term (w_align × penalty)\">align …</span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-align\" title=\"sub-module courtyard bounding-box area (mm²) — compactness term\">area …</span>");
     try w.writeAll("<span class=\"delta\" id=\"sc-align-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-cong\" title=\"routing congestion (w_congest × RUDY overflow)\">cong …</span>");
     try w.writeAll("<span class=\"delta\" id=\"sc-cong-d\"></span>");
@@ -1536,8 +1546,14 @@ fn writeLayDelta(w: *std.Io.Writer, s: LayoutScore, auto: LayoutScore) std.Io.Wr
 /// Apply button (wired in BOARD_JS to reload with the values as query params,
 /// which forces a regenerate). Values reflect the weights behind the layout.
 fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!void {
+    const prot = params.compact_mode == .protrusion;
     try w.writeAll("<div class=\"pcb-tune\"><span class=\"tune-h\">Tuning</span>");
-    try w.print("<label>Align <input id=\"t-align\" type=\"number\" step=\"0.1\" min=\"0\" value=\"{d}\"></label>", .{params.w_align});
+    try w.print("<label title=\"compactness metric\">Compact <select id=\"t-compact\">" ++
+        "<option value=\"bbox\"{s}>bbox area</option>" ++
+        "<option value=\"protrusion\"{s}>protrusion</option></select></label>", .{
+        if (prot) "" else " selected", if (prot) " selected" else "",
+    });
+    try w.print("<label>Compact w <input id=\"t-align\" type=\"number\" step=\"0.05\" min=\"0\" value=\"{d}\"></label>", .{params.w_align});
     try w.print("<label>Loop <input id=\"t-loop\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.loop_w});
     try w.print("<label>Congest <input id=\"t-cong\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.w_congest});
     try w.writeAll("<label class=\"tune-chk\"><input id=\"t-grid\" type=\"checkbox\"");
@@ -1557,7 +1573,7 @@ fn writeScoreView(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Err
     try w.writeAll("<div class=\"pcb-tune pcb-scoreview\"><span class=\"tune-h\">Score view</span>");
     try svRow(w, "wire", "Wire", 1.0);
     try svRow(w, "loop", "Loop", params.loop_w);
-    try svRow(w, "align", "Align", params.w_align);
+    try svRow(w, "align", "Compact", params.w_align);
     try svRow(w, "cong", "Congest", params.w_congest);
     try w.writeAll("<button class=\"btn\" id=\"sv-reset\" title=\"Restore engine weights, all metrics enabled\">Reset</button>");
     try w.writeAll("<span class=\"muted\">recomputes the headline — doesn't move parts</span></div>");
@@ -1617,7 +1633,7 @@ fn writeEmbedBar(w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-hpwl\">HPWL …</span><span class=\"delta\" id=\"sc-hpwl-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-loop\">loop …</span><span class=\"delta\" id=\"sc-loop-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-area\">loop area …</span><span class=\"delta\" id=\"sc-area-d\"></span>");
-    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-align\">align …</span><span class=\"delta\" id=\"sc-align-d\"></span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-align\">area …</span><span class=\"delta\" id=\"sc-align-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-iso\">iso …</span><span class=\"delta\" id=\"sc-iso-d\"></span>");
     try w.writeAll("<span class=\"zoom-grp\"><button class=\"btn\" id=\"z-out\" title=\"Zoom out\">−</button>");
     try w.writeAll("<button class=\"btn\" id=\"z-in\" title=\"Zoom in\">+</button>");
@@ -2371,13 +2387,13 @@ const BOARD_JS =
     \\ setSc("sc-hpwl","wire "+(b.hpwl||0).toFixed(1));
     \\ setSc("sc-loop","loop "+t.loop.toFixed(1)+" · "+PCB.caps+" cap");
     \\ setSc("sc-ind","loop "+(b.loop_nh||0).toFixed(2)+" nH");
-    \\ setSc("sc-align","align "+t.align.toFixed(1));
+    \\ setSc("sc-align","area "+((b.footprint!=null?b.footprint:b.alignment)||0).toFixed(1)+" mm²");
     \\ setSc("sc-cong","cong "+t.cong.toFixed(1));
     \\ delta("sc-obj-d",t.obj,a.obj);
     \\ delta("sc-hpwl-d",b.hpwl||0,PCB.auto.hpwl||0);
     \\ delta("sc-loop-d",t.loop,a.loop);
     \\ delta("sc-ind-d",b.loop_nh||0,PCB.auto.loop_nh||0);
-    \\ delta("sc-align-d",t.align,a.align);
+    \\ delta("sc-align-d",(b.footprint!=null?b.footprint:b.alignment)||0,(PCB.auto.footprint!=null?PCB.auto.footprint:PCB.auto.alignment)||0);
     \\ delta("sc-cong-d",t.cong,a.cong);
     \\ svOff("sc-hpwl",!t.s.wire.on);svOff("sc-hpwl-d",!t.s.wire.on);
     \\ svOff("sc-loop",!t.s.loop.on);svOff("sc-loop-d",!t.s.loop.on);
@@ -2393,7 +2409,8 @@ const BOARD_JS =
     \\ document.querySelectorAll(".lay-row").forEach(function(row){
     \\  var nm=row.getAttribute("data-lay-row"),b=layBreaks[nm];if(!b)return;var t=svTerms(b);
     \\  var sc=row.querySelector(".lay-score");
-    \\  if(sc)sc.textContent="obj "+t.obj.toFixed(1)+" · HPWL "+(b.hpwl||0).toFixed(1)+" · loop "+(b.loop_raw||0).toFixed(1);
+    \\  if(sc)sc.textContent="obj "+t.obj.toFixed(1)+" · loop "+(b.loop_raw||0).toFixed(1)+
+    \\   " · area "+((b.footprint!=null?b.footprint:b.alignment)||0).toFixed(0)+" mm²";
     \\  var dd=row.querySelector(".lay-d");if(!dd)return;var d=t.obj-aobj;
     \\  if(Math.abs(d)<0.05){dd.textContent="=";dd.className="lay-d";}
     \\  else{dd.textContent=(d>0?"+":"")+d.toFixed(1);dd.className="lay-d "+(d>0?"up":"down");}});
@@ -2437,7 +2454,7 @@ const BOARD_JS =
     \\ var v=function(id){return encodeURIComponent(document.getElementById(id).value);};
     \\ var g=document.getElementById("t-grid").checked?1:0;
     \\ window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?w_align="+v("t-align")+
-    \\  "&loop_w="+v("t-loop")+"&w_congest="+v("t-cong")+"&grid="+g;});
+    \\  "&loop_w="+v("t-loop")+"&w_congest="+v("t-cong")+"&grid="+g+"&compact="+v("t-compact");});
     \\(function(){var ids=["sv-en-wire","sv-w-wire","sv-en-loop","sv-w-loop","sv-en-align","sv-w-align","sv-en-cong","sv-w-cong"];
     \\ var def={};ids.forEach(function(id){var e=document.getElementById(id);if(!e)return;
     \\  def[id]=(e.type=="checkbox")?e.checked:e.value;e.addEventListener("input",svApply);});

@@ -114,7 +114,14 @@ const CAP_W_MAX: f64 = 3.0; // max value-priority boost for the smallest cap on 
 // are pulled tighter than generic / output decoupling. Applied only when an
 // inductor marks the design a switcher. PROVISIONAL — magnitude wants tuning.
 const INPUT_LOOP_BOOST: f64 = 2.0;
-const W_ALIGN: f64 = 0.5; // tidiness reward: nudge parts to share a row / column
+// Weight on the compactness term (`compactnessArea`): the sub-module's courtyard
+// bounding-box area (mm²) — replaces the old pairwise tidiness reward. At ~1.0 the
+// area term sits at ~40% of the loop term on the small power/RF sub-blocks, enough
+// to flip boundary caps inward (GND tucked alongside the IC) and shrink the
+// envelope ~10-16% for ≲1% loop cost, without overriding the electrical loop.
+// PROVISIONAL — the area term grows quadratically with board size, so sweep it per
+// design (the "Area" tuning input regenerates with a custom weight).
+const W_ALIGN: f64 = 1.0;
 // Weight on the routing-congestion penalty (`congestionPenalty`). HPWL/RSMT alone
 // does not predict routability — local congestion must be traded off against it
 // (Spindler & Johannes RUDY; UCLA mPL). The penalty is ~0 until a region's
@@ -122,10 +129,20 @@ const W_ALIGN: f64 = 0.5; // tidiness reward: nudge parts to share a row / colum
 // apart out of genuine hotspots. PROVISIONAL — the research notes the optimal
 // congestion weight is IC-derived and must be swept on real PCBs.
 const W_CONGEST: f64 = 2.0;
-const ALIGN_CLAMP_MM: f64 = 1.5; // only finish near-alignments within this offset (no long pulls)
 const GRID_COURTYARDS = true; // round courtyard half-extents to GRID_MM so edges land on-grid
 const COMPACT_MIN_OVERLAP: f64 = GRID_MM; // min shared-edge length when docking a floating part
 const COMPACT_EPS: f64 = 1e-4; // courtyard-gap tolerance for the "touching" test
+
+/// Which compactness metric `w_align` weights (replaces the old tidiness reward):
+///   • `protrusion` (default) — Σ per-part squared reach from the cluster centroid
+///     to its courtyard's far corner (mm²). *Every* part feels an inward + orient
+///     pull, so caps rotate to present their short axis outward (GND tucked
+///     alongside the IC rather than pointing away). Beat bbox on the test boards
+///     (bcuda-ldo5v −17% area & −5% loop; lt3045 a wash), both DRC-clean.
+///   • `bbox` — area of the whole-module courtyard bounding box (mm²). Coarser:
+///     only the *outermost* parts feel it, so interior caps have no gradient.
+///     Kept selectable via the "Compact" dropdown / `?compact=bbox`.
+pub const CompactMode = enum { bbox, protrusion };
 
 /// Runtime-tunable weights (the consts above are the defaults). Passed to
 /// `solve` so the UI can adjust placement without a rebuild. Only the steering
@@ -136,6 +153,7 @@ pub const Params = struct {
     w_congest: f64 = W_CONGEST,
     cap_w_max: f64 = CAP_W_MAX,
     grid_courtyards: bool = GRID_COURTYARDS,
+    compact_mode: CompactMode = .protrusion,
 };
 
 /// Placement grid: final positions snap to this (mm). The interactive page
@@ -243,7 +261,8 @@ pub const Breakdown = struct {
     loop_weighted: f64, // value-priority-weighted loop-length sum (mm, display only)
     loop_nh: f64 = 0, // summed unweighted hot-loop connection inductance (nH)
     loop_nh_weighted: f64 = 0, // value-weighted loop inductance (nH) — the scored loop term
-    alignment: f64, // raw row/column tidiness penalty
+    alignment: f64, // active compactness term (mm²): bbox area or per-part protrusion per compact_mode (field name kept for wire-compat)
+    footprint: f64 = 0, // courtyard bounding-box area (mm²) — always; the yardstick shown for comparing the two modes
     congestion: f64 = 0, // RUDY routing-congestion overflow penalty
     objective: f64, // the weighted total the multi-start/polish minimize
 };
@@ -606,7 +625,10 @@ fn prepare(
 /// sums on the score path, the surrogate above ROUTED_SCORE_MAX_PARTS — and the
 /// objective is rebuilt from its inductance term, so the headline matches.
 fn breakdownWith(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet, params: Params, score: Score, lsum: LoopSums) Breakdown {
-    const al = alignmentPenalty(parts);
+    // `al` is the *active* compactness term (what the objective minimizes);
+    // `footprint` is always the courtyard bbox area — the universal yardstick the
+    // UI shows so the two modes are comparable on the same scale.
+    const al = compactnessTerm(parts, params.compact_mode);
     const cong = congestionPenalty(parts, idx_of, nets);
     return .{
         .hpwl = score.hpwl_mm,
@@ -617,6 +639,7 @@ fn breakdownWith(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: [
         .loop_nh = lsum.raw_nh,
         .loop_nh_weighted = lsum.weighted_nh,
         .alignment = al,
+        .footprint = compactnessArea(parts),
         .congestion = cong,
         .objective = score.hpwl_mm + params.loop_w * lsum.weighted_nh +
             params.w_align * al + params.w_congest * cong,
@@ -1353,7 +1376,7 @@ fn routedPolishCost(
     const focus_w = routedSubsetWeighted(scratch.allocator(), parts, idx_of, nets, loops, cap, true);
     const cong = if (params.w_congest != 0) params.w_congest * congestionPenalty(parts, idx_of, nets) else 0;
     return wireScore(parts, idx_of, nets) + params.loop_w * (others_w + focus_w) +
-        params.w_align * alignmentPenalty(parts) + cong;
+        params.w_align * compactnessTerm(parts, params.compact_mode) + cong;
 }
 
 /// `polishPart` for the routed objective: pick the (position, rotation) over a
@@ -2118,7 +2141,7 @@ fn objectiveCost(
     // where it contributes nothing anyway.
     const cong = if (params.w_congest != 0) params.w_congest * congestionPenalty(parts, idx_of, nets) else 0;
     return hpwl + params.loop_w * weightedLoop(parts, loops) +
-        params.w_align * alignmentPenalty(parts) + cong;
+        params.w_align * compactnessTerm(parts, params.compact_mode) + cong;
 }
 
 /// The same objective as `objectiveCost`, but the loop term is the *real*
@@ -2141,22 +2164,66 @@ fn routedObjectiveCost(
     const hpwl = wireScore(parts, idx_of, nets);
     const loop_weighted = routedLoops(scratch, parts, idx_of, nets, loops).weighted_nh;
     const cong = if (params.w_congest != 0) params.w_congest * congestionPenalty(parts, idx_of, nets) else 0;
-    return hpwl + params.loop_w * loop_weighted + params.w_align * alignmentPenalty(parts) + cong;
+    return hpwl + params.loop_w * loop_weighted + params.w_align * compactnessTerm(parts, params.compact_mode) + cong;
 }
 
-/// Tidiness reward (as a penalty to minimize): for each part pair, the smaller
-/// of their x/y offsets, clamped to `ALIGN_CLAMP_MM`. Driving it down lines
-/// parts up into shared rows/columns; the clamp means only near-aligned pairs
-/// feel a pull, so distant parts aren't dragged together.
-fn alignmentPenalty(parts: []const Part) f64 {
+/// The whole sub-module's footprint area (mm²): the area of the axis-aligned
+/// bounding box over every part's rotation-aware courtyard (`effHw`/`effHh`).
+/// Replaces the old pairwise tidiness reward — minimising the envelope pulls
+/// parts in tight and, because a decoupling cap whose GND pad points *away*
+/// from its IC pushes the bounding box outward, biases each cap toward the
+/// orientation that keeps the whole circuit compact (GND tucked alongside the
+/// chip rather than sticking out into empty space).
+fn compactnessArea(parts: []const Part) f64 {
+    if (parts.len == 0) return 0;
+    var minx: f64 = std.math.inf(f64);
+    var miny: f64 = std.math.inf(f64);
+    var maxx: f64 = -std.math.inf(f64);
+    var maxy: f64 = -std.math.inf(f64);
+    for (parts) |p| {
+        minx = @min(minx, p.x - effHw(p));
+        miny = @min(miny, p.y - effHh(p));
+        maxx = @max(maxx, p.x + effHw(p));
+        maxy = @max(maxy, p.y + effHh(p));
+    }
+    return (maxx - minx) * (maxy - miny);
+}
+
+/// Per-part protrusion (mm²): Σ over parts of the squared distance from the
+/// cluster centroid to that part's courtyard corner *facing away* from the
+/// centroid (`|Δx|+effHw`, `|Δy|+effHh`). Unlike the bounding box, *every* part
+/// contributes a gradient, so each cap is pulled toward the centre **and**
+/// rotated to present its short axis outward — a cap offset mostly in x prefers
+/// its long axis vertical (tangential), which tucks the GND pad alongside the IC
+/// instead of letting it jut into empty space. The whole-cluster spread the
+/// box metric can't see at the interior.
+fn compactnessProtrusion(parts: []const Part) f64 {
+    if (parts.len == 0) return 0;
+    var cx: f64 = 0;
+    var cy: f64 = 0;
+    for (parts) |p| {
+        cx += p.x;
+        cy += p.y;
+    }
+    const inv = 1.0 / @as(f64, @floatFromInt(parts.len));
+    cx *= inv;
+    cy *= inv;
     var total: f64 = 0;
-    for (parts, 0..) |a, i| {
-        for (parts[i + 1 ..]) |b| {
-            const off = @min(@abs(a.x - b.x), @abs(a.y - b.y));
-            total += @min(off, ALIGN_CLAMP_MM);
-        }
+    for (parts) |p| {
+        const rx = @abs(p.x - cx) + effHw(p);
+        const ry = @abs(p.y - cy) + effHh(p);
+        total += rx * rx + ry * ry;
     }
     return total;
+}
+
+/// The active compactness term `w_align` weights, selected by `mode`. Both are
+/// in mm² so the weight stays on a comparable scale across the two.
+fn compactnessTerm(parts: []const Part, mode: CompactMode) f64 {
+    return switch (mode) {
+        .bbox => compactnessArea(parts),
+        .protrusion => compactnessProtrusion(parts),
+    };
 }
 
 const CONGEST_BINS: usize = 8; // congestion grid resolution per axis
