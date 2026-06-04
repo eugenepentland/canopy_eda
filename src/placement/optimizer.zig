@@ -72,6 +72,19 @@ const MULTISTART_MAX_PARTS: usize = 32; // above this, single start (bound O(n²
 const ROUTED_SCORE_MAX_PARTS: usize = 48;
 const POLISH_SWEEPS: usize = 4; // greedy per-part tightening sweeps
 const POLISH_CELLS: i64 = 6; // half-window (grid cells) the polish search scans
+// Routed-aware finishing polish (small boards only): a final local search that
+// scores each candidate (position × rotation) with the *real* maze-routed loop
+// length instead of the fixed-pad surrogate, so a cap settles at the rotation/
+// offset that shortens the actual trace — the surrogate-driven `polish` optimises
+// a straight-gap proxy and can pick a different rotation/side than the router.
+const ROUTED_POLISH_SWEEPS: usize = 2;
+const ROUTED_POLISH_CELLS: i64 = 3; // ±0.6 mm window — local tuck/flip, not a re-place
+// Routed polish routes once per candidate cell, so its cost grows with
+// caps × window × loops. Cap it well below `ROUTED_SCORE_MAX_PARTS` (which only
+// gates a single end-of-solve route) so a mid-size module can't make an
+// on-demand regenerate take tens of seconds. Small power modules — the case this
+// helps most — sit comfortably under it.
+const ROUTED_POLISH_MAX_PARTS: usize = 16;
 const W_ISOLATE: f64 = 1.5; // keep-away penalty: sensitive nets ✗ high-current/switch parts
 const ISO_FALLOFF_MM: f64 = 4.0; // distance scale of the isolation penalty (falls to ~0 beyond)
 const CAP_W_MAX: f64 = 3.0; // max value-priority boost for the smallest cap on a rail
@@ -325,6 +338,10 @@ pub fn solve(
         // gap so every courtyard abuts at least one neighbour (provably tight),
         // highest placement-order priority docking first.
         compactToContact(parts, prep.priority);
+        // Routed-aware tuck: re-settle each cap to the rotation/offset that
+        // shortens the *real* routed trace (the metric the headline reports),
+        // which the surrogate-driven relax/polish can miss. Small boards only.
+        routedPolish(arena, parts, &prep.idx_of, nets, built.loops, params);
     }
 
     // Headline score's loop length: the *real* routed-trace sum on interactive
@@ -528,6 +545,39 @@ fn routedLoops(
         weighted += lp.weight * total;
     }
     return .{ .raw = raw, .weighted = weighted };
+}
+
+/// Weighted routed-loop length over a *subset* of `loops`: `match=true` sums only
+/// the loops owned by cap index `cap`, `match=false` sums all the others. Same
+/// routing as `routedLoops` (the grid is built from every part, so a leg still
+/// detours around the whole board) — it just sums a slice. `routedPolish` re-routes
+/// only the cap it is currently moving (`match=true`) each candidate, and adds the
+/// others' length as a baseline measured once per part — cutting the routes per
+/// candidate from "every loop" to "this cap's loop(s)". A moved cap obstructing a
+/// foreign loop is a second-order effect, re-measured when the next part is polished.
+fn routedSubsetWeighted(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    loops: []const Loop,
+    cap: usize,
+    match: bool,
+) f64 {
+    var weighted: f64 = 0;
+    var lr_opt: ?router.LoopRouter = router.LoopRouter.init(arena, parts, nets, idx_of, .{}) catch null;
+    const ready = if (lr_opt) |lr| lr.ready else false;
+    for (loops) |lp| {
+        if ((lp.cap == cap) != match) continue;
+        const pwr = if (ready) blk: {
+            const cap_c = worldPadCenter(parts[lp.cap], lp.cap_pwr.x, lp.cap_pwr.y);
+            const hub_c = worldPadCenter(parts[lp.hub], lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
+            const routed = lr_opt.?.legLen(cap_c, hub_c, lp.pwr_net) catch null;
+            break :blk if (routed) |r| r else surrogatePwrLeg(parts, lp) + UNROUTABLE_PENALTY_MM;
+        } else surrogatePwrLeg(parts, lp);
+        weighted += lp.weight * (pwr + loopGroundSpan(parts, lp));
+    }
+    return weighted;
 }
 
 /// Apply a cached layout to `parts` when it covers every one (matched by
@@ -873,6 +923,139 @@ fn polishPart(
                 p.y = oy + @as(f64, @floatFromInt(dy)) * GRID_MM;
                 if (overlapsAny(parts, p)) continue;
                 const c = objectiveCost(parts, idx_of, nets, loops, params);
+                if (c < best_cost - 1e-9) {
+                    best_cost = c;
+                    best_x = p.x;
+                    best_y = p.y;
+                    best_rot = r;
+                    improved = true;
+                }
+            }
+        }
+    }
+    p.x = best_x;
+    p.y = best_y;
+    p.rot = best_rot;
+    return improved;
+}
+
+/// Final refinement on the *routed* objective. Mirrors `polish` (greedy per-part
+/// position × rotation grid search, several sweeps) but scores every candidate
+/// with `routedObjectiveCost` — the real maze-routed loop length, the same metric
+/// the headline reports. The surrogate-driven `polish` tucks parts by a straight
+/// edge-to-edge gap, which can settle a cap on a rotation/side the router then
+/// routes long; this pass re-tucks each part to what actually routes short. Runs
+/// once on the finished layout, small boards only (one layout, so the router cost
+/// is bounded — one route per candidate cell). The window is deliberately small
+/// (`ROUTED_POLISH_CELLS`): a local tuck/flip, not a re-place, so it never undoes
+/// the global arrangement the multi-start already chose.
+fn routedPolish(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    loops: []const Loop,
+    params: Params,
+) void {
+    if (parts.len < 2 or parts.len > ROUTED_POLISH_MAX_PARTS or loops.len == 0) return;
+    // Only the decoupling caps (parts that own a loop) drive the routed term, so
+    // those are the only parts worth the per-candidate route. Resistors/other
+    // passives are left where the surrogate polish + compaction placed them.
+    var in_loop = [_]bool{false} ** maxParts;
+    for (loops) |lp| in_loop[lp.cap] = true;
+    var scratch = std.heap.ArenaAllocator.init(arena);
+    defer scratch.deinit();
+
+    // Snapshot the finished layout + its true routed objective. The greedy sweeps
+    // below only accept improving moves, but the closing snap/legalize can nudge a
+    // part off its chosen cell; the gate at the end reverts the whole pass if that
+    // ever leaves the board worse than it started, so routedPolish is never harmful.
+    var before: [maxParts]Pose = undefined;
+    for (parts, 0..) |p, i| before[i] = .{ .x = p.x, .y = p.y, .rot = p.rot };
+    _ = scratch.reset(.retain_capacity);
+    const before_cost = routedObjectiveCost(scratch.allocator(), parts, idx_of, nets, loops, params);
+
+    var sweep: usize = 0;
+    while (sweep < ROUTED_POLISH_SWEEPS) : (sweep += 1) {
+        var improved = false;
+        for (parts, 0..) |*p, i| {
+            if (p.kind == .hub or !in_loop[i]) continue;
+            if (routedPolishPart(&scratch, parts, idx_of, nets, loops, i, params)) improved = true;
+        }
+        if (!improved) break;
+    }
+    snapToGrid(parts);
+    legalizeOnGrid(parts);
+
+    _ = scratch.reset(.retain_capacity);
+    const after_cost = routedObjectiveCost(scratch.allocator(), parts, idx_of, nets, loops, params);
+    if (after_cost > before_cost + 1e-6) {
+        for (parts, 0..) |*p, i| {
+            p.x = before[i].x;
+            p.y = before[i].y;
+            p.rot = before[i].rot;
+        }
+    }
+}
+
+/// The routed objective `routedPolishPart` minimises for one candidate: HPWL +
+/// isolation + alignment over the live positions, plus the loop term split into
+/// the fixed `others_w` baseline and the freshly-routed loops owned by cap `cap`.
+/// `scratch` is reset before the route so the per-candidate router grid is freed.
+fn routedPolishCost(
+    scratch: *std.heap.ArenaAllocator,
+    parts: []const Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    loops: []const Loop,
+    params: Params,
+    cap: usize,
+    others_w: f64,
+) f64 {
+    _ = scratch.reset(.retain_capacity);
+    const focus_w = routedSubsetWeighted(scratch.allocator(), parts, idx_of, nets, loops, cap, true);
+    return hpwlScore(parts, idx_of, nets) + params.loop_w * (others_w + focus_w) +
+        params.w_isolate * isolationPenalty(parts) + params.w_align * alignmentPenalty(parts);
+}
+
+/// `polishPart` for the routed objective: pick the (position, rotation) over a
+/// small grid window that most lowers the routed objective, holding the others
+/// fixed. For speed it re-routes only the loop(s) owned by the moved cap `i` per
+/// candidate (`routedSubsetWeighted` with `match=true`) and adds the other loops'
+/// length (`others_w`) as a baseline measured once — the others don't move, so
+/// the only thing that changes cell-to-cell is this cap's own leg.
+fn routedPolishPart(
+    scratch: *std.heap.ArenaAllocator,
+    parts: []Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    loops: []const Loop,
+    i: usize,
+    params: Params,
+) bool {
+    const p = &parts[i];
+    const ox = p.x;
+    const oy = p.y;
+    // The loops not owned by `i`, routed once at `i`'s current position — the fixed
+    // part of the objective while `i` is tucked. (A moved `i` obstructing one of
+    // these is second-order; it is re-measured when the next part is polished.)
+    _ = scratch.reset(.retain_capacity);
+    const others_w = routedSubsetWeighted(scratch.allocator(), parts, idx_of, nets, loops, i, false);
+    var best_cost = routedPolishCost(scratch, parts, idx_of, nets, loops, params, i, others_w);
+    var best_x = ox;
+    var best_y = oy;
+    var best_rot = p.rot;
+    var improved = false;
+    for (ROT_CAND) |r| {
+        var dy: i64 = -ROUTED_POLISH_CELLS;
+        while (dy <= ROUTED_POLISH_CELLS) : (dy += 1) {
+            var dx: i64 = -ROUTED_POLISH_CELLS;
+            while (dx <= ROUTED_POLISH_CELLS) : (dx += 1) {
+                p.rot = r;
+                p.x = ox + @as(f64, @floatFromInt(dx)) * GRID_MM;
+                p.y = oy + @as(f64, @floatFromInt(dy)) * GRID_MM;
+                if (overlapsAny(parts, p)) continue;
+                const c = routedPolishCost(scratch, parts, idx_of, nets, loops, params, i, others_w);
                 if (c < best_cost - 1e-9) {
                     best_cost = c;
                     best_x = p.x;
@@ -1593,6 +1776,29 @@ fn objectiveCost(
 ) f64 {
     const hpwl = hpwlScore(parts, idx_of, nets);
     return hpwl + params.loop_w * weightedLoop(parts, loops) +
+        params.w_isolate * isolationPenalty(parts) + params.w_align * alignmentPenalty(parts);
+}
+
+/// The same objective as `objectiveCost`, but the loop term is the *real*
+/// maze-routed trace length (`routedLoops`) instead of the fixed-pad surrogate.
+/// The surrogate measures a straight edge-to-edge gap to the pinned hub pad; the
+/// router has to detour around foreign pads, so the two diverge — a layout whose
+/// cap sits a slightly-shorter gap away on one side can route longer than the
+/// other side. The surrogate-driven relax/polish therefore can't see which
+/// rotation/side actually routes short; `routedPolish` uses this to re-tuck on
+/// the metric the headline reports. `scratch` is a resettable arena the caller
+/// wipes between evaluations (the router allocates a fresh grid per call).
+fn routedObjectiveCost(
+    scratch: std.mem.Allocator,
+    parts: []const Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    loops: []const Loop,
+    params: Params,
+) f64 {
+    const hpwl = hpwlScore(parts, idx_of, nets);
+    const loop_weighted = routedLoops(scratch, parts, idx_of, nets, loops).weighted;
+    return hpwl + params.loop_w * loop_weighted +
         params.w_isolate * isolationPenalty(parts) + params.w_align * alignmentPenalty(parts);
 }
 
