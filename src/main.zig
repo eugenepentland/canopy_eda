@@ -426,6 +426,7 @@ test {
     _ = @import("serve/digikey.zig");
     _ = @import("serve/rate_limiter.zig");
     _ = @import("serve/library.zig");
+    _ = @import("serve/library_3d.zig");
     _ = @import("config.zig");
     _ = @import("kicad_pcb/writer.zig");
     _ = @import("kicad_pcb/reader.zig");

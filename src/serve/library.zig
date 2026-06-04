@@ -160,12 +160,19 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
             if (referenced_footprints.contains(fname_local)) continue;
             const fname = try allocator.dupe(u8, fname_local);
             const mtime = if (dir.statFile(entry.name)) |s| s.mtime else |_| 0;
+            const fp_has_model = blk: {
+                if (model_cfg.get(fname_local)) |c| {
+                    if (c.model != null) break :blk true;
+                }
+                break :blk footprint_mod.findModelFile(allocator, project_dir, fname_local, fname_local) != null;
+            };
             try buf.append(allocator, .{
                 .mtime = mtime,
                 .row = .{
                     .name = fname,
                     .kind = .footprint,
                     .search_text = try std.fmt.allocPrint(allocator, "{s} footprint", .{fname}),
+                    .has_3d_model = fp_has_model,
                 },
             });
         }

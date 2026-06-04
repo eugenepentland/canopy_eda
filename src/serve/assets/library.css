@@ -68,7 +68,8 @@ td { font-family: monospace; font-size: 0.9rem; }
 .card-tags { display:flex; flex-wrap:wrap; gap:0.3rem; align-items:center; }
 .card-tags .tag { margin-right:0; }
 .card-meta { color:#6e7681; font-size:0.78rem; font-family:monospace; word-break:break-word; }
-.badge-3d { font-size:0.68rem; color:#3fb950; border:1px solid #2a4a2a; border-radius:3px; padding:0 0.3rem; }
+.badge-3d { font-size:0.68rem; color:#3fb950; border:1px solid #2a4a2a; border-radius:3px; padding:0 0.3rem; text-decoration:none; cursor:pointer; }
+a.badge-3d:hover { background:#1c3a24; border-color:#3fb950; }
 .req-toggle { cursor:pointer; user-select:none; color:#d29922; font-size:0.78rem; align-self:flex-start; }
 .req-toggle:hover { color:#e3b341; }
 .comp-card .req-cards { display:none; grid-template-columns:1fr; gap:0.4rem; margin-top:0.1rem; }

@@ -16,6 +16,7 @@ const pages = @import("serve/pages.zig");
 const api = @import("serve/api.zig");
 const edit = @import("serve/edit.zig");
 const library = @import("serve/library.zig");
+const library_3d = @import("serve/library_3d.zig");
 const upload = @import("serve/upload.zig");
 const upload_package = @import("serve/upload_package.zig");
 const upload_datasheet = @import("serve/upload_datasheet.zig");
@@ -241,6 +242,10 @@ pub fn serve(
 
     // Library
     router.get("/library", library.libraryPage, .{});
+    // 3D model alignment viewer + its STEP stream + transform persistence.
+    router.get("/library/3d/:footprint", library_3d.viewerPage, .{});
+    router.get("/api/model-file/:footprint", library_3d.modelFileApi, .{});
+    router.post("/api/model-transform/:footprint", library_3d.saveTransformApi, .{});
 
     // Upload
     router.post("/api/upload-package", upload_package.uploadPackageApi, .{});

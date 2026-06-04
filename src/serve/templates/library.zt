@@ -68,6 +68,9 @@ pub templ Card(row: LibraryRow) {
             },
             .footprint => {
                 <span class="tag tag-footprint fp-toggle" data-fp={row.name} title="Show footprint preview">show preview ›</span>
+                if (row.has_3d_model) {
+                    <a class="badge-3d" href="/library/3d/{row.name}" title="Align 3D model orientation">3D</a>
+                }
                 <div class="fp-preview" data-fp={row.name}></div>
             },
         }
@@ -90,7 +93,7 @@ pub templ ComponentDetails(row: LibraryRow) {
         if (row.footprint) |fp| {
             <span class="tag tag-footprint fp-toggle" data-fp={fp} title="Show footprint preview">{fp}</span>
             if (row.has_3d_model) {
-                <span class="badge-3d" title="3D model available">3D</span>
+                <a class="badge-3d" href="/library/3d/{fp}" title="Align 3D model orientation">3D</a>
             }
         }
         if (row.pinout) |po| {
