@@ -1089,6 +1089,17 @@ fn runKicadPcbSync(
     else
         copyDesignSources(req.arena, ctx.project_dir, name, board_path, block, pcb_path);
 
+    // Ship the 3D models alongside the board. The sync bakes
+    // `${KIPRJMOD}/models/<name>.step` into each footprint but the file-based
+    // push historically never copied the files, so KiCad's 3D viewer resolved
+    // nothing. Done unconditionally (even on a no-op netlist push) so an already
+    // synced board still backfills a missing `models/` folder; idempotent and
+    // opt-out via ?no_model_copy=1.
+    const models_copied: usize = if (isQueryFlagSet(req, "no_model_copy"))
+        0
+    else
+        copyKicadModels(req.arena, ctx.project_dir, block, pcb_path);
+
     var resp_buf: std.ArrayListUnmanaged(u8) = .empty;
     const rw = resp_buf.writer(ctx.allocator);
     try rw.print(
@@ -1103,6 +1114,7 @@ fn runKicadPcbSync(
         },
     );
     try rw.print(",\"source_copied\":{d}", .{source_copied});
+    try rw.print(",\"models_copied\":{d}", .{models_copied});
     if (lock_warning) |msg| {
         if (wrote_file) {
             try rw.writeAll(",\"warning\":");
@@ -1225,6 +1237,74 @@ fn copyDesignSources(
         if (copyOneReadOnly(arena, project_dir, dest_root, rel)) written += 1;
     }
     return written;
+}
+
+/// Copy every 3D model (`.step`) referenced by the design into a `models/`
+/// folder beside the board, so the `${KIPRJMOD}/models/<name>.step` paths the
+/// sync bakes into each footprint actually resolve in KiCad's 3D viewer.
+/// `${KIPRJMOD}` evaluates to the `.kicad_pcb`'s directory, so the files have to
+/// live in `<board_dir>/models/`. Mirrors `export_kicad_model.exportFootprints`'
+/// model-copy step (same model-config + `findModelFile` resolution), which is
+/// why `export-kicad` boards always had their models while file-based pushes did
+/// not. Best-effort: a failure is logged and never fails the sync. Returns the
+/// number of model files written (skips those already present, so a repeat push
+/// just stats each file — no NAS churn).
+fn copyKicadModels(
+    arena: std.mem.Allocator,
+    project_dir: []const u8,
+    block: *const env_mod.DesignBlock,
+    pcb_path: []const u8,
+) usize {
+    const board_dir = std.fs.path.dirname(pcb_path) orelse ".";
+    const models_dir = std.fmt.allocPrint(arena, "{s}/models", .{board_dir}) catch return 0;
+    infra_fs.cwd().makePath(models_dir) catch |e| {
+        log.warn("model-copy: mkdir {s} failed: {s}", .{ models_dir, @errorName(e) });
+        return 0;
+    };
+
+    var instances: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
+    netlist_mod.collectInstances(arena, block, "", &instances) catch return 0;
+
+    var model_cfg = export_kicad.loadModelConfig(arena, project_dir);
+    var seen = std.StringHashMap(void).init(arena);
+
+    var copied: usize = 0;
+    for (instances.items) |inst| {
+        if (inst.footprint.len == 0) continue;
+        const mcfg = model_cfg.get(inst.footprint);
+        const model_name = if (mcfg) |c|
+            (c.model orelse fp_mod.findModelFile(arena, project_dir, inst.footprint, inst.component))
+        else
+            fp_mod.findModelFile(arena, project_dir, inst.footprint, inst.component);
+        const mname = model_name orelse continue;
+        if (seen.contains(mname)) continue;
+        seen.put(mname, {}) catch |e| log.warn("model-copy: track {s} failed: {s}", .{ mname, @errorName(e) });
+        if (copyOneModel(arena, project_dir, models_dir, mname)) copied += 1;
+    }
+    return copied;
+}
+
+/// Copy `lib/models/<mname>` into the board's `models/` dir. Skips silently when
+/// the source model is missing (not every footprint ships a STEP) and when an
+/// identical-size copy already exists (idempotent re-push). Returns true only
+/// when a file was actually written.
+fn copyOneModel(
+    arena: std.mem.Allocator,
+    project_dir: []const u8,
+    models_dir: []const u8,
+    mname: []const u8,
+) bool {
+    const src_path = std.fmt.allocPrint(arena, "{s}/lib/models/{s}", .{ project_dir, mname }) catch return false;
+    const dst_path = std.fmt.allocPrint(arena, "{s}/{s}", .{ models_dir, mname }) catch return false;
+    const src_stat = infra_fs.cwd().statFile(src_path) catch return false;
+    if (infra_fs.cwd().statFile(dst_path)) |dst_stat| {
+        if (dst_stat.size == src_stat.size) return false;
+    } else |_| {}
+    infra_fs.cwd().copyFile(src_path, infra_fs.cwd(), dst_path, .{}) catch |e| {
+        log.warn("model-copy: {s} failed: {s}", .{ mname, @errorName(e) });
+        return false;
+    };
+    return true;
 }
 
 /// Recursively gather each sub-block's source as a project-relative `.sexp`
