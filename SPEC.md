@@ -250,6 +250,7 @@ Public functions: worldShape, pointDist, shapeGap
 - Emits a footprint's (fab …) body outline as fp_line/fp_circle on the F.Fab layer
 - Emits silkscreen/fab (poly …) as a filled fp_poly and (rect …) as fp_rect on the target layer
 - Emits a custom pad's (poly …) outline as a valid KiCad custom pad with (primitives (gr_poly …)) in pad-local coords
+- Inflates the emitted F.CrtYd courtyard by BBOX_MARGIN_MM so KiCad matches the placement page's drawn courtyard
 
 ## bom
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const ast = @import("sexpr/ast.zig");
 const parser_mod = @import("sexpr/parser.zig");
+const geometry = @import("placement/geometry.zig");
 
 /// Error set for footprint emission helpers — covers the parse step on the
 /// project source and the allocator failures from string formatting, plus
@@ -399,6 +400,13 @@ fn emitKicadCustomPad(
 
 fn emitKicadCourtyard(w: anytype, node: ast.Node) !void {
     const children = node.asList() orelse return;
+    // The placement page draws each part's courtyard as `geometry.load`'s
+    // half-extents, which add `BBOX_MARGIN_MM` (a placement air-gap) on every
+    // side. KiCad's F.CrtYd is meant to match that *displayed* courtyard, so we
+    // inflate the raw rect/circle by the same margin here. The rect uses the
+    // page's origin-centred max-abs convention (`parseRectExt`) so the emitted
+    // box is identical to what the tool renders.
+    const M = geometry.BBOX_MARGIN_MM;
     // (courtyard (rect X1 Y1 X2 Y2)) and (courtyard (circle (CX CY) R))
     for (children[1..]) |child| {
         if (child.isForm("rect")) {
@@ -408,7 +416,9 @@ fn emitKicadCourtyard(w: anytype, node: ast.Node) !void {
                 const y1 = cl[2].asNumber() orelse 0;
                 const x2 = cl[3].asNumber() orelse 0;
                 const y2 = cl[4].asNumber() orelse 0;
-                try w.print("  (fp_rect (start {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ x1, y1, x2, y2 });
+                const hw = @max(@abs(x1), @abs(x2)) + M;
+                const hh = @max(@abs(y1), @abs(y2)) + M;
+                try w.print("  (fp_rect (start {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ -hw, -hh, hw, hh });
                 try w.writeAll("    (stroke (width 0.05) (type default))\n");
                 try w.writeAll(KICAD_FILL_NONE);
                 try w.writeAll("    (layer \"F.CrtYd\")\n");
@@ -421,7 +431,7 @@ fn emitKicadCourtyard(w: anytype, node: ast.Node) !void {
             if (center.len < 2) continue;
             const cx = center[0].asNumber() orelse continue;
             const cy = center[1].asNumber() orelse continue;
-            const r = cl[2].asNumber() orelse continue;
+            const r = (cl[2].asNumber() orelse continue) + M;
             try w.print("  (fp_circle (center {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ cx, cy, cx + r, cy });
             try w.writeAll("    (stroke (width 0.05) (type default))\n");
             try w.writeAll(KICAD_FILL_NONE);
@@ -692,6 +702,20 @@ test "exportFootprintMod emits fab geometry on F.Fab and keeps silkscreen on F.S
     try std.testing.expect(std.mem.indexOf(u8, out, "(fp_circle (center 0.00 0.00) (end 0.50 0.00)") != null);
     // Silkscreen still routes to F.SilkS — fab emission must not displace it.
     try std.testing.expect(std.mem.indexOf(u8, out, "(layer \"F.SilkS\")") != null);
+}
+
+test "exportFootprintMod inflates the F.CrtYd courtyard by the placement margin" {
+    // spec: export_kicad - Inflates the emitted F.CrtYd courtyard by BBOX_MARGIN_MM so KiCad matches the placement page's drawn courtyard
+    const src =
+        \\(footprint "T"
+        \\  (pad 1 smd rect (pos 0 0) (size 1 1))
+        \\  (courtyard (rect -0.85 -0.45 0.85 0.45)))
+    ;
+    const out = try exportFootprintMod(std.testing.allocator, src, null, null, null);
+    defer std.testing.allocator.free(out);
+    // Raw rect is ±0.85/±0.45; +0.15/side → ±1.00/±0.60 on F.CrtYd.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(fp_rect (start -1.00 -0.60) (end 1.00 0.60)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(layer \"F.CrtYd\")") != null);
 }
 
 test "exportFootprintMod emits silkscreen poly + rect (pin-1 markers must not be dropped)" {
