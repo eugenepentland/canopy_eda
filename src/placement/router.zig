@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const optimizer = @import("optimizer.zig");
+const pad_shape = @import("pad_shape.zig");
 const export_kicad = @import("../export_kicad.zig");
 
 const Part = optimizer.Part;
@@ -31,8 +32,10 @@ pub const RouteParams = struct {
     via_dia: f64 = 0.4,
 };
 
-/// A pad as a routing obstacle: its world rect and the net it belongs to.
-pub const PadObs = struct { x0: f64, y0: f64, x1: f64, y1: f64, net: i32 };
+/// A pad as a routing obstacle: its world bounding box, its real copper outline
+/// (`poly`; empty ⇒ the box is exact) and the net it belongs to. The maze pass
+/// rasterises the box; the clearance checks measure against the outline.
+pub const PadObs = struct { x0: f64, y0: f64, x1: f64, y1: f64, poly: []const [2]f64 = &.{}, net: i32 };
 
 /// A routed copper segment. `layer` 0 = top, 1 = bottom signal. `net` is the
 /// flattened-net index it carries (for the design-rule check).
@@ -356,14 +359,11 @@ fn buildObstacles(arena: std.mem.Allocator, parts: []const Part, nets: []const F
     }
     var obs: std.ArrayListUnmanaged(PadObs) = .empty;
     for (parts) |part| {
-        const q = @mod(@round(part.rot), 360);
         for (part.pads) |pad| {
-            const c = optimizer.worldPadCenter(part, pad.x, pad.y);
-            const hw = if (q == 90 or q == 270) pad.h / 2 else pad.w / 2;
-            const hh = if (q == 90 or q == 270) pad.w / 2 else pad.h / 2;
+            const sh = try pad_shape.worldShape(arena, part, pad);
             const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ part.ref_des, pad.number });
             const net = pin_net.get(key) orelse -1;
-            try obs.append(arena, .{ .x0 = c[0] - hw, .y0 = c[1] - hh, .x1 = c[0] + hw, .y1 = c[1] + hh, .net = net });
+            try obs.append(arena, .{ .x0 = sh.x0, .y0 = sh.y0, .x1 = sh.x1, .y1 = sh.y1, .poly = sh.poly, .net = net });
         }
     }
     return obs.toOwnedSlice(arena);
@@ -415,13 +415,6 @@ fn viaR(params: RouteParams) f64 {
     return params.via_dia / 2;
 }
 
-/// Point→axis-aligned-rect distance from raw corner coords (0 if inside).
-fn distPtRect(px: f64, py: f64, x0: f64, y0: f64, x1: f64, y1: f64) f64 {
-    const dx = @max(@max(x0 - px, px - x1), 0);
-    const dy = @max(@max(y0 - py, py - y1), 0);
-    return @sqrt(dx * dx + dy * dy);
-}
-
 /// Shortest distance from point (px,py) to segment (ax,ay)→(bx,by).
 fn segPointDist(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) f64 {
     const dx = bx - ax;
@@ -438,7 +431,7 @@ fn viaClearsPads(ctx: *Ctx, x: f64, y: f64, net: i32) bool {
     const need = viaR(ctx.params) + ctx.params.clearance;
     for (ctx.obs) |p| {
         if (p.net == net) continue;
-        if (distPtRect(x, y, p.x0, p.y0, p.x1, p.y1) < need - 1e-9) return false;
+        if (pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, x, y, need) < need - 1e-9) return false;
     }
     return true;
 }
@@ -488,7 +481,7 @@ fn ptClearsPads(ctx: *Ctx, p: [2]f64, net: i32) bool {
     const need = ctx.params.track_width / 2 + ctx.params.clearance;
     for (ctx.obs) |o| {
         if (o.net == net) continue;
-        if (distPtRect(p[0], p[1], o.x0, o.y0, o.x1, o.y1) < need - 1e-9) return false;
+        if (pad_shape.pointDist(o.x0, o.y0, o.x1, o.y1, o.poly, p[0], p[1], need) < need - 1e-9) return false;
     }
     return true;
 }
@@ -527,7 +520,7 @@ fn trimStub(ctx: *Ctx, placed: []const Via, a: [2]f64, b: [2]f64, net: i32) [2]f
         var ok = true;
         for (ctx.obs) |o| {
             if (o.net == net) continue;
-            if (distPtRect(p[0], p[1], o.x0, o.y0, o.x1, o.y1) < need) {
+            if (pad_shape.pointDist(o.x0, o.y0, o.x1, o.y1, o.poly, p[0], p[1], need) < need) {
                 ok = false;
                 break;
             }

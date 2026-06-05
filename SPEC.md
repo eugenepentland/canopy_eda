@@ -123,6 +123,14 @@ Public functions: load, isGroundFn
 - groundy function names are recognised, straps are not
 - electrical type overrides the name heuristic; signal types demote to strap
 
+## placement/pad_shape
+
+Public functions: worldShape, pointDist, shapeGap
+
+- a concave pad's notch reads as clear copper, its prong as covered
+- shapeGap clears a pad nested in a concave neighbour's notch
+- simplifies a dense outline to a few corners within tolerance
+
 ## eval/builtins
 
 - Evaluates arithmetic operations on numeric values

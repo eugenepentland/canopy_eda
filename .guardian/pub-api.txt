@@ -394,6 +394,10 @@ src/placement/optimizer.zig::placeFromPoses fn
 src/placement/optimizer.zig::scorePoses fn
 src/placement/optimizer.zig::solve fn
 src/placement/optimizer.zig::worldPadCenter fn
+src/placement/pad_shape.zig::Shape struct_
+src/placement/pad_shape.zig::pointDist fn
+src/placement/pad_shape.zig::shapeGap fn
+src/placement/pad_shape.zig::worldShape fn
 src/placement/pin_roles.zig::PartRoles struct_
 src/placement/pin_roles.zig::PinClass enum_
 src/placement/pin_roles.zig::isGroundFn fn
