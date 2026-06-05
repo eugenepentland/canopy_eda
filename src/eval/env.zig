@@ -675,6 +675,14 @@ pub const Instance = struct {
     placeholder: bool = false,
 };
 
+/// True when `component` names a test point (`testpoint` or `testpoint-*`).
+/// Test points are excluded from BOM/coverage/assembly tallies, so review,
+/// coverage, and the BOM HTML all need this one classification rule.
+pub fn isTestPoint(component: []const u8) bool {
+    return std.mem.eql(u8, component, "testpoint") or
+        std.mem.startsWith(u8, component, "testpoint-");
+}
+
 /// A sub-block reference.
 pub const SubBlock = struct {
     name: []const u8,

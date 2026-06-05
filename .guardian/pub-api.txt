@@ -196,6 +196,7 @@ src/eval/env.zig::TestPointTag enum_
 src/eval/env.zig::Value value
 src/eval/env.zig::Verification struct_
 src/eval/env.zig::containsString fn
+src/eval/env.zig::isTestPoint fn
 src/eval/env.zig::parseCheck fn
 src/eval/env.zig::parseNoteRef fn
 src/eval/env.zig::requirementIdForText fn

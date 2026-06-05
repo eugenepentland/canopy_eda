@@ -343,7 +343,7 @@ fn collectTestPoints(
     out: *std.ArrayListUnmanaged(TestPointEntry),
 ) !void {
     for (block.instances) |inst| {
-        if (!isTestPoint(inst)) continue;
+        if (!env_mod.isTestPoint(inst.component)) continue;
         const net = findPin1Net(block, inst.ref_des);
         const purpose = findNoteFor(block.notes, inst.ref_des);
         try out.append(allocator, .{
@@ -353,11 +353,6 @@ fn collectTestPoints(
         });
     }
     for (block.sub_blocks) |sb| try collectTestPoints(allocator, sb.block, out);
-}
-
-fn isTestPoint(inst: Instance) bool {
-    return std.mem.eql(u8, inst.component, "testpoint") or
-        std.mem.startsWith(u8, inst.component, "testpoint-");
 }
 
 fn findPin1Net(block: *const DesignBlock, ref_des: []const u8) []const u8 {
@@ -466,7 +461,7 @@ fn collectCriticalCoverage(
 ) !void {
     for (block.instances) |inst| {
         if (!isCriticalRefDes(inst.ref_des)) continue;
-        if (isTestPoint(inst)) continue;
+        if (env_mod.isTestPoint(inst.component)) continue;
         if (inst.requirements_ignored) continue;
         total.* += 1;
         if (inst.requirements.len > 0) {
@@ -519,7 +514,7 @@ fn collectMpnCoverage(
     missing: *std.ArrayListUnmanaged(MissingMpn),
 ) std.mem.Allocator.Error!void {
     for (block.instances) |inst| {
-        if (isTestPoint(inst)) continue;
+        if (env_mod.isTestPoint(inst.component)) continue;
         total.* += 1;
         var has_mpn = false;
         for (inst.properties) |p| {
