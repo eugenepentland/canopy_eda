@@ -1522,6 +1522,69 @@ test "computeSubBlockAttachments keeps a power producer out of a consuming secti
     try std.testing.expectEqual(@as(?usize, 1), attachments[1]);
 }
 
+/// Count how many of a spoke's synthesized hub attachments land on `hub_ref`,
+/// and report (via `anchored`) whether one of them is `want_pin`. Test helper
+/// for the single-pin-side anchor behaviour.
+fn countHubAttachments(adj: []const ctx_mod.AdjEntry, hub_ref: []const u8, want_pin: []const u8, anchored: *bool) usize {
+    var n: usize = 0;
+    for (adj) |ae| switch (ae.endpoint) {
+        .pin => |p| {
+            if (!std.mem.eql(u8, p.ref_des, hub_ref)) continue;
+            n += 1;
+            if (std.mem.eql(u8, p.pin, want_pin)) anchored.* = true;
+        },
+        .net => {},
+    };
+    return n;
+}
+
+// spec: render_html - A passive bridging a single-hub-pin net and a multi-hub-pin net renders off its single-pin side
+// spec: render_html - A passive bridging two single-hub-pin nets has no anchor and keeps default placement
+test "single-pin-side passive anchors to its lone hub pin, not the busy rail" {
+    // R1 (a 10k pull-up) bridges a lone signal pin (U1.1, net SIG) and the VDD
+    // rail (U1.2/3/4). It must render off the single SIG pin — i.e. be attached
+    // only to U1.1, never the busy VDD pins. R2 is a control: it bridges two
+    // lone-hub nets (symmetric), so it gets no anchor and keeps default placement.
+    const insts = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "R1", .component = "res", .value = "10k", .footprint = "", .symbol = "" },
+        .{ .ref_des = "R2", .component = "res", .value = "0R", .footprint = "", .symbol = "" },
+    };
+    const sig_pins = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "R1", .pin = "1" } };
+    const vdd_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "U1", .pin = "3" },
+        .{ .ref_des = "U1", .pin = "4" }, .{ .ref_des = "R1", .pin = "2" },
+    };
+    const a_pins = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "5" }, .{ .ref_des = "R2", .pin = "1" } };
+    const b_pins = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "6" }, .{ .ref_des = "R2", .pin = "2" } };
+    const nets = [_]env_mod.Net{
+        .{ .name = "SIG", .pins = &sig_pins },
+        .{ .name = "VDD", .pins = &vdd_pins },
+        .{ .name = "SIGA", .pins = &a_pins },
+        .{ .name = "SIGB", .pins = &b_pins },
+    };
+
+    var block = emptyAttachBlock("anchor-test");
+    block.instances = &insts;
+    block.nets = &nets;
+
+    // RenderCtx never frees (it owns no deinit); an arena keeps the leak
+    // checker happy while still exercising the real allocator paths.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx = try setupRenderCtx(arena.allocator(), &block);
+
+    // R1 anchors to its single-pin side; the symmetric R2 does not.
+    try std.testing.expectEqualStrings("SIG", ctx.spoke_anchor_net.get("R1").?);
+    try std.testing.expect(ctx.spoke_anchor_net.get("R2") == null);
+
+    // R1's only synthesized hub attachment is U1.1 — the VDD pins are suppressed.
+    var anchored_to_sig_pin = false;
+    const hub_attachments = countHubAttachments(ctx.adjacency.get("R1").?.items, "U1", "1", &anchored_to_sig_pin);
+    try std.testing.expect(anchored_to_sig_pin);
+    try std.testing.expectEqual(@as(usize, 1), hub_attachments);
+}
+
 /// Fallback rendering for designs that declare instances directly in
 /// `design-block` without any `section` wrapper (e.g. pma3-14ln). Every
 /// hub-prefixed top-level instance becomes its own card inside one synthetic
