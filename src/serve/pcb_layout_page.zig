@@ -20,6 +20,8 @@ const geometry = @import("../placement/geometry.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
 const modules_mod = @import("modules.zig");
+const export_kicad = @import("../export_kicad.zig");
+const export_kicad_footprint = @import("../export_kicad_footprint.zig");
 const review = @import("../review.zig");
 const assets_css = @import("assets_css.zig");
 const pages_tmpl = @import("templates/pages.zig");
@@ -224,7 +226,8 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         try w.print(
             "<nav class=\"viewtoggle\" aria-label=\"View\">" ++
                 "<a href=\"{s}{s}\">Schematic</a>" ++
-                "<a class=\"active\" href=\"/pcb-layout/{s}\">PCB Layout</a></nav>",
+                "<a class=\"active\" id=\"pcb-tab-2d\" href=\"/pcb-layout/{s}\">PCB Layout</a>" ++
+                "<a id=\"pcb-tab-3d\" href=\"#\">3D View</a></nav>",
             .{ schematic_path, name, name },
         );
         try w.writeAll("</div>");
@@ -245,6 +248,9 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         "<svg id=\"pcb-svg\" class=\"pcb-svg\" viewBox=\"0 0 {d:.0} {d:.0}\" width=\"{d:.0}\" height=\"{d:.0}\" xmlns=\"http://www.w3.org/2000/svg\"></svg>",
         .{ view.width, view.height, view.width, view.height },
     );
+    // WebGL 3D-view stage — hidden until the "3D View" tab is opened, then the
+    // body gets `.mode-3d` (CSS swaps the SVG out for this). Built lazily.
+    if (!embed) try w.writeAll(PCB_3D_STAGE_HTML);
     if (!embed) try w.writeAll(COURTYARD_MODAL);
     try w.writeAll("</main>");
     // Right sidebar: the saved-layouts history (manual snapshots + auto-recorded
@@ -263,11 +269,14 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         try w.writeAll("</aside>");
     }
     try w.writeAll("</div>");
-    try writePcbData(w, ctx.allocator, placement, shown, view, name, layouts, routed, ro.params.clearance, violations, embed);
+    try writePcbData(w, ctx.allocator, ctx.project_dir, placement, shown, view, name, layouts, routed, ro.params.clearance, violations, embed);
     // Shared footprint engine (FP.padShape) must load before BOARD_JS runs. Both
     // scripts come after every column so the handlers find the elements they wire.
     try w.writeAll("<script src=\"/static/footprint_svg.js\"></script>");
     try w.writeAll(BOARD_JS);
+    // 3D-view tab wiring — lazy-loads the WebGL stack on first open. Omitted in
+    // the read-only embedded preview (no toggle there).
+    if (!embed) try w.writeAll(PCB_3D_TOGGLE_JS);
     try w.writeAll("</body></html>");
 
     res.content_type = .HTML;
@@ -1829,6 +1838,7 @@ fn writeViaDropJson(w: *std.Io.Writer, p: ?LocalPt) std.Io.Writer.Error!void {
 fn writePcbData(
     w: *std.Io.Writer,
     alloc: std.mem.Allocator,
+    project_dir: []const u8,
     p: optimizer.Placement,
     params: optimizer.Params,
     v: View,
@@ -2000,7 +2010,57 @@ fn writePcbData(
     // Routed copper + DRC markers — emitted in the same shape the
     // /api/pcb-route endpoint returns so drawRoute/drawClr/drawDrc read either.
     try writeRoutedArrays(w, routed, violations);
+
+    // Per-footprint STEP-model references (URL + KiCad offset/rotation) for the
+    // 3D-view tab. Only the full page needs it; the embedded preview has no 3D
+    // toggle, so it skips the (filesystem-scanning) model resolution entirely.
+    try w.writeAll(",\"models\":");
+    if (embed) {
+        try w.writeAll("{}");
+    } else {
+        try writeModelsJson(w, alloc, project_dir, p.instances);
+    }
     try w.writeAll("};</script>");
+}
+
+/// Emit `{ "<footprint>": {"o":[x,y,z],"r":[x,y,z]} }` for every distinct
+/// footprint in the design that resolves to a STEP model — the KiCad offset/
+/// rotation the 3D-view tab orients each part body with (it fetches the bytes
+/// from `/api/model-file/<fp>`, keyed on the map entry). Footprints with no
+/// model are omitted (the viewer shows their pads only).
+fn writeModelsJson(
+    w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    instances: []const export_kicad.FlatInstance,
+) HandlerError!void {
+    const cfg = export_kicad.loadModelConfig(alloc, project_dir);
+    var seen = std.StringHashMap(void).init(alloc);
+    try w.writeByte('{');
+    var first = true;
+    for (instances) |inst| {
+        const fp = inst.footprint;
+        if (fp.len == 0) continue;
+        if (seen.contains(fp)) continue;
+        try seen.put(fp, {});
+        const tf = cfg.get(fp);
+        // Resolve the STEP model the same way the KiCad export / footprint
+        // viewer do: an explicit `model` override wins, else a filesystem
+        // match. Skip footprints with no model — the 3D view shows pads only.
+        const has_model = (if (tf) |t| t.model != null else false) or
+            export_kicad_footprint.findModelFile(alloc, project_dir, fp, fp) != null;
+        if (!has_model) continue;
+        const off = if (tf) |t| t.offset else [3]f64{ 0, 0, 0 };
+        const rot = if (tf) |t| t.rotation else [3]f64{ 0, 0, 0 };
+        if (!first) try w.writeByte(',');
+        first = false;
+        try writeJsonStr(w, fp);
+        try w.print(
+            ":{{\"o\":[{d},{d},{d}],\"r\":[{d},{d},{d}]}}",
+            .{ off[0], off[1], off[2], rot[0], rot[1], rot[2] },
+        );
+    }
+    try w.writeByte('}');
 }
 
 /// Emit `"tracks":[…],"vias":[…],"drc":[…]` (world mm; track layer 0=top,
@@ -2323,6 +2383,22 @@ const PAGE_CSS =
     \\  border-radius:5px;padding:4px 11px;cursor:pointer;color:#c9d1d9}
     \\.court-dialog .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
     \\.court-dialog .btn:disabled{opacity:.45;cursor:default}
+    \\.pcb-3d-stage{display:none;position:relative;width:100%;height:calc(100vh - 150px);min-height:460px;
+    \\  background:#010409;border:1px solid #30363d;border-radius:8px;overflow:hidden}
+    \\body.mode-3d .pcb-3d-stage{display:block}
+    \\.pcb-3d-stage canvas{display:block;width:100%;height:100%;touch-action:none}
+    \\#pcb-3d-status{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#8b949e;
+    \\  font-size:13px;background:rgba(13,17,23,.8);padding:6px 12px;border-radius:6px}
+    \\#pcb-3d-status.err{color:#f85149}
+    \\.pcb-3d-tools{position:absolute;top:10px;right:10px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;
+    \\  background:rgba(22,27,34,.85);border:1px solid #30363d;border-radius:6px;padding:5px 8px;font-size:12px;color:#8b949e}
+    \\.pcb-3d-tools .btn{font:inherit;font-size:12px;border:1px solid #30363d;background:#21262d;border-radius:5px;
+    \\  padding:3px 9px;cursor:pointer;color:#c9d1d9}
+    \\.pcb-3d-tools .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
+    \\.pcb-3d-tools label{display:flex;gap:3px;align-items:center;cursor:pointer}
+    \\.pcb-3d-tools .sep{width:1px;height:16px;background:#30363d}
+    \\body.mode-3d .pcb-svg,body.mode-3d .pcb-tune,body.mode-3d .pcb-route,
+    \\body.mode-3d .pcb-legend,body.mode-3d .pcb-note,body.mode-3d .pcb-bar{display:none}
 ;
 
 /// Extra rules layered on top of PAGE_CSS only when `?embed=1` — the body gets
@@ -2334,6 +2410,65 @@ const EMBED_CSS =
     \\body.embed .pcb-route{margin:2px 0 6px}
     \\body.embed .pcb-svg{width:100%}
     \\body.embed .part{cursor:default}
+;
+
+/// The (hidden) WebGL stage for the 3D-view tab: a canvas, a status overlay,
+/// and a floating toolbar (camera presets + layer toggles). CSS `.mode-3d`
+/// reveals it and hides the 2D board; `pcb_3d_viewer.js` builds the scene.
+const PCB_3D_STAGE_HTML =
+    \\<div class="pcb-3d-stage" id="pcb-3d-stage">
+    \\<canvas id="pcb-3d-canvas"></canvas>
+    \\<div id="pcb-3d-status">Loading 3D view…</div>
+    \\<div class="pcb-3d-tools">
+    \\<button class="btn" id="pcb3d-iso">Iso</button>
+    \\<button class="btn" id="pcb3d-top">Top</button>
+    \\<button class="btn" id="pcb3d-front">Front</button>
+    \\<button class="btn" id="pcb3d-side">Side</button>
+    \\<span class="sep"></span>
+    \\<label><input type="checkbox" id="pcb3d-t-models" checked>Models</label>
+    \\<label><input type="checkbox" id="pcb3d-t-pads" checked>Pads</label>
+    \\<label><input type="checkbox" id="pcb3d-t-board" checked>Board</label>
+    \\<label><input type="checkbox" id="pcb3d-t-axes" checked>Axes</label>
+    \\</div></div>
+;
+
+/// Tab wiring for the Schematic ⇄ PCB Layout ⇄ 3D View switcher. Toggling to
+/// 3D adds `.mode-3d` (CSS swaps in the stage), then lazily injects the WebGL
+/// stack (Three.js + OrbitControls + occt-import-js) and our viewer before
+/// calling `PCB3D.init()` — so the heavy assets load only when 3D is opened.
+/// The PCB Layout tab flips back to 2D in place (no reload) when 3D is active.
+const PCB_3D_TOGGLE_JS =
+    \\<script>(function(){
+    \\var tab3d=document.getElementById("pcb-tab-3d"),tab2d=document.getElementById("pcb-tab-2d");
+    \\if(!tab3d||!tab2d)return;
+    \\var loaded=false,loading=null;
+    \\function loadScript(src){return new Promise(function(res,rej){
+    \\ var s=document.createElement("script");s.src=src;s.onload=res;
+    \\ s.onerror=function(){rej(new Error("load "+src));};document.head.appendChild(s);});}
+    \\function ensure(){
+    \\ if(loaded)return Promise.resolve();
+    \\ if(loading)return loading;
+    \\ var seq=Promise.resolve();
+    \\ ["/static/three.min.js","/static/OrbitControls.js","/static/occt-import-js.js","/static/pcb_3d_viewer.js"]
+    \\  .forEach(function(u){seq=seq.then(function(){return loadScript(u);});});
+    \\ loading=seq.then(function(){loaded=true;});
+    \\ return loading;}
+    \\function show3d(){
+    \\ document.body.classList.add("mode-3d");
+    \\ tab3d.classList.add("active");tab2d.classList.remove("active");
+    \\ ensure().then(function(){
+    \\  if(window.PCB3D){window.PCB3D.init();
+    \\   requestAnimationFrame(function(){window.PCB3D.onShow();});}
+    \\ }).catch(function(e){console.error(e);
+    \\  var st=document.getElementById("pcb-3d-status");
+    \\  if(st){st.textContent="3D assets failed to load";st.className="err";}});}
+    \\function show2d(){
+    \\ document.body.classList.remove("mode-3d");
+    \\ tab2d.classList.add("active");tab3d.classList.remove("active");}
+    \\tab3d.addEventListener("click",function(e){e.preventDefault();show3d();});
+    \\tab2d.addEventListener("click",function(e){
+    \\ if(document.body.classList.contains("mode-3d")){e.preventDefault();show2d();}});
+    \\})();</script>
 ;
 
 const BOARD_JS =
