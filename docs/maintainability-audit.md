@@ -4,7 +4,7 @@ _A survey of redundancies to remove, code to simplify, and structural improvemen
 
 ## Executive summary
 
-The codebase is in genuinely good shape. The health signals are strong: only 7 TODO markers (all legitimate "design-note" references, not debt), ~10 lines of commented-out code, **no orphaned test files** (every one of the 70 test-bearing files is reachable from `main.zig`'s import closure, so `zig build test` runs them all), and Guardian's file/function-size caps are holding. The two output layers that looked most duplication-prone on inspection — the review emitters and the KiCad/`.sexp` emitters — turned out to be **correctly factored** (shared model, format-specific serializers), so the big risky merge is *not* warranted.
+The codebase is in genuinely good shape. The health signals are strong: only 7 TODO markers (all legitimate "design-note" references, not debt), ~10 lines of commented-out code, **no orphaned test files** among existing code (every one of the 70 test-bearing files is reachable from `main.zig`'s import closure, so `zig build test` runs them — but note the caveat in *Implementation status*: a **newly added** file's tests are silently skipped until it's listed in `main.zig`'s `test {}` block), and Guardian's file/function-size caps are holding. The two output layers that looked most duplication-prone on inspection — the review emitters and the KiCad/`.sexp` emitters — turned out to be **correctly factored** (shared model, format-specific serializers), so the big risky merge is *not* warranted.
 
 The real opportunities are concentrated in four themes:
 
@@ -12,6 +12,23 @@ The real opportunities are concentrated in four themes:
 2. **The SVG↔JSON scene-graph emitters** — `render_json.zig` is a structural clone of the `render_svg/*` pipeline; every layout change must be made twice. This is the single largest lockstep-edit surface.
 3. **Accumulated dead code** behind Zig's silence on unused file-scope decls — whole rendering paths, abandoned-approach residue, stranded constants/aliases. All grep-confirmed zero-caller.
 4. **A few stale/contradictory metadata items** — comments and an arity schema that disagree with the code (and, in one case, with generated docs).
+
+---
+
+## Implementation status (branch `claude/intelligent-mendel-5e22aa`)
+
+**Done (4 commits, net −1044 lines of source, `zig build test` green, Guardian snapshots refreshed):**
+
+- ✅ **All dead-code deletions** from the "Quick wins" list below — `render_json.zig` port-block path, the abandoned `aux_pads` cluster in `placement/optimizer.zig` (~85 lines), `serve/sync.zig` dead tail, `render_svg/hub.zig` stranded aliases/constants, `serve/edit.zig` (`parseJsonFloat`, `designBomPath`), `render_svg/context.zig` `collectSubBlockAsHub`, `render_svg/draw.zig` `compactPinNumbers`, `render_svg/connection.zig` dead-store, `serve/mcp.zig` `errorEnvelopeRawId` + JSONRPC `*_ABS`, plus a ~189-line dead cluster in `review_html.zig` (`writeSections` → `writeBoundaryContracts` → `writeVoltCell` + `writeUrlEncoded`). Stale SPEC.md/comment references cleaned up alongside.
+- ✅ **Auth-store consolidation** — `ensureAuthDir` (×4) and `sha256Hex` (×2) hoisted into a new shared `serve/auth_store.zig`. Found and fixed a **silently-skipped test** in the process (the new module wasn't in `main.zig`'s `test {}` block; test count 329 → 330).
+- ✅ **`isTestPoint` (×3) → `eval/env.zig`** — removed a triplicated classification rule (one copy existed only to dodge a serve→review cyclic import; the shared `env.zig` home eliminates that).
+
+**Corrections discovered during implementation (the original survey was wrong on these):**
+
+- ❌ **Test-aggregator gap is NOT real** — but the *mechanism* is. Verified the import-graph closure: all test-bearing files were reachable **except** brand-new files. Adding `serve/auth_store.zig` proved tests in a freshly-added, normally-imported file are silently skipped until the file is `_ = @import`-ed in `main.zig`'s `test {}` block. So: existing tests all run, but **every new test file must be added to that block** or it's invisible to `zig build test`.
+- ⚠️ **The HTML/JSON escaper consolidation is riskier than it looked.** Two traps: (1) `diagram/render.zig` and `pcb_layout_page.zig` define functions *named* `writeEscaped` that are **HTML** escapers (`&lt;`/`&gt;`), not JSON — routing them through `json_writer` would corrupt rendering; (2) the `*std.Io.Writer`-based emitters can't call `json_writer.writeEscaped` as-is because its `WriteError` (= `Allocator.Error`) is incompatible with `std.Io.Writer.Error` — that incompatibility is *why* the copies exist. Consolidating requires first making `json_writer`'s helpers return an inferred error set (`!void`). Deferred — see remaining items.
+
+**Remaining (lower-leverage; not done):** the `writeViolationJson`/`writeNoteJson`/`containsCI`/`baseNetName` hoists, the JSON-escaper unification (needs the `json_writer` error-set change above), `warnResolveIdentities` (×3 — skipped: its only sensible home, `bom.zig`, is a pure library and the helper is serve-layer logging glue), the `component_info.zig`↔`design_doc.zig` overlap, and all of the **Larger refactors** (render-emitter unification, arity-schema reconcile, dead `(function …)` form) — those remain "do deliberately" items.
 
 ---
 
