@@ -79,11 +79,6 @@ const MULTISTART_MAX_PARTS: usize = 32; // above this, single start (bound O(n²
 // grid-seed + one relax — i.e. looked unplaced. Keep the expensive multi-start
 // gated at MULTISTART_MAX_PARTS; let the finishing passes run up to here.
 const POLISH_MAX_PARTS: usize = 64;
-// Real routed-trace loop scoring maze-routes every decoupling loop — accurate
-// but superlinear in board size (a 223-part board takes minutes). Above this
-// part count the *displayed* score keeps the continuous fixed-pad surrogate the
-// optimizer already minimised, so large boards still load in well under a second.
-const ROUTED_SCORE_MAX_PARTS: usize = 48;
 const POLISH_SWEEPS: usize = 4; // greedy per-part tightening sweeps
 const POLISH_CELLS: i64 = 6; // half-window (grid cells) the polish search scans
 // Tighter polish window for the single-start band above MULTISTART_MAX_PARTS:
@@ -99,8 +94,7 @@ const POLISH_CELLS_LARGE: i64 = 3;
 const ROUTED_POLISH_SWEEPS: usize = 2;
 const ROUTED_POLISH_CELLS: i64 = 3; // ±0.6 mm window — local tuck/flip, not a re-place
 // Routed polish routes once per candidate cell, so its cost grows with
-// caps × window × loops. Cap it well below `ROUTED_SCORE_MAX_PARTS` (which only
-// gates a single end-of-solve route) so a mid-size module can't make an
+// caps × window × loops. Keep it small so a mid-size module can't make an
 // on-demand regenerate take tens of seconds. Small power modules — the case this
 // helps most — sit comfortably under it.
 const ROUTED_POLISH_MAX_PARTS: usize = 16;
@@ -453,16 +447,15 @@ pub fn solve(
         tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
     }
 
-    // Headline score's loop length: the *real* routed-trace sum on interactive
-    // boards, the fixed-pad surrogate above ROUTED_SCORE_MAX_PARTS (the router is
-    // too slow on big boards to run on every load). `scoreLayout` already left
-    // the surrogate in `score.loop_mm`; the router overrides it when affordable.
-    var score = scoreLayout(parts, &prep.idx_of, nets, built.loops);
-    const lsum = if (parts.len <= ROUTED_SCORE_MAX_PARTS) blk: {
-        const routed = routedLoops(arena, parts, &prep.idx_of, nets, built.loops);
-        score.loop_mm = routed.raw_mm;
-        break :blk routed;
-    } else surrogateLoops(parts, built.loops);
+    // Headline + objective loop term: the smooth analytic fixed-pad surrogate
+    // (`surrogateLoops`) — the same continuous metric the inner objective already
+    // minimises. The real maze-routed trace is deliberately NOT scored here: re-
+    // routing from scratch per pose makes the score a jagged, bistable function of
+    // position (a 0.05 mm nudge can flip a leg routable↔unroutable and swing the
+    // objective by tens of units — see `src/fuzz_layout.zig`). Routing is a
+    // separate explicit action that draws real copper, not the placement score.
+    const score = scoreLayout(parts, &prep.idx_of, nets, built.loops);
+    const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     return finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, generated);
 }
@@ -482,12 +475,11 @@ pub fn scorePoses(
 ) std.mem.Allocator.Error!Breakdown {
     var prep = try prepare(arena, block, project_dir, params);
     _ = applyCached(prep.parts, poses);
-    var score = scoreLayout(prep.parts, &prep.idx_of, prep.nets, prep.built.loops);
-    const lsum = if (prep.parts.len <= ROUTED_SCORE_MAX_PARTS) blk: {
-        const routed = routedLoops(arena, prep.parts, &prep.idx_of, prep.nets, prep.built.loops);
-        score.loop_mm = routed.raw_mm;
-        break :blk routed;
-    } else surrogateLoops(prep.parts, prep.built.loops);
+    // Score the loop term with the smooth analytic surrogate — never the maze
+    // router — so the drag-to-score the page issues on every pointer move is a
+    // continuous function of position (see `solve`).
+    const score = scoreLayout(prep.parts, &prep.idx_of, prep.nets, prep.built.loops);
+    const lsum = surrogateLoops(prep.parts, prep.built.loops);
     return breakdownWith(prep.parts, &prep.idx_of, prep.nets, params, score, lsum);
 }
 
@@ -638,9 +630,10 @@ fn prepare(
 }
 
 /// Decompose the objective for already-placed parts, surfaced term-by-term for
-/// the score export. `lsum` is supplied by the caller — the real routed-trace
-/// sums on the score path, the surrogate above ROUTED_SCORE_MAX_PARTS — and the
-/// objective is rebuilt from its inductance term, so the headline matches.
+/// the score export. `lsum` is supplied by the caller — the analytic fixed-pad
+/// surrogate (`surrogateLoops`) on the score path, so the reported objective is
+/// the same smooth metric the optimizer minimises — and the objective is rebuilt
+/// from its inductance term, so the headline matches.
 fn breakdownWith(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet, params: Params, score: Score, lsum: LoopSums) Breakdown {
     // `al` is the *active* compactness term (what the objective minimizes);
     // `footprint` is always the courtyard bbox area — the universal yardstick the
@@ -663,12 +656,15 @@ fn breakdownWith(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: [
     };
 }
 
-/// Real routed-trace loop sums (raw + value-weighted) via the maze router — the
-/// **score path only**, never the inner loop. Builds one grid over the placement,
-/// then routes each loop's power leg as actual copper (cap pad → its pinned hub
-/// pin) detouring foreign pads; the cap span + ground return (`loopGroundSpan`)
-/// add the rest of the physical loop. Falls back to the analytic surrogate when a
-/// leg is unroutable or the board is too large to grid, so a score is always produced.
+/// Real routed-trace loop sums (raw + value-weighted) via the maze router — used
+/// **only by the routed finishing passes** (`routedObjectiveCost` →
+/// `rerankSolve`/`routedPolish`), never the reported score (which is the smooth
+/// surrogate — re-routing per pose makes it jagged) and never the inner relax.
+/// Builds one grid over the placement, then routes each loop's power leg as actual
+/// copper (cap pad → its pinned hub pin) detouring foreign pads; the cap span +
+/// ground return (`loopGroundSpan`) add the rest of the physical loop. Falls back
+/// to the analytic surrogate when a leg is unroutable or the board is too large to
+/// grid, so a value is always produced.
 fn routedLoops(
     arena: std.mem.Allocator,
     parts: []const Part,
@@ -1885,19 +1881,6 @@ fn nearestHubPad(cr: Rect, hub: Part, hub_pads: []const PadRect) struct { rect: 
     return .{ .rect = best, .gap = best_gap };
 }
 
-/// Detour cost added to a loop leg whose straight trace is blocked by a pad —
-/// a crude stand-in for "you'd have to route around (or via past) this". Kept
-/// in sync with the page (emitted as `blockPen`).
-pub const BLOCK_PENALTY_MM: f64 = 5.0;
-
-/// Chord length (mm a loop leg cuts through an obstacle pad) at which the block
-/// penalty reaches its full `BLOCK_PENALTY_MM`. Ramping the penalty over this —
-/// rather than a hard in/out toggle — keeps the loop term *continuous* as a cap
-/// slides past a pad. A binary toggle put `5 mm × loop_w × weight` (up to ~45)
-/// cliffs into the objective over a single 0.2 mm step, which read as erratic
-/// scoring and trapped the placer; the ramp turns each cliff into a slope.
-const BLOCK_RAMP_MM: f64 = 1.0;
-
 /// Top signal layer → GND plane (L1→L2) spacing in mm. The decoupling loop's
 /// ground return drops from the cap's GND pad through a via to the plane, runs
 /// laterally in the plane, and rises through a via at the IC's GND pad — so the
@@ -1916,70 +1899,6 @@ const UNROUTABLE_PENALTY_MM: f64 = 10.0;
 /// caps tightest. Unranked caps (rank 0) keep their value weight.
 const PRIORITY_STEP: f64 = 0.5;
 
-/// Length of segment a→b that lies inside axis-aligned rect `r` (0 if it misses
-/// or only grazes an edge). Liang–Barsky clip: the clipped parameter span
-/// `t1 − t0` times the segment length. Drives the *continuous* block penalty —
-/// the deeper a loop leg cuts a pad, the worse, with no in/out cliff.
-fn segRectChord(a: Pt, b: Pt, r: Rect) f64 {
-    var t0: f64 = 0;
-    var t1: f64 = 1;
-    const p = [_]f64{ a.x - b.x, b.x - a.x, a.y - b.y, b.y - a.y };
-    const q = [_]f64{ a.x - r.x0, r.x1 - a.x, a.y - r.y0, r.y1 - a.y };
-    for (0..4) |i| {
-        if (p[i] == 0) {
-            if (q[i] < 0) return 0;
-        } else {
-            const t = q[i] / p[i];
-            if (p[i] < 0) {
-                if (t > t1) return 0;
-                if (t > t0) t0 = t;
-            } else {
-                if (t < t0) return 0;
-                if (t < t1) t1 = t;
-            }
-        }
-    }
-    if (t1 <= t0) return 0;
-    return (t1 - t0) * std.math.hypot(b.x - a.x, b.y - a.y);
-}
-
-fn rectsClose(a: Rect, b: Rect) bool {
-    return @abs(a.x0 - b.x0) < 1e-6 and @abs(a.y0 - b.y0) < 1e-6 and
-        @abs(a.x1 - b.x1) < 1e-6 and @abs(a.y1 - b.y1) < 1e-6;
-}
-
-/// Deepest cut (mm) the straight trace a→b makes through any pad other than the
-/// cap's own (`cap_idx`) or the `target` it connects to — 0 when the leg is
-/// cleanly routable. Obstacles are inset slightly so running along an edge is
-/// free. Drives the continuous block penalty in `nearestReachable`.
-fn legPenetration(parts: []const Part, cap_idx: usize, a: Pt, b: Pt, target: Rect) f64 {
-    const eps = 0.02;
-    var worst: f64 = 0;
-    for (parts, 0..) |part, pi| {
-        if (pi == cap_idx) continue;
-        for (part.pads) |pad| {
-            const r0 = worldRect(part, .{ .x = pad.x, .y = pad.y, .w = pad.w, .h = pad.h });
-            if (rectsClose(r0, target)) continue;
-            const r = Rect{ .x0 = r0.x0 + eps, .y0 = r0.y0 + eps, .x1 = r0.x1 - eps, .y1 = r0.y1 - eps };
-            if (r.x1 <= r.x0 or r.y1 <= r.y0) continue;
-            worst = @max(worst, segRectChord(a, b, r));
-        }
-    }
-    return worst;
-}
-
-/// Surrogate power-leg cost to a loop's *fixed* (pinned) hub pad `target`: the
-/// edge-to-edge gap plus the continuous block-penetration ramp. Unlike
-/// `nearestReachable` there is no argmin over hub pads — the target never flips —
-/// so the cost is continuous in the cap's position (no pin-flip cliffs). This is
-/// the inner-loop stand-in for the real routed trace the score path measures.
-fn fixedReachable(cr: Rect, parts: []const Part, cap_idx: usize, target: Rect) f64 {
-    const np = nearestPoints(cr, target);
-    const chord = legPenetration(parts, cap_idx, np.a, np.b, target);
-    const pen = BLOCK_PENALTY_MM * @min(chord / BLOCK_RAMP_MM, 1.0);
-    return rectGap(cr, target) + pen;
-}
-
 /// Order two pad numbers: numerically when both parse as integers (so "2" < "10"),
 /// else lexicographically (BGA "A1"/"B2"). Picks the default pinned supply pad.
 fn pinLess(a: []const u8, b: []const u8) bool {
@@ -1987,44 +1906,6 @@ fn pinLess(a: []const u8, b: []const u8) bool {
     const bi: ?i64 = std.fmt.parseInt(i64, b, 10) catch null;
     if (ai != null and bi != null) return ai.? < bi.?;
     return std.mem.lessThan(u8, a, b);
-}
-
-/// Nearest *routable* hub pad to cap rect `cr`: edge-to-edge gap plus a detour
-/// penalty when the straight leg is blocked, so the optimizer prefers a pad it
-/// can actually run a clean trace to (and the reported loop reflects reality).
-///
-/// `legBlocked` (a scan over every other pad) is the optimizer's hottest leaf,
-/// so two *exact* prunes skip it for pads that cannot win — the result (min
-/// cost + its rect, first-in-order on ties) is unchanged:
-///   • a pad whose bare gap already ≥ the best cost so far can't improve it,
-///     since the detour penalty only adds (`cost = gap + pen ≥ gap`);
-///   • a pad whose gap exceeds `gmin + BLOCK_PENALTY` can't beat the closest
-///     pad even if that one is blocked, so it's never the minimum.
-/// On a big IC (a dozen-plus ground pads per leg) this drops the per-leg
-/// `legBlocked` count from O(pads) to ~1–2.
-fn nearestReachable(cr: Rect, parts: []const Part, cap_idx: usize, hub_idx: usize, hub_pads: []const PadRect) struct { rect: Rect, gap: f64 } {
-    var gmin: f64 = std.math.inf(f64);
-    for (hub_pads) |pr| gmin = @min(gmin, rectGap(cr, worldRect(parts[hub_idx], pr)));
-    const gcut = gmin + BLOCK_PENALTY_MM;
-
-    var best: f64 = std.math.inf(f64);
-    var best_rect: Rect = cr;
-    for (hub_pads) |pr| {
-        const hr = worldRect(parts[hub_idx], pr);
-        const gap = rectGap(cr, hr);
-        if (gap >= best or gap > gcut) continue; // can't beat the current/closest best
-        const np = nearestPoints(cr, hr);
-        // Continuous detour cost: ramps with how deeply the leg cuts an
-        // obstacle pad, reaching full BLOCK_PENALTY_MM at BLOCK_RAMP_MM chord.
-        const chord = legPenetration(parts, cap_idx, np.a, np.b, hr);
-        const pen = BLOCK_PENALTY_MM * @min(chord / BLOCK_RAMP_MM, 1.0);
-        const cost = gap + pen;
-        if (cost < best) {
-            best = cost;
-            best_rect = hr;
-        }
-    }
-    return .{ .rect = best_rect, .gap = best };
 }
 
 /// True when the part is rotated a quarter turn (its courtyard extents swap).
@@ -2386,19 +2267,24 @@ fn binIndex(f: f64) usize {
 
 /// Hot-loop *inductance* (nH) with each cap's loop scaled by its value-priority
 /// `weight` — so on a multi-cap rail the smaller cap is pulled closest. Uses the
-/// continuous fixed-pad surrogate (no argmin flip); the score path replaces this
-/// with the real routed-trace inductance (see `routedLoops`). This is the loop
-/// term the objective minimizes.
+/// continuous fixed-pad surrogate (no argmin flip) — the same metric the reported
+/// score uses, so the objective the optimizer minimizes and the score the page
+/// shows are one smooth function. (The routed finishing passes additionally probe
+/// the real trace via `routedObjectiveCost`.) This is the loop term the objective
+/// minimizes.
 fn weightedLoop(parts: []const Part, loops: []const Loop) f64 {
     return surrogateLoops(parts, loops).weighted_nh;
 }
 
-/// One loop's surrogate power-leg cost: the fixed-pad gap (+ block ramp) from the
-/// cap's power pad to its pinned hub pin. The rest of the loop (the cap's body
-/// span + the ground return) is added by `loopGroundSpan`.
+/// One loop's surrogate power-leg cost: the straight-line edge-to-edge gap from
+/// the cap's power pad to its pinned hub pin. A pure analytic distance with no
+/// obstacle/detour penalty, so the loop term is a smooth, continuous function of
+/// the cap's position (no chord cliffs as a leg slides past a foreign pad); the
+/// obstacle-aware routed length is measured separately by the finishing passes.
+/// The rest of the loop (the cap's body span + the ground return) is added by
+/// `loopGroundSpan`.
 fn surrogatePwrLeg(parts: []const Part, lp: Loop) f64 {
-    const cap = parts[lp.cap];
-    return fixedReachable(worldRect(cap, lp.cap_pwr), parts, lp.cap, worldRect(parts[lp.hub], lp.hub_pwr_pin));
+    return rectGap(worldRect(parts[lp.cap], lp.cap_pwr), worldRect(parts[lp.hub], lp.hub_pwr_pin));
 }
 
 /// The cap's own pad-to-pad span (its body), edge-to-edge (mm) — the current
@@ -2867,8 +2753,8 @@ fn manhattan(a: Pt, b: Pt) f64 {
 
 /// Signal-net wirelength estimate (`wireScore`) + the decoupling loops' length. The loop term here is
 /// the fixed-pad *surrogate* (power leg to the pinned pin + cap span + ground
-/// return); the score path overrides `loop_mm` with the real routed power-leg
-/// sum (`routedLoops`).
+/// return) — the smooth metric the reported score uses verbatim (no routed
+/// override; the maze router is reserved for the finishing passes, not scoring).
 fn scoreLayout(
     parts: []const Part,
     idx_of: *std.StringHashMap(usize),
@@ -3732,6 +3618,59 @@ test "loopInductanceNh floors at the via inductance and grows with length" {
     // Per-unit-length inductance lands in the physically sane ~0.3–0.7 nH/mm band
     // for a trace over a 0.2 mm-adjacent plane.
     try testing.expect(LOOP_PUL_NH_PER_MM > 0.3 and LOOP_PUL_NH_PER_MM < 0.7);
+}
+
+/// Slide `parts[cap]` by `+dy` for `steps` steps, sampling the scored
+/// (value-weighted) loop inductance each time. Returns the largest single-step
+/// change and the start/end values — the continuity probe the smoothness test
+/// asserts on (kept out of the test body so the test stays assertion-only).
+fn loopStepProbe(parts: []Part, loops: []const Loop, cap: usize, dy: f64, steps: usize) struct { max_step: f64, start: f64, end: f64 } {
+    var prev = surrogateLoops(parts, loops).weighted_nh;
+    const start = prev;
+    var max_step: f64 = 0;
+    var k: usize = 0;
+    while (k < steps) : (k += 1) {
+        parts[cap].y += dy;
+        const nh = surrogateLoops(parts, loops).weighted_nh;
+        max_step = @max(max_step, @abs(nh - prev));
+        prev = nh;
+    }
+    return .{ .max_step = max_step, .start = start, .end = prev };
+}
+
+// spec: placement/optimizer - the scored loop term is the smooth analytic surrogate, continuous in part position (no routing cliffs)
+test "scored loop inductance is continuous as a cap slides toward its pin" {
+    // Hub U1 power pad at (-0.5,-1); cap C1 starts 3 mm below and slides up toward
+    // the pin in fine 0.05 mm steps. The scored loop term (`surrogateLoops`, which
+    // `scoreLayout`/`scorePoses` now report verbatim) must change smoothly — far
+    // below the multi-nH cliffs the maze-routed metric produced when a leg flipped
+    // routable↔unroutable. This continuity is what keeps the drag-to-score and the
+    // optimizer's objective a smooth function of position.
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1.2, .hh = 0.8, .pads = &.{}, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.8, .hh = 0.4, .pads = &.{}, .fallback = false, .x = 0, .y = -3 },
+    };
+    const hub_pwr = [_]PadRect{.{ .x = -0.5, .y = -1, .w = 0.4, .h = 0.4 }};
+    const hub_gnd = [_]PadRect{.{ .x = 0.5, .y = -1, .w = 0.4, .h = 0.4 }};
+    const loops = [_]Loop{.{
+        .cap = 1,
+        .hub = 0,
+        .cap_pwr = .{ .x = -0.5, .y = 0.5, .w = 0.4, .h = 0.4 },
+        .cap_gnd = .{ .x = 0.5, .y = 0.5, .w = 0.4, .h = 0.4 },
+        .hub_pwr = &hub_pwr,
+        .hub_pwr_pin = .{ .x = -0.5, .y = -1, .w = 0.4, .h = 0.4 },
+        .hub_gnd = &hub_gnd,
+        .hub_gnd_pin = .{ .x = 0.5, .y = -1, .w = 0.4, .h = 0.4 },
+    }};
+
+    // 20 × 0.05 mm = 1 mm of travel, staying clear of the hub courtyard.
+    const r = loopStepProbe(&parts, &loops, 1, 0.05, 20);
+    // The surrogate is Lipschitz in distance: a 0.05 mm step moves the inductance
+    // by ~LOOP_PUL_NH_PER_MM·0.05 ≈ 0.025 nH. Bound it well under 0.1 nH — a cliff
+    // the routed metric would blow past by 1-2 orders of magnitude.
+    try testing.expect(r.max_step < 0.1);
+    // And sliding the cap closer to the pin strictly shortened the loop.
+    try testing.expect(r.end < r.start);
 }
 
 // spec: placement/optimizer - input-rail names (and raw rails ≥7V) read as the switching hot loop; output/low rails do not
