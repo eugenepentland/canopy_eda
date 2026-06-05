@@ -37,6 +37,7 @@ const BenchResult = struct {
     min_ns: u64,
     checksum: u64,
     objective: f64,
+    routed: f64,
 };
 
 /// Snap a millimetre coordinate to its integer grid cell. Two layouts that are
@@ -96,6 +97,13 @@ fn benchOne(
     const checksum = poseChecksum(warm);
     const parts = warm.parts.len;
     const objective = warm.breakdown.objective;
+    // Routed objective of the finished placement — the metric `rerankSolve`
+    // actually selects on (the surrogate `objective` above is what the page's
+    // drag-score reports). Lets a placement experiment be judged on the same
+    // metric the rerank path optimizes, not just the surrogate proxy.
+    const poses = try arena.allocator().alloc(optimizer.RefPose, warm.parts.len);
+    for (warm.parts, 0..) |p, i| poses[i] = .{ .ref = p.ref_des, .x = p.x, .y = p.y, .rot = p.rot };
+    const routed = try optimizer.routedScorePoses(arena.allocator(), block, project_dir, poses, .{});
     _ = arena.reset(.retain_capacity);
 
     var rep: usize = 0;
@@ -114,6 +122,7 @@ fn benchOne(
         .min_ns = times[0],
         .checksum = checksum,
         .objective = objective,
+        .routed = routed,
     };
 }
 
@@ -161,8 +170,8 @@ pub fn main() !void {
     for (names.items) |name| {
         if (benchOne(gpa, project_dir, name, reps, times)) |r| {
             std.debug.print(
-                "BENCH {s} parts={d} median_ms={d:.3} min_ms={d:.3} checksum={x:0>16} objective={d:.4}\n",
-                .{ name, r.parts, ms(r.median_ns), ms(r.min_ns), r.checksum, r.objective },
+                "BENCH {s} parts={d} median_ms={d:.3} min_ms={d:.3} checksum={x:0>16} objective={d:.4} routed={d:.4}\n",
+                .{ name, r.parts, ms(r.median_ns), ms(r.min_ns), r.checksum, r.objective, r.routed },
             );
         } else |err| {
             std.debug.print("BENCH_ERR {s} {s}\n", .{ name, @errorName(err) });

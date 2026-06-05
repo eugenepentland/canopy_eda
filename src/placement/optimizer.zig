@@ -457,11 +457,15 @@ pub fn solve(
 
     const generated = !applyCached(parts, cached);
     if (generated) {
-        if (parts.len >= 2 and parts.len <= ROUTED_POLISH_MAX_PARTS and built.loops.len > 0) {
-            // Small board with decoupling loops: pick the global arrangement on the
-            // real routed metric (rerank the top-K multi-start candidates), then the
-            // local routed tuck. This is what closes the surrogate↔routed gap that a
+        if (parts.len >= 2 and parts.len <= MULTISTART_MAX_PARTS and built.loops.len > 0) {
+            // Any multi-start-band board with decoupling loops: pick the global
+            // arrangement on the real routed metric (rerank the top-K candidates),
+            // then the local routed tuck. This closes the surrogate↔routed gap that a
             // single surrogate-selected arrangement + local polish leaves on the table.
+            // Was gated to ROUTED_POLISH_MAX_PARTS (≤16); widened to the whole multi-
+            // start band so 17–32-part loop boards select on routed too (adf5901 −13%,
+            // nestedarray −5%). The final routed tuck (`routedPolish`) still self-gates
+            // to ≤16, so above that the top-K routed rerank alone carries the selection.
             try rerankSolve(arena, parts, &prep.idx_of, nets, built, params, prep.priority);
         } else {
             optimize(parts, &prep.idx_of, nets, built, params);
@@ -523,6 +527,26 @@ pub fn scorePoses(
     const score = scoreLayout(prep.parts, &prep.idx_of, prep.nets, prep.built.loops);
     const lsum = surrogateLoops(prep.parts, prep.built.loops);
     return breakdownWith(prep.parts, &prep.idx_of, prep.nets, params, score, lsum);
+}
+
+/// The maze-routed objective for an existing set of `poses` — the same metric
+/// `rerankSolve` selects its candidates on (HPWL + routed-loop nH + compactness +
+/// congestion), as opposed to the smooth surrogate `scorePoses` reports. Computed
+/// once for diagnostics/benchmarking; deliberately NOT a per-pose optimization
+/// signal — re-routing per pose is jagged/bistable (see the note in `solve`), so
+/// call this on a finished placement, never in a hot loop. Rebuilds the design
+/// like `scorePoses` and applies the poses verbatim (`routedLoops` self-gates on
+/// part count, so it is safe on any board).
+pub fn routedScorePoses(
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    poses: []const RefPose,
+    params: Params,
+) std.mem.Allocator.Error!f64 {
+    var prep = try prepare(arena, block, project_dir, params);
+    _ = applyCached(prep.parts, poses);
+    return routedObjectiveCost(arena, prep.parts, &prep.idx_of, prep.nets, prep.built.loops, params);
 }
 
 /// Build a `Placement` at exactly `poses` (no optimization — overlaps allowed),
@@ -884,8 +908,10 @@ fn rerankSolve(
     params: Params,
     priority: []const u32,
 ) std.mem.Allocator.Error!void {
-    // rerankSolve only runs on small boards (≤ ROUTED_POLISH_MAX_PARTS ≤
-    // MULTISTART_MAX_PARTS), so the multi-start + rotation refine always apply.
+    // rerankSolve runs on loop-bearing boards within the multi-start band
+    // (≤ MULTISTART_MAX_PARTS), so the multi-start + rotation refine always apply.
+    // The final routed tuck (`routedPolish`) self-gates to ≤ ROUTED_POLISH_MAX_PARTS;
+    // above that the top-K routed rerank alone carries the routed selection.
     const starts: usize = RERANK_STARTS;
     const rounds: usize = ROT_ROUNDS;
     const k = std.math.clamp(RERANK_BUDGET / parts.len, 2, RERANK_K);
