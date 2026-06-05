@@ -321,15 +321,17 @@
       try { build(); }
       catch (e) { console.error(e); setStatus("3D view failed: " + (e && e.message), true); }
     },
-    // Re-read PCB.parts and re-pose the scene + re-fit. Called from the 2D board
+    // Re-read PCB.parts and re-pose the scene in place. Called from the 2D board
     // whenever a Load/reset changes the placement while 3D is already built, so
-    // loading a specific saved layout updates the 3D preview live.
-    sync: function () { if (built) { applyPoses(); viewIso(); } },
+    // loading a specific saved layout updates the 3D preview live. The camera is
+    // deliberately left untouched (no re-fit) — only the initial build() frames
+    // the board; after that the user's current orbit is preserved across loads.
+    sync: function () { if (built) applyPoses(); },
     onShow: function () {
       if (!built) return;
-      // Layout may have changed in 2D since 3D was last shown — re-pose and
-      // re-fit only if so, otherwise keep the user's current camera orbit.
-      if (poseSig() !== lastSig) { applyPoses(); viewIso(); }
+      // Reflect any layout change made in 2D since 3D was last shown, but keep
+      // the user's current camera (the "Iso" button re-fits on demand).
+      if (poseSig() !== lastSig) applyPoses();
       resize();
     }
   };
