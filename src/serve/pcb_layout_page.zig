@@ -1814,7 +1814,6 @@ fn writePcbData(
     try w.writeAll("<script>const PCB=");
     try w.print("{{\"scale\":{d},\"minx\":{d},\"miny\":{d},", .{ v.scale, v.minx, v.miny });
     try w.print("\"margin\":{d},\"grid\":{d},\"w\":{d},\"h\":{d},", .{ MARGIN_MM, optimizer.GRID_MM, v.width, v.height });
-    try w.print("\"blockPen\":{d},", .{optimizer.BLOCK_PENALTY_MM});
     try w.print("\"clr\":{d},\"cmargin\":{d},", .{ clearance, geometry.BBOX_MARGIN_MM });
     // Read-only flag for the embedded per-sub-block preview — BOARD_JS skips all
     // edit wiring (drag/rotate/route/save) when set, leaving a pan/zoom viewer.
@@ -2314,29 +2313,6 @@ const BOARD_JS =
     \\function wrect(i,pad){var p=P[i],c=wpt(i,pad.x,pad.y),q=(((p.rot||0)%360)+360)%360;
     \\ var hw=(q==90||q==270)?pad.h/2:pad.w/2, hh=(q==90||q==270)?pad.w/2:pad.h/2;
     \\ return {x0:c.x-hw,y0:c.y-hh,x1:c.x+hw,y1:c.y+hh};}
-    \\function rgap(a,b){var gx=Math.max(0,Math.max(a.x0-b.x1,b.x0-a.x1)),
-    \\ gy=Math.max(0,Math.max(a.y0-b.y1,b.y0-a.y1));return Math.hypot(gx,gy);}
-    \\function nspan(a0,a1,b0,b1){if(a1<b0)return[a1,b0];if(b1<a0)return[a0,b1];
-    \\ var m=(Math.max(a0,b0)+Math.min(a1,b1))/2;return[m,m];}
-    \\function npts(a,b){var sx=nspan(a.x0,a.x1,b.x0,b.x1),sy=nspan(a.y0,a.y1,b.y0,b.y1);
-    \\ return [{x:sx[0],y:sy[0]},{x:sx[1],y:sy[1]}];}
-    \\function shitsRect(a,b,r){var t0=0,t1=1,p=[a.x-b.x,b.x-a.x,a.y-b.y,b.y-a.y],
-    \\ q=[a.x-r.x0,r.x1-a.x,a.y-r.y0,r.y1-a.y];
-    \\ for(var i=0;i<4;i++){if(p[i]===0){if(q[i]<0)return false;}else{var t=q[i]/p[i];
-    \\  if(p[i]<0){if(t>t1)return false;if(t>t0)t0=t;}else{if(t<t0)return false;if(t<t1)t1=t;}}}
-    \\ return t0<t1;}
-    \\function rclose(a,b){return Math.abs(a.x0-b.x0)<1e-6&&Math.abs(a.y0-b.y0)<1e-6&&
-    \\ Math.abs(a.x1-b.x1)<1e-6&&Math.abs(a.y1-b.y1)<1e-6;}
-    \\function blocked(capIdx,a,b,target){var e=0.02;
-    \\ for(var pi=0;pi<P.length;pi++){if(pi===capIdx)continue;var pads=P[pi].pads;
-    \\  for(var k=0;k<pads.length;k++){var r0=wrect(pi,pads[k]);if(rclose(r0,target))continue;
-    \\   var r={x0:r0.x0+e,y0:r0.y0+e,x1:r0.x1-e,y1:r0.y1-e};if(r.x1<=r.x0||r.y1<=r.y0)continue;
-    \\   if(shitsRect(a,b,r))return true;}}return false;}
-    \\function nhub(cr,capIdx,hubIdx,pads){var best=Infinity,br=cr;
-    \\ pads.forEach(function(pr){var hr=wrect(hubIdx,pr),np=npts(cr,hr),
-    \\  cost=rgap(cr,hr)+(blocked(capIdx,np[0],np[1],hr)?PCB.blockPen:0);
-    \\  if(cost<best){best=cost;br=hr;}});
-    \\ return {rect:br,gap:best};}
     \\function setT(i){var p=P[i];
     \\ els[i].setAttribute("transform","translate("+X(p.x).toFixed(1)+","+Y(p.y).toFixed(1)+")");
     \\ bodies[i].setAttribute("transform","rotate("+(p.rot||0)+")");}

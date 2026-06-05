@@ -331,6 +331,7 @@ src/export_kicad_netlist.zig::collectNets fn
 src/export_kicad_netlist.zig::extractFootprintName fn
 src/export_kicad_netlist.zig::extractPadNames fn
 src/export_kicad_netlist.zig::writeNetlist fn
+src/fuzz_layout.zig::main fn
 src/id_insert.zig::IdInsertError value
 src/id_insert.zig::applyInserts fn
 src/id_insert.zig::insertPendingIds fn
@@ -374,7 +375,6 @@ src/placement/geometry.zig::Pad struct_
 src/placement/geometry.zig::SilkCircle struct_
 src/placement/geometry.zig::SilkLine struct_
 src/placement/geometry.zig::load fn
-src/placement/optimizer.zig::BLOCK_PENALTY_MM value
 src/placement/optimizer.zig::Breakdown struct_
 src/placement/optimizer.zig::CompactMode enum_
 src/placement/optimizer.zig::GRID_MM value
