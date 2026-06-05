@@ -141,16 +141,27 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     }
 
     // Escape breakouts: the optimizer reserved a corridor in front of every
-    // single-pin signal pad; emit each as a real trace stub so the signal has
-    // actual copper leaving the part (not just a placement hint). The stub is a
-    // breakout for a *single-pin* net (nothing to connect to on this board), so
-    // it's trimmed to the longest clear prefix from the pad — never crossing a
-    // foreign via or pad — rather than blindly drawing the full 2 mm and
-    // clobbering clearance (the classic via-in-the-stub-path DRC fail).
+    // single-pin signal pad. The pad has nothing to connect to on this board, so
+    // rather than a long surface trace to nowhere the breakout escapes to an
+    // inner layer the way you'd hand-route it — `findEscapeVia` fans outward
+    // (preferring the reserved heading) to the nearest DRC-safe via spot, and we
+    // route a short trace from the pad to that via. When the pad is too hemmed in
+    // for any DRC-safe via, fall back to the trimmed surface stub so a blocked
+    // breakout still has some copper leaving the part.
     for (placement.stubs) |st| {
         const part = placement.parts[st.part];
         const a = optimizer.worldPadCenter(part, st.ax, st.ay);
         const b = optimizer.worldPadCenter(part, st.bx, st.by);
+        const dx = b[0] - a[0];
+        const dy = b[1] - a[1];
+        const dl = std.math.hypot(dx, dy);
+        const dir: [2]f64 = if (dl > 1e-9) .{ dx / dl, dy / dl } else .{ 1, 0 };
+        if (findEscapeVia(&ctx, vias.items, tracks.items, a, dir, st.net)) |vp| {
+            try tracks.append(arena, .{ .x1 = a[0], .y1 = a[1], .x2 = vp[0], .y2 = vp[1], .layer = 0, .width = params.track_width, .net = st.net });
+            try vias.append(arena, .{ .x = vp[0], .y = vp[1], .dia = params.via_dia, .net = st.net });
+            continue;
+        }
+        // Too hemmed in for any DRC-safe via — fall back to the trimmed surface stub.
         const end = trimStub(&ctx, vias.items, a, b, st.net);
         if (@abs(end[0] - a[0]) < 1e-6 and @abs(end[1] - a[1]) < 1e-6) continue;
         try tracks.append(arena, .{ .x1 = a[0], .y1 = a[1], .x2 = end[0], .y2 = end[1], .layer = 0, .width = params.track_width, .net = st.net });
@@ -411,6 +422,16 @@ fn distPtRect(px: f64, py: f64, x0: f64, y0: f64, x1: f64, y1: f64) f64 {
     return @sqrt(dx * dx + dy * dy);
 }
 
+/// Shortest distance from point (px,py) to segment (ax,ay)→(bx,by).
+fn segPointDist(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) f64 {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    if (len2 < 1e-12) return std.math.hypot(px - ax, py - ay);
+    const t = std.math.clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0, 1);
+    return std.math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
 /// True if a via of the configured size centred at (x,y) on net `net` keeps the
 /// copper clearance from every *foreign* pad (the via-in-pad crowding rule).
 fn viaClearsPads(ctx: *Ctx, x: f64, y: f64, net: i32) bool {
@@ -430,6 +451,33 @@ fn viaClearsVias(ctx: *Ctx, placed: []const Via, x: f64, y: f64, net: i32) bool 
         if (v.net == net) continue;
         const need = rr + v.dia / 2 + ctx.params.clearance;
         if (std.math.hypot(x - v.x, y - v.y) < need - 1e-9) return false;
+    }
+    return true;
+}
+
+/// True if a via of the configured size at (x,y) on net `net` keeps copper
+/// clearance from every routed track on a *different* net — the via↔track rule
+/// the DRC then re-checks (so an escape via can't be dropped on foreign copper).
+fn viaClearsTracks(ctx: *Ctx, tracks: []const Track, x: f64, y: f64, net: i32) bool {
+    const rr = viaR(ctx.params);
+    for (tracks) |t| {
+        if (t.net == net) continue;
+        const need = rr + t.width / 2 + ctx.params.clearance;
+        if (segPointDist(t.x1, t.y1, t.x2, t.y2, x, y) < need - 1e-9) return false;
+    }
+    return true;
+}
+
+/// True if the `track_width` stub a→b on net `net` keeps clearance from every
+/// already-placed via on a *different* net (the via↔track rule, from the trace's
+/// side). An escape stub is drawn after some vias are already down, and a via
+/// fixed earlier won't re-check this later trace — so the trace must clear the
+/// vias itself or the pair would fail DRC.
+fn segClearsVias(ctx: *Ctx, placed: []const Via, a: [2]f64, b: [2]f64, net: i32) bool {
+    for (placed) |v| {
+        if (v.net == net) continue;
+        const need = v.dia / 2 + ctx.params.track_width / 2 + ctx.params.clearance;
+        if (segPointDist(a[0], a[1], b[0], b[1], v.x, v.y) < need - 1e-9) return false;
     }
     return true;
 }
@@ -495,6 +543,56 @@ fn trimStub(ctx: *Ctx, placed: []const Via, a: [2]f64, b: [2]f64, net: i32) [2]f
         last = p;
     }
     return last;
+}
+
+/// Rings (grid steps) the escape-via fan searches outward before giving up —
+/// ~3 mm at the default pitch, enough to clear a dense module's pad field.
+const ESCAPE_VIA_RINGS: usize = 12;
+
+/// Find the *nearest* DRC-safe spot for a single-pin breakout's escape via — the
+/// in-tool version of hand-routing a pin that has nothing to land on: drop a via
+/// next to the pad and let the signal leave on an inner layer, with a short trace
+/// from the pad to the via. Two tiers: first the nearest spot whose pad→via stub
+/// also stays clear of foreign pads (a clean hand-route, the normal case); then,
+/// if the pad is so hemmed in that *no* straight stub stays clear — the dense
+/// power-module case that is exactly why you'd escape to an inner layer — the
+/// nearest spot where at least the via itself is DRC-safe, accepting the short
+/// stub crossing the relieved thermal/EP copper beside the pad. Null only when no
+/// DRC-safe via spot exists in the search window at all (caller keeps the trimmed
+/// surface stub).
+fn findEscapeVia(ctx: *Ctx, placed: []const Via, tracks: []const Track, a: [2]f64, dir: [2]f64, net: i32) ?[2]f64 {
+    return escapeFan(ctx, placed, tracks, a, dir, net, true) orelse
+        escapeFan(ctx, placed, tracks, a, dir, net, false);
+}
+
+/// One fan of the escape-via search (see `findEscapeVia`). Fans outward from the
+/// pad `a` in growing grid rings, preferring the reserved corridor heading `dir`
+/// then swivelling to either side, and returns the first grid spot where a via of
+/// the configured size clears every foreign pad, via and routed track. When
+/// `clear_stub` is set the straight pad→via stub must also clear every foreign
+/// pad. Mirrors `findGroundVia`'s fan, but seeded along the escape heading and
+/// additionally clearing routed tracks (it runs after the maze pass).
+fn escapeFan(ctx: *Ctx, placed: []const Via, tracks: []const Track, a: [2]f64, dir: [2]f64, net: i32, clear_stub: bool) ?[2]f64 {
+    const grid = ctx.grid;
+    const ang0 = std.math.atan2(dir[1], dir[0]);
+    var ring: usize = 1;
+    while (ring <= ESCAPE_VIA_RINGS) : (ring += 1) {
+        const rad = @as(f64, @floatFromInt(ring)) * grid.g;
+        var k: usize = 0;
+        while (k < 12) : (k += 1) {
+            const ang = ang0 + swivel(k);
+            const s = grid.snap(a[0] + rad * @cos(ang), a[1] + rad * @sin(ang));
+            if (!viaClearsPads(ctx, s[0], s[1], net)) continue;
+            if (!viaClearsVias(ctx, placed, s[0], s[1], net)) continue;
+            if (!viaClearsTracks(ctx, tracks, s[0], s[1], net)) continue;
+            // The stub itself must clear every already-placed via — those vias
+            // are fixed and won't re-check this trace, so the pair would fail DRC.
+            if (!segClearsVias(ctx, placed, a, s, net)) continue;
+            if (clear_stub and !segClearsPads(ctx, a, s, net)) continue;
+            return s;
+        }
+    }
+    return null;
 }
 
 /// Outward fan direction for a ground via at pad centre `c`: a unit vector
@@ -1123,4 +1221,63 @@ test "returnPathViolations flags unstitched signal vias" {
     };
     const near_res = RouteResult{ .tracks = &.{}, .vias = &near, .routed = 0, .total = 0 };
     try testing.expectEqual(@as(usize, 0), returnPathViolations(placement, near_res, RETURN_PATH_RADIUS_MM));
+}
+
+// spec: placement/router - escapes a single-pin breakout to an inner layer with a short stub and a via
+test "route escapes a single-pin breakout with a short stub and a via" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const G = @import("geometry.zig");
+    // One part with a single pad on net EN (index 0) — a single-pin breakout
+    // with nothing to connect to. The optimizer reserved a 2 mm corridor along
+    // +x; the router should escape it to an inner layer with a short stub + via
+    // rather than a full 2 mm surface trace.
+    const pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.6, .hh = 0.6, .pads = &pad, .fallback = false, .x = 0, .y = 0 },
+    };
+    const pins = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const nets = [_]FlatNet{.{ .name = "EN", .pins = &pins }};
+    const stubs = [_]optimizer.Stub{.{ .part = 0, .ax = 0, .ay = 0, .bx = 2, .by = 0, .net = 0 }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &stubs,
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -1,
+        .miny = -1,
+        .maxx = 3,
+        .maxy = 1,
+        .generated = true,
+    };
+
+    const r = try route(arena, placement, .{});
+
+    // Exactly one via — the escape via — on the breakout's net, dropped close to
+    // the pad (a *short* fanout, not the old full-length surface trace) and on the
+    // +x escape side the corridor reserved.
+    try testing.expectEqual(@as(usize, 1), r.vias.len);
+    const v = r.vias[0];
+    try testing.expectEqual(@as(i32, 0), v.net);
+    try testing.expect(v.x > 0); // fanned out along the +x escape heading
+    try testing.expect(std.math.hypot(v.x, v.y) < 1.0); // short hop off the pad
+
+    // The escape track runs from the pad centre to the via and no further.
+    var found_stub = false;
+    for (r.tracks) |t| {
+        if (t.net != 0) continue;
+        try testing.expect(@abs(t.x1) < 1e-6 and @abs(t.y1) < 1e-6);
+        try testing.expect(@abs(t.x2 - v.x) < 1e-6 and @abs(t.y2 - v.y) < 1e-6);
+        found_stub = true;
+    }
+    try testing.expect(found_stub);
+
+    // The breakout (short stub + via) introduces no clearance violations.
+    const viol = try @import("drc.zig").check(arena, placement, r, 0.127);
+    try testing.expectEqual(@as(usize, 0), viol.len);
 }
