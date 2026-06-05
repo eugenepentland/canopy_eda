@@ -11,6 +11,7 @@
 const std = @import("std");
 const optimizer = @import("optimizer.zig");
 const router = @import("router.zig");
+const pad_shape = @import("pad_shape.zig");
 const export_kicad = @import("../export_kicad.zig");
 
 const FlatNet = export_kicad.FlatNet;
@@ -27,9 +28,10 @@ pub const Violation = struct {
     kind: Kind,
 };
 
-/// A pad reduced to its world rect, the net it carries, and its part index
-/// (so two pads of the same part are never checked against each other).
-const PadBox = struct { x0: f64, y0: f64, x1: f64, y1: f64, net: i32, part: usize };
+/// A pad reduced to its world bounding box, its real copper outline (`poly`;
+/// empty ⇒ the box is exact), the net it carries, and its part index (so two
+/// pads of the same part are never checked against each other).
+const PadBox = struct { x0: f64, y0: f64, x1: f64, y1: f64, poly: []const [2]f64 = &.{}, net: i32, part: usize };
 
 const EPS: f64 = 1e-6;
 
@@ -52,7 +54,7 @@ pub fn check(
         const vr = v.dia / 2;
         for (pads) |p| {
             if (sameNet(v.net, p.net)) continue;
-            const gap = distPointRect(v.x, v.y, p) - vr;
+            const gap = pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, v.x, v.y, vr + clearance) - vr;
             if (gap < clearance - EPS) {
                 try out.append(arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = clearance, .kind = .via_pad });
             }
@@ -83,7 +85,11 @@ pub fn check(
     for (pads, 0..) |a, i| {
         for (pads[i + 1 ..]) |b| {
             if (a.part == b.part or sameNet(a.net, b.net)) continue;
-            const gap = rectRectGap(a, b);
+            const gap = pad_shape.shapeGap(
+                .{ .x0 = a.x0, .y0 = a.y0, .x1 = a.x1, .y1 = a.y1, .poly = a.poly },
+                .{ .x0 = b.x0, .y0 = b.y0, .x1 = b.x1, .y1 = b.y1, .poly = b.poly },
+                clearance,
+            );
             if (gap < clearance - EPS) {
                 const mx = (std.math.clamp((a.x0 + a.x1) / 2, b.x0, b.x1) + std.math.clamp((b.x0 + b.x1) / 2, a.x0, a.x1)) / 2;
                 const my = (std.math.clamp((a.y0 + a.y1) / 2, b.y0, b.y1) + std.math.clamp((b.y0 + b.y1) / 2, a.y0, a.y1)) / 2;
@@ -112,24 +118,14 @@ fn padBoxes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Al
     }
     var list: std.ArrayListUnmanaged(PadBox) = .empty;
     for (placement.parts, 0..) |part, pi| {
-        const q = @mod(@round(part.rot), 360);
         for (part.pads) |pad| {
-            const c = optimizer.worldPadCenter(part, pad.x, pad.y);
-            const hw = if (q == 90 or q == 270) pad.h / 2 else pad.w / 2;
-            const hh = if (q == 90 or q == 270) pad.w / 2 else pad.h / 2;
+            const sh = try pad_shape.worldShape(arena, part, pad);
             const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ part.ref_des, pad.number });
             const net = pin_net.get(key) orelse -1;
-            try list.append(arena, .{ .x0 = c[0] - hw, .y0 = c[1] - hh, .x1 = c[0] + hw, .y1 = c[1] + hh, .net = net, .part = pi });
+            try list.append(arena, .{ .x0 = sh.x0, .y0 = sh.y0, .x1 = sh.x1, .y1 = sh.y1, .poly = sh.poly, .net = net, .part = pi });
         }
     }
     return list.toOwnedSlice(arena);
-}
-
-/// Distance from a point to an axis-aligned rect (0 if inside).
-fn distPointRect(px: f64, py: f64, r: PadBox) f64 {
-    const dx = @max(@max(r.x0 - px, px - r.x1), 0);
-    const dy = @max(@max(r.y0 - py, py - r.y1), 0);
-    return std.math.hypot(dx, dy);
 }
 
 /// Shortest distance from point (px,py) to segment (ax,ay)-(bx,by).
@@ -140,13 +136,6 @@ fn segPointDist(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) f64 {
     if (len2 < EPS) return std.math.hypot(px - ax, py - ay);
     const t = std.math.clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0, 1);
     return std.math.hypot(px - (ax + t * dx), py - (ay + t * dy));
-}
-
-/// Edge-to-edge gap between two axis-aligned rects (0 if they overlap/touch).
-fn rectRectGap(a: PadBox, b: PadBox) f64 {
-    const gx = @max(@max(a.x0 - b.x1, b.x0 - a.x1), 0);
-    const gy = @max(@max(a.y0 - b.y1, b.y0 - a.y1), 0);
-    return std.math.hypot(gx, gy);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
