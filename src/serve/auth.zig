@@ -327,7 +327,7 @@ fn saveInvites(allocator: std.mem.Allocator, auth_dir: []const u8, invites: []co
 /// Mint a single-use invite token tied to `created_by`. The token is a
 /// 24-byte random hex string; `role` is the role assigned to the user when
 /// they redeem the invite. Persists to `auth_dir/invites.json`. Public so
-/// the `eda mint-invite` CLI command can call it without going through the
+/// the `netlisp mint-invite` CLI command can call it without going through the
 /// admin HTTP endpoint (used for out-of-band recovery on locked-out
 /// deployments).
 pub fn createInvite(allocator: std.mem.Allocator, auth_dir: []const u8, created_by: []const u8, role: []const u8) HandlerError![]const u8 {
@@ -757,7 +757,7 @@ pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 
     // The file-based KiCad-sync applier (`/api/sync-kicad-pcb/`) accepts
     // either a plugin bearer token or an OAuth bearer token. Plugin tokens
-    // are minted once via `eda mint-plugin-token`; OAuth mirrors the MCP flow.
+    // are minted once via `netlisp mint-plugin-token`; OAuth mirrors the MCP flow.
     if (std.mem.startsWith(u8, req.url.path, "/api/sync-kicad-pcb/")) {
         if (validatePluginBearerToken(ctx, req)) return true;
         if (validateBearerToken(ctx, req)) return true;
@@ -883,7 +883,7 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(req.arena);
     try w.print(
-        "{{\"challenge\":\"{s}\",\"rp\":{{\"name\":\"Canopy EDA\",\"id\":\"{s}\"}}," ++
+        "{{\"challenge\":\"{s}\",\"rp\":{{\"name\":\"Netlisp\",\"id\":\"{s}\"}}," ++
             "\"user\":{{\"id\":\"{s}\",\"name\":\"{s}\",\"displayName\":\"{s}\"}}," ++
             "\"pubKeyCredParams\":[{{\"type\":\"public-key\",\"alg\":-7}}]," ++
             "\"authenticatorSelection\":{{\"residentKey\":\"preferred\"," ++

@@ -1,4 +1,4 @@
-# EDA Tool
+# Netlisp
 
 CLI-driven electronic design automation for schematic capture using S-expression syntax.
 
@@ -108,6 +108,7 @@ Public functions: route, returnPathViolations
 - routes corners as 45° diagonals rather than 90° bends
 - LoopRouter measures a real per-leg trace length that detours foreign pads
 - counts signal vias lacking a nearby ground stitching via as return-path discontinuities
+- stitches each signal via's return path with a nearby GND plane via
 - escapes a single-pin breakout to an inner layer with a short stub and a via
 
 ## placement/drc

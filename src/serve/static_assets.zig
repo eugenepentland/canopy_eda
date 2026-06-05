@@ -35,6 +35,10 @@ const orbit_controls_js = @embedFile("assets/OrbitControls.js");
 const occt_import_js = @embedFile("assets/occt-import-js.js");
 const occt_import_wasm = @embedFile("assets/occt-import-js.wasm");
 const model_viewer_3d_js = @embedFile("assets/model_viewer_3d.js");
+// 3D PCB-layout viewer (the "3D View" tab on /pcb-layout/:name). Reuses the
+// same Three.js + occt-import-js stack as the footprint viewer; lazy-loaded
+// only when the tab is first opened.
+const pcb_3d_viewer_js = @embedFile("assets/pcb_3d_viewer.js");
 
 // Schematic page assets — pub-imported from render_html so we don't
 // re-`@embedFile` the underlying byte slices (the JS lives under
@@ -80,6 +84,7 @@ const REGISTRY = [_]Asset{
     .{ .name = "occt-import-js.js", .body = occt_import_js, .content_type = .JS },
     .{ .name = "occt-import-js.wasm", .body = occt_import_wasm, .content_type = .WASM },
     .{ .name = "model_viewer_3d.js", .body = model_viewer_3d_js, .content_type = .JS },
+    .{ .name = "pcb_3d_viewer.js", .body = pcb_3d_viewer_js, .content_type = .JS },
 };
 
 /// GET /static/:name — serve an embedded JS/CSS asset. 404 if the name is

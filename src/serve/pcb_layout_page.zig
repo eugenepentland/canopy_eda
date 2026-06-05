@@ -20,6 +20,8 @@ const geometry = @import("../placement/geometry.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
 const modules_mod = @import("modules.zig");
+const export_kicad = @import("../export_kicad.zig");
+const export_kicad_footprint = @import("../export_kicad_footprint.zig");
 const review = @import("../review.zig");
 const assets_css = @import("assets_css.zig");
 const pages_tmpl = @import("templates/pages.zig");
@@ -229,7 +231,8 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         try w.print(
             "<nav class=\"viewtoggle\" aria-label=\"View\">" ++
                 "<a href=\"{s}{s}\">Schematic</a>" ++
-                "<a class=\"active\" href=\"/pcb-layout/{s}\">PCB Layout</a></nav>",
+                "<a class=\"active\" id=\"pcb-tab-2d\" href=\"/pcb-layout/{s}\">PCB Layout</a>" ++
+                "<a id=\"pcb-tab-3d\" href=\"#\">3D View</a></nav>",
             .{ schematic_path, name, name },
         );
         try w.writeAll("</div>");
@@ -250,6 +253,9 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         "<svg id=\"pcb-svg\" class=\"pcb-svg\" viewBox=\"0 0 {d:.0} {d:.0}\" width=\"{d:.0}\" height=\"{d:.0}\" xmlns=\"http://www.w3.org/2000/svg\"></svg>",
         .{ view.width, view.height, view.width, view.height },
     );
+    // WebGL 3D-view stage — hidden until the "3D View" tab is opened, then the
+    // body gets `.mode-3d` (CSS swaps the SVG out for this). Built lazily.
+    if (!embed) try w.writeAll(PCB_3D_STAGE_HTML);
     if (!embed) try w.writeAll(COURTYARD_MODAL);
     try w.writeAll("</main>");
     // Right sidebar: the saved-layouts history (manual snapshots + auto-recorded
@@ -268,11 +274,14 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         try w.writeAll("</aside>");
     }
     try w.writeAll("</div>");
-    try writePcbData(w, ctx.allocator, placement, shown, view, name, layouts, routed, ro.params.clearance, violations, embed);
+    try writePcbData(w, ctx.allocator, ctx.project_dir, placement, shown, view, name, layouts, routed, ro.params.clearance, violations, embed);
     // Shared footprint engine (FP.padShape) must load before BOARD_JS runs. Both
     // scripts come after every column so the handlers find the elements they wire.
     try w.writeAll("<script src=\"/static/footprint_svg.js\"></script>");
     try w.writeAll(BOARD_JS);
+    // 3D-view tab wiring — lazy-loads the WebGL stack on first open. Omitted in
+    // the read-only embedded preview (no toggle there).
+    if (!embed) try w.writeAll(PCB_3D_TOGGLE_JS);
     try w.writeAll("</body></html>");
 
     res.content_type = .HTML;
@@ -434,6 +443,160 @@ fn writeBreakdownJson(w: *std.Io.Writer, b: optimizer.Breakdown, params: optimiz
     try w.print("\"loop_term\":{d},\"alignment_term\":{d},\"congestion_term\":{d},\"objective\":{d}}}", .{
         params.loop_w * b.loop_nh_weighted, params.w_align * b.alignment, params.w_congest * b.congestion, b.objective,
     });
+}
+
+// ── Live regen: background solve + best-so-far progress stream ──────────
+//
+// The "Regenerate" button no longer blocks the page on an 11–16 s solve.
+// Instead it POSTs /api/pcb-regen-start, which spawns the optimizer on a
+// background thread with a progress sink; the browser polls /api/pcb-progress
+// and re-draws the board each time the optimizer finds a better arrangement, so
+// you watch it converge instead of waiting on a spinner. When the run finishes
+// the thread has written the auto-cache exactly as the synchronous path does,
+// so the page just reloads to pick up the final (routable, history-recorded)
+// layout.
+
+/// Work item for a background live-regen solve. `name` is page_allocator-owned
+/// (freed by the thread); `project_dir` is borrowed from the long-lived Handler,
+/// which outlives every request thread.
+const RegenJob = struct {
+    name: []const u8,
+    project_dir: []const u8,
+    params: optimizer.Params,
+    gen: u32,
+};
+
+/// Context the optimizer's progress sink carries: which design + generation a
+/// streamed frame belongs to. Lives on the solver thread's stack for the solve.
+const RegenProgress = struct { name: []const u8, gen: u32 };
+
+/// optimizer.ProgressSink callback: serialize the best-so-far poses to a compact
+/// frame and publish it under the job's design + generation. Best-effort — a
+/// formatting/alloc failure just drops this frame (the next improvement retries).
+fn regenOnBest(ctx_ptr: *anyopaque, parts: []const optimizer.Part, score: f64, pass: optimizer.ProgressPass) void {
+    const ctx: *RegenProgress = @ptrCast(@alignCast(ctx_ptr));
+    var aw: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
+    w.print("{{\"pass\":\"{s}\",\"score\":{d:.2},\"parts\":[", .{ pass.label(), score }) catch return;
+    for (parts, 0..) |p, i| {
+        if (i > 0) w.writeAll(",") catch return;
+        w.writeAll(REF_OPEN) catch return;
+        writeJsonStr(w, p.ref_des) catch return;
+        w.print(",\"x\":{d:.3},\"y\":{d:.3},\"rot\":{d:.0}}}", .{ p.x, p.y, p.rot }) catch return;
+    }
+    w.writeAll("]}") catch return;
+    serve_root.pcbJobFrame(ctx.name, ctx.gen, aw.written());
+}
+
+/// Background thread: re-evaluate the design in its own arena, run the optimizer
+/// with a progress sink streaming best-so-far frames, persist the result the same
+/// way the synchronous page does, then mark the job done so the browser reloads.
+fn regenThread(job: *RegenJob) void {
+    const base = std.heap.page_allocator;
+    defer {
+        base.free(job.name);
+        base.destroy(job);
+    }
+    var arena = std.heap.ArenaAllocator.init(base);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var had_err = true;
+    run: {
+        var handler = Handler{ .allocator = a, .project_dir = job.project_dir, .auth_dir = "" };
+        var eval = Evaluator.init(a, job.project_dir);
+        defer eval.deinit();
+        var module_res: ?modules_mod.ResolvedBlock = null;
+        defer if (module_res) |mr| {
+            mr.eval.deinit();
+            a.destroy(mr.eval);
+        };
+        const block = resolveBlock(&handler, job.name, &eval, &module_res) orelse break :run;
+
+        var prog = RegenProgress{ .name = job.name, .gen = job.gen };
+        optimizer.setProgressSink(.{ .ctx = &prog, .onBest = regenOnBest });
+        defer optimizer.setProgressSink(null);
+
+        const placement = optimizer.solve(a, block, job.project_dir, null, job.params, .place) catch break :run;
+        if (placement.generated) {
+            writeAutoCache(a, job.project_dir, job.name, placement, job.params);
+            recordAutoLayout(a, job.project_dir, job.name, placement);
+        }
+        had_err = false;
+    }
+    serve_root.pcbJobFinish(job.name, job.gen, if (had_err) .failed else .ok);
+}
+
+/// POST /api/pcb-regen-start/:name — kick off a live (background) optimizer run
+/// and return its generation id. The browser then polls /api/pcb-progress/:name
+/// to animate the board converging and reloads when the run finishes. Honours the
+/// same tuning query (?w_align / loop_w / w_congest / grid / compact) as ?regen=1.
+/// If a run for this design is already in flight, its generation is returned and
+/// no second solver is spawned (one per design at a time).
+pub fn pcbRegenStartApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const tune = parseTuning(req);
+    const begin = serve_root.pcbJobBegin(name);
+    if (begin.fresh) spawn: {
+        const job = std.heap.page_allocator.create(RegenJob) catch {
+            serve_root.pcbJobFinish(name, begin.gen, .failed);
+            break :spawn;
+        };
+        job.* = .{
+            .name = std.heap.page_allocator.dupe(u8, name) catch {
+                std.heap.page_allocator.destroy(job);
+                serve_root.pcbJobFinish(name, begin.gen, .failed);
+                break :spawn;
+            },
+            .project_dir = ctx.project_dir,
+            .params = tune.params,
+            .gen = begin.gen,
+        };
+        const t = std.Thread.spawn(.{}, regenThread, .{job}) catch {
+            std.heap.page_allocator.free(job.name);
+            std.heap.page_allocator.destroy(job);
+            serve_root.pcbJobFinish(name, begin.gen, .failed);
+            break :spawn;
+        };
+        t.detach();
+    }
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    try aw.writer.print("{{\"gen\":{d}}}", .{begin.gen});
+    res.content_type = .JSON;
+    res.body = aw.written();
+}
+
+/// GET /api/pcb-progress/:name — current live-regen state for the page's poll
+/// loop: the active generation, the frame sequence (so the client skips frames
+/// it already drew), run/done/err flags, and the latest best-so-far `frame`
+/// (`{pass,score,parts}`) or null. `{"gen":0,"none":true}` means no run has been
+/// started for this design.
+pub fn pcbProgressApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    res.content_type = .JSON;
+    const snap = serve_root.pcbJobSnapshot(ctx.allocator, name) orelse {
+        res.body = "{\"gen\":0,\"none\":true}";
+        return;
+    };
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &aw.writer;
+    try w.print("{{\"gen\":{d},\"seq\":{d},\"running\":{s},\"done\":{s},\"err\":{s},\"frame\":", .{
+        snap.gen,
+        snap.seq,
+        if (snap.running) "true" else "false",
+        if (snap.done) "true" else "false",
+        if (snap.err) "true" else "false",
+    });
+    if (snap.frame) |f| try w.writeAll(f) else try w.writeAll("null");
+    try w.writeByte('}');
+    res.body = aw.written();
 }
 
 /// POST /api/pcb-score/:name — score an arbitrary hand layout *on the server*,
@@ -1624,9 +1787,9 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8) st
     try w.writeAll("<button class=\"btn\" id=\"pcb-score\" title=\"Recompute the objective on the server for the current positions\">Score</button>");
     // Stored layout is reused on load; this re-runs the optimizer, overwrites the
     // cache, and records the result into the saved-layout history below.
-    try w.writeAll("<a class=\"btn\" href=\"/pcb-layout/");
+    try w.writeAll("<a class=\"btn\" id=\"pcb-regen\" href=\"/pcb-layout/");
     try writeAttr(w, name);
-    try w.writeAll("?regen=1\" title=\"Re-run the optimizer and record the result\">Regenerate</a>");
+    try w.writeAll("?regen=1\" title=\"Re-run the optimizer and watch it converge live\">Regenerate</a>");
     // Export the solved positions + full score breakdown (incl. the
     // value-weighted loop + alignment terms the bar above hides) for inspection.
     try w.writeAll("<a class=\"btn\" href=\"/api/pcb-layout/");
@@ -1946,7 +2109,12 @@ const VIA_MATCH_MM: f64 = 3.0;
 /// already pays for routed scoring (mirrors the optimizer's ROUTED_SCORE_MAX_PARTS);
 /// bigger boards skip it and the overlay falls back to the pad centre.
 const ROUTED_VIA_PREVIEW_MAX_PARTS: usize = 48;
-fn dropViaPos(vias: []const router.Via, cx: f64, cy: f64) LocalPt {
+/// The DRC-safe GND-via nearest `(cx,cy)` within `VIA_MATCH_MM`, or null when the
+/// router placed no via there. Null is meaningful: a fat EP/thermal GND pad often
+/// can't take a fanned via at all, so the overlay must *not* invent one at the raw
+/// pad centre (it would sit on a neighbouring pad — e.g. the FB tap abutting the
+/// thermal pad — and never match what routing actually drops).
+fn dropViaPos(vias: []const router.Via, cx: f64, cy: f64) ?LocalPt {
     var best_d2: f64 = VIA_MATCH_MM * VIA_MATCH_MM;
     var found: ?LocalPt = null;
     for (vias) |vi| {
@@ -1956,12 +2124,21 @@ fn dropViaPos(vias: []const router.Via, cx: f64, cy: f64) LocalPt {
             found = .{ .x = vi.x, .y = vi.y };
         }
     }
-    return found orelse .{ .x = cx, .y = cy };
+    return found;
+}
+
+/// Emit a via drop point as `{"x":…,"y":…}`, or `null` when none exists — the
+/// overlay reads null as "draw the GND return path but no via dot here".
+fn writeViaDropJson(w: *std.Io.Writer, p: ?LocalPt) std.Io.Writer.Error!void {
+    if (p) |q| {
+        try w.print("{{\"x\":{d},\"y\":{d}}}", .{ q.x, q.y });
+    } else try w.writeAll("null");
 }
 
 fn writePcbData(
     w: *std.Io.Writer,
     alloc: std.mem.Allocator,
+    project_dir: []const u8,
     p: optimizer.Placement,
     params: optimizer.Params,
     v: View,
@@ -2102,9 +2279,10 @@ fn writePcbData(
         // the plane: the cap's GND pad and the IC's pinned GND pin.
         const cg_c = optimizer.worldPadCenter(p.parts[lp.cap], lp.cap_gnd.x, lp.cap_gnd.y);
         const gp_c = optimizer.worldPadCenter(p.parts[lp.hub], lp.hub_gnd_pin.x, lp.hub_gnd_pin.y);
-        const cgv = dropViaPos(drop_vias, cg_c[0], cg_c[1]);
-        const gpv = dropViaPos(drop_vias, gp_c[0], gp_c[1]);
-        try w.print(",\"cgv\":{{\"x\":{d},\"y\":{d}}},\"gpv\":{{\"x\":{d},\"y\":{d}}}", .{ cgv.x, cgv.y, gpv.x, gpv.y });
+        try w.writeAll(",\"cgv\":");
+        try writeViaDropJson(w, dropViaPos(drop_vias, cg_c[0], cg_c[1]));
+        try w.writeAll(",\"gpv\":");
+        try writeViaDropJson(w, dropViaPos(drop_vias, gp_c[0], gp_c[1]));
         try w.writeAll("}");
     }
     try w.writeAll("],");
@@ -2132,7 +2310,57 @@ fn writePcbData(
     // Routed copper + DRC markers — emitted in the same shape the
     // /api/pcb-route endpoint returns so drawRoute/drawClr/drawDrc read either.
     try writeRoutedArrays(w, routed, violations);
+
+    // Per-footprint STEP-model references (URL + KiCad offset/rotation) for the
+    // 3D-view tab. Only the full page needs it; the embedded preview has no 3D
+    // toggle, so it skips the (filesystem-scanning) model resolution entirely.
+    try w.writeAll(",\"models\":");
+    if (embed) {
+        try w.writeAll("{}");
+    } else {
+        try writeModelsJson(w, alloc, project_dir, p.instances);
+    }
     try w.writeAll("};</script>");
+}
+
+/// Emit `{ "<footprint>": {"o":[x,y,z],"r":[x,y,z]} }` for every distinct
+/// footprint in the design that resolves to a STEP model — the KiCad offset/
+/// rotation the 3D-view tab orients each part body with (it fetches the bytes
+/// from `/api/model-file/<fp>`, keyed on the map entry). Footprints with no
+/// model are omitted (the viewer shows their pads only).
+fn writeModelsJson(
+    w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    instances: []const export_kicad.FlatInstance,
+) HandlerError!void {
+    const cfg = export_kicad.loadModelConfig(alloc, project_dir);
+    var seen = std.StringHashMap(void).init(alloc);
+    try w.writeByte('{');
+    var first = true;
+    for (instances) |inst| {
+        const fp = inst.footprint;
+        if (fp.len == 0) continue;
+        if (seen.contains(fp)) continue;
+        try seen.put(fp, {});
+        const tf = cfg.get(fp);
+        // Resolve the STEP model the same way the KiCad export / footprint
+        // viewer do: an explicit `model` override wins, else a filesystem
+        // match. Skip footprints with no model — the 3D view shows pads only.
+        const has_model = (if (tf) |t| t.model != null else false) or
+            export_kicad_footprint.findModelFile(alloc, project_dir, fp, fp) != null;
+        if (!has_model) continue;
+        const off = if (tf) |t| t.offset else [3]f64{ 0, 0, 0 };
+        const rot = if (tf) |t| t.rotation else [3]f64{ 0, 0, 0 };
+        if (!first) try w.writeByte(',');
+        first = false;
+        try writeJsonStr(w, fp);
+        try w.print(
+            ":{{\"o\":[{d},{d},{d}],\"r\":[{d},{d},{d}]}}",
+            .{ off[0], off[1], off[2], rot[0], rot[1], rot[2] },
+        );
+    }
+    try w.writeByte('}');
 }
 
 /// Emit `"tracks":[…],"vias":[…],"drc":[…]` (world mm; track layer 0=top,
@@ -2459,6 +2687,36 @@ const PAGE_CSS =
     \\  border-radius:5px;padding:4px 11px;cursor:pointer;color:#c9d1d9}
     \\.court-dialog .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
     \\.court-dialog .btn:disabled{opacity:.45;cursor:default}
+    \\.pcb-3d-stage{display:none;position:relative;width:100%;height:calc(100vh - 150px);min-height:460px;
+    \\  background:#010409;border:1px solid #30363d;border-radius:8px;overflow:hidden}
+    \\body.mode-3d .pcb-3d-stage{display:block}
+    \\.pcb-3d-stage canvas{display:block;width:100%;height:100%;touch-action:none}
+    \\#pcb-3d-status{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#8b949e;
+    \\  font-size:13px;background:rgba(13,17,23,.8);padding:6px 12px;border-radius:6px}
+    \\#pcb-3d-status.err{color:#f85149}
+    \\.pcb-3d-tools{position:absolute;top:10px;right:10px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;
+    \\  background:rgba(22,27,34,.85);border:1px solid #30363d;border-radius:6px;padding:5px 8px;font-size:12px;color:#8b949e}
+    \\.pcb-3d-tools .btn{font:inherit;font-size:12px;border:1px solid #30363d;background:#21262d;border-radius:5px;
+    \\  padding:3px 9px;cursor:pointer;color:#c9d1d9}
+    \\.pcb-3d-tools .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
+    \\.pcb-3d-tools label{display:flex;gap:3px;align-items:center;cursor:pointer}
+    \\.pcb-3d-tools .sep{width:1px;height:16px;background:#30363d}
+    \\body.mode-3d .pcb-svg,body.mode-3d .pcb-tune,body.mode-3d .pcb-route,
+    \\body.mode-3d .pcb-legend,body.mode-3d .pcb-note,body.mode-3d .pcb-bar{display:none}
+    \\/* Live-regen status card — floats over the top of the board (pointer-events
+    \\   off) so the optimizer's best-so-far arrangement stays fully visible and
+    \\   animating underneath while it converges. */
+    \\.pcb-live{position:fixed;top:68px;left:50%;transform:translateX(-50%);z-index:300;pointer-events:none}
+    \\.pcb-live-card{display:flex;align-items:center;gap:10px;background:rgba(13,17,23,.92);
+    \\  border:1px solid #30363d;border-radius:9px;padding:9px 15px;box-shadow:0 4px 18px rgba(0,0,0,.45);
+    \\  font-size:13px;color:#e6edf3;max-width:90vw}
+    \\.pcb-live-spin{width:15px;height:15px;border:2px solid #30363d;border-top-color:#58a6ff;
+    \\  border-radius:50%;animation:pcb-live-rot .8s linear infinite;flex:0 0 auto}
+    \\.pcb-live.err .pcb-live-spin{border-top-color:#f85149;animation:none}
+    \\.pcb-live.done .pcb-live-spin{border-top-color:#3fb950;animation:none}
+    \\.pcb-live-msg{font-weight:600}
+    \\.pcb-live-sub{color:#8b949e;font-size:12px;font-variant-numeric:tabular-nums}
+    \\@keyframes pcb-live-rot{to{transform:rotate(360deg)}}
 ;
 
 /// Extra rules layered on top of PAGE_CSS only when `?embed=1` — the body gets
@@ -2470,6 +2728,65 @@ const EMBED_CSS =
     \\body.embed .pcb-route{margin:2px 0 6px}
     \\body.embed .pcb-svg{width:100%}
     \\body.embed .part{cursor:default}
+;
+
+/// The (hidden) WebGL stage for the 3D-view tab: a canvas, a status overlay,
+/// and a floating toolbar (camera presets + layer toggles). CSS `.mode-3d`
+/// reveals it and hides the 2D board; `pcb_3d_viewer.js` builds the scene.
+const PCB_3D_STAGE_HTML =
+    \\<div class="pcb-3d-stage" id="pcb-3d-stage">
+    \\<canvas id="pcb-3d-canvas"></canvas>
+    \\<div id="pcb-3d-status">Loading 3D view…</div>
+    \\<div class="pcb-3d-tools">
+    \\<button class="btn" id="pcb3d-iso">Iso</button>
+    \\<button class="btn" id="pcb3d-top">Top</button>
+    \\<button class="btn" id="pcb3d-front">Front</button>
+    \\<button class="btn" id="pcb3d-side">Side</button>
+    \\<span class="sep"></span>
+    \\<label><input type="checkbox" id="pcb3d-t-models" checked>Models</label>
+    \\<label><input type="checkbox" id="pcb3d-t-pads" checked>Pads</label>
+    \\<label><input type="checkbox" id="pcb3d-t-board" checked>Board</label>
+    \\<label><input type="checkbox" id="pcb3d-t-axes" checked>Axes</label>
+    \\</div></div>
+;
+
+/// Tab wiring for the Schematic ⇄ PCB Layout ⇄ 3D View switcher. Toggling to
+/// 3D adds `.mode-3d` (CSS swaps in the stage), then lazily injects the WebGL
+/// stack (Three.js + OrbitControls + occt-import-js) and our viewer before
+/// calling `PCB3D.init()` — so the heavy assets load only when 3D is opened.
+/// The PCB Layout tab flips back to 2D in place (no reload) when 3D is active.
+const PCB_3D_TOGGLE_JS =
+    \\<script>(function(){
+    \\var tab3d=document.getElementById("pcb-tab-3d"),tab2d=document.getElementById("pcb-tab-2d");
+    \\if(!tab3d||!tab2d)return;
+    \\var loaded=false,loading=null;
+    \\function loadScript(src){return new Promise(function(res,rej){
+    \\ var s=document.createElement("script");s.src=src;s.onload=res;
+    \\ s.onerror=function(){rej(new Error("load "+src));};document.head.appendChild(s);});}
+    \\function ensure(){
+    \\ if(loaded)return Promise.resolve();
+    \\ if(loading)return loading;
+    \\ var seq=Promise.resolve();
+    \\ ["/static/three.min.js","/static/OrbitControls.js","/static/occt-import-js.js","/static/pcb_3d_viewer.js"]
+    \\  .forEach(function(u){seq=seq.then(function(){return loadScript(u);});});
+    \\ loading=seq.then(function(){loaded=true;});
+    \\ return loading;}
+    \\function show3d(){
+    \\ document.body.classList.add("mode-3d");
+    \\ tab3d.classList.add("active");tab2d.classList.remove("active");
+    \\ ensure().then(function(){
+    \\  if(window.PCB3D){window.PCB3D.init();
+    \\   requestAnimationFrame(function(){window.PCB3D.onShow();});}
+    \\ }).catch(function(e){console.error(e);
+    \\  var st=document.getElementById("pcb-3d-status");
+    \\  if(st){st.textContent="3D assets failed to load";st.className="err";}});}
+    \\function show2d(){
+    \\ document.body.classList.remove("mode-3d");
+    \\ tab2d.classList.add("active");tab3d.classList.remove("active");}
+    \\tab3d.addEventListener("click",function(e){e.preventDefault();show3d();});
+    \\tab2d.addEventListener("click",function(e){
+    \\ if(document.body.classList.contains("mode-3d")){e.preventDefault();show2d();}});
+    \\})();</script>
 ;
 
 const BOARD_JS =
@@ -2530,15 +2847,23 @@ const BOARD_JS =
     \\ // the via at the live GND pad centre so it follows the part (the prior via is
     \\ // already cleared with gR above; Route re-derives the exact DRC-safe fan).
     \\ PCB.loops.forEach(function(L){
+    \\   // cgv/gpv are the server's DRC-safe via drops, valid only at the emitted
+    \\   // pose. Once a part is dragged that point is stale, and cgv/gpv come back
+    \\   // null when the router can't fan a via there at all (a fat thermal/EP GND
+    \\   // pad next to a small pad). In both cases draw the return *path* to the raw
+    \\   // pad centre but DON'T draw a via dot — an invented dot would land on the
+    \\   // neighbouring pad (the FB tap) and never match what Route actually drops.
+    \\   var cReal=(L.cgv&&!moved(L.cap)), dReal=(L.gpv&&!moved(L.hub));
     \\   var A=wpt(L.hub,L.pp.x,L.pp.y), B=wpt(L.cap,L.cp.x,L.cp.y),
-    \\       C=(L.cgv&&!moved(L.cap))?L.cgv:wpt(L.cap,L.cg.x,L.cg.y),
-    \\       D=(L.gpv&&!moved(L.hub))?L.gpv:wpt(L.hub,L.gp.x,L.gp.y);
+    \\       C=cReal?L.cgv:wpt(L.cap,L.cg.x,L.cg.y),
+    \\       D=dReal?L.gpv:wpt(L.hub,L.gp.x,L.gp.y);
     \\   aw(B,A,"#ea580c",1.3,0.95);
     \\   var rp=[C,B,A,D].map(function(q){return X(q.x).toFixed(1)+","+Y(q.y).toFixed(1);}).join(" ");
     \\   var pl=el("polyline",{points:rp,fill:"none",stroke:"#58a6ff","stroke-width":1.3,opacity:0.85,"stroke-dasharray":"4 2"});
     \\   var gt=el("title",{}); gt.textContent="GND return images under the power trace on the L2 plane (drops at the DRC-safe GND vias)"; pl.appendChild(gt);
     \\   gR.appendChild(pl);
-    \\   if(!routedNow)[C,D].forEach(function(v){drawVia(gR,v.x,v.y,viaGeo().dia,viaGeo().drill);});});
+    \\   if(!routedNow){ if(cReal)drawVia(gR,C.x,C.y,viaGeo().dia,viaGeo().drill);
+    \\                   if(dReal)drawVia(gR,D.x,D.y,viaGeo().dia,viaGeo().drill); }});
     \\}
     \\function delta(id,cur,base){
     \\ var e=document.getElementById(id);if(!e)return;var d=cur-base;
@@ -2634,15 +2959,16 @@ const BOARD_JS =
     \\ if((ev.key=="r"||ev.key=="R")&&cur>=0){ev.preventDefault();
     \\   P[cur].rot=((((P[cur].rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;
     \\   setT(cur);clearRoute();rats();fetchScore();}});
-    \\function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetchScore();}
+    \\function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetchScore();
+    \\ if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();}
     \\document.getElementById("pcb-reset").addEventListener("click",function(){
     \\ P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;});applyAll();});
     \\document.getElementById("pcb-score").addEventListener("click",fetchScore);
-    \\document.getElementById("t-apply").addEventListener("click",function(){
+    \\document.getElementById("t-apply").addEventListener("click",function(ev){ev.preventDefault();
     \\ var v=function(id){return encodeURIComponent(document.getElementById(id).value);};
     \\ var g=document.getElementById("t-grid").checked?1:0;
-    \\ window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?w_align="+v("t-align")+
-    \\  "&loop_w="+v("t-loop")+"&w_congest="+v("t-cong")+"&grid="+g+"&compact="+v("t-compact");});
+    \\ liveRegen("?w_align="+v("t-align")+"&loop_w="+v("t-loop")+"&w_congest="+v("t-cong")+
+    \\  "&grid="+g+"&compact="+v("t-compact"));});
     \\(function(){var ids=["sv-en-wire","sv-w-wire","sv-en-loop","sv-w-loop","sv-en-align","sv-w-align","sv-en-cong","sv-w-cong"];
     \\ var def={};ids.forEach(function(id){var e=document.getElementById(id);if(!e)return;
     \\  def[id]=(e.type=="checkbox")?e.checked:e.value;e.addEventListener("input",svApply);});
@@ -2835,12 +3161,76 @@ const BOARD_JS =
     \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
     \\  .then(function(j){PCB.tracks=j.tracks||[];PCB.vias=j.vias||[];PCB.drc=j.drc||[];
     \\    if(payload.clearance>0)PCB.clr=payload.clearance;drawRoute();drawClr();drawDrc();
+    \\    rats();/* re-run with tracks present: routedNow is now true, so the loop
+    \\           overlay drops its preview GND vias and only the router's real vias
+    \\           remain — no preview+routed via doubling on the bypass caps. */
     \\    var ok=(j.routed===j.total);
     \\    setStat("r-stat",ok?"ok":"warn","routed "+j.routed+"/"+j.total+" nets · "+((j.vias||[]).length)+" vias");
     \\    setStat("r-drc",(j.drc||[]).length?"err":"ok",(j.drc||[]).length?(j.drc.length+" DRC violation(s)"):"DRC clean ✓");
     \\    var rp=j.return_path||0; setStat("r-rp",rp?"warn":"ok",rp?(rp+" return-path warning(s)"):"return paths ✓");
     \\    rgo.disabled=false;})
     \\  .catch(function(){setStat("r-stat","err","route failed");rgo.disabled=false;});});
+    \\// ── Live regenerate: run the optimizer in the background and animate the
+    \\//    board converging on its best-so-far arrangement (poll-driven). The
+    \\//    Regenerate / Apply buttons start a background solve instead of a
+    \\//    blocking page nav; on any error we fall back to the old ?regen=1 path.
+    \\var byRef={}; P.forEach(function(p,i){byRef[p.ref]=i;});
+    \\// Anchor the main IC (the hub with the largest courtyard — falls back to the
+    \\// biggest part) so every tried arrangement is shown *relative* to it: each
+    \\// live frame is translated to pin this part at its on-screen spot, so the IC
+    \\// stays put in the centre and only the parts around it visibly rearrange.
+    \\var anchorRef=null,anchorTX=0,anchorTY=0;
+    \\(function(){var bi=-1,bs=-1;P.forEach(function(p,i){
+    \\  var s=(p.hw||0)*(p.hh||0)+(p.kind==="hub"?1e6:0);if(s>bs){bs=s;bi=i;}});
+    \\ if(bi>=0){anchorRef=P[bi].ref;anchorTX=orig[bi].x;anchorTY=orig[bi].y;}})();
+    \\var liveBox=null;
+    \\function liveCard(){
+    \\ if(liveBox)return liveBox;
+    \\ liveBox=document.createElement("div"); liveBox.className="pcb-live";
+    \\ liveBox.innerHTML='<div class="pcb-live-card"><div class="pcb-live-spin"></div>'+
+    \\   '<div><div class="pcb-live-msg" id="pcb-live-msg">Starting optimizer…</div>'+
+    \\   '<div class="pcb-live-sub" id="pcb-live-sub"></div></div></div>';
+    \\ document.body.appendChild(liveBox); return liveBox;
+    \\}
+    \\function liveMsg(m,s,cls){var box=liveCard();
+    \\ box.className="pcb-live"+(cls?" "+cls:"");
+    \\ var a=document.getElementById("pcb-live-msg");if(a&&m!==undefined)a.textContent=m;
+    \\ var b=document.getElementById("pcb-live-sub");if(b)b.textContent=(s===undefined?"":s);}
+    \\function liveHide(){if(liveBox&&liveBox.parentNode)liveBox.parentNode.removeChild(liveBox);liveBox=null;}
+    \\function liveApply(f){if(!f||!f.parts)return;
+    \\ // Translate the frame so the anchor IC lands on its fixed on-screen point.
+    \\ var dx=0,dy=0;
+    \\ if(anchorRef!==null){f.parts.forEach(function(q){
+    \\   if(q.ref===anchorRef){dx=anchorTX-q.x;dy=anchorTY-q.y;}});}
+    \\ f.parts.forEach(function(q){var i=byRef[q.ref];if(i===undefined)return;
+    \\   P[i].x=q.x+dx;P[i].y=q.y+dy;P[i].rot=q.rot||0;});
+    \\ P.forEach(function(p,i){setT(i);}); clearRoute(); rats();}
+    \\function liveFallback(query){window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+
+    \\  "?regen=1"+(query?("&"+query.replace(/^\?/,"")):"");}
+    \\function liveRegen(query){
+    \\ liveMsg("Starting optimizer…","","");
+    \\ fetch("/api/pcb-regen-start/"+encodeURIComponent(PCB.name)+(query||""),{method:"POST"})
+    \\  .then(function(r){return r.json();})
+    \\  .then(function(j){if(typeof j.gen!=="number"||!j.gen)throw 0;livePoll(j.gen,-1,0);})
+    \\  .catch(function(){liveFallback(query);});}
+    \\function livePoll(gen,lastSeq,misses){
+    \\ fetch("/api/pcb-progress/"+encodeURIComponent(PCB.name))
+    \\  .then(function(r){return r.json();})
+    \\  .then(function(j){
+    \\   if(j.gen!==gen){liveHide();return;}
+    \\   if(j.frame&&j.seq>lastSeq){liveApply(j.frame);lastSeq=j.seq;
+    \\     liveMsg("Optimizing — "+(j.frame.pass==="refine"?"refining best layout":"exploring layouts"),
+    \\       "candidate score "+(+j.frame.score).toFixed(1)+" · update "+j.seq,"");}
+    \\   if(j.done){if(j.err){liveMsg("Optimizer error — falling back…","","err");
+    \\       setTimeout(function(){liveFallback("");},700);}
+    \\     else{liveMsg("Converged — loading final layout…","","done");
+    \\       setTimeout(function(){window.location.reload();},400);}
+    \\     return;}
+    \\   setTimeout(function(){livePoll(gen,lastSeq,0);},350);})
+    \\  .catch(function(){if(misses>20){liveHide();return;}
+    \\   setTimeout(function(){livePoll(gen,lastSeq,misses+1);},700);});}
+    \\var rgl=document.getElementById("pcb-regen");
+    \\if(rgl)rgl.addEventListener("click",function(ev){ev.preventDefault();liveRegen("");});
     \\rats(); showScore(PCB.auto); drawRoute(); drawClr(); drawDrc();
     \\})();</script>
 ;

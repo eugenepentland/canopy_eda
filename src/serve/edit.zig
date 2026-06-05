@@ -988,7 +988,7 @@ fn designFilePath(allocator: std.mem.Allocator, project_dir: []const u8, name: [
 
 /// Re-evaluate `<name>.sexp`, resolve BOM, render the scene-graph, run
 /// ERC, snapshot the prior state, and bump the live version. This is the
-/// MCP `build` tool's worker — it mirrors `eda build --push <name>`
+/// MCP `build` tool's worker — it mirrors `netlisp build --push <name>`
 /// locally. The agent edits files via VFS, then calls this to make
 /// changes visible in the browser viewer.
 pub fn rebuildDesign(

@@ -30,9 +30,9 @@ pub templ Authorize(
     <html>
         <head>
             if (email == null) {
-                <title>Authorize — Canopy EDA</title>
+                <title>Authorize — Netlisp</title>
             } else {
-                <title>Authorize {client_name} — Canopy EDA</title>
+                <title>Authorize {client_name} — Netlisp</title>
             }
             {!STYLE_BLOCK}
         </head>

@@ -1,4 +1,6 @@
-# Canopy EDA
+# Netlisp
+
+*Schematics as S-expressions — written by an agent, compiled to KiCad.*
 
 A CLI-driven electronic design automation tool. Schematics are written
 as S-expressions (no GUI capture), built into a live web viewer with
@@ -15,7 +17,7 @@ zig build run -- serve --project-dir projects/designs
 # open http://localhost:7050
 ```
 
-`zig build` runs the [Guardian](https://github.com/eugenepentland/canopy_eda/tree/main/.guardian)
+`zig build` runs the [Guardian](https://github.com/eugenepentland/netlisp/tree/main/.guardian)
 checks (formatting, file size, spec drift, …) alongside the test suite.
 
 To rebuild a single design and live-push it to a running server:

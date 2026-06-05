@@ -922,7 +922,7 @@ fn writeOptString(w: anytype, s: ?[]const u8) !void {
 }
 
 /// Regenerate `lib/pinouts/<name>.sexp` from `<source>` (a `.kicad_sym`
-/// in `lib/sources/`). Mirrors what the `eda convert-pinout` CLI does
+/// in `lib/sources/`). Mirrors what the `netlisp convert-pinout` CLI does
 /// — same `generatePinout` function, same `;; Auto-generated pinout`
 /// header — but routes the write through the VFS so sandbox checks
 /// apply and the response carries `dirty_designs`/`library_changes`

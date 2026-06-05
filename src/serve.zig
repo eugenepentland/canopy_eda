@@ -85,6 +85,123 @@ pub fn getLiveVersion(name: []const u8) u32 {
     return live_versions.get(name) orelse 0;
 }
 
+// ── Live PCB-regen jobs ────────────────────────────────────────────────
+//
+// A "Regenerate" on the PCB-layout page runs the optimizer on a background
+// thread instead of blocking the request, so the browser can poll the
+// best-so-far arrangement and animate the board converging instead of staring
+// at a spinner. State per design: the active job generation, a frame counter,
+// run/done/err flags, and the latest best-so-far frame JSON (poses + score).
+// Keys and frame bodies are page_allocator-owned so they outlive the request
+// that spawned the solver and the worker that reads them back.
+
+/// One design's live-regen job. `frame` is the latest best-so-far snapshot
+/// (`{"pass":…,"score":…,"parts":[…]}`), owned by `page_allocator`.
+pub const PcbJob = struct {
+    gen: u32 = 0,
+    seq: u32 = 0,
+    running: bool = false,
+    done: bool = false,
+    err: bool = false,
+    frame: ?[]const u8 = null,
+};
+
+/// Outcome a finished live-regen run reports — `failed` when the design
+/// couldn't be evaluated or the solve errored (the browser then falls back to
+/// the blocking `?regen=1` path).
+pub const JobOutcome = enum { ok, failed };
+
+// Private to this module — only the pcbJob* helpers below touch them, so they
+// stay unexported (no need for a mutable global on the public surface).
+var pcb_jobs_mutex: std.Thread.Mutex = .{};
+var pcb_jobs: std.StringHashMapUnmanaged(PcbJob) = .empty;
+
+/// Result of `pcbJobBegin`: the job's generation and whether a fresh solver
+/// should be spawned (`fresh` is false when one is already running for `name`).
+pub const PcbJobBegin = struct { gen: u32, fresh: bool };
+
+/// Start (or restart) a live-regen job for `name`. If one is already running,
+/// returns its generation with `fresh=false` (one solver per design at a time).
+/// Otherwise bumps the generation, clears prior frames, and returns `fresh=true`
+/// so the caller spawns the background solver tagged with the new generation.
+pub fn pcbJobBegin(name: []const u8) PcbJobBegin {
+    pcb_jobs_mutex.lock();
+    defer pcb_jobs_mutex.unlock();
+    const gop = pcb_jobs.getOrPut(std.heap.page_allocator, name) catch return .{ .gen = 0, .fresh = false };
+    if (!gop.found_existing) {
+        gop.key_ptr.* = std.heap.page_allocator.dupe(u8, name) catch {
+            _ = pcb_jobs.remove(name);
+            return .{ .gen = 0, .fresh = false };
+        };
+        gop.value_ptr.* = .{};
+    }
+    if (gop.value_ptr.running) return .{ .gen = gop.value_ptr.gen, .fresh = false };
+    if (gop.value_ptr.frame) |old| {
+        std.heap.page_allocator.free(old);
+        gop.value_ptr.frame = null;
+    }
+    gop.value_ptr.gen +%= 1;
+    gop.value_ptr.seq = 0;
+    gop.value_ptr.running = true;
+    gop.value_ptr.done = false;
+    gop.value_ptr.err = false;
+    return .{ .gen = gop.value_ptr.gen, .fresh = true };
+}
+
+/// Publish a new best-so-far frame for generation `gen`. Ignored (and the frame
+/// freed) if the job was superseded or already finished — so a stale solver's
+/// late write can't clobber a newer run.
+pub fn pcbJobFrame(name: []const u8, gen: u32, json: []const u8) void {
+    const dup = std.heap.page_allocator.dupe(u8, json) catch return;
+    pcb_jobs_mutex.lock();
+    defer pcb_jobs_mutex.unlock();
+    const e = pcb_jobs.getPtr(name) orelse {
+        std.heap.page_allocator.free(dup);
+        return;
+    };
+    if (e.gen != gen or !e.running) {
+        std.heap.page_allocator.free(dup);
+        return;
+    }
+    if (e.frame) |old| std.heap.page_allocator.free(old);
+    e.frame = dup;
+    e.seq +%= 1;
+}
+
+/// Mark generation `gen` finished (the browser then reloads to pick up the
+/// freshly-written auto-cache). No-op if a newer generation has taken over.
+pub fn pcbJobFinish(name: []const u8, gen: u32, outcome: JobOutcome) void {
+    pcb_jobs_mutex.lock();
+    defer pcb_jobs_mutex.unlock();
+    const e = pcb_jobs.getPtr(name) orelse return;
+    if (e.gen != gen) return;
+    e.running = false;
+    e.done = true;
+    e.err = outcome == .failed;
+}
+
+/// A consistent read of a job's state for the progress API. `frame` is duped
+/// into `alloc` (the request arena) so the handler can serialize it after the
+/// lock is released. Null when no job has ever run for `name`.
+pub const PcbJobView = struct {
+    gen: u32,
+    seq: u32,
+    running: bool,
+    done: bool,
+    err: bool,
+    frame: ?[]const u8,
+};
+
+/// Snapshot the current job state for `name`, duping the latest frame into
+/// `alloc`. Returns null if no job exists for `name`.
+pub fn pcbJobSnapshot(alloc: std.mem.Allocator, name: []const u8) ?PcbJobView {
+    pcb_jobs_mutex.lock();
+    defer pcb_jobs_mutex.unlock();
+    const e = pcb_jobs.get(name) orelse return null;
+    const fr: ?[]const u8 = if (e.frame) |f| (alloc.dupe(u8, f) catch null) else null;
+    return .{ .gen = e.gen, .seq = e.seq, .running = e.running, .done = e.done, .err = e.err, .frame = fr };
+}
+
 // ── Server ─────────────────────────────────────────────────────────────
 
 /// httpz request handler shared across every route and worker thread. Owns
@@ -98,7 +215,7 @@ pub const Handler = struct {
     /// `sessions.json`, `users.json`, `invites.json`, `oauth_clients.json`,
     /// `oauth_tokens.json`, `plugin_tokens.json`). Defaults to
     /// `<project_dir>/auth` when no explicit override is supplied — the
-    /// historic location. Override via `eda serve --auth-dir <path>` or the
+    /// historic location. Override via `netlisp serve --auth-dir <path>` or the
     /// `EDA_AUTH_DIR` env var so multiple worktrees / project checkouts
     /// share one passkey + session store and a passkey registered in one
     /// worktree keeps working in the others.
@@ -188,6 +305,8 @@ pub fn serve(
     router.post("/api/pcb-score/:name", pcb_layout_page.pcbScoreApi, .{});
     router.post("/api/pcb-score-batch/:name", pcb_layout_page.pcbScoreBatchApi, .{});
     router.post("/api/pcb-route/:name", pcb_layout_page.pcbRouteApi, .{});
+    router.post("/api/pcb-regen-start/:name", pcb_layout_page.pcbRegenStartApi, .{});
+    router.get("/api/pcb-progress/:name", pcb_layout_page.pcbProgressApi, .{});
     router.post("/api/courtyard/:name", pcb_layout_page.savePcbCourtyardApi, .{});
     router.get("/modules", modules_page.modulesListPage, .{});
     router.get("/modules/:name", modules_page.moduleViewPage, .{});
