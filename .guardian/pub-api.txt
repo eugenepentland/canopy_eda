@@ -390,6 +390,7 @@ src/placement/optimizer.zig::RefPose struct_
 src/placement/optimizer.zig::Score struct_
 src/placement/optimizer.zig::SeedMode enum_
 src/placement/optimizer.zig::Stub struct_
+src/placement/optimizer.zig::gridPlace fn
 src/placement/optimizer.zig::placeFromPoses fn
 src/placement/optimizer.zig::scorePoses fn
 src/placement/optimizer.zig::solve fn

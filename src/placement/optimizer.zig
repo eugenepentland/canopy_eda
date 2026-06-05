@@ -520,6 +520,61 @@ pub fn placeFromPoses(
     return finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
 }
 
+/// Place every part on a plain uniform grid (no optimization) — the cheap
+/// placeholder the layout page shows when a design has no cached or saved layout
+/// yet, so *opening* the page doesn't pay for a full solve. Same design model as
+/// `placeFromPoses` (escape stubs built, surrogate score so the score bar still
+/// has numbers), but positions come from `arrangeGrid` and `generated` is false
+/// (a raw grid is never persisted as the auto layout). The optimizer still runs
+/// on demand — the Regenerate / Apply-tuning paths and the small per-sub-block
+/// previews call `solve`.
+pub fn gridPlace(
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    params: Params,
+) std.mem.Allocator.Error!Placement {
+    var prep = try prepare(arena, block, project_dir, params);
+    const parts = prep.parts;
+    const nets = prep.nets;
+    const built = prep.built;
+    const stubs = try buildEscapeStubs(arena, nets, parts, &prep.idx_of);
+    applyKeepout(parts, stubs);
+    arrangeGrid(parts);
+    const score = scoreLayout(parts, &prep.idx_of, nets, built.loops);
+    const lsum = surrogateLoops(parts, built.loops);
+    const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
+    return finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
+}
+
+/// Lay parts out on a uniform grid, row-major in flatten order, filling a roughly
+/// square aspect. The cell is sized to the largest part's keepout span (so no two
+/// courtyards can overlap) plus a small gap, and each part is centred in its cell
+/// on the `GRID_MM` grid at rotation 0. Deterministic and O(n) — the "just show
+/// the parts" fallback, no springs or relaxation. Mutates `parts.x/y/rot`.
+fn arrangeGrid(parts: []Part) void {
+    if (parts.len == 0) return;
+    // Uniform cell = the widest/tallest keepout across all parts (the keepout
+    // centre can be offset by an escape stub, so account for both sides) + a gap.
+    var cw: f64 = 0;
+    var ch: f64 = 0;
+    for (parts) |p| {
+        cw = @max(cw, 2 * (keepHw(p) + @abs(keepCx(p) - p.x)));
+        ch = @max(ch, 2 * (keepHh(p) + @abs(keepCy(p) - p.y)));
+    }
+    const GAP_MM: f64 = 2.0;
+    cw = ceilToGrid(cw + GAP_MM);
+    ch = ceilToGrid(ch + GAP_MM);
+    const cols: usize = @max(1, @as(usize, @intFromFloat(@ceil(@sqrt(@as(f64, @floatFromInt(parts.len)))))));
+    for (parts, 0..) |*p, i| {
+        const col: f64 = @floatFromInt(i % cols);
+        const row: f64 = @floatFromInt(i / cols);
+        p.rot = 0;
+        p.x = @round((col * cw + cw / 2) / GRID_MM) * GRID_MM;
+        p.y = @round((row * ch + ch / 2) / GRID_MM) * GRID_MM;
+    }
+}
+
 /// The design model `solve` and `scorePoses` share: the flattened parts (with
 /// footprint geometry + grid-rounded courtyards), the ref→index map, the merged
 /// signal nets, and the springs/decoupling-loops — already classified
