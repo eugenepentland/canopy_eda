@@ -256,6 +256,8 @@ Public functions: load, isGroundFn
 Public functions: renderToHtml, setupRenderCtx, renderHubSvg, computeSubBlockAttachments
 
 - Excludes power-classified nets so a power-producer sub-block is not adopted into a consuming section
+- A passive bridging a single-hub-pin net and a multi-hub-pin net renders off its single-pin side
+- A passive bridging two single-hub-pin nets has no anchor and keeps default placement
 
 ## diagram/types
 

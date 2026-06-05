@@ -148,6 +148,12 @@ pub const RenderCtx = struct {
     pin_canonical_nets: std.StringHashMapUnmanaged([]const u8),
     rendered_spokes: std.StringHashMapUnmanaged(void),
     section_map: std.StringHashMapUnmanaged(usize),
+    /// Spoke ref-des → the base net name it should be drawn off (its "anchor"
+    /// side). Populated for a 2-terminal passive that bridges a net with a
+    /// single hub pin and a net with several hub pins: it renders off the
+    /// single-pin side (e.g. a BOOT pull-up at the MCU's lone BOOT pin) instead
+    /// of being buried among the busy rail's pins. See `computeSpokeAnchors`.
+    spoke_anchor_net: std.StringHashMapUnmanaged([]const u8),
 
     pub fn init(allocator: Allocator) RenderCtx {
         return .{
@@ -165,6 +171,7 @@ pub const RenderCtx = struct {
             .pin_canonical_nets = .empty,
             .rendered_spokes = .empty,
             .section_map = .empty,
+            .spoke_anchor_net = .empty,
         };
     }
 
@@ -324,7 +331,82 @@ pub const RenderCtx = struct {
         }
     }
 
+    /// A 2-terminal passive bridging a single-hub-pin net and a multi-hub-pin
+    /// net belongs on its single-pin side. For each spoke, gather the distinct
+    /// non-ground nets it touches; when there are exactly two and one has a lone
+    /// hub pin while the other has two or more, record that lone-pin net as the
+    /// spoke's anchor. `synthesizeSpokeConnections` then attaches the spoke only
+    /// to its anchor net's hub, so it renders off that pin (e.g. a BOOT pull-up
+    /// at the MCU's BOOT pin) and labels the busy rail at its far end instead.
+    ///
+    /// Only set the anchor when the spoke would actually attach to that lone hub
+    /// under the section-preference rules below (same section, or one side has
+    /// no section). Otherwise leave default behaviour so the spoke never ends up
+    /// attached to neither side.
+    fn computeSpokeAnchors(self: *RenderCtx) !void {
+        const a = self.allocator;
+
+        // Per base-net: hub-pin count, and the lone hub pin when the count is 1.
+        var hub_count: std.StringHashMapUnmanaged(u32) = .empty;
+        var sole_hub: std.StringHashMapUnmanaged(PinRef) = .empty;
+        for (self.nets.items) |net| {
+            const bn = baseNetName(net.name);
+            for (net.pins) |pin| {
+                if (self.spoke_set.contains(pin.ref_des)) continue;
+                const gop = try hub_count.getOrPut(a, bn);
+                gop.value_ptr.* = (if (gop.found_existing) gop.value_ptr.* else 0) + 1;
+                try sole_hub.put(a, bn, pin); // only read back when the count is 1
+            }
+        }
+
+        // Per spoke: the distinct non-ground base nets its pins touch.
+        var spoke_nets: std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .empty;
+        for (self.nets.items) |net| {
+            const bn = baseNetName(net.name);
+            if (isGroundNet(bn)) continue;
+            for (net.pins) |pin| {
+                if (!self.spoke_set.contains(pin.ref_des)) continue;
+                const gop = try spoke_nets.getOrPut(a, pin.ref_des);
+                if (!gop.found_existing) gop.value_ptr.* = .empty;
+                var present = false;
+                for (gop.value_ptr.items) |n| {
+                    if (std.mem.eql(u8, n, bn)) {
+                        present = true;
+                        break;
+                    }
+                }
+                if (!present) try gop.value_ptr.append(a, bn);
+            }
+        }
+
+        var it = spoke_nets.iterator();
+        while (it.next()) |kv| {
+            const nets = kv.value_ptr.items;
+            if (nets.len != 2) continue;
+            const c0 = hub_count.get(nets[0]) orelse 0;
+            const c1 = hub_count.get(nets[1]) orelse 0;
+
+            // One side a lone hub pin, the other two or more.
+            const anchor_net: ?[]const u8 = if (c0 == 1 and c1 >= 2)
+                nets[0]
+            else if (c1 == 1 and c0 >= 2)
+                nets[1]
+            else
+                null;
+
+            if (anchor_net) |an| {
+                const hp = sole_hub.get(an) orelse continue;
+                const ss = self.section_map.get(kv.key_ptr.*);
+                const hs = self.section_map.get(hp.ref_des);
+                if (ss == null or hs == null or ss.? == hs.?) {
+                    try self.spoke_anchor_net.put(a, kv.key_ptr.*, an);
+                }
+            }
+        }
+    }
+
     pub fn synthesizeSpokeConnections(self: *RenderCtx) !void {
+        try self.computeSpokeAnchors();
         for (self.nets.items) |net| {
             const bn = baseNetName(net.name);
             if (isGroundNet(bn)) continue;
@@ -377,6 +459,12 @@ pub const RenderCtx = struct {
             }
 
             for (spoke_pins_buf[0..spoke_count]) |sp| {
+                // Anchored spoke (single-pin-side passive): attach only on its
+                // anchor net so it renders off the lone pin, not the busy rail.
+                if (self.spoke_anchor_net.get(sp.ref_des)) |anchor| {
+                    if (!std.mem.eql(u8, anchor, bn)) continue;
+                }
+
                 const spoke_section = self.section_map.get(sp.ref_des);
 
                 // When the spoke has a section, prefer hubs in the same section.
