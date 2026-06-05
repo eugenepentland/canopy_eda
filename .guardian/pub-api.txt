@@ -774,7 +774,7 @@ src/serve/pcb_layout_page.zig::RefPose value
 src/serve/pcb_layout_page.zig::SyncPose struct_
 src/serve/pcb_layout_page.zig::SyncVia struct_
 src/serve/pcb_layout_page.zig::deleteNamedLayoutApi fn
-src/serve/pcb_layout_page.zig::loadModulePoses fn
+src/serve/pcb_layout_page.zig::loadSubBlockPoses fn
 src/serve/pcb_layout_page.zig::loadSyncLayout fn
 src/serve/pcb_layout_page.zig::loadSyncVias fn
 src/serve/pcb_layout_page.zig::pcbLayoutJsonApi fn
