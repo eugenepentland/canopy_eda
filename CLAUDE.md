@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-A CLI-driven electronic design automation tool for schematic capture. All design files use S-expression syntax. A single Zig binary (`eda`) parses, evaluates, validates, renders, and serves designs.
+A CLI-driven electronic design automation tool for schematic capture. All design files use S-expression syntax. A single Zig binary (`netlisp`) parses, evaluates, validates, renders, and serves designs.
 
 ## Build & Run
 
@@ -291,7 +291,7 @@ The production EDA server runs at **https://co-circuit.eugenepentland.dev** —
 that's the canonical URL for the KiCad-sync agent and any remote MCP client.
 Local dev still uses `http://localhost:7050`.
 
-`eda serve` starts an HTTP server with the schematic viewer + review report:
+`netlisp serve` starts an HTTP server with the schematic viewer + review report:
 
 - **Design list**: `GET /` — links to all .sexp designs
 - **Schematic viewer**: `GET /schematics/:name` — server-rendered HTML schematic with embedded SVG
@@ -308,11 +308,11 @@ Local dev still uses `http://localhost:7050`.
 
 ```bash
 # Terminal 1: start server (default port 7050)
-eda serve --project-dir projects/designs
+netlisp serve --project-dir projects/designs
 
 # Terminal 2: edit and push
 vim projects/designs/src/stm32n6/stm32n6.sexp
-eda build --project-dir projects/designs --push stm32n6
+netlisp build --project-dir projects/designs --push stm32n6
 # Browser auto-updates within 500ms
 ```
 
@@ -340,7 +340,7 @@ is live.
 
 ### MCP server (Claude Code integration)
 
-`eda serve` exposes an MCP server so Claude Code can pull schematics, edit
+`netlisp serve` exposes an MCP server so Claude Code can pull schematics, edit
 the underlying `.sexp` files, and have the browser viewer update live. Two
 transports:
 
@@ -387,7 +387,7 @@ works without a passkey setup.
 
 ```bash
 # Connect from Claude Code:
-claude mcp add --transport http eda http://localhost:7050/mcp \
+claude mcp add --transport http netlisp http://localhost:7050/mcp \
   --client-id eda_c_... --client-secret eda_s_...
 # Claude opens a browser for the authorize step.
 ```

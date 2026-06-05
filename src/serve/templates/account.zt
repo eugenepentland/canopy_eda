@@ -24,7 +24,7 @@ pub templ Account(
     <html>
         <head>
             <meta name="viewport" content="width=device-width,initial-scale=1" />
-            <title>Account — Canopy EDA</title>
+            <title>Account — Netlisp</title>
             {!AUTH_STYLE_BLOCK}
             <link rel="stylesheet" href="/static/account_page.css" />
         </head>
