@@ -2591,7 +2591,9 @@ fn seedSubBlocks(d: *DiffContext, w: anytype, first: *bool, adds: []const Pendin
             for (idxs) |idx| try leftover.append(arena, adds[idx]);
             continue;
         };
-        const poses = pcb_layout.loadModulePoses(arena, d.spc.project_dir, sb.source) orelse {
+        // Poses re-keyed onto this sub-block's own flattened refs (by origin_key)
+        // so a module layout saved in a different design's ref-namespace still maps.
+        const poses = pcb_layout.loadSubBlockPoses(arena, d.spc.project_dir, sb) orelse {
             for (idxs) |idx| try leftover.append(arena, adds[idx]);
             continue;
         };

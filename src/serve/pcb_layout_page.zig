@@ -20,6 +20,7 @@ const geometry = @import("../placement/geometry.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
 const modules_mod = @import("modules.zig");
+const netlist = @import("../export_kicad_netlist.zig");
 const export_kicad = @import("../export_kicad.zig");
 const export_kicad_footprint = @import("../export_kicad_footprint.zig");
 const review = @import("../review.zig");
@@ -1526,7 +1527,7 @@ fn readAutoPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []cons
 /// CCW). The sync stamps these onto a footprint it inserts for the first time.
 pub const SyncPose = struct { x: f64, y: f64, rot: f64 };
 
-/// Re-export so the KiCad sync can name a module's poses (`loadModulePoses`)
+/// Re-export so the KiCad sync can name a module's poses (`loadSubBlockPoses`)
 /// without importing the placement layer directly.
 pub const RefPose = optimizer.RefPose;
 
@@ -1584,14 +1585,81 @@ pub fn loadSyncLayout(
 /// layouts store only positions, so the vias are *computed* at sync time.
 pub const SyncVia = struct { x: f64, y: f64, dia: f64, drill: f64, net: []const u8 };
 
-/// The chosen sync poses for a design *or module* by name — the default-aware
-/// selection (`chooseSyncPoses`), exposed for the per-sub-block sync so it can
-/// load a sub-module's own default layout (keyed by the module's ref-des, which
-/// matches the design's flattened sub-block refs minus the sub-block prefix —
-/// both resolve through the same in-design instantiation). Null when the
-/// module has no saved layout. Result lives on `alloc` (request lifetime).
-pub fn loadModulePoses(alloc: std.mem.Allocator, project_dir: []const u8, module_name: []const u8) ?[]const optimizer.RefPose {
-    return chooseSyncPoses(alloc, project_dir, module_name);
+/// Map a saved layout's poses onto stable `origin_key`, via the *design* named
+/// `source` — the one `/pcb-layout/<source>` flattened to produce the layout.
+/// The layout's ref-des keys carry that design's wrapper prefix (e.g. the
+/// `tpsm84338` eval wraps the module in a `pwr` sub-block → `pwr/U2`), so
+/// re-flattening the same design reproduces those refs exactly; each maps to the
+/// module-local `origin_key` (stable across renumbering and across boards). A
+/// bare-ref alias is also indexed so a layout saved without the wrapper still
+/// bridges. Null on any resolution failure (caller falls back to the raw layout).
+fn poseByOriginKey(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    source: []const u8,
+    layout: []const optimizer.RefPose,
+) ?std.StringHashMap(SyncPose) {
+    const path = paths.designSourcePath(alloc, project_dir, source) catch return null;
+    defer alloc.free(path);
+    const eval = alloc.create(Evaluator) catch return null;
+    defer {
+        eval.deinit();
+        alloc.destroy(eval);
+    }
+    eval.* = Evaluator.init(alloc, project_dir);
+    const result = eval.evalFile(path) catch return null;
+    const dblock = switch (result) {
+        .design_block => |b| b,
+        else => return null,
+    };
+    var flat: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
+    netlist.collectInstances(alloc, dblock, "", &flat) catch return null;
+    var ok_of = std.StringHashMap([]const u8).init(alloc);
+    for (flat.items) |fi| {
+        ok_of.put(fi.ref_des, fi.origin_key) catch return null;
+        if (std.mem.lastIndexOfScalar(u8, fi.ref_des, '/')) |slash| {
+            ok_of.put(fi.ref_des[slash + 1 ..], fi.origin_key) catch return null;
+        }
+    }
+    var pose_by_ok = std.StringHashMap(SyncPose).init(alloc);
+    for (layout) |p| {
+        const ok = ok_of.get(p.ref) orelse continue;
+        if (ok.len == 0) continue;
+        // `ok` borrows the eval's arena (freed on the defer) — dupe it.
+        const key = alloc.dupe(u8, ok) catch return null;
+        pose_by_ok.put(key, .{ .x = p.x, .y = p.y, .rot = p.rot }) catch return null;
+    }
+    return pose_by_ok;
+}
+
+/// A sub-module's default layout re-keyed onto **`sub_block`'s own flattened
+/// ref-des**, bridged by stable `origin_key`. A module's saved layout is keyed
+/// by the ref-des of whatever design `/pcb-layout/<module>` rendered when it was
+/// saved (e.g. the `tpsm84338` eval wraps the module in a `pwr` sub-block →
+/// `pwr/U2`). The *same* part inside another board flattens differently
+/// (`buck_3v3d/U11`) — different wrapper AND renumbering — so a prefix-strip
+/// can't bridge them. This resolves the module to map its layout refs →
+/// `origin_key`, then re-keys the poses onto `sub_block.block`'s flattened refs
+/// by matching `origin_key` (the module-local identity, stable across both).
+/// Falls back to the raw layout (caller prefix-strips) when the module can't be
+/// resolved or nothing bridges. Result lives on `alloc` (request lifetime).
+pub fn loadSubBlockPoses(alloc: std.mem.Allocator, project_dir: []const u8, sub_block: env_mod.SubBlock) ?[]const optimizer.RefPose {
+    const layout = chooseSyncPoses(alloc, project_dir, sub_block.source) orelse return null;
+
+    // origin_key → pose, via the design that produced the layout (see helper).
+    const pose_by_ok = poseByOriginKey(alloc, project_dir, sub_block.source, layout) orelse return layout;
+
+    // Re-key onto sub_block's own flattened refs by origin_key.
+    var flat2: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
+    netlist.collectInstances(alloc, sub_block.block, "", &flat2) catch return layout;
+    var out: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
+    for (flat2.items) |fi| {
+        if (fi.origin_key.len == 0) continue;
+        const pose = pose_by_ok.get(fi.origin_key) orelse continue;
+        out.append(alloc, .{ .ref = fi.ref_des, .x = pose.x, .y = pose.y, .rot = pose.rot }) catch return layout;
+    }
+    if (out.items.len == 0) return layout; // nothing bridged — let the caller prefix-strip
+    return out.toOwnedSlice(alloc) catch layout;
 }
 
 /// The GND vias for a placement at exactly `poses` (built from `block`): run the
