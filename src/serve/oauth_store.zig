@@ -5,6 +5,7 @@ const clock = @import("../infra/clock.zig");
 const log = @import("../infra/log.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const infra_random = @import("../infra/random.zig");
+const auth_store = @import("auth_store.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const AUTH_CODE_TTL_SECS: i64 = 600; // 10 min
@@ -106,11 +107,7 @@ fn tokensPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/oauth_tokens.json", .{auth_dir});
 }
 
-fn ensureAuthDir(auth_dir: []const u8) void {
-    infra_fs.cwd().makePath(auth_dir) catch |e| {
-        log.warn("makePath {s} failed: {s}", .{ auth_dir, @errorName(e) });
-    };
-}
+const ensureAuthDir = auth_store.ensureAuthDir;
 
 fn loadClients(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     const path = clientsPath(allocator, auth_dir) catch return;
@@ -545,20 +542,10 @@ pub fn validateToken(allocator: std.mem.Allocator, auth_dir: []const u8, raw: []
 
 // ── Crypto helpers ──────────────────────────────────────────────────────
 
-/// SHA-256 of `input` rendered as a 64-char lower-case hex string.
-/// Caller owns the buffer. Used to hash secrets and tokens before they
-/// reach `oauth_clients.json` / `oauth_tokens.json`.
-pub fn sha256Hex(allocator: std.mem.Allocator, input: []const u8) std.mem.Allocator.Error![]u8 {
-    var digest: [32]u8 = undefined;
-    Sha256.hash(input, &digest, .{});
-    var out = try allocator.alloc(u8, 64);
-    const hex = "0123456789abcdef";
-    for (digest, 0..) |b, i| {
-        out[i * 2] = hex[b >> 4];
-        out[i * 2 + 1] = hex[b & 0x0f];
-    }
-    return out;
-}
+/// SHA-256 of `input` as a 64-char lower-case hex string (re-exported from
+/// `auth_store`). Used to hash secrets and tokens before they reach
+/// `oauth_clients.json` / `oauth_tokens.json`.
+pub const sha256Hex = auth_store.sha256Hex;
 
 /// SHA-256 of `input` rendered as base64url with no padding — the format
 /// PKCE S256 uses for `code_challenge`. Used by `verifyPkce` to compare

@@ -1067,8 +1067,7 @@ fn writeSectionPorts(w: anytype, sec: Section) !void {
 /// Render the per-section "Boundary contracts" block on the schematic page —
 /// one row per `(port …)` that declared an `(electrical ...)` sub-clause.
 /// Skipped entirely when no port on the section carries electrical data, so
-/// sections without boundary contracts stay uncluttered. Same renderer
-/// shape as `review_html.writeBoundaryContracts` but reads
+/// sections without boundary contracts stay uncluttered. Reads
 /// `env_mod.SectionPort` directly (the schematic page never builds the
 /// flattened `PortSummary` view).
 fn writeSectionBoundaryContracts(w: anytype, sec: Section) !void {

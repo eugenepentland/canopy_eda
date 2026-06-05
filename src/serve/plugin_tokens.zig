@@ -3,8 +3,8 @@ const json_writer = @import("../json_writer.zig");
 const clock = @import("../infra/clock.zig");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
-const Sha256 = std.crypto.hash.sha2.Sha256;
 const infra_random = @import("../infra/random.zig");
+const auth_store = @import("auth_store.zig");
 
 /// Stored record for a minted plugin token. Only the hash is persisted —
 /// the raw token is shown once at mint time and never stored.
@@ -22,11 +22,7 @@ fn tokensPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/plugin_tokens.json", .{auth_dir});
 }
 
-fn ensureAuthDir(auth_dir: []const u8) void {
-    infra_fs.cwd().makePath(auth_dir) catch |e| {
-        log.warn("makePath {s} failed: {s}", .{ auth_dir, @errorName(e) });
-    };
-}
+const ensureAuthDir = auth_store.ensureAuthDir;
 
 fn ensureLoaded(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     if (loaded_auth_dir) |d| {
@@ -114,17 +110,7 @@ pub fn validate(allocator: std.mem.Allocator, auth_dir: []const u8, raw: []const
 
 // ── helpers ─────────────────────────────────────────────────────────────
 
-fn sha256Hex(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var digest: [32]u8 = undefined;
-    Sha256.hash(input, &digest, .{});
-    const hex = "0123456789abcdef";
-    var out = try allocator.alloc(u8, 64);
-    for (digest, 0..) |b, i| {
-        out[i * 2] = hex[b >> 4];
-        out[i * 2 + 1] = hex[b & 0x0f];
-    }
-    return out;
-}
+const sha256Hex = auth_store.sha256Hex;
 
 fn randomHex(allocator: std.mem.Allocator, n_chars: usize) ![]u8 {
     const n_bytes = (n_chars + 1) / 2;

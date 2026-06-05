@@ -6,29 +6,13 @@ const FlatInst = ctx_mod.FlatInst;
 const AdjEntry = ctx_mod.AdjEntry;
 const PinGroup = ctx_mod.PinGroup;
 const draw = @import("draw.zig");
-const hub_width = draw.hub_width;
-const hub_x = draw.hub_x;
-const pin_stub = draw.pin_stub;
 const per_conn_spacing = draw.per_conn_spacing;
 const isGroundNet = draw.isGroundNet;
 const baseNetName = draw.baseNetName;
-const shortRef = draw.shortRef;
-const displayValue = draw.displayValue;
 const pinOrder = draw.pinOrder;
-const writeDebugPin = draw.writeDebugPin;
 const connection = @import("connection.zig");
 const branch = @import("branch.zig");
 const RenderError = draw.RenderError;
-
-// ── Layout constants ──────────────────────────────────────────────
-const HALF_DIVISOR: f64 = 2.0;
-const HUB_VPAD: f64 = 40.0;
-const HUB_TITLE_Y: f64 = 18.0;
-const PIN_LABEL_PAD_X: f64 = 8.0;
-const PIN_LABEL_PAD_Y: f64 = 4.0;
-const PIN_NUMBER_INSET_LEFT: f64 = 38.0;
-const PIN_NUMBER_INSET_RIGHT: f64 = 36.0;
-const PIN_NUMBER_BASELINE: f64 = 1.0;
 
 /// How many stubs a group renders given `stub_count` distinct stubs. Every
 /// distinct stub is drawn in full (stem-folding in `buildStubs` already keeps

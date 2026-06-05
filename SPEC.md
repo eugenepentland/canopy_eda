@@ -346,11 +346,6 @@ Public functions: renderBlockDiagramTabs, renderSystemSvg
 
 Public functions: renderSchematic
 
-## render_svg/draw
-
-- Keeps short pin lists verbatim
-- Collapses four or more pins to an Nx summary
-
 ## erc
 
 - Emits power_budget error when load max exceeds source max

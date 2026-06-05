@@ -101,7 +101,7 @@ pub fn computeInstanceCoverage(
     inst: Instance,
     req_results: []const req_checks.Result,
 ) std.mem.Allocator.Error!?InstanceCoverage {
-    if (isTestPoint(inst)) return null;
+    if (env_mod.isTestPoint(inst.component)) return null;
     if (inst.requirements_ignored) return null;
     if (inst.ref_des.len == 0) return null;
     const class = classifyByRefDes(inst.ref_des);
@@ -302,11 +302,6 @@ fn classifyByRefDes(ref_des: []const u8) ComponentClass {
         'R', 'C', 'L', 'F', 'D' => .passive,
         else => .ic,
     };
-}
-
-fn isTestPoint(inst: Instance) bool {
-    return std.mem.eql(u8, inst.component, "testpoint") or
-        std.mem.startsWith(u8, inst.component, "testpoint-");
 }
 
 fn hasProperty(inst: Instance, key: []const u8) bool {

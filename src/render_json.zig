@@ -59,8 +59,6 @@ const VB_MARGIN: f64 = 40.0;
 const FAR_X_SENTINEL: f64 = 99999.0;
 const BUS_OFFSET: f64 = 10.0;
 const BRANCH_BUS_GAP: f64 = 10.0;
-const PORT_BLOCK_PAD: f64 = 40.0;
-const PORT_SPACING: f64 = 40.0;
 
 // ── JSON Scene Graph Types ───────────────────────────────────────────
 
@@ -170,25 +168,6 @@ const JsonLabel = struct {
     is_ground: bool,
 };
 
-const JsonPort = struct {
-    name: []const u8,
-    net: []const u8,
-    direction: []const u8,
-    y: f64,
-    rated_min: ?f64,
-    rated_max: ?f64,
-};
-
-const JsonPortBlock = struct {
-    name: []const u8,
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-    icon: ?[]const u8,
-    ports: std.ArrayListUnmanaged(JsonPort),
-};
-
 const SceneGraph = struct {
     allocator: Allocator,
     vb_w: f64 = 0,
@@ -199,7 +178,6 @@ const SceneGraph = struct {
     wires: std.ArrayListUnmanaged(JsonWire),
     passives: std.ArrayListUnmanaged(JsonPassive),
     labels: std.ArrayListUnmanaged(JsonLabel),
-    port_blocks: std.ArrayListUnmanaged(JsonPortBlock),
 
     fn init(allocator: Allocator) SceneGraph {
         return .{
@@ -209,7 +187,6 @@ const SceneGraph = struct {
             .wires = .empty,
             .passives = .empty,
             .labels = .empty,
-            .port_blocks = .empty,
         };
     }
 
@@ -732,22 +709,6 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
 
     // Serialize to JSON
     return serializeScene(allocator, &scene);
-}
-
-fn countDir(ports: []const env_mod.Port, dir: []const u8) usize {
-    var c: usize = 0;
-    for (ports) |p| {
-        if (std.mem.eql(u8, p.direction, dir)) c += 1;
-    }
-    return c;
-}
-
-fn countNonOut(ports: []const env_mod.Port) usize {
-    var c: usize = 0;
-    for (ports) |p| {
-        if (!std.mem.eql(u8, p.direction, "out")) c += 1;
-    }
-    return c;
 }
 
 const BranchResult = struct { end_x: f64, cy: f64, terminal: []const u8 };
@@ -1563,60 +1524,6 @@ fn collectTerminalLabel(ctx: *RenderCtx, scene: *SceneGraph, end_x: f64, cy: f64
     }
 }
 
-// ── Port block collection ────────────────────────────────────────────
-
-fn collectPortBlock(scene: *SceneGraph, allocator: Allocator, name: []const u8, ports: []const env_mod.Port, y_start: f64, icon: ?[]const u8) !void {
-    var left_count: usize = 0;
-    var right_count: usize = 0;
-    for (ports) |port| {
-        if (std.mem.eql(u8, port.direction, "out")) {
-            right_count += 1;
-        } else {
-            left_count += 1;
-        }
-    }
-
-    const port_spacing: f64 = PORT_SPACING;
-    const box_pad: f64 = PORT_BLOCK_PAD;
-    const max_side = @max(@max(left_count, right_count), 1);
-    const block_height = box_pad * HALF_DIVISOR + @as(f64, @floatFromInt(max_side - 1)) * port_spacing;
-
-    var port_block = JsonPortBlock{
-        .name = name,
-        .x = hub_x,
-        .y = y_start,
-        .w = hub_width,
-        .h = block_height,
-        .icon = icon,
-        .ports = .empty,
-    };
-
-    var left_idx: usize = 0;
-    var right_idx: usize = 0;
-    for (ports) |port| {
-        const is_output = std.mem.eql(u8, port.direction, "out");
-        const idx = if (is_output) right_idx else left_idx;
-        const py = y_start + box_pad + @as(f64, @floatFromInt(idx)) * port_spacing;
-
-        try port_block.ports.append(allocator, .{
-            .name = port.name,
-            .net = port.net,
-            .direction = port.direction,
-            .y = py,
-            .rated_min = port.rated_min,
-            .rated_max = port.rated_max,
-        });
-
-        if (is_output) {
-            right_idx += 1;
-        } else {
-            left_idx += 1;
-        }
-    }
-
-    try scene.port_blocks.append(allocator, port_block);
-}
-
 // ── JSON Serialization ───────────────────────────────────────────────
 
 fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
@@ -1748,41 +1655,6 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
             if (l.is_ground) "true" else "false",
         });
         try w.writeAll("}");
-    }
-    try w.writeAll("]");
-
-    // Port blocks
-    try w.writeAll(",\"portBlocks\":[");
-    for (scene.port_blocks.items, 0..) |pb, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll("{");
-        try writeJsonString(w, "name", pb.name);
-        try w.print(",\"x\":{d:.1},\"y\":{d:.1},\"w\":{d:.0},\"h\":{d:.1}", .{ pb.x, pb.y, pb.w, pb.h });
-        if (pb.icon) |ic| {
-            try w.writeAll(",");
-            try writeJsonString(w, "icon", ic);
-        } else {
-            try w.writeAll(",\"icon\":null");
-        }
-        try w.writeAll(",\"ports\":[");
-        for (pb.ports.items, 0..) |port, pi| {
-            if (pi > 0) try w.writeAll(",");
-            try w.writeAll("{");
-            try writeJsonString(w, "name", port.name);
-            try w.writeAll(",");
-            try writeJsonString(w, "net", port.net);
-            try w.writeAll(",");
-            try writeJsonString(w, "direction", port.direction);
-            try w.print(",\"y\":{d:.1}", .{port.y});
-            if (port.rated_min) |rm| {
-                try w.print(",\"ratedMin\":{d:.2}", .{rm});
-            }
-            if (port.rated_max) |rm| {
-                try w.print(",\"ratedMax\":{d:.2}", .{rm});
-            }
-            try w.writeAll("}");
-        }
-        try w.writeAll("]}");
     }
     try w.writeAll("]");
 

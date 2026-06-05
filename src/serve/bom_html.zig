@@ -132,7 +132,7 @@ pub fn writeSchematicBomHtml(wr: anytype, block: *const env_mod.DesignBlock) Bom
         // Test points are probe pads, not parts a fab sources. They
         // surface in the dedicated TestPoints table on the review
         // embed; suppress them from the parts BOM in every renderer.
-        if (isTestPoint(inst.component)) continue;
+        if (env_mod.isTestPoint(inst.component)) continue;
         var found = false;
         for (lines.items) |*line| {
             if (std.mem.eql(u8, line.component, inst.component) and
@@ -296,7 +296,7 @@ pub fn writeBomCsv(w: anytype, block: *const env_mod.DesignBlock) BomError!void 
         // Test points are probe pads, not parts a fab sources. They
         // surface in the dedicated TestPoints table on the review
         // embed; suppress them from the parts BOM in every renderer.
-        if (isTestPoint(inst.component)) continue;
+        if (env_mod.isTestPoint(inst.component)) continue;
         var found = false;
         for (lines.items) |*line| {
             if (std.mem.eql(u8, line.component, inst.component) and
@@ -434,16 +434,6 @@ fn attrsEqual(a: []const []const u8, b: []const []const u8) bool {
         if (!std.mem.eql(u8, x, y)) return false;
     }
     return true;
-}
-
-/// True when `component` is a test-probe pad (e.g. `testpoint`,
-/// `testpoint-1mm`, `testpoint-loop`). The schematic BOM and CSV/HTML
-/// exports filter these out — they're board features, not parts a fab
-/// orders. Same predicate as `review.isTestPoint` so the two stay in
-/// sync; copied here to avoid a serve/-into-review cyclic import.
-fn isTestPoint(component: []const u8) bool {
-    return std.mem.eql(u8, component, "testpoint") or
-        std.mem.startsWith(u8, component, "testpoint-");
 }
 
 /// Scan `lib/pinouts/*.sexp` once and return a map from symbol name to its
@@ -755,7 +745,7 @@ pub fn countBom(allocator: std.mem.Allocator, block: *const env_mod.DesignBlock)
     var keys: std.ArrayListUnmanaged(Key) = .empty;
     var counts: BomCounts = .{};
     for (all.items) |inst| {
-        if (isTestPoint(inst.component)) continue;
+        if (env_mod.isTestPoint(inst.component)) continue;
         counts.total += 1;
         var found = false;
         for (keys.items) |k| {

@@ -196,6 +196,7 @@ src/eval/env.zig::TestPointTag enum_
 src/eval/env.zig::Value value
 src/eval/env.zig::Verification struct_
 src/eval/env.zig::containsString fn
+src/eval/env.zig::isTestPoint fn
 src/eval/env.zig::parseCheck fn
 src/eval/env.zig::parseNoteRef fn
 src/eval/env.zig::requirementIdForText fn
@@ -452,7 +453,6 @@ src/render_svg/draw.zig::baseNetName fn
 src/render_svg/draw.zig::branch_spacing value
 src/render_svg/draw.zig::bus_gap value
 src/render_svg/draw.zig::classifyComponent fn
-src/render_svg/draw.zig::compactPinNumbers fn
 src/render_svg/draw.zig::containsCI fn
 src/render_svg/draw.zig::displayValue fn
 src/render_svg/draw.zig::drawBlockIcon fn
@@ -591,6 +591,8 @@ src/serve/auth.zig::setupPage fn
 src/serve/auth.zig::validateBearerToken fn
 src/serve/auth.zig::validatePluginBearerToken fn
 src/serve/auth.zig::validateSession fn
+src/serve/auth_store.zig::ensureAuthDir fn
+src/serve/auth_store.zig::sha256Hex fn
 src/serve/bom_html.zig::BomCounts struct_
 src/serve/bom_html.zig::BomError value
 src/serve/bom_html.zig::SymbolPin struct_
@@ -740,7 +742,7 @@ src/serve/oauth_store.zig::listClientsByEmail fn
 src/serve/oauth_store.zig::revokeAllClientsForEmail fn
 src/serve/oauth_store.zig::revokeClient fn
 src/serve/oauth_store.zig::sha256Base64Url fn
-src/serve/oauth_store.zig::sha256Hex fn
+src/serve/oauth_store.zig::sha256Hex value
 src/serve/oauth_store.zig::validateToken fn
 src/serve/oauth_store.zig::verifyClientSecret fn
 src/serve/oauth_store.zig::verifyPkce fn

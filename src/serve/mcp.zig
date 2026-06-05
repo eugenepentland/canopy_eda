@@ -10,18 +10,11 @@ const users = @import("users.zig");
 const mcp_tools = @import("mcp_tools.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
-// JSON-RPC 2.0 standard error codes (RFC). The magnitude is declared as
-// a positive const so the literal sits immediately after `=` and the
-// magic-number checker accepts it (the checker only suppresses literals
-// directly after `=`, not after a unary minus).
-const JSONRPC_INVALID_REQUEST_ABS: i32 = 32600;
-const JSONRPC_METHOD_NOT_FOUND_ABS: i32 = 32601;
-const JSONRPC_INVALID_PARAMS_ABS: i32 = 32602;
-const JSONRPC_SERVER_ERROR_ABS: i32 = 32000;
-const JSONRPC_INVALID_REQUEST: i32 = -JSONRPC_INVALID_REQUEST_ABS;
-const JSONRPC_METHOD_NOT_FOUND: i32 = -JSONRPC_METHOD_NOT_FOUND_ABS;
-const JSONRPC_INVALID_PARAMS: i32 = -JSONRPC_INVALID_PARAMS_ABS;
-const JSONRPC_SERVER_ERROR: i32 = -JSONRPC_SERVER_ERROR_ABS;
+// JSON-RPC 2.0 standard error codes (RFC).
+const JSONRPC_INVALID_REQUEST: i32 = -32600;
+const JSONRPC_METHOD_NOT_FOUND: i32 = -32601;
+const JSONRPC_INVALID_PARAMS: i32 = -32602;
+const JSONRPC_SERVER_ERROR: i32 = -32000;
 
 const JSONRPC_ENVELOPE_PREFIX: []const u8 = "{\"jsonrpc\":\"2.0\",\"id\":";
 
@@ -72,7 +65,7 @@ pub fn dispatchFrame(
     };
     const root = parsed.value;
     if (root != .object) {
-        return try errorEnvelopeRawId(allocator, "null", JSONRPC_INVALID_REQUEST, "invalid request");
+        return try errorEnvelope(allocator, null, JSONRPC_INVALID_REQUEST, "invalid request");
     }
     const obj = root.object;
 
@@ -244,17 +237,6 @@ fn errorEnvelope(allocator: std.mem.Allocator, id_val: ?std.json.Value, code: i3
     const w = buf.writer(allocator);
     try w.writeAll(JSONRPC_ENVELOPE_PREFIX);
     try writeIdTo(w, id_val);
-    try w.print(",\"error\":{{\"code\":{d},\"message\":", .{code});
-    try json_writer.writeString(w, msg);
-    try w.writeAll("}}");
-    return buf.items;
-}
-
-fn errorEnvelopeRawId(allocator: std.mem.Allocator, raw_id: []const u8, code: i32, msg: []const u8) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const w = buf.writer(allocator);
-    try w.writeAll(JSONRPC_ENVELOPE_PREFIX);
-    try w.writeAll(raw_id);
     try w.print(",\"error\":{{\"code\":{d},\"message\":", .{code});
     try json_writer.writeString(w, msg);
     try w.writeAll("}}");
