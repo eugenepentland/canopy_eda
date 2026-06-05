@@ -2641,7 +2641,8 @@ const BOARD_JS =
     \\ if((ev.key=="r"||ev.key=="R")&&cur>=0){ev.preventDefault();
     \\   P[cur].rot=((((P[cur].rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;
     \\   setT(cur);clearRoute();rats();fetchScore();}});
-    \\function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetchScore();}
+    \\function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetchScore();
+    \\ if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();}
     \\document.getElementById("pcb-reset").addEventListener("click",function(){
     \\ P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;});applyAll();});
     \\document.getElementById("pcb-score").addEventListener("click",fetchScore);
