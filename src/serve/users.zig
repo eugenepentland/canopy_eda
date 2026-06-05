@@ -2,6 +2,7 @@ const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
 const clock = @import("../infra/clock.zig");
 const log = @import("../infra/log.zig");
+const auth_store = @import("auth_store.zig");
 
 /// Permission tier assigned to a user. Drives the canWrite/canAdmin gates
 /// the auth middleware and MCP dispatcher consult before accepting a
@@ -54,11 +55,7 @@ fn usersPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/users.json", .{auth_dir});
 }
 
-fn ensureAuthDir(auth_dir: []const u8) void {
-    infra_fs.cwd().makePath(auth_dir) catch |e| {
-        log.warn("makePath {s} failed: {s}", .{ auth_dir, @errorName(e) });
-    };
-}
+const ensureAuthDir = auth_store.ensureAuthDir;
 
 fn ensureLoaded(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     if (loaded_auth_dir) |d| {
