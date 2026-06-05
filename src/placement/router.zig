@@ -58,6 +58,17 @@ pub const RouteResult = struct {
 const MAX_NODES: usize = 200_000;
 const EMPTY: i32 = -1;
 const VIA_COST_MULT: f64 = 4.0; // a layer change costs ~4 grid steps
+/// Nets with at most this many pads get the top-layer-first attempt (feedback
+/// taps, straps, short two/three-pad signals). Fat nets skip it — see pass 2.
+const TOP_FIRST_MAX_PADS: usize = 4;
+/// Top-layer-first runs only on boards no larger than this. Bigger boards are
+/// dense enough that forcing short nets onto the surface costs more (slow failed
+/// searches) than it saves and disturbs the routing of other nets — see pass 2.
+const TOP_FIRST_MAX_PARTS: usize = 32;
+/// Return-path stitching runs only on boards no larger than this. The pass is
+/// purely additive (it can't disturb existing routing), but it runs a via search
+/// per unstitched signal via, so a huge board's already-long route is left alone.
+const STITCH_MAX_PARTS: usize = 48;
 const SQRT2: f64 = 1.4142135623730951; // diagonal step length vs. orthogonal
 
 /// Route `placement` under `params`. All output is allocated in `arena`.
@@ -136,11 +147,38 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
         try order.append(arena, net_i);
     }
     std.sort.pdq(usize, order.items, net_pri, priorityDesc);
+    // Top-layer-first only on small boards. There it keeps short signal nets on
+    // the surface (no needless vias) with room to spare. On a big, congested
+    // board it backfires: most top-only attempts fail after an exhaustive (and,
+    // with the outline test, slow) surface search, and the few that succeed shift
+    // the greedy first-come routing enough to strand other nets — so we skip it
+    // and route exactly as before. Mirrors the routed-scoring part gate.
+    const top_first = placement.parts.len <= TOP_FIRST_MAX_PARTS;
     for (order.items) |net_i| {
         const pts = try netPoints(arena, placement, &idx_of, placement.nets[net_i]);
         if (pts.len < 2) continue;
         total += 1;
-        if (try routeNet(&ctx, @intCast(net_i), pts, &tracks, &vias)) routed += 1;
+        const ni: i32 = @intCast(net_i);
+        // …and only for *short* nets (a feedback tap, a strap — a handful of
+        // pads), which almost always have a clear surface path. A short net with
+        // no top path rolls back and re-routes with layer changes, same as before.
+        if (top_first and pts.len <= TOP_FIRST_MAX_PADS) {
+            const t_mark = tracks.items.len;
+            const v_mark = vias.items.len;
+            ctx.allow_vias = false;
+            ctx.use_poly = true; // accurate outlines so an EP notch frees the escape
+            const top_ok = try routeNet(&ctx, ni, pts, &tracks, &vias);
+            ctx.allow_vias = true;
+            ctx.use_poly = false;
+            if (top_ok) {
+                routed += 1;
+                continue;
+            }
+            tracks.shrinkRetainingCapacity(t_mark);
+            vias.shrinkRetainingCapacity(v_mark);
+            clearNetOcc(&ctx, ni);
+        }
+        if (try routeNet(&ctx, ni, pts, &tracks, &vias)) routed += 1;
     }
 
     // Escape breakouts: the optimizer reserved a corridor in front of every
@@ -168,6 +206,37 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
         const end = trimStub(&ctx, vias.items, a, b, st.net);
         if (@abs(end[0] - a[0]) < 1e-6 and @abs(end[1] - a[1]) < 1e-6) continue;
         try tracks.append(arena, .{ .x1 = a[0], .y1 = a[1], .x2 = end[0], .y2 = end[1], .layer = 0, .width = params.track_width, .net = st.net });
+    }
+
+    // Return-path stitching. A signal via that swaps reference planes needs a GND
+    // via beside it so its return current can follow across the plane gap — without
+    // one the return takes a long detour and the loop (and EMI) blows up; that's
+    // the `returnPathViolations` warning. For every signal via with no ground via
+    // within `RETURN_PATH_RADIUS_MM`, drop a GND plane stitch via at the nearest
+    // DRC-safe spot inside that radius (no stub — a plane via needs none). Purely
+    // additive: it only appends GND vias, so no existing copper moves. A via that
+    // can't be stitched (no DRC-safe room) simply stays flagged. Gated to modest
+    // boards so a big board's route doesn't grow a search per signal via.
+    if (placement.parts.len <= STITCH_MAX_PARTS) {
+        if (firstGroundNet(placement)) |gnet| {
+            const n_signal = vias.items.len;
+            for (0..n_signal) |i| {
+                const v = vias.items[i];
+                if (isGndVia(placement, v.net)) continue; // already a ground/plane via
+                var stitched = false;
+                for (vias.items) |gv| {
+                    if (!isGndVia(placement, gv.net)) continue;
+                    if (std.math.hypot(v.x - gv.x, v.y - gv.y) <= RETURN_PATH_RADIUS_MM) {
+                        stitched = true;
+                        break;
+                    }
+                }
+                if (stitched) continue;
+                const pos = findStitchVia(&ctx, vias.items, tracks.items, .{ v.x, v.y }, gnet, RETURN_PATH_RADIUS_MM) orelse continue;
+                try vias.append(arena, .{ .x = pos[0], .y = pos[1], .dia = params.via_dia, .net = gnet });
+                stampViaOcc(&ctx, pos[0], pos[1], gnet);
+            }
+        }
     }
 
     return .{
@@ -654,6 +723,42 @@ fn findGroundVia(ctx: *Ctx, placed: []const Via, c: [2]f64, net: i32) ?[2]f64 {
     return null;
 }
 
+/// The nearest DRC-safe spot for a standalone GND plane stitch via near `c` (a
+/// signal via we're stitching the return path of): fan outward in growing rings
+/// to the first grid point within `max_r` mm that clears every foreign pad, every
+/// placed via, and every routed track (the stitch pass runs last, so all copper
+/// is down). Null when nothing fits — the via stays unstitched rather than forcing
+/// a DRC violation. Unlike `findGroundVia` there's no stub back to a pad (a plane
+/// via needs none), so no segment-clearance constraint applies.
+fn findStitchVia(ctx: *Ctx, placed: []const Via, tracks: []const Track, c: [2]f64, net: i32, max_r: f64) ?[2]f64 {
+    const grid = ctx.grid;
+    const max_ring: usize = @max(1, @as(usize, @intFromFloat(@floor(max_r / grid.g))));
+    var ring: usize = 1;
+    while (ring <= max_ring) : (ring += 1) {
+        const rad = @as(f64, @floatFromInt(ring)) * grid.g;
+        var k: usize = 0;
+        while (k < 16) : (k += 1) {
+            const a = (@as(f64, @floatFromInt(k)) / 16.0) * std.math.tau;
+            const s = grid.snap(c[0] + rad * @cos(a), c[1] + rad * @sin(a));
+            if (std.math.hypot(s[0] - c[0], s[1] - c[1]) > max_r) continue;
+            if (!viaClearsPads(ctx, s[0], s[1], net)) continue;
+            if (!viaClearsVias(ctx, placed, s[0], s[1], net)) continue;
+            if (!viaClearsTracks(ctx, tracks, s[0], s[1], net)) continue;
+            return s;
+        }
+    }
+    return null;
+}
+
+/// Index of the first ground net (by name), or null when the board has none —
+/// then there's no plane to stitch to and the stitch pass is skipped.
+fn firstGroundNet(placement: optimizer.Placement) ?i32 {
+    for (placement.nets, 0..) |net, i| {
+        if (isGroundName(shortName(net.name))) return @intCast(i);
+    }
+    return null;
+}
+
 /// Claim every empty grid node within `dist` (mm) of (x,y) for `net` — on the
 /// top layer, and on both layers when `both`. Existing copper is never
 /// overwritten. Used to reserve a via/stub's clearance halo so the maze pass
@@ -750,6 +855,17 @@ const Ctx = struct {
     reach: f64,
     occ: [2][]i32,
     params: RouteParams,
+    /// When false the maze may not change layers — used for the top-layer-only
+    /// first pass so a short signal net (e.g. a feedback tap) stays on the
+    /// surface instead of diving to L2 the moment a via is marginally cheaper.
+    allow_vias: bool = true,
+    /// When true `blocked` measures clearance against each pad's real copper
+    /// outline (poly), not its bounding box — so a concave thermal/EP pad doesn't
+    /// falsely wall off a corridor that a short net could escape through. The
+    /// outline test is much costlier (point-in-polygon per node), so it's only
+    /// switched on for the brief top-layer-first attempts; the bulk two-layer
+    /// maze stays on the cheap, conservative bounding-box path.
+    use_poly: bool = false,
 };
 
 /// True if node (layer, n) can't carry net `net`: copper of another net is
@@ -764,7 +880,15 @@ fn blocked(ctx: *Ctx, layer: usize, n: usize, net: i32) bool {
     var on_own = false;
     var foreign = false;
     for (ctx.obs) |p| {
-        const d = distPointRect(px, py, .{ .x0 = p.x0, .y0 = p.y0, .x1 = p.x1, .y1 = p.y1 });
+        // Measure clearance against the pad's real copper outline only when asked
+        // (the top-first pass): a concave thermal/EP pad over-states copper in its
+        // box, walling off a corridor a short net could escape through — which is
+        // exactly what buries a feedback tap beside an EP and forces it inner. The
+        // outline test is costly, so the bulk maze keeps the cheap box distance.
+        const d = if (ctx.use_poly)
+            pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, px, py, ctx.reach)
+        else
+            distPointRect(px, py, .{ .x0 = p.x0, .y0 = p.y0, .x1 = p.x1, .y1 = p.y1 });
         if (p.net == net) {
             if (d <= 1e-9) on_own = true;
         } else if (d < ctx.reach) {
@@ -803,6 +927,18 @@ fn routeNet(ctx: *Ctx, net: i32, pts: [][2]f64, tracks: *std.ArrayListUnmanaged(
     // begins and ends in the centre of the pad, not a grid point beside it.
     for (pts) |pt| try addStub(ctx, net, pt, tracks);
     return all_ok;
+}
+
+/// Reset every grid node this net stamped back to EMPTY. Used to undo a failed
+/// top-layer-only attempt before re-routing the net with vias allowed — since a
+/// net only ever stamps its own index, clearing `occ == net` leaves every other
+/// net's copper untouched.
+fn clearNetOcc(ctx: *Ctx, net: i32) void {
+    for (0..2) |layer| {
+        for (ctx.occ[layer]) |*c| {
+            if (c.* == net) c.* = EMPTY;
+        }
+    }
 }
 
 /// Append a top-layer stub from pad centre `pt` to its grid access node, if
@@ -860,8 +996,9 @@ fn dijkstra(ctx: *Ctx, net: i32, goal_key: usize, tracks: *std.ArrayListUnmanage
         try relaxDiag(ctx, &pq, dist, prev, net, it.key, layer, ix, iy, -1, 1);
         try relaxDiag(ctx, &pq, dist, prev, net, it.key, layer, ix, iy, -1, -1);
         // Via to the other signal layer at the same (ix,iy) — only where a via
-        // of the configured size keeps clearance from foreign pads and copper.
-        if (viaAllowed(ctx, n, net))
+        // of the configured size keeps clearance from foreign pads and copper,
+        // and only when this pass permits layer changes at all.
+        if (ctx.allow_vias and viaAllowed(ctx, n, net))
             try relaxStep(ctx, &pq, dist, prev, net, it.key, 1 - layer, n, grid.g * VIA_COST_MULT);
     }
 
@@ -1214,6 +1351,59 @@ test "returnPathViolations flags unstitched signal vias" {
     };
     const near_res = RouteResult{ .tracks = &.{}, .vias = &near, .routed = 0, .total = 0 };
     try testing.expectEqual(@as(usize, 0), returnPathViolations(placement, near_res, RETURN_PATH_RADIUS_MM));
+}
+
+// spec: placement/router - stitches each signal via's return path with a nearby GND plane via
+test "route stitches a signal escape via with a ground via" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const G = @import("geometry.zig");
+    // Same single-pin breakout as the escape test, but now the board has a GND
+    // net (index 1). The escape drops one signal via; the return-path pass must
+    // then add a GND plane via within RETURN_PATH_RADIUS_MM so nothing is left
+    // unstitched. Open board, so a DRC-safe stitch spot always exists.
+    const pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.6, .hh = 0.6, .pads = &pad, .fallback = false, .x = 0, .y = 0 },
+    };
+    const pins = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const nets = [_]FlatNet{
+        .{ .name = "EN", .pins = &pins }, // net 0 — the single-pin breakout
+        .{ .name = "GND", .pins = &.{} }, // net 1 — the ground plane to stitch to
+    };
+    const stubs = [_]optimizer.Stub{.{ .part = 0, .ax = 0, .ay = 0, .bx = 2, .by = 0, .net = 0 }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &stubs,
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 3,
+        .maxy = 2,
+        .generated = true,
+    };
+
+    const r = try route(arena, placement, .{});
+
+    // The escape via (net 0) plus exactly one stitching GND via (net 1).
+    try testing.expectEqual(@as(usize, 2), r.vias.len);
+    var sig: ?Via = null;
+    var gnd: ?Via = null;
+    for (r.vias) |v| {
+        if (v.net == 0) sig = v;
+        if (v.net == 1) gnd = v;
+    }
+    try testing.expect(sig != null and gnd != null);
+    // The stitch via sits within the return-path radius of the signal via…
+    try testing.expect(std.math.hypot(gnd.?.x - sig.?.x, gnd.?.y - sig.?.y) <= RETURN_PATH_RADIUS_MM);
+    // …so the routed board reports no return-path discontinuity.
+    try testing.expectEqual(@as(usize, 0), returnPathViolations(placement, r, RETURN_PATH_RADIUS_MM));
 }
 
 // spec: placement/router - escapes a single-pin breakout to an inner layer with a short stub and a via
