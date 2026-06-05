@@ -386,6 +386,8 @@ src/placement/optimizer.zig::Params struct_
 src/placement/optimizer.zig::Part struct_
 src/placement/optimizer.zig::PartKind enum_
 src/placement/optimizer.zig::Placement struct_
+src/placement/optimizer.zig::ProgressPass enum_
+src/placement/optimizer.zig::ProgressSink struct_
 src/placement/optimizer.zig::RatKind enum_
 src/placement/optimizer.zig::RefPose struct_
 src/placement/optimizer.zig::Score struct_
@@ -394,6 +396,7 @@ src/placement/optimizer.zig::Stub struct_
 src/placement/optimizer.zig::gridPlace fn
 src/placement/optimizer.zig::placeFromPoses fn
 src/placement/optimizer.zig::scorePoses fn
+src/placement/optimizer.zig::setProgressSink fn
 src/placement/optimizer.zig::solve fn
 src/placement/optimizer.zig::worldPadCenter fn
 src/placement/pad_shape.zig::Shape struct_
@@ -531,6 +534,10 @@ src/review_json.zig::renderToJson fn
 src/review_json.zig::writeTraceability fn
 src/review_md.zig::renderToMarkdown fn
 src/serve.zig::Handler struct_
+src/serve.zig::JobOutcome enum_
+src/serve.zig::PcbJob struct_
+src/serve.zig::PcbJobBegin struct_
+src/serve.zig::PcbJobView struct_
 src/serve.zig::ServeError value
 src/serve.zig::bumpLiveVersion fn
 src/serve.zig::getLiveVersion fn
@@ -538,6 +545,10 @@ src/serve.zig::live_layout_json value
 src/serve.zig::live_mutex value
 src/serve.zig::live_version_mutex value
 src/serve.zig::live_versions value
+src/serve.zig::pcbJobBegin fn
+src/serve.zig::pcbJobFinish fn
+src/serve.zig::pcbJobFrame fn
+src/serve.zig::pcbJobSnapshot fn
 src/serve.zig::serve fn
 src/serve.zig::setLiveLayoutJson fn
 src/serve/account_page.zig::HandlerError value
@@ -764,6 +775,8 @@ src/serve/pcb_layout_page.zig::deleteNamedLayoutApi fn
 src/serve/pcb_layout_page.zig::loadSyncLayout fn
 src/serve/pcb_layout_page.zig::pcbLayoutJsonApi fn
 src/serve/pcb_layout_page.zig::pcbLayoutPage fn
+src/serve/pcb_layout_page.zig::pcbProgressApi fn
+src/serve/pcb_layout_page.zig::pcbRegenStartApi fn
 src/serve/pcb_layout_page.zig::pcbRouteApi fn
 src/serve/pcb_layout_page.zig::pcbScoreApi fn
 src/serve/pcb_layout_page.zig::pcbScoreBatchApi fn

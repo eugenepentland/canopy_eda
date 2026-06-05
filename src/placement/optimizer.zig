@@ -167,6 +167,48 @@ pub const Params = struct {
     compact_mode: CompactMode = .tidiness,
 };
 
+/// Which phase of the solve a progress frame came from — drives the label the
+/// live-preview overlay shows while watching the optimizer converge.
+///   • `explore` — multi-start / surrogate search (rough arrangements as the
+///     placer hunts the search space).
+///   • `refine`  — finishing work (polished / routed-reranked arrangements).
+pub const ProgressPass = enum {
+    explore,
+    refine,
+    pub fn label(self: ProgressPass) []const u8 {
+        return switch (self) {
+            .explore => "explore",
+            .refine => "refine",
+        };
+    }
+};
+
+/// Optional sink the solve calls each time its internal *best* arrangement
+/// improves, so a caller (the live-regen background thread) can stream the
+/// best-so-far poses to a watching browser. `onBest` receives the live `parts`
+/// array — the callback must copy what it needs, the positions mutate after it
+/// returns. `score` is the (lower-is-better) cost of this arrangement.
+pub const ProgressSink = struct {
+    ctx: *anyopaque,
+    onBest: *const fn (ctx: *anyopaque, parts: []const Part, score: f64, pass: ProgressPass) void,
+};
+
+/// Thread-local so a background solve streams to its own watcher without a
+/// synchronous page solve (which never sets it) paying anything but one null
+/// check, and two concurrent regens (different designs/threads) stay isolated.
+threadlocal var g_progress: ?ProgressSink = null;
+
+/// Install (or clear, with `null`) the progress sink for the *current thread*.
+/// The background regen thread sets this before `solve` and clears it after.
+pub fn setProgressSink(sink: ?ProgressSink) void {
+    g_progress = sink;
+}
+
+/// Report a new best arrangement to the thread's progress sink, if one is set.
+inline fn emitBest(parts: []const Part, score: f64, pass: ProgressPass) void {
+    if (g_progress) |s| s.onBest(s.ctx, parts, score, pass);
+}
+
 /// Placement grid: final positions snap to this (mm). The interactive page
 /// drags on the same grid so manual edits and auto-placement stay aligned.
 pub const GRID_MM: f64 = 0.2;
@@ -852,10 +894,17 @@ fn rerankSolve(
     var cand = try arena.alloc(Pose, k * parts.len);
     const cand_cost = try arena.alloc(f64, k);
     for (cand_cost) |*c| c.* = std.math.inf(f64);
+    // Track the running best surrogate cost only to stream "explore" frames to a
+    // live watcher on each improvement (the top-K bookkeeping below is unchanged).
+    var best_surr: f64 = std.math.inf(f64);
     var s: usize = 0;
     while (s < starts) : (s += 1) {
         runStart(parts, idx_of, nets, built, s, rounds, params);
         const cost = objectiveCost(parts, idx_of, nets, built.loops, params);
+        if (cost < best_surr) {
+            best_surr = cost;
+            emitBest(parts, cost, .explore);
+        }
         var worst: usize = 0;
         for (cand_cost, 0..) |c, i| {
             if (c > cand_cost[worst]) worst = i;
@@ -889,6 +938,8 @@ fn rerankSolve(
             best_cost = sc;
             have = true;
             for (parts, 0..) |p, j| best[j] = .{ .x = p.x, .y = p.y, .rot = p.rot };
+            // Stream this finished, routed-scored candidate (`parts` hold it now).
+            emitBest(parts, sc, .refine);
         }
     }
     if (have) for (parts, 0..) |*p, j| {
@@ -922,6 +973,8 @@ fn optimize(parts: []Part, idx_of: *std.StringHashMap(usize), nets: []const Flat
         if (cost < best_cost) {
             best_cost = cost;
             for (parts, 0..) |p, i| best[i] = .{ .x = p.x, .y = p.y, .rot = p.rot };
+            // Stream this new best to a live watcher (`parts` hold it right now).
+            emitBest(parts, cost, .explore);
         }
     }
     for (parts, 0..) |*p, i| {

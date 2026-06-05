@@ -440,6 +440,160 @@ fn writeBreakdownJson(w: *std.Io.Writer, b: optimizer.Breakdown, params: optimiz
     });
 }
 
+// ── Live regen: background solve + best-so-far progress stream ──────────
+//
+// The "Regenerate" button no longer blocks the page on an 11–16 s solve.
+// Instead it POSTs /api/pcb-regen-start, which spawns the optimizer on a
+// background thread with a progress sink; the browser polls /api/pcb-progress
+// and re-draws the board each time the optimizer finds a better arrangement, so
+// you watch it converge instead of waiting on a spinner. When the run finishes
+// the thread has written the auto-cache exactly as the synchronous path does,
+// so the page just reloads to pick up the final (routable, history-recorded)
+// layout.
+
+/// Work item for a background live-regen solve. `name` is page_allocator-owned
+/// (freed by the thread); `project_dir` is borrowed from the long-lived Handler,
+/// which outlives every request thread.
+const RegenJob = struct {
+    name: []const u8,
+    project_dir: []const u8,
+    params: optimizer.Params,
+    gen: u32,
+};
+
+/// Context the optimizer's progress sink carries: which design + generation a
+/// streamed frame belongs to. Lives on the solver thread's stack for the solve.
+const RegenProgress = struct { name: []const u8, gen: u32 };
+
+/// optimizer.ProgressSink callback: serialize the best-so-far poses to a compact
+/// frame and publish it under the job's design + generation. Best-effort — a
+/// formatting/alloc failure just drops this frame (the next improvement retries).
+fn regenOnBest(ctx_ptr: *anyopaque, parts: []const optimizer.Part, score: f64, pass: optimizer.ProgressPass) void {
+    const ctx: *RegenProgress = @ptrCast(@alignCast(ctx_ptr));
+    var aw: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
+    w.print("{{\"pass\":\"{s}\",\"score\":{d:.2},\"parts\":[", .{ pass.label(), score }) catch return;
+    for (parts, 0..) |p, i| {
+        if (i > 0) w.writeAll(",") catch return;
+        w.writeAll(REF_OPEN) catch return;
+        writeJsonStr(w, p.ref_des) catch return;
+        w.print(",\"x\":{d:.3},\"y\":{d:.3},\"rot\":{d:.0}}}", .{ p.x, p.y, p.rot }) catch return;
+    }
+    w.writeAll("]}") catch return;
+    serve_root.pcbJobFrame(ctx.name, ctx.gen, aw.written());
+}
+
+/// Background thread: re-evaluate the design in its own arena, run the optimizer
+/// with a progress sink streaming best-so-far frames, persist the result the same
+/// way the synchronous page does, then mark the job done so the browser reloads.
+fn regenThread(job: *RegenJob) void {
+    const base = std.heap.page_allocator;
+    defer {
+        base.free(job.name);
+        base.destroy(job);
+    }
+    var arena = std.heap.ArenaAllocator.init(base);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var had_err = true;
+    run: {
+        var handler = Handler{ .allocator = a, .project_dir = job.project_dir, .auth_dir = "" };
+        var eval = Evaluator.init(a, job.project_dir);
+        defer eval.deinit();
+        var module_res: ?modules_mod.ResolvedBlock = null;
+        defer if (module_res) |mr| {
+            mr.eval.deinit();
+            a.destroy(mr.eval);
+        };
+        const block = resolveBlock(&handler, job.name, &eval, &module_res) orelse break :run;
+
+        var prog = RegenProgress{ .name = job.name, .gen = job.gen };
+        optimizer.setProgressSink(.{ .ctx = &prog, .onBest = regenOnBest });
+        defer optimizer.setProgressSink(null);
+
+        const placement = optimizer.solve(a, block, job.project_dir, null, job.params, .place) catch break :run;
+        if (placement.generated) {
+            writeAutoCache(a, job.project_dir, job.name, placement, job.params);
+            recordAutoLayout(a, job.project_dir, job.name, placement);
+        }
+        had_err = false;
+    }
+    serve_root.pcbJobFinish(job.name, job.gen, if (had_err) .failed else .ok);
+}
+
+/// POST /api/pcb-regen-start/:name — kick off a live (background) optimizer run
+/// and return its generation id. The browser then polls /api/pcb-progress/:name
+/// to animate the board converging and reloads when the run finishes. Honours the
+/// same tuning query (?w_align / loop_w / w_congest / grid / compact) as ?regen=1.
+/// If a run for this design is already in flight, its generation is returned and
+/// no second solver is spawned (one per design at a time).
+pub fn pcbRegenStartApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const tune = parseTuning(req);
+    const begin = serve_root.pcbJobBegin(name);
+    if (begin.fresh) spawn: {
+        const job = std.heap.page_allocator.create(RegenJob) catch {
+            serve_root.pcbJobFinish(name, begin.gen, .failed);
+            break :spawn;
+        };
+        job.* = .{
+            .name = std.heap.page_allocator.dupe(u8, name) catch {
+                std.heap.page_allocator.destroy(job);
+                serve_root.pcbJobFinish(name, begin.gen, .failed);
+                break :spawn;
+            },
+            .project_dir = ctx.project_dir,
+            .params = tune.params,
+            .gen = begin.gen,
+        };
+        const t = std.Thread.spawn(.{}, regenThread, .{job}) catch {
+            std.heap.page_allocator.free(job.name);
+            std.heap.page_allocator.destroy(job);
+            serve_root.pcbJobFinish(name, begin.gen, .failed);
+            break :spawn;
+        };
+        t.detach();
+    }
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    try aw.writer.print("{{\"gen\":{d}}}", .{begin.gen});
+    res.content_type = .JSON;
+    res.body = aw.written();
+}
+
+/// GET /api/pcb-progress/:name — current live-regen state for the page's poll
+/// loop: the active generation, the frame sequence (so the client skips frames
+/// it already drew), run/done/err flags, and the latest best-so-far `frame`
+/// (`{pass,score,parts}`) or null. `{"gen":0,"none":true}` means no run has been
+/// started for this design.
+pub fn pcbProgressApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    res.content_type = .JSON;
+    const snap = serve_root.pcbJobSnapshot(ctx.allocator, name) orelse {
+        res.body = "{\"gen\":0,\"none\":true}";
+        return;
+    };
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &aw.writer;
+    try w.print("{{\"gen\":{d},\"seq\":{d},\"running\":{s},\"done\":{s},\"err\":{s},\"frame\":", .{
+        snap.gen,
+        snap.seq,
+        if (snap.running) "true" else "false",
+        if (snap.done) "true" else "false",
+        if (snap.err) "true" else "false",
+    });
+    if (snap.frame) |f| try w.writeAll(f) else try w.writeAll("null");
+    try w.writeByte('}');
+    res.body = aw.written();
+}
+
 /// POST /api/pcb-score/:name — score an arbitrary hand layout *on the server*,
 /// reusing the optimizer's own objective code (no metric duplicated in JS). Body
 /// is the same `{"parts":[{ref,x,y,rot}, …]}` the save endpoint takes; returns
@@ -1499,9 +1653,9 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8) st
     try w.writeAll("<button class=\"btn\" id=\"pcb-score\" title=\"Recompute the objective on the server for the current positions\">Score</button>");
     // Stored layout is reused on load; this re-runs the optimizer, overwrites the
     // cache, and records the result into the saved-layout history below.
-    try w.writeAll("<a class=\"btn\" href=\"/pcb-layout/");
+    try w.writeAll("<a class=\"btn\" id=\"pcb-regen\" href=\"/pcb-layout/");
     try writeAttr(w, name);
-    try w.writeAll("?regen=1\" title=\"Re-run the optimizer and record the result\">Regenerate</a>");
+    try w.writeAll("?regen=1\" title=\"Re-run the optimizer and watch it converge live\">Regenerate</a>");
     // Export the solved positions + full score breakdown (incl. the
     // value-weighted loop + alignment terms the bar above hides) for inspection.
     try w.writeAll("<a class=\"btn\" href=\"/api/pcb-layout/");
@@ -2399,6 +2553,20 @@ const PAGE_CSS =
     \\.pcb-3d-tools .sep{width:1px;height:16px;background:#30363d}
     \\body.mode-3d .pcb-svg,body.mode-3d .pcb-tune,body.mode-3d .pcb-route,
     \\body.mode-3d .pcb-legend,body.mode-3d .pcb-note,body.mode-3d .pcb-bar{display:none}
+    \\/* Live-regen status card — floats over the top of the board (pointer-events
+    \\   off) so the optimizer's best-so-far arrangement stays fully visible and
+    \\   animating underneath while it converges. */
+    \\.pcb-live{position:fixed;top:68px;left:50%;transform:translateX(-50%);z-index:300;pointer-events:none}
+    \\.pcb-live-card{display:flex;align-items:center;gap:10px;background:rgba(13,17,23,.92);
+    \\  border:1px solid #30363d;border-radius:9px;padding:9px 15px;box-shadow:0 4px 18px rgba(0,0,0,.45);
+    \\  font-size:13px;color:#e6edf3;max-width:90vw}
+    \\.pcb-live-spin{width:15px;height:15px;border:2px solid #30363d;border-top-color:#58a6ff;
+    \\  border-radius:50%;animation:pcb-live-rot .8s linear infinite;flex:0 0 auto}
+    \\.pcb-live.err .pcb-live-spin{border-top-color:#f85149;animation:none}
+    \\.pcb-live.done .pcb-live-spin{border-top-color:#3fb950;animation:none}
+    \\.pcb-live-msg{font-weight:600}
+    \\.pcb-live-sub{color:#8b949e;font-size:12px;font-variant-numeric:tabular-nums}
+    \\@keyframes pcb-live-rot{to{transform:rotate(360deg)}}
 ;
 
 /// Extra rules layered on top of PAGE_CSS only when `?embed=1` — the body gets
@@ -2645,11 +2813,11 @@ const BOARD_JS =
     \\document.getElementById("pcb-reset").addEventListener("click",function(){
     \\ P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;});applyAll();});
     \\document.getElementById("pcb-score").addEventListener("click",fetchScore);
-    \\document.getElementById("t-apply").addEventListener("click",function(){
+    \\document.getElementById("t-apply").addEventListener("click",function(ev){ev.preventDefault();
     \\ var v=function(id){return encodeURIComponent(document.getElementById(id).value);};
     \\ var g=document.getElementById("t-grid").checked?1:0;
-    \\ window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?w_align="+v("t-align")+
-    \\  "&loop_w="+v("t-loop")+"&w_congest="+v("t-cong")+"&grid="+g+"&compact="+v("t-compact");});
+    \\ liveRegen("?w_align="+v("t-align")+"&loop_w="+v("t-loop")+"&w_congest="+v("t-cong")+
+    \\  "&grid="+g+"&compact="+v("t-compact"));});
     \\(function(){var ids=["sv-en-wire","sv-w-wire","sv-en-loop","sv-w-loop","sv-en-align","sv-w-align","sv-en-cong","sv-w-cong"];
     \\ var def={};ids.forEach(function(id){var e=document.getElementById(id);if(!e)return;
     \\  def[id]=(e.type=="checkbox")?e.checked:e.value;e.addEventListener("input",svApply);});
@@ -2842,6 +3010,67 @@ const BOARD_JS =
     \\    var rp=j.return_path||0; setStat("r-rp",rp?"warn":"ok",rp?(rp+" return-path warning(s)"):"return paths ✓");
     \\    rgo.disabled=false;})
     \\  .catch(function(){setStat("r-stat","err","route failed");rgo.disabled=false;});});
+    \\// ── Live regenerate: run the optimizer in the background and animate the
+    \\//    board converging on its best-so-far arrangement (poll-driven). The
+    \\//    Regenerate / Apply buttons start a background solve instead of a
+    \\//    blocking page nav; on any error we fall back to the old ?regen=1 path.
+    \\var byRef={}; P.forEach(function(p,i){byRef[p.ref]=i;});
+    \\// Anchor the main IC (the hub with the largest courtyard — falls back to the
+    \\// biggest part) so every tried arrangement is shown *relative* to it: each
+    \\// live frame is translated to pin this part at its on-screen spot, so the IC
+    \\// stays put in the centre and only the parts around it visibly rearrange.
+    \\var anchorRef=null,anchorTX=0,anchorTY=0;
+    \\(function(){var bi=-1,bs=-1;P.forEach(function(p,i){
+    \\  var s=(p.hw||0)*(p.hh||0)+(p.kind==="hub"?1e6:0);if(s>bs){bs=s;bi=i;}});
+    \\ if(bi>=0){anchorRef=P[bi].ref;anchorTX=orig[bi].x;anchorTY=orig[bi].y;}})();
+    \\var liveBox=null;
+    \\function liveCard(){
+    \\ if(liveBox)return liveBox;
+    \\ liveBox=document.createElement("div"); liveBox.className="pcb-live";
+    \\ liveBox.innerHTML='<div class="pcb-live-card"><div class="pcb-live-spin"></div>'+
+    \\   '<div><div class="pcb-live-msg" id="pcb-live-msg">Starting optimizer…</div>'+
+    \\   '<div class="pcb-live-sub" id="pcb-live-sub"></div></div></div>';
+    \\ document.body.appendChild(liveBox); return liveBox;
+    \\}
+    \\function liveMsg(m,s,cls){var box=liveCard();
+    \\ box.className="pcb-live"+(cls?" "+cls:"");
+    \\ var a=document.getElementById("pcb-live-msg");if(a&&m!==undefined)a.textContent=m;
+    \\ var b=document.getElementById("pcb-live-sub");if(b)b.textContent=(s===undefined?"":s);}
+    \\function liveHide(){if(liveBox&&liveBox.parentNode)liveBox.parentNode.removeChild(liveBox);liveBox=null;}
+    \\function liveApply(f){if(!f||!f.parts)return;
+    \\ // Translate the frame so the anchor IC lands on its fixed on-screen point.
+    \\ var dx=0,dy=0;
+    \\ if(anchorRef!==null){f.parts.forEach(function(q){
+    \\   if(q.ref===anchorRef){dx=anchorTX-q.x;dy=anchorTY-q.y;}});}
+    \\ f.parts.forEach(function(q){var i=byRef[q.ref];if(i===undefined)return;
+    \\   P[i].x=q.x+dx;P[i].y=q.y+dy;P[i].rot=q.rot||0;});
+    \\ P.forEach(function(p,i){setT(i);}); clearRoute(); rats();}
+    \\function liveFallback(query){window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+
+    \\  "?regen=1"+(query?("&"+query.replace(/^\?/,"")):"");}
+    \\function liveRegen(query){
+    \\ liveMsg("Starting optimizer…","","");
+    \\ fetch("/api/pcb-regen-start/"+encodeURIComponent(PCB.name)+(query||""),{method:"POST"})
+    \\  .then(function(r){return r.json();})
+    \\  .then(function(j){if(typeof j.gen!=="number"||!j.gen)throw 0;livePoll(j.gen,-1,0);})
+    \\  .catch(function(){liveFallback(query);});}
+    \\function livePoll(gen,lastSeq,misses){
+    \\ fetch("/api/pcb-progress/"+encodeURIComponent(PCB.name))
+    \\  .then(function(r){return r.json();})
+    \\  .then(function(j){
+    \\   if(j.gen!==gen){liveHide();return;}
+    \\   if(j.frame&&j.seq>lastSeq){liveApply(j.frame);lastSeq=j.seq;
+    \\     liveMsg("Optimizing — "+(j.frame.pass==="refine"?"refining best layout":"exploring layouts"),
+    \\       "candidate score "+(+j.frame.score).toFixed(1)+" · update "+j.seq,"");}
+    \\   if(j.done){if(j.err){liveMsg("Optimizer error — falling back…","","err");
+    \\       setTimeout(function(){liveFallback("");},700);}
+    \\     else{liveMsg("Converged — loading final layout…","","done");
+    \\       setTimeout(function(){window.location.reload();},400);}
+    \\     return;}
+    \\   setTimeout(function(){livePoll(gen,lastSeq,0);},350);})
+    \\  .catch(function(){if(misses>20){liveHide();return;}
+    \\   setTimeout(function(){livePoll(gen,lastSeq,misses+1);},700);});}
+    \\var rgl=document.getElementById("pcb-regen");
+    \\if(rgl)rgl.addEventListener("click",function(ev){ev.preventDefault();liveRegen("");});
     \\rats(); showScore(PCB.auto); drawRoute(); drawClr(); drawDrc();
     \\})();</script>
 ;
