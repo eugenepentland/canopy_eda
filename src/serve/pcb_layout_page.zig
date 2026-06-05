@@ -88,12 +88,17 @@ const LayoutScore = struct { hpwl: f64, loop: f64, caps: usize, objective: f64 =
 
 /// A named saved layout: name, kind, capture time (unix s, 0 = unknown),
 /// optional score, and the placement itself (newest first within a file).
+/// `default` marks the one layout the KiCad sync seeds first-insertion
+/// placement + vias from; it's stored once at the top level of the file
+/// (`"default":"<name>"`) and reflected here on the matching entry. At most
+/// one entry has `default = true`.
 const SavedLayout = struct {
     name: []const u8,
     kind: []const u8,
     ts: i64,
     score: ?LayoutScore,
     parts: []const PartPose,
+    default: bool = false,
 };
 
 /// GET /pcb-layout/:name — evaluate the design, run the optimizer, and return
@@ -670,12 +675,15 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         }
     }
 
-    const entry = SavedLayout{ .name = nm, .kind = KIND_MANUAL, .ts = clock.timestamp(), .score = score, .parts = parts };
+    var entry = SavedLayout{ .name = nm, .kind = KIND_MANUAL, .ts = clock.timestamp(), .score = score, .parts = parts };
     const existing = readLayouts(req.arena, ctx.project_dir, name);
     var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
     var replaced = false;
     for (existing) |L| {
         if (!replaced and std.mem.eql(u8, L.name, nm)) {
+            // Re-saving an existing name overwrites its poses/score in place but
+            // keeps its default status — the user re-captured the same layout.
+            entry.default = L.default;
             try out.append(req.arena, entry);
             replaced = true;
         } else try out.append(req.arena, L);
@@ -706,6 +714,38 @@ pub fn deleteNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     for (existing) |L| {
         if (std.mem.eql(u8, L.name, nm_v.string)) continue;
         try out.append(req.arena, L);
+    }
+    writeLayouts(req.arena, ctx.project_dir, name, out.items);
+    res.content_type = .JSON;
+    res.body = OK_JSON_TRUE;
+}
+
+/// POST /api/pcb-layouts/:name/default — mark which saved layout the KiCad sync
+/// seeds first-insertion placement + vias from. Body `{"name":"<layout>"}` sets
+/// that entry as the (single) default; an empty/blank name clears the default.
+/// A name that matches no entry just clears it. Persists the top-level
+/// `"default"` field to `.layouts.json`; returns `{"ok":true}`.
+pub fn setDefaultLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const root = parseJsonObject(req, res) orelse return;
+    const nm_v = root.object.get("name") orelse {
+        res.status = 400;
+        return;
+    };
+    if (nm_v != .string) {
+        res.status = 400;
+        return;
+    }
+    const want = std.mem.trim(u8, nm_v.string, " \t\n\r");
+    const existing = readLayouts(req.arena, ctx.project_dir, name);
+    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    for (existing) |L| {
+        var e = L;
+        e.default = want.len > 0 and std.mem.eql(u8, L.name, want);
+        try out.append(req.arena, e);
     }
     writeLayouts(req.arena, ctx.project_dir, name, out.items);
     res.content_type = .JSON;
@@ -1083,6 +1123,12 @@ fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout
     if (root != .object) return null;
     const arr = root.object.get("layouts") orelse return null;
     if (arr != .array) return null;
+    // Top-level `"default":"<name>"` names the one layout the KiCad sync seeds
+    // from; flag the matching entry below. Absent / empty → no default.
+    const default_name: []const u8 = blk: {
+        const dv = root.object.get("default") orelse break :blk "";
+        break :blk if (dv == .string) dv.string else "";
+    };
     var list: std.ArrayListUnmanaged(SavedLayout) = .empty;
     for (arr.array.items) |it| {
         if (it != .object) continue;
@@ -1106,6 +1152,7 @@ fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout
             .ts = @intFromFloat(jsonNum(it.object.get("ts"))),
             .score = score,
             .parts = parts,
+            .default = default_name.len > 0 and std.mem.eql(u8, nm.string, default_name),
         }) catch return list.items;
     }
     return list.toOwnedSlice(alloc) catch null;
@@ -1160,10 +1207,20 @@ fn writeLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const
     writeFileAll(path, aw.written()) catch return;
 }
 
-/// Serialize the layout list to the `.layouts.json` on-disk shape: score fields
-/// (hpwl/loop/caps) are flattened onto each entry and omitted when unscored.
+/// Serialize the layout list to the `.layouts.json` on-disk shape: an optional
+/// top-level `"default":"<name>"` (the entry whose `default` flag is set, if
+/// any) followed by the `layouts` array. Score fields (hpwl/loop/caps) are
+/// flattened onto each entry and omitted when unscored.
 fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writer.Error!void {
-    try w.writeAll("{\"layouts\":[");
+    try w.writeAll("{");
+    for (layouts) |L| {
+        if (!L.default) continue;
+        try w.writeAll("\"default\":");
+        try writeJsonStr(w, L.name);
+        try w.writeAll(",");
+        break;
+    }
+    try w.writeAll("\"layouts\":[");
     for (layouts, 0..) |L, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll(NAME_OPEN);
@@ -1213,12 +1270,14 @@ fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []c
         .parts = parts,
     };
     // Newest first; keep every manual entry but only the most-recent autos.
+    // The entry the user marked default is never pruned (else a default that
+    // happens to be an auto run could fall off the cap and dangle the sync).
     var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
     out.append(alloc, entry) catch return;
     var autos: usize = 1;
     for (existing) |L| {
         if (std.mem.eql(u8, L.kind, KIND_AUTO)) {
-            if (autos >= MAX_AUTO_LAYOUTS) continue;
+            if (autos >= MAX_AUTO_LAYOUTS and !L.default) continue;
             autos += 1;
         }
         out.append(alloc, L) catch break;
@@ -1304,21 +1363,23 @@ fn readAutoPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []cons
 /// CCW). The sync stamps these onto a footprint it inserts for the first time.
 pub const SyncPose = struct { x: f64, y: f64, rot: f64 };
 
-/// Load the design's premade placement-tool layout for the KiCad sync's
-/// first-insertion path, as a ref-des → pose map (mm + degrees), or null when
-/// the design has no saved layout at all. Preference, newest-wins: a manual
-/// (named) snapshot the user deliberately saved, else the most recent recorded
-/// layout of any kind, else the raw `.autolayout.json` optimizer cache. The
-/// returned map and its keys live on `alloc` (request lifetime). Only positions
-/// are exported — never the routed loops/stubs the optimizer scores with — so a
-/// sync that consults this still emits footprints only, no traces or vias.
-pub fn loadSyncLayout(
-    alloc: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-) ?std.StringHashMap(SyncPose) {
+/// Re-export so the KiCad sync can name a module's poses (`loadModulePoses`)
+/// without importing the placement layer directly.
+pub const RefPose = optimizer.RefPose;
+
+/// Choose the part poses the KiCad sync seeds first-insertion placement (and
+/// GND vias) from, as `RefPose`s, or null when the design has no layout at all.
+/// Preference: the user-marked **default** layout first, then the newest manual
+/// snapshot, then the most recent recorded layout of any kind, then the raw
+/// `.autolayout.json` optimizer cache. Both `loadSyncLayout` (placement) and
+/// `loadSyncVias` (vias) go through this so the vias correspond to exactly the
+/// poses the parts land at. Result lives on `alloc` (request lifetime).
+fn chooseSyncPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?[]const optimizer.RefPose {
     const layouts = readLayouts(alloc, project_dir, name);
     const chosen: ?[]const PartPose = blk: {
+        for (layouts) |L| {
+            if (L.default and L.parts.len > 0) break :blk L.parts;
+        }
         for (layouts) |L| {
             if (std.mem.eql(u8, L.kind, KIND_MANUAL) and L.parts.len > 0) break :blk L.parts;
         }
@@ -1328,16 +1389,89 @@ pub fn loadSyncLayout(
         break :blk null;
     };
     if (chosen) |parts| {
-        var m = std.StringHashMap(SyncPose).init(alloc);
-        for (parts) |pt| m.put(pt.ref, .{ .x = pt.x, .y = pt.y, .rot = pt.rot }) catch return m;
-        return m;
+        const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
+        for (parts, 0..) |pt, i| out[i] = .{ .ref = pt.ref, .x = pt.x, .y = pt.y, .rot = pt.rot };
+        return out;
     }
     // No named/recorded layouts — fall back to the bare optimizer cache.
     const poses = readAutoPoses(alloc, project_dir, name) orelse return null;
     if (poses.len == 0) return null;
+    return poses;
+}
+
+/// Load the design's premade placement-tool layout for the KiCad sync's
+/// first-insertion path, as a ref-des → pose map (mm + degrees), or null when
+/// the design has no saved layout at all. The layout is picked by
+/// `chooseSyncPoses` (default → manual → any → optimizer cache). The returned
+/// map and its keys live on `alloc` (request lifetime). Only positions are
+/// exported here — the GND vias are computed separately by `loadSyncVias`.
+pub fn loadSyncLayout(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+) ?std.StringHashMap(SyncPose) {
+    const poses = chooseSyncPoses(alloc, project_dir, name) orelse return null;
     var m = std.StringHashMap(SyncPose).init(alloc);
     for (poses) |p| m.put(p.ref, .{ .x = p.x, .y = p.y, .rot = p.rot }) catch return m;
     return m;
+}
+
+/// One GND-plane stitching via exported to the KiCad sync: centre (mm), pad +
+/// hole diameter (mm), and the net name it stitches down to the plane. Saved
+/// layouts store only positions, so the vias are *computed* at sync time.
+pub const SyncVia = struct { x: f64, y: f64, dia: f64, drill: f64, net: []const u8 };
+
+/// The chosen sync poses for a design *or module* by name — the default-aware
+/// selection (`chooseSyncPoses`), exposed for the per-sub-block sync so it can
+/// load a sub-module's own default layout (keyed by the module's ref-des, which
+/// matches the design's flattened sub-block refs minus the sub-block prefix —
+/// both resolve through the same in-design instantiation). Null when the
+/// module has no saved layout. Result lives on `alloc` (request lifetime).
+pub fn loadModulePoses(alloc: std.mem.Allocator, project_dir: []const u8, module_name: []const u8) ?[]const optimizer.RefPose {
+    return chooseSyncPoses(alloc, project_dir, module_name);
+}
+
+/// The GND vias for a placement at exactly `poses` (built from `block`): run the
+/// router's ground-via pass — the same DRC-safe pass the layout page previews —
+/// in `block`'s local coordinate frame. Net names come from the placement's
+/// flattened nets; via size/drill use the router's proto-fab defaults. Returns
+/// null when the placement can't be built or the board is too large to grid (no
+/// vias). Used both for a whole design (`loadSyncVias`) and a single sub-block
+/// (the per-block seed offsets these by the block's staging origin).
+pub fn viasForPoses(
+    alloc: std.mem.Allocator,
+    block: *const env_mod.DesignBlock,
+    project_dir: []const u8,
+    poses: []const optimizer.RefPose,
+    params: optimizer.Params,
+) ?[]const SyncVia {
+    const placement = optimizer.placeFromPoses(alloc, block, project_dir, poses, params) catch return null;
+    const rp = router.RouteParams{};
+    const vias = router.groundVias(alloc, placement, rp) catch return null;
+    if (vias.len == 0) return null;
+    const out = alloc.alloc(SyncVia, vias.len) catch return null;
+    for (vias, 0..) |v, i| {
+        const net_name: []const u8 = if (v.net >= 0 and @as(usize, @intCast(v.net)) < placement.nets.len)
+            placement.nets[@intCast(v.net)].name
+        else
+            "";
+        out[i] = .{ .x = v.x, .y = v.y, .dia = v.dia, .drill = rp.via_drill, .net = net_name };
+    }
+    return out;
+}
+
+/// The GND vias for the design's sync layout: pick the default-aware poses
+/// (`chooseSyncPoses`) and route them (`viasForPoses`). Positions only, no
+/// traces. Null when the design has no layout / the board is too large to grid.
+pub fn loadSyncVias(
+    alloc: std.mem.Allocator,
+    block: *const env_mod.DesignBlock,
+    project_dir: []const u8,
+    name: []const u8,
+) ?[]const SyncVia {
+    const poses = chooseSyncPoses(alloc, project_dir, name) orelse return null;
+    const params = readAutoParams(alloc, project_dir, name) orelse optimizer.Params{};
+    return viasForPoses(alloc, block, project_dir, poses, params);
 }
 
 /// Persist the generated layout (its tuning weights + ref/x/y/rot per part) to
@@ -1532,10 +1666,11 @@ fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: Layo
     try w.writeAll("<div class=\"saved-list\">");
     for (layouts) |L| {
         // Two stacked lines so the row fits the narrow sidebar: top = kind + name +
-        // auto-relative delta; bottom = score + Load/Delete. `data-lay-row` keys
-        // the row for the Score-view re-weigh (reweighLayouts in BOARD_JS rewrites
-        // its `.lay-score` + `.lay-d` in place — both still found by querySelector).
-        try w.writeAll("<div class=\"lay-row\" data-lay-row=\"");
+        // auto-relative delta; bottom = ★default-toggle + score + Load/Delete.
+        // `data-lay-row` keys the row for the Score-view re-weigh (reweighLayouts
+        // in BOARD_JS rewrites its `.lay-score` + `.lay-d` in place — both still
+        // found by querySelector). The `def` class highlights the sync default.
+        try w.writeAll(if (L.default) "<div class=\"lay-row def\" data-lay-row=\"" else "<div class=\"lay-row\" data-lay-row=\"");
         try writeAttr(w, L.name);
         try w.writeAll("\"><div class=\"lay-top\"><span class=\"lay-kind ");
         try w.writeAll(if (std.mem.eql(u8, L.kind, KIND_MANUAL)) "k-man\">manual" else "k-auto\">auto");
@@ -1550,7 +1685,18 @@ fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: Layo
             if (s.objective > 0) try w.print("obj {d:.1} · ", .{s.objective});
             try w.print("HPWL {d:.1} · loop {d:.1}", .{ s.hpwl, s.loop });
         } else try w.writeAll("—");
-        try w.writeAll("</span><span class=\"lay-actions\"><button class=\"btn lay-go\" data-lay-load=\"");
+        try w.writeAll("</span><span class=\"lay-actions\"><button class=\"btn lay-star");
+        if (L.default) try w.writeAll(" on");
+        try w.writeAll("\" data-lay-default=\"");
+        try writeAttr(w, L.name);
+        try w.writeAll("\" title=\"");
+        try w.writeAll(if (L.default)
+            "Default layout — the KiCad sync seeds new parts (placement + GND vias) from this. Click to clear."
+        else
+            "Make this the KiCad-sync default (seeds new parts' placement + GND vias)");
+        try w.writeAll("\">");
+        try w.writeAll(if (L.default) "★" else "☆");
+        try w.writeAll("</button><button class=\"btn lay-go\" data-lay-load=\"");
         try writeAttr(w, L.name);
         try w.writeAll("\">Load</button><button class=\"btn lay-del\" title=\"Delete\" data-lay-del=\"");
         try writeAttr(w, L.name);
@@ -2233,6 +2379,10 @@ const PAGE_CSS =
     \\.lay-row .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
     \\.lay-row .lay-del{color:#f85149;border-color:#5b1e28;padding:2px 7px}
     \\.lay-row .lay-del:hover{background:#30363d;border-color:#f85149;color:#ffa198}
+    \\.lay-row .lay-star{color:#8b949e;padding:2px 7px;line-height:1}
+    \\.lay-row .lay-star:hover{color:#e3b341;border-color:#e3b341}
+    \\.lay-row .lay-star.on{color:#e3b341;border-color:#7a5c12;background:#2b2410}
+    \\.lay-row.def{background:#13210f;box-shadow:inset 2px 0 0 #e3b341}
     \\.pcb-tune{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#8b949e}
     \\.pcb-tune .tune-h{font-weight:700;color:#f0f6fc}
     \\.pcb-tune label{display:flex;gap:4px;align-items:center}
@@ -2522,6 +2672,15 @@ const BOARD_JS =
     \\   if(!window.confirm("Delete layout \""+nm+"\"?"))return;
     \\   fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+"/delete",{method:"POST",
     \\     headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm})})
+    \\    .then(function(r){if(!r.ok)throw 0;window.location.reload();}).catch(function(){});});});
+    \\// ★ toggle: set this layout as the KiCad-sync default, or clear it if already
+    \\// default (send an empty name). The server seeds new parts' placement + GND
+    \\// vias from the default on the next sync.
+    \\document.querySelectorAll("[data-lay-default]").forEach(function(b){
+    \\ b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-default");
+    \\   var send=b.classList.contains("on")?"":nm;
+    \\   fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+"/default",{method:"POST",
+    \\     headers:{"Content-Type":"application/json"},body:JSON.stringify({name:send})})
     \\    .then(function(r){if(!r.ok)throw 0;window.location.reload();}).catch(function(){});});});
     \\var rescoreBtn=document.getElementById("pcb-rescore");
     \\if(rescoreBtn)rescoreBtn.addEventListener("click",function(){

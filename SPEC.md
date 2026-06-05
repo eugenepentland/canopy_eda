@@ -66,6 +66,8 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - add places the new footprint at the op's staging (x, y) and bakes canopy_net / canopy_section properties
 - add places the new footprint at the premade layout's (x, y, rotation)
 - add bakes design properties (MPN, Manufacturer, …) on the first sync
+- add_via inserts a (via …) form stitching the GND net
+- add_via at an existing via position is a no-op
 - create_board_item writes a section staging box as a (gr_rect …) on Dwgs.User
 - create_board_item writes a section label as a (gr_text …) on Dwgs.User
 - hides the refdes, value, and metadata so the silk/fab carries no auto-generated text
@@ -553,6 +555,7 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - buildCanopyNetValue renders each passive pad as destRef.destPin.net for a single hub pin, else the bare net name
 - buildCanopyNetValue lists a passive's pads in numeric order joined by ' / ' and returns null when the passive has no connected pads
 - sectionForRef attributes a sub-block part to its sub-block name and a top-level part to its declared section, else ""
+- stripSubPrefix removes a leading "<sub>/" so a flattened sub-block ref maps to its module layout's ref
 - boxCols returns a roughly-square (ceil-sqrt) column count for a staging box of N parts
 - buildStagingLayout gives each part a fixed staging seat from the whole design, independent of push composition
 - protoBoardLayer maps F.Fab and B.Fab to their KiCad board-layer enums

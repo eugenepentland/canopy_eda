@@ -31,6 +31,11 @@ const FORM_LAYER = "layer";
 const FORM_LOCKED = "locked";
 const FORM_NET = "net";
 const FORM_PAD = "pad";
+const FORM_VIA = "via";
+
+// Two vias within this distance (mm) are treated as the same via, so an
+// `add_via` at an already-stitched position is a no-op on re-sync.
+const VIA_DEDUP_MM: f64 = 0.05;
 
 // Section-staging board-graphic conversion (proto nm → .kicad_pcb mm).
 const NM_PER_MM: f64 = 1_000_000.0;
@@ -79,6 +84,10 @@ pub const ApplyStats = struct {
     locked_changed: u32 = 0,
     /// Standalone board graphics written (section staging boxes + labels).
     board_items: u32 = 0,
+    /// GND stitching vias inserted this sync (`add_via` ops). An add_via whose
+    /// position already carries a via on the board is a no-op, so this counts
+    /// only the genuinely new vias.
+    vias_added: u32 = 0,
     /// Properties hidden this sync — Reference (refdes), Value, Datasheet,
     /// Description, and the canopy_* tags all get `(hide yes)` so F.Fab/F.SilkS
     /// carry no auto-generated text. See propertyStaysVisible.
@@ -117,6 +126,61 @@ fn applyOps(arena: std.mem.Allocator, root_children: []const Node, ops: []const 
     return applyOpsCounted(arena, root_children, ops, &stats);
 }
 
+/// First pass over the board's top-level forms: record the max net-id, the
+/// (kicad_uuid → footprint index) lookup, the set of canopy_uuids already
+/// present (so a re-emitted `add` for an existing canopy is a no-op), and the
+/// centres of every existing via (so an `add_via` at one is a no-op).
+fn indexBoardChildren(
+    arena: std.mem.Allocator,
+    root_children: []const Node,
+    max_net_id: *i64,
+    fp_by_uuid: *std.StringHashMap(usize),
+    net_id_by_name: *std.StringHashMap(i64),
+    existing_canopy_uuids: *std.StringHashMap(void),
+    existing_vias: *std.ArrayListUnmanaged(Vec2Mm),
+) std.mem.Allocator.Error!void {
+    for (root_children, 0..) |child, i| {
+        if (child.isForm("net")) {
+            const cl = child.asList() orelse continue;
+            if (cl.len < 3) continue;
+            const id_num = cl[1].asNumber() orelse continue;
+            const id_i64: i64 = @intFromFloat(id_num);
+            if (id_i64 > max_net_id.*) max_net_id.* = id_i64;
+            if (cl[2].asString()) |name| try net_id_by_name.put(name, id_i64);
+        } else if (child.isForm(FORM_FOOTPRINT)) {
+            if (footprintKicadUuid(child)) |u| try fp_by_uuid.put(u, i);
+            if (footprintCanopyUuid(child)) |c| try existing_canopy_uuids.put(c, {});
+        } else if (child.isForm(FORM_VIA)) {
+            if (viaCenterMm(child)) |c| try existing_vias.append(arena, c);
+        }
+    }
+}
+
+/// Handle one `add_via` op: a through-hole GND stitching via from a
+/// first-insertion layout seed. De-dups by position against the board's
+/// existing vias and the ones added earlier this batch, so a re-seed never
+/// doubles a via. The net is referenced by name (the board carries no
+/// top-level net declarations — see the canonicalisation note in
+/// `applyOpsCounted`). Skips silently on a bad/empty op.
+fn applyAddViaOp(
+    arena: std.mem.Allocator,
+    op_obj: std.json.ObjectMap,
+    existing_vias: *std.ArrayListUnmanaged(Vec2Mm),
+    extra_vias: *std.ArrayListUnmanaged(Node),
+    stats: *ApplyStats,
+) WriteError!void {
+    const vx = jsonNumNm(op_obj.get("x")) / NM_PER_MM;
+    const vy = jsonNumNm(op_obj.get("y")) / NM_PER_MM;
+    const vdia = jsonNumNm(op_obj.get("dia")) / NM_PER_MM;
+    const vdrill = jsonNumNm(op_obj.get("drill")) / NM_PER_MM;
+    const vnet = jsonStr(op_obj.get("net"));
+    if (vdia <= 0 or vdrill <= 0 or vnet.len == 0) return;
+    if (viaExistsAt(existing_vias.items, vx, vy)) return;
+    try existing_vias.append(arena, .{ .x = vx, .y = vy });
+    try extra_vias.append(arena, try buildVia(arena, vx, vy, vdia, vdrill, vnet));
+    stats.vias_added += 1;
+}
+
 fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: []const std.json.Value, stats: *ApplyStats) WriteError!Node {
     // First: walk the top-level once to:
     //  - record max net-ID for allocating new nets
@@ -130,19 +194,11 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
     var fp_by_uuid = std.StringHashMap(usize).init(arena);
     var net_id_by_name = std.StringHashMap(i64).init(arena);
     var existing_canopy_uuids = std.StringHashMap(void).init(arena);
-    for (root_children, 0..) |child, i| {
-        if (child.isForm("net")) {
-            const cl = child.asList() orelse continue;
-            if (cl.len < 3) continue;
-            const id_num = cl[1].asNumber() orelse continue;
-            const id_i64: i64 = @intFromFloat(id_num);
-            if (id_i64 > max_net_id) max_net_id = id_i64;
-            if (cl[2].asString()) |name| try net_id_by_name.put(name, id_i64);
-        } else if (child.isForm(FORM_FOOTPRINT)) {
-            if (footprintKicadUuid(child)) |u| try fp_by_uuid.put(u, i);
-            if (footprintCanopyUuid(child)) |c| try existing_canopy_uuids.put(c, {});
-        }
-    }
+    // Centres (mm) of every via already on the board, so an `add_via` at an
+    // existing position is a no-op — keeps a re-seed of the same board from
+    // doubling its stitching vias.
+    var existing_vias: std.ArrayListUnmanaged(Vec2Mm) = .empty;
+    try indexBoardChildren(arena, root_children, &max_net_id, &fp_by_uuid, &net_id_by_name, &existing_canopy_uuids, &existing_vias);
 
     // Apply each op, accumulating:
     //  - mutated_fp[index] = replacement node for the footprint at that index
@@ -158,6 +214,7 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
     var extra_footprints: std.ArrayListUnmanaged(Node) = .empty;
     var extra_graphics: std.ArrayListUnmanaged(Node) = .empty;
     var extra_nets: std.ArrayListUnmanaged(Node) = .empty;
+    var extra_vias: std.ArrayListUnmanaged(Node) = .empty;
     const had_top_level_nets = max_net_id >= 0;
 
     for (ops) |op_val| {
@@ -202,6 +259,11 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
                 try extra_graphics.append(arena, node);
                 stats.board_items += 1;
             }
+            continue;
+        }
+
+        if (std.mem.eql(u8, op_name, "add_via")) {
+            try applyAddViaOp(arena, op_obj, &existing_vias, &extra_vias, stats);
             continue;
         }
 
@@ -308,6 +370,8 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
         if (try normalizePropertyVisibility(arena, fp, &stats.fields_hidden, &stats.fields_shown)) |fixed| out_fp = fixed;
         try new_children.append(arena, out_fp);
     }
+    // GND stitching vias from a layout seed (top-level forms, like footprints).
+    for (extra_vias.items) |v| try new_children.append(arena, v);
     // Section staging boxes / labels (Dwgs.User graphics) go last.
     for (extra_graphics.items) |g| try new_children.append(arena, g);
 
@@ -1110,6 +1174,61 @@ fn makeStringForm(arena: std.mem.Allocator, head: []const u8, value: []const u8)
     return Node.list(Span.zero, children);
 }
 
+/// A single-float form `(<head> <value>)` — e.g. `(size 0.4)`, `(drill 0.2)`.
+fn makeFloatForm(arena: std.mem.Allocator, head: []const u8, value: f64) std.mem.Allocator.Error!Node {
+    var children = try arena.alloc(Node, 2);
+    children[0] = Node.atom(Span.zero, head);
+    children[1] = Node.float(Span.zero, value);
+    return Node.list(Span.zero, children);
+}
+
+/// Read a top-level `(via …)` node's `(at x y)` centre in mm, or null when it
+/// has no parseable position.
+fn viaCenterMm(via: Node) ?Vec2Mm {
+    const cl = via.asList() orelse return null;
+    for (cl) |sub| {
+        if (!sub.isForm(FORM_AT)) continue;
+        const al = sub.asList() orelse return null;
+        if (al.len < 3) return null;
+        const x = al[1].asNumber() orelse return null;
+        const y = al[2].asNumber() orelse return null;
+        return .{ .x = x, .y = y };
+    }
+    return null;
+}
+
+/// True when some via centre in `existing` is within `VIA_DEDUP_MM` of (x, y).
+fn viaExistsAt(existing: []const Vec2Mm, x: f64, y: f64) bool {
+    for (existing) |c| {
+        if (@abs(c.x - x) <= VIA_DEDUP_MM and @abs(c.y - y) <= VIA_DEDUP_MM) return true;
+    }
+    return false;
+}
+
+/// Build a through-hole `(via …)` node stitching `net` to the plane:
+/// `(via (at x y) (size dia) (drill drill) (layers "F.Cu" "B.Cu")
+///  (net "<name>") (uuid "…"))`. The net is referenced by name only — modern
+/// pcbnew boards omit the top-level `(net <id> "name")` declarations and infer
+/// nets from in-element name references (same form `setPadNet` uses), so an
+/// id-based reference would have nothing to bind to. The uuid is derived from
+/// the position so re-emitting the same via is deterministic.
+fn buildVia(arena: std.mem.Allocator, x: f64, y: f64, dia: f64, drill: f64, net: []const u8) WriteError!Node {
+    var children = try arena.alloc(Node, 7);
+    children[0] = Node.atom(Span.zero, FORM_VIA);
+    children[1] = try makeAtForm(arena, x, y, 0);
+    children[2] = try makeFloatForm(arena, "size", dia);
+    children[3] = try makeFloatForm(arena, "drill", drill);
+    var layers = try arena.alloc(Node, 3);
+    layers[0] = Node.atom(Span.zero, "layers");
+    layers[1] = Node.string(Span.zero, "F.Cu");
+    layers[2] = Node.string(Span.zero, "B.Cu");
+    children[4] = Node.list(Span.zero, layers);
+    children[5] = try makeNetForm(arena, 0, net);
+    const seed = try std.fmt.allocPrint(arena, "via:{d}:{d}:{s}", .{ x, y, net });
+    children[6] = try makeStringForm(arena, FORM_UUID, try boardItemUuid(arena, seed));
+    return Node.list(Span.zero, children);
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 // spec: kicad_pcb/writer - set_pad_net rewrites the (net …) form on the matching pad
@@ -1339,6 +1458,66 @@ test "applyOpsToSource add assigns pad nets to the new footprint" {
     // Both pads must reference their nets (name-only, pcbnew v20260206 form).
     try std.testing.expect(std.mem.indexOf(u8, out, "(net \"VBAT\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "(net \"GND\")") != null);
+}
+
+// spec: kicad_pcb/writer - add_via inserts a (via …) form stitching the GND net
+test "applyOpsToSource add_via inserts a via" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "R_0402"
+        \\    (uuid "fp-1")
+        \\    (property "Reference" "R1")))
+    ;
+    // x/y/dia/drill arrive in nanometres (sync emits mmToNm); 1 mm = 1_000_000 nm.
+    const ops =
+        \\[{"op":"add_via","net":"GND","x":1000000,"y":2000000,"dia":400000,"drill":200000}]
+    ;
+    var stats: ApplyStats = .{};
+    const out = try applyOpsToSourceWithStats(arena.allocator(), src, ops, &stats);
+    try std.testing.expectEqual(@as(u32, 1), stats.vias_added);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(via") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(net \"GND\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(layers \"F.Cu\" \"B.Cu\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(drill") != null);
+    // The written board must re-parse and carry exactly one top-level via.
+    const reparsed = try parser.parse(arena.allocator(), out);
+    const root = reparsed[0].asList().?;
+    var via_count: usize = 0;
+    for (root) |child| {
+        if (child.isForm(FORM_VIA)) via_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), via_count);
+}
+
+// spec: kicad_pcb/writer - add_via at an existing via position is a no-op
+test "applyOpsToSource add_via dedups against an existing via" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "R_0402" (uuid "fp-1") (property "Reference" "R1"))
+        \\  (via (at 1 2) (size 0.4) (drill 0.2) (layers "F.Cu" "B.Cu") (net "GND")))
+    ;
+    // Same position as the via already on the board → must not add a second one.
+    const ops =
+        \\[{"op":"add_via","net":"GND","x":1000000,"y":2000000,"dia":400000,"drill":200000}]
+    ;
+    var stats: ApplyStats = .{};
+    const out = try applyOpsToSourceWithStats(arena.allocator(), src, ops, &stats);
+    try std.testing.expectEqual(@as(u32, 0), stats.vias_added);
+    const reparsed = try parser.parse(arena.allocator(), out);
+    const root = reparsed[0].asList().?;
+    var via_count: usize = 0;
+    for (root) |child| {
+        if (child.isForm(FORM_VIA)) via_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), via_count);
 }
 
 // spec: kicad_pcb/writer - add drops legacy (angle …) arcs the modern board parser rejects

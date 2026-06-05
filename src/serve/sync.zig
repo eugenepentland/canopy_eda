@@ -174,6 +174,11 @@ pub const ParsedSyncPlan = struct {
     /// leaves placed footprints' geometry untouched. Lets a board built
     /// before the silk/fab fixes backfill outlines without moving anything.
     refresh: bool = false,
+    /// When true (default), a first-insertion sync that seeds parts from the
+    /// design's default layout also writes their GND-plane stitching vias into
+    /// the board (see `loadSyncVias` + `emitLayoutVias`). Opt-out via
+    /// `?no_layout_vias=1` to write placement only. Traces are never written.
+    emit_layout_vias: bool = true,
     /// Set of `<uuid>|<op>|<key>|<value>` fingerprints the agent has
     /// already pushed in prior syncs. Server skips re-emitting any
     /// state-asserting op whose fingerprint is in this set — works
@@ -696,6 +701,14 @@ const SyncSummary = struct {
     /// Surfaced to the user via the agent's result toast so they can
     /// see "the server kept trying to re-do work that already landed."
     suppressed: u32 = 0,
+    /// GND stitching vias emitted when seeding fresh parts from the default
+    /// layout (`emitLayoutVias`). Pre-dedup count; the writer reports how many
+    /// actually landed (`ApplyStats.vias_added`) after position de-dup.
+    vias: u32 = 0,
+    /// Sub-blocks seeded from their own module default layout this sync
+    /// (`seedSubBlocks`). When > 0, the whole-design via path (`emitLayoutVias`)
+    /// is skipped — the per-block path owns via emission.
+    blocks: u32 = 0,
 };
 
 /// Internal result of running the diff against a parsed plan. Holds the
@@ -905,12 +918,22 @@ pub fn runSyncPlan(
         .summary = &summary,
         .migrate_heuristic = parsed.migrate_heuristic,
         .refresh = parsed.refresh,
+        .sub_blocks = block.sub_blocks,
+        .emit_layout_vias = parsed.emit_layout_vias,
+        .dot_nets = parsed.dot_nets,
     };
     for (instances.items) |inst| try handleInstance(&diff_ctx, inst, &w, &first_op);
 
     // Adds were buffered during the walk; lay them out grouped by section
     // (positions + section boxes/labels) now that every match is resolved.
     try emitStagedAdds(&diff_ctx, &w, &first_op);
+
+    // When this sync seeded fresh parts from the design's *whole-design* default
+    // layout, also write their GND vias. Skipped when per-sub-block seeding ran
+    // (`summary.blocks > 0`) — there the per-block path already emitted vias, and
+    // the whole-design layout would double them at different coordinates.
+    if (summary.blocks == 0)
+        try emitLayoutVias(&diff_ctx, block, project_dir, name, parsed, &w, &first_op);
 
     try emitStaleOps(parsed, &matched_uuids, &w, &first_op, &summary);
 
@@ -923,12 +946,12 @@ pub fn runSyncPlan(
     try rw.print(
         "{{\"design_version\":{d},\"summary\":{{" ++
             "\"updated\":{d},\"added\":{d},\"removed\":{d}," ++
-            "\"swapped\":{d},\"flagged_stale\":{d},\"suppressed\":{d}" ++
+            "\"swapped\":{d},\"flagged_stale\":{d},\"suppressed\":{d},\"vias\":{d}" ++
             "}},\"ops\":",
         .{
             version,            summary.updated, summary.added,
             summary.removed,    summary.swapped, summary.flagged_stale,
-            summary.suppressed,
+            summary.suppressed, summary.vias,
         },
     );
     try rw.writeAll(ops_buf.items);
@@ -1050,6 +1073,7 @@ fn runKicadPcbSync(
         .migrate_heuristic = migrate,
         .dot_nets = dot_nets,
         .refresh = refresh,
+        .emit_layout_vias = !isQueryFlagSet(req, "no_layout_vias"),
         .applied_ops = std.StringHashMap(void).init(req.arena),
     };
     const run = try runSyncPlan(req.arena, ctx.allocator, ctx.project_dir, name, plan);
@@ -1114,11 +1138,12 @@ fn runKicadPcbSync(
         "{{\"ok\":true,\"design_version\":{d}," ++
             "\"applied\":{{\"added\":{d},\"removed\":{d},\"swapped\":{d}," ++
             "\"fields_set\":{d},\"pad_nets_set\":{d},\"locked_changed\":{d}," ++
-            "\"fields_hidden\":{d},\"fields_shown\":{d}}}",
+            "\"fields_hidden\":{d},\"fields_shown\":{d},\"vias_added\":{d}}}",
         .{
             run.version,          stats.added,         stats.removed,
             stats.swapped,        stats.fields_set,    stats.pad_nets_set,
             stats.locked_changed, stats.fields_hidden, stats.fields_shown,
+            stats.vias_added,
         },
     );
     try rw.print(",\"source_copied\":{d}", .{source_copied});
@@ -1138,7 +1163,7 @@ fn runKicadPcbSync(
 fn statsAreZero(s: kicad_pcb_writer.ApplyStats) bool {
     return s.added == 0 and s.removed == 0 and s.swapped == 0 and
         s.fields_set == 0 and s.pad_nets_set == 0 and s.locked_changed == 0 and
-        s.fields_hidden == 0 and s.fields_shown == 0;
+        s.fields_hidden == 0 and s.fields_shown == 0 and s.vias_added == 0;
 }
 
 /// Returns a user-facing message when pcbnew has the target board open
@@ -1558,6 +1583,15 @@ const DiffContext = struct {
     migrate_heuristic: bool,
     /// Re-bake matched parts' geometry via a same-name swap (see ParsedSyncPlan.refresh).
     refresh: bool,
+    /// The design's top-level sub-blocks (name → module source + scoped block).
+    /// `emitStagedAdds` consults these to seed a not-yet-placed sub-block from
+    /// *its own* module default layout, as a unit in the staging area, rather
+    /// than scattering its parts via the whole-design layout. See `seedSubBlock`.
+    sub_blocks: []const env_mod.SubBlock,
+    /// Whether to emit GND vias for a fully-fresh seeded sub-block, and whether
+    /// to keep per-pin sub-nets when naming them (mirrors ParsedSyncPlan).
+    emit_layout_vias: bool,
+    dot_nets: bool,
 };
 
 /// Walk every board fp that didn't match any design instance and emit the
@@ -2480,26 +2514,31 @@ fn groupAddsBySection(
     std.mem.sort([]const u8, order.items, {}, lessThanStr);
 }
 
-/// Emit every buffered `add`, choosing each part's placement. When the design
-/// has a premade placement-tool layout (`premade_layout`) that names the part,
-/// it lands at that exact (x, y, rot) so a first-time import reproduces the
-/// tool's layout — no staging box, and since the sync only ever writes
-/// footprints, no traces or vias. Parts the layout doesn't name (or all parts,
-/// when there is no layout) fall back to the section-staging grid below.
-/// Existing/matched footprints are never moved either way.
+/// Emit every buffered `add`, choosing each part's placement in three tiers:
+///   1. **Per-sub-block module layout** — a not-yet-placed sub-block is seeded
+///      from *its own* module default layout, as one pre-laid-out unit in the
+///      staging area (drag into place in KiCad). See `seedSubBlocks`.
+///   2. **Whole-design premade layout** — a remaining part the design's own
+///      layout names lands at that exact (x, y, rot).
+///   3. **Section-staging grid** — anything left clusters in a staging box.
+/// Existing/matched footprints are never moved by any tier.
 fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
     const arena = d.spc.arena;
     const adds = d.pending_adds.items;
     if (adds.len == 0) return;
 
-    const layout = d.premade_layout orelse return emitStagingGrid(d, w, first, adds);
-
-    // Place every layout-named part at its exact pose; collect the rest for the
-    // staging grid so a partial layout still lands its unknown parts somewhere.
+    // Tier 1: seed sub-blocks that aren't on the board from their module layouts.
     var leftover: std.ArrayListUnmanaged(PendingAdd) = .empty;
-    for (adds) |pa| {
+    try seedSubBlocks(d, w, first, adds, &leftover);
+    const rest = leftover.items;
+    if (rest.len == 0) return;
+
+    // Tier 2: the whole-design premade layout names the part → exact pose.
+    const layout = d.premade_layout orelse return emitStagingGrid(d, w, first, rest);
+    var grid_rest: std.ArrayListUnmanaged(PendingAdd) = .empty;
+    for (rest) |pa| {
         const pose = layout.get(pa.inst.ref_des) orelse {
-            try leftover.append(arena, pa);
+            try grid_rest.append(arena, pa);
             continue;
         };
         const kmod = loadKicadMod(d.spc, pa.fp_name, pa.inst.component) orelse continue;
@@ -2507,7 +2546,228 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
         try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, mmToNm(pose.x), mmToNm(pose.y), pose.rot, pa.canopy_net, pa.section);
         d.summary.added += 1;
     }
-    return emitStagingGrid(d, w, first, leftover.items);
+    // Tier 3: grid staging.
+    return emitStagingGrid(d, w, first, grid_rest.items);
+}
+
+/// Staging band for whole-sub-block seeds: blocks are packed left-to-right at
+/// `BLOCK_STAGE_ORIGIN`, each preserving its module's internal arrangement, so a
+/// not-yet-placed sub-block lands as a draggable unit clear of the main board.
+const BLOCK_STAGE_ORIGIN_X_MM: f64 = 300.0;
+const BLOCK_STAGE_ORIGIN_Y_MM: f64 = 230.0;
+const BLOCK_STAGE_GAP_MM: f64 = 12.0;
+
+/// Tier 1 of `emitStagedAdds`: group the buffered adds by their sub-block
+/// (`pa.section` is the sub-block name for a sub-block part), and for each group
+/// whose sub-block has a module default layout, place its parts as one unit in
+/// the staging band using that layout. Parts not in a module-layout sub-block —
+/// or a sub-block part the module layout doesn't name — are appended to
+/// `leftover` for tiers 2–3. Only the *missing* parts are placed (already-placed
+/// parts never reach `pending_adds`), so this fills a partly-placed block too.
+fn seedSubBlocks(d: *DiffContext, w: anytype, first: *bool, adds: []const PendingAdd, leftover: *std.ArrayListUnmanaged(PendingAdd)) !void {
+    const arena = d.spc.arena;
+    if (d.sub_blocks.len == 0) {
+        for (adds) |pa| try leftover.append(arena, pa);
+        return;
+    }
+    // Group add indices by section, in a stable (sorted) block order.
+    var buckets = std.StringHashMap(std.ArrayListUnmanaged(usize)).init(arena);
+    var order: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (adds, 0..) |pa, i| {
+        const e = try buckets.getOrPut(pa.section);
+        if (!e.found_existing) {
+            e.value_ptr.* = .empty;
+            try order.append(arena, pa.section);
+        }
+        try e.value_ptr.append(arena, i);
+    }
+    std.mem.sort([]const u8, order.items, {}, lessThanStr);
+
+    var cursor_x = BLOCK_STAGE_ORIGIN_X_MM;
+    for (order.items) |sec| {
+        const idxs = (buckets.get(sec) orelse continue).items;
+        // Not a sub-block, or a sub-block with no module default layout → defer.
+        const sb = subBlockNamed(d.sub_blocks, sec) orelse {
+            for (idxs) |idx| try leftover.append(arena, adds[idx]);
+            continue;
+        };
+        const poses = pcb_layout.loadModulePoses(arena, d.spc.project_dir, sb.source) orelse {
+            for (idxs) |idx| try leftover.append(arena, adds[idx]);
+            continue;
+        };
+        if (try seedOneSubBlock(d, w, first, sb, sec, adds, idxs, poses, cursor_x, leftover)) |advance|
+            cursor_x += advance;
+    }
+}
+
+/// Place one sub-block's missing parts at `cursor_x` in the staging band, using
+/// `poses` (module-local). Returns the horizontal advance (block width + gap) to
+/// pack the next block, or null when nothing was placed (no box drawn, cursor
+/// unchanged). The module layout is keyed by the module's ref-des, which equals
+/// the design's flattened sub-block ref minus the `<sec>/` prefix (both resolve
+/// through the same instantiation), so a prefix-strip maps them.
+fn seedOneSubBlock(
+    d: *DiffContext,
+    w: anytype,
+    first: *bool,
+    sb: env_mod.SubBlock,
+    sec: []const u8,
+    adds: []const PendingAdd,
+    idxs: []const usize,
+    poses: []const pcb_layout.RefPose,
+    cursor_x: f64,
+    leftover: *std.ArrayListUnmanaged(PendingAdd),
+) !?f64 {
+    const arena = d.spc.arena;
+    var pmap = std.StringHashMap(pcb_layout.SyncPose).init(arena);
+    var minx: f64 = std.math.floatMax(f64);
+    var miny: f64 = std.math.floatMax(f64);
+    var maxx: f64 = -std.math.floatMax(f64);
+    var maxy: f64 = -std.math.floatMax(f64);
+    for (poses) |p| {
+        try pmap.put(p.ref, .{ .x = p.x, .y = p.y, .rot = p.rot });
+        minx = @min(minx, p.x);
+        miny = @min(miny, p.y);
+        maxx = @max(maxx, p.x);
+        maxy = @max(maxy, p.y);
+    }
+    // Block-space → board-space translation: the block's min corner lands at
+    // (cursor_x, BLOCK_STAGE_ORIGIN_Y), preserving the internal layout.
+    const dx = cursor_x - minx;
+    const dy = BLOCK_STAGE_ORIGIN_Y_MM - miny;
+
+    var seeded: usize = 0;
+    for (idxs) |idx| {
+        const pa = adds[idx];
+        const local = stripSubPrefix(pa.inst.ref_des, sec);
+        const pose = pmap.get(local) orelse {
+            try leftover.append(arena, pa);
+            continue;
+        };
+        const kmod = loadKicadMod(d.spc, pa.fp_name, pa.inst.component) orelse continue;
+        const fp_def = loadFootprintDefForInstance(d.spc, pa.fp_name, pa.inst, pa.canopy_net, pa.section);
+        try emitAddOp(
+            w,
+            first,
+            pa.inst,
+            pa.fp_name,
+            kmod,
+            fp_def,
+            d.pad_net_map,
+            mmToNm(pose.x + dx),
+            mmToNm(pose.y + dy),
+            pose.rot,
+            pa.canopy_net,
+            pa.section,
+        );
+        d.summary.added += 1;
+        seeded += 1;
+    }
+    if (seeded == 0) return null;
+    d.summary.blocks += 1;
+
+    // Outline + label box around the block's footprint extent.
+    const bx0 = cursor_x - STAGE_BOX_PAD_MM;
+    const by0 = BLOCK_STAGE_ORIGIN_Y_MM - STAGE_BOX_PAD_MM - STAGE_LABEL_H_MM;
+    const bx1 = cursor_x + (maxx - minx) + STAGE_BOX_PAD_MM;
+    const by1 = BLOCK_STAGE_ORIGIN_Y_MM + (maxy - miny) + STAGE_BOX_PAD_MM;
+    const items = [_][]const u8{
+        try boardRectItem(arena, bx0, by0, bx1, by1),
+        try boardLabelItem(arena, (bx0 + bx1) * STAGE_HALF, by0 + STAGE_LABEL_H_MM * STAGE_HALF, sec),
+    };
+    for (items) |item_json| {
+        if (!first.*) try w.*.writeAll(",");
+        first.* = false;
+        try w.*.writeAll(BOARD_ITEM_OP_OPEN);
+        try w.*.writeAll(item_json);
+        try w.*.writeAll("}");
+    }
+
+    // GND vias only when the WHOLE block is fresh (every module part was a fresh
+    // add) — a partly-placed block's other parts live elsewhere on the board, so
+    // block-frame vias for them would strand. Offset to match the parts.
+    if (d.emit_layout_vias and seeded == poses.len)
+        try emitBlockVias(d, w, first, sb.block, poses, dx, dy);
+
+    return (bx1 - bx0) + BLOCK_STAGE_GAP_MM;
+}
+
+/// Emit the GND vias for a fully-fresh seeded sub-block: route its module layout
+/// in the block's own frame (`viasForPoses` over the sub-block's scoped block),
+/// then offset each via by (dx, dy) so it lands under the staged parts. Net
+/// names collapse the same way pad nets do. The writer de-dups by position.
+fn emitBlockVias(d: *DiffContext, w: anytype, first: *bool, block: *const env_mod.DesignBlock, poses: []const pcb_layout.RefPose, dx: f64, dy: f64) !void {
+    const vias = pcb_layout.viasForPoses(d.spc.arena, block, d.spc.project_dir, poses, .{}) orelse return;
+    for (vias) |v| {
+        const net = bareNetName(maybeCollapseDotSubNet(v.net, d.dot_nets));
+        if (net.len == 0) continue;
+        if (!first.*) try w.*.writeAll(",");
+        first.* = false;
+        try w.*.writeAll("{\"op\":\"add_via\",\"net\":");
+        try json_writer.writeString(w.*, net);
+        try w.*.print(",\"x\":{d},\"y\":{d},\"dia\":{d},\"drill\":{d}}}", .{
+            mmToNm(v.x + dx), mmToNm(v.y + dy), mmToNm(v.dia), mmToNm(v.drill),
+        });
+        d.summary.vias += 1;
+    }
+}
+
+/// The sub-block named `name`, or null when none matches (e.g. a design-`section`
+/// part rather than a `(sub-block …)`).
+fn subBlockNamed(sub_blocks: []const env_mod.SubBlock, name: []const u8) ?env_mod.SubBlock {
+    for (sub_blocks) |sb| {
+        if (std.mem.eql(u8, sb.name, name)) return sb;
+    }
+    return null;
+}
+
+/// Strip a leading `"<sec>/"` from a flattened ref-des, giving the module-local
+/// ref the module layout is keyed by (`"buck_3v3d/R28"`, `"buck_3v3d"` → `"R28"`).
+/// Returns `ref` unchanged when the prefix doesn't match.
+fn stripSubPrefix(ref: []const u8, sec: []const u8) []const u8 {
+    if (ref.len > sec.len + 1 and std.mem.startsWith(u8, ref, sec) and ref[sec.len] == '/')
+        return ref[sec.len + 1 ..];
+    return ref;
+}
+
+/// Emit `add_via` ops for the GND-plane stitching vias of a first-insertion
+/// seed. Only fires when (a) vias weren't opted out (`?no_layout_vias=1`),
+/// (b) the design has a premade layout, (c) this sync actually added parts, and
+/// (d) **every** buffered add is named by that layout — i.e. no part fell back
+/// to the staging grid. The all-named gate matters because `loadSyncVias`
+/// rebuilds the *whole* placement at the layout poses; a part the layout
+/// doesn't name would sit at the origin there and drop a stray via, so we skip
+/// vias entirely for a partial seed. The writer de-dups by position, so a later
+/// re-seed of the same board re-emits these harmlessly. Net names are collapsed
+/// the same way pad nets are, so the via lands on the GND the pads reference.
+fn emitLayoutVias(
+    d: *DiffContext,
+    block: *const env_mod.DesignBlock,
+    project_dir: []const u8,
+    name: []const u8,
+    parsed: ParsedSyncPlan,
+    w: anytype,
+    first: *bool,
+) !void {
+    if (!parsed.emit_layout_vias) return;
+    if (d.summary.added == 0) return;
+    const layout = d.premade_layout orelse return;
+    for (d.pending_adds.items) |pa| {
+        if (!layout.contains(pa.inst.ref_des)) return; // partial seed → skip vias
+    }
+    const vias = pcb_layout.loadSyncVias(d.spc.arena, block, project_dir, name) orelse return;
+    for (vias) |v| {
+        const net = bareNetName(maybeCollapseDotSubNet(v.net, parsed.dot_nets));
+        if (net.len == 0) continue;
+        if (!first.*) try w.*.writeAll(",");
+        first.* = false;
+        try w.*.writeAll("{\"op\":\"add_via\",\"net\":");
+        try json_writer.writeString(w.*, net);
+        try w.*.print(",\"x\":{d},\"y\":{d},\"dia\":{d},\"drill\":{d}}}", .{
+            mmToNm(v.x), mmToNm(v.y), mmToNm(v.dia), mmToNm(v.drill),
+        });
+        d.summary.vias += 1;
+    }
 }
 
 /// Lay `adds` out as per-section clusters in a staging area and emit them: one
@@ -2919,6 +3179,16 @@ test "sectionForRef attributes sub-block parts to their sub-block and top-level 
     try std.testing.expectEqualStrings("STM32N657L0H3Q Core System", sectionForRef("C84", &ref_to_section));
     // Top-level part in no section → "".
     try std.testing.expectEqualStrings("", sectionForRef("R999", &ref_to_section));
+}
+
+test "stripSubPrefix recovers the module-local ref from a flattened sub-block ref" {
+    // spec: serve/sync - stripSubPrefix removes a leading "<sub>/" so a flattened sub-block ref maps to its module layout's ref
+    try std.testing.expectEqualStrings("R28", stripSubPrefix("buck_3v3d/R28", "buck_3v3d"));
+    try std.testing.expectEqualStrings("U11", stripSubPrefix("mcu/U11", "mcu"));
+    // A non-matching prefix leaves the ref untouched.
+    try std.testing.expectEqualStrings("buck_3v3d/R28", stripSubPrefix("buck_3v3d/R28", "mcu"));
+    // A bare top-level ref (no prefix) is returned as-is.
+    try std.testing.expectEqualStrings("R1", stripSubPrefix("R1", "buck_3v3d"));
 }
 
 test "boxCols returns a roughly-square column count" {
