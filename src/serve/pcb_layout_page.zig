@@ -1699,7 +1699,6 @@ fn writeLegend(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!vo
     try w.writeAll("<span class=\"sw l2gnd\"></span> GND return (images under trace, L2 plane)");
     try w.writeAll("<span class=\"sw viadot\"></span> GND via (L1↔L2, Ø from route params)");
     try w.writeAll("<span class=\"sw sig\"></span> signal");
-    try w.writeAll("<span class=\"sw esc\"></span> escape trace (signal breakout)");
     if (fallback_count > 0) {
         try w.print("<span class=\"note\">{d} part(s) using a placeholder box (no library footprint) — shown dashed</span>", .{fallback_count});
     }
@@ -1885,15 +1884,9 @@ fn writePcbData(
     }
     try w.writeAll("],");
 
-    // Escape stubs: reserved breakout corridors on single-pin signal pads
-    // (footprint-local pad centre → 2 mm tip), drawn as hints + reflected in
-    // the part's keepout so the placer kept them clear.
-    try w.writeAll("\"stubs\":[");
-    for (p.stubs, 0..) |st, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.print("{{\"p\":{d},\"ax\":{d},\"ay\":{d},\"bx\":{d},\"by\":{d}}}", .{ st.part, st.ax, st.ay, st.bx, st.by });
-    }
-    try w.writeAll("],");
+    // (Single-pin breakout corridors are still reserved in the part keepout and
+    // routed by the escape pass — they're no longer drawn as a 2 mm placeholder
+    // hint, since the router now emits the real short-stub + via.)
 
     // Decoupling loops: cap power/ground pads + the hub's candidate power/
     // ground pads, plus the *pinned* hub power/ground pads (`pp`/`gp`) the score
@@ -2230,7 +2223,6 @@ const PAGE_CSS =
     \\.pcb-legend .sw.l2gnd{border-color:#58a6ff;border-top-style:dashed}
     \\.pcb-legend .sw.viadot{border:0;height:9px;width:9px;border-radius:50%;background:radial-gradient(circle,#fff 0 1.5px,#ca8a04 1.5px)}
     \\.pcb-legend .sw.sig{border-color:#9aa7b4}
-    \\.pcb-legend .sw.esc{border-color:#f85149}
     \\.pcb-legend .note{color:#d29922}
     \\.pcb-svg{background:#010409;border:1px solid #30363d;border-radius:8px;max-width:100%;height:auto;touch-action:none}
     \\.pcb-ref{font:600 9px system-ui,sans-serif;text-anchor:middle;pointer-events:none;user-select:none}
@@ -2360,11 +2352,6 @@ const BOARD_JS =
     \\   var gt=el("title",{}); gt.textContent="GND return images under the power trace on the L2 plane (drops at the DRC-safe GND vias)"; pl.appendChild(gt);
     \\   gR.appendChild(pl);
     \\   if(!routedNow)[C,D].forEach(function(v){drawVia(gR,v.x,v.y,viaGeo().dia,viaGeo().drill);});});
-    \\ if(!((PCB.tracks||[]).length)){var tw=parseFloat((document.getElementById("r-tw")||{}).value)||0.15;
-    \\  (PCB.stubs||[]).forEach(function(st){var a=wpt(st.p,st.ax,st.ay),b=wpt(st.p,st.bx,st.by);
-    \\   var ln=el("line",{x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),
-    \\     stroke:"#f85149","stroke-width":Math.max(tw*S,1.5).toFixed(1),"stroke-linecap":"round",opacity:0.9});
-    \\   var t=el("title",{}); t.textContent="signal breakout (escape trace)"; ln.appendChild(t); gR.appendChild(ln);});}
     \\}
     \\function delta(id,cur,base){
     \\ var e=document.getElementById(id);if(!e)return;var d=cur-base;
