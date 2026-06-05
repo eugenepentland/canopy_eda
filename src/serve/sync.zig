@@ -11,7 +11,6 @@ const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const paths = @import("../paths.zig");
-const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const export_kicad = @import("../export_kicad.zig");
@@ -2671,32 +2670,6 @@ fn writePadNetsArray(
         try w.writeAll("]");
     }
     try w.writeAll("]");
-}
-
-// ── helpers ─────────────────────────────────────────────────────────────
-
-const FootprintEntry = struct {
-    kicad_name: []const u8,
-    sha: []const u8,
-    size: usize,
-};
-
-const ModelEntry = struct {
-    name: []const u8,
-    sha: []const u8,
-    size: usize,
-};
-
-fn sha256Hex(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var digest: [32]u8 = undefined;
-    Sha256.hash(input, &digest, .{});
-    const hex = "0123456789abcdef";
-    var out = try allocator.alloc(u8, 64);
-    for (digest, 0..) |b, i| {
-        out[i * 2] = hex[b >> 4];
-        out[i * 2 + 1] = hex[b & 0x0f];
-    }
-    return out;
 }
 
 // ── tests ──────────────────────────────────────────────────────────
