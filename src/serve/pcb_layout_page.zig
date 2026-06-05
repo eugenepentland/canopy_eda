@@ -147,7 +147,16 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const cached = if (sub != null) null else if (refine_name) |rn|
         readLayoutPoses(ctx.allocator, ctx.project_dir, name, rn)
     else if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
-    const placement = optimizer.solve(ctx.allocator, eff_block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place) catch {
+    // No layout to show and nothing asked for one: place the parts on a plain
+    // grid instead of running the (potentially expensive) optimizer on page open.
+    // The optimizer still runs on demand — Regenerate / Apply tuning (?regen=/
+    // weights), seeding a saved layout (?refine=), and the small per-sub-block
+    // previews (which compute fresh and are cheap) all take the `solve` path.
+    const grid_only = sub == null and refine_name == null and !tune.regen and cached == null;
+    const placement = (if (grid_only)
+        optimizer.gridPlace(ctx.allocator, eff_block, ctx.project_dir, tune.params)
+    else
+        optimizer.solve(ctx.allocator, eff_block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place)) catch {
         res.status = 500;
         res.body = PLACEMENT_ERR_MSG;
         return;
@@ -220,13 +229,12 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         );
         try w.writeAll("</div>");
         try writeScorebar(w, placement, name);
-        const auto_score = LayoutScore{
-            .hpwl = placement.score.hpwl_mm,
-            .loop = placement.score.loop_mm,
-            .caps = placement.score.loop_caps,
-            .objective = placement.breakdown.objective,
-        };
-        try writeLayoutsPanel(w, layouts, auto_score);
+        // When showing the plain grid placeholder, say so — the score is the raw
+        // grid's, not an optimized layout, and Regenerate computes the real one.
+        if (grid_only) try w.writeAll(
+            "<div class=\"pcb-note\">Showing parts on a plain grid — no layout computed yet. " ++
+                "Drag parts to arrange, or hit <b>Regenerate</b> to auto-place.</div>",
+        );
         try writeTuning(w, shown);
         try writeScoreView(w, shown);
         const rp_warn = if (routed) |r| router.returnPathViolations(placement, r, router.RETURN_PATH_RADIUS_MM) else 0;
@@ -238,11 +246,29 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         .{ view.width, view.height, view.width, view.height },
     );
     if (!embed) try w.writeAll(COURTYARD_MODAL);
+    try w.writeAll("</main>");
+    // Right sidebar: the saved-layouts history (manual snapshots + auto-recorded
+    // optimizer runs). Lives in its own column so the board has the full centre
+    // width. Emitted before the scripts so BOARD_JS can wire up its Load/Delete
+    // buttons. Omitted in the embedded per-sub-block preview.
+    if (!embed) {
+        const auto_score = LayoutScore{
+            .hpwl = placement.score.hpwl_mm,
+            .loop = placement.score.loop_mm,
+            .caps = placement.score.loop_caps,
+            .objective = placement.breakdown.objective,
+        };
+        try w.writeAll("<aside class=\"pcb-rside\">");
+        try writeLayoutsPanel(w, layouts, auto_score);
+        try w.writeAll("</aside>");
+    }
+    try w.writeAll("</div>");
     try writePcbData(w, ctx.allocator, placement, shown, view, name, layouts, routed, ro.params.clearance, violations, embed);
-    // Shared footprint engine (FP.padShape) must load before BOARD_JS runs.
+    // Shared footprint engine (FP.padShape) must load before BOARD_JS runs. Both
+    // scripts come after every column so the handlers find the elements they wire.
     try w.writeAll("<script src=\"/static/footprint_svg.js\"></script>");
     try w.writeAll(BOARD_JS);
-    try w.writeAll("</main></div></body></html>");
+    try w.writeAll("</body></html>");
 
     res.content_type = .HTML;
     res.body = aw.written();
@@ -1505,26 +1531,30 @@ fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: Layo
     }
     try w.writeAll("<div class=\"saved-list\">");
     for (layouts) |L| {
-        // `data-lay-row` keys the row for the Score-view re-weigh (reweighLayouts
-        // in BOARD_JS rewrites its score + auto-relative delta in place).
+        // Two stacked lines so the row fits the narrow sidebar: top = kind + name +
+        // auto-relative delta; bottom = score + Load/Delete. `data-lay-row` keys
+        // the row for the Score-view re-weigh (reweighLayouts in BOARD_JS rewrites
+        // its `.lay-score` + `.lay-d` in place — both still found by querySelector).
         try w.writeAll("<div class=\"lay-row\" data-lay-row=\"");
         try writeAttr(w, L.name);
-        try w.writeAll("\"><span class=\"lay-kind ");
+        try w.writeAll("\"><div class=\"lay-top\"><span class=\"lay-kind ");
         try w.writeAll(if (std.mem.eql(u8, L.kind, KIND_MANUAL)) "k-man\">manual" else "k-auto\">auto");
         try w.writeAll("</span><span class=\"lay-name\">");
         try writeEscaped(w, L.name);
-        try w.writeAll("</span><span class=\"lay-score\">");
+        try w.writeAll("</span>");
+        if (L.score) |s| {
+            try writeLayDelta(w, s, auto);
+        } else try w.writeAll("<span class=\"lay-d\"></span>");
+        try w.writeAll("</div><div class=\"lay-bot\"><span class=\"lay-score\">");
         if (L.score) |s| {
             if (s.objective > 0) try w.print("obj {d:.1} · ", .{s.objective});
             try w.print("HPWL {d:.1} · loop {d:.1}", .{ s.hpwl, s.loop });
-            try w.writeAll("</span>");
-            try writeLayDelta(w, s, auto);
-        } else try w.writeAll("—</span><span class=\"lay-d\"></span>");
-        try w.writeAll("<button class=\"btn lay-go\" data-lay-load=\"");
+        } else try w.writeAll("—");
+        try w.writeAll("</span><span class=\"lay-actions\"><button class=\"btn lay-go\" data-lay-load=\"");
         try writeAttr(w, L.name);
         try w.writeAll("\">Load</button><button class=\"btn lay-del\" title=\"Delete\" data-lay-del=\"");
         try writeAttr(w, L.name);
-        try w.writeAll("\">✕</button></div>");
+        try w.writeAll("\">✕</button></span></div></div>");
     }
     try w.writeAll("</div></div>");
 }
@@ -2152,8 +2182,11 @@ const COURTYARD_MODAL =
 const PAGE_CSS =
     \\html,body{margin:0;background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
     \\a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}
-    \\.pcb-layout{display:flex;gap:16px;align-items:flex-start;max-width:1500px;margin:0 auto;padding:12px 18px}
+    \\.pcb-layout{display:flex;gap:16px;align-items:flex-start;max-width:1760px;margin:0 auto;padding:12px 18px}
     \\.pcb-main{flex:1;min-width:0}
+    \\.pcb-note{font-size:12px;color:#d29922;background:#1d2230;border:1px solid #30363d;border-left:3px solid #d29922;
+    \\  border-radius:6px;padding:6px 10px;margin:2px 0 8px}
+    \\.pcb-note b{color:#f0f6fc}
     \\.pcb-head{display:flex;align-items:center;gap:12px;margin:6px 0 2px;flex-wrap:wrap}
     \\.pcb-head h1{flex:1;min-width:0}
     \\.pcb-main h1{font-size:18px;font-weight:600;margin:4px 0;color:#f0f6fc}
@@ -2172,26 +2205,30 @@ const PAGE_CSS =
     \\.pcb-bar .zoom-grp .btn{min-width:26px;text-align:center;padding:3px 7px}
     \\.pcb-bar .savemsg{font-size:12px;color:#3fb950;font-weight:600}
     \\.pcb-bar .muted{font-size:11.5px;color:#6e7681}
-    \\.pcb-saved{margin:2px 0 10px;border:1px solid #21262d;border-radius:8px;background:#161b22;overflow:hidden}
-    \\.pcb-saved .saved-h{font-size:12px;font-weight:700;color:#f0f6fc;padding:6px 10px;background:#0d1117;border-bottom:1px solid #21262d;
+    \\.pcb-rside{width:320px;flex:none;position:sticky;top:8px;max-height:calc(100vh - 16px);overflow:auto}
+    \\.pcb-saved{border:1px solid #21262d;border-radius:8px;background:#161b22;overflow:hidden}
+    \\.pcb-saved .saved-h{font-size:12px;font-weight:700;color:#f0f6fc;padding:8px 10px;background:#0d1117;border-bottom:1px solid #21262d;
     \\  display:flex;align-items:center;justify-content:space-between;gap:8px}
     \\.saved-rescore{font:inherit;font-size:11px;font-weight:600;border:1px solid #30363d;background:#21262d;color:#c9d1d9;
     \\  border-radius:5px;padding:2px 9px;cursor:pointer}
     \\.saved-rescore:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
     \\.saved-rescore:disabled{opacity:.5;cursor:default}
     \\.pcb-saved .saved-n{color:#8b949e;font-weight:400}
-    \\.pcb-saved .saved-empty{font-size:12px;color:#8b949e;padding:8px 10px}
-    \\.saved-list{display:flex;flex-direction:column;max-height:220px;overflow:auto}
-    \\.lay-row{display:flex;gap:8px;align-items:center;padding:5px 10px;border-bottom:1px solid #21262d;font-size:12px}
+    \\.pcb-saved .saved-empty{font-size:12px;color:#8b949e;padding:10px;line-height:1.5}
+    \\.saved-list{display:flex;flex-direction:column}
+    \\.lay-row{display:flex;flex-direction:column;gap:5px;padding:8px 10px;border-bottom:1px solid #21262d;font-size:12px}
     \\.lay-row:last-child{border-bottom:0}
-    \\.lay-kind{font-size:9.5px;font-weight:700;border-radius:3px;padding:1px 5px;letter-spacing:.03em}
+    \\.lay-top{display:flex;gap:6px;align-items:center}
+    \\.lay-bot{display:flex;gap:8px;align-items:center;justify-content:space-between}
+    \\.lay-kind{font-size:9.5px;font-weight:700;border-radius:3px;padding:1px 5px;letter-spacing:.03em;flex:none}
     \\.lay-kind.k-man{background:#14365c;color:#79c0ff}
     \\.lay-kind.k-auto{background:#21262d;color:#8b949e}
     \\.lay-name{font-weight:600;color:#e6edf3;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    \\.lay-score{color:#8b949e;white-space:nowrap}
-    \\.lay-d{font-weight:600;min-width:36px;text-align:right}
+    \\.lay-score{color:#8b949e;font-size:11px;flex:1;min-width:0}
+    \\.lay-d{font-weight:600;min-width:36px;text-align:right;flex:none}
     \\.lay-d.up{color:#f85149}
     \\.lay-d.down{color:#3fb950}
+    \\.lay-actions{display:flex;gap:6px;flex:none}
     \\.lay-row .btn{font:inherit;font-size:11px;border:1px solid #30363d;background:#21262d;border-radius:5px;padding:2px 8px;cursor:pointer;color:#c9d1d9}
     \\.lay-row .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
     \\.lay-row .lay-del{color:#f85149;border-color:#5b1e28;padding:2px 7px}
