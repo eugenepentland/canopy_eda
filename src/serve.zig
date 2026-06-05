@@ -300,6 +300,7 @@ pub fn serve(
     router.get("/api/pcb-layout/:name", pcb_layout_page.pcbLayoutJsonApi, .{});
     router.post("/api/pcb-layouts/:name", pcb_layout_page.saveNamedLayoutApi, .{});
     router.post("/api/pcb-layouts/:name/delete", pcb_layout_page.deleteNamedLayoutApi, .{});
+    router.post("/api/pcb-layouts/:name/default", pcb_layout_page.setDefaultLayoutApi, .{});
     router.post("/api/pcb-rescore/:name", pcb_layout_page.rescoreLayoutsApi, .{});
     router.post("/api/pcb-score/:name", pcb_layout_page.pcbScoreApi, .{});
     router.post("/api/pcb-score-batch/:name", pcb_layout_page.pcbScoreBatchApi, .{});

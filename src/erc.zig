@@ -814,7 +814,11 @@ fn checkBlockPowerPins(
             // VREF: auto-direction level translators (LSF0108, TXS0108, …) have no
             // VDD/VCC pin — they are supplied through their VREF_A / VREF_B rails.
             std.mem.startsWith(u8, base, "VREF") or
-            std.mem.startsWith(u8, base, "VS");
+            std.mem.startsWith(u8, base, "VS") or
+            // `V_<digit>` board rails (V_3V3D, V_12V, V_5V0, …) — the underscore
+            // form `rails.looksLikeRail` already recognizes; without this an IC
+            // powered from such a rail is falsely flagged "no power connection".
+            (base.len >= 3 and base[0] == 'V' and base[1] == '_' and base[2] >= '0' and base[2] <= '9');
 
         for (net.pins) |pin| {
             if (pin.ref_des.len == 0) continue;

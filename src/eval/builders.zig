@@ -703,7 +703,11 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
         } else if (arg.isForm("nominal")) {
             const nom_children = arg.asList().?;
             if (nom_children.len >= 2) {
-                nominal = nom_children[1].asNumber();
+                // Evaluate the expression so a *computed* nominal resolves — e.g.
+                // `(nominal vout)` on a parameterized regulator module whose output
+                // voltage is derived from its feedback-divider params — not just a
+                // literal. A bare literal still evaluates to itself.
+                nominal = (try self.evalNode(nom_children[1], env)).asNumber() orelse nom_children[1].asNumber();
             }
         } else if (arg.isForm("current")) {
             const cc = arg.asList().?;

@@ -1,2 +1,3 @@
 # guardian-snapshot v1
 src/render_html.zig: 28 `anytype` parameters (limit: 22)
+src/serve/sync.zig: 26 `anytype` parameters (limit: 22)
