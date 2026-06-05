@@ -170,53 +170,6 @@ pub const RenderCtx = struct {
 
     // ── Data collection ───────────────────────────────────────────────
 
-    /// Render a sub-block as a single hub instance with port-based pins.
-    /// Instead of flattening all internal components, we create one synthetic
-    /// instance and synthetic nets for its ports.
-    fn collectSubBlockAsHub(self: *RenderCtx, sb: env_mod.SubBlock, sb_prefix: []const u8, parent_renames: []const std.StringHashMap([]const u8)) !void {
-        _ = sb_prefix;
-        // Use the first instance's ref_des as the hub ref, or generate one
-        const hub_ref = if (sb.block.instances.len > 0 and isStdRefDes(sb.block.instances[0].ref_des))
-            sb.block.instances[0].ref_des
-        else
-            sb.name;
-
-        // Create synthetic FlatInst for the sub-block
-        const flat = FlatInst{
-            .ref_des = hub_ref,
-            .component = sb.block.name,
-            .value = "",
-            .symbol = "",
-            .parts = &.{},
-        };
-        try self.instances.append(self.allocator, flat);
-        try self.inst_map.put(self.allocator, hub_ref, flat);
-
-        // Create synthetic nets from the sub-block's ports.
-        // Each port becomes a pin on the hub, connected to the parent net.
-        for (sb.block.ports) |port| {
-            // The port's net is internal (e.g., "VOUT"). In the parent's rename map,
-            // it would be prefixed as "buck/VOUT" → "VDD". Build the prefixed key.
-            const prefixed_net = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ sb.name, port.net });
-            var parent_net = resolveNetName(prefixed_net, parent_renames);
-            // If no rename found, fall back to the raw port net name
-            if (std.mem.eql(u8, parent_net, prefixed_net)) {
-                parent_net = port.net;
-            }
-
-            // Create a net entry: hub_ref.port_name on the parent net
-            var pins: std.ArrayListUnmanaged(PinRef) = .empty;
-            try pins.append(self.allocator, .{
-                .ref_des = hub_ref,
-                .pin = port.name,
-            });
-            try self.nets.append(self.allocator, .{
-                .name = parent_net,
-                .pins = try pins.toOwnedSlice(self.allocator),
-            });
-        }
-    }
-
     /// Build a net rename map from a block's net_ties, prefixed appropriately.
     /// A tie (a="VDD", b="buck/VOUT") at prefix="" means: rename net "buck/VOUT" to "VDD".
     fn buildNetRenameMap(self: *RenderCtx, block: *const DesignBlock, prefix: []const u8) !std.StringHashMap([]const u8) {

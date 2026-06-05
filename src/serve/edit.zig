@@ -909,16 +909,6 @@ fn rebuildAndPush(ctx: *Handler, name: []const u8, res: *httpz.Response) Handler
     res.body = OK_JSON_TRUE;
 }
 
-fn parseJsonFloat(body: []const u8, key: []const u8) ?f64 {
-    const marker = std.mem.indexOf(u8, body, key) orelse return null;
-    var start = marker + key.len;
-    // Skip whitespace
-    while (start < body.len and (body[start] == ' ' or body[start] == ':')) : (start += 1) {}
-    var end = start;
-    while (end < body.len and (body[end] == '-' or body[end] == '.' or (body[end] >= '0' and body[end] <= '9'))) : (end += 1) {}
-    return std.fmt.parseFloat(f64, body[start..end]) catch null;
-}
-
 fn parseJsonString(body: []const u8, key: []const u8) ?[]const u8 {
     const marker = std.mem.indexOf(u8, body, key) orelse return null;
     var start = marker + key.len;
@@ -994,10 +984,6 @@ pub const BuildReport = struct {
 
 fn designFilePath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]u8 {
     return paths.designSourcePath(allocator, project_dir, name);
-}
-
-fn designBomPath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]u8 {
-    return paths.designSiblingPath(allocator, project_dir, name, ".bom");
 }
 
 /// Re-evaluate `<name>.sexp`, resolve BOM, render the scene-graph, run

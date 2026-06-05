@@ -122,9 +122,6 @@ pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u
         slot_counts[i] = slots;
         total_slots += slots;
     }
-    const total_height = @as(f64, @floatFromInt(@max(total_slots, 1) -| 1)) * per_conn_spacing;
-    _ = total_height;
-
     var results: std.ArrayListUnmanaged(BranchBody) = .empty;
 
     const multi = classified.items.len > 1;
@@ -137,12 +134,12 @@ pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u
     var consumed_slots: u32 = 0;
     var min_cy: f64 = py;
     var max_cy: f64 = py;
-    const total_h2 = @as(f64, @floatFromInt(@max(total_slots, 1) -| 1)) * per_conn_spacing;
+    const total_height = @as(f64, @floatFromInt(@max(total_slots, 1) -| 1)) * per_conn_spacing;
 
     for (classified.items, 0..) |entry, i| {
         const slots = slot_counts[i];
         const slot_center = @as(f64, @floatFromInt(consumed_slots)) + @as(f64, @floatFromInt(slots -| 1)) / HALF_DIVISOR;
-        const cy = py + slot_center * per_conn_spacing - total_h2 / HALF_DIVISOR;
+        const cy = py + slot_center * per_conn_spacing - total_height / HALF_DIVISOR;
         consumed_slots += slots;
         if (cy < min_cy) min_cy = cy;
         if (cy > max_cy) max_cy = cy;

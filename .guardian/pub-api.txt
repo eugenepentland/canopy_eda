@@ -452,7 +452,6 @@ src/render_svg/draw.zig::baseNetName fn
 src/render_svg/draw.zig::branch_spacing value
 src/render_svg/draw.zig::bus_gap value
 src/render_svg/draw.zig::classifyComponent fn
-src/render_svg/draw.zig::compactPinNumbers fn
 src/render_svg/draw.zig::containsCI fn
 src/render_svg/draw.zig::displayValue fn
 src/render_svg/draw.zig::drawBlockIcon fn
