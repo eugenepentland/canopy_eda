@@ -146,7 +146,12 @@ pub fn importZipBytes(
     try writeSexpFile(allocator, project_dir, "pinouts", safe_name, pinout);
     try writeSexpFile(allocator, project_dir, "footprints", fp_name_final, footprint);
     const component = writeComponentFile(allocator, project_dir, safe_name, safe_name, fp_name_final, sym_data);
-    if (step_data) |sd| try writeModelFile(allocator, project_dir, safe_name, sd);
+    // Key the model on the *footprint* name, matching `uploadModelApi` and
+    // `findModelFile`'s primary lookup. Keying on `safe_name` (the symbol name)
+    // orphans the STEP whenever the symbol and footprint names diverge enough
+    // that `findModelFile`'s substring fallback misses — e.g. a CSE part whose
+    // symbol is "ASE-25.000MHZ-L-C-T" but whose footprint is "ASE20000MHZLRT".
+    if (step_data) |sd| try writeModelFile(allocator, project_dir, fp_name_final, sd);
 
     infra_fs.cwd().deleteFile(tmp_zip) catch |e| switch (e) {
         error.FileNotFound => {},
