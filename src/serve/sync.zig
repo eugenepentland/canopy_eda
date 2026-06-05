@@ -2446,9 +2446,16 @@ fn emitAddOp(
     // Staging position (board nm). Both paths move the new fp here; (0,0)
     // means "no staging hint" (the part stays at the origin).
     try w.*.print(",\"x\":{d},\"y\":{d}", .{ x_nm, y_nm });
-    // Orientation (deg, CCW). Only emitted for a premade-layout placement; the
-    // staging grid passes 0, leaving the writer's bare `(at x y)` form.
-    if (rot_deg != 0) try w.*.print(",\"rot\":{d}", .{rot_deg});
+    // Orientation. The placement engine's angle is CW-positive (the page's
+    // `wpt()` rotates with SVG `rotate()` in a Y-down world), but KiCad's
+    // `(at x y angle)` is CCW-positive — so emit the negated angle. 0/180 are
+    // self-inverse (no change); only 90↔270 swap, which is exactly why vertical
+    // passives were landing 180° flipped while horizontal ones looked fine.
+    // Negating here also keeps each pad where the EDA computed it, so the GND
+    // vias (placed at EDA pad centres) still land on the right KiCad pads.
+    // The staging grid passes 0 → stays the writer's bare `(at x y)` form.
+    const kicad_rot = @mod(360.0 - rot_deg, 360.0);
+    if (kicad_rot != 0) try w.*.print(",\"rot\":{d}", .{kicad_rot});
     try w.*.writeAll(",\"pad_nets\":");
     try writePadNetsArray(w.*, inst.ref_des, pad_net_map);
     try w.*.writeAll("}");
