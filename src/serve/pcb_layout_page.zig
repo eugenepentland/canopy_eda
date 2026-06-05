@@ -1800,7 +1800,12 @@ const VIA_MATCH_MM: f64 = 3.0;
 /// already pays for routed scoring (mirrors the optimizer's ROUTED_SCORE_MAX_PARTS);
 /// bigger boards skip it and the overlay falls back to the pad centre.
 const ROUTED_VIA_PREVIEW_MAX_PARTS: usize = 48;
-fn dropViaPos(vias: []const router.Via, cx: f64, cy: f64) LocalPt {
+/// The DRC-safe GND-via nearest `(cx,cy)` within `VIA_MATCH_MM`, or null when the
+/// router placed no via there. Null is meaningful: a fat EP/thermal GND pad often
+/// can't take a fanned via at all, so the overlay must *not* invent one at the raw
+/// pad centre (it would sit on a neighbouring pad — e.g. the FB tap abutting the
+/// thermal pad — and never match what routing actually drops).
+fn dropViaPos(vias: []const router.Via, cx: f64, cy: f64) ?LocalPt {
     var best_d2: f64 = VIA_MATCH_MM * VIA_MATCH_MM;
     var found: ?LocalPt = null;
     for (vias) |vi| {
@@ -1810,7 +1815,15 @@ fn dropViaPos(vias: []const router.Via, cx: f64, cy: f64) LocalPt {
             found = .{ .x = vi.x, .y = vi.y };
         }
     }
-    return found orelse .{ .x = cx, .y = cy };
+    return found;
+}
+
+/// Emit a via drop point as `{"x":…,"y":…}`, or `null` when none exists — the
+/// overlay reads null as "draw the GND return path but no via dot here".
+fn writeViaDropJson(w: *std.Io.Writer, p: ?LocalPt) std.Io.Writer.Error!void {
+    if (p) |q| {
+        try w.print("{{\"x\":{d},\"y\":{d}}}", .{ q.x, q.y });
+    } else try w.writeAll("null");
 }
 
 fn writePcbData(
@@ -1956,9 +1969,10 @@ fn writePcbData(
         // the plane: the cap's GND pad and the IC's pinned GND pin.
         const cg_c = optimizer.worldPadCenter(p.parts[lp.cap], lp.cap_gnd.x, lp.cap_gnd.y);
         const gp_c = optimizer.worldPadCenter(p.parts[lp.hub], lp.hub_gnd_pin.x, lp.hub_gnd_pin.y);
-        const cgv = dropViaPos(drop_vias, cg_c[0], cg_c[1]);
-        const gpv = dropViaPos(drop_vias, gp_c[0], gp_c[1]);
-        try w.print(",\"cgv\":{{\"x\":{d},\"y\":{d}}},\"gpv\":{{\"x\":{d},\"y\":{d}}}", .{ cgv.x, cgv.y, gpv.x, gpv.y });
+        try w.writeAll(",\"cgv\":");
+        try writeViaDropJson(w, dropViaPos(drop_vias, cg_c[0], cg_c[1]));
+        try w.writeAll(",\"gpv\":");
+        try writeViaDropJson(w, dropViaPos(drop_vias, gp_c[0], gp_c[1]));
         try w.writeAll("}");
     }
     try w.writeAll("],");
@@ -2380,15 +2394,23 @@ const BOARD_JS =
     \\ // the via at the live GND pad centre so it follows the part (the prior via is
     \\ // already cleared with gR above; Route re-derives the exact DRC-safe fan).
     \\ PCB.loops.forEach(function(L){
+    \\   // cgv/gpv are the server's DRC-safe via drops, valid only at the emitted
+    \\   // pose. Once a part is dragged that point is stale, and cgv/gpv come back
+    \\   // null when the router can't fan a via there at all (a fat thermal/EP GND
+    \\   // pad next to a small pad). In both cases draw the return *path* to the raw
+    \\   // pad centre but DON'T draw a via dot — an invented dot would land on the
+    \\   // neighbouring pad (the FB tap) and never match what Route actually drops.
+    \\   var cReal=(L.cgv&&!moved(L.cap)), dReal=(L.gpv&&!moved(L.hub));
     \\   var A=wpt(L.hub,L.pp.x,L.pp.y), B=wpt(L.cap,L.cp.x,L.cp.y),
-    \\       C=(L.cgv&&!moved(L.cap))?L.cgv:wpt(L.cap,L.cg.x,L.cg.y),
-    \\       D=(L.gpv&&!moved(L.hub))?L.gpv:wpt(L.hub,L.gp.x,L.gp.y);
+    \\       C=cReal?L.cgv:wpt(L.cap,L.cg.x,L.cg.y),
+    \\       D=dReal?L.gpv:wpt(L.hub,L.gp.x,L.gp.y);
     \\   aw(B,A,"#ea580c",1.3,0.95);
     \\   var rp=[C,B,A,D].map(function(q){return X(q.x).toFixed(1)+","+Y(q.y).toFixed(1);}).join(" ");
     \\   var pl=el("polyline",{points:rp,fill:"none",stroke:"#58a6ff","stroke-width":1.3,opacity:0.85,"stroke-dasharray":"4 2"});
     \\   var gt=el("title",{}); gt.textContent="GND return images under the power trace on the L2 plane (drops at the DRC-safe GND vias)"; pl.appendChild(gt);
     \\   gR.appendChild(pl);
-    \\   if(!routedNow)[C,D].forEach(function(v){drawVia(gR,v.x,v.y,viaGeo().dia,viaGeo().drill);});});
+    \\   if(!routedNow){ if(cReal)drawVia(gR,C.x,C.y,viaGeo().dia,viaGeo().drill);
+    \\                   if(dReal)drawVia(gR,D.x,D.y,viaGeo().dia,viaGeo().drill); }});
     \\}
     \\function delta(id,cur,base){
     \\ var e=document.getElementById(id);if(!e)return;var d=cur-base;
@@ -2676,6 +2698,9 @@ const BOARD_JS =
     \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
     \\  .then(function(j){PCB.tracks=j.tracks||[];PCB.vias=j.vias||[];PCB.drc=j.drc||[];
     \\    if(payload.clearance>0)PCB.clr=payload.clearance;drawRoute();drawClr();drawDrc();
+    \\    rats();/* re-run with tracks present: routedNow is now true, so the loop
+    \\           overlay drops its preview GND vias and only the router's real vias
+    \\           remain — no preview+routed via doubling on the bypass caps. */
     \\    var ok=(j.routed===j.total);
     \\    setStat("r-stat",ok?"ok":"warn","routed "+j.routed+"/"+j.total+" nets · "+((j.vias||[]).length)+" vias");
     \\    setStat("r-drc",(j.drc||[]).length?"err":"ok",(j.drc||[]).length?(j.drc.length+" DRC violation(s)"):"DRC clean ✓");

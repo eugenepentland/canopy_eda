@@ -58,6 +58,13 @@ pub const RouteResult = struct {
 const MAX_NODES: usize = 200_000;
 const EMPTY: i32 = -1;
 const VIA_COST_MULT: f64 = 4.0; // a layer change costs ~4 grid steps
+/// Nets with at most this many pads get the top-layer-first attempt (feedback
+/// taps, straps, short two/three-pad signals). Fat nets skip it — see pass 2.
+const TOP_FIRST_MAX_PADS: usize = 4;
+/// Top-layer-first runs only on boards no larger than this. Bigger boards are
+/// dense enough that forcing short nets onto the surface costs more (slow failed
+/// searches) than it saves and disturbs the routing of other nets — see pass 2.
+const TOP_FIRST_MAX_PARTS: usize = 32;
 const SQRT2: f64 = 1.4142135623730951; // diagonal step length vs. orthogonal
 
 /// Route `placement` under `params`. All output is allocated in `arena`.
@@ -136,11 +143,38 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
         try order.append(arena, net_i);
     }
     std.sort.pdq(usize, order.items, net_pri, priorityDesc);
+    // Top-layer-first only on small boards. There it keeps short signal nets on
+    // the surface (no needless vias) with room to spare. On a big, congested
+    // board it backfires: most top-only attempts fail after an exhaustive (and,
+    // with the outline test, slow) surface search, and the few that succeed shift
+    // the greedy first-come routing enough to strand other nets — so we skip it
+    // and route exactly as before. Mirrors the routed-scoring part gate.
+    const top_first = placement.parts.len <= TOP_FIRST_MAX_PARTS;
     for (order.items) |net_i| {
         const pts = try netPoints(arena, placement, &idx_of, placement.nets[net_i]);
         if (pts.len < 2) continue;
         total += 1;
-        if (try routeNet(&ctx, @intCast(net_i), pts, &tracks, &vias)) routed += 1;
+        const ni: i32 = @intCast(net_i);
+        // …and only for *short* nets (a feedback tap, a strap — a handful of
+        // pads), which almost always have a clear surface path. A short net with
+        // no top path rolls back and re-routes with layer changes, same as before.
+        if (top_first and pts.len <= TOP_FIRST_MAX_PADS) {
+            const t_mark = tracks.items.len;
+            const v_mark = vias.items.len;
+            ctx.allow_vias = false;
+            ctx.use_poly = true; // accurate outlines so an EP notch frees the escape
+            const top_ok = try routeNet(&ctx, ni, pts, &tracks, &vias);
+            ctx.allow_vias = true;
+            ctx.use_poly = false;
+            if (top_ok) {
+                routed += 1;
+                continue;
+            }
+            tracks.shrinkRetainingCapacity(t_mark);
+            vias.shrinkRetainingCapacity(v_mark);
+            clearNetOcc(&ctx, ni);
+        }
+        if (try routeNet(&ctx, ni, pts, &tracks, &vias)) routed += 1;
     }
 
     // Escape breakouts: the optimizer reserved a corridor in front of every
@@ -750,6 +784,17 @@ const Ctx = struct {
     reach: f64,
     occ: [2][]i32,
     params: RouteParams,
+    /// When false the maze may not change layers — used for the top-layer-only
+    /// first pass so a short signal net (e.g. a feedback tap) stays on the
+    /// surface instead of diving to L2 the moment a via is marginally cheaper.
+    allow_vias: bool = true,
+    /// When true `blocked` measures clearance against each pad's real copper
+    /// outline (poly), not its bounding box — so a concave thermal/EP pad doesn't
+    /// falsely wall off a corridor that a short net could escape through. The
+    /// outline test is much costlier (point-in-polygon per node), so it's only
+    /// switched on for the brief top-layer-first attempts; the bulk two-layer
+    /// maze stays on the cheap, conservative bounding-box path.
+    use_poly: bool = false,
 };
 
 /// True if node (layer, n) can't carry net `net`: copper of another net is
@@ -764,7 +809,15 @@ fn blocked(ctx: *Ctx, layer: usize, n: usize, net: i32) bool {
     var on_own = false;
     var foreign = false;
     for (ctx.obs) |p| {
-        const d = distPointRect(px, py, .{ .x0 = p.x0, .y0 = p.y0, .x1 = p.x1, .y1 = p.y1 });
+        // Measure clearance against the pad's real copper outline only when asked
+        // (the top-first pass): a concave thermal/EP pad over-states copper in its
+        // box, walling off a corridor a short net could escape through — which is
+        // exactly what buries a feedback tap beside an EP and forces it inner. The
+        // outline test is costly, so the bulk maze keeps the cheap box distance.
+        const d = if (ctx.use_poly)
+            pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, px, py, ctx.reach)
+        else
+            distPointRect(px, py, .{ .x0 = p.x0, .y0 = p.y0, .x1 = p.x1, .y1 = p.y1 });
         if (p.net == net) {
             if (d <= 1e-9) on_own = true;
         } else if (d < ctx.reach) {
@@ -803,6 +856,18 @@ fn routeNet(ctx: *Ctx, net: i32, pts: [][2]f64, tracks: *std.ArrayListUnmanaged(
     // begins and ends in the centre of the pad, not a grid point beside it.
     for (pts) |pt| try addStub(ctx, net, pt, tracks);
     return all_ok;
+}
+
+/// Reset every grid node this net stamped back to EMPTY. Used to undo a failed
+/// top-layer-only attempt before re-routing the net with vias allowed — since a
+/// net only ever stamps its own index, clearing `occ == net` leaves every other
+/// net's copper untouched.
+fn clearNetOcc(ctx: *Ctx, net: i32) void {
+    for (0..2) |layer| {
+        for (ctx.occ[layer]) |*c| {
+            if (c.* == net) c.* = EMPTY;
+        }
+    }
 }
 
 /// Append a top-layer stub from pad centre `pt` to its grid access node, if
@@ -860,8 +925,9 @@ fn dijkstra(ctx: *Ctx, net: i32, goal_key: usize, tracks: *std.ArrayListUnmanage
         try relaxDiag(ctx, &pq, dist, prev, net, it.key, layer, ix, iy, -1, 1);
         try relaxDiag(ctx, &pq, dist, prev, net, it.key, layer, ix, iy, -1, -1);
         // Via to the other signal layer at the same (ix,iy) — only where a via
-        // of the configured size keeps clearance from foreign pads and copper.
-        if (viaAllowed(ctx, n, net))
+        // of the configured size keeps clearance from foreign pads and copper,
+        // and only when this pass permits layer changes at all.
+        if (ctx.allow_vias and viaAllowed(ctx, n, net))
             try relaxStep(ctx, &pq, dist, prev, net, it.key, 1 - layer, n, grid.g * VIA_COST_MULT);
     }
 
