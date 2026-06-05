@@ -25,8 +25,14 @@
   var DATA = {};
   var renderer, scene, camera, controls;
   var boardGroup, partsGroup, axes;
+  // One scene Group per PCB.parts entry, in the same index order — so a Load /
+  // drag / reset that mutated PCB.parts can be re-applied by walking both arrays.
+  var partGroups = [];
   var built = false, looping = false;
   var center = { x: 0, y: 0 }, span = 20;
+  // Signature of the poses 3D last rendered; lets onShow() detect a layout that
+  // changed in 2D (Load/reset/drag) and re-fit the camera only when it did.
+  var lastSig = "";
   var statusEl, canvas;
 
   var BOARD_T = 0.6, PAD_T = 0.06;
@@ -157,6 +163,56 @@
     });
   }
 
+  // ── Bounds / substrate / pose sync ───────────────────────────────
+  // Bounds from rotated courtyards (encompass the pads) of the *current* poses.
+  function computeBounds() {
+    var bb = { minx: Infinity, miny: Infinity, maxx: -Infinity, maxy: -Infinity };
+    (DATA.parts || []).forEach(function (p) { growByCourtyard(bb, p); });
+    if (!isFinite(bb.minx)) bb = { minx: -10, miny: -10, maxx: 10, maxy: 10 };
+    return bb;
+  }
+
+  // (Re)build the green substrate slab to span the current bounds, and refresh
+  // center/span (camera framing). Safe to call repeatedly — disposes the old
+  // slab geometry and preserves the Board toggle's visibility state.
+  function rebuildBoard() {
+    var bb = computeBounds();
+    while (boardGroup.children.length) {
+      var old = boardGroup.children[boardGroup.children.length - 1];
+      if (old.geometry) old.geometry.dispose();
+      boardGroup.remove(old);
+    }
+    var mg = 2.0;
+    var x0 = bb.minx - mg, y0 = bb.miny - mg, x1 = bb.maxx + mg, y1 = bb.maxy + mg;
+    var board = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, y1 - y0, BOARD_T), boardMat);
+    board.position.set((x0 + x1) / 2, (y0 + y1) / 2, -BOARD_T / 2);
+    boardGroup.add(board);
+    center.x = (bb.minx + bb.maxx) / 2; center.y = (bb.miny + bb.maxy) / 2;
+    span = Math.max(bb.maxx - bb.minx, bb.maxy - bb.miny, 8);
+  }
+
+  // A cheap fingerprint of every part's pose — used to skip re-fitting when the
+  // layout hasn't changed between two onShow() calls.
+  function poseSig() {
+    return (DATA.parts || []).map(function (p) {
+      return p.x + "," + p.y + "," + (p.rot || 0);
+    }).join(";");
+  }
+
+  // Re-apply the current PCB.parts poses to the part groups + substrate. Pads
+  // and STEP bodies hang off each group, so moving the group moves the whole
+  // part. This is what makes "Load a saved layout" show up in 3D.
+  function applyPoses() {
+    var parts = DATA.parts || [];
+    for (var i = 0; i < partGroups.length; i++) {
+      var p = parts[i]; if (!p) continue;
+      partGroups[i].position.set(p.x, -p.y, 0);
+      partGroups[i].rotation.z = deg2rad(-(p.rot || 0)); // Y flip reverses rotation sense
+    }
+    rebuildBoard();
+    lastSig = poseSig();
+  }
+
   // ── Scene build ──────────────────────────────────────────────────
   function build() {
     var PCB = DATA;
@@ -186,28 +242,18 @@
     partsGroup = new THREE.Group();
     scene.add(boardGroup); scene.add(partsGroup);
 
-    // Bounds from rotated courtyards (encompass the pads), then a margin slab.
-    var bb = { minx: Infinity, miny: Infinity, maxx: -Infinity, maxy: -Infinity };
-    (PCB.parts || []).forEach(function (p) { growByCourtyard(bb, p); });
-    if (!isFinite(bb.minx)) bb = { minx: -10, miny: -10, maxx: 10, maxy: 10 };
-    var mg = 2.0;
-    var x0 = bb.minx - mg, y0 = bb.miny - mg, x1 = bb.maxx + mg, y1 = bb.maxy + mg;
-    var board = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, y1 - y0, BOARD_T), boardMat);
-    board.position.set((x0 + x1) / 2, (y0 + y1) / 2, -BOARD_T / 2);
-    boardGroup.add(board);
-
-    // One group per part: placed + rotated, with pads (and later its model).
+    // One group per part, in PCB.parts order; pads now (model loads async). Pose
+    // (position + rotation) and the substrate are applied by applyPoses() below,
+    // so a later Load just re-runs that against the same groups.
+    partGroups = [];
     (PCB.parts || []).forEach(function (p) {
       var g = new THREE.Group();
-      g.position.set(p.x, -p.y, 0);
-      g.rotation.z = deg2rad(-(p.rot || 0)); // Y flip reverses rotation sense
       addPads(g, p);
       partsGroup.add(g);
+      partGroups.push(g);
       placeModel(g, p);
     });
-
-    center.x = (bb.minx + bb.maxx) / 2; center.y = (bb.miny + bb.maxy) / 2;
-    span = Math.max(bb.maxx - bb.minx, bb.maxy - bb.miny, 8);
+    applyPoses();
 
     wireControls();
     viewIso();
@@ -275,6 +321,16 @@
       try { build(); }
       catch (e) { console.error(e); setStatus("3D view failed: " + (e && e.message), true); }
     },
-    onShow: function () { if (built) { resize(); } }
+    // Re-read PCB.parts and re-pose the scene + re-fit. Called from the 2D board
+    // whenever a Load/reset changes the placement while 3D is already built, so
+    // loading a specific saved layout updates the 3D preview live.
+    sync: function () { if (built) { applyPoses(); viewIso(); } },
+    onShow: function () {
+      if (!built) return;
+      // Layout may have changed in 2D since 3D was last shown — re-pose and
+      // re-fit only if so, otherwise keep the user's current camera orbit.
+      if (poseSig() !== lastSig) { applyPoses(); viewIso(); }
+      resize();
+    }
   };
 })();
