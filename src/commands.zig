@@ -62,7 +62,7 @@ pub const CommandError = std.mem.Allocator.Error ||
         ServiceUnavailable,
     };
 
-/// `eda check <name>` — run ERC on a design and print violations.
+/// `netlisp check <name>` — run ERC on a design and print violations.
 pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
     var project_dir: []const u8 = ".";
     var positional_name: ?[]const u8 = null;
@@ -80,7 +80,7 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandE
         }
     }
     const design = positional_name orelse {
-        std.debug.print("Usage: eda check [--project-dir <d>] [--severity error|warning|info] <design-name>\n", .{});
+        std.debug.print("Usage: netlisp check [--project-dir <d>] [--severity error|warning|info] <design-name>\n", .{});
         std.process.exit(1);
     };
 
@@ -118,11 +118,11 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     try stdout.writeAll(w_buf.items);
 }
 
-/// CLI entry point for `eda build`. Evaluates `<design>.sexp`, runs assertions,
+/// CLI entry point for `netlisp build`. Evaluates `<design>.sexp`, runs assertions,
 /// resolves identities into the `.bom`, and either prints the resolved design
 /// to stdout, writes it to `--output-dir`, or pushes it to a running server
 /// via `--push` so the browser viewer updates live.
-/// `eda lint [--project-dir <d>] <design>` — report id-hygiene issues in a
+/// `netlisp lint [--project-dir <d>] <design>` — report id-hygiene issues in a
 /// design's `.sexp` (legacy residue, bad tokens, duplicates). Exits non-zero
 /// when any issue is found so it can gate CI.
 pub fn cmdLint(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
@@ -138,7 +138,7 @@ pub fn cmdLint(allocator: std.mem.Allocator, args: []const []const u8) CommandEr
         }
     }
     const design = positional_name orelse {
-        std.debug.print("Usage: eda lint [--project-dir <d>] <design-name>\n", .{});
+        std.debug.print("Usage: netlisp lint [--project-dir <d>] <design-name>\n", .{});
         std.process.exit(1);
     };
     const board_path = paths.designSourcePath(allocator, project_dir, design) catch {
@@ -159,7 +159,7 @@ pub fn cmdLint(allocator: std.mem.Allocator, args: []const []const u8) CommandEr
     }
 }
 
-/// `eda build [--project-dir <d>] [--output-dir <out>] [--push] <design>` —
+/// `netlisp build [--project-dir <d>] [--output-dir <out>] [--push] <design>` —
 /// evaluate a design, persist any newly generated `(id …)`/`(ids …)` tokens
 /// back into source, and optionally push the rebuilt scene to a running server.
 pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
@@ -190,7 +190,7 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     if (push_name == null and positional_name != null) push_name = positional_name;
 
     const design = push_name orelse {
-        std.debug.print("Usage: eda build [--project-dir <d>] [--output-dir <out>] [--push] <design-name>\n", .{});
+        std.debug.print("Usage: netlisp build [--project-dir <d>] [--output-dir <out>] [--push] <design-name>\n", .{});
         std.process.exit(1);
     };
 
@@ -295,7 +295,7 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     }
 }
 
-/// CLI entry point for `eda export-kicad`. Builds the design, resolves the
+/// CLI entry point for `netlisp export-kicad`. Builds the design, resolves the
 /// BOM, and writes a KiCad-compatible netlist plus per-footprint
 /// `.kicad_mod` files (and any associated STEP models) into `--output-dir`.
 pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
@@ -316,11 +316,11 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
     }
 
     const name = design_name orelse {
-        std.debug.print("Usage: eda export-kicad --project-dir <d> --output-dir <out> <design-name>\n", .{});
+        std.debug.print("Usage: netlisp export-kicad --project-dir <d> --output-dir <out> <design-name>\n", .{});
         std.process.exit(1);
     };
     const out = output_dir orelse {
-        std.debug.print("Usage: eda export-kicad --project-dir <d> --output-dir <out> <design-name>\n", .{});
+        std.debug.print("Usage: netlisp export-kicad --project-dir <d> --output-dir <out> <design-name>\n", .{});
         std.process.exit(1);
     };
 
@@ -380,7 +380,7 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
     }
 }
 
-/// `eda export-review --project-dir <d> [--output-dir <out>] [--zip] <design>`
+/// `netlisp export-review --project-dir <d> [--output-dir <out>] [--zip] <design>`
 ///
 /// Produces the same package the web button does: `<name>-review.md`
 /// + `<name>-bom.csv`. Default writes both files to `--output-dir`
@@ -413,7 +413,7 @@ pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) C
     }
 
     const name = design_name orelse {
-        std.debug.print("Usage: eda export-review --project-dir <d> [--output-dir <dir>] [--zip] <design>\n", .{});
+        std.debug.print("Usage: netlisp export-review --project-dir <d> [--output-dir <dir>] [--zip] <design>\n", .{});
         std.process.exit(1);
     };
 

@@ -36,7 +36,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("zt", zt_dep.module("zt"));
 
     const exe = b.addExecutable(.{
-        .name = "eda",
+        .name = "netlisp",
         .root_module = exe_mod,
     });
     exe.step.dependOn(templates_step);
@@ -47,7 +47,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
-    const run_step = b.step("run", "Run the eda CLI");
+    const run_step = b.step("run", "Run the netlisp CLI");
     run_step.dependOn(&run_cmd.step);
 
     // Slim PCB-layout optimizer benchmark. Its module pulls in only the

@@ -91,7 +91,7 @@ fn traceChipClass(s: DesignSummary) []const u8 {
 
 pub templ Navbar(active: []const u8) {
     <div class="navbar">
-        <span class="brand">Canopy EDA</span>
+        <span class="brand">Netlisp</span>
         <a href="/" class={if (std.mem.eql(u8, active, "designs")) "active" else null}>Designs</a>
         <a href="/modules" class={if (std.mem.eql(u8, active, "modules")) "active" else null}>Modules</a>
         <a href="/library" class={if (std.mem.eql(u8, active, "library")) "active" else null}>Library</a>
@@ -148,7 +148,7 @@ pub templ Home(summaries: []const DesignSummary, now_sec: i64) {
     <html>
         <head>
             <meta name="viewport" content="width=device-width,initial-scale=1" />
-            <title>EDA Designs</title>
+            <title>Netlisp — Designs</title>
             {!HOME_STYLE_BLOCK}
         </head>
         <body>

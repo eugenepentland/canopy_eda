@@ -98,7 +98,7 @@ pub const Handler = struct {
     /// `sessions.json`, `users.json`, `invites.json`, `oauth_clients.json`,
     /// `oauth_tokens.json`, `plugin_tokens.json`). Defaults to
     /// `<project_dir>/auth` when no explicit override is supplied — the
-    /// historic location. Override via `eda serve --auth-dir <path>` or the
+    /// historic location. Override via `netlisp serve --auth-dir <path>` or the
     /// `EDA_AUTH_DIR` env var so multiple worktrees / project checkouts
     /// share one passkey + session store and a passkey registered in one
     /// worktree keeps working in the others.

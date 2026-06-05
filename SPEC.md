@@ -1,4 +1,4 @@
-# EDA Tool
+# Netlisp
 
 CLI-driven electronic design automation for schematic capture using S-expression syntax.
 
