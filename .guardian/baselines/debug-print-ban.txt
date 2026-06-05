@@ -51,6 +51,7 @@ src/commands.zig:99: std.debug.print reference outside allowed paths
 src/export_kicad.zig:238: std.debug.print reference outside allowed paths
 src/export_kicad.zig:251: std.debug.print reference outside allowed paths
 src/export_kicad.zig:269: std.debug.print reference outside allowed paths
+src/fuzz_layout.zig:223: std.debug.print reference outside allowed paths
 src/lint.zig:43: std.debug.print reference outside allowed paths
 src/main.zig:168: std.debug.print reference outside allowed paths
 src/main.zig:173: std.debug.print reference outside allowed paths

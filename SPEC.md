@@ -87,6 +87,7 @@ Public functions: solve
 - excludes ground nets from spring forces
 - multi-pin wirelength uses the rectilinear MST, which equals span when collinear and exceeds HPWL otherwise
 - loop inductance floors at the via mounting inductance and rises with conductor length
+- the scored loop term is the smooth analytic surrogate, continuous in part position (no routing cliffs)
 - input-rail names (and raw rails ≥7V) read as the switching hot loop; output/low rails do not
 - routing congestion is zero with no multi-pin nets and positive when nets pile into one region
 - legalization separates two overlapping courtyards
