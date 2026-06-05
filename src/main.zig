@@ -75,7 +75,7 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "parse")) {
         if (args.len < 3) {
-            std.debug.print("Usage: eda parse <file>\n", .{});
+            std.debug.print("Usage: netlisp parse <file>\n", .{});
             std.process.exit(1);
         }
         try cmdParse(allocator, args[2]);
@@ -87,19 +87,19 @@ pub fn main() !void {
         try commands.cmdCheck(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "convert-footprint")) {
         if (args.len < 3) {
-            std.debug.print("Usage: eda convert-footprint <file.kicad_mod>\n", .{});
+            std.debug.print("Usage: netlisp convert-footprint <file.kicad_mod>\n", .{});
             std.process.exit(1);
         }
         try cmdConvertFootprint(allocator, args[2]);
     } else if (std.mem.eql(u8, command, "convert-symbol")) {
         if (args.len < 3) {
-            std.debug.print("Usage: eda convert-symbol <file.kicad_sym> [--filter <name>]\n", .{});
+            std.debug.print("Usage: netlisp convert-symbol <file.kicad_sym> [--filter <name>]\n", .{});
             std.process.exit(1);
         }
         try cmdConvertSymbol(allocator, args[2], optionalArg(args[3..], FILTER_FLAG));
     } else if (std.mem.eql(u8, command, "convert-package")) {
         if (args.len < 4) {
-            std.debug.print("Usage: eda convert-package <file.kicad_sym> <file.kicad_mod> [--name <n>] [--filter <f>]\n", .{});
+            std.debug.print("Usage: netlisp convert-package <file.kicad_sym> <file.kicad_mod> [--name <n>] [--filter <f>]\n", .{});
             std.process.exit(1);
         }
         const pkg_name = optionalArg(args[4..], "--name") orelse "package";
@@ -107,13 +107,13 @@ pub fn main() !void {
         try cmdConvertPackage(allocator, args[2], args[3], pkg_name, filter);
     } else if (std.mem.eql(u8, command, "convert-pinout")) {
         if (args.len < 3) {
-            std.debug.print("Usage: eda convert-pinout <file.kicad_sym> [--filter <name>]\n", .{});
+            std.debug.print("Usage: netlisp convert-pinout <file.kicad_sym> [--filter <name>]\n", .{});
             std.process.exit(1);
         }
         try cmdConvertPinout(allocator, args[2], optionalArg(args[3..], FILTER_FLAG));
     } else if (std.mem.eql(u8, command, "merge-alt-functions")) {
         if (args.len < 4) {
-            std.debug.print("Usage: eda merge-alt-functions <pinout.sexp> <alts.csv|alts.xml> [--write]\n", .{});
+            std.debug.print("Usage: netlisp merge-alt-functions <pinout.sexp> <alts.csv|alts.xml> [--write]\n", .{});
             std.process.exit(1);
         }
         try cmdMergeAltFunctions(allocator, args[2], args[3], hasFlag(args[4..], "--write"));
@@ -333,11 +333,11 @@ fn cmdSetPassword(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const auth_dir = try resolveAuthDir(allocator, args);
 
     const email = optionalArg(args, "--email") orelse {
-        std.debug.print("Usage: eda set-password --email <addr> --password <pw> [--role admin] [--auth-dir <d>]\n", .{});
+        std.debug.print("Usage: netlisp set-password --email <addr> --password <pw> [--role admin] [--auth-dir <d>]\n", .{});
         std.process.exit(1);
     };
     const password = optionalArg(args, "--password") orelse {
-        std.debug.print("Usage: eda set-password --email <addr> --password <pw> [--role admin] [--auth-dir <d>]\n", .{});
+        std.debug.print("Usage: netlisp set-password --email <addr> --password <pw> [--role admin] [--auth-dir <d>]\n", .{});
         std.process.exit(1);
     };
     const role_str = optionalArg(args, "--role") orelse "writer";
@@ -372,25 +372,25 @@ fn cmdSetPassword(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 fn printUsage() !void {
     const file = std.fs.File.stdout();
     try file.writeAll(
-        \\eda — Electronic Design Automation CLI
+        \\netlisp — Electronic Design Automation CLI
         \\
         \\Usage:
-        \\  eda parse <file>                   Parse and pretty-print an S-expression file
-        \\  eda build [--project-dir <d>]       Evaluate and emit resolved design
-        \\  eda lint [--project-dir <d>] <name>  Report id-hygiene issues (legacy residue, bad/duplicate tokens)
-        \\  eda check [--project-dir <d>] [--severity <s>] <name>  Run ERC on a design
-        \\  eda serve [--project-dir <d>] [--port <n>]  Start web server (default port 7050)
-        \\  eda mint-plugin-token [--project-dir <d>] [--label <l>]  Mint a bearer token for the KiCad plugin
-        \\  eda mint-invite [--project-dir <d>] [--role <r>] [--auth-dir <d>]  Mint a single-use invite (7-day TTL)
-        \\  eda set-password --email <a> --password <p> [--role <r>] [--auth-dir <d>]  Set or reset a user's password
-        \\  eda export-kicad --project-dir <d> --output-dir <out> <name>  Export KiCad netlist + footprints
-        \\  eda export-review --project-dir <d> [--output-dir <out>] [--zip] <name>  Export design-review package (markdown + BOM CSV)
-        \\  eda convert-footprint <file>        Convert KiCad .kicad_mod to .sexp
-        \\  eda convert-symbol <file> [--filter <name>]  Convert KiCad .kicad_sym to .sexp
-        \\  eda convert-pinout <file> [--filter <name>]  Generate pinout from KiCad .kicad_sym
-        \\  eda merge-alt-functions <pinout.sexp> <alts.csv|alts.xml> [--write]  Merge alt functions (CSV or ST open-pin-data XML)
-        \\  eda gen-language-docs [--output <path>]  Regenerate docs/language-forms.md from src/eval/forms.zig
-        \\  eda help                            Show this help
+        \\  netlisp parse <file>                   Parse and pretty-print an S-expression file
+        \\  netlisp build [--project-dir <d>]       Evaluate and emit resolved design
+        \\  netlisp lint [--project-dir <d>] <name>  Report id-hygiene issues (legacy residue, bad/duplicate tokens)
+        \\  netlisp check [--project-dir <d>] [--severity <s>] <name>  Run ERC on a design
+        \\  netlisp serve [--project-dir <d>] [--port <n>]  Start web server (default port 7050)
+        \\  netlisp mint-plugin-token [--project-dir <d>] [--label <l>]  Mint a bearer token for the KiCad plugin
+        \\  netlisp mint-invite [--project-dir <d>] [--role <r>] [--auth-dir <d>]  Mint a single-use invite (7-day TTL)
+        \\  netlisp set-password --email <a> --password <p> [--role <r>] [--auth-dir <d>]  Set or reset a user's password
+        \\  netlisp export-kicad --project-dir <d> --output-dir <out> <name>  Export KiCad netlist + footprints
+        \\  netlisp export-review --project-dir <d> [--output-dir <out>] [--zip] <name>  Export design-review package (markdown + BOM CSV)
+        \\  netlisp convert-footprint <file>        Convert KiCad .kicad_mod to .sexp
+        \\  netlisp convert-symbol <file> [--filter <name>]  Convert KiCad .kicad_sym to .sexp
+        \\  netlisp convert-pinout <file> [--filter <name>]  Generate pinout from KiCad .kicad_sym
+        \\  netlisp merge-alt-functions <pinout.sexp> <alts.csv|alts.xml> [--write]  Merge alt functions (CSV or ST open-pin-data XML)
+        \\  netlisp gen-language-docs [--output <path>]  Regenerate docs/language-forms.md from src/eval/forms.zig
+        \\  netlisp help                            Show this help
         \\
     );
 }

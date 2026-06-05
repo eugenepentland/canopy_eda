@@ -46,7 +46,7 @@ pub fn renderToMarkdown(
 
     // Title + generation timestamp
     try w.print("# Design Review: {s}\n\n", .{design_name});
-    try w.print("*Generated {s} by Canopy EDA*\n\n", .{doc.generated_at});
+    try w.print("*Generated {s} by Netlisp*\n\n", .{doc.generated_at});
 
     // CSS subset for the inline SVGs that follow. Must come before any
     // <svg> body. Reuses the page's curated subset (no JS hooks).

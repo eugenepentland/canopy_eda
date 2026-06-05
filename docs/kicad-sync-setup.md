@@ -1,7 +1,7 @@
 # KiCad Sync — setup
 
 How to install the Go agent that syncs an open `.kicad_pcb` against a
-Canopy EDA design. This is the operator-facing setup guide; for the
+Netlisp design. This is the operator-facing setup guide; for the
 design contract see [`kicad-sync-architecture.md`](kicad-sync-architecture.md),
 and for module-level detail see [`tools/kicad-sync-go/README.md`](../tools/kicad-sync-go/README.md).
 
@@ -38,7 +38,7 @@ the binary directly with zero scripting glue.
 The recommended path is `go install`:
 
 ```bash
-go install github.com/eugenepentland/canopy_eda/tools/kicad-sync-go/cmd/eda-kicad-sync@latest
+go install github.com/eugenepentland/netlisp/tools/kicad-sync-go/cmd/eda-kicad-sync@latest
 eda-kicad-sync --install-kicad-plugin
 ```
 
@@ -74,8 +74,8 @@ next launch with no second install step. (Windows users need to re-run
 When iterating on the agent itself:
 
 ```bash
-git clone https://github.com/eugenepentland/canopy_eda
-cd canopy_eda/tools/kicad-sync-go
+git clone https://github.com/eugenepentland/netlisp
+cd netlisp/tools/kicad-sync-go
 make install
 ```
 

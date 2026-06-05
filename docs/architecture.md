@@ -13,7 +13,7 @@ A high-level map of what this tool does today. Capability-focused, language-agno
 - **KiCad handoff** — netlist + footprints + STEP models for PCB layout.
 - **MCP surface** — every read/write the schematic exposes to Claude Code.
 
-The intended workflow is text-first and live: edit a `.sexp` file → run `eda build --push <design>` → the open browser tab refreshes within ~500 ms. There is no GUI editor; the browser is read-only with narrow value-edit affordances.
+The intended workflow is text-first and live: edit a `.sexp` file → run `netlisp build --push <design>` → the open browser tab refreshes within ~500 ms. There is no GUI editor; the browser is read-only with narrow value-edit affordances.
 
 **What the tool is not, today.** It does not place or route a PCB (KiCad does). It does not simulate (no SPICE). It does not host a parts database (BOM data is sidecar `.sexp` files). It does not version-diff designs visually. It does not do schematic-level layout (positions are hints, not pixels).
 
@@ -69,7 +69,7 @@ Four observations worth flagging:
 
 - **Spans survive the whole pipeline.** Every error and every auto-inserted ID points back at a (line, col, byte) in the source file. The printer is round-trip safe — IDs get grafted in place without lexical drift.
 - **Assertions never abort the build.** `(assert …)` and `(assert-range …)` accumulate pass/fail entries that surface in the review report. A failing assertion is a finding, not a stop.
-- **The live-push pipeline runs scene-graph JSON, not HTML.** `eda build --push` increments a per-design version counter on the running server. Browsers poll `/api/version/:name` every 2 s; on a bump they re-fetch the JSON scene graph and re-render. The server-side HTML page is canonical for first load and review-mode.
+- **The live-push pipeline runs scene-graph JSON, not HTML.** `netlisp build --push` increments a per-design version counter on the running server. Browsers poll `/api/version/:name` every 2 s; on a bump they re-fetch the JSON scene graph and re-render. The server-side HTML page is canonical for first load and review-mode.
 - **Post-build is deterministic and idempotent.** Ref-deses are assigned by walking instances in source-offset order (so repeated evaluations produce byte-identical BOMs). BOM resolution has a Pass 3.5 fixed-point step that converges UUID-swap corrections in one call. The `pin_enrichment` pass auto-fills `(as …)` for any pin whose pinout entry has exactly one alt, so downstream consumers (renderer, KiCad export, ERC) see the unique alt as if it had been typed.
 
 ## 4. Capability inventory
@@ -160,13 +160,13 @@ Available as HTML at `GET /review/:name` or JSON at `GET /api/review/:name`. Sec
 
 | Format | Endpoint / command |
 | --- | --- |
-| KiCad netlist (legacy `.net`) | `eda export-kicad`, `GET /api/export-netlist/:name` |
-| KiCad netlist + footprints + STEP models | `eda export-kicad`, `GET /api/export-kicad/:name` |
+| KiCad netlist (legacy `.net`) | `netlisp export-kicad`, `GET /api/export-netlist/:name` |
+| KiCad netlist + footprints + STEP models | `netlisp export-kicad`, `GET /api/export-kicad/:name` |
 | BOM CSV | `GET /api/export-bom/:name` |
-| Review markdown + CSV bundle (.zip) | `eda export-review`, `GET /api/export-review/:name` |
-| Flattened post-eval `.sexp` | `eda build` |
+| Review markdown + CSV bundle (.zip) | `netlisp export-review`, `GET /api/export-review/:name` |
+| Flattened post-eval `.sexp` | `netlisp build` |
 
-### Web server (`eda serve`)
+### Web server (`netlisp serve`)
 
 Default port 7050. Dev URL: `http://localhost:7050`. Production URL: `https://co-circuit.eugenepentland.dev`.
 
@@ -187,7 +187,7 @@ Default port 7050. Dev URL: `http://localhost:7050`. Production URL: `https://co
 - Passkey-first (WebAuthn challenge/complete), with a username+password fallback.
 - Three roles: `admin`, `writer`, `reader`. Admins mint single-use invite links (7-day TTL); the invite link encodes the role.
 - Per-install OAuth `client_id`/`client_secret` pairs for MCP clients. Secrets stored as SHA-256 hashes only. Persisted to `projects/designs/auth/oauth_clients.json` and `oauth_tokens.json`.
-- Plugin tokens (bearer) for the KiCad sync agent — minted via `eda mint-plugin-token`.
+- Plugin tokens (bearer) for the KiCad sync agent — minted via `netlisp mint-plugin-token`.
 - Localhost dev bypass: when no session exists and the request is from `localhost`, the account page falls back to a `dev@localhost` identity.
 
 ### MCP server
@@ -220,18 +220,18 @@ Schematic → PCB. The schematic is canonical; the server updates the `.kicad_pc
 
 ### Conversion tools
 
-- `eda convert-footprint <file.kicad_mod>` — KiCad footprint → `.sexp`.
-- `eda convert-symbol <file.kicad_sym> [--filter <name>]` — KiCad symbol → `.sexp`.
-- `eda convert-pinout <file.kicad_sym> [--filter <name>]` — extract pinout (pin → function) only.
-- `eda convert-package <sym.kicad_sym> <fp.kicad_mod> [--name <name>] [--filter <f>]` — combine symbol + footprint into a package.
-- `eda merge-alt-functions <pinout.sexp> <alts.csv|alts.xml> [--write]` — enrich a pinout with alternate-function metadata from a vendor CSV/XML.
+- `netlisp convert-footprint <file.kicad_mod>` — KiCad footprint → `.sexp`.
+- `netlisp convert-symbol <file.kicad_sym> [--filter <name>]` — KiCad symbol → `.sexp`.
+- `netlisp convert-pinout <file.kicad_sym> [--filter <name>]` — extract pinout (pin → function) only.
+- `netlisp convert-package <sym.kicad_sym> <fp.kicad_mod> [--name <name>] [--filter <f>]` — combine symbol + footprint into a package.
+- `netlisp merge-alt-functions <pinout.sexp> <alts.csv|alts.xml> [--write]` — enrich a pinout with alternate-function metadata from a vendor CSV/XML.
 
 ### Live-update loop
 
 ```
 edit .sexp file
    ↓
-eda build --push <name>
+netlisp build --push <name>
    ↓
 server: re-evaluate, regenerate scene graph, increment per-design version counter
    ↓
@@ -286,21 +286,21 @@ KiCad sync sidecars live next to the `.kicad_pcb` (not in `projects/designs/`):
 
 | Command | Purpose |
 | --- | --- |
-| `eda parse <file>` | Parse and pretty-print a `.sexp` file. Round-trip sanity check. |
-| `eda build [--project-dir P] [--push] <name>` | Evaluate a design; emit JSON scene-graph + build metadata. `--push` notifies a running server. |
-| `eda check [--project-dir P] <name>` | Run ERC and emit violations as JSON. |
-| `eda serve [--project-dir P] [--port 7050] [--auth-dir D]` | Start the web/MCP server. |
-| `eda export-kicad [--project-dir P] --output-dir D <name>` | Export KiCad netlist + footprints + STEP models. |
-| `eda export-review [--project-dir P] --output-dir D <name>` | Export design-review markdown + BOM CSV. |
-| `eda convert-footprint <f.kicad_mod>` | Convert a KiCad footprint to `.sexp`. |
-| `eda convert-symbol <f.kicad_sym> [--filter <n>]` | Convert a KiCad symbol to `.sexp`. |
-| `eda convert-package <sym> <fp> [--name <n>] [--filter <f>]` | Combine a symbol + footprint into a `.sexp` package. |
-| `eda convert-pinout <f.kicad_sym> [--filter <n>]` | Extract the pin → function pinout from a KiCad symbol. |
-| `eda merge-alt-functions <pinout.sexp> <alts.csv\|.xml> [--write]` | Enrich a pinout with alternate-function metadata. |
-| `eda mint-plugin-token [--label <l>] [--auth-dir D]` | Issue a bearer token for the KiCad sync agent. |
-| `eda mint-invite [...]` | Mint a single-use invite link (7-day TTL, role-gated). |
-| `eda set-password [...]` | Set or reset a user password and role (admin/writer/reader). |
-| `eda help` | Print usage. |
+| `netlisp parse <file>` | Parse and pretty-print a `.sexp` file. Round-trip sanity check. |
+| `netlisp build [--project-dir P] [--push] <name>` | Evaluate a design; emit JSON scene-graph + build metadata. `--push` notifies a running server. |
+| `netlisp check [--project-dir P] <name>` | Run ERC and emit violations as JSON. |
+| `netlisp serve [--project-dir P] [--port 7050] [--auth-dir D]` | Start the web/MCP server. |
+| `netlisp export-kicad [--project-dir P] --output-dir D <name>` | Export KiCad netlist + footprints + STEP models. |
+| `netlisp export-review [--project-dir P] --output-dir D <name>` | Export design-review markdown + BOM CSV. |
+| `netlisp convert-footprint <f.kicad_mod>` | Convert a KiCad footprint to `.sexp`. |
+| `netlisp convert-symbol <f.kicad_sym> [--filter <n>]` | Convert a KiCad symbol to `.sexp`. |
+| `netlisp convert-package <sym> <fp> [--name <n>] [--filter <f>]` | Combine a symbol + footprint into a `.sexp` package. |
+| `netlisp convert-pinout <f.kicad_sym> [--filter <n>]` | Extract the pin → function pinout from a KiCad symbol. |
+| `netlisp merge-alt-functions <pinout.sexp> <alts.csv\|.xml> [--write]` | Enrich a pinout with alternate-function metadata. |
+| `netlisp mint-plugin-token [--label <l>] [--auth-dir D]` | Issue a bearer token for the KiCad sync agent. |
+| `netlisp mint-invite [...]` | Mint a single-use invite link (7-day TTL, role-gated). |
+| `netlisp set-password [...]` | Set or reset a user password and role (admin/writer/reader). |
+| `netlisp help` | Print usage. |
 
 ## 7. Appendix: HTTP & MCP surface
 
