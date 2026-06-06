@@ -309,6 +309,10 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, a, "--no-grid-court")) {
             // Stop rounding courtyard half-extents up to the grid (denser pack).
             g_params.grid_courtyards = false;
+        } else if (std.mem.eql(u8, a, "--court-overlap") and i + 1 < args.len) {
+            // Sweep how much (mm) two courtyards may overlap in collision.
+            g_params.courtyard_overlap = std.fmt.parseFloat(f64, args[i + 1]) catch g_params.courtyard_overlap;
+            i += 1;
         } else if (!std.mem.startsWith(u8, a, "--")) {
             try names.append(gpa, a);
         }

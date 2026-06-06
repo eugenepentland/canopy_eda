@@ -193,6 +193,21 @@ pub const Params = struct {
     /// layout packed at courtyard-touching density needs a smaller margin to be
     /// reproducible — see the tpsm84338 constraint experiment).
     bbox_margin: f64 = geometry.BBOX_MARGIN_MM,
+    /// How much (mm, total) two parts' *drawn* courtyards may overlap in the
+    /// collision / legalization test. Default 0: courtyards may **touch** (their
+    /// edges land on the shared 0.2 mm grid line — grid-rounded extents +
+    /// `compactToContact` dock to exact contact) but never overlap. That is the
+    /// densest packing with no courtyard intersection, which is what a board
+    /// review expects (KiCad flags overlapping courtyards).
+    ///
+    /// A value > 0 shrinks the collision box below the drawn courtyard, letting
+    /// adjacent clearance bands intersect by that much. The real footprint extent
+    /// still never collides (`ceilToGrid(extent+margin) − margin ≥ extent`, and
+    /// the per-side shrink is capped at `bbox_margin`) — but the *drawn*
+    /// courtyards then visibly overlap, so this is an experimental knob, off by
+    /// default. Only affects fresh auto-placement; saved/hand layouts are applied
+    /// verbatim.
+    courtyard_overlap: f64 = 0,
 };
 
 /// Which phase of the solve a progress frame came from — drives the label the
@@ -489,6 +504,13 @@ const Lowered = struct {
 /// inert until a design with a `(constraints …)` form sets it.
 threadlocal var g_lowered: Lowered = .{};
 
+/// Per-side amount (mm) the collision/legalization keepout boxes are shrunk so
+/// adjacent courtyards may overlap their clearance margins (see
+/// `Params.courtyard_overlap`). Set in `prepare`, read by `keepHw`/`keepHh`/
+/// `keepBoxOf`. Threadlocal (like `g_lowered`) so the hot collision helpers need
+/// no extra parameter and concurrent solves stay isolated. 0 ⇒ strict no-overlap.
+threadlocal var g_collide_shrink: f64 = 0;
+
 /// How `solve` treats an applied `cached` layout.
 pub const SeedMode = enum {
     /// Apply `cached` verbatim when it covers every part (no optimization, fast);
@@ -498,6 +520,56 @@ pub const SeedMode = enum {
     /// it — improve an existing (e.g. hand) layout in place without re-placing.
     refine,
 };
+
+/// The from-scratch placement pipeline, factored out so `solve` can run it twice
+/// (the strict vs courtyard-overlap retry). Global arrangement first — routed-
+/// reranked multi-start where the board has loops and fits the multi-start band,
+/// else optimize + symmetrize + compact — then the priority-cap tuck. Mutates
+/// `parts` in place; honours the thread's `g_collide_shrink`.
+fn runPlacement(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    built: Built,
+    params: Params,
+) std.mem.Allocator.Error!void {
+    if (parts.len >= 2 and parts.len <= MULTISTART_MAX_PARTS and built.loops.len > 0) {
+        // Routed-reranked multi-start (closes the surrogate↔routed gap; widened
+        // from ≤16 to the whole multi-start band so 17–32-part loop boards select
+        // on routed too — adf5901 −13%, nestedarray −5%).
+        try rerankSolve(arena, parts, &prep.idx_of, nets, built, params, prep.priority);
+    } else {
+        optimize(parts, &prep.idx_of, nets, built, params);
+        // Mirror matched halves (symmetric amp input/output) when genuinely
+        // symmetric; a no-op otherwise.
+        try symmetrize(arena, parts, &prep.idx_of, nets, built, params);
+        // Final pull-together: dock any part still held off by the snap gap so
+        // every courtyard abuts a neighbour, highest placement-order priority first.
+        compactToContact(parts, prep.priority);
+    }
+    // Tuck each declared-priority decoupling cap onto its IC pin (a wide per-cap
+    // window the global objective/polish can't do); re-routed and reverted if it
+    // would drop a net, so it never makes routing worse.
+    tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
+}
+
+/// Snapshot every part's pose — the strict/overlap retry in `solve` keeps the
+/// better-routed of the two and restores it with `restorePoses`.
+fn capturePoses(arena: std.mem.Allocator, parts: []const Part) std.mem.Allocator.Error![]Pose {
+    const out = try arena.alloc(Pose, parts.len);
+    for (parts, 0..) |p, i| out[i] = .{ .x = p.x, .y = p.y, .rot = p.rot };
+    return out;
+}
+
+/// Restore poses captured by `capturePoses`.
+fn restorePoses(parts: []Part, poses: []const Pose) void {
+    for (parts, 0..) |*p, i| {
+        p.x = poses[i].x;
+        p.y = poses[i].y;
+        p.rot = poses[i].rot;
+    }
+}
 
 /// Build a placement for `block`. When `cached` covers every part, its poses
 /// are applied directly (no optimization — fast); otherwise the optimizer runs
@@ -527,33 +599,26 @@ pub fn solve(
 
     const generated = !applyCached(parts, cached);
     if (generated) {
-        if (parts.len >= 2 and parts.len <= MULTISTART_MAX_PARTS and built.loops.len > 0) {
-            // Any multi-start-band board with decoupling loops: pick the global
-            // arrangement on the real routed metric (rerank the top-K candidates),
-            // then the local routed tuck. This closes the surrogate↔routed gap that a
-            // single surrogate-selected arrangement + local polish leaves on the table.
-            // Was gated to ROUTED_POLISH_MAX_PARTS (≤16); widened to the whole multi-
-            // start band so 17–32-part loop boards select on routed too (adf5901 −13%,
-            // nestedarray −5%). The final routed tuck (`routedPolish`) still self-gates
-            // to ≤16, so above that the top-K routed rerank alone carries the selection.
-            try rerankSolve(arena, parts, &prep.idx_of, nets, built, params, prep.priority);
-        } else {
-            optimize(parts, &prep.idx_of, nets, built, params);
-            // Mirror matched halves (e.g. a symmetric amp's input/output sections)
-            // when the design is genuinely symmetric; a no-op otherwise.
-            try symmetrize(arena, parts, &prep.idx_of, nets, built, params);
-            // Final pull-together: dock any part still held off by the snap-safety
-            // gap so every courtyard abuts at least one neighbour (provably tight),
-            // highest placement-order priority docking first.
-            compactToContact(parts, prep.priority);
+        try runPlacement(arena, parts, &prep, nets, built, params);
+        // When courtyard overlap is enabled, the denser feasible region helps most
+        // boards but can land a small/sparse one in a worse basin (its HPWL rises
+        // even though overlap only *adds* freedom — a convergence artefact). So
+        // also solve the strict regime and keep whichever routes better: overlap
+        // can then never regress a board below strict. Only pays the 2× cost when
+        // overlap is on (`routedObjectiveCost` is a valid comparison for any board
+        // — it folds in HPWL + congestion and falls back to the surrogate loop
+        // term when there are no loops or the board is too large to route).
+        if (g_collide_shrink > 0 and parts.len >= 2) {
+            const overlap_routed = routedObjectiveCost(arena, parts, &prep.idx_of, nets, built.loops, params);
+            const overlap_poses = try capturePoses(arena, parts);
+            const saved_shrink = g_collide_shrink;
+            g_collide_shrink = 0; // strict regime
+            try runPlacement(arena, parts, &prep, nets, built, params);
+            const strict_routed = routedObjectiveCost(arena, parts, &prep.idx_of, nets, built.loops, params);
+            g_collide_shrink = saved_shrink;
+            if (overlap_routed <= strict_routed) restorePoses(parts, overlap_poses);
+            // else keep the strict arrangement already in `parts`.
         }
-        // Then tuck each *declared-priority* decoupling cap onto its IC pin: a
-        // per-cap wide-window search neither the global optimizer's balanced
-        // objective nor the polish's small window can do — so an author-ranked
-        // bypass cap actually hugs its power pin. Each tuck is re-routed and
-        // reverted if it would drop a net, so it never makes routing worse;
-        // self-no-ops when nothing is ranked or there are no loops.
-        tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
     } else if (mode == .refine and parts.len >= 2 and parts.len <= ROUTED_POLISH_MAX_PARTS and built.loops.len > 0) {
         // Seeded from an existing layout: keep its global arrangement, just run the
         // local routed tuck on it (the same monotonic, safety-netted pass the auto
@@ -1023,6 +1088,17 @@ fn prepare(
     // path; `validateConstraints` surfaces them for authoring.
     const lowered = try resolveConstraints(arena, block, instances, nets, parts, &idx_of, null);
     g_lowered = lowered;
+    // Publish the courtyard-overlap allowance for the thread's collision helpers.
+    // Capped at `bbox_margin` per side so the collision box stays ≥ the real
+    // footprint extent (courtyard = ceilToGrid(extent+margin) ⇒ courtyard−margin
+    // ≥ extent): only clearance bands overlap, never copper. Gated to the
+    // multi-start band (≤ MULTISTART_MAX_PARTS) — that's where dense decap loops
+    // benefit and the strict/overlap retry's 2× cost is affordable; big boards
+    // have area to spare and the retry would double an already-long solve.
+    g_collide_shrink = if (instances.len <= MULTISTART_MAX_PARTS)
+        std.math.clamp(params.courtyard_overlap / 2, 0, params.bbox_margin)
+    else
+        0;
     return .{ .parts = parts, .idx_of = idx_of, .instances = instances, .nets = nets, .built = built, .priority = priority, .lowered = lowered };
 }
 
@@ -2343,12 +2419,12 @@ fn keepCy(p: Part) f64 {
     return if (p.keep.hw < 0) p.y else worldPt(p, p.keep.ox, p.keep.oy).y;
 }
 fn keepHw(p: Part) f64 {
-    if (p.keep.hw < 0) return effHw(p);
-    return if (isQuarter(p.rot)) p.keep.hh else p.keep.hw;
+    const base = if (p.keep.hw < 0) effHw(p) else (if (isQuarter(p.rot)) p.keep.hh else p.keep.hw);
+    return @max(0.0, base - g_collide_shrink);
 }
 fn keepHh(p: Part) f64 {
-    if (p.keep.hw < 0) return effHh(p);
-    return if (isQuarter(p.rot)) p.keep.hw else p.keep.hh;
+    const base = if (p.keep.hw < 0) effHh(p) else (if (isQuarter(p.rot)) p.keep.hw else p.keep.hh);
+    return @max(0.0, base - g_collide_shrink);
 }
 
 /// Build a breakout stub for every pad on an *unaccounted* net — one whose pins
@@ -3446,9 +3522,10 @@ const KeepBox = struct { cxo: f64, cyo: f64, hw: f64, hh: f64 };
 
 fn keepBoxOf(p: Part) KeepBox {
     const q = isQuarter(p.rot);
-    if (p.keep.hw < 0) return .{ .cxo = 0, .cyo = 0, .hw = if (q) p.hh else p.hw, .hh = if (q) p.hw else p.hh };
+    const s = g_collide_shrink; // courtyards may overlap their clearance margins
+    if (p.keep.hw < 0) return .{ .cxo = 0, .cyo = 0, .hw = @max(0.0, (if (q) p.hh else p.hw) - s), .hh = @max(0.0, (if (q) p.hw else p.hh) - s) };
     const off = rotateLocal(p.keep.ox, p.keep.oy, p.rot);
-    return .{ .cxo = off.x, .cyo = off.y, .hw = if (q) p.keep.hh else p.keep.hw, .hh = if (q) p.keep.hw else p.keep.hh };
+    return .{ .cxo = off.x, .cyo = off.y, .hw = @max(0.0, (if (q) p.keep.hh else p.keep.hw) - s), .hh = @max(0.0, (if (q) p.keep.hw else p.keep.hh) - s) };
 }
 
 /// Fill `out[0..parts.len]` with each part's precomputed keepout box.

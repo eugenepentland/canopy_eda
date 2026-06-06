@@ -415,6 +415,8 @@ pub const PngRequest = struct {
     layout: ?[]const u8 = null,
     regen: bool = false,
     sub: ?[]const u8 = null,
+    /// Experimental courtyard-overlap allowance (mm); 0 = touch only (default).
+    court_overlap: f64 = 0,
 };
 
 /// Failures `renderDesignPng` surfaces; callers map these to an HTTP status or
@@ -450,10 +452,11 @@ pub fn renderDesignPng(
         readLayoutPoses(alloc, project_dir, name, ln)
     else if (opts.regen) null else readAutoPoses(alloc, project_dir, name);
     const grid_only = opts.sub == null and opts.layout == null and !opts.regen and cached == null;
+    const png_params = optimizer.Params{ .courtyard_overlap = opts.court_overlap };
     const placement = (if (grid_only)
-        optimizer.gridPlace(alloc, eff_block, project_dir, .{})
+        optimizer.gridPlace(alloc, eff_block, project_dir, png_params)
     else
-        optimizer.solve(alloc, eff_block, project_dir, cached, .{}, if (opts.layout != null) .refine else .place)) catch return error.BuildFailed;
+        optimizer.solve(alloc, eff_block, project_dir, cached, png_params, if (opts.layout != null) .refine else .place)) catch return error.BuildFailed;
 
     const route_params = router.RouteParams{};
     const routed: ?router.RouteResult = if (opts.route) (router.route(alloc, placement, route_params) catch null) else null;
@@ -505,6 +508,11 @@ pub fn pcbPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
         .layout = queryOpt(req, "layout"),
         .regen = queryFlag(req, "regen"),
         .sub = subSlug(req),
+        .court_overlap = blk: {
+            const q = req.query() catch break :blk 0;
+            const v = q.get("court_overlap") orelse break :blk 0;
+            break :blk std.fmt.parseFloat(f64, v) catch 0;
+        },
     };
     const png_bytes = renderDesignPng(arena, ctx.project_dir, name, opts) catch |e| {
         res.status = if (e == error.BlockNotFound or e == error.SubNotFound) 404 else 500;
@@ -1934,6 +1942,12 @@ fn parseTuning(req: *httpz.Request) Tuning {
     }
     if (q.get("compact")) |v| {
         p.compact_mode = parseCompactMode(v);
+        tuned = true;
+    }
+    // Experimental: allow drawn courtyards to overlap their clearance bands by N mm
+    // (default 0 = touch only, no overlap). See Params.courtyard_overlap.
+    if (q.get("court_overlap")) |v| {
+        p.courtyard_overlap = parseF(v, p.courtyard_overlap);
         tuned = true;
     }
     return .{ .params = p, .tuned = tuned, .regen = regen or tuned };
