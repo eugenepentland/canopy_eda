@@ -737,7 +737,7 @@ fn railPadCross(members: []const usize, ic: usize, edge: Edge, parts: []const Pa
     const ic_ref = parts[ic].ref_des;
     const side = (edge == .left or edge == .right); // cross axis = y
     var s: f64 = 0;
-    var n: usize = 0;
+    var n: f64 = 0;
     for (nets) |net| {
         if (isGroundName(shortName(net.name))) continue;
         var touches = false;
@@ -753,13 +753,16 @@ fn railPadCross(members: []const usize, ic: usize, edge: Edge, parts: []const Pa
             if (!std.mem.eql(u8, pp.ref_des, ic_ref)) continue;
             const pad = padLocal(parts[ic], pp.pin);
             if (pad.w == 0 and pad.h == 0) continue;
-            s += if (side) pad.y else pad.x;
-            n += 1;
+            // Area-weighted: the big supply pad dominates over small sense pins on
+            // the same net (e.g. VOUT's wide pad vs ISP/ISN), so the bank docks
+            // opposite the real power pad, not the average of all rail pins.
+            const wgt = pad.w * pad.h;
+            s += wgt * (if (side) pad.y else pad.x);
+            n += wgt;
         }
     }
-    if (n == 0) return null;
-    const local = s / @as(f64, @floatFromInt(n));
-    return (if (side) parts[ic].y else parts[ic].x) + local;
+    if (n <= 0) return null;
+    return (if (side) parts[ic].y else parts[ic].x) + s / n;
 }
 
 /// Snap a rail direction to the dominant edge (y-down). Null when ~zero.
