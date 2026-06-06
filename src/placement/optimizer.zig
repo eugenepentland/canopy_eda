@@ -69,6 +69,9 @@ const LOOP_W: f64 = 6.0; // weight on the loop *inductance* term (nH; see
 // via floor, so 6.0 keeps this term's magnitude near the old length-based 3.0;
 // PROVISIONAL — the research flags that PCB weights need empirical re-tuning.
 const K_COMPACT: f64 = 0.10; // pull toward the cluster centroid (keeps HPWL tight)
+const GROUP_FORCE_PER_W: f64 = 0.05; // relaxation cohesion-force gain per unit `group_w`
+// (g_group_force = group_w·this); default group_w=2 ⇒ 0.10, ≈ K_COMPACT.
+const ZONE_FORCE_PER_W: f64 = 0.04; // relaxation zoning-force gain per unit `group_zone_w`
 const STARTS: usize = 48; // multi-start seeds; keep the lowest-scoring arrangement
 const MULTISTART_MAX_PARTS: usize = 32; // above this, single start (bound O(n²·starts))
 // The once-per-solve quality passes — rotation refine, the greedy `polish` local
@@ -141,6 +144,27 @@ const GRID_COURTYARDS = true; // round courtyard half-extents to GRID_MM so edge
 const COMPACT_MIN_OVERLAP: f64 = GRID_MM; // min shared-edge length when docking a floating part
 const COMPACT_EPS: f64 = 1e-4; // courtyard-gap tolerance for the "touching" test
 
+// ── Phase-A constraint lowering weights (see docs/constraints_dsl.md) ─────────
+// These weight the *search-only* guidance terms a `(constraints …)` form lowers
+// into `objectiveCost`. They are deliberately kept OUT of the reported/compared
+// objective (`scoreLayout`, `scorePoses`, `routedObjectiveCost`): constraints
+// steer where SA looks, but the result is judged on the unmodified physical
+// objective — so a hand layout and a constrained solve are scored identically
+// and the constraints can't "game" the comparison. All PROVISIONAL (the doc's
+// weight-tuning is an offline sweep, not the LLM's job).
+const PROX_W: f64 = 1.5; // proximity pull: cost = PROX_W·priority·(edge gap, mm)
+const KEEPOUT_W: f64 = 4.0; // keep-out hinge: cost = KEEPOUT_W·max(0, min−gap)
+const DEPRIORITIZE_SCALE: f64 = 0.25; // scale a deprioritized part's net wirelength weight
+const ZONE_GAP_MM: f64 = 2.0; // group zoning: cluster centroid sits this far beyond the hub edge on its connecting side
+/// Soft-constraint priority → numeric multiplier (low/med/high).
+fn constraintWeight(p: env.ConstraintPriority) f64 {
+    return switch (p) {
+        .low => 1.0,
+        .med => 2.0,
+        .high => 3.0,
+    };
+}
+
 /// Which placement-regularizer `w_align` weights.
 ///   • `tidiness` (default) — the long-shipped pairwise row/column alignment reward
 ///     (`tidinessPenalty`): for each part pair, the smaller of their x/y offsets,
@@ -165,6 +189,59 @@ pub const Params = struct {
     cap_w_max: f64 = CAP_W_MAX,
     grid_courtyards: bool = GRID_COURTYARDS,
     compact_mode: CompactMode = .tidiness,
+    /// Extra clearance (mm) added to every part's courtyard half-extents (on top
+    /// of its F.CrtYd / pad bbox). The optimizer's density floor: two parts can
+    /// never sit closer than the sum of their margins. Defaults to the geometry
+    /// module's shipping value; exposed so a denser regime can be swept (a hand
+    /// layout packed at courtyard-touching density needs a smaller margin to be
+    /// reproducible — see the tpsm84338 constraint experiment).
+    bbox_margin: f64 = geometry.BBOX_MARGIN_MM,
+    /// How much (mm, total) two parts' *drawn* courtyards may overlap in the
+    /// collision / legalization test. Default 0: courtyards may **touch** (their
+    /// edges land on the shared 0.2 mm grid line — grid-rounded extents +
+    /// `compactToContact` dock to exact contact) but never overlap. That is the
+    /// densest packing with no courtyard intersection, which is what a board
+    /// review expects (KiCad flags overlapping courtyards).
+    ///
+    /// A value > 0 shrinks the collision box below the drawn courtyard, letting
+    /// adjacent clearance bands intersect by that much. The real footprint extent
+    /// still never collides (`ceilToGrid(extent+margin) − margin ≥ extent`, and
+    /// the per-side shrink is capped at `bbox_margin`) — but the *drawn*
+    /// courtyards then visibly overlap, so this is an experimental knob, off by
+    /// default. Only affects fresh auto-placement; saved/hand layouts are applied
+    /// verbatim.
+    courtyard_overlap: f64 = 0,
+    /// Functional-group cohesion weight: cost = `group_w·(bbox_w + bbox_h)` per
+    /// `(group …)` (constraint-DSL *and* the design's own functional groups), so
+    /// a declared cluster (e.g. an output filter's caps) packs into one tight
+    /// block instead of scattering around the hub. Competes with `loop_w`.
+    group_w: f64 = 2.0,
+    /// Group-zoning weight: pulls each group's cluster to the side of its hub it
+    /// connects to (input/output/sensitive land on distinct sides — a power-flow
+    /// layout). 0 disables zoning (cohesion only).
+    group_zone_w: f64 = 1.0,
+    /// Extra clearance (mm) the collision/legalization leaves between courtyards,
+    /// on top of touching — routing/copper room for the GND pour, thermal vias,
+    /// and the SW pour on a power board. 0 = pack to touching (the default for
+    /// dense jellybean boards). Set ~0.3–0.5 for switching-regulator layouts.
+    route_gap: f64 = 0,
+    /// Bank-loop relief (0–1): when several caps in one `(group …)` share one
+    /// power rail they form a *bank* — collectively they only need the cluster
+    /// close to the rail, not each cap independently hugging its own access point
+    /// on the IC's (often tall, central) supply pad. The per-cap loop term pulls
+    /// each cap to the nearest point on that pad, which on a tall pad scatters the
+    /// bank along the pad's full height (top vs bottom of the IC). This knob
+    /// removes that fraction of the loop pull for each cap in a ≥2-member same-rail
+    /// bank (a search-only delta in `constraintCost`, never the reported score), so
+    /// the group's cohesion can pack the bank into one tight block. 0 = off.
+    group_loop_relief: f64 = 0,
+    /// Constructive "zone-then-pack" floorplan (off by default): instead of the
+    /// force-directed relaxation (which makes organic clusters), place the dominant
+    /// IC at the origin and lay each functional `(group …)` as a crisp row/column
+    /// docked to the IC side it wires to — `VIN-caps │ IC │ L │ VOUT-caps`. Only
+    /// engages for a "one dominant IC + groups" shape; falls back to the force
+    /// pipeline otherwise, so it can never degrade a non-switcher board.
+    zone_pack: bool = false,
 };
 
 /// Which phase of the solve a progress frame came from — drives the label the
@@ -419,6 +496,96 @@ const Built = struct {
     loops: []Loop,
 };
 
+/// A `(proximity …)` pull lowered to geometry: keep `part`'s pad `part_pad`
+/// within `max_mm` of `hub`'s pad `hub_pad` (both footprint-local). A *hinge*
+/// penalty `w·max(0, gap − max_mm)` (see `constraintCost`): zero once the part is
+/// inside the radius, so it only acts to drag a badly-placed part in, never to
+/// fight HPWL/loop over a part that is already close. `max_mm == 0` ⇒ a plain
+/// linear pull `w·gap` (no declared radius).
+const ProxTerm = struct { part: usize, hub: usize, part_pad: PadRect, hub_pad: PadRect, w: f64, max_mm: f64 };
+
+/// A `(keep-out …)` lowered to a part-vs-part minimum courtyard gap.
+const KeepTerm = struct { a: usize, b: usize, min_mm: f64 };
+
+/// A `(group …)` lowered to (a) a cohesion penalty on the group's bounding box,
+/// so members pack into one tight block instead of scattering, and (b) optional
+/// zoning: `hub` (the IC the group orbits, -1 = none) plus `dirx`/`diry`, the
+/// hub-local unit direction toward the hub pads the group connects to — the
+/// cluster is pulled to that side of the IC, so input/output/sensitive groups
+/// land on distinct sides (a power-flow layout) instead of piling on the hub.
+const GroupTerm = struct {
+    members: []const usize,
+    hub: i32 = -1,
+    dirx: f64 = 0,
+    diry: f64 = 0,
+};
+
+/// The resolved + lowered Phase-A constraints for the current solve. Every slice
+/// defaults empty so a read on a path that didn't go through `prepare` is a
+/// harmless no-op. Slices live in the solve's arena (valid for that solve only).
+/// Consumed by `constraintCost` — a search-only delta added to `objectiveCost`,
+/// never to the reported/compared objective (see `constraintCost`).
+const Lowered = struct {
+    prox: []const ProxTerm = &.{},
+    keepouts: []const KeepTerm = &.{},
+    /// Per-net wirelength weight (index-aligned with `nets`); 1.0 = default. >1
+    /// from `(net-length … (priority …))`, <1 from `(deprioritize …)`.
+    net_weight: []const f64 = &.{},
+    /// Per-net "this is a switcher input rail" flag (index-aligned), from
+    /// `(power-rail … (role input))` — fires the input-loop boost even when the
+    /// inductor is integrated (so no discrete L reveals the switcher).
+    input_rail: []const bool = &.{},
+    /// Declared `(group …)` clusters (constraint-DSL + the design's functional
+    /// groups) — each penalizes its bounding box (cohesion) and is zoned to a
+    /// side of its hub.
+    groups: []const GroupTerm = &.{},
+    /// True when any term is live — the hot-path `constraintCost` fast-exits when
+    /// false (a design with no constraints and no functional groups).
+    active: bool = false,
+};
+
+/// Thread-local lowered constraints for the current solve — set by `prepare`,
+/// read by `constraintCost`. Threadlocal (like `g_progress`) so the many
+/// `objectiveCost` call sites needn't each thread a new parameter, and two
+/// concurrent solves on different threads stay isolated. Default-empty so it is
+/// inert until a design with a `(constraints …)` form sets it.
+threadlocal var g_lowered: Lowered = .{};
+
+/// Cohesion-force gain for the relaxation: each `(group …)` member is pulled
+/// toward its group's centroid by `g_group_force·(centroid − pos)`, the
+/// position-space twin of the scalar `group_w` cohesion in `constraintCost`.
+/// Without it cohesion only *selects* among arrangements the spring relaxation
+/// produces — it can't *create* a tight block (the relaxation never proposes
+/// one). Set in `prepare` from `params.group_w`; 0 ⇒ no cohesion force.
+threadlocal var g_group_force: f64 = 0;
+
+/// Per-loop multiplier on the decoupling-loop *force* (index-aligned with the
+/// solve's `built.loops`), the force-space twin of `group_loop_relief` in
+/// `constraintCost`: 1.0 for a lone cap, `1 − group_loop_relief` for a cap in a
+/// ≥2-member same-rail bank, so the relaxation stops yanking every bank cap onto
+/// the rail pad and lets cohesion pack them. Set in `prepare`; empty ⇒ all 1.0.
+threadlocal var g_loop_force_scale: []const f64 = &.{};
+
+/// Zoning-force gain for the relaxation (position-space twin of the scalar
+/// `group_zone_w`): each `(group …)` is pulled toward its hub's *connecting side*
+/// (VIN caps left, VOUT caps right, …) so the board reads as a power-flow layout
+/// instead of an isotropic blob. Set in `prepare` from `params.group_zone_w`;
+/// 0 ⇒ no zoning force (cohesion only).
+threadlocal var g_zone_force: f64 = 0;
+
+/// Per-side amount (mm) the collision/legalization keepout boxes are shrunk so
+/// adjacent courtyards may overlap their clearance margins (see
+/// `Params.courtyard_overlap`). Set in `prepare`, read by `keepHw`/`keepHh`/
+/// `keepBoxOf`. Threadlocal (like `g_lowered`) so the hot collision helpers need
+/// no extra parameter and concurrent solves stay isolated. 0 ⇒ strict no-overlap.
+threadlocal var g_collide_shrink: f64 = 0;
+
+/// Extra clearance (mm) the collision/legalization grows each keepout box by, so
+/// parts leave routing/copper room between courtyards instead of packing to
+/// touching (see `Params.route_gap`). Set in `prepare`, read by the collision
+/// helpers. 0 ⇒ touch (the default).
+threadlocal var g_route_gap: f64 = 0;
+
 /// How `solve` treats an applied `cached` layout.
 pub const SeedMode = enum {
     /// Apply `cached` verbatim when it covers every part (no optimization, fast);
@@ -428,6 +595,359 @@ pub const SeedMode = enum {
     /// it — improve an existing (e.g. hand) layout in place without re-placing.
     refine,
 };
+
+/// The from-scratch placement pipeline, factored out so `solve` can run it twice
+/// (the strict vs courtyard-overlap retry). Global arrangement first — routed-
+/// reranked multi-start where the board has loops and fits the multi-start band,
+/// else optimize + symmetrize + compact — then the priority-cap tuck. Mutates
+/// `parts` in place; honours the thread's `g_collide_shrink`.
+fn runPlacement(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    built: Built,
+    params: Params,
+) std.mem.Allocator.Error!void {
+    // Constructive zone-then-pack floorplan (opt-in): crisp VIN│IC│L│VOUT rows the
+    // force model can't make. Returns false (falls through to the force pipeline)
+    // for any shape it doesn't handle, so it never degrades a non-switcher board.
+    if (params.zone_pack and try packZoned(arena, parts, prep, nets, built, params)) {
+        tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
+        return;
+    }
+    if (parts.len >= 2 and parts.len <= MULTISTART_MAX_PARTS and built.loops.len > 0) {
+        // Routed-reranked multi-start (closes the surrogate↔routed gap; widened
+        // from ≤16 to the whole multi-start band so 17–32-part loop boards select
+        // on routed too — adf5901 −13%, nestedarray −5%).
+        try rerankSolve(arena, parts, &prep.idx_of, nets, built, params, prep.priority);
+    } else {
+        optimize(parts, &prep.idx_of, nets, built, params);
+        // Mirror matched halves (symmetric amp input/output) when genuinely
+        // symmetric; a no-op otherwise.
+        try symmetrize(arena, parts, &prep.idx_of, nets, built, params);
+        // Final pull-together: dock any part still held off by the snap gap so
+        // every courtyard abuts a neighbour, highest placement-order priority first.
+        compactToContact(parts, prep.priority);
+    }
+    // Tuck each declared-priority decoupling cap onto its IC pin (a wide per-cap
+    // window the global objective/polish can't do); re-routed and reverted if it
+    // would drop a net, so it never makes routing worse.
+    tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
+}
+
+// ── Zone-then-pack constructive floorplan ────────────────────────────────────
+// The force model makes organic clusters; a power layout wants crisp rows
+// (`VIN-caps │ IC │ L │ VOUT-caps`). `packZoned` places the dominant IC at the
+// origin and lays each functional `(group …)` — plus loose passives and a
+// secondary hub (the inductor) — as a row/column docked to the IC side it wires
+// to, then finishes with overlap-removal + grid-snap only (NEVER `relax`, which
+// would dissolve the rows). Opt-in via `Params.zone_pack`; returns false for any
+// shape it doesn't handle so the caller falls back to the force pipeline.
+
+/// Which IC edge a packed block docks against.
+const Edge = enum { left, right, top, bottom };
+
+/// A packed cluster: its ordered members, their chosen rotations, their block-
+/// local centre offsets, the block half-extents, and the IC edge it docks to.
+const PackBlock = struct {
+    members: []const usize,
+    rots: []const f64,
+    lx: []const f64,
+    ly: []const f64,
+    half_w: f64,
+    half_h: f64,
+    edge: Edge,
+};
+
+const ZoneTopo = struct { ic: usize };
+
+/// The "one dominant IC + groups" shape gate. Accept only when there is a single
+/// hub whose courtyard dwarfs the next (≥2×), every group orbits it (or has no
+/// hub), and the board is within the finisher band. Null ⇒ use the force path.
+fn analyzeTopology(parts: []const Part, lowered: Lowered) ?ZoneTopo {
+    if (!lowered.active or lowered.groups.len == 0) return null;
+    if (parts.len < 2 or parts.len > POLISH_MAX_PARTS) return null;
+    // The IC = largest-area hub.
+    var ic: ?usize = null;
+    var a1: f64 = -1;
+    for (parts, 0..) |p, i| {
+        if (p.kind != .hub) continue;
+        const a = p.hw * p.hh;
+        if (a > a1) {
+            a1 = a;
+            ic = i;
+        }
+    }
+    const ici = ic orelse return null;
+    // Reject multi-IC boards by the *group orbit* test: every functional group must
+    // orbit the one IC (or carry no hub). A board with two comparable ICs has some
+    // groups whose `hub` is the other IC — that's what disqualifies it, not raw
+    // hub area (a power inductor is a big hub but anchors nothing, and may even
+    // carry a U-prefix ref-des, so an area/prefix test misfires).
+    for (lowered.groups) |g| {
+        if (g.hub >= 0 and @as(usize, @intCast(g.hub)) != ici) return null;
+    }
+    return .{ .ic = ici };
+}
+
+/// Sum of the IC's non-ground pad offsets over the nets `members` connect to —
+/// the direction (IC-local; IC is at rot 0 so == world) toward the group's rail
+/// side. Ground is excluded (it is scattered all round the IC and would average
+/// the side away). Zero when the members touch only ground / no IC pad.
+fn railDir(members: []const usize, ic: usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) Pt {
+    const ic_ref = parts[ic].ref_des;
+    var sx: f64 = 0;
+    var sy: f64 = 0;
+    for (nets) |net| {
+        if (isGroundName(shortName(net.name))) continue;
+        var touches = false;
+        for (net.pins) |pp| {
+            const pi = idx_of.get(pp.ref_des) orelse continue;
+            if (memberOf(members, pi)) {
+                touches = true;
+                break;
+            }
+        }
+        if (!touches) continue;
+        for (net.pins) |pp| {
+            if (!std.mem.eql(u8, pp.ref_des, ic_ref)) continue;
+            const pad = padLocal(parts[ic], pp.pin);
+            if (pad.w == 0 and pad.h == 0) continue;
+            sx += pad.x;
+            sy += pad.y;
+        }
+    }
+    return .{ .x = sx, .y = sy };
+}
+
+/// Snap a rail direction to the dominant edge (y-down). Null when ~zero.
+fn snapEdge(d: Pt) ?Edge {
+    if (@abs(d.x) < 1e-9 and @abs(d.y) < 1e-9) return null;
+    if (@abs(d.x) >= @abs(d.y)) return if (d.x > 0) .right else .left;
+    return if (d.y > 0) .bottom else .top;
+}
+
+/// Rotation (of {0,90,180,270}) that turns a cap's power pad toward the IC, so the
+/// hot loop is short. Driven by the real loop power pad; (0,0) ⇒ rot 0 (resistor /
+/// no loop). `inward` is the unit vector from the block toward the IC.
+fn faceRotation(pwr: PadRect, edge: Edge) f64 {
+    const inward: Pt = switch (edge) {
+        .left => .{ .x = 1, .y = 0 },
+        .right => .{ .x = -1, .y = 0 },
+        .top => .{ .x = 0, .y = 1 },
+        .bottom => .{ .x = 0, .y = -1 },
+    };
+    var best: f64 = 0;
+    var best_dot: f64 = -std.math.inf(f64);
+    for (ROT_CAND) |rot| {
+        const p = rotateLocal(pwr.x, pwr.y, rot);
+        const dot = p.x * inward.x + p.y * inward.y;
+        if (dot > best_dot) {
+            best_dot = dot;
+            best = rot;
+        }
+    }
+    return best;
+}
+
+/// Rotation-aware half-extents for a part at a given rotation (without mutating it).
+fn extByRot(p: Part, rot: f64) Pt {
+    return if (isQuarter(rot)) .{ .x = p.hh, .y = p.hw } else .{ .x = p.hw, .y = p.hh };
+}
+
+/// The decoupling loop whose cap is part index `cap`, if any.
+fn loopForCap(loops: []const Loop, cap: usize) ?Loop {
+    for (loops) |lp| {
+        if (lp.cap == cap) return lp;
+    }
+    return null;
+}
+
+/// Order a block's members: bulk caps (largest capacitance) nearest the IC, then
+/// by placement priority, then ref-des — deterministic, no RNG.
+const OrderCtx = struct {
+    parts: []const Part,
+    priority: []const u32,
+    fn lt(c: OrderCtx, a: usize, b: usize) bool {
+        const fa = capValueFarads(c.parts[a].value);
+        const fb = capValueFarads(c.parts[b].value);
+        if (fa != fb) return fa > fb; // larger cap first (nearest the IC)
+        const pa = if (a < c.priority.len) c.priority[a] else 0;
+        const pb = if (b < c.priority.len) c.priority[b] else 0;
+        if (pa != pb) return pa > pb;
+        return std.mem.lessThan(u8, c.parts[a].ref_des, c.parts[b].ref_des);
+    }
+};
+fn orderMembers(arena: std.mem.Allocator, members: []const usize, parts: []const Part, priority: []const u32) std.mem.Allocator.Error![]usize {
+    const out = try arena.dupe(usize, members);
+    std.mem.sortUnstable(usize, out, OrderCtx{ .parts = parts, .priority = priority }, OrderCtx.lt);
+    return out;
+}
+
+/// Lay `ordered` members into a single row/column for `edge` (left/right ⇒ a
+/// vertical column packed along Y; top/bottom ⇒ a horizontal row along X), each
+/// rotated so its power pad faces the IC, packed edge-to-edge with `gap`.
+fn packOneBlock(arena: std.mem.Allocator, ordered: []const usize, parts: []const Part, edge: Edge, loops: []const Loop, gap: f64) std.mem.Allocator.Error!PackBlock {
+    const n = ordered.len;
+    const rots = try arena.alloc(f64, n);
+    const lx = try arena.alloc(f64, n);
+    const ly = try arena.alloc(f64, n);
+    const exts = try arena.alloc(Pt, n);
+    const vertical = (edge == .left or edge == .right); // pack along Y
+    for (ordered, 0..) |m, i| {
+        var rot: f64 = 0;
+        if (loopForCap(loops, m)) |lp| rot = faceRotation(lp.cap_pwr, edge);
+        rots[i] = rot;
+        exts[i] = extByRot(parts[m], rot);
+    }
+    var total: f64 = 0;
+    for (exts) |e| total += 2 * (if (vertical) e.y else e.x);
+    total += @as(f64, @floatFromInt(n - 1)) * gap;
+    var cursor = -total / 2;
+    var cross_half: f64 = 0;
+    for (0..n) |i| {
+        const along = if (vertical) exts[i].y else exts[i].x;
+        const center = cursor + along;
+        if (vertical) {
+            lx[i] = 0;
+            ly[i] = center;
+        } else {
+            lx[i] = center;
+            ly[i] = 0;
+        }
+        cursor += 2 * along + gap;
+        cross_half = @max(cross_half, if (vertical) exts[i].x else exts[i].y);
+    }
+    return .{
+        .members = ordered,
+        .rots = rots,
+        .lx = lx,
+        .ly = ly,
+        .half_w = if (vertical) cross_half else total / 2,
+        .half_h = if (vertical) total / 2 else cross_half,
+        .edge = edge,
+    };
+}
+
+/// Dock every block assigned to `edge` against the IC's `edge` side, stacked along
+/// the edge and centred on the IC, then write each member's final pose.
+fn dockEdge(parts: []Part, ic: usize, blocks: []const PackBlock, edge: Edge, gap: f64, gap_dock: f64) void {
+    const vertical = (edge == .left or edge == .right); // cross axis = Y
+    var k: usize = 0;
+    var total: f64 = 0;
+    for (blocks) |b| {
+        if (b.edge != edge) continue;
+        total += if (vertical) 2 * b.half_h else 2 * b.half_w;
+        k += 1;
+    }
+    if (k == 0) return;
+    total += @as(f64, @floatFromInt(k - 1)) * gap;
+    const ic_cross = if (vertical) parts[ic].y else parts[ic].x;
+    var cursor = ic_cross - total / 2;
+    for (blocks) |b| {
+        if (b.edge != edge) continue;
+        const cross_half = if (vertical) b.half_h else b.half_w;
+        const cross_center = cursor + cross_half;
+        cursor += 2 * cross_half + gap;
+        const depth_center = switch (edge) {
+            .left => parts[ic].x - effHw(parts[ic]) - gap_dock - b.half_w,
+            .right => parts[ic].x + effHw(parts[ic]) + gap_dock + b.half_w,
+            .top => parts[ic].y - effHh(parts[ic]) - gap_dock - b.half_h,
+            .bottom => parts[ic].y + effHh(parts[ic]) + gap_dock + b.half_h,
+        };
+        const cx = if (vertical) depth_center else cross_center;
+        const cy = if (vertical) cross_center else depth_center;
+        for (b.members, 0..) |m, j| {
+            parts[m].rot = b.rots[j];
+            parts[m].x = cx + b.lx[j];
+            parts[m].y = cy + b.ly[j];
+        }
+    }
+}
+
+/// Constructive zone-then-pack floorplan. Returns true when it produced a
+/// complete, overlap-free arrangement; false ⇒ caller uses the force pipeline.
+fn packZoned(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    built: Built,
+    params: Params,
+) std.mem.Allocator.Error!bool {
+    _ = params;
+    const topo = analyzeTopology(parts, g_lowered) orelse return false;
+    const ic = topo.ic;
+    parts[ic].x = 0;
+    parts[ic].y = 0;
+    parts[ic].rot = 0;
+
+    const claimed = try arena.alloc(bool, parts.len);
+    @memset(claimed, false);
+    claimed[ic] = true;
+
+    var blocks: std.ArrayListUnmanaged(PackBlock) = .empty;
+    const gap = @max(g_route_gap, FINAL_CLEAR);
+
+    // Functional-group blocks (hub members dropped — IC at origin, inductor below).
+    for (g_lowered.groups) |g| {
+        var ml: std.ArrayListUnmanaged(usize) = .empty;
+        for (g.members) |m| {
+            if (parts[m].kind == .hub or claimed[m]) continue;
+            try ml.append(arena, m);
+        }
+        if (ml.items.len == 0) continue;
+        const ordered = try orderMembers(arena, ml.items, parts, prep.priority);
+        for (ordered) |m| claimed[m] = true;
+        const edge = snapEdge(railDir(ordered, ic, parts, nets, &prep.idx_of)) orelse .bottom;
+        try blocks.append(arena, try packOneBlock(arena, ordered, parts, edge, built.loops, gap));
+    }
+    // Loose passives (in no group) — each its own single-member block.
+    for (parts, 0..) |p, i| {
+        if (claimed[i] or p.kind == .hub) continue;
+        claimed[i] = true;
+        const single = try arena.dupe(usize, &.{i});
+        const edge = snapEdge(railDir(single, ic, parts, nets, &prep.idx_of)) orelse .bottom;
+        try blocks.append(arena, try packOneBlock(arena, single, parts, edge, built.loops, gap));
+    }
+    // Secondary hubs (the power inductor). Its SW pads are central (dir ≈ 0), so it
+    // defaults to the top edge near the switch node.
+    for (parts, 0..) |p, i| {
+        if (claimed[i] or p.kind != .hub) continue;
+        claimed[i] = true;
+        const single = try arena.dupe(usize, &.{i});
+        const edge = snapEdge(railDir(single, ic, parts, nets, &prep.idx_of)) orelse .top;
+        try blocks.append(arena, try packOneBlock(arena, single, parts, edge, built.loops, gap));
+    }
+
+    dockEdge(parts, ic, blocks.items, .left, gap, gap);
+    dockEdge(parts, ic, blocks.items, .right, gap, gap);
+    dockEdge(parts, ic, blocks.items, .top, gap, gap);
+    dockEdge(parts, ic, blocks.items, .bottom, gap, gap);
+
+    legalize(parts, FINAL_CLEAR);
+    snapToGrid(parts);
+    legalizeOnGrid(parts);
+    return !anyOverlap(parts);
+}
+
+/// Snapshot every part's pose — the strict/overlap retry in `solve` keeps the
+/// better-routed of the two and restores it with `restorePoses`.
+fn capturePoses(arena: std.mem.Allocator, parts: []const Part) std.mem.Allocator.Error![]Pose {
+    const out = try arena.alloc(Pose, parts.len);
+    for (parts, 0..) |p, i| out[i] = .{ .x = p.x, .y = p.y, .rot = p.rot };
+    return out;
+}
+
+/// Restore poses captured by `capturePoses`.
+fn restorePoses(parts: []Part, poses: []const Pose) void {
+    for (parts, 0..) |*p, i| {
+        p.x = poses[i].x;
+        p.y = poses[i].y;
+        p.rot = poses[i].rot;
+    }
+}
 
 /// Build a placement for `block`. When `cached` covers every part, its poses
 /// are applied directly (no optimization — fast); otherwise the optimizer runs
@@ -457,33 +977,26 @@ pub fn solve(
 
     const generated = !applyCached(parts, cached);
     if (generated) {
-        if (parts.len >= 2 and parts.len <= MULTISTART_MAX_PARTS and built.loops.len > 0) {
-            // Any multi-start-band board with decoupling loops: pick the global
-            // arrangement on the real routed metric (rerank the top-K candidates),
-            // then the local routed tuck. This closes the surrogate↔routed gap that a
-            // single surrogate-selected arrangement + local polish leaves on the table.
-            // Was gated to ROUTED_POLISH_MAX_PARTS (≤16); widened to the whole multi-
-            // start band so 17–32-part loop boards select on routed too (adf5901 −13%,
-            // nestedarray −5%). The final routed tuck (`routedPolish`) still self-gates
-            // to ≤16, so above that the top-K routed rerank alone carries the selection.
-            try rerankSolve(arena, parts, &prep.idx_of, nets, built, params, prep.priority);
-        } else {
-            optimize(parts, &prep.idx_of, nets, built, params);
-            // Mirror matched halves (e.g. a symmetric amp's input/output sections)
-            // when the design is genuinely symmetric; a no-op otherwise.
-            try symmetrize(arena, parts, &prep.idx_of, nets, built, params);
-            // Final pull-together: dock any part still held off by the snap-safety
-            // gap so every courtyard abuts at least one neighbour (provably tight),
-            // highest placement-order priority docking first.
-            compactToContact(parts, prep.priority);
+        try runPlacement(arena, parts, &prep, nets, built, params);
+        // When courtyard overlap is enabled, the denser feasible region helps most
+        // boards but can land a small/sparse one in a worse basin (its HPWL rises
+        // even though overlap only *adds* freedom — a convergence artefact). So
+        // also solve the strict regime and keep whichever routes better: overlap
+        // can then never regress a board below strict. Only pays the 2× cost when
+        // overlap is on (`routedObjectiveCost` is a valid comparison for any board
+        // — it folds in HPWL + congestion and falls back to the surrogate loop
+        // term when there are no loops or the board is too large to route).
+        if (g_collide_shrink > 0 and parts.len >= 2) {
+            const overlap_routed = routedObjectiveCost(arena, parts, &prep.idx_of, nets, built.loops, params);
+            const overlap_poses = try capturePoses(arena, parts);
+            const saved_shrink = g_collide_shrink;
+            g_collide_shrink = 0; // strict regime
+            try runPlacement(arena, parts, &prep, nets, built, params);
+            const strict_routed = routedObjectiveCost(arena, parts, &prep.idx_of, nets, built.loops, params);
+            g_collide_shrink = saved_shrink;
+            if (overlap_routed <= strict_routed) restorePoses(parts, overlap_poses);
+            // else keep the strict arrangement already in `parts`.
         }
-        // Then tuck each *declared-priority* decoupling cap onto its IC pin: a
-        // per-cap wide-window search neither the global optimizer's balanced
-        // objective nor the polish's small window can do — so an author-ranked
-        // bypass cap actually hugs its power pin. Each tuck is re-routed and
-        // reverted if it would drop a net, so it never makes routing worse;
-        // self-no-ops when nothing is ranked or there are no loops.
-        tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
     } else if (mode == .refine and parts.len >= 2 and parts.len <= ROUTED_POLISH_MAX_PARTS and built.loops.len > 0) {
         // Seeded from an existing layout: keep its global arrangement, just run the
         // local routed tuck on it (the same monotonic, safety-netted pass the auto
@@ -527,6 +1040,37 @@ pub fn scorePoses(
     const score = scoreLayout(prep.parts, &prep.idx_of, prep.nets, prep.built.loops);
     const lsum = surrogateLoops(prep.parts, prep.built.loops);
     return breakdownWith(prep.parts, &prep.idx_of, prep.nets, params, score, lsum);
+}
+
+/// One hot loop's connection inductance (nH) — the quantity the objective's loop
+/// term sums. Exposed so the PNG renderer can size and label each loop ribbon by
+/// its contribution. Mirrors the surrogate the optimizer minimizes (fixed power
+/// leg, no maze router), so the ribbon weights match what placement is fighting.
+pub fn loopNh(parts: []const Part, lp: Loop) f64 {
+    return loopMetric(parts, lp, surrogatePwrLeg(parts, lp)).nh;
+}
+
+/// Fill `out` (index-aligned with `p.parts`) with each part's share of the
+/// objective, for the render "blame" heatmap. Every ratsnest link's length is
+/// split evenly between its two endpoints, and each hot loop's value-weighted
+/// inductance (× `loop_w`) is charged to its cap — the same mm + `loop_w`·nH
+/// mixing the objective itself sums, so the hottest parts are the ones the
+/// optimizer is straining against. Congestion is board-global and omitted.
+/// Values are raw; the caller normalizes for the colour ramp. No-op on a length
+/// mismatch.
+pub fn perPartBlame(p: Placement, params: Params, out: []f64) void {
+    if (out.len != p.parts.len) return;
+    @memset(out, 0);
+    for (p.links) |l| {
+        const a = worldPt(p.parts[l.a], l.ax, l.ay);
+        const b = worldPt(p.parts[l.b], l.bx, l.by);
+        const d = std.math.hypot(a.x - b.x, a.y - b.y);
+        out[l.a] += d / 2;
+        out[l.b] += d / 2;
+    }
+    for (p.loops) |lp| {
+        out[lp.cap] += params.loop_w * lp.weight * loopNh(p.parts, lp);
+    }
 }
 
 /// The maze-routed objective for an existing set of `poses` — the same metric
@@ -647,7 +1191,314 @@ const Prepared = struct {
     /// Per-part placement-order rank (0 = unranked, higher = earlier in the
     /// declared order) — drives compaction docking order in `solve`.
     priority: []const u32,
+    /// Resolved + lowered Phase-A constraints (see docs/constraints_dsl.md).
+    /// `prepare` also publishes this to `g_lowered` for the solve.
+    lowered: Lowered,
 };
+
+/// Resolve a design-local net name (what a constraint author writes — "VIN",
+/// "FB") to a flattened-net index. Flattening prefixes a sub-block's nets
+/// ("pwr/VIN"), so match on the prefix-stripped `shortName` first, then the full
+/// name. Null when no net matches.
+fn resolveNet(nets: []const FlatNet, want: []const u8) ?usize {
+    for (nets, 0..) |net, i| {
+        if (std.mem.eql(u8, shortName(net.name), want) or std.mem.eql(u8, net.name, want)) return i;
+    }
+    return null;
+}
+
+/// The footprint-local pad of part `idx` that sits on net `net`, or a zero-size
+/// pad at the part centre when it has no pin on that net (so a proximity pull
+/// still has a sensible anchor — the part body).
+fn padOnNet(part: Part, idx: usize, net: FlatNet, idx_of: *std.StringHashMap(usize)) PadRect {
+    for (net.pins) |pr| {
+        const i = idx_of.get(pr.ref_des) orelse continue;
+        if (i != idx) continue;
+        const pad = padLocal(part, pr.pin);
+        return .{ .x = pad.x, .y = pad.y, .w = pad.w, .h = pad.h };
+    }
+    return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+}
+
+/// Resolve + validate the design's Phase-A `(constraints …)` against the
+/// flattened netlist, lowering each form into the geometry/weights `constraintCost`
+/// consumes. Every ref/net is checked; anything that doesn't resolve is appended
+/// to `diags` (a human-readable rejection) and skipped — never silently applied
+/// to a wrong target (the doc's load-bearing safety property). When `diags` is
+/// null, rejections are simply dropped (the hot `prepare` path). All output is in
+/// `arena`. Returns an all-empty `Lowered` when no constraints were authored.
+fn resolveConstraints(
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    instances: []const export_kicad.FlatInstance,
+    nets: []const FlatNet,
+    parts: []const Part,
+    idx_of: *std.StringHashMap(usize),
+    diags: ?*std.ArrayListUnmanaged([]const u8),
+) std.mem.Allocator.Error!Lowered {
+    const c = block.constraints;
+
+    const reject = struct {
+        fn add(a: std.mem.Allocator, d: ?*std.ArrayListUnmanaged([]const u8), comptime fmt: []const u8, args: anytype) void {
+            const dd = d orelse return;
+            const msg = std.fmt.allocPrint(a, fmt, args) catch return;
+            // A dropped diagnostic only loses an authoring hint, never correctness
+            // (the constraint is skipped regardless) — so OOM here just returns.
+            dd.append(a, msg) catch return;
+        }
+    }.add;
+
+    var net_weight = try arena.alloc(f64, nets.len);
+    @memset(net_weight, 1.0);
+    var input_rail = try arena.alloc(bool, nets.len);
+    @memset(input_rail, false);
+    var prox: std.ArrayListUnmanaged(ProxTerm) = .empty;
+    var keepouts: std.ArrayListUnmanaged(KeepTerm) = .empty;
+    var groups: std.ArrayListUnmanaged(GroupTerm) = .empty;
+
+    // power-rail (role input) → mark the rail so the input-loop boost fires even
+    // with an integrated inductor (no discrete L to reveal the switcher).
+    for (c.power_rails) |pr| {
+        const ni = resolveNet(nets, pr.net) orelse {
+            reject(arena, diags, "power-rail '{s}': net '{s}' not in netlist", .{ pr.label, pr.net });
+            continue;
+        };
+        if (pr.role == .input) input_rail[ni] = true;
+    }
+
+    // net-length (priority) → raise that net's wirelength weight.
+    for (c.net_lengths) |nl| {
+        const ni = resolveNet(nets, nl.net) orelse {
+            reject(arena, diags, "net-length: net '{s}' not in netlist", .{nl.net});
+            continue;
+        };
+        net_weight[ni] *= constraintWeight(nl.priority);
+    }
+
+    // deprioritize → scale down the wirelength weight of every net the part is on.
+    for (c.deprioritize) |ref| {
+        const pi = resolvePart(instances, ref) orelse {
+            reject(arena, diags, "deprioritize: part '{s}' not found", .{ref});
+            continue;
+        };
+        for (nets, 0..) |net, ni| {
+            for (net.pins) |pp| {
+                if ((idx_of.get(pp.ref_des) orelse continue) == pi) {
+                    net_weight[ni] *= DEPRIORITIZE_SCALE;
+                    break;
+                }
+            }
+        }
+    }
+
+    // proximity → a pad-to-pad attraction term. The `pin` token is resolved as a
+    // net name (in these designs the relevant pin's net is named after it, e.g.
+    // U1's VIN pin sits on net VIN); failing that, as a literal hub pad number.
+    for (c.proximity) |p| {
+        const part_i = resolvePart(instances, p.ref) orelse {
+            reject(arena, diags, "proximity: part '{s}' not found", .{p.ref});
+            continue;
+        };
+        const hub_i = resolvePart(instances, p.hub) orelse {
+            reject(arena, diags, "proximity {s}: hub '{s}' not found", .{ p.ref, p.hub });
+            continue;
+        };
+        var part_pad: PadRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+        var hub_pad: PadRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+        if (resolveNet(nets, p.pin)) |ni| {
+            // Validate both parts actually touch that net.
+            hub_pad = padOnNet(parts[hub_i], hub_i, nets[ni], idx_of);
+            part_pad = padOnNet(parts[part_i], part_i, nets[ni], idx_of);
+            if (hub_pad.w == 0 and hub_pad.h == 0)
+                reject(arena, diags, "proximity {s}: hub {s} has no pin on net '{s}'", .{ p.ref, p.hub, p.pin });
+        } else {
+            const hp = padLocal(parts[hub_i], p.pin);
+            if (hp.w == 0 and hp.h == 0) {
+                reject(arena, diags, "proximity {s}: '{s}' is neither a net nor a pad of {s}", .{ p.ref, p.pin, p.hub });
+                continue;
+            }
+            hub_pad = .{ .x = hp.x, .y = hp.y, .w = hp.w, .h = hp.h };
+        }
+        try prox.append(arena, .{
+            .part = part_i,
+            .hub = hub_i,
+            .part_pad = part_pad,
+            .hub_pad = hub_pad,
+            .w = PROX_W * constraintWeight(p.priority),
+            .max_mm = p.max_mm,
+        });
+    }
+
+    // keep-out (part X) (from Y) → a part-vs-part min courtyard gap. The net-form
+    // keep-out (a net's routing region away from a region) is parsed + validated
+    // but not yet lowered (its region geometry needs the router) — reported so an
+    // author knows it is inert rather than silently honoured.
+    for (c.keep_outs) |k| {
+        const from_i = resolvePart(instances, k.from) orelse {
+            reject(arena, diags, "keep-out: 'from' part '{s}' not found", .{k.from});
+            continue;
+        };
+        if (k.part.len > 0) {
+            const pi = resolvePart(instances, k.part) orelse {
+                reject(arena, diags, "keep-out: part '{s}' not found", .{k.part});
+                continue;
+            };
+            try keepouts.append(arena, .{ .a = pi, .b = from_i, .min_mm = k.min_mm });
+        } else if (k.net.len > 0) {
+            if (resolveNet(nets, k.net) == null)
+                reject(arena, diags, "keep-out: net '{s}' not in netlist", .{k.net});
+            reject(arena, diags, "keep-out (net '{s}'): net-region keep-out not yet lowered (inert)", .{k.net});
+        }
+    }
+
+    // Constraint-DSL (group …) clusters. Resolve each ref; skip unresolved
+    // (reported) and groups with <2 resolved members (nothing to cohese).
+    for (c.groups) |g| {
+        const m = try resolveGroupMembers(arena, instances, g.refs, diags);
+        if (m.len >= 2) try groups.append(arena, makeGroupTerm(arena, m, parts, nets, idx_of));
+    }
+
+    // The design's own functional (group "name" (refs)) declarations — the same
+    // groups the schematic/BOM use — are ALSO honoured as placement cohesion, so
+    // an output filter's caps sit as one block with no (constraints) form needed.
+    // (Unresolved refs are skipped silently; these are not authored constraints.)
+    for (block.groups) |vg| {
+        const m = try resolveGroupMembers(arena, instances, vg.members, null);
+        if (m.len >= 2) try groups.append(arena, makeGroupTerm(arena, m, parts, nets, idx_of));
+    }
+
+    const has_groups = groups.items.len > 0;
+    return .{
+        .prox = try prox.toOwnedSlice(arena),
+        .keepouts = try keepouts.toOwnedSlice(arena),
+        .net_weight = net_weight,
+        .input_rail = input_rail,
+        .groups = try groups.toOwnedSlice(arena),
+        .active = c.present or has_groups,
+    };
+}
+
+/// True when part index `p` is one of a group's resolved members.
+fn memberOf(members: []const usize, p: usize) bool {
+    for (members) |m| {
+        if (m == p) return true;
+    }
+    return false;
+}
+
+/// Per-loop force/cost multiplier for bank-loop relief (index-aligned with
+/// `loops`): `1 − relief` for a cap that is in a `(group …)` with ≥2 members on
+/// the *same* power rail (a cap bank), else `1.0`. Position-invariant (membership
+/// + rail are fixed for the solve), so it is computed once in `prepare` and read
+/// by both `accumulateLoops` (force) and `constraintCost` (objective) so the two
+/// stay consistent. `relief ≤ 0` ⇒ all `1.0` (relief off).
+fn bankLoopScale(arena: std.mem.Allocator, loops: []const Loop, lowered: Lowered, relief: f64) std.mem.Allocator.Error![]const f64 {
+    const scale = try arena.alloc(f64, loops.len);
+    @memset(scale, 1.0);
+    if (relief <= 0 or !lowered.active) return scale;
+    const r = std.math.clamp(relief, 0.0, 1.0);
+    for (lowered.groups) |g| {
+        for (loops, 0..) |lp, li| {
+            if (!memberOf(g.members, lp.cap)) continue;
+            var bank: usize = 0;
+            for (loops) |lp2| {
+                if (lp2.pwr_net == lp.pwr_net and memberOf(g.members, lp2.cap)) bank += 1;
+            }
+            if (bank >= 2) scale[li] = @min(scale[li], 1.0 - r);
+        }
+    }
+    return scale;
+}
+
+/// Resolve a group's member refs to part indices (in the arena). Unresolved refs
+/// are reported via `diags` when provided, else skipped.
+fn resolveGroupMembers(
+    arena: std.mem.Allocator,
+    instances: []const export_kicad.FlatInstance,
+    refs: []const []const u8,
+    diags: ?*std.ArrayListUnmanaged([]const u8),
+) std.mem.Allocator.Error![]usize {
+    var members: std.ArrayListUnmanaged(usize) = .empty;
+    for (refs) |ref| {
+        if (resolvePart(instances, ref)) |pi|
+            try members.append(arena, pi)
+        else if (diags) |d| {
+            const msg = std.fmt.allocPrint(arena, "group: part '{s}' not found", .{ref}) catch continue;
+            d.append(arena, msg) catch continue; // diag is best-effort; OOM just drops the hint
+        }
+    }
+    return members.toOwnedSlice(arena);
+}
+
+/// Build a `GroupTerm` for `members`: the member set plus the hub it orbits (the
+/// largest hub part) and the unit direction, in hub-local frame, from the hub
+/// centre toward the hub pads the group connects to — used to zone the cluster to
+/// the correct side of the IC. `hub = -1` (no zoning) when no hub/shared pad.
+///
+/// The direction is computed over the group's **non-ground** hub pads only.
+/// Ground pads are scattered all around an IC (and a switcher's exposed pad sits
+/// dead-centre), so folding them in averages the side away — an input bank wired
+/// to a left-edge VIN pad would zone *right* purely because more GND pads happen
+/// to sit on the right. The signature rail (VIN, VOUT, SW, …) is what defines a
+/// group's side, so ground is excluded.
+fn makeGroupTerm(arena: std.mem.Allocator, members: []usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) GroupTerm {
+    _ = arena;
+    var hub: i32 = -1;
+    var best_area: f64 = 0;
+    for (parts, 0..) |p, i| {
+        if (p.kind != .hub) continue;
+        // The hub a group orbits must not be a member of the group itself.
+        if (memberOf(members, i)) continue;
+        const area = p.hw * p.hh;
+        if (area > best_area) {
+            best_area = area;
+            hub = @intCast(i);
+        }
+    }
+    if (hub < 0) return .{ .members = members };
+    const h: usize = @intCast(hub);
+    const hub_ref = parts[h].ref_des;
+    var sx: f64 = 0;
+    var sy: f64 = 0;
+    var n: usize = 0;
+    for (nets) |net| {
+        if (isGroundName(shortName(net.name))) continue; // ground defines no side
+        var touches = false;
+        for (net.pins) |pp| {
+            const pi = idx_of.get(pp.ref_des) orelse continue;
+            if (memberOf(members, pi)) touches = true;
+        }
+        if (!touches) continue;
+        for (net.pins) |pp| {
+            if (!std.mem.eql(u8, pp.ref_des, hub_ref)) continue;
+            const pad = padLocal(parts[h], pp.pin);
+            if (pad.w == 0 and pad.h == 0) continue;
+            sx += pad.x;
+            sy += pad.y;
+            n += 1;
+        }
+    }
+    if (n == 0) return .{ .members = members, .hub = hub };
+    const mag = std.math.hypot(sx, sy);
+    if (mag < 1e-6) return .{ .members = members, .hub = hub };
+    return .{ .members = members, .hub = hub, .dirx = sx / mag, .diry = sy / mag };
+}
+
+/// Validate a design's Phase-A constraints against its flattened netlist without
+/// running a solve — the deterministic, LLM-free validator the doc requires.
+/// Returns the list of human-readable rejections (empty ⇒ everything resolves).
+/// Builds the same design model `solve` does. All output in `arena`.
+pub fn validateConstraints(
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    params: Params,
+) std.mem.Allocator.Error![]const []const u8 {
+    var prep = try prepare(arena, block, project_dir, params);
+    var diags: std.ArrayListUnmanaged([]const u8) = .empty;
+    _ = try resolveConstraints(arena, block, prep.instances, prep.nets, prep.parts, &prep.idx_of, &diags);
+    return diags.toOwnedSlice(arena);
+}
 
 /// Resolve a `(placement-order …)` name to a flattened part index. Matches the
 /// name the author wrote — the stable `origin_key` (survives ref-des renumbering,
@@ -704,7 +1555,7 @@ fn prepare(
     var idx_of = std.StringHashMap(usize).init(arena);
     for (instances, 0..) |inst, i| {
         const hint = pin_counts.get(inst.ref_des) orelse 2;
-        const g = geometry.load(arena, project_dir, inst.footprint, hint);
+        const g = geometry.load(arena, project_dir, inst.footprint, hint, params.bbox_margin);
         const is_hub = isHub(inst.ref_des);
         if (is_hub) {
             const gop = try roles_cache.getOrPut(inst.component);
@@ -747,7 +1598,33 @@ fn prepare(
 
     const built = try buildSprings(arena, nets, parts, &idx_of, roles, explicit_pin);
     classify(parts, built.loops, nets, params.cap_w_max, priority);
-    return .{ .parts = parts, .idx_of = idx_of, .instances = instances, .nets = nets, .built = built, .priority = priority };
+    // Resolve + lower any Phase-A `(constraints …)` and publish to the thread's
+    // `g_lowered` so `constraintCost` (the search-only objective delta) sees it.
+    // Inert when the design authored none. Rejections are dropped on this hot
+    // path; `validateConstraints` surfaces them for authoring.
+    const lowered = try resolveConstraints(arena, block, instances, nets, parts, &idx_of, null);
+    g_lowered = lowered;
+    // Relaxation cohesion- and zoning-force gains (position-space twins of the
+    // scalar `group_w` / `group_zone_w` terms in `constraintCost`).
+    g_group_force = if (lowered.active) @max(0.0, params.group_w) * GROUP_FORCE_PER_W else 0;
+    g_zone_force = if (lowered.active) @max(0.0, params.group_zone_w) * ZONE_FORCE_PER_W else 0;
+    // Per-loop force relief for ≥2-member same-rail banks (twin of the scalar
+    // `group_loop_relief`). Precomputed once: bank membership is position-invariant.
+    g_loop_force_scale = try bankLoopScale(arena, built.loops, lowered, params.group_loop_relief);
+    // Publish the courtyard-overlap allowance for the thread's collision helpers.
+    // Capped at `bbox_margin` per side so the collision box stays ≥ the real
+    // footprint extent (courtyard = ceilToGrid(extent+margin) ⇒ courtyard−margin
+    // ≥ extent): only clearance bands overlap, never copper. Gated to the
+    // multi-start band (≤ MULTISTART_MAX_PARTS) — that's where dense decap loops
+    // benefit and the strict/overlap retry's 2× cost is affordable; big boards
+    // have area to spare and the retry would double an already-long solve.
+    g_collide_shrink = if (instances.len <= MULTISTART_MAX_PARTS)
+        std.math.clamp(params.courtyard_overlap / 2, 0, params.bbox_margin)
+    else
+        0;
+    // Routing/copper room left between courtyards (0 = touch).
+    g_route_gap = @max(0.0, params.route_gap);
+    return .{ .parts = parts, .idx_of = idx_of, .instances = instances, .nets = nets, .built = built, .priority = priority, .lowered = lowered };
 }
 
 /// Decompose the objective for already-placed parts, surfaced term-by-term for
@@ -2067,12 +2944,12 @@ fn keepCy(p: Part) f64 {
     return if (p.keep.hw < 0) p.y else worldPt(p, p.keep.ox, p.keep.oy).y;
 }
 fn keepHw(p: Part) f64 {
-    if (p.keep.hw < 0) return effHw(p);
-    return if (isQuarter(p.rot)) p.keep.hh else p.keep.hw;
+    const base = if (p.keep.hw < 0) effHw(p) else (if (isQuarter(p.rot)) p.keep.hh else p.keep.hw);
+    return @max(0.0, base - g_collide_shrink) + g_route_gap;
 }
 fn keepHh(p: Part) f64 {
-    if (p.keep.hw < 0) return effHh(p);
-    return if (isQuarter(p.rot)) p.keep.hw else p.keep.hh;
+    const base = if (p.keep.hw < 0) effHh(p) else (if (isQuarter(p.rot)) p.keep.hw else p.keep.hh);
+    return @max(0.0, base - g_collide_shrink) + g_route_gap;
 }
 
 /// Build a breakout stub for every pad on an *unaccounted* net — one whose pins
@@ -2203,7 +3080,123 @@ fn objectiveCost(
     // where it contributes nothing anyway.
     const cong = if (params.w_congest != 0) params.w_congest * congestionPenalty(parts, idx_of, nets) else 0;
     return hpwl + params.loop_w * weightedLoop(parts, loops) +
-        params.w_align * compactnessTerm(parts, params.compact_mode) + cong;
+        params.w_align * compactnessTerm(parts, params.compact_mode) + cong +
+        constraintCost(parts, idx_of, nets, loops, params);
+}
+
+/// The Phase-A constraint contribution to the *search* objective — added to
+/// `objectiveCost` so SA is steered by the authored intent, but deliberately
+/// absent from `scoreLayout`/`scorePoses`/`routedObjectiveCost` (the reported &
+/// compared metrics). That separation is the whole point: constraints change
+/// where the optimizer looks, not how the result is judged, so a hand layout and
+/// a constrained solve are scored on the identical unmodified physical objective.
+/// Reads the thread's `g_lowered` (set by `prepare`); a no-op when none authored.
+/// Five lowered terms:
+///   • proximity — Σ w·(edge gap from part pad to hub pin pad)
+///   • keep-out  — Σ KEEPOUT_W·max(0, min − courtyard gap)
+///   • net weight — Σ (w−1)·net wirelength  (net-length raises, deprioritize lowers)
+///   • input-loop boost — extra loop inductance weight on a declared input rail
+///     (fires even with an integrated inductor, which the auto switcher test misses)
+///   • group cohesion — Σ group_w·(member→centroid distance) per `(group …)`,
+///     a per-member pull (force on every member, not just the bbox extremes) —
+///     the scalar twin of the relaxation force in `accumulateGroupCohesion`
+///   • group zoning — group_zone_w·(centroid → hub's connecting side)
+///   • bank-loop relief — removes `group_loop_relief` of the per-cap loop pull for
+///     caps in a ≥2-member same-rail bank (twin of `g_loop_force_scale`)
+fn constraintCost(
+    parts: []const Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    loops: []const Loop,
+    params: Params,
+) f64 {
+    const L = g_lowered;
+    // Fast exit when nothing is live (no constraints and no functional groups).
+    if (!L.active) return 0;
+    var c: f64 = 0;
+
+    for (L.prox) |t| {
+        const gap = rectGap(worldRect(parts[t.part], t.part_pad), worldRect(parts[t.hub], t.hub_pad));
+        // Hinge: only penalise distance beyond the declared radius (so a part
+        // already inside `max_mm` is left alone, not dragged further at the cost
+        // of other nets). A radius of 0 means "no declared max" → plain pull.
+        const over = if (t.max_mm > 0) @max(0.0, gap - t.max_mm) else gap;
+        c += t.w * over;
+    }
+    for (L.keepouts) |k| {
+        const g = partGap(parts[k.a], parts[k.b]);
+        if (g < k.min_mm) c += KEEPOUT_W * (k.min_mm - g);
+    }
+    if (L.net_weight.len == nets.len) {
+        var pts: [MAX_WIRE_PTS]Pt = undefined;
+        for (nets, 0..) |net, ni| {
+            const extra = L.net_weight[ni] - 1.0;
+            if (extra == 0) continue;
+            if (isGroundName(shortName(net.name))) continue;
+            c += extra * netWire(parts, idx_of, net, &pts);
+        }
+    }
+    if (L.input_rail.len == nets.len) {
+        for (loops) |lp| {
+            if (lp.pwr_net < 0) continue;
+            const ni: usize = @intCast(lp.pwr_net);
+            if (ni >= nets.len or !L.input_rail[ni]) continue;
+            const nh = loopMetric(parts, lp, surrogatePwrLeg(parts, lp)).nh;
+            c += (INPUT_LOOP_BOOST - 1.0) * params.loop_w * lp.weight * nh;
+        }
+    }
+    for (L.groups) |g| {
+        const inv = 1.0 / @as(f64, @floatFromInt(g.members.len));
+        // Centroid of the member centres.
+        var cx: f64 = 0;
+        var cy: f64 = 0;
+        for (g.members) |m| {
+            cx += parts[m].x;
+            cy += parts[m].y;
+        }
+        cx *= inv;
+        cy *= inv;
+        // Cohesion: pull *every* member toward the cluster centroid (Σ of the
+        // members' distances to their mean position — a moment-of-inertia term).
+        // Unlike a bounding-box penalty, this exerts a restoring force on the
+        // interior members too, not just the four extremes — so a loop pull that
+        // scatters individual caps along a tall pad is opposed cap-by-cap.
+        for (g.members) |m| {
+            c += params.group_w * std.math.hypot(parts[m].x - cx, parts[m].y - cy);
+        }
+        // Zoning: pull the cluster's centroid to the side of the hub it wires to,
+        // a fixed reach beyond the hub edge, so groups land on distinct sides.
+        if (g.hub >= 0 and params.group_zone_w > 0) {
+            const hub = parts[@intCast(g.hub)];
+            const d = rotateLocal(g.dirx, g.diry, hub.rot);
+            const reach = @abs(d.x) * hub.hw + @abs(d.y) * hub.hh + ZONE_GAP_MM;
+            const tx = hub.x + d.x * reach;
+            const ty = hub.y + d.y * reach;
+            c += params.group_zone_w * std.math.hypot(cx - tx, cy - ty);
+        }
+    }
+    // Bank-loop relief: caps in a ≥2-member same-rail bank don't each need to reach
+    // the rail pad — removing a fraction of their per-cap loop pull lets cohesion
+    // pack them into one block (see `Params.group_loop_relief`). This cancels
+    // exactly the matching fraction `objectiveCost` charged via `weightedLoop`
+    // (`1 − g_loop_force_scale`), so a bank cap's net loop contribution stays ≥0.
+    if (g_loop_force_scale.len == loops.len) {
+        for (loops, 0..) |lp, li| {
+            const relief = 1.0 - g_loop_force_scale[li];
+            if (relief <= 0) continue;
+            const nh = loopMetric(parts, lp, surrogatePwrLeg(parts, lp)).nh;
+            c -= relief * params.loop_w * lp.weight * nh;
+        }
+    }
+    return c;
+}
+
+/// Edge-to-edge gap (mm) between two parts' rotation-aware courtyards — the
+/// distance a `(keep-out (part …) (from …))` penalises below its `min`.
+fn partGap(a: Part, b: Part) f64 {
+    const ar = Rect{ .x0 = a.x - effHw(a), .y0 = a.y - effHh(a), .x1 = a.x + effHw(a), .y1 = a.y + effHh(a) };
+    const br = Rect{ .x0 = b.x - effHw(b), .y0 = b.y - effHh(b), .x1 = b.x + effHw(b), .y1 = b.y + effHh(b) };
+    return rectGap(ar, br);
 }
 
 /// The same objective as `objectiveCost`, but the loop term is the *real*
@@ -2820,31 +3813,37 @@ fn wireScore(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []con
     var pts: [MAX_WIRE_PTS]Pt = undefined;
     for (nets) |net| {
         if (isGroundName(shortName(net.name))) continue;
-        var minx: f64 = std.math.inf(f64);
-        var miny: f64 = std.math.inf(f64);
-        var maxx: f64 = -std.math.inf(f64);
-        var maxy: f64 = -std.math.inf(f64);
-        var cnt: usize = 0;
-        for (net.pins) |pr| {
-            const i = idx_of.get(pr.ref_des) orelse continue;
-            const pad = padLocal(parts[i], pr.pin);
-            const w = worldPt(parts[i], pad.x, pad.y);
-            if (cnt < MAX_WIRE_PTS) pts[cnt] = w;
-            minx = @min(minx, w.x);
-            miny = @min(miny, w.y);
-            maxx = @max(maxx, w.x);
-            maxy = @max(maxy, w.y);
-            cnt += 1;
-        }
-        if (cnt < 2) continue;
-        // HPWL = RSMT for ≤3 pins (keep the fast path); RMST for the rest.
-        if (cnt <= 3 or cnt > MAX_WIRE_PTS) {
-            total += (maxx - minx) + (maxy - miny);
-        } else {
-            total += rmstLen(pts[0..cnt]);
-        }
+        total += netWire(parts, idx_of, net, &pts);
     }
     return total;
+}
+
+/// Wirelength estimate for one net (mm): bounding-box HPWL for ≤3 pins (exact
+/// RSMT, fast path), rectilinear MST for larger. `pts` is a scratch buffer the
+/// caller owns. Factored out of `wireScore` so the constraint layer can weight
+/// an individual net's contribution (`net-length` / `deprioritize`) without
+/// re-deriving it. Caller skips ground nets.
+fn netWire(parts: []const Part, idx_of: *std.StringHashMap(usize), net: FlatNet, pts: *[MAX_WIRE_PTS]Pt) f64 {
+    var minx: f64 = std.math.inf(f64);
+    var miny: f64 = std.math.inf(f64);
+    var maxx: f64 = -std.math.inf(f64);
+    var maxy: f64 = -std.math.inf(f64);
+    var cnt: usize = 0;
+    for (net.pins) |pr| {
+        const i = idx_of.get(pr.ref_des) orelse continue;
+        const pad = padLocal(parts[i], pr.pin);
+        const w = worldPt(parts[i], pad.x, pad.y);
+        if (cnt < MAX_WIRE_PTS) pts[cnt] = w;
+        minx = @min(minx, w.x);
+        miny = @min(miny, w.y);
+        maxx = @max(maxx, w.x);
+        maxy = @max(maxy, w.y);
+        cnt += 1;
+    }
+    if (cnt < 2) return 0;
+    // HPWL = RSMT for ≤3 pins (keep the fast path); RMST for the rest.
+    if (cnt <= 3 or cnt > MAX_WIRE_PTS) return (maxx - minx) + (maxy - miny);
+    return rmstLen(pts[0..cnt]);
 }
 
 /// Rectilinear minimum spanning tree length (Prim, Manhattan metric) over `pts`
@@ -2936,6 +3935,7 @@ fn relax(parts: []Part, springs: []const Spring, loops: []const Loop) void {
 
         accumulateLoops(parts, loops, &ax, &ay);
         accumulateCompaction(parts, &ax, &ay);
+        accumulateGroupCohesion(parts, &ax, &ay);
         _ = accumulateRepulsion(parts, boxes[0..n], &ax, &ay, 0);
 
         var maxdisp: f64 = 0;
@@ -2961,14 +3961,68 @@ fn relax(parts: []Part, springs: []const Spring, loops: []const Loop) void {
 /// gap vector, so it vanishes once the pads touch — repulsion then sets the
 /// final clearance. This replaces the old centroid power/ground springs.
 fn accumulateLoops(parts: []const Part, loops: []const Loop, ax: []f64, ay: []f64) void {
-    for (loops) |lp| {
+    for (loops, 0..) |lp, li| {
+        // Bank caps (a ≥2-member same-rail group) get their loop force relieved so
+        // the relaxation stops yanking each onto the rail pad — cohesion packs them
+        // (see `g_loop_force_scale`). 1.0 for a lone cap / when relief is off.
+        const scale = if (li < g_loop_force_scale.len) g_loop_force_scale[li] else 1.0;
+        if (scale <= 0) continue;
         // Both legs pull toward their *pinned* hub pads (matching the score), so a
         // cap settles with each pad facing its assigned pin — power pad to the
         // supply pin, ground pad to the nearby ground pin — not the nearest of each.
         const pwr_pin = [_]PadRect{lp.hub_pwr_pin};
         const gnd_pin = [_]PadRect{lp.hub_gnd_pin};
-        accumulateLeg(parts, lp.cap, lp.cap_pwr, lp.hub, &pwr_pin, ax, ay);
-        accumulateLeg(parts, lp.cap, lp.cap_gnd, lp.hub, &gnd_pin, ax, ay);
+        accumulateLeg(parts, lp.cap, lp.cap_pwr, lp.hub, &pwr_pin, scale, ax, ay);
+        accumulateLeg(parts, lp.cap, lp.cap_gnd, lp.hub, &gnd_pin, scale, ax, ay);
+    }
+}
+
+/// Cohesion force: pull every `(group …)` member toward its group's centroid,
+/// the position-space twin of the `constraintCost` cohesion term (which alone
+/// can only *select*, not *create*, a tight block — see `g_group_force`). No-op
+/// when no groups are live or the gain is zero.
+fn accumulateGroupCohesion(parts: []const Part, ax: []f64, ay: []f64) void {
+    if (g_group_force <= 0 or !g_lowered.active) return;
+    for (g_lowered.groups) |g| {
+        if (g.members.len < 2) continue;
+        const inv = 1.0 / @as(f64, @floatFromInt(g.members.len));
+        var cx: f64 = 0;
+        var cy: f64 = 0;
+        // The group's anchor is its largest hub member (the IC) — it stays put so
+        // the cluster gathers around it, not the other way round. A *secondary* hub
+        // (e.g. a power inductor in the switching cell) is NOT the anchor and IS
+        // pulled in, so the inductor docks beside the IC instead of floating off.
+        var anchor: usize = g.members[0];
+        var anchor_area: f64 = -1;
+        for (g.members) |m| {
+            cx += parts[m].x;
+            cy += parts[m].y;
+            if (parts[m].kind == .hub and parts[m].hw * parts[m].hh > anchor_area) {
+                anchor_area = parts[m].hw * parts[m].hh;
+                anchor = m;
+            }
+        }
+        cx *= inv;
+        cy *= inv;
+        // Zoning target: the point a fixed reach beyond the hub edge on the side
+        // the group wires to (VIN caps left, VOUT caps right, …). Pulling every
+        // member toward it migrates the whole cluster to that side; null ⇒ no zone.
+        var zone: ?Pt = null;
+        if (g_zone_force > 0 and g.hub >= 0) {
+            const hub = parts[@intCast(g.hub)];
+            const d = rotateLocal(g.dirx, g.diry, hub.rot);
+            const reach = @abs(d.x) * hub.hw + @abs(d.y) * hub.hh + ZONE_GAP_MM;
+            zone = .{ .x = hub.x + d.x * reach, .y = hub.y + d.y * reach };
+        }
+        for (g.members) |m| {
+            if (anchor_area >= 0 and m == anchor) continue; // keep the IC anchored
+            ax[m] += g_group_force * (cx - parts[m].x);
+            ay[m] += g_group_force * (cy - parts[m].y);
+            if (zone) |z| {
+                ax[m] += g_zone_force * (z.x - parts[m].x);
+                ay[m] += g_zone_force * (z.y - parts[m].y);
+            }
+        }
     }
 }
 
@@ -2980,6 +4034,7 @@ fn accumulateLeg(
     cap_pad: PadRect,
     hub: usize,
     hub_pads: []const PadRect,
+    scale: f64,
     ax: []f64,
     ay: []f64,
 ) void {
@@ -2987,8 +4042,8 @@ fn accumulateLeg(
     const near = nearestHubPad(cr, parts[hub], hub_pads);
     if (near.gap < 1e-6) return; // touching → loop leg already minimal
     const np = nearestPoints(cr, near.rect);
-    const dx = K_DECOUPLE * (np.b.x - np.a.x);
-    const dy = K_DECOUPLE * (np.b.y - np.a.y);
+    const dx = scale * K_DECOUPLE * (np.b.x - np.a.x);
+    const dy = scale * K_DECOUPLE * (np.b.y - np.a.y);
     ax[cap] += dx;
     ay[cap] += dy;
     ax[hub] -= dx;
@@ -3081,9 +4136,13 @@ const KeepBox = struct { cxo: f64, cyo: f64, hw: f64, hh: f64 };
 
 fn keepBoxOf(p: Part) KeepBox {
     const q = isQuarter(p.rot);
-    if (p.keep.hw < 0) return .{ .cxo = 0, .cyo = 0, .hw = if (q) p.hh else p.hw, .hh = if (q) p.hw else p.hh };
+    const s = g_collide_shrink; // courtyards may overlap their clearance margins
+    const r = g_route_gap; // …or leave extra routing room between them
+    if (p.keep.hw < 0) return .{ .cxo = 0, .cyo = 0, .hw = @max(0.0, (if (q) p.hh else p.hw) - s) + r, .hh = @max(0.0, (if (q) p.hw else p.hh) - s) + r };
     const off = rotateLocal(p.keep.ox, p.keep.oy, p.rot);
-    return .{ .cxo = off.x, .cyo = off.y, .hw = if (q) p.keep.hh else p.keep.hw, .hh = if (q) p.keep.hw else p.keep.hh };
+    const hw = @max(0.0, (if (q) p.keep.hh else p.keep.hw) - s) + r;
+    const hh = @max(0.0, (if (q) p.keep.hw else p.keep.hh) - s) + r;
+    return .{ .cxo = off.x, .cyo = off.y, .hw = hw, .hh = hh };
 }
 
 /// Fill `out[0..parts.len]` with each part's precomputed keepout box.
@@ -3858,4 +4917,96 @@ test "congestionPenalty fires only on dense regions" {
     // binIndex clamps out-of-range fractions into [0, CONGEST_BINS-1].
     try testing.expectEqual(@as(usize, 0), binIndex(-1.5));
     try testing.expectEqual(CONGEST_BINS - 1, binIndex(999));
+}
+
+// spec: placement/optimizer - relieves the loop pull of caps in a same-rail bank
+test "bankLoopScale relieves only caps in a >=2-member same-rail bank" {
+    const z: PadRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    // Caps 1 & 2 share rail (net 0) and the group → a bank; cap 3 is alone on net 1.
+    const loops = [_]Loop{
+        .{ .cap = 1, .hub = 0, .cap_pwr = z, .cap_gnd = z, .hub_pwr = &.{}, .hub_gnd = &.{}, .pwr_net = 0 },
+        .{ .cap = 2, .hub = 0, .cap_pwr = z, .cap_gnd = z, .hub_pwr = &.{}, .hub_gnd = &.{}, .pwr_net = 0 },
+        .{ .cap = 3, .hub = 0, .cap_pwr = z, .cap_gnd = z, .hub_pwr = &.{}, .hub_gnd = &.{}, .pwr_net = 1 },
+    };
+    const members = [_]usize{ 1, 2, 3 };
+    const groups = [_]GroupTerm{.{ .members = &members }};
+    const lowered = Lowered{ .groups = &groups, .active = true };
+
+    const scale = try bankLoopScale(testing.allocator, &loops, lowered, 0.5);
+    defer testing.allocator.free(@constCast(scale));
+    try testing.expectApproxEqAbs(@as(f64, 0.5), scale[0], 1e-9); // bank cap
+    try testing.expectApproxEqAbs(@as(f64, 0.5), scale[1], 1e-9); // bank cap
+    try testing.expectApproxEqAbs(@as(f64, 1.0), scale[2], 1e-9); // lone cap → no relief
+
+    // relief = 0 ⇒ every entry stays 1.0 (the feature is off).
+    const off = try bankLoopScale(testing.allocator, &loops, lowered, 0);
+    defer testing.allocator.free(@constCast(off));
+    for (off) |s| try testing.expectApproxEqAbs(@as(f64, 1.0), s, 1e-9);
+}
+
+// spec: placement/optimizer - pulls group members toward their centroid, anchoring the IC
+test "accumulateGroupCohesion pulls members in and keeps the hub anchored" {
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 3, .hh = 2, .pads = &.{}, .fallback = true, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &.{}, .fallback = true, .x = -10, .y = 0 },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 1, .hh = 1, .pads = &.{}, .fallback = true, .x = 10, .y = 0 },
+    };
+    const members = [_]usize{ 0, 1, 2 };
+    const groups = [_]GroupTerm{.{ .members = &members }};
+
+    g_lowered = .{ .groups = &groups, .active = true };
+    g_group_force = 0.4;
+    g_zone_force = 0;
+    defer {
+        g_lowered = .{};
+        g_group_force = 0;
+    }
+    var ax = [_]f64{ 0, 0, 0 };
+    var ay = [_]f64{ 0, 0, 0 };
+    accumulateGroupCohesion(&parts, &ax, &ay);
+    // Centroid is at x=0 (the IC). The left cap is pulled right (+), the right cap
+    // left (−); the IC (largest hub = anchor) gets no force.
+    try testing.expect(ax[1] > 0);
+    try testing.expect(ax[2] < 0);
+    try testing.expectApproxEqAbs(@as(f64, 0), ax[0], 1e-9);
+}
+
+// spec: placement/optimizer - zone-pack snaps a rail direction to an IC edge
+test "snapEdge picks the dominant IC edge (y-down)" {
+    try testing.expectEqual(Edge.left, snapEdge(.{ .x = -2, .y = 0.3 }).?);
+    try testing.expectEqual(Edge.right, snapEdge(.{ .x = 2, .y = -0.3 }).?);
+    try testing.expectEqual(Edge.top, snapEdge(.{ .x = 0.1, .y = -2 }).?);
+    try testing.expectEqual(Edge.bottom, snapEdge(.{ .x = 0.1, .y = 2 }).?);
+    try testing.expect(snapEdge(.{ .x = 0, .y = 0 }) == null);
+}
+
+// spec: placement/optimizer - zone-pack rotates a cap so its power pad faces the IC
+test "faceRotation turns the power pad toward the IC" {
+    const pwr = PadRect{ .x = 1, .y = 0, .w = 0.4, .h = 0.4 }; // power pad on +x
+    try testing.expectEqual(@as(f64, 0), faceRotation(pwr, .left)); // IC to the right
+    try testing.expectEqual(@as(f64, 180), faceRotation(pwr, .right)); // IC to the left
+    try testing.expectEqual(@as(f64, 90), faceRotation(pwr, .top)); // IC below (+y)
+    try testing.expectEqual(@as(f64, 270), faceRotation(pwr, .bottom)); // IC above (−y)
+}
+
+// spec: placement/optimizer - zone-pack lays a group into an aligned row/column
+test "packOneBlock lays members into an aligned column for a side edge" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    var parts = [_]Part{
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "C3", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &.{}, .fallback = true },
+    };
+    const ordered = [_]usize{ 0, 1, 2 };
+    const blk = try packOneBlock(arena, &ordered, &parts, .left, &.{}, 0.2);
+    // A side (left) edge packs a vertical column: same x, strictly increasing y.
+    try testing.expectApproxEqAbs(@as(f64, 0), blk.lx[0], 1e-9);
+    try testing.expectApproxEqAbs(blk.lx[0], blk.lx[1], 1e-9);
+    try testing.expectApproxEqAbs(blk.lx[1], blk.lx[2], 1e-9);
+    try testing.expect(blk.ly[0] < blk.ly[1] and blk.ly[1] < blk.ly[2]);
+    // Column half-height spans all three caps + the two gaps; half-width = one cap.
+    try testing.expectApproxEqAbs(@as(f64, 0.6 * 3 + 0.2), blk.half_h, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 1), blk.half_w, 1e-9);
 }

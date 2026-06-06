@@ -61,6 +61,7 @@ pub fn load(
     project_dir: []const u8,
     fp_name: []const u8,
     pin_count_hint: usize,
+    margin: f64,
 ) Geom {
     const path = std.fmt.allocPrint(arena, PATH_FMT, .{ project_dir, fp_name }) catch
         return fallbackGeom(pin_count_hint);
@@ -98,8 +99,8 @@ pub fn load(
         break :blk padExtents(pad_slice) orelse return fallbackGeom(pin_count_hint);
     };
     return .{
-        .hw = ext_with_margin.hw + BBOX_MARGIN_MM,
-        .hh = ext_with_margin.hh + BBOX_MARGIN_MM,
+        .hw = ext_with_margin.hw + margin,
+        .hh = ext_with_margin.hh + margin,
         .pads = pad_slice,
         .fallback = false,
         .silk_lines = silk_lines.items,
@@ -300,7 +301,7 @@ test "load falls back to a synthesized box for a missing footprint" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    const g = load(arena, "/nonexistent-project-dir", "does-not-exist", 10);
+    const g = load(arena, "/nonexistent-project-dir", "does-not-exist", 10, BBOX_MARGIN_MM);
     try testing.expect(g.fallback);
     try testing.expectEqual(@as(usize, 0), g.pads.len);
     try testing.expect(g.hw > 0 and g.hh > 0);

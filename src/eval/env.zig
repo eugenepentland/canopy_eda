@@ -1097,6 +1097,87 @@ pub const DesignBlock = struct {
     /// and (via `(near <pin> …)`) pins which IC pad a decoupling loop targets.
     /// Empty ⇒ the auto-placer uses value-based weighting + geometric pin choice.
     placement_order: []const PlacementOrder = &.{},
+    /// Phase-A placement constraints from top-level `(constraints …)` / `(module …)`
+    /// forms (see docs/constraints_dsl.md). Circuit-intent the auto-placer cannot
+    /// infer — which rail is the switcher input, which parts form a feedback
+    /// divider, what to keep apart — lowered into extra objective terms / weights.
+    /// Symbolic refs/nets/pins are resolved against the flattened netlist (and
+    /// rejected if absent) by the optimizer before use. Empty ⇒ none authored.
+    constraints: PlacementConstraints = .{},
+};
+
+/// A rail's electrical role, declared by `(power-rail <label> (role …) (net …))`.
+/// `input` is the high-dI/dt side of a switcher whose decoupling loop dominates
+/// EMI — declaring it lets the placer apply the input-loop boost even when the
+/// inductor is integrated (so no discrete inductor reveals the topology).
+pub const RailRole = enum { input, output, aux };
+
+/// Soft-constraint priority (maps to a numeric weight multiplier in the placer).
+pub const ConstraintPriority = enum { low, med, high };
+
+/// `(power-rail <label> (role input|output|aux) (net <net>))` — tags a rail's
+/// role. `net` is the symbolic net name (resolved against the flattened netlist).
+pub const PowerRailConstraint = struct {
+    label: []const u8,
+    role: RailRole,
+    net: []const u8,
+};
+
+/// `(proximity <ref> (to-pin <hub> <pin>) (max <n> mm) (priority …)?)` — pull
+/// `ref` toward `hub`'s `pin`. Lowered into a soft attraction term in the placer
+/// objective, weighted by `priority`. `max_mm` = 0 ⇒ unspecified (no hinge).
+pub const ProximityConstraint = struct {
+    ref: []const u8,
+    hub: []const u8,
+    pin: []const u8,
+    max_mm: f64 = 0,
+    priority: ConstraintPriority = .med,
+};
+
+/// `(net-length (net <net>) (minimize | max <n> mm) (priority …)?)` — raise the
+/// weight on a specific net's wirelength (e.g. a high-Z feedback tap), above its
+/// default unit HPWL contribution.
+pub const NetLengthConstraint = struct {
+    net: []const u8,
+    minimize: bool = true,
+    max_mm: f64 = 0,
+    priority: ConstraintPriority = .high,
+};
+
+/// `(keep-out (net <net>)|(part <ref>) (from <ref>) (min <n> mm) (reason …)?)` —
+/// keep the subject (a net's parts, or a part) away from `from`. Exactly one of
+/// `net`/`part` is set. Lowered into a min-distance penalty.
+pub const KeepoutConstraint = struct {
+    net: []const u8 = "",
+    part: []const u8 = "",
+    from: []const u8,
+    min_mm: f64 = 0,
+    reason: []const u8 = "",
+};
+
+/// Arrangement style for a `(group …)`: cluster (default), shared row, or column.
+pub const GroupStyle = enum { cluster, row, column };
+
+/// `(group (<ref>+) (style cluster|row|column)?)` — keep a set of parts together.
+pub const GroupConstraint = struct {
+    refs: []const []const u8,
+    style: GroupStyle = .cluster,
+};
+
+/// The full Phase-A constraint set parsed from a design's `(constraints …)` /
+/// `(module …)` forms. Held symbolically (string refs/nets/pins) on the design
+/// block; the optimizer resolves and lowers it (see docs/constraints_dsl.md).
+pub const PlacementConstraints = struct {
+    proximity: []const ProximityConstraint = &.{},
+    power_rails: []const PowerRailConstraint = &.{},
+    net_lengths: []const NetLengthConstraint = &.{},
+    /// Refs to scale *down* in the objective (config straps etc.) so they don't
+    /// steal space/effort from critical parts.
+    deprioritize: []const []const u8 = &.{},
+    keep_outs: []const KeepoutConstraint = &.{},
+    groups: []const GroupConstraint = &.{},
+    /// True when at least one `(constraints …)`/`(module …)` form was present.
+    present: bool = false,
 };
 
 /// Assertion result.

@@ -396,8 +396,12 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     if (placement.generated) writeAutoCache(ctx.allocator, ctx.project_dir, name, placement, tune.params);
     const shown = if (tune.tuned) tune.params else (readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{});
 
+    // Per-part objective blame for the findings sidecar (index-aligned w/ parts).
+    const blame = try req.arena.alloc(f64, placement.parts.len);
+    optimizer.perPartBlame(placement, shown, blame);
+
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
-    try writePlacementJson(&aw.writer, placement, shown, name);
+    try writePlacementJson(&aw.writer, placement, shown, name, blame);
     res.content_type = .JSON;
     res.body = aw.written();
 }
@@ -415,6 +419,24 @@ pub const PngRequest = struct {
     layout: ?[]const u8 = null,
     regen: bool = false,
     sub: ?[]const u8 = null,
+    /// Experimental courtyard-overlap allowance (mm); 0 = touch only (default).
+    court_overlap: f64 = 0,
+    /// Routing/copper room between courtyards (mm); 0 = touch (default).
+    route_gap: f64 = 0,
+    /// Functional-group cohesion / zoning / bank-loop-relief tuning knobs
+    /// (negative ⇒ "unset", keep the optimizer default).
+    group_w: f64 = -1,
+    group_zone_w: f64 = -1,
+    group_loop_relief: f64 = -1,
+    /// Constructive zone-then-pack floorplan (crisp VIN│IC│L│VOUT rows).
+    zone_pack: bool = false,
+    /// Diagnostic overlays (see render_pcb_png.Options).
+    blame: bool = false,
+    loop_labels: bool = false,
+    dims: bool = false,
+    grid: bool = false,
+    /// Saved-layout name to diff the current placement against.
+    compare: ?[]const u8 = null,
 };
 
 /// Failures `renderDesignPng` surfaces; callers map these to an HTTP status or
@@ -450,10 +472,21 @@ pub fn renderDesignPng(
         readLayoutPoses(alloc, project_dir, name, ln)
     else if (opts.regen) null else readAutoPoses(alloc, project_dir, name);
     const grid_only = opts.sub == null and opts.layout == null and !opts.regen and cached == null;
-    const placement = (if (grid_only)
-        optimizer.gridPlace(alloc, eff_block, project_dir, .{})
+    var png_params = optimizer.Params{ .courtyard_overlap = opts.court_overlap, .route_gap = opts.route_gap };
+    if (opts.group_w >= 0) png_params.group_w = opts.group_w;
+    if (opts.group_zone_w >= 0) png_params.group_zone_w = opts.group_zone_w;
+    if (opts.group_loop_relief >= 0) png_params.group_loop_relief = opts.group_loop_relief;
+    if (opts.zone_pack) png_params.zone_pack = true;
+    // A named saved layout renders VERBATIM (placeFromPoses) — "show me this
+    // layout" must display exactly what was saved, not a re-optimized version:
+    // refine can drift a hand-tuned layout to a worse arrangement (e.g. a 70.8
+    // hand layout relaxing back to 86 because it isn't a relax fixed-point).
+    const placement = (if (opts.layout != null and cached != null)
+        optimizer.placeFromPoses(alloc, eff_block, project_dir, cached.?, png_params)
+    else if (grid_only)
+        optimizer.gridPlace(alloc, eff_block, project_dir, png_params)
     else
-        optimizer.solve(alloc, eff_block, project_dir, cached, .{}, if (opts.layout != null) .refine else .place)) catch return error.BuildFailed;
+        optimizer.solve(alloc, eff_block, project_dir, cached, png_params, .place)) catch return error.BuildFailed;
 
     const route_params = router.RouteParams{};
     const routed: ?router.RouteResult = if (opts.route) (router.route(alloc, placement, route_params) catch null) else null;
@@ -462,6 +495,14 @@ pub fn renderDesignPng(
     else
         &.{};
 
+    // Optional compare layout for the diff overlay (ghost + movement arrows).
+    var cmp_placement: ?optimizer.Placement = null;
+    if (opts.compare) |cn| {
+        if (readLayoutPoses(alloc, project_dir, name, cn)) |cposes| {
+            cmp_placement = optimizer.placeFromPoses(alloc, eff_block, project_dir, cposes, png_params) catch null;
+        }
+    }
+
     return render_pcb_png.render(alloc, placement, .{
         .width = opts.width,
         .highlight_nets = opts.highlight_nets,
@@ -469,6 +510,12 @@ pub fn renderDesignPng(
         .routed = routed,
         .violations = violations,
         .title = eff_block.name,
+        .params = png_params,
+        .blame = opts.blame,
+        .loop_labels = opts.loop_labels,
+        .dims = opts.dims,
+        .grid = opts.grid,
+        .compare = cmp_placement,
     });
 }
 
@@ -505,6 +552,25 @@ pub fn pcbPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
         .layout = queryOpt(req, "layout"),
         .regen = queryFlag(req, "regen"),
         .sub = subSlug(req),
+        .court_overlap = blk: {
+            const q = req.query() catch break :blk 0;
+            const v = q.get("court_overlap") orelse break :blk 0;
+            break :blk std.fmt.parseFloat(f64, v) catch 0;
+        },
+        .route_gap = blk: {
+            const q = req.query() catch break :blk 0;
+            const v = q.get("route_gap") orelse break :blk 0;
+            break :blk std.fmt.parseFloat(f64, v) catch 0;
+        },
+        .group_w = pngFloatOpt(req, "group_w"),
+        .group_zone_w = pngFloatOpt(req, "group_zone_w"),
+        .group_loop_relief = pngFloatOpt(req, "group_loop_relief"),
+        .zone_pack = queryFlag(req, "zone_pack"),
+        .blame = queryFlag(req, "blame"),
+        .loop_labels = queryFlag(req, "loops"),
+        .dims = queryFlag(req, "dims"),
+        .grid = queryFlag(req, "grid"),
+        .compare = queryOpt(req, "compare"),
     };
     const png_bytes = renderDesignPng(arena, ctx.project_dir, name, opts) catch |e| {
         res.status = if (e == error.BlockNotFound or e == error.SubNotFound) 404 else 500;
@@ -525,6 +591,14 @@ fn queryFlag(req: *httpz.Request, key: []const u8) bool {
     const q = req.query() catch return false;
     const v = q.get(key) orelse return false;
     return !(v.len == 0 or std.mem.eql(u8, v, "0"));
+}
+
+/// Query `key` as a float, or -1 when absent/unparseable — the "unset" sentinel
+/// the PNG path uses to keep the optimizer's own default for a group knob.
+fn pngFloatOpt(req: *httpz.Request, key: []const u8) f64 {
+    const q = req.query() catch return -1;
+    const v = q.get(key) orelse return -1;
+    return std.fmt.parseFloat(f64, v) catch -1;
 }
 
 /// Query `key` as an optional string (absent/empty → null).
@@ -552,8 +626,23 @@ fn csvParam(arena: std.mem.Allocator, req: *httpz.Request, key: []const u8) []co
 /// weights, the visible `score`, the full objective `breakdown` (raw terms plus
 /// their weighted contributions and the summed objective), the bounding box, and
 /// each part's `ref/kind/x/y/rot/hw/hh`.
-fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimizer.Params, name: []const u8) std.Io.Writer.Error!void {
+/// World position (mm) of a footprint-local pad on a placed part.
+fn worldPad(pt: optimizer.Part, pad: optimizer.PadRect) [2]f64 {
+    const a = pt.rot * std.math.pi / 180.0;
+    const c = @cos(a);
+    const s = @sin(a);
+    return .{ pt.x + pad.x * c - pad.y * s, pt.y + pad.x * s + pad.y * c };
+}
+
+/// Layout JSON + a `findings` sidecar: each part's normalized objective `blame`
+/// (0–1, the render heatmap value) and a `loops` list (per decoupling loop:
+/// cap, hub, inductance nH, and power-leg length mm) — the machine-readable twin
+/// of the PNG diagnostic overlays, so an agent gets precise numbers, not pixels.
+/// `blame` is index-aligned with `p.parts` (empty ⇒ all zero).
+fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimizer.Params, name: []const u8, blame: []const f64) std.Io.Writer.Error!void {
     const b = p.breakdown;
+    var bmax: f64 = 0;
+    for (blame) |v| bmax = @max(bmax, v);
     try w.writeAll(NAME_OPEN);
     try writeJsonStr(w, name);
     try w.print(",\"generated\":{s},", .{if (p.generated) "true" else "false"});
@@ -569,7 +658,12 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"ref\":");
         try writeJsonStr(w, pt.ref_des);
-        try w.print(",\"kind\":\"{s}\",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"fallback\":{s}}}", .{
+        if (i < p.instances.len) {
+            try w.writeAll(",\"origin\":");
+            try writeJsonStr(w, p.instances[i].origin_key);
+        }
+        const bl = if (i < blame.len and bmax > 0) blame[i] / bmax else 0;
+        try w.print(",\"kind\":\"{s}\",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"fallback\":{s},\"blame\":{d:.3}}}", .{
             if (pt.kind == .hub) "hub" else "passive",
             pt.x,
             pt.y,
@@ -577,7 +671,22 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
             pt.hw,
             pt.hh,
             if (pt.fallback) "true" else "false",
+            bl,
         });
+    }
+    try w.writeAll("],\"loops\":[");
+    for (p.loops, 0..) |L, i| {
+        if (i > 0) try w.writeAll(",");
+        const cap = p.parts[L.cap];
+        const hub = p.parts[L.hub];
+        const cw = worldPad(cap, L.cap_pwr);
+        const hp = worldPad(hub, L.hub_pwr_pin);
+        const leg = std.math.hypot(cw[0] - hp[0], cw[1] - hp[1]);
+        try w.writeAll("{\"cap\":");
+        try writeJsonStr(w, cap.ref_des);
+        try w.writeAll(",\"hub\":");
+        try writeJsonStr(w, hub.ref_des);
+        try w.print(",\"nh\":{d:.3},\"leg_mm\":{d:.3}}}", .{ optimizer.loopNh(p.parts, L), leg });
     }
     try w.writeAll("]}");
 }
@@ -779,12 +888,17 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         res.status = 400;
         return;
     }
+    // Everything here is request-scoped; use req.arena (reclaimed after the
+    // response is sent) — NOT ctx.allocator (the global page_allocator, never
+    // freed: an agent hammering this endpoint for a layout search would OOM the
+    // server, since each call allocates the parsed design + full scorePoses set).
+    const arena = req.arena;
     var poses: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
     for (parts_v.array.items) |it| {
         if (it != .object) continue;
         const ref = it.object.get("ref") orelse continue;
         if (ref != .string) continue;
-        try poses.append(ctx.allocator, .{
+        try poses.append(arena, .{
             .ref = ref.string,
             .x = jsonNum(it.object.get("x")),
             .y = jsonNum(it.object.get("y")),
@@ -792,20 +906,20 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         });
     }
 
-    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    var eval = Evaluator.init(arena, ctx.project_dir);
     defer eval.deinit();
     var module_res: ?modules_mod.ResolvedBlock = null;
     defer if (module_res) |mr| {
         mr.eval.deinit();
-        ctx.allocator.destroy(mr.eval);
+        arena.destroy(mr.eval);
     };
-    const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
+    const block: *env_mod.DesignBlock = resolveBlock(arena, ctx.project_dir, name, &eval, &module_res) orelse {
         res.status = 500;
         res.body = NO_BLOCK_MSG;
         return;
     };
     const eff_block = if (subSlug(req)) |s|
-        (descendToSub(ctx.allocator, block, s) orelse {
+        (descendToSub(arena, block, s) orelse {
             res.status = 404;
             res.body = NO_SUB_MSG;
             return;
@@ -814,13 +928,13 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         block;
 
     const tune = parseTuning(req);
-    const bd = optimizer.scorePoses(ctx.allocator, eff_block, ctx.project_dir, poses.items, tune.params) catch {
+    const bd = optimizer.scorePoses(arena, eff_block, ctx.project_dir, poses.items, tune.params) catch {
         res.status = 500;
         res.body = "score error";
         return;
     };
 
-    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    var aw: std.Io.Writer.Allocating = .init(arena);
     try writeBreakdownJson(&aw.writer, bd, tune.params);
     res.content_type = .JSON;
     res.body = aw.written();
@@ -1276,7 +1390,7 @@ pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
     var rh: f64 = undefined;
     if (is_offset) {
         const off = @max(jsonNum(root.object.get("offset")), 0);
-        const g = geometry.load(req.arena, ctx.project_dir, fp_v.string, 0);
+        const g = geometry.load(req.arena, ctx.project_dir, fp_v.string, 0, geometry.BBOX_MARGIN_MM);
         var ehw: f64 = 0;
         var ehh: f64 = 0;
         for (g.pads) |p| {
@@ -1934,6 +2048,33 @@ fn parseTuning(req: *httpz.Request) Tuning {
     }
     if (q.get("compact")) |v| {
         p.compact_mode = parseCompactMode(v);
+        tuned = true;
+    }
+    // Experimental: allow drawn courtyards to overlap their clearance bands by N mm
+    // (default 0 = touch only, no overlap). See Params.courtyard_overlap.
+    if (q.get("court_overlap")) |v| {
+        p.courtyard_overlap = parseF(v, p.courtyard_overlap);
+        tuned = true;
+    }
+    // Routing/copper room between courtyards (mm); group cohesion + zoning weights.
+    if (q.get("route_gap")) |v| {
+        p.route_gap = parseF(v, p.route_gap);
+        tuned = true;
+    }
+    if (q.get("group_w")) |v| {
+        p.group_w = parseF(v, p.group_w);
+        tuned = true;
+    }
+    if (q.get("group_zone_w")) |v| {
+        p.group_zone_w = parseF(v, p.group_zone_w);
+        tuned = true;
+    }
+    if (q.get("group_loop_relief")) |v| {
+        p.group_loop_relief = parseF(v, p.group_loop_relief);
+        tuned = true;
+    }
+    if (q.get("zone_pack")) |v| {
+        p.zone_pack = !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false"));
         tuned = true;
     }
     return .{ .params = p, .tuned = tuned, .regen = regen or tuned };
