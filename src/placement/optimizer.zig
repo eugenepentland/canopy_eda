@@ -141,6 +141,26 @@ const GRID_COURTYARDS = true; // round courtyard half-extents to GRID_MM so edge
 const COMPACT_MIN_OVERLAP: f64 = GRID_MM; // min shared-edge length when docking a floating part
 const COMPACT_EPS: f64 = 1e-4; // courtyard-gap tolerance for the "touching" test
 
+// ── Phase-A constraint lowering weights (see docs/constraints_dsl.md) ─────────
+// These weight the *search-only* guidance terms a `(constraints …)` form lowers
+// into `objectiveCost`. They are deliberately kept OUT of the reported/compared
+// objective (`scoreLayout`, `scorePoses`, `routedObjectiveCost`): constraints
+// steer where SA looks, but the result is judged on the unmodified physical
+// objective — so a hand layout and a constrained solve are scored identically
+// and the constraints can't "game" the comparison. All PROVISIONAL (the doc's
+// weight-tuning is an offline sweep, not the LLM's job).
+const PROX_W: f64 = 1.5; // proximity pull: cost = PROX_W·priority·(edge gap, mm)
+const KEEPOUT_W: f64 = 4.0; // keep-out hinge: cost = KEEPOUT_W·max(0, min−gap)
+const DEPRIORITIZE_SCALE: f64 = 0.25; // scale a deprioritized part's net wirelength weight
+/// Soft-constraint priority → numeric multiplier (low/med/high).
+fn constraintWeight(p: env.ConstraintPriority) f64 {
+    return switch (p) {
+        .low => 1.0,
+        .med => 2.0,
+        .high => 3.0,
+    };
+}
+
 /// Which placement-regularizer `w_align` weights.
 ///   • `tidiness` (default) — the long-shipped pairwise row/column alignment reward
 ///     (`tidinessPenalty`): for each part pair, the smaller of their x/y offsets,
@@ -165,6 +185,13 @@ pub const Params = struct {
     cap_w_max: f64 = CAP_W_MAX,
     grid_courtyards: bool = GRID_COURTYARDS,
     compact_mode: CompactMode = .tidiness,
+    /// Extra clearance (mm) added to every part's courtyard half-extents (on top
+    /// of its F.CrtYd / pad bbox). The optimizer's density floor: two parts can
+    /// never sit closer than the sum of their margins. Defaults to the geometry
+    /// module's shipping value; exposed so a denser regime can be swept (a hand
+    /// layout packed at courtyard-touching density needs a smaller margin to be
+    /// reproducible — see the tpsm84338 constraint experiment).
+    bbox_margin: f64 = geometry.BBOX_MARGIN_MM,
 };
 
 /// Which phase of the solve a progress frame came from — drives the label the
@@ -419,6 +446,41 @@ const Built = struct {
     loops: []Loop,
 };
 
+/// A `(proximity …)` pull lowered to geometry: keep `part`'s pad `part_pad`
+/// within `max_mm` of `hub`'s pad `hub_pad` (both footprint-local). A *hinge*
+/// penalty `w·max(0, gap − max_mm)` (see `constraintCost`): zero once the part is
+/// inside the radius, so it only acts to drag a badly-placed part in, never to
+/// fight HPWL/loop over a part that is already close. `max_mm == 0` ⇒ a plain
+/// linear pull `w·gap` (no declared radius).
+const ProxTerm = struct { part: usize, hub: usize, part_pad: PadRect, hub_pad: PadRect, w: f64, max_mm: f64 };
+
+/// A `(keep-out …)` lowered to a part-vs-part minimum courtyard gap.
+const KeepTerm = struct { a: usize, b: usize, min_mm: f64 };
+
+/// The resolved + lowered Phase-A constraints for the current solve. Every slice
+/// defaults empty so a read on a path that didn't go through `prepare` is a
+/// harmless no-op. Slices live in the solve's arena (valid for that solve only).
+/// Consumed by `constraintCost` — a search-only delta added to `objectiveCost`,
+/// never to the reported/compared objective (see `constraintCost`).
+const Lowered = struct {
+    prox: []const ProxTerm = &.{},
+    keepouts: []const KeepTerm = &.{},
+    /// Per-net wirelength weight (index-aligned with `nets`); 1.0 = default. >1
+    /// from `(net-length … (priority …))`, <1 from `(deprioritize …)`.
+    net_weight: []const f64 = &.{},
+    /// Per-net "this is a switcher input rail" flag (index-aligned), from
+    /// `(power-rail … (role input))` — fires the input-loop boost even when the
+    /// inductor is integrated (so no discrete L reveals the switcher).
+    input_rail: []const bool = &.{},
+};
+
+/// Thread-local lowered constraints for the current solve — set by `prepare`,
+/// read by `constraintCost`. Threadlocal (like `g_progress`) so the many
+/// `objectiveCost` call sites needn't each thread a new parameter, and two
+/// concurrent solves on different threads stay isolated. Default-empty so it is
+/// inert until a design with a `(constraints …)` form sets it.
+threadlocal var g_lowered: Lowered = .{};
+
 /// How `solve` treats an applied `cached` layout.
 pub const SeedMode = enum {
     /// Apply `cached` verbatim when it covers every part (no optimization, fast);
@@ -647,7 +709,199 @@ const Prepared = struct {
     /// Per-part placement-order rank (0 = unranked, higher = earlier in the
     /// declared order) — drives compaction docking order in `solve`.
     priority: []const u32,
+    /// Resolved + lowered Phase-A constraints (see docs/constraints_dsl.md).
+    /// `prepare` also publishes this to `g_lowered` for the solve.
+    lowered: Lowered,
 };
+
+/// Resolve a design-local net name (what a constraint author writes — "VIN",
+/// "FB") to a flattened-net index. Flattening prefixes a sub-block's nets
+/// ("pwr/VIN"), so match on the prefix-stripped `shortName` first, then the full
+/// name. Null when no net matches.
+fn resolveNet(nets: []const FlatNet, want: []const u8) ?usize {
+    for (nets, 0..) |net, i| {
+        if (std.mem.eql(u8, shortName(net.name), want) or std.mem.eql(u8, net.name, want)) return i;
+    }
+    return null;
+}
+
+/// The footprint-local pad of part `idx` that sits on net `net`, or a zero-size
+/// pad at the part centre when it has no pin on that net (so a proximity pull
+/// still has a sensible anchor — the part body).
+fn padOnNet(part: Part, idx: usize, net: FlatNet, idx_of: *std.StringHashMap(usize)) PadRect {
+    for (net.pins) |pr| {
+        const i = idx_of.get(pr.ref_des) orelse continue;
+        if (i != idx) continue;
+        const pad = padLocal(part, pr.pin);
+        return .{ .x = pad.x, .y = pad.y, .w = pad.w, .h = pad.h };
+    }
+    return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+}
+
+/// Resolve + validate the design's Phase-A `(constraints …)` against the
+/// flattened netlist, lowering each form into the geometry/weights `constraintCost`
+/// consumes. Every ref/net is checked; anything that doesn't resolve is appended
+/// to `diags` (a human-readable rejection) and skipped — never silently applied
+/// to a wrong target (the doc's load-bearing safety property). When `diags` is
+/// null, rejections are simply dropped (the hot `prepare` path). All output is in
+/// `arena`. Returns an all-empty `Lowered` when no constraints were authored.
+fn resolveConstraints(
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    instances: []const export_kicad.FlatInstance,
+    nets: []const FlatNet,
+    parts: []const Part,
+    idx_of: *std.StringHashMap(usize),
+    diags: ?*std.ArrayListUnmanaged([]const u8),
+) std.mem.Allocator.Error!Lowered {
+    const c = block.constraints;
+    if (!c.present) return .{};
+
+    const reject = struct {
+        fn add(a: std.mem.Allocator, d: ?*std.ArrayListUnmanaged([]const u8), comptime fmt: []const u8, args: anytype) void {
+            const dd = d orelse return;
+            const msg = std.fmt.allocPrint(a, fmt, args) catch return;
+            // A dropped diagnostic only loses an authoring hint, never correctness
+            // (the constraint is skipped regardless) — so OOM here just returns.
+            dd.append(a, msg) catch return;
+        }
+    }.add;
+
+    var net_weight = try arena.alloc(f64, nets.len);
+    @memset(net_weight, 1.0);
+    var input_rail = try arena.alloc(bool, nets.len);
+    @memset(input_rail, false);
+    var prox: std.ArrayListUnmanaged(ProxTerm) = .empty;
+    var keepouts: std.ArrayListUnmanaged(KeepTerm) = .empty;
+
+    // power-rail (role input) → mark the rail so the input-loop boost fires even
+    // with an integrated inductor (no discrete L to reveal the switcher).
+    for (c.power_rails) |pr| {
+        const ni = resolveNet(nets, pr.net) orelse {
+            reject(arena, diags, "power-rail '{s}': net '{s}' not in netlist", .{ pr.label, pr.net });
+            continue;
+        };
+        if (pr.role == .input) input_rail[ni] = true;
+    }
+
+    // net-length (priority) → raise that net's wirelength weight.
+    for (c.net_lengths) |nl| {
+        const ni = resolveNet(nets, nl.net) orelse {
+            reject(arena, diags, "net-length: net '{s}' not in netlist", .{nl.net});
+            continue;
+        };
+        net_weight[ni] *= constraintWeight(nl.priority);
+    }
+
+    // deprioritize → scale down the wirelength weight of every net the part is on.
+    for (c.deprioritize) |ref| {
+        const pi = resolvePart(instances, ref) orelse {
+            reject(arena, diags, "deprioritize: part '{s}' not found", .{ref});
+            continue;
+        };
+        for (nets, 0..) |net, ni| {
+            for (net.pins) |pp| {
+                if ((idx_of.get(pp.ref_des) orelse continue) == pi) {
+                    net_weight[ni] *= DEPRIORITIZE_SCALE;
+                    break;
+                }
+            }
+        }
+    }
+
+    // proximity → a pad-to-pad attraction term. The `pin` token is resolved as a
+    // net name (in these designs the relevant pin's net is named after it, e.g.
+    // U1's VIN pin sits on net VIN); failing that, as a literal hub pad number.
+    for (c.proximity) |p| {
+        const part_i = resolvePart(instances, p.ref) orelse {
+            reject(arena, diags, "proximity: part '{s}' not found", .{p.ref});
+            continue;
+        };
+        const hub_i = resolvePart(instances, p.hub) orelse {
+            reject(arena, diags, "proximity {s}: hub '{s}' not found", .{ p.ref, p.hub });
+            continue;
+        };
+        var part_pad: PadRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+        var hub_pad: PadRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+        if (resolveNet(nets, p.pin)) |ni| {
+            // Validate both parts actually touch that net.
+            hub_pad = padOnNet(parts[hub_i], hub_i, nets[ni], idx_of);
+            part_pad = padOnNet(parts[part_i], part_i, nets[ni], idx_of);
+            if (hub_pad.w == 0 and hub_pad.h == 0)
+                reject(arena, diags, "proximity {s}: hub {s} has no pin on net '{s}'", .{ p.ref, p.hub, p.pin });
+        } else {
+            const hp = padLocal(parts[hub_i], p.pin);
+            if (hp.w == 0 and hp.h == 0) {
+                reject(arena, diags, "proximity {s}: '{s}' is neither a net nor a pad of {s}", .{ p.ref, p.pin, p.hub });
+                continue;
+            }
+            hub_pad = .{ .x = hp.x, .y = hp.y, .w = hp.w, .h = hp.h };
+        }
+        try prox.append(arena, .{
+            .part = part_i,
+            .hub = hub_i,
+            .part_pad = part_pad,
+            .hub_pad = hub_pad,
+            .w = PROX_W * constraintWeight(p.priority),
+            .max_mm = p.max_mm,
+        });
+    }
+
+    // keep-out (part X) (from Y) → a part-vs-part min courtyard gap. The net-form
+    // keep-out (a net's routing region away from a region) is parsed + validated
+    // but not yet lowered (its region geometry needs the router) — reported so an
+    // author knows it is inert rather than silently honoured.
+    for (c.keep_outs) |k| {
+        const from_i = resolvePart(instances, k.from) orelse {
+            reject(arena, diags, "keep-out: 'from' part '{s}' not found", .{k.from});
+            continue;
+        };
+        if (k.part.len > 0) {
+            const pi = resolvePart(instances, k.part) orelse {
+                reject(arena, diags, "keep-out: part '{s}' not found", .{k.part});
+                continue;
+            };
+            try keepouts.append(arena, .{ .a = pi, .b = from_i, .min_mm = k.min_mm });
+        } else if (k.net.len > 0) {
+            if (resolveNet(nets, k.net) == null)
+                reject(arena, diags, "keep-out: net '{s}' not in netlist", .{k.net});
+            reject(arena, diags, "keep-out (net '{s}'): net-region keep-out not yet lowered (inert)", .{k.net});
+        }
+    }
+
+    // group → validate refs resolve (cohesion lowering is via the existing align
+    // term; an explicit group cohesion force is future work — validated, not yet
+    // a force, so report it as inert rather than silently honoured).
+    for (c.groups) |g| {
+        for (g.refs) |ref| {
+            if (resolvePart(instances, ref) == null)
+                reject(arena, diags, "group: part '{s}' not found", .{ref});
+        }
+    }
+
+    return .{
+        .prox = try prox.toOwnedSlice(arena),
+        .keepouts = try keepouts.toOwnedSlice(arena),
+        .net_weight = net_weight,
+        .input_rail = input_rail,
+    };
+}
+
+/// Validate a design's Phase-A constraints against its flattened netlist without
+/// running a solve — the deterministic, LLM-free validator the doc requires.
+/// Returns the list of human-readable rejections (empty ⇒ everything resolves).
+/// Builds the same design model `solve` does. All output in `arena`.
+pub fn validateConstraints(
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    params: Params,
+) std.mem.Allocator.Error![]const []const u8 {
+    var prep = try prepare(arena, block, project_dir, params);
+    var diags: std.ArrayListUnmanaged([]const u8) = .empty;
+    _ = try resolveConstraints(arena, block, prep.instances, prep.nets, prep.parts, &prep.idx_of, &diags);
+    return diags.toOwnedSlice(arena);
+}
 
 /// Resolve a `(placement-order …)` name to a flattened part index. Matches the
 /// name the author wrote — the stable `origin_key` (survives ref-des renumbering,
@@ -704,7 +958,7 @@ fn prepare(
     var idx_of = std.StringHashMap(usize).init(arena);
     for (instances, 0..) |inst, i| {
         const hint = pin_counts.get(inst.ref_des) orelse 2;
-        const g = geometry.load(arena, project_dir, inst.footprint, hint);
+        const g = geometry.load(arena, project_dir, inst.footprint, hint, params.bbox_margin);
         const is_hub = isHub(inst.ref_des);
         if (is_hub) {
             const gop = try roles_cache.getOrPut(inst.component);
@@ -747,7 +1001,13 @@ fn prepare(
 
     const built = try buildSprings(arena, nets, parts, &idx_of, roles, explicit_pin);
     classify(parts, built.loops, nets, params.cap_w_max, priority);
-    return .{ .parts = parts, .idx_of = idx_of, .instances = instances, .nets = nets, .built = built, .priority = priority };
+    // Resolve + lower any Phase-A `(constraints …)` and publish to the thread's
+    // `g_lowered` so `constraintCost` (the search-only objective delta) sees it.
+    // Inert when the design authored none. Rejections are dropped on this hot
+    // path; `validateConstraints` surfaces them for authoring.
+    const lowered = try resolveConstraints(arena, block, instances, nets, parts, &idx_of, null);
+    g_lowered = lowered;
+    return .{ .parts = parts, .idx_of = idx_of, .instances = instances, .nets = nets, .built = built, .priority = priority, .lowered = lowered };
 }
 
 /// Decompose the objective for already-placed parts, surfaced term-by-term for
@@ -2203,7 +2463,73 @@ fn objectiveCost(
     // where it contributes nothing anyway.
     const cong = if (params.w_congest != 0) params.w_congest * congestionPenalty(parts, idx_of, nets) else 0;
     return hpwl + params.loop_w * weightedLoop(parts, loops) +
-        params.w_align * compactnessTerm(parts, params.compact_mode) + cong;
+        params.w_align * compactnessTerm(parts, params.compact_mode) + cong +
+        constraintCost(parts, idx_of, nets, loops, params);
+}
+
+/// The Phase-A constraint contribution to the *search* objective — added to
+/// `objectiveCost` so SA is steered by the authored intent, but deliberately
+/// absent from `scoreLayout`/`scorePoses`/`routedObjectiveCost` (the reported &
+/// compared metrics). That separation is the whole point: constraints change
+/// where the optimizer looks, not how the result is judged, so a hand layout and
+/// a constrained solve are scored on the identical unmodified physical objective.
+/// Reads the thread's `g_lowered` (set by `prepare`); a no-op when none authored.
+/// Four lowered terms:
+///   • proximity — Σ w·(edge gap from part pad to hub pin pad)
+///   • keep-out  — Σ KEEPOUT_W·max(0, min − courtyard gap)
+///   • net weight — Σ (w−1)·net wirelength  (net-length raises, deprioritize lowers)
+///   • input-loop boost — extra loop inductance weight on a declared input rail
+///     (fires even with an integrated inductor, which the auto switcher test misses)
+fn constraintCost(
+    parts: []const Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    loops: []const Loop,
+    params: Params,
+) f64 {
+    const L = g_lowered;
+    if (L.prox.len == 0 and L.keepouts.len == 0 and L.net_weight.len == 0 and L.input_rail.len == 0) return 0;
+    var c: f64 = 0;
+
+    for (L.prox) |t| {
+        const gap = rectGap(worldRect(parts[t.part], t.part_pad), worldRect(parts[t.hub], t.hub_pad));
+        // Hinge: only penalise distance beyond the declared radius (so a part
+        // already inside `max_mm` is left alone, not dragged further at the cost
+        // of other nets). A radius of 0 means "no declared max" → plain pull.
+        const over = if (t.max_mm > 0) @max(0.0, gap - t.max_mm) else gap;
+        c += t.w * over;
+    }
+    for (L.keepouts) |k| {
+        const g = partGap(parts[k.a], parts[k.b]);
+        if (g < k.min_mm) c += KEEPOUT_W * (k.min_mm - g);
+    }
+    if (L.net_weight.len == nets.len) {
+        var pts: [MAX_WIRE_PTS]Pt = undefined;
+        for (nets, 0..) |net, ni| {
+            const extra = L.net_weight[ni] - 1.0;
+            if (extra == 0) continue;
+            if (isGroundName(shortName(net.name))) continue;
+            c += extra * netWire(parts, idx_of, net, &pts);
+        }
+    }
+    if (L.input_rail.len == nets.len) {
+        for (loops) |lp| {
+            if (lp.pwr_net < 0) continue;
+            const ni: usize = @intCast(lp.pwr_net);
+            if (ni >= nets.len or !L.input_rail[ni]) continue;
+            const nh = loopMetric(parts, lp, surrogatePwrLeg(parts, lp)).nh;
+            c += (INPUT_LOOP_BOOST - 1.0) * params.loop_w * lp.weight * nh;
+        }
+    }
+    return c;
+}
+
+/// Edge-to-edge gap (mm) between two parts' rotation-aware courtyards — the
+/// distance a `(keep-out (part …) (from …))` penalises below its `min`.
+fn partGap(a: Part, b: Part) f64 {
+    const ar = Rect{ .x0 = a.x - effHw(a), .y0 = a.y - effHh(a), .x1 = a.x + effHw(a), .y1 = a.y + effHh(a) };
+    const br = Rect{ .x0 = b.x - effHw(b), .y0 = b.y - effHh(b), .x1 = b.x + effHw(b), .y1 = b.y + effHh(b) };
+    return rectGap(ar, br);
 }
 
 /// The same objective as `objectiveCost`, but the loop term is the *real*
@@ -2820,31 +3146,37 @@ fn wireScore(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []con
     var pts: [MAX_WIRE_PTS]Pt = undefined;
     for (nets) |net| {
         if (isGroundName(shortName(net.name))) continue;
-        var minx: f64 = std.math.inf(f64);
-        var miny: f64 = std.math.inf(f64);
-        var maxx: f64 = -std.math.inf(f64);
-        var maxy: f64 = -std.math.inf(f64);
-        var cnt: usize = 0;
-        for (net.pins) |pr| {
-            const i = idx_of.get(pr.ref_des) orelse continue;
-            const pad = padLocal(parts[i], pr.pin);
-            const w = worldPt(parts[i], pad.x, pad.y);
-            if (cnt < MAX_WIRE_PTS) pts[cnt] = w;
-            minx = @min(minx, w.x);
-            miny = @min(miny, w.y);
-            maxx = @max(maxx, w.x);
-            maxy = @max(maxy, w.y);
-            cnt += 1;
-        }
-        if (cnt < 2) continue;
-        // HPWL = RSMT for ≤3 pins (keep the fast path); RMST for the rest.
-        if (cnt <= 3 or cnt > MAX_WIRE_PTS) {
-            total += (maxx - minx) + (maxy - miny);
-        } else {
-            total += rmstLen(pts[0..cnt]);
-        }
+        total += netWire(parts, idx_of, net, &pts);
     }
     return total;
+}
+
+/// Wirelength estimate for one net (mm): bounding-box HPWL for ≤3 pins (exact
+/// RSMT, fast path), rectilinear MST for larger. `pts` is a scratch buffer the
+/// caller owns. Factored out of `wireScore` so the constraint layer can weight
+/// an individual net's contribution (`net-length` / `deprioritize`) without
+/// re-deriving it. Caller skips ground nets.
+fn netWire(parts: []const Part, idx_of: *std.StringHashMap(usize), net: FlatNet, pts: *[MAX_WIRE_PTS]Pt) f64 {
+    var minx: f64 = std.math.inf(f64);
+    var miny: f64 = std.math.inf(f64);
+    var maxx: f64 = -std.math.inf(f64);
+    var maxy: f64 = -std.math.inf(f64);
+    var cnt: usize = 0;
+    for (net.pins) |pr| {
+        const i = idx_of.get(pr.ref_des) orelse continue;
+        const pad = padLocal(parts[i], pr.pin);
+        const w = worldPt(parts[i], pad.x, pad.y);
+        if (cnt < MAX_WIRE_PTS) pts[cnt] = w;
+        minx = @min(minx, w.x);
+        miny = @min(miny, w.y);
+        maxx = @max(maxx, w.x);
+        maxy = @max(maxy, w.y);
+        cnt += 1;
+    }
+    if (cnt < 2) return 0;
+    // HPWL = RSMT for ≤3 pins (keep the fast path); RMST for the rest.
+    if (cnt <= 3 or cnt > MAX_WIRE_PTS) return (maxx - minx) + (maxy - miny);
+    return rmstLen(pts[0..cnt]);
 }
 
 /// Rectilinear minimum spanning tree length (Prim, Manhattan metric) over `pts`

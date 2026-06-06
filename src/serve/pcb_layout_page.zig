@@ -1276,7 +1276,7 @@ pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
     var rh: f64 = undefined;
     if (is_offset) {
         const off = @max(jsonNum(root.object.get("offset")), 0);
-        const g = geometry.load(req.arena, ctx.project_dir, fp_v.string, 0);
+        const g = geometry.load(req.arena, ctx.project_dir, fp_v.string, 0, geometry.BBOX_MARGIN_MM);
         var ehw: f64 = 0;
         var ehh: f64 = 0;
         for (g.pads) |p| {

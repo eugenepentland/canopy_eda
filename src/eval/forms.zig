@@ -119,6 +119,7 @@ pub const ScopeForm = enum {
     stub,
     layout,
     placement_order,
+    constraints,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -157,6 +158,8 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "stub", .stub },
     .{ "layout", .layout },
     .{ "placement-order", .placement_order },
+    .{ "constraints", .constraints },
+    .{ "module", .constraints },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -452,6 +455,15 @@ pub const scope_form_docs = blk: {
     t[@intFromEnum(ScopeForm.placement_order)] = .{ .scope = tl, .doc = .{
         .syntax = "(placement-order \"HUB\" \"REF\"… | (near <pin> \"REF\")…)",
         .summary = "Order the passives around a hub for PCB auto-placement (first = highest priority); (near …) also pins which hub pad a cap's loop targets.",
+    } };
+    t[@intFromEnum(ScopeForm.constraints)] = .{ .scope = tl, .doc = .{
+        .syntax = "(constraints | module \"name\" " ++
+            "(power-rail L (role input) (net N)) (proximity REF (to-pin HUB PIN) (max n mm) (priority …)) " ++
+            "(net-length (net N) (minimize) (priority …)) (deprioritize (REF…)) " ++
+            "(keep-out (net N)|(part REF) (from REF) (min n mm)) (group (REF…) (style …)) …)",
+        .summary = "Phase-A PCB placement constraints (circuit intent the auto-placer can't infer): " ++
+            "rail roles, proximity pulls, weighted nets, deprioritized straps, keep-outs, groups. " ++
+            "Refs/nets/pins validated against the netlist. See docs/constraints_dsl.md.",
     } };
     break :blk t;
 };

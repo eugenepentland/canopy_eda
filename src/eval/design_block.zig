@@ -69,6 +69,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var functions: std.ArrayListUnmanaged(env_mod.FunctionGroup) = .empty;
     var parts: std.ArrayListUnmanaged(env_mod.PlaceholderPart) = .empty;
     var placement_orders: std.ArrayListUnmanaged(env_mod.PlacementOrder) = .empty;
+    var constraint_acc: ConstraintAcc = .{};
     var layout_spec: env_mod.LayoutSpec = .{};
     var derating: ?f64 = null;
     var kicad_pcb_path: ?[]const u8 = null;
@@ -163,6 +164,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             },
             .layout => layout_spec = try parseLayout(self, form_children),
             .placement_order => try parsePlacementOrder(self, form_children, &placement_orders),
+            .constraints => try parseConstraints(self, form_children, &constraint_acc),
             // Section-only forms are silently ignored at the top level —
             // a design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract.
@@ -203,6 +205,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .parts = parts.toOwnedSlice(self.allocator) catch &.{},
         .layout = layout_spec,
         .placement_order = placement_orders.toOwnedSlice(self.allocator) catch &.{},
+        .constraints = constraint_acc.build(self.allocator),
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -686,7 +689,7 @@ fn evalSection(
             // `processSharedSectionForm`; top-level-only forms are
             // silently ignored inside a section body.
             .status, .description, .note, .port, .protocol, .calc => {},
-            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function, .stub, .layout, .placement_order => {},
+            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function, .stub, .layout, .placement_order, .constraints => {},
         }
     }
 
@@ -1170,6 +1173,170 @@ fn parsePlacementOrder(
         .hub = hub,
         .entries = entries.toOwnedSlice(self.allocator) catch &.{},
     }) catch return EvalError.OutOfMemory;
+}
+
+/// Accumulator the design-block evaluator threads through `parseConstraints` so
+/// several `(constraints …)`/`(module …)` forms merge into one set on the block.
+const ConstraintAcc = struct {
+    proximity: std.ArrayListUnmanaged(env_mod.ProximityConstraint) = .empty,
+    power_rails: std.ArrayListUnmanaged(env_mod.PowerRailConstraint) = .empty,
+    net_lengths: std.ArrayListUnmanaged(env_mod.NetLengthConstraint) = .empty,
+    deprioritize: std.ArrayListUnmanaged([]const u8) = .empty,
+    keep_outs: std.ArrayListUnmanaged(env_mod.KeepoutConstraint) = .empty,
+    groups: std.ArrayListUnmanaged(env_mod.GroupConstraint) = .empty,
+    present: bool = false,
+
+    /// Freeze the accumulated lists into the immutable struct stored on the block.
+    fn build(self: *ConstraintAcc, alloc: std.mem.Allocator) env_mod.PlacementConstraints {
+        return .{
+            .proximity = self.proximity.toOwnedSlice(alloc) catch &.{},
+            .power_rails = self.power_rails.toOwnedSlice(alloc) catch &.{},
+            .net_lengths = self.net_lengths.toOwnedSlice(alloc) catch &.{},
+            .deprioritize = self.deprioritize.toOwnedSlice(alloc) catch &.{},
+            .keep_outs = self.keep_outs.toOwnedSlice(alloc) catch &.{},
+            .groups = self.groups.toOwnedSlice(alloc) catch &.{},
+            .present = self.present,
+        };
+    }
+};
+
+/// Map a `(priority low|med|high)` atom to the enum (default `med`).
+fn parseConstraintPriority(s: []const u8) env_mod.ConstraintPriority {
+    if (std.mem.eql(u8, s, "high")) return .high;
+    if (std.mem.eql(u8, s, "low")) return .low;
+    return .med;
+}
+
+/// Find the first child list `(head <val> …)` under `body` and return its
+/// `<val>` as literal text (atom or string), or null. Used to read the small
+/// keyword sub-forms of a constraint (`(role …)`, `(net …)`, `(priority …)`).
+fn subText(body: []const Node, head: []const u8) ?[]const u8 {
+    for (body) |n| {
+        const l = n.asList() orelse continue;
+        if (l.len >= 2 and std.mem.eql(u8, l[0].asAtom() orelse "", head)) return l[1].asText();
+    }
+    return null;
+}
+
+/// Like `subText` but returns the `<val>` as a number (for `(max <n> mm)` etc.).
+fn subNum(body: []const Node, head: []const u8) ?f64 {
+    for (body) |n| {
+        const l = n.asList() orelse continue;
+        if (l.len >= 2 and std.mem.eql(u8, l[0].asAtom() orelse "", head)) return l[1].asNumber();
+    }
+    return null;
+}
+
+/// True if `body` contains a bare `(head)` marker form (e.g. `(minimize)`).
+fn hasMarker(body: []const Node, head: []const u8) bool {
+    for (body) |n| {
+        const l = n.asList() orelse continue;
+        if (l.len >= 1 and std.mem.eql(u8, l[0].asAtom() orelse "", head)) return true;
+    }
+    return false;
+}
+
+/// Parse a top-level `(constraints …)` or `(module "name" …)` Phase-A constraint
+/// form (see docs/constraints_dsl.md). Refs/nets/pins are kept symbolic here —
+/// the optimizer's validator resolves them against the flattened netlist and
+/// rejects anything that doesn't exist. Unknown sub-forms (anchor, feedback-
+/// divider — metadata whose teeth are the explicit proximity/keep-out forms) are
+/// skipped. Several forms merge into `acc`.
+fn parseConstraints(self: *Evaluator, form_children: []const Node, acc: *ConstraintAcc) EvalError!void {
+    acc.present = true;
+    // `(module <name> …)` carries a leading name token; `(constraints …)` does
+    // not. Body starts at the first child that is itself a list (a sub-form).
+    var start: usize = 1;
+    while (start < form_children.len and form_children[start].asList() == null) start += 1;
+
+    for (form_children[start..]) |sub_node| {
+        const sub = sub_node.asList() orelse continue;
+        if (sub.len == 0) continue;
+        const head = sub[0].asAtom() orelse continue;
+
+        if (std.mem.eql(u8, head, "power-rail")) {
+            if (sub.len < 2) continue;
+            const label = sub[1].asText() orelse "";
+            const role_s = subText(sub[2..], "role") orelse "aux";
+            const role: env_mod.RailRole = if (std.mem.eql(u8, role_s, "input"))
+                .input
+            else if (std.mem.eql(u8, role_s, "output")) .output else .aux;
+            const net = subText(sub[2..], "net") orelse label;
+            acc.power_rails.append(self.allocator, .{ .label = label, .role = role, .net = net }) catch return EvalError.OutOfMemory;
+        } else if (std.mem.eql(u8, head, "proximity")) {
+            if (sub.len < 3) continue;
+            const ref = sub[1].asText() orelse continue;
+            // (to-pin <hub> <pin>)
+            var hub: []const u8 = "";
+            var pin: []const u8 = "";
+            for (sub[2..]) |n| {
+                const l = n.asList() orelse continue;
+                if (l.len >= 3 and std.mem.eql(u8, l[0].asAtom() orelse "", "to-pin")) {
+                    hub = l[1].asText() orelse "";
+                    pin = l[2].tokenText(self.allocator) orelse "";
+                }
+            }
+            if (hub.len == 0) continue;
+            acc.proximity.append(self.allocator, .{
+                .ref = ref,
+                .hub = hub,
+                .pin = pin,
+                .max_mm = subNum(sub[2..], "max") orelse 0,
+                .priority = parseConstraintPriority(subText(sub[2..], "priority") orelse "med"),
+            }) catch return EvalError.OutOfMemory;
+        } else if (std.mem.eql(u8, head, "net-length")) {
+            const net = subText(sub[1..], "net") orelse continue;
+            acc.net_lengths.append(self.allocator, .{
+                .net = net,
+                .minimize = hasMarker(sub[1..], "minimize") or subNum(sub[1..], "max") == null,
+                .max_mm = subNum(sub[1..], "max") orelse 0,
+                .priority = parseConstraintPriority(subText(sub[1..], "priority") orelse "high"),
+            }) catch return EvalError.OutOfMemory;
+        } else if (std.mem.eql(u8, head, "deprioritize")) {
+            // Refs as a nested list `(deprioritize (R3 R4) …)` or flat
+            // `(deprioritize R3 R4)`; a `(reason …)` sub-form is skipped.
+            if (sub.len >= 2 and sub[1].asList() != null) {
+                for (sub[1].asList().?) |r| {
+                    if (r.asText()) |ref| acc.deprioritize.append(self.allocator, ref) catch return EvalError.OutOfMemory;
+                }
+            } else {
+                for (sub[1..]) |r| {
+                    if (r.asList() != null) continue;
+                    if (r.asText()) |ref| acc.deprioritize.append(self.allocator, ref) catch return EvalError.OutOfMemory;
+                }
+            }
+        } else if (std.mem.eql(u8, head, "keep-out")) {
+            var net: []const u8 = "";
+            var part: []const u8 = "";
+            const net_sub = subText(sub[1..], "net");
+            const part_sub = subText(sub[1..], "part");
+            if (net_sub) |n| net = n;
+            if (part_sub) |p| part = p;
+            const from = subText(sub[1..], "from") orelse continue;
+            acc.keep_outs.append(self.allocator, .{
+                .net = net,
+                .part = part,
+                .from = from,
+                .min_mm = subNum(sub[1..], "min") orelse 0,
+                .reason = subText(sub[1..], "reason") orelse "",
+            }) catch return EvalError.OutOfMemory;
+        } else if (std.mem.eql(u8, head, "group")) {
+            if (sub.len < 2) continue;
+            const ref_list = sub[1].asList() orelse continue;
+            var refs: std.ArrayListUnmanaged([]const u8) = .empty;
+            for (ref_list) |r| if (r.asText()) |ref| refs.append(self.allocator, ref) catch return EvalError.OutOfMemory;
+            const style_s = subText(sub[2..], "style") orelse "cluster";
+            const style: env_mod.GroupStyle = if (std.mem.eql(u8, style_s, "row"))
+                .row
+            else if (std.mem.eql(u8, style_s, "column")) .column else .cluster;
+            acc.groups.append(self.allocator, .{
+                .refs = refs.toOwnedSlice(self.allocator) catch &.{},
+                .style = style,
+            }) catch return EvalError.OutOfMemory;
+        }
+        // Other forms (anchor, feedback-divider, symmetry, orient, lock, side)
+        // are metadata or not yet lowered — skipped, not an error.
+    }
 }
 
 /// The product of evaluating one `(stub …)` form: the metadata record plus a
