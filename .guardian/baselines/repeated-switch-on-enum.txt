@@ -1,6 +1,7 @@
 # guardian-snapshot v1
 switch on prongs (@"error",info,warning) appears in 2 files
 switch on prongs (atom,float,int,list,string,unit_val) appears in 2 files
+switch on prongs (bottom,left,right,top) appears in 2 files
 switch on prongs (datasheet,footprint,manufacturer,mpn,requirements_verified,value) appears in 2 files
 switch on prongs (fail,na,pass,verified) appears in 5 files
 switch on prongs (fail,pass,warn) appears in 2 files

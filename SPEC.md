@@ -101,6 +101,9 @@ Public functions: solve
 - ground-return selection keeps real grounds over straps, with a never-empty fallback
 - relieves the loop pull of caps in a same-rail bank
 - pulls group members toward their centroid, anchoring the IC
+- zone-pack snaps a rail direction to an IC edge
+- zone-pack rotates a cap so its power pad faces the IC
+- zone-pack lays a group into an aligned row/column
 
 ## placement/router
 

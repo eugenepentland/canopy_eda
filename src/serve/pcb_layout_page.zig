@@ -428,6 +428,8 @@ pub const PngRequest = struct {
     group_w: f64 = -1,
     group_zone_w: f64 = -1,
     group_loop_relief: f64 = -1,
+    /// Constructive zone-then-pack floorplan (crisp VIN│IC│L│VOUT rows).
+    zone_pack: bool = false,
     /// Diagnostic overlays (see render_pcb_png.Options).
     blame: bool = false,
     loop_labels: bool = false,
@@ -474,6 +476,7 @@ pub fn renderDesignPng(
     if (opts.group_w >= 0) png_params.group_w = opts.group_w;
     if (opts.group_zone_w >= 0) png_params.group_zone_w = opts.group_zone_w;
     if (opts.group_loop_relief >= 0) png_params.group_loop_relief = opts.group_loop_relief;
+    if (opts.zone_pack) png_params.zone_pack = true;
     // A named saved layout renders VERBATIM (placeFromPoses) — "show me this
     // layout" must display exactly what was saved, not a re-optimized version:
     // refine can drift a hand-tuned layout to a worse arrangement (e.g. a 70.8
@@ -562,6 +565,7 @@ pub fn pcbPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
         .group_w = pngFloatOpt(req, "group_w"),
         .group_zone_w = pngFloatOpt(req, "group_zone_w"),
         .group_loop_relief = pngFloatOpt(req, "group_loop_relief"),
+        .zone_pack = queryFlag(req, "zone_pack"),
         .blame = queryFlag(req, "blame"),
         .loop_labels = queryFlag(req, "loops"),
         .dims = queryFlag(req, "dims"),
@@ -2067,6 +2071,10 @@ fn parseTuning(req: *httpz.Request) Tuning {
     }
     if (q.get("group_loop_relief")) |v| {
         p.group_loop_relief = parseF(v, p.group_loop_relief);
+        tuned = true;
+    }
+    if (q.get("zone_pack")) |v| {
+        p.zone_pack = !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false"));
         tuned = true;
     }
     return .{ .params = p, .tuned = tuned, .regen = regen or tuned };

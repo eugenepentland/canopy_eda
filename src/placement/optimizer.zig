@@ -235,6 +235,13 @@ pub const Params = struct {
     /// bank (a search-only delta in `constraintCost`, never the reported score), so
     /// the group's cohesion can pack the bank into one tight block. 0 = off.
     group_loop_relief: f64 = 0,
+    /// Constructive "zone-then-pack" floorplan (off by default): instead of the
+    /// force-directed relaxation (which makes organic clusters), place the dominant
+    /// IC at the origin and lay each functional `(group …)` as a crisp row/column
+    /// docked to the IC side it wires to — `VIN-caps │ IC │ L │ VOUT-caps`. Only
+    /// engages for a "one dominant IC + groups" shape; falls back to the force
+    /// pipeline otherwise, so it can never degrade a non-switcher board.
+    zone_pack: bool = false,
 };
 
 /// Which phase of the solve a progress frame came from — drives the label the
@@ -602,6 +609,13 @@ fn runPlacement(
     built: Built,
     params: Params,
 ) std.mem.Allocator.Error!void {
+    // Constructive zone-then-pack floorplan (opt-in): crisp VIN│IC│L│VOUT rows the
+    // force model can't make. Returns false (falls through to the force pipeline)
+    // for any shape it doesn't handle, so it never degrades a non-switcher board.
+    if (params.zone_pack and try packZoned(arena, parts, prep, nets, built, params)) {
+        tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
+        return;
+    }
     if (parts.len >= 2 and parts.len <= MULTISTART_MAX_PARTS and built.loops.len > 0) {
         // Routed-reranked multi-start (closes the surrogate↔routed gap; widened
         // from ≤16 to the whole multi-start band so 17–32-part loop boards select
@@ -620,6 +634,302 @@ fn runPlacement(
     // window the global objective/polish can't do); re-routed and reverted if it
     // would drop a net, so it never makes routing worse.
     tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
+}
+
+// ── Zone-then-pack constructive floorplan ────────────────────────────────────
+// The force model makes organic clusters; a power layout wants crisp rows
+// (`VIN-caps │ IC │ L │ VOUT-caps`). `packZoned` places the dominant IC at the
+// origin and lays each functional `(group …)` — plus loose passives and a
+// secondary hub (the inductor) — as a row/column docked to the IC side it wires
+// to, then finishes with overlap-removal + grid-snap only (NEVER `relax`, which
+// would dissolve the rows). Opt-in via `Params.zone_pack`; returns false for any
+// shape it doesn't handle so the caller falls back to the force pipeline.
+
+/// Which IC edge a packed block docks against.
+const Edge = enum { left, right, top, bottom };
+
+/// A packed cluster: its ordered members, their chosen rotations, their block-
+/// local centre offsets, the block half-extents, and the IC edge it docks to.
+const PackBlock = struct {
+    members: []const usize,
+    rots: []const f64,
+    lx: []const f64,
+    ly: []const f64,
+    half_w: f64,
+    half_h: f64,
+    edge: Edge,
+};
+
+const ZoneTopo = struct { ic: usize };
+
+/// The "one dominant IC + groups" shape gate. Accept only when there is a single
+/// hub whose courtyard dwarfs the next (≥2×), every group orbits it (or has no
+/// hub), and the board is within the finisher band. Null ⇒ use the force path.
+fn analyzeTopology(parts: []const Part, lowered: Lowered) ?ZoneTopo {
+    if (!lowered.active or lowered.groups.len == 0) return null;
+    if (parts.len < 2 or parts.len > POLISH_MAX_PARTS) return null;
+    // The IC = largest-area hub.
+    var ic: ?usize = null;
+    var a1: f64 = -1;
+    for (parts, 0..) |p, i| {
+        if (p.kind != .hub) continue;
+        const a = p.hw * p.hh;
+        if (a > a1) {
+            a1 = a;
+            ic = i;
+        }
+    }
+    const ici = ic orelse return null;
+    // Reject multi-IC boards by the *group orbit* test: every functional group must
+    // orbit the one IC (or carry no hub). A board with two comparable ICs has some
+    // groups whose `hub` is the other IC — that's what disqualifies it, not raw
+    // hub area (a power inductor is a big hub but anchors nothing, and may even
+    // carry a U-prefix ref-des, so an area/prefix test misfires).
+    for (lowered.groups) |g| {
+        if (g.hub >= 0 and @as(usize, @intCast(g.hub)) != ici) return null;
+    }
+    return .{ .ic = ici };
+}
+
+/// Sum of the IC's non-ground pad offsets over the nets `members` connect to —
+/// the direction (IC-local; IC is at rot 0 so == world) toward the group's rail
+/// side. Ground is excluded (it is scattered all round the IC and would average
+/// the side away). Zero when the members touch only ground / no IC pad.
+fn railDir(members: []const usize, ic: usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) Pt {
+    const ic_ref = parts[ic].ref_des;
+    var sx: f64 = 0;
+    var sy: f64 = 0;
+    for (nets) |net| {
+        if (isGroundName(shortName(net.name))) continue;
+        var touches = false;
+        for (net.pins) |pp| {
+            const pi = idx_of.get(pp.ref_des) orelse continue;
+            if (memberOf(members, pi)) {
+                touches = true;
+                break;
+            }
+        }
+        if (!touches) continue;
+        for (net.pins) |pp| {
+            if (!std.mem.eql(u8, pp.ref_des, ic_ref)) continue;
+            const pad = padLocal(parts[ic], pp.pin);
+            if (pad.w == 0 and pad.h == 0) continue;
+            sx += pad.x;
+            sy += pad.y;
+        }
+    }
+    return .{ .x = sx, .y = sy };
+}
+
+/// Snap a rail direction to the dominant edge (y-down). Null when ~zero.
+fn snapEdge(d: Pt) ?Edge {
+    if (@abs(d.x) < 1e-9 and @abs(d.y) < 1e-9) return null;
+    if (@abs(d.x) >= @abs(d.y)) return if (d.x > 0) .right else .left;
+    return if (d.y > 0) .bottom else .top;
+}
+
+/// Rotation (of {0,90,180,270}) that turns a cap's power pad toward the IC, so the
+/// hot loop is short. Driven by the real loop power pad; (0,0) ⇒ rot 0 (resistor /
+/// no loop). `inward` is the unit vector from the block toward the IC.
+fn faceRotation(pwr: PadRect, edge: Edge) f64 {
+    const inward: Pt = switch (edge) {
+        .left => .{ .x = 1, .y = 0 },
+        .right => .{ .x = -1, .y = 0 },
+        .top => .{ .x = 0, .y = 1 },
+        .bottom => .{ .x = 0, .y = -1 },
+    };
+    var best: f64 = 0;
+    var best_dot: f64 = -std.math.inf(f64);
+    for (ROT_CAND) |rot| {
+        const p = rotateLocal(pwr.x, pwr.y, rot);
+        const dot = p.x * inward.x + p.y * inward.y;
+        if (dot > best_dot) {
+            best_dot = dot;
+            best = rot;
+        }
+    }
+    return best;
+}
+
+/// Rotation-aware half-extents for a part at a given rotation (without mutating it).
+fn extByRot(p: Part, rot: f64) Pt {
+    return if (isQuarter(rot)) .{ .x = p.hh, .y = p.hw } else .{ .x = p.hw, .y = p.hh };
+}
+
+/// The decoupling loop whose cap is part index `cap`, if any.
+fn loopForCap(loops: []const Loop, cap: usize) ?Loop {
+    for (loops) |lp| {
+        if (lp.cap == cap) return lp;
+    }
+    return null;
+}
+
+/// Order a block's members: bulk caps (largest capacitance) nearest the IC, then
+/// by placement priority, then ref-des — deterministic, no RNG.
+const OrderCtx = struct {
+    parts: []const Part,
+    priority: []const u32,
+    fn lt(c: OrderCtx, a: usize, b: usize) bool {
+        const fa = capValueFarads(c.parts[a].value);
+        const fb = capValueFarads(c.parts[b].value);
+        if (fa != fb) return fa > fb; // larger cap first (nearest the IC)
+        const pa = if (a < c.priority.len) c.priority[a] else 0;
+        const pb = if (b < c.priority.len) c.priority[b] else 0;
+        if (pa != pb) return pa > pb;
+        return std.mem.lessThan(u8, c.parts[a].ref_des, c.parts[b].ref_des);
+    }
+};
+fn orderMembers(arena: std.mem.Allocator, members: []const usize, parts: []const Part, priority: []const u32) std.mem.Allocator.Error![]usize {
+    const out = try arena.dupe(usize, members);
+    std.mem.sortUnstable(usize, out, OrderCtx{ .parts = parts, .priority = priority }, OrderCtx.lt);
+    return out;
+}
+
+/// Lay `ordered` members into a single row/column for `edge` (left/right ⇒ a
+/// vertical column packed along Y; top/bottom ⇒ a horizontal row along X), each
+/// rotated so its power pad faces the IC, packed edge-to-edge with `gap`.
+fn packOneBlock(arena: std.mem.Allocator, ordered: []const usize, parts: []const Part, edge: Edge, loops: []const Loop, gap: f64) std.mem.Allocator.Error!PackBlock {
+    const n = ordered.len;
+    const rots = try arena.alloc(f64, n);
+    const lx = try arena.alloc(f64, n);
+    const ly = try arena.alloc(f64, n);
+    const exts = try arena.alloc(Pt, n);
+    const vertical = (edge == .left or edge == .right); // pack along Y
+    for (ordered, 0..) |m, i| {
+        var rot: f64 = 0;
+        if (loopForCap(loops, m)) |lp| rot = faceRotation(lp.cap_pwr, edge);
+        rots[i] = rot;
+        exts[i] = extByRot(parts[m], rot);
+    }
+    var total: f64 = 0;
+    for (exts) |e| total += 2 * (if (vertical) e.y else e.x);
+    total += @as(f64, @floatFromInt(n - 1)) * gap;
+    var cursor = -total / 2;
+    var cross_half: f64 = 0;
+    for (0..n) |i| {
+        const along = if (vertical) exts[i].y else exts[i].x;
+        const center = cursor + along;
+        if (vertical) {
+            lx[i] = 0;
+            ly[i] = center;
+        } else {
+            lx[i] = center;
+            ly[i] = 0;
+        }
+        cursor += 2 * along + gap;
+        cross_half = @max(cross_half, if (vertical) exts[i].x else exts[i].y);
+    }
+    return .{
+        .members = ordered,
+        .rots = rots,
+        .lx = lx,
+        .ly = ly,
+        .half_w = if (vertical) cross_half else total / 2,
+        .half_h = if (vertical) total / 2 else cross_half,
+        .edge = edge,
+    };
+}
+
+/// Dock every block assigned to `edge` against the IC's `edge` side, stacked along
+/// the edge and centred on the IC, then write each member's final pose.
+fn dockEdge(parts: []Part, ic: usize, blocks: []const PackBlock, edge: Edge, gap: f64, gap_dock: f64) void {
+    const vertical = (edge == .left or edge == .right); // cross axis = Y
+    var k: usize = 0;
+    var total: f64 = 0;
+    for (blocks) |b| {
+        if (b.edge != edge) continue;
+        total += if (vertical) 2 * b.half_h else 2 * b.half_w;
+        k += 1;
+    }
+    if (k == 0) return;
+    total += @as(f64, @floatFromInt(k - 1)) * gap;
+    const ic_cross = if (vertical) parts[ic].y else parts[ic].x;
+    var cursor = ic_cross - total / 2;
+    for (blocks) |b| {
+        if (b.edge != edge) continue;
+        const cross_half = if (vertical) b.half_h else b.half_w;
+        const cross_center = cursor + cross_half;
+        cursor += 2 * cross_half + gap;
+        const depth_center = switch (edge) {
+            .left => parts[ic].x - effHw(parts[ic]) - gap_dock - b.half_w,
+            .right => parts[ic].x + effHw(parts[ic]) + gap_dock + b.half_w,
+            .top => parts[ic].y - effHh(parts[ic]) - gap_dock - b.half_h,
+            .bottom => parts[ic].y + effHh(parts[ic]) + gap_dock + b.half_h,
+        };
+        const cx = if (vertical) depth_center else cross_center;
+        const cy = if (vertical) cross_center else depth_center;
+        for (b.members, 0..) |m, j| {
+            parts[m].rot = b.rots[j];
+            parts[m].x = cx + b.lx[j];
+            parts[m].y = cy + b.ly[j];
+        }
+    }
+}
+
+/// Constructive zone-then-pack floorplan. Returns true when it produced a
+/// complete, overlap-free arrangement; false ⇒ caller uses the force pipeline.
+fn packZoned(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    built: Built,
+    params: Params,
+) std.mem.Allocator.Error!bool {
+    _ = params;
+    const topo = analyzeTopology(parts, g_lowered) orelse return false;
+    const ic = topo.ic;
+    parts[ic].x = 0;
+    parts[ic].y = 0;
+    parts[ic].rot = 0;
+
+    const claimed = try arena.alloc(bool, parts.len);
+    @memset(claimed, false);
+    claimed[ic] = true;
+
+    var blocks: std.ArrayListUnmanaged(PackBlock) = .empty;
+    const gap = @max(g_route_gap, FINAL_CLEAR);
+
+    // Functional-group blocks (hub members dropped — IC at origin, inductor below).
+    for (g_lowered.groups) |g| {
+        var ml: std.ArrayListUnmanaged(usize) = .empty;
+        for (g.members) |m| {
+            if (parts[m].kind == .hub or claimed[m]) continue;
+            try ml.append(arena, m);
+        }
+        if (ml.items.len == 0) continue;
+        const ordered = try orderMembers(arena, ml.items, parts, prep.priority);
+        for (ordered) |m| claimed[m] = true;
+        const edge = snapEdge(railDir(ordered, ic, parts, nets, &prep.idx_of)) orelse .bottom;
+        try blocks.append(arena, try packOneBlock(arena, ordered, parts, edge, built.loops, gap));
+    }
+    // Loose passives (in no group) — each its own single-member block.
+    for (parts, 0..) |p, i| {
+        if (claimed[i] or p.kind == .hub) continue;
+        claimed[i] = true;
+        const single = try arena.dupe(usize, &.{i});
+        const edge = snapEdge(railDir(single, ic, parts, nets, &prep.idx_of)) orelse .bottom;
+        try blocks.append(arena, try packOneBlock(arena, single, parts, edge, built.loops, gap));
+    }
+    // Secondary hubs (the power inductor). Its SW pads are central (dir ≈ 0), so it
+    // defaults to the top edge near the switch node.
+    for (parts, 0..) |p, i| {
+        if (claimed[i] or p.kind != .hub) continue;
+        claimed[i] = true;
+        const single = try arena.dupe(usize, &.{i});
+        const edge = snapEdge(railDir(single, ic, parts, nets, &prep.idx_of)) orelse .top;
+        try blocks.append(arena, try packOneBlock(arena, single, parts, edge, built.loops, gap));
+    }
+
+    dockEdge(parts, ic, blocks.items, .left, gap, gap);
+    dockEdge(parts, ic, blocks.items, .right, gap, gap);
+    dockEdge(parts, ic, blocks.items, .top, gap, gap);
+    dockEdge(parts, ic, blocks.items, .bottom, gap, gap);
+
+    legalize(parts, FINAL_CLEAR);
+    snapToGrid(parts);
+    legalizeOnGrid(parts);
+    return !anyOverlap(parts);
 }
 
 /// Snapshot every part's pose — the strict/overlap retry in `solve` keeps the
@@ -4659,4 +4969,44 @@ test "accumulateGroupCohesion pulls members in and keeps the hub anchored" {
     try testing.expect(ax[1] > 0);
     try testing.expect(ax[2] < 0);
     try testing.expectApproxEqAbs(@as(f64, 0), ax[0], 1e-9);
+}
+
+// spec: placement/optimizer - zone-pack snaps a rail direction to an IC edge
+test "snapEdge picks the dominant IC edge (y-down)" {
+    try testing.expectEqual(Edge.left, snapEdge(.{ .x = -2, .y = 0.3 }).?);
+    try testing.expectEqual(Edge.right, snapEdge(.{ .x = 2, .y = -0.3 }).?);
+    try testing.expectEqual(Edge.top, snapEdge(.{ .x = 0.1, .y = -2 }).?);
+    try testing.expectEqual(Edge.bottom, snapEdge(.{ .x = 0.1, .y = 2 }).?);
+    try testing.expect(snapEdge(.{ .x = 0, .y = 0 }) == null);
+}
+
+// spec: placement/optimizer - zone-pack rotates a cap so its power pad faces the IC
+test "faceRotation turns the power pad toward the IC" {
+    const pwr = PadRect{ .x = 1, .y = 0, .w = 0.4, .h = 0.4 }; // power pad on +x
+    try testing.expectEqual(@as(f64, 0), faceRotation(pwr, .left)); // IC to the right
+    try testing.expectEqual(@as(f64, 180), faceRotation(pwr, .right)); // IC to the left
+    try testing.expectEqual(@as(f64, 90), faceRotation(pwr, .top)); // IC below (+y)
+    try testing.expectEqual(@as(f64, 270), faceRotation(pwr, .bottom)); // IC above (−y)
+}
+
+// spec: placement/optimizer - zone-pack lays a group into an aligned row/column
+test "packOneBlock lays members into an aligned column for a side edge" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    var parts = [_]Part{
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "C3", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &.{}, .fallback = true },
+    };
+    const ordered = [_]usize{ 0, 1, 2 };
+    const blk = try packOneBlock(arena, &ordered, &parts, .left, &.{}, 0.2);
+    // A side (left) edge packs a vertical column: same x, strictly increasing y.
+    try testing.expectApproxEqAbs(@as(f64, 0), blk.lx[0], 1e-9);
+    try testing.expectApproxEqAbs(blk.lx[0], blk.lx[1], 1e-9);
+    try testing.expectApproxEqAbs(blk.lx[1], blk.lx[2], 1e-9);
+    try testing.expect(blk.ly[0] < blk.ly[1] and blk.ly[1] < blk.ly[2]);
+    // Column half-height spans all three caps + the two gaps; half-width = one cap.
+    try testing.expectApproxEqAbs(@as(f64, 0.6 * 3 + 0.2), blk.half_h, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 1), blk.half_w, 1e-9);
 }
