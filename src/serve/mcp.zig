@@ -136,9 +136,19 @@ fn handleToolCall(
 
     var result: std.ArrayListUnmanaged(u8) = .empty;
     const rw = result.writer(allocator);
-    try rw.writeAll("{\"content\":[{\"type\":\"text\",\"text\":");
-    try json_writer.writeString(rw, content_buf.items);
-    try rw.writeAll("}]");
+    if (call_result.image_mime) |mime| {
+        // `content_buf` holds base64 (no characters needing JSON escaping), so
+        // it's written raw between the quotes.
+        try rw.writeAll("{\"content\":[{\"type\":\"image\",\"data\":\"");
+        try rw.writeAll(content_buf.items);
+        try rw.writeAll("\",\"mimeType\":\"");
+        try rw.writeAll(mime);
+        try rw.writeAll("\"}]");
+    } else {
+        try rw.writeAll("{\"content\":[{\"type\":\"text\",\"text\":");
+        try json_writer.writeString(rw, content_buf.items);
+        try rw.writeAll("}]");
+    }
     if (!call_result.ok) try rw.writeAll(",\"isError\":true");
     try rw.writeAll("}");
 

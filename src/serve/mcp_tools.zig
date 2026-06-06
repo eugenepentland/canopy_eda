@@ -26,6 +26,7 @@ const config = @import("../config.zig");
 const component_search = @import("component_search.zig");
 const digikey = @import("digikey.zig");
 const upload = @import("upload.zig");
+const pcb_layout_page = @import("pcb_layout_page.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const NAME_FIELD_PREFIX = "{\"name\":";
@@ -77,6 +78,7 @@ const tools = [_]ToolEntry{
     .{ .name = "get_net", .is_mutation = false },
     .{ .name = "describe_component", .is_mutation = false },
     .{ .name = "get_schematic", .is_mutation = false },
+    .{ .name = "get_pcb_layout_image", .is_mutation = false },
     .{ .name = "get_version", .is_mutation = false },
     .{ .name = "run_checks", .is_mutation = false },
     .{ .name = "generate_review", .is_mutation = false },
@@ -145,6 +147,9 @@ pub const tools_list_result = @embedFile("assets/tools_list_result.json");
 /// caller wraps in a single `{"type":"text","text":...}` block.
 pub const CallResult = struct {
     ok: bool,
+    /// When set, `out` holds base64-encoded image bytes and the caller emits an
+    /// MCP image content block with this MIME type instead of a text block.
+    image_mime: ?[]const u8 = null,
 };
 
 /// Dispatch a tool call. Writes the result into `out` and returns how the
@@ -156,6 +161,19 @@ pub fn call(
     args_val: ?std.json.Value,
     out: *std.ArrayListUnmanaged(u8),
 ) CallResult {
+    // The image tool returns binary content, so it's handled here (not in
+    // `callInner`, which only ever produces text) and tagged with its MIME type
+    // so the MCP layer frames it as an image content block.
+    if (std.mem.eql(u8, tool_name, "get_pcb_layout_image")) {
+        const ok = toolGetPcbImage(allocator, project_dir, args_val, out) catch |err| {
+            const w = out.writer(allocator);
+            w.print(ERR_LINE_TEMPLATE, .{@errorName(err)}) catch |e| {
+                log.warn("failed to write error msg: {s}", .{@errorName(e)});
+            };
+            return .{ .ok = false };
+        };
+        return .{ .ok = ok, .image_mime = if (ok) "image/png" else null };
+    }
     const ok = callInner(allocator, project_dir, tool_name, args_val, out) catch |err| {
         const msg = @errorName(err);
         const w = out.writer(allocator);
@@ -545,6 +563,55 @@ fn toolGetSchematic(allocator: std.mem.Allocator, project_dir: []const u8, args_
     const graph = try renderSceneGraph(allocator, project_dir, name);
     try out.writer(allocator).writeAll(graph);
     return true;
+}
+
+/// Render a design's PCB layout to a PNG and write it base64-encoded into `out`
+/// (the caller emits it as an MCP image content block). Optional `nets`/`refs`
+/// (arrays or comma-separated strings) spotlight a subsystem; `route` overlays
+/// copper; `width`/`layout`/`sub`/`regen` mirror the HTTP endpoint.
+fn toolGetPcbImage(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    var opts = pcb_layout_page.PngRequest{
+        .highlight_nets = jsonStrList(allocator, args_val, "nets"),
+        .highlight_refs = jsonStrList(allocator, args_val, "refs"),
+        .route = optionalBool(args_val, "route") orelse false,
+        .layout = optionalString(args_val, "layout"),
+        .regen = optionalBool(args_val, "regen") orelse false,
+        .sub = optionalString(args_val, "sub"),
+    };
+    if (optionalU64(args_val, "width")) |w| opts.width = @intCast(@min(w, @as(u64, 4000)));
+
+    const png_bytes = pcb_layout_page.renderDesignPng(allocator, project_dir, name, opts) catch |e| {
+        try out.writer(allocator).print("error rendering pcb layout: {s}", .{@errorName(e)});
+        return false;
+    };
+    const enc = std.base64.standard.Encoder;
+    const b64 = try allocator.alloc(u8, enc.calcSize(png_bytes.len));
+    _ = enc.encode(b64, png_bytes);
+    try out.appendSlice(allocator, b64);
+    return true;
+}
+
+/// Parse a JSON arg that may be a string array or a comma-separated string into
+/// a list of trimmed, non-empty tokens (slices into the parsed JSON, valid for
+/// the request). Absent/empty → empty slice.
+fn jsonStrList(allocator: std.mem.Allocator, args_val: ?std.json.Value, key: []const u8) []const []const u8 {
+    const av = args_val orelse return &.{};
+    if (av != .object) return &.{};
+    const v = av.object.get(key) orelse return &.{};
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    if (v == .array) {
+        for (v.array.items) |item| {
+            if (item == .string and item.string.len > 0) list.append(allocator, item.string) catch break;
+        }
+    } else if (v == .string) {
+        var it = std.mem.tokenizeScalar(u8, v.string, ',');
+        while (it.next()) |tok| {
+            const t = std.mem.trim(u8, tok, " \t");
+            if (t.len > 0) list.append(allocator, t) catch break;
+        }
+    }
+    return list.toOwnedSlice(allocator) catch &.{};
 }
 
 fn toolGetVersion(args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator) !bool {

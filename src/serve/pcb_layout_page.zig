@@ -24,6 +24,8 @@ const netlist = @import("../export_kicad_netlist.zig");
 const export_kicad = @import("../export_kicad.zig");
 const export_kicad_footprint = @import("../export_kicad_footprint.zig");
 const review = @import("../review.zig");
+const render_pcb_png = @import("../render_pcb_png.zig");
+const png_mod = @import("../png.zig");
 const assets_css = @import("assets_css.zig");
 const pages_tmpl = @import("templates/pages.zig");
 const serve_root = @import("../serve.zig");
@@ -122,7 +124,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         mr.eval.deinit();
         ctx.allocator.destroy(mr.eval);
     };
-    const block: *env_mod.DesignBlock = resolveBlock(ctx, name, &eval, &module_res) orelse {
+    const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
         res.status = 500;
         res.body = NO_BLOCK_MSG;
         return;
@@ -294,13 +296,14 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 /// `lib/modules/` (via `modules_mod.resolveModuleBlock`, whose evaluator is
 /// stashed in `module_res` for the caller to free). Null if neither exists.
 fn resolveBlock(
-    ctx: *Handler,
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
     name: []const u8,
     eval: *Evaluator,
     module_res: *?modules_mod.ResolvedBlock,
 ) ?*env_mod.DesignBlock {
-    if (paths.designSourcePath(ctx.allocator, ctx.project_dir, name)) |path| {
-        defer ctx.allocator.free(path);
+    if (paths.designSourcePath(alloc, project_dir, name)) |path| {
+        defer alloc.free(path);
         if (eval.evalFile(path)) |result| {
             switch (result) {
                 .design_block => |b| return b,
@@ -308,7 +311,7 @@ fn resolveBlock(
             }
         } else |_| {}
     } else |_| {}
-    module_res.* = modules_mod.resolveModuleBlock(ctx.allocator, ctx.project_dir, name);
+    module_res.* = modules_mod.resolveModuleBlock(alloc, project_dir, name);
     if (module_res.*) |mr| return mr.block;
     return null;
 }
@@ -374,7 +377,7 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         mr.eval.deinit();
         ctx.allocator.destroy(mr.eval);
     };
-    const block: *env_mod.DesignBlock = resolveBlock(ctx, name, &eval, &module_res) orelse {
+    const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
         res.status = 500;
         res.body = NO_BLOCK_MSG;
         return;
@@ -397,6 +400,152 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     try writePlacementJson(&aw.writer, placement, shown, name);
     res.content_type = .JSON;
     res.body = aw.written();
+}
+
+const PNG_DEFAULT_WIDTH: u32 = 1200;
+
+/// Inputs for `renderDesignPng` — the union of what the HTTP query and the MCP
+/// `get_pcb_layout_image` tool can specify. Empty `highlight_*` → plain board;
+/// any value → focus mode (spotlight + dim).
+pub const PngRequest = struct {
+    width: u32 = PNG_DEFAULT_WIDTH,
+    highlight_nets: []const []const u8 = &.{},
+    highlight_refs: []const []const u8 = &.{},
+    route: bool = false,
+    layout: ?[]const u8 = null,
+    regen: bool = false,
+    sub: ?[]const u8 = null,
+};
+
+/// Failures `renderDesignPng` surfaces; callers map these to an HTTP status or
+/// MCP error message.
+pub const PngError = error{ BlockNotFound, SubNotFound, BuildFailed } || png_mod.Error;
+
+/// Resolve `name`, build (or load from cache) its placement, optionally route
+/// it, and render a PNG — shared by the HTTP endpoint and the MCP tool. All
+/// allocation goes through `alloc`; the returned bytes are owned by it.
+pub fn renderDesignPng(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    opts: PngRequest,
+) PngError![]u8 {
+    var eval = Evaluator.init(alloc, project_dir);
+    defer eval.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |mr| {
+        mr.eval.deinit();
+        alloc.destroy(mr.eval);
+    };
+    const block = resolveBlock(alloc, project_dir, name, &eval, &module_res) orelse return error.BlockNotFound;
+    const eff_block: *env_mod.DesignBlock = if (opts.sub) |s|
+        (descendToSub(alloc, block, s) orelse return error.SubNotFound)
+    else
+        block;
+
+    // Same placement-selection logic as the page: a named layout or regen forces
+    // a solve; otherwise reuse the auto cache, falling back to a plain grid when
+    // nothing is cached so an agent's first call stays cheap.
+    const cached = if (opts.sub != null) null else if (opts.layout) |ln|
+        readLayoutPoses(alloc, project_dir, name, ln)
+    else if (opts.regen) null else readAutoPoses(alloc, project_dir, name);
+    const grid_only = opts.sub == null and opts.layout == null and !opts.regen and cached == null;
+    const placement = (if (grid_only)
+        optimizer.gridPlace(alloc, eff_block, project_dir, .{})
+    else
+        optimizer.solve(alloc, eff_block, project_dir, cached, .{}, if (opts.layout != null) .refine else .place)) catch return error.BuildFailed;
+
+    const route_params = router.RouteParams{};
+    const routed: ?router.RouteResult = if (opts.route) (router.route(alloc, placement, route_params) catch null) else null;
+    const violations: []const drc.Violation = if (routed) |r|
+        (drc.check(alloc, placement, r, route_params.clearance) catch &.{})
+    else
+        &.{};
+
+    return render_pcb_png.render(alloc, placement, .{
+        .width = opts.width,
+        .highlight_nets = opts.highlight_nets,
+        .highlight_refs = opts.highlight_refs,
+        .routed = routed,
+        .violations = violations,
+        .title = eff_block.name,
+    });
+}
+
+/// GET /api/pcb-png/:name — render the solved layout as a PNG so an AI agent (or
+/// any HTTP client) can *see* it, not just parse the coordinate JSON.
+///
+/// Query parameters (all optional):
+///   width=<px>            output width (clamped); height follows the board
+///   nets=A,B  refs=U1,C3  focus mode — spotlight these nets/components, dim rest
+///   route=1               run the router and draw copper + DRC markers
+///   layout=<name>         render a specific saved layout (else the auto cache)
+///   regen=1               force a fresh solve instead of the cache
+///   sub=<slug>            scope to one sub-block (per-sub-block preview)
+///
+/// Request-scoped allocation uses `req.arena` (freed after the response is sent;
+/// `res.body` stays valid until then) — `ctx.allocator` is the global page
+/// allocator, so a leaked image per call would never be reclaimed.
+pub fn pcbPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const arena = req.arena;
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const width: u32 = blk: {
+        const q = req.query() catch break :blk PNG_DEFAULT_WIDTH;
+        const wv = q.get("width") orelse break :blk PNG_DEFAULT_WIDTH;
+        break :blk std.fmt.parseInt(u32, wv, 10) catch PNG_DEFAULT_WIDTH;
+    };
+    const opts = PngRequest{
+        .width = width,
+        .highlight_nets = csvParam(arena, req, "nets"),
+        .highlight_refs = csvParam(arena, req, "refs"),
+        .route = queryFlag(req, "route"),
+        .layout = queryOpt(req, "layout"),
+        .regen = queryFlag(req, "regen"),
+        .sub = subSlug(req),
+    };
+    const png_bytes = renderDesignPng(arena, ctx.project_dir, name, opts) catch |e| {
+        res.status = if (e == error.BlockNotFound or e == error.SubNotFound) 404 else 500;
+        res.body = switch (e) {
+            error.BlockNotFound => NO_BLOCK_MSG,
+            error.SubNotFound => NO_SUB_MSG,
+            else => PLACEMENT_ERR_MSG,
+        };
+        return;
+    };
+    res.content_type = .PNG;
+    res.header("Cache-Control", "no-store");
+    res.body = png_bytes;
+}
+
+/// True when query `key` is present and not "0"/empty (a boolean toggle).
+fn queryFlag(req: *httpz.Request, key: []const u8) bool {
+    const q = req.query() catch return false;
+    const v = q.get(key) orelse return false;
+    return !(v.len == 0 or std.mem.eql(u8, v, "0"));
+}
+
+/// Query `key` as an optional string (absent/empty → null).
+fn queryOpt(req: *httpz.Request, key: []const u8) ?[]const u8 {
+    const q = req.query() catch return null;
+    const v = q.get(key) orelse return null;
+    return if (v.len == 0) null else v;
+}
+
+/// Split a comma-separated query parameter into trimmed, non-empty tokens
+/// (slices into the request's query buffer). Empty/absent → empty slice.
+fn csvParam(arena: std.mem.Allocator, req: *httpz.Request, key: []const u8) []const []const u8 {
+    const q = req.query() catch return &.{};
+    const v = q.get(key) orelse return &.{};
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var it = std.mem.tokenizeScalar(u8, v, ',');
+    while (it.next()) |tok| {
+        const t = std.mem.trim(u8, tok, " \t");
+        if (t.len > 0) list.append(arena, t) catch break;
+    }
+    return list.toOwnedSlice(arena) catch &.{};
 }
 
 /// Serialize a placement for the JSON export: name, generated flag, the steering
@@ -505,7 +654,6 @@ fn regenThread(job: *RegenJob) void {
 
     var had_err = true;
     run: {
-        var handler = Handler{ .allocator = a, .project_dir = job.project_dir, .auth_dir = "" };
         var eval = Evaluator.init(a, job.project_dir);
         defer eval.deinit();
         var module_res: ?modules_mod.ResolvedBlock = null;
@@ -513,7 +661,7 @@ fn regenThread(job: *RegenJob) void {
             mr.eval.deinit();
             a.destroy(mr.eval);
         };
-        const block = resolveBlock(&handler, job.name, &eval, &module_res) orelse break :run;
+        const block = resolveBlock(a, job.project_dir, job.name, &eval, &module_res) orelse break :run;
 
         var prog = RegenProgress{ .name = job.name, .gen = job.gen };
         optimizer.setProgressSink(.{ .ctx = &prog, .onBest = regenOnBest });
@@ -651,7 +799,7 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         mr.eval.deinit();
         ctx.allocator.destroy(mr.eval);
     };
-    const block: *env_mod.DesignBlock = resolveBlock(ctx, name, &eval, &module_res) orelse {
+    const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
         res.status = 500;
         res.body = NO_BLOCK_MSG;
         return;
@@ -745,7 +893,7 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         mr.eval.deinit();
         ctx.allocator.destroy(mr.eval);
     };
-    const block: *env_mod.DesignBlock = resolveBlock(ctx, name, &eval, &module_res) orelse {
+    const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
         res.status = 500;
         res.body = NO_BLOCK_MSG;
         return;
@@ -829,7 +977,7 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
             mr.eval.deinit();
             ctx.allocator.destroy(mr.eval);
         };
-        if (resolveBlock(ctx, name, &eval, &module_res)) |block| {
+        if (resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res)) |block| {
             const params = readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{};
             const poses = try req.arena.alloc(optimizer.RefPose, parts.len);
             for (parts, 0..) |p, i| poses[i] = .{ .ref = p.ref, .x = p.x, .y = p.y, .rot = p.rot };
@@ -946,7 +1094,7 @@ pub fn rescoreLayoutsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
         mr.eval.deinit();
         ctx.allocator.destroy(mr.eval);
     };
-    const block: *env_mod.DesignBlock = resolveBlock(ctx, name, &eval, &module_res) orelse {
+    const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
         res.status = 500;
         res.body = NO_BLOCK_MSG;
         return;
@@ -1002,7 +1150,7 @@ pub fn pcbScoreBatchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         mr.eval.deinit();
         ctx.allocator.destroy(mr.eval);
     };
-    const block: *env_mod.DesignBlock = resolveBlock(ctx, name, &eval, &module_res) orelse {
+    const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
         res.status = 500;
         res.body = NO_BLOCK_MSG;
         return;
