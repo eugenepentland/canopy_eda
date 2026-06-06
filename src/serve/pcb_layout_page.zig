@@ -400,11 +400,26 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     const blame = try req.arena.alloc(f64, placement.parts.len);
     optimizer.perPartBlame(placement, shown, blame);
 
+    // Optional `?route=1`: route the board and summarise the real copper so layouts
+    // are directly comparable (trace length, via count, DRC) without scraping HTML.
+    const ro = parseRoute(req);
+    const routed_metrics: ?RoutedMetrics = if (ro.run) blk: {
+        const r = router.route(ctx.allocator, placement, ro.params) catch break :blk null;
+        const v = drc.check(ctx.allocator, placement, r, ro.params.clearance) catch &.{};
+        var trace: f64 = 0;
+        for (r.tracks) |t| trace += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
+        break :blk .{ .trace_mm = trace, .tracks = r.tracks.len, .vias = r.vias.len, .drc = v.len };
+    } else null;
+
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
-    try writePlacementJson(&aw.writer, placement, shown, name, blame);
+    try writePlacementJson(&aw.writer, placement, shown, name, blame, routed_metrics);
     res.content_type = .JSON;
     res.body = aw.written();
 }
+
+/// Summary of a routed board for the JSON API (`?route=1`): total copper length,
+/// track/via counts, and DRC-violation count — the machine-readable comparison key.
+const RoutedMetrics = struct { trace_mm: f64, tracks: usize, vias: usize, drc: usize };
 
 const PNG_DEFAULT_WIDTH: u32 = 1200;
 
@@ -639,7 +654,7 @@ fn worldPad(pt: optimizer.Part, pad: optimizer.PadRect) [2]f64 {
 /// cap, hub, inductance nH, and power-leg length mm) — the machine-readable twin
 /// of the PNG diagnostic overlays, so an agent gets precise numbers, not pixels.
 /// `blame` is index-aligned with `p.parts` (empty ⇒ all zero).
-fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimizer.Params, name: []const u8, blame: []const f64) std.Io.Writer.Error!void {
+fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimizer.Params, name: []const u8, blame: []const f64, routed: ?RoutedMetrics) std.Io.Writer.Error!void {
     const b = p.breakdown;
     var bmax: f64 = 0;
     for (blame) |v| bmax = @max(bmax, v);
@@ -688,7 +703,11 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
         try writeJsonStr(w, hub.ref_des);
         try w.print(",\"nh\":{d:.3},\"leg_mm\":{d:.3}}}", .{ optimizer.loopNh(p.parts, L), leg });
     }
-    try w.writeAll("]}");
+    try w.writeAll("]");
+    if (routed) |r| {
+        try w.print(",\"routed\":{{\"trace_mm\":{d:.1},\"tracks\":{d},\"vias\":{d},\"drc\":{d}}}", .{ r.trace_mm, r.tracks, r.vias, r.drc });
+    }
+    try w.writeAll("}");
 }
 
 /// Emit the objective `breakdown` as a JSON object: the raw terms, each term's
