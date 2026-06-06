@@ -189,12 +189,35 @@ the textbook rows the force model can't:
   locked row/column line → `legalizeOnGrid`. **Never `relax`** (it dissolves rows).
 
 `tps55289-channel ?zone_pack=1`: input caps a left column, output caps a right
-column, inductor below the IC at the switch node; HPWL 87.7; routes DRC. Drive it:
+column, inductor below the IC at the switch node; routes DRC. Drive it:
 
 ```
 GET /api/pcb-png/<name>?regen=1&zone_pack=1&dims=1     # see the floorplan
 GET /api/pcb-png/<name>?regen=1&zone_pack=1&route=1    # routed
+GET /api/pcb-layout/<name>?regen=1&zone_pack=1&route=1 # JSON incl "routed":{trace_mm,vias,drc}
 ```
+
+### Loop-quality refinements (the docking is what made it competitive)
+
+Three changes took the routed trace from 138 → **109 mm** (≈ force's 104 mm) with
+**fewer vias** (31 vs 41), both DRC-clean — so the clean structure now costs little
+copper:
+
+- **Dock each block on its own rail pin** (`railPadCross`, area-weighted by pad so
+  the wide VOUT pad wins over the small ISP/ISN sense pads), not collectively on the
+  IC; co-edge contenders split overlap by inverse `blockMass` (a bank holds its
+  pad, a resistor yields). Stops the input caps being shoved off the VIN pad.
+- **Centre-out member order** (`orderMembers` ranks by criticality — smallest/HF cap
+  first; `centerOutOrder` puts it at the column centre nearest the pin). HF output
+  cap leg 6.9 → 3.4 mm.
+- Compare any two layouts directly via the JSON `routed` block.
+
+**Negative result — DON'T re-add two-depth-lane docking.** Spilling light support
+blocks (resistors, the COMP network) to a second outer lane *did* put the COMP
+network at its pin's Y, but pushed every support part far out → routed trace
+109 → 155 mm. Reverted. The single-lane stack (support parts trailing the bank
+along the edge) routes much shorter; the COMP network sitting at the column end is
+the accepted cost.
 
 ## Still open (product + polish)
 
@@ -207,8 +230,14 @@ GET /api/pcb-png/<name>?regen=1&zone_pack=1&route=1    # routed
   on). To enable by default for the dominant-IC shape, add the keep-routed-better
   force-vs-pack comparison in `solve` (mirror the strict/overlap retry) so it can
   never regress a board.
-- **Co-edge crowding / grid wrap.** Many groups on one edge stack into a long
-  column; wrap into an R×C grid when a single line exceeds a budget.
+- **COMP network at the output-column end (~5–7 mm from COMP pin).** The 5-cap
+  output bank owns the right edge, so the feedback network trails it. Two-lane
+  spillover was tried and reverted (made routing much worse — see above). A better
+  fix would keep it in-lane but reserve a small cross-slot near the COMP pin, or
+  route the bank's *bulk* caps to a perpendicular edge to free centre space.
+- **Output bank is a tall 9 mm column.** Grid-wrap was analysed and rejected for
+  this part: VOUT's pad is tall (±1.7 mm), so a 2nd x-column routes *longer* than
+  the tall 1-column. Bulk-cap end legs (~5 mm) are the residual; bulk caps tolerate it.
 
 - **Default-vs-opt-in product decision (needs the user).** The forces ship with
   the *mild* default (`group_w=2`, `group_zone_w=1`, `group_loop_relief=0`), which
