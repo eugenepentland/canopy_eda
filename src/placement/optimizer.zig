@@ -658,6 +658,15 @@ const PackBlock = struct {
     half_w: f64,
     half_h: f64,
     edge: Edge,
+    /// Cross-coordinate (world) of this block's rail pin on the IC — the block is
+    /// docked centred on it so a decoupling bank sits opposite its supply pad
+    /// (short loop), not collectively centred on the IC. `target_set` false ⇒ fall
+    /// back to the IC centre.
+    target: f64 = 0,
+    target_set: bool = false,
+    /// Anchoring weight when co-edge blocks contend for cross space: a decoupling
+    /// bank (heavy) holds its target; a lone resistor (light) yields and slides out.
+    mass: f64 = 1,
 };
 
 const ZoneTopo = struct { ic: usize };
@@ -721,6 +730,41 @@ fn railDir(members: []const usize, ic: usize, parts: []const Part, nets: []const
     return .{ .x = sx, .y = sy };
 }
 
+/// World cross-coordinate (y for a side edge, x for a top/bottom edge) of the IC's
+/// non-ground pads the members connect to — the point a block docks opposite, so
+/// its decoupling pad sits across from the supply pad. Null when there's no rail pad.
+fn railPadCross(members: []const usize, ic: usize, edge: Edge, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) ?f64 {
+    const ic_ref = parts[ic].ref_des;
+    const side = (edge == .left or edge == .right); // cross axis = y
+    var s: f64 = 0;
+    var n: f64 = 0;
+    for (nets) |net| {
+        if (isGroundName(shortName(net.name))) continue;
+        var touches = false;
+        for (net.pins) |pp| {
+            const pi = idx_of.get(pp.ref_des) orelse continue;
+            if (memberOf(members, pi)) {
+                touches = true;
+                break;
+            }
+        }
+        if (!touches) continue;
+        for (net.pins) |pp| {
+            if (!std.mem.eql(u8, pp.ref_des, ic_ref)) continue;
+            const pad = padLocal(parts[ic], pp.pin);
+            if (pad.w == 0 and pad.h == 0) continue;
+            // Area-weighted: the big supply pad dominates over small sense pins on
+            // the same net (e.g. VOUT's wide pad vs ISP/ISN), so the bank docks
+            // opposite the real power pad, not the average of all rail pins.
+            const wgt = pad.w * pad.h;
+            s += wgt * (if (side) pad.y else pad.x);
+            n += wgt;
+        }
+    }
+    if (n <= 0) return null;
+    return (if (side) parts[ic].y else parts[ic].x) + s / n;
+}
+
 /// Snap a rail direction to the dominant edge (y-down). Null when ~zero.
 fn snapEdge(d: Pt) ?Edge {
     if (@abs(d.x) < 1e-9 and @abs(d.y) < 1e-9) return null;
@@ -764,18 +808,34 @@ fn loopForCap(loops: []const Loop, cap: usize) ?Loop {
     return null;
 }
 
-/// Order a block's members: bulk caps (largest capacitance) nearest the IC, then
-/// by placement priority, then ref-des — deterministic, no RNG.
+/// Co-edge anchoring weight of a block: heavier per decoupling-cap member so a
+/// hot-loop bank holds its rail-pad target while a lone resistor (mass 1) yields.
+fn blockMass(members: []const usize, loops: []const Loop) f64 {
+    var caps: usize = 0;
+    for (members) |m| {
+        if (loopForCap(loops, m) != null) caps += 1;
+    }
+    return 1.0 + 3.0 * @as(f64, @floatFromInt(caps));
+}
+
+/// Order a block's members by *loop criticality*, most critical first (declared
+/// `(placement-order …)` priority, then smallest capacitance — the HF bypass cap
+/// needs the lowest-inductance path so it goes nearest the pin; bulk caps and
+/// resistors trail). `centerOutOrder` then maps this onto column positions so the
+/// most critical member lands at the centre. Deterministic, no RNG.
 const OrderCtx = struct {
     parts: []const Part,
     priority: []const u32,
     fn lt(c: OrderCtx, a: usize, b: usize) bool {
-        const fa = capValueFarads(c.parts[a].value);
-        const fb = capValueFarads(c.parts[b].value);
-        if (fa != fb) return fa > fb; // larger cap first (nearest the IC)
         const pa = if (a < c.priority.len) c.priority[a] else 0;
         const pb = if (b < c.priority.len) c.priority[b] else 0;
         if (pa != pb) return pa > pb;
+        const fa = capValueFarads(c.parts[a].value);
+        const fb = capValueFarads(c.parts[b].value);
+        const ca = fa > 0; // a is a (recognised) capacitor
+        const cb = fb > 0;
+        if (ca != cb) return ca; // caps are more central than resistors
+        if (ca and fa != fb) return fa < fb; // smaller (HF) cap is more critical
         return std.mem.lessThan(u8, c.parts[a].ref_des, c.parts[b].ref_des);
     }
 };
@@ -785,17 +845,43 @@ fn orderMembers(arena: std.mem.Allocator, members: []const usize, parts: []const
     return out;
 }
 
+/// Re-order a criticality-sorted list (most critical first) into column/row
+/// *positions* so the most critical member lands at the centre — nearest the rail
+/// pad the block docks opposite — and less critical members flank it outward.
+/// (A decoupling bank's HF cap belongs closest to the pin; bulk caps tolerate the
+/// ends.) Offsets walk 0,−1,+1,−2,+2,… from the centre, skipping out-of-range.
+fn centerOutOrder(arena: std.mem.Allocator, crit: []const usize) std.mem.Allocator.Error![]usize {
+    const n = crit.len;
+    const out = try arena.alloc(usize, n);
+    const c: isize = @intCast(n / 2);
+    const ni: isize = @intCast(n);
+    var k: usize = 0;
+    var step: isize = 0;
+    while (k < n) : (step += 1) {
+        const off: isize = if (step == 0) 0 else if (@rem(step, 2) == 1) -@divFloor(step + 1, 2) else @divFloor(step, 2);
+        const pos = c + off;
+        if (pos >= 0 and pos < ni) {
+            out[@intCast(pos)] = crit[k];
+            k += 1;
+        }
+    }
+    return out;
+}
+
 /// Lay `ordered` members into a single row/column for `edge` (left/right ⇒ a
 /// vertical column packed along Y; top/bottom ⇒ a horizontal row along X), each
 /// rotated so its power pad faces the IC, packed edge-to-edge with `gap`.
 fn packOneBlock(arena: std.mem.Allocator, ordered: []const usize, parts: []const Part, edge: Edge, loops: []const Loop, gap: f64) std.mem.Allocator.Error!PackBlock {
-    const n = ordered.len;
+    // Map the criticality order onto centre-out positions: most critical member at
+    // the block centre (nearest the rail pad), flanked outward by the rest.
+    const seq = try centerOutOrder(arena, ordered);
+    const n = seq.len;
     const rots = try arena.alloc(f64, n);
     const lx = try arena.alloc(f64, n);
     const ly = try arena.alloc(f64, n);
     const exts = try arena.alloc(Pt, n);
     const vertical = (edge == .left or edge == .right); // pack along Y
-    for (ordered, 0..) |m, i| {
+    for (seq, 0..) |m, i| {
         var rot: f64 = 0;
         if (loopForCap(loops, m)) |lp| rot = faceRotation(lp.cap_pwr, edge);
         rots[i] = rot;
@@ -820,7 +906,7 @@ fn packOneBlock(arena: std.mem.Allocator, ordered: []const usize, parts: []const
         cross_half = @max(cross_half, if (vertical) exts[i].x else exts[i].y);
     }
     return .{
-        .members = ordered,
+        .members = seq,
         .rots = rots,
         .lx = lx,
         .ly = ly,
@@ -830,42 +916,71 @@ fn packOneBlock(arena: std.mem.Allocator, ordered: []const usize, parts: []const
     };
 }
 
-/// Dock every block assigned to `edge` against the IC's `edge` side, stacked along
-/// the edge and centred on the IC, then write each member's final pose. Records
-/// each member's *aligned axis* in `lock_axis`/`lock_val` (1 ⇒ shared x — a side
-/// column; 2 ⇒ shared y — a top/bottom row) so the finish can restore the crisp
-/// line after `legalize` jitters it.
+/// Dock every block assigned to `edge` against the IC's `edge` side. Each block is
+/// placed centred on its rail pin's cross-coordinate (`target`) so a decoupling
+/// bank sits opposite its supply pad (short loop); when co-edge blocks contend for
+/// the same cross space the overlap is split by *inverse mass*, so a hot-loop bank
+/// holds its target and a lone resistor yields. Records each member's aligned axis
+/// in `lock_axis`/`lock_val` (1 ⇒ shared x column, 2 ⇒ shared y row) for the finish.
 fn dockEdge(parts: []Part, ic: usize, blocks: []const PackBlock, edge: Edge, gap: f64, gap_dock: f64, lock_axis: []u8, lock_val: []f64) void {
     const vertical = (edge == .left or edge == .right); // cross axis = Y
+    const ic_cross = if (vertical) parts[ic].y else parts[ic].x;
+    // Gather this edge's blocks (index + cross geometry) into fixed local arrays;
+    // bounded by the part count, which the topology gate caps at POLISH_MAX_PARTS.
+    var bi: [POLISH_MAX_PARTS]usize = undefined;
+    var center: [POLISH_MAX_PARTS]f64 = undefined;
+    var half: [POLISH_MAX_PARTS]f64 = undefined;
+    var mass: [POLISH_MAX_PARTS]f64 = undefined;
     var k: usize = 0;
-    var total: f64 = 0;
-    for (blocks) |b| {
-        if (b.edge != edge) continue;
-        total += if (vertical) 2 * b.half_h else 2 * b.half_w;
+    for (blocks, 0..) |b, idx| {
+        if (b.edge != edge or k >= POLISH_MAX_PARTS) continue;
+        bi[k] = idx;
+        center[k] = if (b.target_set) b.target else ic_cross;
+        half[k] = if (vertical) b.half_h else b.half_w;
+        mass[k] = b.mass;
         k += 1;
     }
     if (k == 0) return;
-    total += @as(f64, @floatFromInt(k - 1)) * gap;
-    const ic_cross = if (vertical) parts[ic].y else parts[ic].x;
-    var cursor = ic_cross - total / 2;
-    for (blocks) |b| {
-        if (b.edge != edge) continue;
-        const cross_half = if (vertical) b.half_h else b.half_w;
-        const cross_center = cursor + cross_half;
-        cursor += 2 * cross_half + gap;
+    // Sort by target cross-position (insertion sort — k is tiny).
+    var a: usize = 1;
+    while (a < k) : (a += 1) {
+        var b2 = a;
+        while (b2 > 0 and center[b2 - 1] > center[b2]) : (b2 -= 1) {
+            std.mem.swap(usize, &bi[b2 - 1], &bi[b2]);
+            std.mem.swap(f64, &center[b2 - 1], &center[b2]);
+            std.mem.swap(f64, &half[b2 - 1], &half[b2]);
+            std.mem.swap(f64, &mass[b2 - 1], &mass[b2]);
+        }
+    }
+    // Resolve overlaps by pushing neighbours apart, the lighter one moving more.
+    var it: usize = 0;
+    while (it < 128) : (it += 1) {
+        var moved = false;
+        for (1..k) |j| {
+            const need = (center[j - 1] + half[j - 1] + gap) - (center[j] - half[j]);
+            if (need > 1e-6) {
+                const tot = mass[j - 1] + mass[j];
+                center[j - 1] -= need * (mass[j] / tot);
+                center[j] += need * (mass[j - 1] / tot);
+                moved = true;
+            }
+        }
+        if (!moved) break;
+    }
+    for (0..k) |j| {
+        const b = blocks[bi[j]];
         const depth_center = switch (edge) {
             .left => parts[ic].x - effHw(parts[ic]) - gap_dock - b.half_w,
             .right => parts[ic].x + effHw(parts[ic]) + gap_dock + b.half_w,
             .top => parts[ic].y - effHh(parts[ic]) - gap_dock - b.half_h,
             .bottom => parts[ic].y + effHh(parts[ic]) + gap_dock + b.half_h,
         };
-        const cx = if (vertical) depth_center else cross_center;
-        const cy = if (vertical) cross_center else depth_center;
-        for (b.members, 0..) |m, j| {
-            parts[m].rot = b.rots[j];
-            parts[m].x = cx + b.lx[j];
-            parts[m].y = cy + b.ly[j];
-            // A side column shares one x; a top/bottom row shares one y.
+        const cx = if (vertical) depth_center else center[j];
+        const cy = if (vertical) center[j] else depth_center;
+        for (b.members, 0..) |m, mj| {
+            parts[m].rot = b.rots[mj];
+            parts[m].x = cx + b.lx[mj];
+            parts[m].y = cy + b.ly[mj];
             if (vertical) {
                 lock_axis[m] = 1;
                 lock_val[m] = parts[m].x;
@@ -964,7 +1079,13 @@ fn packZoned(
         const ordered = try orderMembers(arena, ml.items, parts, prep.priority);
         for (ordered) |m| claimed[m] = true;
         const edge = snapEdge(railDir(ordered, ic, parts, nets, &prep.idx_of)) orelse .bottom;
-        try blocks.append(arena, try packOneBlock(arena, ordered, parts, edge, built.loops, gap));
+        var blk = try packOneBlock(arena, ordered, parts, edge, built.loops, gap);
+        if (railPadCross(ordered, ic, edge, parts, nets, &prep.idx_of)) |t| {
+            blk.target = t;
+            blk.target_set = true;
+        }
+        blk.mass = blockMass(ordered, built.loops);
+        try blocks.append(arena, blk);
     }
     // Loose passives (in no group) — each its own single-member block.
     for (parts, 0..) |p, i| {
@@ -972,7 +1093,13 @@ fn packZoned(
         claimed[i] = true;
         const single = try arena.dupe(usize, &.{i});
         const edge = snapEdge(railDir(single, ic, parts, nets, &prep.idx_of)) orelse .bottom;
-        try blocks.append(arena, try packOneBlock(arena, single, parts, edge, built.loops, gap));
+        var blk = try packOneBlock(arena, single, parts, edge, built.loops, gap);
+        if (railPadCross(single, ic, edge, parts, nets, &prep.idx_of)) |t| {
+            blk.target = t;
+            blk.target_set = true;
+        }
+        blk.mass = blockMass(single, built.loops);
+        try blocks.append(arena, blk);
     }
     // Dock the group + loose blocks first so the switch-hub placement can see which
     // of the top/bottom edges is busier.
