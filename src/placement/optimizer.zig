@@ -152,6 +152,7 @@ const COMPACT_EPS: f64 = 1e-4; // courtyard-gap tolerance for the "touching" tes
 const PROX_W: f64 = 1.5; // proximity pull: cost = PROX_W·priority·(edge gap, mm)
 const KEEPOUT_W: f64 = 4.0; // keep-out hinge: cost = KEEPOUT_W·max(0, min−gap)
 const DEPRIORITIZE_SCALE: f64 = 0.25; // scale a deprioritized part's net wirelength weight
+const GROUP_W: f64 = 0.6; // group cohesion: cost = GROUP_W·Σ member→centroid distance (mm)
 /// Soft-constraint priority → numeric multiplier (low/med/high).
 fn constraintWeight(p: env.ConstraintPriority) f64 {
     return switch (p) {
@@ -457,6 +458,11 @@ const ProxTerm = struct { part: usize, hub: usize, part_pad: PadRect, hub_pad: P
 /// A `(keep-out …)` lowered to a part-vs-part minimum courtyard gap.
 const KeepTerm = struct { a: usize, b: usize, min_mm: f64 };
 
+/// A `(group …)` lowered to a cohesion pull: each member is drawn toward the
+/// group's running centroid, so a declared cluster (e.g. a feedback divider)
+/// stays together instead of splitting across the board.
+const GroupTerm = struct { members: []const usize };
+
 /// The resolved + lowered Phase-A constraints for the current solve. Every slice
 /// defaults empty so a read on a path that didn't go through `prepare` is a
 /// harmless no-op. Slices live in the solve's arena (valid for that solve only).
@@ -472,6 +478,8 @@ const Lowered = struct {
     /// `(power-rail … (role input))` — fires the input-loop boost even when the
     /// inductor is integrated (so no discrete L reveals the switcher).
     input_rail: []const bool = &.{},
+    /// Declared `(group …)` clusters — each pulls its members to their centroid.
+    groups: []const GroupTerm = &.{},
 };
 
 /// Thread-local lowered constraints for the current solve — set by `prepare`,
@@ -773,6 +781,7 @@ fn resolveConstraints(
     @memset(input_rail, false);
     var prox: std.ArrayListUnmanaged(ProxTerm) = .empty;
     var keepouts: std.ArrayListUnmanaged(KeepTerm) = .empty;
+    var groups: std.ArrayListUnmanaged(GroupTerm) = .empty;
 
     // power-rail (role input) → mark the rail so the input-loop boost fires even
     // with an integrated inductor (no discrete L to reveal the switcher).
@@ -869,13 +878,19 @@ fn resolveConstraints(
         }
     }
 
-    // group → validate refs resolve (cohesion lowering is via the existing align
-    // term; an explicit group cohesion force is future work — validated, not yet
-    // a force, so report it as inert rather than silently honoured).
+    // group → a cohesion pull toward the members' centroid. Resolve each ref;
+    // skip unresolved (reported) and groups with <2 resolved members (a single
+    // part has no cohesion to enforce).
     for (c.groups) |g| {
+        var members: std.ArrayListUnmanaged(usize) = .empty;
         for (g.refs) |ref| {
-            if (resolvePart(instances, ref) == null)
+            if (resolvePart(instances, ref)) |pi|
+                try members.append(arena, pi)
+            else
                 reject(arena, diags, "group: part '{s}' not found", .{ref});
+        }
+        if (members.items.len >= 2) {
+            try groups.append(arena, .{ .members = try members.toOwnedSlice(arena) });
         }
     }
 
@@ -884,6 +899,7 @@ fn resolveConstraints(
         .keepouts = try keepouts.toOwnedSlice(arena),
         .net_weight = net_weight,
         .input_rail = input_rail,
+        .groups = try groups.toOwnedSlice(arena),
     };
 }
 
@@ -2474,12 +2490,13 @@ fn objectiveCost(
 /// where the optimizer looks, not how the result is judged, so a hand layout and
 /// a constrained solve are scored on the identical unmodified physical objective.
 /// Reads the thread's `g_lowered` (set by `prepare`); a no-op when none authored.
-/// Four lowered terms:
+/// Five lowered terms:
 ///   • proximity — Σ w·(edge gap from part pad to hub pin pad)
 ///   • keep-out  — Σ KEEPOUT_W·max(0, min − courtyard gap)
 ///   • net weight — Σ (w−1)·net wirelength  (net-length raises, deprioritize lowers)
 ///   • input-loop boost — extra loop inductance weight on a declared input rail
 ///     (fires even with an integrated inductor, which the auto switcher test misses)
+///   • group cohesion — Σ GROUP_W·(member→centroid distance) per `(group …)`
 fn constraintCost(
     parts: []const Part,
     idx_of: *std.StringHashMap(usize),
@@ -2488,7 +2505,9 @@ fn constraintCost(
     params: Params,
 ) f64 {
     const L = g_lowered;
-    if (L.prox.len == 0 and L.keepouts.len == 0 and L.net_weight.len == 0 and L.input_rail.len == 0) return 0;
+    // Fast exit when nothing was authored (the common case: most designs have no
+    // constraints). Sum of slice lengths == 0 ⇒ every term is empty.
+    if (L.prox.len + L.keepouts.len + L.net_weight.len + L.input_rail.len + L.groups.len == 0) return 0;
     var c: f64 = 0;
 
     for (L.prox) |t| {
@@ -2520,6 +2539,20 @@ fn constraintCost(
             const nh = loopMetric(parts, lp, surrogatePwrLeg(parts, lp)).nh;
             c += (INPUT_LOOP_BOOST - 1.0) * params.loop_w * lp.weight * nh;
         }
+    }
+    for (L.groups) |g| {
+        // Pull each member toward the group's centroid (cohesion). Σ of the
+        // member→centroid distances — minimised when the cluster is tight.
+        var cx: f64 = 0;
+        var cy: f64 = 0;
+        for (g.members) |m| {
+            cx += parts[m].x;
+            cy += parts[m].y;
+        }
+        const inv = 1.0 / @as(f64, @floatFromInt(g.members.len));
+        cx *= inv;
+        cy *= inv;
+        for (g.members) |m| c += GROUP_W * std.math.hypot(parts[m].x - cx, parts[m].y - cy);
     }
     return c;
 }
