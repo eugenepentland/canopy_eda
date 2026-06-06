@@ -397,7 +397,7 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     const shown = if (tune.tuned) tune.params else (readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{});
 
     // Per-part objective blame for the findings sidecar (index-aligned w/ parts).
-    const blame = try ctx.allocator.alloc(f64, placement.parts.len);
+    const blame = try req.arena.alloc(f64, placement.parts.len);
     optimizer.perPartBlame(placement, shown, blame);
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
@@ -464,10 +464,16 @@ pub fn renderDesignPng(
     else if (opts.regen) null else readAutoPoses(alloc, project_dir, name);
     const grid_only = opts.sub == null and opts.layout == null and !opts.regen and cached == null;
     const png_params = optimizer.Params{ .courtyard_overlap = opts.court_overlap };
-    const placement = (if (grid_only)
+    // A named saved layout renders VERBATIM (placeFromPoses) — "show me this
+    // layout" must display exactly what was saved, not a re-optimized version:
+    // refine can drift a hand-tuned layout to a worse arrangement (e.g. a 70.8
+    // hand layout relaxing back to 86 because it isn't a relax fixed-point).
+    const placement = (if (opts.layout != null and cached != null)
+        optimizer.placeFromPoses(alloc, eff_block, project_dir, cached.?, png_params)
+    else if (grid_only)
         optimizer.gridPlace(alloc, eff_block, project_dir, png_params)
     else
-        optimizer.solve(alloc, eff_block, project_dir, cached, png_params, if (opts.layout != null) .refine else .place)) catch return error.BuildFailed;
+        optimizer.solve(alloc, eff_block, project_dir, cached, png_params, .place)) catch return error.BuildFailed;
 
     const route_params = router.RouteParams{};
     const routed: ?router.RouteResult = if (opts.route) (router.route(alloc, placement, route_params) catch null) else null;
@@ -848,12 +854,17 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         res.status = 400;
         return;
     }
+    // Everything here is request-scoped; use req.arena (reclaimed after the
+    // response is sent) — NOT ctx.allocator (the global page_allocator, never
+    // freed: an agent hammering this endpoint for a layout search would OOM the
+    // server, since each call allocates the parsed design + full scorePoses set).
+    const arena = req.arena;
     var poses: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
     for (parts_v.array.items) |it| {
         if (it != .object) continue;
         const ref = it.object.get("ref") orelse continue;
         if (ref != .string) continue;
-        try poses.append(ctx.allocator, .{
+        try poses.append(arena, .{
             .ref = ref.string,
             .x = jsonNum(it.object.get("x")),
             .y = jsonNum(it.object.get("y")),
@@ -861,20 +872,20 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         });
     }
 
-    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    var eval = Evaluator.init(arena, ctx.project_dir);
     defer eval.deinit();
     var module_res: ?modules_mod.ResolvedBlock = null;
     defer if (module_res) |mr| {
         mr.eval.deinit();
-        ctx.allocator.destroy(mr.eval);
+        arena.destroy(mr.eval);
     };
-    const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
+    const block: *env_mod.DesignBlock = resolveBlock(arena, ctx.project_dir, name, &eval, &module_res) orelse {
         res.status = 500;
         res.body = NO_BLOCK_MSG;
         return;
     };
     const eff_block = if (subSlug(req)) |s|
-        (descendToSub(ctx.allocator, block, s) orelse {
+        (descendToSub(arena, block, s) orelse {
             res.status = 404;
             res.body = NO_SUB_MSG;
             return;
@@ -883,13 +894,13 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         block;
 
     const tune = parseTuning(req);
-    const bd = optimizer.scorePoses(ctx.allocator, eff_block, ctx.project_dir, poses.items, tune.params) catch {
+    const bd = optimizer.scorePoses(arena, eff_block, ctx.project_dir, poses.items, tune.params) catch {
         res.status = 500;
         res.body = "score error";
         return;
     };
 
-    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    var aw: std.Io.Writer.Allocating = .init(arena);
     try writeBreakdownJson(&aw.writer, bd, tune.params);
     res.content_type = .JSON;
     res.body = aw.written();
