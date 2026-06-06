@@ -396,8 +396,12 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     if (placement.generated) writeAutoCache(ctx.allocator, ctx.project_dir, name, placement, tune.params);
     const shown = if (tune.tuned) tune.params else (readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{});
 
+    // Per-part objective blame for the findings sidecar (index-aligned w/ parts).
+    const blame = try ctx.allocator.alloc(f64, placement.parts.len);
+    optimizer.perPartBlame(placement, shown, blame);
+
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
-    try writePlacementJson(&aw.writer, placement, shown, name);
+    try writePlacementJson(&aw.writer, placement, shown, name, blame);
     res.content_type = .JSON;
     res.body = aw.written();
 }
@@ -586,8 +590,23 @@ fn csvParam(arena: std.mem.Allocator, req: *httpz.Request, key: []const u8) []co
 /// weights, the visible `score`, the full objective `breakdown` (raw terms plus
 /// their weighted contributions and the summed objective), the bounding box, and
 /// each part's `ref/kind/x/y/rot/hw/hh`.
-fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimizer.Params, name: []const u8) std.Io.Writer.Error!void {
+/// World position (mm) of a footprint-local pad on a placed part.
+fn worldPad(pt: optimizer.Part, pad: optimizer.PadRect) [2]f64 {
+    const a = pt.rot * std.math.pi / 180.0;
+    const c = @cos(a);
+    const s = @sin(a);
+    return .{ pt.x + pad.x * c - pad.y * s, pt.y + pad.x * s + pad.y * c };
+}
+
+/// Layout JSON + a `findings` sidecar: each part's normalized objective `blame`
+/// (0–1, the render heatmap value) and a `loops` list (per decoupling loop:
+/// cap, hub, inductance nH, and power-leg length mm) — the machine-readable twin
+/// of the PNG diagnostic overlays, so an agent gets precise numbers, not pixels.
+/// `blame` is index-aligned with `p.parts` (empty ⇒ all zero).
+fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimizer.Params, name: []const u8, blame: []const f64) std.Io.Writer.Error!void {
     const b = p.breakdown;
+    var bmax: f64 = 0;
+    for (blame) |v| bmax = @max(bmax, v);
     try w.writeAll(NAME_OPEN);
     try writeJsonStr(w, name);
     try w.print(",\"generated\":{s},", .{if (p.generated) "true" else "false"});
@@ -603,7 +622,8 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"ref\":");
         try writeJsonStr(w, pt.ref_des);
-        try w.print(",\"kind\":\"{s}\",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"fallback\":{s}}}", .{
+        const bl = if (i < blame.len and bmax > 0) blame[i] / bmax else 0;
+        try w.print(",\"kind\":\"{s}\",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"fallback\":{s},\"blame\":{d:.3}}}", .{
             if (pt.kind == .hub) "hub" else "passive",
             pt.x,
             pt.y,
@@ -611,7 +631,22 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
             pt.hw,
             pt.hh,
             if (pt.fallback) "true" else "false",
+            bl,
         });
+    }
+    try w.writeAll("],\"loops\":[");
+    for (p.loops, 0..) |L, i| {
+        if (i > 0) try w.writeAll(",");
+        const cap = p.parts[L.cap];
+        const hub = p.parts[L.hub];
+        const cw = worldPad(cap, L.cap_pwr);
+        const hp = worldPad(hub, L.hub_pwr_pin);
+        const leg = std.math.hypot(cw[0] - hp[0], cw[1] - hp[1]);
+        try w.writeAll("{\"cap\":");
+        try writeJsonStr(w, cap.ref_des);
+        try w.writeAll(",\"hub\":");
+        try writeJsonStr(w, hub.ref_des);
+        try w.print(",\"nh\":{d:.3},\"leg_mm\":{d:.3}}}", .{ optimizer.loopNh(p.parts, L), leg });
     }
     try w.writeAll("]}");
 }
