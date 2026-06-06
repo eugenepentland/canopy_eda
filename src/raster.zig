@@ -116,10 +116,34 @@ pub const Canvas = struct {
         return std.math.clamp(v, 0, @as(i64, @intCast(self.ih)));
     }
 
-    /// Filled polygon (final-pixel coords, even-odd rule). Up to 64 vertices.
+    /// Filled polygon (final-pixel coords, even-odd rule). Handles arbitrary
+    /// vertex counts: a 64-slot stack scratch covers simple pads/quads, and
+    /// KiCad custom pads (rounded outlines, 100-200+ points) spill to the heap.
     pub fn fillPoly(self: *Canvas, pts: []const [2]f32, c: Rgb, a: f32) void {
+        if (pts.len < 3) return;
         const s: f32 = @floatFromInt(self.ss);
-        var ip: [64][2]f32 = undefined;
+        // `ip` holds the supersampled points; `xs` the per-scanline crossings
+        // (at most one per edge ⇒ sized to the vertex count). Both fall back to
+        // the stack buffers if the heap allocation fails — only the rare big
+        // polygon would then truncate, never the common case.
+        var ip_buf: [64][2]f32 = undefined;
+        var xs_buf: [64]f32 = undefined;
+        var ip: [][2]f32 = &ip_buf;
+        var xs: []f32 = &xs_buf;
+        var heap = false;
+        if (pts.len > ip_buf.len) {
+            if (self.alloc.alloc([2]f32, pts.len)) |b1| {
+                if (self.alloc.alloc(f32, pts.len)) |b2| {
+                    ip = b1;
+                    xs = b2;
+                    heap = true;
+                } else |_| self.alloc.free(b1);
+            } else |_| {}
+        }
+        defer if (heap) {
+            self.alloc.free(ip);
+            self.alloc.free(xs);
+        };
         const n = @min(pts.len, ip.len);
         if (n < 3) return;
         var min_y: f32 = std.math.floatMax(f32);
@@ -133,7 +157,6 @@ pub const Canvas = struct {
         const iy_end: i64 = @min(@as(i64, @intCast(self.ih)), @as(i64, @intFromFloat(@ceil(max_y))) + 1);
         while (iy < iy_end) : (iy += 1) {
             const yc: f32 = @as(f32, @floatFromInt(iy)) + 0.5;
-            var xs: [64]f32 = undefined;
             var m: usize = 0;
             var j: usize = 0;
             while (j < n) : (j += 1) {
@@ -301,6 +324,24 @@ pub const Canvas = struct {
         return png.encodeRgb(alloc, self.w, self.h, out);
     }
 };
+
+test "fillPoly handles polygons past the 64-vertex stack scratch" {
+    // A KiCad custom pad outline can carry 100-200+ vertices; a fixed 64-slot
+    // buffer used to truncate it mid-shape, leaving the fill open. Approximate a
+    // disc with 160 points and assert the centre actually fills.
+    const alloc = std.testing.allocator;
+    var cv = try Canvas.init(alloc, 40, 40, 1, Rgb.hex("#000000"));
+    defer cv.deinit();
+    const N = 160;
+    var pts: [N][2]f32 = undefined;
+    for (0..N) |i| {
+        const t = @as(f32, @floatFromInt(i)) / N * 2.0 * std.math.pi;
+        pts[i] = .{ 20 + 15 * @cos(t), 20 + 15 * @sin(t) };
+    }
+    cv.fillPoly(&pts, Rgb.hex("#b08d57"), 1.0);
+    const o = (20 * cv.iw + 20) * 3; // centre pixel
+    try std.testing.expect(cv.buf[o] == 0xb0 and cv.buf[o + 1] == 0x8d and cv.buf[o + 2] == 0x57);
+}
 
 test "canvas fills and downscales to a valid png" {
     const alloc = std.testing.allocator;
