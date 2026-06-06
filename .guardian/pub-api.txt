@@ -332,6 +332,9 @@ src/export_kicad_netlist.zig::collectNets fn
 src/export_kicad_netlist.zig::extractFootprintName fn
 src/export_kicad_netlist.zig::extractPadNames fn
 src/export_kicad_netlist.zig::writeNetlist fn
+src/font5x7.zig::GH value
+src/font5x7.zig::GW value
+src/font5x7.zig::cols fn
 src/fuzz_layout.zig::main fn
 src/id_insert.zig::IdInsertError value
 src/id_insert.zig::applyInserts fn
@@ -418,6 +421,13 @@ src/placement/router.zig::Via struct_
 src/placement/router.zig::groundVias fn
 src/placement/router.zig::returnPathViolations fn
 src/placement/router.zig::route fn
+src/png.zig::Error value
+src/png.zig::encodeRgb fn
+src/raster.zig::Anchor enum_
+src/raster.zig::Canvas struct_
+src/raster.zig::Caps enum_
+src/raster.zig::PathMode enum_
+src/raster.zig::Rgb struct_
 src/render_block_types.zig::Category enum_
 src/render_block_types.zig::categoryColor fn
 src/render_block_types.zig::classifyByName fn
@@ -437,6 +447,8 @@ src/render_html.zig::setupRenderCtx fn
 src/render_json.zig::RenderCtx value
 src/render_json.zig::RenderError value
 src/render_json.zig::renderSceneGraph fn
+src/render_pcb_png.zig::Options struct_
+src/render_pcb_png.zig::render fn
 src/render_svg/branch.zig::drawBranchTreeLeft fn
 src/render_svg/branch.zig::drawBranchTreeRight fn
 src/render_svg/branch.zig::drawPassiveChainLeft fn
@@ -771,6 +783,8 @@ src/serve/passwords.zig::purge fn
 src/serve/passwords.zig::set fn
 src/serve/passwords.zig::verify fn
 src/serve/pcb_layout_page.zig::HandlerError value
+src/serve/pcb_layout_page.zig::PngError value
+src/serve/pcb_layout_page.zig::PngRequest struct_
 src/serve/pcb_layout_page.zig::RefPose value
 src/serve/pcb_layout_page.zig::SyncPose struct_
 src/serve/pcb_layout_page.zig::SyncVia struct_
@@ -780,11 +794,13 @@ src/serve/pcb_layout_page.zig::loadSyncLayout fn
 src/serve/pcb_layout_page.zig::loadSyncVias fn
 src/serve/pcb_layout_page.zig::pcbLayoutJsonApi fn
 src/serve/pcb_layout_page.zig::pcbLayoutPage fn
+src/serve/pcb_layout_page.zig::pcbPngApi fn
 src/serve/pcb_layout_page.zig::pcbProgressApi fn
 src/serve/pcb_layout_page.zig::pcbRegenStartApi fn
 src/serve/pcb_layout_page.zig::pcbRouteApi fn
 src/serve/pcb_layout_page.zig::pcbScoreApi fn
 src/serve/pcb_layout_page.zig::pcbScoreBatchApi fn
+src/serve/pcb_layout_page.zig::renderDesignPng fn
 src/serve/pcb_layout_page.zig::rescoreLayoutsApi fn
 src/serve/pcb_layout_page.zig::saveNamedLayoutApi fn
 src/serve/pcb_layout_page.zig::savePcbCourtyardApi fn
