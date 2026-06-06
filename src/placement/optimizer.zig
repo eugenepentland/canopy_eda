@@ -69,6 +69,9 @@ const LOOP_W: f64 = 6.0; // weight on the loop *inductance* term (nH; see
 // via floor, so 6.0 keeps this term's magnitude near the old length-based 3.0;
 // PROVISIONAL — the research flags that PCB weights need empirical re-tuning.
 const K_COMPACT: f64 = 0.10; // pull toward the cluster centroid (keeps HPWL tight)
+const GROUP_FORCE_PER_W: f64 = 0.05; // relaxation cohesion-force gain per unit `group_w`
+// (g_group_force = group_w·this); default group_w=2 ⇒ 0.10, ≈ K_COMPACT.
+const ZONE_FORCE_PER_W: f64 = 0.04; // relaxation zoning-force gain per unit `group_zone_w`
 const STARTS: usize = 48; // multi-start seeds; keep the lowest-scoring arrangement
 const MULTISTART_MAX_PARTS: usize = 32; // above this, single start (bound O(n²·starts))
 // The once-per-solve quality passes — rotation refine, the greedy `polish` local
@@ -222,6 +225,16 @@ pub const Params = struct {
     /// and the SW pour on a power board. 0 = pack to touching (the default for
     /// dense jellybean boards). Set ~0.3–0.5 for switching-regulator layouts.
     route_gap: f64 = 0,
+    /// Bank-loop relief (0–1): when several caps in one `(group …)` share one
+    /// power rail they form a *bank* — collectively they only need the cluster
+    /// close to the rail, not each cap independently hugging its own access point
+    /// on the IC's (often tall, central) supply pad. The per-cap loop term pulls
+    /// each cap to the nearest point on that pad, which on a tall pad scatters the
+    /// bank along the pad's full height (top vs bottom of the IC). This knob
+    /// removes that fraction of the loop pull for each cap in a ≥2-member same-rail
+    /// bank (a search-only delta in `constraintCost`, never the reported score), so
+    /// the group's cohesion can pack the bank into one tight block. 0 = off.
+    group_loop_relief: f64 = 0,
 };
 
 /// Which phase of the solve a progress frame came from — drives the label the
@@ -530,6 +543,28 @@ const Lowered = struct {
 /// concurrent solves on different threads stay isolated. Default-empty so it is
 /// inert until a design with a `(constraints …)` form sets it.
 threadlocal var g_lowered: Lowered = .{};
+
+/// Cohesion-force gain for the relaxation: each `(group …)` member is pulled
+/// toward its group's centroid by `g_group_force·(centroid − pos)`, the
+/// position-space twin of the scalar `group_w` cohesion in `constraintCost`.
+/// Without it cohesion only *selects* among arrangements the spring relaxation
+/// produces — it can't *create* a tight block (the relaxation never proposes
+/// one). Set in `prepare` from `params.group_w`; 0 ⇒ no cohesion force.
+threadlocal var g_group_force: f64 = 0;
+
+/// Per-loop multiplier on the decoupling-loop *force* (index-aligned with the
+/// solve's `built.loops`), the force-space twin of `group_loop_relief` in
+/// `constraintCost`: 1.0 for a lone cap, `1 − group_loop_relief` for a cap in a
+/// ≥2-member same-rail bank, so the relaxation stops yanking every bank cap onto
+/// the rail pad and lets cohesion pack them. Set in `prepare`; empty ⇒ all 1.0.
+threadlocal var g_loop_force_scale: []const f64 = &.{};
+
+/// Zoning-force gain for the relaxation (position-space twin of the scalar
+/// `group_zone_w`): each `(group …)` is pulled toward its hub's *connecting side*
+/// (VIN caps left, VOUT caps right, …) so the board reads as a power-flow layout
+/// instead of an isotropic blob. Set in `prepare` from `params.group_zone_w`;
+/// 0 ⇒ no zoning force (cohesion only).
+threadlocal var g_zone_force: f64 = 0;
 
 /// Per-side amount (mm) the collision/legalization keepout boxes are shrunk so
 /// adjacent courtyards may overlap their clearance margins (see
@@ -1033,6 +1068,38 @@ fn resolveConstraints(
     };
 }
 
+/// True when part index `p` is one of a group's resolved members.
+fn memberOf(members: []const usize, p: usize) bool {
+    for (members) |m| {
+        if (m == p) return true;
+    }
+    return false;
+}
+
+/// Per-loop force/cost multiplier for bank-loop relief (index-aligned with
+/// `loops`): `1 − relief` for a cap that is in a `(group …)` with ≥2 members on
+/// the *same* power rail (a cap bank), else `1.0`. Position-invariant (membership
+/// + rail are fixed for the solve), so it is computed once in `prepare` and read
+/// by both `accumulateLoops` (force) and `constraintCost` (objective) so the two
+/// stay consistent. `relief ≤ 0` ⇒ all `1.0` (relief off).
+fn bankLoopScale(arena: std.mem.Allocator, loops: []const Loop, lowered: Lowered, relief: f64) std.mem.Allocator.Error![]const f64 {
+    const scale = try arena.alloc(f64, loops.len);
+    @memset(scale, 1.0);
+    if (relief <= 0 or !lowered.active) return scale;
+    const r = std.math.clamp(relief, 0.0, 1.0);
+    for (lowered.groups) |g| {
+        for (loops, 0..) |lp, li| {
+            if (!memberOf(g.members, lp.cap)) continue;
+            var bank: usize = 0;
+            for (loops) |lp2| {
+                if (lp2.pwr_net == lp.pwr_net and memberOf(g.members, lp2.cap)) bank += 1;
+            }
+            if (bank >= 2) scale[li] = @min(scale[li], 1.0 - r);
+        }
+    }
+    return scale;
+}
+
 /// Resolve a group's member refs to part indices (in the arena). Unresolved refs
 /// are reported via `diags` when provided, else skipped.
 fn resolveGroupMembers(
@@ -1057,6 +1124,13 @@ fn resolveGroupMembers(
 /// largest hub part) and the unit direction, in hub-local frame, from the hub
 /// centre toward the hub pads the group connects to — used to zone the cluster to
 /// the correct side of the IC. `hub = -1` (no zoning) when no hub/shared pad.
+///
+/// The direction is computed over the group's **non-ground** hub pads only.
+/// Ground pads are scattered all around an IC (and a switcher's exposed pad sits
+/// dead-centre), so folding them in averages the side away — an input bank wired
+/// to a left-edge VIN pad would zone *right* purely because more GND pads happen
+/// to sit on the right. The signature rail (VIN, VOUT, SW, …) is what defines a
+/// group's side, so ground is excluded.
 fn makeGroupTerm(arena: std.mem.Allocator, members: []usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) GroupTerm {
     _ = arena;
     var hub: i32 = -1;
@@ -1064,11 +1138,7 @@ fn makeGroupTerm(arena: std.mem.Allocator, members: []usize, parts: []const Part
     for (parts, 0..) |p, i| {
         if (p.kind != .hub) continue;
         // The hub a group orbits must not be a member of the group itself.
-        var is_member = false;
-        for (members) |m| {
-            if (m == i) is_member = true;
-        }
-        if (is_member) continue;
+        if (memberOf(members, i)) continue;
         const area = p.hw * p.hh;
         if (area > best_area) {
             best_area = area;
@@ -1082,12 +1152,11 @@ fn makeGroupTerm(arena: std.mem.Allocator, members: []usize, parts: []const Part
     var sy: f64 = 0;
     var n: usize = 0;
     for (nets) |net| {
+        if (isGroundName(shortName(net.name))) continue; // ground defines no side
         var touches = false;
         for (net.pins) |pp| {
             const pi = idx_of.get(pp.ref_des) orelse continue;
-            for (members) |m| {
-                if (m == pi) touches = true;
-            }
+            if (memberOf(members, pi)) touches = true;
         }
         if (!touches) continue;
         for (net.pins) |pp| {
@@ -1225,6 +1294,13 @@ fn prepare(
     // path; `validateConstraints` surfaces them for authoring.
     const lowered = try resolveConstraints(arena, block, instances, nets, parts, &idx_of, null);
     g_lowered = lowered;
+    // Relaxation cohesion- and zoning-force gains (position-space twins of the
+    // scalar `group_w` / `group_zone_w` terms in `constraintCost`).
+    g_group_force = if (lowered.active) @max(0.0, params.group_w) * GROUP_FORCE_PER_W else 0;
+    g_zone_force = if (lowered.active) @max(0.0, params.group_zone_w) * ZONE_FORCE_PER_W else 0;
+    // Per-loop force relief for ≥2-member same-rail banks (twin of the scalar
+    // `group_loop_relief`). Precomputed once: bank membership is position-invariant.
+    g_loop_force_scale = try bankLoopScale(arena, built.loops, lowered, params.group_loop_relief);
     // Publish the courtyard-overlap allowance for the thread's collision helpers.
     // Capped at `bbox_margin` per side so the collision box stays ≥ the real
     // footprint extent (courtyard = ceilToGrid(extent+margin) ⇒ courtyard−margin
@@ -2711,7 +2787,12 @@ fn objectiveCost(
 ///   • net weight — Σ (w−1)·net wirelength  (net-length raises, deprioritize lowers)
 ///   • input-loop boost — extra loop inductance weight on a declared input rail
 ///     (fires even with an integrated inductor, which the auto switcher test misses)
-///   • group cohesion — Σ GROUP_W·(member→centroid distance) per `(group …)`
+///   • group cohesion — Σ group_w·(member→centroid distance) per `(group …)`,
+///     a per-member pull (force on every member, not just the bbox extremes) —
+///     the scalar twin of the relaxation force in `accumulateGroupCohesion`
+///   • group zoning — group_zone_w·(centroid → hub's connecting side)
+///   • bank-loop relief — removes `group_loop_relief` of the per-cap loop pull for
+///     caps in a ≥2-member same-rail bank (twin of `g_loop_force_scale`)
 fn constraintCost(
     parts: []const Part,
     idx_of: *std.StringHashMap(usize),
@@ -2755,35 +2836,46 @@ fn constraintCost(
         }
     }
     for (L.groups) |g| {
-        // Cohesion: penalize the group's bounding box (member centres) so the
-        // cluster packs into one tight block instead of scattering around the hub.
-        var minx = parts[g.members[0]].x;
-        var maxx = minx;
-        var miny = parts[g.members[0]].y;
-        var maxy = miny;
+        const inv = 1.0 / @as(f64, @floatFromInt(g.members.len));
+        // Centroid of the member centres.
         var cx: f64 = 0;
         var cy: f64 = 0;
         for (g.members) |m| {
-            const px = parts[m].x;
-            const py = parts[m].y;
-            minx = @min(minx, px);
-            maxx = @max(maxx, px);
-            miny = @min(miny, py);
-            maxy = @max(maxy, py);
-            cx += px;
-            cy += py;
+            cx += parts[m].x;
+            cy += parts[m].y;
         }
-        c += params.group_w * ((maxx - minx) + (maxy - miny));
+        cx *= inv;
+        cy *= inv;
+        // Cohesion: pull *every* member toward the cluster centroid (Σ of the
+        // members' distances to their mean position — a moment-of-inertia term).
+        // Unlike a bounding-box penalty, this exerts a restoring force on the
+        // interior members too, not just the four extremes — so a loop pull that
+        // scatters individual caps along a tall pad is opposed cap-by-cap.
+        for (g.members) |m| {
+            c += params.group_w * std.math.hypot(parts[m].x - cx, parts[m].y - cy);
+        }
         // Zoning: pull the cluster's centroid to the side of the hub it wires to,
         // a fixed reach beyond the hub edge, so groups land on distinct sides.
         if (g.hub >= 0 and params.group_zone_w > 0) {
-            const inv = 1.0 / @as(f64, @floatFromInt(g.members.len));
             const hub = parts[@intCast(g.hub)];
             const d = rotateLocal(g.dirx, g.diry, hub.rot);
             const reach = @abs(d.x) * hub.hw + @abs(d.y) * hub.hh + ZONE_GAP_MM;
             const tx = hub.x + d.x * reach;
             const ty = hub.y + d.y * reach;
-            c += params.group_zone_w * std.math.hypot(cx * inv - tx, cy * inv - ty);
+            c += params.group_zone_w * std.math.hypot(cx - tx, cy - ty);
+        }
+    }
+    // Bank-loop relief: caps in a ≥2-member same-rail bank don't each need to reach
+    // the rail pad — removing a fraction of their per-cap loop pull lets cohesion
+    // pack them into one block (see `Params.group_loop_relief`). This cancels
+    // exactly the matching fraction `objectiveCost` charged via `weightedLoop`
+    // (`1 − g_loop_force_scale`), so a bank cap's net loop contribution stays ≥0.
+    if (g_loop_force_scale.len == loops.len) {
+        for (loops, 0..) |lp, li| {
+            const relief = 1.0 - g_loop_force_scale[li];
+            if (relief <= 0) continue;
+            const nh = loopMetric(parts, lp, surrogatePwrLeg(parts, lp)).nh;
+            c -= relief * params.loop_w * lp.weight * nh;
         }
     }
     return c;
@@ -3533,6 +3625,7 @@ fn relax(parts: []Part, springs: []const Spring, loops: []const Loop) void {
 
         accumulateLoops(parts, loops, &ax, &ay);
         accumulateCompaction(parts, &ax, &ay);
+        accumulateGroupCohesion(parts, &ax, &ay);
         _ = accumulateRepulsion(parts, boxes[0..n], &ax, &ay, 0);
 
         var maxdisp: f64 = 0;
@@ -3558,14 +3651,68 @@ fn relax(parts: []Part, springs: []const Spring, loops: []const Loop) void {
 /// gap vector, so it vanishes once the pads touch — repulsion then sets the
 /// final clearance. This replaces the old centroid power/ground springs.
 fn accumulateLoops(parts: []const Part, loops: []const Loop, ax: []f64, ay: []f64) void {
-    for (loops) |lp| {
+    for (loops, 0..) |lp, li| {
+        // Bank caps (a ≥2-member same-rail group) get their loop force relieved so
+        // the relaxation stops yanking each onto the rail pad — cohesion packs them
+        // (see `g_loop_force_scale`). 1.0 for a lone cap / when relief is off.
+        const scale = if (li < g_loop_force_scale.len) g_loop_force_scale[li] else 1.0;
+        if (scale <= 0) continue;
         // Both legs pull toward their *pinned* hub pads (matching the score), so a
         // cap settles with each pad facing its assigned pin — power pad to the
         // supply pin, ground pad to the nearby ground pin — not the nearest of each.
         const pwr_pin = [_]PadRect{lp.hub_pwr_pin};
         const gnd_pin = [_]PadRect{lp.hub_gnd_pin};
-        accumulateLeg(parts, lp.cap, lp.cap_pwr, lp.hub, &pwr_pin, ax, ay);
-        accumulateLeg(parts, lp.cap, lp.cap_gnd, lp.hub, &gnd_pin, ax, ay);
+        accumulateLeg(parts, lp.cap, lp.cap_pwr, lp.hub, &pwr_pin, scale, ax, ay);
+        accumulateLeg(parts, lp.cap, lp.cap_gnd, lp.hub, &gnd_pin, scale, ax, ay);
+    }
+}
+
+/// Cohesion force: pull every `(group …)` member toward its group's centroid,
+/// the position-space twin of the `constraintCost` cohesion term (which alone
+/// can only *select*, not *create*, a tight block — see `g_group_force`). No-op
+/// when no groups are live or the gain is zero.
+fn accumulateGroupCohesion(parts: []const Part, ax: []f64, ay: []f64) void {
+    if (g_group_force <= 0 or !g_lowered.active) return;
+    for (g_lowered.groups) |g| {
+        if (g.members.len < 2) continue;
+        const inv = 1.0 / @as(f64, @floatFromInt(g.members.len));
+        var cx: f64 = 0;
+        var cy: f64 = 0;
+        // The group's anchor is its largest hub member (the IC) — it stays put so
+        // the cluster gathers around it, not the other way round. A *secondary* hub
+        // (e.g. a power inductor in the switching cell) is NOT the anchor and IS
+        // pulled in, so the inductor docks beside the IC instead of floating off.
+        var anchor: usize = g.members[0];
+        var anchor_area: f64 = -1;
+        for (g.members) |m| {
+            cx += parts[m].x;
+            cy += parts[m].y;
+            if (parts[m].kind == .hub and parts[m].hw * parts[m].hh > anchor_area) {
+                anchor_area = parts[m].hw * parts[m].hh;
+                anchor = m;
+            }
+        }
+        cx *= inv;
+        cy *= inv;
+        // Zoning target: the point a fixed reach beyond the hub edge on the side
+        // the group wires to (VIN caps left, VOUT caps right, …). Pulling every
+        // member toward it migrates the whole cluster to that side; null ⇒ no zone.
+        var zone: ?Pt = null;
+        if (g_zone_force > 0 and g.hub >= 0) {
+            const hub = parts[@intCast(g.hub)];
+            const d = rotateLocal(g.dirx, g.diry, hub.rot);
+            const reach = @abs(d.x) * hub.hw + @abs(d.y) * hub.hh + ZONE_GAP_MM;
+            zone = .{ .x = hub.x + d.x * reach, .y = hub.y + d.y * reach };
+        }
+        for (g.members) |m| {
+            if (anchor_area >= 0 and m == anchor) continue; // keep the IC anchored
+            ax[m] += g_group_force * (cx - parts[m].x);
+            ay[m] += g_group_force * (cy - parts[m].y);
+            if (zone) |z| {
+                ax[m] += g_zone_force * (z.x - parts[m].x);
+                ay[m] += g_zone_force * (z.y - parts[m].y);
+            }
+        }
     }
 }
 
@@ -3577,6 +3724,7 @@ fn accumulateLeg(
     cap_pad: PadRect,
     hub: usize,
     hub_pads: []const PadRect,
+    scale: f64,
     ax: []f64,
     ay: []f64,
 ) void {
@@ -3584,8 +3732,8 @@ fn accumulateLeg(
     const near = nearestHubPad(cr, parts[hub], hub_pads);
     if (near.gap < 1e-6) return; // touching → loop leg already minimal
     const np = nearestPoints(cr, near.rect);
-    const dx = K_DECOUPLE * (np.b.x - np.a.x);
-    const dy = K_DECOUPLE * (np.b.y - np.a.y);
+    const dx = scale * K_DECOUPLE * (np.b.x - np.a.x);
+    const dy = scale * K_DECOUPLE * (np.b.y - np.a.y);
     ax[cap] += dx;
     ay[cap] += dy;
     ax[hub] -= dx;
@@ -4459,4 +4607,56 @@ test "congestionPenalty fires only on dense regions" {
     // binIndex clamps out-of-range fractions into [0, CONGEST_BINS-1].
     try testing.expectEqual(@as(usize, 0), binIndex(-1.5));
     try testing.expectEqual(CONGEST_BINS - 1, binIndex(999));
+}
+
+// spec: placement/optimizer - relieves the loop pull of caps in a same-rail bank
+test "bankLoopScale relieves only caps in a >=2-member same-rail bank" {
+    const z: PadRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    // Caps 1 & 2 share rail (net 0) and the group → a bank; cap 3 is alone on net 1.
+    const loops = [_]Loop{
+        .{ .cap = 1, .hub = 0, .cap_pwr = z, .cap_gnd = z, .hub_pwr = &.{}, .hub_gnd = &.{}, .pwr_net = 0 },
+        .{ .cap = 2, .hub = 0, .cap_pwr = z, .cap_gnd = z, .hub_pwr = &.{}, .hub_gnd = &.{}, .pwr_net = 0 },
+        .{ .cap = 3, .hub = 0, .cap_pwr = z, .cap_gnd = z, .hub_pwr = &.{}, .hub_gnd = &.{}, .pwr_net = 1 },
+    };
+    const members = [_]usize{ 1, 2, 3 };
+    const groups = [_]GroupTerm{.{ .members = &members }};
+    const lowered = Lowered{ .groups = &groups, .active = true };
+
+    const scale = try bankLoopScale(testing.allocator, &loops, lowered, 0.5);
+    defer testing.allocator.free(@constCast(scale));
+    try testing.expectApproxEqAbs(@as(f64, 0.5), scale[0], 1e-9); // bank cap
+    try testing.expectApproxEqAbs(@as(f64, 0.5), scale[1], 1e-9); // bank cap
+    try testing.expectApproxEqAbs(@as(f64, 1.0), scale[2], 1e-9); // lone cap → no relief
+
+    // relief = 0 ⇒ every entry stays 1.0 (the feature is off).
+    const off = try bankLoopScale(testing.allocator, &loops, lowered, 0);
+    defer testing.allocator.free(@constCast(off));
+    for (off) |s| try testing.expectApproxEqAbs(@as(f64, 1.0), s, 1e-9);
+}
+
+// spec: placement/optimizer - pulls group members toward their centroid, anchoring the IC
+test "accumulateGroupCohesion pulls members in and keeps the hub anchored" {
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 3, .hh = 2, .pads = &.{}, .fallback = true, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &.{}, .fallback = true, .x = -10, .y = 0 },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 1, .hh = 1, .pads = &.{}, .fallback = true, .x = 10, .y = 0 },
+    };
+    const members = [_]usize{ 0, 1, 2 };
+    const groups = [_]GroupTerm{.{ .members = &members }};
+
+    g_lowered = .{ .groups = &groups, .active = true };
+    g_group_force = 0.4;
+    g_zone_force = 0;
+    defer {
+        g_lowered = .{};
+        g_group_force = 0;
+    }
+    var ax = [_]f64{ 0, 0, 0 };
+    var ay = [_]f64{ 0, 0, 0 };
+    accumulateGroupCohesion(&parts, &ax, &ay);
+    // Centroid is at x=0 (the IC). The left cap is pulled right (+), the right cap
+    // left (−); the IC (largest hub = anchor) gets no force.
+    try testing.expect(ax[1] > 0);
+    try testing.expect(ax[2] < 0);
+    try testing.expectApproxEqAbs(@as(f64, 0), ax[0], 1e-9);
 }

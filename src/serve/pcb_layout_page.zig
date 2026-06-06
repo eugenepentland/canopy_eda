@@ -423,6 +423,11 @@ pub const PngRequest = struct {
     court_overlap: f64 = 0,
     /// Routing/copper room between courtyards (mm); 0 = touch (default).
     route_gap: f64 = 0,
+    /// Functional-group cohesion / zoning / bank-loop-relief tuning knobs
+    /// (negative ⇒ "unset", keep the optimizer default).
+    group_w: f64 = -1,
+    group_zone_w: f64 = -1,
+    group_loop_relief: f64 = -1,
     /// Diagnostic overlays (see render_pcb_png.Options).
     blame: bool = false,
     loop_labels: bool = false,
@@ -465,7 +470,10 @@ pub fn renderDesignPng(
         readLayoutPoses(alloc, project_dir, name, ln)
     else if (opts.regen) null else readAutoPoses(alloc, project_dir, name);
     const grid_only = opts.sub == null and opts.layout == null and !opts.regen and cached == null;
-    const png_params = optimizer.Params{ .courtyard_overlap = opts.court_overlap, .route_gap = opts.route_gap };
+    var png_params = optimizer.Params{ .courtyard_overlap = opts.court_overlap, .route_gap = opts.route_gap };
+    if (opts.group_w >= 0) png_params.group_w = opts.group_w;
+    if (opts.group_zone_w >= 0) png_params.group_zone_w = opts.group_zone_w;
+    if (opts.group_loop_relief >= 0) png_params.group_loop_relief = opts.group_loop_relief;
     // A named saved layout renders VERBATIM (placeFromPoses) — "show me this
     // layout" must display exactly what was saved, not a re-optimized version:
     // refine can drift a hand-tuned layout to a worse arrangement (e.g. a 70.8
@@ -551,6 +559,9 @@ pub fn pcbPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
             const v = q.get("route_gap") orelse break :blk 0;
             break :blk std.fmt.parseFloat(f64, v) catch 0;
         },
+        .group_w = pngFloatOpt(req, "group_w"),
+        .group_zone_w = pngFloatOpt(req, "group_zone_w"),
+        .group_loop_relief = pngFloatOpt(req, "group_loop_relief"),
         .blame = queryFlag(req, "blame"),
         .loop_labels = queryFlag(req, "loops"),
         .dims = queryFlag(req, "dims"),
@@ -576,6 +587,14 @@ fn queryFlag(req: *httpz.Request, key: []const u8) bool {
     const q = req.query() catch return false;
     const v = q.get(key) orelse return false;
     return !(v.len == 0 or std.mem.eql(u8, v, "0"));
+}
+
+/// Query `key` as a float, or -1 when absent/unparseable — the "unset" sentinel
+/// the PNG path uses to keep the optimizer's own default for a group knob.
+fn pngFloatOpt(req: *httpz.Request, key: []const u8) f64 {
+    const q = req.query() catch return -1;
+    const v = q.get(key) orelse return -1;
+    return std.fmt.parseFloat(f64, v) catch -1;
 }
 
 /// Query `key` as an optional string (absent/empty → null).
@@ -635,6 +654,10 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"ref\":");
         try writeJsonStr(w, pt.ref_des);
+        if (i < p.instances.len) {
+            try w.writeAll(",\"origin\":");
+            try writeJsonStr(w, p.instances[i].origin_key);
+        }
         const bl = if (i < blame.len and bmax > 0) blame[i] / bmax else 0;
         try w.print(",\"kind\":\"{s}\",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"fallback\":{s},\"blame\":{d:.3}}}", .{
             if (pt.kind == .hub) "hub" else "passive",
@@ -2040,6 +2063,10 @@ fn parseTuning(req: *httpz.Request) Tuning {
     }
     if (q.get("group_zone_w")) |v| {
         p.group_zone_w = parseF(v, p.group_zone_w);
+        tuned = true;
+    }
+    if (q.get("group_loop_relief")) |v| {
+        p.group_loop_relief = parseF(v, p.group_loop_relief);
         tuned = true;
     }
     return .{ .params = p, .tuned = tuned, .regen = regen or tuned };

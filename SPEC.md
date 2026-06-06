@@ -99,6 +99,8 @@ Public functions: solve
 - reserves a breakout corridor only for single-component nets
 - pairs matched halves across an IN/OUT mirror
 - ground-return selection keeps real grounds over straps, with a never-empty fallback
+- relieves the loop pull of caps in a same-rail bank
+- pulls group members toward their centroid, anchoring the IC
 
 ## placement/router
 
