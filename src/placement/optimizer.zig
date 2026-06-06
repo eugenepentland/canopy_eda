@@ -831,8 +831,11 @@ fn packOneBlock(arena: std.mem.Allocator, ordered: []const usize, parts: []const
 }
 
 /// Dock every block assigned to `edge` against the IC's `edge` side, stacked along
-/// the edge and centred on the IC, then write each member's final pose.
-fn dockEdge(parts: []Part, ic: usize, blocks: []const PackBlock, edge: Edge, gap: f64, gap_dock: f64) void {
+/// the edge and centred on the IC, then write each member's final pose. Records
+/// each member's *aligned axis* in `lock_axis`/`lock_val` (1 ⇒ shared x — a side
+/// column; 2 ⇒ shared y — a top/bottom row) so the finish can restore the crisp
+/// line after `legalize` jitters it.
+fn dockEdge(parts: []Part, ic: usize, blocks: []const PackBlock, edge: Edge, gap: f64, gap_dock: f64, lock_axis: []u8, lock_val: []f64) void {
     const vertical = (edge == .left or edge == .right); // cross axis = Y
     var k: usize = 0;
     var total: f64 = 0;
@@ -862,8 +865,63 @@ fn dockEdge(parts: []Part, ic: usize, blocks: []const PackBlock, edge: Edge, gap
             parts[m].rot = b.rots[j];
             parts[m].x = cx + b.lx[j];
             parts[m].y = cy + b.ly[j];
+            // A side column shares one x; a top/bottom row shares one y.
+            if (vertical) {
+                lock_axis[m] = 1;
+                lock_val[m] = parts[m].x;
+            } else {
+                lock_axis[m] = 2;
+                lock_val[m] = parts[m].y;
+            }
         }
     }
+}
+
+/// Place a secondary hub (the power inductor) at the switch node: centred on the
+/// IC's switch-pad x-centroid, docked tight to the less-crowded of the top/bottom
+/// edge, so it straddles SW1/SW2 instead of floating off. Locks its x to the
+/// switch-pad centroid so the finish keeps it centred. Falls back to the top edge
+/// when no switch pad is found.
+fn placeSwitchHub(parts: []Part, ic: usize, sec: usize, nets: []const FlatNet, idx_of: *std.StringHashMap(usize), blocks: []const PackBlock, gap: f64, lock_axis: []u8, lock_val: []f64) void {
+    const ic_ref = parts[ic].ref_des;
+    var sx: f64 = 0;
+    var nsw: usize = 0;
+    for (nets) |net| {
+        if (isGroundName(shortName(net.name))) continue;
+        var t_ic = false;
+        var t_sec = false;
+        for (net.pins) |pp| {
+            const pi = idx_of.get(pp.ref_des) orelse continue;
+            if (pi == ic) t_ic = true;
+            if (pi == sec) t_sec = true;
+        }
+        if (!(t_ic and t_sec)) continue;
+        for (net.pins) |pp| {
+            if (!std.mem.eql(u8, pp.ref_des, ic_ref)) continue;
+            const pad = padLocal(parts[ic], pp.pin);
+            if (pad.w == 0 and pad.h == 0) continue;
+            sx += pad.x;
+            nsw += 1;
+        }
+    }
+    const cx = parts[ic].x + (if (nsw > 0) sx / @as(f64, @floatFromInt(nsw)) else 0);
+    // Dock to whichever of top/bottom carries fewer blocks (keeps the switch cell
+    // off the busier edge).
+    var top: usize = 0;
+    var bot: usize = 0;
+    for (blocks) |b| {
+        if (b.edge == .top) top += 1;
+        if (b.edge == .bottom) bot += 1;
+    }
+    parts[sec].rot = 0;
+    const e = extByRot(parts[sec], 0);
+    parts[sec].x = cx;
+    parts[sec].y = if (top <= bot)
+        parts[ic].y - effHh(parts[ic]) - gap - e.y
+    else
+        parts[ic].y + effHh(parts[ic]) + gap + e.y;
+    lock_axis[sec] = 1; // keep it centred on the switch-pad x
+    lock_val[sec] = cx;
 }
 
 /// Constructive zone-then-pack floorplan. Returns true when it produced a
@@ -886,6 +944,11 @@ fn packZoned(
     const claimed = try arena.alloc(bool, parts.len);
     @memset(claimed, false);
     claimed[ic] = true;
+    // Per-part aligned-axis lock (0 none, 1 shared-x column, 2 shared-y row) so the
+    // finish can restore the crisp row/column line that `legalize` jitters.
+    const lock_axis = try arena.alloc(u8, parts.len);
+    @memset(lock_axis, 0);
+    const lock_val = try arena.alloc(f64, parts.len);
 
     var blocks: std.ArrayListUnmanaged(PackBlock) = .empty;
     const gap = @max(g_route_gap, FINAL_CLEAR);
@@ -911,22 +974,28 @@ fn packZoned(
         const edge = snapEdge(railDir(single, ic, parts, nets, &prep.idx_of)) orelse .bottom;
         try blocks.append(arena, try packOneBlock(arena, single, parts, edge, built.loops, gap));
     }
-    // Secondary hubs (the power inductor). Its SW pads are central (dir ≈ 0), so it
-    // defaults to the top edge near the switch node.
+    // Dock the group + loose blocks first so the switch-hub placement can see which
+    // of the top/bottom edges is busier.
+    dockEdge(parts, ic, blocks.items, .left, gap, gap, lock_axis, lock_val);
+    dockEdge(parts, ic, blocks.items, .right, gap, gap, lock_axis, lock_val);
+    dockEdge(parts, ic, blocks.items, .top, gap, gap, lock_axis, lock_val);
+    dockEdge(parts, ic, blocks.items, .bottom, gap, gap, lock_axis, lock_val);
+
+    // Secondary hubs (the power inductor) straddle the switch node — placed last,
+    // centred on the IC's switch pads, on the less-crowded top/bottom edge.
     for (parts, 0..) |p, i| {
         if (claimed[i] or p.kind != .hub) continue;
         claimed[i] = true;
-        const single = try arena.dupe(usize, &.{i});
-        const edge = snapEdge(railDir(single, ic, parts, nets, &prep.idx_of)) orelse .top;
-        try blocks.append(arena, try packOneBlock(arena, single, parts, edge, built.loops, gap));
+        placeSwitchHub(parts, ic, i, nets, &prep.idx_of, blocks.items, gap, lock_axis, lock_val);
     }
 
-    dockEdge(parts, ic, blocks.items, .left, gap, gap);
-    dockEdge(parts, ic, blocks.items, .right, gap, gap);
-    dockEdge(parts, ic, blocks.items, .top, gap, gap);
-    dockEdge(parts, ic, blocks.items, .bottom, gap, gap);
-
     legalize(parts, FINAL_CLEAR);
+    // Restore the crisp row/column lines `legalize` nudged (a column's shared x, a
+    // row's shared y); on-grid legalization then resolves any residual *cross-axis*
+    // overlap by whole cells, leaving the aligned axis intact.
+    for (parts, 0..) |*p, i| {
+        if (lock_axis[i] == 1) p.x = lock_val[i] else if (lock_axis[i] == 2) p.y = lock_val[i];
+    }
     snapToGrid(parts);
     legalizeOnGrid(parts);
     return !anyOverlap(parts);
