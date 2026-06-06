@@ -258,7 +258,19 @@ const Ctx = struct {
             const col = if (hot) ACCENT else PAD_COL;
             const a: f32 = if (hot or active) 1.0 else DIM_A;
             if (pad.poly.len >= 3) {
-                var pts: [64][2]f32 = undefined;
+                // KiCad custom pads carry full copper outlines (100-200+ pts);
+                // a 64-slot stack scratch covers the common case, larger spill
+                // to the heap so the polygon is never truncated mid-shape.
+                var stack: [64][2]f32 = undefined;
+                var pts: [][2]f32 = &stack;
+                var heap = false;
+                if (pad.poly.len > stack.len) {
+                    if (self.cv.alloc.alloc([2]f32, pad.poly.len)) |b| {
+                        pts = b;
+                        heap = true;
+                    } else |_| {}
+                }
+                defer if (heap) self.cv.alloc.free(pts);
                 const n = @min(pad.poly.len, pts.len);
                 for (pad.poly[0..n], 0..) |pp, i| pts[i] = self.lp(part, pp[0], pp[1]);
                 self.cv.fillPoly(pts[0..n], col, a);
