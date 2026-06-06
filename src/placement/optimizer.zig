@@ -152,7 +152,7 @@ const COMPACT_EPS: f64 = 1e-4; // courtyard-gap tolerance for the "touching" tes
 const PROX_W: f64 = 1.5; // proximity pull: cost = PROX_W·priority·(edge gap, mm)
 const KEEPOUT_W: f64 = 4.0; // keep-out hinge: cost = KEEPOUT_W·max(0, min−gap)
 const DEPRIORITIZE_SCALE: f64 = 0.25; // scale a deprioritized part's net wirelength weight
-const GROUP_W: f64 = 0.6; // group cohesion: cost = GROUP_W·Σ member→centroid distance (mm)
+const ZONE_GAP_MM: f64 = 2.0; // group zoning: cluster centroid sits this far beyond the hub edge on its connecting side
 /// Soft-constraint priority → numeric multiplier (low/med/high).
 fn constraintWeight(p: env.ConstraintPriority) f64 {
     return switch (p) {
@@ -208,6 +208,20 @@ pub const Params = struct {
     /// default. Only affects fresh auto-placement; saved/hand layouts are applied
     /// verbatim.
     courtyard_overlap: f64 = 0,
+    /// Functional-group cohesion weight: cost = `group_w·(bbox_w + bbox_h)` per
+    /// `(group …)` (constraint-DSL *and* the design's own functional groups), so
+    /// a declared cluster (e.g. an output filter's caps) packs into one tight
+    /// block instead of scattering around the hub. Competes with `loop_w`.
+    group_w: f64 = 2.0,
+    /// Group-zoning weight: pulls each group's cluster to the side of its hub it
+    /// connects to (input/output/sensitive land on distinct sides — a power-flow
+    /// layout). 0 disables zoning (cohesion only).
+    group_zone_w: f64 = 1.0,
+    /// Extra clearance (mm) the collision/legalization leaves between courtyards,
+    /// on top of touching — routing/copper room for the GND pour, thermal vias,
+    /// and the SW pour on a power board. 0 = pack to touching (the default for
+    /// dense jellybean boards). Set ~0.3–0.5 for switching-regulator layouts.
+    route_gap: f64 = 0,
 };
 
 /// Which phase of the solve a progress frame came from — drives the label the
@@ -473,10 +487,18 @@ const ProxTerm = struct { part: usize, hub: usize, part_pad: PadRect, hub_pad: P
 /// A `(keep-out …)` lowered to a part-vs-part minimum courtyard gap.
 const KeepTerm = struct { a: usize, b: usize, min_mm: f64 };
 
-/// A `(group …)` lowered to a cohesion pull: each member is drawn toward the
-/// group's running centroid, so a declared cluster (e.g. a feedback divider)
-/// stays together instead of splitting across the board.
-const GroupTerm = struct { members: []const usize };
+/// A `(group …)` lowered to (a) a cohesion penalty on the group's bounding box,
+/// so members pack into one tight block instead of scattering, and (b) optional
+/// zoning: `hub` (the IC the group orbits, -1 = none) plus `dirx`/`diry`, the
+/// hub-local unit direction toward the hub pads the group connects to — the
+/// cluster is pulled to that side of the IC, so input/output/sensitive groups
+/// land on distinct sides (a power-flow layout) instead of piling on the hub.
+const GroupTerm = struct {
+    members: []const usize,
+    hub: i32 = -1,
+    dirx: f64 = 0,
+    diry: f64 = 0,
+};
 
 /// The resolved + lowered Phase-A constraints for the current solve. Every slice
 /// defaults empty so a read on a path that didn't go through `prepare` is a
@@ -493,8 +515,13 @@ const Lowered = struct {
     /// `(power-rail … (role input))` — fires the input-loop boost even when the
     /// inductor is integrated (so no discrete L reveals the switcher).
     input_rail: []const bool = &.{},
-    /// Declared `(group …)` clusters — each pulls its members to their centroid.
+    /// Declared `(group …)` clusters (constraint-DSL + the design's functional
+    /// groups) — each penalizes its bounding box (cohesion) and is zoned to a
+    /// side of its hub.
     groups: []const GroupTerm = &.{},
+    /// True when any term is live — the hot-path `constraintCost` fast-exits when
+    /// false (a design with no constraints and no functional groups).
+    active: bool = false,
 };
 
 /// Thread-local lowered constraints for the current solve — set by `prepare`,
@@ -510,6 +537,12 @@ threadlocal var g_lowered: Lowered = .{};
 /// `keepBoxOf`. Threadlocal (like `g_lowered`) so the hot collision helpers need
 /// no extra parameter and concurrent solves stay isolated. 0 ⇒ strict no-overlap.
 threadlocal var g_collide_shrink: f64 = 0;
+
+/// Extra clearance (mm) the collision/legalization grows each keepout box by, so
+/// parts leave routing/copper room between courtyards instead of packing to
+/// touching (see `Params.route_gap`). Set in `prepare`, read by the collision
+/// helpers. 0 ⇒ touch (the default).
+threadlocal var g_route_gap: f64 = 0;
 
 /// How `solve` treats an applied `cached` layout.
 pub const SeedMode = enum {
@@ -859,7 +892,6 @@ fn resolveConstraints(
     diags: ?*std.ArrayListUnmanaged([]const u8),
 ) std.mem.Allocator.Error!Lowered {
     const c = block.constraints;
-    if (!c.present) return .{};
 
     const reject = struct {
         fn add(a: std.mem.Allocator, d: ?*std.ArrayListUnmanaged([]const u8), comptime fmt: []const u8, args: anytype) void {
@@ -974,29 +1006,103 @@ fn resolveConstraints(
         }
     }
 
-    // group → a cohesion pull toward the members' centroid. Resolve each ref;
-    // skip unresolved (reported) and groups with <2 resolved members (a single
-    // part has no cohesion to enforce).
+    // Constraint-DSL (group …) clusters. Resolve each ref; skip unresolved
+    // (reported) and groups with <2 resolved members (nothing to cohese).
     for (c.groups) |g| {
-        var members: std.ArrayListUnmanaged(usize) = .empty;
-        for (g.refs) |ref| {
-            if (resolvePart(instances, ref)) |pi|
-                try members.append(arena, pi)
-            else
-                reject(arena, diags, "group: part '{s}' not found", .{ref});
-        }
-        if (members.items.len >= 2) {
-            try groups.append(arena, .{ .members = try members.toOwnedSlice(arena) });
-        }
+        const m = try resolveGroupMembers(arena, instances, g.refs, diags);
+        if (m.len >= 2) try groups.append(arena, makeGroupTerm(arena, m, parts, nets, idx_of));
     }
 
+    // The design's own functional (group "name" (refs)) declarations — the same
+    // groups the schematic/BOM use — are ALSO honoured as placement cohesion, so
+    // an output filter's caps sit as one block with no (constraints) form needed.
+    // (Unresolved refs are skipped silently; these are not authored constraints.)
+    for (block.groups) |vg| {
+        const m = try resolveGroupMembers(arena, instances, vg.members, null);
+        if (m.len >= 2) try groups.append(arena, makeGroupTerm(arena, m, parts, nets, idx_of));
+    }
+
+    const has_groups = groups.items.len > 0;
     return .{
         .prox = try prox.toOwnedSlice(arena),
         .keepouts = try keepouts.toOwnedSlice(arena),
         .net_weight = net_weight,
         .input_rail = input_rail,
         .groups = try groups.toOwnedSlice(arena),
+        .active = c.present or has_groups,
     };
+}
+
+/// Resolve a group's member refs to part indices (in the arena). Unresolved refs
+/// are reported via `diags` when provided, else skipped.
+fn resolveGroupMembers(
+    arena: std.mem.Allocator,
+    instances: []const export_kicad.FlatInstance,
+    refs: []const []const u8,
+    diags: ?*std.ArrayListUnmanaged([]const u8),
+) std.mem.Allocator.Error![]usize {
+    var members: std.ArrayListUnmanaged(usize) = .empty;
+    for (refs) |ref| {
+        if (resolvePart(instances, ref)) |pi|
+            try members.append(arena, pi)
+        else if (diags) |d| {
+            const msg = std.fmt.allocPrint(arena, "group: part '{s}' not found", .{ref}) catch continue;
+            d.append(arena, msg) catch continue; // diag is best-effort; OOM just drops the hint
+        }
+    }
+    return members.toOwnedSlice(arena);
+}
+
+/// Build a `GroupTerm` for `members`: the member set plus the hub it orbits (the
+/// largest hub part) and the unit direction, in hub-local frame, from the hub
+/// centre toward the hub pads the group connects to — used to zone the cluster to
+/// the correct side of the IC. `hub = -1` (no zoning) when no hub/shared pad.
+fn makeGroupTerm(arena: std.mem.Allocator, members: []usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) GroupTerm {
+    _ = arena;
+    var hub: i32 = -1;
+    var best_area: f64 = 0;
+    for (parts, 0..) |p, i| {
+        if (p.kind != .hub) continue;
+        // The hub a group orbits must not be a member of the group itself.
+        var is_member = false;
+        for (members) |m| {
+            if (m == i) is_member = true;
+        }
+        if (is_member) continue;
+        const area = p.hw * p.hh;
+        if (area > best_area) {
+            best_area = area;
+            hub = @intCast(i);
+        }
+    }
+    if (hub < 0) return .{ .members = members };
+    const h: usize = @intCast(hub);
+    const hub_ref = parts[h].ref_des;
+    var sx: f64 = 0;
+    var sy: f64 = 0;
+    var n: usize = 0;
+    for (nets) |net| {
+        var touches = false;
+        for (net.pins) |pp| {
+            const pi = idx_of.get(pp.ref_des) orelse continue;
+            for (members) |m| {
+                if (m == pi) touches = true;
+            }
+        }
+        if (!touches) continue;
+        for (net.pins) |pp| {
+            if (!std.mem.eql(u8, pp.ref_des, hub_ref)) continue;
+            const pad = padLocal(parts[h], pp.pin);
+            if (pad.w == 0 and pad.h == 0) continue;
+            sx += pad.x;
+            sy += pad.y;
+            n += 1;
+        }
+    }
+    if (n == 0) return .{ .members = members, .hub = hub };
+    const mag = std.math.hypot(sx, sy);
+    if (mag < 1e-6) return .{ .members = members, .hub = hub };
+    return .{ .members = members, .hub = hub, .dirx = sx / mag, .diry = sy / mag };
 }
 
 /// Validate a design's Phase-A constraints against its flattened netlist without
@@ -1130,6 +1236,8 @@ fn prepare(
         std.math.clamp(params.courtyard_overlap / 2, 0, params.bbox_margin)
     else
         0;
+    // Routing/copper room left between courtyards (0 = touch).
+    g_route_gap = @max(0.0, params.route_gap);
     return .{ .parts = parts, .idx_of = idx_of, .instances = instances, .nets = nets, .built = built, .priority = priority, .lowered = lowered };
 }
 
@@ -2451,11 +2559,11 @@ fn keepCy(p: Part) f64 {
 }
 fn keepHw(p: Part) f64 {
     const base = if (p.keep.hw < 0) effHw(p) else (if (isQuarter(p.rot)) p.keep.hh else p.keep.hw);
-    return @max(0.0, base - g_collide_shrink);
+    return @max(0.0, base - g_collide_shrink) + g_route_gap;
 }
 fn keepHh(p: Part) f64 {
     const base = if (p.keep.hw < 0) effHh(p) else (if (isQuarter(p.rot)) p.keep.hw else p.keep.hh);
-    return @max(0.0, base - g_collide_shrink);
+    return @max(0.0, base - g_collide_shrink) + g_route_gap;
 }
 
 /// Build a breakout stub for every pad on an *unaccounted* net — one whose pins
@@ -2612,9 +2720,8 @@ fn constraintCost(
     params: Params,
 ) f64 {
     const L = g_lowered;
-    // Fast exit when nothing was authored (the common case: most designs have no
-    // constraints). Sum of slice lengths == 0 ⇒ every term is empty.
-    if (L.prox.len + L.keepouts.len + L.net_weight.len + L.input_rail.len + L.groups.len == 0) return 0;
+    // Fast exit when nothing is live (no constraints and no functional groups).
+    if (!L.active) return 0;
     var c: f64 = 0;
 
     for (L.prox) |t| {
@@ -2648,18 +2755,36 @@ fn constraintCost(
         }
     }
     for (L.groups) |g| {
-        // Pull each member toward the group's centroid (cohesion). Σ of the
-        // member→centroid distances — minimised when the cluster is tight.
+        // Cohesion: penalize the group's bounding box (member centres) so the
+        // cluster packs into one tight block instead of scattering around the hub.
+        var minx = parts[g.members[0]].x;
+        var maxx = minx;
+        var miny = parts[g.members[0]].y;
+        var maxy = miny;
         var cx: f64 = 0;
         var cy: f64 = 0;
         for (g.members) |m| {
-            cx += parts[m].x;
-            cy += parts[m].y;
+            const px = parts[m].x;
+            const py = parts[m].y;
+            minx = @min(minx, px);
+            maxx = @max(maxx, px);
+            miny = @min(miny, py);
+            maxy = @max(maxy, py);
+            cx += px;
+            cy += py;
         }
-        const inv = 1.0 / @as(f64, @floatFromInt(g.members.len));
-        cx *= inv;
-        cy *= inv;
-        for (g.members) |m| c += GROUP_W * std.math.hypot(parts[m].x - cx, parts[m].y - cy);
+        c += params.group_w * ((maxx - minx) + (maxy - miny));
+        // Zoning: pull the cluster's centroid to the side of the hub it wires to,
+        // a fixed reach beyond the hub edge, so groups land on distinct sides.
+        if (g.hub >= 0 and params.group_zone_w > 0) {
+            const inv = 1.0 / @as(f64, @floatFromInt(g.members.len));
+            const hub = parts[@intCast(g.hub)];
+            const d = rotateLocal(g.dirx, g.diry, hub.rot);
+            const reach = @abs(d.x) * hub.hw + @abs(d.y) * hub.hh + ZONE_GAP_MM;
+            const tx = hub.x + d.x * reach;
+            const ty = hub.y + d.y * reach;
+            c += params.group_zone_w * std.math.hypot(cx * inv - tx, cy * inv - ty);
+        }
     }
     return c;
 }
@@ -3554,9 +3679,12 @@ const KeepBox = struct { cxo: f64, cyo: f64, hw: f64, hh: f64 };
 fn keepBoxOf(p: Part) KeepBox {
     const q = isQuarter(p.rot);
     const s = g_collide_shrink; // courtyards may overlap their clearance margins
-    if (p.keep.hw < 0) return .{ .cxo = 0, .cyo = 0, .hw = @max(0.0, (if (q) p.hh else p.hw) - s), .hh = @max(0.0, (if (q) p.hw else p.hh) - s) };
+    const r = g_route_gap; // …or leave extra routing room between them
+    if (p.keep.hw < 0) return .{ .cxo = 0, .cyo = 0, .hw = @max(0.0, (if (q) p.hh else p.hw) - s) + r, .hh = @max(0.0, (if (q) p.hw else p.hh) - s) + r };
     const off = rotateLocal(p.keep.ox, p.keep.oy, p.rot);
-    return .{ .cxo = off.x, .cyo = off.y, .hw = @max(0.0, (if (q) p.keep.hh else p.keep.hw) - s), .hh = @max(0.0, (if (q) p.keep.hw else p.keep.hh) - s) };
+    const hw = @max(0.0, (if (q) p.keep.hh else p.keep.hw) - s) + r;
+    const hh = @max(0.0, (if (q) p.keep.hw else p.keep.hh) - s) + r;
+    return .{ .cxo = off.x, .cyo = off.y, .hw = hw, .hh = hh };
 }
 
 /// Fill `out[0..parts.len]` with each part's precomputed keepout box.

@@ -421,6 +421,8 @@ pub const PngRequest = struct {
     sub: ?[]const u8 = null,
     /// Experimental courtyard-overlap allowance (mm); 0 = touch only (default).
     court_overlap: f64 = 0,
+    /// Routing/copper room between courtyards (mm); 0 = touch (default).
+    route_gap: f64 = 0,
     /// Diagnostic overlays (see render_pcb_png.Options).
     blame: bool = false,
     loop_labels: bool = false,
@@ -463,7 +465,7 @@ pub fn renderDesignPng(
         readLayoutPoses(alloc, project_dir, name, ln)
     else if (opts.regen) null else readAutoPoses(alloc, project_dir, name);
     const grid_only = opts.sub == null and opts.layout == null and !opts.regen and cached == null;
-    const png_params = optimizer.Params{ .courtyard_overlap = opts.court_overlap };
+    const png_params = optimizer.Params{ .courtyard_overlap = opts.court_overlap, .route_gap = opts.route_gap };
     // A named saved layout renders VERBATIM (placeFromPoses) — "show me this
     // layout" must display exactly what was saved, not a re-optimized version:
     // refine can drift a hand-tuned layout to a worse arrangement (e.g. a 70.8
@@ -542,6 +544,11 @@ pub fn pcbPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
         .court_overlap = blk: {
             const q = req.query() catch break :blk 0;
             const v = q.get("court_overlap") orelse break :blk 0;
+            break :blk std.fmt.parseFloat(f64, v) catch 0;
+        },
+        .route_gap = blk: {
+            const q = req.query() catch break :blk 0;
+            const v = q.get("route_gap") orelse break :blk 0;
             break :blk std.fmt.parseFloat(f64, v) catch 0;
         },
         .blame = queryFlag(req, "blame"),
@@ -2020,6 +2027,19 @@ fn parseTuning(req: *httpz.Request) Tuning {
     // (default 0 = touch only, no overlap). See Params.courtyard_overlap.
     if (q.get("court_overlap")) |v| {
         p.courtyard_overlap = parseF(v, p.courtyard_overlap);
+        tuned = true;
+    }
+    // Routing/copper room between courtyards (mm); group cohesion + zoning weights.
+    if (q.get("route_gap")) |v| {
+        p.route_gap = parseF(v, p.route_gap);
+        tuned = true;
+    }
+    if (q.get("group_w")) |v| {
+        p.group_w = parseF(v, p.group_w);
+        tuned = true;
+    }
+    if (q.get("group_zone_w")) |v| {
+        p.group_zone_w = parseF(v, p.group_zone_w);
         tuned = true;
     }
     return .{ .params = p, .tuned = tuned, .regen = regen or tuned };
