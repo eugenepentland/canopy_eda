@@ -1,20 +1,28 @@
 # WIP: usable switching-regulator placement
 
-**Branch:** `claude/busy-golick-2706ec`
-**Status:** the "Open problem" below is **SOLVED** — functional groups now cluster
-and zone into a power-flow layout. Root cause: cohesion/zoning lived only in the
-scalar `constraintCost` (used to *select* among arrangements), but the spring
-relaxation that actually *sets positions* had no cohesion force — so it never
-*proposed* a tight block for the selector to pick. Fix: gave cohesion and zoning
-**relaxation forces** (the position-space twins of the scalar terms). `tps55289-channel`
-went from isotropic scatter (caps on all four sides, inductor 10 mm off) to
-input-caps-left / output-caps-right zoned clusters with loop ≤ baseline and the
-board still routes. Builds green, `zig build test` exit 0, guardian clean.
-Experimental, **NOT deployed** (prod :7050 still runs the old binary).
+**Branch:** `claude/busy-golick-2706ec` (MERGED to main + DEPLOYED to prod :7050,
+ReleaseFast, 2026-06-06).
 
-See "What changed (the fix)" and "How to drive it" below. Remaining polish
-(crisp single-row banks, inductor docked exactly at the SW pads, the
-default-vs-opt-in product decision) is in "Still open".
+**Status — two things shipped:**
+
+1. **Group cohesion + zoning relaxation forces** (default-on, mild). Root cause of
+   the old "doesn't cluster": cohesion/zoning lived only in the scalar
+   `constraintCost` (which *selects* among arrangements), but the spring relaxation
+   that actually *sets positions* had no cohesion force, so it never *proposed* a
+   tight block. Fix: position-space twins (`accumulateGroupCohesion`, `g_group_force`,
+   `g_zone_force`) + ground-excluded zone direction + bank-loop relief (opt-in).
+   See "What changed (the fix)".
+
+2. **Zone-then-pack constructive floorplan** (`?zone_pack=1`, opt-in, default off) —
+   the crisp textbook layout the force model can't make: dominant IC centred, each
+   `(group …)` laid as an aligned row/column docked to the side it wires to, the
+   inductor docked at the switch node. `tps55289-channel ?zone_pack=1`: input caps a
+   left column, output caps a right column, inductor below the IC at SW, HPWL 87.7,
+   routes DRC. See "Zone-then-pack" below.
+
+Remaining: kill the ~0.4 mm output-column residual jitter; keep-routed-better
+force-vs-pack so `zone_pack` can default-on for the dominant-IC shape; co-edge
+grid-wrap. See "Still open".
 
 ## Goal
 
@@ -161,7 +169,46 @@ GET /api/pcb-png/<name>?regen=1&group_w=8&group_zone_w=2.5&route=1     # routed
 `group_loop_relief` 0.3–0.6 tightens cap banks further at the cost of a longer
 reported loop — use only when the bank dominates (e.g. a 4–5-cap output filter).
 
+## Zone-then-pack (the crisp-rows floorplan, `?zone_pack=1`)
+
+Constructive floorplan (in `src/placement/optimizer.zig`, `packZoned` hooked at the
+top of `runPlacement`; gated by `Params.zone_pack`, **off by default**). It produces
+the textbook rows the force model can't:
+
+- **`analyzeTopology`** gate: one dominant IC that *every group orbits* (a true
+  multi-IC board has groups whose `hub` is a second IC → rejected; raw hub *area* is
+  NOT used — a power inductor is a big hub yet anchors nothing and can even carry a
+  U-prefix ref-des). Anything else → `false` → force pipeline (never degrades a
+  non-switcher board).
+- IC at origin → **`packGroupBlock`** (order by capacitance; `faceRotation` turns
+  each cap's power pad toward the IC; pack edge-to-edge into a row/column) →
+  **`assignGroupEdge`/`dockEdge`** (snap the group's non-ground rail direction to
+  L/R/T/B, stack co-edge groups centred on the IC) → loose passives as single
+  blocks → **`placeSwitchHub`** (inductor centred on the IC's switch-pad x-centroid,
+  docked to the less-crowded top/bottom edge) → `legalize` → restore each block's
+  locked row/column line → `legalizeOnGrid`. **Never `relax`** (it dissolves rows).
+
+`tps55289-channel ?zone_pack=1`: input caps a left column, output caps a right
+column, inductor below the IC at the switch node; HPWL 87.7; routes DRC. Drive it:
+
+```
+GET /api/pcb-png/<name>?regen=1&zone_pack=1&dims=1     # see the floorplan
+GET /api/pcb-png/<name>?regen=1&zone_pack=1&route=1    # routed
+```
+
 ## Still open (product + polish)
+
+- **Residual output-column jitter (~0.4 mm).** After the lock-line restore,
+  `legalizeOnGrid` still nudges a couple of output caps one cell in x to clear a
+  corner clip between the right column and a top/bottom block. Fix = avoid the
+  corner overlap at dock time (cap each edge's cross-extent, or depth-offset
+  perpendicular blocks) rather than relying on legalization.
+- **`zone_pack` default-on.** It is flag-authoritative today (shows the pack when
+  on). To enable by default for the dominant-IC shape, add the keep-routed-better
+  force-vs-pack comparison in `solve` (mirror the strict/overlap retry) so it can
+  never regress a board.
+- **Co-edge crowding / grid wrap.** Many groups on one edge stack into a long
+  column; wrap into an R×C grid when a single line exceeds a budget.
 
 - **Default-vs-opt-in product decision (needs the user).** The forces ship with
   the *mild* default (`group_w=2`, `group_zone_w=1`, `group_loop_relief=0`), which
@@ -174,13 +221,7 @@ reported loop — use only when the bank dominates (e.g. a 4–5-cap output filt
   power design opts in declaratively while the global default stays mild — the
   cleanest fit with the existing "make the search honor constraints" design, a bit
   more parser work.
-- **Crisp single-row banks + inductor exactly at the SW pads.** The force model
-  produces coherent *organic* clusters, not crisp rows, and the inductor docks
-  *near* the cell rather than precisely straddling SW1/SW2. Getting textbook
-  `VIN-caps │ IC │ L │ VOUT-caps` rows is the **zone-then-pack** reframe: decide
-  each group's side first, then place each group as a *rigid sub-block* (a row/grid
-  of its members) rather than relaxing members individually. Bigger change; the
-  current forces are the incremental step before it.
+  (Crisp `VIN│IC│L│VOUT` rows + inductor at SW are now DONE — see "Zone-then-pack".)
 - **`route_gap` during search still destabilising** (unchanged from before) — it
   belongs in final legalization, not the search keepbox.
 - **`ad7380-4` regen errored** in the regression harness (HTTP error — likely a
