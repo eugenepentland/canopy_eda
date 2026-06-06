@@ -1,8 +1,8 @@
 # guardian-snapshot v1
 src/eval/design_block.zig:692: line is 180 chars (cap 160)
 src/eval/forms.zig:449: line is 187 chars (cap 160)
-src/placement/optimizer.zig:791: line is 165 chars (cap 160)
-src/placement/optimizer.zig:885: line is 191 chars (cap 160)
+src/placement/optimizer.zig:871: line is 165 chars (cap 160)
+src/placement/optimizer.zig:997: line is 191 chars (cap 160)
 src/serve/schematic_page.zig:74: line is 168 chars (cap 160)
 src/serve/templates/account.zig:180: line is 162 chars (cap 160)
 src/serve/templates/account.zig:21: line is 194 chars (cap 160)
