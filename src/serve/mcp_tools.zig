@@ -568,7 +568,10 @@ fn toolGetSchematic(allocator: std.mem.Allocator, project_dir: []const u8, args_
 /// Render a design's PCB layout to a PNG and write it base64-encoded into `out`
 /// (the caller emits it as an MCP image content block). Optional `nets`/`refs`
 /// (arrays or comma-separated strings) spotlight a subsystem; `route` overlays
-/// copper; `width`/`layout`/`sub`/`regen` mirror the HTTP endpoint.
+/// copper; `width`/`layout`/`sub`/`regen` mirror the HTTP endpoint. Diagnostic
+/// overlays: `blame` (cost heatmap + worst-offenders), `loops` (per-loop nH
+/// labels), `dims` (mm dimension leaders), `grid` (mm reference grid), and
+/// `compare` (a saved-layout name to diff against — ghosts + movement arrows).
 fn toolGetPcbImage(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     var opts = pcb_layout_page.PngRequest{
@@ -578,6 +581,11 @@ fn toolGetPcbImage(allocator: std.mem.Allocator, project_dir: []const u8, args_v
         .layout = optionalString(args_val, "layout"),
         .regen = optionalBool(args_val, "regen") orelse false,
         .sub = optionalString(args_val, "sub"),
+        .blame = optionalBool(args_val, "blame") orelse false,
+        .loop_labels = optionalBool(args_val, "loops") orelse false,
+        .dims = optionalBool(args_val, "dims") orelse false,
+        .grid = optionalBool(args_val, "grid") orelse false,
+        .compare = optionalString(args_val, "compare"),
     };
     if (optionalU64(args_val, "width")) |w| opts.width = @intCast(@min(w, @as(u64, 4000)));
 

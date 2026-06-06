@@ -39,13 +39,19 @@ const DRC_COL = Rgb.hex("#f85149");
 const ACCENT = Rgb.hex("#f5c542"); // focus highlight
 const TEXT_COL = Rgb.hex("#c9d1d9");
 const TEXT_DIM = Rgb.hex("#6e7681");
+const GOOD_COL = Rgb.hex("#3fb950"); // improvement (compare Δ ≤ 0)
+const GRID_COL = Rgb.hex("#30363d"); // reference grid lines
+// Blame heatmap ramp: cheap (cool) → expensive (hot).
+const BLAME_LO = Rgb.hex("#15302a");
+const BLAME_MID = Rgb.hex("#b8860b");
+const BLAME_HI = Rgb.hex("#c0392b");
 
 const MARGIN_MM: f64 = 2.0;
 const MIN_W: u32 = 400;
 const MAX_W: u32 = 2200;
 const MAX_H: u32 = 2600;
 const SS: u32 = 2; // supersample factor for anti-aliasing
-const HEADER_H: u32 = 30;
+const HEADER_H: u32 = 46; // title + objective score line (+ focus/compare line)
 const LEGEND_H: u32 = 22;
 const DIM_A: f32 = 0.20; // alpha for de-emphasised elements in focus mode
 
@@ -66,6 +72,20 @@ pub const Options = struct {
     violations: []const drc.Violation = &.{},
     /// Caption shown top-left (typically the design name).
     title: []const u8 = "",
+    /// Optimizer weights — drive the objective score line and blame attribution.
+    params: optimizer.Params = .{},
+    /// Tint each courtyard by its share of the objective + show a worst-offenders
+    /// panel ("what to fix first").
+    blame: bool = false,
+    /// Label each hot loop with its connection inductance (nH).
+    loop_labels: bool = false,
+    /// Draw labeled mm dimension leaders on each hot loop's power leg.
+    dims: bool = false,
+    /// Draw a 1/2/5 mm reference grid with axis ticks.
+    grid: bool = false,
+    /// A second placement to diff against: ghost outlines + movement arrows +
+    /// a Δobjective in the score line.
+    compare: ?optimizer.Placement = null,
 };
 
 /// Render `p` to PNG bytes owned by `alloc`.
@@ -107,6 +127,24 @@ pub fn render(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options) p
 
     const caption = if (focus) try buildCaption(alloc, opts) else "";
 
+    // Per-part blame (normalized to the hottest part) for the heatmap tint.
+    var blame_norm: []const f64 = &.{};
+    if (opts.blame) {
+        const raw = try alloc.alloc(f64, p.parts.len);
+        optimizer.perPartBlame(p, opts.params, raw);
+        var mx: f64 = 0;
+        for (raw) |v| mx = @max(mx, v);
+        if (mx > 0) for (raw) |*v| {
+            v.* /= mx;
+        };
+        blame_norm = raw;
+    }
+
+    // ref_des → index into the compare placement (for ghost/arrow lookup).
+    var cmp_idx = std.StringHashMap(usize).init(alloc);
+    defer cmp_idx.deinit();
+    if (opts.compare) |c| for (c.parts, 0..) |cp, i| try cmp_idx.put(cp.ref_des, i);
+
     var ctx = Ctx{
         .cv = &cv,
         .scale = scale,
@@ -119,15 +157,23 @@ pub fn render(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options) p
         .hot_nets = &hot_nets,
         .hot_refs = &hot_refs,
         .pad_net = &pad_net,
+        .opts = opts,
+        .blame_norm = blame_norm,
+        .cmp_idx = &cmp_idx,
     };
 
+    if (opts.grid) ctx.drawGrid();
+    if (opts.compare != null) ctx.drawCompareGhost();
     ctx.drawParts();
     ctx.drawAirwires();
     ctx.drawLoops();
+    if (opts.dims) ctx.drawDims();
+    if (opts.compare != null) ctx.drawCompareArrows();
     if (opts.routed) |r| ctx.drawRouted(r);
     ctx.drawViolations(opts.violations);
     ctx.drawLabels();
-    ctx.drawHeader(opts);
+    if (opts.blame) ctx.drawBlamePanel();
+    ctx.drawHeader();
     ctx.drawLegend(opts.routed != null);
 
     return cv.toPng(alloc);
@@ -170,6 +216,11 @@ const Ctx = struct {
     hot_nets: *std.StringHashMap(void),
     hot_refs: *std.StringHashMap(void),
     pad_net: *std.StringHashMap([]const u8),
+    opts: Options,
+    /// Per-part objective blame, normalized to [0,1]; empty when blame is off.
+    blame_norm: []const f64,
+    /// ref_des → index into `opts.compare.?.parts`; empty when no compare layout.
+    cmp_idx: *std.StringHashMap(usize),
 
     fn xpx(self: *Ctx, mm: f64) f32 {
         return @floatCast((mm - self.minx + MARGIN_MM) * self.scale);
@@ -224,7 +275,7 @@ const Ctx = struct {
     }
 
     fn drawParts(self: *Ctx) void {
-        for (self.p.parts) |part| {
+        for (self.p.parts, 0..) |part, pi| {
             const active = self.partActive(part);
             const base_a: f32 = if (active) 1.0 else DIM_A;
             const stroke = if (part.kind == .hub) HUB_STROKE else PASSIVE_STROKE;
@@ -233,7 +284,13 @@ const Ctx = struct {
                 self.lp(part, -part.hw, -part.hh), self.lp(part, part.hw, -part.hh),
                 self.lp(part, part.hw, part.hh),   self.lp(part, -part.hw, part.hh),
             };
-            self.cv.fillPoly(&court, COURT_FILL, base_a);
+            // Blame heatmap tints the fill green→red by objective share; the cool
+            // baseline COURT_FILL otherwise.
+            const fill = if (self.opts.blame and pi < self.blame_norm.len)
+                blameColor(self.blame_norm[pi])
+            else
+                COURT_FILL;
+            self.cv.fillPoly(&court, fill, base_a);
             self.cv.strokePath(&court, .closed, self.outlineW(active), stroke, base_a);
             if (self.focus and active and (self.refHot(part.ref_des))) {
                 self.cv.strokePath(&court, .closed, self.outlineW(true) + self.pw(1.5), ACCENT, 0.9);
@@ -341,11 +398,19 @@ const Ctx = struct {
             const gp = self.lp(hub, L.hub_gnd_pin.x, L.hub_gnd_pin.y);
             const dim = self.focus and !(self.partActive(cap) or self.partActive(hub));
             const a: f32 = if (dim) DIM_A * 0.6 else 0.9;
-            // Hot power leg cap→hub.
-            self.cv.line(cp[0], cp[1], pp[0], pp[1], self.pw(1.3), AW_PROX, a, .butt);
+            // Power-leg ribbon width grows with the loop's inductance share, so
+            // the loops dominating the objective read as the fattest.
+            const nh = optimizer.loopNh(self.p.parts, L);
+            const w = std.math.clamp(1.0 + nh * 0.7, 1.0, 5.0);
+            self.cv.line(cp[0], cp[1], pp[0], pp[1], self.pw(w), AW_PROX, a, .butt);
             // L2 ground-return path cap_gnd → cap_pwr → hub_pwr → hub_gnd.
             const ret = [_][2]f32{ cg, cp, pp, gp };
             self.cv.strokePath(&ret, .open, self.pw(1.1), LOOP_RET, a * 0.85);
+            if (self.opts.loop_labels) {
+                var buf: [24]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "{d:.1}nH", .{nh}) catch "";
+                self.cv.text((cp[0] + pp[0]) / 2, (cp[1] + pp[1]) / 2 - self.pw(6), s, self.pw(8), AW_PROX, a, .middle);
+            }
         }
     }
 
@@ -369,6 +434,113 @@ const Ctx = struct {
         }
     }
 
+    /// Labeled mm dimension leaders on each hot loop's power leg, so distances
+    /// are legible without pixel-counting.
+    fn drawDims(self: *Ctx) void {
+        for (self.p.loops) |L| {
+            const cap = self.p.parts[L.cap];
+            const hub = self.p.parts[L.hub];
+            const cw = world(cap, L.cap_pwr.x, L.cap_pwr.y);
+            const hwd = world(hub, L.hub_pwr_pin.x, L.hub_pwr_pin.y);
+            const mm = std.math.hypot(cw[0] - hwd[0], cw[1] - hwd[1]);
+            const a = [_]f32{ self.xpx(cw[0]), self.ypx(cw[1]) };
+            const b = [_]f32{ self.xpx(hwd[0]), self.ypx(hwd[1]) };
+            self.cv.line(a[0], a[1], b[0], b[1], self.pw(0.6), TEXT_COL, 0.75, .round);
+            var buf: [24]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d:.2}mm", .{mm}) catch "";
+            self.cv.text((a[0] + b[0]) / 2, (a[1] + b[1]) / 2 + self.pw(2), s, self.pw(8), TEXT_COL, 0.95, .middle);
+        }
+    }
+
+    /// A faint 1/2/5 mm reference grid with axis tick labels, under everything.
+    fn drawGrid(self: *Ctx) void {
+        const step = gridStep(self.p.maxx - self.p.minx, self.p.maxy - self.p.miny);
+        const top = self.yoff;
+        const bot = @as(f32, @floatFromInt(self.cv.h - LEGEND_H));
+        const left = self.xpx(self.minx - MARGIN_MM);
+        const right = self.xpx(self.p.maxx + MARGIN_MM);
+        var gx = @ceil((self.minx - MARGIN_MM) / step) * step;
+        while (gx <= self.p.maxx + MARGIN_MM + 1e-6) : (gx += step) {
+            const px = self.xpx(gx);
+            self.cv.line(px, top, px, bot, self.pw(0.4), GRID_COL, 0.5, .butt);
+            var buf: [16]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d:.0}", .{gx}) catch "";
+            self.cv.text(px, bot - self.pw(9), s, self.pw(7), TEXT_DIM, 0.7, .middle);
+        }
+        var gy = @ceil((self.miny - MARGIN_MM) / step) * step;
+        while (gy <= self.p.maxy + MARGIN_MM + 1e-6) : (gy += step) {
+            const py = self.ypx(gy);
+            self.cv.line(left, py, right, py, self.pw(0.4), GRID_COL, 0.5, .butt);
+            var buf: [16]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d:.0}", .{gy}) catch "";
+            self.cv.text(left + self.pw(2), py - self.pw(3), s, self.pw(7), TEXT_DIM, 0.7, .start);
+        }
+    }
+
+    /// Ghost outlines of the compare layout's part positions, under the live one.
+    fn drawCompareGhost(self: *Ctx) void {
+        const c = self.opts.compare orelse return;
+        for (self.p.parts) |part| {
+            const idx = self.cmp_idx.get(part.ref_des) orelse continue;
+            const old = c.parts[idx];
+            const court = [_][2]f32{
+                self.lp(old, -old.hw, -old.hh), self.lp(old, old.hw, -old.hh),
+                self.lp(old, old.hw, old.hh),   self.lp(old, -old.hw, old.hh),
+            };
+            self.cv.strokePath(&court, .closed, self.pw(0.8), TEXT_DIM, 0.45);
+        }
+    }
+
+    /// Arrows from each part's compare position to its live position (movement).
+    fn drawCompareArrows(self: *Ctx) void {
+        const c = self.opts.compare orelse return;
+        for (self.p.parts) |part| {
+            const idx = self.cmp_idx.get(part.ref_des) orelse continue;
+            const old = c.parts[idx];
+            if (std.math.hypot(part.x - old.x, part.y - old.y) < 0.05) continue;
+            const a = [_]f32{ self.xpx(old.x), self.ypx(old.y) };
+            const b = [_]f32{ self.xpx(part.x), self.ypx(part.y) };
+            self.cv.line(a[0], a[1], b[0], b[1], self.pw(1.0), ACCENT, 0.85, .round);
+            self.cv.disc(b[0], b[1], self.pw(2.0), ACCENT, 0.9);
+        }
+    }
+
+    /// Top-right panel listing the three highest-blame parts ("fix these first").
+    fn drawBlamePanel(self: *Ctx) void {
+        if (self.blame_norm.len == 0) return;
+        var idx = [_]usize{ 0, 0, 0 };
+        var val = [_]f64{ -1, -1, -1 };
+        for (self.blame_norm, 0..) |v, i| {
+            if (v > val[0]) {
+                val[2] = val[1];
+                idx[2] = idx[1];
+                val[1] = val[0];
+                idx[1] = idx[0];
+                val[0] = v;
+                idx[0] = i;
+            } else if (v > val[1]) {
+                val[2] = val[1];
+                idx[2] = idx[1];
+                val[1] = v;
+                idx[1] = i;
+            } else if (v > val[2]) {
+                val[2] = v;
+                idx[2] = i;
+            }
+        }
+        const x = @as(f32, @floatFromInt(self.cv.w)) - self.pw(130);
+        var y = self.yoff + self.pw(6);
+        self.cv.text(x, y, "WORST (blame)", self.pw(8), TEXT_COL, 0.95, .start);
+        y += self.pw(12);
+        for (0..3) |k| {
+            if (val[k] < 0) break;
+            var buf: [48]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d}. {s}  {d:.0}%", .{ k + 1, self.p.parts[idx[k]].ref_des, val[k] * 100 }) catch "";
+            self.cv.text(x, y, s, self.pw(8), blameColor(val[k]), 0.95, .start);
+            y += self.pw(11);
+        }
+    }
+
     fn drawLabels(self: *Ctx) void {
         const h = self.pw(9);
         for (self.p.parts) |part| {
@@ -382,12 +554,30 @@ const Ctx = struct {
         }
     }
 
-    fn drawHeader(self: *Ctx, opts: Options) void {
+    fn drawHeader(self: *Ctx) void {
         const pad = self.pw(6);
-        if (opts.title.len > 0) {
-            self.cv.text(pad, self.pw(5), opts.title, self.pw(13), TEXT_COL, 1.0, .start);
+        if (self.opts.title.len > 0) {
+            self.cv.text(pad, self.pw(3), self.opts.title, self.pw(13), TEXT_COL, 1.0, .start);
         }
-        if (self.focus) self.cv.text(pad, self.pw(18), self.caption, self.pw(9), ACCENT, 1.0, .start);
+        // Objective decomposition — every render is self-documenting.
+        const b = self.p.breakdown;
+        var buf: [200]u8 = undefined;
+        const score = std.fmt.bufPrint(
+            &buf,
+            "obj {d:.1}  |  hpwl {d:.1}  loop {d:.1}nH  cmp {d:.0}mm2  cong {d:.1}",
+            .{ b.objective, b.hpwl, b.loop_nh, b.alignment, b.congestion },
+        ) catch "";
+        self.cv.text(pad, self.pw(20), score, self.pw(9), TEXT_DIM, 1.0, .start);
+        // Third line: compare Δ if diffing, else the focus caption.
+        if (self.opts.compare) |c| {
+            var buf2: [64]u8 = undefined;
+            const d = b.objective - c.breakdown.objective;
+            const sign = if (d >= 0) "+" else "-";
+            const s2 = std.fmt.bufPrint(&buf2, "vs base: d_obj {s}{d:.1} ({s})", .{ sign, @abs(d), if (d <= 0) "better" else "worse" }) catch "";
+            self.cv.text(pad, self.pw(32), s2, self.pw(9), if (d <= 0) GOOD_COL else DRC_COL, 1.0, .start);
+        } else if (self.focus) {
+            self.cv.text(pad, self.pw(32), self.caption, self.pw(8), ACCENT, 1.0, .start);
+        }
     }
 
     fn drawLegend(self: *Ctx, routed: bool) void {
@@ -430,6 +620,30 @@ fn awColor(kind: optimizer.RatKind) Rgb {
     if (kind == .proximity) return AW_PROX;
     if (kind == .ground) return AW_GND;
     return AW_SIG;
+}
+
+/// One channel of a linear colour blend.
+fn mixByte(a: u8, b: u8, t: f64) u8 {
+    const af: f64 = @floatFromInt(a);
+    const bf: f64 = @floatFromInt(b);
+    return @intFromFloat(@round(af + (bf - af) * t));
+}
+/// Blend two colours; `t` clamped to [0,1].
+fn lerpRgb(a: Rgb, b: Rgb, t: f64) Rgb {
+    const tt = std.math.clamp(t, 0, 1);
+    return .{ .r = mixByte(a.r, b.r, tt), .g = mixByte(a.g, b.g, tt), .b = mixByte(a.b, b.b, tt) };
+}
+/// Heatmap colour for a normalized blame value: cheap (cool) → expensive (hot).
+fn blameColor(t: f64) Rgb {
+    return if (t < 0.5) lerpRgb(BLAME_LO, BLAME_MID, t * 2) else lerpRgb(BLAME_MID, BLAME_HI, (t - 0.5) * 2);
+}
+/// Reference-grid spacing (mm): 1/2/5/10 so the line count stays legible.
+fn gridStep(span_x: f64, span_y: f64) f64 {
+    const span = @max(span_x, span_y);
+    if (span <= 16) return 1;
+    if (span <= 40) return 2;
+    if (span <= 100) return 5;
+    return 10;
 }
 
 /// Build the focus-mode caption ("FOCUS  NETS: …  REFS: …") in `alloc`.

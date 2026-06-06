@@ -664,6 +664,37 @@ pub fn scorePoses(
     return breakdownWith(prep.parts, &prep.idx_of, prep.nets, params, score, lsum);
 }
 
+/// One hot loop's connection inductance (nH) — the quantity the objective's loop
+/// term sums. Exposed so the PNG renderer can size and label each loop ribbon by
+/// its contribution. Mirrors the surrogate the optimizer minimizes (fixed power
+/// leg, no maze router), so the ribbon weights match what placement is fighting.
+pub fn loopNh(parts: []const Part, lp: Loop) f64 {
+    return loopMetric(parts, lp, surrogatePwrLeg(parts, lp)).nh;
+}
+
+/// Fill `out` (index-aligned with `p.parts`) with each part's share of the
+/// objective, for the render "blame" heatmap. Every ratsnest link's length is
+/// split evenly between its two endpoints, and each hot loop's value-weighted
+/// inductance (× `loop_w`) is charged to its cap — the same mm + `loop_w`·nH
+/// mixing the objective itself sums, so the hottest parts are the ones the
+/// optimizer is straining against. Congestion is board-global and omitted.
+/// Values are raw; the caller normalizes for the colour ramp. No-op on a length
+/// mismatch.
+pub fn perPartBlame(p: Placement, params: Params, out: []f64) void {
+    if (out.len != p.parts.len) return;
+    @memset(out, 0);
+    for (p.links) |l| {
+        const a = worldPt(p.parts[l.a], l.ax, l.ay);
+        const b = worldPt(p.parts[l.b], l.bx, l.by);
+        const d = std.math.hypot(a.x - b.x, a.y - b.y);
+        out[l.a] += d / 2;
+        out[l.b] += d / 2;
+    }
+    for (p.loops) |lp| {
+        out[lp.cap] += params.loop_w * lp.weight * loopNh(p.parts, lp);
+    }
+}
+
 /// The maze-routed objective for an existing set of `poses` — the same metric
 /// `rerankSolve` selects its candidates on (HPWL + routed-loop nH + compactness +
 /// congestion), as opposed to the smooth surrogate `scorePoses` reports. Computed

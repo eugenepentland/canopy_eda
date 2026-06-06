@@ -417,6 +417,13 @@ pub const PngRequest = struct {
     sub: ?[]const u8 = null,
     /// Experimental courtyard-overlap allowance (mm); 0 = touch only (default).
     court_overlap: f64 = 0,
+    /// Diagnostic overlays (see render_pcb_png.Options).
+    blame: bool = false,
+    loop_labels: bool = false,
+    dims: bool = false,
+    grid: bool = false,
+    /// Saved-layout name to diff the current placement against.
+    compare: ?[]const u8 = null,
 };
 
 /// Failures `renderDesignPng` surfaces; callers map these to an HTTP status or
@@ -465,6 +472,14 @@ pub fn renderDesignPng(
     else
         &.{};
 
+    // Optional compare layout for the diff overlay (ghost + movement arrows).
+    var cmp_placement: ?optimizer.Placement = null;
+    if (opts.compare) |cn| {
+        if (readLayoutPoses(alloc, project_dir, name, cn)) |cposes| {
+            cmp_placement = optimizer.placeFromPoses(alloc, eff_block, project_dir, cposes, png_params) catch null;
+        }
+    }
+
     return render_pcb_png.render(alloc, placement, .{
         .width = opts.width,
         .highlight_nets = opts.highlight_nets,
@@ -472,6 +487,12 @@ pub fn renderDesignPng(
         .routed = routed,
         .violations = violations,
         .title = eff_block.name,
+        .params = png_params,
+        .blame = opts.blame,
+        .loop_labels = opts.loop_labels,
+        .dims = opts.dims,
+        .grid = opts.grid,
+        .compare = cmp_placement,
     });
 }
 
@@ -513,6 +534,11 @@ pub fn pcbPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
             const v = q.get("court_overlap") orelse break :blk 0;
             break :blk std.fmt.parseFloat(f64, v) catch 0;
         },
+        .blame = queryFlag(req, "blame"),
+        .loop_labels = queryFlag(req, "loops"),
+        .dims = queryFlag(req, "dims"),
+        .grid = queryFlag(req, "grid"),
+        .compare = queryOpt(req, "compare"),
     };
     const png_bytes = renderDesignPng(arena, ctx.project_dir, name, opts) catch |e| {
         res.status = if (e == error.BlockNotFound or e == error.SubNotFound) 404 else 500;
