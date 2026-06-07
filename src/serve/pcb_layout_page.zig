@@ -201,7 +201,8 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 
     const view = View.init(placement);
     // The named-layout history is a whole-design concept; scoped previews show none.
-    const layouts: []const SavedLayout = if (sub != null) &.{} else readLayouts(ctx.allocator, ctx.project_dir, name);
+    // Deduplicated + best-score-first for the panel (see displayLayouts).
+    const layouts = displayLayouts(ctx.allocator, ctx.project_dir, name, sub);
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     const w = &aw.writer;
@@ -250,12 +251,22 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
             "<div class=\"pcb-note\">Showing parts on a plain grid — no layout computed yet. " ++
                 "Drag parts to arrange, or hit <b>Regenerate</b> to auto-place.</div>",
         );
+        // Secondary controls collapse behind a chip row (accordion: one panel
+        // open at a time) so the default view is just the toolbar + board. The
+        // Route panel auto-opens when the page loaded already routed, so its
+        // status is visible without a click.
+        const route_open = routed != null;
+        try writeTabsRow(w, route_open);
+        try w.writeAll("<div class=\"pcb-panels\">");
         try writeTuning(w, shown);
         try writeScoreView(w, shown);
         const rp_warn = if (routed) |r| router.returnPathViolations(placement, r, router.RETURN_PATH_RADIUS_MM) else 0;
-        try writeRoutePanel(w, ro.params, routed, violations.len, rp_warn);
+        try writeRoutePanel(w, ro.params, routed, violations.len, rp_warn, route_open);
+        try w.writeAll("</div>");
+        try writeLegend(w, placement, true); // hidden; revealed by the Legend chip
+        try writeHeatLegend(w); // hidden; revealed by the Heatmap chip
     }
-    try writeLegend(w, placement);
+    if (embed) try writeLegend(w, placement, false);
     try w.print(
         "<svg id=\"pcb-svg\" class=\"pcb-svg\" viewBox=\"0 0 {d:.0} {d:.0}\" width=\"{d:.0}\" height=\"{d:.0}\" xmlns=\"http://www.w3.org/2000/svg\"></svg>",
         .{ view.width, view.height, view.width, view.height },
@@ -750,11 +761,19 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
 /// weighted contribution, and the summed `objective`. Shared by the GET export
 /// and the POST score endpoint so both report the same shape.
 fn writeBreakdownJson(w: *std.Io.Writer, b: optimizer.Breakdown, params: optimizer.Params) std.Io.Writer.Error!void {
-    try w.print("{{\"hpwl\":{d},\"loop_raw\":{d},\"loop_weighted\":{d},\"loop_nh\":{d},\"loop_nh_weighted\":{d},", .{
+    try w.writeByte('{');
+    try writeBreakdownFields(w, b, params);
+    try w.writeByte('}');
+}
+
+/// The breakdown's fields with no enclosing braces, so the score endpoint can
+/// splice an extra `"blame"` map into the same object for the live Heatmap.
+fn writeBreakdownFields(w: *std.Io.Writer, b: optimizer.Breakdown, params: optimizer.Params) std.Io.Writer.Error!void {
+    try w.print("\"hpwl\":{d},\"loop_raw\":{d},\"loop_weighted\":{d},\"loop_nh\":{d},\"loop_nh_weighted\":{d},", .{
         b.hpwl, b.loop_raw, b.loop_weighted, b.loop_nh, b.loop_nh_weighted,
     });
     try w.print("\"alignment\":{d},\"footprint\":{d},\"congestion\":{d},", .{ b.alignment, b.footprint, b.congestion });
-    try w.print("\"loop_term\":{d},\"alignment_term\":{d},\"congestion_term\":{d},\"objective\":{d}}}", .{
+    try w.print("\"loop_term\":{d},\"alignment_term\":{d},\"congestion_term\":{d},\"objective\":{d}", .{
         params.loop_w * b.loop_nh_weighted, params.w_align * b.alignment, params.w_congest * b.congestion, b.objective,
     });
 }
@@ -983,14 +1002,42 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         block;
 
     const tune = parseTuning(req);
-    const bd = optimizer.scorePoses(arena, eff_block, ctx.project_dir, poses.items, tune.params) catch {
-        res.status = 500;
-        res.body = "score error";
-        return;
+    // The live Heatmap asks for per-part blame (`"blame":true`, sent only while
+    // the view is on) so a drag refreshes the tint. That needs a built Placement
+    // (perPartBlame attributes over its parts/links/loops), so we take the
+    // heavier placeFromPoses path — whose breakdown is the same scoreLayout +
+    // surrogateLoops the light scorePoses returns, so the score bar never jumps.
+    // Without the flag, stay on the cheap surrogate-only score (no Placement).
+    const want_blame = blk: {
+        const v = root.object.get("blame") orelse break :blk false;
+        break :blk v == .bool and v.bool;
     };
 
     var aw: std.Io.Writer.Allocating = .init(arena);
-    try writeBreakdownJson(&aw.writer, bd, tune.params);
+    if (want_blame) {
+        const placement = optimizer.placeFromPoses(arena, eff_block, ctx.project_dir, poses.items, tune.params) catch {
+            res.status = 500;
+            res.body = "score error";
+            return;
+        };
+        const blame = partBlameRaw(arena, placement, tune.params);
+        try aw.writer.writeByte('{');
+        try writeBreakdownFields(&aw.writer, placement.breakdown, tune.params);
+        try aw.writer.writeAll(",\"blame\":{");
+        for (placement.parts, 0..) |pt, i| {
+            if (i > 0) try aw.writer.writeByte(',');
+            try writeJsonStr(&aw.writer, pt.ref_des);
+            try aw.writer.print(":{d:.4}", .{if (i < blame.len) blame[i] else 0});
+        }
+        try aw.writer.writeAll("}}");
+    } else {
+        const bd = optimizer.scorePoses(arena, eff_block, ctx.project_dir, poses.items, tune.params) catch {
+            res.status = 500;
+            res.body = "score error";
+            return;
+        };
+        try writeBreakdownJson(&aw.writer, bd, tune.params);
+    }
     res.content_type = .JSON;
     res.body = aw.written();
 }
@@ -1159,17 +1206,35 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
     var entry = SavedLayout{ .name = nm, .kind = KIND_MANUAL, .ts = clock.timestamp(), .score = score, .parts = parts };
     const existing = readLayouts(req.arena, ctx.project_dir, name);
     var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    // `replaced` = wrote `entry` in place of a matching row (same name, or an
+    // auto run of this exact arrangement, promoted to the named keeper).
+    // `dup` = this arrangement is already saved as another named layout, so we
+    // keep that one and add nothing (no duplicate).
     var replaced = false;
+    var dup = false;
     for (existing) |L| {
-        if (!replaced and std.mem.eql(u8, L.name, nm)) {
+        const open = !replaced and !dup; // still searching for the row to update
+        if (open and std.mem.eql(u8, L.name, nm)) {
             // Re-saving an existing name overwrites its poses/score in place but
-            // keeps its default status — the user re-captured the same layout.
+            // keeps its default status — the user re-captured under the same name.
             entry.default = L.default;
             try out.append(req.arena, entry);
             replaced = true;
+        } else if (open and sameLayoutScore(L.score, entry.score)) {
+            if (std.mem.eql(u8, L.kind, KIND_AUTO)) {
+                // Same arrangement as an auto run → promote it to this named
+                // keeper in place rather than leaving a duplicate behind.
+                entry.default = L.default;
+                try out.append(req.arena, entry);
+                replaced = true;
+            } else {
+                // Already saved as a named layout — keep it, don't duplicate.
+                dup = true;
+                try out.append(req.arena, L);
+            }
         } else try out.append(req.arena, L);
     }
-    if (!replaced) try out.insert(req.arena, 0, entry);
+    if (!replaced and !dup) try out.insert(req.arena, 0, entry);
     writeLayouts(req.arena, ctx.project_dir, name, out.items);
     res.content_type = .JSON;
     res.body = OK_JSON_TRUE;
@@ -1722,26 +1787,85 @@ fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.
     try w.writeAll("]}");
 }
 
+/// Two saved layouts are duplicates when their score matches: the headline
+/// objective and its two visible raw terms (HPWL + loop length) agree to 0.1.
+/// This is the "duplicate layout" the panel dedups on — what the user reads as
+/// the same row, e.g. repeated Regenerate runs that reconverge to the same
+/// objective even if a part lands a grid step off. (Position isn't compared:
+/// the deterministic optimizer can reach an equal-score arrangement that differs
+/// by a hair, which the user still sees as the same layout.) Unscored legacy
+/// entries never match — they're kept rather than guessed at.
+fn sameLayoutScore(a: ?LayoutScore, b: ?LayoutScore) bool {
+    const x = a orelse return false;
+    const y = b orelse return false;
+    return @abs(x.objective - y.objective) < 0.1 and @abs(x.hpwl - y.hpwl) < 0.1 and @abs(x.loop - y.loop) < 0.1;
+}
+
+/// Panel sort key: lower is better, so the best layout sorts to the top. Entries
+/// predating the objective field fall back to HPWL+loop; unscored entries last.
+fn layoutCost(L: SavedLayout) f64 {
+    const s = L.score orelse return std.math.inf(f64);
+    return if (s.objective > 0) s.objective else s.hpwl + s.loop;
+}
+fn layoutLessByScore(_: void, a: SavedLayout, b: SavedLayout) bool {
+    return layoutCost(a) < layoutCost(b);
+}
+
+/// Collapse saved layouts that are the same arrangement into one, so the panel
+/// never lists a placement twice (chiefly repeated Regenerate runs that
+/// converged identically). Input order is preserved; each group's survivor keeps
+/// a manual name over an auto stamp and the default flag if any member had it.
+fn dedupLayouts(alloc: std.mem.Allocator, layouts: []const SavedLayout) []const SavedLayout {
+    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    for (layouts) |L| {
+        var merged = false;
+        for (out.items) |*K| {
+            if (!sameLayoutScore(K.score, L.score)) continue;
+            const keep_default = K.default or L.default;
+            // Prefer to keep a manual (named) entry over an auto stamp.
+            if (std.mem.eql(u8, L.kind, KIND_MANUAL) and !std.mem.eql(u8, K.kind, KIND_MANUAL)) K.* = L;
+            K.default = keep_default;
+            merged = true;
+            break;
+        }
+        if (!merged) out.append(alloc, L) catch return layouts;
+    }
+    return out.items;
+}
+
+/// The saved-layout list for the panel: duplicate arrangements collapsed (legacy
+/// histories that accumulated repeated Regenerate runs — the cleanup is persisted
+/// once), then sorted best-score-first. The on-disk order stays newest-first
+/// (only this display copy is re-sorted), so recordAutoLayout keeps its
+/// "newest = entry 0" assumption. Empty for sub-scoped previews.
+fn displayLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) []const SavedLayout {
+    if (sub != null) return &.{};
+    const raw = readLayouts(alloc, project_dir, name);
+    const deduped = dedupLayouts(alloc, raw);
+    if (deduped.len != raw.len) writeLayouts(alloc, project_dir, name, deduped);
+    const sorted = alloc.dupe(SavedLayout, deduped) catch return deduped;
+    std.mem.sort(SavedLayout, sorted, {}, layoutLessByScore);
+    return sorted;
+}
+
 /// Append an auto-recorded snapshot of the just-generated `placement` to the
-/// layout history. Skips when the newest entry is an identical auto run (same
-/// score + part count), then prunes auto entries past `MAX_AUTO_LAYOUTS`.
+/// layout history — unless that arrangement is *already saved* (under any name,
+/// auto or manual), in which case there is nothing new to record. Then prunes
+/// auto entries past `MAX_AUTO_LAYOUTS`.
 fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, p: optimizer.Placement) void {
     const existing = readLayouts(alloc, project_dir, name);
     const score = LayoutScore{ .hpwl = p.score.hpwl_mm, .loop = p.score.loop_mm, .caps = p.score.loop_caps, .objective = p.breakdown.objective };
-    if (existing.len > 0 and std.mem.eql(u8, existing[0].kind, KIND_AUTO)) {
-        if (existing[0].score) |s0| {
-            if (existing[0].parts.len == p.parts.len and scoreApproxEq(s0, score)) {
-                // Same layout as the newest auto entry. If it predates the
-                // objective field, backfill it in place; otherwise it's a true
-                // duplicate and there's nothing new to record.
-                if (s0.objective > 0) return;
-                backfillNewestScore(alloc, project_dir, name, existing, score);
-                return;
-            }
-        }
-    }
     const parts = alloc.alloc(PartPose, p.parts.len) catch return;
     for (p.parts, 0..) |pt, i| parts[i] = .{ .ref = pt.ref_des, .x = pt.x, .y = pt.y, .rot = pt.rot };
+    // Dedup against EVERY saved layout, not just the newest: a regen that
+    // reproduces an arrangement already in the list (same objective + HPWL +
+    // loop) adds nothing. If the match is the newest entry and predates the
+    // objective field, backfill it in place.
+    for (existing, 0..) |L, i| {
+        if (!sameLayoutScore(L.score, score)) continue;
+        if (i == 0 and (L.score == null or L.score.?.objective <= 0)) backfillNewestScore(alloc, project_dir, name, existing, score);
+        return;
+    }
     const now = clock.timestamp();
     const entry = SavedLayout{
         .name = fmtAutoName(alloc, now) catch return,
@@ -1764,12 +1888,6 @@ fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []c
         out.append(alloc, L) catch break;
     }
     writeLayouts(alloc, project_dir, name, out.items);
-}
-
-/// Two scores are "the same layout" for dedup when caps match and both
-/// continuous metrics agree to within 0.05 mm.
-fn scoreApproxEq(a: LayoutScore, b: LayoutScore) bool {
-    return a.caps == b.caps and @abs(a.hpwl - b.hpwl) < 0.05 and @abs(a.loop - b.loop) < 0.05;
 }
 
 /// Rewrite the layout list with `score` patched onto the newest entry — used to
@@ -2221,8 +2339,8 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8) st
     try w.writeAll("<button class=\"btn\" id=\"z-in\" title=\"Zoom in\">+</button>");
     try w.writeAll("<button class=\"btn\" id=\"z-fit\" title=\"Reset zoom\">Fit</button></span>");
     try w.writeAll("<span class=\"savemsg\" id=\"pcb-savemsg\"></span>");
-    try w.writeAll("<span class=\"muted\">drag part to move · hover + R to rotate · scroll to zoom · drag background to pan · snaps to ");
-    try w.print("{d} mm</span>", .{optimizer.GRID_MM});
+    try w.print("<span class=\"muted\" title=\"drag part to move · hover + R to rotate · scroll to zoom · " ++
+        "drag background to pan · snaps to {d} mm grid\">drag · R rotate · scroll zoom</span>", .{optimizer.GRID_MM});
     try w.writeAll("</div>");
 }
 
@@ -2308,6 +2426,39 @@ fn writeLayDelta(w: *std.Io.Writer, s: LayoutScore, auto: LayoutScore) std.Io.Wr
     });
 }
 
+/// Chip row that toggles the collapsible control panels (Tuning / Score view /
+/// Route — an accordion, one open at a time) plus the two board-view overlays
+/// (the blame Heatmap tint and the trace Legend). The Route chip starts active
+/// when the page loaded already routed, so its status panel is visible without a
+/// click. All behaviour is wired in BOARD_JS by the `data-panel` / id hooks.
+fn writeTabsRow(w: *std.Io.Writer, route_open: bool) std.Io.Writer.Error!void {
+    try w.writeAll("<div class=\"pcb-tabs\">");
+    try w.writeAll("<button class=\"tab-chip\" data-panel=\"panel-tune\" " ++
+        "title=\"Steering weights — re-runs the optimizer\">Tuning</button>");
+    try w.writeAll("<button class=\"tab-chip\" data-panel=\"panel-score\" " ++
+        "title=\"Re-weigh the score in the browser — doesn't move parts\">Score view</button>");
+    try w.writeAll(if (route_open)
+        "<button class=\"tab-chip active\" data-panel=\"panel-route\" title=\"Autoroute + DRC\">Route</button>"
+    else
+        "<button class=\"tab-chip\" data-panel=\"panel-route\" title=\"Autoroute + DRC\">Route</button>");
+    try w.writeAll("<span class=\"tabs-sep\"></span>");
+    try w.writeAll("<label class=\"view-chip\" " ++
+        "title=\"Tint each part green→red by its share of the objective (cost/blame heatmap)\">" ++
+        "<input type=\"checkbox\" id=\"v-heat\"> Heatmap</label>");
+    try w.writeAll("<label class=\"view-chip\" title=\"Show the trace / via colour key\">" ++
+        "<input type=\"checkbox\" id=\"v-legend\"> Legend</label>");
+    try w.writeAll("</div>");
+}
+
+/// Gradient key for the blame Heatmap, shown only while that view is enabled.
+fn writeHeatLegend(w: *std.Io.Writer) std.Io.Writer.Error!void {
+    try w.writeAll("<div class=\"heat-legend\" id=\"heat-legend\" hidden>" ++
+        "<span class=\"heat-h\">Heatmap</span>" ++
+        "<span class=\"heat-lbl\">cheap</span><span class=\"heat-bar\"></span><span class=\"heat-lbl\">costly</span>" ++
+        "<span class=\"muted\">each part tinted by its share of the objective · snapshot of the loaded layout</span>" ++
+        "</div>");
+}
+
 /// Tuning panel: number inputs for the steering weights + a grid toggle and an
 /// Apply button (wired in BOARD_JS to reload with the values as query params,
 /// which forces a regenerate). Values reflect the weights behind the layout.
@@ -2318,7 +2469,7 @@ fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!
         }
     }.s;
     const m = params.compact_mode;
-    try w.writeAll("<div class=\"pcb-tune\"><span class=\"tune-h\">Tuning</span>");
+    try w.writeAll("<div class=\"pcb-tune pcb-panel\" id=\"panel-tune\" hidden><span class=\"tune-h\">Tuning</span>");
     try w.print("<label title=\"placement regularizer\">Compact <select id=\"t-compact\">" ++
         "<option value=\"tidiness\"{s}>tidiness (row/col)</option>" ++
         "<option value=\"bbox\"{s}>bbox area</option>" ++
@@ -2342,7 +2493,7 @@ fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!
 /// two layouts on pure hot-loop inductance). Defaults mirror the engine weights,
 /// so the headline matches the optimizer's objective until you change something.
 fn writeScoreView(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!void {
-    try w.writeAll("<div class=\"pcb-tune pcb-scoreview\"><span class=\"tune-h\">Score view</span>");
+    try w.writeAll("<div class=\"pcb-tune pcb-scoreview pcb-panel\" id=\"panel-score\" hidden><span class=\"tune-h\">Score view</span>");
     try svRow(w, "wire", "Wire", 1.0);
     try svRow(w, "loop", "Loop", params.loop_w);
     try svRow(w, "align", "Compact", params.w_align);
@@ -2363,8 +2514,17 @@ fn svRow(w: *std.Io.Writer, key: []const u8, label: []const u8, weight: f64) std
 
 /// Routing panel: DRC inputs (mm) + a Route button (wired in BOARD_JS to
 /// reload with `?route=1&…`). Shows the routed/total tally + DRC result.
-fn writeRoutePanel(w: *std.Io.Writer, params: router.RouteParams, routed: ?router.RouteResult, n_drc: usize, n_rp: usize) std.Io.Writer.Error!void {
-    try w.writeAll("<div class=\"pcb-route\"><span class=\"tune-h\">Route</span>");
+fn writeRoutePanel(
+    w: *std.Io.Writer,
+    params: router.RouteParams,
+    routed: ?router.RouteResult,
+    n_drc: usize,
+    n_rp: usize,
+    start_open: bool,
+) std.Io.Writer.Error!void {
+    try w.writeAll("<div class=\"pcb-route pcb-panel\" id=\"panel-route\"");
+    if (!start_open) try w.writeAll(" hidden");
+    try w.writeAll("><span class=\"tune-h\">Route</span>");
     try w.print("<label>Track <input id=\"r-tw\" type=\"number\" step=\"0.05\" min=\"0.05\" value=\"{d}\"></label>", .{params.track_width});
     try w.print("<label>Clearance <input id=\"r-cl\" type=\"number\" step=\"0.05\" min=\"0.05\" value=\"{d}\"></label>", .{params.clearance});
     try w.print("<label>Via drill <input id=\"r-vd\" type=\"number\" step=\"0.05\" min=\"0.1\" value=\"{d}\"></label>", .{params.via_drill});
@@ -2448,12 +2608,12 @@ fn writeEmbedRoute(
     try w.writeAll("</div>");
 }
 
-fn writeLegend(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!void {
+fn writeLegend(w: *std.Io.Writer, p: optimizer.Placement, hidden: bool) std.Io.Writer.Error!void {
     var fallback_count: usize = 0;
     for (p.parts) |part| {
         if (part.fallback) fallback_count += 1;
     }
-    try w.writeAll("<div class=\"pcb-legend\">");
+    try w.writeAll(if (hidden) "<div class=\"pcb-legend\" id=\"pcb-legend\" hidden>" else "<div class=\"pcb-legend\" id=\"pcb-legend\">");
     try w.writeAll("<span class=\"sw prox\"></span> power leg (L1)");
     try w.writeAll("<span class=\"sw l2gnd\"></span> GND return (images under trace, L2 plane)");
     try w.writeAll("<span class=\"sw viadot\"></span> GND via (L1↔L2, Ø from route params)");
@@ -2555,6 +2715,15 @@ fn writeViaDropJson(w: *std.Io.Writer, p: ?LocalPt) std.Io.Writer.Error!void {
     } else try w.writeAll("null");
 }
 
+/// Raw per-part objective blame (the same attribution the PNG heatmap uses), in
+/// `alloc`; empty on alloc failure. The client normalizes for the colour ramp —
+/// excluding the anchor IC — and refreshes it on drag via the score endpoint.
+fn partBlameRaw(alloc: std.mem.Allocator, p: optimizer.Placement, params: optimizer.Params) []const f64 {
+    const blame = alloc.alloc(f64, p.parts.len) catch return &.{};
+    optimizer.perPartBlame(p, params, blame);
+    return blame;
+}
+
 fn writePcbData(
     w: *std.Io.Writer,
     alloc: std.mem.Allocator,
@@ -2599,6 +2768,10 @@ fn writePcbData(
     try w.writeAll(",");
     try writeLayoutsJson(w, layouts);
 
+    // Raw per-part objective blame → the live "Heatmap" toggle tints each
+    // courtyard by its share (client normalizes, excluding the anchor IC).
+    const blame = partBlameRaw(alloc, p, params);
+
     // Parts.
     try w.writeAll(PARTS_OPEN);
     for (p.parts, 0..) |pt, i| {
@@ -2610,6 +2783,7 @@ fn writePcbData(
             pt.hw,                                pt.hh, if (pt.kind == .hub) "hub" else "passive",
             if (pt.fallback) "true" else "false",
         });
+        try w.print("\"blame\":{d:.4},", .{if (i < blame.len) blame[i] else 0});
         try w.writeAll("\"fp\":");
         try writeJsonStr(w, fp_of.get(pt.ref_des) orelse "");
         try w.writeAll(",\"pads\":[");
@@ -3031,6 +3205,27 @@ const PAGE_CSS =
     \\.lay-row .lay-star:hover{color:#e3b341;border-color:#e3b341}
     \\.lay-row .lay-star.on{color:#e3b341;border-color:#7a5c12;background:#2b2410}
     \\.lay-row.def{background:#13210f;box-shadow:inset 2px 0 0 #e3b341}
+    \\/* Collapsible control deck: a chip row toggles one panel at a time, so the
+    \\   default view is the toolbar + board instead of a stack of control strips. */
+    \\.pcb-tabs{display:flex;gap:6px;align-items:center;margin:6px 0 8px;flex-wrap:wrap}
+    \\.pcb-tabs .tab-chip{font:inherit;font-size:12px;border:1px solid #30363d;background:#161b22;color:#c9d1d9;
+    \\  border-radius:14px;padding:3px 12px;cursor:pointer}
+    \\.pcb-tabs .tab-chip:hover{background:#21262d;border-color:#58a6ff;color:#e6edf3}
+    \\.pcb-tabs .tab-chip.active{background:rgba(31,111,235,.22);border-color:#58a6ff;color:#e6edf3}
+    \\.pcb-tabs .tabs-sep{width:1px;height:18px;background:#30363d;margin:0 3px}
+    \\.pcb-tabs .view-chip{display:inline-flex;gap:5px;align-items:center;font-size:12px;color:#c9d1d9;
+    \\  border:1px solid #30363d;background:#161b22;border-radius:14px;padding:3px 11px;cursor:pointer}
+    \\.pcb-tabs .view-chip:hover{border-color:#58a6ff;color:#e6edf3}
+    \\.pcb-panel{background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:8px 12px}
+    \\.pcb-panel[hidden]{display:none}
+    \\.heat-legend{display:flex;gap:9px;align-items:center;font-size:12px;color:#8b949e;margin:4px 0 12px;flex-wrap:wrap}
+    \\.heat-legend[hidden]{display:none}
+    \\.heat-legend .heat-h{font-weight:700;color:#f0f6fc}
+    \\.heat-legend .heat-lbl{font-size:11px;color:#8b949e}
+    \\.heat-legend .heat-bar{width:120px;height:10px;border-radius:5px;border:1px solid #30363d;
+    \\  background:linear-gradient(90deg,#15302a,#b8860b,#c0392b)}
+    \\.heat-legend .muted{font-size:11px;color:#6e7681}
+    \\.pcb-legend[hidden]{display:none}
     \\.pcb-tune{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#8b949e}
     \\.pcb-tune .tune-h{font-weight:700;color:#f0f6fc}
     \\.pcb-tune label{display:flex;gap:4px;align-items:center}
@@ -3121,7 +3316,8 @@ const PAGE_CSS =
     \\.pcb-3d-tools .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
     \\.pcb-3d-tools label{display:flex;gap:3px;align-items:center;cursor:pointer}
     \\.pcb-3d-tools .sep{width:1px;height:16px;background:#30363d}
-    \\body.mode-3d .pcb-svg,body.mode-3d .pcb-tune,body.mode-3d .pcb-route,
+    \\body.mode-3d .pcb-svg,body.mode-3d .pcb-tune,body.mode-3d .pcb-route,body.mode-3d .pcb-tabs,
+    \\body.mode-3d .pcb-panel,body.mode-3d .heat-legend,
     \\body.mode-3d .pcb-legend,body.mode-3d .pcb-note,body.mode-3d .pcb-bar{display:none}
     \\/* Live-regen status card — floats over the top of the board (pointer-events
     \\   off) so the optimizer's best-so-far arrangement stays fully visible and
@@ -3287,7 +3483,8 @@ const BOARD_JS =
     \\}
     \\function delta(id,cur,base){
     \\ var e=document.getElementById(id);if(!e)return;var d=cur-base;
-    \\ if(Math.abs(d)<0.05){e.textContent="=";e.className="delta";}
+    \\ // Blank (not "=") when unchanged so the score bar isn't a row of "=" on load.
+    \\ if(Math.abs(d)<0.05){e.textContent="";e.className="delta";}
     \\ else{e.textContent=(d>0?"+":"")+d.toFixed(1);e.className="delta "+(d>0?"up":"down");}
     \\}
     \\function setSc(id,t){var e=document.getElementById(id);if(e)e.textContent=t;}
@@ -3344,11 +3541,15 @@ const BOARD_JS =
     \\var scoreReq=0;
     \\function fetchScore(){
     \\ setSc("sc-obj","objective …");var seq=++scoreReq;
-    \\ var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};})};
+    \\ // Ask for per-part blame only while the Heatmap view is on, so a finished
+    \\ // drag/rotate re-tints the board to the new cost distribution.
+    \\ var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};}),blame:heatOn};
     \\ fetch("/api/pcb-score/"+encodeURIComponent(PCB.name),{method:"POST",
     \\   headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
     \\  .then(function(r){return r.json();})
-    \\  .then(function(b){if(seq===scoreReq)showScore(b);})
+    \\  .then(function(b){if(seq!==scoreReq)return;
+    \\   if(b.blame){P.forEach(function(p){var v=b.blame[p.ref];if(v!==undefined)p.blame=v;});if(heatOn)applyHeat();}
+    \\   showScore(b);})
     \\  .catch(function(){if(seq===scoreReq)setSc("sc-obj","objective —");});
     \\}
     \\function mm(ev){var r=svg.getBoundingClientRect(),vb=svg.viewBox.baseVal;
@@ -3651,6 +3852,39 @@ const BOARD_JS =
     \\   setTimeout(function(){livePoll(gen,lastSeq,misses+1);},700);});}
     \\var rgl=document.getElementById("pcb-regen");
     \\if(rgl)rgl.addEventListener("click",function(ev){ev.preventDefault();liveRegen("");});
+    \\// ── Collapsible control deck (accordion) + board-view overlays ──────────
+    \\(function(){
+    \\ var chips=Array.prototype.slice.call(document.querySelectorAll(".tab-chip"));
+    \\ function panels(){return document.querySelectorAll(".pcb-panel");}
+    \\ function openPanel(id){panels().forEach(function(p){p.hidden=(p.id!==id);});
+    \\   chips.forEach(function(c){c.classList.toggle("active",c.getAttribute("data-panel")===id);});}
+    \\ function closeAll(){panels().forEach(function(p){p.hidden=true;});
+    \\   chips.forEach(function(c){c.classList.remove("active");});}
+    \\ chips.forEach(function(c){c.addEventListener("click",function(){
+    \\   if(c.classList.contains("active"))closeAll();else openPanel(c.getAttribute("data-panel"));});});
+    \\})();
+    \\// Cost/blame heatmap: tint each part's courtyard green→red by its share of the
+    \\// objective (PCB.parts[i].blame, normalized server-side); mirrors the PNG ramp.
+    \\function lerpHex(a,b,t){var ar=(a>>16)&255,ag=(a>>8)&255,ab=a&255;
+    \\ return "rgb("+Math.round(ar+(((b>>16)&255)-ar)*t)+","+Math.round(ag+(((b>>8)&255)-ag)*t)+
+    \\  ","+Math.round(ab+((b&255)-ab)*t)+")";}
+    \\function blameColor(t){if(!(t>0))t=0;if(t>1)t=1;
+    \\ return t<0.5?lerpHex(0x15302a,0xb8860b,t*2):lerpHex(0xb8860b,0xc0392b,(t-0.5)*2);}
+    \\var heatOn=false;
+    \\// Normalize against the hottest *non-anchor* part: the anchor IC is the fixed
+    \\// reference point everything is placed around, so it carries no tint (and is
+    \\// excluded from the max, so its blame doesn't flatten the rest of the ramp).
+    \\function applyHeat(){var mx=0;
+    \\ P.forEach(function(p){if(p.ref!==anchorRef){var b=p.blame||0;if(b>mx)mx=b;}});
+    \\ P.forEach(function(p,i){var ct=els[i]&&els[i].querySelector(".court");if(!ct)return;
+    \\  if(!heatOn||p.ref===anchorRef){ct.setAttribute("fill","#161b22");return;}
+    \\  ct.setAttribute("fill",blameColor(mx>0?(p.blame||0)/mx:0));});}
+    \\var heatCb=document.getElementById("v-heat");
+    \\if(heatCb)heatCb.addEventListener("change",function(){heatOn=heatCb.checked;
+    \\ var hl=document.getElementById("heat-legend");if(hl)hl.hidden=!heatOn;applyHeat();});
+    \\var legCb=document.getElementById("v-legend");
+    \\if(legCb)legCb.addEventListener("change",function(){var l=document.getElementById("pcb-legend");
+    \\ if(l)l.hidden=!legCb.checked;});
     \\rats(); showScore(PCB.auto); drawRoute(); drawClr(); drawDrc();
     \\})();</script>
 ;
