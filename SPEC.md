@@ -106,6 +106,7 @@ Public functions: solve
 - zone-pack lays a group into an aligned row/column
 - the manual placement block keeps authored order and resolves rotations
 - the manual floorplan docks sides around the anchor IC and stages unlisted parts
+- a long manual side wraps into multiple depth lanes
 
 ## placement/router
 

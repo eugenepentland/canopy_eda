@@ -452,6 +452,9 @@ pub const PngRequest = struct {
     group_loop_relief: f64 = -1,
     /// Constructive zone-then-pack floorplan (crisp VIN│IC│L│VOUT rows).
     zone_pack: bool = false,
+    /// Bypass an authored `(placement …)` spec so the force / zone path renders
+    /// instead (the `?placement=off` A/B switch).
+    placement_off: bool = false,
     /// Diagnostic overlays (see render_pcb_png.Options).
     blame: bool = false,
     loop_labels: bool = false,
@@ -492,7 +495,8 @@ pub fn renderDesignPng(
     // nothing is cached so an agent's first call stays cheap.
     // A `(placement …)` form drives a fresh solve unless a saved layout (?layout=)
     // or a sub-scoped preview was requested — the spec is the source of truth.
-    const spec_drives = opts.sub == null and opts.layout == null and eff_block.placement.present;
+    // `?placement=off` opts out (preview the automatic placer for comparison).
+    const spec_drives = opts.sub == null and opts.layout == null and !opts.placement_off and eff_block.placement.present;
     const cached = if (opts.sub != null) null else if (opts.layout) |ln|
         readLayoutPoses(alloc, project_dir, name, ln)
     else if (opts.regen or spec_drives) null else readAutoPoses(alloc, project_dir, name);
@@ -502,6 +506,7 @@ pub fn renderDesignPng(
     if (opts.group_zone_w >= 0) png_params.group_zone_w = opts.group_zone_w;
     if (opts.group_loop_relief >= 0) png_params.group_loop_relief = opts.group_loop_relief;
     if (opts.zone_pack) png_params.zone_pack = true;
+    if (opts.placement_off) png_params.ignore_placement = true;
     // A named saved layout renders VERBATIM (placeFromPoses) — "show me this
     // layout" must display exactly what was saved, not a re-optimized version:
     // refine can drift a hand-tuned layout to a worse arrangement (e.g. a 70.8
@@ -591,6 +596,11 @@ pub fn pcbPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
         .group_zone_w = pngFloatOpt(req, "group_zone_w"),
         .group_loop_relief = pngFloatOpt(req, "group_loop_relief"),
         .zone_pack = queryFlag(req, "zone_pack"),
+        .placement_off = blk: {
+            const q = req.query() catch break :blk false;
+            const v = q.get("placement") orelse break :blk false;
+            break :blk std.mem.eql(u8, v, "off");
+        },
         .blame = queryFlag(req, "blame"),
         .loop_labels = queryFlag(req, "loops"),
         .dims = queryFlag(req, "dims"),
@@ -2121,6 +2131,14 @@ fn parseTuning(req: *httpz.Request) Tuning {
     if (q.get("zone_pack")) |v| {
         p.zone_pack = !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false"));
         tuned = true;
+    }
+    // `?placement=off` bypasses an authored (placement …) spec so the force / zone
+    // path runs — for A/B-ing the manual floorplan against the automatic placer.
+    if (q.get("placement")) |v| {
+        if (std.mem.eql(u8, v, "off")) {
+            p.ignore_placement = true;
+            tuned = true;
+        }
     }
     return .{ .params = p, .tuned = tuned, .regen = regen or tuned };
 }

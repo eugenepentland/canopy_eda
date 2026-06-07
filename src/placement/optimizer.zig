@@ -242,6 +242,11 @@ pub const Params = struct {
     /// engages for a "one dominant IC + groups" shape; falls back to the force
     /// pipeline otherwise, so it can never degrade a non-switcher board.
     zone_pack: bool = false,
+    /// Bypass any agent-authored `(placement …)` floorplan for this solve, so the
+    /// force / zone-pack path runs instead — lets the page/PNG preview what the
+    /// automatic placer produces on a design that carries a manual spec (the
+    /// `?placement=off` A/B switch). Off by default (the spec drives when present).
+    ignore_placement: bool = false,
 };
 
 /// Which phase of the solve a progress frame came from — drives the label the
@@ -632,12 +637,22 @@ fn runPlacement(
     // Agent-authored manual floorplan from a `(placement …)` form: the spec is the
     // source of truth, so it drives placement when present. Falls back to the force
     // pipeline (recording it in the diagnostics) on any failure it can't resolve.
-    if (prep.placement) |rp| {
-        if (try packSpec(arena, parts, &prep.idx_of, nets, built, rp)) {
-            tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
-            return;
+    if (!params.ignore_placement) {
+        if (prep.placement) |rp| {
+            if (try packSpec(arena, parts, &prep.idx_of, nets, built, rp)) {
+                // Cheap surrogate local tuck (no routing): a small per-cap window that
+                // squeezes each decoupling cap toward its pin without unspooling the
+                // constructed lanes — closes most of the gap to the force optimum while
+                // keeping every part on its authored side (the spec's coarse structure
+                // is preserved; polish only does the fine placement).
+                polish(parts, &prep.idx_of, nets, built.loops, params);
+                snapToGrid(parts);
+                legalizeOnGrid(parts);
+                tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
+                return;
+            }
+            g_placement_diag.used_spec = false;
         }
-        g_placement_diag.used_spec = false;
     }
     // Constructive zone-then-pack floorplan (opt-in): crisp VIN│IC│L│VOUT rows the
     // force model can't make. Returns false (falls through to the force pipeline)
@@ -1386,11 +1401,85 @@ fn packSpecBlock(arena: std.mem.Allocator, members: []const usize, rots_override
     };
 }
 
+/// Max parts in one packed lane before a side wraps into another (depth) lane.
+const MAX_PER_LANE: usize = 4;
+
+/// How many depth lanes a side of `n` parts wraps into (1 until it exceeds
+/// `MAX_PER_LANE`, then balanced) — turns one tall column into a compact grid.
+fn laneCount(n: usize) usize {
+    if (n <= MAX_PER_LANE) return 1;
+    return (n + MAX_PER_LANE - 1) / MAX_PER_LANE;
+}
+
+/// Build one packed lane for `members` (with per-member rotation overrides) on `edge`,
+/// set its dock target to the rail-pad cross-coordinate (so the lane sits opposite its
+/// supply pad — short loop), weight it, and append it to `lanes`.
+fn appendLane(
+    arena: std.mem.Allocator,
+    lanes: *std.ArrayListUnmanaged(PackBlock),
+    members: []const usize,
+    rots: []const ?f64,
+    ic: usize,
+    edge: Edge,
+    parts: []const Part,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+    loops: []const Loop,
+    gap: f64,
+) std.mem.Allocator.Error!void {
+    var blk = try packSpecBlock(arena, members, rots, parts, edge, loops, gap);
+    if (railPadCross(members, ic, edge, parts, nets, idx_of)) |t| {
+        blk.target = t;
+        blk.target_set = true;
+    }
+    blk.mass = blockMass(members, loops);
+    try lanes.append(arena, blk);
+}
+
+/// Dock a side's depth lanes outward from the IC edge: lane 0 flush to the IC, each
+/// later lane one lane-depth + `gap` beyond the previous, all sharing the cross-centre
+/// (`b.target`, the rail pad, else `ic_cross`) so they line up. This realizes both the
+/// IC│L│VOUT switch-node lane and the multi-column wrap of a long side. Locks the
+/// shared-line axis (the lane's depth coordinate) so the finish keeps the columns crisp.
+fn dockLanes(parts: []Part, ic: usize, lanes: []const PackBlock, edge: Edge, gap: f64, gap_dock: f64, ic_cross: f64, lock_axis: []u8, lock_val: []f64) void {
+    const vertical = (edge == .left or edge == .right); // cross = Y, depth = X
+    var depth_cursor: f64 = switch (edge) {
+        .left => parts[ic].x - effHw(parts[ic]) - gap_dock,
+        .right => parts[ic].x + effHw(parts[ic]) + gap_dock,
+        .top => parts[ic].y - effHh(parts[ic]) - gap_dock,
+        .bottom => parts[ic].y + effHh(parts[ic]) + gap_dock,
+    };
+    const outward: f64 = switch (edge) {
+        .left, .top => -1,
+        .right, .bottom => 1,
+    };
+    for (lanes) |b| {
+        const half_depth = if (vertical) b.half_w else b.half_h;
+        const depth_center = depth_cursor + outward * half_depth;
+        const cross_center = if (b.target_set) b.target else ic_cross;
+        const cx = if (vertical) depth_center else cross_center;
+        const cy = if (vertical) cross_center else depth_center;
+        for (b.members, 0..) |m, mj| {
+            parts[m].rot = b.rots[mj];
+            parts[m].x = cx + b.lx[mj];
+            parts[m].y = cy + b.ly[mj];
+            if (vertical) {
+                lock_axis[m] = 1; // shared-x column line (the lane's depth)
+                lock_val[m] = parts[m].x;
+            } else {
+                lock_axis[m] = 2; // shared-y row line (the lane's depth)
+                lock_val[m] = parts[m].y;
+            }
+        }
+        depth_cursor += outward * (2 * half_depth + gap);
+    }
+}
+
 /// Constructive placement from a resolved `(placement …)` spec: the anchor IC at the
-/// origin, each side's parts packed as a row/column in the authored order (honouring
-/// rotation overrides, else facing the IC) and docked to that IC edge, each
-/// `(switch …)` inductor straddling the SW node, and any parts the spec didn't list
-/// staged in a band below the board (reported via `g_placement_diag.unplaced`).
+/// origin, each side's parts packed into depth lanes in the authored order (honouring
+/// rotation overrides, else facing the IC), a `(switch …)` inductor in the innermost
+/// lane of its side, long sides wrapped into a compact grid, and any parts the spec
+/// didn't list staged in a band below the board (reported via `g_placement_diag`).
 /// Finishes with overlap-removal + grid-snap only — never `relax`. Returns true on a
 /// complete, overlap-free arrangement; false ⇒ caller falls back to the force placer.
 fn packSpec(
@@ -1415,50 +1504,56 @@ fn packSpec(
     @memset(lock_axis, 0);
     const lock_val = try arena.alloc(f64, parts.len);
 
-    var blocks: std.ArrayListUnmanaged(PackBlock) = .empty;
     const gap = @max(g_route_gap, FINAL_CLEAR);
 
-    // One block per IC edge: any `(switch …)` inductor on that edge comes first
-    // (innermost in the column), then the declared side items in authored order.
-    // Building per-edge — not per-side — lets co-edge sides plus the inductor share a
-    // single docked block, folding the inductor onto its authored side (a dedicated
-    // switch-node straddle lane is M2) so it can't collide with another edge.
+    // Depth lanes per IC edge (M2). Each edge becomes one or more lanes stacked
+    // outward from the IC: a `(switch …)` inductor takes the innermost lane (between
+    // the IC and that side's caps — the IC│L│VOUT switch-node lane), then the side's
+    // parts wrap into one or more lanes (a long side becomes a compact grid instead of
+    // one tall column). `dockLanes` puts lane 0 flush to the IC and each later lane one
+    // lane deeper, all sharing the rail-pad cross-centre so they line up. Author the
+    // switch on the edge nearest the SW pads so it doesn't push the output bank out.
     const all_edges = [_]Edge{ .left, .right, .top, .bottom };
     for (all_edges) |e| {
-        var ml: std.ArrayListUnmanaged(usize) = .empty;
-        var rots: std.ArrayListUnmanaged(?f64) = .empty;
+        var lanes: std.ArrayListUnmanaged(PackBlock) = .empty;
+        // Innermost lane: the switch inductor(s) on this edge, between IC and caps.
+        var sw_members: std.ArrayListUnmanaged(usize) = .empty;
         for (rp.switches) |sw| {
             if (sw.edge != e or claimed[sw.part]) continue;
             claimed[sw.part] = true;
-            try ml.append(arena, sw.part);
-            try rots.append(arena, null); // inductor: face-the-IC default rotation
+            try sw_members.append(arena, sw.part);
         }
+        if (sw_members.items.len > 0) {
+            const sw_rots = try arena.alloc(?f64, sw_members.items.len);
+            @memset(sw_rots, null); // inductor: face-the-IC default rotation
+            try appendLane(arena, &lanes, sw_members.items, sw_rots, ic, e, parts, nets, idx_of, built.loops, gap);
+        }
+        // The side's parts, in authored order, wrapped into balanced lanes.
+        var members: std.ArrayListUnmanaged(usize) = .empty;
+        var rots: std.ArrayListUnmanaged(?f64) = .empty;
         for (rp.sides) |s| {
             if (s.edge != e) continue;
             for (s.items) |it| {
                 if (claimed[it.part]) continue; // a ref listed twice / also the anchor
                 claimed[it.part] = true;
-                try ml.append(arena, it.part);
+                try members.append(arena, it.part);
                 try rots.append(arena, it.rot);
             }
         }
-        if (ml.items.len == 0) continue;
-        var blk = try packSpecBlock(arena, ml.items, rots.items, parts, e, built.loops, gap);
-        // Dock the block centred opposite its supply pad on the IC (short loop) when
-        // its parts touch an IC rail pad; otherwise dockEdge centres it on the IC.
-        if (railPadCross(ml.items, ic, e, parts, nets, idx_of)) |t| {
-            blk.target = t;
-            blk.target_set = true;
+        if (members.items.len > 0) {
+            const n = members.items.len;
+            const nlanes = laneCount(n);
+            const per = (n + nlanes - 1) / nlanes; // ceil — balance the lanes
+            var i: usize = 0;
+            while (i < n) : (i += per) {
+                const end = @min(i + per, n);
+                try appendLane(arena, &lanes, members.items[i..end], rots.items[i..end], ic, e, parts, nets, idx_of, built.loops, gap);
+            }
         }
-        blk.mass = blockMass(ml.items, built.loops);
-        try blocks.append(arena, blk);
+        if (lanes.items.len == 0) continue;
+        const ic_cross = if (e == .left or e == .right) parts[ic].y else parts[ic].x;
+        dockLanes(parts, ic, lanes.items, e, gap, gap, ic_cross, lock_axis, lock_val);
     }
-
-    // Dock the blocks to their edges (co-edge stacking + alignment locks in dockEdge).
-    dockEdge(parts, ic, blocks.items, .left, gap, gap, lock_axis, lock_val);
-    dockEdge(parts, ic, blocks.items, .right, gap, gap, lock_axis, lock_val);
-    dockEdge(parts, ic, blocks.items, .top, gap, gap, lock_axis, lock_val);
-    dockEdge(parts, ic, blocks.items, .bottom, gap, gap, lock_axis, lock_val);
 
     // Parts the spec didn't list → a staging band below the board, reported (not lost)
     // so the agent can see exactly what's left to assign.
@@ -5685,5 +5780,60 @@ test "packSpec docks sides around the anchor IC and stages unlisted parts" {
     try testing.expectEqual(@as(usize, 1), g_placement_diag.unplaced.len);
     try testing.expectEqualStrings("C9", g_placement_diag.unplaced[0]);
     // No courtyards overlap.
+    try testing.expect(!anyOverlap(&parts));
+}
+
+// spec: placement/optimizer - a long manual side wraps into multiple depth lanes
+test "packSpec wraps a long side into multiple depth lanes" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    // A side wraps only once it exceeds MAX_PER_LANE parts.
+    try testing.expectEqual(@as(usize, 1), laneCount(1));
+    try testing.expectEqual(@as(usize, 1), laneCount(MAX_PER_LANE));
+    try testing.expect(laneCount(MAX_PER_LANE + 1) >= 2);
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 3, .hh = 3, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.6, .hh = 0.6, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 0.6, .hh = 0.6, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "C3", .kind = .passive, .hw = 0.6, .hh = 0.6, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "C4", .kind = .passive, .hw = 0.6, .hh = 0.6, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "C5", .kind = .passive, .hw = 0.6, .hh = 0.6, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "C6", .kind = .passive, .hw = 0.6, .hh = 0.6, .pads = &.{}, .fallback = true },
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("U1", 0);
+    try idx_of.put("C1", 1);
+    try idx_of.put("C2", 2);
+    try idx_of.put("C3", 3);
+    try idx_of.put("C4", 4);
+    try idx_of.put("C5", 5);
+    try idx_of.put("C6", 6);
+    // Six caps on one side — past MAX_PER_LANE, so they must wrap into >1 lane.
+    const right = [_]SpecItem{ .{ .part = 1 }, .{ .part = 2 }, .{ .part = 3 }, .{ .part = 4 }, .{ .part = 5 }, .{ .part = 6 } };
+    const sides = [_]SpecSide{.{ .edge = .right, .items = &right }};
+    const rp = ResolvedPlacement{ .anchor = 0, .sides = &sides, .switches = &.{} };
+    g_placement_diag = .{ .active = true };
+    defer g_placement_diag = .{};
+    var springs = [_]Spring{};
+    var loops = [_]Loop{};
+    const built = Built{ .springs = &springs, .loops = &loops };
+    try testing.expect(try packSpec(arena, &parts, &idx_of, &.{}, built, rp));
+    // Every cap is right of the IC...
+    for (1..7) |i| try testing.expect(parts[i].x > parts[0].x);
+    // ...and they occupy at least two distinct depth lanes (x columns), not one
+    // tall column — i.e. the side wrapped into a compact grid.
+    var distinct: usize = 0;
+    for (1..7) |i| {
+        var seen = false;
+        for (1..i) |j| {
+            if (@abs(parts[i].x - parts[j].x) < 0.05) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) distinct += 1;
+    }
+    try testing.expect(distinct >= 2);
     try testing.expect(!anyOverlap(&parts));
 }
