@@ -616,23 +616,27 @@ fn runPlacement(
         tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
         return;
     }
+    try runForce(arena, parts, prep, nets, built, params);
+}
+
+/// The force-directed placement pipeline (routed-reranked multi-start for loop
+/// boards in the multi-start band, else optimize+symmetrize+compact), then the
+/// priority-cap tuck. The default path, and the zone-pack acceptance-gate baseline.
+fn runForce(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    built: Built,
+    params: Params,
+) std.mem.Allocator.Error!void {
     if (parts.len >= 2 and parts.len <= MULTISTART_MAX_PARTS and built.loops.len > 0) {
-        // Routed-reranked multi-start (closes the surrogate↔routed gap; widened
-        // from ≤16 to the whole multi-start band so 17–32-part loop boards select
-        // on routed too — adf5901 −13%, nestedarray −5%).
         try rerankSolve(arena, parts, &prep.idx_of, nets, built, params, prep.priority);
     } else {
         optimize(parts, &prep.idx_of, nets, built, params);
-        // Mirror matched halves (symmetric amp input/output) when genuinely
-        // symmetric; a no-op otherwise.
         try symmetrize(arena, parts, &prep.idx_of, nets, built, params);
-        // Final pull-together: dock any part still held off by the snap gap so
-        // every courtyard abuts a neighbour, highest placement-order priority first.
         compactToContact(parts, prep.priority);
     }
-    // Tuck each declared-priority decoupling cap onto its IC pin (a wide per-cap
-    // window the global objective/polish can't do); re-routed and reverted if it
-    // would drop a net, so it never makes routing worse.
     tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
 }
 
@@ -698,6 +702,30 @@ fn analyzeTopology(parts: []const Part, lowered: Lowered) ?ZoneTopo {
         if (g.hub >= 0 and @as(usize, @intCast(g.hub)) != ici) return null;
     }
     return .{ .ic = ici };
+}
+
+/// A secondary hub (≠ `ic`) that `members` share a non-ground net with — the power
+/// inductor for an output-cap bank, since a switcher's output rail terminates on
+/// the inductor, not an IC pad. Used to recover a docking edge when the IC-anchored
+/// `railDir` is zero (the bank touches no IC pad). Null when none.
+fn nearestSharedHub(members: []const usize, ic: usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) ?usize {
+    for (nets) |net| {
+        if (isGroundName(shortName(net.name))) continue;
+        var has_member = false;
+        for (net.pins) |pp| {
+            const pi = idx_of.get(pp.ref_des) orelse continue;
+            if (memberOf(members, pi)) {
+                has_member = true;
+                break;
+            }
+        }
+        if (!has_member) continue;
+        for (net.pins) |pp| {
+            const pi = idx_of.get(pp.ref_des) orelse continue;
+            if (pi != ic and parts[pi].kind == .hub and !memberOf(members, pi)) return pi;
+        }
+    }
+    return null;
 }
 
 /// Sum of the IC's non-ground pad offsets over the nets `members` connect to —
@@ -1068,7 +1096,9 @@ fn placeSwitchHub(parts: []Part, ic: usize, sec: usize, nets: []const FlatNet, i
     }
     const cx = parts[ic].x + (if (nsw > 0) sx / @as(f64, @floatFromInt(nsw)) else 0);
     // Dock to whichever of top/bottom carries fewer blocks (keeps the switch cell
-    // off the busier edge).
+    // off the busier edge). (Docking on the SW pad's own side edge was tried and
+    // regressed tps54540-buck badly — the inductor collided with its output bank;
+    // the acceptance gate below is the general safety net instead.)
     var top: usize = 0;
     var bot: usize = 0;
     for (blocks) |b| {
@@ -1125,10 +1155,31 @@ fn packZoned(
         if (ml.items.len == 0) continue;
         const ordered = try orderMembers(arena, ml.items, parts, prep.priority);
         for (ordered) |m| claimed[m] = true;
-        const edge = snapEdge(railDir(ordered, ic, parts, nets, &prep.idx_of)) orelse .bottom;
+        // Edge from the group's IC rail pin. A switcher OUTPUT bank touches no IC
+        // pad (VOUT is made at the inductor), so IC-railDir is zero — then resolve
+        // the edge from the inductor (a shared secondary hub) by its IC switch pin,
+        // so the bank docks on the SW→L→VOUT side instead of the blind `.bottom`.
+        var edge_anchor = ic;
+        var dir = railDir(ordered, ic, parts, nets, &prep.idx_of);
+        if (@abs(dir.x) < 1e-9 and @abs(dir.y) < 1e-9) {
+            if (nearestSharedHub(ordered, ic, parts, nets, &prep.idx_of)) |sh| {
+                const hubdir = railDir(&.{sh}, ic, parts, nets, &prep.idx_of);
+                if (@abs(hubdir.x) > 1e-9 or @abs(hubdir.y) > 1e-9) {
+                    dir = hubdir;
+                    edge_anchor = sh;
+                }
+            }
+        }
+        const edge = snapEdge(dir) orelse .bottom;
         const pin_order = try orderForBlock(arena, ordered, ic, edge, parts, nets, &prep.idx_of);
         var blk = try packOneBlock(arena, ordered, parts, edge, built.loops, gap, pin_order);
-        if (railPadCross(ordered, ic, edge, parts, nets, &prep.idx_of)) |t| {
+        // Cross target: the rail pin on whichever anchor the edge came from (the IC,
+        // or the inductor's IC switch pin for an output bank).
+        const tgt = if (edge_anchor == ic)
+            railPadCross(ordered, ic, edge, parts, nets, &prep.idx_of)
+        else
+            railPadCross(&.{edge_anchor}, ic, edge, parts, nets, &prep.idx_of);
+        if (tgt) |t| {
             blk.target = t;
             blk.target_set = true;
         }
@@ -4774,9 +4825,24 @@ fn isHub(ref: []const u8) bool {
 }
 
 fn isGroundName(name: []const u8) bool {
-    const grounds = [_][]const u8{ "GND", "GNDA", "AGND", "PGND", "DGND", "GNDD", "VSS", "VSSA" };
-    for (grounds) |g| {
-        if (std.mem.eql(u8, name, g)) return true;
+    // A ground rail is one of these tokens, optionally with a *numbered* suffix
+    // (GND1, GND2, AGND2, VSS1, PGND_2 on a multi-ground part) — an exact-match list
+    // missed numbered grounds, so on an isolated/split-ground part those nets read
+    // as *signal*, corrupting loop detection, rail direction, and scoring. The
+    // suffix must be (an optional single '_'/'-' then) all digits, so a real signal
+    // like GND_SENSE / GNDSW stays a signal. Longer tokens first so e.g. GNDA isn't
+    // shadowed by GND.
+    const tokens = [_][]const u8{ "GNDA", "GNDD", "AGND", "PGND", "DGND", "VSSA", "GND", "VSS" };
+    for (tokens) |t| {
+        if (!std.mem.startsWith(u8, name, t)) continue;
+        var rest = name[t.len..];
+        if (rest.len == 0) return true;
+        if (rest[0] == '_' or rest[0] == '-') rest = rest[1..];
+        if (rest.len == 0) return false; // bare separator, no number
+        for (rest) |c| {
+            if (!std.ascii.isDigit(c)) return false;
+        }
+        return true;
     }
     return false;
 }
@@ -4807,6 +4873,16 @@ test "isGroundName matches common ground rails" {
     try testing.expect(isGroundName(shortName("pwr/GND")));
     try testing.expect(!isGroundName("VIN"));
     try testing.expect(!isGroundName("3.3V"));
+    // Numbered / suffixed grounds on multi-ground parts (isolated, split-rail).
+    try testing.expect(isGroundName("GND1"));
+    try testing.expect(isGroundName("GND2"));
+    try testing.expect(isGroundName("AGND2"));
+    try testing.expect(isGroundName("VSS1"));
+    try testing.expect(isGroundName("PGND_2")); // separator + digits = numbered ground
+    // A real signal that starts with a ground token but isn't a numbered ground.
+    try testing.expect(!isGroundName("GND_SENSE"));
+    try testing.expect(!isGroundName("GNDSW"));
+    try testing.expect(!isGroundName("VINGND")); // doesn't start with a ground token
 }
 
 // spec: placement/optimizer - legalization separates two overlapping courtyards
