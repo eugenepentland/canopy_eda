@@ -231,6 +231,41 @@ network at its pin's Y, but pushed every support part far out → routed trace
 along the edge) routes much shorter; the COMP network sitting at the column end is
 the accepted cost.
 
+### Generalizing across all switchers (the tps55289 tuning didn't transfer)
+
+A routed survey (`?zone_pack=1` vs force) over every switcher/regulator showed
+zone-pack was over-fitted to tps55289 — a buck-*boost* whose IC has a VOUT pin —
+and **regressed plain bucks** (tps62933-rail +7.0 mm, mie1w0505 +2.9, tps54540
++1.7). An adversarial multi-agent diagnosis (`zone-pack-switcher-diagnose`
+workflow) found two GENERAL root causes, both fixed:
+
+- **A plain buck's output rail terminates at the inductor, not an IC pad** — so
+  `railDir(IC)` is zero and the output-cap bank fell to the blind `.bottom`
+  default, opposite the inductor. `nearestSharedHub` now finds the inductor (a
+  secondary hub the bank shares a non-ground net with) and, when IC-railDir is
+  zero, derives the bank's edge + target from the inductor's IC switch pin → it
+  docks on the SW→L→VOUT side. (tps55289 is untouched — its caps touch the IC VOUT
+  pin, so IC-railDir is non-zero and the fix doesn't engage. That's *why* it
+  worked and the plain bucks didn't.)
+- **`isGroundName` was an exact-match list** missing `GND1`/`GND2`/numbered grounds,
+  so a split/isolated-ground part read those as *signal* (corrupting loop
+  detection, rail direction, scoring). Now: a ground token + optional `[_-]` +
+  digits (keeps `GND_SENSE`/`GNDSW` as signal). Blast radius tiny — pma3 (and other
+  single-`GND` designs) are byte-identical.
+
+Result (zone vs force routed trace): tps55289 −3.2, ap33772-sink −8.0,
+**tps62933-rail +7.0 → −1.2**, mie1w0505 +2.9 → +0.9, tps54540-buck +2.3,
+adp7118-ldo +0.4 — 3 clear wins, the rest within ~2 mm, all DRC-clean.
+
+**Two more negative results — don't retry.** (1) Docking the inductor on the SW
+pad's own *side* edge regressed tps54540 +2.3 → +9.5 (it collided with its output
+bank); kept the top/bottom-by-crowding rule. (2) An **acceptance gate** keeping
+zone only if `routedObjectiveCost ≤ force` *reverted the ap33772/tps62933 trace
+wins* — because that objective (straight-line HPWL + loop-nh + align) disagrees
+with actual routed trace (HPWL penalises zone's spread; the maze router routes it
+shorter). A real default-on gate must compare **full routed trace** (route the
+board), not the objective. zone-pack stays opt-in for now.
+
 ## Still open (product + polish) — all minor; layout routes < force
 
 - **Boot-cap pair shifts right under C_VCC contention (~1–2 mm off their BOOT
@@ -243,10 +278,12 @@ the accepted cost.
   centre). `placeSwitchHub` could center on the area-weighted SW-pad pair exactly.
 - **Residual output-column jitter (~0.4 mm)** from `legalizeOnGrid` clearing a
   corner clip — cosmetic.
-- **`zone_pack` default-on.** It is flag-authoritative today (shows the pack when
-  on). To enable by default for the dominant-IC shape, add the keep-routed-better
-  force-vs-pack comparison in `solve` (mirror the strict/overlap retry) so it can
-  never regress a board.
+- **`zone_pack` default-on.** Flag-authoritative today. To default it on for the
+  dominant-IC shape it needs a keep-better gate — but it MUST compare **full routed
+  trace** (route both arrangements with `router.route`, sum tracks), NOT
+  `routedObjectiveCost` (that reverted real trace wins — see negative result above).
+  Until then it stays opt-in; the small per-design losers (tps54540 +2.3, mie +0.9)
+  are acceptable for an opt-in flag where the user is choosing the structured layout.
 - **COMP network at the output-column end (~5–7 mm from COMP pin).** The 5-cap
   output bank owns the right edge, so the feedback network trails it. Two-lane
   spillover was tried and reverted (made routing much worse — see above). A better
