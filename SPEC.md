@@ -107,6 +107,7 @@ Public functions: solve
 - the manual placement block keeps authored order and resolves rotations
 - the manual floorplan docks sides around the anchor IC and stages unlisted parts
 - a long manual side wraps into multiple depth lanes
+- (no-refine) packs courtyards flush (touching) and symmetric
 
 ## placement/router
 

@@ -1509,7 +1509,13 @@ fn packSpec(
     @memset(lock_axis, 0);
     const lock_val = try arena.alloc(f64, parts.len);
 
-    const gap = @max(g_route_gap, FINAL_CLEAR);
+    // `(no-refine)` ⇒ pack courtyards flush (gap 0). Every part's grid-rounded
+    // courtyard edge lands on a 0.2 mm line, so abutting lanes/members touch
+    // exactly without overlapping, giving a symmetric, contact-tight raw pack.
+    // With refinement on, keep the snap-safety clearance so the polish pass has
+    // room to nudge caps toward their pins.
+    const touch = !rp.refine;
+    const gap: f64 = if (touch) 0 else @max(g_route_gap, FINAL_CLEAR);
 
     // Depth lanes per IC edge (M2). Each edge becomes one or more lanes stacked
     // outward from the IC. The side's listed parts take the lanes NEAREST the IC, in
@@ -1579,25 +1585,42 @@ fn packSpec(
         try unplaced.append(arena, p.ref_des);
     }
 
-    legalize(parts, FINAL_CLEAR);
-    // Restore the crisp row/column lines `legalize` nudged (a column's shared x, a
-    // row's shared y); on-grid legalization then resolves any residual cross-axis
-    // overlap by whole cells, leaving the aligned axis intact.
-    for (parts, 0..) |*p, i| {
-        if (lock_axis[i] == 1) p.x = lock_val[i] else if (lock_axis[i] == 2) p.y = lock_val[i];
-    }
-    snapToGrid(parts);
-    legalizeOnGrid(parts);
-    // The lock-restore can re-introduce a residual overlap at a densely-packed corner
-    // (a long row meeting a tall column) that on-grid legalization can't clear on the
-    // locked axis. Rather than discard the whole authored layout to the force placer,
-    // do one more plain legalize WITHOUT re-locking — contended parts slide just clear
-    // of their line, sacrificing a touch of alignment at that corner only. (When the
-    // locked layout was already clean — the common case — this never runs.)
-    if (anyOverlap(parts)) {
-        legalize(parts, FINAL_CLEAR);
+    // Touch finish: the lanes are already packed flush on grid lines, so a plain
+    // grid snap + grid-overlap resolve keeps the courtyards abutting. The snap
+    // shifts every member of a lane by the *same* amount (each member's local
+    // offset is a whole grid multiple), so a symmetric pair stays symmetric and a
+    // touching edge stays touching — only the lane as a whole lands on the grid.
+    // The FINAL_CLEAR inflation is skipped (it would re-open the gap). If a
+    // contended corner can't be cleared on grid, fall through to the clearance
+    // finish below — degrade to the 0.2 mm-gap layout rather than discard the
+    // authored placement to the force placer.
+    var finished = false;
+    if (touch) {
         snapToGrid(parts);
         legalizeOnGrid(parts);
+        finished = !anyOverlap(parts);
+    }
+    if (!finished) {
+        legalize(parts, FINAL_CLEAR);
+        // Restore the crisp row/column lines `legalize` nudged (a column's shared x, a
+        // row's shared y); on-grid legalization then resolves any residual cross-axis
+        // overlap by whole cells, leaving the aligned axis intact.
+        for (parts, 0..) |*p, i| {
+            if (lock_axis[i] == 1) p.x = lock_val[i] else if (lock_axis[i] == 2) p.y = lock_val[i];
+        }
+        snapToGrid(parts);
+        legalizeOnGrid(parts);
+        // The lock-restore can re-introduce a residual overlap at a densely-packed corner
+        // (a long row meeting a tall column) that on-grid legalization can't clear on the
+        // locked axis. Rather than discard the whole authored layout to the force placer,
+        // do one more plain legalize WITHOUT re-locking — contended parts slide just clear
+        // of their line, sacrificing a touch of alignment at that corner only. (When the
+        // locked layout was already clean — the common case — this never runs.)
+        if (anyOverlap(parts)) {
+            legalize(parts, FINAL_CLEAR);
+            snapToGrid(parts);
+            legalizeOnGrid(parts);
+        }
     }
     if (anyOverlap(parts)) return false;
     g_placement_diag.used_spec = true;
@@ -5786,6 +5809,53 @@ test "packSpec docks sides around the anchor IC and stages unlisted parts" {
     try testing.expectEqualStrings("C9", g_placement_diag.unplaced[0]);
     // No courtyards overlap.
     try testing.expect(!anyOverlap(&parts));
+}
+
+// spec: placement/optimizer - (no-refine) packs courtyards flush (touching) and symmetric
+test "packSpec no-refine packs a symmetric pair flush" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    const mk = struct {
+        fn parts() [3]Part {
+            return .{
+                .{ .ref_des = "U1", .kind = .hub, .hw = 3, .hh = 3, .pads = &.{}, .fallback = true },
+                .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &.{}, .fallback = true },
+                .{ .ref_des = "C2", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &.{}, .fallback = true },
+            };
+        }
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("U1", 0);
+    try idx_of.put("C1", 1);
+    try idx_of.put("C2", 2);
+    const top = [_]SpecItem{ .{ .part = 1 }, .{ .part = 2 } };
+    const sides = [_]SpecSide{.{ .edge = .top, .items = &top }};
+    g_placement_diag = .{ .active = true };
+    defer g_placement_diag = .{};
+    var springs = [_]Spring{};
+    var loops = [_]Loop{};
+    const built = Built{ .springs = &springs, .loops = &loops };
+
+    // (no-refine) ⇒ the two equal caps pack flush: centres exactly hw1+hw2 apart
+    // (courtyards abut), symmetric about the IC, and on the top edge.
+    var touch_parts = mk.parts();
+    const touch_rp = ResolvedPlacement{ .anchor = 0, .sides = &sides, .switches = &.{}, .refine = false };
+    try testing.expect(try packSpec(arena, &touch_parts, &idx_of, &.{}, built, touch_rp));
+    try testing.expect(touch_parts[1].y < touch_parts[0].y); // above the IC
+    try testing.expect(touch_parts[2].y < touch_parts[0].y);
+    try testing.expectApproxEqAbs(@as(f64, 0), touch_parts[1].x + touch_parts[2].x, 1e-9); // symmetric about x=0
+    const touch_gap = @abs(touch_parts[2].x - touch_parts[1].x);
+    try testing.expectApproxEqAbs(touch_parts[1].hw + touch_parts[2].hw, touch_gap, 1e-9); // flush
+    try testing.expect(!anyOverlap(&touch_parts));
+
+    // With refinement on (default), the same pack leaves the FINAL_CLEAR snap gap,
+    // so the centres sit strictly farther apart than touching.
+    var refine_parts = mk.parts();
+    const refine_rp = ResolvedPlacement{ .anchor = 0, .sides = &sides, .switches = &.{} };
+    try testing.expect(try packSpec(arena, &refine_parts, &idx_of, &.{}, built, refine_rp));
+    const refine_gap = @abs(refine_parts[2].x - refine_parts[1].x);
+    try testing.expect(refine_gap > touch_gap + 1e-6);
 }
 
 // spec: placement/optimizer - a long manual side wraps into multiple depth lanes
