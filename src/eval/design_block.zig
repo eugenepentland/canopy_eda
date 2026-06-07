@@ -1570,13 +1570,15 @@ fn placementSideFromAtom(atom: []const u8) ?env_mod.PlacementSide {
 /// [(switch "REF" side)])` floorplan form into a `PlacementSpec`. Each side
 /// lists its parts in IC-outward order; an item is a bare ref (`"C1"`) or a
 /// rotation override `(rot <deg> "C1")`. `(switch "L1" right)` marks a power
-/// inductor straddling the SW node toward `side`. Malformed sub-forms and
+/// inductor straddling the SW node toward `side`. `(no-refine)` skips the
+/// post-pack polish; `(centered)` centers every side on the IC. Malformed sub-forms and
 /// unknown side keywords are skipped so a typo can't abort the build — the
 /// optimizer's `packSpec` resolves refs against the netlist and falls back to
 /// the force placer on any failure.
 fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_mod.PlacementSpec {
     var anchor: []const u8 = "";
     var refine = true;
+    var centered = false;
     var sides: std.ArrayListUnmanaged(env_mod.PlacementSideSpec) = .empty;
     var switches: std.ArrayListUnmanaged(env_mod.SwitchPlacement) = .empty;
     for (form_children[1..]) |child| {
@@ -1586,6 +1588,11 @@ fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_m
         // (no-refine) — skip the post-pack polish, showing the raw constructive pack.
         if (std.mem.eql(u8, head, "no-refine")) {
             refine = false;
+            continue;
+        }
+        // (centered) — center every side's lane on the IC, not opposite its rail pad.
+        if (std.mem.eql(u8, head, "centered")) {
+            centered = true;
             continue;
         }
         if (std.mem.eql(u8, head, "anchor")) {
@@ -1627,6 +1634,7 @@ fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_m
         .switches = switches.toOwnedSlice(self.allocator) catch &.{},
         .present = true,
         .refine = refine,
+        .centered = centered,
     };
 }
 
