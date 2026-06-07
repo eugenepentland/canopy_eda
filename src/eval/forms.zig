@@ -469,10 +469,12 @@ pub const scope_form_docs = blk: {
     } };
     t[@intFromEnum(ScopeForm.placement)] = .{ .scope = tl, .doc = .{
         .syntax = "(placement (anchor \"REF\") " ++
-            "(left|right|top|bottom \"REF\"… | (rot N \"REF\")…)… [(switch \"REF\" side)] [(no-refine)])",
+            "(left|right|top|bottom \"REF\"… | (rot N \"REF\")…)… [(switch \"REF\" side)] [(no-refine)] [(centered)])",
         .summary = "Agent-authored PCB floorplan: declare each part's side of the main IC, " ++
             "the order along that edge, and an optional rotation; the solver legalizes it to " ++
-            "exact coordinates (the manual twin of the automatic switcher floorplan).",
+            "exact coordinates (the manual twin of the automatic switcher floorplan). " ++
+            "(no-refine) shows the raw constructive pack (flush, symmetric); " ++
+            "(centered) centers every side on the IC instead of opposite its rail pad.",
     } };
     break :blk t;
 };

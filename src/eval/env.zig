@@ -1077,6 +1077,12 @@ pub const PlacementSpec = struct {
     /// A/B-ing what the refinement actually changes (e.g. it can drift a symmetric
     /// pair off-centre).
     refine: bool = true,
+    /// True ⇒ center every side's lane on the IC centerline instead of opposite its
+    /// rail pad. By default each lane docks across from the supply pad it feeds
+    /// (`railPadCross`, shortest power loop), which pulls an off-centre rail's caps
+    /// off the IC centerline. A `(centered)` marker in the form sets this true for a
+    /// symmetric floorplan (every side mirrored about the anchor).
+    centered: bool = false,
 };
 
 /// The fully-evaluated result of a `(design-block …)`: the flattened netlist

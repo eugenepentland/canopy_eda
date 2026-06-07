@@ -1297,6 +1297,9 @@ const ResolvedPlacement = struct {
     switches: []const SpecSwitch,
     /// Run the post-pack refinement (polish + priority tuck)? `(no-refine)` ⇒ false.
     refine: bool = true,
+    /// Center each side's lane on the IC instead of opposite its rail pad?
+    /// `(centered)` ⇒ true (symmetric floorplan); default false (rail-pad dock).
+    centered: bool = false,
 };
 
 /// Map an authored `(placement …)` side keyword to the optimizer's dock `Edge`.
@@ -1342,6 +1345,7 @@ fn resolvePlacement(
         .sides = try sides.toOwnedSlice(arena),
         .switches = try switches.toOwnedSlice(arena),
         .refine = spec.refine,
+        .centered = spec.centered,
     };
 }
 
@@ -1418,7 +1422,9 @@ fn laneCount(n: usize) usize {
 
 /// Build one packed lane for `members` (with per-member rotation overrides) on `edge`,
 /// set its dock target to the rail-pad cross-coordinate (so the lane sits opposite its
-/// supply pad — short loop), weight it, and append it to `lanes`.
+/// supply pad — short loop), weight it, and append it to `lanes`. When `centered`, the
+/// rail-pad target is skipped so the lane falls back to the IC centerline (a symmetric
+/// floorplan instead of the loop-shortening dock).
 fn appendLane(
     arena: std.mem.Allocator,
     lanes: *std.ArrayListUnmanaged(PackBlock),
@@ -1431,11 +1437,14 @@ fn appendLane(
     idx_of: *std.StringHashMap(usize),
     loops: []const Loop,
     gap: f64,
+    centered: bool,
 ) std.mem.Allocator.Error!void {
     var blk = try packSpecBlock(arena, members, rots, parts, edge, loops, gap);
-    if (railPadCross(members, ic, edge, parts, nets, idx_of)) |t| {
-        blk.target = t;
-        blk.target_set = true;
+    if (!centered) {
+        if (railPadCross(members, ic, edge, parts, nets, idx_of)) |t| {
+            blk.target = t;
+            blk.target_set = true;
+        }
     }
     blk.mass = blockMass(members, loops);
     try lanes.append(arena, blk);
@@ -1546,7 +1555,7 @@ fn packSpec(
             var i: usize = 0;
             while (i < n) : (i += per) {
                 const end = @min(i + per, n);
-                try appendLane(arena, &lanes, members.items[i..end], rots.items[i..end], ic, e, parts, nets, idx_of, built.loops, gap);
+                try appendLane(arena, &lanes, members.items[i..end], rots.items[i..end], ic, e, parts, nets, idx_of, built.loops, gap, rp.centered);
             }
         }
         // The switch inductor(s) on this edge take the lane BEYOND the side's parts.
@@ -1559,7 +1568,7 @@ fn packSpec(
         if (sw_members.items.len > 0) {
             const sw_rots = try arena.alloc(?f64, sw_members.items.len);
             @memset(sw_rots, null); // inductor: face-the-IC default rotation
-            try appendLane(arena, &lanes, sw_members.items, sw_rots, ic, e, parts, nets, idx_of, built.loops, gap);
+            try appendLane(arena, &lanes, sw_members.items, sw_rots, ic, e, parts, nets, idx_of, built.loops, gap, rp.centered);
         }
         if (lanes.items.len == 0) continue;
         const ic_cross = if (e == .left or e == .right) parts[ic].y else parts[ic].x;
@@ -5856,6 +5865,48 @@ test "packSpec no-refine packs a symmetric pair flush" {
     try testing.expect(try packSpec(arena, &refine_parts, &idx_of, &.{}, built, refine_rp));
     const refine_gap = @abs(refine_parts[2].x - refine_parts[1].x);
     try testing.expect(refine_gap > touch_gap + 1e-6);
+}
+
+// spec: placement/optimizer - (centered) docks each side on the IC centerline, not its rail pad
+test "packSpec (centered) keeps a rail-pad lane on the IC centerline" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    // The IC has an off-centre supply pad (x = 1.6) on net VOUT; the top cap touches
+    // VOUT, so railPadCross would dock the lane opposite that pad.
+    const ic_pads = [_]geometry.Pad{.{ .number = "1", .x = 1.6, .y = 0, .w = 1, .h = 1 }};
+    const mk = struct {
+        fn parts(pads: []const geometry.Pad) [2]Part {
+            return .{
+                .{ .ref_des = "U1", .kind = .hub, .hw = 3, .hh = 2, .pads = pads, .fallback = true },
+                .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &.{}, .fallback = true },
+            };
+        }
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("U1", 0);
+    try idx_of.put("C1", 1);
+    const pins = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+    const nets = [_]FlatNet{.{ .name = "VOUT", .pins = &pins }};
+    const top = [_]SpecItem{.{ .part = 1 }};
+    const sides = [_]SpecSide{.{ .edge = .top, .items = &top }};
+    g_placement_diag = .{ .active = true };
+    defer g_placement_diag = .{};
+    var springs = [_]Spring{};
+    var loops = [_]Loop{};
+    const built = Built{ .springs = &springs, .loops = &loops };
+
+    // Default: the lane docks opposite the off-centre supply pad → off the IC centerline.
+    var off = mk.parts(&ic_pads);
+    const off_rp = ResolvedPlacement{ .anchor = 0, .sides = &sides, .switches = &.{} };
+    try testing.expect(try packSpec(arena, &off, &idx_of, &nets, built, off_rp));
+    try testing.expect(off[1].x > 1.0); // pulled toward the pad at x ≈ 1.6
+
+    // (centered): the rail-pad target is skipped → the lane sits on the IC centerline.
+    var cen = mk.parts(&ic_pads);
+    const cen_rp = ResolvedPlacement{ .anchor = 0, .sides = &sides, .switches = &.{}, .centered = true };
+    try testing.expect(try packSpec(arena, &cen, &idx_of, &nets, built, cen_rp));
+    try testing.expectApproxEqAbs(@as(f64, 0), cen[1].x, 1e-9); // centered on the IC
 }
 
 // spec: placement/optimizer - a long manual side wraps into multiple depth lanes

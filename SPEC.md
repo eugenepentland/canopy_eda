@@ -108,6 +108,7 @@ Public functions: solve
 - the manual floorplan docks sides around the anchor IC and stages unlisted parts
 - a long manual side wraps into multiple depth lanes
 - (no-refine) packs courtyards flush (touching) and symmetric
+- (centered) docks each side on the IC centerline, not its rail pad
 
 ## placement/router
 
