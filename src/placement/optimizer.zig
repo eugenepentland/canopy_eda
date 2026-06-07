@@ -845,6 +845,40 @@ fn orderMembers(arena: std.mem.Allocator, members: []const usize, parts: []const
     return out;
 }
 
+/// Cross-spread (mm) beyond which a group's members are treated as *distributed*
+/// (each maps to a distinct rail pin — e.g. the two boot caps to BOOT1/BOOT2) and
+/// laid out in pin order, rather than a *shared*-rail bank centred on one pin.
+const DISTRIBUTE_MM: f64 = 0.6;
+
+/// Decide a group block's member layout. If members' own rail-pin cross-positions
+/// spread past `DISTRIBUTE_MM` (distinct pins), sort them by pin so each sits above
+/// its own pad (returns `pin_order=true`); otherwise keep the criticality order for
+/// the centre-out HF placement (`pin_order=false`). Fixes boot caps landing on the
+/// wrong lateral side of the IC.
+fn orderForBlock(arena: std.mem.Allocator, ordered: []usize, ic: usize, edge: Edge, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) std.mem.Allocator.Error!bool {
+    if (ordered.len < 2) return false;
+    const tgt = try arena.alloc(f64, ordered.len);
+    var lo = std.math.inf(f64);
+    var hi = -std.math.inf(f64);
+    const fallback = railPadCross(ordered, ic, edge, parts, nets, idx_of) orelse 0;
+    for (ordered, 0..) |m, i| {
+        tgt[i] = railPadCross(&.{m}, ic, edge, parts, nets, idx_of) orelse fallback;
+        lo = @min(lo, tgt[i]);
+        hi = @max(hi, tgt[i]);
+    }
+    if (hi - lo <= DISTRIBUTE_MM) return false; // shared rail → centre-out
+    // Distributed: insertion-sort members by their pin cross (ascending = pack order).
+    var a: usize = 1;
+    while (a < ordered.len) : (a += 1) {
+        var b = a;
+        while (b > 0 and tgt[b - 1] > tgt[b]) : (b -= 1) {
+            std.mem.swap(f64, &tgt[b - 1], &tgt[b]);
+            std.mem.swap(usize, &ordered[b - 1], &ordered[b]);
+        }
+    }
+    return true;
+}
+
 /// Re-order a criticality-sorted list (most critical first) into column/row
 /// *positions* so the most critical member lands at the centre — nearest the rail
 /// pad the block docks opposite — and less critical members flank it outward.
@@ -871,16 +905,28 @@ fn centerOutOrder(arena: std.mem.Allocator, crit: []const usize) std.mem.Allocat
 /// Lay `ordered` members into a single row/column for `edge` (left/right ⇒ a
 /// vertical column packed along Y; top/bottom ⇒ a horizontal row along X), each
 /// rotated so its power pad faces the IC, packed edge-to-edge with `gap`.
-fn packOneBlock(arena: std.mem.Allocator, ordered: []const usize, parts: []const Part, edge: Edge, loops: []const Loop, gap: f64) std.mem.Allocator.Error!PackBlock {
-    // Map the criticality order onto centre-out positions: most critical member at
-    // the block centre (nearest the rail pad), flanked outward by the rest.
-    const seq = try centerOutOrder(arena, ordered);
+///
+/// `pin_order` true means `ordered` is already in pack-axis order by each member's
+/// own rail pin (a *distributed* group like the two boot caps, which must sit above
+/// their own BOOT pad) — laid in that order verbatim. False means a *shared*-rail
+/// bank: the order is by criticality and `centerOutOrder` puts the HF cap at the
+/// centre nearest the single pin. Members are aligned by their **inner (power-pad)
+/// edge** toward the IC, not by centre, so a narrow cap isn't dragged outboard by
+/// a wider neighbour (its power pad stays as close to the rail pad as the others').
+fn packOneBlock(arena: std.mem.Allocator, ordered: []const usize, parts: []const Part, edge: Edge, loops: []const Loop, gap: f64, pin_order: bool) std.mem.Allocator.Error!PackBlock {
+    const seq = if (pin_order) try arena.dupe(usize, ordered) else try centerOutOrder(arena, ordered);
     const n = seq.len;
     const rots = try arena.alloc(f64, n);
     const lx = try arena.alloc(f64, n);
     const ly = try arena.alloc(f64, n);
     const exts = try arena.alloc(Pt, n);
     const vertical = (edge == .left or edge == .right); // pack along Y
+    // Inward (toward-IC) sign on the depth axis: left ⇒ +x, right ⇒ −x, top ⇒ +y,
+    // bottom ⇒ −y (y is down).
+    const inward: f64 = switch (edge) {
+        .left, .top => 1,
+        .right, .bottom => -1,
+    };
     for (seq, 0..) |m, i| {
         var rot: f64 = 0;
         if (loopForCap(loops, m)) |lp| rot = faceRotation(lp.cap_pwr, edge);
@@ -890,20 +936,21 @@ fn packOneBlock(arena: std.mem.Allocator, ordered: []const usize, parts: []const
     var total: f64 = 0;
     for (exts) |e| total += 2 * (if (vertical) e.y else e.x);
     total += @as(f64, @floatFromInt(n - 1)) * gap;
-    var cursor = -total / 2;
     var cross_half: f64 = 0;
+    for (exts) |e| cross_half = @max(cross_half, if (vertical) e.x else e.y);
+    var cursor = -total / 2;
     for (0..n) |i| {
         const along = if (vertical) exts[i].y else exts[i].x;
-        const center = cursor + along;
+        const depth_off = inward * (cross_half - (if (vertical) exts[i].x else exts[i].y));
+        const pack = cursor + along;
         if (vertical) {
-            lx[i] = 0;
-            ly[i] = center;
+            lx[i] = depth_off; // align inner (power-pad) edge toward the IC
+            ly[i] = pack;
         } else {
-            lx[i] = center;
-            ly[i] = 0;
+            lx[i] = pack;
+            ly[i] = depth_off;
         }
         cursor += 2 * along + gap;
-        cross_half = @max(cross_half, if (vertical) exts[i].x else exts[i].y);
     }
     return .{
         .members = seq,
@@ -1079,7 +1126,8 @@ fn packZoned(
         const ordered = try orderMembers(arena, ml.items, parts, prep.priority);
         for (ordered) |m| claimed[m] = true;
         const edge = snapEdge(railDir(ordered, ic, parts, nets, &prep.idx_of)) orelse .bottom;
-        var blk = try packOneBlock(arena, ordered, parts, edge, built.loops, gap);
+        const pin_order = try orderForBlock(arena, ordered, ic, edge, parts, nets, &prep.idx_of);
+        var blk = try packOneBlock(arena, ordered, parts, edge, built.loops, gap, pin_order);
         if (railPadCross(ordered, ic, edge, parts, nets, &prep.idx_of)) |t| {
             blk.target = t;
             blk.target_set = true;
@@ -1093,7 +1141,7 @@ fn packZoned(
         claimed[i] = true;
         const single = try arena.dupe(usize, &.{i});
         const edge = snapEdge(railDir(single, ic, parts, nets, &prep.idx_of)) orelse .bottom;
-        var blk = try packOneBlock(arena, single, parts, edge, built.loops, gap);
+        var blk = try packOneBlock(arena, single, parts, edge, built.loops, gap, false);
         if (railPadCross(single, ic, edge, parts, nets, &prep.idx_of)) |t| {
             blk.target = t;
             blk.target_set = true;
@@ -5196,7 +5244,7 @@ test "packOneBlock lays members into an aligned column for a side edge" {
         .{ .ref_des = "C3", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &.{}, .fallback = true },
     };
     const ordered = [_]usize{ 0, 1, 2 };
-    const blk = try packOneBlock(arena, &ordered, &parts, .left, &.{}, 0.2);
+    const blk = try packOneBlock(arena, &ordered, &parts, .left, &.{}, 0.2, false);
     // A side (left) edge packs a vertical column: same x, strictly increasing y.
     try testing.expectApproxEqAbs(@as(f64, 0), blk.lx[0], 1e-9);
     try testing.expectApproxEqAbs(blk.lx[0], blk.lx[1], 1e-9);
