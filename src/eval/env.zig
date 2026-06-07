@@ -1036,6 +1036,43 @@ pub const LayoutSpec = struct {
     edges: []const LayoutEdge = &.{},
 };
 
+/// Which side of the anchor IC a `(placement …)` directive docks a part to.
+pub const PlacementSide = enum { left, right, top, bottom };
+
+/// One part in a `(placement …)` side list: the ref-des and an optional
+/// rotation override (degrees CCW). `null` ⇒ the solver picks the rotation that
+/// turns the part's power pad toward the IC (the loop-shortening default).
+pub const PlacementItem = struct {
+    ref: []const u8,
+    rot: ?f64 = null,
+};
+
+/// One `(left|right|top|bottom …)` side list of a `(placement …)` form: the
+/// parts docked to that side of the anchor IC, listed in IC-outward order.
+pub const PlacementSideSpec = struct {
+    side: PlacementSide,
+    items: []const PlacementItem = &.{},
+};
+
+/// One `(switch "REF" side)` directive: a power inductor (a secondary hub on
+/// the SW net) straddling the switch node, biased toward `side` (the output).
+pub const SwitchPlacement = struct {
+    ref: []const u8,
+    side: PlacementSide,
+};
+
+/// Agent-authored PCB floorplan from a top-level `(placement …)` form: the
+/// anchor IC plus, per part, its side of the IC, order along that edge, and an
+/// optional rotation. The optimizer's `packSpec` realizes it into coordinates
+/// (the manual twin of the automatic switcher floorplan). `present=false` ⇒
+/// none authored, so placement falls through to the force / zone-pack path.
+pub const PlacementSpec = struct {
+    anchor: []const u8 = "",
+    sides: []const PlacementSideSpec = &.{},
+    switches: []const SwitchPlacement = &.{},
+    present: bool = false,
+};
+
 /// The fully-evaluated result of a `(design-block …)`: the flattened netlist
 /// (instances + nets + ports), the section/sub-block tree, and the design-doc
 /// metadata (critical ICs, verifications, rails, functions) the review and
@@ -1104,6 +1141,11 @@ pub const DesignBlock = struct {
     /// Symbolic refs/nets/pins are resolved against the flattened netlist (and
     /// rejected if absent) by the optimizer before use. Empty ⇒ none authored.
     constraints: PlacementConstraints = .{},
+    /// Agent-authored manual floorplan from a top-level `(placement …)` form:
+    /// each part's side of the anchor IC + order + optional rotation. The
+    /// optimizer's `packSpec` realizes it into coordinates (force/zone-pack
+    /// fallback on failure). `present=false` ⇒ none authored.
+    placement: PlacementSpec = .{},
 };
 
 /// A rail's electrical role, declared by `(power-rail <label> (role …) (net …))`.

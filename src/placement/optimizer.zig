@@ -586,6 +586,26 @@ threadlocal var g_collide_shrink: f64 = 0;
 /// helpers. 0 ⇒ touch (the default).
 threadlocal var g_route_gap: f64 = 0;
 
+/// Diagnostics from the most recent `(placement …)`-driven solve, so the PCB-layout
+/// JSON can report coverage to the agent authoring the spec. `active` = a spec drove
+/// (or attempted to drive) this solve; `used_spec` = `packSpec` produced the shown
+/// layout (false ⇒ it fell back to the force placer); `unplaced` = refs the spec
+/// didn't cover (staged in a band below the board). Reset in `prepare`, set by
+/// `packSpec`. Threadlocal like `g_lowered` so concurrent solves stay isolated.
+const PlacementDiag = struct {
+    active: bool = false,
+    used_spec: bool = false,
+    unplaced: []const []const u8 = &.{},
+};
+threadlocal var g_placement_diag: PlacementDiag = .{};
+
+/// The most recent `(placement …)` solve's diagnostics (see `PlacementDiag`). Read
+/// by the PCB-layout JSON right after `solve` on the same thread. Returns an inert
+/// (`active=false`) value when the last solve had no spec.
+pub fn placementDiag() PlacementDiag {
+    return g_placement_diag;
+}
+
 /// How `solve` treats an applied `cached` layout.
 pub const SeedMode = enum {
     /// Apply `cached` verbatim when it covers every part (no optimization, fast);
@@ -609,6 +629,16 @@ fn runPlacement(
     built: Built,
     params: Params,
 ) std.mem.Allocator.Error!void {
+    // Agent-authored manual floorplan from a `(placement …)` form: the spec is the
+    // source of truth, so it drives placement when present. Falls back to the force
+    // pipeline (recording it in the diagnostics) on any failure it can't resolve.
+    if (prep.placement) |rp| {
+        if (try packSpec(arena, parts, &prep.idx_of, nets, built, rp)) {
+            tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
+            return;
+        }
+        g_placement_diag.used_spec = false;
+    }
     // Constructive zone-then-pack floorplan (opt-in): crisp VIN│IC│L│VOUT rows the
     // force model can't make. Returns false (falls through to the force pipeline)
     // for any shape it doesn't handle, so it never degrades a non-switcher board.
@@ -1227,6 +1257,254 @@ fn packZoned(
     return !anyOverlap(parts);
 }
 
+// ── Agent-authored manual floorplan (`(placement …)`) ────────────────────────
+// `packSpec` is the explicit twin of `packZoned`: the same dock-and-finish
+// primitives, but driven by a `(placement …)` spec the agent authored (each part's
+// side of the IC + order + optional rotation) instead of topology inference. The
+// spec is lowered to part indices in `prepare` (`resolvePlacement`); `packSpec`
+// realizes it and falls back to the force placer on any failure.
+
+/// One `(placement …)` side item lowered to a part index + optional rotation
+/// override (degrees; null ⇒ face the IC via `faceRotation`).
+const SpecItem = struct { part: usize, rot: ?f64 = null };
+/// One `(left|right|top|bottom …)` side lowered to its IC edge + ordered items.
+const SpecSide = struct { edge: Edge, items: []const SpecItem };
+/// One `(switch "REF" side)` directive lowered to a part index + biased edge.
+const SpecSwitch = struct { part: usize, edge: Edge };
+/// A `(placement …)` spec resolved against the flattened netlist: the anchor IC,
+/// each side's ordered parts, and any inductor straddles. Built by `resolvePlacement`
+/// and stored on `Prepared`; null when no spec was authored / the anchor is unknown.
+const ResolvedPlacement = struct {
+    anchor: usize,
+    sides: []const SpecSide,
+    switches: []const SpecSwitch,
+};
+
+/// Map an authored `(placement …)` side keyword to the optimizer's dock `Edge`.
+fn edgeFromSide(s: env.PlacementSide) Edge {
+    return switch (s) {
+        .left => .left,
+        .right => .right,
+        .top => .top,
+        .bottom => .bottom,
+    };
+}
+
+/// Lower the design's `(placement …)` form against the flattened `instances`,
+/// resolving every ref the same way `(placement-order …)` does (`resolvePart`:
+/// origin-key, exact ref-des, or sub-block-leaf suffix). Refs that don't resolve
+/// are dropped (the part then surfaces as `unplaced` in `packSpec`). Null when no
+/// spec was authored or the anchor IC can't be found (⇒ force/zone-pack path).
+fn resolvePlacement(
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    instances: []const export_kicad.FlatInstance,
+) std.mem.Allocator.Error!?ResolvedPlacement {
+    const spec = block.placement;
+    if (!spec.present) return null;
+    const anchor = resolvePart(instances, spec.anchor) orelse return null;
+    var sides: std.ArrayListUnmanaged(SpecSide) = .empty;
+    for (spec.sides) |s| {
+        var items: std.ArrayListUnmanaged(SpecItem) = .empty;
+        for (s.items) |it| {
+            const pi = resolvePart(instances, it.ref) orelse continue;
+            try items.append(arena, .{ .part = pi, .rot = it.rot });
+        }
+        if (items.items.len == 0) continue;
+        try sides.append(arena, .{ .edge = edgeFromSide(s.side), .items = try items.toOwnedSlice(arena) });
+    }
+    var switches: std.ArrayListUnmanaged(SpecSwitch) = .empty;
+    for (spec.switches) |sw| {
+        const pi = resolvePart(instances, sw.ref) orelse continue;
+        try switches.append(arena, .{ .part = pi, .edge = edgeFromSide(sw.side) });
+    }
+    return .{
+        .anchor = anchor,
+        .sides = try sides.toOwnedSlice(arena),
+        .switches = try switches.toOwnedSlice(arena),
+    };
+}
+
+/// Gap (mm) below the board where parts the spec didn't list are staged.
+const STAGE_GAP_MM: f64 = 5.0;
+
+/// Like `packOneBlock`, but for an agent-authored side: lay the members in the
+/// *given* order (no criticality re-sort, no centre-out), honouring each member's
+/// rotation override (`rots_override[i]`); a null override falls back to
+/// `faceRotation` so the part's power pad faces the IC (resistors / no loop ⇒ rot 0).
+/// Left/right ⇒ a vertical column, top/bottom ⇒ a horizontal row, packed edge-to-edge
+/// with `gap`, inner (power-pad) edges aligned toward the IC.
+fn packSpecBlock(arena: std.mem.Allocator, members: []const usize, rots_override: []const ?f64, parts: []const Part, edge: Edge, loops: []const Loop, gap: f64) std.mem.Allocator.Error!PackBlock {
+    const seq = try arena.dupe(usize, members);
+    const n = seq.len;
+    const rots = try arena.alloc(f64, n);
+    const lx = try arena.alloc(f64, n);
+    const ly = try arena.alloc(f64, n);
+    const exts = try arena.alloc(Pt, n);
+    const vertical = (edge == .left or edge == .right); // pack along Y
+    const inward: f64 = switch (edge) {
+        .left, .top => 1,
+        .right, .bottom => -1,
+    };
+    for (seq, 0..) |m, i| {
+        var rot: f64 = 0;
+        if (rots_override[i]) |r| {
+            rot = r; // honour the authored rotation verbatim (isQuarter handles extents)
+        } else if (loopForCap(loops, m)) |lp| {
+            rot = faceRotation(lp.cap_pwr, edge);
+        }
+        rots[i] = rot;
+        exts[i] = extByRot(parts[m], rot);
+    }
+    var total: f64 = 0;
+    for (exts) |e| total += 2 * (if (vertical) e.y else e.x);
+    total += @as(f64, @floatFromInt(n - 1)) * gap;
+    var cross_half: f64 = 0;
+    for (exts) |e| cross_half = @max(cross_half, if (vertical) e.x else e.y);
+    var cursor = -total / 2;
+    for (0..n) |i| {
+        const along = if (vertical) exts[i].y else exts[i].x;
+        const depth_off = inward * (cross_half - (if (vertical) exts[i].x else exts[i].y));
+        const pack = cursor + along;
+        if (vertical) {
+            lx[i] = depth_off; // align inner (power-pad) edge toward the IC
+            ly[i] = pack;
+        } else {
+            lx[i] = pack;
+            ly[i] = depth_off;
+        }
+        cursor += 2 * along + gap;
+    }
+    return .{
+        .members = seq,
+        .rots = rots,
+        .lx = lx,
+        .ly = ly,
+        .half_w = if (vertical) cross_half else total / 2,
+        .half_h = if (vertical) total / 2 else cross_half,
+        .edge = edge,
+    };
+}
+
+/// Constructive placement from a resolved `(placement …)` spec: the anchor IC at the
+/// origin, each side's parts packed as a row/column in the authored order (honouring
+/// rotation overrides, else facing the IC) and docked to that IC edge, each
+/// `(switch …)` inductor straddling the SW node, and any parts the spec didn't list
+/// staged in a band below the board (reported via `g_placement_diag.unplaced`).
+/// Finishes with overlap-removal + grid-snap only — never `relax`. Returns true on a
+/// complete, overlap-free arrangement; false ⇒ caller falls back to the force placer.
+fn packSpec(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    built: Built,
+    rp: ResolvedPlacement,
+) std.mem.Allocator.Error!bool {
+    const ic = rp.anchor;
+    parts[ic].x = 0;
+    parts[ic].y = 0;
+    parts[ic].rot = 0;
+
+    const claimed = try arena.alloc(bool, parts.len);
+    @memset(claimed, false);
+    claimed[ic] = true;
+    // Per-part aligned-axis lock (0 none, 1 shared-x column, 2 shared-y row) so the
+    // finish can restore the crisp row/column line `legalize` jitters.
+    const lock_axis = try arena.alloc(u8, parts.len);
+    @memset(lock_axis, 0);
+    const lock_val = try arena.alloc(f64, parts.len);
+
+    var blocks: std.ArrayListUnmanaged(PackBlock) = .empty;
+    const gap = @max(g_route_gap, FINAL_CLEAR);
+
+    // One block per IC edge: any `(switch …)` inductor on that edge comes first
+    // (innermost in the column), then the declared side items in authored order.
+    // Building per-edge — not per-side — lets co-edge sides plus the inductor share a
+    // single docked block, folding the inductor onto its authored side (a dedicated
+    // switch-node straddle lane is M2) so it can't collide with another edge.
+    const all_edges = [_]Edge{ .left, .right, .top, .bottom };
+    for (all_edges) |e| {
+        var ml: std.ArrayListUnmanaged(usize) = .empty;
+        var rots: std.ArrayListUnmanaged(?f64) = .empty;
+        for (rp.switches) |sw| {
+            if (sw.edge != e or claimed[sw.part]) continue;
+            claimed[sw.part] = true;
+            try ml.append(arena, sw.part);
+            try rots.append(arena, null); // inductor: face-the-IC default rotation
+        }
+        for (rp.sides) |s| {
+            if (s.edge != e) continue;
+            for (s.items) |it| {
+                if (claimed[it.part]) continue; // a ref listed twice / also the anchor
+                claimed[it.part] = true;
+                try ml.append(arena, it.part);
+                try rots.append(arena, it.rot);
+            }
+        }
+        if (ml.items.len == 0) continue;
+        var blk = try packSpecBlock(arena, ml.items, rots.items, parts, e, built.loops, gap);
+        // Dock the block centred opposite its supply pad on the IC (short loop) when
+        // its parts touch an IC rail pad; otherwise dockEdge centres it on the IC.
+        if (railPadCross(ml.items, ic, e, parts, nets, idx_of)) |t| {
+            blk.target = t;
+            blk.target_set = true;
+        }
+        blk.mass = blockMass(ml.items, built.loops);
+        try blocks.append(arena, blk);
+    }
+
+    // Dock the blocks to their edges (co-edge stacking + alignment locks in dockEdge).
+    dockEdge(parts, ic, blocks.items, .left, gap, gap, lock_axis, lock_val);
+    dockEdge(parts, ic, blocks.items, .right, gap, gap, lock_axis, lock_val);
+    dockEdge(parts, ic, blocks.items, .top, gap, gap, lock_axis, lock_val);
+    dockEdge(parts, ic, blocks.items, .bottom, gap, gap, lock_axis, lock_val);
+
+    // Parts the spec didn't list → a staging band below the board, reported (not lost)
+    // so the agent can see exactly what's left to assign.
+    var unplaced: std.ArrayListUnmanaged([]const u8) = .empty;
+    var maxy: f64 = parts[ic].y + effHh(parts[ic]);
+    for (parts, 0..) |*p, i| {
+        if (claimed[i]) maxy = @max(maxy, p.y + effHh(p.*));
+    }
+    const band_y = maxy + STAGE_GAP_MM;
+    var cursor: f64 = 0;
+    for (parts, 0..) |*p, i| {
+        if (claimed[i]) continue;
+        claimed[i] = true;
+        p.rot = 0;
+        p.x = cursor + effHw(p.*);
+        p.y = band_y + effHh(p.*);
+        cursor += 2 * effHw(p.*) + gap;
+        try unplaced.append(arena, p.ref_des);
+    }
+
+    legalize(parts, FINAL_CLEAR);
+    // Restore the crisp row/column lines `legalize` nudged (a column's shared x, a
+    // row's shared y); on-grid legalization then resolves any residual cross-axis
+    // overlap by whole cells, leaving the aligned axis intact.
+    for (parts, 0..) |*p, i| {
+        if (lock_axis[i] == 1) p.x = lock_val[i] else if (lock_axis[i] == 2) p.y = lock_val[i];
+    }
+    snapToGrid(parts);
+    legalizeOnGrid(parts);
+    // The lock-restore can re-introduce a residual overlap at a densely-packed corner
+    // (a long row meeting a tall column) that on-grid legalization can't clear on the
+    // locked axis. Rather than discard the whole authored layout to the force placer,
+    // do one more plain legalize WITHOUT re-locking — contended parts slide just clear
+    // of their line, sacrificing a touch of alignment at that corner only. (When the
+    // locked layout was already clean — the common case — this never runs.)
+    if (anyOverlap(parts)) {
+        legalize(parts, FINAL_CLEAR);
+        snapToGrid(parts);
+        legalizeOnGrid(parts);
+    }
+    if (anyOverlap(parts)) return false;
+    g_placement_diag.used_spec = true;
+    g_placement_diag.unplaced = try unplaced.toOwnedSlice(arena);
+    return true;
+}
+
 /// Snapshot every part's pose — the strict/overlap retry in `solve` keeps the
 /// better-routed of the two and restores it with `restorePoses`.
 fn capturePoses(arena: std.mem.Allocator, parts: []const Part) std.mem.Allocator.Error![]Pose {
@@ -1489,6 +1767,10 @@ const Prepared = struct {
     /// Resolved + lowered Phase-A constraints (see docs/constraints_dsl.md).
     /// `prepare` also publishes this to `g_lowered` for the solve.
     lowered: Lowered,
+    /// Resolved agent-authored `(placement …)` floorplan, when one was declared and
+    /// its anchor IC resolved. Null ⇒ no manual spec; `runPlacement` then uses the
+    /// force / zone-pack path. `packSpec` realizes it.
+    placement: ?ResolvedPlacement = null,
 };
 
 /// Resolve a design-local net name (what a constraint author writes — "VIN",
@@ -1919,7 +2201,11 @@ fn prepare(
         0;
     // Routing/copper room left between courtyards (0 = touch).
     g_route_gap = @max(0.0, params.route_gap);
-    return .{ .parts = parts, .idx_of = idx_of, .instances = instances, .nets = nets, .built = built, .priority = priority, .lowered = lowered };
+    // Lower any agent-authored `(placement …)` floorplan and reset the per-solve
+    // diagnostics the PCB-layout JSON reads back (active iff a spec resolved).
+    const placement = try resolvePlacement(arena, block, instances);
+    g_placement_diag = .{ .active = placement != null };
+    return .{ .parts = parts, .idx_of = idx_of, .instances = instances, .nets = nets, .built = built, .priority = priority, .lowered = lowered, .placement = placement };
 }
 
 /// Decompose the objective for already-placed parts, surfaced term-by-term for
@@ -5329,4 +5615,75 @@ test "packOneBlock lays members into an aligned column for a side edge" {
     // Column half-height spans all three caps + the two gaps; half-width = one cap.
     try testing.expectApproxEqAbs(@as(f64, 0.6 * 3 + 0.2), blk.half_h, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 1), blk.half_w, 1e-9);
+}
+
+// spec: placement/optimizer - the manual placement block keeps authored order and resolves rotations
+test "packSpecBlock keeps authored order and resolves rotations" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    var parts = [_]Part{
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 0.5, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 1, .hh = 0.5, .pads = &.{}, .fallback = true },
+    };
+    // C1 carries a decoupling loop (power pad on +x); C2 carries an explicit 90°.
+    const loops = [_]Loop{.{ .cap = 0, .hub = 0, .cap_pwr = .{ .x = 1, .y = 0, .w = 0.4, .h = 0.4 }, .cap_gnd = .{ .x = -1, .y = 0, .w = 0.4, .h = 0.4 }, .hub_pwr = &.{}, .hub_gnd = &.{} }};
+    const members = [_]usize{ 0, 1 };
+    const rots = [_]?f64{ null, 90 };
+    const blk = try packSpecBlock(arena, &members, &rots, &parts, .right, &loops, 0.2);
+    // Authored order is preserved verbatim — no criticality re-sort / centre-out.
+    try testing.expectEqual(@as(usize, 0), blk.members[0]);
+    try testing.expectEqual(@as(usize, 1), blk.members[1]);
+    // C1's default rotation faces the IC: power pad on +x, IC left of a right-edge block ⇒ 180°.
+    try testing.expectEqual(@as(f64, 180), blk.rots[0]);
+    // C2's explicit override is honoured verbatim.
+    try testing.expectEqual(@as(f64, 90), blk.rots[1]);
+    // A right (side) edge packs a vertical column: increasing y down the column.
+    try testing.expect(blk.ly[0] < blk.ly[1]);
+}
+
+// spec: placement/optimizer - the manual floorplan docks sides around the anchor IC and stages unlisted parts
+test "packSpec docks sides around the anchor IC and stages unlisted parts" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    try testing.expectEqual(Edge.left, edgeFromSide(.left));
+    try testing.expectEqual(Edge.bottom, edgeFromSide(.bottom));
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 3, .hh = 3, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "C3", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "C9", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &.{}, .fallback = true }, // unlisted
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("U1", 0);
+    try idx_of.put("C1", 1);
+    try idx_of.put("C2", 2);
+    try idx_of.put("C3", 3);
+    try idx_of.put("C9", 4);
+    const left = [_]SpecItem{ .{ .part = 1 }, .{ .part = 2 } };
+    const right = [_]SpecItem{.{ .part = 3 }};
+    const sides = [_]SpecSide{ .{ .edge = .left, .items = &left }, .{ .edge = .right, .items = &right } };
+    const rp = ResolvedPlacement{ .anchor = 0, .sides = &sides, .switches = &.{} };
+    g_placement_diag = .{ .active = true };
+    defer g_placement_diag = .{};
+    var springs = [_]Spring{};
+    var loops = [_]Loop{};
+    const built = Built{ .springs = &springs, .loops = &loops };
+    const ok = try packSpec(arena, &parts, &idx_of, &.{}, built, rp);
+    try testing.expect(ok);
+    // The anchor IC is pinned at the origin.
+    try testing.expectApproxEqAbs(@as(f64, 0), parts[0].x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0), parts[0].y, 1e-9);
+    // Left-side caps sit left of the IC; the right-side cap sits to its right.
+    try testing.expect(parts[1].x < parts[0].x);
+    try testing.expect(parts[2].x < parts[0].x);
+    try testing.expect(parts[3].x > parts[0].x);
+    // The unlisted cap is staged below the board and reported, not lost.
+    try testing.expect(parts[4].y > parts[0].y);
+    try testing.expectEqual(@as(usize, 1), g_placement_diag.unplaced.len);
+    try testing.expectEqualStrings("C9", g_placement_diag.unplaced[0]);
+    // No courtyards overlap.
+    try testing.expect(!anyOverlap(&parts));
 }

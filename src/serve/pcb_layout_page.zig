@@ -154,15 +154,19 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // can't clobber the whole-design auto cache or its saved-layout history.
     const tune = parseTuning(req);
     const refine_name: ?[]const u8 = if (sub != null) null else if (req.query()) |q| q.get("refine") else |_| null;
+    // A `(placement …)` form is the source of truth: when the design carries one
+    // (and we're not loading a saved/refine layout or a sub-scoped preview), drive a
+    // fresh solve so the spec — not a stale auto cache — places the board.
+    const spec_drives = sub == null and refine_name == null and eff_block.placement.present;
     const cached = if (sub != null) null else if (refine_name) |rn|
         readLayoutPoses(ctx.allocator, ctx.project_dir, name, rn)
-    else if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
+    else if (tune.regen or spec_drives) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
     // No layout to show and nothing asked for one: place the parts on a plain
     // grid instead of running the (potentially expensive) optimizer on page open.
     // The optimizer still runs on demand — Regenerate / Apply tuning (?regen=/
     // weights), seeding a saved layout (?refine=), and the small per-sub-block
     // previews (which compute fresh and are cheap) all take the `solve` path.
-    const grid_only = sub == null and refine_name == null and !tune.regen and cached == null;
+    const grid_only = sub == null and refine_name == null and !tune.regen and !spec_drives and cached == null;
     const placement = (if (grid_only)
         optimizer.gridPlace(ctx.allocator, eff_block, ctx.project_dir, tune.params)
     else
@@ -385,9 +389,12 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 
     const tune = parseTuning(req);
     const refine_name: ?[]const u8 = if (req.query()) |q| q.get("refine") else |_| null;
+    // A `(placement …)` form drives a fresh solve (see the page handler) unless a
+    // saved/refine layout was asked for.
+    const spec_drives = refine_name == null and block.placement.present;
     const cached = if (refine_name) |rn|
         readLayoutPoses(ctx.allocator, ctx.project_dir, name, rn)
-    else if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
+    else if (tune.regen or spec_drives) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
     const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place) catch {
         res.status = 500;
         res.body = PLACEMENT_ERR_MSG;
@@ -483,10 +490,13 @@ pub fn renderDesignPng(
     // Same placement-selection logic as the page: a named layout or regen forces
     // a solve; otherwise reuse the auto cache, falling back to a plain grid when
     // nothing is cached so an agent's first call stays cheap.
+    // A `(placement …)` form drives a fresh solve unless a saved layout (?layout=)
+    // or a sub-scoped preview was requested — the spec is the source of truth.
+    const spec_drives = opts.sub == null and opts.layout == null and eff_block.placement.present;
     const cached = if (opts.sub != null) null else if (opts.layout) |ln|
         readLayoutPoses(alloc, project_dir, name, ln)
-    else if (opts.regen) null else readAutoPoses(alloc, project_dir, name);
-    const grid_only = opts.sub == null and opts.layout == null and !opts.regen and cached == null;
+    else if (opts.regen or spec_drives) null else readAutoPoses(alloc, project_dir, name);
+    const grid_only = opts.sub == null and opts.layout == null and !opts.regen and !spec_drives and cached == null;
     var png_params = optimizer.Params{ .courtyard_overlap = opts.court_overlap, .route_gap = opts.route_gap };
     if (opts.group_w >= 0) png_params.group_w = opts.group_w;
     if (opts.group_zone_w >= 0) png_params.group_zone_w = opts.group_zone_w;
@@ -706,6 +716,22 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
     try w.writeAll("]");
     if (routed) |r| {
         try w.print(",\"routed\":{{\"trace_mm\":{d:.1},\"tracks\":{d},\"vias\":{d},\"drc\":{d}}}", .{ r.trace_mm, r.tracks, r.vias, r.drc });
+    }
+    // When a `(placement …)` spec drove this solve, report coverage so the agent
+    // editing the spec can see whether it was honoured (`source`) and which parts it
+    // didn't list (`unplaced`, staged below the board). Read straight from the
+    // optimizer's per-solve thread-local — set during the `solve` just above.
+    const pl = optimizer.placementDiag();
+    if (pl.active) {
+        try w.print(",\"placement\":{{\"source\":\"{s}\",\"fell_back\":{s},\"unplaced\":[", .{
+            if (pl.used_spec) "spec" else "force",
+            if (pl.used_spec) "false" else "true",
+        });
+        for (pl.unplaced, 0..) |ref, i| {
+            if (i > 0) try w.writeAll(",");
+            try writeJsonStr(w, ref);
+        }
+        try w.writeAll("]}");
     }
     try w.writeAll("}");
 }

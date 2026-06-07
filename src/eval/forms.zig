@@ -120,6 +120,7 @@ pub const ScopeForm = enum {
     layout,
     placement_order,
     constraints,
+    placement,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -160,6 +161,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "placement-order", .placement_order },
     .{ "constraints", .constraints },
     .{ "module", .constraints },
+    .{ "placement", .placement },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -464,6 +466,13 @@ pub const scope_form_docs = blk: {
         .summary = "Phase-A PCB placement constraints (circuit intent the auto-placer can't infer): " ++
             "rail roles, proximity pulls, weighted nets, deprioritized straps, keep-outs, groups. " ++
             "Refs/nets/pins validated against the netlist. See docs/constraints_dsl.md.",
+    } };
+    t[@intFromEnum(ScopeForm.placement)] = .{ .scope = tl, .doc = .{
+        .syntax = "(placement (anchor \"REF\") " ++
+            "(left|right|top|bottom \"REF\"… | (rot N \"REF\")…)… [(switch \"REF\" side)])",
+        .summary = "Agent-authored PCB floorplan: declare each part's side of the main IC, " ++
+            "the order along that edge, and an optional rotation; the solver legalizes it to " ++
+            "exact coordinates (the manual twin of the automatic switcher floorplan).",
     } };
     break :blk t;
 };
