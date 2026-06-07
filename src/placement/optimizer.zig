@@ -1477,9 +1477,9 @@ fn dockLanes(parts: []Part, ic: usize, lanes: []const PackBlock, edge: Edge, gap
 
 /// Constructive placement from a resolved `(placement …)` spec: the anchor IC at the
 /// origin, each side's parts packed into depth lanes in the authored order (honouring
-/// rotation overrides, else facing the IC), a `(switch …)` inductor in the innermost
-/// lane of its side, long sides wrapped into a compact grid, and any parts the spec
-/// didn't list staged in a band below the board (reported via `g_placement_diag`).
+/// rotation overrides, else facing the IC), long sides wrapped into a compact grid, a
+/// `(switch …)` inductor in the lane just beyond its side's parts, and any parts the
+/// spec didn't list staged in a band below the board (reported via `g_placement_diag`).
 /// Finishes with overlap-removal + grid-snap only — never `relax`. Returns true on a
 /// complete, overlap-free arrangement; false ⇒ caller falls back to the force placer.
 fn packSpec(
@@ -1507,28 +1507,16 @@ fn packSpec(
     const gap = @max(g_route_gap, FINAL_CLEAR);
 
     // Depth lanes per IC edge (M2). Each edge becomes one or more lanes stacked
-    // outward from the IC: a `(switch …)` inductor takes the innermost lane (between
-    // the IC and that side's caps — the IC│L│VOUT switch-node lane), then the side's
-    // parts wrap into one or more lanes (a long side becomes a compact grid instead of
-    // one tall column). `dockLanes` puts lane 0 flush to the IC and each later lane one
-    // lane deeper, all sharing the rail-pad cross-centre so they line up. Author the
-    // switch on the edge nearest the SW pads so it doesn't push the output bank out.
+    // outward from the IC. The side's listed parts take the lanes NEAREST the IC, in
+    // authored order (a long side wraps into a compact grid instead of one tall
+    // column); a `(switch …)` inductor on that edge takes the lane BEYOND them. So the
+    // decoupling bank you list hugs the IC pins and the bulky inductor sits one lane
+    // further out — IC│caps│L. `dockLanes` puts lane 0 flush to the IC and each later
+    // lane one lane deeper, all sharing the rail-pad cross-centre so they line up.
     const all_edges = [_]Edge{ .left, .right, .top, .bottom };
     for (all_edges) |e| {
         var lanes: std.ArrayListUnmanaged(PackBlock) = .empty;
-        // Innermost lane: the switch inductor(s) on this edge, between IC and caps.
-        var sw_members: std.ArrayListUnmanaged(usize) = .empty;
-        for (rp.switches) |sw| {
-            if (sw.edge != e or claimed[sw.part]) continue;
-            claimed[sw.part] = true;
-            try sw_members.append(arena, sw.part);
-        }
-        if (sw_members.items.len > 0) {
-            const sw_rots = try arena.alloc(?f64, sw_members.items.len);
-            @memset(sw_rots, null); // inductor: face-the-IC default rotation
-            try appendLane(arena, &lanes, sw_members.items, sw_rots, ic, e, parts, nets, idx_of, built.loops, gap);
-        }
-        // The side's parts, in authored order, wrapped into balanced lanes.
+        // The side's parts (nearest the IC), in authored order, wrapped into lanes.
         var members: std.ArrayListUnmanaged(usize) = .empty;
         var rots: std.ArrayListUnmanaged(?f64) = .empty;
         for (rp.sides) |s| {
@@ -1549,6 +1537,18 @@ fn packSpec(
                 const end = @min(i + per, n);
                 try appendLane(arena, &lanes, members.items[i..end], rots.items[i..end], ic, e, parts, nets, idx_of, built.loops, gap);
             }
+        }
+        // The switch inductor(s) on this edge take the lane BEYOND the side's parts.
+        var sw_members: std.ArrayListUnmanaged(usize) = .empty;
+        for (rp.switches) |sw| {
+            if (sw.edge != e or claimed[sw.part]) continue;
+            claimed[sw.part] = true;
+            try sw_members.append(arena, sw.part);
+        }
+        if (sw_members.items.len > 0) {
+            const sw_rots = try arena.alloc(?f64, sw_members.items.len);
+            @memset(sw_rots, null); // inductor: face-the-IC default rotation
+            try appendLane(arena, &lanes, sw_members.items, sw_rots, ic, e, parts, nets, idx_of, built.loops, gap);
         }
         if (lanes.items.len == 0) continue;
         const ic_cross = if (e == .left or e == .right) parts[ic].y else parts[ic].x;
