@@ -1576,12 +1576,18 @@ fn placementSideFromAtom(atom: []const u8) ?env_mod.PlacementSide {
 /// the force placer on any failure.
 fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_mod.PlacementSpec {
     var anchor: []const u8 = "";
+    var refine = true;
     var sides: std.ArrayListUnmanaged(env_mod.PlacementSideSpec) = .empty;
     var switches: std.ArrayListUnmanaged(env_mod.SwitchPlacement) = .empty;
     for (form_children[1..]) |child| {
         const c = child.asList() orelse continue;
         if (c.len < 1) continue;
         const head = c[0].asAtom() orelse continue;
+        // (no-refine) — skip the post-pack polish, showing the raw constructive pack.
+        if (std.mem.eql(u8, head, "no-refine")) {
+            refine = false;
+            continue;
+        }
         if (std.mem.eql(u8, head, "anchor")) {
             if (c.len >= 2) anchor = c[1].asString() orelse c[1].asAtom() orelse anchor;
             continue;
@@ -1620,6 +1626,7 @@ fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_m
         .sides = sides.toOwnedSlice(self.allocator) catch &.{},
         .switches = switches.toOwnedSlice(self.allocator) catch &.{},
         .present = true,
+        .refine = refine,
     };
 }
 

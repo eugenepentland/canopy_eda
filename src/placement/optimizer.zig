@@ -640,15 +640,17 @@ fn runPlacement(
     if (!params.ignore_placement) {
         if (prep.placement) |rp| {
             if (try packSpec(arena, parts, &prep.idx_of, nets, built, rp)) {
-                // Cheap surrogate local tuck (no routing): a small per-cap window that
-                // squeezes each decoupling cap toward its pin without unspooling the
-                // constructed lanes — closes most of the gap to the force optimum while
-                // keeping every part on its authored side (the spec's coarse structure
-                // is preserved; polish only does the fine placement).
-                polish(parts, &prep.idx_of, nets, built.loops, params);
-                snapToGrid(parts);
-                legalizeOnGrid(parts);
-                tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
+                // Post-pack refinement (skipped by a `(no-refine)` marker, so the raw
+                // constructive pack can be compared): a cheap surrogate local tuck (no
+                // routing) that squeezes each cap toward its pin without unspooling the
+                // lanes, then the priority-cap tuck. Keeps every part on its authored
+                // side — only the fine placement moves.
+                if (rp.refine) {
+                    polish(parts, &prep.idx_of, nets, built.loops, params);
+                    snapToGrid(parts);
+                    legalizeOnGrid(parts);
+                    tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
+                }
                 return;
             }
             g_placement_diag.used_spec = false;
@@ -1293,6 +1295,8 @@ const ResolvedPlacement = struct {
     anchor: usize,
     sides: []const SpecSide,
     switches: []const SpecSwitch,
+    /// Run the post-pack refinement (polish + priority tuck)? `(no-refine)` ⇒ false.
+    refine: bool = true,
 };
 
 /// Map an authored `(placement …)` side keyword to the optimizer's dock `Edge`.
@@ -1337,6 +1341,7 @@ fn resolvePlacement(
         .anchor = anchor,
         .sides = try sides.toOwnedSlice(arena),
         .switches = try switches.toOwnedSlice(arena),
+        .refine = spec.refine,
     };
 }
 
