@@ -1071,6 +1071,12 @@ pub const PlacementSpec = struct {
     sides: []const PlacementSideSpec = &.{},
     switches: []const SwitchPlacement = &.{},
     present: bool = false,
+    /// True (default) ⇒ run the post-pack refinement (the surrogate `polish` +
+    /// priority-cap tuck) that fine-tunes positions. A `(no-refine)` marker in the
+    /// form sets this false, leaving the pure deterministic constructive pack — for
+    /// A/B-ing what the refinement actually changes (e.g. it can drift a symmetric
+    /// pair off-centre).
+    refine: bool = true,
 };
 
 /// The fully-evaluated result of a `(design-block …)`: the flattened netlist

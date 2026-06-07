@@ -469,7 +469,7 @@ pub const scope_form_docs = blk: {
     } };
     t[@intFromEnum(ScopeForm.placement)] = .{ .scope = tl, .doc = .{
         .syntax = "(placement (anchor \"REF\") " ++
-            "(left|right|top|bottom \"REF\"… | (rot N \"REF\")…)… [(switch \"REF\" side)])",
+            "(left|right|top|bottom \"REF\"… | (rot N \"REF\")…)… [(switch \"REF\" side)] [(no-refine)])",
         .summary = "Agent-authored PCB floorplan: declare each part's side of the main IC, " ++
             "the order along that edge, and an optional rotation; the solver legalizes it to " ++
             "exact coordinates (the manual twin of the automatic switcher floorplan).",
