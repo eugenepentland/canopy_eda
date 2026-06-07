@@ -183,7 +183,11 @@ src/eval/env.zig::PlaceholderPart struct_
 src/eval/env.zig::Placement struct_
 src/eval/env.zig::PlacementConstraints struct_
 src/eval/env.zig::PlacementEntry struct_
+src/eval/env.zig::PlacementItem struct_
 src/eval/env.zig::PlacementOrder struct_
+src/eval/env.zig::PlacementSide enum_
+src/eval/env.zig::PlacementSideSpec struct_
+src/eval/env.zig::PlacementSpec struct_
 src/eval/env.zig::Port struct_
 src/eval/env.zig::PortDirection enum_
 src/eval/env.zig::PowerDomain struct_
@@ -200,6 +204,7 @@ src/eval/env.zig::SectionStatus enum_
 src/eval/env.zig::SeriesKind enum_
 src/eval/env.zig::SignalType enum_
 src/eval/env.zig::SubBlock struct_
+src/eval/env.zig::SwitchPlacement struct_
 src/eval/env.zig::TestPoint struct_
 src/eval/env.zig::TestPointTag enum_
 src/eval/env.zig::Value value
@@ -409,6 +414,7 @@ src/placement/optimizer.zig::gridPlace fn
 src/placement/optimizer.zig::loopNh fn
 src/placement/optimizer.zig::perPartBlame fn
 src/placement/optimizer.zig::placeFromPoses fn
+src/placement/optimizer.zig::placementDiag fn
 src/placement/optimizer.zig::routedScorePoses fn
 src/placement/optimizer.zig::scorePoses fn
 src/placement/optimizer.zig::setProgressSink fn

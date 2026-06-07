@@ -71,6 +71,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var placement_orders: std.ArrayListUnmanaged(env_mod.PlacementOrder) = .empty;
     var constraint_acc: ConstraintAcc = .{};
     var layout_spec: env_mod.LayoutSpec = .{};
+    var placement_spec: env_mod.PlacementSpec = .{};
     var derating: ?f64 = null;
     var kicad_pcb_path: ?[]const u8 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
@@ -165,6 +166,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             .layout => layout_spec = try parseLayout(self, form_children),
             .placement_order => try parsePlacementOrder(self, form_children, &placement_orders),
             .constraints => try parseConstraints(self, form_children, &constraint_acc),
+            .placement => placement_spec = try parsePlacement(self, form_children),
             // Section-only forms are silently ignored at the top level —
             // a design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract.
@@ -206,6 +208,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .layout = layout_spec,
         .placement_order = placement_orders.toOwnedSlice(self.allocator) catch &.{},
         .constraints = constraint_acc.build(self.allocator),
+        .placement = placement_spec,
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -689,7 +692,7 @@ fn evalSection(
             // `processSharedSectionForm`; top-level-only forms are
             // silently ignored inside a section body.
             .status, .description, .note, .port, .protocol, .calc => {},
-            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function, .stub, .layout, .placement_order, .constraints => {},
+            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function, .stub, .layout, .placement_order, .constraints, .placement => {},
         }
     }
 
@@ -1550,6 +1553,74 @@ fn relFromAtom(atom: []const u8) ?env_mod.PlaceRel {
     if (std.mem.eql(u8, atom, "above")) return .above;
     if (std.mem.eql(u8, atom, "below")) return .below;
     return null;
+}
+
+/// Map a placement side keyword (`left`/`right`/`top`/`bottom`) to a
+/// `PlacementSide`. Returns null for anything else so `parsePlacement` can skip
+/// an unrecognised side or `(switch …)` direction.
+fn placementSideFromAtom(atom: []const u8) ?env_mod.PlacementSide {
+    if (std.mem.eql(u8, atom, "left")) return .left;
+    if (std.mem.eql(u8, atom, "right")) return .right;
+    if (std.mem.eql(u8, atom, "top")) return .top;
+    if (std.mem.eql(u8, atom, "bottom")) return .bottom;
+    return null;
+}
+
+/// Parse a top-level `(placement (anchor "REF") (left|right|top|bottom item…)…
+/// [(switch "REF" side)])` floorplan form into a `PlacementSpec`. Each side
+/// lists its parts in IC-outward order; an item is a bare ref (`"C1"`) or a
+/// rotation override `(rot <deg> "C1")`. `(switch "L1" right)` marks a power
+/// inductor straddling the SW node toward `side`. Malformed sub-forms and
+/// unknown side keywords are skipped so a typo can't abort the build — the
+/// optimizer's `packSpec` resolves refs against the netlist and falls back to
+/// the force placer on any failure.
+fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_mod.PlacementSpec {
+    var anchor: []const u8 = "";
+    var sides: std.ArrayListUnmanaged(env_mod.PlacementSideSpec) = .empty;
+    var switches: std.ArrayListUnmanaged(env_mod.SwitchPlacement) = .empty;
+    for (form_children[1..]) |child| {
+        const c = child.asList() orelse continue;
+        if (c.len < 1) continue;
+        const head = c[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "anchor")) {
+            if (c.len >= 2) anchor = c[1].asString() orelse c[1].asAtom() orelse anchor;
+            continue;
+        }
+        // (switch "REF" side) — power inductor straddling the SW node.
+        if (std.mem.eql(u8, head, "switch")) {
+            if (c.len < 3) continue;
+            const ref = c[1].asString() orelse c[1].asAtom() orelse continue;
+            const side_atom = c[2].asAtom() orelse c[2].asString() orelse continue;
+            const side = placementSideFromAtom(side_atom) orelse continue;
+            switches.append(self.allocator, .{ .ref = ref, .side = side }) catch return EvalError.OutOfMemory;
+            continue;
+        }
+        const side = placementSideFromAtom(head) orelse continue;
+        var items: std.ArrayListUnmanaged(env_mod.PlacementItem) = .empty;
+        for (c[1..]) |item_node| {
+            // (rot <deg> "REF") rotation override, or a bare ref string/atom.
+            if (item_node.asList()) |il| {
+                if (il.len >= 3 and std.mem.eql(u8, il[0].asAtom() orelse "", "rot")) {
+                    const deg = il[1].asNumber() orelse continue;
+                    const ref = il[2].asString() orelse il[2].asAtom() orelse continue;
+                    items.append(self.allocator, .{ .ref = ref, .rot = deg }) catch return EvalError.OutOfMemory;
+                }
+                continue;
+            }
+            const ref = item_node.asString() orelse item_node.asAtom() orelse continue;
+            items.append(self.allocator, .{ .ref = ref }) catch return EvalError.OutOfMemory;
+        }
+        sides.append(self.allocator, .{
+            .side = side,
+            .items = items.toOwnedSlice(self.allocator) catch &.{},
+        }) catch return EvalError.OutOfMemory;
+    }
+    return .{
+        .anchor = anchor,
+        .sides = sides.toOwnedSlice(self.allocator) catch &.{},
+        .switches = switches.toOwnedSlice(self.allocator) catch &.{},
+        .present = true,
+    };
 }
 
 /// Parse one `(function "Name" "Subtitle"? (verb "…")? (includes "a" "b" …)?)`
