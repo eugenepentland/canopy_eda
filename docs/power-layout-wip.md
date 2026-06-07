@@ -197,11 +197,11 @@ GET /api/pcb-png/<name>?regen=1&zone_pack=1&route=1    # routed
 GET /api/pcb-layout/<name>?regen=1&zone_pack=1&route=1 # JSON incl "routed":{trace_mm,vias,drc}
 ```
 
-### Loop-quality refinements (the docking is what made it competitive)
+### Loop-quality refinements — zone-pack now routes BELOW the force layout
 
-Three changes took the routed trace from 138 → **109 mm** (≈ force's 104 mm) with
-**fewer vias** (31 vs 41), both DRC-clean — so the clean structure now costs little
-copper:
+A sequence of docking fixes took the routed trace from 138 → **100.5 mm** — *below*
+the force layout's 103.7 mm — DRC-clean. So the clean, structured floorplan is now
+also the shorter-copper one:
 
 - **Dock each block on its own rail pin** (`railPadCross`, area-weighted by pad so
   the wide VOUT pad wins over the small ISP/ISN sense pads), not collectively on the
@@ -210,7 +210,19 @@ copper:
 - **Centre-out member order** (`orderMembers` ranks by criticality — smallest/HF cap
   first; `centerOutOrder` puts it at the column centre nearest the pin). HF output
   cap leg 6.9 → 3.4 mm.
-- Compare any two layouts directly via the JSON `routed` block.
+- **Boot caps in pin order** (`orderForBlock` flags a *distributed* group whose
+  members' own rail-pin cross-positions spread past `DISTRIBUTE_MM`, e.g. the two
+  boot caps → BOOT1/BOOT2; laid in pin order, not criticality, so each sits above
+  its own pad). Was the worst bug: caps on the wrong sides → 4 mm crossing
+  bootstrap traces on the high-dV/dt SW node. **Found by an adversarial multi-agent
+  layout review** (`tps55289-layout-review` workflow: 5 dimensions × verify × synth).
+- **Inner-edge alignment** (`packOneBlock` aligns each member by its power-pad edge
+  toward the IC, not by centre), so a narrow HF cap isn't dragged outboard by a
+  wider neighbour.
+- **JSON routed metrics**: `GET /api/pcb-layout/:name?route=1` →
+  `routed:{trace_mm,tracks,vias,drc}` — compare any two layouts on real copper.
+  The *surrogate* loop metric favours the scattered force layout (it's a per-cap
+  straight line that ignores manufacturability), so judge with the routed block.
 
 **Negative result — DON'T re-add two-depth-lane docking.** Spilling light support
 blocks (resistors, the COMP network) to a second outer lane *did* put the COMP
@@ -219,13 +231,18 @@ network at its pin's Y, but pushed every support part far out → routed trace
 along the edge) routes much shorter; the COMP network sitting at the column end is
 the accepted cost.
 
-## Still open (product + polish)
+## Still open (product + polish) — all minor; layout routes < force
 
-- **Residual output-column jitter (~0.4 mm).** After the lock-line restore,
-  `legalizeOnGrid` still nudges a couple of output caps one cell in x to clear a
-  corner clip between the right column and a top/bottom block. Fix = avoid the
-  corner overlap at dock time (cap each edge's cross-extent, or depth-offset
-  perpendicular blocks) rather than relying on legalization.
+- **Boot-cap pair shifts right under C_VCC contention (~1–2 mm off their BOOT
+  pads).** Pin order is now correct (no crossing), but on the top edge `C_VCC`
+  (mass 4, one GND-decoupling cap) outweighs the boot block (mass 1 — boot caps
+  have no GND loop so `blockMass` undercounts them) and pushes it right. Fix: count
+  switch-node caps (BOOT/SW nets) as switching-critical in `blockMass`, or let
+  C_VCC pick one VCC pin side instead of centring on both.
+- **L1 ~0.2 mm off the SW midpoint** (down from 0.6 after the boot fix freed the
+  centre). `placeSwitchHub` could center on the area-weighted SW-pad pair exactly.
+- **Residual output-column jitter (~0.4 mm)** from `legalizeOnGrid` clearing a
+  corner clip — cosmetic.
 - **`zone_pack` default-on.** It is flag-authoritative today (shows the pack when
   on). To enable by default for the dominant-IC shape, add the keep-routed-better
   force-vs-pack comparison in `solve` (mirror the strict/overlap retry) so it can
