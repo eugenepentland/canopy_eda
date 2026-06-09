@@ -597,7 +597,7 @@ threadlocal var g_route_gap: f64 = 0;
 /// layout (false ⇒ it fell back to the force placer); `unplaced` = refs the spec
 /// didn't cover (staged in a band below the board). Reset in `prepare`, set by
 /// `packSpec`. Threadlocal like `g_lowered` so concurrent solves stay isolated.
-const PlacementDiag = struct {
+pub const PlacementDiag = struct {
     active: bool = false,
     used_spec: bool = false,
     /// Refs the spec didn't list that are still in the staging band (auto-fill

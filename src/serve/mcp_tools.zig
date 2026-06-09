@@ -84,6 +84,7 @@ const tools = [_]ToolEntry{
     .{ .name = "get_pcb_layout_image", .is_mutation = false },
     .{ .name = "describe_pcb_layout", .is_mutation = false },
     .{ .name = "export_placement_spec", .is_mutation = false },
+    .{ .name = "propose_placement", .is_mutation = false },
     .{ .name = "get_version", .is_mutation = false },
     .{ .name = "run_checks", .is_mutation = false },
     .{ .name = "generate_review", .is_mutation = false },
@@ -244,6 +245,7 @@ fn dispatchInfo(
     if (std.mem.eql(u8, tool_name, "get_schematic")) return try toolGetSchematic(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "describe_pcb_layout")) return try toolDescribePcbLayout(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "export_placement_spec")) return try toolExportPlacementSpec(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "propose_placement")) return try toolProposePlacement(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "get_version")) return try toolGetVersion(args_val, out, allocator);
     if (std.mem.eql(u8, tool_name, "run_checks")) return try toolRunChecks(allocator, project_dir, args_val, out, w);
     if (std.mem.eql(u8, tool_name, "generate_review")) return try toolGenerateReview(allocator, project_dir, args_val, w, out);
@@ -613,6 +615,26 @@ fn toolExportPlacementSpec(allocator: std.mem.Allocator, project_dir: []const u8
     return true;
 }
 
+/// `propose_placement` — dry-run a `(placement …)` / `(floorplan …)` form
+/// against a request-local copy of the design and return the proposed-vs-
+/// current scoreboard. Read-only: the agent A/B-tests a spec before writing
+/// it into the .sexp file.
+fn toolProposePlacement(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const spec_text = requireString(args_val, "spec") orelse return missingArg(out, allocator, "spec");
+    const route = optionalBool(args_val, "route") orelse false;
+    const result = placement_spec.proposePlacement(allocator, project_dir, name, spec_text, route) catch |e| {
+        try out.writer(allocator).print("error proposing placement: {s}", .{@errorName(e)});
+        return false;
+    };
+    if (result == null) {
+        try out.appendSlice(allocator, "error: no (placement ...) or (floorplan ...) form found in spec");
+        return false;
+    }
+    try out.appendSlice(allocator, result.?);
+    return true;
+}
+
 /// Render a design's PCB layout to a PNG and write it base64-encoded into `out`
 /// (the caller emits it as an MCP image content block). Optional `nets`/`refs`
 /// (arrays or comma-separated strings) spotlight a subsystem; `route` overlays
@@ -635,8 +657,12 @@ fn toolGetPcbImage(allocator: std.mem.Allocator, project_dir: []const u8, args_v
         .grid = optionalBool(args_val, "grid") orelse false,
         .compare = optionalString(args_val, "compare"),
         .pins = jsonStrList(allocator, args_val, "pins"),
+        .crop = optionalString(args_val, "crop"),
+        .sheet = optionalBool(args_val, "sheet") orelse false,
+        .critique = optionalBool(args_val, "critique") orelse false,
     };
     if (optionalU64(args_val, "width")) |w| opts.width = @intCast(@min(w, @as(u64, 4000)));
+    if (optionalU64(args_val, "r")) |r| opts.crop_r = @floatFromInt(r);
     if (optionalString(args_val, "names")) |s| opts.names = std.meta.stringToEnum(render_pcb_png.NameMode, s);
 
     const png_bytes = pcb_layout_page.renderDesignPng(allocator, project_dir, name, opts) catch |e| {
