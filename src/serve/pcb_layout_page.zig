@@ -487,6 +487,71 @@ pub const PngError = error{ BlockNotFound, SubNotFound, BuildFailed } || png_mod
 
 /// Resolve `name`, build (or load from cache) its placement, optionally route
 /// it, and render a PNG — shared by the HTTP endpoint and the MCP tool. All
+/// A solved placement plus the request context the PNG and describe endpoints
+/// share — both views must show the *same* board. `placement` references block
+/// memory owned by the caller's `eval`/`module_res`, so those must outlive it.
+pub const SolvedRequest = struct {
+    placement: optimizer.Placement,
+    spec_status: ?render_pcb_png.SpecStatus,
+    params: optimizer.Params,
+    title: []const u8,
+    /// The (possibly sub-scoped) design block the placement was solved from —
+    /// callers needing a second solve (e.g. the compare overlay) reuse it.
+    block: *env_mod.DesignBlock,
+};
+
+/// Resolve `name` and apply the request's placement-selection rules: a named
+/// saved layout renders verbatim, `regen` or a `(placement …)` spec forces a
+/// fresh solve, otherwise the auto cache is reused — falling back to a plain
+/// grid when nothing is cached so an agent's first call stays cheap.
+/// `?placement=off` opts a spec design back into the automatic placer.
+pub fn solveForRequest(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    opts: PngRequest,
+    eval: *Evaluator,
+    module_res: *?modules_mod.ResolvedBlock,
+) PngError!SolvedRequest {
+    const block = resolveBlock(alloc, project_dir, name, eval, module_res) orelse return error.BlockNotFound;
+    const eff_block: *env_mod.DesignBlock = if (opts.sub) |s|
+        (descendToSub(alloc, block, s) orelse return error.SubNotFound)
+    else
+        block;
+
+    const spec_drives = opts.sub == null and opts.layout == null and !opts.placement_off and eff_block.placement.present;
+    const cached = if (opts.sub != null) null else if (opts.layout) |ln|
+        readLayoutPoses(alloc, project_dir, name, ln)
+    else if (opts.regen or spec_drives) null else readAutoPoses(alloc, project_dir, name);
+    const grid_only = opts.sub == null and opts.layout == null and !opts.regen and !spec_drives and cached == null;
+    var params = optimizer.Params{ .courtyard_overlap = opts.court_overlap, .route_gap = opts.route_gap };
+    if (opts.group_w >= 0) params.group_w = opts.group_w;
+    if (opts.group_zone_w >= 0) params.group_zone_w = opts.group_zone_w;
+    if (opts.group_loop_relief >= 0) params.group_loop_relief = opts.group_loop_relief;
+    if (opts.zone_pack) params.zone_pack = true;
+    if (opts.placement_off) params.ignore_placement = true;
+    // A named saved layout renders VERBATIM (placeFromPoses) — "show me this
+    // layout" must display exactly what was saved, not a re-optimized version:
+    // refine can drift a hand-tuned layout to a worse arrangement (e.g. a 70.8
+    // hand layout relaxing back to 86 because it isn't a relax fixed-point).
+    const placement = (if (opts.layout != null and cached != null)
+        optimizer.placeFromPoses(alloc, eff_block, project_dir, cached.?, params)
+    else if (grid_only)
+        optimizer.gridPlace(alloc, eff_block, project_dir, params)
+    else
+        optimizer.solve(alloc, eff_block, project_dir, cached, params, .place)) catch return error.BuildFailed;
+
+    // `(placement …)` spec coverage from the solve just above (same thread).
+    // Only meaningful on the spec-driven path — saved layouts / grid renders
+    // would read a stale or inert diag.
+    const diag = optimizer.placementDiag();
+    const spec_status: ?render_pcb_png.SpecStatus = if (spec_drives and diag.active)
+        .{ .used_spec = diag.used_spec, .unplaced = diag.unplaced }
+    else
+        null;
+    return .{ .placement = placement, .spec_status = spec_status, .params = params, .title = eff_block.name, .block = eff_block };
+}
+
 /// allocation goes through `alloc`; the returned bytes are owned by it.
 pub fn renderDesignPng(
     alloc: std.mem.Allocator,
@@ -501,48 +566,10 @@ pub fn renderDesignPng(
         mr.eval.deinit();
         alloc.destroy(mr.eval);
     };
-    const block = resolveBlock(alloc, project_dir, name, &eval, &module_res) orelse return error.BlockNotFound;
-    const eff_block: *env_mod.DesignBlock = if (opts.sub) |s|
-        (descendToSub(alloc, block, s) orelse return error.SubNotFound)
-    else
-        block;
-
-    // Same placement-selection logic as the page: a named layout or regen forces
-    // a solve; otherwise reuse the auto cache, falling back to a plain grid when
-    // nothing is cached so an agent's first call stays cheap.
-    // A `(placement …)` form drives a fresh solve unless a saved layout (?layout=)
-    // or a sub-scoped preview was requested — the spec is the source of truth.
-    // `?placement=off` opts out (preview the automatic placer for comparison).
-    const spec_drives = opts.sub == null and opts.layout == null and !opts.placement_off and eff_block.placement.present;
-    const cached = if (opts.sub != null) null else if (opts.layout) |ln|
-        readLayoutPoses(alloc, project_dir, name, ln)
-    else if (opts.regen or spec_drives) null else readAutoPoses(alloc, project_dir, name);
-    const grid_only = opts.sub == null and opts.layout == null and !opts.regen and !spec_drives and cached == null;
-    var png_params = optimizer.Params{ .courtyard_overlap = opts.court_overlap, .route_gap = opts.route_gap };
-    if (opts.group_w >= 0) png_params.group_w = opts.group_w;
-    if (opts.group_zone_w >= 0) png_params.group_zone_w = opts.group_zone_w;
-    if (opts.group_loop_relief >= 0) png_params.group_loop_relief = opts.group_loop_relief;
-    if (opts.zone_pack) png_params.zone_pack = true;
-    if (opts.placement_off) png_params.ignore_placement = true;
-    // A named saved layout renders VERBATIM (placeFromPoses) — "show me this
-    // layout" must display exactly what was saved, not a re-optimized version:
-    // refine can drift a hand-tuned layout to a worse arrangement (e.g. a 70.8
-    // hand layout relaxing back to 86 because it isn't a relax fixed-point).
-    const placement = (if (opts.layout != null and cached != null)
-        optimizer.placeFromPoses(alloc, eff_block, project_dir, cached.?, png_params)
-    else if (grid_only)
-        optimizer.gridPlace(alloc, eff_block, project_dir, png_params)
-    else
-        optimizer.solve(alloc, eff_block, project_dir, cached, png_params, .place)) catch return error.BuildFailed;
-
-    // `(placement …)` spec coverage from the solve just above (same thread).
-    // Only meaningful on the spec-driven path — saved layouts / grid renders
-    // would read a stale or inert diag.
-    const diag = optimizer.placementDiag();
-    const spec_status: ?render_pcb_png.SpecStatus = if (spec_drives and diag.active)
-        .{ .used_spec = diag.used_spec, .unplaced = diag.unplaced }
-    else
-        null;
+    const solved = try solveForRequest(alloc, project_dir, name, opts, &eval, &module_res);
+    const placement = solved.placement;
+    const spec_status = solved.spec_status;
+    const png_params = solved.params;
     // Auto name mode: a spec-driven image speaks the spec's vocabulary.
     const name_mode = opts.names orelse
         (if (spec_status != null) render_pcb_png.NameMode.origin else render_pcb_png.NameMode.ref);
@@ -558,7 +585,7 @@ pub fn renderDesignPng(
     var cmp_placement: ?optimizer.Placement = null;
     if (opts.compare) |cn| {
         if (readLayoutPoses(alloc, project_dir, name, cn)) |cposes| {
-            cmp_placement = optimizer.placeFromPoses(alloc, eff_block, project_dir, cposes, png_params) catch null;
+            cmp_placement = optimizer.placeFromPoses(alloc, solved.block, project_dir, cposes, png_params) catch null;
         }
     }
 
@@ -568,7 +595,7 @@ pub fn renderDesignPng(
         .highlight_refs = opts.highlight_refs,
         .routed = routed,
         .violations = violations,
-        .title = eff_block.name,
+        .title = solved.title,
         .params = png_params,
         .blame = opts.blame,
         .loop_labels = opts.loop_labels,
@@ -581,35 +608,16 @@ pub fn renderDesignPng(
     });
 }
 
-/// GET /api/pcb-png/:name — render the solved layout as a PNG so an AI agent (or
-/// any HTTP client) can *see* it, not just parse the coordinate JSON.
-///
-/// Query parameters (all optional):
-///   width=<px>            output width (clamped); height follows the board
-///   nets=A,B  refs=U1,C3  focus mode — spotlight these nets/components, dim rest
-///   route=1               run the router and draw copper + DRC markers
-///   layout=<name>         render a specific saved layout (else the auto cache)
-///   regen=1               force a fresh solve instead of the cache
-///   sub=<slug>            scope to one sub-block (per-sub-block preview)
-///   names=ref|origin|both part labels: ref-des, spec origin name, or REF=ORIGIN
-///                         (default: origin when a (placement …) spec drives)
-///   pins=U13,C5           label these parts' pads with net names ("hubs" = all)
-///
-/// Request-scoped allocation uses `req.arena` (freed after the response is sent;
-/// `res.body` stays valid until then) — `ctx.allocator` is the global page
-/// allocator, so a leaked image per call would never be reclaimed.
-pub fn pcbPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const arena = req.arena;
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
+/// Parse a `PngRequest` from an HTTP query string — shared by the PNG endpoint
+/// and `/api/pcb-describe` so both accept the identical parameter set (and so
+/// the facts always describe the placement the image shows).
+pub fn pngRequestFromQuery(arena: std.mem.Allocator, req: *httpz.Request) PngRequest {
     const width: u32 = blk: {
         const q = req.query() catch break :blk PNG_DEFAULT_WIDTH;
         const wv = q.get("width") orelse break :blk PNG_DEFAULT_WIDTH;
         break :blk std.fmt.parseInt(u32, wv, 10) catch PNG_DEFAULT_WIDTH;
     };
-    const opts = PngRequest{
+    return .{
         .width = width,
         .highlight_nets = csvParam(arena, req, "nets"),
         .highlight_refs = csvParam(arena, req, "refs"),
@@ -647,6 +655,32 @@ pub fn pcbPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
         },
         .pins = csvParam(arena, req, "pins"),
     };
+}
+
+/// GET /api/pcb-png/:name — render the solved layout as a PNG so an AI agent (or
+/// any HTTP client) can *see* it, not just parse the coordinate JSON.
+///
+/// Query parameters (all optional):
+///   width=<px>            output width (clamped); height follows the board
+///   nets=A,B  refs=U1,C3  focus mode — spotlight these nets/components, dim rest
+///   route=1               run the router and draw copper + DRC markers
+///   layout=<name>         render a specific saved layout (else the auto cache)
+///   regen=1               force a fresh solve instead of the cache
+///   sub=<slug>            scope to one sub-block (per-sub-block preview)
+///   names=ref|origin|both part labels: ref-des, spec origin name, or REF=ORIGIN
+///                         (default: origin when a (placement …) spec drives)
+///   pins=U13,C5           label these parts' pads with net names ("hubs" = all)
+///
+/// Request-scoped allocation uses `req.arena` (freed after the response is sent;
+/// `res.body` stays valid until then) — `ctx.allocator` is the global page
+/// allocator, so a leaked image per call would never be reclaimed.
+pub fn pcbPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const arena = req.arena;
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const opts = pngRequestFromQuery(arena, req);
     const png_bytes = renderDesignPng(arena, ctx.project_dir, name, opts) catch |e| {
         res.status = if (e == error.BlockNotFound or e == error.SubNotFound) 404 else 500;
         res.body = switch (e) {
@@ -3137,7 +3171,7 @@ fn writeAttr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
 }
 
 /// Emit `s` as a quoted, JSON-escaped string to a `std.Io.Writer`.
-fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
+pub fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
     try w.writeByte('"');
     for (s) |c| switch (c) {
         '"' => try w.writeAll("\\\""),
