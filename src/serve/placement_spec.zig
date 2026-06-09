@@ -88,15 +88,17 @@ pub fn exportSpec(
     else
         "auto";
     var aw: std.Io.Writer.Allocating = .init(alloc);
-    writeSpecJson(&aw.writer, solved.placement, solved.spec_status, sexp.?, source, name, solved.title) catch
+    writeSpecJson(&aw.writer, alloc, solved.placement, solved.spec_status, sexp.?, source, name, solved.title) catch
         return error.BuildFailed;
     return .{ .json = aw.written(), .sexp = sexp.? };
 }
 
 /// JSON wrapper around the spec text: where the layout came from, the anchor's
 /// names, and any parts skipped because the source solve left them staged.
+/// Skipped parts are named in the same vocabulary the spec text uses.
 fn writeSpecJson(
     w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
     p: optimizer.Placement,
     spec: ?render_pcb_png.SpecStatus,
     sexp: []const u8,
@@ -104,6 +106,8 @@ fn writeSpecJson(
     name: []const u8,
     title: []const u8,
 ) BuildError!void {
+    const use_origin = try computeUseOrigin(alloc, p);
+    defer alloc.free(use_origin);
     try w.writeAll("{\"name\":");
     try pcb_layout_page.writeJsonStr(w, name);
     try w.writeAll(",\"title\":");
@@ -123,7 +127,7 @@ fn writeSpecJson(
     if (spec) |sp| {
         for (sp.unplaced, 0..) |ref, i| {
             if (i > 0) try w.writeAll(",");
-            try pcb_layout_page.writeJsonStr(w, ref);
+            try pcb_layout_page.writeJsonStr(w, specNameForRef(p, use_origin, ref));
         }
     }
     try w.writeAll("]}");
@@ -290,6 +294,16 @@ fn computeUseOrigin(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Al
 fn writeName(w: *std.Io.Writer, p: optimizer.Placement, use_origin: []const bool, pi: usize) BuildError!void {
     const nm = if (pi < use_origin.len and use_origin[pi]) p.instances[pi].origin_key else p.parts[pi].ref_des;
     try w.print("\"{s}\"", .{nm});
+}
+
+/// The spec name for a diag ref-des (diag lists carry ref-des, the spec
+/// speaks origin names where unique) — unknown refs pass through unchanged.
+fn specNameForRef(p: optimizer.Placement, use_origin: []const bool, ref: []const u8) []const u8 {
+    for (p.parts, 0..) |part, pi| {
+        if (!std.mem.eql(u8, part.ref_des, ref)) continue;
+        return if (pi < use_origin.len and use_origin[pi]) p.instances[pi].origin_key else ref;
+    }
+    return ref;
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
