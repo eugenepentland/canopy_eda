@@ -1331,14 +1331,34 @@ fn resolvePlacement(
     arena: std.mem.Allocator,
     block: *const DesignBlock,
     instances: []const export_kicad.FlatInstance,
+    nets: []const FlatNet,
+    parts: []const Part,
 ) std.mem.Allocator.Error!?ResolvedPlacement {
     const spec = block.placement;
     if (!spec.present) return null;
     const anchor = resolvePart(instances, spec.anchor) orelse return null;
+
+    // Claim explicit refs + switches up front so a `(net …)` rule never grabs a
+    // part the author placed by name (rules only sweep the leftovers).
+    const claimed = try arena.alloc(bool, instances.len);
+    @memset(claimed, false);
+    claimed[anchor] = true;
+    for (spec.sides) |s| for (s.items) |it| {
+        if (it.net != null) continue;
+        if (resolvePart(instances, it.ref)) |pi| claimed[pi] = true;
+    };
+    for (spec.switches) |sw| {
+        if (resolvePart(instances, sw.ref)) |pi| claimed[pi] = true;
+    }
+
     var sides: std.ArrayListUnmanaged(SpecSide) = .empty;
     for (spec.sides) |s| {
         var items: std.ArrayListUnmanaged(SpecItem) = .empty;
         for (s.items) |it| {
+            if (it.net) |rule_net| {
+                try expandNetRule(arena, &items, claimed, instances, nets, parts, rule_net);
+                continue;
+            }
             const pi = resolvePart(instances, it.ref) orelse continue;
             try items.append(arena, .{ .part = pi, .rot = it.rot });
         }
@@ -1357,6 +1377,51 @@ fn resolvePlacement(
         .refine = spec.refine,
         .centered = spec.centered,
     };
+}
+
+/// Expand a `(net "VIN")` side rule: append every not-yet-claimed part with a
+/// pad on the named net (matched case-insensitively, full name or `/`-leaf),
+/// smallest courtyard first — the HF cap lands nearest the IC, the bulk caps
+/// trail outward, mirroring `orderMembers`' criticality proxy. Claims as it
+/// matches, so later rules and sides never double-place a part.
+fn expandNetRule(
+    arena: std.mem.Allocator,
+    items: *std.ArrayListUnmanaged(SpecItem),
+    claimed: []bool,
+    instances: []const export_kicad.FlatInstance,
+    nets: []const FlatNet,
+    parts: []const Part,
+    rule_net: []const u8,
+) std.mem.Allocator.Error!void {
+    var matched: std.ArrayListUnmanaged(usize) = .empty;
+    for (nets) |net| {
+        if (!netNameMatches(net.name, rule_net)) continue;
+        for (net.pins) |pin| {
+            for (instances, 0..) |inst, pi| {
+                if (!std.mem.eql(u8, inst.ref_des, pin.ref_des)) continue;
+                if (claimed[pi]) break;
+                claimed[pi] = true;
+                try matched.append(arena, pi);
+                break;
+            }
+        }
+    }
+    std.sort.insertion(usize, matched.items, parts, partAreaLess);
+    for (matched.items) |pi| try items.append(arena, .{ .part = pi, .rot = null });
+}
+
+fn partAreaLess(parts: []const Part, a: usize, b: usize) bool {
+    return parts[a].hw * parts[a].hh < parts[b].hw * parts[b].hh;
+}
+
+/// Case-insensitive net-name match against the full flattened name or its
+/// sub-block leaf (`buck/VIN` matches a `(net "VIN")` rule).
+fn netNameMatches(name: []const u8, rule: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(name, rule)) return true;
+    if (std.mem.lastIndexOfScalar(u8, name, '/')) |i| {
+        return std.ascii.eqlIgnoreCase(name[i + 1 ..], rule);
+    }
+    return false;
 }
 
 /// Gap (mm) below the board where parts the spec didn't list are staged.
@@ -1727,8 +1792,31 @@ fn autofillUnlisted(
         if (veto and sweep_filled.items.len > 0) {
             const rc = routedCount(arena, parts, nets);
             if (rc < baseline) {
+                // One of this sweep's fills blocked a routed net. Back the whole
+                // sweep out, then salvage: re-fill one part at a time with a
+                // per-part route check, so only the true culprit stays staged.
+                // (The sweep-level check exists for speed; this slower path only
+                // runs when a sweep actually regresses.)
                 restorePoses(parts, sweep_poses);
                 for (sweep_filled.items) |i| staged[i] = true;
+                for (sweep_filled.items) |i| {
+                    const anchors = try autofillAnchors(arena, parts, nets, staged, i);
+                    if (anchors.len == 0) continue;
+                    const p = &parts[i];
+                    const sx = p.x;
+                    const sy = p.y;
+                    const sr = p.rot;
+                    if (!autofillOne(parts, anchors, i)) continue;
+                    const rc2 = routedCount(arena, parts, nets);
+                    if (rc2 < baseline) {
+                        p.x = sx;
+                        p.y = sy;
+                        p.rot = sr;
+                    } else {
+                        baseline = rc2;
+                        staged[i] = false;
+                    }
+                }
                 break;
             }
             baseline = rc;
@@ -2639,7 +2727,7 @@ fn prepare(
     g_route_gap = @max(0.0, params.route_gap);
     // Lower any agent-authored `(placement …)` floorplan and reset the per-solve
     // diagnostics the PCB-layout JSON reads back (active iff a spec resolved).
-    const placement = try resolvePlacement(arena, block, instances);
+    const placement = try resolvePlacement(arena, block, instances, nets, parts);
     g_placement_diag = .{ .active = placement != null };
     return .{ .parts = parts, .idx_of = idx_of, .instances = instances, .nets = nets, .built = built, .priority = priority, .lowered = lowered, .placement = placement };
 }
@@ -6122,6 +6210,40 @@ test "packSpec docks sides around the anchor IC and stages unlisted parts" {
     try testing.expectEqualStrings("C9", g_placement_diag.unplaced[0]);
     // No courtyards overlap.
     try testing.expect(!anyOverlap(&parts));
+}
+
+// spec: placement/optimizer - (net "NAME") side rules expand to unclaimed parts on the net
+test "expandNetRule claims net members smallest-first, skipping explicit refs" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    const parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 3, .hh = 3, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1.6, .hh = 0.8, .pads = &.{}, .fallback = true }, // bulk (big)
+        .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.3, .pads = &.{}, .fallback = true }, // HF (small)
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.3, .pads = &.{}, .fallback = true },
+    };
+    const instances = [_]export_kicad.FlatInstance{
+        .{ .ref_des = "U1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "C1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "C2", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "R1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+    };
+    const vin_pins = [_]export_kicad.FlatPin{
+        .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" },
+        .{ .ref_des = "C2", .pin = "1" }, .{ .ref_des = "R1", .pin = "1" },
+    };
+    const nets = [_]FlatNet{.{ .name = "pwr/VIN", .pins = &vin_pins }};
+    const claimed = try arena.alloc(bool, instances.len);
+    @memset(claimed, false);
+    claimed[0] = true; // anchor
+    claimed[3] = true; // R1 explicitly placed elsewhere
+    var items: std.ArrayListUnmanaged(SpecItem) = .empty;
+    // Leaf + case-insensitive match: the rule says "vin", the net is "pwr/VIN".
+    try expandNetRule(arena, &items, claimed, &instances, &nets, &parts, "vin");
+    try testing.expectEqual(@as(usize, 2), items.items.len);
+    try testing.expectEqual(@as(usize, 2), items.items[0].part); // C2: smallest first
+    try testing.expectEqual(@as(usize, 1), items.items[1].part); // C1: bulk trails
 }
 
 // spec: placement/optimizer - spec auto-fill pulls unlisted parts out of the staging band

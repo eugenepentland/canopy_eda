@@ -469,10 +469,13 @@ pub const scope_form_docs = blk: {
     } };
     t[@intFromEnum(ScopeForm.placement)] = .{ .scope = tl, .doc = .{
         .syntax = "(placement (anchor \"REF\") " ++
-            "(left|right|top|bottom \"REF\"… | (rot N \"REF\")…)… [(switch \"REF\" side)] [(no-refine)] [(centered)])",
+            "(left|right|top|bottom \"REF\"… | (rot N \"REF\") | (net \"NAME\")…)… [(switch \"REF\" side)] [(no-refine)] [(centered)])",
         .summary = "Agent-authored PCB floorplan: declare each part's side of the main IC, " ++
             "the order along that edge, and an optional rotation; the solver legalizes it to " ++
             "exact coordinates (the manual twin of the automatic switcher floorplan). " ++
+            "A (net \"VIN\") item is a membership rule: every not-otherwise-claimed part with " ++
+            "a pad on that net joins the side (smallest first) — survives part additions. " ++
+            "Parts no side lists are pin-hug auto-filled beside their placed pads. " ++
             "(no-refine) shows the raw constructive pack (flush, symmetric); " ++
             "(centered) centers every side on the IC instead of opposite its rail pad.",
     } };
