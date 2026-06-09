@@ -72,6 +72,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var constraint_acc: ConstraintAcc = .{};
     var layout_spec: env_mod.LayoutSpec = .{};
     var placement_spec: env_mod.PlacementSpec = .{};
+    var floorplan_spec: env_mod.PlacementSpec = .{};
     var derating: ?f64 = null;
     var kicad_pcb_path: ?[]const u8 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
@@ -167,6 +168,8 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             .placement_order => try parsePlacementOrder(self, form_children, &placement_orders),
             .constraints => try parseConstraints(self, form_children, &constraint_acc),
             .placement => placement_spec = try parsePlacement(self, form_children),
+            // Same grammar as (placement …); the items name sub-block slugs.
+            .floorplan => floorplan_spec = try parsePlacement(self, form_children),
             // Section-only forms are silently ignored at the top level —
             // a design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract.
@@ -209,6 +212,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .placement_order = placement_orders.toOwnedSlice(self.allocator) catch &.{},
         .constraints = constraint_acc.build(self.allocator),
         .placement = placement_spec,
+        .floorplan = floorplan_spec,
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -692,7 +696,7 @@ fn evalSection(
             // `processSharedSectionForm`; top-level-only forms are
             // silently ignored inside a section body.
             .status, .description, .note, .port, .protocol, .calc => {},
-            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function, .stub, .layout, .placement_order, .constraints, .placement => {},
+            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function, .stub, .layout, .placement_order, .constraints, .placement, .floorplan => {},
         }
     }
 
