@@ -600,7 +600,12 @@ threadlocal var g_route_gap: f64 = 0;
 const PlacementDiag = struct {
     active: bool = false,
     used_spec: bool = false,
+    /// Refs the spec didn't list that are still in the staging band (auto-fill
+    /// found no collision-free improving pose, or was gated off).
     unplaced: []const []const u8 = &.{},
+    /// Refs the spec didn't list that `autofillUnlisted` placed automatically —
+    /// usable positions, but the agent should know the spec doesn't pin them.
+    auto_filled: []const []const u8 = &.{},
 };
 threadlocal var g_placement_diag: PlacementDiag = .{};
 
@@ -640,6 +645,11 @@ fn runPlacement(
     if (!params.ignore_placement) {
         if (prep.placement) |rp| {
             if (try packSpec(arena, parts, &prep.idx_of, nets, built, rp)) {
+                // Pin-hug auto-fill: parts the spec didn't list leave the staging
+                // band for the best collision-free spot near their pins (authored
+                // parts never move). Runs even under `(no-refine)` — it only
+                // touches unlisted parts, so the authored pack stays deterministic.
+                try autofillUnlisted(arena, parts, &prep.idx_of, nets, built.loops);
                 // Post-pack refinement (skipped by a `(no-refine)` marker, so the raw
                 // constructive pack can be compared): a cheap surrogate local tuck (no
                 // routing) that squeezes each cap toward its pin without unspooling the
@@ -1635,6 +1645,300 @@ fn packSpec(
     g_placement_diag.used_spec = true;
     g_placement_diag.unplaced = try unplaced.toOwnedSlice(arena);
     return true;
+}
+
+/// Auto-fill cost guard: staged-part counts beyond this keep the band (each
+/// fill is a windowed scan; two dozen covers any real module).
+const AUTOFILL_MAX: usize = 24;
+/// Re-sweep the fills until none improves: placing one part gives the parts
+/// that wire to it (and only it) their anchors, so chains fill over sweeps.
+const AUTOFILL_SWEEPS: usize = 3;
+/// Routed-veto gate: above this part count, skip the per-fill re-route check
+/// (matches the routedLoops gate — routing large boards per move is too slow).
+const AUTOFILL_VETO_MAX: usize = 48;
+/// Search window margin (mm) beyond the anchor targets' bounding box.
+const AUTOFILL_MARGIN_MM: f64 = 6.0;
+/// Window cap (grid cells per axis) — bounds the scan on pathological boards.
+const RELOCATE_MAX_CELLS: i64 = 120;
+/// Coarse stride (grid cells) for the first scan pass: sample the window every
+/// N cells, then refine at full resolution around the coarse best.
+const COARSE_STRIDE: i64 = 2;
+/// Ground anchors pull weakly — the return is a via to the plane, not a trace
+/// to one specific pad, so any nearby GND pad serves.
+const AUTOFILL_GND_W: f64 = 0.25;
+
+/// Place every part the `(placement …)` spec didn't list ("pin-hug" auto-fill):
+/// instead of leaving them in the staging band below the board, move each to
+/// the collision-free pose nearest the *already-placed* pads it wires to, while
+/// every authored part stays exactly where the spec put it. A partial spec thus
+/// yields a usable board: the author pins the structure they care about, the
+/// solver fills in the rest.
+///
+/// Candidates are scored against placed parts ONLY (`autofillAnchors`): two
+/// staged parts that share a net (a feedback R + its C) would otherwise anchor
+/// each other inside the band and never leave — scoring against the placed set
+/// breaks the coupling, and makes each candidate O(anchors) instead of a full-
+/// board objective pass. A part whose nets touch only staged parts waits a
+/// sweep until a partner lands. Each kept move is re-routed and reverted if it
+/// would drop a net (gated on board size). Parts that find no spot stay in the
+/// band and remain `unplaced`; filled parts move to `auto_filled` in the diag.
+fn autofillUnlisted(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    idx_of: *std.StringHashMap(usize),
+    nets: []const FlatNet,
+    loops: []const Loop,
+) std.mem.Allocator.Error!void {
+    const staged_refs = g_placement_diag.unplaced;
+    if (staged_refs.len == 0 or staged_refs.len > AUTOFILL_MAX) return;
+
+    var idxs: std.ArrayListUnmanaged(usize) = .empty;
+    for (staged_refs) |ref| {
+        if (idx_of.get(ref)) |i| try idxs.append(arena, i);
+    }
+    // Most-constrained first: loop-bearing caps must reach their hub pins, and
+    // big parts need contiguous room — both go before small free placements so
+    // late arrivals only have small holes left to fill.
+    std.sort.insertion(usize, idxs.items, SortByLoopThenArea{ .parts = parts, .loops = loops }, SortByLoopThenArea.lessThan);
+
+    const staged = try arena.alloc(bool, parts.len);
+    @memset(staged, false);
+    for (idxs.items) |i| staged[i] = true;
+
+    // Routed veto per SWEEP, not per fill: one maze route per sweep (≤4 total
+    // with the baseline) instead of one per part — if a sweep's fills cost a
+    // routed net, the whole sweep is backed out and filling stops there.
+    const veto = parts.len <= AUTOFILL_VETO_MAX;
+    var baseline = if (veto) routedCount(arena, parts, nets) else 0;
+    var sweep: usize = 0;
+    while (sweep < AUTOFILL_SWEEPS) : (sweep += 1) {
+        var improved = false;
+        const sweep_poses = try capturePoses(arena, parts);
+        var sweep_filled: std.ArrayListUnmanaged(usize) = .empty;
+        for (idxs.items) |i| {
+            if (!staged[i]) continue; // already filled in an earlier sweep
+            const anchors = try autofillAnchors(arena, parts, nets, staged, i);
+            if (anchors.len == 0) continue; // wires only to staged parts — wait a sweep
+            if (!autofillOne(parts, anchors, i)) continue;
+            staged[i] = false;
+            try sweep_filled.append(arena, i);
+            improved = true;
+        }
+        if (veto and sweep_filled.items.len > 0) {
+            const rc = routedCount(arena, parts, nets);
+            if (rc < baseline) {
+                restorePoses(parts, sweep_poses);
+                for (sweep_filled.items) |i| staged[i] = true;
+                break;
+            }
+            baseline = rc;
+        }
+        if (!improved) break;
+    }
+
+    var filled: std.ArrayListUnmanaged([]const u8) = .empty;
+    var remaining: std.ArrayListUnmanaged([]const u8) = .empty;
+    var any_filled = false;
+    for (idxs.items) |i| {
+        if (!staged[i]) {
+            try filled.append(arena, parts[i].ref_des);
+            any_filled = true;
+        } else {
+            try remaining.append(arena, parts[i].ref_des);
+        }
+    }
+    if (any_filled) {
+        snapToGrid(parts);
+        legalizeOnGrid(parts);
+    }
+    g_placement_diag.auto_filled = try filled.toOwnedSlice(arena);
+    g_placement_diag.unplaced = try remaining.toOwnedSlice(arena);
+}
+
+/// Auto-fill order: loop-bearing parts first, then larger courtyards first.
+const SortByLoopThenArea = struct {
+    parts: []const Part,
+    loops: []const Loop,
+
+    fn hasLoop(self: SortByLoopThenArea, i: usize) bool {
+        for (self.loops) |L| {
+            if (L.cap == i) return true;
+        }
+        return false;
+    }
+    fn lessThan(self: SortByLoopThenArea, a: usize, b: usize) bool {
+        const la = self.hasLoop(a);
+        const lb = self.hasLoop(b);
+        if (la != lb) return la;
+        return self.parts[a].hw * self.parts[a].hh > self.parts[b].hw * self.parts[b].hh;
+    }
+};
+
+/// One pad of the part being filled, paired with the world positions of every
+/// already-placed pad on the same net. The fill cost takes the min over
+/// `targets` per pad, so a multi-pad net (GND) pulls toward whichever placed
+/// pad is closest to the candidate pose.
+const PadAnchor = struct {
+    lx: f64,
+    ly: f64,
+    w: f64,
+    targets: []const [2]f64,
+};
+
+/// Build staged part `i`'s anchor list against the placed set: for each of its
+/// pads' nets, the world positions of that net's pads on non-staged parts.
+/// Empty when the part wires only to other staged parts (wait a sweep).
+fn autofillAnchors(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    nets: []const FlatNet,
+    staged: []const bool,
+    i: usize,
+) std.mem.Allocator.Error![]PadAnchor {
+    var out: std.ArrayListUnmanaged(PadAnchor) = .empty;
+    const me = parts[i];
+    for (nets) |net| {
+        for (net.pins) |pin| {
+            if (!std.mem.eql(u8, pin.ref_des, me.ref_des)) continue;
+            const pad = padByNumber(me, pin.pin) orelse continue;
+            var targets: std.ArrayListUnmanaged([2]f64) = .empty;
+            for (net.pins) |op| {
+                if (std.mem.eql(u8, op.ref_des, me.ref_des)) continue;
+                const j = indexOfRef(parts, op.ref_des) orelse continue;
+                if (staged[j]) continue;
+                const opad = padByNumber(parts[j], op.pin) orelse continue;
+                const wp = worldPt(parts[j], opad.x, opad.y);
+                try targets.append(arena, .{ wp.x, wp.y });
+            }
+            if (targets.items.len == 0) continue;
+            try out.append(arena, .{
+                .lx = pad.x,
+                .ly = pad.y,
+                .w = if (isGroundName(net.name)) AUTOFILL_GND_W else 1.0,
+                .targets = try targets.toOwnedSlice(arena),
+            });
+        }
+    }
+    return out.toOwnedSlice(arena);
+}
+
+/// Anchor cost of part `i`'s current pose: each anchored pad's weighted
+/// distance to its nearest placed counterpart.
+fn anchorCost(parts: []const Part, anchors: []const PadAnchor, i: usize) f64 {
+    const p = parts[i];
+    var sum: f64 = 0;
+    for (anchors) |a| {
+        const wp = worldPt(p, a.lx, a.ly);
+        var best = std.math.floatMax(f64);
+        for (a.targets) |t| {
+            const d = std.math.hypot(wp.x - t[0], wp.y - t[1]);
+            if (d < best) best = d;
+        }
+        sum += a.w * best;
+    }
+    return sum;
+}
+
+/// Move staged part `i` to the collision-free (position × rotation) with the
+/// lowest anchor cost, scanning a window around the anchor targets' bounding
+/// box coarse-to-fine. Returns true if an improving pose was found.
+fn autofillOne(parts: []Part, anchors: []const PadAnchor, i: usize) bool {
+    // Window: the targets' bounding box + margin, as cell offsets from here.
+    var minx: f64 = std.math.inf(f64);
+    var miny: f64 = std.math.inf(f64);
+    var maxx: f64 = -std.math.inf(f64);
+    var maxy: f64 = -std.math.inf(f64);
+    for (anchors) |a| for (a.targets) |t| {
+        minx = @min(minx, t[0]);
+        miny = @min(miny, t[1]);
+        maxx = @max(maxx, t[0]);
+        maxy = @max(maxy, t[1]);
+    };
+    const p = &parts[i];
+    const ox = p.x;
+    const oy = p.y;
+    const m = AUTOFILL_MARGIN_MM + effHw(p.*) + effHh(p.*);
+    const lo_x = @max(-RELOCATE_MAX_CELLS, cellOffset(minx - m - ox));
+    const hi_x = @min(RELOCATE_MAX_CELLS, cellOffset(maxx + m - ox));
+    const lo_y = @max(-RELOCATE_MAX_CELLS, cellOffset(miny - m - oy));
+    const hi_y = @min(RELOCATE_MAX_CELLS, cellOffset(maxy + m - oy));
+
+    var best = anchorCost(parts, anchors, i);
+    var bx = ox;
+    var by = oy;
+    var br = p.rot;
+    var moved = false;
+
+    // Coarse pass: every COARSE_STRIDE cells over the window.
+    for (ROT_CAND) |r| {
+        var dy: i64 = lo_y;
+        while (dy <= hi_y) : (dy += COARSE_STRIDE) {
+            var dx: i64 = lo_x;
+            while (dx <= hi_x) : (dx += COARSE_STRIDE) {
+                p.rot = r;
+                p.x = ox + @as(f64, @floatFromInt(dx)) * GRID_MM;
+                p.y = oy + @as(f64, @floatFromInt(dy)) * GRID_MM;
+                if (overlapsAny(parts, p)) continue;
+                const c = anchorCost(parts, anchors, i);
+                if (c < best - 1e-9) {
+                    best = c;
+                    bx = p.x;
+                    by = p.y;
+                    br = r;
+                    moved = true;
+                }
+            }
+        }
+    }
+
+    // Fine pass: full resolution in a ±COARSE_STRIDE box around the coarse best.
+    const cx = cellOffset(bx - ox);
+    const cy = cellOffset(by - oy);
+    for (ROT_CAND) |r| {
+        var dy: i64 = @max(lo_y, cy - COARSE_STRIDE);
+        while (dy <= @min(hi_y, cy + COARSE_STRIDE)) : (dy += 1) {
+            var dx: i64 = @max(lo_x, cx - COARSE_STRIDE);
+            while (dx <= @min(hi_x, cx + COARSE_STRIDE)) : (dx += 1) {
+                p.rot = r;
+                p.x = ox + @as(f64, @floatFromInt(dx)) * GRID_MM;
+                p.y = oy + @as(f64, @floatFromInt(dy)) * GRID_MM;
+                if (overlapsAny(parts, p)) continue;
+                const c = anchorCost(parts, anchors, i);
+                if (c < best - 1e-9) {
+                    best = c;
+                    bx = p.x;
+                    by = p.y;
+                    br = r;
+                    moved = true;
+                }
+            }
+        }
+    }
+    p.x = bx;
+    p.y = by;
+    p.rot = br;
+    return moved;
+}
+
+/// `parts[i].pads` entry with the given pad number, or null.
+fn padByNumber(p: Part, number: []const u8) ?geometry.Pad {
+    for (p.pads) |pad| {
+        if (std.mem.eql(u8, pad.number, number)) return pad;
+    }
+    return null;
+}
+
+/// Index of the part with this exact ref-des, or null.
+fn indexOfRef(parts: []const Part, ref: []const u8) ?usize {
+    for (parts, 0..) |p, j| {
+        if (std.mem.eql(u8, p.ref_des, ref)) return j;
+    }
+    return null;
+}
+
+/// Round a millimetre offset to the nearest grid-cell count.
+fn cellOffset(mm: f64) i64 {
+    return @intFromFloat(@round(mm / GRID_MM));
 }
 
 /// Snapshot every part's pose — the strict/overlap retry in `solve` keeps the
@@ -5817,6 +6121,50 @@ test "packSpec docks sides around the anchor IC and stages unlisted parts" {
     try testing.expectEqual(@as(usize, 1), g_placement_diag.unplaced.len);
     try testing.expectEqualStrings("C9", g_placement_diag.unplaced[0]);
     // No courtyards overlap.
+    try testing.expect(!anyOverlap(&parts));
+}
+
+// spec: placement/optimizer - spec auto-fill pulls unlisted parts out of the staging band
+test "autofillUnlisted places a staged part beside its net" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    var hub_pads = [_]geometry.Pad{
+        .{ .number = "1", .x = -2.5, .y = 0, .w = 0.8, .h = 0.8 },
+        .{ .number = "2", .x = 2.5, .y = 0, .w = 0.8, .h = 0.8 },
+    };
+    var cap_pads = [_]geometry.Pad{
+        .{ .number = "1", .x = -0.5, .y = 0, .w = 0.5, .h = 0.5 },
+        .{ .number = "2", .x = 0.5, .y = 0, .w = 0.5, .h = 0.5 },
+    };
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 3, .hh = 3, .pads = &hub_pads, .fallback = true },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &cap_pads, .fallback = true },
+        .{ .ref_des = "C9", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &cap_pads, .fallback = true }, // unlisted
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("U1", 0);
+    try idx_of.put("C1", 1);
+    try idx_of.put("C9", 2);
+    const vin_pins = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "C9", .pin = "1" } };
+    const nets = [_]FlatNet{.{ .name = "VIN", .pins = &vin_pins }};
+    const left = [_]SpecItem{.{ .part = 1 }};
+    const sides = [_]SpecSide{.{ .edge = .left, .items = &left }};
+    const rp = ResolvedPlacement{ .anchor = 0, .sides = &sides, .switches = &.{} };
+    g_placement_diag = .{ .active = true };
+    defer g_placement_diag = .{};
+    var springs = [_]Spring{};
+    var loops = [_]Loop{};
+    const built = Built{ .springs = &springs, .loops = &loops };
+    try testing.expect(try packSpec(arena, &parts, &idx_of, &nets, built, rp));
+    // Staged below the board before the fill…
+    try testing.expect(parts[2].y > parts[0].y + parts[0].hh);
+    try autofillUnlisted(arena, &parts, &idx_of, &nets, built.loops);
+    // …auto-filled beside its net afterwards: off the band, reported as filled.
+    try testing.expectEqual(@as(usize, 1), g_placement_diag.auto_filled.len);
+    try testing.expectEqualStrings("C9", g_placement_diag.auto_filled[0]);
+    try testing.expectEqual(@as(usize, 0), g_placement_diag.unplaced.len);
+    try testing.expect(parts[2].y < parts[0].y + parts[0].hh + STAGE_GAP_MM);
     try testing.expect(!anyOverlap(&parts));
 }
 

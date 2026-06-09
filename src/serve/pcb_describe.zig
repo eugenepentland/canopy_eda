@@ -109,7 +109,12 @@ pub fn writeDescribeJson(
     }
     var unplaced = std.StringHashMap(void).init(alloc);
     defer unplaced.deinit();
-    if (spec) |sp| for (sp.unplaced) |ref| try unplaced.put(ref, {});
+    var auto_filled = std.StringHashMap(void).init(alloc);
+    defer auto_filled.deinit();
+    if (spec) |sp| {
+        for (sp.unplaced) |ref| try unplaced.put(ref, {});
+        for (sp.auto_filled) |ref| try auto_filled.put(ref, {});
+    }
 
     const anchor = anchorIndex(p.parts);
 
@@ -132,6 +137,11 @@ pub fn writeDescribeJson(
     if (spec) |sp| {
         try w.print(",\"placement\":{{\"source\":\"{s}\",\"unplaced\":[", .{if (sp.used_spec) "spec" else "force"});
         for (sp.unplaced, 0..) |ref, i| {
+            if (i > 0) try w.writeAll(",");
+            try pcb_layout_page.writeJsonStr(w, ref);
+        }
+        try w.writeAll("],\"auto_filled\":[");
+        for (sp.auto_filled, 0..) |ref, i| {
             if (i > 0) try w.writeAll(",");
             try pcb_layout_page.writeJsonStr(w, ref);
         }
@@ -165,6 +175,7 @@ pub fn writeDescribeJson(
             }
         }
         if (unplaced.contains(part.ref_des)) try w.writeAll(",\"unplaced\":true");
+        if (auto_filled.contains(part.ref_des)) try w.writeAll(",\"auto_filled\":true");
         try writePartNets(w, alloc, &pad_net, part);
         try w.writeAll("}");
     }
