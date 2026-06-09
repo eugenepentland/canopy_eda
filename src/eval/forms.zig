@@ -121,6 +121,7 @@ pub const ScopeForm = enum {
     placement_order,
     constraints,
     placement,
+    floorplan,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -162,6 +163,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "constraints", .constraints },
     .{ "module", .constraints },
     .{ "placement", .placement },
+    .{ "floorplan", .floorplan },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -478,6 +480,17 @@ pub const scope_form_docs = blk: {
             "Parts no side lists are pin-hug auto-filled beside their placed pads. " ++
             "(no-refine) shows the raw constructive pack (flush, symmetric); " ++
             "(centered) centers every side on the IC instead of opposite its rail pad.",
+    } };
+    t[@intFromEnum(ScopeForm.floorplan)] = .{ .scope = tl, .doc = .{
+        .syntax = "(floorplan (anchor \"SUB\") " ++
+            "(left|right|top|bottom \"SUB\"… | (rot N \"SUB\")…)…)",
+        .summary = "Design-level macro floorplan: the same side/order grammar as (placement …) " ++
+            "but the names are (sub-block …) slugs. Each listed sub-block is solved as its own " ++
+            "board (its module-level (placement …) spec composes) and docked as a RIGID macro " ++
+            "on its side of the anchor sub-block, in listed order; (rot N \"SUB\") turns the " ++
+            "whole macro in quarter steps. Top-level parts outside any sub-block are pin-hug " ++
+            "auto-filled beside their placed pads; sub-blocks the floorplan doesn't list stay " ++
+            "in the staging band and are reported unplaced.",
     } };
     break :blk t;
 };

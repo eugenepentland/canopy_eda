@@ -395,6 +395,7 @@ src/placement/geometry.zig::SilkLine struct_
 src/placement/geometry.zig::load fn
 src/placement/optimizer.zig::Breakdown struct_
 src/placement/optimizer.zig::CompactMode enum_
+src/placement/optimizer.zig::Edge enum_
 src/placement/optimizer.zig::GRID_MM value
 src/placement/optimizer.zig::Link struct_
 src/placement/optimizer.zig::Loop struct_
@@ -410,6 +411,7 @@ src/placement/optimizer.zig::RefPose struct_
 src/placement/optimizer.zig::Score struct_
 src/placement/optimizer.zig::SeedMode enum_
 src/placement/optimizer.zig::Stub struct_
+src/placement/optimizer.zig::faceRotation fn
 src/placement/optimizer.zig::gridPlace fn
 src/placement/optimizer.zig::loopNh fn
 src/placement/optimizer.zig::perPartBlame fn
@@ -804,8 +806,12 @@ src/serve/passwords.zig::set fn
 src/serve/passwords.zig::verify fn
 src/serve/pcb_describe.zig::DescribeError value
 src/serve/pcb_describe.zig::Side enum_
+src/serve/pcb_describe.zig::aabbHalf fn
+src/serve/pcb_describe.zig::anchorIndex fn
 src/serve/pcb_describe.zig::describeDesign fn
+src/serve/pcb_describe.zig::originOf fn
 src/serve/pcb_describe.zig::pcbDescribeApi fn
+src/serve/pcb_describe.zig::sideOf fn
 src/serve/pcb_describe.zig::writeDescribeJson fn
 src/serve/pcb_layout_page.zig::HandlerError value
 src/serve/pcb_layout_page.zig::PngError value
@@ -837,6 +843,11 @@ src/serve/pcb_layout_page.zig::viasForPoses fn
 src/serve/pcb_layout_page.zig::writeJsonStr fn
 src/serve/pdf_viewer.zig::HandlerError value
 src/serve/pdf_viewer.zig::pdfViewerPage fn
+src/serve/placement_spec.zig::BuildError value
+src/serve/placement_spec.zig::ExportedSpec struct_
+src/serve/placement_spec.zig::buildSpecSexp fn
+src/serve/placement_spec.zig::exportSpec fn
+src/serve/placement_spec.zig::placementSpecApi fn
 src/serve/plugin_tokens.zig::Token struct_
 src/serve/plugin_tokens.zig::mint fn
 src/serve/plugin_tokens.zig::validate fn

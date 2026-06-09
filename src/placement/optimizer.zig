@@ -643,6 +643,14 @@ fn runPlacement(
     // source of truth, so it drives placement when present. Falls back to the force
     // pipeline (recording it in the diagnostics) on any failure it can't resolve.
     if (!params.ignore_placement) {
+        // Design-level `(floorplan …)`: sub-blocks dock as rigid macros around the
+        // anchor block. Takes precedence over a part-level `(placement …)` — the
+        // macro structure subsumes it (module-level specs still compose inside
+        // each nested sub-block solve).
+        if (prep.floorplan) |fc| {
+            if (try packFloorplan(arena, parts, prep, nets, built, fc, params)) return;
+            g_placement_diag.used_spec = false;
+        }
         if (prep.placement) |rp| {
             if (try packSpec(arena, parts, &prep.idx_of, nets, built, rp)) {
                 // Pin-hug auto-fill: parts the spec didn't list leave the staging
@@ -707,7 +715,7 @@ fn runForce(
 // shape it doesn't handle so the caller falls back to the force pipeline.
 
 /// Which IC edge a packed block docks against.
-const Edge = enum { left, right, top, bottom };
+pub const Edge = enum { left, right, top, bottom };
 
 /// A packed cluster: its ordered members, their chosen rotations, their block-
 /// local centre offsets, the block half-extents, and the IC edge it docks to.
@@ -860,7 +868,7 @@ fn snapEdge(d: Pt) ?Edge {
 /// Rotation (of {0,90,180,270}) that turns a cap's power pad toward the IC, so the
 /// hot loop is short. Driven by the real loop power pad; (0,0) ⇒ rot 0 (resistor /
 /// no loop). `inward` is the unit vector from the block toward the IC.
-fn faceRotation(pwr: PadRect, edge: Edge) f64 {
+pub fn faceRotation(pwr: PadRect, edge: Edge) f64 {
     const inward: Pt = switch (edge) {
         .left => .{ .x = 1, .y = 0 },
         .right => .{ .x = -1, .y = 0 },
@@ -2046,6 +2054,423 @@ fn restorePoses(parts: []Part, poses: []const Pose) void {
     }
 }
 
+// ── (floorplan …) design-level macro pack ───────────────────────────────────
+
+/// Gap (mm) between docked sub-block macros — inter-module routing room.
+const FLOORPLAN_GAP_MM: f64 = 1.0;
+
+/// A `(floorplan …)` form waiting to be packed: the authored spec plus the
+/// design block and project dir `packFloorplan` needs to solve each
+/// `(sub-block …)` as its own board. Slugs resolve at pack time.
+const FloorplanCtx = struct {
+    spec: env.PlacementSpec,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+};
+
+/// One rigid macro scheduled for docking: the design-part indices of its
+/// members, their poses relative to the macro origin (a grid point, so a
+/// grid-snapped dock keeps every member on grid), and its tight bbox.
+const Macro = struct {
+    members: []usize,
+    lx: []f64,
+    ly: []f64,
+    rots: []f64,
+    bminx: f64 = 0,
+    bminy: f64 = 0,
+    bmaxx: f64 = 0,
+    bmaxy: f64 = 0,
+
+    fn width(m: Macro) f64 {
+        return m.bmaxx - m.bminx;
+    }
+    fn height(m: Macro) f64 {
+        return m.bmaxy - m.bminy;
+    }
+};
+
+/// A docked macro: its origin pose plus the dock axis it slides on when a
+/// corner clash needs resolving.
+const PlacedMacro = struct {
+    m: Macro,
+    cx: f64,
+    cy: f64,
+    edge: Edge,
+
+    fn minx(p: PlacedMacro) f64 {
+        return p.cx + p.m.bminx;
+    }
+    fn maxx(p: PlacedMacro) f64 {
+        return p.cx + p.m.bmaxx;
+    }
+    fn miny(p: PlacedMacro) f64 {
+        return p.cy + p.m.bminy;
+    }
+    fn maxy(p: PlacedMacro) f64 {
+        return p.cy + p.m.bmaxy;
+    }
+};
+
+/// The threadlocal state `prepare` publishes for a solve — snapshotted and
+/// restored around the nested per-sub-block solves a floorplan pack runs, so
+/// the parent solve's own constraints/diagnostics survive. Progress is muted
+/// during the nested solves (their frames would garble the live-regen view).
+const SolveState = struct {
+    lowered: Lowered,
+    group_force: f64,
+    zone_force: f64,
+    loop_force_scale: []const f64,
+    collide_shrink: f64,
+    route_gap: f64,
+    diag: PlacementDiag,
+    progress: ?ProgressSink,
+
+    fn snapshot() SolveState {
+        return .{
+            .lowered = g_lowered,
+            .group_force = g_group_force,
+            .zone_force = g_zone_force,
+            .loop_force_scale = g_loop_force_scale,
+            .collide_shrink = g_collide_shrink,
+            .route_gap = g_route_gap,
+            .diag = g_placement_diag,
+            .progress = g_progress,
+        };
+    }
+
+    fn restore(s: SolveState) void {
+        g_lowered = s.lowered;
+        g_group_force = s.group_force;
+        g_zone_force = s.zone_force;
+        g_loop_force_scale = s.loop_force_scale;
+        g_collide_shrink = s.collide_shrink;
+        g_route_gap = s.route_gap;
+        g_placement_diag = s.diag;
+        g_progress = s.progress;
+    }
+};
+
+/// Index of the named `(sub-block …)` in `subs`, or null.
+fn subIndexOf(subs: []const env.SubBlock, slug: []const u8) ?usize {
+    for (subs, 0..) |sub, i| {
+        if (std.mem.eql(u8, sub.name, slug)) return i;
+    }
+    return null;
+}
+
+/// Round to the placement grid (member offsets are grid multiples, so a
+/// grid-rounded origin keeps every member on grid).
+fn gridRound(v: f64) f64 {
+    return @round(v / GRID_MM) * GRID_MM;
+}
+
+/// Normalize raw member poses into a rigid macro: apply the quarter-step
+/// whole-macro rotation about the centroid, re-origin on a grid point, and
+/// measure the tight bbox from the members' rotated courtyards. The pose
+/// slices are mutated in place and adopted by the returned macro.
+fn finishMacro(
+    members: []usize,
+    xs: []f64,
+    ys: []f64,
+    rots: []f64,
+    parts: []const Part,
+    rot_override: ?f64,
+) Macro {
+    if (rot_override) |r0| {
+        const r = @mod(@round(r0 / 90.0) * 90.0, 360.0);
+        if (r != 0) {
+            var rcx: f64 = 0;
+            var rcy: f64 = 0;
+            for (xs) |x| rcx += x;
+            for (ys) |y| rcy += y;
+            rcx /= @as(f64, @floatFromInt(xs.len));
+            rcy /= @as(f64, @floatFromInt(ys.len));
+            const a = r * std.math.pi / 180.0;
+            // Exact quarter-turn sines keep grid-multiple offsets on grid.
+            const c = @round(@cos(a));
+            const s = @round(@sin(a));
+            for (xs, ys, rots) |*x, *y, *rt| {
+                const dx = x.* - rcx;
+                const dy = y.* - rcy;
+                x.* = rcx + dx * c - dy * s;
+                y.* = rcy + dx * s + dy * c;
+                rt.* = @mod(rt.* + r, 360.0);
+            }
+        }
+    }
+    const ox = gridRound(xs[0]);
+    const oy = gridRound(ys[0]);
+    var m = Macro{
+        .members = members,
+        .lx = xs,
+        .ly = ys,
+        .rots = rots,
+        .bminx = std.math.inf(f64),
+        .bminy = std.math.inf(f64),
+        .bmaxx = -std.math.inf(f64),
+        .bmaxy = -std.math.inf(f64),
+    };
+    for (members, 0..) |pi, k| {
+        xs[k] = gridRound(xs[k] - ox);
+        ys[k] = gridRound(ys[k] - oy);
+        // Keepout-aware extents (escape-stub corridors included): the dock and
+        // clash tests must respect the same boxes `anyOverlap` checks, or a
+        // member's breakout corridor pokes into the neighbouring macro.
+        var tmp = parts[pi];
+        tmp.rot = rots[k];
+        const kb = keepBoxOf(tmp);
+        m.bminx = @min(m.bminx, xs[k] + kb.cxo - kb.hw);
+        m.bmaxx = @max(m.bmaxx, xs[k] + kb.cxo + kb.hw);
+        m.bminy = @min(m.bminy, ys[k] + kb.cyo - kb.hh);
+        m.bmaxy = @max(m.bmaxy, ys[k] + kb.cyo + kb.hh);
+    }
+    return m;
+}
+
+/// Solve one `(sub-block …)` as its own board and lift the result into a rigid
+/// macro of design-part indices (flattened ref = `slug/<module ref>`). The
+/// nested solve trashes the thread's solve state — the caller brackets the
+/// whole macro-building phase with a `SolveState` snapshot. Null when no
+/// member maps into the flattened design.
+fn buildSubMacro(
+    arena: std.mem.Allocator,
+    sub: env.SubBlock,
+    rot_override: ?f64,
+    prep: *Prepared,
+    fc: FloorplanCtx,
+    params: Params,
+) std.mem.Allocator.Error!?Macro {
+    const sp = try solve(arena, sub.block, fc.project_dir, null, params, .place);
+    // Design-side lookup: refs compose as `slug/<module ref>` when the flatten
+    // kept the module's numbering, but a design-level renumber shifts it
+    // (design `buck/U2` vs module `U1`) — fall back to the renumber-proof
+    // origin-key match. Both fallback sides are restricted to first-level
+    // children (no nested `/`), where module-local origin keys are unique.
+    var origin_idx = std.StringHashMap(usize).init(arena);
+    const prefix = try std.fmt.allocPrint(arena, "{s}/", .{sub.name});
+    for (prep.instances, 0..) |inst, i| {
+        if (!std.mem.startsWith(u8, inst.ref_des, prefix)) continue;
+        if (inst.origin_key.len == 0) continue;
+        if (std.mem.indexOfScalar(u8, inst.ref_des[prefix.len..], '/') != null) continue;
+        try origin_idx.put(inst.origin_key, i);
+    }
+    var members: std.ArrayListUnmanaged(usize) = .empty;
+    var xs: std.ArrayListUnmanaged(f64) = .empty;
+    var ys: std.ArrayListUnmanaged(f64) = .empty;
+    var rots: std.ArrayListUnmanaged(f64) = .empty;
+    for (sp.parts, 0..) |part, j| {
+        const ref = try std.fmt.allocPrint(arena, "{s}/{s}", .{ sub.name, part.ref_des });
+        const key = if (j < sp.instances.len and sp.instances[j].origin_key.len > 0)
+            sp.instances[j].origin_key
+        else
+            part.ref_des;
+        const top_level = std.mem.indexOfScalar(u8, part.ref_des, '/') == null;
+        const pi = prep.idx_of.get(ref) orelse
+            (if (top_level) origin_idx.get(key) else null) orelse continue;
+        try members.append(arena, pi);
+        try xs.append(arena, part.x);
+        try ys.append(arena, part.y);
+        try rots.append(arena, part.rot);
+    }
+    if (members.items.len == 0) return null;
+    return finishMacro(members.items, xs.items, ys.items, rots.items, prep.parts, rot_override);
+}
+
+/// A floorplan item that names a part instead of a sub-block slug (a top-level
+/// connector, mounting hole …): a one-member macro at its footprint extents.
+fn buildPartMacro(arena: std.mem.Allocator, pi: usize, rot_override: ?f64, parts: []const Part) std.mem.Allocator.Error!Macro {
+    const members = try arena.alloc(usize, 1);
+    members[0] = pi;
+    const xs = try arena.alloc(f64, 1);
+    const ys = try arena.alloc(f64, 1);
+    const rots = try arena.alloc(f64, 1);
+    xs[0] = 0;
+    ys[0] = 0;
+    rots[0] = parts[pi].rot;
+    return finishMacro(members, xs, ys, rots, parts, rot_override);
+}
+
+/// Dock one side's macros in authored order: a single lane flush to the anchor
+/// macro's facing bbox edge (+ routing gap), the row/column centred on the
+/// anchor's centre. Origin poses are returned via the out slices.
+fn dockMacroSide(a: Macro, ms: []const Macro, edge: Edge, cx: []f64, cy: []f64) void {
+    const vertical = (edge == .left or edge == .right);
+    var total: f64 = 0;
+    for (ms) |m| total += if (vertical) m.height() else m.width();
+    total += @as(f64, @floatFromInt(ms.len -| 1)) * FLOORPLAN_GAP_MM;
+    const acx = (a.bminx + a.bmaxx) / 2;
+    const acy = (a.bminy + a.bmaxy) / 2;
+    var cursor = (if (vertical) acy else acx) - total / 2;
+    for (ms, 0..) |m, i| {
+        switch (edge) {
+            .left => {
+                cx[i] = a.bminx - FLOORPLAN_GAP_MM - m.bmaxx;
+                cy[i] = cursor - m.bminy;
+            },
+            .right => {
+                cx[i] = a.bmaxx + FLOORPLAN_GAP_MM - m.bminx;
+                cy[i] = cursor - m.bminy;
+            },
+            .top => {
+                cy[i] = a.bminy - FLOORPLAN_GAP_MM - m.bmaxy;
+                cx[i] = cursor - m.bminx;
+            },
+            .bottom => {
+                cy[i] = a.bmaxy + FLOORPLAN_GAP_MM - m.bminy;
+                cx[i] = cursor - m.bminx;
+            },
+        }
+        cursor += (if (vertical) m.height() else m.width()) + FLOORPLAN_GAP_MM;
+    }
+}
+
+/// Push later-docked macros outward along their own dock axis until no two
+/// macros' gap-inflated bboxes intersect — a tall left column meeting a wide
+/// top row at the corner is the typical clash. Each push strictly increases
+/// the offender's distance from the anchor, so the sweeps converge. The
+/// anchor (index 0) never moves.
+fn resolveMacroClash(placed: []PlacedMacro) void {
+    var sweep: usize = 0;
+    while (sweep < 16) : (sweep += 1) {
+        var moved = false;
+        for (placed, 0..) |*p, i| {
+            if (i == 0) continue;
+            for (placed[0..i]) |q| {
+                const px = @min(p.maxx(), q.maxx()) - @max(p.minx(), q.minx()) + FLOORPLAN_GAP_MM;
+                const py = @min(p.maxy(), q.maxy()) - @max(p.miny(), q.miny()) + FLOORPLAN_GAP_MM;
+                if (px <= 1e-9 or py <= 1e-9) continue;
+                moved = true;
+                switch (p.edge) {
+                    .left => p.cx -= px,
+                    .right => p.cx += px,
+                    .top => p.cy -= py,
+                    .bottom => p.cy += py,
+                }
+            }
+        }
+        if (!moved) break;
+    }
+}
+
+/// Realize a `(floorplan …)`: solve each listed sub-block as its own board
+/// (its module-level `(placement …)` spec composes), dock the results as
+/// RIGID macros around the anchor in authored order, pin-hug-fill loose
+/// top-level parts, and stage anything unlisted (reported `unplaced`).
+/// Items may also name individual top-level parts (a connector on an edge).
+/// Returns false when the anchor resolves to nothing (force fallback).
+fn packFloorplan(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    built: Built,
+    fc: FloorplanCtx,
+    params: Params,
+) std.mem.Allocator.Error!bool {
+    const subs = fc.block.sub_blocks;
+
+    // Build every macro first: the nested solves overwrite the thread's solve
+    // state, so the snapshot brackets the whole phase.
+    const saved = SolveState.snapshot();
+    g_progress = null;
+    const claimed_sub = try arena.alloc(bool, subs.len);
+    @memset(claimed_sub, false);
+
+    var anchor_macro: ?Macro = null;
+    if (subIndexOf(subs, fc.spec.anchor)) |si| {
+        claimed_sub[si] = true;
+        anchor_macro = try buildSubMacro(arena, subs[si], null, prep, fc, params);
+    } else if (resolvePart(prep.instances, fc.spec.anchor)) |pi| {
+        anchor_macro = try buildPartMacro(arena, pi, null, prep.parts);
+    }
+
+    var side_macros: [4]std.ArrayListUnmanaged(Macro) = .{ .empty, .empty, .empty, .empty };
+    for (fc.spec.sides) |s| {
+        const ei: usize = @intFromEnum(edgeFromSide(s.side));
+        for (s.items) |it| {
+            if (it.net != null) continue; // membership rules are (placement …)-only
+            var mac: ?Macro = null;
+            if (subIndexOf(subs, it.ref)) |si| {
+                if (!claimed_sub[si]) {
+                    claimed_sub[si] = true;
+                    mac = try buildSubMacro(arena, subs[si], it.rot, prep, fc, params);
+                }
+            } else if (resolvePart(prep.instances, it.ref)) |pi| {
+                mac = try buildPartMacro(arena, pi, it.rot, prep.parts);
+            }
+            if (mac) |m| try side_macros[ei].append(arena, m);
+        }
+    }
+    saved.restore();
+    const am = anchor_macro orelse return false;
+
+    // Anchor at the origin, dock each side, resolve corner clashes.
+    var placed: std.ArrayListUnmanaged(PlacedMacro) = .empty;
+    try placed.append(arena, .{ .m = am, .cx = 0, .cy = 0, .edge = .left });
+    for (&side_macros, 0..) |*list, ei| {
+        if (list.items.len == 0) continue;
+        const cxs = try arena.alloc(f64, list.items.len);
+        const cys = try arena.alloc(f64, list.items.len);
+        dockMacroSide(am, list.items, @enumFromInt(ei), cxs, cys);
+        for (list.items, 0..) |m, i| {
+            try placed.append(arena, .{ .m = m, .cx = cxs[i], .cy = cys[i], .edge = @enumFromInt(ei) });
+        }
+    }
+    resolveMacroClash(placed.items);
+
+    const is_placed = try arena.alloc(bool, parts.len);
+    @memset(is_placed, false);
+    var band_base = -std.math.inf(f64);
+    for (placed.items) |pm| {
+        const cx = gridRound(pm.cx);
+        const cy = gridRound(pm.cy);
+        for (pm.m.members, 0..) |pi, k| {
+            parts[pi].x = cx + pm.m.lx[k];
+            parts[pi].y = cy + pm.m.ly[k];
+            parts[pi].rot = pm.m.rots[k];
+            is_placed[pi] = true;
+            const pb = keepBoxOf(parts[pi]);
+            band_base = @max(band_base, parts[pi].y + pb.cyo + pb.hh);
+        }
+    }
+
+    // Stage everything else below the board: loose top-level parts (the
+    // pin-hug fill pulls those out) and unlisted sub-blocks' parts (kept
+    // staged deliberately — list the slug to dock them).
+    const band_y = band_base + STAGE_GAP_MM;
+    var cursor: f64 = 0;
+    var loose: std.ArrayListUnmanaged([]const u8) = .empty;
+    var staged_blocks: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (parts, 0..) |*p, i| {
+        if (is_placed[i]) continue;
+        p.rot = 0;
+        // Pack on keepout extents — the band must satisfy the same boxes
+        // `anyOverlap` checks (an escape-stub corridor is wider than the
+        // courtyard, and a staged hub usually carries several).
+        const kb = keepBoxOf(p.*);
+        p.x = cursor + (kb.hw - kb.cxo);
+        p.y = band_y + (kb.hh - kb.cyo);
+        cursor += 2 * kb.hw + GRID_MM;
+        if (std.mem.indexOfScalar(u8, p.ref_des, '/') == null) {
+            try loose.append(arena, p.ref_des);
+        } else {
+            try staged_blocks.append(arena, p.ref_des);
+        }
+    }
+    if (anyOverlap(parts)) return false;
+
+    g_placement_diag.used_spec = true;
+    g_placement_diag.unplaced = try loose.toOwnedSlice(arena);
+    try autofillUnlisted(arena, parts, &prep.idx_of, nets, built.loops);
+    if (staged_blocks.items.len > 0) {
+        var all_unplaced: std.ArrayListUnmanaged([]const u8) = .empty;
+        try all_unplaced.appendSlice(arena, g_placement_diag.unplaced);
+        try all_unplaced.appendSlice(arena, staged_blocks.items);
+        g_placement_diag.unplaced = try all_unplaced.toOwnedSlice(arena);
+    }
+    return true;
+}
+
 /// Build a placement for `block`. When `cached` covers every part, its poses
 /// are applied directly (no optimization — fast); otherwise the optimizer runs
 /// and `Placement.generated` is set so the caller can persist a fresh cache.
@@ -2295,6 +2720,9 @@ const Prepared = struct {
     /// its anchor IC resolved. Null ⇒ no manual spec; `runPlacement` then uses the
     /// force / zone-pack path. `packSpec` realizes it.
     placement: ?ResolvedPlacement = null,
+    /// The design's `(floorplan …)` macro spec plus what `packFloorplan` needs to
+    /// solve each sub-block as its own board. Null ⇒ none authored.
+    floorplan: ?FloorplanCtx = null,
 };
 
 /// Resolve a design-local net name (what a constraint author writes — "VIN",
@@ -2728,8 +3156,12 @@ fn prepare(
     // Lower any agent-authored `(placement …)` floorplan and reset the per-solve
     // diagnostics the PCB-layout JSON reads back (active iff a spec resolved).
     const placement = try resolvePlacement(arena, block, instances, nets, parts);
-    g_placement_diag = .{ .active = placement != null };
-    return .{ .parts = parts, .idx_of = idx_of, .instances = instances, .nets = nets, .built = built, .priority = priority, .lowered = lowered, .placement = placement };
+    const floorplan: ?FloorplanCtx = if (block.floorplan.present)
+        .{ .spec = block.floorplan, .block = block, .project_dir = project_dir }
+    else
+        null;
+    g_placement_diag = .{ .active = placement != null or floorplan != null };
+    return .{ .parts = parts, .idx_of = idx_of, .instances = instances, .nets = nets, .built = built, .priority = priority, .lowered = lowered, .placement = placement, .floorplan = floorplan };
 }
 
 /// Decompose the objective for already-placed parts, surfaced term-by-term for
@@ -6432,4 +6864,68 @@ test "packSpec wraps a long side into multiple depth lanes" {
     }
     try testing.expect(distinct >= 2);
     try testing.expect(!anyOverlap(&parts));
+}
+
+// spec: placement/optimizer - (floorplan …) docks sub-block macros around the anchor block
+test "dockMacroSide stacks macros flush to the anchor edge with routing gap" {
+    var members_a = [_]usize{0};
+    var z = [_]f64{0};
+    var z2 = [_]f64{0};
+    var z3 = [_]f64{0};
+    const anchor = Macro{ .members = &members_a, .lx = &z, .ly = &z2, .rots = &z3, .bminx = -5, .bminy = -5, .bmaxx = 5, .bmaxy = 5 };
+    var members_b = [_]usize{1};
+    var members_c = [_]usize{2};
+    const m0 = Macro{ .members = &members_b, .lx = &z, .ly = &z2, .rots = &z3, .bminx = -2, .bminy = -2, .bmaxx = 2, .bmaxy = 2 };
+    const m1 = Macro{ .members = &members_c, .lx = &z, .ly = &z2, .rots = &z3, .bminx = -2, .bminy = -2, .bmaxx = 2, .bmaxy = 2 };
+    var cxs = [_]f64{ 0, 0 };
+    var cys = [_]f64{ 0, 0 };
+    dockMacroSide(anchor, &[_]Macro{ m0, m1 }, .left, &cxs, &cys);
+    // Right bbox edges land one routing gap left of the anchor's left edge.
+    try testing.expectApproxEqAbs(@as(f64, -5 - FLOORPLAN_GAP_MM - 2), cxs[0], 1e-9);
+    try testing.expectApproxEqAbs(cxs[0], cxs[1], 1e-9);
+    // The stack (4 + gap + 4 tall) is centred on the anchor centreline.
+    try testing.expectApproxEqAbs(@as(f64, -(4.0 + FLOORPLAN_GAP_MM) / 2), cys[0], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, (4.0 + FLOORPLAN_GAP_MM) / 2), cys[1], 1e-9);
+}
+
+// spec: placement/optimizer - floorplan corner clashes push the later macro out along its dock axis
+test "resolveMacroClash separates a left column from a wide top row" {
+    var members_a = [_]usize{0};
+    var z = [_]f64{0};
+    var z2 = [_]f64{0};
+    var z3 = [_]f64{0};
+    const box = Macro{ .members = &members_a, .lx = &z, .ly = &z2, .rots = &z3, .bminx = -4, .bminy = -4, .bmaxx = 4, .bmaxy = 4 };
+    const wide = Macro{ .members = &members_a, .lx = &z, .ly = &z2, .rots = &z3, .bminx = -12, .bminy = -2, .bmaxx = 12, .bmaxy = 2 };
+    var placed = [_]PlacedMacro{
+        .{ .m = box, .cx = 0, .cy = 0, .edge = .left },
+        .{ .m = box, .cx = -9, .cy = 0, .edge = .left },
+        // Wide top row overlapping the left column's corner.
+        .{ .m = wide, .cx = 0, .cy = -7, .edge = .top },
+    };
+    resolveMacroClash(&placed);
+    // The top row slid up until its gap-inflated box clears the column.
+    try testing.expect(placed[2].maxy() + FLOORPLAN_GAP_MM <= placed[1].miny() + 1e-9);
+    // The anchor and the column kept their dock positions.
+    try testing.expectApproxEqAbs(@as(f64, 0), placed[0].cx, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, -9), placed[1].cx, 1e-9);
+}
+
+// spec: placement/optimizer - floorplan (rot N "SUB") turns the whole macro in quarter steps
+test "finishMacro rotates members rigidly about the centroid" {
+    const pads = [_]geometry.Pad{};
+    const parts = [_]Part{
+        .{ .ref_des = "A", .kind = .passive, .hw = 1, .hh = 0.5, .pads = &pads, .fallback = false },
+        .{ .ref_des = "B", .kind = .passive, .hw = 1, .hh = 0.5, .pads = &pads, .fallback = false },
+    };
+    var members = [_]usize{ 0, 1 };
+    var xs = [_]f64{ 0, 4 };
+    var ys = [_]f64{ 0, 0 };
+    var rots = [_]f64{ 0, 0 };
+    const m = finishMacro(&members, &xs, &ys, &rots, &parts, 90);
+    // The pair was horizontal; after a quarter turn it's vertical and each
+    // member's extents swapped (rot 90), so the bbox is 1 wide per member.
+    try testing.expectApproxEqAbs(@as(f64, 90), m.rots[0], 1e-9);
+    try testing.expectApproxEqAbs(m.lx[0], m.lx[1], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 4), @abs(m.ly[1] - m.ly[0]), 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 1.0), m.bmaxx - m.bminx, 1e-9);
 }

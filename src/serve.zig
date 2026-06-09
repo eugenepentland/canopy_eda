@@ -25,6 +25,7 @@ const footprint_preview = @import("serve/footprint_preview.zig");
 const schematic_page = @import("serve/schematic_page.zig");
 const pcb_layout_page = @import("serve/pcb_layout_page.zig");
 const pcb_describe = @import("serve/pcb_describe.zig");
+const placement_spec = @import("serve/placement_spec.zig");
 const modules_page = @import("serve/modules.zig");
 const auth = @import("serve/auth.zig");
 const mcp = @import("serve/mcp.zig");
@@ -301,6 +302,7 @@ pub fn serve(
     router.get("/api/pcb-layout/:name", pcb_layout_page.pcbLayoutJsonApi, .{});
     router.get("/api/pcb-png/:name", pcb_layout_page.pcbPngApi, .{});
     router.get("/api/pcb-describe/:name", pcb_describe.pcbDescribeApi, .{});
+    router.get("/api/placement-spec/:name", placement_spec.placementSpecApi, .{});
     router.post("/api/pcb-layouts/:name", pcb_layout_page.saveNamedLayoutApi, .{});
     router.post("/api/pcb-layouts/:name/delete", pcb_layout_page.deleteNamedLayoutApi, .{});
     router.post("/api/pcb-layouts/:name/default", pcb_layout_page.setDefaultLayoutApi, .{});

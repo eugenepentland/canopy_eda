@@ -519,7 +519,8 @@ pub fn solveForRequest(
     else
         block;
 
-    const spec_drives = opts.sub == null and opts.layout == null and !opts.placement_off and eff_block.placement.present;
+    const spec_drives = opts.sub == null and opts.layout == null and !opts.placement_off and
+        (eff_block.placement.present or eff_block.floorplan.present);
     const cached = if (opts.sub != null) null else if (opts.layout) |ln|
         readLayoutPoses(alloc, project_dir, name, ln)
     else if (opts.regen or spec_drives) null else readAutoPoses(alloc, project_dir, name);

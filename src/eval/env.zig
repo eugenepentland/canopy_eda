@@ -1162,6 +1162,12 @@ pub const DesignBlock = struct {
     /// optimizer's `packSpec` realizes it into coordinates (force/zone-pack
     /// fallback on failure). `present=false` ⇒ none authored.
     placement: PlacementSpec = .{},
+    /// Design-level macro floorplan from a top-level `(floorplan …)` form: the
+    /// same grammar as `(placement …)` but the names are `(sub-block …)` slugs.
+    /// Each listed sub-block is solved as its own board (its module-level
+    /// `(placement …)` spec composes) and docked as a rigid macro on its side
+    /// of the anchor sub-block. `present=false` ⇒ none authored.
+    floorplan: PlacementSpec = .{},
 };
 
 /// A rail's electrical role, declared by `(power-rail <label> (role …) (net …))`.
