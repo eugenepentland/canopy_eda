@@ -27,6 +27,7 @@ const component_search = @import("component_search.zig");
 const digikey = @import("digikey.zig");
 const upload = @import("upload.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
+const render_pcb_png = @import("../render_pcb_png.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const NAME_FIELD_PREFIX = "{\"name\":";
@@ -586,8 +587,10 @@ fn toolGetPcbImage(allocator: std.mem.Allocator, project_dir: []const u8, args_v
         .dims = optionalBool(args_val, "dims") orelse false,
         .grid = optionalBool(args_val, "grid") orelse false,
         .compare = optionalString(args_val, "compare"),
+        .pins = jsonStrList(allocator, args_val, "pins"),
     };
     if (optionalU64(args_val, "width")) |w| opts.width = @intCast(@min(w, @as(u64, 4000)));
+    if (optionalString(args_val, "names")) |s| opts.names = std.meta.stringToEnum(render_pcb_png.NameMode, s);
 
     const png_bytes = pcb_layout_page.renderDesignPng(allocator, project_dir, name, opts) catch |e| {
         try out.writer(allocator).print("error rendering pcb layout: {s}", .{@errorName(e)});
