@@ -707,7 +707,7 @@ fn runForce(
 // shape it doesn't handle so the caller falls back to the force pipeline.
 
 /// Which IC edge a packed block docks against.
-const Edge = enum { left, right, top, bottom };
+pub const Edge = enum { left, right, top, bottom };
 
 /// A packed cluster: its ordered members, their chosen rotations, their block-
 /// local centre offsets, the block half-extents, and the IC edge it docks to.
@@ -860,7 +860,7 @@ fn snapEdge(d: Pt) ?Edge {
 /// Rotation (of {0,90,180,270}) that turns a cap's power pad toward the IC, so the
 /// hot loop is short. Driven by the real loop power pad; (0,0) ⇒ rot 0 (resistor /
 /// no loop). `inward` is the unit vector from the block toward the IC.
-fn faceRotation(pwr: PadRect, edge: Edge) f64 {
+pub fn faceRotation(pwr: PadRect, edge: Edge) f64 {
     const inward: Pt = switch (edge) {
         .left => .{ .x = 1, .y = 0 },
         .right => .{ .x = -1, .y = 0 },

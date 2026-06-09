@@ -308,7 +308,7 @@ fn world(part: optimizer.Part, lx: f64, ly: f64) [2]f64 {
 }
 
 /// World-axis-aligned half-extents of `part`'s rotated courtyard (AABB).
-fn aabbHalf(part: optimizer.Part) [2]f64 {
+pub fn aabbHalf(part: optimizer.Part) [2]f64 {
     const a = part.rot * std.math.pi / 180.0;
     const c = @abs(@cos(a));
     const s = @abs(@sin(a));
@@ -318,7 +318,7 @@ fn aabbHalf(part: optimizer.Part) [2]f64 {
 /// Which side of a reference box a point offset (dx,dy) falls on, normalized
 /// by the combined half-extents so a wide flat board doesn't read everything
 /// as left/right. `center` only when well inside the combined box.
-fn sideOf(dx: f64, dy: f64, a_half: [2]f64, b_half: [2]f64) Side {
+pub fn sideOf(dx: f64, dy: f64, a_half: [2]f64, b_half: [2]f64) Side {
     const nx = dx / @max(a_half[0] + b_half[0], 0.001);
     const ny = dy / @max(a_half[1] + b_half[1], 0.001);
     if (@max(@abs(nx), @abs(ny)) < 0.45) return .center;
@@ -345,7 +345,7 @@ fn rectGap(a: optimizer.Part, b: optimizer.Part) f64 {
 
 /// Index of the anchor part facts are oriented around: the largest hub by
 /// courtyard area (the IC the live-regen view pins), else null.
-fn anchorIndex(parts: []const optimizer.Part) ?usize {
+pub fn anchorIndex(parts: []const optimizer.Part) ?usize {
     var best: ?usize = null;
     var best_area: f64 = 0;
     for (parts, 0..) |part, i| {
@@ -361,7 +361,7 @@ fn anchorIndex(parts: []const optimizer.Part) ?usize {
 
 /// The part's stable module-local origin name (what a `(placement …)` spec
 /// calls it), falling back to the ref-des when none was recorded.
-fn originOf(p: optimizer.Placement, pi: usize) []const u8 {
+pub fn originOf(p: optimizer.Placement, pi: usize) []const u8 {
     if (pi < p.instances.len and p.instances[pi].origin_key.len > 0) return p.instances[pi].origin_key;
     return p.parts[pi].ref_des;
 }
