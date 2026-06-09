@@ -473,6 +473,12 @@ pub const PngRequest = struct {
     grid: bool = false,
     /// Saved-layout name to diff the current placement against.
     compare: ?[]const u8 = null,
+    /// Part-name labelling (`?names=ref|origin|both`). Null = auto: origin
+    /// names when a `(placement …)` spec drives the solve (so the image speaks
+    /// the spec's vocabulary), ref-des otherwise.
+    names: ?render_pcb_png.NameMode = null,
+    /// Parts whose pads get net-name labels (`?pins=U13,C5`; "hubs" = all hubs).
+    pins: []const []const u8 = &.{},
 };
 
 /// Failures `renderDesignPng` surfaces; callers map these to an HTTP status or
@@ -529,6 +535,18 @@ pub fn renderDesignPng(
     else
         optimizer.solve(alloc, eff_block, project_dir, cached, png_params, .place)) catch return error.BuildFailed;
 
+    // `(placement …)` spec coverage from the solve just above (same thread).
+    // Only meaningful on the spec-driven path — saved layouts / grid renders
+    // would read a stale or inert diag.
+    const diag = optimizer.placementDiag();
+    const spec_status: ?render_pcb_png.SpecStatus = if (spec_drives and diag.active)
+        .{ .used_spec = diag.used_spec, .unplaced = diag.unplaced }
+    else
+        null;
+    // Auto name mode: a spec-driven image speaks the spec's vocabulary.
+    const name_mode = opts.names orelse
+        (if (spec_status != null) render_pcb_png.NameMode.origin else render_pcb_png.NameMode.ref);
+
     const route_params = router.RouteParams{};
     const routed: ?router.RouteResult = if (opts.route) (router.route(alloc, placement, route_params) catch null) else null;
     const violations: []const drc.Violation = if (routed) |r|
@@ -557,6 +575,9 @@ pub fn renderDesignPng(
         .dims = opts.dims,
         .grid = opts.grid,
         .compare = cmp_placement,
+        .names = name_mode,
+        .pin_refs = opts.pins,
+        .spec = spec_status,
     });
 }
 
@@ -570,6 +591,9 @@ pub fn renderDesignPng(
 ///   layout=<name>         render a specific saved layout (else the auto cache)
 ///   regen=1               force a fresh solve instead of the cache
 ///   sub=<slug>            scope to one sub-block (per-sub-block preview)
+///   names=ref|origin|both part labels: ref-des, spec origin name, or REF=ORIGIN
+///                         (default: origin when a (placement …) spec drives)
+///   pins=U13,C5           label these parts' pads with net names ("hubs" = all)
 ///
 /// Request-scoped allocation uses `req.arena` (freed after the response is sent;
 /// `res.body` stays valid until then) — `ctx.allocator` is the global page
@@ -617,6 +641,11 @@ pub fn pcbPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
         .dims = queryFlag(req, "dims"),
         .grid = queryFlag(req, "grid"),
         .compare = queryOpt(req, "compare"),
+        .names = blk: {
+            const v = queryOpt(req, "names") orelse break :blk null;
+            break :blk std.meta.stringToEnum(render_pcb_png.NameMode, v);
+        },
+        .pins = csvParam(arena, req, "pins"),
     };
     const png_bytes = renderDesignPng(arena, ctx.project_dir, name, opts) catch |e| {
         res.status = if (e == error.BlockNotFound or e == error.SubNotFound) 404 else 500;

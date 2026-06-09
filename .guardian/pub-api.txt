@@ -465,7 +465,9 @@ src/render_html.zig::setupRenderCtx fn
 src/render_json.zig::RenderCtx value
 src/render_json.zig::RenderError value
 src/render_json.zig::renderSceneGraph fn
+src/render_pcb_png.zig::NameMode enum_
 src/render_pcb_png.zig::Options struct_
+src/render_pcb_png.zig::SpecStatus struct_
 src/render_pcb_png.zig::render fn
 src/render_svg/branch.zig::drawBranchTreeLeft fn
 src/render_svg/branch.zig::drawBranchTreeRight fn

@@ -55,6 +55,21 @@ const HEADER_H: u32 = 46; // title + objective score line (+ focus/compare line)
 const LEGEND_H: u32 = 22;
 const DIM_A: f32 = 0.20; // alpha for de-emphasised elements in focus mode
 
+/// Which name labels parts: the flattened ref-des (`C150`), the stable
+/// module-local origin name a `(placement …)` spec is written in (`C_BOOT1`),
+/// or both (`C150=C_BOOT1`). Parts without an origin name fall back to ref.
+pub const NameMode = enum { ref, origin, both };
+
+/// Coverage of the `(placement …)` spec that drove this solve (from
+/// `optimizer.placementDiag()`): whether the constructive pack was used at all,
+/// and which parts the spec didn't list (staged in a band below the board).
+/// Rendered as a header status + red hatch so a fallback never silently passes
+/// for a real layout.
+pub const SpecStatus = struct {
+    used_spec: bool,
+    unplaced: []const []const u8,
+};
+
 /// Render options: output size, focus-mode highlight sets, optional routed
 /// copper / DRC overlay, and the caption.
 pub const Options = struct {
@@ -86,6 +101,14 @@ pub const Options = struct {
     /// A second placement to diff against: ghost outlines + movement arrows +
     /// a Δobjective in the score line.
     compare: ?optimizer.Placement = null,
+    /// Part-name labelling: ref-des, spec origin name, or both.
+    names: NameMode = .ref,
+    /// Label these parts' pads with their net names (case-insensitive ref-des,
+    /// sub-block leaf matched like `highlight_refs`; the token "hubs" labels
+    /// every hub). How an agent checks "is the FB divider at the FB pad".
+    pin_refs: []const []const u8 = &.{},
+    /// `(placement …)` spec coverage — header status + red hatch on unplaced.
+    spec: ?SpecStatus = null,
 };
 
 /// Render `p` to PNG bytes owned by `alloc`.
@@ -114,6 +137,14 @@ pub fn render(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options) p
     var hot_refs = std.StringHashMap(void).init(alloc);
     defer hot_refs.deinit();
     try buildHighlightSets(alloc, p, opts, &hot_nets, &hot_refs);
+
+    // Pad-label targets and spec-unplaced parts, both uppercased ref sets.
+    var pin_set = std.StringHashMap(void).init(alloc);
+    defer pin_set.deinit();
+    for (opts.pin_refs) |ref| try pin_set.put(try upper(alloc, ref), {});
+    var unplaced_set = std.StringHashMap(void).init(alloc);
+    defer unplaced_set.deinit();
+    if (opts.spec) |sp| for (sp.unplaced) |ref| try unplaced_set.put(try upper(alloc, ref), {});
 
     // ref|pad → full net name, so pads/airwires can resolve their net.
     var pad_net = std.StringHashMap([]const u8).init(alloc);
@@ -160,6 +191,8 @@ pub fn render(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options) p
         .opts = opts,
         .blame_norm = blame_norm,
         .cmp_idx = &cmp_idx,
+        .pin_set = &pin_set,
+        .unplaced_set = &unplaced_set,
     };
 
     if (opts.grid) ctx.drawGrid();
@@ -172,6 +205,7 @@ pub fn render(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options) p
     if (opts.routed) |r| ctx.drawRouted(r);
     ctx.drawViolations(opts.violations);
     ctx.drawLabels();
+    ctx.drawPinLabels();
     if (opts.blame) ctx.drawBlamePanel();
     ctx.drawHeader();
     ctx.drawLegend(opts.routed != null);
@@ -221,6 +255,10 @@ const Ctx = struct {
     blame_norm: []const f64,
     /// ref_des → index into `opts.compare.?.parts`; empty when no compare layout.
     cmp_idx: *std.StringHashMap(usize),
+    /// Uppercased `pin_refs` (pad-net-label targets); empty when none requested.
+    pin_set: *std.StringHashMap(void),
+    /// Uppercased refs the `(placement …)` spec left unplaced (staging band).
+    unplaced_set: *std.StringHashMap(void),
 
     fn xpx(self: *Ctx, mm: f64) f32 {
         return @floatCast((mm - self.minx + MARGIN_MM) * self.scale);
@@ -263,6 +301,31 @@ const Ctx = struct {
         }
         return false;
     }
+    /// True when `part`'s pads should carry net-name labels: its ref (or
+    /// sub-block leaf) is in `pin_refs`, or the "hubs" token selected all hubs.
+    fn pinLabeled(self: *Ctx, part: optimizer.Part) bool {
+        if (self.pin_set.count() == 0) return false;
+        if (part.kind == .hub and self.pin_set.contains("HUBS")) return true;
+        if (upperInSet(self.pin_set, part.ref_des)) return true;
+        if (std.mem.lastIndexOfScalar(u8, part.ref_des, '/')) |i| {
+            if (upperInSet(self.pin_set, part.ref_des[i + 1 ..])) return true;
+        }
+        return false;
+    }
+    fn isUnplaced(self: *Ctx, ref: []const u8) bool {
+        if (self.unplaced_set.count() == 0) return false;
+        return upperInSet(self.unplaced_set, ref);
+    }
+    /// The label `names` mode picks for part `pi`: ref-des, the spec's stable
+    /// origin name (fallback ref when a part has none), or `REF=ORIGIN`.
+    fn partLabel(self: *Ctx, pi: usize, buf: []u8) []const u8 {
+        const ref = self.p.parts[pi].ref_des;
+        if (self.opts.names == .ref) return ref;
+        const origin = if (pi < self.p.instances.len) self.p.instances[pi].origin_key else "";
+        if (origin.len == 0 or std.mem.eql(u8, origin, ref)) return ref;
+        if (self.opts.names == .origin) return origin;
+        return std.fmt.bufPrint(buf, "{s}={s}", .{ ref, origin }) catch ref;
+    }
     /// A part is active (full-strength) when not in focus mode, or when its ref
     /// is spotlighted, or it has a pad on a spotlighted net.
     fn partActive(self: *Ctx, part: optimizer.Part) bool {
@@ -294,6 +357,14 @@ const Ctx = struct {
             self.cv.strokePath(&court, .closed, self.outlineW(active), stroke, base_a);
             if (self.focus and active and (self.refHot(part.ref_des))) {
                 self.cv.strokePath(&court, .closed, self.outlineW(true) + self.pw(1.5), ACCENT, 0.9);
+            }
+            // A part the `(placement …)` spec left unplaced sits in a staging
+            // band — cross it out so it never reads as a deliberate placement.
+            if (self.isUnplaced(part.ref_des)) {
+                self.cv.fillPoly(&court, DRC_COL, 0.12);
+                self.cv.strokePath(&court, .closed, self.outlineW(true), DRC_COL, 0.9);
+                self.cv.line(court[0][0], court[0][1], court[2][0], court[2][1], self.pw(1.0), DRC_COL, 0.8, .butt);
+                self.cv.line(court[1][0], court[1][1], court[3][0], court[3][1], self.pw(1.0), DRC_COL, 0.8, .butt);
             }
             // Silk (footprint-local, rotates with the part).
             for (part.silk_lines) |sl| {
@@ -543,14 +614,46 @@ const Ctx = struct {
 
     fn drawLabels(self: *Ctx) void {
         const h = self.pw(9);
-        for (self.p.parts) |part| {
+        for (self.p.parts, 0..) |part, pi| {
             const active = self.partActive(part);
             if (self.focus and !active) continue;
             const eff_hh = if (isQuarter(part.rot)) part.hw else part.hh;
             const cx = self.xpx(part.x);
             const top = self.ypx(part.y) - self.len(eff_hh) - h - self.pw(2);
-            const col = if (self.focus and self.refHot(part.ref_des)) ACCENT else if (part.kind == .hub) HUB_STROKE else PASSIVE_STROKE;
-            self.cv.text(cx, top, part.ref_des, h, col, 1.0, .middle);
+            const col = if (self.isUnplaced(part.ref_des))
+                DRC_COL
+            else if (self.focus and self.refHot(part.ref_des))
+                ACCENT
+            else if (part.kind == .hub) HUB_STROKE else PASSIVE_STROKE;
+            var buf: [96]u8 = undefined;
+            self.cv.text(cx, top, self.partLabel(pi, &buf), h, col, 1.0, .middle);
+        }
+    }
+
+    /// Net-name labels on the pads of every `pin_refs`-selected part, dark on
+    /// the pad copper — how an agent reads pin functions (FB/SW/VIN) off the
+    /// image instead of guessing from pad geometry.
+    fn drawPinLabels(self: *Ctx) void {
+        if (self.pin_set.count() == 0) return;
+        for (self.p.parts) |part| {
+            if (!self.pinLabeled(part)) continue;
+            for (part.pads, 0..) |pad, pad_i| {
+                const net = self.netOf(part.ref_des, pad.number) orelse continue;
+                const c = self.lp(part, pad.x, pad.y);
+                // Cap the glyph height to the pad's smaller extent so labels on
+                // fine-pitch pads shrink instead of blanketing the neighbourhood.
+                const h = std.math.clamp(self.len(@min(pad.w, pad.h)) * 0.8, self.pw(4.0), self.pw(7.0));
+                const s = shortName(net);
+                // Stagger neighbouring labels vertically so adjacent same-row
+                // pads (a QFN edge) don't run their names together.
+                const stagger: f32 = if (pad_i % 2 == 0) -h * 0.7 else h * 0.7;
+                // Dark backing chip so the label survives overflowing a small
+                // pad onto the board (bright-on-dark everywhere).
+                const ty = c[1] - h / 2 + stagger;
+                const tw = raster.Canvas.textWidth(s, h);
+                self.cv.fillRect(c[0] - tw / 2 - self.pw(1), ty - self.pw(1), tw + self.pw(2), h + self.pw(2), BG, 0.55);
+                self.cv.text(c[0], ty, s, h, TEXT_COL, 1.0, .middle);
+            }
         }
     }
 
@@ -568,6 +671,20 @@ const Ctx = struct {
             .{ b.objective, b.hpwl, b.loop_nh, b.alignment, b.congestion },
         ) catch "";
         self.cv.text(pad, self.pw(20), score, self.pw(9), TEXT_DIM, 1.0, .start);
+        // Top-right: `(placement …)` spec coverage, so a fallback or a half-
+        // covered spec is impossible to mistake for a finished layout.
+        if (self.opts.spec) |sp| {
+            const xr = @as(f32, @floatFromInt(self.cv.w)) - pad;
+            if (!sp.used_spec) {
+                self.cv.text(xr, self.pw(3), "SPEC FELL BACK TO AUTO", self.pw(10), DRC_COL, 1.0, .end);
+            } else if (sp.unplaced.len > 0) {
+                var buf3: [48]u8 = undefined;
+                const s3 = std.fmt.bufPrint(&buf3, "SPEC: {d} UNPLACED (staged)", .{sp.unplaced.len}) catch "";
+                self.cv.text(xr, self.pw(3), s3, self.pw(10), DRC_COL, 1.0, .end);
+            } else {
+                self.cv.text(xr, self.pw(3), "SPEC: ALL PLACED", self.pw(10), GOOD_COL, 1.0, .end);
+            }
+        }
         // Third line: compare Δ if diffing, else the focus caption.
         if (self.opts.compare) |c| {
             var buf2: [64]u8 = undefined;
@@ -592,6 +709,9 @@ const Ctx = struct {
             x = self.legendItem(x, y, VIA_COL, "VIA");
         }
         if (self.focus) x = self.legendItem(x, y, ACCENT, "FOCUS");
+        if (self.opts.spec) |sp| {
+            if (sp.unplaced.len > 0) x = self.legendItem(x, y, DRC_COL, "UNPLACED");
+        }
     }
 
     fn legendItem(self: *Ctx, x: f32, y: f32, col: Rgb, label: []const u8) f32 {
@@ -728,6 +848,57 @@ test "render produces a PNG for a tiny placement" {
         .generated = true,
     };
     const png_bytes = try render(alloc, p, .{ .width = 600, .title = "test" });
+    defer alloc.free(png_bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x89, 0x50, 0x4E, 0x47 }, png_bytes[0..4]);
+}
+
+test "render with origin labels, pad net labels and spec status" {
+    const export_kicad = @import("export_kicad.zig");
+    // The renderer assumes an arena (production passes req.arena): the upper-
+    // cased highlight/pin/unplaced keys are never individually freed.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    var pads = [_]geometry.Pad{
+        .{ .number = "1", .x = -0.5, .y = 0, .w = 0.6, .h = 0.6 },
+        .{ .number = "2", .x = 0.5, .y = 0, .w = 0.6, .h = 0.6 },
+    };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 5, .y = 5 },
+        .{ .ref_des = "C150", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &pads, .fallback = false, .x = 9, .y = 5 },
+    };
+    const instances = [_]export_kicad.FlatInstance{
+        .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "", .properties = &.{}, .uuid = "", .origin_key = "U1" },
+        .{ .ref_des = "C150", .component = "cap", .value = "100nF", .footprint = "", .properties = &.{}, .uuid = "", .origin_key = "C_BOOT1" },
+    };
+    const net_pins = [_]export_kicad.FlatPin{
+        .{ .ref_des = "U1", .pin = "1" },
+        .{ .ref_des = "C150", .pin = "1" },
+    };
+    const nets = [_]export_kicad.FlatNet{.{ .name = "VIN", .pins = &net_pins }};
+    const p = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &instances,
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 12,
+        .maxy = 10,
+        .generated = true,
+    };
+    const unplaced = [_][]const u8{"C150"};
+    const pin_refs = [_][]const u8{"hubs"};
+    const png_bytes = try render(alloc, p, .{
+        .width = 600,
+        .title = "test",
+        .names = .both,
+        .pin_refs = &pin_refs,
+        .spec = .{ .used_spec = true, .unplaced = &unplaced },
+    });
     defer alloc.free(png_bytes);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x89, 0x50, 0x4E, 0x47 }, png_bytes[0..4]);
 }
