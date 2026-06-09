@@ -1042,9 +1042,13 @@ pub const PlacementSide = enum { left, right, top, bottom };
 /// One part in a `(placement …)` side list: the ref-des and an optional
 /// rotation override (degrees CCW). `null` ⇒ the solver picks the rotation that
 /// turns the part's power pad toward the IC (the loop-shortening default).
+/// A `(net "VIN")` item instead sets `net` — a membership RULE that expands to
+/// every not-otherwise-claimed part with a pad on that net (small parts first),
+/// so a spec needn't enumerate refs and survives parts being added to the rail.
 pub const PlacementItem = struct {
-    ref: []const u8,
+    ref: []const u8 = "",
     rot: ?f64 = null,
+    net: ?[]const u8 = null,
 };
 
 /// One `(left|right|top|bottom …)` side list of a `(placement …)` form: the

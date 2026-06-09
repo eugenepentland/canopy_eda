@@ -546,7 +546,7 @@ pub fn solveForRequest(
     // would read a stale or inert diag.
     const diag = optimizer.placementDiag();
     const spec_status: ?render_pcb_png.SpecStatus = if (spec_drives and diag.active)
-        .{ .used_spec = diag.used_spec, .unplaced = diag.unplaced }
+        .{ .used_spec = diag.used_spec, .unplaced = diag.unplaced, .auto_filled = diag.auto_filled }
     else
         null;
     return .{ .placement = placement, .spec_status = spec_status, .params = params, .title = eff_block.name, .block = eff_block };
@@ -812,6 +812,11 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
             if (pl.used_spec) "false" else "true",
         });
         for (pl.unplaced, 0..) |ref, i| {
+            if (i > 0) try w.writeAll(",");
+            try writeJsonStr(w, ref);
+        }
+        try w.writeAll("],\"auto_filled\":[");
+        for (pl.auto_filled, 0..) |ref, i| {
             if (i > 0) try w.writeAll(",");
             try writeJsonStr(w, ref);
         }

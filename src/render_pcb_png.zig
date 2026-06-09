@@ -68,6 +68,9 @@ pub const NameMode = enum { ref, origin, both };
 pub const SpecStatus = struct {
     used_spec: bool,
     unplaced: []const []const u8,
+    /// Spec-unlisted parts the pin-hug auto-fill placed — usable positions the
+    /// spec doesn't pin (drawn with an amber outline, not the red hatch).
+    auto_filled: []const []const u8 = &.{},
 };
 
 /// Render options: output size, focus-mode highlight sets, optional routed
@@ -144,7 +147,12 @@ pub fn render(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options) p
     for (opts.pin_refs) |ref| try pin_set.put(try upper(alloc, ref), {});
     var unplaced_set = std.StringHashMap(void).init(alloc);
     defer unplaced_set.deinit();
-    if (opts.spec) |sp| for (sp.unplaced) |ref| try unplaced_set.put(try upper(alloc, ref), {});
+    var autofill_set = std.StringHashMap(void).init(alloc);
+    defer autofill_set.deinit();
+    if (opts.spec) |sp| {
+        for (sp.unplaced) |ref| try unplaced_set.put(try upper(alloc, ref), {});
+        for (sp.auto_filled) |ref| try autofill_set.put(try upper(alloc, ref), {});
+    }
 
     // ref|pad → full net name, so pads/airwires can resolve their net.
     var pad_net = std.StringHashMap([]const u8).init(alloc);
@@ -193,6 +201,7 @@ pub fn render(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options) p
         .cmp_idx = &cmp_idx,
         .pin_set = &pin_set,
         .unplaced_set = &unplaced_set,
+        .autofill_set = &autofill_set,
     };
 
     if (opts.grid) ctx.drawGrid();
@@ -259,6 +268,8 @@ const Ctx = struct {
     pin_set: *std.StringHashMap(void),
     /// Uppercased refs the `(placement …)` spec left unplaced (staging band).
     unplaced_set: *std.StringHashMap(void),
+    /// Uppercased refs the pin-hug auto-fill placed (spec-unlisted, amber).
+    autofill_set: *std.StringHashMap(void),
 
     fn xpx(self: *Ctx, mm: f64) f32 {
         return @floatCast((mm - self.minx + MARGIN_MM) * self.scale);
@@ -316,6 +327,10 @@ const Ctx = struct {
         if (self.unplaced_set.count() == 0) return false;
         return upperInSet(self.unplaced_set, ref);
     }
+    fn isAutoFilled(self: *Ctx, ref: []const u8) bool {
+        if (self.autofill_set.count() == 0) return false;
+        return upperInSet(self.autofill_set, ref);
+    }
     /// The label `names` mode picks for part `pi`: ref-des, the spec's stable
     /// origin name (fallback ref when a part has none), or `REF=ORIGIN`.
     fn partLabel(self: *Ctx, pi: usize, buf: []u8) []const u8 {
@@ -365,6 +380,10 @@ const Ctx = struct {
                 self.cv.strokePath(&court, .closed, self.outlineW(true), DRC_COL, 0.9);
                 self.cv.line(court[0][0], court[0][1], court[2][0], court[2][1], self.pw(1.0), DRC_COL, 0.8, .butt);
                 self.cv.line(court[1][0], court[1][1], court[3][0], court[3][1], self.pw(1.0), DRC_COL, 0.8, .butt);
+            } else if (self.isAutoFilled(part.ref_des)) {
+                // Auto-filled: a usable position the spec doesn't pin — amber
+                // outline so the agent can tell authored from solver-chosen.
+                self.cv.strokePath(&court, .closed, self.outlineW(true), ACCENT, 0.75);
             }
             // Silk (footprint-local, rotates with the part).
             for (part.silk_lines) |sl| {
@@ -672,15 +691,25 @@ const Ctx = struct {
         ) catch "";
         self.cv.text(pad, self.pw(20), score, self.pw(9), TEXT_DIM, 1.0, .start);
         // Top-right: `(placement …)` spec coverage, so a fallback or a half-
-        // covered spec is impossible to mistake for a finished layout.
+        // covered spec is impossible to mistake for a finished layout. Auto-
+        // filled parts are usable but unpinned — amber, between red and green.
         if (self.opts.spec) |sp| {
             const xr = @as(f32, @floatFromInt(self.cv.w)) - pad;
             if (!sp.used_spec) {
                 self.cv.text(xr, self.pw(3), "SPEC FELL BACK TO AUTO", self.pw(10), DRC_COL, 1.0, .end);
             } else if (sp.unplaced.len > 0) {
-                var buf3: [48]u8 = undefined;
+                var buf3: [64]u8 = undefined;
                 const s3 = std.fmt.bufPrint(&buf3, "SPEC: {d} UNPLACED (staged)", .{sp.unplaced.len}) catch "";
                 self.cv.text(xr, self.pw(3), s3, self.pw(10), DRC_COL, 1.0, .end);
+                if (sp.auto_filled.len > 0) {
+                    var buf4: [48]u8 = undefined;
+                    const s4 = std.fmt.bufPrint(&buf4, "+ {d} AUTO-FILLED", .{sp.auto_filled.len}) catch "";
+                    self.cv.text(xr, self.pw(15), s4, self.pw(9), ACCENT, 1.0, .end);
+                }
+            } else if (sp.auto_filled.len > 0) {
+                var buf3: [64]u8 = undefined;
+                const s3 = std.fmt.bufPrint(&buf3, "SPEC + {d} AUTO-FILLED", .{sp.auto_filled.len}) catch "";
+                self.cv.text(xr, self.pw(3), s3, self.pw(10), ACCENT, 1.0, .end);
             } else {
                 self.cv.text(xr, self.pw(3), "SPEC: ALL PLACED", self.pw(10), GOOD_COL, 1.0, .end);
             }
@@ -711,6 +740,7 @@ const Ctx = struct {
         if (self.focus) x = self.legendItem(x, y, ACCENT, "FOCUS");
         if (self.opts.spec) |sp| {
             if (sp.unplaced.len > 0) x = self.legendItem(x, y, DRC_COL, "UNPLACED");
+            if (sp.auto_filled.len > 0) x = self.legendItem(x, y, ACCENT, "AUTO-FILLED");
         }
     }
 

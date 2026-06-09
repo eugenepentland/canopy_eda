@@ -1611,12 +1611,17 @@ fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_m
         const side = placementSideFromAtom(head) orelse continue;
         var items: std.ArrayListUnmanaged(env_mod.PlacementItem) = .empty;
         for (c[1..]) |item_node| {
-            // (rot <deg> "REF") rotation override, or a bare ref string/atom.
+            // (rot <deg> "REF") rotation override, (net "NAME") membership rule,
+            // or a bare ref string/atom.
             if (item_node.asList()) |il| {
-                if (il.len >= 3 and std.mem.eql(u8, il[0].asAtom() orelse "", "rot")) {
+                const ihead = il[0].asAtom() orelse "";
+                if (il.len >= 3 and std.mem.eql(u8, ihead, "rot")) {
                     const deg = il[1].asNumber() orelse continue;
                     const ref = il[2].asString() orelse il[2].asAtom() orelse continue;
                     items.append(self.allocator, .{ .ref = ref, .rot = deg }) catch return EvalError.OutOfMemory;
+                } else if (il.len >= 2 and std.mem.eql(u8, ihead, "net")) {
+                    const net = il[1].asString() orelse il[1].asAtom() orelse continue;
+                    items.append(self.allocator, .{ .net = net }) catch return EvalError.OutOfMemory;
                 }
                 continue;
             }
