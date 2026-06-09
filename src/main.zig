@@ -442,6 +442,7 @@ test {
     _ = @import("placement/router.zig");
     _ = @import("placement/drc.zig");
     _ = @import("serve/pcb_layout_page.zig");
+    _ = @import("serve/pcb_describe.zig");
     _ = @import("png.zig");
     _ = @import("font5x7.zig");
     _ = @import("raster.zig");

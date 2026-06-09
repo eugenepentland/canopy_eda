@@ -27,6 +27,7 @@ const component_search = @import("component_search.zig");
 const digikey = @import("digikey.zig");
 const upload = @import("upload.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
+const pcb_describe = @import("pcb_describe.zig");
 const render_pcb_png = @import("../render_pcb_png.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -80,6 +81,7 @@ const tools = [_]ToolEntry{
     .{ .name = "describe_component", .is_mutation = false },
     .{ .name = "get_schematic", .is_mutation = false },
     .{ .name = "get_pcb_layout_image", .is_mutation = false },
+    .{ .name = "describe_pcb_layout", .is_mutation = false },
     .{ .name = "get_version", .is_mutation = false },
     .{ .name = "run_checks", .is_mutation = false },
     .{ .name = "generate_review", .is_mutation = false },
@@ -238,6 +240,7 @@ fn dispatchInfo(
 ) !?bool {
     const w = out.writer(allocator);
     if (std.mem.eql(u8, tool_name, "get_schematic")) return try toolGetSchematic(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "describe_pcb_layout")) return try toolDescribePcbLayout(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "get_version")) return try toolGetVersion(args_val, out, allocator);
     if (std.mem.eql(u8, tool_name, "run_checks")) return try toolRunChecks(allocator, project_dir, args_val, out, w);
     if (std.mem.eql(u8, tool_name, "generate_review")) return try toolGenerateReview(allocator, project_dir, args_val, w, out);
@@ -563,6 +566,25 @@ fn toolGetSchematic(allocator: std.mem.Allocator, project_dir: []const u8, args_
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const graph = try renderSceneGraph(allocator, project_dir, name);
     try out.writer(allocator).writeAll(graph);
+    return true;
+}
+
+/// Structured spatial facts about the solved placement — the textual twin of
+/// `get_pcb_layout_image`, built from the identical placement so the facts
+/// always describe the board the image shows.
+fn toolDescribePcbLayout(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const opts = pcb_layout_page.PngRequest{
+        .route = optionalBool(args_val, "route") orelse false,
+        .layout = optionalString(args_val, "layout"),
+        .regen = optionalBool(args_val, "regen") orelse false,
+        .sub = optionalString(args_val, "sub"),
+    };
+    const body = pcb_describe.describeDesign(allocator, project_dir, name, opts) catch |e| {
+        try out.writer(allocator).print("error describing pcb layout: {s}", .{@errorName(e)});
+        return false;
+    };
+    try out.appendSlice(allocator, body);
     return true;
 }
 
