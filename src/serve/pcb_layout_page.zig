@@ -554,7 +554,12 @@ pub fn solveForRequest(
     // would read a stale or inert diag.
     const diag = optimizer.placementDiag();
     const spec_status: ?render_pcb_png.SpecStatus = if (spec_drives and diag.active)
-        .{ .used_spec = diag.used_spec, .unplaced = diag.unplaced, .auto_filled = diag.auto_filled }
+        .{
+            .used_spec = diag.used_spec,
+            .unplaced = diag.unplaced,
+            .auto_filled = diag.auto_filled,
+            .unresolved = diag.unresolved,
+        }
     else
         null;
     return .{ .placement = placement, .spec_status = spec_status, .params = params, .title = eff_block.name, .block = eff_block };

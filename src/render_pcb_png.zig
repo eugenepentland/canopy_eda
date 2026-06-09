@@ -71,6 +71,10 @@ pub const SpecStatus = struct {
     /// Spec-unlisted parts the pin-hug auto-fill placed — usable positions the
     /// spec doesn't pin (drawn with an amber outline, not the red hatch).
     auto_filled: []const []const u8 = &.{},
+    /// Spec names that resolved to no part / sub-block (typos, renames) —
+    /// surfaced by the describe endpoint's lint, carried here so the facts and
+    /// the image are built from one status object.
+    unresolved: []const []const u8 = &.{},
 };
 
 /// Render options: output size, focus-mode highlight sets, optional routed

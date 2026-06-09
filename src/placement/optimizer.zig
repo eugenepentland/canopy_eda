@@ -606,6 +606,10 @@ const PlacementDiag = struct {
     /// Refs the spec didn't list that `autofillUnlisted` placed automatically —
     /// usable positions, but the agent should know the spec doesn't pin them.
     auto_filled: []const []const u8 = &.{},
+    /// Names the spec wrote that resolve to NO part / sub-block (typos, parts
+    /// renamed since the spec was authored). The lint layer surfaces these —
+    /// a silently-dropped spec line is the most confusing authoring failure.
+    unresolved: []const []const u8 = &.{},
 };
 threadlocal var g_placement_diag: PlacementDiag = .{};
 
@@ -1318,6 +1322,8 @@ const ResolvedPlacement = struct {
     /// Center each side's lane on the IC instead of opposite its rail pad?
     /// `(centered)` ⇒ true (symmetric floorplan); default false (rail-pad dock).
     centered: bool = false,
+    /// Spec names that resolved to nothing — reported, never silently dropped.
+    unresolved: []const []const u8 = &.{},
 };
 
 /// Map an authored `(placement …)` side keyword to the optimizer's dock `Edge`.
@@ -1359,6 +1365,7 @@ fn resolvePlacement(
         if (resolvePart(instances, sw.ref)) |pi| claimed[pi] = true;
     }
 
+    var unresolved: std.ArrayListUnmanaged([]const u8) = .empty;
     var sides: std.ArrayListUnmanaged(SpecSide) = .empty;
     for (spec.sides) |s| {
         var items: std.ArrayListUnmanaged(SpecItem) = .empty;
@@ -1367,7 +1374,10 @@ fn resolvePlacement(
                 try expandNetRule(arena, &items, claimed, instances, nets, parts, rule_net);
                 continue;
             }
-            const pi = resolvePart(instances, it.ref) orelse continue;
+            const pi = resolvePart(instances, it.ref) orelse {
+                try unresolved.append(arena, it.ref);
+                continue;
+            };
             try items.append(arena, .{ .part = pi, .rot = it.rot });
         }
         if (items.items.len == 0) continue;
@@ -1375,7 +1385,10 @@ fn resolvePlacement(
     }
     var switches: std.ArrayListUnmanaged(SpecSwitch) = .empty;
     for (spec.switches) |sw| {
-        const pi = resolvePart(instances, sw.ref) orelse continue;
+        const pi = resolvePart(instances, sw.ref) orelse {
+            try unresolved.append(arena, sw.ref);
+            continue;
+        };
         try switches.append(arena, .{ .part = pi, .edge = edgeFromSide(sw.side) });
     }
     return .{
@@ -1384,6 +1397,7 @@ fn resolvePlacement(
         .switches = try switches.toOwnedSlice(arena),
         .refine = spec.refine,
         .centered = spec.centered,
+        .unresolved = try unresolved.toOwnedSlice(arena),
     };
 }
 
@@ -2376,12 +2390,15 @@ fn packFloorplan(
     const claimed_sub = try arena.alloc(bool, subs.len);
     @memset(claimed_sub, false);
 
+    var unresolved: std.ArrayListUnmanaged([]const u8) = .empty;
     var anchor_macro: ?Macro = null;
     if (subIndexOf(subs, fc.spec.anchor)) |si| {
         claimed_sub[si] = true;
         anchor_macro = try buildSubMacro(arena, subs[si], null, prep, fc, params);
     } else if (resolvePart(prep.instances, fc.spec.anchor)) |pi| {
         anchor_macro = try buildPartMacro(arena, pi, null, prep.parts);
+    } else {
+        try unresolved.append(arena, fc.spec.anchor);
     }
 
     var side_macros: [4]std.ArrayListUnmanaged(Macro) = .{ .empty, .empty, .empty, .empty };
@@ -2397,11 +2414,14 @@ fn packFloorplan(
                 }
             } else if (resolvePart(prep.instances, it.ref)) |pi| {
                 mac = try buildPartMacro(arena, pi, it.rot, prep.parts);
+            } else {
+                try unresolved.append(arena, it.ref);
             }
             if (mac) |m| try side_macros[ei].append(arena, m);
         }
     }
     saved.restore();
+    if (unresolved.items.len > 0) g_placement_diag.unresolved = try unresolved.toOwnedSlice(arena);
     const am = anchor_macro orelse return false;
 
     // Anchor at the origin, dock each side, resolve corner clashes.
@@ -3160,7 +3180,18 @@ fn prepare(
         .{ .spec = block.floorplan, .block = block, .project_dir = project_dir }
     else
         null;
-    g_placement_diag = .{ .active = placement != null or floorplan != null };
+    // Active when a form was AUTHORED (even if its anchor failed to resolve),
+    // so a broken spec surfaces as "fell back to auto", never silently.
+    var unresolved0: []const []const u8 = if (placement) |pl| pl.unresolved else &.{};
+    if (block.placement.present and placement == null and block.placement.anchor.len > 0) {
+        const one = try arena.alloc([]const u8, 1);
+        one[0] = block.placement.anchor;
+        unresolved0 = one;
+    }
+    g_placement_diag = .{
+        .active = block.placement.present or floorplan != null,
+        .unresolved = unresolved0,
+    };
     return .{ .parts = parts, .idx_of = idx_of, .instances = instances, .nets = nets, .built = built, .priority = priority, .lowered = lowered, .placement = placement, .floorplan = floorplan };
 }
 
