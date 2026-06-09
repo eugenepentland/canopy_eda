@@ -479,6 +479,13 @@ pub const PngRequest = struct {
     names: ?render_pcb_png.NameMode = null,
     /// Parts whose pads get net-name labels (`?pins=U13,C5`; "hubs" = all hubs).
     pins: []const []const u8 = &.{},
+    /// Crop the viewport around this part (`?crop=U1`), radius `?r=<mm>`.
+    crop: ?[]const u8 = null,
+    crop_r: f64 = 6,
+    /// Contact sheet (`?sheet=1`): whole board + per-hub pin-labeled closeups.
+    sheet: bool = false,
+    /// Callout overlay (`?critique=1`): numbered worst-problem markers + panel.
+    critique: bool = false,
 };
 
 /// Failures `renderDesignPng` surfaces; callers map these to an HTTP status or
@@ -547,7 +554,12 @@ pub fn solveForRequest(
     // would read a stale or inert diag.
     const diag = optimizer.placementDiag();
     const spec_status: ?render_pcb_png.SpecStatus = if (spec_drives and diag.active)
-        .{ .used_spec = diag.used_spec, .unplaced = diag.unplaced, .auto_filled = diag.auto_filled }
+        .{
+            .used_spec = diag.used_spec,
+            .unplaced = diag.unplaced,
+            .auto_filled = diag.auto_filled,
+            .unresolved = diag.unresolved,
+        }
     else
         null;
     return .{ .placement = placement, .spec_status = spec_status, .params = params, .title = eff_block.name, .block = eff_block };
@@ -590,7 +602,7 @@ pub fn renderDesignPng(
         }
     }
 
-    return render_pcb_png.render(alloc, placement, .{
+    const ropts = render_pcb_png.Options{
         .width = opts.width,
         .highlight_nets = opts.highlight_nets,
         .highlight_refs = opts.highlight_refs,
@@ -606,7 +618,12 @@ pub fn renderDesignPng(
         .names = name_mode,
         .pin_refs = opts.pins,
         .spec = spec_status,
-    });
+        .crop = opts.crop,
+        .crop_r = opts.crop_r,
+        .critique = opts.critique,
+    };
+    if (opts.sheet) return render_pcb_png.renderSheet(alloc, placement, ropts);
+    return render_pcb_png.render(alloc, placement, ropts);
 }
 
 /// Parse a `PngRequest` from an HTTP query string — shared by the PNG endpoint
@@ -655,6 +672,14 @@ pub fn pngRequestFromQuery(arena: std.mem.Allocator, req: *httpz.Request) PngReq
             break :blk std.meta.stringToEnum(render_pcb_png.NameMode, v);
         },
         .pins = csvParam(arena, req, "pins"),
+        .crop = queryOpt(req, "crop"),
+        .crop_r = blk: {
+            const q = req.query() catch break :blk 6;
+            const v = q.get("r") orelse break :blk 6;
+            break :blk std.fmt.parseFloat(f64, v) catch 6;
+        },
+        .sheet = queryFlag(req, "sheet"),
+        .critique = queryFlag(req, "critique"),
     };
 }
 

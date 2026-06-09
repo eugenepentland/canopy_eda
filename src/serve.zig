@@ -303,6 +303,7 @@ pub fn serve(
     router.get("/api/pcb-png/:name", pcb_layout_page.pcbPngApi, .{});
     router.get("/api/pcb-describe/:name", pcb_describe.pcbDescribeApi, .{});
     router.get("/api/placement-spec/:name", placement_spec.placementSpecApi, .{});
+    router.post("/api/propose-placement/:name", placement_spec.proposePlacementApi, .{});
     router.post("/api/pcb-layouts/:name", pcb_layout_page.saveNamedLayoutApi, .{});
     router.post("/api/pcb-layouts/:name/delete", pcb_layout_page.deleteNamedLayoutApi, .{});
     router.post("/api/pcb-layouts/:name/default", pcb_layout_page.setDefaultLayoutApi, .{});

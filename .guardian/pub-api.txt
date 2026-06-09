@@ -140,7 +140,9 @@ src/eval/builders.zig::parseSectionPort fn
 src/eval/builders.zig::processPinForm fn
 src/eval/builtins.zig::BuiltinError value
 src/eval/builtins.zig::evalBuiltinOp fn
+src/eval/design_block.zig::ParsedPlacementForm struct_
 src/eval/design_block.zig::evalDesignBlock fn
+src/eval/design_block.zig::parsePlacementText fn
 src/eval/electrical.zig::parse fn
 src/eval/electrical.zig::parseSubForms fn
 src/eval/env.zig::AssertionResult struct_
@@ -404,6 +406,7 @@ src/placement/optimizer.zig::Params struct_
 src/placement/optimizer.zig::Part struct_
 src/placement/optimizer.zig::PartKind enum_
 src/placement/optimizer.zig::Placement struct_
+src/placement/optimizer.zig::PlacementDiag struct_
 src/placement/optimizer.zig::ProgressPass enum_
 src/placement/optimizer.zig::ProgressSink struct_
 src/placement/optimizer.zig::RatKind enum_
@@ -471,6 +474,7 @@ src/render_pcb_png.zig::NameMode enum_
 src/render_pcb_png.zig::Options struct_
 src/render_pcb_png.zig::SpecStatus struct_
 src/render_pcb_png.zig::render fn
+src/render_pcb_png.zig::renderSheet fn
 src/render_svg/branch.zig::drawBranchTreeLeft fn
 src/render_svg/branch.zig::drawBranchTreeRight fn
 src/render_svg/branch.zig::drawPassiveChainLeft fn
@@ -848,6 +852,8 @@ src/serve/placement_spec.zig::ExportedSpec struct_
 src/serve/placement_spec.zig::buildSpecSexp fn
 src/serve/placement_spec.zig::exportSpec fn
 src/serve/placement_spec.zig::placementSpecApi fn
+src/serve/placement_spec.zig::proposePlacement fn
+src/serve/placement_spec.zig::proposePlacementApi fn
 src/serve/plugin_tokens.zig::Token struct_
 src/serve/plugin_tokens.zig::mint fn
 src/serve/plugin_tokens.zig::validate fn

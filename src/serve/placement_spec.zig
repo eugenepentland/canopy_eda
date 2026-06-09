@@ -10,7 +10,10 @@
 const std = @import("std");
 const httpz = @import("httpz");
 const optimizer = @import("../placement/optimizer.zig");
+const pcb_router = @import("../placement/router.zig");
+const drc = @import("../placement/drc.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
+const design_block = @import("../eval/design_block.zig");
 const modules_mod = @import("modules.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const pcb_describe = @import("pcb_describe.zig");
@@ -50,6 +53,129 @@ pub fn placementSpecApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     }
     res.content_type = .JSON;
     res.body = result.json;
+}
+
+/// POST /api/propose-placement/:name — dry-run a `(placement …)` /
+/// `(floorplan …)` form sent as the request body: solve it against a
+/// request-local copy of the design, compare against the current layout, and
+/// return both scoreboards. Nothing is written — the agent A/B-tests a spec
+/// BEFORE committing it to the .sexp file. `?route=1` also routes both.
+pub fn proposePlacementApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void {
+    const arena = req.arena;
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "{\"error\":\"send the (placement ...) or (floorplan ...) form as the request body\"}";
+        return;
+    };
+    const route = blk: {
+        const q = req.query() catch break :blk false;
+        const v = q.get("route") orelse break :blk false;
+        break :blk v.len > 0 and v[0] == '1';
+    };
+    const result = proposePlacement(arena, ctx.project_dir, name, body, route) catch |e| {
+        res.status = if (e == error.BlockNotFound or e == error.SubNotFound) 404 else 500;
+        res.body = "{\"error\":\"propose failed\"}";
+        return;
+    };
+    res.content_type = .JSON;
+    if (result == null) {
+        res.status = 422;
+        res.body = "{\"error\":\"no (placement ...) or (floorplan ...) form found in the body\"}";
+        return;
+    }
+    res.body = result.?;
+}
+
+/// Dry-run solve of a proposed spec. Returns the comparison JSON, or null when
+/// the body holds no parseable placement/floorplan form. The design block is
+/// re-evaluated per request, so the in-memory spec swap leaks nowhere.
+pub fn proposePlacement(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    spec_text: []const u8,
+    route: bool,
+) pcb_layout_page.PngError!?[]u8 {
+    var eval = Evaluator.init(alloc, project_dir);
+    defer eval.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |mr| {
+        mr.eval.deinit();
+        alloc.destroy(mr.eval);
+    };
+    // Baseline: the design exactly as a plain GET would solve it.
+    const base = try pcb_layout_page.solveForRequest(alloc, project_dir, name, .{}, &eval, &module_res);
+    const parsed = (design_block.parsePlacementText(&eval, spec_text) catch null) orelse return null;
+
+    // Swap the spec on the request-local block and solve fresh.
+    if (parsed.floorplan) {
+        base.block.floorplan = parsed.spec;
+    } else {
+        base.block.placement = parsed.spec;
+    }
+    const proposed = optimizer.solve(alloc, base.block, project_dir, null, base.params, .place) catch
+        return error.BuildFailed;
+    const diag = optimizer.placementDiag();
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    const w = &aw.writer;
+    writeProposeJson(w, alloc, name, parsed.floorplan, base.placement, proposed, diag, route) catch
+        return error.BuildFailed;
+    return aw.written();
+}
+
+/// The comparison document both propose surfaces (HTTP + MCP) return.
+fn writeProposeJson(
+    w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    name: []const u8,
+    floorplan: bool,
+    current: optimizer.Placement,
+    proposed: optimizer.Placement,
+    diag: optimizer.PlacementDiag,
+    route: bool,
+) BuildError!void {
+    try w.writeAll("{\"name\":");
+    try pcb_layout_page.writeJsonStr(w, name);
+    try w.print(",\"form\":\"{s}\"", .{if (floorplan) "floorplan" else "placement"});
+    try w.writeAll(",\"proposed\":");
+    try writeScoreObj(w, alloc, proposed, route);
+    try w.print(",\"used_spec\":{}", .{diag.used_spec});
+    try writeRefList(w, ",\"unplaced\":", diag.unplaced);
+    try writeRefList(w, ",\"auto_filled\":", diag.auto_filled);
+    try writeRefList(w, ",\"unresolved\":", diag.unresolved);
+    try w.writeAll(",\"current\":");
+    try writeScoreObj(w, alloc, current, route);
+    try w.print(",\"delta_objective\":{d:.1}}}", .{proposed.breakdown.objective - current.breakdown.objective});
+}
+
+fn writeScoreObj(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement, route: bool) BuildError!void {
+    const b = p.breakdown;
+    try w.print("{{\"objective\":{d:.1},\"hpwl\":{d:.1},\"loop_nh\":{d:.1}", .{ b.objective, b.hpwl, b.loop_nh });
+    if (route) {
+        const rp = pcb_router.RouteParams{};
+        if (pcb_router.route(alloc, p, rp) catch null) |r| {
+            var trace: f64 = 0;
+            for (r.tracks) |t| trace += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
+            const v = drc.check(alloc, p, r, rp.clearance) catch &.{};
+            try w.print(",\"routed\":{{\"trace_mm\":{d:.1},\"vias\":{d},\"drc\":{d}}}", .{ trace, r.vias.len, v.len });
+        }
+    }
+    try w.writeAll("}");
+}
+
+fn writeRefList(w: *std.Io.Writer, key: []const u8, refs: []const []const u8) BuildError!void {
+    try w.writeAll(key);
+    try w.writeAll("[");
+    for (refs, 0..) |r, i| {
+        if (i > 0) try w.writeAll(",");
+        try pcb_layout_page.writeJsonStr(w, r);
+    }
+    try w.writeAll("]");
 }
 
 /// The exported spec text plus its JSON wrapper; an empty `sexp` means the
@@ -394,4 +520,21 @@ test "buildSpecSexp falls back to ref-des on duplicate origin keys" {
     const sexp = (try buildSpecSexp(alloc, p, null)).?;
     try std.testing.expect(std.mem.indexOf(u8, sexp, "(left \"a/C1\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, sexp, "(right \"b/C2\")") != null);
+}
+
+// spec: Web Server - propose_placement parses a standalone placement/floorplan form
+test "parsePlacementText parses standalone placement and floorplan forms" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    const pp = (try design_block.parsePlacementText(&eval, "(placement (anchor \"U1\") (left \"C1\"))")).?;
+    try std.testing.expect(!pp.floorplan);
+    try std.testing.expect(pp.spec.present);
+    try std.testing.expectEqualStrings("U1", pp.spec.anchor);
+    const fp = (try design_block.parsePlacementText(&eval, "(floorplan (anchor \"buck\") (right \"ldo\"))")).?;
+    try std.testing.expect(fp.floorplan);
+    try std.testing.expectEqualStrings("buck", fp.spec.anchor);
+    try std.testing.expect((try design_block.parsePlacementText(&eval, "(note \"hi\")")) == null);
 }

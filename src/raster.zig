@@ -282,6 +282,24 @@ pub const Canvas = struct {
         }
     }
 
+    /// Copy `src`'s pixels into this canvas with its top-left at final-pixel
+    /// (x,y) — the contact-sheet compositor. Both canvases must share the same
+    /// supersample factor; out-of-bounds rows/columns are clipped.
+    pub fn blit(self: *Canvas, src: *const Canvas, x: u32, y: u32) void {
+        const ox = @as(usize, x) * self.ss;
+        const oy = @as(usize, y) * self.ss;
+        if (ox >= self.iw) return;
+        const w = @min(src.iw, self.iw - ox);
+        var row: usize = 0;
+        while (row < src.ih) : (row += 1) {
+            const dy = oy + row;
+            if (dy >= self.ih) break;
+            const so = row * src.iw * 3;
+            const do = (dy * self.iw + ox) * 3;
+            @memcpy(self.buf[do .. do + w * 3], src.buf[so .. so + w * 3]);
+        }
+    }
+
     /// Width in final px a `text` call of cell height `h_px` would occupy.
     pub fn textWidth(s: []const u8, h_px: f32) f32 {
         if (s.len == 0) return 0;

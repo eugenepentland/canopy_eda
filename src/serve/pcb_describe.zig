@@ -115,6 +115,13 @@ pub fn writeDescribeJson(
         for (sp.unplaced) |ref| try unplaced.put(ref, {});
         for (sp.auto_filled) |ref| try auto_filled.put(ref, {});
     }
+    // net → the single hub package edge its pads sit on (null = several edges,
+    // i.e. no preference). Drives the per-part `want_side` regret signal.
+    var net_edge = std.StringHashMap(?Side).init(alloc);
+    defer net_edge.deinit();
+    try buildNetEdgeMap(p, &pad_net, &net_edge);
+    var wrong_side: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer wrong_side.deinit(alloc);
 
     const anchor = anchorIndex(p.parts);
 
@@ -145,6 +152,11 @@ pub fn writeDescribeJson(
             if (i > 0) try w.writeAll(",");
             try pcb_layout_page.writeJsonStr(w, ref);
         }
+        try w.writeAll("],\"unresolved\":[");
+        for (sp.unresolved, 0..) |ref, i| {
+            if (i > 0) try w.writeAll(",");
+            try pcb_layout_page.writeJsonStr(w, ref);
+        }
         try w.writeAll("]}");
     }
 
@@ -168,10 +180,21 @@ pub fn writeDescribeJson(
                 try w.writeAll(",\"side\":\"anchor\"");
             } else {
                 const a = p.parts[ai];
-                try w.print(",\"side\":\"{s}\",\"gap_mm\":{d:.2}", .{
-                    @tagName(sideOf(part.x - a.x, part.y - a.y, aabbHalf(a), aabbHalf(part))),
-                    rectGap(a, part),
-                });
+                const cur = sideOf(part.x - a.x, part.y - a.y, aabbHalf(a), aabbHalf(part));
+                try w.print(",\"side\":\"{s}\",\"gap_mm\":{d:.2}", .{ @tagName(cur), rectGap(a, part) });
+                // Side regret: this part's hub pads all live on one package
+                // edge, and the part sits on the OPPOSITE side of the anchor.
+                // Adjacent sides (right vs bottom-edge pads) are corner cases
+                // that are usually fine, so only the unambiguous mismatch
+                // surfaces — every connection must cross the whole package.
+                if (part.kind == .passive and !unplaced.contains(part.ref_des)) {
+                    if (wantSideOf(&net_edge, &pad_net, part)) |want| {
+                        if (oppositeSides(want, cur)) {
+                            try w.print(",\"want_side\":\"{s}\"", .{@tagName(want)});
+                            try wrong_side.append(alloc, part.ref_des);
+                        }
+                    }
+                }
             }
         }
         if (unplaced.contains(part.ref_des)) try w.writeAll(",\"unplaced\":true");
@@ -207,11 +230,148 @@ pub fn writeDescribeJson(
     try w.writeAll("]");
 
     try writeHubPads(w, alloc, p, &pad_net);
+    try writeLint(w, alloc, p, spec, wrong_side.items);
 
     if (routed) |r| {
         try w.print(",\"routed\":{{\"trace_mm\":{d:.1},\"tracks\":{d},\"vias\":{d},\"drc\":{d}}}", .{ r.trace_mm, r.tracks, r.vias, r.drc });
     }
     try w.writeAll("}");
+}
+
+/// Map each net to the single hub package edge its pads sit on; nets whose hub
+/// pads straddle edges (or sit at the centre — an exposed pad) map to null.
+fn buildNetEdgeMap(
+    p: optimizer.Placement,
+    pad_net: *std.StringHashMap([]const u8),
+    out: *std.StringHashMap(?Side),
+) std.mem.Allocator.Error!void {
+    for (p.parts) |part| {
+        if (part.kind != .hub) continue;
+        for (part.pads) |pad| {
+            const net = netOf(pad_net, part.ref_des, pad.number) orelse continue;
+            const e = padEdge(part, pad.x, pad.y);
+            if (e == .center) continue;
+            const gop = try out.getOrPut(net);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = e;
+                continue;
+            }
+            if (gop.value_ptr.*) |prev| {
+                if (prev != e) gop.value_ptr.* = null;
+            }
+        }
+    }
+}
+
+/// The side `part` "wants" to be on: the single hub edge of its first
+/// non-ground net, when the hub pads agree on one. Null = no preference.
+fn wantSideOf(
+    net_edge: *std.StringHashMap(?Side),
+    pad_net: *std.StringHashMap([]const u8),
+    part: optimizer.Part,
+) ?Side {
+    for (part.pads) |pad| {
+        const net = netOf(pad_net, part.ref_des, pad.number) orelse continue;
+        if (groundish(net)) continue;
+        const maybe = net_edge.get(net) orelse continue;
+        if (maybe) |e| return e;
+    }
+    return null;
+}
+
+/// True for the two unambiguous mismatches: left↔right, top↔bottom.
+fn oppositeSides(a: Side, b: Side) bool {
+    return (a == .left and b == .right) or (a == .right and b == .left) or
+        (a == .top and b == .bottom) or (a == .bottom and b == .top);
+}
+
+/// Ground-family net check (leaf name): GND/AGND/PGND/…/VSS — the return is a
+/// plane, so ground pads never define a preferred side.
+fn groundish(name: []const u8) bool {
+    const leaf = if (std.mem.lastIndexOfScalar(u8, name, '/')) |i| name[i + 1 ..] else name;
+    var buf: [32]u8 = undefined;
+    if (leaf.len > buf.len) return false;
+    const up = std.ascii.upperString(&buf, leaf);
+    return std.mem.indexOf(u8, up, "GND") != null or std.mem.eql(u8, up, "VSS");
+}
+
+/// Loops flagged "long": worse than twice the median inductance (and over an
+/// absolute floor so tiny boards don't lint their best loop).
+const LONG_LOOP_FLOOR_NH: f64 = 3.0;
+
+/// One lint entry: `{"rule","severity","refs":[…],"msg"}`.
+fn lintItem(
+    w: *std.Io.Writer,
+    first: *bool,
+    rule: []const u8,
+    severity: []const u8,
+    refs: []const []const u8,
+    msg: []const u8,
+) DescribeError!void {
+    if (!first.*) try w.writeAll(",");
+    first.* = false;
+    try w.writeAll("{\"rule\":");
+    try pcb_layout_page.writeJsonStr(w, rule);
+    try w.writeAll(",\"severity\":");
+    try pcb_layout_page.writeJsonStr(w, severity);
+    try w.writeAll(",\"refs\":[");
+    for (refs, 0..) |r, i| {
+        if (i > 0) try w.writeAll(",");
+        try pcb_layout_page.writeJsonStr(w, r);
+    }
+    try w.writeAll("],\"msg\":");
+    try pcb_layout_page.writeJsonStr(w, msg);
+    try w.writeAll("}");
+}
+
+/// Placement lint: machine-checkable rules an agent should fix before trusting
+/// the layout. Spec coverage problems are errors; geometric smells are warns.
+fn writeLint(
+    w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    p: optimizer.Placement,
+    spec: ?render_pcb_png.SpecStatus,
+    wrong_side: []const []const u8,
+) DescribeError!void {
+    try w.writeAll(",\"lint\":[");
+    var first = true;
+    const sev_err = "error";
+    const sev_warn = "warn";
+    if (spec) |sp| {
+        if (!sp.used_spec) {
+            try lintItem(w, &first, "fell-back-to-auto", sev_err, &.{}, "a placement/floorplan form was authored but its constructive pack failed; the force placer arranged the board instead");
+        }
+        if (sp.unresolved.len > 0) {
+            try lintItem(w, &first, "unresolved-name", sev_err, sp.unresolved, "spec names that match no part or sub-block (typo, or renamed since the spec was written)");
+        }
+        if (sp.unplaced.len > 0) {
+            try lintItem(w, &first, "unplaced", sev_err, sp.unplaced, "parts still in the staging band below the board; list them in the spec or free up room");
+        }
+    }
+    if (wrong_side.len > 0) {
+        try lintItem(w, &first, "wrong-side", sev_warn, wrong_side, "part sits on a different side of the anchor than the hub edge its net's pads are on; moving it shortens the connection");
+    }
+    // Long loops: collect inductances, compare to the median.
+    if (p.loops.len >= 4) {
+        const nhs = try alloc.alloc(f64, p.loops.len);
+        defer alloc.free(nhs);
+        for (p.loops, 0..) |L, i| nhs[i] = optimizer.loopNh(p.parts, L);
+        const sorted = try alloc.dupe(f64, nhs);
+        defer alloc.free(sorted);
+        std.mem.sort(f64, sorted, {}, std.sort.asc(f64));
+        const median = sorted[sorted.len / 2];
+        var refs: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer refs.deinit(alloc);
+        for (p.loops, 0..) |L, i| {
+            if (nhs[i] > 2 * median and nhs[i] > LONG_LOOP_FLOOR_NH) {
+                try refs.append(alloc, p.parts[L.cap].ref_des);
+            }
+        }
+        if (refs.items.len > 0) {
+            try lintItem(w, &first, "long-loop", sev_warn, refs.items, "decoupling loop inductance is more than twice the board median; tighten the cap to its supply pin");
+        }
+    }
+    try w.writeAll("]");
 }
 
 /// The unique nets on `part`'s pads, in pad order — `"nets":["VIN","GND"]`.

@@ -1578,6 +1578,30 @@ fn placementSideFromAtom(atom: []const u8) ?env_mod.PlacementSide {
 /// post-pack polish; `(centered)` centers every side on the IC. Malformed sub-forms and
 /// unknown side keywords are skipped so a typo can't abort the build — the
 /// optimizer's `packSpec` resolves refs against the netlist and falls back to
+/// A standalone placement/floorplan form parsed from bare text (not a design
+/// file) — the propose-placement dry-run's input.
+pub const ParsedPlacementForm = struct { spec: env_mod.PlacementSpec, floorplan: bool };
+
+/// Parse the first `(placement …)` or `(floorplan …)` form in `text` — the
+/// propose-placement dry-run entry: an agent sends spec text and the server
+/// solves it against a request-local design copy, no file written. Null when
+/// the text holds no such form (or doesn't parse at all).
+pub fn parsePlacementText(self: *Evaluator, text: []const u8) EvalError!?ParsedPlacementForm {
+    const nodes = @import("../sexpr/parser.zig").parse(self.allocator, text) catch return null;
+    for (nodes) |node| {
+        const lst = node.asList() orelse continue;
+        if (lst.len < 1) continue;
+        const head = lst[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "placement")) {
+            return .{ .spec = try parsePlacement(self, lst), .floorplan = false };
+        }
+        if (std.mem.eql(u8, head, "floorplan")) {
+            return .{ .spec = try parsePlacement(self, lst), .floorplan = true };
+        }
+    }
+    return null;
+}
+
 /// the force placer on any failure.
 fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_mod.PlacementSpec {
     var anchor: []const u8 = "";
