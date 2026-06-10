@@ -21,7 +21,16 @@ fn checkArity(self: *Evaluator, sf: forms.SpecialForm, args: []const Node) EvalE
     const schema = forms.schemaFor(sf) orelse return;
     if (forms.validateArity(schema, args.len) == null) return;
     const span = if (args.len > 0) args[0].span else ast.Span.zero;
-    self.setError(span, "wrong number of arguments");
+    const name = sf.sourceName();
+    if (schema.max_args) |max| {
+        if (max == schema.min_args) {
+            self.setErrorFmt(span, "({s} …) expects {d} argument(s), got {d}", .{ name, schema.min_args, args.len });
+        } else {
+            self.setErrorFmt(span, "({s} …) expects {d}–{d} arguments, got {d}", .{ name, schema.min_args, max, args.len });
+        }
+    } else {
+        self.setErrorFmt(span, "({s} …) expects at least {d} argument(s), got {d}", .{ name, schema.min_args, args.len });
+    }
     return EvalError.ArityError;
 }
 
@@ -30,7 +39,10 @@ fn checkArity(self: *Evaluator, sf: forms.SpecialForm, args: []const Node) EvalE
 /// statement, not a value-producing form.
 pub fn evalLet(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     try checkArity(self, .let, args);
-    const name = args[0].asAtom() orelse return EvalError.InvalidForm;
+    const name = args[0].asAtom() orelse {
+        self.setError(args[0].span, "(let …) first argument must be a bare name, e.g. (let vout 3.3)");
+        return EvalError.InvalidForm;
+    };
     const value = try self.evalNode(args[1], env);
     try env.put(name, value);
     return .nil;
@@ -54,8 +66,14 @@ pub fn evalIf(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
 /// keyword on a clause head matches unconditionally, like Scheme's `cond`.
 pub fn evalCond(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     for (args) |clause| {
-        const clause_children = clause.asList() orelse return EvalError.InvalidForm;
-        if (clause_children.len != 2) return EvalError.InvalidForm;
+        const clause_children = clause.asList() orelse {
+            self.setError(clause.span, "(cond …) clauses must be (test expr) lists");
+            return EvalError.InvalidForm;
+        };
+        if (clause_children.len != 2) {
+            self.setError(clause.span, "(cond …) clauses must be (test expr) lists");
+            return EvalError.InvalidForm;
+        }
 
         // Check for (else ...)
         if (clause_children[0].asAtom()) |name| {
@@ -79,7 +97,10 @@ pub fn evalCond(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 pub fn evalFmt(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     try checkArity(self, .fmt_, args);
     const template_val = try self.evalNode(args[0], env);
-    const template = template_val.asString() orelse return EvalError.TypeError;
+    const template = template_val.asString() orelse {
+        self.setError(args[0].span, "(fmt …) template must be a string");
+        return EvalError.TypeError;
+    };
 
     var fmt_args: std.ArrayListUnmanaged(Value) = .empty;
     defer fmt_args.deinit(self.allocator);
@@ -104,7 +125,10 @@ pub fn evalAssert(self: *Evaluator, args: []const Node, env: *Env) EvalError!Val
     try checkArity(self, .assert_, args);
     const cond = try self.evalNode(args[0], env);
     const msg_val = try self.evalNode(args[1], env);
-    const msg = msg_val.asString() orelse return EvalError.TypeError;
+    const msg = msg_val.asString() orelse {
+        self.setError(args[1].span, "(assert …) message must be a string");
+        return EvalError.TypeError;
+    };
     try self.assertions.append(self.allocator, .{
         .passed = cond.isTruthy(),
         .message = msg,
@@ -123,10 +147,22 @@ pub fn evalAssertRange(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     const max = try self.evalNode(args[2], env);
     const label_val = try self.evalNode(args[3], env);
 
-    const v = val.asNumber() orelse return EvalError.TypeError;
-    const lo = min.asNumber() orelse return EvalError.TypeError;
-    const hi = max.asNumber() orelse return EvalError.TypeError;
-    const label = label_val.asString() orelse return EvalError.TypeError;
+    const v = val.asNumber() orelse {
+        self.setError(args[0].span, "(assert-range …) value must be a number");
+        return EvalError.TypeError;
+    };
+    const lo = min.asNumber() orelse {
+        self.setError(args[1].span, "(assert-range …) lower bound must be a number");
+        return EvalError.TypeError;
+    };
+    const hi = max.asNumber() orelse {
+        self.setError(args[2].span, "(assert-range …) upper bound must be a number");
+        return EvalError.TypeError;
+    };
+    const label = label_val.asString() orelse {
+        self.setError(args[3].span, "(assert-range …) label must be a string");
+        return EvalError.TypeError;
+    };
 
     const passed = v >= lo and v <= hi;
 

@@ -20,6 +20,16 @@ pub const SpecialForm = enum {
     pub fn fromAtom(name: []const u8) ?SpecialForm {
         return atom_to_form.get(name);
     }
+
+    /// The source spelling of this form's head atom — used by arity/type
+    /// diagnostics so the message names the offending form. Derived from
+    /// the registry table so the two can never drift.
+    pub fn sourceName(self: SpecialForm) []const u8 {
+        for (atom_to_form.keys(), atom_to_form.values()) |k, v| {
+            if (v == self) return k;
+        }
+        return "?";
+    }
 };
 
 const atom_to_form = std.StaticStringMap(SpecialForm).initComptime(.{
@@ -123,6 +133,7 @@ pub const ScopeForm = enum {
     placement,
     floorplan,
     board,
+    replicate,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -166,6 +177,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "placement", .placement },
     .{ "floorplan", .floorplan },
     .{ "board", .board },
+    .{ "replicate", .replicate },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -356,8 +368,9 @@ pub const scope_form_docs = blk: {
         .summary = "Functional subsystem card. Inside `(section …)` nests one level into a sub-section.",
     } };
     t[@intFromEnum(ScopeForm.decouple)] = .{ .scope = all, .doc = .{
-        .syntax = "(decouple \"NET\" item…) | (decouple (cap-0402 \"100nF\") N per-pin \"REF\" \"NET1\" …)",
-        .summary = "Emit decoupling capacitors against a net, in single- or multi-net form.",
+        .syntax = "(decouple \"NET\" [(comp \"val\")] COUNT per-pin [REF|auto] PIN…|(pins-of \"REF\" \"NET\")…)",
+        .summary = "Emit COUNT decoupling caps per listed host pin. Component and REF may come from " ++
+            "(decouple-defaults …); (pins-of REF NET) / auto expand to the pins already declared on the net.",
     } };
     t[@intFromEnum(ScopeForm.series)] = .{ .scope = all, .doc = .{
         .syntax = "(series …)",
@@ -505,6 +518,12 @@ pub const scope_form_docs = blk: {
             "mounting hardware at the four corners (TL, TR, BR, BL in authored order). " ++
             "The interior placement (force, (placement …), or (floorplan …)) is centered in " ++
             "the outline; the rendered views draw the outline rectangle.",
+    } };
+    t[@intFromEnum(ScopeForm.replicate)] = .{ .scope = tl, .doc = .{
+        .syntax = "(replicate N \"name~D\" (module-call args…))",
+        .summary = "Instantiate N copies of a module as sub-blocks: ~D in the name template and " ++
+            "in bare call-arg atoms is replaced by the 1-based index. Requires (hierarchical-ids); " ++
+            "the form carries one auto-minted (id …) and each copy's sub-block uuid derives from it + the substituted name.",
     } };
     break :blk t;
 };

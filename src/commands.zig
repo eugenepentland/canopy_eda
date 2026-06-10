@@ -16,6 +16,7 @@ const PROJECT_DIR_FLAG = "--project-dir";
 const OUTPUT_DIR_FLAG = "--output-dir";
 const OUT_OF_MEMORY_MSG = "Out of memory\n";
 const BUILD_ERROR_FMT = "Build error: {}\n";
+const DIAG_ERROR_FMT = "{s}:{d}:{d}: error: {s}\n";
 const BUILD_FAILED_ASSERTION_MSG = "Build failed: assertion violations\n";
 const CANNOT_WRITE_FMT = "Cannot write {s}: {}\n";
 const PASS_FMT = "PASS: {s}\n";
@@ -204,6 +205,11 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch |err| {
+        // Render the stashed diagnostic (span + message + module call
+        // chain) when one exists — the bare error code is the fallback.
+        if (eval.last_error) |diag| {
+            std.debug.print(DIAG_ERROR_FMT, .{ board_path, diag.span.line, diag.span.col, diag.message });
+        }
         std.debug.print(BUILD_ERROR_FMT, .{err});
         std.process.exit(1);
     };
@@ -212,6 +218,13 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
         id_insert.insertPendingIds(allocator, board_path, eval.pending_ids.items, eval.pending_child_ids.items) catch |err| {
             std.debug.print("ID insertion error: {}\n", .{err});
         };
+    }
+
+    // Lint warnings (unknown sub-forms / enum words the evaluator skipped).
+    // Spans from module files point into those files but are reported
+    // against the board path — the message names the offending form either way.
+    for (eval.warnings.items) |w| {
+        std.debug.print("{s}:{d}:{d}: warning: {s}\n", .{ board_path, w.span.line, w.span.col, w.message });
     }
 
     var has_failure = false;
@@ -334,6 +347,11 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch |err| {
+        // Render the stashed diagnostic (span + message + module call
+        // chain) when one exists — the bare error code is the fallback.
+        if (eval.last_error) |diag| {
+            std.debug.print(DIAG_ERROR_FMT, .{ board_path, diag.span.line, diag.span.col, diag.message });
+        }
         std.debug.print(BUILD_ERROR_FMT, .{err});
         std.process.exit(1);
     };
@@ -423,6 +441,11 @@ pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) C
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
     const result = eval.evalFile(board_path) catch |err| {
+        // Render the stashed diagnostic (span + message + module call
+        // chain) when one exists — the bare error code is the fallback.
+        if (eval.last_error) |diag| {
+            std.debug.print(DIAG_ERROR_FMT, .{ board_path, diag.span.line, diag.span.col, diag.message });
+        }
         std.debug.print(BUILD_ERROR_FMT, .{err});
         std.process.exit(1);
     };

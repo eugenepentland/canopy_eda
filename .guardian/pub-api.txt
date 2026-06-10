@@ -133,11 +133,13 @@ src/eval/builders.zig::emitDecoupleItems fn
 src/eval/builders.zig::expandSectionBusPort fn
 src/eval/builders.zig::expandTopLevelBusPort fn
 src/eval/builders.zig::findPinFuncMap fn
+src/eval/builders.zig::isKnownPinsChild fn
 src/eval/builders.zig::loadDesignFile fn
 src/eval/builders.zig::loadFile fn
 src/eval/builders.zig::parseSectionCalc fn
 src/eval/builders.zig::parseSectionPort fn
 src/eval/builders.zig::processPinForm fn
+src/eval/builders.zig::warnUnknownPinsChild fn
 src/eval/builtins.zig::BuiltinError value
 src/eval/builtins.zig::evalBuiltinOp fn
 src/eval/design_block.zig::ParsedPlacementForm struct_
@@ -221,7 +223,9 @@ src/eval/evaluator.zig::AltFunc struct_
 src/eval/evaluator.zig::DecoupleDefaults struct_
 src/eval/evaluator.zig::EvalDiagnostic struct_
 src/eval/evaluator.zig::EvalError value
+src/eval/evaluator.zig::EvalWarning struct_
 src/eval/evaluator.zig::Evaluator struct_
+src/eval/evaluator.zig::ModuleFrame struct_
 src/eval/evaluator.zig::PinNetDecl struct_
 src/eval/evaluator.zig::ids value
 src/eval/fmt.zig::FmtError value
@@ -305,6 +309,7 @@ src/eval/special_forms.zig::evalCond fn
 src/eval/special_forms.zig::evalFmt fn
 src/eval/special_forms.zig::evalIf fn
 src/eval/special_forms.zig::evalLet fn
+src/eval/suggest.zig::unboundMessage fn
 src/eval/test_point.zig::parse fn
 src/eval/validate.zig::trackNetFormSource fn
 src/eval/validate.zig::validateDesign fn

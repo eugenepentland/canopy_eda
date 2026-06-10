@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
+const sexpr_parser = @import("../sexpr/parser.zig");
 const log = @import("../infra/log.zig");
 const env_mod = @import("env.zig");
 const evaluator_mod = @import("evaluator.zig");
@@ -40,6 +41,19 @@ fn hasHierarchicalMarker(forms: []const Node) bool {
         if (std.mem.eql(u8, head, "hierarchical-ids")) return true;
     }
     return false;
+}
+
+/// Form heads that are deliberately inert in scope-form dispatch and must
+/// not draw an unknown-sub-form warning: identity anchors consumed by the
+/// id machinery (`id`/`ids`), the `(hierarchical-ids)` marker read by
+/// `hasHierarchicalMarker`, and the documented-but-inert `(row N)`/`(col N)`
+/// grid hints carried by sections and hub instances.
+fn isInertFormHead(name: []const u8) bool {
+    return std.mem.eql(u8, name, "id") or
+        std.mem.eql(u8, name, "ids") or
+        std.mem.eql(u8, name, "hierarchical-ids") or
+        std.mem.eql(u8, name, "row") or
+        std.mem.eql(u8, name, "col");
 }
 
 /// Evaluate a `(design-block "name" form…)` form into a heap-allocated
@@ -90,12 +104,15 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     self.hierarchical_ids = saved_hierarchical or hasHierarchicalMarker(args[1..]);
     defer self.hierarchical_ids = saved_hierarchical;
 
-    // Decouple defaults are design-block-local: snapshot and clear so a
-    // parent's (decouple-defaults …) never leaks into a nested sub-block
-    // module's own decouples. A (decouple-defaults …) form inside this body
-    // sets them below; the defer restores the enclosing design's on exit.
+    // Decouple defaults: the IC ref is design-block-local (a parent's
+    // fallback host makes no sense inside a different module), but the
+    // BYPASS component cascades — a sub-block module that doesn't declare
+    // its own (decouple-defaults (bypass …)) inherits the enclosing
+    // design's, transitively through nested sub-blocks. A
+    // (decouple-defaults …) form inside this body overrides below; the
+    // defer restores the enclosing design's defaults on exit.
     const saved_decouple_defaults = self.decouple_defaults;
-    self.decouple_defaults = .{};
+    self.decouple_defaults = .{ .ic = "", .bypass = saved_decouple_defaults.bypass };
     defer self.decouple_defaults = saved_decouple_defaults;
 
     for (args[1..]) |form| {
@@ -103,7 +120,11 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         if (form_children.len == 0) continue;
         const form_name = form_children[0].asAtom() orelse continue;
 
-        const sf = ScopeForm.fromAtom(form_name) orelse continue;
+        const sf = ScopeForm.fromAtom(form_name) orelse {
+            if (!isInertFormHead(form_name))
+                self.warnFmt(form.span, "unknown sub-form ({s} …) in (design-block …)", .{form_name});
+            continue;
+        };
         switch (sf) {
             .instance => {
                 const result = try instance_mod.buildInstance(self, form_children, env);
@@ -148,15 +169,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
                 if (cfg.derating) |d| derating = d;
             },
             .kicad_pcb => {
-                // (kicad-pcb "<absolute path>") — captures the on-disk
-                // PCB the file-based sync endpoint writes to. Only the
-                // literal string form is supported; no env-var or
-                // template expansion (NAS paths are deterministic).
-                if (form_children.len >= 2) {
-                    if (form_children[1].asString()) |p| {
-                        kicad_pcb_path = p;
-                    }
-                }
+                if (parseKicadPcbPath(form_children)) |p| kicad_pcb_path = p;
             },
             .function => if (try parseFunction(self, form_children)) |f| try functions.append(self.allocator, f),
             .stub => if (try parseStub(self, form_children)) |p| {
@@ -172,10 +185,14 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             // Same grammar as (placement …); the items name sub-block slugs.
             .floorplan => floorplan_spec = try parsePlacement(self, form_children),
             .board => board_spec = try parseBoard(self, form_children),
-            // Section-only forms are silently ignored at the top level —
-            // a design-block body shouldn't carry status/description/pins
-            // directly. The exhaustive switch is the contract.
-            .pins, .protocol, .calc, .description, .status, .role, .diagram, .hosts, .category => {},
+            .replicate => try evalReplicate(self, form_children, env, &sub_blocks),
+            // Section-only forms are ignored at the top level — a
+            // design-block body shouldn't carry status/description/pins
+            // directly. The exhaustive switch is the contract; the warning
+            // makes the silent skip visible.
+            .pins, .protocol, .calc, .description, .status, .role, .diagram, .hosts, .category => {
+                self.warnFmt(form.span, "({s} …) is section-only — ignored at design-block top level", .{form_name});
+            },
         }
     }
 
@@ -240,6 +257,129 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     block.rails = rails_mod.build(self.allocator, block) catch return EvalError.OutOfMemory;
 
     return .{ .design_block = block };
+}
+
+/// Read the path from a `(kicad-pcb "<absolute path>")` form — the on-disk
+/// PCB the file-based sync endpoint writes to. Only the literal string form
+/// is supported; no env-var or template expansion (NAS paths are
+/// deterministic). Null when the form carries no string.
+fn parseKicadPcbPath(form_children: []const Node) ?[]const u8 {
+    if (form_children.len < 2) return null;
+    return form_children[1].asString();
+}
+
+/// Evaluate `(replicate N "name~D" (module-call args…) [(id …)])` — the
+/// top-level replication form. For idx 1..N it instantiates the module call
+/// with every bare `~D` atom in the args replaced by idx, names the
+/// resulting sub-block from the template with `~D` substituted, and appends
+/// it to `sub_blocks`. Identity: the replicate form carries ONE auto-minted
+/// `(id …)` (written back into source on first build, exactly like
+/// `(sub-block …)`); each copy's sub-block uuid is
+/// `deriveChildId(replicate_uuid, sub_name)` and the children derive through
+/// the existing hierarchical-ids machinery — which is why the form requires
+/// `(hierarchical-ids)`.
+fn evalReplicate(
+    self: *Evaluator,
+    form_children: []const Node,
+    env: *Env,
+    sub_blocks: *std.ArrayListUnmanaged(SubBlock),
+) EvalError!void {
+    if (!self.hierarchical_ids) {
+        self.setError(form_children[0].span, "replicate requires (hierarchical-ids) — sub-block ids are derived per index");
+        return EvalError.InvalidForm;
+    }
+    if (form_children.len < 4) {
+        self.setError(form_children[0].span, "(replicate …) expects (replicate N \"name~D\" (module-call …))");
+        return EvalError.ArityError;
+    }
+    const count_f = (try self.evalNode(form_children[1], env)).asNumber() orelse {
+        self.setError(form_children[1].span, "(replicate …) count must be a number");
+        return EvalError.TypeError;
+    };
+    if (count_f < 1 or count_f > MAX_REPLICATE_COUNT) {
+        self.setErrorFmt(form_children[1].span, "(replicate …) count must be 1..{d}", .{MAX_REPLICATE_COUNT});
+        return EvalError.InvalidForm;
+    }
+    const count: usize = @intFromFloat(count_f);
+    const template = form_children[2].asString() orelse {
+        self.setError(form_children[2].span, "(replicate …) name template must be a string, e.g. \"adc~D\"");
+        return EvalError.TypeError;
+    };
+    const call_node = form_children[3];
+    const call_children = call_node.asList() orelse {
+        self.setError(call_node.span, "(replicate …) third argument must be a module call, e.g. (ad7380-channel ~D)");
+        return EvalError.InvalidForm;
+    };
+    const source: []const u8 = if (call_children.len > 0) (call_children[0].asAtom() orelse "") else "";
+
+    // One source-resident uuid for the whole form (auto-minted + queued for
+    // write-back on first build, like a sub-block's).
+    const replicate_uuid = try ids.getOrCreateFormId(self, form_children);
+
+    var idx: usize = 1;
+    while (idx <= count) : (idx += 1) {
+        const sub_name = try substituteIndexInString(self, template, idx);
+        const call = try substituteIndexInNode(self, call_node, idx);
+
+        // Discard module-scope pending-id writes exactly like buildSubBlock —
+        // their offsets point into the module source, not the board file.
+        const pending_pre = self.pending_ids.items.len;
+        const pending_child_pre = self.pending_child_ids.items.len;
+        const call_val = try self.evalNode(call, env);
+        const block = switch (call_val) {
+            .design_block => |b| b,
+            else => {
+                self.setErrorFmt(call_node.span, "(replicate …) call must return a design-block (copy {d})", .{idx});
+                return EvalError.TypeError;
+            },
+        };
+        self.pending_ids.items.len = pending_pre;
+        self.pending_child_ids.items.len = pending_child_pre;
+
+        const subblock_uuid = try ids.deriveChildId(self, replicate_uuid, sub_name, 0);
+        try ids.reassignSubBlockIdsV4(self, block, subblock_uuid);
+
+        try sub_blocks.append(self.allocator, .{
+            .name = sub_name,
+            .block = block,
+            .source = source,
+        });
+    }
+}
+
+/// Upper bound on `(replicate N …)` so a typo'd count can't allocate an
+/// absurd design.
+const MAX_REPLICATE_COUNT: usize = 999;
+
+/// Replace every `~D` occurrence in `template` with the decimal index.
+fn substituteIndexInString(self: *Evaluator, template: []const u8, idx: usize) EvalError![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var rest = template;
+    while (std.mem.indexOf(u8, rest, "~D")) |pos| {
+        buf.appendSlice(self.allocator, rest[0..pos]) catch return EvalError.OutOfMemory;
+        buf.writer(self.allocator).print("{d}", .{idx}) catch return EvalError.OutOfMemory;
+        rest = rest[pos + 2 ..];
+    }
+    buf.appendSlice(self.allocator, rest) catch return EvalError.OutOfMemory;
+    return buf.toOwnedSlice(self.allocator) catch EvalError.OutOfMemory;
+}
+
+/// Deep-copy `node` with every bare `~D` atom replaced by the integer idx.
+/// Lists are rebuilt recursively; all other node kinds pass through
+/// unchanged (spans preserved so diagnostics still point at the source).
+fn substituteIndexInNode(self: *Evaluator, node: Node, idx: usize) EvalError!Node {
+    switch (node.tag) {
+        .atom => |a| {
+            if (std.mem.eql(u8, a, "~D")) return Node.int(node.span, @intCast(idx));
+            return node;
+        },
+        .list => |children| {
+            const copy = self.allocator.alloc(Node, children.len) catch return EvalError.OutOfMemory;
+            for (children, 0..) |child, i| copy[i] = try substituteIndexInNode(self, child, idx);
+            return Node.list(node.span, copy);
+        },
+        else => return node,
+    }
 }
 
 /// Append auto pin aliases (net-ties) for an instance based on its pinout.
@@ -534,6 +674,8 @@ fn processSharedSectionForm(
             if (sf_children.len >= 2) {
                 if (sf_children[1].asAtom()) |status_str| {
                     scope.explicit_status.* = parseSectionStatus(status_str);
+                    if (scope.explicit_status.* == null)
+                        self.warnFmt(sf_children[1].span, "unknown status '{s}' in (status …) — expected concept|implemented|review", .{status_str});
                 }
             }
             return true;
@@ -552,8 +694,11 @@ fn processSharedSectionForm(
                     var ref: ?env_mod.NoteRef = null;
                     for (sf_children[2..]) |extra| {
                         if (env_mod.parseNoteRef(extra)) |r| {
-                            ref = r;
-                            break;
+                            if (ref == null) ref = r;
+                        } else if (!extra.isForm("id") and !extra.isForm("ids")) {
+                            // (id …) anchors are inert residue from the
+                            // auto-id inserter — skip without warning.
+                            self.warnFmt(extra.span, "unknown note modifier in (note …) — expected (ref \"file.pdf\" (page N))", .{});
                         }
                     }
                     try scope.notes.append(self.allocator, .{ .text = text, .ref = ref });
@@ -635,7 +780,11 @@ fn evalSection(
         const sf_children = sf.asList() orelse continue;
         if (sf_children.len == 0) continue;
         const sf_name = sf_children[0].asAtom() orelse continue;
-        const sft = ScopeForm.fromAtom(sf_name) orelse continue;
+        const sft = ScopeForm.fromAtom(sf_name) orelse {
+            if (!isInertFormHead(sf_name))
+                self.warnFmt(sf.span, "unknown sub-form ({s} …) in (section …)", .{sf_name});
+            continue;
+        };
 
         if (try processSharedSectionForm(self, sft, sf_children, env, scope)) continue;
 
@@ -647,6 +796,8 @@ fn evalSection(
                             block_role = .input;
                         } else if (std.mem.eql(u8, role_str, "output")) {
                             block_role = .output;
+                        } else {
+                            self.warnFmt(sf_children[1].span, "unknown role '{s}' in (role …) — expected input|output", .{role_str});
                         }
                     }
                 }
@@ -654,7 +805,11 @@ fn evalSection(
             .diagram => {
                 if (sf_children.len >= 2) {
                     if (sf_children[1].asAtom()) |mode| {
-                        if (std.mem.eql(u8, mode, "hidden")) diagram_hidden = true;
+                        if (std.mem.eql(u8, mode, "hidden")) {
+                            diagram_hidden = true;
+                        } else {
+                            self.warnFmt(sf_children[1].span, "unknown diagram mode '{s}' in (diagram …) — expected hidden", .{mode});
+                        }
                     }
                 }
             },
@@ -697,9 +852,29 @@ fn evalSection(
             .section => try evalSubSection(self, sf_children, env, instances, all_pin_nets, notes, net_ties, &sec_instances, &sec_sub_sections),
             // Shared-form variants are consumed above by
             // `processSharedSectionForm`; top-level-only forms are
-            // silently ignored inside a section body.
+            // ignored inside a section body (with a lint warning so the
+            // silent skip is visible).
             .status, .description, .note, .port, .protocol, .calc => {},
-            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function, .stub, .layout, .placement_order, .constraints, .placement, .floorplan, .board => {},
+            .group,
+            .sub_block,
+            .verifies,
+            .design_doc,
+            .test_point,
+            .power_config,
+            .decouple_defaults,
+            .kicad_pcb,
+            .function,
+            .stub,
+            .layout,
+            .placement_order,
+            .constraints,
+            .placement,
+            .floorplan,
+            .board,
+            .replicate,
+            => {
+                self.warnFmt(sf.span, "({s} …) is top-level-only — ignored inside (section …)", .{sf_name});
+            },
         }
     }
 
@@ -760,6 +935,10 @@ fn evalPinsForm(
     var pg_pins: std.ArrayListUnmanaged(env_mod.PartPin) = .empty;
     for (sf_children[2..]) |pin_form| {
         if (pin_form.isForm("group")) continue;
+        if (!builders.isKnownPinsChild(pin_form)) {
+            builders.warnUnknownPinsChild(self, pin_form);
+            continue;
+        }
         try builders.processPinForm(self, pin_form, pins_ref, pin_func_map, env, all_pin_nets, &pg_pins, net_ties);
     }
     const pg_slice = pg_pins.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
@@ -851,7 +1030,11 @@ fn evalSubSection(
         const ssf_children = ssf.asList() orelse continue;
         if (ssf_children.len == 0) continue;
         const ssf_name = ssf_children[0].asAtom() orelse continue;
-        const sft = ScopeForm.fromAtom(ssf_name) orelse continue;
+        const sft = ScopeForm.fromAtom(ssf_name) orelse {
+            if (!isInertFormHead(ssf_name))
+                self.warnFmt(ssf.span, "unknown sub-form ({s} …) in nested (section …)", .{ssf_name});
+            continue;
+        };
 
         if (try processSharedSectionForm(self, sft, ssf_children, env, sub_scope)) continue;
 
@@ -873,6 +1056,10 @@ fn evalSubSection(
                 const pin_func_map2 = builders.findPinFuncMap(self, instances.items, pins_ref);
                 var pg_pins2: std.ArrayListUnmanaged(env_mod.PartPin) = .empty;
                 for (ssf_children[2..]) |pin_form| {
+                    if (!builders.isKnownPinsChild(pin_form)) {
+                        builders.warnUnknownPinsChild(self, pin_form);
+                        continue;
+                    }
                     try builders.processPinForm(self, pin_form, pins_ref, pin_func_map2, env, all_pin_nets, &pg_pins2, net_ties);
                 }
                 const pg_slice2 = pg_pins2.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
@@ -907,10 +1094,12 @@ fn evalSubSection(
             .bus_net => try evalBusNetForm(self, ssf_children, env, net_ties),
             // Sub-sections don't recurse, don't carry top-level-only
             // forms, and don't have `role`/`diagram`. Shared-form
-            // variants went through `processSharedSectionForm` above.
-            // Sub-sections deliberately accept no top-level-only or
-            // section-only forms beyond what's matched above.
-            else => {},
+            // variants went through `processSharedSectionForm` above;
+            // anything else is ignored with a lint warning.
+            .status, .description, .note, .port, .protocol, .calc => {},
+            else => {
+                self.warnFmt(ssf.span, "({s} …) is not valid inside a nested (section …) — ignored", .{ssf_name});
+            },
         }
     }
     const final_sub_instances = sub_instances.toOwnedSlice(self.allocator) catch &.{};
@@ -1416,6 +1605,8 @@ fn parseStub(self: *Evaluator, form_children: []const Node) EvalError!?StubResul
             }
             if (sig_net.len == 0) continue;
             try signals.append(self.allocator, .{ .name = sig_name, .class = sig_class, .net = sig_net });
+        } else if (!isInertFormHead(head)) {
+            self.warnFmt(sub_node.span, "unknown sub-form ({s} …) in (stub …)", .{head});
         }
     }
 
@@ -1590,7 +1781,7 @@ pub const ParsedPlacementForm = struct { spec: env_mod.PlacementSpec, floorplan:
 /// solves it against a request-local design copy, no file written. Null when
 /// the text holds no such form (or doesn't parse at all).
 pub fn parsePlacementText(self: *Evaluator, text: []const u8) EvalError!?ParsedPlacementForm {
-    const nodes = @import("../sexpr/parser.zig").parse(self.allocator, text) catch return null;
+    const nodes = sexpr_parser.parse(self.allocator, text) catch return null;
     for (nodes) |node| {
         const lst = node.asList() orelse continue;
         if (lst.len < 1) continue;
@@ -1777,7 +1968,7 @@ test "design-block captures (kicad-pcb path)" {
         \\(design-block "test"
         \\  (kicad-pcb "/mnt/nas/test.kicad_pcb"))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -1804,7 +1995,7 @@ test "design-block parses a (function …) group" {
         \\    (stack 2)
         \\    (includes "DMM Analog Front-End" "DMM Cal EEPROM")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -1834,7 +2025,7 @@ test "design-block parses a (board ...) form" {
         \\    (right (rot 90 "sma1"))
         \\    (corners "MK1" "MK2" "MK3" "MK4")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
     var eval = Evaluator.init(a, "");
     defer eval.deinit();
@@ -1858,7 +2049,7 @@ test "section (hosts …) records owned sub-block names" {
         \\(design-block "test"
         \\  (section "PSU" (hosts "psu1" "mon_ch1")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -1881,7 +2072,7 @@ test "stub form parses role mpn category and size" {
         \\(design-block "test"
         \\  (stub "my-mcu" (role "Host MCU") (mpn "STM32H563") (category mcu) (size 9 9)))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
     var eval = Evaluator.init(a, "");
     defer eval.deinit();
@@ -1910,7 +2101,7 @@ test "stub auto-assigns a ref-des from the category prefix" {
         \\  (stub "u" (category mcu))
         \\  (stub "x" (category power) (ref "U7")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
     var eval = Evaluator.init(a, "");
     defer eval.deinit();
@@ -1931,7 +2122,7 @@ test "stub signal contributes net membership" {
         \\  (stub "a" (category mcu) (signal "SCL" i2c "I2C"))
         \\  (stub "b" (category sensor) (signal "SCL" i2c "I2C")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
     var eval = Evaluator.init(a, "");
     defer eval.deinit();
@@ -1954,7 +2145,7 @@ test "stub channels count is recorded on the part" {
         \\  (stub "psu" (category power) (channels 2))
         \\  (stub "solo" (category power)))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
     var eval = Evaluator.init(a, "");
     defer eval.deinit();
@@ -1974,7 +2165,7 @@ test "design-block parses a (layout …) form with anchor and place" {
         \\    (anchor "rp2350")
         \\    (place "esp32" (right-of "rp2350"))))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2005,7 +2196,7 @@ test "layout place parses each relation keyword" {
         \\    (place "d" (above "a"))
         \\    (place "e" (below "a"))))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2029,7 +2220,7 @@ test "layout place collects multiple constraints" {
         \\  (layout
         \\    (place "c" (right-of "b") (below "a"))))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2056,7 +2247,7 @@ test "layout row parses an ordered band of block keys" {
         \\    (row "mcu" "esp32" "screen")
         \\    (row "buck5v" "buck3v3")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2082,7 +2273,7 @@ test "layout group parses a labeled region over member keys" {
         \\    (group "Brains" "mcu" "esp32")
         \\    (group "Power" "buck5v" "buck3v3" "or_diode")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2108,7 +2299,7 @@ test "layout edge parses left and right pinned blocks" {
         \\    (edge left "usbc_host" "barrel")
         \\    (edge right "banana")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2132,7 +2323,7 @@ test "evalBusNetForm expands inclusive index range" {
     // so the test doesn't need a project_dir + pinout fixture.
     const a = std.heap.page_allocator;
     const src = "(bus-net \"FLASH_IO\" 0 2 \"flash\")";
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2158,7 +2349,7 @@ test "evalBusNetForm strided fan-out distributes channels across subs and ports"
         \\(bus-net "ADF_CH" 1 10 (suffixes P N) (over "adc1" "adc2" "adc3")
         \\         (ports AINA_EXT_ AINB_EXT_ AINC_EXT_ AIND_EXT_))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2191,7 +2382,7 @@ test "evalSubBlockBridges ties PREFIX+port to sub/port and honours rename" {
         \\(sub-block "imu" (bno08x-imu)
         \\  (bridge "IMU_" SCK MOSI MISO (rename CS NCS)))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2214,7 +2405,7 @@ test "evalSubBlockBridges ties PREFIX+port to sub/port and honours rename" {
 test "expandSectionBusPort expands index x suffix matrix" {
     const a = std.heap.page_allocator;
     const src = "(bus-port \"ADF_CH\" 1 3 (suffixes P N) in differential)";
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2241,7 +2432,7 @@ test "parseVerifies reads an (id …) target as a stable-id sign-off" {
         \\  (rationale "checked against datasheet")
         \\  (signed-off-by "me" (date "2026-05-25")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2262,7 +2453,7 @@ test "parseVerifies reads an (id …) target as a stable-id sign-off" {
 test "parseVerifies reads a ref-des target as a ref-des sign-off" {
     const a = std.heap.page_allocator;
     const src = "(verifies (req \"U6\" deadbeef) \"looks good\")";
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2275,4 +2466,309 @@ test "parseVerifies reads a ref-des target as a ref-des sign-off" {
     try testing.expectEqualStrings("", v.target_id);
     try testing.expectEqualStrings("deadbeef", v.req_id);
     try testing.expectEqualStrings("looks good", v.rationale);
+}
+
+/// Evaluate a design-block source string with a registered cap family and
+/// return the evaluator (caller inspects `warnings`). page_allocator:
+/// evaluator allocations are intentionally never freed (project convention).
+/// Cap family name shared by the warning/cascade test fixtures.
+const TEST_CAP_FAMILY = "cap-0402";
+
+fn evalWarningFixture(alloc: std.mem.Allocator, eval: *Evaluator, source: []const u8) !void {
+    eval.* = Evaluator.init(alloc, ".");
+    try eval.component_cache.put(alloc, TEST_CAP_FAMILY, .{
+        .name = TEST_CAP_FAMILY,
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "",
+    });
+    try eval.component_cache.put(alloc, "fakeic", .{
+        .name = "fakeic",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    const nodes = try sexpr_parser.parse(alloc, source);
+    _ = try eval.evalNodes(nodes, &env);
+}
+
+/// True when any recorded warning message contains `needle`.
+fn hasWarningContaining(eval: *const Evaluator, needle: []const u8) bool {
+    for (eval.warnings.items) |w| {
+        if (std.mem.indexOf(u8, w.message, needle) != null) return true;
+    }
+    return false;
+}
+
+// spec: eval/design_block - an unknown sub-form inside a section records a lint warning naming the form
+test "unknown section sub-form records a warning" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    try evalWarningFixture(alloc, &eval,
+        \\(design-block "T"
+        \\  (section "S" "desc"
+        \\    (rolle input)))
+    );
+    try testing.expect(hasWarningContaining(&eval, "unknown sub-form (rolle …) in (section …)"));
+}
+
+// spec: eval/design_block - a misspelled role word records a warning listing the expected values
+test "unknown role word records a warning" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    try evalWarningFixture(alloc, &eval,
+        \\(design-block "T"
+        \\  (section "S" "desc"
+        \\    (role inptu)))
+    );
+    try testing.expect(hasWarningContaining(&eval, "unknown role 'inptu' in (role …) — expected input|output"));
+}
+
+// spec: eval/design_block - an unknown design-block top-level form records a warning
+test "unknown design-block sub-form records a warning" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    try evalWarningFixture(alloc, &eval,
+        \\(design-block "T"
+        \\  (placment-order "U1"))
+    );
+    try testing.expect(hasWarningContaining(&eval, "unknown sub-form (placment-order …) in (design-block …)"));
+}
+
+// spec: eval/design_block - an unknown port option records a warning naming the option
+test "unknown port option records a warning" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    try evalWarningFixture(alloc, &eval,
+        \\(design-block "T"
+        \\  (port "VDD" in pwoer))
+    );
+    try testing.expect(hasWarningContaining(&eval, "unknown port option 'pwoer' in (port …)"));
+}
+
+// spec: eval/design_block - a non-property sub-form in an instance body records a warning
+test "ignored instance sub-form records a warning" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    try evalWarningFixture(alloc, &eval,
+        \\(design-block "T"
+        \\  (instance "C1" (cap-0402 "100nF")
+        \\    (pin 1 "VDD")
+        \\    (pin 2 "GND")
+        \\    (mpn 42)))
+    );
+    try testing.expect(hasWarningContaining(&eval, "ignored sub-form (mpn …) in (instance \"C1\" …)"));
+}
+
+// spec: eval/design_block - inert id/ids/hierarchical-ids/row/col heads never draw warnings
+test "inert form heads are warning-free" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    try evalWarningFixture(alloc, &eval,
+        \\(design-block "T"
+        \\  (hierarchical-ids)
+        \\  (section "S" "desc"
+        \\    (row 0)
+        \\    (col 1)
+        \\    (instance "C1" (cap-0402 "100nF")
+        \\      (pin 1 "VDD")
+        \\      (pin 2 "GND")
+        \\      (id abcd1234))))
+    );
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+}
+
+/// Source for the replicate tests: a tiny one-cap module replicated 3×
+/// under (hierarchical-ids), with the replicate form's (id …) pinned so
+/// child ids are reproducible across fresh evaluations.
+const replicate_fixture_src =
+    \\(defmodule tiny (n)
+    \\  (design-block (fmt "Tiny ~R" n)
+    \\    (instance "C1" (cap-0402 "100nF")
+    \\      (pin 1 "VDD")
+    \\      (pin 2 "GND"))))
+    \\(design-block "Top"
+    \\  (hierarchical-ids)
+    \\  (replicate 3 "adc~D" (tiny ~D) (id abcd1234)))
+;
+
+/// Evaluate the replicate fixture with a fresh evaluator and return the
+/// resulting top-level design block.
+fn evalReplicateFixture(alloc: std.mem.Allocator, eval: *Evaluator) !*DesignBlock {
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    try evalWarningFixture(alloc, eval, replicate_fixture_src);
+    // evalWarningFixture discards the value; re-evaluate to capture it.
+    const nodes = try sexpr_parser.parse(alloc, replicate_fixture_src);
+    var env2 = env_mod.Env.init(alloc, null);
+    defer env2.deinit();
+    const v = try eval.evalNodes(nodes, &env2);
+    return switch (v) {
+        .design_block => |b| b,
+        else => error.TestUnexpectedResult,
+    };
+}
+
+// spec: eval/design_block - replicate expands to N sub-blocks with the index substituted into names and call args
+test "replicate builds N sub-blocks with substituted names and args" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const block = try evalReplicateFixture(alloc, &eval);
+
+    try testing.expectEqual(@as(usize, 3), block.sub_blocks.len);
+    try testing.expectEqualStrings("adc1", block.sub_blocks[0].name);
+    try testing.expectEqualStrings("adc2", block.sub_blocks[1].name);
+    try testing.expectEqualStrings("adc3", block.sub_blocks[2].name);
+    // ~D substituted into the call args: the module names itself "Tiny <n>".
+    try testing.expectEqualStrings("Tiny 1", block.sub_blocks[0].block.name);
+    try testing.expectEqualStrings("Tiny 3", block.sub_blocks[2].block.name);
+    // Distinct global ref-des across the copies.
+    const r0 = block.sub_blocks[0].block.instances[0].ref_des;
+    const r1 = block.sub_blocks[1].block.instances[0].ref_des;
+    const r2 = block.sub_blocks[2].block.instances[0].ref_des;
+    try testing.expect(!std.mem.eql(u8, r0, r1));
+    try testing.expect(!std.mem.eql(u8, r1, r2));
+    // Distinct derived ids across the copies (different sub-block uuids).
+    const id_a = block.sub_blocks[0].block.instances[0].id;
+    const id_b = block.sub_blocks[1].block.instances[0].id;
+    try testing.expect(!std.mem.eql(u8, id_a, id_b));
+}
+
+// spec: eval/design_block - replicate child ids are stable across two evaluations of the same id-annotated source
+test "replicate ids are stable across evals" {
+    const alloc = std.heap.page_allocator;
+    var eval_a: Evaluator = undefined;
+    const block_a = try evalReplicateFixture(alloc, &eval_a);
+    var eval_b: Evaluator = undefined;
+    const block_b = try evalReplicateFixture(alloc, &eval_b);
+
+    try expectSameReplicaIds(block_a, block_b);
+    // The pinned (id abcd1234) means nothing new is queued for write-back
+    // at the replicate form itself.
+    for (eval_a.pending_ids.items) |p| {
+        try testing.expect(!std.mem.eql(u8, p.id, "abcd1234"));
+    }
+}
+
+/// Assert two evaluations of the replicate fixture produced identical
+/// sub-block names and child instance ids.
+fn expectSameReplicaIds(block_a: *const DesignBlock, block_b: *const DesignBlock) !void {
+    try testing.expectEqual(block_b.sub_blocks.len, block_a.sub_blocks.len);
+    for (block_a.sub_blocks, block_b.sub_blocks) |sa, sb| {
+        try testing.expectEqualStrings(sb.name, sa.name);
+        try testing.expectEqual(sb.block.instances.len, sa.block.instances.len);
+        for (sa.block.instances, sb.block.instances) |ia, ib| {
+            try testing.expectEqualStrings(ib.id, ia.id);
+        }
+    }
+}
+
+// spec: eval/design_block - replicate without hierarchical-ids is rejected with the opt-in message
+test "replicate requires hierarchical-ids" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const r = evalWarningFixture(alloc, &eval,
+        \\(defmodule tiny (n)
+        \\  (design-block "Tiny"
+        \\    (instance "C1" (cap-0402 "100nF")
+        \\      (pin 1 "VDD")
+        \\      (pin 2 "GND"))))
+        \\(design-block "Top"
+        \\  (replicate 3 "adc~D" (tiny ~D) (id abcd1234)))
+    );
+    try testing.expectError(error.InvalidForm, r);
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expectEqualStrings("replicate requires (hierarchical-ids) — sub-block ids are derived per index", diag.message);
+}
+
+/// Find the first cap-0402 instance in a block, or null.
+fn findCapInstance(block: *const DesignBlock) ?Instance {
+    for (block.instances) |inst| {
+        if (std.mem.eql(u8, inst.component, TEST_CAP_FAMILY)) return inst;
+    }
+    return null;
+}
+
+/// Evaluate a cascade-test source and return the named sub-block's block.
+fn evalCascadeFixture(alloc: std.mem.Allocator, eval: *Evaluator, source: []const u8) !*DesignBlock {
+    eval.* = undefined;
+    try evalWarningFixture(alloc, eval, source);
+    const nodes = try sexpr_parser.parse(alloc, source);
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    const v = try eval.evalNodes(nodes, &env);
+    const block = switch (v) {
+        .design_block => |b| b,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(@as(usize, 1), block.sub_blocks.len);
+    return block.sub_blocks[0].block;
+}
+
+// spec: eval/design_block - the decouple-defaults bypass component cascades into sub-block modules that declare none
+test "decouple-defaults bypass cascades into a sub-block" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const sub = try evalCascadeFixture(alloc, &eval,
+        \\(defmodule mymod ()
+        \\  (design-block "Mod"
+        \\    (instance "U1" fakeic (pin 1 "VDD") (pin 2 "GND"))
+        \\    (decouple "VDD" 1 per-pin U1 1)))
+        \\(design-block "Top"
+        \\  (decouple-defaults (bypass (cap-0402 "100nF")))
+        \\  (sub-block "m" (mymod)))
+    );
+    const cap = findCapInstance(sub) orelse return error.TestExpectedCap;
+    try testing.expectEqualStrings("100nF", cap.value);
+}
+
+// spec: eval/design_block - a sub-block module's own decouple-defaults bypass wins over the parent's
+test "module-local decouple-defaults bypass wins over the parent" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const sub = try evalCascadeFixture(alloc, &eval,
+        \\(defmodule mymod ()
+        \\  (design-block "Mod"
+        \\    (decouple-defaults (bypass (cap-0402 "1uF")))
+        \\    (instance "U1" fakeic (pin 1 "VDD") (pin 2 "GND"))
+        \\    (decouple "VDD" 1 per-pin U1 1)))
+        \\(design-block "Top"
+        \\  (decouple-defaults (bypass (cap-0402 "100nF")))
+        \\  (sub-block "m" (mymod)))
+    );
+    const cap = findCapInstance(sub) orelse return error.TestExpectedCap;
+    try testing.expectEqualStrings("1uF", cap.value);
+}
+
+// spec: eval/design_block - the bypass default cascades transitively through nested sub-blocks while the ic ref stays local
+test "bypass default cascades transitively into nested sub-blocks" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const mid = try evalCascadeFixture(alloc, &eval,
+        \\(defmodule innermod ()
+        \\  (design-block "Inner"
+        \\    (instance "U1" fakeic (pin 1 "VDD") (pin 2 "GND"))
+        \\    (decouple "VDD" 1 per-pin U1 1)))
+        \\(defmodule outermod ()
+        \\  (design-block "Outer"
+        \\    (sub-block "inner" (innermod))))
+        \\(design-block "Top"
+        \\  (decouple-defaults (ic "U99") (bypass (cap-0402 "100nF")))
+        \\  (sub-block "outer" (outermod)))
+    );
+    try testing.expectEqual(@as(usize, 1), mid.sub_blocks.len);
+    const cap = findCapInstance(mid.sub_blocks[0].block) orelse return error.TestExpectedCap;
+    try testing.expectEqualStrings("100nF", cap.value);
+    // The ic ref did NOT cascade: the inner decouple's split net names U1
+    // (its explicit ref), not the top-level default U99.
+    var found_u1_net = false;
+    for (mid.sub_blocks[0].block.nets) |net| {
+        if (std.mem.indexOf(u8, net.name, ".U99.") != null) return error.TestIcLeaked;
+        if (std.mem.indexOf(u8, net.name, "VDD.") != null) found_u1_net = true;
+    }
+    try testing.expect(found_u1_net);
 }

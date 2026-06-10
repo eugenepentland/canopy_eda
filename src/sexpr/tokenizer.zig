@@ -2,9 +2,10 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const Span = ast.Span;
 
-/// Lexical category of an S-expression token. `unit_val` covers numbers
-/// with a trailing unit (`100k`, `3.3V`, `220nF`); `int` and `float` are
-/// reserved for plain numerics.
+/// Lexical category of an S-expression token. `unit_val` covers dimension
+/// numbers with a trailing `mm`/`mil`; `si_val` covers SI-scaled electrical
+/// literals (`220k`, `100nF`, `3.3V`, `10mA`) whose text keeps the suffix so
+/// the parser can apply the scale; `int` and `float` are plain numerics.
 pub const TokenTag = enum {
     lparen,
     rparen,
@@ -13,6 +14,7 @@ pub const TokenTag = enum {
     int,
     float,
     unit_val,
+    si_val,
     eof,
 };
 
@@ -195,6 +197,17 @@ pub const Tokenizer = struct {
                 }
             }
         }
+        // SI scale suffix (k/M/G/u/n/p — or m only when a unit letter
+        // follows, so `3m`/`mm`/`mil` keep their existing meanings),
+        // optionally followed by ONE unit letter from {V,A,F,H,R} that is
+        // ignored for the value (`100nF` == `100n`); or a bare unit letter
+        // (`3.3V` → 3.3). The suffix must end the token — `100kHz` and
+        // `204928-0301.stp` keep falling through to the atom path below.
+        if (self.siSuffixLen()) |suffix_len| {
+            var k: u2 = 0;
+            while (k < suffix_len) : (k += 1) self.advance();
+            return Token{ .tag = .si_val, .text = self.source[start..self.pos], .span = s };
+        }
         // If followed by an atom-continuation char, this wasn't a number at
         // all — it's an identifier like "204928-0301.stp" or "12.5abc".
         // Slurp the rest as an atom.
@@ -211,6 +224,41 @@ pub const Tokenizer = struct {
             return Token{ .tag = .float, .text = text, .span = s };
         }
         return Token{ .tag = .int, .text = text, .span = s };
+    }
+
+    /// Length (1 or 2 chars) of an SI value suffix starting at the cursor,
+    /// or null when the upcoming chars aren't one. Accepted shapes:
+    ///   • scale letter alone:        `4.7k`, `10M`, `1n`
+    ///   • scale letter + unit letter: `100nF`, `10mA`, `100mV`
+    ///   • unit letter alone:          `3.3V`, `0.5A`
+    /// `m` is only a scale when a unit letter follows — bare `3m`, `mm`,
+    /// and `mil` keep their existing dimension/atom behavior.
+    fn siSuffixLen(self: *const Tokenizer) ?u2 {
+        const c0 = self.peek() orelse return null;
+        if (isScaleLetter(c0)) {
+            const c1 = self.peekAt(1);
+            if (!isAtomContinue(c1)) return 1;
+            if (c1) |u| {
+                if (isUnitLetter(u) and !isAtomContinue(self.peekAt(2))) return 2;
+            }
+            return null;
+        }
+        if (c0 == 'm') {
+            if (self.peekAt(1)) |u| {
+                if (isUnitLetter(u) and !isAtomContinue(self.peekAt(2))) return 2;
+            }
+            return null;
+        }
+        if (isUnitLetter(c0) and !isAtomContinue(self.peekAt(1))) return 1;
+        return null;
+    }
+
+    fn isScaleLetter(c: u8) bool {
+        return c == 'k' or c == 'M' or c == 'G' or c == 'u' or c == 'n' or c == 'p';
+    }
+
+    fn isUnitLetter(c: u8) bool {
+        return c == 'V' or c == 'A' or c == 'F' or c == 'H' or c == 'R';
     }
 
     fn readAtom(self: *Tokenizer, s: Span) Token {
@@ -328,6 +376,55 @@ test "tokenize numbers" {
     const t5 = try t.next();
     try std.testing.expectEqual(TokenTag.unit_val, t5.tag);
     try std.testing.expectEqualStrings("10", t5.text);
+}
+
+// spec: sexpr/tokenizer - Tokenizes SI-scaled literals (220k, 100nF, 3.3V, 10mA) as si_val with the suffix in the token text
+test "tokenize si suffixed numbers" {
+    var t = Tokenizer.init("220k 4.7M 1G 10u 100n 22p 100nF 10mA 100mV 3.3V 0.5A 10R 1uH");
+    const expected = [_][]const u8{ "220k", "4.7M", "1G", "10u", "100n", "22p", "100nF", "10mA", "100mV", "3.3V", "0.5A", "10R", "1uH" };
+    for (expected) |want| {
+        const tok = try t.next();
+        try std.testing.expectEqual(TokenTag.si_val, tok.tag);
+        try std.testing.expectEqualStrings(want, tok.text);
+    }
+    const eof = try t.next();
+    try std.testing.expectEqual(TokenTag.eof, eof.tag);
+}
+
+// spec: sexpr/tokenizer - SI suffix rules leave mm/mil dimensions, bare milli, and longer identifiers untouched
+test "tokenize si suffix boundary cases" {
+    // mm/mil stay unit_val dimension tokens; bare `3m` stays an atom;
+    // a suffix followed by more atom chars falls through to an atom
+    // (`100kHz`, `5V3`, `204928-0301.stp`); plain ints/floats unchanged.
+    var t = Tokenizer.init("1.0mm 10mil 3m 100kHz 5V3 204928-0301.stp 42 3.3");
+    const cases = [_]struct { tag: TokenTag, text: []const u8 }{
+        .{ .tag = .unit_val, .text = "1.0" },
+        .{ .tag = .unit_val, .text = "10" },
+        .{ .tag = .atom, .text = "3m" },
+        .{ .tag = .atom, .text = "100kHz" },
+        .{ .tag = .atom, .text = "5V3" },
+        .{ .tag = .atom, .text = "204928-0301.stp" },
+        .{ .tag = .int, .text = "42" },
+        .{ .tag = .float, .text = "3.3" },
+    };
+    for (cases) |case| {
+        const tok = try t.next();
+        try std.testing.expectEqual(case.tag, tok.tag);
+        try std.testing.expectEqualStrings(case.text, tok.text);
+    }
+}
+
+// spec: sexpr/tokenizer - SI literal at a paren boundary ends the token
+test "tokenize si suffix before rparen" {
+    var t = Tokenizer.init("(let r 4.7k)");
+    _ = try t.next(); // (
+    _ = try t.next(); // let
+    _ = try t.next(); // r
+    const tok = try t.next();
+    try std.testing.expectEqual(TokenTag.si_val, tok.tag);
+    try std.testing.expectEqualStrings("4.7k", tok.text);
+    const rp = try t.next();
+    try std.testing.expectEqual(TokenTag.rparen, rp.tag);
 }
 
 // spec: sexpr/tokenizer - Skips line comments starting with semicolon

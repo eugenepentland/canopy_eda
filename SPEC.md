@@ -6,6 +6,9 @@ CLI-driven electronic design automation for schematic capture using S-expression
 
 - Tokenizes parentheses and atoms from S-expression input
 - Tokenizes integer and float numbers with optional unit suffixes
+- Tokenizes SI-scaled literals (220k, 100nF, 3.3V, 10mA) as si_val with the suffix in the token text
+- SI suffix rules leave mm/mil dimensions, bare milli, and longer identifiers untouched
+- SI literal at a paren boundary ends the token
 - Skips line comments starting with semicolon
 - Tokenizes arithmetic operators as distinct tokens
 - Tokenizes comparison operators as distinct tokens
@@ -17,6 +20,7 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Parses a simple S-expression list into an AST node
 - Parses nested S-expression lists into a tree
 - Parses numbers and unit values into typed AST nodes
+- Parses SI-scaled literals (220k, 100nF, 3.3V, 10mA) into scaled float nodes
 - Parses input containing comments by ignoring them
 - Parses multiple top-level forms into separate AST nodes
 - Identifies forms by head atom via isForm helper
@@ -182,9 +186,30 @@ Public functions: worldShape, pointDist, shapeGap
 
 - Fills a pin's asserted_fns with the unique alt when the pinout has exactly one alternative
 
+## eval/modules
+
+- Module calls bind purely positional arguments in declaration order
+- Module calls accept named (param expr) arguments in any order
+- Module calls mix leading positional with trailing named arguments
+- A 2-list whose head is not a declared param stays a positional expression
+- Binding the same module parameter twice is diagnosed by name
+- A positional argument after a named argument is rejected
+- Unbound module parameters are diagnosed by name at the call site
+- Surplus positional arguments are diagnosed with expected and actual counts
+
+## eval/suggest
+
+- editDistance computes the Levenshtein distance between names
+- unbound library name yields an import hint naming the missing import
+- a near-miss name yields a did-you-mean suggestion from env and cache candidates
+- a name with no close candidate reports a plain unknown-name message
+
 ## eval/evaluator
 
 - Evaluates arithmetic expressions from S-expression AST
+- an error inside a module body appends the module call stack to the diagnostic
+- SI-suffixed literals evaluate to their scaled numeric value
+- SI-suffixed literals flow through module call arguments
 - Evaluates let bindings that define named values in scope
 - Evaluates if conditionals selecting a branch by predicate
 - Evaluates fmt expressions producing formatted strings
@@ -429,6 +454,23 @@ Public functions: analyze
 - fanout places one component from COMMON to each listed net
 - decouple-defaults lets decouple omit its component and host ref
 - decouple with no defaults keeps its legacy explicit form
+- decouple per-pin (pins-of REF NET) expands to the same instances and nets as the hand-written pin list
+- decouple per-pin auto expands the decouple-defaults IC's pins on the decoupled net
+- decouple per-pin auto without a decouple-defaults ic is diagnosed
+- decouple pins-of with no matching declared pins is diagnosed with the declaration-order contract
+- decouple mixes (pins-of …) expansion with extra literal pins
+- an unknown sub-form inside a section records a lint warning naming the form
+- a misspelled role word records a warning listing the expected values
+- an unknown design-block top-level form records a warning
+- an unknown port option records a warning naming the option
+- a non-property sub-form in an instance body records a warning
+- inert id/ids/hierarchical-ids/row/col heads never draw warnings
+- replicate expands to N sub-blocks with the index substituted into names and call args
+- replicate child ids are stable across two evaluations of the same id-annotated source
+- replicate without hierarchical-ids is rejected with the opt-in message
+- the decouple-defaults bypass component cascades into sub-block modules that declare none
+- a sub-block module's own decouple-defaults bypass wins over the parent's
+- the bypass default cascades transitively through nested sub-blocks while the ic ref stays local
 - bus-port expands one port per index times optional suffix list
 - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
 - kicad-pcb form captures the literal path on the design block
