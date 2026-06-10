@@ -220,7 +220,10 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     if (!embed) try pages_tmpl.Navbar.render(.{""}, w);
 
     try w.writeAll("<div class=\"pcb-layout\">");
-    if (!embed) try writeSidebar(w, ctx.allocator, placement);
+    // Cross-probe target for the sidebar's "Show in schematic" links: modules
+    // render under /modules/, designs under /schematics/.
+    const sch_base: []const u8 = if (module_res != null) "/modules/" else "/schematics/";
+    if (!embed) try writeSidebar(w, ctx.allocator, placement, sch_base, name);
     try w.writeAll("<main class=\"pcb-main\">");
     if (embed) {
         // Compact, read-only chrome for the per-sub-block preview embedded in
@@ -2722,7 +2725,13 @@ fn writeLegend(w: *std.Io.Writer, p: optimizer.Placement, hidden: bool) std.Io.W
 
 const PinNet = struct { pin: []const u8, net: []const u8 };
 
-fn writeSidebar(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement) HandlerError!void {
+fn writeSidebar(
+    w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    p: optimizer.Placement,
+    sch_base: []const u8,
+    design_name: []const u8,
+) HandlerError!void {
     var by_ref = std.StringHashMap(std.ArrayListUnmanaged(PinNet)).init(alloc);
     for (p.nets) |net| {
         for (net.pins) |pin| {
@@ -2764,6 +2773,15 @@ fn writeSidebar(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placem
             }
             try w.writeAll("</div>");
         }
+        // Reverse cross-probe: jump to this part on the schematic page. The
+        // viewer's hash handler scrolls + flashes the component (matching the
+        // exact ref first, then the bare sub-block leaf).
+        try w.writeAll("<a class=\"comp-sch-link\" href=\"");
+        try w.writeAll(sch_base);
+        try writeAttr(w, design_name);
+        try w.writeAll("#comp-");
+        try writeAttr(w, inst.ref_des);
+        try w.writeAll("\" title=\"Open the schematic page scrolled to this part\">Show in schematic \u{2192}</a>");
         try w.writeAll("</li>");
     }
     try w.writeAll("</ul></aside>");
@@ -3380,8 +3398,20 @@ const PAGE_CSS =
     \\  cursor:pointer;font-family:inherit}
     \\.comp-fp.court-edit:hover{color:#58a6ff;text-decoration:underline}
     \\.comp-pins{display:flex;flex-wrap:wrap;gap:3px 5px}
+    \\.comp-sch-link{display:inline-block;font-size:10.5px;color:#58a6ff;text-decoration:none;margin-top:4px}
+    \\.comp-sch-link:hover{text-decoration:underline}
     \\.pn{font-size:11px;color:#c9d1d9;background:#21262d;border-radius:3px;padding:0 5px;white-space:nowrap}
     \\.pn b{color:#e6edf3;font-weight:600;margin-right:3px}
+    \\.part.focus-flash .court{stroke:#f0b72f!important;stroke-width:2.6!important;animation:partflash .55s ease-in-out 4}
+    \\@keyframes partflash{50%{stroke-opacity:0.25}}
+    \\.kbd-overlay{position:fixed;inset:0;background:rgba(1,4,9,0.72);z-index:340;display:flex;align-items:center;justify-content:center}
+    \\.kbd-box{background:#161b22;border:1px solid #30363d;border-radius:10px;min-width:320px;max-width:480px;
+    \\  padding:18px 22px;box-shadow:0 16px 48px rgba(0,0,0,0.7)}
+    \\.kbd-box h3{margin:0 0 12px;font-size:15px;color:#f0f6fc}
+    \\.kbd-row{display:flex;justify-content:space-between;gap:18px;padding:4px 0;font-size:13px;color:#c9d1d9}
+    \\.kbd-row kbd{background:#21262d;border:1px solid #30363d;border-bottom-width:2px;border-radius:4px;
+    \\  padding:1px 7px;font-family:ui-monospace,monospace;font-size:11.5px;color:#79c0ff;white-space:nowrap}
+    \\.kbd-hint{margin-top:12px;font-size:11.5px;color:#6e7681}
     \\.court-modal{position:fixed;inset:0;background:rgba(1,4,9,0.7);display:flex;
     \\  align-items:center;justify-content:center;z-index:200}
     \\.court-modal[hidden]{display:none}
@@ -3996,5 +4026,28 @@ const BOARD_JS =
     \\if(legCb)legCb.addEventListener("change",function(){var l=document.getElementById("pcb-legend");
     \\ if(l)l.hidden=!legCb.checked;});
     \\rats(); showScore(PCB.auto); drawRoute(); drawClr(); drawDrc();
+    \\// ── Cross-probe focus: ?focus=REF (or #REF) selects that part on load —
+    \\//    zoom/centre the view on it, flash its courtyard, and reveal it in the
+    \\//    component sidebar. Exact ref first, then the bare sub-block leaf
+    \\//    (focus=U2 matches ldo/U2), mirroring the PNG renderer's ?refs= rule.
+    \\(function(){
+    \\ var want="";
+    \\ try{want=new URLSearchParams(location.search).get("focus")||"";}catch(e){}
+    \\ if(!want&&location.hash.length>1)want=decodeURIComponent(location.hash.slice(1));
+    \\ if(!want)return;
+    \\ function leaf(r){var i=r.lastIndexOf("/");return i<0?r:r.slice(i+1);}
+    \\ var idx=-1;
+    \\ P.forEach(function(p,i){if(idx<0&&p.ref===want)idx=i;});
+    \\ if(idx<0)P.forEach(function(p,i){if(idx<0&&leaf(p.ref)===want)idx=i;});
+    \\ if(idx<0)return;
+    \\ var p=P[idx],cx=X(p.x),cy=Y(p.y);
+    \\ var fw=Math.min(VBW,Math.max(VBW*0.35,(2*p.hw+14)*S*4));
+    \\ vb={x:cx-fw/2,y:cy-fw*(VBH/VBW)/2,w:fw,h:fw*(VBH/VBW)};setVB();
+    \\ els[idx].classList.add("focus-flash");
+    \\ setTimeout(function(){els[idx].classList.remove("focus-flash");},2600);
+    \\ var sel=p.ref;if(window.CSS&&CSS.escape)sel=CSS.escape(sel);
+    \\ var li=document.querySelector('.comp[data-ref="'+sel+'"]');
+    \\ if(li){li.scrollIntoView({behavior:"smooth",block:"center"});li.classList.add("sel");}
+    \\})();
     \\})();</script>
 ;

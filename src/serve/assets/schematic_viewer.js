@@ -409,6 +409,25 @@
     });
   }
 
+  // Where to find this component on a PCB-layout view, or null when none
+  // applies. Modules have a whole-module /pcb-layout/:name view; design
+  // pages only have per-sub-block scoped views (?sub=<slug>), so the link
+  // appears only when the instance lives inside a sub-block. The focus ref
+  // for a sub-scoped view is the bare leaf (the scoped layout's refs are
+  // module-local).
+  function pcbLocateHref(ref, c) {
+    if (typeof SCH_VIEW !== 'undefined' && SCH_VIEW === 'module') {
+      return '/pcb-layout/' + encodeURIComponent(DESIGN_NAME) + '?focus=' + encodeURIComponent(ref);
+    }
+    var sec = c.section ? sectionBySlug[c.section] : null;
+    if (sec && sec.sub) {
+      var leaf = ref.indexOf('/') >= 0 ? ref.slice(ref.lastIndexOf('/') + 1) : ref;
+      return '/pcb-layout/' + encodeURIComponent(DESIGN_NAME) +
+        '?sub=' + encodeURIComponent(c.section) + '&focus=' + encodeURIComponent(leaf);
+    }
+    return null;
+  }
+
   // Unified detail view for any component — hubs render their pin table,
   // passives render a compact info card with a "show net" jump for each pin.
   function showComponent(ref, doScroll) {
@@ -429,6 +448,11 @@
           escapeHtml(c.component) + '</span>' : '') +
         (c.value ? ' · ' + escapeHtml(c.value) : '') +
       '</div>';
+    var pcbHref = pcbLocateHref(ref, c);
+    if (pcbHref) {
+      html += '<div class="sb-pcb-locate"><a href="' + escapeHtml(pcbHref) +
+        '" title="Open the PCB layout view zoomed to this part">Locate on PCB →</a></div>';
+    }
     if (c.footprint) html += footprintPreviewHtml(c.footprint);
     if (c.kind !== 'hub') {
       // Passives: show the nets they sit on, derived from SCH_INDEX.nets.
@@ -1741,6 +1765,32 @@
   }
   document.querySelectorAll('.dg-svg').forEach(setupDiagramZoom);
 
+  // ---- Cross-probe via URL hash ----
+  // /schematics/:name#comp-<REF> (the PCB sidebar's "Show in schematic" link)
+  // scrolls to that component and flashes it, reusing the search-result
+  // selection path. Exact ref first, then bare sub-block leaf (U2 matches
+  // pwr/U2). Also handles in-page hash changes.
+  function componentFromHash() {
+    var h = location.hash || '';
+    if (h.indexOf('#comp-') !== 0) return null;
+    var want = decodeURIComponent(h.slice(6));
+    if (compByRef[want]) return want;
+    var found = null;
+    (SCH_INDEX.components || []).forEach(function (c) {
+      if (found) return;
+      var r = c.ref;
+      var leaf = r.indexOf('/') >= 0 ? r.slice(r.lastIndexOf('/') + 1) : r;
+      if (leaf === want) found = r;
+    });
+    return found;
+  }
+  function applyHashFocus() {
+    var ref = componentFromHash();
+    if (ref) showComponent(ref, true);
+    return !!ref;
+  }
+  window.addEventListener('hashchange', applyHashFocus);
+
   // ---- Boot ----
-  showSectionList();
+  if (!applyHashFocus()) showSectionList();
 })();
