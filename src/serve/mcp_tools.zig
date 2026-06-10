@@ -3,6 +3,7 @@ const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
 const paths = @import("../paths.zig");
 const edit = @import("edit.zig");
+const diag_format = @import("diag_format.zig");
 const vfs = @import("vfs.zig");
 const history = @import("history.zig");
 const serve_root = @import("../serve.zig");
@@ -1928,6 +1929,10 @@ fn writeBuildReport(w: anytype, report: edit.BuildReport) !void {
     if (report.snapshot) |s| try json_writer.writeString(w, s) else try w.writeAll("null");
     try w.writeAll(",\"error\":");
     if (report.error_message) |m| try json_writer.writeString(w, m) else try w.writeAll("null");
+    // Structured source-located build diagnostic (file/line/col/message/
+    // source_line) so an agent can jump straight to the failing form.
+    try w.writeAll(",\"diagnostic\":");
+    if (report.diagnostic) |d| try diag_format.writeJson(w, d) else try w.writeAll("null");
     try w.writeAll(",\"assertion_failures\":[");
     for (report.assertion_failures, 0..) |a, i| {
         if (i > 0) try w.writeAll(",");

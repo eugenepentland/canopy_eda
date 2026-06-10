@@ -684,6 +684,13 @@ src/serve/component_search.zig::searchErrorMessage fn
 src/serve/design_doc.zig::EditError value
 src/serve/design_doc.zig::addCriticalIc fn
 src/serve/design_doc.zig::removeCriticalIc fn
+src/serve/diag_format.zig::Diagnostic struct_
+src/serve/diag_format.zig::build fn
+src/serve/diag_format.zig::caretLine fn
+src/serve/diag_format.zig::formatText fn
+src/serve/diag_format.zig::load fn
+src/serve/diag_format.zig::renderErrorPage fn
+src/serve/diag_format.zig::writeJson fn
 src/serve/digikey.zig::DatasheetError value
 src/serve/digikey.zig::DatasheetResult struct_
 src/serve/digikey.zig::Product struct_

@@ -14,6 +14,7 @@ const bom_html = @import("bom_html.zig");
 const history = @import("history.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
 const erc_mod = @import("../erc.zig");
+const diag_format = @import("diag_format.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const HTTP_NOT_FOUND: u16 = 404;
@@ -978,6 +979,10 @@ pub const BuildReport = struct {
     snapshot: ?[]const u8 = null,
     eval_ok: bool,
     error_message: ?[]const u8 = null,
+    /// Source-located diagnostic for a failed eval — file:line:col, the
+    /// evaluator's message, and the offending source line. Null on success
+    /// or when no span was recorded.
+    diagnostic: ?diag_format.Diagnostic = null,
     assertion_failures: []const AssertionFailure = &.{},
     erc: []const erc_mod.Violation = &.{},
 };
@@ -1016,12 +1021,21 @@ pub fn rebuildDesign(
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
     const eval_result = eval.evalFile(path) catch |e| {
+        // Resolve the span into a full diagnostic (re-reads the file so the
+        // shown line matches what the agent just wrote). The human-readable
+        // error_message becomes the compiler-style text when a span exists.
+        const d: ?diag_format.Diagnostic = diag_format.load(allocator, path, @errorName(e), eval.last_error) catch null;
+        const msg: []const u8 = if (d) |dd|
+            (diag_format.formatText(allocator, dd) catch @errorName(e))
+        else
+            @errorName(e);
         return .{
             .ok = false,
             .version = serve_root.getLiveVersion(name),
             .snapshot = snap_id,
             .eval_ok = false,
-            .error_message = @errorName(e),
+            .error_message = msg,
+            .diagnostic = d,
         };
     };
     const block = switch (eval_result) {

@@ -10,6 +10,7 @@ const render_html = @import("../render_html.zig");
 const review = @import("../review.zig");
 const req_checks = @import("../req_checks.zig");
 const assets_css = @import("assets_css.zig");
+const diag_format = @import("diag_format.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
@@ -30,9 +31,14 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
 
-    const result = eval.evalFile(board_path) catch {
+    const result = eval.evalFile(board_path) catch |e| {
+        // Render a proper diagnostic panel — file:line:col, the evaluator's
+        // message, and the offending source line with a caret — instead of a
+        // bare "Build error" string.
+        const d = try diag_format.load(ctx.allocator, board_path, @errorName(e), eval.last_error);
         res.status = 500;
-        res.body = "Build error";
+        res.content_type = .HTML;
+        res.body = try diag_format.renderErrorPage(ctx.allocator, name, d);
         return;
     };
 

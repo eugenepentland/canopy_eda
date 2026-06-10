@@ -19,6 +19,7 @@ const review_json_mod = @import("../review_json.zig");
 const review_md_mod = @import("../review_md.zig");
 const req_checks = @import("../req_checks.zig");
 const edit_mod = @import("edit.zig");
+const diag_format = @import("diag_format.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
@@ -70,13 +71,31 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
 
 /// POST /api/push/:name — re-evaluate the design's `.sexp` source, replace the
 /// live scene-graph JSON, and bump the version counter so the browser viewer
-/// picks up the rebuild on its next `/api/version/:name` poll.
+/// picks up the rebuild on its next `/api/version/:name` poll. On a build
+/// failure the JSON body carries a structured `diagnostic`
+/// (`{file,line,col,message,source_line}`) alongside the human-readable text.
 pub fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = HTTP_NOT_FOUND;
+        return;
+    };
+
+    const board_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
+    defer ctx.allocator.free(board_path);
+
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
-    const target = (try evalDesignForExport(ctx, req, res, &eval)) orelse return;
-    const name = target.name;
-    const block = target.block;
+    const result = eval.evalFile(board_path) catch |e| {
+        try writeBuildErrorJson(ctx, res, board_path, @errorName(e), eval.last_error);
+        return;
+    };
+    const block = switch (result) {
+        .design_block => |b| b,
+        else => {
+            try writeBuildErrorJson(ctx, res, board_path, "not a design-block", null);
+            return;
+        },
+    };
 
     const new_layout = render_json.renderSceneGraph(ctx.allocator, block, ctx.project_dir) catch null;
     serve_root.setLiveLayoutJson(new_layout);
@@ -84,6 +103,30 @@ pub fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handler
 
     std.debug.print("Pushed {s} (v{d})\n", .{ name, v });
     res.body = "ok";
+}
+
+/// 500 + `{"ok":false,"error":<text>,"diagnostic":{…}}` for a failed build.
+/// `error` is the compiler-style human text (`file:line:col: message` plus the
+/// caret block); `diagnostic` is the same data structured for tooling.
+fn writeBuildErrorJson(
+    ctx: *Handler,
+    res: *httpz.Response,
+    board_path: []const u8,
+    err_name: []const u8,
+    last_error: ?@import("../eval/evaluator.zig").EvalDiagnostic,
+) HandlerError!void {
+    const d = try diag_format.load(ctx.allocator, board_path, err_name, last_error);
+    const text = try diag_format.formatText(ctx.allocator, d);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(ctx.allocator);
+    try w.writeAll("{\"ok\":false,\"error\":");
+    try json_writer.writeString(w, text);
+    try w.writeAll(",\"diagnostic\":");
+    try diag_format.writeJson(w, d);
+    try w.writeAll("}");
+    res.status = HTTP_INTERNAL_ERROR;
+    res.content_type = .JSON;
+    res.body = buf.items;
 }
 
 /// GET /api/version/:name — return `{"version":N}`. The schematic viewer

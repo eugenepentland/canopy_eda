@@ -13,6 +13,9 @@ unlinked tag: placement/optimizer - (net "NAME") side rules expand to unclaimed 
 unlinked tag: placement/optimizer - floorplan (rot N "SUB") turns the whole macro in quarter steps in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - floorplan corner clashes push the later macro out along its dock axis in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - spec auto-fill pulls unlisted parts out of the staging band in ./src/placement/optimizer.zig
+unlinked tag: serve/diag_format - build blanks the source line when the span doesn't match the buffer (module-file spans) in ./src/serve/diag_format.zig
+unlinked tag: serve/diag_format - build extracts the offending source line from the buffer at the span in ./src/serve/diag_format.zig
+unlinked tag: serve/diag_format - caretLine pads to the 1-based column (preserving tabs) and ends with a caret in ./src/serve/diag_format.zig
 unverified: serve/notes - Reads and writes `<design>.notes.md` next to the design source file
 unverified: serve/notes - Rejects bodies larger than 1 MiB
 unverified: serve/notes - Returns an empty string when no notes file exists yet
