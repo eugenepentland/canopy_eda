@@ -1310,6 +1310,109 @@
     if (rerun) rerun.addEventListener('click', showErc);
   }
 
+  // ---- History panel (version snapshots + diff vs current) ----
+  // Lists the stored snapshots from GET /api/history/:name (written by the
+  // server before every save/build); "Diff vs current" fetches
+  // GET /api/diff/:name?from=<id>&to=current and renders the structured
+  // result grouped as Added / Removed / Changed / Net changes.
+  var historyBtn = document.getElementById('history-btn');
+  if (historyBtn) historyBtn.addEventListener('click', showHistory);
+
+  function sbPanelHeader(title, onBack) {
+    detailBox.innerHTML = '<span class="sb-back">← All sections</span><h4>' + escapeHtml(title) + '</h4>' +
+      '<div class="sb-empty">Loading…</div>';
+    detailBox.querySelector('.sb-back').addEventListener('click', onBack || showSectionList);
+  }
+
+  function showHistory() {
+    sbPanelHeader('History', showSectionList);
+    fetch('/api/history/' + encodeURIComponent(DESIGN_NAME))
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var snaps = j.snapshots || [];
+        var html = '<span class="sb-back">← All sections</span><h4>History</h4>';
+        if (!snaps.length) {
+          html += '<div class="sb-empty">No stored versions yet — a snapshot is taken before every save / build.</div>';
+        } else {
+          html += '<div class="sb-comp-meta">' + snaps.length + ' stored version' + (snaps.length === 1 ? '' : 's') + '</div>';
+          snaps.forEach(function (s) {
+            html += '<div class="hist-row">' +
+              '<div class="hist-id">' + escapeHtml(s.id) + '</div>' +
+              (s.description ? '<div class="hist-desc">' + escapeHtml(s.description) + '</div>' : '') +
+              '<div class="hist-actions"><button class="hist-diff-btn" data-id="' + escapeHtml(s.id) + '">Diff vs current</button></div>' +
+              '</div>';
+          });
+        }
+        detailBox.innerHTML = html;
+        detailBox.querySelector('.sb-back').addEventListener('click', showSectionList);
+        detailBox.querySelectorAll('.hist-diff-btn').forEach(function (btn) {
+          btn.addEventListener('click', function () { showVersionDiff(btn.dataset.id); });
+        });
+      })
+      .catch(function (e) {
+        detailBox.innerHTML = '<span class="sb-back">← All sections</span><h4>History</h4>' +
+          '<div class="sb-empty">Error: ' + escapeHtml(String(e)) + '</div>';
+        detailBox.querySelector('.sb-back').addEventListener('click', showSectionList);
+      });
+  }
+
+  function diffGroup(title, items, render) {
+    if (!items || !items.length) return '';
+    var out = '<div class="diff-group">' + escapeHtml(title) + ' (' + items.length + ')</div>';
+    items.forEach(function (it) { out += render(it); });
+    return out;
+  }
+
+  function showVersionDiff(id) {
+    sbPanelHeader('Diff ' + id + ' → current', showHistory);
+    detailBox.querySelector('.sb-back').textContent = '← History';
+    fetch('/api/diff/' + encodeURIComponent(DESIGN_NAME) + '?from=' + encodeURIComponent(id) + '&to=current')
+      .then(function (r) {
+        return r.json().then(function (j) { return { ok: r.ok, j: j }; });
+      })
+      .then(function (resp) {
+        var html = '<span class="sb-back">← History</span><h4>Diff vs current</h4>' +
+          '<div class="sb-comp-meta">' + escapeHtml(id) + ' → current</div>';
+        if (!resp.ok) {
+          html += '<div class="sb-empty">' + escapeHtml((resp.j && resp.j.error) || 'diff failed') + '</div>';
+        } else {
+          var d = resp.j.diff || {};
+          html += diffGroup('Added', d.instances_added, function (e) {
+            return '<div class="diff-item add">+ ' + escapeHtml(e.ref) + ' ' + escapeHtml(e.component) +
+              (e.value ? ' · ' + escapeHtml(e.value) : '') + '</div>';
+          });
+          html += diffGroup('Removed', d.instances_removed, function (e) {
+            return '<div class="diff-item del">− ' + escapeHtml(e.ref) + ' ' + escapeHtml(e.component) +
+              (e.value ? ' · ' + escapeHtml(e.value) : '') + '</div>';
+          });
+          html += diffGroup('Value changes', d.value_changes, function (c) {
+            return '<div class="diff-item chg">' + escapeHtml(c.ref) + ': ' + escapeHtml(c.old || '—') +
+              ' → ' + escapeHtml(c.new || '—') + '</div>';
+          });
+          html += diffGroup('Footprint changes', d.footprint_changes, function (c) {
+            return '<div class="diff-item chg">' + escapeHtml(c.ref) + ': ' + escapeHtml(c.old || '—') +
+              ' → ' + escapeHtml(c.new || '—') + '</div>';
+          });
+          html += diffGroup('Net changes', d.net_changes, function (n) {
+            var bits = [];
+            (n.pins_added || []).forEach(function (p) { bits.push('+' + p); });
+            (n.pins_removed || []).forEach(function (p) { bits.push('−' + p); });
+            return '<div class="diff-item chg">' + escapeHtml(n.net) + ': ' + escapeHtml(bits.join(' ')) + '</div>';
+          });
+          var any = ['instances_added', 'instances_removed', 'value_changes', 'footprint_changes', 'net_changes']
+            .some(function (k) { return d[k] && d[k].length; });
+          if (!any) html += '<div class="diff-empty">No differences — this version matches the current source.</div>';
+        }
+        detailBox.innerHTML = html;
+        detailBox.querySelector('.sb-back').addEventListener('click', showHistory);
+      })
+      .catch(function (e) {
+        detailBox.innerHTML = '<span class="sb-back">← History</span><h4>Diff vs current</h4>' +
+          '<div class="sb-empty">Error: ' + escapeHtml(String(e)) + '</div>';
+        detailBox.querySelector('.sb-back').addEventListener('click', showHistory);
+      });
+  }
+
   // ---- KiCad menu (dropdown toggle for the two download buttons) ----
   (function () {
     var menu = document.querySelector('.kicad-menu');

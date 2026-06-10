@@ -271,6 +271,15 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
             "title=\"Copy the raw .sexp source to the clipboard\">\u{1F4CB} Copy SRC</button>",
     );
     try w.writeAll("<button class=\"head-link head-btn\" id=\"erc-btn\" type=\"button\">ERC</button>");
+    // Version history (designs only — module sources aren't snapshotted):
+    // opens the sidebar History panel listing stored snapshots, each with a
+    // "Diff vs current" action backed by GET /api/diff/:name.
+    if (!is_module) {
+        try w.writeAll(
+            "<button class=\"head-link head-btn\" id=\"history-btn\" type=\"button\" " ++
+                "title=\"Stored versions (snapshotted on every save/build) with diff vs current\">History</button>",
+        );
+    }
     try w.writeAll("<div class=\"kicad-menu\">");
     try w.writeAll("<button class=\"head-link head-btn\" id=\"kicad-btn\" type=\"button\">KiCad \u{25BE}</button>");
     try w.writeAll("<div class=\"kicad-panel\" id=\"kicad-panel\">");

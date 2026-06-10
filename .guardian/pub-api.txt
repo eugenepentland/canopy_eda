@@ -681,6 +681,16 @@ src/serve/component_search.zig::downloadFootprint fn
 src/serve/component_search.zig::errorMessage fn
 src/serve/component_search.zig::searchComponents fn
 src/serve/component_search.zig::searchErrorMessage fn
+src/serve/design_diff.zig::DesignDiff struct_
+src/serve/design_diff.zig::DiffError value
+src/serve/design_diff.zig::FieldChange struct_
+src/serve/design_diff.zig::HandlerError value
+src/serve/design_diff.zig::InstanceEntry struct_
+src/serve/design_diff.zig::NetChange struct_
+src/serve/design_diff.zig::diffApi fn
+src/serve/design_diff.zig::diffBlocks fn
+src/serve/design_diff.zig::historyApi fn
+src/serve/design_diff.zig::writeDiffJson fn
 src/serve/design_doc.zig::EditError value
 src/serve/design_doc.zig::addCriticalIc fn
 src/serve/design_doc.zig::removeCriticalIc fn
