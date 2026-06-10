@@ -754,9 +754,16 @@ fn isSignalTypeKeyword(s: []const u8) bool {
 /// voltage — matching `parseSectionPort` — with an explicit `(nominal …)`
 /// taking precedence.
 pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port {
-    if (args.len < 2) return EvalError.ArityError;
+    if (args.len < 2) {
+        const span = if (args.len > 0) args[0].span else ast.Span.zero;
+        self.setError(span, "(port …) expects at least a name and a direction, e.g. (port \"VDD\" in)");
+        return EvalError.ArityError;
+    }
     const name_val = try self.evalNode(args[0], env);
-    const name = name_val.asString() orelse return EvalError.TypeError;
+    const name = name_val.asString() orelse {
+        self.setError(args[0].span, "(port …) name must be a string");
+        return EvalError.TypeError;
+    };
 
     // Short form: (port "NAME" direction ...) — net = name
     // Long form:  (port "NAME" "NET" direction ...) — explicit net
@@ -770,7 +777,10 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
         } else {
             // Could be a non-direction atom — treat as long form
             const net_val = try self.evalNode(args[1], env);
-            net = net_val.asString() orelse return EvalError.TypeError;
+            net = net_val.asString() orelse {
+                self.setError(args[1].span, "(port …) net must be a string");
+                return EvalError.TypeError;
+            };
             dir_idx = 2;
         }
     } else if (args[1].asString()) |s| {
@@ -778,11 +788,18 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
         net = s;
         dir_idx = 2;
     } else {
+        self.setError(args[1].span, "(port …) expects a direction or net after the name");
         return EvalError.InvalidForm;
     }
 
-    if (dir_idx >= args.len) return EvalError.ArityError;
-    const dir = args[dir_idx].asAtom() orelse return EvalError.InvalidForm;
+    if (dir_idx >= args.len) {
+        self.setErrorFmt(args[0].span, "(port \"{s}\" …) is missing its direction (in|out|io|bidi)", .{name});
+        return EvalError.ArityError;
+    }
+    const dir = args[dir_idx].asAtom() orelse {
+        self.setErrorFmt(args[dir_idx].span, "(port \"{s}\" …) direction must be a bare word: in|out|io|bidi", .{name});
+        return EvalError.InvalidForm;
+    };
 
     // Warn when long form is used with identical name and net
     if (dir_idx == 2 and std.mem.eql(u8, name, net)) {
@@ -889,30 +906,53 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
 /// Build a `(note "REFDES" "text")` annotation that the schematic renderer
 /// pins next to the named instance. Both arguments must evaluate to strings.
 pub fn buildNote(self: *Evaluator, args: []const Node, env: *Env) EvalError!Note {
-    if (args.len != 2) return EvalError.ArityError;
+    if (args.len != 2) {
+        const span = if (args.len > 0) args[0].span else ast.Span.zero;
+        self.setErrorFmt(span, "(note …) expects 2 arguments, got {d} — (note \"REF\" \"text\")", .{args.len});
+        return EvalError.ArityError;
+    }
     const rd_val = try self.evalNode(args[0], env);
     const text_val = try self.evalNode(args[1], env);
     return Note{
-        .ref_des = rd_val.asString() orelse return EvalError.TypeError,
-        .text = text_val.asString() orelse return EvalError.TypeError,
+        .ref_des = rd_val.asString() orelse {
+            self.setError(args[0].span, "(note …) ref-des must be a string");
+            return EvalError.TypeError;
+        },
+        .text = text_val.asString() orelse {
+            self.setError(args[1].span, "(note …) text must be a string");
+            return EvalError.TypeError;
+        },
     };
 }
 
 /// Build a `(group "name" ("R1" "R2" ...))` form into a `Group` that bundles
 /// a set of ref-deses for the schematic renderer's visual grouping pass.
 pub fn buildGroup(self: *Evaluator, args: []const Node, env: *Env) EvalError!Group {
-    if (args.len != 2) return EvalError.ArityError;
+    if (args.len != 2) {
+        const span = if (args.len > 0) args[0].span else ast.Span.zero;
+        self.setErrorFmt(span, "(group …) expects 2 arguments, got {d} — (group \"name\" (\"R1\" \"R2\"))", .{args.len});
+        return EvalError.ArityError;
+    }
     const name_val = try self.evalNode(args[0], env);
-    const members_node = args[1].asList() orelse return EvalError.InvalidForm;
+    const members_node = args[1].asList() orelse {
+        self.setError(args[1].span, "(group …) members must be a list of ref-des strings");
+        return EvalError.InvalidForm;
+    };
 
     var members: std.ArrayListUnmanaged([]const u8) = .empty;
     for (members_node) |m| {
-        const s = m.asString() orelse return EvalError.TypeError;
+        const s = m.asString() orelse {
+            self.setError(m.span, "(group …) members must be ref-des strings");
+            return EvalError.TypeError;
+        };
         try members.append(self.allocator, s);
     }
 
     return Group{
-        .name = name_val.asString() orelse return EvalError.TypeError,
+        .name = name_val.asString() orelse {
+            self.setError(args[0].span, "(group …) name must be a string");
+            return EvalError.TypeError;
+        },
         .members = members.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
     };
 }
@@ -927,9 +967,15 @@ pub fn buildSubBlock(self: *Evaluator, form_children: []const Node, env: *Env) E
     // args drops the "sub-block" head; an optional trailing `(ids …)` sidecar
     // carries source-resident child ids (read by parseChildIdSidecar below).
     const args = form_children[1..];
-    if (args.len < 2) return EvalError.ArityError;
+    if (args.len < 2) {
+        self.setError(form_children[0].span, "(sub-block …) expects a name and a module call: (sub-block \"pwr\" (tpsm84338 …))");
+        return EvalError.ArityError;
+    }
     const name_val = try self.evalNode(args[0], env);
-    const name = name_val.asString() orelse return EvalError.TypeError;
+    const name = name_val.asString() orelse {
+        self.setError(args[0].span, "(sub-block …) name must be a string");
+        return EvalError.TypeError;
+    };
 
     // Trailing children after the module call: (id …)/(ids …) identity
     // anchors and (bridge …) net shorthands are consumed elsewhere;
@@ -978,7 +1024,10 @@ pub fn buildSubBlock(self: *Evaluator, form_children: []const Node, env: *Env) E
         const call_val = try self.evalNode(args[1], env);
         switch (call_val) {
             .design_block => |b| break :blk b,
-            else => return EvalError.TypeError,
+            else => {
+                self.setErrorFmt(args[1].span, "(sub-block \"{s}\" …) call must return a design-block", .{name});
+                return EvalError.TypeError;
+            },
         }
     };
     // Discard the module-scope id writes the sub-block evaluation pushed (their

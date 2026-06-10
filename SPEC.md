@@ -197,9 +197,17 @@ Public functions: worldShape, pointDist, shapeGap
 - Unbound module parameters are diagnosed by name at the call site
 - Surplus positional arguments are diagnosed with expected and actual counts
 
+## eval/suggest
+
+- editDistance computes the Levenshtein distance between names
+- unbound library name yields an import hint naming the missing import
+- a near-miss name yields a did-you-mean suggestion from env and cache candidates
+- a name with no close candidate reports a plain unknown-name message
+
 ## eval/evaluator
 
 - Evaluates arithmetic expressions from S-expression AST
+- an error inside a module body appends the module call stack to the diagnostic
 - SI-suffixed literals evaluate to their scaled numeric value
 - SI-suffixed literals flow through module call arguments
 - Evaluates let bindings that define named values in scope

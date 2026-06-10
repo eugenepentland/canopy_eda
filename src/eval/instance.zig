@@ -93,9 +93,15 @@ pub fn resolveComponent(self: *Evaluator, val: Value) ?ResolvedComponent {
 pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) EvalError!InstanceResult {
     // form_children includes "instance" atom: (instance "R4" (res-0402 "220k") (pin 1 "NET_A") ...)
     const args = form_children[1..];
-    if (args.len < 2) return EvalError.ArityError;
+    if (args.len < 2) {
+        self.setError(form_children[0].span, "(instance …) expects at least 2 arguments: (instance \"REF\" component …)");
+        return EvalError.ArityError;
+    }
     const ref_val = try self.evalNode(args[0], env);
-    const ref_des = ref_val.asString() orelse return EvalError.TypeError;
+    const ref_des = ref_val.asString() orelse {
+        self.setError(args[0].span, "(instance …) ref-des must be a string, e.g. (instance \"U1\" …)");
+        return EvalError.TypeError;
+    };
 
     // Parse (id xxxxxxxx) from full form children
     const parsed_id = ids.parseId(form_children);
@@ -111,10 +117,16 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
 
     const comp_val = try self.evalNode(args[1], env);
     const comp_offset = ids.componentSourceOffset(args[1]);
-    const resolved = resolveComponent(self, comp_val) orelse return EvalError.TypeError;
+    const resolved = resolveComponent(self, comp_val) orelse {
+        self.setErrorFmt(args[1].span, "(instance \"{s}\" …) second argument must be a component, e.g. (cap-0402 \"100nF\")", .{ref_des});
+        return EvalError.TypeError;
+    };
     // (instance ...) requires the component to resolve through the library —
     // an empty footprint signals that the family wasn't in the cache.
-    if (!self.component_cache.contains(resolved.family)) return EvalError.UnboundVariable;
+    if (!self.component_cache.contains(resolved.family)) {
+        self.setErrorFmt(args[1].span, "component '{s}' is not imported — add (import {s})", .{ resolved.family, resolved.family });
+        return EvalError.UnboundVariable;
+    }
     const inst = Instance{
         .ref_des = ref_des,
         .label = ref_des,

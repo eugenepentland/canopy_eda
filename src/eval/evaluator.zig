@@ -7,6 +7,7 @@ const builtins = @import("builtins.zig");
 // Sub-modules
 const special_forms = @import("special_forms.zig");
 const modules = @import("modules.zig");
+const suggest = @import("suggest.zig");
 const design_block = @import("design_block.zig");
 const instance_mod = @import("instance.zig");
 const builders = @import("builders.zig");
@@ -39,6 +40,14 @@ pub const EvalDiagnostic = struct {
     /// Human-readable summary. Borrowed; lives as long as the source
     /// buffer or the static string the caller passed in.
     message: []const u8,
+};
+
+/// One frame of the module call stack — the module being evaluated and
+/// where it was called from. `setError` appends these as context lines so
+/// an error deep inside `(tpsm84338 …)` still points at the call site.
+pub const ModuleFrame = struct {
+    name: []const u8,
+    call_span: ast.Span,
 };
 
 /// One non-fatal lint finding recorded during evaluation — e.g. a
@@ -160,6 +169,11 @@ pub const Evaluator = struct {
     /// them as `file:line:col: warning: …` and the server can read the list
     /// off the evaluator after a build.
     warnings: std.ArrayListUnmanaged(EvalWarning) = .empty,
+    /// Module call stack, pushed by `callModule` around each body
+    /// evaluation. While non-empty, `setError` appends one
+    /// `  in module 'x' (called at L:C)` context line per frame
+    /// (innermost first) to every diagnostic it records.
+    module_stack: std.ArrayListUnmanaged(ModuleFrame) = .empty,
 
     pub const PendingId = struct {
         /// Byte offset of the opening paren of the form
@@ -252,6 +266,7 @@ pub const Evaluator = struct {
     pub fn deinit(self: *Evaluator) void {
         self.assertions.deinit(self.allocator);
         self.warnings.deinit(self.allocator);
+        self.module_stack.deinit(self.allocator);
         self.loaded_files.deinit(self.allocator);
         self.component_cache.deinit(self.allocator);
         self.symbol_pin_cache.deinit(self.allocator);
@@ -304,6 +319,8 @@ pub const Evaluator = struct {
                 if (env.get(name)) |v| return v;
                 // Might be a bare component reference
                 if (self.component_cache.get(name)) |_| return .{ .component = name };
+                // Unresolvable — suggest an import or a near-miss name.
+                self.setError(node.span, suggest.unboundMessage(self, name, env));
                 return EvalError.UnboundVariable;
             },
             .string => |s| return .{ .string = s },
@@ -319,9 +336,28 @@ pub const Evaluator = struct {
 
     /// Record a source-located diagnostic for the most recent error.
     /// The message slice is borrowed; pass a static string or a slice
-    /// that outlives the next `evalNode` call.
+    /// that outlives the next `evalNode` call. While the module call
+    /// stack is non-empty, the message gets one
+    /// `  in module 'x' (called at L:C)` context line appended per
+    /// frame, innermost first.
     pub fn setError(self: *Evaluator, span: ast.Span, message: []const u8) void {
-        self.last_error = .{ .span = span, .message = message };
+        self.last_error = .{ .span = span, .message = self.withModuleContext(message) };
+    }
+
+    /// Append the module-call-stack context lines to `message`. Returns
+    /// the original slice when the stack is empty or allocation fails.
+    fn withModuleContext(self: *Evaluator, message: []const u8) []const u8 {
+        if (self.module_stack.items.len == 0) return message;
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        const w = buf.writer(self.allocator);
+        w.writeAll(message) catch return message;
+        var i = self.module_stack.items.len;
+        while (i > 0) {
+            i -= 1;
+            const frame = self.module_stack.items[i];
+            w.print("\n  in module '{s}' (called at {d}:{d})", .{ frame.name, frame.call_span.line, frame.call_span.col }) catch return message;
+        }
+        return buf.toOwnedSlice(self.allocator) catch message;
     }
 
     /// Record a formatted diagnostic. The message is allocated from the
@@ -392,7 +428,10 @@ pub const Evaluator = struct {
         if (self.component_cache.get(head_name)) |comp| {
             if (comp.is_family and args.len >= 1) {
                 const val = try self.evalNode(args[0], env);
-                const val_str = val.asString() orelse return EvalError.TypeError;
+                const val_str = val.asString() orelse {
+                    self.setErrorFmt(args[0].span, "({s} …) value must be a string, e.g. ({s} \"100nF\")", .{ head_name, head_name });
+                    return EvalError.TypeError;
+                };
                 // Collect additional args as schematic attributes
                 var attrs: std.ArrayListUnmanaged([]const u8) = .empty;
                 for (args[1..]) |attr_node| {
@@ -409,9 +448,9 @@ pub const Evaluator = struct {
         }
 
         // Nothing in the dispatch table, no module, no component — the
-        // head atom is undefined. Stash it so the caller can render
-        // "unknown form `foo` at sexp:42:7" instead of a bare error.
-        self.setError(head.span, head_name);
+        // head atom is undefined. Suggest an import or a near-miss name
+        // so the caller can render an actionable diagnostic.
+        self.setError(head.span, suggest.unboundMessage(self, head_name, env));
         return EvalError.UnboundVariable;
     }
 
@@ -426,7 +465,8 @@ pub const Evaluator = struct {
 
 // spec: eval/evaluator - last_error records the source span of an unknown form so callers can report file:line:col
 test "unknown form populates last_error with span" {
-    const alloc = std.testing.allocator;
+    // page_allocator: diagnostic messages are allocated and never freed.
+    const alloc = std.heap.page_allocator;
     var eval = Evaluator.init(alloc, ".");
     defer eval.deinit();
     var env = Env.init(alloc, null);
@@ -444,12 +484,13 @@ test "unknown form populates last_error with span" {
     try std.testing.expectError(EvalError.UnboundVariable, result);
     const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
     try std.testing.expectEqual(@as(u32, 2), diag.span.line);
-    try std.testing.expectEqualStrings("definitely-not-a-form", diag.message);
+    try std.testing.expect(std.mem.indexOf(u8, diag.message, "unknown name 'definitely-not-a-form'") != null);
 }
 
 // spec: eval/evaluator - last_error records the source span of an arity mismatch in a special form
 test "arity error populates last_error with span" {
-    const alloc = std.testing.allocator;
+    // page_allocator: diagnostic messages are allocated and never freed.
+    const alloc = std.heap.page_allocator;
     var eval = Evaluator.init(alloc, ".");
     defer eval.deinit();
     var env = Env.init(alloc, null);
@@ -457,7 +498,7 @@ test "arity error populates last_error with span" {
 
     const parser = @import("../sexpr/parser.zig");
     // `let` needs exactly 2 args; this gives it 3. Span should point at
-    // the first argument's position.
+    // the first argument's position; the message names the form.
     const nodes = try parser.parse(alloc, "(let x 1 2)");
     defer parser.freeNodes(alloc, nodes);
 
@@ -465,7 +506,33 @@ test "arity error populates last_error with span" {
     try std.testing.expectError(EvalError.ArityError, result);
     const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
     try std.testing.expect(diag.span.line == 1 and diag.span.col > 1);
-    try std.testing.expectEqualStrings("wrong number of arguments", diag.message);
+    try std.testing.expectEqualStrings("(let …) expects 2 argument(s), got 3", diag.message);
+}
+
+// spec: eval/evaluator - an error inside a module body appends the module call stack to the diagnostic
+test "module call stack appears in diagnostics" {
+    // page_allocator: diagnostic messages are allocated and never freed.
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    const nodes = try parser.parse(alloc,
+        \\(defmodule inner () (let x not-a-thing))
+        \\(defmodule outer () (inner))
+        \\(outer)
+    );
+
+    const result = eval.evalNodes(nodes, &env);
+    try std.testing.expectError(EvalError.UnboundVariable, result);
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try std.testing.expect(std.mem.indexOf(u8, diag.message, "unknown name 'not-a-thing'") != null);
+    // Innermost frame first, then the outer call, each with its call site.
+    const inner_pos = std.mem.indexOf(u8, diag.message, "in module 'inner' (called at") orelse return error.TestExpectedFrame;
+    const outer_pos = std.mem.indexOf(u8, diag.message, "in module 'outer' (called at") orelse return error.TestExpectedFrame;
+    try std.testing.expect(inner_pos < outer_pos);
 }
 
 // spec: eval/evaluator - Evaluates arithmetic expressions from S-expression AST
@@ -773,4 +840,5 @@ test {
     _ = instance_mod;
     _ = builders;
     _ = forms;
+    _ = suggest;
 }

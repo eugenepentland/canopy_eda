@@ -20,6 +20,16 @@ pub const SpecialForm = enum {
     pub fn fromAtom(name: []const u8) ?SpecialForm {
         return atom_to_form.get(name);
     }
+
+    /// The source spelling of this form's head atom — used by arity/type
+    /// diagnostics so the message names the offending form. Derived from
+    /// the registry table so the two can never drift.
+    pub fn sourceName(self: SpecialForm) []const u8 {
+        for (atom_to_form.keys(), atom_to_form.values()) |k, v| {
+            if (v == self) return k;
+        }
+        return "?";
+    }
 };
 
 const atom_to_form = std.StaticStringMap(SpecialForm).initComptime(.{

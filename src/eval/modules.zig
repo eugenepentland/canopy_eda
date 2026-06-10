@@ -53,8 +53,15 @@ pub fn evalImport(self: *Evaluator, args: []const Node, env: *Env) EvalError!Val
     // Support multi-import: (import a b c ...)
     if (args.len < 1) return EvalError.ArityError;
     for (args) |arg| {
-        const name = arg.asAtom() orelse return EvalError.InvalidForm;
-        try resolveImport(self, name, env);
+        const name = arg.asAtom() orelse {
+            self.setError(arg.span, "(import …) names must be bare atoms, e.g. (import cap-0402)");
+            return EvalError.InvalidForm;
+        };
+        resolveImport(self, name, env) catch |err| {
+            if (self.last_error == null)
+                self.setErrorFmt(arg.span, "cannot import '{s}' — no lib/components/{s}.sexp or lib/modules/{s}.sexp", .{ name, name, name });
+            return err;
+        };
     }
     return .nil;
 }
@@ -278,13 +285,22 @@ pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalE
 pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     // (defmodule name (params...) docstring? body...)
     if (args.len < 2) return EvalError.ArityError;
-    const name = args[0].asAtom() orelse return EvalError.InvalidForm;
-    const params_node = args[1].asList() orelse return EvalError.InvalidForm;
+    const name = args[0].asAtom() orelse {
+        self.setError(args[0].span, "(defmodule …) name must be a bare atom");
+        return EvalError.InvalidForm;
+    };
+    const params_node = args[1].asList() orelse {
+        self.setErrorFmt(args[1].span, "(defmodule {s} …) expects a parameter list, e.g. (defmodule {s} (rfbt rfbb) …)", .{ name, name });
+        return EvalError.InvalidForm;
+    };
 
     var params: std.ArrayListUnmanaged([]const u8) = .empty;
     defer params.deinit(self.allocator);
     for (params_node) |p| {
-        const pname = p.asAtom() orelse return EvalError.InvalidForm;
+        const pname = p.asAtom() orelse {
+            self.setErrorFmt(p.span, "(defmodule {s} …) parameters must be bare atoms", .{name});
+            return EvalError.InvalidForm;
+        };
         try params.append(self.allocator, pname);
     }
 
@@ -366,7 +382,11 @@ pub fn callModule(self: *Evaluator, mod: ModuleDef, call_args: []const Node, cal
         try mod_env.put(param, bound[i].?);
     }
 
-    // Evaluate module body
+    // Evaluate module body with a call-stack frame so any diagnostic
+    // recorded inside the body carries `in module 'x' (called at L:C)`
+    // context lines (innermost first).
+    try self.module_stack.append(self.allocator, .{ .name = mod.name, .call_span = call_span });
+    defer _ = self.module_stack.pop();
     return self.evalNodes(mod.body, &mod_env);
 }
 
