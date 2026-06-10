@@ -641,7 +641,14 @@ Public functions: uploadDatasheetApi, listDatasheetsApi, serveDatasheetApi, isPd
 - sanitize strips path segments
 - sanitize forces .pdf extension
 - sanitize replaces unsafe chars
+- sanitize strips duplicate-download marker
+- sanitize preserves trailing-digit names
 - isPdfMagic gates non-PDF input
+
+## serve/edit
+
+- datasheet dedupe ignores re-download counter suffix
+- datasheet stem preserves trailing-digit part numbers
 
 ## serve/component_search
 

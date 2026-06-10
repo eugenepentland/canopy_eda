@@ -22,10 +22,27 @@ pub fn isPdfMagic(body: []const u8) bool {
 /// double-dot inputs and any path-component-only smuggling attempts.
 pub const SanitizeError = error{ InvalidName, OutOfMemory };
 
+/// Strip a trailing OS/browser duplicate-download marker — a parenthesised
+/// counter like ` (1)`, `(2)`, `_(3)` — from a filename stem (no extension).
+/// This is what produces stale `tps55289 (1).pdf` second copies; normalising it
+/// away makes a re-download/re-upload land on the same canonical name and
+/// overwrite, instead of creating a divergent file the component never links.
+/// A stem that merely ends in digits (`lm2596`) is left untouched — only a
+/// parenthesised counter is removed.
+fn stripDuplicateMarker(stem: []const u8) []const u8 {
+    if (stem.len < 3 or stem[stem.len - 1] != ')') return stem;
+    const open = std.mem.lastIndexOfScalar(u8, stem, '(') orelse return stem;
+    const inner = stem[open + 1 .. stem.len - 1];
+    if (inner.len == 0) return stem;
+    for (inner) |c| if (c < '0' or c > '9') return stem;
+    return std.mem.trimRight(u8, stem[0..open], " _");
+}
+
 /// Conservative filename whitelist for `lib/datasheets/`. Drops any path
-/// component the client tried to smuggle in, replaces non-`[a-zA-Z0-9_.-]`
-/// bytes with `_`, and forces a trailing `.pdf`. Caller owns the returned
-/// slice. Used by both transports — kept here so the policy is one-place.
+/// component the client tried to smuggle in, strips a duplicate-download
+/// marker (`foo (1).pdf` → `foo.pdf`), replaces non-`[a-zA-Z0-9_.-]` bytes
+/// with `_`, and forces a trailing `.pdf`. Caller owns the returned slice.
+/// Used by both transports — kept here so the policy is one-place.
 pub fn sanitizeFilename(allocator: std.mem.Allocator, raw: []const u8) SanitizeError![]u8 {
     if (raw.len == 0) return error.InvalidName;
     // Drop any path component the client tried to smuggle in.
@@ -35,8 +52,15 @@ pub fn sanitizeFilename(allocator: std.mem.Allocator, raw: []const u8) SanitizeE
     };
     if (base.len == 0 or std.mem.eql(u8, base, "..") or std.mem.eql(u8, base, ".")) return error.InvalidName;
 
+    // Normalise a duplicate-download marker on the stem before whitelisting,
+    // while the original ` (1)` form is still intact (whitelisting would
+    // otherwise turn it into the opaque `__1_` that no dedupe recognises).
+    const had_pdf = std.ascii.endsWithIgnoreCase(base, ".pdf");
+    const stem = if (had_pdf) base[0 .. base.len - 4] else base;
+    const cleaned = stripDuplicateMarker(stem);
+
     var out: std.ArrayListUnmanaged(u8) = .empty;
-    for (base) |c| {
+    for (cleaned) |c| {
         const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_' or c == '-' or c == '.';
         try out.append(allocator, if (ok) c else '_');
     }
@@ -221,6 +245,25 @@ test "sanitizeFilename replaces non-whitelist chars with underscore" {
     const out = try sanitizeFilename(alloc, "weird name with spaces & symbols.pdf");
     defer alloc.free(out);
     try std.testing.expectEqualStrings("weird_name_with_spaces___symbols.pdf", out);
+}
+
+test "sanitizeFilename strips a duplicate-download marker" {
+    // spec: serve/upload_datasheet - sanitize strips duplicate-download marker
+    const alloc = std.testing.allocator;
+    const a = try sanitizeFilename(alloc, "tps55289 (1).pdf");
+    defer alloc.free(a);
+    try std.testing.expectEqualStrings("tps55289.pdf", a);
+    const b = try sanitizeFilename(alloc, "foo(12).pdf");
+    defer alloc.free(b);
+    try std.testing.expectEqualStrings("foo.pdf", b);
+}
+
+test "sanitizeFilename keeps a part number that merely ends in digits" {
+    // spec: serve/upload_datasheet - sanitize preserves trailing-digit names
+    const alloc = std.testing.allocator;
+    const out = try sanitizeFilename(alloc, "lm2596.pdf");
+    defer alloc.free(out);
+    try std.testing.expectEqualStrings("lm2596.pdf", out);
 }
 
 test "isPdfMagic rejects non-PDF bytes" {

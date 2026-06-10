@@ -1460,10 +1460,59 @@ pub fn removeSectionNoteCore(
     return error.NoteNotFound;
 }
 
+/// Canonical comparison stem for a datasheet filename: drop `.pdf` and any
+/// trailing duplicate-download marker so two names that differ only by a
+/// re-download counter compare equal. Handles both the raw browser form
+/// (`foo (1)`) and the post-sanitise form the filename whitelist bakes it into
+/// (`foo__1_`). A part number that merely ends in digits (`lm2596`) is left
+/// untouched — only a parenthesised or `__`-wrapped counter is removed.
+fn datasheetStem(name: []const u8) []const u8 {
+    var s = name;
+    if (std.ascii.endsWithIgnoreCase(s, ".pdf")) s = s[0 .. s.len - 4];
+    // Raw form: trailing `(<digits>)`.
+    if (s.len >= 3 and s[s.len - 1] == ')') {
+        if (std.mem.lastIndexOfScalar(u8, s, '(')) |open| {
+            const inner = s[open + 1 .. s.len - 1];
+            if (inner.len > 0 and allAsciiDigits(inner)) return std.mem.trimRight(u8, s[0..open], " _");
+        }
+    }
+    // Post-sanitise form: trailing `__<digits>_` (from `(N)` once `(`/`)` map to `_`).
+    if (s.len >= 4 and s[s.len - 1] == '_') {
+        var j = s.len - 1;
+        while (j > 0 and s[j - 1] >= '0' and s[j - 1] <= '9') j -= 1;
+        if (j < s.len - 1 and j >= 2 and s[j - 1] == '_' and s[j - 2] == '_') {
+            s = std.mem.trimRight(u8, s[0 .. j - 2], " _");
+        }
+    }
+    return s;
+}
+
+fn allAsciiDigits(s: []const u8) bool {
+    for (s) |c| if (c < '0' or c > '9') return false;
+    return true;
+}
+
+/// True iff `component_form` already declares a `(datasheet "…")` whose stem
+/// matches `pdf`'s — the single-link dedupe predicate, suffix-insensitive.
+fn componentLinksDatasheet(component_form: []const u8, pdf: []const u8) bool {
+    const want = datasheetStem(pdf);
+    const open = "(datasheet \"";
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, component_form, i, open)) |at| {
+        const name_start = at + open.len;
+        const end = std.mem.indexOfScalarPos(u8, component_form, name_start, '"') orelse break;
+        const have = datasheetStem(component_form[name_start..end]);
+        if (have.len == want.len and std.ascii.eqlIgnoreCase(have, want)) return true;
+        i = end + 1;
+    }
+    return false;
+}
+
 /// Splice a `(datasheet "file.pdf")` entry into the component definition at
-/// `lib/components/<component>.sexp`. Dedupes — a duplicate filename returns
-/// `DuplicateImport` rather than re-adding. Lets the schematic sidebar link
-/// a PDF to a part with one click instead of editing the library by hand.
+/// `lib/components/<component>.sexp`. Dedupes — a filename whose stem already
+/// links (ignoring a re-download counter) returns `DuplicateImport` rather than
+/// re-adding. Lets the schematic sidebar link a PDF to a part with one click
+/// instead of editing the library by hand.
 ///
 /// The library file isn't rebuilt into a design (it's a library, not a
 /// design), so this path bypasses the usual writeAndRebuild flow: we do a
@@ -1488,10 +1537,13 @@ pub fn addComponentDatasheetCore(
     const form_start = std.mem.indexOf(u8, source, "(component").?;
     const form_end = findFormEnd(source, form_start) orelse return error.MalformedSource;
 
-    // Dedupe: already linked?
-    const needle = try std.fmt.allocPrint(allocator, "(datasheet \"{s}\")", .{pdf});
-    defer allocator.free(needle);
-    if (std.mem.indexOf(u8, source[form_start..form_end], needle) != null) return error.DuplicateImport;
+    // Dedupe on the normalised stem, not the exact string: a re-download often
+    // arrives under a duplicate-marker name (`tps55289__1_.pdf`) that points at
+    // the same datasheet the part already links as `tps55289.pdf`. Comparing
+    // raw strings let the near-dup slip through and appended a second form whose
+    // file was missing. Match any existing `(datasheet "…")` whose stem equals
+    // this one's so the link stays single.
+    if (componentLinksDatasheet(source[form_start..form_end], pdf)) return error.DuplicateImport;
 
     // Insert before the closing `)` with matching indent.
     const insert_at = form_end - 1;
@@ -1911,4 +1963,26 @@ pub fn saveSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     }
     try w.writeAll("}");
     res.body = out.items;
+}
+
+// ── Tests ─────────────────────────────────────────────────────────
+
+test "componentLinksDatasheet dedupes a re-download counter name" {
+    // spec: serve/edit - datasheet dedupe ignores re-download counter suffix
+    const form =
+        \\(component "tps55289"
+        \\  (datasheet "tps55289.pdf"))
+    ;
+    // Exact, ` (1)`, and post-sanitise `__1_` variants all count as duplicates.
+    try std.testing.expect(componentLinksDatasheet(form, "tps55289.pdf"));
+    try std.testing.expect(componentLinksDatasheet(form, "tps55289 (1).pdf"));
+    try std.testing.expect(componentLinksDatasheet(form, "tps55289__1_.pdf"));
+    // A genuinely different datasheet is not a duplicate.
+    try std.testing.expect(!componentLinksDatasheet(form, "tps55289-errata.pdf"));
+}
+
+test "datasheetStem keeps a trailing-digit part number intact" {
+    // spec: serve/edit - datasheet stem preserves trailing-digit part numbers
+    try std.testing.expectEqualStrings("lm2596", datasheetStem("lm2596.pdf"));
+    try std.testing.expectEqualStrings("tps55289", datasheetStem("tps55289__2_.pdf"));
 }
