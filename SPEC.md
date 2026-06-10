@@ -465,6 +465,9 @@ Public functions: analyze
 - an unknown port option records a warning naming the option
 - a non-property sub-form in an instance body records a warning
 - inert id/ids/hierarchical-ids/row/col heads never draw warnings
+- replicate expands to N sub-blocks with the index substituted into names and call args
+- replicate child ids are stable across two evaluations of the same id-annotated source
+- replicate without hierarchical-ids is rejected with the opt-in message
 - bus-port expands one port per index times optional suffix list
 - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
 - kicad-pcb form captures the literal path on the design block

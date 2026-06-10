@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
+const sexpr_parser = @import("../sexpr/parser.zig");
 const log = @import("../infra/log.zig");
 const env_mod = @import("env.zig");
 const evaluator_mod = @import("evaluator.zig");
@@ -181,6 +182,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             // Same grammar as (placement …); the items name sub-block slugs.
             .floorplan => floorplan_spec = try parsePlacement(self, form_children),
             .board => board_spec = try parseBoard(self, form_children),
+            .replicate => try evalReplicate(self, form_children, env, &sub_blocks),
             // Section-only forms are ignored at the top level — a
             // design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract; the warning
@@ -261,6 +263,120 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
 fn parseKicadPcbPath(form_children: []const Node) ?[]const u8 {
     if (form_children.len < 2) return null;
     return form_children[1].asString();
+}
+
+/// Evaluate `(replicate N "name~D" (module-call args…) [(id …)])` — the
+/// top-level replication form. For idx 1..N it instantiates the module call
+/// with every bare `~D` atom in the args replaced by idx, names the
+/// resulting sub-block from the template with `~D` substituted, and appends
+/// it to `sub_blocks`. Identity: the replicate form carries ONE auto-minted
+/// `(id …)` (written back into source on first build, exactly like
+/// `(sub-block …)`); each copy's sub-block uuid is
+/// `deriveChildId(replicate_uuid, sub_name)` and the children derive through
+/// the existing hierarchical-ids machinery — which is why the form requires
+/// `(hierarchical-ids)`.
+fn evalReplicate(
+    self: *Evaluator,
+    form_children: []const Node,
+    env: *Env,
+    sub_blocks: *std.ArrayListUnmanaged(SubBlock),
+) EvalError!void {
+    if (!self.hierarchical_ids) {
+        self.setError(form_children[0].span, "replicate requires (hierarchical-ids) — sub-block ids are derived per index");
+        return EvalError.InvalidForm;
+    }
+    if (form_children.len < 4) {
+        self.setError(form_children[0].span, "(replicate …) expects (replicate N \"name~D\" (module-call …))");
+        return EvalError.ArityError;
+    }
+    const count_f = (try self.evalNode(form_children[1], env)).asNumber() orelse {
+        self.setError(form_children[1].span, "(replicate …) count must be a number");
+        return EvalError.TypeError;
+    };
+    if (count_f < 1 or count_f > MAX_REPLICATE_COUNT) {
+        self.setErrorFmt(form_children[1].span, "(replicate …) count must be 1..{d}", .{MAX_REPLICATE_COUNT});
+        return EvalError.InvalidForm;
+    }
+    const count: usize = @intFromFloat(count_f);
+    const template = form_children[2].asString() orelse {
+        self.setError(form_children[2].span, "(replicate …) name template must be a string, e.g. \"adc~D\"");
+        return EvalError.TypeError;
+    };
+    const call_node = form_children[3];
+    const call_children = call_node.asList() orelse {
+        self.setError(call_node.span, "(replicate …) third argument must be a module call, e.g. (ad7380-channel ~D)");
+        return EvalError.InvalidForm;
+    };
+    const source: []const u8 = if (call_children.len > 0) (call_children[0].asAtom() orelse "") else "";
+
+    // One source-resident uuid for the whole form (auto-minted + queued for
+    // write-back on first build, like a sub-block's).
+    const replicate_uuid = try ids.getOrCreateFormId(self, form_children);
+
+    var idx: usize = 1;
+    while (idx <= count) : (idx += 1) {
+        const sub_name = try substituteIndexInString(self, template, idx);
+        const call = try substituteIndexInNode(self, call_node, idx);
+
+        // Discard module-scope pending-id writes exactly like buildSubBlock —
+        // their offsets point into the module source, not the board file.
+        const pending_pre = self.pending_ids.items.len;
+        const pending_child_pre = self.pending_child_ids.items.len;
+        const call_val = try self.evalNode(call, env);
+        const block = switch (call_val) {
+            .design_block => |b| b,
+            else => {
+                self.setErrorFmt(call_node.span, "(replicate …) call must return a design-block (copy {d})", .{idx});
+                return EvalError.TypeError;
+            },
+        };
+        self.pending_ids.items.len = pending_pre;
+        self.pending_child_ids.items.len = pending_child_pre;
+
+        const subblock_uuid = try ids.deriveChildId(self, replicate_uuid, sub_name, 0);
+        try ids.reassignSubBlockIdsV4(self, block, subblock_uuid);
+
+        try sub_blocks.append(self.allocator, .{
+            .name = sub_name,
+            .block = block,
+            .source = source,
+        });
+    }
+}
+
+/// Upper bound on `(replicate N …)` so a typo'd count can't allocate an
+/// absurd design.
+const MAX_REPLICATE_COUNT: usize = 999;
+
+/// Replace every `~D` occurrence in `template` with the decimal index.
+fn substituteIndexInString(self: *Evaluator, template: []const u8, idx: usize) EvalError![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var rest = template;
+    while (std.mem.indexOf(u8, rest, "~D")) |pos| {
+        buf.appendSlice(self.allocator, rest[0..pos]) catch return EvalError.OutOfMemory;
+        buf.writer(self.allocator).print("{d}", .{idx}) catch return EvalError.OutOfMemory;
+        rest = rest[pos + 2 ..];
+    }
+    buf.appendSlice(self.allocator, rest) catch return EvalError.OutOfMemory;
+    return buf.toOwnedSlice(self.allocator) catch EvalError.OutOfMemory;
+}
+
+/// Deep-copy `node` with every bare `~D` atom replaced by the integer idx.
+/// Lists are rebuilt recursively; all other node kinds pass through
+/// unchanged (spans preserved so diagnostics still point at the source).
+fn substituteIndexInNode(self: *Evaluator, node: Node, idx: usize) EvalError!Node {
+    switch (node.tag) {
+        .atom => |a| {
+            if (std.mem.eql(u8, a, "~D")) return Node.int(node.span, @intCast(idx));
+            return node;
+        },
+        .list => |children| {
+            const copy = self.allocator.alloc(Node, children.len) catch return EvalError.OutOfMemory;
+            for (children, 0..) |child, i| copy[i] = try substituteIndexInNode(self, child, idx);
+            return Node.list(node.span, copy);
+        },
+        else => return node,
+    }
 }
 
 /// Append auto pin aliases (net-ties) for an instance based on its pinout.
@@ -752,6 +868,7 @@ fn evalSection(
             .placement,
             .floorplan,
             .board,
+            .replicate,
             => {
                 self.warnFmt(sf.span, "({s} …) is top-level-only — ignored inside (section …)", .{sf_name});
             },
@@ -1661,7 +1778,7 @@ pub const ParsedPlacementForm = struct { spec: env_mod.PlacementSpec, floorplan:
 /// solves it against a request-local design copy, no file written. Null when
 /// the text holds no such form (or doesn't parse at all).
 pub fn parsePlacementText(self: *Evaluator, text: []const u8) EvalError!?ParsedPlacementForm {
-    const nodes = @import("../sexpr/parser.zig").parse(self.allocator, text) catch return null;
+    const nodes = sexpr_parser.parse(self.allocator, text) catch return null;
     for (nodes) |node| {
         const lst = node.asList() orelse continue;
         if (lst.len < 1) continue;
@@ -1848,7 +1965,7 @@ test "design-block captures (kicad-pcb path)" {
         \\(design-block "test"
         \\  (kicad-pcb "/mnt/nas/test.kicad_pcb"))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -1875,7 +1992,7 @@ test "design-block parses a (function …) group" {
         \\    (stack 2)
         \\    (includes "DMM Analog Front-End" "DMM Cal EEPROM")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -1905,7 +2022,7 @@ test "design-block parses a (board ...) form" {
         \\    (right (rot 90 "sma1"))
         \\    (corners "MK1" "MK2" "MK3" "MK4")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
     var eval = Evaluator.init(a, "");
     defer eval.deinit();
@@ -1929,7 +2046,7 @@ test "section (hosts …) records owned sub-block names" {
         \\(design-block "test"
         \\  (section "PSU" (hosts "psu1" "mon_ch1")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -1952,7 +2069,7 @@ test "stub form parses role mpn category and size" {
         \\(design-block "test"
         \\  (stub "my-mcu" (role "Host MCU") (mpn "STM32H563") (category mcu) (size 9 9)))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
     var eval = Evaluator.init(a, "");
     defer eval.deinit();
@@ -1981,7 +2098,7 @@ test "stub auto-assigns a ref-des from the category prefix" {
         \\  (stub "u" (category mcu))
         \\  (stub "x" (category power) (ref "U7")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
     var eval = Evaluator.init(a, "");
     defer eval.deinit();
@@ -2002,7 +2119,7 @@ test "stub signal contributes net membership" {
         \\  (stub "a" (category mcu) (signal "SCL" i2c "I2C"))
         \\  (stub "b" (category sensor) (signal "SCL" i2c "I2C")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
     var eval = Evaluator.init(a, "");
     defer eval.deinit();
@@ -2025,7 +2142,7 @@ test "stub channels count is recorded on the part" {
         \\  (stub "psu" (category power) (channels 2))
         \\  (stub "solo" (category power)))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
     var eval = Evaluator.init(a, "");
     defer eval.deinit();
@@ -2045,7 +2162,7 @@ test "design-block parses a (layout …) form with anchor and place" {
         \\    (anchor "rp2350")
         \\    (place "esp32" (right-of "rp2350"))))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2076,7 +2193,7 @@ test "layout place parses each relation keyword" {
         \\    (place "d" (above "a"))
         \\    (place "e" (below "a"))))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2100,7 +2217,7 @@ test "layout place collects multiple constraints" {
         \\  (layout
         \\    (place "c" (right-of "b") (below "a"))))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2127,7 +2244,7 @@ test "layout row parses an ordered band of block keys" {
         \\    (row "mcu" "esp32" "screen")
         \\    (row "buck5v" "buck3v3")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2153,7 +2270,7 @@ test "layout group parses a labeled region over member keys" {
         \\    (group "Brains" "mcu" "esp32")
         \\    (group "Power" "buck5v" "buck3v3" "or_diode")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2179,7 +2296,7 @@ test "layout edge parses left and right pinned blocks" {
         \\    (edge left "usbc_host" "barrel")
         \\    (edge right "banana")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2203,7 +2320,7 @@ test "evalBusNetForm expands inclusive index range" {
     // so the test doesn't need a project_dir + pinout fixture.
     const a = std.heap.page_allocator;
     const src = "(bus-net \"FLASH_IO\" 0 2 \"flash\")";
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2229,7 +2346,7 @@ test "evalBusNetForm strided fan-out distributes channels across subs and ports"
         \\(bus-net "ADF_CH" 1 10 (suffixes P N) (over "adc1" "adc2" "adc3")
         \\         (ports AINA_EXT_ AINB_EXT_ AINC_EXT_ AIND_EXT_))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2262,7 +2379,7 @@ test "evalSubBlockBridges ties PREFIX+port to sub/port and honours rename" {
         \\(sub-block "imu" (bno08x-imu)
         \\  (bridge "IMU_" SCK MOSI MISO (rename CS NCS)))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2285,7 +2402,7 @@ test "evalSubBlockBridges ties PREFIX+port to sub/port and honours rename" {
 test "expandSectionBusPort expands index x suffix matrix" {
     const a = std.heap.page_allocator;
     const src = "(bus-port \"ADF_CH\" 1 3 (suffixes P N) in differential)";
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2312,7 +2429,7 @@ test "parseVerifies reads an (id …) target as a stable-id sign-off" {
         \\  (rationale "checked against datasheet")
         \\  (signed-off-by "me" (date "2026-05-25")))
     ;
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2333,7 +2450,7 @@ test "parseVerifies reads an (id …) target as a stable-id sign-off" {
 test "parseVerifies reads a ref-des target as a ref-des sign-off" {
     const a = std.heap.page_allocator;
     const src = "(verifies (req \"U6\" deadbeef) \"looks good\")";
-    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
 
     var eval = Evaluator.init(a, "");
@@ -2362,7 +2479,7 @@ fn evalWarningFixture(alloc: std.mem.Allocator, eval: *Evaluator, source: []cons
     });
     var env = env_mod.Env.init(alloc, null);
     defer env.deinit();
-    const nodes = try @import("../sexpr/parser.zig").parse(alloc, source);
+    const nodes = try sexpr_parser.parse(alloc, source);
     _ = try eval.evalNodes(nodes, &env);
 }
 
@@ -2450,4 +2567,107 @@ test "inert form heads are warning-free" {
         \\      (id abcd1234))))
     );
     try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+}
+
+/// Source for the replicate tests: a tiny one-cap module replicated 3×
+/// under (hierarchical-ids), with the replicate form's (id …) pinned so
+/// child ids are reproducible across fresh evaluations.
+const replicate_fixture_src =
+    \\(defmodule tiny (n)
+    \\  (design-block (fmt "Tiny ~R" n)
+    \\    (instance "C1" (cap-0402 "100nF")
+    \\      (pin 1 "VDD")
+    \\      (pin 2 "GND"))))
+    \\(design-block "Top"
+    \\  (hierarchical-ids)
+    \\  (replicate 3 "adc~D" (tiny ~D) (id abcd1234)))
+;
+
+/// Evaluate the replicate fixture with a fresh evaluator and return the
+/// resulting top-level design block.
+fn evalReplicateFixture(alloc: std.mem.Allocator, eval: *Evaluator) !*DesignBlock {
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    try evalWarningFixture(alloc, eval, replicate_fixture_src);
+    // evalWarningFixture discards the value; re-evaluate to capture it.
+    const nodes = try sexpr_parser.parse(alloc, replicate_fixture_src);
+    var env2 = env_mod.Env.init(alloc, null);
+    defer env2.deinit();
+    const v = try eval.evalNodes(nodes, &env2);
+    return switch (v) {
+        .design_block => |b| b,
+        else => error.TestUnexpectedResult,
+    };
+}
+
+// spec: eval/design_block - replicate expands to N sub-blocks with the index substituted into names and call args
+test "replicate builds N sub-blocks with substituted names and args" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const block = try evalReplicateFixture(alloc, &eval);
+
+    try testing.expectEqual(@as(usize, 3), block.sub_blocks.len);
+    try testing.expectEqualStrings("adc1", block.sub_blocks[0].name);
+    try testing.expectEqualStrings("adc2", block.sub_blocks[1].name);
+    try testing.expectEqualStrings("adc3", block.sub_blocks[2].name);
+    // ~D substituted into the call args: the module names itself "Tiny <n>".
+    try testing.expectEqualStrings("Tiny 1", block.sub_blocks[0].block.name);
+    try testing.expectEqualStrings("Tiny 3", block.sub_blocks[2].block.name);
+    // Distinct global ref-des across the copies.
+    const r0 = block.sub_blocks[0].block.instances[0].ref_des;
+    const r1 = block.sub_blocks[1].block.instances[0].ref_des;
+    const r2 = block.sub_blocks[2].block.instances[0].ref_des;
+    try testing.expect(!std.mem.eql(u8, r0, r1));
+    try testing.expect(!std.mem.eql(u8, r1, r2));
+    // Distinct derived ids across the copies (different sub-block uuids).
+    const id_a = block.sub_blocks[0].block.instances[0].id;
+    const id_b = block.sub_blocks[1].block.instances[0].id;
+    try testing.expect(!std.mem.eql(u8, id_a, id_b));
+}
+
+// spec: eval/design_block - replicate child ids are stable across two evaluations of the same id-annotated source
+test "replicate ids are stable across evals" {
+    const alloc = std.heap.page_allocator;
+    var eval_a: Evaluator = undefined;
+    const block_a = try evalReplicateFixture(alloc, &eval_a);
+    var eval_b: Evaluator = undefined;
+    const block_b = try evalReplicateFixture(alloc, &eval_b);
+
+    try expectSameReplicaIds(block_a, block_b);
+    // The pinned (id abcd1234) means nothing new is queued for write-back
+    // at the replicate form itself.
+    for (eval_a.pending_ids.items) |p| {
+        try testing.expect(!std.mem.eql(u8, p.id, "abcd1234"));
+    }
+}
+
+/// Assert two evaluations of the replicate fixture produced identical
+/// sub-block names and child instance ids.
+fn expectSameReplicaIds(block_a: *const DesignBlock, block_b: *const DesignBlock) !void {
+    try testing.expectEqual(block_b.sub_blocks.len, block_a.sub_blocks.len);
+    for (block_a.sub_blocks, block_b.sub_blocks) |sa, sb| {
+        try testing.expectEqualStrings(sb.name, sa.name);
+        try testing.expectEqual(sb.block.instances.len, sa.block.instances.len);
+        for (sa.block.instances, sb.block.instances) |ia, ib| {
+            try testing.expectEqualStrings(ib.id, ia.id);
+        }
+    }
+}
+
+// spec: eval/design_block - replicate without hierarchical-ids is rejected with the opt-in message
+test "replicate requires hierarchical-ids" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const r = evalWarningFixture(alloc, &eval,
+        \\(defmodule tiny (n)
+        \\  (design-block "Tiny"
+        \\    (instance "C1" (cap-0402 "100nF")
+        \\      (pin 1 "VDD")
+        \\      (pin 2 "GND"))))
+        \\(design-block "Top"
+        \\  (replicate 3 "adc~D" (tiny ~D) (id abcd1234)))
+    );
+    try testing.expectError(error.InvalidForm, r);
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expectEqualStrings("replicate requires (hierarchical-ids) — sub-block ids are derived per index", diag.message);
 }

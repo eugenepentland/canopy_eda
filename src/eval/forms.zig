@@ -133,6 +133,7 @@ pub const ScopeForm = enum {
     placement,
     floorplan,
     board,
+    replicate,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -176,6 +177,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "placement", .placement },
     .{ "floorplan", .floorplan },
     .{ "board", .board },
+    .{ "replicate", .replicate },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -515,6 +517,12 @@ pub const scope_form_docs = blk: {
             "mounting hardware at the four corners (TL, TR, BR, BL in authored order). " ++
             "The interior placement (force, (placement …), or (floorplan …)) is centered in " ++
             "the outline; the rendered views draw the outline rectangle.",
+    } };
+    t[@intFromEnum(ScopeForm.replicate)] = .{ .scope = tl, .doc = .{
+        .syntax = "(replicate N \"name~D\" (module-call args…))",
+        .summary = "Instantiate N copies of a module as sub-blocks: ~D in the name template and " ++
+            "in bare call-arg atoms is replaced by the 1-based index. Requires (hierarchical-ids); " ++
+            "the form carries one auto-minted (id …) and each copy's sub-block uuid derives from it + the substituted name.",
     } };
     break :blk t;
 };
