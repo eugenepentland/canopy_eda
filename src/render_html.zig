@@ -208,7 +208,7 @@ pub fn renderToHtml(
     try w.writeAll("</div>");
     try writeSidebar(w, review_doc);
     try w.writeAll("</div>");
-    try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns, check_results, review_doc);
+    try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns, check_results, review_doc, schematic_path);
     // Per-sub-block PCB preview wiring — reuses the DESIGN_NAME global declared
     // by writeScripts, so it must follow that call. Only emitted when there are
     // sub-blocks (matching the global PCB-settings bar above).
@@ -271,6 +271,15 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
             "title=\"Copy the raw .sexp source to the clipboard\">\u{1F4CB} Copy SRC</button>",
     );
     try w.writeAll("<button class=\"head-link head-btn\" id=\"erc-btn\" type=\"button\">ERC</button>");
+    // Version history (designs only — module sources aren't snapshotted):
+    // opens the sidebar History panel listing stored snapshots, each with a
+    // "Diff vs current" action backed by GET /api/diff/:name.
+    if (!is_module) {
+        try w.writeAll(
+            "<button class=\"head-link head-btn\" id=\"history-btn\" type=\"button\" " ++
+                "title=\"Stored versions (snapshotted on every save/build) with diff vs current\">History</button>",
+        );
+    }
     try w.writeAll("<div class=\"kicad-menu\">");
     try w.writeAll("<button class=\"head-link head-btn\" id=\"kicad-btn\" type=\"button\">KiCad \u{25BE}</button>");
     try w.writeAll("<div class=\"kicad-panel\" id=\"kicad-panel\">");
@@ -1645,9 +1654,15 @@ fn writeScripts(
     asserted_fns: *const std.StringHashMapUnmanaged([]const u8),
     check_results: *const CheckResultMap,
     review_doc: ?review.ReviewDoc,
+    schematic_path: []const u8,
 ) !void {
     try w.writeAll("<script>var DESIGN_NAME=");
     try writeJsString(w, design_name);
+    // "module" when this page renders a reusable module (/modules/:name),
+    // "design" for a project design — drives the sidebar's "Locate on PCB"
+    // link target (modules have a whole-module /pcb-layout view; designs only
+    // have per-sub-block scoped views).
+    try w.print(";var SCH_VIEW=\"{s}\"", .{if (std.mem.eql(u8, schematic_path, "/modules/")) "module" else "design"});
     try w.writeAll(";var SCH_INDEX=");
     try writeSearchIndex(w, allocator, block, ctx, asserted_fns, check_results);
     try w.writeAll(";var SCH_AUDIT=");
@@ -1750,7 +1765,10 @@ fn writeSearchIndex(
         try writeJsString(w, sb.name);
         try w.writeAll(",\"description\":");
         try writeJsString(w, sb.block.name);
-        try w.writeAll(",\"category\":");
+        // Marks this entry as a sub-block (vs. a plain section): the sidebar
+        // uses it to build the per-sub-block "Locate on PCB" link
+        // (/pcb-layout/:design?sub=<slug>&focus=<ref>).
+        try w.writeAll(",\"sub\":true,\"category\":");
         try writeJsString(w, @tagName(sb_cat));
         try emitReqStatusFields(w, sb_counts);
         try w.writeAll(hubsArrayPrefix);

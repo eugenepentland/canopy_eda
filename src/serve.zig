@@ -34,6 +34,8 @@ const account_page = @import("serve/account_page.zig");
 const static_assets = @import("serve/static_assets.zig");
 const sync = @import("serve/sync.zig");
 const notes = @import("serve/notes.zig");
+const design_diff = @import("serve/design_diff.zig");
+const datasheet_attach = @import("serve/datasheet_attach.zig");
 const rate_limiter = @import("serve/rate_limiter.zig");
 const mcp_docs = @import("serve/mcp_docs.zig");
 
@@ -333,6 +335,10 @@ pub fn serve(
     router.get("/api/export-review/:name", api.exportReviewPackageApi, .{});
     router.get("/api/erc/:name", api.ercApi, .{});
     router.get("/api/review/:name", api.reviewJsonApi, .{});
+    // Version history: snapshot list + structured diff between two stored
+    // revisions (or a revision and the current working file).
+    router.get("/api/history/:name", design_diff.historyApi, .{});
+    router.get("/api/diff/:name", design_diff.diffApi, .{});
     router.post("/api/section-note/:name/add", api.addSectionNoteApi, .{});
     router.post("/api/section-note/:name/remove", api.removeSectionNoteApi, .{});
     router.post("/api/component-datasheet/:component/add", api.addComponentDatasheetApi, .{});
@@ -342,6 +348,9 @@ pub fn serve(
     router.get("/api/pinout/:name", api.pinoutApi, .{});
     router.post("/api/upload-datasheet", upload_datasheet.uploadDatasheetApi, .{});
     router.get("/api/datasheets", upload_datasheet.listDatasheetsApi, .{});
+    // One-click attach from the library page: splice (datasheet "…") into
+    // a component's lib/components/<name>.sexp (idempotent).
+    router.post("/api/attach-datasheet", datasheet_attach.attachDatasheetApi, .{});
     router.get("/datasheets/:filename", upload_datasheet.serveDatasheetApi, .{});
     router.get("/pdf-view/:filename", pdf_viewer.pdfViewerPage, .{});
 

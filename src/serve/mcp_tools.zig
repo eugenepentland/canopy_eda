@@ -3,6 +3,7 @@ const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
 const paths = @import("../paths.zig");
 const edit = @import("edit.zig");
+const diag_format = @import("diag_format.zig");
 const vfs = @import("vfs.zig");
 const history = @import("history.zig");
 const serve_root = @import("../serve.zig");
@@ -1928,6 +1929,10 @@ fn writeBuildReport(w: anytype, report: edit.BuildReport) !void {
     if (report.snapshot) |s| try json_writer.writeString(w, s) else try w.writeAll("null");
     try w.writeAll(",\"error\":");
     if (report.error_message) |m| try json_writer.writeString(w, m) else try w.writeAll("null");
+    // Structured source-located build diagnostic (file/line/col/message/
+    // source_line) so an agent can jump straight to the failing form.
+    try w.writeAll(",\"diagnostic\":");
+    if (report.diagnostic) |d| try diag_format.writeJson(w, d) else try w.writeAll("null");
     try w.writeAll(",\"assertion_failures\":[");
     for (report.assertion_failures, 0..) |a, i| {
         if (i > 0) try w.writeAll(",");
@@ -2009,6 +2014,14 @@ pub const DesignSummary = struct {
     /// satisfied (footprint + datasheet imported, requirements defined,
     /// placed + verified). Feeds the home dashboard's "N/M ICs ready" chip.
     critical_complete: usize = 0,
+    /// ERC violation counts by severity (0 when the build failed). Drive the
+    /// home dashboard's red/yellow status chips.
+    erc_errors: usize = 0,
+    erc_warnings: usize = 0,
+    /// Failed (non-warning) `(assert …)` results from the evaluation.
+    assert_fails: usize = 0,
+    /// Still-open tasks in the design's `.notes.md` sidecar.
+    open_notes: usize = 0,
 };
 
 /// Count instances flattened across a design plus every sub-block. Does NOT
@@ -2107,8 +2120,30 @@ pub fn listDesignSummaries(
                     summary.critical_declared = trace.declared;
                     summary.critical_complete = trace.complete;
                 }
+
+                // Status-chip roll-up for the home dashboard: ERC severities
+                // (same .bom-resolved path the review endpoint uses), failed
+                // non-warning assertions, and open .notes.md tasks. Each
+                // degrades to 0 on failure rather than dropping the summary.
+                const bom_path = paths.designSiblingPath(allocator, project_dir, base, ".bom") catch null;
+                if (bom_path) |bp| {
+                    defer allocator.free(bp);
+                    bom.resolveIdentities(allocator, @constCast(block), bp, project_dir) catch |e| warnResolveIdentities(base, e);
+                }
+                const violations = erc_mod.runErc(allocator, @constCast(block), project_dir) catch &[_]erc_mod.Violation{};
+                for (violations) |v| {
+                    if (v.severity == .@"error") {
+                        summary.erc_errors += 1;
+                    } else if (v.severity == .warning) {
+                        summary.erc_warnings += 1;
+                    }
+                }
+                for (eval.assertions.items) |a| {
+                    if (!a.passed and !a.is_warning) summary.assert_fails += 1;
+                }
             }
         } else |_| {}
+        summary.open_notes = countOpenNotes(allocator, project_dir, base);
 
         try summaries.append(allocator, summary);
     }
@@ -2119,6 +2154,18 @@ pub fn listDesignSummaries(
         }
     }.lessThan);
     return slice;
+}
+
+/// Open-task count from `<design>.notes.md` — 0 when the sidecar doesn't
+/// exist or can't be parsed. Backs the home dashboard's notes chip.
+fn countOpenNotes(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) usize {
+    var raw: ?[]u8 = null;
+    const parsed = notes.loadNotes(allocator, project_dir, name, &raw) catch return 0;
+    var open: usize = 0;
+    for (parsed.tasks) |t| {
+        if (t.completed == null) open += 1;
+    }
+    return open;
 }
 
 /// Parse the file's top-level forms and return true iff any is a

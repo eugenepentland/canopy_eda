@@ -14,6 +14,8 @@ const bom_html = @import("bom_html.zig");
 const history = @import("history.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
 const erc_mod = @import("../erc.zig");
+const diag_format = @import("diag_format.zig");
+const datasheet_attach = @import("datasheet_attach.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const HTTP_NOT_FOUND: u16 = 404;
@@ -978,6 +980,10 @@ pub const BuildReport = struct {
     snapshot: ?[]const u8 = null,
     eval_ok: bool,
     error_message: ?[]const u8 = null,
+    /// Source-located diagnostic for a failed eval — file:line:col, the
+    /// evaluator's message, and the offending source line. Null on success
+    /// or when no span was recorded.
+    diagnostic: ?diag_format.Diagnostic = null,
     assertion_failures: []const AssertionFailure = &.{},
     erc: []const erc_mod.Violation = &.{},
 };
@@ -1016,12 +1022,21 @@ pub fn rebuildDesign(
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
     const eval_result = eval.evalFile(path) catch |e| {
+        // Resolve the span into a full diagnostic (re-reads the file so the
+        // shown line matches what the agent just wrote). The human-readable
+        // error_message becomes the compiler-style text when a span exists.
+        const d: ?diag_format.Diagnostic = diag_format.load(allocator, path, @errorName(e), eval.last_error) catch null;
+        const msg: []const u8 = if (d) |dd|
+            (diag_format.formatText(allocator, dd) catch @errorName(e))
+        else
+            @errorName(e);
         return .{
             .ok = false,
             .version = serve_root.getLiveVersion(name),
             .snapshot = snap_id,
             .eval_ok = false,
-            .error_message = @errorName(e),
+            .error_message = msg,
+            .diagnostic = d,
         };
     };
     const block = switch (eval_result) {
@@ -1460,54 +1475,6 @@ pub fn removeSectionNoteCore(
     return error.NoteNotFound;
 }
 
-/// Canonical comparison stem for a datasheet filename: drop `.pdf` and any
-/// trailing duplicate-download marker so two names that differ only by a
-/// re-download counter compare equal. Handles both the raw browser form
-/// (`foo (1)`) and the post-sanitise form the filename whitelist bakes it into
-/// (`foo__1_`). A part number that merely ends in digits (`lm2596`) is left
-/// untouched — only a parenthesised or `__`-wrapped counter is removed.
-fn datasheetStem(name: []const u8) []const u8 {
-    var s = name;
-    if (std.ascii.endsWithIgnoreCase(s, ".pdf")) s = s[0 .. s.len - 4];
-    // Raw form: trailing `(<digits>)`.
-    if (s.len >= 3 and s[s.len - 1] == ')') {
-        if (std.mem.lastIndexOfScalar(u8, s, '(')) |open| {
-            const inner = s[open + 1 .. s.len - 1];
-            if (inner.len > 0 and allAsciiDigits(inner)) return std.mem.trimRight(u8, s[0..open], " _");
-        }
-    }
-    // Post-sanitise form: trailing `__<digits>_` (from `(N)` once `(`/`)` map to `_`).
-    if (s.len >= 4 and s[s.len - 1] == '_') {
-        var j = s.len - 1;
-        while (j > 0 and s[j - 1] >= '0' and s[j - 1] <= '9') j -= 1;
-        if (j < s.len - 1 and j >= 2 and s[j - 1] == '_' and s[j - 2] == '_') {
-            s = std.mem.trimRight(u8, s[0 .. j - 2], " _");
-        }
-    }
-    return s;
-}
-
-fn allAsciiDigits(s: []const u8) bool {
-    for (s) |c| if (c < '0' or c > '9') return false;
-    return true;
-}
-
-/// True iff `component_form` already declares a `(datasheet "…")` whose stem
-/// matches `pdf`'s — the single-link dedupe predicate, suffix-insensitive.
-fn componentLinksDatasheet(component_form: []const u8, pdf: []const u8) bool {
-    const want = datasheetStem(pdf);
-    const open = "(datasheet \"";
-    var i: usize = 0;
-    while (std.mem.indexOfPos(u8, component_form, i, open)) |at| {
-        const name_start = at + open.len;
-        const end = std.mem.indexOfScalarPos(u8, component_form, name_start, '"') orelse break;
-        const have = datasheetStem(component_form[name_start..end]);
-        if (have.len == want.len and std.ascii.eqlIgnoreCase(have, want)) return true;
-        i = end + 1;
-    }
-    return false;
-}
-
 /// Splice a `(datasheet "file.pdf")` entry into the component definition at
 /// `lib/components/<component>.sexp`. Dedupes — a filename whose stem already
 /// links (ignoring a re-download counter) returns `DuplicateImport` rather than
@@ -1533,38 +1500,16 @@ pub fn addComponentDatasheetCore(
     const source = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return error.CannotReadDesign;
     defer allocator.free(source);
 
-    if (std.mem.indexOf(u8, source, "(component") == null) return error.MalformedSource;
-    const form_start = std.mem.indexOf(u8, source, "(component").?;
-    const form_end = findFormEnd(source, form_start) orelse return error.MalformedSource;
-
-    // Dedupe on the normalised stem, not the exact string: a re-download often
-    // arrives under a duplicate-marker name (`tps55289__1_.pdf`) that points at
-    // the same datasheet the part already links as `tps55289.pdf`. Comparing
-    // raw strings let the near-dup slip through and appended a second form whose
-    // file was missing. Match any existing `(datasheet "…")` whose stem equals
-    // this one's so the link stays single.
-    if (componentLinksDatasheet(source[form_start..form_end], pdf)) return error.DuplicateImport;
-
-    // Insert before the closing `)` with matching indent.
-    const insert_at = form_end - 1;
-    const indent = detectComponentIndent(source, form_start);
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-    try w.writeAll(source[0..insert_at]);
-    try w.writeByte('\n');
-    try w.writeAll(indent);
-    try w.writeAll("(datasheet \"");
-    for (pdf) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        else => try w.writeByte(c),
+    // Pure splice (dedupes on the normalised stem — see datasheet_attach.zig,
+    // where the logic lives so it's unit-testable).
+    const new_source = datasheet_attach.spliceDatasheet(allocator, source, pdf) catch |err| switch (err) {
+        error.MalformedSource => return error.MalformedSource,
+        error.DuplicateImport => return error.DuplicateImport,
+        error.OutOfMemory => return error.OutOfMemory,
     };
-    try w.writeAll("\")");
-    try w.writeAll(source[insert_at..]);
+    defer allocator.free(new_source);
 
-    try writeLibComponent(path, buf.items);
+    try writeLibComponent(path, new_source);
     const version = serve_root.bumpLiveVersion(component_name);
     return .{ .version = version, .snapshot = null };
 }
@@ -1636,20 +1581,6 @@ fn safePdfName(name: []const u8) bool {
         if (!ok) return false;
     }
     return true;
-}
-
-/// Indent prefix for the first child inside a `(component ...)` form —
-/// library files are typically indented with two spaces, but follow the
-/// file's existing style when possible.
-fn detectComponentIndent(source: []const u8, form_start: usize) []const u8 {
-    var i: usize = form_start;
-    while (i < source.len and source[i] != '\n') : (i += 1) {}
-    if (i >= source.len) return "  ";
-    i += 1;
-    const indent_start = i;
-    while (i < source.len and (source[i] == ' ' or source[i] == '\t')) : (i += 1) {}
-    if (i == indent_start) return "  ";
-    return source[indent_start..i];
 }
 
 /// Return the indentation prefix (leading whitespace) of the first child
@@ -1974,15 +1905,15 @@ test "componentLinksDatasheet dedupes a re-download counter name" {
         \\  (datasheet "tps55289.pdf"))
     ;
     // Exact, ` (1)`, and post-sanitise `__1_` variants all count as duplicates.
-    try std.testing.expect(componentLinksDatasheet(form, "tps55289.pdf"));
-    try std.testing.expect(componentLinksDatasheet(form, "tps55289 (1).pdf"));
-    try std.testing.expect(componentLinksDatasheet(form, "tps55289__1_.pdf"));
+    try std.testing.expect(datasheet_attach.linksDatasheet(form, "tps55289.pdf"));
+    try std.testing.expect(datasheet_attach.linksDatasheet(form, "tps55289 (1).pdf"));
+    try std.testing.expect(datasheet_attach.linksDatasheet(form, "tps55289__1_.pdf"));
     // A genuinely different datasheet is not a duplicate.
-    try std.testing.expect(!componentLinksDatasheet(form, "tps55289-errata.pdf"));
+    try std.testing.expect(!datasheet_attach.linksDatasheet(form, "tps55289-errata.pdf"));
 }
 
 test "datasheetStem keeps a trailing-digit part number intact" {
     // spec: serve/edit - datasheet stem preserves trailing-digit part numbers
-    try std.testing.expectEqualStrings("lm2596", datasheetStem("lm2596.pdf"));
-    try std.testing.expectEqualStrings("tps55289", datasheetStem("tps55289__2_.pdf"));
+    try std.testing.expectEqualStrings("lm2596", datasheet_attach.datasheetStem("lm2596.pdf"));
+    try std.testing.expectEqualStrings("tps55289", datasheet_attach.datasheetStem("tps55289__2_.pdf"));
 }

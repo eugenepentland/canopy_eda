@@ -360,3 +360,53 @@ details li{margin:3px 0;font-size:0.88rem;color:#c9d1d9;line-height:1.45;}
 .sub-pcb-frame-wrap{border:1px solid #30363d;border-radius:8px;overflow:hidden;background:#010409;}
 .sub-pcb-frame-wrap[hidden]{display:none;}
 .sub-pcb-frame{width:100%;height:540px;border:0;display:block;}
+
+/* ── KiCad push preview modal + toast ─────────────────────────────────── */
+.kpv-overlay{position:fixed;inset:0;background:rgba(1,4,9,0.72);z-index:300;display:flex;align-items:center;justify-content:center;}
+.kpv-box{background:#161b22;border:1px solid #30363d;border-radius:10px;width:min(680px,92vw);max-height:84vh;display:flex;flex-direction:column;box-shadow:0 16px 48px rgba(0,0,0,0.7);}
+.kpv-head{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #21262d;}
+.kpv-head h3{margin:0;font-size:0.95rem;color:#f0f6fc;}
+.kpv-x{background:none;border:0;color:#8b949e;font-size:1.1rem;cursor:pointer;padding:2px 6px;}
+.kpv-x:hover{color:#f0f6fc;}
+.kpv-summary{display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px;border-bottom:1px solid #21262d;}
+.kpv-chip{font-size:0.75rem;padding:3px 10px;border-radius:10px;border:1px solid #30363d;color:#8b949e;}
+.kpv-chip.hot{color:#d29922;border-color:#9e6a03;}
+.kpv-ops{overflow-y:auto;padding:8px 16px;font-family:ui-monospace,SFMono-Regular,monospace;font-size:0.74rem;line-height:1.5;color:#c9d1d9;flex:1;min-height:60px;max-height:46vh;}
+.kpv-op{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px dotted #21262d;padding:2px 0;}
+.kpv-op .op-kind{color:#58a6ff;font-weight:600;margin-right:6px;}
+.kpv-empty{color:#6e7681;font-size:0.8rem;padding:8px 0;}
+.kpv-foot{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid #21262d;}
+.kpv-btn{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:6px 16px;font-size:0.8rem;cursor:pointer;font-family:inherit;}
+.kpv-btn:hover{background:#30363d;border-color:#58a6ff;}
+.kpv-btn.primary{background:#238636;border-color:#2ea043;color:#fff;}
+.kpv-btn.primary:hover{background:#2ea043;}
+.kpv-btn:disabled{opacity:0.55;cursor:default;}
+.sch-toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:320;background:#161b22;border:1px solid #30363d;border-left:4px solid #58a6ff;border-radius:8px;padding:10px 18px;font-size:0.82rem;color:#c9d1d9;box-shadow:0 8px 24px rgba(0,0,0,0.6);max-width:80vw;word-wrap:break-word;}
+.sch-toast.ok{border-left-color:#3fb950;}
+.sch-toast.err{border-left-color:#f85149;}
+.sch-toast.warn{border-left-color:#d29922;}
+
+/* ── Keyboard-shortcut help overlay (`?`) ─────────────────────────────── */
+.kbd-overlay{position:fixed;inset:0;background:rgba(1,4,9,0.72);z-index:340;display:flex;align-items:center;justify-content:center;}
+.kbd-box{background:#161b22;border:1px solid #30363d;border-radius:10px;min-width:320px;max-width:480px;padding:18px 22px;box-shadow:0 16px 48px rgba(0,0,0,0.7);}
+.kbd-box h3{margin:0 0 12px;font-size:0.95rem;color:#f0f6fc;}
+.kbd-row{display:flex;justify-content:space-between;gap:18px;padding:4px 0;font-size:0.82rem;color:#c9d1d9;}
+.kbd-row kbd{background:#21262d;border:1px solid #30363d;border-bottom-width:2px;border-radius:4px;padding:1px 7px;font-family:ui-monospace,SFMono-Regular,monospace;font-size:0.74rem;color:#79c0ff;white-space:nowrap;}
+.kbd-hint{margin-top:12px;font-size:0.72rem;color:#6e7681;}
+
+/* ── History / version-diff panel bits (sidebar) ──────────────────────── */
+.hist-row{border:1px solid #21262d;border-radius:6px;padding:7px 9px;margin-bottom:6px;}
+.hist-id{font-family:ui-monospace,SFMono-Regular,monospace;font-size:0.74rem;color:#79c0ff;}
+.hist-desc{font-size:0.72rem;color:#8b949e;margin-top:2px;}
+.hist-actions{margin-top:5px;}
+.hist-diff-btn{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:3px 10px;font-size:0.72rem;cursor:pointer;font-family:inherit;}
+.hist-diff-btn:hover{background:#30363d;border-color:#58a6ff;}
+.diff-group{margin:8px 0 2px;font-size:0.78rem;font-weight:700;color:#f0f6fc;}
+.diff-item{font-family:ui-monospace,SFMono-Regular,monospace;font-size:0.72rem;padding:2px 0 2px 8px;color:#c9d1d9;border-left:2px solid #30363d;margin-bottom:1px;white-space:normal;word-break:break-word;}
+.diff-item.add{border-left-color:#3fb950;}
+.diff-item.del{border-left-color:#f85149;}
+.diff-item.chg{border-left-color:#d29922;}
+.diff-empty{font-size:0.76rem;color:#6e7681;padding:6px 0;}
+.sb-pcb-locate{margin:2px 0 8px;}
+.sb-pcb-locate a{font-size:0.76rem;color:#58a6ff;text-decoration:none;}
+.sb-pcb-locate a:hover{text-decoration:underline;}

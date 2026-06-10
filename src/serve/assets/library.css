@@ -82,3 +82,15 @@ a.badge-3d:hover { background:#1c3a24; border-color:#3fb950; }
 .comp-card.drag-over { position:relative; z-index:1001; outline:2px dashed #58a6ff; outline-offset:3px; background:#1c2333; }
 .comp-card.drag-over::after { content:"Drop .zip (3D model) or .pdf (datasheet)"; position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; padding:0 0.5rem; color:#58a6ff; font-size:0.85rem; font-weight:600; background:rgba(13,17,23,0.82); border-radius:8px; pointer-events:none; }
 </style></head><body>
+
+/* ── Attach-datasheet control on component cards ───────────────────── */
+.ds-attach { margin-top: 0.35rem; font-size: 0.78rem; }
+.ds-attach-toggle { color: #8b949e; cursor: pointer; user-select: none; }
+.ds-attach-toggle:hover { color: #e3a857; }
+.ds-attach-row { display: inline-flex; gap: 0.35rem; margin-left: 0.4rem; align-items: center; }
+.ds-attach-row[hidden] { display: none; }
+.ds-attach-input { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9;
+  border-radius: 4px; padding: 2px 6px; font-size: 0.76rem; width: 170px; }
+.ds-attach-btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+  border-radius: 4px; padding: 2px 9px; font-size: 0.76rem; cursor: pointer; }
+.ds-attach-btn:hover { background: #30363d; border-color: #e3a857; }

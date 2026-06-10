@@ -21,6 +21,11 @@ const HOME_STYLE_BLOCK: []const u8 = "<style>" ++ @embedFile("../assets/navbar.c
     \\.trace-chip.pass{color:#3fb950;border-color:#238636}
     \\.trace-chip.warn{color:#d29922;border-color:#9e6a03}
     \\.trace-chip.fail{color:#f85149;border-color:#da3633}
+    \\.status-chips{display:flex;flex-wrap:wrap;gap:5px}
+    \\.st-chip{font-size:11px;padding:1px 8px;border-radius:10px;border:1px solid #30363d;color:#8b949e}
+    \\.st-chip.err{color:#f85149;border-color:#da3633}
+    \\.st-chip.warn{color:#d29922;border-color:#9e6a03}
+    \\.st-chip.pass{color:#3fb950;border-color:#238636}
     \\.design-card-sections{display:flex;flex-wrap:wrap;gap:4px}
     \\.section-chip{background:#1a1a2e;color:#8b949e;font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid #21262d}
     \\.section-chip-more{color:#6e7681;font-size:11px;padding:2px 4px}
@@ -81,6 +86,12 @@ fn chipsShown(n: usize) usize {
     return if (n < MAX_CHIPS) n else MAX_CHIPS;
 }
 
+/// True when a built design has nothing to flag — no ERC errors/warnings, no
+/// failed assertions, no open notes — so the card shows one green PASS chip.
+fn allClear(s: DesignSummary) bool {
+    return s.erc_errors == 0 and s.erc_warnings == 0 and s.assert_fails == 0 and s.open_notes == 0;
+}
+
 /// CSS class for the "N/M ICs ready" traceability chip: green when every
 /// declared critical IC is fully traced, red when none are, amber otherwise.
 fn traceChipClass(s: DesignSummary) []const u8 {
@@ -127,6 +138,26 @@ pub templ DesignCard(s: DesignSummary, now_sec: i64) {
                 <span class={traceChipClass(s)}>{s.critical_complete}/{s.critical_declared} ICs ready</span>
             }
         </div>
+        if (s.build_ok) {
+            <div class="status-chips">
+                if (allClear(s)) {
+                    <span class="st-chip pass" title="No ERC issues, no failed assertions, no open notes">PASS</span>
+                } else {
+                    if (s.erc_errors > 0) {
+                        <span class="st-chip err" title="ERC errors">{s.erc_errors} ERC error{pluralS(s.erc_errors)}</span>
+                    }
+                    if (s.erc_warnings > 0) {
+                        <span class="st-chip warn" title="ERC warnings">{s.erc_warnings} ERC warning{pluralS(s.erc_warnings)}</span>
+                    }
+                    if (s.assert_fails > 0) {
+                        <span class="st-chip err" title="Failed (assert …) checks">{s.assert_fails} failed assertion{pluralS(s.assert_fails)}</span>
+                    }
+                    if (s.open_notes > 0) {
+                        <span class="st-chip" title="Open tasks in the design notes">{s.open_notes} open note{pluralS(s.open_notes)}</span>
+                    }
+                }
+            </div>
+        }
         if (s.sections.len > 0) {
             <div class="design-card-sections">
                 for (s.sections[0..chipsShown(s.sections.len)]) |sec| {
