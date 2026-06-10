@@ -41,6 +41,7 @@ const TEXT_COL = Rgb.hex("#c9d1d9");
 const TEXT_DIM = Rgb.hex("#6e7681");
 const GOOD_COL = Rgb.hex("#3fb950"); // improvement (compare Δ ≤ 0)
 const GRID_COL = Rgb.hex("#30363d"); // reference grid lines
+const EDGE_COL = Rgb.hex("#7ee787"); // (board …) outline rectangle
 // Blame heatmap ramp: cheap (cool) → expensive (hot).
 const BLAME_LO = Rgb.hex("#15302a");
 const BLAME_MID = Rgb.hex("#b8860b");
@@ -244,6 +245,7 @@ fn renderCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options)
     };
 
     if (opts.grid) ctx.drawGrid();
+    ctx.drawBoardOutline();
     if (opts.compare != null) ctx.drawCompareGhost();
     ctx.drawParts();
     ctx.drawAirwires();
@@ -698,6 +700,21 @@ const Ctx = struct {
             const s = std.fmt.bufPrint(&buf, "{d:.2}mm", .{mm}) catch "";
             self.cv.text((a[0] + b[0]) / 2, (a[1] + b[1]) / 2 + self.pw(2), s, self.pw(8), TEXT_COL, 0.95, .middle);
         }
+    }
+
+    /// The `(board (size W H) …)` outline rectangle with its dimensions, under
+    /// the parts — the physical board edge everything must stay inside.
+    fn drawBoardOutline(self: *Ctx) void {
+        const r = self.p.board_rect orelse return;
+        const x0 = self.xpx(r.minx);
+        const y0 = self.ypx(r.miny);
+        const x1 = self.xpx(r.minx + r.w);
+        const y1 = self.ypx(r.miny + r.h);
+        const pts = [_][2]f32{ .{ x0, y0 }, .{ x1, y0 }, .{ x1, y1 }, .{ x0, y1 }, .{ x0, y0 } };
+        self.cv.strokePath(&pts, .open, self.pw(1.4), EDGE_COL, 0.9);
+        var buf: [32]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "{d:.0}x{d:.0}mm", .{ r.w, r.h }) catch "";
+        self.cv.text(x0 + self.pw(4), y0 + self.pw(3), s, self.pw(8), EDGE_COL, 0.9, .start);
     }
 
     /// A faint 1/2/5 mm reference grid with axis tick labels, under everything.

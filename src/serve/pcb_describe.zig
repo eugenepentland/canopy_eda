@@ -138,7 +138,14 @@ pub fn writeDescribeJson(
         try pcb_layout_page.writeJsonStr(w, originOf(p, ai));
         try w.writeAll("}");
     }
-    try w.print(",\"board\":{{\"w_mm\":{d:.2},\"h_mm\":{d:.2}}}", .{ p.maxx - p.minx, p.maxy - p.miny });
+    try w.print(",\"board\":{{\"w_mm\":{d:.2},\"h_mm\":{d:.2}", .{ p.maxx - p.minx, p.maxy - p.miny });
+    // The authored `(board (size W H) …)` outline, when one drives the layout —
+    // distinct from the bbox above (which includes the staging band/margins).
+    if (p.board_rect) |br| {
+        try w.print(",\"outline\":{{\"w_mm\":{d:.2},\"h_mm\":{d:.2}", .{ br.w, br.h });
+        try w.print(",\"minx\":{d:.2},\"miny\":{d:.2}}}", .{ br.minx, br.miny });
+    }
+    try w.writeAll("}");
     const b = p.breakdown;
     try w.print(",\"score\":{{\"objective\":{d:.1},\"hpwl\":{d:.1},\"loop_nh\":{d:.1}}}", .{ b.objective, b.hpwl, b.loop_nh });
     if (spec) |sp| {
@@ -350,6 +357,29 @@ fn writeLint(
     }
     if (wrong_side.len > 0) {
         try lintItem(w, &first, "wrong-side", sev_warn, wrong_side, "part sits on a different side of the anchor than the hub edge its net's pads are on; moving it shortens the connection");
+    }
+    // Parts poking past the authored `(board …)` outline. Staged (unplaced)
+    // parts sit below the board by design and are already reported above.
+    if (p.board_rect) |br| {
+        var in_band = std.StringHashMap(void).init(alloc);
+        defer in_band.deinit();
+        if (spec) |sp| for (sp.unplaced) |ref| try in_band.put(ref, {});
+        var outside: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer outside.deinit(alloc);
+        const tol = 0.05;
+        for (p.parts) |part| {
+            if (in_band.contains(part.ref_des)) continue;
+            const half = aabbHalf(part);
+            if (part.x - half[0] < br.minx - tol or part.x + half[0] > br.minx + br.w + tol or
+                part.y - half[1] < br.miny - tol or part.y + half[1] > br.miny + br.h + tol)
+            {
+                try outside.append(alloc, part.ref_des);
+            }
+        }
+        if (outside.items.len > 0) {
+            const msg = "part courtyard crosses the (board …) outline; grow the board or move the part inside";
+            try lintItem(w, &first, "outside-outline", sev_warn, outside.items, msg);
+        }
     }
     // Long loops: collect inductances, compare to the median.
     if (p.loops.len >= 4) {
