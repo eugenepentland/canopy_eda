@@ -25,6 +25,14 @@ const SubBlock = env_mod.SubBlock;
 // ── Constants ─────────────────────────────────────────────────────
 const ASSERT_RANGE_ARITY: usize = 5;
 
+/// The head atom of a list form, for warning messages — `"?"` when the
+/// node isn't a list or its head isn't an atom.
+fn formHeadName(node: Node) []const u8 {
+    const l = node.asList() orelse return "?";
+    if (l.len == 0) return "?";
+    return l[0].asAtom() orelse "?";
+}
+
 /// Parse (port "NET" in/out/io ...) section port declaration.
 pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod.Env) EvalError!?env_mod.SectionPort {
     // (port "NET" in/out/io [signal-type] [voltage] [role R] [protocol P])
@@ -105,6 +113,7 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
                 is_optional = true;
                 continue;
             }
+            self.warnFmt(arg.span, "unknown port option '{s}' in (port …)", .{atom});
             continue;
         }
         if (arg.asString()) |s| {
@@ -115,6 +124,8 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
             }
         } else if (arg.asNumber()) |n| {
             voltage = n;
+        } else if (arg.asList() != null) {
+            self.warnFmt(arg.span, "unknown sub-form ({s} …) in (port …)", .{formHeadName(arg)});
         }
     }
     if (port_name.len == 0) return null;
@@ -454,6 +465,19 @@ pub fn processPinForm(
     }
 }
 
+/// True when a child of a `(pins …)` block is one of the recognised forms
+/// (`pin`/`bus`/`group`). Callers warn-and-skip anything else — those forms
+/// used to be silently dead.
+pub fn isKnownPinsChild(node: Node) bool {
+    return node.isForm("pin") or node.isForm("bus") or node.isForm("group");
+}
+
+/// Record the unknown-sub-form warning for a non-pin/bus/group child of a
+/// `(pins …)` block.
+pub fn warnUnknownPinsChild(self: *Evaluator, node: Node) void {
+    self.warnFmt(node.span, "unknown sub-form ({s} …) in (pins …) — expected (pin …) or (bus …)", .{formHeadName(node)});
+}
+
 /// Emit decoupling cap instances from (comp "val") count/ref pairs.
 ///
 /// Each cap's id is keyed on the renumber-proof structural key
@@ -488,7 +512,11 @@ pub fn emitDecoupleItems(
         const comp_val = try self.evalNode(comp_node, env);
         const dec_comp_offset = ids.componentSourceOffset(comp_node);
         const resolved = instance_mod.resolveComponent(self, comp_val) orelse {
-            // Unresolvable leading token (e.g. a trailing (id …)) — step past it.
+            // Unresolvable leading token. A trailing (id …)/(ids …) anchor is
+            // expected residue; anything else is a silently-dropped group.
+            if (!items[idx].isForm("id") and !items[idx].isForm("ids")) {
+                self.warnFmt(items[idx].span, "ignored item in (decouple \"{s}\" …) — expected (comp \"val\") COUNT per-pin REF PIN…", .{net_name});
+            }
             idx += 1;
             continue;
         };
@@ -712,6 +740,12 @@ fn isDirectionKeyword(s: []const u8) bool {
         std.mem.eql(u8, s, "io") or std.mem.eql(u8, s, "bidi");
 }
 
+fn isSignalTypeKeyword(s: []const u8) bool {
+    return std.mem.eql(u8, s, "power") or std.mem.eql(u8, s, "signal") or
+        std.mem.eql(u8, s, "clock") or std.mem.eql(u8, s, "data") or
+        std.mem.eql(u8, s, "differential");
+}
+
 /// Parse a `(port "NAME" [net] dir ...)` form into a `Port`. Accepts the
 /// short form (net = name) and the long form with explicit net string, plus
 /// the optional `(rated …)`, `(nominal …)`, `(current …)`, `(efficiency …)`,
@@ -817,11 +851,21 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
                 enable_net = en_val.asString() orelse (ec[1].asAtom() orelse "");
             }
         } else if (arg.asAtom()) |kw| {
-            if (std.mem.eql(u8, kw, "optional")) is_optional = true;
+            if (std.mem.eql(u8, kw, "optional")) {
+                is_optional = true;
+            } else if (!isSignalTypeKeyword(kw)) {
+                // Signal-type words (power/clock/…) are valid in the section
+                // twin and tolerated here; anything else is a likely typo.
+                self.warnFmt(arg.span, "unknown port option '{s}' in (port …)", .{kw});
+            }
         } else if (arg.asNumber()) |n| {
             // Bare trailing number is the nominal voltage, matching
             // parseSectionPort; an explicit (nominal …) form still wins.
             if (nominal == null) nominal = n;
+        } else if (arg.asList() != null) {
+            // None of the known sub-forms (rated/nominal/current/efficiency/
+            // enable/electrical) matched above.
+            self.warnFmt(arg.span, "unknown sub-form ({s} …) in (port …)", .{formHeadName(arg)});
         }
     }
 
@@ -886,6 +930,14 @@ pub fn buildSubBlock(self: *Evaluator, form_children: []const Node, env: *Env) E
     if (args.len < 2) return EvalError.ArityError;
     const name_val = try self.evalNode(args[0], env);
     const name = name_val.asString() orelse return EvalError.TypeError;
+
+    // Trailing children after the module call: (id …)/(ids …) identity
+    // anchors and (bridge …) net shorthands are consumed elsewhere;
+    // anything else is silently dead — flag it.
+    for (args[2..]) |extra| {
+        if (extra.isForm("id") or extra.isForm("ids") or extra.isForm("bridge")) continue;
+        self.warnFmt(extra.span, "unknown sub-form ({s} …) in (sub-block …)", .{formHeadName(extra)});
+    }
 
     // Second arg can be:
     //   1. A string literal = file path to a design-block .sexp file

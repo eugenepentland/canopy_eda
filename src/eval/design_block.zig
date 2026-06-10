@@ -42,6 +42,19 @@ fn hasHierarchicalMarker(forms: []const Node) bool {
     return false;
 }
 
+/// Form heads that are deliberately inert in scope-form dispatch and must
+/// not draw an unknown-sub-form warning: identity anchors consumed by the
+/// id machinery (`id`/`ids`), the `(hierarchical-ids)` marker read by
+/// `hasHierarchicalMarker`, and the documented-but-inert `(row N)`/`(col N)`
+/// grid hints carried by sections and hub instances.
+fn isInertFormHead(name: []const u8) bool {
+    return std.mem.eql(u8, name, "id") or
+        std.mem.eql(u8, name, "ids") or
+        std.mem.eql(u8, name, "hierarchical-ids") or
+        std.mem.eql(u8, name, "row") or
+        std.mem.eql(u8, name, "col");
+}
+
 /// Evaluate a `(design-block "name" form…)` form into a heap-allocated
 /// `DesignBlock`. Iterates each child form (instance/port/note/group/section/
 /// sub-block/net/series/decouple/verifies), builds nets from collected
@@ -103,7 +116,11 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         if (form_children.len == 0) continue;
         const form_name = form_children[0].asAtom() orelse continue;
 
-        const sf = ScopeForm.fromAtom(form_name) orelse continue;
+        const sf = ScopeForm.fromAtom(form_name) orelse {
+            if (!isInertFormHead(form_name))
+                self.warnFmt(form.span, "unknown sub-form ({s} …) in (design-block …)", .{form_name});
+            continue;
+        };
         switch (sf) {
             .instance => {
                 const result = try instance_mod.buildInstance(self, form_children, env);
@@ -148,15 +165,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
                 if (cfg.derating) |d| derating = d;
             },
             .kicad_pcb => {
-                // (kicad-pcb "<absolute path>") — captures the on-disk
-                // PCB the file-based sync endpoint writes to. Only the
-                // literal string form is supported; no env-var or
-                // template expansion (NAS paths are deterministic).
-                if (form_children.len >= 2) {
-                    if (form_children[1].asString()) |p| {
-                        kicad_pcb_path = p;
-                    }
-                }
+                if (parseKicadPcbPath(form_children)) |p| kicad_pcb_path = p;
             },
             .function => if (try parseFunction(self, form_children)) |f| try functions.append(self.allocator, f),
             .stub => if (try parseStub(self, form_children)) |p| {
@@ -172,10 +181,13 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             // Same grammar as (placement …); the items name sub-block slugs.
             .floorplan => floorplan_spec = try parsePlacement(self, form_children),
             .board => board_spec = try parseBoard(self, form_children),
-            // Section-only forms are silently ignored at the top level —
-            // a design-block body shouldn't carry status/description/pins
-            // directly. The exhaustive switch is the contract.
-            .pins, .protocol, .calc, .description, .status, .role, .diagram, .hosts, .category => {},
+            // Section-only forms are ignored at the top level — a
+            // design-block body shouldn't carry status/description/pins
+            // directly. The exhaustive switch is the contract; the warning
+            // makes the silent skip visible.
+            .pins, .protocol, .calc, .description, .status, .role, .diagram, .hosts, .category => {
+                self.warnFmt(form.span, "({s} …) is section-only — ignored at design-block top level", .{form_name});
+            },
         }
     }
 
@@ -240,6 +252,15 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     block.rails = rails_mod.build(self.allocator, block) catch return EvalError.OutOfMemory;
 
     return .{ .design_block = block };
+}
+
+/// Read the path from a `(kicad-pcb "<absolute path>")` form — the on-disk
+/// PCB the file-based sync endpoint writes to. Only the literal string form
+/// is supported; no env-var or template expansion (NAS paths are
+/// deterministic). Null when the form carries no string.
+fn parseKicadPcbPath(form_children: []const Node) ?[]const u8 {
+    if (form_children.len < 2) return null;
+    return form_children[1].asString();
 }
 
 /// Append auto pin aliases (net-ties) for an instance based on its pinout.
@@ -534,6 +555,8 @@ fn processSharedSectionForm(
             if (sf_children.len >= 2) {
                 if (sf_children[1].asAtom()) |status_str| {
                     scope.explicit_status.* = parseSectionStatus(status_str);
+                    if (scope.explicit_status.* == null)
+                        self.warnFmt(sf_children[1].span, "unknown status '{s}' in (status …) — expected concept|implemented|review", .{status_str});
                 }
             }
             return true;
@@ -552,8 +575,11 @@ fn processSharedSectionForm(
                     var ref: ?env_mod.NoteRef = null;
                     for (sf_children[2..]) |extra| {
                         if (env_mod.parseNoteRef(extra)) |r| {
-                            ref = r;
-                            break;
+                            if (ref == null) ref = r;
+                        } else if (!extra.isForm("id") and !extra.isForm("ids")) {
+                            // (id …) anchors are inert residue from the
+                            // auto-id inserter — skip without warning.
+                            self.warnFmt(extra.span, "unknown note modifier in (note …) — expected (ref \"file.pdf\" (page N))", .{});
                         }
                     }
                     try scope.notes.append(self.allocator, .{ .text = text, .ref = ref });
@@ -635,7 +661,11 @@ fn evalSection(
         const sf_children = sf.asList() orelse continue;
         if (sf_children.len == 0) continue;
         const sf_name = sf_children[0].asAtom() orelse continue;
-        const sft = ScopeForm.fromAtom(sf_name) orelse continue;
+        const sft = ScopeForm.fromAtom(sf_name) orelse {
+            if (!isInertFormHead(sf_name))
+                self.warnFmt(sf.span, "unknown sub-form ({s} …) in (section …)", .{sf_name});
+            continue;
+        };
 
         if (try processSharedSectionForm(self, sft, sf_children, env, scope)) continue;
 
@@ -647,6 +677,8 @@ fn evalSection(
                             block_role = .input;
                         } else if (std.mem.eql(u8, role_str, "output")) {
                             block_role = .output;
+                        } else {
+                            self.warnFmt(sf_children[1].span, "unknown role '{s}' in (role …) — expected input|output", .{role_str});
                         }
                     }
                 }
@@ -654,7 +686,11 @@ fn evalSection(
             .diagram => {
                 if (sf_children.len >= 2) {
                     if (sf_children[1].asAtom()) |mode| {
-                        if (std.mem.eql(u8, mode, "hidden")) diagram_hidden = true;
+                        if (std.mem.eql(u8, mode, "hidden")) {
+                            diagram_hidden = true;
+                        } else {
+                            self.warnFmt(sf_children[1].span, "unknown diagram mode '{s}' in (diagram …) — expected hidden", .{mode});
+                        }
                     }
                 }
             },
@@ -697,9 +733,28 @@ fn evalSection(
             .section => try evalSubSection(self, sf_children, env, instances, all_pin_nets, notes, net_ties, &sec_instances, &sec_sub_sections),
             // Shared-form variants are consumed above by
             // `processSharedSectionForm`; top-level-only forms are
-            // silently ignored inside a section body.
+            // ignored inside a section body (with a lint warning so the
+            // silent skip is visible).
             .status, .description, .note, .port, .protocol, .calc => {},
-            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function, .stub, .layout, .placement_order, .constraints, .placement, .floorplan, .board => {},
+            .group,
+            .sub_block,
+            .verifies,
+            .design_doc,
+            .test_point,
+            .power_config,
+            .decouple_defaults,
+            .kicad_pcb,
+            .function,
+            .stub,
+            .layout,
+            .placement_order,
+            .constraints,
+            .placement,
+            .floorplan,
+            .board,
+            => {
+                self.warnFmt(sf.span, "({s} …) is top-level-only — ignored inside (section …)", .{sf_name});
+            },
         }
     }
 
@@ -760,6 +815,10 @@ fn evalPinsForm(
     var pg_pins: std.ArrayListUnmanaged(env_mod.PartPin) = .empty;
     for (sf_children[2..]) |pin_form| {
         if (pin_form.isForm("group")) continue;
+        if (!builders.isKnownPinsChild(pin_form)) {
+            builders.warnUnknownPinsChild(self, pin_form);
+            continue;
+        }
         try builders.processPinForm(self, pin_form, pins_ref, pin_func_map, env, all_pin_nets, &pg_pins, net_ties);
     }
     const pg_slice = pg_pins.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
@@ -851,7 +910,11 @@ fn evalSubSection(
         const ssf_children = ssf.asList() orelse continue;
         if (ssf_children.len == 0) continue;
         const ssf_name = ssf_children[0].asAtom() orelse continue;
-        const sft = ScopeForm.fromAtom(ssf_name) orelse continue;
+        const sft = ScopeForm.fromAtom(ssf_name) orelse {
+            if (!isInertFormHead(ssf_name))
+                self.warnFmt(ssf.span, "unknown sub-form ({s} …) in nested (section …)", .{ssf_name});
+            continue;
+        };
 
         if (try processSharedSectionForm(self, sft, ssf_children, env, sub_scope)) continue;
 
@@ -873,6 +936,10 @@ fn evalSubSection(
                 const pin_func_map2 = builders.findPinFuncMap(self, instances.items, pins_ref);
                 var pg_pins2: std.ArrayListUnmanaged(env_mod.PartPin) = .empty;
                 for (ssf_children[2..]) |pin_form| {
+                    if (!builders.isKnownPinsChild(pin_form)) {
+                        builders.warnUnknownPinsChild(self, pin_form);
+                        continue;
+                    }
                     try builders.processPinForm(self, pin_form, pins_ref, pin_func_map2, env, all_pin_nets, &pg_pins2, net_ties);
                 }
                 const pg_slice2 = pg_pins2.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
@@ -907,10 +974,12 @@ fn evalSubSection(
             .bus_net => try evalBusNetForm(self, ssf_children, env, net_ties),
             // Sub-sections don't recurse, don't carry top-level-only
             // forms, and don't have `role`/`diagram`. Shared-form
-            // variants went through `processSharedSectionForm` above.
-            // Sub-sections deliberately accept no top-level-only or
-            // section-only forms beyond what's matched above.
-            else => {},
+            // variants went through `processSharedSectionForm` above;
+            // anything else is ignored with a lint warning.
+            .status, .description, .note, .port, .protocol, .calc => {},
+            else => {
+                self.warnFmt(ssf.span, "({s} …) is not valid inside a nested (section …) — ignored", .{ssf_name});
+            },
         }
     }
     const final_sub_instances = sub_instances.toOwnedSlice(self.allocator) catch &.{};
@@ -1416,6 +1485,8 @@ fn parseStub(self: *Evaluator, form_children: []const Node) EvalError!?StubResul
             }
             if (sig_net.len == 0) continue;
             try signals.append(self.allocator, .{ .name = sig_name, .class = sig_class, .net = sig_net });
+        } else if (!isInertFormHead(head)) {
+            self.warnFmt(sub_node.span, "unknown sub-form ({s} …) in (stub …)", .{head});
         }
     }
 
@@ -2275,4 +2346,108 @@ test "parseVerifies reads a ref-des target as a ref-des sign-off" {
     try testing.expectEqualStrings("", v.target_id);
     try testing.expectEqualStrings("deadbeef", v.req_id);
     try testing.expectEqualStrings("looks good", v.rationale);
+}
+
+/// Evaluate a design-block source string with a registered cap family and
+/// return the evaluator (caller inspects `warnings`). page_allocator:
+/// evaluator allocations are intentionally never freed (project convention).
+fn evalWarningFixture(alloc: std.mem.Allocator, eval: *Evaluator, source: []const u8) !void {
+    eval.* = Evaluator.init(alloc, ".");
+    try eval.component_cache.put(alloc, "cap-0402", .{
+        .name = "cap-0402",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "",
+    });
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    const nodes = try @import("../sexpr/parser.zig").parse(alloc, source);
+    _ = try eval.evalNodes(nodes, &env);
+}
+
+/// True when any recorded warning message contains `needle`.
+fn hasWarningContaining(eval: *const Evaluator, needle: []const u8) bool {
+    for (eval.warnings.items) |w| {
+        if (std.mem.indexOf(u8, w.message, needle) != null) return true;
+    }
+    return false;
+}
+
+// spec: eval/design_block - an unknown sub-form inside a section records a lint warning naming the form
+test "unknown section sub-form records a warning" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    try evalWarningFixture(alloc, &eval,
+        \\(design-block "T"
+        \\  (section "S" "desc"
+        \\    (rolle input)))
+    );
+    try testing.expect(hasWarningContaining(&eval, "unknown sub-form (rolle …) in (section …)"));
+}
+
+// spec: eval/design_block - a misspelled role word records a warning listing the expected values
+test "unknown role word records a warning" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    try evalWarningFixture(alloc, &eval,
+        \\(design-block "T"
+        \\  (section "S" "desc"
+        \\    (role inptu)))
+    );
+    try testing.expect(hasWarningContaining(&eval, "unknown role 'inptu' in (role …) — expected input|output"));
+}
+
+// spec: eval/design_block - an unknown design-block top-level form records a warning
+test "unknown design-block sub-form records a warning" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    try evalWarningFixture(alloc, &eval,
+        \\(design-block "T"
+        \\  (placment-order "U1"))
+    );
+    try testing.expect(hasWarningContaining(&eval, "unknown sub-form (placment-order …) in (design-block …)"));
+}
+
+// spec: eval/design_block - an unknown port option records a warning naming the option
+test "unknown port option records a warning" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    try evalWarningFixture(alloc, &eval,
+        \\(design-block "T"
+        \\  (port "VDD" in pwoer))
+    );
+    try testing.expect(hasWarningContaining(&eval, "unknown port option 'pwoer' in (port …)"));
+}
+
+// spec: eval/design_block - a non-property sub-form in an instance body records a warning
+test "ignored instance sub-form records a warning" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    try evalWarningFixture(alloc, &eval,
+        \\(design-block "T"
+        \\  (instance "C1" (cap-0402 "100nF")
+        \\    (pin 1 "VDD")
+        \\    (pin 2 "GND")
+        \\    (mpn 42)))
+    );
+    try testing.expect(hasWarningContaining(&eval, "ignored sub-form (mpn …) in (instance \"C1\" …)"));
+}
+
+// spec: eval/design_block - inert id/ids/hierarchical-ids/row/col heads never draw warnings
+test "inert form heads are warning-free" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    try evalWarningFixture(alloc, &eval,
+        \\(design-block "T"
+        \\  (hierarchical-ids)
+        \\  (section "S" "desc"
+        \\    (row 0)
+        \\    (col 1)
+        \\    (instance "C1" (cap-0402 "100nF")
+        \\      (pin 1 "VDD")
+        \\      (pin 2 "GND")
+        \\      (id abcd1234))))
+    );
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
 }

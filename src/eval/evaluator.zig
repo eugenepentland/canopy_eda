@@ -41,6 +41,17 @@ pub const EvalDiagnostic = struct {
     message: []const u8,
 };
 
+/// One non-fatal lint finding recorded during evaluation — e.g. a
+/// silently-ignored sub-form `(rolle …)` that a builder used to skip with
+/// `continue`. Parallel to `assertions`: the design still builds, and the
+/// CLI / server surface the list after the fact.
+pub const EvalWarning = struct {
+    span: ast.Span,
+    /// Human-readable summary. Allocated from the evaluator's allocator
+    /// and intentionally never freed (project memory convention).
+    message: []const u8,
+};
+
 pub const EvalError = error{
     TypeError,
     ArityError,
@@ -144,6 +155,11 @@ pub const Evaluator = struct {
     /// Populated by the form handlers when they return an error so the
     /// CLI / server can render a diagnostic that points at the source.
     last_error: ?EvalDiagnostic = null,
+    /// Non-fatal lint findings (unknown sub-forms / enum words the builders
+    /// would otherwise skip silently). Never aborts a build; the CLI prints
+    /// them as `file:line:col: warning: …` and the server can read the list
+    /// off the evaluator after a build.
+    warnings: std.ArrayListUnmanaged(EvalWarning) = .empty,
 
     pub const PendingId = struct {
         /// Byte offset of the opening paren of the form
@@ -235,6 +251,7 @@ pub const Evaluator = struct {
 
     pub fn deinit(self: *Evaluator) void {
         self.assertions.deinit(self.allocator);
+        self.warnings.deinit(self.allocator);
         self.loaded_files.deinit(self.allocator);
         self.component_cache.deinit(self.allocator);
         self.symbol_pin_cache.deinit(self.allocator);
@@ -315,6 +332,13 @@ pub const Evaluator = struct {
     pub fn setErrorFmt(self: *Evaluator, span: ast.Span, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
         self.setError(span, msg);
+    }
+
+    /// Record a non-fatal lint warning (see `warnings`). Allocation
+    /// failures silently drop the warning — never the build.
+    pub fn warnFmt(self: *Evaluator, span: ast.Span, comptime fmt: []const u8, args: anytype) void {
+        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+        self.warnings.append(self.allocator, .{ .span = span, .message = msg }) catch return;
     }
 
     fn evalForm(self: *Evaluator, children: []const Node, env: *Env) EvalError!Value {

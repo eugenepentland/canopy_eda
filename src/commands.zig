@@ -214,6 +214,13 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
         };
     }
 
+    // Lint warnings (unknown sub-forms / enum words the evaluator skipped).
+    // Spans from module files point into those files but are reported
+    // against the board path — the message names the offending form either way.
+    for (eval.warnings.items) |w| {
+        std.debug.print("{s}:{d}:{d}: warning: {s}\n", .{ board_path, w.span.line, w.span.col, w.message });
+    }
+
     var has_failure = false;
     for (eval.assertions.items) |assertion| {
         if (assertion.passed) {

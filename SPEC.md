@@ -451,6 +451,12 @@ Public functions: analyze
 - decouple per-pin auto without a decouple-defaults ic is diagnosed
 - decouple pins-of with no matching declared pins is diagnosed with the declaration-order contract
 - decouple mixes (pins-of …) expansion with extra literal pins
+- an unknown sub-form inside a section records a lint warning naming the form
+- a misspelled role word records a warning listing the expected values
+- an unknown design-block top-level form records a warning
+- an unknown port option records a warning naming the option
+- a non-property sub-form in an instance body records a warning
+- inert id/ids/hierarchical-ids/row/col heads never draw warnings
 - bus-port expands one port per index times optional suffix list
 - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
 - kicad-pcb form captures the literal path on the design block
