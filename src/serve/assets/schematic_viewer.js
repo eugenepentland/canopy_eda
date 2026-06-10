@@ -271,10 +271,41 @@
     pickResult(currentResults[parseInt(item.dataset.idx, 10)]);
   });
 
-  // Global keyboard shortcuts: '/' or Ctrl+F focuses search.
+  // Global keyboard shortcuts: '/' or Ctrl+F focuses search; '?' toggles the
+  // shortcut-help overlay (list mirrors exactly what this file binds).
+  var kbdOverlay = null;
+  function closeKbdOverlay() {
+    if (kbdOverlay && kbdOverlay.parentNode) kbdOverlay.parentNode.removeChild(kbdOverlay);
+    kbdOverlay = null;
+  }
+  function toggleKbdOverlay() {
+    if (kbdOverlay) { closeKbdOverlay(); return; }
+    kbdOverlay = document.createElement('div');
+    kbdOverlay.className = 'kbd-overlay';
+    kbdOverlay.innerHTML =
+      '<div class="kbd-box"><h3>Keyboard shortcuts</h3>' +
+      '<div class="kbd-row"><span>Focus search</span><kbd>/</kbd></div>' +
+      '<div class="kbd-row"><span>Focus search (alt)</span><kbd>Ctrl+F</kbd></div>' +
+      '<div class="kbd-row"><span>Move through results</span><kbd>↑ ↓</kbd></div>' +
+      '<div class="kbd-row"><span>Open selected result</span><kbd>Enter</kbd></div>' +
+      '<div class="kbd-row"><span>Clear search / close</span><kbd>Esc</kbd></div>' +
+      '<div class="kbd-row"><span>Toggle this help</span><kbd>?</kbd></div>' +
+      '<div class="kbd-hint">Esc or click anywhere to close</div></div>';
+    document.body.appendChild(kbdOverlay);
+    kbdOverlay.addEventListener('click', closeKbdOverlay);
+  }
   document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && kbdOverlay) { closeKbdOverlay(); return; }
     if (e.target === searchInput) return;
+    var t = e.target;
+    var typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    if (e.key === '?' && !typing) {
+      e.preventDefault();
+      toggleKbdOverlay();
+      return;
+    }
     if (e.key === '/' || ((e.ctrlKey || e.metaKey) && e.key === 'f')) {
+      if (typing) return;
       e.preventDefault();
       searchInput.focus();
       searchInput.select();

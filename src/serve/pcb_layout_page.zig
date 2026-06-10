@@ -3716,8 +3716,29 @@ const BOARD_JS =
     \\ g.addEventListener("pointerup",function(ev){var mv=drag&&drag.moved;drag=null;g.style.cursor="grab";
     \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(mv)fetchScore();else scrollToComp(P[i].ref);});
     \\});
+    \\// Keyboard: R / Shift+R rotates the hovered part; ? toggles the
+    \\// shortcut-help overlay (Esc or click closes it). The overlay's list
+    \\// mirrors exactly what this script binds.
+    \\var kbdOv=null;
+    \\function kbdClose(){if(kbdOv&&kbdOv.parentNode)kbdOv.parentNode.removeChild(kbdOv);kbdOv=null;}
+    \\function kbdToggle(){
+    \\ if(kbdOv){kbdClose();return;}
+    \\ kbdOv=document.createElement("div");kbdOv.className="kbd-overlay";
+    \\ kbdOv.innerHTML='<div class="kbd-box"><h3>Keyboard &amp; mouse</h3>'+
+    \\  '<div class="kbd-row"><span>Rotate hovered part +90°</span><kbd>R</kbd></div>'+
+    \\  '<div class="kbd-row"><span>Rotate hovered part −90°</span><kbd>Shift+R</kbd></div>'+
+    \\  '<div class="kbd-row"><span>Move part (snaps to grid)</span><kbd>drag part</kbd></div>'+
+    \\  '<div class="kbd-row"><span>Pan</span><kbd>drag background</kbd></div>'+
+    \\  '<div class="kbd-row"><span>Zoom</span><kbd>scroll</kbd></div>'+
+    \\  '<div class="kbd-row"><span>Toggle this help</span><kbd>?</kbd></div>'+
+    \\  '<div class="kbd-hint">Esc or click anywhere to close</div></div>';
+    \\ document.body.appendChild(kbdOv);kbdOv.addEventListener("click",kbdClose);
+    \\}
     \\document.addEventListener("keydown",function(ev){
-    \\ if((ev.key=="r"||ev.key=="R")&&cur>=0){ev.preventDefault();
+    \\ if(ev.key=="Escape"&&kbdOv){kbdClose();return;}
+    \\ var t=ev.target,typing=t&&(t.tagName=="INPUT"||t.tagName=="TEXTAREA"||t.isContentEditable);
+    \\ if(ev.key=="?"&&!typing){ev.preventDefault();kbdToggle();return;}
+    \\ if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();
     \\   P[cur].rot=((((P[cur].rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;
     \\   setT(cur);clearRoute();rats();fetchScore();}});
     \\function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetchScore();
@@ -3730,12 +3751,25 @@ const BOARD_JS =
     \\ var g=document.getElementById("t-grid").checked?1:0;
     \\ liveRegen("?w_align="+v("t-align")+"&loop_w="+v("t-loop")+"&w_congest="+v("t-cong")+
     \\  "&grid="+g+"&compact="+v("t-compact"));});
+    \\// Score-view weights persist per design in localStorage ("pcb-sv:<name>"):
+    \\// stored on every change, restored on load (before the first showScore so
+    \\// the headline respects them), and cleared by Reset along with the inputs.
     \\(function(){var ids=["sv-en-wire","sv-w-wire","sv-en-loop","sv-w-loop","sv-en-align","sv-w-align","sv-en-cong","sv-w-cong"];
+    \\ var key="pcb-sv:"+PCB.name;
     \\ var def={};ids.forEach(function(id){var e=document.getElementById(id);if(!e)return;
-    \\  def[id]=(e.type=="checkbox")?e.checked:e.value;e.addEventListener("input",svApply);});
+    \\  def[id]=(e.type=="checkbox")?e.checked:e.value;});
+    \\ var stored=null;try{stored=JSON.parse(localStorage.getItem(key)||"null");}catch(e){}
+    \\ if(stored)ids.forEach(function(id){var e=document.getElementById(id);if(!e||!(id in stored))return;
+    \\  if(e.type=="checkbox")e.checked=!!stored[id];else e.value=stored[id];});
+    \\ function persist(){var o={};ids.forEach(function(id){var e=document.getElementById(id);if(!e)return;
+    \\  o[id]=(e.type=="checkbox")?e.checked:e.value;});
+    \\  try{localStorage.setItem(key,JSON.stringify(o));}catch(e){}}
+    \\ ids.forEach(function(id){var e=document.getElementById(id);if(!e)return;
+    \\  e.addEventListener("input",function(){persist();svApply();});});
     \\ var rb=document.getElementById("sv-reset");
     \\ if(rb)rb.addEventListener("click",function(){ids.forEach(function(id){var e=document.getElementById(id);
-    \\   if(e){if(e.type=="checkbox")e.checked=def[id];else e.value=def[id];}});svApply();});})();
+    \\   if(e){if(e.type=="checkbox")e.checked=def[id];else e.value=def[id];}});
+    \\  try{localStorage.removeItem(key);}catch(e){}svApply();});})();
     \\function pad2(n){return (n<10?"0":"")+n;}
     \\function stamp(){var d=new Date();return pad2(d.getMonth()+1)+"-"+pad2(d.getDate())+" "+pad2(d.getHours())+":"+pad2(d.getMinutes());}
     \\document.getElementById("pcb-saveas").addEventListener("click",function(){
