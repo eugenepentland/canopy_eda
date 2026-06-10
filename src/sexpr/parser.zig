@@ -40,12 +40,25 @@ fn parseNode(allocator: std.mem.Allocator, tok: *Tokenizer, token: Token) ParseE
         .rparen => return ParseError.UnexpectedRparen,
         .atom => return Node.atom(token.span, token.text),
         .string => return Node.string(token.span, token.text),
+        .int, .float, .si_val, .unit_val => return parseNumberNode(tok, token),
+        .eof => return ParseError.UnexpectedEof,
+    }
+}
+
+/// Parse a numeric token (`int`/`float`/`si_val`/`unit_val`) into its AST
+/// node, applying the SI scale suffix or the mm/mil dimension conversion.
+fn parseNumberNode(tok: *Tokenizer, token: Token) ParseError!Node {
+    switch (token.tag) {
         .int => {
             const val = std.fmt.parseInt(i64, token.text, 10) catch return ParseError.InvalidNumber;
             return Node.int(token.span, val);
         },
         .float => {
             const val = std.fmt.parseFloat(f64, token.text) catch return ParseError.InvalidNumber;
+            return Node.float(token.span, val);
+        },
+        .si_val => {
+            const val = parseSiValue(token.text) orelse return ParseError.InvalidNumber;
             return Node.float(token.span, val);
         },
         .unit_val => {
@@ -59,8 +72,35 @@ fn parseNode(allocator: std.mem.Allocator, tok: *Tokenizer, token: Token) ParseE
             }
             return Node.unitVal(token.span, mm_value);
         },
-        .eof => return ParseError.UnexpectedEof,
+        else => return ParseError.InvalidNumber,
     }
+}
+
+/// Parse an SI-scaled literal token (`220k`, `100nF`, `3.3V`, `10mA`) into
+/// its numeric value. The numeric prefix is multiplied by the scale letter
+/// (k/M/G/u/n/p/m); a trailing unit letter (V/A/F/H/R) carries no scale.
+/// Returns null when the text has no parsable numeric prefix — the
+/// tokenizer's suffix rules make that unreachable for `.si_val` tokens.
+fn parseSiValue(text: []const u8) ?f64 {
+    var num_end: usize = 0;
+    while (num_end < text.len) : (num_end += 1) {
+        const c = text[num_end];
+        const numeric = (c >= '0' and c <= '9') or c == '.' or (c == '-' and num_end == 0);
+        if (!numeric) break;
+    }
+    if (num_end == 0 or num_end == text.len) return null;
+    const base = std.fmt.parseFloat(f64, text[0..num_end]) catch return null;
+    const scale: f64 = switch (text[num_end]) {
+        'k' => 1e3,
+        'M' => 1e6,
+        'G' => 1e9,
+        'm' => 1e-3,
+        'u' => 1e-6,
+        'n' => 1e-9,
+        'p' => 1e-12,
+        else => 1.0, // bare unit letter (V/A/F/H/R)
+    };
+    return base * scale;
 }
 
 fn parseList(allocator: std.mem.Allocator, tok: *Tokenizer, open_span: Span) ParseError!Node {
@@ -120,6 +160,30 @@ test "parse numbers and units" {
     try std.testing.expectApproxEqAbs(@as(f64, 1.0), children[1].asNumber().?, 0.001);
     try std.testing.expectApproxEqAbs(@as(f64, 0.5), children[2].asNumber().?, 0.001);
     try std.testing.expectApproxEqAbs(@as(f64, 0.254), children[3].asNumber().?, 0.001);
+}
+
+// spec: sexpr/parser - Parses SI-scaled literals (220k, 100nF, 3.3V, 10mA) into scaled float nodes
+test "parse si scaled values" {
+    const alloc = std.testing.allocator;
+    const nodes = try parse(alloc, "(vals 220k 4.7k 1M 2G 10u 100n 22p 100nF 1uH 10mA 100mV 3.3V 0.5A 47R)");
+    defer freeNodes(alloc, nodes);
+
+    const c = nodes[0].asList().?;
+    try std.testing.expectApproxEqRel(@as(f64, 220000.0), c[1].asNumber().?, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 4700.0), c[2].asNumber().?, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 1e6), c[3].asNumber().?, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 2e9), c[4].asNumber().?, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 1e-5), c[5].asNumber().?, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 1e-7), c[6].asNumber().?, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 22e-12), c[7].asNumber().?, 1e-12);
+    // 100nF == 100n — the unit letter carries no scale
+    try std.testing.expectApproxEqRel(@as(f64, 1e-7), c[8].asNumber().?, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 1e-6), c[9].asNumber().?, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 0.01), c[10].asNumber().?, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 0.1), c[11].asNumber().?, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 3.3), c[12].asNumber().?, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 0.5), c[13].asNumber().?, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 47.0), c[14].asNumber().?, 1e-12);
 }
 
 // spec: sexpr/parser - Parses input containing comments by ignoring them

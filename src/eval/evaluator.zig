@@ -466,6 +466,43 @@ test "eval let bindings" {
     try std.testing.expectEqual(@as(f64, 8.0), result.asNumber().?);
 }
 
+// spec: eval/evaluator - SI-suffixed literals evaluate to their scaled numeric value
+test "eval si suffixed literal in let" {
+    const alloc = std.testing.allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    const nodes = try parser.parse(alloc, "(let r 4.7k) r");
+    defer parser.freeNodes(alloc, nodes);
+
+    const result = try eval.evalNodes(nodes, &env);
+    try std.testing.expectApproxEqRel(@as(f64, 4700.0), result.asNumber().?, 1e-12);
+}
+
+// spec: eval/evaluator - SI-suffixed literals flow through module call arguments
+test "eval si suffixed literal as module argument" {
+    // page_allocator: defmodule's captured param slice is intentionally never freed.
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    // vout = 0.6 * (1 + 220k/47k) — the classic feedback-divider formula.
+    const nodes = try parser.parse(alloc,
+        \\(defmodule fb (rfbt rfbb) (* 0.6 (+ 1.0 (/ rfbt rfbb))))
+        \\(fb 220k 47k)
+    );
+    defer parser.freeNodes(alloc, nodes);
+
+    const result = try eval.evalNodes(nodes, &env);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.4085), result.asNumber().?, 0.001);
+}
+
 // spec: eval/evaluator - Evaluates if conditionals selecting a branch by predicate
 test "eval if conditional" {
     const alloc = std.testing.allocator;

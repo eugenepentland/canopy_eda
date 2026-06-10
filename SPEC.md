@@ -6,6 +6,9 @@ CLI-driven electronic design automation for schematic capture using S-expression
 
 - Tokenizes parentheses and atoms from S-expression input
 - Tokenizes integer and float numbers with optional unit suffixes
+- Tokenizes SI-scaled literals (220k, 100nF, 3.3V, 10mA) as si_val with the suffix in the token text
+- SI suffix rules leave mm/mil dimensions, bare milli, and longer identifiers untouched
+- SI literal at a paren boundary ends the token
 - Skips line comments starting with semicolon
 - Tokenizes arithmetic operators as distinct tokens
 - Tokenizes comparison operators as distinct tokens
@@ -17,6 +20,7 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Parses a simple S-expression list into an AST node
 - Parses nested S-expression lists into a tree
 - Parses numbers and unit values into typed AST nodes
+- Parses SI-scaled literals (220k, 100nF, 3.3V, 10mA) into scaled float nodes
 - Parses input containing comments by ignoring them
 - Parses multiple top-level forms into separate AST nodes
 - Identifies forms by head atom via isForm helper
@@ -185,6 +189,8 @@ Public functions: worldShape, pointDist, shapeGap
 ## eval/evaluator
 
 - Evaluates arithmetic expressions from S-expression AST
+- SI-suffixed literals evaluate to their scaled numeric value
+- SI-suffixed literals flow through module call arguments
 - Evaluates let bindings that define named values in scope
 - Evaluates if conditionals selecting a branch by predicate
 - Evaluates fmt expressions producing formatted strings
