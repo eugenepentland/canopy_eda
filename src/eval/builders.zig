@@ -524,13 +524,23 @@ pub fn emitDecoupleItems(
         // default IC declared, the first post-per-pin token is taken as a pin
         // unless it equals that ref; with no default the token is always the
         // ref (legacy positional form, unchanged for designs that set none).
+        // A leading `(pins-of "REF" "NET")` supplies the host ref itself, and
+        // a leading `auto` defers to the decouple-defaults IC — neither is
+        // consumed here, the pin-collection loop below expands them.
         if (c >= items.len) {
             idx = c;
             continue;
         }
         const first_tok: ?[]const u8 = items[c].asText();
+        const first_is_expander = items[c].isForm("pins-of") or
+            (first_tok != null and std.mem.eql(u8, first_tok.?, "auto"));
         var ref_str: []const u8 = undefined;
-        if (self.decouple_defaults.ic.len > 0) {
+        if (first_is_expander) {
+            ref_str = if (items[c].isForm("pins-of"))
+                try pinsOfRef(self, items[c], env)
+            else
+                try autoHostRef(self, items[c].span, net_name);
+        } else if (self.decouple_defaults.ic.len > 0) {
             if (first_tok != null and std.mem.eql(u8, first_tok.?, self.decouple_defaults.ic)) {
                 ref_str = first_tok.?;
                 c += 1; // explicit ref consumed
@@ -561,7 +571,23 @@ pub fn emitDecoupleItems(
         defer target_pins.deinit(self.allocator);
         var pin_idx = c;
         while (pin_idx < items.len) : (pin_idx += 1) {
+            // `(pins-of "REF" "NET")` expands to every already-declared pin of
+            // REF on NET; bare `auto` does the same for the decouple-defaults
+            // IC on this decouple's own net. Mixed use with literal pins is OK.
+            if (items[pin_idx].isForm("pins-of")) {
+                const por = try pinsOfRef(self, items[pin_idx], env);
+                const pon = try pinsOfNet(self, items[pin_idx], env);
+                try expandPinsOf(self, all_pin_nets, por, pon, items[pin_idx].span, &target_pins);
+                continue;
+            }
             if (items[pin_idx].asList() != null) break; // next (comp …) group / (id …)
+            if (items[pin_idx].asAtom()) |a| {
+                if (std.mem.eql(u8, a, "auto")) {
+                    const host = try autoHostRef(self, items[pin_idx].span, net_name);
+                    try expandPinsOf(self, all_pin_nets, host, net_name, items[pin_idx].span, &target_pins);
+                    continue;
+                }
+            }
             const raw = ids.pinId(self, items[pin_idx]) orelse break;
             const pid = if (pin_func_map) |pm| (instance_mod.resolvePinName(self, pm, raw) orelse raw) else raw;
             try target_pins.append(self.allocator, pid);
@@ -620,6 +646,64 @@ pub fn emitDecoupleItems(
             }
         }
         idx = pin_idx;
+    }
+}
+
+/// The instance ref named by a `(pins-of "REF" "NET")` form (evaluated, so a
+/// computed ref works). Diagnoses a malformed form.
+fn pinsOfRef(self: *Evaluator, node: Node, env: *Env) EvalError![]const u8 {
+    const pc = node.asList().?;
+    if (pc.len < 3) {
+        self.setError(node.span, "(pins-of …) expects 2 arguments: (pins-of \"REF\" \"NET\")");
+        return EvalError.InvalidForm;
+    }
+    return (try self.evalNode(pc[1], env)).asString() orelse {
+        self.setError(pc[1].span, "(pins-of …) ref must be a string");
+        return EvalError.TypeError;
+    };
+}
+
+/// The net named by a `(pins-of "REF" "NET")` form. Arity was already
+/// checked by `pinsOfRef` (the two are always called together).
+fn pinsOfNet(self: *Evaluator, node: Node, env: *Env) EvalError![]const u8 {
+    const pc = node.asList().?;
+    return (try self.evalNode(pc[2], env)).asString() orelse {
+        self.setError(pc[2].span, "(pins-of …) net must be a string");
+        return EvalError.TypeError;
+    };
+}
+
+/// The host ref a bare `auto` per-pin marker resolves to: the
+/// `(decouple-defaults (ic "REF"))` value. Diagnoses a missing default.
+fn autoHostRef(self: *Evaluator, span: ast.Span, net_name: []const u8) EvalError![]const u8 {
+    if (self.decouple_defaults.ic.len == 0) {
+        self.setErrorFmt(span, "(decouple \"{s}\" … per-pin auto) requires (decouple-defaults (ic \"REF\")) to be set first", .{net_name});
+        return EvalError.InvalidForm;
+    }
+    return self.decouple_defaults.ic;
+}
+
+/// Append every pin of instance `ref` currently declared on net `net` to
+/// `target_pins` — the expansion of `(pins-of …)` / `auto`. Nets build
+/// incrementally, so only pins from forms evaluated before the decouple are
+/// visible; zero matches is an error pointing at that ordering contract.
+fn expandPinsOf(
+    self: *Evaluator,
+    all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
+    ref: []const u8,
+    net: []const u8,
+    span: ast.Span,
+    target_pins: *std.ArrayListUnmanaged([]const u8),
+) EvalError!void {
+    const before = target_pins.items.len;
+    for (all_pin_nets.items) |pn| {
+        if (std.mem.eql(u8, pn.ref_des, ref) and std.mem.eql(u8, pn.net, net)) {
+            try target_pins.append(self.allocator, pn.pin);
+        }
+    }
+    if (target_pins.items.len == before) {
+        self.setErrorFmt(span, "no pins of \"{s}\" on net \"{s}\" — (pins …) declarations must appear before (decouple …)", .{ ref, net });
+        return EvalError.InvalidForm;
     }
 }
 
@@ -1126,4 +1210,147 @@ test "decouple without defaults treats the post-per-pin token as the ref" {
     try testing.expectEqual(@as(usize, 2), instances.items.len);
     try testing.expectEqualStrings("100nF@7#0", instances.items[0].origin_key);
     try testing.expectEqualStrings("VDD.U1.7", all_pin_nets.items[0].net);
+}
+
+/// Shared fixture for the pins-of tests: an evaluator in hierarchical-ids
+/// mode (deterministic child ids), a cap family, and U1's J14/K14 pins
+/// pre-declared on VDD the way an earlier (pins …) form would have.
+fn pinsOfFixture(alloc: std.mem.Allocator, eval: *Evaluator, all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl)) !void {
+    eval.* = Evaluator.init(alloc, ".");
+    eval.hierarchical_ids = true;
+    try putTestFamily(eval, alloc, "cap-0201");
+    try all_pin_nets.append(alloc, .{ .ref_des = "U1", .pin = "J14", .net = "VDD" });
+    try all_pin_nets.append(alloc, .{ .ref_des = "U1", .pin = "K14", .net = "VDD" });
+}
+
+// spec: eval/design_block - decouple per-pin (pins-of REF NET) expands to the same instances and nets as the hand-written pin list
+test "decouple pins-of expansion matches the hand-written pin list" {
+    const alloc = std.heap.page_allocator;
+
+    var eval_a: Evaluator = undefined;
+    var nets_a: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    try pinsOfFixture(alloc, &eval_a, &nets_a);
+    var env_a = env_mod.Env.init(alloc, null);
+    defer env_a.deinit();
+    var inst_a: std.ArrayListUnmanaged(Instance) = .empty;
+    var sidecar_a = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
+    const items_a = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin (pins-of \"U1\" \"VDD\")");
+    try emitDecoupleItems(&eval_a, items_a, "VDD", &env_a, &inst_a, &nets_a, "abcd1234", &sidecar_a);
+
+    var eval_b: Evaluator = undefined;
+    var nets_b: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    try pinsOfFixture(alloc, &eval_b, &nets_b);
+    var env_b = env_mod.Env.init(alloc, null);
+    defer env_b.deinit();
+    var inst_b: std.ArrayListUnmanaged(Instance) = .empty;
+    var sidecar_b = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
+    const items_b = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin U1 J14 K14");
+    try emitDecoupleItems(&eval_b, items_b, "VDD", &env_b, &inst_b, &nets_b, "abcd1234", &sidecar_b);
+
+    // Same downstream state: cap instances (incl. derived ids + origin keys)
+    // and identical pin-net declarations, including the reassigned host pins.
+    try expectSameDecoupleState(inst_a.items, inst_b.items, nets_a.items, nets_b.items);
+}
+
+/// Assert two emitDecoupleItems runs produced identical downstream state:
+/// the same instances (ref-des, origin key, derived id, value) and the same
+/// pin-net declarations in the same order.
+fn expectSameDecoupleState(
+    inst_a: []const Instance,
+    inst_b: []const Instance,
+    nets_a: []const PinNetDecl,
+    nets_b: []const PinNetDecl,
+) !void {
+    try testing.expectEqual(inst_b.len, inst_a.len);
+    for (inst_a, inst_b) |a, b| {
+        try testing.expectEqualStrings(b.ref_des, a.ref_des);
+        try testing.expectEqualStrings(b.origin_key, a.origin_key);
+        try testing.expectEqualStrings(b.id, a.id);
+        try testing.expectEqualStrings(b.value, a.value);
+    }
+    try testing.expectEqual(nets_b.len, nets_a.len);
+    for (nets_a, nets_b) |a, b| {
+        try testing.expectEqualStrings(b.ref_des, a.ref_des);
+        try testing.expectEqualStrings(b.pin, a.pin);
+        try testing.expectEqualStrings(b.net, a.net);
+    }
+}
+
+// spec: eval/design_block - decouple per-pin auto expands the decouple-defaults IC's pins on the decoupled net
+test "decouple per-pin auto expands the defaults ic pins" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    var nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    try pinsOfFixture(alloc, &eval, &nets);
+    eval.decouple_defaults.ic = "U1";
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    var instances: std.ArrayListUnmanaged(Instance) = .empty;
+    var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
+
+    const items = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin auto");
+    try emitDecoupleItems(&eval, items, "VDD", &env, &instances, &nets, "abcd1234", &sidecar);
+
+    try testing.expectEqual(@as(usize, 2), instances.items.len);
+    try testing.expectEqualStrings("100nF@J14#0", instances.items[0].origin_key);
+    try testing.expectEqualStrings("100nF@K14#0", instances.items[1].origin_key);
+    try testing.expectEqualStrings("VDD.U1.J14", nets.items[0].net);
+}
+
+// spec: eval/design_block - decouple per-pin auto without a decouple-defaults ic is diagnosed
+test "decouple per-pin auto without defaults ic errors" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    var nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    try pinsOfFixture(alloc, &eval, &nets);
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    var instances: std.ArrayListUnmanaged(Instance) = .empty;
+    var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
+
+    const items = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin auto");
+    const r = emitDecoupleItems(&eval, items, "VDD", &env, &instances, &nets, "abcd1234", &sidecar);
+    try testing.expectError(error.InvalidForm, r);
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expect(std.mem.indexOf(u8, diag.message, "per-pin auto) requires (decouple-defaults (ic") != null);
+}
+
+// spec: eval/design_block - decouple pins-of with no matching declared pins is diagnosed with the declaration-order contract
+test "decouple pins-of with zero matches errors" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    var nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    try pinsOfFixture(alloc, &eval, &nets);
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    var instances: std.ArrayListUnmanaged(Instance) = .empty;
+    var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
+
+    // U1 has no pins on VDDA — the (pins …) for that rail hasn't run yet.
+    const items = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin (pins-of \"U1\" \"VDDA\")");
+    const r = emitDecoupleItems(&eval, items, "VDDA", &env, &instances, &nets, "abcd1234", &sidecar);
+    try testing.expectError(error.InvalidForm, r);
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expect(std.mem.indexOf(u8, diag.message, "no pins of \"U1\" on net \"VDDA\"") != null);
+    try testing.expect(std.mem.indexOf(u8, diag.message, "(pins …) declarations must appear before (decouple …)") != null);
+}
+
+// spec: eval/design_block - decouple mixes (pins-of …) expansion with extra literal pins
+test "decouple pins-of mixes with extra literal pins" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    var nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    try pinsOfFixture(alloc, &eval, &nets);
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    var instances: std.ArrayListUnmanaged(Instance) = .empty;
+    var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
+
+    const items = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin (pins-of \"U1\" \"VDD\") F1");
+    try emitDecoupleItems(&eval, items, "VDD", &env, &instances, &nets, "abcd1234", &sidecar);
+
+    try testing.expectEqual(@as(usize, 3), instances.items.len);
+    try testing.expectEqualStrings("100nF@J14#0", instances.items[0].origin_key);
+    try testing.expectEqualStrings("100nF@K14#0", instances.items[1].origin_key);
+    try testing.expectEqualStrings("100nF@F1#0", instances.items[2].origin_key);
 }

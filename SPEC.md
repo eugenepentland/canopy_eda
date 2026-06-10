@@ -446,6 +446,11 @@ Public functions: analyze
 - fanout places one component from COMMON to each listed net
 - decouple-defaults lets decouple omit its component and host ref
 - decouple with no defaults keeps its legacy explicit form
+- decouple per-pin (pins-of REF NET) expands to the same instances and nets as the hand-written pin list
+- decouple per-pin auto expands the decouple-defaults IC's pins on the decoupled net
+- decouple per-pin auto without a decouple-defaults ic is diagnosed
+- decouple pins-of with no matching declared pins is diagnosed with the declaration-order contract
+- decouple mixes (pins-of …) expansion with extra literal pins
 - bus-port expands one port per index times optional suffix list
 - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
 - kicad-pcb form captures the literal path on the design block

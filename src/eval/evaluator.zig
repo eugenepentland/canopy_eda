@@ -307,6 +307,16 @@ pub const Evaluator = struct {
         self.last_error = .{ .span = span, .message = message };
     }
 
+    /// Record a formatted diagnostic. The message is allocated from the
+    /// evaluator's allocator and intentionally never freed (project memory
+    /// convention — diagnostics outlive the eval call). An allocation
+    /// failure silently skips the diagnostic; the error itself still
+    /// propagates through the usual `EvalError` return.
+    pub fn setErrorFmt(self: *Evaluator, span: ast.Span, comptime fmt: []const u8, args: anytype) void {
+        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+        self.setError(span, msg);
+    }
+
     fn evalForm(self: *Evaluator, children: []const Node, env: *Env) EvalError!Value {
         const head = children[0];
         const head_name = head.asAtom() orelse {

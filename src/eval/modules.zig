@@ -321,14 +321,6 @@ fn namedParamIndex(mod: ModuleDef, arg: Node) ?usize {
     return null;
 }
 
-/// Record a formatted diagnostic on the evaluator. The message is allocated
-/// from the evaluator's allocator and intentionally never freed (project
-/// memory convention — diagnostics outlive the eval call).
-fn setErrorFmt(self: *Evaluator, span: ast.Span, comptime fmt: []const u8, args: anytype) void {
-    const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
-    self.setError(span, msg);
-}
-
 /// Call a module: bind each call-site argument — positional in declaration
 /// order, or named via `(param expr)` — into a fresh child scope rooted at
 /// the module file's import env, then run the module body. Positional args
@@ -345,7 +337,7 @@ pub fn callModule(self: *Evaluator, mod: ModuleDef, call_args: []const Node, cal
     for (call_args) |arg| {
         if (namedParamIndex(mod, arg)) |pi| {
             if (bound[pi] != null) {
-                setErrorFmt(self, arg.span, "parameter '{s}' bound twice in call to module '{s}'", .{ mod.params[pi], mod.name });
+                self.setErrorFmt(arg.span, "parameter '{s}' bound twice in call to module '{s}'", .{ mod.params[pi], mod.name });
                 return EvalError.InvalidForm;
             }
             const pair = arg.asList().?;
@@ -354,11 +346,11 @@ pub fn callModule(self: *Evaluator, mod: ModuleDef, call_args: []const Node, cal
             continue;
         }
         if (seen_named) {
-            setErrorFmt(self, arg.span, "positional argument after named argument in call to module '{s}'", .{mod.name});
+            self.setErrorFmt(arg.span, "positional argument after named argument in call to module '{s}'", .{mod.name});
             return EvalError.InvalidForm;
         }
         if (pos_idx >= mod.params.len) {
-            setErrorFmt(self, arg.span, "module '{s}' expects {d} argument(s), got {d}", .{ mod.name, mod.params.len, call_args.len });
+            self.setErrorFmt(arg.span, "module '{s}' expects {d} argument(s), got {d}", .{ mod.name, mod.params.len, call_args.len });
             return EvalError.ArityError;
         }
         bound[pos_idx] = try self.evalNode(arg, caller_env);
@@ -389,7 +381,7 @@ fn checkMissingParams(self: *Evaluator, mod: ModuleDef, bound: []const ?Value, c
         try missing.appendSlice(self.allocator, param);
     }
     if (missing.items.len == 0) return;
-    setErrorFmt(self, call_span, "module '{s}' missing argument(s): {s}", .{ mod.name, missing.items });
+    self.setErrorFmt(call_span, "module '{s}' missing argument(s): {s}", .{ mod.name, missing.items });
     return EvalError.ArityError;
 }
 
