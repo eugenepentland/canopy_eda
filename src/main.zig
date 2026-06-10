@@ -445,6 +445,7 @@ test {
     _ = @import("serve/pcb_describe.zig");
     _ = @import("serve/diag_format.zig");
     _ = @import("serve/design_diff.zig");
+    _ = @import("serve/datasheet_attach.zig");
     _ = @import("serve/placement_spec.zig");
     _ = @import("png.zig");
     _ = @import("font5x7.zig");

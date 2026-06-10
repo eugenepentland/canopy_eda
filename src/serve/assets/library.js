@@ -304,3 +304,44 @@ function linkDatasheet(file,component){
   };
   r.readAsArrayBuffer(file);
 }
+// Attach-datasheet control on component cards: pick an already-uploaded PDF
+// (datalist filled lazily from /api/datasheets) and POST /api/attach-datasheet
+// to splice (datasheet "…") into the component's .sexp. Idempotent server-side
+// — "already linked" comes back as ok with a note.
+var dsOptionsLoaded=false;
+function loadDsOptions(){
+  if(dsOptionsLoaded)return;dsOptionsLoaded=true;
+  fetch('/api/datasheets').then(function(r){return r.json();}).then(function(j){
+    var dl=document.getElementById('lib-ds-options');if(!dl)return;
+    dl.innerHTML=(j.files||[]).map(function(f){
+      return '<option value="'+String(f.name).replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'">';
+    }).join('');
+  }).catch(function(){dsOptionsLoaded=false;});
+}
+document.addEventListener('click',function(e){
+  var tog=(e.target&&e.target.closest)?e.target.closest('.ds-attach-toggle'):null;
+  if(tog){
+    var row=tog.parentElement.querySelector('.ds-attach-row');
+    if(row){row.hidden=!row.hidden;if(!row.hidden){loadDsOptions();var inp=row.querySelector('.ds-attach-input');if(inp)inp.focus();}}
+    return;
+  }
+  var btn=(e.target&&e.target.closest)?e.target.closest('.ds-attach-btn'):null;
+  if(!btn)return;
+  var card=btn.closest('.comp-card[data-component]');
+  var input=btn.parentElement.querySelector('.ds-attach-input');
+  var comp=card&&card.getAttribute('data-component');
+  var file=input?input.value.trim():'';
+  if(!comp){showToast('err','This card has no component definition to attach to',5000);return;}
+  if(!file){showToast('err','Pick an uploaded PDF first',4000);return;}
+  showToast('pending','Attaching '+file+' to '+comp+'…');
+  fetch('/api/attach-datasheet',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({component:comp,file:file})})
+    .then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});})
+    .then(function(resp){
+      if(!resp.ok||!resp.j.ok)throw new Error((resp.j&&resp.j.error)||'attach failed');
+      var dup=resp.j.note==='already linked';
+      showToast('ok',(dup?'Already linked to ':'Attached to ')+comp,3500);
+      if(!dup)setTimeout(function(){location.reload();},1000);
+    })
+    .catch(function(err){showToast('err','Attach failed: '+err.message,8000);});
+});

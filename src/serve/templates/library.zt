@@ -40,6 +40,7 @@ pub templ Library(rows: []const LibraryRow) {
                     <span class="page-info" id="page-info"></span>
                     <button id="page-next">Next &rarr;</button>
                 </div>
+                <datalist id="lib-ds-options"></datalist>
             </div>
             <script src="/static/footprint_svg.js"></script>
             <script src="/static/library.js"></script>
@@ -119,6 +120,13 @@ pub templ ComponentDetails(row: LibraryRow) {
             }
         </div>
     }
+    <div class="ds-attach">
+        <span class="ds-attach-toggle" title="Link an already-uploaded PDF (lib/datasheets/) to this part">📎 attach datasheet</span>
+        <span class="ds-attach-row" hidden>
+            <input type="text" class="ds-attach-input" list="lib-ds-options" placeholder="uploaded PDF…" />
+            <button class="ds-attach-btn" type="button">Attach</button>
+        </span>
+    </div>
     if (row.footprint) |fp| {
         <div class="fp-preview" data-fp={fp}></div>
     }
