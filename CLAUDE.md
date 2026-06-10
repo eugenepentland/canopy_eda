@@ -237,9 +237,44 @@ the **subtitle** as the chip caption.
       (pin 4 vout-str)
       ...)))
 
-;; Usage
-(sub-block "pwr" (tpsm84338 220000 47000 1000))
+;; Usage — positional, named, or mixed (positional may not follow named)
+(sub-block "pwr" (tpsm84338 220k 47k 1k))
+(sub-block "pwr" (tpsm84338 (rfbt 220k) (rfbb 47k) (rled 1k)))
 ```
+
+### Numeric literals with SI suffixes
+
+Bare numbers accept SI scale suffixes and an optional unit letter:
+`220k` = 220000, `4.7k`, `1M`, `100n` = `100nF` = 1e-7, `10p`, `3.3V` = 3.3,
+`0.5A`, `100mV` = 0.1 (milli only with a unit letter — `mm`/`mil` stay
+dimension tokens). Unknown trailing text (`100kHz`) still parses as an atom.
+
+### Replication
+
+```scheme
+(design-block "ADC Array"
+  (hierarchical-ids)                      ;; required by replicate
+  (replicate 4 "adc~D" (ad7380-channel ~D)))  ;; sub-blocks adc1..adc4, ~D = index
+```
+
+One `(id …)` is auto-minted on the replicate form; each copy's uuid derives
+from it (`deriveChildId(replicate_uuid, name)`), so ids are renumber-proof.
+
+### Decoupling shorthand
+
+`(decouple "VDD" 1 per-pin (pins-of "stm32" "VDD"))` expands to every pin of
+that instance on the net (the `(pins …)` declarations must appear first);
+`per-pin auto` does the same using the `(decouple-defaults (ic …))` ref. The
+`(decouple-defaults … (bypass …))` component (not the ic) cascades into
+sub-block modules that don't set their own.
+
+### Lint warnings
+
+Unknown sub-forms / enum words inside known forms (e.g. `(role inptu)`, a
+section-only form at top level) no longer vanish silently — `netlisp build`
+prints `file:line:col: warning: …` to stderr. Eval errors now name the form
+with expected arity, suggest `(import …)` or nearest-name for unbound
+components, and print the module call stack.
 
 ### Sub-block identity: legacy sidecar vs. hierarchical (opt-in)
 
@@ -293,7 +328,7 @@ Local dev still uses `http://localhost:7050`.
 
 `netlisp serve` starts an HTTP server with the schematic viewer + review report:
 
-- **Design list**: `GET /` — links to all .sexp designs
+- **Design list**: `GET /` — links to all .sexp designs, with per-card health chips (ERC errors/warnings, failed assertions, open notes, green PASS)
 - **Schematic viewer**: `GET /schematics/:name` — server-rendered HTML schematic with embedded SVG
 - **Review report**: `GET /review/:name` — HTML design-review doc (summary banner, power-budget table, per-section cards, BOM, assertions, unresolved issues). JSON form at `GET /api/review/:name` for programmatic use.
 - **Scene graph**: `GET /api/scene-graph/:name` — JSON scene graph for schematic (used by the live-push pipeline)
@@ -301,11 +336,14 @@ Local dev still uses `http://localhost:7050`.
 - **PCB layout facts**: `GET /api/pcb-describe/:name` — structured spatial facts about the solved placement (`src/serve/pcb_describe.zig`), the textual twin of the PNG: built from the identical placement-selection logic and accepting the same query parameters, so the facts always describe the board the image shows. Returns JSON with the axes convention (y grows down; "top" = −y, matching `(placement …)` spec words), the anchor (largest hub IC), per-part `ref`/`origin`/side-of-anchor/`gap_mm`/nets/`unplaced`, per-decoupling-loop net + power-leg mm + nH + side, each hub's net→package-edge pad map, spec coverage (incl. `unresolved` spec names), per-part `want_side` (the part sits OPPOSITE the hub edge its net's pads are on), a `lint` array (fell-back-to-auto / unresolved-name / unplaced errors; wrong-side / long-loop / outside-outline warns), `board.outline` (the authored `(board (size W H) …)` rectangle when one exists), and (with `?route=1`) `routed:{trace_mm,tracks,vias,drc}`. Agents should read measurements here and use the PNG for gestalt.
 - **Placement-spec export**: `GET /api/placement-spec/:name` — reverse-engineer an editable `(placement …)` spec from any solved layout (`src/serve/placement_spec.zig`), closing the DSL loop: the optimizer (or a saved hand layout) finds an arrangement, this endpoint turns it back into the declarative form to paste into the design/module `.sexp`, tweak, and re-solve deterministically. Anchor = largest hub; each part listed on its side of the anchor, inner lane first then along the edge; `(rot …)` only where the actual rotation differs from the solver's default; origin names when unique, ref-des otherwise. Same placement-selection params as the PNG (`layout=`, `regen=1`, `sub=`); `?format=sexp` returns bare spec text, else JSON `{name,title,source,anchor,spec,skipped}`.
 - **Placement dry-run**: `POST /api/propose-placement/:name` — body = a `(placement …)` or `(floorplan …)` form; solves it against a request-local copy of the design (nothing written) and returns the proposed-vs-current scoreboard `{proposed:{objective,hpwl,loop_nh,routed?},used_spec,unplaced,auto_filled,unresolved,current:{…},delta_objective}` — the A/B step before committing a spec to the `.sexp`. `?route=1` routes both layouts.
-- **Live push**: `POST /api/push/:name` — rebuild and push update
+- **Live push**: `POST /api/push/:name` — rebuild and push update. On eval failure the JSON (and the schematic page, and the MCP `build` tool) carries a structured `diagnostic` `{file,line,col,message,source_line}` rendered compiler-style with a caret (`src/serve/diag_format.zig`).
+- **Version history + diff**: `GET /api/history/:name` — stored snapshot ids (file copies under `<project>/history/<name>/<timestamp>/`, written before every mutation); `GET /api/diff/:name?from=<id>&to=<id|current>` — request-local netlist diff (instances added/removed, value/footprint changes, net membership changes; `src/serve/design_diff.zig`). Schematic header's History panel renders it. Caveat: snapshots capture the design file only, so an old revision re-evaluates against today's lib/ modules.
+- **Datasheet attach**: `POST /api/attach-datasheet` `{component,file}` — splices the datasheet link into `lib/components/<name>.sexp` (idempotent, traversal-safe); library page has a per-card attach control. `GET /api/datasheets` lists candidates.
+- **Cross-probing**: `/pcb-layout/:name?focus=REF` (or `#REF`) zooms/flashes a part (leaf-matching like `?refs=`); PCB sidebar rows link "Show in schematic →" (`#comp-REF` scroll+flash), schematic component detail links "Locate on PCB →".
 - **Version polling**: `GET /api/version/:name` — returns `{"version":N}`
 - **Value editing**: `POST /api/edit-value/:name` — edit component value in .sexp file
 - **ERC**: `GET /api/erc/:name` — electrical-rule violations
-- **KiCad sync**: `POST /api/sync-kicad-pcb/:name` — file-based sync. Reads the `.kicad_pcb` declared by the design's `(kicad-pcb "<path>")` form, diffs it against the flattened netlist, and writes the updated board in place so footprint placements and routing are preserved. Driven by the schematic viewer's "Push to KiCad PCB" button. (`?dry_run=1` / `?migrate=1` / `?prune=1` modifiers.)
+- **KiCad sync**: `POST /api/sync-kicad-pcb/:name` — file-based sync. Reads the `.kicad_pcb` declared by the design's `(kicad-pcb "<path>")` form, diffs it against the flattened netlist, and writes the updated board in place so footprint placements and routing are preserved. Driven by the schematic viewer's "Push to KiCad PCB" button, which now dry-runs first and shows a preview modal (op list + summary counts) before the real write, with a result toast. (`?dry_run=1` / `?migrate=1` / `?prune=1` modifiers.)
 - **Library upload**: `GET /library`, `POST /api/upload-symbol`, `POST /api/upload-footprint`
 
 ### Live update workflow
