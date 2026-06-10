@@ -2850,6 +2850,13 @@ fn writePcbData(
     try w.print("{{\"scale\":{d},\"minx\":{d},\"miny\":{d},", .{ v.scale, v.minx, v.miny });
     try w.print("\"margin\":{d},\"grid\":{d},\"w\":{d},\"h\":{d},", .{ MARGIN_MM, optimizer.GRID_MM, v.width, v.height });
     try w.print("\"clr\":{d},\"cmargin\":{d},", .{ clearance, geometry.BBOX_MARGIN_MM });
+    // `(board (size W H) …)` outline rectangle (world mm) — null when the
+    // design declares no physical board; the viewer draws the edge.
+    if (p.board_rect) |br| {
+        try w.print("\"board\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}},", .{ br.minx, br.miny, br.w, br.h });
+    } else {
+        try w.writeAll("\"board\":null,");
+    }
     // Read-only flag for the embedded per-sub-block preview — BOARD_JS skips all
     // edit wiring (drag/rotate/route/save) when set, leaving a pan/zoom viewer.
     try w.print("\"ro\":{s},", .{if (embed) "true" else "false"});
@@ -3513,6 +3520,15 @@ const BOARD_JS =
     \\gT.style.pointerEvents="none"; gR.style.pointerEvents="none"; gC.style.pointerEvents="none"; gD.style.pointerEvents="none";
     \\const els=[], bodies=[];
     \\function el(n,a){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);return e;}
+    \\// (board (size W H) …) physical outline, under everything (read-only).
+    \\if(PCB.board){
+    \\ var br=PCB.board,gB=document.createElementNS(NS,"g");
+    \\ svg.insertBefore(gB,gP); gB.style.pointerEvents="none";
+    \\ gB.appendChild(el("rect",{x:X(br.x).toFixed(1),y:Y(br.y).toFixed(1),width:(br.w*S).toFixed(1),
+    \\   height:(br.h*S).toFixed(1),fill:"none",stroke:"#7ee787","stroke-width":1.6,opacity:0.85}));
+    \\ var bt=el("text",{x:(X(br.x)+6).toFixed(1),y:(Y(br.y)+14).toFixed(1),fill:"#7ee787","font-size":"11",opacity:0.85});
+    \\ bt.textContent=br.w.toFixed(0)+"×"+br.h.toFixed(0)+" mm"; gB.appendChild(bt);
+    \\}
     \\function wpt(i,lx,ly){var p=P[i],a=(p.rot||0)*Math.PI/180,c=Math.cos(a),s=Math.sin(a);
     \\ return {x:p.x+lx*c-ly*s,y:p.y+lx*s+ly*c};}
     \\function moved(i){return P[i].x!==orig[i].x||P[i].y!==orig[i].y||(P[i].rot||0)!==orig[i].rot;}

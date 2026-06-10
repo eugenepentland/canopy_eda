@@ -1089,6 +1089,25 @@ pub const PlacementSpec = struct {
     centered: bool = false,
 };
 
+/// The physical board declared by a top-level `(board …)` form: the outline
+/// rectangle plus the parts that live ON it — connectors docked to a named
+/// board edge (`(left|right|top|bottom "ref" …)` lists, same item grammar as
+/// `(placement …)` incl. `(rot N "ref")`) and mounting hardware pinned at the
+/// `(corners …)` (TL, TR, BR, BL in authored order). `(size W H)` is required
+/// for the form to take effect — a board is a physical object with a known
+/// outline; without it the optimizer ignores the form and lint reports it.
+pub const BoardSpec = struct {
+    /// Outline size in mm. 0 ⇒ `(size …)` missing → the form is inert.
+    w: f64 = 0,
+    h: f64 = 0,
+    /// Edge-docked parts per board edge (NOT sides of an anchor — the words
+    /// name the physical board edge the connector mounts on).
+    sides: []const PlacementSideSpec = &.{},
+    /// Corner-pinned parts (mounting holes/standoffs): TL, TR, BR, BL.
+    corners: []const PlacementItem = &.{},
+    present: bool = false,
+};
+
 /// The fully-evaluated result of a `(design-block …)`: the flattened netlist
 /// (instances + nets + ports), the section/sub-block tree, and the design-doc
 /// metadata (critical ICs, verifications, rails, functions) the review and
@@ -1168,6 +1187,10 @@ pub const DesignBlock = struct {
     /// `(placement …)` spec composes) and docked as a rigid macro on its side
     /// of the anchor sub-block. `present=false` ⇒ none authored.
     floorplan: PlacementSpec = .{},
+    /// Physical board outline + edge-docked connectors + corner mounting
+    /// hardware from a top-level `(board …)` form. `present=false` ⇒ none
+    /// authored — the layout stays an unbounded part cluster.
+    board: BoardSpec = .{},
 };
 
 /// A rail's electrical role, declared by `(power-rail <label> (role …) (net …))`.

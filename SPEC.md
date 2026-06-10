@@ -106,6 +106,9 @@ Public functions: solve
 - zone-pack lays a group into an aligned row/column
 - the manual placement block keeps authored order and resolves rotations
 - the manual floorplan docks sides around the anchor IC and stages unlisted parts
+- (board ...) edge default rotation turns connector pads toward the board interior
+- (board ...) docks edge parts flush inside the outline and pins corners
+- (board ...) edge parts wanting the same spot de-overlap along the edge
 - a long manual side wraps into multiple depth lanes
 - (no-refine) packs courtyards flush (touching) and symmetric
 - (centered) docks each side on the IC centerline, not its rail pad
@@ -437,6 +440,7 @@ Public functions: analyze
 - layout group form parses a labeled region over member block keys
 - layout edge form parses left/right edge-pinned block keys
 - hosts form records the sub-block instance names a section owns
+- board form parses outline size, edge lists, and corners
 - verifies req with an (id …) target parses as a stable-id sign-off leaving ref-des empty
 - verifies req with a ref-des target parses as a ref-des sign-off leaving target-id empty
 

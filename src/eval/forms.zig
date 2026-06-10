@@ -122,6 +122,7 @@ pub const ScopeForm = enum {
     constraints,
     placement,
     floorplan,
+    board,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -164,6 +165,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "module", .constraints },
     .{ "placement", .placement },
     .{ "floorplan", .floorplan },
+    .{ "board", .board },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -491,6 +493,18 @@ pub const scope_form_docs = blk: {
             "whole macro in quarter steps. Top-level parts outside any sub-block are pin-hug " ++
             "auto-filled beside their placed pads; sub-blocks the floorplan doesn't list stay " ++
             "in the staging band and are reported unplaced.",
+    } };
+    t[@intFromEnum(ScopeForm.board)] = .{ .scope = tl, .doc = .{
+        .syntax = "(board (size W H) " ++
+            "(left|right|top|bottom \"REF\"… | (rot N \"REF\")…)… [(corners \"REF\"…)])",
+        .summary = "Physical board outline + edge hardware: (size W H) is the outline in mm " ++
+            "(required — without it the form is inert). Each (left|right|top|bottom …) list " ++
+            "docks those parts flush INSIDE that board edge (the words name physical edges, " ++
+            "not sides of an anchor), slid along the edge toward the pads they connect to; " ++
+            "(rot N \"REF\") overrides the default pads-inward rotation. (corners …) pins " ++
+            "mounting hardware at the four corners (TL, TR, BR, BL in authored order). " ++
+            "The interior placement (force, (placement …), or (floorplan …)) is centered in " ++
+            "the outline; the rendered views draw the outline rectangle.",
     } };
     break :blk t;
 };

@@ -444,7 +444,14 @@ pub const Placement = struct {
     /// false when positions came straight from the cache. The caller persists
     /// the cache only when this is true.
     generated: bool,
+    /// The physical outline rectangle from a `(board (size W H) …)` form,
+    /// world coordinates (same frame as `parts`). Null when the design has no
+    /// effective board form — renderers draw no outline.
+    board_rect: ?BoardRect = null,
 };
+
+/// A `(board …)` outline rectangle in world mm (top-left + size).
+pub const BoardRect = struct { minx: f64, miny: f64, w: f64, h: f64 };
 
 /// A cached part pose (ref-des + centre + rotation) — the persisted form of an
 /// auto-generated layout, so the optimizer needn't re-run on every page load.
@@ -1735,8 +1742,12 @@ fn packSpec(
 }
 
 /// Auto-fill cost guard: staged-part counts beyond this keep the band (each
-/// fill is a windowed scan; two dozen covers any real module).
-const AUTOFILL_MAX: usize = 24;
+/// fill is a windowed scan). Sized for the `(floorplan …)` usage on a real
+/// board — list the modules + connectors, auto-fill ALL the loose glue (the
+/// barracuda base board leaves 31 RC-filter parts loose; the original cap of
+/// 24 silently skipped every one of them). The expensive routed veto is gated
+/// separately (`AUTOFILL_VETO_MAX`), so a high cap costs only windowed scans.
+const AUTOFILL_MAX: usize = 64;
 /// Re-sweep the fills until none improves: placing one part gives the parts
 /// that wire to it (and only it) their anchors, so chains fill over sweeps.
 const AUTOFILL_SWEEPS: usize = 3;
@@ -1847,6 +1858,9 @@ fn autofillUnlisted(
     }
 
     var filled: std.ArrayListUnmanaged([]const u8) = .empty;
+    // Append to (not replace) earlier fills — the board-dock path runs a
+    // second pass for the connectors' partners.
+    try filled.appendSlice(arena, g_placement_diag.auto_filled);
     var remaining: std.ArrayListUnmanaged([]const u8) = .empty;
     var any_filled = false;
     for (idxs.items) |i| {
@@ -1968,10 +1982,23 @@ fn autofillOne(parts: []Part, anchors: []const PadAnchor, i: usize) bool {
     const ox = p.x;
     const oy = p.y;
     const m = AUTOFILL_MARGIN_MM + effHw(p.*) + effHh(p.*);
-    const lo_x = @max(-RELOCATE_MAX_CELLS, cellOffset(minx - m - ox));
-    const hi_x = @min(RELOCATE_MAX_CELLS, cellOffset(maxx + m - ox));
-    const lo_y = @max(-RELOCATE_MAX_CELLS, cellOffset(miny - m - oy));
-    const hi_y = @min(RELOCATE_MAX_CELLS, cellOffset(maxy + m - oy));
+    var lo_x = @max(-RELOCATE_MAX_CELLS, cellOffset(minx - m - ox));
+    var hi_x = @min(RELOCATE_MAX_CELLS, cellOffset(maxx + m - ox));
+    var lo_y = @max(-RELOCATE_MAX_CELLS, cellOffset(miny - m - oy));
+    var hi_y = @min(RELOCATE_MAX_CELLS, cellOffset(maxy + m - oy));
+    // The part-relative clamp empties the window when the part is staged far
+    // from every target (a band pushed below a (board …) outline) — then
+    // re-centre the window on the targets' bbox instead, in absolute mm,
+    // same span cap. Near-target fills keep the original window byte-for-byte.
+    if (lo_x > hi_x or lo_y > hi_y) {
+        const half_span = @as(f64, @floatFromInt(RELOCATE_MAX_CELLS)) * GRID_MM / 2.0;
+        const cx0 = std.math.clamp((minx + maxx) / 2, minx - m + half_span, maxx + m - half_span);
+        const cy0 = std.math.clamp((miny + maxy) / 2, miny - m + half_span, maxy + m - half_span);
+        lo_x = cellOffset(cx0 - half_span - ox);
+        hi_x = cellOffset(cx0 + half_span - ox);
+        lo_y = cellOffset(cy0 - half_span - oy);
+        hi_y = cellOffset(cy0 + half_span - oy);
+    }
 
     var best = anchorCost(parts, anchors, i);
     var bx = ox;
@@ -2491,6 +2518,424 @@ fn packFloorplan(
     return true;
 }
 
+// ── Physical board: outline + edge docking (`(board …)`) ────────────────────
+// The interior placement (force / spec / floorplan) is solved first and left
+// unchanged; the authored W×H outline is then centered on it, each edge list
+// docks flush INSIDE its named board edge (slid along the edge toward the
+// parts it connects to, then 1-D de-overlapped within the span the corners
+// leave free), and `(corners …)` hardware pins at the four corners.
+
+/// Clearance between neighbouring edge-docked parts along their shared edge,
+/// and between an edge part and the corner hardware bounding its span (mm).
+const BOARD_EDGE_GAP_MM: f64 = 1.0;
+
+/// The four `(corners …)` slots in authored order.
+const CornerSlot = enum { tl, tr, br, bl };
+
+/// Default rotation for an edge-docked connector: the quarter turn that points
+/// its pad centroid toward the board interior — pads inward, body toward (or
+/// overhanging) the edge, the way an edge-launch SMA / USB-C / RJ45 mounts.
+/// Parts whose pads are centred on the footprint (mounting standoffs) keep 0.
+fn edgeInwardRot(p: Part, edge: Edge) f64 {
+    if (p.pads.len == 0) return 0;
+    var cx: f64 = 0;
+    var cy: f64 = 0;
+    for (p.pads) |pad| {
+        cx += pad.x;
+        cy += pad.y;
+    }
+    cx /= @as(f64, @floatFromInt(p.pads.len));
+    cy /= @as(f64, @floatFromInt(p.pads.len));
+    if (cx * cx + cy * cy < 0.01) return 0;
+    // Board-interior direction for each edge (y grows DOWN: top edge = −y).
+    const inx: f64 = switch (edge) {
+        .left => 1,
+        .right => -1,
+        .top, .bottom => 0,
+    };
+    const iny: f64 = switch (edge) {
+        .top => 1,
+        .bottom => -1,
+        .left, .right => 0,
+    };
+    var best_rot: f64 = 0;
+    var best = -std.math.inf(f64);
+    var r: f64 = 0;
+    while (r < 360) : (r += 90) {
+        const off = rotateLocal(cx, cy, r);
+        const dot = off.x * inx + off.y * iny;
+        if (dot > best + 1e-9) {
+            best = dot;
+            best_rot = r;
+        }
+    }
+    return best_rot;
+}
+
+/// The attachment centroid of `pi`: mean centre of the other parts it shares a
+/// non-ground net with (ground nets touch everything, pulling every connector
+/// to the board centre). Falls back to ground-net partners, then null. The
+/// docked connector slides along its edge toward this point.
+fn attachCentroid(parts: []const Part, idx_of: *const std.StringHashMap(usize), nets: []const FlatNet, pi: usize) ?Pt {
+    var sx: f64 = 0;
+    var sy: f64 = 0;
+    var n: f64 = 0;
+    var gx: f64 = 0;
+    var gy: f64 = 0;
+    var gn: f64 = 0;
+    for (nets) |net| {
+        var touches = false;
+        for (net.pins) |pin| {
+            if (idx_of.get(pin.ref_des)) |qi| {
+                if (qi == pi) {
+                    touches = true;
+                    break;
+                }
+            }
+        }
+        if (!touches) continue;
+        const groundy = isGroundName(net.name);
+        for (net.pins) |pin| {
+            const qi = idx_of.get(pin.ref_des) orelse continue;
+            if (qi == pi) continue;
+            if (groundy) {
+                gx += parts[qi].x;
+                gy += parts[qi].y;
+                gn += 1;
+            } else {
+                sx += parts[qi].x;
+                sy += parts[qi].y;
+                n += 1;
+            }
+        }
+    }
+    if (n > 0) return .{ .x = sx / n, .y = sy / n };
+    if (gn > 0) return .{ .x = gx / gn, .y = gy / gn };
+    return null;
+}
+
+/// One resolved edge-list entry: the part index + its authored rotation.
+const SideRef = struct { pi: usize, rot: ?f64 };
+
+/// Resolve the `(board …)` side + corner names against the flattened design.
+/// Unresolved names are appended to the placement diag (the lint layer
+/// surfaces them); a name in two lists keeps its first claim.
+const BoardClaims = struct {
+    claimed: []bool,
+    side_parts: [4][]const SideRef,
+    corner_parts: []const usize,
+};
+
+fn resolveBoardClaims(
+    arena: std.mem.Allocator,
+    spec: env.BoardSpec,
+    instances: []const export_kicad.FlatInstance,
+    nparts: usize,
+    record_unresolved: bool,
+) std.mem.Allocator.Error!BoardClaims {
+    const claimed = try arena.alloc(bool, nparts);
+    @memset(claimed, false);
+    var unresolved: std.ArrayListUnmanaged([]const u8) = .empty;
+    var side_lists: [4]std.ArrayListUnmanaged(SideRef) = .{ .empty, .empty, .empty, .empty };
+    for (spec.sides) |s| {
+        const ei: usize = @intFromEnum(edgeFromSide(s.side));
+        for (s.items) |it| {
+            if (it.net != null) continue; // membership rules are (placement …)-only
+            if (resolvePart(instances, it.ref)) |pi| {
+                if (!claimed[pi]) {
+                    claimed[pi] = true;
+                    try side_lists[ei].append(arena, .{ .pi = pi, .rot = it.rot });
+                }
+            } else try unresolved.append(arena, it.ref);
+        }
+    }
+    var corner_list: std.ArrayListUnmanaged(usize) = .empty;
+    for (spec.corners) |it| {
+        if (resolvePart(instances, it.ref)) |pi| {
+            if (!claimed[pi]) {
+                claimed[pi] = true;
+                try corner_list.append(arena, pi);
+            }
+        } else try unresolved.append(arena, it.ref);
+    }
+    if (record_unresolved and unresolved.items.len > 0) {
+        var all: std.ArrayListUnmanaged([]const u8) = .empty;
+        try all.appendSlice(arena, g_placement_diag.unresolved);
+        try all.appendSlice(arena, unresolved.items);
+        g_placement_diag.unresolved = try all.toOwnedSlice(arena);
+    }
+    return .{
+        .claimed = claimed,
+        .side_parts = .{
+            try side_lists[0].toOwnedSlice(arena),
+            try side_lists[1].toOwnedSlice(arena),
+            try side_lists[2].toOwnedSlice(arena),
+            try side_lists[3].toOwnedSlice(arena),
+        },
+        .corner_parts = try corner_list.toOwnedSlice(arena),
+    };
+}
+
+/// Remove board-claimed refs from a placement-diag list — a claimed part is
+/// placed by the board form now, whatever the spec pass thought of it.
+fn scrubClaimed(
+    arena: std.mem.Allocator,
+    list: []const []const u8,
+    idx_of: *const std.StringHashMap(usize),
+    claimed: []const bool,
+) std.mem.Allocator.Error![]const []const u8 {
+    var still: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (list) |ref| {
+        const pi = idx_of.get(ref) orelse {
+            try still.append(arena, ref);
+            continue;
+        };
+        if (!claimed[pi]) try still.append(arena, ref);
+    }
+    return still.toOwnedSlice(arena);
+}
+
+/// Realize a `(board …)` form on an already-solved interior placement. Mutates
+/// only the claimed (edge/corner) parts and the staging band; returns the
+/// outline rectangle for the renderers.
+fn packBoard(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    instances: []const export_kicad.FlatInstance,
+    idx_of: *const std.StringHashMap(usize),
+    nets: []const FlatNet,
+    spec: env.BoardSpec,
+) std.mem.Allocator.Error!BoardRect {
+    const bc = try resolveBoardClaims(arena, spec, instances, parts.len, true);
+
+    // Interior bbox: every part that is neither board-claimed nor staged in
+    // the spec band (keepout extents — same boxes the collision pass checks).
+    var staged = std.StringHashMap(void).init(arena);
+    for (g_placement_diag.unplaced) |ref| try staged.put(ref, {});
+    var ix0 = std.math.inf(f64);
+    var iy0 = std.math.inf(f64);
+    var ix1 = -std.math.inf(f64);
+    var iy1 = -std.math.inf(f64);
+    for (parts, 0..) |p, i| {
+        if (bc.claimed[i] or staged.contains(p.ref_des)) continue;
+        const kb = keepBoxOf(p);
+        ix0 = @min(ix0, p.x + kb.cxo - kb.hw);
+        ix1 = @max(ix1, p.x + kb.cxo + kb.hw);
+        iy0 = @min(iy0, p.y + kb.cyo - kb.hh);
+        iy1 = @max(iy1, p.y + kb.cyo + kb.hh);
+    }
+    if (ix0 > ix1) {
+        ix0 = 0;
+        ix1 = 0;
+        iy0 = 0;
+        iy1 = 0;
+    }
+    // Each edge's docked parts occupy a lane reaching inward from the edge;
+    // offset the rectangle so the interior centres in the region the lanes
+    // leave FREE (centring on the full rectangle would slide the interior
+    // under a deep connector like a magjack).
+    var lane = [4]f64{ 0, 0, 0, 0 };
+    for (bc.side_parts, 0..) |list, ei| {
+        const edge: Edge = @enumFromInt(ei);
+        for (list) |sr| {
+            var tmp = parts[sr.pi];
+            tmp.rot = if (sr.rot) |r| @mod(@round(r / 90.0) * 90.0, 360.0) else edgeInwardRot(tmp, edge);
+            const kb = keepBoxOf(tmp);
+            const depth = if (edge == .left or edge == .right) 2 * kb.hw else 2 * kb.hh;
+            lane[ei] = @max(lane[ei], depth + BOARD_EDGE_GAP_MM);
+        }
+    }
+    const rect = BoardRect{
+        .minx = gridRound((ix0 + ix1) / 2 - spec.w / 2 - (lane[0] - lane[1]) / 2),
+        .miny = gridRound((iy0 + iy1) / 2 - spec.h / 2 - (lane[2] - lane[3]) / 2),
+        .w = spec.w,
+        .h = spec.h,
+    };
+    const x0 = rect.minx;
+    const x1 = rect.minx + rect.w;
+    const y0 = rect.miny;
+    const y1 = rect.miny + rect.h;
+
+    // Corners first (TL, TR, BR, BL in authored order) — they bound the edge
+    // spans. Track each one's world keepout so the edges dodge it.
+    var corner_box = [4]?Rect{ null, null, null, null };
+    for (bc.corner_parts, 0..) |pi, k| {
+        if (k >= 4) break;
+        const p = &parts[pi];
+        p.rot = 0;
+        const kb = keepBoxOf(p.*);
+        switch (@as(CornerSlot, @enumFromInt(k))) {
+            .tl => {
+                p.x = gridRound(x0 + kb.hw - kb.cxo);
+                p.y = gridRound(y0 + kb.hh - kb.cyo);
+            },
+            .tr => {
+                p.x = gridRound(x1 - kb.hw - kb.cxo);
+                p.y = gridRound(y0 + kb.hh - kb.cyo);
+            },
+            .br => {
+                p.x = gridRound(x1 - kb.hw - kb.cxo);
+                p.y = gridRound(y1 - kb.hh - kb.cyo);
+            },
+            .bl => {
+                p.x = gridRound(x0 + kb.hw - kb.cxo);
+                p.y = gridRound(y1 - kb.hh - kb.cyo);
+            },
+        }
+        corner_box[k] = .{
+            .x0 = p.x + kb.cxo - kb.hw,
+            .y0 = p.y + kb.cyo - kb.hh,
+            .x1 = p.x + kb.cxo + kb.hw,
+            .y1 = p.y + kb.cyo + kb.hh,
+        };
+    }
+
+    // Each edge: rotation (pads inward unless overridden) → cross-axis flush
+    // inside the edge → desired slide position (attachment centroid) → 1-D
+    // de-overlap inside the span the adjacent corners leave free.
+    for (bc.side_parts, 0..) |list, ei| {
+        if (list.len == 0) continue;
+        const edge: Edge = @enumFromInt(ei);
+        const vertical = (edge == .left or edge == .right);
+        // Span along the edge, shrunk past any adjacent corner hardware.
+        var span_min = if (vertical) y0 else x0;
+        var span_max = if (vertical) y1 else x1;
+        const corner_at: [2]?Rect = switch (edge) {
+            .left => .{ corner_box[0], corner_box[3] }, // TL, BL
+            .right => .{ corner_box[1], corner_box[2] }, // TR, BR
+            .top => .{ corner_box[0], corner_box[1] }, // TL, TR
+            .bottom => .{ corner_box[3], corner_box[2] }, // BL, BR
+        };
+        if (corner_at[0]) |cb| span_min = @max(span_min, (if (vertical) cb.y1 else cb.x1) + BOARD_EDGE_GAP_MM);
+        if (corner_at[1]) |cb| span_max = @min(span_max, (if (vertical) cb.y0 else cb.x0) - BOARD_EDGE_GAP_MM);
+
+        const Entry = struct { pi: usize, want: f64, half: f64 };
+        var entries = try arena.alloc(Entry, list.len);
+        for (list, 0..) |sr, i| {
+            const p = &parts[sr.pi];
+            p.rot = if (sr.rot) |r| @mod(@round(r / 90.0) * 90.0, 360.0) else edgeInwardRot(p.*, edge);
+            const kb = keepBoxOf(p.*);
+            switch (edge) {
+                .left => p.x = x0 + kb.hw - kb.cxo,
+                .right => p.x = x1 - kb.hw - kb.cxo,
+                .top => p.y = y0 + kb.hh - kb.cyo,
+                .bottom => p.y = y1 - kb.hh - kb.cyo,
+            }
+            const want = if (attachCentroid(parts, idx_of, nets, sr.pi)) |c|
+                (if (vertical) c.y else c.x)
+            else
+                (span_min + span_max) / 2;
+            entries[i] = .{
+                .pi = sr.pi,
+                .want = std.math.clamp(want, span_min, span_max),
+                .half = if (vertical) kb.hh else kb.hw,
+            };
+        }
+        std.mem.sort(Entry, entries, {}, struct {
+            fn less(_: void, a: Entry, b: Entry) bool {
+                return a.want < b.want;
+            }
+        }.less);
+        // Standard 1-D legalize: forward sweep packs left-to-right at desired
+        // positions, backward sweep pulls everything inside the span. A span
+        // too small for its parts overflows past `span_min` — honest geometry
+        // the overlap lint reports rather than a silent rescale.
+        const centers = try arena.alloc(f64, entries.len);
+        for (entries, 0..) |e, i| {
+            const lo = if (i == 0)
+                span_min + e.half
+            else
+                centers[i - 1] + entries[i - 1].half + e.half + BOARD_EDGE_GAP_MM;
+            centers[i] = @max(e.want, lo);
+        }
+        var i = entries.len;
+        var hi = span_max - entries[entries.len - 1].half;
+        while (i > 0) {
+            i -= 1;
+            centers[i] = @min(centers[i], hi);
+            if (i > 0) hi = centers[i] - entries[i].half - entries[i - 1].half - BOARD_EDGE_GAP_MM;
+        }
+        for (entries, 0..) |e, k| {
+            const p = &parts[e.pi];
+            const kb = keepBoxOf(p.*);
+            if (vertical) {
+                p.y = gridRound(centers[k] - kb.cyo);
+            } else {
+                p.x = gridRound(centers[k] - kb.cxo);
+            }
+        }
+    }
+
+    // Board-claimed parts are placed now — drop them from the spec staging
+    // diag (a floorplan that doesn't list the connectors leaves them loose;
+    // the board form is what places them).
+    g_placement_diag.unplaced = try scrubClaimed(arena, g_placement_diag.unplaced, idx_of, bc.claimed);
+    g_placement_diag.auto_filled = try scrubClaimed(arena, g_placement_diag.auto_filled, idx_of, bc.claimed);
+    staged.clearRetainingCapacity();
+    for (g_placement_diag.unplaced) |ref| try staged.put(ref, {});
+
+    // The spec staging band was packed under the *interior*; a board outline
+    // can reach further down. Keep the band clear of the rectangle.
+    var band_top = std.math.inf(f64);
+    var band_hits = false;
+    for (parts) |p| {
+        if (!staged.contains(p.ref_des)) continue;
+        const kb = keepBoxOf(p);
+        const top = p.y + kb.cyo - kb.hh;
+        band_top = @min(band_top, top);
+        if (top < y1 + GRID_MM) band_hits = true;
+    }
+    if (band_hits) {
+        const dy = (y1 + STAGE_GAP_MM) - band_top;
+        for (parts) |*p| {
+            if (staged.contains(p.ref_des)) p.y += dy;
+        }
+    }
+    return rect;
+}
+
+/// The outline rectangle for a layout loaded from cache (poses applied
+/// verbatim — nothing re-docks): W×H centered on the board-claimed parts'
+/// bbox when any resolve (they were docked flush to the edges when the cache
+/// was written, so their bbox ≈ the original rectangle), else on the whole
+/// board's bbox.
+fn boardRectFromPoses(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    instances: []const export_kicad.FlatInstance,
+    spec: env.BoardSpec,
+) std.mem.Allocator.Error!BoardRect {
+    const bc = try resolveBoardClaims(arena, spec, instances, parts.len, false);
+    var ix0 = std.math.inf(f64);
+    var iy0 = std.math.inf(f64);
+    var ix1 = -std.math.inf(f64);
+    var iy1 = -std.math.inf(f64);
+    var any_claimed = false;
+    for (bc.claimed) |c| {
+        if (c) any_claimed = true;
+    }
+    for (parts, 0..) |p, i| {
+        if (any_claimed and !bc.claimed[i]) continue;
+        const kb = keepBoxOf(p);
+        ix0 = @min(ix0, p.x + kb.cxo - kb.hw);
+        ix1 = @max(ix1, p.x + kb.cxo + kb.hw);
+        iy0 = @min(iy0, p.y + kb.cyo - kb.hh);
+        iy1 = @max(iy1, p.y + kb.cyo + kb.hh);
+    }
+    if (ix0 > ix1) {
+        ix0 = 0;
+        ix1 = 0;
+        iy0 = 0;
+        iy1 = 0;
+    }
+    return .{
+        .minx = gridRound((ix0 + ix1) / 2 - spec.w / 2),
+        .miny = gridRound((iy0 + iy1) / 2 - spec.h / 2),
+        .w = spec.w,
+        .h = spec.h,
+    };
+}
+
 /// Build a placement for `block`. When `cached` covers every part, its poses
 /// are applied directly (no optimization — fast); otherwise the optimizer runs
 /// and `Placement.generated` is set so the caller can persist a fresh cache.
@@ -2517,6 +2962,13 @@ pub fn solve(
     const stubs = try buildEscapeStubs(arena, nets, parts, &prep.idx_of);
     applyKeepout(parts, stubs);
 
+    // `(board (size W H) …)` with a real size declares a physical outline:
+    // dock its edge/corner hardware after the interior solve, and surface the
+    // rectangle to the renderers either way. Without `(size …)` the form is
+    // inert (the describe lint reports it).
+    const board_live = block.board.present and block.board.w > 0 and block.board.h > 0;
+    var board_rect: ?BoardRect = null;
+
     const generated = !applyCached(parts, cached);
     if (generated) {
         try runPlacement(arena, parts, &prep, nets, built, params);
@@ -2539,6 +2991,15 @@ pub fn solve(
             if (overlap_routed <= strict_routed) restorePoses(parts, overlap_poses);
             // else keep the strict arrangement already in `parts`.
         }
+        if (board_live) {
+            board_rect = try packBoard(arena, parts, prep.instances, &prep.idx_of, nets, block.board);
+            // The dock just landed the connectors; parts whose only anchors
+            // are ON those connectors (CC pull-downs, LED resistors) couldn't
+            // fill during the spec pass — give them a second pin-hug pass.
+            if (g_placement_diag.unplaced.len > 0) {
+                try autofillUnlisted(arena, parts, &prep.idx_of, nets, built.loops);
+            }
+        }
     } else if (mode == .refine and parts.len >= 2 and parts.len <= ROUTED_POLISH_MAX_PARTS and built.loops.len > 0) {
         // Seeded from an existing layout: keep its global arrangement, just run the
         // local routed tuck on it (the same monotonic, safety-netted pass the auto
@@ -2558,7 +3019,19 @@ pub fn solve(
     const score = scoreLayout(parts, &prep.idx_of, nets, built.loops);
     const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
-    return finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, generated);
+    var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, generated);
+    if (board_live) {
+        if (board_rect == null) board_rect = try boardRectFromPoses(arena, parts, prep.instances, block.board);
+        pl.board_rect = board_rect;
+        // The view frame must include the outline even where it reaches past
+        // the parts (a sparse board on a big rectangle).
+        const r = board_rect.?;
+        pl.minx = @min(pl.minx, r.minx);
+        pl.miny = @min(pl.miny, r.miny);
+        pl.maxx = @max(pl.maxx, r.minx + r.w);
+        pl.maxy = @max(pl.maxy, r.miny + r.h);
+    }
+    return pl;
 }
 
 /// Score an arbitrary set of part poses with the optimizer's *own* objective —
@@ -2661,7 +3134,17 @@ pub fn placeFromPoses(
     const score = scoreLayout(parts, &prep.idx_of, nets, built.loops);
     const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
-    return finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
+    var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
+    // Saved/hand layouts of a `(board …)` design keep their outline overlay.
+    if (block.board.present and block.board.w > 0 and block.board.h > 0) {
+        const r = try boardRectFromPoses(arena, parts, prep.instances, block.board);
+        pl.board_rect = r;
+        pl.minx = @min(pl.minx, r.minx);
+        pl.miny = @min(pl.miny, r.miny);
+        pl.maxx = @max(pl.maxx, r.minx + r.w);
+        pl.maxy = @max(pl.maxy, r.miny + r.h);
+    }
+    return pl;
 }
 
 /// Place every part on a plain uniform grid (no optimization) — the cheap
@@ -6750,6 +7233,98 @@ test "autofillUnlisted places a staged part beside its net" {
     try testing.expectEqualStrings("C9", g_placement_diag.auto_filled[0]);
     try testing.expectEqual(@as(usize, 0), g_placement_diag.unplaced.len);
     try testing.expect(parts[2].y < parts[0].y + parts[0].hh + STAGE_GAP_MM);
+    try testing.expect(!anyOverlap(&parts));
+}
+
+// spec: placement/optimizer - (board ...) edge default rotation turns connector pads toward the board interior
+test "edgeInwardRot points pads inward per edge" {
+    var pads = [_]geometry.Pad{.{ .number = "1", .x = 1.0, .y = 0, .w = 0.5, .h = 0.5 }};
+    const p = Part{ .ref_des = "J1", .kind = .hub, .hw = 2, .hh = 1, .pads = &pads, .fallback = true };
+    try testing.expectApproxEqAbs(@as(f64, 0), edgeInwardRot(p, .left), 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 180), edgeInwardRot(p, .right), 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 90), edgeInwardRot(p, .top), 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 270), edgeInwardRot(p, .bottom), 1e-9);
+}
+
+// spec: placement/optimizer - (board ...) docks edge parts flush inside the outline and pins corners
+test "packBoard docks edges and corners on the outline" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    var j_pads = [_]geometry.Pad{.{ .number = "1", .x = 1.0, .y = 0, .w = 0.8, .h = 0.8 }};
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 3, .hh = 3, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "J1", .kind = .hub, .hw = 2, .hh = 1.5, .pads = &j_pads, .fallback = true },
+        .{ .ref_des = "MK1", .kind = .passive, .hw = 1, .hh = 1, .pads = &.{}, .fallback = true },
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("U1", 0);
+    try idx_of.put("J1", 1);
+    try idx_of.put("MK1", 2);
+    const instances = [_]export_kicad.FlatInstance{
+        .{ .ref_des = "U1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "J1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "MK1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+    };
+    const net_pins = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "J1", .pin = "1" } };
+    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &net_pins }};
+    const left_items = [_]env.PlacementItem{.{ .ref = "J1" }};
+    const sides = [_]env.PlacementSideSpec{.{ .side = .left, .items = &left_items }};
+    const corners = [_]env.PlacementItem{ .{ .ref = "MK1" }, .{ .ref = "NOPE" } };
+    const spec = env.BoardSpec{ .w = 20, .h = 20, .sides = &sides, .corners = &corners, .present = true };
+    g_placement_diag = .{};
+    defer g_placement_diag = .{};
+    const rect = try packBoard(arena, &parts, &instances, &idx_of, &nets, spec);
+    // The outline shifts left of the interior centre (U1 at the origin) so the
+    // interior centres in the region the left edge's dock lane (2*hw(J1) +
+    // gap = 5mm) leaves free: minx = -10 - 5/2, grid-rounded.
+    try testing.expectApproxEqAbs(@as(f64, -12.6), rect.minx, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, -10), rect.miny, 1e-9);
+    // J1 flush inside the left edge (keepout hw 2 -> centre at minx+2), pads
+    // inward (rot 0), slid opposite its attachment (U1 at y 0).
+    try testing.expectApproxEqAbs(rect.minx + 2, parts[1].x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0), parts[1].y, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0), parts[1].rot, 1e-9);
+    // MK1 pinned at the top-left corner, inset by its keepout extents.
+    try testing.expectApproxEqAbs(rect.minx + 1, parts[2].x, 1e-9);
+    try testing.expectApproxEqAbs(rect.miny + 1, parts[2].y, 1e-9);
+    // The corner name that resolves to nothing is reported, not dropped.
+    try testing.expectEqual(@as(usize, 1), g_placement_diag.unresolved.len);
+    try testing.expectEqualStrings("NOPE", g_placement_diag.unresolved[0]);
+}
+
+// spec: placement/optimizer - (board ...) edge parts wanting the same spot de-overlap along the edge
+test "packBoard de-overlaps edge parts along their edge" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 3, .hh = 3, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "J1", .kind = .hub, .hw = 2, .hh = 1.5, .pads = &.{}, .fallback = true },
+        .{ .ref_des = "J2", .kind = .hub, .hw = 2, .hh = 1.5, .pads = &.{}, .fallback = true },
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("U1", 0);
+    try idx_of.put("J1", 1);
+    try idx_of.put("J2", 2);
+    const instances = [_]export_kicad.FlatInstance{
+        .{ .ref_des = "U1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "J1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "J2", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+    };
+    // Both connectors attach to U1 (y 0) -> both want the same slide position.
+    const p1 = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "J1", .pin = "1" } };
+    const p2 = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "J2", .pin = "1" } };
+    const nets = [_]FlatNet{ .{ .name = "A", .pins = &p1 }, .{ .name = "B", .pins = &p2 } };
+    const left_items = [_]env.PlacementItem{ .{ .ref = "J1" }, .{ .ref = "J2" } };
+    const sides = [_]env.PlacementSideSpec{.{ .side = .left, .items = &left_items }};
+    const spec = env.BoardSpec{ .w = 20, .h = 20, .sides = &sides, .present = true };
+    g_placement_diag = .{};
+    defer g_placement_diag = .{};
+    _ = try packBoard(arena, &parts, &instances, &idx_of, &nets, spec);
+    // Same edge (same x), separated along it by at least their extents + gap.
+    try testing.expectApproxEqAbs(parts[1].x, parts[2].x, 1e-9);
+    try testing.expect(@abs(parts[1].y - parts[2].y) >= 1.5 + 1.5 + BOARD_EDGE_GAP_MM - 1e-9);
     try testing.expect(!anyOverlap(&parts));
 }
 
