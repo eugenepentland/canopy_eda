@@ -73,6 +73,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var layout_spec: env_mod.LayoutSpec = .{};
     var placement_spec: env_mod.PlacementSpec = .{};
     var floorplan_spec: env_mod.PlacementSpec = .{};
+    var board_spec: env_mod.BoardSpec = .{};
     var derating: ?f64 = null;
     var kicad_pcb_path: ?[]const u8 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
@@ -170,6 +171,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             .placement => placement_spec = try parsePlacement(self, form_children),
             // Same grammar as (placement …); the items name sub-block slugs.
             .floorplan => floorplan_spec = try parsePlacement(self, form_children),
+            .board => board_spec = try parseBoard(self, form_children),
             // Section-only forms are silently ignored at the top level —
             // a design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract.
@@ -213,6 +215,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .constraints = constraint_acc.build(self.allocator),
         .placement = placement_spec,
         .floorplan = floorplan_spec,
+        .board = board_spec,
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -696,7 +699,7 @@ fn evalSection(
             // `processSharedSectionForm`; top-level-only forms are
             // silently ignored inside a section body.
             .status, .description, .note, .port, .protocol, .calc => {},
-            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function, .stub, .layout, .placement_order, .constraints, .placement, .floorplan => {},
+            .group, .sub_block, .verifies, .design_doc, .test_point, .power_config, .decouple_defaults, .kicad_pcb, .function, .stub, .layout, .placement_order, .constraints, .placement, .floorplan, .board => {},
         }
     }
 
@@ -1671,6 +1674,43 @@ fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_m
     };
 }
 
+/// Parse a top-level `(board …)` form: `(size W H)` outline (mm) + the same
+/// per-edge item lists as `(placement …)` (here the words name physical board
+/// edges) + `(corners "REF" …)` mounting hardware. The side lists are parsed
+/// by `parsePlacement` (which skips the heads it doesn't know); this adds the
+/// size and corners on top.
+fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.BoardSpec {
+    const ps = try parsePlacement(self, form_children);
+    var w: f64 = 0;
+    var h: f64 = 0;
+    var corners: std.ArrayListUnmanaged(env_mod.PlacementItem) = .empty;
+    for (form_children[1..]) |child| {
+        const c = child.asList() orelse continue;
+        if (c.len < 1) continue;
+        const head = c[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "size")) {
+            if (c.len >= 3) {
+                w = c[1].asNumber() orelse 0;
+                h = c[2].asNumber() orelse 0;
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, head, "corners")) {
+            for (c[1..]) |item_node| {
+                const ref = item_node.asString() orelse item_node.asAtom() orelse continue;
+                corners.append(self.allocator, .{ .ref = ref }) catch return EvalError.OutOfMemory;
+            }
+        }
+    }
+    return .{
+        .w = w,
+        .h = h,
+        .sides = ps.sides,
+        .corners = corners.toOwnedSlice(self.allocator) catch &.{},
+        .present = true,
+    };
+}
+
 /// Parse one `(function "Name" "Subtitle"? (verb "…")? (includes "a" "b" …)?)`
 /// form into a `FunctionGroup` for the high-level Function view. The first
 /// string after the head is the name, an optional second string is the
@@ -1782,6 +1822,33 @@ test "design-block parses a (function …) group" {
     try testing.expectEqual(@as(u8, 2), f.stack);
     try testing.expectEqual(@as(usize, 2), f.includes.len);
     try testing.expectEqualStrings("DMM Analog Front-End", f.includes[0]);
+}
+
+// spec: eval/design_block - board form parses outline size, edge lists, and corners
+test "design-block parses a (board ...) form" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (board (size 80 55)
+        \\    (left "usbc" "rj45")
+        \\    (right (rot 90 "sma1"))
+        \\    (corners "MK1" "MK2" "MK3" "MK4")))
+    ;
+    const nodes = try @import("../sexpr/parser.zig").parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expect(block.board.present);
+    try testing.expectApproxEqAbs(@as(f64, 80), block.board.w, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 55), block.board.h, 1e-9);
+    try testing.expectEqual(@as(usize, 2), block.board.sides.len);
+    try testing.expectEqualStrings("usbc", block.board.sides[0].items[0].ref);
+    try testing.expectEqual(@as(f64, 90), block.board.sides[1].items[0].rot.?);
+    try testing.expectEqual(@as(usize, 4), block.board.corners.len);
+    try testing.expectEqualStrings("MK3", block.board.corners[2].ref);
 }
 
 // spec: eval/design_block - hosts form records the sub-block instance names a section owns

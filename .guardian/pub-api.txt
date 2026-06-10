@@ -147,6 +147,7 @@ src/eval/electrical.zig::parse fn
 src/eval/electrical.zig::parseSubForms fn
 src/eval/env.zig::AssertionResult struct_
 src/eval/env.zig::BlockRole enum_
+src/eval/env.zig::BoardSpec struct_
 src/eval/env.zig::CalcBlock struct_
 src/eval/env.zig::CalcResult struct_
 src/eval/env.zig::Check value
@@ -395,6 +396,7 @@ src/placement/geometry.zig::Pad struct_
 src/placement/geometry.zig::SilkCircle struct_
 src/placement/geometry.zig::SilkLine struct_
 src/placement/geometry.zig::load fn
+src/placement/optimizer.zig::BoardRect struct_
 src/placement/optimizer.zig::Breakdown struct_
 src/placement/optimizer.zig::CompactMode enum_
 src/placement/optimizer.zig::Edge enum_
