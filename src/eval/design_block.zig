@@ -104,12 +104,15 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     self.hierarchical_ids = saved_hierarchical or hasHierarchicalMarker(args[1..]);
     defer self.hierarchical_ids = saved_hierarchical;
 
-    // Decouple defaults are design-block-local: snapshot and clear so a
-    // parent's (decouple-defaults …) never leaks into a nested sub-block
-    // module's own decouples. A (decouple-defaults …) form inside this body
-    // sets them below; the defer restores the enclosing design's on exit.
+    // Decouple defaults: the IC ref is design-block-local (a parent's
+    // fallback host makes no sense inside a different module), but the
+    // BYPASS component cascades — a sub-block module that doesn't declare
+    // its own (decouple-defaults (bypass …)) inherits the enclosing
+    // design's, transitively through nested sub-blocks. A
+    // (decouple-defaults …) form inside this body overrides below; the
+    // defer restores the enclosing design's defaults on exit.
     const saved_decouple_defaults = self.decouple_defaults;
-    self.decouple_defaults = .{};
+    self.decouple_defaults = .{ .ic = "", .bypass = saved_decouple_defaults.bypass };
     defer self.decouple_defaults = saved_decouple_defaults;
 
     for (args[1..]) |form| {
@@ -2468,13 +2471,23 @@ test "parseVerifies reads a ref-des target as a ref-des sign-off" {
 /// Evaluate a design-block source string with a registered cap family and
 /// return the evaluator (caller inspects `warnings`). page_allocator:
 /// evaluator allocations are intentionally never freed (project convention).
+/// Cap family name shared by the warning/cascade test fixtures.
+const TEST_CAP_FAMILY = "cap-0402";
+
 fn evalWarningFixture(alloc: std.mem.Allocator, eval: *Evaluator, source: []const u8) !void {
     eval.* = Evaluator.init(alloc, ".");
-    try eval.component_cache.put(alloc, "cap-0402", .{
-        .name = "cap-0402",
+    try eval.component_cache.put(alloc, TEST_CAP_FAMILY, .{
+        .name = TEST_CAP_FAMILY,
         .symbol_name = "",
         .footprint_name = "",
         .is_family = true,
+        .param_type = "",
+    });
+    try eval.component_cache.put(alloc, "fakeic", .{
+        .name = "fakeic",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
         .param_type = "",
     });
     var env = env_mod.Env.init(alloc, null);
@@ -2670,4 +2683,92 @@ test "replicate requires hierarchical-ids" {
     try testing.expectError(error.InvalidForm, r);
     const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
     try testing.expectEqualStrings("replicate requires (hierarchical-ids) — sub-block ids are derived per index", diag.message);
+}
+
+/// Find the first cap-0402 instance in a block, or null.
+fn findCapInstance(block: *const DesignBlock) ?Instance {
+    for (block.instances) |inst| {
+        if (std.mem.eql(u8, inst.component, TEST_CAP_FAMILY)) return inst;
+    }
+    return null;
+}
+
+/// Evaluate a cascade-test source and return the named sub-block's block.
+fn evalCascadeFixture(alloc: std.mem.Allocator, eval: *Evaluator, source: []const u8) !*DesignBlock {
+    eval.* = undefined;
+    try evalWarningFixture(alloc, eval, source);
+    const nodes = try sexpr_parser.parse(alloc, source);
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    const v = try eval.evalNodes(nodes, &env);
+    const block = switch (v) {
+        .design_block => |b| b,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(@as(usize, 1), block.sub_blocks.len);
+    return block.sub_blocks[0].block;
+}
+
+// spec: eval/design_block - the decouple-defaults bypass component cascades into sub-block modules that declare none
+test "decouple-defaults bypass cascades into a sub-block" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const sub = try evalCascadeFixture(alloc, &eval,
+        \\(defmodule mymod ()
+        \\  (design-block "Mod"
+        \\    (instance "U1" fakeic (pin 1 "VDD") (pin 2 "GND"))
+        \\    (decouple "VDD" 1 per-pin U1 1)))
+        \\(design-block "Top"
+        \\  (decouple-defaults (bypass (cap-0402 "100nF")))
+        \\  (sub-block "m" (mymod)))
+    );
+    const cap = findCapInstance(sub) orelse return error.TestExpectedCap;
+    try testing.expectEqualStrings("100nF", cap.value);
+}
+
+// spec: eval/design_block - a sub-block module's own decouple-defaults bypass wins over the parent's
+test "module-local decouple-defaults bypass wins over the parent" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const sub = try evalCascadeFixture(alloc, &eval,
+        \\(defmodule mymod ()
+        \\  (design-block "Mod"
+        \\    (decouple-defaults (bypass (cap-0402 "1uF")))
+        \\    (instance "U1" fakeic (pin 1 "VDD") (pin 2 "GND"))
+        \\    (decouple "VDD" 1 per-pin U1 1)))
+        \\(design-block "Top"
+        \\  (decouple-defaults (bypass (cap-0402 "100nF")))
+        \\  (sub-block "m" (mymod)))
+    );
+    const cap = findCapInstance(sub) orelse return error.TestExpectedCap;
+    try testing.expectEqualStrings("1uF", cap.value);
+}
+
+// spec: eval/design_block - the bypass default cascades transitively through nested sub-blocks while the ic ref stays local
+test "bypass default cascades transitively into nested sub-blocks" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    const mid = try evalCascadeFixture(alloc, &eval,
+        \\(defmodule innermod ()
+        \\  (design-block "Inner"
+        \\    (instance "U1" fakeic (pin 1 "VDD") (pin 2 "GND"))
+        \\    (decouple "VDD" 1 per-pin U1 1)))
+        \\(defmodule outermod ()
+        \\  (design-block "Outer"
+        \\    (sub-block "inner" (innermod))))
+        \\(design-block "Top"
+        \\  (decouple-defaults (ic "U99") (bypass (cap-0402 "100nF")))
+        \\  (sub-block "outer" (outermod)))
+    );
+    try testing.expectEqual(@as(usize, 1), mid.sub_blocks.len);
+    const cap = findCapInstance(mid.sub_blocks[0].block) orelse return error.TestExpectedCap;
+    try testing.expectEqualStrings("100nF", cap.value);
+    // The ic ref did NOT cascade: the inner decouple's split net names U1
+    // (its explicit ref), not the top-level default U99.
+    var found_u1_net = false;
+    for (mid.sub_blocks[0].block.nets) |net| {
+        if (std.mem.indexOf(u8, net.name, ".U99.") != null) return error.TestIcLeaked;
+        if (std.mem.indexOf(u8, net.name, "VDD.") != null) found_u1_net = true;
+    }
+    try testing.expect(found_u1_net);
 }

@@ -61,7 +61,7 @@ where each is accepted: **D** = design-block top level,
 | `(bus-port "prefix" width dir …)` | DSs | Declare a multi-bit boundary bus that expands to one port per lane. |
 | `(note "id" "text" [(ref …)])` | DSs | Attach a design-time note to the surrounding scope. |
 | `(section "name" ["subtitle"] form…)` | DSs | Functional subsystem card. Inside `(section …)` nests one level into a sub-section. |
-| `(decouple "NET" item…) | (decouple (cap-0402 "100nF") N per-pin "REF" "NET1" …)` | DSs | Emit decoupling capacitors against a net, in single- or multi-net form. |
+| `(decouple "NET" [(comp "val")] COUNT per-pin [REF|auto] PIN…|(pins-of "REF" "NET")…)` | DSs | Emit COUNT decoupling caps per listed host pin. Component and REF may come from (decouple-defaults …); (pins-of REF NET) / auto expand to the pins already declared on the net. |
 | `(series …)` | DSs | Insert a series element (resistor / ferrite / etc.) between two nets. |
 | `(fanout "COMMON" (comp) "NET1" "NET2" … [(id …)])` | DSs | Place one component from a shared COMMON net to each listed net (star of series elements). |
 | `(net "A" "B" …)` | DSs | Tie one or more nets to a canonical name (net-merge). |

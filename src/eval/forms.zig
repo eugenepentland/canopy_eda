@@ -368,8 +368,9 @@ pub const scope_form_docs = blk: {
         .summary = "Functional subsystem card. Inside `(section …)` nests one level into a sub-section.",
     } };
     t[@intFromEnum(ScopeForm.decouple)] = .{ .scope = all, .doc = .{
-        .syntax = "(decouple \"NET\" item…) | (decouple (cap-0402 \"100nF\") N per-pin \"REF\" \"NET1\" …)",
-        .summary = "Emit decoupling capacitors against a net, in single- or multi-net form.",
+        .syntax = "(decouple \"NET\" [(comp \"val\")] COUNT per-pin [REF|auto] PIN…|(pins-of \"REF\" \"NET\")…)",
+        .summary = "Emit COUNT decoupling caps per listed host pin. Component and REF may come from " ++
+            "(decouple-defaults …); (pins-of REF NET) / auto expand to the pins already declared on the net.",
     } };
     t[@intFromEnum(ScopeForm.series)] = .{ .scope = all, .doc = .{
         .syntax = "(series …)",

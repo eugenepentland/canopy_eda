@@ -468,6 +468,9 @@ Public functions: analyze
 - replicate expands to N sub-blocks with the index substituted into names and call args
 - replicate child ids are stable across two evaluations of the same id-annotated source
 - replicate without hierarchical-ids is rejected with the opt-in message
+- the decouple-defaults bypass component cascades into sub-block modules that declare none
+- a sub-block module's own decouple-defaults bypass wins over the parent's
+- the bypass default cascades transitively through nested sub-blocks while the ic ref stays local
 - bus-port expands one port per index times optional suffix list
 - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
 - kicad-pcb form captures the literal path on the design block
