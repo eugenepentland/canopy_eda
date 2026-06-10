@@ -306,28 +306,172 @@ pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!
     return .nil;
 }
 
-/// Call a module: evaluate each call-site argument in the caller's env,
-/// bind them to the module's parameter names in a fresh child scope rooted
-/// at the module file's import env, and run the module body. Returns the
-/// last body expression's value — typically a `(design-block …)`.
-pub fn callModule(self: *Evaluator, mod: ModuleDef, call_args: []const Node, caller_env: *Env) EvalError!Value {
-    // Evaluate call arguments
-    var arg_values: std.ArrayListUnmanaged(Value) = .empty;
-    defer arg_values.deinit(self.allocator);
+/// Index of the declared parameter a call arg names, when the arg uses the
+/// named form `(param expr)` — a 2-element list whose head atom matches one
+/// of the module's parameter names. Anything else (including 2-element lists
+/// like `(cap-0402 "100nF")` whose head is not a param) is a positional
+/// expression and returns null.
+fn namedParamIndex(mod: ModuleDef, arg: Node) ?usize {
+    const pair = arg.asList() orelse return null;
+    if (pair.len != 2) return null;
+    const name = pair[0].asAtom() orelse return null;
+    for (mod.params, 0..) |param, i| {
+        if (std.mem.eql(u8, param, name)) return i;
+    }
+    return null;
+}
+
+/// Record a formatted diagnostic on the evaluator. The message is allocated
+/// from the evaluator's allocator and intentionally never freed (project
+/// memory convention — diagnostics outlive the eval call).
+fn setErrorFmt(self: *Evaluator, span: ast.Span, comptime fmt: []const u8, args: anytype) void {
+    const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+    self.setError(span, msg);
+}
+
+/// Call a module: bind each call-site argument — positional in declaration
+/// order, or named via `(param expr)` — into a fresh child scope rooted at
+/// the module file's import env, then run the module body. Positional args
+/// may not follow a named arg; duplicate and missing bindings are
+/// diagnosed with the parameter names. Returns the last body expression's
+/// value — typically a `(design-block …)`.
+pub fn callModule(self: *Evaluator, mod: ModuleDef, call_args: []const Node, call_span: ast.Span, caller_env: *Env) EvalError!Value {
+    const bound = self.allocator.alloc(?Value, mod.params.len) catch return EvalError.OutOfMemory;
+    defer self.allocator.free(bound);
+    for (bound) |*b| b.* = null;
+
+    var pos_idx: usize = 0;
+    var seen_named = false;
     for (call_args) |arg| {
-        const v = try self.evalNode(arg, caller_env);
-        try arg_values.append(self.allocator, v);
+        if (namedParamIndex(mod, arg)) |pi| {
+            if (bound[pi] != null) {
+                setErrorFmt(self, arg.span, "parameter '{s}' bound twice in call to module '{s}'", .{ mod.params[pi], mod.name });
+                return EvalError.InvalidForm;
+            }
+            const pair = arg.asList().?;
+            bound[pi] = try self.evalNode(pair[1], caller_env);
+            seen_named = true;
+            continue;
+        }
+        if (seen_named) {
+            setErrorFmt(self, arg.span, "positional argument after named argument in call to module '{s}'", .{mod.name});
+            return EvalError.InvalidForm;
+        }
+        if (pos_idx >= mod.params.len) {
+            setErrorFmt(self, arg.span, "module '{s}' expects {d} argument(s), got {d}", .{ mod.name, mod.params.len, call_args.len });
+            return EvalError.ArityError;
+        }
+        bound[pos_idx] = try self.evalNode(arg, caller_env);
+        pos_idx += 1;
     }
 
-    if (arg_values.items.len != mod.params.len) return EvalError.ArityError;
+    try checkMissingParams(self, mod, bound, call_span);
 
     // Create module scope with parameter bindings
     var mod_env = Env.init(self.allocator, mod.imports);
     defer mod_env.deinit();
     for (mod.params, 0..) |param, i| {
-        try mod_env.put(param, arg_values.items[i]);
+        try mod_env.put(param, bound[i].?);
     }
 
     // Evaluate module body
     return self.evalNodes(mod.body, &mod_env);
+}
+
+/// Diagnose any parameter left unbound after the call args are processed:
+/// `module 'tpsm84338' missing argument(s): rled`.
+fn checkMissingParams(self: *Evaluator, mod: ModuleDef, bound: []const ?Value, call_span: ast.Span) EvalError!void {
+    var missing: std.ArrayListUnmanaged(u8) = .empty;
+    defer missing.deinit(self.allocator);
+    for (mod.params, 0..) |param, i| {
+        if (bound[i] != null) continue;
+        if (missing.items.len > 0) try missing.appendSlice(self.allocator, ", ");
+        try missing.appendSlice(self.allocator, param);
+    }
+    if (missing.items.len == 0) return;
+    setErrorFmt(self, call_span, "module '{s}' missing argument(s): {s}", .{ mod.name, missing.items });
+    return EvalError.ArityError;
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+/// Evaluate `source` (defmodule + call) with a fresh evaluator, returning
+/// the final value or the error. `eval_out` receives the evaluator so the
+/// test can inspect `last_error`. Callers pass page_allocator: defmodule's
+/// captured param slice and diagnostic messages are intentionally never freed.
+fn evalModuleSource(alloc: std.mem.Allocator, eval_out: *Evaluator, source: []const u8) EvalError!Value {
+    eval_out.* = Evaluator.init(alloc, ".");
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    const nodes = parser_mod.parse(alloc, source) catch return EvalError.ImportError;
+    return eval_out.evalNodes(nodes, &env);
+}
+
+// spec: eval/modules - Module calls bind purely positional arguments in declaration order
+test "callModule positional arguments" {
+    var eval: Evaluator = undefined;
+    const v = try evalModuleSource(std.heap.page_allocator, &eval, "(defmodule m (a b) (- a b)) (m 10 4)");
+    try testing.expectEqual(@as(f64, 6.0), v.asNumber().?);
+}
+
+// spec: eval/modules - Module calls accept named (param expr) arguments in any order
+test "callModule named arguments" {
+    var eval: Evaluator = undefined;
+    const v = try evalModuleSource(std.heap.page_allocator, &eval, "(defmodule m (a b) (- a b)) (m (b 4) (a 10))");
+    try testing.expectEqual(@as(f64, 6.0), v.asNumber().?);
+}
+
+// spec: eval/modules - Module calls mix leading positional with trailing named arguments
+test "callModule mixed positional then named" {
+    var eval: Evaluator = undefined;
+    const v = try evalModuleSource(std.heap.page_allocator, &eval, "(defmodule m (a b c) (- (- a b) c)) (m 10 (c 1) (b 4))");
+    try testing.expectEqual(@as(f64, 5.0), v.asNumber().?);
+}
+
+// spec: eval/modules - A 2-list whose head is not a declared param stays a positional expression
+test "callModule non-param 2-list evaluates positionally" {
+    var eval: Evaluator = undefined;
+    // (fmt "hi") is a 2-element list with an atom head that matches no
+    // param — it must evaluate as an expression, not be rejected as a
+    // named arg or misparsed into a binding.
+    const v = try evalModuleSource(std.heap.page_allocator, &eval, "(defmodule m (a) a) (m (fmt \"hi\"))");
+    try testing.expectEqualStrings("hi", v.asString().?);
+}
+
+// spec: eval/modules - Binding the same module parameter twice is diagnosed by name
+test "callModule duplicate binding errors" {
+    var eval: Evaluator = undefined;
+    const r = evalModuleSource(std.heap.page_allocator, &eval, "(defmodule m (a b) (- a b)) (m 10 (a 3))");
+    try testing.expectError(EvalError.InvalidForm, r);
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expect(std.mem.indexOf(u8, diag.message, "parameter 'a' bound twice") != null);
+}
+
+// spec: eval/modules - A positional argument after a named argument is rejected
+test "callModule positional after named errors" {
+    var eval: Evaluator = undefined;
+    const r = evalModuleSource(std.heap.page_allocator, &eval, "(defmodule m (a b) (- a b)) (m (a 10) 4)");
+    try testing.expectError(EvalError.InvalidForm, r);
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expect(std.mem.indexOf(u8, diag.message, "positional argument after named argument") != null);
+}
+
+// spec: eval/modules - Unbound module parameters are diagnosed by name at the call site
+test "callModule missing arguments errors" {
+    var eval: Evaluator = undefined;
+    const r = evalModuleSource(std.heap.page_allocator, &eval, "(defmodule tps (rfbt rfbb rled) (+ rfbt rfbb)) (tps 220000)");
+    try testing.expectError(EvalError.ArityError, r);
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expect(std.mem.indexOf(u8, diag.message, "module 'tps' missing argument(s): rfbb, rled") != null);
+}
+
+// spec: eval/modules - Surplus positional arguments are diagnosed with expected and actual counts
+test "callModule too many arguments errors" {
+    var eval: Evaluator = undefined;
+    const r = evalModuleSource(std.heap.page_allocator, &eval, "(defmodule m (a) a) (m 1 2)");
+    try testing.expectError(EvalError.ArityError, r);
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expect(std.mem.indexOf(u8, diag.message, "module 'm' expects 1 argument(s), got 2") != null);
 }

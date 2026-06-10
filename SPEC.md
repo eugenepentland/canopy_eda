@@ -186,6 +186,17 @@ Public functions: worldShape, pointDist, shapeGap
 
 - Fills a pin's asserted_fns with the unique alt when the pinout has exactly one alternative
 
+## eval/modules
+
+- Module calls bind purely positional arguments in declaration order
+- Module calls accept named (param expr) arguments in any order
+- Module calls mix leading positional with trailing named arguments
+- A 2-list whose head is not a declared param stays a positional expression
+- Binding the same module parameter twice is diagnosed by name
+- A positional argument after a named argument is rejected
+- Unbound module parameters are diagnosed by name at the call site
+- Surplus positional arguments are diagnosed with expected and actual counts
+
 ## eval/evaluator
 
 - Evaluates arithmetic expressions from S-expression AST

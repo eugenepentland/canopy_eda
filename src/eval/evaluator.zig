@@ -349,7 +349,7 @@ pub const Evaluator = struct {
         // Module or component-family invocation
         if (env.get(head_name)) |v| {
             switch (v) {
-                .module => |mod| return modules.callModule(self, mod, args, env),
+                .module => |mod| return modules.callModule(self, mod, args, head.span, env),
                 else => {},
             }
         }
