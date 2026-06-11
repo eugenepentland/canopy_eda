@@ -145,6 +145,25 @@ pub fn build(b: *std.Build) void {
     guardian.addAllChecks(b, check_exe, b.getInstallStep(), .{});
     guardian.addAllChecks(b, check_exe, test_step, .{});
 
+    // Auto-generated language reference (docs/language-forms.md).
+    // `zig build docs` regenerates it from the evaluator's dispatch
+    // tables; the --check twin runs on every `zig build test` (with an
+    // explicit cwd, so it can't silently skip the way a cwd-dependent
+    // unit test could) and fails when the committed file is stale.
+    const docs_gen_run = b.addRunArtifact(exe);
+    docs_gen_run.addArgs(&.{"gen-language-docs"});
+    docs_gen_run.setCwd(b.path("."));
+    docs_gen_run.has_side_effects = true;
+    const docs_step = b.step("docs", "Regenerate docs/language-forms.md from the form dispatch tables");
+    docs_step.dependOn(&docs_gen_run.step);
+
+    const docs_check_run = b.addRunArtifact(exe);
+    docs_check_run.addArgs(&.{ "gen-language-docs", "--check" });
+    docs_check_run.setCwd(b.path("."));
+    docs_check_run.has_side_effects = true;
+    test_step.dependOn(&docs_check_run.step);
+    b.getInstallStep().dependOn(&docs_check_run.step);
+
     // spec-init: generate starter SPEC.md
     const spec_init_run = b.addRunArtifact(check_exe);
     spec_init_run.addArgs(&.{ "spec-init", "." });

@@ -37,7 +37,9 @@ fn categoryFromKey(key: []const u8) ?Category {
     return category_keys.get(key);
 }
 
-const category_keys = std.StaticStringMap(Category).initComptime(.{
+/// Valid `(category <key>)` keys. Pub so the generated language
+/// reference can list them from the same map the classifier consults.
+pub const category_keys = std.StaticStringMap(Category).initComptime(.{
     .{ "mcu", .mcu },
     .{ "power", .power },
     .{ "memory", .memory },
@@ -70,44 +72,40 @@ pub fn classifyCategoryKey(category: []const u8, name: []const u8) Category {
     return classifyByName(name, &.{});
 }
 
+/// One keyword rule for `classifyByName`: a section whose name contains
+/// any of `keywords` (case-insensitive) gets `category`.
+pub const NameRule = struct {
+    category: Category,
+    keywords: []const []const u8,
+};
+
+/// Priority-ordered keyword rules — the single source of truth for both
+/// `classifyByName` and the generated language reference (`src/docgen.zig`
+/// renders this table into `docs/language-forms.md`). Order matters: the
+/// MCU keywords run first so e.g. a "STM32N657 Core System" section that
+/// happens to embed a debug-header (J-prefix) instance still lands in the
+/// MCU category instead of the connector heuristic below.
+pub const name_rules = [_]NameRule{
+    .{ .category = .mcu, .keywords = &.{ "MCU", "SoC", "CPU", "Core System", "STM32", "ESP32", "nRF", "Microcontroller" } },
+    .{ .category = .power, .keywords = &.{ "Buck", "LDO", "Regulator", "Power", "Charger", "Converter", "PMIC" } },
+    .{ .category = .memory, .keywords = &.{ "Flash", "PSRAM", "RAM", "EEPROM", "SD Card" } },
+    .{ .category = .clock, .keywords = &.{ "Clock", "HSE", "LSE", "Oscillator", "PLL", "Crystal" } },
+    .{ .category = .comms, .keywords = &.{ "USB", "Ethernet", "BLE", "WiFi", "CAN", "UART" } },
+    .{ .category = .sensor, .keywords = &.{ "IMU", "ADC", "Sensor", "Temperature", "Accelerometer", "Gyro" } },
+    .{ .category = .analog, .keywords = &.{ "Analog", "DAC", "Op-Amp", "Reference", "Amplifier" } },
+    .{ .category = .protection, .keywords = &.{ "ESD", "Protection", "Fuse", "TVS" } },
+    .{ .category = .connector, .keywords = &.{ "Connector", "Expansion", "Header", "Mounting", "SWD", "Debug", "RJ45", "B2B" } },
+};
+
 /// Classify a section/sub-block into a `Category` from a section name and
-/// its instances. Order matters — the MCU keywords run first so a "STM32
-/// Core System" section that happens to embed a debug header still lands
-/// in the MCU category instead of the connector heuristic below.
+/// its instances by walking `name_rules` in priority order, then falling
+/// back to a J/P ref-des connector heuristic, then `.peripheral`.
 pub fn classifyByName(name: []const u8, instances: []const env_mod.Instance) Category {
-    // MCU — detect ahead of everything else so e.g. "STM32N657L0H3Q Core
-    // System" doesn't fall through to the J/P connector heuristic below
-    // just because it embeds a debug-header (J-prefix) instance.
-    if (containsCI(name, "MCU") or containsCI(name, "SoC") or
-        containsCI(name, "CPU") or containsCI(name, "Core System") or
-        containsCI(name, "STM32") or containsCI(name, "ESP32") or
-        containsCI(name, "nRF") or containsCI(name, "Microcontroller")) return .mcu;
-    // Power
-    if (containsCI(name, "Buck") or containsCI(name, "LDO") or containsCI(name, "Regulator") or
-        containsCI(name, "Power") or containsCI(name, "Charger") or containsCI(name, "Converter") or
-        containsCI(name, "PMIC")) return .power;
-    // Memory
-    if (containsCI(name, "Flash") or containsCI(name, "PSRAM") or containsCI(name, "RAM") or
-        containsCI(name, "EEPROM") or containsCI(name, "SD Card")) return .memory;
-    // Clocking
-    if (containsCI(name, "Clock") or containsCI(name, "HSE") or containsCI(name, "LSE") or
-        containsCI(name, "Oscillator") or containsCI(name, "PLL") or containsCI(name, "Crystal")) return .clock;
-    // Comms
-    if (containsCI(name, "USB") or containsCI(name, "Ethernet") or containsCI(name, "BLE") or
-        containsCI(name, "WiFi") or containsCI(name, "CAN") or containsCI(name, "UART")) return .comms;
-    // Sensor
-    if (containsCI(name, "IMU") or containsCI(name, "ADC") or containsCI(name, "Sensor") or
-        containsCI(name, "Temperature") or containsCI(name, "Accelerometer") or containsCI(name, "Gyro")) return .sensor;
-    // Analog
-    if (containsCI(name, "Analog") or containsCI(name, "DAC") or containsCI(name, "Op-Amp") or
-        containsCI(name, "Reference") or containsCI(name, "Amplifier")) return .analog;
-    // Protection
-    if (containsCI(name, "ESD") or containsCI(name, "Protection") or containsCI(name, "Fuse") or
-        containsCI(name, "TVS")) return .protection;
-    // Connector
-    if (containsCI(name, "Connector") or containsCI(name, "Expansion") or containsCI(name, "Header") or
-        containsCI(name, "Mounting") or containsCI(name, "SWD") or containsCI(name, "Debug") or
-        containsCI(name, "RJ45") or containsCI(name, "B2B")) return .connector;
+    for (name_rules) |rule| {
+        for (rule.keywords) |kw| {
+            if (containsCI(name, kw)) return rule.category;
+        }
+    }
     for (instances) |inst| {
         if (inst.ref_des.len > 0 and (inst.ref_des[0] == 'J' or inst.ref_des[0] == 'P')) return .connector;
     }

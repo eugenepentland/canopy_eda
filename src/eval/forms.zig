@@ -205,8 +205,8 @@ pub const special_form_schema = blk: {
         .{ .let, .{ .min_args = 2, .max_args = 2 } },
         .{ .if_, .{ .min_args = 3, .max_args = 3 } },
         .{ .cond, .{ .min_args = 1, .max_args = null } },
-        .{ .import, .{ .min_args = 1, .max_args = 1 } },
-        .{ .defmodule, .{ .min_args = 3, .max_args = null } },
+        .{ .import, .{ .min_args = 1, .max_args = null } },
+        .{ .defmodule, .{ .min_args = 2, .max_args = null } },
         .{ .design_block, .{ .min_args = 1, .max_args = null } },
         .{ .assert_, .{ .min_args = 2, .max_args = 2 } },
         .{ .assert_range, .{ .min_args = 4, .max_args = 4 } },
@@ -245,11 +245,11 @@ pub fn validateArity(schema: FormSchema, arg_count: usize) ?ArityViolation {
 }
 
 // ── Documentation tables ───────────────────────────────────────────────
-// The renderer below walks these tables to emit `docs/language-forms.md`.
+// `src/docgen.zig` walks these tables to emit `docs/language-forms.md`.
 // Keeping the syntax + one-line description next to the enum variants
 // (rather than in a separate markdown file) means a new form can't be
-// added without also documenting it — the comptime indexed arrays force
-// exhaustive coverage.
+// added without also documenting it — `requireAllDocumented` turns a
+// missing row into a compile error naming the undocumented variant.
 
 /// One row of the generated reference. `syntax` is the source-form
 /// template a human would write; `summary` is a one-line description.
@@ -258,9 +258,27 @@ pub const FormDoc = struct {
     summary: []const u8,
 };
 
+/// Comptime-unwrap an optional-element doc table, turning any variant
+/// that was never assigned a row into a compile error naming it. This is
+/// what makes the doc tables exhaustive *by construction*: adding an enum
+/// variant without documenting it stops the build.
+fn requireAllDocumented(
+    comptime E: type,
+    comptime T: type,
+    comptime table: [@typeInfo(E).@"enum".fields.len]?T,
+) [@typeInfo(E).@"enum".fields.len]T {
+    var out: [table.len]T = undefined;
+    for (table, 0..) |entry, i| {
+        out[i] = entry orelse @compileError("missing doc-table row for " ++
+            @typeName(E) ++ "." ++ @typeInfo(E).@"enum".fields[i].name ++
+            " — every form must be documented (see docs/language-forms.md)");
+    }
+    return out;
+}
+
 pub const special_form_docs = blk: {
     const N = @typeInfo(SpecialForm).@"enum".fields.len;
-    var t: [N]FormDoc = undefined;
+    var t: [N]?FormDoc = @splat(null);
     t[@intFromEnum(SpecialForm.let)] = .{
         .syntax = "(let name expr)",
         .summary = "Bind `name` to the evaluated value of `expr` in the current scope.",
@@ -274,11 +292,11 @@ pub const special_form_docs = blk: {
         .summary = "Walk clauses in order, returning the first matching expression's value.",
     };
     t[@intFromEnum(SpecialForm.import)] = .{
-        .syntax = "(import name)",
-        .summary = "Load a library component or module by name. Searches `lib/components/` then `lib/modules/`.",
+        .syntax = "(import name…)",
+        .summary = "Load library components or modules by name. Searches `lib/components/` then `lib/modules/`.",
     };
     t[@intFromEnum(SpecialForm.defmodule)] = .{
-        .syntax = "(defmodule name (params…) body…)",
+        .syntax = "(defmodule name (params…) [\"docstring\"] body…)",
         .summary = "Define a parameterised module that closes over the surrounding env.",
     };
     t[@intFromEnum(SpecialForm.design_block)] = .{
@@ -295,18 +313,18 @@ pub const special_form_docs = blk: {
     };
     t[@intFromEnum(SpecialForm.fmt_)] = .{
         .syntax = "(fmt \"template\" args…)",
-        .summary = "Format a string using `~V`/`~R`/`~C`/`~A`/`~S` directives.",
+        .summary = "Format a string. See the “String formatting directives” table for the `~X` specifiers.",
     };
     t[@intFromEnum(SpecialForm.id_)] = .{
         .syntax = "(id <hex8>)",
         .summary = "Stable 8-char identifier auto-inserted by the build. Evaluator short-circuits to `.nil`.",
     };
-    break :blk t;
+    break :blk requireAllDocumented(SpecialForm, FormDoc, t);
 };
 
 pub const builtin_docs = blk: {
     const N = @typeInfo(Builtin).@"enum".fields.len;
-    var t: [N]FormDoc = undefined;
+    var t: [N]?FormDoc = @splat(null);
     t[@intFromEnum(Builtin.add)] = .{ .syntax = "(+ a b)", .summary = "Numeric addition." };
     t[@intFromEnum(Builtin.sub)] = .{ .syntax = "(- a b)", .summary = "Numeric subtraction." };
     t[@intFromEnum(Builtin.mul)] = .{ .syntax = "(* a b)", .summary = "Numeric multiplication." };
@@ -327,7 +345,7 @@ pub const builtin_docs = blk: {
     t[@intFromEnum(Builtin.and_)] = .{ .syntax = "(and a b)", .summary = "Boolean and (eager — both args evaluated)." };
     t[@intFromEnum(Builtin.or_)] = .{ .syntax = "(or a b)", .summary = "Boolean or (eager — both args evaluated)." };
     t[@intFromEnum(Builtin.not_)] = .{ .syntax = "(not a)", .summary = "Boolean negation." };
-    break :blk t;
+    break :blk requireAllDocumented(Builtin, FormDoc, t);
 };
 
 /// Which scopes accept each `ScopeForm` variant. The set drives the
@@ -338,9 +356,12 @@ pub const ScopeAvailability = packed struct {
     sub_section: bool,
 };
 
+/// A design-scope form's doc row plus the scopes that accept it.
+pub const ScopedFormDoc = struct { doc: FormDoc, scope: ScopeAvailability };
+
 pub const scope_form_docs = blk: {
     const N = @typeInfo(ScopeForm).@"enum".fields.len;
-    var t: [N]struct { doc: FormDoc, scope: ScopeAvailability } = undefined;
+    var t: [N]?ScopedFormDoc = @splat(null);
 
     const all = ScopeAvailability{ .design_block = true, .section = true, .sub_section = true };
     const dsec = ScopeAvailability{ .design_block = false, .section = true, .sub_section = true };
@@ -465,7 +486,8 @@ pub const scope_form_docs = blk: {
     } };
     t[@intFromEnum(ScopeForm.stub)] = .{ .scope = tl, .doc = .{
         .syntax = "(stub \"name\" [(role …)] [(mpn …)] [(category key)] [(size W H)] [(channels N)] [(ref \"REF\")] (signal \"name\" class \"net\")…)",
-        .summary = "Declare a placeholder part — auto-placed, sized bounding box, signal-wired, optionally N stacked channels — for design-phase diagrams before a real component exists.",
+        .summary = "Declare a placeholder part — auto-placed, sized bounding box, signal-wired, optionally " ++
+            "N stacked channels — for design-phase diagrams before a real component exists.",
     } };
     t[@intFromEnum(ScopeForm.layout)] = .{ .scope = tl, .doc = .{
         .syntax = "(layout (anchor \"name\") (place \"name\" (right-of|left-of|above|below \"ref\"))…)",
@@ -525,117 +547,8 @@ pub const scope_form_docs = blk: {
             "in bare call-arg atoms is replaced by the 1-based index. Requires (hierarchical-ids); " ++
             "the form carries one auto-minted (id …) and each copy's sub-block uuid derives from it + the substituted name.",
     } };
-    break :blk t;
+    break :blk requireAllDocumented(ScopeForm, ScopedFormDoc, t);
 };
-
-/// Render a Markdown reference for every form recognised by the
-/// evaluator, drawn from the registries + schema + doc tables above.
-/// The output is deterministic — call it from a build step or test and
-/// compare to a checked-in file to enforce that the docs never lag the
-/// implementation. Caller owns the returned slice.
-pub fn renderLanguageReference(allocator: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    try renderTo(buf.writer(allocator));
-    return buf.toOwnedSlice(allocator);
-}
-
-fn renderTo(writer: anytype) !void {
-    try writer.writeAll(
-        \\# S-Expression Language: Form Reference
-        \\
-        \\<!-- Auto-generated from src/eval/forms.zig. Do not edit by hand —
-        \\     run `zig build run -- gen-language-docs` to regenerate. -->
-        \\
-        \\Every special form, builtin operator, and design-scope form the
-        \\evaluator recognises, with its arity contract and a one-line
-        \\summary. The hand-written prose lives in
-        \\[`sexp-language.md`](sexp-language.md); this file is the
-        \\machine-checked grammar surface.
-        \\
-        \\## Special forms
-        \\
-        \\Arguments are passed un-evaluated; each form decides what to evaluate.
-        \\
-        \\| Form | Arity | Summary |
-        \\| --- | --- | --- |
-        \\
-    );
-    inline for (@typeInfo(SpecialForm).@"enum".fields) |f| {
-        const variant: SpecialForm = @enumFromInt(f.value);
-        const doc = special_form_docs[@intFromEnum(variant)];
-        try writer.writeAll("| `");
-        try writer.writeAll(doc.syntax);
-        try writer.writeAll("` | ");
-        try writeArity(writer, schemaFor(variant));
-        try writer.writeAll(" | ");
-        try writer.writeAll(doc.summary);
-        try writer.writeAll(" |\n");
-    }
-
-    try writer.writeAll(
-        \\
-        \\## Builtin operators
-        \\
-        \\Arithmetic, comparison, and logic operators. Arguments are evaluated left-to-right before the operator runs.
-        \\
-        \\| Form | Summary |
-        \\| --- | --- |
-        \\
-    );
-    inline for (@typeInfo(Builtin).@"enum".fields) |f| {
-        const variant: Builtin = @enumFromInt(f.value);
-        const doc = builtin_docs[@intFromEnum(variant)];
-        try writer.writeAll("| `");
-        try writer.writeAll(doc.syntax);
-        try writer.writeAll("` | ");
-        try writer.writeAll(doc.summary);
-        try writer.writeAll(" |\n");
-    }
-
-    try writer.writeAll(
-        \\
-        \\## Design-scope forms
-        \\
-        \\Forms that may appear directly inside a `(design-block …)`, a
-        \\`(section …)`, or a nested sub-section. The scope column lists
-        \\where each is accepted: **D** = design-block top level,
-        \\**S** = section, **s** = sub-section.
-        \\
-        \\| Form | Scope | Summary |
-        \\| --- | --- | --- |
-        \\
-    );
-    inline for (@typeInfo(ScopeForm).@"enum".fields) |f| {
-        const variant: ScopeForm = @enumFromInt(f.value);
-        const row = scope_form_docs[@intFromEnum(variant)];
-        try writer.writeAll("| `");
-        try writer.writeAll(row.doc.syntax);
-        try writer.writeAll("` | ");
-        if (row.scope.design_block) try writer.writeAll("D") else try writer.writeAll("·");
-        if (row.scope.section) try writer.writeAll("S") else try writer.writeAll("·");
-        if (row.scope.sub_section) try writer.writeAll("s") else try writer.writeAll("·");
-        try writer.writeAll(" | ");
-        try writer.writeAll(row.doc.summary);
-        try writer.writeAll(" |\n");
-    }
-}
-
-fn writeArity(writer: anytype, schema: ?FormSchema) !void {
-    const s = schema orelse {
-        try writer.writeAll("—");
-        return;
-    };
-    if (s.max_args) |max| {
-        if (max == s.min_args) {
-            try writer.print("{d}", .{s.min_args});
-        } else {
-            try writer.print("{d}–{d}", .{ s.min_args, max });
-        }
-    } else {
-        try writer.print("{d}+", .{s.min_args});
-    }
-}
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
@@ -701,24 +614,4 @@ test "schemaFor covers all special forms except id" {
             try std.testing.expect(schemaFor(variant) != null);
         }
     }
-}
-
-// spec: eval/forms - renderLanguageReference output matches the committed docs/language-forms.md so docs can never lag the registry
-test "language-forms.md is in sync with the registry" {
-    const alloc = std.testing.allocator;
-
-    // Skip when the test is invoked outside a project tree (the file
-    // simply isn't there to compare against). The round-trip test in
-    // sexpr/printer.zig uses the same pattern.
-    var file = std.fs.cwd().openFile("docs/language-forms.md", .{}) catch return;
-    defer file.close();
-    const committed = try file.readToEndAlloc(alloc, 1024 * 1024);
-    defer alloc.free(committed);
-
-    const generated = try renderLanguageReference(alloc);
-    defer alloc.free(generated);
-
-    // expectEqualStrings produces a usable diff on failure. To
-    // regenerate the file, run `zig build run -- gen-language-docs`.
-    try std.testing.expectEqualStrings(committed, generated);
 }

@@ -77,8 +77,8 @@ fn parseNumberNode(tok: *Tokenizer, token: Token) ParseError!Node {
 }
 
 /// Parse an SI-scaled literal token (`220k`, `100nF`, `3.3V`, `10mA`) into
-/// its numeric value. The numeric prefix is multiplied by the scale letter
-/// (k/M/G/u/n/p/m); a trailing unit letter (V/A/F/H/R) carries no scale.
+/// its numeric value. The numeric prefix is multiplied by the scale letter's
+/// entry in `tokenizer.si_scales`; a trailing unit letter carries no scale.
 /// Returns null when the text has no parsable numeric prefix — the
 /// tokenizer's suffix rules make that unreachable for `.si_val` tokens.
 fn parseSiValue(text: []const u8) ?f64 {
@@ -90,16 +90,9 @@ fn parseSiValue(text: []const u8) ?f64 {
     }
     if (num_end == 0 or num_end == text.len) return null;
     const base = std.fmt.parseFloat(f64, text[0..num_end]) catch return null;
-    const scale: f64 = switch (text[num_end]) {
-        'k' => 1e3,
-        'M' => 1e6,
-        'G' => 1e9,
-        'm' => 1e-3,
-        'u' => 1e-6,
-        'n' => 1e-9,
-        'p' => 1e-12,
-        else => 1.0, // bare unit letter (V/A/F/H/R)
-    };
+    const scale: f64 = for (tokenizer_mod.si_scales) |s| {
+        if (s.letter == text[num_end]) break s.multiplier;
+    } else 1.0; // bare unit letter (V/A/F/H/R)
     return base * scale;
 }
 

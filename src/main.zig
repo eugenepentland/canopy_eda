@@ -2,7 +2,7 @@ const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const parser = @import("sexpr/parser.zig");
 const printer = @import("sexpr/printer.zig");
-const eval_forms = @import("eval/forms.zig");
+const docgen = @import("docgen.zig");
 const footprint_conv = @import("convert/footprint.zig");
 const symbol_conv = @import("convert/symbol.zig");
 const alt_functions = @import("convert/alt_functions.zig");
@@ -144,7 +144,8 @@ pub fn main() !void {
         try cmdSetPassword(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "gen-language-docs")) {
         const out_path = optionalArg(args[2..], "--output") orelse "docs/language-forms.md";
-        try cmdGenLanguageDocs(allocator, out_path);
+        const check_only = hasFlag(args[2..], "--check");
+        try cmdGenLanguageDocs(allocator, out_path, check_only);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
         try printUsage();
     } else {
@@ -154,15 +155,28 @@ pub fn main() !void {
     }
 }
 
-/// Regenerate the auto-generated language reference. Walks every form
-/// registered in `src/eval/forms.zig` and writes a Markdown table to
-/// `out_path` (default `docs/language-forms.md`). A drift test in
-/// `forms.zig` re-runs the renderer and fails the build if the
-/// committed file no longer matches — so editing the registry without
-/// re-running this command is a CI error.
-fn cmdGenLanguageDocs(allocator: std.mem.Allocator, out_path: []const u8) !void {
-    const rendered = try eval_forms.renderLanguageReference(allocator);
+/// Regenerate (or, with `--check`, verify) the auto-generated language
+/// reference. Walks every dispatch table aggregated by `src/docgen.zig`
+/// and writes a Markdown reference to `out_path` (default
+/// `docs/language-forms.md`). `zig build test` runs the `--check` mode,
+/// so editing a registry without regenerating the file fails the build.
+fn cmdGenLanguageDocs(allocator: std.mem.Allocator, out_path: []const u8, check_only: bool) !void {
+    const rendered = try docgen.renderLanguageReference(allocator);
     defer allocator.free(rendered);
+
+    if (check_only) {
+        const committed = infra_fs.cwd().readFileAlloc(allocator, out_path, 1024 * 1024) catch |err| {
+            std.debug.print("docs check FAILED: cannot read {s} ({any}) — run `zig build docs` to generate it\n", .{ out_path, err });
+            std.process.exit(1);
+        };
+        defer allocator.free(committed);
+        if (!std.mem.eql(u8, committed, rendered)) {
+            std.debug.print("docs check FAILED: {s} is out of date with the dispatch tables — run `zig build docs` to regenerate\n", .{out_path});
+            std.process.exit(1);
+        }
+        std.debug.print("docs check OK: {s} matches the dispatch tables\n", .{out_path});
+        return;
+    }
 
     const file = infra_fs.cwd().createFile(out_path, .{ .truncate = true }) catch |err| {
         std.debug.print("Error opening {s}: {}\n", .{ out_path, err });
@@ -389,7 +403,7 @@ fn printUsage() !void {
         \\  netlisp convert-symbol <file> [--filter <name>]  Convert KiCad .kicad_sym to .sexp
         \\  netlisp convert-pinout <file> [--filter <name>]  Generate pinout from KiCad .kicad_sym
         \\  netlisp merge-alt-functions <pinout.sexp> <alts.csv|alts.xml> [--write]  Merge alt functions (CSV or ST open-pin-data XML)
-        \\  netlisp gen-language-docs [--output <path>]  Regenerate docs/language-forms.md from src/eval/forms.zig
+        \\  netlisp gen-language-docs [--output <path>] [--check]  Regenerate (or verify with --check) docs/language-forms.md from the dispatch tables
         \\  netlisp help                            Show this help
         \\
     );
@@ -402,8 +416,10 @@ test {
     _ = @import("sexpr/parser.zig");
     _ = @import("sexpr/printer.zig");
     _ = @import("eval/env.zig");
+    _ = @import("eval/forms.zig");
     _ = @import("eval/builtins.zig");
     _ = @import("eval/fmt.zig");
+    _ = @import("docgen.zig");
     _ = @import("eval/evaluator.zig");
     _ = @import("eval/pin_enrichment.zig");
     _ = @import("eval/rails.zig");
