@@ -462,44 +462,86 @@ pub fn boardFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
         res.status = HTTP_INTERNAL_ERROR;
         return;
     };
-    const fp_children = findBoardFootprint(nodes, want_uuid) orelse {
+    const found = findBoardFootprint(nodes, want_uuid) orelse {
         res.status = HTTP_NOT_FOUND;
         res.body = "footprint not on board";
         return;
     };
 
     var shapes: Shapes = .{};
-    try collectShapesFromBoardFp(req.arena, fp_children, &shapes);
+    try collectShapesFromBoardFp(req.arena, found.children, &shapes);
     if (shapes.isEmpty()) {
         res.status = HTTP_NOT_FOUND;
         res.body = "Empty footprint";
         return;
     }
+    // KiCad stores back-side footprints with local Y negated (mirrored across
+    // the part's X axis). Normalise to front view so the comparison against
+    // the front-authored library reads 1:1 — without this every Y-asymmetric
+    // bottom part looks "re-pinned" even when the geometry matches exactly.
+    if (found.back) try mirrorShapesY(req.arena, &shapes);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try emitFootprintJson(buf.writer(req.arena), shapes);
     res.body = buf.items;
     res.content_type = .JSON;
 }
 
+const BoardFpMatch = struct { children: []const Node, back: bool };
+
 /// Locate the board footprint whose `(uuid "…")` equals `want`; returns its
-/// child forms (everything after the lib-id string) or null.
-fn findBoardFootprint(nodes: []const Node, want: []const u8) ?[]const Node {
+/// child forms (everything after the lib-id string) plus whether the part
+/// sits on the back (`(layer "B.Cu")`), or null.
+fn findBoardFootprint(nodes: []const Node, want: []const u8) ?BoardFpMatch {
     if (nodes.len == 0) return null;
     const root = nodes[0].asList() orelse return null;
     for (root) |child| {
         if (!child.isForm("footprint")) continue;
         const cl = child.asList() orelse continue;
         if (cl.len < 2) continue;
+        var is_match = false;
+        var back = false;
         for (cl[2..]) |sub| {
             const sl = sub.asList() orelse continue;
             if (sl.len < 2) continue;
             const head = sl[0].asAtom() orelse continue;
-            if (!std.mem.eql(u8, head, "uuid")) continue;
-            const u = sl[1].asString() orelse continue;
-            if (std.mem.eql(u8, u, want)) return cl[2..];
+            if (std.mem.eql(u8, head, "uuid")) {
+                const u = sl[1].asString() orelse continue;
+                if (std.mem.eql(u8, u, want)) is_match = true;
+            } else if (std.mem.eql(u8, head, "layer")) {
+                const lname = sl[1].asString() orelse (sl[1].asAtom() orelse continue);
+                back = std.mem.eql(u8, lname, "B.Cu");
+            }
         }
+        if (is_match) return .{ .children = cl[2..], .back = back };
     }
     return null;
+}
+
+/// Negate every Y in the collected shapes — normalises a back-side board
+/// footprint (stored Y-mirrored by KiCad) into the front-view frame the
+/// library preview uses. Polygon point slices are reallocated (they alias
+/// parsed-source-derived storage).
+fn mirrorShapesY(allocator: std.mem.Allocator, shapes: *Shapes) HandlerError!void {
+    for (shapes.pads.items) |*p| p.y = -p.y;
+    for (shapes.segs.items) |*s| {
+        s.y1 = -s.y1;
+        s.y2 = -s.y2;
+    }
+    for (shapes.circs.items) |*c| c.cy = -c.cy;
+    for (shapes.rects.items) |*r| {
+        r.y0 = -r.y0;
+        r.y1 = -r.y1;
+    }
+    for (shapes.polys.items) |*poly| {
+        const flipped = try allocator.alloc(Point, poly.pts.len);
+        for (poly.pts, 0..) |pt, i| flipped[i] = .{ .x = pt.x, .y = -pt.y };
+        poly.pts = flipped;
+    }
+    for (shapes.court_rects.items) |*r| {
+        r.y0 = -r.y0;
+        r.y1 = -r.y1;
+    }
+    for (shapes.court_circs.items) |*c| c.cy = -c.cy;
 }
 
 /// The board layer a KiCad fp graphic targets, looked up from its

@@ -1027,22 +1027,34 @@ fn flipLayerForm(arena: std.mem.Allocator, layer: Node) std.mem.Allocator.Error!
     return Node.list(Span.zero, out);
 }
 
-/// Fold the footprint's rotation into a pad's `(at x y [rot])`. The
-/// `.kicad_pcb` format stores pad angles absolutely (footprint rotation +
-/// pad-local rotation — a 90°-rotated 0402's pads read `(at ±0.51 0 90)` on
-/// real boards), while a library kmod carries pad-local angles. Splicing the
-/// local angle unchanged into a rotated footprint skews every non-square pad.
-/// The x/y tokens pass through verbatim (no int→float churn); the angle is
-/// emitted as an int when whole so pads keep pcbnew's compact form.
-fn absolutizePadAngle(arena: std.mem.Allocator, at: Node, fp_rot: f64) std.mem.Allocator.Error!Node {
+/// Negate a coordinate node unless it's zero (avoids 0 → -0 churn and keeps
+/// the original token formatting for the unchanged case).
+fn negateCoord(n: Node) Node {
+    const v = n.asNumber() orelse return n;
+    if (v == 0) return n;
+    switch (n.tag) {
+        .int => |i| return Node.int(Span.zero, -i),
+        else => return Node.float(Span.zero, -v),
+    }
+}
+
+/// Rebuild a pad's `(at x y [rot])` for the target footprint: fold the
+/// footprint rotation into the stored angle (the `.kicad_pcb` format keeps
+/// pad angles absolute — a 90°-rotated 0402's pads read `(at ±0.51 0 90)` on
+/// real boards), and for a back-side footprint negate the local Y and the
+/// local angle (KiCad's stored mirror — see `adaptKmodChild`). The x token
+/// passes through verbatim; the angle is emitted as an int when whole so
+/// pads keep pcbnew's compact form.
+fn adaptPadAt(arena: std.mem.Allocator, at: Node, to_back: bool, fp_rot: f64) std.mem.Allocator.Error!Node {
     const al = at.asList() orelse return at;
     if (al.len < 3) return at;
     const local: f64 = if (al.len >= 4) (al[3].asNumber() orelse 0) else 0;
-    const stored = @mod(local + fp_rot, 360.0);
+    const signed_local = if (to_back) -local else local;
+    const stored = @mod(signed_local + fp_rot, 360.0);
     const out = try arena.alloc(Node, if (stored == 0) 3 else 4);
     out[0] = al[0];
     out[1] = al[1];
-    out[2] = al[2];
+    out[2] = if (to_back) negateCoord(al[2]) else al[2];
     if (stored != 0) {
         const whole: i64 = @intFromFloat(stored);
         out[3] = if (@as(f64, @floatFromInt(whole)) == stored)
@@ -1053,16 +1065,67 @@ fn absolutizePadAngle(arena: std.mem.Allocator, at: Node, fp_rot: f64) std.mem.A
     return Node.list(Span.zero, out);
 }
 
+/// Geometry sub-form heads carrying an (x y) pair whose Y mirrors on a
+/// back-side footprint: line/rect endpoints, circle centre + radius point,
+/// arc three-point form.
+fn isVec2Head(head: []const u8) bool {
+    const heads = [_][]const u8{ "start", "end", "center", "mid" };
+    for (heads) |h| {
+        if (std.mem.eql(u8, head, h)) return true;
+    }
+    return false;
+}
+
+/// Mirror a graphic form's geometry across the footprint's X axis (negate
+/// every Y): `(start x y)` / `(end …)` / `(center …)` / `(mid …)` children
+/// and `(pts (xy x y) …)` polygon vertices. Used when splicing front-authored
+/// kmod geometry into a back-side footprint.
+fn mirrorGeomY(arena: std.mem.Allocator, sub: Node) std.mem.Allocator.Error!Node {
+    const sl = sub.asList() orelse return sub;
+    if (sl.len < 3) return sub;
+    const head = sl[0].asAtom() orelse return sub;
+    if (isVec2Head(head)) {
+        const out = try arena.alloc(Node, sl.len);
+        @memcpy(out, sl);
+        out[2] = negateCoord(sl[2]);
+        return Node.list(Span.zero, out);
+    }
+    if (std.mem.eql(u8, head, "pts")) {
+        const out = try arena.alloc(Node, sl.len);
+        out[0] = sl[0];
+        for (sl[1..], 1..) |xy, i| {
+            const xl = xy.asList() orelse {
+                out[i] = xy;
+                continue;
+            };
+            if (xl.len < 3) {
+                out[i] = xy;
+                continue;
+            }
+            const xout = try arena.alloc(Node, xl.len);
+            @memcpy(xout, xl);
+            xout[2] = negateCoord(xl[2]);
+            out[i] = Node.list(Span.zero, xout);
+        }
+        return Node.list(Span.zero, out);
+    }
+    return sub;
+}
+
 /// Adapt one kmod child to the footprint it's being spliced into:
 ///
 ///  - `to_back`: rename every front layer token to its B.* twin (pad
-///    `(layers …)` lists and graphic `(layer …)` children). Local coordinates
-///    are NOT mirrored — KiCad stores back-side footprints with library-local
-///    coordinates and derives the mirror from the footprint-level
-///    `(layer "B.Cu")` (verified against boards pcbnew itself wrote: a B.Cu
-///    part's pad 1 sits at the same local x as the front-side library).
+///    `(layers …)` lists and graphic `(layer …)` children) AND mirror the
+///    local geometry across the X axis — pad/graphic Y negated, pad local
+///    angle negated. That is KiCad's stored back-side convention: pcbnew
+///    writes a flipped footprint with local Y negated (verified against a
+///    hand-flipped board — a B.Cu Molex socket's pad 1 sits at local
+///    (x, -y) of the front-side library, X identical). An earlier version
+///    only flipped layer names because every sampled part happened to be
+///    Y-symmetric; Y-asymmetric parts (pin headers, connectors) exposed the
+///    mirror.
 ///  - `fp_rot`: fold the footprint rotation into each pad's stored angle
-///    (see `absolutizePadAngle`).
+///    (see `adaptPadAt`).
 ///
 /// Children that need neither change pass through untouched.
 fn adaptKmodChild(arena: std.mem.Allocator, sub: Node, to_back: bool, fp_rot: f64) std.mem.Allocator.Error!Node {
@@ -1075,8 +1138,8 @@ fn adaptKmodChild(arena: std.mem.Allocator, sub: Node, to_back: bool, fp_rot: f6
         const out = try arena.alloc(Node, subl.len);
         @memcpy(out, subl);
         for (out, 0..) |c, i| {
-            if (c.isForm(FORM_AT) and fp_rot != 0) {
-                out[i] = try absolutizePadAngle(arena, c, fp_rot);
+            if (c.isForm(FORM_AT) and (fp_rot != 0 or to_back)) {
+                out[i] = try adaptPadAt(arena, c, to_back, fp_rot);
             } else if (c.isForm("layers") and to_back) {
                 out[i] = try flipLayersList(arena, c);
             }
@@ -1087,7 +1150,11 @@ fn adaptKmodChild(arena: std.mem.Allocator, sub: Node, to_back: bool, fp_rot: f6
         const out = try arena.alloc(Node, subl.len);
         @memcpy(out, subl);
         for (out, 0..) |c, i| {
-            if (c.isForm(FORM_LAYER)) out[i] = try flipLayerForm(arena, c);
+            if (c.isForm(FORM_LAYER)) {
+                out[i] = try flipLayerForm(arena, c);
+            } else {
+                out[i] = try mirrorGeomY(arena, c);
+            }
         }
         return Node.list(Span.zero, out);
     }
@@ -1734,9 +1801,11 @@ test "applyOpsToSource swap_footprint accepts legacy module-format kmod" {
     try std.testing.expect(std.mem.indexOf(u8, out[pad_idx..], "(net \"VCC\")") != null);
 }
 
-// spec: kicad_pcb/writer - swap_footprint flips kmod layers to the back for a footprint on B.Cu, keeping local coordinates
-// (KiCad derives the mirror from the footprint-level layer, so coordinates must NOT be mirrored here).
-test "applyOpsToSource swap_footprint flips kmod layers for a back-side footprint" {
+// spec: kicad_pcb/writer - swap_footprint mirrors a kmod onto the back for a footprint on B.Cu (layers F→B, local Y negated)
+// pcbnew stores flipped footprints with local Y negated — verified against a
+// hand-flipped board where a B.Cu connector's pads sit at (x, -y) of the
+// front-authored library, X identical.
+test "applyOpsToSource swap_footprint mirrors kmod layers and Y for a back-side footprint" {
     const a = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -1752,8 +1821,10 @@ test "applyOpsToSource swap_footprint flips kmod layers for a back-side footprin
         \\    (pad "1" smd roundrect (at 0.3 0 90) (layers "B.Cu" "B.Mask" "B.Paste") (net "VDD"))))
     ;
     const kmod_json = "(footprint \\\"c-0201\\\" " ++
-        "(fp_line (start -1 0) (end 1 0) (layer \\\"F.SilkS\\\")) " ++
+        "(fp_line (start -1 0.5) (end 1 0.5) (layer \\\"F.SilkS\\\")) " ++
         "(pad \\\"1\\\" smd roundrect (at 0.3 0) (size 0.3 0.3) " ++
+        "(layers \\\"F.Cu\\\" \\\"F.Paste\\\" \\\"F.Mask\\\")) " ++
+        "(pad \\\"2\\\" smd roundrect (at 0.3 0.6) (size 0.3 0.3) " ++
         "(layers \\\"F.Cu\\\" \\\"F.Paste\\\" \\\"F.Mask\\\")))";
     const ops =
         \\[{"op":"swap_footprint","uuid":"fp-1","new_footprint_name":"c-0201",
@@ -1768,11 +1839,15 @@ test "applyOpsToSource swap_footprint flips kmod layers for a back-side footprin
     try std.testing.expect(std.mem.indexOf(u8, out, "(layer \"B.Cu\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "(layers \"B.Cu\" \"B.Paste\" \"B.Mask\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "F.Cu") == null);
-    // Silkscreen flips with it; local coordinates are untouched.
+    // Silkscreen flips layer AND mirrors Y.
     try std.testing.expect(std.mem.indexOf(u8, out, "(layer \"B.SilkS\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "(start -1 0)") != null);
-    // Pad angle is stored absolutely: 0 local + 90 footprint = 90.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(start -1 -0.5)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(end 1 -0.5)") != null);
+    // Pad 1 sits on the Y axis: only the absolute angle lands (0 local + 90 fp).
     try std.testing.expect(std.mem.indexOf(u8, out, "(at 0.3 0 90)") != null);
+    // Pad 2's local Y mirrors: front-library (0.3, 0.6) → (0.3, -0.6) stored
+    // on the back, matching where pcbnew itself puts a flipped pad.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(at 0.3 -0.6 90)") != null);
     // Identity + reference text survive the swap.
     try std.testing.expect(std.mem.indexOf(u8, out, "\"canopy_uuid\" \"abc12345\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"Reference\" \"C145\"") != null);
