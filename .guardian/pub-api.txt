@@ -116,6 +116,9 @@ src/diagram/types.zig::RailEnd struct_
 src/diagram/types.zig::builtin_classes value
 src/diagram/types.zig::discovered_palette value
 src/diagram/types.zig::findClass fn
+src/docgen.zig::Section struct_
+src/docgen.zig::SectionIterator struct_
+src/docgen.zig::extractSection fn
 src/docgen.zig::renderLanguageReference fn
 src/emit.zig::emitResolved fn
 src/erc.zig::PinoutEntry struct_

@@ -170,6 +170,8 @@ Public functions: worldShape, pointDist, shapeGap
 ## docgen
 
 - renderLanguageReference output matches the committed docs/language-forms.md so docs can never lag the registries
+- extractSection returns one ## section of the rendered reference, matching the title case-insensitively
+- SectionIterator walks every ## heading of the rendered reference in order
 - The generated reference names every category key so (category …) docs follow the classifier map
 
 ## eval/fmt
@@ -739,6 +741,7 @@ Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesig
 - libEntryScore ranks a name match above a description-only match
 - list_library with a query returns only fuzzily-matching entries ranked best-first
 - list_library without a query (or a blank one) lists every entry
+- The tools registration table and the embedded tools_list_result.json declare exactly the same tool names
 
 ## config
 

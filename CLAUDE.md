@@ -421,6 +421,17 @@ Tools exposed (defined in `src/serve/mcp_tools.zig`):
   dry-runs a placement/floorplan form against a request-local design copy and
   returns the proposed-vs-current scoreboard (args: `name`, `spec`, optional `route`);
   the image tool also accepts `crop`/`r`/`sheet`/`critique` view modes.
+- **Language / module authoring (read-only)**: `get_language_reference` —
+  the auto-generated S-expression reference rendered live from the dispatch
+  tables (same content as `docs/language-forms.md`; optional `section` arg
+  returns one `## ` section). `preview_module` — evaluate a `lib/modules`
+  defmodule standalone with caller-chosen args (request-local, nothing
+  written): `view=summary` returns `{title,ports,instances,nets,sub_blocks,
+  erc,assertions}` (the `main_ic_in_design` ERC check is suppressed — the
+  preview root IS the module), `view=scene_graph` the full schematic JSON.
+  For module-level *layout*, the PCB tools above accept a module name as
+  `name` directly (resolved via a real instantiation in a design, else a
+  zero-arg call).
 - **VFS file ops**: `read_file`, `list_dir`, `glob` (read-only);
   `write_file`, `edit_file`, `delete_file`, `move_file` (mutation).
 - **Build / state**: `build`, `regenerate_pinout`, `restore_version`.
