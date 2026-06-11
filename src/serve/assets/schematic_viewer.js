@@ -1003,11 +1003,11 @@
   // (canopy_* / MPN field updates, pad-net rewires, vias, staging graphics)
   // collapse into <details> folds so they don't bury what matters.
   function buildKicadOpsHtml(ops) {
-    var cats = { add: [], remove: [], swap: [], rename: [], value: [], stale: [], fields: [], padnets: [], vias: [], graphics: [], other: [] };
+    var cats = { add: [], remove: [], swap: [], model: [], rename: [], value: [], stale: [], fields: [], padnets: [], vias: [], graphics: [], other: [] };
     ops.forEach(function (op) {
       if (op.op === 'add') cats.add.push(op);
       else if (op.op === 'remove') cats.remove.push(op);
-      else if (op.op === 'swap_footprint') cats.swap.push(op);
+      else if (op.op === 'swap_footprint') (op.reason === 'model' ? cats.model : cats.swap).push(op);
       else if (op.op === 'flag_stale') cats.stale.push(op);
       else if (op.op === 'set_field' && op.field === 'reference') cats.rename.push(op);
       else if (op.op === 'set_field' && op.field === 'value') cats.value.push(op);
@@ -1018,15 +1018,17 @@
       else cats.other.push(op);
     });
     var html = '';
-    function rows(list, kind, fmt) {
+    function rows(list, kind, fmt, rowAttrs) {
       return list.map(function (op) {
-        return '<div class="kpv-op"><span class="op-kind k-' + kind + '">' + kind + '</span>' + fmt(op) + '</div>';
+        var extra = rowAttrs ? rowAttrs(op) : '';
+        var cls = rowAttrs ? ' kpv-clickable' : '';
+        return '<div class="kpv-op' + cls + '"' + extra + '><span class="op-kind k-' + kind + '">' + kind + '</span>' + fmt(op) + '</div>';
       }).join('');
     }
-    function section(list, kind, title, hint, fmt) {
+    function section(list, kind, title, hint, fmt, rowAttrs) {
       if (!list.length) return;
       html += '<div class="kpv-cat"><span class="kpv-cat-title">' + title + ' (' + list.length + ')</span>' +
-        (hint ? '<span class="kpv-cat-hint">' + hint + '</span>' : '') + '</div>' + rows(list, kind, fmt);
+        (hint ? '<span class="kpv-cat-hint">' + hint + '</span>' : '') + '</div>' + rows(list, kind, fmt, rowAttrs);
     }
     function fold(list, kind, title, hint, fmt) {
       if (!list.length) return;
@@ -1036,14 +1038,23 @@
     }
     var esc = escapeHtml;
     function refOf(op) { return esc(op.ref || op.uuid || '?'); }
+    // Swap rows are clickable: an inline old-vs-new footprint comparison
+    // expands under the row (board copy via /api/board-footprint, library
+    // version via /api/footprint).
+    function swapAttrs(op) {
+      return ' data-cmp-uuid="' + esc(op.uuid || '') + '" data-cmp-fp="' + esc(op.new_footprint_name || '') + '" title="Click to compare old vs new footprint"';
+    }
+    function swapFmt(op) {
+      return refOf(op) + (op.new_footprint_name ? ' · ' + esc(op.new_footprint_name) : '') +
+        '<span class="kpv-cmp-link">compare ▾</span>';
+    }
     section(cats.add, 'add', 'Add parts', 'new on the board — staged off to the side, drag into place', function (op) {
       return refOf(op) + (op.footprint_name ? ' · ' + esc(op.footprint_name) : '') +
         (op.value ? ' · = ' + esc(op.value) : '');
     });
     section(cats.remove, 'remove', 'Remove parts', 'deleted from the board', refOf);
-    section(cats.swap, 'fp', 'Footprint re-bakes', 'geometry refreshed in place — position, side & routing preserved', function (op) {
-      return refOf(op) + (op.new_footprint_name ? ' · ' + esc(op.new_footprint_name) : '');
-    });
+    section(cats.swap, 'fp', 'Footprint updates', 'library footprint differs from the board copy — pads may change shape; position, side & routing preserved', swapFmt, swapAttrs);
+    section(cats.model, 'model', '3D model updates', 're-baked from the library to refresh the 3D model — pads normally identical', swapFmt, swapAttrs);
     section(cats.rename, 'rename', 'Refdes renames', 'reference text only — same part, footprint & position unchanged', function (op) {
       return (op.old ? esc(op.old) : '?') + ' → ' + esc(op.value || '');
     });
@@ -1099,6 +1110,11 @@
         '</div>' +
       '</div>';
     document.body.appendChild(overlay);
+    // Swap rows expand an inline old-vs-new footprint comparison.
+    overlay.querySelector('.kpv-ops').addEventListener('click', function (e) {
+      var row = e.target.closest ? e.target.closest('.kpv-clickable') : null;
+      if (row) toggleFootprintCompare(row);
+    });
     function close() { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
     overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) close(); });
     overlay.querySelector('.kpv-x').addEventListener('click', close);
@@ -1112,6 +1128,41 @@
         confirmBtn.textContent = 'Confirm — write board';
       });
     });
+  }
+
+  // Fetch a footprint-preview JSON and draw it into `target` (shared FP
+  // renderer — same engine as the sidebar/library previews).
+  function fetchFpPreviewInto(target, url) {
+    fetch(url).then(function (r) {
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t || 'no preview'); });
+      return r.json();
+    }).then(function (data) {
+      var s = FP.el('svg', {});
+      FP.drawFootprint(s, data);
+      s.style.width = '100%'; s.style.height = 'auto'; s.style.maxHeight = '180px'; s.style.display = 'block'; s.style.borderRadius = '4px';
+      target.innerHTML = '';
+      target.appendChild(s);
+    }).catch(function (e) {
+      target.textContent = (e && e.message) ? e.message : 'preview unavailable';
+    });
+  }
+
+  // Toggle the inline old-vs-new footprint comparison under a swap row.
+  // OLD = the footprint as it exists on the board right now (by KiCad uuid);
+  // NEW = the library footprint the sync would re-bake it to. Both render
+  // through the same engine in footprint-local mm, so shapes compare 1:1.
+  function toggleFootprintCompare(row) {
+    var next = row.nextElementSibling;
+    if (next && next.classList.contains('kpv-cmp-panel')) { next.remove(); return; }
+    var panel = document.createElement('div');
+    panel.className = 'kpv-cmp-panel';
+    panel.innerHTML =
+      '<div class="kpv-cmp-col"><div class="kpv-cmp-cap">On board now</div><div class="kpv-cmp-svg">Loading…</div></div>' +
+      '<div class="kpv-cmp-col"><div class="kpv-cmp-cap">After sync (library)</div><div class="kpv-cmp-svg">Loading…</div></div>';
+    row.parentNode.insertBefore(panel, row.nextSibling);
+    var cols = panel.querySelectorAll('.kpv-cmp-svg');
+    fetchFpPreviewInto(cols[0], '/api/board-footprint/' + encodeURIComponent(DESIGN_NAME) + '?uuid=' + encodeURIComponent(row.dataset.cmpUuid || ''));
+    fetchFpPreviewInto(cols[1], '/api/footprint/' + encodeURIComponent(row.dataset.cmpFp || ''));
   }
 
   // Format the real-push success body ({applied:{…}, warning?}) for the toast.
