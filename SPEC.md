@@ -118,6 +118,9 @@ Public functions: solve
 - a long manual side wraps into multiple depth lanes
 - (no-refine) packs courtyards flush (touching) and symmetric
 - (centered) docks each side on the IC centerline, not its rail pad
+- a series part's rotation aligns its pad axis with its matched hub pins
+- series detection pairs a 2-pad part with two single-hub legs to one hub
+- series rotations are applied and pinned; authored spec rotations win
 
 ## placement/router
 
@@ -226,6 +229,7 @@ Public functions: worldShape, pointDist, shapeGap
 - Evaluates assert-range that fails when value is out of bounds
 - evalFile auto-imports the standard passives prelude before user nodes run
 - Module files loaded via resolveImport get the same passives prelude before their body evaluates
+- componentPrefix maps passive families to their ref-des letters
 - Passives prelude resolves the standard cap/res/ind/ferrite/led families when their files exist
 - Passives prelude silently skips library entries whose files are missing instead of failing the build
 - Explicit import after prelude pre-loads is a no-op (resolveImport short-circuits on cached components)
