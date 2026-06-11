@@ -385,6 +385,9 @@ pub fn serve(
     // Upload
     router.post("/api/upload-package", upload_package.uploadPackageApi, .{});
     router.get("/api/footprint/:name", footprint_preview.footprintApi, .{});
+    // Board-side twin of /api/footprint — one footprint as it exists on the
+    // design's .kicad_pcb, for the sync preview's old-vs-new comparison.
+    router.get("/api/board-footprint/:name", footprint_preview.boardFootprintApi, .{});
     router.post("/api/upload-zip", upload.uploadZipApi, .{});
     // Fetch a part's footprint + datasheet from Component Search Engine.
     router.post("/api/cse-fetch", library.cseFetchApi, .{});

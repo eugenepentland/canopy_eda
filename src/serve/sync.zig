@@ -2285,7 +2285,7 @@ fn handleMatched(
     if (!footprintNameMatches(d, m.footprint_name, fp_name_short)) {
         if (loadKicadMod(d.spc, fp_name_short, inst.component)) |kmod| {
             const fp_def = loadFootprintDef(d.spc, fp_name_short);
-            try emitSwapOp(w, first, target, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map);
+            try emitSwapOp(w, first, target, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map, SWAP_REASON_GEOMETRY);
             d.summary.swapped += 1;
             ops_emitted.* += 1;
         }
@@ -2297,10 +2297,13 @@ fn handleMatched(
         // in the viewer → Save → next push re-bakes just the drifted parts.
         // swapFootprint preserves at/uuid/layer/locked + custom properties and
         // re-applies pad nets, so nothing moves; only the geometry (incl. the
-        // `(model …)` block via buildKicadMod) is refreshed.
+        // `(model …)` block via buildKicadMod) is refreshed. The reason tag
+        // lets the preview file the row under "3D model updates" vs
+        // "Footprint updates".
         if (loadKicadMod(d.spc, fp_name_short, inst.component)) |kmod| {
             const fp_def = loadFootprintDef(d.spc, fp_name_short);
-            try emitSwapOp(w, first, target, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map);
+            const reason = if (d.refresh) SWAP_REASON_REFRESH else SWAP_REASON_MODEL;
+            try emitSwapOp(w, first, target, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map, reason);
             d.summary.swapped += 1;
             ops_emitted.* += 1;
         }
@@ -3074,6 +3077,13 @@ fn emitStagingGrid(d: *DiffContext, w: anytype, first: *bool, adds: []const Pend
     }
 }
 
+/// Why a swap was emitted — display metadata the preview modal uses to file
+/// the row under "3D model updates" (model) vs "Footprint updates"
+/// (geometry/refresh). The writer and IPC agent ignore it.
+const SWAP_REASON_GEOMETRY = "geometry";
+const SWAP_REASON_MODEL = "model";
+const SWAP_REASON_REFRESH = "refresh";
+
 fn emitSwapOp(
     w: anytype,
     first: *bool,
@@ -3083,6 +3093,7 @@ fn emitSwapOp(
     fp_def_json: ?[]const u8,
     ref_des: []const u8,
     pad_net_map: *std.StringHashMap([]const u8),
+    reason: []const u8,
 ) !void {
     if (!first.*) try w.*.writeAll(",");
     first.* = false;
@@ -3091,6 +3102,8 @@ fn emitSwapOp(
     // Display metadata for the preview modal (the writer targets by uuid).
     try w.*.writeAll(",\"ref\":");
     try json_writer.writeString(w.*, ref_des);
+    try w.*.writeAll(",\"reason\":");
+    try json_writer.writeString(w.*, reason);
     try w.*.writeAll(",\"new_footprint_name\":");
     try json_writer.writeString(w.*, fp_name);
     try w.*.writeAll(",\"kicad_mod\":");

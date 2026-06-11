@@ -395,3 +395,210 @@ fn writeJsonStr(w: anytype, s: []const u8) HandlerError!void {
     };
     try w.writeByte('"');
 }
+
+// ── Board-side footprint extraction (old-vs-new compare) ────────────────
+// The sync preview's swap rows offer an "old vs new" comparison: the NEW
+// side is the library footprint (`/api/footprint/:name` above); the OLD
+// side is the footprint as it currently exists on the design's
+// `(kicad-pcb "<path>")` board file, served here in the SAME JSON shape so
+// the shared client renderer draws both. Coordinates are footprint-local
+// exactly as stored, so the two sides compare directly regardless of where
+// (or on which side) the part is placed. Courtyard drawn as fp_line on the
+// board is skipped — pads, silk, and fab are what the comparison is for.
+
+const eval_mod = @import("../eval/evaluator.zig");
+const paths = @import("../paths.zig");
+
+const HTTP_BAD_REQUEST: u16 = 400;
+const MAX_PCB_BYTES: usize = 64 * 1024 * 1024;
+
+/// GET /api/board-footprint/:name?uuid=<kicad-uuid> — one footprint from the
+/// design's declared `.kicad_pcb`, as preview JSON ({bbox, pads, silk, fab,
+/// courtyard}). 404 when the design has no board file or the uuid isn't on it.
+pub fn boardFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = HTTP_NOT_FOUND;
+        return;
+    };
+    const q = req.query() catch {
+        res.status = HTTP_BAD_REQUEST;
+        return;
+    };
+    const want_uuid = q.get("uuid") orelse {
+        res.status = HTTP_BAD_REQUEST;
+        res.body = "missing ?uuid=";
+        return;
+    };
+
+    const design_path = paths.designSourcePath(req.arena, ctx.project_dir, name) catch {
+        res.status = HTTP_INTERNAL_ERROR;
+        return;
+    };
+    var eval = eval_mod.Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+    const result = eval.evalFile(design_path) catch {
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = "Build error";
+        return;
+    };
+    const block = switch (result) {
+        .design_block => |b| b,
+        else => {
+            res.status = HTTP_NOT_FOUND;
+            return;
+        },
+    };
+    const pcb_path = block.kicad_pcb_path orelse {
+        res.status = HTTP_NOT_FOUND;
+        res.body = "design has no (kicad-pcb …) form";
+        return;
+    };
+    const src = infra_fs.cwd().readFileAlloc(req.arena, pcb_path, MAX_PCB_BYTES) catch {
+        res.status = HTTP_NOT_FOUND;
+        res.body = "board file unreadable";
+        return;
+    };
+    const nodes = parser_mod.parse(req.arena, src) catch {
+        res.status = HTTP_INTERNAL_ERROR;
+        return;
+    };
+    const fp_children = findBoardFootprint(nodes, want_uuid) orelse {
+        res.status = HTTP_NOT_FOUND;
+        res.body = "footprint not on board";
+        return;
+    };
+
+    var shapes: Shapes = .{};
+    try collectShapesFromBoardFp(req.arena, fp_children, &shapes);
+    if (shapes.isEmpty()) {
+        res.status = HTTP_NOT_FOUND;
+        res.body = "Empty footprint";
+        return;
+    }
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try emitFootprintJson(buf.writer(req.arena), shapes);
+    res.body = buf.items;
+    res.content_type = .JSON;
+}
+
+/// Locate the board footprint whose `(uuid "…")` equals `want`; returns its
+/// child forms (everything after the lib-id string) or null.
+fn findBoardFootprint(nodes: []const Node, want: []const u8) ?[]const Node {
+    if (nodes.len == 0) return null;
+    const root = nodes[0].asList() orelse return null;
+    for (root) |child| {
+        if (!child.isForm("footprint")) continue;
+        const cl = child.asList() orelse continue;
+        if (cl.len < 2) continue;
+        for (cl[2..]) |sub| {
+            const sl = sub.asList() orelse continue;
+            if (sl.len < 2) continue;
+            const head = sl[0].asAtom() orelse continue;
+            if (!std.mem.eql(u8, head, "uuid")) continue;
+            const u = sl[1].asString() orelse continue;
+            if (std.mem.eql(u8, u, want)) return cl[2..];
+        }
+    }
+    return null;
+}
+
+/// The board layer a KiCad fp graphic targets, looked up from its
+/// `(layer "…")` child. Both sides map to the same preview layer so a
+/// bottom part's silk compares cleanly against the front-authored library.
+fn boardGraphicLayer(sub: Node) ?Layer {
+    const sl = sub.asList() orelse return null;
+    for (sl[1..]) |c| {
+        const cl = c.asList() orelse continue;
+        if (cl.len < 2) continue;
+        const head = cl[0].asAtom() orelse continue;
+        if (!std.mem.eql(u8, head, "layer")) continue;
+        const lname = cl[1].asString() orelse (cl[1].asAtom() orelse continue);
+        if (std.mem.endsWith(u8, lname, ".SilkS")) return .silk;
+        if (std.mem.endsWith(u8, lname, ".Fab")) return .fab;
+        return null; // CrtYd / Cu / other — not part of the preview layers
+    }
+    return null;
+}
+
+/// Read a named `(head x y)` 2-vector child of a board graphic form.
+fn boardVec2(sub: Node, head_name: []const u8) ?Point {
+    const sl = sub.asList() orelse return null;
+    for (sl[1..]) |c| {
+        const cl = c.asList() orelse continue;
+        if (cl.len < 3) continue;
+        const head = cl[0].asAtom() orelse continue;
+        if (!std.mem.eql(u8, head, head_name)) continue;
+        const x = cl[1].asNumber() orelse return null;
+        const y = cl[2].asNumber() orelse return null;
+        return .{ .x = x, .y = y };
+    }
+    return null;
+}
+
+/// Walk a BOARD-format footprint's children into `shapes`. The `.kicad_pcb`
+/// grammar differs from the library `.sexp`: pads carry `(at …)`/`(size …)`,
+/// graphics are `fp_line`/`fp_circle`/`fp_rect`/`fp_poly` with a per-form
+/// `(layer …)`. Pad-local coordinates are stored library-identical for both
+/// board sides (KiCad mirrors at render), so no coordinate mapping is needed.
+fn collectShapesFromBoardFp(allocator: std.mem.Allocator, children: []const Node, shapes: *Shapes) HandlerError!void {
+    for (children) |child| {
+        if (child.isForm("pad")) {
+            if (parseBoardPad(allocator, child)) |p| try shapes.pads.append(allocator, p);
+        } else if (child.isForm("fp_line")) {
+            const layer = boardGraphicLayer(child) orelse continue;
+            const s = boardVec2(child, "start") orelse continue;
+            const e = boardVec2(child, "end") orelse continue;
+            try shapes.segs.append(allocator, .{ .x1 = s.x, .y1 = s.y, .x2 = e.x, .y2 = e.y, .layer = layer });
+        } else if (child.isForm("fp_circle")) {
+            const layer = boardGraphicLayer(child) orelse continue;
+            const c = boardVec2(child, "center") orelse continue;
+            const e = boardVec2(child, "end") orelse continue;
+            const r = @sqrt((e.x - c.x) * (e.x - c.x) + (e.y - c.y) * (e.y - c.y));
+            try shapes.circs.append(allocator, .{ .cx = c.x, .cy = c.y, .r = r, .layer = layer });
+        } else if (child.isForm("fp_rect")) {
+            const layer = boardGraphicLayer(child) orelse continue;
+            const s = boardVec2(child, "start") orelse continue;
+            const e = boardVec2(child, "end") orelse continue;
+            try shapes.rects.append(allocator, .{ .x0 = s.x, .y0 = s.y, .x1 = e.x, .y1 = e.y, .layer = layer });
+        } else if (child.isForm("fp_poly")) {
+            const layer = boardGraphicLayer(child) orelse continue;
+            if (try readBoardPolyPts(allocator, child)) |pts| {
+                try shapes.polys.append(allocator, .{ .pts = pts, .layer = layer });
+            }
+        }
+    }
+}
+
+/// Pad in `.kicad_pcb` form: `(pad "N" <type> <shape> (at x y [rot]) (size w h) …)`.
+fn parseBoardPad(allocator: std.mem.Allocator, child: Node) ?Pad {
+    const cl = child.asList() orelse return null;
+    if (cl.len < 4) return null;
+    const id: []const u8 = cl[1].asString() orelse cl[1].asAtom() orelse blk: {
+        const n = cl[1].asNumber() orelse break :blk "";
+        break :blk std.fmt.allocPrint(allocator, "{d}", .{@as(i64, @intFromFloat(n))}) catch "";
+    };
+    const shape: []const u8 = cl[3].asAtom() orelse "rect";
+    const at = boardVec2(child, "at") orelse Point{ .x = 0, .y = 0 };
+    const size = boardVec2(child, "size") orelse Point{ .x = 0, .y = 0 };
+    return .{ .id = id, .x = at.x, .y = at.y, .w = size.x, .h = size.y, .shape = shape, .pts = null };
+}
+
+/// `(fp_poly (pts (xy x y) (xy x y) …) …)` → point slice, or null when too few.
+fn readBoardPolyPts(allocator: std.mem.Allocator, child: Node) HandlerError!?[]const Point {
+    const cl = child.asList() orelse return null;
+    for (cl[1..]) |sub| {
+        if (!sub.isForm("pts")) continue;
+        const pl = sub.asList() orelse return null;
+        var pts: std.ArrayListUnmanaged(Point) = .empty;
+        for (pl[1..]) |xy| {
+            const xl = xy.asList() orelse continue;
+            if (xl.len < 3) continue;
+            const x = xl[1].asNumber() orelse continue;
+            const y = xl[2].asNumber() orelse continue;
+            try pts.append(allocator, .{ .x = x, .y = y });
+        }
+        if (pts.items.len < 3) return null;
+        return pts.items;
+    }
+    return null;
+}
