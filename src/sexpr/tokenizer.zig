@@ -27,6 +27,28 @@ pub const Token = struct {
     span: Span,
 };
 
+/// One SI scale suffix: the letter and its multiplier. Single source of
+/// truth for the tokenizer's suffix recognition, the parser's value
+/// conversion (`parseSiValue`), and the generated language reference
+/// (`src/docgen.zig`). `bare` = the letter is a scale even with no unit
+/// letter following — `m` is not, so bare `3m`, `mm`, and `mil` keep
+/// their existing dimension/atom meanings.
+pub const SiScale = struct { letter: u8, multiplier: f64, bare: bool };
+
+pub const si_scales = [_]SiScale{
+    .{ .letter = 'k', .multiplier = 1e3, .bare = true },
+    .{ .letter = 'M', .multiplier = 1e6, .bare = true },
+    .{ .letter = 'G', .multiplier = 1e9, .bare = true },
+    .{ .letter = 'm', .multiplier = 1e-3, .bare = false },
+    .{ .letter = 'u', .multiplier = 1e-6, .bare = true },
+    .{ .letter = 'n', .multiplier = 1e-9, .bare = true },
+    .{ .letter = 'p', .multiplier = 1e-12, .bare = true },
+};
+
+/// Unit letters accepted after a scale letter (or alone): they carry no
+/// scale, only readability (`100nF` == `100n`, `3.3V` == `3.3`).
+pub const si_unit_letters: []const u8 = "VAFHR";
+
 /// S-expression tokenizer. Holds a non-owning reference to `source` plus
 /// the cursor (`pos`, `line`, `col`) used for span reporting; instantiate
 /// with `init(source)` then call `next()` to walk tokens until `eof`.
@@ -243,7 +265,7 @@ pub const Tokenizer = struct {
             }
             return null;
         }
-        if (c0 == 'm') {
+        if (isUnitRequiredScale(c0)) {
             if (self.peekAt(1)) |u| {
                 if (isUnitLetter(u) and !isAtomContinue(self.peekAt(2))) return 2;
             }
@@ -253,12 +275,26 @@ pub const Tokenizer = struct {
         return null;
     }
 
+    /// Scale letters that stand on their own (`4.7k`). Consults
+    /// `si_scales` so recognition, conversion, and docs share one table.
     fn isScaleLetter(c: u8) bool {
-        return c == 'k' or c == 'M' or c == 'G' or c == 'u' or c == 'n' or c == 'p';
+        for (si_scales) |s| {
+            if (s.bare and s.letter == c) return true;
+        }
+        return false;
+    }
+
+    /// Scale letters that are only a scale when a unit letter follows
+    /// (`10mA` yes; bare `3m` stays a dimension/atom). Today just `m`.
+    fn isUnitRequiredScale(c: u8) bool {
+        for (si_scales) |s| {
+            if (!s.bare and s.letter == c) return true;
+        }
+        return false;
     }
 
     fn isUnitLetter(c: u8) bool {
-        return c == 'V' or c == 'A' or c == 'F' or c == 'H' or c == 'R';
+        return std.mem.indexOfScalar(u8, si_unit_letters, c) != null;
     }
 
     fn readAtom(self: *Tokenizer, s: Span) Token {

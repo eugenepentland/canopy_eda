@@ -116,6 +116,7 @@ src/diagram/types.zig::RailEnd struct_
 src/diagram/types.zig::builtin_classes value
 src/diagram/types.zig::discovered_palette value
 src/diagram/types.zig::findClass fn
+src/docgen.zig::renderLanguageReference fn
 src/emit.zig::emitResolved fn
 src/erc.zig::PinoutEntry struct_
 src/erc.zig::Severity value
@@ -228,7 +229,10 @@ src/eval/evaluator.zig::Evaluator struct_
 src/eval/evaluator.zig::ModuleFrame struct_
 src/eval/evaluator.zig::PinNetDecl struct_
 src/eval/evaluator.zig::ids value
+src/eval/fmt.zig::Directive struct_
+src/eval/fmt.zig::DirectiveArg enum_
 src/eval/fmt.zig::FmtError value
+src/eval/fmt.zig::directives value
 src/eval/fmt.zig::format fn
 src/eval/forms.zig::ArityViolation struct_
 src/eval/forms.zig::Builtin enum_
@@ -236,9 +240,9 @@ src/eval/forms.zig::FormDoc struct_
 src/eval/forms.zig::FormSchema struct_
 src/eval/forms.zig::ScopeAvailability value
 src/eval/forms.zig::ScopeForm enum_
+src/eval/forms.zig::ScopedFormDoc struct_
 src/eval/forms.zig::SpecialForm enum_
 src/eval/forms.zig::builtin_docs value
-src/eval/forms.zig::renderLanguageReference fn
 src/eval/forms.zig::schemaFor fn
 src/eval/forms.zig::scope_form_docs value
 src/eval/forms.zig::special_form_docs value
@@ -459,11 +463,14 @@ src/raster.zig::Caps enum_
 src/raster.zig::PathMode enum_
 src/raster.zig::Rgb struct_
 src/render_block_types.zig::Category enum_
+src/render_block_types.zig::NameRule struct_
 src/render_block_types.zig::categoryColor fn
+src/render_block_types.zig::category_keys value
 src/render_block_types.zig::classifyByName fn
 src/render_block_types.zig::classifyCategoryKey fn
 src/render_block_types.zig::classifySection fn
 src/render_block_types.zig::containsCI fn
+src/render_block_types.zig::name_rules value
 src/render_block_types.zig::toLower fn
 src/render_html.zig::CheckResultMap value
 src/render_html.zig::RenderError value
@@ -978,9 +985,12 @@ src/sexpr/parser.zig::ParseError value
 src/sexpr/parser.zig::freeNodes fn
 src/sexpr/parser.zig::parse fn
 src/sexpr/printer.zig::print fn
+src/sexpr/tokenizer.zig::SiScale struct_
 src/sexpr/tokenizer.zig::Token struct_
 src/sexpr/tokenizer.zig::TokenTag enum_
 src/sexpr/tokenizer.zig::Tokenizer struct_
+src/sexpr/tokenizer.zig::si_scales value
+src/sexpr/tokenizer.zig::si_unit_letters value
 src/traceability.zig::TraceRow struct_
 src/traceability.zig::TraceStage enum_
 src/traceability.zig::Traceability struct_

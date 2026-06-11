@@ -166,7 +166,11 @@ Public functions: worldShape, pointDist, shapeGap
 - ScopeForm.fromAtom resolves every form name that can appear in a design-block / section / subsection
 - validateArity flags too-few and too-many arguments and accepts in-range counts
 - schemaFor returns the schema for every special form whose arity is fixed
-- renderLanguageReference output matches the committed docs/language-forms.md so docs can never lag the registry
+
+## docgen
+
+- renderLanguageReference output matches the committed docs/language-forms.md so docs can never lag the registries
+- The generated reference names every category key so (category …) docs follow the classifier map
 
 ## eval/fmt
 
@@ -176,6 +180,7 @@ Public functions: worldShape, pointDist, shapeGap
 - Formats amperage values with SI prefix (uA/mA/A)
 - Formats tilde escape sequences in format strings
 - Formats mixed specifiers in a single format string
+- The directives table and format()'s dispatch recognise exactly the same specifier characters
 
 ## eval/env
 

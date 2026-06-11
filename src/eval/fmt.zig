@@ -21,6 +21,29 @@ const GIGA: f64 = 1_000_000_000.0;
 const TERA: f64 = 1_000_000_000_000.0;
 const WHOLE_NUMBER_LIMIT: f64 = 1e15;
 
+/// What a `~X` directive consumes from the argument list.
+pub const DirectiveArg = enum { number, string, none };
+
+/// One `(fmt …)` template directive. This table is the single source of
+/// truth for the language docs (`src/docgen.zig` renders it into
+/// `docs/language-forms.md`); the "directive table matches format()
+/// dispatch" test below proves the `format` switch and this table
+/// recognise exactly the same specifier characters, so they can't drift.
+pub const Directive = struct {
+    spec: u8,
+    arg: DirectiveArg,
+    summary: []const u8,
+};
+
+pub const directives = [_]Directive{
+    .{ .spec = 'V', .arg = .number, .summary = "Voltage: plain number + `V` (`3.41` → `3.41V`)." },
+    .{ .spec = 'R', .arg = .number, .summary = "Resistance: SI-scaled with `k`/`M` (`4700` → `4.7k`)." },
+    .{ .spec = 'C', .arg = .number, .summary = "Capacitance: SI-scaled `F`/`mF`/`uF`/`nF`/`pF` (`1e-7` → `100nF`)." },
+    .{ .spec = 'A', .arg = .number, .summary = "Current: SI-scaled `A`/`mA`/`uA` (`0.002` → `2mA`)." },
+    .{ .spec = 'S', .arg = .string, .summary = "Verbatim string argument." },
+    .{ .spec = '~', .arg = .none, .summary = "Literal `~` (consumes no argument)." },
+};
+
 /// Format a string with ~V, ~R, ~C, ~A, ~S, ~~ specifiers.
 pub fn format(allocator: std.mem.Allocator, template: []const u8, args: []const Value) FmtError![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -235,4 +258,46 @@ test "format mixed" {
     const r = try format(alloc, "RFBT = ~R, RFBB = ~R", &args);
     defer alloc.free(r);
     try std.testing.expectEqualStrings("RFBT = 220k, RFBB = 47k", r);
+}
+
+// spec: eval/fmt - The directives table and format()'s dispatch recognise exactly the same specifier characters
+test "directive table matches format() dispatch" {
+    try std.testing.expect(directiveTableMatchesDispatch(std.testing.allocator));
+}
+
+/// Try every possible specifier byte: `format()` must reject it with
+/// FormatError exactly when `directives` doesn't list it. This keeps the
+/// documented directive set (rendered into docs/language-forms.md)
+/// mechanically in sync with the switch in `format()`.
+fn directiveTableMatchesDispatch(alloc: std.mem.Allocator) bool {
+    for (0..256) |c| {
+        const spec: u8 = @intCast(c);
+        const in_table = for (directives) |d| {
+            if (d.spec == spec) break true;
+        } else false;
+        const recognized = specRecognized(alloc, spec);
+        if (in_table != recognized) {
+            std.debug.print("fmt directive '~{c}' (0x{x:0>2}): in table={}, dispatched={}\n", .{ spec, spec, in_table, recognized });
+            return false;
+        }
+    }
+    return true;
+}
+
+/// True when `format()` dispatches the specifier — any outcome other
+/// than FormatError counts (TypeError / NotEnoughArgs still prove the
+/// switch recognised it). Tries a number argument, then a string.
+fn specRecognized(alloc: std.mem.Allocator, spec: u8) bool {
+    const template = [_]u8{ '~', spec };
+    const num_args = [_]Value{.{ .number = 1.0 }};
+    if (format(alloc, &template, &num_args)) |out| {
+        alloc.free(out);
+        return true;
+    } else |err| if (err != FmtError.FormatError) return true;
+    const str_args = [_]Value{.{ .string = "x" }};
+    if (format(alloc, &template, &str_args)) |out| {
+        alloc.free(out);
+        return true;
+    } else |err| if (err != FmtError.FormatError) return true;
+    return false;
 }
