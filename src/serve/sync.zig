@@ -1681,7 +1681,7 @@ fn emitStaleOps(
         const target = opTargetUuid(bfp);
         if (target.len == 0) continue;
         if (parsed.prune_stale) {
-            try emitOp(w, first_op, "remove", .{.{ "uuid", target }});
+            try emitOp(w, first_op, "remove", .{ .{ "uuid", target }, .{ "ref", bfp.ref } });
             summary.removed += 1;
             continue;
         }
@@ -2163,11 +2163,15 @@ fn handleMatched(
             ops_emitted.* += 1;
         }
     }
+    // The "old" / "ref" keys on set_field ops are display metadata for the
+    // preview modal (rename rows read "FB1 → L2", value rows name the part);
+    // the file writer and the IPC agent ignore keys they don't know.
     if (!std.mem.eql(u8, m.ref, inst.ref_des)) {
         if (try emitOpUnlessApplied(d, w, first, OP_SET_FIELD, .{
             .{ "uuid", target },
             .{ "field", "reference" },
             .{ "value", inst.ref_des },
+            .{ "old", m.ref },
         }, target, "reference", inst.ref_des)) {
             ops_emitted.* += 1;
         }
@@ -2177,6 +2181,8 @@ fn handleMatched(
             .{ "uuid", target },
             .{ "field", "value" },
             .{ "value", inst.value },
+            .{ "old", m.value },
+            .{ "ref", inst.ref_des },
         }, target, "value", inst.value)) {
             ops_emitted.* += 1;
         }
@@ -2193,6 +2199,7 @@ fn handleMatched(
             .{ "uuid", target },
             .{ "field", FIELD_CANOPY_UUID },
             .{ "value", inst.uuid },
+            .{ "ref", inst.ref_des },
         }, target, FIELD_CANOPY_UUID, inst.uuid)) {
             ops_emitted.* += 1;
         }
@@ -2214,6 +2221,7 @@ fn handleMatched(
             .{ "uuid", target },
             .{ "field", field_name },
             .{ "value", p.value },
+            .{ "ref", inst.ref_des },
         }, target, field_name, p.value)) {
             ops_emitted.* += 1;
         }
@@ -2227,6 +2235,7 @@ fn handleMatched(
                 .{ "uuid", target },
                 .{ "field", FIELD_CANOPY_NET },
                 .{ "value", cn },
+                .{ "ref", inst.ref_des },
             }, target, FIELD_CANOPY_NET, cn)) {
                 ops_emitted.* += 1;
             }
@@ -2240,6 +2249,7 @@ fn handleMatched(
                 .{ "uuid", target },
                 .{ "field", FIELD_CANOPY_SECTION },
                 .{ "value", section },
+                .{ "ref", inst.ref_des },
             }, target, FIELD_CANOPY_SECTION, section)) {
                 ops_emitted.* += 1;
             }
@@ -2936,6 +2946,9 @@ fn emitSwapOp(
     first.* = false;
     try w.*.writeAll("{\"op\":\"swap_footprint\",\"uuid\":");
     try json_writer.writeString(w.*, uuid);
+    // Display metadata for the preview modal (the writer targets by uuid).
+    try w.*.writeAll(",\"ref\":");
+    try json_writer.writeString(w.*, ref_des);
     try w.*.writeAll(",\"new_footprint_name\":");
     try json_writer.writeString(w.*, fp_name);
     try w.*.writeAll(",\"kicad_mod\":");
@@ -2974,6 +2987,7 @@ fn emitPadNetOps(
                 .{ "uuid", uuid },
                 .{ "pad", cp.number },
                 .{ "net", want },
+                .{ "ref", ref_des },
             }, uuid, cp.number, want)) {
                 emitted += 1;
             }
@@ -2989,6 +3003,7 @@ fn emitPadNetOps(
                 .{ "uuid", uuid },
                 .{ "pad", cp.number },
                 .{ "net", "" },
+                .{ "ref", ref_des },
             }, uuid, cp.number, "")) {
                 emitted += 1;
             }

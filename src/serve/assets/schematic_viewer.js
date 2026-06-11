@@ -997,6 +997,80 @@
     return bits.join(' · ');
   }
 
+  // Categorised op list for the preview modal. Board-shape changes (parts
+  // added/removed, footprint re-bakes, refdes renames, value edits, stale
+  // flags) render as headed sections up top; the high-volume metadata ops
+  // (canopy_* / MPN field updates, pad-net rewires, vias, staging graphics)
+  // collapse into <details> folds so they don't bury what matters.
+  function buildKicadOpsHtml(ops) {
+    var cats = { add: [], remove: [], swap: [], rename: [], value: [], stale: [], fields: [], padnets: [], vias: [], graphics: [], other: [] };
+    ops.forEach(function (op) {
+      if (op.op === 'add') cats.add.push(op);
+      else if (op.op === 'remove') cats.remove.push(op);
+      else if (op.op === 'swap_footprint') cats.swap.push(op);
+      else if (op.op === 'flag_stale') cats.stale.push(op);
+      else if (op.op === 'set_field' && op.field === 'reference') cats.rename.push(op);
+      else if (op.op === 'set_field' && op.field === 'value') cats.value.push(op);
+      else if (op.op === 'set_field') cats.fields.push(op);
+      else if (op.op === 'set_pad_net') cats.padnets.push(op);
+      else if (op.op === 'add_via') cats.vias.push(op);
+      else if (op.op === 'create_board_item') cats.graphics.push(op);
+      else cats.other.push(op);
+    });
+    var html = '';
+    function rows(list, kind, fmt) {
+      return list.map(function (op) {
+        return '<div class="kpv-op"><span class="op-kind k-' + kind + '">' + kind + '</span>' + fmt(op) + '</div>';
+      }).join('');
+    }
+    function section(list, kind, title, hint, fmt) {
+      if (!list.length) return;
+      html += '<div class="kpv-cat"><span class="kpv-cat-title">' + title + ' (' + list.length + ')</span>' +
+        (hint ? '<span class="kpv-cat-hint">' + hint + '</span>' : '') + '</div>' + rows(list, kind, fmt);
+    }
+    function fold(list, kind, title, hint, fmt) {
+      if (!list.length) return;
+      html += '<details class="kpv-fold"><summary>' + title + ' (' + list.length + ')' +
+        (hint ? ' <span class="kpv-cat-hint">' + hint + '</span>' : '') + '</summary>' +
+        rows(list, kind, fmt) + '</details>';
+    }
+    var esc = escapeHtml;
+    function refOf(op) { return esc(op.ref || op.uuid || '?'); }
+    section(cats.add, 'add', 'Add parts', 'new on the board — staged off to the side, drag into place', function (op) {
+      return refOf(op) + (op.footprint_name ? ' · ' + esc(op.footprint_name) : '') +
+        (op.value ? ' · = ' + esc(op.value) : '');
+    });
+    section(cats.remove, 'remove', 'Remove parts', 'deleted from the board', refOf);
+    section(cats.swap, 'fp', 'Footprint re-bakes', 'geometry refreshed in place — position, side & routing preserved', function (op) {
+      return refOf(op) + (op.new_footprint_name ? ' · ' + esc(op.new_footprint_name) : '');
+    });
+    section(cats.rename, 'rename', 'Refdes renames', 'reference text only — same part, footprint & position unchanged', function (op) {
+      return (op.old ? esc(op.old) : '?') + ' → ' + esc(op.value || '');
+    });
+    section(cats.value, 'value', 'Value changes', '', function (op) {
+      return refOf(op) + ' · ' + (op.old ? esc(op.old) + ' → ' : '') + esc(op.value || '');
+    });
+    section(cats.stale, 'stale', 'Stale parts', 'on the board but not in the design — flagged only, nothing removed', refOf);
+    fold(cats.fields, 'field', 'Field updates', 'metadata only (canopy_section, MPN, …) — nothing moves', function (op) {
+      return (op.ref ? esc(op.ref) + ' · ' : '') + esc(op.field || '') + ' = ' + esc(op.value || '');
+    });
+    fold(cats.padnets, 'net', 'Pad-net updates', 'pad → net assignments', function (op) {
+      return (op.ref ? esc(op.ref) + ' · ' : '') + 'pad ' + esc(op.pad || '') + ' → ' + (op.net ? esc(op.net) : '(cleared)');
+    });
+    fold(cats.vias, 'via', 'Stitching vias', 'fresh-board seeding only', function (op) {
+      var x = op.x !== undefined ? (op.x / 1e6).toFixed(1) : '?';
+      var y = op.y !== undefined ? (op.y / 1e6).toFixed(1) : '?';
+      return esc(op.net || '') + ' @ ' + x + ', ' + y + ' mm';
+    });
+    fold(cats.graphics, 'gfx', 'Staging graphics', 'box + label around staged parts', function () {
+      return 'section box / label';
+    });
+    fold(cats.other, 'op', 'Other', '', function (op) {
+      return esc(op.op || '?') + ' · ' + esc(kicadOpLabel(op));
+    });
+    return html;
+  }
+
   function kicadSummaryChips(s) {
     var keys = ['updated', 'added', 'removed', 'swapped', 'flagged_stale', 'suppressed', 'vias'];
     return keys.map(function (k) {
@@ -1011,10 +1085,7 @@
     var overlay = document.createElement('div');
     overlay.className = 'kpv-overlay';
     var opsHtml = ops.length
-      ? ops.map(function (op) {
-          return '<div class="kpv-op"><span class="op-kind">' + escapeHtml(op.op || '?') + '</span>' +
-            escapeHtml(kicadOpLabel(op)) + '</div>';
-        }).join('')
+      ? buildKicadOpsHtml(ops)
       : '<div class="kpv-empty">No changes — the board already matches the design.</div>';
     overlay.innerHTML =
       '<div class="kpv-box">' +
