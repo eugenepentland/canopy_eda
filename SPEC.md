@@ -65,6 +65,8 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - set_locked toggles (locked yes) on the targeted footprint
 - add wires pad nets from the op's [pin, net] array
 - swap_footprint accepts a legacy (module …) kmod
+- swap_footprint flips kmod layers to the back for a footprint on B.Cu, keeping local coordinates
+- swap_footprint stores pad angles absolutely (footprint rotation + pad-local rotation)
 - add drops legacy (angle …) arcs the modern board parser rejects
 - preserves pcbnew-style boards: in-element net forms
 - add places the new footprint at the op's staging (x, y) and bakes canopy_net / canopy_section properties
@@ -625,6 +627,8 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - loadFootprintDefImpl ships a footprint's fab geometry on F.Fab so the synced part keeps its outline
 - writeGeomBlockProtoJson traces a (poly …) outline as boundary segments and emits (rect …) on the block's layer
 - maybeCollapseDotSubNet folds a per-pin sub-net to its rail by default but keeps it verbatim in dot-net mode
+- formatBackupStamp renders epoch seconds as a sortable filesystem-safe stamp
+- writeFileAtomic rolls a timestamped board backup and prunes beyond MAX_BOARD_BACKUPS
 
 ## serve/vfs
 

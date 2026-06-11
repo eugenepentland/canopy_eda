@@ -951,12 +951,157 @@ fn skipKmodChild(sub: Node) bool {
     return false;
 }
 
+/// Front board-layer tokens a library kmod carries, mapped to their back-side
+/// twins. Library footprints are always authored front-side; when geometry is
+/// spliced into a footprint that lives on the back, every layer reference must
+/// flip or the part's copper lands on the wrong side of the board (the bug
+/// that rewrote a routed board's bottom passives with top-side pads). Names
+/// with no front/back side (`*.Cu`, `Edge.Cuts`) pass through unchanged.
+fn flipLayerToBack(name: []const u8) []const u8 {
+    const pairs = [_][2][]const u8{
+        .{ "F.Cu", "B.Cu" },
+        .{ "F.Paste", "B.Paste" },
+        .{ "F.Mask", "B.Mask" },
+        .{ "F.SilkS", "B.SilkS" },
+        .{ "F.Fab", "B.Fab" },
+        .{ "F.CrtYd", "B.CrtYd" },
+        .{ "F.Adhes", "B.Adhes" },
+    };
+    for (pairs) |p| {
+        if (std.mem.eql(u8, name, p[0])) return p[1];
+    }
+    return name;
+}
+
+/// Text payload of an atom-or-string node ((layer F.SilkS) vs (layer "F.SilkS")
+/// both occur in kmods, depending on which KiCad generation exported them).
+fn nodeText(n: Node) ?[]const u8 {
+    if (n.asAtom()) |a| return a;
+    if (n.asString()) |s| return s;
+    return null;
+}
+
+/// Rebuild `n` with new text, keeping its atom-vs-string flavor so the
+/// round-trip print matches the surrounding file's quoting style.
+fn sameKindText(n: Node, text: []const u8) Node {
+    if (n.asAtom() != null) return Node.atom(Span.zero, text);
+    return Node.string(Span.zero, text);
+}
+
+/// kmod child forms that carry a `(layer …)` to flip when the target
+/// footprint sits on the back. fp_text never reaches this (skipKmodChild
+/// drops it); `(model …)` is side-agnostic (KiCad flips the body itself).
+fn isKmodGraphicForm(head: []const u8) bool {
+    const forms = [_][]const u8{
+        "fp_line", "fp_rect", "fp_circle", "fp_poly", "fp_arc",
+        "gr_line", "gr_rect", "gr_circle", "gr_poly", "gr_arc",
+    };
+    for (forms) |f| {
+        if (std.mem.eql(u8, head, f)) return true;
+    }
+    return false;
+}
+
+/// `(layers "F.Cu" "F.Paste" …)` → back-side twins, preserving token kind.
+fn flipLayersList(arena: std.mem.Allocator, layers: Node) std.mem.Allocator.Error!Node {
+    const ll = layers.asList() orelse return layers;
+    const out = try arena.alloc(Node, ll.len);
+    out[0] = ll[0];
+    for (ll[1..], 1..) |c, i| {
+        const txt = nodeText(c) orelse {
+            out[i] = c;
+            continue;
+        };
+        out[i] = sameKindText(c, flipLayerToBack(txt));
+    }
+    return Node.list(Span.zero, out);
+}
+
+/// `(layer "F.SilkS")` → `(layer "B.SilkS")`, preserving token kind.
+fn flipLayerForm(arena: std.mem.Allocator, layer: Node) std.mem.Allocator.Error!Node {
+    const ll = layer.asList() orelse return layer;
+    if (ll.len < 2) return layer;
+    const out = try arena.alloc(Node, ll.len);
+    @memcpy(out, ll);
+    if (nodeText(ll[1])) |txt| out[1] = sameKindText(ll[1], flipLayerToBack(txt));
+    return Node.list(Span.zero, out);
+}
+
+/// Fold the footprint's rotation into a pad's `(at x y [rot])`. The
+/// `.kicad_pcb` format stores pad angles absolutely (footprint rotation +
+/// pad-local rotation — a 90°-rotated 0402's pads read `(at ±0.51 0 90)` on
+/// real boards), while a library kmod carries pad-local angles. Splicing the
+/// local angle unchanged into a rotated footprint skews every non-square pad.
+/// The x/y tokens pass through verbatim (no int→float churn); the angle is
+/// emitted as an int when whole so pads keep pcbnew's compact form.
+fn absolutizePadAngle(arena: std.mem.Allocator, at: Node, fp_rot: f64) std.mem.Allocator.Error!Node {
+    const al = at.asList() orelse return at;
+    if (al.len < 3) return at;
+    const local: f64 = if (al.len >= 4) (al[3].asNumber() orelse 0) else 0;
+    const stored = @mod(local + fp_rot, 360.0);
+    const out = try arena.alloc(Node, if (stored == 0) 3 else 4);
+    out[0] = al[0];
+    out[1] = al[1];
+    out[2] = al[2];
+    if (stored != 0) {
+        const whole: i64 = @intFromFloat(stored);
+        out[3] = if (@as(f64, @floatFromInt(whole)) == stored)
+            Node.int(Span.zero, whole)
+        else
+            Node.float(Span.zero, stored);
+    }
+    return Node.list(Span.zero, out);
+}
+
+/// Adapt one kmod child to the footprint it's being spliced into:
+///
+///  - `to_back`: rename every front layer token to its B.* twin (pad
+///    `(layers …)` lists and graphic `(layer …)` children). Local coordinates
+///    are NOT mirrored — KiCad stores back-side footprints with library-local
+///    coordinates and derives the mirror from the footprint-level
+///    `(layer "B.Cu")` (verified against boards pcbnew itself wrote: a B.Cu
+///    part's pad 1 sits at the same local x as the front-side library).
+///  - `fp_rot`: fold the footprint rotation into each pad's stored angle
+///    (see `absolutizePadAngle`).
+///
+/// Children that need neither change pass through untouched.
+fn adaptKmodChild(arena: std.mem.Allocator, sub: Node, to_back: bool, fp_rot: f64) std.mem.Allocator.Error!Node {
+    const subl = sub.asList() orelse return sub;
+    if (subl.len == 0) return sub;
+    const head = subl[0].asAtom() orelse return sub;
+
+    if (std.mem.eql(u8, head, FORM_PAD)) {
+        if (!to_back and fp_rot == 0) return sub;
+        const out = try arena.alloc(Node, subl.len);
+        @memcpy(out, subl);
+        for (out, 0..) |c, i| {
+            if (c.isForm(FORM_AT) and fp_rot != 0) {
+                out[i] = try absolutizePadAngle(arena, c, fp_rot);
+            } else if (c.isForm("layers") and to_back) {
+                out[i] = try flipLayersList(arena, c);
+            }
+        }
+        return Node.list(Span.zero, out);
+    }
+    if (to_back and isKmodGraphicForm(head)) {
+        const out = try arena.alloc(Node, subl.len);
+        @memcpy(out, subl);
+        for (out, 0..) |c, i| {
+            if (c.isForm(FORM_LAYER)) out[i] = try flipLayerForm(arena, c);
+        }
+        return Node.list(Span.zero, out);
+    }
+    return sub;
+}
+
 /// Replace a footprint's library reference and pad geometry while
 /// preserving every piece of user state KiCad needs to keep the part on
 /// the board: `(at X Y rot)`, `(uuid …)`, `(layer …)`, `(locked …)`,
-/// and any custom `(property …)` not in the standard set. The replacement
-/// body comes from the swap op's `kicad_mod`, the same way the agent
-/// would CreateItems a new footprint with the new geometry.
+/// and every `(property …)`. The replacement body comes from the swap
+/// op's `kicad_mod`, the same way the agent would CreateItems a new
+/// footprint with the new geometry — adapted to the footprint's side and
+/// rotation (see `adaptKmodChild`) so a bottom-side or rotated part keeps
+/// its physical placement.
 fn swapFootprint(
     arena: std.mem.Allocator,
     fp: Node,
@@ -968,27 +1113,37 @@ fn swapFootprint(
     extra_nets: *std.ArrayListUnmanaged(Node),
 ) WriteError!Node {
     const cl = fp.asList() orelse return fp;
-    // Preserve user state from the existing footprint.
+    // Preserve user state from the existing footprint, and capture the
+    // side + rotation the spliced kmod geometry must be adapted to.
     var preserved: std.ArrayListUnmanaged(Node) = .empty;
+    var fp_rot: f64 = 0;
+    var is_back = false;
     const preserve_keys = [_][]const u8{ "at", "uuid", "layer", "locked", "tstamp" };
     for (cl[2..]) |sub| {
         const subl = sub.asList() orelse continue;
         if (subl.len == 0) continue;
         const head = subl[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, FORM_AT) and subl.len >= 4) {
+            fp_rot = subl[3].asNumber() orelse 0;
+        }
+        if (std.mem.eql(u8, head, FORM_LAYER) and subl.len >= 2) {
+            if (nodeText(subl[1])) |ln| is_back = std.mem.eql(u8, ln, "B.Cu");
+        }
         for (preserve_keys) |k| {
             if (std.mem.eql(u8, head, k)) {
                 try preserved.append(arena, sub);
                 break;
             }
         }
-        // Custom properties (not Reference/Value/Footprint/Datasheet/Description/
-        // canopy_uuid) also stay — they're user annotations the swap shouldn't
-        // erase. Reference/Value/canopy_uuid will be reissued by follow-on
-        // set_field ops if the new netlist needs them, so dropping them here
-        // is fine.
+        // Every (property …) stays: Reference/Value keep their authored silk
+        // position/layer/justify (which carry the part's side), custom
+        // properties keep user annotations, and canopy_uuid survives even
+        // when the design's uuid didn't change (handleMatched only re-stamps
+        // on a difference, so dropping it here orphaned swapped parts until
+        // the by_kicad_uuid fallback re-adopted them). Follow-on set_field
+        // ops update any of these in place when the design's text differs.
         if (std.mem.eql(u8, head, FORM_PROPERTY) and subl.len >= 2) {
-            const pk = subl[1].asString() orelse continue;
-            if (!isStandardPropertyKey(pk)) try preserved.append(arena, sub);
+            try preserved.append(arena, sub);
         }
     }
 
@@ -1007,10 +1162,12 @@ fn swapFootprint(
     // Preserved user state first.
     for (preserved.items) |p| try new_fp_children.append(arena, p);
     // Then the geometry from the .kicad_mod, dropping the placement/identity
-    // and legacy ref/value text the board supplies separately.
+    // and legacy ref/value text the board supplies separately, and adapting
+    // each child to the preserved side + rotation (back-side layer flip,
+    // absolute pad angles).
     for (kmod_children[2..]) |sub| {
         if (skipKmodChild(sub)) continue;
-        try new_fp_children.append(arena, sub);
+        try new_fp_children.append(arena, try adaptKmodChild(arena, sub, is_back, fp_rot));
     }
     var swapped = Node.list(Span.zero, try new_fp_children.toOwnedSlice(arena));
     // Apply pad_nets so the new pads point at the right nets.
@@ -1053,15 +1210,6 @@ fn applyPadNetsFromJson(
         }
     }
     return current;
-}
-
-fn isStandardPropertyKey(k: []const u8) bool {
-    return std.mem.eql(u8, k, PROP_REFERENCE) or
-        std.mem.eql(u8, k, PROP_VALUE) or
-        std.mem.eql(u8, k, "Footprint") or
-        std.mem.eql(u8, k, "Datasheet") or
-        std.mem.eql(u8, k, "Description") or
-        std.mem.eql(u8, k, PROP_CANOPY_UUID);
 }
 
 /// Build a fresh `(footprint …)` node for an `add` op. Places the part
@@ -1132,10 +1280,12 @@ fn buildAddFootprint(
         }
     }
     // Inline geometry from .kicad_mod, skipping the placement/identity and
-    // legacy ref/value text we inject or reissue separately.
+    // legacy ref/value text we inject or reissue separately. Adds always land
+    // on the front, but a premade-layout pose can carry a rotation — fold it
+    // into each pad's stored angle (the file format keeps pad angles absolute).
     for (kmod_children[2..]) |sub| {
         if (skipKmodChild(sub)) continue;
-        try children.append(arena, sub);
+        try children.append(arena, try adaptKmodChild(arena, sub, false, rot_deg));
     }
 
     var fp = Node.list(Span.zero, try children.toOwnedSlice(arena));
@@ -1582,6 +1732,76 @@ test "applyOpsToSource swap_footprint accepts legacy module-format kmod" {
     // BGA/WCSP footprints swap in with every pad unconnected.
     const pad_idx = std.mem.indexOf(u8, out, "(pad A1").?;
     try std.testing.expect(std.mem.indexOf(u8, out[pad_idx..], "(net \"VCC\")") != null);
+}
+
+// spec: kicad_pcb/writer - swap_footprint flips kmod layers to the back for a footprint on B.Cu, keeping local coordinates
+// (KiCad derives the mirror from the footprint-level layer, so coordinates must NOT be mirrored here).
+test "applyOpsToSource swap_footprint flips kmod layers for a back-side footprint" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "c-0201"
+        \\    (uuid "fp-1")
+        \\    (at 100 50 90)
+        \\    (layer "B.Cu")
+        \\    (property "Reference" "C145")
+        \\    (property "canopy_uuid" "abc12345")
+        \\    (pad "1" smd roundrect (at 0.3 0 90) (layers "B.Cu" "B.Mask" "B.Paste") (net "VDD"))))
+    ;
+    const kmod_json = "(footprint \\\"c-0201\\\" " ++
+        "(fp_line (start -1 0) (end 1 0) (layer \\\"F.SilkS\\\")) " ++
+        "(pad \\\"1\\\" smd roundrect (at 0.3 0) (size 0.3 0.3) " ++
+        "(layers \\\"F.Cu\\\" \\\"F.Paste\\\" \\\"F.Mask\\\")))";
+    const ops =
+        \\[{"op":"swap_footprint","uuid":"fp-1","new_footprint_name":"c-0201",
+        \\  "kicad_mod":"
+    ++ kmod_json ++
+        \\",
+        \\  "pad_nets":[["1","VDD"]]}]
+    ;
+    const out = try applyOpsToSource(arena.allocator(), src, ops);
+    // Footprint stays on the back, and the spliced pad's copper does too —
+    // no front-side token may survive anywhere in the swapped part.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(layer \"B.Cu\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(layers \"B.Cu\" \"B.Paste\" \"B.Mask\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "F.Cu") == null);
+    // Silkscreen flips with it; local coordinates are untouched.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(layer \"B.SilkS\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(start -1 0)") != null);
+    // Pad angle is stored absolutely: 0 local + 90 footprint = 90.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(at 0.3 0 90)") != null);
+    // Identity + reference text survive the swap.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"canopy_uuid\" \"abc12345\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"Reference\" \"C145\"") != null);
+}
+
+// spec: kicad_pcb/writer - swap_footprint stores pad angles absolutely (footprint rotation + pad-local rotation)
+test "applyOpsToSource swap_footprint folds footprint rotation into pad angles" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "r-0402"
+        \\    (uuid "fp-1")
+        \\    (at 20 30 -90)
+        \\    (layer "F.Cu")
+        \\    (pad "1" smd roundrect (at -0.51 0 270) (layers "F.Cu" "F.Paste" "F.Mask") (net "OUT"))))
+    ;
+    const ops =
+        \\[{"op":"swap_footprint","uuid":"fp-1","new_footprint_name":"r-0402",
+        \\  "kicad_mod":"(footprint \"r-0402\" (pad \"1\" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers \"F.Cu\" \"F.Paste\" \"F.Mask\")))",
+        \\  "pad_nets":[["1","OUT"]]}]
+    ;
+    const out = try applyOpsToSource(arena.allocator(), src, ops);
+    // -90° footprint + 0° pad-local = 270 stored (pcbnew normalises to 0..360).
+    try std.testing.expect(std.mem.indexOf(u8, out, "(at -0.51 0 270)") != null);
+    // Front part stays front.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(layers \"F.Cu\" \"F.Paste\" \"F.Mask\")") != null);
 }
 
 // spec: kicad_pcb/writer - preserves pcbnew-style boards: in-element net forms
