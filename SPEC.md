@@ -65,7 +65,7 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - set_locked toggles (locked yes) on the targeted footprint
 - add wires pad nets from the op's [pin, net] array
 - swap_footprint accepts a legacy (module …) kmod
-- swap_footprint flips kmod layers to the back for a footprint on B.Cu, keeping local coordinates
+- swap_footprint mirrors a kmod onto the back for a footprint on B.Cu (layers F→B, local Y negated)
 - swap_footprint stores pad angles absolutely (footprint rotation + pad-local rotation)
 - add drops legacy (angle …) arcs the modern board parser rejects
 - preserves pcbnew-style boards: in-element net forms
