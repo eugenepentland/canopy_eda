@@ -2552,7 +2552,8 @@ fn writeHeatLegend(w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"heat-legend\" id=\"heat-legend\" hidden>" ++
         "<span class=\"heat-h\">Heatmap</span>" ++
         "<span class=\"heat-lbl\">cheap</span><span class=\"heat-bar\"></span><span class=\"heat-lbl\">costly</span>" ++
-        "<span class=\"muted\">each part tinted by its share of the objective · snapshot of the loaded layout</span>" ++
+        "<span class=\"muted\">each part tinted by its share of the objective · " ++
+        "scale fixed when toggled on (re-toggle to re-base) · hover a part for the raw number</span>" ++
         "</div>");
 }
 
@@ -4038,23 +4039,35 @@ const BOARD_JS =
     \\   if(c.classList.contains("active"))closeAll();else openPanel(c.getAttribute("data-panel"));});});
     \\})();
     \\// Cost/blame heatmap: tint each part's courtyard green→red by its share of the
-    \\// objective (PCB.parts[i].blame, normalized server-side); mirrors the PNG ramp.
+    \\// objective (PCB.parts[i].blame, raw — the live /api/pcb-score units).
     \\function lerpHex(a,b,t){var ar=(a>>16)&255,ag=(a>>8)&255,ab=a&255;
     \\ return "rgb("+Math.round(ar+(((b>>16)&255)-ar)*t)+","+Math.round(ag+(((b>>8)&255)-ag)*t)+
     \\  ","+Math.round(ab+((b&255)-ab)*t)+")";}
     \\function blameColor(t){if(!(t>0))t=0;if(t>1)t=1;
     \\ return t<0.5?lerpHex(0x15302a,0xb8860b,t*2):lerpHex(0xb8860b,0xc0392b,(t-0.5)*2);}
     \\var heatOn=false;
-    \\// Normalize against the hottest *non-anchor* part: the anchor IC is the fixed
-    \\// reference point everything is placed around, so it carries no tint (and is
-    \\// excluded from the max, so its blame doesn't flatten the rest of the ramp).
-    \\function applyHeat(){var mx=0;
-    \\ P.forEach(function(p){if(p.ref!==anchorRef){var b=p.blame||0;if(b>mx)mx=b;}});
-    \\ P.forEach(function(p,i){var ct=els[i]&&els[i].querySelector(".court");if(!ct)return;
-    \\  if(!heatOn||p.ref===anchorRef){ct.setAttribute("fill","#161b22");return;}
-    \\  ct.setAttribute("fill",blameColor(mx>0?(p.blame||0)/mx:0));});}
+    \\// Colour scale: the hottest *non-anchor* part's blame, captured when the
+    \\// heatmap is switched ON and held FIXED while it stays on — re-normalizing
+    \\// per drag made every OTHER part's tint shift when one part moved (moving a
+    \\// well-placed small cap read as "the big cap got worse"). With the scale
+    \\// pinned, a drag re-tints only the parts whose raw blame actually changed;
+    \\// values above the captured scale clamp to full red. The anchor IC is the
+    \\// fixed reference point everything is placed around, so it carries no tint
+    \\// and never sets the scale. Toggle the heatmap off/on to re-capture.
+    \\var heatScale=0;
+    \\function heatMax(){var mx=0;
+    \\ P.forEach(function(p){if(p.ref!==anchorRef){var b=p.blame||0;if(b>mx)mx=b;}});return mx;}
+    \\function applyHeat(){
+    \\ P.forEach(function(p,i){var g=els[i];if(!g)return;var ct=g.querySelector(".court");if(!ct)return;
+    \\  var tt=g.querySelector("title");
+    \\  if(!heatOn||p.ref===anchorRef){ct.setAttribute("fill","#161b22");if(tt)tt.remove();return;}
+    \\  var b=p.blame||0,t=heatScale>0?b/heatScale:0;
+    \\  ct.setAttribute("fill",blameColor(t));
+    \\  if(!tt){tt=document.createElementNS(NS,"title");g.appendChild(tt);}
+    \\  tt.textContent=p.ref+" \u{00b7} blame "+b.toFixed(1)+" ("+Math.round(Math.min(t,1)*100)+"% of scale "+heatScale.toFixed(1)+")";});}
     \\var heatCb=document.getElementById("v-heat");
     \\if(heatCb)heatCb.addEventListener("change",function(){heatOn=heatCb.checked;
+    \\ if(heatOn)heatScale=heatMax();
     \\ var hl=document.getElementById("heat-legend");if(hl)hl.hidden=!heatOn;applyHeat();});
     \\var legCb=document.getElementById("v-legend");
     \\if(legCb)legCb.addEventListener("change",function(){var l=document.getElementById("pcb-legend");

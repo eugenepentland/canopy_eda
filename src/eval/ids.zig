@@ -225,7 +225,7 @@ pub fn prescanRefDes(self: *Evaluator, forms: []const Node) void {
 /// Get the ref-des prefix letter for a component family name.
 pub fn componentPrefix(family: []const u8) u8 {
     // Known passive/generic families
-    if (std.mem.eql(u8, family, "ind")) return 'L';
+    if (std.mem.eql(u8, family, "ind") or std.mem.startsWith(u8, family, "ind-")) return 'L';
     if (std.mem.eql(u8, family, "led") or std.mem.startsWith(u8, family, "led-")) return 'D';
     if (std.mem.startsWith(u8, family, "cap")) return 'C';
     if (std.mem.startsWith(u8, family, "res")) return 'R';
@@ -696,6 +696,19 @@ test "isStandardRefDes" {
     try std.testing.expect(isStandardRefDes("stm32") == false);
     try std.testing.expect(isStandardRefDes("flash") == false);
     try std.testing.expect(isStandardRefDes("a") == false);
+}
+
+// spec: eval/evaluator - componentPrefix maps passive families to their ref-des letters
+test "componentPrefix maps inductor families to L" {
+    try std.testing.expectEqual(@as(u8, 'L'), componentPrefix("ind"));
+    try std.testing.expectEqual(@as(u8, 'L'), componentPrefix("ind-2016"));
+    try std.testing.expectEqual(@as(u8, 'L'), componentPrefix("ind-0603"));
+    try std.testing.expectEqual(@as(u8, 'L'), componentPrefix("xfl4012"));
+    try std.testing.expectEqual(@as(u8, 'L'), componentPrefix("ferrite-0805"));
+    // Not inductors: "indicator-led"-style names must not match "ind-".
+    try std.testing.expectEqual(@as(u8, 'U'), componentPrefix("inductive-sensor"));
+    try std.testing.expectEqual(@as(u8, 'C'), componentPrefix("cap-0402"));
+    try std.testing.expectEqual(@as(u8, 'R'), componentPrefix("res-0201"));
 }
 
 // spec: eval/evaluator - generateId registers each token so a second call cannot collide

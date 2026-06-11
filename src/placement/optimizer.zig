@@ -317,6 +317,12 @@ pub const Part = struct {
     x: f64 = 0,
     y: f64 = 0,
     rot: f64 = 0,
+    /// Rotation provenance: `.authored` (a spec `(rot …)`) and `.series` (a
+    /// series part's pad-pairing — see `SeriesPair`) rotations are *decided*,
+    /// not searched — the HPWL-driven rotation searches are blind to
+    /// through-body detours, so they must not revisit them. `.series` may be
+    /// re-derived (it's deterministic); `.authored` always wins.
+    rot_pin: RotPin = .none,
     /// Collision keepout box (footprint-local). Defaults to the sentinel
     /// (`hw<0`), meaning "use the symmetric courtyard" (`effHw`/`effHh` about
     /// the part centre) — so a part with no escape stub behaves exactly as
@@ -327,6 +333,9 @@ pub const Part = struct {
 /// Footprint-local collision keepout: centre offset (`ox`,`oy`) + half-extents
 /// (`hw`,`hh`). `hw<0` is the sentinel for "no override → use the courtyard".
 const Keepout = struct { ox: f64 = 0, oy: f64 = 0, hw: f64 = -1, hh: f64 = -1 };
+
+/// See `Part.rot_pin`.
+const RotPin = enum { none, series, authored };
 
 /// A breakout stub reserved in front of an *unaccounted* pad — one on a net
 /// that touches only this part (a single-pin signal like RFIN/LNAOUT that
@@ -506,7 +515,28 @@ pub const Loop = struct {
 const Built = struct {
     springs: []Spring,
     loops: []Loop,
+    series: []SeriesPair = &.{},
 };
+
+/// A 2-pad *series* element between two pins of the same hub — the buck-boost
+/// inductor across LX1/LX2, a feedback resistor between VOUT and FB. For these
+/// parts the airwire metric is nearly blind to rotation: turning the part moves
+/// one pad closer to its pin exactly as far as it moves the other away, and the
+/// straight airwire passes through the part's own body, so HPWL can't see that
+/// the "wrong" rotation routes one leg the long way around. The rotation is
+/// therefore *decided geometrically* (`seriesPairRot`: align the part's pad
+/// axis with its matched hub pads' axis) and pinned (`Part.rot_pinned`) so the
+/// HPWL-driven polish can't flip it. Pads/targets are footprint-local; `a`/`b`
+/// are the part's two legs in net order.
+const SeriesPair = struct {
+    part: usize,
+    hub: usize,
+    a: SeriesLeg,
+    b: SeriesLeg,
+};
+/// One leg of a series pair: the part pad and the hub-side target it must
+/// reach (the centroid of the hub's pads on that leg's net), footprint-local.
+const SeriesLeg = struct { part_pad: PadRect, hub_pad: PadRect };
 
 /// A `(proximity …)` pull lowered to geometry: keep `part`'s pad `part_pad`
 /// within `max_mm` of `hub`'s pad `hub_pad` (both footprint-local). A *hinge*
@@ -675,7 +705,7 @@ fn runPlacement(
                 // lanes, then the priority-cap tuck. Keeps every part on its authored
                 // side — only the fine placement moves.
                 if (rp.refine) {
-                    polish(parts, &prep.idx_of, nets, built.loops, params);
+                    polish(parts, &prep.idx_of, nets, built, params);
                     snapToGrid(parts);
                     legalizeOnGrid(parts);
                     tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
@@ -1459,10 +1489,21 @@ const STAGE_GAP_MM: f64 = 5.0;
 /// Like `packOneBlock`, but for an agent-authored side: lay the members in the
 /// *given* order (no criticality re-sort, no centre-out), honouring each member's
 /// rotation override (`rots_override[i]`); a null override falls back to
-/// `faceRotation` so the part's power pad faces the IC (resistors / no loop ⇒ rot 0).
+/// `faceRotation` so the part's power pad faces the IC, or — for a series part
+/// (the `(switch …)` inductor across LX1/LX2, see `SeriesPair`) — to the
+/// pad-pairing rotation; resistors with neither ⇒ rot 0.
 /// Left/right ⇒ a vertical column, top/bottom ⇒ a horizontal row, packed edge-to-edge
 /// with `gap`, inner (power-pad) edges aligned toward the IC.
-fn packSpecBlock(arena: std.mem.Allocator, members: []const usize, rots_override: []const ?f64, parts: []const Part, edge: Edge, loops: []const Loop, gap: f64) std.mem.Allocator.Error!PackBlock {
+fn packSpecBlock(
+    arena: std.mem.Allocator,
+    members: []const usize,
+    rots_override: []const ?f64,
+    parts: []const Part,
+    edge: Edge,
+    loops: []const Loop,
+    series: []const SeriesPair,
+    gap: f64,
+) std.mem.Allocator.Error!PackBlock {
     const seq = try arena.dupe(usize, members);
     const n = seq.len;
     const rots = try arena.alloc(f64, n);
@@ -1480,6 +1521,8 @@ fn packSpecBlock(arena: std.mem.Allocator, members: []const usize, rots_override
             rot = r; // honour the authored rotation verbatim (isQuarter handles extents)
         } else if (loopForCap(loops, m)) |lp| {
             rot = faceRotation(lp.cap_pwr, edge);
+        } else if (seriesFor(series, m)) |sp| {
+            rot = seriesPairRot(parts, sp) orelse 0;
         }
         rots[i] = rot;
         exts[i] = extByRot(parts[m], rot);
@@ -1539,18 +1582,18 @@ fn appendLane(
     parts: []const Part,
     nets: []const FlatNet,
     idx_of: *std.StringHashMap(usize),
-    loops: []const Loop,
+    built: Built,
     gap: f64,
     centered: bool,
 ) std.mem.Allocator.Error!void {
-    var blk = try packSpecBlock(arena, members, rots, parts, edge, loops, gap);
+    var blk = try packSpecBlock(arena, members, rots, parts, edge, built.loops, built.series, gap);
     if (!centered) {
         if (railPadCross(members, ic, edge, parts, nets, idx_of)) |t| {
             blk.target = t;
             blk.target_set = true;
         }
     }
-    blk.mass = blockMass(members, loops);
+    blk.mass = blockMass(members, built.loops);
     try lanes.append(arena, blk);
 }
 
@@ -1659,7 +1702,7 @@ fn packSpec(
             var i: usize = 0;
             while (i < n) : (i += per) {
                 const end = @min(i + per, n);
-                try appendLane(arena, &lanes, members.items[i..end], rots.items[i..end], ic, e, parts, nets, idx_of, built.loops, gap, rp.centered);
+                try appendLane(arena, &lanes, members.items[i..end], rots.items[i..end], ic, e, parts, nets, idx_of, built, gap, rp.centered);
             }
         }
         // The switch inductor(s) on this edge take the lane BEYOND the side's parts.
@@ -1672,11 +1715,19 @@ fn packSpec(
         if (sw_members.items.len > 0) {
             const sw_rots = try arena.alloc(?f64, sw_members.items.len);
             @memset(sw_rots, null); // inductor: face-the-IC default rotation
-            try appendLane(arena, &lanes, sw_members.items, sw_rots, ic, e, parts, nets, idx_of, built.loops, gap, rp.centered);
+            try appendLane(arena, &lanes, sw_members.items, sw_rots, ic, e, parts, nets, idx_of, built, gap, rp.centered);
         }
         if (lanes.items.len == 0) continue;
         const ic_cross = if (e == .left or e == .right) parts[ic].y else parts[ic].x;
         dockLanes(parts, ic, lanes.items, e, gap, gap, ic_cross, lock_axis, lock_val);
+    }
+
+    // Authored `(rot …)` overrides are decided, not searched — pin them so the
+    // refinement passes (and the series pairing) can't flip them.
+    for (rp.sides) |s| {
+        for (s.items) |it| {
+            if (it.rot != null) parts[it.part].rot_pin = .authored;
+        }
     }
 
     // Parts the spec didn't list → a staging band below the board, reported (not lost)
@@ -2006,8 +2057,12 @@ fn autofillOne(parts: []Part, anchors: []const PadAnchor, i: usize) bool {
     var br = p.rot;
     var moved = false;
 
+    // A pinned rotation is decided (spec / series pairing) — search position only.
+    const pinned = [_]f64{p.rot};
+    const rot_cands: []const f64 = if (p.rot_pin != .none) &pinned else &ROT_CAND;
+
     // Coarse pass: every COARSE_STRIDE cells over the window.
-    for (ROT_CAND) |r| {
+    for (rot_cands) |r| {
         var dy: i64 = lo_y;
         while (dy <= hi_y) : (dy += COARSE_STRIDE) {
             var dx: i64 = lo_x;
@@ -2031,7 +2086,7 @@ fn autofillOne(parts: []Part, anchors: []const PadAnchor, i: usize) bool {
     // Fine pass: full resolution in a ±COARSE_STRIDE box around the coarse best.
     const cx = cellOffset(bx - ox);
     const cy = cellOffset(by - oy);
-    for (ROT_CAND) |r| {
+    for (rot_cands) |r| {
         var dy: i64 = @max(lo_y, cy - COARSE_STRIDE);
         while (dy <= @min(hi_y, cy + COARSE_STRIDE)) : (dy += 1) {
             var dx: i64 = @max(lo_x, cx - COARSE_STRIDE);
@@ -3882,7 +3937,7 @@ fn rerankSolve(
             p.y = cand[c * parts.len + j].y;
             p.rot = cand[c * parts.len + j].rot;
         }
-        polish(parts, idx_of, nets, built.loops, params);
+        polish(parts, idx_of, nets, built, params);
         legalizeFinal(parts);
         try symmetrize(arena, parts, idx_of, nets, built, params);
         compactToContact(parts, priority);
@@ -3938,7 +3993,7 @@ fn optimize(parts: []Part, idx_of: *std.StringHashMap(usize), nets: []const Flat
     }
     // Polish only the winning arrangement (the local search is the costliest
     // step — running it per start would be 64× the work for no extra quality).
-    polish(parts, idx_of, nets, built.loops, params);
+    polish(parts, idx_of, nets, built, params);
     legalizeFinal(parts);
 }
 
@@ -4125,7 +4180,10 @@ fn tuckCap(parts: []Part, lp: Loop) void {
     var bx = ox;
     var by = oy;
     var br = p.rot;
-    for (ROT_CAND) |r| {
+    // A pinned rotation is decided (spec / series pairing) — search position only.
+    const pinned = [_]f64{p.rot};
+    const rot_cands: []const f64 = if (p.rot_pin != .none) &pinned else &ROT_CAND;
+    for (rot_cands) |r| {
         var dy: i64 = -TIGHTEN_CELLS;
         while (dy <= TIGHTEN_CELLS) : (dy += 1) {
             var dx: i64 = -TIGHTEN_CELLS;
@@ -4337,10 +4395,15 @@ fn polish(
     parts: []Part,
     idx_of: *std.StringHashMap(usize),
     nets: []const FlatNet,
-    loops: []const Loop,
+    built: Built,
     params: Params,
 ) void {
+    const loops = built.loops;
     if (parts.len < 2 or parts.len > POLISH_MAX_PARTS) return;
+    // Series parts' rotations are decided by pad pairing, not searched — set and
+    // pin them before the sweeps (every polish caller legalizes right after, so
+    // a swap of a non-square part's extents can't leave a lasting overlap).
+    applySeriesRotations(parts, built.series);
     // Each candidate cell costs a full-board objective eval (no incremental
     // precompute yet), so the per-part window is (2·cells+1)² evals. On the
     // single-start band above MULTISTART_MAX_PARTS that quadratic times tens of
@@ -4378,7 +4441,10 @@ fn polishPart(
     var best_y = oy;
     var best_rot = p.rot;
     var improved = false;
-    for (ROT_CAND) |r| {
+    // A pinned rotation is decided (spec / series pairing) — search position only.
+    const pinned = [_]f64{p.rot};
+    const rot_cands: []const f64 = if (p.rot_pin != .none) &pinned else &ROT_CAND;
+    for (rot_cands) |r| {
         var dy: i64 = -cells;
         while (dy <= cells) : (dy += 1) {
             var dx: i64 = -cells;
@@ -4512,7 +4578,10 @@ fn routedPolishPart(
     var best_y = oy;
     var best_rot = p.rot;
     var improved = false;
-    for (ROT_CAND) |r| {
+    // A pinned rotation is decided (spec / series pairing) — search position only.
+    const pinned = [_]f64{p.rot};
+    const rot_cands: []const f64 = if (p.rot_pin != .none) &pinned else &ROT_CAND;
+    for (rot_cands) |r| {
         var dy: i64 = -ROUTED_POLISH_CELLS;
         while (dy <= ROUTED_POLISH_CELLS) : (dy += 1) {
             var dx: i64 = -ROUTED_POLISH_CELLS;
@@ -5566,6 +5635,7 @@ fn buildSprings(
     const gnd = try groundPads(arena, nets, parts, idx_of, roles);
     var springs: std.ArrayListUnmanaged(Spring) = .empty;
     var loops: std.ArrayListUnmanaged(Loop) = .empty;
+    var legs: std.ArrayListUnmanaged(SeriesCand) = .empty;
 
     for (nets, 0..) |net, net_i| {
         if (isGroundName(shortName(net.name))) continue;
@@ -5588,12 +5658,107 @@ fn buildSprings(
 
         const single_hub = hub_idx != null and !multi_hub;
         if (single_hub) {
-            try hugToHub(arena, &springs, &loops, eps.items, hub_idx.?, gnd, roles, explicit_pin, @intCast(net_i));
+            try hugToHub(arena, &springs, &loops, &legs, eps.items, hub_idx.?, gnd, roles, explicit_pin, @intCast(net_i));
         } else {
             try weakCluster(arena, &springs, eps.items);
         }
     }
-    return .{ .springs = try springs.toOwnedSlice(arena), .loops = try loops.toOwnedSlice(arena) };
+    const series = try pairSeriesLegs(arena, legs.items, parts);
+    return .{ .springs = try springs.toOwnedSlice(arena), .loops = try loops.toOwnedSlice(arena), .series = series };
+}
+
+/// One non-decoupling passive leg recorded by `hugToHub` — a candidate half of
+/// a `SeriesPair`. `hub_pad` is the centroid of the hub's pads on the leg's net.
+const SeriesCand = struct { part: usize, hub: usize, part_pad: PadRect, hub_pad: PadRect };
+
+/// Pair up `hugToHub`'s candidate legs into `SeriesPair`s: a part qualifies
+/// when it has exactly two pads, exactly two legs, both legs reach the *same*
+/// hub, and the hub-side targets are distinct (two different pins — a part
+/// strapped twice to one pin has no orientation to decide).
+fn pairSeriesLegs(arena: std.mem.Allocator, cands: []const SeriesCand, parts: []const Part) std.mem.Allocator.Error![]SeriesPair {
+    var out: std.ArrayListUnmanaged(SeriesPair) = .empty;
+    for (cands, 0..) |c, i| {
+        if (parts[c.part].pads.len != 2) continue;
+        // Count this part's legs and find the one other than `i` (emit each
+        // pair once, from its first leg).
+        var n: usize = 0;
+        var first_idx: usize = cands.len;
+        var mate_idx: usize = cands.len;
+        for (cands, 0..) |o, j| {
+            if (o.part != c.part) continue;
+            n += 1;
+            if (first_idx == cands.len) first_idx = j;
+            if (j != i and mate_idx == cands.len) mate_idx = j;
+        }
+        if (n != 2 or first_idx != i or mate_idx == cands.len) continue;
+        const m = cands[mate_idx];
+        if (m.hub != c.hub) continue;
+        // Two distinct pads reaching two distinct hub targets, else there is
+        // no orientation to decide.
+        if (c.part_pad.x == m.part_pad.x and c.part_pad.y == m.part_pad.y) continue;
+        if (c.hub_pad.x == m.hub_pad.x and c.hub_pad.y == m.hub_pad.y) continue;
+        try out.append(arena, .{
+            .part = c.part,
+            .hub = c.hub,
+            .a = .{ .part_pad = c.part_pad, .hub_pad = c.hub_pad },
+            .b = .{ .part_pad = m.part_pad, .hub_pad = m.hub_pad },
+        });
+    }
+    return out.toOwnedSlice(arena);
+}
+
+/// The series pair whose part is index `part`, if any (cf. `loopForCap`).
+fn seriesFor(series: []const SeriesPair, part: usize) ?SeriesPair {
+    for (series) |sp| {
+        if (sp.part == part) return sp;
+    }
+    return null;
+}
+
+/// The quarter rotation that best aligns a series part's pad axis with its
+/// matched hub pads' axis — so each pad faces *its own* pin instead of one pad
+/// docking close while the other's leg detours around the part body. World-space
+/// via the hub's current rotation; position-independent (depends only on the two
+/// footprints), so it cannot flip as the part slides along its lane.
+fn seriesPairRot(parts: []const Part, sp: SeriesPair) ?f64 {
+    const pdx = sp.b.part_pad.x - sp.a.part_pad.x;
+    const pdy = sp.b.part_pad.y - sp.a.part_pad.y;
+    const ta = rotateLocal(sp.a.hub_pad.x, sp.a.hub_pad.y, parts[sp.hub].rot);
+    const tb = rotateLocal(sp.b.hub_pad.x, sp.b.hub_pad.y, parts[sp.hub].rot);
+    const tdx = tb.x - ta.x;
+    const tdy = tb.y - ta.y;
+    if (@abs(pdx) + @abs(pdy) < 1e-9 or @abs(tdx) + @abs(tdy) < 1e-9) return null;
+    var best: f64 = 0;
+    var best_dot = -std.math.inf(f64);
+    for (ROT_CAND) |r| {
+        const p = rotateLocal(pdx, pdy, r);
+        const dot = p.x * tdx + p.y * tdy;
+        if (dot > best_dot) {
+            best_dot = dot;
+            best = r;
+        }
+    }
+    return best;
+}
+
+/// Set every series part to its pad-pairing rotation and pin it `.series`
+/// (an `.authored` spec `(rot …)` wins and is left alone). Re-applies over an
+/// existing `.series` pin — the pairing is deterministic, and the multi-start
+/// rerank polishes several restored candidates through this path in turn. Run
+/// after seeding, before the rotation-searching refinement passes — see
+/// `SeriesPair` for why those searches must not own this decision. A rotation
+/// that would collide at the part's current pose is applied anyway: the
+/// legalize passes that follow every polish resolve position overlaps, but
+/// only this pass knows the right orientation.
+fn applySeriesRotations(parts: []Part, series: []const SeriesPair) void {
+    for (series) |sp| {
+        const p = &parts[sp.part];
+        if (p.rot_pin == .authored or p.kind == .hub) continue;
+        if (seriesPairRot(parts, sp)) |r| {
+            p.rot = r;
+            p.rot_pin = .series;
+        }
+    }
 }
 
 /// Set each loop's value-priority weight:
@@ -5706,6 +5871,7 @@ fn hugToHub(
     arena: std.mem.Allocator,
     springs: *std.ArrayListUnmanaged(Spring),
     loops: *std.ArrayListUnmanaged(Loop),
+    legs: *std.ArrayListUnmanaged(SeriesCand),
     eps: []const Endpoint,
     hub: usize,
     gnd: []const []const PadRect,
@@ -5777,6 +5943,14 @@ fn hugToHub(
         } else {
             // Non-decoupling single-hub passive: hug the hub's pad centroid.
             try springs.append(arena, .{ .a = e.idx, .b = hub, .ax = e.px, .ay = e.py, .bx = ht.x, .by = ht.y, .k = K_PROX, .kind = .proximity });
+            // Record the leg — `pairSeriesLegs` turns a 2-pad part with two of
+            // these (to the same hub) into a `SeriesPair`.
+            try legs.append(arena, .{
+                .part = e.idx,
+                .hub = hub,
+                .part_pad = .{ .x = e.px, .y = e.py, .w = e.pw, .h = e.ph },
+                .hub_pad = .{ .x = ht.x, .y = ht.y, .w = 0, .h = 0 },
+            });
         }
     }
 }
@@ -7097,10 +7271,17 @@ test "packSpecBlock keeps authored order and resolves rotations" {
         .{ .ref_des = "C2", .kind = .passive, .hw = 1, .hh = 0.5, .pads = &.{}, .fallback = true },
     };
     // C1 carries a decoupling loop (power pad on +x); C2 carries an explicit 90°.
-    const loops = [_]Loop{.{ .cap = 0, .hub = 0, .cap_pwr = .{ .x = 1, .y = 0, .w = 0.4, .h = 0.4 }, .cap_gnd = .{ .x = -1, .y = 0, .w = 0.4, .h = 0.4 }, .hub_pwr = &.{}, .hub_gnd = &.{} }};
+    const loops = [_]Loop{.{
+        .cap = 0,
+        .hub = 0,
+        .cap_pwr = .{ .x = 1, .y = 0, .w = 0.4, .h = 0.4 },
+        .cap_gnd = .{ .x = -1, .y = 0, .w = 0.4, .h = 0.4 },
+        .hub_pwr = &.{},
+        .hub_gnd = &.{},
+    }};
     const members = [_]usize{ 0, 1 };
     const rots = [_]?f64{ null, 90 };
-    const blk = try packSpecBlock(arena, &members, &rots, &parts, .right, &loops, 0.2);
+    const blk = try packSpecBlock(arena, &members, &rots, &parts, .right, &loops, &.{}, 0.2);
     // Authored order is preserved verbatim — no criticality re-sort / centre-out.
     try testing.expectEqual(@as(usize, 0), blk.members[0]);
     try testing.expectEqual(@as(usize, 1), blk.members[1]);
@@ -7110,6 +7291,85 @@ test "packSpecBlock keeps authored order and resolves rotations" {
     try testing.expectEqual(@as(f64, 90), blk.rots[1]);
     // A right (side) edge packs a vertical column: increasing y down the column.
     try testing.expect(blk.ly[0] < blk.ly[1]);
+}
+
+// spec: placement/optimizer - a series part's rotation aligns its pad axis with its matched hub pins
+test "seriesPairRot aligns the pad axis with the matched hub pins" {
+    // TPS631000-style switch cell: hub pins LX1/LX2 stacked on Y (the IC's left
+    // edge), inductor pads on X at rot 0. The pairing must pick a quarter turn
+    // (pads end up stacked on Y, each facing its own pin) — exactly the case
+    // where summed Manhattan HPWL is rotation-invariant and cannot decide.
+    const parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "L1", .kind = .passive, .hw = 1.25, .hh = 1.05, .pads = &.{}, .fallback = false },
+    };
+    const sp = SeriesPair{
+        .part = 1,
+        .hub = 0,
+        .a = .{ .part_pad = .{ .x = -0.73, .y = 0, .w = 0.55, .h = 1.6 }, .hub_pad = .{ .x = -1.0, .y = 0.25, .w = 0, .h = 0 } },
+        .b = .{ .part_pad = .{ .x = 0.73, .y = 0, .w = 0.55, .h = 1.6 }, .hub_pad = .{ .x = -1.0, .y = -0.25, .w = 0, .h = 0 } },
+    };
+    const r = seriesPairRot(&parts, sp).?;
+    // Convention-independent check: the rotated pad axis must be (anti)parallel
+    // to the hub-pin axis (0,−0.5) — pointing the same way, no X component left.
+    const d = rotateLocal(sp.b.part_pad.x - sp.a.part_pad.x, sp.b.part_pad.y - sp.a.part_pad.y, r);
+    try testing.expect(@abs(d.x) < 1e-9);
+    try testing.expect(d.y < 0);
+    // And it is a quarter turn, not the HPWL-tied 0/180.
+    try testing.expect(r == 90 or r == 270);
+}
+
+// spec: placement/optimizer - series detection pairs a 2-pad part with two single-hub legs to one hub
+test "pairSeriesLegs pairs two legs of a 2-pad part to one hub" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    const two_pads = [_]geometry.Pad{
+        .{ .number = "1", .x = -0.73, .y = 0, .w = 0.55, .h = 1.6 },
+        .{ .number = "2", .x = 0.73, .y = 0, .w = 0.55, .h = 1.6 },
+    };
+    const parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "L1", .kind = .passive, .hw = 1.25, .hh = 1.05, .pads = &two_pads, .fallback = false },
+        .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.3, .pads = &two_pads, .fallback = false },
+    };
+    const cands = [_]SeriesCand{
+        // L1: two legs to the same hub (U1) → one pair.
+        .{ .part = 1, .hub = 0, .part_pad = .{ .x = -0.73, .y = 0, .w = 0.55, .h = 1.6 }, .hub_pad = .{ .x = -1, .y = 0.25, .w = 0, .h = 0 } },
+        .{ .part = 1, .hub = 0, .part_pad = .{ .x = 0.73, .y = 0, .w = 0.55, .h = 1.6 }, .hub_pad = .{ .x = -1, .y = -0.25, .w = 0, .h = 0 } },
+        // R1: two legs but to two different hubs → not a series pair.
+        .{ .part = 3, .hub = 0, .part_pad = .{ .x = -0.73, .y = 0, .w = 0.5, .h = 0.5 }, .hub_pad = .{ .x = 1, .y = 0, .w = 0, .h = 0 } },
+        .{ .part = 3, .hub = 2, .part_pad = .{ .x = 0.73, .y = 0, .w = 0.5, .h = 0.5 }, .hub_pad = .{ .x = -1, .y = 0, .w = 0, .h = 0 } },
+    };
+    const series = try pairSeriesLegs(arena, &cands, &parts);
+    try testing.expectEqual(@as(usize, 1), series.len);
+    try testing.expectEqual(@as(usize, 1), series[0].part);
+    try testing.expectEqual(@as(usize, 0), series[0].hub);
+}
+
+// spec: placement/optimizer - series rotations are applied and pinned; authored spec rotations win
+test "applySeriesRotations pins the pairing but never an authored rot" {
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "L1", .kind = .passive, .hw = 1.25, .hh = 1.05, .pads = &.{}, .fallback = false },
+    };
+    const sp = SeriesPair{
+        .part = 1,
+        .hub = 0,
+        .a = .{ .part_pad = .{ .x = -0.73, .y = 0, .w = 0.55, .h = 1.6 }, .hub_pad = .{ .x = -1.0, .y = 0.25, .w = 0, .h = 0 } },
+        .b = .{ .part_pad = .{ .x = 0.73, .y = 0, .w = 0.55, .h = 1.6 }, .hub_pad = .{ .x = -1.0, .y = -0.25, .w = 0, .h = 0 } },
+    };
+    applySeriesRotations(&parts, &.{sp});
+    try testing.expectEqual(RotPin.series, parts[1].rot_pin);
+    const paired = parts[1].rot;
+    try testing.expect(paired == 90 or paired == 270);
+    // An authored rotation is never overridden by the pairing.
+    parts[1].rot = 180;
+    parts[1].rot_pin = .authored;
+    applySeriesRotations(&parts, &.{sp});
+    try testing.expectEqual(@as(f64, 180), parts[1].rot);
+    try testing.expectEqual(RotPin.authored, parts[1].rot_pin);
 }
 
 // spec: placement/optimizer - the manual floorplan docks sides around the anchor IC and stages unlisted parts
