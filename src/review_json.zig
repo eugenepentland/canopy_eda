@@ -401,6 +401,10 @@ fn writeRail(w: anytype, r: power_budget.Rail) !void {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"ref\":");
         try json_writer.writeString(w, c.ref_des);
+        try w.writeAll(",\"component\":");
+        try json_writer.writeString(w, c.component);
+        try w.writeAll(",\"label\":");
+        try json_writer.writeString(w, c.label);
         try w.writeAll(NET_KEY);
         try json_writer.writeString(w, c.net);
         try w.writeAll(",\"pins\":[");

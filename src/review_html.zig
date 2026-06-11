@@ -143,11 +143,16 @@ pub fn writePowerBudget(w: anytype, rails: []const power_budget.Rail) RenderErro
         if (r.consumers.len > 0) {
             try w.writeAll(
                 "<div class=\"rail-body\"><table class=\"consumer-table\">" ++
-                    "<thead><tr><th>Ref</th><th>Net</th><th>Pins</th>" ++
+                    "<thead><tr><th>Part</th><th>Ref</th><th>Net</th><th>Pins</th>" ++
                     "<th>i-typ (A)</th><th>i-max (A)</th></tr></thead><tbody>",
             );
             for (r.consumers) |c| {
+                // Part: the (load "…") label if given, else the library
+                // component, else the ref as a last resort.
+                const part: []const u8 = if (c.label.len > 0) c.label else if (c.component.len > 0) c.component else c.ref_des;
                 try w.writeAll(trCodeOpen);
+                try writeHtmlEscaped(w, part);
+                try w.writeAll(codeTdToCode);
                 try writeHtmlEscaped(w, c.ref_des);
                 try w.writeAll(codeTdToCode);
                 try writeHtmlEscaped(w, c.net);

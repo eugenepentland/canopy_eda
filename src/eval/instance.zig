@@ -262,6 +262,7 @@ pub fn parsePinForm(
     var tail: usize = pin_children.len;
     var i_typ: ?f64 = null;
     var i_max: ?f64 = null;
+    var load_label: []const u8 = "";
     while (tail > 0) {
         const last = pin_children[tail - 1];
         if (last.isForm("i-typ")) {
@@ -271,6 +272,10 @@ pub fn parsePinForm(
         } else if (last.isForm("i-max")) {
             const cc = last.asList().?;
             if (cc.len >= 2) i_max = cc[1].asNumber();
+            tail -= 1;
+        } else if (last.isForm("load")) {
+            const cc = last.asList().?;
+            if (cc.len >= 2) load_label = (try self.evalNode(cc[1], env)).asString() orelse (cc[1].asAtom() orelse "");
             tail -= 1;
         } else break;
     }
@@ -314,6 +319,7 @@ pub fn parsePinForm(
             .asserted_fns = asserted_fns,
             .i_typ = if (first_pin) i_typ else null,
             .i_max = if (first_pin) i_max else null,
+            .load_label = if (first_pin) load_label else "",
         });
         first_pin = false;
     }

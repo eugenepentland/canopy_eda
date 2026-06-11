@@ -1135,6 +1135,7 @@ fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl)
             .asserted_fns = pn.asserted_fns,
             .i_typ = pn.i_typ,
             .i_max = pn.i_max,
+            .load_label = pn.load_label,
         }) catch return EvalError.OutOfMemory;
     }
     // Apply net-ties: merge two nets into one.
