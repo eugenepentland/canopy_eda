@@ -31,6 +31,7 @@ const pcb_layout_page = @import("pcb_layout_page.zig");
 const pcb_describe = @import("pcb_describe.zig");
 const placement_spec = @import("placement_spec.zig");
 const render_pcb_png = @import("../render_pcb_png.zig");
+const docgen = @import("../docgen.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const NAME_FIELD_PREFIX = "{\"name\":";
@@ -43,6 +44,8 @@ const ERR_BUILD_FAILED = "error: build failed";
 const ERR_LINE_TEMPLATE = "error: {s}";
 const VERSION_SNAPSHOT_TEMPLATE = "{{\"ok\":true,\"version\":{d},\"snapshot\":";
 const JSON_NET_KEY = ",\"net\":";
+const JSON_COMPONENT_KEY = ",\"component\":";
+const JSON_VALUE_KEY = ",\"value\":";
 const JSON_MANUFACTURER_KEY = ",\"manufacturer\":";
 const JSON_DESCRIPTION_KEY = ",\"description\":";
 const JSON_ERR_OPEN = "{\"ok\":false,\"error\":";
@@ -89,6 +92,13 @@ const tools = [_]ToolEntry{
     .{ .name = "get_version", .is_mutation = false },
     .{ .name = "run_checks", .is_mutation = false },
     .{ .name = "generate_review", .is_mutation = false },
+    // The auto-generated S-expression language reference, rendered live from
+    // the evaluator's own dispatch tables (same content as docs/language-forms.md).
+    .{ .name = "get_language_reference", .is_mutation = false },
+    // Evaluate a lib/modules defmodule standalone (with caller-chosen args)
+    // and return its schematic summary / scene graph — module-level design
+    // without instantiating it in a real board first.
+    .{ .name = "preview_module", .is_mutation = false },
     // Mutations on history.
     .{ .name = "restore_version", .is_mutation = true },
     // Virtual filesystem — agent reads/edits files like a local checkout.
@@ -202,6 +212,7 @@ fn callInner(
     if (try dispatchVfs(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchProject(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchInfo(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
+    if (try dispatchLanguage(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchReview(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchNotes(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchRequirements(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
@@ -253,6 +264,21 @@ fn dispatchInfo(
     if (std.mem.eql(u8, tool_name, "read_datasheet")) return try toolReadDatasheet(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "search_components")) return try toolSearchComponents(allocator, args_val, out);
     if (std.mem.eql(u8, tool_name, "resolve_mpn")) return try toolResolveMpn(allocator, args_val, out);
+    return null;
+}
+
+/// Language-level tools: the auto-generated S-expression reference and
+/// standalone module preview — the agent-facing surface for authoring
+/// design/module .sexp files without a host design.
+fn dispatchLanguage(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    tool_name: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayListUnmanaged(u8),
+) !?bool {
+    if (std.mem.eql(u8, tool_name, "get_language_reference")) return try toolGetLanguageReference(allocator, args_val, out);
+    if (std.mem.eql(u8, tool_name, "preview_module")) return try toolPreviewModule(allocator, project_dir, args_val, out);
     return null;
 }
 
@@ -573,6 +599,199 @@ fn toolGetSchematic(allocator: std.mem.Allocator, project_dir: []const u8, args_
     const graph = try renderSceneGraph(allocator, project_dir, name);
     try out.writer(allocator).writeAll(graph);
     return true;
+}
+
+/// `get_language_reference` — the auto-generated S-expression language
+/// reference, rendered live from the same dispatch tables the evaluator
+/// runs on (identical content to docs/language-forms.md, so it can never
+/// be stale). Optional `section` returns just one `## ` section; an
+/// unknown title errors with the list of valid ones.
+fn toolGetLanguageReference(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const doc = try docgen.renderLanguageReference(allocator);
+    const section = optionalString(args_val, "section") orelse {
+        try out.appendSlice(allocator, doc);
+        return true;
+    };
+    if (docgen.extractSection(doc, section)) |body| {
+        try out.appendSlice(allocator, body);
+        return true;
+    }
+    const w = out.writer(allocator);
+    try w.print("error: unknown section \"{s}\" — valid sections: ", .{section});
+    var it = docgen.SectionIterator{ .doc = doc };
+    var first = true;
+    while (it.next()) |sec| {
+        if (!first) try w.writeAll(", ");
+        first = false;
+        try w.print("\"{s}\"", .{sec.title});
+    }
+    return false;
+}
+
+/// `preview_module` — evaluate a lib/modules `(defmodule …)` standalone with
+/// caller-chosen arguments against a request-local evaluator (nothing
+/// written). This closes the module-level design loop: edit
+/// `lib/modules/<m>.sexp` via the VFS tools, preview here (netlist summary +
+/// ERC + assertions, or the full scene graph), iterate — no host design
+/// needed. For module-level *layout*, pass the module name straight to
+/// `get_pcb_layout_image` / `describe_pcb_layout` / `export_placement_spec`,
+/// which resolve module names via a real instantiation (else a zero-arg call).
+fn toolPreviewModule(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const w = out.writer(allocator);
+    const module = requireString(args_val, "module") orelse return missingArg(out, allocator, "module");
+    if (!isBareModuleName(module)) {
+        try w.writeAll("{\"ok\":false,\"error\":\"invalid module name (bare lib/modules name expected)\"}");
+        return false;
+    }
+    const args_text = optionalString(args_val, "args") orelse "";
+    const view = optionalString(args_val, "view") orelse "summary";
+
+    // Synthesize a one-sub-block wrapper design and evaluate it in-memory —
+    // the same shape modules.resolveModuleBlock uses for the /modules page.
+    const source = try std.fmt.allocPrint(
+        allocator,
+        "(import {s})\n(design-block \"preview\" (sub-block \"{s}\" ({s} {s})))",
+        .{ module, module, module, args_text },
+    );
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    const result = eval.evalSource(source) catch |e| {
+        try w.writeAll("{\"ok\":false,\"error\":\"module eval failed\",\"diagnostic\":");
+        const diag = try diag_format.build(allocator, "<preview>", source, @errorName(e), eval.last_error);
+        try diag_format.writeJson(w, diag);
+        try w.writeAll("}");
+        return false;
+    };
+    const wrapper: *env_mod.DesignBlock = switch (result) {
+        .design_block => |b| b,
+        else => {
+            try w.writeAll("{\"ok\":false,\"error\":\"module did not evaluate to a design block\"}");
+            return false;
+        },
+    };
+    if (wrapper.sub_blocks.len == 0) {
+        try w.writeAll("{\"ok\":false,\"error\":\"module call produced no sub-block\"}");
+        return false;
+    }
+    const block = wrapper.sub_blocks[0].block;
+
+    if (std.mem.eql(u8, view, "scene_graph")) {
+        const graph = try render_json.renderSceneGraph(allocator, block, project_dir);
+        try out.appendSlice(allocator, graph);
+        return true;
+    }
+    if (!std.mem.eql(u8, view, "summary")) {
+        try w.writeAll("{\"ok\":false,\"error\":\"unknown view (expected summary or scene_graph)\"}");
+        return false;
+    }
+    try writeModuleSummary(allocator, w, project_dir, module, block, eval.assertions.items);
+    return true;
+}
+
+/// Bare module-name guard for the synthesized preview source — atom
+/// characters only, so a crafted name can't splice extra forms into the
+/// wrapper design.
+fn isBareModuleName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |c| {
+        const ok = std.ascii.isAlphanumeric(c) or c == '-' or c == '_';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/// Emit one ERC violation as a JSON object {kind,severity,message[,ref][,net]}.
+/// Shared by run_checks, the build report, and preview_module so the three
+/// surfaces stay shape-identical.
+fn writeErcViolationJson(w: anytype, v: erc_mod.Violation) !void {
+    try w.writeAll("{\"kind\":\"");
+    try w.writeAll(@tagName(v.kind));
+    try w.writeAll("\",\"severity\":\"");
+    try w.writeAll(@tagName(v.severity));
+    try w.writeAll("\",\"message\":");
+    try json_writer.writeString(w, v.message);
+    if (v.ref_des.len > 0) {
+        try w.writeAll(",\"ref\":");
+        try json_writer.writeString(w, v.ref_des);
+    }
+    if (v.net.len > 0) {
+        try w.writeAll(JSON_NET_KEY);
+        try json_writer.writeString(w, v.net);
+    }
+    try w.writeAll("}");
+}
+
+/// Compact JSON summary of an evaluated module block: title, ports,
+/// instances, nets, nested sub-blocks, ERC violations, and the assertions
+/// recorded during evaluation (a module's design math surfaces here).
+/// Boundary `(port …)` nets are expected to look floating in isolation —
+/// the description in tools_list_result.json warns agents accordingly.
+fn writeModuleSummary(
+    allocator: std.mem.Allocator,
+    w: anytype,
+    project_dir: []const u8,
+    module: []const u8,
+    block: *const env_mod.DesignBlock,
+    assertions: []const env_mod.AssertionResult,
+) !void {
+    try w.writeAll("{\"ok\":true,\"module\":");
+    try json_writer.writeString(w, module);
+    try w.writeAll(",\"title\":");
+    try json_writer.writeString(w, block.name);
+    try w.writeAll(",\"ports\":[");
+    for (block.ports, 0..) |p, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll(NAME_FIELD_PREFIX);
+        try json_writer.writeString(w, p.name);
+        try w.writeAll(JSON_NET_KEY);
+        try json_writer.writeString(w, p.net);
+        try w.writeAll(",\"dir\":");
+        try json_writer.writeString(w, p.direction);
+        try w.writeAll("}");
+    }
+    try w.writeAll("],\"instances\":[");
+    for (block.instances, 0..) |inst, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll(REF_DES_FIELD_PREFIX);
+        try json_writer.writeString(w, inst.ref_des);
+        try w.writeAll(JSON_COMPONENT_KEY);
+        try json_writer.writeString(w, inst.component);
+        try w.writeAll(JSON_VALUE_KEY);
+        try json_writer.writeString(w, inst.value);
+        try w.writeAll("}");
+    }
+    try w.writeAll("],\"nets\":[");
+    for (block.nets, 0..) |net, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll(NAME_FIELD_PREFIX);
+        try json_writer.writeString(w, net.name);
+        try w.print(",\"pin_count\":{d}}}", .{net.pins.len});
+    }
+    try w.writeAll("],\"sub_blocks\":[");
+    for (block.sub_blocks, 0..) |sb, i| {
+        if (i > 0) try w.writeAll(",");
+        try json_writer.writeString(w, sb.name);
+    }
+    try w.writeAll("],\"erc\":[");
+    const violations = try erc_mod.runErc(allocator, block, project_dir);
+    var first = true;
+    for (violations) |v| {
+        // The preview root IS the module, so "main IC should be sealed in a
+        // module" is satisfied by construction — reporting it would tell the
+        // agent to do what it already did.
+        if (v.kind == .main_ic_in_design) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try writeErcViolationJson(w, v);
+    }
+    try w.writeAll("],\"assertions\":[");
+    for (assertions, 0..) |a, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("{{\"passed\":{},\"warning\":{},\"message\":", .{ a.passed, a.is_warning });
+        try json_writer.writeString(w, a.message);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]}");
 }
 
 /// Structured spatial facts about the solved placement — the textual twin of
@@ -1467,21 +1686,7 @@ fn runChecks(
         }
         if (!first) try w.writeAll(",");
         first = false;
-        try w.writeAll("{\"kind\":\"");
-        try w.writeAll(@tagName(v.kind));
-        try w.writeAll("\",\"severity\":\"");
-        try w.writeAll(@tagName(v.severity));
-        try w.writeAll("\",\"message\":");
-        try json_writer.writeString(w, v.message);
-        if (v.ref_des.len > 0) {
-            try w.writeAll(",\"ref\":");
-            try json_writer.writeString(w, v.ref_des);
-        }
-        if (v.net.len > 0) {
-            try w.writeAll(JSON_NET_KEY);
-            try json_writer.writeString(w, v.net);
-        }
-        try w.writeAll("}");
+        try writeErcViolationJson(w, v);
     }
     try w.writeAll("]}");
     return true;
@@ -1644,11 +1849,11 @@ fn listInstances(
         try json_writer.writeString(w, inst.ref_des);
         try w.writeAll(",\"label\":");
         try json_writer.writeString(w, inst.label);
-        try w.writeAll(",\"component\":");
+        try w.writeAll(JSON_COMPONENT_KEY);
         try json_writer.writeString(w, inst.component);
         try w.writeAll(",\"symbol\":");
         try json_writer.writeString(w, inst.symbol);
-        try w.writeAll(",\"value\":");
+        try w.writeAll(JSON_VALUE_KEY);
         try json_writer.writeString(w, inst.value);
 
         // Pin count: prefer explicit parts if present (multi-part symbol);
@@ -1856,9 +2061,9 @@ fn getNet(
             first = false;
             try w.writeAll(REF_DES_FIELD_PREFIX);
             try json_writer.writeString(w, inst.ref_des);
-            try w.writeAll(",\"component\":");
+            try w.writeAll(JSON_COMPONENT_KEY);
             try json_writer.writeString(w, inst.component);
-            try w.writeAll(",\"value\":");
+            try w.writeAll(JSON_VALUE_KEY);
             try json_writer.writeString(w, inst.value);
             try w.writeAll("}");
             break;
@@ -1943,21 +2148,7 @@ fn writeBuildReport(w: anytype, report: edit.BuildReport) !void {
     try w.writeAll("],\"erc\":[");
     for (report.erc, 0..) |v, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll("{\"kind\":\"");
-        try w.writeAll(@tagName(v.kind));
-        try w.writeAll("\",\"severity\":\"");
-        try w.writeAll(@tagName(v.severity));
-        try w.writeAll("\",\"message\":");
-        try json_writer.writeString(w, v.message);
-        if (v.ref_des.len > 0) {
-            try w.writeAll(",\"ref\":");
-            try json_writer.writeString(w, v.ref_des);
-        }
-        if (v.net.len > 0) {
-            try w.writeAll(JSON_NET_KEY);
-            try json_writer.writeString(w, v.net);
-        }
-        try w.writeAll("}");
+        try writeErcViolationJson(w, v);
     }
     try w.writeAll("]}");
 }
@@ -2324,4 +2515,42 @@ test "list_library without a query lists every entry" {
     try listLibrarySubdir(alloc, proj, "components", null, out.writer(alloc));
     try std.testing.expect(std.mem.indexOf(u8, out.items, "aaa") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "bbb") != null);
+}
+
+/// (test helper) True when `name` is a registered tool in the `tools` table.
+fn isKnownTool(name: []const u8) bool {
+    for (tools) |t| {
+        if (std.mem.eql(u8, t.name, name)) return true;
+    }
+    return false;
+}
+
+/// (test helper) The embedded tools/list JSON and the `tools` registration
+/// table declare exactly the same tool names — checked both directions plus
+/// a count match, so adding a tool to one site without the other fails.
+fn jsonMatchesToolTable(alloc: std.mem.Allocator) !bool {
+    var arena_inst = std.heap.ArenaAllocator.init(alloc);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, tools_list_result, .{});
+    const list = (root.object.get("tools") orelse return false).array.items;
+    if (list.len != tools.len) return false;
+    for (list) |item| {
+        const jname = item.object.get("name") orelse return false;
+        if (!isKnownTool(jname.string)) return false;
+    }
+    for (tools) |t| {
+        var found = false;
+        for (list) |item| {
+            const jname = item.object.get("name") orelse continue;
+            if (std.mem.eql(u8, jname.string, t.name)) found = true;
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+// spec: serve/mcp_tools - The tools registration table and the embedded tools_list_result.json declare exactly the same tool names
+test "tools table matches tools_list_result.json" {
+    try std.testing.expect(try jsonMatchesToolTable(std.testing.allocator));
 }

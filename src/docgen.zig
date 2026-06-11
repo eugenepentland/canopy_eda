@@ -191,6 +191,53 @@ fn renderTo(writer: anytype) !void {
     try writer.writeAll(".\n");
 }
 
+/// Slice one `## `-headed section out of a rendered reference (heading
+/// line through the byte before the next `## ` heading, or EOF). Matching
+/// is case-insensitive on the heading title so MCP callers can ask for
+/// "numeric literals". Returns null when no heading matches — derive the
+/// valid titles with `SectionIterator`, never from a hardcoded list.
+pub fn extractSection(doc: []const u8, title: []const u8) ?[]const u8 {
+    var it = SectionIterator{ .doc = doc };
+    while (it.next()) |sec| {
+        if (std.ascii.eqlIgnoreCase(sec.title, title)) return sec.body;
+    }
+    return null;
+}
+
+/// One `## ` section of a rendered reference: the bare heading title and
+/// the full body slice (heading line included).
+pub const Section = struct { title: []const u8, body: []const u8 };
+
+/// Walk the `## ` headings of a rendered reference in order. Keeps the
+/// section list derived from the generated output itself, so a new doc
+/// section is automatically addressable with zero registration.
+pub const SectionIterator = struct {
+    doc: []const u8,
+    pos: usize = 0,
+
+    pub fn next(self: *SectionIterator) ?Section {
+        const start = findHeading(self.doc, self.pos) orelse return null;
+        const title_start = start + "## ".len;
+        const title_end = std.mem.indexOfScalarPos(u8, self.doc, title_start, '\n') orelse self.doc.len;
+        const end = findHeading(self.doc, title_end) orelse self.doc.len;
+        self.pos = end;
+        return .{
+            .title = std.mem.trim(u8, self.doc[title_start..title_end], " \r"),
+            .body = self.doc[start..end],
+        };
+    }
+
+    /// Byte offset of the next line starting with `## `, at or after `from`.
+    fn findHeading(doc: []const u8, from: usize) ?usize {
+        var i = from;
+        while (std.mem.indexOfPos(u8, doc, i, "## ")) |hit| {
+            if (hit == 0 or doc[hit - 1] == '\n') return hit;
+            i = hit + 1;
+        }
+        return null;
+    }
+};
+
 /// Write table-cell content, escaping `|` so syntax templates like
 /// `(status concept|implemented|review)` don't split the Markdown cell.
 fn writeCell(writer: anytype, text: []const u8) !void {
@@ -242,6 +289,38 @@ test "language-forms.md is in sync with the dispatch tables" {
     // expectEqualStrings produces a usable diff on failure. To
     // regenerate the file, run `zig build docs`.
     try std.testing.expectEqualStrings(committed, generated);
+}
+
+// spec: docgen - extractSection returns one ## section of the rendered reference, matching the title case-insensitively
+test "extractSection slices one heading's section" {
+    const alloc = std.testing.allocator;
+    const doc = try renderLanguageReference(alloc);
+    defer alloc.free(doc);
+
+    const sec = extractSection(doc, "numeric literals").?;
+    try std.testing.expect(std.mem.startsWith(u8, sec, "## Numeric literals"));
+    try std.testing.expect(std.mem.indexOf(u8, sec, "## Design-scope forms") == null);
+    try std.testing.expect(extractSection(doc, "no such section") == null);
+}
+
+/// (helper) Count the `## ` sections an iterator yields.
+fn countSections(doc: []const u8) usize {
+    var it = SectionIterator{ .doc = doc };
+    var n: usize = 0;
+    while (it.next()) |_| n += 1;
+    return n;
+}
+
+// spec: docgen - SectionIterator walks every ## heading of the rendered reference in order
+test "SectionIterator finds the reference sections" {
+    const alloc = std.testing.allocator;
+    const doc = try renderLanguageReference(alloc);
+    defer alloc.free(doc);
+
+    var it = SectionIterator{ .doc = doc };
+    const first = it.next().?;
+    try std.testing.expectEqualStrings("Special forms", first.title);
+    try std.testing.expect(countSections(doc) >= 6);
 }
 
 // spec: docgen - The generated reference names every category key so (category …) docs follow the classifier map
