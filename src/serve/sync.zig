@@ -9,6 +9,7 @@ const std = @import("std");
 const json_writer = @import("../json_writer.zig");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
+const clock = @import("../infra/clock.zig");
 const log = @import("../infra/log.zig");
 const paths = @import("../paths.zig");
 
@@ -921,6 +922,7 @@ pub fn runSyncPlan(
         .sub_blocks = block.sub_blocks,
         .emit_layout_vias = parsed.emit_layout_vias,
         .dot_nets = parsed.dot_nets,
+        .board_fresh = parsed.board.len == 0,
     };
     for (instances.items) |inst| try handleInstance(&diff_ctx, inst, &w, &first_op);
 
@@ -1203,22 +1205,80 @@ fn extractOpsArrayJson(envelope: []const u8) ?[]const u8 {
     return envelope[start..last_brace];
 }
 
+/// How many timestamped board backups (`<path>.bak-<stamp>`) to keep per
+/// `.kicad_pcb`. Older ones are pruned best-effort after each backup.
+const MAX_BOARD_BACKUPS: usize = 10;
+/// Suffix between the board filename and the backup timestamp.
+const BACKUP_INFIX = ".bak-";
+
+/// Render an epoch-seconds value as `YYYY-MM-DDTHH-MM-SS` — the same
+/// filesystem-safe, lexicographically-sortable stamp the history snapshots
+/// use, so sorting backup filenames sorts them chronologically.
+fn formatBackupStamp(arena: std.mem.Allocator, epoch_sec: u64) std.mem.Allocator.Error![]u8 {
+    const es = std.time.epoch.EpochSeconds{ .secs = epoch_sec };
+    const year_day = es.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_sec = es.getDaySeconds();
+    return std.fmt.allocPrint(arena, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}-{d:0>2}-{d:0>2}", .{
+        @as(u32, year_day.year),
+        month_day.month.numeric(),
+        @as(u32, month_day.day_index) + 1,
+        day_sec.getHoursIntoDay(),
+        day_sec.getMinutesIntoHour(),
+        day_sec.getSecondsIntoMinute(),
+    });
+}
+
+/// Best-effort cap on the number of `<path>.bak-*` siblings: keeps the
+/// newest MAX_BOARD_BACKUPS (the stamp sorts chronologically), deletes the
+/// rest. Any failure is logged and ignored — a failed prune must never
+/// fail the sync whose backup already succeeded.
+fn pruneBackups(arena: std.mem.Allocator, path: []const u8) void {
+    pruneBackupsImpl(arena, path) catch |e|
+        log.warn("kicad-pcb backup prune for {s} failed: {s}", .{ path, @errorName(e) });
+}
+
+fn pruneBackupsImpl(arena: std.mem.Allocator, path: []const u8) !void {
+    const dir_path = std.fs.path.dirname(path) orelse ".";
+    const prefix = try std.fmt.allocPrint(arena, "{s}{s}", .{ std.fs.path.basename(path), BACKUP_INFIX });
+    var dir = try infra_fs.cwd().openDir(dir_path, .{ .iterate = true });
+    defer dir.close();
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
+        try names.append(arena, try arena.dupe(u8, entry.name));
+    }
+    if (names.items.len <= MAX_BOARD_BACKUPS) return;
+    std.mem.sort([]const u8, names.items, {}, lessThanStr);
+    for (names.items[0 .. names.items.len - MAX_BOARD_BACKUPS]) |n| {
+        dir.deleteFile(n) catch |e|
+            log.warn("kicad-pcb backup prune: delete {s} failed: {s}", .{ n, @errorName(e) });
+    }
+}
+
 /// Write `contents` to `path` atomically via tmp file → fsync(file) →
 /// rename. NAS callers concerned about partial visibility through NFS
 /// caches can run `sync` post-hoc; for a human-driven button press the
 /// rename is durable enough in practice.
 fn writeFileAtomic(arena: std.mem.Allocator, path: []const u8, contents: []const u8) !void {
-    // Roll the current file to `<path>.bak` before overwriting so a bad
-    // sync (e.g. an unwanted prune) is one copy away from undo — the board
-    // lives on the NAS, outside git, so this is the only safety net. Abort
-    // the whole write if the backup can't be made; better to fail loudly
-    // than overwrite with no fallback. FileNotFound = first sync, nothing
-    // to back up yet, so proceed.
-    const backup_path = try std.fmt.allocPrint(arena, "{s}.bak", .{path});
+    // Roll the current file to `<path>.bak-<timestamp>` before overwriting so
+    // a bad sync (e.g. an unwanted prune) is one copy away from undo — the
+    // board lives on the NAS, outside git, so this is the only safety net.
+    // Timestamped (rather than a single `.bak`) so a quick second push can't
+    // clobber the only good backup; `pruneBackups` keeps the newest
+    // MAX_BOARD_BACKUPS. Abort the whole write if the backup can't be made;
+    // better to fail loudly than overwrite with no fallback. FileNotFound =
+    // first sync, nothing to back up yet, so proceed.
+    const now = clock.timestamp();
+    const stamp = try formatBackupStamp(arena, if (now < 0) 0 else @intCast(now));
+    const backup_path = try std.fmt.allocPrint(arena, "{s}{s}{s}", .{ path, BACKUP_INFIX, stamp });
     infra_fs.cwd().copyFile(path, infra_fs.cwd(), backup_path, .{}) catch |e| switch (e) {
         error.FileNotFound => {},
         else => return e,
     };
+    pruneBackups(arena, path);
 
     const tmp_path = try std.fmt.allocPrint(arena, "{s}.tmp", .{path});
 
@@ -1592,6 +1652,15 @@ const DiffContext = struct {
     /// to keep per-pin sub-nets when naming them (mirrors ParsedSyncPlan).
     emit_layout_vias: bool,
     dot_nets: bool,
+    /// True when the target board contains no footprints at all — a brand-new
+    /// `.kicad_pcb`. Layout-pose seeding and stitching-via emission only run
+    /// on fresh boards: on a populated (laid-out, routed) board the design's
+    /// auto-layout coordinates are meaningless, so placing new parts at them —
+    /// or spraying the layout's via plan across the routing — corrupts real
+    /// work. On a non-fresh board, new parts go to the off-board staging area
+    /// (per-section grid, or per-sub-block arranged unit) and no via is ever
+    /// written.
+    board_fresh: bool,
 };
 
 /// Walk every board fp that didn't match any design instance and emit the
@@ -2525,7 +2594,8 @@ fn groupAddsBySection(
 ///   1. **Per-sub-block module layout** — a not-yet-placed sub-block is seeded
 ///      from *its own* module default layout, as one pre-laid-out unit in the
 ///      staging area (drag into place in KiCad). See `seedSubBlocks`.
-///   2. **Whole-design premade layout** — a remaining part the design's own
+///   2. **Whole-design premade layout** (fresh boards only — see
+///      `DiffContext.board_fresh`) — a remaining part the design's own
 ///      layout names lands at that exact (x, y, rot).
 ///   3. **Section-staging grid** — anything left clusters in a staging box.
 /// Existing/matched footprints are never moved by any tier.
@@ -2541,7 +2611,11 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
     if (rest.len == 0) return;
 
     // Tier 2: the whole-design premade layout names the part → exact pose.
-    const layout = d.premade_layout orelse return emitStagingGrid(d, w, first, rest);
+    // Fresh boards only — on a populated board the layout's coordinates land
+    // in the middle of existing placement/routing, so everything left over
+    // goes to the off-board staging grid instead.
+    const layout_if_fresh: ?std.StringHashMap(pcb_layout.SyncPose) = if (d.board_fresh) d.premade_layout else null;
+    const layout = layout_if_fresh orelse return emitStagingGrid(d, w, first, rest);
     var grid_rest: std.ArrayListUnmanaged(PendingAdd) = .empty;
     for (rest) |pa| {
         const pose = layout.get(pa.inst.ref_des) orelse {
@@ -2692,10 +2766,12 @@ fn seedOneSubBlock(
         try w.*.writeAll("}");
     }
 
-    // GND vias only when the WHOLE block is fresh (every module part was a fresh
-    // add) — a partly-placed block's other parts live elsewhere on the board, so
-    // block-frame vias for them would strand. Offset to match the parts.
-    if (d.emit_layout_vias and seeded == poses.len)
+    // GND vias only on a fresh board AND when the WHOLE block is fresh (every
+    // module part was a fresh add). On a populated board the staged block gets
+    // dragged into place, but vias don't travel with footprints — they'd stay
+    // stranded in the staging band. A partly-placed block's other parts live
+    // elsewhere on the board, so block-frame vias for them would strand too.
+    if (d.emit_layout_vias and d.board_fresh and seeded == poses.len)
         try emitBlockVias(d, w, first, sb.block, poses, dx, dy);
 
     return (bx1 - bx0) + BLOCK_STAGE_GAP_MM;
@@ -2741,14 +2817,17 @@ fn stripSubPrefix(ref: []const u8, sec: []const u8) []const u8 {
 
 /// Emit `add_via` ops for the GND-plane stitching vias of a first-insertion
 /// seed. Only fires when (a) vias weren't opted out (`?no_layout_vias=1`),
-/// (b) the design has a premade layout, (c) this sync actually added parts, and
-/// (d) **every** buffered add is named by that layout — i.e. no part fell back
-/// to the staging grid. The all-named gate matters because `loadSyncVias`
-/// rebuilds the *whole* placement at the layout poses; a part the layout
-/// doesn't name would sit at the origin there and drop a stray via, so we skip
-/// vias entirely for a partial seed. The writer de-dups by position, so a later
-/// re-seed of the same board re-emits these harmlessly. Net names are collapsed
-/// the same way pad nets are, so the via lands on the GND the pads reference.
+/// (b) the target board is FRESH (zero footprints — see
+/// `DiffContext.board_fresh`; on a populated board the layout's via plan
+/// lands on top of real routing), (c) the design has a premade layout,
+/// (d) this sync actually added parts, and (e) **every** buffered add is
+/// named by that layout — i.e. no part fell back to the staging grid. The
+/// all-named gate matters because `loadSyncVias` rebuilds the *whole*
+/// placement at the layout poses; a part the layout doesn't name would sit
+/// at the origin there and drop a stray via, so we skip vias entirely for a
+/// partial seed. The writer de-dups by position, so a later re-seed of the
+/// same board re-emits these harmlessly. Net names are collapsed the same
+/// way pad nets are, so the via lands on the GND the pads reference.
 fn emitLayoutVias(
     d: *DiffContext,
     block: *const env_mod.DesignBlock,
@@ -2759,6 +2838,7 @@ fn emitLayoutVias(
     first: *bool,
 ) !void {
     if (!parsed.emit_layout_vias) return;
+    if (!d.board_fresh) return;
     if (d.summary.added == 0) return;
     const layout = d.premade_layout orelse return;
     for (d.pending_adds.items) |pa| {
@@ -3300,4 +3380,69 @@ test "writeGeomBlockProtoJson traces a poly as one segment per edge" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "BL_F_SilkS") != null);
     // One BoardGraphicShape per edge — four vertices close into four segments.
     try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, buf.items, "BL_F_SilkS"));
+}
+
+// spec: serve/sync - formatBackupStamp renders epoch seconds as a sortable filesystem-safe stamp
+test "formatBackupStamp renders epoch zero as a sortable filesystem-safe stamp" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const stamp = try formatBackupStamp(aa.allocator(), 0);
+    try std.testing.expectEqualStrings("1970-01-01T00-00-00", stamp);
+}
+
+/// Test helper: pre-seed `n` stamped backups of `b.kicad_pcb`. 1969 stamps
+/// sort before any real clock stamp, so a prune must drop the oldest of
+/// these, never the freshly-rolled backup.
+fn writeStaleBackupsForTest(dir: std.fs.Dir, arena: std.mem.Allocator, n: usize) !void {
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const bname = try std.fmt.allocPrint(arena, "b.kicad_pcb.bak-1969-01-01T00-00-{d:0>2}", .{i});
+        try dir.writeFile(.{ .sub_path = bname, .data = "stale" });
+    }
+}
+
+const BackupScanForTest = struct { count: usize, fresh_holds_old: bool, oldest_present: bool };
+
+/// Test helper: tally `b.kicad_pcb.bak-*` siblings — how many, whether the
+/// oldest 1969 stamp survived, and whether the fresh (real-clock) backup
+/// carries the pre-write board contents.
+fn scanBackupsForTest(dir: std.fs.Dir, arena: std.mem.Allocator) !BackupScanForTest {
+    var out = BackupScanForTest{ .count = 0, .fresh_holds_old = false, .oldest_present = false };
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, "b.kicad_pcb.bak-")) continue;
+        out.count += 1;
+        if (std.mem.endsWith(u8, entry.name, "1969-01-01T00-00-00")) out.oldest_present = true;
+        if (std.mem.indexOf(u8, entry.name, "1969") == null) {
+            const content = try dir.readFileAlloc(arena, entry.name, 64);
+            out.fresh_holds_old = std.mem.eql(u8, content, "old-board");
+        }
+    }
+    return out;
+}
+
+// spec: serve/sync - writeFileAtomic rolls a timestamped board backup and prunes beyond MAX_BOARD_BACKUPS
+test "writeFileAtomic rolls a timestamped backup and prunes beyond the cap" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+
+    const root = try tmp.dir.realpathAlloc(arena, ".");
+    const board_path = try std.fmt.allocPrint(arena, "{s}/b.kicad_pcb", .{root});
+    try tmp.dir.writeFile(.{ .sub_path = "b.kicad_pcb", .data = "old-board" });
+    // Start at the cap so the freshly-rolled backup pushes the count over it.
+    try writeStaleBackupsForTest(tmp.dir, arena, MAX_BOARD_BACKUPS);
+
+    try writeFileAtomic(arena, board_path, "new-board");
+
+    const got = try tmp.dir.readFileAlloc(arena, "b.kicad_pcb", 64);
+    try std.testing.expectEqualStrings("new-board", got);
+    // Cap holds after the new backup joined: the oldest 1969 stamp was pruned
+    // and the fresh backup carries the pre-write contents.
+    const scan = try scanBackupsForTest(tmp.dir, arena);
+    try std.testing.expectEqual(MAX_BOARD_BACKUPS, scan.count);
+    try std.testing.expect(scan.fresh_holds_old);
+    try std.testing.expect(!scan.oldest_present);
 }
