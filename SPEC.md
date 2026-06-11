@@ -629,6 +629,8 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - maybeCollapseDotSubNet folds a per-pin sub-net to its rail by default but keeps it verbatim in dot-net mode
 - formatBackupStamp renders epoch seconds as a sortable filesystem-safe stamp
 - writeFileAtomic rolls a timestamped board backup and prunes beyond MAX_BOARD_BACKUPS
+- placement guard reports moved, rotated, or side-flipped footprints and exempts adds/removes
+- placement guard passes when every existing footprint keeps its pose
 
 ## serve/vfs
 

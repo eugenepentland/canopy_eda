@@ -29,6 +29,7 @@ const pcb_layout = @import("pcb_layout_page.zig");
 // ── Constants ─────────────────────────────────────────────────────
 const HTTP_NOT_FOUND: u16 = 404;
 const HTTP_BAD_REQUEST: u16 = 400;
+const HTTP_CONFLICT: u16 = 409;
 const HTTP_INTERNAL_ERROR: u16 = 500;
 const MAX_FOOTPRINT_BYTES: usize = 1024 * 1024;
 /// Cap when reading a `.sexp` source to mirror beside the board (matches the
@@ -303,7 +304,7 @@ fn loadFootprintDefImpl(
     const fp_source = infra_fs.cwd().readFileAlloc(spc.arena, fp_path, MAX_FOOTPRINT_BYTES) catch return null;
 
     const nodes = parser_mod.parse(spc.arena, fp_source) catch return null;
-    if (nodes.len == 0 or !nodes[0].isForm("footprint")) return null;
+    if (nodes.len == 0 or !nodes[0].isForm(FORM_HEAD_FOOTPRINT)) return null;
     const children = nodes[0].asList() orelse return null;
     if (children.len < 2) return null;
 
@@ -980,14 +981,18 @@ const MAX_PCB_BYTES: usize = 64 * 1024 * 1024;
 /// computes the diff against the design's flattened netlist, and applies
 /// the ops to the file in place.
 /// Query flags: `?dry_run=1` returns the JSON envelope the diff would
-/// produce without writing; `?migrate=1` enables the heuristic relink
-/// (parent-path + value + net signature) to recover a board whose
-/// canopy_uuids/ref-des drifted; `?prune=1` turns every `flag_stale` op
-/// into a real `remove`; `?dot_nets=1` keeps the per-pin `(decouple …)`
-/// sub-nets (`VDD.U18.IN`) as pad nets instead of collapsing to the rail,
-/// so each bypass cap shows which pin it belongs to; `?refresh=1` re-bakes
-/// every matched part's footprint geometry (same-name swap) so an existing
-/// board backfills new silkscreen/fab outlines without moving anything.
+/// produce without writing; the heuristic relink (parent-path + value + net
+/// signature, recovers drifted canopy_uuids/ref-des as in-place renames) is
+/// ON by default — `?no_migrate=1` disables it, `?migrate=1` is accepted as
+/// a no-op for old links; `?prune=1` turns every `flag_stale` op into a
+/// real `remove`; `?dot_nets=1` keeps the per-pin `(decouple …)` sub-nets
+/// (`VDD.U18.IN`) as pad nets instead of collapsing to the rail, so each
+/// bypass cap shows which pin it belongs to; `?refresh=1` re-bakes every
+/// matched part's footprint geometry (same-name swap) so an existing board
+/// backfills new silkscreen/fab outlines without moving anything. Every
+/// non-dry write runs the placement guard: if the new board would move,
+/// rotate, or side-flip an existing footprint, the sync answers HTTP 409
+/// and writes nothing.
 pub fn syncKicadPcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = HTTP_NOT_FOUND;
@@ -995,11 +1000,16 @@ pub fn syncKicadPcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     };
     const dry_run = isDryRun(req);
     const prune_stale = isQueryFlagSet(req, "prune");
-    // `?migrate=1` enables the heuristic relink (parent-path + value + net
-    // signature) so a board whose canopy_uuids/ref-des drifted from the
-    // design gets re-linked in place (placement preserved) instead of
-    // churning into add+stale. The conservative default stays off.
-    const migrate = isQueryFlagSet(req, "migrate");
+    // The heuristic relink (parent-path + value + net signature) is ON by
+    // default for the file-based path: a board part whose canopy_uuid/ref-des
+    // drifted from the design (e.g. a refdes-prefix change like FB→L) gets
+    // re-linked in place — refdes updated, footprint/position/routing kept —
+    // instead of churning into a staged duplicate + stale flag. Both tiers
+    // only pair when the match is unambiguous (equal group counts, or a
+    // wiring signature unique on both sides), and the placement guard below
+    // aborts any write that would move a part. `?no_migrate=1` restores the
+    // old conservative matching; `?migrate=1` is still accepted (no-op).
+    const migrate = !isQueryFlagSet(req, "no_migrate");
     // `?dot_nets=1` keeps each decoupling cap on its own per-pin sub-net.
     const dot_nets = isQueryFlagSet(req, "dot_nets");
     // `?refresh=1` re-bakes every matched part's footprint geometry (same-name
@@ -1111,6 +1121,19 @@ fn runKicadPcbSync(
     // "file modified, reload?" every push and reporting non-zero changes
     // to the user forever.
     const wrote_file = !statsAreZero(stats);
+
+    // Placement guard: abort (HTTP 409, nothing written) if the new board
+    // would move, rotate, or side-flip ANY footprint that already exists.
+    // The sync's contract is that only fresh adds get positions — this
+    // backstops the whole diff/writer pipeline against ever rearranging a
+    // routed board again (the 2026-06-11 bottom-flip incident).
+    if (wrote_file) {
+        if (try placementViolations(req.arena, src, new_pcb)) |viol| {
+            log.warn("kicad-pcb sync {s}: {s}", .{ name, viol });
+            sendError(res, HTTP_CONFLICT, viol);
+            return;
+        }
+    }
     if (wrote_file) writeFileAtomic(req.arena, pcb_path, new_pcb) catch return error.PcbWriteFailed;
 
     // Mirror the schematic source (the design `.sexp` + every sub-block module/
@@ -1256,6 +1279,117 @@ fn pruneBackupsImpl(arena: std.mem.Allocator, path: []const u8) !void {
         dir.deleteFile(n) catch |e|
             log.warn("kicad-pcb backup prune: delete {s} failed: {s}", .{ n, @errorName(e) });
     }
+}
+
+// ── Placement guard ──────────────────────────────────────────────────
+// The sync's contract is that an existing footprint NEVER moves, rotates,
+// or changes board side — only fresh adds get positions and only prune
+// deletes parts. Before any write, the old and new board texts are compared
+// footprint-by-footprint; a violation aborts the write with HTTP 409 so a
+// regression in the diff/writer can't silently rearrange a routed board.
+
+/// Position tolerance (mm) when comparing placements — KiCad stores 4
+/// decimals, so anything under a tenth of a micron is formatting noise.
+const PLACEMENT_EPS_MM: f64 = 1e-4;
+/// Rotation tolerance (degrees).
+const PLACEMENT_EPS_DEG: f64 = 1e-3;
+/// At most this many offending parts are named in the error message.
+const MAX_PLACEMENT_VIOLATIONS_LISTED: usize = 8;
+
+/// One footprint's placement read from a `.kicad_pcb` text; map key is the
+/// footprint's KiCad-internal uuid.
+const FpPlacement = struct { ref: []const u8, x: f64, y: f64, rot: f64, layer: []const u8 };
+
+/// Collect every top-level footprint's (uuid → ref/x/y/rot/layer) from a
+/// board text. Unparseable input yields an empty map (the guard degrades to
+/// a no-op rather than blocking the sync on its own bug — both texts were
+/// already parsed upstream by the reader/writer in any real request).
+fn collectPlacements(arena: std.mem.Allocator, src: []const u8) std.mem.Allocator.Error!std.StringHashMap(FpPlacement) {
+    var out = std.StringHashMap(FpPlacement).init(arena);
+    const nodes = parser_mod.parse(arena, src) catch return out;
+    if (nodes.len == 0) return out;
+    const root = nodes[0].asList() orelse return out;
+    for (root) |child| {
+        if (!child.isForm(FORM_HEAD_FOOTPRINT)) continue;
+        const cl = child.asList() orelse continue;
+        var uuid: []const u8 = "";
+        var ref: []const u8 = "?";
+        var x: f64 = 0;
+        var y: f64 = 0;
+        var rot: f64 = 0;
+        var layer: []const u8 = "";
+        for (cl[1..]) |sub| {
+            const sl = sub.asList() orelse continue;
+            if (sl.len < 2) continue;
+            const head = sl[0].asAtom() orelse continue;
+            if (std.mem.eql(u8, head, FORM_HEAD_UUID)) {
+                uuid = sl[1].asString() orelse uuid;
+            } else if (std.mem.eql(u8, head, FORM_HEAD_AT)) {
+                if (sl.len >= 3) {
+                    x = sl[1].asNumber() orelse 0;
+                    y = sl[2].asNumber() orelse 0;
+                }
+                if (sl.len >= 4) rot = sl[3].asNumber() orelse 0;
+            } else if (std.mem.eql(u8, head, FORM_HEAD_LAYER)) {
+                layer = sl[1].asString() orelse (sl[1].asAtom() orelse layer);
+            } else if (std.mem.eql(u8, head, FORM_HEAD_PROPERTY) and sl.len >= 3) {
+                const pk = sl[1].asString() orelse continue;
+                if (std.mem.eql(u8, pk, "Reference")) ref = sl[2].asString() orelse ref;
+            }
+        }
+        if (uuid.len > 0) try out.put(uuid, .{ .ref = ref, .x = x, .y = y, .rot = rot, .layer = layer });
+    }
+    return out;
+}
+
+const FORM_HEAD_UUID = "uuid";
+const FORM_HEAD_AT = "at";
+const FORM_HEAD_LAYER = "layer";
+const FORM_HEAD_PROPERTY = "property";
+const FORM_HEAD_FOOTPRINT = "footprint";
+
+/// Compare every footprint present in BOTH board texts and describe any whose
+/// placement changed — moved (x/y), rotated, or flipped to the other side.
+/// Returns null when the invariant holds. Parts present on only one side
+/// (fresh adds, pruned stales) are exempt: the sync may create or delete
+/// parts, but it must never displace one that exists.
+fn placementViolations(arena: std.mem.Allocator, old_src: []const u8, new_src: []const u8) std.mem.Allocator.Error!?[]const u8 {
+    var old_map = try collectPlacements(arena, old_src);
+    const new_map = try collectPlacements(arena, new_src);
+    var list: std.ArrayListUnmanaged(u8) = .empty;
+    const w = list.writer(arena);
+    var count: usize = 0;
+    var it = old_map.iterator();
+    while (it.next()) |entry| {
+        const a = entry.value_ptr.*;
+        const b = new_map.get(entry.key_ptr.*) orelse continue;
+        const side_changed = !std.mem.eql(u8, a.layer, b.layer);
+        const moved = @abs(a.x - b.x) > PLACEMENT_EPS_MM or @abs(a.y - b.y) > PLACEMENT_EPS_MM;
+        const drot = @abs(@mod(a.rot - b.rot + 180.0, 360.0) - 180.0);
+        const rotated = drot > PLACEMENT_EPS_DEG;
+        const changed = side_changed or moved or rotated;
+        if (!changed) continue;
+        count += 1;
+        if (count > MAX_PLACEMENT_VIOLATIONS_LISTED) continue;
+        if (count > 1) try w.writeAll("; ");
+        if (side_changed) {
+            try w.print("{s}: side {s} -> {s}", .{ a.ref, a.layer, b.layer });
+        } else if (moved) {
+            try w.print("{s}: moved ({d:.3}, {d:.3}) -> ({d:.3}, {d:.3})", .{ a.ref, a.x, a.y, b.x, b.y });
+        } else {
+            try w.print("{s}: rotated {d:.1} -> {d:.1}", .{ a.ref, a.rot, b.rot });
+        }
+    }
+    if (count == 0) return null;
+    var msg: std.ArrayListUnmanaged(u8) = .empty;
+    const mw = msg.writer(arena);
+    try mw.print(
+        "placement guard: this sync would change the position/side of {d} existing part(s) — write aborted, board file unchanged: {s}",
+        .{ count, list.items },
+    );
+    if (count > MAX_PLACEMENT_VIOLATIONS_LISTED)
+        try mw.print(" (+{d} more)", .{count - MAX_PLACEMENT_VIOLATIONS_LISTED});
+    return msg.items;
 }
 
 /// Write `contents` to `path` atomically via tmp file → fsync(file) →
@@ -1833,11 +1967,13 @@ fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance) ?BoardFp {
     // for a design instance whose canopy uuid happens to also point at
     // a (likely agent-created duplicate at origin) by_uuid entry, the
     // netsig pair wins and the duplicate falls into stale — exactly
-    // what the user wants when running --migrate to recover a board
-    // where a hierarchy move (top-level `Q1` → `disp/Q3`) caused the
-    // sync to create a clone instead of relinking the existing fp.
+    // what the user wants to recover a board where a hierarchy move
+    // (top-level `Q1` → `disp/Q3`) caused the sync to create a clone
+    // instead of relinking the existing fp.
     if (d.migrate_heuristic) {
-        if (d.by_netsig.get(inst.uuid)) |m| return m;
+        if (d.by_netsig.get(inst.uuid)) |m| {
+            if (!d.matched_uuids.contains(m.kicad_uuid)) return m;
+        }
     }
     if (pickByUuidOrRef(inst.uuid, inst.ref_des, d.by_uuid, d.by_ref, d.reserved_kicad_uuids, d.matched_uuids)) |m| return m;
     // Adopt-in-place: a board fp whose KiCad-internal uuid equals this
@@ -1849,8 +1985,14 @@ fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance) ?BoardFp {
     if (pickByKicadUuid(inst.uuid, d.by_kicad_uuid, d.matched_uuids)) |m| return m;
     // Migration tier (parent_path/value). canopy_uuid stamping + ref-des
     // rename are emitted by handleMatched for every match tier (Option G),
-    // so matchInstance no longer emits anything itself.
-    return heuristicMatch(d, inst);
+    // so matchInstance no longer emits anything itself. Refuse an fp some
+    // earlier instance already claimed this walk — falling through to an
+    // add is strictly better than two instances emitting contradictory
+    // ops against one footprint.
+    if (heuristicMatch(d, inst)) |m| {
+        if (!d.matched_uuids.contains(m.kicad_uuid)) return m;
+    }
+    return null;
 }
 
 /// Migration-mode lookup for (parent_path, value) pairings. Gated on
@@ -2264,7 +2406,7 @@ fn handleMatched(
 /// collide with the description KiCad reads from the footprint library.
 fn skipDesignProperty(key: []const u8) bool {
     if (std.mem.eql(u8, key, "value")) return true;
-    if (std.mem.eql(u8, key, "footprint")) return true;
+    if (std.mem.eql(u8, key, FORM_HEAD_FOOTPRINT)) return true;
     if (std.mem.eql(u8, key, "description")) return true;
     return false;
 }
@@ -3460,4 +3602,48 @@ test "writeFileAtomic rolls a timestamped backup and prunes beyond the cap" {
     try std.testing.expectEqual(MAX_BOARD_BACKUPS, scan.count);
     try std.testing.expect(scan.fresh_holds_old);
     try std.testing.expect(!scan.oldest_present);
+}
+
+// spec: serve/sync - placement guard reports moved, rotated, or side-flipped footprints and exempts adds/removes
+test "placementViolations flags moved and side-flipped parts but not adds or removes" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    const old_src =
+        \\(kicad_pcb
+        \\  (footprint "r-0402" (uuid "u-moved") (at 10 20 90) (layer "F.Cu") (property "Reference" "R1"))
+        \\  (footprint "c-0201" (uuid "u-flip") (at 5 5) (layer "B.Cu") (property "Reference" "C2"))
+        \\  (footprint "c-0201" (uuid "u-gone") (at 1 1) (layer "F.Cu") (property "Reference" "C3")))
+    ;
+    const new_src =
+        \\(kicad_pcb
+        \\  (footprint "r-0402" (uuid "u-moved") (at 11 20 90) (layer "F.Cu") (property "Reference" "R1"))
+        \\  (footprint "c-0201" (uuid "u-flip") (at 5 5) (layer "F.Cu") (property "Reference" "C2"))
+        \\  (footprint "c-0201" (uuid "u-new") (at 300 25) (layer "F.Cu") (property "Reference" "L9")))
+    ;
+    const viol = (try placementViolations(arena, old_src, new_src)).?;
+    // The two real changes are named …
+    try std.testing.expect(std.mem.indexOf(u8, viol, "R1: moved") != null);
+    try std.testing.expect(std.mem.indexOf(u8, viol, "C2: side B.Cu -> F.Cu") != null);
+    try std.testing.expect(std.mem.indexOf(u8, viol, "2 existing part(s)") != null);
+    // … while the pruned part and the fresh add are exempt.
+    try std.testing.expect(std.mem.indexOf(u8, viol, "C3") == null);
+    try std.testing.expect(std.mem.indexOf(u8, viol, "L9") == null);
+}
+
+// spec: serve/sync - placement guard passes when every existing footprint keeps its pose
+test "placementViolations returns null when placements are unchanged" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    const old_src =
+        \\(kicad_pcb
+        \\  (footprint "r-0402" (uuid "u-1") (at 10 20 270) (layer "B.Cu") (property "Reference" "R1")))
+    ;
+    const new_src =
+        \\(kicad_pcb
+        \\  (footprint "r-0402" (uuid "u-1") (at 10 20 270) (layer "B.Cu") (property "Reference" "R1"))
+        \\  (footprint "c-0201" (uuid "u-add") (at 300 25) (layer "F.Cu") (property "Reference" "C9")))
+    ;
+    try std.testing.expect((try placementViolations(arena, old_src, new_src)) == null);
 }
