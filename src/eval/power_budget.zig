@@ -27,6 +27,15 @@ const SENTINEL_CURRENT: f64 = 1.0;
 /// separate consumers so the source net stays visible.
 pub const RailConsumer = struct {
     ref_des: []const u8,
+    /// Library component of `ref_des` (e.g. "adf5901acpz-rl7") — the part
+    /// drawing this current. "" when the ref isn't a top-level instance
+    /// (e.g. a regulator-input back-computed consumer keyed on a sub-block).
+    component: []const u8 = "",
+    /// Optional human label from `(load "name")` on the annotated pin. Used
+    /// for rolled-up loads lumped on a carrier part (a bulk cap or filter
+    /// bead) so the row names the real consumer instead of the carrier.
+    /// "" ⇒ display falls back to `component`.
+    label: []const u8 = "",
     /// Net name as declared in source (e.g. "VDDA18USB"), before any
     /// ferrite-bead rollup to the top-level rail name.
     net: []const u8,
@@ -75,6 +84,11 @@ pub fn analyze(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
 ) std.mem.Allocator.Error![]const Rail {
+    // ref_des → library component, so each consumer row can show the part
+    // number (e.g. "U10" → "adf5901acpz-rl7") instead of just the ref.
+    var components: std.StringHashMapUnmanaged([]const u8) = .empty;
+    for (block.instances) |inst| try components.put(allocator, inst.ref_des, inst.component);
+
     // Step 1: union-find on ferrite-bead-bridged nets. A ferrite is a DC
     // conductor, so loads on its downstream side must attribute back to the
     // upstream regulator's budget.
@@ -152,6 +166,8 @@ pub fn analyze(
 
     const ConsumerGroup = struct {
         ref_des: []const u8,
+        component: []const u8 = "",
+        label: []const u8 = "",
         net: []const u8,
         root: []const u8,
         pins: std.ArrayListUnmanaged([]const u8) = .empty,
@@ -179,9 +195,16 @@ pub fn analyze(
             const group_key = std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ pin.ref_des, base }) catch continue;
             const gop = consumer_groups.getOrPut(allocator, group_key) catch continue;
             if (!gop.found_existing) {
-                gop.value_ptr.* = .{ .ref_des = pin.ref_des, .net = base, .root = root };
+                gop.value_ptr.* = .{
+                    .ref_des = pin.ref_des,
+                    .component = components.get(pin.ref_des) orelse "",
+                    .net = base,
+                    .root = root,
+                };
                 try load.group_keys.append(allocator, group_key);
             }
+            // First non-empty `(load "…")` label on any pin of the group wins.
+            if (gop.value_ptr.label.len == 0 and pin.load_label.len > 0) gop.value_ptr.label = pin.load_label;
             try gop.value_ptr.pins.append(allocator, pin.pin);
             if (pin.i_typ) |v| {
                 gop.value_ptr.sum_typ += v;
@@ -339,6 +362,8 @@ fn buildConsumers(
         if (!g.any_typ and !g.any_max) continue;
         try out.append(allocator, .{
             .ref_des = g.ref_des,
+            .component = g.component,
+            .label = g.label,
             .net = g.net,
             .pins = g.pins.items,
             .i_typ = if (g.any_typ) g.sum_typ else null,

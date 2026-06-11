@@ -87,6 +87,11 @@ pub const PinRef = struct {
     /// Absolute-max current drawn by this instance on the owning pin-group's net (A).
     /// Populated from `(i-max X)`; same single-pin attachment semantics as i_typ.
     i_max: ?f64 = null,
+    /// Display name for the power-budget consumer row, from `(load "name")` on the
+    /// pin form. Lets a rolled-up annotation (e.g. a rail's load lumped on its bulk
+    /// cap or filter bead) name the real part(s) drawing the current instead of the
+    /// carrier component. Empty ⇒ the budget falls back to the instance's component.
+    load_label: []const u8 = "",
 };
 
 /// A net in a design block.

@@ -93,6 +93,8 @@ pub const PinNetDecl = struct {
     i_typ: ?f64 = null,
     /// Absolute-max current (A) on this net — same first-pin-only semantics as i_typ.
     i_max: ?f64 = null,
+    /// Power-budget display name from `(load "name")` — see `PinRef.load_label`.
+    load_label: []const u8 = "",
 };
 
 /// A single alternate function entry for a multi-function pin.
