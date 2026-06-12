@@ -8,6 +8,8 @@ add: // spec: serve/sync - runSyncPlan errors with NotADesign when the source fi
 unlinked tag: Web Server - Placement-spec export falls back to ref-des when origin names repeat in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - Placement-spec export rebuilds an editable (placement …) form from a solved layout in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - propose_placement parses a standalone placement/floorplan form in ./src/serve/placement_spec.zig
+unlinked tag: Web Server - spec save inserts a new placement form before the design-block close in ./src/serve/placement_spec.zig
+unlinked tag: Web Server - spec save replaces an existing placement form in place in ./src/serve/placement_spec.zig
 unlinked tag: placement/optimizer - (floorplan …) docks sub-block macros around the anchor block in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - (net "NAME") side rules expand to unclaimed parts on the net in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - floorplan (rot N "SUB") turns the whole macro in quarter steps in ./src/placement/optimizer.zig

@@ -1,2 +1,2 @@
 # guardian-snapshot v1
-src/serve/placement_spec.zig:96: pub fn has a `bool` parameter (replace with two named methods or an enum)
+src/serve/placement_spec.zig:361: pub fn has a `bool` parameter (replace with two named methods or an enum)

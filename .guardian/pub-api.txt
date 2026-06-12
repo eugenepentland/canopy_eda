@@ -759,6 +759,7 @@ src/serve/edit.zig::rewirePinApi fn
 src/serve/edit.zig::saveSourceApi fn
 src/serve/edit.zig::swapPinsApi fn
 src/serve/edit.zig::swapPinsCore fn
+src/serve/edit.zig::writeAndRebuild fn
 src/serve/edit.zig::writeDesignCore fn
 src/serve/footprint_preview.zig::HandlerError value
 src/serve/footprint_preview.zig::boardFootprintApi fn
@@ -898,6 +899,9 @@ src/serve/placement_spec.zig::exportSpec fn
 src/serve/placement_spec.zig::placementSpecApi fn
 src/serve/placement_spec.zig::proposePlacement fn
 src/serve/placement_spec.zig::proposePlacementApi fn
+src/serve/placement_spec.zig::specSaveApi fn
+src/serve/placement_spec.zig::specSolve fn
+src/serve/placement_spec.zig::specSolveApi fn
 src/serve/plugin_tokens.zig::Token struct_
 src/serve/plugin_tokens.zig::mint fn
 src/serve/plugin_tokens.zig::validate fn

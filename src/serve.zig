@@ -306,6 +306,9 @@ pub fn serve(
     router.get("/api/pcb-describe/:name", pcb_describe.pcbDescribeApi, .{});
     router.get("/api/placement-spec/:name", placement_spec.placementSpecApi, .{});
     router.post("/api/propose-placement/:name", placement_spec.proposePlacementApi, .{});
+    // The PCB page's live spec panel: solve-as-you-type preview + save-to-design.
+    router.post("/api/spec-solve/:name", placement_spec.specSolveApi, .{});
+    router.post("/api/spec-save/:name", placement_spec.specSaveApi, .{});
     router.post("/api/pcb-layouts/:name", pcb_layout_page.saveNamedLayoutApi, .{});
     router.post("/api/pcb-layouts/:name/delete", pcb_layout_page.deleteNamedLayoutApi, .{});
     router.post("/api/pcb-layouts/:name/default", pcb_layout_page.setDefaultLayoutApi, .{});
