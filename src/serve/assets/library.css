@@ -81,7 +81,6 @@ a.badge-3d:hover { background:#1c3a24; border-color:#3fb950; }
    highlight is visible, and show where the datasheet will attach. */
 .comp-card.drag-over { position:relative; z-index:1001; outline:2px dashed #58a6ff; outline-offset:3px; background:#1c2333; }
 .comp-card.drag-over::after { content:"Drop .zip (3D model) or .pdf (datasheet)"; position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; padding:0 0.5rem; color:#58a6ff; font-size:0.85rem; font-weight:600; background:rgba(13,17,23,0.82); border-radius:8px; pointer-events:none; }
-</style></head><body>
 
 /* ── Attach-datasheet control on component cards ───────────────────── */
 .ds-attach { margin-top: 0.35rem; font-size: 0.78rem; }
