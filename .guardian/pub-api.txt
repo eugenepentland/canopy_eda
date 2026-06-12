@@ -412,6 +412,7 @@ src/placement/optimizer.zig::BoardRect struct_
 src/placement/optimizer.zig::Breakdown struct_
 src/placement/optimizer.zig::CompactMode enum_
 src/placement/optimizer.zig::Edge enum_
+src/placement/optimizer.zig::FullRouted struct_
 src/placement/optimizer.zig::GRID_MM value
 src/placement/optimizer.zig::Link struct_
 src/placement/optimizer.zig::Loop struct_
@@ -428,7 +429,9 @@ src/placement/optimizer.zig::RefPose struct_
 src/placement/optimizer.zig::Score struct_
 src/placement/optimizer.zig::SeedMode enum_
 src/placement/optimizer.zig::Stub struct_
+src/placement/optimizer.zig::effAlignW fn
 src/placement/optimizer.zig::faceRotation fn
+src/placement/optimizer.zig::fullRoutedScorePoses fn
 src/placement/optimizer.zig::gridPlace fn
 src/placement/optimizer.zig::loopNh fn
 src/placement/optimizer.zig::perPartBlame fn

@@ -168,6 +168,36 @@ fn printScore(tag: []const u8, name: []const u8, bd: optimizer.Breakdown, routed
     );
 }
 
+/// The params the `FULL` line is *scored* under: the objective weights pinned
+/// to the shipped defaults, only the geometry knobs (`--margin`,
+/// `--no-grid-court`, `--court-overlap`) carried from the CLI. The FULL cost
+/// formula contains `loop_w`/`w_align`/`input_loop_boost`, so scoring a weight
+/// sweep under the swept weights would change the yardstick along with the
+/// solver — every config must be judged on the same fixed physical metric.
+fn fullEvalParams() optimizer.Params {
+    var p = optimizer.Params{};
+    p.bbox_margin = g_params.bbox_margin;
+    p.grid_courtyards = g_params.grid_courtyards;
+    p.courtyard_overlap = g_params.courtyard_overlap;
+    p.compact_mode = g_params.compact_mode;
+    return p;
+}
+
+/// Print the full-route verdict for a layout on its own `FULL` line — the
+/// measured-copper metric (`fullRoutedScorePoses`) the rerank arbiter selects
+/// on, so sweeps and engine A/Bs are judged on real traces, vias, and DRC
+/// rather than the RSMT estimate. `FULL … unroutable` when the board can't grid.
+fn printFull(tag: []const u8, name: []const u8, fr: ?optimizer.FullRouted) void {
+    if (fr) |f| {
+        std.debug.print(
+            "FULL {s} {s} cost={d:.4} trace_mm={d:.2} vias={d} drc={d} unrouted={d} loop_nh_w={d:.4}\n",
+            .{ tag, name, f.cost, f.trace_mm, f.vias, f.drc, f.unrouted, f.loop_nh_weighted },
+        );
+    } else {
+        std.debug.print("FULL {s} {s} unroutable\n", .{ tag, name });
+    }
+}
+
 /// Score a *fixed* set of `poses` for design `name` under the current engine —
 /// both the smooth surrogate breakdown (`scorePoses`) and the routed objective
 /// (`routedScorePoses`). Lets a hand layout from a `.layouts.json` be compared
@@ -187,6 +217,8 @@ fn scoreOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u8, t
     const bd = try optimizer.scorePoses(arena.allocator(), block, project_dir, poses, g_params);
     const routed = try optimizer.routedScorePoses(arena.allocator(), block, project_dir, poses, g_params);
     printScore(tag, name, bd, routed);
+    const fr = try optimizer.fullRoutedScorePoses(arena.allocator(), block, project_dir, poses, fullEvalParams());
+    printFull(tag, name, fr);
 }
 
 /// Diagnostic: seed `solve` with a saved layout and report whether it was
@@ -257,6 +289,8 @@ fn breakdownOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u
     for (pl.parts, 0..) |p, i| poses[i] = .{ .ref = p.ref_des, .x = p.x, .y = p.y, .rot = p.rot };
     const routed = try optimizer.routedScorePoses(arena.allocator(), block, project_dir, poses, g_params);
     printScore("auto", name, pl.breakdown, routed);
+    const fr = try optimizer.fullRoutedScorePoses(arena.allocator(), block, project_dir, poses, fullEvalParams());
+    printFull("auto", name, fr);
 }
 
 /// CLI entry point: parse `--project-dir`, `--reps`, and the positional design
@@ -305,6 +339,20 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, a, "--margin") and i + 1 < args.len) {
             // Override the courtyard clearance margin (mm) for the quality modes.
             g_params.bbox_margin = std.fmt.parseFloat(f64, args[i + 1]) catch g_params.bbox_margin;
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--loop-w") and i + 1 < args.len) {
+            // Objective-weight overrides for the sweep harness: solve + score
+            // under these weights, judge on the FULL line's measured copper.
+            g_params.loop_w = std.fmt.parseFloat(f64, args[i + 1]) catch g_params.loop_w;
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--align-w") and i + 1 < args.len) {
+            g_params.w_align = std.fmt.parseFloat(f64, args[i + 1]) catch g_params.w_align;
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--congest-w") and i + 1 < args.len) {
+            g_params.w_congest = std.fmt.parseFloat(f64, args[i + 1]) catch g_params.w_congest;
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--boost") and i + 1 < args.len) {
+            g_params.input_loop_boost = std.fmt.parseFloat(f64, args[i + 1]) catch g_params.input_loop_boost;
             i += 1;
         } else if (std.mem.eql(u8, a, "--no-grid-court")) {
             // Stop rounding courtyard half-extents up to the grid (denser pack).

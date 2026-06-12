@@ -785,7 +785,8 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
     try writeJsonStr(w, name);
     try w.print(",\"generated\":{s},", .{if (p.generated) "true" else "false"});
     try w.print("\"params\":{{\"loop_w\":{d},\"w_align\":{d},\"w_congest\":{d},\"cap_w_max\":{d},\"grid\":{s},\"compact\":\"{s}\"}},", .{
-        params.loop_w, params.w_align, params.w_congest, params.cap_w_max, if (params.grid_courtyards) "true" else "false", @tagName(params.compact_mode),
+        params.loop_w,                                   optimizer.effAlignW(params),   params.w_congest, params.cap_w_max,
+        if (params.grid_courtyards) "true" else "false", @tagName(params.compact_mode),
     });
     try w.print("\"score\":{{\"hpwl_mm\":{d},\"loop_mm\":{d},\"loop_caps\":{d}}},", .{ p.score.hpwl_mm, p.score.loop_mm, p.score.loop_caps });
     try w.writeAll("\"breakdown\":");
@@ -871,7 +872,7 @@ fn writeBreakdownFields(w: *std.Io.Writer, b: optimizer.Breakdown, params: optim
     });
     try w.print("\"alignment\":{d},\"footprint\":{d},\"congestion\":{d},", .{ b.alignment, b.footprint, b.congestion });
     try w.print("\"loop_term\":{d},\"alignment_term\":{d},\"congestion_term\":{d},\"objective\":{d}", .{
-        params.loop_w * b.loop_nh_weighted, params.w_align * b.alignment, params.w_congest * b.congestion, b.objective,
+        params.loop_w * b.loop_nh_weighted, optimizer.effAlignW(params) * b.alignment, params.w_congest * b.congestion, b.objective,
     });
 }
 
@@ -2276,12 +2277,22 @@ fn readAutoParams(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
     if (po != .object) return null;
     var p = optimizer.Params{};
     if (po.object.get("loop_w")) |v| p.loop_w = jsonNum(v);
-    if (po.object.get("w_align")) |v| p.w_align = jsonNum(v);
     if (po.object.get("w_congest")) |v| p.w_congest = jsonNum(v);
     if (po.object.get("cap_w_max")) |v| p.cap_w_max = jsonNum(v);
     if (po.object.get("grid")) |v| p.grid_courtyards = v == .bool and v.bool;
     if (po.object.get("compact")) |v| {
         if (v == .string) p.compact_mode = parseCompactMode(v.string);
+    }
+    // Parsed after `compact` (it depends on the mode): a negative value is the
+    // auto sentinel current builds write; 0.5 under tidiness is the legacy
+    // shipped default — the tidiness term has since been pair-normalized (its
+    // weight scale moved to W_ALIGN_TIDINESS), so re-pinning the old number
+    // would silently apply a ~5× weaker alignment than either era intended.
+    // Both resolve to auto; anything else was a deliberate tuning override.
+    if (po.object.get("w_align")) |v| {
+        const a = jsonNum(v);
+        const legacy_default = p.compact_mode == .tidiness and a == 0.5;
+        if (a >= 0 and !legacy_default) p.w_align = a;
     }
     return p;
 }
@@ -2574,7 +2585,7 @@ fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!
         "<option value=\"protrusion\"{s}>protrusion</option></select></label>", .{
         sel(m == .tidiness), sel(m == .bbox), sel(m == .protrusion),
     });
-    try w.print("<label>Compact w <input id=\"t-align\" type=\"number\" step=\"0.05\" min=\"0\" value=\"{d}\"></label>", .{params.w_align});
+    try w.print("<label>Compact w <input id=\"t-align\" type=\"number\" step=\"0.05\" min=\"0\" value=\"{d}\"></label>", .{optimizer.effAlignW(params)});
     try w.print("<label>Loop <input id=\"t-loop\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.loop_w});
     try w.print("<label>Congest <input id=\"t-cong\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.w_congest});
     try w.writeAll("<label class=\"tune-chk\"><input id=\"t-grid\" type=\"checkbox\"");
@@ -2594,7 +2605,7 @@ fn writeScoreView(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Err
     try w.writeAll("<div class=\"pcb-tune pcb-scoreview pcb-panel\" id=\"panel-score\" hidden><span class=\"tune-h\">Score view</span>");
     try svRow(w, "wire", "Wire", 1.0);
     try svRow(w, "loop", "Loop", params.loop_w);
-    try svRow(w, "align", "Compact", params.w_align);
+    try svRow(w, "align", "Compact", optimizer.effAlignW(params));
     try svRow(w, "cong", "Congest", params.w_congest);
     try w.writeAll("<button class=\"btn\" id=\"sv-reset\" title=\"Restore engine weights, all metrics enabled\">Reset</button>");
     try w.writeAll("<span class=\"muted\">recomputes the headline — doesn't move parts</span></div>");

@@ -43,6 +43,7 @@ const netlist_mod = @import("../export_kicad_netlist.zig");
 const geometry = @import("geometry.zig");
 const pin_roles = @import("pin_roles.zig");
 const router = @import("router.zig");
+const drc = @import("drc.zig");
 const parser = @import("../sexpr/parser.zig");
 const infra_fs = @import("../infra/fs.zig");
 
@@ -61,13 +62,16 @@ const HUB_MASS: f64 = 4.0; // hubs move less → act as anchors
 const PASSIVE_MASS: f64 = 1.0;
 const SEED_GAP_MM: f64 = 1.5; // extra gap between seed grid cells
 const ROT_ROUNDS: usize = 2; // rotation-refine ↔ relax coordinate-descent rounds
-const LOOP_W: f64 = 6.0; // weight on the loop *inductance* term (nH; see
+const LOOP_W: f64 = 12.0; // weight on the loop *inductance* term (nH; see
 // `loopInductanceNh`). On a solid GND plane the loop is dominated by the power-leg
 // (L1) trace — the return images directly under it (`loopGroundSpan` carries no
 // lateral term) — so minimising the connection inductance minimises both the EMI
-// loop area and the PDN bandwidth limit. The loop nH ≈ 0.5·(loop length mm) + a
-// via floor, so 6.0 keeps this term's magnitude near the old length-based 3.0;
-// PROVISIONAL — the research flags that PCB weights need empirical re-tuning.
+// loop area and the PDN bandwidth limit. 6.0 (which kept the term near the old
+// length-based 3.0) was re-tuned by the 2026-06 coordinate sweep judged on the
+// FIXED full-route metric (real trace + vias + DRC + unrouted at the prior
+// weights): 12.0 won −1.5% alone and, combined with the swept align/boost,
+// −3.7% geomean across the 10-design suite (tpsm84338c −11%, pma3-14ln −6.1%,
+// tpsm84338 −3.1%; worst regression nestedarray +2.1%).
 const K_COMPACT: f64 = 0.10; // pull toward the cluster centroid (keeps HPWL tight)
 const GROUP_FORCE_PER_W: f64 = 0.05; // relaxation cohesion-force gain per unit `group_w`
 // (g_group_force = group_w·this); default group_w=2 ⇒ 0.10, ≈ K_COMPACT.
@@ -122,8 +126,10 @@ const CAP_W_MAX: f64 = 3.0; // max value-priority boost for the smallest cap on 
 // loop (Cin→high-side switch→GND). That loop carries the high-dI/dt current and
 // dominates radiated EMI (E ∝ f²·area·I; Richtek AN045, TI SNVA638A), so its caps
 // are pulled tighter than generic / output decoupling. Applied only when an
-// inductor marks the design a switcher. PROVISIONAL — magnitude wants tuning.
-const INPUT_LOOP_BOOST: f64 = 2.0;
+// inductor marks the design a switcher. 2.0 → 3.0 per the 2026-06 sweep: on the
+// fixed full-route metric, 3.0 improved tpsm84338c −13.5% with every other suite
+// design byte-identical — a strictly-dominant move.
+const INPUT_LOOP_BOOST: f64 = 3.0;
 // Weight on the placement-regularizer term (`compactnessTerm`, default `.tidiness`).
 // 0.5 is the long-shipped tidiness weight: the row/column alignment reward keeps
 // large boards compact (aligned parts route shorter — load-bearing on 200+ part
@@ -132,7 +138,28 @@ const INPUT_LOOP_BOOST: f64 = 2.0;
 // inductance ~10-13% (up to +88% on a buck) by dragging caps off their IC power
 // pins and do nothing for large-board row alignment — so they are not the default.
 const ALIGN_CLAMP_MM: f64 = 1.5; // only finish near-alignments within this offset (no long pulls)
-const W_ALIGN: f64 = 0.5;
+// Per-mode alignment-weight defaults. The three compactness terms live on
+// different scales (`tidiness` = size-normalized mean pairwise offset × n, mm;
+// `bbox`/`protrusion` = mm²), so a single shared weight silently changes meaning
+// when the mode dropdown switches — each mode carries its own default instead.
+// `Params.w_align = W_ALIGN_AUTO` (the shipping default) resolves through
+// `effAlignW`; an explicit query/sidecar value overrides for any mode.
+// `tidinessPenalty` is normalized by pair count (× 2/(n−1), i.e. n × the mean
+// pairwise misalignment) so it grows ~linearly with part count like HPWL does —
+// the raw O(n²) sum made the effective alignment-vs-wirelength balance a
+// function of board size (weights tuned on a 10-part module meant something
+// 25× stronger per part at 300 parts). 2.75 would mirror the long-shipped 0.5
+// at the n≈12 module scale; the 2026-06 sweep (fixed full-route yardstick)
+// picked 1.5 instead — geomean −0.8%, rf-switch-8way −14.5%, and two fewer
+// unroutable nets across the suite, vs ≤+1% drift elsewhere. Alignment earns
+// less than assumed once real copper is the judge.
+const W_ALIGN_TIDINESS: f64 = 1.5;
+// Area modes (mm²): ~0.5/(typical module bbox mm² per mm of tidiness) — these
+// lost the 12-design sweep and are opt-in; weights sized so toggling the mode
+// keeps the term's magnitude in the objective comparable, not 1:1 identical.
+const W_ALIGN_BBOX: f64 = 0.10;
+const W_ALIGN_PROTRUSION: f64 = 0.02;
+const W_ALIGN_AUTO: f64 = -1.0; // sentinel: resolve per compact_mode (effAlignW)
 // Weight on the routing-congestion penalty (`congestionPenalty`). HPWL/RSMT alone
 // does not predict routability — local congestion must be traded off against it
 // (Spindler & Johannes RUDY; UCLA mPL). The penalty is ~0 until a region's
@@ -140,6 +167,27 @@ const W_ALIGN: f64 = 0.5;
 // apart out of genuine hotspots. PROVISIONAL — the research notes the optimal
 // congestion weight is IC-derived and must be swept on real PCBs.
 const W_CONGEST: f64 = 2.0;
+// ── Full-route arbiter (`rerankSolve` final selection) ────────────────────────
+// The routed-loop rerank still judges signal wirelength by the RSMT *estimate*;
+// the full-route pass routes the whole board (the same maze router + DRC the
+// layout page runs) for the few best candidates and picks on what actually
+// matters: real copper length, via count, DRC violations, and unrouted nets.
+// Costs are expressed in mm-equivalents so they blend with trace length.
+const FULLROUTE_TOP: usize = 3; // candidates that graduate from loop-rerank to a full route
+const FULLROUTE_VIA_MM: f64 = 2.0; // one via ≈ this much extra trace (drill + return-path discontinuity)
+const FULLROUTE_DRC_MM: f64 = 25.0; // one clearance violation outweighs a couple of vias, not the board
+// An unroutable net costs far more than any detour that routes: it is a
+// hand-fix on the real board. 50 proved too cheap — on rf-switch-8way the
+// arbiter traded 4 extra unrouted nets for ~300 mm less copper, which no
+// designer would take. 150 ≈ three full board crossings per failed net.
+const FULLROUTE_UNROUTED_MM: f64 = 150.0;
+// Above this estimated grid-node count the arbiter is SKIPPED (the loop-rerank
+// winner stands): route time scales with nodes, and a sprawling 30-part board
+// at the standard pitch costs ~5 s per candidate route. A 2×-pitch "cheap"
+// arbiter was tried and rejected — the coarse grid disagreed with the fine one
+// about *which* candidate had unroutable nets, so its verdicts didn't transfer
+// to the board the user actually routes. Honest arbitration or none.
+const FULLROUTE_FINE_NODES: f64 = 60_000;
 const GRID_COURTYARDS = true; // round courtyard half-extents to GRID_MM so edges land on-grid
 const COMPACT_MIN_OVERLAP: f64 = GRID_MM; // min shared-edge length when docking a floating part
 const COMPACT_EPS: f64 = 1e-4; // courtyard-gap tolerance for the "touching" test
@@ -184,8 +232,17 @@ pub const CompactMode = enum { tidiness, bbox, protrusion };
 /// weights are exposed; the structural tunables (iters, starts) stay fixed.
 pub const Params = struct {
     loop_w: f64 = LOOP_W,
-    w_align: f64 = W_ALIGN,
+    /// Alignment/compactness weight. Defaults to the `W_ALIGN_AUTO` sentinel,
+    /// which resolves to the active `compact_mode`'s own default via `effAlignW`
+    /// — the three modes live on different scales (mm vs mm²), so a shared
+    /// constant would silently change meaning when the mode switches. Set ≥0 to
+    /// override explicitly (query/sidecar values do).
+    w_align: f64 = W_ALIGN_AUTO,
     w_congest: f64 = W_CONGEST,
+    /// Extra loop-inductance weight multiplier on a switching regulator's INPUT
+    /// decoupling loop (see `INPUT_LOOP_BOOST`). Exposed so the bench sweep can
+    /// retune the provisional magnitude against routed outcomes.
+    input_loop_boost: f64 = INPUT_LOOP_BOOST,
     cap_w_max: f64 = CAP_W_MAX,
     grid_courtyards: bool = GRID_COURTYARDS,
     compact_mode: CompactMode = .tidiness,
@@ -248,6 +305,19 @@ pub const Params = struct {
     /// `?placement=off` A/B switch). Off by default (the spec drives when present).
     ignore_placement: bool = false,
 };
+
+/// The effective alignment weight: an explicit `w_align` (≥0) wins; the
+/// `W_ALIGN_AUTO` sentinel resolves to the active compactness mode's own
+/// default. Every objective/score path multiplies the compactness term by this
+/// (never by `params.w_align` raw), so the UI and the search always agree.
+pub fn effAlignW(params: Params) f64 {
+    if (params.w_align >= 0) return params.w_align;
+    return switch (params.compact_mode) {
+        .tidiness => W_ALIGN_TIDINESS,
+        .bbox => W_ALIGN_BBOX,
+        .protrusion => W_ALIGN_PROTRUSION,
+    };
+}
 
 /// Which phase of the solve a progress frame came from — drives the label the
 /// live-preview overlay shows while watching the optimizer converge.
@@ -628,6 +698,15 @@ threadlocal var g_collide_shrink: f64 = 0;
 /// helpers. 0 ⇒ touch (the default).
 threadlocal var g_route_gap: f64 = 0;
 
+/// Per-flattened-net declared current (A), index-aligned with the `nets` slice
+/// `prepare` returns — resolved from `(current …)` on the design's own ports and
+/// its sub-blocks' output ports (via their net-ties) plus the summed `(i-typ …)`
+/// consumer pins per rail. Read by `congestPitch` to widen a power net's RUDY
+/// corridor to the IPC-2221 trace width its current needs. Empty ⇒ all nets use
+/// the signal pitch. Set in `prepare`; threadlocal like `g_lowered` so the hot
+/// objective path needn't thread another parameter through every call site.
+threadlocal var g_net_current: []const f64 = &.{};
+
 /// Diagnostics from the most recent `(placement …)`-driven solve, so the PCB-layout
 /// JSON can report coverage to the agent authoring the spec. `active` = a spec drove
 /// (or attempted to drive) this solve; `used_spec` = `packSpec` produced the shown
@@ -736,7 +815,15 @@ fn runForce(
     built: Built,
     params: Params,
 ) std.mem.Allocator.Error!void {
-    if (parts.len >= 2 and parts.len <= MULTISTART_MAX_PARTS and built.loops.len > 0) {
+    // The whole multi-start band reranks — loop-less boards included. The
+    // rerank used to be gated on loop-bearing boards (its candidate metric was
+    // only the routed *loops*), but the final arbiter is now a FULL route, which
+    // differentiates candidates on any board: an arrangement whose RSMT estimate
+    // looks tight can route to far more copper (rf-switch-8way solved estimate
+    // 711 mm / routed 1031 mm vs an alternative at 875/773 — the estimate
+    // preferred the wrong one by 33%). With no loops the loop-leg term is just
+    // zero and the surrogate ranking still seeds the candidate pool.
+    if (parts.len >= 2 and parts.len <= MULTISTART_MAX_PARTS) {
         try rerankSolve(arena, parts, &prep.idx_of, nets, built, params, prep.priority);
     } else {
         optimize(parts, &prep.idx_of, nets, built, params);
@@ -3163,6 +3250,27 @@ pub fn routedScorePoses(
     return routedObjectiveCost(arena, prep.parts, &prep.idx_of, prep.nets, prep.built.loops, params);
 }
 
+/// The FULL-route score for an existing set of `poses` — the highest-fidelity
+/// rung: the whole board is mazed (every net, not just loop legs) and judged on
+/// real trace length + vias + post-route DRC + unrouted nets (see `FullRouted`).
+/// This is the metric `rerankSolve`'s final arbiter selects on; exposed so the
+/// bench can compare engines / weight sweeps on measured copper instead of the
+/// RSMT estimate. Expensive (a full route per call) — diagnostics only, never a
+/// per-pose search signal. Null when the board can't be gridded.
+pub fn fullRoutedScorePoses(
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    poses: []const RefPose,
+    params: Params,
+) std.mem.Allocator.Error!?FullRouted {
+    var prep = try prepare(arena, block, project_dir, params);
+    _ = applyCached(prep.parts, poses);
+    const lw = routedLoops(arena, prep.parts, &prep.idx_of, prep.nets, prep.built.loops).weighted_nh;
+    const stubs = try buildEscapeStubs(arena, prep.nets, prep.parts, &prep.idx_of);
+    return fullRouteCost(arena, prep.parts, prep.nets, prep.built.loops, stubs, prep.priority, params, .{}, lw);
+}
+
 /// Build a `Placement` at exactly `poses` (no optimization — overlaps allowed),
 /// so a caller can route the user's *on-screen* layout verbatim instead of the
 /// auto-generated one. Same design model as `scorePoses` (and it also builds the
@@ -3292,6 +3400,46 @@ fn resolveNet(nets: []const FlatNet, want: []const u8) ?usize {
         if (std.mem.eql(u8, shortName(net.name), want) or std.mem.eql(u8, net.name, want)) return i;
     }
     return null;
+}
+
+/// Per-flattened-net declared current (A) — the data the power-budget table
+/// already collects, resolved against the placement netlist so `congestPitch`
+/// can size each rail's RUDY corridor. Three sources, max-merged per net:
+///   • the design's own ports carrying `(current <typ> <max>)`;
+///   • sub-block *output* ports with current (the budget's "sources"), mapped to
+///     the top-level rail through the `(net …)` tie that connects them;
+///   • the summed `(i-typ …)` consumer pins on each top-level net, so a rail
+///     with no source declaration is still sized by its declared loads.
+/// Names resolve via `resolveNet` (short or full); anything unresolved is
+/// skipped — a missed net just keeps the signal pitch, never errors.
+fn netCurrents(arena: std.mem.Allocator, block: *const DesignBlock, nets: []const FlatNet) std.mem.Allocator.Error![]f64 {
+    const cur = try arena.alloc(f64, nets.len);
+    @memset(cur, 0);
+    for (block.ports) |port| {
+        const amps = port.current_typ orelse port.current_max orelse continue;
+        const want = if (port.net.len > 0) port.net else port.name;
+        if (resolveNet(nets, want)) |ni| cur[ni] = @max(cur[ni], amps);
+    }
+    for (block.sub_blocks) |sb| {
+        for (sb.block.ports) |port| {
+            if (!std.mem.eql(u8, port.direction, "out")) continue;
+            const amps = port.current_typ orelse port.current_max orelse continue;
+            const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ sb.name, port.name });
+            for (block.net_ties) |nt| {
+                const top = if (std.mem.eql(u8, nt.a, path)) nt.b else if (std.mem.eql(u8, nt.b, path)) nt.a else continue;
+                if (resolveNet(nets, top)) |ni| cur[ni] = @max(cur[ni], amps);
+            }
+        }
+    }
+    for (block.nets) |net| {
+        var sum: f64 = 0;
+        for (net.pins) |pin| {
+            if (pin.i_typ) |v| sum += v;
+        }
+        if (sum <= 0) continue;
+        if (resolveNet(nets, net.name)) |ni| cur[ni] = @max(cur[ni], sum);
+    }
+    return cur;
 }
 
 /// The footprint-local pad of part `idx` that sits on net `net`, or a zero-size
@@ -3684,7 +3832,10 @@ fn prepare(
     }
 
     const built = try buildSprings(arena, nets, parts, &idx_of, roles, explicit_pin);
-    classify(parts, built.loops, nets, params.cap_w_max, priority);
+    classify(parts, built.loops, nets, params.cap_w_max, params.input_loop_boost, priority);
+    // Declared rail currents (ports' `(current …)`, pins' `(i-typ …)`) → the
+    // per-net congestion corridor widths `congestPitch` reads.
+    g_net_current = try netCurrents(arena, block, nets);
     // Resolve + lower any Phase-A `(constraints …)` and publish to the thread's
     // `g_lowered` so `constraintCost` (the search-only objective delta) sees it.
     // Inert when the design authored none. Rejections are dropped on this hot
@@ -3756,7 +3907,7 @@ fn breakdownWith(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: [
         .footprint = compactnessArea(parts),
         .congestion = cong,
         .objective = score.hpwl_mm + params.loop_w * lsum.weighted_nh +
-            params.w_align * al + params.w_congest * cong,
+            effAlignW(params) * al + params.w_congest * cong,
     };
 }
 
@@ -3891,10 +4042,10 @@ fn rerankSolve(
     params: Params,
     priority: []const u32,
 ) std.mem.Allocator.Error!void {
-    // rerankSolve runs on loop-bearing boards within the multi-start band
+    // rerankSolve runs on every board in the multi-start band
     // (≤ MULTISTART_MAX_PARTS), so the multi-start + rotation refine always apply.
     // The final routed tuck (`routedPolish`) self-gates to ≤ ROUTED_POLISH_MAX_PARTS;
-    // above that the top-K routed rerank alone carries the routed selection.
+    // above that the top-K rerank + full-route arbiter alone carry the selection.
     const starts: usize = RERANK_STARTS;
     const rounds: usize = ROT_ROUNDS;
     const k = std.math.clamp(RERANK_BUDGET / parts.len, 2, RERANK_K);
@@ -3924,12 +4075,15 @@ fn rerankSolve(
         }
     }
 
-    // Finish each kept candidate and keep the routed-best finished arrangement.
+    // Finish each kept candidate and rank the finished arrangements on the
+    // routed-loop objective (cheap — only the loop legs are mazed).
     var scratch = std.heap.ArenaAllocator.init(arena);
     defer scratch.deinit();
-    const best = try arena.alloc(Pose, parts.len);
-    var best_cost: f64 = std.math.inf(f64);
-    var have = false;
+    const fin = try arena.alloc(Pose, k * parts.len);
+    const fin_cost = try arena.alloc(f64, k);
+    const fin_loop = try arena.alloc(f64, k);
+    for (fin_cost) |*c| c.* = std.math.inf(f64);
+    var stream_best: f64 = std.math.inf(f64);
     for (0..k) |c| {
         if (cand_cost[c] == std.math.inf(f64)) continue;
         for (parts, 0..) |*p, j| {
@@ -3942,19 +4096,87 @@ fn rerankSolve(
         try symmetrize(arena, parts, idx_of, nets, built, params);
         compactToContact(parts, priority);
         _ = scratch.reset(.retain_capacity);
-        const sc = routedObjectiveCost(scratch.allocator(), parts, idx_of, nets, built.loops, params);
-        if (!have or sc < best_cost) {
-            best_cost = sc;
-            have = true;
-            for (parts, 0..) |p, j| best[j] = .{ .x = p.x, .y = p.y, .rot = p.rot };
+        // The routed-loop objective, with the loop term kept so the full-route
+        // arbiter below can reuse it without paying `routedLoops` again.
+        const lw = routedLoops(scratch.allocator(), parts, idx_of, nets, built.loops).weighted_nh;
+        const cong = if (params.w_congest != 0) params.w_congest * congestionPenalty(parts, idx_of, nets) else 0;
+        const sc = wireScore(parts, idx_of, nets) + params.loop_w * lw +
+            effAlignW(params) * compactnessTerm(parts, params.compact_mode) + cong;
+        fin_cost[c] = sc;
+        fin_loop[c] = lw;
+        for (parts, 0..) |p, j| fin[c * parts.len + j] = .{ .x = p.x, .y = p.y, .rot = p.rot };
+        if (sc < stream_best) {
+            stream_best = sc;
             // Stream this finished, routed-scored candidate (`parts` hold it now).
             emitBest(parts, sc, .refine);
         }
     }
-    if (have) for (parts, 0..) |*p, j| {
-        p.x = best[j].x;
-        p.y = best[j].y;
-        p.rot = best[j].rot;
+
+    // Full-route arbiter: the routed-loop rerank still judges signal wirelength
+    // by the RSMT estimate, which can't see detours, layer changes, or two nets
+    // fighting for one corridor. Graduate the few best finished candidates to a
+    // FULL route — real copper + vias + post-route DRC — and let that pick the
+    // winner. Falls back to the routed-loop ranking when no candidate routes.
+    var order_buf: [RERANK_K]usize = undefined;
+    const order = order_buf[0..k];
+    for (order, 0..) |*o, i| o.* = i;
+    std.mem.sort(usize, order, fin_cost, struct {
+        fn lt(cost: []const f64, a: usize, b: usize) bool {
+            return cost[a] < cost[b];
+        }
+    }.lt);
+    var best_c = order[0];
+    if (fin_cost[best_c] != std.math.inf(f64)) {
+        const stubs = try buildEscapeStubs(arena, nets, parts, idx_of);
+        const top = @min(FULLROUTE_TOP, k);
+        // One route pitch for EVERY candidate — mixing fidelities would bias
+        // the comparison. Coarsen 2× when the largest candidate would cost too
+        // many fine-pitch grid nodes (route time scales with node count).
+        var max_w: f64 = 0;
+        var max_h: f64 = 0;
+        for (order[0..top]) |c| {
+            if (fin_cost[c] == std.math.inf(f64)) break;
+            var minx: f64 = std.math.inf(f64);
+            var miny: f64 = std.math.inf(f64);
+            var maxx: f64 = -std.math.inf(f64);
+            var maxy: f64 = -std.math.inf(f64);
+            for (parts, 0..) |p, j| {
+                const pose = fin[c * parts.len + j];
+                minx = @min(minx, pose.x - effHw(p));
+                miny = @min(miny, pose.y - effHh(p));
+                maxx = @max(maxx, pose.x + effHw(p));
+                maxy = @max(maxy, pose.y + effHh(p));
+            }
+            max_w = @max(max_w, maxx - minx);
+            max_h = @max(max_h, maxy - miny);
+        }
+        const rp = router.RouteParams{};
+        const fine_g = rp.track_width + rp.clearance;
+        const est_nodes = ((max_w + 2) / fine_g + 1) * ((max_h + 2) / fine_g + 1);
+        var chosen: ?usize = null;
+        if (est_nodes <= FULLROUTE_FINE_NODES) {
+            var best_full: f64 = std.math.inf(f64);
+            for (order[0..top]) |c| {
+                if (fin_cost[c] == std.math.inf(f64)) break;
+                for (parts, 0..) |*p, j| {
+                    p.x = fin[c * parts.len + j].x;
+                    p.y = fin[c * parts.len + j].y;
+                    p.rot = fin[c * parts.len + j].rot;
+                }
+                _ = scratch.reset(.retain_capacity);
+                const fr = (try fullRouteCost(scratch.allocator(), parts, nets, built.loops, stubs, priority, params, rp, fin_loop[c])) orelse continue;
+                if (chosen == null or fr.cost < best_full) {
+                    best_full = fr.cost;
+                    chosen = c;
+                }
+            }
+        }
+        if (chosen) |c| best_c = c;
+    }
+    if (fin_cost[best_c] != std.math.inf(f64)) for (parts, 0..) |*p, j| {
+        p.x = fin[best_c * parts.len + j].x;
+        p.y = fin[best_c * parts.len + j].y;
+        p.rot = fin[best_c * parts.len + j].rot;
     };
 
     // Local routed tuck on the chosen global arrangement.
@@ -4547,7 +4769,7 @@ fn routedPolishCost(
     const focus_w = routedSubsetWeighted(scratch.allocator(), parts, idx_of, nets, loops, cap, true);
     const cong = if (params.w_congest != 0) params.w_congest * congestionPenalty(parts, idx_of, nets) else 0;
     return wireScore(parts, idx_of, nets) + params.loop_w * (others_w + focus_w) +
-        params.w_align * compactnessTerm(parts, params.compact_mode) + cong;
+        effAlignW(params) * compactnessTerm(parts, params.compact_mode) + cong;
 }
 
 /// `polishPart` for the routed objective: pick the (position, rotation) over a
@@ -5155,10 +5377,14 @@ fn isNoConnect(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "unconnected") or std.mem.startsWith(u8, name, "no_connect");
 }
 
-/// Coordinate descent over rotation: for each passive, set the 0/90/180/270°
-/// that minimizes the global objective (HPWL + weighted loop). Hubs are left
-/// at 0° — for a single-hub module their rotation is a degenerate global
-/// frame turn that changes no relative distance.
+/// Coordinate descent over rotation: for each part, set the 0/90/180/270°
+/// that minimizes the global objective (HPWL + weighted loop). On a
+/// single-hub module the hub stays at 0° — its rotation is a degenerate
+/// global frame turn that changes no relative distance — but with two or
+/// more hubs their *relative* orientation is real (which edges face each
+/// other decides every inter-hub net), so multi-hub boards search hubs too.
+/// Pinned rotations (spec `(rot …)` / series pairing) are decided, not
+/// searched — same rule as every other rotation search.
 fn optimizeRotations(
     parts: []Part,
     idx_of: *std.StringHashMap(usize),
@@ -5166,8 +5392,13 @@ fn optimizeRotations(
     loops: []const Loop,
     params: Params,
 ) void {
+    var hub_count: usize = 0;
+    for (parts) |p| {
+        if (p.kind == .hub) hub_count += 1;
+    }
     for (parts) |*p| {
-        if (p.kind == .hub) continue;
+        if (p.rot_pin != .none) continue;
+        if (p.kind == .hub and hub_count < 2) continue;
         var best_rot = p.rot;
         var best_cost = objectiveCost(parts, idx_of, nets, loops, params);
         for (ROT_CAND) |r| {
@@ -5183,7 +5414,7 @@ fn optimizeRotations(
 }
 
 /// Scalar objective the rotation/polish/multi-start search minimizes:
-/// wirelength(RSMT) + `LOOP_W`·(value-weighted loop inductance) + `W_ALIGN`·
+/// wirelength(RSMT) + `LOOP_W`·(value-weighted loop inductance) + `effAlignW`·
 /// (alignment) + `W_CONGEST`·(routing congestion). The *displayed* score
 /// (`scoreLayout`) stays plain wirelength + loop length — these extra rules only
 /// steer placement, they don't change the headline numbers.
@@ -5200,7 +5431,7 @@ fn objectiveCost(
     // where it contributes nothing anyway.
     const cong = if (params.w_congest != 0) params.w_congest * congestionPenalty(parts, idx_of, nets) else 0;
     return hpwl + params.loop_w * weightedLoop(parts, loops) +
-        params.w_align * compactnessTerm(parts, params.compact_mode) + cong +
+        effAlignW(params) * compactnessTerm(parts, params.compact_mode) + cong +
         constraintCost(parts, idx_of, nets, loops, params);
 }
 
@@ -5262,7 +5493,7 @@ fn constraintCost(
             const ni: usize = @intCast(lp.pwr_net);
             if (ni >= nets.len or !L.input_rail[ni]) continue;
             const nh = loopMetric(parts, lp, surrogatePwrLeg(parts, lp)).nh;
-            c += (INPUT_LOOP_BOOST - 1.0) * params.loop_w * lp.weight * nh;
+            c += (params.input_loop_boost - 1.0) * params.loop_w * lp.weight * nh;
         }
     }
     for (L.groups) |g| {
@@ -5339,7 +5570,94 @@ fn routedObjectiveCost(
     const hpwl = wireScore(parts, idx_of, nets);
     const loop_weighted = routedLoops(scratch, parts, idx_of, nets, loops).weighted_nh;
     const cong = if (params.w_congest != 0) params.w_congest * congestionPenalty(parts, idx_of, nets) else 0;
-    return hpwl + params.loop_w * loop_weighted + params.w_align * compactnessTerm(parts, params.compact_mode) + cong;
+    return hpwl + params.loop_w * loop_weighted + effAlignW(params) * compactnessTerm(parts, params.compact_mode) + cong;
+}
+
+/// One full-route verdict — what the estimate-based objectives can only proxy,
+/// measured: real copper length, via count, post-route DRC violations, nets the
+/// router couldn't complete, plus the routed loop term carried through. `cost`
+/// blends them in mm-equivalents (see the `FULLROUTE_*` weights).
+pub const FullRouted = struct {
+    cost: f64,
+    trace_mm: f64,
+    vias: usize,
+    drc: usize,
+    unrouted: usize,
+    loop_nh_weighted: f64,
+};
+
+/// Fully route the board as placed — the same maze router + clearance check the
+/// layout page runs — and score the result. This is the last rung of the
+/// fidelity ladder: the RSMT estimate inside `routedObjectiveCost` cannot see
+/// detours, layer changes, or two nets fighting for one corridor; the real
+/// route can. The congestion proxy is deliberately absent (vias / DRC /
+/// unrouted / trace ARE the measured thing it predicts); compactness stays so
+/// the arbiter still values the regularizer the search optimized. Null when
+/// the router can't grid the board (caller falls back to the routed-loop
+/// objective). All allocation in `scratch`; `loop_nh_weighted` is the already-
+/// measured routed loop term (don't pay `routedLoops` twice).
+fn fullRouteCost(
+    scratch: std.mem.Allocator,
+    parts: []Part,
+    nets: []const FlatNet,
+    loops: []const Loop,
+    stubs: []const Stub,
+    priority: []const u32,
+    params: Params,
+    rp: router.RouteParams,
+    loop_nh_weighted: f64,
+) std.mem.Allocator.Error!?FullRouted {
+    if (parts.len == 0) return null;
+    var minx: f64 = std.math.inf(f64);
+    var miny: f64 = std.math.inf(f64);
+    var maxx: f64 = -std.math.inf(f64);
+    var maxy: f64 = -std.math.inf(f64);
+    for (parts) |p| {
+        minx = @min(minx, p.x - effHw(p));
+        miny = @min(miny, p.y - effHh(p));
+        maxx = @max(maxx, p.x + effHw(p));
+        maxy = @max(maxy, p.y + effHh(p));
+    }
+    // A minimal Placement — exactly the fields `router.route`/`drc.check` read
+    // (parts, nets, stubs, priority, bounds). Links/instances are render-only.
+    const pl = Placement{
+        .parts = parts,
+        .links = &.{},
+        .loops = loops,
+        .stubs = stubs,
+        .instances = &.{},
+        .nets = nets,
+        .priority = priority,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = minx,
+        .miny = miny,
+        .maxx = maxx,
+        .maxy = maxy,
+        .generated = false,
+    };
+    const routed = try router.route(scratch, pl, rp);
+    // A fully-empty result with nets present means the board couldn't be
+    // gridded (too large / degenerate) — no information, let the caller fall
+    // back. (A ground-only board legitimately returns vias and no tracks.)
+    if (routed.total == 0 and routed.tracks.len == 0 and routed.vias.len == 0 and nets.len > 0) return null;
+    const viol = try drc.check(scratch, pl, routed, rp.clearance);
+    var trace: f64 = 0;
+    for (routed.tracks) |t| trace += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
+    const unrouted = routed.total - routed.routed;
+    const cost = trace +
+        FULLROUTE_VIA_MM * @as(f64, @floatFromInt(routed.vias.len)) +
+        FULLROUTE_DRC_MM * @as(f64, @floatFromInt(viol.len)) +
+        FULLROUTE_UNROUTED_MM * @as(f64, @floatFromInt(unrouted)) +
+        params.loop_w * loop_nh_weighted +
+        effAlignW(params) * compactnessTerm(parts, params.compact_mode);
+    return .{
+        .cost = cost,
+        .trace_mm = trace,
+        .vias = routed.vias.len,
+        .drc = viol.len,
+        .unrouted = unrouted,
+        .loop_nh_weighted = loop_nh_weighted,
+    };
 }
 
 /// The whole sub-module's footprint area (mm²): the area of the axis-aligned
@@ -5408,7 +5726,14 @@ fn compactnessTerm(parts: []const Part, mode: CompactMode) f64 {
 /// so distant parts aren't dragged together. The long-shipped default regularizer —
 /// cheap, and on large boards aligned rows route far shorter (the `.bbox`/
 /// `.protrusion` area modes do not align, so they can't substitute here).
+///
+/// Normalized by pair count (× 2/(n−1) ⇒ n × the mean pairwise misalignment) so
+/// the term grows ~linearly with part count, the same as HPWL — the raw O(n²)
+/// sum made the alignment-vs-wirelength balance an accident of board size (one
+/// part's alignment gradient scaled with n while its wirelength gradient
+/// didn't). The weight scale moves to `W_ALIGN_TIDINESS` accordingly.
 fn tidinessPenalty(parts: []const Part) f64 {
+    if (parts.len < 2) return 0;
     var total: f64 = 0;
     for (parts, 0..) |a, i| {
         for (parts[i + 1 ..]) |b| {
@@ -5416,12 +5741,56 @@ fn tidinessPenalty(parts: []const Part) f64 {
             total += @min(off, ALIGN_CLAMP_MM);
         }
     }
-    return total;
+    return total * 2.0 / @as(f64, @floatFromInt(parts.len - 1));
 }
 
-const CONGEST_BINS: usize = 8; // congestion grid resolution per axis
-const CONGEST_PITCH_MM: f64 = 0.254; // one wire's footprint ≈ track_width + clearance
-const CONGEST_CAP: f64 = 2.0; // routable wire-density per bin (top + bottom signal layers)
+// Congestion grid: bin size targets ~3 mm so a real hotspot is visible on any
+// board — a fixed 8×8 grid meant 12.5 mm bins on a 100 mm board (too coarse to
+// see a pileup) and sub-mm bins on a tiny module (noise). Bin *count* per axis
+// is derived from the extent and clamped: the floor keeps small modules at the
+// long-shipped resolution, the cap bounds the per-eval cost (`objectiveCost` is
+// hot — every polish candidate pays nets × covered-bins).
+const CONGEST_BIN_MM: f64 = 3.0; // target bin edge (mm)
+const CONGEST_BINS_MIN: usize = 8;
+const CONGEST_BINS_MAX: usize = 32;
+const CONGEST_PITCH_MM: f64 = 0.254; // one signal wire's footprint ≈ track_width + clearance
+const CONGEST_CLEARANCE_MM: f64 = 0.127; // the clearance half of that pitch (router default rule)
+// Routable wire-density per bin, summed over the two signal layers. 2.0 (the
+// old value) is 100% copper utilization per layer — real maze/auto routability
+// collapses well before that (~60–80% per layer; beyond it detours explode),
+// so the penalty only fired in pathological pileups. 1.4 ≈ 70% × 2 layers.
+const CONGEST_CAP: f64 = 1.4;
+
+/// Bin count for one axis of the congestion grid: extent / target bin size,
+/// clamped to `[CONGEST_BINS_MIN, CONGEST_BINS_MAX]`.
+fn congestBins(extent: f64) usize {
+    const n: usize = @intFromFloat(@ceil(@max(extent, 1.0) / CONGEST_BIN_MM));
+    return std.math.clamp(n, CONGEST_BINS_MIN, CONGEST_BINS_MAX);
+}
+
+/// IPC-2221-approximate trace width (mm) for `amps` of continuous current —
+/// external 1 oz copper, 10 °C rise: I = 0.048·ΔT^0.44·A^0.725 (A in mil²),
+/// width = A / 1.378 mil. ~0.30 mm at 1 A, ~0.78 mm at 2 A, ~1.37 mm at 3 A.
+/// 0 for no/unknown current, so the caller falls back to the signal pitch.
+fn ipc2221WidthMm(amps: f64) f64 {
+    if (amps <= 0) return 0;
+    const k = 0.048 * std.math.pow(f64, 10.0, 0.44); // ΔT = 10 °C
+    const area_mil2 = std.math.pow(f64, amps / k, 1.0 / 0.725);
+    const width_mil = area_mil2 / 1.378; // 1 oz copper thickness
+    return width_mil * 0.0254;
+}
+
+/// One net's congestion wire pitch (mm): the signal default, widened to the
+/// IPC-2221 trace width (plus clearance) when the net carries a declared
+/// current (`g_net_current`, resolved from `(current …)` ports and `(i-typ …)`
+/// pins by `prepare`). A 3 A rail needs a ~1.4 mm corridor, not a 0.254 mm one
+/// — sizing its RUDY footprint by the copper that must actually exist makes
+/// congestion see power routing, not just signal count.
+fn congestPitch(net_index: usize) f64 {
+    if (net_index >= g_net_current.len) return CONGEST_PITCH_MM;
+    const w = ipc2221WidthMm(g_net_current[net_index]);
+    return @max(CONGEST_PITCH_MM, w + CONGEST_CLEARANCE_MM);
+}
 
 /// Routing-congestion penalty (RUDY: Rectangular Uniform wire DensitY). Lays a
 /// coarse grid over the board and, for each signal net, spreads its estimated
@@ -5431,7 +5800,9 @@ const CONGEST_CAP: f64 = 2.0; // routable wire-density per bin (top + bottom sig
 /// board, growing where many nets pile into one region. This predicts routability
 /// (whether the board routes clean), which pure wirelength does not — it must be
 /// traded off against HPWL, not minimized in isolation (Spindler & Johannes;
-/// UCLA mPL supply/demand). Ground nets are excluded (they drop to the plane).
+/// UCLA mPL supply/demand). Ground nets are excluded (they drop to the plane);
+/// a net with a declared current deposits a proportionally wider corridor
+/// (`congestPitch`).
 fn congestionPenalty(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet) f64 {
     if (parts.len == 0) return 0;
     var minx: f64 = std.math.inf(f64);
@@ -5444,13 +5815,15 @@ fn congestionPenalty(parts: []const Part, idx_of: *std.StringHashMap(usize), net
         maxx = @max(maxx, p.x + effHw(p));
         maxy = @max(maxy, p.y + effHh(p));
     }
-    const binw = (maxx - minx) / @as(f64, CONGEST_BINS);
-    const binh = (maxy - miny) / @as(f64, CONGEST_BINS);
+    const nbx = congestBins(maxx - minx);
+    const nby = congestBins(maxy - miny);
+    const binw = (maxx - minx) / @as(f64, @floatFromInt(nbx));
+    const binh = (maxy - miny) / @as(f64, @floatFromInt(nby));
     if (binw <= 1e-6 or binh <= 1e-6) return 0;
     const bin_area = binw * binh;
 
-    var dens = [_]f64{0} ** (CONGEST_BINS * CONGEST_BINS);
-    for (nets) |net| {
+    var dens = [_]f64{0} ** (CONGEST_BINS_MAX * CONGEST_BINS_MAX);
+    for (nets, 0..) |net, net_i| {
         if (isGroundName(shortName(net.name))) continue;
         var nminx: f64 = std.math.inf(f64);
         var nminy: f64 = std.math.inf(f64);
@@ -5468,22 +5841,23 @@ fn congestionPenalty(parts: []const Part, idx_of: *std.StringHashMap(usize), net
             cnt += 1;
         }
         if (cnt < 2) continue;
+        const pitch = congestPitch(net_i);
         const nw = nmaxx - nminx;
         const nh = nmaxy - nminy;
         // Effective footprint for spreading: a trace has a finite width, so floor
         // each axis to one wire pitch. This keeps `na` non-degenerate AND lets a
         // perfectly horizontal/vertical net still deposit density over its corridor.
-        const ex0 = nminx - @max(0.0, CONGEST_PITCH_MM - nw) / 2;
-        const ex1 = nmaxx + @max(0.0, CONGEST_PITCH_MM - nw) / 2;
-        const ey0 = nminy - @max(0.0, CONGEST_PITCH_MM - nh) / 2;
-        const ey1 = nmaxy + @max(0.0, CONGEST_PITCH_MM - nh) / 2;
+        const ex0 = nminx - @max(0.0, pitch - nw) / 2;
+        const ex1 = nmaxx + @max(0.0, pitch - nw) / 2;
+        const ey0 = nminy - @max(0.0, pitch - nh) / 2;
+        const ey1 = nmaxy + @max(0.0, pitch - nh) / 2;
         const na = (ex1 - ex0) * (ey1 - ey0); // = max(nw,pitch)·max(nh,pitch)
         // RUDY per-net density: wire area (HPWL × pitch) over the bounding-box area.
-        const dn = ((nw + nh) * CONGEST_PITCH_MM) / na;
-        const bx0 = binIndex((ex0 - minx) / binw);
-        const bx1 = binIndex((ex1 - minx) / binw);
-        const by0 = binIndex((ey0 - miny) / binh);
-        const by1 = binIndex((ey1 - miny) / binh);
+        const dn = ((nw + nh) * pitch) / na;
+        const bx0 = binIndex((ex0 - minx) / binw, nbx);
+        const bx1 = binIndex((ex1 - minx) / binw, nbx);
+        const by0 = binIndex((ey0 - miny) / binh, nby);
+        const by1 = binIndex((ey1 - miny) / binh, nby);
         var by = by0;
         while (by <= by1) : (by += 1) {
             var bx = bx0;
@@ -5493,23 +5867,23 @@ fn congestionPenalty(parts: []const Part, idx_of: *std.StringHashMap(usize), net
                 const cy0 = miny + @as(f64, @floatFromInt(by)) * binh;
                 const ow = @max(0.0, @min(ex1, cx0 + binw) - @max(ex0, cx0));
                 const oh = @max(0.0, @min(ey1, cy0 + binh) - @max(ey0, cy0));
-                dens[by * CONGEST_BINS + bx] += dn * (ow * oh) / bin_area;
+                dens[by * nbx + bx] += dn * (ow * oh) / bin_area;
             }
         }
     }
     var pen: f64 = 0;
-    for (dens) |d| {
+    for (dens[0 .. nbx * nby]) |d| {
         const over = d - CONGEST_CAP;
         if (over > 0) pen += over * over;
     }
     return pen;
 }
 
-/// Clamp a fractional bin coordinate to a valid `[0, CONGEST_BINS-1]` index.
-fn binIndex(f: f64) usize {
+/// Clamp a fractional bin coordinate to a valid `[0, bins-1]` index.
+fn binIndex(f: f64, bins: usize) usize {
     if (f <= 0) return 0;
     const i: usize = @intFromFloat(@floor(f));
-    return @min(i, CONGEST_BINS - 1);
+    return @min(i, bins - 1);
 }
 
 /// Hot-loop *inductance* (nH) with each cap's loop scaled by its value-priority
@@ -5771,7 +6145,7 @@ fn applySeriesRotations(parts: []Part, series: []const SeriesPair) void {
 ///     INPUT rail (VIN/PVIN/VBUS/…, see `isInputRailName`) is the high-dI/dt hot
 ///     loop and its weight is multiplied by `INPUT_LOOP_BOOST` — pulled tighter
 ///     than output/generic decoupling because it dominates EMI.
-fn classify(parts: []Part, loops: []Loop, nets: []const FlatNet, cap_w_max: f64, priority: []const u32) void {
+fn classify(parts: []Part, loops: []Loop, nets: []const FlatNet, cap_w_max: f64, input_loop_boost: f64, priority: []const u32) void {
     var switcher = false;
     for (parts) |p| {
         if (isInductor(p.ref_des)) {
@@ -5792,7 +6166,7 @@ fn classify(parts: []Part, loops: []Loop, nets: []const FlatNet, cap_w_max: f64,
         var w = @max(w_val, priorityWeight(priority[lp.cap]));
         if (switcher and lp.pwr_net >= 0) {
             const ni: usize = @intCast(lp.pwr_net);
-            if (ni < nets.len and isInputRailName(shortName(nets[ni].name))) w *= INPUT_LOOP_BOOST;
+            if (ni < nets.len and isInputRailName(shortName(nets[ni].name))) w *= input_loop_boost;
         }
         lp.weight = w;
     }
@@ -7164,9 +7538,13 @@ test "congestionPenalty fires only on dense regions" {
     };
     try testing.expect(congestionPenalty(&parts, &idx_of, &dense_nets) > 0);
 
-    // binIndex clamps out-of-range fractions into [0, CONGEST_BINS-1].
-    try testing.expectEqual(@as(usize, 0), binIndex(-1.5));
-    try testing.expectEqual(CONGEST_BINS - 1, binIndex(999));
+    // binIndex clamps out-of-range fractions into [0, bins-1].
+    try testing.expectEqual(@as(usize, 0), binIndex(-1.5, CONGEST_BINS_MIN));
+    try testing.expectEqual(CONGEST_BINS_MIN - 1, binIndex(999, CONGEST_BINS_MIN));
+    // Bin count tracks the board extent at ~CONGEST_BIN_MM per bin, clamped.
+    try testing.expectEqual(CONGEST_BINS_MIN, congestBins(1.0)); // tiny module → floor
+    try testing.expectEqual(@as(usize, 20), congestBins(60.0)); // 60 mm → 3 mm bins
+    try testing.expectEqual(CONGEST_BINS_MAX, congestBins(500.0)); // huge board → cap
 }
 
 // spec: placement/optimizer - relieves the loop pull of caps in a same-rail bank
