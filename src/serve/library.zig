@@ -276,16 +276,31 @@ pub fn cseFetchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 
 /// True when `name` is a safe single library basename — rejects path traversal
 /// and separators so the model/delete endpoints can't escape `lib/` via a
-/// crafted `:name`/`:kind` param.
+/// crafted `:name`/`:kind` param. `,` is allowed: manufacturer part numbers
+/// embed it as a packaging suffix (e.g. `74ahct1g125gm,132`) and it's neither a
+/// path separator nor part of a `..` traversal. Names arrive percent-decoded,
+/// so `%` is still rejected (a stray `%` is never a legitimate basename char).
 fn isSafeLibName(name: []const u8) bool {
     if (name.len == 0 or name.len > 128) return false;
     if (std.mem.indexOf(u8, name, "..") != null) return false;
     for (name) |c| {
         const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
-            (c >= '0' and c <= '9') or c == '.' or c == '-' or c == '_';
+            (c >= '0' and c <= '9') or c == '.' or c == '-' or c == '_' or c == ',';
         if (!ok) return false;
     }
     return true;
+}
+
+/// `{"ok":false}` JSON for a `:name`/`:kind` param that fails `isSafeLibName`
+/// (or can't be percent-decoded).
+const ERR_INVALID_NAME = "{\"ok\":false,\"error\":\"invalid name\"}";
+
+/// Percent-decode a URL path param. httpz hands params back verbatim, so
+/// `encodeURIComponent`'d reserved chars (a comma → `%2C`) arrive encoded;
+/// decode before mapping the name to a file on disk.
+fn urlDecode(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]u8 {
+    const buf = try allocator.dupe(u8, raw);
+    return std.Uri.percentDecodeInPlace(buf);
 }
 
 fn sendErr(res: *httpz.Response, status: u16, json_body: []const u8) void {
@@ -302,13 +317,17 @@ fn sendErr(res: *httpz.Response, status: u16, json_body: []const u8) void {
 /// `:name` is itself the footprint.
 pub fn uploadModelApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    const name = req.param("name") orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"missing name\"}");
-    if (!isSafeLibName(name)) return sendErr(res, 400, "{\"ok\":false,\"error\":\"invalid name\"}");
+    const name_raw = req.param("name") orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"missing name\"}");
     const body = req.body() orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"missing body\"}");
 
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena.deinit();
     const aa = arena.allocator();
+
+    // Decode so part numbers like `74ahct1g125gm,132` (sent as `%2C`) map to the
+    // right file on disk, then validate the decoded name.
+    const name = urlDecode(aa, name_raw) catch return sendErr(res, 400, ERR_INVALID_NAME);
+    if (!isSafeLibName(name)) return sendErr(res, 400, ERR_INVALID_NAME);
 
     const filename = req.header("x-filename") orelse "model.zip";
     // Accept either a raw .step/.stp file (the body IS the model) or a .zip
@@ -356,7 +375,7 @@ pub fn deleteLibraryEntryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
     res.content_type = .JSON;
     const kind = req.param("kind") orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"missing kind\"}");
     const name = req.param("name") orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"missing name\"}");
-    if (!isSafeLibName(name)) return sendErr(res, 400, "{\"ok\":false,\"error\":\"invalid name\"}");
+    if (!isSafeLibName(name)) return sendErr(res, 400, ERR_INVALID_NAME);
     const subdir = subdirForKind(kind) orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"invalid kind\"}");
 
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
@@ -517,6 +536,17 @@ fn extractField(content: []const u8, field: []const u8) ?[]const u8 {
         pos = needle_start + 1;
     }
     return null;
+}
+
+test "isSafeLibName allows part-number commas but still rejects traversal + separators" {
+    // Manufacturer packaging suffixes embed a comma (74AHC1G125GM,132).
+    try std.testing.expect(isSafeLibName("74ahct1g125gm,132"));
+    try std.testing.expect(isSafeLibName("plain-name_1.0"));
+    // Separators / traversal / stray percent stay rejected.
+    try std.testing.expect(!isSafeLibName("../etc/passwd"));
+    try std.testing.expect(!isSafeLibName("a/b"));
+    try std.testing.expect(!isSafeLibName("a%2Cb"));
+    try std.testing.expect(!isSafeLibName(""));
 }
 
 test "linkCseDatasheet splices the downloaded datasheet into the component" {

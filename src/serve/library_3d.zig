@@ -9,6 +9,14 @@ const ast = @import("../sexpr/ast.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
+/// Percent-decode a URL path param. httpz returns params verbatim, so a
+/// footprint whose name embeds a reserved char (a comma → `%2C`, e.g.
+/// `74ahct1g125gm,132`) arrives encoded; decode before resolving it to a file.
+fn urlDecode(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]u8 {
+    const buf = try allocator.dupe(u8, raw);
+    return std.Uri.percentDecodeInPlace(buf);
+}
+
 const MAX_FOOTPRINT_BYTES: usize = 256 * 1024;
 const MAX_MODEL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_BODY_BYTES: usize = 16 * 1024;
@@ -43,7 +51,8 @@ fn resolveModelName(allocator: std.mem.Allocator, project_dir: []const u8, footp
 /// browser-side OpenCASCADE (occt-import-js) WASM can parse it. 404 when the
 /// footprint has no model. Served as binary; the viewer fetches it once.
 pub fn modelFileApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const footprint = req.param(PARAM_FOOTPRINT) orelse return notFound(res);
+    const footprint_raw = req.param(PARAM_FOOTPRINT) orelse return notFound(res);
+    const footprint = urlDecode(req.arena, footprint_raw) catch return notFound(res);
     const model_name = resolveModelName(req.arena, ctx.project_dir, footprint) orelse return notFound(res);
     const path = std.fmt.allocPrint(req.arena, "{s}/lib/models/{s}", .{ ctx.project_dir, model_name }) catch return notFound(res);
     const bytes = infra_fs.cwd().readFileAlloc(req.arena, path, MAX_MODEL_BYTES) catch return notFound(res);
@@ -60,7 +69,11 @@ pub fn modelFileApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 /// The page embeds the pads + courtyard + current transform as JSON; the
 /// heavy lifting (STEP parse, render, gizmo) lives in `/static/model_viewer_3d.js`.
 pub fn viewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const footprint = req.param(PARAM_FOOTPRINT) orelse return notFound(res);
+    // `footprint_url` is the raw (still percent-encoded) param — kept for
+    // re-emitting into the model-file URL; `footprint` is decoded for display,
+    // config lookups, and pad parsing (so commas etc. resolve to the right file).
+    const footprint_url = req.param(PARAM_FOOTPRINT) orelse return notFound(res);
+    const footprint = urlDecode(req.arena, footprint_url) catch return notFound(res);
 
     const model_name = resolveModelName(req.arena, ctx.project_dir, footprint);
 
@@ -95,7 +108,7 @@ pub fn viewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     // Embedded data the viewer JS reads. Pads + courtyard come from the
     // footprint .sexp; offset/rotation from model-config.json.
     try w.writeAll("<script>window.VIEWER_DATA=");
-    try writeViewerDataJson(w, req.arena, ctx.project_dir, footprint, model_name, offset, rotation);
+    try writeViewerDataJson(w, req.arena, ctx.project_dir, footprint, footprint_url, model_name, offset, rotation);
     try w.writeAll(";</script>");
 
     try w.writeAll("<script src=\"/static/three.min.js\"></script>");
@@ -115,6 +128,7 @@ fn writeViewerDataJson(
     arena: std.mem.Allocator,
     project_dir: []const u8,
     footprint: []const u8,
+    footprint_url: []const u8,
     model_name: ?[]const u8,
     offset: [3]f64,
     rotation: [3]f64,
@@ -124,7 +138,9 @@ fn writeViewerDataJson(
     try w.writeAll(",\"model\":");
     if (model_name) |m| {
         try writeJsonString(w, m);
-        try w.print(",\"modelUrl\":\"/api/model-file/{s}\"", .{footprint});
+        // Keep the encoded form in the URL so reserved chars (`,`, `#`, …)
+        // round-trip back through the router to the same file.
+        try w.print(",\"modelUrl\":\"/api/model-file/{s}\"", .{footprint_url});
     } else {
         try w.writeAll("null,\"modelUrl\":null");
     }
@@ -319,13 +335,17 @@ fn isPadTypeKeyword(s: []const u8) bool {
 /// reads this on the next push, so the orientation lands on the board.
 pub fn saveTransformApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    const footprint = req.param(PARAM_FOOTPRINT) orelse return badRequest(res, "missing footprint");
+    const footprint_raw = req.param(PARAM_FOOTPRINT) orelse return badRequest(res, "missing footprint");
     const body = req.body() orelse return badRequest(res, "missing body");
     if (body.len > MAX_BODY_BYTES) return badRequest(res, "body too large");
 
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena.deinit();
     const aa = arena.allocator();
+
+    // Decode `%2C`-style escapes so the config key matches the footprint name
+    // (e.g. `74ahct1g125gm,132`) the KiCad sync looks up.
+    const footprint = urlDecode(aa, footprint_raw) catch return badRequest(res, "invalid footprint");
 
     const parsed = std.json.parseFromSliceLeaky(std.json.Value, aa, body, .{}) catch return badRequest(res, "invalid JSON");
     const offset = parseVec3(parsed, "offset") orelse return badRequest(res, "missing offset[3]");
