@@ -14,6 +14,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const env_mod = @import("../eval/env.zig");
+const log = @import("../infra/log.zig");
 
 const Allocator = std.mem.Allocator;
 const Graph = types.Graph;
@@ -362,6 +363,11 @@ fn resolveRows(graph: *const Graph, cell_of: []Cell, placed: []bool) void {
     }
 }
 
+/// Collision-bump cap: how many cells a displaced placement may slide along
+/// its constraint direction looking for a free cell. Real layouts collide a
+/// couple of times at most; the cap only guards a pathological chain.
+const max_bump = 64;
+
 /// Resolve `(place …)` directives into absolute cells. `cell_of[i]` is node i's
 /// cell once resolved; `placed[i]` marks it. A placement with no constraints is
 /// a pinned anchor; one with constraints resolves only when *every* block it
@@ -373,12 +379,25 @@ fn resolveRows(graph: *const Graph, cell_of: []Cell, placed: []bool) void {
 /// graph), so a directive whose references resolve later still lands. A
 /// placement referencing an unknown block, or stuck in a cycle, never resolves →
 /// caller flows it into the fallback row.
+///
+/// Two directives can legally resolve to the *same* cell (e.g. `(below "mcu")`
+/// vs `(right-of "hub")` meeting in the middle); without a check the later
+/// block silently renders stacked on the earlier one. A collision instead
+/// bumps the later block cell-by-cell along its constraint direction to the
+/// first free cell, and warns with both block names so the author can fix the
+/// design.
 fn resolvePlacements(
+    arena: Allocator,
     graph: *const Graph,
     cell_of: []Cell,
     placed: []bool,
-) void {
+) Allocator.Error!void {
     const ps = graph.layout.placements;
+    // Occupancy (cell → gid). Row bands resolved before this call count too.
+    var occupied: std.AutoHashMapUnmanaged(Cell, u32) = .{};
+    for (graph.nodes, 0..) |_, i| {
+        if (placed[i]) try occupied.put(arena, cell_of[i], @intCast(i));
+    }
     // Anchors first: each is its own root at a distinct column so independent
     // trees don't overlap.
     var next_anchor_col: i32 = 0;
@@ -386,8 +405,17 @@ fn resolvePlacements(
         if (p.constraints.len != 0) continue;
         const gi = nodeByKey(graph, p.name) orelse continue;
         if (placed[gi]) continue;
-        cell_of[gi] = .{ .col = next_anchor_col, .row = 0 };
+        var cell = Cell{ .col = next_anchor_col, .row = 0 };
+        if (occupied.get(cell)) |other| {
+            log.warn(
+                "layout: anchor \"{s}\" lands on \"{s}\"'s cell ({d},{d}); bumped rightward",
+                .{ p.name, placedName(graph, other), cell.col, cell.row },
+            );
+            cell = bumpToFree(&occupied, cell, .right_of);
+        }
+        cell_of[gi] = cell;
         placed[gi] = true;
+        try occupied.put(arena, cell, gi);
         next_anchor_col += anchor_col_stride;
     }
     // Constrained placements: sweep until no further progress.
@@ -398,14 +426,46 @@ fn resolvePlacements(
             if (p.constraints.len == 0) continue;
             const gi = nodeByKey(graph, p.name) orelse continue;
             if (placed[gi]) continue;
-            if (resolveConstraints(graph, p.constraints, cell_of, placed)) |cell| {
+            if (resolveConstraints(graph, p.constraints, cell_of, placed)) |res| {
+                var cell = res.cell;
+                if (occupied.get(cell)) |other| {
+                    log.warn(
+                        "layout: \"{s}\" and \"{s}\" both resolve to cell ({d},{d}); bumped \"{s}\" {s}",
+                        .{ p.name, placedName(graph, other), cell.col, cell.row, p.name, relWord(res.rel) },
+                    );
+                    cell = bumpToFree(&occupied, cell, res.rel);
+                }
                 cell_of[gi] = cell;
                 placed[gi] = true;
+                try occupied.put(arena, cell, gi);
                 progressed = true;
             }
         }
         if (!progressed) break;
     }
+}
+
+/// The first free cell at or beyond `cell0`, stepping in `rel`'s direction.
+fn bumpToFree(occupied: *const std.AutoHashMapUnmanaged(Cell, u32), cell0: Cell, rel: env_mod.PlaceRel) Cell {
+    var cell = cell0;
+    var hops: usize = 0;
+    while (occupied.contains(cell) and hops < max_bump) : (hops += 1) cell = offsetCell(cell, rel);
+    return cell;
+}
+
+/// The authoring key (or display label) of a placed node, for collision warnings.
+fn placedName(graph: *const Graph, gid: u32) []const u8 {
+    const nd = graph.nodes[gid];
+    return if (nd.key.len > 0) nd.key else nd.label;
+}
+
+fn relWord(rel: env_mod.PlaceRel) []const u8 {
+    return switch (rel) {
+        .right_of => "rightward",
+        .left_of => "leftward",
+        .above => "upward",
+        .below => "downward",
+    };
 }
 
 /// True when `gid` is named by any `(edge …)` directive — such blocks are
@@ -460,6 +520,11 @@ fn resolveEdges(graph: *const Graph, cell_of: []Cell, placed: []bool) void {
     }
 }
 
+/// A resolved constrained placement: the combined cell, plus the direction of
+/// the last constraint — the axis the block bumps along when its cell turns
+/// out to be occupied by an earlier placement.
+const ResolvedCell = struct { cell: Cell, rel: env_mod.PlaceRel };
+
 /// Combine a placement's constraints into one cell, or null if any referenced
 /// block isn't placed yet (so the caller retries next sweep) or every reference
 /// is unknown (so it never resolves → fallback row). Each constraint offsets the
@@ -473,22 +538,27 @@ fn resolveConstraints(
     constraints: []const env_mod.PlaceConstraint,
     cell_of: []const Cell,
     placed: []const bool,
-) ?Cell {
+) ?ResolvedCell {
     var col: ?i32 = null;
     var row: ?i32 = null;
     var last: ?Cell = null; // last resolved constraint's full offset (axis fallback)
+    var last_rel: env_mod.PlaceRel = .right_of;
     for (constraints) |con| {
         const ri = nodeByKey(graph, con.reference) orelse continue; // unknown ref: ignore
         if (!placed[ri]) return null; // a real reference isn't ready yet → retry
         const off = offsetCell(cell_of[ri], con.rel);
         last = off;
+        last_rel = con.rel;
         switch (con.rel) {
             .right_of, .left_of => col = off.col,
             .above, .below => row = off.row,
         }
     }
     const base = last orelse return null; // every reference was unknown
-    return .{ .col = col orelse base.col, .row = row orelse base.row };
+    return .{
+        .cell = .{ .col = col orelse base.col, .row = row orelse base.row },
+        .rel = last_rel,
+    };
 }
 
 /// Offset a reference cell by one step in the constraint's direction.
@@ -521,7 +591,7 @@ pub fn computeFreeLayout(arena: Allocator, graph: *const Graph) Allocator.Error!
     const placed = try arena.alloc(bool, n);
     @memset(placed, false);
     resolveRows(graph, cell_of, placed);
-    resolvePlacements(graph, cell_of, placed);
+    try resolvePlacements(arena, graph, cell_of, placed);
     resolveEdges(graph, cell_of, placed);
 
     // Normalise placed cells so the minimum col/row is 0 (anchors/left-of can
@@ -728,6 +798,14 @@ fn stackTopExtent(stack: u8) f64 {
 // is already clear; otherwise the wire detours through the nearest gap channel
 // (a row/column gap, or the perimeter ring around everything) whose staircase
 // clears every foreign group.
+//
+// Group boxes are *soft* obstacles: a spatially incoherent group (one whose
+// padded bounding box swallows non-member blocks) is excluded from obstacle
+// duty up front, and when the remaining group boxes still leave an edge no
+// clear channel the router retries against the blocks alone — so the old
+// worst case, a wire drawn straight through other blocks because every
+// channel crossed some group's huge bounding box, can no longer happen
+// unless the blocks themselves leave literally no gap.
 
 /// An axis-aligned obstacle rectangle in layout pixels.
 const Rect = struct { x0: f64, y0: f64, x1: f64, y1: f64 };
@@ -798,8 +876,26 @@ fn collectGroupObstacles(arena: Allocator, graph: *const Graph, nodes: []const L
             try members.append(arena, id);
         }
         if (members.items.len == 0) continue;
+        const box = Rect{ .x0 = minx - group_pad, .y0 = miny - group_label_h, .x1 = maxx + group_pad, .y1 = maxy + group_pad };
+        // A group whose box swallows blocks that are NOT its members is
+        // spatially incoherent: its members are scattered, so the padded
+        // bounding box covers unrelated stretches of the canvas (it can engulf
+        // other groups whole). Keeping such a box as a routing obstacle leaves
+        // many edges with no clear channel at all, which forces the router's
+        // blocked-path fallback straight through blocks. The box is still
+        // drawn — it just stops being an obstacle.
+        var coherent = true;
+        for (nodes) |ln| {
+            if (memberOf(members.items, ln.gid)) continue;
+            const r = nodeRect(ln.x, ln.y);
+            if (r.x1 > box.x0 and r.x0 < box.x1 and r.y1 > box.y0 and r.y0 < box.y1) {
+                coherent = false;
+                break;
+            }
+        }
+        if (!coherent) continue;
         try out.append(arena, .{
-            .box = .{ .x0 = minx - group_pad, .y0 = miny - group_label_h, .x1 = maxx + group_pad, .y1 = maxy + group_pad },
+            .box = box,
             .members = try members.toOwnedSlice(arena),
         });
     }
@@ -968,15 +1064,36 @@ fn clearVx(vxs: []const f64, hya: f64, hyb: f64, ax: f64, bx: f64, pref: f64, ob
     return best;
 }
 
+/// Assemble the horizontal-plan staircase through channel `hy0`, lane-spread.
+fn hStair(arena: Allocator, lanes: *FreeLanes, ea: Pt, eb: Pt, vxa: f64, vxb: f64, hy0: f64) Allocator.Error![]Pt {
+    const hy = hy0 + laneDelta(try bumpLane(arena, &lanes.h, @intFromFloat(@round(hy0 / 4))));
+    const stair = [_]Pt{ ea, .{ .x = vxa, .y = ea.y }, .{ .x = vxa, .y = hy }, .{ .x = vxb, .y = hy }, .{ .x = vxb, .y = eb.y }, eb };
+    return collapsePts(arena, &stair);
+}
+
+/// Vertical-plan twin of `hStair`: the staircase through channel `vx0`.
+fn vStair(arena: Allocator, lanes: *FreeLanes, ea: Pt, eb: Pt, hya: f64, hyb: f64, vx0: f64) Allocator.Error![]Pt {
+    const vx = vx0 + laneDelta(try bumpLane(arena, &lanes.v, @intFromFloat(@round(vx0 / 4))));
+    const stair = [_]Pt{ ea, .{ .x = ea.x, .y = hya }, .{ .x = vx, .y = hya }, .{ .x = vx, .y = hyb }, .{ .x = eb.x, .y = hyb }, eb };
+    return collapsePts(arena, &stair);
+}
+
 /// Build the orthogonal polyline for one edge: a direct jog when clear, else a
 /// staircase through the nearest obstacle-free gap channel. The jog coordinate
 /// is lane-spread per corridor; when the spread jog clips an obstacle the
 /// centred jog is retried before paying for a staircase detour.
+///
+/// `obs` is every obstacle (foreign group boxes first, then foreign blocks);
+/// `hard` is its blocks-only tail. When no shape clears `obs`, the whole
+/// ladder retries against `hard` alone — a wire crossing a group *tint* is far
+/// better than one drawn through a block, which is what the old
+/// blocked-simple fallback produced whenever the channels were all covered.
 fn buildFreeRoute(
     arena: Allocator,
     ends: [4]f64, // ax, ay, bx, by (top-left of each box)
     plan: FreePlan,
     obs: []const Rect,
+    hard: []const Rect,
     chans: [2][]const f64, // vxs, hys
     lanes: *FreeLanes,
 ) Allocator.Error![]Pt {
@@ -996,10 +1113,15 @@ fn buildFreeRoute(
         if (!pathHitsAny(&centred, obs)) return collapsePts(arena, &centred);
         const vxa = channelBeside(chans[0], if (right) ax + node_w else ax, right, if (right) free_h_gap / 2 else -free_h_gap / 2);
         const vxb = channelBeside(chans[0], if (right) bx else bx + node_w, !right, if (right) -free_h_gap / 2 else free_h_gap / 2);
-        const hy0 = clearHy(chans[1], vxa, vxb, ea.y, eb.y, (ea.y + eb.y) / 2, obs) orelse return collapsePts(arena, &simple);
-        const hy = hy0 + laneDelta(try bumpLane(arena, &lanes.h, @intFromFloat(@round(hy0 / 4))));
-        const stair = [_]Pt{ ea, .{ .x = vxa, .y = ea.y }, .{ .x = vxa, .y = hy }, .{ .x = vxb, .y = hy }, .{ .x = vxb, .y = eb.y }, eb };
-        return collapsePts(arena, &stair);
+        if (clearHy(chans[1], vxa, vxb, ea.y, eb.y, (ea.y + eb.y) / 2, obs)) |hy0|
+            return hStair(arena, lanes, ea, eb, vxa, vxb, hy0);
+        if (hard.len < obs.len) { // group boxes blocked everything: retry vs blocks only
+            if (!pathHitsAny(&simple, hard)) return collapsePts(arena, &simple);
+            if (!pathHitsAny(&centred, hard)) return collapsePts(arena, &centred);
+            if (clearHy(chans[1], vxa, vxb, ea.y, eb.y, (ea.y + eb.y) / 2, hard)) |hy0|
+                return hStair(arena, lanes, ea, eb, vxa, vxb, hy0);
+        }
+        return collapsePts(arena, &simple);
     }
     const down = plan.fwd;
     const ea = portPoint(ax, ay, if (down) side_b else side_t, plan.fa);
@@ -1012,10 +1134,15 @@ fn buildFreeRoute(
     if (!pathHitsAny(&centred, obs)) return collapsePts(arena, &centred);
     const hya = channelBeside(chans[1], if (down) ay + node_h else ay, down, if (down) free_v_gap / 2 else -free_v_gap / 2);
     const hyb = channelBeside(chans[1], if (down) by else by + node_h, !down, if (down) -free_v_gap / 2 else free_v_gap / 2);
-    const vx0 = clearVx(chans[0], hya, hyb, ea.x, eb.x, (ea.x + eb.x) / 2, obs) orelse return collapsePts(arena, &simple);
-    const vx = vx0 + laneDelta(try bumpLane(arena, &lanes.v, @intFromFloat(@round(vx0 / 4))));
-    const stair = [_]Pt{ ea, .{ .x = ea.x, .y = hya }, .{ .x = vx, .y = hya }, .{ .x = vx, .y = hyb }, .{ .x = eb.x, .y = hyb }, eb };
-    return collapsePts(arena, &stair);
+    if (clearVx(chans[0], hya, hyb, ea.x, eb.x, (ea.x + eb.x) / 2, obs)) |vx0|
+        return vStair(arena, lanes, ea, eb, hya, hyb, vx0);
+    if (hard.len < obs.len) { // group boxes blocked everything: retry vs blocks only
+        if (!pathHitsAny(&simple, hard)) return collapsePts(arena, &simple);
+        if (!pathHitsAny(&centred, hard)) return collapsePts(arena, &centred);
+        if (clearVx(chans[0], hya, hyb, ea.x, eb.x, (ea.x + eb.x) / 2, hard)) |vx0|
+            return vStair(arena, lanes, ea, eb, hya, hyb, vx0);
+    }
+    return collapsePts(arena, &simple);
 }
 
 /// Route every placed edge as an obstacle-aware orthogonal polyline (see the
@@ -1069,10 +1196,14 @@ fn routeFreeEdges(arena: Allocator, graph: *const Graph, nodes: []const LNode, g
     var routes: std.ArrayListUnmanaged(Route) = .empty;
     for (plans.items) |plan| {
         const e = graph.edges[plan.eidx];
+        // Foreign group boxes first, foreign blocks after — `n_soft` marks the
+        // boundary so the router can retry against the blocks-only tail when
+        // the group boxes leave no clear channel.
         var obs: std.ArrayListUnmanaged(Rect) = .empty;
         for (gobs) |g| {
             if (!memberOf(g.members, e.from) and !memberOf(g.members, e.to)) try obs.append(arena, g.box);
         }
+        const n_soft = obs.items.len;
         for (nodes) |ln| {
             if (ln.gid != e.from and ln.gid != e.to) try obs.append(arena, inflateRect(nodeRect(ln.x, ln.y), route_clear));
         }
@@ -1081,6 +1212,7 @@ fn routeFreeEdges(arena: Allocator, graph: *const Graph, nodes: []const LNode, g
             .{ px[e.from], py[e.from], px[e.to], py[e.to] },
             plan,
             obs.items,
+            obs.items[n_soft..],
             .{ vxs, hys },
             &lanes,
         );
@@ -2392,6 +2524,74 @@ test "computeFreeLayout places a block from two references" {
     try testing.expectApproxEqAbs(xy[1].x + node_w + free_h_gap, xy[2].x, 0.5);
     try testing.expect(xy[2].y > xy[0].y);
     try testing.expectApproxEqAbs(xy[0].y + node_h + free_v_gap, xy[2].y, 0.5);
+}
+
+// spec: diagram/layout - computeFreeLayout bumps a placement that resolves onto an occupied cell to the next free cell
+test "computeFreeLayout never stacks two placed blocks on one cell" {
+    // d (below b) and e (right-of c) both resolve to cell (1,1) — the exact
+    // labstation failure (`UX & Indicators` under `USB-C Host Interface`).
+    // The later directive must bump along its constraint direction instead of
+    // silently rendering on top of the earlier block.
+    var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("b"), mkKeyed("c"), mkKeyed("d"), mkKeyed("e") };
+    const b_right_a = [_]env_mod.PlaceConstraint{.{ .rel = .right_of, .reference = "a" }};
+    const c_below_a = [_]env_mod.PlaceConstraint{.{ .rel = .below, .reference = "a" }};
+    const d_below_b = [_]env_mod.PlaceConstraint{.{ .rel = .below, .reference = "b" }};
+    const e_right_c = [_]env_mod.PlaceConstraint{.{ .rel = .right_of, .reference = "c" }};
+    const placements = [_]env_mod.Placement{
+        .{ .name = "a" },
+        .{ .name = "b", .constraints = &b_right_a },
+        .{ .name = "c", .constraints = &c_below_a },
+        .{ .name = "d", .constraints = &d_below_b },
+        .{ .name = "e", .constraints = &e_right_c },
+    };
+    const graph = Graph{ .nodes = &nodes, .edges = &.{}, .layout = .{ .placements = &placements } };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeFreeLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 5), lay.nodes.len);
+    const xy = nodeXY(lay.nodes);
+    // No two blocks share a position (xy slots past nodes.len are unused).
+    for (xy[0..nodes.len], 0..) |p, i| {
+        for (xy[i + 1 .. nodes.len]) |q| {
+            try testing.expect(@abs(p.x - q.x) > 0.5 or @abs(p.y - q.y) > 0.5);
+        }
+    }
+    // d kept the contested cell (declared first); e bumped one column right.
+    try testing.expectApproxEqAbs(xy[3].x + node_w + free_h_gap, xy[4].x, 0.5);
+    try testing.expectApproxEqAbs(xy[3].y, xy[4].y, 0.5);
+}
+
+// spec: diagram/layout - computeFreeLayout drops a scattered group's box from routing obstacles instead of punching the wire through a block
+test "computeFreeLayout routes around a block under an incoherent group box" {
+    // a — b — c in a row; d (below a) and e (above c) form group "G" whose
+    // bounding box engulfs all three non-members. Treated as an obstacle that
+    // box blocks every channel and the a→c wire used to fall back to the
+    // direct path straight through b; the box must be dropped from obstacle
+    // duty so the wire detours around b instead.
+    var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("b"), mkKeyed("c"), mkKeyed("d"), mkKeyed("e") };
+    const b_right_a = [_]env_mod.PlaceConstraint{.{ .rel = .right_of, .reference = "a" }};
+    const c_right_b = [_]env_mod.PlaceConstraint{.{ .rel = .right_of, .reference = "b" }};
+    const d_below_a = [_]env_mod.PlaceConstraint{.{ .rel = .below, .reference = "a" }};
+    const e_above_c = [_]env_mod.PlaceConstraint{.{ .rel = .above, .reference = "c" }};
+    const placements = [_]env_mod.Placement{
+        .{ .name = "a" },
+        .{ .name = "b", .constraints = &b_right_a },
+        .{ .name = "c", .constraints = &c_right_b },
+        .{ .name = "d", .constraints = &d_below_a },
+        .{ .name = "e", .constraints = &e_above_c },
+    };
+    const gmem = [_][]const u8{ "d", "e" };
+    const groups = [_]env_mod.LayoutGroup{.{ .label = "G", .members = &gmem }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 2, .class = types.CLASS_CONTROL, .label = "x" }};
+    const graph = Graph{ .nodes = &nodes, .edges = &edges, .layout = .{ .placements = &placements, .groups = &groups } };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeFreeLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), lay.routes.len);
+    const xy = nodeXY(lay.nodes);
+    // The wire never enters b's box (gid 1 — the block between the endpoints).
+    const b_box = GroupBox{ .label = "", .x = xy[1].x, .y = xy[1].y, .w = node_w, .h = node_h };
+    try expectRouteOrthAndClear(lay.routes[0], b_box);
 }
 
 // spec: diagram/layout - computeFreeLayout lays each layout row as a horizontal band, stacking bands top-to-bottom

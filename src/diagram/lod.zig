@@ -18,18 +18,31 @@ const Writer = std.Io.Writer;
 
 /// Entity a glance chip stands for: one `(group …)` region (with its member
 /// node ids) or one ungrouped block promoted to a chip of its own.
-const Entity = struct {
+pub const Entity = struct {
     label: []const u8,
     x: f64,
     y: f64,
     w: f64,
     h: f64,
+    /// Zoom target stamped into the chip's `data-*` attributes: the entity's
+    /// ORIGINAL bounds, before the overlap-separation pass moved the chip.
+    /// Clicking a chip must zoom to where its member blocks actually are, not
+    /// to wherever the chip was pushed.
+    zx: f64,
+    zy: f64,
+    zw: f64,
+    zh: f64,
     color: []const u8,
     /// Number of member blocks (1 for a solo chip).
     count: usize,
     /// Up to the first few member labels, for the chip caption. Empty for solo.
     members: []const []const u8,
 };
+
+/// Minimum clear gap the separation pass keeps between two glance chips.
+const chip_gap: f64 = 28;
+/// Pass cap for the push-apart relaxation; real diagrams settle in a handful.
+const sep_pass_cap = 256;
 
 /// One aggregated glance edge: every base edge of `class` between the same
 /// entity pair collapses into a single line whose `nets` counts the parallel
@@ -68,18 +81,80 @@ const chip_sub_fs: f64 = 21;
 const chip_sub_fs_min: f64 = 13;
 const sub_char_w: f64 = 0.60;
 
+/// Build the glance chips and push overlapping ones apart. A group chip is the
+/// raw `(group …)` bounding box, and a group with spatially scattered members
+/// produces a huge box that can overlap — or swallow whole — other chips;
+/// drawn as-is the glance layer stacks unreadably. Separation moves chips
+/// apart along the smaller-overlap axis (half each way) until disjoint; each
+/// chip's `z*` zoom target keeps its original bounds. The caller must size the
+/// SVG canvas to cover the returned entities, which can end up past the base
+/// layout's extent.
+pub fn buildGlanceEntities(
+    arena: Allocator,
+    graph: *const Graph,
+    lay: layout.Layout,
+    palette: []const []const u8,
+) Allocator.Error![]Entity {
+    const ents = try buildEntities(arena, graph, lay, palette);
+    separateEntities(ents);
+    // Keep every chip on-canvas: shift the whole layer right/down when the
+    // push-apart drove a chip past the top/left padding.
+    var minx: f64 = std.math.floatMax(f64);
+    var miny: f64 = std.math.floatMax(f64);
+    for (ents) |e| {
+        minx = @min(minx, e.x);
+        miny = @min(miny, e.y);
+    }
+    if (ents.len > 0) {
+        const dx: f64 = if (minx < layout.pad) layout.pad - minx else 0;
+        const dy: f64 = if (miny < layout.pad) layout.pad - miny else 0;
+        for (ents) |*e| {
+            e.x += dx;
+            e.y += dy;
+        }
+    }
+    return ents;
+}
+
+/// Push-apart relaxation: any two chips overlapping (or closer than
+/// `chip_gap`) on both axes move half the required distance each, along the
+/// axis needing the smaller correction. Deterministic (fixed pair order, no
+/// randomness) so the same design always renders the same glance layer.
+fn separateEntities(ents: []Entity) void {
+    var pass: usize = 0;
+    while (pass < sep_pass_cap) : (pass += 1) {
+        var moved = false;
+        for (ents, 0..) |*a, i| {
+            for (ents[i + 1 ..]) |*b| {
+                const dx = @min(a.x + a.w, b.x + b.w) - @max(a.x, b.x) + chip_gap;
+                const dy = @min(a.y + a.h, b.y + b.h) - @max(a.y, b.y) + chip_gap;
+                if (dx <= 0 or dy <= 0) continue;
+                moved = true;
+                if (dx <= dy) {
+                    const s: f64 = if (a.x + a.w / 2 <= b.x + b.w / 2) 1 else -1;
+                    a.x -= s * dx / 2;
+                    b.x += s * dx / 2;
+                } else {
+                    const s: f64 = if (a.y + a.h / 2 <= b.y + b.h / 2) 1 else -1;
+                    a.y -= s * dy / 2;
+                    b.y += s * dy / 2;
+                }
+            }
+        }
+        if (!moved) return;
+    }
+}
+
 /// Emit the `<g class="dg-glance">` layer: chips for every entity, aggregated
 /// class-colored connections between them, and a ×N net-count tag per line.
-/// `palette` is the same cycled palette the base layer's group boxes use, so a
-/// chip and its expanded region share a hue.
+/// `ents` comes from `buildGlanceEntities` (chips already separated).
 pub fn writeGlanceLayer(
     arena: Allocator,
     w: *Writer,
     graph: *const Graph,
     lay: layout.Layout,
-    palette: []const []const u8,
+    ents: []const Entity,
 ) (Allocator.Error || Writer.Error)!void {
-    const ents = try buildEntities(arena, graph, lay, palette);
     if (ents.len == 0) return;
     const ent_of = try entityOf(arena, graph, lay, ents);
     const aggs = try aggregateEdges(arena, graph, ent_of);
@@ -124,6 +199,10 @@ fn buildEntities(
             .y = gb.y,
             .w = gb.w,
             .h = gb.h,
+            .zx = gb.x,
+            .zy = gb.y,
+            .zw = gb.w,
+            .zh = gb.h,
             .color = palette[gb.color_idx % palette.len],
             .count = count,
             .members = try labels.toOwnedSlice(arena),
@@ -138,6 +217,10 @@ fn buildEntities(
             .y = ln.y,
             .w = layout.node_w,
             .h = layout.node_h,
+            .zx = ln.x,
+            .zy = ln.y,
+            .zw = layout.node_w,
+            .zh = layout.node_h,
             .color = rb.categoryColor(nd.category),
             .count = 1,
             .members = &.{},
@@ -338,11 +421,13 @@ fn classColor(graph: *const Graph, id: types.ClassId) []const u8 {
 /// One glance chip: solid backing (so the cross-fade never shows base wiring
 /// through it), a tinted fill + border in the entity color, the title centred,
 /// and a caption naming the member count + first member parts. The `data-*`
-/// rect lets the viewer JS zoom into the chip's region on click.
+/// rect lets the viewer JS zoom into the chip's region on click — the `z*`
+/// original bounds, so the zoom lands on the member blocks even when the
+/// separation pass moved the chip itself.
 fn writeChip(arena: Allocator, w: *Writer, e: Entity) (Allocator.Error || Writer.Error)!void {
     try w.print(
         "<g class=\"dg-chip\" data-x=\"{d:.1}\" data-y=\"{d:.1}\" data-w=\"{d:.1}\" data-h=\"{d:.1}\">",
-        .{ e.x, e.y, e.w, e.h },
+        .{ e.zx, e.zy, e.zw, e.zh },
     );
     try w.print(
         "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\" rx=\"14\" fill=\"#0d1117\"/>",
@@ -490,7 +575,8 @@ test "writeGlanceLayer emits group chips plus solo chips for ungrouped blocks" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     const palette = [_][]const u8{"#58a6ff"};
-    try writeGlanceLayer(arena_state.allocator(), &aw.writer, &graph, lay, &palette);
+    const ents = try buildGlanceEntities(arena_state.allocator(), &graph, lay, &palette);
+    try writeGlanceLayer(arena_state.allocator(), &aw.writer, &graph, lay, ents);
     const svg = aw.written();
     // One group chip whose caption lists both members, one solo chip for the
     // ungrouped sensor; the intra-group BUS edge aggregates away.
@@ -499,4 +585,47 @@ test "writeGlanceLayer emits group chips plus solo chips for ungrouped blocks" {
     try testing.expect(std.mem.indexOf(u8, svg, "MCU \u{00b7} Flash") != null);
     try testing.expect(std.mem.indexOf(u8, svg, "Sensor") != null);
     try testing.expect(std.mem.indexOf(u8, svg, "data-w=\"700.0\"") != null);
+}
+
+// spec: diagram/lod - Separates overlapping glance chips so chips never stack while keeping each chip's original zoom target
+test "buildGlanceEntities pushes overlapping group chips apart" {
+    // Two groups with interleaved members: "Wide" spans a…d so its bounding
+    // box swallows "Inner" (b…c) whole — the raw boxes render stacked.
+    var nodes = [_]types.Node{ testNode("a"), testNode("b"), testNode("c"), testNode("d") };
+    const g1m = [_][]const u8{ "a", "d" };
+    const g2m = [_][]const u8{ "b", "c" };
+    const groups = [_]env_mod.LayoutGroup{
+        .{ .label = "Wide", .members = &g1m },
+        .{ .label = "Inner", .members = &g2m },
+    };
+    var graph = Graph{ .nodes = &nodes, .edges = &.{} };
+    graph.layout.groups = &groups;
+    var lnodes = [_]layout.LNode{
+        .{ .gid = 0, .x = 0, .y = 0 },
+        .{ .gid = 1, .x = 400, .y = 0 },
+        .{ .gid = 2, .x = 800, .y = 0 },
+        .{ .gid = 3, .x = 1200, .y = 0 },
+    };
+    const gboxes = [_]layout.GroupBox{
+        .{ .label = "Wide", .x = 0, .y = 0, .w = 1500, .h = 150, .color_idx = 0 },
+        .{ .label = "Inner", .x = 400, .y = 20, .w = 700, .h = 110, .color_idx = 1 },
+    };
+    const lay = layout.Layout{ .nodes = &lnodes, .routes = &.{}, .width = 1600, .height = 200, .groups = &gboxes };
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const palette = [_][]const u8{ "#58a6ff", "#d29922" };
+    const ents = try buildGlanceEntities(arena_state.allocator(), &graph, lay, &palette);
+    try testing.expectEqual(@as(usize, 2), ents.len);
+    // Disjoint after separation…
+    const a = ents[0];
+    const b = ents[1];
+    const ox = @min(a.x + a.w, b.x + b.w) - @max(a.x, b.x);
+    const oy = @min(a.y + a.h, b.y + b.h) - @max(a.y, b.y);
+    try testing.expect(ox <= 0 or oy <= 0);
+    // …sizes untouched, and the zoom target keeps the ORIGINAL (overlapping)
+    // box so clicking still lands on the member blocks.
+    try testing.expectApproxEqAbs(@as(f64, 1500), a.w, 0.5);
+    try testing.expectApproxEqAbs(@as(f64, 0), a.zx, 0.5);
+    try testing.expectApproxEqAbs(@as(f64, 400), b.zx, 0.5);
+    try testing.expectApproxEqAbs(@as(f64, 20), b.zy, 0.5);
 }
