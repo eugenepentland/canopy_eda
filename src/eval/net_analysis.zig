@@ -74,38 +74,68 @@ pub fn findMissingDecouplingNets(
         }
     }
 
-    var missing: std.ArrayListUnmanaged([]const u8) = .empty;
+    // Aggregate IC- and cap-presence per *base* rail name, folding the trunk
+    // net together with its per-pin bypass-stub nets (`<rail>.<ic>.<pad>`).
+    // A `(decouple … per-pin PAD)` form hangs each local cap on such a stub and
+    // pulls the bypassed pad off the trunk; `buildNets` then renames the stub to
+    // share the canonical rail prefix when the pad's power-domain name merges
+    // into a board rail (e.g. VDDSMPS/VDDIO2 → V1P8). So a rail whose pads are
+    // all locally bypassed carries its caps only on the stubs, never the trunk —
+    // a per-net check would falsely flag the trunk as undecoupled (the stm32n6
+    // V1P8 1.8 V rail). Collapsing trunk + stubs to one base-name verdict fixes
+    // that without weakening the check for genuinely bare rails.
+    var rails_with_ic: std.StringHashMapUnmanaged(void) = .empty;
+    defer rails_with_ic.deinit(allocator);
+    var rails_with_cap: std.StringHashMapUnmanaged(void) = .empty;
+    defer rails_with_cap.deinit(allocator);
     for (block.nets) |net| {
         const base = baseNetName(net.name);
         if (!power_nets.contains(base)) continue;
-
-        var has_ic = false;
-        var has_cap = false;
         for (net.pins) |pin| {
             if (pin.ref_des.len == 0) continue;
-            const prefix = refDesLocalPrefix(pin.ref_des);
-            if (prefix == 'U') has_ic = true;
-            if (prefix == 'C') has_cap = true;
-        }
-        if (has_ic and !has_cap) {
-            for (block.net_ties) |tie| {
-                const other: ?[]const u8 = if (std.mem.eql(u8, tie.a, base))
-                    tie.b
-                else if (std.mem.eql(u8, tie.b, base))
-                    tie.a
-                else
-                    null;
-                if (other) |o| {
-                    if (std.mem.indexOfScalar(u8, o, '/') != null and subBlockNetHasCap(block, o)) {
-                        has_cap = true;
-                        break;
-                    }
-                }
+            switch (refDesLocalPrefix(pin.ref_des)) {
+                'U' => try rails_with_ic.put(allocator, base, {}),
+                'C' => try rails_with_cap.put(allocator, base, {}),
+                else => {},
             }
         }
-        if (has_ic and !has_cap) {
-            try missing.append(allocator, base);
-        }
+    }
+
+    // Emit each undecoupled base rail once, walking `block.nets` for a stable
+    // order rather than the (unordered) hash map.
+    var missing: std.ArrayListUnmanaged([]const u8) = .empty;
+    var emitted: std.StringHashMapUnmanaged(void) = .empty;
+    defer emitted.deinit(allocator);
+    for (block.nets) |net| {
+        const base = baseNetName(net.name);
+        if (!rails_with_ic.contains(base)) continue;
+        if (rails_with_cap.contains(base)) continue;
+        if (emitted.contains(base)) continue;
+        // Decoupling may instead live inside a sub-block whose power port is
+        // tied to this rail via a `(net "RAIL" "sub/PORT" …)` form.
+        if (tiedSubBlockHasCap(block, base)) continue;
+        try emitted.put(allocator, base, {});
+        try missing.append(allocator, base);
     }
     return missing.toOwnedSlice(allocator);
+}
+
+/// True when `base` is tied — via a `(net …)` form / net-tie — to a sub-block
+/// power port whose internal leaf net carries a decoupling cap. Lets a board
+/// rail count a peripheral module's own bypassing (e.g. `flash/VDDIO` on V1P8).
+fn tiedSubBlockHasCap(block: *const DesignBlock, base: []const u8) bool {
+    for (block.net_ties) |tie| {
+        const other: ?[]const u8 = if (std.mem.eql(u8, tie.a, base))
+            tie.b
+        else if (std.mem.eql(u8, tie.b, base))
+            tie.a
+        else
+            null;
+        if (other) |o| {
+            if (std.mem.indexOfScalar(u8, o, '/') != null and subBlockNetHasCap(block, o)) {
+                return true;
+            }
+        }
+    }
+    return false;
 }

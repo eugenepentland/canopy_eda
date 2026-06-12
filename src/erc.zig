@@ -104,6 +104,13 @@ fn checkMainIcsInDesign(
         if (na.refDesLocalPrefix(inst.ref_des) != 'U') continue;
         if (inst.requirements_ignored) continue;
         if (isPassiveComponent(inst.component)) continue;
+        // The board's designated primary IC — declared as a (critical-ic …)
+        // with a compute role (MCU/CPU/SoC/FPGA/…) — is *meant* to sit at the
+        // top level: the whole design reads as functional sections hanging off
+        // it. Only peripheral ICs belong sealed in a (defmodule …), so exempt
+        // the anchor processor instead of nagging to modularise the one part
+        // the design is built around.
+        if (isDeclaredMainIc(block, inst.component)) continue;
         const msg = std.fmt.allocPrint(
             allocator,
             "Main IC \"{s}\" ({s}) is instantiated directly in the design — " ++
@@ -117,6 +124,30 @@ fn checkMainIcsInDesign(
             .ref_des = inst.ref_des,
         });
     }
+}
+
+/// True when `component` is declared as a board-defining `(critical-ic …)`
+/// whose role names a primary compute part. Such an IC is the design's anchor
+/// and legitimately lives at the top level (see `checkMainIcsInDesign`).
+fn isDeclaredMainIc(block: *const DesignBlock, component: []const u8) bool {
+    for (block.critical_ics) |ci| {
+        if (!std.mem.eql(u8, ci.component, component)) continue;
+        if (roleIsPrimaryCompute(ci.role)) return true;
+    }
+    return false;
+}
+
+/// Case-insensitive match for the compute-role keywords used in
+/// `(critical-ic … (role "…"))` declarations — "Main MCU", "Application
+/// Processor", "Host SoC", etc. Deliberately narrow: only the board's
+/// processor is exempted from the modularise-peripherals check, not every
+/// IC someone chose to flag as critical.
+fn roleIsPrimaryCompute(role: []const u8) bool {
+    const needles = [_][]const u8{ "MCU", "MPU", "CPU", "SoC", "FPGA", "Processor", "Microcontroller" };
+    for (needles) |n| {
+        if (std.ascii.indexOfIgnoreCase(role, n) != null) return true;
+    }
+    return false;
 }
 
 /// For each net, gather pins whose component library declared electrical
@@ -2203,6 +2234,74 @@ test "support parts and passives instantiated directly in design are allowed" {
         violations.deinit(std.testing.allocator);
     }
     try std.testing.expectEqual(@as(usize, 0), violations.items.len);
+}
+
+// spec: erc - Allows the board's declared main IC (critical-ic with a compute role) to be instantiated directly
+test "design's declared main MCU instantiated directly is allowed" {
+    const instances = [_]Instance{.{
+        .ref_des = "U9",
+        .component = "stm32n657l0h3q",
+        .value = "",
+        .footprint = "bga-223",
+        .symbol = "",
+    }};
+    const crit = [_]env_mod.CriticalIc{.{
+        .component = "stm32n657l0h3q",
+        .role = "Main MCU",
+    }};
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &instances,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .critical_ics = &crit,
+    };
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkMainIcsInDesign(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 0), violations.items.len);
+}
+
+// spec: erc - Still flags a critical IC whose role is a peripheral, not the main processor
+test "critical IC with a non-compute role is still flagged when instantiated directly" {
+    const instances = [_]Instance{.{
+        .ref_des = "U8",
+        .component = "ad7380-4bcpz",
+        .value = "",
+        .footprint = "lfcsp-16",
+        .symbol = "",
+    }};
+    const crit = [_]env_mod.CriticalIc{.{
+        .component = "ad7380-4bcpz",
+        .role = "Precision ADC",
+    }};
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &instances,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .critical_ics = &crit,
+    };
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkMainIcsInDesign(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    var hit = false;
+    for (violations.items) |v| {
+        if (v.kind == .main_ic_in_design and std.mem.eql(u8, v.ref_des, "U8")) hit = true;
+    }
+    try std.testing.expect(hit);
 }
 
 // spec: erc - Does not flag main ICs that are wrapped in sub-blocks
