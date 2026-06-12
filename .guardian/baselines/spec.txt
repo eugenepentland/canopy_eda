@@ -7,9 +7,15 @@ add: // spec: serve/sync - runSyncPlan errors with BuildFailed when the source f
 add: // spec: serve/sync - runSyncPlan errors with NotADesign when the source file does not evaluate to a design-block
 unlinked tag: Web Server - Placement-spec export falls back to ref-des when origin names repeat in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - Placement-spec export rebuilds an editable (placement …) form from a solved layout in ./src/serve/placement_spec.zig
+unlinked tag: Web Server - The layouts sidecar round-trips snapshots and the optimizer cache slot through one file in ./src/serve/pcb_layout_page.zig
 unlinked tag: Web Server - propose_placement parses a standalone placement/floorplan form in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - spec save inserts a new placement form before the design-block close in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - spec save replaces an existing placement form in place in ./src/serve/placement_spec.zig
+unlinked tag: Web Server - spec save splices the placement form into a defmodule body in ./src/serve/placement_spec.zig
+unlinked tag: eval/modules - A later parameter's default may reference an earlier parameter in ./src/eval/modules.zig
+unlinked tag: eval/modules - A supplied argument overrides the parameter's declared default in ./src/eval/modules.zig
+unlinked tag: eval/modules - Omitted parameters fall back to their declared (param default) value in ./src/eval/modules.zig
+unlinked tag: eval/modules - Required parameters are still diagnosed when only defaulted ones are unbound in ./src/eval/modules.zig
 unlinked tag: placement/optimizer - (floorplan …) docks sub-block macros around the anchor block in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - (net "NAME") side rules expand to unclaimed parts on the net in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - floorplan (rot N "SUB") turns the whole macro in quarter steps in ./src/placement/optimizer.zig

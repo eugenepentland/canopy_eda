@@ -20,7 +20,7 @@ Arguments are passed un-evaluated; each form decides what to evaluate.
 | `(if cond then else)` | 3 | Short-circuit conditional. Only the matching branch is evaluated. |
 | `(cond (test1 expr1) … (else exprN))` | 1+ | Walk clauses in order, returning the first matching expression's value. |
 | `(import name…)` | 1+ | Load library components or modules by name. Searches `lib/components/` then `lib/modules/`. |
-| `(defmodule name (params…) ["docstring"] body…)` | 2+ | Define a parameterised module that closes over the surrounding env. |
+| `(defmodule name (param \| (param default)…) ["docstring"] body…)` | 2+ | Define a parameterised module that closes over the surrounding env. A `(param default)` pair makes the argument optional — its default evaluates at call time when omitted, so a fully-defaulted module also renders standalone. |
 | `(design-block "name" form…)` | 1+ | The root container — every `.sexp` design file evaluates to one. |
 | `(assert cond "message")` | 2 | Record a pass/fail entry. Failures surface in the review report, never aborts the build. |
 | `(assert-range value lo hi "label")` | 4 | Record an assertion that `value` is in `[lo, hi]`, with a formatted diagnostic. |

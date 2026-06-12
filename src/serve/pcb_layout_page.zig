@@ -39,15 +39,11 @@ const SCALE_MAX: f64 = 48.0;
 const TARGET_PX: f64 = 1000.0; // desired content width/height
 const MARGIN_MM: f64 = 2.0;
 
-/// Sidecar holding a hand-saved placement (ref → x/y/rot), next to the design.
-const SAVED_EXT = ".placement.json";
-
-/// Sidecar caching the auto-generated layout, so the (expensive) optimizer
-/// runs once and later loads read this instead. Regenerated on `?regen=1`.
+/// Legacy standalone optimizer-cache sidecar. The cache now lives in the
+/// `"cache"` key of `.layouts.json` (one sidecar per design); this file is
+/// still read as a fallback for boards last solved by an older build, and
+/// is deleted the next time the cache is written.
 const AUTO_EXT = ".autolayout.json";
-
-/// A saved part placement: centre (mm) + rotation (deg).
-const SavedPos = struct { x: f64, y: f64, rot: f64 };
 
 /// JSON key prefix shared by every `{"ref": …}` record we emit.
 const REF_OPEN = "{\"ref\":";
@@ -68,9 +64,10 @@ const OK_JSON_TRUE = "{\"ok\":true}";
 /// The ` checked` HTML attribute fragment, emitted to pre-check a checkbox.
 const CHECKED = " checked";
 
-/// Sidecar holding every *named* saved layout for a design — manual snapshots
-/// the user named, plus an auto-recorded history of optimizer runs. Supersedes
-/// the single-slot `.placement.json` (migrated in on first read).
+/// The one layout sidecar per design: every *named* saved layout (manual
+/// snapshots the user named plus an auto-recorded history of optimizer
+/// runs) under `"layouts"`, the KiCad-sync `"default"` marker, and the
+/// single-slot optimizer cache under `"cache"`.
 const LAYOUTS_EXT = ".layouts.json";
 
 /// Layout `kind` tags. `manual` = a snapshot the user saved by name; `auto` =
@@ -105,6 +102,59 @@ const SavedLayout = struct {
     parts: []const PartPose,
     default: bool = false,
 };
+
+/// Which layout state the page is showing — the precedence ladder made
+/// visible in the scorebar chip: source **spec** > saved **snapshot**
+/// (`?refine=`) > **cache** slot > **fresh** solve > plain **grid**.
+const LayoutSource = enum { spec, snapshot, cache, fresh, grid };
+
+/// One chip in the scorebar naming where the shown layout came from, so
+/// the precedence between the `(placement …)` spec, saved snapshots, and
+/// the optimizer cache is visible instead of implicit.
+fn writeSourceChip(w: *std.Io.Writer, src: LayoutSource) std.Io.Writer.Error!void {
+    const label: []const u8, const cls: []const u8, const title: []const u8 = switch (src) {
+        .spec => .{
+            "from spec", "spec",
+            "Placed by the (placement …) form in the source file — the source of truth. " ++
+                "Saved snapshots and the cache are ignored while a spec is present.",
+        },
+        .snapshot => .{
+            "from snapshot",                                                                         "snap",
+            "Showing a saved layout snapshot (?refine=), refined in place. The cache is untouched.",
+        },
+        .cache => .{
+            "from cache", "cache",
+            "Reusing the optimizer cache from the last solve (the \"cache\" slot of the " ++
+                ".layouts.json sidecar). Regenerate re-solves; Save as spec promotes it to the source file.",
+        },
+        .fresh => .{
+            "fresh solve",                                                                     "fresh",
+            "Solved on this page load (Regenerate / tuning weights / per-sub-block preview).",
+        },
+        .grid => .{
+            "no layout",                                                                    "grid",
+            "Plain grid placeholder — no layout computed yet. Regenerate to auto-place.",
+        },
+    };
+    try w.print("<span class=\"src-chip src-{s}\" title=\"{s}\">{s}</span>", .{ cls, title, label });
+}
+
+/// Name the rung of the precedence ladder the shown placement came from,
+/// mirroring the selection logic at the top of `pcbLayoutPage`.
+fn classifyLayoutSource(
+    sub: ?[]const u8,
+    grid_only: bool,
+    spec_drives: bool,
+    refine_name: ?[]const u8,
+    cached: ?[]const optimizer.RefPose,
+) LayoutSource {
+    if (sub != null) return .fresh;
+    if (grid_only) return .grid;
+    if (spec_drives) return .spec;
+    if (refine_name != null and cached != null) return .snapshot;
+    if (cached != null) return .cache;
+    return .fresh;
+}
 
 /// GET /pcb-layout/:name — evaluate the design, run the optimizer, and return
 /// the interactive (drag + live-score) inline-SVG preview with a sidebar.
@@ -238,7 +288,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
             .{ schematic_path, name, name },
         );
         try w.writeAll("</div>");
-        try writeScorebar(w, placement, name);
+        try writeScorebar(w, placement, name, classifyLayoutSource(sub, grid_only, spec_drives, refine_name, cached));
         // When showing the plain grid placeholder, say so — the score is the raw
         // grid's, not an optimized layout, and Regenerate computes the real one.
         if (grid_only) try w.writeAll(
@@ -1701,30 +1751,6 @@ fn jsonNum(v: ?std.json.Value) f64 {
     };
 }
 
-/// Read the `.placement.json` sidecar into a ref → SavedPos map, or null if
-/// absent/unreadable. Strings are owned by `alloc` (request lifetime).
-fn readSaved(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?std.StringHashMap(SavedPos) {
-    const path = paths.designSiblingPath(alloc, project_dir, name, SAVED_EXT) catch return null;
-    defer alloc.free(path);
-    const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20) catch return null;
-    const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{}) catch return null;
-    if (root != .object) return null;
-    const parts = root.object.get("parts") orelse return null;
-    if (parts != .array) return null;
-    var m = std.StringHashMap(SavedPos).init(alloc);
-    for (parts.array.items) |it| {
-        if (it != .object) continue;
-        const ref = it.object.get("ref") orelse continue;
-        if (ref != .string) continue;
-        m.put(ref.string, .{
-            .x = jsonNum(it.object.get("x")),
-            .y = jsonNum(it.object.get("y")),
-            .rot = jsonNum(it.object.get("rot")),
-        }) catch return m;
-    }
-    return m;
-}
-
 /// The poses of a single named saved layout (`?refine=<layout>`), as `RefPose`s
 /// ready to seed `solve`. Null when no layout by that name exists. Used to refine
 /// a specific hand layout with the routed tuck rather than re-placing from scratch.
@@ -1741,10 +1767,8 @@ fn readLayoutPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []co
 }
 
 /// Read every saved layout for `name` from its `.layouts.json` sidecar
-/// (newest first). When that file is absent, migrate the legacy single-slot
-/// `.placement.json` into a one-entry list so the historic hand placement is
-/// not lost. Returns an empty slice when neither exists or on parse failure;
-/// allocations live on `alloc` (request lifetime).
+/// (newest first). Returns an empty slice when the file doesn't exist or on
+/// parse failure; allocations live on `alloc` (request lifetime).
 fn readLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) []const SavedLayout {
     if (paths.designSiblingPath(alloc, project_dir, name, LAYOUTS_EXT)) |path| {
         defer alloc.free(path);
@@ -1752,7 +1776,7 @@ fn readLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const 
             if (parseLayouts(alloc, data)) |list| return list;
         } else |_| {}
     } else |_| {}
-    return migrateSaved(alloc, project_dir, name);
+    return &[_]SavedLayout{};
 }
 
 /// Parse a `.layouts.json` body (`{"layouts":[…]}`) into a slice of
@@ -1818,40 +1842,100 @@ fn parsePartPoses(alloc: std.mem.Allocator, v: ?std.json.Value) ?[]const PartPos
     return list.toOwnedSlice(alloc) catch null;
 }
 
-/// Build a one-entry layout list from the legacy `.placement.json` slot (kind
-/// "manual", name "saved", no score). Empty slice when no legacy file exists.
-fn migrateSaved(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) []const SavedLayout {
-    const m = readSaved(alloc, project_dir, name) orelse return &[_]SavedLayout{};
-    var parts: std.ArrayListUnmanaged(PartPose) = .empty;
-    var it = m.iterator();
-    while (it.next()) |e| parts.append(alloc, .{
-        .ref = e.key_ptr.*,
-        .x = e.value_ptr.x,
-        .y = e.value_ptr.y,
-        .rot = e.value_ptr.rot,
-    }) catch break;
-    if (parts.items.len == 0) return &[_]SavedLayout{};
-    const one = alloc.alloc(SavedLayout, 1) catch return &[_]SavedLayout{};
-    one[0] = .{ .name = "saved", .kind = KIND_MANUAL, .ts = 0, .score = null, .parts = parts.items };
-    return one;
+/// The single-slot optimizer cache: the tuning weights that produced the
+/// last solve plus its part poses. Lives in the `"cache"` key of
+/// `.layouts.json`; never shown as a snapshot row.
+const CacheSlot = struct {
+    params: optimizer.Params,
+    /// Null when the slot carried no parts array at all (callers treat
+    /// that as "no cached layout — solve fresh").
+    parts: ?[]const PartPose,
+};
+
+/// Parse a `{"params":{…},"parts":[…]}` cache object (either the `"cache"`
+/// key of `.layouts.json` or the root of a legacy `.autolayout.json`).
+fn parseCacheSlot(alloc: std.mem.Allocator, v: std.json.Value) ?CacheSlot {
+    if (v != .object) return null;
+    var p = optimizer.Params{};
+    if (v.object.get("params")) |po| {
+        if (po == .object) parseCacheParams(po, &p);
+    }
+    return .{ .params = p, .parts = parsePartPoses(alloc, v.object.get("parts")) };
 }
 
-/// Persist the layout list to `.layouts.json`. Best-effort: a write failure
-/// just means the list reverts to what was last on disk.
+/// Apply the cache's stored tuning weights onto `p`.
+fn parseCacheParams(po: std.json.Value, p: *optimizer.Params) void {
+    if (po.object.get("loop_w")) |v| p.loop_w = jsonNum(v);
+    if (po.object.get("w_congest")) |v| p.w_congest = jsonNum(v);
+    if (po.object.get("cap_w_max")) |v| p.cap_w_max = jsonNum(v);
+    if (po.object.get("grid")) |v| p.grid_courtyards = v == .bool and v.bool;
+    if (po.object.get("compact")) |v| {
+        if (v == .string) p.compact_mode = parseCompactMode(v.string);
+    }
+    // Parsed after `compact` (it depends on the mode): a negative value is the
+    // auto sentinel current builds write; 0.5 under tidiness is the legacy
+    // shipped default — the tidiness term has since been pair-normalized (its
+    // weight scale moved to W_ALIGN_TIDINESS), so re-pinning the old number
+    // would silently apply a ~5× weaker alignment than either era intended.
+    // Both resolve to auto; anything else was a deliberate tuning override.
+    if (po.object.get("w_align")) |v| {
+        const a = jsonNum(v);
+        const legacy_default = p.compact_mode == .tidiness and a == 0.5;
+        if (a >= 0 and !legacy_default) p.w_align = a;
+    }
+}
+
+/// Read the optimizer-cache slot for `name`: the `"cache"` key of
+/// `.layouts.json` first, falling back to the legacy standalone
+/// `.autolayout.json` for boards last solved by an older build.
+fn readCacheSlot(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?CacheSlot {
+    if (paths.designSiblingPath(alloc, project_dir, name, LAYOUTS_EXT)) |path| {
+        defer alloc.free(path);
+        if (infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20)) |data| {
+            if (std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{})) |root| {
+                if (root == .object) {
+                    if (root.object.get("cache")) |c| {
+                        if (parseCacheSlot(alloc, c)) |slot| return slot;
+                    }
+                }
+            } else |_| {}
+        } else |_| {}
+    } else |_| {}
+    const path = paths.designSiblingPath(alloc, project_dir, name, AUTO_EXT) catch return null;
+    defer alloc.free(path);
+    const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20) catch return null;
+    const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{}) catch return null;
+    return parseCacheSlot(alloc, root);
+}
+
+/// Persist the layout list to `.layouts.json`, carrying the existing cache
+/// slot over unchanged. Best-effort: a write failure just means the list
+/// reverts to what was last on disk.
 fn writeLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout) void {
+    writeLayoutsFile(alloc, project_dir, name, layouts, readCacheSlot(alloc, project_dir, name));
+}
+
+/// Persist layouts + cache slot to `.layouts.json` (the whole sidecar).
+fn writeLayoutsFile(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    layouts: []const SavedLayout,
+    cache: ?CacheSlot,
+) void {
     const path = paths.designSiblingPath(alloc, project_dir, name, LAYOUTS_EXT) catch return;
     defer alloc.free(path);
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
-    writeLayoutsFileJson(w, layouts) catch return;
+    writeLayoutsFileJson(w, layouts, cache) catch return;
     writeFileAll(path, aw.written()) catch return;
 }
 
-/// Serialize the layout list to the `.layouts.json` on-disk shape: an optional
-/// top-level `"default":"<name>"` (the entry whose `default` flag is set, if
-/// any) followed by the `layouts` array. Score fields (hpwl/loop/caps) are
-/// flattened onto each entry and omitted when unscored.
-fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writer.Error!void {
+/// Serialize the sidecar to its on-disk shape: an optional top-level
+/// `"default":"<name>"` (the entry whose `default` flag is set, if any),
+/// the optional `"cache"` slot, then the `layouts` array. Score fields
+/// (hpwl/loop/caps) are flattened onto each entry and omitted when unscored.
+fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout, cache: ?CacheSlot) std.Io.Writer.Error!void {
     try w.writeAll("{");
     for (layouts) |L| {
         if (!L.default) continue;
@@ -1859,6 +1943,11 @@ fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.
         try writeJsonStr(w, L.name);
         try w.writeAll(",");
         break;
+    }
+    if (cache) |c| {
+        try w.writeAll("\"cache\":");
+        try writeCacheSlotJson(w, c);
+        try w.writeAll(",");
     }
     try w.writeAll("\"layouts\":[");
     for (layouts, 0..) |L, i| {
@@ -2026,30 +2115,15 @@ fn monthAbbrev(m: clock.epoch.Month) []const u8 {
     };
 }
 
-/// Read the `.autolayout.json` cache into a slice of `RefPose`, or null if
-/// absent/unreadable. Strings are owned by `alloc` (request lifetime), which
-/// outlives the `solve` call that consumes them.
+/// Read the optimizer cache's poses into a slice of `RefPose`, or null if
+/// no cache slot exists. Strings are owned by `alloc` (request lifetime),
+/// which outlives the `solve` call that consumes them.
 fn readAutoPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?[]const optimizer.RefPose {
-    const path = paths.designSiblingPath(alloc, project_dir, name, AUTO_EXT) catch return null;
-    defer alloc.free(path);
-    const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20) catch return null;
-    const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{}) catch return null;
-    if (root != .object) return null;
-    const parts = root.object.get("parts") orelse return null;
-    if (parts != .array) return null;
-    var list: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
-    for (parts.array.items) |it| {
-        if (it != .object) continue;
-        const ref = it.object.get("ref") orelse continue;
-        if (ref != .string) continue;
-        list.append(alloc, .{
-            .ref = ref.string,
-            .x = jsonNum(it.object.get("x")),
-            .y = jsonNum(it.object.get("y")),
-            .rot = jsonNum(it.object.get("rot")),
-        }) catch return null;
-    }
-    return list.toOwnedSlice(alloc) catch null;
+    const slot = readCacheSlot(alloc, project_dir, name) orelse return null;
+    const parts = slot.parts orelse return null;
+    const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
+    for (parts, 0..) |pt, i| out[i] = .{ .ref = pt.ref, .x = pt.x, .y = pt.y, .rot = pt.rot };
+    return out;
 }
 
 /// One placed part exported to the KiCad sync: centre (mm) + rotation (deg,
@@ -2064,7 +2138,7 @@ pub const RefPose = optimizer.RefPose;
 /// GND vias) from, as `RefPose`s, or null when the design has no layout at all.
 /// Preference: the user-marked **default** layout first, then the newest manual
 /// snapshot, then the most recent recorded layout of any kind, then the raw
-/// `.autolayout.json` optimizer cache. Both `loadSyncLayout` (placement) and
+/// optimizer-cache slot. Both `loadSyncLayout` (placement) and
 /// `loadSyncVias` (vias) go through this so the vias correspond to exactly the
 /// poses the parts land at. Result lives on `alloc` (request lifetime).
 fn chooseSyncPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?[]const optimizer.RefPose {
@@ -2234,63 +2308,48 @@ pub fn loadSyncVias(
     return viasForPoses(alloc, block, project_dir, poses, params);
 }
 
-/// Persist the generated layout (its tuning weights + ref/x/y/rot per part) to
-/// `.autolayout.json`. Best-effort: a write failure just means a regenerate.
+/// Persist the generated layout (its tuning weights + ref/x/y/rot per part)
+/// into the `"cache"` slot of `.layouts.json`, then drop the superseded
+/// standalone `.autolayout.json` so each design carries one layout sidecar.
+/// Best-effort: a write failure just means a regenerate.
 fn writeAutoCache(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, p: optimizer.Placement, params: optimizer.Params) void {
-    const path = paths.designSiblingPath(alloc, project_dir, name, AUTO_EXT) catch return;
-    defer alloc.free(path);
-    var aw: std.Io.Writer.Allocating = .init(alloc);
-    const w = &aw.writer;
-    writeCacheJson(w, p, params) catch return;
-    writeFileAll(path, aw.written()) catch return;
+    const parts = alloc.alloc(PartPose, p.parts.len) catch return;
+    for (p.parts, 0..) |pt, i| parts[i] = .{ .ref = pt.ref_des, .x = pt.x, .y = pt.y, .rot = pt.rot };
+    const layouts = readLayouts(alloc, project_dir, name);
+    writeLayoutsFile(alloc, project_dir, name, layouts, .{ .params = params, .parts = parts });
+    if (paths.designSiblingPath(alloc, project_dir, name, AUTO_EXT)) |legacy| {
+        defer alloc.free(legacy);
+        infra_fs.cwd().deleteFile(legacy) catch |e| switch (e) {
+            // Usually already gone — only first post-upgrade solve has one.
+            error.FileNotFound => {},
+            else => {},
+        };
+    } else |_| {}
 }
 
-/// Serialize to `{"params":{…},"parts":[{ref,x,y,rot}, …]}` — the weights so
-/// the controls reflect what produced the layout, the parts for the cache.
-fn writeCacheJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimizer.Params) std.Io.Writer.Error!void {
+/// Serialize a cache slot to `{"params":{…},"parts":[{ref,x,y,rot}, …]}` —
+/// the weights so the controls reflect what produced the layout, the parts
+/// for the cache.
+fn writeCacheSlotJson(w: *std.Io.Writer, c: CacheSlot) std.Io.Writer.Error!void {
     try w.print("{{\"params\":{{\"loop_w\":{d},\"w_align\":{d},\"w_congest\":{d},\"cap_w_max\":{d},\"grid\":{s},\"compact\":\"{s}\"}},", .{
-        params.loop_w,                                   params.w_align,                params.w_congest, params.cap_w_max,
-        if (params.grid_courtyards) "true" else "false", @tagName(params.compact_mode),
+        c.params.loop_w,                                   c.params.w_align,                c.params.w_congest, c.params.cap_w_max,
+        if (c.params.grid_courtyards) "true" else "false", @tagName(c.params.compact_mode),
     });
     try w.writeAll(PARTS_OPEN);
-    for (p.parts, 0..) |pt, i| {
+    for (c.parts orelse &[_]PartPose{}, 0..) |pt, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll(REF_OPEN);
-        try writeJsonStr(w, pt.ref_des);
+        try writeJsonStr(w, pt.ref);
         try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d}}}", .{ pt.x, pt.y, pt.rot });
     }
     try w.writeAll("]}");
 }
 
-/// Read the tuning weights stored alongside a cached layout, or null if absent.
+/// Read the tuning weights stored alongside the cached layout, or null when
+/// no cache slot exists.
 fn readAutoParams(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?optimizer.Params {
-    const path = paths.designSiblingPath(alloc, project_dir, name, AUTO_EXT) catch return null;
-    defer alloc.free(path);
-    const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20) catch return null;
-    const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{}) catch return null;
-    if (root != .object) return null;
-    const po = root.object.get("params") orelse return null;
-    if (po != .object) return null;
-    var p = optimizer.Params{};
-    if (po.object.get("loop_w")) |v| p.loop_w = jsonNum(v);
-    if (po.object.get("w_congest")) |v| p.w_congest = jsonNum(v);
-    if (po.object.get("cap_w_max")) |v| p.cap_w_max = jsonNum(v);
-    if (po.object.get("grid")) |v| p.grid_courtyards = v == .bool and v.bool;
-    if (po.object.get("compact")) |v| {
-        if (v == .string) p.compact_mode = parseCompactMode(v.string);
-    }
-    // Parsed after `compact` (it depends on the mode): a negative value is the
-    // auto sentinel current builds write; 0.5 under tidiness is the legacy
-    // shipped default — the tidiness term has since been pair-normalized (its
-    // weight scale moved to W_ALIGN_TIDINESS), so re-pinning the old number
-    // would silently apply a ~5× weaker alignment than either era intended.
-    // Both resolve to auto; anything else was a deliberate tuning override.
-    if (po.object.get("w_align")) |v| {
-        const a = jsonNum(v);
-        const legacy_default = p.compact_mode == .tidiness and a == 0.5;
-        if (a >= 0 and !legacy_default) p.w_align = a;
-    }
-    return p;
+    const slot = readCacheSlot(alloc, project_dir, name) orelse return null;
+    return slot.params;
 }
 
 /// Tuning weights parsed from the request query, plus whether any were present
@@ -2409,8 +2468,9 @@ const View = struct {
 
 // ── Score bar + legend ───────────────────────────────────────────────────
 
-fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8) std.Io.Writer.Error!void {
+fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, src: LayoutSource) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-bar\">");
+    try writeSourceChip(w, src);
     // The weighted objective the optimizer actually minimises, then its terms.
     // All filled/updated by showScore() — server-computed, never re-derived in JS.
     try w.writeAll("<span class=\"score\" id=\"sc-obj\" title=\"weighted objective the optimizer minimizes\">objective ");
@@ -2503,7 +2563,11 @@ fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: Layo
         try w.writeAll(if (L.default) "★" else "☆");
         try w.writeAll("</button><button class=\"btn lay-go\" data-lay-load=\"");
         try writeAttr(w, L.name);
-        try w.writeAll("\">Load</button><button class=\"btn lay-del\" title=\"Delete\" data-lay-del=\"");
+        try w.writeAll("\">Load</button><button class=\"btn lay-spec\" " ++
+            "title=\"Promote: export this snapshot as a (placement ...) spec into the panel below - " ++
+            "Save then writes it into the source file, making it the layout's source of truth\" data-lay-spec=\"");
+        try writeAttr(w, L.name);
+        try w.writeAll("\">→spec</button><button class=\"btn lay-del\" title=\"Delete\" data-lay-del=\"");
         try writeAttr(w, L.name);
         try w.writeAll("\">✕</button></span></div></div>");
     }
@@ -2623,8 +2687,8 @@ fn writeSpecPanel(w: *std.Io.Writer, is_module: bool) std.Io.Writer.Error!void {
         "<input type=\"checkbox\" id=\"spec-live\" checked> Live</label>");
     try w.writeAll("<button class=\"btn\" id=\"spec-apply\" title=\"solve the spec and preview the result (nothing written)\">Preview</button>");
     if (is_module) {
-        try w.writeAll("<button class=\"btn\" id=\"spec-save\" disabled " ++
-            "title=\"modules keep their spec inside the defmodule - paste it there by hand\">Save to design</button>");
+        try w.writeAll("<button class=\"btn\" id=\"spec-save\" " ++
+            "title=\"write this spec into the defmodule body in lib/modules - every design using the module picks it up\">Save to module</button>");
     } else {
         try w.writeAll("<button class=\"btn\" id=\"spec-save\" " ++
             "title=\"write this spec into the design .sexp (a history snapshot is taken first)\">Save to design</button>");
@@ -3331,6 +3395,11 @@ const PAGE_CSS =
     \\.pcb-main h1{font-size:18px;font-weight:600;margin:4px 0;color:#f0f6fc}
     \\.pcb-sub{font-size:13px;font-weight:400;color:#8b949e}
     \\.pcb-bar{display:flex;gap:10px;align-items:center;margin:8px 0;flex-wrap:wrap}
+    \\.src-chip{font-size:11px;padding:2px 9px;border-radius:10px;border:1px solid #30363d;color:#8b949e;cursor:help;white-space:nowrap}
+    \\.src-chip.src-spec{color:#3fb950;border-color:#238636}
+    \\.src-chip.src-snap{color:#58a6ff;border-color:#1f6feb}
+    \\.src-chip.src-cache{color:#d29922;border-color:#9e6a03}
+    \\.src-chip.src-grid{color:#f85149;border-color:#da3633}
     \\.pcb-bar .score{font-weight:600;color:#e6edf3;background:#161b22;border:1px solid #21262d;border-radius:4px;padding:2px 8px}
     \\.pcb-bar .sc-sub{font-weight:500;font-size:12px;color:#8b949e;background:#0d1117}
     \\.pcb-bar .delta{font-size:12px;font-weight:600;min-width:34px}
@@ -4144,6 +4213,19 @@ const BOARD_JS =
     \\ if(btnR)btnR.addEventListener("click",fetchSpec);
     \\ if(btnC)btnC.addEventListener("click",function(){
     \\  if(navigator.clipboard)navigator.clipboard.writeText(ta.value).then(function(){setMsg("copied ✓","ok");});});
+    \\ // "→spec" on a saved-layout row: promote that snapshot into the panel —
+    \\ // export its (placement …) form, preview it, leave Save one click away.
+    \\ document.addEventListener("click",function(e){
+    \\  var b=e.target.closest&&e.target.closest("[data-lay-spec]");if(!b)return;
+    \\  setMsg("exporting spec from snapshot…","");
+    \\  fetch("/api/placement-spec/"+encodeURIComponent(PCB.name)+"?layout="+encodeURIComponent(b.dataset.laySpec))
+    \\   .then(function(r){if(!r.ok)throw 0;return r.json();})
+    \\   .then(function(j){ta.value=j.spec||"";
+    \\     var det=document.getElementById("pcb-spec");if(det)det.open=true;
+    \\     stat.textContent="from snapshot: "+b.dataset.laySpec;
+    \\     setMsg("snapshot exported — Save writes it into the source file","ok");
+    \\     applySpec();ta.scrollIntoView({behavior:"smooth",block:"center"});})
+    \\   .catch(function(){setMsg("couldn't export a spec from that snapshot","err");});});
     \\ if(btnS&&!btnS.disabled)btnS.addEventListener("click",function(){
     \\  if(!confirm("Write this spec into "+PCB.name+".sexp?\nThe existing (placement ...) form is replaced"+
     \\   " (a history snapshot is taken first), and the spec then drives this design's layout."))return;
@@ -4216,3 +4298,41 @@ const BOARD_JS =
     \\})();
     \\})();</script>
 ;
+
+// ── Tests ──────────────────────────────────────────────────────────────
+
+// spec: Web Server - The layouts sidecar round-trips snapshots and the optimizer cache slot through one file
+test "layouts sidecar round-trips cache slot" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const parts = [_]PartPose{.{ .ref = "U1", .x = 1.5, .y = -2.0, .rot = 90 }};
+    const layouts = [_]SavedLayout{.{
+        .name = "best",
+        .kind = KIND_MANUAL,
+        .ts = 123,
+        .score = .{ .hpwl = 10, .loop = 2, .caps = 1, .objective = 42 },
+        .parts = &parts,
+        .default = true,
+    }};
+    var params = optimizer.Params{};
+    params.loop_w = 7;
+    const cache = CacheSlot{ .params = params, .parts = &parts };
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeLayoutsFileJson(&aw.writer, &layouts, cache);
+    const text = aw.written();
+
+    const got = parseLayouts(alloc, text) orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqualStrings("best", got[0].name);
+    try std.testing.expect(got[0].default);
+    try std.testing.expectEqual(@as(usize, 1), got[0].parts.len);
+
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, text, .{});
+    const slot = parseCacheSlot(alloc, root.object.get("cache").?) orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(f64, 7), slot.params.loop_w);
+    try std.testing.expectEqual(@as(usize, 1), slot.parts.?.len);
+    try std.testing.expectEqualStrings("U1", slot.parts.?[0].ref);
+}

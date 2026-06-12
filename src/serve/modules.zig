@@ -18,6 +18,8 @@ const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const env_mod = @import("../eval/env.zig");
 const parser_mod = @import("../sexpr/parser.zig");
+const printer_mod = @import("../sexpr/printer.zig");
+const sexpr_ast = @import("../sexpr/ast.zig");
 const render_html = @import("../render_html.zig");
 const assets_css = @import("assets_css.zig");
 const mcp_tools = @import("mcp_tools.zig");
@@ -161,8 +163,9 @@ pub fn moduleSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 
 // ── GET /modules ──────────────────────────────────────────────────────
 
-/// One row in the `/modules` list.
-const ModuleEntry = struct {
+/// One row in the `/modules` list (also reused by the home page's
+/// Modules section).
+pub const ModuleEntry = struct {
     name: []const u8,
     params: []const u8,
     doc: []const u8,
@@ -183,26 +186,50 @@ fn moduleMeta(allocator: std.mem.Allocator, content: []const u8) ModuleMeta {
         if (!node.isForm("defmodule")) continue;
         const children = node.asList() orelse return empty;
         if (children.len < 3) return empty;
-        var params: std.ArrayListUnmanaged(u8) = .empty;
-        params.append(allocator, '(') catch return empty;
-        if (children[2].asList()) |plist| {
-            for (plist, 0..) |p, i| {
-                if (i > 0) params.appendSlice(allocator, " ") catch return empty;
-                params.appendSlice(allocator, p.asAtom() orelse "") catch return empty;
-            }
-        }
-        params.append(allocator, ')') catch return empty;
+        const params = renderParamList(allocator, children[2]) orelse return empty;
         var doc: []const u8 = "";
         if (children.len > 3) {
             if (children[3].asString()) |d| doc = d;
         }
-        return .{ .params = params.items, .doc = doc };
+        return .{ .params = params, .doc = doc };
     }
     return empty;
 }
 
+/// Render a defmodule parameter list as display text: `(a b=4.7k)`. A bare
+/// atom prints as-is; a `(param default)` pair prints `name=default` so the
+/// card shows which arguments are optional. Null on allocation failure.
+fn renderParamList(allocator: std.mem.Allocator, params_node: sexpr_ast.Node) ?[]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    appendParamList(allocator, &buf, params_node) catch return null;
+    return buf.items;
+}
+
+fn appendParamList(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    params_node: sexpr_ast.Node,
+) std.mem.Allocator.Error!void {
+    try buf.append(allocator, '(');
+    if (params_node.asList()) |plist| {
+        for (plist, 0..) |p, i| {
+            if (i > 0) try buf.appendSlice(allocator, " ");
+            if (p.asAtom()) |pname| {
+                try buf.appendSlice(allocator, pname);
+                continue;
+            }
+            const pair = p.asList() orelse continue;
+            if (pair.len != 2) continue;
+            try buf.appendSlice(allocator, pair[0].asAtom() orelse "");
+            try buf.append(allocator, '=');
+            try buf.appendSlice(allocator, try printer_mod.print(allocator, pair[1..2]));
+        }
+    }
+    try buf.append(allocator, ')');
+}
+
 /// Collect every `lib/modules/*.sexp` entry, sorted by name.
-fn collectModules(allocator: std.mem.Allocator, project_dir: []const u8) ![]ModuleEntry {
+pub fn collectModules(allocator: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error![]ModuleEntry {
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/modules", .{project_dir});
     defer allocator.free(dir_path);
 
@@ -459,8 +486,10 @@ fn writeSourceOnlyPage(
     if (render_failed) {
         try w.writeAll("This module evaluated but the schematic renderer errored — showing source instead.");
     } else {
-        try w.writeAll("This module takes parameters and no design currently instantiates it, " ++
-            "so it can't be rendered as a schematic on its own. Showing source instead.");
+        try w.writeAll("This module has required parameters and no design currently instantiates it, " ++
+            "so it can't be rendered as a schematic on its own. Give every parameter a default " ++
+            "— <code>(defmodule m ((param default) …) …)</code> — to make it render standalone. " ++
+            "Showing source instead.");
     }
     try w.writeAll("</div>");
     try w.writeAll("<pre class=\"mod-src-pre\">");

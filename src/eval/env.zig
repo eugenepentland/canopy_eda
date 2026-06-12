@@ -65,6 +65,11 @@ pub const Value = union(enum) {
 pub const ModuleDef = struct {
     name: []const u8,
     params: []const []const u8,
+    /// Per-parameter default expression, parallel to `params`. A `(param
+    /// default)` pair in the defmodule parameter list stores the default's
+    /// AST here; it is evaluated at call time only when the caller omits the
+    /// argument. Null = required parameter.
+    defaults: []const ?ast.Node,
     body: []const ast.Node,
     /// Import scope from the module file
     imports: *Env,

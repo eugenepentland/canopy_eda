@@ -296,8 +296,10 @@ pub const special_form_docs = blk: {
         .summary = "Load library components or modules by name. Searches `lib/components/` then `lib/modules/`.",
     };
     t[@intFromEnum(SpecialForm.defmodule)] = .{
-        .syntax = "(defmodule name (params…) [\"docstring\"] body…)",
-        .summary = "Define a parameterised module that closes over the surrounding env.",
+        .syntax = "(defmodule name (param | (param default)…) [\"docstring\"] body…)",
+        .summary = "Define a parameterised module that closes over the surrounding env. " ++
+            "A `(param default)` pair makes the argument optional — its default evaluates at " ++
+            "call time when omitted, so a fully-defaulted module also renders standalone.",
     };
     t[@intFromEnum(SpecialForm.design_block)] = .{
         .syntax = "(design-block \"name\" form…)",

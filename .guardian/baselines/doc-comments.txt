@@ -27,5 +27,6 @@ src/serve/templates/mcp_docs.zig: pub const ToolCard (struct_) has no /// doc co
 src/serve/templates/oauth.zig: pub const Authorize (struct_) has no /// doc comment
 src/serve/templates/pages.zig: pub const DesignCard (struct_) has no /// doc comment
 src/serve/templates/pages.zig: pub const Home (struct_) has no /// doc comment
+src/serve/templates/pages.zig: pub const ModuleCard (struct_) has no /// doc comment
 src/serve/templates/pages.zig: pub const Navbar (struct_) has no /// doc comment
 src/serve/templates/pdf_viewer.zig: pub const Page (struct_) has no /// doc comment

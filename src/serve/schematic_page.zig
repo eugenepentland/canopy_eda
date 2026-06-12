@@ -1,5 +1,6 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
@@ -17,6 +18,26 @@ const Handler = serve_root.Handler;
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
+/// When `name` has no design source but does exist under `lib/modules/`,
+/// answer a 302 to `/modules/<name>` and return true. Keeps a module name
+/// typed into `/schematics/…` from rendering as a build error.
+fn redirectToModule(
+    ctx: *Handler,
+    name: []const u8,
+    board_path: []const u8,
+    res: *httpz.Response,
+) HandlerError!bool {
+    if (infra_fs.cwd().access(board_path, .{})) |_| return false else |_| {}
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return false;
+    if (std.mem.indexOf(u8, name, "..") != null) return false;
+    const mod_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/modules/{s}.sexp", .{ ctx.project_dir, name });
+    defer ctx.allocator.free(mod_path);
+    infra_fs.cwd().access(mod_path, .{}) catch return false;
+    res.status = 302;
+    res.header("Location", try std.fmt.allocPrint(ctx.allocator, "/modules/{s}", .{name}));
+    return true;
+}
+
 /// GET /schematics/:name — HTML schematic page. Evaluates the design, runs
 /// ERC for the status banner, then hands off to render_html.renderToHtml.
 pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
@@ -27,6 +48,10 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 
     const board_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(board_path);
+
+    // A module name typed into a design URL: send it to the module viewer,
+    // so designs and modules open from the same address shape.
+    if (try redirectToModule(ctx, name, board_path, res)) return;
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
