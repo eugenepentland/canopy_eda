@@ -2110,7 +2110,9 @@
     if (vb.length !== 4 || vb.some(isNaN)) return;
     var base = { x: vb[0], y: vb[1], w: vb[2], h: vb[3] };
     var cur = { x: base.x, y: base.y, w: base.w, h: base.h };
-    var minW = base.w / 16, maxW = base.w * 1.2;
+    // 64x: deep enough that a dense section's schematic tile (a dozen part
+    // symbols packed into one block) reaches comfortably readable pin text.
+    var minW = base.w / 64, maxW = base.w * 1.2;
 
     // ---- Semantic zoom (Layout view only) ----
     // The server stamps data-lod="0" on the Layout SVG when it carries a

@@ -857,16 +857,58 @@ fn laneDelta(n: u16) f64 {
     return sign * step * lane_gap;
 }
 
-/// Fanned attachment point along a box face for the n-th wire on that side,
-/// spread symmetrically around the middle and clamped off the corners.
-fn faceFrac(n: u16) f64 {
-    const step: f64 = @floatFromInt((n + 1) / 2);
-    const sign: f64 = if (n % 2 == 1) 1.0 else -1.0;
-    return std.math.clamp(0.5 + sign * step * 0.16, 0.14, 0.86);
-}
-
 fn sideKey(gid: u32, side: u8) i64 {
     return @as(i64, gid) * 4 + side;
+}
+
+/// One routable edge's precomputed attachment plan: dominant axis, direction,
+/// and the fraction along each endpoint's face. The fan pass fills `fa`/`fb`
+/// so a face's wires spread evenly across its whole width — the old running
+/// fan clamped everything past the fourth wire onto the same two corner
+/// positions, which is exactly where dense boxes piled up.
+const FreePlan = struct {
+    eidx: usize,
+    horizontal: bool,
+    fwd: bool,
+    fa: f64 = 0.5,
+    fb: f64 = 0.5,
+};
+
+/// One entry in a face's fan bucket: which plan, which end of it, and the far
+/// endpoint's perpendicular centre — sorting on that orders the comb so wires
+/// leave a face in the direction they travel instead of crossing at the box.
+const FreePort = struct { plan: usize, is_from: bool, sort: f64 };
+
+/// Corridor lane bookkeeping: `h`/`v` spread staircase channels (keyed on the
+/// channel coordinate), `mh`/`mv` spread simple one-jog paths (keyed on the
+/// jog coordinate bucketed to 24px) — without the latter, every edge between
+/// the same two columns jogs at the identical midpoint and the wires lie
+/// exactly on top of each other.
+const FreeLanes = struct {
+    h: std.AutoHashMapUnmanaged(i64, u16) = .{},
+    v: std.AutoHashMapUnmanaged(i64, u16) = .{},
+    mh: std.AutoHashMapUnmanaged(i64, u16) = .{},
+    mv: std.AutoHashMapUnmanaged(i64, u16) = .{},
+};
+
+fn faceAppend(
+    arena: Allocator,
+    faces: *std.AutoHashMapUnmanaged(i64, std.ArrayListUnmanaged(FreePort)),
+    key: i64,
+    fp: FreePort,
+) Allocator.Error!void {
+    const gop = try faces.getOrPut(arena, key);
+    if (!gop.found_existing) gop.value_ptr.* = .empty;
+    try gop.value_ptr.append(arena, fp);
+}
+
+fn portLess(_: void, a: FreePort, b: FreePort) bool {
+    if (a.sort != b.sort) return a.sort < b.sort;
+    return a.plan < b.plan;
+}
+
+fn midKey(coord: f64) i64 {
+    return @intFromFloat(@round(coord / 24));
 }
 
 /// Drop duplicate and colinear interior points so the path has clean corners.
@@ -927,53 +969,61 @@ fn clearVx(vxs: []const f64, hya: f64, hyb: f64, ax: f64, bx: f64, pref: f64, ob
 }
 
 /// Build the orthogonal polyline for one edge: a direct jog when clear, else a
-/// staircase through the nearest obstacle-free gap channel.
+/// staircase through the nearest obstacle-free gap channel. The jog coordinate
+/// is lane-spread per corridor; when the spread jog clips an obstacle the
+/// centred jog is retried before paying for a staircase detour.
 fn buildFreeRoute(
     arena: Allocator,
     ends: [4]f64, // ax, ay, bx, by (top-left of each box)
-    ids: [2]u32, // from, to
+    plan: FreePlan,
     obs: []const Rect,
     chans: [2][]const f64, // vxs, hys
-    maps: [3]*std.AutoHashMapUnmanaged(i64, u16), // side, h-lane, v-lane
+    lanes: *FreeLanes,
 ) Allocator.Error![]Pt {
     const ax = ends[0];
     const ay = ends[1];
     const bx = ends[2];
     const by = ends[3];
-    const horizontal = @abs((bx - ax)) >= @abs((by - ay));
-    if (horizontal) {
-        const right = bx >= ax;
-        const sa: u8 = if (right) side_r else side_l;
-        const ta: u8 = if (right) side_l else side_r;
-        const ea = portPoint(ax, ay, sa, faceFrac(try bumpLane(arena, maps[0], sideKey(ids[0], sa))));
-        const eb = portPoint(bx, by, ta, faceFrac(try bumpLane(arena, maps[0], sideKey(ids[1], ta))));
-        var simple = [_]Pt{ ea, .{ .x = (ea.x + eb.x) / 2, .y = ea.y }, .{ .x = (ea.x + eb.x) / 2, .y = eb.y }, eb };
+    if (plan.horizontal) {
+        const right = plan.fwd;
+        const ea = portPoint(ax, ay, if (right) side_r else side_l, plan.fa);
+        const eb = portPoint(bx, by, if (right) side_l else side_r, plan.fb);
+        const mid0 = (ea.x + eb.x) / 2;
+        const midx = mid0 + laneDelta(try bumpLane(arena, &lanes.mv, midKey(mid0)));
+        var simple = [_]Pt{ ea, .{ .x = midx, .y = ea.y }, .{ .x = midx, .y = eb.y }, eb };
         if (!pathHitsAny(&simple, obs)) return collapsePts(arena, &simple);
+        var centred = [_]Pt{ ea, .{ .x = mid0, .y = ea.y }, .{ .x = mid0, .y = eb.y }, eb };
+        if (!pathHitsAny(&centred, obs)) return collapsePts(arena, &centred);
         const vxa = channelBeside(chans[0], if (right) ax + node_w else ax, right, if (right) free_h_gap / 2 else -free_h_gap / 2);
         const vxb = channelBeside(chans[0], if (right) bx else bx + node_w, !right, if (right) -free_h_gap / 2 else free_h_gap / 2);
         const hy0 = clearHy(chans[1], vxa, vxb, ea.y, eb.y, (ea.y + eb.y) / 2, obs) orelse return collapsePts(arena, &simple);
-        const hy = hy0 + laneDelta(try bumpLane(arena, maps[1], @intFromFloat(@round(hy0 / 4))));
+        const hy = hy0 + laneDelta(try bumpLane(arena, &lanes.h, @intFromFloat(@round(hy0 / 4))));
         const stair = [_]Pt{ ea, .{ .x = vxa, .y = ea.y }, .{ .x = vxa, .y = hy }, .{ .x = vxb, .y = hy }, .{ .x = vxb, .y = eb.y }, eb };
         return collapsePts(arena, &stair);
     }
-    const down = by >= ay;
-    const sa: u8 = if (down) side_b else side_t;
-    const ta: u8 = if (down) side_t else side_b;
-    const ea = portPoint(ax, ay, sa, faceFrac(try bumpLane(arena, maps[0], sideKey(ids[0], sa))));
-    const eb = portPoint(bx, by, ta, faceFrac(try bumpLane(arena, maps[0], sideKey(ids[1], ta))));
-    var simple = [_]Pt{ ea, .{ .x = ea.x, .y = (ea.y + eb.y) / 2 }, .{ .x = eb.x, .y = (ea.y + eb.y) / 2 }, eb };
+    const down = plan.fwd;
+    const ea = portPoint(ax, ay, if (down) side_b else side_t, plan.fa);
+    const eb = portPoint(bx, by, if (down) side_t else side_b, plan.fb);
+    const mid0 = (ea.y + eb.y) / 2;
+    const midy = mid0 + laneDelta(try bumpLane(arena, &lanes.mh, midKey(mid0)));
+    var simple = [_]Pt{ ea, .{ .x = ea.x, .y = midy }, .{ .x = eb.x, .y = midy }, eb };
     if (!pathHitsAny(&simple, obs)) return collapsePts(arena, &simple);
+    var centred = [_]Pt{ ea, .{ .x = ea.x, .y = mid0 }, .{ .x = eb.x, .y = mid0 }, eb };
+    if (!pathHitsAny(&centred, obs)) return collapsePts(arena, &centred);
     const hya = channelBeside(chans[1], if (down) ay + node_h else ay, down, if (down) free_v_gap / 2 else -free_v_gap / 2);
     const hyb = channelBeside(chans[1], if (down) by else by + node_h, !down, if (down) -free_v_gap / 2 else free_v_gap / 2);
     const vx0 = clearVx(chans[0], hya, hyb, ea.x, eb.x, (ea.x + eb.x) / 2, obs) orelse return collapsePts(arena, &simple);
-    const vx = vx0 + laneDelta(try bumpLane(arena, maps[2], @intFromFloat(@round(vx0 / 4))));
+    const vx = vx0 + laneDelta(try bumpLane(arena, &lanes.v, @intFromFloat(@round(vx0 / 4))));
     const stair = [_]Pt{ ea, .{ .x = ea.x, .y = hya }, .{ .x = vx, .y = hya }, .{ .x = vx, .y = hyb }, .{ .x = eb.x, .y = hyb }, eb };
     return collapsePts(arena, &stair);
 }
 
 /// Route every placed edge as an obstacle-aware orthogonal polyline (see the
 /// section header above). Foreign `(group …)` boxes and other blocks are
-/// obstacles; the author's own endpoints' groups are not.
+/// obstacles; the author's own endpoints' groups are not. Three passes: plan
+/// each edge's faces, fan every face's attachments evenly across the face
+/// (ordered by far-end position so a comb never crosses itself at the box),
+/// then build the polylines with corridor lane spreading.
 fn routeFreeEdges(arena: Allocator, graph: *const Graph, nodes: []const LNode, gobs: []const GroupObs) Allocator.Error![]Route {
     const n = graph.nodes.len;
     const present = try arena.alloc(bool, n);
@@ -985,15 +1035,40 @@ fn routeFreeEdges(arena: Allocator, graph: *const Graph, nodes: []const LNode, g
         px[ln.gid] = ln.x;
         py[ln.gid] = ln.y;
     }
-    const vxs = try channelCoords(arena, nodes, true);
-    const hys = try channelCoords(arena, nodes, false);
-    var sidemap: std.AutoHashMapUnmanaged(i64, u16) = .{};
-    var hmap: std.AutoHashMapUnmanaged(i64, u16) = .{};
-    var vmap: std.AutoHashMapUnmanaged(i64, u16) = .{};
-    var routes: std.ArrayListUnmanaged(Route) = .empty;
-    for (graph.edges) |e| {
+    var plans: std.ArrayListUnmanaged(FreePlan) = .empty;
+    var faces: std.AutoHashMapUnmanaged(i64, std.ArrayListUnmanaged(FreePort)) = .{};
+    for (graph.edges, 0..) |e, eidx| {
         if (e.from == e.to) continue;
         if (!present[e.from] or !present[e.to]) continue;
+        const ax = px[e.from];
+        const ay = py[e.from];
+        const bx = px[e.to];
+        const by = py[e.to];
+        const horizontal = @abs(bx - ax) >= @abs(by - ay);
+        const fwd = if (horizontal) bx >= ax else by >= ay;
+        const pi = plans.items.len;
+        try plans.append(arena, .{ .eidx = eidx, .horizontal = horizontal, .fwd = fwd });
+        const sa: u8 = if (horizontal) (if (fwd) side_r else side_l) else (if (fwd) side_b else side_t);
+        const ta: u8 = if (horizontal) (if (fwd) side_l else side_r) else (if (fwd) side_t else side_b);
+        const sort_a: f64 = if (horizontal) by + node_h / 2 else bx + node_w / 2;
+        const sort_b: f64 = if (horizontal) ay + node_h / 2 else ax + node_w / 2;
+        try faceAppend(arena, &faces, sideKey(e.from, sa), .{ .plan = pi, .is_from = true, .sort = sort_a });
+        try faceAppend(arena, &faces, sideKey(e.to, ta), .{ .plan = pi, .is_from = false, .sort = sort_b });
+    }
+    var fit = faces.valueIterator();
+    while (fit.next()) |bucket| {
+        std.mem.sort(FreePort, bucket.items, {}, portLess);
+        for (bucket.items, 0..) |fp, i| {
+            const f = portFrac(@intCast(i), @intCast(bucket.items.len));
+            if (fp.is_from) plans.items[fp.plan].fa = f else plans.items[fp.plan].fb = f;
+        }
+    }
+    const vxs = try channelCoords(arena, nodes, true);
+    const hys = try channelCoords(arena, nodes, false);
+    var lanes = FreeLanes{};
+    var routes: std.ArrayListUnmanaged(Route) = .empty;
+    for (plans.items) |plan| {
+        const e = graph.edges[plan.eidx];
         var obs: std.ArrayListUnmanaged(Rect) = .empty;
         for (gobs) |g| {
             if (!memberOf(g.members, e.from) and !memberOf(g.members, e.to)) try obs.append(arena, g.box);
@@ -1004,10 +1079,10 @@ fn routeFreeEdges(arena: Allocator, graph: *const Graph, nodes: []const LNode, g
         const pts = try buildFreeRoute(
             arena,
             .{ px[e.from], py[e.from], px[e.to], py[e.to] },
-            .{ e.from, e.to },
+            plan,
             obs.items,
             .{ vxs, hys },
-            .{ &sidemap, &hmap, &vmap },
+            &lanes,
         );
         try routes.append(arena, .{
             .from_gid = e.from,
@@ -2430,6 +2505,38 @@ test "computeFreeLayout lanes parallel wires apart" {
     const y0 = lay.routes[0].pts[lay.routes[0].pts.len / 2].y;
     const y1 = lay.routes[1].pts[lay.routes[1].pts.len / 2].y;
     try testing.expect(@abs(y0 - y1) > 1);
+}
+
+// spec: diagram/layout - computeFreeLayout fans a face's wires evenly across the face ordered by far-end position
+test "computeFreeLayout fans same-face wires without stacking" {
+    // a, b, c stacked in one column all wire to d on the right: the three
+    // arrivals share d's left face and must spread top-to-bottom in source
+    // order instead of piling onto one point.
+    var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("b"), mkKeyed("c"), mkKeyed("d") };
+    const b_below_a = [_]env_mod.PlaceConstraint{.{ .rel = .below, .reference = "a" }};
+    const c_below_b = [_]env_mod.PlaceConstraint{.{ .rel = .below, .reference = "b" }};
+    const d_right_b = [_]env_mod.PlaceConstraint{.{ .rel = .right_of, .reference = "b" }};
+    const placements = [_]env_mod.Placement{
+        .{ .name = "a" },
+        .{ .name = "b", .constraints = &b_below_a },
+        .{ .name = "c", .constraints = &c_below_b },
+        .{ .name = "d", .constraints = &d_right_b },
+    };
+    var edges = [_]types.Edge{
+        .{ .from = 0, .to = 3, .class = types.CLASS_CONTROL, .label = "x" },
+        .{ .from = 1, .to = 3, .class = types.CLASS_CONTROL, .label = "y" },
+        .{ .from = 2, .to = 3, .class = types.CLASS_CONTROL, .label = "z" },
+    };
+    const graph = Graph{ .nodes = &nodes, .edges = &edges, .layout = .{ .placements = &placements } };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeFreeLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 3), lay.routes.len);
+    const y0 = lay.routes[0].pts[lay.routes[0].pts.len - 1].y;
+    const y1 = lay.routes[1].pts[lay.routes[1].pts.len - 1].y;
+    const y2 = lay.routes[2].pts[lay.routes[2].pts.len - 1].y;
+    try testing.expect(y0 < y1 and y1 < y2);
+    try testing.expect(y1 - y0 > 5 and y2 - y1 > 5);
 }
 
 // spec: diagram/layout - computeGroupsLayout shows only the group boxes with one connector per pair of groups a net crosses, and no individual nodes
