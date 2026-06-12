@@ -2321,7 +2321,11 @@ fn handleMatched(
             ops_emitted.* += 1;
         }
     }
-    if (!std.mem.eql(u8, m.value, inst.value)) {
+    // An empty design value means "no opinion", not "clear it": fixed
+    // components (identified by MPN — e.g. every custom part on an
+    // import-kicad board) carry no instance value, and blanking the
+    // board's human-set Value field would strip its BOM annotations.
+    if (inst.value.len > 0 and !std.mem.eql(u8, m.value, inst.value)) {
         if (try emitOpUnlessApplied(d, w, first, OP_SET_FIELD, .{
             .{ "uuid", target },
             .{ "field", "value" },
