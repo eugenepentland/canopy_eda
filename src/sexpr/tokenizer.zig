@@ -326,12 +326,16 @@ pub const Tokenizer = struct {
 
     fn isAtomContinue(c: ?u8) bool {
         const ch = c orelse return false;
-        // `+` is included so KiCad's unquoted model paths (e.g.
-        // `PMA3-24323LN+.stp` from Mini-Circuits part libraries) tokenize
-        // as a single atom. `+` standalone is still picked up by
-        // `readOperator` since it isn't an atom *start* char, so
-        // arithmetic forms like `(+ 1 2)` are unaffected.
-        return isAtomStart(ch) or isDigit(ch) or ch == '-' or ch == '/' or ch == '.' or ch == '*' or ch == '#' or ch == '@' or ch == ':' or ch == '+';
+        // `+` and `,` are included so KiCad's unquoted model paths tokenize
+        // as a single atom: `PMA3-24323LN+.stp` from Mini-Circuits part
+        // libraries needs `+`; SamacSys/Nexperia exports name the model after
+        // the MPN (e.g. `(model 74AHCT1G125GF,132.stp …)`) and need `,`. Both
+        // are mid-token only — neither is an atom *start* char, so `+`
+        // standalone is still picked up by `readOperator` and a leading `,`
+        // still errors; arithmetic forms like `(+ 1 2)` are unaffected.
+        return isAtomStart(ch) or isDigit(ch) or ch == '-' or ch == '/' or
+            ch == '.' or ch == '*' or ch == '#' or ch == '@' or ch == ':' or
+            ch == '+' or ch == ',';
     }
 
     fn isOperatorChar(c: u8) bool {
@@ -374,6 +378,24 @@ test "tokenize unquoted filename with plus" {
     const t3 = try t.next();
     try std.testing.expectEqual(TokenTag.atom, t3.tag);
     try std.testing.expectEqualStrings("PMA3-24323LN+.stp", t3.text);
+    const t4 = try t.next();
+    try std.testing.expectEqual(TokenTag.rparen, t4.tag);
+}
+
+// spec: sexpr/tokenizer - Tokenizes KiCad-style unquoted filenames containing ,
+test "tokenize unquoted filename with comma" {
+    // (model 74AHCT1G125GF,132.stp …) — SamacSys/Nexperia exports name the
+    // unquoted model path after the MPN, which carries a comma. Regression:
+    // the comma was an UnexpectedCharacter, failing footprint conversion and
+    // aborting the whole zip import.
+    var t = Tokenizer.init("(model 74AHCT1G125GF,132.stp)");
+    _ = try t.next(); // (
+    const t2 = try t.next();
+    try std.testing.expectEqual(TokenTag.atom, t2.tag);
+    try std.testing.expectEqualStrings("model", t2.text);
+    const t3 = try t.next();
+    try std.testing.expectEqual(TokenTag.atom, t3.tag);
+    try std.testing.expectEqualStrings("74AHCT1G125GF,132.stp", t3.text);
     const t4 = try t.next();
     try std.testing.expectEqual(TokenTag.rparen, t4.tag);
 }
