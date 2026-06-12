@@ -995,8 +995,10 @@ pub const CSS =
     \\.dg-svg[data-lod="0"] .dg-glance{opacity:1;pointer-events:auto;}
     \\.dg-base{transition:opacity .25s ease;}
     \\.dg-svg[data-lod="0"] .dg-base{opacity:0;pointer-events:none;}
-    \\.dg-svg[data-lod] .dg-edge-label,.dg-svg[data-lod] .dg-pill,.dg-svg[data-lod] .dg-sub{opacity:0;transition:opacity .25s ease;}
-    \\.dg-svg[data-lod="2"] .dg-edge-label,.dg-svg[data-lod="2"] .dg-pill,.dg-svg[data-lod="2"] .dg-sub{opacity:1;}
+    \\.dg-deep{opacity:0;pointer-events:none;transition:opacity .25s ease;}
+    \\.dg-svg[data-lod="2"] .dg-deep{opacity:1;}
+    \\.dg-edge-label,.dg-pill{transition:opacity .25s ease;}
+    \\.dg-svg[data-lod="2"] .dg-edge-label,.dg-svg[data-lod="2"] .dg-pill{opacity:0;}
     \\.dg-chip{cursor:pointer;}
     \\.dg-chip:hover .dg-chip-tint{fill-opacity:0.16;}
     \\.dg-chip-title{fill:#e6edf3;font:700 38px -apple-system,BlinkMacSystemFont,sans-serif;text-anchor:middle;}

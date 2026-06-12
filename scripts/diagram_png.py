@@ -49,10 +49,12 @@ DG_CSS = (
 
 # The page cross-fades the Layout view's LOD layers from CSS keyed on the
 # SVG's data-lod attribute (driven by the viewer's zoom). cairosvg knows none
-# of that, so emulate one chosen level with static rules.
+# of that, so emulate one chosen level with static rules. LOD 2 (each block a
+# window onto its section's real schematic) is assembled in the browser by
+# cloning the page's hub insets, so the static render can only show detail.
 LOD_CSS = {
     "0": ".dg-base{opacity:0;}",
-    "1": ".dg-glance{display:none;}.dg-edge-label,.dg-pill,.dg-sub{opacity:0;}",
+    "1": ".dg-glance{display:none;}",
     "2": ".dg-glance{display:none;}",
 }
 
