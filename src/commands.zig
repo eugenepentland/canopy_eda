@@ -533,6 +533,8 @@ pub fn cmdImportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
     var name: ?[]const u8 = null;
     var title: ?[]const u8 = null;
     var dry_run = false;
+    var fold_channels = false;
+    var fold_prefix: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], PROJECT_DIR_FLAG) and i + 1 < args.len) {
@@ -546,6 +548,12 @@ pub fn cmdImportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--dry-run")) {
             dry_run = true;
+        } else if (std.mem.eql(u8, args[i], "--fold-channels")) {
+            fold_channels = true;
+        } else if (std.mem.eql(u8, args[i], "--fold-prefix") and i + 1 < args.len) {
+            fold_prefix = args[i + 1];
+            fold_channels = true;
+            i += 1;
         } else if (!std.mem.startsWith(u8, args[i], "--")) {
             board_path = args[i];
         }
@@ -567,6 +575,8 @@ pub fn cmdImportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
         .name = design_name,
         .title = design_title,
         .dry_run = dry_run,
+        .fold_channels = fold_channels,
+        .fold_prefix = fold_prefix,
     }) catch |err| {
         std.debug.print("Import error: {}\n", .{err});
         std.process.exit(1);
@@ -580,6 +590,15 @@ pub fn cmdImportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
     });
     std.debug.print("library: {d} files generated, {d} components already present\n", .{ summary.lib_written, summary.lib_existing });
     std.debug.print("design: {d} nets, {d} unconnected pads dropped\n", .{ summary.nets, summary.dropped_pins });
+    if (summary.folded_channels > 0) {
+        std.debug.print("folded: {d} channels x {d} parts -> module {s}", .{ summary.folded_channels, summary.folded_parts_each, summary.fold_module });
+        if (summary.fold_skipped > 0) {
+            std.debug.print(" ({d} deviating channel(s) left flat)", .{summary.fold_skipped});
+        }
+        std.debug.print("\n", .{});
+    } else if (fold_channels) {
+        std.debug.print("folded: no repeating channel structure found\n", .{});
+    }
     std.debug.print("Wrote {s}\n", .{summary.design_path});
     std.debug.print("Next: netlisp build --project-dir {s} --push {s}\n", .{ project_dir, design_name });
 }

@@ -31,18 +31,26 @@ const parser_mod = @import("sexpr/parser.zig");
 const footprint_conv = @import("convert/footprint.zig");
 const kicad_fmt = @import("kicad_pcb/format.zig");
 const infra_fs = @import("infra/fs.zig");
+const import_fold = @import("import_fold.zig");
 
 const Node = ast.Node;
 
+/// KiCad's single-pad stub prefix — pads on these nets are unconnected.
+pub const UNCONNECTED_PREFIX = "unconnected-";
+
 // ── Data model ────────────────────────────────────────────────────────
 
-const Pad = struct {
+/// One board pad: number, raw KiCad net ("" = unconnected), and the
+/// schematic pin name KiCad copies onto the pad as `(pinfunction …)`.
+pub const Pad = struct {
     number: []const u8,
     net: []const u8, // raw KiCad net name; "" = unconnected
     func: []const u8, // (pinfunction …) or ""
 };
 
-const Part = struct {
+/// One footprint lifted off the board, with its BOM properties, pads, and
+/// the classification fields the import pipeline fills in.
+pub const Part = struct {
     ref: []const u8,
     value: []const u8,
     lib_id: []const u8, // "Lib:Footprint" as placed on the board
@@ -73,6 +81,11 @@ pub const ImportOptions = struct {
     name: []const u8, // design name → src/<name>.sexp
     title: []const u8, // (design-block "<title>" …)
     dry_run: bool = false,
+    /// Fold repeated channel structure (CH1_*/CH2_*/… net families) into a
+    /// generated defmodule + per-channel sub-blocks. See import_fold.zig.
+    fold_channels: bool = false,
+    /// Explicit channel-prefix override (e.g. "CH"); null = auto-detect.
+    fold_prefix: ?[]const u8 = null,
 };
 
 /// Counts reported back to the CLI after an import run.
@@ -85,6 +98,10 @@ pub const ImportSummary = struct {
     nets: usize = 0,
     dropped_pins: usize = 0, // unconnected/empty-net pads
     design_path: []const u8 = "",
+    folded_channels: usize = 0, // sub-blocks emitted by --fold-channels
+    folded_parts_each: usize = 0, // parts per folded channel
+    fold_module: []const u8 = "", // generated module name ("" = no fold)
+    fold_skipped: usize = 0, // channels that deviated and stayed flat
 };
 
 pub const ImportError = error{ InvalidBoard, OutOfMemory, WriteFailed } || std.fs.File.OpenError || std.fs.File.ReadError || parser_mod.ParseError;
@@ -120,7 +137,24 @@ pub fn importBoard(arena: std.mem.Allocator, opts: ImportOptions) ImportError!Im
 
     try ensureLibFiles(arena, opts, parts, comps, &summary);
 
-    const design_text = try buildDesignText(arena, opts, parts, comps, &summary);
+    var fold_res: import_fold.FoldResult = .{};
+    if (opts.fold_channels) {
+        fold_res = try import_fold.foldChannels(arena, parts, opts.name, opts.fold_prefix);
+        if (fold_res.active) {
+            summary.folded_channels = fold_res.channels.len;
+            summary.folded_parts_each = fold_res.parts_per_channel;
+            summary.fold_module = fold_res.module_name;
+            summary.fold_skipped = fold_res.skipped_indices.len;
+            const mod_path = try std.fmt.allocPrint(arena, "{s}/lib/modules/{s}.sexp", .{ opts.project_dir, fold_res.module_name });
+            if (!fileExists(mod_path)) {
+                try writeLibFile(opts, mod_path, fold_res.module_text, &summary);
+            } else {
+                summary.lib_existing += 1;
+            }
+        }
+    }
+
+    const design_text = try buildDesignText(arena, opts, parts, comps, &fold_res, &summary);
     const design_path = try std.fmt.allocPrint(arena, "{s}/src/{s}.sexp", .{ opts.project_dir, opts.name });
     summary.design_path = design_path;
     if (!opts.dry_run) {
@@ -612,13 +646,15 @@ fn padNumText(node: Node, buf: *[32]u8) ?[]const u8 {
 // ── Design emission ───────────────────────────────────────────────────
 
 /// Render the design .sexp: imports for every generated component, then a
-/// design-block with hubs (ICs/connectors) ahead of passives, instances in
-/// natural ref order, and pins grouped per net.
+/// design-block with folded channel sub-blocks first (when --fold-channels
+/// found a repetition), then hubs (ICs/connectors) ahead of passives in
+/// natural ref order, pins grouped per net.
 fn buildDesignText(
     arena: std.mem.Allocator,
     opts: ImportOptions,
     parts: []Part,
     comps: []const CustomComp,
+    fold_res: *const import_fold.FoldResult,
     summary: *ImportSummary,
 ) ImportError![]const u8 {
     var nets = NetNames.init(arena);
@@ -633,14 +669,22 @@ fn buildDesignText(
     try w.writeAll(";; Netlist source: board pads (KiCad embeds pinfunction + net per pad).\n\n");
 
     var import_names: std.ArrayListUnmanaged([]const u8) = .empty;
-    for (comps) |c| try import_names.append(arena, c.name);
+    for (comps) |c| {
+        // Components used only inside the folded module are imported there.
+        if (fold_res.active and !compUsedFlat(parts, fold_res, c.name)) continue;
+        try import_names.append(arena, c.name);
+    }
+    if (fold_res.active) try import_names.append(arena, fold_res.module_name);
     std.mem.sort([]const u8, import_names.items, {}, strLessThan);
     for (import_names.items) |n| try w.print("(import {s})\n", .{n});
     if (import_names.items.len > 0) try w.writeByte('\n');
 
     try w.print("(design-block \"{s}\"\n", .{try escapeQuotes(arena, opts.title)});
+    if (fold_res.active) try emitFoldedChannels(w, fold_res, &nets);
+
     var last_was_hub: ?bool = null;
     for (order) |idx| {
+        if (fold_res.active and fold_res.folded[idx]) continue;
         const part = parts[idx];
         const hub = isHubRef(part.ref);
         if (last_was_hub == null or last_was_hub.? != hub) {
@@ -652,6 +696,55 @@ fn buildDesignText(
     try w.writeAll(")\n");
     summary.nets = nets.count();
     return buf.items;
+}
+
+/// True when component `name` is used by at least one part that stays in
+/// the flat remainder (i.e. not folded into the channel module).
+fn compUsedFlat(parts: []const Part, fold_res: *const import_fold.FoldResult, name: []const u8) bool {
+    for (parts, 0..) |part, i| {
+        if (fold_res.folded[i]) continue;
+        const comp = part.comp_name orelse continue;
+        if (std.mem.eql(u8, comp, name)) return true;
+    }
+    return false;
+}
+
+/// Emit the folded-channel block: `(hierarchical-ids)`, one `(sub-block
+/// "chK" (<module>))` per channel with its original ref-des as a comment
+/// and its indexed-net stitching, then the consolidated shared-net forms.
+fn emitFoldedChannels(
+    w: anytype,
+    fold_res: *const import_fold.FoldResult,
+    nets: *NetNames,
+) ImportError!void {
+    try w.writeAll("  (hierarchical-ids)\n");
+    try w.print("\n  ;; ── Channels: {s} ×{d}", .{ fold_res.module_name, fold_res.channels.len });
+    if (fold_res.skipped_indices.len > 0) {
+        try w.writeAll(" (deviating, left flat:");
+        for (fold_res.skipped_indices) |k| try w.print(" {d}", .{k});
+        try w.writeAll(")");
+    }
+    try w.writeAll(" ──\n");
+
+    for (fold_res.channels) |chan| {
+        try w.print("  (sub-block \"{s}\" ({s}))  ;; {s}\n", .{ chan.sub_name, fold_res.module_name, chan.ref_map });
+        for (chan.wires) |wire| {
+            const outer = (try nets.resolve(wire.outer_raw)) orelse continue;
+            try w.print("  (net \"{s}\" \"{s}/{s}\")\n", .{ outer, chan.sub_name, wire.port });
+        }
+    }
+
+    if (fold_res.shared_nets.len > 0) {
+        try w.writeAll("\n  ;; shared rails & control into every channel\n");
+        for (fold_res.shared_nets) |sn| {
+            const outer = (try nets.resolve(sn.raw)) orelse continue;
+            try w.print("  (net \"{s}\"", .{outer});
+            for (fold_res.channels) |chan| {
+                try w.print(" \"{s}/{s}\"", .{ chan.sub_name, sn.port });
+            }
+            try w.writeAll(")\n");
+        }
+    }
 }
 
 fn emitInstance(arena: std.mem.Allocator, w: anytype, part: Part, nets: *NetNames, summary: *ImportSummary) ImportError!void {
@@ -743,7 +836,7 @@ const NetNames = struct {
     /// Returns the sanitized net name, or null for unconnected pads
     /// (empty net or a KiCad `unconnected-*` stub).
     fn resolve(self: *NetNames, raw: []const u8) ImportError!?[]const u8 {
-        if (raw.len == 0 or std.mem.startsWith(u8, raw, "unconnected-")) return null;
+        if (raw.len == 0 or std.mem.startsWith(u8, raw, UNCONNECTED_PREFIX)) return null;
         if (self.by_raw.get(raw)) |cached| return cached;
 
         var name = try sanitizeNetName(self.arena, raw);
@@ -766,7 +859,7 @@ const NetNames = struct {
 /// Strip the sheet-path slash KiCad prefixes onto local labels, drop the
 /// parens from auto-names like `Net-(R1-Pad2)`, and replace anything the
 /// s-expr tokenizer or downstream tooling could trip on with `_`.
-fn sanitizeNetName(arena: std.mem.Allocator, raw: []const u8) ImportError![]const u8 {
+pub fn sanitizeNetName(arena: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]const u8 {
     var trimmed = raw;
     if (trimmed.len > 0 and trimmed[0] == '/') trimmed = trimmed[1..];
 
@@ -926,12 +1019,13 @@ test "design text maps families and groups pins by net" {
     try testing.expectEqualStrings("lmx2595rhar", comps[0].name);
 
     var summary = ImportSummary{};
+    const no_fold = import_fold.FoldResult{};
     const text = try buildDesignText(arena, .{
         .board_path = "test.kicad_pcb",
         .project_dir = project_dir,
         .name = "test",
         .title = "Test Board",
-    }, parts, comps, &summary);
+    }, parts, comps, &no_fold, &summary);
 
     try testing.expect(std.mem.indexOf(u8, text, "(import lmx2595rhar)") != null);
     try testing.expect(std.mem.indexOf(u8, text, "(instance \"C1\" (cap-0402 \"100nF\")") != null);

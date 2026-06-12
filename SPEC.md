@@ -289,6 +289,12 @@ Public functions: worldShape, pointDist, shapeGap
 - Renames pure-numeric and family-clashing component names so they stay referenceable atoms
 - Sanitizes library names to lowercase slugs
 
+## import_fold
+
+- Detects indexed net families (digit run → ~) excluding KiCad auto-names
+- Picks the varying digit run as the channel index when other runs are constant
+- Folds isomorphic channels into a module and leaves deviating channels flat
+
 ## convert/alt-functions
 
 - Parses a long-format CSV with position/function/etype columns
