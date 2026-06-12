@@ -859,6 +859,11 @@ const NetNames = struct {
 /// Strip the sheet-path slash KiCad prefixes onto local labels, drop the
 /// parens from auto-names like `Net-(R1-Pad2)`, and replace anything the
 /// s-expr tokenizer or downstream tooling could trip on with `_`.
+///
+/// Dots are NOT kept: the evaluator canonicalizes dotted nets under the
+/// `<rail>.<ic>.<pad>` bypass-stub convention (prefix before the first
+/// dot), so importing KiCad's `+5.0V`/`+5.7V` verbatim silently MERGES
+/// them into one `+5` rail. They become `+5_0V`/`+5_7V` instead.
 pub fn sanitizeNetName(arena: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]const u8 {
     var trimmed = raw;
     if (trimmed.len > 0 and trimmed[0] == '/') trimmed = trimmed[1..];
@@ -866,7 +871,7 @@ pub fn sanitizeNetName(arena: std.mem.Allocator, raw: []const u8) std.mem.Alloca
     var out: std.ArrayListUnmanaged(u8) = .empty;
     for (trimmed) |ch| {
         switch (ch) {
-            'A'...'Z', 'a'...'z', '0'...'9', '_', '+', '.', '-' => try out.append(arena, ch),
+            'A'...'Z', 'a'...'z', '0'...'9', '_', '+', '-' => try out.append(arena, ch),
             '(', ')', '"' => {},
             else => try out.append(arena, '_'),
         }
@@ -988,6 +993,10 @@ test "net name sanitization" {
     var nets = NetNames.init(arena);
     try testing.expectEqualStrings("CAL_SW", (try nets.resolve("/CAL_SW")).?);
     try testing.expectEqualStrings("Net-IC1-Pad2", (try nets.resolve("Net-(IC1-Pad2)")).?);
+    // Dotted rails must stay distinct — the evaluator splits net names at
+    // the first dot (bypass-stub convention), which would merge them.
+    try testing.expectEqualStrings("+5_0V", (try nets.resolve("/+5.0V")).?);
+    try testing.expectEqualStrings("+5_7V", (try nets.resolve("/+5.7V")).?);
     try testing.expect((try nets.resolve("unconnected-(IC1-Pad3)")) == null);
     try testing.expect((try nets.resolve("")) == null);
     // Distinct raw names may never merge after sanitization.
