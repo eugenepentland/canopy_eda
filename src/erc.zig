@@ -104,13 +104,14 @@ fn checkMainIcsInDesign(
         if (na.refDesLocalPrefix(inst.ref_des) != 'U') continue;
         if (inst.requirements_ignored) continue;
         if (isPassiveComponent(inst.component)) continue;
-        // The board's designated primary IC — declared as a (critical-ic …)
-        // with a compute role (MCU/CPU/SoC/FPGA/…) — is *meant* to sit at the
-        // top level: the whole design reads as functional sections hanging off
-        // it. Only peripheral ICs belong sealed in a (defmodule …), so exempt
-        // the anchor processor instead of nagging to modularise the one part
-        // the design is built around.
-        if (isDeclaredMainIc(block, inst.component)) continue;
+        // An IC the author has catalogued as a (critical-ic …) is exempt: it is
+        // already reviewed "on its own" through the design-doc lifecycle
+        // (footprint → datasheet → requirements → placed+verified), which is the
+        // very thing sealing it in a (defmodule …) was meant to provide. This
+        // covers both a single anchor MCU and a flat RF/analog board whose every
+        // IC is a tracked critical part; un-catalogued ICs are still nagged to
+        // modularise.
+        if (isDeclaredCriticalIc(block, inst.component)) continue;
         const msg = std.fmt.allocPrint(
             allocator,
             "Main IC \"{s}\" ({s}) is instantiated directly in the design — " ++
@@ -129,23 +130,9 @@ fn checkMainIcsInDesign(
 /// True when `component` is declared as a board-defining `(critical-ic …)`
 /// whose role names a primary compute part. Such an IC is the design's anchor
 /// and legitimately lives at the top level (see `checkMainIcsInDesign`).
-fn isDeclaredMainIc(block: *const DesignBlock, component: []const u8) bool {
+fn isDeclaredCriticalIc(block: *const DesignBlock, component: []const u8) bool {
     for (block.critical_ics) |ci| {
-        if (!std.mem.eql(u8, ci.component, component)) continue;
-        if (roleIsPrimaryCompute(ci.role)) return true;
-    }
-    return false;
-}
-
-/// Case-insensitive match for the compute-role keywords used in
-/// `(critical-ic … (role "…"))` declarations — "Main MCU", "Application
-/// Processor", "Host SoC", etc. Deliberately narrow: only the board's
-/// processor is exempted from the modularise-peripherals check, not every
-/// IC someone chose to flag as critical.
-fn roleIsPrimaryCompute(role: []const u8) bool {
-    const needles = [_][]const u8{ "MCU", "MPU", "CPU", "SoC", "FPGA", "Processor", "Microcontroller" };
-    for (needles) |n| {
-        if (std.ascii.indexOfIgnoreCase(role, n) != null) return true;
+        if (std.mem.eql(u8, ci.component, component)) return true;
     }
     return false;
 }
@@ -837,6 +824,18 @@ fn isVoltagePointRail(base: []const u8) bool {
     return i < base.len and base[i] >= '0' and base[i] <= '9';
 }
 
+/// True for `V_…` underscore board-rail names — the digit-first form
+/// (`V_3V3D`, `V_12V`) and the domain-tagged form (`V_RF_3P3`, `V_RX_2P5`,
+/// `V_NEG_3P3`). Requires the `V_` prefix plus at least one digit somewhere
+/// after it (the voltage), so a non-rail signal like `V_SENSE` is not matched.
+fn isUnderscoreRail(base: []const u8) bool {
+    if (base.len < 4 or base[0] != 'V' or base[1] != '_') return false;
+    for (base[2..]) |c| {
+        if (c >= '0' and c <= '9') return true;
+    }
+    return false;
+}
+
 fn checkBlockPowerPins(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
@@ -866,10 +865,12 @@ fn checkBlockPowerPins(
             // VDD/VCC pin — they are supplied through their VREF_A / VREF_B rails.
             std.mem.startsWith(u8, base, "VREF") or
             std.mem.startsWith(u8, base, "VS") or
-            // `V_<digit>` board rails (V_3V3D, V_12V, V_5V0, …) — the underscore
-            // form `rails.looksLikeRail` already recognizes; without this an IC
-            // powered from such a rail is falsely flagged "no power connection".
-            (base.len >= 3 and base[0] == 'V' and base[1] == '_' and base[2] >= '0' and base[2] <= '9');
+            // `V_…` underscore board rails — both the digit-first form
+            // (V_3V3D, V_12V, V_5V0) and the domain-tagged form
+            // (V_RF_3P3, V_RX_2P5, V_NEG_3P3) RF/analog boards use. Without
+            // this an IC powered only from such a rail is falsely flagged
+            // "no power connection".
+            isUnderscoreRail(base);
 
         for (net.pins) |pin| {
             if (pin.ref_des.len == 0) continue;
@@ -2236,7 +2237,7 @@ test "support parts and passives instantiated directly in design are allowed" {
     try std.testing.expectEqual(@as(usize, 0), violations.items.len);
 }
 
-// spec: erc - Allows the board's declared main IC (critical-ic with a compute role) to be instantiated directly
+// spec: erc - Allows an IC declared as a critical-ic to be instantiated directly in the design
 test "design's declared main MCU instantiated directly is allowed" {
     const instances = [_]Instance{.{
         .ref_des = "U9",
@@ -2268,18 +2269,18 @@ test "design's declared main MCU instantiated directly is allowed" {
     try std.testing.expectEqual(@as(usize, 0), violations.items.len);
 }
 
-// spec: erc - Still flags a critical IC whose role is a peripheral, not the main processor
-test "critical IC with a non-compute role is still flagged when instantiated directly" {
+// spec: erc - Allows a directly-instantiated critical-ic regardless of its role (e.g. a flat RF board's ICs)
+test "critical IC with a peripheral role is also allowed when instantiated directly" {
     const instances = [_]Instance{.{
         .ref_des = "U8",
-        .component = "ad7380-4bcpz",
+        .component = "adf5901acpz-rl7",
         .value = "",
-        .footprint = "lfcsp-16",
+        .footprint = "lfcsp-32",
         .symbol = "",
     }};
     const crit = [_]env_mod.CriticalIc{.{
-        .component = "ad7380-4bcpz",
-        .role = "Precision ADC",
+        .component = "adf5901acpz-rl7",
+        .role = "RF transmitter",
     }};
     const block: DesignBlock = .{
         .name = "demo",
@@ -2297,11 +2298,7 @@ test "critical IC with a non-compute role is still flagged when instantiated dir
         for (violations.items) |v| std.testing.allocator.free(v.message);
         violations.deinit(std.testing.allocator);
     }
-    var hit = false;
-    for (violations.items) |v| {
-        if (v.kind == .main_ic_in_design and std.mem.eql(u8, v.ref_des, "U8")) hit = true;
-    }
-    try std.testing.expect(hit);
+    try std.testing.expectEqual(@as(usize, 0), violations.items.len);
 }
 
 // spec: erc - Does not flag main ICs that are wrapped in sub-blocks

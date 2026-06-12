@@ -452,8 +452,8 @@ Public functions: renderSchematic
 - Treats a top-level design port with electrical metadata as a virtual driver and receiver on its net
 - Flags a main IC instantiated directly in the design instead of via a sub-block
 - Allows ignore-requirements support parts and passives to be instantiated directly in the design
-- Allows the board's declared main IC (critical-ic with a compute role) to be instantiated directly
-- Still flags a critical IC whose role is a peripheral, not the main processor
+- Allows an IC declared as a critical-ic to be instantiated directly in the design
+- Allows a directly-instantiated critical-ic regardless of its role (e.g. a flat RF board's ICs)
 - Does not flag main ICs that are wrapped in sub-blocks
 
 ## eval/power_budget
