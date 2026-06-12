@@ -29,10 +29,10 @@ src/serve/bom_html.zig:316: hardcoded std.heap.page_allocator outside main/test
 src/serve/bom_html.zig:399: hardcoded std.heap.page_allocator outside main/test
 src/serve/bom_html.zig:420: hardcoded std.heap.page_allocator outside main/test
 src/serve/bom_html.zig:638: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:908: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:926: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:974: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:979: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:980: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:989: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:990: hardcoded std.heap.page_allocator outside main/test
+src/serve/pcb_layout_page.zig:905: hardcoded std.heap.page_allocator outside main/test
+src/serve/pcb_layout_page.zig:923: hardcoded std.heap.page_allocator outside main/test
+src/serve/pcb_layout_page.zig:971: hardcoded std.heap.page_allocator outside main/test
+src/serve/pcb_layout_page.zig:976: hardcoded std.heap.page_allocator outside main/test
+src/serve/pcb_layout_page.zig:977: hardcoded std.heap.page_allocator outside main/test
+src/serve/pcb_layout_page.zig:986: hardcoded std.heap.page_allocator outside main/test
+src/serve/pcb_layout_page.zig:987: hardcoded std.heap.page_allocator outside main/test

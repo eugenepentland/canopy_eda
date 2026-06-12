@@ -69,7 +69,9 @@ fn weightedTerms(bd: Breakdown) struct { hpwl: f64, loop: f64, algn: f64, cong: 
     return .{
         .hpwl = bd.hpwl,
         .loop = PARAMS.loop_w * bd.loop_nh_weighted,
-        .algn = PARAMS.w_align * bd.alignment,
+        // `effAlignW`, not `.w_align` — the raw field defaults to the auto
+        // sentinel (−1), which would sign-flip the alignment term here.
+        .algn = optimizer.effAlignW(PARAMS) * bd.alignment,
         .cong = PARAMS.w_congest * bd.congestion,
     };
 }

@@ -207,16 +207,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     const w = &aw.writer;
 
-    try w.writeAll("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
-    try w.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
-    try w.print("<title>{s} — PCB Layout</title>", .{eff_block.name});
-    try w.writeAll("<style>");
-    try w.writeAll(assets_css.NAVBAR_CSS);
-    try w.writeAll(PAGE_CSS);
-    if (embed) try w.writeAll(EMBED_CSS);
-    try w.writeAll("</style></head><body");
-    if (embed) try w.writeAll(" class=\"embed\"");
-    try w.writeAll(">");
+    try writeDocHead(w, eff_block.name, embed);
     if (!embed) try pages_tmpl.Navbar.render(.{""}, w);
 
     try w.writeAll("<div class=\"pcb-layout\">");
@@ -278,6 +269,11 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // body gets `.mode-3d` (CSS swaps the SVG out for this). Built lazily.
     if (!embed) try w.writeAll(PCB_3D_STAGE_HTML);
     if (!embed) try w.writeAll(COURTYARD_MODAL);
+    // Placement-DSL panel below the board: the spec for the shown layout,
+    // hand-editable with a live re-solve preview. Whole-design pages only —
+    // the embedded/sub-scoped previews are read-only and the spec endpoints
+    // target the full design.
+    if (!embed and sub == null) try writeSpecPanel(w, module_res != null);
     try w.writeAll("</main>");
     // Right sidebar: the saved-layouts history (manual snapshots + auto-recorded
     // optimizer runs). Lives in its own column so the board has the full centre
@@ -785,7 +781,8 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
     try writeJsonStr(w, name);
     try w.print(",\"generated\":{s},", .{if (p.generated) "true" else "false"});
     try w.print("\"params\":{{\"loop_w\":{d},\"w_align\":{d},\"w_congest\":{d},\"cap_w_max\":{d},\"grid\":{s},\"compact\":\"{s}\"}},", .{
-        params.loop_w, params.w_align, params.w_congest, params.cap_w_max, if (params.grid_courtyards) "true" else "false", @tagName(params.compact_mode),
+        params.loop_w,                                   optimizer.effAlignW(params),   params.w_congest, params.cap_w_max,
+        if (params.grid_courtyards) "true" else "false", @tagName(params.compact_mode),
     });
     try w.print("\"score\":{{\"hpwl_mm\":{d},\"loop_mm\":{d},\"loop_caps\":{d}}},", .{ p.score.hpwl_mm, p.score.loop_mm, p.score.loop_caps });
     try w.writeAll("\"breakdown\":");
@@ -871,7 +868,7 @@ fn writeBreakdownFields(w: *std.Io.Writer, b: optimizer.Breakdown, params: optim
     });
     try w.print("\"alignment\":{d},\"footprint\":{d},\"congestion\":{d},", .{ b.alignment, b.footprint, b.congestion });
     try w.print("\"loop_term\":{d},\"alignment_term\":{d},\"congestion_term\":{d},\"objective\":{d}", .{
-        params.loop_w * b.loop_nh_weighted, params.w_align * b.alignment, params.w_congest * b.congestion, b.objective,
+        params.loop_w * b.loop_nh_weighted, optimizer.effAlignW(params) * b.alignment, params.w_congest * b.congestion, b.objective,
     });
 }
 
@@ -2276,12 +2273,22 @@ fn readAutoParams(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
     if (po != .object) return null;
     var p = optimizer.Params{};
     if (po.object.get("loop_w")) |v| p.loop_w = jsonNum(v);
-    if (po.object.get("w_align")) |v| p.w_align = jsonNum(v);
     if (po.object.get("w_congest")) |v| p.w_congest = jsonNum(v);
     if (po.object.get("cap_w_max")) |v| p.cap_w_max = jsonNum(v);
     if (po.object.get("grid")) |v| p.grid_courtyards = v == .bool and v.bool;
     if (po.object.get("compact")) |v| {
         if (v == .string) p.compact_mode = parseCompactMode(v.string);
+    }
+    // Parsed after `compact` (it depends on the mode): a negative value is the
+    // auto sentinel current builds write; 0.5 under tidiness is the legacy
+    // shipped default — the tidiness term has since been pair-normalized (its
+    // weight scale moved to W_ALIGN_TIDINESS), so re-pinning the old number
+    // would silently apply a ~5× weaker alignment than either era intended.
+    // Both resolve to auto; anything else was a deliberate tuning override.
+    if (po.object.get("w_align")) |v| {
+        const a = jsonNum(v);
+        const legacy_default = p.compact_mode == .tidiness and a == 0.5;
+        if (a >= 0 and !legacy_default) p.w_align = a;
     }
     return p;
 }
@@ -2574,7 +2581,7 @@ fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!
         "<option value=\"protrusion\"{s}>protrusion</option></select></label>", .{
         sel(m == .tidiness), sel(m == .bbox), sel(m == .protrusion),
     });
-    try w.print("<label>Compact w <input id=\"t-align\" type=\"number\" step=\"0.05\" min=\"0\" value=\"{d}\"></label>", .{params.w_align});
+    try w.print("<label>Compact w <input id=\"t-align\" type=\"number\" step=\"0.05\" min=\"0\" value=\"{d}\"></label>", .{optimizer.effAlignW(params)});
     try w.print("<label>Loop <input id=\"t-loop\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.loop_w});
     try w.print("<label>Congest <input id=\"t-cong\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.w_congest});
     try w.writeAll("<label class=\"tune-chk\"><input id=\"t-grid\" type=\"checkbox\"");
@@ -2582,6 +2589,50 @@ fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!
     try w.writeAll("> Grid edges</label>");
     try w.writeAll("<button class=\"btn\" id=\"t-apply\">Apply &amp; regenerate</button>");
     try w.writeAll("<span class=\"muted\">re-runs the optimizer with these weights</span></div>");
+}
+
+/// The `<head>` + opening `<body>` of the layout page: charset/viewport metas,
+/// title, and the navbar + page styles (embeds add the chrome-trimming CSS and
+/// the `.embed` body class).
+fn writeDocHead(w: *std.Io.Writer, title: []const u8, embed: bool) std.Io.Writer.Error!void {
+    try w.writeAll("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
+    try w.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+    try w.print("<title>{s} — PCB Layout</title>", .{title});
+    try w.writeAll("<style>");
+    try w.writeAll(assets_css.NAVBAR_CSS);
+    try w.writeAll(PAGE_CSS);
+    if (embed) try w.writeAll(EMBED_CSS);
+    try w.writeAll("</style></head><body");
+    if (embed) try w.writeAll(" class=\"embed\"");
+    try w.writeAll(">");
+}
+
+/// Placement-DSL panel below the board: the `(placement …)` spec for the shown
+/// layout (fetched from /api/placement-spec on load), hand-editable with a
+/// debounced live re-solve (/api/spec-solve → the live-regen frame applier), a
+/// Preview button for when live is off, and Save (designs only — a module's
+/// spec lives inside its defmodule body, which the splice can't target).
+/// All behaviour is wired in BOARD_JS by the `spec-*` ids.
+fn writeSpecPanel(w: *std.Io.Writer, is_module: bool) std.Io.Writer.Error!void {
+    try w.writeAll("<details class=\"pcb-spec\" id=\"pcb-spec\" open><summary>Placement DSL" ++
+        "<span class=\"spec-stat\" id=\"spec-stat\"></span></summary><div class=\"spec-body\">");
+    try w.writeAll("<textarea id=\"spec-text\" spellcheck=\"false\" " ++
+        "placeholder=\"(placement (anchor &quot;U1&quot;) (left &quot;C1&quot;) ...)\"></textarea>");
+    try w.writeAll("<div class=\"spec-row\">");
+    try w.writeAll("<label class=\"tune-chk\" title=\"re-solve and preview as you type\">" ++
+        "<input type=\"checkbox\" id=\"spec-live\" checked> Live</label>");
+    try w.writeAll("<button class=\"btn\" id=\"spec-apply\" title=\"solve the spec and preview the result (nothing written)\">Preview</button>");
+    if (is_module) {
+        try w.writeAll("<button class=\"btn\" id=\"spec-save\" disabled " ++
+            "title=\"modules keep their spec inside the defmodule - paste it there by hand\">Save to design</button>");
+    } else {
+        try w.writeAll("<button class=\"btn\" id=\"spec-save\" " ++
+            "title=\"write this spec into the design .sexp (a history snapshot is taken first)\">Save to design</button>");
+    }
+    try w.writeAll("<button class=\"btn\" id=\"spec-reset\" title=\"restore the spec for the layout on disk\">Reset</button>");
+    try w.writeAll("<button class=\"btn\" id=\"spec-copy\">Copy</button>");
+    try w.writeAll("<span class=\"spec-msg\" id=\"spec-msg\"></span>");
+    try w.writeAll("</div></div></details>");
 }
 
 /// Score-view panel: per-metric enable toggles + display weights that recompute
@@ -2594,7 +2645,7 @@ fn writeScoreView(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Err
     try w.writeAll("<div class=\"pcb-tune pcb-scoreview pcb-panel\" id=\"panel-score\" hidden><span class=\"tune-h\">Score view</span>");
     try svRow(w, "wire", "Wire", 1.0);
     try svRow(w, "loop", "Loop", params.loop_w);
-    try svRow(w, "align", "Compact", params.w_align);
+    try svRow(w, "align", "Compact", optimizer.effAlignW(params));
     try svRow(w, "cong", "Congest", params.w_congest);
     try w.writeAll("<button class=\"btn\" id=\"sv-reset\" title=\"Restore engine weights, all metrics enabled\">Reset</button>");
     try w.writeAll("<span class=\"muted\">recomputes the headline — doesn't move parts</span></div>");
@@ -3338,6 +3389,18 @@ const PAGE_CSS =
     \\.pcb-tabs .view-chip:hover{border-color:#58a6ff;color:#e6edf3}
     \\.pcb-panel{background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:8px 12px}
     \\.pcb-panel[hidden]{display:none}
+    \\.pcb-spec{margin-top:10px;background:#0d1117;border:1px solid #21262d;border-radius:8px}
+    \\.pcb-spec summary{cursor:pointer;padding:8px 12px;color:#f0f6fc;font-size:13px;font-weight:700;user-select:none}
+    \\.pcb-spec .spec-stat{margin-left:10px;font-size:11px;font-weight:400;color:#6e7681}
+    \\.spec-body{padding:0 12px 10px}
+    \\#spec-text{width:100%;min-height:150px;resize:vertical;background:#010409;color:#c9d1d9;
+    \\  border:1px solid #21262d;border-radius:6px;padding:8px;box-sizing:border-box;
+    \\  font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre;tab-size:2}
+    \\#spec-text:focus{outline:none;border-color:#388bfd}
+    \\.spec-row{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;font-size:12px;color:#8b949e}
+    \\.spec-msg{font-size:12px;color:#8b949e}
+    \\.spec-msg.ok{color:#3fb950}.spec-msg.warn{color:#d29922}.spec-msg.err{color:#f85149}
+    \\body.mode-3d .pcb-spec{display:none}
     \\.heat-legend{display:flex;gap:9px;align-items:center;font-size:12px;color:#8b949e;margin:4px 0 12px;flex-wrap:wrap}
     \\.heat-legend[hidden]{display:none}
     \\.heat-legend .heat-h{font-weight:700;color:#f0f6fc}
@@ -4037,6 +4100,61 @@ const BOARD_JS =
     \\   chips.forEach(function(c){c.classList.remove("active");});}
     \\ chips.forEach(function(c){c.addEventListener("click",function(){
     \\   if(c.classList.contains("active"))closeAll();else openPanel(c.getAttribute("data-panel"));});});
+    \\})();
+    \\// ── Placement-DSL panel: show the spec for this layout; hand edits re-solve
+    \\//    server-side (request-local, nothing written) and the board re-renders
+    \\//    through the same frame applier the live regen uses. Save splices the
+    \\//    spec into the design .sexp (history snapshot first) and reloads.
+    \\(function(){
+    \\ var ta=document.getElementById("spec-text"); if(!ta)return;
+    \\ var msg=document.getElementById("spec-msg"),stat=document.getElementById("spec-stat"),
+    \\     live=document.getElementById("spec-live"),btnA=document.getElementById("spec-apply"),
+    \\     btnS=document.getElementById("spec-save"),btnR=document.getElementById("spec-reset"),
+    \\     btnC=document.getElementById("spec-copy");
+    \\ var t=null,busy=false,dirty=false;
+    \\ function setMsg(s,cls){msg.className="spec-msg"+(cls?" "+cls:"");msg.textContent=s;}
+    \\ function fetchSpec(){
+    \\  fetch("/api/placement-spec/"+encodeURIComponent(PCB.name))
+    \\   .then(function(r){if(!r.ok)throw 0;return r.json();})
+    \\   .then(function(j){ta.value=j.spec||"";
+    \\     stat.textContent="from "+(j.source||"auto")+(j.skipped&&j.skipped.length?(" · "+j.skipped.length+" part(s) unplaced in source layout"):"");
+    \\     setMsg("","");})
+    \\   .catch(function(){stat.textContent="";setMsg("no spec available — the board needs an IC anchor","warn");});}
+    \\ function applySpec(){
+    \\  if(busy){dirty=true;return;}
+    \\  var text=ta.value;if(!text.replace(/\s/g,""))return;
+    \\  busy=true;setMsg("solving…","");
+    \\  fetch("/api/spec-solve/"+encodeURIComponent(PCB.name),{method:"POST",body:text})
+    \\   .then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j};});})
+    \\   .then(function(o){busy=false;
+    \\     if(!o.ok||o.j.error){setMsg(o.j.error||"solve failed","err");return;}
+    \\     var j=o.j;liveApply({parts:j.parts});
+    \\     var d=j.delta_objective||0;
+    \\     var s="objective "+j.objective.toFixed(1)+" ("+(d>0?"+":"")+d.toFixed(1)+" vs current)";
+    \\     var cls=d<=0?"ok":"warn";
+    \\     if(j.unresolved&&j.unresolved.length){s+=" · unresolved: "+j.unresolved.join(", ");cls="err";}
+    \\     if(j.unplaced&&j.unplaced.length)s+=" · "+j.unplaced.length+" unplaced (staged)";
+    \\     if(j.used_spec===false){s+=" · fell back to auto (spec didn't drive)";cls="err";}
+    \\     setMsg(s,cls);
+    \\     if(dirty){dirty=false;applySpec();}})
+    \\   .catch(function(){busy=false;setMsg("solve failed","err");});}
+    \\ ta.addEventListener("input",function(){if(!live||!live.checked)return;
+    \\  clearTimeout(t);t=setTimeout(applySpec,600);});
+    \\ if(btnA)btnA.addEventListener("click",applySpec);
+    \\ if(btnR)btnR.addEventListener("click",fetchSpec);
+    \\ if(btnC)btnC.addEventListener("click",function(){
+    \\  if(navigator.clipboard)navigator.clipboard.writeText(ta.value).then(function(){setMsg("copied ✓","ok");});});
+    \\ if(btnS&&!btnS.disabled)btnS.addEventListener("click",function(){
+    \\  if(!confirm("Write this spec into "+PCB.name+".sexp?\nThe existing (placement ...) form is replaced"+
+    \\   " (a history snapshot is taken first), and the spec then drives this design's layout."))return;
+    \\  setMsg("saving…","");
+    \\  fetch("/api/spec-save/"+encodeURIComponent(PCB.name),{method:"POST",body:ta.value})
+    \\   .then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j};});})
+    \\   .then(function(o){if(!o.ok||o.j.error){setMsg(o.j.error||"save failed","err");return;}
+    \\     setMsg("saved ✓ — reloading…","ok");
+    \\     setTimeout(function(){window.location="/pcb-layout/"+encodeURIComponent(PCB.name);},600);})
+    \\   .catch(function(){setMsg("save failed","err");});});
+    \\ fetchSpec();
     \\})();
     \\// Cost/blame heatmap: tint each part's courtyard green→red by its share of the
     \\// objective (PCB.parts[i].blame, raw — the live /api/pcb-score units).

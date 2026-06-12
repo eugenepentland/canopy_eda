@@ -2,6 +2,7 @@
 DOWNLOAD_TIMEOUT_SECS = "60"
 HEADER_CORS_ALLOW_ORIGIN = "access-control-allow-origin"
 NAME_FIELD_PREFIX = "{\"name\":"
+NAME_OPEN = "{\"name\":"
 OK_JSON_TRUE = "{\"ok\":true}"
 SEXP_EXT_LEN = ".sexp"
 SEXP_PATH_TEMPLATE = "{s}/{s}.sexp"
@@ -21,6 +22,8 @@ in: src/serve/library.zig
 in: src/serve/mcp_tools.zig
 in: src/serve/oauth.zig
 in: src/serve/pcb_layout_page.zig
+in: src/serve/pcb_layout_page.zig
+in: src/serve/placement_spec.zig
 in: src/serve/sync.zig
 in: src/serve/templates/account.zig
 in: src/serve/templates/account.zig

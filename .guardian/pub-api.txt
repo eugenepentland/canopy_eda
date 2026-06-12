@@ -412,6 +412,7 @@ src/placement/optimizer.zig::BoardRect struct_
 src/placement/optimizer.zig::Breakdown struct_
 src/placement/optimizer.zig::CompactMode enum_
 src/placement/optimizer.zig::Edge enum_
+src/placement/optimizer.zig::FullRouted struct_
 src/placement/optimizer.zig::GRID_MM value
 src/placement/optimizer.zig::Link struct_
 src/placement/optimizer.zig::Loop struct_
@@ -428,7 +429,9 @@ src/placement/optimizer.zig::RefPose struct_
 src/placement/optimizer.zig::Score struct_
 src/placement/optimizer.zig::SeedMode enum_
 src/placement/optimizer.zig::Stub struct_
+src/placement/optimizer.zig::effAlignW fn
 src/placement/optimizer.zig::faceRotation fn
+src/placement/optimizer.zig::fullRoutedScorePoses fn
 src/placement/optimizer.zig::gridPlace fn
 src/placement/optimizer.zig::loopNh fn
 src/placement/optimizer.zig::perPartBlame fn
@@ -756,6 +759,7 @@ src/serve/edit.zig::rewirePinApi fn
 src/serve/edit.zig::saveSourceApi fn
 src/serve/edit.zig::swapPinsApi fn
 src/serve/edit.zig::swapPinsCore fn
+src/serve/edit.zig::writeAndRebuild fn
 src/serve/edit.zig::writeDesignCore fn
 src/serve/footprint_preview.zig::HandlerError value
 src/serve/footprint_preview.zig::boardFootprintApi fn
@@ -895,6 +899,9 @@ src/serve/placement_spec.zig::exportSpec fn
 src/serve/placement_spec.zig::placementSpecApi fn
 src/serve/placement_spec.zig::proposePlacement fn
 src/serve/placement_spec.zig::proposePlacementApi fn
+src/serve/placement_spec.zig::specSaveApi fn
+src/serve/placement_spec.zig::specSolve fn
+src/serve/placement_spec.zig::specSolveApi fn
 src/serve/plugin_tokens.zig::Token struct_
 src/serve/plugin_tokens.zig::mint fn
 src/serve/plugin_tokens.zig::validate fn

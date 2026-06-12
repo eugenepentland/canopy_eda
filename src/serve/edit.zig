@@ -1093,7 +1093,10 @@ fn readDesignSource(allocator: std.mem.Allocator, project_dir: []const u8, name:
     return infra_fs.cwd().readFileAlloc(allocator, path, MAX_SOURCE_BYTES) catch return error.CannotReadDesign;
 }
 
-fn writeAndRebuild(
+/// Snapshot → write → re-evaluate → bump the live version. The canonical
+/// design-file mutation tail, shared by the granular edits here and the
+/// PCB page's placement-spec save (`placement_spec.specSaveApi`).
+pub fn writeAndRebuild(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
