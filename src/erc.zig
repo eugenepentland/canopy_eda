@@ -849,6 +849,14 @@ fn isUnderscoreRail(base: []const u8) bool {
     return false;
 }
 
+/// KiCad-style signed voltage rail: '+'/'-' followed by a digit, with a
+/// 'V' somewhere after ("+5V", "-5.0V", "+3V3", "+12V", "+5_0V").
+fn isSignedVoltRail(base: []const u8) bool {
+    if (base.len < 3 or (base[0] != '+' and base[0] != '-')) return false;
+    if (base[1] < '0' or base[1] > '9') return false;
+    return std.mem.indexOfScalar(u8, base[2..], 'V') != null;
+}
+
 fn checkBlockPowerPins(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
@@ -883,7 +891,11 @@ fn checkBlockPowerPins(
             // (V_RF_3P3, V_RX_2P5, V_NEG_3P3) RF/analog boards use. Without
             // this an IC powered only from such a rail is falsely flagged
             // "no power connection".
-            isUnderscoreRail(base);
+            isUnderscoreRail(base) or
+            // KiCad-convention signed rails (+5V, +3V3, -5.0V, +12V — and
+            // the dot-free +5_0V form imported modules use). Boards migrated
+            // via import-kicad keep these names verbatim.
+            isSignedVoltRail(base);
 
         for (net.pins) |pin| {
             if (pin.ref_des.len == 0) continue;
@@ -2248,6 +2260,18 @@ test "support parts and passives instantiated directly in design are allowed" {
         violations.deinit(std.testing.allocator);
     }
     try std.testing.expectEqual(@as(usize, 0), violations.items.len);
+}
+
+// spec: erc - Recognizes KiCad-style signed rails (+5V, -5.0V, +3V3, +5_0V) as power nets
+test "signed voltage rails count as power" {
+    try std.testing.expect(isSignedVoltRail("+5V"));
+    try std.testing.expect(isSignedVoltRail("-5.0V"));
+    try std.testing.expect(isSignedVoltRail("+3V3"));
+    try std.testing.expect(isSignedVoltRail("+12V"));
+    try std.testing.expect(isSignedVoltRail("+5_0V"));
+    try std.testing.expect(!isSignedVoltRail("+EDGE"));
+    try std.testing.expect(!isSignedVoltRail("MOSI"));
+    try std.testing.expect(!isSignedVoltRail("-X5V"));
 }
 
 // spec: erc - Accepts an MPN-identified fixed component as a valued passive (no missing_value)

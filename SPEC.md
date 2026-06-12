@@ -468,6 +468,7 @@ Public functions: renderSchematic
 - Treats a top-level design port with electrical metadata as a virtual driver and receiver on its net
 - Flags a main IC instantiated directly in the design instead of via a sub-block
 - Accepts an MPN-identified fixed component as a valued passive (no missing_value)
+- Recognizes KiCad-style signed rails (+5V, -5.0V, +3V3, +5_0V) as power nets
 - Allows ignore-requirements support parts and passives to be instantiated directly in the design
 - Allows an IC declared as a critical-ic to be instantiated directly in the design
 - Allows a directly-instantiated critical-ic regardless of its role (e.g. a flat RF board's ICs)
