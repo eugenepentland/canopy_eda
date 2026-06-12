@@ -42,9 +42,9 @@ DG_CSS = (
     ".dg-pinfo{font-weight:600;font-size:16px;font-family:monospace;}"
     ".dg-bucket{stroke-width:1.8;}"
     ".dg-pilltext{fill:#c9d1d9;font-weight:500;font-size:15px;font-family:monospace;}"
-    ".dg-chip-title{fill:#e6edf3;font-weight:700;font-size:26px;font-family:sans-serif;text-anchor:middle;}"
-    ".dg-chip-sub{fill:#8b949e;font-weight:600;font-size:15px;font-family:monospace;text-anchor:middle;}"
-    ".dg-glance-count{font-weight:700;font-size:16px;font-family:monospace;text-anchor:middle;}"
+    ".dg-chip-title{fill:#e6edf3;font-weight:700;font-size:38px;font-family:sans-serif;text-anchor:middle;}"
+    ".dg-chip-sub{fill:#8b949e;font-weight:600;font-size:21px;font-family:monospace;text-anchor:middle;}"
+    ".dg-glance-count{font-weight:700;font-size:19px;font-family:monospace;text-anchor:middle;}"
 )
 
 # The page cross-fades the Layout view's LOD layers from CSS keyed on the

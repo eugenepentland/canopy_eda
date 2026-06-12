@@ -58,11 +58,15 @@ const min_face_overlap: f64 = 60;
 const tag_inset: f64 = 34;
 const tag_side: f64 = 15;
 const tag_stagger: f64 = 30;
-/// Chip title sizing: preferred size, the floor it may shrink to before
-/// truncation kicks in, and the average glyph width as a fraction of size.
-const chip_title_fs: f64 = 26;
-const chip_title_fs_min: f64 = 14;
+/// Chip text sizing: preferred size, the floor it may shrink to before
+/// truncation kicks in, and the average glyph width as a fraction of size —
+/// one set for the title (sans) and one for the member caption (mono).
+const chip_title_fs: f64 = 38;
+const chip_title_fs_min: f64 = 16;
 const title_char_w: f64 = 0.62;
+const chip_sub_fs: f64 = 21;
+const chip_sub_fs_min: f64 = 13;
+const sub_char_w: f64 = 0.60;
 
 /// Emit the `<g class="dg-glance">` layer: chips for every entity, aggregated
 /// class-colored connections between them, and a ×N net-count tag per line.
@@ -351,20 +355,36 @@ fn writeChip(arena: Allocator, w: *Writer, e: Entity) (Allocator.Error || Writer
     );
     const cx = e.x + e.w / 2;
     const cy = e.y + e.h / 2;
-    // Shrink the title toward a floor before truncating, so a narrow chip
+    const caption = try chipCaption(arena, e);
+    // Shrink text toward a floor before truncating, so a narrow chip
     // ("Control & Connectivity" over a single stacked column) keeps its
-    // whole name at a smaller size instead of losing the end.
+    // whole name at a smaller size instead of losing the end. Same for the
+    // caption, so a narrow chip's full member list survives.
     const len_f: f64 = @floatFromInt(@max(e.label.len, 1));
     const fit: f64 = (e.w - 28) / (title_char_w * len_f);
     const fs = @min(chip_title_fs, @max(chip_title_fs_min, fit));
-    const title_max: usize = @max(8, @as(usize, @intFromFloat((e.w - 28) / (title_char_w * fs))));
-    try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-chip-title\" style=\"font-size:{d:.0}px\">", .{ cx, cy - 2, fs });
+    // fit ≥ floor ⇒ the shrink made the whole label fit (fs ≤ fit), so only a
+    // floor-pinned label truncates — and computing the budget that way avoids
+    // the float round-trip dropping a fitting label's last character.
+    const title_max: usize = if (fit >= chip_title_fs_min)
+        e.label.len
+    else
+        @max(8, @as(usize, @intFromFloat((e.w - 28) / (title_char_w * chip_title_fs_min))));
+    // Centre the title+caption pair vertically; a captionless solo chip
+    // centres the title alone.
+    const ty: f64 = if (caption.len > 0) cy - fs * 0.10 else cy + fs * 0.36;
+    try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-chip-title\" style=\"font-size:{d:.0}px\">", .{ cx, ty, fs });
     try writeEscaped(w, try truncate(arena, e.label, title_max));
     try w.writeAll("</text>");
-    const caption = try chipCaption(arena, e);
     if (caption.len > 0) {
-        const cap_max: usize = @max(10, @as(usize, @intFromFloat(e.w / 8.5)));
-        try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-chip-sub\">", .{ cx, cy + 22 });
+        const cap_len: f64 = @floatFromInt(@max(caption.len, 1));
+        const cap_fit: f64 = (e.w - 24) / (sub_char_w * cap_len);
+        const cfs = @min(chip_sub_fs, @max(chip_sub_fs_min, cap_fit));
+        const cap_max: usize = if (cap_fit >= chip_sub_fs_min)
+            caption.len
+        else
+            @max(10, @as(usize, @intFromFloat((e.w - 24) / (sub_char_w * chip_sub_fs_min))));
+        try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-chip-sub\" style=\"font-size:{d:.0}px\">", .{ cx, cy + cfs * 1.35, cfs });
         try writeEscaped(w, try truncate(arena, caption, cap_max));
         try w.writeAll("</text>");
     }
@@ -384,8 +404,12 @@ fn chipCaption(arena: Allocator, e: Entity) Allocator.Error![]const u8 {
 
 fn truncate(arena: Allocator, text: []const u8, max: usize) Allocator.Error![]const u8 {
     if (text.len <= max) return text;
-    if (max < 2) return text[0..max];
-    return std.fmt.allocPrint(arena, "{s}\u{2026}", .{text[0 .. max - 1]});
+    if (max < 2) return "";
+    // Back the cut up to a UTF-8 boundary so a multi-byte glyph ("·", "—")
+    // never splits into an invalid sequence.
+    var end = max - 1;
+    while (end > 0 and (text[end] & 0xC0) == 0x80) end -= 1;
+    return std.fmt.allocPrint(arena, "{s}\u{2026}", .{text[0..end]});
 }
 
 fn writeEscaped(w: *Writer, text: []const u8) Writer.Error!void {

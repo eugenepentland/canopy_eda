@@ -967,8 +967,10 @@ pub const CSS =
     \\font:600 17px -apple-system,BlinkMacSystemFont,sans-serif;}
     \\.dg-tab:hover{color:#c9d1d9;border-color:#484f58;}
     \\.dg-panel{display:none;overflow-x:auto;}
-    \\.dg-svg{display:block;width:100%;max-width:1536px;height:auto;cursor:grab;touch-action:none;}
+    \\.dg-svg{display:block;width:100%;max-width:1536px;height:auto;cursor:grab;touch-action:none;
+    \\user-select:none;-webkit-user-select:none;}
     \\.dg-svg:active{cursor:grabbing;}
+    \\.dg-svg a{-webkit-user-drag:none;}
     \\.dg-view{position:relative;}
     \\.dg-zoom{position:absolute;top:8px;right:8px;display:flex;gap:4px;z-index:5;}
     \\.dg-zoom button{width:28px;height:28px;font:600 16px -apple-system,BlinkMacSystemFont,sans-serif;line-height:1;
@@ -997,9 +999,9 @@ pub const CSS =
     \\.dg-svg[data-lod="2"] .dg-edge-label,.dg-svg[data-lod="2"] .dg-pill,.dg-svg[data-lod="2"] .dg-sub{opacity:1;}
     \\.dg-chip{cursor:pointer;}
     \\.dg-chip:hover .dg-chip-tint{fill-opacity:0.16;}
-    \\.dg-chip-title{fill:#e6edf3;font:700 26px -apple-system,BlinkMacSystemFont,sans-serif;text-anchor:middle;}
-    \\.dg-chip-sub{fill:#8b949e;font:600 15px "SF Mono","Fira Code",monospace;text-anchor:middle;}
-    \\.dg-glance-count{font:700 16px "SF Mono","Fira Code",monospace;text-anchor:middle;}
+    \\.dg-chip-title{fill:#e6edf3;font:700 38px -apple-system,BlinkMacSystemFont,sans-serif;text-anchor:middle;}
+    \\.dg-chip-sub{fill:#8b949e;font:600 21px "SF Mono","Fira Code",monospace;text-anchor:middle;}
+    \\.dg-glance-count{font:700 19px "SF Mono","Fira Code",monospace;text-anchor:middle;}
     \\.dg-lod-tag{display:flex;align-items:center;padding:0 10px;font:600 13px "SF Mono","Fira Code",monospace;
     \\color:#8b949e;background:#161b22;border:1px solid #30363d;border-radius:6px;user-select:none;}
     \\.dg-pcard{fill:#0d1117;stroke-width:1.8;}

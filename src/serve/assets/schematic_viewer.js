@@ -2149,6 +2149,12 @@
       zoomAt(e.deltaY < 0 ? 0.85 : 1 / 0.85, e.clientX, e.clientY);
     }, { passive: false });
 
+    // The diagram's node boxes are <a> links: starting a drag on one fires the
+    // browser's native link-drag (a ghost of the SVG follows the cursor)
+    // instead of our pan. Killing dragstart keeps pointer-based panning the
+    // only drag behavior.
+    svg.addEventListener('dragstart', function (e) { e.preventDefault(); });
+
     var dragging = false, sx0 = 0, sy0 = 0, ox = 0, oy = 0, moved = false;
     svg.addEventListener('pointerdown', function (e) {
       if (e.button !== 0) return;
