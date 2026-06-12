@@ -388,6 +388,13 @@ Public functions: computeLayout, hasSystemView, computeSystemLayout, computeChai
 - Omits an unconnected block from the System view when edges exist
 - Keeps a force-shown block in the layout even when it has no edges
 
+## diagram/lod
+
+Public functions: writeGlanceLayer
+
+- Aggregates base edges into one glance connection per entity pair and class, summing fanouts
+- Renders a glance chip per group and per ungrouped block with member captions
+
 ## diagram/render
 
 Public functions: renderTabs

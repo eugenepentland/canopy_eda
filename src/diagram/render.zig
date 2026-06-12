@@ -7,6 +7,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const layout = @import("layout.zig");
+const lod = @import("lod.zig");
 const rb = @import("../render_block_types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -116,8 +117,12 @@ fn writePanelOpen(w: *Writer, key: []const u8) Writer.Error!void {
 }
 
 /// Open the diagram `<svg>` sized to the layout's canvas (shared by every view).
-fn writeSvgOpen(w: *Writer, width: f64, height: f64) Writer.Error!void {
-    try w.print("<svg viewBox=\"0 0 {d:.0} {d:.0}\" class=\"dg-svg\" xmlns=\"http://www.w3.org/2000/svg\">", .{ width, height });
+/// `with_lod` (Layout view with a glance layer only) stamps the `data-lod`
+/// attribute the viewer JS drives from the zoom level — LOD 0 (glance) is the
+/// server-rendered default, so fit-to-screen lands on the high-level view.
+fn writeSvgOpen(w: *Writer, width: f64, height: f64, with_lod: bool) Writer.Error!void {
+    const lod_attr = if (with_lod) " data-lod=\"0\"" else "";
+    try w.print("<svg viewBox=\"0 0 {d:.0} {d:.0}\" class=\"dg-svg\"{s} xmlns=\"http://www.w3.org/2000/svg\">", .{ width, height, lod_attr });
 }
 
 /// The checked-radio → show-panel + light-tab CSS pair for one keyed view.
@@ -178,8 +183,18 @@ pub fn renderSystemStandalone(allocator: Allocator, graph: *const Graph, w: *Wri
 /// standalone block.
 fn renderSystemBody(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout, rail_mode: bool) (Allocator.Error || Writer.Error)!void {
     try writeClassLegend(w, graph, lay);
-    try writeSvgOpen(w, lay.width, lay.height);
+    // Semantic zoom applies to the author-placed Layout view when it declares
+    // `(group …)` regions: the full block/wire body becomes the `dg-base`
+    // layer and a glance layer (group chips + aggregated connections) sits on
+    // top; CSS keyed on `data-lod` cross-fades them as the viewer zooms.
+    const with_lod = rail_mode and lay.groups.len > 0;
+    try writeSvgOpen(w, lay.width, lay.height, with_lod);
+    if (with_lod) try w.writeAll("<g class=\"dg-base\">");
     try renderSystemView(arena, w, graph, lay, rail_mode);
+    if (with_lod) {
+        try w.writeAll("</g>");
+        try lod.writeGlanceLayer(arena, w, graph, lay, &group_palette);
+    }
     try w.writeAll("</svg>");
 }
 
@@ -372,7 +387,7 @@ fn renderView(allocator: Allocator, graph: *const Graph, view: ClassId, w: *Writ
 
     try writePanelOpen(w, graph.classes[view].key);
     if (palette) |p| try writeLegend(w, p, lay);
-    try writeSvgOpen(w, lay.width, lay.height);
+    try writeSvgOpen(w, lay.width, lay.height, false);
     if (view == types.CLASS_POWER) {
         try renderPowerView(arena, w, graph, lay, palette);
     } else {
@@ -974,6 +989,19 @@ pub const CSS =
     \\.dg-sw{width:16px;height:16px;display:inline-block;}
     \\.dg-band-label{font:700 17px "SF Mono","Fira Code",monospace;}
     \\.dg-group-label{font:700 15px "SF Mono","Fira Code",monospace;letter-spacing:0.04em;}
+    \\.dg-glance{opacity:0;pointer-events:none;transition:opacity .25s ease;}
+    \\.dg-svg[data-lod="0"] .dg-glance{opacity:1;pointer-events:auto;}
+    \\.dg-base{transition:opacity .25s ease;}
+    \\.dg-svg[data-lod="0"] .dg-base{opacity:0;pointer-events:none;}
+    \\.dg-svg[data-lod] .dg-edge-label,.dg-svg[data-lod] .dg-pill,.dg-svg[data-lod] .dg-sub{opacity:0;transition:opacity .25s ease;}
+    \\.dg-svg[data-lod="2"] .dg-edge-label,.dg-svg[data-lod="2"] .dg-pill,.dg-svg[data-lod="2"] .dg-sub{opacity:1;}
+    \\.dg-chip{cursor:pointer;}
+    \\.dg-chip:hover .dg-chip-tint{fill-opacity:0.16;}
+    \\.dg-chip-title{fill:#e6edf3;font:700 26px -apple-system,BlinkMacSystemFont,sans-serif;text-anchor:middle;}
+    \\.dg-chip-sub{fill:#8b949e;font:600 15px "SF Mono","Fira Code",monospace;text-anchor:middle;}
+    \\.dg-glance-count{font:700 16px "SF Mono","Fira Code",monospace;text-anchor:middle;}
+    \\.dg-lod-tag{display:flex;align-items:center;padding:0 10px;font:600 13px "SF Mono","Fira Code",monospace;
+    \\color:#8b949e;background:#161b22;border:1px solid #30363d;border-radius:6px;user-select:none;}
     \\.dg-pcard{fill:#0d1117;stroke-width:1.8;}
     \\.dg-pinfo{font:600 16px "SF Mono","Fira Code",monospace;}
     \\.dg-bucket{stroke-width:1.8;}

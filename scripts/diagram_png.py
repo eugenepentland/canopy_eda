@@ -42,7 +42,19 @@ DG_CSS = (
     ".dg-pinfo{font-weight:600;font-size:16px;font-family:monospace;}"
     ".dg-bucket{stroke-width:1.8;}"
     ".dg-pilltext{fill:#c9d1d9;font-weight:500;font-size:15px;font-family:monospace;}"
+    ".dg-chip-title{fill:#e6edf3;font-weight:700;font-size:26px;font-family:sans-serif;text-anchor:middle;}"
+    ".dg-chip-sub{fill:#8b949e;font-weight:600;font-size:15px;font-family:monospace;text-anchor:middle;}"
+    ".dg-glance-count{font-weight:700;font-size:16px;font-family:monospace;text-anchor:middle;}"
 )
+
+# The page cross-fades the Layout view's LOD layers from CSS keyed on the
+# SVG's data-lod attribute (driven by the viewer's zoom). cairosvg knows none
+# of that, so emulate one chosen level with static rules.
+LOD_CSS = {
+    "0": ".dg-base{opacity:0;}",
+    "1": ".dg-glance{display:none;}.dg-edge-label,.dg-pill,.dg-sub{opacity:0;}",
+    "2": ".dg-glance{display:none;}",
+}
 
 
 def main() -> int:
@@ -51,6 +63,8 @@ def main() -> int:
     ap.add_argument("out", nargs="?", default=None, help="output PNG path")
     ap.add_argument("scale", nargs="?", type=float, default=1.6, help="raster scale factor")
     ap.add_argument("--view", default="system", help="tab key: system|power|clocks|control|rf|...")
+    ap.add_argument("--lod", choices=["0", "1", "2"], default=None,
+                    help="semantic-zoom level for a Layout view that has one (default: the SVG's baked level)")
     ap.add_argument("--port", type=int, default=7060)
     ap.add_argument("--host", default="localhost")
     args = ap.parse_args()
@@ -84,9 +98,14 @@ def main() -> int:
             x += 22 + 16 + len(label) * 10 + 28
 
     inner = re.sub(r"</svg>$", "", re.sub(r"^<svg[^>]*>", "", svg))
+    lod_css = ""
+    svg_tag = re.match(r"<svg[^>]*>", svg).group(0)
+    baked = re.search(r'data-lod="(\d)"', svg_tag)
+    if baked:
+        lod_css = LOD_CSS[args.lod if args.lod is not None else baked.group(1)]
     doc = (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h + leg_h}">'
-        f"<style>{DG_CSS}</style>"
+        f"<style>{DG_CSS}{lod_css}</style>"
         f'<rect x="0" y="0" width="{w}" height="{h + leg_h}" fill="#0d1117"/>'
         + "".join(strip)
         + f'<g transform="translate(0,{leg_h})">{inner}</g></svg>'

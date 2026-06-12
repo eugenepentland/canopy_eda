@@ -2112,7 +2112,22 @@
     var cur = { x: base.x, y: base.y, w: base.w, h: base.h };
     var minW = base.w / 16, maxW = base.w * 1.2;
 
-    function apply() { svg.setAttribute('viewBox', cur.x + ' ' + cur.y + ' ' + cur.w + ' ' + cur.h); }
+    // ---- Semantic zoom (Layout view only) ----
+    // The server stamps data-lod="0" on the Layout SVG when it carries a
+    // glance layer. Zoom drives the attribute through 0 (group chips) →
+    // 1 (blocks & wires) → 2 (+ net labels & subtitles); the page CSS does
+    // the actual cross-fades, so this stays one attribute write.
+    var hasLod = svg.hasAttribute('data-lod');
+    var lodTag = null;
+    function lodFor(z) { return z < 1.45 ? '0' : (z < 2.6 ? '1' : '2'); }
+    function updateLod() {
+      if (!hasLod) return;
+      var l = lodFor(base.w / cur.w);
+      if (svg.getAttribute('data-lod') !== l) svg.setAttribute('data-lod', l);
+      if (lodTag) lodTag.textContent = 'LOD ' + l + ' · ' + (l === '0' ? 'glance' : l === '1' ? 'blocks' : 'detail');
+    }
+
+    function apply() { svg.setAttribute('viewBox', cur.x + ' ' + cur.y + ' ' + cur.w + ' ' + cur.h); updateLod(); }
     function reset() { cur.x = base.x; cur.y = base.y; cur.w = base.w; cur.h = base.h; apply(); }
 
     // Zoom by `factor` (>1 zooms out) keeping the point under (cx,cy) fixed.
@@ -2179,6 +2194,47 @@
     mkBtn('−', 'Zoom out', function () { centerZoom(1 / 0.8); });
     mkBtn('⟲', 'Reset view', reset);
     wrap.appendChild(bar);
+
+    if (hasLod) {
+      lodTag = document.createElement('span');
+      lodTag.className = 'dg-lod-tag';
+      lodTag.title = 'Detail level — zoom to change (scroll, buttons, or click a chip)';
+      bar.insertBefore(lodTag, bar.firstChild);
+      updateLod();
+
+      // Click a glance chip → glide the viewBox into that group's region; the
+      // zoom crosses the LOD threshold, so the chip "opens" into its blocks.
+      var glideRaf = null;
+      function glideTo(x, y, w2, h2) {
+        if (glideRaf) cancelAnimationFrame(glideRaf);
+        var from = { x: cur.x, y: cur.y, w: cur.w, h: cur.h }, t0 = null;
+        function step(ts) {
+          if (t0 === null) t0 = ts;
+          var p = Math.min(1, (ts - t0) / 360); p = p * (2 - p);
+          cur.x = from.x + (x - from.x) * p; cur.y = from.y + (y - from.y) * p;
+          cur.w = from.w + (w2 - from.w) * p; cur.h = from.h + (h2 - from.h) * p;
+          apply();
+          if (p < 1) glideRaf = requestAnimationFrame(step);
+        }
+        glideRaf = requestAnimationFrame(step);
+      }
+      svg.querySelectorAll('.dg-chip').forEach(function (chip) {
+        chip.addEventListener('click', function () {
+          var r = {
+            x: parseFloat(chip.getAttribute('data-x')), y: parseFloat(chip.getAttribute('data-y')),
+            w: parseFloat(chip.getAttribute('data-w')), h: parseFloat(chip.getAttribute('data-h'))
+          };
+          if (isNaN(r.x) || isNaN(r.w)) return;
+          // Frame the region with padding, but force the zoom past the LOD-0
+          // threshold so a huge group still switches to its block view.
+          var pad = 70;
+          var tw = Math.max(r.w + pad * 2, (r.h + pad * 2) * base.w / base.h);
+          tw = Math.min(Math.max(tw, minW), base.w / 1.55);
+          var th = tw * base.h / base.w;
+          glideTo(r.x + r.w / 2 - tw / 2, r.y + r.h / 2 - th / 2, tw, th);
+        });
+      });
+    }
   }
   document.querySelectorAll('.dg-svg').forEach(setupDiagramZoom);
 
