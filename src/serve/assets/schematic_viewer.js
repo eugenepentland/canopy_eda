@@ -2021,6 +2021,26 @@
   }
   document.querySelectorAll('.dg-svg').forEach(setupDiagramZoom);
 
+  // ---- Diagram block → section cross-probe ----
+  // Every block in the Layout / Power / Clocks / Control / System diagrams is
+  // an SVG <a href="#sec-SLUG"> link. Native hash-nav already jumps there, but
+  // when the target section is already on-screen the jump is invisible — so
+  // intercept the click to scroll-center AND flash the section, the same
+  // feedback the sidebar's section list gives. A sub-block attached inside a
+  // section renders under id="sub-SLUG", so fall back to that anchor.
+  document.addEventListener('click', function (e) {
+    var link = e.target.closest && e.target.closest('a.dg-node-link');
+    if (!link) return;
+    var href = link.getAttribute('href') || '';
+    if (href.indexOf('#sec-') !== 0) return;
+    var slug = href.slice(5);
+    var anchor = document.getElementById('sec-' + slug) || document.getElementById('sub-' + slug);
+    if (!anchor) return; // let native nav try if we can't resolve it
+    e.preventDefault();
+    scrollTo(anchor);
+    flash(anchor);
+  });
+
   // ---- Cross-probe via URL hash ----
   // /schematics/:name#comp-<REF> (the PCB sidebar's "Show in schematic" link)
   // scrolls to that component and flashes it, reusing the search-result
