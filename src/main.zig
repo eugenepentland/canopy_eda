@@ -439,6 +439,8 @@ test {
     _ = @import("convert/footprint.zig");
     _ = @import("convert/symbol.zig");
     _ = @import("import_kicad.zig");
+    _ = @import("import_fold.zig");
+    _ = @import("import_fold_emit.zig");
     _ = @import("convert/alt_functions.zig");
     _ = @import("export_kicad.zig");
     _ = @import("export_kicad_footprint.zig");

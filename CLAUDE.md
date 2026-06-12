@@ -39,7 +39,18 @@ zig build run -- export-kicad --project-dir projects/designs --output-dir <dir>
 # files), and writes src/<name>.sexp keeping KiCad's ref-des, with sanitized
 # net names (unconnected-* pads dropped, DNP parts annotated). Imported
 # designs are flat — section/sub-block structure is post-import curation.
-zig build run -- import-kicad <board.kicad_pcb> --project-dir projects/designs --name <design> [--title <t>] [--dry-run]
+#
+# --fold-channels: for channelized boards (CH1_*/CH2_*/… net families) the
+# importer detects the repeated per-channel circuit (seed by indexed net
+# families, grow through private auto-nets, verify structural isomorphism)
+# and emits ONE lib/modules/<design>-<prefix>.sexp defmodule + a (sub-block
+# "chK" …) per channel with (net "CHK_X" "chK/X") stitching; channels that
+# deviate structurally stay flat and are reported. Original ref-des survive
+# as comments on each sub-block line. --fold-prefix CH overrides detection.
+# Module port names are dot-free (+5.0V → port +5_0V) — dotted nets collide
+# with the <rail>.<ic>.<pad> bypass-stub convention. The schematic page
+# renders identical repeated sub-blocks once ("sub-block ×7").
+zig build run -- import-kicad <board.kicad_pcb> --project-dir projects/designs --name <design> [--title <t>] [--dry-run] [--fold-channels] [--fold-prefix <P>]
 
 # Convert KiCad files
 zig build run -- convert-footprint <file.kicad_mod>

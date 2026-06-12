@@ -192,9 +192,30 @@ pub fn renderToHtml(
     // designs like power-6v, pma3-14ln) still deserve a rendering. Emit a
     // synthetic card per sub-block that didn't attach to a section, plus one
     // flat card if any hubs live at the top level outside any section.
+    // Identical repeats of one module (a folded channel instantiated chN
+    // times) collapse into a single exemplar card labeled with every
+    // instance name — a channelized board renders its channel once.
+    const sb_grouped = try allocator.alloc(bool, block.sub_blocks.len);
+    @memset(sb_grouped, false);
     for (block.sub_blocks, 0..) |sb, sb_idx| {
-        if (sub_attachments[sb_idx] != null) continue;
-        try writeSubBlockCard(&ctx, w, allocator, sb, check_results, .standalone);
+        if (sub_attachments[sb_idx] != null or sb_grouped[sb_idx]) continue;
+        var group_names: std.ArrayListUnmanaged(u8) = .empty;
+        var copies: usize = 1;
+        if (sb.source.len > 0) {
+            for (block.sub_blocks[sb_idx + 1 ..], sb_idx + 1..) |other, oi| {
+                if (sub_attachments[oi] != null or sb_grouped[oi]) continue;
+                if (!sameSubBlockShape(sb, other)) continue;
+                sb_grouped[oi] = true;
+                copies += 1;
+                try group_names.appendSlice(allocator, ", ");
+                try group_names.appendSlice(allocator, other.name);
+            }
+        }
+        const group: ?SubBlockGroup = if (copies > 1)
+            .{ .extra_names = group_names.items, .copies = copies }
+        else
+            null;
+        try writeSubBlockCard(&ctx, w, allocator, sb, check_results, .standalone, group);
     }
 
     if (block.sections.len == 0 and hasTopLevelHubs(block)) {
@@ -631,7 +652,7 @@ fn writeSection(
 
     for (sec.sub_sections) |sub| try writeSection(ctx, w, allocator, block, sub, depth + 1, check_results, &.{});
 
-    for (attached_subs) |sb| try writeSubBlockCard(ctx, w, allocator, sb, check_results, .attached);
+    for (attached_subs) |sb| try writeSubBlockCard(ctx, w, allocator, sb, check_results, .attached, null);
 
     try w.writeAll(sectionClose);
 }
@@ -1180,6 +1201,28 @@ const SubBlockMode = enum {
 /// own `<section>` (used by section-less designs and floating sub-blocks); in
 /// `attached` mode it's a `<div>` nested inside the adopting section's frame,
 /// with the heading demoted to `<h3>`.
+/// Two sub-blocks are render-identical when they come from the same module
+/// source and evaluated to the same shape (instance/net counts and the same
+/// component+value sequence). Module calls with different parameters that
+/// change the produced circuit fail the sequence check and render apart.
+fn sameSubBlockShape(a: env_mod.SubBlock, b: env_mod.SubBlock) bool {
+    if (a.source.len == 0 or !std.mem.eql(u8, a.source, b.source)) return false;
+    if (a.block.instances.len != b.block.instances.len) return false;
+    if (a.block.nets.len != b.block.nets.len) return false;
+    for (a.block.instances, b.block.instances) |ia, ib| {
+        if (!std.mem.eql(u8, ia.component, ib.component)) return false;
+        if (!std.mem.eql(u8, ia.value, ib.value)) return false;
+    }
+    return true;
+}
+
+/// Grouping info for identical repeated sub-blocks: the exemplar card
+/// carries every sibling's name and a ×N count instead of N copies.
+const SubBlockGroup = struct {
+    extra_names: []const u8, // ", ch3, ch4, …" appended after the exemplar name
+    copies: usize,
+};
+
 fn writeSubBlockCard(
     ctx: *RenderCtx,
     w: anytype,
@@ -1187,6 +1230,7 @@ fn writeSubBlockCard(
     sb: env_mod.SubBlock,
     check_results: *const CheckResultMap,
     mode: SubBlockMode,
+    group: ?SubBlockGroup,
 ) !void {
     const slug = try review.slugify(allocator, sb.name);
     switch (mode) {
@@ -1200,11 +1244,17 @@ fn writeSubBlockCard(
         .attached => "<div class=\"sec-head\"><h3>",
     });
     try writeHtmlEscaped(w, sb.name);
+    if (group) |g| try writeHtmlEscaped(w, g.extra_names);
     try w.writeAll(switch (mode) {
         .standalone => "</h2>",
         .attached => "</h3>",
     });
-    try w.writeAll("<span class=\"pill pill-ok\">sub-block</span>");
+    if (group) |g| {
+        try w.print("<span class=\"pill pill-ok\">sub-block &times;{d}</span>", .{g.copies});
+        try w.writeAll("<span class=\"pill\">identical copies — rendered once</span>");
+    } else {
+        try w.writeAll("<span class=\"pill pill-ok\">sub-block</span>");
+    }
     // "Copy source" pulls the underlying module/file text via
     // /api/module-source; "View" opens the standalone /modules viewer. Both
     // need the sub-block's source provenance — skip them when it's unknown.
