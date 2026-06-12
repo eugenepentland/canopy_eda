@@ -10,6 +10,7 @@ const id_insert = @import("id_insert.zig");
 const lint = @import("lint.zig");
 const erc_mod = @import("erc.zig");
 const env_mod = @import("eval/env.zig");
+const import_kicad = @import("import_kicad.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const PROJECT_DIR_FLAG = "--project-dir";
@@ -516,6 +517,71 @@ pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) C
         std.debug.print(WROTE_BYTES_FMT, .{ md_path, md.len });
         std.debug.print(WROTE_BYTES_FMT, .{ csv_path, csv_buf.items.len });
     }
+}
+
+/// `netlisp import-kicad <board.kicad_pcb> [--project-dir <d>] [--name <n>]
+/// [--title <t>] [--dry-run]` — migrate an existing KiCad board into the
+/// project: family-map standard passives, generate library files for the
+/// rest, and write `src/<name>.sexp` mirroring the board's netlist.
+pub fn cmdImportKicad(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var board_path: ?[]const u8 = null;
+    var project_dir: []const u8 = ".";
+    var name: ?[]const u8 = null;
+    var title: ?[]const u8 = null;
+    var dry_run = false;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], PROJECT_DIR_FLAG) and i + 1 < args.len) {
+            project_dir = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--name") and i + 1 < args.len) {
+            name = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--title") and i + 1 < args.len) {
+            title = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--dry-run")) {
+            dry_run = true;
+        } else if (!std.mem.startsWith(u8, args[i], "--")) {
+            board_path = args[i];
+        }
+    }
+
+    const board = board_path orelse {
+        std.debug.print("Usage: netlisp import-kicad <board.kicad_pcb> [--project-dir <d>] [--name <n>] [--title <t>] [--dry-run]\n", .{});
+        std.process.exit(1);
+    };
+
+    const base = std.fs.path.basename(board);
+    const stem = if (std.mem.lastIndexOfScalar(u8, base, '.')) |dot| base[0..dot] else base;
+    const design_name = name orelse try import_kicad.sanitizeName(arena, stem);
+    const design_title = title orelse stem;
+
+    const summary = import_kicad.importBoard(arena, .{
+        .board_path = board,
+        .project_dir = project_dir,
+        .name = design_name,
+        .title = design_title,
+        .dry_run = dry_run,
+    }) catch |err| {
+        std.debug.print("Import error: {}\n", .{err});
+        std.process.exit(1);
+    };
+
+    std.debug.print("{s}{d} parts: {d} family-mapped passives, {d} custom components\n", .{
+        if (dry_run) "[dry-run] " else "",
+        summary.parts,
+        summary.family_mapped,
+        summary.custom_parts,
+    });
+    std.debug.print("library: {d} files generated, {d} components already present\n", .{ summary.lib_written, summary.lib_existing });
+    std.debug.print("design: {d} nets, {d} unconnected pads dropped\n", .{ summary.nets, summary.dropped_pins });
+    std.debug.print("Wrote {s}\n", .{summary.design_path});
+    std.debug.print("Next: netlisp build --project-dir {s} --push {s}\n", .{ project_dir, design_name });
 }
 
 fn pushToServer(allocator: std.mem.Allocator, url: []const u8, body: []const u8) !void {

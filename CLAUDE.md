@@ -29,6 +29,18 @@ zig build run -- build --project-dir projects/designs --push <design-name>
 # Export KiCad netlist + footprints (handoff to KiCad's PCB editor)
 zig build run -- export-kicad --project-dir projects/designs --output-dir <dir>
 
+# Migrate an existing KiCad board INTO netlisp (reverse direction). Reads the
+# .kicad_pcb alone — modern KiCad embeds the netlist (per-pad nets), pin names
+# (pinfunction), footprint geometry, and BOM properties (Value/MPN/DNP) right
+# in the board file, so no schematic wire-tracing is needed. Maps standard
+# passives onto existing component families (cap-0402, res-0805, an FB ref on
+# an L_0402 footprint → ferrite-0402), generates lib/components + lib/pinouts
+# + lib/footprints for everything else (never overwrites existing library
+# files), and writes src/<name>.sexp keeping KiCad's ref-des, with sanitized
+# net names (unconnected-* pads dropped, DNP parts annotated). Imported
+# designs are flat — section/sub-block structure is post-import curation.
+zig build run -- import-kicad <board.kicad_pcb> --project-dir projects/designs --name <design> [--title <t>] [--dry-run]
+
 # Convert KiCad files
 zig build run -- convert-footprint <file.kicad_mod>
 zig build run -- convert-symbol <file.kicad_sym> [--filter <name>]

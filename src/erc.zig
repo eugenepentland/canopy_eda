@@ -684,9 +684,13 @@ fn checkMissingValues(
     const all_instances = collectBlockInstances(allocator, block);
     for (all_instances) |inst| {
         if (inst.ref_des.len == 0) continue;
-        // Passives (R, C, L) need values
+        // Passives (R, C, L) need values — unless the instance is a fixed
+        // component already identified by MPN (e.g. a PS1608GT2-R50-T1
+        // chip inductor imported from KiCad under its original "R" ref):
+        // a part-number part has no free value left to declare.
         const prefix = na.refDesLocalPrefix(inst.ref_des);
         if ((prefix == 'R' or prefix == 'C' or prefix == 'L') and inst.value.len == 0) {
+            if (hasNonEmptyProperty(inst, "mpn")) continue;
             const msg = std.fmt.allocPrint(allocator, "{s}: Missing value for {s}", .{ inst.ref_des, inst.component }) catch continue;
             try violations.append(allocator, .{
                 .kind = .missing_value,
@@ -696,6 +700,15 @@ fn checkMissingValues(
             });
         }
     }
+}
+
+/// True when the instance carries a component property `key` with a
+/// non-empty value (properties flow in from the lib component file).
+fn hasNonEmptyProperty(inst: Instance, key: []const u8) bool {
+    for (inst.properties) |prop| {
+        if (std.mem.eql(u8, prop.key, key) and prop.value.len > 0) return true;
+    }
+    return false;
 }
 
 /// Check for instances missing a footprint.
@@ -2235,6 +2248,47 @@ test "support parts and passives instantiated directly in design are allowed" {
         violations.deinit(std.testing.allocator);
     }
     try std.testing.expectEqual(@as(usize, 0), violations.items.len);
+}
+
+// spec: erc - Accepts an MPN-identified fixed component as a valued passive (no missing_value)
+test "passive ref on an MPN-identified fixed component is not missing a value" {
+    const instances = [_]Instance{
+        // KiCad-imported chip inductor: "R" ref, no free value, identified
+        // entirely by the component's MPN property.
+        .{
+            .ref_des = "R1",
+            .component = "ps1608gt2-r50-t1",
+            .value = "",
+            .footprint = "ps1608gt2r50t1",
+            .symbol = "",
+            .properties = &.{.{ .key = "mpn", .value = "PS1608GT2-R50-T1" }},
+        },
+        // Genuinely value-less passive — must still be flagged.
+        .{
+            .ref_des = "R2",
+            .component = "res-0402",
+            .value = "",
+            .footprint = "",
+            .symbol = "",
+        },
+    };
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &instances,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkMissingValues(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), violations.items.len);
+    try std.testing.expectEqualStrings("R2", violations.items[0].ref_des);
 }
 
 // spec: erc - Allows an IC declared as a critical-ic to be instantiated directly in the design

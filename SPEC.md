@@ -279,6 +279,16 @@ Public functions: worldShape, pointDist, shapeGap
 
 - Converts a KiCad symbol file into S-expression format
 
+## import_kicad
+
+- Parses board footprints into parts with ref, value, MPN, and per-pad net + pinfunction
+- Sanitizes KiCad net names (sheet-slash stripped, auto-net parens dropped, unconnected pads null)
+- Emits a design with family-mapped passives, custom-part imports, net-grouped pins, and deduped thermal pads
+- Generates pinout files from pad pinfunctions with numeric-then-alpha pin ordering
+- Normalizes pad angles against footprint rotation when emitting footprint geometry
+- Renames pure-numeric and family-clashing component names so they stay referenceable atoms
+- Sanitizes library names to lowercase slugs
+
 ## convert/alt-functions
 
 - Parses a long-format CSV with position/function/etype columns
@@ -451,6 +461,7 @@ Public functions: renderSchematic
 - Treats a section port with electrical metadata as a virtual driver and receiver on its net
 - Treats a top-level design port with electrical metadata as a virtual driver and receiver on its net
 - Flags a main IC instantiated directly in the design instead of via a sub-block
+- Accepts an MPN-identified fixed component as a valued passive (no missing_value)
 - Allows ignore-requirements support parts and passives to be instantiated directly in the design
 - Allows an IC declared as a critical-ic to be instantiated directly in the design
 - Allows a directly-instantiated critical-ic regardless of its role (e.g. a flat RF board's ICs)

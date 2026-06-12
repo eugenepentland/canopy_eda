@@ -20,6 +20,7 @@ src/commands.zig::cmdBuild fn
 src/commands.zig::cmdCheck fn
 src/commands.zig::cmdExportKicad fn
 src/commands.zig::cmdExportReview fn
+src/commands.zig::cmdImportKicad fn
 src/commands.zig::cmdLint fn
 src/config.zig::cseConnectSid fn
 src/config.zig::cseMaxInFlight fn
@@ -369,6 +370,11 @@ src/fuzz_layout.zig::main fn
 src/id_insert.zig::IdInsertError value
 src/id_insert.zig::applyInserts fn
 src/id_insert.zig::insertPendingIds fn
+src/import_kicad.zig::ImportError value
+src/import_kicad.zig::ImportOptions struct_
+src/import_kicad.zig::ImportSummary struct_
+src/import_kicad.zig::importBoard fn
+src/import_kicad.zig::sanitizeName fn
 src/infra/clock.zig::epoch value
 src/infra/clock.zig::milliTimestamp value
 src/infra/clock.zig::nanoTimestamp value

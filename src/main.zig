@@ -117,6 +117,8 @@ pub fn main() !void {
             std.process.exit(1);
         }
         try cmdMergeAltFunctions(allocator, args[2], args[3], hasFlag(args[4..], "--write"));
+    } else if (std.mem.eql(u8, command, "import-kicad")) {
+        try commands.cmdImportKicad(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "export-kicad")) {
         try commands.cmdExportKicad(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "export-review")) {
@@ -397,6 +399,7 @@ fn printUsage() !void {
         \\  netlisp mint-plugin-token [--project-dir <d>] [--label <l>]  Mint a bearer token for the KiCad plugin
         \\  netlisp mint-invite [--project-dir <d>] [--role <r>] [--auth-dir <d>]  Mint a single-use invite (7-day TTL)
         \\  netlisp set-password --email <a> --password <p> [--role <r>] [--auth-dir <d>]  Set or reset a user's password
+        \\  netlisp import-kicad <board.kicad_pcb> [--project-dir <d>] [--name <n>] [--title <t>] [--dry-run]  Migrate a KiCad board into a netlisp design
         \\  netlisp export-kicad --project-dir <d> --output-dir <out> <name>  Export KiCad netlist + footprints
         \\  netlisp export-review --project-dir <d> [--output-dir <out>] [--zip] <name>  Export design-review package (markdown + BOM CSV)
         \\  netlisp convert-footprint <file>        Convert KiCad .kicad_mod to .sexp
@@ -435,6 +438,7 @@ test {
     _ = @import("emit.zig");
     _ = @import("convert/footprint.zig");
     _ = @import("convert/symbol.zig");
+    _ = @import("import_kicad.zig");
     _ = @import("convert/alt_functions.zig");
     _ = @import("export_kicad.zig");
     _ = @import("export_kicad_footprint.zig");
