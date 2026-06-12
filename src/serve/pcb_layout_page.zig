@@ -261,6 +261,11 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         try writeHeatLegend(w); // hidden; revealed by the Heatmap chip
     }
     if (embed) try writeLegend(w, placement, false);
+    // Placement-DSL panel above the board: the spec for the shown layout,
+    // hand-editable with a live re-solve preview, sitting over the preview.
+    // Whole-design pages only — the embedded/sub-scoped previews are read-only
+    // and the spec endpoints target the full design.
+    if (!embed and sub == null) try writeSpecPanel(w, module_res != null);
     try w.print(
         "<svg id=\"pcb-svg\" class=\"pcb-svg\" viewBox=\"0 0 {d:.0} {d:.0}\" width=\"{d:.0}\" height=\"{d:.0}\" xmlns=\"http://www.w3.org/2000/svg\"></svg>",
         .{ view.width, view.height, view.width, view.height },
@@ -269,11 +274,6 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // body gets `.mode-3d` (CSS swaps the SVG out for this). Built lazily.
     if (!embed) try w.writeAll(PCB_3D_STAGE_HTML);
     if (!embed) try w.writeAll(COURTYARD_MODAL);
-    // Placement-DSL panel below the board: the spec for the shown layout,
-    // hand-editable with a live re-solve preview. Whole-design pages only —
-    // the embedded/sub-scoped previews are read-only and the spec endpoints
-    // target the full design.
-    if (!embed and sub == null) try writeSpecPanel(w, module_res != null);
     try w.writeAll("</main>");
     // Right sidebar: the saved-layouts history (manual snapshots + auto-recorded
     // optimizer runs). Lives in its own column so the board has the full centre
@@ -3389,7 +3389,7 @@ const PAGE_CSS =
     \\.pcb-tabs .view-chip:hover{border-color:#58a6ff;color:#e6edf3}
     \\.pcb-panel{background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:8px 12px}
     \\.pcb-panel[hidden]{display:none}
-    \\.pcb-spec{margin-top:10px;background:#0d1117;border:1px solid #21262d;border-radius:8px}
+    \\.pcb-spec{margin:4px 0 12px;background:#0d1117;border:1px solid #21262d;border-radius:8px}
     \\.pcb-spec summary{cursor:pointer;padding:8px 12px;color:#f0f6fc;font-size:13px;font-weight:700;user-select:none}
     \\.pcb-spec .spec-stat{margin-left:10px;font-size:11px;font-weight:400;color:#6e7681}
     \\.spec-body{padding:0 12px 10px}
@@ -3468,6 +3468,12 @@ const PAGE_CSS =
     \\.pn b{color:#e6edf3;font-weight:600;margin-right:3px}
     \\.part.focus-flash .court{stroke:#f0b72f!important;stroke-width:2.6!important;animation:partflash .55s ease-in-out 4}
     \\@keyframes partflash{50%{stroke-opacity:0.25}}
+    \\/* Parts the placement spec didn't list (auto-staged): flag them red, and
+    \\   the gU overlay draws a dashed red box around the whole staged cluster. */
+    \\.part.unplaced .court{stroke:#f85149!important;stroke-dasharray:4 3!important;fill:rgba(248,81,73,.12)!important}
+    \\.part.unplaced .pcb-ref{fill:#f85149!important}
+    \\.unplaced-box{fill:rgba(248,81,73,.05);stroke:#f85149;stroke-width:1.4;stroke-dasharray:7 5}
+    \\.unplaced-lbl{fill:#f85149;font:700 11px system-ui,sans-serif}
     \\.kbd-overlay{position:fixed;inset:0;background:rgba(1,4,9,0.72);z-index:340;display:flex;align-items:center;justify-content:center}
     \\.kbd-box{background:#161b22;border:1px solid #30363d;border-radius:10px;min-width:320px;max-width:480px;
     \\  padding:18px 22px;box-shadow:0 16px 48px rgba(0,0,0,0.7)}
@@ -3610,8 +3616,9 @@ const BOARD_JS =
     \\const svg=document.getElementById("pcb-svg");
     \\const gP=document.createElementNS(NS,"g"), gR=document.createElementNS(NS,"g");
     \\const gT=document.createElementNS(NS,"g"), gC=document.createElementNS(NS,"g"), gD=document.createElementNS(NS,"g");
-    \\svg.appendChild(gP); svg.appendChild(gC); svg.appendChild(gT); svg.appendChild(gR); svg.appendChild(gD);
-    \\gT.style.pointerEvents="none"; gR.style.pointerEvents="none"; gC.style.pointerEvents="none"; gD.style.pointerEvents="none";
+    \\const gU=document.createElementNS(NS,"g");
+    \\svg.appendChild(gP); svg.appendChild(gC); svg.appendChild(gT); svg.appendChild(gR); svg.appendChild(gD); svg.appendChild(gU);
+    \\gT.style.pointerEvents="none"; gR.style.pointerEvents="none"; gC.style.pointerEvents="none"; gD.style.pointerEvents="none"; gU.style.pointerEvents="none";
     \\const els=[], bodies=[];
     \\function el(n,a){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);return e;}
     \\// (board (size W H) …) physical outline, under everything (read-only).
@@ -3653,6 +3660,29 @@ const BOARD_JS =
     \\ gP.appendChild(g); els.push(g); bodies.push(body);
     \\ setT(i);
     \\});
+    \\// ── Unplaced (auto-staged) parts: the ones a (placement …) spec didn't list.
+    \\//    The optimizer drops them into a staging band; flag each one red and draw
+    \\//    a dashed red box around the cluster so a gap in the spec is obvious.
+    \\var unplacedSet={};
+    \\function markUnplaced(refs){
+    \\ unplacedSet={};(refs||[]).forEach(function(r){unplacedSet[r]=1;});
+    \\ P.forEach(function(p,i){if(els[i])els[i].classList.toggle("unplaced",!!unplacedSet[p.ref]);});
+    \\ refreshUnplaced();}
+    \\function refreshUnplaced(){
+    \\ while(gU.firstChild)gU.removeChild(gU.firstChild);
+    \\ var n=0,x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+    \\ P.forEach(function(p,i){if(!unplacedSet[p.ref])return;n++;
+    \\  var q=(((p.rot||0)%360)+360)%360,sw=(q==90||q==270)?p.hh:p.hw,sh=(q==90||q==270)?p.hw:p.hh;
+    \\  var cx=X(p.x),cy=Y(p.y),hw=sw*S,hh=sh*S;
+    \\  if(cx-hw<x0)x0=cx-hw;if(cy-hh<y0)y0=cy-hh;if(cx+hw>x1)x1=cx+hw;if(cy+hh>y1)y1=cy+hh;});
+    \\ if(n===0)return;
+    \\ var pad=10;x0-=pad;y0-=pad;x1+=pad;y1+=pad;
+    \\ gU.appendChild(el("rect",{"class":"unplaced-box",x:x0.toFixed(1),y:y0.toFixed(1),
+    \\  width:(x1-x0).toFixed(1),height:(y1-y0).toFixed(1),rx:4}));
+    \\ var ly=(y0-5<12)?(y0+15):(y0-5);
+    \\ var lbl=el("text",{"class":"unplaced-lbl",x:(x0+6).toFixed(1),y:ly.toFixed(1)});
+    \\ lbl.textContent="⚠ "+n+" part"+(n==1?"":"s")+" not in placement spec";
+    \\ gU.appendChild(lbl);}
     \\function aw(a,b,col,sw,op){gR.appendChild(el("line",{x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),
     \\ x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),stroke:col,"stroke-width":sw,opacity:op}));}
     \\function rats(){
@@ -3776,7 +3806,7 @@ const BOARD_JS =
     \\ g.addEventListener("pointermove",function(ev){if(!drag||drag.i!==i)return;var m=mm(ev);
     \\   var nx=Math.round((m.x+drag.ox)/G)*G,ny=Math.round((m.y+drag.oy)/G)*G;
     \\   if(nx===P[i].x&&ny===P[i].y)return;P[i].x=nx;P[i].y=ny;
-    \\   if(!drag.moved){drag.moved=true;clearRoute();}setT(i);rats();drawClr();});
+    \\   if(!drag.moved){drag.moved=true;clearRoute();}setT(i);rats();drawClr();refreshUnplaced();});
     \\ g.addEventListener("pointerup",function(ev){var mv=drag&&drag.moved;drag=null;g.style.cursor="grab";
     \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(mv)fetchScore();else scrollToComp(P[i].ref);});
     \\});
@@ -3804,8 +3834,8 @@ const BOARD_JS =
     \\ if(ev.key=="?"&&!typing){ev.preventDefault();kbdToggle();return;}
     \\ if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();
     \\   P[cur].rot=((((P[cur].rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;
-    \\   setT(cur);clearRoute();rats();fetchScore();}});
-    \\function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetchScore();
+    \\   setT(cur);clearRoute();rats();fetchScore();refreshUnplaced();}});
+    \\function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetchScore();refreshUnplaced();
     \\ if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();}
     \\document.getElementById("pcb-reset").addEventListener("click",function(){
     \\ P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;});applyAll();});
@@ -4063,11 +4093,11 @@ const BOARD_JS =
     \\   if(q.ref===anchorRef){dx=anchorTX-q.x;dy=anchorTY-q.y;}});}
     \\ f.parts.forEach(function(q){var i=byRef[q.ref];if(i===undefined)return;
     \\   P[i].x=q.x+dx;P[i].y=q.y+dy;P[i].rot=q.rot||0;});
-    \\ P.forEach(function(p,i){setT(i);}); clearRoute(); rats();}
+    \\ P.forEach(function(p,i){setT(i);}); clearRoute(); rats(); refreshUnplaced();}
     \\function liveFallback(query){window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+
     \\  "?regen=1"+(query?("&"+query.replace(/^\?/,"")):"");}
     \\function liveRegen(query){
-    \\ liveMsg("Starting optimizer…","","");
+    \\ liveMsg("Starting optimizer…","","");markUnplaced([]);
     \\ fetch("/api/pcb-regen-start/"+encodeURIComponent(PCB.name)+(query||""),{method:"POST"})
     \\  .then(function(r){return r.json();})
     \\  .then(function(j){if(typeof j.gen!=="number"||!j.gen)throw 0;livePoll(j.gen,-1,0);})
@@ -4128,12 +4158,12 @@ const BOARD_JS =
     \\   .then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j};});})
     \\   .then(function(o){busy=false;
     \\     if(!o.ok||o.j.error){setMsg(o.j.error||"solve failed","err");return;}
-    \\     var j=o.j;liveApply({parts:j.parts});
+    \\     var j=o.j;liveApply({parts:j.parts});markUnplaced(j.unplaced||[]);
     \\     var d=j.delta_objective||0;
     \\     var s="objective "+j.objective.toFixed(1)+" ("+(d>0?"+":"")+d.toFixed(1)+" vs current)";
     \\     var cls=d<=0?"ok":"warn";
     \\     if(j.unresolved&&j.unresolved.length){s+=" · unresolved: "+j.unresolved.join(", ");cls="err";}
-    \\     if(j.unplaced&&j.unplaced.length)s+=" · "+j.unplaced.length+" unplaced (staged)";
+    \\     if(j.unplaced&&j.unplaced.length)s+=" · "+j.unplaced.length+" unplaced (red box)";
     \\     if(j.used_spec===false){s+=" · fell back to auto (spec didn't drive)";cls="err";}
     \\     setMsg(s,cls);
     \\     if(dirty){dirty=false;applySpec();}})
@@ -4191,6 +4221,7 @@ const BOARD_JS =
     \\if(legCb)legCb.addEventListener("change",function(){var l=document.getElementById("pcb-legend");
     \\ if(l)l.hidden=!legCb.checked;});
     \\rats(); showScore(PCB.auto); drawRoute(); drawClr(); drawDrc();
+    \\markUnplaced(PCB.placement&&PCB.placement.unplaced);
     \\// ── Cross-probe focus: ?focus=REF (or #REF) selects that part on load —
     \\//    zoom/centre the view on it, flash its courtyard, and reveal it in the
     \\//    component sidebar. Exact ref first, then the bare sub-block leaf
