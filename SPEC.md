@@ -403,6 +403,7 @@ Public functions: renderTabs
 - System view draws every class's edges at once, colored by class, with a class legend
 - System view labels functional bands so it reads as an architecture
 - Wraps a block's description onto multiple lines instead of truncating at one
+- Truncation backs up to a UTF-8 boundary so multi-byte characters never split
 
 ## diagram/diagram
 

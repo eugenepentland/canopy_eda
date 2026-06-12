@@ -886,8 +886,12 @@ fn writeLegend(w: *Writer, palette: []const VoltColor, lay: layout.Layout) Write
 
 fn truncate(arena: Allocator, s: []const u8, max: usize) Allocator.Error![]const u8 {
     if (s.len <= max) return s;
-    if (max <= 1) return s[0..max];
-    return std.fmt.allocPrint(arena, "{s}\u{2026}", .{s[0 .. max - 1]});
+    // Back the cut up to a UTF-8 codepoint boundary (continuation bytes are
+    // 0b10xxxxxx) so a multi-byte character is dropped whole, never split.
+    var cut = if (max <= 1) max else max - 1;
+    while (cut > 0 and s[cut] & 0xC0 == 0x80) cut -= 1;
+    if (max <= 1) return s[0..cut];
+    return std.fmt.allocPrint(arena, "{s}\u{2026}", .{s[0..cut]});
 }
 
 /// Greedy word-wrap `s` into at most `max_lines` lines of ~`max` chars each, so
@@ -1219,4 +1223,26 @@ test "wrapText word-wraps to a line budget" {
     const cut = try wrapText(a, "alpha beta gamma delta epsilon", 12, 2);
     try testing.expectEqual(@as(usize, 2), cut.len);
     try testing.expect(std.mem.endsWith(u8, cut[1], "\u{2026}"));
+}
+
+/// Test helper: truncate `s` at every possible `max` (including the
+/// no-ellipsis max<=1 path) and assert each result is valid UTF-8.
+fn expectAllCutsValidUtf8(a: Allocator, s: []const u8) !void {
+    var max: usize = 0;
+    while (max <= s.len + 1) : (max += 1) {
+        try testing.expect(std.unicode.utf8ValidateSlice(try truncate(a, s, max)));
+    }
+}
+
+// spec: diagram/render - Truncation backs up to a UTF-8 boundary so multi-byte characters never split
+test "truncate never splits a multi-byte UTF-8 character" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Real repro: the stm32n6 USB subtitle, whose em-dash (3 bytes,
+    // 0xE2 0x80 0x94) starts at byte 21 and straddles the cut for max=23.
+    const sub = "USB 2.0 HS via USB-C \u{2014} chip details sealed in usb-c-hs module";
+    const t = try truncate(a, sub, 23);
+    try testing.expectEqualStrings("USB 2.0 HS via USB-C \u{2026}", t);
+    try expectAllCutsValidUtf8(a, sub);
 }
