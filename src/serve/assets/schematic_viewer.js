@@ -2110,9 +2110,124 @@
     if (vb.length !== 4 || vb.some(isNaN)) return;
     var base = { x: vb[0], y: vb[1], w: vb[2], h: vb[3] };
     var cur = { x: base.x, y: base.y, w: base.w, h: base.h };
-    var minW = base.w / 16, maxW = base.w * 1.2;
+    // 64x: deep enough that a dense section's schematic tile (a dozen part
+    // symbols packed into one block) reaches comfortably readable pin text.
+    var minW = base.w / 64, maxW = base.w * 1.2;
 
-    function apply() { svg.setAttribute('viewBox', cur.x + ' ' + cur.y + ' ' + cur.w + ' ' + cur.h); }
+    // ---- Semantic zoom (Layout view only) ----
+    // The server stamps data-lod="0" on the Layout SVG when it carries a
+    // glance layer. Zoom drives the attribute through 0 (group chips) →
+    // 1 (the full block diagram with labels) → 2 (each block becomes a
+    // window onto its section's real schematic); the page CSS does the
+    // actual cross-fades, so this stays one attribute write.
+    var hasLod = svg.hasAttribute('data-lod');
+    var lodTag = null, deepBuilt = false;
+    function lodFor(z) { return z < 1.45 ? '0' : (z < 3.0 ? '1' : '2'); }
+    function updateLod() {
+      if (!hasLod) return;
+      var l = lodFor(base.w / cur.w);
+      if (l === '2' && !deepBuilt) buildDeepLayer();
+      if (svg.getAttribute('data-lod') !== l) svg.setAttribute('data-lod', l);
+      if (lodTag) lodTag.textContent = 'LOD ' + l + ' · ' + (l === '0' ? 'glance' : l === '1' ? 'detail' : 'schematic');
+    }
+
+    // ---- Deep layer (LOD 2): the actual schematic inside each block ----
+    // Every diagram node links to its section card (#sec-SLUG / #sub-SLUG),
+    // and each card already contains the real hub-and-spoke schematic as
+    // standalone <svg class="hub-inset"> elements. Clone them into a nested
+    // <svg> scaled to the node's box, so zooming past the detail level turns
+    // each block into a window onto its actual circuit. Built lazily on the
+    // first entry into LOD 2; pointer-events stay off so clicks fall through
+    // to the node link (jump to the full card below).
+    function buildDeepLayer() {
+      deepBuilt = true;
+      var NS = 'http://www.w3.org/2000/svg';
+      var deep = document.createElementNS(NS, 'g');
+      deep.setAttribute('class', 'dg-deep');
+      var made = 0;
+      svg.querySelectorAll('a.dg-node-link').forEach(function (link) {
+        var href = link.getAttribute('href') || '';
+        if (href.indexOf('#sec-') !== 0) return;
+        var slug = href.slice(5);
+        var card = document.getElementById('sec-' + slug) || document.getElementById('sub-' + slug);
+        if (!card) return;
+        var insets = card.querySelectorAll('svg.hub-inset');
+        if (!insets.length) return;
+        var rects = link.querySelectorAll('.dg-rect');
+        var rect = rects[rects.length - 1];
+        if (!rect) return;
+        var x = parseFloat(rect.getAttribute('x')), y = parseFloat(rect.getAttribute('y'));
+        var bw = parseFloat(rect.getAttribute('width')), bh = parseFloat(rect.getAttribute('height'));
+        if ([x, y, bw, bh].some(isNaN)) return;
+        var GAP = 48, parts = [];
+        insets.forEach(function (s) {
+          var vb = (s.getAttribute('viewBox') || '').split(/[ ,]+/).map(Number);
+          if (vb.length !== 4 || vb.some(isNaN)) return;
+          parts.push({ el: s, w: vb[2], h: vb[3] });
+        });
+        if (!parts.length) return;
+        // Pack the card's insets into the row count that wastes the least
+        // scale inside the wide block box — one long row shrinks a many-part
+        // section (the MCU core) to dust, one tall stack does the same to a
+        // pair, so try each and keep the best fit.
+        function measure(rows) {
+          var cols = Math.ceil(parts.length / rows), W = 0, H = 0, grid = [];
+          for (var ri = 0; ri < rows; ri++) {
+            var row = parts.slice(ri * cols, (ri + 1) * cols);
+            if (!row.length) continue;
+            var rw = row.reduce(function (a, p) { return a + p.w; }, 0) + GAP * (row.length - 1);
+            var rh = 0;
+            row.forEach(function (p) { rh = Math.max(rh, p.h); });
+            grid.push({ row: row, w: rw, h: rh });
+            W = Math.max(W, rw);
+            H += rh + (grid.length > 1 ? GAP : 0);
+          }
+          return { grid: grid, W: W, H: H, scale: Math.min((bw - 6) / W, (bh - 6) / H) };
+        }
+        var best = measure(1);
+        for (var r = 2; r <= Math.min(parts.length, 4); r++) {
+          var m = measure(r);
+          if (m.scale > best.scale) best = m;
+        }
+        var W = best.W, H = best.H;
+        var tile = document.createElementNS(NS, 'g');
+        var back = document.createElementNS(NS, 'rect');
+        back.setAttribute('x', x); back.setAttribute('y', y);
+        back.setAttribute('width', bw); back.setAttribute('height', bh);
+        back.setAttribute('rx', 6);
+        back.setAttribute('fill', '#0d1117');
+        back.setAttribute('stroke', rect.getAttribute('stroke') || '#30363d');
+        back.setAttribute('stroke-width', '1');
+        tile.appendChild(back);
+        var outer = document.createElementNS(NS, 'svg');
+        outer.setAttribute('x', x + 3); outer.setAttribute('y', y + 3);
+        outer.setAttribute('width', bw - 6); outer.setAttribute('height', bh - 6);
+        outer.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+        outer.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+        var rowY = 0;
+        best.grid.forEach(function (g) {
+          var off = (W - g.w) / 2;
+          g.row.forEach(function (p) {
+            var clone = p.el.cloneNode(true);
+            clone.removeAttribute('class');
+            clone.removeAttribute('id');
+            clone.setAttribute('x', off);
+            clone.setAttribute('y', rowY + (g.h - p.h) / 2);
+            clone.setAttribute('width', p.w);
+            clone.setAttribute('height', p.h);
+            off += p.w + GAP;
+            outer.appendChild(clone);
+          });
+          rowY += g.h + GAP;
+        });
+        tile.appendChild(outer);
+        deep.appendChild(tile);
+        made++;
+      });
+      if (made) svg.appendChild(deep);
+    }
+
+    function apply() { svg.setAttribute('viewBox', cur.x + ' ' + cur.y + ' ' + cur.w + ' ' + cur.h); updateLod(); }
     function reset() { cur.x = base.x; cur.y = base.y; cur.w = base.w; cur.h = base.h; apply(); }
 
     // Zoom by `factor` (>1 zooms out) keeping the point under (cx,cy) fixed.
@@ -2133,6 +2248,12 @@
       e.preventDefault();
       zoomAt(e.deltaY < 0 ? 0.85 : 1 / 0.85, e.clientX, e.clientY);
     }, { passive: false });
+
+    // The diagram's node boxes are <a> links: starting a drag on one fires the
+    // browser's native link-drag (a ghost of the SVG follows the cursor)
+    // instead of our pan. Killing dragstart keeps pointer-based panning the
+    // only drag behavior.
+    svg.addEventListener('dragstart', function (e) { e.preventDefault(); });
 
     var dragging = false, sx0 = 0, sy0 = 0, ox = 0, oy = 0, moved = false;
     svg.addEventListener('pointerdown', function (e) {
@@ -2179,6 +2300,47 @@
     mkBtn('−', 'Zoom out', function () { centerZoom(1 / 0.8); });
     mkBtn('⟲', 'Reset view', reset);
     wrap.appendChild(bar);
+
+    if (hasLod) {
+      lodTag = document.createElement('span');
+      lodTag.className = 'dg-lod-tag';
+      lodTag.title = 'Detail level — zoom to change (scroll, buttons, or click a chip)';
+      bar.insertBefore(lodTag, bar.firstChild);
+      updateLod();
+
+      // Click a glance chip → glide the viewBox into that group's region; the
+      // zoom crosses the LOD threshold, so the chip "opens" into its blocks.
+      var glideRaf = null;
+      function glideTo(x, y, w2, h2) {
+        if (glideRaf) cancelAnimationFrame(glideRaf);
+        var from = { x: cur.x, y: cur.y, w: cur.w, h: cur.h }, t0 = null;
+        function step(ts) {
+          if (t0 === null) t0 = ts;
+          var p = Math.min(1, (ts - t0) / 360); p = p * (2 - p);
+          cur.x = from.x + (x - from.x) * p; cur.y = from.y + (y - from.y) * p;
+          cur.w = from.w + (w2 - from.w) * p; cur.h = from.h + (h2 - from.h) * p;
+          apply();
+          if (p < 1) glideRaf = requestAnimationFrame(step);
+        }
+        glideRaf = requestAnimationFrame(step);
+      }
+      svg.querySelectorAll('.dg-chip').forEach(function (chip) {
+        chip.addEventListener('click', function () {
+          var r = {
+            x: parseFloat(chip.getAttribute('data-x')), y: parseFloat(chip.getAttribute('data-y')),
+            w: parseFloat(chip.getAttribute('data-w')), h: parseFloat(chip.getAttribute('data-h'))
+          };
+          if (isNaN(r.x) || isNaN(r.w)) return;
+          // Frame the region with padding, but force the zoom past the LOD-0
+          // threshold so a huge group still switches to its block view.
+          var pad = 70;
+          var tw = Math.max(r.w + pad * 2, (r.h + pad * 2) * base.w / base.h);
+          tw = Math.min(Math.max(tw, minW), base.w / 1.55);
+          var th = tw * base.h / base.w;
+          glideTo(r.x + r.w / 2 - tw / 2, r.y + r.h / 2 - th / 2, tw, th);
+        });
+      });
+    }
   }
   document.querySelectorAll('.dg-svg').forEach(setupDiagramZoom);
 

@@ -93,6 +93,7 @@ src/diagram/layout.zig::pw_pill_cols value
 src/diagram/layout.zig::pw_pill_gap value
 src/diagram/layout.zig::pw_pill_h value
 src/diagram/layout.zig::v_gap value
+src/diagram/lod.zig::writeGlanceLayer fn
 src/diagram/membership.zig::Membership struct_
 src/diagram/membership.zig::build fn
 src/diagram/render.zig::CSS value

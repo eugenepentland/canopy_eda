@@ -369,6 +369,7 @@ Public functions: computeLayout, hasSystemView, computeSystemLayout, computeChai
 - computeFreeLayout pins edge-directive blocks to the column just outside the rest of the content
 - computeFreeLayout routes each edge as an orthogonal polyline around any group box neither endpoint belongs to
 - computeFreeLayout spreads wires sharing a corridor into parallel lanes instead of overlapping
+- computeFreeLayout fans a face's wires evenly across the face ordered by far-end position
 - computeGroupsLayout shows only the group boxes with one connector per pair of groups a net crosses, and no individual nodes
 - Returns null for a view with no edges
 - Ranks nodes left-to-right by signal flow, breaking cycles for layering
@@ -387,6 +388,13 @@ Public functions: computeLayout, hasSystemView, computeSystemLayout, computeChai
 - Falls back to isolated block boxes when there are no connections
 - Omits an unconnected block from the System view when edges exist
 - Keeps a force-shown block in the layout even when it has no edges
+
+## diagram/lod
+
+Public functions: writeGlanceLayer
+
+- Aggregates base edges into one glance connection per entity pair and class, summing fanouts
+- Renders a glance chip per group and per ungrouped block with member captions
 
 ## diagram/render
 
