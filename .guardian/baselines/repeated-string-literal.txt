@@ -1,4 +1,5 @@
 # guardian-snapshot v1
+src/import_kicad.zig: string literal {s}/lib/components/{s}.sexp appears 3 times — extract a const
 src/serve/bom_html.zig: string literal manufacturer appears 3 times — extract a const
 src/serve/edit.zig: string literal {{\"ok\":true,\"version\":{d}}} appears 3 times — extract a const
 src/serve/mcp_tools.zig: string literal component appears 4 times — extract a const
