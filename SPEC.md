@@ -397,6 +397,7 @@ Public functions: renderTabs
 - Draws each rail label once per source, not once per fanout branch
 - Colors power edges by voltage and renders a voltage legend
 - Draws per-rail load buckets with rail-colored headings in the power view
+- Power-view producer cards and load pills cross-probe to their section
 - RF signal edges get no tab of their own; the flow shows in the Layout/System view
 - Puts the combined System view first and selects it by default
 - System view draws every class's edges at once, colored by class, with a class legend

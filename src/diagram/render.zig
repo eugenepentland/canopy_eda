@@ -415,10 +415,20 @@ const pill_h: f64 = 20; // edge-label pill height
 const pill_half_h: f64 = 10; // half of pill_h, also the pill corner radius
 const label_dy: f64 = 4; // edge-label text baseline nudge
 
+/// Open an `<a href="#sec-<slug>">` cross-probe wrapper around a clickable
+/// block when `slug` is non-empty (a stub / antenna carries none). Returns
+/// whether a link was opened, so the caller knows to emit the matching `</a>`.
+/// Shared by every diagram block: the System/Layout/Clocks/Control nodes and
+/// the Power view's producer cards and load pills.
+fn openNodeLink(w: *Writer, slug: []const u8) Writer.Error!bool {
+    if (slug.len == 0) return false;
+    try w.print("<a href=\"#sec-{s}\" class=\"dg-node-link\">", .{slug});
+    return true;
+}
+
 fn writeNode(arena: Allocator, w: *Writer, node: types.Node, x: f64, y: f64) (Allocator.Error || Writer.Error)!void {
     const color = rb.categoryColor(node.category);
-    const has_link = node.slug.len > 0;
-    if (has_link) try w.print("<a href=\"#sec-{s}\" class=\"dg-node-link\">", .{node.slug});
+    const has_link = try openNodeLink(w, node.slug);
     try w.writeAll("<g class=\"dg-node\">");
     // Board-edge endpoints (antennas / EMVS cells) get a dashed border.
     const rect_class = if (node.is_boundary) "dg-rect dg-boundary" else "dg-rect";
@@ -776,6 +786,10 @@ fn writePowerCard(
     color: []const u8,
     info: []const u8,
 ) (Allocator.Error || Writer.Error)!void {
+    // The card cross-probes to its schematic section via the same
+    // `#sec-<slug>` link the block-diagram nodes use, so the Power view is as
+    // clickable as Layout / Clocks / Control. A stub carries no slug ⇒ no link.
+    const has_link = try openNodeLink(w, node.slug);
     try w.print(
         "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\" rx=\"6\" class=\"dg-pcard\" stroke=\"{s}\"/>",
         .{ b.x, b.y, b.w, b.h, color },
@@ -799,6 +813,7 @@ fn writePowerCard(
         try writeEscaped(w, info);
         try w.writeAll("</text>");
     }
+    if (has_link) try w.writeAll("</a>");
 }
 
 /// A load bucket: rail-color outlined box, "X.X V · N loads" heading, then one
@@ -826,13 +841,17 @@ fn writePowerBucket(arena: Allocator, w: *Writer, graph: *const Graph, b: layout
         const row: f64 = @floatFromInt(k / cols);
         const px = b.x + layout.pw_bucket_pad + col * (pill_w + layout.pw_pill_gap);
         const py = b.y + layout.pw_head_h + row * (layout.pw_pill_h + layout.pw_pill_gap);
+        // Each consumer pill cross-probes to that block's schematic section.
+        const member = graph.nodes[gid];
+        const has_link = try openNodeLink(w, member.slug);
         try w.print(
             "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\" rx=\"4\" class=\"dg-pill\" stroke=\"{s}\"/>",
             .{ px, py, pill_w, layout.pw_pill_h, color },
         );
         try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-pilltext\">", .{ px + pbox_pad / 2, py + layout.pw_pill_h - pill_text_rise });
-        try writeEscaped(w, try truncate(arena, graph.nodes[gid].label, pill_chars));
+        try writeEscaped(w, try truncate(arena, member.label, pill_chars));
         try w.writeAll("</text>");
+        if (has_link) try w.writeAll("</a>");
     }
 }
 
@@ -1073,6 +1092,29 @@ test "renderTabs draws load buckets in the power view" {
     try testing.expect(std.mem.indexOf(u8, out, "class=\"dg-bucket\"") != null);
     try testing.expect(std.mem.indexOf(u8, out, "dg-band-label") != null);
     try testing.expect(std.mem.indexOf(u8, out, "3.3 V") != null);
+}
+
+// spec: diagram/render - Power-view producer cards and load pills cross-probe to their section
+test "renderTabs links power-view cards and load pills to their sections" {
+    // A regulator feeding one load: the producer card and the consumer pill
+    // are each wrapped in the same `#sec-<slug>` cross-probe link the
+    // block-diagram nodes use, so the Power view is clickable too.
+    var nodes = [_]types.Node{
+        .{ .label = "REG", .subtitle = "", .category = .power, .slug = "reg", .inputs = &.{}, .outputs = &.{} },
+        .{ .label = "A", .subtitle = "", .category = .peripheral, .slug = "load-a", .inputs = &.{}, .outputs = &.{} },
+    };
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "v", .voltage = 3.3 }};
+    var graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try renderTabs(testing.allocator, &graph, &aw.writer);
+    const out = aw.written();
+    // Scope to the Power panel so we are sure the links come from the power
+    // render path (the producer also appears as a node in other panels).
+    const pw_start = std.mem.indexOf(u8, out, "dg-panel-power").?;
+    const power = out[pw_start..];
+    try testing.expect(std.mem.indexOf(u8, power, "href=\"#sec-reg\"") != null);
+    try testing.expect(std.mem.indexOf(u8, power, "href=\"#sec-load-a\"") != null);
 }
 
 // spec: diagram/render - Colors power edges by voltage and renders a voltage legend
