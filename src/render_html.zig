@@ -1724,8 +1724,11 @@ pub const SCHEMATIC_VIEWER_JS = @import("serve/schematic_viewer_js.zig").SCHEMAT
 /// Walk the design and emit a JSON object the sidebar JS uses for search +
 /// inspection. Shape:
 ///   `{sections:[{slug,name,description,hubs:[ref...]}],
-///     components:[{ref,component,value,kind,section,pins?:[{id,net,fn,alt}]}],
+///     components:[{ref,component,value,kind,section,src?,pins?:[{id,net,fn,alt}]}],
 ///     nets:[{name,members:[{ref,pin,fn?}]}]}`
+/// `src` is the byte offset of the instance's defining form in the design
+/// source (present only for top-level instances — the sidebar's
+/// "Edit source →" jump).
 /// Every instance (hubs AND passives) lands in `components` so search hits
 /// "C83" or "10nF". Hubs additionally carry `pins` for the component-detail
 /// view; passives don't (they have at most a few pins and are inspected on
@@ -1957,6 +1960,10 @@ fn emitComponentEntry(
     try writeJsString(w, kind);
     try w.writeAll(",\"section\":");
     try writeJsString(w, section_slug);
+    // Byte offset of the defining form in the design source — the sidebar's
+    // "Edit source →" jump target. Omitted when the instance doesn't live in
+    // the top-level design file (sub-block children, synthetics).
+    if (inst.src_offset > 0) try w.print(",\"src\":{d}", .{inst.src_offset});
 
     if (!std.mem.eql(u8, kind, "hub")) {
         try w.writeAll("}");
