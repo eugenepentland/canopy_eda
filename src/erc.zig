@@ -790,6 +790,22 @@ fn checkUnconnectedPowerPins(
     }
 }
 
+/// True for the `V<int>P<frac>` board-rail naming convention — `V5P0`,
+/// `V1P8`, `V3P3`, `V0P9`, `V12P0` — where `P` stands in for the decimal
+/// point. Mirrors `rails.looksLikeRail`'s "V + digit" intent but is scoped to
+/// the explicit point-rail form so a V-initial signal name (VSYNC) can't
+/// match. Used by the IC-power-presence check so a rail like the 5V `V5P0`
+/// isn't mistaken for a non-power net.
+fn isVoltagePointRail(base: []const u8) bool {
+    if (base.len < 4 or base[0] != 'V') return false; // shortest is "V0P9"
+    var i: usize = 1;
+    const int_start = i;
+    while (i < base.len and base[i] >= '0' and base[i] <= '9') : (i += 1) {}
+    if (i == int_start or i >= base.len or base[i] != 'P') return false;
+    i += 1; // consume the 'P'
+    return i < base.len and base[i] >= '0' and base[i] <= '9';
+}
+
 fn checkBlockPowerPins(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
@@ -806,8 +822,12 @@ fn checkBlockPowerPins(
             std.mem.startsWith(u8, base, "GND") or
             std.mem.endsWith(u8, base, "GND") or std.mem.endsWith(u8, base, "VSS");
         const is_vdd = std.mem.startsWith(u8, base, "VDD") or std.mem.startsWith(u8, base, "VCC") or
-            std.mem.startsWith(u8, base, "VBAT") or std.mem.startsWith(u8, base, "V3P3") or
-            std.mem.startsWith(u8, base, "V1P") or std.mem.startsWith(u8, base, "V2P") or
+            std.mem.startsWith(u8, base, "VBAT") or
+            // `V<int>P<frac>` board-rail convention (V1P8, V3P3, V5P0, V0P9,
+            // V12P0 …) — `P` is the decimal point. Generalises the old
+            // V1P/V2P/V3P3 special-cases, which missed higher rails like the
+            // 5V `V5P0` feeding the NeoPixel level shifter.
+            isVoltagePointRail(base) or
             std.mem.startsWith(u8, base, "VBUS") or std.mem.startsWith(u8, base, "VIN") or
             std.mem.startsWith(u8, base, "VOUT") or std.mem.startsWith(u8, base, "AVDD") or
             std.mem.startsWith(u8, base, "DVDD") or std.mem.startsWith(u8, base, "V+") or
@@ -1828,6 +1848,21 @@ test "power pins missing supply still flagged" {
             std.mem.indexOf(u8, v.message, "no power connection") != null) hit = true;
     }
     try std.testing.expect(hit);
+}
+
+// spec: erc - Recognises a V<int>P<frac> rail such as the 5V V5P0 as power
+test "power pins V5P0 rail is recognised as power" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // The NeoPixel level shifter's VCC sits on the 5V board rail "V5P0".
+    // The old V1P/V2P/V3P3 list missed it and falsely flagged "no power".
+    const block = try makePowerPinBlock(alloc, "someic", "V5P0");
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkUnconnectedPowerPins(alloc, &block, &violations);
+    for (violations.items) |v| {
+        try std.testing.expect(!std.mem.eql(u8, v.message, "U1: IC has no power connection"));
+    }
 }
 
 // Build a single-net DesignBlock with two pins whose ElectricalDecls are
