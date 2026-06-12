@@ -56,6 +56,12 @@ pub const FlatInst = struct {
     /// Manufacturer name from `(property "manufacturer" "...")` —
     /// also fed to the search index.
     manufacturer: []const u8 = "",
+    /// Byte offset of the defining form in the *top-level design source*,
+    /// copied off `Instance.source_offset`. Drives the sidebar's
+    /// "Edit source →" jump. 0 means "no source link": sub-block children
+    /// (their offsets point into the module file, which `/api/source/:name`
+    /// can't serve) and synthetic instances.
+    src_offset: u32 = 0,
 };
 
 fn propertyValue(props: []const env_mod.Property, key: []const u8) []const u8 {
@@ -265,6 +271,10 @@ pub const RenderCtx = struct {
                 .requirements = inst.requirements,
                 .mpn = propertyValue(inst.properties, "mpn"),
                 .manufacturer = propertyValue(inst.properties, "manufacturer"),
+                // Sub-block instances evaluate out of their module file, so
+                // their offsets don't map into the design source — only
+                // top-level (unprefixed) instances get a source link.
+                .src_offset = if (prefix.len == 0) inst.source_offset else 0,
             };
             try self.instances.append(self.allocator, flat);
             try self.inst_map.put(self.allocator, rd, flat);

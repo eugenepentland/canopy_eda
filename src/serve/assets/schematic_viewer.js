@@ -484,6 +484,15 @@
       html += '<div class="sb-pcb-locate"><a href="' + escapeHtml(pcbHref) +
         '" title="Open the PCB layout view zoomed to this part">Locate on PCB →</a></div>';
     }
+    // Source cross-probe: `src` is the byte offset of this instance's defining
+    // form in the design file (absent for sub-block parts, whose source lives
+    // in a module file the editor can't load — and module pages, where
+    // /api/source/:name doesn't resolve).
+    var canEditSrc = c.src && (typeof SCH_VIEW === 'undefined' || SCH_VIEW !== 'module');
+    if (canEditSrc) {
+      html += '<div class="sb-src-edit"><a href="#" ' +
+        'title="Open the source editor at this instance’s definition">Edit source →</a></div>';
+    }
     if (c.footprint) html += footprintPreviewHtml(c.footprint);
     if (c.kind !== 'hub') {
       // Passives: show the nets they sit on, derived from SCH_INDEX.nets.
@@ -527,6 +536,13 @@
       var target = back.dataset.back;
       if (target) showSection(target, false); else showSectionList();
     });
+    var srcLink = detailBox.querySelector('.sb-src-edit a');
+    if (srcLink) {
+      srcLink.addEventListener('click', function (e) {
+        e.preventDefault();
+        openSourceEditorAtOffset(c.src, ref);
+      });
+    }
     var compLink = detailBox.querySelector('.sb-comp-link');
     if (compLink) {
       compLink.addEventListener('click', function (e) {
@@ -1834,7 +1850,14 @@
     overlay.innerHTML =
       '<div class="src-edit-box">' +
         '<div class="src-edit-head"><h3>Edit source <span class="src-edit-sec"></span></h3>' +
-          '<span class="src-edit-hint">Whole-file editor · ⌘/Ctrl-S to save</span></div>' +
+          '<span class="src-edit-hint">Whole-file editor · ⌘/Ctrl-S to save · ⌘/Ctrl-F to find</span></div>' +
+        '<div class="src-edit-find" hidden>' +
+          '<input type="text" class="src-find-input" placeholder="Find…" spellcheck="false">' +
+          '<span class="src-find-count"></span>' +
+          '<button type="button" class="src-edit-btn src-find-prev" title="Previous match (Shift-Enter)">↑</button>' +
+          '<button type="button" class="src-edit-btn src-find-next" title="Next match (Enter)">↓</button>' +
+          '<button type="button" class="src-edit-btn src-find-close" title="Close (Esc)">×</button>' +
+        '</div>' +
         '<div class="src-edit-cm"></div>' +
         '<div class="src-edit-foot">' +
           '<span class="src-edit-err"></span>' +
@@ -1873,6 +1896,111 @@
     overlay.querySelector('.src-edit-cancel').addEventListener('click', close);
     overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) close(); });
 
+    // ---- Find bar (⌘/Ctrl-F) ----
+    // Self-contained search over the document: the vendored CodeMirror bundle
+    // is core-only (no search/dialog addons), so matches are found with a
+    // case-insensitive literal regex on the raw string and highlighted via
+    // markText. Enter/Shift-Enter cycle, Esc closes back into the editor.
+    var findBar = overlay.querySelector('.src-edit-find');
+    var findInput = overlay.querySelector('.src-find-input');
+    var findCount = overlay.querySelector('.src-find-count');
+    var findMatches = []; // [{start,len}] string indices into cm.getValue()
+    var findCur = -1;
+    var findMarks = [];
+    var findTimer = null;
+
+    function clearFindMarks() {
+      findMarks.forEach(function (m) { m.clear(); });
+      findMarks = [];
+    }
+    function showFindMatch() {
+      if (findCur < 0 || findCur >= findMatches.length) return;
+      var m = findMatches[findCur];
+      var from = cm.posFromIndex(m.start);
+      var to = cm.posFromIndex(m.start + m.len);
+      cm.setSelection(from, to);
+      cm.scrollIntoView({ from: from, to: to }, 80);
+      findCount.textContent = (findCur + 1) + '/' + findMatches.length;
+    }
+    function runFind() {
+      clearFindMarks();
+      findMatches = [];
+      findCur = -1;
+      var q = findInput.value;
+      if (!q) { findCount.textContent = ''; return; }
+      var doc = cm.getValue();
+      var re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+      var m;
+      while ((m = re.exec(doc)) !== null) {
+        findMatches.push({ start: m.index, len: m[0].length });
+      }
+      if (!findMatches.length) { findCount.textContent = '0 results'; return; }
+      // Highlight-all is capped so a one-letter query on a big file doesn't
+      // mint thousands of marks; the counter still reports the full total.
+      var cap = Math.min(findMatches.length, 500);
+      for (var k = 0; k < cap; k++) {
+        findMarks.push(cm.markText(
+          cm.posFromIndex(findMatches[k].start),
+          cm.posFromIndex(findMatches[k].start + findMatches[k].len),
+          { className: 'cm-find-match' }
+        ));
+      }
+      // Start from the first match at/after the cursor so opening the bar
+      // near your edit point lands nearby instead of at the file top.
+      var cursorIdx = cm.indexFromPos(cm.getCursor('from'));
+      findCur = 0;
+      for (var j = 0; j < findMatches.length; j++) {
+        if (findMatches[j].start >= cursorIdx) { findCur = j; break; }
+      }
+      showFindMatch();
+    }
+    function stepFind(dir) {
+      if (!findMatches.length) return;
+      findCur = (findCur + dir + findMatches.length) % findMatches.length;
+      showFindMatch();
+    }
+    function openFind() {
+      findBar.hidden = false;
+      if (cm.somethingSelected()) {
+        var sel = cm.getSelection();
+        if (sel.length <= 200 && sel.indexOf('\n') < 0) findInput.value = sel;
+      }
+      findInput.focus();
+      findInput.select();
+      runFind();
+    }
+    function closeFind() {
+      findBar.hidden = true;
+      clearFindMarks();
+      findCount.textContent = '';
+      cm.focus();
+    }
+    findInput.addEventListener('input', function () {
+      if (findTimer) clearTimeout(findTimer);
+      findTimer = setTimeout(runFind, 120);
+    });
+    findInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); stepFind(e.shiftKey ? -1 : 1); }
+      else if (e.key === 'Escape') { e.preventDefault(); closeFind(); }
+    });
+    overlay.querySelector('.src-find-prev').addEventListener('click', function () { stepFind(-1); });
+    overlay.querySelector('.src-find-next').addEventListener('click', function () { stepFind(1); });
+    overlay.querySelector('.src-find-close').addEventListener('click', closeFind);
+    // Edits shift every offset — re-run the search while the bar is open.
+    cm.on('change', function () {
+      if (findBar.hidden) return;
+      if (findTimer) clearTimeout(findTimer);
+      findTimer = setTimeout(runFind, 200);
+    });
+    // One bubble-phase handler covers the whole modal (editor, buttons, find
+    // input itself): preventDefault stops the browser's native page find.
+    overlay.addEventListener('keydown', function (e) {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'f' || e.key === 'F')) {
+        e.preventDefault();
+        openFind();
+      }
+    });
+
     function save() {
       state.errEl.textContent = '';
       state.saveBtn.disabled = true;
@@ -1894,7 +2022,13 @@
         });
     }
     state.saveBtn.addEventListener('click', save);
-    cm.setOption('extraKeys', { 'Cmd-S': save, 'Ctrl-S': save });
+    cm.setOption('extraKeys', {
+      'Cmd-S': save,
+      'Ctrl-S': save,
+      'Esc': function () {
+        if (!findBar.hidden) closeFind(); else return CodeMirror.Pass;
+      }
+    });
 
     state.loadPromise = fetch('/api/source/' + DESIGN_NAME)
       .then(function (r) { return r.json(); })
@@ -1908,6 +2042,16 @@
     return state;
   }
 
+  // Center the editor on `line`, flash it, and leave the cursor there.
+  function revealEditorLine(state, line) {
+    state.cm.focus();
+    state.cm.setCursor({ line: line, ch: 0 });
+    var top = state.cm.charCoords({ line: line, ch: 0 }, 'local').top;
+    state.cm.scrollTo(null, top - state.cm.getScrollInfo().clientHeight / 2);
+    state.cm.addLineClass(line, 'background', 'cm-section-flash');
+    setTimeout(function () { state.cm.removeLineClass(line, 'background', 'cm-section-flash'); }, 1500);
+  }
+
   function scrollEditorToSection(state, sectionName) {
     function go() {
       state.secEl.textContent = sectionName ? '· ' + sectionName : '';
@@ -1915,13 +2059,24 @@
       var doc = state.cm.getValue();
       var idx = doc.indexOf('(section "' + sectionName + '"');
       if (idx < 0) { state.cm.focus(); return; }
-      var line = doc.slice(0, idx).split('\n').length - 1;
-      state.cm.focus();
-      state.cm.setCursor({ line: line, ch: 0 });
-      var top = state.cm.charCoords({ line: line, ch: 0 }, 'local').top;
-      state.cm.scrollTo(null, top - state.cm.getScrollInfo().clientHeight / 2);
-      state.cm.addLineClass(line, 'background', 'cm-section-flash');
-      setTimeout(function () { state.cm.removeLineClass(line, 'background', 'cm-section-flash'); }, 1500);
+      revealEditorLine(state, doc.slice(0, idx).split('\n').length - 1);
+    }
+    if (state.loaded) go(); else state.loadPromise.then(go);
+  }
+
+  // Jump to a byte offset (SCH_INDEX components[].src, reported by the Zig
+  // renderer). The offset indexes the UTF-8 source bytes, not the JS (UTF-16)
+  // string, so derive the line by counting newline bytes up to it.
+  function scrollEditorToOffset(state, byteOff, label) {
+    function go() {
+      state.secEl.textContent = label ? '· ' + label : '';
+      var bytes = new TextEncoder().encode(state.cm.getValue());
+      var line = 0;
+      var end = Math.min(byteOff, bytes.length);
+      for (var i = 0; i < end; i++) {
+        if (bytes[i] === 10) line++;
+      }
+      revealEditorLine(state, line);
     }
     if (state.loaded) go(); else state.loadPromise.then(go);
   }
@@ -1930,6 +2085,12 @@
     if (!window.CodeMirror) { alert('Source editor failed to load (CodeMirror missing)'); return; }
     if (!srcEditor) srcEditor = buildSourceEditor();
     scrollEditorToSection(srcEditor, sectionName);
+  }
+
+  function openSourceEditorAtOffset(byteOff, label) {
+    if (!window.CodeMirror) { alert('Source editor failed to load (CodeMirror missing)'); return; }
+    if (!srcEditor) srcEditor = buildSourceEditor();
+    scrollEditorToOffset(srcEditor, byteOff, label);
   }
 
   document.addEventListener('click', function (e) {
