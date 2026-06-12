@@ -14,6 +14,7 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Tokenizes comparison operators as distinct tokens
 - Tracks line and column position for each token
 - Tokenizes KiCad-style unquoted filenames containing +
+- Tokenizes KiCad-style unquoted filenames containing ,
 
 ## sexpr/parser
 
