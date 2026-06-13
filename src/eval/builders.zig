@@ -985,9 +985,15 @@ pub fn buildSubBlock(self: *Evaluator, form_children: []const Node, env: *Env) E
 
     // Trailing children after the module call: (id …)/(ids …) identity
     // anchors and (bridge …) net shorthands are consumed elsewhere;
-    // anything else is silently dead — flag it.
+    // (reflow) opts out of module-layout composition. Anything else is
+    // silently dead — flag it.
+    var reflow = false;
     for (args[2..]) |extra| {
         if (extra.isForm("id") or extra.isForm("ids") or extra.isForm("bridge")) continue;
+        if (extra.isForm("reflow")) {
+            reflow = true;
+            continue;
+        }
         self.warnFmt(extra.span, "unknown sub-form ({s} …) in (sub-block …)", .{formHeadName(extra)});
     }
 
@@ -1060,6 +1066,7 @@ pub fn buildSubBlock(self: *Evaluator, form_children: []const Node, env: *Env) E
         .name = name,
         .block = block,
         .source = source,
+        .reflow = reflow,
     };
 }
 

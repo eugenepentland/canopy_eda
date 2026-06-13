@@ -185,14 +185,15 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // are placed, never the whole design. `?embed=1` trims the page chrome
     // (navbar/sidebar/edit controls) for inline display in that preview frame.
     const sub = subSlug(req);
-    const eff_block: *env_mod.DesignBlock = if (sub) |s|
+    const sub_block: ?env_mod.SubBlock = if (sub) |s|
         (descendToSub(ctx.allocator, block, s) orelse {
             res.status = 404;
             res.body = NO_SUB_MSG;
             return;
         })
     else
-        block;
+        null;
+    const eff_block: *env_mod.DesignBlock = if (sub_block) |sb| sb.block else block;
     const embed = isEmbed(req);
 
     // Tuning weights come from the query (?w_align=… etc) — any present (or
@@ -271,7 +272,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         // the schematic page: a score line plus the routed-status + show
         // clearance/DRC toggles (initial state mirrors the page's globals).
         const tg = parseToggles(req);
-        try writeEmbedBar(w);
+        try writeEmbedBar(w, if (sub_block) |sb| sb.source else "");
         try writeEmbedRoute(w, ro.params, routed, violations.len, tg.clr, tg.drc);
     } else {
         // Header row: title + the Schematic ⇄ PCB Layout switcher (PCB active).
@@ -403,10 +404,10 @@ fn descendToSub(
     allocator: std.mem.Allocator,
     block: *env_mod.DesignBlock,
     sub_slug: []const u8,
-) ?*env_mod.DesignBlock {
+) ?env_mod.SubBlock {
     for (block.sub_blocks) |sb| {
         const slug = review.slugify(allocator, sb.name) catch continue;
-        if (std.mem.eql(u8, slug, sub_slug)) return sb.block;
+        if (std.mem.eql(u8, slug, sub_slug)) return sb;
     }
     return null;
 }
@@ -571,7 +572,7 @@ pub fn solveForRequest(
 ) PngError!SolvedRequest {
     const block = resolveBlock(alloc, project_dir, name, eval, module_res) orelse return error.BlockNotFound;
     const eff_block: *env_mod.DesignBlock = if (opts.sub) |s|
-        (descendToSub(alloc, block, s) orelse return error.SubNotFound)
+        (descendToSub(alloc, block, s) orelse return error.SubNotFound).block
     else
         block;
 
@@ -608,7 +609,12 @@ pub fn solveForRequest(
             .unplaced = diag.unplaced,
             .auto_filled = diag.auto_filled,
             .unresolved = diag.unresolved,
+            .composed = diag.composed,
         }
+    else if (diag.composed.len > 0)
+        // Force-path board whose module specs composed: no design-level spec
+        // drives it, but report the composed macros so facts + image show them.
+        .{ .used_spec = false, .unplaced = &.{}, .composed = diag.composed }
     else
         null;
     return .{ .placement = placement, .spec_status = spec_status, .params = params, .title = eff_block.name, .block = eff_block };
@@ -1141,7 +1147,7 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
             res.status = 404;
             res.body = NO_SUB_MSG;
             return;
-        })
+        }).block
     else
         block;
 
@@ -1263,7 +1269,7 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
             res.status = 404;
             res.body = NO_SUB_MSG;
             return;
-        })
+        }).block
     else
         block;
 
@@ -2772,8 +2778,20 @@ fn writeRoutePanel(
 /// Compact, read-only score line for the embedded per-sub-block preview. Holds
 /// the same `sc-*` spans BOARD_JS's showScore() fills (deltas read "=" since the
 /// baseline is the layout itself) plus the zoom group — no edit buttons.
-fn writeEmbedBar(w: *std.Io.Writer) std.Io.Writer.Error!void {
+/// `module_source` = the sub-block's module name (empty when the sub-block
+/// has no module provenance): renders an "Edit module layout" escape hatch
+/// to the module's own full PCB page, where the spec panel saves into the
+/// module file — the read-only preview stays read-only.
+fn writeEmbedBar(w: *std.Io.Writer, module_source: []const u8) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-bar\">");
+    if (module_source.len > 0 and std.mem.indexOfScalar(u8, module_source, '/') == null and
+        !std.mem.endsWith(u8, module_source, ".sexp"))
+    {
+        try w.writeAll("<a class=\"btn\" target=\"_top\" title=\"Open the module's own PCB page — " ++
+            "its spec panel saves the layout into lib/modules, so every design using it picks the change up\" href=\"/pcb-layout/");
+        try writeAttr(w, module_source);
+        try w.writeAll("\">Edit module layout →</a>");
+    }
     try w.writeAll("<span class=\"score\" id=\"sc-obj\">objective …</span><span class=\"delta\" id=\"sc-obj-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-hpwl\">HPWL …</span><span class=\"delta\" id=\"sc-hpwl-d\"></span>");
     try w.writeAll("<span class=\"score sc-sub\" id=\"sc-loop\">loop …</span><span class=\"delta\" id=\"sc-loop-d\"></span>");

@@ -704,6 +704,10 @@ pub const SubBlock = struct {
     /// "path/to/file.sexp")` it is that project-relative path. Empty when the
     /// sub-block was constructed without source provenance (e.g. tests).
     source: []const u8 = "",
+    /// `(reflow)` marker: opt this instantiation out of module-layout
+    /// composition — the parent's placer re-flows the module's parts freely
+    /// instead of docking the module's own `(placement …)` as a rigid macro.
+    reflow: bool = false,
 };
 
 /// A pin group referencing a top-level instance's pins within a section.

@@ -76,6 +76,9 @@ pub const SpecStatus = struct {
     /// surfaced by the describe endpoint's lint, carried here so the facts and
     /// the image are built from one status object.
     unresolved: []const []const u8 = &.{},
+    /// Sub-block slugs whose module-level `(placement …)` was composed into
+    /// the force solve as a rigid macro (`composeModuleMacros`).
+    composed: []const []const u8 = &.{},
 };
 
 /// Render options: output size, focus-mode highlight sets, optional routed

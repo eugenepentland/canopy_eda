@@ -170,6 +170,9 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "kicad-pcb", .kicad_pcb },
     .{ "function", .function },
     .{ "stub", .stub },
+    // `diagram-layout` is the canonical name (the word "layout" alone now
+    // means PCB placement); `layout` stays a working alias for older files.
+    .{ "diagram-layout", .layout },
     .{ "layout", .layout },
     .{ "placement-order", .placement_order },
     .{ "constraints", .constraints },
@@ -455,8 +458,10 @@ pub const scope_form_docs = blk: {
         .summary = "Visual group annotation rendered in the schematic.",
     } };
     t[@intFromEnum(ScopeForm.sub_block)] = .{ .scope = tl, .doc = .{
-        .syntax = "(sub-block \"name\" (module-call args…))",
-        .summary = "Instantiate a parameterised module inside the design.",
+        .syntax = "(sub-block \"name\" (module-call args…) [(reflow)])",
+        .summary = "Instantiate a parameterised module inside the design. When the module's body " ++
+            "carries its own `(placement …)` spec the parent's PCB solve docks it as a rigid macro; " ++
+            "a `(reflow)` marker opts this instantiation out (parts re-flow freely).",
     } };
     t[@intFromEnum(ScopeForm.verifies)] = .{ .scope = tl, .doc = .{
         .syntax = "(verifies (req \"REF\" REQID) [rationale])",
@@ -492,8 +497,10 @@ pub const scope_form_docs = blk: {
             "N stacked channels — for design-phase diagrams before a real component exists.",
     } };
     t[@intFromEnum(ScopeForm.layout)] = .{ .scope = tl, .doc = .{
-        .syntax = "(layout (anchor \"name\") (place \"name\" (right-of|left-of|above|below \"ref\"))…)",
-        .summary = "Declare a Mermaid-style free-floating block-diagram layout by positioning blocks relative to one another.",
+        .syntax = "(diagram-layout (anchor \"name\") (place \"name\" (right-of|left-of|above|below \"ref\"))…)",
+        .summary = "Position blocks relative to one another on the SCHEMATIC block diagram " ++
+            "(Mermaid-style, free-floating) — nothing to do with PCB placement, which is " ++
+            "`(placement …)` / `(floorplan …)`. `(layout …)` is the legacy alias.",
     } };
     t[@intFromEnum(ScopeForm.placement_order)] = .{ .scope = tl, .doc = .{
         .syntax = "(placement-order \"HUB\" \"REF\"… | (near <pin> \"REF\")…)",
@@ -591,6 +598,12 @@ test "ScopeForm registry covers every variant" {
     try std.testing.expectEqual(ScopeForm.instance, ScopeForm.fromAtom("instance").?);
     try std.testing.expectEqual(ScopeForm.sub_block, ScopeForm.fromAtom("sub-block").?);
     try std.testing.expect(ScopeForm.fromAtom("let") == null);
+}
+
+// spec: eval/forms - diagram-layout is the canonical name for the schematic layout form, layout the alias
+test "diagram-layout aliases the layout scope form" {
+    try std.testing.expectEqual(ScopeForm.layout, ScopeForm.fromAtom("diagram-layout").?);
+    try std.testing.expectEqual(ScopeForm.layout, ScopeForm.fromAtom("layout").?);
 }
 
 // spec: eval/forms - validateArity flags too-few and too-many arguments and accepts in-range counts

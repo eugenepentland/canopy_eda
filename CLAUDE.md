@@ -272,6 +272,18 @@ splices a `(placement …)` form into the defmodule body, so a module's
 layout is authored once in the module file and every design instantiating
 it picks the spec up.
 
+**Module layouts compose into parent boards by default.** When a parent
+design solves on the force path (no design-level `(placement …)` /
+`(floorplan …)`), every first-level sub-block whose module body carries a
+`(placement …)` spec is re-stamped as a RIGID macro centred where the
+force solve put its members (`composeModuleMacros` in
+`src/placement/optimizer.zig`): the solver chooses the global
+arrangement, the module author the internal one. Overlap legalization
+pushes *other* parts away; if it can't converge the pass reverts
+wholesale. `(sub-block "x" (mod …) (reflow))` opts one instantiation out.
+Design-level spec > floorplan > composed module specs > free force solve
+is the full precedence. Composed slugs land in `placementDiag().composed`.
+
 ### Numeric literals with SI suffixes
 
 Bare numbers accept SI scale suffixes and an optional unit letter:
@@ -297,6 +309,14 @@ that instance on the net (the `(pins …)` declarations must appear first);
 `per-pin auto` does the same using the `(decouple-defaults (ic …))` ref. The
 `(decouple-defaults … (bypass …))` component (not the ic) cascades into
 sub-block modules that don't set their own.
+
+### Schematic diagram layout: `(diagram-layout …)`
+
+The free-floating block-diagram arrangement (the schematic page's Layout
+tab) is authored with `(diagram-layout (anchor "x") (place "y"
+(right-of "x")) …)`. **`(layout …)` is the legacy alias** — both parse,
+but prefer `diagram-layout` in new files: the word "layout" alone now
+means PCB placement (`(placement …)`, `(floorplan …)`, `/pcb-layout`).
 
 ### Lint warnings
 
