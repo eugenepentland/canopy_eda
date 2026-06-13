@@ -286,7 +286,11 @@ pub const Client = struct {
     pub fn init(conn: *websocket.Conn, ctx: *const Context) !Client {
         return .{
             .conn = conn,
-            .allocator = ctx.handler.allocator,
+            // The Client outlives the upgrade request, whose handler now
+            // carries a per-request arena — pin the connection's base
+            // allocator to the process allocator (per-message work runs in
+            // its own arena over it in `clientMessage`).
+            .allocator = std.heap.page_allocator,
             .project_dir = ctx.handler.project_dir,
             .email = ctx.email,
         };

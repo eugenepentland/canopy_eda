@@ -398,8 +398,10 @@ pub const Check = union(enum) {
 pub const SeriesKind = enum { R, L, C };
 
 /// Parse `(check (<primitive> ...))` nested inside a `(requirement ...)`
-/// body. Returns null if the form isn't a recognized check.
-pub fn parseCheck(node: ast.Node) ?Check {
+/// body. Returns null if the form isn't a recognized check. Pin-list slices
+/// are allocated from `allocator` and share its lifetime (request arena in
+/// the serve path, evaluator allocator at build time).
+pub fn parseCheck(allocator: std.mem.Allocator, node: ast.Node) ?Check {
     const children = node.asList() orelse return null;
     if (children.len < 2) return null;
     const head = children[0].asAtom() orelse return null;
@@ -460,9 +462,6 @@ pub fn parseCheck(node: ast.Node) ?Check {
         if (pins_form.len < 3) return null;
         const ph = pins_form[0].asAtom() orelse return null;
         if (!std.mem.eql(u8, ph, "pins")) return null;
-        // Allocate the pin slice in the global page allocator — same lifetime
-        // policy as other AST string slices.
-        const allocator = std.heap.page_allocator;
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
         for (pins_form[1..]) |pn| {
             const s = pn.asText() orelse continue;
@@ -484,7 +483,6 @@ pub fn parseCheck(node: ast.Node) ?Check {
         if (pins_form.len < 2) return null;
         const ph = pins_form[0].asAtom() orelse return null;
         if (!std.mem.eql(u8, ph, "pins")) return null;
-        const allocator = std.heap.page_allocator;
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
         for (pins_form[1..]) |pn| {
             const s = pn.asText() orelse continue;

@@ -18,6 +18,11 @@ var mu: std.Thread.Mutex = .{};
 var tokens_list: std.ArrayListUnmanaged(Token) = .empty;
 var loaded_auth_dir: ?[]const u8 = null;
 
+// Tokens persist in the module-global `tokens_list` for the life of the
+// process — callers pass a per-request arena, so stored strings must come
+// from the process allocator.
+const store_alloc = std.heap.page_allocator;
+
 fn tokensPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/plugin_tokens.json", .{auth_dir});
 }
@@ -44,9 +49,9 @@ fn load(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     const parsed = std.json.parseFromSlice([]const Entry, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch return;
     defer parsed.deinit();
     for (parsed.value) |e| {
-        tokens_list.append(allocator, .{
-            .hash = allocator.dupe(u8, e.hash) catch continue,
-            .label = allocator.dupe(u8, e.label) catch continue,
+        tokens_list.append(store_alloc, .{
+            .hash = store_alloc.dupe(u8, e.hash) catch continue,
+            .label = store_alloc.dupe(u8, e.label) catch continue,
             .created_at = e.created_at,
         }) catch continue;
     }
@@ -84,10 +89,10 @@ pub fn mint(allocator: std.mem.Allocator, auth_dir: []const u8, label: []const u
     const suffix = try randomHex(allocator, 32);
     defer allocator.free(suffix);
     const raw = try std.fmt.allocPrint(allocator, "eda_p_{s}", .{suffix});
-    const hash = try sha256Hex(allocator, raw);
-    try tokens_list.append(allocator, .{
+    const hash = try sha256Hex(store_alloc, raw);
+    try tokens_list.append(store_alloc, .{
         .hash = hash,
-        .label = try allocator.dupe(u8, label),
+        .label = try store_alloc.dupe(u8, label),
         .created_at = clock.timestamp(),
     });
     save(allocator, auth_dir);

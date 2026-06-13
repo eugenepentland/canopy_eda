@@ -187,7 +187,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
             for (cl[2..]) |extra| {
                 if (env_mod.parseNoteRef(extra)) |r| {
                     ref = r;
-                } else if (env_mod.parseCheck(extra)) |c| {
+                } else if (env_mod.parseCheck(self.allocator, extra)) |c| {
                     chk = c;
                 } else if (extra.asList()) |sub| {
                     if (sub.len >= 2) {

@@ -470,7 +470,7 @@ pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(ctx.allocator);
-    try bom_html.writeBomCsv(w, block);
+    try bom_html.writeBomCsv(ctx.allocator, w, block);
 
     const disposition = std.fmt.allocPrint(ctx.allocator, "attachment; filename=\"{s}-bom.csv\"", .{name}) catch {
         res.status = HTTP_INTERNAL_ERROR;
@@ -541,7 +541,7 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
 
     // Render BOM CSV.
     var csv_buf: std.ArrayListUnmanaged(u8) = .empty;
-    bom_html.writeBomCsv(csv_buf.writer(ctx.allocator), block) catch {
+    bom_html.writeBomCsv(ctx.allocator, csv_buf.writer(ctx.allocator), block) catch {
         res.status = HTTP_INTERNAL_ERROR;
         res.body = "BOM CSV error";
         return;
@@ -804,7 +804,7 @@ pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     try w.writeAll("{\"components\":{");
     _ = try bom_html.writeComponentsJson(w, block, "", &sym_cache, ctx.allocator, ctx.project_dir);
     try w.writeAll("},\"nets\":{");
-    _ = try bom_html.writeNetsJson(w, block, "");
+    _ = try bom_html.writeNetsJson(ctx.allocator, w, block, "");
     try w.writeAll("}}");
 
     res.body = try ctx.allocator.dupe(u8, buf.items);
