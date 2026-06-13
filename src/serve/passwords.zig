@@ -30,6 +30,11 @@ var mu: std.Thread.Mutex = .{};
 var rows: std.ArrayListUnmanaged(PasswordRow) = .empty;
 var loaded_auth_dir: ?[]const u8 = null;
 
+// Rows live in the module-global `rows` for the life of the process —
+// callers pass a per-request arena, so anything persisted must be duped
+// into the process allocator instead.
+const store_alloc = std.heap.page_allocator;
+
 fn passwordsPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/passwords.json", .{auth_dir});
 }
@@ -56,9 +61,9 @@ fn load(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     const parsed = std.json.parseFromSlice([]const Entry, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch return;
     defer parsed.deinit();
     for (parsed.value) |e| {
-        rows.append(allocator, .{
-            .email = allocator.dupe(u8, e.email) catch continue,
-            .hash = allocator.dupe(u8, e.hash) catch continue,
+        rows.append(store_alloc, .{
+            .email = store_alloc.dupe(u8, e.email) catch continue,
+            .hash = store_alloc.dupe(u8, e.hash) catch continue,
             .updated_at = e.updated_at,
         }) catch continue;
     }
@@ -115,7 +120,7 @@ pub fn set(
         .params = scrypt.Params.interactive,
         .encoding = .phc,
     }, &hash_buf);
-    const hash_dup = try allocator.dupe(u8, hash_str);
+    const hash_dup = try store_alloc.dupe(u8, hash_str);
     const now = clock.timestamp();
 
     if (indexOfEmailLocked(email)) |idx| {
@@ -125,8 +130,8 @@ pub fn set(
         rows.items[idx].hash = hash_dup;
         rows.items[idx].updated_at = now;
     } else {
-        try rows.append(allocator, .{
-            .email = try allocator.dupe(u8, email),
+        try rows.append(store_alloc, .{
+            .email = try store_alloc.dupe(u8, email),
             .hash = hash_dup,
             .updated_at = now,
         });

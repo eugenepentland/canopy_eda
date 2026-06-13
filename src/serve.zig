@@ -233,9 +233,23 @@ pub const Handler = struct {
         req: *httpz.Request,
         res: *httpz.Response,
     ) !void {
+        // Hand the route handler a request-scoped view of the Handler whose
+        // allocator is httpz's per-request arena (reset after the response is
+        // written). Every per-request allocation — evaluator state, rendered
+        // HTML, scene graphs, PNG canvases — dies with the request instead of
+        // accumulating in the process allocator for the life of the server
+        // (the old behaviour leaked MBs per page view until OOM). Anything
+        // that must outlive the request (live versions, regen-job frames,
+        // auth/oauth stores, the MCP websocket client) dupes into
+        // page_allocator internally and was audited to do so.
+        var req_handler = Handler{
+            .allocator = res.arena,
+            .project_dir = self.project_dir,
+            .auth_dir = self.auth_dir,
+        };
         // Auth middleware: check before dispatching to route handler
-        if (!try auth.authMiddleware(self, req, res)) return;
-        return action(self, req, res);
+        if (!try auth.authMiddleware(&req_handler, req, res)) return;
+        return action(&req_handler, req, res);
     }
 
     pub fn notFound(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {

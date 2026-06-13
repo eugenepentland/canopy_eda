@@ -204,7 +204,7 @@ pub const RenderCtx = struct {
     /// Resolve a net name through a chain of rename maps (parent → grandparent → ...).
     /// For qualified names like "ldo/VIN.U1.IN", also tries resolving the base
     /// part "ldo/VIN" and preserves the suffix ".U1.IN".
-    fn resolveNetName(net_name: []const u8, rename_maps: []const std.StringHashMap([]const u8)) []const u8 {
+    fn resolveNetName(allocator: std.mem.Allocator, net_name: []const u8, rename_maps: []const std.StringHashMap([]const u8)) []const u8 {
         // Try exact match first
         var resolved = net_name;
         for (rename_maps) |m| {
@@ -230,7 +230,7 @@ pub const RenderCtx = struct {
                 if (!std.mem.eql(u8, base_resolved, base)) {
                     // Concatenate resolved base + suffix
                     return std.fmt.allocPrint(
-                        std.heap.page_allocator,
+                        allocator,
                         "{s}{s}",
                         .{ base_resolved, suffix },
                     ) catch net_name;
@@ -293,7 +293,7 @@ pub const RenderCtx = struct {
             else
                 net.name;
             // Apply cross-block net rename through all ancestor rename maps
-            net_name = resolveNetName(net_name, all_renames.items);
+            net_name = resolveNetName(self.allocator, net_name, all_renames.items);
             try self.nets.append(self.allocator, .{
                 .name = net_name,
                 .pins = try pins.toOwnedSlice(self.allocator),

@@ -475,7 +475,7 @@ pub fn cmdExportReview(allocator: std.mem.Allocator, args: []const []const u8) C
     const md = try review_md.renderToMarkdown(allocator, block, project_dir, name, doc, source, &check_results);
 
     var csv_buf: std.ArrayListUnmanaged(u8) = .empty;
-    try bom_html.writeBomCsv(csv_buf.writer(allocator), block);
+    try bom_html.writeBomCsv(allocator, csv_buf.writer(allocator), block);
 
     try infra_fs.cwd().makePath(output_dir);
     const md_name = try std.fmt.allocPrint(allocator, "{s}-review.md", .{name});

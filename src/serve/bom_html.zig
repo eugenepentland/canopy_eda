@@ -111,10 +111,10 @@ pub fn collectMissing(
 /// page: groups instances by `(component, value, footprint, attrs)`,
 /// surfaces every `Property` key as a badge, and emits no embedded JS —
 /// the schematic page's own scripts own the click handlers.
-pub fn writeSchematicBomHtml(wr: anytype, block: *const env_mod.DesignBlock) BomError!void {
+pub fn writeSchematicBomHtml(allocator: std.mem.Allocator, wr: anytype, block: *const env_mod.DesignBlock) BomError!void {
     const Instance = env_mod.Instance;
     var all: std.ArrayListUnmanaged(Instance) = .empty;
-    try bomCollectInstancesHierarchical(std.heap.page_allocator, block, "", &all);
+    try bomCollectInstancesHierarchical(allocator, block, "", &all);
     if (all.items.len == 0) return;
 
     const BomLine = struct {
@@ -141,15 +141,15 @@ pub fn writeSchematicBomHtml(wr: anytype, block: *const env_mod.DesignBlock) Bom
                 attrsEqual(line.attrs, inst.attrs))
             {
                 line.count += 1;
-                try line.refs.append(std.heap.page_allocator, inst.ref_des);
+                try line.refs.append(allocator, inst.ref_des);
                 found = true;
                 break;
             }
         }
         if (!found) {
             var refs: std.ArrayListUnmanaged([]const u8) = .empty;
-            try refs.append(std.heap.page_allocator, inst.ref_des);
-            try lines.append(std.heap.page_allocator, .{
+            try refs.append(allocator, inst.ref_des);
+            try lines.append(allocator, .{
                 .component = inst.component,
                 .value = inst.value,
                 .footprint = inst.footprint,
@@ -213,8 +213,8 @@ pub fn writeSchematicBomHtml(wr: anytype, block: *const env_mod.DesignBlock) Bom
         try wr.writeAll("</td>");
 
         // refs joined for the data-ref payload.
-        const refs_csv = try joinRefs(std.heap.page_allocator, line.refs.items);
-        defer std.heap.page_allocator.free(refs_csv);
+        const refs_csv = try joinRefs(allocator, line.refs.items);
+        defer allocator.free(refs_csv);
 
         // MPN — editable. data-ref carries every ref-des in the group; the
         // JS save handler iterates and POSTs once per ref.
@@ -275,10 +275,10 @@ fn joinRefs(allocator: std.mem.Allocator, refs: []const []const u8) ![]u8 {
 /// Emit the parts list as CSV (component, value, footprint, count, refs,
 /// then any extra `attrs` columns). Used by `exportBomCsvApi` and the
 /// review-package zip exporter.
-pub fn writeBomCsv(w: anytype, block: *const env_mod.DesignBlock) BomError!void {
+pub fn writeBomCsv(allocator: std.mem.Allocator, w: anytype, block: *const env_mod.DesignBlock) BomError!void {
     const Instance = env_mod.Instance;
     var all: std.ArrayListUnmanaged(Instance) = .empty;
-    try bomCollectInstances(block, &all);
+    try bomCollectInstances(allocator, block, &all);
     if (all.items.len == 0) return;
 
     const BomLine = struct {
@@ -305,15 +305,15 @@ pub fn writeBomCsv(w: anytype, block: *const env_mod.DesignBlock) BomError!void 
                 attrsEqual(line.attrs, inst.attrs))
             {
                 line.count += 1;
-                try line.refs.append(std.heap.page_allocator, inst.ref_des);
+                try line.refs.append(allocator, inst.ref_des);
                 found = true;
                 break;
             }
         }
         if (!found) {
             var refs: std.ArrayListUnmanaged([]const u8) = .empty;
-            try refs.append(std.heap.page_allocator, inst.ref_des);
-            try lines.append(std.heap.page_allocator, .{
+            try refs.append(allocator, inst.ref_des);
+            try lines.append(allocator, .{
                 .component = inst.component,
                 .value = inst.value,
                 .footprint = inst.footprint,
@@ -394,12 +394,12 @@ fn writeCsvField(w: anytype, field: []const u8) !void {
     }
 }
 
-fn bomCollectInstances(block: *const env_mod.DesignBlock, out: *std.ArrayListUnmanaged(env_mod.Instance)) !void {
+fn bomCollectInstances(allocator: std.mem.Allocator, block: *const env_mod.DesignBlock, out: *std.ArrayListUnmanaged(env_mod.Instance)) !void {
     for (block.instances) |inst| {
-        try out.append(std.heap.page_allocator, inst);
+        try out.append(allocator, inst);
     }
     for (block.sub_blocks) |sb| {
-        try bomCollectInstances(sb.block, out);
+        try bomCollectInstances(allocator, sb.block, out);
     }
 }
 
@@ -417,7 +417,7 @@ fn bomCollectInstancesHierarchical(
     for (block.instances) |inst| {
         var copy = inst;
         if (prefix.len > 0) copy.ref_des = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, inst.ref_des });
-        try out.append(std.heap.page_allocator, copy);
+        try out.append(allocator, copy);
     }
     for (block.sub_blocks) |sb| {
         const child_prefix = if (prefix.len > 0)
@@ -634,9 +634,7 @@ fn baseNetName(name: []const u8) []const u8 {
 /// Emit a `{ "<net>": [{ref_des, pin}, …], … }` object grouping every pin
 /// reference by its base net name, applying `net_ties` to merge sub-block
 /// nets into the parent's name (so `ldo/VIN` collapses into `VDD`).
-pub fn writeNetsJson(w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8) BomError!bool {
-    const allocator = std.heap.page_allocator;
-
+pub fn writeNetsJson(allocator: std.mem.Allocator, w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8) BomError!bool {
     // Build rename map from net_ties: "sb_name/port" → "parent_net"
     var rename = std.StringHashMap([]const u8).init(allocator);
     for (block.net_ties) |nt| {

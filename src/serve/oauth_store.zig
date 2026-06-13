@@ -65,6 +65,12 @@ var loaded_auth_dir: ?[]const u8 = null;
 var clients_file_was_nonempty: bool = false;
 var tokens_file_was_nonempty: bool = false;
 
+// Everything held in the module-global lists/maps above outlives any single
+// request — handlers call in with a per-request arena, so persistent rows,
+// codes, and the containers themselves are allocated from the process
+// allocator instead of the caller's.
+const store_alloc = std.heap.page_allocator;
+
 fn ensureLoaded(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     if (loaded_auth_dir) |d| {
         if (std.mem.eql(u8, d, auth_dir)) return;
@@ -76,18 +82,18 @@ fn ensureLoaded(allocator: std.mem.Allocator, auth_dir: []const u8) void {
         // file" rather than "merge two files into a duplicated mess that
         // then writes back."
         for (clients_list.items) |c| {
-            allocator.free(@constCast(c.id));
-            allocator.free(@constCast(c.secret_hash));
-            allocator.free(@constCast(c.name));
-            allocator.free(@constCast(c.email));
-            allocator.free(@constCast(c.redirect_uri));
+            store_alloc.free(@constCast(c.id));
+            store_alloc.free(@constCast(c.secret_hash));
+            store_alloc.free(@constCast(c.name));
+            store_alloc.free(@constCast(c.email));
+            store_alloc.free(@constCast(c.redirect_uri));
         }
         clients_list.clearRetainingCapacity();
         for (tokens_list.items) |t| {
-            allocator.free(@constCast(t.hash));
-            allocator.free(@constCast(t.client_id));
-            allocator.free(@constCast(t.email));
-            allocator.free(@constCast(t.scope));
+            store_alloc.free(@constCast(t.hash));
+            store_alloc.free(@constCast(t.client_id));
+            store_alloc.free(@constCast(t.email));
+            store_alloc.free(@constCast(t.scope));
         }
         tokens_list.clearRetainingCapacity();
         clients_file_was_nonempty = false;
@@ -96,7 +102,7 @@ fn ensureLoaded(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     loaded_auth_dir = auth_dir;
     loadClients(allocator, auth_dir);
     loadTokens(allocator, auth_dir);
-    if (codes_map == null) codes_map = std.StringHashMap(AuthCode).init(allocator);
+    if (codes_map == null) codes_map = std.StringHashMap(AuthCode).init(store_alloc);
 }
 
 fn clientsPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
@@ -140,12 +146,12 @@ fn loadClients(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     };
     defer parsed.deinit();
     for (parsed.value) |e| {
-        clients_list.append(allocator, .{
-            .id = allocator.dupe(u8, e.id) catch continue,
-            .secret_hash = allocator.dupe(u8, e.secret_hash) catch continue,
-            .name = allocator.dupe(u8, e.name) catch continue,
-            .email = allocator.dupe(u8, e.email) catch continue,
-            .redirect_uri = allocator.dupe(u8, e.redirect_uri) catch continue,
+        clients_list.append(store_alloc, .{
+            .id = store_alloc.dupe(u8, e.id) catch continue,
+            .secret_hash = store_alloc.dupe(u8, e.secret_hash) catch continue,
+            .name = store_alloc.dupe(u8, e.name) catch continue,
+            .email = store_alloc.dupe(u8, e.email) catch continue,
+            .redirect_uri = store_alloc.dupe(u8, e.redirect_uri) catch continue,
             .created_at = e.created_at,
             .revoked = e.revoked,
         }) catch continue;
@@ -210,11 +216,11 @@ fn loadTokens(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     const now = clock.timestamp();
     for (parsed.value) |e| {
         if (e.expires_at < now) continue;
-        tokens_list.append(allocator, .{
-            .hash = allocator.dupe(u8, e.hash) catch continue,
-            .client_id = allocator.dupe(u8, e.client_id) catch continue,
-            .email = allocator.dupe(u8, e.email) catch continue,
-            .scope = allocator.dupe(u8, e.scope) catch continue,
+        tokens_list.append(store_alloc, .{
+            .hash = store_alloc.dupe(u8, e.hash) catch continue,
+            .client_id = store_alloc.dupe(u8, e.client_id) catch continue,
+            .email = store_alloc.dupe(u8, e.email) catch continue,
+            .scope = store_alloc.dupe(u8, e.scope) catch continue,
             .expires_at = e.expires_at,
         }) catch continue;
     }
@@ -318,20 +324,22 @@ pub fn createClient(
 
     const id_suffix = try randomHex(allocator, 16);
     defer allocator.free(id_suffix);
-    const id = try std.fmt.allocPrint(allocator, "eda_c_{s}", .{id_suffix});
+    // `id` is both stored and returned — allocate it from the store so the
+    // persisted row survives the caller's request arena.
+    const id = try std.fmt.allocPrint(store_alloc, "eda_c_{s}", .{id_suffix});
 
     const secret_suffix = try randomHex(allocator, 32);
     defer allocator.free(secret_suffix);
     const secret = try std.fmt.allocPrint(allocator, "eda_s_{s}", .{secret_suffix});
 
-    const secret_hash = try sha256Hex(allocator, secret);
+    const secret_hash = try sha256Hex(store_alloc, secret);
 
-    try clients_list.append(allocator, .{
+    try clients_list.append(store_alloc, .{
         .id = id,
         .secret_hash = secret_hash,
-        .name = try allocator.dupe(u8, name),
-        .email = try allocator.dupe(u8, email),
-        .redirect_uri = try allocator.dupe(u8, redirect_uri),
+        .name = try store_alloc.dupe(u8, name),
+        .email = try store_alloc.dupe(u8, email),
+        .redirect_uri = try store_alloc.dupe(u8, redirect_uri),
         .created_at = clock.timestamp(),
         .revoked = false,
     });
@@ -377,8 +385,8 @@ pub fn claimClient(allocator: std.mem.Allocator, auth_dir: []const u8, id: []con
     for (clients_list.items) |*c| {
         if (!std.mem.eql(u8, c.id, id)) continue;
         if (c.email.len != 0) return; // already owned
-        const dup = allocator.dupe(u8, owner_email) catch return;
-        allocator.free(@constCast(c.email));
+        const dup = store_alloc.dupe(u8, owner_email) catch return;
+        store_alloc.free(@constCast(c.email));
         c.email = dup;
         changed = true;
         break;
@@ -454,14 +462,14 @@ pub fn issueCode(
     defer mu.unlock();
     ensureLoaded(allocator, auth_dir);
 
-    const code = try randomHex(allocator, 32);
+    const code = try randomHex(store_alloc, 32);
     const entry = AuthCode{
         .code = code,
-        .client_id = try allocator.dupe(u8, client_id),
-        .redirect_uri = try allocator.dupe(u8, redirect_uri),
-        .email = try allocator.dupe(u8, email),
-        .code_challenge = try allocator.dupe(u8, code_challenge),
-        .scope = try allocator.dupe(u8, scope),
+        .client_id = try store_alloc.dupe(u8, client_id),
+        .redirect_uri = try store_alloc.dupe(u8, redirect_uri),
+        .email = try store_alloc.dupe(u8, email),
+        .code_challenge = try store_alloc.dupe(u8, code_challenge),
+        .scope = try store_alloc.dupe(u8, scope),
         .expires_at = clock.timestamp() + AUTH_CODE_TTL_SECS,
     };
     try codes_map.?.put(code, entry);
@@ -499,13 +507,13 @@ pub fn issueToken(
     const raw_suffix = try randomHex(allocator, 32);
     defer allocator.free(raw_suffix);
     const raw = try std.fmt.allocPrint(allocator, "eda_t_{s}", .{raw_suffix});
-    const hash = try sha256Hex(allocator, raw);
+    const hash = try sha256Hex(store_alloc, raw);
 
-    try tokens_list.append(allocator, .{
+    try tokens_list.append(store_alloc, .{
         .hash = hash,
-        .client_id = try allocator.dupe(u8, client_id),
-        .email = try allocator.dupe(u8, email),
-        .scope = try allocator.dupe(u8, scope),
+        .client_id = try store_alloc.dupe(u8, client_id),
+        .email = try store_alloc.dupe(u8, email),
+        .scope = try store_alloc.dupe(u8, scope),
         .expires_at = clock.timestamp() + ACCESS_TOKEN_TTL_SECS,
     });
     saveTokens(allocator, auth_dir);

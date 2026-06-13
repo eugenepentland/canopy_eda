@@ -92,7 +92,7 @@ pub fn describeComponent(
     defer freeLoadedPinout(allocator, loaded);
 
     const w = out.writer(allocator);
-    try writeComponentJson(w, name, info, datasheets.items, loaded, root_children[2..]);
+    try writeComponentJson(allocator, w, name, info, datasheets.items, loaded, root_children[2..]);
     return true;
 }
 
@@ -299,6 +299,7 @@ fn parsePinoutBody(allocator: std.mem.Allocator, src: []const u8) !?[]PinEntry {
 /// check kind — no risk of label drift between describe_component and the
 /// build-time review.
 fn writeComponentJson(
+    allocator: std.mem.Allocator,
     w: anytype,
     requested_name: []const u8,
     info: ComponentInfo,
@@ -370,12 +371,12 @@ fn writeComponentJson(
         if (cl.len < 2) continue;
         if (!req_first) try w.writeAll(",");
         req_first = false;
-        try writeRequirementJson(w, cl);
+        try writeRequirementJson(allocator, w, cl);
     }
     try w.writeAll("]}");
 }
 
-fn writeRequirementJson(w: anytype, cl: []const ast.Node) !void {
+fn writeRequirementJson(allocator: std.mem.Allocator, w: anytype, cl: []const ast.Node) !void {
     const text = if (cl.len >= 2) (cl[1].asString() orelse cl[1].asAtom() orelse "") else "";
     try w.writeAll("{\"id\":");
     var id_buf: [8]u8 = undefined;
@@ -395,7 +396,7 @@ fn writeRequirementJson(w: anytype, cl: []const ast.Node) !void {
             ref_page = ref.page;
             if (ref.quote) |q| ref_quote = q;
         } else if (sub.isForm("check")) {
-            if (env_mod.parseCheck(sub)) |c| check = c;
+            if (env_mod.parseCheck(allocator, sub)) |c| check = c;
         }
     }
 
@@ -544,7 +545,7 @@ fn checkClauseValid(allocator: std.mem.Allocator, cs: []const u8) bool {
     defer sexpr_parser.freeNodes(allocator, nodes);
     if (nodes.len != 1) return false;
     if (!nodes[0].isForm("check")) return false;
-    return env_mod.parseCheck(nodes[0]) != null;
+    return env_mod.parseCheck(allocator, nodes[0]) != null;
 }
 
 /// Byte index of the `)` that closes the top-level form — the last `)` in
@@ -659,7 +660,7 @@ pub fn listRequirements(
         if (cl.len < 2) continue;
         if (!first) try w.writeAll(",");
         first = false;
-        try writeRequirementJson(w, cl);
+        try writeRequirementJson(allocator, w, cl);
     }
     try w.writeAll("]}");
     return true;

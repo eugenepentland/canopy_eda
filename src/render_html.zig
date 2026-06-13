@@ -147,7 +147,7 @@ pub fn renderToHtml(
             "<span class=\"sch-card-sub muted\">{d} unique · {d} total parts</span></summary>",
         .{ bom_counts.unique, bom_counts.total },
     );
-    try bom_html.writeSchematicBomHtml(w, block);
+    try bom_html.writeSchematicBomHtml(allocator, w, block);
     try w.writeAll("</details>");
 
     // Design notes — structured TODO list backed by `<design>.notes.md`.

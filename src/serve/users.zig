@@ -51,6 +51,11 @@ var mu = std.Thread.Mutex{};
 var users_list: std.ArrayListUnmanaged(User) = .empty;
 var loaded_auth_dir: ?[]const u8 = null;
 
+// Everything stored in the module-global `users_list` must outlive any single
+// request — handlers call in with a per-request arena, so persistent rows are
+// allocated from the process allocator instead of the caller's.
+const store_alloc = std.heap.page_allocator;
+
 fn usersPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/users.json", .{auth_dir});
 }
@@ -75,8 +80,8 @@ fn loadUsers(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     defer parsed.deinit();
     for (parsed.value) |e| {
         const role = Role.fromString(e.role) orelse .reader;
-        users_list.append(allocator, .{
-            .email = allocator.dupe(u8, e.email) catch continue,
+        users_list.append(store_alloc, .{
+            .email = store_alloc.dupe(u8, e.email) catch continue,
             .role = role,
             .created_at = e.created_at,
         }) catch continue;
@@ -117,8 +122,8 @@ fn backfillFromCredentials(allocator: std.mem.Allocator, auth_dir: []const u8) v
         if (c.email.len == 0) continue;
         if (indexOfEmailLocked(c.email) != null) continue;
         const role: Role = if (users_list.items.len == 0) .admin else .writer;
-        users_list.append(allocator, .{
-            .email = allocator.dupe(u8, c.email) catch continue,
+        users_list.append(store_alloc, .{
+            .email = store_alloc.dupe(u8, c.email) catch continue,
             .role = role,
             .created_at = c.created_at,
         }) catch continue;
@@ -152,8 +157,8 @@ pub fn ensureUser(
 
     // First-ever user becomes admin regardless of requested_role (bootstrap).
     const role: Role = if (users_list.items.len == 0) .admin else requested_role;
-    try users_list.append(allocator, .{
-        .email = try allocator.dupe(u8, email),
+    try users_list.append(store_alloc, .{
+        .email = try store_alloc.dupe(u8, email),
         .role = role,
         .created_at = clock.timestamp(),
     });

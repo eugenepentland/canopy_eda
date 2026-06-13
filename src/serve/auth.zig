@@ -94,9 +94,14 @@ var sessions_mutex: std.Thread.Mutex = .{};
 var sessions: ?std.StringHashMap(SessionData) = null;
 var sessions_auth_dir: ?[]const u8 = null;
 
+// The session map outlives every request — handlers call in with a
+// per-request arena, so the map itself and every token/email stored in it
+// must come from the process allocator instead.
+const store_alloc = std.heap.page_allocator;
+
 fn getSessionMap(allocator: std.mem.Allocator, auth_dir: []const u8) *std.StringHashMap(SessionData) {
     if (sessions == null) {
-        sessions = std.StringHashMap(SessionData).init(allocator);
+        sessions = std.StringHashMap(SessionData).init(store_alloc);
         sessions_auth_dir = auth_dir;
         // Load persisted sessions
         loadSessions(allocator, auth_dir);
@@ -120,8 +125,8 @@ fn loadSessions(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     for (parsed.value) |entry| {
         if (entry.email.len == 0) continue; // Drop legacy sessions without identity
         if (now < entry.expiry) {
-            const token_dup = allocator.dupe(u8, entry.token) catch continue;
-            const email_dup = allocator.dupe(u8, entry.email) catch continue;
+            const token_dup = store_alloc.dupe(u8, entry.token) catch continue;
+            const email_dup = store_alloc.dupe(u8, entry.email) catch continue;
             sessions.?.put(token_dup, .{ .email = email_dup, .expiry = entry.expiry }) catch continue;
         }
     }
@@ -156,8 +161,8 @@ pub fn createSession(allocator: std.mem.Allocator, auth_dir: []const u8, email: 
     var rand_bytes: [32]u8 = undefined;
     infra_random.bytes(&rand_bytes);
     const hex = std.fmt.bytesToHex(rand_bytes, .lower);
-    const token = try allocator.dupe(u8, &hex);
-    const email_dup = try allocator.dupe(u8, email);
+    const token = try store_alloc.dupe(u8, &hex);
+    const email_dup = try store_alloc.dupe(u8, email);
 
     const now = clock.timestamp();
     const expiry = now + SESSION_TTL_SECS;
