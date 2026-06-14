@@ -65,6 +65,11 @@ pub const Value = union(enum) {
 pub const ModuleDef = struct {
     name: []const u8,
     params: []const []const u8,
+    /// Per-parameter default expression, parallel to `params`. A `(param
+    /// default)` pair in the defmodule parameter list stores the default's
+    /// AST here; it is evaluated at call time only when the caller omits the
+    /// argument. Null = required parameter.
+    defaults: []const ?ast.Node,
     body: []const ast.Node,
     /// Import scope from the module file
     imports: *Env,
@@ -697,6 +702,10 @@ pub const SubBlock = struct {
     /// "path/to/file.sexp")` it is that project-relative path. Empty when the
     /// sub-block was constructed without source provenance (e.g. tests).
     source: []const u8 = "",
+    /// `(reflow)` marker: opt this instantiation out of module-layout
+    /// composition — the parent's placer re-flows the module's parts freely
+    /// instead of docking the module's own `(placement …)` as a rigid macro.
+    reflow: bool = false,
 };
 
 /// A pin group referencing a top-level instance's pins within a section.

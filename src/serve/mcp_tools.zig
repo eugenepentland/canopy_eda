@@ -1597,26 +1597,25 @@ fn runChecks(
     changed_since: ?[]const u8,
     w: anytype,
 ) !bool {
-    const path = try paths.designSourcePath(allocator, project_dir, name);
-    defer allocator.free(path);
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
-    const result = eval.evalFile(path) catch {
-        try w.writeAll(ERR_BUILD_FAILED);
-        return false;
-    };
-
-    const block: *env_mod.DesignBlock = switch (result) {
-        .design_block => |db| db,
-        else => {
+    const nb = evalNamedBlock(allocator, project_dir, name, &eval) catch |e| switch (e) {
+        error.NotADesign => {
             try w.writeAll(ERR_NOT_DESIGN);
             return false;
         },
+        else => {
+            try w.writeAll(ERR_BUILD_FAILED);
+            return false;
+        },
     };
+    const block = nb.block;
 
-    const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
-    defer allocator.free(bom_path);
-    bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
+    if (!nb.is_module) {
+        const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
+        defer allocator.free(bom_path);
+        bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
+    }
 
     // If changed_since is set, compute the symmetric-difference sets of
     // ref_des and net names between the prior snapshot and the current
@@ -1675,7 +1674,7 @@ fn runChecks(
     }
 
     try w.writeAll(",\"erc\":[");
-    const erc_all = try erc_mod.runErc(allocator, block, project_dir);
+    const erc_all = try runErcForNamedBlock(allocator, nb, project_dir);
     var first = true;
     for (erc_all) |v| {
         if (severity_filter) |sf| if (!std.mem.eql(u8, @tagName(v.severity), sf)) continue;
@@ -1701,28 +1700,27 @@ fn generateReview(
     name: []const u8,
     w: anytype,
 ) !bool {
-    const path = try paths.designSourcePath(allocator, project_dir, name);
-    defer allocator.free(path);
-
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
-    const result = eval.evalFile(path) catch {
-        try w.writeAll(ERR_BUILD_FAILED);
-        return false;
-    };
-    const block: *const env_mod.DesignBlock = switch (result) {
-        .design_block => |b| b,
-        else => {
+    const nb = evalNamedBlock(allocator, project_dir, name, &eval) catch |e| switch (e) {
+        error.NotADesign => {
             try w.writeAll(ERR_NOT_DESIGN);
             return false;
         },
+        else => {
+            try w.writeAll(ERR_BUILD_FAILED);
+            return false;
+        },
     };
+    const block = nb.block;
 
-    const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
-    defer allocator.free(bom_path);
-    bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
+    if (!nb.is_module) {
+        const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
+        defer allocator.free(bom_path);
+        bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
+    }
 
-    const violations = try erc_mod.runErc(allocator, block, project_dir);
+    const violations = try runErcForNamedBlock(allocator, nb, project_dir);
     var check_results = req_checks.runChecks(allocator, &eval, block) catch
         std.StringHashMapUnmanaged([]req_checks.Result).empty;
     req_checks.applyVerifications(&check_results, block, block.instances);
@@ -1826,21 +1824,19 @@ fn listInstances(
     name: []const u8,
     w: anytype,
 ) !bool {
-    const path = try paths.designSourcePath(allocator, project_dir, name);
-    defer allocator.free(path);
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
-    const result = eval.evalFile(path) catch {
-        try w.writeAll(ERR_BUILD_FAILED);
-        return false;
-    };
-    const block: *const env_mod.DesignBlock = switch (result) {
-        .design_block => |b| b,
-        else => {
+    const nb = evalNamedBlock(allocator, project_dir, name, &eval) catch |e| switch (e) {
+        error.NotADesign => {
             try w.writeAll(ERR_NOT_DESIGN);
             return false;
         },
+        else => {
+            try w.writeAll(ERR_BUILD_FAILED);
+            return false;
+        },
     };
+    const block = nb.block;
 
     try w.writeAll("{\"instances\":[");
     for (block.instances, 0..) |inst, i| {
@@ -1881,21 +1877,19 @@ pub fn listFreePins(
     filter: ?[]const u8,
     w: anytype,
 ) ToolError!bool {
-    const path = try paths.designSourcePath(allocator, project_dir, name);
-    defer allocator.free(path);
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
-    const result = eval.evalFile(path) catch {
-        try w.writeAll(ERR_BUILD_FAILED);
-        return false;
-    };
-    const block: *const env_mod.DesignBlock = switch (result) {
-        .design_block => |b| b,
-        else => {
+    const nb = evalNamedBlock(allocator, project_dir, name, &eval) catch |e| switch (e) {
+        error.NotADesign => {
             try w.writeAll(ERR_NOT_DESIGN);
             return false;
         },
+        else => {
+            try w.writeAll(ERR_BUILD_FAILED);
+            return false;
+        },
     };
+    const block = nb.block;
 
     var target: ?*const env_mod.Instance = null;
     for (block.instances) |*inst| {
@@ -1985,21 +1979,19 @@ fn getNet(
     net_name: []const u8,
     w: anytype,
 ) !bool {
-    const path = try paths.designSourcePath(allocator, project_dir, name);
-    defer allocator.free(path);
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
-    const result = eval.evalFile(path) catch {
-        try w.writeAll(ERR_BUILD_FAILED);
-        return false;
-    };
-    const block: *const env_mod.DesignBlock = switch (result) {
-        .design_block => |b| b,
-        else => {
+    const nb = evalNamedBlock(allocator, project_dir, name, &eval) catch |e| switch (e) {
+        error.NotADesign => {
             try w.writeAll(ERR_NOT_DESIGN);
             return false;
         },
+        else => {
+            try w.writeAll(ERR_BUILD_FAILED);
+            return false;
+        },
     };
+    const block = nb.block;
 
     var target: ?*const env_mod.Net = null;
     for (block.nets) |*n| {
@@ -2209,6 +2201,10 @@ pub const DesignSummary = struct {
     /// home dashboard's red/yellow status chips.
     erc_errors: usize = 0,
     erc_warnings: usize = 0,
+    /// Distinct lib/modules names instantiated anywhere in the design's
+    /// sub-block tree. Lets the home page show "used by …" on module cards
+    /// without re-evaluating every design a second time.
+    modules_used: []const []const u8 = &.{},
     /// Failed (non-warning) `(assert …)` results from the evaluation.
     assert_fails: usize = 0,
     /// Still-open tasks in the design's `.notes.md` sidecar.
@@ -2332,6 +2328,10 @@ pub fn listDesignSummaries(
                 for (eval.assertions.items) |a| {
                     if (!a.passed and !a.is_warning) summary.assert_fails += 1;
                 }
+
+                var used: std.ArrayListUnmanaged([]const u8) = .empty;
+                try collectModuleUses(allocator, block, &used);
+                summary.modules_used = try used.toOwnedSlice(allocator);
             }
         } else |_| {}
         summary.open_notes = countOpenNotes(allocator, project_dir, base);
@@ -2359,6 +2359,28 @@ fn countOpenNotes(allocator: std.mem.Allocator, project_dir: []const u8, name: [
     return open;
 }
 
+/// Walk a block's sub-block tree and append each distinct `source` (the
+/// module name a `(sub-block …)` instantiates) to `out`, depth-first.
+fn collectModuleUses(
+    allocator: std.mem.Allocator,
+    block: *const env_mod.DesignBlock,
+    out: *std.ArrayListUnmanaged([]const u8),
+) std.mem.Allocator.Error!void {
+    for (block.sub_blocks) |sb| {
+        if (sb.source.len > 0) {
+            var seen = false;
+            for (out.items) |existing| {
+                if (std.mem.eql(u8, existing, sb.source)) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) try out.append(allocator, try allocator.dupe(u8, sb.source));
+        }
+        try collectModuleUses(allocator, sb.block, out);
+    }
+}
+
 /// Parse the file's top-level forms and return true iff any is a
 /// `(design-block ...)`. Used to filter out board definitions and auxiliary
 /// .sexp files from list_designs.
@@ -2370,30 +2392,98 @@ fn hasTopLevelDesignBlock(allocator: std.mem.Allocator, path: []const u8) bool {
     return false;
 }
 
-/// Evaluate a design and return the schematic scene-graph JSON the MCP
-/// `get_schematic` tool ships back to Claude Code. Same renderer the
-/// browser viewer consumes via `/api/scene-graph/:name`.
+/// How `evalNamedBlock` resolved a name: a design source under `src/`, or
+/// a `lib/modules/` module synthesized as a zero-arg call (parameter
+/// defaults supply the arguments).
+pub const NamedBlock = struct {
+    block: *env_mod.DesignBlock,
+    is_module: bool,
+};
+
+/// Evaluate `name` as a design, or — when no `src/<name>.sexp` exists and
+/// `lib/modules/<name>.sexp` does — as a standalone module instantiation.
+/// This is what lets the read-only by-name tools (get_schematic,
+/// run_checks, list_instances, generate_review, …) accept module names the
+/// same way the PCB tools already do. The module path returns the module's
+/// own evaluated block (the wrapper's sole sub-block). `eval` is
+/// caller-owned and must outlive the returned block.
+pub fn evalNamedBlock(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    eval: *Evaluator,
+) ToolError!NamedBlock {
+    const path = try paths.designSourcePath(allocator, project_dir, name);
+    defer allocator.free(path);
+    const have_design = blk: {
+        infra_fs.cwd().access(path, .{}) catch break :blk false;
+        break :blk true;
+    };
+    if (have_design) {
+        const result = try eval.evalFile(path);
+        switch (result) {
+            .design_block => |b| return .{ .block = b, .is_module = false },
+            else => return error.NotADesign,
+        }
+    }
+
+    if (!isBareModuleName(name)) return error.FileNotFound;
+    const mod_path = try std.fmt.allocPrint(allocator, "{s}/lib/modules/{s}.sexp", .{ project_dir, name });
+    defer allocator.free(mod_path);
+    infra_fs.cwd().access(mod_path, .{}) catch return error.FileNotFound;
+    const source = try std.fmt.allocPrint(
+        allocator,
+        "(import {s})\n(design-block \"{s}\" (sub-block \"{s}\" ({s})))",
+        .{ name, name, name, name },
+    );
+    const result = try eval.evalSource(source);
+    switch (result) {
+        .design_block => |b| {
+            if (b.sub_blocks.len == 0) return error.NotADesign;
+            return .{ .block = b.sub_blocks[0].block, .is_module = true };
+        },
+        else => return error.NotADesign,
+    }
+}
+
+/// Run ERC on a named block, dropping `main_ic_in_design` for standalone
+/// module renders — the module IS the design root there, so demanding the
+/// main IC be sealed in a module is satisfied by construction (same
+/// suppression `preview_module` applies).
+pub fn runErcForNamedBlock(
+    allocator: std.mem.Allocator,
+    nb: NamedBlock,
+    project_dir: []const u8,
+) std.mem.Allocator.Error![]const erc_mod.Violation {
+    const violations = try erc_mod.runErc(allocator, nb.block, project_dir);
+    if (!nb.is_module) return violations;
+    var keep: std.ArrayListUnmanaged(erc_mod.Violation) = .empty;
+    for (violations) |v| {
+        if (v.kind == .main_ic_in_design) continue;
+        try keep.append(allocator, v);
+    }
+    return keep.toOwnedSlice(allocator);
+}
+
+/// Evaluate a design (or module) and return the schematic scene-graph JSON
+/// the MCP `get_schematic` tool ships back to Claude Code. Same renderer
+/// the browser viewer consumes via `/api/scene-graph/:name`.
 pub fn renderSceneGraph(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
 ) ToolError![]const u8 {
-    const path = try paths.designSourcePath(allocator, project_dir, name);
-    defer allocator.free(path);
-
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
-    const result = try eval.evalFile(path);
-    const block: *const env_mod.DesignBlock = switch (result) {
-        .design_block => |b| b,
-        else => return error.NotADesign,
-    };
+    const nb = try evalNamedBlock(allocator, project_dir, name, &eval);
 
-    const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
-    defer allocator.free(bom_path);
-    bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
+    if (!nb.is_module) {
+        const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
+        defer allocator.free(bom_path);
+        bom.resolveIdentities(allocator, nb.block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
+    }
 
-    return render_json.renderSceneGraph(allocator, block, project_dir);
+    return render_json.renderSceneGraph(allocator, nb.block, project_dir);
 }
 
 fn toolReadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {

@@ -1,6 +1,15 @@
 const mcp_tools = @import("../mcp_tools.zig");
 const DesignSummary = mcp_tools.DesignSummary;
 
+/// One module card on the home page: lib/modules metadata joined with the
+/// designs that instantiate it (computed by the index handler).
+pub const ModuleHomeEntry = struct {
+    name: []const u8,
+    params: []const u8,
+    doc: []const u8,
+    used_by: []const []const u8,
+};
+
 // zt treats `<style>` as a raw-text element — expressions inside are NOT
 // interpolated, so the entire `<style>…</style>` block ships as a single raw
 // chunk emitted via `{!HOME_STYLE_BLOCK}` in the head.
@@ -27,8 +36,11 @@ const HOME_STYLE_BLOCK: []const u8 = "<style>" ++ @embedFile("../assets/navbar.c
     \\.st-chip.warn{color:#d29922;border-color:#9e6a03}
     \\.st-chip.pass{color:#3fb950;border-color:#238636}
     \\.design-card-sections{display:flex;flex-wrap:wrap;gap:4px}
-    \\.section-chip{background:#1a1a2e;color:#8b949e;font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid #21262d}
+    \\.section-chip{background:#1a1a2e;color:#8b949e;font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid #21262d;text-decoration:none}
+    \\a.section-chip:hover{border-color:#58a6ff;color:#c9d1d9}
     \\.section-chip-more{color:#6e7681;font-size:11px;padding:2px 4px}
+    \\.mod-params{color:#6e7681;font-size:12px;font-family:monospace;font-weight:400}
+    \\.mod-sub-note{padding:0 16px;margin:4px 0 0;color:#8b949e;font-size:0.85rem}
     \\.design-card-links{display:flex;gap:8px;margin-top:auto;padding-top:4px}
     \\.design-card-link{color:#8b949e;font-size:13px;padding:6px 14px;
     \\border:1px solid #30363d;border-radius:6px;text-decoration:none;
@@ -174,7 +186,32 @@ pub templ DesignCard(s: DesignSummary, now_sec: i64) {
     </div>
 }
 
-pub templ Home(summaries: []const DesignSummary, now_sec: i64) {
+pub templ ModuleCard(m: ModuleHomeEntry) {
+    <div class="design-card">
+        <div class="design-card-header">
+            <div class="design-card-title">{m.name} <span class="mod-params">{m.params}</span></div>
+        </div>
+        if (m.doc.len > 0) {
+            <div class="design-card-stats"><span>{m.doc}</span></div>
+        }
+        <div class="design-card-sections">
+            if (m.used_by.len > 0) {
+                <span class="section-chip-more">used by</span>
+                for (m.used_by) |d| {
+                    <a class="section-chip" href="/schematics/{d}">{d}</a>
+                }
+            } else {
+                <span class="section-chip-more">not used by any design yet</span>
+            }
+        </div>
+        <div class="design-card-links">
+            <a class="design-card-link" href="/modules/{m.name}">Schematic</a>
+            <a class="design-card-link" href="/pcb-layout/{m.name}">PCB layout</a>
+        </div>
+    </div>
+}
+
+pub templ Home(summaries: []const DesignSummary, modules: []const ModuleHomeEntry, now_sec: i64) {
     <!DOCTYPE html>
     <html>
         <head>
@@ -194,6 +231,15 @@ pub templ Home(summaries: []const DesignSummary, now_sec: i64) {
                         <div class="empty-hint">No designs found in src/.</div>
                     }
                 </div>
+                if (modules.len > 0) {
+                    <h1 style="padding:8px 16px 0;color:#f0f6fc">Modules</h1>
+                    <p class="mod-sub-note">Reusable parameterised blocks under lib/modules/.</p>
+                    <div class="designs-grid">
+                        for (modules) |m| {
+                            @ModuleCard(m)
+                        }
+                    </div>
+                }
             </div>
         </body>
     </html>

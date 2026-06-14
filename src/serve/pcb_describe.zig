@@ -164,6 +164,11 @@ pub fn writeDescribeJson(
             if (i > 0) try w.writeAll(",");
             try pcb_layout_page.writeJsonStr(w, ref);
         }
+        try w.writeAll("],\"composed\":[");
+        for (sp.composed, 0..) |slug, i| {
+            if (i > 0) try w.writeAll(",");
+            try pcb_layout_page.writeJsonStr(w, slug);
+        }
         try w.writeAll("]}");
     }
 
@@ -345,7 +350,9 @@ fn writeLint(
     const sev_err = "error";
     const sev_warn = "warn";
     if (spec) |sp| {
-        if (!sp.used_spec) {
+        // `used_spec == false` with composed macros isn't a fallback — the
+        // board never had a design-level spec; its modules composed instead.
+        if (!sp.used_spec and sp.composed.len == 0) {
             try lintItem(w, &first, "fell-back-to-auto", sev_err, &.{}, "a placement/floorplan form was authored but its constructive pack failed; the force placer arranged the board instead");
         }
         if (sp.unresolved.len > 0) {

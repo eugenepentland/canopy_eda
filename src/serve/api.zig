@@ -685,23 +685,22 @@ fn buildDocForName(
     project_dir: []const u8,
     name: []const u8,
 ) !review_mod.ReviewDoc {
-    const board_path = try paths.designSourcePath(allocator, project_dir, name);
-    defer allocator.free(board_path);
-
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
 
-    const result = try eval.evalFile(board_path);
-    const block = switch (result) {
-        .design_block => |b| b,
-        else => return error.NotADesign,
-    };
+    // Designs and lib/modules resolve through the same helper, so the
+    // review report works for a standalone module too (defaults supply
+    // the module's arguments).
+    const nb = try mcp_tools.evalNamedBlock(allocator, project_dir, name, &eval);
+    const block = nb.block;
 
-    const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
-    defer allocator.free(bom_path);
-    try bom.resolveIdentities(allocator, @constCast(block), bom_path, project_dir);
+    if (!nb.is_module) {
+        const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
+        defer allocator.free(bom_path);
+        try bom.resolveIdentities(allocator, block, bom_path, project_dir);
+    }
 
-    const violations = try erc_mod.runErc(allocator, block, project_dir);
+    const violations = try mcp_tools.runErcForNamedBlock(allocator, nb, project_dir);
 
     // Run requirement-attached (check ...) primitives + overlay (verifies …)
     // sign-offs so the per-component review entries carry pass/fail/verified

@@ -726,6 +726,9 @@ pub const PlacementDiag = struct {
     /// renamed since the spec was authored). The lint layer surfaces these —
     /// a silently-dropped spec line is the most confusing authoring failure.
     unresolved: []const []const u8 = &.{},
+    /// Sub-block slugs whose module-level `(placement …)` spec was composed
+    /// into the force result as a rigid macro (`composeModuleMacros`).
+    composed: []const []const u8 = &.{},
 };
 threadlocal var g_placement_diag: PlacementDiag = .{};
 
@@ -802,6 +805,9 @@ fn runPlacement(
         return;
     }
     try runForce(arena, parts, prep, nets, built, params);
+    // Module-authored `(placement …)` specs compose into the force result as
+    // rigid macros — after the tuck, so nothing dissolves them afterwards.
+    if (!params.ignore_placement) try composeModuleMacros(arena, parts, prep, params);
 }
 
 /// The force-directed placement pipeline (routed-reranked multi-start for loop
@@ -2660,6 +2666,138 @@ fn packFloorplan(
     return true;
 }
 
+// ── Module-spec macro composition (force path) ──────────────────────────────
+// A module that authored its own `(placement …)` keeps that internal
+// arrangement wherever it's instantiated. The floorplan and design-spec
+// paths already define composition; this pass brings it to the DEFAULT
+// (force) path: solve free, then re-stamp each spec-bearing sub-block as a
+// rigid macro centred where the force solve put its members — the solver
+// keeps choosing the global arrangement, the module author the internal one.
+
+/// Re-stamp every composable sub-block as a rigid macro (nested solve, its
+/// module spec driving) centred on its members' force-solved centroid, then
+/// push overlapping free parts (or whole later macros) outward until clean.
+/// Reverts wholesale when legalization can't converge, so composition never
+/// ships an overlapping board. Records composed slugs in the diag.
+fn composeModuleMacros(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    params: Params,
+) std.mem.Allocator.Error!void {
+    const fc = prep.compose orelse return;
+    const backup = try capturePoses(arena, parts);
+
+    // Nested solves trash the thread's solve state — bracket the whole
+    // macro-building phase, exactly like packFloorplan.
+    const saved = SolveState.snapshot();
+    g_progress = null;
+    var macros: std.ArrayListUnmanaged(Macro) = .empty;
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (fc.block.sub_blocks) |sub| {
+        if (!sub.block.placement.present or sub.reflow) continue;
+        if (try buildSubMacro(arena, sub, null, prep, fc, params)) |m| {
+            try macros.append(arena, m);
+            try names.append(arena, sub.name);
+        }
+    }
+    saved.restore();
+    if (macros.items.len == 0) return;
+
+    const macro_of = try arena.alloc(?usize, parts.len);
+    @memset(macro_of, null);
+    for (macros.items, 0..) |m, mi| {
+        // Map the macro's member centroid onto the members' force-solved
+        // centroid — the least-displacement drop-in. Grid-rounding the origin
+        // keeps every member on grid (offsets are grid multiples).
+        var cx: f64 = 0;
+        var cy: f64 = 0;
+        for (m.members) |pi| {
+            cx += parts[pi].x;
+            cy += parts[pi].y;
+        }
+        var mlx: f64 = 0;
+        var mly: f64 = 0;
+        for (m.lx) |v| mlx += v;
+        for (m.ly) |v| mly += v;
+        const n: f64 = @floatFromInt(m.members.len);
+        const ox = gridRound((cx - mlx) / n);
+        const oy = gridRound((cy - mly) / n);
+        for (m.members, 0..) |pi, k| {
+            parts[pi].x = ox + m.lx[k];
+            parts[pi].y = oy + m.ly[k];
+            parts[pi].rot = m.rots[k];
+            macro_of[pi] = mi;
+        }
+    }
+
+    legalizeComposed(parts, macro_of);
+    if (anyOverlap(parts)) {
+        restorePoses(parts, backup);
+        return;
+    }
+    g_placement_diag.composed = try names.toOwnedSlice(arena);
+}
+
+/// Penetration-driven separation after the macro re-stamp: a free part
+/// overlapping a macro member moves away; two distinct macros overlapping
+/// move the later one as a unit (the first stays — stamped order). Free-vs-
+/// free pairs are skipped until a push has disturbed the (overlap-free)
+/// force result. Pushes are grid-ceiled along the smaller penetration axis.
+/// Sweeps cap out; the caller's `anyOverlap` accept-test decides whether
+/// the result ships.
+fn legalizeComposed(parts: []Part, macro_of: []const ?usize) void {
+    var pushed_free = false;
+    var sweep: usize = 0;
+    while (sweep < 24) : (sweep += 1) {
+        var moved = false;
+        for (0..parts.len) |i| {
+            for (i + 1..parts.len) |j| {
+                const ma = macro_of[i];
+                const mb = macro_of[j];
+                if (ma != null and mb != null and ma.? == mb.?) continue;
+                if (ma == null and mb == null and !pushed_free) continue;
+                if (separateComposedPair(parts, macro_of, i, j)) {
+                    moved = true;
+                    if (ma == null or mb == null) pushed_free = true;
+                }
+            }
+        }
+        if (!moved) break;
+    }
+}
+
+/// Resolve one overlapping pair for `legalizeComposed`: push the free side
+/// (or the later-stamped macro as a unit) along the smaller-penetration
+/// axis, away from the stationary box's centre. True when something moved.
+fn separateComposedPair(parts: []Part, macro_of: []const ?usize, i: usize, j: usize) bool {
+    const a = &parts[i];
+    const b = &parts[j];
+    const px = (keepHw(a.*) + keepHw(b.*)) - @abs(keepCx(a.*) - keepCx(b.*));
+    const py = (keepHh(a.*) + keepHh(b.*)) - @abs(keepCy(a.*) - keepCy(b.*));
+    if (px <= 1e-9 or py <= 1e-9) return false;
+    const dx = if (px <= py) ceilToGrid(px) * (if (keepCx(b.*) >= keepCx(a.*)) @as(f64, 1) else -1) else 0;
+    const dy = if (px <= py) 0 else ceilToGrid(py) * (if (keepCy(b.*) >= keepCy(a.*)) @as(f64, 1) else -1);
+    if (macro_of[j] == null) {
+        b.x += dx;
+        b.y += dy;
+        return true;
+    }
+    if (macro_of[i] == null) {
+        a.x -= dx;
+        a.y -= dy;
+        return true;
+    }
+    const mb = macro_of[j].?;
+    for (parts, 0..) |*p, k| {
+        if (macro_of[k] != null and macro_of[k].? == mb) {
+            p.x += dx;
+            p.y += dy;
+        }
+    }
+    return true;
+}
+
 // ── Physical board: outline + edge docking (`(board …)`) ────────────────────
 // The interior placement (force / spec / floorplan) is solved first and left
 // unchanged; the authored W×H outline is then centered on it, each edge list
@@ -3389,6 +3527,11 @@ const Prepared = struct {
     /// The design's `(floorplan …)` macro spec plus what `packFloorplan` needs to
     /// solve each sub-block as its own board. Null ⇒ none authored.
     floorplan: ?FloorplanCtx = null,
+    /// Set when no design-level floorplan exists but a first-level sub-block's
+    /// module carries its own `(placement …)` spec: `composeModuleMacros`
+    /// re-stamps those sub-blocks as rigid macros after the force solve.
+    /// Null ⇒ nothing to compose.
+    compose: ?FloorplanCtx = null,
 };
 
 /// Resolve a design-local net name (what a constraint author writes — "VIN",
@@ -3869,6 +4012,18 @@ fn prepare(
         .{ .spec = block.floorplan, .block = block, .project_dir = project_dir }
     else
         null;
+    // No design-level floorplan, but a sub-block's module authored its own
+    // `(placement …)`: the force path composes those as rigid macros
+    // (`composeModuleMacros`). `(reflow)` on the sub-block opts it out.
+    var compose: ?FloorplanCtx = null;
+    if (floorplan == null) {
+        for (block.sub_blocks) |sub| {
+            if (sub.block.placement.present and !sub.reflow) {
+                compose = .{ .spec = block.floorplan, .block = block, .project_dir = project_dir };
+                break;
+            }
+        }
+    }
     // Active when a form was AUTHORED (even if its anchor failed to resolve),
     // so a broken spec surfaces as "fell back to auto", never silently.
     var unresolved0: []const []const u8 = if (placement) |pl| pl.unresolved else &.{};
@@ -3881,7 +4036,7 @@ fn prepare(
         .active = block.placement.present or floorplan != null,
         .unresolved = unresolved0,
     };
-    return .{ .parts = parts, .idx_of = idx_of, .instances = instances, .nets = nets, .built = built, .priority = priority, .lowered = lowered, .placement = placement, .floorplan = floorplan };
+    return .{ .parts = parts, .idx_of = idx_of, .instances = instances, .nets = nets, .built = built, .priority = priority, .lowered = lowered, .placement = placement, .floorplan = floorplan, .compose = compose };
 }
 
 /// Decompose the objective for already-placed parts, surfaced term-by-term for
@@ -8172,4 +8327,40 @@ test "finishMacro rotates members rigidly about the centroid" {
     try testing.expectApproxEqAbs(m.lx[0], m.lx[1], 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 4), @abs(m.ly[1] - m.ly[0]), 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 1.0), m.bmaxx - m.bminx, 1e-9);
+}
+
+// spec: placement/optimizer - composed module macros push free parts away and stay rigid
+test "legalizeComposed moves the free part, not the macro members" {
+    const pads = [_]geometry.Pad{};
+    var parts = [_]Part{
+        // Two-member rigid macro at x = 0 and 4.
+        .{ .ref_des = "m/U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "m/C1", .kind = .passive, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 4, .y = 0 },
+        // Free part overlapping the second member.
+        .{ .ref_des = "R1", .kind = .passive, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 6, .y = 0.5 },
+    };
+    const macro_of = [_]?usize{ 0, 0, null };
+    legalizeComposed(&parts, &macro_of);
+    // Macro members never moved relative to each other (or at all).
+    try testing.expectApproxEqAbs(@as(f64, 0), parts[0].x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 4), parts[1].x, 1e-9);
+    // The free part was pushed clear of both members.
+    try testing.expect(!overlapsAny(&parts, &parts[2]));
+}
+
+// spec: placement/optimizer - composed macros overlapping each other move the later one as a unit
+test "legalizeComposed shifts the later macro rigidly" {
+    const pads = [_]geometry.Pad{};
+    var parts = [_]Part{
+        .{ .ref_des = "a/U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "b/U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 3, .y = 0.5 },
+        .{ .ref_des = "b/C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 7, .y = 0.5 },
+    };
+    const macro_of = [_]?usize{ 0, 1, 1 };
+    legalizeComposed(&parts, &macro_of);
+    // Macro b moved as a unit: the b members' relative offset is preserved.
+    try testing.expectApproxEqAbs(@as(f64, 4), parts[2].x - parts[1].x, 1e-9);
+    try testing.expectApproxEqAbs(parts[2].y, parts[1].y, 1e-9);
+    // And the overlap with macro a is gone.
+    try testing.expect(!anyOverlap(&parts));
 }

@@ -275,7 +275,37 @@ the **subtitle** as the chip caption.
 ;; Usage — positional, named, or mixed (positional may not follow named)
 (sub-block "pwr" (tpsm84338 220k 47k 1k))
 (sub-block "pwr" (tpsm84338 (rfbt 220k) (rfbb 47k) (rled 1k)))
+
+;; A (param default) pair makes the argument optional — the default
+;; evaluates at call time (later defaults may reference earlier params).
+;; A fully-defaulted module renders standalone everywhere a design does.
+(defmodule tpsm84338 ((rfbt 220k) (rfbb 47k) (rled 1k)) …)
 ```
+
+**Modules are first-class on every read surface.** A `lib/modules/` name
+works wherever a design name does: `GET /` lists modules with their
+parameters and the designs using them, `/schematics/<m>` 302s to
+`/modules/<m>`, `/api/review/<m>` and the MCP read tools (`get_schematic`,
+`run_checks`, `list_instances`, `get_net`, `list_free_pins`,
+`generate_review`) resolve the module standalone via its parameter
+defaults (the `main_ic_in_design` ERC check is suppressed there — the
+module IS the root). The PCB tools already resolved module names (real
+instantiation first, else zero-arg); `POST /api/spec-save/<m>` now also
+splices a `(placement …)` form into the defmodule body, so a module's
+layout is authored once in the module file and every design instantiating
+it picks the spec up.
+
+**Module layouts compose into parent boards by default.** When a parent
+design solves on the force path (no design-level `(placement …)` /
+`(floorplan …)`), every first-level sub-block whose module body carries a
+`(placement …)` spec is re-stamped as a RIGID macro centred where the
+force solve put its members (`composeModuleMacros` in
+`src/placement/optimizer.zig`): the solver chooses the global
+arrangement, the module author the internal one. Overlap legalization
+pushes *other* parts away; if it can't converge the pass reverts
+wholesale. `(sub-block "x" (mod …) (reflow))` opts one instantiation out.
+Design-level spec > floorplan > composed module specs > free force solve
+is the full precedence. Composed slugs land in `placementDiag().composed`.
 
 ### Numeric literals with SI suffixes
 
@@ -302,6 +332,14 @@ that instance on the net (the `(pins …)` declarations must appear first);
 `per-pin auto` does the same using the `(decouple-defaults (ic …))` ref. The
 `(decouple-defaults … (bypass …))` component (not the ic) cascades into
 sub-block modules that don't set their own.
+
+### Schematic diagram layout: `(diagram-layout …)`
+
+The free-floating block-diagram arrangement (the schematic page's Layout
+tab) is authored with `(diagram-layout (anchor "x") (place "y"
+(right-of "x")) …)`. **`(layout …)` is the legacy alias** — both parse,
+but prefer `diagram-layout` in new files: the word "layout" alone now
+means PCB placement (`(placement …)`, `(floorplan …)`, `/pcb-layout`).
 
 ### Lint warnings
 
@@ -371,6 +409,7 @@ Local dev still uses `http://localhost:7050`.
 - **PCB layout facts**: `GET /api/pcb-describe/:name` — structured spatial facts about the solved placement (`src/serve/pcb_describe.zig`), the textual twin of the PNG: built from the identical placement-selection logic and accepting the same query parameters, so the facts always describe the board the image shows. Returns JSON with the axes convention (y grows down; "top" = −y, matching `(placement …)` spec words), the anchor (largest hub IC), per-part `ref`/`origin`/side-of-anchor/`gap_mm`/nets/`unplaced`, per-decoupling-loop net + power-leg mm + nH + side, each hub's net→package-edge pad map, spec coverage (incl. `unresolved` spec names), per-part `want_side` (the part sits OPPOSITE the hub edge its net's pads are on), a `lint` array (fell-back-to-auto / unresolved-name / unplaced errors; wrong-side / long-loop / outside-outline warns), `board.outline` (the authored `(board (size W H) …)` rectangle when one exists), and (with `?route=1`) `routed:{trace_mm,tracks,vias,drc}`. Agents should read measurements here and use the PNG for gestalt.
 - **Placement-spec export**: `GET /api/placement-spec/:name` — reverse-engineer an editable `(placement …)` spec from any solved layout (`src/serve/placement_spec.zig`), closing the DSL loop: the optimizer (or a saved hand layout) finds an arrangement, this endpoint turns it back into the declarative form to paste into the design/module `.sexp`, tweak, and re-solve deterministically. Anchor = largest hub; each part listed on its side of the anchor, inner lane first then along the edge; `(rot …)` only where the actual rotation differs from the solver's default; origin names when unique, ref-des otherwise. Same placement-selection params as the PNG (`layout=`, `regen=1`, `sub=`); `?format=sexp` returns bare spec text, else JSON `{name,title,source,anchor,spec,skipped}`.
 - **Placement dry-run**: `POST /api/propose-placement/:name` — body = a `(placement …)` or `(floorplan …)` form; solves it against a request-local copy of the design (nothing written) and returns the proposed-vs-current scoreboard `{proposed:{objective,hpwl,loop_nh,routed?},used_spec,unplaced,auto_filled,unresolved,current:{…},delta_objective}` — the A/B step before committing a spec to the `.sexp`. `?route=1` routes both layouts.
+- **Layout state**: one sidecar per design — `<design>.layouts.json` `{default, cache, layouts[]}`. `layouts[]` = named snapshots (manual saves + auto-recorded optimizer runs), `default` = the KiCad-sync seed, `cache` = the single-slot optimizer cache (tuning params + poses, overwritten each solve). Precedence the `/pcb-layout` viewer shows as a scorebar chip: source `(placement …)` spec > saved snapshot (`?refine=`) > cache > fresh solve > plain grid. Legacy standalone `<design>.autolayout.json` is still read as a fallback and deleted on the next solve; `.placement.json` migration was dropped (all designs migrated). Each saved-layout row has a `→spec` button that exports the snapshot into the spec panel for promotion into the source file.
 - **Live push**: `POST /api/push/:name` — rebuild and push update. On eval failure the JSON (and the schematic page, and the MCP `build` tool) carries a structured `diagnostic` `{file,line,col,message,source_line}` rendered compiler-style with a caret (`src/serve/diag_format.zig`).
 - **Version history + diff**: `GET /api/history/:name` — stored snapshot ids (file copies under `<project>/history/<name>/<timestamp>/`, written before every mutation); `GET /api/diff/:name?from=<id>&to=<id|current>` — request-local netlist diff (instances added/removed, value/footprint changes, net membership changes; `src/serve/design_diff.zig`). Schematic header's History panel renders it. Caveat: snapshots capture the design file only, so an old revision re-evaluates against today's lib/ modules.
 - **Datasheet attach**: `POST /api/attach-datasheet` `{component,file}` — splices the datasheet link into `lib/components/<name>.sexp` (idempotent, traversal-safe); library page has a per-card attach control. `GET /api/datasheets` lists candidates.

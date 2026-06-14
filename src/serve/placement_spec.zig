@@ -26,6 +26,8 @@ const Handler = serve_root.Handler;
 
 /// 400 body shared by the POST endpoints that expect a bare spec form.
 const ERR_NEED_FORM = "{\"error\":\"send the (placement ...) or (floorplan ...) form as the request body\"}";
+/// 500 body shared by the save paths when the target file can't be written.
+const ERR_WRITE_FAILED = "{\"error\":\"write failed\"}";
 /// JSON object opener for the responses that lead with the design name.
 const NAME_OPEN = "{\"name\":";
 
@@ -199,8 +201,10 @@ fn writeSolveJson(
 /// replace its existing top-level `(placement …)` / `(floorplan …)` form, or
 /// insert one before the design-block's closing paren. A history snapshot is
 /// taken first (`edit.writeAndRebuild`), the design re-evaluates, and the live
-/// version bumps so open viewers refresh. Designs only — a module's layout
-/// spec lives inside its `(defmodule …)` body, which this splice can't target.
+/// version bumps so open viewers refresh. When `name` is a lib/modules module
+/// instead of a design, the spec splices into the `(design-block …)` inside
+/// its `(defmodule …)` body — every design instantiating the module picks the
+/// layout up on its next solve.
 pub fn specSaveApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void {
     const arena = req.arena;
     const name = req.param("name") orelse {
@@ -228,12 +232,12 @@ pub fn specSaveApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb
         res.status = 500;
         return;
     };
+    const token: []const u8 = if (parsed.floorplan) "(floorplan" else "(placement";
     const source = infra_fs.cwd().readFileAlloc(arena, path, MAX_DESIGN_BYTES) catch {
-        res.status = 404;
-        res.body = "{\"error\":\"not a design under src/ - for a module, paste the spec into its defmodule body\"}";
+        // Not a design — fall through to the module save path.
+        try specSaveModule(ctx, res, arena, name, body, token);
         return;
     };
-    const token: []const u8 = if (parsed.floorplan) "(floorplan" else "(placement";
     const new_source = splicePlacementForm(arena, source, body, token) catch {
         res.status = 500;
         return;
@@ -249,7 +253,7 @@ pub fn specSaveApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb
             // evaluates — surface that loudly instead of a silent 500.
             res.body = "{\"error\":\"design failed to rebuild after the edit - restore from history\"}";
         } else {
-            res.body = "{\"error\":\"write failed\"}";
+            res.body = ERR_WRITE_FAILED;
         }
         return;
     };
@@ -266,6 +270,69 @@ pub fn specSaveApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb
 
 /// Max design-file size the spec save will read (matches edit.zig's cap).
 const MAX_DESIGN_BYTES: usize = 1 << 20;
+
+/// Module tail of the spec save: splice the form into the `(design-block …)`
+/// inside `lib/modules/<name>.sexp`'s defmodule body, verify the file still
+/// evaluates (request-local) before writing, then bump the live version.
+/// No history snapshot — the history store is design-keyed.
+fn specSaveModule(
+    ctx: *Handler,
+    res: *httpz.Response,
+    arena: std.mem.Allocator,
+    name: []const u8,
+    body: []const u8,
+    token: []const u8,
+) pcb_layout_page.HandlerError!void {
+    if (std.mem.indexOfScalar(u8, name, '/') != null or std.mem.indexOf(u8, name, "..") != null) {
+        res.status = 400;
+        res.body = "{\"error\":\"bad name\"}";
+        return;
+    }
+    const path = std.fmt.allocPrint(arena, "{s}/lib/modules/{s}.sexp", .{ ctx.project_dir, name }) catch {
+        res.status = 500;
+        return;
+    };
+    const source = infra_fs.cwd().readFileAlloc(arena, path, MAX_DESIGN_BYTES) catch {
+        res.status = 404;
+        res.body = "{\"error\":\"no design or module by that name\"}";
+        return;
+    };
+    const new_source = splicePlacementForm(arena, source, body, token) catch {
+        res.status = 500;
+        return;
+    } orelse {
+        res.status = 422;
+        res.body = "{\"error\":\"no (design-block ...) found in the module body\"}";
+        return;
+    };
+    // The module file must still evaluate with the spec in place — defmodule
+    // registration catches syntax damage before anything touches disk.
+    var check = Evaluator.init(arena, ctx.project_dir);
+    defer check.deinit();
+    _ = check.evalSource(new_source) catch {
+        res.status = 422;
+        res.body = "{\"error\":\"module no longer evaluates with this spec - not written\"}";
+        return;
+    };
+    {
+        const file = infra_fs.cwd().createFile(path, .{}) catch {
+            res.status = 500;
+            res.body = ERR_WRITE_FAILED;
+            return;
+        };
+        defer file.close();
+        file.writeAll(new_source) catch {
+            res.status = 500;
+            res.body = ERR_WRITE_FAILED;
+            return;
+        };
+    }
+    const version = serve_root.bumpLiveVersion(name);
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    const w = &aw.writer;
+    w.print("{{\"ok\":true,\"version\":{d},\"module\":true}}", .{version}) catch return error.OutOfMemory;
+    res.body = aw.written();
+}
 
 /// Replace the design's first top-level `token` form (`(placement` /
 /// `(floorplan`) with `spec`, or — when none exists — insert `spec` before the
@@ -839,4 +906,25 @@ test "parsePlacementText parses standalone placement and floorplan forms" {
     try std.testing.expect(fp.floorplan);
     try std.testing.expectEqualStrings("buck", fp.spec.anchor);
     try std.testing.expect((try design_block.parsePlacementText(&eval, "(note \"hi\")")) == null);
+}
+
+// spec: Web Server - spec save splices the placement form into a defmodule body
+test "splicePlacementForm targets the design-block inside a defmodule" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const src =
+        "(defmodule buck ((vin 12.0))\n" ++
+        "  \"12V buck module\"\n" ++
+        "  (design-block \"Buck\"\n" ++
+        "    (instance \"U1\" chip)))\n";
+    const out = (try splicePlacementForm(alloc, src, "(placement (anchor \"U1\"))", "(placement")).?;
+    // Inserted before the design-block close — i.e. inside the defmodule,
+    // after the last instance, with both closing parens still behind it.
+    const at = std.mem.indexOf(u8, out, "(placement (anchor \"U1\"))") orelse return error.TestSpliceMissing;
+    const inst = std.mem.indexOf(u8, out, "(instance \"U1\" chip)") orelse return error.TestSpliceMissing;
+    try std.testing.expect(at > inst);
+    // Both the design-block's and the defmodule's closing parens follow the
+    // spliced spec — it landed inside the module body, not after it.
+    try std.testing.expect(std.mem.indexOf(u8, out[at..], "\n))") != null);
 }

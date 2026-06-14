@@ -282,6 +282,9 @@ pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalE
 /// `ModuleDef` in the current env. The body nodes are stored verbatim for
 /// later evaluation when the module is called; the param list is captured
 /// alongside the module file's import scope so calls resolve correctly.
+/// A parameter is either a bare atom (required) or a `(param default)` pair
+/// — the default expression is stored unevaluated and only runs at call
+/// time when the caller omits that argument.
 pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     // (defmodule name (params...) docstring? body...)
     if (args.len < 2) return EvalError.ArityError;
@@ -296,12 +299,25 @@ pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!
 
     var params: std.ArrayListUnmanaged([]const u8) = .empty;
     defer params.deinit(self.allocator);
+    var defaults: std.ArrayListUnmanaged(?Node) = .empty;
+    defer defaults.deinit(self.allocator);
     for (params_node) |p| {
-        const pname = p.asAtom() orelse {
-            self.setErrorFmt(p.span, "(defmodule {s} …) parameters must be bare atoms", .{name});
-            return EvalError.InvalidForm;
-        };
-        try params.append(self.allocator, pname);
+        if (p.asAtom()) |pname| {
+            try params.append(self.allocator, pname);
+            try defaults.append(self.allocator, null);
+            continue;
+        }
+        if (p.asList()) |pair| {
+            if (pair.len == 2) {
+                if (pair[0].asAtom()) |pname| {
+                    try params.append(self.allocator, pname);
+                    try defaults.append(self.allocator, pair[1]);
+                    continue;
+                }
+            }
+        }
+        self.setErrorFmt(p.span, "(defmodule {s} …) parameters must be bare atoms or (param default) pairs", .{name});
+        return EvalError.InvalidForm;
     }
 
     // Skip docstring if present
@@ -311,9 +327,11 @@ pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!
     }
 
     const param_slice = self.allocator.dupe([]const u8, params.items) catch return EvalError.OutOfMemory;
+    const default_slice = self.allocator.dupe(?Node, defaults.items) catch return EvalError.OutOfMemory;
     const mod = ModuleDef{
         .name = name,
         .params = param_slice,
+        .defaults = default_slice,
         .body = args[body_start..],
         .imports = env,
     };
@@ -375,28 +393,38 @@ pub fn callModule(self: *Evaluator, mod: ModuleDef, call_args: []const Node, cal
 
     try checkMissingParams(self, mod, bound, call_span);
 
-    // Create module scope with parameter bindings
+    // Evaluate with a call-stack frame so any diagnostic recorded inside the
+    // body — or inside a default expression — carries `in module 'x'
+    // (called at L:C)` context lines (innermost first).
+    try self.module_stack.append(self.allocator, .{ .name = mod.name, .call_span = call_span });
+    defer _ = self.module_stack.pop();
+
+    // Create module scope with parameter bindings. Parameters the caller
+    // left unbound fall back to their declared default, evaluated inside
+    // the module scope in declaration order — a later parameter's default
+    // may therefore reference an earlier parameter.
     var mod_env = Env.init(self.allocator, mod.imports);
     defer mod_env.deinit();
     for (mod.params, 0..) |param, i| {
-        try mod_env.put(param, bound[i].?);
+        if (bound[i]) |v| {
+            try mod_env.put(param, v);
+        } else if (mod.defaults[i]) |dflt| {
+            try mod_env.put(param, try self.evalNode(dflt, &mod_env));
+        }
     }
 
-    // Evaluate module body with a call-stack frame so any diagnostic
-    // recorded inside the body carries `in module 'x' (called at L:C)`
-    // context lines (innermost first).
-    try self.module_stack.append(self.allocator, .{ .name = mod.name, .call_span = call_span });
-    defer _ = self.module_stack.pop();
     return self.evalNodes(mod.body, &mod_env);
 }
 
-/// Diagnose any parameter left unbound after the call args are processed:
+/// Diagnose any parameter left unbound after the call args are processed,
+/// excluding parameters that declare a default:
 /// `module 'tpsm84338' missing argument(s): rled`.
 fn checkMissingParams(self: *Evaluator, mod: ModuleDef, bound: []const ?Value, call_span: ast.Span) EvalError!void {
     var missing: std.ArrayListUnmanaged(u8) = .empty;
     defer missing.deinit(self.allocator);
     for (mod.params, 0..) |param, i| {
         if (bound[i] != null) continue;
+        if (mod.defaults[i] != null) continue;
         if (missing.items.len > 0) try missing.appendSlice(self.allocator, ", ");
         try missing.appendSlice(self.allocator, param);
     }
@@ -477,6 +505,36 @@ test "callModule missing arguments errors" {
     try testing.expectError(EvalError.ArityError, r);
     const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
     try testing.expect(std.mem.indexOf(u8, diag.message, "module 'tps' missing argument(s): rfbb, rled") != null);
+}
+
+// spec: eval/modules - Omitted parameters fall back to their declared (param default) value
+test "callModule default fills omitted argument" {
+    var eval: Evaluator = undefined;
+    const v = try evalModuleSource(std.heap.page_allocator, &eval, "(defmodule m (a (b 4)) (- a b)) (m 10)");
+    try testing.expectEqual(@as(f64, 6.0), v.asNumber().?);
+}
+
+// spec: eval/modules - A supplied argument overrides the parameter's declared default
+test "callModule explicit argument overrides default" {
+    var eval: Evaluator = undefined;
+    const v = try evalModuleSource(std.heap.page_allocator, &eval, "(defmodule m ((a 2) (b 3)) (- a b)) (m (b 1))");
+    try testing.expectEqual(@as(f64, 1.0), v.asNumber().?);
+}
+
+// spec: eval/modules - A later parameter's default may reference an earlier parameter
+test "callModule default references earlier param" {
+    var eval: Evaluator = undefined;
+    const v = try evalModuleSource(std.heap.page_allocator, &eval, "(defmodule m (a (b a)) (+ a b)) (m 5)");
+    try testing.expectEqual(@as(f64, 10.0), v.asNumber().?);
+}
+
+// spec: eval/modules - Required parameters are still diagnosed when only defaulted ones are unbound
+test "callModule missing required param with defaults present" {
+    var eval: Evaluator = undefined;
+    const r = evalModuleSource(std.heap.page_allocator, &eval, "(defmodule m (a (b 2)) (+ a b)) (m)");
+    try testing.expectError(EvalError.ArityError, r);
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expect(std.mem.indexOf(u8, diag.message, "module 'm' missing argument(s): a") != null);
 }
 
 // spec: eval/modules - Surplus positional arguments are diagnosed with expected and actual counts
