@@ -268,7 +268,7 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
     );
     try w.writeAll(
         "<button class=\"head-link head-btn\" id=\"copy-src-btn\" type=\"button\" " ++
-            "title=\"Copy the raw .sexp source to the clipboard\">\u{1F4CB} Copy SRC</button>",
+            "title=\"Download the raw .sexp source file\">\u{2B07} Export SRC</button>",
     );
     try w.writeAll("<button class=\"head-link head-btn\" id=\"erc-btn\" type=\"button\">ERC</button>");
     // Version history (designs only — module sources aren't snapshotted):

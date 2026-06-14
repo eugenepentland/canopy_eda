@@ -1310,26 +1310,24 @@
   wireKicadPushButton(pushPcbDotBtn, '/api/sync-kicad-pcb/' + DESIGN_NAME + '?dot_nets=1', 'Pushing (per-pin nets)…');
   wireKicadPushButton(pushPcbRefreshBtn, '/api/sync-kicad-pcb/' + DESIGN_NAME + '?refresh=1', 'Refreshing footprints…');
 
-  // ---- Copy SRC ----
-  // Fetches the raw .sexp source via /api/source/:name and writes it to the
-  // clipboard. Falls back to a hidden textarea + execCommand when the async
-  // Clipboard API is unavailable (older browsers, non-HTTPS contexts).
+  // ---- Export SRC ----
+  // Fetches the raw .sexp source via /api/source/:name and saves it as a
+  // <design>.sexp file download (Blob + a temporary <a download>).
   var copySrcBtn = document.getElementById('copy-src-btn');
   if (copySrcBtn) {
     copySrcBtn.addEventListener('click', function () {
       if (copySrcBtn.dataset.busy === '1') return;
       copySrcBtn.dataset.busy = '1';
       var original = copySrcBtn.textContent;
-      copySrcBtn.textContent = 'Copying…';
+      copySrcBtn.textContent = 'Exporting…';
       fetch('/api/source/' + DESIGN_NAME).then(function (r) {
         if (!r.ok) throw new Error('fetch failed: ' + r.status);
         return r.json();
       }).then(function (j) {
         var src = (j && typeof j.source === 'string') ? j.source : '';
         if (!src) throw new Error('empty source');
-        return copyToClipboard(src);
-      }).then(function () {
-        copySrcBtn.textContent = '✓ Copied';
+        downloadText(DESIGN_NAME + '.sexp', src);
+        copySrcBtn.textContent = '✓ Exported';
         setTimeout(function () {
           copySrcBtn.textContent = original;
           copySrcBtn.dataset.busy = '';
@@ -1337,28 +1335,23 @@
       }).catch(function (e) {
         copySrcBtn.textContent = original;
         copySrcBtn.dataset.busy = '';
-        alert('Copy failed: ' + e);
+        alert('Export failed: ' + e);
       });
     });
   }
 
-  function copyToClipboard(text) {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      return navigator.clipboard.writeText(text);
-    }
-    return new Promise(function (resolve, reject) {
-      try {
-        var ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.left = '-9999px';
-        document.body.appendChild(ta);
-        ta.select();
-        var ok = document.execCommand('copy');
-        document.body.removeChild(ta);
-        if (ok) resolve(); else reject(new Error('execCommand returned false'));
-      } catch (e) { reject(e); }
-    });
+  // Trigger a browser download of `text` as `filename` via a transient
+  // object-URL anchor (revoked once the click is dispatched).
+  function downloadText(filename, text) {
+    var blob = new Blob([text], { type: 'application/octet-stream' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 0);
   }
 
   // ---- ERC panel ----
