@@ -341,6 +341,37 @@ tab) is authored with `(diagram-layout (anchor "x") (place "y"
 but prefer `diagram-layout` in new files: the word "layout" alone now
 means PCB placement (`(placement …)`, `(floorplan …)`, `/pcb-layout`).
 
+The Layout tab is a **semantic-zoom ladder**: zoomed all the way out it
+draws the **LOD0 "glance" layer** — one chip per `(group …)` region (or
+ungrouped block), each chip the bounding box of its members — and zooming
+in cross-fades to the detailed block diagram, then to the cloned real
+schematic.
+
+**Keeping the Layout diagram current — two halves, one automatic, one not:**
+
+- *Render-time (automatic, every design).* A `(group …)` whose members are
+  spatially scattered produces a huge bounding box that can overlap — or
+  swallow whole — other chips. The LOD0 layer therefore **auto-separates**
+  overlapping glance chips at render time (`separateEntities` in
+  `src/diagram/lod.zig`): a deterministic push-apart along the
+  smaller-overlap axis, each chip's click-to-zoom target pinned to its
+  *original* member bounds. There is no per-design chip tuning and nothing
+  to regenerate — every design's glance layer is overlap-free by
+  construction. The author's job is upstream: keep each `(group …)`
+  spatially coherent so its box doesn't sprawl across the page to begin
+  with (a group spanning the whole sheet still separates cleanly, it just
+  reads as a giant card).
+
+- *Authoring (per design, manual).* Every design should carry a
+  `(diagram-layout …)` and keep it in sync with the netlist. When you add,
+  remove, or rename a `(sub-block …)` / `(section …)` / `(group …)`,
+  refresh the matching `(anchor …)` / `(place …)` entries in the same edit:
+  a `(place …)` naming a block that no longer exists is dropped silently,
+  and a new block with no `(place …)` falls back to the engine's
+  auto-placement and can land anywhere. After any structural edit, reload
+  `/schematics/<name>`, eyeball the Layout tab at full zoom-out, and treat a
+  stale or scattered diagram as part of the change still to finish.
+
 ### Lint warnings
 
 Unknown sub-forms / enum words inside known forms (e.g. `(role inptu)`, a
