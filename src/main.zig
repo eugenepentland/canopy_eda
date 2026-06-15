@@ -446,6 +446,7 @@ test {
     _ = @import("export_kicad_footprint.zig");
     _ = @import("serve.zig");
     _ = @import("serve/auth_store.zig");
+    _ = @import("serve/users.zig");
     _ = @import("serve/sync.zig");
     _ = @import("serve/component_search.zig");
     _ = @import("serve/digikey.zig");

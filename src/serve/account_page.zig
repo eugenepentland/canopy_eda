@@ -39,11 +39,11 @@ pub fn accountPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     const clients = try store.listClientsByEmail(ctx.allocator, ctx.auth_dir, email);
     defer ctx.allocator.free(clients);
 
-    const current_role = users.getRole(ctx.allocator, ctx.project_dir, email);
+    const current_role = users.getRole(ctx.allocator, ctx.auth_dir, email);
     const is_admin = current_role.canAdmin();
 
     const user_list: []users.User = if (is_admin)
-        try users.listUsers(ctx.allocator, ctx.project_dir)
+        try users.listUsers(ctx.allocator, ctx.auth_dir)
     else
         &[_]users.User{};
     defer if (is_admin) ctx.allocator.free(user_list);
@@ -134,7 +134,7 @@ fn requireAdmin(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) ?[]con
         res.body = "{\"error\":\"sign in required\"}";
         return null;
     };
-    if (!users.getRole(ctx.allocator, ctx.project_dir, email).canAdmin()) {
+    if (!users.getRole(ctx.allocator, ctx.auth_dir, email).canAdmin()) {
         res.status = 403;
         res.content_type = .JSON;
         res.body = "{\"error\":\"admin role required\"}";
@@ -175,7 +175,7 @@ pub fn updateUserRoleApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
         return;
     };
 
-    const ok = users.setRole(ctx.allocator, ctx.project_dir, target, new_role, actor) catch |err| {
+    const ok = users.setRole(ctx.allocator, ctx.auth_dir, target, new_role, actor) catch |err| {
         if (err == error.LastAdmin) {
             res.status = 409;
             res.content_type = .JSON;
@@ -222,7 +222,7 @@ pub fn deleteUserApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         return;
     }
 
-    const ok = users.deleteUser(ctx.allocator, ctx.project_dir, target, actor) catch |err| {
+    const ok = users.deleteUser(ctx.allocator, ctx.auth_dir, target, actor) catch |err| {
         res.status = 409;
         res.content_type = .JSON;
         res.body = switch (err) {
@@ -240,7 +240,7 @@ pub fn deleteUserApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 
     // Cascade: revoke OAuth clients, drop passkeys + sessions.
     store.revokeAllClientsForEmail(ctx.allocator, ctx.auth_dir, target);
-    auth.purgeIdentity(ctx.allocator, ctx.project_dir, target);
+    auth.purgeIdentity(ctx.allocator, ctx.auth_dir, target);
 
     res.content_type = .JSON;
     res.body = OK_JSON_TRUE;

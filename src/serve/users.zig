@@ -246,3 +246,33 @@ pub fn deleteUser(
     saveUsers(allocator, auth_dir);
     return true;
 }
+
+// ── Tests ──────────────────────────────────────────────────────────────
+
+// spec: serve/users - The user/role store persists to and resolves from auth_dir, not the project dir (users.json lives at <auth_dir>/users.json)
+// Locks the invariant the account-page and MCP role checks rely on: every
+// caller must pass `auth_dir` to read the same data that was written there.
+test "user store reads and writes under auth_dir" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const auth_dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(auth_dir);
+
+    // Reset the process-global store so this test is order-independent.
+    users_list.clearRetainingCapacity();
+    loaded_auth_dir = null;
+
+    // First user is bootstrapped as admin and persisted under auth_dir.
+    const role = try ensureUser(alloc, auth_dir, "admin@example.com", .writer);
+    try std.testing.expectEqual(Role.admin, role);
+
+    // The store file must live at `<auth_dir>/users.json`.
+    var f = try tmp.dir.openFile("users.json", .{});
+    f.close();
+
+    // Reading the role back from the same auth_dir resolves the admin.
+    try std.testing.expectEqual(Role.admin, getRole(alloc, auth_dir, "admin@example.com"));
+    // An unknown email defaults to reader.
+    try std.testing.expectEqual(Role.reader, getRole(alloc, auth_dir, "stranger@example.com"));
+}

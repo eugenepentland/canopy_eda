@@ -32,6 +32,7 @@ unlinked tag: serve/design_diff - identical revisions produce an empty diff in .
 unlinked tag: serve/diag_format - build blanks the source line when the span doesn't match the buffer (module-file spans) in ./src/serve/diag_format.zig
 unlinked tag: serve/diag_format - build extracts the offending source line from the buffer at the span in ./src/serve/diag_format.zig
 unlinked tag: serve/diag_format - caretLine pads to the 1-based column (preserving tabs) and ends with a caret in ./src/serve/diag_format.zig
+unlinked tag: serve/users - The user/role store persists to and resolves from auth_dir, not the project dir (users.json lives at <auth_dir>/users.json) in ./src/serve/users.zig
 unverified: serve/notes - Reads and writes `<design>.notes.md` next to the design source file
 unverified: serve/notes - Rejects bodies larger than 1 MiB
 unverified: serve/notes - Returns an empty string when no notes file exists yet
