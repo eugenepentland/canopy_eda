@@ -384,6 +384,7 @@ Public functions: computeLayout, hasSystemView, computeSystemLayout, computeChai
 - computeFreeLayout drops a scattered group's box from routing obstacles instead of punching the wire through a block
 - computeFreeLayout lays each layout row as a horizontal band, stacking bands top-to-bottom
 - computeFreeLayout boxes each layout group around its members with a labeled top strip
+- computeFreeLayout separates overlapping (group …) boxes onto disjoint grid cells so group regions never overlap
 - computeFreeLayout pins edge-directive blocks to the column just outside the rest of the content
 - computeFreeLayout routes each edge as an orthogonal polyline around any group box neither endpoint belongs to
 - computeFreeLayout spreads wires sharing a corridor into parallel lanes instead of overlapping

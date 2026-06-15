@@ -580,6 +580,127 @@ fn nodeByKey(graph: *const Graph, name: []const u8) ?u32 {
     return null;
 }
 
+/// Cap for the group-separation relaxation; a handful of passes settles any
+/// real diagram (mirrors `lod.separateEntities`).
+const group_sep_pass_cap = 256;
+
+/// Push overlapping `(group …)` regions onto disjoint grid cells so their drawn
+/// boxes — and the glance chips built from them — never overlap, while every
+/// block stays on the free-layout lattice.
+///
+/// Each `(group …)` (first-declaring-group wins per block) and each ungrouped
+/// block becomes a rigid *cluster* occupying the integer cell bounding box of
+/// its members. Positions are exact multiples of the column/row pitch off
+/// `ox0`/`oy0`, so each LNode maps back to its lattice cell losslessly. A
+/// deterministic push-apart then runs on the cluster cell boxes: any two whose
+/// cell ranges intersect on both axes move the higher-centred cluster (all its
+/// members together) along the smaller-overlap axis by just enough whole cells
+/// to clear. Because clusters are rigid and moves are whole cells, intra-group
+/// relative placement is preserved and blocks stay grid-aligned. A drawn box is
+/// the cell box plus sub-cell padding, and one lattice step (≥ `free_h_gap` /
+/// `free_v_gap` px) dwarfs that padding — so disjoint cell boxes guarantee
+/// disjoint drawn boxes. Members are written back to pixels in place. No-op when
+/// the design declares no groups.
+fn separateGroupClusters(arena: Allocator, graph: *const Graph, nodes: []LNode, ox0: f64, oy0: f64) Allocator.Error!void {
+    if (graph.layout.groups.len == 0 or nodes.len == 0) return;
+    const col_pitch = node_w + free_h_gap;
+    const row_pitch = node_h + free_v_gap;
+    const col = try arena.alloc(i32, nodes.len);
+    const row = try arena.alloc(i32, nodes.len);
+    for (nodes, 0..) |ln, k| {
+        col[k] = @intFromFloat(@round((ln.x - ox0) / col_pitch));
+        row[k] = @intFromFloat(@round((ln.y - oy0) / row_pitch));
+    }
+    // Cluster id per LNode: each group (first-declaring wins) is one cluster,
+    // each ungrouped block its own. Map graph gid → LNode index first.
+    const idx_of = try arena.alloc(?usize, graph.nodes.len);
+    @memset(idx_of, null);
+    for (nodes, 0..) |ln, k| idx_of[ln.gid] = k;
+    const cluster = try arena.alloc(i32, nodes.len);
+    @memset(cluster, -1);
+    var ncl: i32 = 0;
+    for (graph.layout.groups) |g| {
+        var cid: i32 = -1;
+        for (g.members) |name| {
+            const gid = nodeByKey(graph, name) orelse continue;
+            const k = idx_of[gid] orelse continue;
+            if (cluster[k] != -1) continue; // already claimed by an earlier group
+            if (cid == -1) {
+                cid = ncl;
+                ncl += 1;
+            }
+            cluster[k] = cid;
+        }
+    }
+    for (cluster) |*c| {
+        if (c.* == -1) {
+            c.* = ncl;
+            ncl += 1;
+        }
+    }
+    if (ncl <= 1) return;
+    const m: usize = @intCast(ncl);
+    const c0 = try arena.alloc(i32, m); // cluster cell bounding box: min/max col, min/max row
+    const c1 = try arena.alloc(i32, m);
+    const r0 = try arena.alloc(i32, m);
+    const r1 = try arena.alloc(i32, m);
+    for (0..m) |c| {
+        c0[c] = std.math.maxInt(i32);
+        c1[c] = std.math.minInt(i32);
+        r0[c] = std.math.maxInt(i32);
+        r1[c] = std.math.minInt(i32);
+    }
+    for (cluster, 0..) |cid, k| {
+        const c: usize = @intCast(cid);
+        c0[c] = @min(c0[c], col[k]);
+        c1[c] = @max(c1[c], col[k]);
+        r0[c] = @min(r0[c], row[k]);
+        r1[c] = @max(r1[c], row[k]);
+    }
+    // Push-apart on the cell boxes: only ever moves clusters in the +col/+row
+    // direction, so total displacement is monotone and the loop converges.
+    var pass: usize = 0;
+    while (pass < group_sep_pass_cap) : (pass += 1) {
+        var moved = false;
+        for (0..m) |i| {
+            for (i + 1..m) |j| {
+                const ocx = @min(c1[i], c1[j]) - @max(c0[i], c0[j]) + 1; // shared cols, >0 ⇒ overlap
+                const ocy = @min(r1[i], r1[j]) - @max(r0[i], r0[j]) + 1;
+                if (ocx <= 0 or ocy <= 0) continue;
+                moved = true;
+                if (ocx <= ocy) {
+                    const mv: i32 = if ((c0[i] + c1[i]) <= (c0[j] + c1[j])) @intCast(j) else @intCast(i);
+                    for (cluster, 0..) |cid, k| if (cid == mv) {
+                        col[k] += ocx;
+                    };
+                    c0[@intCast(mv)] += ocx;
+                    c1[@intCast(mv)] += ocx;
+                } else {
+                    const mv: i32 = if ((r0[i] + r1[i]) <= (r0[j] + r1[j])) @intCast(j) else @intCast(i);
+                    for (cluster, 0..) |cid, k| if (cid == mv) {
+                        row[k] += ocy;
+                    };
+                    r0[@intCast(mv)] += ocy;
+                    r1[@intCast(mv)] += ocy;
+                }
+            }
+        }
+        if (!moved) break;
+    }
+    // Re-normalise to a 0,0 origin (moves only pushed +, but stay defensive),
+    // then write members back to pixel positions on the lattice.
+    var mincol: i32 = std.math.maxInt(i32);
+    var minrow: i32 = std.math.maxInt(i32);
+    for (col, row) |c, r| {
+        mincol = @min(mincol, c);
+        minrow = @min(minrow, r);
+    }
+    for (nodes, 0..) |*ln, k| {
+        ln.x = ox0 + @as(f64, @floatFromInt(col[k] - mincol)) * col_pitch;
+        ln.y = oy0 + @as(f64, @floatFromInt(row[k] - minrow)) * row_pitch;
+    }
+}
+
 /// The free **Layout** view: place blocks at the cells their `(place …)`
 /// directives imply, convert to pixels, route edges face-to-face, and flow any
 /// un-placed block into a row below. Returns null when no `(layout …)` was
@@ -658,6 +779,19 @@ pub fn computeFreeLayout(arena: Allocator, graph: *const Graph) Allocator.Error!
     if (lnodes.items.len == 0) return null;
 
     const nodes = try lnodes.toOwnedSlice(arena);
+    // Group-aware separation: nudge overlapping `(group …)` regions onto
+    // disjoint grid cells so their boxes (and the LOD-0 glance chips built from
+    // them) never overlap, keeping every block on the lattice.
+    try separateGroupClusters(arena, graph, nodes, pad + gx, pad + top_reserve + gy);
+    // Blocks may have moved; recompute the content extent before boxing/routing.
+    max_x = 0;
+    max_y = 0;
+    for (nodes) |ln| {
+        const nd = graph.nodes[ln.gid];
+        const re: f64 = if (nd.stack > 1) @as(f64, @floatFromInt(nd.stack - 1)) * stack_card_offset else 0;
+        max_x = @max(max_x, ln.x + node_w + re);
+        max_y = @max(max_y, ln.y + node_h);
+    }
     const groups = try computeGroupBoxes(arena, graph, nodes);
     for (groups) |gb| {
         max_x = @max(max_x, gb.x + gb.w);
@@ -2633,6 +2767,45 @@ test "computeFreeLayout boxes a layout group around its members" {
     try testing.expect(g.y < xy[0].y);
     try testing.expect(g.x + g.w > xy[1].x + node_w);
     try testing.expect(g.y + g.h > xy[0].y + node_h);
+}
+
+// spec: diagram/layout - computeFreeLayout separates overlapping (group …) boxes onto disjoint grid cells so group regions never overlap
+test "computeFreeLayout separates interleaved group boxes" {
+    // G1 = {a, c}, G2 = {b}, placed a→b→c left-to-right: G1's raw box (a..c)
+    // swallows G2's box (just b). The separation pass must move a whole cluster
+    // so the two drawn boxes end up disjoint, with blocks still on the lattice.
+    var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("b"), mkKeyed("c") };
+    const b_right_a = [_]env_mod.PlaceConstraint{.{ .rel = .right_of, .reference = "a" }};
+    const c_right_b = [_]env_mod.PlaceConstraint{.{ .rel = .right_of, .reference = "b" }};
+    const placements = [_]env_mod.Placement{
+        .{ .name = "a" },
+        .{ .name = "b", .constraints = &b_right_a },
+        .{ .name = "c", .constraints = &c_right_b },
+    };
+    const g1m = [_][]const u8{ "a", "c" };
+    const g2m = [_][]const u8{"b"};
+    const groups = [_]env_mod.LayoutGroup{
+        .{ .label = "G1", .members = &g1m },
+        .{ .label = "G2", .members = &g2m },
+    };
+    const graph = Graph{ .nodes = &nodes, .edges = &.{}, .layout = .{ .placements = &placements, .groups = &groups } };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeFreeLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), lay.groups.len);
+    const ga = lay.groups[0];
+    const gb = lay.groups[1];
+    // Drawn boxes disjoint: no overlap on at least one axis.
+    const ox = @min(ga.x + ga.w, gb.x + gb.w) - @max(ga.x, gb.x);
+    const oy = @min(ga.y + ga.h, gb.y + gb.h) - @max(ga.y, gb.y);
+    try testing.expect(ox <= 0 or oy <= 0);
+    // Every block still sits on the column lattice (gx = group_pad with groups).
+    const xy = nodeXY(lay.nodes);
+    const pitch = node_w + free_h_gap;
+    for (xy[0..3]) |p| {
+        const cells = (p.x - (pad + group_pad)) / pitch;
+        try testing.expect(@abs(cells - @round(cells)) < 0.01);
+    }
 }
 
 // spec: diagram/layout - computeFreeLayout routes each edge as an orthogonal polyline around any group box neither endpoint belongs to
