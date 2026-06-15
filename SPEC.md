@@ -380,6 +380,8 @@ Public functions: computeLayout, hasSystemView, computeSystemLayout, computeChai
 - computeFreeLayout flows un-placed blocks into a fallback row below the placed cluster
 - computeFreeLayout places a block with a missing reference into the fallback row without aborting
 - computeFreeLayout breaks a placement cycle instead of looping forever
+- computeFreeLayout bumps a placement that resolves onto an occupied cell to the next free cell
+- computeFreeLayout drops a scattered group's box from routing obstacles instead of punching the wire through a block
 - computeFreeLayout lays each layout row as a horizontal band, stacking bands top-to-bottom
 - computeFreeLayout boxes each layout group around its members with a labeled top strip
 - computeFreeLayout pins edge-directive blocks to the column just outside the rest of the content
@@ -407,10 +409,11 @@ Public functions: computeLayout, hasSystemView, computeSystemLayout, computeChai
 
 ## diagram/lod
 
-Public functions: writeGlanceLayer
+Public functions: buildGlanceEntities, writeGlanceLayer
 
 - Aggregates base edges into one glance connection per entity pair and class, summing fanouts
 - Renders a glance chip per group and per ungrouped block with member captions
+- Separates overlapping glance chips so chips never stack while keeping each chip's original zoom target
 
 ## diagram/render
 

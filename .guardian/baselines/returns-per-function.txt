@@ -1,4 +1,5 @@
 # guardian-snapshot v1
+src/diagram/layout.zig:1091: fn 'buildFreeRoute' has 14 return statements (cap 12)
 src/eval/env.zig:409: fn 'parseCheck' has 79 return statements (cap 12)
 src/eval/ids.zig:226: fn 'componentPrefix' has 17 return statements (cap 12)
 src/render_svg/connection.zig:320: fn 'tryChainConns' has 14 return statements (cap 12)

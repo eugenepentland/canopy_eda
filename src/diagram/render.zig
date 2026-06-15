@@ -188,12 +188,25 @@ fn renderSystemBody(arena: Allocator, w: *Writer, graph: *const Graph, lay: layo
     // layer and a glance layer (group chips + aggregated connections) sits on
     // top; CSS keyed on `data-lod` cross-fades them as the viewer zooms.
     const with_lod = rail_mode and lay.groups.len > 0;
-    try writeSvgOpen(w, lay.width, lay.height, with_lod);
+    // Glance chips are built before the `<svg>` tag: their separation pass can
+    // push a chip past the base layout's extent, and the viewBox must cover
+    // both layers.
+    const glance_ents: []lod.Entity = if (with_lod)
+        try lod.buildGlanceEntities(arena, graph, lay, &group_palette)
+    else
+        &.{};
+    var cw = lay.width;
+    var ch = lay.height;
+    for (glance_ents) |e| {
+        cw = @max(cw, e.x + e.w + layout.pad);
+        ch = @max(ch, e.y + e.h + layout.pad);
+    }
+    try writeSvgOpen(w, cw, ch, with_lod);
     if (with_lod) try w.writeAll("<g class=\"dg-base\">");
     try renderSystemView(arena, w, graph, lay, rail_mode);
     if (with_lod) {
         try w.writeAll("</g>");
-        try lod.writeGlanceLayer(arena, w, graph, lay, &group_palette);
+        try lod.writeGlanceLayer(arena, w, graph, lay, glance_ents);
     }
     try w.writeAll("</svg>");
 }
