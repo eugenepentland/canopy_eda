@@ -349,18 +349,24 @@ schematic.
 
 **Keeping the Layout diagram current — two halves, one automatic, one not:**
 
-- *Render-time (automatic, every design).* A `(group …)` whose members are
-  spatially scattered produces a huge bounding box that can overlap — or
-  swallow whole — other chips. The LOD0 layer therefore **auto-separates**
-  overlapping glance chips at render time (`separateEntities` in
-  `src/diagram/lod.zig`): a deterministic push-apart along the
-  smaller-overlap axis, each chip's click-to-zoom target pinned to its
-  *original* member bounds. There is no per-design chip tuning and nothing
-  to regenerate — every design's glance layer is overlap-free by
-  construction. The author's job is upstream: keep each `(group …)`
-  spatially coherent so its box doesn't sprawl across the page to begin
-  with (a group spanning the whole sheet still separates cleanly, it just
-  reads as a giant card).
+- *Render-time (automatic, every design).* A `(group …)` box is the bounding
+  box of its members, so interleaved members produce huge overlapping (or
+  engulfing) region boxes — at *every* zoom level, not just the glance
+  chips. `computeFreeLayout` therefore runs a **group-aware separation**
+  (`separateGroupClusters` in `src/diagram/layout.zig`): each `(group …)`
+  and each ungrouped block is a rigid cluster occupying its members' integer
+  cell box, and overlapping cell boxes push apart by whole cells along the
+  smaller-overlap axis. Blocks stay on the `node_w+free_h_gap` ×
+  `node_h+free_v_gap` lattice, intra-group relative placement is preserved,
+  and disjoint cell boxes guarantee disjoint *drawn* boxes at LOD1/LOD2 —
+  which in turn makes the LOD0 glance chips (built from those boxes) disjoint
+  and grid-snapped for free (`separateEntities` in `src/diagram/lod.zig`
+  remains as a cheap glance-layer safety net, now usually a no-op). The pass
+  is a no-op for designs whose groups are already contiguous; only ones with
+  interleaved groups get respread (and the page gets wider). There is no
+  per-design tuning and nothing to regenerate. The author's job is upstream:
+  keep each `(group …)` spatially coherent so the engine needn't respread it
+  — co-locate a group's members in the `(place …)` directives.
 
 - *Authoring (per design, manual).* Every design should carry a
   `(diagram-layout …)` and keep it in sync with the netlist. When you add,
