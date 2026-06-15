@@ -434,6 +434,17 @@ src/placement/geometry.zig::Pad struct_
 src/placement/geometry.zig::SilkCircle struct_
 src/placement/geometry.zig::SilkLine struct_
 src/placement/geometry.zig::load fn
+src/placement/layout_lint.zig::Finding struct_
+src/placement/layout_lint.zig::Severity enum_
+src/placement/layout_lint.zig::freeFindings fn
+src/placement/layout_lint.zig::lint fn
+src/placement/module_policy.zig::ModuleClass enum_
+src/placement/module_policy.zig::ModuleInfo struct_
+src/placement/module_policy.zig::ModulePolicy struct_
+src/placement/module_policy.zig::NetClass enum_
+src/placement/module_policy.zig::PartRole enum_
+src/placement/module_policy.zig::analyze fn
+src/placement/module_policy.zig::classifyNetName fn
 src/placement/optimizer.zig::BoardRect struct_
 src/placement/optimizer.zig::Breakdown struct_
 src/placement/optimizer.zig::CompactMode enum_

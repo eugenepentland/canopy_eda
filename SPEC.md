@@ -142,6 +142,20 @@ Public functions: check
 - passes a via that shares the pad's net
 - a routed module with a crowded ground pad has no clearance violations
 
+## placement/module_policy
+
+Public functions: analyze, classifyNetName
+
+- classifies ground, input-rail, switch-node and feedback nets by name
+- infers a buck module from an inductor on the input rail and tags the input cap
+
+## placement/layout_lint
+
+Public functions: lint, freeFindings
+
+- flags a decoupling cap whose power-leg exceeds the 6 mm budget
+- flags a feedback part placed within keep-out of a switching-node aggressor
+
 ## placement/pin_roles
 
 Public functions: load, isGroundFn

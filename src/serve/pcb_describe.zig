@@ -16,6 +16,8 @@ const httpz = @import("httpz");
 const optimizer = @import("../placement/optimizer.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
+const module_policy = @import("../placement/module_policy.zig");
+const layout_lint = @import("../placement/layout_lint.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const modules_mod = @import("modules.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
@@ -86,6 +88,8 @@ pub const DescribeError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
 /// `"origin"` JSON key — the stable module-local name, emitted beside every ref.
 const ORIGIN_KEY = ",\"origin\":";
+/// Opening of a `{"ref": …}` object — emitted for parts, hub-pad maps, and roles.
+const REF_KEY = "{\"ref\":";
 
 /// Emit the full facts document. Split from `describeDesign` so tests can run
 /// it on a hand-built `Placement` without a project on disk.
@@ -175,7 +179,7 @@ pub fn writeDescribeJson(
     try w.writeAll(",\"parts\":[");
     for (p.parts, 0..) |part, pi| {
         if (pi > 0) try w.writeAll(",");
-        try w.writeAll("{\"ref\":");
+        try w.writeAll(REF_KEY);
         try pcb_layout_page.writeJsonStr(w, part.ref_des);
         try w.writeAll(ORIGIN_KEY);
         try pcb_layout_page.writeJsonStr(w, originOf(p, pi));
@@ -242,7 +246,16 @@ pub fn writeDescribeJson(
     try w.writeAll("]");
 
     try writeHubPads(w, alloc, p, &pad_net);
-    try writeLint(w, alloc, p, spec, wrong_side.items);
+
+    // Module-policy facts (Phase 0) + layout verification gates (Phase 1): both
+    // pure analyses over the solved placement, surfaced here so the facts and
+    // the lint match the board the PNG shows.
+    var policy = try module_policy.analyze(alloc, p);
+    defer policy.deinit(alloc);
+    const findings = try layout_lint.lint(alloc, p, policy);
+    defer layout_lint.freeFindings(alloc, findings);
+    try writeModulePolicy(w, p, policy);
+    try writeLint(w, alloc, p, spec, wrong_side.items, findings);
 
     if (routed) |r| {
         try w.print(",\"routed\":{{\"trace_mm\":{d:.1},\"tracks\":{d},\"vias\":{d},\"drc\":{d}}}", .{ r.trace_mm, r.tracks, r.vias, r.drc });
@@ -336,14 +349,70 @@ fn lintItem(
     try w.writeAll("}");
 }
 
+/// The module-policy facts block (Phase 0): the detected module classes,
+/// criticality net classes (only the routing-order-relevant ones, to stay
+/// concise), and the inferred passive roles. Pure observation — it lets an
+/// agent see how the board was read before trusting the lint below.
+fn writeModulePolicy(
+    w: *std.Io.Writer,
+    p: optimizer.Placement,
+    policy: module_policy.ModulePolicy,
+) DescribeError!void {
+    try w.writeAll(",\"module_policy\":{\"modules\":[");
+    for (policy.modules, 0..) |m, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"hub\":");
+        try pcb_layout_page.writeJsonStr(w, p.parts[m.hub].ref_des);
+        try w.writeAll(ORIGIN_KEY);
+        try pcb_layout_page.writeJsonStr(w, originOf(p, m.hub));
+        try w.print(",\"class\":\"{s}\",\"has_inductor\":{}}}", .{ @tagName(m.class), m.has_inductor });
+    }
+    try w.writeAll("],\"net_classes\":[");
+    var first = true;
+    for (p.nets, 0..) |net, i| {
+        if (i >= policy.net_class.len or !interestingNetClass(policy.net_class[i])) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.writeAll("{\"net\":");
+        try pcb_layout_page.writeJsonStr(w, net.name);
+        try w.print(",\"class\":\"{s}\"}}", .{@tagName(policy.net_class[i])});
+    }
+    try w.writeAll("],\"roles\":[");
+    first = true;
+    for (p.parts, 0..) |part, i| {
+        if (i >= policy.part_role.len) break;
+        const r = policy.part_role[i];
+        if (r == .other or r == .anchor_ic) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.writeAll(REF_KEY);
+        try pcb_layout_page.writeJsonStr(w, part.ref_des);
+        try w.writeAll(ORIGIN_KEY);
+        try pcb_layout_page.writeJsonStr(w, originOf(p, i));
+        try w.print(",\"role\":\"{s}\"}}", .{@tagName(r)});
+    }
+    try w.writeAll("]}");
+}
+
+/// Only the criticality-bearing net classes earn a facts line — ground, power,
+/// control, and plain signal are the bulk of nets and add noise.
+fn interestingNetClass(c: module_policy.NetClass) bool {
+    return switch (c) {
+        .input_rail, .switch_node, .clock, .rf, .feedback, .analog => true,
+        .ground, .power, .control, .signal => false,
+    };
+}
+
 /// Placement lint: machine-checkable rules an agent should fix before trusting
 /// the layout. Spec coverage problems are errors; geometric smells are warns.
+/// `findings` are the Phase-1 layout gates, appended after the built-in rules.
 fn writeLint(
     w: *std.Io.Writer,
     alloc: std.mem.Allocator,
     p: optimizer.Placement,
     spec: ?render_pcb_png.SpecStatus,
     wrong_side: []const []const u8,
+    findings: []const layout_lint.Finding,
 ) DescribeError!void {
     try w.writeAll(",\"lint\":[");
     var first = true;
@@ -408,6 +477,15 @@ fn writeLint(
             try lintItem(w, &first, "long-loop", sev_warn, refs.items, "decoupling loop inductance is more than twice the board median; tighten the cap to its supply pin");
         }
     }
+    // Phase-1 layout gates (decap-far, hot-loop-not-tightest, feedback-near-aggressor).
+    for (findings) |f| {
+        const sev = switch (f.severity) {
+            .err => sev_err,
+            .warn => sev_warn,
+            .info => "info",
+        };
+        try lintItem(w, &first, f.rule, sev, f.refs, f.msg);
+    }
     try w.writeAll("]");
 }
 
@@ -443,7 +521,7 @@ fn writeHubPads(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placem
         if (part.kind != .hub) continue;
         if (!first_hub) try w.writeAll(",");
         first_hub = false;
-        try w.writeAll("{\"ref\":");
+        try w.writeAll(REF_KEY);
         try pcb_layout_page.writeJsonStr(w, part.ref_des);
         try w.writeAll(ORIGIN_KEY);
         try pcb_layout_page.writeJsonStr(w, originOf(p, pi));
@@ -663,4 +741,8 @@ test "writeDescribeJson emits parts with sides, nets and hub pad map" {
     try std.testing.expect(std.mem.indexOf(u8, out, "\"nets\":[\"VIN\",\"GND\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"VIN\",\"edges\":[\"left\"],\"pads\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"source\":\"spec\"") != null);
+    // Module-policy facts: VIN reads as an input rail and C9 as the input cap.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"module_policy\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"VIN\",\"class\":\"input_rail\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"ref\":\"C9\",\"origin\":\"C_IN\",\"role\":\"input_cap\"") != null);
 }
