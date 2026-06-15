@@ -80,7 +80,6 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var verifications: std.ArrayListUnmanaged(env_mod.Verification) = .empty;
     var critical_ics: std.ArrayListUnmanaged(env_mod.CriticalIc) = .empty;
     var test_points: std.ArrayListUnmanaged(env_mod.TestPoint) = .empty;
-    var functions: std.ArrayListUnmanaged(env_mod.FunctionGroup) = .empty;
     var parts: std.ArrayListUnmanaged(env_mod.PlaceholderPart) = .empty;
     var placement_orders: std.ArrayListUnmanaged(env_mod.PlacementOrder) = .empty;
     var constraint_acc: ConstraintAcc = .{};
@@ -171,7 +170,6 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             .kicad_pcb => {
                 if (parseKicadPcbPath(form_children)) |p| kicad_pcb_path = p;
             },
-            .function => if (try parseFunction(self, form_children)) |f| try functions.append(self.allocator, f),
             .stub => if (try parseStub(self, form_children)) |p| {
                 ids.registerRefDes(self, p.part.ref_des);
                 try instances.append(self.allocator, p.instance);
@@ -225,7 +223,6 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .test_points = test_points.toOwnedSlice(self.allocator) catch &.{},
         .derating = derating,
         .kicad_pcb_path = kicad_pcb_path,
-        .functions = functions.toOwnedSlice(self.allocator) catch &.{},
         .parts = parts.toOwnedSlice(self.allocator) catch &.{},
         .layout = layout_spec,
         .placement_order = placement_orders.toOwnedSlice(self.allocator) catch &.{},
@@ -863,7 +860,6 @@ fn evalSection(
             .power_config,
             .decouple_defaults,
             .kicad_pcb,
-            .function,
             .stub,
             .layout,
             .placement_order,
@@ -1903,58 +1899,6 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
     };
 }
 
-/// Parse one `(function "Name" "Subtitle"? (verb "…")? (includes "a" "b" …)?)`
-/// form into a `FunctionGroup` for the high-level Function view. The first
-/// string after the head is the name, an optional second string is the
-/// subtitle; `(verb …)` is the action phrase and `(includes …)` lists the
-/// member section / sub-block names. Returns null when there's no name.
-fn parseFunction(self: *Evaluator, form_children: []const Node) EvalError!?env_mod.FunctionGroup {
-    if (form_children.len < 2) return null;
-    const name = form_children[1].asString() orelse return null;
-    var subtitle: []const u8 = "";
-    var verb: []const u8 = "";
-    var stack: u8 = 1;
-    var chain_pos: f64 = -1;
-    var chain_label: []const u8 = "";
-    var includes: std.ArrayListUnmanaged([]const u8) = .empty;
-    for (form_children[2..]) |node| {
-        if (node.asString()) |s| {
-            if (subtitle.len == 0) subtitle = s;
-            continue;
-        }
-        const lst = node.asList() orelse continue;
-        if (lst.len < 1) continue;
-        const head = lst[0].asAtom() orelse continue;
-        if (std.mem.eql(u8, head, "verb")) {
-            if (lst.len >= 2) verb = lst[1].asString() orelse lst[1].asAtom() orelse "";
-        } else if (std.mem.eql(u8, head, "stack")) {
-            if (lst.len >= 2) {
-                if (lst[1].asNumber()) |n| stack = @intFromFloat(@max(1, @min(9, n)));
-            }
-        } else if (std.mem.eql(u8, head, "chain")) {
-            // (chain <pos> "<label>"): narrative-stage position + name.
-            if (lst.len >= 2) {
-                if (lst[1].asNumber()) |n| chain_pos = n;
-            }
-            if (lst.len >= 3) chain_label = lst[2].asString() orelse lst[2].asAtom() orelse "";
-        } else if (std.mem.eql(u8, head, "includes")) {
-            for (lst[1..]) |inc| {
-                const s = inc.asString() orelse inc.asAtom() orelse continue;
-                includes.append(self.allocator, s) catch return EvalError.OutOfMemory;
-            }
-        }
-    }
-    return env_mod.FunctionGroup{
-        .name = name,
-        .subtitle = subtitle,
-        .verb = verb,
-        .stack = stack,
-        .chain_pos = chain_pos,
-        .chain_label = chain_label,
-        .includes = includes.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
-    };
-}
-
 // ── Tests ─────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -1984,36 +1928,6 @@ test "design-block captures (kicad-pcb path)" {
     };
     try testing.expect(block.kicad_pcb_path != null);
     try testing.expectEqualStrings("/mnt/nas/test.kicad_pcb", block.kicad_pcb_path.?);
-}
-
-// spec: eval/design_block - function form parses a named functional group with a verb and member sections
-test "design-block parses a (function …) group" {
-    const a = std.heap.page_allocator;
-    const src =
-        \\(design-block "test"
-        \\  (function "Measurement" "isolated DMM"
-        \\    (verb "measures V/R")
-        \\    (stack 2)
-        \\    (includes "DMM Analog Front-End" "DMM Cal EEPROM")))
-    ;
-    const nodes = try sexpr_parser.parse(a, src);
-    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
-
-    var eval = Evaluator.init(a, "");
-    defer eval.deinit();
-    var env = env_mod.Env.init(a, null);
-    defer env.deinit();
-
-    // Always a design_block here — access the payload directly (no branch).
-    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
-    try testing.expectEqual(@as(usize, 1), block.functions.len);
-    const f = block.functions[0];
-    try testing.expectEqualStrings("Measurement", f.name);
-    try testing.expectEqualStrings("isolated DMM", f.subtitle);
-    try testing.expectEqualStrings("measures V/R", f.verb);
-    try testing.expectEqual(@as(u8, 2), f.stack);
-    try testing.expectEqual(@as(usize, 2), f.includes.len);
-    try testing.expectEqualStrings("DMM Analog Front-End", f.includes[0]);
 }
 
 // spec: eval/design_block - board form parses outline size, edge lists, and corners

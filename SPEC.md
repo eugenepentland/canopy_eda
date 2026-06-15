@@ -523,7 +523,6 @@ Public functions: analyze
 - bus-port expands one port per index times optional suffix list
 - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
 - kicad-pcb form captures the literal path on the design block
-- function form parses a named functional group with a verb and member sections
 - layout form parses (anchor "name") roots and (place "name" (rel "ref")) directives
 - layout place resolves right-of/left-of/above/below into a relative offset from the referenced block
 - layout place collects multiple constraints so a block is positioned by several references

@@ -962,29 +962,6 @@ pub const PowerRail = struct {
     upstream_rail: ?[]const u8 = null,
 };
 
-/// The result of evaluating a design-block form.
-/// A declared high-level functional subsystem for the **Function** view — the
-/// glanceable "what does the system do" abstraction. `name` is the short
-/// functional title ("Measurement"), `subtitle` an optional one-liner, `verb`
-/// the action phrase shown on the block ("measures V/R, 3 kV isolated"), and
-/// `includes` the section / sub-block names that roll up into this function.
-/// Sections named by no `FunctionGroup` auto-group by category in the diagram.
-pub const FunctionGroup = struct {
-    name: []const u8,
-    subtitle: []const u8 = "",
-    verb: []const u8 = "",
-    includes: []const []const u8 = &.{},
-    /// `(stack N)`: render this block as N offset cards to show it's N identical
-    /// channels (e.g. a 2-channel PSU). 1 ⇒ a single box.
-    stack: u8 = 1,
-    /// `(chain <pos> "<label>")`: this block's place in the Signal Chain view —
-    /// `pos` orders the narrative stages (blocks sharing a pos group into one
-    /// stage), `label` names the stage. -1 ⇒ not in the chain (the view buckets
-    /// it under "Other"); the Signal Chain tab only appears when some block sets it.
-    chain_pos: f64 = -1,
-    chain_label: []const u8 = "",
-};
-
 /// One direction a `(place …)` constraint offsets a block in: horizontal
 /// (`right_of`/`left_of`) constraints set the column, vertical (`above`/`below`)
 /// set the row — so two constraints on different axes pin a block on both.
@@ -1161,10 +1138,6 @@ pub const DesignBlock = struct {
     /// when the design has no PCB target — the file-based KiCad sync
     /// endpoint refuses to write without it.
     kicad_pcb_path: ?[]const u8 = null,
-    /// Declared functional subsystems for the high-level Function view, from
-    /// top-level `(function …)` forms. Empty ⇒ the Function view auto-groups
-    /// every section by category instead.
-    functions: []const FunctionGroup = &.{},
     /// Placeholder parts declared via top-level `(stub …)` forms — sketched
     /// components with a bounding box and named signals but no real library
     /// footprint yet. They render as diagram nodes, export as pad-less KiCad
