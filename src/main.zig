@@ -465,6 +465,8 @@ test {
     _ = @import("placement/optimizer.zig");
     _ = @import("placement/router.zig");
     _ = @import("placement/drc.zig");
+    _ = @import("placement/module_policy.zig");
+    _ = @import("placement/layout_lint.zig");
     _ = @import("serve/pcb_layout_page.zig");
     _ = @import("serve/pcb_describe.zig");
     _ = @import("serve/diag_format.zig");

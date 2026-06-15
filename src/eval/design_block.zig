@@ -87,6 +87,8 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var placement_spec: env_mod.PlacementSpec = .{};
     var floorplan_spec: env_mod.PlacementSpec = .{};
     var board_spec: env_mod.BoardSpec = .{};
+    var policy_net_overrides: std.ArrayListUnmanaged(env_mod.NetClassOverride) = .empty;
+    var policy_module_overrides: std.ArrayListUnmanaged(env_mod.ModuleClassOverride) = .empty;
     var derating: ?f64 = null;
     var kicad_pcb_path: ?[]const u8 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
@@ -184,6 +186,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             .floorplan => floorplan_spec = try parsePlacement(self, form_children),
             .board => board_spec = try parseBoard(self, form_children),
             .replicate => try evalReplicate(self, form_children, env, &sub_blocks),
+            .module_policy => try parsePolicyOverrides(self, form_children, &policy_net_overrides, &policy_module_overrides),
             // Section-only forms are ignored at the top level — a
             // design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract; the warning
@@ -230,6 +233,10 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .placement = placement_spec,
         .floorplan = floorplan_spec,
         .board = board_spec,
+        .policy_overrides = .{
+            .nets = policy_net_overrides.toOwnedSlice(self.allocator) catch &.{},
+            .modules = policy_module_overrides.toOwnedSlice(self.allocator) catch &.{},
+        },
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -868,6 +875,7 @@ fn evalSection(
             .floorplan,
             .board,
             .replicate,
+            .module_policy,
             => {
                 self.warnFmt(sf.span, "({s} …) is top-level-only — ignored inside (section …)", .{sf_name});
             },
@@ -1369,6 +1377,34 @@ fn parsePlacementOrder(
         .hub = hub,
         .entries = entries.toOwnedSlice(self.allocator) catch &.{},
     }) catch return EvalError.OutOfMemory;
+}
+
+/// Parse a top-level `(module-policy …)` form into the design's policy-detector
+/// overrides. Two child shapes: `(module "REF" class)` pins a hub IC's
+/// `ModuleClass`; `(net-class "NAME" class)` pins a net's routing `NetClass`.
+/// The class token is left as raw text — `placement/module_policy.zig` parses it
+/// against its taxonomy (an unknown token is dropped there, not here). Several
+/// `(module-policy …)` forms accumulate. Phase 4 of the module-placement ruleset.
+fn parsePolicyOverrides(
+    self: *Evaluator,
+    form_children: []const Node,
+    nets: *std.ArrayListUnmanaged(env_mod.NetClassOverride),
+    modules: *std.ArrayListUnmanaged(env_mod.ModuleClassOverride),
+) EvalError!void {
+    for (form_children[1..]) |child| {
+        const cl = child.asList() orelse continue;
+        if (cl.len < 3) continue;
+        const head = cl[0].asAtom() orelse continue;
+        const target = cl[1].asText() orelse continue;
+        const class = cl[2].asText() orelse continue;
+        if (std.mem.eql(u8, head, "module")) {
+            modules.append(self.allocator, .{ .ref = target, .class = class }) catch return EvalError.OutOfMemory;
+        } else if (std.mem.eql(u8, head, "net-class")) {
+            nets.append(self.allocator, .{ .net = target, .class = class }) catch return EvalError.OutOfMemory;
+        } else {
+            self.warnFmt(child.span, "unknown (module-policy …) item ({s} …) — expected (module …) or (net-class …)", .{head});
+        }
+    }
 }
 
 /// Accumulator the design-block evaluator threads through `parseConstraints` so

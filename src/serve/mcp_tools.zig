@@ -30,6 +30,7 @@ const upload = @import("upload.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const pcb_describe = @import("pcb_describe.zig");
 const placement_spec = @import("placement_spec.zig");
+const module_policy_spec = @import("module_policy_spec.zig");
 const render_pcb_png = @import("../render_pcb_png.zig");
 const docgen = @import("../docgen.zig");
 
@@ -88,6 +89,7 @@ const tools = [_]ToolEntry{
     .{ .name = "get_pcb_layout_image", .is_mutation = false },
     .{ .name = "describe_pcb_layout", .is_mutation = false },
     .{ .name = "export_placement_spec", .is_mutation = false },
+    .{ .name = "export_module_policy", .is_mutation = false },
     .{ .name = "propose_placement", .is_mutation = false },
     .{ .name = "get_version", .is_mutation = false },
     .{ .name = "run_checks", .is_mutation = false },
@@ -257,6 +259,7 @@ fn dispatchInfo(
     if (std.mem.eql(u8, tool_name, "get_schematic")) return try toolGetSchematic(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "describe_pcb_layout")) return try toolDescribePcbLayout(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "export_placement_spec")) return try toolExportPlacementSpec(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "export_module_policy")) return try toolExportModulePolicy(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "propose_placement")) return try toolProposePlacement(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "get_version")) return try toolGetVersion(args_val, out, allocator);
     if (std.mem.eql(u8, tool_name, "run_checks")) return try toolRunChecks(allocator, project_dir, args_val, out, w);
@@ -831,6 +834,24 @@ fn toolExportPlacementSpec(allocator: std.mem.Allocator, project_dir: []const u8
         try out.appendSlice(allocator, "error: no hub anchor - a (placement ...) spec needs an IC");
         return false;
     }
+    try out.appendSlice(allocator, result.json);
+    return true;
+}
+
+/// `export_module_policy` — reverse-engineer an editable `(module-policy …)` block
+/// from the solved layout's detected policy (same selection rules as
+/// `export_placement_spec`: `layout` / `regen` / `sub`). Read-only.
+fn toolExportModulePolicy(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const opts = pcb_layout_page.PngRequest{
+        .layout = optionalString(args_val, "layout"),
+        .regen = optionalBool(args_val, "regen") orelse false,
+        .sub = optionalString(args_val, "sub"),
+    };
+    const result = module_policy_spec.exportPolicy(allocator, project_dir, name, opts) catch |e| {
+        try out.writer(allocator).print("error exporting module policy: {s}", .{@errorName(e)});
+        return false;
+    };
     try out.appendSlice(allocator, result.json);
     return true;
 }

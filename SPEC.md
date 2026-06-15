@@ -122,6 +122,7 @@ Public functions: solve
 - a series part's rotation aligns its pad axis with its matched hub pins
 - series detection pairs a 2-pad part with two single-hub legs to one hub
 - series rotations are applied and pinned; authored spec rotations win
+- synthesizes an aggressor-avoidance keep-out for a feedback passive
 
 ## placement/router
 
@@ -133,6 +134,8 @@ Public functions: route, returnPathViolations
 - counts signal vias lacking a nearby ground stitching via as return-path discontinuities
 - stitches each signal via's return path with a nearby GND plane via
 - escapes a single-pin breakout to an inner layer with a short stub and a via
+- elevates only the switching hot loop above the baseline routing tier
+- lets explicit (placement-order …) priority dominate the intrinsic net-class rank
 
 ## placement/drc
 
@@ -141,6 +144,22 @@ Public functions: check
 - flags a via that crowds a foreign pad's clearance
 - passes a via that shares the pad's net
 - a routed module with a crowded ground pad has no clearance violations
+
+## placement/module_policy
+
+Public functions: analyze, classifyNetName
+
+- classifies ground, input-rail, switch-node and feedback nets by name
+- infers a buck module from an inductor on the input rail and tags the input cap
+- applies (module-policy …) author overrides over the heuristic detection
+- exports the detected policy as an editable (module-policy …) block
+
+## placement/layout_lint
+
+Public functions: lint, freeFindings
+
+- flags a decoupling cap whose power-leg exceeds the 6 mm budget
+- flags a feedback part placed within keep-out of a switching-node aggressor
 
 ## placement/pin_roles
 

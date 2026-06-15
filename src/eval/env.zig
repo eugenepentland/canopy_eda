@@ -254,6 +254,37 @@ pub const PlacementEntry = struct {
     pin: []const u8 = "",
 };
 
+/// One `(net-class "NAME" class)` override inside a `(module-policy …)` form:
+/// pin a net's routing-criticality `NetClass` (the bare enum token, e.g.
+/// `input_rail`) when the detector's name heuristics read it wrong. The class
+/// string is interpreted in `placement/module_policy.zig` (kept stringly here so
+/// the eval layer needn't depend on the placement taxonomy).
+pub const NetClassOverride = struct {
+    /// Net name to match — exact or by leaf segment (the part after the last `/`).
+    net: []const u8,
+    /// Bare `NetClass` token: ground|power|input_rail|switch_node|clock|rf|
+    /// feedback|analog|control|signal.
+    class: []const u8,
+};
+
+/// One `(module "REF" class)` override inside a `(module-policy …)` form: pin a
+/// hub IC's detected `ModuleClass` (e.g. an integrated buck with no discrete
+/// inductor that reads as `generic`). Matched by ref-des, exact or by leaf.
+pub const ModuleClassOverride = struct {
+    ref: []const u8,
+    /// Bare `ModuleClass` token: buck|ldo|mcu|rf_amp|analog_afe|generic.
+    class: []const u8,
+};
+
+/// Author overrides for the best-effort module-policy detector, from a top-level
+/// `(module-policy …)` form. Empty by default (detection stands alone). Applied
+/// in `placement/module_policy.zig` *after* the heuristics, so the author has the
+/// last word on a misread net or hub. Phase 4 of the module-placement ruleset.
+pub const PolicyOverrides = struct {
+    nets: []const NetClassOverride = &.{},
+    modules: []const ModuleClassOverride = &.{},
+};
+
 /// A named virtual pin on a placeholder `(stub …)`. A stub declares its
 /// interface by *signal* (a logical name on a net) rather than by physical
 /// pin number — the placeholder has no real pinout yet. `class` is a diagram
@@ -1176,6 +1207,11 @@ pub const DesignBlock = struct {
     /// hardware from a top-level `(board …)` form. `present=false` ⇒ none
     /// authored — the layout stays an unbounded part cluster.
     board: BoardSpec = .{},
+    /// Author overrides for the module-policy detector from a top-level
+    /// `(module-policy …)` form — pin a misread net's `NetClass` or a hub's
+    /// `ModuleClass`. Applied after detection in `placement/module_policy.zig`.
+    /// Empty ⇒ detection stands alone. Phase 4 of the module-placement ruleset.
+    policy_overrides: PolicyOverrides = .{},
 };
 
 /// A rail's electrical role, declared by `(power-rail <label> (role …) (net …))`.

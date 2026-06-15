@@ -133,6 +133,7 @@ pub const ScopeForm = enum {
     floorplan,
     board,
     replicate,
+    module_policy,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -179,6 +180,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "floorplan", .floorplan },
     .{ "board", .board },
     .{ "replicate", .replicate },
+    .{ "module-policy", .module_policy },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -549,6 +551,15 @@ pub const scope_form_docs = blk: {
         .summary = "Instantiate N copies of a module as sub-blocks: ~D in the name template and " ++
             "in bare call-arg atoms is replaced by the 1-based index. Requires (hierarchical-ids); " ++
             "the form carries one auto-minted (id …) and each copy's sub-block uuid derives from it + the substituted name.",
+    } };
+    t[@intFromEnum(ScopeForm.module_policy)] = .{ .scope = tl, .doc = .{
+        .syntax = "(module-policy (module \"REF\" buck|ldo|mcu|rf_amp|analog_afe|generic)… " ++
+            "(net-class \"NAME\" ground|power|input_rail|switch_node|clock|rf|feedback|analog|control|signal)…)",
+        .summary = "Override the best-effort module-policy detector (PCB layout): pin a hub IC's " ++
+            "ModuleClass or a net's routing-criticality NetClass when the name heuristics read it " ++
+            "wrong (e.g. an integrated buck with no discrete inductor that reads as generic). " ++
+            "Applied after detection — the author has the last word. Surfaced in /api/pcb-describe; " ++
+            "export the detected policy as a starting point with /api/module-policy.",
     } };
     break :blk requireAllDocumented(ScopeForm, ScopedFormDoc, t);
 };
