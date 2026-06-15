@@ -134,6 +134,8 @@ Public functions: route, returnPathViolations
 - counts signal vias lacking a nearby ground stitching via as return-path discontinuities
 - stitches each signal via's return path with a nearby GND plane via
 - escapes a single-pin breakout to an inner layer with a short stub and a via
+- elevates only the switching hot loop above the baseline routing tier
+- lets explicit (placement-order …) priority dominate the intrinsic net-class rank
 
 ## placement/drc
 

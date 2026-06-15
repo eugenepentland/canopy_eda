@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const optimizer = @import("optimizer.zig");
+const module_policy = @import("module_policy.zig");
 const pad_shape = @import("pad_shape.zig");
 const export_kicad = @import("../export_kicad.zig");
 
@@ -138,7 +139,10 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     // now detouring the ground vias stamped in pass 1. Nets are routed in
     // declared `(placement-order …)` priority (highest first) so a high-priority
     // rail claims the short path before a low-priority signal can block it — the
-    // router has no rip-up, so first-routed wins. Ties keep net order.
+    // router has no rip-up, so first-routed wins. Within a priority tier the
+    // switching hot loop (switch-node / input-rail nets) routes ahead of the
+    // pack, so a discrete switcher's loop claims the tightest copper even when
+    // the author declared no `(placement-order …)`. Remaining ties keep net order.
     const net_pri = try arena.alloc(u32, placement.nets.len);
     for (placement.nets, 0..) |net, i| net_pri[i] = netPriority(placement, &idx_of, net);
     var order: std.ArrayListUnmanaged(usize) = .empty;
@@ -438,17 +442,44 @@ fn buildObstacles(arena: std.mem.Allocator, parts: []const Part, nets: []const F
     return obs.toOwnedSlice(arena);
 }
 
-/// A net's routing priority: the highest `(placement-order …)` rank among the
-/// parts it touches (0 when none is ranked). Routing the highest-priority nets
-/// first lets them claim the short path before lower-priority signals block it.
+/// Bits reserved for the intrinsic net-class rank in a net's sort key. Explicit
+/// `(placement-order …)` priority occupies the high bits and always dominates;
+/// the net-class rank only orders nets the author left unranked and breaks ties
+/// between equal-ranked ones. Three bits leaves headroom for `(net-class …)`
+/// overrides (Phase 4); the auto rule below uses only ranks 0–1.
+const NETCLASS_BITS = 3;
+
+/// A net's routing priority. Primary key: the highest `(placement-order …)` rank
+/// among the parts it touches (0 when none is ranked). Secondary key (the low
+/// `NETCLASS_BITS` bits): the net's intrinsic routing criticality inferred from
+/// its name (Phase 3 of the module-placement ruleset) — the switcher hot loop and
+/// its input rail route ahead of the pack. Routing the hot loop first lets it
+/// claim the tightest copper before a bulk net blocks it (the router has no
+/// rip-up, so first-routed wins), even when the author declared no
+/// `(placement-order …)`.
 fn netPriority(placement: optimizer.Placement, idx_of: *std.StringHashMap(usize), net: FlatNet) u32 {
-    if (placement.priority.len == 0) return 0;
     var best: u32 = 0;
     for (net.pins) |pin| {
         const pi = idx_of.get(pin.ref_des) orelse continue;
         if (pi < placement.priority.len and placement.priority[pi] > best) best = placement.priority[pi];
     }
-    return best;
+    return (best << NETCLASS_BITS) | netClassRank(net.name);
+}
+
+/// Intrinsic routing-order rank for a net from its name-based `NetClass`
+/// (0 = baseline, 1 = route first). Only the switching hot loop and its input
+/// rail are elevated. Those net names exist solely on a switching power module,
+/// so this is a no-op on signal/array boards — which is precisely why it never
+/// regresses them — while on a discrete switcher it gives the hot loop the
+/// tightest copper. Clock/RF/feedback/power are deliberately *not* elevated:
+/// reordering them trades total routed length board-by-board (it helps a
+/// clock-sparse board and hurts a clock-dense array), a tradeoff the scalar
+/// routed metric can't adjudicate, so they stay at the baseline tier.
+fn netClassRank(name: []const u8) u32 {
+    return switch (module_policy.classifyNetName(name)) {
+        .switch_node, .input_rail => 1,
+        else => 0,
+    };
 }
 
 /// Sort net indices by descending priority, with the net index itself as a
@@ -1463,4 +1494,54 @@ test "route escapes a single-pin breakout with a short stub and a via" {
     // The breakout (short stub + via) introduces no clearance violations.
     const viol = try @import("drc.zig").check(arena, placement, r, 0.127);
     try testing.expectEqual(@as(usize, 0), viol.len);
+}
+
+// spec: placement/router - elevates only the switching hot loop above the baseline routing tier
+test "netClassRank elevates switch-node and input-rail nets but no other class" {
+    // The switching loop routes first…
+    try testing.expectEqual(@as(u32, 1), netClassRank("SW")); // switch node
+    try testing.expectEqual(@as(u32, 1), netClassRank("VIN")); // input rail
+    // …everything else stays at the baseline tier — clock/RF/power/signal are
+    // deliberately NOT reordered (a tradeoff the scalar routed metric can't judge).
+    try testing.expectEqual(@as(u32, 0), netClassRank("SCLK")); // clock
+    try testing.expectEqual(@as(u32, 0), netClassRank("DATA0")); // bulk signal
+    try testing.expectEqual(@as(u32, 0), netClassRank("GND")); // ground (pass-1 anyway)
+}
+
+// spec: placement/router - lets explicit (placement-order …) priority dominate the intrinsic net-class rank
+test "netPriority ranks the hot loop first yet keeps placement-order dominant" {
+    var idx = std.StringHashMap(usize).init(testing.allocator);
+    defer idx.deinit();
+    try idx.put("U1", 0);
+    try idx.put("C1", 1);
+
+    const sw_pins = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const sig_pins = [_]export_kicad.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const sw = FlatNet{ .name = "SW", .pins = &sw_pins };
+    const sig = FlatNet{ .name = "DATA", .pins = &sig_pins };
+
+    const base = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 0,
+        .maxy = 0,
+        .generated = true,
+    };
+
+    // With no `(placement-order …)`, the hot-loop net outranks the bulk signal.
+    try testing.expect(netPriority(base, &idx, sw) > netPriority(base, &idx, sig));
+
+    // Declare a high `(placement-order …)` rank on the signal's part: explicit
+    // author intent now wins, even though the hot loop still carries its class bit.
+    var pri = [_]u32{ 0, 5 }; // U1 (hot loop) unranked, C1 (signal) ranked 5
+    var ranked = base;
+    ranked.priority = &pri;
+    try testing.expect(netPriority(ranked, &idx, sig) > netPriority(ranked, &idx, sw));
 }
