@@ -370,7 +370,7 @@ fn writeModulePolicy(
     try w.writeAll("],\"net_classes\":[");
     var first = true;
     for (p.nets, 0..) |net, i| {
-        if (i >= policy.net_class.len or !interestingNetClass(policy.net_class[i])) continue;
+        if (i >= policy.net_class.len or !module_policy.isInterestingClass(policy.net_class[i])) continue;
         if (!first) try w.writeAll(",");
         first = false;
         try w.writeAll("{\"net\":");
@@ -392,15 +392,6 @@ fn writeModulePolicy(
         try w.print(",\"role\":\"{s}\"}}", .{@tagName(r)});
     }
     try w.writeAll("]}");
-}
-
-/// Only the criticality-bearing net classes earn a facts line — ground, power,
-/// control, and plain signal are the bulk of nets and add noise.
-fn interestingNetClass(c: module_policy.NetClass) bool {
-    return switch (c) {
-        .input_rail, .switch_node, .clock, .rf, .feedback, .analog => true,
-        .ground, .power, .control, .signal => false,
-    };
 }
 
 /// Placement lint: machine-checkable rules an agent should fix before trusting

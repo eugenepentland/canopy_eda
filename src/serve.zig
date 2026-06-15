@@ -26,6 +26,7 @@ const schematic_page = @import("serve/schematic_page.zig");
 const pcb_layout_page = @import("serve/pcb_layout_page.zig");
 const pcb_describe = @import("serve/pcb_describe.zig");
 const placement_spec = @import("serve/placement_spec.zig");
+const module_policy_spec = @import("serve/module_policy_spec.zig");
 const modules_page = @import("serve/modules.zig");
 const auth = @import("serve/auth.zig");
 const mcp = @import("serve/mcp.zig");
@@ -319,6 +320,7 @@ pub fn serve(
     router.get("/api/pcb-png/:name", pcb_layout_page.pcbPngApi, .{});
     router.get("/api/pcb-describe/:name", pcb_describe.pcbDescribeApi, .{});
     router.get("/api/placement-spec/:name", placement_spec.placementSpecApi, .{});
+    router.get("/api/module-policy/:name", module_policy_spec.modulePolicyApi, .{});
     router.post("/api/propose-placement/:name", placement_spec.proposePlacementApi, .{});
     // The PCB page's live spec panel: solve-as-you-type preview + save-to-design.
     router.post("/api/spec-solve/:name", placement_spec.specSolveApi, .{});

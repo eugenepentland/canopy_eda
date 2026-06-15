@@ -158,6 +158,58 @@ fn nameMatches(name: []const u8, want: []const u8) bool {
     return std.mem.eql(u8, name, want) or std.mem.eql(u8, leafName(name), want);
 }
 
+/// Only the criticality-bearing net classes are worth surfacing or pinning —
+/// ground, power, control, and plain signal are the bulk of nets and add noise.
+/// Shared by the describe facts and the `(module-policy …)` export.
+pub fn isInterestingClass(c: NetClass) bool {
+    return switch (c) {
+        .input_rail, .switch_node, .clock, .rf, .feedback, .analog => true,
+        .ground, .power, .control, .signal => false,
+    };
+}
+
+/// The name to write for a hub in an exported override: its module-local origin
+/// (renumber-proof, what an author would recognise) when known, else its ref-des.
+fn hubName(p: Placement, hub: usize) []const u8 {
+    if (hub < p.instances.len and p.instances[hub].origin_key.len > 0) return p.instances[hub].origin_key;
+    return p.parts[hub].ref_des;
+}
+
+/// Render the detected policy as an editable `(module-policy …)` block — the
+/// starting point an author pastes into a design, corrects, and commits (the
+/// reverse of the override consumption above, closing the DSL loop the way
+/// `/api/placement-spec` does for `(placement …)`). One `(module …)` line per
+/// detected hub; one `(net-class …)` line per net whose class is criticality-
+/// bearing (the obvious ground/power/signal/control defaults are skipped). Null
+/// when there's nothing worth pinning. Caller owns the returned bytes.
+pub fn exportText(alloc: Allocator, p: Placement) (Allocator.Error || std.Io.Writer.Error)!?[]u8 {
+    var policy = try analyze(alloc, p);
+    defer policy.deinit(alloc);
+
+    var any_net = false;
+    for (policy.net_class) |c| {
+        if (isInterestingClass(c)) {
+            any_net = true;
+            break;
+        }
+    }
+    if (policy.modules.len == 0 and !any_net) return null;
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    errdefer aw.deinit();
+    const w = &aw.writer;
+    try w.writeAll("(module-policy");
+    for (policy.modules) |m| {
+        try w.print("\n  (module \"{s}\" {s})", .{ hubName(p, m.hub), @tagName(m.class) });
+    }
+    for (p.nets, 0..) |net, i| {
+        if (!isInterestingClass(policy.net_class[i])) continue;
+        try w.print("\n  (net-class \"{s}\" {s})", .{ net.name, @tagName(policy.net_class[i]) });
+    }
+    try w.writeAll(")\n");
+    return try aw.toOwnedSlice();
+}
+
 /// Fill `out` with a `NetClass` per net: the leaf-name class, upgraded to
 /// `switch_node` for an otherwise-plain net that bridges a hub and an inductor
 /// (the SW/LX node, however it's named).
@@ -522,4 +574,48 @@ test "analyze honors net-class and module-class overrides" {
     try testing.expectEqual(NetClass.input_rail, policy.net_class[0]);
     // The module override pinned U1 to ldo despite the inductor (would read buck).
     try testing.expectEqual(ModuleClass.ldo, policy.modules[0].class);
+}
+
+// spec: placement/module_policy - exports the detected policy as an editable (module-policy …) block
+test "exportText renders the detected hubs and criticality nets, skipping defaults" {
+    const pad = geometry.Pad{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 };
+    var hub_pads = [_]geometry.Pad{pad};
+    var l_pads = [_]geometry.Pad{pad};
+    var c_pads = [_]geometry.Pad{pad};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &hub_pads, .fallback = false },
+        .{ .ref_des = "L1", .kind = .passive, .hw = 1, .hh = 1, .pads = &l_pads, .fallback = false },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &c_pads, .fallback = false, .value = "22uF" },
+    };
+    const vin = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "L1", .pin = "1" } };
+    const sw = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "L1", .pin = "2" } };
+    const vout = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "C1", .pin = "1" } };
+    const nets = [_]export_kicad.FlatNet{
+        .{ .name = "VIN", .pins = &vin },
+        .{ .name = "SW", .pins = &sw },
+        .{ .name = "VOUT", .pins = &vout }, // power → skipped from the block
+    };
+    const p = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 1,
+        .maxy = 1,
+        .generated = true,
+    };
+    const text = (try exportText(testing.allocator, p)).?;
+    defer testing.allocator.free(text);
+
+    try testing.expect(std.mem.indexOf(u8, text, "(module-policy") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "(module \"U1\" buck)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "(net-class \"VIN\" input_rail)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "(net-class \"SW\" switch_node)") != null);
+    // VOUT is a plain power rail — not criticality-bearing, so it's left out.
+    try testing.expect(std.mem.indexOf(u8, text, "VOUT") == null);
 }

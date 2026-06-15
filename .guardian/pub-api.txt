@@ -448,6 +448,8 @@ src/placement/module_policy.zig::NetClass enum_
 src/placement/module_policy.zig::PartRole enum_
 src/placement/module_policy.zig::analyze fn
 src/placement/module_policy.zig::classifyNetName fn
+src/placement/module_policy.zig::exportText fn
+src/placement/module_policy.zig::isInterestingClass fn
 src/placement/optimizer.zig::BoardRect struct_
 src/placement/optimizer.zig::Breakdown struct_
 src/placement/optimizer.zig::CompactMode enum_
@@ -841,6 +843,9 @@ src/serve/mcp_tools.zig::listFreePins fn
 src/serve/mcp_tools.zig::renderSceneGraph fn
 src/serve/mcp_tools.zig::runErcForNamedBlock fn
 src/serve/mcp_tools.zig::tools_list_result value
+src/serve/module_policy_spec.zig::ExportedPolicy struct_
+src/serve/module_policy_spec.zig::exportPolicy fn
+src/serve/module_policy_spec.zig::modulePolicyApi fn
 src/serve/modules.zig::HandlerError value
 src/serve/modules.zig::ModuleEntry struct_
 src/serve/modules.zig::ResolvedBlock struct_

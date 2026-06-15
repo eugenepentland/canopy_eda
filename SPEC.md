@@ -152,6 +152,7 @@ Public functions: analyze, classifyNetName
 - classifies ground, input-rail, switch-node and feedback nets by name
 - infers a buck module from an inductor on the input rail and tags the input cap
 - applies (module-policy …) author overrides over the heuristic detection
+- exports the detected policy as an editable (module-policy …) block
 
 ## placement/layout_lint
 
