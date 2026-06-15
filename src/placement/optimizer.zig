@@ -203,6 +203,11 @@ const COMPACT_EPS: f64 = 1e-4; // courtyard-gap tolerance for the "touching" tes
 // weight-tuning is an offline sweep, not the LLM's job).
 const PROX_W: f64 = 1.5; // proximity pull: cost = PROX_W·priority·(edge gap, mm)
 const KEEPOUT_W: f64 = 4.0; // keep-out hinge: cost = KEEPOUT_W·max(0, min−gap)
+/// Courtyard gap (mm) a synthesized aggressor-avoidance keep-out (Phase 2b)
+/// demands between a feedback passive and a switching/clock/RF passive — a touch
+/// above the `feedback-near-aggressor` lint threshold so a satisfied solve also
+/// clears the lint with margin.
+const AGGRESSOR_KEEPOUT_MM: f64 = 2.5;
 const DEPRIORITIZE_SCALE: f64 = 0.25; // scale a deprioritized part's net wirelength weight
 const ZONE_GAP_MM: f64 = 2.0; // group zoning: cluster centroid sits this far beyond the hub edge on its connecting side
 /// Soft-constraint priority → numeric multiplier (low/med/high).
@@ -3655,8 +3660,11 @@ fn resolveConstraints(
     // `(placement …)` / `(floorplan …)` author owns their arrangement, and a
     // discrete-L switcher is already boosted by `classify` (auto-marking would
     // double-boost), so both are excluded.
-    const auto_input = !block.placement.present and !block.floorplan.present and
-        autoInputRails(parts, nets, input_rail);
+    // Phase-2 auto-policy applies only on the free-solve path: an explicit
+    // `(placement …)` / `(floorplan …)` author owns the arrangement (the
+    // vendor-EVM-overrides rule), so the synthesized boost/keep-outs stand down.
+    const free_solve = !block.placement.present and !block.floorplan.present;
+    const auto_input = free_solve and autoInputRails(parts, nets, input_rail);
 
     // net-length (priority) → raise that net's wirelength weight.
     for (c.net_lengths) |nl| {
@@ -3743,6 +3751,15 @@ fn resolveConstraints(
         }
     }
 
+    // Phase-2b aggressor-avoidance keep-outs: push a feedback/compensation
+    // passive away from a switching-node / clock / RF passive (the inductor,
+    // snubber, crystal, RF match) so the sensitive high-impedance FB node
+    // doesn't couple to the aggressor. Synthesized into the SAME part-vs-part
+    // keep-out machinery a hand `(keep-out …)` lowers to — search-only, so the
+    // reported objective stays comparable. Free-solve path only.
+    if (free_solve) try synthAggressorKeepouts(arena, parts, nets, idx_of, &keepouts);
+    const has_keepouts = keepouts.items.len > 0;
+
     // Constraint-DSL (group …) clusters. Resolve each ref; skip unresolved
     // (reported) and groups with <2 resolved members (nothing to cohese).
     for (c.groups) |g| {
@@ -3766,7 +3783,7 @@ fn resolveConstraints(
         .net_weight = net_weight,
         .input_rail = input_rail,
         .groups = try groups.toOwnedSlice(arena),
-        .active = c.present or has_groups or auto_input,
+        .active = c.present or has_groups or auto_input or has_keepouts,
     };
 }
 
@@ -3798,6 +3815,39 @@ fn autoInputRails(parts: []const Part, nets: []const FlatNet, input_rail: []bool
         }
     }
     return marked;
+}
+
+/// Phase-2b: append a part-vs-part keep-out between every feedback passive and
+/// every switching-node / clock / RF passive (the aggressors), so the solve
+/// keeps the sensitive FB node clear of them. Hubs are excluded on both sides —
+/// the IC legitimately carries the FB and SW pins; the rule is about the FB
+/// *divider* versus the SW *node copper / inductor*. Keep-outs are inert
+/// (zero cost) once the gap is met, so emitting all pairs is cheap and only
+/// acts where the force layout would otherwise crowd them.
+fn synthAggressorKeepouts(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+    out: *std.ArrayListUnmanaged(KeepTerm),
+) std.mem.Allocator.Error!void {
+    const flags = try arena.alloc(std.EnumSet(module_policy.NetClass), parts.len);
+    defer arena.free(flags);
+    for (flags) |*f| f.* = std.EnumSet(module_policy.NetClass).initEmpty();
+    for (nets) |net| {
+        const cls = module_policy.classifyNetName(net.name);
+        for (net.pins) |pin| {
+            if (idx_of.get(pin.ref_des)) |pi| flags[pi].insert(cls);
+        }
+    }
+    for (parts, 0..) |fp, fi| {
+        if (fp.kind != .passive or !flags[fi].contains(.feedback)) continue;
+        for (parts, 0..) |ap, ai| {
+            if (ai == fi or ap.kind != .passive) continue;
+            const aggressor = flags[ai].contains(.switch_node) or flags[ai].contains(.clock) or flags[ai].contains(.rf);
+            if (aggressor) try out.append(arena, .{ .a = fi, .b = ai, .min_mm = AGGRESSOR_KEEPOUT_MM });
+        }
+    }
 }
 
 /// True when part index `p` is one of a group's resolved members.
@@ -8407,4 +8457,31 @@ test "legalizeComposed shifts the later macro rigidly" {
     try testing.expectApproxEqAbs(parts[2].y, parts[1].y, 1e-9);
     // And the overlap with macro a is gone.
     try testing.expect(!anyOverlap(&parts));
+}
+
+// spec: placement/optimizer - synthesizes an aggressor-avoidance keep-out for a feedback passive
+test "synthAggressorKeepouts pairs a feedback passive with the switching inductor" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "L1", .kind = .passive, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+    };
+    const sw = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "L1", .pin = "1" } };
+    const fb = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "R1", .pin = "1" } };
+    const nets = [_]FlatNet{
+        .{ .name = "SW", .pins = &sw },
+        .{ .name = "FB", .pins = &fb },
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    for (parts, 0..) |p, i| try idx_of.put(p.ref_des, i);
+    var keepouts: std.ArrayListUnmanaged(KeepTerm) = .empty;
+    try synthAggressorKeepouts(arena, &parts, &nets, &idx_of, &keepouts);
+    // Exactly one pair: R1 (on feedback net FB) kept clear of L1 (on the
+    // switching node SW). The hub U1, on both nets, is excluded both ways.
+    try testing.expectEqual(@as(usize, 1), keepouts.items.len);
+    try testing.expectEqual(@as(usize, 2), keepouts.items[0].a); // R1 (victim)
+    try testing.expectEqual(@as(usize, 1), keepouts.items[0].b); // L1 (aggressor)
 }

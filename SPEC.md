@@ -122,6 +122,7 @@ Public functions: solve
 - a series part's rotation aligns its pad axis with its matched hub pins
 - series detection pairs a 2-pad part with two single-hub legs to one hub
 - series rotations are applied and pinned; authored spec rotations win
+- synthesizes an aggressor-avoidance keep-out for a feedback passive
 
 ## placement/router
 
