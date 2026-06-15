@@ -42,6 +42,7 @@ const export_kicad = @import("../export_kicad.zig");
 const netlist_mod = @import("../export_kicad_netlist.zig");
 const geometry = @import("geometry.zig");
 const pin_roles = @import("pin_roles.zig");
+const module_policy = @import("module_policy.zig");
 const router = @import("router.zig");
 const drc = @import("drc.zig");
 const parser = @import("../sexpr/parser.zig");
@@ -3644,6 +3645,19 @@ fn resolveConstraints(
         if (pr.role == .input) input_rail[ni] = true;
     }
 
+    // Phase-2a auto hot-loop boost: an INTEGRATED-module switcher (a regulated
+    // converter with no discrete inductor — TPSM84338, TPS6299x …) hides its
+    // switching loop inside the package, so `classify`'s discrete-inductor test
+    // never fires the input-loop boost. When `module_policy` detects an input
+    // rail + a feedback net (the regulated-converter tell) and there is no
+    // discrete L, auto-mark the input rail — the same thing a hand-authored
+    // `(power-rail … (role input))` does. Free-solve path only: an explicit
+    // `(placement …)` / `(floorplan …)` author owns their arrangement, and a
+    // discrete-L switcher is already boosted by `classify` (auto-marking would
+    // double-boost), so both are excluded.
+    const auto_input = !block.placement.present and !block.floorplan.present and
+        autoInputRails(parts, nets, input_rail);
+
     // net-length (priority) → raise that net's wirelength weight.
     for (c.net_lengths) |nl| {
         const ni = resolveNet(nets, nl.net) orelse {
@@ -3752,8 +3766,38 @@ fn resolveConstraints(
         .net_weight = net_weight,
         .input_rail = input_rail,
         .groups = try groups.toOwnedSlice(arena),
-        .active = c.present or has_groups,
+        .active = c.present or has_groups or auto_input,
     };
+}
+
+/// Phase-2a: mark every detected input-rail net as a hot rail (so
+/// `constraintCost`'s input-loop boost fires) when the design is an
+/// integrated-module switcher — it carries a feedback net (a regulated
+/// converter) but no discrete inductor (a discrete-L switcher is already
+/// boosted by `classify`, so marking here would double-boost). `input_rail` is
+/// index-aligned with `nets`; entries already set by a `(power-rail …)` stay
+/// set. Returns true when it marked at least one rail (so the caller can flip
+/// `Lowered.active` on — else `constraintCost` would fast-exit and skip the boost).
+fn autoInputRails(parts: []const Part, nets: []const FlatNet, input_rail: []bool) bool {
+    for (parts) |p| {
+        if (isInductor(p.ref_des)) return false; // discrete-L switcher → classify handles it
+    }
+    var has_feedback = false;
+    for (nets) |n| {
+        if (module_policy.classifyNetName(n.name) == .feedback) {
+            has_feedback = true;
+            break;
+        }
+    }
+    if (!has_feedback) return false; // no FB divider → not a regulated converter
+    var marked = false;
+    for (nets, 0..) |n, ni| {
+        if (module_policy.classifyNetName(n.name) == .input_rail) {
+            input_rail[ni] = true;
+            marked = true;
+        }
+    }
+    return marked;
 }
 
 /// True when part index `p` is one of a group's resolved members.
