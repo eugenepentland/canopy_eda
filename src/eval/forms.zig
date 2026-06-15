@@ -125,7 +125,6 @@ pub const ScopeForm = enum {
     power_config,
     decouple_defaults,
     kicad_pcb,
-    function,
     stub,
     layout,
     placement_order,
@@ -168,7 +167,6 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "power-config", .power_config },
     .{ "decouple-defaults", .decouple_defaults },
     .{ "kicad-pcb", .kicad_pcb },
-    .{ "function", .function },
     .{ "stub", .stub },
     // `diagram-layout` is the canonical name (the word "layout" alone now
     // means PCB placement); `layout` stays a working alias for older files.
@@ -486,10 +484,6 @@ pub const scope_form_docs = blk: {
     t[@intFromEnum(ScopeForm.kicad_pcb)] = .{ .scope = tl, .doc = .{
         .syntax = "(kicad-pcb \"absolute/path/to/board.kicad_pcb\")",
         .summary = "Declare the PCB file the file-based KiCad sync writes board updates to.",
-    } };
-    t[@intFromEnum(ScopeForm.function)] = .{ .scope = tl, .doc = .{
-        .syntax = "(function \"Name\" [\"subtitle\"] [(verb \"…\")] [(stack N)] [(chain pos \"stage\")] (includes \"section\"…))",
-        .summary = "Declare a high-level functional subsystem for the Function view; (chain …) also places it on the Signal Chain view's narrative spine.",
     } };
     t[@intFromEnum(ScopeForm.stub)] = .{ .scope = tl, .doc = .{
         .syntax = "(stub \"name\" [(role …)] [(mpn …)] [(category key)] [(size W H)] [(channels N)] [(ref \"REF\")] (signal \"name\" class \"net\")…)",

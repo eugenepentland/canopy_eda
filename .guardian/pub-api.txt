@@ -169,7 +169,6 @@ src/eval/env.zig::EdgeSide enum_
 src/eval/env.zig::ElectricalDecl struct_
 src/eval/env.zig::ElectricalType enum_
 src/eval/env.zig::Env struct_
-src/eval/env.zig::FunctionGroup struct_
 src/eval/env.zig::Group struct_
 src/eval/env.zig::GroupConstraint struct_
 src/eval/env.zig::GroupStyle enum_
