@@ -533,6 +533,10 @@ pub const Placement = struct {
     /// world coordinates (same frame as `parts`). Null when the design has no
     /// effective board form — renderers draw no outline.
     board_rect: ?BoardRect = null,
+    /// Author overrides for the module-policy detector, carried through from the
+    /// design's `(module-policy …)` form so `module_policy.analyze` (which only
+    /// sees the `Placement`) can honor them. Empty by default. Phase 4.
+    policy_overrides: env.PolicyOverrides = .{},
 };
 
 /// A `(board …)` outline rectangle in world mm (top-left + size).
@@ -3306,6 +3310,7 @@ pub fn solve(
     const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, generated);
+    pl.policy_overrides = block.policy_overrides;
     if (board_live) {
         if (board_rect == null) board_rect = try boardRectFromPoses(arena, parts, prep.instances, block.board);
         pl.board_rect = board_rect;
@@ -3442,6 +3447,7 @@ pub fn placeFromPoses(
     const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
+    pl.policy_overrides = block.policy_overrides;
     // Saved/hand layouts of a `(board …)` design keep their outline overlay.
     if (block.board.present and block.board.w > 0 and block.board.h > 0) {
         const r = try boardRectFromPoses(arena, parts, prep.instances, block.board);
@@ -3478,7 +3484,9 @@ pub fn gridPlace(
     const score = scoreLayout(parts, &prep.idx_of, nets, built.loops);
     const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
-    return finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
+    var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
+    pl.policy_overrides = block.policy_overrides;
+    return pl;
 }
 
 /// Lay parts out on a uniform grid, row-major in flatten order, filling a roughly

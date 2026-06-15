@@ -99,6 +99,9 @@ pub fn analyze(alloc: Allocator, p: Placement) Allocator.Error!ModulePolicy {
     for (p.parts, 0..) |part, i| try idx.put(part.ref_des, i);
 
     classifyNets(p, &idx, net_class);
+    // Author overrides win over the heuristics, and they run *before* roles are
+    // derived so a re-tagged net flows through to its passives' roles too.
+    applyNetOverrides(p, net_class);
 
     // Per-part set of the net classes touching its pads — the basis for roles.
     const flags = try alloc.alloc(std.EnumSet(NetClass), p.parts.len);
@@ -115,7 +118,44 @@ pub fn analyze(alloc: Allocator, p: Placement) Allocator.Error!ModulePolicy {
     }
 
     const modules = try detectModules(alloc, p, net_class);
+    applyModuleOverrides(p, modules);
     return .{ .net_class = net_class, .part_role = part_role, .modules = modules };
+}
+
+/// Apply the design's `(module-policy (net-class "NAME" class) …)` overrides over
+/// the heuristic `net_class`, matching each by exact net name or leaf segment.
+/// An unparseable class token or an unmatched name is silently ignored — the
+/// detector's reading stands. Phase 4 of the module-placement ruleset.
+fn applyNetOverrides(p: Placement, net_class: []NetClass) void {
+    for (p.policy_overrides.nets) |ov| {
+        const cls = std.meta.stringToEnum(NetClass, ov.class) orelse continue;
+        for (p.nets, 0..) |net, i| {
+            if (nameMatches(net.name, ov.net)) net_class[i] = cls;
+        }
+    }
+}
+
+/// Apply the design's `(module-policy (module "REF" class) …)` overrides over the
+/// detected `ModuleClass`. A hub matches `ov.ref` by its flattened ref-des *or*
+/// its module-local origin name (exact or leaf) — so a `(module "U1" …)` written
+/// in a module file still binds after the part renumbers to e.g. U17 in a parent
+/// board. An unmatched ref or unparseable class is silently ignored.
+fn applyModuleOverrides(p: Placement, modules: []ModuleInfo) void {
+    for (p.policy_overrides.modules) |ov| {
+        const cls = std.meta.stringToEnum(ModuleClass, ov.class) orelse continue;
+        for (modules) |*m| {
+            const ref = p.parts[m.hub].ref_des;
+            const origin = if (m.hub < p.instances.len) p.instances[m.hub].origin_key else "";
+            if (nameMatches(ref, ov.ref) or nameMatches(origin, ov.ref)) m.class = cls;
+        }
+    }
+}
+
+/// True when `name` equals `want` outright or by its leaf segment (the part after
+/// the last `/`). Empty `name` never matches. The lenient match both schemes use.
+fn nameMatches(name: []const u8, want: []const u8) bool {
+    if (name.len == 0) return false;
+    return std.mem.eql(u8, name, want) or std.mem.eql(u8, leafName(name), want);
 }
 
 /// Fill `out` with a `NetClass` per net: the leaf-name class, upgraded to
@@ -358,6 +398,7 @@ fn anyContains(s: []const u8, subs: []const []const u8) bool {
 const testing = std.testing;
 const export_kicad = @import("../export_kicad.zig");
 const geometry = @import("geometry.zig");
+const env = @import("../eval/env.zig");
 
 // spec: placement/module_policy - classifies ground, input-rail, switch-node and feedback nets by name
 test "classifyNetName tags the criticality classes by leaf name" {
@@ -426,4 +467,59 @@ test "analyze detects a buck module and its input cap" {
     try testing.expectEqual(@as(usize, 1), policy.modules.len);
     try testing.expectEqual(ModuleClass.buck, policy.modules[0].class);
     try testing.expect(policy.modules[0].has_inductor);
+}
+
+// spec: placement/module_policy - applies (module-policy …) author overrides over the heuristic detection
+test "analyze honors net-class and module-class overrides" {
+    const pad = geometry.Pad{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 };
+    var hub_pads = [_]geometry.Pad{pad};
+    var l_pads = [_]geometry.Pad{pad};
+    var c_pads = [_]geometry.Pad{pad};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &hub_pads, .fallback = false },
+        .{ .ref_des = "L1", .kind = .passive, .hw = 1, .hh = 1, .pads = &l_pads, .fallback = false },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &c_pads, .fallback = false, .value = "100nF" },
+    };
+    const vin = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "L1", .pin = "1" } };
+    // A non-standard rail name the detector reads as a plain signal until told.
+    const rail = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "C1", .pin = "1" } };
+    const nets = [_]export_kicad.FlatNet{
+        .{ .name = "VIN", .pins = &vin },
+        .{ .name = "MY_RAIL", .pins = &rail },
+    };
+    const overrides = env.PolicyOverrides{
+        .nets = &.{
+            .{ .net = "MY_RAIL", .class = "input_rail" }, // re-tag the misread rail
+            .{ .net = "VIN", .class = "bogus_token" }, // unparseable → ignored
+        },
+        .modules = &.{
+            .{ .ref = "U1", .class = "ldo" }, // pin the hub's class
+        },
+    };
+    const p = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 1,
+        .maxy = 1,
+        .generated = true,
+        .policy_overrides = overrides,
+    };
+    var policy = try analyze(testing.allocator, p);
+    defer policy.deinit(testing.allocator);
+
+    // The net override re-tagged MY_RAIL as an input rail…
+    try testing.expectEqual(NetClass.input_rail, policy.net_class[1]);
+    // …which flows through to the cap on it (now an input cap, not decoupling).
+    try testing.expectEqual(PartRole.input_cap, policy.part_role[2]);
+    // The unparseable token was ignored — VIN keeps its detected class.
+    try testing.expectEqual(NetClass.input_rail, policy.net_class[0]);
+    // The module override pinned U1 to ldo despite the inductor (would read buck).
+    try testing.expectEqual(ModuleClass.ldo, policy.modules[0].class);
 }
