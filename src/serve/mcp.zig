@@ -281,6 +281,7 @@ pub const Client = struct {
     conn: *websocket.Conn,
     allocator: std.mem.Allocator,
     project_dir: []const u8,
+    auth_dir: []const u8,
     email: []const u8,
 
     pub fn init(conn: *websocket.Conn, ctx: *const Context) !Client {
@@ -292,6 +293,7 @@ pub const Client = struct {
             // its own arena over it in `clientMessage`).
             .allocator = std.heap.page_allocator,
             .project_dir = ctx.handler.project_dir,
+            .auth_dir = ctx.handler.auth_dir,
             .email = ctx.email,
         };
     }
@@ -304,7 +306,7 @@ pub const Client = struct {
         // for the duration of the connection. Fall back to admin on the dev
         // localhost path (same policy as resolveRole above).
         const role = if (self.email.len > 0)
-            users.getRole(self.allocator, self.project_dir, self.email)
+            users.getRole(self.allocator, self.auth_dir, self.email)
         else
             users.Role.admin;
         const reply_opt = dispatchFrame(aa, self.project_dir, data, role) catch |err| blk: {

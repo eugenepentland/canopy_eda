@@ -15,7 +15,7 @@ src/serve.zig:60: hardcoded std.heap.page_allocator outside main/test
 src/serve.zig:73: hardcoded std.heap.page_allocator outside main/test
 src/serve.zig:75: hardcoded std.heap.page_allocator outside main/test
 src/serve/auth.zig:100: hardcoded std.heap.page_allocator outside main/test
-src/serve/mcp.zig:293: hardcoded std.heap.page_allocator outside main/test
+src/serve/mcp.zig:294: hardcoded std.heap.page_allocator outside main/test
 src/serve/oauth_store.zig:72: hardcoded std.heap.page_allocator outside main/test
 src/serve/passwords.zig:36: hardcoded std.heap.page_allocator outside main/test
 src/serve/pcb_layout_page.zig:1027: hardcoded std.heap.page_allocator outside main/test
