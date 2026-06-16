@@ -461,6 +461,7 @@ pub fn issueCode(
     mu.lock();
     defer mu.unlock();
     ensureLoaded(allocator, auth_dir);
+    sweepExpiredCodes(); // bound the map: reclaim codes that were never exchanged
 
     const code = try randomHex(store_alloc, 32);
     const entry = AuthCode{
@@ -478,14 +479,63 @@ pub fn issueCode(
 
 /// Single-use lookup: pop the AuthCode out of the in-memory map and
 /// return it (only when not yet expired). The code is gone after this
-/// call — replays at the token endpoint return null.
+/// call — replays at the token endpoint return null. The returned
+/// strings are duped into `allocator` (the request arena); the original
+/// `store_alloc` (page_allocator) copies are freed here, so a consumed
+/// code leaves nothing behind.
 pub fn consumeCode(allocator: std.mem.Allocator, auth_dir: []const u8, code: []const u8) ?AuthCode {
     mu.lock();
     defer mu.unlock();
     ensureLoaded(allocator, auth_dir);
+    sweepExpiredCodes();
     const entry = codes_map.?.fetchRemove(code) orelse return null;
+    // The popped strings are store_alloc (page_allocator) owned and must be
+    // freed here — the request arena can't reclaim them. Copy the fields the
+    // caller needs into `allocator` (the request arena) FIRST, so the deferred
+    // free of the originals is never a use-after-free.
+    defer freeAuthCode(entry.value);
     if (entry.value.expires_at < clock.timestamp()) return null;
-    return entry.value;
+    return AuthCode{
+        .code = allocator.dupe(u8, entry.value.code) catch return null,
+        .client_id = allocator.dupe(u8, entry.value.client_id) catch return null,
+        .redirect_uri = allocator.dupe(u8, entry.value.redirect_uri) catch return null,
+        .email = allocator.dupe(u8, entry.value.email) catch return null,
+        .code_challenge = allocator.dupe(u8, entry.value.code_challenge) catch return null,
+        .scope = allocator.dupe(u8, entry.value.scope) catch return null,
+        .expires_at = entry.value.expires_at,
+    };
+}
+
+/// Free the six `store_alloc`-owned strings of an `AuthCode`. The map key
+/// aliases `code` (same allocation), so this releases the key too.
+fn freeAuthCode(c: AuthCode) void {
+    store_alloc.free(@constCast(c.code));
+    store_alloc.free(@constCast(c.client_id));
+    store_alloc.free(@constCast(c.redirect_uri));
+    store_alloc.free(@constCast(c.email));
+    store_alloc.free(@constCast(c.code_challenge));
+    store_alloc.free(@constCast(c.scope));
+}
+
+/// Evict + free every auth code past its TTL. Bounds `codes_map` so codes that
+/// are issued but never exchanged (abandoned consent, closed tab) don't
+/// accumulate forever. Caller must hold `mu`.
+fn sweepExpiredCodes() void {
+    if (codes_map == null) return;
+    const map = &codes_map.?;
+    const now = clock.timestamp();
+    // Collect expired keys first; mutating the map mid-iteration is undefined.
+    var expired: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer expired.deinit(store_alloc);
+    var it = map.iterator();
+    while (it.next()) |kv| {
+        if (kv.value_ptr.expires_at >= now) continue;
+        // On the (benign) OOM here, skip this key — the next sweep reclaims it.
+        expired.append(store_alloc, kv.key_ptr.*) catch continue;
+    }
+    for (expired.items) |k| {
+        if (map.fetchRemove(k)) |e| freeAuthCode(e.value);
+    }
 }
 
 // ── Access tokens (persisted, 30 day TTL) ───────────────────────────────

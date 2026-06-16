@@ -91,10 +91,12 @@ fn lintDecapDistance(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, ou
         if (legMm(p, L) > DECAP_MAX_LEG_MM) try refs.append(alloc, p.parts[L.cap].ref_des);
     }
     if (refs.items.len == 0) return;
+    const refs_owned = try alloc.dupe([]const u8, refs.items);
+    errdefer alloc.free(refs_owned);
     try out.append(alloc, .{
         .rule = "decap-far",
         .severity = .warn,
-        .refs = try alloc.dupe([]const u8, refs.items),
+        .refs = refs_owned,
         .msg = "decoupling cap power-leg exceeds ~6 mm to its supply pin; the long leg adds loop inductance that defeats the cap — move it onto the IC's pin",
     });
 }
@@ -120,10 +122,12 @@ fn lintHotLoopTightest(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, 
         if (optimizer.loopNh(p.parts, L) > min_nonhot * HOT_LOOP_MARGIN) try refs.append(alloc, p.parts[L.cap].ref_des);
     }
     if (refs.items.len == 0) return;
+    const refs_owned = try alloc.dupe([]const u8, refs.items);
+    errdefer alloc.free(refs_owned);
     try out.append(alloc, .{
         .rule = "hot-loop-not-tightest",
         .severity = .warn,
-        .refs = try alloc.dupe([]const u8, refs.items),
+        .refs = refs_owned,
         .msg = "the switcher input (hot) loop is looser than a less-critical decoupling loop on the same board; " ++
             "the highest-dI/dt loop should be the tightest — pull the input cap onto the IC's PVIN/PGND pins",
     });
@@ -151,6 +155,7 @@ fn lintFeedbackAggressor(alloc: Allocator, p: Placement, policy: mp.ModulePolicy
         const ai = best orelse continue;
         if (best_gap >= FB_AGGRESSOR_GAP_MM) continue;
         const pair = try alloc.dupe([]const u8, &.{ fp.ref_des, p.parts[ai].ref_des });
+        errdefer alloc.free(pair);
         try out.append(alloc, .{
             .rule = "feedback-near-aggressor",
             .severity = .warn,

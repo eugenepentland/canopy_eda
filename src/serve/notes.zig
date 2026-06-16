@@ -72,11 +72,11 @@ fn notesPath(allocator: std.mem.Allocator, project_dir: []const u8, name: []cons
     return std.fmt.allocPrint(allocator, "{s}/{s}.notes.md", .{ dir, name });
 }
 
-/// Parse a notes-file body into structured tasks + scratchpad. The
-/// returned `Notes` borrows slices from `raw`; both task fields and
-/// scratchpad are views into the original buffer (or allocated only on
-/// the scratchpad rejoin path). Caller must hold `raw` alive while
-/// using the result.
+/// Parse a notes-file body into structured tasks + scratchpad. The task
+/// slice and the scratchpad are both allocated and owned by the caller
+/// (free each via `allocator`); the string fields *inside* each Note still
+/// borrow from `raw`, so the caller must keep `raw` alive while using the
+/// task text/ids.
 pub fn parseNotes(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error!Notes {
     var tasks: std.ArrayListUnmanaged(Note) = .empty;
     var scratch: std.ArrayListUnmanaged(u8) = .empty;
@@ -93,14 +93,22 @@ pub fn parseNotes(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocat
         first_scratch = false;
     }
 
-    // Trim trailing blank lines from the scratchpad so we don't re-emit
-    // them on every save; leading blanks are preserved (the user may
-    // want a leading separator).
-    const scratch_trimmed = std.mem.trimRight(u8, scratch.items, "\n\r \t");
+    // Trim surrounding blank lines: trailing ones so we don't re-emit them on
+    // every save, and any leading blank lines — the separator renderNotes puts
+    // between the task list and the scratchpad — so a save/load round-trip stays
+    // stable instead of accreting blank lines each cycle. The scratchpad is
+    // returned as an owned slice: `scratch` is heap-backed whenever any
+    // scratchpad line exists, and prior code leaked it (returned a view without
+    // freeing the buffer).
+    defer scratch.deinit(allocator);
+    defer tasks.deinit(allocator); // no-op after a successful toOwnedSlice; frees the buffer if it OOMs
+    const scratch_trimmed = std.mem.trimRight(u8, std.mem.trimLeft(u8, scratch.items, "\n\r"), "\n\r \t");
 
+    const tasks_owned = try tasks.toOwnedSlice(allocator);
+    errdefer allocator.free(tasks_owned);
     return .{
-        .tasks = try tasks.toOwnedSlice(allocator),
-        .scratchpad = scratch_trimmed,
+        .tasks = tasks_owned,
+        .scratchpad = try allocator.dupe(u8, scratch_trimmed),
     };
 }
 
@@ -489,6 +497,7 @@ test "parse round-trips open and done tasks" {
     ;
     const notes = try parseNotes(allocator, raw);
     defer allocator.free(notes.tasks);
+    defer allocator.free(notes.scratchpad);
     try std.testing.expectEqual(@as(usize, 2), notes.tasks.len);
     try std.testing.expectEqualStrings("a1b2c3d4", notes.tasks[0].id);
     try std.testing.expect(notes.tasks[0].completed == null);
@@ -509,6 +518,7 @@ test "parse treats malformed task-like lines as scratchpad" {
     const allocator = std.testing.allocator;
     const notes = try parseNotes(allocator, "- [ ] not a date (abc) text\n- [?] unknown\n");
     defer allocator.free(notes.tasks);
+    defer allocator.free(notes.scratchpad);
     try std.testing.expectEqual(@as(usize, 0), notes.tasks.len);
     try std.testing.expect(std.mem.indexOf(u8, notes.scratchpad, "not a date") != null);
 }
