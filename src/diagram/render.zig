@@ -202,8 +202,16 @@ fn renderSystemBody(arena: Allocator, w: *Writer, graph: *const Graph, lay: layo
         ch = @max(ch, e.y + e.h + layout.pad);
     }
     try writeSvgOpen(w, cw, ch, with_lod);
-    if (with_lod) try w.writeAll("<g class=\"dg-base\">");
-    try renderSystemView(arena, w, graph, lay, rail_mode);
+    // The semantic-zoom Layout view draws blocks only (`bare`): the per-net wires
+    // are suppressed, and connectivity is shown by the coarse aggregated
+    // group-to-group links (drawn first, under the blocks) plus the LOD-0 glance
+    // layer. The reader zooms a block into its real schematic for the detail.
+    // Every other view (and a group-less Layout) draws its own per-net wires.
+    if (with_lod) {
+        try w.writeAll("<g class=\"dg-base\">");
+        try lod.writeBaseAggLinks(arena, w, graph, lay, glance_ents);
+    }
+    try renderSystemView(arena, w, graph, lay, rail_mode, with_lod);
     if (with_lod) {
         try w.writeAll("</g>");
         try lod.writeGlanceLayer(arena, w, graph, lay, glance_ents);
@@ -224,44 +232,51 @@ const sys_arrow_sz: f64 = 13; // signal-edge arrowhead size (px)
 /// carry their class color (what a connection *carries*). Power wires recede
 /// (thin/faint, undirected, unlabeled) — the rail fan is the main clutter and
 /// its voltages live in the focused Power tab.
-fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout, rail_mode: bool) (Allocator.Error || Writer.Error)!void {
+fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout, rail_mode: bool, bare: bool) (Allocator.Error || Writer.Error)!void {
     try writeStageBands(w, lay);
     try writeGroupBoxes(w, lay);
+    // `bare` (the semantic-zoom Layout view) draws only the blocks — no wires,
+    // arrowheads, or labels. Connectivity is read from the LOD-0 glance layer and
+    // by zooming a block into its real schematic. Every other view wires its blocks.
     // In rail mode (the Layout view) each power net gets its own color + label so
     // rails are traceable; otherwise power recedes as one faint anonymous color.
-    const rails: ?[]const RailColor = if (rail_mode) try buildRailPalette(arena, graph) else null;
-    // The Layout view (rail_mode) routes its own obstacle-dodging orthogonal
-    // paths, so draw them as sharp right-angle polylines (`sharp`); the staged
-    // System / Function views keep the flowing-Bézier style over lane routes.
-    for (lay.routes) |r| {
-        if (r.class == types.CLASS_POWER) {
-            if (rails) |p| {
-                try drawSysEdge(w, r, railColor(p, r.label), sys_rail_width, sys_rail_opacity, rail_mode);
+    const rails: ?[]const RailColor = if (rail_mode and !bare) try buildRailPalette(arena, graph) else null;
+    if (!bare) {
+        // The Layout view (rail_mode) routes its own obstacle-dodging orthogonal
+        // paths, drawn as sharp right-angle polylines (`sharp`); the staged
+        // System / Function views keep the flowing-Bézier style over lane routes.
+        for (lay.routes) |r| {
+            if (r.class == types.CLASS_POWER) {
+                if (rails) |p| {
+                    try drawSysEdge(w, r, railColor(p, r.label), sys_rail_width, sys_rail_opacity, rail_mode);
+                } else {
+                    try drawSysEdge(w, r, classColor(graph, r.class), sys_power_width, sys_power_opacity, rail_mode);
+                }
             } else {
-                try drawSysEdge(w, r, classColor(graph, r.class), sys_power_width, sys_power_opacity, rail_mode);
+                try drawSysEdge(w, r, classColor(graph, r.class), null, null, rail_mode);
             }
-        } else {
-            try drawSysEdge(w, r, classColor(graph, r.class), null, null, rail_mode);
         }
     }
-    for (lay.nodes) |n| try writeNode(arena, w, graph.nodes[n.gid], n.x, n.y);
-    // Arrowheads after the boxes so they sit on top of the block border and
-    // read as "drives into this block". Signal edges only.
-    for (lay.routes) |r| {
-        if (r.class == types.CLASS_POWER) continue;
-        try writeArrowhead(w, r, classColor(graph, r.class));
-    }
-    // Labels: signal edges always; power edges too in rail mode (so each rail is
-    // named), each in its own color.
-    var labeled: std.StringHashMapUnmanaged(void) = .empty;
-    for (lay.routes) |r| {
-        if (r.label.len == 0) continue;
-        const is_power = r.class == types.CLASS_POWER;
-        if (is_power and rails == null) continue;
-        const color = if (is_power) railColor(rails.?, r.label) else classColor(graph, r.class);
-        const key = try std.fmt.allocPrint(arena, "{d}|{s}", .{ r.from_gid, r.label });
-        if ((try labeled.getOrPut(arena, key)).found_existing) continue;
-        try writeEdgeLabel(arena, w, r, color);
+    for (lay.nodes) |n| try writeNode(arena, w, n.gid, graph.nodes[n.gid], n.x, n.y);
+    if (!bare) {
+        // Arrowheads after the boxes so they sit on top of the block border and
+        // read as "drives into this block". Signal edges only.
+        for (lay.routes) |r| {
+            if (r.class == types.CLASS_POWER) continue;
+            try writeArrowhead(w, r, classColor(graph, r.class));
+        }
+        // Labels: signal edges always; power edges too in rail mode (so each rail
+        // is named), each in its own color.
+        var labeled: std.StringHashMapUnmanaged(void) = .empty;
+        for (lay.routes) |r| {
+            if (r.label.len == 0) continue;
+            const is_power = r.class == types.CLASS_POWER;
+            if (is_power and rails == null) continue;
+            const color = if (is_power) railColor(rails.?, r.label) else classColor(graph, r.class);
+            const key = try std.fmt.allocPrint(arena, "{d}|{s}", .{ r.from_gid, r.label });
+            if ((try labeled.getOrPut(arena, key)).found_existing) continue;
+            try writeEdgeLabel(arena, w, r, color);
+        }
     }
 }
 
@@ -286,8 +301,8 @@ fn writeArrowhead(w: *Writer, r: layout.Route, color: []const u8) Writer.Error!v
     const half = sys_arrow_sz * 0.55;
     // Base corners offset along the perpendicular (-dy, dx).
     try w.print(
-        "<path d=\"M {d:.1} {d:.1} L {d:.1} {d:.1} L {d:.1} {d:.1} Z\" fill=\"{s}\"/>",
-        .{ tip.x, tip.y, bx - dy * half, by + dx * half, bx + dy * half, by - dx * half, color },
+        "<path d=\"M {d:.1} {d:.1} L {d:.1} {d:.1} L {d:.1} {d:.1} Z\" fill=\"{s}\" class=\"dg-edge-arrow\" data-a=\"{d}\" data-b=\"{d}\"/>",
+        .{ tip.x, tip.y, bx - dy * half, by + dx * half, bx + dy * half, by - dx * half, color, r.from_gid, r.to_gid },
     );
 }
 
@@ -410,7 +425,7 @@ fn renderView(allocator: Allocator, graph: *const Graph, view: ClassId, w: *Writ
         // Bézier connector as the power tree — lane alignment keeps chains on one
         // row, so the curves run clean.
         for (lay.routes) |r| try writeCurveEdge(w, r, classColor(graph, view));
-        for (lay.nodes) |n| try writeNode(arena, w, graph.nodes[n.gid], n.x, n.y);
+        for (lay.nodes) |n| try writeNode(arena, w, n.gid, graph.nodes[n.gid], n.x, n.y);
         // One label per (source, rail). A rail fanning out to many consumers is a
         // single net, so its name is drawn once on the trunk, not once per branch.
         var labeled: std.StringHashMapUnmanaged(void) = .empty;
@@ -454,10 +469,12 @@ fn openNodeLink(w: *Writer, slug: []const u8) Writer.Error!bool {
     return true;
 }
 
-fn writeNode(arena: Allocator, w: *Writer, node: types.Node, x: f64, y: f64) (Allocator.Error || Writer.Error)!void {
+fn writeNode(arena: Allocator, w: *Writer, gid: u32, node: types.Node, x: f64, y: f64) (Allocator.Error || Writer.Error)!void {
     const color = rb.categoryColor(node.category);
     const has_link = try openNodeLink(w, node.slug);
-    try w.writeAll("<g class=\"dg-node\">");
+    // `data-gid` lets the hover-focus JS find the edges (`data-a`/`data-b`)
+    // touching this block.
+    try w.print("<g class=\"dg-node\" data-gid=\"{d}\">", .{gid});
     // Board-edge endpoints (antennas / EMVS cells) get a dashed border.
     const rect_class = if (node.is_boundary) "dg-rect dg-boundary" else "dg-rect";
     // Multi-channel block: draw offset cards behind the main box (back-to-front)
@@ -524,9 +541,21 @@ fn writeSubLines(w: *Writer, x: f64, y: f64, lines: []const []const u8) (Allocat
 
 // ── edges ──────────────────────────────────────────────────────────────
 
-/// A small filled terminal dot where an edge meets a block.
-fn writeDot(w: *Writer, p: types.Pt, color: []const u8) Writer.Error!void {
-    try w.print("<circle cx=\"{d:.1}\" cy=\"{d:.1}\" r=\"{d:.1}\" fill=\"{s}\"/>", .{ p.x, p.y, edge_dot_r, color });
+/// A small filled terminal dot where an edge meets a block. Carries the same
+/// `data-a`/`data-b` endpoint ids as its edge so the hover-focus JS can dim it
+/// in lock-step with the line.
+fn writeDot(w: *Writer, p: types.Pt, color: []const u8, ga: u32, gb: u32) Writer.Error!void {
+    try w.print(
+        "<circle cx=\"{d:.1}\" cy=\"{d:.1}\" r=\"{d:.1}\" fill=\"{s}\" class=\"dg-edge-dot\" data-a=\"{d}\" data-b=\"{d}\"/>",
+        .{ p.x, p.y, edge_dot_r, color, ga, gb },
+    );
+}
+
+/// Emit the ` data-a`/`data-b` endpoint-id attributes shared by every edge
+/// element (path, dot, arrowhead), so the viewer JS can highlight just the
+/// connections touching a hovered block.
+fn writeEdgeData(w: *Writer, r: layout.Route) Writer.Error!void {
+    try w.print(" data-a=\"{d}\" data-b=\"{d}\"", .{ r.from_gid, r.to_gid });
 }
 
 fn writeEdgeLabel(arena: Allocator, w: *Writer, r: layout.Route, color: []const u8) (Allocator.Error || Writer.Error)!void {
@@ -682,10 +711,11 @@ fn writeCurveEdgeStyled(w: *Writer, r: layout.Route, color: []const u8, width: ?
         "<path d=\"M {d:.1} {d:.1} C {d:.1} {d:.1}, {d:.1} {d:.1}, {d:.1} {d:.1}\" class=\"dg-edge\" stroke=\"{s}\"",
         .{ a.x, a.y, c1x, a.y, c2x, b.y, b.x, b.y, color },
     );
+    try writeEdgeData(w, r);
     try writeEdgeStrokeClose(w, width, opacity);
     if (opacity == null) {
-        try writeDot(w, a, color);
-        try writeDot(w, b, color);
+        try writeDot(w, a, color, r.from_gid, r.to_gid);
+        try writeDot(w, b, color, r.from_gid, r.to_gid);
     }
 }
 
@@ -710,8 +740,9 @@ fn writeRoutedEdge(w: *Writer, r: layout.Route, color: []const u8, width: ?f64, 
         try w.print(" Q {d:.1} {d:.1}, {d:.1} {d:.1}", .{ pts[i].x, pts[i].y, m.x, m.y });
     }
     try w.print(" L {d:.1} {d:.1}\" class=\"dg-edge\" stroke=\"{s}\"", .{ pts[pts.len - 1].x, pts[pts.len - 1].y, color });
+    try writeEdgeData(w, r);
     try writeEdgeStrokeClose(w, width, opacity);
-    if (opacity == null) try writeDot(w, pts[0], color); // source dot; arrowhead marks the sink
+    if (opacity == null) try writeDot(w, pts[0], color, r.from_gid, r.to_gid); // source dot; arrowhead marks the sink
 }
 
 fn midpoint(a: types.Pt, b: types.Pt) types.Pt {
@@ -744,8 +775,9 @@ fn writeOrthEdge(w: *Writer, r: layout.Route, color: []const u8, width: ?f64, op
     var i: usize = 1;
     while (i < pts.len) : (i += 1) try w.print(" L {d:.1} {d:.1}", .{ pts[i].x, pts[i].y });
     try w.print("\" class=\"dg-edge\" stroke=\"{s}\"", .{color});
+    try writeEdgeData(w, r);
     try writeEdgeStrokeClose(w, width, opacity);
-    if (opacity == null) try writeDot(w, pts[0], color);
+    if (opacity == null) try writeDot(w, pts[0], color, r.from_gid, r.to_gid);
 }
 
 /// Draws the power supply tree: rail-colored wires first, then the source /
@@ -1012,6 +1044,11 @@ pub const CSS =
     \\.dg-svg[data-lod="2"] .dg-deep{opacity:1;}
     \\.dg-edge-label,.dg-pill{transition:opacity .25s ease;}
     \\.dg-svg[data-lod="2"] .dg-edge-label,.dg-svg[data-lod="2"] .dg-pill{opacity:0;}
+    \\.dg-edge,.dg-edge-dot,.dg-edge-arrow,.dg-node{transition:opacity .2s ease;}
+    \\.dg-svg.dg-focus .dg-edge,.dg-svg.dg-focus .dg-edge-dot,.dg-svg.dg-focus .dg-edge-arrow{opacity:0.07;}
+    \\.dg-svg.dg-focus .dg-edge.dg-hot,.dg-svg.dg-focus .dg-edge-dot.dg-hot,.dg-svg.dg-focus .dg-edge-arrow.dg-hot{opacity:1;}
+    \\.dg-svg.dg-focus .dg-node{opacity:0.3;}
+    \\.dg-svg.dg-focus .dg-node.dg-hot{opacity:1;}
     \\.dg-chip{cursor:pointer;}
     \\.dg-chip:hover .dg-chip-tint{fill-opacity:0.16;}
     \\.dg-chip-title{fill:#e6edf3;font:700 38px -apple-system,BlinkMacSystemFont,sans-serif;text-anchor:middle;}

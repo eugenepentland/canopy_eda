@@ -2340,6 +2340,43 @@
   }
   document.querySelectorAll('.dg-svg').forEach(setupDiagramZoom);
 
+  // ---- Hover-focus dimming (declutter) ----
+  // A dense Layout diagram is hard to trace because every net is drawn at once.
+  // Hovering a block dims every connection except the nets touching it (and the
+  // blocks at their far ends), so the diagram reads one subsystem at a time.
+  // Pure presentation: the block carries data-gid, each edge/dot/arrow carries
+  // data-a/data-b (its endpoint gids), and we just toggle the .dg-hot class the
+  // CSS fades around. Works at any zoom (LOD 0's glance layer has no .dg-node,
+  // so it's unaffected).
+  document.querySelectorAll('.dg-svg').forEach(function (svg) {
+    var nodes = svg.querySelectorAll('.dg-node[data-gid]');
+    if (nodes.length < 3) return; // nothing to declutter on a 2-block diagram
+    if (svg.querySelectorAll('[data-a]').length === 0) return; // no wires to dim (e.g. the blocks-only Layout view)
+    function clearFocus() {
+      svg.classList.remove('dg-focus');
+      svg.querySelectorAll('.dg-hot').forEach(function (el) { el.classList.remove('dg-hot'); });
+    }
+    nodes.forEach(function (node) {
+      node.addEventListener('mouseenter', function () {
+        var gid = node.getAttribute('data-gid');
+        if (gid === null) return;
+        clearFocus();
+        svg.classList.add('dg-focus');
+        var neigh = Object.create(null);
+        neigh[gid] = true;
+        svg.querySelectorAll('[data-a="' + gid + '"],[data-b="' + gid + '"]').forEach(function (el) {
+          el.classList.add('dg-hot');
+          neigh[el.getAttribute('data-a')] = true;
+          neigh[el.getAttribute('data-b')] = true;
+        });
+        nodes.forEach(function (n) {
+          if (neigh[n.getAttribute('data-gid')]) n.classList.add('dg-hot');
+        });
+      });
+      node.addEventListener('mouseleave', clearFocus);
+    });
+  });
+
   // ---- Diagram block → section cross-probe ----
   // Every block in the Layout / Power / Clocks / Control / System diagrams is
   // an SVG <a href="#sec-SLUG"> link. Native hash-nav already jumps there, but

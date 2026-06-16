@@ -165,6 +165,38 @@ pub fn writeGlanceLayer(
     try w.writeAll("</g>");
 }
 
+/// Draw the same aggregated group-to-group links the glance layer shows, but at
+/// the base layer's *original* group geometry (the `z*` bounds, not the
+/// overlap-separated chip positions) — so the coarse connectivity stays visible
+/// and aligned with the blocks at LOD 1/2, where the per-net wires are
+/// suppressed. The caller emits this inside `dg-base`, so it fades out at LOD 0
+/// (the glance layer draws its own copy at the separated positions there).
+/// Drawn before the blocks so the opaque block bodies sit on top; the links run
+/// border-to-border and so live in the gaps between groups.
+pub fn writeBaseAggLinks(
+    arena: Allocator,
+    w: *Writer,
+    graph: *const Graph,
+    lay: layout.Layout,
+    ents: []const Entity,
+) (Allocator.Error || Writer.Error)!void {
+    if (ents.len == 0) return;
+    const base = try arena.alloc(Entity, ents.len);
+    for (ents, 0..) |e, i| {
+        base[i] = e;
+        base[i].x = e.zx;
+        base[i].y = e.zy;
+        base[i].w = e.zw;
+        base[i].h = e.zh;
+    }
+    const ent_of = try entityOf(arena, graph, lay, ents);
+    const aggs = try aggregateEdges(arena, graph, ent_of);
+    try w.writeAll("<g class=\"dg-agglinks\">");
+    for (aggs) |agg| try writeAggEdge(w, graph, aggGeometry(base, aggs, agg), agg);
+    for (aggs) |agg| try writeAggTag(w, graph, base, aggs, agg);
+    try w.writeAll("</g>");
+}
+
 /// Build the chip list: one per placed `(group …)` (bounds from the already
 /// computed `GroupBox`, members re-resolved from the source spec via the same
 /// key match the layout used), then one solo chip per laid-out block no group
