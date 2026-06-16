@@ -361,8 +361,14 @@ pub fn estimateBranchCount(self: *RenderCtx, spoke_rd: []const u8, hub_ref: []co
         if (hub_pin != null and std.mem.eql(u8, ae.pin, hub_pin.?)) continue;
         switch (ae.endpoint) {
             .net => |net| {
-                if (isGroundNet(baseNetName(net))) return 1;
-                const net_pins = self.net_index.get(baseNetName(net)) orelse continue;
+                const bn = baseNetName(net);
+                // Mirror `tryChainConns`: ground and sub-block-shared rails are
+                // terminals, so the chain needs just one slot — not one per
+                // sibling spoke on the rail. Without this the reserved height
+                // still counts the fanned-out branches the walker no longer
+                // draws, so each hub block stays oversized.
+                if (isGroundNet(bn) or self.shared_rail_nets.contains(bn)) return 1;
+                const net_pins = self.net_index.get(bn) orelse continue;
                 var has_hub = false;
                 for (net_pins.items) |np| {
                     if (!self.spoke_set.contains(np.ref_des) and !std.mem.eql(u8, np.ref_des, spoke_rd)) {
