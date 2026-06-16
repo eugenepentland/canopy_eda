@@ -328,7 +328,13 @@ fn tryChainConns(
     const ae = conns[0];
     switch (ae.endpoint) {
         .net => |net| {
-            if (isGroundNet(net)) return .{ .chain = &.{}, .terminal = net, .branches = &.{} };
+            // Terminate at ground and at any rail/bus shared across sub-blocks:
+            // both are global terminals, not local passive junctions. Walking
+            // into a shared rail would fan out into every passive on it and
+            // pull in sibling sub-blocks' networks (e.g. both PMA3 LNAs' VDD
+            // bias resistors on each LNA's hub). See `RenderCtx.shared_rail_nets`.
+            if (isGroundNet(net) or self.shared_rail_nets.contains(net))
+                return .{ .chain = &.{}, .terminal = net, .branches = &.{} };
 
             const net_pins = self.net_index.get(net) orelse return .{ .chain = &.{}, .terminal = net, .branches = &.{} };
 
@@ -343,12 +349,10 @@ fn tryChainConns(
 
             var other_spokes: std.ArrayListUnmanaged(PinRef) = .empty;
             for (net_pins.items) |np| {
-                if (!std.mem.eql(u8, np.ref_des, current_ref) and
-                    self.spoke_set.contains(np.ref_des) and
-                    !visited.contains(np.ref_des))
-                {
-                    try other_spokes.append(self.allocator, np);
-                }
+                if (std.mem.eql(u8, np.ref_des, current_ref)) continue;
+                if (!self.spoke_set.contains(np.ref_des)) continue;
+                if (visited.contains(np.ref_des)) continue;
+                try other_spokes.append(self.allocator, np);
             }
 
             if (other_spokes.items.len == 0) {
