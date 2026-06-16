@@ -22,6 +22,14 @@ fn isStdRefDes(ref: []const u8) bool {
     return i == ref.len and i > digit_start;
 }
 
+/// Sub-block origin of a flattened ref-des: everything before the last '/'
+/// (the path of the sub-block that contains the part), or "" for a top-level
+/// instance. Two parts with different origins live in different sub-blocks.
+fn originOf(ref: []const u8) []const u8 {
+    const idx = std.mem.lastIndexOfScalar(u8, ref, '/') orelse return "";
+    return ref[0..idx];
+}
+
 const Allocator = std.mem.Allocator;
 
 // ── Flat types ────────────────────────────────────────────────────────
@@ -150,6 +158,12 @@ pub const RenderCtx = struct {
     adjacency: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(AdjEntry)),
     net_index: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(PinRef)),
     significant_nets: std.StringHashMapUnmanaged(void),
+    /// Base names of (non-ground) nets shared across two or more sub-blocks —
+    /// i.e. global rails/buses, not local passive junctions. The spoke-chain
+    /// walker terminates and labels these instead of fanning out into every
+    /// passive on the rail (which would pull in sibling sub-blocks' identical
+    /// networks). Populated by `buildSignificantNets`.
+    shared_rail_nets: std.StringHashMapUnmanaged(void),
     port_nets: std.StringHashMapUnmanaged(void),
     pin_canonical_nets: std.StringHashMapUnmanaged([]const u8),
     rendered_spokes: std.StringHashMapUnmanaged(void),
@@ -173,6 +187,7 @@ pub const RenderCtx = struct {
             .adjacency = .empty,
             .net_index = .empty,
             .significant_nets = .empty,
+            .shared_rail_nets = .empty,
             .port_nets = .empty,
             .pin_canonical_nets = .empty,
             .rendered_spokes = .empty,
@@ -584,6 +599,47 @@ pub const RenderCtx = struct {
             }
             if (has_hub) {
                 try self.significant_nets.put(self.allocator, bn, {});
+            }
+        }
+        // A (non-ground) net whose pins span two or more sections / sub-blocks
+        // is a global rail/bus, not a local passive junction. The spoke-chain
+        // walker must terminate (and label) there instead of fanning out into
+        // every passive on the rail — otherwise one sub-block's passive network
+        // drags in its siblings' identical networks (e.g. both PMA3 LNAs' VDD
+        // bias resistors appearing on each LNA's hub SVG via the shared V5P0
+        // rail). Marking it significant lets `renderTerminalGroups` draw the
+        // rail label at the chain's terminus.
+        //
+        // `section_map` is the authoritative origin signal: every section and
+        // every top-level sub-block gets a distinct index, and flattened
+        // children keep their renumbered ref-des in it. (`originOf` only sees a
+        // path prefix, which renumbering to standard ref-des erases — so it
+        // alone can't tell R70/lna1 from R74/lna2. Kept as a cheap fallback for
+        // any net whose pins carry a sub-block path but no section.)
+        const NO_SECTION = std.math.maxInt(usize);
+        var first_origin: std.StringHashMapUnmanaged([]const u8) = .empty;
+        defer first_origin.deinit(self.allocator);
+        var first_section: std.StringHashMapUnmanaged(usize) = .empty;
+        defer first_section.deinit(self.allocator);
+        for (self.nets.items) |net| {
+            const bn = baseNetName(net.name);
+            if (isGroundNet(bn)) continue;
+            if (self.shared_rail_nets.contains(bn)) continue;
+            for (net.pins) |pin| {
+                const origin = originOf(pin.ref_des);
+                const sect = self.section_map.get(pin.ref_des) orelse NO_SECTION;
+                const og = try first_origin.getOrPut(self.allocator, bn);
+                const sg = try first_section.getOrPut(self.allocator, bn);
+                if (!og.found_existing) {
+                    og.value_ptr.* = origin;
+                    sg.value_ptr.* = sect;
+                    continue;
+                }
+                if (sg.value_ptr.* != sect or !std.mem.eql(u8, og.value_ptr.*, origin)) {
+                    try self.shared_rail_nets.put(self.allocator, bn, {});
+                    try self.significant_nets.put(self.allocator, bn, {});
+                    break;
+                }
             }
         }
         for ([_][]const u8{ "GND", "AGND", "DGND", "VSS" }) |g| {
