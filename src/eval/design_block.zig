@@ -87,6 +87,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var placement_spec: env_mod.PlacementSpec = .{};
     var floorplan_spec: env_mod.PlacementSpec = .{};
     var board_spec: env_mod.BoardSpec = .{};
+    var revision_spec: env_mod.Revision = .{};
     var policy_net_overrides: std.ArrayListUnmanaged(env_mod.NetClassOverride) = .empty;
     var policy_module_overrides: std.ArrayListUnmanaged(env_mod.ModuleClassOverride) = .empty;
     var derating: ?f64 = null;
@@ -185,6 +186,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             // Same grammar as (placement …); the items name sub-block slugs.
             .floorplan => floorplan_spec = try parsePlacement(self, form_children),
             .board => board_spec = try parseBoard(self, form_children),
+            .revision => revision_spec = try parseRevision(self, form_children),
             .replicate => try evalReplicate(self, form_children, env, &sub_blocks),
             .module_policy => try parsePolicyOverrides(self, form_children, &policy_net_overrides, &policy_module_overrides),
             // Section-only forms are ignored at the top level — a
@@ -237,6 +239,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             .nets = policy_net_overrides.toOwnedSlice(self.allocator) catch &.{},
             .modules = policy_module_overrides.toOwnedSlice(self.allocator) catch &.{},
         },
+        .revision = revision_spec,
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -270,6 +273,68 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
 fn parseKicadPcbPath(form_children: []const Node) ?[]const u8 {
     if (form_children.len < 2) return null;
     return form_children[1].asString();
+}
+
+/// Parse `(revision "ID" (date "YYYY-MM-DD") (change "ID" "summary")…)` — the
+/// design's declared board revision. The first argument is the canonical
+/// revision id; like ids elsewhere it's a literal string (not evaluated). An
+/// optional `(date …)` sub-form carries the cut date and each `(change …)`
+/// sub-form appends one changelog entry (newest-first by convention). An
+/// id-less form (or a non-string id) is reported as a lint warning and
+/// treated as absent, so a typo can't silently version the board.
+fn parseRevision(self: *Evaluator, form_children: []const Node) EvalError!env_mod.Revision {
+    if (form_children.len < 2) {
+        self.warnFmt(form_children[0].span, "(revision …) needs an id, e.g. (revision \"A\")", .{});
+        return .{};
+    }
+    const id = form_children[1].asString() orelse {
+        self.warnFmt(form_children[1].span, "(revision …) id must be a quoted string, e.g. (revision \"F4\")", .{});
+        return .{};
+    };
+
+    var date: []const u8 = "";
+    var changes: std.ArrayListUnmanaged(env_mod.RevisionChange) = .empty;
+
+    for (form_children[2..]) |child| {
+        const kids = child.asList() orelse {
+            self.warnFmt(child.span, "(revision …) extra arguments must be (date …) or (change …) sub-forms", .{});
+            continue;
+        };
+        if (kids.len == 0) continue;
+        const head = kids[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "date")) {
+            if (kids.len >= 2) {
+                if (kids[1].asString()) |d| {
+                    date = d;
+                } else {
+                    self.warnFmt(kids[1].span, "(date …) value must be a quoted string", .{});
+                }
+            }
+        } else if (std.mem.eql(u8, head, "change")) {
+            if (kids.len < 3) {
+                self.warnFmt(child.span, "(change …) needs an id and a summary, e.g. (change \"A\" \"first spin\")", .{});
+                continue;
+            }
+            const cid = kids[1].asString() orelse {
+                self.warnFmt(kids[1].span, "(change …) id must be a quoted string", .{});
+                continue;
+            };
+            const summary = kids[2].asString() orelse {
+                self.warnFmt(kids[2].span, "(change …) summary must be a quoted string", .{});
+                continue;
+            };
+            try changes.append(self.allocator, .{ .id = cid, .summary = summary });
+        } else {
+            self.warnFmt(child.span, "unknown sub-form ({s} …) in (revision …)", .{head});
+        }
+    }
+
+    return .{
+        .id = id,
+        .date = date,
+        .changes = changes.toOwnedSlice(self.allocator) catch &.{},
+        .present = true,
+    };
 }
 
 /// Evaluate `(replicate N "name~D" (module-call args…) [(id …)])` — the
@@ -876,6 +941,7 @@ fn evalSection(
             .board,
             .replicate,
             .module_policy,
+            .revision,
             => {
                 self.warnFmt(sf.span, "({s} …) is top-level-only — ignored inside (section …)", .{sf_name});
             },
@@ -1991,6 +2057,68 @@ test "design-block parses a (board ...) form" {
     try testing.expectEqual(@as(f64, 90), block.board.sides[1].items[0].rot.?);
     try testing.expectEqual(@as(usize, 4), block.board.corners.len);
     try testing.expectEqualStrings("MK3", block.board.corners[2].ref);
+}
+
+// spec: eval/design_block - revision form captures id, date, and newest-first changelog
+test "design-block parses a (revision ...) form" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (revision "F4"
+        \\    (date "2026-06-15")
+        \\    (change "F4" "Removed antenna-select switch")
+        \\    (change "E" "First fab spin")))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expect(block.revision.present);
+    try testing.expectEqualStrings("F4", block.revision.id);
+    try testing.expectEqualStrings("2026-06-15", block.revision.date);
+    try testing.expectEqual(@as(usize, 2), block.revision.changes.len);
+    try testing.expectEqualStrings("F4", block.revision.changes[0].id);
+    try testing.expectEqualStrings("Removed antenna-select switch", block.revision.changes[0].summary);
+    try testing.expectEqualStrings("E", block.revision.changes[1].id);
+}
+
+// spec: eval/design_block - revision form with only an id is present with empty date/changelog
+test "design-block parses a bare (revision id) form" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (revision "A"))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expect(block.revision.present);
+    try testing.expectEqualStrings("A", block.revision.id);
+    try testing.expectEqualStrings("", block.revision.date);
+    try testing.expectEqual(@as(usize, 0), block.revision.changes.len);
+}
+
+// spec: eval/design_block - a design with no (revision …) form is unversioned (present=false)
+test "design-block without a revision form is unversioned" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test")
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expect(!block.revision.present);
 }
 
 // spec: eval/design_block - hosts form records the sub-block instance names a section owns

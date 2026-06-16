@@ -1128,6 +1128,30 @@ pub const BoardSpec = struct {
     present: bool = false,
 };
 
+/// One historical entry from a `(change "id" "summary")` line inside the
+/// `(revision …)` form — the in-file changelog. By convention the list is
+/// newest-first and `id` matches the revision the change shipped in.
+pub const RevisionChange = struct {
+    id: []const u8,
+    summary: []const u8,
+};
+
+/// Declared design revision from a top-level `(revision "id" (date "…")
+/// (change …)…)` form: the canonical, human-meaningful board revision a
+/// recipient reads to know which spin of the design they're holding, and
+/// the one a designer bumps by hand when cutting a new revision. Distinct
+/// from the per-edit snapshot/version history (`/api/history`, the live
+/// `/api/version` counter) — those track *every save*; this tracks the
+/// deliberate manufacturing revision that belongs on the schematic header,
+/// the review doc, and (later) the KiCad title block.
+/// `present=false` ⇒ no `(revision …)` form; the design is unversioned.
+pub const Revision = struct {
+    id: []const u8 = "",
+    date: []const u8 = "",
+    changes: []const RevisionChange = &.{},
+    present: bool = false,
+};
+
 /// The fully-evaluated result of a `(design-block …)`: the flattened netlist
 /// (instances + nets + ports), the section/sub-block tree, and the design-doc
 /// metadata (critical ICs, verifications, rails, functions) the review and
@@ -1212,6 +1236,10 @@ pub const DesignBlock = struct {
     /// `ModuleClass`. Applied after detection in `placement/module_policy.zig`.
     /// Empty ⇒ detection stands alone. Phase 4 of the module-placement ruleset.
     policy_overrides: PolicyOverrides = .{},
+    /// Declared board revision from a top-level `(revision …)` form — the
+    /// canonical human-meaningful spin id (+ optional date + in-file
+    /// changelog). `present=false` ⇒ the design declares no revision.
+    revision: Revision = .{},
 };
 
 /// A rail's electrical role, declared by `(power-rail <label> (role …) (net …))`.

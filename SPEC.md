@@ -550,6 +550,9 @@ Public functions: analyze
 - layout edge form parses left/right edge-pinned block keys
 - hosts form records the sub-block instance names a section owns
 - board form parses outline size, edge lists, and corners
+- revision form captures id, date, and newest-first changelog
+- revision form with only an id is present with empty date/changelog
+- a design with no (revision …) form is unversioned (present=false)
 - verifies req with an (id …) target parses as a stable-id sign-off leaving ref-des empty
 - verifies req with a ref-des target parses as a ref-des sign-off leaving target-id empty
 

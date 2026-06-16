@@ -134,6 +134,7 @@ pub const ScopeForm = enum {
     board,
     replicate,
     module_policy,
+    revision,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -181,6 +182,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "board", .board },
     .{ "replicate", .replicate },
     .{ "module-policy", .module_policy },
+    .{ "revision", .revision },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -560,6 +562,14 @@ pub const scope_form_docs = blk: {
             "wrong (e.g. an integrated buck with no discrete inductor that reads as generic). " ++
             "Applied after detection — the author has the last word. Surfaced in /api/pcb-describe; " ++
             "export the detected policy as a starting point with /api/module-policy.",
+    } };
+    t[@intFromEnum(ScopeForm.revision)] = .{ .scope = tl, .doc = .{
+        .syntax = "(revision \"ID\" [(date \"YYYY-MM-DD\")] [(change \"ID\" \"summary\")…])",
+        .summary = "Declare the design's canonical board revision: a human-meaningful spin id " ++
+            "(\"A\", \"F4\", \"1.2\"), an optional date, and an optional newest-first in-file " ++
+            "changelog. Shown on the schematic header and review doc so a recipient of the .sexp " ++
+            "can tell which revision they hold; bump it by hand when cutting a new spin. Distinct " ++
+            "from the per-edit snapshot history — tag the git commit to anchor the bump.",
     } };
     break :blk requireAllDocumented(ScopeForm, ScopedFormDoc, t);
 };

@@ -26,6 +26,26 @@ pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) std.mem
     try w.writeAll(",\"generated_at\":");
     try json_writer.writeString(w, doc.generated_at);
 
+    try w.writeAll(",\"revision\":");
+    if (doc.revision.present) {
+        try w.writeAll("{\"id\":");
+        try json_writer.writeString(w, doc.revision.id);
+        try w.writeAll(",\"date\":");
+        try json_writer.writeString(w, doc.revision.date);
+        try w.writeAll(",\"changes\":[");
+        for (doc.revision.changes, 0..) |c, i| {
+            if (i > 0) try w.writeAll(",");
+            try w.writeAll("{\"id\":");
+            try json_writer.writeString(w, c.id);
+            try w.writeAll(",\"summary\":");
+            try json_writer.writeString(w, c.summary);
+            try w.writeAll("}");
+        }
+        try w.writeAll("]}");
+    } else {
+        try w.writeAll("null");
+    }
+
     try w.writeAll(",\"summary\":");
     try writeSummary(w, doc.summary);
 

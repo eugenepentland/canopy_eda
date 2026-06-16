@@ -48,6 +48,19 @@ pub fn renderToMarkdown(
     try w.print("# Design Review: {s}\n\n", .{design_name});
     try w.print("*Generated {s} by Netlisp*\n\n", .{doc.generated_at});
 
+    // Declared board revision (omitted entirely for unversioned designs).
+    if (doc.revision.present) {
+        if (doc.revision.date.len > 0) {
+            try w.print("**Revision {s}** · {s}\n\n", .{ doc.revision.id, doc.revision.date });
+        } else {
+            try w.print("**Revision {s}**\n\n", .{doc.revision.id});
+        }
+        for (doc.revision.changes) |c| {
+            try w.print("- **{s}** — {s}\n", .{ c.id, c.summary });
+        }
+        if (doc.revision.changes.len > 0) try w.writeAll("\n");
+    }
+
     // CSS subset for the inline SVGs that follow. Must come before any
     // <svg> body. Reuses the page's curated subset (no JS hooks).
     try w.writeAll("<style>\n");

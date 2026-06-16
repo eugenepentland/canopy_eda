@@ -9,6 +9,8 @@ h3{color:#f0f6fc;font-size:0.95rem;margin:0;}
 .sch-head{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;padding:16px 0;border-bottom:1px solid #21262d;}
 .head-title{grid-column:1;}
 .subtitle{color:#8b949e;font-size:0.9rem;margin-top:4px;}
+.rev-pill{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:10px;background:#10243f;color:#58a6ff;border:1px solid #1f3b5c;font-size:0.8rem;font-weight:600;letter-spacing:0.02em;vertical-align:middle;}
+.rev-pill[title]{cursor:help;}
 .banner{grid-column:2;padding:10px 20px;border-radius:6px;font-weight:700;letter-spacing:0.04em;font-size:0.85rem;}
 .banner-pass{background:#0d3a1f;color:#3fb950;border:1px solid #1e5631;}
 .banner-warn{background:#3a2e0d;color:#d29922;border:1px solid #5b4617;}
