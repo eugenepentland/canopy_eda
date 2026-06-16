@@ -209,6 +209,9 @@ pub const ReviewDoc = struct {
     design_name: []const u8,
     title: []const u8,
     generated_at: []const u8, // ISO-8601 UTC ("YYYY-MM-DDTHH:MM:SSZ")
+    /// Declared board revision from the design's `(revision …)` form.
+    /// `present=false` ⇒ unversioned (the review omits the revision line).
+    revision: env_mod.Revision = .{},
     summary: Summary,
     sections: []const SectionReport,
     power_budget: []const power_budget.Rail,
@@ -268,6 +271,7 @@ pub fn buildReview(
         .design_name = design_name,
         .title = block.name,
         .generated_at = generated_at,
+        .revision = block.revision,
         .summary = summary,
         .sections = sections,
         .power_budget = rails_sorted,

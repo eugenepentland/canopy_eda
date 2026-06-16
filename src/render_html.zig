@@ -86,7 +86,7 @@ pub fn renderToHtml(
     try pages_tmpl.Navbar.render(.{""}, w);
     try w.writeAll("<div class=\"sch-layout\">");
     try w.writeAll("<div class=\"sch-wrap\">");
-    try writeHeader(w, block.name, design_name, status, schematic_path);
+    try writeHeader(w, block.name, design_name, status, schematic_path, block.revision);
 
     // Global PCB-layout controls (via/trace/DRC) that feed every per-sub-block
     // preview below. Shown only when the design has sub-blocks to preview — the
@@ -244,7 +244,33 @@ pub fn renderToHtml(
     return aw.written();
 }
 
-fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: review.Status, schematic_path: []const u8) !void {
+/// Render the declared board revision as a pill beside the `.sexp` subtitle —
+/// "Rev <id>" plus the date when present, with the in-file changelog as the
+/// hover title so a recipient can see at a glance which spin they hold and
+/// what changed. Renders nothing when the design declares no `(revision …)`.
+fn writeRevisionPill(w: *std.Io.Writer, revision: env_mod.Revision) !void {
+    if (!revision.present) return;
+    try w.writeAll(" <span class=\"rev-pill\"");
+    if (revision.changes.len > 0) {
+        try w.writeAll(" title=\"");
+        for (revision.changes, 0..) |c, i| {
+            if (i != 0) try w.writeAll("\n");
+            try writeHtmlEscaped(w, c.id);
+            try w.writeAll(" — ");
+            try writeHtmlEscaped(w, c.summary);
+        }
+        try w.writeAll("\"");
+    }
+    try w.writeAll(">Rev ");
+    try writeHtmlEscaped(w, revision.id);
+    if (revision.date.len > 0) {
+        try w.writeAll(" · ");
+        try writeHtmlEscaped(w, revision.date);
+    }
+    try w.writeAll("</span>");
+}
+
+fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: review.Status, schematic_path: []const u8, revision: env_mod.Revision) !void {
     // `schematic_path` is "/modules/" for a reusable module, "/schematics/" for
     // a full design. Modules get the Schematic ⇄ PCB Layout switcher (small
     // enough that the whole-block PCB layout is fast and useful); full designs
@@ -265,7 +291,9 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
     try writeHtmlEscaped(w, title);
     try w.writeAll("</h1><div class=\"subtitle\"><code>");
     try writeHtmlEscaped(w, design_name);
-    try w.writeAll(".sexp</code></div></div>");
+    try w.writeAll(".sexp</code>");
+    try writeRevisionPill(w, revision);
+    try w.writeAll("</div></div>");
     try w.print("<div class=\"{s}\">{s}</div>", .{ banner_class, banner_label });
     try w.writeAll("<div class=\"head-links\">");
     // A module gets the Schematic ⇄ PCB Layout switcher (the PCB layout page

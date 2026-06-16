@@ -212,6 +212,8 @@ src/eval/env.zig::Property struct_
 src/eval/env.zig::ProximityConstraint struct_
 src/eval/env.zig::RailRole enum_
 src/eval/env.zig::Requirement struct_
+src/eval/env.zig::Revision struct_
+src/eval/env.zig::RevisionChange struct_
 src/eval/env.zig::Section struct_
 src/eval/env.zig::SectionNote struct_
 src/eval/env.zig::SectionPort struct_
