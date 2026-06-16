@@ -1071,13 +1071,16 @@
     section(cats.remove, 'remove', 'Remove parts', 'deleted from the board', refOf);
     section(cats.swap, 'fp', 'Footprint updates', 'library footprint differs from the board copy — pads may change shape; position, side & routing preserved', swapFmt, swapAttrs);
     section(cats.model, 'model', '3D model updates', 're-baked from the library to refresh the 3D model — pads normally identical', swapFmt, swapAttrs);
-    section(cats.rename, 'rename', 'Refdes renames', 'reference text only — same part, footprint & position unchanged', function (op) {
-      return (op.old ? esc(op.old) : '?') + ' → ' + esc(op.value || '');
-    });
     section(cats.value, 'value', 'Value changes', '', function (op) {
       return refOf(op) + ' · ' + (op.old ? esc(op.old) + ' → ' : '') + esc(op.value || '');
     });
     section(cats.stale, 'stale', 'Stale parts', 'on the board but not in the design — flagged only, nothing removed', refOf);
+    // Refdes renames are reference-text-only (relink kept the part, footprint &
+    // position) — high-volume and low-stakes, so they collapse into a fold
+    // rather than burying the board-shape changes above.
+    fold(cats.rename, 'rename', 'Refdes renames', 'reference text only — same part, footprint & position unchanged', function (op) {
+      return (op.old ? esc(op.old) : '?') + ' → ' + esc(op.value || '');
+    });
     fold(cats.fields, 'field', 'Field updates', 'metadata only (canopy_section, MPN, …) — nothing moves', function (op) {
       return (op.ref ? esc(op.ref) + ' · ' : '') + esc(op.field || '') + ' = ' + esc(op.value || '');
     });
