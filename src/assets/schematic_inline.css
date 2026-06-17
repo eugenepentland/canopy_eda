@@ -170,6 +170,13 @@ h3{color:#f0f6fc;font-size:0.95rem;margin:0;}
 .awz-pick{color:#8b949e;font-size:0.82rem;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid #21262d;}
 .awz-pick b{color:#c9d1d9;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
 .awz-params-head{color:#8b949e;font-size:0.74rem;text-transform:uppercase;letter-spacing:0.04em;margin:12px 0 6px;}
+.awz-mod-layout{margin:0 0 12px;border:1px solid #21262d;border-radius:6px;overflow:hidden;background:#0d1117;}
+.awz-mod-img{padding:8px;display:flex;align-items:center;justify-content:center;min-height:60px;}
+.awz-mod-img img{max-width:100%;height:auto;border-radius:4px;display:block;}
+.awz-nolayout{margin:0 0 12px;padding:7px 9px;border:1px dashed #30363d;border-radius:6px;color:#6e7681;font-size:0.76rem;}
+.awz-net-pop{position:fixed;z-index:1100;max-height:180px;overflow-y:auto;background:#161b22;border:1px solid #30363d;border-radius:6px;box-shadow:0 6px 18px rgba(1,4,9,0.6);}
+.awz-net-opt{padding:4px 9px;cursor:pointer;color:#c9d1d9;font-size:0.8rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
+.awz-net-opt:hover{background:#1f6feb33;}
 /* Layout-tab drag-to-arrange. */
 .dg-edit-bar{position:absolute;top:8px;right:8px;display:flex;gap:6px;align-items:center;z-index:5;}
 .dg-edit-bar button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;padding:4px 10px;font-size:0.78rem;cursor:pointer;font-family:inherit;}

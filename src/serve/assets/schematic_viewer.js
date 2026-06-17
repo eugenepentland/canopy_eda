@@ -479,6 +479,45 @@
     return out;
   }
 
+  // Turn a plain net <input> into a searchable combobox: a floating filtered
+  // list of existing nets drops down on focus/typing; clicking one fills the
+  // field, but the input stays freeform so a brand-new net can still be typed.
+  // The popup is fixed-positioned and parented to `host` (the modal overlay) so
+  // it escapes the body's overflow clipping and is removed when the modal closes.
+  function wireNetCombo(input, nets, host) {
+    var pop = document.createElement('div');
+    pop.className = 'awz-net-pop';
+    pop.style.display = 'none';
+    host.appendChild(pop);
+    function place() {
+      var r = input.getBoundingClientRect();
+      pop.style.left = r.left + 'px';
+      pop.style.top = (r.bottom + 2) + 'px';
+      pop.style.width = Math.max(r.width, 140) + 'px';
+    }
+    function render() {
+      var q = input.value.trim().toLowerCase();
+      var hits = nets.filter(function (n) { return !q || n.toLowerCase().indexOf(q) >= 0; });
+      if (!hits.length) { pop.style.display = 'none'; return; }
+      pop.innerHTML = hits.slice(0, 40).map(function (n) {
+        return '<div class="awz-net-opt">' + escapeHtml(n) + '</div>';
+      }).join('');
+      pop.querySelectorAll('.awz-net-opt').forEach(function (o) {
+        o.addEventListener('mousedown', function (e) {
+          e.preventDefault();
+          input.value = o.textContent;
+          pop.style.display = 'none';
+        });
+      });
+      place();
+      pop.style.display = 'block';
+    }
+    input.addEventListener('focus', render);
+    input.addEventListener('input', render);
+    input.addEventListener('keydown', function (e) { if (e.key === 'Escape') pop.style.display = 'none'; });
+    input.addEventListener('blur', function () { setTimeout(function () { pop.style.display = 'none'; }, 120); });
+  }
+
   function openAddWizard() {
     var ov = document.createElement('div');
     ov.className = 'src-edit-overlay';
@@ -502,15 +541,13 @@
           '<button type="button" class="src-edit-btn awz-cancel">Cancel</button>' +
           '<button type="button" class="src-edit-btn primary awz-add" disabled>Add</button>' +
         '</div>' +
-        '<datalist id="awz-net-list"></datalist>' +
       '</div>';
     document.body.appendChild(ov);
     function close() { if (ov.parentNode) ov.parentNode.removeChild(ov); }
     ov.querySelector('.awz-cancel').addEventListener('click', close);
     ov.addEventListener('mousedown', function (e) { if (e.target === ov) close(); });
 
-    var netDl = ov.querySelector('#awz-net-list');
-    (SCH_INDEX.nets || []).forEach(function (n) { var o = document.createElement('option'); o.value = n.name; netDl.appendChild(o); });
+    var netNames = (SCH_INDEX.nets || []).map(function (n) { return n.name; });
 
     var search = ov.querySelector('.awz-search');
     var results = ov.querySelector('.awz-results');
@@ -521,8 +558,8 @@
     var selected = null;
 
     loadLibFull(function (f) {
-      items = (f.components || []).map(function (c) { return { name: c.name, kind: 'component', family: !!c.family }; })
-        .concat((f.modules || []).map(function (m) { return { name: m.name, kind: 'module', params: m.params || '' }; }));
+      items = (f.components || []).map(function (c) { return { name: c.name, kind: 'component', family: !!c.family, footprint: c.footprint || '' }; })
+        .concat((f.modules || []).map(function (m) { return { name: m.name, kind: 'module', params: m.params || '', placement: !!m.placement }; }));
       renderResults('');
       search.focus();
     });
@@ -560,6 +597,7 @@
     function renderComponentDetail(it) {
       detail.innerHTML =
         '<div class="awz-pick">Component: <b>' + escapeHtml(it.name) + '</b></div>' +
+        (it.footprint ? footprintPreviewHtml(it.footprint) : '') +
         '<div class="awz-row"><label>Value</label>' +
           '<input class="awz-val" placeholder="100nF (optional)" spellcheck="false"></div>' +
         '<div class="awz-row"><label>Section</label><select class="awz-sec">' + secOpts + '</select></div>' +
@@ -568,15 +606,18 @@
         '<div class="awz-pins-head">Pin connections</div>' +
         '<div class="awz-pins"></div>' +
         '<button type="button" class="src-edit-btn awz-add-pin">+ pin</button>';
+      if (it.footprint) loadFootprintPreview(detail);
       var pinsBox = detail.querySelector('.awz-pins');
       function addPinRow(pin, net) {
         var row = document.createElement('div');
         row.className = 'awz-pin-row';
         row.innerHTML = '<input class="awz-pin" placeholder="pin#" spellcheck="false">' +
-          '<input class="awz-net" list="awz-net-list" placeholder="net" spellcheck="false">' +
+          '<input class="awz-net" placeholder="net" spellcheck="false" autocomplete="off">' +
           '<button type="button" class="awz-pin-del" title="Remove">×</button>';
         row.querySelector('.awz-pin').value = pin || '';
-        row.querySelector('.awz-net').value = net || '';
+        var netInput = row.querySelector('.awz-net');
+        netInput.value = net || '';
+        wireNetCombo(netInput, netNames, ov);
         row.querySelector('.awz-pin-del').addEventListener('click', function () { row.remove(); });
         pinsBox.appendChild(row);
       }
@@ -595,11 +636,33 @@
           '<input class="awz-args" placeholder="positional or named args (optional)" spellcheck="false"></div>';
       detail.innerHTML =
         '<div class="awz-pick">Module: <b>' + escapeHtml(it.name) + '</b></div>' +
+        modLayoutHtml(it) +
         '<div class="awz-row"><label>Name</label>' +
           '<input class="awz-name" value="' + escapeHtml(it.name) + '" spellcheck="false"></div>' +
         '<div class="awz-params-head">Parameters' +
           (params.length ? ' <span class="src-edit-hint">leave blank to use the default</span>' : '') +
           '</div>' + rows;
+      if (it.placement) loadModLayout(detail, it.name);
+    }
+
+    // A module's premade PCB layout, rendered server-side by /api/pcb-png as a
+    // module name (force-solved from its (placement …) spec). Shown only when
+    // the module actually has a premade layout; otherwise a short note.
+    function modLayoutHtml(it) {
+      if (!it.placement) return '<div class="awz-nolayout">No premade PCB layout — it will auto-place when solved.</div>';
+      return '<div class="awz-mod-layout" data-mod="' + escapeHtml(it.name) + '">' +
+        '<div class="sb-fp-title">Premade layout <span class="muted">' + escapeHtml(it.name) + '</span></div>' +
+        '<div class="awz-mod-img"><span class="sb-fp-empty muted">Loading layout…</span></div>' +
+        '</div>';
+    }
+    function loadModLayout(scope, mod) {
+      var box = scope.querySelector('.awz-mod-img');
+      if (!box) return;
+      var img = new Image();
+      img.alt = 'PCB layout for ' + mod;
+      img.onload = function () { box.innerHTML = ''; box.appendChild(img); };
+      img.onerror = function () { box.innerHTML = '<span class="sb-fp-empty muted">No layout preview available.</span>'; };
+      img.src = '/api/pcb-png/' + encodeURIComponent(mod) + '?width=460&names=origin';
     }
 
     addBtn.addEventListener('click', function () {

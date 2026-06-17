@@ -35,6 +35,7 @@ const HEADER_CORS = "access-control-allow-origin";
 const MAX_SOURCE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_LIB_FILE_BYTES: usize = 1024 * 1024;
 const SEXP_EXT = ".sexp";
+const FOOTPRINT_OPEN = "(footprint ";
 
 // ── POST /api/validate/:name ──────────────────────────────────────
 
@@ -164,8 +165,11 @@ fn writeDiag(
 
 /// The autocomplete index: component/family names from `lib/components/` and
 /// module names (with their parameter lists) from `lib/modules/`. Response:
-/// `{"components":[{"name":…,"family":bool}],"modules":[{"name":…,"params":…}]}`.
-/// Best-effort — a missing directory yields an empty list rather than an error.
+/// `{"components":[{"name":…,"family":bool,"footprint":…}],
+///   "modules":[{"name":…,"params":…,"placement":bool}]}`.
+/// `footprint` powers the wizard's footprint preview; `placement` flags a module
+/// with a premade `(placement …)` layout. Best-effort — a missing directory
+/// yields an empty list rather than an error.
 pub fn libIndexApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header(HEADER_CORS, "*");
@@ -192,12 +196,40 @@ fn emitComponents(ctx: *Handler, w: anytype) HandlerError!void {
         const base = entry.name[0 .. entry.name.len - SEXP_EXT.len];
         const content = dir.readFileAlloc(ctx.allocator, entry.name, MAX_LIB_FILE_BYTES) catch continue;
         const is_family = std.mem.indexOf(u8, content, "(component-family ") != null;
+        const footprint = extractFootprint(content);
         if (!first) try w.writeAll(",");
         first = false;
         try w.writeAll("{\"name\":");
         try json_writer.writeString(w, base);
-        try w.print(",\"family\":{}}}", .{is_family});
+        try w.print(",\"family\":{}", .{is_family});
+        try w.writeAll(",\"footprint\":");
+        try json_writer.writeString(w, footprint);
+        try w.writeAll("}");
     }
+}
+
+/// Pull the footprint name out of a component `.sexp` — handles both the atom
+/// form `(footprint c-0402)` and the quoted form `(footprint "sot891")`.
+/// Returns "" when no footprint form is present.
+fn extractFootprint(content: []const u8) []const u8 {
+    const k = std.mem.indexOf(u8, content, FOOTPRINT_OPEN) orelse return "";
+    var i = k + FOOTPRINT_OPEN.len;
+    while (i < content.len and content[i] == ' ') : (i += 1) {}
+    if (i >= content.len) return "";
+    if (content[i] == '"') {
+        i += 1;
+        const start = i;
+        const end = std.mem.indexOfScalarPos(u8, content, i, '"') orelse return "";
+        return content[start..end];
+    }
+    const start = i;
+    while (i < content.len) : (i += 1) {
+        switch (content[i]) {
+            ' ', ')', '\n', '\t', '\r' => break,
+            else => {},
+        }
+    }
+    return content[start..i];
 }
 
 fn emitModules(ctx: *Handler, w: anytype) HandlerError!void {
@@ -211,12 +243,15 @@ fn emitModules(ctx: *Handler, w: anytype) HandlerError!void {
         const base = entry.name[0 .. entry.name.len - SEXP_EXT.len];
         const content = dir.readFileAlloc(ctx.allocator, entry.name, MAX_LIB_FILE_BYTES) catch "";
         const params = extractModuleParams(content, base);
+        // A premade layout = the defmodule body carries a (placement …) spec.
+        const has_placement = std.mem.indexOf(u8, content, "(placement") != null;
         if (!first) try w.writeAll(",");
         first = false;
         try w.writeAll("{\"name\":");
         try json_writer.writeString(w, base);
         try w.writeAll(",\"params\":");
         try json_writer.writeString(w, params);
+        try w.print(",\"placement\":{}", .{has_placement});
         try w.writeAll("}");
     }
 }
@@ -462,4 +497,22 @@ test "extractModuleParams handles defaulted params" {
 test "extractModuleParams returns empty for missing module" {
     // spec: serve/edit_assist - lib-index returns no params when the defmodule is absent
     try std.testing.expectEqualStrings("", extractModuleParams("(design-block \"x\")", "nope"));
+}
+
+test "extractFootprint reads atom and quoted footprint forms" {
+    // spec: serve/edit_assist - lib-index reports each component's footprint name
+    const atom =
+        \\(component-family "cap-0402"
+        \\  (footprint c-0402)
+        \\  (parameter "value" capacitance))
+    ;
+    try std.testing.expectEqualStrings("c-0402", extractFootprint(atom));
+    const quoted =
+        \\(component "x"
+        \\  (footprint "sot891")
+        \\  (mpn "X"))
+    ;
+    try std.testing.expectEqualStrings("sot891", extractFootprint(quoted));
+    // No footprint form → empty.
+    try std.testing.expectEqualStrings("", extractFootprint("(component \"x\" (mpn \"X\"))"));
 }
