@@ -805,6 +805,9 @@ src/serve/edit.zig::swapPinsApi fn
 src/serve/edit.zig::swapPinsCore fn
 src/serve/edit.zig::writeAndRebuild fn
 src/serve/edit.zig::writeDesignCore fn
+src/serve/edit_assist.zig::libIndexApi fn
+src/serve/edit_assist.zig::saveDiagramLayoutApi fn
+src/serve/edit_assist.zig::validateSourceApi fn
 src/serve/footprint_preview.zig::HandlerError value
 src/serve/footprint_preview.zig::boardFootprintApi fn
 src/serve/footprint_preview.zig::footprintApi fn

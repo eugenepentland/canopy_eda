@@ -215,6 +215,39 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 /// (e.g. `cap-0805` → `cap-0603`) using a source-offset checksum to
 /// detect concurrent edits, ensure the new family is in `(import …)`,
 /// rebuild, and return the refreshed components JSON.
+/// True when `c` separates S-expression tokens (whitespace, parens, quote) —
+/// used to confirm a substring match is a whole token, not a fragment.
+fn isFootprintTokenBoundary(c: u8) bool {
+    return std.mem.indexOfScalar(u8, " \t\n\r()\"", c) != null;
+}
+
+/// Locate the byte offset of `component` as a standalone token inside the
+/// `(instance "ref" …)` form. editFootprintApi's fallback for when the caller's
+/// `srcOff` points at the instance form (the scene-graph `components[].src`
+/// offset) rather than at the component token itself. Returns null when the
+/// instance or a whole-token match isn't found.
+fn findComponentTokenInInstance(source: []const u8, ref: []const u8, component: []const u8) ?usize {
+    if (ref.len == 0 or component.len == 0) return null;
+    var buf: [256]u8 = undefined;
+    const needle = std.fmt.bufPrint(&buf, INSTANCE_OPEN_TEMPLATE, .{ref}) catch return null;
+    const inst_start = std.mem.indexOf(u8, source, needle) orelse return null;
+    const inst_end = findFormEnd(source, inst_start) orelse source.len;
+    var from = inst_start + needle.len;
+    while (std.mem.indexOfPos(u8, source[0..inst_end], from, component)) |pos| {
+        const before_ok = pos == 0 or isFootprintTokenBoundary(source[pos - 1]);
+        const after_pos = pos + component.len;
+        const after_ok = after_pos >= inst_end or isFootprintTokenBoundary(source[after_pos]);
+        if (before_ok and after_ok) return pos;
+        from = pos + 1;
+    }
+    return null;
+}
+
+/// POST /api/edit-footprint/:name — swap an instance's component/footprint
+/// family. Body `{"ref","component","oldComponent","srcOff"}`: replaces the
+/// `oldComponent` token (located at `srcOff`, or via `ref` when srcOff points
+/// at the instance form), ensures the new family is imported, rebuilds, and
+/// returns the refreshed `components` map.
 pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -265,6 +298,10 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         return;
     };
 
+    // Optional `ref` lets us recover when srcOff points at the instance form
+    // (the scene-graph offset) instead of at the component token.
+    const ref_des = parseJsonString(body, "\"ref\"") orelse "";
+
     // Verify the new component family exists
     const comp_path = std.fmt.allocPrint(ctx.allocator, COMPONENT_PATH_TEMPLATE, .{ ctx.project_dir, new_component }) catch {
         res.status = 500;
@@ -291,19 +328,25 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     };
     defer ctx.allocator.free(source);
 
-    if (source_offset + old_component.len > source.len or
-        !std.mem.eql(u8, source[source_offset .. source_offset + old_component.len], old_component))
-    {
-        res.status = 400;
-        res.body = "source offset mismatch — file may have changed";
-        return;
-    }
+    // The component token must sit exactly at `source_offset`. When it doesn't
+    // (e.g. srcOff is the instance-form offset the scene graph reports), fall
+    // back to locating the token inside the `(instance "ref" …)` form.
+    const direct_ok = source_offset + old_component.len <= source.len and
+        std.mem.eql(u8, source[source_offset .. source_offset + old_component.len], old_component);
+    const comp_offset = if (direct_ok)
+        source_offset
+    else
+        findComponentTokenInInstance(source, ref_des, old_component) orelse {
+            res.status = 400;
+            res.body = "source offset mismatch — file may have changed";
+            return;
+        };
 
     var new_source: std.ArrayListUnmanaged(u8) = .empty;
     const nw = new_source.writer(ctx.allocator);
-    try nw.writeAll(source[0..source_offset]);
+    try nw.writeAll(source[0..comp_offset]);
     try nw.writeAll(new_component);
-    try nw.writeAll(source[source_offset + old_component.len ..]);
+    try nw.writeAll(source[comp_offset + old_component.len ..]);
 
     // Ensure new component is in the import statement
     var final_source = new_source.items;
@@ -426,6 +469,12 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     };
     const value = parseJsonString(body, "\"value\"") orelse "";
     const section = parseJsonString(body, "\"section\"") orelse "";
+    // Optional caller-chosen ref-des. When omitted we emit the component name
+    // as a descriptive (non-standard) label, which the evaluator's post-build
+    // auto-assignment renumbers to the right prefix (C1, R3, …). An instance
+    // form requires a ref-des string first arg, so this must never be empty.
+    const ref_arg = parseJsonString(body, "\"ref\"") orelse "";
+    const label = if (ref_arg.len > 0) ref_arg else component;
 
     // Read source file
     const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
@@ -476,9 +525,9 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     var inst_form: std.ArrayListUnmanaged(u8) = .empty;
     const iw = inst_form.writer(ctx.allocator);
     if (value.len > 0) {
-        try iw.print("  (instance ({s} \"{s}\")", .{ component, value });
+        try iw.print("  (instance \"{s}\" ({s} \"{s}\")", .{ label, component, value });
     } else {
-        try iw.print("  (instance {s}", .{component});
+        try iw.print("  (instance \"{s}\" {s}", .{ label, component });
     }
     try iw.writeAll(pin_str.items);
     try iw.writeAll(")\n");
@@ -1913,6 +1962,21 @@ test "componentLinksDatasheet dedupes a re-download counter name" {
     try std.testing.expect(datasheet_attach.linksDatasheet(form, "tps55289__1_.pdf"));
     // A genuinely different datasheet is not a duplicate.
     try std.testing.expect(!datasheet_attach.linksDatasheet(form, "tps55289-errata.pdf"));
+}
+
+test "findComponentTokenInInstance locates the token via ref" {
+    // spec: serve/edit - edit-footprint locates the component token within the instance form
+    const src =
+        \\(design-block "X"
+        \\  (instance "C4" (cap-0402 "1pF")
+        \\    (pin 1 "GND")))
+    ;
+    const inst_off = std.mem.indexOf(u8, src, "(instance \"C4\"").?;
+    const off = findComponentTokenInInstance(src, "C4", "cap-0402").?;
+    try std.testing.expect(off > inst_off);
+    try std.testing.expectEqualStrings("cap-0402", src[off .. off + "cap-0402".len]);
+    // No match for a ref that isn't present.
+    try std.testing.expect(findComponentTokenInInstance(src, "C9", "cap-0402") == null);
 }
 
 test "datasheetStem keeps a trailing-digit part number intact" {

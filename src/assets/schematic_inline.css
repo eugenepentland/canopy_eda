@@ -73,6 +73,120 @@ h3{color:#f0f6fc;font-size:0.95rem;margin:0;}
 .src-edit-find .src-edit-btn{padding:2px 9px;}
 /* All-match highlight for the find bar (current match uses the selection). */
 .cm-find-match{background:rgba(187,128,9,0.45);border-radius:2px;}
+/* Editor toolbar: snippet inserters + tidy-indent. */
+.src-edit-tools{display:flex;align-items:center;gap:6px;padding:6px 16px;border-bottom:1px solid #21262d;background:#161b22;flex-wrap:wrap;}
+.src-tools-label{color:#6e7681;font-size:0.72rem;font-family:system-ui,sans-serif;text-transform:uppercase;letter-spacing:0.04em;}
+.src-tools-gap{flex:1;}
+.src-edit-tools .src-edit-btn{padding:2px 9px;font-size:0.76rem;}
+/* Status chip + problems panel. */
+.src-edit-status{font-size:0.78rem;font-family:system-ui,sans-serif;cursor:pointer;padding:2px 8px;border-radius:10px;user-select:none;}
+.src-status-ok{color:#3fb950;}
+.src-status-warn{color:#d29922;}
+.src-status-err{color:#f85149;}
+.src-edit-problems{max-height:150px;overflow-y:auto;border-bottom:1px solid #21262d;background:#0d1117;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.78rem;}
+.src-edit-problems[hidden]{display:none;}
+.src-prob{display:flex;gap:10px;padding:4px 16px;cursor:pointer;border-left:3px solid transparent;}
+.src-prob:hover{background:#161b22;}
+.src-prob-error{border-left-color:#f85149;}
+.src-prob-warning{border-left-color:#d29922;}
+.src-prob-assert{border-left-color:#a371f7;}
+.src-prob-loc{color:#6e7681;flex:0 0 44px;}
+.src-prob-msg{color:#c9d1d9;flex:1;}
+.src-prob-fix{flex:0 0 auto;background:#1f6feb;color:#fff;border:none;border-radius:4px;padding:1px 8px;font-size:0.72rem;cursor:pointer;font-family:inherit;}
+.src-prob-fix:hover{background:#388bfd;}
+/* Inline diagnostics in the editor. */
+.cm-diag-error-line{background:rgba(248,81,73,0.08);}
+.cm-diag-warn-line{background:rgba(210,153,34,0.08);}
+.cm-diag-underline-error{text-decoration:underline wavy #f85149;text-decoration-skip-ink:none;}
+.cm-diag-underline-warn{text-decoration:underline wavy #d29922;text-decoration-skip-ink:none;}
+.eda-diag-gutter{width:14px;}
+.cm-diag-dot{cursor:pointer;font-size:0.7rem;line-height:1;display:inline-block;width:14px;text-align:center;}
+.cm-diag-dot.is-error{color:#f85149;}
+.cm-diag-dot.is-warn{color:#d29922;}
+/* Autocomplete popup. */
+.src-ac{position:absolute;z-index:1100;margin:0;padding:4px 0;list-style:none;background:#161b22;border:1px solid #30363d;border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,0.55);max-height:240px;overflow-y:auto;min-width:180px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8rem;}
+.src-ac li{display:flex;align-items:center;gap:10px;padding:3px 12px;cursor:pointer;color:#c9d1d9;}
+.src-ac li.sel{background:#1f6feb;color:#fff;}
+.src-ac-text{flex:1;white-space:nowrap;}
+.src-ac-type{color:#6e7681;font-size:0.68rem;text-transform:uppercase;letter-spacing:0.03em;}
+.src-ac li.sel .src-ac-type{color:#c9d8ff;}
+/* Component inspector (structured edit panel in the sidebar). */
+.sb-inspect{margin:8px 0;border:1px solid #21262d;border-radius:6px;background:#0d1117;}
+.sb-inspect>summary{cursor:pointer;color:#58a6ff;font-size:0.8rem;padding:6px 10px;list-style:none;user-select:none;}
+.sb-inspect>summary::-webkit-details-marker{display:none;}
+.sb-inspect>summary::before{content:"✎ ";color:#6e7681;}
+.sb-inspect[open]>summary{border-bottom:1px solid #21262d;}
+.sb-insp-field{display:flex;align-items:center;gap:6px;padding:5px 10px;}
+.sb-insp-field label{flex:0 0 76px;color:#8b949e;font-size:0.74rem;}
+.sb-insp-field input{flex:1;min-width:0;background:#010409;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:3px 6px;font-size:0.78rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
+.sb-insp-field input:focus{outline:none;border-color:#58a6ff;}
+.sb-insp-btn{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:3px 9px;font-size:0.74rem;cursor:pointer;font-family:inherit;}
+.sb-insp-btn:hover{background:#30363d;border-color:#58a6ff;}
+.sb-insp-msg{padding:0 10px;font-size:0.74rem;min-height:1em;font-family:system-ui,sans-serif;}
+.sb-insp-msg.is-ok{color:#3fb950;}
+.sb-insp-msg.is-error{color:#f85149;}
+.sb-insp-del{margin:6px 10px 10px;background:#21262d;color:#f85149;border:1px solid #30363d;border-radius:4px;padding:4px 10px;font-size:0.74rem;cursor:pointer;font-family:inherit;}
+.sb-insp-del:hover{background:#3a1d1d;border-color:#da3633;}
+/* Inline pin re-wire affordance on pin rows. The row is a 2-col grid; rows
+   that gained an ✎ button get a third auto column so it sits on the right. */
+.sb-pin-row:has(.sb-pin-edit){grid-template-columns:46px 1fr auto;}
+.sb-pin-edit{align-self:center;background:none;border:none;color:#6e7681;cursor:pointer;font-size:0.8rem;padding:0 4px;}
+.sb-pin-edit:hover{color:#58a6ff;}
+.sb-pin-net-input{box-sizing:border-box;width:100%;background:#010409;color:#c9d1d9;border:1px solid #58a6ff;border-radius:4px;padding:2px 6px;font-size:0.78rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
+.sb-pin-net-input:focus{outline:none;}
+/* Add-component bar + wizard modal. */
+.sb-add-comp{display:block;width:100%;margin:0 0 10px;background:#16331f;color:#3fb950;border:1px solid #238636;border-radius:6px;padding:7px 10px;font-size:0.82rem;cursor:pointer;font-family:inherit;}
+.sb-add-comp:hover{background:#1c3d26;border-color:#2ea043;}
+.add-wiz{height:auto;max-height:88vh;width:min(560px,95vw);}
+.add-wiz-body{padding:14px 16px;overflow-y:auto;}
+.awz-row{display:flex;align-items:center;gap:8px;margin-bottom:9px;}
+.awz-row label{flex:0 0 86px;color:#8b949e;font-size:0.8rem;}
+.awz-row input,.awz-row select{flex:1;min-width:0;background:#010409;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;padding:5px 8px;font-size:0.82rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
+.awz-row input:focus,.awz-row select:focus{outline:none;border-color:#58a6ff;}
+.awz-pins-head{color:#8b949e;font-size:0.74rem;text-transform:uppercase;letter-spacing:0.04em;margin:12px 0 6px;}
+.awz-pin-row{display:flex;gap:8px;margin-bottom:6px;align-items:center;}
+.awz-pin{flex:0 0 90px;background:#010409;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;padding:4px 8px;font-size:0.82rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
+.awz-net{flex:1;min-width:0;background:#010409;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;padding:4px 8px;font-size:0.82rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
+.awz-pin:focus,.awz-net:focus{outline:none;border-color:#58a6ff;}
+.awz-pin-del{background:none;border:none;color:#6e7681;cursor:pointer;font-size:1rem;padding:0 4px;}
+.awz-pin-del:hover{color:#f85149;}
+.awz-add-pin{margin-top:4px;padding:3px 10px;font-size:0.76rem;}
+/* Layout-tab drag-to-arrange. */
+.dg-edit-bar{position:absolute;top:8px;right:8px;display:flex;gap:6px;align-items:center;z-index:5;}
+.dg-edit-bar button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;padding:4px 10px;font-size:0.78rem;cursor:pointer;font-family:inherit;}
+.dg-edit-bar button:hover{background:#30363d;border-color:#58a6ff;}
+.dg-edit-bar .dg-edit-save{background:#238636;border-color:#2ea043;color:#fff;}
+.dg-edit-msg{color:#8b949e;font-size:0.74rem;font-family:system-ui,sans-serif;}
+.dg-svg.dg-editing .dg-node{cursor:move;}
+.dg-svg.dg-editing .dg-node .dg-rect{stroke-dasharray:4 3;}
+/* Drag-to-connect on the schematic. */
+.sch-connect-toggle{position:fixed;bottom:16px;right:16px;z-index:900;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:8px 12px;font-size:0.82rem;cursor:pointer;font-family:inherit;box-shadow:0 4px 14px rgba(0,0,0,0.4);}
+.sch-connect-toggle.on{background:#1f6feb;border-color:#388bfd;color:#fff;}
+body.connect-mode .pin-stub{cursor:crosshair;}
+body.connect-mode .pin-stub:hover line{stroke:#58a6ff !important;stroke-width:2.5 !important;}
+#connect-overlay{position:fixed;inset:0;pointer-events:none;z-index:899;}
+#connect-overlay line{stroke:#58a6ff;stroke-width:2;stroke-dasharray:5 4;}
+/* Structural tree (sidebar). */
+.sb-tree-toggle{display:inline-block;margin:0 0 6px;color:#58a6ff;font-size:0.76rem;cursor:pointer;user-select:none;}
+.sb-tree-sec{margin:2px 0;}
+.sb-tree-sec>summary{cursor:pointer;color:#c9d1d9;font-size:0.82rem;padding:3px 4px;list-style:none;}
+.sb-tree-sec>summary::-webkit-details-marker{display:none;}
+.sb-tree-sec>summary::before{content:"▸";color:#6e7681;font-size:0.7rem;margin-right:5px;display:inline-block;}
+.sb-tree-sec[open]>summary::before{content:"▾";}
+.sb-tree-comp{padding:2px 6px 2px 22px;font-size:0.78rem;color:#8b949e;cursor:pointer;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;display:flex;gap:8px;}
+.sb-tree-comp:hover{background:#161b22;color:#c9d1d9;}
+.sb-tree-ref{color:#58a6ff;flex:0 0 auto;}
+.sb-tree-val{color:#6e7681;}
+/* Split structured↔source panel in the editor. */
+.src-edit-box.has-split .src-edit-cm{border-right:1px solid #21262d;}
+.src-split-wrap{display:flex;flex:1;min-height:0;}
+.src-split-panel{flex:0 0 240px;overflow-y:auto;background:#0d1117;border-bottom:1px solid #21262d;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.78rem;}
+.src-split-panel[hidden]{display:none;}
+.src-split-head{color:#8b949e;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;padding:6px 10px;border-bottom:1px solid #21262d;position:sticky;top:0;background:#0d1117;}
+.src-split-item{padding:3px 10px;cursor:pointer;display:flex;gap:8px;}
+.src-split-item:hover{background:#161b22;}
+.src-split-ref{color:#58a6ff;flex:0 0 auto;}
+.src-split-comp{color:#6e7681;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 /* CodeMirror "eda-dark" theme — matches the GitHub-dark page palette. */
 .cm-s-eda-dark.CodeMirror{background:#0d1117;color:#c9d1d9;}
 .cm-s-eda-dark .CodeMirror-gutters{background:#0d1117;border-right:1px solid #21262d;}

@@ -372,14 +372,65 @@
     return html;
   }
 
+  // "+ Add component" bar — only on design pages (module pages can't take a
+  // new top-level instance through /api/add-instance).
+  function addCompBarHtml() {
+    if (typeof SCH_VIEW !== 'undefined' && SCH_VIEW === 'module') return '';
+    return '<button type="button" class="sb-add-comp">+ Add component</button>';
+  }
+  function wireAddCompBar() {
+    var b = detailBox.querySelector('.sb-add-comp');
+    if (b) b.addEventListener('click', openAddWizard);
+    var tt = detailBox.querySelector('.sb-tree-toggle');
+    if (tt) tt.addEventListener('click', function () {
+      if (tt.getAttribute('data-mode') === 'tree') showTree(); else showSectionList();
+    });
+  }
+
+  // Structural tree: every section as a collapsible node with its component
+  // rows inline (ref · component · value), a one-glance hierarchy. Section
+  // headers expand/collapse; component rows open the component detail.
+  function showTree() {
+    var bySec = {};
+    (SCH_INDEX.components || []).forEach(function (c) {
+      var k = c.section || '';
+      (bySec[k] = bySec[k] || []).push(c);
+    });
+    var html = addCompBarHtml() + '<span class="sb-tree-toggle" data-mode="list">≣ List view</span>';
+    function compRows(list) {
+      return list.slice().sort(function (a, b) { return cmpPin(a.ref, b.ref); }).map(function (c) {
+        return '<div class="sb-tree-comp" data-ref="' + escapeHtml(c.ref) + '">' +
+          '<span class="sb-tree-ref">' + escapeHtml(c.ref) + '</span>' +
+          '<span>' + escapeHtml(c.component || '') + '</span>' +
+          (c.value ? '<span class="sb-tree-val">' + escapeHtml(c.value) + '</span>' : '') + '</div>';
+      }).join('');
+    }
+    (SCH_INDEX.sections || []).forEach(function (s) {
+      var list = bySec[s.slug] || [];
+      html += '<details class="sb-tree-sec" open><summary>' + escapeHtml(s.name) +
+        ' <span class="muted">(' + list.length + ')</span></summary>' + compRows(list) + '</details>';
+    });
+    if ((bySec[''] || []).length) {
+      html += '<details class="sb-tree-sec" open><summary>(no section) <span class="muted">(' +
+        bySec[''].length + ')</span></summary>' + compRows(bySec['']) + '</details>';
+    }
+    detailBox.innerHTML = html;
+    wireAddCompBar();
+    detailBox.querySelectorAll('.sb-tree-comp[data-ref]').forEach(function (row) {
+      row.addEventListener('click', function () { showComponent(row.getAttribute('data-ref'), true); });
+    });
+  }
+
   function showSectionList() {
     var auditHtml = auditListHtml();
     if (!SCH_INDEX.sections || !SCH_INDEX.sections.length) {
-      detailBox.innerHTML = auditHtml + '<div class="sb-empty">No sections.</div>';
+      detailBox.innerHTML = auditHtml + addCompBarHtml() + '<div class="sb-empty">No sections.</div>';
       wireAuditClicks();
+      wireAddCompBar();
       return;
     }
-    var html = auditHtml + '<h4>Sections</h4>';
+    var html = auditHtml + addCompBarHtml() +
+      '<span class="sb-tree-toggle" data-mode="tree">⊞ Tree view</span><h4>Sections</h4>';
     SCH_INDEX.sections.forEach(function (s) {
       var catPill = s.category
         ? '<span class="sb-cat cat-' + s.category + '">' + escapeHtml(s.category) + '</span>'
@@ -391,8 +442,102 @@
     });
     detailBox.innerHTML = html;
     wireAuditClicks();
+    wireAddCompBar();
     detailBox.querySelectorAll('.sb-list-item[data-slug]').forEach(function (el) {
       el.addEventListener('click', function () { showSection(el.dataset.slug, true); });
+    });
+  }
+
+  // ---- Add-component wizard ----
+  // Modal form over /api/add-instance: pick a library component, give it a
+  // value + optional section + ref-des, and map pins to nets (with net
+  // autocomplete). The server emits a valid (instance …) form and auto-assigns
+  // the ref-des; on success we reload so the new part renders.
+  function openAddWizard() {
+    var ov = document.createElement('div');
+    ov.className = 'src-edit-overlay';
+    var secOpts = '<option value="">(top level)</option>' +
+      (SCH_INDEX.sections || []).map(function (s) {
+        return '<option value="' + escapeHtml(s.name) + '">' + escapeHtml(s.name) + '</option>';
+      }).join('');
+    ov.innerHTML =
+      '<div class="src-edit-box add-wiz">' +
+        '<div class="src-edit-head"><h3>Add component</h3>' +
+          '<span class="src-edit-hint">Ref-des is auto-assigned unless you set one</span></div>' +
+        '<div class="add-wiz-body">' +
+          '<div class="awz-row"><label>Component</label>' +
+            '<input class="awz-comp" list="awz-comp-list" placeholder="cap-0402, res-0805, …" spellcheck="false"></div>' +
+          '<div class="awz-row"><label>Value</label>' +
+            '<input class="awz-val" placeholder="100nF (optional)" spellcheck="false"></div>' +
+          '<div class="awz-row"><label>Section</label><select class="awz-sec">' + secOpts + '</select></div>' +
+          '<div class="awz-row"><label>Ref-des</label>' +
+            '<input class="awz-ref" placeholder="auto (e.g. C12)" spellcheck="false"></div>' +
+          '<div class="awz-pins-head">Pin connections</div>' +
+          '<div class="awz-pins"></div>' +
+          '<button type="button" class="src-edit-btn awz-add-pin">+ pin</button>' +
+        '</div>' +
+        '<div class="src-edit-foot">' +
+          '<span class="awz-msg src-edit-err"></span>' +
+          '<button type="button" class="src-edit-btn awz-cancel">Cancel</button>' +
+          '<button type="button" class="src-edit-btn primary awz-add">Add</button>' +
+        '</div>' +
+        '<datalist id="awz-comp-list"></datalist><datalist id="awz-net-list"></datalist>' +
+      '</div>';
+    document.body.appendChild(ov);
+    function close() { if (ov.parentNode) ov.parentNode.removeChild(ov); }
+    ov.querySelector('.awz-cancel').addEventListener('click', close);
+    ov.addEventListener('mousedown', function (e) { if (e.target === ov) close(); });
+
+    // Datalists: components from the library index, nets from the scene graph.
+    loadInspLib(function (comps) {
+      var dl = ov.querySelector('#awz-comp-list');
+      comps.forEach(function (c) { var o = document.createElement('option'); o.value = c.name; dl.appendChild(o); });
+    });
+    var netDl = ov.querySelector('#awz-net-list');
+    (SCH_INDEX.nets || []).forEach(function (n) { var o = document.createElement('option'); o.value = n.name; netDl.appendChild(o); });
+
+    var pinsBox = ov.querySelector('.awz-pins');
+    function addPinRow(pin, net) {
+      var row = document.createElement('div');
+      row.className = 'awz-pin-row';
+      row.innerHTML = '<input class="awz-pin" placeholder="pin#" spellcheck="false">' +
+        '<input class="awz-net" list="awz-net-list" placeholder="net" spellcheck="false">' +
+        '<button type="button" class="awz-pin-del" title="Remove">×</button>';
+      row.querySelector('.awz-pin').value = pin || '';
+      row.querySelector('.awz-net').value = net || '';
+      row.querySelector('.awz-pin-del').addEventListener('click', function () { row.remove(); });
+      pinsBox.appendChild(row);
+    }
+    addPinRow('1', ''); addPinRow('2', '');
+    ov.querySelector('.awz-add-pin').addEventListener('click', function () { addPinRow('', ''); });
+
+    var msg = ov.querySelector('.awz-msg');
+    ov.querySelector('.awz-add').addEventListener('click', function () {
+      var comp = ov.querySelector('.awz-comp').value.trim();
+      if (!comp) { msg.textContent = 'Pick a component.'; return; }
+      var pins = {};
+      ov.querySelectorAll('.awz-pin-row').forEach(function (r) {
+        var p = r.querySelector('.awz-pin').value.trim();
+        var n = r.querySelector('.awz-net').value.trim();
+        if (p && n) pins[p] = n;
+      });
+      var body = {
+        component: comp,
+        value: ov.querySelector('.awz-val').value.trim(),
+        section: ov.querySelector('.awz-sec').value,
+        ref: ov.querySelector('.awz-ref').value.trim(),
+        pins: pins
+      };
+      msg.textContent = 'Adding…';
+      fetch('/api/add-instance/' + DESIGN_NAME, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      })
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+        .then(function (res) {
+          if (!res.ok || !res.j || res.j.ok === false) { msg.textContent = (res.j && res.j.error) || 'add failed'; return; }
+          window.location.reload();
+        })
+        .catch(function (e) { msg.textContent = e.message || 'network error'; });
     });
   }
 
@@ -459,6 +604,32 @@
     return null;
   }
 
+  // Lazily-loaded library component list, used to populate the inspector's
+  // footprint/component datalist. Fetched once per page from /api/lib-index.
+  var inspLibComps = null;
+  function loadInspLib(cb) {
+    if (inspLibComps) { cb(inspLibComps); return; }
+    fetch('/api/lib-index').then(function (r) { return r.json(); })
+      .then(function (j) { inspLibComps = (j && j.components) || []; cb(inspLibComps); })
+      .catch(function () { inspLibComps = []; cb(inspLibComps); });
+  }
+
+  // POST a surgical edit, then act on the result. `reload` true forces a full
+  // page reload (the netlist/geometry changed); false just advances the
+  // version watermark so our own edit doesn't trigger the 2s poll's reload.
+  function postEdit(endpoint, body, reload, onErr) {
+    fetch(endpoint + '/' + DESIGN_NAME, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (!res.ok || !res.j || res.j.ok === false) { onErr((res.j && res.j.error) || 'edit failed'); return; }
+        if (reload) { window.location.reload(); return; }
+        if (res.j && typeof res.j.version === 'number') lastVersion = res.j.version;
+      })
+      .catch(function (e) { onErr(e.message || 'network error'); });
+  }
+
   // Unified detail view for any component — hubs render their pin table,
   // passives render a compact info card with a "show net" jump for each pin.
   function showComponent(ref, doScroll) {
@@ -492,6 +663,22 @@
     if (canEditSrc) {
       html += '<div class="sb-src-edit"><a href="#" ' +
         'title="Open the source editor at this instance’s definition">Edit source →</a></div>';
+      // Structured inspector: edit value / component / MPN and delete the part
+      // without touching the source — each field POSTs a surgical edit.
+      html += '<details class="sb-inspect"><summary>Edit component</summary>' +
+        '<div class="sb-insp-field"><label>Value</label>' +
+          '<input class="sb-insp-val" spellcheck="false" value="' + escapeHtml(c.value || '') + '">' +
+          '<button class="sb-insp-btn" data-act="value">Save</button></div>' +
+        '<div class="sb-insp-field"><label>Component</label>' +
+          '<input class="sb-insp-comp" spellcheck="false" list="insp-comp-list" value="' + escapeHtml(c.component || '') + '">' +
+          '<button class="sb-insp-btn" data-act="comp">Apply</button></div>' +
+        '<div class="sb-insp-field"><label>MPN</label>' +
+          '<input class="sb-insp-mpn" spellcheck="false" placeholder="manufacturer part #" value="' + escapeHtml(c.mpn || '') + '">' +
+          '<button class="sb-insp-btn" data-act="mpn">Save</button></div>' +
+        '<div class="sb-insp-msg"></div>' +
+        '<button class="sb-insp-del" data-act="delete">Delete component</button>' +
+        '<datalist id="insp-comp-list"></datalist><datalist id="insp-net-list"></datalist>' +
+        '</details>';
     }
     if (c.footprint) html += footprintPreviewHtml(c.footprint);
     if (c.kind !== 'hub') {
@@ -568,6 +755,90 @@
           scrollTo(pinEl || firstSvgPin);
         }
       });
+    });
+    if (canEditSrc) wireInspector(detailBox, ref, c);
+  }
+
+  // Wire the structured inspector panel + inline pin re-wiring for an
+  // editable (top-level, non-module) instance. Each control POSTs a surgical
+  // edit; structural changes reload the page, scalar value/MPN edits don't.
+  function wireInspector(box, ref, c) {
+    var panel = box.querySelector('.sb-inspect');
+    if (!panel) return;
+    var msg = panel.querySelector('.sb-insp-msg');
+    function showMsg(text, isErr) {
+      msg.textContent = text;
+      msg.className = 'sb-insp-msg' + (isErr ? ' is-error' : ' is-ok');
+    }
+    // Populate the net datalist (for inline pin editing) from the scene graph,
+    // and the component datalist from the library index.
+    var netDl = panel.querySelector('#insp-net-list');
+    (SCH_INDEX.nets || []).forEach(function (n) {
+      var o = document.createElement('option'); o.value = n.name; netDl.appendChild(o);
+    });
+    var compDl = panel.querySelector('#insp-comp-list');
+    loadInspLib(function (comps) {
+      comps.forEach(function (cc) { var o = document.createElement('option'); o.value = cc.name; compDl.appendChild(o); });
+    });
+    panel.querySelectorAll('.sb-insp-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var act = btn.getAttribute('data-act');
+        if (act === 'value') {
+          postEdit('/api/edit-value', { ref: ref, value: panel.querySelector('.sb-insp-val').value.trim() }, false,
+            function (e) { showMsg(e, true); });
+          showMsg('Saved value.', false);
+        } else if (act === 'mpn') {
+          postEdit('/api/edit-mpn', { ref: ref, mpn: panel.querySelector('.sb-insp-mpn').value.trim() }, false,
+            function (e) { showMsg(e, true); });
+          showMsg('Saved MPN.', false);
+        } else if (act === 'comp') {
+          var nc = panel.querySelector('.sb-insp-comp').value.trim();
+          if (!nc || nc === c.component) { showMsg('Enter a different component.', true); return; }
+          showMsg('Applying…', false);
+          postEdit('/api/edit-footprint', { ref: ref, component: nc, oldComponent: c.component || '', srcOff: c.src }, true,
+            function (e) { showMsg(e, true); });
+        }
+      });
+    });
+    var del = panel.querySelector('.sb-insp-del');
+    if (del) del.addEventListener('click', function () {
+      if (!window.confirm('Delete ' + ref + ' from the design?')) return;
+      showMsg('Deleting…', false);
+      postEdit('/api/remove-instance', { ref: ref }, true, function (e) { showMsg(e, true); });
+    });
+    // Inline pin re-wiring: an ✎ button on each pin row swaps the net text for
+    // an input (net datalist); Enter/blur POSTs rewire-pin and reloads.
+    box.querySelectorAll('.sb-pin-row').forEach(function (row) {
+      var pin = row.getAttribute('data-pin');
+      var netCell = row.querySelector('.sb-pin-net');
+      if (!netCell || !pin) return;
+      var edit = document.createElement('button');
+      edit.className = 'sb-pin-edit';
+      edit.textContent = '✎';
+      edit.title = 'Re-wire pin ' + pin;
+      edit.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var inp = document.createElement('input');
+        inp.className = 'sb-pin-net-input';
+        inp.setAttribute('list', 'insp-net-list');
+        inp.spellcheck = false;
+        inp.value = row.getAttribute('data-net') || '';
+        netCell.replaceWith(inp);
+        inp.focus(); inp.select();
+        var done = false;
+        function commit() {
+          if (done) return; done = true;
+          var nn = inp.value.trim();
+          if (!nn || nn === (row.getAttribute('data-net') || '')) { showComponent(ref, false); return; }
+          postEdit('/api/rewire-pin', { ref: ref, pin: pin, net: nn }, true, function (er) { alert('Re-wire failed: ' + er); showComponent(ref, false); });
+        }
+        inp.addEventListener('keydown', function (ev) {
+          if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+          else if (ev.key === 'Escape') { done = true; showComponent(ref, false); }
+        });
+        inp.addEventListener('blur', commit);
+      });
+      row.appendChild(edit);
     });
   }
 
@@ -1846,7 +2117,18 @@
     overlay.innerHTML =
       '<div class="src-edit-box">' +
         '<div class="src-edit-head"><h3>Edit source <span class="src-edit-sec"></span></h3>' +
-          '<span class="src-edit-hint">Whole-file editor · ⌘/Ctrl-S to save · ⌘/Ctrl-F to find</span></div>' +
+          '<span class="src-edit-hint">⌘/Ctrl-S save · ⌘/Ctrl-F find · ⌘/Ctrl-Space complete · live-checked as you type</span></div>' +
+        '<div class="src-edit-tools">' +
+          '<span class="src-tools-label">Insert:</span>' +
+          '<button type="button" class="src-edit-btn src-snip" data-snip="section">section</button>' +
+          '<button type="button" class="src-edit-btn src-snip" data-snip="instance">instance</button>' +
+          '<button type="button" class="src-edit-btn src-snip" data-snip="subblock">sub-block</button>' +
+          '<button type="button" class="src-edit-btn src-snip" data-snip="net">net</button>' +
+          '<button type="button" class="src-edit-btn src-snip" data-snip="decouple">decouple</button>' +
+          '<button type="button" class="src-edit-btn src-edit-outline" title="Toggle component outline">Outline</button>' +
+          '<span class="src-tools-gap"></span>' +
+          '<button type="button" class="src-edit-btn src-edit-format" title="Re-indent by paren depth (comments preserved)">Tidy indent</button>' +
+        '</div>' +
         '<div class="src-edit-find" hidden>' +
           '<input type="text" class="src-find-input" placeholder="Find…" spellcheck="false">' +
           '<span class="src-find-count"></span>' +
@@ -1854,8 +2136,16 @@
           '<button type="button" class="src-edit-btn src-find-next" title="Next match (Enter)">↓</button>' +
           '<button type="button" class="src-edit-btn src-find-close" title="Close (Esc)">×</button>' +
         '</div>' +
-        '<div class="src-edit-cm"></div>' +
+        '<div class="src-split-wrap">' +
+          '<div class="src-edit-cm"></div>' +
+          '<div class="src-split-panel" hidden>' +
+            '<div class="src-split-head">Components</div>' +
+            '<div class="src-split-list"></div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="src-edit-problems" hidden></div>' +
         '<div class="src-edit-foot">' +
+          '<span class="src-edit-status src-status-ok" title="Click to list problems">checking…</span>' +
           '<span class="src-edit-err"></span>' +
           '<button type="button" class="src-edit-btn src-edit-cancel">Close</button>' +
           '<button type="button" class="src-edit-btn primary src-edit-save">Save</button>' +
@@ -1872,7 +2162,8 @@
       autoCloseBrackets: true,
       lineWrapping: false,
       indentUnit: 2,
-      tabSize: 2
+      tabSize: 2,
+      gutters: ['CodeMirror-linenumbers', 'eda-diag-gutter']
     });
 
     var state = {
@@ -1881,8 +2172,12 @@
       errEl: overlay.querySelector('.src-edit-err'),
       secEl: overlay.querySelector('.src-edit-sec'),
       saveBtn: overlay.querySelector('.src-edit-save'),
+      statusEl: overlay.querySelector('.src-edit-status'),
+      problemsEl: overlay.querySelector('.src-edit-problems'),
       loaded: false,
-      loadPromise: null
+      loadPromise: null,
+      diagMarks: [],
+      diagLineClasses: []
     };
 
     function close() {
@@ -2021,6 +2316,8 @@
     cm.setOption('extraKeys', {
       'Cmd-S': save,
       'Ctrl-S': save,
+      'Ctrl-Space': function () { openAC(); },
+      'Cmd-Space': function () { openAC(); },
       'Esc': function () {
         if (!findBar.hidden) closeFind(); else return CodeMirror.Pass;
       }
@@ -2034,6 +2331,402 @@
         setTimeout(function () { cm.refresh(); }, 0);
       })
       .catch(function (e) { state.errEl.textContent = 'Load failed: ' + e.message; });
+
+    // ---- Live diagnostics ----
+    // Debounced POST to /api/validate (read-only dry eval): parse/eval errors,
+    // lint warnings, and failed assertions come back with 1-based spans. We
+    // paint located ones as gutter markers + line tints + underlines (native
+    // title tooltips), and list everything in a togglable problems panel.
+    function clearDiagnostics() {
+      state.diagMarks.forEach(function (m) { m.clear(); });
+      state.diagMarks = [];
+      state.diagLineClasses.forEach(function (ln) {
+        cm.removeLineClass(ln, 'wrap', 'cm-diag-error-line');
+        cm.removeLineClass(ln, 'wrap', 'cm-diag-warn-line');
+      });
+      state.diagLineClasses = [];
+      cm.clearGutter('eda-diag-gutter');
+    }
+    function applyDiagnostics(diags) {
+      clearDiagnostics();
+      var nE = 0, nW = 0;
+      diags.forEach(function (d) { if (d.severity === 'error') nE++; else nW++; });
+      var byLine = {};
+      diags.forEach(function (d) {
+        if (!d.line || d.line < 1 || d.line > cm.lineCount()) return;
+        var ln = d.line - 1;
+        (byLine[ln] = byLine[ln] || []).push(d);
+      });
+      Object.keys(byLine).forEach(function (lnStr) {
+        var ln = +lnStr, ds = byLine[ln];
+        var isErr = ds.some(function (d) { return d.severity === 'error'; });
+        cm.addLineClass(ln, 'wrap', isErr ? 'cm-diag-error-line' : 'cm-diag-warn-line');
+        state.diagLineClasses.push(ln);
+        var lineTxt = cm.getLine(ln) || '';
+        ds.forEach(function (d) {
+          var ch0 = Math.max(0, (d.col || 1) - 1);
+          var to = lineTxt.length;
+          if (ch0 >= to) ch0 = Math.max(0, to - 1);
+          state.diagMarks.push(cm.markText(
+            { line: ln, ch: ch0 }, { line: ln, ch: to },
+            { className: isErr ? 'cm-diag-underline-error' : 'cm-diag-underline-warn', title: d.message }
+          ));
+        });
+        var dot = document.createElement('span');
+        dot.className = 'cm-diag-dot ' + (isErr ? 'is-error' : 'is-warn');
+        dot.textContent = isErr ? '●' : '▲';
+        dot.title = ds.map(function (d) { return d.message; }).join('\n');
+        dot.addEventListener('click', function () { cm.setCursor({ line: ln, ch: 0 }); cm.focus(); });
+        cm.setGutterMarker(ln, 'eda-diag-gutter', dot);
+      });
+      var s = state.statusEl;
+      s.className = 'src-edit-status';
+      if (nE > 0) { s.classList.add('src-status-err'); s.textContent = '✕ ' + nE + ' error' + (nE > 1 ? 's' : '') + (nW ? ' · ' + nW + ' warning' + (nW > 1 ? 's' : '') : ''); }
+      else if (nW > 0) { s.classList.add('src-status-warn'); s.textContent = '▲ ' + nW + ' warning' + (nW > 1 ? 's' : ''); }
+      else { s.classList.add('src-status-ok'); s.textContent = '✓ no problems'; }
+      renderProblems(diags);
+    }
+    function renderProblems(diags) {
+      var p = state.problemsEl;
+      p.textContent = '';
+      if (!diags.length) { p.hidden = true; return; }
+      diags.forEach(function (d) {
+        var row = document.createElement('div');
+        row.className = 'src-prob src-prob-' + d.severity;
+        row.setAttribute('data-line', d.line || 0);
+        var loc = document.createElement('span');
+        loc.className = 'src-prob-loc';
+        loc.textContent = d.line > 0 ? ('L' + d.line) : '•';
+        var msg = document.createElement('span');
+        msg.className = 'src-prob-msg';
+        msg.textContent = d.message;
+        row.appendChild(loc); row.appendChild(msg);
+        var fix = quickFixFor(d);
+        if (fix) {
+          var fb = document.createElement('button');
+          fb.className = 'src-prob-fix';
+          fb.textContent = fix.label;
+          fb.addEventListener('click', function (e) { e.stopPropagation(); fix.apply(); });
+          row.appendChild(fb);
+        }
+        p.appendChild(row);
+      });
+    }
+    // Offer a one-click fix for the two commonest footguns: an unbound name
+    // that's actually a library part (→ add to the import form) or an unquoted
+    // net (→ wrap it in quotes at the diagnostic's span).
+    function quickFixFor(d) {
+      if (d.severity !== 'error') return null;
+      // (a) The evaluator already identified an un-imported library part.
+      var lib = /'([^']+)' is in the library/.exec(d.message);
+      if (lib) return { label: '+ import ' + lib[1], apply: function () { addImportFix(lib[1]); } };
+      // (b) Generic unknown/unbound name → import if we recognise it, else a
+      // likely-unquoted net to wrap in quotes.
+      var m = /unknown name '([^']+)'/.exec(d.message) || /[Uu]nbound (?:variable|name) '?([A-Za-z0-9_+\-.\/~]+)'?/.exec(d.message);
+      if (!m) return null;
+      var name = m[1];
+      var comps = (state.libIndex && state.libIndex.components) || [];
+      var mods = (state.libIndex && state.libIndex.modules) || [];
+      var isLib = comps.some(function (c) { return c.name === name; }) || mods.some(function (mm) { return mm.name === name; });
+      if (isLib) return { label: '+ import ' + name, apply: function () { addImportFix(name); } };
+      if (d.line > 0 && /^[A-Za-z0-9_+\-.\/~]+$/.test(name)) return { label: 'Quote "' + name + '"', apply: function () { quoteTokenFix(d, name); } };
+      return null;
+    }
+    function addImportFix(name) {
+      var doc = cm.getValue();
+      var imp = doc.indexOf('(import');
+      if (imp >= 0) {
+        var close = matchParenIndex(doc, imp);
+        if (close > imp) {
+          var pos = cm.posFromIndex(close);
+          cm.replaceRange(' ' + name, pos, pos);
+        }
+      } else {
+        cm.replaceRange('(import ' + name + ')\n', { line: 0, ch: 0 });
+      }
+      scheduleValidate();
+    }
+    function quoteTokenFix(d, name) {
+      var from = { line: d.line - 1, ch: Math.max(0, d.col - 1) };
+      var line = cm.getLine(from.line) || '';
+      // Only wrap when the token at the span really is the bare name.
+      if (line.substr(from.ch, name.length) !== name) { scheduleValidate(); return; }
+      var to = { line: from.line, ch: from.ch + name.length };
+      cm.replaceRange('"' + name + '"', from, to);
+      scheduleValidate();
+    }
+    // Index of the ')' matching the '(' at openIdx, respecting strings and
+    // ; comments. Returns -1 if unbalanced.
+    function matchParenIndex(doc, openIdx) {
+      var depth = 0, inStr = false;
+      for (var i = openIdx; i < doc.length; i++) {
+        var c = doc[i];
+        if (inStr) { if (c === '\\') { i++; continue; } if (c === '"') inStr = false; continue; }
+        if (c === '"') { inStr = true; continue; }
+        if (c === ';') { while (i < doc.length && doc[i] !== '\n') i++; continue; }
+        if (c === '(') depth++;
+        else if (c === ')') { depth--; if (depth === 0) return i; }
+      }
+      return -1;
+    }
+    var valTimer = null;
+    function scheduleValidate() { if (valTimer) clearTimeout(valTimer); valTimer = setTimeout(runValidate, 400); }
+    function runValidate() {
+      if (!state.loaded) return;
+      libReady(); // so quick-fixes can distinguish a library part from a net
+      fetch('/api/validate/' + DESIGN_NAME, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: cm.getValue() })
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (j) { applyDiagnostics((j && j.diagnostics) || []); })
+        .catch(function () { /* keep last good diagnostics */ });
+    }
+    cm.on('change', scheduleValidate);
+    state.problemsEl.addEventListener('click', function (e) {
+      var r = e.target.closest ? e.target.closest('.src-prob') : null;
+      if (!r) return;
+      var ln = +r.getAttribute('data-line');
+      if (ln > 0) revealEditorLine(state, ln - 1);
+    });
+    state.statusEl.addEventListener('click', function () {
+      if (state.problemsEl.childNodes.length) state.problemsEl.hidden = !state.problemsEl.hidden;
+    });
+    // Kick a first validation once the file lands.
+    state.loadPromise && state.loadPromise.then(function () { runValidate(); });
+
+    // ---- Snippets ----
+    var SNIPPETS = {
+      section: '(section "Name" "one-line technical summary"\n  (row 0) (col 1)\n  )\n',
+      instance: '(instance "U1" component-name\n  (pin 1 "NET1")\n  (pin 2 "NET2"))\n',
+      subblock: '(sub-block "name" (module-name))\n',
+      net: '(net "NET_NAME" "alias1" "alias2")\n',
+      decouple: '(decouple "VDD" 1 per-pin (pins-of "U1" "VDD"))\n'
+    };
+    function insertSnippet(kind) {
+      var snip = SNIPPETS[kind];
+      if (!snip) return;
+      var cur = cm.getCursor();
+      // Indent the snippet to the current line's leading whitespace.
+      var lead = (cm.getLine(cur.line) || '').match(/^\s*/)[0];
+      var text = snip.replace(/\n(?!$)/g, '\n' + lead);
+      cm.replaceRange(text, cur);
+      cm.focus();
+      scheduleValidate();
+    }
+    overlay.querySelectorAll('.src-snip').forEach(function (b) {
+      b.addEventListener('click', function () { insertSnippet(b.getAttribute('data-snip')); });
+    });
+
+    // ---- Tidy indent ----
+    // Whitespace-only reindent by paren depth. Strings and ; comments are
+    // skipped when counting depth, and only leading whitespace is rewritten —
+    // every token and comment is preserved (the AST printer would drop
+    // comments, so we never round-trip through it).
+    function netParenDelta(line) {
+      var d = 0, inStr = false;
+      for (var i = 0; i < line.length; i++) {
+        var c = line[i];
+        if (inStr) { if (c === '\\') { i++; continue; } if (c === '"') inStr = false; continue; }
+        if (c === '"') { inStr = true; continue; }
+        if (c === ';') break;
+        if (c === '(') d++; else if (c === ')') d--;
+      }
+      return d;
+    }
+    function tidyIndent() {
+      var lines = cm.getValue().split('\n');
+      var out = [], depth = 0;
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].replace(/^\s+/, '');
+        if (line === '') { out.push(''); continue; }
+        var lead = 0;
+        while (lead < line.length && line[lead] === ')') lead++;
+        var indent = Math.max(0, depth - lead);
+        out.push('  '.repeat(indent) + line);
+        depth = Math.max(0, depth + netParenDelta(line));
+      }
+      var cur = cm.getCursor();
+      cm.setValue(out.join('\n'));
+      cm.setCursor(cur);
+      scheduleValidate();
+    }
+    overlay.querySelector('.src-edit-format').addEventListener('click', tidyIndent);
+
+    // ---- Split structured↔source outline ----
+    // A live list of the design's (instance …) forms parsed from the buffer.
+    // Edits to the source update the list (source→structured); clicking a row
+    // jumps the editor to that instance (structured→source navigation).
+    var splitPanel = overlay.querySelector('.src-split-panel');
+    var splitList = overlay.querySelector('.src-split-list');
+    var splitBox = overlay.querySelector('.src-edit-box');
+    function parseInstances(doc) {
+      var re = /\(instance\s+"([^"]+)"\s+(?:\(\s*([^\s)]+)\s+"([^"]*)"\s*\)|([^\s)]+))/g, m, out = [];
+      while ((m = re.exec(doc))) out.push({ ref: m[1], comp: m[2] || m[4] || '', val: m[3] || '', idx: m.index });
+      return out;
+    }
+    function refreshSplit() {
+      if (splitPanel.hidden) return;
+      var doc = cm.getValue();
+      splitList.textContent = '';
+      parseInstances(doc).forEach(function (it) {
+        var row = document.createElement('div');
+        row.className = 'src-split-item';
+        var ref = document.createElement('span'); ref.className = 'src-split-ref'; ref.textContent = it.ref;
+        var comp = document.createElement('span'); comp.className = 'src-split-comp';
+        comp.textContent = it.comp + (it.val ? ' ' + it.val : '');
+        row.appendChild(ref); row.appendChild(comp);
+        row.addEventListener('click', function () {
+          revealEditorLine(state, doc.slice(0, it.idx).split('\n').length - 1);
+        });
+        splitList.appendChild(row);
+      });
+    }
+    overlay.querySelector('.src-edit-outline').addEventListener('click', function () {
+      splitPanel.hidden = !splitPanel.hidden;
+      splitBox.classList.toggle('has-split', !splitPanel.hidden);
+      refreshSplit();
+      setTimeout(function () { cm.refresh(); }, 0);
+    });
+    cm.on('change', refreshSplit);
+
+    // ---- Autocomplete ----
+    // Custom popup (the vendored bundle has no show-hint addon). Sources:
+    // form names (static, with the grammar we know), nets + ref-des parsed
+    // from the buffer, and library components/modules from /api/lib-index.
+    var FORMS = ['instance', 'net', 'section', 'sub-block', 'port', 'pin', 'part',
+      'decouple', 'series', 'fanout', 'note', 'group', 'import', 'design-block',
+      'defmodule', 'bus', 'bus-net', 'bus-port', 'pins', 'protocol', 'role',
+      'calc', 'description', 'status', 'assert', 'assert-range', 'let', 'if',
+      'cond', 'fmt', 'replicate', 'board', 'placement', 'floorplan',
+      'diagram-layout', 'stub', 'hierarchical-ids', 'kicad-pcb'];
+    var ac = { el: null, items: [], sel: 0, from: null, to: null };
+    function libReady() {
+      if (state.libIndex || state.libFetching) return;
+      state.libFetching = true;
+      fetch('/api/lib-index').then(function (r) { return r.json(); })
+        .then(function (j) { state.libIndex = j || { components: [], modules: [] }; })
+        .catch(function () { state.libIndex = { components: [], modules: [] }; });
+    }
+    function collectIdents() {
+      var doc = cm.getValue(), refs = {}, nets = {}, m;
+      var ri = /\(instance\s+"([^"]+)"/g;
+      while ((m = ri.exec(doc))) refs[m[1]] = 1;
+      var sq = /"([^"\\]*(?:\\.[^"\\]*)*)"/g;
+      while ((m = sq.exec(doc))) { var s = m[1]; if (s && s.indexOf(' ') < 0 && !refs[s]) nets[s] = 1; }
+      return { refs: Object.keys(refs), nets: Object.keys(nets) };
+    }
+    function ctxAt() {
+      var cur = cm.getCursor(), line = cm.getLine(cur.line) || '', left = line.slice(0, cur.ch);
+      var inStr = ((left.match(/"/g) || []).length % 2) === 1;
+      var tm = left.match(/[A-Za-z0-9_+\-.\/~]*$/);
+      var token = tm ? tm[0] : '';
+      var tokenStart = cur.ch - token.length;
+      var bi = tokenStart - 1;
+      while (bi >= 0 && line[bi] === ' ') bi--;
+      var afterParen = bi >= 0 && line[bi] === '(';
+      var isImport = /\(import\b/.test(left);
+      return { cur: cur, token: token, tokenStart: tokenStart, inStr: inStr, afterParen: afterParen, isImport: isImport };
+    }
+    function candidatesFor(c) {
+      var out = [], idents = collectIdents();
+      var comps = (state.libIndex && state.libIndex.components) || [];
+      var mods = (state.libIndex && state.libIndex.modules) || [];
+      function add(text, type) { out.push({ text: text, type: type }); }
+      if (c.inStr) {
+        idents.nets.forEach(function (n) { add(n, 'net'); });
+        idents.refs.forEach(function (r) { add(r, 'ref'); });
+      } else if (c.afterParen) {
+        FORMS.forEach(function (f) { add(f, 'form'); });
+        comps.forEach(function (cc) { add(cc.name, cc.family ? 'family' : 'comp'); });
+        mods.forEach(function (mm) { add(mm.name, 'module'); });
+      } else {
+        // bare token mid-form: import args, module args, component refs.
+        comps.forEach(function (cc) { add(cc.name, cc.family ? 'family' : 'comp'); });
+        mods.forEach(function (mm) { add(mm.name, 'module'); });
+        if (!c.isImport) idents.nets.forEach(function (n) { add(n, 'net'); });
+      }
+      var q = c.token.toLowerCase();
+      if (q) {
+        out = out.filter(function (o) { return o.text.toLowerCase().indexOf(q) >= 0; });
+        out.sort(function (a, b) {
+          var ap = a.text.toLowerCase().indexOf(q) === 0 ? 0 : 1;
+          var bp = b.text.toLowerCase().indexOf(q) === 0 ? 0 : 1;
+          if (ap !== bp) return ap - bp;
+          return a.text.length - b.text.length;
+        });
+      }
+      // De-dup by text, cap.
+      var seen = {}, dedup = [];
+      for (var i = 0; i < out.length && dedup.length < 40; i++) {
+        if (seen[out[i].text]) continue;
+        seen[out[i].text] = 1; dedup.push(out[i]);
+      }
+      return dedup;
+    }
+    var acKeyMap = {
+      Up: function () { moveAC(-1); }, Down: function () { moveAC(1); },
+      Enter: function () { pickAC(); }, Tab: function () { pickAC(); },
+      Esc: function () { closeAC(); }
+    };
+    function closeAC() {
+      if (!ac.el) return;
+      cm.removeKeyMap(acKeyMap);
+      if (ac.el.parentNode) ac.el.parentNode.removeChild(ac.el);
+      ac.el = null; ac.items = [];
+    }
+    function moveAC(dir) {
+      if (!ac.el) return;
+      ac.sel = (ac.sel + dir + ac.items.length) % ac.items.length;
+      Array.prototype.forEach.call(ac.el.children, function (li, i) {
+        li.classList.toggle('sel', i === ac.sel);
+        if (i === ac.sel) li.scrollIntoView({ block: 'nearest' });
+      });
+    }
+    function pickAC() {
+      if (!ac.el || !ac.items.length) return;
+      var it = ac.items[ac.sel];
+      cm.replaceRange(it.text, ac.from, ac.to);
+      closeAC();
+      cm.focus();
+      scheduleValidate();
+    }
+    function openAC() {
+      libReady();
+      var c = ctxAt();
+      var items = candidatesFor(c);
+      if (!items.length || (c.token.length === 0 && !c.afterParen && !c.inStr)) { closeAC(); return; }
+      closeAC();
+      ac.items = items; ac.sel = 0;
+      ac.from = { line: c.cur.line, ch: c.tokenStart };
+      ac.to = { line: c.cur.line, ch: c.cur.ch };
+      var el = document.createElement('ul');
+      el.className = 'src-ac';
+      items.forEach(function (it, i) {
+        var li = document.createElement('li');
+        if (i === 0) li.className = 'sel';
+        var t = document.createElement('span'); t.className = 'src-ac-text'; t.textContent = it.text;
+        var ty = document.createElement('span'); ty.className = 'src-ac-type'; ty.textContent = it.type;
+        li.appendChild(t); li.appendChild(ty);
+        li.addEventListener('mousedown', function (e) { e.preventDefault(); ac.sel = i; pickAC(); });
+        el.appendChild(li);
+      });
+      var coords = cm.cursorCoords(ac.from, 'page');
+      el.style.left = coords.left + 'px';
+      el.style.top = coords.bottom + 'px';
+      document.body.appendChild(el);
+      ac.el = el;
+      cm.addKeyMap(acKeyMap);
+    }
+    cm.on('inputRead', function () { openAC(); });
+    cm.on('cursorActivity', function () {
+      // Close if the cursor left the active completion range.
+      if (!ac.el) return;
+      var cur = cm.getCursor();
+      if (cur.line !== ac.from.line || cur.ch < ac.from.ch) closeAC();
+    });
+    cm.on('blur', function () { setTimeout(closeAC, 120); });
 
     return state;
   }
@@ -2376,6 +3069,245 @@
       node.addEventListener('mouseleave', clearFocus);
     });
   });
+
+  // ---- Layout-tab drag-to-arrange ----
+  // An "Edit layout" toggle on the Layout SVG lets you drag blocks; "Save"
+  // regenerates a (diagram-layout …) from the dragged grid (anchor + a
+  // staircase of right-of / below constraints — the DSL is relative-only) and
+  // POSTs it to /api/diagram-layout, preserving any (group …)/(edge …) lines.
+  var LAYOUT_CELL_W = 484, LAYOUT_CELL_H = 214; // node_w+gap × node_h+gap
+
+  // Map a client (screen) point into the SVG's user coordinate space — robust
+  // to the viewer's zoom/pan because getScreenCTM reflects the live viewBox.
+  function svgPoint(svg, cx, cy) {
+    var pt = svg.createSVGPoint(); pt.x = cx; pt.y = cy;
+    var m = svg.getScreenCTM();
+    if (!m) return { x: cx, y: cy };
+    var p = pt.matrixTransform(m.inverse());
+    return { x: p.x, y: p.y };
+  }
+  // Build a (diagram-layout …) form from placed blocks. Exposed for tests via
+  // window.__buildDiagramForm. `extra` = preserved (group …)/(edge …) lines.
+  function buildDiagramForm(blocks, extra) {
+    if (!blocks.length) return '(diagram-layout)';
+    blocks.forEach(function (b) {
+      b.col = Math.round(b.x / LAYOUT_CELL_W);
+      b.row = Math.round(b.y / LAYOUT_CELL_H);
+    });
+    var rowsMap = {};
+    blocks.forEach(function (b) { (rowsMap[b.row] = rowsMap[b.row] || []).push(b); });
+    var rowKeys = Object.keys(rowsMap).map(Number).sort(function (a, b) { return a - b; });
+    var lines = [], anchor = null, prevRowFirst = null;
+    function q(s) { return '"' + String(s).replace(/"/g, '\\"') + '"'; }
+    rowKeys.forEach(function (rk, ri) {
+      var row = rowsMap[rk].sort(function (a, b) { return a.col - b.col; });
+      row.forEach(function (b, ci) {
+        if (ri === 0 && ci === 0) anchor = b.name;
+        else if (ci === 0) lines.push('(place ' + q(b.name) + ' (below ' + q(prevRowFirst) + '))');
+        else lines.push('(place ' + q(b.name) + ' (right-of ' + q(row[ci - 1].name) + '))');
+      });
+      prevRowFirst = row[0].name;
+    });
+    var body = '  (anchor ' + q(anchor) + ')';
+    if (lines.length) body += '\n  ' + lines.join('\n  ');
+    (extra || []).forEach(function (e) { body += '\n  ' + e; });
+    return '(diagram-layout\n' + body + ')';
+  }
+  if (typeof window !== 'undefined') window.__buildDiagramForm = buildDiagramForm;
+
+  // Extract balanced (group …)/(edge …)/(row …) sub-forms from a diagram-layout
+  // form's text, to preserve them across a drag-driven regeneration.
+  function extractLayoutGroups(src) {
+    var form = src.match(/\((?:diagram-layout|layout)\b/);
+    if (!form) return [];
+    var start = form.index, depth = 0, i = start, inStr = false, body = '';
+    for (; i < src.length; i++) {
+      var c = src[i];
+      body += c;
+      if (inStr) { if (c === '\\') { body += src[++i]; } else if (c === '"') inStr = false; continue; }
+      if (c === '"') inStr = true;
+      else if (c === ';') { while (i < src.length && src[i] !== '\n') body += src[++i] || ''; }
+      else if (c === '(') depth++;
+      else if (c === ')') { depth--; if (depth === 0) break; }
+    }
+    var out = [];
+    var re = /\((?:group|edge|row)\b/g, m;
+    while ((m = re.exec(body))) {
+      var s = m.index, d = 0, j = s, str = false, frag = '';
+      for (; j < body.length; j++) {
+        var ch = body[j]; frag += ch;
+        if (str) { if (ch === '\\') { frag += body[++j]; } else if (ch === '"') str = false; continue; }
+        if (ch === '"') str = true; else if (ch === '(') d++; else if (ch === ')') { d--; if (d === 0) break; }
+      }
+      out.push(frag);
+    }
+    return out;
+  }
+
+  document.querySelectorAll('.dg-svg[data-lod]').forEach(function (svg) {
+    var nodes = svg.querySelectorAll('.dg-node[data-name]');
+    if (nodes.length < 2) return;
+    var bar = document.createElement('div');
+    bar.className = 'dg-edit-bar';
+    bar.innerHTML = '<button type="button" class="dg-edit-toggle">✎ Edit layout</button>' +
+      '<button type="button" class="dg-edit-save" hidden>Save</button>' +
+      '<button type="button" class="dg-edit-cancel" hidden>Cancel</button>' +
+      '<span class="dg-edit-msg"></span>';
+    var parent = svg.parentNode;
+    if (parent) { parent.style.position = parent.style.position || 'relative'; parent.appendChild(bar); }
+    var editing = false, drag = null;
+    var toggle = bar.querySelector('.dg-edit-toggle');
+    var saveBtn = bar.querySelector('.dg-edit-save');
+    var cancelBtn = bar.querySelector('.dg-edit-cancel');
+    var msg = bar.querySelector('.dg-edit-msg');
+
+    function nodeBase(node) {
+      var rect = node.querySelector('rect');
+      return { x: parseFloat(rect.getAttribute('x')) || 0, y: parseFloat(rect.getAttribute('y')) || 0 };
+    }
+    function setEditing(on) {
+      editing = on;
+      svg.classList.toggle('dg-editing', on);
+      toggle.hidden = on; saveBtn.hidden = !on; cancelBtn.hidden = !on;
+      msg.textContent = on ? 'Drag blocks, then Save' : '';
+    }
+    toggle.addEventListener('click', function () { setEditing(true); });
+    cancelBtn.addEventListener('click', function () { window.location.reload(); });
+
+    nodes.forEach(function (node) {
+      node.addEventListener('mousedown', function (e) {
+        if (!editing) return;
+        e.preventDefault(); e.stopPropagation();
+        var tr = node.transform.baseVal.consolidate();
+        var base = { tx: tr ? tr.matrix.e : 0, ty: tr ? tr.matrix.f : 0 };
+        var p0 = svgPoint(svg, e.clientX, e.clientY);
+        drag = { node: node, base: base, p0: p0 };
+      });
+    });
+    window.addEventListener('mousemove', function (e) {
+      if (!drag) return;
+      var p = svgPoint(svg, e.clientX, e.clientY);
+      drag.node.setAttribute('transform', 'translate(' + (drag.base.tx + p.x - drag.p0.x) + ',' + (drag.base.ty + p.y - drag.p0.y) + ')');
+    });
+    window.addEventListener('mouseup', function () { drag = null; });
+
+    saveBtn.addEventListener('click', function () {
+      msg.textContent = 'Saving…';
+      var blocks = [];
+      nodes.forEach(function (node) {
+        var b = nodeBase(node);
+        var tr = node.transform.baseVal.consolidate();
+        blocks.push({ name: node.getAttribute('data-name'), x: b.x + (tr ? tr.matrix.e : 0), y: b.y + (tr ? tr.matrix.f : 0) });
+      });
+      // Preserve groups/edges from the current source, then write back.
+      fetch('/api/source/' + DESIGN_NAME).then(function (r) { return r.json(); })
+        .then(function (j) {
+          var extra = extractLayoutGroups(typeof j.source === 'string' ? j.source : '');
+          var form = buildDiagramForm(blocks, extra);
+          return fetch('/api/diagram-layout/' + DESIGN_NAME, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ form: form })
+          });
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          if (!res || res.ok === false) { msg.textContent = (res && res.error) || 'save failed'; return; }
+          window.location.reload();
+        })
+        .catch(function (e) { msg.textContent = e.message || 'network error'; });
+    });
+  });
+
+  // ---- Drag-to-connect ----
+  // A "Connect" toggle turns the schematic into wiring mode: drag from one pin
+  // stub to another pin (or onto a net wire) to put the source pin on that
+  // net via /api/rewire-pin. A page-level overlay line follows the cursor so
+  // the drag reads across the per-section hub SVGs. Off by default so normal
+  // click-navigation is unaffected.
+  (function setupConnectMode() {
+    if (typeof SCH_VIEW !== 'undefined' && SCH_VIEW === 'module') return; // rewire targets top-level instances
+    if (!document.querySelector('.pin-stub')) return;
+    var toggle = document.createElement('button');
+    toggle.className = 'sch-connect-toggle';
+    toggle.type = 'button';
+    toggle.textContent = '🔌 Connect: off';
+    document.body.appendChild(toggle);
+    var on = false;
+    toggle.addEventListener('click', function () {
+      on = !on;
+      document.body.classList.toggle('connect-mode', on);
+      toggle.classList.toggle('on', on);
+      toggle.textContent = on ? '🔌 Connect: on' : '🔌 Connect: off';
+    });
+
+    var overlay = null, line = null, src = null;
+    function ensureOverlay() {
+      if (overlay) return;
+      overlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      overlay.id = 'connect-overlay';
+      line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      overlay.appendChild(line);
+      document.body.appendChild(overlay);
+    }
+    function pinCenter(el) {
+      var r = el.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }
+    function firstPin(stub) {
+      var p = stub.getAttribute('data-pin') || '';
+      return p.split(',')[0].trim();
+    }
+    // The net a pin currently sits on, from the scene-graph index.
+    function pinNet(ref, pin) {
+      var found = null;
+      (SCH_INDEX.nets || []).forEach(function (n) {
+        (n.members || []).forEach(function (m) {
+          if (m.ref === ref && String(m.pin) === String(pin)) found = n.name;
+        });
+      });
+      return found;
+    }
+    document.addEventListener('mousedown', function (e) {
+      if (!on) return;
+      var stub = e.target.closest && e.target.closest('.pin-stub');
+      if (!stub || !stub.getAttribute('data-ref')) return;
+      e.preventDefault(); e.stopPropagation();
+      ensureOverlay();
+      src = { ref: stub.getAttribute('data-ref'), pin: firstPin(stub) };
+      var c = pinCenter(stub);
+      line.setAttribute('x1', c.x); line.setAttribute('y1', c.y);
+      line.setAttribute('x2', c.x); line.setAttribute('y2', c.y);
+      overlay.style.display = 'block';
+    }, true);
+    window.addEventListener('mousemove', function (e) {
+      if (!src || !line) return;
+      line.setAttribute('x2', e.clientX); line.setAttribute('y2', e.clientY);
+    });
+    window.addEventListener('mouseup', function (e) {
+      if (!src) return;
+      var s = src; src = null;
+      if (overlay) overlay.style.display = 'none';
+      var tgt = document.elementFromPoint(e.clientX, e.clientY);
+      if (!tgt || !tgt.closest) return;
+      var net = null;
+      var netEl = tgt.closest('.net');
+      var pinEl = tgt.closest('.pin-stub');
+      if (netEl) net = netEl.getAttribute('data-net');
+      else if (pinEl) net = pinNet(pinEl.getAttribute('data-ref'), firstPin(pinEl));
+      if (!net) { toggle.textContent = '🔌 no target net'; return; }
+      if (net === pinNet(s.ref, s.pin)) { toggle.textContent = '🔌 already on ' + net; return; }
+      toggle.textContent = '🔌 connecting…';
+      fetch('/api/rewire-pin/' + DESIGN_NAME, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ref: s.ref, pin: s.pin, net: net })
+      })
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+        .then(function (res) {
+          if (!res.ok || !res.j || res.j.ok === false) { toggle.textContent = '🔌 ' + ((res.j && res.j.error) || 'failed'); return; }
+          window.location.reload();
+        })
+        .catch(function () { toggle.textContent = '🔌 error'; });
+    });
+  })();
 
   // ---- Diagram block → section cross-probe ----
   // Every block in the Layout / Power / Clocks / Control / System diagrams is
