@@ -1359,7 +1359,21 @@ fn writeSubBlockCard(
         try hub_refs.append(allocator, inst.ref_des);
     }
 
-    try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items, check_results);
+    // A module can organise its hub pins with `(pins "REF" (group "label") …)`
+    // groups (the same convention top-level designs use). Collect them from the
+    // sub-block's sections so the hub renders one labelled SVG per group instead
+    // of a single flat pin list. (ref_des is remapped to the flattened hub by
+    // ids.assignSubBlockRefDes, so it matches hub_refs above.)
+    var sb_pin_groups: std.ArrayListUnmanaged(env_mod.PinGroup) = .empty;
+    defer sb_pin_groups.deinit(allocator);
+    for (sb.block.sections) |sec| {
+        for (sec.pin_groups) |pg| try sb_pin_groups.append(allocator, pg);
+        for (sec.sub_sections) |sub_sec| {
+            for (sub_sec.pin_groups) |pg| try sb_pin_groups.append(allocator, pg);
+        }
+    }
+
+    try writeSectionHubs(ctx, w, allocator, sb_pin_groups.items, hub_refs.items, check_results);
 
     // Per-sub-block PCB layout preview (read-only, computed on demand). Scoped
     // to this sub-block via ?sub=<slug> so the whole design is never placed; it
