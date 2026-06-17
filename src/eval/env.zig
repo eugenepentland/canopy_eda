@@ -754,6 +754,7 @@ pub const SignalType = enum {
     clock,
     data,
     differential,
+    rf,
 };
 
 /// Direction of a section-level port for the block diagram. `in` is a sink
