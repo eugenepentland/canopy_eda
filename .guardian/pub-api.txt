@@ -784,8 +784,10 @@ src/serve/diag_format.zig::renderErrorPage fn
 src/serve/diag_format.zig::writeJson fn
 src/serve/digikey.zig::DatasheetError value
 src/serve/digikey.zig::DatasheetResult struct_
+src/serve/digikey.zig::PriceBreak struct_
 src/serve/digikey.zig::Product struct_
 src/serve/digikey.zig::SearchError value
+src/serve/digikey.zig::Variation struct_
 src/serve/digikey.zig::datasheetErrorMessage fn
 src/serve/digikey.zig::default_base value
 src/serve/digikey.zig::downloadDatasheet fn

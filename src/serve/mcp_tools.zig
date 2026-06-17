@@ -51,10 +51,17 @@ const JSON_VALUE_KEY = ",\"value\":";
 const JSON_MANUFACTURER_KEY = ",\"manufacturer\":";
 const JSON_DESCRIPTION_KEY = ",\"description\":";
 const JSON_ERR_OPEN = "{\"ok\":false,\"error\":";
+// Shared opening of the part-search envelopes (search_components / resolve_mpn /
+// check_stock): `{"ok":true,"query":<q>` then `,"count":N,"results":[`.
+const JSON_OK_QUERY_OPEN = "{\"ok\":true,\"query\":";
+const JSON_COUNT_RESULTS_OPEN = ",\"count\":{d},\"results\":[";
 const KEY_PART_NUMBER = "part_number";
 // search_components `limit` arg: default and hard cap.
 const SEARCH_LIMIT_DEFAULT: usize = 10;
 const SEARCH_LIMIT_MAX: u64 = 50;
+// check_stock default is smaller — each result carries full per-packaging price
+// ladders, so a handful of exact-ish matches is the useful payload (cap shared).
+const STOCK_LIMIT_DEFAULT: usize = 5;
 
 const EvalError = @import("../eval/evaluator.zig").EvalError;
 const RenderError = render_json.RenderError;
@@ -126,9 +133,13 @@ const tools = [_]ToolEntry{
     // Pairs with download_footprint / download_datasheet to import a chosen one.
     .{ .name = "search_components", .is_mutation = false },
     // Resolve a fuzzy query to real manufacturer part numbers (+ datasheet
-    // URLs) via the DigiKey Product Information API (read-only). Feed a chosen
-    // MPN to search_components / download_footprint / download_datasheet.
+    // URLs, live stock, unit price) via the DigiKey Product Information API
+    // (read-only). Feed a chosen MPN to search_components / download_footprint
+    // / download_datasheet, or to check_stock for the full price ladder.
     .{ .name = "resolve_mpn", .is_mutation = false },
+    // Live DigiKey stock + pricing for a known MPN/orderable number: per-packaging
+    // quantity available, MOQ, and the full quantity price-break ladder (read-only).
+    .{ .name = "check_stock", .is_mutation = false },
     // Per-design TODO notes (sidecar `<design>.notes.md`). Lets agents
     // log follow-ups for the next revision and mark them complete with
     // a date stamp once the design has been updated.
@@ -215,6 +226,7 @@ fn callInner(
     if (try dispatchVfs(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchProject(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchInfo(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
+    if (try dispatchParts(allocator, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchLanguage(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchReview(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchNotes(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
@@ -266,8 +278,22 @@ fn dispatchInfo(
     if (std.mem.eql(u8, tool_name, "run_checks")) return try toolRunChecks(allocator, project_dir, args_val, out, w);
     if (std.mem.eql(u8, tool_name, "generate_review")) return try toolGenerateReview(allocator, project_dir, args_val, w, out);
     if (std.mem.eql(u8, tool_name, "read_datasheet")) return try toolReadDatasheet(allocator, project_dir, args_val, out);
+    return null;
+}
+
+/// External part-catalog lookups (read-only, network): Component Search Engine
+/// keyword search and the DigiKey resolve-MPN / stock-and-pricing tools. Grouped
+/// apart from `dispatchInfo` so each dispatcher stays small. Returns null when
+/// the tool name doesn't match any of these.
+fn dispatchParts(
+    allocator: std.mem.Allocator,
+    tool_name: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayListUnmanaged(u8),
+) !?bool {
     if (std.mem.eql(u8, tool_name, "search_components")) return try toolSearchComponents(allocator, args_val, out);
     if (std.mem.eql(u8, tool_name, "resolve_mpn")) return try toolResolveMpn(allocator, args_val, out);
+    if (std.mem.eql(u8, tool_name, "check_stock")) return try toolCheckStock(allocator, args_val, out);
     return null;
 }
 
@@ -1234,9 +1260,9 @@ fn toolSearchComponents(allocator: std.mem.Allocator, args_val: ?std.json.Value,
         return false;
     };
 
-    try w.writeAll("{\"ok\":true,\"query\":");
+    try w.writeAll(JSON_OK_QUERY_OPEN);
     try json_writer.writeString(w, query);
-    try w.print(",\"count\":{d},\"results\":[", .{hits.len});
+    try w.print(JSON_COUNT_RESULTS_OPEN, .{hits.len});
     for (hits, 0..) |h, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"part_number\":");
@@ -1265,26 +1291,17 @@ fn toolResolveMpn(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: 
     const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, SEARCH_LIMIT_MAX)) else SEARCH_LIMIT_DEFAULT;
     const w = out.writer(allocator);
 
-    const client_id = config.digikeyClientId(allocator) orelse {
-        try w.writeAll("{\"ok\":false,\"error\":\"DIGIKEY_CLIENT_ID is not set on the server; add it to .env\"}");
-        return false;
-    };
-    const client_secret = config.digikeyClientSecret(allocator) orelse {
-        try w.writeAll("{\"ok\":false,\"error\":\"DIGIKEY_CLIENT_SECRET is not set on the server; add it to .env\"}");
-        return false;
-    };
-    const base: []const u8 = config.digikeyApiBase(allocator) orelse digikey.default_base;
-
-    const products = digikey.resolveMpn(allocator, base, client_id, client_secret, query, limit) catch |err| {
+    const creds = (try digikeyCreds(allocator, w)) orelse return false;
+    const products = digikey.resolveMpn(allocator, creds.base, creds.client_id, creds.client_secret, query, limit) catch |err| {
         try w.writeAll(JSON_ERR_OPEN);
         try json_writer.writeString(w, digikey.searchErrorMessage(err));
         try w.writeAll("}");
         return false;
     };
 
-    try w.writeAll("{\"ok\":true,\"query\":");
+    try w.writeAll(JSON_OK_QUERY_OPEN);
     try json_writer.writeString(w, query);
-    try w.print(",\"count\":{d},\"results\":[", .{products.len});
+    try w.print(JSON_COUNT_RESULTS_OPEN, .{products.len});
     for (products, 0..) |p, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"mpn\":");
@@ -1299,16 +1316,115 @@ fn toolResolveMpn(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: 
         try writeOptString(w, p.product_url);
         try w.writeAll(",\"digikey_part_number\":");
         try writeOptString(w, p.digikey_part_number);
+        // At-a-glance stock + price + lifecycle (full ladders via check_stock).
+        try w.print(",\"quantity_available\":{d},\"unit_price\":", .{p.quantity_available});
+        try writeOptNum(w, p.unit_price);
+        try w.writeAll(",\"product_status\":");
+        try writeOptString(w, p.product_status);
         try w.writeAll("}");
     }
     try w.writeAll("]}");
     return true;
 }
 
+/// Live DigiKey stock + pricing for a known MPN/orderable number. Resolves the
+/// query through the same keyword search as `resolve_mpn`, then emits the full
+/// per-packaging inventory and quantity price-break ladder for each match — the
+/// "is it actually on the shelf, and what does qty-N cost" step. Read-only.
+/// Returns `{ok:true,query,count,results:[{mpn,manufacturer,description,
+/// product_status,quantity_available,unit_price,product_url,digikey_part_number,
+/// variations:[{digikey_part_number,package_type,quantity_available,
+/// minimum_order_quantity,price_breaks:[{break_quantity,unit_price,
+/// total_price}]}]}]}` or `{ok:false,error}`.
+fn toolCheckStock(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const query = requireString(args_val, "query") orelse return missingArg(out, allocator, "query");
+    const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, SEARCH_LIMIT_MAX)) else STOCK_LIMIT_DEFAULT;
+    const w = out.writer(allocator);
+
+    const creds = (try digikeyCreds(allocator, w)) orelse return false;
+    const products = digikey.resolveMpn(allocator, creds.base, creds.client_id, creds.client_secret, query, limit) catch |err| {
+        try w.writeAll(JSON_ERR_OPEN);
+        try json_writer.writeString(w, digikey.searchErrorMessage(err));
+        try w.writeAll("}");
+        return false;
+    };
+
+    try w.writeAll(JSON_OK_QUERY_OPEN);
+    try json_writer.writeString(w, query);
+    try w.print(JSON_COUNT_RESULTS_OPEN, .{products.len});
+    for (products, 0..) |p, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"mpn\":");
+        try json_writer.writeString(w, p.mpn);
+        try w.writeAll(JSON_MANUFACTURER_KEY);
+        try json_writer.writeString(w, p.manufacturer);
+        try w.writeAll(JSON_DESCRIPTION_KEY);
+        try json_writer.writeString(w, p.description);
+        try w.writeAll(",\"product_status\":");
+        try writeOptString(w, p.product_status);
+        try w.print(",\"quantity_available\":{d},\"unit_price\":", .{p.quantity_available});
+        try writeOptNum(w, p.unit_price);
+        try w.writeAll(",\"product_url\":");
+        try writeOptString(w, p.product_url);
+        try w.writeAll(",\"digikey_part_number\":");
+        try writeOptString(w, p.digikey_part_number);
+        try w.writeAll(",\"variations\":[");
+        for (p.variations, 0..) |v, vi| {
+            if (vi > 0) try w.writeAll(",");
+            try w.writeAll("{\"digikey_part_number\":");
+            try writeOptString(w, v.digikey_part_number);
+            try w.writeAll(",\"package_type\":");
+            try writeOptString(w, v.package_type);
+            try w.print(",\"quantity_available\":{d},\"minimum_order_quantity\":{d},\"price_breaks\":[", .{
+                v.quantity_available, v.minimum_order_quantity,
+            });
+            for (v.price_breaks, 0..) |b, bi| {
+                if (bi > 0) try w.writeAll(",");
+                try w.print("{{\"break_quantity\":{d},\"unit_price\":{d},\"total_price\":{d}}}", .{
+                    b.break_quantity, b.unit_price, b.total_price,
+                });
+            }
+            try w.writeAll("]}");
+        }
+        try w.writeAll("]}");
+    }
+    try w.writeAll("]}");
+    return true;
+}
+
+/// DigiKey OAuth credentials + API base, read server-side. On a missing
+/// credential this writes the `{ok:false,error}` envelope into `w` and returns
+/// null, so a caller does `(try digikeyCreds(a, w)) orelse return false;`.
+const DigiKeyCreds = struct { client_id: []u8, client_secret: []u8, base: []const u8 };
+fn digikeyCreds(allocator: std.mem.Allocator, w: anytype) !?DigiKeyCreds {
+    const client_id = config.digikeyClientId(allocator) orelse {
+        try w.writeAll("{\"ok\":false,\"error\":\"DIGIKEY_CLIENT_ID is not set on the server; add it to .env\"}");
+        return null;
+    };
+    const client_secret = config.digikeyClientSecret(allocator) orelse {
+        try w.writeAll("{\"ok\":false,\"error\":\"DIGIKEY_CLIENT_SECRET is not set on the server; add it to .env\"}");
+        return null;
+    };
+    return .{
+        .client_id = client_id,
+        .client_secret = client_secret,
+        .base = config.digikeyApiBase(allocator) orelse digikey.default_base,
+    };
+}
+
 /// Emit a JSON string, or `null` when the optional is absent.
 fn writeOptString(w: anytype, s: ?[]const u8) !void {
     if (s) |v| {
         try json_writer.writeString(w, v);
+    } else {
+        try w.writeAll("null");
+    }
+}
+
+/// Emit a JSON number (decimal, never scientific), or `null` when absent.
+fn writeOptNum(w: anytype, n: ?f64) !void {
+    if (n) |v| {
+        try w.print("{d}", .{v});
     } else {
         try w.writeAll("null");
     }

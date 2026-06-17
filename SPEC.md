@@ -812,6 +812,7 @@ Public functions: resolveMpn, searchErrorMessage, downloadDatasheet, datasheetEr
 
 - parseAccessToken extracts the bearer token from the OAuth response
 - collectProducts maps the Products array to resolved parts
+- collectProducts captures live stock, unit price, status, and per-variation price breaks
 - keywordVariants drops trailing keywords for graceful relaxation
 - normalizeDatasheetUrl unwraps a gotoUrl interstitial
 
