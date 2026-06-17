@@ -475,6 +475,8 @@ test {
     _ = @import("serve/design_diff.zig");
     _ = @import("serve/datasheet_attach.zig");
     _ = @import("serve/placement_spec.zig");
+    _ = @import("serve/page_cache.zig");
+    _ = @import("deflate.zig");
     _ = @import("png.zig");
     _ = @import("font5x7.zig");
     _ = @import("raster.zig");

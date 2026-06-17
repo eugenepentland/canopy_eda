@@ -96,6 +96,17 @@ pub fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!vo
 
             const nodes = parser_mod.parse(self.allocator, file_content) catch return EvalError.ImportError;
 
+            // Record this read in `loaded_files` so a caller can reconstruct the
+            // evaluator's complete file read-set (design + checks + every
+            // imported lib file) for mtime-based cache invalidation. `path` is
+            // freed when this call returns, so key on a dup owned by
+            // `self.allocator` (the request arena on the serve path).
+            if (!self.loaded_files.contains(path)) {
+                if (self.allocator.dupe(u8, path)) |key| {
+                    self.loaded_files.put(self.allocator, key, nodes) catch self.allocator.free(key);
+                } else |_| {}
+            }
+
             // Determine what kind of file this is
             if (nodes.len > 0) {
                 if (nodes[0].isForm("component")) {

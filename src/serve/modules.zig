@@ -267,7 +267,103 @@ fn appendParamList(
 }
 
 /// Collect every `lib/modules/*.sexp` entry, sorted by name.
+// ── Module-list cache ──────────────────────────────────────────────────
+//
+// collectModules reads + parses all 52 lib/modules/*.sexp files on every call
+// (~18 ms), and it backs both the home page (module-card join) and the /modules
+// list. The result depends only on the lib/modules directory, so we cache it
+// across requests, keyed by a cheap directory fingerprint — the .sexp file
+// count and the newest mtime among them. An edit bumps an mtime, an add bumps
+// the count and mtime, a delete bumps the count; any of those invalidates. The
+// cached entries live in page_allocator (the request arena dies per response);
+// hits dupe back into the request arena. The fingerprint scan is ~52 stat()s
+// (~1 ms) versus the ~18 ms read+parse it replaces.
+
+const page = std.heap.page_allocator;
+
+const ModuleDirStamp = struct {
+    count: usize = 0,
+    max_mtime_ns: i128 = 0,
+    /// Distinguishes "no cache yet" from "an empty/absent directory".
+    valid: bool = false,
+};
+
+var module_cache_mutex: std.Thread.Mutex = .{};
+var module_cache_entries: []ModuleEntry = &.{};
+var module_cache_stamp: ModuleDirStamp = .{};
+
+/// Fingerprint the lib/modules directory: count of `.sexp` files and the newest
+/// mtime among them. `scratch` is the request arena (for the dir path).
+fn moduleDirStamp(scratch: std.mem.Allocator, project_dir: []const u8) ModuleDirStamp {
+    const dir_path = std.fmt.allocPrint(scratch, "{s}/lib/modules", .{project_dir}) catch return .{};
+    defer scratch.free(dir_path);
+    var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return .{ .valid = true };
+    defer dir.close();
+    var stamp: ModuleDirStamp = .{ .valid = true };
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".sexp")) continue;
+        stamp.count += 1;
+        if (dir.statFile(entry.name)) |st| {
+            if (st.mtime > stamp.max_mtime_ns) stamp.max_mtime_ns = st.mtime;
+        } else |_| {}
+    }
+    return stamp;
+}
+
+/// Deep-copy module entries into `alloc`.
+fn dupeModuleEntries(alloc: std.mem.Allocator, src: []const ModuleEntry) std.mem.Allocator.Error![]ModuleEntry {
+    const out = try alloc.alloc(ModuleEntry, src.len);
+    for (src, 0..) |e, i| out[i] = .{
+        .name = try alloc.dupe(u8, e.name),
+        .params = try alloc.dupe(u8, e.params),
+        .doc = try alloc.dupe(u8, e.doc),
+    };
+    return out;
+}
+
+/// The lib/modules inventory (name + params + doc per module), sorted by name.
+/// Cached across requests and invalidated when the directory's file
+/// count/mtimes change. Backs the home page and /modules list.
 pub fn collectModules(allocator: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error![]ModuleEntry {
+    const stamp = moduleDirStamp(allocator, project_dir);
+    if (stamp.valid) {
+        module_cache_mutex.lock();
+        if (module_cache_stamp.valid and
+            module_cache_stamp.count == stamp.count and
+            module_cache_stamp.max_mtime_ns == stamp.max_mtime_ns)
+        {
+            const hit = dupeModuleEntries(allocator, module_cache_entries) catch null;
+            module_cache_mutex.unlock();
+            if (hit) |entries| return entries;
+        } else {
+            module_cache_mutex.unlock();
+        }
+    }
+
+    const fresh = try collectModulesUncached(allocator, project_dir);
+    if (stamp.valid) cacheModules(fresh, stamp);
+    return fresh;
+}
+
+/// Store a freshly-collected inventory (deep-duped into page_allocator),
+/// freeing the prior cached copy.
+fn cacheModules(entries: []const ModuleEntry, stamp: ModuleDirStamp) void {
+    const stored = dupeModuleEntries(page, entries) catch return;
+    module_cache_mutex.lock();
+    defer module_cache_mutex.unlock();
+    for (module_cache_entries) |e| {
+        page.free(e.name);
+        page.free(e.params);
+        page.free(e.doc);
+    }
+    page.free(module_cache_entries);
+    module_cache_entries = stored;
+    module_cache_stamp = stamp;
+}
+
+fn collectModulesUncached(allocator: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error![]ModuleEntry {
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/modules", .{project_dir});
     defer allocator.free(dir_path);
 

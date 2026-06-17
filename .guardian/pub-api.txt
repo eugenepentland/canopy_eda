@@ -61,6 +61,9 @@ src/coverage.zig::SectionCoverage struct_
 src/coverage.zig::computeInstanceCoverage fn
 src/coverage.zig::computeOverallCoverage fn
 src/coverage.zig::computeSectionCoverage fn
+src/deflate.zig::Error value
+src/deflate.zig::deflateRaw fn
+src/deflate.zig::gzip fn
 src/diagram/classify.zig::PortClassMap value
 src/diagram/classify.zig::buildPortClassMap fn
 src/diagram/classify.zig::buildRegistry fn
@@ -911,6 +914,9 @@ src/serve/oauth_store.zig::sha256Hex value
 src/serve/oauth_store.zig::validateToken fn
 src/serve/oauth_store.zig::verifyClientSecret fn
 src/serve/oauth_store.zig::verifyPkce fn
+src/serve/page_cache.zig::FileSet struct_
+src/serve/page_cache.zig::FileStamp struct_
+src/serve/page_cache.zig::capture fn
 src/serve/pages.zig::HandlerError value
 src/serve/pages.zig::cssPage fn
 src/serve/pages.zig::indexPage fn
