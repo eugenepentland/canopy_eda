@@ -1,5 +1,6 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const deflate = @import("deflate.zig");
 
 /// Error set for the `serve` entry point — wraps all the failure modes that
 /// can come out of `httpz.Server.init`, `router`, and `listen`. The set is
@@ -251,7 +252,11 @@ pub const Handler = struct {
         };
         // Auth middleware: check before dispatching to route handler
         if (!try auth.authMiddleware(&req_handler, req, res)) return;
-        return action(&req_handler, req, res);
+        try action(&req_handler, req, res);
+        // gzip text responses for clients that accept it. The compressed buffer
+        // lives in res.arena (dies with the request) — stateless, nothing to
+        // invalidate. Biggest win for remote clients where transfer dominates.
+        maybeCompress(req, res);
     }
 
     pub fn notFound(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
@@ -259,6 +264,44 @@ pub const Handler = struct {
         res.body = "Not found";
     }
 };
+
+/// Bodies below this size aren't worth compressing — the gzip header/trailer
+/// (18 B) plus the CPU outweigh the few saved bytes, and TCP ships them in one
+/// segment regardless.
+const gzip_min_bytes: usize = 1400;
+
+/// gzip-compress a 200 text response in place when the client advertised gzip
+/// support. Runs after every route handler. The compressed buffer is allocated
+/// in the per-request arena (`res.arena`), so it dies with the request — there
+/// is no cross-request state and nothing to invalidate. No-op for small bodies,
+/// non-text content types, already-written/chunked responses (e.g. the MCP
+/// WebSocket upgrade, event streams), or clients that don't send gzip.
+fn maybeCompress(req: *httpz.Request, res: *httpz.Response) void {
+    if (res.written or res.chunked or res.status != 200) return;
+    const ct = res.content_type orelse return;
+    switch (ct) {
+        .HTML, .JSON, .CSS, .SVG, .JS, .TEXT, .XML, .CSV => {},
+        else => return,
+    }
+    // The effective body is the writer buffer when a handler used the writer
+    // API (res.json, etc.), otherwise res.body — mirroring httpz's own pick in
+    // Response.write.
+    const body = if (res.buffer.writer.end > 0) res.buffer.writer.buffered() else res.body;
+    if (body.len < gzip_min_bytes) return;
+
+    const accept = req.header("accept-encoding") orelse return;
+    if (std.mem.indexOf(u8, accept, "gzip") == null) return;
+
+    const compressed = deflate.gzip(res.arena, body) catch return;
+    if (compressed.len >= body.len) return; // never inflate
+
+    // Route the response through res.body and drop any writer-buffer contents,
+    // since httpz prefers a non-empty buffer over res.body.
+    res.buffer.writer.end = 0;
+    res.body = compressed;
+    res.header("Content-Encoding", "gzip");
+    res.header("Vary", "Accept-Encoding");
+}
 
 /// Bring up the EDA web server on `port`: registers every page, JSON API,
 /// auth, OAuth, and MCP route against an httpz instance, then blocks on

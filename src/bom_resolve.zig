@@ -279,6 +279,17 @@ fn saveBom(
         try w.writeAll(")\n");
     }
 
+    // Skip the write when the .bom is byte-identical to what's on disk. An
+    // unconditional rewrite bumps the file mtime on every resolve — including
+    // the read-only schematic/home/review paths — which needlessly churns git
+    // and, worse, defeats the server's mtime-keyed page caches (they track the
+    // .bom as a dependency, so a no-op rewrite spuriously invalidates them).
+    // Mirrors the ".refdes.json writes only on change" rule.
+    if (infra_fs.cwd().readFileAlloc(allocator, bom_path, 16 * 1024 * 1024)) |existing| {
+        defer allocator.free(existing);
+        if (std.mem.eql(u8, existing, buf.items)) return;
+    } else |_| {}
+
     const f = try infra_fs.cwd().createFile(bom_path, .{});
     defer f.close();
     try f.writeAll(buf.items);

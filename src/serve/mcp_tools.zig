@@ -33,6 +33,7 @@ const placement_spec = @import("placement_spec.zig");
 const module_policy_spec = @import("module_policy_spec.zig");
 const render_pcb_png = @import("../render_pcb_png.zig");
 const docgen = @import("../docgen.zig");
+const page_cache = @import("page_cache.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const NAME_FIELD_PREFIX = "{\"name\":";
@@ -2248,6 +2249,113 @@ fn countNets(block: *const env_mod.DesignBlock) usize {
     return n;
 }
 
+// ── Design-summary cache ───────────────────────────────────────────────
+//
+// The home page (GET /), /api/designs, and the MCP list_designs tool all call
+// listDesignSummaries, which fully evaluates every design and runs ERC +
+// requirement checks + traceability + BOM resolution + the notes scan — ~60 ms
+// for the current design set, recomputed identically on every load. We cache
+// each design's summary across requests, keyed by name and invalidated by the
+// evaluation's file read-set (page_cache.FileSet — design, checks, every
+// imported lib file, plus the .bom/.refdes.json/.notes.md siblings) and the
+// live version. A valid hit is a handful of stat() calls plus a memcpy. The
+// stored copy lives in page_allocator (the request arena dies per response);
+// hits dupe back into the request arena. Bounded by the design-file count.
+
+const page = std.heap.page_allocator;
+
+const SummaryCacheEntry = struct {
+    summary: DesignSummary,
+    files: page_cache.FileSet,
+    live_version: u32,
+};
+
+var summary_cache_mutex: std.Thread.Mutex = .{};
+var summary_cache: std.StringHashMapUnmanaged(SummaryCacheEntry) = .empty;
+
+/// Deep-copy a summary's owned strings into `alloc` (every `[]const u8` /
+/// `[]const []const u8` field). Scalars copy by value.
+fn dupeSummary(alloc: std.mem.Allocator, s: DesignSummary) std.mem.Allocator.Error!DesignSummary {
+    const sections = try alloc.alloc([]const u8, s.sections.len);
+    for (s.sections, 0..) |sec, i| sections[i] = try alloc.dupe(u8, sec);
+    const mods = try alloc.alloc([]const u8, s.modules_used.len);
+    for (s.modules_used, 0..) |m, i| mods[i] = try alloc.dupe(u8, m);
+    return .{
+        .name = try alloc.dupe(u8, s.name),
+        .title = try alloc.dupe(u8, s.title),
+        .sections = sections,
+        .instance_count = s.instance_count,
+        .net_count = s.net_count,
+        .mtime_sec = s.mtime_sec,
+        .build_ok = s.build_ok,
+        .critical_declared = s.critical_declared,
+        .critical_complete = s.critical_complete,
+        .erc_errors = s.erc_errors,
+        .erc_warnings = s.erc_warnings,
+        .modules_used = mods,
+        .assert_fails = s.assert_fails,
+        .open_notes = s.open_notes,
+    };
+}
+
+/// Free a page_allocator-owned summary's strings (used when an entry is
+/// replaced).
+fn freeSummary(alloc: std.mem.Allocator, s: DesignSummary) void {
+    alloc.free(s.name);
+    alloc.free(s.title);
+    for (s.sections) |sec| alloc.free(sec);
+    alloc.free(s.sections);
+    for (s.modules_used) |m| alloc.free(m);
+    alloc.free(s.modules_used);
+}
+
+/// Return a request-arena copy of the cached summary for `name` when a valid
+/// entry exists (read-set unchanged and live version matches), else null.
+fn summaryCacheGet(arena: std.mem.Allocator, name: []const u8, live_version: u32) ?DesignSummary {
+    summary_cache_mutex.lock();
+    defer summary_cache_mutex.unlock();
+    const e = summary_cache.getPtr(name) orelse return null;
+    if (e.live_version != live_version or !e.files.isValid()) return null;
+    return dupeSummary(arena, e.summary) catch null;
+}
+
+/// Cache `summary` for `name`, duping it + the read-set into page_allocator and
+/// freeing any prior entry. `scratch` is the request arena.
+fn summaryCachePut(
+    scratch: std.mem.Allocator,
+    eval: *const Evaluator,
+    project_dir: []const u8,
+    name: []const u8,
+    summary: DesignSummary,
+    live_version: u32,
+) void {
+    const files = page_cache.capture(scratch, eval, project_dir, name) catch return;
+    const stored = dupeSummary(page, summary) catch {
+        files.deinit();
+        return;
+    };
+    const key = page.dupe(u8, name) catch {
+        files.deinit();
+        freeSummary(page, stored);
+        return;
+    };
+
+    summary_cache_mutex.lock();
+    defer summary_cache_mutex.unlock();
+    const gop = summary_cache.getOrPut(page, key) catch {
+        files.deinit();
+        freeSummary(page, stored);
+        page.free(key);
+        return;
+    };
+    if (gop.found_existing) {
+        page.free(key); // map keeps the original key
+        gop.value_ptr.files.deinit();
+        freeSummary(page, gop.value_ptr.summary);
+    }
+    gop.value_ptr.* = .{ .summary = stored, .files = files, .live_version = live_version };
+}
+
 /// Scan `{project_dir}/src/` for design files and return a summary for each.
 /// Designs that fail to evaluate are still included with build_ok=false so
 /// the UI can surface them instead of silently dropping them.
@@ -2270,9 +2378,20 @@ pub fn listDesignSummaries(
         if (std.mem.endsWith(u8, entry.basename, ".checks.sexp")) continue;
         const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ src_path, entry.path });
         defer allocator.free(full_path);
-        if (!hasTopLevelDesignBlock(allocator, full_path)) continue;
-
         const base = try allocator.dupe(u8, entry.basename[0 .. entry.basename.len - ".sexp".len]);
+
+        // Serve the cached summary when this design's source files are
+        // unchanged. Checked BEFORE hasTopLevelDesignBlock (a full re-parse of
+        // the file) so a hit skips that parse too — a cached entry is proof the
+        // file is a design. live_version is read before the eval so a bump
+        // mid-build is treated as a miss next time rather than baked in.
+        const live_version = serve_root.getLiveVersion(base);
+        if (summaryCacheGet(allocator, base, live_version)) |cached| {
+            try summaries.append(allocator, cached);
+            continue;
+        }
+
+        if (!hasTopLevelDesignBlock(allocator, full_path)) continue;
 
         var mtime_sec: i64 = 0;
         if (dir.statFile(entry.path)) |st| {
@@ -2356,6 +2475,12 @@ pub fn listDesignSummaries(
             }
         } else |_| {}
         summary.open_notes = countOpenNotes(allocator, project_dir, base);
+
+        // Cache only successful builds: a failed eval has an incomplete read-set
+        // (it may have errored before reaching some imports), so its
+        // invalidation set can't be trusted. Failed builds are rare and cheap to
+        // recompute.
+        if (summary.build_ok) summaryCachePut(allocator, &eval, project_dir, base, summary, live_version);
 
         try summaries.append(allocator, summary);
     }

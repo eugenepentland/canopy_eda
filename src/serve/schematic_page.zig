@@ -12,11 +12,85 @@ const review = @import("../review.zig");
 const req_checks = @import("../req_checks.zig");
 const assets_css = @import("assets_css.zig");
 const diag_format = @import("diag_format.zig");
+const page_cache = @import("page_cache.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
+
+// ── Rendered-HTML cache ────────────────────────────────────────────────
+//
+// The schematic page is a pure function of the design's source files: a clean
+// reload re-evaluates the design, runs ERC + requirement checks + the review
+// doc, and renders ~1 MB of HTML, all identical to last time. We cache the
+// rendered body across requests, keyed by design name and invalidated by the
+// evaluation's file read-set (page_cache.FileSet) plus the live version, so a
+// repeat load skips eval+erc+render entirely. The body and its read-set live in
+// page_allocator (the request arena is freed per response); a hit dupes the
+// body back into the request arena under the lock so a concurrent eviction
+// can't free it mid-response. Keys are bounded by the number of design files on
+// disk (module names redirect away before reaching here), so per-name
+// replacement needs no separate eviction policy.
+
+const page = std.heap.page_allocator;
+
+const HtmlCacheEntry = struct {
+    html: []const u8,
+    files: page_cache.FileSet,
+    live_version: u32,
+};
+
+var html_cache_mutex: std.Thread.Mutex = .{};
+var html_cache: std.StringHashMapUnmanaged(HtmlCacheEntry) = .empty;
+
+/// Return a request-arena copy of the cached HTML for `name` when a valid entry
+/// exists (read-set unchanged and live version matches), else null. Validation
+/// and the dup happen under the lock so a concurrent put can't free the body.
+fn htmlCacheGet(arena: std.mem.Allocator, name: []const u8, live_version: u32) ?[]const u8 {
+    html_cache_mutex.lock();
+    defer html_cache_mutex.unlock();
+    const e = html_cache.getPtr(name) orelse return null;
+    if (e.live_version != live_version or !e.files.isValid()) return null;
+    return arena.dupe(u8, e.html) catch null;
+}
+
+/// Cache freshly-rendered `html` for `name`, duping the body and read-set into
+/// page_allocator and freeing any prior entry. `scratch` is the request arena.
+fn htmlCachePut(
+    scratch: std.mem.Allocator,
+    eval: *const Evaluator,
+    project_dir: []const u8,
+    name: []const u8,
+    html: []const u8,
+    live_version: u32,
+) void {
+    const files = page_cache.capture(scratch, eval, project_dir, name) catch return;
+    const body = page.dupe(u8, html) catch {
+        files.deinit();
+        return;
+    };
+    const key = page.dupe(u8, name) catch {
+        files.deinit();
+        page.free(body);
+        return;
+    };
+
+    html_cache_mutex.lock();
+    defer html_cache_mutex.unlock();
+    const gop = html_cache.getOrPut(page, key) catch {
+        files.deinit();
+        page.free(body);
+        page.free(key);
+        return;
+    };
+    if (gop.found_existing) {
+        page.free(key); // map keeps the original key
+        gop.value_ptr.files.deinit();
+        page.free(gop.value_ptr.html);
+    }
+    gop.value_ptr.* = .{ .html = body, .files = files, .live_version = live_version };
+}
 
 /// When `name` has no design source but does exist under `lib/modules/`,
 /// answer a 302 to `/modules/<name>` and return true. Keeps a module name
@@ -52,6 +126,16 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // A module name typed into a design URL: send it to the module viewer,
     // so designs and modules open from the same address shape.
     if (try redirectToModule(ctx, name, board_path, res)) return;
+
+    // Serve the cached render when the design's source files are unchanged.
+    // Capture the live version *before* evaluating so a bump mid-eval is
+    // correctly treated as a miss on the next load rather than baked in.
+    const live_version = serve_root.getLiveVersion(name);
+    if (htmlCacheGet(ctx.allocator, name, live_version)) |cached| {
+        res.content_type = .HTML;
+        res.body = cached;
+        return;
+    }
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
@@ -119,6 +203,8 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         res.body = try std.fmt.allocPrint(ctx.allocator, "Render error: {s}", .{@errorName(err)});
         return;
     };
+
+    htmlCachePut(ctx.allocator, &eval, ctx.project_dir, name, html, live_version);
 
     res.content_type = .HTML;
     res.body = html;
