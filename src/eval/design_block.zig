@@ -759,11 +759,17 @@ fn processSharedSectionForm(
         .note => {
             if (sf_children.len >= 2) {
                 const nv = try self.evalNode(sf_children[1], env);
-                if (nv.asString()) |text| {
+                if (nv.asString()) |first| {
                     var ref: ?env_mod.NoteRef = null;
+                    var text = first;
                     for (sf_children[2..]) |extra| {
                         if (env_mod.parseNoteRef(extra)) |r| {
                             if (ref == null) ref = r;
+                        } else if (extra.asString()) |s| {
+                            // A second string is the note body — the labeled
+                            // form `(note "SUBJECT" "text")`. Join so subject-
+                            // tagged notes read naturally and don't warn.
+                            text = std.fmt.allocPrint(self.allocator, "{s} — {s}", .{ text, s }) catch text;
                         } else if (!extra.isForm("id") and !extra.isForm("ids")) {
                             // (id …) anchors are inert residue from the
                             // auto-id inserter — skip without warning.

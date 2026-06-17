@@ -88,6 +88,12 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
                 direction = .io;
                 continue;
             }
+            // `bidi` is the documented synonym for `io` (bidirectional) — accept
+            // it here too so section ports match the design-block port form.
+            if (std.mem.eql(u8, atom, "bidi")) {
+                direction = .io;
+                continue;
+            }
             // Signal type keywords
             if (std.mem.eql(u8, atom, "power")) {
                 sig_type = .power;
@@ -107,6 +113,10 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
             }
             if (std.mem.eql(u8, atom, "differential")) {
                 sig_type = .differential;
+                continue;
+            }
+            if (std.mem.eql(u8, atom, "rf")) {
+                sig_type = .rf;
                 continue;
             }
             if (std.mem.eql(u8, atom, "optional")) {
@@ -749,7 +759,7 @@ fn isDirectionKeyword(s: []const u8) bool {
 fn isSignalTypeKeyword(s: []const u8) bool {
     return std.mem.eql(u8, s, "power") or std.mem.eql(u8, s, "signal") or
         std.mem.eql(u8, s, "clock") or std.mem.eql(u8, s, "data") or
-        std.mem.eql(u8, s, "differential");
+        std.mem.eql(u8, s, "differential") or std.mem.eql(u8, s, "rf");
 }
 
 /// Parse a `(port "NAME" [net] dir ...)` form into a `Port`. Accepts the
@@ -827,7 +837,14 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
     var enable_net: []const u8 = "";
     var is_optional: bool = false;
     var elec: ?env_mod.ElectricalDecl = null;
+    // `role`/`protocol`/`class` take the following token as their value (as in
+    // the section-port form); skip it so it isn't flagged as an unknown option.
+    var skip_kw_value = false;
     for (args[dir_idx + 1 ..]) |arg| {
+        if (skip_kw_value) {
+            skip_kw_value = false;
+            continue;
+        }
         if (arg.isForm("electrical")) {
             const ec = arg.asList().?;
             var decl = env_mod.ElectricalDecl{ .pin = name };
@@ -876,8 +893,12 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
         } else if (arg.asAtom()) |kw| {
             if (std.mem.eql(u8, kw, "optional")) {
                 is_optional = true;
+            } else if (std.mem.eql(u8, kw, "role") or std.mem.eql(u8, kw, "protocol") or std.mem.eql(u8, kw, "class")) {
+                // Metadata keywords mirror the section-port form; consume their
+                // following value token (parsePort doesn't store them on Port).
+                skip_kw_value = true;
             } else if (!isSignalTypeKeyword(kw)) {
-                // Signal-type words (power/clock/…) are valid in the section
+                // Signal-type words (power/clock/rf/…) are valid in the section
                 // twin and tolerated here; anything else is a likely typo.
                 self.warnFmt(arg.span, "unknown port option '{s}' in (port …)", .{kw});
             }
