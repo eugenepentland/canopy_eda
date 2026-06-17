@@ -136,6 +136,7 @@ pub fn collectFlatInstances(
     block: *const DesignBlock,
     prefix: []const u8,
     list: *std.ArrayListUnmanaged(FlatInfo),
+    ref_style: env_mod.RefStyle,
 ) std.mem.Allocator.Error!void {
     var net_map = std.StringHashMap(std.ArrayListUnmanaged([]const u8)).init(allocator);
     defer {
@@ -154,7 +155,9 @@ pub fn collectFlatInstances(
     }
 
     for (block.instances) |inst| {
-        const ref = if (prefix.len > 0)
+        // Grouped-refdes makes ref-deses globally unique → drop the redundant
+        // sub-block path prefix so the BOM key is the bare `R1_1`, not `a/R1_1`.
+        const ref = if (prefix.len > 0 and ref_style == .hierarchical)
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, inst.ref_des })
         else
             try allocator.dupe(u8, inst.ref_des);
@@ -181,7 +184,7 @@ pub fn collectFlatInstances(
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, sb.name })
         else
             try allocator.dupe(u8, sb.name);
-        try collectFlatInstances(allocator, sb.block, sub_prefix, list);
+        try collectFlatInstances(allocator, sb.block, sub_prefix, list, ref_style);
     }
 }
 

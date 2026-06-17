@@ -16,14 +16,16 @@ pub fn emitResolved(allocator: std.mem.Allocator, block: *const DesignBlock) std
     try w.writeAll("(resolved-design ");
     try writeString(w, block.name);
 
-    // Instances (flattened)
+    // Instances (flattened). grouped-refdes ⇒ bare global ref-des (no sub-block
+    // path prefix), since the registry already made each ref-des unique.
+    const ref_style = block.refStyle();
     try w.writeAll("\n\n  (instances");
-    try emitInstances(allocator, w, block, "");
+    try emitInstances(allocator, w, block, "", ref_style);
     try w.writeByte(')');
 
     // Nets (flattened)
     try w.writeAll("\n\n  (nets");
-    try emitNets(allocator, w, block, "");
+    try emitNets(allocator, w, block, "", ref_style);
     try w.writeByte(')');
 
     // Ports (flattened)
@@ -43,7 +45,7 @@ pub fn emitResolved(allocator: std.mem.Allocator, block: *const DesignBlock) std
     // Notes (flattened)
     if (hasNotes(block)) {
         try w.writeAll("\n\n  (notes");
-        try emitNotes(allocator, w, block, "");
+        try emitNotes(allocator, w, block, "", ref_style);
         try w.writeByte(')');
     }
 
@@ -51,10 +53,10 @@ pub fn emitResolved(allocator: std.mem.Allocator, block: *const DesignBlock) std
     return buf.toOwnedSlice(allocator);
 }
 
-fn emitInstances(allocator: std.mem.Allocator, w: anytype, block: *const DesignBlock, prefix: []const u8) !void {
+fn emitInstances(allocator: std.mem.Allocator, w: anytype, block: *const DesignBlock, prefix: []const u8, ref_style: env_mod.RefStyle) !void {
     for (block.instances) |inst| {
         try w.writeAll("\n    (instance ");
-        try writePrefixedString(w, prefix, inst.ref_des);
+        if (ref_style == .flat) try writeString(w, inst.ref_des) else try writePrefixedString(w, prefix, inst.ref_des);
         try w.writeByte(' ');
         try writeString(w, inst.component);
         try w.writeByte(' ');
@@ -82,17 +84,19 @@ fn emitInstances(allocator: std.mem.Allocator, w: anytype, block: *const DesignB
     for (block.sub_blocks) |sb| {
         const child_prefix = try buildPrefix(allocator, prefix, sb.name);
         defer if (prefix.len > 0) allocator.free(child_prefix);
-        try emitInstances(allocator, w, sb.block, child_prefix);
+        try emitInstances(allocator, w, sb.block, child_prefix, ref_style);
     }
 }
 
-fn emitNets(allocator: std.mem.Allocator, w: anytype, block: *const DesignBlock, prefix: []const u8) !void {
+fn emitNets(allocator: std.mem.Allocator, w: anytype, block: *const DesignBlock, prefix: []const u8, ref_style: env_mod.RefStyle) !void {
     for (block.nets) |net| {
         try w.writeAll("\n    (net ");
+        // Net names stay prefixed (sub-block-local nets can share a name); only
+        // the pin ref-des goes bare under grouped-refdes.
         try writePrefixedString(w, prefix, net.name);
         for (net.pins) |pin| {
             try w.writeAll("\n      (pin ");
-            try writePrefixedString(w, prefix, pin.ref_des);
+            if (ref_style == .flat) try writeString(w, pin.ref_des) else try writePrefixedString(w, prefix, pin.ref_des);
             try w.print(" {s})", .{pin.pin});
         }
         try w.writeByte(')');
@@ -100,7 +104,7 @@ fn emitNets(allocator: std.mem.Allocator, w: anytype, block: *const DesignBlock,
     for (block.sub_blocks) |sb| {
         const child_prefix = try buildPrefix(allocator, prefix, sb.name);
         defer if (prefix.len > 0) allocator.free(child_prefix);
-        try emitNets(allocator, w, sb.block, child_prefix);
+        try emitNets(allocator, w, sb.block, child_prefix, ref_style);
     }
 }
 
@@ -152,10 +156,10 @@ fn emitHierarchy(w: anytype, block: *const DesignBlock) !void {
     }
 }
 
-fn emitNotes(allocator: std.mem.Allocator, w: anytype, block: *const DesignBlock, prefix: []const u8) !void {
+fn emitNotes(allocator: std.mem.Allocator, w: anytype, block: *const DesignBlock, prefix: []const u8, ref_style: env_mod.RefStyle) !void {
     for (block.notes) |note| {
         try w.writeAll("\n    (note ");
-        try writePrefixedString(w, prefix, note.ref_des);
+        if (ref_style == .flat) try writeString(w, note.ref_des) else try writePrefixedString(w, prefix, note.ref_des);
         try w.writeByte(' ');
         try writeString(w, note.text);
         try w.writeByte(')');
@@ -163,7 +167,7 @@ fn emitNotes(allocator: std.mem.Allocator, w: anytype, block: *const DesignBlock
     for (block.sub_blocks) |sb| {
         const child_prefix = try buildPrefix(allocator, prefix, sb.name);
         defer if (prefix.len > 0) allocator.free(child_prefix);
-        try emitNotes(allocator, w, sb.block, child_prefix);
+        try emitNotes(allocator, w, sb.block, child_prefix, ref_style);
     }
 }
 

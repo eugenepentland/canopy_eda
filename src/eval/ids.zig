@@ -5,6 +5,8 @@ const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const env_mod = @import("env.zig");
 const evaluator_mod = @import("evaluator.zig");
+const refdes_group = @import("refdes_group.zig");
+const paths = @import("../paths.zig");
 const Evaluator = evaluator_mod.Evaluator;
 const EvalError = evaluator_mod.EvalError;
 const AltFunc = evaluator_mod.AltFunc;
@@ -187,6 +189,134 @@ fn assignSubBlockRefDes(self: *Evaluator, block: *DesignBlock) !void {
     for (@as([]env_mod.SubBlock, @constCast(block.sub_blocks))) |*sb| {
         try assignSubBlockRefDes(self, sb.block);
     }
+}
+
+// ── Grouped ref-des (value/footprint block ranges) ───────────────────────
+
+/// Re-stamp every instance in the design tree into a stable value/footprint
+/// block-range ref-des (C100…, C200…) and propagate the rename through nets,
+/// notes, and sections. Assignments are pinned by each part's stable `id` in a
+/// `<design>.refdes.json` sidecar (read here; written by the build command only
+/// when it changed, so read-only paths never mutate it). See `refdes_group`.
+pub fn applyGroupedRefDes(self: *Evaluator, block: *DesignBlock) EvalError!void {
+    const top_path = self.top_design_path orelse return;
+    const slug = designSlug(top_path);
+    const path = paths.designSiblingPath(self.allocator, self.project_dir, slug, ".refdes.json") catch return EvalError.OutOfMemory;
+
+    const existing: []const u8 = infra_fs.cwd().readFileAlloc(self.allocator, path, 4 * 1024 * 1024) catch "";
+    const block_size = if (self.grouped_block_size != 0) self.grouped_block_size else refdes_group.DEFAULT_BLOCK_SIZE;
+    const format: refdes_group.Format = if (self.grouped_two_level) .two_level else .block_range;
+    var reg = refdes_group.load(self.allocator, existing, format, block_size);
+    defer reg.deinit();
+
+    // Globally-unique old refs ⇒ one flat old→new map works at every tree level.
+    var rename = std.StringHashMapUnmanaged([]const u8).empty;
+    defer rename.deinit(self.allocator);
+    try resolveTreeGrouped(self, block, &reg, &rename);
+
+    if (rename.count() > 0) applyGroupedRenameTree(self, block, &rename);
+
+    // Stage the sidecar write only when the registry actually changed.
+    if (reg.dirty) {
+        self.refdes_sidecar_json = reg.toJson(self.allocator) catch return EvalError.OutOfMemory;
+        self.refdes_sidecar_path = path;
+    }
+}
+
+/// Design slug from a source path: basename minus the final extension
+/// (`…/stm32n6/stm32n6.sexp` → "stm32n6"), matching `designSiblingPath` lookup.
+fn designSlug(path: []const u8) []const u8 {
+    const base = std.fs.path.basename(path);
+    if (std.mem.lastIndexOfScalar(u8, base, '.')) |dot| {
+        if (dot > 0) return base[0..dot];
+    }
+    return base;
+}
+
+/// Walk the flattened tree, resolving each instance to its grouped ref-des and
+/// recording old→new in `rename`. Instances with no stable key (id/origin_key)
+/// or a non-standard current ref-des are left untouched.
+fn resolveTreeGrouped(
+    self: *Evaluator,
+    block: *DesignBlock,
+    reg: *refdes_group.Registry,
+    rename: *std.StringHashMapUnmanaged([]const u8),
+) EvalError!void {
+    const insts: []Instance = @constCast(block.instances);
+    for (insts) |*inst| {
+        const key = if (inst.id.len > 0) inst.id else inst.origin_key;
+        if (key.len == 0) continue;
+        const parsed = refdes_group.parseRef(inst.ref_des) orelse continue;
+        const new_ref = reg.resolve(self.allocator, key, parsed.prefix, inst.value, inst.footprint) catch return EvalError.OutOfMemory;
+        if (!std.mem.eql(u8, new_ref, inst.ref_des)) {
+            rename.put(self.allocator, inst.ref_des, new_ref) catch return EvalError.OutOfMemory;
+        }
+    }
+    for (@as([]env_mod.SubBlock, @constCast(block.sub_blocks))) |*sb| {
+        try resolveTreeGrouped(self, sb.block, reg, rename);
+    }
+}
+
+/// Apply a global old→new ref-des map across a block tree: instance ref_des, net
+/// pin refs + embedded net-name segments, note refs, and section refs.
+fn applyGroupedRenameTree(
+    self: *Evaluator,
+    block: *DesignBlock,
+    rename: *std.StringHashMapUnmanaged([]const u8),
+) void {
+    const insts: []Instance = @constCast(block.instances);
+    for (insts) |*inst| {
+        if (rename.get(inst.ref_des)) |nr| inst.ref_des = nr;
+    }
+    const net_slice: []env_mod.Net = @constCast(block.nets);
+    for (net_slice) |*net| {
+        const pins: []env_mod.PinRef = @constCast(net.pins);
+        for (pins) |*pin| {
+            if (rename.get(pin.ref_des)) |nr| pin.ref_des = nr;
+        }
+        net.name = renameNetNameSegments(self, net.name, rename);
+    }
+    const note_slice: []env_mod.Note = @constCast(block.notes);
+    for (note_slice) |*note| {
+        if (rename.get(note.ref_des)) |nr| note.ref_des = nr;
+    }
+    renameSectionRefs(@constCast(block.sections), rename);
+    for (@as([]env_mod.SubBlock, @constCast(block.sub_blocks))) |*sb| {
+        applyGroupedRenameTree(self, sb.block, rename);
+    }
+}
+
+/// Rename interior dot-delimited segments of a net name (`VDD.U1.J14` →
+/// `VDD.C205.J14`) — the `<rail>.<ic>.<pad>` bypass-stub convention. Only
+/// interior segments are treated as refs (matching `autoAssignRefDes`'s `.x.`
+/// wrap); the first (rail) and last (pad) are left alone. Returns `name`
+/// unchanged when nothing matched.
+fn renameNetNameSegments(
+    self: *Evaluator,
+    name: []const u8,
+    rename: *std.StringHashMapUnmanaged([]const u8),
+) []const u8 {
+    if (std.mem.indexOfScalar(u8, name, '.') == null) return name;
+    var segs: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer segs.deinit(self.allocator);
+    var it = std.mem.splitScalar(u8, name, '.');
+    while (it.next()) |s| segs.append(self.allocator, s) catch return name;
+    if (segs.items.len < 3) return name;
+    var changed = false;
+    var i: usize = 1;
+    while (i + 1 < segs.items.len) : (i += 1) {
+        if (rename.get(segs.items[i])) |nr| {
+            segs.items[i] = nr;
+            changed = true;
+        }
+    }
+    if (!changed) return name;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (segs.items, 0..) |s, k| {
+        if (k > 0) buf.append(self.allocator, '.') catch return name;
+        buf.appendSlice(self.allocator, s) catch return name;
+    }
+    return buf.toOwnedSlice(self.allocator) catch return name;
 }
 
 /// Recursively rename ref_des in sections and sub-sections.

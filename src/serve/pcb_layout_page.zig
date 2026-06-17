@@ -2222,7 +2222,7 @@ fn poseByOriginKey(
         else => return null,
     };
     var flat: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
-    netlist.collectInstances(alloc, dblock, "", &flat) catch return null;
+    netlist.collectInstances(alloc, dblock, "", &flat, dblock.refStyle()) catch return null;
     var ok_of = std.StringHashMap([]const u8).init(alloc);
     for (flat.items) |fi| {
         ok_of.put(fi.ref_des, fi.origin_key) catch return null;
@@ -2258,9 +2258,11 @@ pub fn loadSubBlockPoses(alloc: std.mem.Allocator, project_dir: []const u8, sub_
     // origin_key → pose, via the design that produced the layout (see helper).
     const pose_by_ok = poseByOriginKey(alloc, project_dir, sub_block.source, layout) orelse return layout;
 
-    // Re-key onto sub_block's own flattened refs by origin_key.
+    // Re-key onto sub_block's own flattened refs by origin_key. This is a
+    // module-scoped re-key (matched by origin_key), not the grouped root, so
+    // keep the prefixed walk regardless of the design's grouped-refdes setting.
     var flat2: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
-    netlist.collectInstances(alloc, sub_block.block, "", &flat2) catch return layout;
+    netlist.collectInstances(alloc, sub_block.block, "", &flat2, .hierarchical) catch return layout;
     var out: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
     for (flat2.items) |fi| {
         if (fi.origin_key.len == 0) continue;

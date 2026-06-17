@@ -804,7 +804,7 @@ pub fn runSyncPlan(
     bom.resolveIdentities(handler_alloc, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
     var instances: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
-    try netlist_mod.collectInstances(arena, block, "", &instances);
+    try netlist_mod.collectInstances(arena, block, "", &instances, block.refStyle());
     var nets: std.ArrayListUnmanaged(export_kicad.FlatNet) = .empty;
     try export_kicad.flattenAndMergeNets(arena, block, &nets);
 
@@ -1490,7 +1490,7 @@ fn copyKicadModels(
     };
 
     var instances: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
-    netlist_mod.collectInstances(arena, block, "", &instances) catch return 0;
+    netlist_mod.collectInstances(arena, block, "", &instances, block.refStyle()) catch return 0;
 
     var model_cfg = export_kicad.loadModelConfig(arena, project_dir);
     var seen = std.StringHashMap(void).init(arena);

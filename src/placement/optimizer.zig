@@ -4007,7 +4007,7 @@ fn prepare(
     // nets are included — a buck design is one sub-block, so `block.instances`
     // alone would be empty.
     var inst_list: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
-    try netlist_mod.collectInstances(arena, block, "", &inst_list);
+    try netlist_mod.collectInstances(arena, block, "", &inst_list, block.refStyle());
     var net_list: std.ArrayListUnmanaged(FlatNet) = .empty;
     try export_kicad.flattenAndMergeNets(arena, block, &net_list);
     const instances = inst_list.items;
