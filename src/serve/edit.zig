@@ -1370,7 +1370,13 @@ pub fn writeAndRebuild(
     const result = eval.evalFile(path) catch return error.RebuildFailed;
     const block = switch (result) {
         .design_block => |b| b,
-        else => return error.RebuildFailed,
+        // A `lib/modules/<name>.sexp` file evaluates to a `(defmodule …)`, not
+        // a design-block. It parsed, its imports resolved, and the module
+        // registered without error, so accept the save and bump the version;
+        // the `/modules/<name>` page re-instantiates the module on the next
+        // load (surfacing any body-level diagnostic there). BOM/scene-graph
+        // need a flattened design, so they're skipped for a module file.
+        else => return .{ .version = serve_root.bumpLiveVersion(name), .snapshot = snap_id },
     };
 
     const bom_path = paths.designSiblingPath(allocator, project_dir, name, ".bom") catch return error.OutOfMemory;
@@ -1572,7 +1578,8 @@ pub fn restoreDesignCore(
     const result = eval.evalFile(path) catch return error.RebuildFailed;
     const block = switch (result) {
         .design_block => |b| b,
-        else => return error.RebuildFailed,
+        // Module file (`lib/modules/<name>.sexp`) — see writeAndRebuild.
+        else => return .{ .version = serve_root.bumpLiveVersion(name), .snapshot = pre_snap },
     };
 
     const bom_path = paths.designSiblingPath(allocator, project_dir, name, ".bom") catch return error.OutOfMemory;
