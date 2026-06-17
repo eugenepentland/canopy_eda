@@ -185,6 +185,11 @@ h3{color:#f0f6fc;font-size:0.95rem;margin:0;}
 .dg-edit-msg{color:#8b949e;font-size:0.74rem;font-family:system-ui,sans-serif;}
 .dg-svg.dg-editing .dg-node{cursor:move;}
 .dg-svg.dg-editing .dg-node .dg-rect{stroke-dasharray:4 3;}
+/* Editing acts on the real block layer, so reveal + enable it at any zoom —
+   the default view sits on the LOD0 glance layer where .dg-base is hidden and
+   pointer-events:none, which is why a drag otherwise just panned. */
+.dg-svg.dg-editing .dg-base{opacity:1 !important;pointer-events:auto !important;}
+.dg-svg.dg-editing .dg-glance,.dg-svg.dg-editing .dg-deep{opacity:0 !important;pointer-events:none !important;}
 /* Drag-to-connect on the schematic. */
 .sch-connect-toggle{position:fixed;bottom:16px;right:16px;z-index:900;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:8px 12px;font-size:0.82rem;cursor:pointer;font-family:inherit;box-shadow:0 4px 14px rgba(0,0,0,0.4);}
 .sch-connect-toggle.on{background:#1f6feb;border-color:#388bfd;color:#fff;}

@@ -3129,6 +3129,10 @@
     var dragging = false, sx0 = 0, sy0 = 0, ox = 0, oy = 0, moved = false;
     svg.addEventListener('pointerdown', function (e) {
       if (e.button !== 0) return;
+      // In layout-edit mode a press on a block is a block-drag, not a pan — let
+      // the node's own pointer handler own it (background still pans).
+      if (svg.classList.contains('dg-editing') && e.target.closest &&
+          e.target.closest('.dg-node-link, .dg-node')) return;
       dragging = true; moved = false; sx0 = e.clientX; sy0 = e.clientY; ox = cur.x; oy = cur.y;
       try { svg.setPointerCapture(e.pointerId); } catch (_) {}
     });
@@ -3356,22 +3360,29 @@
     toggle.addEventListener('click', function () { setEditing(true); });
     cancelBtn.addEventListener('click', function () { window.location.reload(); });
 
+    // Pointer events (not mouse) so stopPropagation actually keeps the SVG's
+    // pointer-based pan from firing on the same press; pointer capture makes the
+    // drag robust if the cursor briefly leaves the block.
     nodes.forEach(function (node) {
-      node.addEventListener('mousedown', function (e) {
-        if (!editing) return;
+      node.addEventListener('pointerdown', function (e) {
+        if (!editing || e.button !== 0) return;
         e.preventDefault(); e.stopPropagation();
         var tr = node.transform.baseVal.consolidate();
         var base = { tx: tr ? tr.matrix.e : 0, ty: tr ? tr.matrix.f : 0 };
         var p0 = svgPoint(svg, e.clientX, e.clientY);
         drag = { node: node, base: base, p0: p0 };
+        try { node.setPointerCapture(e.pointerId); } catch (_) {}
       });
+      // While editing, a block press/release must not follow its <a> cross-probe
+      // link (would navigate away mid-edit).
+      node.addEventListener('click', function (e) { if (editing) { e.preventDefault(); e.stopPropagation(); } });
     });
-    window.addEventListener('mousemove', function (e) {
+    window.addEventListener('pointermove', function (e) {
       if (!drag) return;
       var p = svgPoint(svg, e.clientX, e.clientY);
       drag.node.setAttribute('transform', 'translate(' + (drag.base.tx + p.x - drag.p0.x) + ',' + (drag.base.ty + p.y - drag.p0.y) + ')');
     });
-    window.addEventListener('mouseup', function () { drag = null; });
+    window.addEventListener('pointerup', function () { drag = null; });
 
     saveBtn.addEventListener('click', function () {
       msg.textContent = 'Saving…';
