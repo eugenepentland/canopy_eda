@@ -484,7 +484,14 @@
   // field, but the input stays freeform so a brand-new net can still be typed.
   // The popup is fixed-positioned and parented to `host` (the modal overlay) so
   // it escapes the body's overflow clipping and is removed when the modal closes.
-  function wireNetCombo(input, nets, host) {
+  // Searchable combobox over a string list. `host` parents the floating
+  // popup (use a non-transformed ancestor — the popup is position:fixed so it
+  // escapes overflow clipping but stays anchored under the input). Optional
+  // `onpick` fires after a list selection so a caller can commit immediately
+  // (e.g. the sidebar pin re-wire posts as soon as a net is chosen). Freeform:
+  // a value not in the list can still be typed.
+  function wireNetCombo(input, nets, host, onpick) {
+    input.setAttribute('autocomplete', 'off');
     var pop = document.createElement('div');
     pop.className = 'awz-net-pop';
     pop.style.display = 'none';
@@ -507,6 +514,7 @@
           e.preventDefault();
           input.value = o.textContent;
           pop.style.display = 'none';
+          if (onpick) onpick(input.value);
         });
       });
       place();
@@ -845,21 +853,26 @@
     if (canEditSrc) {
       html += '<div class="sb-src-edit"><a href="#" ' +
         'title="Open the source editor at this instance’s definition">Edit source →</a></div>';
-      // Structured inspector: edit value / component / MPN and delete the part
-      // without touching the source — each field POSTs a surgical edit.
-      html += '<details class="sb-inspect"><summary>Edit component</summary>' +
+      // Structured inspector: edit value / footprint / MPN and delete the part
+      // without touching the source — each field POSTs a surgical edit. For
+      // passives the panel opens by default and the component field reads as
+      // "Footprint" (the package-named component family IS the footprint), so a
+      // passive's value + package are editable at a glance.
+      var isPassive = c.kind === 'passive';
+      html += '<details class="sb-inspect"' + (isPassive ? ' open' : '') + '><summary>' +
+        (isPassive ? 'Edit value / footprint' : 'Edit component') + '</summary>' +
         '<div class="sb-insp-field"><label>Value</label>' +
           '<input class="sb-insp-val" spellcheck="false" value="' + escapeHtml(c.value || '') + '">' +
           '<button class="sb-insp-btn" data-act="value">Save</button></div>' +
-        '<div class="sb-insp-field"><label>Component</label>' +
-          '<input class="sb-insp-comp" spellcheck="false" list="insp-comp-list" value="' + escapeHtml(c.component || '') + '">' +
+        '<div class="sb-insp-field"><label>' + (isPassive ? 'Footprint' : 'Component') + '</label>' +
+          '<input class="sb-insp-comp" spellcheck="false" value="' + escapeHtml(c.component || '') + '">' +
           '<button class="sb-insp-btn" data-act="comp">Apply</button></div>' +
+        (isPassive && c.footprint ? '<div class="sb-insp-hint">PCB pad: ' + escapeHtml(c.footprint) + '</div>' : '') +
         '<div class="sb-insp-field"><label>MPN</label>' +
           '<input class="sb-insp-mpn" spellcheck="false" placeholder="manufacturer part #" value="' + escapeHtml(c.mpn || '') + '">' +
           '<button class="sb-insp-btn" data-act="mpn">Save</button></div>' +
         '<div class="sb-insp-msg"></div>' +
         '<button class="sb-insp-del" data-act="delete">Delete component</button>' +
-        '<datalist id="insp-comp-list"></datalist><datalist id="insp-net-list"></datalist>' +
         '</details>';
     }
     if (c.footprint) html += footprintPreviewHtml(c.footprint);
@@ -952,15 +965,12 @@
       msg.textContent = text;
       msg.className = 'sb-insp-msg' + (isErr ? ' is-error' : ' is-ok');
     }
-    // Populate the net datalist (for inline pin editing) from the scene graph,
-    // and the component datalist from the library index.
-    var netDl = panel.querySelector('#insp-net-list');
-    (SCH_INDEX.nets || []).forEach(function (n) {
-      var o = document.createElement('option'); o.value = n.name; netDl.appendChild(o);
-    });
-    var compDl = panel.querySelector('#insp-comp-list');
-    loadInspLib(function (comps) {
-      comps.forEach(function (cc) { var o = document.createElement('option'); o.value = cc.name; compDl.appendChild(o); });
+    // Net names (for inline pin re-wiring) from the scene graph; the
+    // component/footprint field gets a searchable combo from the library index.
+    var netNames = (SCH_INDEX.nets || []).map(function (n) { return n.name; });
+    var compInput = panel.querySelector('.sb-insp-comp');
+    if (compInput) loadInspLib(function (comps) {
+      wireNetCombo(compInput, comps.map(function (cc) { return cc.name; }), box);
     });
     panel.querySelectorAll('.sb-insp-btn').forEach(function (btn) {
       btn.addEventListener('click', function () {
@@ -1002,7 +1012,6 @@
         e.stopPropagation();
         var inp = document.createElement('input');
         inp.className = 'sb-pin-net-input';
-        inp.setAttribute('list', 'insp-net-list');
         inp.spellcheck = false;
         inp.value = row.getAttribute('data-net') || '';
         netCell.replaceWith(inp);
@@ -1014,6 +1023,8 @@
           if (!nn || nn === (row.getAttribute('data-net') || '')) { showComponent(ref, false); return; }
           postEdit('/api/rewire-pin', { ref: ref, pin: pin, net: nn }, true, function (er) { alert('Re-wire failed: ' + er); showComponent(ref, false); });
         }
+        // Searchable net dropdown; picking a net commits immediately.
+        wireNetCombo(inp, netNames, box, function () { commit(); });
         inp.addEventListener('keydown', function (ev) {
           if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
           else if (ev.key === 'Escape') { done = true; showComponent(ref, false); }
