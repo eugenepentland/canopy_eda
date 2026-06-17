@@ -3875,7 +3875,7 @@ const BOARD_JS =
     \\const gP=document.createElementNS(NS,"g"), gR=document.createElementNS(NS,"g");
     \\const gT=document.createElementNS(NS,"g"), gC=document.createElementNS(NS,"g"), gD=document.createElementNS(NS,"g");
     \\const gU=document.createElementNS(NS,"g");
-    \\svg.appendChild(gP); svg.appendChild(gC); svg.appendChild(gT); svg.appendChild(gR); svg.appendChild(gD); svg.appendChild(gU);
+    \\svg.appendChild(gR); svg.appendChild(gP); svg.appendChild(gC); svg.appendChild(gT); svg.appendChild(gD); svg.appendChild(gU);
     \\gT.style.pointerEvents="none"; gR.style.pointerEvents="none"; gC.style.pointerEvents="none"; gD.style.pointerEvents="none"; gU.style.pointerEvents="none";
     \\const els=[], bodies=[];
     \\function el(n,a){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);return e;}
