@@ -770,6 +770,9 @@ Public functions: uploadDatasheetApi, listDatasheetsApi, serveDatasheetApi, isPd
 - datasheet dedupe ignores re-download counter suffix
 - datasheet stem preserves trailing-digit part numbers
 - edit-footprint locates the component token within the instance form
+- rewire-pin locates the instance by component-token offset
+- rewire-pin splits a multi-pin shorthand to re-wire one pin
+- rewire-pin finds a pin in a section pins map
 
 ## serve/edit_assist
 

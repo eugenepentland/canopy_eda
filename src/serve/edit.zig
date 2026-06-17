@@ -42,11 +42,14 @@ const ERR_CANNOT_READ_FILE = "cannot read file";
 const ERR_CANNOT_WRITE_FILE = "cannot write file";
 const ERR_REBUILD_FAILED = "rebuild failed";
 const ERR_INSTANCE_NOT_FOUND = "instance not found";
+const ERR_GENERATED_PART = "this part is generated (decouple/series) or defined in a module — edit its source form directly";
 const ERR_MISSING_REF = "missing ref";
 
 const ERR_JSON_NO_BODY = "{\"error\":\"no body\"}";
 const ERR_JSON_MISSING_NAME = "{\"error\":\"missing name\"}";
 const OK_JSON_TRUE = "{\"ok\":true}";
+/// `std.fmt` template for a `{"error":"<msg>"}` JSON body (msg substituted).
+const ERR_JSON_FMT = "{{\"error\":\"{s}\"}}";
 
 /// Error set for HTTP handlers in this module. Wide enough to cover
 /// every subsystem error that may bubble through `try`: allocator, writer,
@@ -82,134 +85,86 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
         return;
     };
     const body = req.body() orelse {
-        res.status = 400;
-        res.body = "no body";
+        sendJsonError(ctx, res, 400, "no body");
         return;
     };
 
-    // Parse JSON: {"ref": "C3", "value": "0.5pF"}
-    const ref_start = std.mem.indexOf(u8, body, JSON_REF_KEY) orelse {
-        res.status = 400;
-        res.body = ERR_MISSING_REF;
+    // Parse JSON: {"ref": "C3", "value": "0.5pF", "srcOff": 1234}
+    const ref_des = parseJsonString(body, "\"ref\"") orelse {
+        sendJsonError(ctx, res, 400, ERR_MISSING_REF);
         return;
     };
-    const ref_val_start = ref_start + JSON_REF_KEY.len;
-    const ref_end = std.mem.indexOfPos(u8, body, ref_val_start, "\"") orelse {
-        res.status = 400;
+    const new_value = parseJsonString(body, "\"value\"") orelse {
+        sendJsonError(ctx, res, 400, "missing value");
         return;
     };
-    const ref_des = body[ref_val_start..ref_end];
-
-    const val_start_marker = std.mem.indexOf(u8, body, JSON_VALUE_KEY) orelse {
-        res.status = 400;
-        res.body = "missing value";
-        return;
-    };
-    const val_start = val_start_marker + JSON_VALUE_KEY.len;
-    const val_end = std.mem.indexOfPos(u8, body, val_start, "\"") orelse {
-        res.status = 400;
-        return;
-    };
-    const new_value = body[val_start..val_end];
+    const src_off = parseSrcOff(body);
 
     // Read the .sexp file
     const file_path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch {
-        res.status = 500;
+        sendJsonError(ctx, res, 500, ERR_CANNOT_READ_FILE);
         return;
     };
     defer ctx.allocator.free(file_path);
 
     const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
-        res.status = 500;
-        res.body = ERR_CANNOT_READ_FILE;
+        sendJsonError(ctx, res, 500, ERR_CANNOT_READ_FILE);
         return;
     };
     defer ctx.allocator.free(source);
 
-    // Find the instance line and replace the value
-    const needle = std.fmt.allocPrint(ctx.allocator, INSTANCE_OPEN_TEMPLATE ++ " (", .{ref_des}) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+    // Locate the enclosing instance form (offset-first → label-robust).
+    const inst_open = findInstanceOpen(source, ref_des, src_off) orelse {
+        sendJsonError(ctx, res, 404, if (src_off > 0) ERR_GENERATED_PART else ERR_INSTANCE_NOT_FOUND);
         return;
     };
-    defer ctx.allocator.free(needle);
-
-    const inst_pos = std.mem.indexOf(u8, source, needle) orelse {
-        res.status = HTTP_NOT_FOUND;
-        res.body = ERR_INSTANCE_NOT_FOUND;
+    const inst_end = findFormEnd(source, inst_open) orelse {
+        sendJsonError(ctx, res, 400, "malformed instance form");
         return;
     };
 
-    const after_inst = inst_pos + needle.len;
-    var pos = after_inst;
-    while (pos < source.len and source[pos] != '"' and source[pos] != ')') : (pos += 1) {}
-
-    if (pos >= source.len or source[pos] != '"') {
-        res.status = 400;
-        res.body = "cannot find value in instance";
-        return;
-    }
-
-    const old_val_start = pos + 1;
-    const old_val_end_pos = std.mem.indexOfPos(u8, source, old_val_start, "\"") orelse {
-        res.status = 400;
+    // Locate the editable value string (first quoted string of the component
+    // family form). A bare/fixed component (e.g. `204928-0601`) has none.
+    const vr = findInstanceValueRange(source, inst_open, inst_end) orelse {
+        sendJsonError(ctx, res, 400, "this part has a fixed component with no editable value");
         return;
     };
 
     var new_source: std.ArrayListUnmanaged(u8) = .empty;
     const nw = new_source.writer(ctx.allocator);
-    try nw.writeAll(source[0..old_val_start]);
+    try nw.writeAll(source[0..vr[0]]);
     try nw.writeAll(new_value);
-    try nw.writeAll(source[old_val_end_pos..]);
+    try nw.writeAll(source[vr[1]..]);
 
-    const file = infra_fs.cwd().createFile(file_path, .{}) catch {
-        res.status = 500;
-        res.body = ERR_CANNOT_WRITE_FILE;
-        return;
-    };
-    defer file.close();
-    file.writeAll(new_source.items) catch {
-        res.status = 500;
+    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = new_source.items }) catch {
+        sendJsonError(ctx, res, 500, ERR_CANNOT_WRITE_FILE);
         return;
     };
 
-    std.debug.print("Edited {s} {s} -> \"{s}\"\n", .{ name, ref_des, new_value });
-
-    // Rebuild and push live update
-    const board_path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch {
-        res.status = 500;
+    rebuildAndPush(ctx, name, res) catch {
+        sendJsonError(ctx, res, 500, ERR_REBUILD_FAILED);
         return;
     };
-    defer ctx.allocator.free(board_path);
+}
 
-    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
-    defer eval.deinit();
-    const result = eval.evalFile(board_path) catch {
-        res.status = 500;
-        res.body = ERR_REBUILD_FAILED;
-        return;
-    };
-    const block = switch (result) {
-        .design_block => |b| b,
-        else => {
-            res.status = 500;
-            return;
-        },
-    };
-
-    const bom_path = paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, ".bom") catch {
-        res.status = 500;
-        return;
-    };
-    defer ctx.allocator.free(bom_path);
-    bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| warnResolveIdentities(name, e);
-
-    const new_layout = render_json.renderSceneGraph(ctx.allocator, block, ctx.project_dir) catch null;
-    serve_root.setLiveLayoutJson(new_layout);
-    _ = serve_root.bumpLiveVersion(name);
-
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
-    res.content_type = .JSON;
-    res.body = OK_JSON_TRUE;
+/// Locate the editable value string inside an instance form — the first quoted
+/// string of the component family form, e.g. the `100nF` in
+/// `(instance "C1" (cap-0402 "100nF") …)`. Returns `{start, end}` (exclusive of
+/// the quotes), or null when the part carries a bare/fixed component (nothing to
+/// edit) or the form is malformed.
+fn findInstanceValueRange(source: []const u8, inst_open: usize, inst_end: usize) ?[2]usize {
+    var pos = inst_open + INSTANCE_HEAD.len;
+    while (pos < inst_end and isPinWs(source[pos])) : (pos += 1) {}
+    if (pos >= inst_end or source[pos] != '"') return null;
+    pos = (std.mem.indexOfScalarPos(u8, source, pos + 1, '"') orelse inst_end) + 1; // past label
+    while (pos < inst_end and isPinWs(source[pos])) : (pos += 1) {}
+    if (pos >= inst_end or source[pos] != '(') return null; // fixed component
+    const comp_end = findFormEnd(source, pos) orelse inst_end;
+    const vq = std.mem.indexOfScalarPos(u8, source, pos + 1, '"') orelse return null;
+    if (vq >= comp_end) return null;
+    const vs = vq + 1;
+    const ve = std.mem.indexOfScalarPos(u8, source, vs, '"') orelse return null;
+    return .{ vs, ve };
 }
 
 /// POST /api/edit-footprint/:name — swap an instance's component family
@@ -724,111 +679,288 @@ pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     };
 }
 
+const INSTANCE_HEAD = "(instance";
+const PIN_HEAD = "(pin ";
+
+/// Send a JSON `{"error":"…"}` body. `msg` is a trusted static string (no
+/// embedded quotes/backslashes) — the frontend's `postEdit` parses the body as
+/// JSON, so error paths must speak JSON too (a plaintext body trips its
+/// `JSON.parse`, surfacing a cryptic "Unexpected token" to the user).
+fn sendJsonError(ctx: *Handler, res: *httpz.Response, status: u16, msg: []const u8) void {
+    res.status = status;
+    res.content_type = .JSON;
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.body = std.fmt.allocPrint(ctx.allocator, ERR_JSON_FMT, .{msg}) catch
+        "{\"error\":\"edit failed\"}";
+}
+
+/// Parse the optional numeric `"srcOff":N` field (the component-token offset the
+/// scene graph publishes as `components[].src`). Returns 0 when absent.
+fn parseSrcOff(body: []const u8) usize {
+    const m = std.mem.indexOf(u8, body, JSON_SRC_OFF_KEY) orelse return 0;
+    var s = m + JSON_SRC_OFF_KEY.len;
+    while (s < body.len and body[s] == ' ') : (s += 1) {}
+    var e = s;
+    while (e < body.len and body[e] >= '0' and body[e] <= '9') : (e += 1) {}
+    return std.fmt.parseInt(usize, body[s..e], 10) catch 0;
+}
+
+/// Locate the opening '(' of the `(instance "…"` form a part lives in. `src_off`
+/// is the component-token offset the scene graph publishes (`components[].src`);
+/// scanning back to the enclosing `(instance` makes the edit endpoints robust to
+/// instances declared with a descriptive *label* that auto-renumbers to a
+/// different ref-des (e.g. `(instance "expansion" 204928-0601 …)` → U10, so
+/// `(instance "U10"` is never in the source). Falls back to a `(instance "REF"`
+/// needle when no usable offset is given.
+fn findInstanceOpen(source: []const u8, ref_des: []const u8, src_off: usize) ?usize {
+    if (src_off > 0 and src_off <= source.len) {
+        if (std.mem.lastIndexOf(u8, source[0..src_off], INSTANCE_HEAD)) |p| {
+            // Confirm it opens `(instance "` (not a comment mention) and that
+            // src_off really sits inside this instance form.
+            var q = p + INSTANCE_HEAD.len;
+            while (q < source.len and (source[q] == ' ' or source[q] == '\t')) : (q += 1) {}
+            if (q < source.len and source[q] == '"') {
+                if (findFormEnd(source, p)) |end| {
+                    if (src_off < end) return p;
+                }
+            }
+        }
+    }
+    var buf: [256]u8 = undefined;
+    const needle = std.fmt.bufPrint(&buf, INSTANCE_OPEN_TEMPLATE, .{ref_des}) catch return null;
+    return std.mem.indexOf(u8, source, needle);
+}
+
+/// A parsed `(pin …)` form. The leading pin-id tokens are appended to the
+/// caller's list; the struct carries the net-string bounds and flags the caller
+/// needs to decide whether a multi-pin split is safe.
+const PinForm = struct {
+    form_start: usize,
+    form_end: usize,
+    net_start: usize, // index just past the opening quote of the net string
+    net_end: usize, // index of the closing quote
+    has_subform: bool, // an `(as …)` (or other) sub-form sits among the tokens
+    clean_tail: bool, // only whitespace between the net's close-quote and ')'
+};
+
+fn isPinWs(ch: u8) bool {
+    return ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r';
+}
+
+/// True at the end of a pin-id token: whitespace, a sub-form '(', the net
+/// string '"', or the form's ')'.
+fn isPinTokenEnd(ch: u8) bool {
+    return isPinWs(ch) or ch == '"' or ch == '(' or ch == ')';
+}
+
+/// Parse a `(pin …)` form starting at `form_start` (the '('). Appends the
+/// leading pin-id tokens (slices into `source`) to `tokens` and returns the net
+/// string bounds + safety flags. Returns null for a malformed form (no net).
+fn parsePinForm(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    form_start: usize,
+    tokens: *std.ArrayListUnmanaged([]const u8),
+) !?PinForm {
+    const form_end = findFormEnd(source, form_start) orelse return null;
+    var i = form_start + PIN_HEAD.len - 1; // step back over the trailing space
+    var has_subform = false;
+    while (i < form_end) {
+        while (i < form_end and isPinWs(source[i])) : (i += 1) {}
+        if (i >= form_end) return null;
+        const ch = source[i];
+        if (ch == ')') return null; // no net string
+        if (ch == '"') {
+            const ns = i + 1;
+            const ne = std.mem.indexOfScalarPos(u8, source, ns, '"') orelse return null;
+            var t = ne + 1;
+            var clean = true;
+            while (t + 1 < form_end) : (t += 1) {
+                if (!isPinWs(source[t])) {
+                    clean = false;
+                    break;
+                }
+            }
+            return PinForm{
+                .form_start = form_start,
+                .form_end = form_end,
+                .net_start = ns,
+                .net_end = ne,
+                .has_subform = has_subform,
+                .clean_tail = clean,
+            };
+        }
+        if (ch == '(') {
+            has_subform = true;
+            i = findFormEnd(source, i) orelse return null;
+            continue;
+        }
+        const ts = i;
+        while (i < form_end and !isPinTokenEnd(source[i])) : (i += 1) {}
+        try tokens.append(allocator, source[ts..i]);
+    }
+    return null;
+}
+
+/// The source label of an instance (its first quoted string), e.g. "stm32" in
+/// `(instance "stm32" …)`. The label drives lookup of the instance's
+/// section-level `(pins "<label>" …)` pin maps.
+fn instanceLabel(source: []const u8, inst_open: usize) ?[]const u8 {
+    var i = inst_open + INSTANCE_HEAD.len;
+    while (i < source.len and isPinWs(source[i])) : (i += 1) {}
+    if (i >= source.len or source[i] != '"') return null;
+    const s = i + 1;
+    const e = std.mem.indexOfScalarPos(u8, source, s, '"') orelse return null;
+    return source[s..e];
+}
+
+/// Scan `(pin …)` forms in [start, end) for the first whose pin-id token list
+/// contains `pin`; on a hit, appends that form's tokens to `out_tokens` and
+/// returns the parsed form.
+fn findPinFormInRegion(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    start: usize,
+    end: usize,
+    pin: []const u8,
+    out_tokens: *std.ArrayListUnmanaged([]const u8),
+) !?PinForm {
+    var search = start;
+    while (std.mem.indexOfPos(u8, source[0..end], search, PIN_HEAD)) |pf| {
+        var tokens: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer tokens.deinit(allocator);
+        if ((parsePinForm(allocator, source, pf, &tokens) catch null)) |parsed| {
+            for (tokens.items) |tk| {
+                if (std.mem.eql(u8, tk, pin)) {
+                    try out_tokens.appendSlice(allocator, tokens.items);
+                    return parsed;
+                }
+            }
+            search = parsed.form_end;
+        } else {
+            search = pf + PIN_HEAD.len;
+        }
+    }
+    return null;
+}
+
+/// Find the `(pin …)` form for `pin` belonging to the instance at `inst_open`,
+/// searching the instance body first and then every section-level
+/// `(pins "<label>" …)` map that declares the instance's pins (the main-IC
+/// pin-map pattern). Tokens of the matched form are appended to `out_tokens`.
+fn findInstancePinForm(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    inst_open: usize,
+    inst_end: usize,
+    pin: []const u8,
+    out_tokens: *std.ArrayListUnmanaged([]const u8),
+) !?PinForm {
+    if (try findPinFormInRegion(allocator, source, inst_open, inst_end, pin, out_tokens)) |m| return m;
+    const label = instanceLabel(source, inst_open) orelse return null;
+    var needle_buf: [256]u8 = undefined;
+    const needle = std.fmt.bufPrint(&needle_buf, "(pins \"{s}\"", .{label}) catch return null;
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, source, from, needle)) |pp| {
+        const pe = findFormEnd(source, pp) orelse source.len;
+        if (try findPinFormInRegion(allocator, source, pp, pe, pin, out_tokens)) |m| return m;
+        from = pe;
+    }
+    return null;
+}
+
 /// POST /api/rewire-pin/:name
-/// Body: {"ref":"U1","pin":"5","net":"VDD_NEW"}
+/// Body: {"ref":"U1","pin":"5","net":"VDD_NEW","srcOff":1234}
 pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
     };
     const body = req.body() orelse {
-        res.status = 400;
-        res.body = "no body";
+        sendJsonError(ctx, res, 400, "no body");
         return;
     };
 
     const ref_des = parseJsonString(body, "\"ref\"") orelse {
-        res.status = 400;
-        res.body = ERR_MISSING_REF;
+        sendJsonError(ctx, res, 400, ERR_MISSING_REF);
         return;
     };
     const pin = parseJsonString(body, "\"pin\"") orelse {
-        res.status = 400;
-        res.body = "missing pin";
+        sendJsonError(ctx, res, 400, "missing pin");
         return;
     };
     const new_net = parseJsonString(body, "\"net\"") orelse {
-        res.status = 400;
-        res.body = "missing net";
+        sendJsonError(ctx, res, 400, "missing net");
         return;
     };
+    const src_off = parseSrcOff(body);
 
     const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(file_path);
 
     const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
-        res.status = 500;
-        res.body = ERR_CANNOT_READ_FILE;
+        sendJsonError(ctx, res, 500, ERR_CANNOT_READ_FILE);
         return;
     };
     defer ctx.allocator.free(source);
 
-    // Find the instance
-    const inst_needle = try std.fmt.allocPrint(ctx.allocator, INSTANCE_OPEN_TEMPLATE, .{ref_des});
-    defer ctx.allocator.free(inst_needle);
-
-    const inst_pos = std.mem.indexOf(u8, source, inst_needle) orelse {
-        res.status = 404;
-        res.body = ERR_INSTANCE_NOT_FOUND;
+    // Locate the enclosing instance form (by component-token offset, robust to
+    // label-declared instances; ref-des needle as fallback).
+    const inst_open = findInstanceOpen(source, ref_des, src_off) orelse {
+        sendJsonError(ctx, res, 404, if (src_off > 0) ERR_GENERATED_PART else ERR_INSTANCE_NOT_FOUND);
+        return;
+    };
+    const inst_end = findFormEnd(source, inst_open) orelse {
+        sendJsonError(ctx, res, 400, "malformed instance form");
         return;
     };
 
-    // Find the pin form within this instance: (pin N "NET")
-    // Search for (pin <pin_num> "...) within the instance
-    const pin_needle = try std.fmt.allocPrint(ctx.allocator, "(pin {s} \"", .{pin});
-    defer ctx.allocator.free(pin_needle);
-
-    const search_start = inst_pos;
-    // Find the end of the instance form
-    var depth: u32 = 0;
-    var inst_end: usize = inst_pos;
-    for (source[inst_pos..], 0..) |ch, i| {
-        if (ch == '(') depth += 1;
-        if (ch == ')') {
-            depth -= 1;
-            if (depth == 0) {
-                inst_end = inst_pos + i + 1;
-                break;
-            }
-        }
-    }
-
-    const inst_region = source[search_start..inst_end];
-    const pin_offset = std.mem.indexOf(u8, inst_region, pin_needle) orelse {
-        res.status = 404;
-        res.body = "pin not found in instance";
-        return;
-    };
-
-    // Find the net string in this pin form
-    const abs_pin = search_start + pin_offset + pin_needle.len;
-    const net_end = std.mem.indexOfPos(u8, source, abs_pin, "\"") orelse {
-        res.status = 400;
-        res.body = "malformed pin form";
+    // Find the matching `(pin …)` form — in the instance body or a section-level
+    // `(pins "<label>" …)` map — covering single forms AND multi-pin shorthand
+    // like `(pin 2 4 6 "VDD")` (which the old `(pin N "` needle could not match).
+    var match_tokens: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer match_tokens.deinit(ctx.allocator);
+    const p = (try findInstancePinForm(ctx.allocator, source, inst_open, inst_end, pin, &match_tokens)) orelse {
+        sendJsonError(ctx, res, 404, "pin not found — it may be wired via a (net …) form; edit the source directly");
         return;
     };
 
     var new_source: std.ArrayListUnmanaged(u8) = .empty;
     const nw = new_source.writer(ctx.allocator);
-    try nw.writeAll(source[0..abs_pin]);
-    try nw.writeAll(new_net);
-    try nw.writeAll(source[net_end..]);
+    if (match_tokens.items.len <= 1) {
+        // Single-pin form: replace just the net string, preserving any trailing
+        // `(as …)`/`(id …)` annotations.
+        try nw.writeAll(source[0..p.net_start]);
+        try nw.writeAll(new_net);
+        try nw.writeAll(source[p.net_end..]);
+    } else {
+        // Multi-pin shorthand: split the target pin into its own form, leaving
+        // the rest on the original net. Only safe for a clean `(pin … "net")`.
+        if (p.has_subform or !p.clean_tail) {
+            sendJsonError(ctx, res, 400, "this pin shares an annotated multi-pin (pin …) form — edit the source directly");
+            return;
+        }
+        const old_net = source[p.net_start..p.net_end];
+        try nw.writeAll(source[0..p.form_start]);
+        try nw.writeAll(PIN_HEAD);
+        var first = true;
+        for (match_tokens.items) |tk| {
+            if (std.mem.eql(u8, tk, pin)) continue;
+            if (!first) try nw.writeByte(' ');
+            try nw.writeAll(tk);
+            first = false;
+        }
+        try nw.print(" \"{s}\") (pin {s} \"{s}\")", .{ old_net, pin, new_net });
+        try nw.writeAll(source[p.form_end..]);
+    }
 
-    const file = infra_fs.cwd().createFile(file_path, .{}) catch {
-        res.status = 500;
-        res.body = ERR_CANNOT_WRITE_FILE;
+    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = new_source.items }) catch {
+        sendJsonError(ctx, res, 500, ERR_CANNOT_WRITE_FILE);
         return;
     };
-    defer file.close();
-    file.writeAll(new_source.items) catch {
-        res.status = 500;
-        return;
-    };
 
-    std.debug.print("Rewired {s} pin {s} -> \"{s}\" in {s}\n", .{ ref_des, pin, new_net, name });
     rebuildAndPush(ctx, name, res) catch {
-        res.status = 500;
-        res.body = ERR_REBUILD_FAILED;
+        sendJsonError(ctx, res, 500, ERR_REBUILD_FAILED);
         return;
     };
 }
@@ -901,7 +1033,7 @@ pub fn movePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
             },
             else => {
                 res.status = 500;
-                res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"error\":\"{s}\"}}", .{@errorName(err)});
+                res.body = try std.fmt.allocPrint(ctx.allocator, ERR_JSON_FMT, .{@errorName(err)});
                 return;
             },
         }
@@ -969,7 +1101,7 @@ pub fn swapPinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
             },
             else => {
                 res.status = 500;
-                res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"error\":\"{s}\"}}", .{@errorName(err)});
+                res.body = try std.fmt.allocPrint(ctx.allocator, ERR_JSON_FMT, .{@errorName(err)});
                 return;
             },
         }
@@ -2047,4 +2179,72 @@ test "datasheetStem keeps a trailing-digit part number intact" {
     // spec: serve/edit - datasheet stem preserves trailing-digit part numbers
     try std.testing.expectEqualStrings("lm2596", datasheet_attach.datasheetStem("lm2596.pdf"));
     try std.testing.expectEqualStrings("tps55289", datasheet_attach.datasheetStem("tps55289__2_.pdf"));
+}
+
+test "findInstanceOpen finds a label-declared instance by component offset" {
+    // spec: serve/edit - rewire-pin locates the instance by component-token offset
+    const src =
+        \\(design-block "X"
+        \\  (instance "expansion" 204928-0601
+        \\    (pin 2 4 6 "VDD")))
+    ;
+    const head = "(instance \"expansion\"";
+    const comp_off = std.mem.indexOf(u8, src, "204928-0601").?;
+    // ref-des "U10" is NOT in the source (label auto-renumbers) — offset wins.
+    const open = findInstanceOpen(src, "U10", comp_off).?;
+    try std.testing.expectEqualStrings(head, src[open .. open + head.len]);
+    // With no offset, falls back to the label/ref-des needle.
+    try std.testing.expectEqual(open, findInstanceOpen(src, "expansion", 0).?);
+    try std.testing.expect(findInstanceOpen(src, "NOPE", 0) == null);
+}
+
+test "parsePinForm reads single and multi-pin shorthand forms" {
+    // spec: serve/edit - rewire-pin splits a multi-pin shorthand to re-wire one pin
+    const src =
+        \\(instance "x" foo
+        \\  (pin 2 4 6 "VDD")
+        \\  (pin W16 (as "PG11") "BPSK"))
+    ;
+    const a = std.testing.allocator;
+    var toks: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer toks.deinit(a);
+
+    const shorthand = std.mem.indexOf(u8, src, "(pin 2").?;
+    const pf = (try parsePinForm(a, src, shorthand, &toks)).?;
+    try std.testing.expectEqual(@as(usize, 3), toks.items.len);
+    try std.testing.expectEqualStrings("2", toks.items[0]);
+    try std.testing.expectEqualStrings("6", toks.items[2]);
+    try std.testing.expectEqualStrings("VDD", src[pf.net_start..pf.net_end]);
+    try std.testing.expect(!pf.has_subform and pf.clean_tail);
+
+    // A single pin carrying an (as …) annotation → one token, sub-form flagged.
+    toks.clearRetainingCapacity();
+    const annotated = std.mem.indexOf(u8, src, "(pin W16").?;
+    const pf2 = (try parsePinForm(a, src, annotated, &toks)).?;
+    try std.testing.expectEqual(@as(usize, 1), toks.items.len);
+    try std.testing.expectEqualStrings("W16", toks.items[0]);
+    try std.testing.expectEqualStrings("BPSK", src[pf2.net_start..pf2.net_end]);
+    try std.testing.expect(pf2.has_subform);
+}
+
+test "findInstancePinForm finds a pin in a section (pins label) map" {
+    // spec: serve/edit - rewire-pin finds a pin in a section pins map
+    const src =
+        \\(design-block "X"
+        \\  (instance "stm32" big-mcu)
+        \\  (section "Y"
+        \\    (pins "stm32" (group "G") (pin W16 (as "PG11") "OLDNET"))))
+    ;
+    const a = std.testing.allocator;
+    const inst_open = std.mem.indexOf(u8, src, "(instance \"stm32\"").?;
+    const inst_end = findFormEnd(src, inst_open).?;
+    var toks: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer toks.deinit(a);
+    // Not in the (tiny) instance body, but in the section's (pins "stm32" …) map.
+    const m = (try findInstancePinForm(a, src, inst_open, inst_end, "W16", &toks)).?;
+    try std.testing.expectEqualStrings("OLDNET", src[m.net_start..m.net_end]);
+    try std.testing.expectEqual(@as(usize, 1), toks.items.len);
+    // A pin that exists nowhere stays unmatched.
+    toks.clearRetainingCapacity();
+    try std.testing.expect((try findInstancePinForm(a, src, inst_open, inst_end, "ZZ9", &toks)) == null);
 }
