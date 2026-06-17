@@ -1153,6 +1153,12 @@ pub const Revision = struct {
     present: bool = false,
 };
 
+/// How a flattened ref-des reads: `.hierarchical` keeps the sub-block path
+/// prefix (`a/R1_1`) so sub-block-local refs stay unique; `.flat` emits the
+/// bare ref (`R1_1`). Grouped-refdes designs use `.flat` — their ref-deses are
+/// already globally unique, so the prefix is redundant.
+pub const RefStyle = enum { hierarchical, flat };
+
 /// The fully-evaluated result of a `(design-block …)`: the flattened netlist
 /// (instances + nets + ports), the section/sub-block tree, and the design-doc
 /// metadata (critical ICs, verifications, rails, functions) the review and
@@ -1166,6 +1172,11 @@ pub const DesignBlock = struct {
     groups: []const Group,
     sub_blocks: []const SubBlock,
     sections: []const Section = &.{},
+    /// True when the design declared `(grouped-refdes)` — its ref-deses were
+    /// re-stamped into value/footprint block ranges (`refdes_group`) and pinned
+    /// to a `<design>.refdes.json` sidecar, so they survive insert/delete/reorder
+    /// instead of drifting with the per-prefix source-order counter.
+    grouped_refdes: bool = false,
     /// Net ties for cross-block connections (sub-block port wiring).
     net_ties: []const NetTie = &.{},
     /// Design-side `(verifies …)` sign-offs that answer library requirements
@@ -1241,6 +1252,13 @@ pub const DesignBlock = struct {
     /// canonical human-meaningful spin id (+ optional date + in-file
     /// changelog). `present=false` ⇒ the design declares no revision.
     revision: Revision = .{},
+
+    /// Ref-des flattening style for this design: `.flat` under grouped-refdes
+    /// (refs are globally unique → drop the sub-block path prefix), else
+    /// `.hierarchical`. Passed to the netlist/BOM/emit flatteners.
+    pub fn refStyle(self: DesignBlock) RefStyle {
+        return if (self.grouped_refdes) .flat else .hierarchical;
+    }
 };
 
 /// A rail's electrical role, declared by `(power-rail <label> (role …) (net …))`.

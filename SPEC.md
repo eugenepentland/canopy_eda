@@ -274,6 +274,17 @@ Public functions: worldShape, pointDist, shapeGap
 - last_error records the source span of an unknown form so callers can report file:line:col
 - last_error records the source span of an arity mismatch in a special form
 
+## eval/refdes_group
+
+- parseRef splits a ref-des into prefix and number
+- a fresh registry assigns block-range refs grouped by class
+- two-level format renders class_member refs
+- resolve pins a part's ref by its id across builds
+- switching the format re-renders the same slots
+- changing a part's value re-classes it to a new block
+- a class exceeding block_size spills into a fresh block
+- toJson round-trips through load
+
 ## id_insert
 
 - findMatchingClose finds correct closing paren

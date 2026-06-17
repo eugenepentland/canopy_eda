@@ -421,6 +421,64 @@ The two schemes coexist per-design. Switching an existing design to
 `(hierarchical-ids)` changes its child ids (different derivation), so it is a
 one-time board re-stamp — adopt deliberately, not casually.
 
+### Stable ref-des: value/footprint grouping (opt-in)
+
+By default a ref-des is a per-prefix counter walked in source order
+(`ids.nextRefDes`): insert or delete a part mid-file and everything downstream
+renumbers (`C50`→`C51`…). The 8-char `(id …)` keeps the *PCB* identity stable
+through that drift, but the human-facing ref-des still churns the BOM, git
+diffs, and traceability sign-offs.
+
+`(grouped-refdes)` in the design-block body opts into a stable scheme: a
+**class** is the tuple `(prefix, value, footprint)` — every 100 nF cap-0402 is
+one class, with a stable 1-based per-prefix index. Each part is pinned to a
+member slot in its class, keyed by the part's stable `id`, and the (class,
+member) pair renders to a ref-des by one of two **formats**:
+
+- `(grouped-refdes)` — default `.two_level`: `C<class>_<member>` (`C1_5` — class
+  1, member 5): the most literal "these are all the same part" reading. Carries
+  an underscore into KiCad/BOM/assembly (non-canonical) — fine inside this tool +
+  KiCad; switch to block-range for a fab/assembly hand-off that wants plain
+  `[A-Z]+[0-9]+`.
+- `(grouped-refdes (format block-range))` — class N owns a contiguous block of
+  numbers (`C100…C199`, `C200…C299`, … with `block_size = 100`, widened by
+  `(grouped-refdes (format block-range) (block 1000))`; a class with
+  >`block_size` members spills into a fresh block automatically). Canonical
+  `[A-Z]+[0-9]+` (`C105`).
+
+Because the grouped ref-des is globally unique by construction, the flatteners
+(`emit`, `bom`, `export_kicad` netlist + 3D model, sync, optimizer) drop the
+usual sub-block path prefix for grouped designs — a part in sub-block `a` shows
+as the bare global `C1_2`, **not** `a/C1_2`, on the board, in the BOM, and in
+the PCB view (net *names* keep their prefix — sub-block-local nets can collide).
+The flatten style is `DesignBlock.refStyle()` (`.flat` vs `.hierarchical`); the
+schematic *diagram* keeps the prefixed walk (it resolves a pin's `a/` prefix to
+its sub-block node). Non-grouped designs are unchanged (`.hierarchical`).
+
+Because storage is logical (class index + member offset, not the rendered
+string), switching `(format …)` is a clean re-render that preserves every part's
+slot. Either way:
+
+- adding a part of an existing class appends the next free member (`C103`),
+  touching nothing else;
+- deleting a class never renumbers another (class bases are pinned);
+- only a *value/footprint* edit moves a part between classes — the one case its
+  ref-des intentionally changes (the `id` keeps the footprint anchored through
+  it).
+
+Strings stay canonical `[A-Z]+[0-9]+` (`C205`), so KiCad, the netlist exporter,
+and assembly tooling accept them unchanged. The class table + member map persist
+to a `<design>.refdes.json` sidecar next to the `.bom`; the `build` command
+writes it (only when the assignment changed, so a no-op rebuild has zero churn),
+read-only paths never do. `(grouped-refdes (block 1000))` widens the block for
+dense boards (a class with >99 of one value otherwise spills into a fresh
+block automatically). The pass runs once at the top level over the whole
+flattened tree (top-level + sub-block + decouple/series children), so it
+re-stamps the entire board. Core logic + the block-range allocator live in
+`src/eval/refdes_group.zig`; the tree walk + rename propagation in
+`ids.applyGroupedRefDes`. Adopting it on an existing design re-stamps every
+ref-des once — deliberate, like `(hierarchical-ids)`.
+
 ### Ports
 
 ```scheme

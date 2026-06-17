@@ -349,7 +349,10 @@ fn collectSubBlockRails(
 /// sees exactly the same connectivity the board does.
 fn buildFlatNets(scratch: Allocator, block: *const DesignBlock) Allocator.Error![]export_kicad.FlatNet {
     var nets: std.ArrayListUnmanaged(export_kicad.FlatNet) = .empty;
-    try netlist.collectNets(scratch, block, "", &nets);
+    // false: keep the diagram's internal flatten prefixed exactly as before —
+    // it's a self-consistent rendering pipeline, independent of the board's
+    // grouped-refdes ref-des strings.
+    try netlist.collectNets(scratch, block, "", &nets, .hierarchical);
     var ties: std.ArrayListUnmanaged(netlist.FlatTie) = .empty;
     try netlist.collectNetTies(scratch, block, "", &ties);
     try netlist.applyNetTies(scratch, &nets, ties.items);

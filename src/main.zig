@@ -425,6 +425,7 @@ test {
     _ = @import("docgen.zig");
     _ = @import("eval/evaluator.zig");
     _ = @import("eval/ids.zig");
+    _ = @import("eval/refdes_group.zig");
     _ = @import("eval/pin_enrichment.zig");
     _ = @import("eval/rails.zig");
     _ = @import("eval/test_point.zig");

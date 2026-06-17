@@ -87,7 +87,7 @@ pub fn resolveIdentities(
 
     var flat_list: std.ArrayListUnmanaged(FlatInfo) = .empty;
     defer flat_list.deinit(allocator);
-    try bom_mod.collectFlatInstances(allocator, block, "", &flat_list);
+    try bom_mod.collectFlatInstances(allocator, block, "", &flat_list, block.refStyle());
 
     var result_map = std.StringHashMap([]const u8).init(allocator);
     defer result_map.deinit();

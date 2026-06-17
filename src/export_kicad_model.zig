@@ -152,7 +152,7 @@ pub fn exportFootprints(
 
     var instances: std.ArrayListUnmanaged(FlatInstance) = .empty;
     defer instances.deinit(allocator);
-    try collectInstances(allocator, block, "", &instances);
+    try collectInstances(allocator, block, "", &instances, block.refStyle());
 
     var processed_fps = std.StringHashMap(void).init(allocator);
     defer processed_fps.deinit();

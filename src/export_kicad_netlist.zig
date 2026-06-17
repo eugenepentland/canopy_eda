@@ -162,9 +162,15 @@ pub fn collectInstances(
     block: *const DesignBlock,
     prefix: []const u8,
     list: *std.ArrayListUnmanaged(FlatInstance),
+    ref_style: env_mod.RefStyle,
 ) std.mem.Allocator.Error!void {
     for (block.instances) |inst| {
-        const ref = try prefixed(allocator, prefix, inst.ref_des);
+        // `(grouped-refdes)` makes ref-deses globally unique, so the sub-block
+        // path prefix is redundant — emit the bare ref (`R1_1`, not `a/R1_1`).
+        const ref = if (ref_style == .flat)
+            try allocator.dupe(u8, inst.ref_des)
+        else
+            try prefixed(allocator, prefix, inst.ref_des);
 
         // Use BOM-assigned UUID if available, otherwise derive from ID
         const effective_uuid = if (inst.uuid.len > 0)
@@ -188,7 +194,7 @@ pub fn collectInstances(
     }
     for (block.sub_blocks) |sb| {
         const sub_prefix = try prefixed(allocator, prefix, sb.name);
-        try collectInstances(allocator, sb.block, sub_prefix, list);
+        try collectInstances(allocator, sb.block, sub_prefix, list, ref_style);
     }
 }
 
@@ -201,14 +207,21 @@ pub fn collectNets(
     block: *const DesignBlock,
     prefix: []const u8,
     list: *std.ArrayListUnmanaged(FlatNet),
+    ref_style: env_mod.RefStyle,
 ) std.mem.Allocator.Error!void {
     for (block.nets) |net| {
+        // Net names stay prefixed even under grouped-refdes: sub-block-local
+        // nets can share a name and must stay distinct. Only the ref-des part
+        // of each pin goes bare (it is already globally unique when grouped).
         const net_name = try prefixed(allocator, prefix, net.name);
 
         var pins = try allocator.alloc(FlatPin, net.pins.len);
         for (net.pins, 0..) |pin, i| {
             pins[i] = .{
-                .ref_des = try prefixed(allocator, prefix, pin.ref_des),
+                .ref_des = if (ref_style == .flat)
+                    try allocator.dupe(u8, pin.ref_des)
+                else
+                    try prefixed(allocator, prefix, pin.ref_des),
                 .pin = pin.pin,
             };
         }
@@ -220,7 +233,7 @@ pub fn collectNets(
     }
     for (block.sub_blocks) |sb| {
         const sub_prefix = try prefixed(allocator, prefix, sb.name);
-        try collectNets(allocator, sb.block, sub_prefix, list);
+        try collectNets(allocator, sb.block, sub_prefix, list, ref_style);
     }
 }
 
