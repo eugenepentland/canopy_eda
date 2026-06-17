@@ -30,10 +30,31 @@ const MAX_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
 const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " ++
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 
+/// One quantity price break from a variation's `StandardPricing` ladder —
+/// "at `break_quantity` units, each costs `unit_price` (`total_price` for the
+/// break)". Prices are in the catalog currency DigiKey returns for the locale.
+pub const PriceBreak = struct {
+    break_quantity: u64,
+    unit_price: f64,
+    total_price: f64,
+};
+
+/// One orderable packaging option of a product (Cut Tape, Tape & Reel, Tube …)
+/// with its own live stock, minimum order quantity, and price-break ladder.
+/// All slices are owned by the allocator passed to `resolveMpn`.
+pub const Variation = struct {
+    digikey_part_number: ?[]const u8,
+    package_type: ?[]const u8,
+    /// Live stock for this packaging (DigiKey `QuantityAvailableforPackageType`).
+    quantity_available: u64,
+    minimum_order_quantity: u64,
+    price_breaks: []const PriceBreak,
+};
+
 /// One resolved catalog match. All slices are owned by the allocator passed to
 /// `resolveMpn` (a request arena on the MCP path). `datasheet_url`,
-/// `product_url`, and `digikey_part_number` are null when DigiKey omits them or
-/// returns them empty.
+/// `product_url`, `digikey_part_number`, `unit_price`, and `product_status` are
+/// null when DigiKey omits them or returns them empty.
 pub const Product = struct {
     mpn: []const u8,
     manufacturer: []const u8,
@@ -41,6 +62,15 @@ pub const Product = struct {
     datasheet_url: ?[]const u8,
     product_url: ?[]const u8,
     digikey_part_number: ?[]const u8,
+    /// Total live stock across every packaging variation (DigiKey
+    /// `QuantityAvailable`); 0 when out of stock or absent.
+    quantity_available: u64,
+    /// Single-unit catalog price for the default packaging, or null when absent.
+    unit_price: ?f64,
+    /// Lifecycle status ("Active", "Obsolete", "Last Time Buy", …), or null.
+    product_status: ?[]const u8,
+    /// Per-packaging stock + price ladder; empty when DigiKey returns none.
+    variations: []const Variation,
 };
 
 pub const SearchError = error{
@@ -221,19 +251,64 @@ fn collectProducts(allocator: std.mem.Allocator, root: std.json.Value, limit: us
 }
 
 /// Map a `Products` array to owned `Product`s, capped at `limit`. Entries
-/// without a `ManufacturerProductNumber` are skipped.
+/// without a `ManufacturerProductNumber` are skipped. Live stock, unit price,
+/// lifecycle status, and the per-packaging price ladders all come from the same
+/// keyword-search response — DigiKey returns them inline, so no second call.
 fn mapProducts(allocator: std.mem.Allocator, items: []std.json.Value, limit: usize) std.mem.Allocator.Error![]Product {
     var list: std.ArrayListUnmanaged(Product) = .empty;
     for (items) |item| {
         if (list.items.len >= limit) break;
         const mpn = strField(item, "ManufacturerProductNumber") orelse continue;
+        const variations = try mapVariations(allocator, item);
         try list.append(allocator, .{
             .mpn = try allocator.dupe(u8, mpn),
             .manufacturer = try allocator.dupe(u8, nestedStr(item, "Manufacturer", "Name") orelse ""),
             .description = try allocator.dupe(u8, nestedStr(item, "Description", "ProductDescription") orelse ""),
             .datasheet_url = try dupeOpt(allocator, nonEmpty(strField(item, "DatasheetUrl"))),
             .product_url = try dupeOpt(allocator, nonEmpty(strField(item, "ProductUrl"))),
-            .digikey_part_number = try dupeOpt(allocator, nonEmpty(firstVariationDk(item))),
+            // The orderable DK number on the first (default) packaging; duped
+            // fresh so it never aliases variations[0]'s owned copy.
+            .digikey_part_number = if (variations.len > 0) try dupeOpt(allocator, variations[0].digikey_part_number) else null,
+            .quantity_available = u64Field(item, "QuantityAvailable"),
+            .unit_price = numField(item, "UnitPrice"),
+            .product_status = try dupeOpt(allocator, nonEmpty(nestedStr(item, "ProductStatus", "Status"))),
+            .variations = variations,
+        });
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+/// Map a product's `ProductVariations` array to owned `Variation`s, each with
+/// its packaging, live stock, MOQ, and price-break ladder. Empty when absent.
+fn mapVariations(allocator: std.mem.Allocator, product: std.json.Value) std.mem.Allocator.Error![]const Variation {
+    if (product != .object) return &.{};
+    const pv = product.object.get("ProductVariations") orelse return &.{};
+    if (pv != .array) return &.{};
+    var list: std.ArrayListUnmanaged(Variation) = .empty;
+    for (pv.array.items) |v| {
+        try list.append(allocator, .{
+            .digikey_part_number = try dupeOpt(allocator, nonEmpty(strField(v, "DigiKeyProductNumber"))),
+            .package_type = try dupeOpt(allocator, nonEmpty(nestedStr(v, "PackageType", "Name"))),
+            .quantity_available = u64Field(v, "QuantityAvailableforPackageType"),
+            .minimum_order_quantity = u64Field(v, "MinimumOrderQuantity"),
+            .price_breaks = try mapPriceBreaks(allocator, v),
+        });
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+/// Map a variation's `StandardPricing` array to owned `PriceBreak`s. Empty when
+/// absent (e.g. a marketplace part with no public ladder).
+fn mapPriceBreaks(allocator: std.mem.Allocator, variation: std.json.Value) std.mem.Allocator.Error![]const PriceBreak {
+    if (variation != .object) return &.{};
+    const sp = variation.object.get("StandardPricing") orelse return &.{};
+    if (sp != .array) return &.{};
+    var list: std.ArrayListUnmanaged(PriceBreak) = .empty;
+    for (sp.array.items) |b| {
+        try list.append(allocator, .{
+            .break_quantity = u64Field(b, "BreakQuantity"),
+            .unit_price = numField(b, "UnitPrice") orelse 0,
+            .total_price = numField(b, "TotalPrice") orelse 0,
         });
     }
     return list.toOwnedSlice(allocator);
@@ -248,12 +323,30 @@ fn productsArray(root: std.json.Value) ?[]std.json.Value {
     return p.array.items;
 }
 
-/// `ProductVariations[0].DigiKeyProductNumber`, or null when absent.
-fn firstVariationDk(product: std.json.Value) ?[]const u8 {
-    if (product != .object) return null;
-    const pv = product.object.get("ProductVariations") orelse return null;
-    if (pv != .array or pv.array.items.len == 0) return null;
-    return strField(pv.array.items[0], "DigiKeyProductNumber");
+/// `obj[key]` as an f64, or null when missing/not numeric. DigiKey returns
+/// prices as JSON floats and quantities as integers; both decode here.
+fn numField(v: std.json.Value, key: []const u8) ?f64 {
+    if (v != .object) return null;
+    return jsonNum(v.object.get(key) orelse return null);
+}
+
+/// A JSON number as f64, spanning the integer / float / number_string encodings
+/// `std.json` may produce. Null for any non-numeric value.
+fn jsonNum(v: std.json.Value) ?f64 {
+    return switch (v) {
+        .integer => |i| @floatFromInt(i),
+        .float => |x| x,
+        .number_string => |s| std.fmt.parseFloat(f64, s) catch null,
+        else => null,
+    };
+}
+
+/// `obj[key]` as a non-negative u64 (floored), or 0 when missing/not numeric —
+/// the natural "unknown == none" reading for a stock or quantity field.
+fn u64Field(v: std.json.Value, key: []const u8) u64 {
+    const n = numField(v, key) orelse return 0;
+    if (n <= 0) return 0;
+    return @intFromFloat(n);
 }
 
 /// `obj[outer][inner]` as a string, or null at any missing/typed-wrong hop.
@@ -495,13 +588,68 @@ test "collectProducts maps the Products array to resolved parts" {
     try std.testing.expectEqual(@as(usize, 0), none.len);
 }
 
+test "collectProducts captures live stock, unit price, status, and price breaks" {
+    // spec: serve/digikey - collectProducts captures live stock, unit price, status, and per-variation price breaks
+    const a = std.testing.allocator;
+    const json =
+        \\{"Products":[
+        \\ {"ManufacturerProductNumber":"INA228AIDGSR",
+        \\  "Manufacturer":{"Name":"Texas Instruments"},
+        \\  "Description":{"ProductDescription":"IC CURRENT/POWER MONITOR"},
+        \\  "QuantityAvailable":15000,"UnitPrice":1.23,
+        \\  "ProductStatus":{"Id":0,"Status":"Active"},
+        \\  "ProductVariations":[
+        \\   {"DigiKeyProductNumber":"296-INA228-NDCT","PackageType":{"Name":"Cut Tape (CT)"},
+        \\    "QuantityAvailableforPackageType":15000,"MinimumOrderQuantity":1,
+        \\    "StandardPricing":[{"BreakQuantity":1,"UnitPrice":1.23,"TotalPrice":1.23},
+        \\     {"BreakQuantity":10,"UnitPrice":0.98,"TotalPrice":9.80}]},
+        \\   {"DigiKeyProductNumber":"296-INA228-NDTR","PackageType":{"Name":"Tape & Reel (TR)"},
+        \\    "QuantityAvailableforPackageType":3000,"MinimumOrderQuantity":3000,
+        \\    "StandardPricing":[]}]},
+        \\ {"ManufacturerProductNumber":"NOSTOCK","Manufacturer":{"Name":"Acme"}}
+        \\]}
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, json, .{});
+    defer parsed.deinit();
+    const ps = try collectProducts(a, parsed.value, 10);
+    defer freeProducts(a, ps);
+    try std.testing.expectEqual(@as(usize, 2), ps.len);
+
+    // Product-level stock / price / lifecycle come off the same response.
+    try std.testing.expectEqual(@as(u64, 15000), ps[0].quantity_available);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.23), ps[0].unit_price.?, 1e-9);
+    try std.testing.expectEqualStrings("Active", ps[0].product_status.?);
+    // The top-level DK number tracks the first (default) packaging variation.
+    try std.testing.expectEqualStrings("296-INA228-NDCT", ps[0].digikey_part_number.?);
+
+    // Each packaging variation carries its own stock, MOQ, and price ladder.
+    try std.testing.expectEqual(@as(usize, 2), ps[0].variations.len);
+    const ct = ps[0].variations[0];
+    try std.testing.expectEqualStrings("Cut Tape (CT)", ct.package_type.?);
+    try std.testing.expectEqual(@as(u64, 15000), ct.quantity_available);
+    try std.testing.expectEqual(@as(u64, 1), ct.minimum_order_quantity);
+    try std.testing.expectEqual(@as(usize, 2), ct.price_breaks.len);
+    try std.testing.expectEqual(@as(u64, 10), ct.price_breaks[1].break_quantity);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.98), ct.price_breaks[1].unit_price, 1e-9);
+    // A reel with no published ladder maps to an empty price_breaks slice.
+    try std.testing.expectEqual(@as(u64, 3000), ps[0].variations[1].minimum_order_quantity);
+    try std.testing.expectEqual(@as(usize, 0), ps[0].variations[1].price_breaks.len);
+
+    // A product with no stock/price/variations fields reads as zero/null/empty.
+    try std.testing.expectEqual(@as(u64, 0), ps[1].quantity_available);
+    try std.testing.expect(ps[1].unit_price == null);
+    try std.testing.expect(ps[1].product_status == null);
+    try std.testing.expectEqual(@as(usize, 0), ps[1].variations.len);
+}
+
 /// Test-only: free the joined terms + backing slice of a variant list.
 fn freeVariants(a: std.mem.Allocator, variants: []const []const u8) void {
     for (variants) |v| a.free(v);
     a.free(variants);
 }
 
-/// Test-only: free the owned strings + backing slice of a `Product` list.
+/// Test-only: free the owned strings + backing slice of a `Product` list,
+/// including each product's per-packaging variations and their price ladders.
 fn freeProducts(a: std.mem.Allocator, products: []Product) void {
     for (products) |p| {
         a.free(p.mpn);
@@ -510,6 +658,13 @@ fn freeProducts(a: std.mem.Allocator, products: []Product) void {
         if (p.datasheet_url) |x| a.free(x);
         if (p.product_url) |x| a.free(x);
         if (p.digikey_part_number) |x| a.free(x);
+        if (p.product_status) |x| a.free(x);
+        for (p.variations) |v| {
+            if (v.digikey_part_number) |x| a.free(x);
+            if (v.package_type) |x| a.free(x);
+            a.free(v.price_breaks);
+        }
+        a.free(p.variations);
     }
     a.free(products);
 }
