@@ -498,6 +498,10 @@ pub const Link = struct {
     bx: f64,
     by: f64,
     kind: RatKind,
+    /// Flattened name of the net this airwire belongs to (empty when unknown).
+    /// Carried through so the viewer can colour airwires by net class without
+    /// re-deriving connectivity. Slices the flattened netlist, not owned.
+    net: []const u8 = "",
 };
 
 /// The optimizer's output: placed parts, ratsnest, and the overall bounding
@@ -555,6 +559,9 @@ const Spring = struct {
     by: f64,
     k: f64,
     kind: RatKind,
+    /// Net this spring's airwire belongs to (empty when unknown) — copied onto
+    /// the emitted `Link` so the viewer can colour ratsnest by net class.
+    net: []const u8 = "",
 };
 
 /// One decoupling cap's hot loop. The loop length is measured **edge-to-edge
@@ -6289,9 +6296,9 @@ fn buildSprings(
 
         const single_hub = hub_idx != null and !multi_hub;
         if (single_hub) {
-            try hugToHub(arena, &springs, &loops, &legs, eps.items, hub_idx.?, gnd, roles, explicit_pin, @intCast(net_i));
+            try hugToHub(arena, &springs, &loops, &legs, eps.items, hub_idx.?, gnd, roles, explicit_pin, @intCast(net_i), net.name);
         } else {
-            try weakCluster(arena, &springs, eps.items);
+            try weakCluster(arena, &springs, eps.items, net.name);
         }
     }
     const series = try pairSeriesLegs(arena, legs.items, parts);
@@ -6509,6 +6516,7 @@ fn hugToHub(
     roles: []const pin_roles.PartRoles,
     explicit_pin: []const []const u8,
     net_i: i32,
+    net_name: []const u8,
 ) std.mem.Allocator.Error!void {
     // The hub's pads on this (power) net seed the loop target / hug centroid.
     // Config straps tied to the rail (a declared `input`/`output`/`io` pin such
@@ -6573,7 +6581,17 @@ fn hugToHub(
             });
         } else {
             // Non-decoupling single-hub passive: hug the hub's pad centroid.
-            try springs.append(arena, .{ .a = e.idx, .b = hub, .ax = e.px, .ay = e.py, .bx = ht.x, .by = ht.y, .k = K_PROX, .kind = .proximity });
+            try springs.append(arena, .{
+                .a = e.idx,
+                .b = hub,
+                .ax = e.px,
+                .ay = e.py,
+                .bx = ht.x,
+                .by = ht.y,
+                .k = K_PROX,
+                .kind = .proximity,
+                .net = net_name,
+            });
             // Record the leg — `pairSeriesLegs` turns a 2-pad part with two of
             // these (to the same hub) into a `SeriesPair`.
             try legs.append(arena, .{
@@ -6591,11 +6609,12 @@ fn weakCluster(
     arena: std.mem.Allocator,
     springs: *std.ArrayListUnmanaged(Spring),
     eps: []const Endpoint,
+    net_name: []const u8,
 ) std.mem.Allocator.Error!void {
     const r = eps[0];
     for (eps[1..]) |e| {
         if (e.idx == r.idx) continue;
-        try springs.append(arena, .{ .a = e.idx, .b = r.idx, .ax = 0, .ay = 0, .bx = 0, .by = 0, .k = K_SIG, .kind = .signal });
+        try springs.append(arena, .{ .a = e.idx, .b = r.idx, .ax = 0, .ay = 0, .bx = 0, .by = 0, .k = K_SIG, .kind = .signal, .net = net_name });
     }
 }
 
@@ -7301,6 +7320,7 @@ fn finalize(
             .bx = s.bx,
             .by = s.by,
             .kind = s.kind,
+            .net = s.net,
         };
     }
 

@@ -19,6 +19,7 @@ const optimizer = @import("../placement/optimizer.zig");
 const geometry = @import("../placement/geometry.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
+const module_policy = @import("../placement/module_policy.zig");
 const modules_mod = @import("modules.zig");
 const netlist = @import("../export_kicad_netlist.zig");
 const export_kicad = @import("../export_kicad.zig");
@@ -310,6 +311,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         try w.writeAll("</div>");
         try writeLegend(w, placement, true); // hidden; revealed by the Legend chip
         try writeHeatLegend(w); // hidden; revealed by the Heatmap chip
+        try writeNetLegend(w); // hidden; revealed by the Net colours chip
     }
     if (embed) try writeLegend(w, placement, false);
     // Placement-DSL panel above the board: the spec for the shown layout,
@@ -2619,11 +2621,166 @@ fn writeTabsRow(w: *std.Io.Writer, route_open: bool) std.Io.Writer.Error!void {
         "<button class=\"tab-chip\" data-panel=\"panel-route\" title=\"Autoroute + DRC\">Route</button>");
     try w.writeAll("<span class=\"tabs-sep\"></span>");
     try w.writeAll("<label class=\"view-chip\" " ++
+        "title=\"Give every net its own pad/airwire colour — no-connect white, GND " ++
+        "brown, power warm, each signal net a distinct colour — so connectivity " ++
+        "reads off the board without the schematic\">" ++
+        "<input type=\"checkbox\" id=\"v-netcol\"> Net colours</label>");
+    try w.writeAll("<label class=\"view-chip\" " ++
         "title=\"Tint each part green→red by its share of the objective (cost/blame heatmap)\">" ++
         "<input type=\"checkbox\" id=\"v-heat\"> Heatmap</label>");
     try w.writeAll("<label class=\"view-chip\" title=\"Show the trace / via colour key\">" ++
         "<input type=\"checkbox\" id=\"v-legend\"> Legend</label>");
     try w.writeAll("</div>");
+}
+
+// ── Net-colours view palette ────────────────────────────────────────────────
+// Four buckets, not the full criticality taxonomy: no-connect → white, ground →
+// one brown, power-family → a vivid warm colour (red/orange/yellow band), and
+// every other (signal) net → its own distinct colour spread around the wheel.
+// The goal is "tell the nets apart at a glance", not "label each net's role".
+const NET_BROWN = "#8a5a2b"; // every ground variant (GND/AGND/PGND/…)
+const NET_WHITE = "#ffffff"; // no-connect nets + pads on no net at all
+
+/// `h` in degrees [0,360), `s`/`l` in [0,1] → `"#rrggbb"` written into `buf`.
+fn hslHex(buf: *[7]u8, h: f64, s: f64, l: f64) []const u8 {
+    const c = (1 - @abs(2 * l - 1)) * s;
+    const hp = h / 60.0;
+    const x = c * (1 - @abs(@mod(hp, 2.0) - 1));
+    var r: f64 = 0;
+    var g: f64 = 0;
+    var b: f64 = 0;
+    if (hp < 1) {
+        r = c;
+        g = x;
+    } else if (hp < 2) {
+        r = x;
+        g = c;
+    } else if (hp < 3) {
+        g = c;
+        b = x;
+    } else if (hp < 4) {
+        g = x;
+        b = c;
+    } else if (hp < 5) {
+        r = x;
+        b = c;
+    } else {
+        r = c;
+        b = x;
+    }
+    const m = l - c / 2.0;
+    const rgb = [3]u8{ chan(r + m), chan(g + m), chan(b + m) };
+    const HEXD = "0123456789abcdef";
+    buf[0] = '#';
+    for (rgb, 0..) |v, i| {
+        buf[1 + i * 2] = HEXD[v >> 4];
+        buf[2 + i * 2] = HEXD[v & 0x0f];
+    }
+    return buf[0..7];
+}
+
+fn chan(v: f64) u8 {
+    return @intFromFloat(@round(std.math.clamp(v, 0, 1) * 255));
+}
+
+/// True for a no-connect net name (mirrors `optimizer.isNoConnect`, private).
+fn isNoConnectName(name: []const u8) bool {
+    const s = shortName(name);
+    if (std.mem.eql(u8, s, "NC") or std.mem.eql(u8, s, "DNC")) return true;
+    return std.mem.startsWith(u8, s, "unconnected") or std.mem.startsWith(u8, s, "no_connect");
+}
+
+/// True for a digit-first voltage-rail name — `6V`, `12V`, `3V3`, `5V0`, `1V8`.
+/// The shared `classifyNetName` only treats `V`-prefixed names as power, so these
+/// common rail spellings would otherwise colour as signals. Kept LOCAL to the
+/// colour view (not folded into the classifier) so it can't shift the placement/
+/// router net-class behaviour that consumes `classifyNetName`.
+fn looksLikeVoltageRail(name: []const u8) bool {
+    const s = shortName(name);
+    var i: usize = 0;
+    while (i < s.len and std.ascii.isDigit(s[i])) i += 1;
+    if (i == 0 or i >= s.len) return false; // must start with digit(s)…
+    return std.ascii.toUpper(s[i]) == 'V'; // …immediately followed by 'V'
+}
+
+/// Colour for one net: white (no-connect), brown (ground), a warm colour stepped
+/// through the red→yellow band per power net (`pi`), or a distinct colour stepped
+/// around the rest of the wheel per signal net (`si`). The golden-angle step
+/// (137.508°) keeps consecutive nets far apart in hue so they read as distinct.
+/// `pi`/`si` are bumped so each net in its bucket gets a fresh slot.
+fn netColorHex(name: []const u8, buf: *[7]u8, pi: *usize, si: *usize) []const u8 {
+    if (isNoConnectName(name)) return NET_WHITE;
+    const cls = module_policy.classifyNetName(name);
+    if (cls == .ground) return NET_BROWN;
+    const is_power = cls == .power or cls == .input_rail or cls == .switch_node or looksLikeVoltageRail(name);
+    if (is_power) {
+        const h = @mod(@as(f64, @floatFromInt(pi.*)) * 137.508, 50.0);
+        pi.* += 1;
+        return hslHex(buf, h, 0.92, 0.52);
+    }
+    const h = 60.0 + @mod(@as(f64, @floatFromInt(si.*)) * 137.508, 300.0);
+    si.* += 1;
+    return hslHex(buf, h, 0.72, 0.58);
+}
+
+/// Emit `"links":[ {a,ax,ay,b,bx,by,k,net?}, … ]` — the ratsnest airwires. Each
+/// carries its collapsed `netKey` (when known) so the Net-colours view can tint
+/// it by class.
+fn writeLinks(w: *std.Io.Writer, links: []const optimizer.Link) std.Io.Writer.Error!void {
+    try w.writeAll("\"links\":[");
+    for (links, 0..) |l, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("{{\"a\":{d},\"ax\":{d},\"ay\":{d},", .{ l.a, l.ax, l.ay });
+        try w.print("\"b\":{d},\"bx\":{d},\"by\":{d},\"k\":\"{s}\"", .{ l.b, l.bx, l.by, kindStr(l.kind) });
+        if (l.net.len > 0) {
+            try w.writeAll(",\"net\":");
+            try writeJsonStr(w, netKey(l.net));
+        }
+        try w.writeAll("}");
+    }
+    try w.writeAll("],");
+}
+
+/// Emit `"netcolor":{ "<netKey>":"<hex>", … }` — a per-net colour map keyed by
+/// the same collapsed `netKey` the pad/airwire `net` fields use. The Net-colours
+/// view paints each pad/airwire straight from this (no class indirection): white
+/// for no-connect, brown for ground, warm for power, a distinct colour per signal
+/// net. Dotted bypass-stub nets collapse to one rail key (first net assigns the
+/// slot — same key always lands the same bucket). `netColorHex` walks the buckets
+/// and steps the per-bucket index so distinct nets get distinct colours.
+fn writeNetColors(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement) HandlerError!void {
+    try w.writeAll("\"netcolor\":{");
+    var seen = std.StringHashMap(void).init(alloc);
+    var first = true;
+    var pi: usize = 0;
+    var si: usize = 0;
+    var buf: [7]u8 = undefined;
+    for (p.nets) |net| {
+        const k = netKey(net.name);
+        if (seen.contains(k)) continue;
+        try seen.put(k, {});
+        const hex = netColorHex(net.name, &buf, &pi, &si);
+        if (!first) try w.writeAll(",");
+        first = false;
+        try writeJsonStr(w, k);
+        try w.writeAll(":");
+        try writeJsonStr(w, hex);
+    }
+    try w.writeAll("}");
+}
+
+/// Swatch key for the Net-colours view, shown only while that view is enabled —
+/// the four buckets the per-net colouring uses (signal shown as a spectrum since
+/// every signal net gets its own colour).
+fn writeNetLegend(w: *std.Io.Writer) std.Io.Writer.Error!void {
+    try w.writeAll("<div class=\"net-legend\" id=\"net-legend\" hidden>" ++
+        "<span class=\"net-h\">Net colours</span>" ++
+        "<span class=\"net-sw\"><i style=\"background:" ++ NET_WHITE ++ "\"></i>No-connect</span>" ++
+        "<span class=\"net-sw\"><i style=\"background:" ++ NET_BROWN ++ "\"></i>GND</span>" ++
+        "<span class=\"net-sw\"><i style=\"background:linear-gradient(90deg,#e5484d,#ff924d,#f2cd2e)\"></i>Power</span>" ++
+        "<span class=\"net-sw\"><i style=\"background:linear-gradient(90deg," ++
+        "#3fb950,#2dd4bf,#58a6ff,#bc6bff,#f778ba)\"></i>Signal — one colour per net</span>" ++
+        "<span class=\"muted\">each signal net gets its own colour · ground returns stay as the dashed loop overlay</span></div>");
 }
 
 /// Gradient key for the blame Heatmap, shown only while that view is enabled.
@@ -3077,14 +3234,12 @@ fn writePcbData(
     }
     try w.writeAll("],");
 
-    // Airwires.
-    try w.writeAll("\"links\":[");
-    for (p.links, 0..) |l, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.print("{{\"a\":{d},\"ax\":{d},\"ay\":{d},", .{ l.a, l.ax, l.ay });
-        try w.print("\"b\":{d},\"bx\":{d},\"by\":{d},\"k\":\"{s}\"}}", .{ l.b, l.bx, l.by, kindStr(l.kind) });
-    }
-    try w.writeAll("],");
+    // Airwires (each tagged with its collapsed net name for the Net-colours view).
+    try writeLinks(w, p.links);
+
+    // Per-net colour map the "Net colours" view paints pads + airwires from.
+    try writeNetColors(w, alloc, p);
+    try w.writeAll(",");
 
     // (Single-pin breakout corridors are still reserved in the part keepout and
     // routed by the escape pass — they're no longer drawn as a 2 mm placeholder
@@ -3497,6 +3652,12 @@ const PAGE_CSS =
     \\.heat-legend .heat-bar{width:120px;height:10px;border-radius:5px;border:1px solid #30363d;
     \\  background:linear-gradient(90deg,#15302a,#b8860b,#c0392b)}
     \\.heat-legend .muted{font-size:11px;color:#6e7681}
+    \\.net-legend{display:flex;gap:10px;align-items:center;font-size:12px;color:#8b949e;margin:4px 0 12px;flex-wrap:wrap}
+    \\.net-legend[hidden]{display:none}
+    \\.net-legend .net-h{font-weight:700;color:#f0f6fc}
+    \\.net-legend .net-sw{display:inline-flex;gap:5px;align-items:center;font-size:11px;color:#c9d1d9}
+    \\.net-legend .net-sw i{width:13px;height:13px;border-radius:3px;border:1px solid #30363d;display:inline-block}
+    \\.net-legend .muted{font-size:11px;color:#6e7681}
     \\.pcb-legend[hidden]{display:none}
     \\.pcb-tune{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#8b949e}
     \\.pcb-tune .tune-h{font-weight:700;color:#f0f6fc}
@@ -3607,7 +3768,7 @@ const PAGE_CSS =
     \\.pcb-3d-tools label{display:flex;gap:3px;align-items:center;cursor:pointer}
     \\.pcb-3d-tools .sep{width:1px;height:16px;background:#30363d}
     \\body.mode-3d .pcb-svg,body.mode-3d .pcb-tune,body.mode-3d .pcb-route,body.mode-3d .pcb-tabs,
-    \\body.mode-3d .pcb-panel,body.mode-3d .heat-legend,
+    \\body.mode-3d .pcb-panel,body.mode-3d .heat-legend,body.mode-3d .net-legend,
     \\body.mode-3d .pcb-legend,body.mode-3d .pcb-note,body.mode-3d .pcb-bar{display:none}
     \\/* Live-regen status card — floats over the top of the board (pointer-events
     \\   off) so the optimizer's best-so-far arrangement stays fully visible and
@@ -3779,6 +3940,7 @@ const BOARD_JS =
     \\ PCB.links.forEach(function(l){
     \\   var a=wpt(l.a,l.ax,l.ay),b=wpt(l.b,l.bx,l.by);
     \\   var col=l.k=="proximity"?"#ea580c":(l.k=="ground"?"#22b8cf":"#9aa7b4");
+    \\   if(netColOn){var nc=netColorOf(l.net);if(nc)col=nc;}
     \\   aw(a,b,col,l.k=="signal"?0.7:1.3,l.k=="signal"?0.55:0.9);});
     \\ var routedNow=((PCB.tracks||[]).length>0);
     \\ // Use the server's DRC-safe GND-via drop (cgv/gpv) only while the cap/hub is
@@ -3917,9 +4079,16 @@ const BOARD_JS =
     \\  '<div class="kbd-hint">Esc or click anywhere to close</div></div>';
     \\ document.body.appendChild(kbdOv);kbdOv.addEventListener("click",kbdClose);
     \\}
+    \\// "Typing" = focus is in a TEXT-entry field; only then do the single-key
+    \\// shortcuts (R rotate, ? help) yield to it. A focused checkbox/radio/button/
+    \\// range — e.g. the Net-colours or Heatmap toggle you just clicked — is NOT
+    \\// typing, so R keeps rotating the hovered part. (A bare `INPUT` test used to
+    \\// swallow R after any toggle click.)
+    \\function kbTyping(t){if(!t)return false;if(t.isContentEditable||t.tagName=="TEXTAREA")return true;
+    \\ return t.tagName=="INPUT"&&!/^(checkbox|radio|button|submit|reset|range|color|file)$/i.test(t.type||"text");}
     \\document.addEventListener("keydown",function(ev){
     \\ if(ev.key=="Escape"&&kbdOv){kbdClose();return;}
-    \\ var t=ev.target,typing=t&&(t.tagName=="INPUT"||t.tagName=="TEXTAREA"||t.isContentEditable);
+    \\ var typing=kbTyping(ev.target);
     \\ if(ev.key=="?"&&!typing){ev.preventDefault();kbdToggle();return;}
     \\ if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();
     \\   P[cur].rot=((((P[cur].rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;
@@ -4322,6 +4491,24 @@ const BOARD_JS =
     \\var legCb=document.getElementById("v-legend");
     \\if(legCb)legCb.addEventListener("change",function(){var l=document.getElementById("pcb-legend");
     \\ if(l)l.hidden=!legCb.checked;});
+    \\// ── Net colours: give every net its own colour so connectivity reads off
+    \\//    the board without the schematic. Per-net colour comes straight from
+    \\//    PCB.netcolor[net] (no-connect → white, GND → brown, power → warm,
+    \\//    each signal net → a distinct colour). A pad on NO net is a no-connect
+    \\//    pin → white; off, pads go back to copper. Orthogonal to the heatmap
+    \\//    (which tints courtyards). rats() honours the flag, so re-drawing the
+    \\//    ratsnest re-applies the airwire colours.
+    \\var netColOn=false;
+    \\function netColorOf(nk){if(!nk||!PCB.netcolor)return null;return PCB.netcolor[nk]||null;}
+    \\function applyNetColors(){var pads=gP.querySelectorAll(".pad");
+    \\ for(var i=0;i<pads.length;i++){var pe=pads[i];
+    \\  if(!netColOn){pe.setAttribute("fill","#b08d57");continue;}
+    \\  var nk=pe.getAttribute("data-net");
+    \\  pe.setAttribute("fill",nk?(netColorOf(nk)||"#b08d57"):"#ffffff");}}
+    \\var netColCb=document.getElementById("v-netcol");
+    \\if(netColCb)netColCb.addEventListener("change",function(){netColOn=netColCb.checked;
+    \\ var nl=document.getElementById("net-legend");if(nl)nl.hidden=!netColOn;
+    \\ applyNetColors();rats();});
     \\rats(); showScore(PCB.auto); drawRoute(); drawClr(); drawDrc();
     \\markUnplaced(PCB.placement&&PCB.placement.unplaced);
     \\// ── Cross-probe focus: ?focus=REF (or #REF) selects that part on load —
