@@ -3506,6 +3506,38 @@
   }
   window.addEventListener('hashchange', applyHashFocus);
 
+  // ---- Revision changelog popover ----
+  // The header "Rev <id>" pill (rendered by render_html.zig when the design
+  // declares a (revision …) form with (change …) entries) opens an in-file
+  // changelog. Toggle on click; close on outside-click or Escape. No-op when
+  // the design has no revision/changelog (the pill is a plain span then).
+  (function () {
+    var pill = document.getElementById('rev-pill');
+    var panel = document.getElementById('rev-changelog');
+    if (!pill || !panel) return;
+    var wrap = pill.parentNode;
+    function close() {
+      panel.hidden = true;
+      wrap.classList.remove('open');
+      pill.setAttribute('aria-expanded', 'false');
+    }
+    function open() {
+      panel.hidden = false;
+      wrap.classList.add('open');
+      pill.setAttribute('aria-expanded', 'true');
+    }
+    pill.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (panel.hidden) open(); else close();
+    });
+    document.addEventListener('click', function (e) {
+      if (!panel.hidden && !wrap.contains(e.target)) close();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && !panel.hidden) close();
+    });
+  })();
+
   // ---- Boot ----
   if (!applyHashFocus()) showSectionList();
 })();

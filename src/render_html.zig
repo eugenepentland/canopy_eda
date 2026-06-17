@@ -245,29 +245,50 @@ pub fn renderToHtml(
 }
 
 /// Render the declared board revision as a pill beside the `.sexp` subtitle —
-/// "Rev <id>" plus the date when present, with the in-file changelog as the
-/// hover title so a recipient can see at a glance which spin they hold and
-/// what changed. Renders nothing when the design declares no `(revision …)`.
+/// "Rev <id>" plus the date when present. When the design's `(revision …)`
+/// form carries a `(change …)` changelog the pill becomes a button that opens
+/// an in-file changelog popover (toggled by `schematic_viewer.js`), so a
+/// recipient can see at a glance which spin they hold *and* read what changed
+/// in it. With no changelog the pill is a plain, non-interactive label.
+/// Renders nothing when the design declares no `(revision …)`.
 fn writeRevisionPill(w: *std.Io.Writer, revision: env_mod.Revision) !void {
     if (!revision.present) return;
-    try w.writeAll(" <span class=\"rev-pill\"");
-    if (revision.changes.len > 0) {
-        try w.writeAll(" title=\"");
-        for (revision.changes, 0..) |c, i| {
-            if (i != 0) try w.writeAll("\n");
-            try writeHtmlEscaped(w, c.id);
-            try w.writeAll(" — ");
-            try writeHtmlEscaped(w, c.summary);
-        }
-        try w.writeAll("\"");
+    if (revision.changes.len == 0) {
+        try w.writeAll(" <span class=\"rev-pill\">Rev ");
+        try writeRevisionLabel(w, revision);
+        try w.writeAll("</span>");
+        return;
     }
-    try w.writeAll(">Rev ");
+    // Clickable pill → in-file changelog popover. The "▾" is the open
+    // affordance; the panel ships hidden and is toggled client-side.
+    try w.writeAll(" <span class=\"rev-pill-wrap\">");
+    try w.writeAll("<button type=\"button\" class=\"rev-pill rev-pill-btn\" id=\"rev-pill\" " ++
+        "aria-expanded=\"false\" aria-controls=\"rev-changelog\" title=\"View changelog\">Rev ");
+    try writeRevisionLabel(w, revision);
+    try w.writeAll(" \u{25BE}</button>");
+    try w.writeAll("<div class=\"rev-changelog\" id=\"rev-changelog\" role=\"dialog\" " ++
+        "aria-label=\"Revision changelog\" hidden>");
+    try w.writeAll("<div class=\"rev-cl-head\">Changelog \u{2014} Rev ");
+    try writeRevisionLabel(w, revision);
+    try w.writeAll("</div><ul class=\"rev-cl-list\">");
+    for (revision.changes) |c| {
+        try w.writeAll("<li><span class=\"rev-cl-id\">");
+        try writeHtmlEscaped(w, c.id);
+        try w.writeAll("</span><span class=\"rev-cl-text\">");
+        try writeHtmlEscaped(w, c.summary);
+        try w.writeAll("</span></li>");
+    }
+    try w.writeAll("</ul></div></span>");
+}
+
+/// Write the bare "<id>" / "<id> · <date>" label shared by the rev pill and
+/// its changelog popover header.
+fn writeRevisionLabel(w: *std.Io.Writer, revision: env_mod.Revision) !void {
     try writeHtmlEscaped(w, revision.id);
     if (revision.date.len > 0) {
         try w.writeAll(" · ");
         try writeHtmlEscaped(w, revision.date);
     }
-    try w.writeAll("</span>");
 }
 
 fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: review.Status, schematic_path: []const u8, revision: env_mod.Revision) !void {
