@@ -769,6 +769,15 @@ Public functions: uploadDatasheetApi, listDatasheetsApi, serveDatasheetApi, isPd
 
 - datasheet dedupe ignores re-download counter suffix
 - datasheet stem preserves trailing-digit part numbers
+- edit-footprint locates the component token within the instance form
+
+## serve/edit_assist
+
+Public functions: validateSourceApi, libIndexApi
+
+- lib-index extracts a module's parameter names
+- lib-index handles (param default) pairs
+- lib-index returns no params when the defmodule is absent
 
 ## serve/component_search
 

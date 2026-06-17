@@ -15,6 +15,7 @@ pub const ServeError = std.mem.Allocator.Error ||
 const pages = @import("serve/pages.zig");
 const api = @import("serve/api.zig");
 const edit = @import("serve/edit.zig");
+const edit_assist = @import("serve/edit_assist.zig");
 const library = @import("serve/library.zig");
 const library_3d = @import("serve/library_3d.zig");
 const upload = @import("serve/upload.zig");
@@ -386,6 +387,10 @@ pub fn serve(
     router.get("/api/design-state/:name", api.designStateApi, .{});
     router.get("/api/source/:name", edit.getSourceApi, .{});
     router.post("/api/source/:name", edit.saveSourceApi, .{});
+    // Smart-editor assistance: dry-validate unsaved source (no write) and the
+    // autocomplete library index.
+    router.post("/api/validate/:name", edit_assist.validateSourceApi, .{});
+    router.get("/api/lib-index", edit_assist.libIndexApi, .{});
     router.get("/api/notes/:name", notes.getNotesApi, .{});
     router.put("/api/notes/:name", notes.saveNotesApi, .{});
     router.get("/api/notes/:name/tasks", notes.getTasksApi, .{});
