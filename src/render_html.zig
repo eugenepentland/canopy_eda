@@ -33,6 +33,15 @@ const pinOrder = draw.pinOrder;
 
 const MUTED_EM_DASH = review_html.mutedDash;
 
+// Shared table-row HTML fragments — reused across the port tables and the
+// module-layout checklist so the literals aren't duplicated (guardian's
+// repeated-string-literal check).
+const ROW_TD_CODE_OPEN = "<tr><td><code>";
+const TD_CELL_SEP = "</td><td>";
+const ROW_TD_CLOSE = "</td></tr>";
+const TABLE_DETAILS_CLOSE = "</tbody></table></details>";
+const PILL_WARN = "pill-warn";
+
 const Allocator = std.mem.Allocator;
 
 /// Error set for HTML emit helpers. The writers in this module are
@@ -150,6 +159,12 @@ pub fn renderToHtml(
     try bom_html.writeSchematicBomHtml(allocator, w, block);
     try w.writeAll("</details>");
 
+    // Module-layout checklist — one row per top-level (sub-block …) flagging
+    // whether its module carries a (placement …) spec yet. Surfaced so the
+    // author can confirm every sub-module is laid out before a KiCad hand-off.
+    // Only meaningful when the design actually instantiates modules.
+    if (block.sub_blocks.len > 0) try writeModuleLayoutStatus(w, block);
+
     // Design notes — structured TODO list backed by `<design>.notes.md`.
     // The task list + add form drive /api/notes/:name/tasks/*; the
     // scratchpad textarea round-trips through the raw /api/notes/:name
@@ -227,7 +242,7 @@ pub fn renderToHtml(
     // lists the design's assertions). Keeps the page tail clean.
 
     try w.writeAll("</div>");
-    try writeSidebar(w, review_doc);
+    try writeSidebar(w, review_doc, block.sub_blocks.len > 0);
     try w.writeAll("</div>");
     try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns, check_results, review_doc, schematic_path);
     // Per-sub-block PCB preview wiring — reuses the DESIGN_NAME global declared
@@ -506,7 +521,7 @@ fn countsForRefs(check_results: *const CheckResultMap, refs: []const []const u8)
 /// get a chip when their backing data is non-empty — the renderer skips
 /// the matching `<section>` block in those cases too, so a chip linking to
 /// a missing section would scroll to nowhere.
-fn writeSidebar(w: anytype, review_doc: ?review.ReviewDoc) !void {
+fn writeSidebar(w: anytype, review_doc: ?review.ReviewDoc, has_modules: bool) !void {
     try w.writeAll("<aside class=\"sch-sidebar\" id=\"sch-sidebar\">");
     try w.writeAll("<nav class=\"sb-toc\" aria-label=\"Page contents\">");
     try writeTocChip(w, "page-block-diagram", "Block diagram");
@@ -517,6 +532,7 @@ fn writeSidebar(w: anytype, review_doc: ?review.ReviewDoc) !void {
         if (doc.power_budget.len > 0) try writeTocChip(w, "page-power-budget", "Power budget");
     }
     try writeTocChip(w, "page-bom", "BOM");
+    if (has_modules) try writeTocChip(w, "page-module-layouts", "Module layouts");
     try writeTocChip(w, "page-notes", "Notes");
     try w.writeAll("</nav>");
     try w.writeAll(
@@ -629,14 +645,14 @@ fn writeSection(
     const status_pill: []const u8 = switch (sec.status) {
         .concept => "pill-concept",
         .implemented => "pill-ok",
-        .review => "pill-warn",
+        .review => PILL_WARN,
     };
     try w.writeAll("<div class=\"sec-head\"><h2>");
     try writeHtmlEscaped(w, sec.name);
     try w.print("</h2><span class=\"pill {s}\">{s}</span>", .{ status_pill, @tagName(sec.status) });
     const sec_cov = try coverage.computeSectionCoverage(allocator, block, sec, check_results);
     if (sec_cov.checked > 0) {
-        const cov_class: []const u8 = if (sec_cov.complete == sec_cov.checked) "pill-pass" else "pill-warn";
+        const cov_class: []const u8 = if (sec_cov.complete == sec_cov.checked) "pill-pass" else PILL_WARN;
         try w.print(
             "<span class=\"pill {s}\" title=\"Click 'Coverage' below to see what's checked and what's missing\">{d}/{d} complete</span>",
             .{ cov_class, sec_cov.complete, sec_cov.checked },
@@ -1123,11 +1139,11 @@ fn writeSectionPorts(w: anytype, sec: Section) !void {
     );
     try w.writeAll("<table class=\"ports\"><thead><tr><th>Port</th><th>Dir</th><th>Type</th><th>Voltage</th><th>Role/Protocol</th></tr></thead><tbody>");
     for (sec.ports) |p| {
-        try w.writeAll("<tr><td><code>");
+        try w.writeAll(ROW_TD_CODE_OPEN);
         try writeHtmlEscaped(w, p.name);
         try w.print("</code></td><td>{s}</td><td>{s}</td><td>", .{ @tagName(p.direction), @tagName(p.signal_type) });
         if (p.voltage) |v| try w.print("{d}V", .{v}) else try w.writeAll(MUTED_EM_DASH);
-        try w.writeAll("</td><td>");
+        try w.writeAll(TD_CELL_SEP);
         if (p.protocol.len > 0) {
             try w.writeAll("<code>");
             try writeHtmlEscaped(w, p.protocol);
@@ -1138,9 +1154,9 @@ fn writeSectionPorts(w: anytype, sec: Section) !void {
             try writeHtmlEscaped(w, p.role);
         }
         if (p.protocol.len == 0 and p.role.len == 0) try w.writeAll(MUTED_EM_DASH);
-        try w.writeAll("</td></tr>");
+        try w.writeAll(ROW_TD_CLOSE);
     }
-    try w.writeAll("</tbody></table></details>");
+    try w.writeAll(TABLE_DETAILS_CLOSE);
 }
 
 /// Render the per-section "Boundary contracts" block on the schematic page —
@@ -1168,7 +1184,7 @@ fn writeSectionBoundaryContracts(w: anytype, sec: Section) !void {
     try w.writeAll("</tr></thead><tbody>");
     for (sec.ports) |p| {
         const e = p.electrical orelse continue;
-        try w.writeAll("<tr><td><code>");
+        try w.writeAll(ROW_TD_CODE_OPEN);
         try writeHtmlEscaped(w, p.name);
         try w.print("</code></td><td>{s}</td><td>", .{@tagName(p.direction)});
         if (e.electrical_type) |t| {
@@ -1188,15 +1204,15 @@ fn writeSectionBoundaryContracts(w: anytype, sec: Section) !void {
         } else {
             try w.writeAll(MUTED_EM_DASH);
         }
-        try w.writeAll("</td><td>");
+        try w.writeAll(TD_CELL_SEP);
         if (e.domain.len > 0) {
             try writeHtmlEscaped(w, e.domain);
         } else {
             try w.writeAll(MUTED_EM_DASH);
         }
-        try w.writeAll("</td></tr>");
+        try w.writeAll(ROW_TD_CLOSE);
     }
-    try w.writeAll("</tbody></table></details>");
+    try w.writeAll(TABLE_DETAILS_CLOSE);
 }
 
 fn writeContractVoltCell(w: anytype, v: ?f64) !void {
@@ -1397,6 +1413,89 @@ fn writeSubBlockPcb(w: *std.Io.Writer, slug: []const u8) !void {
     try w.writeAll("<div class=\"sub-pcb-frame-wrap\" hidden>");
     try w.writeAll("<iframe class=\"sub-pcb-frame\" title=\"PCB layout preview\" loading=\"lazy\"></iframe>");
     try w.writeAll("</div></div></details>");
+}
+
+/// "Module layouts" checklist panel — one row per top-level `(sub-block …)`,
+/// flagging whether its module carries a `(placement …)` spec yet. A module
+/// with a spec composes onto the parent board as a fixed macro
+/// (`composeModuleMacros`); one without is placed freely by the parent solver.
+/// The author wants every sub-module laid out before a KiCad hand-off, so the
+/// `<summary>` shows the laid-out tally even when collapsed and the card opens
+/// itself when anything is still missing. A `(reflow)` sub-block is intentionally
+/// re-flowed by the parent and so needs no spec of its own — it doesn't count
+/// as missing. Caller guards on `block.sub_blocks.len > 0`.
+fn writeModuleLayoutStatus(w: *std.Io.Writer, block: *const DesignBlock) !void {
+    var have: usize = 0;
+    var missing: usize = 0;
+    for (block.sub_blocks) |sb| {
+        if (sb.block.placement.present) {
+            have += 1;
+        } else if (!sb.reflow) {
+            missing += 1;
+        }
+    }
+    const total = block.sub_blocks.len;
+    const summary_pill: []const u8 = if (missing == 0) "pill-ok" else PILL_WARN;
+
+    try w.print(
+        "<details id=\"page-module-layouts\" class=\"sch-bom-card page-anchor\"{s}>",
+        .{if (missing > 0) " open" else ""},
+    );
+    try w.print(
+        "<summary>Module layouts <span class=\"pill {s}\">{d}/{d} laid out</span>",
+        .{ summary_pill, have, total },
+    );
+    if (missing > 0) {
+        try w.print(
+            "<span class=\"sch-card-sub muted\">{d} sub-module{s} still need a layout</span>",
+            .{ missing, if (missing == 1) "" else "s" },
+        );
+    }
+    try w.writeAll("</summary>");
+
+    try w.writeAll(
+        "<p class=\"muted\" style=\"font-size:0.85rem;margin:6px 0 10px;\">" ++
+            "Each <code>(sub-block …)</code> whose module declares a <code>(placement …)</code> " ++
+            "spec composes onto the parent board as a fixed macro. Give every sub-module a layout — " ++
+            "open its PCB Layout view and save a placement spec — before exporting to KiCad. " ++
+            "A <code>(reflow)</code> sub-block is placed freely by the parent and needs none.</p>",
+    );
+
+    try w.writeAll("<table><thead><tr><th>Sub-block</th><th>Module</th><th>Layout</th></tr></thead><tbody>");
+    for (block.sub_blocks) |sb| {
+        try w.writeAll(ROW_TD_CODE_OPEN);
+        try writeHtmlEscaped(w, sb.name);
+        try w.writeAll("</code></td><td>");
+        if (sb.source.len > 0) {
+            // Module-name sources (no slash) link to the standalone /modules
+            // viewer where the layout is authored; path-based sub-blocks can't
+            // route there, so show the bare path.
+            if (std.mem.indexOfScalar(u8, sb.source, '/') == null) {
+                try w.writeAll("<a href=\"/modules/");
+                try writeUrlEncoded(w, sb.source);
+                try w.writeAll("\">");
+                try writeHtmlEscaped(w, sb.source);
+                try w.writeAll("</a>");
+            } else {
+                try w.writeAll("<code>");
+                try writeHtmlEscaped(w, sb.source);
+                try w.writeAll("</code>");
+            }
+        } else {
+            try writeHtmlEscaped(w, sb.block.name);
+        }
+        try w.writeAll(TD_CELL_SEP);
+        if (sb.block.placement.present) {
+            try w.writeAll("<span class=\"pill pill-ok\">layout \u{2713}</span>");
+            if (sb.reflow) try w.writeAll(" <span class=\"pill pill-concept\">reflow override</span>");
+        } else if (sb.reflow) {
+            try w.writeAll("<span class=\"pill pill-concept\">reflow — parent places</span>");
+        } else {
+            try w.writeAll("<span class=\"pill pill-warn\">no layout</span>");
+        }
+        try w.writeAll(ROW_TD_CLOSE);
+    }
+    try w.writeAll(TABLE_DETAILS_CLOSE);
 }
 
 /// Wires every sub-block "PCB Layout" panel: on Generate, build the scoped,
