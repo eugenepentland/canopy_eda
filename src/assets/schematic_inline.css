@@ -190,7 +190,7 @@ h3{color:#f0f6fc;font-size:0.95rem;margin:0;}
 .awz-net-opt{padding:4px 9px;cursor:pointer;color:#c9d1d9;font-size:0.8rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
 .awz-net-opt:hover{background:#1f6feb33;}
 /* Layout-tab drag-to-arrange. */
-.dg-edit-bar{position:absolute;top:8px;right:8px;display:flex;gap:6px;align-items:center;z-index:5;}
+.dg-edit-bar{position:absolute;bottom:8px;right:8px;display:flex;gap:6px;align-items:center;z-index:5;}
 .dg-edit-bar button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;padding:4px 10px;font-size:0.78rem;cursor:pointer;font-family:inherit;}
 .dg-edit-bar button:hover{background:#30363d;border-color:#58a6ff;}
 .dg-edit-bar .dg-edit-save{background:#238636;border-color:#2ea043;color:#fff;}
