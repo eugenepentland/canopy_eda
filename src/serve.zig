@@ -391,6 +391,9 @@ pub fn serve(
     // autocomplete library index.
     router.post("/api/validate/:name", edit_assist.validateSourceApi, .{});
     router.get("/api/lib-index", edit_assist.libIndexApi, .{});
+    // Layout-tab drag-to-arrange writeback: splice a regenerated
+    // (diagram-layout …) form into the design source.
+    router.post("/api/diagram-layout/:name", edit_assist.saveDiagramLayoutApi, .{});
     router.get("/api/notes/:name", notes.getNotesApi, .{});
     router.put("/api/notes/:name", notes.saveNotesApi, .{});
     router.get("/api/notes/:name/tasks", notes.getTasksApi, .{});

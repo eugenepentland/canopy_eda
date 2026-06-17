@@ -27,7 +27,9 @@ const evaluator_mod = @import("../eval/evaluator.zig");
 const Evaluator = evaluator_mod.Evaluator;
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
-const HandlerError = @import("edit.zig").HandlerError;
+const edit = @import("edit.zig");
+const HandlerError = edit.HandlerError;
+const paths = @import("../paths.zig");
 
 const HEADER_CORS = "access-control-allow-origin";
 const MAX_SOURCE_BYTES: usize = 10 * 1024 * 1024;
@@ -268,7 +270,171 @@ fn paramNames(group: []const u8) []const u8 {
     return std.mem.trim(u8, group, " \t\n\r");
 }
 
+// ── POST /api/diagram-layout/:name ────────────────────────────────
+
+/// Index of the ')' matching the '(' at `open`, skipping strings and `;`
+/// comments. Returns null when unbalanced.
+fn matchParen(source: []const u8, open: usize) ?usize {
+    var depth: usize = 0;
+    var i = open;
+    var in_str = false;
+    while (i < source.len) : (i += 1) {
+        const c = source[i];
+        if (in_str) {
+            if (c == '\\') {
+                i += 1;
+            } else if (c == '"') in_str = false;
+            continue;
+        }
+        switch (c) {
+            '"' => in_str = true,
+            ';' => while (i < source.len and source[i] != '\n') : (i += 1) {},
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// True when only whitespace precedes byte `pos` on its line — i.e. the form
+/// at `pos` opens a line, so it isn't inside a `;` comment or trailing another
+/// token. Keeps a commented "(layout …)" mention from being mistaken for the
+/// real form.
+fn atLineStart(source: []const u8, pos: usize) bool {
+    var i = pos;
+    while (i > 0) {
+        i -= 1;
+        if (source[i] == '\n') return true;
+        if (source[i] != ' ' and source[i] != '\t') return false;
+    }
+    return true;
+}
+
+/// Find the byte range `[start, end)` of the first top-level `(diagram-layout …)`
+/// or `(layout …)` form, or null when neither exists. Only line-opening matches
+/// count, so a comment mentioning the form is skipped.
+fn findLayoutForm(source: []const u8) ?struct { start: usize, end: usize } {
+    const heads = [_][]const u8{ "(diagram-layout", "(layout" };
+    for (heads) |head| {
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, source, from, head)) |start| {
+            from = start + head.len;
+            // Require a delimiter after the head so "(layout" doesn't match a
+            // longer atom like "(layout-order", and a line-start before it.
+            const after = start + head.len;
+            const delim_ok = after >= source.len or std.mem.indexOfScalar(u8, " \n\t()", source[after]) != null;
+            if (delim_ok and atLineStart(source, start)) {
+                const close = matchParen(source, start) orelse continue;
+                return .{ .start = start, .end = close + 1 };
+            }
+        }
+    }
+    return null;
+}
+
+/// POST /api/diagram-layout/:name — body `{"form":"(diagram-layout …)"}`.
+/// Replaces the design's existing `(diagram-layout …)`/`(layout …)` form (or
+/// inserts the new one just before the design-block's closing paren), then
+/// validates + writes + rebuilds via the normal mutation path. Powers the
+/// Layout tab's drag-to-arrange writeback — the schematic twin of PCB
+/// `spec-save`.
+pub fn saveDiagramLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    res.content_type = .JSON;
+    res.header(HEADER_CORS, "*");
+
+    const name = req.param("name") orelse {
+        res.status = 404;
+        res.body = "{\"ok\":false,\"error\":\"missing name\"}";
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "{\"ok\":false,\"error\":\"no body\"}";
+        return;
+    };
+    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
+        res.status = 400;
+        res.body = "{\"ok\":false,\"error\":\"invalid json\"}";
+        return;
+    };
+    defer parsed.deinit();
+    const form_val = parsed.value.object.get("form") orelse {
+        res.status = 400;
+        res.body = "{\"ok\":false,\"error\":\"missing form\"}";
+        return;
+    };
+    if (form_val != .string or form_val.string.len == 0) {
+        res.status = 400;
+        res.body = "{\"ok\":false,\"error\":\"form must be a non-empty string\"}";
+        return;
+    }
+    const form = form_val.string;
+
+    const path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 500;
+        return;
+    };
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, path, MAX_SOURCE_BYTES) catch {
+        res.status = 404;
+        res.body = "{\"ok\":false,\"error\":\"cannot read design\"}";
+        return;
+    };
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    const w = out.writer(ctx.allocator);
+    if (findLayoutForm(source)) |span| {
+        try w.writeAll(source[0..span.start]);
+        try w.writeAll(form);
+        try w.writeAll(source[span.end..]);
+    } else if (std.mem.indexOf(u8, source, "(design-block")) |db| {
+        const close = matchParen(source, db) orelse {
+            res.status = 400;
+            res.body = "{\"ok\":false,\"error\":\"unbalanced design-block\"}";
+            return;
+        };
+        try w.writeAll(source[0..close]);
+        try w.writeAll("  ");
+        try w.writeAll(form);
+        try w.writeAll("\n");
+        try w.writeAll(source[close..]);
+    } else {
+        res.status = 400;
+        res.body = "{\"ok\":false,\"error\":\"no design-block\"}";
+        return;
+    }
+
+    const result = edit.writeDesignCore(ctx.allocator, ctx.project_dir, name, out.items) catch |err| {
+        res.status = 400;
+        res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"{s}\"}}", .{@errorName(err)});
+        return;
+    };
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
+}
+
 // ── Tests ─────────────────────────────────────────────────────────
+
+test "findLayoutForm finds a diagram-layout form and its bounds" {
+    // spec: serve/edit_assist - diagram-layout writeback locates the existing form
+    const src =
+        \\(design-block "X"
+        \\  (diagram-layout (anchor "a") (place "b" (right-of "a")))
+        \\  (instance "C1" (cap-0402 "1nF")))
+    ;
+    const span = findLayoutForm(src).?;
+    try std.testing.expect(std.mem.startsWith(u8, src[span.start..span.end], "(diagram-layout"));
+    try std.testing.expect(std.mem.endsWith(u8, src[span.start..span.end], ")"));
+    // The legacy alias is found too (forms sit at line start in real files).
+    const legacy = "(design-block \"X\"\n  (layout (anchor \"a\")))";
+    try std.testing.expect(findLayoutForm(legacy) != null);
+    // A commented mention is NOT mistaken for the form.
+    try std.testing.expect(findLayoutForm("(design-block \"X\"\n  ;; see (layout …) below\n  )") == null);
+    // Absent → null.
+    try std.testing.expect(findLayoutForm("(design-block \"X\")") == null);
+}
 
 test "extractModuleParams reads a simple parameter list" {
     // spec: serve/edit_assist - lib-index extracts a module's parameter names

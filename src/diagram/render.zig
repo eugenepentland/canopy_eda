@@ -473,8 +473,14 @@ fn writeNode(arena: Allocator, w: *Writer, gid: u32, node: types.Node, x: f64, y
     const color = rb.categoryColor(node.category);
     const has_link = try openNodeLink(w, node.slug);
     // `data-gid` lets the hover-focus JS find the edges (`data-a`/`data-b`)
-    // touching this block.
-    try w.print("<g class=\"dg-node\" data-gid=\"{d}\">", .{gid});
+    // touching this block; `data-name` carries the full (untruncated) block
+    // name so the Layout-tab drag writeback can regenerate `(place "name" …)`
+    // (the visible label is truncated and the link only carries the slug).
+    try w.writeAll("<g class=\"dg-node\" data-gid=\"");
+    try w.print("{d}", .{gid});
+    try w.writeAll("\" data-name=\"");
+    try writeEscaped(w, node.label);
+    try w.writeAll("\">");
     // Board-edge endpoints (antennas / EMVS cells) get a dashed border.
     const rect_class = if (node.is_boundary) "dg-rect dg-boundary" else "dg-rect";
     // Multi-channel block: draw offset cards behind the main box (back-to-front)

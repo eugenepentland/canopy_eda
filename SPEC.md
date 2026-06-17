@@ -773,11 +773,12 @@ Public functions: uploadDatasheetApi, listDatasheetsApi, serveDatasheetApi, isPd
 
 ## serve/edit_assist
 
-Public functions: validateSourceApi, libIndexApi
+Public functions: validateSourceApi, libIndexApi, saveDiagramLayoutApi
 
 - lib-index extracts a module's parameter names
 - lib-index handles (param default) pairs
 - lib-index returns no params when the defmodule is absent
+- diagram-layout writeback locates the existing form
 
 ## serve/component_search
 

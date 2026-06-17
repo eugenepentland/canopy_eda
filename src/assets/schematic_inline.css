@@ -151,6 +151,42 @@ h3{color:#f0f6fc;font-size:0.95rem;margin:0;}
 .awz-pin-del{background:none;border:none;color:#6e7681;cursor:pointer;font-size:1rem;padding:0 4px;}
 .awz-pin-del:hover{color:#f85149;}
 .awz-add-pin{margin-top:4px;padding:3px 10px;font-size:0.76rem;}
+/* Layout-tab drag-to-arrange. */
+.dg-edit-bar{position:absolute;top:8px;right:8px;display:flex;gap:6px;align-items:center;z-index:5;}
+.dg-edit-bar button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;padding:4px 10px;font-size:0.78rem;cursor:pointer;font-family:inherit;}
+.dg-edit-bar button:hover{background:#30363d;border-color:#58a6ff;}
+.dg-edit-bar .dg-edit-save{background:#238636;border-color:#2ea043;color:#fff;}
+.dg-edit-msg{color:#8b949e;font-size:0.74rem;font-family:system-ui,sans-serif;}
+.dg-svg.dg-editing .dg-node{cursor:move;}
+.dg-svg.dg-editing .dg-node .dg-rect{stroke-dasharray:4 3;}
+/* Drag-to-connect on the schematic. */
+.sch-connect-toggle{position:fixed;bottom:16px;right:16px;z-index:900;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:8px 12px;font-size:0.82rem;cursor:pointer;font-family:inherit;box-shadow:0 4px 14px rgba(0,0,0,0.4);}
+.sch-connect-toggle.on{background:#1f6feb;border-color:#388bfd;color:#fff;}
+body.connect-mode .pin-stub{cursor:crosshair;}
+body.connect-mode .pin-stub:hover line{stroke:#58a6ff !important;stroke-width:2.5 !important;}
+#connect-overlay{position:fixed;inset:0;pointer-events:none;z-index:899;}
+#connect-overlay line{stroke:#58a6ff;stroke-width:2;stroke-dasharray:5 4;}
+/* Structural tree (sidebar). */
+.sb-tree-toggle{display:inline-block;margin:0 0 6px;color:#58a6ff;font-size:0.76rem;cursor:pointer;user-select:none;}
+.sb-tree-sec{margin:2px 0;}
+.sb-tree-sec>summary{cursor:pointer;color:#c9d1d9;font-size:0.82rem;padding:3px 4px;list-style:none;}
+.sb-tree-sec>summary::-webkit-details-marker{display:none;}
+.sb-tree-sec>summary::before{content:"▸";color:#6e7681;font-size:0.7rem;margin-right:5px;display:inline-block;}
+.sb-tree-sec[open]>summary::before{content:"▾";}
+.sb-tree-comp{padding:2px 6px 2px 22px;font-size:0.78rem;color:#8b949e;cursor:pointer;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;display:flex;gap:8px;}
+.sb-tree-comp:hover{background:#161b22;color:#c9d1d9;}
+.sb-tree-ref{color:#58a6ff;flex:0 0 auto;}
+.sb-tree-val{color:#6e7681;}
+/* Split structured↔source panel in the editor. */
+.src-edit-box.has-split .src-edit-cm{border-right:1px solid #21262d;}
+.src-split-wrap{display:flex;flex:1;min-height:0;}
+.src-split-panel{flex:0 0 240px;overflow-y:auto;background:#0d1117;border-bottom:1px solid #21262d;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.78rem;}
+.src-split-panel[hidden]{display:none;}
+.src-split-head{color:#8b949e;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;padding:6px 10px;border-bottom:1px solid #21262d;position:sticky;top:0;background:#0d1117;}
+.src-split-item{padding:3px 10px;cursor:pointer;display:flex;gap:8px;}
+.src-split-item:hover{background:#161b22;}
+.src-split-ref{color:#58a6ff;flex:0 0 auto;}
+.src-split-comp{color:#6e7681;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 /* CodeMirror "eda-dark" theme — matches the GitHub-dark page palette. */
 .cm-s-eda-dark.CodeMirror{background:#0d1117;color:#c9d1d9;}
 .cm-s-eda-dark .CodeMirror-gutters{background:#0d1117;border-right:1px solid #21262d;}

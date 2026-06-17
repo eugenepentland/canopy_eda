@@ -381,6 +381,44 @@
   function wireAddCompBar() {
     var b = detailBox.querySelector('.sb-add-comp');
     if (b) b.addEventListener('click', openAddWizard);
+    var tt = detailBox.querySelector('.sb-tree-toggle');
+    if (tt) tt.addEventListener('click', function () {
+      if (tt.getAttribute('data-mode') === 'tree') showTree(); else showSectionList();
+    });
+  }
+
+  // Structural tree: every section as a collapsible node with its component
+  // rows inline (ref · component · value), a one-glance hierarchy. Section
+  // headers expand/collapse; component rows open the component detail.
+  function showTree() {
+    var bySec = {};
+    (SCH_INDEX.components || []).forEach(function (c) {
+      var k = c.section || '';
+      (bySec[k] = bySec[k] || []).push(c);
+    });
+    var html = addCompBarHtml() + '<span class="sb-tree-toggle" data-mode="list">≣ List view</span>';
+    function compRows(list) {
+      return list.slice().sort(function (a, b) { return cmpPin(a.ref, b.ref); }).map(function (c) {
+        return '<div class="sb-tree-comp" data-ref="' + escapeHtml(c.ref) + '">' +
+          '<span class="sb-tree-ref">' + escapeHtml(c.ref) + '</span>' +
+          '<span>' + escapeHtml(c.component || '') + '</span>' +
+          (c.value ? '<span class="sb-tree-val">' + escapeHtml(c.value) + '</span>' : '') + '</div>';
+      }).join('');
+    }
+    (SCH_INDEX.sections || []).forEach(function (s) {
+      var list = bySec[s.slug] || [];
+      html += '<details class="sb-tree-sec" open><summary>' + escapeHtml(s.name) +
+        ' <span class="muted">(' + list.length + ')</span></summary>' + compRows(list) + '</details>';
+    });
+    if ((bySec[''] || []).length) {
+      html += '<details class="sb-tree-sec" open><summary>(no section) <span class="muted">(' +
+        bySec[''].length + ')</span></summary>' + compRows(bySec['']) + '</details>';
+    }
+    detailBox.innerHTML = html;
+    wireAddCompBar();
+    detailBox.querySelectorAll('.sb-tree-comp[data-ref]').forEach(function (row) {
+      row.addEventListener('click', function () { showComponent(row.getAttribute('data-ref'), true); });
+    });
   }
 
   function showSectionList() {
@@ -391,7 +429,8 @@
       wireAddCompBar();
       return;
     }
-    var html = auditHtml + addCompBarHtml() + '<h4>Sections</h4>';
+    var html = auditHtml + addCompBarHtml() +
+      '<span class="sb-tree-toggle" data-mode="tree">⊞ Tree view</span><h4>Sections</h4>';
     SCH_INDEX.sections.forEach(function (s) {
       var catPill = s.category
         ? '<span class="sb-cat cat-' + s.category + '">' + escapeHtml(s.category) + '</span>'
@@ -2086,6 +2125,7 @@
           '<button type="button" class="src-edit-btn src-snip" data-snip="subblock">sub-block</button>' +
           '<button type="button" class="src-edit-btn src-snip" data-snip="net">net</button>' +
           '<button type="button" class="src-edit-btn src-snip" data-snip="decouple">decouple</button>' +
+          '<button type="button" class="src-edit-btn src-edit-outline" title="Toggle component outline">Outline</button>' +
           '<span class="src-tools-gap"></span>' +
           '<button type="button" class="src-edit-btn src-edit-format" title="Re-indent by paren depth (comments preserved)">Tidy indent</button>' +
         '</div>' +
@@ -2096,7 +2136,13 @@
           '<button type="button" class="src-edit-btn src-find-next" title="Next match (Enter)">↓</button>' +
           '<button type="button" class="src-edit-btn src-find-close" title="Close (Esc)">×</button>' +
         '</div>' +
-        '<div class="src-edit-cm"></div>' +
+        '<div class="src-split-wrap">' +
+          '<div class="src-edit-cm"></div>' +
+          '<div class="src-split-panel" hidden>' +
+            '<div class="src-split-head">Components</div>' +
+            '<div class="src-split-list"></div>' +
+          '</div>' +
+        '</div>' +
         '<div class="src-edit-problems" hidden></div>' +
         '<div class="src-edit-foot">' +
           '<span class="src-edit-status src-status-ok" title="Click to list problems">checking…</span>' +
@@ -2507,6 +2553,43 @@
       scheduleValidate();
     }
     overlay.querySelector('.src-edit-format').addEventListener('click', tidyIndent);
+
+    // ---- Split structured↔source outline ----
+    // A live list of the design's (instance …) forms parsed from the buffer.
+    // Edits to the source update the list (source→structured); clicking a row
+    // jumps the editor to that instance (structured→source navigation).
+    var splitPanel = overlay.querySelector('.src-split-panel');
+    var splitList = overlay.querySelector('.src-split-list');
+    var splitBox = overlay.querySelector('.src-edit-box');
+    function parseInstances(doc) {
+      var re = /\(instance\s+"([^"]+)"\s+(?:\(\s*([^\s)]+)\s+"([^"]*)"\s*\)|([^\s)]+))/g, m, out = [];
+      while ((m = re.exec(doc))) out.push({ ref: m[1], comp: m[2] || m[4] || '', val: m[3] || '', idx: m.index });
+      return out;
+    }
+    function refreshSplit() {
+      if (splitPanel.hidden) return;
+      var doc = cm.getValue();
+      splitList.textContent = '';
+      parseInstances(doc).forEach(function (it) {
+        var row = document.createElement('div');
+        row.className = 'src-split-item';
+        var ref = document.createElement('span'); ref.className = 'src-split-ref'; ref.textContent = it.ref;
+        var comp = document.createElement('span'); comp.className = 'src-split-comp';
+        comp.textContent = it.comp + (it.val ? ' ' + it.val : '');
+        row.appendChild(ref); row.appendChild(comp);
+        row.addEventListener('click', function () {
+          revealEditorLine(state, doc.slice(0, it.idx).split('\n').length - 1);
+        });
+        splitList.appendChild(row);
+      });
+    }
+    overlay.querySelector('.src-edit-outline').addEventListener('click', function () {
+      splitPanel.hidden = !splitPanel.hidden;
+      splitBox.classList.toggle('has-split', !splitPanel.hidden);
+      refreshSplit();
+      setTimeout(function () { cm.refresh(); }, 0);
+    });
+    cm.on('change', refreshSplit);
 
     // ---- Autocomplete ----
     // Custom popup (the vendored bundle has no show-hint addon). Sources:
@@ -2986,6 +3069,245 @@
       node.addEventListener('mouseleave', clearFocus);
     });
   });
+
+  // ---- Layout-tab drag-to-arrange ----
+  // An "Edit layout" toggle on the Layout SVG lets you drag blocks; "Save"
+  // regenerates a (diagram-layout …) from the dragged grid (anchor + a
+  // staircase of right-of / below constraints — the DSL is relative-only) and
+  // POSTs it to /api/diagram-layout, preserving any (group …)/(edge …) lines.
+  var LAYOUT_CELL_W = 484, LAYOUT_CELL_H = 214; // node_w+gap × node_h+gap
+
+  // Map a client (screen) point into the SVG's user coordinate space — robust
+  // to the viewer's zoom/pan because getScreenCTM reflects the live viewBox.
+  function svgPoint(svg, cx, cy) {
+    var pt = svg.createSVGPoint(); pt.x = cx; pt.y = cy;
+    var m = svg.getScreenCTM();
+    if (!m) return { x: cx, y: cy };
+    var p = pt.matrixTransform(m.inverse());
+    return { x: p.x, y: p.y };
+  }
+  // Build a (diagram-layout …) form from placed blocks. Exposed for tests via
+  // window.__buildDiagramForm. `extra` = preserved (group …)/(edge …) lines.
+  function buildDiagramForm(blocks, extra) {
+    if (!blocks.length) return '(diagram-layout)';
+    blocks.forEach(function (b) {
+      b.col = Math.round(b.x / LAYOUT_CELL_W);
+      b.row = Math.round(b.y / LAYOUT_CELL_H);
+    });
+    var rowsMap = {};
+    blocks.forEach(function (b) { (rowsMap[b.row] = rowsMap[b.row] || []).push(b); });
+    var rowKeys = Object.keys(rowsMap).map(Number).sort(function (a, b) { return a - b; });
+    var lines = [], anchor = null, prevRowFirst = null;
+    function q(s) { return '"' + String(s).replace(/"/g, '\\"') + '"'; }
+    rowKeys.forEach(function (rk, ri) {
+      var row = rowsMap[rk].sort(function (a, b) { return a.col - b.col; });
+      row.forEach(function (b, ci) {
+        if (ri === 0 && ci === 0) anchor = b.name;
+        else if (ci === 0) lines.push('(place ' + q(b.name) + ' (below ' + q(prevRowFirst) + '))');
+        else lines.push('(place ' + q(b.name) + ' (right-of ' + q(row[ci - 1].name) + '))');
+      });
+      prevRowFirst = row[0].name;
+    });
+    var body = '  (anchor ' + q(anchor) + ')';
+    if (lines.length) body += '\n  ' + lines.join('\n  ');
+    (extra || []).forEach(function (e) { body += '\n  ' + e; });
+    return '(diagram-layout\n' + body + ')';
+  }
+  if (typeof window !== 'undefined') window.__buildDiagramForm = buildDiagramForm;
+
+  // Extract balanced (group …)/(edge …)/(row …) sub-forms from a diagram-layout
+  // form's text, to preserve them across a drag-driven regeneration.
+  function extractLayoutGroups(src) {
+    var form = src.match(/\((?:diagram-layout|layout)\b/);
+    if (!form) return [];
+    var start = form.index, depth = 0, i = start, inStr = false, body = '';
+    for (; i < src.length; i++) {
+      var c = src[i];
+      body += c;
+      if (inStr) { if (c === '\\') { body += src[++i]; } else if (c === '"') inStr = false; continue; }
+      if (c === '"') inStr = true;
+      else if (c === ';') { while (i < src.length && src[i] !== '\n') body += src[++i] || ''; }
+      else if (c === '(') depth++;
+      else if (c === ')') { depth--; if (depth === 0) break; }
+    }
+    var out = [];
+    var re = /\((?:group|edge|row)\b/g, m;
+    while ((m = re.exec(body))) {
+      var s = m.index, d = 0, j = s, str = false, frag = '';
+      for (; j < body.length; j++) {
+        var ch = body[j]; frag += ch;
+        if (str) { if (ch === '\\') { frag += body[++j]; } else if (ch === '"') str = false; continue; }
+        if (ch === '"') str = true; else if (ch === '(') d++; else if (ch === ')') { d--; if (d === 0) break; }
+      }
+      out.push(frag);
+    }
+    return out;
+  }
+
+  document.querySelectorAll('.dg-svg[data-lod]').forEach(function (svg) {
+    var nodes = svg.querySelectorAll('.dg-node[data-name]');
+    if (nodes.length < 2) return;
+    var bar = document.createElement('div');
+    bar.className = 'dg-edit-bar';
+    bar.innerHTML = '<button type="button" class="dg-edit-toggle">✎ Edit layout</button>' +
+      '<button type="button" class="dg-edit-save" hidden>Save</button>' +
+      '<button type="button" class="dg-edit-cancel" hidden>Cancel</button>' +
+      '<span class="dg-edit-msg"></span>';
+    var parent = svg.parentNode;
+    if (parent) { parent.style.position = parent.style.position || 'relative'; parent.appendChild(bar); }
+    var editing = false, drag = null;
+    var toggle = bar.querySelector('.dg-edit-toggle');
+    var saveBtn = bar.querySelector('.dg-edit-save');
+    var cancelBtn = bar.querySelector('.dg-edit-cancel');
+    var msg = bar.querySelector('.dg-edit-msg');
+
+    function nodeBase(node) {
+      var rect = node.querySelector('rect');
+      return { x: parseFloat(rect.getAttribute('x')) || 0, y: parseFloat(rect.getAttribute('y')) || 0 };
+    }
+    function setEditing(on) {
+      editing = on;
+      svg.classList.toggle('dg-editing', on);
+      toggle.hidden = on; saveBtn.hidden = !on; cancelBtn.hidden = !on;
+      msg.textContent = on ? 'Drag blocks, then Save' : '';
+    }
+    toggle.addEventListener('click', function () { setEditing(true); });
+    cancelBtn.addEventListener('click', function () { window.location.reload(); });
+
+    nodes.forEach(function (node) {
+      node.addEventListener('mousedown', function (e) {
+        if (!editing) return;
+        e.preventDefault(); e.stopPropagation();
+        var tr = node.transform.baseVal.consolidate();
+        var base = { tx: tr ? tr.matrix.e : 0, ty: tr ? tr.matrix.f : 0 };
+        var p0 = svgPoint(svg, e.clientX, e.clientY);
+        drag = { node: node, base: base, p0: p0 };
+      });
+    });
+    window.addEventListener('mousemove', function (e) {
+      if (!drag) return;
+      var p = svgPoint(svg, e.clientX, e.clientY);
+      drag.node.setAttribute('transform', 'translate(' + (drag.base.tx + p.x - drag.p0.x) + ',' + (drag.base.ty + p.y - drag.p0.y) + ')');
+    });
+    window.addEventListener('mouseup', function () { drag = null; });
+
+    saveBtn.addEventListener('click', function () {
+      msg.textContent = 'Saving…';
+      var blocks = [];
+      nodes.forEach(function (node) {
+        var b = nodeBase(node);
+        var tr = node.transform.baseVal.consolidate();
+        blocks.push({ name: node.getAttribute('data-name'), x: b.x + (tr ? tr.matrix.e : 0), y: b.y + (tr ? tr.matrix.f : 0) });
+      });
+      // Preserve groups/edges from the current source, then write back.
+      fetch('/api/source/' + DESIGN_NAME).then(function (r) { return r.json(); })
+        .then(function (j) {
+          var extra = extractLayoutGroups(typeof j.source === 'string' ? j.source : '');
+          var form = buildDiagramForm(blocks, extra);
+          return fetch('/api/diagram-layout/' + DESIGN_NAME, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ form: form })
+          });
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          if (!res || res.ok === false) { msg.textContent = (res && res.error) || 'save failed'; return; }
+          window.location.reload();
+        })
+        .catch(function (e) { msg.textContent = e.message || 'network error'; });
+    });
+  });
+
+  // ---- Drag-to-connect ----
+  // A "Connect" toggle turns the schematic into wiring mode: drag from one pin
+  // stub to another pin (or onto a net wire) to put the source pin on that
+  // net via /api/rewire-pin. A page-level overlay line follows the cursor so
+  // the drag reads across the per-section hub SVGs. Off by default so normal
+  // click-navigation is unaffected.
+  (function setupConnectMode() {
+    if (typeof SCH_VIEW !== 'undefined' && SCH_VIEW === 'module') return; // rewire targets top-level instances
+    if (!document.querySelector('.pin-stub')) return;
+    var toggle = document.createElement('button');
+    toggle.className = 'sch-connect-toggle';
+    toggle.type = 'button';
+    toggle.textContent = '🔌 Connect: off';
+    document.body.appendChild(toggle);
+    var on = false;
+    toggle.addEventListener('click', function () {
+      on = !on;
+      document.body.classList.toggle('connect-mode', on);
+      toggle.classList.toggle('on', on);
+      toggle.textContent = on ? '🔌 Connect: on' : '🔌 Connect: off';
+    });
+
+    var overlay = null, line = null, src = null;
+    function ensureOverlay() {
+      if (overlay) return;
+      overlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      overlay.id = 'connect-overlay';
+      line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      overlay.appendChild(line);
+      document.body.appendChild(overlay);
+    }
+    function pinCenter(el) {
+      var r = el.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }
+    function firstPin(stub) {
+      var p = stub.getAttribute('data-pin') || '';
+      return p.split(',')[0].trim();
+    }
+    // The net a pin currently sits on, from the scene-graph index.
+    function pinNet(ref, pin) {
+      var found = null;
+      (SCH_INDEX.nets || []).forEach(function (n) {
+        (n.members || []).forEach(function (m) {
+          if (m.ref === ref && String(m.pin) === String(pin)) found = n.name;
+        });
+      });
+      return found;
+    }
+    document.addEventListener('mousedown', function (e) {
+      if (!on) return;
+      var stub = e.target.closest && e.target.closest('.pin-stub');
+      if (!stub || !stub.getAttribute('data-ref')) return;
+      e.preventDefault(); e.stopPropagation();
+      ensureOverlay();
+      src = { ref: stub.getAttribute('data-ref'), pin: firstPin(stub) };
+      var c = pinCenter(stub);
+      line.setAttribute('x1', c.x); line.setAttribute('y1', c.y);
+      line.setAttribute('x2', c.x); line.setAttribute('y2', c.y);
+      overlay.style.display = 'block';
+    }, true);
+    window.addEventListener('mousemove', function (e) {
+      if (!src || !line) return;
+      line.setAttribute('x2', e.clientX); line.setAttribute('y2', e.clientY);
+    });
+    window.addEventListener('mouseup', function (e) {
+      if (!src) return;
+      var s = src; src = null;
+      if (overlay) overlay.style.display = 'none';
+      var tgt = document.elementFromPoint(e.clientX, e.clientY);
+      if (!tgt || !tgt.closest) return;
+      var net = null;
+      var netEl = tgt.closest('.net');
+      var pinEl = tgt.closest('.pin-stub');
+      if (netEl) net = netEl.getAttribute('data-net');
+      else if (pinEl) net = pinNet(pinEl.getAttribute('data-ref'), firstPin(pinEl));
+      if (!net) { toggle.textContent = '🔌 no target net'; return; }
+      if (net === pinNet(s.ref, s.pin)) { toggle.textContent = '🔌 already on ' + net; return; }
+      toggle.textContent = '🔌 connecting…';
+      fetch('/api/rewire-pin/' + DESIGN_NAME, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ref: s.ref, pin: s.pin, net: net })
+      })
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+        .then(function (res) {
+          if (!res.ok || !res.j || res.j.ok === false) { toggle.textContent = '🔌 ' + ((res.j && res.j.error) || 'failed'); return; }
+          window.location.reload();
+        })
+        .catch(function () { toggle.textContent = '🔌 error'; });
+    });
+  })();
 
   // ---- Diagram block → section cross-probe ----
   // Every block in the Layout / Power / Clocks / Control / System diagrams is
