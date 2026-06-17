@@ -27,10 +27,78 @@ pub fn indexPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handler
     const modules = collectHomeModules(ctx.allocator, ctx.project_dir, summaries) catch &[_]home_template.ModuleHomeEntry{};
     const now_sec: i64 = @intCast(@divTrunc(clock.nanoTimestamp(), clock.ns_per_s));
 
+    const design_cards = buildDesignCards(ctx.allocator, summaries) catch &[_]home_template.DesignCardVM{};
+    const module_cards = buildModuleCards(ctx.allocator, modules) catch &[_]home_template.ModuleCardVM{};
+
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
-    try home_template.Home.render(.{ summaries, modules, now_sec }, &aw.writer);
+    try home_template.Home.render(.{ design_cards, module_cards, now_sec }, &aw.writer);
     res.body = aw.written();
     res.content_type = .HTML;
+}
+
+/// Pair every design summary with the search haystack the home page's
+/// client-side filter AND-matches query terms against.
+fn buildDesignCards(
+    allocator: std.mem.Allocator,
+    summaries: []const mcp_tools.DesignSummary,
+) ![]home_template.DesignCardVM {
+    const out = try allocator.alloc(home_template.DesignCardVM, summaries.len);
+    for (summaries, out) |s, *card| {
+        card.* = .{ .s = s, .search = try designSearchText(allocator, s) };
+    }
+    return out;
+}
+
+/// Pair every module entry with its search haystack.
+fn buildModuleCards(
+    allocator: std.mem.Allocator,
+    modules: []const home_template.ModuleHomeEntry,
+) ![]home_template.ModuleCardVM {
+    const out = try allocator.alloc(home_template.ModuleCardVM, modules.len);
+    for (modules, out) |m, *card| {
+        card.* = .{ .m = m, .search = try moduleSearchText(allocator, m) };
+    }
+    return out;
+}
+
+/// "design <name> <title> <section…>" — the searchable text for a design
+/// card. The leading "design" tag word makes a query of "design" surface
+/// every design (mirroring the visible type tag).
+fn designSearchText(
+    allocator: std.mem.Allocator,
+    s: mcp_tools.DesignSummary,
+) std.mem.Allocator.Error![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try buf.appendSlice(allocator, "design ");
+    try buf.appendSlice(allocator, s.name);
+    if (s.title.len > 0) {
+        try buf.append(allocator, ' ');
+        try buf.appendSlice(allocator, s.title);
+    }
+    for (s.sections) |sec| {
+        try buf.append(allocator, ' ');
+        try buf.appendSlice(allocator, sec);
+    }
+    return buf.items;
+}
+
+/// "module <name> <params> <doc>" — the searchable text for a module card.
+fn moduleSearchText(
+    allocator: std.mem.Allocator,
+    m: home_template.ModuleHomeEntry,
+) std.mem.Allocator.Error![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try buf.appendSlice(allocator, "module ");
+    try buf.appendSlice(allocator, m.name);
+    if (m.params.len > 0) {
+        try buf.append(allocator, ' ');
+        try buf.appendSlice(allocator, m.params);
+    }
+    if (m.doc.len > 0) {
+        try buf.append(allocator, ' ');
+        try buf.appendSlice(allocator, m.doc);
+    }
+    return buf.items;
 }
 
 /// Join the lib/modules inventory with each design's `modules_used` list so

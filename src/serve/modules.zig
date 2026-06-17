@@ -90,38 +90,6 @@ const COPY_SCRIPT =
     \\</script>
 ;
 
-/// Inline `<script>` that filters the module grid as the user types. Mirrors
-/// the library page's search: split the query into terms and AND-match each
-/// against the card's `data-search` attribute (name + params + doc). Pure
-/// client-side — every module is already on the page.
-const SEARCH_SCRIPT =
-    \\<script>
-    \\(function(){
-    \\ var input=document.getElementById('mod-search');
-    \\ if(!input)return;
-    \\ var cards=Array.prototype.slice.call(document.querySelectorAll('.mod-grid .mod-card'));
-    \\ var count=document.getElementById('mod-count');
-    \\ var empty=document.getElementById('mod-empty');
-    \\ function apply(){
-    \\  var q=input.value.toLowerCase().trim();
-    \\  var terms=q?q.split(/\s+/):[];
-    \\  var shown=0;
-    \\  for(var i=0;i<cards.length;i++){
-    \\   var s=(cards[i].getAttribute('data-search')||'').toLowerCase();
-    \\   var match=true;
-    \\   for(var t=0;t<terms.length;t++){if(s.indexOf(terms[t])<0){match=false;break;}}
-    \\   cards[i].style.display=match?'':'none';
-    \\   if(match)shown++;
-    \\  }
-    \\  count.textContent=q?(shown+' of '+cards.length+' modules'):(cards.length+(cards.length===1?' module':' modules'));
-    \\  if(empty)empty.style.display=shown===0?'':'none';
-    \\ }
-    \\ input.addEventListener('input',apply);
-    \\ apply();
-    \\})();
-    \\</script>
-;
-
 // ── Source resolution ─────────────────────────────────────────────────
 
 /// Reject absolute paths and `..` traversal in a sub-block `source` value.
@@ -392,75 +360,12 @@ fn collectModulesUncached(allocator: std.mem.Allocator, project_dir: []const u8)
     return entries.items;
 }
 
-/// GET /modules — grid of every reusable module under `lib/modules/`.
-pub fn modulesListPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const entries = collectModules(ctx.allocator, ctx.project_dir) catch &[_]ModuleEntry{};
-
-    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
-    const w = &aw.writer;
-    try w.writeAll("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
-    try w.writeAll("<title>Modules</title><style>");
-    try w.writeAll(assets_css.NAVBAR_CSS);
-    try w.writeAll("</style>");
-    try w.writeAll(PAGE_CSS);
-    try w.writeAll("</head><body>");
-    try pages.Navbar.render(.{"modules"}, w);
-    try w.writeAll("<div class=\"mod-wrap\">");
-    try w.writeAll("<h1>Modules</h1>");
-    try w.writeAll("<p class=\"mod-sub\">Reusable <code>(defmodule …)</code> blocks under <code>lib/modules/</code>. " ++
-        "Each is a sealed sub-block that designs import and wire up.</p>");
-
-    if (entries.len == 0) {
-        try w.writeAll("<div class=\"empty-hint\">No modules found in lib/modules/.</div>");
-    } else {
-        try w.writeAll("<input type=\"text\" id=\"mod-search\" class=\"mod-search\" autofocus " ++
-            "placeholder=\"Search modules by name, parameter, or description…\">");
-        try w.writeAll("<div class=\"mod-count\" id=\"mod-count\"></div>");
-        try w.writeAll("<div class=\"mod-grid\">");
-        for (entries) |e| {
-            try w.writeAll("<div class=\"mod-card\" data-search=\"");
-            try writeHtmlEscaped(w, e.name);
-            try w.writeAll(" ");
-            try writeHtmlEscaped(w, e.params);
-            try w.writeAll(" ");
-            try writeHtmlEscaped(w, e.doc);
-            try w.writeAll("\">");
-            try w.writeAll("<div class=\"mod-card-name\">");
-            try writeHtmlEscaped(w, e.name);
-            if (e.params.len > 2) {
-                try w.writeAll(" <span class=\"mod-card-params\">");
-                try writeHtmlEscaped(w, e.params);
-                try w.writeAll("</span>");
-            }
-            try w.writeAll("</div>");
-            if (e.doc.len > 0) {
-                try w.writeAll("<div class=\"mod-card-desc\">");
-                try writeHtmlEscaped(w, e.doc);
-                try w.writeAll("</div>");
-            }
-            try w.writeAll("<div class=\"mod-card-links\">");
-            try w.writeAll("<a class=\"mod-card-link\" href=\"/modules/");
-            try writeUrlEncoded(w, e.name);
-            try w.writeAll("\">View schematic</a>");
-            try w.writeAll("<a class=\"mod-card-link\" href=\"/pcb-layout/");
-            try writeUrlEncoded(w, e.name);
-            try w.writeAll("\">PCB layout</a>");
-            try w.writeAll("<button type=\"button\" class=\"copy-src-btn\" data-src=\"");
-            try writeHtmlEscaped(w, e.name);
-            try w.writeAll("\">Copy source</button>");
-            try w.writeAll("</div></div>");
-        }
-        try w.writeAll("</div>");
-        try w.writeAll("<div class=\"empty-hint\" id=\"mod-empty\" style=\"display:none\">" ++
-            "No modules match your search.</div>");
-    }
-    try w.writeAll("</div>");
-    try w.writeAll(COPY_SCRIPT);
-    try w.writeAll(SEARCH_SCRIPT);
-    try w.writeAll("</body></html>");
-
-    res.body = aw.written();
-    res.content_type = .HTML;
+/// GET /modules — the standalone module list was merged into the home page
+/// (`GET /`), which now lists designs and modules together as one tagged,
+/// searchable grid. Redirect any lingering links there.
+pub fn modulesListPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    res.status = 302;
+    res.header("Location", "/");
 }
 
 // ── GET /modules/:name ────────────────────────────────────────────────
@@ -621,7 +526,7 @@ fn writeSourceOnlyPage(
     try w.writeAll("</style>");
     try w.writeAll(PAGE_CSS);
     try w.writeAll("</head><body>");
-    try pages.Navbar.render(.{"modules"}, w);
+    try pages.Navbar.render(.{"designs"}, w);
     try w.writeAll("<div class=\"mod-wrap\">");
     try w.writeAll("<div class=\"mod-src-head\"><h1>");
     try writeHtmlEscaped(w, name);
@@ -658,16 +563,4 @@ fn writeHtmlEscaped(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
         '"' => try w.writeAll("&quot;"),
         else => try w.writeByte(c),
     };
-}
-
-fn writeUrlEncoded(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    for (s) |c| {
-        const safe = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
-            (c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.' or c == '~';
-        if (safe) {
-            try w.writeByte(c);
-        } else {
-            try w.print("%{X:0>2}", .{c});
-        }
-    }
 }

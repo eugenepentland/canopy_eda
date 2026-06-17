@@ -10,6 +10,21 @@ pub const ModuleHomeEntry = struct {
     used_by: []const []const u8,
 };
 
+/// A design summary paired with the lowercase-friendly haystack the home
+/// page's client-side filter AND-matches query terms against (the "design"
+/// tag word + name + title + section names). Built by the index handler.
+pub const DesignCardVM = struct {
+    s: DesignSummary,
+    search: []const u8,
+};
+
+/// A module entry paired with its search haystack (the "module" tag word +
+/// name + params + doc).
+pub const ModuleCardVM = struct {
+    m: ModuleHomeEntry,
+    search: []const u8,
+};
+
 // zt treats `<style>` as a raw-text element — expressions inside are NOT
 // interpolated, so the entire `<style>…</style>` block ships as a single raw
 // chunk emitted via `{!HOME_STYLE_BLOCK}` in the head.
@@ -47,8 +62,54 @@ const HOME_STYLE_BLOCK: []const u8 = "<style>" ++ @embedFile("../assets/navbar.c
     \\text-align:center;flex:1}
     \\.design-card-link:hover{border-color:#58a6ff;color:#c9d1d9}
     \\.empty-hint{color:#6e7681;font-size:13px;padding:24px;text-align:center}
+    \\.type-row{display:flex;align-items:center}
+    \\.type-tag{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;
+    \\padding:1px 8px;border-radius:10px;border:1px solid #30363d;color:#8b949e}
+    \\.type-tag.design{color:#58a6ff;border-color:#1f6feb}
+    \\.type-tag.module{color:#bc8cff;border-color:#8957e5}
+    \\.home-search{display:block;box-sizing:border-box;width:calc(100% - 32px);margin:8px 16px 4px;
+    \\background:#161b22;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;
+    \\padding:.55rem .75rem;font-size:.95rem;font-family:inherit}
+    \\.home-search:focus{outline:none;border-color:#58a6ff}
+    \\.home-search::placeholder{color:#555}
+    \\.home-count{color:#6e7681;font-size:12px;margin:0 16px 4px}
     \\@media(max-width:600px){.designs-grid{grid-template-columns:1fr;padding:12px;gap:10px}.design-card{padding:16px}}
 ++ "</style>";
+
+// Client-side filter for the unified Designs + Modules grid. Mirrors the
+// library / former /modules search: split the query on whitespace and
+// AND-match each term against the card's `data-search` attribute (name +
+// title/params + sections/doc + the type-tag word). Raw-text block emitted
+// via `{!HOME_SEARCH_SCRIPT}` so zt doesn't try to interpolate the JS.
+const HOME_SEARCH_SCRIPT: []const u8 =
+    \\<script>
+    \\(function(){
+    \\ var input=document.getElementById('home-search');
+    \\ if(!input)return;
+    \\ var grid=document.getElementById('home-grid');
+    \\ var cards=Array.prototype.slice.call(grid.querySelectorAll('.design-card'));
+    \\ var count=document.getElementById('home-count');
+    \\ var empty=document.getElementById('home-empty');
+    \\ var total=cards.length;
+    \\ function apply(){
+    \\  var q=input.value.toLowerCase().trim();
+    \\  var terms=q?q.split(/\s+/):[];
+    \\  var shown=0;
+    \\  for(var i=0;i<cards.length;i++){
+    \\   var s=(cards[i].getAttribute('data-search')||'').toLowerCase();
+    \\   var match=true;
+    \\   for(var t=0;t<terms.length;t++){if(s.indexOf(terms[t])<0){match=false;break;}}
+    \\   cards[i].style.display=match?'':'none';
+    \\   if(match)shown++;
+    \\  }
+    \\  count.textContent=q?(shown+' of '+total+' items'):(total+(total===1?' item':' items'));
+    \\  if(empty)empty.style.display=shown===0?'':'none';
+    \\ }
+    \\ input.addEventListener('input',apply);
+    \\ apply();
+    \\})();
+    \\</script>
+;
 
 const SECONDS_PER_MINUTE: i64 = 60;
 const SECONDS_PER_HOUR: i64 = 3600;
@@ -116,15 +177,15 @@ pub templ Navbar(active: []const u8) {
     <div class="navbar">
         <span class="brand">Netlisp</span>
         <a href="/" class={if (std.mem.eql(u8, active, "designs")) "active" else null}>Designs</a>
-        <a href="/modules" class={if (std.mem.eql(u8, active, "modules")) "active" else null}>Modules</a>
         <a href="/library" class={if (std.mem.eql(u8, active, "library")) "active" else null}>Library</a>
         <a href="/mcp-tools" class={if (std.mem.eql(u8, active, "mcp")) "active" else null}>MCP</a>
         <a href="/account" style="margin-left:auto" class={if (std.mem.eql(u8, active, "account")) "active" else null}>Account</a>
     </div>
 }
 
-pub templ DesignCard(s: DesignSummary, now_sec: i64) {
-    <div class="design-card">
+pub templ DesignCard(s: DesignSummary, search: []const u8, now_sec: i64) {
+    <div class="design-card" data-search={search}>
+        <div class="type-row"><span class="type-tag design">Design</span></div>
         <div class="design-card-header">
             if (hasOwnTitle(s)) {
                 <div class="design-card-title">{s.title}</div>
@@ -186,8 +247,9 @@ pub templ DesignCard(s: DesignSummary, now_sec: i64) {
     </div>
 }
 
-pub templ ModuleCard(m: ModuleHomeEntry) {
-    <div class="design-card">
+pub templ ModuleCard(m: ModuleHomeEntry, search: []const u8) {
+    <div class="design-card" data-search={search}>
+        <div class="type-row"><span class="type-tag module">Module</span></div>
         <div class="design-card-header">
             <div class="design-card-title">{m.name} <span class="mod-params">{m.params}</span></div>
         </div>
@@ -211,36 +273,37 @@ pub templ ModuleCard(m: ModuleHomeEntry) {
     </div>
 }
 
-pub templ Home(summaries: []const DesignSummary, modules: []const ModuleHomeEntry, now_sec: i64) {
+pub templ Home(design_cards: []const DesignCardVM, module_cards: []const ModuleCardVM, now_sec: i64) {
     <!DOCTYPE html>
     <html>
         <head>
             <meta name="viewport" content="width=device-width,initial-scale=1" />
-            <title>Netlisp — Designs</title>
+            <title>Netlisp — Designs &amp; Modules</title>
             {!HOME_STYLE_BLOCK}
         </head>
         <body>
             @Navbar("designs")
             <div style="max-width:960px;margin:0 auto">
-                <h1 style="padding:16px 16px 0;color:#f0f6fc">Designs</h1>
-                <div class="designs-grid">
-                    for (summaries) |s| {
-                        @DesignCard(s, now_sec)
+                <h1 style="padding:16px 16px 0;color:#f0f6fc">Designs &amp; Modules</h1>
+                <p class="mod-sub-note">Every <code>.sexp</code> design and reusable <code>lib/modules/</code> block — tagged and searchable.</p>
+                <input
+                    type="text" id="home-search" class="home-search" autofocus
+                    placeholder="Search designs and modules…" />
+                <div class="home-count" id="home-count"></div>
+                <div class="designs-grid" id="home-grid">
+                    for (design_cards) |c| {
+                        @DesignCard(c.s, c.search, now_sec)
                     }
-                    if (summaries.len == 0) {
-                        <div class="empty-hint">No designs found in src/.</div>
+                    for (module_cards) |c| {
+                        @ModuleCard(c.m, c.search)
+                    }
+                    if (design_cards.len == 0 and module_cards.len == 0) {
+                        <div class="empty-hint">No designs or modules found.</div>
                     }
                 </div>
-                if (modules.len > 0) {
-                    <h1 style="padding:8px 16px 0;color:#f0f6fc">Modules</h1>
-                    <p class="mod-sub-note">Reusable parameterised blocks under lib/modules/.</p>
-                    <div class="designs-grid">
-                        for (modules) |m| {
-                            @ModuleCard(m)
-                        }
-                    </div>
-                }
+                <div class="empty-hint" id="home-empty" style="display:none">No designs or modules match your search.</div>
             </div>
+            {!HOME_SEARCH_SCRIPT}
         </body>
     </html>
 }
