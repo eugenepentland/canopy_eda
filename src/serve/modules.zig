@@ -51,6 +51,12 @@ const PAGE_CSS =
     \\border-radius:6px;text-decoration:none;text-align:center;flex:1;}
     \\.mod-card-link:hover{border-color:#58a6ff;color:#c9d1d9;}
     \\.empty-hint{color:#6e7681;font-size:13px;padding:24px;text-align:center;}
+    \\.mod-search{width:100%;box-sizing:border-box;background:#161b22;border:1px solid #30363d;
+    \\border-radius:6px;color:#c9d1d9;padding:0.55rem 0.75rem;font-size:0.95rem;margin:0 0 8px;
+    \\font-family:inherit;}
+    \\.mod-search:focus{outline:none;border-color:#58a6ff;}
+    \\.mod-search::placeholder{color:#555;}
+    \\.mod-count{color:#6e7681;font-size:12px;margin:0 0 16px;}
     \\.mod-src-head{display:flex;align-items:center;gap:12px;margin:16px 0 8px;}
     \\.mod-src-note{background:#1c2230;border:1px solid #30363d;border-radius:6px;
     \\padding:10px 14px;color:#8b949e;font-size:0.85rem;margin:8px 0 16px;}
@@ -81,6 +87,38 @@ const COPY_SCRIPT =
     \\  .catch(function(){b.textContent='Copy failed';
     \\   setTimeout(function(){b.textContent=o;},1500);});
     \\});
+    \\</script>
+;
+
+/// Inline `<script>` that filters the module grid as the user types. Mirrors
+/// the library page's search: split the query into terms and AND-match each
+/// against the card's `data-search` attribute (name + params + doc). Pure
+/// client-side — every module is already on the page.
+const SEARCH_SCRIPT =
+    \\<script>
+    \\(function(){
+    \\ var input=document.getElementById('mod-search');
+    \\ if(!input)return;
+    \\ var cards=Array.prototype.slice.call(document.querySelectorAll('.mod-grid .mod-card'));
+    \\ var count=document.getElementById('mod-count');
+    \\ var empty=document.getElementById('mod-empty');
+    \\ function apply(){
+    \\  var q=input.value.toLowerCase().trim();
+    \\  var terms=q?q.split(/\s+/):[];
+    \\  var shown=0;
+    \\  for(var i=0;i<cards.length;i++){
+    \\   var s=(cards[i].getAttribute('data-search')||'').toLowerCase();
+    \\   var match=true;
+    \\   for(var t=0;t<terms.length;t++){if(s.indexOf(terms[t])<0){match=false;break;}}
+    \\   cards[i].style.display=match?'':'none';
+    \\   if(match)shown++;
+    \\  }
+    \\  count.textContent=q?(shown+' of '+cards.length+' modules'):(cards.length+(cards.length===1?' module':' modules'));
+    \\  if(empty)empty.style.display=shown===0?'':'none';
+    \\ }
+    \\ input.addEventListener('input',apply);
+    \\ apply();
+    \\})();
     \\</script>
 ;
 
@@ -279,9 +317,18 @@ pub fn modulesListPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) H
     if (entries.len == 0) {
         try w.writeAll("<div class=\"empty-hint\">No modules found in lib/modules/.</div>");
     } else {
+        try w.writeAll("<input type=\"text\" id=\"mod-search\" class=\"mod-search\" autofocus " ++
+            "placeholder=\"Search modules by name, parameter, or description…\">");
+        try w.writeAll("<div class=\"mod-count\" id=\"mod-count\"></div>");
         try w.writeAll("<div class=\"mod-grid\">");
         for (entries) |e| {
-            try w.writeAll("<div class=\"mod-card\">");
+            try w.writeAll("<div class=\"mod-card\" data-search=\"");
+            try writeHtmlEscaped(w, e.name);
+            try w.writeAll(" ");
+            try writeHtmlEscaped(w, e.params);
+            try w.writeAll(" ");
+            try writeHtmlEscaped(w, e.doc);
+            try w.writeAll("\">");
             try w.writeAll("<div class=\"mod-card-name\">");
             try writeHtmlEscaped(w, e.name);
             if (e.params.len > 2) {
@@ -308,9 +355,12 @@ pub fn modulesListPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) H
             try w.writeAll("</div></div>");
         }
         try w.writeAll("</div>");
+        try w.writeAll("<div class=\"empty-hint\" id=\"mod-empty\" style=\"display:none\">" ++
+            "No modules match your search.</div>");
     }
     try w.writeAll("</div>");
     try w.writeAll(COPY_SCRIPT);
+    try w.writeAll(SEARCH_SCRIPT);
     try w.writeAll("</body></html>");
 
     res.body = aw.written();
