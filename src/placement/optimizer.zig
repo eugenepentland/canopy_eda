@@ -562,6 +562,17 @@ const Spring = struct {
     /// Net this spring's airwire belongs to (empty when unknown) — copied onto
     /// the emitted `Link` so the viewer can colour ratsnest by net class.
     net: []const u8 = "",
+    /// Footprint-local pad offsets the rendered `Link` draws *from* (mm). The
+    /// force uses `ax/ay/bx/by`; a weak inter-hub `.signal` spring keeps those at
+    /// the part centre (0,0) so the tuned force model is unchanged, but the drawn
+    /// airwire should still join the real pads — so it carries them here. Default
+    /// 0; `weakCluster` is the only place force-centre ≠ draw-pad, and the
+    /// link-build reads these only for `.signal` springs. Proximity/loop springs
+    /// already hold pads in `ax/ay`, so their draw offsets equal the force ones.
+    dax: f64 = 0,
+    day: f64 = 0,
+    dbx: f64 = 0,
+    dby: f64 = 0,
 };
 
 /// One decoupling cap's hot loop. The loop length is measured **edge-to-edge
@@ -6605,6 +6616,11 @@ fn hugToHub(
 }
 
 /// Weak centre-to-centre pull among a net's endpoints (no single hub to hug).
+/// The *force* stays centre-to-centre (the historical, tuned behaviour for these
+/// weak K_SIG springs), but each spring records its two endpoints' pad offsets so
+/// the rendered ratsnest joins the real pads — e.g. on a multi-hub net like a
+/// crystal wired to an MCU (both `U`-prefixed → both hubs) the airwire runs
+/// pin-to-pin, not box-centre to box-centre.
 fn weakCluster(
     arena: std.mem.Allocator,
     springs: *std.ArrayListUnmanaged(Spring),
@@ -6614,7 +6630,21 @@ fn weakCluster(
     const r = eps[0];
     for (eps[1..]) |e| {
         if (e.idx == r.idx) continue;
-        try springs.append(arena, .{ .a = e.idx, .b = r.idx, .ax = 0, .ay = 0, .bx = 0, .by = 0, .k = K_SIG, .kind = .signal, .net = net_name });
+        try springs.append(arena, .{
+            .a = e.idx,
+            .b = r.idx,
+            .ax = 0,
+            .ay = 0,
+            .bx = 0,
+            .by = 0,
+            .k = K_SIG,
+            .kind = .signal,
+            .net = net_name,
+            .dax = e.px,
+            .day = e.py,
+            .dbx = r.px,
+            .dby = r.py,
+        });
     }
 }
 
@@ -7312,13 +7342,18 @@ fn finalize(
 
     var links = try arena.alloc(Link, springs.len);
     for (springs, 0..) |s, i| {
+        // A `.signal` spring pulls part centres (its tuned force) but should be
+        // *drawn* pad-to-pad — so the inter-hub ratsnest reads pin-to-pin. Its
+        // draw offsets live in `dax/…`; every other spring already holds the pad
+        // offsets in `ax/…`, so the force and draw endpoints coincide.
+        const pads = s.kind == .signal;
         links[i] = .{
             .a = s.a,
             .b = s.b,
-            .ax = s.ax,
-            .ay = s.ay,
-            .bx = s.bx,
-            .by = s.by,
+            .ax = if (pads) s.dax else s.ax,
+            .ay = if (pads) s.day else s.ay,
+            .bx = if (pads) s.dbx else s.bx,
+            .by = if (pads) s.dby else s.by,
             .kind = s.kind,
             .net = s.net,
         };
