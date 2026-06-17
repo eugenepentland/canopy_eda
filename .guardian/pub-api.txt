@@ -1014,8 +1014,10 @@ src/serve/templates/mcp_docs.zig::ParamRow struct_
 src/serve/templates/mcp_docs.zig::ToolCard struct_
 src/serve/templates/oauth.zig::Authorize struct_
 src/serve/templates/pages.zig::DesignCard struct_
+src/serve/templates/pages.zig::DesignCardVM struct_
 src/serve/templates/pages.zig::Home struct_
 src/serve/templates/pages.zig::ModuleCard struct_
+src/serve/templates/pages.zig::ModuleCardVM struct_
 src/serve/templates/pages.zig::ModuleHomeEntry struct_
 src/serve/templates/pages.zig::Navbar struct_
 src/serve/templates/pdf_viewer.zig::Page struct_
