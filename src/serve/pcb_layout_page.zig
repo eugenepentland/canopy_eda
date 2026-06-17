@@ -2609,6 +2609,10 @@ fn writeLayDelta(w: *std.Io.Writer, s: LayoutScore, auto: LayoutScore) std.Io.Wr
 /// (the blame Heatmap tint and the trace Legend). The Route chip starts active
 /// when the page loaded already routed, so its status panel is visible without a
 /// click. All behaviour is wired in BOARD_JS by the `data-panel` / id hooks.
+/// Opening tag shared by the board-view toggle chips (Ratsnest / Net colours /
+/// Heatmap / Legend) — extracted so the repeated literal stays in one place.
+const VIEW_CHIP_OPEN = "<label class=\"view-chip\" ";
+
 fn writeTabsRow(w: *std.Io.Writer, route_open: bool) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-tabs\">");
     try w.writeAll("<button class=\"tab-chip\" data-panel=\"panel-tune\" " ++
@@ -2620,15 +2624,19 @@ fn writeTabsRow(w: *std.Io.Writer, route_open: bool) std.Io.Writer.Error!void {
     else
         "<button class=\"tab-chip\" data-panel=\"panel-route\" title=\"Autoroute + DRC\">Route</button>");
     try w.writeAll("<span class=\"tabs-sep\"></span>");
-    try w.writeAll("<label class=\"view-chip\" " ++
+    try w.writeAll(VIEW_CHIP_OPEN ++
+        "title=\"Show the ratsnest airwires + decoupling-loop overlays (pin-to-pin) — " ++
+        "uncheck to hide them and read the bare placement\">" ++
+        "<input type=\"checkbox\" id=\"v-rats\" checked> Ratsnest</label>");
+    try w.writeAll(VIEW_CHIP_OPEN ++
         "title=\"Give every net its own pad/airwire colour — no-connect white, GND " ++
         "brown, power warm, each signal net a distinct colour — so connectivity " ++
         "reads off the board without the schematic\">" ++
         "<input type=\"checkbox\" id=\"v-netcol\"> Net colours</label>");
-    try w.writeAll("<label class=\"view-chip\" " ++
+    try w.writeAll(VIEW_CHIP_OPEN ++
         "title=\"Tint each part green→red by its share of the objective (cost/blame heatmap)\">" ++
         "<input type=\"checkbox\" id=\"v-heat\"> Heatmap</label>");
-    try w.writeAll("<label class=\"view-chip\" title=\"Show the trace / via colour key\">" ++
+    try w.writeAll(VIEW_CHIP_OPEN ++ "title=\"Show the trace / via colour key\">" ++
         "<input type=\"checkbox\" id=\"v-legend\"> Legend</label>");
     try w.writeAll("</div>");
 }
@@ -3937,6 +3945,7 @@ const BOARD_JS =
     \\ x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),stroke:col,"stroke-width":sw,opacity:op}));}
     \\function rats(){
     \\ while(gR.firstChild)gR.removeChild(gR.firstChild);
+    \\ if(!ratsOn)return;
     \\ PCB.links.forEach(function(l){
     \\   var a=wpt(l.a,l.ax,l.ay),b=wpt(l.b,l.bx,l.by);
     \\   var col=l.k=="proximity"?"#ea580c":(l.k=="ground"?"#22b8cf":"#9aa7b4");
@@ -4499,6 +4508,12 @@ const BOARD_JS =
     \\//    (which tints courtyards). rats() honours the flag, so re-drawing the
     \\//    ratsnest re-applies the airwire colours.
     \\var netColOn=false;
+    \\// ── Ratsnest toggle: the airwires + decoupling-loop overlays live in gR;
+    \\//    rats() honours this flag (early-returns after clearing), so once off they
+    \\//    stay hidden through drags/rotations until toggled back on.
+    \\var ratsOn=true;
+    \\var ratsCb=document.getElementById("v-rats");
+    \\if(ratsCb)ratsCb.addEventListener("change",function(){ratsOn=ratsCb.checked;rats();});
     \\function netColorOf(nk){if(!nk||!PCB.netcolor)return null;return PCB.netcolor[nk]||null;}
     \\function applyNetColors(){var pads=gP.querySelectorAll(".pad");
     \\ for(var i=0;i<pads.length;i++){var pe=pads[i];
