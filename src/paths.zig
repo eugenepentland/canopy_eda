@@ -53,6 +53,16 @@ pub fn designSiblingPath(
 
     if (try findUniqueInSrc(allocator, project_dir, filename)) |found| return found;
 
+    // A `lib/modules/<name>.sexp` defmodule is editable too (the schematic
+    // viewer's "Edit src" works on module pages). When no design source exists
+    // under `src/` but a module of that name does, resolve the sibling next to
+    // the module file so reads, snapshots, and saves all target it.
+    const mod_sexp = try std.fmt.allocPrint(allocator, "{s}/lib/modules/{s}.sexp", .{ project_dir, name });
+    defer allocator.free(mod_sexp);
+    if (infra_fs.cwd().access(mod_sexp, .{})) |_| {
+        return std.fmt.allocPrint(allocator, "{s}/lib/modules/{s}{s}", .{ project_dir, name, ext });
+    } else |_| {}
+
     return std.fmt.allocPrint(allocator, "{s}/src/{s}", .{ project_dir, filename });
 }
 
