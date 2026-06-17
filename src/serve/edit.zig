@@ -35,6 +35,7 @@ const JSON_PINS_KEY = "\"pins\"";
 const COMPONENT_PATH_TEMPLATE = "{s}/lib/components/{s}.sexp";
 const INSTANCE_OPEN_TEMPLATE = "(instance \"{s}\"";
 const SECTION_OPEN_TEMPLATE = "(section \"{s}\"";
+const IMPORT_OPEN = "(import ";
 
 const HEADER_CORS_ALLOW_ORIGIN = "access-control-allow-origin";
 const ERR_CANNOT_READ_FILE = "cannot read file";
@@ -350,7 +351,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 
     // Ensure new component is in the import statement
     var final_source = new_source.items;
-    if (std.mem.indexOf(u8, final_source, "(import ")) |import_start| {
+    if (std.mem.indexOf(u8, final_source, IMPORT_OPEN)) |import_start| {
         var depth: u32 = 0;
         var import_end: usize = import_start;
         for (final_source[import_start..], 0..) |ch, i| {
@@ -450,7 +451,10 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 }
 
 /// POST /api/add-instance/:name
-/// Body: {"section":"Power","component":"cap-0402","value":"100nF","pins":{"1":"VDD","2":"GND"}}
+/// Component body: {"section":"Power","component":"cap-0402","value":"100nF","pins":{"1":"VDD","2":"GND"}}
+/// Module body:    {"kind":"module","component":"tpsm84338","name":"pwr","args":"(rfbt 220k) (rfbb 47k)"}
+/// A module emits a top-level (sub-block "<name>" (<module> <args>)); the
+/// section field is ignored for modules (sub-blocks are not evaluated in a section).
 pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -475,6 +479,25 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     // form requires a ref-des string first arg, so this must never be empty.
     const ref_arg = parseJsonString(body, "\"ref\"") orelse "";
     const label = if (ref_arg.len > 0) ref_arg else component;
+
+    // `kind:"module"` emits a (sub-block "<name>" (<module> <args>)) instead of
+    // an (instance …). Modules live at design-block top level (they are not
+    // evaluated inside a (section …)), so the section field is ignored for them.
+    // `args` is the already-formatted inside-parens text (named "(rfbt 220k)" or
+    // positional "220k 47k"); empty for a fully-defaulted module.
+    const kind = parseJsonString(body, "\"kind\"") orelse "component";
+    const is_module = std.mem.eql(u8, kind, "module");
+    const sub_name = blk: {
+        const n = parseJsonString(body, "\"name\"") orelse "";
+        break :blk if (n.len > 0) n else component;
+    };
+    const mod_args = parseJsonString(body, "\"args\"") orelse "";
+    // When the part needs a top-level (import …) to resolve — every module, and
+    // any non-family component (an IC) — the client sets "import":true and we
+    // splice one in (idempotent) so the rebuilt design evaluates. Component
+    // families (cap-0402, res-0805, …) auto-load, so the flag is omitted there.
+    const want_import = std.mem.indexOf(u8, body, "\"import\":true") != null or
+        std.mem.indexOf(u8, body, "\"import\": true") != null;
 
     // Read source file
     const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
@@ -521,31 +544,52 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
         }
     }
 
-    // Build the instance form
+    // Build the form — a (sub-block …) for modules, otherwise an (instance …).
     var inst_form: std.ArrayListUnmanaged(u8) = .empty;
     const iw = inst_form.writer(ctx.allocator);
-    if (value.len > 0) {
-        try iw.print("  (instance \"{s}\" ({s} \"{s}\")", .{ label, component, value });
+    if (is_module) {
+        if (mod_args.len > 0) {
+            try iw.print("  (sub-block \"{s}\" ({s} {s}))\n", .{ sub_name, component, mod_args });
+        } else {
+            try iw.print("  (sub-block \"{s}\" ({s}))\n", .{ sub_name, component });
+        }
     } else {
-        try iw.print("  (instance \"{s}\" {s}", .{ label, component });
+        if (value.len > 0) {
+            try iw.print("  (instance \"{s}\" ({s} \"{s}\")", .{ label, component, value });
+        } else {
+            try iw.print("  (instance \"{s}\" {s}", .{ label, component });
+        }
+        try iw.writeAll(pin_str.items);
+        try iw.writeAll(")\n");
     }
-    try iw.writeAll(pin_str.items);
-    try iw.writeAll(")\n");
+
+    // Splice a top-level (import <component>) just before (design-block when the
+    // part needs one and it isn't already imported. Everything below operates on
+    // this augmented buffer.
+    const eff_source: []const u8 = if (want_import and !hasImport(source, component)) blk: {
+        const anchor = std.mem.indexOf(u8, source, "(design-block") orelse break :blk source;
+        var aug: std.ArrayListUnmanaged(u8) = .empty;
+        const aw = aug.writer(ctx.allocator);
+        try aw.writeAll(source[0..anchor]);
+        try aw.print("{s}{s})\n", .{ IMPORT_OPEN, component });
+        try aw.writeAll(source[anchor..]);
+        break :blk aug.items;
+    } else source;
 
     // Find insertion point: inside section if specified, otherwise before last closing paren
     var new_source: std.ArrayListUnmanaged(u8) = .empty;
     const nw = new_source.writer(ctx.allocator);
 
-    if (section.len > 0) {
+    if (!is_module and section.len > 0) {
         // Find (section "Name" ...) and insert before its closing paren
         const sec_needle = try std.fmt.allocPrint(ctx.allocator, SECTION_OPEN_TEMPLATE, .{section});
         defer ctx.allocator.free(sec_needle);
 
-        if (std.mem.indexOf(u8, source, sec_needle)) |sec_start| {
+        if (std.mem.indexOf(u8, eff_source, sec_needle)) |sec_start| {
             // Find matching closing paren
             var depth: u32 = 0;
             var sec_end: usize = sec_start;
-            for (source[sec_start..], 0..) |ch, i| {
+            for (eff_source[sec_start..], 0..) |ch, i| {
                 if (ch == '(') depth += 1;
                 if (ch == ')') {
                     depth -= 1;
@@ -555,24 +599,24 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
                     }
                 }
             }
-            try nw.writeAll(source[0..sec_end]);
+            try nw.writeAll(eff_source[0..sec_end]);
             try nw.writeAll("\n");
             try nw.writeAll(inst_form.items);
-            try nw.writeAll(source[sec_end..]);
+            try nw.writeAll(eff_source[sec_end..]);
         } else {
             // Section not found, insert at end
-            const last_paren = std.mem.lastIndexOfScalar(u8, source, ')') orelse source.len;
-            try nw.writeAll(source[0..last_paren]);
+            const last_paren = std.mem.lastIndexOfScalar(u8, eff_source, ')') orelse eff_source.len;
+            try nw.writeAll(eff_source[0..last_paren]);
             try nw.writeAll("\n");
             try nw.writeAll(inst_form.items);
-            try nw.writeAll(source[last_paren..]);
+            try nw.writeAll(eff_source[last_paren..]);
         }
     } else {
-        const last_paren = std.mem.lastIndexOfScalar(u8, source, ')') orelse source.len;
-        try nw.writeAll(source[0..last_paren]);
+        const last_paren = std.mem.lastIndexOfScalar(u8, eff_source, ')') orelse eff_source.len;
+        try nw.writeAll(eff_source[0..last_paren]);
         try nw.writeAll("\n");
         try nw.writeAll(inst_form.items);
-        try nw.writeAll(source[last_paren..]);
+        try nw.writeAll(eff_source[last_paren..]);
     }
 
     // Write file
@@ -967,6 +1011,26 @@ fn parseJsonString(body: []const u8, key: []const u8) ?[]const u8 {
     start += 1; // skip opening quote
     const end = std.mem.indexOfPos(u8, body, start, "\"") orelse return null;
     return body[start..end];
+}
+
+/// True when `source` already has a top-level `(import <name>)`. Token-aware so
+/// `(import foo)` does not match a request to import `foobar`.
+fn hasImport(source: []const u8, name: []const u8) bool {
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, source, from, IMPORT_OPEN)) |p| {
+        from = p + IMPORT_OPEN.len;
+        var q = from;
+        while (q < source.len and source[q] == ' ') : (q += 1) {}
+        if (std.mem.startsWith(u8, source[q..], name)) {
+            const after = q + name.len;
+            if (after >= source.len) return true;
+            switch (source[after]) {
+                ' ', ')', '\n', '\t', '\r' => return true,
+                else => {},
+            }
+        }
+    }
+    return false;
 }
 
 // ── Core mutation API (shared between HTTP handlers and MCP tools) ───────

@@ -151,6 +151,25 @@ h3{color:#f0f6fc;font-size:0.95rem;margin:0;}
 .awz-pin-del{background:none;border:none;color:#6e7681;cursor:pointer;font-size:1rem;padding:0 4px;}
 .awz-pin-del:hover{color:#f85149;}
 .awz-add-pin{margin-top:4px;padding:3px 10px;font-size:0.76rem;}
+.awz-search-wrap{margin-bottom:12px;}
+.awz-search{width:100%;box-sizing:border-box;background:#010409;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:7px 10px;font-size:0.86rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
+.awz-search:focus{outline:none;border-color:#58a6ff;}
+.awz-results{margin-top:6px;max-height:200px;overflow-y:auto;border:1px solid #21262d;border-radius:6px;}
+.awz-result{display:flex;align-items:center;gap:8px;padding:5px 9px;cursor:pointer;border-bottom:1px solid #161b22;}
+.awz-result:last-child{border-bottom:none;}
+.awz-result:hover{background:#161b22;}
+.awz-result.sel{background:#1f6feb33;}
+.awz-rname{color:#c9d1d9;font-size:0.82rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
+.awz-badge{flex:0 0 auto;font-size:0.62rem;text-transform:uppercase;letter-spacing:0.04em;padding:1px 6px;border-radius:9px;border:1px solid #30363d;color:#8b949e;}
+.awz-badge.module{color:#d2a8ff;border-color:#8957e5;}
+.awz-badge.family{color:#7ee787;border-color:#2ea043;}
+.awz-badge.part{color:#79c0ff;border-color:#1f6feb;}
+.awz-phint{color:#6e7681;font-size:0.72rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-left:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:45%;}
+.awz-empty{padding:10px;color:#6e7681;font-size:0.8rem;text-align:center;}
+.awz-detail:empty{display:none;}
+.awz-pick{color:#8b949e;font-size:0.82rem;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid #21262d;}
+.awz-pick b{color:#c9d1d9;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
+.awz-params-head{color:#8b949e;font-size:0.74rem;text-transform:uppercase;letter-spacing:0.04em;margin:12px 0 6px;}
 /* Layout-tab drag-to-arrange. */
 .dg-edit-bar{position:absolute;top:8px;right:8px;display:flex;gap:6px;align-items:center;z-index:5;}
 .dg-edit-bar button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;padding:4px 10px;font-size:0.78rem;cursor:pointer;font-family:inherit;}

@@ -448,11 +448,37 @@
     });
   }
 
-  // ---- Add-component wizard ----
-  // Modal form over /api/add-instance: pick a library component, give it a
-  // value + optional section + ref-des, and map pins to nets (with net
-  // autocomplete). The server emits a valid (instance …) form and auto-assigns
-  // the ref-des; on success we reload so the new part renders.
+  // ---- Add-component / add-module wizard ----
+  // Modal over /api/add-instance with a live search box across the whole
+  // library: pick a component (→ value + section + ref + pin→net map, emitted
+  // as an (instance …)) or a module (→ sub-block name + parameter values,
+  // emitted as a top-level (sub-block …)). The server auto-assigns ref-des and
+  // pushes the rebuild; on success we reload so the new part renders.
+
+  // Parse a defmodule param string ("rfbt rfbb" or "(rfbt 220k) (rfbb 47k)")
+  // into [{name, def}] — first token of each (name default) group, or a bare
+  // atom with no default.
+  function parseModParams(str) {
+    var out = [], i = 0, n = (str || '').length;
+    while (i < n) {
+      while (i < n && /\s/.test(str[i])) i++;
+      if (i >= n) break;
+      if (str[i] === '(') {
+        var depth = 0, start = i;
+        for (; i < n; i++) { if (str[i] === '(') depth++; else if (str[i] === ')') { depth--; if (depth === 0) { i++; break; } } }
+        var inner = str.slice(start + 1, i - 1).trim();
+        var sp = inner.search(/\s/);
+        if (sp < 0) out.push({ name: inner, def: '' });
+        else out.push({ name: inner.slice(0, sp), def: inner.slice(sp + 1).trim() });
+      } else {
+        var s = i;
+        while (i < n && !/\s/.test(str[i]) && str[i] !== '(') i++;
+        out.push({ name: str.slice(s, i), def: '' });
+      }
+    }
+    return out;
+  }
+
   function openAddWizard() {
     var ov = document.createElement('div');
     ov.className = 'src-edit-overlay';
@@ -462,72 +488,157 @@
       }).join('');
     ov.innerHTML =
       '<div class="src-edit-box add-wiz">' +
-        '<div class="src-edit-head"><h3>Add component</h3>' +
-          '<span class="src-edit-hint">Ref-des is auto-assigned unless you set one</span></div>' +
+        '<div class="src-edit-head"><h3>Add component or module</h3>' +
+          '<span class="src-edit-hint">Search the library, then fill in the details</span></div>' +
         '<div class="add-wiz-body">' +
-          '<div class="awz-row"><label>Component</label>' +
-            '<input class="awz-comp" list="awz-comp-list" placeholder="cap-0402, res-0805, …" spellcheck="false"></div>' +
-          '<div class="awz-row"><label>Value</label>' +
-            '<input class="awz-val" placeholder="100nF (optional)" spellcheck="false"></div>' +
-          '<div class="awz-row"><label>Section</label><select class="awz-sec">' + secOpts + '</select></div>' +
-          '<div class="awz-row"><label>Ref-des</label>' +
-            '<input class="awz-ref" placeholder="auto (e.g. C12)" spellcheck="false"></div>' +
-          '<div class="awz-pins-head">Pin connections</div>' +
-          '<div class="awz-pins"></div>' +
-          '<button type="button" class="src-edit-btn awz-add-pin">+ pin</button>' +
+          '<div class="awz-search-wrap">' +
+            '<input class="awz-search" placeholder="Search components & modules…" spellcheck="false" autocomplete="off">' +
+            '<div class="awz-results"></div>' +
+          '</div>' +
+          '<div class="awz-detail"></div>' +
         '</div>' +
         '<div class="src-edit-foot">' +
           '<span class="awz-msg src-edit-err"></span>' +
           '<button type="button" class="src-edit-btn awz-cancel">Cancel</button>' +
-          '<button type="button" class="src-edit-btn primary awz-add">Add</button>' +
+          '<button type="button" class="src-edit-btn primary awz-add" disabled>Add</button>' +
         '</div>' +
-        '<datalist id="awz-comp-list"></datalist><datalist id="awz-net-list"></datalist>' +
+        '<datalist id="awz-net-list"></datalist>' +
       '</div>';
     document.body.appendChild(ov);
     function close() { if (ov.parentNode) ov.parentNode.removeChild(ov); }
     ov.querySelector('.awz-cancel').addEventListener('click', close);
     ov.addEventListener('mousedown', function (e) { if (e.target === ov) close(); });
 
-    // Datalists: components from the library index, nets from the scene graph.
-    loadInspLib(function (comps) {
-      var dl = ov.querySelector('#awz-comp-list');
-      comps.forEach(function (c) { var o = document.createElement('option'); o.value = c.name; dl.appendChild(o); });
-    });
     var netDl = ov.querySelector('#awz-net-list');
     (SCH_INDEX.nets || []).forEach(function (n) { var o = document.createElement('option'); o.value = n.name; netDl.appendChild(o); });
 
-    var pinsBox = ov.querySelector('.awz-pins');
-    function addPinRow(pin, net) {
-      var row = document.createElement('div');
-      row.className = 'awz-pin-row';
-      row.innerHTML = '<input class="awz-pin" placeholder="pin#" spellcheck="false">' +
-        '<input class="awz-net" list="awz-net-list" placeholder="net" spellcheck="false">' +
-        '<button type="button" class="awz-pin-del" title="Remove">×</button>';
-      row.querySelector('.awz-pin').value = pin || '';
-      row.querySelector('.awz-net').value = net || '';
-      row.querySelector('.awz-pin-del').addEventListener('click', function () { row.remove(); });
-      pinsBox.appendChild(row);
-    }
-    addPinRow('1', ''); addPinRow('2', '');
-    ov.querySelector('.awz-add-pin').addEventListener('click', function () { addPinRow('', ''); });
-
+    var search = ov.querySelector('.awz-search');
+    var results = ov.querySelector('.awz-results');
+    var detail = ov.querySelector('.awz-detail');
+    var addBtn = ov.querySelector('.awz-add');
     var msg = ov.querySelector('.awz-msg');
-    ov.querySelector('.awz-add').addEventListener('click', function () {
-      var comp = ov.querySelector('.awz-comp').value.trim();
-      if (!comp) { msg.textContent = 'Pick a component.'; return; }
-      var pins = {};
-      ov.querySelectorAll('.awz-pin-row').forEach(function (r) {
-        var p = r.querySelector('.awz-pin').value.trim();
-        var n = r.querySelector('.awz-net').value.trim();
-        if (p && n) pins[p] = n;
+    var items = [];        // flat [{name, kind, family, params}]
+    var selected = null;
+
+    loadLibFull(function (f) {
+      items = (f.components || []).map(function (c) { return { name: c.name, kind: 'component', family: !!c.family }; })
+        .concat((f.modules || []).map(function (m) { return { name: m.name, kind: 'module', params: m.params || '' }; }));
+      renderResults('');
+      search.focus();
+    });
+
+    function renderResults(q) {
+      q = (q || '').toLowerCase();
+      var hits = items.filter(function (it) { return !q || it.name.toLowerCase().indexOf(q) >= 0; });
+      hits.sort(function (a, b) { return a.name.localeCompare(b.name); });
+      if (!hits.length) { results.innerHTML = '<div class="awz-empty">No matches</div>'; return; }
+      results.innerHTML = hits.slice(0, 60).map(function (it) {
+        var badge = it.kind === 'module' ? 'module' : (it.family ? 'family' : 'part');
+        var hint = it.kind === 'module' && it.params ? '<span class="awz-phint">' + escapeHtml(it.params) + '</span>' : '';
+        return '<div class="awz-result" data-name="' + escapeHtml(it.name) + '" data-kind="' + it.kind + '">' +
+          '<span class="awz-badge ' + badge + '">' + badge + '</span>' +
+          '<span class="awz-rname">' + escapeHtml(it.name) + '</span>' + hint + '</div>';
+      }).join('');
+      results.querySelectorAll('.awz-result').forEach(function (el) {
+        el.addEventListener('click', function () {
+          var it = items.filter(function (x) { return x.name === el.dataset.name && x.kind === el.dataset.kind; })[0];
+          if (it) selectItem(it, el);
+        });
       });
-      var body = {
-        component: comp,
-        value: ov.querySelector('.awz-val').value.trim(),
-        section: ov.querySelector('.awz-sec').value,
-        ref: ov.querySelector('.awz-ref').value.trim(),
-        pins: pins
-      };
+    }
+    search.addEventListener('input', function () { renderResults(search.value.trim()); });
+
+    function selectItem(it, el) {
+      selected = it;
+      results.querySelectorAll('.awz-result').forEach(function (r) { r.classList.remove('sel'); });
+      if (el) el.classList.add('sel');
+      addBtn.disabled = false;
+      msg.textContent = '';
+      if (it.kind === 'module') renderModuleDetail(it); else renderComponentDetail(it);
+    }
+
+    function renderComponentDetail(it) {
+      detail.innerHTML =
+        '<div class="awz-pick">Component: <b>' + escapeHtml(it.name) + '</b></div>' +
+        '<div class="awz-row"><label>Value</label>' +
+          '<input class="awz-val" placeholder="100nF (optional)" spellcheck="false"></div>' +
+        '<div class="awz-row"><label>Section</label><select class="awz-sec">' + secOpts + '</select></div>' +
+        '<div class="awz-row"><label>Ref-des</label>' +
+          '<input class="awz-ref" placeholder="auto (e.g. C12)" spellcheck="false"></div>' +
+        '<div class="awz-pins-head">Pin connections</div>' +
+        '<div class="awz-pins"></div>' +
+        '<button type="button" class="src-edit-btn awz-add-pin">+ pin</button>';
+      var pinsBox = detail.querySelector('.awz-pins');
+      function addPinRow(pin, net) {
+        var row = document.createElement('div');
+        row.className = 'awz-pin-row';
+        row.innerHTML = '<input class="awz-pin" placeholder="pin#" spellcheck="false">' +
+          '<input class="awz-net" list="awz-net-list" placeholder="net" spellcheck="false">' +
+          '<button type="button" class="awz-pin-del" title="Remove">×</button>';
+        row.querySelector('.awz-pin').value = pin || '';
+        row.querySelector('.awz-net').value = net || '';
+        row.querySelector('.awz-pin-del').addEventListener('click', function () { row.remove(); });
+        pinsBox.appendChild(row);
+      }
+      addPinRow('1', ''); addPinRow('2', '');
+      detail.querySelector('.awz-add-pin').addEventListener('click', function () { addPinRow('', ''); });
+    }
+
+    function renderModuleDetail(it) {
+      var params = parseModParams(it.params);
+      var rows = params.length ? params.map(function (p) {
+        return '<div class="awz-row"><label>' + escapeHtml(p.name) + '</label>' +
+          '<input class="awz-param" data-name="' + escapeHtml(p.name) + '" placeholder="' +
+          escapeHtml(p.def || '(required)') + '" spellcheck="false"></div>';
+      }).join('') :
+        '<div class="awz-row"><label>Args</label>' +
+          '<input class="awz-args" placeholder="positional or named args (optional)" spellcheck="false"></div>';
+      detail.innerHTML =
+        '<div class="awz-pick">Module: <b>' + escapeHtml(it.name) + '</b></div>' +
+        '<div class="awz-row"><label>Name</label>' +
+          '<input class="awz-name" value="' + escapeHtml(it.name) + '" spellcheck="false"></div>' +
+        '<div class="awz-params-head">Parameters' +
+          (params.length ? ' <span class="src-edit-hint">leave blank to use the default</span>' : '') +
+          '</div>' + rows;
+    }
+
+    addBtn.addEventListener('click', function () {
+      if (!selected) { msg.textContent = 'Pick a component or module.'; return; }
+      var body;
+      if (selected.kind === 'module') {
+        var nm = (detail.querySelector('.awz-name').value || '').trim() || selected.name;
+        var args = '';
+        var paramInputs = detail.querySelectorAll('.awz-param');
+        if (paramInputs.length) {
+          var parts = [];
+          paramInputs.forEach(function (inp) {
+            var v = inp.value.trim();
+            if (v) parts.push('(' + inp.dataset.name + ' ' + v + ')');
+          });
+          args = parts.join(' ');
+        } else {
+          var af = detail.querySelector('.awz-args');
+          args = af ? af.value.trim() : '';
+        }
+        // Every module needs a top-level (import …) to resolve.
+        body = { kind: 'module', component: selected.name, name: nm, args: args, import: true };
+      } else {
+        var pins = {};
+        detail.querySelectorAll('.awz-pin-row').forEach(function (r) {
+          var p = r.querySelector('.awz-pin').value.trim();
+          var n = r.querySelector('.awz-net').value.trim();
+          if (p && n) pins[p] = n;
+        });
+        body = {
+          component: selected.name,
+          value: detail.querySelector('.awz-val').value.trim(),
+          section: detail.querySelector('.awz-sec').value,
+          ref: detail.querySelector('.awz-ref').value.trim(),
+          pins: pins,
+          // Families (cap-0402, …) auto-load; a non-family part (an IC) needs (import …).
+          import: !selected.family
+        };
+      }
       msg.textContent = 'Adding…';
       fetch('/api/add-instance/' + DESIGN_NAME, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
@@ -604,15 +715,23 @@
     return null;
   }
 
-  // Lazily-loaded library component list, used to populate the inspector's
-  // footprint/component datalist. Fetched once per page from /api/lib-index.
+  // Lazily-loaded library index ({components, modules}), fetched once per page
+  // from /api/lib-index. `loadInspLib` returns just the components (the
+  // inspector's footprint datalist); `loadLibFull` returns the whole index
+  // (the add wizard's search box, which lists components AND modules).
   var inspLibComps = null;
-  function loadInspLib(cb) {
-    if (inspLibComps) { cb(inspLibComps); return; }
+  var libFull = null;
+  function loadLibFull(cb) {
+    if (libFull) { cb(libFull); return; }
     fetch('/api/lib-index').then(function (r) { return r.json(); })
-      .then(function (j) { inspLibComps = (j && j.components) || []; cb(inspLibComps); })
-      .catch(function () { inspLibComps = []; cb(inspLibComps); });
+      .then(function (j) {
+        libFull = { components: (j && j.components) || [], modules: (j && j.modules) || [] };
+        inspLibComps = libFull.components;
+        cb(libFull);
+      })
+      .catch(function () { libFull = { components: [], modules: [] }; inspLibComps = []; cb(libFull); });
   }
+  function loadInspLib(cb) { loadLibFull(function (f) { cb(f.components); }); }
 
   // POST a surgical edit, then act on the result. `reload` true forces a full
   // page reload (the netlist/geometry changed); false just advances the
