@@ -811,9 +811,20 @@
     fetch(endpoint + '/' + DESIGN_NAME, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     })
-      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      // Parse the body tolerantly: error paths may return a plaintext message
+      // (not JSON), which a bare r.json() would turn into a cryptic
+      // "Unexpected token" instead of the actual error.
+      .then(function (r) {
+        return r.text().then(function (t) {
+          var j = null;
+          try { j = t ? JSON.parse(t) : null; } catch (_) { j = { error: t }; }
+          return { ok: r.ok, j: j };
+        });
+      })
       .then(function (res) {
-        if (!res.ok || !res.j || res.j.ok === false) { onErr((res.j && res.j.error) || 'edit failed'); return; }
+        if (!res.ok || !res.j || res.j.ok === false || res.j.error) {
+          onErr((res.j && (res.j.error || res.j.message)) || 'edit failed'); return;
+        }
         if (reload) { window.location.reload(); return; }
         if (res.j && typeof res.j.version === 'number') lastVersion = res.j.version;
       })
@@ -976,7 +987,7 @@
       btn.addEventListener('click', function () {
         var act = btn.getAttribute('data-act');
         if (act === 'value') {
-          postEdit('/api/edit-value', { ref: ref, value: panel.querySelector('.sb-insp-val').value.trim() }, false,
+          postEdit('/api/edit-value', { ref: ref, value: panel.querySelector('.sb-insp-val').value.trim(), srcOff: c.src }, false,
             function (e) { showMsg(e, true); });
           showMsg('Saved value.', false);
         } else if (act === 'mpn') {
@@ -1021,7 +1032,7 @@
           if (done) return; done = true;
           var nn = inp.value.trim();
           if (!nn || nn === (row.getAttribute('data-net') || '')) { showComponent(ref, false); return; }
-          postEdit('/api/rewire-pin', { ref: ref, pin: pin, net: nn }, true, function (er) { alert('Re-wire failed: ' + er); showComponent(ref, false); });
+          postEdit('/api/rewire-pin', { ref: ref, pin: pin, net: nn, srcOff: c.src }, true, function (er) { alert('Re-wire failed: ' + er); showComponent(ref, false); });
         }
         // Searchable net dropdown; picking a net commits immediately.
         wireNetCombo(inp, netNames, box, function () { commit(); });
