@@ -185,6 +185,13 @@ fn assignSubBlockRefDes(self: *Evaluator, block: *DesignBlock) !void {
         }
     }
 
+    // A sub-block module may organise its hub pins with `(pins "REF" (group …))`
+    // declarations inside its own sections; those carry their own ref_des (plus a
+    // copy of the section's instances). Remap them through the same map so the
+    // grouped-pin labels still match the hub after it is renumbered (e.g. U1 → U12)
+    // — mirrors the top-level path's renameSectionRefs call.
+    renameSectionRefs(@constCast(block.sections), &rename_map);
+
     // Recurse into nested sub-blocks
     for (@as([]env_mod.SubBlock, @constCast(block.sub_blocks))) |*sb| {
         try assignSubBlockRefDes(self, sb.block);
