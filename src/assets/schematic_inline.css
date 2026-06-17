@@ -191,13 +191,6 @@ h3{color:#f0f6fc;font-size:0.95rem;margin:0;}
    pointer-events:none, which is why a drag otherwise just panned. */
 .dg-svg.dg-editing .dg-base{opacity:1 !important;pointer-events:auto !important;}
 .dg-svg.dg-editing .dg-glance,.dg-svg.dg-editing .dg-deep{opacity:0 !important;pointer-events:none !important;}
-/* Drag-to-connect on the schematic. */
-.sch-connect-toggle{position:fixed;bottom:16px;right:16px;z-index:900;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:8px 12px;font-size:0.82rem;cursor:pointer;font-family:inherit;box-shadow:0 4px 14px rgba(0,0,0,0.4);}
-.sch-connect-toggle.on{background:#1f6feb;border-color:#388bfd;color:#fff;}
-body.connect-mode .pin-stub{cursor:crosshair;}
-body.connect-mode .pin-stub:hover line{stroke:#58a6ff !important;stroke-width:2.5 !important;}
-#connect-overlay{position:fixed;inset:0;pointer-events:none;z-index:899;}
-#connect-overlay line{stroke:#58a6ff;stroke-width:2;stroke-dasharray:5 4;}
 /* Structural tree (sidebar). */
 .sb-tree-toggle{display:inline-block;margin:0 0 6px;color:#58a6ff;font-size:0.76rem;cursor:pointer;user-select:none;}
 .sb-tree-sec{margin:2px 0;}

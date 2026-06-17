@@ -748,6 +748,15 @@
     var html = '<span class="sb-back">← All sections</span>' +
       '<h4>' + escapeHtml(sec.name) + '</h4>';
     if (sec.description) html += '<div class="sb-comp-meta">' + escapeHtml(sec.description) + '</div>';
+    // Sub-blocks are declared `(sub-block "name" (module …))` in the design
+    // file — offer the same "Edit source →" jump components get, landing on that
+    // declaration so the user can edit its module/args (the design page only;
+    // module pages have no /api/source for themselves).
+    var canEditSub = sec.sub && (typeof SCH_VIEW === 'undefined' || SCH_VIEW !== 'module');
+    if (canEditSub) {
+      html += '<div class="sb-src-edit"><a href="#" data-subedit="' + escapeHtml(sec.name) + '" ' +
+        'title="Open the source editor at this sub-block’s declaration">Edit source →</a></div>';
+    }
     if (!sec.hubs || !sec.hubs.length) {
       html += '<div class="sb-empty">No hubs in this section.</div>';
     } else {
@@ -762,6 +771,11 @@
     }
     detailBox.innerHTML = html;
     detailBox.querySelector('.sb-back').addEventListener('click', showSectionList);
+    var subEdit = detailBox.querySelector('.sb-src-edit a[data-subedit]');
+    if (subEdit) subEdit.addEventListener('click', function (e) {
+      e.preventDefault();
+      openSourceEditorAtSubBlock(subEdit.getAttribute('data-subedit'));
+    });
     detailBox.querySelectorAll('.sb-list-item').forEach(function (el) {
       el.addEventListener('click', function () { showComponent(el.dataset.ref, true); });
     });
@@ -2945,16 +2959,23 @@
     setTimeout(function () { state.cm.removeLineClass(line, 'background', 'cm-section-flash'); }, 1500);
   }
 
-  function scrollEditorToSection(state, sectionName) {
+  // Reveal the first line matching `needle` in the editor (or just focus when
+  // the form isn't found — e.g. a replicate-generated sub-block has no literal
+  // declaration). `label` shows in the editor header.
+  function scrollEditorToText(state, needle, label) {
     function go() {
-      state.secEl.textContent = sectionName ? '· ' + sectionName : '';
-      if (!sectionName) { state.cm.focus(); return; }
+      state.secEl.textContent = label ? '· ' + label : '';
+      if (!needle) { state.cm.focus(); return; }
       var doc = state.cm.getValue();
-      var idx = doc.indexOf('(section "' + sectionName + '"');
+      var idx = doc.indexOf(needle);
       if (idx < 0) { state.cm.focus(); return; }
       revealEditorLine(state, doc.slice(0, idx).split('\n').length - 1);
     }
     if (state.loaded) go(); else state.loadPromise.then(go);
+  }
+
+  function scrollEditorToSection(state, sectionName) {
+    scrollEditorToText(state, sectionName ? '(section "' + sectionName + '"' : '', sectionName);
   }
 
   // Jump to a byte offset (SCH_INDEX components[].src, reported by the Zig
@@ -2978,6 +2999,13 @@
     if (!window.CodeMirror) { alert('Source editor failed to load (CodeMirror missing)'); return; }
     if (!srcEditor) srcEditor = buildSourceEditor();
     scrollEditorToSection(srcEditor, sectionName);
+  }
+
+  // Open the source editor at a sub-block's `(sub-block "name" …)` declaration.
+  function openSourceEditorAtSubBlock(subName) {
+    if (!window.CodeMirror) { alert('Source editor failed to load (CodeMirror missing)'); return; }
+    if (!srcEditor) srcEditor = buildSourceEditor();
+    scrollEditorToText(srcEditor, '(sub-block "' + subName + '"', subName);
   }
 
   function openSourceEditorAtOffset(byteOff, label) {
@@ -3431,98 +3459,6 @@
         .catch(function (e) { msg.textContent = e.message || 'network error'; });
     });
   });
-
-  // ---- Drag-to-connect ----
-  // A "Connect" toggle turns the schematic into wiring mode: drag from one pin
-  // stub to another pin (or onto a net wire) to put the source pin on that
-  // net via /api/rewire-pin. A page-level overlay line follows the cursor so
-  // the drag reads across the per-section hub SVGs. Off by default so normal
-  // click-navigation is unaffected.
-  (function setupConnectMode() {
-    if (typeof SCH_VIEW !== 'undefined' && SCH_VIEW === 'module') return; // rewire targets top-level instances
-    if (!document.querySelector('.pin-stub')) return;
-    var toggle = document.createElement('button');
-    toggle.className = 'sch-connect-toggle';
-    toggle.type = 'button';
-    toggle.textContent = '🔌 Connect: off';
-    document.body.appendChild(toggle);
-    var on = false;
-    toggle.addEventListener('click', function () {
-      on = !on;
-      document.body.classList.toggle('connect-mode', on);
-      toggle.classList.toggle('on', on);
-      toggle.textContent = on ? '🔌 Connect: on' : '🔌 Connect: off';
-    });
-
-    var overlay = null, line = null, src = null;
-    function ensureOverlay() {
-      if (overlay) return;
-      overlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      overlay.id = 'connect-overlay';
-      line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-      overlay.appendChild(line);
-      document.body.appendChild(overlay);
-    }
-    function pinCenter(el) {
-      var r = el.getBoundingClientRect();
-      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-    }
-    function firstPin(stub) {
-      var p = stub.getAttribute('data-pin') || '';
-      return p.split(',')[0].trim();
-    }
-    // The net a pin currently sits on, from the scene-graph index.
-    function pinNet(ref, pin) {
-      var found = null;
-      (SCH_INDEX.nets || []).forEach(function (n) {
-        (n.members || []).forEach(function (m) {
-          if (m.ref === ref && String(m.pin) === String(pin)) found = n.name;
-        });
-      });
-      return found;
-    }
-    document.addEventListener('mousedown', function (e) {
-      if (!on) return;
-      var stub = e.target.closest && e.target.closest('.pin-stub');
-      if (!stub || !stub.getAttribute('data-ref')) return;
-      e.preventDefault(); e.stopPropagation();
-      ensureOverlay();
-      src = { ref: stub.getAttribute('data-ref'), pin: firstPin(stub) };
-      var c = pinCenter(stub);
-      line.setAttribute('x1', c.x); line.setAttribute('y1', c.y);
-      line.setAttribute('x2', c.x); line.setAttribute('y2', c.y);
-      overlay.style.display = 'block';
-    }, true);
-    window.addEventListener('mousemove', function (e) {
-      if (!src || !line) return;
-      line.setAttribute('x2', e.clientX); line.setAttribute('y2', e.clientY);
-    });
-    window.addEventListener('mouseup', function (e) {
-      if (!src) return;
-      var s = src; src = null;
-      if (overlay) overlay.style.display = 'none';
-      var tgt = document.elementFromPoint(e.clientX, e.clientY);
-      if (!tgt || !tgt.closest) return;
-      var net = null;
-      var netEl = tgt.closest('.net');
-      var pinEl = tgt.closest('.pin-stub');
-      if (netEl) net = netEl.getAttribute('data-net');
-      else if (pinEl) net = pinNet(pinEl.getAttribute('data-ref'), firstPin(pinEl));
-      if (!net) { toggle.textContent = '🔌 no target net'; return; }
-      if (net === pinNet(s.ref, s.pin)) { toggle.textContent = '🔌 already on ' + net; return; }
-      toggle.textContent = '🔌 connecting…';
-      fetch('/api/rewire-pin/' + DESIGN_NAME, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ref: s.ref, pin: s.pin, net: net })
-      })
-        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
-        .then(function (res) {
-          if (!res.ok || !res.j || res.j.ok === false) { toggle.textContent = '🔌 ' + ((res.j && res.j.error) || 'failed'); return; }
-          window.location.reload();
-        })
-        .catch(function () { toggle.textContent = '🔌 error'; });
-    });
-  })();
 
   // ---- Diagram block → section cross-probe ----
   // Every block in the Layout / Power / Clocks / Control / System diagrams is
