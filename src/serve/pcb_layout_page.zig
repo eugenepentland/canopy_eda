@@ -266,7 +266,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // Cross-probe target for the sidebar's "Show in schematic" links: modules
     // render under /modules/, designs under /schematics/.
     const sch_base: []const u8 = if (module_res != null) "/modules/" else "/schematics/";
-    if (!embed) try writeSidebar(w, ctx.allocator, placement, sch_base, name);
+    if (!embed) try writeSidebar(w, placement, sch_base);
     try w.writeAll("<main class=\"pcb-main\">");
     if (embed) {
         // Compact, read-only chrome for the per-sub-block preview embedded in
@@ -3028,70 +3028,26 @@ fn writeLegend(w: *std.Io.Writer, p: optimizer.Placement, hidden: bool) std.Io.W
     try w.writeAll("</div>");
 }
 
-// ── Sidebar (component → pin/net list) ───────────────────────────────────
+// ── Sidebar (single-part properties panel, KiCad-style) ──────────────────
 
-const PinNet = struct { pin: []const u8, net: []const u8 };
-
-fn writeSidebar(
-    w: *std.Io.Writer,
-    alloc: std.mem.Allocator,
-    p: optimizer.Placement,
-    sch_base: []const u8,
-    design_name: []const u8,
-) HandlerError!void {
-    var by_ref = std.StringHashMap(std.ArrayListUnmanaged(PinNet)).init(alloc);
-    for (p.nets) |net| {
-        for (net.pins) |pin| {
-            const gop = try by_ref.getOrPut(pin.ref_des);
-            if (!gop.found_existing) gop.value_ptr.* = .empty;
-            try gop.value_ptr.append(alloc, .{ .pin = pin.pin, .net = net.name });
-        }
-    }
-
+/// KiCad-style properties sidebar: empty until a part is clicked on the board,
+/// then BOARD_JS (`renderProps`) fills it with just that one part's properties
+/// — ref, value, footprint (courtyard-edit), live position/rotation, pin→net
+/// list, and a schematic jump. Every per-part field already ships in the
+/// embedded `PCB.parts`, so this only emits the container + the empty-state
+/// hint; the part count and the schematic-jump base (`/schematics/` vs
+/// `/modules/`, stashed as `data-schbase`) are the lone server-rendered bits.
+fn writeSidebar(w: *std.Io.Writer, p: optimizer.Placement, sch_base: []const u8) HandlerError!void {
     try w.writeAll("<aside class=\"pcb-side\">");
-    try w.print("<div class=\"side-h\">Components <span class=\"side-n\">{d}</span></div>", .{p.instances.len});
-    try w.writeAll("<ul class=\"comp-list\">");
-    for (p.instances) |inst| {
-        try w.writeAll("<li class=\"comp\" data-ref=\"");
-        try writeAttr(w, inst.ref_des);
-        try w.writeAll("\"><div class=\"comp-top\"><span class=\"comp-ref\">");
-        try writeEscaped(w, shortName(inst.ref_des));
-        try w.writeAll("</span><span class=\"comp-val\">");
-        try writeEscaped(w, instLabel(inst));
-        try w.writeAll("</span></div>");
-        if (inst.footprint.len > 0) {
-            try w.writeAll("<button class=\"comp-fp court-edit\" data-court-ref=\"");
-            try writeAttr(w, inst.ref_des);
-            try w.writeAll("\" title=\"Edit footprint courtyard\">▢ ");
-            try writeEscaped(w, inst.footprint);
-            try w.writeAll("</button>");
-        }
-        if (by_ref.getPtr(inst.ref_des)) |pins| {
-            std.mem.sort(PinNet, pins.items, {}, lessPin);
-            try w.writeAll("<div class=\"comp-pins\">");
-            for (pins.items) |pn| {
-                try w.writeAll("<span class=\"pn\" data-net=\"");
-                try writeAttr(w, netKey(pn.net));
-                try w.writeAll("\"><b>");
-                try writeEscaped(w, pn.pin);
-                try w.writeAll("</b>");
-                try writeEscaped(w, netLabel(pn.net));
-                try w.writeAll("</span>");
-            }
-            try w.writeAll("</div>");
-        }
-        // Reverse cross-probe: jump to this part on the schematic page. The
-        // viewer's hash handler scrolls + flashes the component (matching the
-        // exact ref first, then the bare sub-block leaf).
-        try w.writeAll("<a class=\"comp-sch-link\" href=\"");
-        try w.writeAll(sch_base);
-        try writeAttr(w, design_name);
-        try w.writeAll("#comp-");
-        try writeAttr(w, inst.ref_des);
-        try w.writeAll("\" title=\"Open the schematic page scrolled to this part\">Show in schematic \u{2192}</a>");
-        try w.writeAll("</li>");
-    }
-    try w.writeAll("</ul></aside>");
+    try w.writeAll("<div class=\"side-h\">Properties</div>");
+    try w.writeAll("<div id=\"prop-body\" class=\"prop-body\" data-schbase=\"");
+    try writeAttr(w, sch_base);
+    try w.print(
+        "\"><div class=\"prop-empty\">Click a part on the board to see its properties." ++
+            "<br><span class=\"prop-empty-n\">{d} components</span></div>",
+        .{p.instances.len},
+    );
+    try w.writeAll("</div></aside>");
 }
 
 // ── Embedded board data (consumed by BOARD_JS) ───────────────────────────
@@ -3143,6 +3099,43 @@ fn partBlameRaw(alloc: std.mem.Allocator, p: optimizer.Placement, params: optimi
     return blame;
 }
 
+/// Emit one part's `,"pads":[…]` array — each pad's geometry, number, optional
+/// custom-poly copper outline, and resolved net (looked up in `pin_net`, keyed
+/// `"<ref>|<num>"`). Opens with the `,"pads"` key and closes the array, so the
+/// caller continues straight into `,"silk":…`.
+fn writePadsJson(
+    w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    pt: optimizer.Part,
+    pin_net: std.StringHashMap([]const u8),
+) HandlerError!void {
+    try w.writeAll(",\"pads\":[");
+    for (pt.pads, 0..) |pad, j| {
+        if (j > 0) try w.writeAll(",");
+        try w.print("{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d},\"shape\":", .{ pad.x, pad.y, pad.w, pad.h });
+        try writeJsonStr(w, pad.shape);
+        try w.writeAll(",\"num\":");
+        try writeJsonStr(w, pad.number);
+        // Custom pad: the real copper outline so the shared FP engine draws
+        // the polygon, not the bounding box.
+        if (pad.poly.len >= 3) {
+            try w.writeAll(",\"poly\":[");
+            for (pad.poly, 0..) |pp, k| {
+                if (k > 0) try w.writeAll(",");
+                try w.print("[{d},{d}]", .{ pp[0], pp[1] });
+            }
+            try w.writeAll("]");
+        }
+        const pkey = try std.fmt.allocPrint(alloc, "{s}|{s}", .{ pt.ref_des, pad.number });
+        if (pin_net.get(pkey)) |nk| {
+            try w.writeAll(",\"net\":");
+            try writeJsonStr(w, nk);
+        }
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+}
+
 fn writePcbData(
     w: *std.Io.Writer,
     alloc: std.mem.Allocator,
@@ -3163,6 +3156,9 @@ fn writePcbData(
     // ref → footprint name (for the courtyard editor).
     var fp_of = std.StringHashMap([]const u8).init(alloc);
     for (p.instances) |inst| try fp_of.put(inst.ref_des, inst.footprint);
+    // ref → display value ("100nF", "STM32…") for the properties panel.
+    var val_of = std.StringHashMap([]const u8).init(alloc);
+    for (p.instances) |inst| try val_of.put(inst.ref_des, instLabel(inst));
     var pin_net = std.StringHashMap([]const u8).init(alloc);
     for (p.nets) |net| {
         for (net.pins) |pin| {
@@ -3212,29 +3208,10 @@ fn writePcbData(
         try w.print("\"blame\":{d:.4},", .{if (i < blame.len) blame[i] else 0});
         try w.writeAll("\"fp\":");
         try writeJsonStr(w, fp_of.get(pt.ref_des) orelse "");
-        try w.writeAll(",\"pads\":[");
-        for (pt.pads, 0..) |pad, j| {
-            if (j > 0) try w.writeAll(",");
-            try w.print("{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d},\"shape\":", .{ pad.x, pad.y, pad.w, pad.h });
-            try writeJsonStr(w, pad.shape);
-            // Custom pad: the real copper outline so the shared FP engine draws
-            // the polygon, not the bounding box.
-            if (pad.poly.len >= 3) {
-                try w.writeAll(",\"poly\":[");
-                for (pad.poly, 0..) |pp, k| {
-                    if (k > 0) try w.writeAll(",");
-                    try w.print("[{d},{d}]", .{ pp[0], pp[1] });
-                }
-                try w.writeAll("]");
-            }
-            const pkey = try std.fmt.allocPrint(alloc, "{s}|{s}", .{ pt.ref_des, pad.number });
-            if (pin_net.get(pkey)) |nk| {
-                try w.writeAll(",\"net\":");
-                try writeJsonStr(w, nk);
-            }
-            try w.writeAll("}");
-        }
-        try w.writeAll("],\"silk\":{\"l\":[");
+        try w.writeAll(",\"val\":");
+        try writeJsonStr(w, val_of.get(pt.ref_des) orelse "");
+        try writePadsJson(w, alloc, pt, pin_net);
+        try w.writeAll(",\"silk\":{\"l\":[");
         for (pt.silk_lines, 0..) |s, j| {
             if (j > 0) try w.writeAll(",");
             try w.print("[{d},{d},{d},{d}]", .{ s.x1, s.y1, s.x2, s.y2 });
@@ -3478,13 +3455,6 @@ fn instLabel(inst: anytype) []const u8 {
     return inst.component;
 }
 
-fn lessPin(_: void, a: PinNet, b: PinNet) bool {
-    const an = std.fmt.parseInt(u32, a.pin, 10) catch null;
-    const bn = std.fmt.parseInt(u32, b.pin, 10) catch null;
-    if (an != null and bn != null) return an.? < bn.?;
-    return std.mem.lessThan(u8, a.pin, b.pin);
-}
-
 fn shortName(s: []const u8) []const u8 {
     if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| return s[i + 1 ..];
     return s;
@@ -3494,11 +3464,6 @@ fn shortName(s: []const u8) []const u8 {
 fn netKey(name: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, name, '.')) |i| return name[0..i];
     return name;
-}
-
-/// Poured net name shown to the user: collapsed rail, prefix stripped.
-fn netLabel(name: []const u8) []const u8 {
-    return shortName(netKey(name));
 }
 
 /// Mirrors the optimizer's ground-net set, so the page's HPWL net groups
@@ -3709,28 +3674,29 @@ const PAGE_CSS =
     \\.part{cursor:grab}
     \\.part .court{transition:filter .08s}
     \\.part.hl .court{filter:drop-shadow(0 0 3px rgba(88,166,255,.75))}
+    \\.part.sel .court{stroke:#58a6ff!important;stroke-width:2!important;filter:drop-shadow(0 0 4px rgba(88,166,255,.9))}
     \\.pad{transition:fill .08s}
     \\.pad.net-hl{fill:#f85149}
     \\.pn.net-hl{background:#5b1e28;color:#ffa198}
     \\.pcb-side{width:288px;flex:none;position:sticky;top:8px;max-height:calc(100vh - 16px);
     \\  overflow:auto;border:1px solid #21262d;border-radius:8px;background:#161b22}
     \\.side-h{font-size:13px;font-weight:600;padding:10px 12px;border-bottom:1px solid #21262d;position:sticky;top:0;background:#161b22;color:#f0f6fc}
-    \\.side-n{color:#8b949e;font-weight:400}
-    \\.comp-list{list-style:none;margin:0;padding:0}
-    \\.comp{padding:8px 12px;border-bottom:1px solid #21262d;cursor:default}
-    \\.comp.hl{background:#1c2230}
-    \\.comp.sel{background:#1f2937;box-shadow:inset 3px 0 0 #58a6ff;animation:compflash .7s ease-out}
-    \\@keyframes compflash{from{background:#2d3b52}to{background:#1f2937}}
-    \\.comp-top{display:flex;gap:8px;align-items:baseline}
-    \\.comp-ref{font-weight:600;font-size:13px;color:#e6edf3}
-    \\.comp-val{font-size:12px;color:#8b949e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    \\.comp-fp{font-size:10.5px;color:#6e7681;margin:1px 0 4px}
-    \\.comp-fp.court-edit{display:block;width:100%;text-align:left;background:none;border:0;padding:1px 0 4px;
-    \\  cursor:pointer;font-family:inherit}
-    \\.comp-fp.court-edit:hover{color:#58a6ff;text-decoration:underline}
-    \\.comp-pins{display:flex;flex-wrap:wrap;gap:3px 5px}
-    \\.comp-sch-link{display:inline-block;font-size:10.5px;color:#58a6ff;text-decoration:none;margin-top:4px}
-    \\.comp-sch-link:hover{text-decoration:underline}
+    \\.prop-empty{padding:16px 14px;color:#8b949e;line-height:1.55;font-size:12.5px}
+    \\.prop-empty-n{display:inline-block;margin-top:6px;color:#6e7681;font-size:11.5px}
+    \\.prop-head{display:flex;align-items:baseline;gap:8px;padding:11px 12px;border-bottom:1px solid #21262d}
+    \\.prop-ref{font-weight:700;font-size:16px;color:#f0f6fc}
+    \\.prop-val{font-size:12.5px;color:#8b949e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    \\.prop-rows{padding:7px 12px;border-bottom:1px solid #21262d}
+    \\.prop-row{display:flex;justify-content:space-between;gap:10px;padding:2.5px 0;font-size:12px}
+    \\.prop-row .k{color:#8b949e}
+    \\.prop-row .v{color:#e6edf3;font-variant-numeric:tabular-nums;text-align:right}
+    \\.prop-fp{display:block;width:100%;text-align:left;background:none;border:0;border-bottom:1px solid #21262d;
+    \\  padding:8px 12px;cursor:pointer;font-family:inherit;font-size:11px;color:#6e7681}
+    \\.prop-fp:hover{color:#58a6ff;text-decoration:underline}
+    \\.prop-sec{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:#6e7681;padding:9px 12px 5px}
+    \\.prop-pins{display:flex;flex-wrap:wrap;gap:4px 5px;padding:0 12px 11px}
+    \\.prop-sch{display:block;padding:10px 12px;font-size:12px;color:#58a6ff;border-top:1px solid #21262d}
+    \\.prop-sch:hover{text-decoration:underline}
     \\.pn{font-size:11px;color:#c9d1d9;background:#21262d;border-radius:3px;padding:0 5px;white-space:nowrap}
     \\.pn b{color:#e6edf3;font-weight:600;margin-right:3px}
     \\.part.focus-flash .court{stroke:#f0b72f!important;stroke-width:2.6!important;animation:partflash .55s ease-in-out 4}
@@ -4073,6 +4039,51 @@ const BOARD_JS =
     \\ var sx=vb.x+(ev.clientX-r.left)*(vb.width/r.width);
     \\ var sy=vb.y+(ev.clientY-r.top)*(vb.height/r.height);
     \\ return {x:sx/S+MX-M,y:sy/S+MY-M};}
+    \\// ── KiCad-style properties panel ──────────────────────────────────────
+    \\// The sidebar shows ONE part at a time: clicking a part on the board fills it
+    \\// from PCB.parts (live x/y/rot), clicking empty board clears it back to the
+    \\// hint. No scrolling list. renderProps rebuilds the panel; updatePropLive is
+    \\// the cheap position/rotation refresh during a drag or rotate.
+    \\var selRef=null;
+    \\function pEsc(s){return String(s==null?"":s).replace(/[&<>]/g,function(c){
+    \\ return c=="&"?"&amp;":(c=="<"?"&lt;":"&gt;");});}
+    \\function pMm(v){return (Math.round(v*100)/100).toFixed(2);}
+    \\function nLeaf(s){var i=String(s).lastIndexOf("/");return i<0?s:s.slice(i+1);}
+    \\function pRow(k,v,id){return '<div class="prop-row"><span class="k">'+k+'</span><span class="v"'+
+    \\ (id?(' id="'+id+'"'):'')+'>'+pEsc(v)+'</span></div>';}
+    \\function renderProps(){var body=document.getElementById("prop-body");if(!body)return;
+    \\ var p=selRef?partByRef(selRef):null;
+    \\ if(!p){body.innerHTML='<div class="prop-empty">Click a part on the board to see its properties.'+
+    \\  '<br><span class="prop-empty-n">'+P.length+' components</span></div>';return;}
+    \\ var rot=(((p.rot||0)%360)+360)%360;
+    \\ var h='<div class="prop-head"><span class="prop-ref">'+pEsc(p.ref)+'</span>'+
+    \\  (p.val?'<span class="prop-val">'+pEsc(p.val)+'</span>':'')+'</div>';
+    \\ h+='<div class="prop-rows">'+pRow("X",pMm(p.x)+" mm","prop-x")+pRow("Y",pMm(p.y)+" mm","prop-y")+
+    \\  pRow("Rotation",rot+"°","prop-rot")+pRow("Type",p.kind=="hub"?"Hub / IC":"Passive")+'</div>';
+    \\ if(p.fp)h+='<button class="prop-fp" data-court-ref="'+pEsc(p.ref)+'" title="Edit footprint courtyard">▢ '+pEsc(p.fp)+'</button>';
+    \\ var pads=(p.pads||[]).slice().sort(function(a,b){var an=parseInt(a.num,10),bn=parseInt(b.num,10);
+    \\  if(!isNaN(an)&&!isNaN(bn))return an-bn;return String(a.num||"").localeCompare(String(b.num||""));});
+    \\ var pins="";pads.forEach(function(pd){if(!pd.num&&!pd.net)return;
+    \\  pins+='<span class="pn" data-net="'+pEsc(pd.net||"")+'"><b>'+pEsc(pd.num||"")+'</b>'+pEsc(nLeaf(pd.net||""))+'</span>';});
+    \\ if(pins)h+='<div class="prop-sec">Pins → nets</div><div class="prop-pins">'+pins+'</div>';
+    \\ var sb=body.getAttribute("data-schbase")||"/schematics/";
+    \\ h+='<a class="prop-sch" href="'+sb+encodeURIComponent(PCB.name)+'#comp-'+encodeURIComponent(p.ref)+'" '+
+    \\  'title="Open the schematic page scrolled to this part">Show in schematic →</a>';
+    \\ body.innerHTML=h;
+    \\ var cb=body.querySelector("[data-court-ref]");
+    \\ if(cb)cb.addEventListener("click",function(){openCourt(cb.getAttribute("data-court-ref"));});
+    \\ body.querySelectorAll(".pn[data-net]").forEach(function(e){var nn=e.getAttribute("data-net");
+    \\  if(!nn)return;e.addEventListener("mouseenter",function(){hlBy("data-net",nn,"net-hl",true);});
+    \\  e.addEventListener("mouseleave",function(){hlBy("data-net",nn,"net-hl",false);});});}
+    \\function updatePropLive(){if(!selRef)return;var p=partByRef(selRef);if(!p)return;
+    \\ var ex=document.getElementById("prop-x"),ey=document.getElementById("prop-y"),er=document.getElementById("prop-rot");
+    \\ if(ex)ex.textContent=pMm(p.x)+" mm";if(ey)ey.textContent=pMm(p.y)+" mm";
+    \\ if(er)er.textContent=((((p.rot||0)%360)+360)%360)+"°";}
+    \\function markSelPart(){document.querySelectorAll(".part.sel").forEach(function(e){e.classList.remove("sel");});
+    \\ if(!selRef)return;var s=(window.CSS&&CSS.escape)?CSS.escape(selRef):selRef;
+    \\ var g=document.querySelector('.part[data-ref="'+s+'"]');if(g)g.classList.add("sel");}
+    \\function selectComp(ref){selRef=ref;renderProps();markSelPart();}
+    \\function clearSel(){if(!selRef)return;selRef=null;renderProps();markSelPart();}
     \\if(!RO){
     \\var drag=null, cur=-1;
     \\// Iterative layout editing: curLayout is the saved layout the Update button
@@ -4090,12 +4101,6 @@ const BOARD_JS =
     \\ var chip=document.getElementById("pcb-srcchip");
     \\ if(chip&&curLayout){chip.textContent="saved \u{00b7} "+curLayout;chip.className="src-chip src-snapshot";
     \\  chip.title="Showing saved layout \u{201c}"+curLayout+"\u{201d} \u{2014} drag to edit, then Update to save progress.";}}
-    \\// Click a part on the board → reveal it in the component sidebar: scroll the
-    \\// matching <li> into view and flash it so you can see what the part is.
-    \\function scrollToComp(ref){var li=document.querySelector('.comp[data-ref="'+ref+'"]');
-    \\ if(!li)return;li.scrollIntoView({behavior:"smooth",block:"center"});
-    \\ document.querySelectorAll(".comp.sel").forEach(function(e){e.classList.remove("sel");});
-    \\ void li.offsetWidth;li.classList.add("sel");}
     \\els.forEach(function(g,i){
     \\ g.addEventListener("mouseenter",function(){cur=i;});
     \\ g.addEventListener("mouseleave",function(){if(cur===i)cur=-1;});
@@ -4104,9 +4109,10 @@ const BOARD_JS =
     \\ g.addEventListener("pointermove",function(ev){if(!drag||drag.i!==i)return;var m=mm(ev);
     \\   var nx=Math.round((m.x+drag.ox)/G)*G,ny=Math.round((m.y+drag.oy)/G)*G;
     \\   if(nx===P[i].x&&ny===P[i].y)return;P[i].x=nx;P[i].y=ny;
-    \\   if(!drag.moved){drag.moved=true;clearRoute();}setT(i);rats();drawClr();refreshUnplaced();});
+    \\   if(!drag.moved){drag.moved=true;clearRoute();}setT(i);rats();drawClr();refreshUnplaced();
+    \\   if(selRef===P[i].ref)updatePropLive();});
     \\ g.addEventListener("pointerup",function(ev){var mv=drag&&drag.moved;drag=null;g.style.cursor="grab";
-    \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(mv)fetchScore();else scrollToComp(P[i].ref);});
+    \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(mv)fetchScore();else selectComp(P[i].ref);});
     \\ // Pads now sit in the top gPads layer, so a pointerdown on a pad no longer
     \\ // bubbles to the part group. Forward it: capture on g (the court group, which
     \\ // owns pointermove/up) so the part still drags when grabbed by a pad, and keep
@@ -4149,8 +4155,8 @@ const BOARD_JS =
     \\ if(ev.key=="?"&&!typing){ev.preventDefault();kbdToggle();return;}
     \\ if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();
     \\   P[cur].rot=((((P[cur].rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;
-    \\   setT(cur);clearRoute();rats();fetchScore();refreshUnplaced();}});
-    \\function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetchScore();refreshUnplaced();
+    \\   setT(cur);clearRoute();rats();fetchScore();refreshUnplaced();if(selRef===P[cur].ref)updatePropLive();}});
+    \\function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetchScore();refreshUnplaced();updatePropLive();
     \\ if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();}
     \\document.getElementById("pcb-reset").addEventListener("click",function(){
     \\ P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;});applyAll();});
@@ -4300,10 +4306,12 @@ const BOARD_JS =
     \\var zf=document.getElementById("z-fit");if(zf)zf.addEventListener("click",function(){vb={x:0,y:0,w:VBW,h:VBH};setVB();});
     \\var pan=null;
     \\svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.preventDefault();
-    \\ pan={cx:ev.clientX,cy:ev.clientY,vx:vb.x,vy:vb.y};svg.setPointerCapture(ev.pointerId);svg.style.cursor="grabbing";});
+    \\ pan={cx:ev.clientX,cy:ev.clientY,vx:vb.x,vy:vb.y,moved:false};svg.setPointerCapture(ev.pointerId);svg.style.cursor="grabbing";});
     \\svg.addEventListener("pointermove",function(ev){if(!pan)return;var r=svg.getBoundingClientRect();
+    \\ if(Math.abs(ev.clientX-pan.cx)>3||Math.abs(ev.clientY-pan.cy)>3)pan.moved=true;
     \\ vb.x=pan.vx-(ev.clientX-pan.cx)*(vb.w/r.width);vb.y=pan.vy-(ev.clientY-pan.cy)*(vb.h/r.height);setVB();});
-    \\svg.addEventListener("pointerup",function(ev){pan=null;svg.style.cursor="";try{svg.releasePointerCapture(ev.pointerId);}catch(e){}});
+    \\svg.addEventListener("pointerup",function(ev){var click=pan&&!pan.moved;pan=null;svg.style.cursor="";
+    \\ try{svg.releasePointerCapture(ev.pointerId);}catch(e){}if(click)clearSel();});
     \\function viaGeo(){var va=parseFloat((document.getElementById("r-va")||{}).value),
     \\ vd=parseFloat((document.getElementById("r-vd")||{}).value);return {dia:va>0?va:0.4,drill:vd>0?vd:0.2};}
     \\function drawVia(g,wx,wy,dia,drill){var r=Math.max(dia/2*S,2.5),rh=Math.min(Math.max(drill/2*S,1),r*0.7);
@@ -4647,9 +4655,7 @@ const BOARD_JS =
     \\ vb={x:cx-fw/2,y:cy-fw*(VBH/VBW)/2,w:fw,h:fw*(VBH/VBW)};setVB();
     \\ els[idx].classList.add("focus-flash");
     \\ setTimeout(function(){els[idx].classList.remove("focus-flash");},2600);
-    \\ var sel=p.ref;if(window.CSS&&CSS.escape)sel=CSS.escape(sel);
-    \\ var li=document.querySelector('.comp[data-ref="'+sel+'"]');
-    \\ if(li){li.scrollIntoView({behavior:"smooth",block:"center"});li.classList.add("sel");}
+    \\ selectComp(p.ref);
     \\})();
     \\})();</script>
 ;
