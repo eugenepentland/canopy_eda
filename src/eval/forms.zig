@@ -128,6 +128,7 @@ pub const ScopeForm = enum {
     stub,
     layout,
     placement_order,
+    placement_group,
     constraints,
     placement,
     floorplan,
@@ -176,6 +177,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "diagram-layout", .layout },
     .{ "layout", .layout },
     .{ "placement-order", .placement_order },
+    .{ "placement-group", .placement_group },
     .{ "constraints", .constraints },
     .{ "module", .constraints },
     .{ "placement", .placement },
@@ -505,6 +507,12 @@ pub const scope_form_docs = blk: {
     t[@intFromEnum(ScopeForm.placement_order)] = .{ .scope = tl, .doc = .{
         .syntax = "(placement-order \"HUB\" \"REF\"… | (near <pin> \"REF\")…)",
         .summary = "Order the passives around a hub for PCB auto-placement (first = highest priority); (near …) also pins which hub pad a cap's loop targets.",
+    } };
+    t[@intFromEnum(ScopeForm.placement_group)] = .{ .scope = tl, .doc = .{
+        .syntax = "(placement-group \"HUB\" \"NAME\" \"REF\"… | (near <pin> \"REF\")…)",
+        .summary = "A named cluster of passives around a hub: (placement-order …) priority + " ++
+            "(near …) pin pinning PLUS (group …) cohesion + hub-side zoning, so the members " ++
+            "pack as one unit beside the hub pins they serve.",
     } };
     t[@intFromEnum(ScopeForm.constraints)] = .{ .scope = tl, .doc = .{
         .syntax = "(constraints | module \"name\" " ++

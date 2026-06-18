@@ -243,6 +243,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             },
             .layout => layout_spec = try parseLayout(self, form_children),
             .placement_order => try parsePlacementOrder(self, form_children, &placement_orders),
+            .placement_group => try parsePlacementGroup(self, form_children, &placement_orders, &groups),
             .constraints => try parseConstraints(self, form_children, &constraint_acc),
             .placement => placement_spec = try parsePlacement(self, form_children),
             // Same grammar as (placement …); the items name sub-block slugs.
@@ -1014,6 +1015,7 @@ fn evalSection(
             .stub,
             .layout,
             .placement_order,
+            .placement_group,
             .constraints,
             .placement,
             .floorplan,
@@ -1522,6 +1524,51 @@ fn parsePlacementOrder(
     out.append(self.allocator, .{
         .hub = hub,
         .entries = entries.toOwnedSlice(self.allocator) catch &.{},
+    }) catch return EvalError.OutOfMemory;
+}
+
+/// Parse `(placement-group "HUB" "NAME" entries…)` — a NAMED cluster of passives
+/// around a hub. It expands into BOTH existing mechanisms: a `PlacementOrder`
+/// (so the entries' priority + `(near <pin> …)` pin pinning behave exactly like
+/// `(placement-order …)`), and a `Group` (so the same members get cohesion +
+/// hub-side zoning and pack as one unit). `<NAME>` is the group label; entries
+/// share the `(placement-order …)` grammar (bare ref, or `(near <pin> <ref>)`).
+fn parsePlacementGroup(
+    self: *Evaluator,
+    form_children: []const Node,
+    order_out: *std.ArrayListUnmanaged(env_mod.PlacementOrder),
+    group_out: *std.ArrayListUnmanaged(env_mod.Group),
+) EvalError!void {
+    if (form_children.len < 3) return; // need at least (placement-group HUB NAME)
+    const hub = form_children[1].asString() orelse form_children[1].asAtom() orelse return;
+    const name = form_children[2].asText() orelse "";
+    var entries: std.ArrayListUnmanaged(env_mod.PlacementEntry) = .empty;
+    var members: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (form_children[3..]) |child| {
+        if (child.asList()) |cl| {
+            // (near <pin> <ref>) — pins the cap's loop power leg, same as
+            // placement-order; pin token may be int/atom/string.
+            if (cl.len < 3) continue;
+            const head = cl[0].asAtom() orelse continue;
+            if (!std.mem.eql(u8, head, "near")) continue;
+            const pin = cl[1].tokenText(self.allocator) orelse continue;
+            const ref = cl[2].asText() orelse continue;
+            entries.append(self.allocator, .{ .ref = ref, .pin = pin }) catch return EvalError.OutOfMemory;
+            members.append(self.allocator, ref) catch return EvalError.OutOfMemory;
+        } else {
+            const ref = child.asString() orelse child.asAtom() orelse continue;
+            entries.append(self.allocator, .{ .ref = ref }) catch return EvalError.OutOfMemory;
+            members.append(self.allocator, ref) catch return EvalError.OutOfMemory;
+        }
+    }
+    if (entries.items.len == 0) return;
+    order_out.append(self.allocator, .{
+        .hub = hub,
+        .entries = entries.toOwnedSlice(self.allocator) catch &.{},
+    }) catch return EvalError.OutOfMemory;
+    group_out.append(self.allocator, .{
+        .name = name,
+        .members = members.toOwnedSlice(self.allocator) catch &.{},
     }) catch return EvalError.OutOfMemory;
 }
 
@@ -2183,6 +2230,36 @@ test "design-block parses a (board ...) form" {
     try testing.expectEqual(@as(f64, 90), block.board.sides[1].items[0].rot.?);
     try testing.expectEqual(@as(usize, 4), block.board.corners.len);
     try testing.expectEqualStrings("MK3", block.board.corners[2].ref);
+}
+
+// spec: eval/design_block - placement-group expands into a placement-order (pins) and a group (cohesion)
+test "design-block parses a (placement-group …) into an order and a group" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (placement-group "U1" "Analog 3V3"
+        \\    (near 3 "C_AVDD1") "C_BULK"))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    // It feeds the placement-order machinery (priority + near-pin pinning)…
+    try testing.expectEqual(@as(usize, 1), block.placement_order.len);
+    try testing.expectEqualStrings("U1", block.placement_order[0].hub);
+    try testing.expectEqual(@as(usize, 2), block.placement_order[0].entries.len);
+    try testing.expectEqualStrings("C_AVDD1", block.placement_order[0].entries[0].ref);
+    try testing.expectEqualStrings("3", block.placement_order[0].entries[0].pin);
+    try testing.expectEqualStrings("", block.placement_order[0].entries[1].pin); // bare ref → no pin
+    // …AND the group-cohesion machinery (named member set).
+    try testing.expectEqual(@as(usize, 1), block.groups.len);
+    try testing.expectEqualStrings("Analog 3V3", block.groups[0].name);
+    try testing.expectEqual(@as(usize, 2), block.groups[0].members.len);
+    try testing.expectEqualStrings("C_AVDD1", block.groups[0].members[0]);
+    try testing.expectEqualStrings("C_BULK", block.groups[0].members[1]);
 }
 
 // spec: eval/design_block - revision form captures id, date, and newest-first changelog
