@@ -123,6 +123,7 @@ pub fn writeSchematicBomHtml(allocator: std.mem.Allocator, wr: anytype, block: *
         footprint: []const u8,
         attrs: []const []const u8,
         properties: []const env_mod.Property,
+        dnp: bool,
         count: u32,
         refs: std.ArrayListUnmanaged([]const u8),
     };
@@ -135,7 +136,8 @@ pub fn writeSchematicBomHtml(allocator: std.mem.Allocator, wr: anytype, block: *
         if (env_mod.isTestPoint(inst.component)) continue;
         var found = false;
         for (lines.items) |*line| {
-            if (std.mem.eql(u8, line.component, inst.component) and
+            if (line.dnp == inst.dnp and
+                std.mem.eql(u8, line.component, inst.component) and
                 std.mem.eql(u8, line.value, inst.value) and
                 std.mem.eql(u8, line.footprint, inst.footprint) and
                 attrsEqual(line.attrs, inst.attrs))
@@ -155,6 +157,7 @@ pub fn writeSchematicBomHtml(allocator: std.mem.Allocator, wr: anytype, block: *
                 .footprint = inst.footprint,
                 .attrs = inst.attrs,
                 .properties = inst.properties,
+                .dnp = inst.dnp,
                 .count = 1,
                 .refs = refs,
             });
@@ -185,7 +188,7 @@ pub fn writeSchematicBomHtml(allocator: std.mem.Allocator, wr: anytype, block: *
             if (std.mem.eql(u8, p.key, "manufacturer")) manufacturer = p.value;
         }
 
-        try wr.writeAll("<tr>");
+        if (line.dnp) try wr.writeAll("<tr class=\"sch-bom-dnp-row\">") else try wr.writeAll("<tr>");
         try wr.print("<td class=\"sch-bom-qty\">{d}</td>", .{line.count});
 
         // Refs cell — full list with title for hover.
@@ -205,8 +208,9 @@ pub fn writeSchematicBomHtml(allocator: std.mem.Allocator, wr: anytype, block: *
         try wr.print("<td>{s}</td>", .{line.value});
         try wr.print("<td>{s}</td>", .{line.footprint});
 
-        // Attrs — schematic-time annotations like "x7r", "np0".
+        // Attrs — schematic-time annotations like "x7r", "np0"; DNP first.
         try wr.writeAll("<td class=\"sch-bom-attrs\">");
+        if (line.dnp) try wr.writeAll("<span class=\"sch-bom-tag sch-bom-dnp\">DNP</span>");
         for (line.attrs) |attr| {
             try wr.print("<span class=\"sch-bom-tag\">{s}</span>", .{attr});
         }
@@ -287,6 +291,7 @@ pub fn writeBomCsv(allocator: std.mem.Allocator, w: anytype, block: *const env_m
         footprint: []const u8,
         properties: []const env_mod.Property,
         attrs: []const []const u8,
+        dnp: bool,
         count: u32,
         refs: std.ArrayListUnmanaged([]const u8),
     };
@@ -299,7 +304,8 @@ pub fn writeBomCsv(allocator: std.mem.Allocator, w: anytype, block: *const env_m
         if (env_mod.isTestPoint(inst.component)) continue;
         var found = false;
         for (lines.items) |*line| {
-            if (std.mem.eql(u8, line.component, inst.component) and
+            if (line.dnp == inst.dnp and
+                std.mem.eql(u8, line.component, inst.component) and
                 std.mem.eql(u8, line.value, inst.value) and
                 std.mem.eql(u8, line.footprint, inst.footprint) and
                 attrsEqual(line.attrs, inst.attrs))
@@ -319,6 +325,7 @@ pub fn writeBomCsv(allocator: std.mem.Allocator, w: anytype, block: *const env_m
                 .footprint = inst.footprint,
                 .properties = inst.properties,
                 .attrs = inst.attrs,
+                .dnp = inst.dnp,
                 .count = 1,
                 .refs = refs,
             });
@@ -334,7 +341,7 @@ pub fn writeBomCsv(allocator: std.mem.Allocator, w: anytype, block: *const env_m
     }.lt);
 
     // CSV header
-    try w.writeAll("Qty,References,Component,Value,Footprint,MPN,Manufacturer,Datasheet\r\n");
+    try w.writeAll("Qty,References,Component,Value,Footprint,MPN,Manufacturer,Datasheet,DNP\r\n");
 
     for (lines.items) |line| {
         // Qty
@@ -370,6 +377,8 @@ pub fn writeBomCsv(allocator: std.mem.Allocator, w: anytype, block: *const env_m
         try writeCsvField(w, manufacturer);
         try w.writeAll(",");
         try writeCsvField(w, datasheet);
+        try w.writeAll(",");
+        try w.writeAll(if (line.dnp) "DNP" else "");
         try w.writeAll("\r\n");
     }
 }

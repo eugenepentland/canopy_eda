@@ -95,6 +95,9 @@ pub const FlatInstance = struct {
     footprint: []const u8,
     properties: []const Property,
     uuid: []const u8,
+    /// Do Not Populate — carried from the source instance's `(dnp)` flag.
+    /// Default false so literal builders may omit it.
+    dnp: bool = false,
 };
 
 /// One net in the flattened design with a hierarchically-prefixed name and

@@ -494,6 +494,7 @@ Public functions: renderSchematic
 - Flags a rail whose only net-tie is its own source port (no consumer)
 - Recognises a VREF-supplied level translator as powered (no false positive)
 - Recognises a V<int>P<frac> rail such as the 5V V5P0 as power
+- Test points are exempt from the IC-ground/power check
 - Still flags an IC with a ground pin but no recognised power net
 - Flags a sequencing cycle by emitting sequence_cycle per affected rail
 - Flags a net where the worst driver high level is below the worst receiver high threshold

@@ -484,6 +484,9 @@ details li{margin:3px 0;font-size:0.88rem;color:#c9d1d9;line-height:1.45;}
 .sch-bom-attrs,.sch-bom-other{max-width:180px;}
 .sch-bom-tag{display:inline-block;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:3px;padding:1px 6px;font-size:0.7rem;margin-right:3px;}
 .sch-bom-tag-prop{background:#1f2a3d;border-color:#243454;color:#79c0ff;}
+.sch-bom-dnp{background:#3d1f24;border-color:#5c2a31;color:#ff9da4;font-weight:600;}
+.sch-bom-dnp-row td{opacity:0.62;}
+.sch-bom-dnp-row .sch-bom-dnp{opacity:1;}
 .sch-bom-tag-link{color:#58a6ff;text-decoration:none;}
 .sch-bom-tag-link:hover{text-decoration:underline;}
 .sch-bom-mpn,.sch-bom-mfr{white-space:nowrap;}

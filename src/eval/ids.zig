@@ -29,9 +29,31 @@ pub fn nextRefDes(self: *Evaluator, prefix: u8) EvalError![]const u8 {
     return std.fmt.allocPrint(self.allocator, "{c}{d}", .{ prefix, gop.value_ptr.* }) catch return EvalError.OutOfMemory;
 }
 
+/// Next test-point ref-des ("TP1", "TP2", …). Test points carry a 2-letter
+/// prefix the single-char `auto_refdes` map can't hold, so they have their own
+/// counter, kept globally unique across the whole flattened design.
+fn nextTestPointRefDes(self: *Evaluator) EvalError![]const u8 {
+    self.tp_refdes += 1;
+    return std.fmt.allocPrint(self.allocator, "TP{d}", .{self.tp_refdes}) catch return EvalError.OutOfMemory;
+}
+
+/// Next ref-des for an instance, dispatching test points (multi-char "TP"
+/// prefix) to their own counter and everything else to the single-char
+/// `nextRefDes(componentPrefix(...))` path.
+fn nextRefDesForInstance(self: *Evaluator, component: []const u8) EvalError![]const u8 {
+    if (env_mod.isTestPoint(component)) return nextTestPointRefDes(self);
+    return nextRefDes(self, componentPrefix(component));
+}
+
 /// Bump auto ref-des counter to avoid conflicts with explicit ref-des.
 pub fn registerRefDes(self: *Evaluator, ref_des: []const u8) void {
     if (ref_des.len < 2) return;
+    // Test points carry a 2-letter "TP" prefix tracked by a separate counter.
+    if (ref_des.len >= 3 and ref_des[0] == 'T' and ref_des[1] == 'P' and std.ascii.isDigit(ref_des[2])) {
+        const num = std.fmt.parseInt(u32, ref_des[2..], 10) catch return;
+        if (num > self.tp_refdes) self.tp_refdes = num;
+        return;
+    }
     const prefix = ref_des[0];
     const num = std.fmt.parseInt(u32, ref_des[1..], 10) catch return;
     const gop = self.auto_refdes.getOrPut(self.allocator, prefix) catch return;
@@ -79,8 +101,7 @@ pub fn autoAssignRefDes(self: *Evaluator, block: *DesignBlock) EvalError!void {
     for (order) |i| {
         const inst = &insts[i];
         if (!isStandardRefDes(inst.ref_des)) {
-            const prefix = componentPrefix(inst.component);
-            const new_ref = nextRefDes(self, prefix) catch continue;
+            const new_ref = nextRefDesForInstance(self, inst.component) catch continue;
             try rename_map.put(self.allocator, inst.ref_des, new_ref);
             inst.ref_des = new_ref;
         }
@@ -144,8 +165,7 @@ fn assignSubBlockRefDes(self: *Evaluator, block: *DesignBlock) !void {
     // Assign new global ref_des for all instances
     for (order) |i| {
         const inst = &insts[i];
-        const prefix = componentPrefix(inst.component);
-        const new_ref = nextRefDes(self, prefix) catch continue;
+        const new_ref = nextRefDesForInstance(self, inst.component) catch continue;
         if (!std.mem.eql(u8, inst.ref_des, new_ref)) {
             try rename_map.put(self.allocator, inst.ref_des, new_ref);
             inst.ref_des = new_ref;

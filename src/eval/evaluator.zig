@@ -136,6 +136,9 @@ pub const Evaluator = struct {
     symbol_alt_cache: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged([]const AltFunc)),
     /// Auto ref-des counter per prefix letter
     auto_refdes: std.AutoHashMapUnmanaged(u8, u32),
+    /// Auto ref-des counter for test points. They carry a 2-letter "TP" prefix
+    /// the single-char `auto_refdes` map can't represent, so they count here.
+    tp_refdes: u32 = 0,
     /// Forms that need (id ...) auto-inserted: (source_offset, generated_id)
     pending_ids: std.ArrayListUnmanaged(PendingId),
     /// Child-id sidecars that need `(ids ("key" token) …)` written/extended on

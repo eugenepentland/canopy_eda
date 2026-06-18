@@ -54,6 +54,12 @@ pub fn writeNetlist(
         for (inst.properties) |prop| {
             try w.print("      (property (name \"{s}\") (value \"{s}\"))\n", .{ prop.key, prop.value });
         }
+        // Do Not Populate — KiCad reads these two properties to mark the part DNP
+        // and drop it from the assembly BOM while keeping it in the netlist.
+        if (inst.dnp) {
+            try w.writeAll("      (property (name \"dnp\") (value \"\"))\n");
+            try w.writeAll("      (property (name \"exclude_from_bom\") (value \"\"))\n");
+        }
         try w.writeAll("    )\n");
     }
     try w.writeAll("  )\n");
@@ -190,6 +196,7 @@ pub fn collectInstances(
             .footprint = inst.footprint,
             .properties = inst.properties,
             .uuid = effective_uuid,
+            .dnp = inst.dnp,
         });
     }
     for (block.sub_blocks) |sb| {

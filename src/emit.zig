@@ -74,6 +74,7 @@ fn emitInstances(allocator: std.mem.Allocator, w: anytype, block: *const DesignB
             }
             try w.writeByte(')');
         }
+        if (inst.dnp) try w.writeAll("\n      (dnp)");
         if (inst.uuid.len > 0) {
             try w.writeAll("\n      (uuid ");
             try writeString(w, inst.uuid);
