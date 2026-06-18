@@ -3133,6 +3133,385 @@ fn dockSidesByTier(parts: []Part, sides: *[4]std.ArrayListUnmanaged(SidePart), h
     }
 }
 
+/// A net hitting ≥ this many anchor-hub pads is a power/ground rail, not a local
+/// signal link; a net joining ≥ this many parts is a bus. Either disqualifies the
+/// net from forming a cluster edge (they'd merge every part into one blob).
+const CLUSTER_MAX_RAIL_PADS: usize = 3;
+const CLUSTER_MAX_NET_PARTS: usize = 5;
+
+/// Connected components of the NON-hub parts, joined by "local" nets (not ground,
+/// not a wide rail, not a bus) — i.e. the signal subsystems: a crystal + its
+/// coupling caps + term resistor, a series R + its cap. For each component we also
+/// accumulate the centroid of the IC *signal* pads its members touch — the point
+/// the subsystem attaches to the anchor IC — so a member with no IC pad of its own
+/// (a TCXO wired only through its caps; a series R between two local nets) can dock
+/// beside the rest of its cluster instead of scattering to the rail or the
+/// leftover row. That scattering was the dominant source of ratsnest crossings.
+const ClusterInfo = struct {
+    root: []usize, // component id per part (flattened union-find)
+    size: []usize, // non-hub members per root
+    attach: [][2]f64, // summed IC-signal-pad local centre per root
+    attach_n: []usize, // count, to average the attach centroid
+
+    fn clustered(self: ClusterInfo, pi: usize) bool {
+        return self.size[self.root[pi]] >= 2;
+    }
+    /// Average IC-signal-pad local centre of `pi`'s cluster, or null if its
+    /// subsystem touches the IC only through rails/ground (no signal anchor).
+    fn attachOf(self: ClusterInfo, pi: usize) ?[2]f64 {
+        const r = self.root[pi];
+        if (self.attach_n[r] == 0) return null;
+        const n: f64 = @floatFromInt(self.attach_n[r]);
+        return .{ self.attach[r][0] / n, self.attach[r][1] / n };
+    }
+};
+
+fn ufFind(p: []usize, x0: usize) usize {
+    var x = x0;
+    while (p[x] != x) {
+        p[x] = p[p[x]]; // path halving
+        x = p[x];
+    }
+    return x;
+}
+
+fn buildClusters(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    hi: usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+) std.mem.Allocator.Error!ClusterInfo {
+    const n = parts.len;
+    const p = try arena.alloc(usize, n);
+    for (p, 0..) |*e, i| e.* = i;
+    // Union non-hub parts that share a local net.
+    for (nets) |net| {
+        if (pin_roles.isGroundFn(shortName(net.name))) continue;
+        var hubpads: usize = 0;
+        var members: usize = 0;
+        var first: ?usize = null;
+        for (net.pins) |pr| {
+            const idx = idx_of.get(pr.ref_des) orelse continue;
+            if (idx == hi) {
+                hubpads += 1;
+            } else {
+                members += 1;
+                if (first == null) first = idx;
+            }
+        }
+        if (hubpads >= CLUSTER_MAX_RAIL_PADS or members >= CLUSTER_MAX_NET_PARTS) continue;
+        const f = first orelse continue;
+        for (net.pins) |pr| {
+            const idx = idx_of.get(pr.ref_des) orelse continue;
+            if (idx == hi or idx == f) continue;
+            p[ufFind(p, idx)] = ufFind(p, f);
+        }
+    }
+    var size = try arena.alloc(usize, n);
+    @memset(size, 0);
+    for (parts, 0..) |part, i| {
+        if (i == hi or part.kind == .hub) continue;
+        size[ufFind(p, i)] += 1;
+    }
+    // Accumulate each cluster's IC-signal-pad attach centroid.
+    var attach = try arena.alloc([2]f64, n);
+    @memset(attach, .{ 0, 0 });
+    var attach_n = try arena.alloc(usize, n);
+    @memset(attach_n, 0);
+    for (nets) |net| {
+        if (pin_roles.isGroundFn(shortName(net.name))) continue;
+        const pads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
+        if (pads.len == 0 or pads.len > 2) continue; // need a single-ish IC signal pad
+        for (net.pins) |pr| {
+            const idx = idx_of.get(pr.ref_des) orelse continue;
+            if (idx == hi or parts[idx].kind == .hub) continue;
+            const r = ufFind(p, idx);
+            attach[r][0] += pads[0][0];
+            attach[r][1] += pads[0][1];
+            attach_n[r] += 1;
+        }
+    }
+    const root = try arena.alloc(usize, n);
+    for (root, 0..) |*e, i| e.* = ufFind(p, i);
+    return .{ .root = root, .size = size, .attach = attach, .attach_n = attach_n };
+}
+
+/// Choose each non-hub part's anchor pad and bucket it onto a side of the IC.
+/// A decoupling CAP spreads across its rail's pads (round-robin); a signal part
+/// sits by its own IC pad; a cluster orphan (no IC signal pad) docks at its
+/// subsystem's attach centroid so connected parts stay together; anything with no
+/// IC connection drops to `leftover`. Pad offset → side + along-edge coordinate.
+fn assignSides(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    hi: usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+    roles: pin_roles.PartRoles,
+    ci: ClusterInfo,
+    tier_of: []const usize,
+    sides: *[4]std.ArrayListUnmanaged(SidePart),
+    leftover: *std.ArrayListUnmanaged(usize),
+) std.mem.Allocator.Error!void {
+    var net_next: std.AutoHashMapUnmanaged(usize, usize) = .empty;
+    for (parts, 0..) |p, pi| {
+        if (pi == hi) continue; // only the anchor hub is fixed; other hubs (a TCXO) ring it too
+        // Classify this part's IC nets into the most-signal-like (fewest hub pads,
+        // ≤2) and the widest rail (most hub pads).
+        var sig: ?[2]f64 = null;
+        var sig_cnt: usize = 0;
+        var rail: ?usize = null;
+        var rail_cnt: usize = 0;
+        for (nets, 0..) |net, ni| {
+            if (!netHasPart(net, pi, idx_of)) continue;
+            if (padOnNet(parts[hi], hi, net, idx_of).w == 0) continue; // hub not on net
+            if (roles.classOf(hubPinOnNet(net, hi, idx_of)) == .ground) continue;
+            var cnt: usize = 0;
+            for (net.pins) |pr| {
+                if ((idx_of.get(pr.ref_des) orelse continue) == hi) cnt += 1;
+            }
+            if (cnt <= 2 and (sig == null or cnt < sig_cnt)) {
+                const pads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
+                if (pads.len > 0) {
+                    sig = pads[0];
+                    sig_cnt = cnt;
+                }
+            }
+            if (rail == null or cnt > rail_cnt) {
+                rail = ni;
+                rail_cnt = cnt;
+            }
+        }
+        const is_cap = leafRefPrefix(p.ref_des) == 'C';
+        // Decide the anchor pad: rail round-robin for decoupling caps, else the
+        // part's own signal pad, else its cluster's attach, else leftover.
+        var pad: [2]f64 = undefined;
+        if (is_cap and rail != null and rail_cnt >= CLUSTER_MAX_RAIL_PADS) {
+            pad = (try rrPad(arena, parts, hi, nets, idx_of, &net_next, rail.?)) orelse {
+                try leftover.append(arena, pi);
+                continue;
+            };
+        } else if (sig) |s| {
+            pad = s;
+        } else if (ci.clustered(pi) and ci.attachOf(pi) != null) {
+            pad = ci.attachOf(pi).?;
+        } else if (rail) |rn| {
+            pad = (try rrPad(arena, parts, hi, nets, idx_of, &net_next, rn)) orelse {
+                try leftover.append(arena, pi);
+                continue;
+            };
+        } else {
+            try leftover.append(arena, pi);
+            continue;
+        }
+        const vert = @abs(pad[0]) >= @abs(pad[1]);
+        const s: usize = if (vert) (if (pad[0] < 0) 0 else 1) else (if (pad[1] < 0) 2 else 3);
+        parts[pi].rot = if (vert) 0 else 90;
+        const pkb = keepBoxOf(parts[pi]);
+        try sides[s].append(arena, .{
+            .i = pi,
+            .tier = tier_of[pi],
+            .along = if (vert) pad[1] else pad[0],
+            .half_along = if (vert) pkb.hh else pkb.hw,
+            .depth = if (vert) pkb.hw else pkb.hh,
+        });
+    }
+}
+
+/// Round-robin the next hub pad on `net` so same-rail parts spread across the
+/// rail's many IC pads instead of piling on one. Null when the hub has no pad.
+fn rrPad(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    hi: usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+    net_next: *std.AutoHashMapUnmanaged(usize, usize),
+    net: usize,
+) std.mem.Allocator.Error!?[2]f64 {
+    const pads = try hubPadsOnNet(arena, parts[hi], hi, nets[net], idx_of);
+    if (pads.len == 0) return null;
+    const gop = try net_next.getOrPut(arena, net);
+    const k = if (gop.found_existing) gop.value_ptr.* else 0;
+    gop.value_ptr.* = k + 1;
+    return pads[k % pads.len];
+}
+
+fn orient2(p: [2]f64, q: [2]f64, r: [2]f64) f64 {
+    return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+}
+fn ptEq(p: [2]f64, q: [2]f64) bool {
+    return @abs(p[0] - q[0]) < 1e-6 and @abs(p[1] - q[1]) < 1e-6;
+}
+/// Interior crossing of segments a1→a2 and b1→b2 — a shared endpoint (two airwires
+/// meeting at the same pad) is not a crossing.
+fn segsCross(a1: [2]f64, a2: [2]f64, b1: [2]f64, b2: [2]f64) bool {
+    if (ptEq(a1, b1) or ptEq(a1, b2) or ptEq(a2, b1) or ptEq(a2, b2)) return false;
+    const d1 = orient2(b1, b2, a1);
+    const d2 = orient2(b1, b2, a2);
+    const d3 = orient2(a1, a2, b1);
+    const d4 = orient2(a1, a2, b2);
+    const opp1 = (d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0);
+    const opp2 = (d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0);
+    return opp1 and opp2;
+}
+
+/// Euclidean minimum spanning tree (Prim's) over `pts`, appending its edges as
+/// segments to `out`. An MST is planar, so a net never crosses ITSELF — the
+/// crossing metric then measures only the inter-net tangle that placement controls.
+fn primEdges(arena: std.mem.Allocator, pts: []const [2]f64, out: *std.ArrayListUnmanaged([4]f64)) std.mem.Allocator.Error!void {
+    const n = pts.len;
+    const intree = try arena.alloc(bool, n);
+    @memset(intree, false);
+    intree[0] = true;
+    var added: usize = 1;
+    while (added < n) : (added += 1) {
+        var bi: usize = 0;
+        var bj: usize = 0;
+        var bd: f64 = std.math.inf(f64);
+        for (pts, 0..) |a, i| {
+            if (!intree[i]) continue;
+            for (pts, 0..) |b, j| {
+                if (intree[j]) continue;
+                const dx = a[0] - b[0];
+                const dy = a[1] - b[1];
+                const d = dx * dx + dy * dy;
+                if (d < bd) {
+                    bd = d;
+                    bi = i;
+                    bj = j;
+                }
+            }
+        }
+        intree[bj] = true;
+        try out.append(arena, .{ pts[bi][0], pts[bi][1], pts[bj][0], pts[bj][1] });
+    }
+}
+
+/// Append a decoupling cap's power loop: its power pad → the nearest hub pad on
+/// the same (non-ground) net. Mirrors the orange loop the viewer draws, so the
+/// crossing metric sees the loops that dominate the rough layout's tangle.
+fn appendCapLoop(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    hi: usize,
+    pi: usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+    out: *std.ArrayListUnmanaged([4]f64),
+) std.mem.Allocator.Error!void {
+    for (nets) |net| {
+        if (!netHasPart(net, pi, idx_of)) continue;
+        if (pin_roles.isGroundFn(shortName(net.name))) continue;
+        const cap_pad = padOnNet(parts[pi], pi, net, idx_of);
+        if (cap_pad.w == 0 and cap_pad.h == 0) continue;
+        const pads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
+        if (pads.len == 0) continue;
+        const cw = worldPadCenter(parts[pi], cap_pad.x, cap_pad.y);
+        var best: f64 = std.math.inf(f64);
+        var bx: f64 = 0;
+        var by: f64 = 0;
+        for (pads) |hp| {
+            const w = worldPadCenter(parts[hi], hp[0], hp[1]);
+            const dx = w[0] - cw[0];
+            const dy = w[1] - cw[1];
+            const d = dx * dx + dy * dy;
+            if (d < best) {
+                best = d;
+                bx = w[0];
+                by = w[1];
+            }
+        }
+        try out.append(arena, .{ cw[0], cw[1], bx, by });
+        return; // one loop per cap
+    }
+}
+
+/// Count airwire crossings of the current placement: a planar per-net MST (ground
+/// skipped — it reaches every part, so its crossings are noise) plus each cap's
+/// decoupling loop. The objective the swap polish minimizes.
+fn crossingMetric(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    hi: usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+) std.mem.Allocator.Error!usize {
+    var segs: std.ArrayListUnmanaged([4]f64) = .empty;
+    for (nets) |net| {
+        if (pin_roles.isGroundFn(shortName(net.name))) continue;
+        var pts: std.ArrayListUnmanaged([2]f64) = .empty;
+        for (net.pins) |pr| {
+            const idx = idx_of.get(pr.ref_des) orelse continue;
+            const pad = padOnNet(parts[idx], idx, net, idx_of);
+            if (pad.w == 0 and pad.h == 0) continue;
+            try pts.append(arena, worldPadCenter(parts[idx], pad.x, pad.y));
+        }
+        if (pts.items.len >= 2) try primEdges(arena, pts.items, &segs);
+    }
+    for (parts, 0..) |p, pi| {
+        if (pi == hi or p.kind == .hub or leafRefPrefix(p.ref_des) != 'C') continue;
+        try appendCapLoop(arena, parts, hi, pi, nets, idx_of, &segs);
+    }
+    var n: usize = 0;
+    for (segs.items, 0..) |s, i| {
+        for (segs.items[i + 1 ..]) |t| {
+            if (segsCross(.{ s[0], s[1] }, .{ s[2], s[3] }, .{ t[0], t[1] }, .{ t[2], t[3] })) n += 1;
+        }
+    }
+    return n;
+}
+
+const ROUGH_POLISH_PASSES: usize = 6;
+const ROUGH_POLISH_MAX_PARTS: usize = 80; // bound the O(parts²·segs²) search to module sizes
+
+/// Crossing-reduction polish: repeatedly swap two SAME-footprint-size parts when it
+/// lowers the crossing metric (same size ⇒ the swap stays overlap-free, so no
+/// re-legalization is needed mid-search). Greedy hill-climb, a few passes; stops
+/// early when a pass makes no improvement.
+fn polishCrossings(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    hi: usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+) std.mem.Allocator.Error!void {
+    var best = try crossingMetric(arena, parts, hi, nets, idx_of);
+    var pass: usize = 0;
+    while (best > 0 and pass < ROUGH_POLISH_PASSES) : (pass += 1) {
+        var improved = false;
+        for (parts, 0..) |_, i| {
+            if (i == hi) continue;
+            for (i + 1..parts.len) |j| {
+                if (j == hi) continue;
+                if (@abs(parts[i].hw - parts[j].hw) > 1e-6 or @abs(parts[i].hh - parts[j].hh) > 1e-6) continue;
+                const ip = .{ parts[i].x, parts[i].y, parts[i].rot };
+                const jp = .{ parts[j].x, parts[j].y, parts[j].rot };
+                parts[i].x = jp[0];
+                parts[i].y = jp[1];
+                parts[i].rot = jp[2];
+                parts[j].x = ip[0];
+                parts[j].y = ip[1];
+                parts[j].rot = ip[2];
+                const c = try crossingMetric(arena, parts, hi, nets, idx_of);
+                if (c < best) {
+                    best = c;
+                    improved = true;
+                } else {
+                    parts[i].x = ip[0];
+                    parts[i].y = ip[1];
+                    parts[i].rot = ip[2];
+                    parts[j].x = jp[0];
+                    parts[j].y = jp[1];
+                    parts[j].rot = jp[2];
+                }
+            }
+        }
+        if (!improved) break;
+    }
+}
+
 fn packPadAnchored(
     arena: std.mem.Allocator,
     parts: []Part,
@@ -3198,68 +3577,14 @@ fn packPadAnchored(
     var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
     var leftover: std.ArrayListUnmanaged(usize) = .empty;
 
-    // Pass 1 — pick each part's anchor NET. GND nets never count. A cap follows the
-    // net with the MOST hub pads (its power rail); a resistor the FEWEST (its signal);
-    // anything else its first non-ground net. Pad-count, not a name match, separates
-    // rails from signals (a rail lands on many IC pins, a signal on one), so it needs
-    // no electrical annotations.
-    const Pick = struct { i: usize, net: usize };
-    var picks: std.ArrayListUnmanaged(Pick) = .empty;
-    for (parts, 0..) |p, pi| {
-        if (pi == hi) continue;
-        const pref = leafRefPrefix(p.ref_des);
-        const is_cap = pref == 'C';
-        const is_res = pref == 'R';
-        var bnet: ?usize = null;
-        var bcnt: usize = 0;
-        for (nets, 0..) |net, ni| {
-            if (!netHasPart(net, pi, &prep.idx_of)) continue;
-            if (padOnNet(parts[hi], hi, net, &prep.idx_of).w == 0) continue; // hub not on net
-            if (roles.classOf(hubPinOnNet(net, hi, &prep.idx_of)) == .ground) continue;
-            var cnt: usize = 0;
-            for (net.pins) |pr| {
-                if ((prep.idx_of.get(pr.ref_des) orelse continue) == hi) cnt += 1;
-            }
-            const take = bnet == null or (is_cap and cnt > bcnt) or (is_res and cnt < bcnt);
-            if (take) {
-                bnet = ni;
-                bcnt = cnt;
-            }
-        }
-        if (bnet) |ni| {
-            try picks.append(arena, .{ .i = pi, .net = ni });
-        } else {
-            try leftover.append(arena, pi);
-        }
-    }
-
-    // Pass 2 — assign each part to one of its anchor net's hub pads, round-robin, so
-    // same-rail parts spread across the rail's many IC pads instead of piling on one.
-    // The chosen pad's offset from the IC centre (IC at origin, unrotated) gives the
-    // side and along-edge coordinate; 2-pin parts rotate to face the edge.
-    var net_next: std.AutoHashMapUnmanaged(usize, usize) = .empty;
-    for (picks.items) |pk| {
-        const pads = try hubPadsOnNet(arena, parts[hi], hi, nets[pk.net], &prep.idx_of);
-        if (pads.len == 0) {
-            try leftover.append(arena, pk.i);
-            continue;
-        }
-        const gop = try net_next.getOrPut(arena, pk.net);
-        const k = if (gop.found_existing) gop.value_ptr.* else 0;
-        gop.value_ptr.* = k + 1;
-        const pad = pads[k % pads.len];
-        const vert = @abs(pad[0]) >= @abs(pad[1]);
-        const s: usize = if (vert) (if (pad[0] < 0) 0 else 1) else (if (pad[1] < 0) 2 else 3);
-        parts[pk.i].rot = if (vert) 0 else 90;
-        const pkb = keepBoxOf(parts[pk.i]);
-        try sides[s].append(arena, .{
-            .i = pk.i,
-            .tier = tier_of[pk.i],
-            .along = if (vert) pad[1] else pad[0],
-            .half_along = if (vert) pkb.hh else pkb.hw,
-            .depth = if (vert) pkb.hw else pkb.hh,
-        });
-    }
+    // Cluster connected signal subsystems, then bucket each part onto a side of
+    // the IC. Decoupling caps spread across their rail; signal parts sit by their
+    // own IC pad; a subsystem's orphan members (a TCXO wired only through its caps,
+    // a series R between two local nets) dock at the cluster's attach centroid so
+    // connected parts stay together — keeping their airwires short instead of
+    // spanning the board, which was the dominant ratsnest-crossing source.
+    const ci = try buildClusters(arena, parts, hi, nets, &prep.idx_of);
+    try assignSides(arena, parts, hi, nets, &prep.idx_of, roles, ci, tier_of, &sides, &leftover);
 
     // Lay each side's parts into tier-ordered lanes around the IC.
     dockSidesByTier(parts, &sides, hkb);
@@ -3276,6 +3601,11 @@ fn packPadAnchored(
             x += pkb.hw + PAD_ANCHOR_PART_GAP_MM;
         }
     }
+
+    // Crossing-reduction polish: same-size swaps that lower the airwire-crossing
+    // count, on top of the cluster-aware seed (modules only — it's bounded but
+    // O(parts²·segments²) per pass).
+    if (parts.len <= ROUGH_POLISH_MAX_PARTS) try polishCrossings(arena, parts, hi, nets, &prep.idx_of);
 
     legalizeFinal(parts); // resolve any corner / cross-side overlaps
     return true;
@@ -9249,4 +9579,16 @@ test "dockSidesByTier fills inner lane by priority, spilling lower tiers outward
     // its x is greater (less negative) than the spilled tier-1 part's.
     try testing.expect(parts[0].x > parts[1].x);
     try testing.expect(parts[0].x < 0 and parts[1].x < 0);
+}
+
+// spec: placement/optimizer - segsCross flags interior airwire crossings, not shared endpoints
+test "segsCross flags interior crossings and ignores shared endpoints" {
+    // Diagonals of a unit square cross in the middle.
+    try testing.expect(segsCross(.{ 0, 0 }, .{ 1, 1 }, .{ 0, 1 }, .{ 1, 0 }));
+    // Parallel segments never cross.
+    try testing.expect(!segsCross(.{ 0, 0 }, .{ 1, 0 }, .{ 0, 1 }, .{ 1, 1 }));
+    // Two airwires meeting at the same pad share an endpoint — not a crossing.
+    try testing.expect(!segsCross(.{ 0, 0 }, .{ 1, 1 }, .{ 0, 0 }, .{ 1, -1 }));
+    // Disjoint and far apart.
+    try testing.expect(!segsCross(.{ 0, 0 }, .{ 1, 0 }, .{ 5, 5 }, .{ 6, 6 }));
 }

@@ -1,4 +1,4 @@
 # guardian-snapshot v1
 src/eval/design_block.zig:2153: switch at top level of test body
-src/placement/optimizer.zig:9012: more than one top-level for loop
+src/placement/optimizer.zig:9342: more than one top-level for loop
 src/sexpr/printer.zig:253: while at top level of test body
