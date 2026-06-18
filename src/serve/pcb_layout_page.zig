@@ -3883,10 +3883,17 @@ const BOARD_JS =
     \\const svg=document.getElementById("pcb-svg");
     \\const gP=document.createElementNS(NS,"g"), gR=document.createElementNS(NS,"g");
     \\const gT=document.createElementNS(NS,"g"), gC=document.createElementNS(NS,"g"), gD=document.createElementNS(NS,"g");
-    \\const gU=document.createElementNS(NS,"g");
-    \\svg.appendChild(gR); svg.appendChild(gP); svg.appendChild(gC); svg.appendChild(gT); svg.appendChild(gD); svg.appendChild(gU);
+    \\const gU=document.createElementNS(NS,"g"), gPads=document.createElementNS(NS,"g");
+    \\// Layer stack (bottom→top): part bodies (courtyard + silk + ref) < ratsnest <
+    \\// pads < clearance < tracks < DRC < unplaced. The ratsnest (gR) sits ABOVE each
+    \\// part's dark courtyard so airwires read across the body, but BELOW the copper
+    \\// pads (gPads, drawn after gR) so no airwire ever paints over a pad. Pads ride
+    \\// in their own top layer; each part's gPads subgroup is kept in lock-step with
+    \\// the body transform by setT (translate+rotate), and a pointerdown forwarder
+    \\// (see the drag block) keeps a part draggable even when grabbed by a pad.
+    \\svg.appendChild(gP); svg.appendChild(gR); svg.appendChild(gPads); svg.appendChild(gC); svg.appendChild(gT); svg.appendChild(gD); svg.appendChild(gU);
     \\gT.style.pointerEvents="none"; gR.style.pointerEvents="none"; gC.style.pointerEvents="none"; gD.style.pointerEvents="none"; gU.style.pointerEvents="none";
-    \\const els=[], bodies=[];
+    \\const els=[], bodies=[], padEls=[];
     \\function el(n,a){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);return e;}
     \\// (board (size W H) …) physical outline, under everything (read-only).
     \\if(PCB.board){
@@ -3903,9 +3910,12 @@ const BOARD_JS =
     \\function wrect(i,pad){var p=P[i],c=wpt(i,pad.x,pad.y),q=(((p.rot||0)%360)+360)%360;
     \\ var hw=(q==90||q==270)?pad.h/2:pad.w/2, hh=(q==90||q==270)?pad.w/2:pad.h/2;
     \\ return {x0:c.x-hw,y0:c.y-hh,x1:c.x+hw,y1:c.y+hh};}
-    \\function setT(i){var p=P[i];
-    \\ els[i].setAttribute("transform","translate("+X(p.x).toFixed(1)+","+Y(p.y).toFixed(1)+")");
-    \\ bodies[i].setAttribute("transform","rotate("+(p.rot||0)+")");}
+    \\function setT(i){var p=P[i],tx=X(p.x).toFixed(1),ty=Y(p.y).toFixed(1),rot=(p.rot||0);
+    \\ els[i].setAttribute("transform","translate("+tx+","+ty+")");
+    \\ bodies[i].setAttribute("transform","rotate("+rot+")");
+    \\ // Pads live in the top gPads layer (above the ratsnest), so they carry the
+    \\ // part's full translate+rotate themselves rather than inheriting it.
+    \\ if(padEls[i])padEls[i].setAttribute("transform","translate("+tx+","+ty+") rotate("+rot+")");}
     \\P.forEach(function(p,i){
     \\ var g=el("g",{"class":"part","data-ref":p.ref});
     \\ var body=el("g",{"class":"body"});
@@ -3918,13 +3928,17 @@ const BOARD_JS =
     \\    x2:(s[2]*S).toFixed(1),y2:(s[3]*S).toFixed(1),stroke:"#8b949e","stroke-width":0.8,"stroke-linecap":"round"}));});
     \\  p.silk.c.forEach(function(c){body.appendChild(el("circle",{cx:(c[0]*S).toFixed(1),cy:(c[1]*S).toFixed(1),
     \\    r:Math.max(c[2]*S,1).toFixed(1),fill:"none",stroke:"#8b949e","stroke-width":0.8}));});}
+    \\ // Pads go into their own gPads subgroup (drawn above the ratsnest), not into
+    \\ // the body — so airwires pass behind the copper. data-ref lets the drag
+    \\ // forwarder map a pad back to its part.
+    \\ var pg=el("g",{"class":"padset","data-ref":p.ref});
     \\ p.pads.forEach(function(pad){
     \\   var at={fill:"#b08d57"}; if(pad.net)at["data-net"]=pad.net;
-    \\   body.appendChild(FP.padShape(pad,{scale:S,minPx:1.5,cls:"pad",attrs:at}));});
+    \\   pg.appendChild(FP.padShape(pad,{scale:S,minPx:1.5,cls:"pad",attrs:at}));});
     \\ g.appendChild(body);
     \\ var t=el("text",{"class":"pcb-ref",x:0,y:(-p.hh*S-2).toFixed(1),fill:p.kind=="hub"?"#58a6ff":"#8b949e"});
     \\ t.textContent=p.ref; g.appendChild(t);
-    \\ gP.appendChild(g); els.push(g); bodies.push(body);
+    \\ gP.appendChild(g); gPads.appendChild(pg); els.push(g); bodies.push(body); padEls.push(pg);
     \\ setT(i);
     \\});
     \\// ── Unplaced (auto-staged) parts: the ones a (placement …) spec didn't list.
@@ -4063,10 +4077,9 @@ const BOARD_JS =
     \\var drag=null, cur=-1;
     \\// Iterative layout editing: curLayout is the saved layout the Update button
     \\// writes back into (overwrite in place) instead of forcing a new one. Set by
-    \\// Load and after a Save as…; the one-shot reapplyKey survives our own post-save
-    \\// reload so the board returns to exactly the arrangement you were editing.
+    \\// Load and after a Save as…. Save/Update persist in place (no page reload — see
+    \\// persistLayout), so the board, camera and view toggles never reset under you.
     \\var curLayout=null;
-    \\var reapplyKey="pcb-reapply:"+PCB.name;
     \\function setActiveLayout(nm){curLayout=(nm&&nm.length)?nm:null;
     \\ var ub=document.getElementById("pcb-update");if(ub)ub.disabled=!curLayout;
     \\ var ind=document.getElementById("pcb-active");
@@ -4094,6 +4107,16 @@ const BOARD_JS =
     \\   if(!drag.moved){drag.moved=true;clearRoute();}setT(i);rats();drawClr();refreshUnplaced();});
     \\ g.addEventListener("pointerup",function(ev){var mv=drag&&drag.moved;drag=null;g.style.cursor="grab";
     \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(mv)fetchScore();else scrollToComp(P[i].ref);});
+    \\ // Pads now sit in the top gPads layer, so a pointerdown on a pad no longer
+    \\ // bubbles to the part group. Forward it: capture on g (the court group, which
+    \\ // owns pointermove/up) so the part still drags when grabbed by a pad, and keep
+    \\ // `cur` (the R-rotate target) tracking pad hover too.
+    \\ var pg=padEls[i];
+    \\ if(pg){
+    \\  pg.addEventListener("mouseenter",function(){cur=i;});
+    \\  pg.addEventListener("mouseleave",function(){if(cur===i)cur=-1;});
+    \\  pg.addEventListener("pointerdown",function(ev){ev.preventDefault();var m=mm(ev);
+    \\    drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});}
     \\});
     \\// Keyboard: R / Shift+R rotates the hovered part; ? toggles the
     \\// shortcut-help overlay (Esc or click closes it). The overlay's list
@@ -4158,75 +4181,105 @@ const BOARD_JS =
     \\  try{localStorage.removeItem(key);}catch(e){}svApply();});})();
     \\function pad2(n){return (n<10?"0":"")+n;}
     \\function stamp(){var d=new Date();return pad2(d.getMonth()+1)+"-"+pad2(d.getDate())+" "+pad2(d.getHours())+":"+pad2(d.getMinutes());}
-    \\document.getElementById("pcb-saveas").addEventListener("click",function(){
-    \\ var nm=window.prompt("Name this layout:","layout "+stamp());
-    \\ if(nm===null)return; nm=nm.trim(); if(!nm)return;
-    \\ var msg=document.getElementById("pcb-savemsg");
-    \\ var payload={name:nm,parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};})};
-    \\ msg.style.color="#8b949e";msg.textContent="saving…";
-    \\ fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name),{method:"POST",
-    \\   headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
-    \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
-    \\  .then(function(){msg.style.color="#3fb950";msg.textContent="saved ✓";
-    \\    try{sessionStorage.setItem(reapplyKey,nm);}catch(e){}
-    \\    setTimeout(function(){window.location.href="/pcb-layout/"+encodeURIComponent(PCB.name);},300);})
-    \\  .catch(function(){msg.style.color="#f85149";msg.textContent="save failed";});});
-    \\// Update: overwrite the loaded layout in place (no prompt) — save progress on
-    \\// the layout you're iterating, then reload showing that same arrangement.
-    \\var updBtn=document.getElementById("pcb-update");
-    \\if(updBtn)updBtn.addEventListener("click",function(){
-    \\ if(!curLayout)return; var msg=document.getElementById("pcb-savemsg");
-    \\ var payload={name:curLayout,parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};})};
-    \\ msg.style.color="#8b949e";msg.textContent="updating…";
-    \\ fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name),{method:"POST",
-    \\   headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
-    \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
-    \\  .then(function(){msg.style.color="#3fb950";msg.textContent="updated ✓";
-    \\    try{sessionStorage.setItem(reapplyKey,curLayout);}catch(e){}
-    \\    setTimeout(function(){window.location.href="/pcb-layout/"+encodeURIComponent(PCB.name);},300);})
-    \\  .catch(function(){msg.style.color="#f85149";msg.textContent="update failed";});});
     \\function layByName(nm){var Ls=PCB.layouts||[];for(var i=0;i<Ls.length;i++)if(Ls[i].name===nm)return Ls[i];return null;}
-    \\document.querySelectorAll("[data-lay-load]").forEach(function(b){
-    \\ b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-load");var L=layByName(nm);if(!L)return;
-    \\   P.forEach(function(p){var s=L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;}});applyAll();
-    \\   setActiveLayout(nm);});});
-    \\document.querySelectorAll("[data-lay-del]").forEach(function(b){
-    \\ b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-del");
-    \\   if(!window.confirm("Delete layout \""+nm+"\"?"))return;
-    \\   fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+"/delete",{method:"POST",
-    \\     headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm})})
-    \\    .then(function(r){if(!r.ok)throw 0;window.location.reload();}).catch(function(){});});});
+    \\// ── Saved-layout panel rows are built/bound here too (not only server-side) so
+    \\//    a Save/Update can splice a row in place rather than reloading the page.
+    \\function mkEl(tag,cls,txt){var e=document.createElement(tag);if(cls)e.className=cls;
+    \\ if(txt!=null)e.textContent=txt;return e;}
+    \\function bindLayLoad(b){b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-load");
+    \\ var L=layByName(nm);if(!L)return;
+    \\ P.forEach(function(p){var s=L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;}});applyAll();
+    \\ setActiveLayout(nm);});}
+    \\function bindLayDel(b){b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-del");
+    \\ if(!window.confirm("Delete layout \""+nm+"\"?"))return;
+    \\ fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+"/delete",{method:"POST",
+    \\   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm})})
+    \\  .then(function(r){if(!r.ok)throw 0;window.location.reload();}).catch(function(){});});}
     \\// ★ toggle: set this layout as the KiCad-sync default, or clear it if already
     \\// default (send an empty name). The server seeds new parts' placement + GND
     \\// vias from the default on the next sync.
-    \\document.querySelectorAll("[data-lay-default]").forEach(function(b){
-    \\ b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-default");
-    \\   var send=b.classList.contains("on")?"":nm;
-    \\   fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+"/default",{method:"POST",
-    \\     headers:{"Content-Type":"application/json"},body:JSON.stringify({name:send})})
-    \\    .then(function(r){if(!r.ok)throw 0;window.location.reload();}).catch(function(){});});});
-    \\var rescoreBtn=document.getElementById("pcb-rescore");
-    \\if(rescoreBtn)rescoreBtn.addEventListener("click",function(){
-    \\ rescoreBtn.disabled=true;rescoreBtn.textContent="Rescoring…";
+    \\function bindLayDefault(b){b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-default");
+    \\ var send=b.classList.contains("on")?"":nm;
+    \\ fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+"/default",{method:"POST",
+    \\   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:send})})
+    \\  .then(function(r){if(!r.ok)throw 0;window.location.reload();}).catch(function(){});});}
+    \\function bindRescore(btn){btn.addEventListener("click",function(){
+    \\ btn.disabled=true;btn.textContent="Rescoring…";
     \\ fetch("/api/pcb-rescore/"+encodeURIComponent(PCB.name),{method:"POST"})
     \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
     \\  .then(function(){window.location.reload();})
-    \\  .catch(function(){rescoreBtn.disabled=false;rescoreBtn.textContent="↻ Rescore all";});});
-    \\// Fetch each saved layout's raw breakdown once, then re-weigh the panel so its
-    \\// scores/deltas track the Score-view weights alongside the live bar.
-    \\(function(){if(!((PCB.layouts||[]).length))return;
+    \\  .catch(function(){btn.disabled=false;btn.textContent="\u{21bb} Rescore all";});}); }
+    \\document.querySelectorAll("[data-lay-load]").forEach(bindLayLoad);
+    \\document.querySelectorAll("[data-lay-del]").forEach(bindLayDel);
+    \\document.querySelectorAll("[data-lay-default]").forEach(bindLayDefault);
+    \\var rescoreBtn0=document.getElementById("pcb-rescore");if(rescoreBtn0)bindRescore(rescoreBtn0);
+    \\// Build a fresh manual saved-layout row mirroring writeLayoutsPanel's markup, so
+    \\// reweighLayouts (keyed on .lay-row/.lay-score/.lay-d) and the panel buttons all
+    \\// work on it with no reload. score/delta fill in once loadLayoutScores returns.
+    \\function buildLayRow(nm){
+    \\ var row=mkEl("div","lay-row");row.setAttribute("data-lay-row",nm);
+    \\ var top=mkEl("div","lay-top");
+    \\ top.appendChild(mkEl("span","lay-kind k-man","manual"));
+    \\ top.appendChild(mkEl("span","lay-name",nm));
+    \\ top.appendChild(mkEl("span","lay-d",""));
+    \\ var bot=mkEl("div","lay-bot");bot.appendChild(mkEl("span","lay-score","\u{2014}"));
+    \\ var act=mkEl("span","lay-actions");
+    \\ var star=mkEl("button","btn lay-star","\u{2606}");star.setAttribute("data-lay-default",nm);
+    \\ star.title="Make this the KiCad-sync default (seeds new parts' placement + GND vias)";bindLayDefault(star);
+    \\ var go=mkEl("button","btn lay-go","Load");go.setAttribute("data-lay-load",nm);bindLayLoad(go);
+    \\ var spec=mkEl("button","btn lay-spec","\u{2192}spec");spec.setAttribute("data-lay-spec",nm);
+    \\ spec.title="Promote: export this snapshot as a (placement ...) spec into the panel below";
+    \\ var del=mkEl("button","btn lay-del","\u{2715}");del.setAttribute("data-lay-del",nm);del.title="Delete";bindLayDel(del);
+    \\ act.appendChild(star);act.appendChild(go);act.appendChild(spec);act.appendChild(del);
+    \\ bot.appendChild(act);row.appendChild(top);row.appendChild(bot);return row;}
+    \\// Splice a row for nm into the panel if it isn't there yet (Save as…); the
+    \\// empty-state placeholder converts to a list + rescore button on the first save.
+    \\function upsertLayoutPanel(nm){var saved=document.querySelector(".pcb-saved");if(!saved)return;
+    \\ var list=saved.querySelector(".saved-list");
+    \\ if(!list){var emp=saved.querySelector(".saved-empty");if(emp&&emp.parentNode)emp.parentNode.removeChild(emp);
+    \\  list=mkEl("div","saved-list");saved.appendChild(list);
+    \\  var hd=saved.querySelector(".saved-h");
+    \\  if(hd&&!document.getElementById("pcb-rescore")){var rb=mkEl("button","saved-rescore","\u{21bb} Rescore all");
+    \\   rb.id="pcb-rescore";rb.title="Recompute every saved layout's objective with the current engine";
+    \\   hd.appendChild(rb);bindRescore(rb);}}
+    \\ var rows=list.querySelectorAll(".lay-row");
+    \\ for(var i=0;i<rows.length;i++)if(rows[i].getAttribute("data-lay-row")===nm)return;
+    \\ list.appendChild(buildLayRow(nm));
+    \\ var n=saved.querySelector(".saved-n");if(n)n.textContent=list.querySelectorAll(".lay-row").length;}
+    \\// Fetch each saved layout's raw breakdown, then re-weigh the panel so its
+    \\// scores/deltas track the Score-view weights alongside the live bar. Re-run
+    \\// after a Save/Update so the affected row's score refreshes in place.
+    \\function loadLayoutScores(){if(!((PCB.layouts||[]).length))return;
     \\ fetch("/api/pcb-score-batch/"+encodeURIComponent(PCB.name),{method:"POST"})
     \\  .then(function(r){return r.json();})
     \\  .then(function(j){(j.results||[]).forEach(function(it){layBreaks[it.name]=it.breakdown;});reweighLayouts();})
-    \\  .catch(function(){});})();
-    \\// After our own Save/Update reload, re-apply the just-saved layout's poses so
-    \\// the board shows exactly what you were editing (verbatim, not the auto cache)
-    \\// and the Update button stays armed for the next iteration. One-shot: consumed
-    \\// immediately so an unrelated later visit isn't hijacked.
-    \\(function(){var nm=null;try{nm=sessionStorage.getItem(reapplyKey);sessionStorage.removeItem(reapplyKey);}catch(e){}
-    \\ if(!nm)return; var L=layByName(nm); if(!L)return;
-    \\ P.forEach(function(p){var s=L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;}});applyAll();
-    \\ setActiveLayout(nm);})();
+    \\  .catch(function(){});}
+    \\// Persist the current poses to layout nm and update the panel IN PLACE — no
+    \\// page reload, so the camera and view toggles you set while editing stay put.
+    \\function persistLayout(nm,verb){var msg=document.getElementById("pcb-savemsg");
+    \\ var parts=P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};});
+    \\ if(msg){msg.style.color="#8b949e";msg.textContent=verb+"\u{2026}";}
+    \\ return fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name),{method:"POST",
+    \\   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts})})
+    \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
+    \\  .then(function(){
+    \\    var pmap={};parts.forEach(function(p){pmap[p.ref]={x:p.x,y:p.y,rot:p.rot};});
+    \\    var Ls=PCB.layouts||(PCB.layouts=[]),found=null;
+    \\    for(var i=0;i<Ls.length;i++)if(Ls[i].name===nm){found=Ls[i];break;}
+    \\    if(found){found.parts=pmap;found.kind="manual";}
+    \\    else Ls.push({name:nm,kind:"manual",parts:pmap,score:null});
+    \\    upsertLayoutPanel(nm);setActiveLayout(nm);loadLayoutScores();
+    \\    if(msg){msg.style.color="#3fb950";msg.textContent=(verb==="updating"?"updated":"saved")+" \u{2713}";}})
+    \\  .catch(function(){if(msg){msg.style.color="#f85149";
+    \\    msg.textContent=(verb==="updating"?"update":"save")+" failed";}});}
+    \\document.getElementById("pcb-saveas").addEventListener("click",function(){
+    \\ var nm=window.prompt("Name this layout:","layout "+stamp());
+    \\ if(nm===null)return; nm=nm.trim(); if(!nm)return; persistLayout(nm,"saving");});
+    \\// Update: overwrite the loaded layout in place (no prompt) — save progress on
+    \\// the layout you're iterating without disturbing the view.
+    \\var updBtn=document.getElementById("pcb-update");
+    \\if(updBtn)updBtn.addEventListener("click",function(){if(!curLayout)return;persistLayout(curLayout,"updating");});
+    \\loadLayoutScores();
     \\}
     \\function hlBy(at,v,cls,on){document.querySelectorAll("["+at+"]").forEach(function(e){
     \\ if(e.getAttribute(at)===v)e.classList.toggle(cls,on);});}
@@ -4564,7 +4617,7 @@ const BOARD_JS =
     \\var ratsCb=document.getElementById("v-rats");
     \\if(ratsCb)ratsCb.addEventListener("change",function(){ratsOn=ratsCb.checked;rats();});
     \\function netColorOf(nk){if(!nk||!PCB.netcolor)return null;return PCB.netcolor[nk]||null;}
-    \\function applyNetColors(){var pads=gP.querySelectorAll(".pad");
+    \\function applyNetColors(){var pads=gPads.querySelectorAll(".pad");
     \\ for(var i=0;i<pads.length;i++){var pe=pads[i];
     \\  if(!netColOn){pe.setAttribute("fill","#b08d57");continue;}
     \\  var nk=pe.getAttribute("data-net");
