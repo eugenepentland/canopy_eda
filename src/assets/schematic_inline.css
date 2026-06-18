@@ -34,6 +34,10 @@ h3{color:#f0f6fc;font-size:0.95rem;margin:0;}
 #erc-btn.erc-pass{border-color:#2ea043;color:#3fb950;}
 #erc-btn.erc-warn{border-color:#d29922;color:#d29922;}
 #erc-btn.erc-err{border-color:#da3633;color:#f85149;}
+.sync-chip.sync-checking{border-color:#30363d;color:#8b949e;}
+.sync-chip.sync-ok{border-color:#2ea043;color:#3fb950;}
+.sync-chip.sync-stale{border-color:#d29922;color:#d29922;}
+.sync-chip.sync-unknown{border-color:#6e7681;color:#8b949e;}
 .kicad-menu{position:relative;}
 .kicad-panel{display:none;position:absolute;top:calc(100% + 6px);left:0;z-index:50;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px;width:340px;box-shadow:0 8px 24px rgba(0,0,0,0.6);}
 .kicad-menu.open .kicad-panel{display:block;}

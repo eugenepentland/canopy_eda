@@ -95,7 +95,7 @@ pub fn renderToHtml(
     try pages_tmpl.Navbar.render(.{""}, w);
     try w.writeAll("<div class=\"sch-layout\">");
     try w.writeAll("<div class=\"sch-wrap\">");
-    try writeHeader(w, block.name, design_name, status, schematic_path, block.revision);
+    try writeHeader(w, block.name, design_name, status, schematic_path, block.revision, block.kicad_pcb_path != null);
 
     // Global PCB-layout controls (via/trace/DRC) that feed every per-sub-block
     // preview below. Shown only when the design has sub-blocks to preview — the
@@ -306,7 +306,15 @@ fn writeRevisionLabel(w: *std.Io.Writer, revision: env_mod.Revision) !void {
     }
 }
 
-fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: review.Status, schematic_path: []const u8, revision: env_mod.Revision) !void {
+fn writeHeader(
+    w: anytype,
+    title: []const u8,
+    design_name: []const u8,
+    status: review.Status,
+    schematic_path: []const u8,
+    revision: env_mod.Revision,
+    has_kicad_pcb: bool,
+) !void {
     // `schematic_path` is "/modules/" for a reusable module, "/schematics/" for
     // a full design. Modules get the Schematic ⇄ PCB Layout switcher (small
     // enough that the whole-block PCB layout is fast and useful); full designs
@@ -363,6 +371,17 @@ fn writeHeader(w: anytype, title: []const u8, design_name: []const u8, status: r
         try w.writeAll(
             "<button class=\"head-link head-btn\" id=\"history-btn\" type=\"button\" " ++
                 "title=\"Stored versions (snapshotted on every save/build) with diff vs current\">History</button>",
+        );
+    }
+    // File-based KiCad-sync freshness chip — only for designs that declare a
+    // (kicad-pcb "<path>") target. The schematic_viewer.js dry-runs the sync
+    // on page load and recolours this: green when the .kicad_pcb already
+    // matches the netlist, amber + a pending-op count when a Push would write
+    // the board, grey when the board file can't be read. Click re-checks.
+    if (has_kicad_pcb) {
+        try w.writeAll(
+            "<button class=\"head-link head-btn sync-chip\" id=\"kicad-sync-chip\" type=\"button\" " ++
+                "title=\"Checking whether the .kicad_pcb matches the design\u{2026}\">\u{27F3} PCB sync\u{2026}</button>",
         );
     }
     try w.writeAll("<div class=\"kicad-menu\">");
