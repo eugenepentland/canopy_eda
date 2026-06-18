@@ -310,6 +310,20 @@ pub const Params = struct {
     /// automatic placer produces on a design that carries a manual spec (the
     /// `?placement=off` A/B switch). Off by default (the spec drives when present).
     ignore_placement: bool = false,
+    /// Rough hierarchical seed (off by default): instead of the flat force solve
+    /// (which interleaves parts across module boundaries to shave wirelength),
+    /// solve each first-level sub-block internally, freeze it as a rigid block,
+    /// and arrange the *blocks* by connectivity on a coarse grid. Every module
+    /// stays intact and grid-aligned — a legible starting point a human drags to
+    /// finish, deliberately not metric-optimal. Falls back to the force pipeline
+    /// when the design has fewer than two clusters to arrange. See `runRough`.
+    rough: bool = false,
+    /// Skip the expensive global search (multi-start + routed rerank) and take the
+    /// single optimize+compact force pass instead. A spec still drives when present.
+    /// Set for the rough seed's per-module nested solves — a quick force layout is
+    /// enough for a starting point, and N full solves (one per module) is far too
+    /// slow for an interactive button.
+    fast: bool = false,
 };
 
 /// The effective alignment weight: an explicit `w_align` (≥0) wins; the
@@ -790,6 +804,31 @@ fn runPlacement(
     built: Built,
     params: Params,
 ) std.mem.Allocator.Error!void {
+    // Rough hierarchical seed (explicit `?rough=1` / "Rough" button): cluster each
+    // module into a rigid block and arrange the blocks by connectivity. Honours each
+    // module's own internal spec (via the nested solve) but ignores the design-level
+    // arrangement — the point is a predictable, legible module-clustered start.
+    if (params.rough) {
+        if (try runRough(arena, parts, prep, nets, params)) return;
+        // Flat module/design: ring the anchor IC with each part on the side of the
+        // pad it connects to (GND ignored; cap→VDD pad, R→signal pad), hugging the
+        // edge. This is the pad-anchored hand-layout seed.
+        if (try packPadAnchored(arena, parts, prep, nets)) return;
+        // No hub to anchor on (e.g. a passives-only board): fall back to a declumped
+        // force solve — kill the alignment term and force courtyard spacing so the
+        // compaction can't collapse everything into one block.
+        var fp = params;
+        fp.w_align = 0;
+        if (fp.route_gap < ROUGH_DECLUMP_GAP_MM) fp.route_gap = ROUGH_DECLUMP_GAP_MM;
+        // The compaction pass reads the courtyard spacing from the `g_route_gap`
+        // global (set once in `prepare` from the original params), not from `fp` —
+        // so bump the global here, restoring it after, or the spread won't apply.
+        const saved_gap = g_route_gap;
+        g_route_gap = @max(g_route_gap, ROUGH_DECLUMP_GAP_MM);
+        defer g_route_gap = saved_gap;
+        try runForce(arena, parts, prep, nets, built, fp);
+        return;
+    }
     // Agent-authored manual floorplan from a `(placement …)` form: the spec is the
     // source of truth, so it drives placement when present. Falls back to the force
     // pipeline (recording it in the diagnostics) on any failure it can't resolve.
@@ -857,6 +896,15 @@ fn runForce(
     // 711 mm / routed 1031 mm vs an alternative at 875/773 — the estimate
     // preferred the wrong one by 33%). With no loops the loop-leg term is just
     // zero and the surrogate ranking still seeds the candidate pool.
+    // `fast` — the rough seed's per-module nested solve: ONE seeded relax + legalize,
+    // no multi-start (STARTS=48 per module is far too slow N modules deep), no rotation
+    // rounds, no routed tuck. A spec, when present, already drove placement above; this
+    // is only the spec-less force layout, and a quick block is all a rough seed needs.
+    if (params.fast) {
+        runStart(parts, &prep.idx_of, nets, built, 0, 0, params);
+        legalizeFinal(parts);
+        return;
+    }
     if (parts.len >= 2 and parts.len <= MULTISTART_MAX_PARTS) {
         try rerankSolve(arena, parts, &prep.idx_of, nets, built, params, prep.priority);
     } else {
@@ -2826,6 +2874,540 @@ fn separateComposedPair(parts: []Part, macro_of: []const ?usize, i: usize, j: us
     return true;
 }
 
+// ── Rough hierarchical seed (`Params.rough`) ─────────────────────────────────
+// The flat force solve interleaves parts across module boundaries to shave
+// wirelength, which is exactly what makes its output annoying to hand-finish.
+// The rough seed instead places HIERARCHICALLY: solve each first-level sub-block
+// internally (reusing `buildSubMacro`, so a module's own `(placement …)` spec is
+// honoured), freeze it as a rigid block, then arrange the *blocks* by connectivity
+// on a coarse grid. Every module stays intact and grid-aligned — a legible start a
+// human drags to finish, deliberately not metric-optimal. `runPlacement` calls it
+// ahead of the force path when `params.rough`; it returns false (caller falls back
+// to force) when the design has fewer than two clusters to arrange.
+
+const ROUGH_ITERS: usize = 240;
+/// Connectivity spring gain per shared net (linear; equilibrium ≈ box contact).
+const ROUGH_K_ATT: f64 = 0.02;
+/// Box-overlap repulsion gain (keeps blocks from sitting on top of each other).
+const ROUGH_K_REP: f64 = 0.5;
+/// Weak pull toward the centroid so disconnected blocks don't drift away.
+const ROUGH_K_CENTER: f64 = 0.01;
+const ROUGH_STEP: f64 = 0.5;
+const ROUGH_MAX_STEP_MM: f64 = 4.0;
+/// Breathing room left between blocks during the relaxation (mm).
+const ROUGH_BLOCK_GAP_MM: f64 = 2.0;
+/// Coarse grid the block centres snap to — legible + easy to grab (5× base grid).
+const ROUGH_ORIGIN_GRID_MM: f64 = 1.0;
+/// Courtyard spacing forced on a FLAT rough seed so the compaction pass spreads the
+/// passives radially around the hub (in the direction of each part's pad) instead of
+/// collapsing them into a block off to one side. Tuned on lmk05318b-clock.
+const ROUGH_DECLUMP_GAP_MM: f64 = 3.0;
+
+/// Wrap a single free top-level part as its own one-member rigid block, so the
+/// arranger places it by connectivity and the legalizer keeps it clear.
+fn singletonMacro(arena: std.mem.Allocator, parts: []const Part, pi: usize) std.mem.Allocator.Error!Macro {
+    const members = try arena.alloc(usize, 1);
+    members[0] = pi;
+    const xs = try arena.alloc(f64, 1);
+    xs[0] = parts[pi].x;
+    const ys = try arena.alloc(f64, 1);
+    ys[0] = parts[pi].y;
+    const rots = try arena.alloc(f64, 1);
+    rots[0] = parts[pi].rot;
+    return finishMacro(members, xs, ys, rots, parts, null);
+}
+
+fn runRough(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    params: Params,
+) std.mem.Allocator.Error!bool {
+    const fc = FloorplanCtx{ .spec = prep.block.floorplan, .block = prep.block, .project_dir = prep.project_dir };
+    // Nested per-module solves trash the thread's solve state and would stream
+    // partial frames to a watcher — bracket the build phase like composeModuleMacros.
+    const saved = SolveState.snapshot();
+    g_progress = null;
+    var child_params = params;
+    child_params.rough = false; // nested module solves place normally (honour their spec)…
+    child_params.fast = true; // …but skip multi-start + routed rerank — a quick seed, N modules deep
+    var macros: std.ArrayListUnmanaged(Macro) = .empty;
+    for (prep.block.sub_blocks) |sub| {
+        if (try buildSubMacro(arena, sub, null, prep, fc, child_params)) |m| {
+            try macros.append(arena, m);
+        }
+    }
+    saved.restore();
+
+    // No sub-block macros means a FLAT design/module (or a grouped-refdes board
+    // whose members didn't map): there are no modules to cluster, so hierarchical
+    // arrangement adds nothing. Bail to the caller, which runs the pad-aware force
+    // relax instead (parts settle toward the hub pad they connect to, not clumped).
+    if (macros.items.len < 2) return false;
+
+    const macro_of = try arena.alloc(?usize, parts.len);
+    @memset(macro_of, null);
+    for (macros.items, 0..) |m, mi| {
+        for (m.members) |pi| macro_of[pi] = mi;
+    }
+    // Every top-level part with no module home becomes its own block, so it lands
+    // by connectivity (a bare bypass cap beside the IC module it wires to).
+    for (0..parts.len) |pi| {
+        if (macro_of[pi] != null) continue;
+        macro_of[pi] = macros.items.len;
+        try macros.append(arena, try singletonMacro(arena, parts, pi));
+    }
+
+    const origins = try arrangeMacros(arena, macros.items, macro_of, nets, &prep.idx_of);
+    stampMacros(parts, macros.items, origins);
+    // Final hard de-overlap: push whole blocks apart on grid (same legalizer the
+    // spec-composition path uses). A residual touch is acceptable for a rough seed.
+    legalizeComposed(parts, macro_of);
+    return true;
+}
+
+/// Drop each rigid block at its arranged origin: every member lands at
+/// `origin + (lx,ly)` with the block's rotation, so the module's internal layout
+/// is preserved exactly and only the block as a whole has moved.
+fn stampMacros(parts: []Part, macros: []const Macro, origins: []const [2]f64) void {
+    for (macros, 0..) |m, mi| {
+        for (m.members, 0..) |pi, k| {
+            parts[pi].x = origins[mi][0] + m.lx[k];
+            parts[pi].y = origins[mi][1] + m.ly[k];
+            parts[pi].rot = m.rots[k];
+        }
+    }
+}
+
+/// Keepout-aware world bounding box `{minx,miny,maxx,maxy}` of a set of member
+/// parts — used to check two modules occupy disjoint regions after a rough seed.
+fn membersBox(parts: []const Part, members: []const usize) [4]f64 {
+    var b = [4]f64{ std.math.inf(f64), std.math.inf(f64), -std.math.inf(f64), -std.math.inf(f64) };
+    for (members) |pi| {
+        const kb = keepBoxOf(parts[pi]);
+        b[0] = @min(b[0], parts[pi].x + kb.cxo - kb.hw);
+        b[1] = @min(b[1], parts[pi].y + kb.cyo - kb.hh);
+        b[2] = @max(b[2], parts[pi].x + kb.cxo + kb.hw);
+        b[3] = @max(b[3], parts[pi].y + kb.cyo + kb.hh);
+    }
+    return b;
+}
+
+// ── Pad-anchored flat-module seed (`packPadAnchored`) ────────────────────────
+// For a flat module (IC + passives, no sub-blocks) the natural hand-layout puts
+// each passive on the SIDE of the IC where the pad it serves lives, hugging the
+// edge. This rings the anchor IC's perimeter that way: each part is docked on the
+// side of the IC pad it connects to, GND ignored for side-selection — a bypass cap
+// follows its power (VDD) pad, a pull-up/down resistor follows its signal pad, any
+// other part its first non-ground pad. Parts pack tight against the edge; parts
+// touching the IC only through ground (or not at all) drop into a band below.
+//
+// An author `(rough …)` form steers two things: `(anchor "REF")` overrides the
+// largest-hub anchor pick, and the `(group …)` priority tiers set how CLOSE each
+// part packs — tier 0 takes the inner lane against the IC, later tiers fan out
+// (radial distance = priority). The side still comes from connectivity, so the
+// groups reorder lanes without breaking the pad-following rule.
+
+/// Uppercased ref-des prefix letter of a part's leaf ref (after the last `/`),
+/// e.g. `'C'` for "pwr/C3". 0 when empty. Distinguishes cap (C) from resistor (R).
+fn leafRefPrefix(ref: []const u8) u8 {
+    const leaf = if (std.mem.lastIndexOfScalar(u8, ref, '/')) |s| ref[s + 1 ..] else ref;
+    return if (leaf.len > 0) std.ascii.toUpper(leaf[0]) else 0;
+}
+
+/// True when part index `pi` has a pin on `net`.
+fn netHasPart(net: FlatNet, pi: usize, idx_of: *std.StringHashMap(usize)) bool {
+    for (net.pins) |pr| {
+        if ((idx_of.get(pr.ref_des) orelse continue) == pi) return true;
+    }
+    return false;
+}
+
+/// The hub's physical pad id on `net` (for pin-role lookup), or "" if absent.
+fn hubPinOnNet(net: FlatNet, hi: usize, idx_of: *std.StringHashMap(usize)) []const u8 {
+    for (net.pins) |pr| {
+        if ((idx_of.get(pr.ref_des) orelse continue) == hi) return pr.pin;
+    }
+    return "";
+}
+
+/// Footprint-local centres of every hub pad on `net` — a rail lands on many, a
+/// signal on one, so the caller can both rank nets and spread parts across pads.
+fn hubPadsOnNet(arena: std.mem.Allocator, hub: Part, hi: usize, net: FlatNet, idx_of: *std.StringHashMap(usize)) std.mem.Allocator.Error![][2]f64 {
+    var out: std.ArrayListUnmanaged([2]f64) = .empty;
+    for (net.pins) |pr| {
+        if ((idx_of.get(pr.ref_des) orelse continue) != hi) continue;
+        const pad = padLocal(hub, pr.pin);
+        if (pad.w == 0 and pad.h == 0) continue;
+        try out.append(arena, .{ pad.x, pad.y });
+    }
+    return out.toOwnedSlice(arena);
+}
+
+/// True when a part's flattened ref-des or module-local origin name matches an
+/// author token from a `(rough …)` anchor/group — exact or by leaf segment, the
+/// same lenient match `(module-policy …)` uses so a token written in a module
+/// file still binds after the part renumbers (e.g. U1→U17) in a parent board.
+fn roughNameMatch(ref: []const u8, origin: []const u8, want: []const u8) bool {
+    if (want.len == 0) return false;
+    if (ref.len > 0 and (std.mem.eql(u8, ref, want) or std.mem.eql(u8, shortName(ref), want))) return true;
+    if (origin.len > 0 and (std.mem.eql(u8, origin, want) or std.mem.eql(u8, shortName(origin), want))) return true;
+    return false;
+}
+
+/// IC edge → first ring of parts (mm) and the spacing between parts along an edge.
+const PAD_ANCHOR_IC_GAP_MM: f64 = 0.5;
+const PAD_ANCHOR_PART_GAP_MM: f64 = 0.4;
+/// Target lanes per IC side: a crowded side spreads ALONG the edge into about this
+/// many lanes (sized to the part count) instead of stacking many lanes outward, so
+/// even low-priority parts stay close to the IC radially. Smaller = tighter ring.
+const ROUGH_PACK_LANES: f64 = 2;
+
+/// One part docked to a side of the anchor IC in `packPadAnchored`: its index,
+/// priority `tier` (lower = tighter to the IC), desired coordinate ALONG the edge
+/// (its IC pad's position), half-extent along the edge, and depth out from it.
+const SidePart = struct { i: usize, tier: usize, along: f64, half_along: f64, depth: f64 };
+
+/// Dock each side's parts into lanes hugging the IC edge, ordered by (tier, along):
+/// the (rough …) priority groups are the FILL ORDER — the highest-priority parts
+/// take the inner lane first and lower tiers spill outward only when the inner
+/// lanes fill, so nothing is pushed far unless the side is genuinely crowded.
+/// Lane along-extent is sized to the part count (≈ROUGH_PACK_LANES lanes) so a
+/// busy side spreads tangentially rather than stacking many lanes radially; each
+/// lane is flush at its inner radius and the next clears only the deepest part in
+/// THIS lane (a per-lane pitch — one big part widens its own lane, not the side).
+fn dockSidesByTier(parts: []Part, sides: *[4]std.ArrayListUnmanaged(SidePart), hkb: KeepBox) void {
+    const lessTierAlong = struct {
+        fn lt(_: void, a: SidePart, b: SidePart) bool {
+            if (a.tier != b.tier) return a.tier < b.tier;
+            return a.along < b.along;
+        }
+    }.lt;
+    for (sides, 0..) |*list, s| {
+        if (list.items.len == 0) continue;
+        std.mem.sort(SidePart, list.items, {}, lessTierAlong);
+        const vert = s < 2; // 0 left / 1 right run vertically; 2 top / 3 bottom horizontally
+        const span = if (vert) hkb.hh else hkb.hw; // how far the IC edge reaches each way
+        const base = if (vert) hkb.hw else hkb.hh; // IC half-extent out toward the parts
+        // Lane length = enough to spread the side's parts over ~ROUGH_PACK_LANES
+        // lanes, but never shorter than the IC edge. A crowded side gets longer
+        // lanes (tangential spread) instead of more lanes (radial stacking).
+        var total: f64 = 0;
+        for (list.items) |a| total += 2 * a.half_along + PAD_ANCHOR_PART_GAP_MM;
+        const limit = @max(span, total / (2 * ROUGH_PACK_LANES));
+        var lane_inner: f64 = base + PAD_ANCHOR_IC_GAP_MM;
+        var lane_maxd: f64 = 0;
+        var cursor: f64 = -limit;
+        for (list.items) |a| {
+            var pos = @max(a.along, cursor + a.half_along);
+            // Wrap to the next lane out only when this one runs past its length.
+            if (pos + a.half_along > limit and cursor > -limit) {
+                lane_inner += 2 * lane_maxd + PAD_ANCHOR_PART_GAP_MM;
+                lane_maxd = 0;
+                cursor = -limit;
+                pos = @max(a.along, cursor + a.half_along);
+            }
+            cursor = pos + a.half_along + PAD_ANCHOR_PART_GAP_MM;
+            lane_maxd = @max(lane_maxd, a.depth);
+            const off = lane_inner + a.depth;
+            switch (s) {
+                0 => {
+                    parts[a.i].x = gridRound(-off);
+                    parts[a.i].y = gridRound(pos);
+                },
+                1 => {
+                    parts[a.i].x = gridRound(off);
+                    parts[a.i].y = gridRound(pos);
+                },
+                2 => {
+                    parts[a.i].y = gridRound(-off);
+                    parts[a.i].x = gridRound(pos);
+                },
+                else => {
+                    parts[a.i].y = gridRound(off);
+                    parts[a.i].x = gridRound(pos);
+                },
+            }
+        }
+    }
+}
+
+fn packPadAnchored(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+) std.mem.Allocator.Error!bool {
+    // Anchor: the author's `(rough (anchor …))` IC when it resolves to a hub,
+    // else the largest hub IC. Matched by ref-des or module-local origin name.
+    const rough = prep.block.rough;
+    var hi: usize = 0;
+    var found = false;
+    if (rough.anchor.len > 0) {
+        for (parts, 0..) |p, i| {
+            if (p.kind != .hub) continue;
+            const origin = if (i < prep.instances.len) prep.instances[i].origin_key else "";
+            if (roughNameMatch(p.ref_des, origin, rough.anchor)) {
+                hi = i;
+                found = true;
+                break;
+            }
+        }
+    }
+    if (!found) {
+        var best: f64 = -1;
+        for (parts, 0..) |p, i| {
+            if (p.kind != .hub) continue;
+            const kb = keepBoxOf(p);
+            const area = kb.hw * kb.hh;
+            if (area > best) {
+                best = area;
+                hi = i;
+                found = true;
+            }
+        }
+    }
+    if (!found) return false;
+
+    parts[hi].x = 0;
+    parts[hi].y = 0;
+    parts[hi].rot = 0;
+    const hkb = keepBoxOf(parts[hi]);
+    const roles = pin_roles.load(arena, prep.project_dir, prep.instances[hi].component);
+
+    // Priority tier per part from the `(rough …)` groups: group index = tier
+    // (index 0 placed tightest to the anchor). A part in no group gets the last
+    // tier (placed outermost); with no groups every part is tier 0, so the
+    // tier sort below is a no-op and packing matches the heuristic default.
+    const ntiers = rough.groups.len;
+    const default_tier = if (ntiers == 0) 0 else ntiers;
+    const tier_of = try arena.alloc(usize, parts.len);
+    for (tier_of) |*t| t.* = default_tier;
+    for (rough.groups, 0..) |g, gi| {
+        for (g.members) |want| {
+            for (parts, 0..) |p, pi| {
+                const origin = if (pi < prep.instances.len) prep.instances[pi].origin_key else "";
+                if (roughNameMatch(p.ref_des, origin, want)) tier_of[pi] = gi;
+            }
+        }
+    }
+
+    // One bucket per side (0 left, 1 right, 2 top, 3 bottom) of `SidePart`s; the
+    // lane packing (tier order, per-lane pitch) lives in `dockSidesByTier`.
+    var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
+    var leftover: std.ArrayListUnmanaged(usize) = .empty;
+
+    // Pass 1 — pick each part's anchor NET. GND nets never count. A cap follows the
+    // net with the MOST hub pads (its power rail); a resistor the FEWEST (its signal);
+    // anything else its first non-ground net. Pad-count, not a name match, separates
+    // rails from signals (a rail lands on many IC pins, a signal on one), so it needs
+    // no electrical annotations.
+    const Pick = struct { i: usize, net: usize };
+    var picks: std.ArrayListUnmanaged(Pick) = .empty;
+    for (parts, 0..) |p, pi| {
+        if (pi == hi) continue;
+        const pref = leafRefPrefix(p.ref_des);
+        const is_cap = pref == 'C';
+        const is_res = pref == 'R';
+        var bnet: ?usize = null;
+        var bcnt: usize = 0;
+        for (nets, 0..) |net, ni| {
+            if (!netHasPart(net, pi, &prep.idx_of)) continue;
+            if (padOnNet(parts[hi], hi, net, &prep.idx_of).w == 0) continue; // hub not on net
+            if (roles.classOf(hubPinOnNet(net, hi, &prep.idx_of)) == .ground) continue;
+            var cnt: usize = 0;
+            for (net.pins) |pr| {
+                if ((prep.idx_of.get(pr.ref_des) orelse continue) == hi) cnt += 1;
+            }
+            const take = bnet == null or (is_cap and cnt > bcnt) or (is_res and cnt < bcnt);
+            if (take) {
+                bnet = ni;
+                bcnt = cnt;
+            }
+        }
+        if (bnet) |ni| {
+            try picks.append(arena, .{ .i = pi, .net = ni });
+        } else {
+            try leftover.append(arena, pi);
+        }
+    }
+
+    // Pass 2 — assign each part to one of its anchor net's hub pads, round-robin, so
+    // same-rail parts spread across the rail's many IC pads instead of piling on one.
+    // The chosen pad's offset from the IC centre (IC at origin, unrotated) gives the
+    // side and along-edge coordinate; 2-pin parts rotate to face the edge.
+    var net_next: std.AutoHashMapUnmanaged(usize, usize) = .empty;
+    for (picks.items) |pk| {
+        const pads = try hubPadsOnNet(arena, parts[hi], hi, nets[pk.net], &prep.idx_of);
+        if (pads.len == 0) {
+            try leftover.append(arena, pk.i);
+            continue;
+        }
+        const gop = try net_next.getOrPut(arena, pk.net);
+        const k = if (gop.found_existing) gop.value_ptr.* else 0;
+        gop.value_ptr.* = k + 1;
+        const pad = pads[k % pads.len];
+        const vert = @abs(pad[0]) >= @abs(pad[1]);
+        const s: usize = if (vert) (if (pad[0] < 0) 0 else 1) else (if (pad[1] < 0) 2 else 3);
+        parts[pk.i].rot = if (vert) 0 else 90;
+        const pkb = keepBoxOf(parts[pk.i]);
+        try sides[s].append(arena, .{
+            .i = pk.i,
+            .tier = tier_of[pk.i],
+            .along = if (vert) pad[1] else pad[0],
+            .half_along = if (vert) pkb.hh else pkb.hw,
+            .depth = if (vert) pkb.hw else pkb.hh,
+        });
+    }
+
+    // Lay each side's parts into tier-ordered lanes around the IC.
+    dockSidesByTier(parts, &sides, hkb);
+
+    // Ground-only / unconnected parts: a single row below the IC.
+    if (leftover.items.len > 0) {
+        var x: f64 = -hkb.hw;
+        const y = gridRound(hkb.hh + 6);
+        for (leftover.items) |pi| {
+            const pkb = keepBoxOf(parts[pi]);
+            x += pkb.hw;
+            parts[pi].x = gridRound(x);
+            parts[pi].y = y;
+            x += pkb.hw + PAD_ANCHOR_PART_GAP_MM;
+        }
+    }
+
+    legalizeFinal(parts); // resolve any corner / cross-side overlaps
+    return true;
+}
+
+/// Place rigid blocks by connectivity: a coarse spring relaxation on block centres
+/// (springs weighted by how many nets cross each block pair) with box repulsion and
+/// a weak centering pull, then snap each centre to a coarse grid. Returns one world
+/// origin per macro — the reference a member's (lx,ly) offset adds to, so the block's
+/// bounding box ends up centred on its relaxed centre. `legalizeComposed` does the
+/// final hard de-overlap; this just gets connected blocks near each other.
+fn arrangeMacros(
+    arena: std.mem.Allocator,
+    macros: []const Macro,
+    macro_of: []const ?usize,
+    nets: []const FlatNet,
+    idx_of: *const std.StringHashMap(usize),
+) std.mem.Allocator.Error![][2]f64 {
+    const n = macros.len;
+    // Pairwise shared-net weights: a net touching k distinct blocks adds 1 to each
+    // of its block pairs, so heavily-interconnected modules attract hardest.
+    const w = try arena.alloc(f64, n * n);
+    @memset(w, 0);
+    var touch: std.ArrayListUnmanaged(usize) = .empty;
+    for (nets) |net| {
+        touch.clearRetainingCapacity();
+        for (net.pins) |pin| {
+            const pi = idx_of.get(pin.ref_des) orelse continue;
+            const mo = macro_of[pi] orelse continue;
+            var dup = false;
+            for (touch.items) |t| {
+                if (t == mo) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) try touch.append(arena, mo);
+        }
+        if (touch.items.len < 2) continue;
+        for (touch.items, 0..) |a, ai| {
+            for (touch.items[ai + 1 ..]) |b| {
+                w[a * n + b] += 1;
+                w[b * n + a] += 1;
+            }
+        }
+    }
+
+    // Block half-extents and bbox-centre offsets (world centre = origin + offset).
+    const hw = try arena.alloc(f64, n);
+    const hh = try arena.alloc(f64, n);
+    const offx = try arena.alloc(f64, n);
+    const offy = try arena.alloc(f64, n);
+    var max_span: f64 = 1;
+    for (macros, 0..) |m, i| {
+        hw[i] = @max(m.width() / 2, 0.1);
+        hh[i] = @max(m.height() / 2, 0.1);
+        offx[i] = (m.bminx + m.bmaxx) / 2;
+        offy[i] = (m.bminy + m.bmaxy) / 2;
+        max_span = @max(max_span, @max(m.width(), m.height()));
+    }
+
+    // Deterministic initial spread on a square grid, generous spacing so blocks
+    // begin non-overlapping and the springs pull connected ones together.
+    const centers = try arena.alloc([2]f64, n);
+    const cols: usize = @max(1, @as(usize, @intFromFloat(@ceil(@sqrt(@as(f64, @floatFromInt(n)))))));
+    const spacing = max_span + ROUGH_BLOCK_GAP_MM;
+    for (0..n) |i| {
+        const r: f64 = @floatFromInt(i / cols);
+        const c: f64 = @floatFromInt(i % cols);
+        centers[i] = .{ c * spacing, r * spacing };
+    }
+
+    const nf: f64 = @floatFromInt(n);
+    const force = try arena.alloc([2]f64, n);
+    var it: usize = 0;
+    while (it < ROUGH_ITERS) : (it += 1) {
+        @memset(force, [2]f64{ 0, 0 });
+        var gx: f64 = 0;
+        var gy: f64 = 0;
+        for (centers) |c| {
+            gx += c[0];
+            gy += c[1];
+        }
+        gx /= nf;
+        gy /= nf;
+        for (0..n) |a| {
+            force[a][0] += (gx - centers[a][0]) * ROUGH_K_CENTER;
+            force[a][1] += (gy - centers[a][1]) * ROUGH_K_CENTER;
+            for (a + 1..n) |b| {
+                const dx = centers[b][0] - centers[a][0];
+                const dy = centers[b][1] - centers[a][1];
+                const ww = w[a * n + b];
+                if (ww > 0) { // connectivity spring (linear → equilibrium at contact)
+                    const fx = ROUGH_K_ATT * ww * dx;
+                    const fy = ROUGH_K_ATT * ww * dy;
+                    force[a][0] += fx;
+                    force[a][1] += fy;
+                    force[b][0] -= fx;
+                    force[b][1] -= fy;
+                }
+                const ox = hw[a] + hw[b] + ROUGH_BLOCK_GAP_MM - @abs(dx);
+                const oy = hh[a] + hh[b] + ROUGH_BLOCK_GAP_MM - @abs(dy);
+                if (ox > 0 and oy > 0) { // overlapping: push along smaller-overlap axis
+                    if (ox <= oy) {
+                        const push = ROUGH_K_REP * ox * (if (dx >= 0) @as(f64, 1) else -1);
+                        force[a][0] -= push;
+                        force[b][0] += push;
+                    } else {
+                        const push = ROUGH_K_REP * oy * (if (dy >= 0) @as(f64, 1) else -1);
+                        force[a][1] -= push;
+                        force[b][1] += push;
+                    }
+                }
+            }
+        }
+        for (0..n) |a| {
+            centers[a][0] += @max(-ROUGH_MAX_STEP_MM, @min(ROUGH_MAX_STEP_MM, force[a][0] * ROUGH_STEP));
+            centers[a][1] += @max(-ROUGH_MAX_STEP_MM, @min(ROUGH_MAX_STEP_MM, force[a][1] * ROUGH_STEP));
+        }
+    }
+
+    const origins = try arena.alloc([2]f64, n);
+    for (0..n) |i| {
+        // Snap the block CENTRE to the coarse grid, then back out the origin so the
+        // member offsets (grid multiples) keep every part on the base grid.
+        const ccx = @round(centers[i][0] / ROUGH_ORIGIN_GRID_MM) * ROUGH_ORIGIN_GRID_MM;
+        const ccy = @round(centers[i][1] / ROUGH_ORIGIN_GRID_MM) * ROUGH_ORIGIN_GRID_MM;
+        origins[i] = .{ gridRound(ccx - offx[i]), gridRound(ccy - offy[i]) };
+    }
+    return origins;
+}
+
 // ── Physical board: outline + edge docking (`(board …)`) ────────────────────
 // The interior placement (force / spec / floorplan) is solved first and left
 // unchanged; the authored W×H outline is then centered on it, each edge list
@@ -3564,6 +4146,12 @@ const Prepared = struct {
     /// re-stamps those sub-blocks as rigid macros after the force solve.
     /// Null ⇒ nothing to compose.
     compose: ?FloorplanCtx = null,
+    /// The design block + project dir this model was prepared from, carried so the
+    /// rough hierarchical seed (`runRough`) can iterate `block.sub_blocks` and
+    /// nested-solve each one as its own board (it needs a `FloorplanCtx`, which the
+    /// spec-driven paths only build when a spec is authored).
+    block: *const DesignBlock,
+    project_dir: []const u8,
 };
 
 /// Resolve a design-local net name (what a constraint author writes — "VIN",
@@ -4156,7 +4744,20 @@ fn prepare(
         .active = block.placement.present or floorplan != null,
         .unresolved = unresolved0,
     };
-    return .{ .parts = parts, .idx_of = idx_of, .instances = instances, .nets = nets, .built = built, .priority = priority, .lowered = lowered, .placement = placement, .floorplan = floorplan, .compose = compose };
+    return .{
+        .parts = parts,
+        .idx_of = idx_of,
+        .instances = instances,
+        .nets = nets,
+        .built = built,
+        .priority = priority,
+        .lowered = lowered,
+        .placement = placement,
+        .floorplan = floorplan,
+        .compose = compose,
+        .block = block,
+        .project_dir = project_dir,
+    };
 }
 
 /// Decompose the objective for already-placed parts, surfaced term-by-term for
@@ -8547,4 +9148,105 @@ test "synthAggressorKeepouts pairs a feedback passive with the switching inducto
     try testing.expectEqual(@as(usize, 1), keepouts.items.len);
     try testing.expectEqual(@as(usize, 2), keepouts.items[0].a); // R1 (victim)
     try testing.expectEqual(@as(usize, 1), keepouts.items[0].b); // L1 (aggressor)
+}
+
+// spec: placement/optimizer - rough seed keeps each module a rigid, non-interleaved block
+test "arrangeMacros + legalize keep modules intact and disjoint" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const pads = [_]geometry.Pad{};
+    // Module a = {0,1}, module b = {2,3}, started INTERLEAVED along x (a at 0/12,
+    // b at 6/18) so a flat solve would mix them — the rough seed must pull each
+    // module into its own rigid, disjoint block.
+    var parts = [_]Part{
+        .{ .ref_des = "a/U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "a/C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 12, .y = 0 },
+        .{ .ref_des = "b/U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 6, .y = 0 },
+        .{ .ref_des = "b/C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 18, .y = 0 },
+    };
+    const am = [_]usize{ 0, 1 };
+    const bm = [_]usize{ 2, 3 };
+    // finishMacro grid-snaps each module's members to module-local offsets and
+    // records the block bbox (rot_override null = keep authored rotations).
+    const az = [_]f64{ 0, 0 };
+    const macros = [_]Macro{
+        finishMacro(
+            try arena.dupe(usize, &am),
+            try arena.dupe(f64, &[_]f64{ 0, 12 }),
+            try arena.dupe(f64, &az),
+            try arena.dupe(f64, &az),
+            &parts,
+            null,
+        ),
+        finishMacro(
+            try arena.dupe(usize, &bm),
+            try arena.dupe(f64, &[_]f64{ 6, 18 }),
+            try arena.dupe(f64, &az),
+            try arena.dupe(f64, &az),
+            &parts,
+            null,
+        ),
+    };
+    const macro_of = [_]?usize{ 0, 0, 1, 1 };
+    // One net joins the two modules, so the arranger has connectivity to act on.
+    const link = [_]export_kicad.FlatPin{ .{ .ref_des = "a/C1", .pin = "1" }, .{ .ref_des = "b/U1", .pin = "1" } };
+    const nets = [_]FlatNet{.{ .name = "L", .pins = &link }};
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("a/U1", 0);
+    try idx_of.put("a/C1", 1);
+    try idx_of.put("b/U1", 2);
+    try idx_of.put("b/C1", 3);
+
+    const origins = try arrangeMacros(arena, &macros, &macro_of, &nets, &idx_of);
+    stampMacros(&parts, &macros, origins);
+    legalizeComposed(&parts, &macro_of);
+
+    // Rigidity: each module's internal member offset survived the arrange + legalize
+    // (a module moves only as a whole block). finishMacro snapped both to dx = 12.
+    try testing.expectApproxEqAbs(@as(f64, 12), parts[1].x - parts[0].x, 1e-9);
+    try testing.expectApproxEqAbs(parts[1].y, parts[0].y, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 12), parts[3].x - parts[2].x, 1e-9);
+    try testing.expectApproxEqAbs(parts[3].y, parts[2].y, 1e-9);
+    // No part overlaps anywhere.
+    try testing.expect(!anyOverlap(&parts));
+    // The two modules occupy disjoint bounding boxes — they did not interleave.
+    const ba = membersBox(&parts, &am);
+    const bb = membersBox(&parts, &bm);
+    const disjoint = ba[2] <= bb[0] or bb[2] <= ba[0] or ba[3] <= bb[1] or bb[3] <= ba[1];
+    try testing.expect(disjoint);
+}
+
+// spec: placement/optimizer - (rough …) anchor/group tokens match by ref-des or origin name
+test "roughNameMatch matches by ref-des or origin, exact or leaf" {
+    try testing.expect(roughNameMatch("U1", "", "U1")); // exact ref
+    try testing.expect(roughNameMatch("clk/U1", "", "U1")); // leaf of a prefixed ref
+    try testing.expect(roughNameMatch("U17", "U1", "U1")); // origin survives renumber
+    try testing.expect(roughNameMatch("a/C5", "C_VDD", "C_VDD")); // origin name
+    try testing.expect(!roughNameMatch("U2", "", "U1")); // no match
+    try testing.expect(!roughNameMatch("U1", "", "")); // empty token never matches
+}
+
+// spec: placement/optimizer - (rough …) priority is the fill order; lower tiers spill to outer lanes
+test "dockSidesByTier fills inner lane by priority, spilling lower tiers outward" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const pads = [_]geometry.Pad{};
+    var parts = [_]Part{
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false },
+    };
+    // Both docked on the LEFT (s=0) at the same edge coordinate; C1 is tier 0
+    // (highest priority), C2 tier 1. The anchor is tiny so a lane holds only one
+    // part — C1 claims the inner lane and C2 spills to the outer lane.
+    var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
+    try sides[0].append(arena, .{ .i = 0, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
+    try sides[0].append(arena, .{ .i = 1, .tier = 1, .along = 0, .half_along = 0.5, .depth = 0.5 });
+    const hkb = KeepBox{ .cxo = 0, .cyo = 0, .hw = 0.3, .hh = 0.3 };
+    dockSidesByTier(&parts, &sides, hkb);
+    // Left side x is negative; the inner (tier-0) part sits closer to the IC, so
+    // its x is greater (less negative) than the spilled tier-1 part's.
+    try testing.expect(parts[0].x > parts[1].x);
+    try testing.expect(parts[0].x < 0 and parts[1].x < 0);
 }

@@ -135,6 +135,7 @@ pub const ScopeForm = enum {
     replicate,
     module_policy,
     revision,
+    rough,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -183,6 +184,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "replicate", .replicate },
     .{ "module-policy", .module_policy },
     .{ "revision", .revision },
+    .{ "rough", .rough },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -562,6 +564,16 @@ pub const scope_form_docs = blk: {
             "wrong (e.g. an integrated buck with no discrete inductor that reads as generic). " ++
             "Applied after detection — the author has the last word. Surfaced in /api/pcb-describe; " ++
             "export the detected policy as a starting point with /api/module-policy.",
+    } };
+    t[@intFromEnum(ScopeForm.rough)] = .{ .scope = tl, .doc = .{
+        .syntax = "(rough [(anchor \"REF\")] (group \"name\" \"REF\"…)…)",
+        .summary = "Author the rough-placement seed (the `?rough=1` / \"Rough\" button on /pcb-layout): " ++
+            "(anchor …) names the IC everything centres on (default: the largest hub), and each " ++
+            "(group …) is a priority TIER in descending order — the first group is placed first and " ++
+            "packs tightest to the anchor, later groups fan outward. A group sets priority, not " ++
+            "position: every member still lands on the IC side its pad connects to (GND ignored), so " ++
+            "a bypass cap sits by its VDD pad and a pull resistor by its signal pad. Parts in no " ++
+            "group are placed last. Refs match by ref-des or module-local origin name (exact or leaf).",
     } };
     t[@intFromEnum(ScopeForm.revision)] = .{ .scope = tl, .doc = .{
         .syntax = "(revision \"ID\" [(date \"YYYY-MM-DD\")] [(change \"ID\" \"summary\")…])",

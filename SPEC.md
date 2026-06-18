@@ -113,6 +113,7 @@ Public functions: solve
 - zone-pack lays a group into an aligned row/column
 - the manual placement block keeps authored order and resolves rotations
 - the manual floorplan docks sides around the anchor IC and stages unlisted parts
+- rough seed keeps each module a rigid, non-interleaved block
 - (board ...) edge default rotation turns connector pads toward the board interior
 - (board ...) docks edge parts flush inside the outline and pins corners
 - (board ...) edge parts wanting the same spot de-overlap along the edge

@@ -1159,6 +1159,35 @@ pub const Revision = struct {
 /// already globally unique, so the prefix is redundant.
 pub const RefStyle = enum { hierarchical, flat };
 
+/// One named priority group in a `(rough …)` form — a set of parts (by ref-des
+/// or module-local origin name) that share a placement priority. Group ORDER in
+/// the form body is the priority: the first group is placed first and packs
+/// tightest to the anchor IC, later groups fan outward. A group is a priority
+/// *tier*, not a spatial cluster — each member still lands on the IC side its
+/// pad connects to; the group only sets how close.
+pub const RoughGroup = struct {
+    /// Author label (the string in `(group "name" …)`); cosmetic, for export.
+    name: []const u8 = "",
+    /// Member parts in this tier, by ref-des or origin name (matched leniently,
+    /// like `(module-policy …)`: exact or by leaf segment after the last `/`).
+    members: []const []const u8 = &.{},
+};
+
+/// Author-declared rough-placement seed from a top-level `(rough …)` form: the
+/// anchor IC everything centres on, plus ordered priority groups telling the
+/// rough placer which parts to place first (tightest to the anchor). Consumed by
+/// `placement/optimizer.zig`'s `packPadAnchored` in `?rough=1` mode. `present=
+/// false` ⇒ none authored, so the rougher uses its largest-hub anchor + the
+/// pad-count heuristic with no priority ordering.
+pub const RoughSpec = struct {
+    /// Anchor IC ref-des or origin name (matched leniently). Empty ⇒ the rougher
+    /// picks the largest hub.
+    anchor: []const u8 = "",
+    /// Priority groups in descending priority (index 0 = placed first).
+    groups: []const RoughGroup = &.{},
+    present: bool = false,
+};
+
 /// The fully-evaluated result of a `(design-block …)`: the flattened netlist
 /// (instances + nets + ports), the section/sub-block tree, and the design-doc
 /// metadata (critical ICs, verifications, rails, functions) the review and
@@ -1252,6 +1281,10 @@ pub const DesignBlock = struct {
     /// canonical human-meaningful spin id (+ optional date + in-file
     /// changelog). `present=false` ⇒ the design declares no revision.
     revision: Revision = .{},
+    /// Author-declared rough-placement seed from a top-level `(rough …)` form:
+    /// the anchor IC + ordered priority groups the rough placer (`?rough=1`)
+    /// honours. `present=false` ⇒ the rougher uses its heuristic defaults.
+    rough: RoughSpec = .{},
 
     /// Ref-des flattening style for this design: `.flat` under grouped-refdes
     /// (refs are globally unique → drop the sub-block path prefix), else

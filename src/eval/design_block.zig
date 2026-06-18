@@ -131,6 +131,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var floorplan_spec: env_mod.PlacementSpec = .{};
     var board_spec: env_mod.BoardSpec = .{};
     var revision_spec: env_mod.Revision = .{};
+    var rough_spec: env_mod.RoughSpec = .{};
     var policy_net_overrides: std.ArrayListUnmanaged(env_mod.NetClassOverride) = .empty;
     var policy_module_overrides: std.ArrayListUnmanaged(env_mod.ModuleClassOverride) = .empty;
     var derating: ?f64 = null;
@@ -248,6 +249,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             .floorplan => floorplan_spec = try parsePlacement(self, form_children),
             .board => board_spec = try parseBoard(self, form_children),
             .revision => revision_spec = try parseRevision(self, form_children),
+            .rough => rough_spec = try parseRough(self, form_children),
             .replicate => try evalReplicate(self, form_children, env, &sub_blocks),
             .module_policy => try parsePolicyOverrides(self, form_children, &policy_net_overrides, &policy_module_overrides),
             // Section-only forms are ignored at the top level — a
@@ -301,6 +303,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             .modules = policy_module_overrides.toOwnedSlice(self.allocator) catch &.{},
         },
         .revision = revision_spec,
+        .rough = rough_spec,
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -1018,6 +1021,7 @@ fn evalSection(
             .replicate,
             .module_policy,
             .revision,
+            .rough,
             => {
                 self.warnFmt(sf.span, "({s} …) is top-level-only — ignored inside (section …)", .{sf_name});
             },
@@ -1547,6 +1551,52 @@ fn parsePolicyOverrides(
             self.warnFmt(child.span, "unknown (module-policy …) item ({s} …) — expected (module …) or (net-class …)", .{head});
         }
     }
+}
+
+/// Parse a top-level `(rough …)` form into the design's rough-placement seed:
+/// an optional `(anchor "REF")` and a list of `(group "name" "REF"…)` priority
+/// tiers in authored (descending-priority) order. Member tokens stay raw
+/// (ref-des or origin name) — `placement/optimizer.zig` matches them leniently.
+/// A `(group …)` with no members is dropped; `(rough)` alone ⇒ `present=false`.
+fn parseRough(self: *Evaluator, form_children: []const Node) EvalError!env_mod.RoughSpec {
+    var anchor: []const u8 = "";
+    var groups: std.ArrayListUnmanaged(env_mod.RoughGroup) = .empty;
+    for (form_children[1..]) |child| {
+        const cl = child.asList() orelse continue;
+        if (cl.len == 0) continue;
+        const head = cl[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "anchor")) {
+            if (cl.len >= 2) anchor = cl[1].asString() orelse cl[1].asAtom() orelse "";
+        } else if (std.mem.eql(u8, head, "group")) {
+            try parseRoughGroup(self, cl, &groups);
+        } else {
+            self.warnFmt(child.span, "unknown (rough …) item ({s} …) — expected (anchor …) or (group …)", .{head});
+        }
+    }
+    const grp = groups.toOwnedSlice(self.allocator) catch &.{};
+    return .{ .anchor = anchor, .groups = grp, .present = anchor.len > 0 or grp.len > 0 };
+}
+
+/// Parse one `(group "name" "REF"…)` child of a `(rough …)` form: the first
+/// token is the cosmetic label, the rest are member ref-des / origin tokens.
+/// A group with no members after the label is dropped (the caller never sees it).
+fn parseRoughGroup(
+    self: *Evaluator,
+    cl: []const Node,
+    out: *std.ArrayListUnmanaged(env_mod.RoughGroup),
+) EvalError!void {
+    if (cl.len < 2) return;
+    const name = cl[1].asString() orelse cl[1].asAtom() orelse "";
+    var members: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (cl[2..]) |m| {
+        const tok = m.asString() orelse m.asAtom() orelse continue;
+        members.append(self.allocator, tok) catch return EvalError.OutOfMemory;
+    }
+    if (members.items.len == 0) return;
+    out.append(self.allocator, .{
+        .name = name,
+        .members = members.toOwnedSlice(self.allocator) catch &.{},
+    }) catch return EvalError.OutOfMemory;
 }
 
 /// Accumulator the design-block evaluator threads through `parseConstraints` so
