@@ -137,7 +137,7 @@ fn writeSourceChip(w: *std.Io.Writer, src: LayoutSource) std.Io.Writer.Error!voi
             "Plain grid placeholder — no layout computed yet. Regenerate to auto-place.",
         },
     };
-    try w.print("<span class=\"src-chip src-{s}\" title=\"{s}\">{s}</span>", .{ cls, title, label });
+    try w.print("<span class=\"src-chip src-{s}\" id=\"pcb-srcchip\" title=\"{s}\">{s}</span>", .{ cls, title, label });
 }
 
 /// Name the rung of the precedence ladder the shown placement came from,
@@ -2507,8 +2507,14 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
     try w.writeAll("<a class=\"btn\" href=\"/api/pcb-layout/");
     try writeAttr(w, name);
     try w.writeAll("\" target=\"_blank\" title=\"Download positions + full score breakdown as JSON\">Export JSON</a>");
-    try w.writeAll("<button class=\"btn\" id=\"pcb-saveas\" title=\"Save the current placement under a name\">Save as…</button>");
+    // Update writes the current placement back into the layout the user loaded
+    // (overwrite in place) — the iterative "save progress" path. Disabled until a
+    // saved layout is the active edit target (set by Load, or after a Save as…).
+    try w.writeAll("<button class=\"btn\" id=\"pcb-update\" disabled " ++
+        "title=\"Save changes back into the loaded layout (overwrite in place)\">Update</button>");
+    try w.writeAll("<button class=\"btn\" id=\"pcb-saveas\" title=\"Save the current placement under a new name\">Save as…</button>");
     try w.writeAll("<button class=\"btn\" id=\"pcb-reset\">Reset to auto</button>");
+    try w.writeAll("<span class=\"lay-active\" id=\"pcb-active\" style=\"display:none\"></span>");
     try w.writeAll("<span class=\"zoom-grp\"><button class=\"btn\" id=\"z-out\" title=\"Zoom out\">−</button>");
     try w.writeAll("<button class=\"btn\" id=\"z-in\" title=\"Zoom in\">+</button>");
     try w.writeAll("<button class=\"btn\" id=\"z-fit\" title=\"Reset zoom\">Fit</button></span>");
@@ -3595,6 +3601,7 @@ const PAGE_CSS =
     \\.pcb-bar .zoom-grp{display:inline-flex;gap:4px}
     \\.pcb-bar .zoom-grp .btn{min-width:26px;text-align:center;padding:3px 7px}
     \\.pcb-bar .savemsg{font-size:12px;color:#3fb950;font-weight:600}
+    \\.pcb-bar .lay-active{font-size:12px;color:#58a6ff;font-weight:600;font-style:italic}
     \\.pcb-bar .muted{font-size:11.5px;color:#6e7681}
     \\.pcb-rside{width:320px;flex:none;position:sticky;top:8px;max-height:calc(100vh - 16px);overflow:auto}
     \\.pcb-saved{border:1px solid #21262d;border-radius:8px;background:#161b22;overflow:hidden}
@@ -3628,6 +3635,8 @@ const PAGE_CSS =
     \\.lay-row .lay-star:hover{color:#e3b341;border-color:#e3b341}
     \\.lay-row .lay-star.on{color:#e3b341;border-color:#7a5c12;background:#2b2410}
     \\.lay-row.def{background:#13210f;box-shadow:inset 2px 0 0 #e3b341}
+    \\.lay-row.active{background:#0d1f2d;box-shadow:inset 2px 0 0 #58a6ff}
+    \\.lay-row.active.def{box-shadow:inset 2px 0 0 #58a6ff,inset 4px 0 0 #e3b341}
     \\/* Collapsible control deck: a chip row toggles one panel at a time, so the
     \\   default view is the toolbar + board instead of a stack of control strips. */
     \\.pcb-tabs{display:flex;gap:6px;align-items:center;margin:6px 0 8px;flex-wrap:wrap}
@@ -4052,6 +4061,22 @@ const BOARD_JS =
     \\ return {x:sx/S+MX-M,y:sy/S+MY-M};}
     \\if(!RO){
     \\var drag=null, cur=-1;
+    \\// Iterative layout editing: curLayout is the saved layout the Update button
+    \\// writes back into (overwrite in place) instead of forcing a new one. Set by
+    \\// Load and after a Save as…; the one-shot reapplyKey survives our own post-save
+    \\// reload so the board returns to exactly the arrangement you were editing.
+    \\var curLayout=null;
+    \\var reapplyKey="pcb-reapply:"+PCB.name;
+    \\function setActiveLayout(nm){curLayout=(nm&&nm.length)?nm:null;
+    \\ var ub=document.getElementById("pcb-update");if(ub)ub.disabled=!curLayout;
+    \\ var ind=document.getElementById("pcb-active");
+    \\ if(ind){if(curLayout){ind.textContent="editing \u{201c}"+curLayout+"\u{201d}";ind.style.display="";}
+    \\  else{ind.textContent="";ind.style.display="none";}}
+    \\ document.querySelectorAll(".lay-row").forEach(function(row){
+    \\  row.classList.toggle("active",curLayout!=null&&row.getAttribute("data-lay-row")===curLayout);});
+    \\ var chip=document.getElementById("pcb-srcchip");
+    \\ if(chip&&curLayout){chip.textContent="saved \u{00b7} "+curLayout;chip.className="src-chip src-snapshot";
+    \\  chip.title="Showing saved layout \u{201c}"+curLayout+"\u{201d} \u{2014} drag to edit, then Update to save progress.";}}
     \\// Click a part on the board → reveal it in the component sidebar: scroll the
     \\// matching <li> into view and flash it so you can see what the part is.
     \\function scrollToComp(ref){var li=document.querySelector('.comp[data-ref="'+ref+'"]');
@@ -4143,12 +4168,28 @@ const BOARD_JS =
     \\   headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
     \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
     \\  .then(function(){msg.style.color="#3fb950";msg.textContent="saved ✓";
-    \\    setTimeout(function(){window.location.reload();},300);})
+    \\    try{sessionStorage.setItem(reapplyKey,nm);}catch(e){}
+    \\    setTimeout(function(){window.location.href="/pcb-layout/"+encodeURIComponent(PCB.name);},300);})
     \\  .catch(function(){msg.style.color="#f85149";msg.textContent="save failed";});});
+    \\// Update: overwrite the loaded layout in place (no prompt) — save progress on
+    \\// the layout you're iterating, then reload showing that same arrangement.
+    \\var updBtn=document.getElementById("pcb-update");
+    \\if(updBtn)updBtn.addEventListener("click",function(){
+    \\ if(!curLayout)return; var msg=document.getElementById("pcb-savemsg");
+    \\ var payload={name:curLayout,parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};})};
+    \\ msg.style.color="#8b949e";msg.textContent="updating…";
+    \\ fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name),{method:"POST",
+    \\   headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
+    \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
+    \\  .then(function(){msg.style.color="#3fb950";msg.textContent="updated ✓";
+    \\    try{sessionStorage.setItem(reapplyKey,curLayout);}catch(e){}
+    \\    setTimeout(function(){window.location.href="/pcb-layout/"+encodeURIComponent(PCB.name);},300);})
+    \\  .catch(function(){msg.style.color="#f85149";msg.textContent="update failed";});});
     \\function layByName(nm){var Ls=PCB.layouts||[];for(var i=0;i<Ls.length;i++)if(Ls[i].name===nm)return Ls[i];return null;}
     \\document.querySelectorAll("[data-lay-load]").forEach(function(b){
-    \\ b.addEventListener("click",function(){var L=layByName(b.getAttribute("data-lay-load"));if(!L)return;
-    \\   P.forEach(function(p){var s=L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;}});applyAll();});});
+    \\ b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-load");var L=layByName(nm);if(!L)return;
+    \\   P.forEach(function(p){var s=L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;}});applyAll();
+    \\   setActiveLayout(nm);});});
     \\document.querySelectorAll("[data-lay-del]").forEach(function(b){
     \\ b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-del");
     \\   if(!window.confirm("Delete layout \""+nm+"\"?"))return;
@@ -4178,6 +4219,14 @@ const BOARD_JS =
     \\  .then(function(r){return r.json();})
     \\  .then(function(j){(j.results||[]).forEach(function(it){layBreaks[it.name]=it.breakdown;});reweighLayouts();})
     \\  .catch(function(){});})();
+    \\// After our own Save/Update reload, re-apply the just-saved layout's poses so
+    \\// the board shows exactly what you were editing (verbatim, not the auto cache)
+    \\// and the Update button stays armed for the next iteration. One-shot: consumed
+    \\// immediately so an unrelated later visit isn't hijacked.
+    \\(function(){var nm=null;try{nm=sessionStorage.getItem(reapplyKey);sessionStorage.removeItem(reapplyKey);}catch(e){}
+    \\ if(!nm)return; var L=layByName(nm); if(!L)return;
+    \\ P.forEach(function(p){var s=L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;}});applyAll();
+    \\ setActiveLayout(nm);})();
     \\}
     \\function hlBy(at,v,cls,on){document.querySelectorAll("["+at+"]").forEach(function(e){
     \\ if(e.getAttribute(at)===v)e.classList.toggle(cls,on);});}
