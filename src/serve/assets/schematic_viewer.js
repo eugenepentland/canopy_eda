@@ -1726,6 +1726,7 @@
             try { j = JSON.parse(resp2.body); } catch (_e) {}
             closeModal();
             schToast(kicadAppliedMessage(j), (j && j.warning) ? 'warn' : 'ok', 8000);
+            if (typeof refreshKicadSyncChip === 'function') refreshKicadSyncChip();
           }).catch(function (e) {
             resetConfirm();
             schToast('Push failed: ' + e, 'err', 9000);
@@ -1784,6 +1785,7 @@
           pushPcbStatus.style.color = '#3fb950';
         }
         if (pushPcbStatus) pushPcbStatus.textContent = msg;
+        if (typeof refreshKicadSyncChip === 'function') refreshKicadSyncChip();
       }).catch(function (e) {
         btn.textContent = original;
         btn.dataset.busy = '';
@@ -1801,6 +1803,62 @@
   wireKicadPreviewButton(pushPcbPruneBtn, 'Push + Delete Stale', 'prune=1', 'Previewing…');
   wireKicadPushButton(pushPcbDotBtn, '/api/sync-kicad-pcb/' + DESIGN_NAME + '?dot_nets=1', 'Pushing (per-pin nets)…');
   wireKicadPushButton(pushPcbRefreshBtn, '/api/sync-kicad-pcb/' + DESIGN_NAME + '?refresh=1', 'Refreshing footprints…');
+
+  // ---- KiCad PCB sync-freshness chip ----
+  // For designs that declare a (kicad-pcb …) target the header carries a
+  // #kicad-sync-chip. On load (and on click to re-check, and after a Push) we
+  // dry-run the file-based sync and reflect the result: green when the board
+  // already matches the netlist, amber + a pending-change count when a Push
+  // would write the .kicad_pcb, grey when the board file can't be read. The
+  // count excludes `suppressed` (already-applied no-ops) so it tracks exactly
+  // what a Push would change.
+  var kicadSyncChip = document.getElementById('kicad-sync-chip');
+  function setSyncChip(state, text, title) {
+    if (!kicadSyncChip) return;
+    kicadSyncChip.className = 'head-link head-btn sync-chip ' + state;
+    kicadSyncChip.textContent = text;
+    kicadSyncChip.title = title;
+  }
+  function refreshKicadSyncChip() {
+    if (!kicadSyncChip || kicadSyncChip.dataset.busy === '1') return;
+    kicadSyncChip.dataset.busy = '1';
+    setSyncChip('sync-checking', '⟳ PCB sync…', 'Checking whether the .kicad_pcb matches the design…');
+    fetch('/api/sync-kicad-pcb/' + DESIGN_NAME + '?dry_run=1', { method: 'POST' }).then(function (r) {
+      return r.text().then(function (body) { return { ok: r.ok, body: body }; });
+    }).then(function (resp) {
+      kicadSyncChip.dataset.busy = '';
+      if (!resp.ok) {
+        setSyncChip('sync-unknown', '⚠ PCB unreachable', resp.body || 'Could not read the .kicad_pcb board.');
+        return;
+      }
+      var j = {};
+      try { j = JSON.parse(resp.body); } catch (_e) {}
+      var s = (j && j.summary) || {};
+      var pending = (s.added || 0) + (s.removed || 0) + (s.updated || 0) + (s.swapped || 0) + (s.vias || 0);
+      var stale = s.flagged_stale || 0;
+      var total = pending + stale;
+      if (total === 0) {
+        setSyncChip('sync-ok', '✓ PCB in sync', 'The .kicad_pcb matches the design netlist. Click to re-check.');
+        return;
+      }
+      var parts = [];
+      if (s.added) parts.push(s.added + ' added');
+      if (s.removed) parts.push(s.removed + ' removed');
+      if (s.updated) parts.push(s.updated + ' updated');
+      if (s.swapped) parts.push(s.swapped + ' footprint swap' + (s.swapped > 1 ? 's' : ''));
+      if (s.vias) parts.push(s.vias + ' vias');
+      if (stale) parts.push(stale + ' stale on board');
+      setSyncChip('sync-stale', '⚠ PCB needs sync (' + total + ')',
+        'Pending: ' + parts.join(', ') + '. Open KiCad ▾ → Push to KiCad PCB. Click to re-check.');
+    }).catch(function (e) {
+      kicadSyncChip.dataset.busy = '';
+      setSyncChip('sync-unknown', '⚠ PCB unreachable', 'Sync check failed: ' + e);
+    });
+  }
+  if (kicadSyncChip) {
+    kicadSyncChip.addEventListener('click', refreshKicadSyncChip);
+    refreshKicadSyncChip();
+  }
 
   // ---- Export SRC ----
   // Fetches the raw .sexp source via /api/source/:name and saves it as a
