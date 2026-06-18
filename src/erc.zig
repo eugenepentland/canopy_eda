@@ -909,6 +909,9 @@ fn checkBlockPowerPins(
         const prefix = na.refDesLocalPrefix(inst.ref_des);
         // Only check ICs (U prefix)
         if (prefix != 'U') continue;
+        // Skip test points — single-pad probe pads, never an IC (also get a "TP"
+        // ref-des, so this is belt-and-suspenders against a stray 'U').
+        if (env_mod.isTestPoint(inst.component)) continue;
         // Skip passive components that got U prefix (LEDs, inductors, filters, crystals)
         if (isPassiveComponent(inst.component)) continue;
         // Skip ICs that intentionally have no ground reference pin (float with
@@ -1919,6 +1922,37 @@ test "power pins V5P0 rail is recognised as power" {
     try checkUnconnectedPowerPins(alloc, &block, &violations);
     for (violations.items) |v| {
         try std.testing.expect(!std.mem.eql(u8, v.message, "U1: IC has no power connection"));
+    }
+}
+
+// spec: erc - Test points are exempt from the IC-ground/power check
+test "test point is not flagged for missing ground/power" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // A `testpoint` part connecting only a signal net. Even if it somehow
+    // carried a U ref-des, it must not trip "IC has no ground/power" — it is a
+    // single-pad probe pad, not an IC. (Normally it gets a "TP" ref-des.)
+    const insts = try alloc.alloc(Instance, 1);
+    insts[0] = .{ .ref_des = "U7", .component = "testpoint", .value = "", .footprint = "", .symbol = "" };
+    const sig_pins = try alloc.alloc(env_mod.PinRef, 1);
+    sig_pins[0] = .{ .ref_des = "U7", .pin = "1" };
+    const nets = try alloc.alloc(Net, 1);
+    nets[0] = .{ .name = "STATUS0", .pins = sig_pins };
+    const block: DesignBlock = .{
+        .name = "tp-fixture",
+        .instances = insts,
+        .nets = nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkUnconnectedPowerPins(alloc, &block, &violations);
+    for (violations.items) |v| {
+        try std.testing.expect(std.mem.indexOf(u8, v.message, "no ground connection") == null);
+        try std.testing.expect(std.mem.indexOf(u8, v.message, "no power connection") == null);
     }
 }
 

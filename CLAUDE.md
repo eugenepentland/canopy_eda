@@ -158,7 +158,19 @@ subsections below cover conventions and idiomatic usage only.
 (instance "U1" stm32n657l0h3q
   (pin 1 2 3 4 5 "VDD")
   (pin 27 28 29 30 31 "GND"))
+
+;; (dnp) — first-class Do Not Populate. The footprint + pads stay in the
+;; netlist / on the board (so a mod can stuff it), but it's marked DNP on the
+;; BOM (badge + CSV column, kept off populated-qty merges), in the schematic,
+;; and in the KiCad netlist export (dnp + exclude_from_bom properties). Use it
+;; for option resistors / strap twins / spare-output footprints.
+(instance "R_OPT" (res-0402 "0R") (pin 1 "A") (pin 2 "B") (dnp))
 ```
+
+Test points (`(instance "TP_X" testpoint (pin 1 "NET"))`) are first-class
+inside `(defmodule …)` sub-blocks: they take a renumber-safe `TP` ref-des and
+are exempt from the `IC has no ground` ERC. A bare `(test-point "TP" "NET")`
+stays a schematic-only marker (no exported pad).
 
 ### Multi-part symbols with grid layout
 

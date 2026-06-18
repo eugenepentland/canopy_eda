@@ -126,6 +126,9 @@ pub const FlatInfo = struct {
     nets: []const []const u8,
     properties: []const Property,
     id: []const u8 = "",
+    /// Do Not Populate — carried from the source instance's `(dnp)` flag so the
+    /// BOM can mark the row and drop it from the populated-part tally.
+    dnp: bool = false,
 };
 
 /// Walk a design block and append a flat `FlatInfo` per instance into `list`,
@@ -177,6 +180,7 @@ pub fn collectFlatInstances(
             .nets = nets_list,
             .properties = inst.properties,
             .id = inst.id,
+            .dnp = inst.dnp,
         });
     }
     for (block.sub_blocks) |sb| {

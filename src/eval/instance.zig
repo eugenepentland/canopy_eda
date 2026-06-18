@@ -163,8 +163,9 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     var pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
     var inline_notes: std.ArrayListUnmanaged(Note) = .empty;
     var inline_props: std.ArrayListUnmanaged(env_mod.Property) = .empty;
+    var dnp_flag = false;
 
-    const known_forms = [_][]const u8{ "pin", "note", "bus", "id", "as" };
+    const known_forms = [_][]const u8{ "pin", "note", "bus", "id", "as", "dnp" };
 
     for (args[2..]) |form| {
         if (form.isForm("note")) {
@@ -177,6 +178,9 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
             }
         } else if (form.isForm("pin")) {
             try parsePinForm(self, form, ref_des, env, &pin_nets, reverse_pinout);
+        } else if (form.isForm("dnp")) {
+            // (dnp) — mark Do Not Populate. Bare flag form (no value).
+            dnp_flag = true;
         } else if (form.isForm("bus")) {
             // (bus "NET_PREFIX" "BUS_NAME") -- expand component bus definition
             const bc = form.asList().?;
@@ -228,6 +232,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     }
 
     var final_inst = inst;
+    final_inst.dnp = dnp_flag;
 
     // Merge properties: start with component defaults, override with inline
     if (inline_props.items.len > 0) {

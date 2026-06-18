@@ -712,6 +712,11 @@ pub const Instance = struct {
     /// pin-level geometry checks and pad-net emission for it, and ERC warns
     /// (never errors) that it needs a real component before fab.
     placeholder: bool = false,
+    /// True when the instance declares `(dnp)` — Do Not Populate. The footprint
+    /// and pads stay in the netlist / on the board (so the option can be stuffed
+    /// during a rework), but it is excluded from the assembly BOM and marked DNP
+    /// in the schematic, the KiCad netlist, and the .kicad_pcb footprint attrs.
+    dnp: bool = false,
 };
 
 /// True when `component` names a test point (`testpoint` or `testpoint-*`).
