@@ -3734,6 +3734,8 @@ const PAGE_CSS =
     \\/* Sticky net selection (click a pad): a gold glow + ring, drawn with a filter
     \\   so it stands out over ANY fill — works with net colours on or off. */
     \\.pad.net-sel{stroke:#ffd33d;stroke-width:1.6;paint-order:stroke;filter:drop-shadow(0 0 2px #ffd33d) drop-shadow(0 0 5px #ffd33d)}
+    \\/* The defined decoupling connection pin on the IC: red glow instead of gold. */
+    \\.pad.net-sel-pin{stroke:#f85149;stroke-width:1.6;paint-order:stroke;filter:drop-shadow(0 0 2px #f85149) drop-shadow(0 0 5px #f85149)}
     \\.pn.net-sel{background:#3a2e07;color:#ffd33d;box-shadow:0 0 0 1px #ffd33d}
     \\.pcb-side{width:288px;flex:none;position:sticky;top:8px;max-height:calc(100vh - 16px);
     \\  overflow:auto;border:1px solid #21262d;border-radius:8px;background:#161b22}
@@ -3929,6 +3931,15 @@ const BOARD_JS =
     \\function setT(i){var p=P[i];
     \\ els[i].setAttribute("transform","translate("+X(p.x).toFixed(1)+","+Y(p.y).toFixed(1)+")");
     \\ bodies[i].setAttribute("transform","rotate("+(p.rot||0)+")");}
+    \\// Decoupling-loop power pins: the EXACT hub pad each bypass/decoupling CAP is
+    \\// paired with (loop.pp). CAPS only — the optimizer also loops strap resistors
+    \\// to GND, but those aren't decoupling caps. Keyed by hub index + local pad
+    \\// centre so the marked pad moves with the part; these glow red (not gold) when
+    \\// their net is picked, so the defined connection point stands out.
+    \\var loopPin={};(PCB.loops||[]).forEach(function(L){var c=PCB.parts[L.cap],rf=(c&&c.ref)||"";
+    \\ var lf=rf.lastIndexOf("/")>=0?rf.slice(rf.lastIndexOf("/")+1):rf;
+    \\ if(lf.charAt(0)!=="C"&&lf.charAt(0)!=="c")return;
+    \\ loopPin[L.hub+":"+L.pp.x.toFixed(2)+":"+L.pp.y.toFixed(2)]=1;});
     \\P.forEach(function(p,i){
     \\ var g=el("g",{"class":"part","data-ref":p.ref});
     \\ var body=el("g",{"class":"body"});
@@ -3943,7 +3954,9 @@ const BOARD_JS =
     \\    r:Math.max(c[2]*S,1).toFixed(1),fill:"none",stroke:"#8b949e","stroke-width":0.8}));});}
     \\ p.pads.forEach(function(pad){
     \\   var at={fill:"#b08d57"}; if(pad.net)at["data-net"]=pad.net;
-    \\   body.appendChild(FP.padShape(pad,{scale:S,minPx:1.5,cls:"pad",attrs:at}));});
+    \\   var pe=FP.padShape(pad,{scale:S,minPx:1.5,cls:"pad",attrs:at});
+    \\   if(loopPin[i+":"+pad.x.toFixed(2)+":"+pad.y.toFixed(2)])pe.classList.add("looppin");
+    \\   body.appendChild(pe);});
     \\ g.appendChild(body);
     \\ var t=el("text",{"class":"pcb-ref",x:0,y:(-p.hh*S-2).toFixed(1),fill:p.kind=="hub"?"#58a6ff":"#8b949e"});
     \\ t.textContent=p.ref; g.appendChild(t);
@@ -4272,7 +4285,9 @@ const BOARD_JS =
     \\ if(net&&selNetCur===net)net=null;
     \\ selNetCur=net;
     \\ document.querySelectorAll("[data-net]").forEach(function(e){
-    \\  e.classList.toggle("net-sel",net!=null&&e.getAttribute("data-net")===net);});}
+    \\  var on=net!=null&&e.getAttribute("data-net")===net,pin=e.classList.contains("looppin");
+    \\  e.classList.toggle("net-sel-pin",on&&pin);
+    \\  e.classList.toggle("net-sel",on&&!pin);});}
     \\if(RO)gP.addEventListener("click",function(ev){var net=netAt(ev.target);if(net){ev.stopPropagation();selNet(net);}});
     \\document.querySelectorAll(".pn[data-net]").forEach(function(e){e.style.cursor="pointer";
     \\ e.addEventListener("click",function(){selNet(e.getAttribute("data-net"));});});
