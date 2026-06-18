@@ -5117,6 +5117,17 @@ fn resolvePart(instances: []const export_kicad.FlatInstance, ref: []const u8) ?u
     return null;
 }
 
+/// The IC pad a `(decouple … per-pin …)` cap decouples, read from its structural
+/// origin key `value@PAD#replica` (built in `builders.emitDecoupleItems`). Null
+/// when the key has no `@PAD#` segment — a non-per-pin decouple (`value#replica`)
+/// or any named part (whose origin key is the source name).
+fn decouplePinFromOrigin(origin_key: []const u8) ?[]const u8 {
+    const at = std.mem.indexOfScalar(u8, origin_key, '@') orelse return null;
+    const hash = std.mem.indexOfScalarPos(u8, origin_key, at + 1, '#') orelse return null;
+    const pin = origin_key[at + 1 .. hash];
+    return if (pin.len > 0) pin else null;
+}
+
 fn prepare(
     arena: std.mem.Allocator,
     block: *const DesignBlock,
@@ -5188,6 +5199,14 @@ fn prepare(
     @memset(priority, 0);
     const explicit_pin = try arena.alloc([]const u8, instances.len);
     for (explicit_pin) |*e| e.* = "";
+    // A (decouple … per-pin N …) cap carries the IC pad it decouples in its
+    // structural origin key `value@PAD#replica`; pin its loop to that pad so the
+    // bypass loop targets the pin it serves (and the part shows that target on
+    // the layout). These caps are auto-named, so this is the only way to pin
+    // them — a hand-authored (placement-order/group …) (near …) overrides below.
+    for (instances, 0..) |inst, pi| {
+        if (decouplePinFromOrigin(inst.origin_key)) |pin| explicit_pin[pi] = pin;
+    }
     for (block.placement_order) |po| {
         const k: u32 = @intCast(po.entries.len);
         for (po.entries, 0..) |ent, pos| {
@@ -9815,6 +9834,15 @@ test "refineSidesByPull re-sides a part toward its signal pad" {
     try testing.expectEqual(@as(usize, 0), sides[0].items.len);
     try testing.expectEqual(@as(usize, 1), sides[1].items.len);
     try testing.expect(parts[1].x > 0);
+}
+
+// spec: placement/optimizer - decouplePinFromOrigin reads the decoupled pad from a per-pin cap's structural key
+test "decouplePinFromOrigin extracts the pad from value@pad#replica keys" {
+    try testing.expectEqualStrings("3", decouplePinFromOrigin("100nF@3#0").?);
+    try testing.expectEqualStrings("B4", decouplePinFromOrigin("10uF@B4#2").?); // BGA pad name
+    try testing.expect(decouplePinFromOrigin("100nF#0") == null); // non-per-pin decouple
+    try testing.expect(decouplePinFromOrigin("C_AVDD1") == null); // named part
+    try testing.expect(decouplePinFromOrigin("10uF@#0") == null); // empty pad
 }
 
 // spec: placement/optimizer - posSide buckets a point into the anchor quadrant it lies in
