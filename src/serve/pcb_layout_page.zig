@@ -5,8 +5,8 @@
 //! parts can be **dragged** (snapping to the 0.2 mm grid) and the layout
 //! **score** (HPWL + decoupling-loop length) recomputes live — letting you
 //! compare a hand placement against the auto one. A sidebar lists every
-//! component and the net on each pin; hovering cross-highlights, and hovering
-//! a pad (or net chip) reds every pad on that net.
+//! component and the net on each pin; hovering a part cross-highlights it, and
+//! clicking a pad (or net chip) glows every pad on that net.
 
 const std = @import("std");
 const httpz = @import("httpz");
@@ -515,6 +515,10 @@ pub const PngRequest = struct {
     group_loop_relief: f64 = -1,
     /// Constructive zone-then-pack floorplan (crisp VIN│IC│L│VOUT rows).
     zone_pack: bool = false,
+    /// Rough hierarchical seed: cluster each module into a rigid block and arrange
+    /// the blocks by connectivity (the `?rough=1` module-clustered starting point).
+    /// Forces a fresh solve like `regen`.
+    rough: bool = false,
     /// Bypass an authored `(placement …)` spec so the force / zone path renders
     /// instead (the `?placement=off` A/B switch).
     placement_off: bool = false,
@@ -582,13 +586,14 @@ pub fn solveForRequest(
         (eff_block.placement.present or eff_block.floorplan.present);
     const cached = if (opts.sub != null) null else if (opts.layout) |ln|
         readLayoutPoses(alloc, project_dir, name, ln)
-    else if (opts.regen or spec_drives) null else readAutoPoses(alloc, project_dir, name);
-    const grid_only = opts.sub == null and opts.layout == null and !opts.regen and !spec_drives and cached == null;
+    else if (opts.regen or opts.rough or spec_drives) null else readAutoPoses(alloc, project_dir, name);
+    const grid_only = opts.sub == null and opts.layout == null and !opts.regen and !opts.rough and !spec_drives and cached == null;
     var params = optimizer.Params{ .courtyard_overlap = opts.court_overlap, .route_gap = opts.route_gap };
     if (opts.group_w >= 0) params.group_w = opts.group_w;
     if (opts.group_zone_w >= 0) params.group_zone_w = opts.group_zone_w;
     if (opts.group_loop_relief >= 0) params.group_loop_relief = opts.group_loop_relief;
     if (opts.zone_pack) params.zone_pack = true;
+    if (opts.rough) params.rough = true;
     if (opts.placement_off) params.ignore_placement = true;
     // A named saved layout renders VERBATIM (placeFromPoses) — "show me this
     // layout" must display exactly what was saved, not a re-optimized version:
@@ -714,6 +719,7 @@ pub fn pngRequestFromQuery(arena: std.mem.Allocator, req: *httpz.Request) PngReq
         .group_zone_w = pngFloatOpt(req, "group_zone_w"),
         .group_loop_relief = pngFloatOpt(req, "group_loop_relief"),
         .zone_pack = queryFlag(req, "zone_pack"),
+        .rough = queryFlag(req, "rough"),
         .placement_off = blk: {
             const q = req.query() catch break :blk false;
             const v = q.get("placement") orelse break :blk false;
@@ -2423,6 +2429,13 @@ fn parseTuning(req: *httpz.Request) Tuning {
         p.zone_pack = !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false"));
         tuned = true;
     }
+    // `?rough=1` — the rough hierarchical seed: cluster each module into a rigid
+    // block and arrange the blocks by connectivity (a legible start to hand-finish,
+    // not metric-optimal). Always forces a fresh solve (never reuses the cache).
+    if (q.get("rough")) |v| {
+        p.rough = !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false"));
+        if (p.rough) regen = true;
+    }
     // `?placement=off` bypasses an authored (placement …) spec so the force / zone
     // path runs — for A/B-ing the manual floorplan against the automatic placer.
     if (q.get("placement")) |v| {
@@ -2502,6 +2515,13 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
     try w.writeAll("<a class=\"btn\" id=\"pcb-regen\" href=\"/pcb-layout/");
     try writeAttr(w, name);
     try w.writeAll("?regen=1\" title=\"Re-run the optimizer and watch it converge live\">Regenerate</a>");
+    // Rough seed: cluster each module into a rigid block and arrange the blocks by
+    // connectivity — a legible, module-intact starting point to drag-finish, rather
+    // than the metric-optimal (and cross-module-interleaved) full solve.
+    try w.writeAll("<a class=\"btn\" id=\"pcb-rough\" href=\"/pcb-layout/");
+    try writeAttr(w, name);
+    try w.writeAll("?rough=1\" title=\"Rough module-clustered seed: every module kept intact and ");
+    try w.writeAll("grid-aligned, arranged by connectivity — a start you drag to finish\">Rough</a>");
     // Export the solved positions + full score breakdown (incl. the
     // value-weighted loop + alignment terms the bar above hides) for inspection.
     try w.writeAll("<a class=\"btn\" href=\"/api/pcb-layout/");
@@ -3709,9 +3729,12 @@ const PAGE_CSS =
     \\.part{cursor:grab}
     \\.part .court{transition:filter .08s}
     \\.part.hl .court{filter:drop-shadow(0 0 3px rgba(88,166,255,.75))}
-    \\.pad{transition:fill .08s}
-    \\.pad.net-hl{fill:#f85149}
-    \\.pn.net-hl{background:#5b1e28;color:#ffa198}
+    \\.pad{transition:fill .08s,filter .08s}
+    \\.pad[data-net]{cursor:pointer}
+    \\/* Sticky net selection (click a pad): a gold glow + ring, drawn with a filter
+    \\   so it stands out over ANY fill — works with net colours on or off. */
+    \\.pad.net-sel{stroke:#ffd33d;stroke-width:1.6;paint-order:stroke;filter:drop-shadow(0 0 2px #ffd33d) drop-shadow(0 0 5px #ffd33d)}
+    \\.pn.net-sel{background:#3a2e07;color:#ffd33d;box-shadow:0 0 0 1px #ffd33d}
     \\.pcb-side{width:288px;flex:none;position:sticky;top:8px;max-height:calc(100vh - 16px);
     \\  overflow:auto;border:1px solid #21262d;border-radius:8px;background:#161b22}
     \\.side-h{font-size:13px;font-weight:600;padding:10px 12px;border-bottom:1px solid #21262d;position:sticky;top:0;background:#161b22;color:#f0f6fc}
@@ -4087,13 +4110,14 @@ const BOARD_JS =
     \\ g.addEventListener("mouseenter",function(){cur=i;});
     \\ g.addEventListener("mouseleave",function(){if(cur===i)cur=-1;});
     \\ g.addEventListener("pointerdown",function(ev){ev.preventDefault();var m=mm(ev);
-    \\   drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});
+    \\   drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y,down:ev.target};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});
     \\ g.addEventListener("pointermove",function(ev){if(!drag||drag.i!==i)return;var m=mm(ev);
     \\   var nx=Math.round((m.x+drag.ox)/G)*G,ny=Math.round((m.y+drag.oy)/G)*G;
     \\   if(nx===P[i].x&&ny===P[i].y)return;P[i].x=nx;P[i].y=ny;
     \\   if(!drag.moved){drag.moved=true;clearRoute();}setT(i);rats();drawClr();refreshUnplaced();});
-    \\ g.addEventListener("pointerup",function(ev){var mv=drag&&drag.moved;drag=null;g.style.cursor="grab";
-    \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(mv)fetchScore();else scrollToComp(P[i].ref);});
+    \\ g.addEventListener("pointerup",function(ev){var mv=drag&&drag.moved,dn=drag&&drag.down;drag=null;g.style.cursor="grab";
+    \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}
+    \\   if(mv){fetchScore();return;}var net=netAt(dn);if(net)selNet(net);scrollToComp(P[i].ref);});
     \\});
     \\// Keyboard: R / Shift+R rotates the hovered part; ? toggles the
     \\// shortcut-help overlay (Esc or click closes it). The overlay's list
@@ -4233,7 +4257,25 @@ const BOARD_JS =
     \\function wire(at,cls){document.querySelectorAll("["+at+"]").forEach(function(e){
     \\ e.addEventListener("mouseenter",function(){hlBy(at,e.getAttribute(at),cls,true);});
     \\ e.addEventListener("mouseleave",function(){hlBy(at,e.getAttribute(at),cls,false);});});}
-    \\wire("data-ref","hl"); wire("data-net","net-hl");
+    \\wire("data-ref","hl");
+    \\// Sticky net selection: click a pad and every pad on that net (plus its
+    \\// sidebar net chip) gets a gold glow, so you can trace what's tied together
+    \\// with net colours on OR off. Re-click the same net, or click empty board,
+    \\// to clear. A plain `click` is unreliable on the board — the drag/pan
+    \\// handlers preventDefault pointerdown, which suppresses it — so the editor
+    \\// drives this from the part/background POINTER-UP (no-move = a click). The
+    \\// read-only preview has no drag handlers, so there a real click works and we
+    \\// delegate on gP. Sidebar chips are plain HTML, so a normal click is fine.
+    \\var selNetCur=null;
+    \\function netAt(e){while(e&&e.getAttribute){var n=e.getAttribute("data-net");if(n)return n;if(e===svg)break;e=e.parentNode;}return null;}
+    \\function selNet(net){
+    \\ if(net&&selNetCur===net)net=null;
+    \\ selNetCur=net;
+    \\ document.querySelectorAll("[data-net]").forEach(function(e){
+    \\  e.classList.toggle("net-sel",net!=null&&e.getAttribute("data-net")===net);});}
+    \\if(RO)gP.addEventListener("click",function(ev){var net=netAt(ev.target);if(net){ev.stopPropagation();selNet(net);}});
+    \\document.querySelectorAll(".pn[data-net]").forEach(function(e){e.style.cursor="pointer";
+    \\ e.addEventListener("click",function(){selNet(e.getAttribute("data-net"));});});
     \\var VBW=PCB.w,VBH=PCB.h,vb={x:0,y:0,w:VBW,h:VBH};
     \\function setVB(){svg.setAttribute("viewBox",vb.x.toFixed(1)+" "+vb.y.toFixed(1)+" "+vb.w.toFixed(1)+" "+vb.h.toFixed(1));}
     \\function zoomAt(cx,cy,f){if((f<1&&vb.w<VBW*0.08)||(f>1&&vb.w>VBW*8))return;
@@ -4249,8 +4291,10 @@ const BOARD_JS =
     \\svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.preventDefault();
     \\ pan={cx:ev.clientX,cy:ev.clientY,vx:vb.x,vy:vb.y};svg.setPointerCapture(ev.pointerId);svg.style.cursor="grabbing";});
     \\svg.addEventListener("pointermove",function(ev){if(!pan)return;var r=svg.getBoundingClientRect();
+    \\ if(Math.abs(ev.clientX-pan.cx)+Math.abs(ev.clientY-pan.cy)>3)pan.moved=true;
     \\ vb.x=pan.vx-(ev.clientX-pan.cx)*(vb.w/r.width);vb.y=pan.vy-(ev.clientY-pan.cy)*(vb.h/r.height);setVB();});
-    \\svg.addEventListener("pointerup",function(ev){pan=null;svg.style.cursor="";try{svg.releasePointerCapture(ev.pointerId);}catch(e){}});
+    \\svg.addEventListener("pointerup",function(ev){var clk=pan&&!pan.moved;pan=null;svg.style.cursor="";
+    \\ try{svg.releasePointerCapture(ev.pointerId);}catch(e){}if(clk)selNet(null);});
     \\function viaGeo(){var va=parseFloat((document.getElementById("r-va")||{}).value),
     \\ vd=parseFloat((document.getElementById("r-vd")||{}).value);return {dia:va>0?va:0.4,drill:vd>0?vd:0.2};}
     \\function drawVia(g,wx,wy,dia,drill){var r=Math.max(dia/2*S,2.5),rh=Math.min(Math.max(drill/2*S,1),r*0.7);
@@ -4436,6 +4480,8 @@ const BOARD_JS =
     \\   setTimeout(function(){livePoll(gen,lastSeq,misses+1);},700);});}
     \\var rgl=document.getElementById("pcb-regen");
     \\if(rgl)rgl.addEventListener("click",function(ev){ev.preventDefault();liveRegen("");});
+    \\var rgh=document.getElementById("pcb-rough");
+    \\if(rgh)rgh.addEventListener("click",function(ev){ev.preventDefault();liveRegen("?rough=1");});
     \\// ── Collapsible control deck (accordion) + board-view overlays ──────────
     \\(function(){
     \\ var chips=Array.prototype.slice.call(document.querySelectorAll(".tab-chip"));
