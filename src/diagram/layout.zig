@@ -778,11 +778,34 @@ pub fn computeFreeLayout(arena: Allocator, graph: *const Graph) Allocator.Error!
     }
     if (lnodes.items.len == 0) return null;
 
-    const nodes = try lnodes.toOwnedSlice(arena);
     // Group-aware separation: nudge overlapping `(group …)` regions onto
     // disjoint grid cells so their boxes (and the LOD-0 glance chips built from
     // them) never overlap, keeping every block on the lattice.
-    try separateGroupClusters(arena, graph, nodes, pad + gx, pad + top_reserve + gy);
+    try separateGroupClusters(arena, graph, lnodes.items, pad + gx, pad + top_reserve + gy);
+    // Synthesised off-board antenna / EMVS-cell nodes: place each next to the
+    // chip it feeds (left of an RX chip, right of a TX one) so the Layout view
+    // shows which radiator each RF IC drives. routeFreeEdges draws the labelled
+    // chip↔antenna edge once both endpoints are present.
+    try placeBoundaryNodes(arena, graph, &lnodes);
+    const nodes = try lnodes.toOwnedSlice(arena);
+    // Antennas can land left of / above the block origin; shift everything back
+    // so the minimum corner returns to the canvas origin (else it clips).
+    {
+        var minx: f64 = std.math.floatMax(f64);
+        var miny: f64 = std.math.floatMax(f64);
+        for (nodes) |ln| {
+            minx = @min(minx, ln.x);
+            miny = @min(miny, ln.y);
+        }
+        const ox = pad + gx;
+        const oy = pad + top_reserve + gy;
+        const dx: f64 = if (minx < ox) ox - minx else 0;
+        const dy: f64 = if (miny < oy) oy - miny else 0;
+        if (dx != 0 or dy != 0) for (nodes) |*ln| {
+            ln.x += dx;
+            ln.y += dy;
+        };
+    }
     // Blocks may have moved; recompute the content extent before boxing/routing.
     max_x = 0;
     max_y = 0;
@@ -806,6 +829,66 @@ pub fn computeFreeLayout(arena: Allocator, graph: *const Graph) Allocator.Error!
         .height = max_y + pad,
         .groups = groups,
     };
+}
+
+/// Place each synthesised antenna / boundary node (`is_boundary`, no `(place …)`
+/// key — so the block pass skipped it) next to the single chip it connects to:
+/// an RX feed sits left of its chip, a TX feed right, pushed outward by whole
+/// column pitches past any block it would overlap. Multiple feeds on one chip
+/// stack downward. Appends the placed antennas to `lnodes` (chips already in it).
+fn placeBoundaryNodes(arena: Allocator, graph: *const Graph, lnodes: *std.ArrayListUnmanaged(LNode)) Allocator.Error!void {
+    if (lnodes.items.len == 0) return;
+    var pos: std.AutoHashMapUnmanaged(u32, LNode) = .empty;
+    var rects: std.ArrayListUnmanaged(Rect) = .empty;
+    for (lnodes.items) |ln| {
+        try pos.put(arena, ln.gid, ln);
+        try rects.append(arena, .{ .x0 = ln.x, .y0 = ln.y, .x1 = ln.x + node_w, .y1 = ln.y + node_h });
+    }
+    const col_pitch = node_w + free_h_gap;
+    const row_pitch = node_h + free_v_gap;
+    var stack_count: std.AutoHashMapUnmanaged(u64, u32) = .empty;
+    for (graph.nodes, 0..) |nd, i| {
+        if (!nd.is_boundary) continue;
+        const aid: u32 = @intCast(i);
+        // The chip + side: an RX feed is the edge's `from` (antenna → chip) → place
+        // left; a TX feed is the `to` (chip → antenna) → place right. One edge each.
+        var chip: ?u32 = null;
+        var dir: f64 = -1;
+        for (graph.edges) |e| {
+            if (e.from == aid) {
+                chip = e.to;
+                dir = -1;
+                break;
+            }
+            if (e.to == aid) {
+                chip = e.from;
+                dir = 1;
+                break;
+            }
+        }
+        const cgid = chip orelse continue;
+        const cp = pos.get(cgid) orelse continue;
+        const skey = (@as(u64, cgid) << 1) | @as(u64, @intFromBool(dir > 0));
+        const slot = stack_count.get(skey) orelse 0;
+        try stack_count.put(arena, skey, slot + 1);
+        const y = cp.y + @as(f64, @floatFromInt(slot)) * row_pitch;
+        var x = cp.x + dir * col_pitch;
+        var guard: u32 = 0;
+        while (guard < 64) : (guard += 1) {
+            const r = Rect{ .x0 = x, .y0 = y, .x1 = x + node_w, .y1 = y + node_h };
+            var hit = false;
+            for (rects.items) |o| {
+                if (r.x0 < o.x1 and o.x0 < r.x1 and r.y0 < o.y1 and o.y0 < r.y1) {
+                    hit = true;
+                    break;
+                }
+            }
+            if (!hit) break;
+            x += dir * col_pitch;
+        }
+        try lnodes.append(arena, .{ .gid = aid, .x = x, .y = y });
+        try rects.append(arena, .{ .x0 = x, .y0 = y, .x1 = x + node_w, .y1 = y + node_h });
+    }
 }
 
 /// The **Groups** view: the free-layout group boxes with the individual blocks

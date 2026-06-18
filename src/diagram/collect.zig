@@ -429,6 +429,7 @@ fn deriveEdges(
 /// `TX_EMVS_*` cell drive. The leading underscore also excludes `RFINB_4159_1`.
 fn isBoundaryName(name: []const u8) bool {
     if (std.mem.startsWith(u8, name, "TX_EMVS")) return true;
+    if (std.mem.startsWith(u8, name, "TXEMVS")) return true;
     if (std.mem.endsWith(u8, name, "_RFOUT") or std.mem.endsWith(u8, name, "_RFIN")) return true;
     const at = std.mem.indexOf(u8, name, "_RFIN") orelse return false;
     const after = at + "_RFIN".len;
@@ -439,6 +440,7 @@ fn isBoundaryName(name: []const u8) bool {
 /// `TX_EMVS_*` → `TX_EMVS`, `BEAM1_RFIN` → `BEAM1`, `RX1_RFIN3+` → `RX1`.
 fn antennaBase(name: []const u8) []const u8 {
     if (std.mem.startsWith(u8, name, "TX_EMVS")) return "TX_EMVS";
+    if (std.mem.startsWith(u8, name, "TXEMVS")) return "TXEMVS";
     if (std.mem.indexOf(u8, name, "_RFOUT")) |i| return name[0..i];
     if (std.mem.indexOf(u8, name, "_RFIN")) |i| return name[0..i];
     return name;
@@ -446,7 +448,7 @@ fn antennaBase(name: []const u8) []const u8 {
 
 /// Display label for a synthesised endpoint (allocated; freed by deinit).
 fn antennaLabel(allocator: Allocator, base: []const u8) Allocator.Error![]const u8 {
-    if (std.mem.eql(u8, base, "TX_EMVS")) return allocator.dupe(u8, "TX-EMVS cell");
+    if (std.mem.eql(u8, base, "TX_EMVS") or std.mem.eql(u8, base, "TXEMVS")) return allocator.dupe(u8, "TX-EMVS cell");
     if (std.mem.startsWith(u8, base, "RX")) return std.fmt.allocPrint(allocator, "{s} EMVS cell", .{base});
     return std.fmt.allocPrint(allocator, "{s} antenna", .{base});
 }
@@ -470,6 +472,54 @@ fn buildRfPortDir(scratch: Allocator, block: *const DesignBlock) Allocator.Error
     return m;
 }
 
+/// Distinct IC blocks reachable from a boundary net through its transparent
+/// matching passives (R/C/L/F/D), traced transitively net→passive→net but never
+/// through a power/GND net (so a shunt-to-ground match doesn't pull in the
+/// plane). Returns the single chip when the closure holds exactly one IC (→ a
+/// real antenna feed, where the radiator side is a component-free dead-end);
+/// null otherwise — 0 ICs is dangling, ≥2 is an inter-IC signal that merely
+/// *looks* like a boundary net (e.g. an `ADAR2001_RFIN` LO from the LMX through
+/// a resistive pad + AC cap).
+fn boundaryChip(
+    scratch: Allocator,
+    flat: []const export_kicad.FlatNet,
+    mem: *const membership.Membership,
+    port_map: *const classify.PortClassMap,
+    part_nets: *const std.StringHashMapUnmanaged(std.ArrayListUnmanaged(usize)),
+    start: usize,
+) Allocator.Error!?u32 {
+    var seen_ic: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    var visited: std.AutoHashMapUnmanaged(usize, void) = .empty;
+    var queue: std.ArrayListUnmanaged(usize) = .empty;
+    try visited.put(scratch, start, {});
+    try queue.append(scratch, start);
+    var chip: ?u32 = null;
+    var count: usize = 0;
+    var head: usize = 0;
+    while (head < queue.items.len) : (head += 1) {
+        for (flat[queue.items[head]].pins) |p| {
+            if (isHubRef(leafRef(p.ref_des))) {
+                const nid = mem.resolve(p.ref_des) orelse continue;
+                const gop = try seen_ic.getOrPut(scratch, nid);
+                if (!gop.found_existing) {
+                    count += 1;
+                    chip = nid;
+                }
+                continue;
+            }
+            // Transparent passive: enqueue its other (non-power) nets.
+            const others = part_nets.get(p.ref_des) orelse continue;
+            for (others.items) |oni| {
+                if (visited.contains(oni)) continue;
+                if (classify.netClass(cleanNetName(flat[oni].name), port_map) == types.CLASS_POWER) continue;
+                try visited.put(scratch, oni, {});
+                try queue.append(scratch, oni);
+            }
+        }
+    }
+    return if (count == 1) chip else null;
+}
+
 /// Synthesise an endpoint node + edge for each RF boundary net that reaches
 /// exactly one on-board block. Antennas grouped by `antennaBase`; the four
 /// `TX_EMVS_*` legs collapse onto one cell with a fanout count.
@@ -486,29 +536,30 @@ fn antennaPass(
     const dir = try buildRfPortDir(scratch, block);
     var ant_id: std.StringHashMapUnmanaged(u32) = .empty;
     var pair_idx: std.AutoHashMapUnmanaged(u64, usize) = .empty;
-    var touched_set: std.AutoHashMapUnmanaged(u32, void) = .empty;
 
-    for (flat) |net| {
+    // ref_des → the flat-net indices it appears on, for tracing a boundary net
+    // through a series matching element (DC-block / tuning cap) to the IC.
+    var part_nets: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(usize)) = .empty;
+    for (flat, 0..) |net, ni| {
+        for (net.pins) |p| {
+            const gop = try part_nets.getOrPut(scratch, p.ref_des);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.append(scratch, ni);
+        }
+    }
+
+    for (flat, 0..) |net, net_idx| {
         const clean = cleanNetName(net.name);
         if (!isBoundaryName(clean)) continue;
         if (classify.netClass(clean, port_map) != types.CLASS_RF) continue;
 
-        touched_set.clearRetainingCapacity();
-        var chip: ?u32 = null;
-        var count: usize = 0;
-        for (net.pins) |p| {
-            const nid = mem.resolve(p.ref_des) orelse continue;
-            const gop = try touched_set.getOrPut(scratch, nid);
-            if (!gop.found_existing) {
-                count += 1;
-                chip = nid;
-            }
-        }
-        if (count != 1) continue; // a 2-block net is a real edge, not a boundary
+        // The single IC this boundary net feeds (series matching passives are
+        // transparent; a hop to a *second* IC means it's a signal, not a feed).
+        const chip = (try boundaryChip(scratch, flat, mem, port_map, &part_nets, net_idx)) orelse continue;
         // A real antenna terminates on an RF chip, never on the mezzanine. If a
         // boundary net resolves only to the connector it's an attachment
         // artifact (the chip's sub-block folded into the connector), so skip it.
-        if (nodes.items[chip.?].category == .connector) continue;
+        if (nodes.items[chip].category == .connector) continue;
 
         const base = antennaBase(clean);
         const aid = blk: {
@@ -529,8 +580,8 @@ fn antennaPass(
         };
 
         const chip_out = dir.get(clean) orelse nameDrivesOut(clean);
-        const from = if (chip_out) chip.? else aid;
-        const to = if (chip_out) aid else chip.?;
+        const from = if (chip_out) chip else aid;
+        const to = if (chip_out) aid else chip;
         const key = (@as(u64, from) << 32) | to;
         const pg = try pair_idx.getOrPut(scratch, key);
         if (pg.found_existing) {
@@ -783,6 +834,24 @@ fn isDigit(c: u8) bool {
 fn cleanNetName(name: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, name, '.')) |dot| return name[0..dot];
     return name;
+}
+
+/// Leaf ref-des — the part after the last sub-block `/` prefix
+/// (`rx1/U1` → `U1`, `C_KRX1_DCB` → `C_KRX1_DCB`).
+fn leafRef(r: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, r, '/')) |i| return r[i + 1 ..];
+    return r;
+}
+
+/// A hub (IC/connector) ref-des vs a 2-pin passive (R/C/L/F/D) — mirrors the
+/// hub/spoke split so antenna synthesis treats series matching passives as
+/// transparent and attaches the antenna to the IC behind them.
+fn isHubRef(ref: []const u8) bool {
+    if (ref.len == 0) return true;
+    return switch (ref[0]) {
+        'R', 'C', 'L', 'F', 'D' => false,
+        else => true,
+    };
 }
 
 /// Common prefix of two labels, trimmed of trailing separators — collapses
