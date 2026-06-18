@@ -3052,6 +3052,11 @@ fn writeLegend(w: *std.Io.Writer, p: optimizer.Placement, hidden: bool) std.Io.W
 
 const PinNet = struct { pin: []const u8, net: []const u8 };
 
+/// A decoupling cap's authored target: the hub + pin a `(near <pin> …)` form
+/// pinned its power leg to, plus the rail. Built from `Placement.loops` for caps
+/// whose `explicit_pin` is set, so the sidebar can echo the authored connection.
+const DecapTarget = struct { hub_ref: []const u8, pin: []const u8, rail: []const u8 };
+
 fn writeSidebar(
     w: *std.Io.Writer,
     alloc: std.mem.Allocator,
@@ -3066,6 +3071,24 @@ fn writeSidebar(
             if (!gop.found_existing) gop.value_ptr.* = .empty;
             try gop.value_ptr.append(alloc, .{ .pin = pin.pin, .net = net.name });
         }
+    }
+
+    // Authored decoupling targets, keyed by the cap's ref-des: which hub pin a
+    // `(near <pin> …)` form pinned each bypass cap to (the same pad the board's
+    // red defined-pin glow marks). Only explicitly-pinned caps appear.
+    var decap = std.StringHashMap(DecapTarget).init(alloc);
+    for (p.loops) |lp| {
+        if (lp.explicit_pin.len == 0) continue;
+        if (lp.cap >= p.instances.len or lp.hub >= p.instances.len) continue;
+        const rail = if (lp.pwr_net >= 0 and @as(usize, @intCast(lp.pwr_net)) < p.nets.len)
+            netLabel(p.nets[@intCast(lp.pwr_net)].name)
+        else
+            "";
+        try decap.put(p.instances[lp.cap].ref_des, .{
+            .hub_ref = shortName(p.instances[lp.hub].ref_des),
+            .pin = lp.explicit_pin,
+            .rail = rail,
+        });
     }
 
     try w.writeAll("<aside class=\"pcb-side\">");
@@ -3097,6 +3120,21 @@ fn writeSidebar(
                 try w.writeAll("</b>");
                 try writeEscaped(w, netLabel(pn.net));
                 try w.writeAll("</span>");
+            }
+            try w.writeAll("</div>");
+        }
+        // Authored decoupling target: the hub pin a `(near <pin> …)` form pinned
+        // this bypass cap to — the same pad the board's red defined-pin glow marks.
+        if (decap.get(inst.ref_des)) |t| {
+            try w.writeAll("<div class=\"comp-decap\" title=\"Authored bypass target — ");
+            try w.writeAll("(near …) pins this cap's power leg to this hub pin\">\u{26A1} decouples <b>");
+            try writeEscaped(w, t.hub_ref);
+            try w.writeAll("</b> pin <b>");
+            try writeEscaped(w, t.pin);
+            try w.writeAll("</b>");
+            if (t.rail.len > 0) {
+                try w.writeAll(" \u{00B7} ");
+                try writeEscaped(w, t.rail);
             }
             try w.writeAll("</div>");
         }
@@ -3758,6 +3796,9 @@ const PAGE_CSS =
     \\.comp-sch-link:hover{text-decoration:underline}
     \\.pn{font-size:11px;color:#c9d1d9;background:#21262d;border-radius:3px;padding:0 5px;white-space:nowrap}
     \\.pn b{color:#e6edf3;font-weight:600;margin-right:3px}
+    \\/* Authored bypass target — echoes the board's red defined-pin glow. */
+    \\.comp-decap{font-size:10.5px;color:#f0a0a0;margin-top:4px}
+    \\.comp-decap b{color:#f85149;font-weight:600}
     \\.part.focus-flash .court{stroke:#f0b72f!important;stroke-width:2.6!important;animation:partflash .55s ease-in-out 4}
     \\@keyframes partflash{50%{stroke-opacity:0.25}}
     \\/* Parts the placement spec didn't list (auto-staged): flag them red, and

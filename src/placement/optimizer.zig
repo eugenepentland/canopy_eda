@@ -621,6 +621,11 @@ pub const Loop = struct {
     /// a rail toward the pin, and is raised further by a declared
     /// `(placement-order …)` rank. 1 for a lone, unranked cap. Set in `classify`.
     weight: f64 = 1,
+    /// The hub pin the design EXPLICITLY pinned this cap to via `(near <pin> …)`,
+    /// or "" when the target pin was auto-chosen (lowest-numbered supply). Lets a
+    /// read surface (the PCB sidebar) show the authored decoupling target, not a
+    /// solver default. Set in `hugToHub`.
+    explicit_pin: []const u8 = "",
 };
 
 /// `buildSprings` output: the force list plus the decoupling loops to score.
@@ -7686,7 +7691,8 @@ fn hugToHub(
             // Pin the power leg to one hub pad — the cap's explicitly-named pin
             // (`(near <pin> …)`) if it's on this net, else the lowest-numbered
             // supply pad. Fixing the target removes the per-eval argmin flip.
-            const pin_rect = findHubPin(eps, hub, explicit_pin[e.idx]) orelse default_pin_rect;
+            const named_rect = findHubPin(eps, hub, explicit_pin[e.idx]);
+            const pin_rect = named_rect orelse default_pin_rect;
             // The ground return targets the hub GND pad nearest that power pin —
             // also fixed (no flip), so the loop is a coherent local pin pair.
             const gnd_rect = nearestPad(gnd[hub], pin_rect);
@@ -7700,6 +7706,8 @@ fn hugToHub(
                 .hub_gnd = gnd[hub],
                 .hub_gnd_pin = gnd_rect,
                 .pwr_net = net_i,
+                // Only an authored, on-this-net `(near <pin>)` counts as explicit.
+                .explicit_pin = if (named_rect != null) explicit_pin[e.idx] else "",
             });
         } else {
             // Non-decoupling single-hub passive: hug the hub's pad centroid.
