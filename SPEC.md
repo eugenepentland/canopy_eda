@@ -124,6 +124,8 @@ Public functions: solve
 - series detection pairs a 2-pad part with two single-hub legs to one hub
 - series rotations are applied and pinned; authored spec rotations win
 - synthesizes an aggressor-avoidance keep-out for a feedback passive
+- past the multi-start band a single force start falls back to the pad-anchored ring when that scores better
+- the rough-seed safety net keeps the lower-objective arrangement
 
 ## placement/router
 

@@ -1,7 +1,7 @@
 # guardian-snapshot v1
-src/placement/optimizer.zig:1166: line is 193 chars (cap 160)
-src/placement/optimizer.zig:1224: line is 182 chars (cap 160)
-src/placement/optimizer.zig:1355: line is 191 chars (cap 160)
+src/placement/optimizer.zig:1231: line is 193 chars (cap 160)
+src/placement/optimizer.zig:1289: line is 182 chars (cap 160)
+src/placement/optimizer.zig:1420: line is 191 chars (cap 160)
 src/serve/pcb_describe.zig:416: line is 193 chars (cap 160)
 src/serve/pcb_describe.zig:419: line is 171 chars (cap 160)
 src/serve/pcb_describe.zig:426: line is 190 chars (cap 160)

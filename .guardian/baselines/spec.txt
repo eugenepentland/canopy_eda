@@ -1,4 +1,5 @@
 # guardian-snapshot v1
+add: // spec: placement/optimizer - past the multi-start band a single force start falls back to the pad-anchored ring when that scores better
 add: // spec: serve/notes - Reads and writes `<design>.notes.md` next to the design source file
 add: // spec: serve/notes - Rejects bodies larger than 1 MiB
 add: // spec: serve/notes - Returns an empty string when no notes file exists yet
@@ -41,6 +42,7 @@ unlinked tag: serve/diag_format - build blanks the source line when the span doe
 unlinked tag: serve/diag_format - build extracts the offending source line from the buffer at the span in ./src/serve/diag_format.zig
 unlinked tag: serve/diag_format - caretLine pads to the 1-based column (preserving tabs) and ends with a caret in ./src/serve/diag_format.zig
 unlinked tag: serve/users - The user/role store persists to and resolves from auth_dir, not the project dir (users.json lives at <auth_dir>/users.json) in ./src/serve/users.zig
+unverified: placement/optimizer - past the multi-start band a single force start falls back to the pad-anchored ring when that scores better
 unverified: serve/notes - Reads and writes `<design>.notes.md` next to the design source file
 unverified: serve/notes - Rejects bodies larger than 1 MiB
 unverified: serve/notes - Returns an empty string when no notes file exists yet

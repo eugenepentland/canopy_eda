@@ -796,6 +796,64 @@ pub const SeedMode = enum {
     refine,
 };
 
+/// The smooth-surrogate objective (the value `scorePoses` reports and the viewer
+/// shows) for the CURRENT poses in `parts`, computed in place — no `prepare()`
+/// rebuild, so it is cheap to call mid-pipeline as a candidate comparator.
+fn surrogateObjective(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet, loops: []const Loop, params: Params) f64 {
+    const score = scoreLayout(parts, idx_of, nets, loops);
+    const lsum = surrogateLoops(parts, loops);
+    return breakdownWith(parts, idx_of, nets, params, score, lsum).objective;
+}
+
+/// Best-of-rough safety net for the default force path. Past the multi-start band
+/// (`parts.len > MULTISTART_MAX_PARTS`) the force solve takes a SINGLE start, which
+/// can settle in a scattered basin far worse than the constructive rough seed — the
+/// flat pad-anchored ring (w55rp20: force ~3764 vs ring ~1495) or the hierarchical
+/// module-clustered arrange (barracuda-base/cyclops-analog: ~30% worse by force). So
+/// once the force result is final, build the SAME rough seed `?rough=1` produces as
+/// an alternative candidate, score both on the surrogate objective, and keep whichever
+/// is better. The output is therefore NEVER worse than the force solve alone; it only
+/// rescues the cases the single start loses. Caller gates it to the at-risk band:
+/// skipped for nested `fast` seed solves and the reranked multi-start band; the
+/// `(board …)`-outline guard below skips outline designs (the ring ignores the
+/// outline, so its surrogate score isn't comparable to the edge-docked solve).
+fn keepBetterOfRough(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    built: Built,
+    params: Params,
+) std.mem.Allocator.Error!void {
+    // A `(board …)` outline design edge-docks parts in the force solve; the ring
+    // ignores the outline, so its surrogate score isn't comparable — leave it alone.
+    const bd = prep.block.board;
+    if (bd.present and bd.w > 0 and bd.h > 0) return;
+    const force_obj = surrogateObjective(parts, &prep.idx_of, nets, built.loops, params);
+    // Snapshot the force poses so a force win restores cleanly after the ring overwrites them.
+    const saved = try arena.alloc([3]f64, parts.len);
+    for (parts, 0..) |p, i| saved[i] = .{ p.x, p.y, p.rot };
+    // Build the SAME rough seed `?rough=1` produces: the hierarchical module-clustered
+    // arrange for a multi-module design (where it beats a scattered force solve by
+    // ~30%), else the flat pad-anchored ring. Neither applies (no hub) → restore + bail.
+    var seeded = try runRough(arena, parts, prep, nets, params);
+    if (!seeded) seeded = try packPadAnchored(arena, parts, prep, nets);
+    if (!seeded) {
+        for (parts, 0..) |*p, i| {
+            p.x = saved[i][0];
+            p.y = saved[i][1];
+            p.rot = saved[i][2];
+        }
+        return;
+    }
+    if (surrogateObjective(parts, &prep.idx_of, nets, built.loops, params) < force_obj) return; // ring wins — keep it
+    for (parts, 0..) |*p, i| { // force wins — restore its poses
+        p.x = saved[i][0];
+        p.y = saved[i][1];
+        p.rot = saved[i][2];
+    }
+}
+
 /// The from-scratch placement pipeline, factored out so `solve` can run it twice
 /// (the strict vs courtyard-overlap retry). Global arrangement first — routed-
 /// reranked multi-start where the board has loops and fits the multi-start band,
@@ -880,6 +938,13 @@ fn runPlacement(
     // Module-authored `(placement …)` specs compose into the force result as
     // rigid macros — after the tuck, so nothing dissolves them afterwards.
     if (!params.ignore_placement) try composeModuleMacros(arena, parts, prep, params);
+    // Best-of-rough safety net: past the multi-start band the force solve is a single
+    // start that can lose badly to the constructive pad-anchored ring on cap-dense
+    // boards. Keep whichever scores better (never worse than force alone). Skipped for
+    // nested `fast` seeds; the outline guard lives inside the helper.
+    if (!params.fast and parts.len > MULTISTART_MAX_PARTS) {
+        try keepBetterOfRough(arena, parts, prep, nets, built, params);
+    }
 }
 
 /// The force-directed placement pipeline (routed-reranked multi-start for loop
@@ -9987,4 +10052,32 @@ test "polishCrossings honours want_side, refusing a wrong-side swap" {
     try polishCrossings(arena, &pinned, 0, &nets, &idx_of, &want);
     try testing.expect(pinned[1].x > 0); // R1 held on the right
     try testing.expect(pinned[2].x < 0); // R2 held on the left
+}
+
+// spec: placement/optimizer - the rough-seed safety net keeps the lower-objective arrangement
+test "surrogateObjective ranks a tighter layout below a spread one" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The comparator the best-of-rough safety net trusts: a cap hugging the hub must
+    // score below the same cap flung far away (shorter airwire → lower objective), so
+    // keepBetterOfRough keeps the tighter of the force solve and the pad-anchored ring.
+    const hub_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1, .h = 1 }};
+    const c_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &hub_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &c_pads, .fallback = false, .x = 2, .y = 0 },
+    };
+    const nets = [_]FlatNet{
+        .{ .name = "N", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("U1", 0);
+    try idx_of.put("C1", 1);
+    const params = Params{ .w_align = 0 }; // kill alignment; objective ≈ wirelength
+    const no_loops = [_]Loop{};
+    const tight = surrogateObjective(&parts, &idx_of, &nets, &no_loops, params);
+    parts[1].x = 40; // fling the cap far from the hub
+    const spread = surrogateObjective(&parts, &idx_of, &nets, &no_loops, params);
+    try testing.expect(tight < spread);
 }
