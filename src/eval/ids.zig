@@ -387,9 +387,9 @@ pub fn componentPrefix(family: []const u8) u8 {
     if (std.mem.startsWith(u8, family, "cap")) return 'C';
     if (std.mem.startsWith(u8, family, "res")) return 'R';
     if (std.mem.startsWith(u8, family, "diode")) return 'D';
-    // Coilcraft XFL-series power inductors live as standalone library parts
-    // (e.g. xfl4012) rather than being modeled as the generic `ind` family.
-    if (std.mem.startsWith(u8, family, "xfl")) return 'L';
+    // Coilcraft XFL- and Murata DFE-series power inductors live as standalone
+    // library parts (e.g. xfl4012, dfe201612e) rather than the generic `ind`.
+    if (std.mem.startsWith(u8, family, "xfl") or std.mem.startsWith(u8, family, "dfe")) return 'L';
     // Known connector patterns
     if (std.mem.startsWith(u8, family, "connector")) return 'J';
     if (std.mem.startsWith(u8, family, "amphenol")) return 'J';
@@ -861,6 +861,7 @@ test "componentPrefix maps inductor families to L" {
     try std.testing.expectEqual(@as(u8, 'L'), componentPrefix("ind-2016"));
     try std.testing.expectEqual(@as(u8, 'L'), componentPrefix("ind-0603"));
     try std.testing.expectEqual(@as(u8, 'L'), componentPrefix("xfl4012"));
+    try std.testing.expectEqual(@as(u8, 'L'), componentPrefix("dfe201612e-r47m-p2"));
     try std.testing.expectEqual(@as(u8, 'L'), componentPrefix("ferrite-0805"));
     // Not inductors: "indicator-led"-style names must not match "ind-".
     try std.testing.expectEqual(@as(u8, 'U'), componentPrefix("inductive-sensor"));
