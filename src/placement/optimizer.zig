@@ -3681,6 +3681,63 @@ fn polishCrossings(
     }
 }
 
+/// The local centre of a part's "important" pad for IC-facing orientation: its pad
+/// on the highest-priority net it shares with the anchor hub — ground excluded,
+/// fewest-hub-pads (most signal-like) wins, so a bypass cap picks its power pad
+/// over GND and a series/pull resistor picks its signal pad. Null when no
+/// non-ground net of the part reaches the hub (nothing to orient toward).
+fn importantPadLocal(
+    part: Part,
+    pi: usize,
+    hi: usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+) ?[2]f64 {
+    var best: ?FlatNet = null;
+    var best_cnt: usize = std.math.maxInt(usize);
+    for (nets) |net| {
+        if (!netHasPart(net, pi, idx_of)) continue;
+        if (pin_roles.isGroundFn(shortName(net.name))) continue;
+        var hubpads: usize = 0;
+        for (net.pins) |pr| {
+            if ((idx_of.get(pr.ref_des) orelse continue) == hi) hubpads += 1;
+        }
+        if (hubpads == 0) continue; // the net must reach the IC
+        if (hubpads < best_cnt) {
+            best_cnt = hubpads;
+            best = net;
+        }
+    }
+    const net = best orelse return null;
+    const pad = padOnNet(part, pi, net, idx_of);
+    if (pad.w == 0 and pad.h == 0) return null;
+    return .{ pad.x, pad.y };
+}
+
+/// Final rough-seed orientation pass: rotate each 2-pad passive 180° when its
+/// important pad (see `importantPadLocal`) faces AWAY from the anchor IC, so the
+/// pad that matters sits on the inner (IC-facing) side — a bypass cap's power pad
+/// toward the IC power pin (short hot loop), a series/pull resistor's signal pad
+/// toward the IC. A 180° flip of a symmetric 2-pad part keeps its bbox, so it can
+/// never introduce an overlap; hubs/connectors and odd-pad parts keep their
+/// rotation. Runs last, so "inner" is measured from each part's final position.
+fn orientPadsToIC(
+    parts: []Part,
+    hi: usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+) void {
+    for (parts, 0..) |*p, pi| {
+        if (pi == hi or p.kind == .hub or p.pads.len != 2) continue;
+        const lp = importantPadLocal(p.*, pi, hi, nets, idx_of) orelse continue;
+        const off = rotateLocal(lp[0], lp[1], p.rot);
+        // Inward = from the part toward the IC; flip when the pad points outward.
+        const inx = parts[hi].x - p.x;
+        const iny = parts[hi].y - p.y;
+        if (off.x * inx + off.y * iny < 0) p.rot = @mod(p.rot + 180, 360);
+    }
+}
+
 fn packPadAnchored(
     arena: std.mem.Allocator,
     parts: []Part,
@@ -3791,6 +3848,10 @@ fn packPadAnchored(
     // count, on top of the cluster-aware seed (modules only — it's bounded but
     // O(parts²·segments²) per pass). `want_side` keeps it from re-siding parts.
     if (parts.len <= ROUGH_POLISH_MAX_PARTS) try polishCrossings(arena, parts, hi, nets, &prep.idx_of, want_side);
+
+    // Orient each 2-pad passive so its important pad faces the IC (power pad of a
+    // bypass cap toward the IC power pin, signal pad of a resistor toward the IC).
+    orientPadsToIC(parts, hi, nets, &prep.idx_of);
 
     legalizeFinal(parts); // resolve any corner / cross-side overlaps
     return true;
@@ -9843,6 +9904,37 @@ test "decouplePinFromOrigin extracts the pad from value@pad#replica keys" {
     try testing.expect(decouplePinFromOrigin("100nF#0") == null); // non-per-pin decouple
     try testing.expect(decouplePinFromOrigin("C_AVDD1") == null); // named part
     try testing.expect(decouplePinFromOrigin("10uF@#0") == null); // empty pad
+}
+
+// spec: placement/optimizer - orientPadsToIC flips a 2-pad part so its important pad faces the IC
+test "orientPadsToIC turns the important pad toward the anchor" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Cap C1 on the LEFT of the IC; pad "1" (power, net VDD→hub) at local +x,
+    // pad "2" (GND) at local −x. Seeded rot 180 → the power pad points OUTWARD.
+    const hub_pads = [_]geometry.Pad{.{ .number = "1", .x = -3, .y = 0, .w = 1, .h = 1 }};
+    const c_pads = [_]geometry.Pad{
+        .{ .number = "1", .x = 1, .y = 0, .w = 0.4, .h = 0.4 },
+        .{ .number = "2", .x = -1, .y = 0, .w = 0.4, .h = 0.4 },
+    };
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &hub_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 0.5, .pads = &c_pads, .fallback = false, .x = -10, .y = 0, .rot = 180 },
+    };
+    const nets = [_]FlatNet{
+        .{ .name = "VDD", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
+        .{ .name = "GND", .pins = &.{.{ .ref_des = "C1", .pin = "2" }} },
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("U1", 0);
+    try idx_of.put("C1", 1);
+    orientPadsToIC(&parts, 0, &nets, &idx_of);
+    // Flipped 180 → 0 so pad "1" (power, not GND) sits at world +x, toward the IC.
+    try testing.expectEqual(@as(f64, 0), parts[1].rot);
+    // A part already oriented right is left untouched.
+    orientPadsToIC(&parts, 0, &nets, &idx_of);
+    try testing.expectEqual(@as(f64, 0), parts[1].rot);
 }
 
 // spec: placement/optimizer - posSide buckets a point into the anchor quadrant it lies in

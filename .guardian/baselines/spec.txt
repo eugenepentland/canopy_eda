@@ -26,6 +26,7 @@ unlinked tag: placement/optimizer - composed module macros push free parts away 
 unlinked tag: placement/optimizer - decouplePinFromOrigin reads the decoupled pad from a per-pin cap's structural key in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - floorplan (rot N "SUB") turns the whole macro in quarter steps in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - floorplan corner clashes push the later macro out along its dock axis in ./src/placement/optimizer.zig
+unlinked tag: placement/optimizer - orientPadsToIC flips a 2-pad part so its important pad faces the IC in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - posSide buckets a point into the anchor quadrant it lies in in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - refineSidesByPull moves a part to the IC side its real connections pull toward in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - segsCross flags interior airwire crossings, not shared endpoints in ./src/placement/optimizer.zig
