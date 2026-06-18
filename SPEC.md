@@ -113,6 +113,7 @@ Public functions: solve
 - zone-pack lays a group into an aligned row/column
 - the manual placement block keeps authored order and resolves rotations
 - the manual floorplan docks sides around the anchor IC and stages unlisted parts
+- rough seed keeps each module a rigid, non-interleaved block
 - (board ...) edge default rotation turns connector pads toward the board interior
 - (board ...) docks edge parts flush inside the outline and pins corners
 - (board ...) edge parts wanting the same spot de-overlap along the edge
@@ -123,6 +124,8 @@ Public functions: solve
 - series detection pairs a 2-pad part with two single-hub legs to one hub
 - series rotations are applied and pinned; authored spec rotations win
 - synthesizes an aggressor-avoidance keep-out for a feedback passive
+- past the multi-start band a single force start falls back to the pad-anchored ring when that scores better
+- the rough-seed safety net keeps the lower-objective arrangement
 
 ## placement/router
 
@@ -562,6 +565,7 @@ Public functions: analyze
 - layout edge form parses left/right edge-pinned block keys
 - hosts form records the sub-block instance names a section owns
 - board form parses outline size, edge lists, and corners
+- placement-group expands into a placement-order (pins) and a group (cohesion)
 - revision form captures id, date, and newest-first changelog
 - revision form with only an id is present with empty date/changelog
 - a design with no (revision …) form is unversioned (present=false)

@@ -219,6 +219,8 @@ src/eval/env.zig::RefStyle enum_
 src/eval/env.zig::Requirement struct_
 src/eval/env.zig::Revision struct_
 src/eval/env.zig::RevisionChange struct_
+src/eval/env.zig::RoughGroup struct_
+src/eval/env.zig::RoughSpec struct_
 src/eval/env.zig::Section struct_
 src/eval/env.zig::SectionNote struct_
 src/eval/env.zig::SectionPort struct_
