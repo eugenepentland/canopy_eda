@@ -25,8 +25,11 @@ unlinked tag: placement/optimizer - composed macros overlapping each other move 
 unlinked tag: placement/optimizer - composed module macros push free parts away and stay rigid in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - floorplan (rot N "SUB") turns the whole macro in quarter steps in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - floorplan corner clashes push the later macro out along its dock axis in ./src/placement/optimizer.zig
+unlinked tag: placement/optimizer - posSide buckets a point into the anchor quadrant it lies in in ./src/placement/optimizer.zig
+unlinked tag: placement/optimizer - refineSidesByPull moves a part to the IC side its real connections pull toward in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - segsCross flags interior airwire crossings, not shared endpoints in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - spec auto-fill pulls unlisted parts out of the staging band in ./src/placement/optimizer.zig
+unlinked tag: placement/optimizer - the crossing polish never swaps a part onto its wrong anchor side in ./src/placement/optimizer.zig
 unlinked tag: serve/datasheet_attach - spliceDatasheet dedupes on the normalised stem (re-download counters ignored) in ./src/serve/datasheet_attach.zig
 unlinked tag: serve/datasheet_attach - spliceDatasheet inserts the (datasheet …) form before the component's closing paren with matching indent in ./src/serve/datasheet_attach.zig
 unlinked tag: serve/datasheet_attach - spliceDatasheet rejects sources without a component form in ./src/serve/datasheet_attach.zig

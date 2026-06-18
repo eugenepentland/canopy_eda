@@ -3338,6 +3338,151 @@ fn rrPad(
     return pads[k % pads.len];
 }
 
+/// Refinement passes and pull weights for `refineSidesByPull`. A dedicated IC
+/// signal pad is the firmest anchor; a connected neighbour part next; a wide
+/// rail barely tugs (a decoupling cap must not be yanked to one arbitrary VDD
+/// pad). Signal + neighbour pulls are *directional* — a part with neither stays
+/// where the initial dock put it (the rail tug alone can't pick a side).
+const ROUGH_RESIDE_PASSES: usize = 4;
+const RESIDE_W_SIG: f64 = 2.0;
+const RESIDE_W_NBR: f64 = 1.5;
+const RESIDE_W_RAIL: f64 = 0.3;
+
+/// A part's refinement pull: the weighted centroid of its real connections plus
+/// `dir` — whether any of that pull is *directional* (a signal pad or a neighbour,
+/// vs. a centred rail tug that can't choose a side). See `sidePullTarget`.
+const PullTarget = struct { x: f64, y: f64, dir: bool };
+
+/// Weighted centroid of part `pi`'s real connections for side refinement: an IC
+/// signal pad pulls hardest, a connected neighbour next, a wide rail only weakly
+/// toward its pad-centroid (a decoupling cap must not be yanked to one arbitrary
+/// VDD pad). Ground and wide buses are excluded. `dir` is false when the only pull
+/// is the centred rail — the caller then leaves the part on its seeded side.
+fn sidePullTarget(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    hi: usize,
+    pi: usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+) std.mem.Allocator.Error!PullTarget {
+    var sx: f64 = 0;
+    var sy: f64 = 0;
+    var sw: f64 = 0;
+    var has_dir = false;
+    for (nets) |net| {
+        if (!netHasPart(net, pi, idx_of)) continue;
+        if (pin_roles.isGroundFn(shortName(net.name))) continue;
+        var hubpads: usize = 0;
+        var members: usize = 0;
+        for (net.pins) |pr| {
+            const idx = idx_of.get(pr.ref_des) orelse continue;
+            if (idx == hi) hubpads += 1 else members += 1;
+        }
+        if (hubpads > 0) {
+            const pads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
+            if (hubpads <= 2) {
+                for (pads) |pd| {
+                    sx += pd[0] * RESIDE_W_SIG;
+                    sy += pd[1] * RESIDE_W_SIG;
+                }
+                sw += RESIDE_W_SIG * @as(f64, @floatFromInt(pads.len));
+                if (pads.len > 0) has_dir = true;
+            } else if (pads.len > 0) {
+                // Wide rail: pull weakly toward the rail pads' centroid.
+                var cx: f64 = 0;
+                var cy: f64 = 0;
+                for (pads) |pd| {
+                    cx += pd[0];
+                    cy += pd[1];
+                }
+                const np: f64 = @floatFromInt(pads.len);
+                sx += (cx / np) * RESIDE_W_RAIL;
+                sy += (cy / np) * RESIDE_W_RAIL;
+                sw += RESIDE_W_RAIL;
+            }
+        }
+        // Neighbour pull — only on a local net (not a wide rail, not a bus),
+        // matching the clustering rules so VDD/GND don't drag every part toward
+        // every other.
+        if (hubpads >= CLUSTER_MAX_RAIL_PADS or members > CLUSTER_MAX_NET_PARTS) continue;
+        for (net.pins) |pr| {
+            const idx = idx_of.get(pr.ref_des) orelse continue;
+            if (idx == hi or idx == pi) continue;
+            sx += parts[idx].x * RESIDE_W_NBR;
+            sy += parts[idx].y * RESIDE_W_NBR;
+            sw += RESIDE_W_NBR;
+            has_dir = true;
+        }
+    }
+    if (!has_dir or sw <= 1e-6) return .{ .x = parts[pi].x, .y = parts[pi].y, .dir = false };
+    return .{ .x = sx / sw, .y = sy / sw, .dir = true };
+}
+
+/// Connectivity-aware side refinement. `assignSides` buckets each part by ONE
+/// chosen IC pad, blind to where the part's *other* ends sit — so a series R
+/// whose far end is a connector on the opposite edge, or a cap that should hug a
+/// neighbour, lands on the wrong side and its airwire crosses the IC. Once the
+/// first dock has positioned everyone, this recomputes each ringed part's
+/// preferred side from the weighted centroid of its real connections (IC pads +
+/// neighbour centres; ground and wide buses excluded) and re-docks, repeating
+/// until no part changes side (capped at `ROUGH_RESIDE_PASSES`). Parts with no
+/// directional pull (pure VDD/GND decoupling caps) keep their seeded side, so the
+/// even rail spread from `rrPad` survives.
+fn refineSidesByPull(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    hi: usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+    tier_of: []const usize,
+    sides: *[4]std.ArrayListUnmanaged(SidePart),
+    hkb: KeepBox,
+) std.mem.Allocator.Error!void {
+    // The ringed parts (everything currently docked to a side; leftover
+    // ground-only parts stay put) and each one's current side, seeded from the
+    // initial buckets so we can detect convergence.
+    var ring: std.ArrayListUnmanaged(usize) = .empty;
+    const cur_side = try arena.alloc(u8, parts.len);
+    @memset(cur_side, 255);
+    for (sides, 0..) |list, s| {
+        for (list.items) |sp| {
+            try ring.append(arena, sp.i);
+            cur_side[sp.i] = @intCast(s);
+        }
+    }
+    if (ring.items.len == 0) return;
+
+    var pass: usize = 0;
+    while (pass < ROUGH_RESIDE_PASSES) : (pass += 1) {
+        var moved = false;
+        for (sides) |*list| list.clearRetainingCapacity();
+        for (ring.items) |pi| {
+            if (pi == hi) continue;
+            // Target the pull centroid when it points somewhere; a part with no
+            // directional pull keeps its current spot (→ same side, same height).
+            const t = try sidePullTarget(arena, parts, hi, pi, nets, idx_of);
+            const vert = @abs(t.x) >= @abs(t.y);
+            const s: usize = if (vert) (if (t.x < 0) 0 else 1) else (if (t.y < 0) 2 else 3);
+            if (cur_side[pi] != s) {
+                moved = true;
+                cur_side[pi] = @intCast(s);
+            }
+            parts[pi].rot = if (vert) 0 else 90;
+            const pkb = keepBoxOf(parts[pi]);
+            try sides[s].append(arena, .{
+                .i = pi,
+                .tier = tier_of[pi],
+                .along = if (vert) t.y else t.x,
+                .half_along = if (vert) pkb.hh else pkb.hw,
+                .depth = if (vert) pkb.hw else pkb.hh,
+            });
+        }
+        dockSidesByTier(parts, sides, hkb);
+        if (!moved) break; // stable — no part wants a different side
+    }
+}
+
 fn orient2(p: [2]f64, q: [2]f64, r: [2]f64) f64 {
     return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
 }
@@ -3466,17 +3611,32 @@ fn crossingMetric(
 const ROUGH_POLISH_PASSES: usize = 6;
 const ROUGH_POLISH_MAX_PARTS: usize = 80; // bound the O(parts²·segs²) search to module sizes
 
+/// Side (0 left, 1 right, 2 top, 3 bottom) of point (x,y) relative to the anchor
+/// at (ax,ay) — the same quadrant rule the side bucketing uses.
+fn posSide(ax: f64, ay: f64, x: f64, y: f64) u8 {
+    const dx = x - ax;
+    const dy = y - ay;
+    const vert = @abs(dx) >= @abs(dy);
+    return if (vert) (if (dx < 0) 0 else 1) else (if (dy < 0) 2 else 3);
+}
+
 /// Crossing-reduction polish: repeatedly swap two SAME-footprint-size parts when it
 /// lowers the crossing metric (same size ⇒ the swap stays overlap-free, so no
 /// re-legalization is needed mid-search). Greedy hill-climb, a few passes; stops
-/// early when a pass makes no improvement.
+/// early when a pass makes no improvement. `want_side[k]` pins a directionally-wired
+/// part to the anchor side `refineSidesByPull` chose for it (255 = unconstrained,
+/// e.g. a pure decoupling cap) — a swap that would park a constrained part on the
+/// wrong side is rejected, so the crossing search never undoes the correct-side work.
 fn polishCrossings(
     arena: std.mem.Allocator,
     parts: []Part,
     hi: usize,
     nets: []const FlatNet,
     idx_of: *std.StringHashMap(usize),
+    want_side: []const u8,
 ) std.mem.Allocator.Error!void {
+    const ax = parts[hi].x;
+    const ay = parts[hi].y;
     var best = try crossingMetric(arena, parts, hi, nets, idx_of);
     var pass: usize = 0;
     while (best > 0 and pass < ROUGH_POLISH_PASSES) : (pass += 1) {
@@ -3486,6 +3646,10 @@ fn polishCrossings(
             for (i + 1..parts.len) |j| {
                 if (j == hi) continue;
                 if (@abs(parts[i].hw - parts[j].hw) > 1e-6 or @abs(parts[i].hh - parts[j].hh) > 1e-6) continue;
+                // i would move to j's spot and vice versa — skip if that lands a
+                // side-constrained part on the wrong side of the anchor.
+                if (want_side[i] != 255 and posSide(ax, ay, parts[j].x, parts[j].y) != want_side[i]) continue;
+                if (want_side[j] != 255 and posSide(ax, ay, parts[i].x, parts[i].y) != want_side[j]) continue;
                 const ip = .{ parts[i].x, parts[i].y, parts[i].rot };
                 const jp = .{ parts[j].x, parts[j].y, parts[j].rot };
                 parts[i].x = jp[0];
@@ -3602,10 +3766,26 @@ fn packPadAnchored(
         }
     }
 
+    // Connectivity-aware re-side: now that everyone has a position, move parts to
+    // the IC side their real neighbours pull toward (the initial dock chose by one
+    // IC pad, blind to the part's far ends — the main wrong-side source).
+    try refineSidesByPull(arena, parts, hi, nets, &prep.idx_of, tier_of, &sides, hkb);
+
+    // Freeze each directionally-wired part's correct side so the crossing polish
+    // can't undo it; a part with no directional pull (a pure decoupling cap) is
+    // left unconstrained (255) and stays freely swappable.
+    const want_side = try arena.alloc(u8, parts.len);
+    @memset(want_side, 255);
+    for (parts, 0..) |_, pi| {
+        if (pi == hi) continue;
+        const t = try sidePullTarget(arena, parts, hi, pi, nets, &prep.idx_of);
+        if (t.dir) want_side[pi] = posSide(parts[hi].x, parts[hi].y, t.x, t.y);
+    }
+
     // Crossing-reduction polish: same-size swaps that lower the airwire-crossing
     // count, on top of the cluster-aware seed (modules only — it's bounded but
-    // O(parts²·segments²) per pass).
-    if (parts.len <= ROUGH_POLISH_MAX_PARTS) try polishCrossings(arena, parts, hi, nets, &prep.idx_of);
+    // O(parts²·segments²) per pass). `want_side` keeps it from re-siding parts.
+    if (parts.len <= ROUGH_POLISH_MAX_PARTS) try polishCrossings(arena, parts, hi, nets, &prep.idx_of, want_side);
 
     legalizeFinal(parts); // resolve any corner / cross-side overlaps
     return true;
@@ -9591,4 +9771,92 @@ test "segsCross flags interior crossings and ignores shared endpoints" {
     try testing.expect(!segsCross(.{ 0, 0 }, .{ 1, 1 }, .{ 0, 0 }, .{ 1, -1 }));
     // Disjoint and far apart.
     try testing.expect(!segsCross(.{ 0, 0 }, .{ 1, 0 }, .{ 5, 5 }, .{ 6, 6 }));
+}
+
+// spec: placement/optimizer - refineSidesByPull moves a part to the IC side its real connections pull toward
+test "refineSidesByPull re-sides a part toward its signal pad" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Hub U1 (index 0) with its only SIG pad on the RIGHT (x=+5); passive R1 hangs
+    // off it. R1 is mis-seeded on the LEFT — refinement should pull it right.
+    const hub_pads = [_]geometry.Pad{.{ .number = "1", .x = 5, .y = 0, .w = 1, .h = 1 }};
+    const r_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1, .h = 1 }};
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &hub_pads, .fallback = false },
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &r_pads, .fallback = false },
+    };
+    const nets = [_]FlatNet{
+        .{ .name = "SIG", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "R1", .pin = "1" } } },
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("U1", 0);
+    try idx_of.put("R1", 1);
+    const tier_of = [_]usize{ 0, 0 };
+
+    var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
+    try sides[0].append(arena, .{ .i = 1, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
+    parts[1].x = -10; // its mis-seeded (left) position
+    parts[1].y = 0;
+    const hkb = KeepBox{ .cxo = 0, .cyo = 0, .hw = 2, .hh = 2 };
+
+    try refineSidesByPull(arena, &parts, 0, &nets, &idx_of, &tier_of, &sides, hkb);
+
+    // Moved from the LEFT bucket (s=0) to the RIGHT (s=1), now at positive x.
+    try testing.expectEqual(@as(usize, 0), sides[0].items.len);
+    try testing.expectEqual(@as(usize, 1), sides[1].items.len);
+    try testing.expect(parts[1].x > 0);
+}
+
+// spec: placement/optimizer - posSide buckets a point into the anchor quadrant it lies in
+test "posSide picks the anchor side a point lies on" {
+    try testing.expectEqual(@as(u8, 1), posSide(0, 0, 5, 1)); // right
+    try testing.expectEqual(@as(u8, 0), posSide(0, 0, -5, 1)); // left
+    try testing.expectEqual(@as(u8, 3), posSide(0, 0, 1, 5)); // bottom (+y)
+    try testing.expectEqual(@as(u8, 2), posSide(0, 0, 1, -5)); // top (−y)
+    try testing.expectEqual(@as(u8, 1), posSide(2, 0, 9, 2)); // relative to a non-origin anchor
+}
+
+// spec: placement/optimizer - the crossing polish never swaps a part onto its wrong anchor side
+test "polishCrossings honours want_side, refusing a wrong-side swap" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // X-crossing: net N1 wires R1(right) to R3(far left), N2 wires R2(left) to
+    // R4(far right) — the two airwires cross at the origin. Swapping the same-size
+    // R1↔R2 uncrosses them, but that parks R1 on the LEFT (its wrong side).
+    const sp = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    const mk = struct {
+        fn p(ref: []const u8, x: f64, y: f64, h: f64, pads: []const geometry.Pad) Part {
+            return .{ .ref_des = ref, .kind = .passive, .hw = h, .hh = h, .pads = pads, .fallback = false, .x = x, .y = y };
+        }
+    }.p;
+    const init = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 0, .y = 0 },
+        mk("R1", 6, 3, 0.5, &sp), // right, swappable size
+        mk("R2", -6, 3, 0.5, &sp), // left, swappable size
+        mk("R3", -6, -3, 0.7, &sp), // target, different size (can't swap with R1/R2)
+        mk("R4", 6, -3, 0.7, &sp),
+    };
+    const nets = [_]FlatNet{
+        .{ .name = "N1", .pins = &.{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R3", .pin = "1" } } },
+        .{ .name = "N2", .pins = &.{ .{ .ref_des = "R2", .pin = "1" }, .{ .ref_des = "R4", .pin = "1" } } },
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    inline for (.{ "U1", "R1", "R2", "R3", "R4" }, 0..) |r, i| try idx_of.put(r, i);
+
+    // Unconstrained polish (all 255) DOES swap R1↔R2 to kill the crossing.
+    var free = init;
+    const open = [_]u8{255} ** 5;
+    try polishCrossings(arena, &free, 0, &nets, &idx_of, &open);
+    try testing.expect(free[1].x < 0); // R1 moved to the left
+
+    // Side-constrained polish refuses the swap — R1 stays on its right side.
+    var pinned = init;
+    const want = [_]u8{ 255, 1, 0, 255, 255 }; // R1→right, R2→left
+    try polishCrossings(arena, &pinned, 0, &nets, &idx_of, &want);
+    try testing.expect(pinned[1].x > 0); // R1 held on the right
+    try testing.expect(pinned[2].x < 0); // R2 held on the left
 }
