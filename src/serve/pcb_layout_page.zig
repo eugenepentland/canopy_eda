@@ -515,6 +515,11 @@ pub const PngRequest = struct {
     group_loop_relief: f64 = -1,
     /// Constructive zone-then-pack floorplan (crisp VIN│IC│L│VOUT rows).
     zone_pack: bool = false,
+    /// Rough hierarchical / pad-anchored seed (`?rough=1`): cluster each module
+    /// into a rigid block, or — for a flat module — ring the anchor IC with each
+    /// passive on the side of the pad it serves. A legible, module-intact start
+    /// (the `Params.rough` path in the optimizer), deliberately not metric-optimal.
+    rough: bool = false,
     /// Bypass an authored `(placement …)` spec so the force / zone path renders
     /// instead (the `?placement=off` A/B switch).
     placement_off: bool = false,
@@ -582,13 +587,16 @@ pub fn solveForRequest(
         (eff_block.placement.present or eff_block.floorplan.present);
     const cached = if (opts.sub != null) null else if (opts.layout) |ln|
         readLayoutPoses(alloc, project_dir, name, ln)
-    else if (opts.regen or spec_drives) null else readAutoPoses(alloc, project_dir, name);
-    const grid_only = opts.sub == null and opts.layout == null and !opts.regen and !spec_drives and cached == null;
+    else if (opts.regen or opts.rough or spec_drives) null else readAutoPoses(alloc, project_dir, name);
+    const grid_only = opts.sub == null and opts.layout == null and !opts.regen and !opts.rough and !spec_drives and cached == null;
     var params = optimizer.Params{ .courtyard_overlap = opts.court_overlap, .route_gap = opts.route_gap };
     if (opts.group_w >= 0) params.group_w = opts.group_w;
     if (opts.group_zone_w >= 0) params.group_zone_w = opts.group_zone_w;
     if (opts.group_loop_relief >= 0) params.group_loop_relief = opts.group_loop_relief;
     if (opts.zone_pack) params.zone_pack = true;
+    // `?rough=1` forces the rough seed (runs before — and so bypasses — any
+    // authored `(placement …)` spec inside the solve). Fresh solve only.
+    if (opts.rough) params.rough = true;
     if (opts.placement_off) params.ignore_placement = true;
     // A named saved layout renders VERBATIM (placeFromPoses) — "show me this
     // layout" must display exactly what was saved, not a re-optimized version:
@@ -714,6 +722,7 @@ pub fn pngRequestFromQuery(arena: std.mem.Allocator, req: *httpz.Request) PngReq
         .group_zone_w = pngFloatOpt(req, "group_zone_w"),
         .group_loop_relief = pngFloatOpt(req, "group_loop_relief"),
         .zone_pack = queryFlag(req, "zone_pack"),
+        .rough = queryFlag(req, "rough"),
         .placement_off = blk: {
             const q = req.query() catch break :blk false;
             const v = q.get("placement") orelse break :blk false;
