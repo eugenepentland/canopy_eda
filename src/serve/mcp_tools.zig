@@ -833,6 +833,7 @@ fn toolDescribePcbLayout(allocator: std.mem.Allocator, project_dir: []const u8, 
         .route = optionalBool(args_val, "route") orelse false,
         .layout = optionalString(args_val, "layout"),
         .regen = optionalBool(args_val, "regen") orelse false,
+        .rough = optionalBool(args_val, "rough") orelse false,
         .sub = optionalString(args_val, "sub"),
     };
     const body = pcb_describe.describeDesign(allocator, project_dir, name, opts) catch |e| {
@@ -851,6 +852,7 @@ fn toolExportPlacementSpec(allocator: std.mem.Allocator, project_dir: []const u8
     const opts = pcb_layout_page.PngRequest{
         .layout = optionalString(args_val, "layout"),
         .regen = optionalBool(args_val, "regen") orelse false,
+        .rough = optionalBool(args_val, "rough") orelse false,
         .sub = optionalString(args_val, "sub"),
     };
     const result = placement_spec.exportSpec(allocator, project_dir, name, opts) catch |e| {
@@ -873,6 +875,7 @@ fn toolExportModulePolicy(allocator: std.mem.Allocator, project_dir: []const u8,
     const opts = pcb_layout_page.PngRequest{
         .layout = optionalString(args_val, "layout"),
         .regen = optionalBool(args_val, "regen") orelse false,
+        .rough = optionalBool(args_val, "rough") orelse false,
         .sub = optionalString(args_val, "sub"),
     };
     const result = module_policy_spec.exportPolicy(allocator, project_dir, name, opts) catch |e| {
@@ -928,6 +931,7 @@ fn toolGetPcbImage(allocator: std.mem.Allocator, project_dir: []const u8, args_v
         .crop = optionalString(args_val, "crop"),
         .sheet = optionalBool(args_val, "sheet") orelse false,
         .critique = optionalBool(args_val, "critique") orelse false,
+        .rough = optionalBool(args_val, "rough") orelse false,
     };
     if (optionalU64(args_val, "width")) |w| opts.width = @intCast(@min(w, @as(u64, 4000)));
     if (optionalU64(args_val, "r")) |r| opts.crop_r = @floatFromInt(r);
