@@ -2432,6 +2432,12 @@ fn parseTuning(req: *httpz.Request) Tuning {
         p.zone_pack = !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false"));
         tuned = true;
     }
+    // `?rough=1` — the rough module-clustered / pad-anchored seed (the "Rough"
+    // button); forces a fresh solve down the `Params.rough` path.
+    if (q.get("rough")) |v| {
+        p.rough = !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false"));
+        if (p.rough) tuned = true;
+    }
     // `?placement=off` bypasses an authored (placement …) spec so the force / zone
     // path runs — for A/B-ing the manual floorplan against the automatic placer.
     if (q.get("placement")) |v| {
@@ -2511,6 +2517,13 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
     try w.writeAll("<a class=\"btn\" id=\"pcb-regen\" href=\"/pcb-layout/");
     try writeAttr(w, name);
     try w.writeAll("?regen=1\" title=\"Re-run the optimizer and watch it converge live\">Regenerate</a>");
+    // Rough seed: each module kept as an intact, grid-aligned rigid block (a flat
+    // module rings the anchor IC, each passive on the side of the pad it serves).
+    // A legible, module-coherent start to hand-finish — deliberately not optimal.
+    try w.writeAll("<a class=\"btn\" id=\"pcb-rough\" href=\"/pcb-layout/");
+    try writeAttr(w, name);
+    try w.writeAll("?rough=1\" title=\"Rough module-clustered seed: every module kept intact " ++
+        "and grid-aligned (not metric-optimal) — a legible start to hand-finish\">Rough</a>");
     // Export the solved positions + full score breakdown (incl. the
     // value-weighted loop + alignment terms the bar above hides) for inspection.
     try w.writeAll("<a class=\"btn\" href=\"/api/pcb-layout/");
@@ -4546,6 +4559,8 @@ const BOARD_JS =
     \\   setTimeout(function(){livePoll(gen,lastSeq,misses+1);},700);});}
     \\var rgl=document.getElementById("pcb-regen");
     \\if(rgl)rgl.addEventListener("click",function(ev){ev.preventDefault();liveRegen("");});
+    \\var rgh=document.getElementById("pcb-rough");
+    \\if(rgh)rgh.addEventListener("click",function(ev){ev.preventDefault();liveRegen("?rough=1");});
     \\// ── Collapsible control deck (accordion) + board-view overlays ──────────
     \\(function(){
     \\ var chips=Array.prototype.slice.call(document.querySelectorAll(".tab-chip"));
