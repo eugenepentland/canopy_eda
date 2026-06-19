@@ -3915,7 +3915,10 @@ const BOARD_JS =
     \\   var at={fill:"#b08d57"}; if(pad.net)at["data-net"]=pad.net;
     \\   var pe=FP.padShape(pad,{scale:S,minPx:1.5,cls:"pad",attrs:at});
     \\   if(loopPin[i+":"+pad.x.toFixed(2)+":"+pad.y.toFixed(2)])pe.classList.add("looppin");
-    \\   pg.appendChild(pe);});
+    \\   pg.appendChild(pe);
+    \\   // Pad number, centred inside the copper. pointer-events off so a click on
+    \\   // the digit still falls through to the pad (net glow / drag) underneath.
+    \\   var lbl=FP.padLabel(pad,S);if(lbl){lbl.style.pointerEvents="none";pg.appendChild(lbl);}});
     \\ g.appendChild(body);
     \\ var t=el("text",{"class":"pcb-ref",x:0,y:(-p.hh*S-2).toFixed(1),fill:p.kind=="hub"?"#58a6ff":"#8b949e"});
     \\ t.textContent=p.ref; g.appendChild(t);
