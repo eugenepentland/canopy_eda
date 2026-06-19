@@ -272,6 +272,14 @@ pub const Evaluator = struct {
         /// silently skips pins without electrical data so the library
         /// can grow annotations incrementally.
         electrical: []const env_mod.ElectricalDecl = &.{},
+        /// Explicit ref-des class declared via `(refdes "Y")` in the component
+        /// file — the single-letter prefix this part's instances get, overriding
+        /// the family-name heuristic in `ids.componentPrefix`. Lets a part whose
+        /// name doesn't match a heuristic pattern declare its true class (e.g. a
+        /// SiTime `sit…` oscillator → `Y`, which would otherwise fall through to
+        /// the IC prefix `U` and be mistaken for a hub by the placer). 0 = unset
+        /// (fall back to the name heuristic).
+        refdes_prefix: u8 = 0,
     };
 
     pub fn init(allocator: std.mem.Allocator, project_dir: []const u8) Evaluator {
