@@ -3683,6 +3683,9 @@ const PAGE_CSS =
     \\   pad on that net, drawn as a filter so it shows over any fill (net colours
     \\   on or off). Re-click the same net, or click the empty board, to clear. */
     \\.pad.net-sel{stroke:#ffd33d;stroke-width:1.6;paint-order:stroke;filter:drop-shadow(0 0 2px #ffd33d) drop-shadow(0 0 5px #ffd33d)}
+    \\/* The authored decoupling target pad on the IC (a cap's defined pin): red
+    \\   glow instead of gold, so you can see exactly which pad each cap decouples. */
+    \\.pad.net-sel-pin{stroke:#f85149;stroke-width:1.6;paint-order:stroke;filter:drop-shadow(0 0 2px #f85149) drop-shadow(0 0 5px #f85149)}
     \\.pn.net-sel{background:#3a2e07;color:#ffd33d;box-shadow:0 0 0 1px #ffd33d}
     \\.pcb-side{width:288px;flex:none;position:sticky;top:8px;max-height:calc(100vh - 16px);
     \\  overflow:auto;border:1px solid #21262d;border-radius:8px;background:#161b22}
@@ -3888,6 +3891,10 @@ const BOARD_JS =
     \\ // Pads live in the top gPads layer (above the ratsnest), so they carry the
     \\ // part's full translate+rotate themselves rather than inheriting it.
     \\ if(padEls[i])padEls[i].setAttribute("transform","translate("+tx+","+ty+") rotate("+rot+")");}
+    \\// Defined decoupling pads: each loop pins a cap to ONE hub pad (L.pp =
+    \\// hub_pwr_pin). Mark those hub pads so a net selection glows them red (the
+    \\// authored decoupling target) rather than gold. Keyed hubIndex:padX:padY.
+    \\var loopPin={};(PCB.loops||[]).forEach(function(L){if(L.pp)loopPin[L.hub+":"+L.pp.x.toFixed(2)+":"+L.pp.y.toFixed(2)]=1;});
     \\P.forEach(function(p,i){
     \\ var g=el("g",{"class":"part","data-ref":p.ref});
     \\ var body=el("g",{"class":"body"});
@@ -3906,7 +3913,9 @@ const BOARD_JS =
     \\ var pg=el("g",{"class":"padset","data-ref":p.ref});
     \\ p.pads.forEach(function(pad){
     \\   var at={fill:"#b08d57"}; if(pad.net)at["data-net"]=pad.net;
-    \\   pg.appendChild(FP.padShape(pad,{scale:S,minPx:1.5,cls:"pad",attrs:at}));});
+    \\   var pe=FP.padShape(pad,{scale:S,minPx:1.5,cls:"pad",attrs:at});
+    \\   if(loopPin[i+":"+pad.x.toFixed(2)+":"+pad.y.toFixed(2)])pe.classList.add("looppin");
+    \\   pg.appendChild(pe);});
     \\ g.appendChild(body);
     \\ var t=el("text",{"class":"pcb-ref",x:0,y:(-p.hh*S-2).toFixed(1),fill:p.kind=="hub"?"#58a6ff":"#8b949e"});
     \\ t.textContent=p.ref; g.appendChild(t);
@@ -4312,7 +4321,9 @@ const BOARD_JS =
     \\function netAt(e){while(e&&e.getAttribute){var n=e.getAttribute("data-net");if(n)return n;if(e===svg)break;e=e.parentNode;}return null;}
     \\function selNet(net){if(net&&selNetCur===net)net=null;selNetCur=net;
     \\ document.querySelectorAll("[data-net]").forEach(function(e){
-    \\  e.classList.toggle("net-sel",net!=null&&e.getAttribute("data-net")===net);});}
+    \\  var on=net!=null&&e.getAttribute("data-net")===net,pin=e.classList.contains("looppin");
+    \\  e.classList.toggle("net-sel-pin",on&&pin);
+    \\  e.classList.toggle("net-sel",on&&!pin);});}
     \\if(RO)gPads.addEventListener("click",function(ev){var net=netAt(ev.target);if(net){ev.stopPropagation();selNet(net);}});
     \\var VBW=PCB.w,VBH=PCB.h,vb={x:0,y:0,w:VBW,h:VBH};
     \\function setVB(){svg.setAttribute("viewBox",vb.x.toFixed(1)+" "+vb.y.toFixed(1)+" "+vb.w.toFixed(1)+" "+vb.h.toFixed(1));}
