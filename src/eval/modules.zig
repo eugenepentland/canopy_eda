@@ -151,6 +151,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
         "bus",                 "note",
         "datasheet",           "requirement",
         "ignore-requirements", "electrical",
+        "refdes",
     };
 
     var props: std.ArrayListUnmanaged(env_mod.Property) = .empty;
@@ -159,6 +160,9 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
     var requirements: std.ArrayListUnmanaged(env_mod.Requirement) = .empty;
     var electrical: std.ArrayListUnmanaged(env_mod.ElectricalDecl) = .empty;
     var requirements_ignored = false;
+    // Explicit ref-des class: `(refdes "Y")` declares the single-letter prefix
+    // this part's instances get, overriding the name heuristic. 0 = unset.
+    var refdes_prefix: u8 = 0;
 
     for (children[1..]) |child| {
         const cl = child.asList() orelse continue;
@@ -233,6 +237,12 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
                 .name = bus_name,
                 .pins = bus_pins.toOwnedSlice(self.allocator) catch &.{},
             }) catch continue;
+        } else if (std.mem.eql(u8, field, "refdes")) {
+            // (refdes "Y") — declare this part's ref-des class explicitly, so
+            // its instances get that prefix regardless of the family-name
+            // heuristic. The first character is the single-letter prefix.
+            const val = cl[1].asText() orelse continue;
+            if (val.len > 0) refdes_prefix = val[0];
         } else if (!env_mod.containsString(&skip_fields, field)) {
             // Unknown, non-structural field -- treat as inline property.
             const val = cl[1].asText() orelse continue;
@@ -253,6 +263,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
         .requirements = requirements.toOwnedSlice(self.allocator) catch &.{},
         .requirements_ignored = requirements_ignored,
         .electrical = electrical.toOwnedSlice(self.allocator) catch &.{},
+        .refdes_prefix = refdes_prefix,
     });
 }
 
@@ -264,6 +275,7 @@ pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalE
     var symbol_name: []const u8 = "";
     var footprint_name: []const u8 = "";
     var param_type: []const u8 = "";
+    var refdes_prefix: u8 = 0; // (refdes "X") — explicit ref-des class; 0 = unset
 
     for (children[1..]) |child| {
         if (child.isForm("symbol")) {
@@ -278,6 +290,14 @@ pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalE
             const cl = child.asList().?;
             if (cl.len >= 3) param_type = cl[2].asText() orelse "";
         }
+        if (child.isForm("refdes")) {
+            const cl = child.asList().?;
+            if (cl.len >= 2) {
+                if (cl[1].asText()) |val| {
+                    if (val.len > 0) refdes_prefix = val[0];
+                }
+            }
+        }
     }
 
     try self.component_cache.put(self.allocator, name, .{
@@ -286,6 +306,7 @@ pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalE
         .footprint_name = footprint_name,
         .is_family = true,
         .param_type = param_type,
+        .refdes_prefix = refdes_prefix,
     });
 }
 

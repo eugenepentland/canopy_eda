@@ -253,6 +253,7 @@ Public functions: worldShape, pointDist, shapeGap
 - evalFile auto-imports the standard passives prelude before user nodes run
 - Module files loaded via resolveImport get the same passives prelude before their body evaluates
 - componentPrefix maps passive families to their ref-des letters
+- instancePrefix honors a component's explicit (refdes "X") class over the name heuristic
 - Passives prelude resolves the standard cap/res/ind/ferrite/led families when their files exist
 - Passives prelude silently skips library entries whose files are missing instead of failing the build
 - Explicit import after prelude pre-loads is a no-op (resolveImport short-circuits on cached components)

@@ -39,10 +39,23 @@ fn nextTestPointRefDes(self: *Evaluator) EvalError![]const u8 {
 
 /// Next ref-des for an instance, dispatching test points (multi-char "TP"
 /// prefix) to their own counter and everything else to the single-char
-/// `nextRefDes(componentPrefix(...))` path.
+/// `nextRefDes(instancePrefix(...))` path.
 fn nextRefDesForInstance(self: *Evaluator, component: []const u8) EvalError![]const u8 {
     if (env_mod.isTestPoint(component)) return nextTestPointRefDes(self);
-    return nextRefDes(self, componentPrefix(component));
+    return nextRefDes(self, instancePrefix(self, component));
+}
+
+/// Ref-des prefix for an instance of `component`: the component file's explicit
+/// `(refdes "X")` class when one is declared, else the family-name heuristic
+/// `componentPrefix`. The explicit tag lets a part whose name doesn't match a
+/// heuristic pattern declare its true class — e.g. a SiTime `sit…` oscillator
+/// tags `(refdes "Y")` so it isn't defaulted to the IC prefix `U` and mistaken
+/// for a hub by the placer (which keys off the ref-des letter).
+fn instancePrefix(self: *Evaluator, component: []const u8) u8 {
+    if (self.component_cache.get(component)) |cd| {
+        if (cd.refdes_prefix != 0) return cd.refdes_prefix;
+    }
+    return componentPrefix(component);
 }
 
 /// Bump auto ref-des counter to avoid conflicts with explicit ref-des.
@@ -867,6 +880,26 @@ test "componentPrefix maps inductor families to L" {
     try std.testing.expectEqual(@as(u8, 'U'), componentPrefix("inductive-sensor"));
     try std.testing.expectEqual(@as(u8, 'C'), componentPrefix("cap-0402"));
     try std.testing.expectEqual(@as(u8, 'R'), componentPrefix("res-0201"));
+}
+
+// spec: eval/evaluator - instancePrefix honors a component's explicit (refdes "X") class over the name heuristic
+test "instancePrefix honors explicit refdes tag" {
+    const alloc = std.testing.allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    // A SiTime oscillator name defaults to the IC prefix 'U' by heuristic, but
+    // an explicit (refdes "Y") tag overrides it to the crystal/oscillator class.
+    try eval.component_cache.put(alloc, "sit5021ai-2de-33e-100-000000x", .{
+        .name = "sit5021ai-2de-33e-100-000000x",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+        .refdes_prefix = 'Y',
+    });
+    try std.testing.expectEqual(@as(u8, 'Y'), instancePrefix(&eval, "sit5021ai-2de-33e-100-000000x"));
+    // No tag (component absent from the cache) → fall back to the name heuristic.
+    try std.testing.expectEqual(@as(u8, 'U'), instancePrefix(&eval, "some-unknown-ic"));
 }
 
 // spec: eval/evaluator - generateId registers each token so a second call cannot collide
