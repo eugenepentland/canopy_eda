@@ -3675,9 +3675,15 @@ const PAGE_CSS =
     \\.part .court{transition:filter .08s}
     \\.part.hl .court{filter:drop-shadow(0 0 3px rgba(88,166,255,.75))}
     \\.part.sel .court{stroke:#58a6ff!important;stroke-width:2!important;filter:drop-shadow(0 0 4px rgba(88,166,255,.9))}
-    \\.pad{transition:fill .08s}
+    \\.pad{transition:fill .08s,filter .08s}
+    \\.pad[data-net]{cursor:pointer}
     \\.pad.net-hl{fill:#f85149}
     \\.pn.net-hl{background:#5b1e28;color:#ffa198}
+    \\/* Sticky net selection (click a pad / pin chip): a gold glow + ring on every
+    \\   pad on that net, drawn as a filter so it shows over any fill (net colours
+    \\   on or off). Re-click the same net, or click the empty board, to clear. */
+    \\.pad.net-sel{stroke:#ffd33d;stroke-width:1.6;paint-order:stroke;filter:drop-shadow(0 0 2px #ffd33d) drop-shadow(0 0 5px #ffd33d)}
+    \\.pn.net-sel{background:#3a2e07;color:#ffd33d;box-shadow:0 0 0 1px #ffd33d}
     \\.pcb-side{width:288px;flex:none;position:sticky;top:8px;max-height:calc(100vh - 16px);
     \\  overflow:auto;border:1px solid #21262d;border-radius:8px;background:#161b22}
     \\.side-h{font-size:13px;font-weight:600;padding:10px 12px;border-bottom:1px solid #21262d;position:sticky;top:0;background:#161b22;color:#f0f6fc}
@@ -4073,8 +4079,11 @@ const BOARD_JS =
     \\ var cb=body.querySelector("[data-court-ref]");
     \\ if(cb)cb.addEventListener("click",function(){openCourt(cb.getAttribute("data-court-ref"));});
     \\ body.querySelectorAll(".pn[data-net]").forEach(function(e){var nn=e.getAttribute("data-net");
-    \\  if(!nn)return;e.addEventListener("mouseenter",function(){hlBy("data-net",nn,"net-hl",true);});
-    \\  e.addEventListener("mouseleave",function(){hlBy("data-net",nn,"net-hl",false);});});}
+    \\  if(!nn)return;e.style.cursor="pointer";
+    \\  if(nn===selNetCur)e.classList.add("net-sel");
+    \\  e.addEventListener("mouseenter",function(){hlBy("data-net",nn,"net-hl",true);});
+    \\  e.addEventListener("mouseleave",function(){hlBy("data-net",nn,"net-hl",false);});
+    \\  e.addEventListener("click",function(){selNet(nn);});});}
     \\function updatePropLive(){if(!selRef)return;var p=partByRef(selRef);if(!p)return;
     \\ var ex=document.getElementById("prop-x"),ey=document.getElementById("prop-y"),er=document.getElementById("prop-rot");
     \\ if(ex)ex.textContent=pMm(p.x)+" mm";if(ey)ey.textContent=pMm(p.y)+" mm";
@@ -4105,14 +4114,14 @@ const BOARD_JS =
     \\ g.addEventListener("mouseenter",function(){cur=i;});
     \\ g.addEventListener("mouseleave",function(){if(cur===i)cur=-1;});
     \\ g.addEventListener("pointerdown",function(ev){ev.preventDefault();var m=mm(ev);
-    \\   drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});
+    \\   drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y,down:ev.target};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});
     \\ g.addEventListener("pointermove",function(ev){if(!drag||drag.i!==i)return;var m=mm(ev);
     \\   var nx=Math.round((m.x+drag.ox)/G)*G,ny=Math.round((m.y+drag.oy)/G)*G;
     \\   if(nx===P[i].x&&ny===P[i].y)return;P[i].x=nx;P[i].y=ny;
     \\   if(!drag.moved){drag.moved=true;clearRoute();}setT(i);rats();drawClr();refreshUnplaced();
     \\   if(selRef===P[i].ref)updatePropLive();});
-    \\ g.addEventListener("pointerup",function(ev){var mv=drag&&drag.moved;drag=null;g.style.cursor="grab";
-    \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(mv)fetchScore();else selectComp(P[i].ref);});
+    \\ g.addEventListener("pointerup",function(ev){var mv=drag&&drag.moved,dn=drag&&drag.down;drag=null;g.style.cursor="grab";
+    \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(mv){fetchScore();return;}var net=netAt(dn);if(net)selNet(net);selectComp(P[i].ref);});
     \\ // Pads now sit in the top gPads layer, so a pointerdown on a pad no longer
     \\ // bubbles to the part group. Forward it: capture on g (the court group, which
     \\ // owns pointermove/up) so the part still drags when grabbed by a pad, and keep
@@ -4122,7 +4131,7 @@ const BOARD_JS =
     \\  pg.addEventListener("mouseenter",function(){cur=i;});
     \\  pg.addEventListener("mouseleave",function(){if(cur===i)cur=-1;});
     \\  pg.addEventListener("pointerdown",function(ev){ev.preventDefault();var m=mm(ev);
-    \\    drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});}
+    \\    drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y,down:ev.target};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});}
     \\});
     \\// Keyboard: R / Shift+R rotates the hovered part; ? toggles the
     \\// shortcut-help overlay (Esc or click closes it). The overlay's list
@@ -4293,6 +4302,18 @@ const BOARD_JS =
     \\ e.addEventListener("mouseenter",function(){hlBy(at,e.getAttribute(at),cls,true);});
     \\ e.addEventListener("mouseleave",function(){hlBy(at,e.getAttribute(at),cls,false);});});}
     \\wire("data-ref","hl"); wire("data-net","net-hl");
+    \\// Sticky net selection: click a pad (or a sidebar pin chip) and every pad on
+    \\// that net glows gold, so you can trace what's tied together with net colours
+    \\// on OR off. Re-click the same net, or click the empty board, to clear. The
+    \\// editor drives it from the part POINTER-UP (a no-move click — the drag
+    \\// handlers preventDefault pointerdown, which suppresses a plain click); the
+    \\// read-only preview has no drag handlers, so a delegated click on gPads works.
+    \\var selNetCur=null;
+    \\function netAt(e){while(e&&e.getAttribute){var n=e.getAttribute("data-net");if(n)return n;if(e===svg)break;e=e.parentNode;}return null;}
+    \\function selNet(net){if(net&&selNetCur===net)net=null;selNetCur=net;
+    \\ document.querySelectorAll("[data-net]").forEach(function(e){
+    \\  e.classList.toggle("net-sel",net!=null&&e.getAttribute("data-net")===net);});}
+    \\if(RO)gPads.addEventListener("click",function(ev){var net=netAt(ev.target);if(net){ev.stopPropagation();selNet(net);}});
     \\var VBW=PCB.w,VBH=PCB.h,vb={x:0,y:0,w:VBW,h:VBH};
     \\function setVB(){svg.setAttribute("viewBox",vb.x.toFixed(1)+" "+vb.y.toFixed(1)+" "+vb.w.toFixed(1)+" "+vb.h.toFixed(1));}
     \\function zoomAt(cx,cy,f){if((f<1&&vb.w<VBW*0.08)||(f>1&&vb.w>VBW*8))return;
@@ -4311,7 +4332,7 @@ const BOARD_JS =
     \\ if(Math.abs(ev.clientX-pan.cx)>3||Math.abs(ev.clientY-pan.cy)>3)pan.moved=true;
     \\ vb.x=pan.vx-(ev.clientX-pan.cx)*(vb.w/r.width);vb.y=pan.vy-(ev.clientY-pan.cy)*(vb.h/r.height);setVB();});
     \\svg.addEventListener("pointerup",function(ev){var click=pan&&!pan.moved;pan=null;svg.style.cursor="";
-    \\ try{svg.releasePointerCapture(ev.pointerId);}catch(e){}if(click)clearSel();});
+    \\ try{svg.releasePointerCapture(ev.pointerId);}catch(e){}if(click){clearSel();selNet(null);}});
     \\function viaGeo(){var va=parseFloat((document.getElementById("r-va")||{}).value),
     \\ vd=parseFloat((document.getElementById("r-vd")||{}).value);return {dia:va>0?va:0.4,drill:vd>0?vd:0.2};}
     \\function drawVia(g,wx,wy,dia,drill){var r=Math.max(dia/2*S,2.5),rh=Math.min(Math.max(drill/2*S,1),r*0.7);
