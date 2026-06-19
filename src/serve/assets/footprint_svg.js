@@ -63,19 +63,22 @@ window.FP = (function () {
   }
 
   // The pad-id label, centred on the pad and scaled to its short side (multi-
-  // char ids shrink so they stay inside the copper). Null when there's no id.
+  // char ids shrink so they stay inside the copper). The library preview keys
+  // off `pad.id`; the PCB-layout blob uses `pad.num` — accept either. Null when
+  // the pad has no identifier or no area.
   function padLabel(pad, scale) {
     var sc = scale || 1;
-    if (!pad.id) return null;
+    var id = pad.id || pad.num;
+    if (!id) return null;
     var base = Math.min(pad.w, pad.h);
     if (base <= 0) return null;
     var fs = base * 0.62;
-    if (pad.id.length > 1) fs = fs * 1.5 / pad.id.length;
+    if (id.length > 1) fs = fs * 1.5 / id.length;
     var t = el("text", {
       x: n3(pad.x * sc), y: n3(pad.y * sc), "font-size": n3(fs * sc), fill: C.label,
       "text-anchor": "middle", "dominant-baseline": "central", "font-family": "sans-serif",
     });
-    t.textContent = pad.id;
+    t.textContent = id;
     return t;
   }
 
