@@ -3890,7 +3890,12 @@ const BOARD_JS =
     \\ bodies[i].setAttribute("transform","rotate("+rot+")");
     \\ // Pads live in the top gPads layer (above the ratsnest), so they carry the
     \\ // part's full translate+rotate themselves rather than inheriting it.
-    \\ if(padEls[i])padEls[i].setAttribute("transform","translate("+tx+","+ty+") rotate("+rot+")");}
+    \\ if(padEls[i]){padEls[i].setAttribute("transform","translate("+tx+","+ty+") rotate("+rot+")");
+    \\  // Keep pad numbers reading horizontally at any part orientation: counter-
+    \\  // rotate each label by -rot about its own centre (its x/y attrs ARE the pad
+    \\  // centre), cancelling the padset's rotation so the digit never flips.
+    \\  padEls[i].querySelectorAll("text").forEach(function(t){
+    \\   t.setAttribute("transform","rotate("+(-rot)+" "+t.getAttribute("x")+" "+t.getAttribute("y")+")");});}}
     \\// Defined decoupling pads: each loop pins a cap to ONE hub pad (L.pp =
     \\// hub_pwr_pin). Mark those hub pads so a net selection glows them red (the
     \\// authored decoupling target) rather than gold. Keyed hubIndex:padX:padY.
