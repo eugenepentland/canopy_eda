@@ -37,6 +37,7 @@ unlinked tag: placement/optimizer - orientPadsToIC flips a 2-pad part so its imp
 unlinked tag: placement/optimizer - posSide buckets a point into the anchor quadrant it lies in in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - refineSidesByPull moves a part to the IC side its real connections pull toward in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - segsCross flags interior airwire crossings, not shared endpoints in ./src/placement/optimizer.zig
+unlinked tag: placement/optimizer - servedPadLocal resolves a decoupling cap's bound hub pad on-net and rejects a cross-hub binding in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - spec auto-fill pulls unlisted parts out of the staging band in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - the crossing polish never swaps a part onto its wrong anchor side in ./src/placement/optimizer.zig
 unlinked tag: serve/datasheet_attach - spliceDatasheet dedupes on the normalised stem (re-download counters ignored) in ./src/serve/datasheet_attach.zig
