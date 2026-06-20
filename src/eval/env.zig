@@ -283,6 +283,11 @@ pub const ModuleClassOverride = struct {
 pub const PolicyOverrides = struct {
     nets: []const NetClassOverride = &.{},
     modules: []const ModuleClassOverride = &.{},
+    /// `(module-policy (require-decouple-binding))` — opt this design into
+    /// treating the `decouple-unbound` layout lint as a hard error (every HF
+    /// decoupling cap on a multi-supply-pad rail MUST declare its pin). Default
+    /// false: the lint stays a warning until a design has finished migrating.
+    require_decouple_binding: bool = false,
 };
 
 /// A named virtual pin on a placeholder `(stub …)`. A stub declares its
