@@ -175,13 +175,19 @@ pub const ModuleEntry = struct {
     name: []const u8,
     params: []const u8,
     doc: []const u8,
+    /// True when the defmodule body declares placement-cohesion `(group …)`
+    /// forms (the form the rough seed coheres). Drives the home page's
+    /// "grouping" tag. Source-derived, so it rides the inventory cache.
+    has_groups: bool = false,
 };
 
-/// `(defmodule …)` metadata: the parameter list rendered as `(a b c)` and
-/// the optional doc string. Both empty when the file isn't a valid module.
+/// `(defmodule …)` metadata: the parameter list rendered as `(a b c)`, the
+/// optional doc string, and whether the body carries placement-cohesion
+/// `(group …)` forms. All empty/false when the file isn't a valid module.
 const ModuleMeta = struct {
     params: []const u8 = "",
     doc: []const u8 = "",
+    has_groups: bool = false,
 };
 
 /// Parse `(defmodule <name> (<params…>) "<doc>"? …)` out of a module file.
@@ -197,9 +203,28 @@ fn moduleMeta(allocator: std.mem.Allocator, content: []const u8) ModuleMeta {
         if (children.len > 3) {
             if (children[3].asString()) |d| doc = d;
         }
-        return .{ .params = params, .doc = doc };
+        return .{ .params = params, .doc = doc, .has_groups = nodeHasCohesionGroup(node) };
     }
     return empty;
+}
+
+/// True when `node` (or any descendant) is a placement-cohesion
+/// `(group "name" (member …))` form — the form the rough seed coheres
+/// (`block.groups`). It is distinguished from a pin `(group "label")` (no
+/// argument list) and a diagram-layout `(group "label" "key" …)` (bare-string
+/// members) by its parenthesized member LIST argument, so the home page's
+/// "grouping" tag tracks exactly what enables a good roughing pass.
+fn nodeHasCohesionGroup(node: sexpr_ast.Node) bool {
+    const children = node.asList() orelse return false;
+    if (node.isForm("group")) {
+        for (children[1..]) |arg| {
+            if (arg.asList() != null) return true;
+        }
+    }
+    for (children) |child| {
+        if (nodeHasCohesionGroup(child)) return true;
+    }
+    return false;
 }
 
 /// Render a defmodule parameter list as display text: `(a b=4.7k)`. A bare
@@ -287,6 +312,7 @@ fn dupeModuleEntries(alloc: std.mem.Allocator, src: []const ModuleEntry) std.mem
         .name = try alloc.dupe(u8, e.name),
         .params = try alloc.dupe(u8, e.params),
         .doc = try alloc.dupe(u8, e.doc),
+        .has_groups = e.has_groups,
     };
     return out;
 }
@@ -349,7 +375,7 @@ fn collectModulesUncached(allocator: std.mem.Allocator, project_dir: []const u8)
             continue;
         };
         const meta = moduleMeta(allocator, content);
-        try entries.append(allocator, .{ .name = base, .params = meta.params, .doc = meta.doc });
+        try entries.append(allocator, .{ .name = base, .params = meta.params, .doc = meta.doc, .has_groups = meta.has_groups });
     }
 
     std.mem.sort(ModuleEntry, entries.items, {}, struct {
@@ -563,4 +589,25 @@ fn writeHtmlEscaped(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
         '"' => try w.writeAll("&quot;"),
         else => try w.writeByte(c),
     };
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────
+
+// spec: Web Server - Module grouping tag detects placement-cohesion groups but not pin or diagram groups
+test "nodeHasCohesionGroup distinguishes cohesion groups from pin and diagram groups" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // Cohesion group: a member LIST follows the name → counts.
+    const cohesion = try parser_mod.parse(a, "(defmodule m () (design-block \"t\" (group \"Buck\" (\"U1\" \"L1\"))))");
+    try std.testing.expect(nodeHasCohesionGroup(cohesion[0]));
+
+    // Pin group inside (pins …): label only, no list → does not count.
+    const pin = try parser_mod.parse(a, "(defmodule m () (design-block \"t\" (pins \"U1\" (group \"Bank\") (pin 1 \"VDD\"))))");
+    try std.testing.expect(!nodeHasCohesionGroup(pin[0]));
+
+    // Diagram-layout group: bare-string members, no list → does not count.
+    const diagram = try parser_mod.parse(a, "(defmodule m () (design-block \"t\" (diagram-layout (group \"Front\" \"a\" \"b\"))))");
+    try std.testing.expect(!nodeHasCohesionGroup(diagram[0]));
 }

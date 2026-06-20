@@ -102,6 +102,11 @@ const SavedLayout = struct {
     score: ?LayoutScore,
     parts: []const PartPose,
     default: bool = false,
+    /// This layout was produced by the Rough seed (`?rough=1`) — the
+    /// AI-friendly module-clustered starting point a human then hand-finishes.
+    /// Recorded so the schematic's Module-layouts panel can show, per
+    /// sub-module, that a rough placement has been seeded (vs. starred/done).
+    rough: bool = false,
 };
 
 /// Which layout state the page is showing — the precedence ladder made
@@ -235,7 +240,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // this — there's no sidecar key for an individual sub-block yet.
     if (sub == null and placement.generated) {
         writeAutoCache(ctx.allocator, ctx.project_dir, name, placement, tune.params);
-        recordAutoLayout(ctx.allocator, ctx.project_dir, name, placement);
+        recordAutoLayout(ctx.allocator, ctx.project_dir, name, placement, tune.params);
     }
     const shown = if (sub != null or tune.tuned)
         tune.params
@@ -1014,7 +1019,7 @@ fn regenThread(job: *RegenJob) void {
         const placement = optimizer.solve(a, block, job.project_dir, null, job.params, .place) catch break :run;
         if (placement.generated) {
             writeAutoCache(a, job.project_dir, job.name, placement, job.params);
-            recordAutoLayout(a, job.project_dir, job.name, placement);
+            recordAutoLayout(a, job.project_dir, job.name, placement, job.params);
         }
         had_err = false;
     }
@@ -1827,6 +1832,10 @@ fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout
             .objective = jsonNum(it.object.get("objective")), // 0 for legacy entries
         };
         const parts = parsePartPoses(alloc, it.object.get("parts")) orelse &[_]PartPose{};
+        const rough = blk: {
+            const rv = it.object.get("rough") orelse break :blk false;
+            break :blk rv == .bool and rv.bool;
+        };
         list.append(alloc, .{
             .name = nm.string,
             .kind = kind,
@@ -1834,6 +1843,7 @@ fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout
             .score = score,
             .parts = parts,
             .default = default_name.len > 0 and std.mem.eql(u8, nm.string, default_name),
+            .rough = rough,
         }) catch return list.items;
     }
     return list.toOwnedSlice(alloc) catch null;
@@ -1974,6 +1984,7 @@ fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout, cache: 
         try w.writeAll(",\"kind\":");
         try writeJsonStr(w, L.kind);
         try w.print(",\"ts\":{d}", .{L.ts});
+        if (L.rough) try w.writeAll(",\"rough\":true");
         if (L.score) |s| try w.print(",\"hpwl\":{d},\"loop\":{d},\"caps\":{d},\"objective\":{d}", .{ s.hpwl, s.loop, s.caps, s.objective });
         try w.writeAll(",\"parts\":[");
         for (L.parts, 0..) |pt, j| {
@@ -2052,7 +2063,7 @@ fn displayLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
 /// layout history — unless that arrangement is *already saved* (under any name,
 /// auto or manual), in which case there is nothing new to record. Then prunes
 /// auto entries past `MAX_AUTO_LAYOUTS`.
-fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, p: optimizer.Placement) void {
+fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, p: optimizer.Placement, params: optimizer.Params) void {
     const existing = readLayouts(alloc, project_dir, name);
     const score = LayoutScore{ .hpwl = p.score.hpwl_mm, .loop = p.score.loop_mm, .caps = p.score.loop_caps, .objective = p.breakdown.objective };
     const parts = alloc.alloc(PartPose, p.parts.len) catch return;
@@ -2060,10 +2071,16 @@ fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []c
     // Dedup against EVERY saved layout, not just the newest: a regen that
     // reproduces an arrangement already in the list (same objective + HPWL +
     // loop) adds nothing. If the match is the newest entry and predates the
-    // objective field, backfill it in place.
+    // objective field, backfill it in place. A rough solve that reconverges to
+    // an existing (untagged) arrangement still tags it rough so the panel's
+    // "rough seeded" status lights up.
     for (existing, 0..) |L, i| {
         if (!sameLayoutScore(L.score, score)) continue;
-        if (i == 0 and (L.score == null or L.score.?.objective <= 0)) backfillNewestScore(alloc, project_dir, name, existing, score);
+        if (params.rough and !L.rough) {
+            tagRough(alloc, project_dir, name, existing, i);
+        } else if (i == 0 and (L.score == null or L.score.?.objective <= 0)) {
+            backfillNewestScore(alloc, project_dir, name, existing, score);
+        }
         return;
     }
     const now = clock.timestamp();
@@ -2073,6 +2090,7 @@ fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []c
         .ts = now,
         .score = score,
         .parts = parts,
+        .rough = params.rough,
     };
     // Newest first; keep every manual entry but only the most-recent autos.
     // The entry the user marked default is never pruned (else a default that
@@ -2086,6 +2104,20 @@ fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []c
             autos += 1;
         }
         out.append(alloc, L) catch break;
+    }
+    writeLayouts(alloc, project_dir, name, out.items);
+}
+
+/// Rewrite the layout list with the `rough` flag set on entry `idx` — used when
+/// a Rough solve reconverges to an arrangement already saved without the flag,
+/// so the schematic's Module-layouts panel still reads "rough seeded" rather
+/// than recording a duplicate row.
+fn tagRough(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, existing: []const SavedLayout, idx: usize) void {
+    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    for (existing, 0..) |L, i| {
+        var e = L;
+        if (i == idx) e.rough = true;
+        out.append(alloc, e) catch return;
     }
     writeLayouts(alloc, project_dir, name, out.items);
 }
@@ -4760,4 +4792,25 @@ test "layouts sidecar round-trips cache slot" {
     try std.testing.expectEqual(@as(f64, 7), slot.params.loop_w);
     try std.testing.expectEqual(@as(usize, 1), slot.parts.?.len);
     try std.testing.expectEqualStrings("U1", slot.parts.?[0].ref);
+}
+
+// spec: Web Server - A rough-seeded saved layout round-trips its rough flag through the sidecar
+test "layouts sidecar round-trips rough flag" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
+    const layouts = [_]SavedLayout{
+        .{ .name = "rough seed", .kind = KIND_AUTO, .ts = 1, .score = null, .parts = &parts, .rough = true },
+        .{ .name = "hand", .kind = KIND_MANUAL, .ts = 2, .score = null, .parts = &parts },
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeLayoutsFileJson(&aw.writer, &layouts, null);
+
+    const got = parseLayouts(alloc, aw.written()) orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(usize, 2), got.len);
+    try std.testing.expect(got[0].rough);
+    try std.testing.expect(!got[1].rough);
 }

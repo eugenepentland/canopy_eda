@@ -2351,6 +2351,11 @@ pub const DesignSummary = struct {
     assert_fails: usize = 0,
     /// Still-open tasks in the design's `.notes.md` sidecar.
     open_notes: usize = 0,
+    /// True when the design declares placement-cohesion `(group …)` forms
+    /// (`block.groups`) — the grouping the rough seed coheres. Surfaced as the
+    /// home page's "grouping" tag so the layout workflow (author grouping →
+    /// rough → star) is visible at a glance.
+    has_groups: bool = false,
 };
 
 /// Count instances flattened across a design plus every sub-block. Does NOT
@@ -2553,6 +2558,7 @@ pub fn listDesignSummaries(
                 summary.instance_count = countInstances(block);
                 summary.net_count = countNets(block);
                 summary.build_ok = true;
+                summary.has_groups = block.groups.len > 0;
 
                 // Traceability roll-up for the home dashboard. Run the same
                 // requirement checks the schematic page does so "placed +
