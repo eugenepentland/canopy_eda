@@ -1,6 +1,6 @@
 # guardian-snapshot v1
 src/eval/ids.zig:419: condition has 6 boolean ops (cap 3)
-src/placement/optimizer.zig:3391: condition has 5 boolean ops (cap 3)
+src/placement/optimizer.zig:3497: condition has 5 boolean ops (cap 3)
 src/serve/bom_html.zig:139: condition has 4 boolean ops (cap 3)
 src/serve/bom_html.zig:307: condition has 4 boolean ops (cap 3)
 src/serve/bom_html.zig:88: condition has 4 boolean ops (cap 3)

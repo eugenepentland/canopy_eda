@@ -276,6 +276,17 @@ pub const ModuleClassOverride = struct {
     class: []const u8,
 };
 
+/// One `(part-role "REF" role)` override inside a `(module-policy …)` form: pin a
+/// passive's detected `PartRole` (e.g. a decoupling cap the heuristics misread).
+/// Matched by ref-des or module-local origin name, exact or by leaf. Feeds the
+/// constructive role placer, the layout lint, and the describe facts.
+pub const PartRoleOverride = struct {
+    ref: []const u8,
+    /// Bare `PartRole` token: input_cap|decoupling_cap|bulk_cap|feedback_divider|
+    /// matching_element|anchor_ic|other.
+    role: []const u8,
+};
+
 /// Author overrides for the best-effort module-policy detector, from a top-level
 /// `(module-policy …)` form. Empty by default (detection stands alone). Applied
 /// in `placement/module_policy.zig` *after* the heuristics, so the author has the
@@ -283,6 +294,7 @@ pub const ModuleClassOverride = struct {
 pub const PolicyOverrides = struct {
     nets: []const NetClassOverride = &.{},
     modules: []const ModuleClassOverride = &.{},
+    part_roles: []const PartRoleOverride = &.{},
     /// `(module-policy (require-decouple-binding))` — opt this design into
     /// treating the `decouple-unbound` layout lint as a hard error (every HF
     /// decoupling cap on a multi-supply-pad rail MUST declare its pin). Default
@@ -1109,6 +1121,14 @@ pub const SwitchPlacement = struct {
     side: PlacementSide,
 };
 
+/// How role-based auto-placement engages for a block (`PlacementSpec.auto_mode`):
+/// `.unset` (default, no marker) ⇒ a recognized module class (buck/ldo/mcu/rf_amp/
+/// analog_afe) is placed constructively from its detected roles and a `generic`
+/// block falls back to the force solve; `.on` (`(placement (auto))`) ⇒ force the
+/// role ladder even on a `generic` block AND compose the result into parent boards;
+/// `.off` (`(placement (manual))`) ⇒ always use the force solver.
+pub const PlacementAuto = enum { unset, on, off };
+
 /// Agent-authored PCB floorplan from a top-level `(placement …)` form: the
 /// anchor IC plus, per part, its side of the IC, order along that edge, and an
 /// optional rotation. The optimizer's `packSpec` realizes it into coordinates
@@ -1131,6 +1151,9 @@ pub const PlacementSpec = struct {
     /// off the IC centerline. A `(centered)` marker in the form sets this true for a
     /// symmetric floorplan (every side mirrored about the anchor).
     centered: bool = false,
+    /// Role-based auto-placement mode (see `PlacementAuto`). `(auto)` ⇒ `.on`,
+    /// `(manual)` ⇒ `.off`, no marker ⇒ `.unset` (recognized classes auto-place).
+    auto_mode: PlacementAuto = .unset,
 };
 
 /// The physical board declared by a top-level `(board …)` form: the outline
