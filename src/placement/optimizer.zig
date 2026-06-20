@@ -841,7 +841,7 @@ fn keepBetterOfRough(
     // arrange for a multi-module design (where it beats a scattered force solve by
     // ~30%), else the flat pad-anchored ring. Neither applies (no hub) → restore + bail.
     var seeded = try runRough(arena, parts, prep, nets, params);
-    if (!seeded) seeded = try packPadAnchored(arena, parts, prep, nets);
+    if (!seeded) seeded = try packPadAnchored(arena, parts, prep, nets, false);
     if (!seeded) {
         for (parts, 0..) |*p, i| {
             p.x = saved[i][0];
@@ -880,7 +880,7 @@ fn runPlacement(
         // Flat module/design: ring the anchor IC with each part on the side of the
         // pad it connects to (GND ignored; cap→VDD pad, R→signal pad), hugging the
         // edge. This is the pad-anchored hand-layout seed.
-        if (try packPadAnchored(arena, parts, prep, nets)) return;
+        if (try packPadAnchored(arena, parts, prep, nets, true)) return;
         // No hub to anchor on (e.g. a passives-only board): fall back to a declumped
         // force solve — kill the alignment term and force courtyard spacing so the
         // compaction can't collapse everything into one block.
@@ -3137,6 +3137,11 @@ const PAD_ANCHOR_PART_GAP_MM: f64 = 0.4;
 /// many lanes (sized to the part count) instead of stacking many lanes outward, so
 /// even low-priority parts stay close to the IC radially. Smaller = tighter ring.
 const ROUGH_PACK_LANES: f64 = 2;
+/// `SidePart.along` sentinel meaning "no preferred tangential spot — pack me
+/// sequentially from the lane start". `dockSidesByTier` clamps a part to
+/// `max(along, cursor+half)`, so a literal 0 would pin every such part to x≥0
+/// (a dense pile); a large-negative value lets them spread across the whole lane.
+const ALONG_PACK_SEQ: f64 = -1e9;
 
 /// One part docked to a side of the anchor IC in `packPadAnchored`: its index,
 /// priority `tier` (lower = tighter to the IC), desired coordinate ALONG the edge
@@ -3325,6 +3330,7 @@ fn assignSides(
     roles: pin_roles.PartRoles,
     ci: ClusterInfo,
     tier_of: []const usize,
+    sig_side: []u8,
     sides: *[4]std.ArrayListUnmanaged(SidePart),
     leftover: *std.ArrayListUnmanaged(usize),
 ) std.mem.Allocator.Error!void {
@@ -3337,14 +3343,38 @@ fn assignSides(
         var sig_cnt: usize = 0;
         var rail: ?usize = null;
         var rail_cnt: usize = 0;
+        // Cohesion anchor: the pad of a concentrated (≤2 hub-pad) NON-ground,
+        // NON-power signal net — the inductor's switch node, the crystal's
+        // XIN/XOUT, a reset pin. Tracked separately from `sig` (which the role
+        // ground-test can miss, letting the GND pad win the fewest-pad pick) and
+        // ground-excluded *by name*, so a pure VDD/GND bypass cap has no anchor
+        // and casts no vote in `cohereGroups`.
+        var anchor: ?[2]f64 = null;
+        var anchor_cnt: usize = 0;
         for (nets, 0..) |net, ni| {
             if (!netHasPart(net, pi, idx_of)) continue;
             if (padOnNet(parts[hi], hi, net, idx_of).w == 0) continue; // hub not on net
-            if (roles.classOf(hubPinOnNet(net, hi, idx_of)) == .ground) continue;
+            // Cohesion anchor (additive — does NOT affect sig/rail bucketing): a
+            // ≤2-pad signal net that is ground by neither role NOR name. The name
+            // test catches a hub GND pad the role data misses, so a pure VDD/GND
+            // bypass cap gets no anchor. A power rail lands on many pads (cnt>2),
+            // so it's excluded too. Checked before the role `continue` below so it
+            // still runs on nets that pass the (unreliable) role ground-test.
             var cnt: usize = 0;
             for (net.pins) |pr| {
                 if ((idx_of.get(pr.ref_des) orelse continue) == hi) cnt += 1;
             }
+            if (cnt <= 2 and !pin_roles.isGroundFn(shortName(net.name)) and
+                roles.classOf(hubPinOnNet(net, hi, idx_of)) != .ground and
+                (anchor == null or cnt < anchor_cnt))
+            {
+                const apads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
+                if (apads.len > 0) {
+                    anchor = apads[0];
+                    anchor_cnt = cnt;
+                }
+            }
+            if (roles.classOf(hubPinOnNet(net, hi, idx_of)) == .ground) continue;
             if (cnt <= 2 and (sig == null or cnt < sig_cnt)) {
                 const pads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
                 if (pads.len > 0) {
@@ -3356,6 +3386,14 @@ fn assignSides(
                 rail = ni;
                 rail_cnt = cnt;
             }
+        }
+        // Record the side of this part's anchor signal pad, if any — the
+        // directional vote `cohereGroups` tallies per schematic group. A pure
+        // wide-rail bypass cap has no anchor (255) and casts no vote, which is
+        // what keeps such groups distributed instead of cohered.
+        if (anchor) |a| {
+            const sv = @abs(a[0]) >= @abs(a[1]);
+            sig_side[pi] = if (sv) (if (a[0] < 0) @as(u8, 0) else 1) else (if (a[1] < 0) @as(u8, 2) else 3);
         }
         const is_cap = leafRefPrefix(p.ref_des) == 'C';
         // Decide the anchor pad: rail round-robin for decoupling caps, else the
@@ -3390,6 +3428,88 @@ fn assignSides(
             .half_along = if (vert) pkb.hh else pkb.hw,
             .depth = if (vert) pkb.hw else pkb.hh,
         });
+    }
+}
+
+/// Cohere each authored schematic `(group …)` onto a single IC side — the way a
+/// hand layout keeps a functional subsystem (VREG, crystal, reset) together on one
+/// edge while spreading the general per-pin decoupling around the package. The
+/// target side is the dominant vote among the group's *directionally-anchored*
+/// members: a part with a concentrated ≤2-pad IC signal pad (the inductor's switch
+/// node, the crystal's XIN/XOUT, the reset pin) votes that pad's side via
+/// `sig_side`. A group of pure wide-rail bypass caps casts no vote and is left
+/// distributed (each cap keeps its per-pad side from `assignSides`). On a clear,
+/// tie-free majority every member is re-bucketed onto that side; `cohere_side`
+/// records it so the want-side freeze keeps the crossing polish from scattering
+/// the group again. Runs before `dockSidesByTier`, so cohered members lane-pack
+/// together on their shared side.
+fn cohereGroups(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    hi: usize,
+    groups: []const env.Group,
+    instances: []const export_kicad.FlatInstance,
+    tier_of: []const usize,
+    sig_side: []const u8,
+    cohere_side: []u8,
+    sides: *[4]std.ArrayListUnmanaged(SidePart),
+) std.mem.Allocator.Error!void {
+    for (groups) |g| {
+        var members: std.ArrayListUnmanaged(usize) = .empty;
+        var votes = [_]usize{ 0, 0, 0, 0 };
+        for (g.members) |want| {
+            for (parts, 0..) |p, pi| {
+                if (pi == hi) continue; // the anchor IC is fixed; never re-sided
+                const origin = if (pi < instances.len) instances[pi].origin_key else "";
+                if (!roughNameMatch(p.ref_des, origin, want)) continue;
+                try members.append(arena, pi);
+                if (sig_side[pi] < 4) votes[sig_side[pi]] += 1;
+            }
+        }
+        if (members.items.len < 2) continue;
+        // Dominant anchored side: strictly most-voted, ≥1 vote, no tie. A group
+        // with no anchored member (pure bypass) scores 0 everywhere → left spread.
+        var dom: usize = 255;
+        var best: usize = 0;
+        var tie = false;
+        for (votes, 0..) |v, s| {
+            if (v > best) {
+                best = v;
+                dom = s;
+                tie = false;
+            } else if (v == best and v > 0) tie = true;
+        }
+        if (best == 0 or tie) continue;
+        // Re-bucket every member onto `dom`, recomputing its lane geometry for the
+        // side's orientation (vertical sides run at rot 0, horizontal at rot 90).
+        const vert = dom < 2;
+        for (members.items) |pi| {
+            // Only re-side members already docked to a side; a ground-only member
+            // sitting in the leftover row stays there (cohesion is a ring concern).
+            var found = false;
+            for (sides) |*lst| {
+                var k: usize = 0;
+                while (k < lst.items.len) : (k += 1) {
+                    if (lst.items[k].i == pi) {
+                        _ = lst.orderedRemove(k);
+                        found = true;
+                        break;
+                    }
+                }
+                if (found) break;
+            }
+            if (!found) continue;
+            cohere_side[pi] = @intCast(dom);
+            parts[pi].rot = if (vert) 0 else 90;
+            const pkb = keepBoxOf(parts[pi]);
+            try sides[dom].append(arena, .{
+                .i = pi,
+                .tier = tier_of[pi],
+                .along = ALONG_PACK_SEQ, // spread across the shared lane, not piled at x≥0
+                .half_along = if (vert) pkb.hh else pkb.hw,
+                .depth = if (vert) pkb.hw else pkb.hh,
+            });
+        }
     }
 }
 
@@ -3510,6 +3630,7 @@ fn refineSidesByPull(
     nets: []const FlatNet,
     idx_of: *std.StringHashMap(usize),
     tier_of: []const usize,
+    cohere_side: []const u8,
     sides: *[4]std.ArrayListUnmanaged(SidePart),
     hkb: KeepBox,
 ) std.mem.Allocator.Error!void {
@@ -3536,8 +3657,16 @@ fn refineSidesByPull(
             // Target the pull centroid when it points somewhere; a part with no
             // directional pull keeps its current spot (→ same side, same height).
             const t = try sidePullTarget(arena, parts, hi, pi, nets, idx_of);
-            const vert = @abs(t.x) >= @abs(t.y);
-            const s: usize = if (vert) (if (t.x < 0) 0 else 1) else (if (t.y < 0) 2 else 3);
+            var vert = @abs(t.x) >= @abs(t.y);
+            var s: usize = if (vert) (if (t.x < 0) 0 else 1) else (if (t.y < 0) 2 else 3);
+            var along: f64 = if (vert) t.y else t.x;
+            // A group-cohered part is pinned to its group's shared side, so the
+            // per-part pull can't re-scatter a deliberately-grouped subsystem.
+            if (cohere_side[pi] < 4) {
+                s = cohere_side[pi];
+                vert = s < 2;
+                along = ALONG_PACK_SEQ;
+            }
             if (cur_side[pi] != s) {
                 moved = true;
                 cur_side[pi] = @intCast(s);
@@ -3547,7 +3676,7 @@ fn refineSidesByPull(
             try sides[s].append(arena, .{
                 .i = pi,
                 .tier = tier_of[pi],
-                .along = if (vert) t.y else t.x,
+                .along = along,
                 .half_along = if (vert) pkb.hh else pkb.hw,
                 .depth = if (vert) pkb.hw else pkb.hh,
             });
@@ -3812,6 +3941,11 @@ fn packPadAnchored(
     parts: []Part,
     prep: *Prepared,
     nets: []const FlatNet,
+    // Cohere authored `(group …)` subsystems onto one IC edge. Only the explicit
+    // `?rough=1` path wants this (a legible, hand-like seed the user reads as the
+    // final layout); when `packPadAnchored` merely seeds the force solve, cohesion
+    // is left off so the tuned force result is bit-identical to before.
+    cohere: bool,
 ) std.mem.Allocator.Error!bool {
     // Anchor: the author's `(rough (anchor …))` IC when it resolves to a hub,
     // else the largest hub IC. Matched by ref-des or module-local origin name.
@@ -3879,7 +4013,17 @@ fn packPadAnchored(
     // connected parts stay together — keeping their airwires short instead of
     // spanning the board, which was the dominant ratsnest-crossing source.
     const ci = try buildClusters(arena, parts, hi, nets, &prep.idx_of);
-    try assignSides(arena, parts, hi, nets, &prep.idx_of, roles, ci, tier_of, &sides, &leftover);
+    const sig_side = try arena.alloc(u8, parts.len);
+    @memset(sig_side, 255);
+    try assignSides(arena, parts, hi, nets, &prep.idx_of, roles, ci, tier_of, sig_side, &sides, &leftover);
+
+    // Cohere each authored `(group …)` onto one IC edge (the side its
+    // directionally-anchored members vote for) so a functional subsystem stays
+    // together like a hand layout; pure bypass groups stay distributed. Only on
+    // the explicit rough path — a force seed stays uncohered (see `cohere`).
+    const cohere_side = try arena.alloc(u8, parts.len);
+    @memset(cohere_side, 255);
+    if (cohere) try cohereGroups(arena, parts, hi, prep.block.groups, prep.instances, tier_of, sig_side, cohere_side, &sides);
 
     // Lay each side's parts into tier-ordered lanes around the IC.
     dockSidesByTier(parts, &sides, hkb);
@@ -3900,15 +4044,21 @@ fn packPadAnchored(
     // Connectivity-aware re-side: now that everyone has a position, move parts to
     // the IC side their real neighbours pull toward (the initial dock chose by one
     // IC pad, blind to the part's far ends — the main wrong-side source).
-    try refineSidesByPull(arena, parts, hi, nets, &prep.idx_of, tier_of, &sides, hkb);
+    try refineSidesByPull(arena, parts, hi, nets, &prep.idx_of, tier_of, cohere_side, &sides, hkb);
 
     // Freeze each directionally-wired part's correct side so the crossing polish
     // can't undo it; a part with no directional pull (a pure decoupling cap) is
-    // left unconstrained (255) and stays freely swappable.
+    // left unconstrained (255) and stays freely swappable — unless it was
+    // group-cohered, in which case its group's side is frozen so the subsystem
+    // stays together.
     const want_side = try arena.alloc(u8, parts.len);
     @memset(want_side, 255);
     for (parts, 0..) |_, pi| {
         if (pi == hi) continue;
+        if (cohere_side[pi] < 4) {
+            want_side[pi] = cohere_side[pi];
+            continue;
+        }
         const t = try sidePullTarget(arena, parts, hi, pi, nets, &prep.idx_of);
         if (t.dir) want_side[pi] = posSide(parts[hi].x, parts[hi].y, t.x, t.y);
     }
@@ -10124,6 +10274,7 @@ test "refineSidesByPull re-sides a part toward its signal pad" {
     try idx_of.put("U1", 0);
     try idx_of.put("R1", 1);
     const tier_of = [_]usize{ 0, 0 };
+    const cohere_side = [_]u8{ 255, 255 }; // neither part is group-cohered
 
     var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
     try sides[0].append(arena, .{ .i = 1, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
@@ -10131,12 +10282,60 @@ test "refineSidesByPull re-sides a part toward its signal pad" {
     parts[1].y = 0;
     const hkb = KeepBox{ .cxo = 0, .cyo = 0, .hw = 2, .hh = 2 };
 
-    try refineSidesByPull(arena, &parts, 0, &nets, &idx_of, &tier_of, &sides, hkb);
+    try refineSidesByPull(arena, &parts, 0, &nets, &idx_of, &tier_of, &cohere_side, &sides, hkb);
 
     // Moved from the LEFT bucket (s=0) to the RIGHT (s=1), now at positive x.
     try testing.expectEqual(@as(usize, 0), sides[0].items.len);
     try testing.expectEqual(@as(usize, 1), sides[1].items.len);
     try testing.expect(parts[1].x > 0);
+}
+
+// spec: placement/optimizer - cohereGroups pins a subsystem with an anchored member to one side, leaves an anchorless bypass group spread
+test "cohereGroups coheres an anchored group and leaves a pure-bypass group distributed" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+
+    // PWR = L1 (anchored: sig_side top) + C1,C2 (bypass, no anchor) → cohere all
+    // to top. BYP = C3,C4 (bypass only, no anchor) → must stay where they were.
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "L1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "C3", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "C4", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+    };
+    const pwr_m = [_][]const u8{ "L1", "C1", "C2" };
+    const byp_m = [_][]const u8{ "C3", "C4" };
+    const groups = [_]env.Group{ .{ .name = "PWR", .members = &pwr_m }, .{ .name = "BYP", .members = &byp_m } };
+    // Only L1 has a directional anchor (top = side 2); all caps are anchorless.
+    const sig_side = [_]u8{ 255, 2, 255, 255, 255, 255 };
+    const tier_of = [_]usize{ 0, 0, 0, 0, 0, 0 };
+    const cohere_side = try arena.alloc(u8, parts.len);
+    @memset(cohere_side, 255);
+
+    // Seed each ringed part on a NON-top side so cohesion visibly moves the PWR
+    // group: L1,C3→left(0); C1,C4→right(1); C2→bottom(3).
+    var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
+    try sides[0].append(arena, .{ .i = 1, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
+    try sides[1].append(arena, .{ .i = 2, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
+    try sides[3].append(arena, .{ .i = 3, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
+    try sides[0].append(arena, .{ .i = 4, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
+    try sides[1].append(arena, .{ .i = 5, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
+
+    try cohereGroups(arena, &parts, 0, &groups, &.{}, &tier_of, &sig_side, cohere_side, &sides);
+
+    // PWR (L1,C1,C2) all cohered to top (side 2); BYP (C3,C4) untouched.
+    try testing.expectEqual(@as(u8, 2), cohere_side[1]);
+    try testing.expectEqual(@as(u8, 2), cohere_side[2]);
+    try testing.expectEqual(@as(u8, 2), cohere_side[3]);
+    try testing.expectEqual(@as(u8, 255), cohere_side[4]);
+    try testing.expectEqual(@as(u8, 255), cohere_side[5]);
+    try testing.expectEqual(@as(usize, 3), sides[2].items.len); // all PWR on top
+    // BYP members stayed on their seeded sides (C3 left, C4 right).
+    try testing.expectEqual(@as(usize, 1), sides[0].items.len);
+    try testing.expectEqual(@as(usize, 1), sides[1].items.len);
 }
 
 // spec: placement/optimizer - decouplePinFromOrigin reads the decoupled pad from a per-pin cap's structural key
