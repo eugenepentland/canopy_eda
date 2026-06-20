@@ -29,6 +29,7 @@ const digikey = @import("digikey.zig");
 const upload = @import("upload.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const pcb_describe = @import("pcb_describe.zig");
+const layout_match = @import("layout_match.zig");
 const placement_spec = @import("placement_spec.zig");
 const module_policy_spec = @import("module_policy_spec.zig");
 const render_pcb_png = @import("../render_pcb_png.zig");
@@ -96,6 +97,7 @@ const tools = [_]ToolEntry{
     .{ .name = "get_schematic", .is_mutation = false },
     .{ .name = "get_pcb_layout_image", .is_mutation = false },
     .{ .name = "describe_pcb_layout", .is_mutation = false },
+    .{ .name = "compare_layout_to_starred", .is_mutation = false },
     .{ .name = "export_placement_spec", .is_mutation = false },
     .{ .name = "export_module_policy", .is_mutation = false },
     .{ .name = "propose_placement", .is_mutation = false },
@@ -271,6 +273,7 @@ fn dispatchInfo(
     const w = out.writer(allocator);
     if (std.mem.eql(u8, tool_name, "get_schematic")) return try toolGetSchematic(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "describe_pcb_layout")) return try toolDescribePcbLayout(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "compare_layout_to_starred")) return try toolCompareLayoutToStarred(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "export_placement_spec")) return try toolExportPlacementSpec(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "export_module_policy")) return try toolExportModulePolicy(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "propose_placement")) return try toolProposePlacement(allocator, project_dir, args_val, out);
@@ -838,6 +841,19 @@ fn toolDescribePcbLayout(allocator: std.mem.Allocator, project_dir: []const u8, 
     };
     const body = pcb_describe.describeDesign(allocator, project_dir, name, opts) catch |e| {
         try out.writer(allocator).print("error describing pcb layout: {s}", .{@errorName(e)});
+        return false;
+    };
+    try out.appendSlice(allocator, body);
+    return true;
+}
+
+/// `compare_layout_to_starred` — score the `?rough=1` seed against the starred
+/// (default) saved layout: interchangeable-class-matched same-edge agreement +
+/// drag, the "is the rough in the right general area to finish by hand" check.
+fn toolCompareLayoutToStarred(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    const body = layout_match.layoutMatchJson(allocator, project_dir, name) catch |e| {
+        try out.writer(allocator).print("error comparing layout to starred: {s}", .{@errorName(e)});
         return false;
     };
     try out.appendSlice(allocator, body);

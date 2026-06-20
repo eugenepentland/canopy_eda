@@ -9,6 +9,8 @@ add: // spec: serve/sync - runSyncPlan errors with NotADesign when the source fi
 unlinked tag: Web Server - Placement-spec export falls back to ref-des when origin names repeat in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - Placement-spec export rebuilds an editable (placement …) form from a solved layout in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - The layouts sidecar round-trips snapshots and the optimizer cache slot through one file in ./src/serve/pcb_layout_page.zig
+unlinked tag: Web Server - layout-match counts a wrong-edge proportion as a partial area mismatch in ./src/serve/layout_match.zig
+unlinked tag: Web Server - layout-match credits interchangeable parts by per-edge count, ignoring which fungible part is where in ./src/serve/layout_match.zig
 unlinked tag: Web Server - propose_placement parses a standalone placement/floorplan form in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - spec save inserts a new placement form before the design-block close in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - spec save replaces an existing placement form in place in ./src/serve/placement_spec.zig
