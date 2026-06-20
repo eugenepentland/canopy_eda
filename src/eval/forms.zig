@@ -564,12 +564,15 @@ pub const scope_form_docs = blk: {
     } };
     t[@intFromEnum(ScopeForm.module_policy)] = .{ .scope = tl, .doc = .{
         .syntax = "(module-policy (module \"REF\" buck|ldo|mcu|rf_amp|analog_afe|generic)… " ++
-            "(net-class \"NAME\" ground|power|input_rail|switch_node|clock|rf|feedback|analog|control|signal)…)",
+            "(net-class \"NAME\" ground|power|input_rail|switch_node|clock|rf|feedback|analog|control|signal)… " ++
+            "(require-decouple-binding))",
         .summary = "Override the best-effort module-policy detector (PCB layout): pin a hub IC's " ++
             "ModuleClass or a net's routing-criticality NetClass when the name heuristics read it " ++
             "wrong (e.g. an integrated buck with no discrete inductor that reads as generic). " ++
-            "Applied after detection — the author has the last word. Surfaced in /api/pcb-describe; " ++
-            "export the detected policy as a starting point with /api/module-policy.",
+            "Applied after detection — the author has the last word. (require-decouple-binding) " ++
+            "promotes the decouple-unbound layout lint to a hard error for this design (every HF " ++
+            "decoupling cap on a multi-supply-pad rail must declare its pin via (decouples …)). " ++
+            "Surfaced in /api/pcb-describe; export the detected policy as a start with /api/module-policy.",
     } };
     t[@intFromEnum(ScopeForm.rough)] = .{ .scope = tl, .doc = .{
         .syntax = "(rough [(anchor \"REF\")] (group \"name\" \"REF\"…)…)",

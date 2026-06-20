@@ -134,6 +134,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var rough_spec: env_mod.RoughSpec = .{};
     var policy_net_overrides: std.ArrayListUnmanaged(env_mod.NetClassOverride) = .empty;
     var policy_module_overrides: std.ArrayListUnmanaged(env_mod.ModuleClassOverride) = .empty;
+    var require_decouple_binding = false;
     var derating: ?f64 = null;
     var kicad_pcb_path: ?[]const u8 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
@@ -252,7 +253,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             .revision => revision_spec = try parseRevision(self, form_children),
             .rough => rough_spec = try parseRough(self, form_children),
             .replicate => try evalReplicate(self, form_children, env, &sub_blocks),
-            .module_policy => try parsePolicyOverrides(self, form_children, &policy_net_overrides, &policy_module_overrides),
+            .module_policy => try parsePolicyOverrides(self, form_children, &policy_net_overrides, &policy_module_overrides, &require_decouple_binding),
             // Section-only forms are ignored at the top level — a
             // design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract; the warning
@@ -302,6 +303,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .policy_overrides = .{
             .nets = policy_net_overrides.toOwnedSlice(self.allocator) catch &.{},
             .modules = policy_module_overrides.toOwnedSlice(self.allocator) catch &.{},
+            .require_decouple_binding = require_decouple_binding,
         },
         .revision = revision_spec,
         .rough = rough_spec,
@@ -1583,11 +1585,19 @@ fn parsePolicyOverrides(
     form_children: []const Node,
     nets: *std.ArrayListUnmanaged(env_mod.NetClassOverride),
     modules: *std.ArrayListUnmanaged(env_mod.ModuleClassOverride),
+    require_decouple_binding: *bool,
 ) EvalError!void {
     for (form_children[1..]) |child| {
         const cl = child.asList() orelse continue;
-        if (cl.len < 3) continue;
+        if (cl.len == 0) continue;
         const head = cl[0].asAtom() orelse continue;
+        // `(require-decouple-binding)` — a bare marker that flips the
+        // decouple-unbound layout lint to a hard error for this design.
+        if (std.mem.eql(u8, head, "require-decouple-binding")) {
+            require_decouple_binding.* = true;
+            continue;
+        }
+        if (cl.len < 3) continue;
         const target = cl[1].asText() orelse continue;
         const class = cl[2].asText() orelse continue;
         if (std.mem.eql(u8, head, "module")) {
@@ -1595,7 +1605,7 @@ fn parsePolicyOverrides(
         } else if (std.mem.eql(u8, head, "net-class")) {
             nets.append(self.allocator, .{ .net = target, .class = class }) catch return EvalError.OutOfMemory;
         } else {
-            self.warnFmt(child.span, "unknown (module-policy …) item ({s} …) — expected (module …) or (net-class …)", .{head});
+            self.warnFmt(child.span, "unknown (module-policy …) item ({s} …) — expected (module …), (net-class …), or (require-decouple-binding)", .{head});
         }
     }
 }
