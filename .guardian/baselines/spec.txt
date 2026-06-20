@@ -13,7 +13,8 @@ unlinked tag: Web Server - propose_placement parses a standalone placement/floor
 unlinked tag: Web Server - spec save inserts a new placement form before the design-block close in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - spec save replaces an existing placement form in place in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - spec save splices the placement form into a defmodule body in ./src/serve/placement_spec.zig
-unlinked tag: eval/forms - diagram-layout is the canonical name for the schematic layout form, layout the alias in ./src/eval/forms.zig
+unlinked tag: erc - surfaces layout-critical net classes as info rows, staying silent on ground/power/plain-signal nets in ./src/erc.zig
+unlinked tag: eval/forms - diagram-layout is the sole name for the schematic layout form; the legacy layout/module aliases are gone in ./src/eval/forms.zig
 unlinked tag: eval/instance - (decouples "IC" PIN) binds a cap to a specific hub pad in ./src/eval/instance.zig
 unlinked tag: eval/instance - (decouples rail) opts a cap out of the per-pin-decoupling requirement in ./src/eval/instance.zig
 unlinked tag: eval/modules - A later parameter's default may reference an earlier parameter in ./src/eval/modules.zig

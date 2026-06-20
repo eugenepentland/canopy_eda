@@ -7,6 +7,7 @@ const power_sequencing = @import("eval/power_sequencing.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const json_writer = @import("json_writer.zig");
 const checks = @import("checks.zig");
+const module_policy = @import("placement/module_policy.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
 const Net = env_mod.Net;
@@ -41,6 +42,7 @@ pub const ViolationKind = enum {
     sequence_cycle,
     voltage_domain_incompatible,
     main_ic_in_design,
+    layout_class_inferred,
 };
 
 /// One electrical-rule-check finding. `kind` selects the rule, `severity`
@@ -78,6 +80,7 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkSequencingCycles(allocator, block, &violations);
     try checkVoltageDomainCompat(allocator, block, &violations);
     try checkMainIcsInDesign(allocator, block, &violations);
+    try checkLayoutClasses(allocator, block, &violations);
     if (project_dir.len > 0) try checkPinFunctions(allocator, block, project_dir, &violations);
 
     return violations.items;
@@ -123,6 +126,42 @@ fn checkMainIcsInDesign(
             .severity = .@"error",
             .message = msg,
             .ref_des = inst.ref_des,
+        });
+    }
+}
+
+/// Surface the heuristic net-criticality classification the PCB placer will use,
+/// so the author can SEE a wrong guess instead of discovering it as a bad board.
+/// Each net whose *name* reads as a layout-critical class (input rail, switch
+/// node, clock, RF, feedback, analog — `module_policy.isInterestingClass`) gets
+/// one `info` row naming the class and the `(module-policy (net-class …))`
+/// override. Name-only (`classifyNetName`), so it runs on the netlist with no
+/// placement solve; the placement-aware view (incl. per-hub ModuleClass) stays
+/// on `/api/pcb-describe`. Ground/power/plain-signal nets are intentionally
+/// silent — they are the bulk and add no signal.
+fn checkLayoutClasses(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayListUnmanaged(Violation),
+) !void {
+    for (block.nets) |net| {
+        // Skip the auto-generated `<rail>.<ic>.<pad>` bypass-stub sub-nets — they
+        // are an internal per-pad detail of a rail that is itself surfaced, and
+        // their munged names trip the name heuristics (e.g. "V08CAP" → input_rail).
+        if (std.mem.indexOfScalar(u8, net.name, '.') != null) continue;
+        const cls = module_policy.classifyNetName(net.name);
+        if (!module_policy.isInterestingClass(cls)) continue;
+        const msg = std.fmt.allocPrint(
+            allocator,
+            "Net \"{s}\" reads as {s} for PCB layout (drives loop weighting / routing order) — " ++
+                "if that's wrong, pin it with (module-policy (net-class \"{s}\" <class>))",
+            .{ net.name, @tagName(cls), net.name },
+        ) catch return;
+        try violations.append(allocator, .{
+            .kind = .layout_class_inferred,
+            .severity = .info,
+            .message = msg,
+            .net = net.name,
         });
     }
 }
@@ -2448,4 +2487,38 @@ test "main IC wrapped in a sub-block is not flagged" {
         violations.deinit(std.testing.allocator);
     }
     try std.testing.expectEqual(@as(usize, 0), violations.items.len);
+}
+
+// spec: erc - surfaces layout-critical net classes as info rows, staying silent on ground/power/plain-signal nets
+test "layout class surfacing flags only the interesting nets" {
+    const p1 = [_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "1" }};
+    const p2 = [_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "2" }};
+    const p3 = [_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "3" }};
+    const p4 = [_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "4" }};
+    const nets = [_]env_mod.Net{
+        .{ .name = "VIN", .pins = &p1 }, // input_rail → surfaced
+        .{ .name = "SW1", .pins = &p2 }, // switch_node → surfaced
+        .{ .name = "GND", .pins = &p3 }, // ground → silent
+        .{ .name = "GPIO5", .pins = &p4 }, // signal → silent
+    };
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &.{},
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkLayoutClasses(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 2), violations.items.len);
+    for (violations.items) |v| {
+        try std.testing.expectEqual(ViolationKind.layout_class_inferred, v.kind);
+        try std.testing.expectEqual(Severity.info, v.severity);
+    }
 }
