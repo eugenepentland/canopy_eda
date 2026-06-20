@@ -3729,6 +3729,8 @@ const PAGE_CSS =
     \\.part .court{transition:filter .08s}
     \\.part.hl .court{filter:drop-shadow(0 0 3px rgba(88,166,255,.75))}
     \\.part.sel .court{stroke:#58a6ff!important;stroke-width:2!important;filter:drop-shadow(0 0 4px rgba(88,166,255,.9))}
+    \\.part.msel .court{stroke:#d2a8ff!important;stroke-width:2!important;filter:drop-shadow(0 0 4px rgba(210,168,255,.85))}
+    \\.marquee{fill:rgba(88,166,255,.12);stroke:#58a6ff;stroke-width:1;stroke-dasharray:4 3;vector-effect:non-scaling-stroke;pointer-events:none}
     \\.pad{transition:fill .08s,filter .08s}
     \\.pad[data-net]{cursor:pointer}
     \\.pad.net-hl{fill:#f85149}
@@ -4166,6 +4168,15 @@ const BOARD_JS =
     \\function clearSel(){if(!selRef)return;selRef=null;renderProps();markSelPart();}
     \\if(!RO){
     \\var drag=null, cur=-1;
+    \\// Multi-select (marquee): sel = part indices currently box-selected; gdrag
+    \\// = an in-progress group move (every selected part shifts by the same grid-
+    \\// snapped delta). Highlighted with .msel (purple) vs the single .sel (blue).
+    \\var sel=[], gdrag=null;
+    \\function markSel(){els.forEach(function(g,i){g.classList.toggle("msel",sel.indexOf(i)>=0);});}
+    \\function selSet(idxs){sel=idxs;markSel();}
+    \\function selClear(){if(!sel.length)return;sel=[];markSel();}
+    \\function gdragStart(m,down){return {sx:m.x,sy:m.y,moved:false,down:down,
+    \\ orig:sel.map(function(k){return {i:k,x:P[k].x,y:P[k].y};})};}
     \\// Iterative layout editing: curLayout is the saved layout the Update button
     \\// writes back into (overwrite in place) instead of forcing a new one. Set by
     \\// Load and after a Save as…. Save/Update persist in place (no page reload — see
@@ -4185,13 +4196,21 @@ const BOARD_JS =
     \\ g.addEventListener("mouseenter",function(){cur=i;});
     \\ g.addEventListener("mouseleave",function(){if(cur===i)cur=-1;});
     \\ g.addEventListener("pointerdown",function(ev){ev.preventDefault();var m=mm(ev);
+    \\   if(sel.length>1&&sel.indexOf(i)>=0){gdrag=gdragStart(m,ev.target);g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";return;}
+    \\   if(sel.length)selClear();
     \\   drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y,down:ev.target};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});
-    \\ g.addEventListener("pointermove",function(ev){if(!drag||drag.i!==i)return;var m=mm(ev);
+    \\ g.addEventListener("pointermove",function(ev){
+    \\   if(gdrag){var gm=mm(ev),dx=Math.round((gm.x-gdrag.sx)/G)*G,dy=Math.round((gm.y-gdrag.sy)/G)*G,any=false;
+    \\     gdrag.orig.forEach(function(o){var nx=o.x+dx,ny=o.y+dy;if(P[o.i].x!==nx||P[o.i].y!==ny){P[o.i].x=nx;P[o.i].y=ny;setT(o.i);any=true;}});
+    \\     if(any){if(!gdrag.moved){gdrag.moved=true;clearRoute();}rats();drawClr();refreshUnplaced();}return;}
+    \\   if(!drag||drag.i!==i)return;var m=mm(ev);
     \\   var nx=Math.round((m.x+drag.ox)/G)*G,ny=Math.round((m.y+drag.oy)/G)*G;
     \\   if(nx===P[i].x&&ny===P[i].y)return;P[i].x=nx;P[i].y=ny;
     \\   if(!drag.moved){drag.moved=true;clearRoute();}setT(i);rats();drawClr();refreshUnplaced();
     \\   if(selRef===P[i].ref)updatePropLive();});
-    \\ g.addEventListener("pointerup",function(ev){var mv=drag&&drag.moved,dn=drag&&drag.down;drag=null;g.style.cursor="grab";
+    \\ g.addEventListener("pointerup",function(ev){
+    \\   if(gdrag){var gmv=gdrag.moved;gdrag=null;g.style.cursor="grab";try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(gmv)fetchScore();return;}
+    \\   var mv=drag&&drag.moved,dn=drag&&drag.down;drag=null;g.style.cursor="grab";
     \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(mv){fetchScore();return;}var net=netAt(dn);if(net)selNet(net);selectComp(P[i].ref);});
     \\ // Pads now sit in the top gPads layer, so a pointerdown on a pad no longer
     \\ // bubbles to the part group. Forward it: capture on g (the court group, which
@@ -4202,6 +4221,8 @@ const BOARD_JS =
     \\  pg.addEventListener("mouseenter",function(){cur=i;});
     \\  pg.addEventListener("mouseleave",function(){if(cur===i)cur=-1;});
     \\  pg.addEventListener("pointerdown",function(ev){ev.preventDefault();var m=mm(ev);
+    \\    if(sel.length>1&&sel.indexOf(i)>=0){gdrag=gdragStart(m,ev.target);g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";return;}
+    \\    if(sel.length)selClear();
     \\    drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y,down:ev.target};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});}
     \\});
     \\// Keyboard: R / Shift+R rotates the hovered part; ? toggles the
@@ -4216,7 +4237,10 @@ const BOARD_JS =
     \\  '<div class="kbd-row"><span>Rotate hovered part +90°</span><kbd>R</kbd></div>'+
     \\  '<div class="kbd-row"><span>Rotate hovered part −90°</span><kbd>Shift+R</kbd></div>'+
     \\  '<div class="kbd-row"><span>Move part (snaps to grid)</span><kbd>drag part</kbd></div>'+
-    \\  '<div class="kbd-row"><span>Pan</span><kbd>drag background</kbd></div>'+
+    \\  '<div class="kbd-row"><span>Select box (multi-select)</span><kbd>drag empty space</kbd></div>'+
+    \\  '<div class="kbd-row"><span>Move all selected together</span><kbd>drag a selected part</kbd></div>'+
+    \\  '<div class="kbd-row"><span>Clear selection</span><kbd>Esc / click empty</kbd></div>'+
+    \\  '<div class="kbd-row"><span>Pan</span><kbd>Space+drag &middot; middle-drag</kbd></div>'+
     \\  '<div class="kbd-row"><span>Zoom</span><kbd>scroll</kbd></div>'+
     \\  '<div class="kbd-row"><span>Toggle this help</span><kbd>?</kbd></div>'+
     \\  '<div class="kbd-hint">Esc or click anywhere to close</div></div>';
@@ -4229,8 +4253,13 @@ const BOARD_JS =
     \\// swallow R after any toggle click.)
     \\function kbTyping(t){if(!t)return false;if(t.isContentEditable||t.tagName=="TEXTAREA")return true;
     \\ return t.tagName=="INPUT"&&!/^(checkbox|radio|button|submit|reset|range|color|file)$/i.test(t.type||"text");}
+    \\// Space (held) switches an empty-space drag from marquee-select to pan; a
+    \\// keyup releases it. Guarded by kbTyping so Space still types in a field.
+    \\var SPACE=false;
+    \\document.addEventListener("keydown",function(ev){if((ev.key===" "||ev.code==="Space")&&!kbTyping(ev.target)){SPACE=true;ev.preventDefault();}});
+    \\document.addEventListener("keyup",function(ev){if(ev.key===" "||ev.code==="Space")SPACE=false;});
     \\document.addEventListener("keydown",function(ev){
-    \\ if(ev.key=="Escape"&&kbdOv){kbdClose();return;}
+    \\ if(ev.key=="Escape"){if(kbdOv){kbdClose();}else{selClear();clearSel();}return;}
     \\ var typing=kbTyping(ev.target);
     \\ if(ev.key=="?"&&!typing){ev.preventDefault();kbdToggle();return;}
     \\ if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();
@@ -4239,7 +4268,7 @@ const BOARD_JS =
     \\function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetchScore();refreshUnplaced();updatePropLive();
     \\ if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();}
     \\document.getElementById("pcb-reset").addEventListener("click",function(){
-    \\ P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;});applyAll();});
+    \\ selClear();P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;});applyAll();});
     \\document.getElementById("pcb-score").addEventListener("click",fetchScore);
     \\document.getElementById("t-apply").addEventListener("click",function(ev){ev.preventDefault();
     \\ var v=function(id){return encodeURIComponent(document.getElementById(id).value);};
@@ -4398,14 +4427,31 @@ const BOARD_JS =
     \\var zi=document.getElementById("z-in");if(zi)zi.addEventListener("click",function(){zc(0.8);});
     \\var zo=document.getElementById("z-out");if(zo)zo.addEventListener("click",function(){zc(1.25);});
     \\var zf=document.getElementById("z-fit");if(zf)zf.addEventListener("click",function(){vb={x:0,y:0,w:VBW,h:VBH};setVB();});
-    \\var pan=null;
+    \\// Empty-space drag = marquee select (pick every part whose centre lands in the
+    \\// box); Space-held or middle-button drag = pan instead. A no-move click clears
+    \\// the selection. The rubber-band rect lives in the top layer (pointer-events
+    \\// off) and is drawn in SVG coords via X()/Y() so it tracks pan/zoom.
+    \\var pan=null,marq=null,marqEl=null;
     \\svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.preventDefault();
-    \\ pan={cx:ev.clientX,cy:ev.clientY,vx:vb.x,vy:vb.y,moved:false};svg.setPointerCapture(ev.pointerId);svg.style.cursor="grabbing";});
-    \\svg.addEventListener("pointermove",function(ev){if(!pan)return;var r=svg.getBoundingClientRect();
-    \\ if(Math.abs(ev.clientX-pan.cx)>3||Math.abs(ev.clientY-pan.cy)>3)pan.moved=true;
-    \\ vb.x=pan.vx-(ev.clientX-pan.cx)*(vb.w/r.width);vb.y=pan.vy-(ev.clientY-pan.cy)*(vb.h/r.height);setVB();});
-    \\svg.addEventListener("pointerup",function(ev){var click=pan&&!pan.moved;pan=null;svg.style.cursor="";
-    \\ try{svg.releasePointerCapture(ev.pointerId);}catch(e){}if(click){clearSel();selNet(null);}});
+    \\ if(SPACE||ev.button===1){pan={cx:ev.clientX,cy:ev.clientY,vx:vb.x,vy:vb.y,moved:false};svg.setPointerCapture(ev.pointerId);svg.style.cursor="grabbing";return;}
+    \\ var m=mm(ev);marq={x0:m.x,y0:m.y,x1:m.x,y1:m.y,moved:false};svg.setPointerCapture(ev.pointerId);
+    \\ marqEl=el("rect",{"class":"marquee",x:0,y:0,width:0,height:0});gU.appendChild(marqEl);});
+    \\svg.addEventListener("pointermove",function(ev){
+    \\ if(pan){var r=svg.getBoundingClientRect();
+    \\  if(Math.abs(ev.clientX-pan.cx)>3||Math.abs(ev.clientY-pan.cy)>3)pan.moved=true;
+    \\  vb.x=pan.vx-(ev.clientX-pan.cx)*(vb.w/r.width);vb.y=pan.vy-(ev.clientY-pan.cy)*(vb.h/r.height);setVB();return;}
+    \\ if(marq){var m=mm(ev);marq.x1=m.x;marq.y1=m.y;
+    \\  if(Math.abs(m.x-marq.x0)>0.2||Math.abs(m.y-marq.y0)>0.2)marq.moved=true;
+    \\  var ax=Math.min(marq.x0,marq.x1),ay=Math.min(marq.y0,marq.y1),bx=Math.max(marq.x0,marq.x1),by=Math.max(marq.y0,marq.y1);
+    \\  marqEl.setAttribute("x",X(ax).toFixed(1));marqEl.setAttribute("y",Y(ay).toFixed(1));
+    \\  marqEl.setAttribute("width",((bx-ax)*S).toFixed(1));marqEl.setAttribute("height",((by-ay)*S).toFixed(1));return;}});
+    \\svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.pointerId);}catch(e){}
+    \\ if(pan){var click=!pan.moved;pan=null;svg.style.cursor="";if(click){selClear();clearSel();selNet(null);}return;}
+    \\ if(marq){var box=marq,mv=marq.moved;if(marqEl&&marqEl.parentNode)marqEl.parentNode.removeChild(marqEl);marqEl=null;marq=null;
+    \\  if(mv){var ax=Math.min(box.x0,box.x1),ay=Math.min(box.y0,box.y1),bx=Math.max(box.x0,box.x1),by=Math.max(box.y0,box.y1);
+    \\   var pick=[];P.forEach(function(p,i){if(p.x>=ax&&p.x<=bx&&p.y>=ay&&p.y<=by)pick.push(i);});
+    \\   clearSel();selSet(pick);}
+    \\  else{selClear();clearSel();selNet(null);}return;}});
     \\function viaGeo(){var va=parseFloat((document.getElementById("r-va")||{}).value),
     \\ vd=parseFloat((document.getElementById("r-vd")||{}).value);return {dia:va>0?va:0.4,drill:vd>0?vd:0.2};}
     \\function drawVia(g,wx,wy,dia,drill){var r=Math.max(dia/2*S,2.5),rh=Math.min(Math.max(drill/2*S,1),r*0.7);
