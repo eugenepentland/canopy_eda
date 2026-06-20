@@ -3119,6 +3119,26 @@ fn hubPadsOnNet(arena: std.mem.Allocator, hub: Part, hi: usize, net: FlatNet, id
     return out.toOwnedSlice(arena);
 }
 
+/// Footprint-local centre of the anchor hub's pad named `tok` (a `(decouples "IC"
+/// PIN)` binding or a generator's `value@PAD#replica` origin pad), but ONLY when
+/// that pad lies on one of part `pi`'s own nets. The net scoping rejects a
+/// cross-hub binding: a `(decouples "U2" 8)` cap names U2's pad 8, and the anchor
+/// U1 may carry an unrelated pad 8 on a different net — without the on-net check it
+/// would mis-resolve to U1's pad 8. Null when `tok` is empty or names no on-net hub pad.
+fn servedPadLocal(parts: []const Part, hi: usize, pi: usize, tok: []const u8, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) ?[2]f64 {
+    if (tok.len == 0) return null;
+    for (nets) |net| {
+        if (!netHasPart(net, pi, idx_of)) continue;
+        for (net.pins) |pr| {
+            if ((idx_of.get(pr.ref_des) orelse continue) != hi) continue;
+            if (!std.mem.eql(u8, pr.pin, tok)) continue;
+            const pad = padLocal(parts[hi], pr.pin);
+            if (pad.w != 0 or pad.h != 0) return .{ pad.x, pad.y };
+        }
+    }
+    return null;
+}
+
 /// True when a part's flattened ref-des or module-local origin name matches an
 /// author token from a `(rough …)` anchor/group — exact or by leaf segment, the
 /// same lenient match `(module-policy …)` uses so a token written in a module
@@ -3317,10 +3337,13 @@ fn buildClusters(
 }
 
 /// Choose each non-hub part's anchor pad and bucket it onto a side of the IC.
-/// A decoupling CAP spreads across its rail's pads (round-robin); a signal part
-/// sits by its own IC pad; a cluster orphan (no IC signal pad) docks at its
-/// subsystem's attach centroid so connected parts stay together; anything with no
-/// IC connection drops to `leftover`. Pad offset → side + along-edge coordinate.
+/// A decoupling CAP with a served-pad binding (`served_pad`, from `(decouples "IC"
+/// PIN)` / a per-pin generator) docks on the edge of THAT pad — so the bypass caps
+/// distribute around the package next to the pins they serve, like a hand layout;
+/// an unbound cap spreads across its rail's pads (round-robin). A signal part sits
+/// by its own IC pad; a cluster orphan (no IC signal pad) docks at its subsystem's
+/// attach centroid so connected parts stay together; anything with no IC connection
+/// drops to `leftover`. Pad offset → side + along-edge coordinate.
 fn assignSides(
     arena: std.mem.Allocator,
     parts: []Part,
@@ -3331,6 +3354,7 @@ fn assignSides(
     ci: ClusterInfo,
     tier_of: []const usize,
     sig_side: []u8,
+    served_pad: []const ?[2]f64,
     sides: *[4]std.ArrayListUnmanaged(SidePart),
     leftover: *std.ArrayListUnmanaged(usize),
 ) std.mem.Allocator.Error!void {
@@ -3396,10 +3420,14 @@ fn assignSides(
             sig_side[pi] = if (sv) (if (a[0] < 0) @as(u8, 0) else 1) else (if (a[1] < 0) @as(u8, 2) else 3);
         }
         const is_cap = leafRefPrefix(p.ref_des) == 'C';
-        // Decide the anchor pad: rail round-robin for decoupling caps, else the
-        // part's own signal pad, else its cluster's attach, else leftover.
+        // Decide the anchor pad: a decoupling cap with a served-pad binding docks on
+        // THAT pad (distributing the bypass caps to the pins they serve, like a hand
+        // layout); else rail round-robin for an unbound cap; else the part's own
+        // signal pad; else its cluster's attach; else leftover.
         var pad: [2]f64 = undefined;
-        if (is_cap and rail != null and rail_cnt >= CLUSTER_MAX_RAIL_PADS) {
+        if (is_cap and served_pad[pi] != null) {
+            pad = served_pad[pi].?;
+        } else if (is_cap and rail != null and rail_cnt >= CLUSTER_MAX_RAIL_PADS) {
             pad = (try rrPad(arena, parts, hi, nets, idx_of, &net_next, rail.?)) orelse {
                 try leftover.append(arena, pi);
                 continue;
@@ -4015,7 +4043,29 @@ fn packPadAnchored(
     const ci = try buildClusters(arena, parts, hi, nets, &prep.idx_of);
     const sig_side = try arena.alloc(u8, parts.len);
     @memset(sig_side, 255);
-    try assignSides(arena, parts, hi, nets, &prep.idx_of, roles, ci, tier_of, sig_side, &sides, &leftover);
+    // Per-cap served decoupling pad (from `(decouples "IC" PIN)` or a per-pin
+    // generator key), net-scoped to the anchor hub. Lets `assignSides` dock each
+    // bound bypass cap on the edge of the pad it serves — the hand-layout spread —
+    // instead of round-robining it. Rough path only (`cohere`): the force seed
+    // keeps its round-robin spread so its tuned solve stays bit-identical to before.
+    const served_pad = try arena.alloc(?[2]f64, parts.len);
+    @memset(served_pad, null);
+    if (cohere) {
+        for (parts, 0..) |_, pi| {
+            if (pi == hi) continue;
+            var tok: []const u8 = "";
+            if (pi < prep.instances.len) {
+                const inst = prep.instances[pi];
+                if (inst.decouple_pin.len > 0) {
+                    tok = inst.decouple_pin;
+                } else if (decouplePinFromOrigin(inst.origin_key)) |p| {
+                    tok = p;
+                }
+            }
+            served_pad[pi] = servedPadLocal(parts, hi, pi, tok, nets, &prep.idx_of);
+        }
+    }
+    try assignSides(arena, parts, hi, nets, &prep.idx_of, roles, ci, tier_of, sig_side, served_pad, &sides, &leftover);
 
     // Cohere each authored `(group …)` onto one IC edge (the side its
     // directionally-anchored members vote for) so a functional subsystem stays
@@ -10336,6 +10386,38 @@ test "cohereGroups coheres an anchored group and leaves a pure-bypass group dist
     // BYP members stayed on their seeded sides (C3 left, C4 right).
     try testing.expectEqual(@as(usize, 1), sides[0].items.len);
     try testing.expectEqual(@as(usize, 1), sides[1].items.len);
+}
+
+// spec: placement/optimizer - servedPadLocal resolves a decoupling cap's bound hub pad on-net and rejects a cross-hub binding
+test "servedPadLocal resolves a bound pad on-net and rejects cross-hub bindings" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    // U1 (idx 0) has pads 10@(3,0); U2 (idx 1) has an unrelated pad 8@(0,5).
+    const u1_pads = [_]geometry.Pad{.{ .number = "10", .x = 3, .y = 0, .w = 0.3, .h = 0.3 }};
+    const u2_pads = [_]geometry.Pad{.{ .number = "8", .x = 0, .y = 5, .w = 0.3, .h = 0.3 }};
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 4, .hh = 4, .pads = &u1_pads, .fallback = false },
+        .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &u2_pads, .fallback = false },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.3, .hh = 0.3, .pads = &.{}, .fallback = false },
+    };
+    // C1 sits on DVDD with U1 pad 10; it does NOT touch U2's pad 8.
+    const nets = [_]FlatNet{
+        .{ .name = "DVDD", .pins = &.{ .{ .ref_des = "U1", .pin = "10" }, .{ .ref_des = "C1", .pin = "1" } } },
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("U1", 0);
+    try idx_of.put("U2", 1);
+    try idx_of.put("C1", 2);
+    // Bound to U1 pad 10 on its own net → resolves to that pad's centre (3,0).
+    const got = servedPadLocal(&parts, 0, 2, "10", &nets, &idx_of);
+    try testing.expect(got != null);
+    try testing.expectApproxEqAbs(@as(f64, 3), got.?[0], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0), got.?[1], 1e-9);
+    // A cross-hub token (U2's pad 8, off C1's net at U1) → null, never mis-docked.
+    try testing.expect(servedPadLocal(&parts, 0, 2, "8", &nets, &idx_of) == null);
+    // Empty token → null.
+    try testing.expect(servedPadLocal(&parts, 0, 2, "", &nets, &idx_of) == null);
 }
 
 // spec: placement/optimizer - decouplePinFromOrigin reads the decoupled pad from a per-pin cap's structural key
