@@ -98,6 +98,12 @@ pub const FlatInstance = struct {
     /// Do Not Populate — carried from the source instance's `(dnp)` flag.
     /// Default false so literal builders may omit it.
     dnp: bool = false,
+    /// `(decouples "IC" PIN)` target pad, carried from the source instance so the
+    /// placement optimizer can pin this cap's decoupling-loop / ratsnest to that
+    /// hub pad. "" ⇒ no binding. `decouple_rail` carries `(decouples rail)`, the
+    /// opt-out that exempts the cap from the per-pin-decoupling lint.
+    decouple_pin: []const u8 = "",
+    decouple_rail: bool = false,
 };
 
 /// One net in the flattened design with a hierarchically-prefixed name and

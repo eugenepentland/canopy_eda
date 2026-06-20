@@ -626,6 +626,10 @@ pub const Loop = struct {
     /// read surface (the PCB sidebar) show the authored decoupling target, not a
     /// solver default. Set in `hugToHub`.
     explicit_pin: []const u8 = "",
+    /// `(decouples rail)` opt-out: this cap deliberately serves the whole rail,
+    /// so the per-pin-decoupling lint must not demand a pad binding for it. Set
+    /// in `hugToHub` from the cap's source instance.
+    rail_optout: bool = false,
 };
 
 /// `buildSprings` output: the force list plus the decoupling loops to score.
@@ -5330,8 +5334,17 @@ fn prepare(
     // bypass loop targets the pin it serves (and the part shows that target on
     // the layout). These caps are auto-named, so this is the only way to pin
     // them — a hand-authored (placement-order/group …) (near …) overrides below.
+    // `(decouples rail)` opt-out flags, parallel to `explicit_pin` — caps that
+    // serve the whole rail and so are exempt from the per-pin-decoupling lint.
+    const rail_optout = try arena.alloc(bool, instances.len);
+    @memset(rail_optout, false);
     for (instances, 0..) |inst, pi| {
         if (decouplePinFromOrigin(inst.origin_key)) |pin| explicit_pin[pi] = pin;
+        // A `(decouples "IC" PIN)` instance binding pins the loop to that pad —
+        // more authoritative than the structural-key default, less than a
+        // hand-authored (placement-order … (near …)) below.
+        if (inst.decouple_pin.len > 0) explicit_pin[pi] = inst.decouple_pin;
+        if (inst.decouple_rail) rail_optout[pi] = true;
     }
     for (block.placement_order) |po| {
         const k: u32 = @intCast(po.entries.len);
@@ -5342,7 +5355,7 @@ fn prepare(
         }
     }
 
-    const built = try buildSprings(arena, nets, parts, &idx_of, roles, explicit_pin);
+    const built = try buildSprings(arena, nets, parts, &idx_of, roles, explicit_pin, rail_optout);
     classify(parts, built.loops, nets, params.cap_w_max, params.input_loop_boost, priority);
     // Declared rail currents (ports' `(current …)`, pins' `(i-typ …)`) → the
     // per-net congestion corridor widths `congestPitch` reads.
@@ -7541,6 +7554,7 @@ fn buildSprings(
     idx_of: *std.StringHashMap(usize),
     roles: []const pin_roles.PartRoles,
     explicit_pin: []const []const u8,
+    rail_optout: []const bool,
 ) std.mem.Allocator.Error!Built {
     const gnd = try groundPads(arena, nets, parts, idx_of, roles);
     var springs: std.ArrayListUnmanaged(Spring) = .empty;
@@ -7568,7 +7582,7 @@ fn buildSprings(
 
         const single_hub = hub_idx != null and !multi_hub;
         if (single_hub) {
-            try hugToHub(arena, &springs, &loops, &legs, eps.items, hub_idx.?, gnd, roles, explicit_pin, @intCast(net_i), net.name);
+            try hugToHub(arena, &springs, &loops, &legs, eps.items, hub_idx.?, gnd, roles, explicit_pin, rail_optout, @intCast(net_i), net.name);
         } else {
             try weakCluster(arena, &springs, eps.items, net.name);
         }
@@ -7787,6 +7801,7 @@ fn hugToHub(
     gnd: []const []const PadRect,
     roles: []const pin_roles.PartRoles,
     explicit_pin: []const []const u8,
+    rail_optout: []const bool,
     net_i: i32,
     net_name: []const u8,
 ) std.mem.Allocator.Error!void {
@@ -7853,6 +7868,7 @@ fn hugToHub(
                 .pwr_net = net_i,
                 // Only an authored, on-this-net `(near <pin>)` counts as explicit.
                 .explicit_pin = if (named_rect != null) explicit_pin[e.idx] else "",
+                .rail_optout = rail_optout[e.idx],
             });
         } else {
             // Non-decoupling single-hub passive: hug the hub's pad centroid.

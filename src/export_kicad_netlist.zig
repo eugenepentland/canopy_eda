@@ -197,6 +197,8 @@ pub fn collectInstances(
             .properties = inst.properties,
             .uuid = effective_uuid,
             .dnp = inst.dnp,
+            .decouple_pin = inst.decouple_pin,
+            .decouple_rail = inst.decouple_rail,
         });
     }
     for (block.sub_blocks) |sb| {

@@ -71,6 +71,7 @@ pub fn lint(alloc: Allocator, p: Placement, policy: mp.ModulePolicy) Allocator.E
     try lintDecapDistance(alloc, p, policy, &out);
     try lintHotLoopTightest(alloc, p, policy, &out);
     try lintFeedbackAggressor(alloc, p, policy, &out);
+    try lintDecoupleUnbound(alloc, p, policy, &out);
     return out.toOwnedSlice(alloc);
 }
 
@@ -98,6 +99,37 @@ fn lintDecapDistance(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, ou
         .severity = .warn,
         .refs = refs_owned,
         .msg = "decoupling cap power-leg exceeds ~6 mm to its supply pin; the long leg adds loop inductance that defeats the cap — move it onto the IC's pin",
+    });
+}
+
+/// `decouple-unbound`: a high-frequency decoupling cap on a rail that lands on
+/// ≥2 of the hub's *supply* pads (straps like EN/PG already excluded from that
+/// count), with no per-pin binding — so its loop + ratsnest collapse onto one
+/// (lowest-numbered) pad instead of declaring which pin it serves. The author
+/// should bind it with `(decouples "IC" PIN)` (or a `(decouple … per-pin)`
+/// form), or, if it genuinely serves the whole rail, mark `(decouples rail)`.
+/// Exemptions: bulk reservoirs (rail-level by nature) and single-supply-pad
+/// rails (the target is unambiguous — e.g. a buck VIN, never the enable strap).
+fn lintDecoupleUnbound(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, out: *std.ArrayListUnmanaged(Finding)) Allocator.Error!void {
+    var refs: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer refs.deinit(alloc);
+    for (p.loops) |L| {
+        if (L.explicit_pin.len > 0) continue; // already bound (decouples / near / per-pin)
+        if (L.rail_optout) continue; // explicit (decouples rail) opt-out
+        if (L.cap < policy.part_role.len and policy.part_role[L.cap] == .bulk_cap) continue; // bulk exempt
+        if (L.hub_pwr.len < 2) continue; // one supply pad ⇒ binding is unambiguous
+        try refs.append(alloc, p.parts[L.cap].ref_des);
+    }
+    if (refs.items.len == 0) return;
+    const refs_owned = try alloc.dupe([]const u8, refs.items);
+    errdefer alloc.free(refs_owned);
+    try out.append(alloc, .{
+        .rule = "decouple-unbound",
+        .severity = .warn,
+        .refs = refs_owned,
+        .msg = "HF decoupling cap on a multi-pin rail has no pin binding — its loop " ++
+            "collapses onto one supply pad. Bind it with (decouples \"IC\" PIN) or a " ++
+            "(decouple … per-pin) form, or mark (decouples rail) if it serves the whole rail",
     });
 }
 
@@ -312,6 +344,60 @@ test "lint flags a feedback part next to the inductor" {
     try testing.expectEqualStrings("feedback-near-aggressor", findings[0].rule);
     try testing.expectEqualStrings("R1", findings[0].refs[0]);
     try testing.expectEqualStrings("L1", findings[0].refs[1]);
+}
+
+// spec: placement/layout_lint - flags an HF decoupling cap on a multi-supply-pad rail with no pin binding, exempting (decouples rail) opt-outs
+test "lint flags an unbound decoupling cap on a multi-pin rail" {
+    var hub_pads = [_]geometry.Pad{ pad("1"), pad("2") };
+    var c1_pads = [_]geometry.Pad{pad("1")};
+    var c2_pads = [_]geometry.Pad{pad("1")};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &hub_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &c1_pads, .fallback = false, .x = 1, .y = 0 },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &c2_pads, .fallback = false, .x = 1, .y = 1 },
+    };
+    // Two supply pads on the rail ⇒ the binding is ambiguous and must be declared.
+    var hub_pwr = [_]optimizer.PadRect{ .{ .x = 0, .y = 0, .w = 0.5, .h = 0.5 }, .{ .x = 0.5, .y = 0, .w = 0.5, .h = 0.5 } };
+    var hub_gnd = [_]optimizer.PadRect{.{ .x = 0, .y = 0.5, .w = 0.5, .h = 0.5 }};
+    const mkLoop = struct {
+        fn f(cap: usize, hp: []optimizer.PadRect, hg: []optimizer.PadRect, optout: bool) optimizer.Loop {
+            return .{
+                .cap = cap,
+                .hub = 0,
+                .cap_pwr = .{ .x = 0, .y = 0, .w = 0.5, .h = 0.5 },
+                .cap_gnd = .{ .x = 0, .y = 0.5, .w = 0.5, .h = 0.5 },
+                .hub_pwr = hp,
+                .hub_pwr_pin = hp[0],
+                .hub_gnd = hg,
+                .hub_gnd_pin = hg[0],
+                .pwr_net = 0,
+                .weight = 1,
+                .rail_optout = optout,
+            };
+        }
+    }.f;
+    var loops = [_]optimizer.Loop{
+        mkLoop(1, &hub_pwr, &hub_gnd, false), // C1 unbound → flagged
+        mkLoop(2, &hub_pwr, &hub_gnd, true), // C2 (decouples rail) → exempt
+    };
+    const n1 = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+    const nets = [_]export_kicad.FlatNet{.{ .name = "VDD", .pins = &n1 }};
+    const p = mkPlacement(&parts, &loops, &nets);
+
+    var ncs = [_]NetClass{.power};
+    var prs = [_]PartRole{ .anchor_ic, .decoupling_cap, .decoupling_cap };
+    const policy = mp.ModulePolicy{ .net_class = &ncs, .part_role = &prs, .modules = &.{} };
+
+    const findings = try lint(testing.allocator, p, policy);
+    defer freeFindings(testing.allocator, findings);
+    var found = false;
+    for (findings) |fdg| {
+        if (!std.mem.eql(u8, fdg.rule, "decouple-unbound")) continue;
+        found = true;
+        try testing.expectEqual(@as(usize, 1), fdg.refs.len); // only C1; C2 opted out
+        try testing.expectEqualStrings("C1", fdg.refs[0]);
+    }
+    try testing.expect(found);
 }
 
 fn mkPlacement(parts: []optimizer.Part, loops: []const optimizer.Loop, nets: []const export_kicad.FlatNet) Placement {

@@ -164,8 +164,11 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     var inline_notes: std.ArrayListUnmanaged(Note) = .empty;
     var inline_props: std.ArrayListUnmanaged(env_mod.Property) = .empty;
     var dnp_flag = false;
+    var decouple_ic: []const u8 = "";
+    var decouple_pin: []const u8 = "";
+    var decouple_rail = false;
 
-    const known_forms = [_][]const u8{ "pin", "note", "bus", "id", "as", "dnp" };
+    const known_forms = [_][]const u8{ "pin", "note", "bus", "id", "as", "dnp", "decouples" };
 
     for (args[2..]) |form| {
         if (form.isForm("note")) {
@@ -181,6 +184,23 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
         } else if (form.isForm("dnp")) {
             // (dnp) — mark Do Not Populate. Bare flag form (no value).
             dnp_flag = true;
+        } else if (form.isForm("decouples")) {
+            // (decouples "IC" PIN) — bind this cap's power leg to a specific hub
+            // pad; (decouples rail) — opt out of the per-pin-decoupling lint.
+            const dc = form.asList().?;
+            if (dc.len == 2 and std.mem.eql(u8, dc[1].asAtom() orelse "", "rail")) {
+                decouple_rail = true;
+            } else if (dc.len >= 3) {
+                const ic_val = try self.evalNode(dc[1], env);
+                decouple_ic = ic_val.asString() orelse (dc[1].asAtom() orelse "");
+                // Resolve PIN the same way (pin …) does: a function name maps
+                // through the pinout to its physical pad, a number stays as-is —
+                // so the binding matches the hub's physical pad id the placer uses.
+                const raw = ids.pinId(self, dc[2]) orelse "";
+                decouple_pin = if (reverse_pinout) |rp| (resolvePinName(self, rp, raw) orelse raw) else raw;
+            } else {
+                self.warnFmt(form.span, "(decouples …) on \"{s}\" — expected (decouples \"IC\" PIN) or (decouples rail)", .{ref_des});
+            }
         } else if (form.isForm("bus")) {
             // (bus "NET_PREFIX" "BUS_NAME") -- expand component bus definition
             const bc = form.asList().?;
@@ -233,6 +253,9 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
 
     var final_inst = inst;
     final_inst.dnp = dnp_flag;
+    final_inst.decouple_ic = decouple_ic;
+    final_inst.decouple_pin = decouple_pin;
+    final_inst.decouple_rail = decouple_rail;
 
     // Merge properties: start with component defaults, override with inline
     if (inline_props.items.len > 0) {
@@ -629,4 +652,47 @@ test "evalFanoutForm stars one component from common to each target net" {
     try testing.expectEqualStrings("VA", all_pin_nets.items[1].net);
     try testing.expectEqualStrings("V1P8", all_pin_nets.items[2].net);
     try testing.expectEqualStrings("VC", all_pin_nets.items[5].net);
+}
+
+// spec: eval/instance - (decouples "IC" PIN) binds a cap to a specific hub pad
+test "decouples form sets the instance pin binding" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    try eval.component_cache.put(alloc, "cap-0402", .{
+        .name = "cap-0402",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "",
+    });
+    const src = "(instance \"C1\" (cap-0402 \"100nF\") (pin 1 \"VDD\") (pin 2 \"GND\") (decouples \"U1\" 24))";
+    const nodes = try parser_mod.parse(alloc, src);
+    const res = try buildInstance(&eval, nodes[0].asList().?, &env);
+    try testing.expectEqualStrings("U1", res.instance.decouple_ic);
+    try testing.expectEqualStrings("24", res.instance.decouple_pin);
+    try testing.expect(!res.instance.decouple_rail);
+}
+
+// spec: eval/instance - (decouples rail) opts a cap out of the per-pin-decoupling requirement
+test "decouples rail sets the rail opt-out flag" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    try eval.component_cache.put(alloc, "cap-0402", .{
+        .name = "cap-0402",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "",
+    });
+    const src = "(instance \"C9\" (cap-0402 \"10uF\") (pin 1 \"VDD\") (pin 2 \"GND\") (decouples rail))";
+    const nodes = try parser_mod.parse(alloc, src);
+    const res = try buildInstance(&eval, nodes[0].asList().?, &env);
+    try testing.expect(res.instance.decouple_rail);
+    try testing.expectEqualStrings("", res.instance.decouple_pin);
 }
