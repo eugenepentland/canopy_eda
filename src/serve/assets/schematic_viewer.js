@@ -71,8 +71,11 @@
   }
   function flash(el) {
     if (!el) return;
+    // Drop any lingering flash from a previous pick so rapid clicks don't stack.
+    document.querySelectorAll('.flash').forEach(function (n) { n.classList.remove('flash'); });
     el.classList.add('flash');
-    setTimeout(function () { el.classList.remove('flash'); }, 900);
+    // Long enough to cover the two-pulse CSS animation (.7s × 2).
+    setTimeout(function () { el.classList.remove('flash'); }, 1500);
   }
   function scrollTo(el) {
     if (!el) return;
@@ -851,9 +854,13 @@
     var c = compByRef[ref];
     if (!c) return;
     if (doScroll) {
+      // Hubs (U/J/…) are HTML `.sch-hub` cards; passives are inline
+      // `<g class="component">` symbols nested *inside* a hub's SVG. Flash
+      // whichever we matched directly — walking up to `.closest('.sch-hub')`
+      // would wrongly light up the enclosing IC card instead of the passive.
       var anchor = document.querySelector('.sch-hub[data-ref="' + cssEscape(ref) + '"]')
                 || document.querySelector('svg [data-ref="' + cssEscape(ref) + '"].component');
-      if (anchor) { scrollTo(anchor); flash(anchor.closest('.sch-hub') || anchor); }
+      if (anchor) { scrollTo(anchor); flash(anchor); }
     }
     var backTarget = c.section && sectionBySlug[c.section] ? c.section : null;
     var html = '<span class="sb-back" data-back="' + (backTarget ? escapeHtml(backTarget) : '') + '">← ' +
