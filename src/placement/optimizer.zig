@@ -7583,6 +7583,11 @@ fn buildSprings(
         const single_hub = hub_idx != null and !multi_hub;
         if (single_hub) {
             try hugToHub(arena, &springs, &loops, &legs, eps.items, hub_idx.?, gnd, roles, explicit_pin, rail_optout, @intCast(net_i), net.name);
+        } else if (multi_hub) {
+            // A rail shared by ≥2 ICs: honour each cap's explicit `(decouples …)`
+            // pin binding with a real loop to the hub that owns the named pad,
+            // instead of collapsing the whole rail into one weak cluster.
+            try clusterMultiHub(arena, &springs, &loops, eps.items, gnd, roles, explicit_pin, rail_optout, @intCast(net_i), net.name);
         } else {
             try weakCluster(arena, &springs, eps.items, net.name);
         }
@@ -7805,16 +7810,64 @@ fn hugToHub(
     net_i: i32,
     net_name: []const u8,
 ) std.mem.Allocator.Error!void {
-    // The hub's pads on this (power) net seed the loop target / hug centroid.
-    // Config straps tied to the rail (a declared `input`/`output`/`io` pin such
-    // as EN/UV or PGFB) are dropped so the bypass cap hugs the real supply pins,
-    // not a control pin that merely shares the net. If every hub pad is a strap
-    // we keep them all, so a rail is never left without a target.
+    const tgt = (try hubTargets(arena, eps, hub, roles)) orelse return;
+
+    for (eps) |e| {
+        if (e.idx == hub or e.is_hub) continue;
+        const decouple = gnd[e.idx].len > 0 and gnd[hub].len > 0;
+        if (decouple) {
+            try emitCapLoop(arena, loops, eps, e, hub, tgt, gnd, explicit_pin, rail_optout, net_i);
+        } else {
+            // Non-decoupling single-hub passive: hug the hub's pad centroid.
+            try springs.append(arena, .{
+                .a = e.idx,
+                .b = hub,
+                .ax = e.px,
+                .ay = e.py,
+                .bx = tgt.centroid.x,
+                .by = tgt.centroid.y,
+                .k = K_PROX,
+                .kind = .proximity,
+                .net = net_name,
+            });
+            // Record the leg — `pairSeriesLegs` turns a 2-pad part with two of
+            // these (to the same hub) into a `SeriesPair`.
+            try legs.append(arena, .{
+                .part = e.idx,
+                .hub = hub,
+                .part_pad = .{ .x = e.px, .y = e.py, .w = e.pw, .h = e.ph },
+                .hub_pad = .{ .x = tgt.centroid.x, .y = tgt.centroid.y, .w = 0, .h = 0 },
+            });
+        }
+    }
+}
+
+/// A hub's target geometry on one (power) net, shared by the single-hub
+/// (`hugToHub`) and multi-hub (`clusterMultiHub`) paths.
+const HubTarget = struct {
+    /// The hub's supply pads on the net (kept as a slice so `classify` can group
+    /// caps that share a rail by pointer identity).
+    hub_pwr_s: []const PadRect,
+    /// Lowest-numbered real supply pad — the pinned loop target for a cap with no
+    /// explicit pin. Fixing it removes the per-eval argmin flip.
+    default_pin_rect: PadRect,
+    /// Centroid of the chosen pads — the non-decoupling hug spring target.
+    centroid: Pt,
+};
+
+/// The hub's pads on this (power) net. Config straps tied to the rail (a declared
+/// `input`/`output`/`io` pin such as EN/UV or PGFB) are dropped so a bypass cap
+/// hugs the real supply pins, not a control pin that merely shares the net; if
+/// every hub pad is a strap we keep them all so a rail is never left targetless.
+/// Returns null when the hub has no pad on this net.
+fn hubTargets(
+    arena: std.mem.Allocator,
+    eps: []const Endpoint,
+    hub: usize,
+    roles: []const pin_roles.PartRoles,
+) std.mem.Allocator.Error!?HubTarget {
     var hub_all: std.ArrayListUnmanaged(PadRect) = .empty;
     var hub_real: std.ArrayListUnmanaged(PadRect) = .empty;
-    // Lowest-numbered real supply pad — the default pinned target for a cap that
-    // doesn't name an explicit pin (`(near <pin> …)`). Fixing it removes the
-    // per-eval argmin flip that made the score jump on a small nudge.
     var def_rect: ?PadRect = null;
     var def_pin: []const u8 = "";
     for (eps) |e| {
@@ -7829,9 +7882,8 @@ fn hugToHub(
             }
         }
     }
-    if (hub_all.items.len == 0) return;
+    if (hub_all.items.len == 0) return null;
     const hub_pwr_s = if (hub_real.items.len > 0) try hub_real.toOwnedSlice(arena) else try hub_all.toOwnedSlice(arena);
-    // Centroid of the chosen pads — the non-decoupling spring target.
     var hx: f64 = 0;
     var hy: f64 = 0;
     for (hub_pwr_s) |p| {
@@ -7839,60 +7891,97 @@ fn hugToHub(
         hy += p.y;
     }
     const hn: f64 = @floatFromInt(hub_pwr_s.len);
-    const ht = Pt{ .x = hx / hn, .y = hy / hn };
-    // Default pinned target: the lowest-numbered real supply pad, or the first
-    // hub pad when every pad was a strap (kept above so the rail isn't dropped).
-    const default_pin_rect = def_rect orelse hub_pwr_s[0];
+    return .{
+        .hub_pwr_s = hub_pwr_s,
+        .default_pin_rect = def_rect orelse hub_pwr_s[0],
+        .centroid = .{ .x = hx / hn, .y = hy / hn },
+    };
+}
 
-    for (eps) |e| {
-        if (e.idx == hub or e.is_hub) continue;
-        const decouple = gnd[e.idx].len > 0 and gnd[hub].len > 0;
-        if (decouple) {
-            // Pin the power leg to one hub pad — the cap's explicitly-named pin
-            // (`(near <pin> …)`) if it's on this net, else the lowest-numbered
-            // supply pad. Fixing the target removes the per-eval argmin flip.
-            const named_rect = findHubPin(eps, hub, explicit_pin[e.idx]);
-            const pin_rect = named_rect orelse default_pin_rect;
-            // The ground return targets the hub GND pad nearest that power pin —
-            // also fixed (no flip), so the loop is a coherent local pin pair.
-            const gnd_rect = nearestPad(gnd[hub], pin_rect);
-            try loops.append(arena, .{
-                .cap = e.idx,
-                .hub = hub,
-                .cap_pwr = .{ .x = e.px, .y = e.py, .w = e.pw, .h = e.ph },
-                .cap_gnd = gnd[e.idx][0],
-                .hub_pwr = hub_pwr_s,
-                .hub_pwr_pin = pin_rect,
-                .hub_gnd = gnd[hub],
-                .hub_gnd_pin = gnd_rect,
-                .pwr_net = net_i,
-                // Only an authored, on-this-net `(near <pin>)` counts as explicit.
-                .explicit_pin = if (named_rect != null) explicit_pin[e.idx] else "",
-                .rail_optout = rail_optout[e.idx],
-            });
-        } else {
-            // Non-decoupling single-hub passive: hug the hub's pad centroid.
-            try springs.append(arena, .{
-                .a = e.idx,
-                .b = hub,
-                .ax = e.px,
-                .ay = e.py,
-                .bx = ht.x,
-                .by = ht.y,
-                .k = K_PROX,
-                .kind = .proximity,
-                .net = net_name,
-            });
-            // Record the leg — `pairSeriesLegs` turns a 2-pad part with two of
-            // these (to the same hub) into a `SeriesPair`.
-            try legs.append(arena, .{
-                .part = e.idx,
-                .hub = hub,
-                .part_pad = .{ .x = e.px, .y = e.py, .w = e.pw, .h = e.ph },
-                .hub_pad = .{ .x = ht.x, .y = ht.y, .w = 0, .h = 0 },
-            });
-        }
+/// Append one decoupling cap's hot loop against `hub`. The power leg is pinned to
+/// the cap's named pad (`explicit_pin` — e.g. from `(decouples "IC" PIN)` or a
+/// `(near <pin>)`) when that pad is on this net, else to `tgt.default_pin_rect`;
+/// the ground return targets the hub GND pad nearest that power pin. Both targets
+/// are fixed (no per-eval argmin), so loop cost stays continuous in the cap's
+/// position. Caller guarantees both the cap and the hub have a ground pad.
+fn emitCapLoop(
+    arena: std.mem.Allocator,
+    loops: *std.ArrayListUnmanaged(Loop),
+    eps: []const Endpoint,
+    e: Endpoint,
+    hub: usize,
+    tgt: HubTarget,
+    gnd: []const []const PadRect,
+    explicit_pin: []const []const u8,
+    rail_optout: []const bool,
+    net_i: i32,
+) std.mem.Allocator.Error!void {
+    const named_rect = findHubPin(eps, hub, explicit_pin[e.idx]);
+    const pin_rect = named_rect orelse tgt.default_pin_rect;
+    const gnd_rect = nearestPad(gnd[hub], pin_rect);
+    try loops.append(arena, .{
+        .cap = e.idx,
+        .hub = hub,
+        .cap_pwr = .{ .x = e.px, .y = e.py, .w = e.pw, .h = e.ph },
+        .cap_gnd = gnd[e.idx][0],
+        .hub_pwr = tgt.hub_pwr_s,
+        .hub_pwr_pin = pin_rect,
+        .hub_gnd = gnd[hub],
+        .hub_gnd_pin = gnd_rect,
+        .pwr_net = net_i,
+        // Only an authored, on-this-net pin counts as explicit.
+        .explicit_pin = if (named_rect != null) explicit_pin[e.idx] else "",
+        .rail_optout = rail_optout[e.idx],
+    });
+}
+
+/// The hub endpoint that owns pad `want` on this net. A physical pad belongs to
+/// exactly one IC, so the named pin disambiguates which hub a `(decouples …)`
+/// cap binds to on a rail shared by several ICs. Null if no hub matches.
+fn hubOwningPin(eps: []const Endpoint, want: []const u8) ?usize {
+    if (want.len == 0) return null;
+    for (eps) |h| {
+        if (h.is_hub and std.mem.eql(u8, h.pin, want)) return h.idx;
     }
+    return null;
+}
+
+/// A net with ≥2 hub ICs (e.g. a supply rail landing on both an MCU and a QSPI
+/// flash) has no single hub to hug, so its endpoints normally fall to the weak
+/// centre-pull `weakCluster`. But a decoupling cap that *names* its pad via
+/// `(decouples "IC" PIN)` (or a generator stub key) still wants a real loop to
+/// that exact pin — silently demoting it to a weak cluster is the layout bug
+/// this guards against. Peel each explicitly-bound decoupling cap into a `Loop`
+/// against the hub that owns the named pad; everything else weak-clusters as
+/// before, so unbound caps and true multi-hub signal nets are unchanged.
+fn clusterMultiHub(
+    arena: std.mem.Allocator,
+    springs: *std.ArrayListUnmanaged(Spring),
+    loops: *std.ArrayListUnmanaged(Loop),
+    eps: []const Endpoint,
+    gnd: []const []const PadRect,
+    roles: []const pin_roles.PartRoles,
+    explicit_pin: []const []const u8,
+    rail_optout: []const bool,
+    net_i: i32,
+    net_name: []const u8,
+) std.mem.Allocator.Error!void {
+    var rest: std.ArrayListUnmanaged(Endpoint) = .empty;
+    for (eps) |e| {
+        const bound = !e.is_hub and gnd[e.idx].len > 0 and explicit_pin[e.idx].len > 0;
+        if (bound) {
+            if (hubOwningPin(eps, explicit_pin[e.idx])) |hub| {
+                if (gnd[hub].len > 0) {
+                    if (try hubTargets(arena, eps, hub, roles)) |tgt| {
+                        try emitCapLoop(arena, loops, eps, e, hub, tgt, gnd, explicit_pin, rail_optout, net_i);
+                        continue;
+                    }
+                }
+            }
+        }
+        try rest.append(arena, e);
+    }
+    if (rest.items.len >= 2) try weakCluster(arena, springs, rest.items, net_name);
 }
 
 /// Weak centre-to-centre pull among a net's endpoints (no single hub to hug).
@@ -8938,6 +9027,78 @@ test "buildEscapeStubs reserves a corridor for unaccounted single-component nets
     applyKeepout(&parts, stubs);
     try testing.expect(parts[0].keep.hw > parts[0].hw); // R1 keepout grew right
     try testing.expect(parts[1].keep.hw < 0); // U1 unchanged (sentinel)
+}
+
+// spec: placement/optimizer - an explicit (decouples …) binding still loops to its hub on a rail shared by >=2 ICs
+test "buildSprings honours explicit decoupling bindings on a multi-hub rail" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // VDD lands on both U1 (MCU) and U2 (flash) → a multi-hub rail. C1 is bound
+    // to U1 pad 5, C2 to U2 pad 8. Each must still form a real loop to its own
+    // hub instead of the whole rail collapsing into one weak cluster (loops==0).
+    const u1_pads = [_]geometry.Pad{
+        .{ .number = "5", .x = -2, .y = 0, .w = 0.3, .h = 0.3 },
+        .{ .number = "15", .x = -2, .y = 1, .w = 0.3, .h = 0.3 },
+        .{ .number = "81", .x = -2, .y = -1, .w = 0.3, .h = 0.3 },
+    };
+    const u2_pads = [_]geometry.Pad{
+        .{ .number = "8", .x = 2, .y = 0, .w = 0.3, .h = 0.3 },
+        .{ .number = "4", .x = 2, .y = -1, .w = 0.3, .h = 0.3 },
+    };
+    const cap_pads = [_]geometry.Pad{
+        .{ .number = "1", .x = -0.4, .y = 0, .w = 0.3, .h = 0.3 },
+        .{ .number = "2", .x = 0.4, .y = 0, .w = 0.3, .h = 0.3 },
+    };
+    const parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &u1_pads, .fallback = false },
+        .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &u2_pads, .fallback = false },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.3, .pads = &cap_pads, .fallback = false },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.3, .pads = &cap_pads, .fallback = false },
+    };
+    const vdd = [_]export_kicad.FlatPin{
+        .{ .ref_des = "U1", .pin = "5" }, .{ .ref_des = "U1", .pin = "15" },
+        .{ .ref_des = "U2", .pin = "8" }, .{ .ref_des = "C1", .pin = "1" },
+        .{ .ref_des = "C2", .pin = "1" },
+    };
+    const gnd_net = [_]export_kicad.FlatPin{
+        .{ .ref_des = "U1", .pin = "81" }, .{ .ref_des = "U2", .pin = "4" },
+        .{ .ref_des = "C1", .pin = "2" },  .{ .ref_des = "C2", .pin = "2" },
+    };
+    const nets = [_]FlatNet{
+        .{ .name = "VDD", .pins = &vdd },
+        .{ .name = "GND", .pins = &gnd_net },
+    };
+    var idx = std.StringHashMap(usize).init(arena);
+    try idx.put("U1", 0);
+    try idx.put("U2", 1);
+    try idx.put("C1", 2);
+    try idx.put("C2", 3);
+
+    const roles = [_]pin_roles.PartRoles{ .{}, .{}, .{}, .{} };
+    const explicit = [_][]const u8{ "", "", "5", "8" };
+    const optout = [_]bool{ false, false, false, false };
+
+    const built = try buildSprings(arena, &nets, &parts, &idx, &roles, &explicit, &optout);
+
+    try testing.expectEqual(@as(usize, 2), built.loops.len);
+    var saw_u1 = false;
+    var saw_u2 = false;
+    for (built.loops) |lp| {
+        if (lp.cap == 2) { // C1 → U1 pad 5
+            try testing.expectEqual(@as(usize, 0), lp.hub);
+            try testing.expectEqualStrings("5", lp.explicit_pin);
+            try testing.expectApproxEqAbs(@as(f64, -2), lp.hub_pwr_pin.x, 1e-9);
+            saw_u1 = true;
+        } else if (lp.cap == 3) { // C2 → U2 pad 8
+            try testing.expectEqual(@as(usize, 1), lp.hub);
+            try testing.expectEqualStrings("8", lp.explicit_pin);
+            try testing.expectApproxEqAbs(@as(f64, 2), lp.hub_pwr_pin.x, 1e-9);
+            saw_u2 = true;
+        }
+    }
+    try testing.expect(saw_u1 and saw_u2);
 }
 
 // spec: placement/optimizer - loop legs measure edge-to-edge to the nearest hub pad

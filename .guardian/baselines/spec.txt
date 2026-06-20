@@ -26,6 +26,7 @@ unlinked tag: placement/optimizer - (floorplan …) docks sub-block macros aroun
 unlinked tag: placement/optimizer - (net "NAME") side rules expand to unclaimed parts on the net in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - (rough …) anchor/group tokens match by ref-des or origin name in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - (rough …) priority is the fill order; lower tiers spill to outer lanes in ./src/placement/optimizer.zig
+unlinked tag: placement/optimizer - an explicit (decouples …) binding still loops to its hub on a rail shared by >=2 ICs in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - composed macros overlapping each other move the later one as a unit in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - composed module macros push free parts away and stay rigid in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - decouplePinFromOrigin reads the decoupled pad from a per-pin cap's structural key in ./src/placement/optimizer.zig
