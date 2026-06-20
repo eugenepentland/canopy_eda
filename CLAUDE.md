@@ -345,6 +345,41 @@ that instance on the net (the `(pins …)` declarations must appear first);
 `(decouple-defaults … (bypass …))` component (not the ic) cascades into
 sub-block modules that don't set their own.
 
+### Per-pin decoupling binding: `(decouples "IC" PIN)`
+
+A bypass cap declared as a plain `(instance …)` on a multi-pin rail (e.g. ten
+`(instance "C_IOVDD_N" (cap-0402 "100nF") (pin 1 "VDD3V3") (pin 2 "GND"))`
+caps, all on the same `VDD3V3` net that lands on a dozen IC pads) has no way to
+say *which* pad it serves, so the placer pins every one of them to the same
+(lowest-numbered) supply pad — their decoupling loops and the `/pcb-layout`
+ratsnest all collapse onto one pin. Add `(decouples "IC" PIN)` to bind the
+cap's power leg to a specific hub pad — the per-instance twin of a
+`(placement-order … (near …))`, but it lives on the cap and also drives the
+ERC/lint requirement below:
+
+```scheme
+(instance "C_IOVDD_3" (cap-0402 "100nF") (pin 1 "VDD3V3") (pin 2 "GND")
+  (decouples "U1" 24))                 ;; this cap serves IOVDD_3 = pad 24
+(instance "C_IOVDD_BULK" (cap-0402 "10uF") (pin 1 "VDD3V3") (pin 2 "GND")
+  (decouples rail))                    ;; reservoir — serves the whole rail
+```
+
+`PIN` is resolved the same way `(pin …)` tokens are — a pad number or a
+pinout function name. `(decouples rail)` is the explicit opt-out for a cap that
+genuinely serves the whole rail (a reservoir / deliberately rail-level bypass).
+The two `(decouple … per-pin …)` shorthands above already supply this binding
+automatically (each generated cap carries its pad in its structural id); use
+`(decouples …)` when you keep hand-named cap instances (and their stable ids).
+
+The **`decouple-unbound` layout lint** (in `pcb-describe`'s `lint[]`, surfaced on
+`/pcb-layout`) makes per-pin binding a *requirement*: an HF decoupling cap on a
+rail that lands on ≥2 of a hub's **supply** pads (config straps like EN/PG are
+excluded from that count by `pin_roles`, so a cap never binds to the enable pin)
+with no `(decouples …)` / `(near …)` / per-pin binding is flagged. Exempt:
+bulk reservoirs (≥4.7 µF, rail-level by nature), single-supply-pad rails (a buck
+VIN/VOUT — the target is unambiguous), and `(decouples rail)` opt-outs. Value
+sets only placement tightness, never *whether* a cap must declare its pin.
+
 ### Schematic diagram layout: `(diagram-layout …)`
 
 The free-floating block-diagram arrangement (the schematic page's Layout

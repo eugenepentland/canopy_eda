@@ -717,6 +717,19 @@ pub const Instance = struct {
     /// during a rework), but it is excluded from the assembly BOM and marked DNP
     /// in the schematic, the KiCad netlist, and the .kicad_pcb footprint attrs.
     dnp: bool = false,
+    /// `(decouples "IC" PIN)` — bind this (decoupling) cap's power leg to a
+    /// specific hub pad. Pins the decoupling-loop target + ratsnest endpoint to
+    /// that pad (the per-instance twin of a `(placement-order … (near …))`), so
+    /// on a multi-pad rail each cap visibly serves its own pin. `decouple_ic` is
+    /// the named hub ref (for validation); `decouple_pin` is the pad it targets.
+    /// Empty ⇒ no binding (auto: lowest-numbered supply pad).
+    decouple_ic: []const u8 = "",
+    decouple_pin: []const u8 = "",
+    /// `(decouples rail)` — explicit opt-out: this cap serves the whole rail (a
+    /// reservoir / deliberately rail-level bypass), so the per-pin-decoupling
+    /// lint must not require a pad binding for it. Distinct from "no form at
+    /// all" (which IS flagged on a multi-supply-pad rail).
+    decouple_rail: bool = false,
 };
 
 /// True when `component` names a test point (`testpoint` or `testpoint-*`).

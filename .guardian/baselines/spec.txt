@@ -14,10 +14,13 @@ unlinked tag: Web Server - spec save inserts a new placement form before the des
 unlinked tag: Web Server - spec save replaces an existing placement form in place in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - spec save splices the placement form into a defmodule body in ./src/serve/placement_spec.zig
 unlinked tag: eval/forms - diagram-layout is the canonical name for the schematic layout form, layout the alias in ./src/eval/forms.zig
+unlinked tag: eval/instance - (decouples "IC" PIN) binds a cap to a specific hub pad in ./src/eval/instance.zig
+unlinked tag: eval/instance - (decouples rail) opts a cap out of the per-pin-decoupling requirement in ./src/eval/instance.zig
 unlinked tag: eval/modules - A later parameter's default may reference an earlier parameter in ./src/eval/modules.zig
 unlinked tag: eval/modules - A supplied argument overrides the parameter's declared default in ./src/eval/modules.zig
 unlinked tag: eval/modules - Omitted parameters fall back to their declared (param default) value in ./src/eval/modules.zig
 unlinked tag: eval/modules - Required parameters are still diagnosed when only defaulted ones are unbound in ./src/eval/modules.zig
+unlinked tag: placement/layout_lint - flags an HF decoupling cap on a multi-supply-pad rail with no pin binding, exempting (decouples rail) opt-outs in ./src/placement/layout_lint.zig
 unlinked tag: placement/optimizer - (floorplan …) docks sub-block macros around the anchor block in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - (net "NAME") side rules expand to unclaimed parts on the net in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - (rough …) anchor/group tokens match by ref-des or origin name in ./src/placement/optimizer.zig
