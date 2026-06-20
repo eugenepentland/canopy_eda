@@ -172,14 +172,12 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "decouple-defaults", .decouple_defaults },
     .{ "kicad-pcb", .kicad_pcb },
     .{ "stub", .stub },
-    // `diagram-layout` is the canonical name (the word "layout" alone now
-    // means PCB placement); `layout` stays a working alias for older files.
+    // `diagram-layout` is the canonical (and only) name for the schematic
+    // block-diagram arrangement; the word "layout" alone means PCB placement.
     .{ "diagram-layout", .layout },
-    .{ "layout", .layout },
     .{ "placement-order", .placement_order },
     .{ "placement-group", .placement_group },
     .{ "constraints", .constraints },
-    .{ "module", .constraints },
     .{ "placement", .placement },
     .{ "floorplan", .floorplan },
     .{ "board", .board },
@@ -502,7 +500,7 @@ pub const scope_form_docs = blk: {
         .syntax = "(diagram-layout (anchor \"name\") (place \"name\" (right-of|left-of|above|below \"ref\"))…)",
         .summary = "Position blocks relative to one another on the SCHEMATIC block diagram " ++
             "(Mermaid-style, free-floating) — nothing to do with PCB placement, which is " ++
-            "`(placement …)` / `(floorplan …)`. `(layout …)` is the legacy alias.",
+            "`(placement …)` / `(floorplan …)`.",
     } };
     t[@intFromEnum(ScopeForm.placement_order)] = .{ .scope = tl, .doc = .{
         .syntax = "(placement-order \"HUB\" \"REF\"… | (near <pin> \"REF\")…)",
@@ -515,7 +513,7 @@ pub const scope_form_docs = blk: {
             "pack as one unit beside the hub pins they serve.",
     } };
     t[@intFromEnum(ScopeForm.constraints)] = .{ .scope = tl, .doc = .{
-        .syntax = "(constraints | module \"name\" " ++
+        .syntax = "(constraints \"name\" " ++
             "(power-rail L (role input) (net N)) (proximity REF (to-pin HUB PIN) (max n mm) (priority …)) " ++
             "(net-length (net N) (minimize) (priority …)) (deprioritize (REF…)) " ++
             "(keep-out (net N)|(part REF) (from REF) (min n mm)) (group (REF…) (style …)) …)",
@@ -635,10 +633,12 @@ test "ScopeForm registry covers every variant" {
     try std.testing.expect(ScopeForm.fromAtom("let") == null);
 }
 
-// spec: eval/forms - diagram-layout is the canonical name for the schematic layout form, layout the alias
-test "diagram-layout aliases the layout scope form" {
+// spec: eval/forms - diagram-layout is the sole name for the schematic layout form; the legacy layout/module aliases are gone
+test "diagram-layout is the schematic layout form and legacy aliases are retired" {
     try std.testing.expectEqual(ScopeForm.layout, ScopeForm.fromAtom("diagram-layout").?);
-    try std.testing.expectEqual(ScopeForm.layout, ScopeForm.fromAtom("layout").?);
+    // `layout` (PCB-placement now) and `module` (collided with defmodule) are no longer scope-form aliases.
+    try std.testing.expectEqual(@as(?ScopeForm, null), ScopeForm.fromAtom("layout"));
+    try std.testing.expectEqual(@as(?ScopeForm, null), ScopeForm.fromAtom("module"));
 }
 
 // spec: eval/forms - validateArity flags too-few and too-many arguments and accepts in-range counts

@@ -1928,7 +1928,7 @@ fn parseStub(self: *Evaluator, form_children: []const Node) EvalError!?StubResul
     };
 }
 
-/// Parse a top-level `(layout (anchor "name") (place "name" (rel "ref")…)…)`
+/// Parse a top-level `(diagram-layout (anchor "name") (place "name" (rel "ref")…)…)`
 /// form into a `LayoutSpec`. `(anchor "x")` and a bare `(place "x")` are pinned
 /// roots (no constraints). `(place "x" (right-of "a") (below "b"))` carries
 /// *several* constraints — x is positioned relative to every listed block, so a
@@ -2443,7 +2443,7 @@ test "design-block parses a (layout …) form with anchor and place" {
     const a = std.heap.page_allocator;
     const src =
         \\(design-block "test"
-        \\  (layout
+        \\  (diagram-layout
         \\    (anchor "rp2350")
         \\    (place "esp32" (right-of "rp2350"))))
     ;
@@ -2472,7 +2472,7 @@ test "layout place parses each relation keyword" {
     const a = std.heap.page_allocator;
     const src =
         \\(design-block "test"
-        \\  (layout
+        \\  (diagram-layout
         \\    (place "b" (right-of "a"))
         \\    (place "c" (left-of "a"))
         \\    (place "d" (above "a"))
@@ -2499,7 +2499,7 @@ test "layout place collects multiple constraints" {
     const a = std.heap.page_allocator;
     const src =
         \\(design-block "test"
-        \\  (layout
+        \\  (diagram-layout
         \\    (place "c" (right-of "b") (below "a"))))
     ;
     const nodes = try sexpr_parser.parse(a, src);
@@ -2525,7 +2525,7 @@ test "layout row parses an ordered band of block keys" {
     const a = std.heap.page_allocator;
     const src =
         \\(design-block "test"
-        \\  (layout
+        \\  (diagram-layout
         \\    (row "mcu" "esp32" "screen")
         \\    (row "buck5v" "buck3v3")))
     ;
@@ -2551,7 +2551,7 @@ test "layout group parses a labeled region over member keys" {
     const a = std.heap.page_allocator;
     const src =
         \\(design-block "test"
-        \\  (layout
+        \\  (diagram-layout
         \\    (group "Brains" "mcu" "esp32")
         \\    (group "Power" "buck5v" "buck3v3" "or_diode")))
     ;
@@ -2577,7 +2577,7 @@ test "layout edge parses left and right pinned blocks" {
     const a = std.heap.page_allocator;
     const src =
         \\(design-block "test"
-        \\  (layout
+        \\  (diagram-layout
         \\    (edge left "usbc_host" "barrel")
         \\    (edge right "banana")))
     ;
