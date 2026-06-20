@@ -835,6 +835,14 @@ src/serve/history.zig::SnapshotInfo struct_
 src/serve/history.zig::listSnapshots fn
 src/serve/history.zig::restore fn
 src/serve/history.zig::snapshot fn
+src/serve/layout_match.zig::ClassDist struct_
+src/serve/layout_match.zig::MatchResult struct_
+src/serve/layout_match.zig::PInfo struct_
+src/serve/layout_match.zig::analyze fn
+src/serve/layout_match.zig::compare fn
+src/serve/layout_match.zig::layoutMatchApi fn
+src/serve/layout_match.zig::layoutMatchJson fn
+src/serve/layout_match.zig::matchInfos fn
 src/serve/library.zig::HandlerError value
 src/serve/library.zig::LibraryRow struct_
 src/serve/library.zig::cseFetchApi fn
@@ -943,6 +951,7 @@ src/serve/pcb_layout_page.zig::HandlerError value
 src/serve/pcb_layout_page.zig::PngError value
 src/serve/pcb_layout_page.zig::PngRequest struct_
 src/serve/pcb_layout_page.zig::RefPose value
+src/serve/pcb_layout_page.zig::SavedLayout struct_
 src/serve/pcb_layout_page.zig::SolvedRequest struct_
 src/serve/pcb_layout_page.zig::SyncPose struct_
 src/serve/pcb_layout_page.zig::SyncVia struct_
@@ -959,6 +968,7 @@ src/serve/pcb_layout_page.zig::pcbRouteApi fn
 src/serve/pcb_layout_page.zig::pcbScoreApi fn
 src/serve/pcb_layout_page.zig::pcbScoreBatchApi fn
 src/serve/pcb_layout_page.zig::pngRequestFromQuery fn
+src/serve/pcb_layout_page.zig::readLayouts fn
 src/serve/pcb_layout_page.zig::renderDesignPng fn
 src/serve/pcb_layout_page.zig::rescoreLayoutsApi fn
 src/serve/pcb_layout_page.zig::saveNamedLayoutApi fn

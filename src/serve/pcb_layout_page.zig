@@ -95,7 +95,7 @@ const LayoutScore = struct { hpwl: f64, loop: f64, caps: usize, objective: f64 =
 /// placement + vias from; it's stored once at the top level of the file
 /// (`"default":"<name>"`) and reflected here on the matching entry. At most
 /// one entry has `default = true`.
-const SavedLayout = struct {
+pub const SavedLayout = struct {
     name: []const u8,
     kind: []const u8,
     ts: i64,
@@ -1791,7 +1791,7 @@ fn readLayoutPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []co
 /// Read every saved layout for `name` from its `.layouts.json` sidecar
 /// (newest first). Returns an empty slice when the file doesn't exist or on
 /// parse failure; allocations live on `alloc` (request lifetime).
-fn readLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) []const SavedLayout {
+pub fn readLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) []const SavedLayout {
     if (paths.designSiblingPath(alloc, project_dir, name, LAYOUTS_EXT)) |path| {
         defer alloc.free(path);
         if (infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20)) |data| {

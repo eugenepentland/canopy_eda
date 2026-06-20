@@ -27,6 +27,7 @@ const footprint_preview = @import("serve/footprint_preview.zig");
 const schematic_page = @import("serve/schematic_page.zig");
 const pcb_layout_page = @import("serve/pcb_layout_page.zig");
 const pcb_describe = @import("serve/pcb_describe.zig");
+const layout_match = @import("serve/layout_match.zig");
 const placement_spec = @import("serve/placement_spec.zig");
 const module_policy_spec = @import("serve/module_policy_spec.zig");
 const modules_page = @import("serve/modules.zig");
@@ -363,6 +364,7 @@ pub fn serve(
     router.get("/api/pcb-layout/:name", pcb_layout_page.pcbLayoutJsonApi, .{});
     router.get("/api/pcb-png/:name", pcb_layout_page.pcbPngApi, .{});
     router.get("/api/pcb-describe/:name", pcb_describe.pcbDescribeApi, .{});
+    router.get("/api/layout-match/:name", layout_match.layoutMatchApi, .{});
     router.get("/api/placement-spec/:name", placement_spec.placementSpecApi, .{});
     router.get("/api/module-policy/:name", module_policy_spec.modulePolicyApi, .{});
     router.post("/api/propose-placement/:name", placement_spec.proposePlacementApi, .{});
