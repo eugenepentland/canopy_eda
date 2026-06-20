@@ -2692,7 +2692,7 @@ fn writeTabsRow(w: *std.Io.Writer, route_open: bool) std.Io.Writer.Error!void {
         "title=\"Give every net its own pad/airwire colour — no-connect white, GND " ++
         "brown, power warm, each signal net a distinct colour — so connectivity " ++
         "reads off the board without the schematic\">" ++
-        "<input type=\"checkbox\" id=\"v-netcol\"> Net colours</label>");
+        "<input type=\"checkbox\" id=\"v-netcol\" checked> Net colours</label>");
     try w.writeAll(VIEW_CHIP_OPEN ++
         "title=\"Tint each part green→red by its share of the objective (cost/blame heatmap)\">" ++
         "<input type=\"checkbox\" id=\"v-heat\"> Heatmap</label>");
@@ -2841,7 +2841,7 @@ fn writeNetColors(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Plac
 /// the four buckets the per-net colouring uses (signal shown as a spectrum since
 /// every signal net gets its own colour).
 fn writeNetLegend(w: *std.Io.Writer) std.Io.Writer.Error!void {
-    try w.writeAll("<div class=\"net-legend\" id=\"net-legend\" hidden>" ++
+    try w.writeAll("<div class=\"net-legend\" id=\"net-legend\">" ++
         "<span class=\"net-h\">Net colours</span>" ++
         "<span class=\"net-sw\"><i style=\"background:" ++ NET_WHITE ++ "\"></i>No-connect</span>" ++
         "<span class=\"net-sw\"><i style=\"background:" ++ NET_BROWN ++ "\"></i>GND</span>" ++
@@ -4759,7 +4759,7 @@ const BOARD_JS =
     \\//    pin → white; off, pads go back to copper. Orthogonal to the heatmap
     \\//    (which tints courtyards). rats() honours the flag, so re-drawing the
     \\//    ratsnest re-applies the airwire colours.
-    \\var netColOn=false;
+    \\var netColOn=true;
     \\// ── Ratsnest toggle: the airwires + decoupling-loop overlays live in gR;
     \\//    rats() honours this flag (early-returns after clearing), so once off they
     \\//    stay hidden through drags/rotations until toggled back on.
@@ -4776,7 +4776,7 @@ const BOARD_JS =
     \\if(netColCb)netColCb.addEventListener("change",function(){netColOn=netColCb.checked;
     \\ var nl=document.getElementById("net-legend");if(nl)nl.hidden=!netColOn;
     \\ applyNetColors();rats();});
-    \\rats(); showScore(PCB.auto); drawRoute(); drawClr(); drawDrc();
+    \\applyNetColors(); rats(); showScore(PCB.auto); drawRoute(); drawClr(); drawDrc();
     \\markUnplaced(PCB.placement&&PCB.placement.unplaced);
     \\// ── Cross-probe focus: ?focus=REF (or #REF) selects that part on load —
     \\//    zoom/centre the view on it, flash its courtyard, and reveal it in the
