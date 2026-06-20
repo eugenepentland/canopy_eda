@@ -49,7 +49,16 @@ h3{color:#f0f6fc;font-size:0.95rem;margin:0;}
 .sch-attached-sub{margin:14px 0 4px;padding:10px 12px;background:#12161d;border:1px solid #21262d;border-radius:6px;}
 .sch-attached-sub>.sec-head{margin-bottom:4px;}
 .sch-attached-sub>.sec-desc{margin:2px 0 8px;}
-.sch-section.flash,.sch-hub.flash{outline:2px solid #58a6ff;outline-offset:-2px;transition:outline-color .25s;}
+/* Click-to-locate flash (sidebar → schematic). Hubs/sections pulse an
+   outline; inline passive symbols (drawn as <g class="component"> inside the
+   hub-inset SVGs, which can't take a reliable CSS outline) instead get their
+   hit-area box filled + stroked so the exact part stands out after the scroll. */
+.sch-section.flash,.sch-hub.flash{outline:2px solid #58a6ff;outline-offset:-2px;animation:sch-flash-pulse .7s ease-in-out 2;}
+@keyframes sch-flash-pulse{0%,100%{outline-color:#58a6ff;}50%{outline-color:#f0b72f;}}
+svg .component.flash .hit-area{fill:rgba(88,166,255,.20);stroke:#58a6ff;stroke-width:1.5;animation:sch-comp-flash .7s ease-in-out 2;}
+svg .component.flash text{fill:#f0f6fc;font-weight:700;}
+svg .component.flash line{stroke:#79c0ff;}
+@keyframes sch-comp-flash{0%,100%{fill:rgba(88,166,255,.10);stroke:#58a6ff;}50%{fill:rgba(240,183,47,.30);stroke:#f0b72f;}}
 .sec-head{display:flex;align-items:center;gap:10px;margin-bottom:8px;}
 .sec-desc{margin:4px 0 10px;color:#8b949e;font-size:0.9rem;}
 .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;}
