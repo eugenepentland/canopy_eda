@@ -28,6 +28,7 @@ const block_diagram = @import("diagram/diagram.zig");
 const rb = @import("render_block_types.zig");
 const bom_html = @import("serve/bom_html.zig");
 const pages_tmpl = @import("serve/templates/pages.zig");
+const layout_status = @import("layout_status.zig");
 const isHub = draw.isHub;
 const pinOrder = draw.pinOrder;
 
@@ -163,7 +164,7 @@ pub fn renderToHtml(
     // whether its module carries a (placement …) spec yet. Surfaced so the
     // author can confirm every sub-module is laid out before a KiCad hand-off.
     // Only meaningful when the design actually instantiates modules.
-    if (block.sub_blocks.len > 0) try writeModuleLayoutStatus(w, block);
+    if (block.sub_blocks.len > 0) try writeModuleLayoutStatus(allocator, project_dir, w, block);
 
     // Design notes — structured TODO list backed by `<design>.notes.md`.
     // The task list + add form drive /api/notes/:name/tasks/*; the
@@ -1449,18 +1450,32 @@ fn writeSubBlockPcb(w: *std.Io.Writer, slug: []const u8) !void {
 }
 
 /// "Module layouts" checklist panel — one row per top-level `(sub-block …)`,
-/// flagging whether its module carries a `(placement …)` spec yet. A module
-/// with a spec composes onto the parent board as a fixed macro
-/// (`composeModuleMacros`); one without is placed freely by the parent solver.
-/// The author wants every sub-module laid out before a KiCad hand-off, so the
-/// `<summary>` shows the laid-out tally even when collapsed and the card opens
-/// itself when anything is still missing. A `(reflow)` sub-block is intentionally
-/// re-flowed by the parent and so needs no spec of its own — it doesn't count
-/// as missing. Caller guards on `block.sub_blocks.len > 0`.
-fn writeModuleLayoutStatus(w: *std.Io.Writer, block: *const DesignBlock) !void {
+/// tracking each sub-module through the placement workflow: AI authors the
+/// grouping in the DSL, seeds a **Rough** placement (`?rough=1`), a human
+/// hand-finishes it and **stars** the result (the `/pcb-layout` panel's ★ —
+/// reused as the "done" marker), then exports it to a `(placement …)` **spec**
+/// so the module composes onto the parent board as a fixed macro
+/// (`composeModuleMacros`). The Rough/Starred columns read each module's
+/// `<module>.layouts.json` sidecar (`layout_status`); the Layout-spec column
+/// reads the evaluated module's `(placement …)` form. The `<summary>` shows the
+/// laid-out tally even when collapsed and the card opens itself when anything
+/// still lacks a spec. A `(reflow)` sub-block is intentionally re-flowed by the
+/// parent and so needs no spec of its own — it doesn't count as missing.
+/// Caller guards on `block.sub_blocks.len > 0`.
+fn writeModuleLayoutStatus(allocator: Allocator, project_dir: []const u8, w: *std.Io.Writer, block: *const DesignBlock) !void {
+    // One sidecar read per sub-block, reused by both the summary tally and the
+    // per-row chips. A non-module sub-block (path source / inline block) has no
+    // resolvable sidecar, so its status stays all-false and reads as "—".
+    const statuses = try allocator.alloc(layout_status.ModuleLayoutStatus, block.sub_blocks.len);
+    defer allocator.free(statuses);
     var have: usize = 0;
     var missing: usize = 0;
-    for (block.sub_blocks) |sb| {
+    var rough_n: usize = 0;
+    var starred_n: usize = 0;
+    for (block.sub_blocks, statuses) |sb, *st| {
+        st.* = if (moduleSourceName(sb)) |m| layout_status.read(allocator, project_dir, m) else .{};
+        if (st.rough) rough_n += 1;
+        if (st.starred) starred_n += 1;
         if (sb.block.placement.present) {
             have += 1;
         } else if (!sb.reflow) {
@@ -1478,6 +1493,10 @@ fn writeModuleLayoutStatus(w: *std.Io.Writer, block: *const DesignBlock) !void {
         "<summary>Module layouts <span class=\"pill {s}\">{d}/{d} laid out</span>",
         .{ summary_pill, have, total },
     );
+    try w.print(
+        "<span class=\"sch-card-sub muted\">{d} rough · {d} starred</span>",
+        .{ rough_n, starred_n },
+    );
     if (missing > 0) {
         try w.print(
             "<span class=\"sch-card-sub muted\">{d} sub-module{s} still need a layout</span>",
@@ -1488,14 +1507,18 @@ fn writeModuleLayoutStatus(w: *std.Io.Writer, block: *const DesignBlock) !void {
 
     try w.writeAll(
         "<p class=\"muted\" style=\"font-size:0.85rem;margin:6px 0 10px;\">" ++
-            "Each <code>(sub-block …)</code> whose module declares a <code>(placement …)</code> " ++
-            "spec composes onto the parent board as a fixed macro. Give every sub-module a layout — " ++
-            "open its PCB Layout view and save a placement spec — before exporting to KiCad. " ++
-            "A <code>(reflow)</code> sub-block is placed freely by the parent and needs none.</p>",
+            "Workflow per <code>(sub-block …)</code>: author the placement grouping in the DSL, " ++
+            "seed a <b>Rough</b> placement on the module's PCB Layout view (the “Rough” button), " ++
+            "hand-finish it and <b>star</b> the saved layout (the ★), then promote it to a " ++
+            "<code>(placement …)</code> spec so the module composes onto the parent board as a fixed " ++
+            "macro — do this for every sub-module before a KiCad hand-off. A <code>(reflow)</code> " ++
+            "sub-block is placed freely by the parent and needs none.</p>",
     );
 
-    try w.writeAll("<table><thead><tr><th>Sub-block</th><th>Module</th><th>Layout</th></tr></thead><tbody>");
-    for (block.sub_blocks) |sb| {
+    try w.writeAll("<table><thead><tr><th>Sub-block</th><th>Module</th>" ++
+        "<th>Rough</th><th>Starred</th><th>Layout spec</th></tr></thead><tbody>");
+    for (block.sub_blocks, statuses) |sb, st| {
+        const mod_name = moduleSourceName(sb);
         try w.writeAll(ROW_TD_CODE_OPEN);
         try writeHtmlEscaped(w, sb.name);
         try w.writeAll("</code></td><td>");
@@ -1503,11 +1526,11 @@ fn writeModuleLayoutStatus(w: *std.Io.Writer, block: *const DesignBlock) !void {
             // Module-name sources (no slash) link to the standalone /modules
             // viewer where the layout is authored; path-based sub-blocks can't
             // route there, so show the bare path.
-            if (std.mem.indexOfScalar(u8, sb.source, '/') == null) {
+            if (mod_name) |m| {
                 try w.writeAll("<a href=\"/modules/");
-                try writeUrlEncoded(w, sb.source);
+                try writeUrlEncoded(w, m);
                 try w.writeAll("\">");
-                try writeHtmlEscaped(w, sb.source);
+                try writeHtmlEscaped(w, m);
                 try w.writeAll("</a>");
             } else {
                 try w.writeAll("<code>");
@@ -1517,19 +1540,62 @@ fn writeModuleLayoutStatus(w: *std.Io.Writer, block: *const DesignBlock) !void {
         } else {
             try writeHtmlEscaped(w, sb.block.name);
         }
+
+        // Rough — has a rough placement been seeded for this module?
+        try w.writeAll(TD_CELL_SEP);
+        if (mod_name == null) {
+            try w.writeAll(LAYOUT_DASH);
+        } else if (st.rough) {
+            try w.writeAll("<span class=\"pill pill-ok\">rough \u{2713}</span>");
+        } else {
+            try w.writeAll(ROUGH_TODO_CELL);
+        }
+
+        // Starred — has a finished layout been starred (the ★ / sync default)?
+        try w.writeAll(TD_CELL_SEP);
+        if (mod_name == null) {
+            try w.writeAll(LAYOUT_DASH);
+        } else if (st.starred) {
+            try w.writeAll("<span class=\"pill pill-ok\">starred \u{2605}</span>");
+        } else {
+            try w.writeAll(STARRED_TODO_CELL);
+        }
+
+        // Layout spec — does the module carry a (placement …) form?
         try w.writeAll(TD_CELL_SEP);
         if (sb.block.placement.present) {
-            try w.writeAll("<span class=\"pill pill-ok\">layout \u{2713}</span>");
+            try w.writeAll("<span class=\"pill pill-ok\">spec \u{2713}</span>");
             if (sb.reflow) try w.writeAll(" <span class=\"pill pill-concept\">reflow override</span>");
         } else if (sb.reflow) {
             try w.writeAll("<span class=\"pill pill-concept\">reflow — parent places</span>");
         } else {
-            try w.writeAll("<span class=\"pill pill-warn\">no layout</span>");
+            try w.writeAll("<span class=\"pill pill-warn\">no spec</span>");
         }
         try w.writeAll(ROW_TD_CLOSE);
     }
     try w.writeAll(TABLE_DETAILS_CLOSE);
 }
+
+/// The module name a sub-block instantiates, for resolving its layout sidecar:
+/// `sb.source` when it is a bare module name (non-empty, no `/`). Null for
+/// path-based sources and inline design-blocks, which have no `/modules/` page
+/// or `<module>.layouts.json` to read.
+fn moduleSourceName(sb: env_mod.SubBlock) ?[]const u8 {
+    if (sb.source.len == 0) return null;
+    if (std.mem.indexOfScalar(u8, sb.source, '/') != null) return null;
+    return sb.source;
+}
+
+/// Shared "no data" cell for the Rough/Starred columns (a non-module sub-block).
+const LAYOUT_DASH = "<span class=\"muted\">—</span>";
+
+/// Rough column, not-yet-seeded state.
+const ROUGH_TODO_CELL = "<span class=\"pill pill-todo\" title=\"No rough placement seeded yet — " ++
+    "open the module's PCB Layout and hit Rough\">pending</span>";
+
+/// Starred column, not-yet-starred state.
+const STARRED_TODO_CELL = "<span class=\"pill pill-todo\" title=\"No layout starred yet — " ++
+    "finish the layout and star it (\u{2605}) on the module's PCB Layout view\">\u{2606} not yet</span>";
 
 /// Wires every sub-block "PCB Layout" panel: on Generate, build the scoped,
 /// routed embed URL from the global PCB-settings inputs and (re)load the

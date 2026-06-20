@@ -8,6 +8,10 @@ pub const ModuleHomeEntry = struct {
     params: []const u8,
     doc: []const u8,
     used_by: []const []const u8,
+    /// Module body declares placement-cohesion `(group …)` DSL — ready to rough.
+    has_groups: bool = false,
+    /// A layout in `<module>.layouts.json` is starred (a person approved it).
+    has_starred: bool = false,
 };
 
 /// A design summary paired with the lowercase-friendly haystack the home
@@ -16,6 +20,8 @@ pub const ModuleHomeEntry = struct {
 pub const DesignCardVM = struct {
     s: DesignSummary,
     search: []const u8,
+    /// A layout in `<design>.layouts.json` is starred (a person approved it).
+    has_starred: bool = false,
 };
 
 /// A module entry paired with its search haystack (the "module" tag word +
@@ -62,11 +68,20 @@ const HOME_STYLE_BLOCK: []const u8 = "<style>" ++ @embedFile("../assets/navbar.c
     \\text-align:center;flex:1}
     \\.design-card-link:hover{border-color:#58a6ff;color:#c9d1d9}
     \\.empty-hint{color:#6e7681;font-size:13px;padding:24px;text-align:center}
-    \\.type-row{display:flex;align-items:center}
+    \\.type-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
     \\.type-tag{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;
     \\padding:1px 8px;border-radius:10px;border:1px solid #30363d;color:#8b949e}
     \\.type-tag.design{color:#58a6ff;border-color:#1f6feb}
     \\.type-tag.module{color:#bc8cff;border-color:#8957e5}
+    \\.tag-chip{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;
+    \\padding:1px 8px;border-radius:10px;border:1px solid #30363d;color:#8b949e}
+    \\.tag-chip.grouping{color:#3fb950;border-color:#238636}
+    \\.tag-chip.starred{color:#d29922;border-color:#9e6a03}
+    \\.home-filters{display:flex;gap:6px;padding:0 16px 4px;flex-wrap:wrap}
+    \\.home-filter{background:#161b22;border:1px solid #30363d;border-radius:6px;color:#8b949e;
+    \\font-size:12px;padding:.3rem .7rem;cursor:pointer;font-family:inherit}
+    \\.home-filter:hover{border-color:#58a6ff;color:#c9d1d9}
+    \\.home-filter.active{color:#f0f6fc;border-color:#58a6ff;background:#1f2937}
     \\.home-search{display:block;box-sizing:border-box;width:calc(100% - 32px);margin:8px 16px 4px;
     \\background:#161b22;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;
     \\padding:.55rem .75rem;font-size:.95rem;font-family:inherit}
@@ -90,22 +105,31 @@ const HOME_SEARCH_SCRIPT: []const u8 =
     \\ var cards=Array.prototype.slice.call(grid.querySelectorAll('.design-card'));
     \\ var count=document.getElementById('home-count');
     \\ var empty=document.getElementById('home-empty');
+    \\ var btns=Array.prototype.slice.call(document.querySelectorAll('.home-filter'));
     \\ var total=cards.length;
+    \\ var kind='all';
     \\ function apply(){
     \\  var q=input.value.toLowerCase().trim();
     \\  var terms=q?q.split(/\s+/):[];
     \\  var shown=0;
     \\  for(var i=0;i<cards.length;i++){
-    \\   var s=(cards[i].getAttribute('data-search')||'').toLowerCase();
-    \\   var match=true;
-    \\   for(var t=0;t<terms.length;t++){if(s.indexOf(terms[t])<0){match=false;break;}}
-    \\   cards[i].style.display=match?'':'none';
+    \\   var c=cards[i];
+    \\   var s=(c.getAttribute('data-search')||'').toLowerCase();
+    \\   var match=(kind==='all')||(c.getAttribute('data-kind')===kind);
+    \\   for(var t=0;match&&t<terms.length;t++){if(s.indexOf(terms[t])<0)match=false;}
+    \\   c.style.display=match?'':'none';
     \\   if(match)shown++;
     \\  }
-    \\  count.textContent=q?(shown+' of '+total+' items'):(total+(total===1?' item':' items'));
+    \\  var filtered=q||kind!=='all';
+    \\  count.textContent=filtered?(shown+' of '+total+' items'):(total+(total===1?' item':' items'));
     \\  if(empty)empty.style.display=shown===0?'':'none';
     \\ }
     \\ input.addEventListener('input',apply);
+    \\ btns.forEach(function(b){b.addEventListener('click',function(){
+    \\  kind=b.getAttribute('data-filter')||'all';
+    \\  btns.forEach(function(x){x.classList.toggle('active',x===b);});
+    \\  apply();
+    \\ });});
     \\ apply();
     \\})();
     \\</script>
@@ -117,6 +141,20 @@ const SECONDS_PER_DAY: i64 = 86400;
 const DAYS_PER_MONTH_APPROX: i64 = 30;
 
 const MAX_CHIPS: usize = 6;
+
+/// One type-filter button on the home grid. `id` matches each card's
+/// `data-kind` (or "all"); the client script in HOME_SEARCH_SCRIPT toggles
+/// the active button and AND-combines the chosen kind with the text search.
+const HomeFilter = struct { id: []const u8, label: []const u8 };
+const HOME_FILTERS = [_]HomeFilter{
+    .{ .id = "all", .label = "All" },
+    .{ .id = "design", .label = "Designs" },
+    .{ .id = "module", .label = "Modules" },
+};
+
+fn filterClass(id: []const u8) []const u8 {
+    return if (std.mem.eql(u8, id, "all")) "home-filter active" else "home-filter";
+}
 
 const RelTime = struct {
     age_sec: i64,
@@ -183,9 +221,17 @@ pub templ Navbar(active: []const u8) {
     </div>
 }
 
-pub templ DesignCard(s: DesignSummary, search: []const u8, now_sec: i64) {
-    <div class="design-card" data-search={search}>
-        <div class="type-row"><span class="type-tag design">Design</span></div>
+pub templ DesignCard(s: DesignSummary, search: []const u8, has_starred: bool, now_sec: i64) {
+    <div class="design-card" data-kind="design" data-search={search}>
+        <div class="type-row">
+            <span class="type-tag design">Design</span>
+            if (s.has_groups) {
+                <span class="tag-chip grouping" title="Declares placement (group …) DSL — ready for a rough placement">grouping</span>
+            }
+            if (has_starred) {
+                <span class="tag-chip starred" title="A layout has been starred — approved by a person">★ starred</span>
+            }
+        </div>
         <div class="design-card-header">
             if (hasOwnTitle(s)) {
                 <div class="design-card-title">{s.title}</div>
@@ -248,8 +294,16 @@ pub templ DesignCard(s: DesignSummary, search: []const u8, now_sec: i64) {
 }
 
 pub templ ModuleCard(m: ModuleHomeEntry, search: []const u8) {
-    <div class="design-card" data-search={search}>
-        <div class="type-row"><span class="type-tag module">Module</span></div>
+    <div class="design-card" data-kind="module" data-search={search}>
+        <div class="type-row">
+            <span class="type-tag module">Module</span>
+            if (m.has_groups) {
+                <span class="tag-chip grouping" title="Declares placement (group …) DSL — ready for a rough placement">grouping</span>
+            }
+            if (m.has_starred) {
+                <span class="tag-chip starred" title="A layout has been starred — approved by a person">★ starred</span>
+            }
+        </div>
         <div class="design-card-header">
             <div class="design-card-title">{m.name} <span class="mod-params">{m.params}</span></div>
         </div>
@@ -289,10 +343,15 @@ pub templ Home(design_cards: []const DesignCardVM, module_cards: []const ModuleC
                 <input
                     type="text" id="home-search" class="home-search" autofocus
                     placeholder="Search designs and modules…" />
+                <div class="home-filters" id="home-filters">
+                    for (HOME_FILTERS) |f| {
+                        <button type="button" class={filterClass(f.id)} data-filter="{f.id}">{f.label}</button>
+                    }
+                </div>
                 <div class="home-count" id="home-count"></div>
                 <div class="designs-grid" id="home-grid">
                     for (design_cards) |c| {
-                        @DesignCard(c.s, c.search, now_sec)
+                        @DesignCard(c.s, c.search, c.has_starred, now_sec)
                     }
                     for (module_cards) |c| {
                         @ModuleCard(c.m, c.search)

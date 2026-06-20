@@ -11,6 +11,7 @@ const library = @import("library.zig");
 const mcp_tools = @import("mcp_tools.zig");
 const modules_page = @import("modules.zig");
 const home_template = @import("templates/pages.zig");
+const layout_status = @import("../layout_status.zig");
 
 /// Error set for HTTP handlers in this module: only writer-side errors
 /// propagate back to httpz; everything else is caught internally and
@@ -27,7 +28,7 @@ pub fn indexPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handler
     const modules = collectHomeModules(ctx.allocator, ctx.project_dir, summaries) catch &[_]home_template.ModuleHomeEntry{};
     const now_sec: i64 = @intCast(@divTrunc(clock.nanoTimestamp(), clock.ns_per_s));
 
-    const design_cards = buildDesignCards(ctx.allocator, summaries) catch &[_]home_template.DesignCardVM{};
+    const design_cards = buildDesignCards(ctx.allocator, ctx.project_dir, summaries) catch &[_]home_template.DesignCardVM{};
     const module_cards = buildModuleCards(ctx.allocator, modules) catch &[_]home_template.ModuleCardVM{};
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
@@ -37,14 +38,23 @@ pub fn indexPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handler
 }
 
 /// Pair every design summary with the search haystack the home page's
-/// client-side filter AND-matches query terms against.
+/// client-side filter AND-matches query terms against, plus its "starred"
+/// flag. The starred flag is read fresh from the design's `.layouts.json`
+/// sidecar (NOT from the read-set-cached summary) so starring a layout shows
+/// up on the next home load.
 fn buildDesignCards(
     allocator: std.mem.Allocator,
+    project_dir: []const u8,
     summaries: []const mcp_tools.DesignSummary,
 ) ![]home_template.DesignCardVM {
     const out = try allocator.alloc(home_template.DesignCardVM, summaries.len);
     for (summaries, out) |s, *card| {
-        card.* = .{ .s = s, .search = try designSearchText(allocator, s) };
+        const starred = layout_status.read(allocator, project_dir, s.name).starred;
+        card.* = .{
+            .s = s,
+            .has_starred = starred,
+            .search = try designSearchText(allocator, s, starred),
+        };
     }
     return out;
 }
@@ -63,10 +73,12 @@ fn buildModuleCards(
 
 /// "design <name> <title> <section…>" — the searchable text for a design
 /// card. The leading "design" tag word makes a query of "design" surface
-/// every design (mirroring the visible type tag).
+/// every design (mirroring the visible type tag); the "grouping"/"starred"
+/// tag words mirror the visible status tags so the same words filter them.
 fn designSearchText(
     allocator: std.mem.Allocator,
     s: mcp_tools.DesignSummary,
+    starred: bool,
 ) std.mem.Allocator.Error![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try buf.appendSlice(allocator, "design ");
@@ -79,7 +91,20 @@ fn designSearchText(
         try buf.append(allocator, ' ');
         try buf.appendSlice(allocator, sec);
     }
+    try appendTagWords(allocator, &buf, s.has_groups, starred);
     return buf.items;
+}
+
+/// Append the " grouping"/" starred" haystack words so a text query of either
+/// tag word filters to the cards showing it. Shared by design + module cards.
+fn appendTagWords(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    has_groups: bool,
+    starred: bool,
+) std.mem.Allocator.Error!void {
+    if (has_groups) try buf.appendSlice(allocator, " grouping");
+    if (starred) try buf.appendSlice(allocator, " starred");
 }
 
 /// "module <name> <params> <doc>" — the searchable text for a module card.
@@ -98,6 +123,7 @@ fn moduleSearchText(
         try buf.append(allocator, ' ');
         try buf.appendSlice(allocator, m.doc);
     }
+    try appendTagWords(allocator, &buf, m.has_groups, m.has_starred);
     return buf.items;
 }
 
@@ -125,6 +151,9 @@ fn collectHomeModules(
             .params = m.params,
             .doc = m.doc,
             .used_by = try used_by.toOwnedSlice(allocator),
+            .has_groups = m.has_groups,
+            // Read fresh each load so starring a module's layout shows up here.
+            .has_starred = layout_status.read(allocator, project_dir, m.name).starred,
         });
     }
     return entries.toOwnedSlice(allocator);

@@ -247,6 +247,7 @@ h3{color:#f0f6fc;font-size:0.95rem;margin:0;}
 .pill-ok{background:#0d3a1f;color:#3fb950;}
 .pill-warn{background:#3a2e0d;color:#d29922;}
 .pill-concept{background:#24232e;color:#a89eff;}
+.pill-todo{background:#1f2128;color:#8b949e;}
 .muted{color:#6e7681;}
 table{width:100%;border-collapse:collapse;margin:6px 0 12px;}
 th,td{text-align:left;padding:6px 10px;border-bottom:1px solid #21262d;font-size:0.88rem;}

@@ -438,6 +438,8 @@ src/kicad_pcb/writer.zig::ApplyStats struct_
 src/kicad_pcb/writer.zig::WriteError value
 src/kicad_pcb/writer.zig::applyOpsToSource fn
 src/kicad_pcb/writer.zig::applyOpsToSourceWithStats fn
+src/layout_status.zig::ModuleLayoutStatus struct_
+src/layout_status.zig::read fn
 src/lint.zig::LintError value
 src/lint.zig::lintFile fn
 src/main.zig::main fn

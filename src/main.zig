@@ -433,6 +433,7 @@ test {
     _ = @import("eval/electrical.zig");
     _ = @import("diagram/diagram.zig");
     _ = @import("render_html.zig");
+    _ = @import("layout_status.zig");
     _ = @import("eval/power_budget.zig");
     _ = @import("eval/power_sequencing.zig");
     _ = @import("erc.zig");
@@ -446,6 +447,7 @@ test {
     _ = @import("export_kicad.zig");
     _ = @import("export_kicad_footprint.zig");
     _ = @import("serve.zig");
+    _ = @import("serve/modules.zig");
     _ = @import("serve/auth_store.zig");
     _ = @import("serve/users.zig");
     _ = @import("serve/sync.zig");

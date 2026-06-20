@@ -1,7 +1,7 @@
 # guardian-snapshot v1
 src/eval/power_budget.zig:478: hardcoded std.heap.page_allocator outside main/test
 src/eval/power_budget.zig:479: hardcoded std.heap.page_allocator outside main/test
-src/render_html.zig:866: hardcoded std.heap.page_allocator outside main/test
+src/render_html.zig:867: hardcoded std.heap.page_allocator outside main/test
 src/review_md.zig:335: hardcoded std.heap.page_allocator outside main/test
 src/serve.zig:137: hardcoded std.heap.page_allocator outside main/test
 src/serve.zig:139: hardcoded std.heap.page_allocator outside main/test
@@ -16,18 +16,18 @@ src/serve.zig:76: hardcoded std.heap.page_allocator outside main/test
 src/serve.zig:78: hardcoded std.heap.page_allocator outside main/test
 src/serve/auth.zig:100: hardcoded std.heap.page_allocator outside main/test
 src/serve/mcp.zig:294: hardcoded std.heap.page_allocator outside main/test
-src/serve/mcp_tools.zig:2385: hardcoded std.heap.page_allocator outside main/test
-src/serve/modules.zig:250: hardcoded std.heap.page_allocator outside main/test
+src/serve/mcp_tools.zig:2390: hardcoded std.heap.page_allocator outside main/test
+src/serve/modules.zig:275: hardcoded std.heap.page_allocator outside main/test
 src/serve/oauth_store.zig:72: hardcoded std.heap.page_allocator outside main/test
 src/serve/page_cache.zig:25: hardcoded std.heap.page_allocator outside main/test
 src/serve/passwords.zig:36: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:1038: hardcoded std.heap.page_allocator outside main/test
 src/serve/pcb_layout_page.zig:1043: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:1044: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:1053: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:1054: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:972: hardcoded std.heap.page_allocator outside main/test
-src/serve/pcb_layout_page.zig:990: hardcoded std.heap.page_allocator outside main/test
+src/serve/pcb_layout_page.zig:1048: hardcoded std.heap.page_allocator outside main/test
+src/serve/pcb_layout_page.zig:1049: hardcoded std.heap.page_allocator outside main/test
+src/serve/pcb_layout_page.zig:1058: hardcoded std.heap.page_allocator outside main/test
+src/serve/pcb_layout_page.zig:1059: hardcoded std.heap.page_allocator outside main/test
+src/serve/pcb_layout_page.zig:977: hardcoded std.heap.page_allocator outside main/test
+src/serve/pcb_layout_page.zig:995: hardcoded std.heap.page_allocator outside main/test
 src/serve/plugin_tokens.zig:24: hardcoded std.heap.page_allocator outside main/test
 src/serve/schematic_page.zig:36: hardcoded std.heap.page_allocator outside main/test
 src/serve/users.zig:57: hardcoded std.heap.page_allocator outside main/test
