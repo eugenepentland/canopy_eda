@@ -71,8 +71,8 @@ const HOME_STYLE_BLOCK: []const u8 = "<style>" ++ @embedFile("../assets/navbar.c
     \\.type-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
     \\.type-tag{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;
     \\padding:1px 8px;border-radius:10px;border:1px solid #30363d;color:#8b949e}
-    \\.type-tag.design{color:#58a6ff;border-color:#1f6feb}
-    \\.type-tag.module{color:#bc8cff;border-color:#8957e5}
+    \\.type-tag.board{color:#58a6ff;border-color:#1f6feb}
+    \\.type-tag.subcircuit{color:#bc8cff;border-color:#8957e5}
     \\.tag-chip{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;
     \\padding:1px 8px;border-radius:10px;border:1px solid #30363d;color:#8b949e}
     \\.tag-chip.grouping{color:#3fb950;border-color:#238636}
@@ -142,14 +142,20 @@ const DAYS_PER_MONTH_APPROX: i64 = 30;
 
 const MAX_CHIPS: usize = 6;
 
+// Route prefix for the schematic viewer. Interpolated into every "open the
+// schematic" href so the generated template emits one shared const reference
+// instead of repeating the literal path (keeps it off the repeated-string
+// guardian check). `/schematics/<name>` renders both designs and modules.
+const SCHEMATIC_PREFIX: []const u8 = "/schematics/";
+
 /// One type-filter button on the home grid. `id` matches each card's
 /// `data-kind` (or "all"); the client script in HOME_SEARCH_SCRIPT toggles
 /// the active button and AND-combines the chosen kind with the text search.
 const HomeFilter = struct { id: []const u8, label: []const u8 };
 const HOME_FILTERS = [_]HomeFilter{
     .{ .id = "all", .label = "All" },
-    .{ .id = "design", .label = "Designs" },
-    .{ .id = "module", .label = "Modules" },
+    .{ .id = "board", .label = "Boards" },
+    .{ .id = "subcircuit", .label = "Subcircuits" },
 };
 
 fn filterClass(id: []const u8) []const u8 {
@@ -222,9 +228,13 @@ pub templ Navbar(active: []const u8) {
 }
 
 pub templ DesignCard(s: DesignSummary, search: []const u8, has_starred: bool, now_sec: i64) {
-    <div class="design-card" data-kind="design" data-search={search}>
+    <div class="design-card" data-kind={if (s.is_board) "board" else "subcircuit"} data-search={search}>
         <div class="type-row">
-            <span class="type-tag design">Design</span>
+            if (s.is_board) {
+                <span class="type-tag board">Board</span>
+            } else {
+                <span class="type-tag subcircuit">Subcircuit</span>
+            }
             if (s.has_groups) {
                 <span class="tag-chip grouping" title="Declares placement (group …) DSL — ready for a rough placement">grouping</span>
             }
@@ -288,15 +298,15 @@ pub templ DesignCard(s: DesignSummary, search: []const u8, has_starred: bool, no
             </div>
         }
         <div class="design-card-links">
-            <a class="design-card-link" href="/schematics/{s.name}">Schematic</a>
+            <a class="design-card-link" href="{SCHEMATIC_PREFIX}{s.name}">Schematic</a>
         </div>
     </div>
 }
 
 pub templ ModuleCard(m: ModuleHomeEntry, search: []const u8) {
-    <div class="design-card" data-kind="module" data-search={search}>
+    <div class="design-card" data-kind="subcircuit" data-search={search}>
         <div class="type-row">
-            <span class="type-tag module">Module</span>
+            <span class="type-tag subcircuit">Subcircuit</span>
             if (m.has_groups) {
                 <span class="tag-chip grouping" title="Declares placement (group …) DSL — ready for a rough placement">grouping</span>
             }
@@ -314,14 +324,14 @@ pub templ ModuleCard(m: ModuleHomeEntry, search: []const u8) {
             if (m.used_by.len > 0) {
                 <span class="section-chip-more">used by</span>
                 for (m.used_by) |d| {
-                    <a class="section-chip" href="/schematics/{d}">{d}</a>
+                    <a class="section-chip" href="{SCHEMATIC_PREFIX}{d}">{d}</a>
                 }
             } else {
                 <span class="section-chip-more">not used by any design yet</span>
             }
         </div>
         <div class="design-card-links">
-            <a class="design-card-link" href="/modules/{m.name}">Schematic</a>
+            <a class="design-card-link" href="{SCHEMATIC_PREFIX}{m.name}">Schematic</a>
             <a class="design-card-link" href="/pcb-layout/{m.name}">PCB layout</a>
         </div>
     </div>

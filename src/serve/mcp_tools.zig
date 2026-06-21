@@ -2373,6 +2373,12 @@ pub const DesignSummary = struct {
     /// home page's "grouping" tag so the layout workflow (author grouping →
     /// rough → star) is visible at a glance.
     has_groups: bool = false,
+    /// True when the evaluated design declares fabrication intent — a
+    /// top-level `(board …)` outline, a `(kicad-pcb …)` target, or any
+    /// `(critical-ic …)`. Such a block is a fabricable *board*; otherwise it
+    /// is a reusable *subcircuit*. Drives the home page's Board/Subcircuit
+    /// role tag + filter (the role is content-derived, not folder-derived).
+    is_board: bool = false,
 };
 
 /// Count instances flattened across a design plus every sub-block. Does NOT
@@ -2437,6 +2443,8 @@ fn dupeSummary(alloc: std.mem.Allocator, s: DesignSummary) std.mem.Allocator.Err
         .modules_used = mods,
         .assert_fails = s.assert_fails,
         .open_notes = s.open_notes,
+        .has_groups = s.has_groups,
+        .is_board = s.is_board,
     };
 }
 
@@ -2576,6 +2584,13 @@ pub fn listDesignSummaries(
                 summary.net_count = countNets(block);
                 summary.build_ok = true;
                 summary.has_groups = block.groups.len > 0;
+                // Content-derived board/subcircuit role: a block is a fabricable
+                // *board* iff it declares fabrication intent (a (board …) outline,
+                // a (kicad-pcb …) target, or any (critical-ic …)); otherwise it is
+                // a reusable subcircuit. Folder is not consulted.
+                summary.is_board = block.board.present or
+                    block.kicad_pcb_path != null or
+                    block.critical_ics.len > 0;
 
                 // Traceability roll-up for the home dashboard. Run the same
                 // requirement checks the schematic page does so "placed +

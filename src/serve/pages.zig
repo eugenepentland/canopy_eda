@@ -71,17 +71,18 @@ fn buildModuleCards(
     return out;
 }
 
-/// "design <name> <title> <section…>" — the searchable text for a design
-/// card. The leading "design" tag word makes a query of "design" surface
-/// every design (mirroring the visible type tag); the "grouping"/"starred"
-/// tag words mirror the visible status tags so the same words filter them.
+/// "<role> <name> <title> <section…>" — the searchable text for a design
+/// card. The leading role tag word ("board" or "subcircuit") makes a query of
+/// either word surface the matching cards (mirroring the visible type tag);
+/// the "grouping"/"starred" tag words mirror the visible status tags so the
+/// same words filter them.
 fn designSearchText(
     allocator: std.mem.Allocator,
     s: mcp_tools.DesignSummary,
     starred: bool,
 ) std.mem.Allocator.Error![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    try buf.appendSlice(allocator, "design ");
+    try buf.appendSlice(allocator, if (s.is_board) "board " else "subcircuit ");
     try buf.appendSlice(allocator, s.name);
     if (s.title.len > 0) {
         try buf.append(allocator, ' ');
@@ -107,13 +108,15 @@ fn appendTagWords(
     if (starred) try buf.appendSlice(allocator, " starred");
 }
 
-/// "module <name> <params> <doc>" — the searchable text for a module card.
+/// "subcircuit <name> <params> <doc>" — the searchable text for a module
+/// card. Modules are reusable subcircuits, so the leading role tag word is
+/// "subcircuit" (matching the visible type tag + the Subcircuits filter).
 fn moduleSearchText(
     allocator: std.mem.Allocator,
     m: home_template.ModuleHomeEntry,
 ) std.mem.Allocator.Error![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    try buf.appendSlice(allocator, "module ");
+    try buf.appendSlice(allocator, "subcircuit ");
     try buf.appendSlice(allocator, m.name);
     if (m.params.len > 0) {
         try buf.append(allocator, ' ');
