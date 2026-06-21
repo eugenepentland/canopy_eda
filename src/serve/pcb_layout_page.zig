@@ -2569,7 +2569,7 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
     try w.writeAll("<button class=\"btn\" id=\"z-fit\" title=\"Reset zoom\">Fit</button></span>");
     try w.writeAll("<span class=\"savemsg\" id=\"pcb-savemsg\"></span>");
     try w.print("<span class=\"muted\" title=\"drag part to move · hover + R to rotate · Ctrl+Z undo · " ++
-        "scroll to zoom · drag background to pan · snaps to {d} mm grid · press ? for all shortcuts\">" ++
+        "two-finger drag / scroll to pan · pinch or Ctrl+scroll to zoom · snaps to {d} mm grid · press ? for all shortcuts\">" ++
         "drag · R rotate · Ctrl+Z undo · ? help</span>", .{optimizer.GRID_MM});
     try w.writeAll("</div>");
 }
@@ -4224,8 +4224,8 @@ const BOARD_JS =
     \\  '<div class="kbd-row"><span>Move all selected together</span><kbd>drag a selected part</kbd></div>'+
     \\  '<div class="kbd-row"><span>Clear selection</span><kbd>Esc / click empty</kbd></div>'+
     \\  '<div class="kbd-row"><span>Undo / redo move</span><kbd>Ctrl+Z / Ctrl+Shift+Z</kbd></div>'+
-    \\  '<div class="kbd-row"><span>Pan</span><kbd>Space+drag &middot; middle-drag</kbd></div>'+
-    \\  '<div class="kbd-row"><span>Zoom</span><kbd>scroll</kbd></div>'+
+    \\  '<div class="kbd-row"><span>Pan</span><kbd>two-finger drag &middot; scroll &middot; Space+drag &middot; middle-drag</kbd></div>'+
+    \\  '<div class="kbd-row"><span>Zoom</span><kbd>pinch &middot; Ctrl+scroll &middot; +/&minus;</kbd></div>'+
     \\  '<div class="kbd-row"><span>Toggle this help</span><kbd>?</kbd></div>'+
     \\  '<div class="kbd-hint">Esc or click anywhere to close</div></div>';
     \\ document.body.appendChild(kbdOv);kbdOv.addEventListener("click",kbdClose);
@@ -4426,7 +4426,15 @@ const BOARD_JS =
     \\ var r=svg.getBoundingClientRect();
     \\ var px=vb.x+(cx-r.left)*(vb.w/r.width),py=vb.y+(cy-r.top)*(vb.h/r.height);
     \\ vb.x=px-(px-vb.x)*f; vb.y=py-(py-vb.y)*f; vb.w*=f; vb.h*=f; setVB();}
-    \\svg.addEventListener("wheel",function(ev){ev.preventDefault();zoomAt(ev.clientX,ev.clientY,ev.deltaY>0?1.1:0.9);},{passive:false});
+    \\// Figma-style wheel: a pinch gesture (or held Ctrl) arrives as a wheel event
+    \\// with ctrlKey set → zoom; a plain two-finger trackpad drag (or mouse wheel)
+    \\// → pan by its delta. deltaMode 1/2 (line/page) is normalised to pixels so a
+    \\// notched mouse wheel pans a sane distance too.
+    \\svg.addEventListener("wheel",function(ev){ev.preventDefault();
+    \\ if(ev.ctrlKey){zoomAt(ev.clientX,ev.clientY,Math.exp(ev.deltaY*0.01));return;}
+    \\ var r=svg.getBoundingClientRect(),dx=ev.deltaX,dy=ev.deltaY;
+    \\ if(ev.deltaMode===1){dx*=16;dy*=16;}else if(ev.deltaMode===2){dx*=r.width;dy*=r.height;}
+    \\ vb.x+=dx*(vb.w/r.width);vb.y+=dy*(vb.h/r.height);setVB();},{passive:false});
     \\function zc(f){var r=svg.getBoundingClientRect();zoomAt(r.left+r.width/2,r.top+r.height/2,f);}
     \\var zi=document.getElementById("z-in");if(zi)zi.addEventListener("click",function(){zc(0.8);});
     \\var zo=document.getElementById("z-out");if(zo)zo.addEventListener("click",function(){zc(1.25);});
@@ -4437,7 +4445,8 @@ const BOARD_JS =
     \\// off) and is drawn in SVG coords via X()/Y() so it tracks pan/zoom.
     \\var pan=null,marq=null,marqEl=null;
     \\svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.preventDefault();
-    \\ if(SPACE||ev.button===1){pan={cx:ev.clientX,cy:ev.clientY,vx:vb.x,vy:vb.y,moved:false};svg.setPointerCapture(ev.pointerId);svg.style.cursor="grabbing";return;}
+    \\ if(SPACE||ev.button===1){pan={cx:ev.clientX,cy:ev.clientY,vx:vb.x,vy:vb.y,moved:false};
+    \\  svg.setPointerCapture(ev.pointerId);svg.style.cursor="grabbing";return;}
     \\ var m=mm(ev);marq={x0:m.x,y0:m.y,x1:m.x,y1:m.y,moved:false};svg.setPointerCapture(ev.pointerId);
     \\ marqEl=el("rect",{"class":"marquee",x:0,y:0,width:0,height:0});gU.appendChild(marqEl);});
     \\svg.addEventListener("pointermove",function(ev){
