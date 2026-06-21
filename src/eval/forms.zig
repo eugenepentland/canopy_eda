@@ -12,6 +12,7 @@ pub const SpecialForm = enum {
     import,
     defmodule,
     design_block,
+    block,
     assert_,
     assert_range,
     fmt_,
@@ -39,6 +40,7 @@ const atom_to_form = std.StaticStringMap(SpecialForm).initComptime(.{
     .{ "import", .import },
     .{ "defmodule", .defmodule },
     .{ "design-block", .design_block },
+    .{ "block", .block },
     .{ "assert", .assert_ },
     .{ "assert-range", .assert_range },
     .{ "fmt", .fmt_ },
@@ -215,6 +217,7 @@ pub const special_form_schema = blk: {
         .{ .import, .{ .min_args = 1, .max_args = null } },
         .{ .defmodule, .{ .min_args = 2, .max_args = null } },
         .{ .design_block, .{ .min_args = 1, .max_args = null } },
+        .{ .block, .{ .min_args = 1, .max_args = null } },
         .{ .assert_, .{ .min_args = 2, .max_args = 2 } },
         .{ .assert_range, .{ .min_args = 4, .max_args = 4 } },
         .{ .fmt_, .{ .min_args = 1, .max_args = null } },
@@ -311,6 +314,13 @@ pub const special_form_docs = blk: {
     t[@intFromEnum(SpecialForm.design_block)] = .{
         .syntax = "(design-block \"name\" form…)",
         .summary = "The root container — every `.sexp` design file evaluates to one.",
+    };
+    t[@intFromEnum(SpecialForm.block)] = .{
+        .syntax = "(block \"name\" form… | name (param | (param default)…) [\"docstring\"] body…)",
+        .summary = "The unified circuit definition. A string name is an eager design root " ++
+            "(identical to `(design-block …)`); a bare-atom name with a parameter list is a " ++
+            "parameterised, embeddable definition (identical to `(defmodule …)`). " ++
+            "`(design-block …)` and `(defmodule …)` remain as permanent aliases.",
     };
     t[@intFromEnum(SpecialForm.assert_)] = .{
         .syntax = "(assert cond \"message\")",
@@ -622,6 +632,13 @@ test "SpecialForm.fromAtom returns null for unknown names" {
     try std.testing.expect(SpecialForm.fromAtom("LET") == null);
     try std.testing.expectEqual(SpecialForm.let, SpecialForm.fromAtom("let").?);
     try std.testing.expectEqual(SpecialForm.design_block, SpecialForm.fromAtom("design-block").?);
+}
+
+// spec: eval/forms - block is the unified definition form; design-block and defmodule remain permanent aliases
+test "block form resolves and legacy definition keywords remain aliases" {
+    try std.testing.expectEqual(SpecialForm.block, SpecialForm.fromAtom("block").?);
+    try std.testing.expectEqual(SpecialForm.design_block, SpecialForm.fromAtom("design-block").?);
+    try std.testing.expectEqual(SpecialForm.defmodule, SpecialForm.fromAtom("defmodule").?);
 }
 
 // spec: eval/forms - Builtin.fromAtom resolves every operator name
