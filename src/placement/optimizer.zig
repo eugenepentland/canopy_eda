@@ -930,6 +930,22 @@ fn runPlacement(
             }
             g_placement_diag.used_spec = false;
         }
+        // Role-based constructive placement (no explicit spec, recognized module
+        // class or `(auto)`): synthesized from detected roles, realized through the
+        // same `packSpec` + finish as an authored spec. `packSpec` returning false
+        // falls through to the zone-pack / force path.
+        if (prep.role_placement) |rp| {
+            if (try packSpec(arena, parts, &prep.idx_of, nets, built, rp)) {
+                try autofillUnlisted(arena, parts, &prep.idx_of, nets, built.loops);
+                if (rp.refine) {
+                    polish(parts, &prep.idx_of, nets, built, params);
+                    snapToGrid(parts);
+                    legalizeOnGrid(parts);
+                    tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
+                }
+                return;
+            }
+        }
     }
     // Constructive zone-then-pack floorplan (opt-in): crisp VIN│IC│L│VOUT rows the
     // force model can't make. Returns false (falls through to the force pipeline)
@@ -1678,6 +1694,96 @@ fn resolvePlacement(
         .refine = spec.refine,
         .centered = spec.centered,
         .unresolved = try unresolved.toOwnedSlice(arena),
+    };
+}
+
+/// Build a `(placement …)`-equivalent `ResolvedPlacement` from the detected
+/// module-policy roles — the role-inferred twin of `resolvePlacement`, realizing
+/// the research priority ladder through the existing `packSpec`. Anchors on the
+/// largest recognized-class hub, then docks each recognized-role satellite (input/
+/// decoupling/bulk cap, feedback divider, RF/matching element) on the anchor edge
+/// its non-ground net's pad sits on (`railDir`/`snapEdge` — exactly what the spec
+/// path uses), ordered by criticality (smallest HF cap nearest the pin, via
+/// `orderMembers`). Ordinary passives (role `other`) and parts with no anchor
+/// connection are left unclaimed for `autofillUnlisted` to pin-hug. Returns null —
+/// falling through to the force solve — for a `generic` block (unless `auto_on`),
+/// a block with no recognized hub, or one where no satellite resolves to an edge.
+fn proposeRolePlacement(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+    instances: []const export_kicad.FlatInstance,
+    overrides: env.PolicyOverrides,
+    auto_on: bool,
+) std.mem.Allocator.Error!?ResolvedPlacement {
+    if (parts.len < 2 or parts.len > POLISH_MAX_PARTS) return null;
+
+    // The detector is pure topology (positions unused), so analyse a minimal view
+    // of the pre-solve netlist. Arena-allocated ⇒ no deinit.
+    const view = Placement{
+        .parts = parts,
+        .links = try arena.alloc(Link, 0),
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = instances,
+        .nets = nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 0,
+        .maxy = 0,
+        .generated = false,
+        .policy_overrides = overrides,
+    };
+    const policy = try module_policy.analyze(arena, view);
+
+    // Anchor = largest recognized-class hub (a generic hub only when (auto) forces it).
+    var anchor: ?usize = null;
+    var best_pads: usize = 0;
+    for (policy.modules) |m| {
+        if (m.class == .generic and !auto_on) continue;
+        const np = parts[m.hub].pads.len;
+        if (anchor == null or np > best_pads) {
+            anchor = m.hub;
+            best_pads = np;
+        }
+    }
+    const ic = anchor orelse return null;
+
+    // Bucket each recognized-role satellite onto the anchor edge its non-ground net
+    // lands on. Indexed by `@intFromEnum(Edge)` (left,right,top,bottom = 0..3).
+    var by_edge = [_]std.ArrayListUnmanaged(usize){ .empty, .empty, .empty, .empty };
+    var any = false;
+    for (parts, 0..) |part, i| {
+        if (i == ic or part.kind == .hub) continue;
+        const placeable = switch (policy.part_role[i]) {
+            .input_cap, .decoupling_cap, .bulk_cap, .feedback_divider, .matching_element => true,
+            .anchor_ic, .other => false,
+        };
+        if (!placeable) continue;
+        const e = snapEdge(railDir(&.{i}, ic, parts, nets, idx_of)) orelse continue;
+        try by_edge[@intFromEnum(e)].append(arena, i);
+        any = true;
+    }
+    if (!any) return null;
+
+    var sides: std.ArrayListUnmanaged(SpecSide) = .empty;
+    for ([_]Edge{ .left, .right, .top, .bottom }) |e| {
+        const bucket = by_edge[@intFromEnum(e)].items;
+        if (bucket.len == 0) continue;
+        const ordered = try orderMembers(arena, bucket, parts, &[_]u32{});
+        const items = try arena.alloc(SpecItem, ordered.len);
+        for (ordered, 0..) |pi, k| items[k] = .{ .part = pi };
+        try sides.append(arena, .{ .edge = e, .items = items });
+    }
+    return .{
+        .anchor = ic,
+        .sides = try sides.toOwnedSlice(arena),
+        .switches = &.{},
+        .refine = true,
+        .centered = false,
+        .unresolved = &.{},
     };
 }
 
@@ -4991,6 +5097,12 @@ const Prepared = struct {
     /// re-stamps those sub-blocks as rigid macros after the force solve.
     /// Null ⇒ nothing to compose.
     compose: ?FloorplanCtx = null,
+    /// Role-based constructive placement synthesized from the detected module-policy
+    /// roles (the research priority ladder), when no explicit `(placement …)`/
+    /// `(floorplan …)` exists and the block is auto-eligible. `runPlacement` realizes
+    /// it via `packSpec` between the explicit-spec and zone-pack tiers; null ⇒ the
+    /// block is `generic`/opted-out ⇒ force solve.
+    role_placement: ?ResolvedPlacement = null,
     /// The design block + project dir this model was prepared from, carried so the
     /// rough hierarchical seed (`runRough`) can iterate `block.sub_blocks` and
     /// nested-solve each one as its own board (it needs a `FloorplanCtx`, which the
@@ -5617,6 +5729,16 @@ fn prepare(
         .active = block.placement.present or floorplan != null,
         .unresolved = unresolved0,
     };
+    // Role-based constructive placement — OPT-IN via `(placement (auto))`. Default-on
+    // for recognized module classes is gated off for now: the routed A/B regressed
+    // array-style boards (the ladder crams peers onto one anchor) and leaked past the
+    // size gate through composition's nested solves — revisit before flipping it on.
+    // The role-inferred twin of `resolvePlacement`; `runPlacement` realizes it via
+    // `packSpec`, falling back to the force solve when it's null.
+    var role_placement: ?ResolvedPlacement = null;
+    if (placement == null and floorplan == null and block.placement.auto_mode == .on) {
+        role_placement = try proposeRolePlacement(arena, parts, nets, &idx_of, instances, block.policy_overrides, true);
+    }
     return .{
         .parts = parts,
         .idx_of = idx_of,
@@ -5628,6 +5750,7 @@ fn prepare(
         .placement = placement,
         .floorplan = floorplan,
         .compose = compose,
+        .role_placement = role_placement,
         .block = block,
         .project_dir = project_dir,
     };

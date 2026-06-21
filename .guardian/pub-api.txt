@@ -192,6 +192,7 @@ src/eval/env.zig::Note struct_
 src/eval/env.zig::NoteRef struct_
 src/eval/env.zig::Part struct_
 src/eval/env.zig::PartPin struct_
+src/eval/env.zig::PartRoleOverride struct_
 src/eval/env.zig::PartSignal struct_
 src/eval/env.zig::PinGroup struct_
 src/eval/env.zig::PinRef struct_
@@ -199,6 +200,7 @@ src/eval/env.zig::PlaceConstraint struct_
 src/eval/env.zig::PlaceRel enum_
 src/eval/env.zig::PlaceholderPart struct_
 src/eval/env.zig::Placement struct_
+src/eval/env.zig::PlacementAuto enum_
 src/eval/env.zig::PlacementConstraints struct_
 src/eval/env.zig::PlacementEntry struct_
 src/eval/env.zig::PlacementItem struct_

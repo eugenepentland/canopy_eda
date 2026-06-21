@@ -523,7 +523,7 @@ pub const scope_form_docs = blk: {
     } };
     t[@intFromEnum(ScopeForm.placement)] = .{ .scope = tl, .doc = .{
         .syntax = "(placement (anchor \"REF\") " ++
-            "(left|right|top|bottom \"REF\"… | (rot N \"REF\") | (net \"NAME\")…)… [(switch \"REF\" side)] [(no-refine)] [(centered)])",
+            "(left|right|top|bottom \"REF\"… | (rot N \"REF\") | (net \"NAME\")…)… [(switch \"REF\" side)] [(no-refine)] [(centered)] | (auto) | (manual))",
         .summary = "Agent-authored PCB floorplan: declare each part's side of the main IC, " ++
             "the order along that edge, and an optional rotation; the solver legalizes it to " ++
             "exact coordinates (the manual twin of the automatic switcher floorplan). " ++
@@ -531,7 +531,11 @@ pub const scope_form_docs = blk: {
             "a pad on that net joins the side (smallest first) — survives part additions. " ++
             "Parts no side lists are pin-hug auto-filled beside their placed pads. " ++
             "(no-refine) shows the raw constructive pack (flush, symmetric); " ++
-            "(centered) centers every side on the IC instead of opposite its rail pad.",
+            "(centered) centers every side on the IC instead of opposite its rail pad. " ++
+            "(auto) places the block constructively from its detected roles (anchor IC, then " ++
+            "critical-loop caps docked at their supply pads smallest-first, then the rest) and " ++
+            "composes it into parent boards — opt-in, no sides needed; (manual) and the default " ++
+            "use the force solver.",
     } };
     t[@intFromEnum(ScopeForm.floorplan)] = .{ .scope = tl, .doc = .{
         .syntax = "(floorplan (anchor \"SUB\") " ++
@@ -565,10 +569,12 @@ pub const scope_form_docs = blk: {
     t[@intFromEnum(ScopeForm.module_policy)] = .{ .scope = tl, .doc = .{
         .syntax = "(module-policy (module \"REF\" buck|ldo|mcu|rf_amp|analog_afe|generic)… " ++
             "(net-class \"NAME\" ground|power|input_rail|switch_node|clock|rf|feedback|analog|control|signal)… " ++
+            "(part-role \"REF\" input_cap|decoupling_cap|bulk_cap|feedback_divider|matching_element|anchor_ic|other)… " ++
             "(require-decouple-binding))",
         .summary = "Override the best-effort module-policy detector (PCB layout): pin a hub IC's " ++
-            "ModuleClass or a net's routing-criticality NetClass when the name heuristics read it " ++
-            "wrong (e.g. an integrated buck with no discrete inductor that reads as generic). " ++
+            "ModuleClass, a net's routing-criticality NetClass, or a passive's PartRole when the " ++
+            "name heuristics read it wrong (e.g. an integrated buck with no discrete inductor that " ++
+            "reads as generic, or a decoupling cap miscategorised). " ++
             "Applied after detection — the author has the last word. (require-decouple-binding) " ++
             "promotes the decouple-unbound layout lint to a hard error for this design (every HF " ++
             "decoupling cap on a multi-supply-pad rail must declare its pin via (decouples …)). " ++

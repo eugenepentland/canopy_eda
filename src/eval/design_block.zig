@@ -134,6 +134,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     var rough_spec: env_mod.RoughSpec = .{};
     var policy_net_overrides: std.ArrayListUnmanaged(env_mod.NetClassOverride) = .empty;
     var policy_module_overrides: std.ArrayListUnmanaged(env_mod.ModuleClassOverride) = .empty;
+    var policy_part_role_overrides: std.ArrayListUnmanaged(env_mod.PartRoleOverride) = .empty;
     var require_decouple_binding = false;
     var derating: ?f64 = null;
     var kicad_pcb_path: ?[]const u8 = null;
@@ -253,7 +254,14 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
             .revision => revision_spec = try parseRevision(self, form_children),
             .rough => rough_spec = try parseRough(self, form_children),
             .replicate => try evalReplicate(self, form_children, env, &sub_blocks),
-            .module_policy => try parsePolicyOverrides(self, form_children, &policy_net_overrides, &policy_module_overrides, &require_decouple_binding),
+            .module_policy => try parsePolicyOverrides(
+                self,
+                form_children,
+                &policy_net_overrides,
+                &policy_module_overrides,
+                &policy_part_role_overrides,
+                &require_decouple_binding,
+            ),
             // Section-only forms are ignored at the top level — a
             // design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract; the warning
@@ -303,6 +311,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
         .policy_overrides = .{
             .nets = policy_net_overrides.toOwnedSlice(self.allocator) catch &.{},
             .modules = policy_module_overrides.toOwnedSlice(self.allocator) catch &.{},
+            .part_roles = policy_part_role_overrides.toOwnedSlice(self.allocator) catch &.{},
             .require_decouple_binding = require_decouple_binding,
         },
         .revision = revision_spec,
@@ -1585,6 +1594,7 @@ fn parsePolicyOverrides(
     form_children: []const Node,
     nets: *std.ArrayListUnmanaged(env_mod.NetClassOverride),
     modules: *std.ArrayListUnmanaged(env_mod.ModuleClassOverride),
+    part_roles: *std.ArrayListUnmanaged(env_mod.PartRoleOverride),
     require_decouple_binding: *bool,
 ) EvalError!void {
     for (form_children[1..]) |child| {
@@ -1604,8 +1614,11 @@ fn parsePolicyOverrides(
             modules.append(self.allocator, .{ .ref = target, .class = class }) catch return EvalError.OutOfMemory;
         } else if (std.mem.eql(u8, head, "net-class")) {
             nets.append(self.allocator, .{ .net = target, .class = class }) catch return EvalError.OutOfMemory;
+        } else if (std.mem.eql(u8, head, "part-role")) {
+            part_roles.append(self.allocator, .{ .ref = target, .role = class }) catch return EvalError.OutOfMemory;
         } else {
-            self.warnFmt(child.span, "unknown (module-policy …) item ({s} …) — expected (module …), (net-class …), or (require-decouple-binding)", .{head});
+            self.warnFmt(child.span, "unknown (module-policy …) item ({s} …) — expected " ++
+                "(module …), (net-class …), (part-role …), or (require-decouple-binding)", .{head});
         }
     }
 }
@@ -2083,6 +2096,7 @@ fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_m
     var anchor: []const u8 = "";
     var refine = true;
     var centered = false;
+    var auto_mode: env_mod.PlacementAuto = .unset;
     var sides: std.ArrayListUnmanaged(env_mod.PlacementSideSpec) = .empty;
     var switches: std.ArrayListUnmanaged(env_mod.SwitchPlacement) = .empty;
     for (form_children[1..]) |child| {
@@ -2097,6 +2111,17 @@ fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_m
         // (centered) — center every side's lane on the IC, not opposite its rail pad.
         if (std.mem.eql(u8, head, "centered")) {
             centered = true;
+            continue;
+        }
+        // (auto) — force role-based constructive placement (the detected-role
+        // ladder) even on a generic block, and compose the result into parents.
+        if (std.mem.eql(u8, head, "auto")) {
+            auto_mode = .on;
+            continue;
+        }
+        // (manual) — opt out of role auto-placement; always use the force solver.
+        if (std.mem.eql(u8, head, "manual")) {
+            auto_mode = .off;
             continue;
         }
         if (std.mem.eql(u8, head, "anchor")) {
@@ -2144,6 +2169,7 @@ fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_m
         .present = true,
         .refine = refine,
         .centered = centered,
+        .auto_mode = auto_mode,
     };
 }
 

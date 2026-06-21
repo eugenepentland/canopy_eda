@@ -116,6 +116,8 @@ pub fn analyze(alloc: Allocator, p: Placement) Allocator.Error!ModulePolicy {
     for (p.parts, 0..) |part, i| {
         part_role[i] = if (part.kind == .hub) .anchor_ic else roleOfPassive(part, flags[i]);
     }
+    // Author overrides win over the role heuristics (e.g. a misread decoupling cap).
+    applyPartRoleOverrides(p, part_role);
 
     const modules = try detectModules(alloc, p, net_class);
     applyModuleOverrides(p, modules);
@@ -147,6 +149,20 @@ fn applyModuleOverrides(p: Placement, modules: []ModuleInfo) void {
             const ref = p.parts[m.hub].ref_des;
             const origin = if (m.hub < p.instances.len) p.instances[m.hub].origin_key else "";
             if (nameMatches(ref, ov.ref) or nameMatches(origin, ov.ref)) m.class = cls;
+        }
+    }
+}
+
+/// Apply the design's `(module-policy (part-role "REF" role) …)` overrides over the
+/// detected `PartRole`. A part matches `ov.ref` by its flattened ref-des *or* its
+/// module-local origin name (exact or leaf), like the module override. An unmatched
+/// ref or unparseable role token is silently ignored — the heuristic stands.
+fn applyPartRoleOverrides(p: Placement, part_role: []PartRole) void {
+    for (p.policy_overrides.part_roles) |ov| {
+        const role = std.meta.stringToEnum(PartRole, ov.role) orelse continue;
+        for (p.parts, 0..) |part, i| {
+            const origin = if (i < p.instances.len) p.instances[i].origin_key else "";
+            if (nameMatches(part.ref_des, ov.ref) or nameMatches(origin, ov.ref)) part_role[i] = role;
         }
     }
 }
