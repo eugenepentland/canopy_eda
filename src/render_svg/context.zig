@@ -70,6 +70,16 @@ pub const FlatInst = struct {
     /// (their offsets point into the module file, which `/api/source/:name`
     /// can't serve) and synthetic instances.
     src_offset: u32 = 0,
+    /// `(decouples "IC" PIN)` binding, copied off the Instance. Lets the
+    /// spoke-attachment pass dock a bypass cap on the one hub pad it serves
+    /// instead of fanning it onto every pin of the rail (the schematic twin of
+    /// the per-pad binding the PCB placer already honors). `decouple_ic` is the
+    /// (module-local) hub ref and `decouple_pin` the resolved pad; both empty
+    /// when the cap declares no binding. `decouple_rail` marks a rail-level
+    /// reservoir (`(decouples rail)`) — shown once on the rail, not per pin.
+    decouple_ic: []const u8 = "",
+    decouple_pin: []const u8 = "",
+    decouple_rail: bool = false,
 };
 
 fn propertyValue(props: []const env_mod.Property, key: []const u8) []const u8 {
@@ -290,6 +300,9 @@ pub const RenderCtx = struct {
                 // their offsets don't map into the design source — only
                 // top-level (unprefixed) instances get a source link.
                 .src_offset = if (prefix.len == 0) inst.source_offset else 0,
+                .decouple_ic = inst.decouple_ic,
+                .decouple_pin = inst.decouple_pin,
+                .decouple_rail = inst.decouple_rail,
             };
             try self.instances.append(self.allocator, flat);
             try self.inst_map.put(self.allocator, rd, flat);
@@ -430,6 +443,50 @@ pub const RenderCtx = struct {
         }
     }
 
+    /// The single hub pin a `(decouples …)` cap should dock on, chosen among
+    /// `hubs` (the hub pins on the cap's current net). Returns null when the
+    /// spoke declares no binding, or its bound pad isn't among this net's hub
+    /// pins (a cross-net binding) — the caller then applies the default
+    /// rail-wide fan-out so the spoke is never dropped.
+    ///
+    ///  - `(decouples "IC" PAD)` → the hub pin whose pad == PAD. An exact
+    ///    `decouple_ic` ref match wins (non-renumbered designs); otherwise the
+    ///    first pad match (the ref churns when a module flattens into a parent —
+    ///    U1→U13 — but the physical pad number is stable, and net membership
+    ///    already scopes the search to this rail).
+    ///  - `(decouples rail)` → one representative pin on the rail's busiest hub,
+    ///    so a reservoir shows once instead of reserving height on every pin.
+    fn boundHubPin(self: *RenderCtx, spoke_ref: []const u8, hubs: []const PinRef) ?PinRef {
+        const fi = self.inst_map.get(spoke_ref) orelse return null;
+        if (fi.decouple_pin.len > 0) {
+            var pad_match: ?PinRef = null;
+            for (hubs) |hp| {
+                if (!std.mem.eql(u8, hp.pin, fi.decouple_pin)) continue;
+                if (fi.decouple_ic.len > 0 and std.mem.eql(u8, hp.ref_des, fi.decouple_ic)) return hp;
+                if (pad_match == null) pad_match = hp;
+            }
+            return pad_match;
+        }
+        if (fi.decouple_rail) {
+            // Pick the hub with the most pins on this net (the main consumer),
+            // and dock on its first pin.
+            var best: ?PinRef = null;
+            var best_count: usize = 0;
+            for (hubs) |cand| {
+                var count: usize = 0;
+                for (hubs) |hp| {
+                    if (std.mem.eql(u8, hp.ref_des, cand.ref_des)) count += 1;
+                }
+                if (count > best_count) {
+                    best_count = count;
+                    best = cand;
+                }
+            }
+            return best;
+        }
+        return null;
+    }
+
     pub fn synthesizeSpokeConnections(self: *RenderCtx) !void {
         try self.computeSpokeAnchors();
         for (self.nets.items) |net| {
@@ -488,6 +545,28 @@ pub const RenderCtx = struct {
                 // anchor net so it renders off the lone pin, not the busy rail.
                 if (self.spoke_anchor_net.get(sp.ref_des)) |anchor| {
                     if (!std.mem.eql(u8, anchor, bn)) continue;
+                }
+
+                // `(decouples "IC" PAD)` / `(decouples rail)` binding: dock the
+                // cap on the one hub pad it serves (or one rail pin for a
+                // reservoir) instead of fanning it onto every pin of the rail.
+                // This distributes per-pin bypass caps to the part bucket that
+                // owns their pad and stops the reserved-height pile-up where one
+                // group claims every cap on a multi-pad rail. The net-name
+                // `<rail>.<ic>.<pad>` convention (from the (decouple per-pin …)
+                // shorthand) is handled separately via `hub_target` above;
+                // this covers the explicit (decouples …) form, which keeps the
+                // cap on the plain rail net.
+                if (self.boundHubPin(sp.ref_des, hub_pins_buf[0..hub_count])) |bp| {
+                    try self.adjAppend(bp.ref_des, .{
+                        .pin = bp.pin,
+                        .endpoint = .{ .pin = .{ .ref_des = sp.ref_des, .pin = sp.pin } },
+                    });
+                    try self.adjAppend(sp.ref_des, .{
+                        .pin = sp.pin,
+                        .endpoint = .{ .pin = .{ .ref_des = bp.ref_des, .pin = bp.pin } },
+                    });
+                    continue;
                 }
 
                 const spoke_section = self.section_map.get(sp.ref_des);
@@ -729,3 +808,66 @@ pub const RenderCtx = struct {
         try self.adjacency.put(self.allocator, ref_des, list);
     }
 };
+
+/// True when hub `hub`'s adjacency reaches spoke `spoke` via its own pin `pin`.
+fn hubReachesSpokeOnPin(ctx: *RenderCtx, hub: []const u8, pin: []const u8, spoke: []const u8) bool {
+    const list = ctx.adjacency.get(hub) orelse return false;
+    for (list.items) |ae| {
+        if (!std.mem.eql(u8, ae.pin, pin)) continue;
+        switch (ae.endpoint) {
+            .pin => |p| if (std.mem.eql(u8, p.ref_des, spoke)) return true,
+            .net => {},
+        }
+    }
+    return false;
+}
+
+// spec: render_svg - Docks a (decouples ...) bypass cap on the bound hub pad instead of every pin of the rail
+test "decouples binding docks each cap on its served hub pad" {
+    const testing = std.testing;
+    // U1 is a hub with two supply pads (1, 2) on one rail VDD plus a ground pad
+    // (3). C1 binds to pad 2, C2 to pad 1 — so each cap must reach U1 on exactly
+    // its bound pad. A plain rail bypass cap (no binding) fans onto every supply
+    // pad, which is what piled every cap onto one part block before the fix.
+    const insts = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "C1", .component = "cap", .value = "100nF", .footprint = "", .symbol = "", .decouple_ic = "U1", .decouple_pin = "2" },
+        .{ .ref_des = "C2", .component = "cap", .value = "100nF", .footprint = "", .symbol = "", .decouple_ic = "U1", .decouple_pin = "1" },
+    };
+    const vdd_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "U1", .pin = "2" },
+        .{ .ref_des = "C1", .pin = "1" }, .{ .ref_des = "C2", .pin = "1" },
+    };
+    const gnd_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "C1", .pin = "2" }, .{ .ref_des = "C2", .pin = "2" },
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "VDD", .pins = &vdd_pins },
+        .{ .name = "GND", .pins = &gnd_pins },
+    };
+    const block: DesignBlock = .{
+        .name = "decouple-bind-test",
+        .instances = &insts,
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = RenderCtx.init(arena.allocator());
+    try ctx.collectFlat(&block, "");
+    try ctx.classify();
+    try ctx.buildAdjacency();
+    try ctx.synthesizeSpokeConnections();
+
+    // Each cap docks on exactly its bound pad …
+    try testing.expect(hubReachesSpokeOnPin(&ctx, "U1", "2", "C1"));
+    try testing.expect(hubReachesSpokeOnPin(&ctx, "U1", "1", "C2"));
+    // … and not on the other supply pad (the pre-fix fan-out attached every cap
+    // to both pads, so one part block claimed them all).
+    try testing.expect(!hubReachesSpokeOnPin(&ctx, "U1", "1", "C1"));
+    try testing.expect(!hubReachesSpokeOnPin(&ctx, "U1", "2", "C2"));
+}

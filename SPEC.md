@@ -482,6 +482,8 @@ Public functions: renderBlockDiagramTabs, renderSystemSvg
 
 Public functions: renderSchematic
 
+- Docks a (decouples ...) bypass cap on the bound hub pad instead of every pin of the rail
+
 ## erc
 
 - Flags a board with at least five blocks that leaves some outside every group cluster
