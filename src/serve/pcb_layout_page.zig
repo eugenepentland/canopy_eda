@@ -310,7 +310,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         try writeTabsRow(w, route_open);
         try w.writeAll("<div class=\"pcb-panels\">");
         try writeTuning(w, shown);
-        try writeScoreView(w, shown);
+        try writeScoreView(w, shown, name);
         const rp_warn = if (routed) |r| router.returnPathViolations(placement, r, router.RETURN_PATH_RADIUS_MM) else 0;
         try writeRoutePanel(w, ro.params, routed, violations.len, rp_warn, route_open);
         try w.writeAll("</div>");
@@ -319,11 +319,6 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         try writeNetLegend(w); // hidden; revealed by the Net colours chip
     }
     if (embed) try writeLegend(w, placement, false);
-    // Placement-DSL panel above the board: the spec for the shown layout,
-    // hand-editable with a live re-solve preview, sitting over the preview.
-    // Whole-design pages only — the embedded/sub-scoped previews are read-only
-    // and the spec endpoints target the full design.
-    if (!embed and sub == null) try writeSpecPanel(w, module_res != null);
     try w.print(
         "<svg id=\"pcb-svg\" class=\"pcb-svg\" viewBox=\"0 0 {d:.0} {d:.0}\" width=\"{d:.0}\" height=\"{d:.0}\" xmlns=\"http://www.w3.org/2000/svg\"></svg>",
         .{ view.width, view.height, view.width, view.height },
@@ -2525,56 +2520,57 @@ const View = struct {
 
 // ── Score bar + legend ───────────────────────────────────────────────────
 
+// Action-bar group wrappers — small inline-flex clusters separated by thin rules
+// so the buttons read as grouped (place / save / edit) rather than one long row.
+// Extracted as consts (each used 3× in writeScorebar).
+const BAR_SEP = "<span class=\"bar-sep\"></span>";
+const BAR_GRP = "<span class=\"bar-grp\">";
+const BAR_GRP_END = "</span>" ++ BAR_SEP;
+
 fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, src: LayoutSource) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-bar\">");
     try writeSourceChip(w, src);
-    // The weighted objective the optimizer actually minimises, then its terms.
-    // All filled/updated by showScore() — server-computed, never re-derived in JS.
-    try w.writeAll("<span class=\"score\" id=\"sc-obj\" title=\"weighted objective the optimizer minimizes\">objective ");
+    // Headline objective + its delta only — the per-term breakdown (wire / loop /
+    // area / congestion) moved into the Score panel so this action bar stays a
+    // clean row of "what to do". Filled/updated by showScore().
+    try w.writeAll("<span class=\"score\" id=\"sc-obj\" " ++
+        "title=\"weighted objective the optimizer minimizes (term breakdown in the Score chip)\">objective ");
     try w.print("{d:.1}</span>", .{p.breakdown.objective});
     try w.writeAll("<span class=\"delta\" id=\"sc-obj-d\"></span>");
-    try w.print("<span class=\"score sc-sub\" id=\"sc-hpwl\" title=\"signal wirelength: RSMT estimate (mm)\">wire {d:.1}</span>", .{p.breakdown.hpwl});
-    try w.writeAll("<span class=\"delta\" id=\"sc-hpwl-d\"></span>");
-    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-loop\" title=\"weighted decoupling-loop term (loop_w × value-weighted loop length)\">loop …</span>");
-    try w.writeAll("<span class=\"delta\" id=\"sc-loop-d\"></span>");
-    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-ind\" title=\"hot-loop connection inductance (nH) — the scored loop metric\">loop … nH</span>");
-    try w.writeAll("<span class=\"delta\" id=\"sc-ind-d\"></span>");
-    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-align\" title=\"sub-module courtyard bounding-box area (mm²) — compactness term\">area …</span>");
-    try w.writeAll("<span class=\"delta\" id=\"sc-align-d\"></span>");
-    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-cong\" title=\"routing congestion (w_congest × RUDY overflow)\">cong …</span>");
-    try w.writeAll("<span class=\"delta\" id=\"sc-cong-d\"></span>");
-    try w.writeAll("<button class=\"btn\" id=\"pcb-score\" title=\"Recompute the objective on the server for the current positions\">Score</button>");
-    // Stored layout is reused on load; this re-runs the optimizer, overwrites the
-    // cache, and records the result into the saved-layout history below.
+    try w.writeAll(BAR_SEP);
+    // Auto-place group: Regenerate re-runs the optimizer live; Rough drops the
+    // legible module-clustered seed. Both nav to a fresh solve.
+    try w.writeAll(BAR_GRP);
     try w.writeAll("<a class=\"btn\" id=\"pcb-regen\" href=\"/pcb-layout/");
     try writeAttr(w, name);
     try w.writeAll("?regen=1\" title=\"Re-run the optimizer and watch it converge live\">Regenerate</a>");
-    // Rough seed: each module kept as an intact, grid-aligned rigid block (a flat
-    // module rings the anchor IC, each passive on the side of the pad it serves).
-    // A legible, module-coherent start to hand-finish — deliberately not optimal.
     try w.writeAll("<a class=\"btn\" id=\"pcb-rough\" href=\"/pcb-layout/");
     try writeAttr(w, name);
     try w.writeAll("?rough=1\" title=\"Rough module-clustered seed: every module kept intact " ++
         "and grid-aligned (not metric-optimal) — a legible start to hand-finish\">Rough</a>");
-    // Export the solved positions + full score breakdown (incl. the
-    // value-weighted loop + alignment terms the bar above hides) for inspection.
-    try w.writeAll("<a class=\"btn\" href=\"/api/pcb-layout/");
-    try writeAttr(w, name);
-    try w.writeAll("\" target=\"_blank\" title=\"Download positions + full score breakdown as JSON\">Export JSON</a>");
-    // Update writes the current placement back into the layout the user loaded
-    // (overwrite in place) — the iterative "save progress" path. Disabled until a
-    // saved layout is the active edit target (set by Load, or after a Save as…).
+    try w.writeAll(BAR_GRP_END);
+    // Save group: Save as… mints a new snapshot; Update overwrites the loaded one
+    // in place (disabled until a saved layout is the active edit target).
+    try w.writeAll(BAR_GRP);
+    try w.writeAll("<button class=\"btn\" id=\"pcb-saveas\" title=\"Save the current placement under a new name\">Save as…</button>");
     try w.writeAll("<button class=\"btn\" id=\"pcb-update\" disabled " ++
         "title=\"Save changes back into the loaded layout (overwrite in place)\">Update</button>");
-    try w.writeAll("<button class=\"btn\" id=\"pcb-saveas\" title=\"Save the current placement under a new name\">Save as…</button>");
-    try w.writeAll("<button class=\"btn\" id=\"pcb-reset\">Reset to auto</button>");
     try w.writeAll("<span class=\"lay-active\" id=\"pcb-active\" style=\"display:none\"></span>");
+    try w.writeAll(BAR_GRP_END);
+    // Edit group: undo / redo the last manual move-or-rotate (Ctrl+Z / Ctrl+Shift+Z),
+    // and reset back to the auto layout. Undo/redo start disabled (empty history).
+    try w.writeAll(BAR_GRP);
+    try w.writeAll("<button class=\"btn\" id=\"pcb-undo\" disabled title=\"Undo last move / rotate (Ctrl+Z)\">↶ Undo</button>");
+    try w.writeAll("<button class=\"btn\" id=\"pcb-redo\" disabled title=\"Redo (Ctrl+Shift+Z)\">↷ Redo</button>");
+    try w.writeAll("<button class=\"btn\" id=\"pcb-reset\" title=\"Discard manual edits, restore the auto layout\">Reset</button>");
+    try w.writeAll(BAR_GRP_END);
     try w.writeAll("<span class=\"zoom-grp\"><button class=\"btn\" id=\"z-out\" title=\"Zoom out\">−</button>");
     try w.writeAll("<button class=\"btn\" id=\"z-in\" title=\"Zoom in\">+</button>");
     try w.writeAll("<button class=\"btn\" id=\"z-fit\" title=\"Reset zoom\">Fit</button></span>");
     try w.writeAll("<span class=\"savemsg\" id=\"pcb-savemsg\"></span>");
-    try w.print("<span class=\"muted\" title=\"drag part to move · hover + R to rotate · scroll to zoom · " ++
-        "drag background to pan · snaps to {d} mm grid\">drag · R rotate · scroll zoom</span>", .{optimizer.GRID_MM});
+    try w.print("<span class=\"muted\" title=\"drag part to move · hover + R to rotate · Ctrl+Z undo · " ++
+        "scroll to zoom · drag background to pan · snaps to {d} mm grid · press ? for all shortcuts\">" ++
+        "drag · R rotate · Ctrl+Z undo · ? help</span>", .{optimizer.GRID_MM});
     try w.writeAll("</div>");
 }
 
@@ -2633,11 +2629,7 @@ fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: Layo
         try w.writeAll(if (L.default) "★" else "☆");
         try w.writeAll("</button><button class=\"btn lay-go\" data-lay-load=\"");
         try writeAttr(w, L.name);
-        try w.writeAll("\">Load</button><button class=\"btn lay-spec\" " ++
-            "title=\"Promote: export this snapshot as a (placement ...) spec into the panel below - " ++
-            "Save then writes it into the source file, making it the layout's source of truth\" data-lay-spec=\"");
-        try writeAttr(w, L.name);
-        try w.writeAll("\">→spec</button><button class=\"btn lay-del\" title=\"Delete\" data-lay-del=\"");
+        try w.writeAll("\">Load</button><button class=\"btn lay-del\" title=\"Delete\" data-lay-del=\"");
         try writeAttr(w, L.name);
         try w.writeAll("\">✕</button></span></div></div>");
     }
@@ -2664,7 +2656,7 @@ fn writeLayDelta(w: *std.Io.Writer, s: LayoutScore, auto: LayoutScore) std.Io.Wr
     });
 }
 
-/// Chip row that toggles the collapsible control panels (Tuning / Score view /
+/// Chip row that toggles the collapsible control panels (Tuning / Score /
 /// Route — an accordion, one open at a time) plus the two board-view overlays
 /// (the blame Heatmap tint and the trace Legend). The Route chip starts active
 /// when the page loaded already routed, so its status panel is visible without a
@@ -2678,7 +2670,7 @@ fn writeTabsRow(w: *std.Io.Writer, route_open: bool) std.Io.Writer.Error!void {
     try w.writeAll("<button class=\"tab-chip\" data-panel=\"panel-tune\" " ++
         "title=\"Steering weights — re-runs the optimizer\">Tuning</button>");
     try w.writeAll("<button class=\"tab-chip\" data-panel=\"panel-score\" " ++
-        "title=\"Re-weigh the score in the browser — doesn't move parts\">Score view</button>");
+        "title=\"Score breakdown + re-weigh — doesn't move parts\">Score</button>");
     try w.writeAll(if (route_open)
         "<button class=\"tab-chip active\" data-panel=\"panel-route\" title=\"Autoroute + DRC\">Route</button>"
     else
@@ -2904,42 +2896,33 @@ fn writeDocHead(w: *std.Io.Writer, title: []const u8, embed: bool) std.Io.Writer
     try w.writeAll(">");
 }
 
-/// Placement-DSL panel below the board: the `(placement …)` spec for the shown
-/// layout (fetched from /api/placement-spec on load), hand-editable with a
-/// debounced live re-solve (/api/spec-solve → the live-regen frame applier), a
-/// Preview button for when live is off, and Save (designs only — a module's
-/// spec lives inside its defmodule body, which the splice can't target).
-/// All behaviour is wired in BOARD_JS by the `spec-*` ids.
-fn writeSpecPanel(w: *std.Io.Writer, is_module: bool) std.Io.Writer.Error!void {
-    try w.writeAll("<details class=\"pcb-spec\" id=\"pcb-spec\" open><summary>Placement DSL" ++
-        "<span class=\"spec-stat\" id=\"spec-stat\"></span></summary><div class=\"spec-body\">");
-    try w.writeAll("<textarea id=\"spec-text\" spellcheck=\"false\" " ++
-        "placeholder=\"(placement (anchor &quot;U1&quot;) (left &quot;C1&quot;) ...)\"></textarea>");
-    try w.writeAll("<div class=\"spec-row\">");
-    try w.writeAll("<label class=\"tune-chk\" title=\"re-solve and preview as you type\">" ++
-        "<input type=\"checkbox\" id=\"spec-live\" checked> Live</label>");
-    try w.writeAll("<button class=\"btn\" id=\"spec-apply\" title=\"solve the spec and preview the result (nothing written)\">Preview</button>");
-    if (is_module) {
-        try w.writeAll("<button class=\"btn\" id=\"spec-save\" " ++
-            "title=\"write this spec into the defmodule body in lib/modules - every design using the module picks it up\">Save to module</button>");
-    } else {
-        try w.writeAll("<button class=\"btn\" id=\"spec-save\" " ++
-            "title=\"write this spec into the design .sexp (a history snapshot is taken first)\">Save to design</button>");
-    }
-    try w.writeAll("<button class=\"btn\" id=\"spec-reset\" title=\"restore the spec for the layout on disk\">Reset</button>");
-    try w.writeAll("<button class=\"btn\" id=\"spec-copy\">Copy</button>");
-    try w.writeAll("<span class=\"spec-msg\" id=\"spec-msg\"></span>");
-    try w.writeAll("</div></div></details>");
-}
-
 /// Score-view panel: per-metric enable toggles + display weights that recompute
 /// the headline objective *in the browser* from the breakdown's stored raw terms
 /// — no re-placement, no server round-trip. Lets you re-weigh or drop each metric
 /// to see how it moves the total (e.g. disable Wire + Align + Congest to compare
 /// two layouts on pure hot-loop inductance). Defaults mirror the engine weights,
 /// so the headline matches the optimizer's objective until you change something.
-fn writeScoreView(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!void {
-    try w.writeAll("<div class=\"pcb-tune pcb-scoreview pcb-panel\" id=\"panel-score\" hidden><span class=\"tune-h\">Score view</span>");
+fn writeScoreView(w: *std.Io.Writer, params: optimizer.Params, name: []const u8) std.Io.Writer.Error!void {
+    try w.writeAll("<div class=\"pcb-tune pcb-scoreview pcb-panel\" id=\"panel-score\" hidden><span class=\"tune-h\">Score</span>");
+    // Live per-term readout, relocated off the action bar to declutter it. The
+    // spans are updated in place by showScore(); Recompute + Export JSON sit here
+    // too as score-detail utilities (rarely needed mid-edit).
+    try w.writeAll("<div class=\"sc-readout\">");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-hpwl\" title=\"signal wirelength: RSMT estimate (mm)\">wire …</span>");
+    try w.writeAll("<span class=\"delta\" id=\"sc-hpwl-d\"></span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-loop\" title=\"weighted decoupling-loop term (loop_w × value-weighted loop length)\">loop …</span>");
+    try w.writeAll("<span class=\"delta\" id=\"sc-loop-d\"></span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-ind\" title=\"hot-loop connection inductance (nH) — the scored loop metric\">loop … nH</span>");
+    try w.writeAll("<span class=\"delta\" id=\"sc-ind-d\"></span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-align\" title=\"sub-module courtyard bounding-box area (mm²) — compactness term\">area …</span>");
+    try w.writeAll("<span class=\"delta\" id=\"sc-align-d\"></span>");
+    try w.writeAll("<span class=\"score sc-sub\" id=\"sc-cong\" title=\"routing congestion (w_congest × RUDY overflow)\">cong …</span>");
+    try w.writeAll("<span class=\"delta\" id=\"sc-cong-d\"></span>");
+    try w.writeAll("<button class=\"btn\" id=\"pcb-score\" title=\"Recompute the objective on the server for the current positions\">Recompute</button>");
+    try w.writeAll("<a class=\"btn\" href=\"/api/pcb-layout/");
+    try writeAttr(w, name);
+    try w.writeAll("\" target=\"_blank\" title=\"Download positions + full score breakdown as JSON\">Export JSON</a>");
+    try w.writeAll("</div>");
     try svRow(w, "wire", "Wire", 1.0);
     try svRow(w, "loop", "Loop", params.loop_w);
     try svRow(w, "align", "Compact", optimizer.effAlignW(params));
@@ -3609,10 +3592,11 @@ const PAGE_CSS =
     \\.src-chip.src-cache{color:#d29922;border-color:#9e6a03}
     \\.src-chip.src-grid{color:#f85149;border-color:#da3633}
     \\.pcb-bar .score{font-weight:600;color:#e6edf3;background:#161b22;border:1px solid #21262d;border-radius:4px;padding:2px 8px}
-    \\.pcb-bar .sc-sub{font-weight:500;font-size:12px;color:#8b949e;background:#0d1117}
     \\.pcb-bar .delta{font-size:12px;font-weight:600;min-width:34px}
     \\.pcb-bar .delta.up{color:#f85149}
     \\.pcb-bar .delta.down{color:#3fb950}
+    \\.pcb-bar .bar-grp{display:inline-flex;gap:5px;align-items:center}
+    \\.pcb-bar .bar-sep{width:1px;height:18px;background:#30363d;flex:none}
     \\.pcb-bar .btn{font:inherit;font-size:12px;border:1px solid #30363d;background:#21262d;border-radius:5px;
     \\  padding:3px 9px;cursor:pointer;text-decoration:none;color:#c9d1d9;display:inline-block}
     \\.pcb-bar .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
@@ -3669,18 +3653,9 @@ const PAGE_CSS =
     \\.pcb-tabs .view-chip:hover{border-color:#58a6ff;color:#e6edf3}
     \\.pcb-panel{background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:8px 12px}
     \\.pcb-panel[hidden]{display:none}
-    \\.pcb-spec{margin:4px 0 12px;background:#0d1117;border:1px solid #21262d;border-radius:8px}
-    \\.pcb-spec summary{cursor:pointer;padding:8px 12px;color:#f0f6fc;font-size:13px;font-weight:700;user-select:none}
-    \\.pcb-spec .spec-stat{margin-left:10px;font-size:11px;font-weight:400;color:#6e7681}
-    \\.spec-body{padding:0 12px 10px}
-    \\#spec-text{width:100%;min-height:150px;resize:vertical;background:#010409;color:#c9d1d9;
-    \\  border:1px solid #21262d;border-radius:6px;padding:8px;box-sizing:border-box;
-    \\  font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre;tab-size:2}
-    \\#spec-text:focus{outline:none;border-color:#388bfd}
-    \\.spec-row{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;font-size:12px;color:#8b949e}
-    \\.spec-msg{font-size:12px;color:#8b949e}
-    \\.spec-msg.ok{color:#3fb950}.spec-msg.warn{color:#d29922}.spec-msg.err{color:#f85149}
-    \\body.mode-3d .pcb-spec{display:none}
+    \\.pcb-panel .btn{font:inherit;font-size:12px;border:1px solid #30363d;background:#21262d;border-radius:5px;
+    \\  padding:3px 9px;cursor:pointer;text-decoration:none;color:#c9d1d9;display:inline-block}
+    \\.pcb-panel .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
     \\.heat-legend{display:flex;gap:9px;align-items:center;font-size:12px;color:#8b949e;margin:4px 0 12px;flex-wrap:wrap}
     \\.heat-legend[hidden]{display:none}
     \\.heat-legend .heat-h{font-weight:700;color:#f0f6fc}
@@ -3704,7 +3679,13 @@ const PAGE_CSS =
     \\.pcb-scoreview .sv-row{display:flex;gap:3px;align-items:center}
     \\.pcb-scoreview .sv-wl{gap:1px}
     \\.pcb-scoreview input[type=number]{width:44px}
-    \\.pcb-bar .sc-off{opacity:.35;text-decoration:line-through}
+    \\.pcb-scoreview .sc-readout{flex-basis:100%;display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+    \\.sc-readout .score{font-weight:600;color:#e6edf3;background:#161b22;border:1px solid #21262d;border-radius:4px;padding:2px 8px}
+    \\.sc-readout .sc-sub{font-weight:500;font-size:12px;color:#8b949e;background:#0d1117}
+    \\.sc-readout .delta{font-size:12px;font-weight:600;min-width:30px}
+    \\.sc-readout .delta.up{color:#f85149}
+    \\.sc-readout .delta.down{color:#3fb950}
+    \\.sc-readout .sc-off{opacity:.35;text-decoration:line-through}
     \\.pcb-route{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#8b949e}
     \\.pcb-route .tune-h{font-weight:700;color:#f0f6fc}
     \\.pcb-route label{display:flex;gap:4px;align-items:center}
@@ -4175,7 +4156,7 @@ const BOARD_JS =
     \\function markSel(){els.forEach(function(g,i){g.classList.toggle("msel",sel.indexOf(i)>=0);});}
     \\function selSet(idxs){sel=idxs;markSel();}
     \\function selClear(){if(!sel.length)return;sel=[];markSel();}
-    \\function gdragStart(m,down){return {sx:m.x,sy:m.y,moved:false,down:down,
+    \\function gdragStart(m,down){return {sx:m.x,sy:m.y,moved:false,down:down,snap:snapPoses(),
     \\ orig:sel.map(function(k){return {i:k,x:P[k].x,y:P[k].y};})};}
     \\// Iterative layout editing: curLayout is the saved layout the Update button
     \\// writes back into (overwrite in place) instead of forcing a new one. Set by
@@ -4198,7 +4179,7 @@ const BOARD_JS =
     \\ g.addEventListener("pointerdown",function(ev){ev.preventDefault();var m=mm(ev);
     \\   if(sel.length>1&&sel.indexOf(i)>=0){gdrag=gdragStart(m,ev.target);g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";return;}
     \\   if(sel.length)selClear();
-    \\   drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y,down:ev.target};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});
+    \\   drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y,down:ev.target,snap:snapPoses()};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});
     \\ g.addEventListener("pointermove",function(ev){
     \\   if(gdrag){var gm=mm(ev),dx=Math.round((gm.x-gdrag.sx)/G)*G,dy=Math.round((gm.y-gdrag.sy)/G)*G,any=false;
     \\     gdrag.orig.forEach(function(o){var nx=o.x+dx,ny=o.y+dy;if(P[o.i].x!==nx||P[o.i].y!==ny){P[o.i].x=nx;P[o.i].y=ny;setT(o.i);any=true;}});
@@ -4209,9 +4190,11 @@ const BOARD_JS =
     \\   if(!drag.moved){drag.moved=true;clearRoute();}setT(i);rats();drawClr();refreshUnplaced();
     \\   if(selRef===P[i].ref)updatePropLive();});
     \\ g.addEventListener("pointerup",function(ev){
-    \\   if(gdrag){var gmv=gdrag.moved;gdrag=null;g.style.cursor="grab";try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(gmv)fetchScore();return;}
-    \\   var mv=drag&&drag.moved,dn=drag&&drag.down;drag=null;g.style.cursor="grab";
-    \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(mv){fetchScore();return;}var net=netAt(dn);if(net)selNet(net);selectComp(P[i].ref);});
+    \\   if(gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap;gdrag=null;g.style.cursor="grab";
+    \\    try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(gmv){recordUndo(gsnap);fetchScore();}return;}
+    \\   var mv=drag&&drag.moved,dn=drag&&drag.down,dsnap=drag&&drag.snap;drag=null;g.style.cursor="grab";
+    \\   try{g.releasePointerCapture(ev.pointerId);}catch(e){}if(mv){recordUndo(dsnap);fetchScore();return;}
+    \\   var net=netAt(dn);if(net)selNet(net);selectComp(P[i].ref);});
     \\ // Pads now sit in the top gPads layer, so a pointerdown on a pad no longer
     \\ // bubbles to the part group. Forward it: capture on g (the court group, which
     \\ // owns pointermove/up) so the part still drags when grabbed by a pad, and keep
@@ -4223,7 +4206,7 @@ const BOARD_JS =
     \\  pg.addEventListener("pointerdown",function(ev){ev.preventDefault();var m=mm(ev);
     \\    if(sel.length>1&&sel.indexOf(i)>=0){gdrag=gdragStart(m,ev.target);g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";return;}
     \\    if(sel.length)selClear();
-    \\    drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y,down:ev.target};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});}
+    \\    drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y,down:ev.target,snap:snapPoses()};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});}
     \\});
     \\// Keyboard: R / Shift+R rotates the hovered part; ? toggles the
     \\// shortcut-help overlay (Esc or click closes it). The overlay's list
@@ -4240,6 +4223,7 @@ const BOARD_JS =
     \\  '<div class="kbd-row"><span>Select box (multi-select)</span><kbd>drag empty space</kbd></div>'+
     \\  '<div class="kbd-row"><span>Move all selected together</span><kbd>drag a selected part</kbd></div>'+
     \\  '<div class="kbd-row"><span>Clear selection</span><kbd>Esc / click empty</kbd></div>'+
+    \\  '<div class="kbd-row"><span>Undo / redo move</span><kbd>Ctrl+Z / Ctrl+Shift+Z</kbd></div>'+
     \\  '<div class="kbd-row"><span>Pan</span><kbd>Space+drag &middot; middle-drag</kbd></div>'+
     \\  '<div class="kbd-row"><span>Zoom</span><kbd>scroll</kbd></div>'+
     \\  '<div class="kbd-row"><span>Toggle this help</span><kbd>?</kbd></div>'+
@@ -4262,12 +4246,34 @@ const BOARD_JS =
     \\ if(ev.key=="Escape"){if(kbdOv){kbdClose();}else{selClear();clearSel();}return;}
     \\ var typing=kbTyping(ev.target);
     \\ if(ev.key=="?"&&!typing){ev.preventDefault();kbdToggle();return;}
-    \\ if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();
+    \\ if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();recordUndo();
     \\   P[cur].rot=((((P[cur].rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;
     \\   setT(cur);clearRoute();rats();fetchScore();refreshUnplaced();if(selRef===P[cur].ref)updatePropLive();}});
     \\function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetchScore();refreshUnplaced();updatePropLive();
     \\ if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();}
-    \\document.getElementById("pcb-reset").addEventListener("click",function(){
+    \\// ── Undo / redo ─────────────────────────────────────────────────────────
+    \\// Snapshot every part's pose before a mutating gesture; Ctrl+Z restores the
+    \\// last one (Ctrl+Shift+Z / Ctrl+Y redoes). Drags/group-moves capture their
+    \\// PRE state at pointerdown and commit it only if something actually moved;
+    \\// rotate / reset / load record just before they mutate. Snapshots are pose
+    \\// arrays indexed by P order (stable), so a restore is a write-back + applyAll.
+    \\var undoStack=[],redoStack=[];
+    \\function snapPoses(){return P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0};});}
+    \\function undoBtns(){var u=document.getElementById("pcb-undo"),r=document.getElementById("pcb-redo");
+    \\ if(u)u.disabled=!undoStack.length;if(r)r.disabled=!redoStack.length;}
+    \\function recordUndo(snap){undoStack.push(snap||snapPoses());if(undoStack.length>200)undoStack.shift();
+    \\ redoStack.length=0;undoBtns();}
+    \\function restorePoses(s){s.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y=q.y;P[i].rot=q.rot;}});applyAll();}
+    \\function doUndo(){if(!undoStack.length)return;redoStack.push(snapPoses());restorePoses(undoStack.pop());undoBtns();}
+    \\function doRedo(){if(!redoStack.length)return;undoStack.push(snapPoses());restorePoses(redoStack.pop());undoBtns();}
+    \\var undoBtn=document.getElementById("pcb-undo");if(undoBtn)undoBtn.addEventListener("click",doUndo);
+    \\var redoBtn=document.getElementById("pcb-redo");if(redoBtn)redoBtn.addEventListener("click",doRedo);
+    \\document.addEventListener("keydown",function(ev){if(!(ev.ctrlKey||ev.metaKey)||kbTyping(ev.target))return;
+    \\ var k=(ev.key||"").toLowerCase();
+    \\ if(k==="z"&&!ev.shiftKey){ev.preventDefault();doUndo();}
+    \\ else if((k==="z"&&ev.shiftKey)||k==="y"){ev.preventDefault();doRedo();}});
+    \\undoBtns();
+    \\document.getElementById("pcb-reset").addEventListener("click",function(){recordUndo();
     \\ selClear();P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;});applyAll();});
     \\document.getElementById("pcb-score").addEventListener("click",fetchScore);
     \\document.getElementById("t-apply").addEventListener("click",function(ev){ev.preventDefault();
@@ -4302,7 +4308,7 @@ const BOARD_JS =
     \\function mkEl(tag,cls,txt){var e=document.createElement(tag);if(cls)e.className=cls;
     \\ if(txt!=null)e.textContent=txt;return e;}
     \\function bindLayLoad(b){b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-load");
-    \\ var L=layByName(nm);if(!L)return;
+    \\ var L=layByName(nm);if(!L)return;recordUndo();
     \\ P.forEach(function(p){var s=L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;}});applyAll();
     \\ setActiveLayout(nm);});}
     \\function bindLayDel(b){b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-del");
@@ -4342,10 +4348,8 @@ const BOARD_JS =
     \\ var star=mkEl("button","btn lay-star","\u{2606}");star.setAttribute("data-lay-default",nm);
     \\ star.title="Make this the KiCad-sync default (seeds new parts' placement + GND vias)";bindLayDefault(star);
     \\ var go=mkEl("button","btn lay-go","Load");go.setAttribute("data-lay-load",nm);bindLayLoad(go);
-    \\ var spec=mkEl("button","btn lay-spec","\u{2192}spec");spec.setAttribute("data-lay-spec",nm);
-    \\ spec.title="Promote: export this snapshot as a (placement ...) spec into the panel below";
     \\ var del=mkEl("button","btn lay-del","\u{2715}");del.setAttribute("data-lay-del",nm);del.title="Delete";bindLayDel(del);
-    \\ act.appendChild(star);act.appendChild(go);act.appendChild(spec);act.appendChild(del);
+    \\ act.appendChild(star);act.appendChild(go);act.appendChild(del);
     \\ bot.appendChild(act);row.appendChild(top);row.appendChild(bot);return row;}
     \\// Splice a row for nm into the panel if it isn't there yet (Save as…); the
     \\// empty-state placeholder converts to a list + rescore button on the first save.
@@ -4649,74 +4653,6 @@ const BOARD_JS =
     \\   chips.forEach(function(c){c.classList.remove("active");});}
     \\ chips.forEach(function(c){c.addEventListener("click",function(){
     \\   if(c.classList.contains("active"))closeAll();else openPanel(c.getAttribute("data-panel"));});});
-    \\})();
-    \\// ── Placement-DSL panel: show the spec for this layout; hand edits re-solve
-    \\//    server-side (request-local, nothing written) and the board re-renders
-    \\//    through the same frame applier the live regen uses. Save splices the
-    \\//    spec into the design .sexp (history snapshot first) and reloads.
-    \\(function(){
-    \\ var ta=document.getElementById("spec-text"); if(!ta)return;
-    \\ var msg=document.getElementById("spec-msg"),stat=document.getElementById("spec-stat"),
-    \\     live=document.getElementById("spec-live"),btnA=document.getElementById("spec-apply"),
-    \\     btnS=document.getElementById("spec-save"),btnR=document.getElementById("spec-reset"),
-    \\     btnC=document.getElementById("spec-copy");
-    \\ var t=null,busy=false,dirty=false;
-    \\ function setMsg(s,cls){msg.className="spec-msg"+(cls?" "+cls:"");msg.textContent=s;}
-    \\ function fetchSpec(){
-    \\  fetch("/api/placement-spec/"+encodeURIComponent(PCB.name))
-    \\   .then(function(r){if(!r.ok)throw 0;return r.json();})
-    \\   .then(function(j){ta.value=j.spec||"";
-    \\     stat.textContent="from "+(j.source||"auto")+(j.skipped&&j.skipped.length?(" · "+j.skipped.length+" part(s) unplaced in source layout"):"");
-    \\     setMsg("","");})
-    \\   .catch(function(){stat.textContent="";setMsg("no spec available — the board needs an IC anchor","warn");});}
-    \\ function applySpec(){
-    \\  if(busy){dirty=true;return;}
-    \\  var text=ta.value;if(!text.replace(/\s/g,""))return;
-    \\  busy=true;setMsg("solving…","");
-    \\  fetch("/api/spec-solve/"+encodeURIComponent(PCB.name),{method:"POST",body:text})
-    \\   .then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j};});})
-    \\   .then(function(o){busy=false;
-    \\     if(!o.ok||o.j.error){setMsg(o.j.error||"solve failed","err");return;}
-    \\     var j=o.j;liveApply({parts:j.parts});markUnplaced(j.unplaced||[]);
-    \\     var d=j.delta_objective||0;
-    \\     var s="objective "+j.objective.toFixed(1)+" ("+(d>0?"+":"")+d.toFixed(1)+" vs current)";
-    \\     var cls=d<=0?"ok":"warn";
-    \\     if(j.unresolved&&j.unresolved.length){s+=" · unresolved: "+j.unresolved.join(", ");cls="err";}
-    \\     if(j.unplaced&&j.unplaced.length)s+=" · "+j.unplaced.length+" unplaced (red box)";
-    \\     if(j.used_spec===false){s+=" · fell back to auto (spec didn't drive)";cls="err";}
-    \\     setMsg(s,cls);
-    \\     if(dirty){dirty=false;applySpec();}})
-    \\   .catch(function(){busy=false;setMsg("solve failed","err");});}
-    \\ ta.addEventListener("input",function(){if(!live||!live.checked)return;
-    \\  clearTimeout(t);t=setTimeout(applySpec,600);});
-    \\ if(btnA)btnA.addEventListener("click",applySpec);
-    \\ if(btnR)btnR.addEventListener("click",fetchSpec);
-    \\ if(btnC)btnC.addEventListener("click",function(){
-    \\  if(navigator.clipboard)navigator.clipboard.writeText(ta.value).then(function(){setMsg("copied ✓","ok");});});
-    \\ // "→spec" on a saved-layout row: promote that snapshot into the panel —
-    \\ // export its (placement …) form, preview it, leave Save one click away.
-    \\ document.addEventListener("click",function(e){
-    \\  var b=e.target.closest&&e.target.closest("[data-lay-spec]");if(!b)return;
-    \\  setMsg("exporting spec from snapshot…","");
-    \\  fetch("/api/placement-spec/"+encodeURIComponent(PCB.name)+"?layout="+encodeURIComponent(b.dataset.laySpec))
-    \\   .then(function(r){if(!r.ok)throw 0;return r.json();})
-    \\   .then(function(j){ta.value=j.spec||"";
-    \\     var det=document.getElementById("pcb-spec");if(det)det.open=true;
-    \\     stat.textContent="from snapshot: "+b.dataset.laySpec;
-    \\     setMsg("snapshot exported — Save writes it into the source file","ok");
-    \\     applySpec();ta.scrollIntoView({behavior:"smooth",block:"center"});})
-    \\   .catch(function(){setMsg("couldn't export a spec from that snapshot","err");});});
-    \\ if(btnS&&!btnS.disabled)btnS.addEventListener("click",function(){
-    \\  if(!confirm("Write this spec into "+PCB.name+".sexp?\nThe existing (placement ...) form is replaced"+
-    \\   " (a history snapshot is taken first), and the spec then drives this design's layout."))return;
-    \\  setMsg("saving…","");
-    \\  fetch("/api/spec-save/"+encodeURIComponent(PCB.name),{method:"POST",body:ta.value})
-    \\   .then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j};});})
-    \\   .then(function(o){if(!o.ok||o.j.error){setMsg(o.j.error||"save failed","err");return;}
-    \\     setMsg("saved ✓ — reloading…","ok");
-    \\     setTimeout(function(){window.location="/pcb-layout/"+encodeURIComponent(PCB.name);},600);})
-    \\   .catch(function(){setMsg("save failed","err");});});
-    \\ fetchSpec();
     \\})();
     \\// Cost/blame heatmap: tint each part's courtyard green→red by its share of the
     \\// objective (PCB.parts[i].blame, raw — the live /api/pcb-score units).
