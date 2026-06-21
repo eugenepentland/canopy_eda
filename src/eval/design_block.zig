@@ -2113,10 +2113,13 @@ fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_m
             centered = true;
             continue;
         }
-        // (auto) — force role-based constructive placement (the detected-role
-        // ladder) even on a generic block, and compose the result into parents.
+        // (auto "REF") — role-based constructive placement around the named
+        // central IC (the detected-role ladder). The ref IS the declared anchor.
+        // Engages for a module root only (composed into parents); inert on a
+        // top-level design and when no ref is named.
         if (std.mem.eql(u8, head, "auto")) {
             auto_mode = .on;
+            if (c.len >= 2) anchor = c[1].asString() orelse c[1].asAtom() orelse anchor;
             continue;
         }
         // (manual) — opt out of role auto-placement; always use the force solver.

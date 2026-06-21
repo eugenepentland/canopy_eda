@@ -445,7 +445,13 @@ pub fn callModule(self: *Evaluator, mod: ModuleDef, call_args: []const Node, cal
         }
     }
 
-    return self.evalNodes(mod.body, &mod_env);
+    const result = try self.evalNodes(mod.body, &mod_env);
+    // Mark the produced block as a module body (vs a top-level design) so the
+    // PCB placer engages role-based auto-placement for modules only. Propagates
+    // to sub-block instantiations, standalone previews, and zero-arg resolves —
+    // every module root flows through here.
+    if (result == .design_block) result.design_block.from_module = true;
+    return result;
 }
 
 /// Diagnose any parameter left unbound after the call args are processed,
