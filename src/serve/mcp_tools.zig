@@ -10,6 +10,7 @@ const serve_root = @import("../serve.zig");
 const render_json = @import("../render_json.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const env_mod = @import("../eval/env.zig");
+const eval_modules = @import("../eval/modules.zig");
 const erc_mod = @import("../erc.zig");
 const log = @import("../infra/log.zig");
 const bom = @import("../bom.zig");
@@ -2711,7 +2712,10 @@ pub fn evalNamedBlock(
         const result = try eval.evalFile(path);
         switch (result) {
             .design_block => |b| return .{ .block = b, .is_module = false },
-            else => return error.NotADesign,
+            // A defmodule file (returns .nil) means `name` resolved via the
+            // lib/modules fallback in designSourcePath — not a real src/ design.
+            // Fall through to instantiate it as a module below.
+            else => {},
         }
     }
 
@@ -2719,17 +2723,24 @@ pub fn evalNamedBlock(
     const mod_path = try std.fmt.allocPrint(allocator, "{s}/lib/modules/{s}.sexp", .{ project_dir, name });
     defer allocator.free(mod_path);
     infra_fs.cwd().access(mod_path, .{}) catch return error.FileNotFound;
-    const source = try std.fmt.allocPrint(
-        allocator,
-        "(import {s})\n(design-block \"{s}\" (sub-block \"{s}\" ({s})))",
-        .{ name, name, name, name },
-    );
-    const result = try eval.evalSource(source);
+    // Instantiate the module by name with zero arguments — its (param default)s
+    // supply the values (defaults-first). Call the block directly rather than
+    // splicing a synthetic `(sub-block …)` source string: under `evalSource`
+    // (no `top_design_path`) that wrapper-synth silently produced a
+    // sub-block-less design, so a direct `callModule` is both correct and
+    // cleaner. The returned block borrows `eval`'s arena — the caller keeps
+    // `eval` alive — and is stamped `.embedded` by `callModule`.
+    var env = env_mod.Env.init(allocator, null);
+    defer env.deinit();
+    try eval_modules.resolveImport(eval, name, &env);
+    const bound = env.get(name) orelse return error.NotADesign;
+    const bd = switch (bound) {
+        .block_def => |b| b,
+        else => return error.NotADesign,
+    };
+    const result = try eval_modules.callModule(eval, bd, &.{}, .{ .line = 1, .col = 1, .offset = 0 }, &env);
     switch (result) {
-        .design_block => |b| {
-            if (b.sub_blocks.len == 0) return error.NotADesign;
-            return .{ .block = b.sub_blocks[0].block, .is_module = true };
-        },
+        .design_block => |b| return .{ .block = b, .is_module = true },
         else => return error.NotADesign,
     }
 }
