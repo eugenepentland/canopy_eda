@@ -103,6 +103,11 @@ pub const Node = struct {
     /// power view place a dual-rail part in the overlap of two bands. Owned;
     /// freed by `Graph.deinit`. Empty ⇒ unknown.
     rails: []const f64 = &.{},
+    /// Up to ~3 headline part tokens for this block ({"TPS62933DRLR"}, {"3× LSF0108"}),
+    /// rendered as a muted part row beneath the subtitle and used as the LOD0 glance
+    /// caption — so the diagram reads as a part reference. Each entry and the slice
+    /// are owned; freed by `Graph.deinit`. Empty ⇒ no part row.
+    parts: []const []const u8 = &.{},
     /// True for a synthesised board-edge endpoint (antenna / EMVS cell) rather
     /// than a real on-board block. Rendered with a dashed border; its `label`
     /// is owned and freed by `Graph.deinit`.
@@ -168,6 +173,8 @@ pub const Graph = struct {
             if (n.rails.len > 0) allocator.free(n.rails);
             if (n.slug.len > 0) allocator.free(n.slug);
             if (n.is_boundary and n.label.len > 0) allocator.free(n.label);
+            for (n.parts) |p| allocator.free(p);
+            if (n.parts.len > 0) allocator.free(n.parts);
         }
         allocator.free(self.nodes);
         for (self.edges) |e| allocator.free(e.label);

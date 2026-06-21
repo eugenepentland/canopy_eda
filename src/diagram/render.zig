@@ -9,6 +9,7 @@ const types = @import("types.zig");
 const layout = @import("layout.zig");
 const lod = @import("lod.zig");
 const rb = @import("../render_block_types.zig");
+const env_mod = @import("../eval/env.zig");
 
 const Allocator = std.mem.Allocator;
 const Graph = types.Graph;
@@ -30,6 +31,14 @@ pub const system_color: []const u8 = "#768390"; // neutral accent (shows all cla
 const layout_key: []const u8 = "layout";
 const layout_label: []const u8 = "Layout";
 const layout_color: []const u8 = "#e3742f"; // orange accent — the author-placed free view
+
+const blocks_key: []const u8 = "blocks";
+const blocks_label: []const u8 = "Block overview";
+const blocks_color: []const u8 = "#58a6ff"; // blue accent — the grouped block-overview cards
+
+/// Shared view-tab radio template: `{0}` = view key, `{1}` = "" or `checked_attr`.
+const radio_fmt: []const u8 = "<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\"{s}>";
+const checked_attr: []const u8 = " checked";
 
 /// A signal class renders as its own focused tab when it carries edges and is
 /// not a reference (ground) class — *except* RF: the RF/Analog signal flow is
@@ -53,6 +62,9 @@ pub fn renderTabs(allocator: Allocator, graph: *const Graph, w: *Writer) (Alloca
     // a free Layout (which renders the same blocks and supersedes it). The
     // focused per-class views show alongside either lead view.
     const has_system = !has_layout and layout.hasSystemView(graph);
+    // Block overview: the grouped-cards view of the authored (group …) clusters,
+    // shown as the lead tab whenever the design declares any groups.
+    const has_blocks = graph.layout.groups.len > 0;
     var first_signal: ?ClassId = null;
     for (graph.classes, 0..) |_, i| {
         const id: ClassId = @intCast(i);
@@ -61,13 +73,13 @@ pub fn renderTabs(allocator: Allocator, graph: *const Graph, w: *Writer) (Alloca
             break;
         }
     }
-    // Nothing to draw: no lead overview (Layout/System) and no signal view.
-    if (!has_layout and !has_system) {
-        if (first_signal == null) return;
-    }
+    // Nothing to draw: no block overview, no lead overview (Layout/System), no signal view.
+    const has_overview = has_blocks or has_layout or has_system;
+    if (!has_overview and first_signal == null) return;
 
     try w.writeAll("<div class=\"dg-wrap\"><style>");
     // Per-view rules: the checked radio shows its panel and lights its tab.
+    if (has_blocks) try writeToggleRule(w, blocks_key, blocks_color);
     if (has_layout) try writeToggleRule(w, layout_key, layout_color);
     if (has_system) try writeToggleRule(w, system_key, system_color);
     for (graph.classes, 0..) |c, i| {
@@ -78,17 +90,21 @@ pub fn renderTabs(allocator: Allocator, graph: *const Graph, w: *Writer) (Alloca
     // Radios first so the `:checked ~` sibling selectors can reach the panels.
     // Default-selected tab: Layout if the author placed one, else the System
     // fallback, else the first signal view. At most one of Layout/System exists.
-    if (has_layout) try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\" checked>", .{layout_key});
-    if (has_system) try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\" checked>", .{system_key});
-    // A signal view is the default only when no lead (Layout/System) view is present.
-    const signal_default = !has_layout and !has_system;
+    // Block overview leads when groups exist; otherwise Layout, then System.
+    const lead_checked: []const u8 = if (has_blocks) "" else checked_attr;
+    if (has_blocks) try w.print(radio_fmt, .{ blocks_key, checked_attr });
+    if (has_layout) try w.print(radio_fmt, .{ layout_key, lead_checked });
+    if (has_system) try w.print(radio_fmt, .{ system_key, lead_checked });
+    // A signal view is the default only when no lead (Block overview/Layout/System) view is present.
+    const signal_default = !has_blocks and !has_layout and !has_system;
     for (graph.classes, 0..) |c, i| {
         const id: ClassId = @intCast(i);
         if (!isSignalView(graph, id)) continue;
-        const checked = if (signal_default and id == first_signal.?) " checked" else "";
-        try w.print("<input type=\"radio\" name=\"dg-view\" id=\"dg-tab-{s}\" class=\"dg-radio\"{s}>", .{ c.key, checked });
+        const checked = if (signal_default and id == first_signal.?) checked_attr else "";
+        try w.print(radio_fmt, .{ c.key, checked });
     }
     try w.writeAll("<div class=\"dg-tabs\">");
+    if (has_blocks) try writeTabLabel(w, blocks_key, blocks_label);
     if (has_layout) try writeTabLabel(w, layout_key, layout_label);
     if (has_system) try writeTabLabel(w, system_key, system_label);
     for (graph.classes, 0..) |c, i| {
@@ -96,6 +112,7 @@ pub fn renderTabs(allocator: Allocator, graph: *const Graph, w: *Writer) (Alloca
         try writeTabLabel(w, c.key, c.label);
     }
     try w.writeAll("</div><div class=\"dg-panels\">");
+    if (has_blocks) try renderBlocksPanel(allocator, graph, w);
     if (has_layout) try renderFreePanel(allocator, graph, w);
     if (has_system) try renderCoarsePanel(allocator, graph, system_key, w);
     for (graph.classes, 0..) |_, i| {
@@ -162,6 +179,71 @@ fn renderFreePanel(allocator: Allocator, graph: *const Graph, w: *Writer) (Alloc
     const lay = (try layout.computeFreeLayout(arena, graph)) orelse return;
     try writePanelOpen(w, layout_key);
     try renderSystemBody(arena, w, graph, lay, true);
+    try w.writeAll("</div>");
+}
+
+/// The **Block overview** tab panel: a grouped-cards block diagram. Each
+/// authored `(group …)` cluster is a tinted region holding one card per member
+/// block (name, one-line purpose, key part numbers), linking to its schematic
+/// card. Built from the same graph the wired views use, so the two agree. A
+/// member that resolves to no node is skipped; unclaimed real blocks fall into a
+/// trailing "Other" cluster.
+fn renderBlocksPanel(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try writePanelOpen(w, blocks_key);
+    try w.writeAll("<div class=\"dg-bgrid\">");
+    const claimed = try arena.alloc(bool, graph.nodes.len);
+    @memset(claimed, false);
+    for (graph.layout.groups) |grp| {
+        var ids: std.ArrayListUnmanaged(u32) = .empty;
+        for (grp.members) |name| {
+            const id = lod.nodeByKey(graph, name) orelse continue;
+            if (claimed[id]) continue;
+            claimed[id] = true;
+            try ids.append(arena, id);
+        }
+        if (ids.items.len == 0) continue;
+        try writeBlockGroup(arena, w, graph, grp.label, ids.items);
+    }
+    // Trailing "Other": real, unclaimed, placeable nodes (skip synthesised
+    // antennas/crystals, which carry no authoring key).
+    var other: std.ArrayListUnmanaged(u32) = .empty;
+    for (graph.nodes, 0..) |nd, i| {
+        if (claimed[i] or nd.is_boundary or nd.key.len == 0) continue;
+        try other.append(arena, @intCast(i));
+    }
+    if (other.items.len > 0) try writeBlockGroup(arena, w, graph, "Other", other.items);
+    try w.writeAll("</div></div>");
+}
+
+/// One tinted cluster region + its member cards. The accent colour is the first
+/// member's category colour.
+fn writeBlockGroup(arena: Allocator, w: *Writer, graph: *const Graph, label: []const u8, ids: []const u32) (Allocator.Error || Writer.Error)!void {
+    const color = rb.categoryColor(graph.nodes[ids[0]].category);
+    try w.print("<div class=\"dg-bgrp\" style=\"background:{s}1a;border-left:3px solid {s}\">", .{ color, color });
+    try w.print("<div class=\"dg-bgh\" style=\"color:{s}\"><span class=\"dg-bdot\" style=\"background:{s}\"></span>", .{ color, color });
+    try writeEscaped(w, label);
+    try w.writeAll("</div>");
+    for (ids) |id| {
+        const nd = graph.nodes[id];
+        if (nd.slug.len > 0) try w.print("<a class=\"dg-bc\" href=\"#sec-{s}\">", .{nd.slug}) else try w.writeAll("<div class=\"dg-bc\">");
+        try w.writeAll("<div class=\"dg-bn\">");
+        try writeEscaped(w, nd.label);
+        try w.writeAll("</div>");
+        if (nd.subtitle.len > 0) {
+            try w.writeAll("<div class=\"dg-bf\">");
+            try writeEscaped(w, nd.subtitle);
+            try w.writeAll("</div>");
+        }
+        if (nd.parts.len > 0) {
+            try w.writeAll("<div class=\"dg-bp\">");
+            try writeEscaped(w, try std.mem.join(arena, " \u{00b7} ", nd.parts));
+            try w.writeAll("</div>");
+        }
+        try w.writeAll(if (nd.slug.len > 0) "</a>" else "</div>");
+    }
     try w.writeAll("</div>");
 }
 
@@ -514,6 +596,7 @@ fn writeNode(arena: Allocator, w: *Writer, gid: u32, node: types.Node, x: f64, y
     const sub_max: usize = @max(min_sub_chars, @as(usize, @intFromFloat((layout.node_w - pad_x * 2) / sub_char_w)));
     const tx = x + pad_x;
     const ty = y + sub_y_off;
+    var sub_rows: usize = 0;
     if (node.caption.len > 0 or node.members.len > 0) {
         // A Function super-node. Its verb ("what it does") moves to a hover
         // tooltip; the box body shows the explicit caption (a concrete spec /
@@ -525,9 +608,25 @@ fn writeNode(arena: Allocator, w: *Writer, gid: u32, node: types.Node, x: f64, y
             try w.writeAll("</title>");
         }
         const body = if (node.caption.len > 0) node.caption else try std.mem.join(arena, " · ", node.members);
-        try writeSubLines(w, tx, ty, try wrapText(arena, body, sub_max, sub_lines));
+        const lines = try wrapText(arena, body, sub_max, sub_lines);
+        try writeSubLines(w, tx, ty, lines);
+        sub_rows = lines.len;
     } else if (node.subtitle.len > 0) {
-        try writeSubLines(w, tx, ty, try wrapText(arena, node.subtitle, sub_max, sub_lines));
+        // Cap the description to one line when a part row follows, so both fit
+        // the fixed node height; the full text stays reachable via the card link.
+        const max_l = if (node.parts.len > 0) @as(usize, 1) else sub_lines;
+        const lines = try wrapText(arena, node.subtitle, sub_max, max_l);
+        try writeSubLines(w, tx, ty, lines);
+        sub_rows = lines.len;
+    }
+    // Muted monospace part-number row beneath the description — the headline
+    // silicon for this block, so the diagram reads as a part reference.
+    if (node.parts.len > 0) {
+        const py = ty + @as(f64, @floatFromInt(sub_rows)) * sub_line_h;
+        const joined = try std.mem.join(arena, " · ", node.parts);
+        try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-parts\">", .{ tx, py });
+        try writeEscaped(w, try truncate(arena, joined, sub_max));
+        try w.writeAll("</text>");
     }
     try w.writeAll("</g>");
     if (has_link) try w.writeAll("</a>");
@@ -1018,6 +1117,17 @@ pub const CSS =
     \\font:600 17px -apple-system,BlinkMacSystemFont,sans-serif;}
     \\.dg-tab:hover{color:#c9d1d9;border-color:#484f58;}
     \\.dg-panel{display:none;overflow-x:auto;}
+    \\.dg-bgrid{column-count:3;column-gap:14px;max-width:1280px;}
+    \\.dg-bgrp{break-inside:avoid;margin:0 0 14px;border-radius:10px;padding:9px 11px 11px;}
+    \\.dg-bgh{font:600 13px -apple-system,BlinkMacSystemFont,sans-serif;letter-spacing:.02em;margin:0 0 2px;display:flex;align-items:center;gap:7px;}
+    \\.dg-bdot{width:9px;height:9px;border-radius:2px;flex:none;}
+    \\.dg-bc{display:block;background:#161b22;border:1px solid #30363d;border-radius:7px;padding:7px 9px;margin:6px 0 0;text-decoration:none;}
+    \\a.dg-bc:hover{border-color:#58a6ff;}
+    \\.dg-bn{color:#c9d1d9;font:500 14px -apple-system,BlinkMacSystemFont,sans-serif;}
+    \\.dg-bf{color:#8b949e;font:12.5px -apple-system,BlinkMacSystemFont,sans-serif;margin-top:1px;line-height:1.35;}
+    \\.dg-bp{color:#58a6ff;font:12.5px "SF Mono","Fira Code",monospace;margin-top:3px;}
+    \\@media(max-width:1100px){.dg-bgrid{column-count:2;}}
+    \\@media(max-width:680px){.dg-bgrid{column-count:1;}}
     \\.dg-svg{display:block;width:100%;max-width:1536px;height:auto;cursor:grab;touch-action:none;
     \\user-select:none;-webkit-user-select:none;}
     \\.dg-svg:active{cursor:grabbing;}
@@ -1033,6 +1143,7 @@ pub const CSS =
     \\.dg-node-link{cursor:pointer;}
     \\.dg-label{fill:#c9d1d9;font:600 18px -apple-system,BlinkMacSystemFont,sans-serif;}
     \\.dg-sub{fill:#8b949e;font:15px -apple-system,BlinkMacSystemFont,sans-serif;}
+    \\.dg-parts{fill:#6e7681;font:600 13px "SF Mono","Fira Code",monospace;letter-spacing:0.02em;}
     \\.dg-edge{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round;}
     \\.dg-pill{fill:#161b22;stroke-width:1;}
     \\.dg-edge-label{font:600 15px "SF Mono","Fira Code",monospace;text-anchor:middle;}
@@ -1096,6 +1207,29 @@ test "renderTabs emits only tabs for views that have edges" {
     defer aw2.deinit();
     try renderTabs(testing.allocator, &empty, &aw2.writer);
     try testing.expectEqual(@as(usize, 0), aw2.written().len);
+}
+
+// spec: diagram/render - Leads with a Block overview tab of grouped cards when the design declares groups
+test "renderTabs leads with the Block overview tab when groups are declared" {
+    const parts0 = [_][]const u8{"RP2350B"};
+    var nodes = [_]types.Node{
+        .{ .label = "MCU", .subtitle = "main controller", .category = .mcu, .slug = "mcu", .key = "mcu", .inputs = &.{}, .outputs = &.{}, .parts = &parts0 },
+        .{ .label = "Sensor", .subtitle = "", .category = .sensor, .slug = "sens", .key = "sens", .inputs = &.{}, .outputs = &.{} },
+    };
+    const members = [_][]const u8{ "mcu", "sens" };
+    const grps = [_]env_mod.LayoutGroup{.{ .label = "Core", .members = &members }};
+    var graph = Graph{ .nodes = &nodes, .edges = &.{}, .layout = .{ .groups = &grps } };
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try renderTabs(testing.allocator, &graph, &aw.writer);
+    const out = aw.written();
+    // The Block overview tab + panel render, the cluster label + a card's part
+    // number show, and the blocks radio is the default (checked) lead view.
+    try testing.expect(std.mem.indexOf(u8, out, "dg-tab-blocks") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "dg-panel-blocks") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Core") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "RP2350B") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "dg-tab-blocks\" class=\"dg-radio\" checked") != null);
 }
 
 // spec: diagram/render - RF signal edges get no tab of their own; the flow shows in the Layout/System view

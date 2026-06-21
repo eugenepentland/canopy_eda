@@ -404,6 +404,8 @@ Public functions: collectGraph
 - Surfaces an on-board crystal as a clock source feeding its block
 - Carries a programmable rail's rated span onto the producer node
 - Emits one diagram node per stub categorised by its declared category
+- Resolves each block's headline part numbers from hub instances + critical-ICs
+- A (diagram hidden) host section lends its description + card anchor to the chip
 
 ## diagram/layout
 
@@ -444,7 +446,7 @@ Public functions: computeLayout, hasSystemView, computeSystemLayout, computeChai
 
 ## diagram/lod
 
-Public functions: buildGlanceEntities, writeGlanceLayer
+Public functions: buildGlanceEntities, writeGlanceLayer, nodeByKey
 
 - Aggregates base edges into one glance connection per entity pair and class, summing fanouts
 - Renders a glance chip per group and per ungrouped block with member captions
@@ -455,6 +457,7 @@ Public functions: buildGlanceEntities, writeGlanceLayer
 Public functions: renderTabs
 
 - Renders a tab per non-empty view and nothing when no view has edges
+- Leads with a Block overview tab of grouped cards when the design declares groups
 - A designer-declared class renders its own view
 - Draws all edge labels after all wires so net pills stay legible
 - Draws each rail label once per source, not once per fanout branch

@@ -99,6 +99,7 @@ src/diagram/layout.zig::pw_pill_h value
 src/diagram/layout.zig::v_gap value
 src/diagram/lod.zig::Entity struct_
 src/diagram/lod.zig::buildGlanceEntities fn
+src/diagram/lod.zig::nodeByKey fn
 src/diagram/lod.zig::writeBaseAggLinks fn
 src/diagram/lod.zig::writeGlanceLayer fn
 src/diagram/membership.zig::Membership struct_
