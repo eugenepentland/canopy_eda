@@ -193,6 +193,13 @@ fn renderBlocksPanel(allocator: Allocator, graph: *const Graph, w: *Writer) (All
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     try writePanelOpen(w, blocks_key);
+    try w.writeAll(
+        "<div class=\"dg-mleg\">" ++
+            "<span><i style=\"background:#d29922\"></i>Concept — rough part ideas</span>" ++
+            "<span><i style=\"background:#388bfd\"></i>Schematic — sub-module drawn, awaiting layout</span>" ++
+            "<span><i style=\"background:#3fb950\"></i>Done — drawn (direct) or laid out \u{2605} (sub-module)</span>" ++
+            "</div>",
+    );
     try w.writeAll("<div class=\"dg-bgrid\">");
     const claimed = try arena.alloc(bool, graph.nodes.len);
     @memset(claimed, false);
@@ -220,17 +227,73 @@ fn renderBlocksPanel(allocator: Allocator, graph: *const Graph, w: *Writer) (All
 
 /// One tinted cluster region + its member cards. The accent colour is the first
 /// member's category colour.
+// ── Maturity dot ─────────────────────────────────────────────────────────
+// A single small status dot per block chip, coloured by its design-maturity:
+// amber (concept) → blue (schematic — a sub-module awaiting layout) → green
+// (done). Deliberately minimal: the colour carries the state (decoded by the
+// panel legend) and the word is a hover tooltip, so the chips stay uncluttered.
+
+/// Colour for a maturity state: amber (concept) → blue (schematic) → green (done).
+fn maturityColor(m: types.Maturity) []const u8 {
+    return switch (m) {
+        .concept => "#d29922",
+        .schematic => "#388bfd",
+        .done => "#3fb950",
+    };
+}
+
+fn maturityLabel(m: types.Maturity) []const u8 {
+    return switch (m) {
+        .concept => "Concept",
+        .schematic => "Schematic",
+        .done => "Done",
+    };
+}
+
+/// The maturity dot for a block-overview card: one small coloured circle after
+/// the chip name, with the stage word as a hover tooltip. No-op when the node
+/// carries no maturity (synthesised endpoints).
+fn writeCardMaturityDot(w: *Writer, node: types.Node) Writer.Error!void {
+    const m = node.maturity orelse return;
+    try w.print(
+        "<span class=\"dg-mdot\" style=\"background:{s}\" title=\"{s}\"></span>",
+        .{ maturityColor(m), maturityLabel(m) },
+    );
+}
+
+/// The completion tally shown on a group header: how many of the group's chips
+/// are done (a direct section drawn, or a sub-module laid out ★) over the total.
+/// Turns green when the whole group is done. No-op for a group with no
+/// maturity-bearing chips.
+fn writeGroupTally(w: *Writer, graph: *const Graph, ids: []const u32) Writer.Error!void {
+    var done: usize = 0;
+    var total: usize = 0;
+    for (ids) |id| {
+        const m = graph.nodes[id].maturity orelse continue;
+        total += 1;
+        if (m == .done) done += 1;
+    }
+    if (total == 0) return;
+    const color = if (done == total) "#3fb950" else "#8b949e";
+    try w.print(
+        "<span class=\"dg-bgt\" style=\"color:{s}\" title=\"{d} of {d} blocks done\">{d}/{d}</span>",
+        .{ color, done, total, done, total },
+    );
+}
+
 fn writeBlockGroup(arena: Allocator, w: *Writer, graph: *const Graph, label: []const u8, ids: []const u32) (Allocator.Error || Writer.Error)!void {
     const color = rb.categoryColor(graph.nodes[ids[0]].category);
     try w.print("<div class=\"dg-bgrp\" style=\"background:{s}1a;border-left:3px solid {s}\">", .{ color, color });
     try w.print("<div class=\"dg-bgh\" style=\"color:{s}\"><span class=\"dg-bdot\" style=\"background:{s}\"></span>", .{ color, color });
     try writeEscaped(w, label);
+    try writeGroupTally(w, graph, ids);
     try w.writeAll("</div>");
     for (ids) |id| {
         const nd = graph.nodes[id];
         if (nd.slug.len > 0) try w.print("<a class=\"dg-bc\" href=\"#sec-{s}\">", .{nd.slug}) else try w.writeAll("<div class=\"dg-bc\">");
         try w.writeAll("<div class=\"dg-bn\">");
         try writeEscaped(w, nd.label);
+        try writeCardMaturityDot(w, nd);
         try w.writeAll("</div>");
         if (nd.subtitle.len > 0) {
             try w.writeAll("<div class=\"dg-bf\">");
@@ -589,6 +652,17 @@ fn writeNode(arena: Allocator, w: *Writer, gid: u32, node: types.Node, x: f64, y
         "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.0}\" height=\"{d:.0}\" rx=\"6\" class=\"{s}\" stroke=\"{s}\"/>",
         .{ x, y, layout.node_w, layout.node_h, rect_class, color },
     );
+    // Maturity status dot in the top-right corner, coloured by stage with the
+    // stage word as a hover tooltip. Skipped for synthesised boundary endpoints,
+    // which carry no design-maturity.
+    if (node.maturity) |m| {
+        if (!node.is_boundary) {
+            try w.print(
+                "<circle cx=\"{d:.1}\" cy=\"{d:.1}\" r=\"4\" fill=\"{s}\"><title>{s}</title></circle>",
+                .{ x + layout.node_w - 12, y + 12, maturityColor(m), maturityLabel(m) },
+            );
+        }
+    }
     const label_max: usize = @max(min_label_chars, @as(usize, @intFromFloat((layout.node_w - pad_x * 2) / label_char_w)));
     try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-label\">", .{ x + pad_x, y + label_y_off });
     try writeEscaped(w, try truncate(arena, node.label, label_max));
@@ -1121,11 +1195,16 @@ pub const CSS =
     \\.dg-bgrp{break-inside:avoid;margin:0 0 14px;border-radius:10px;padding:9px 11px 11px;}
     \\.dg-bgh{font:600 13px -apple-system,BlinkMacSystemFont,sans-serif;letter-spacing:.02em;margin:0 0 2px;display:flex;align-items:center;gap:7px;}
     \\.dg-bdot{width:9px;height:9px;border-radius:2px;flex:none;}
+    \\.dg-bgt{margin-left:auto;flex:none;font:500 11px "SF Mono","Fira Code",monospace;letter-spacing:0;}
     \\.dg-bc{display:block;background:#161b22;border:1px solid #30363d;border-radius:7px;padding:7px 9px;margin:6px 0 0;text-decoration:none;}
     \\a.dg-bc:hover{border-color:#58a6ff;}
     \\.dg-bn{color:#c9d1d9;font:500 14px -apple-system,BlinkMacSystemFont,sans-serif;}
     \\.dg-bf{color:#8b949e;font:12.5px -apple-system,BlinkMacSystemFont,sans-serif;margin-top:1px;line-height:1.35;}
     \\.dg-bp{color:#58a6ff;font:12.5px "SF Mono","Fira Code",monospace;margin-top:3px;}
+    \\.dg-mdot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-left:7px;vertical-align:middle;}
+    \\.dg-mleg{display:flex;gap:14px;flex-wrap:wrap;margin:0 0 12px 2px;font:12px -apple-system,BlinkMacSystemFont,sans-serif;color:#8b949e;}
+    \\.dg-mleg span{display:inline-flex;align-items:center;gap:6px;}
+    \\.dg-mleg i{width:8px;height:8px;border-radius:50%;display:inline-block;}
     \\@media(max-width:1100px){.dg-bgrid{column-count:2;}}
     \\@media(max-width:680px){.dg-bgrid{column-count:1;}}
     \\.dg-svg{display:block;width:100%;max-width:1536px;height:auto;cursor:grab;touch-action:none;

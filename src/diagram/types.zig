@@ -78,6 +78,17 @@ pub const RailEnd = struct {
     v_lo: ?f64 = null,
 };
 
+/// Design-maturity of a block, surfaced as a status dot. Two finish lines,
+/// because the tool only does *module-level* PCB layout:
+///   - a sub-module (or a section hosting one) runs concept → schematic → done,
+///     where `done` means its layout has been starred (★);
+///   - a section placed directly on the main board needs no layout, so the
+///     schematic *is* its finish line — it reports `done` as soon as it's drawn.
+/// `concept` = rough part ideas (a `(stub …)`, an empty section, or a manual
+/// `(status concept)` clamp). `schematic` (the in-progress blue) is therefore
+/// only ever a sub-module that's drawn but not yet laid out.
+pub const Maturity = enum { concept, schematic, done };
+
 /// One block in the diagram — one per `(section …)` and one per unattached
 /// `(sub-block …)`. `label`/`subtitle` are unowned slices into the source
 /// DesignBlock; `slug` is allocated by `review.slugify`; `inputs`/`outputs`
@@ -133,6 +144,10 @@ pub const Node = struct {
     /// members are wired (an author who declared a subsystem wants it drawn);
     /// ordinary nodes leave it false and are omitted when isolated.
     force_show: bool = false,
+    /// Auto-derived design-maturity stage (see `Maturity`), drawn as a progress
+    /// bar on block-overview chips. `null` ⇒ no bar — set for synthesised
+    /// endpoints (antennas, crystals) which have no design-maturity of their own.
+    maturity: ?Maturity = null,
 };
 
 /// A directed inter-block connection. `from` is the driver/producer side so

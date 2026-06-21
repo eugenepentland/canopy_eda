@@ -122,6 +122,7 @@ src/diagram/types.zig::ClassDef struct_
 src/diagram/types.zig::ClassId value
 src/diagram/types.zig::Edge struct_
 src/diagram/types.zig::Graph struct_
+src/diagram/types.zig::Maturity enum_
 src/diagram/types.zig::Node struct_
 src/diagram/types.zig::Pt struct_
 src/diagram/types.zig::RailEnd struct_

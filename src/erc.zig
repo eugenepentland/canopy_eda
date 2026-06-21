@@ -191,7 +191,9 @@ fn checkComponentGrouping(
 ) !void {
     const attachments = membership.computeSubBlockAttachments(allocator, block) catch return;
     defer allocator.free(attachments);
-    var graph = collect.collectGraph(allocator, block, attachments) catch return;
+    // project_dir "" — this check only needs group coverage, not the starred-layout
+    // maturity lookup, so skip the sidecar reads.
+    var graph = collect.collectGraph(allocator, block, attachments, "") catch return;
     defer graph.deinit(allocator);
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
