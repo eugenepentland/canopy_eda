@@ -21,8 +21,8 @@ pub const Value = union(enum) {
         /// Schematic-level attributes (e.g., "np0", "x7r" for dielectric type)
         attrs: []const []const u8 = &.{},
     },
-    /// A module definition (name, params, body nodes)
-    module: ModuleDef,
+    /// A block definition: a named, optionally-parameterized circuit.
+    block_def: BlockDef,
     /// A design block result
     design_block: *DesignBlock,
     /// Nil / void
@@ -62,7 +62,7 @@ pub const Value = union(enum) {
 /// A `(defmodule …)` definition: the parameter list, body AST nodes, and the
 /// module file's lexical scope so calls bind parameters into a child env that
 /// still resolves imports the module declared.
-pub const ModuleDef = struct {
+pub const BlockDef = struct {
     name: []const u8,
     params: []const []const u8,
     /// Per-parameter default expression, parallel to `params`. A `(param
@@ -1126,7 +1126,7 @@ pub const SwitchPlacement = struct {
 /// detected roles (the research priority ladder) around the author-declared
 /// central IC `REF`, and compose the result into parent boards; `.unset` (no
 /// marker) and `.off` (`(placement (manual))`) ⇒ use the force solver. `.on`
-/// engages for MODULE roots only (`DesignBlock.from_module`) and only with a
+/// engages for MODULE roots only (`DesignBlock.origin == .embedded`) and only with a
 /// named anchor — a full design always force-solves its overall arrangement,
 /// sidestepping the array-cram regression that default-on detection hit.
 pub const PlacementAuto = enum { unset, on, off };
@@ -1237,6 +1237,13 @@ pub const RoughSpec = struct {
     present: bool = false,
 };
 
+/// Provenance of a `DesignBlock`: a top-level `(design-block …)` root vs the
+/// body of an embedded `(defmodule …)` application. The prior `from_module`
+/// bool maps to `.embedded`. This is the placement-engine knob for role-based
+/// auto-placement — kept distinct from a block's board/subcircuit *role*, which
+/// is derived from declared content.
+pub const BlockOrigin = enum { design_root, embedded };
+
 /// The fully-evaluated result of a `(design-block …)`: the flattened netlist
 /// (instances + nets + ports), the section/sub-block tree, and the design-doc
 /// metadata (critical ICs, verifications, rails, functions) the review and
@@ -1250,14 +1257,15 @@ pub const DesignBlock = struct {
     groups: []const Group,
     sub_blocks: []const SubBlock,
     sections: []const Section = &.{},
-    /// True when this block is the body of a `(defmodule …)` application — a
-    /// `(sub-block …)` instantiation, a standalone module preview, or a zero-arg
-    /// resolve — rather than a top-level `(design-block …)`. Stamped by
-    /// `callModule`. Gates role-based auto-placement (`(placement (auto "REF"))`),
-    /// which engages for module roots only: a full design's overall arrangement
-    /// stays the force solve, while each module it instantiates is laid out around
-    /// its declared anchor and composed in.
-    from_module: bool = false,
+    /// Provenance: `.embedded` when this block is the body of a `(defmodule …)`
+    /// application — a `(sub-block …)` instantiation, a standalone module
+    /// preview, or a zero-arg resolve — vs `.design_root` for a top-level
+    /// `(design-block …)`. Stamped `.embedded` by `callModule`. Gates role-based
+    /// auto-placement (`(placement (auto "REF"))`), which engages for embedded
+    /// (module) roots only: a full design's overall arrangement stays the force
+    /// solve, while each module it instantiates is laid out around its declared
+    /// anchor and composed in.
+    origin: BlockOrigin = .design_root,
     /// True when the design declared `(grouped-refdes)` — its ref-deses were
     /// re-stamped into value/footprint block ranges (`refdes_group`) and pinned
     /// to a `<design>.refdes.json` sidecar, so they survive insert/delete/reorder

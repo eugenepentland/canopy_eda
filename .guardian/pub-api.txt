@@ -165,6 +165,8 @@ src/eval/design_block.zig::parsePlacementText fn
 src/eval/electrical.zig::parse fn
 src/eval/electrical.zig::parseSubForms fn
 src/eval/env.zig::AssertionResult struct_
+src/eval/env.zig::BlockDef struct_
+src/eval/env.zig::BlockOrigin enum_
 src/eval/env.zig::BlockRole enum_
 src/eval/env.zig::BoardSpec struct_
 src/eval/env.zig::CalcBlock struct_
@@ -188,7 +190,6 @@ src/eval/env.zig::LayoutGroup struct_
 src/eval/env.zig::LayoutRow struct_
 src/eval/env.zig::LayoutSpec struct_
 src/eval/env.zig::ModuleClassOverride struct_
-src/eval/env.zig::ModuleDef struct_
 src/eval/env.zig::Net struct_
 src/eval/env.zig::NetClassOverride struct_
 src/eval/env.zig::NetLengthConstraint struct_

@@ -12,7 +12,7 @@ const BusDef = Evaluator.BusDef;
 const Node = ast.Node;
 const Value = env_mod.Value;
 const Env = env_mod.Env;
-const ModuleDef = env_mod.ModuleDef;
+const BlockDef = env_mod.BlockDef;
 
 // ── Constants ─────────────────────────────────────────────────────
 const FOOTPRINT_FORM = "footprint";
@@ -311,7 +311,7 @@ pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalE
 }
 
 /// Evaluate `(defmodule name (params…) "doc?" body…)` and bind the resulting
-/// `ModuleDef` in the current env. The body nodes are stored verbatim for
+/// `BlockDef` in the current env. The body nodes are stored verbatim for
 /// later evaluation when the module is called; the param list is captured
 /// alongside the module file's import scope so calls resolve correctly.
 /// A parameter is either a bare atom (required) or a `(param default)` pair
@@ -360,7 +360,7 @@ pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!
 
     const param_slice = self.allocator.dupe([]const u8, params.items) catch return EvalError.OutOfMemory;
     const default_slice = self.allocator.dupe(?Node, defaults.items) catch return EvalError.OutOfMemory;
-    const mod = ModuleDef{
+    const mod = BlockDef{
         .name = name,
         .params = param_slice,
         .defaults = default_slice,
@@ -368,7 +368,7 @@ pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!
         .imports = env,
     };
 
-    try env.put(name, .{ .module = mod });
+    try env.put(name, .{ .block_def = mod });
     return .nil;
 }
 
@@ -377,7 +377,7 @@ pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!
 /// of the module's parameter names. Anything else (including 2-element lists
 /// like `(cap-0402 "100nF")` whose head is not a param) is a positional
 /// expression and returns null.
-fn namedParamIndex(mod: ModuleDef, arg: Node) ?usize {
+fn namedParamIndex(mod: BlockDef, arg: Node) ?usize {
     const pair = arg.asList() orelse return null;
     if (pair.len != 2) return null;
     const name = pair[0].asAtom() orelse return null;
@@ -393,7 +393,7 @@ fn namedParamIndex(mod: ModuleDef, arg: Node) ?usize {
 /// may not follow a named arg; duplicate and missing bindings are
 /// diagnosed with the parameter names. Returns the last body expression's
 /// value — typically a `(design-block …)`.
-pub fn callModule(self: *Evaluator, mod: ModuleDef, call_args: []const Node, call_span: ast.Span, caller_env: *Env) EvalError!Value {
+pub fn callModule(self: *Evaluator, mod: BlockDef, call_args: []const Node, call_span: ast.Span, caller_env: *Env) EvalError!Value {
     const bound = self.allocator.alloc(?Value, mod.params.len) catch return EvalError.OutOfMemory;
     defer self.allocator.free(bound);
     for (bound) |*b| b.* = null;
@@ -446,18 +446,18 @@ pub fn callModule(self: *Evaluator, mod: ModuleDef, call_args: []const Node, cal
     }
 
     const result = try self.evalNodes(mod.body, &mod_env);
-    // Mark the produced block as a module body (vs a top-level design) so the
-    // PCB placer engages role-based auto-placement for modules only. Propagates
-    // to sub-block instantiations, standalone previews, and zero-arg resolves —
-    // every module root flows through here.
-    if (result == .design_block) result.design_block.from_module = true;
+    // Mark the produced block as embedded (vs a top-level design root) so the
+    // PCB placer engages role-based auto-placement for module roots only.
+    // Propagates to sub-block instantiations, standalone previews, and zero-arg
+    // resolves — every module root flows through here.
+    if (result == .design_block) result.design_block.origin = .embedded;
     return result;
 }
 
 /// Diagnose any parameter left unbound after the call args are processed,
 /// excluding parameters that declare a default:
 /// `module 'tpsm84338' missing argument(s): rled`.
-fn checkMissingParams(self: *Evaluator, mod: ModuleDef, bound: []const ?Value, call_span: ast.Span) EvalError!void {
+fn checkMissingParams(self: *Evaluator, mod: BlockDef, bound: []const ?Value, call_span: ast.Span) EvalError!void {
     var missing: std.ArrayListUnmanaged(u8) = .empty;
     defer missing.deinit(self.allocator);
     for (mod.params, 0..) |param, i| {

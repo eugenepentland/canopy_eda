@@ -27,7 +27,7 @@ const Port = env_mod.Port;
 const Note = env_mod.Note;
 const Group = env_mod.Group;
 const SubBlock = env_mod.SubBlock;
-const ModuleDef = env_mod.ModuleDef;
+const BlockDef = env_mod.BlockDef;
 const AssertionResult = env_mod.AssertionResult;
 
 /// Source-located explanation for the most recent `EvalError`. Zig
@@ -464,7 +464,7 @@ pub const Evaluator = struct {
         // Module or component-family invocation
         if (env.get(head_name)) |v| {
             switch (v) {
-                .module => |mod| return modules.callModule(self, mod, args, head.span, env),
+                .block_def => |mod| return modules.callModule(self, mod, args, head.span, env),
                 else => {},
             }
         }

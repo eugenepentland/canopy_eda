@@ -5736,7 +5736,7 @@ fn prepare(
     // `packSpec`, falling back to the force solve when it's null.
     var role_placement: ?ResolvedPlacement = null;
     // Engage only for a module root that named its central IC (`(placement (auto "REF"))`).
-    const auto_module = block.from_module and block.placement.auto_mode == .on and block.placement.anchor.len > 0;
+    const auto_module = block.origin == .embedded and block.placement.auto_mode == .on and block.placement.anchor.len > 0;
     if (placement == null and floorplan == null and auto_module) {
         role_placement = try proposeRolePlacement(arena, parts, nets, &idx_of, instances, block.policy_overrides, block.placement.anchor);
     }
