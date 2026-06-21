@@ -396,85 +396,34 @@ pub fn modulesListPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) Han
 
 // ── GET /modules/:name ────────────────────────────────────────────────
 
-/// Recursively search a design's sub-block tree for one whose `source`
-/// matches `module_name`, returning its evaluated block.
-fn findSubBlockBlock(block: *const env_mod.DesignBlock, module_name: []const u8) ?*env_mod.DesignBlock {
-    for (block.sub_blocks) |sb| {
-        if (std.mem.eql(u8, sb.source, module_name)) return sb.block;
-        if (findSubBlockBlock(sb.block, module_name)) |found| return found;
-    }
-    return null;
-}
-
-/// Try to obtain a renderable, fully-evaluated block for `module_name`.
-/// First preference: a real instantiation found in one of the project's
-/// designs (concrete args, real wiring). Fallback: synthesize a zero-arg
-/// instantiation, which only succeeds for parameter-less modules. The
-/// `*Evaluator` that produced the block is returned alongside it because the
-/// block borrows the evaluator's arena — the caller must keep it alive until
-/// rendering is done.
+/// A module instantiated standalone for rendering, paired with the
+/// `*Evaluator` whose arena the block borrows — the caller must keep the
+/// evaluator alive until rendering is done.
 pub const ResolvedBlock = struct {
     block: *env_mod.DesignBlock,
     eval: *Evaluator,
 };
 
-/// Resolve `module_name` to a renderable block (real usage in a design first,
-/// else a zero-arg instantiation). The returned `eval` owns the block's arena
-/// — the caller must `deinit` + `destroy` it once done. Null if unresolvable.
+/// Resolve `module_name` to a renderable, fully-evaluated block via its
+/// parameter defaults — the deterministic, defaults-first instantiation
+/// `mcp_tools.evalNamedBlock` performs for every read surface (it is the single
+/// resolver; this wrapper only adapts the ownership: the returned `eval` owns
+/// the block's arena and the caller must `deinit` + `destroy` it once done).
+/// Null when the module is missing or declares a required parameter with no
+/// default (caller shows the source-only view).
 pub fn resolveModuleBlock(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     module_name: []const u8,
 ) ?ResolvedBlock {
-    // 1. Look for a real usage across the project's designs. `listDesignNames`
-    //    returns bare basenames; the files may sit in `src/<group>/` subdirs,
-    //    so resolve each through `paths.designSourcePath`.
-    const design_names = mcp_tools.listDesignNames(allocator, project_dir) catch &[_][]const u8{};
-    for (design_names) |dname| {
-        const path = paths.designSourcePath(allocator, project_dir, dname) catch continue;
-        const eval = allocator.create(Evaluator) catch continue;
-        eval.* = Evaluator.init(allocator, project_dir);
-        const result = eval.evalFile(path) catch {
-            eval.deinit();
-            allocator.destroy(eval);
-            continue;
-        };
-        switch (result) {
-            .design_block => |b| {
-                if (findSubBlockBlock(b, module_name)) |found| {
-                    return .{ .block = found, .eval = eval };
-                }
-            },
-            else => {},
-        }
-        eval.deinit();
-        allocator.destroy(eval);
-    }
-
-    // 2. Fallback: synthesize a zero-arg instantiation. Works only when the
-    //    module takes no parameters; parameterized modules raise an arity or
-    //    assert error here and fall through to the source-only view.
-    const synthetic = std.fmt.allocPrint(
-        allocator,
-        "(import {s})\n(design-block \"{s}\" (sub-block \"preview\" ({s})))",
-        .{ module_name, module_name, module_name },
-    ) catch return null;
     const eval = allocator.create(Evaluator) catch return null;
     eval.* = Evaluator.init(allocator, project_dir);
-    const result = eval.evalSource(synthetic) catch {
+    const nb = mcp_tools.evalNamedBlock(allocator, project_dir, module_name, eval) catch {
         eval.deinit();
         allocator.destroy(eval);
         return null;
     };
-    switch (result) {
-        .design_block => |b| {
-            if (b.sub_blocks.len > 0) return .{ .block = b.sub_blocks[0].block, .eval = eval };
-        },
-        else => {},
-    }
-    eval.deinit();
-    allocator.destroy(eval);
-    return null;
+    return .{ .block = nb.block, .eval = eval };
 }
 
 /// GET /modules/:name — render a module as a standalone schematic page. Falls
@@ -498,8 +447,8 @@ pub fn moduleViewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     };
     defer ctx.allocator.free(src_path);
 
-    // Preferred path: a real (or synthesized) evaluated block → full
-    // schematic page via the shared renderer.
+    // Preferred path: the module instantiated via its parameter defaults →
+    // full schematic page via the shared renderer.
     if (resolveModuleBlock(ctx.allocator, ctx.project_dir, name)) |resolved| {
         var empty_checks: render_html.CheckResultMap = .empty;
         const html = render_html.renderToHtml(
