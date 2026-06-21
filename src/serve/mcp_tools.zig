@@ -1656,7 +1656,7 @@ fn libEntryScore(query: []const u8, name: []const u8, description: ?[]const u8) 
 /// With a non-null `query`, only entries whose name or description fuzzily
 /// match are emitted, ranked best-first; with null `query`, every entry is
 /// emitted in directory order.
-fn listLibrarySubdir(
+pub fn listLibrarySubdir(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     sub: []const u8,
@@ -1976,7 +1976,7 @@ fn categoryName(c: PinCategory) []const u8 {
 /// Return a pointer to the evaluated DesignBlock for `name`, or an error string
 /// written to `w` and null return. Caller must call `eval.deinit()` on the
 /// returned evaluator pointer's memory arena (via `defer` in the caller).
-fn listInstances(
+pub fn listInstances(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
@@ -2130,7 +2130,7 @@ pub fn listFreePins(
 
 /// Emit every pin connected to `net_name`, plus every passive instance
 /// (ref_des starting with R/L/C/F/D) whose ref_des appears on the net.
-fn getNet(
+pub fn getNet(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,

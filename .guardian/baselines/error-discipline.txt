@@ -1,6 +1,9 @@
 # guardian-snapshot v1
 pub const MyError = error{ Foo, Bar };
 pub fn run(...) MyError!void { ... }
+src/serve/mcp_tools.zig: pub fn getNet uses inferred error set `!T` (use `MyErr!T`)
+src/serve/mcp_tools.zig: pub fn listInstances uses inferred error set `!T` (use `MyErr!T`)
+src/serve/mcp_tools.zig: pub fn listLibrarySubdir uses inferred error set `!T` (use `MyErr!T`)
 src/serve/notes.zig: pub fn addTaskCore uses inferred error set `!T` (use `MyErr!T`)
 src/serve/notes.zig: pub fn loadNotes uses inferred error set `!T` (use `MyErr!T`)
 src/serve/notes.zig: pub fn mutateTaskCore uses inferred error set `!T` (use `MyErr!T`)

@@ -8,6 +8,7 @@ const symbol_conv = @import("convert/symbol.zig");
 const alt_functions = @import("convert/alt_functions.zig");
 const serve_mod = @import("serve.zig");
 const commands = @import("commands.zig");
+const query = @import("query.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
 const auth = @import("serve/auth.zig");
 const users = @import("serve/users.zig");
@@ -85,6 +86,22 @@ pub fn main() !void {
         try commands.cmdLint(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "check")) {
         try commands.cmdCheck(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "designs")) {
+        try query.cmdDesigns(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "instances")) {
+        try query.cmdInstances(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "net")) {
+        try query.cmdNet(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "free-pins")) {
+        try query.cmdFreePins(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "schematic")) {
+        try query.cmdSchematic(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "describe")) {
+        try query.cmdDescribe(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "library")) {
+        try query.cmdLibrary(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "reference")) {
+        try query.cmdReference(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "convert-footprint")) {
         if (args.len < 3) {
             std.debug.print("Usage: netlisp convert-footprint <file.kicad_mod>\n", .{});
@@ -395,6 +412,14 @@ fn printUsage() !void {
         \\  netlisp build [--project-dir <d>]       Evaluate and emit resolved design
         \\  netlisp lint [--project-dir <d>] <name>  Report id-hygiene issues (legacy residue, bad/duplicate tokens)
         \\  netlisp check [--project-dir <d>] [--severity <s>] <name>  Run ERC on a design
+        \\  netlisp designs [--project-dir <d>]     List designs (name + title) as JSON
+        \\  netlisp instances [--project-dir <d>] <name>  List a design's parts as JSON
+        \\  netlisp net [--project-dir <d>] <name> <net>  Pins + passives on a net as JSON
+        \\  netlisp free-pins [--project-dir <d>] <name> <ref> [--category <c>]  Unassigned pins on an IC
+        \\  netlisp schematic [--project-dir <d>] <name>  Full scene-graph JSON (instances, nets, ports, ERC)
+        \\  netlisp describe [--project-dir <d>] <component>  Component definition + datasheet requirements as JSON
+        \\  netlisp library [--project-dir <d>] [query]  Fuzzy-search components/modules/parts/footprints
+        \\  netlisp reference [section]             Print the DSL grammar reference (docs/language-forms.md)
         \\  netlisp serve [--project-dir <d>] [--port <n>]  Start web server (default port 7050)
         \\  netlisp mint-plugin-token [--project-dir <d>] [--label <l>]  Mint a bearer token for the KiCad plugin
         \\  netlisp mint-invite [--project-dir <d>] [--role <r>] [--auth-dir <d>]  Mint a single-use invite (7-day TTL)
@@ -423,6 +448,7 @@ test {
     _ = @import("eval/builtins.zig");
     _ = @import("eval/fmt.zig");
     _ = @import("docgen.zig");
+    _ = @import("query.zig");
     _ = @import("eval/evaluator.zig");
     _ = @import("eval/ids.zig");
     _ = @import("eval/refdes_group.zig");
