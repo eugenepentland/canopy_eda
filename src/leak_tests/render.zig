@@ -30,6 +30,7 @@
 const std = @import("std");
 const env_mod = @import("../eval/env.zig");
 const render_html = @import("../render_html.zig");
+const membership = @import("../diagram/membership.zig");
 const render_json = @import("../render_json.zig");
 const render_pcb_png = @import("../render_pcb_png.zig");
 const raster = @import("../raster.zig");
@@ -160,8 +161,9 @@ test "leak: render_pcb_png.render runs clean under an arena (focus + labels)" {
 // leak-audit: computeSubBlockAttachments returns an owned `[]?usize` and frees
 // its internal net→sub-block / name-index / power-net hash maps before
 // returning (OWNED-RETURN, idiom 1). testing.allocator panics if any of those
-// maps escape. Mirrors the source test's DesignBlock construction.
-test "leak: render_html.computeSubBlockAttachments frees its scratch maps" {
+// maps escape. Mirrors the source test's DesignBlock construction. (Lives in
+// diagram/membership since the diagram graph builders share it.)
+test "leak: membership.computeSubBlockAttachments frees its scratch maps" {
     const ldo_ports = [_]env_mod.SectionPort{
         .{ .name = "V_RF_3P3", .direction = .in, .signal_type = .power, .voltage = 3.3 },
     };
@@ -189,7 +191,7 @@ test "leak: render_html.computeSubBlockAttachments frees its scratch maps" {
     block.sub_blocks = &sub_blocks;
     block.net_ties = &net_ties;
 
-    const attachments = try render_html.computeSubBlockAttachments(std.testing.allocator, &block);
+    const attachments = try membership.computeSubBlockAttachments(std.testing.allocator, &block);
     defer std.testing.allocator.free(attachments);
     try std.testing.expectEqual(@as(usize, 2), attachments.len);
 }
