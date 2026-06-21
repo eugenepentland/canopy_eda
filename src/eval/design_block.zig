@@ -107,10 +107,19 @@ fn isInertFormHead(name: []const u8) bool {
 pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     if (args.len < 1) return EvalError.ArityError;
 
-    // First arg is name (could be computed via fmt)
+    // First arg is name (could be computed via fmt); the rest is the body.
     const name_val = try self.evalNode(args[0], env);
     const name = name_val.asString() orelse return EvalError.TypeError;
+    return materializeBlock(self, name, args[1..], env);
+}
 
+/// Materialize a block body — the forms after the name — into a heap-allocated
+/// `DesignBlock`: walk each form (instance/port/section/sub-block/net/…), build
+/// nets from the collected pin-net declarations, auto-assign ref-deses, and run
+/// the design validator. `evalDesignBlock` parses the name and delegates here;
+/// factoring it out lets the lazy `(block …)`/`(defmodule …)` body path reuse
+/// the identical routine instead of round-tripping through a wrapper form.
+fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const Node, env: *Env) EvalError!Value {
     var instances: std.ArrayListUnmanaged(Instance) = .empty;
     var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
     var ports: std.ArrayListUnmanaged(Port) = .empty;
@@ -142,14 +151,14 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
 
     // Pre-scan: register all explicit ref-des to avoid auto-counter collisions,
     // and all existing id/ids tokens so generateId never re-mints one.
-    ids.prescanRefDes(self, args[1..]);
-    ids.prescanIds(self, args[1..]);
+    ids.prescanRefDes(self, body_forms);
+    ids.prescanIds(self, body_forms);
 
     // `(hierarchical-ids)` opts this design (and the modules it sub-blocks) into
     // Option-4 sub-block identity. Inherit from any enclosing design and restore
     // on exit so the flag follows the design tree, not evaluation order.
     const saved_hierarchical = self.hierarchical_ids;
-    self.hierarchical_ids = saved_hierarchical or hasHierarchicalMarker(args[1..]);
+    self.hierarchical_ids = saved_hierarchical or hasHierarchicalMarker(body_forms);
     defer self.hierarchical_ids = saved_hierarchical;
 
     // `(grouped-refdes)` opts into value/footprint block-range ref-des grouping.
@@ -160,7 +169,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     const saved_grouped = self.grouped_refdes;
     const saved_grouped_block = self.grouped_block_size;
     const saved_grouped_two_level = self.grouped_two_level;
-    const grouped_cfg = groupedRefdesConfig(args[1..]);
+    const grouped_cfg = groupedRefdesConfig(body_forms);
     self.grouped_refdes = saved_grouped or (grouped_cfg != null);
     defer self.grouped_refdes = saved_grouped;
     defer self.grouped_block_size = saved_grouped_block;
@@ -181,7 +190,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     self.decouple_defaults = .{ .ic = "", .bypass = saved_decouple_defaults.bypass };
     defer self.decouple_defaults = saved_decouple_defaults;
 
-    for (args[1..]) |form| {
+    for (body_forms) |form| {
         const form_children = form.asList() orelse continue;
         if (form_children.len == 0) continue;
         const form_name = form_children[0].asAtom() orelse continue;
