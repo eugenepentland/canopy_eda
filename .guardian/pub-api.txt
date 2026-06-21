@@ -893,6 +893,7 @@ src/serve/modules.zig::collectModules fn
 src/serve/modules.zig::moduleSourceApi fn
 src/serve/modules.zig::moduleViewPage fn
 src/serve/modules.zig::modulesListPage fn
+src/serve/modules.zig::renderModulePage fn
 src/serve/modules.zig::resolveModuleBlock fn
 src/serve/notes.zig::HandlerError value
 src/serve/notes.zig::Note struct_

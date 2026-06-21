@@ -13,6 +13,7 @@ const req_checks = @import("../req_checks.zig");
 const assets_css = @import("assets_css.zig");
 const diag_format = @import("diag_format.zig");
 const page_cache = @import("page_cache.zig");
+const modules_page = @import("modules.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
@@ -30,8 +31,9 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 // page_allocator (the request arena is freed per response); a hit dupes the
 // body back into the request arena under the lock so a concurrent eviction
 // can't free it mid-response. Keys are bounded by the number of design files on
-// disk (module names redirect away before reaching here), so per-name
-// replacement needs no separate eviction policy.
+// disk (module-only names are rendered in place by the module renderer and
+// return before reaching here), so per-name replacement needs no separate
+// eviction policy.
 
 const page = std.heap.page_allocator;
 
@@ -96,34 +98,31 @@ fn htmlCachePut(
 /// `lib/modules/<name>.sexp` fallback (see `paths.designSiblingPath`) rather
 /// than a real `src/` design. That file existing must NOT be read as "a design
 /// source exists" — evaluating the `(defmodule …)` yields a module, not a
-/// design block, which 500s. Detecting it lets `/schematics/<module>` redirect.
+/// design block, which 500s. Detecting it lets `/schematics/<module>` render
+/// the module in place via the module renderer instead.
 fn resolvesToModuleSource(board_path: []const u8) bool {
     return std.mem.indexOf(u8, board_path, "/lib/modules/") != null;
 }
 
-/// When `name` has no design source but does exist under `lib/modules/`,
-/// answer a 302 to `/modules/<name>` and return true. Keeps a module name
-/// typed into `/schematics/…` from rendering as a build error.
-fn redirectToModule(
-    ctx: *Handler,
-    name: []const u8,
-    board_path: []const u8,
-    res: *httpz.Response,
-) HandlerError!bool {
-    // A real `src/` design renders normally. A module-only name resolves to its
-    // `lib/modules/<name>.sexp` file, which exists — so guard the existence
-    // check on it NOT being that module fallback, else the redirect is skipped
-    // and the defmodule evaluates into a "Not a design block" 500.
+/// True when `name` has no real `src/` design but does exist under
+/// `lib/modules/` — i.e. a module name typed into `/schematics/…`. Detected so
+/// the schematic handler can render the module *in place* (no 302 hop) using
+/// the same address shape as a design. `board_path` is `designSourcePath`'s
+/// result: a real design's path points into `src/`; a module-only name falls
+/// back to its `lib/modules/<name>.sexp` (caught by `resolvesToModuleSource`,
+/// or by the path not existing on disk).
+fn isModuleOnly(ctx: *Handler, name: []const u8, board_path: []const u8) bool {
+    // A real `src/` design renders normally. Treat as a module only when the
+    // resolved path is NOT a real src/ design — either it fell back to the
+    // lib/modules path, or it doesn't exist on disk at all.
     if (!resolvesToModuleSource(board_path)) {
         if (infra_fs.cwd().access(board_path, .{})) |_| return false else |_| {}
     }
     if (std.mem.indexOfScalar(u8, name, '/') != null) return false;
     if (std.mem.indexOf(u8, name, "..") != null) return false;
-    const mod_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/modules/{s}.sexp", .{ ctx.project_dir, name });
+    const mod_path = std.fmt.allocPrint(ctx.allocator, "{s}/lib/modules/{s}.sexp", .{ ctx.project_dir, name }) catch return false;
     defer ctx.allocator.free(mod_path);
     infra_fs.cwd().access(mod_path, .{}) catch return false;
-    res.status = 302;
-    res.header("Location", try std.fmt.allocPrint(ctx.allocator, "/modules/{s}", .{name}));
     return true;
 }
 
@@ -138,9 +137,10 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const board_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(board_path);
 
-    // A module name typed into a design URL: send it to the module viewer,
-    // so designs and modules open from the same address shape.
-    if (try redirectToModule(ctx, name, board_path, res)) return;
+    // A module name typed into a design URL: render the module in place via the
+    // module renderer, so designs and modules open from the same address shape
+    // with no redirect hop. (The module chrome's own links stay at /modules/.)
+    if (isModuleOnly(ctx, name, board_path)) return modules_page.renderModulePage(ctx, res, name);
 
     // Serve the cached render when the design's source files are unchanged.
     // Capture the live version *before* evaluating so a bump mid-eval is

@@ -3,13 +3,10 @@
 //! the `/api/module-source` endpoint that backs the "copy source" button on
 //! sub-block cards.
 //!
-//! A module is parameterized, so it can't be rendered in isolation without
-//! argument values. The viewer prefers a *real* instantiation: it scans the
-//! project's designs for a `(sub-block … (<module> …))` that already wired
-//! the module up with concrete args and renders that evaluated block. When
-//! no design uses the module it falls back to synthesizing a zero-arg
-//! instantiation (works for parameter-less modules); failing that it shows
-//! the raw source.
+//! A module is parameterized, so it renders standalone via its parameter
+//! defaults — the deterministic, defaults-first `evalNamedBlock` resolution
+//! every read surface uses. A module that declares a required parameter with
+//! no default can't be instantiated, so it shows the raw source instead.
 
 const std = @import("std");
 const httpz = @import("httpz");
@@ -434,6 +431,17 @@ pub fn moduleViewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
         res.status = 404;
         return;
     };
+    return renderModulePage(ctx, res, name);
+}
+
+/// Render module `name` as a standalone schematic page (the body of
+/// `moduleViewPage`, factored out so `/schematics/<module>` can render a module
+/// in place rather than 302-redirecting). Validates the name, resolves the
+/// source path, and renders via the shared `render_html` renderer with the
+/// `/modules/` chrome — falling back to the raw-source view when the module
+/// can't be instantiated or the renderer errors. The `sourceIsSafe` guard is
+/// kept here so both entry points are protected.
+pub fn renderModulePage(ctx: *Handler, res: *httpz.Response, name: []const u8) HandlerError!void {
     if (!sourceIsSafe(name)) {
         res.status = 400;
         res.body = "bad module name";
