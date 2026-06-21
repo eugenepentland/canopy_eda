@@ -5729,13 +5729,15 @@ fn prepare(
         .active = block.placement.present or floorplan != null,
         .unresolved = unresolved0,
     };
-    // Role-based constructive placement: default-on for a recognized module class
-    // with no explicit spec; `(placement (auto))` forces it, `(placement (manual))`
-    // opts out. The role-inferred twin of `resolvePlacement` — `runPlacement`
-    // realizes it via `packSpec`, falling back to the force solve when it's null.
+    // Role-based constructive placement — OPT-IN via `(placement (auto))`. Default-on
+    // for recognized module classes is gated off for now: the routed A/B regressed
+    // array-style boards (the ladder crams peers onto one anchor) and leaked past the
+    // size gate through composition's nested solves — revisit before flipping it on.
+    // The role-inferred twin of `resolvePlacement`; `runPlacement` realizes it via
+    // `packSpec`, falling back to the force solve when it's null.
     var role_placement: ?ResolvedPlacement = null;
-    if (placement == null and floorplan == null and block.placement.auto_mode != .off) {
-        role_placement = try proposeRolePlacement(arena, parts, nets, &idx_of, instances, block.policy_overrides, block.placement.auto_mode == .on);
+    if (placement == null and floorplan == null and block.placement.auto_mode == .on) {
+        role_placement = try proposeRolePlacement(arena, parts, nets, &idx_of, instances, block.policy_overrides, true);
     }
     return .{
         .parts = parts,

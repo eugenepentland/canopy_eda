@@ -532,11 +532,10 @@ pub const scope_form_docs = blk: {
             "Parts no side lists are pin-hug auto-filled beside their placed pads. " ++
             "(no-refine) shows the raw constructive pack (flush, symmetric); " ++
             "(centered) centers every side on the IC instead of opposite its rail pad. " ++
-            "With NO explicit sides, a recognized module class (buck/ldo/mcu/rf_amp/analog_afe) " ++
-            "is auto-placed from its detected roles (anchor IC, then critical-loop caps docked at " ++
-            "their supply pads smallest-first, then the rest) — no spec needed; (auto) forces that " ++
-            "ladder even on a generic block AND composes it into parent boards, (manual) opts back " ++
-            "out to the force solver.",
+            "(auto) places the block constructively from its detected roles (anchor IC, then " ++
+            "critical-loop caps docked at their supply pads smallest-first, then the rest) and " ++
+            "composes it into parent boards — opt-in, no sides needed; (manual) and the default " ++
+            "use the force solver.",
     } };
     t[@intFromEnum(ScopeForm.floorplan)] = .{ .scope = tl, .doc = .{
         .syntax = "(floorplan (anchor \"SUB\") " ++

@@ -1122,11 +1122,11 @@ pub const SwitchPlacement = struct {
 };
 
 /// How role-based auto-placement engages for a block (`PlacementSpec.auto_mode`):
-/// `.unset` (default, no marker) ⇒ a recognized module class (buck/ldo/mcu/rf_amp/
-/// analog_afe) is placed constructively from its detected roles and a `generic`
-/// block falls back to the force solve; `.on` (`(placement (auto))`) ⇒ force the
-/// role ladder even on a `generic` block AND compose the result into parent boards;
-/// `.off` (`(placement (manual))`) ⇒ always use the force solver.
+/// `.on` (`(placement (auto))`) ⇒ place the block constructively from its detected
+/// roles (the research priority ladder) and compose the result into parent boards;
+/// `.unset` (no marker) and `.off` (`(placement (manual))`) ⇒ use the force solver.
+/// OPT-IN for now: default-on for recognized module classes is gated off pending
+/// routed-A/B work (it regressed array-style boards), so only `.on` engages it.
 pub const PlacementAuto = enum { unset, on, off };
 
 /// Agent-authored PCB floorplan from a top-level `(placement …)` form: the
@@ -1152,7 +1152,7 @@ pub const PlacementSpec = struct {
     /// symmetric floorplan (every side mirrored about the anchor).
     centered: bool = false,
     /// Role-based auto-placement mode (see `PlacementAuto`). `(auto)` ⇒ `.on`,
-    /// `(manual)` ⇒ `.off`, no marker ⇒ `.unset` (recognized classes auto-place).
+    /// `(manual)` ⇒ `.off`, no marker ⇒ `.unset` (force solve; auto is opt-in).
     auto_mode: PlacementAuto = .unset,
 };
 
