@@ -114,7 +114,9 @@ fn writeSystemDiagram(allocator: Allocator, w: anytype, block: *const DesignBloc
     // ArrayList writer through a scratch Allocating buffer.
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    try block_diagram.renderSystemSvg(allocator, block, sub_attachments, &aw.writer);
+    // The markdown/zip export has no project root to read layout sidecars from,
+    // so chips cap at the `schematic` maturity stage (no starred-layout lookup).
+    try block_diagram.renderSystemSvg(allocator, block, sub_attachments, "", &aw.writer);
     try w.writeAll(aw.written());
     try w.writeAll("\n\n");
 }

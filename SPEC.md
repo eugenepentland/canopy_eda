@@ -404,6 +404,7 @@ Public functions: collectGraph
 - Surfaces an on-board crystal as a clock source feeding its block
 - Carries a programmable rail's rated span onto the producer node
 - Emits one diagram node per stub categorised by its declared category
+- Derives a 3-stage chip maturity (concept/schematic/done) from content
 - Resolves each block's headline part numbers from hub instances + critical-ICs
 - A (diagram hidden) host section lends its description + card anchor to the chip
 

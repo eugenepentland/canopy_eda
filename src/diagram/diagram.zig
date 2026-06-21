@@ -23,9 +23,12 @@ pub fn renderBlockDiagramTabs(
     allocator: Allocator,
     block: *const DesignBlock,
     sub_attachments: []const ?usize,
+    /// Project root, for deriving each chip's `layout` maturity stage from the
+    /// sub-modules' `.layouts.json` sidecars (empty ⇒ chips cap at `schematic`).
+    project_dir: []const u8,
     w: *Writer,
 ) (Allocator.Error || Writer.Error)!void {
-    var graph = try collect.collectGraph(allocator, block, sub_attachments);
+    var graph = try collect.collectGraph(allocator, block, sub_attachments, project_dir);
     defer graph.deinit(allocator);
     try render.renderTabs(allocator, &graph, w);
 }
@@ -39,9 +42,10 @@ pub fn renderSystemSvg(
     allocator: Allocator,
     block: *const DesignBlock,
     sub_attachments: []const ?usize,
+    project_dir: []const u8,
     w: *Writer,
 ) (Allocator.Error || Writer.Error)!void {
-    var graph = try collect.collectGraph(allocator, block, sub_attachments);
+    var graph = try collect.collectGraph(allocator, block, sub_attachments, project_dir);
     defer graph.deinit(allocator);
     if (try render.renderSystemStandalone(allocator, &graph, w)) return;
 

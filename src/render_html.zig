@@ -120,7 +120,7 @@ pub fn renderToHtml(
     // sub-block-requirements list were dropped from this page — the audit
     // counts live on the ERC button + sidebar instead.
     try w.writeAll("<div id=\"page-block-diagram\" class=\"page-anchor\">");
-    try block_diagram.renderBlockDiagramTabs(allocator, block, sub_attachments, w);
+    try block_diagram.renderBlockDiagramTabs(allocator, block, sub_attachments, project_dir, w);
     try w.writeAll("</div>");
     if (review_doc) |doc| {
         try w.writeAll("<div class=\"review-embed review-wrap\">");

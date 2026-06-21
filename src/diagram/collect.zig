@@ -14,6 +14,7 @@ const export_kicad = @import("../export_kicad.zig");
 const types = @import("types.zig");
 const classify = @import("classify.zig");
 const membership = @import("membership.zig");
+const layout_status = @import("../layout_status.zig");
 
 const DesignBlock = env_mod.DesignBlock;
 const Section = env_mod.Section;
@@ -30,6 +31,10 @@ pub fn collectGraph(
     allocator: Allocator,
     block: *const DesignBlock,
     sub_attachments: []const ?usize,
+    /// Project root, for reading each sub-module's `.layouts.json` to derive the
+    /// `layout` maturity stage. Empty ⇒ no starred-layout lookup (chips cap at
+    /// the `schematic` stage), the right degradation for the static export.
+    project_dir: []const u8,
 ) Allocator.Error!Graph {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
@@ -82,8 +87,8 @@ pub fn collectGraph(
         };
     }
 
-    try buildSectionNodes(allocator, scratch, block, &sub_port_to_net, sec_to_sub, &nodes, sec_node);
-    try buildSubBlockNodes(allocator, scratch, block, &sub_port_to_net, dg_attach, &nodes, sub_node);
+    try buildSectionNodes(allocator, scratch, block, &sub_port_to_net, sec_to_sub, &nodes, sec_node, project_dir);
+    try buildSubBlockNodes(allocator, scratch, block, &sub_port_to_net, dg_attach, &nodes, sub_node, project_dir);
 
     // Placeholder `(stub …)` parts: one node each, categorised by the stub's
     // declared category. Record ref-des → node so the netlist (built from the
@@ -198,6 +203,7 @@ fn buildSectionNodes(
     sec_to_sub: []const ?usize,
     nodes: *std.ArrayListUnmanaged(Node),
     sec_node: []?u32,
+    project_dir: []const u8,
 ) Allocator.Error!void {
     for (block.sections, 0..) |sec, sec_idx| {
         if (sec.diagram_hidden) continue;
@@ -217,6 +223,7 @@ fn buildSectionNodes(
             .inputs = try dupeRails(allocator, input_buf.items),
             .outputs = try dupeRails(allocator, output_buf.items),
             .parts = mp.tokens,
+            .maturity = sectionMaturity(scratch, project_dir, block, sec, sec_to_sub[sec_idx]),
         });
         sec_node[sec_idx] = @intCast(nodes.items.len - 1);
     }
@@ -230,6 +237,7 @@ fn buildSubBlockNodes(
     sub_attachments: []const ?usize,
     nodes: *std.ArrayListUnmanaged(Node),
     sub_node: []?u32,
+    project_dir: []const u8,
 ) Allocator.Error!void {
     for (block.sub_blocks, 0..) |sb, sb_idx| {
         if (sb_idx < sub_attachments.len and sub_attachments[sb_idx] != null) continue;
@@ -255,6 +263,7 @@ fn buildSubBlockNodes(
             .inputs = try dupeRails(allocator, input_buf.items),
             .outputs = try dupeRails(allocator, output_buf.items),
             .parts = mp.tokens,
+            .maturity = subBlockMaturity(scratch, project_dir, sb),
         });
         sub_node[sb_idx] = @intCast(nodes.items.len - 1);
     }
@@ -292,9 +301,92 @@ fn buildStubNodes(
             .inputs = &.{},
             .outputs = &.{},
             .parts = stub_parts,
+            // A `(stub …)` is a rough part idea by definition — always concept.
+            .maturity = .concept,
         });
         stub_node[i] = @intCast(nodes.items.len - 1);
     }
+}
+
+/// Derive a section's maturity (see `types.Maturity`). Auto from content, with
+/// `(status concept)` as a manual clamp down. A section that hosts a sub-module
+/// inherits the sub-module finish line (done only once every hosted module is
+/// starred ★, blue while one is still un-laid-out); a section placed directly on
+/// the main board needs no layout, so the schematic is its finish line and it
+/// reports `done` straight away. `adopted_sub` is the sub-block this section
+/// adopted via the net-count heuristic (when it declares no explicit `(hosts …)`).
+fn sectionMaturity(alloc: Allocator, project_dir: []const u8, block: *const DesignBlock, sec: Section, adopted_sub: ?usize) types.Maturity {
+    // (status concept) pins it (the evaluator also infers concept for an empty
+    // section — no instances, pin-groups, or sub-sections — so this covers both).
+    if (sec.status == .concept) return .concept;
+    // A rough part among the section's own instances keeps it at concept.
+    for (sec.instances) |inst| {
+        if (inst.placeholder) return .concept;
+    }
+    // Explicit hosts are the authority on which sub-modules this section owns.
+    if (sec.hosts.len > 0) {
+        var all_starred = true;
+        for (sec.hosts) |host| {
+            const sb = findSubBlock(block, host) orelse continue;
+            if (blockHasRoughPart(sb.block)) return .concept;
+            if (!subBlockStarred(alloc, project_dir, sb)) all_starred = false;
+        }
+        return if (all_starred) .done else .schematic;
+    }
+    // Else a heuristically-adopted sub-block, if any, sets the finish line.
+    if (adopted_sub) |sb_idx| {
+        const sb = block.sub_blocks[sb_idx];
+        if (blockHasRoughPart(sb.block)) return .concept;
+        return if (subBlockStarred(alloc, project_dir, sb)) .done else .schematic;
+    }
+    // Direct-in-design section: schematic is its finish line → done.
+    return .done;
+}
+
+/// Derive an unattached sub-block chip's maturity. A sub-block IS a module, so
+/// its finish line is a starred (★) layout: `done` once starred, blue `schematic`
+/// while drawn-but-not-laid-out, and `concept` when it still holds a rough part.
+fn subBlockMaturity(alloc: Allocator, project_dir: []const u8, sb: SubBlock) types.Maturity {
+    if (blockHasRoughPart(sb.block)) return .concept;
+    if (subBlockStarred(alloc, project_dir, sb)) return .done;
+    return .schematic;
+}
+
+/// True when a (sub-)design still holds rough part ideas: a `(stub …)`
+/// placeholder part or any instance flagged `placeholder`.
+fn blockHasRoughPart(blk: *const DesignBlock) bool {
+    if (blk.parts.len > 0) return true;
+    for (blk.instances) |inst| {
+        if (inst.placeholder) return true;
+    }
+    return false;
+}
+
+/// Has this sub-block's module starred a finished PCB layout? Reads the
+/// `<module>.layouts.json` sidecar's `default` (★) entry. False when the source
+/// isn't a bare module name or `project_dir` is unset (e.g. the static export).
+fn subBlockStarred(alloc: Allocator, project_dir: []const u8, sb: SubBlock) bool {
+    if (project_dir.len == 0) return false;
+    const m = moduleNameOf(sb) orelse return false;
+    return layout_status.read(alloc, project_dir, m).starred;
+}
+
+/// The bare module name a sub-block instantiates (non-empty source, no `/`), for
+/// resolving its `.layouts.json`. Null for path / inline sources. Mirrors
+/// `render_html.moduleSourceName`.
+fn moduleNameOf(sb: SubBlock) ?[]const u8 {
+    if (sb.source.len == 0) return null;
+    if (std.mem.indexOfScalar(u8, sb.source, '/') != null) return null;
+    return sb.source;
+}
+
+/// Find a sub-block by its handle (`(sub-block "name" …)`), for `(hosts …)`
+/// resolution. Null when no sub-block carries that name.
+fn findSubBlock(block: *const DesignBlock, name: []const u8) ?SubBlock {
+    for (block.sub_blocks) |sb| {
+        if (std.mem.eql(u8, sb.name, name)) return sb;
+    }
+    return null;
 }
 
 /// A sub-block classified as a power block (buck / LDO / regulator) — it
@@ -1011,7 +1103,7 @@ test "collectGraph emits a categorised node for each stub" {
     };
     var block = emptyBlock("t");
     block.parts = &parts;
-    var g = try collectGraph(testing.allocator, &block, &.{});
+    var g = try collectGraph(testing.allocator, &block, &.{}, "");
     defer g.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 2), g.nodes.len);
     // Node category comes from the stub's declared (category …); channels → stack.
@@ -1020,6 +1112,38 @@ test "collectGraph emits a categorised node for each stub" {
     try testing.expectEqual(@as(u8, 4), g.nodes[1].stack);
     // Authoring key is the stub name, for (layout (place "key" …)) matching.
     try testing.expectEqualStrings("my-mcu", g.nodes[0].key);
+    // A stub is a rough part idea by definition → concept maturity.
+    try testing.expect(g.nodes[0].maturity.? == .concept);
+}
+
+// spec: diagram/collect - Derives a 3-stage chip maturity (concept/schematic/done) from content
+test "collectGraph derives chip maturity from content" {
+    var clean_mod = emptyBlock("Clean Module");
+    const stub_parts = [_]env_mod.PlaceholderPart{
+        .{ .ref_des = "U9", .name = "rough-part", .signals = &.{} },
+    };
+    var rough_mod = emptyBlock("Rough Module");
+    rough_mod.parts = &stub_parts;
+    const subs = [_]SubBlock{
+        .{ .name = "clean", .block = &clean_mod },
+        .{ .name = "rough", .block = &rough_mod },
+    };
+    const secs = [_]Section{
+        .{ .name = "Idea Block", .status = .concept },
+        .{ .name = "Wired Block", .status = .implemented },
+    };
+    var block = emptyBlock("board");
+    block.sections = &secs;
+    block.sub_blocks = &subs;
+    // project_dir "" ⇒ no starred-layout lookup, so no sub-module reaches done.
+    var g = try collectGraph(testing.allocator, &block, &.{}, "");
+    defer g.deinit(testing.allocator);
+    // Order: section nodes first, then unattached sub-block nodes.
+    try testing.expectEqual(@as(usize, 4), g.nodes.len);
+    try testing.expect(g.nodes[0].maturity.? == .concept); // (status concept) pins it
+    try testing.expect(g.nodes[1].maturity.? == .done); // direct section, no sub-module ⇒ schematic is its finish line
+    try testing.expect(g.nodes[2].maturity.? == .schematic); // sub-module drawn, not starred ⇒ awaiting layout
+    try testing.expect(g.nodes[3].maturity.? == .concept); // sub-module still holds a rough (stub) part
 }
 
 // spec: diagram/collect - Derives inter-block edges from the flattened netlist rather than an MCU hub
@@ -1035,7 +1159,7 @@ test "collectGraph connects two non-MCU sections via a shared net" {
     var block = emptyBlock("rf");
     block.sections = &secs;
     block.nets = &nets;
-    var g = try collectGraph(testing.allocator, &block, &.{});
+    var g = try collectGraph(testing.allocator, &block, &.{}, "");
     defer g.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 2), g.nodes.len);
     try testing.expect(g.edges.len >= 1);
@@ -1048,7 +1172,7 @@ test "collectGraph labels an unattached sub-block by its module title" {
     const subs = [_]SubBlock{.{ .name = "esp32", .block = &module }};
     var block = emptyBlock("board");
     block.sub_blocks = &subs;
-    var g = try collectGraph(testing.allocator, &block, &.{});
+    var g = try collectGraph(testing.allocator, &block, &.{}, "");
     defer g.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), g.nodes.len);
     try testing.expectEqualStrings("ESP32-S3 UI", g.nodes[0].label);
@@ -1062,7 +1186,7 @@ test "collectGraph keeps a programmable rail's lower bound" {
     const subs = [_]SubBlock{.{ .name = "bank_a", .block = &module }};
     var block = emptyBlock("board");
     block.sub_blocks = &subs;
-    var g = try collectGraph(testing.allocator, &block, &.{});
+    var g = try collectGraph(testing.allocator, &block, &.{}, "");
     defer g.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), g.nodes.len);
     try testing.expectEqual(@as(usize, 1), g.nodes[0].outputs.len);
@@ -1078,7 +1202,7 @@ test "collectGraph surfaces a module crystal as a clock source" {
     const subs = [_]SubBlock{.{ .name = "mcu", .block = &module }};
     var block = emptyBlock("board");
     block.sub_blocks = &subs;
-    var g = try collectGraph(testing.allocator, &block, &.{});
+    var g = try collectGraph(testing.allocator, &block, &.{}, "");
     defer g.deinit(testing.allocator);
     // The mcu block node + the synthesized Crystal source, joined by a clock edge.
     try testing.expectEqual(@as(usize, 2), g.nodes.len);
@@ -1105,7 +1229,7 @@ test "collectGraph drops ground and merges a differential pair" {
     var block = emptyBlock("rf");
     block.sections = &secs;
     block.nets = &nets;
-    var g = try collectGraph(testing.allocator, &block, &.{});
+    var g = try collectGraph(testing.allocator, &block, &.{}, "");
     defer g.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), g.edges.len);
     try testing.expectEqual(@as(u16, 2), g.edges[0].fanout);
@@ -1127,7 +1251,7 @@ test "collectGraph resolves rail voltage from a consumer when no producer declar
     var block = emptyBlock("pwr");
     block.sections = &secs;
     block.nets = &nets;
-    var g = try collectGraph(testing.allocator, &block, &.{});
+    var g = try collectGraph(testing.allocator, &block, &.{}, "");
     defer g.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), g.edges.len);
     try testing.expectEqual(types.CLASS_POWER, g.edges[0].class);
@@ -1149,7 +1273,7 @@ test "collectGraph picks the primary rail by pin count" {
     var block = emptyBlock("d");
     block.sections = &secs;
     block.nets = &nets;
-    var g = try collectGraph(testing.allocator, &block, &.{});
+    var g = try collectGraph(testing.allocator, &block, &.{}, "");
     defer g.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), g.nodes.len);
     try testing.expectApproxEqAbs(@as(f64, 3.3), g.nodes[0].power_rail, 0.01);
@@ -1178,7 +1302,7 @@ test "collectGraph adds an antenna node for a one-sided RF boundary net" {
     var block = emptyBlock("rf");
     block.sections = &secs;
     block.nets = &nets;
-    var g = try collectGraph(testing.allocator, &block, &.{});
+    var g = try collectGraph(testing.allocator, &block, &.{}, "");
     defer g.deinit(testing.allocator);
     // The chip section plus one synthesised antenna endpoint (appended last).
     try testing.expectEqual(@as(usize, 2), g.nodes.len);
@@ -1229,7 +1353,7 @@ test "applyHiddenSectionText lends a hidden section's text to its hosted chip" {
     // The card path adopts "buck" into the hidden section; the diagram must still
     // give it a chip (the un-adoption), then lend it the section's text + anchor.
     const attach = [_]?usize{0};
-    var g = try collectGraph(testing.allocator, &block, &attach);
+    var g = try collectGraph(testing.allocator, &block, &attach, "");
     defer g.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), g.nodes.len);
     try testing.expectEqualStrings("TPS62933 5V to 3.3V buck, 3A", g.nodes[0].subtitle);
