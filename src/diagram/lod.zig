@@ -309,6 +309,39 @@ pub fn nodeByKey(graph: *const Graph, name: []const u8) ?u32 {
     return null;
 }
 
+/// How well a design's `(group …)` cohesion clusters cover its diagram blocks.
+pub const GroupCoverage = struct {
+    /// Count of real, placeable blocks — those carrying an authoring key and not
+    /// a synthesised boundary node (an off-board antenna / crystal can't be
+    /// grouped, so it never counts).
+    total: u32,
+    /// Labels of the real blocks that no `(group …)` cluster names. Borrowed
+    /// from `graph.nodes[i].label`; allocated in the caller's arena.
+    ungrouped: []const []const u8,
+};
+
+/// Measure `(group …)` coverage of `graph`'s blocks. Members resolve through
+/// `nodeByKey` and the same boundary/key filter the Block-overview "Other"
+/// bucket uses (`render.zig`), so the ERC grouping check and the diagram agree
+/// on what counts as ungrouped. Result lives in `arena`.
+pub fn groupCoverage(arena: Allocator, graph: *const Graph) Allocator.Error!GroupCoverage {
+    const claimed = try arena.alloc(bool, graph.nodes.len);
+    @memset(claimed, false);
+    for (graph.layout.groups) |grp| {
+        for (grp.members) |name| {
+            if (nodeByKey(graph, name)) |id| claimed[id] = true;
+        }
+    }
+    var total: u32 = 0;
+    var ungrouped: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (graph.nodes, 0..) |nd, i| {
+        if (nd.is_boundary or nd.key.len == 0) continue;
+        total += 1;
+        if (!claimed[i]) try ungrouped.append(arena, nd.label);
+    }
+    return .{ .total = total, .ungrouped = try ungrouped.toOwnedSlice(arena) };
+}
+
 /// Collapse the base edge list to one aggregate per (entity pair, class),
 /// counting nets (each base edge contributes its fanout). Intra-entity edges
 /// and reference classes (ground) drop out.
@@ -666,4 +699,21 @@ test "buildGlanceEntities pushes overlapping group chips apart" {
     try testing.expectApproxEqAbs(@as(f64, 0), a.zx, 0.5);
     try testing.expectApproxEqAbs(@as(f64, 400), b.zx, 0.5);
     try testing.expectApproxEqAbs(@as(f64, 20), b.zy, 0.5);
+}
+
+// spec: diagram/lod - Reports the block count and which blocks no group cluster claims
+test "groupCoverage flags blocks outside every group cluster" {
+    var nodes = [_]types.Node{ testNode("MCU"), testNode("Flash"), testNode("Sensor") };
+    var edges = [_]types.Edge{};
+    const members = [_][]const u8{ "MCU", "Flash" };
+    const groups = [_]env_mod.LayoutGroup{.{ .label = "Compute", .members = &members }};
+    var graph = Graph{ .nodes = &nodes, .edges = &edges };
+    graph.layout.groups = &groups;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const cov = try groupCoverage(arena_state.allocator(), &graph);
+    // 3 real blocks; "Sensor" is named by no (group …) cluster.
+    try testing.expectEqual(@as(u32, 3), cov.total);
+    try testing.expectEqual(@as(usize, 1), cov.ungrouped.len);
+    try testing.expectEqualStrings("Sensor", cov.ungrouped[0]);
 }

@@ -8,6 +8,9 @@ const parser_mod = @import("sexpr/parser.zig");
 const json_writer = @import("json_writer.zig");
 const checks = @import("checks.zig");
 const module_policy = @import("placement/module_policy.zig");
+const collect = @import("diagram/collect.zig");
+const lod = @import("diagram/lod.zig");
+const membership = @import("diagram/membership.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
 const Net = env_mod.Net;
@@ -17,6 +20,13 @@ pub const Severity = checks.Severity;
 // ── Constants ─────────────────────────────────────────────────────
 const VOLTAGE_MISMATCH_TOLERANCE_V: f64 = 0.01;
 const PERCENT_MULTIPLIER: f64 = 100.0;
+/// Below this many diagram blocks the grouping rule doesn't apply — a tiny
+/// power/module design (a buck + its passives) reads fine without `(group …)`
+/// regions, so only real boards get flagged. Mirrors the "≥5 blocks" scope.
+const GROUP_COVERAGE_MIN_BLOCKS: u32 = 5;
+/// How many ungrouped block names to spell out in the violation before
+/// summarising the rest as "+N more".
+const GROUP_COVERAGE_NAME_LIMIT: usize = 6;
 
 /// Tag identifying which electrical-rule check produced a `Violation`. The
 /// review UI groups findings by this kind so users can scan all
@@ -43,6 +53,7 @@ pub const ViolationKind = enum {
     voltage_domain_incompatible,
     main_ic_in_design,
     layout_class_inferred,
+    components_not_grouped,
 };
 
 /// One electrical-rule-check finding. `kind` selects the rule, `severity`
@@ -81,6 +92,7 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkVoltageDomainCompat(allocator, block, &violations);
     try checkMainIcsInDesign(allocator, block, &violations);
     try checkLayoutClasses(allocator, block, &violations);
+    try checkComponentGrouping(allocator, block, &violations);
     if (project_dir.len > 0) try checkPinFunctions(allocator, block, project_dir, &violations);
 
     return violations.items;
@@ -164,6 +176,54 @@ fn checkLayoutClasses(
             .net = net.name,
         });
     }
+}
+
+/// Flag a design whose functional blocks aren't split into `(group …)` cohesion
+/// clusters (the barracuda-base idiom). Builds the same diagram graph the
+/// schematic Block-overview view uses — so "ungrouped" means exactly what that
+/// view's "Other" bucket shows — and errors once a real board (≥ the block
+/// floor) leaves any block out of every cluster. Tiny power/module designs stay
+/// exempt: grouping a buck + its handful of passives adds no legibility.
+fn checkComponentGrouping(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayListUnmanaged(Violation),
+) !void {
+    const attachments = membership.computeSubBlockAttachments(allocator, block) catch return;
+    defer allocator.free(attachments);
+    // project_dir "" — this check only needs group coverage, not the starred-layout
+    // maturity lookup, so skip the sidecar reads.
+    var graph = collect.collectGraph(allocator, block, attachments, "") catch return;
+    defer graph.deinit(allocator);
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cov = lod.groupCoverage(arena, &graph) catch return;
+    if (cov.total < GROUP_COVERAGE_MIN_BLOCKS or cov.ungrouped.len == 0) return;
+
+    // Spell out the first few offenders, then summarise the tail.
+    const shown = @min(cov.ungrouped.len, GROUP_COVERAGE_NAME_LIMIT);
+    var names: std.ArrayListUnmanaged(u8) = .empty;
+    for (cov.ungrouped[0..shown], 0..) |label, i| {
+        if (i > 0) names.appendSlice(arena, ", ") catch return;
+        names.appendSlice(arena, label) catch return;
+    }
+    const tail = if (cov.ungrouped.len > shown)
+        std.fmt.allocPrint(arena, ", +{d} more", .{cov.ungrouped.len - shown}) catch ""
+    else
+        "";
+    const msg = std.fmt.allocPrint(
+        allocator,
+        "{d} of {d} blocks are outside any (group …) cluster: {s}{s} — split components into " ++
+            "(group …) regions (like barracuda-base) for a scannable block view",
+        .{ cov.ungrouped.len, cov.total, names.items, tail },
+    ) catch return;
+    try violations.append(allocator, .{
+        .kind = .components_not_grouped,
+        .severity = .@"error",
+        .message = msg,
+    });
 }
 
 /// True when `component` is declared as a board-defining `(critical-ic …)`
@@ -2520,5 +2580,63 @@ test "layout class surfacing flags only the interesting nets" {
     for (violations.items) |v| {
         try std.testing.expectEqual(ViolationKind.layout_class_inferred, v.kind);
         try std.testing.expectEqual(Severity.info, v.severity);
+    }
+}
+
+// spec: erc - Flags a board with at least five blocks that leaves some outside every group cluster
+test "grouping check flags an ungrouped multi-block design" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const sections = [_]env_mod.Section{
+        .{ .name = "Block A" },
+        .{ .name = "Block B" },
+        .{ .name = "Block C" },
+        .{ .name = "Block D" },
+        .{ .name = "Block E" },
+    };
+    const block = env_mod.DesignBlock{
+        .name = "ungrouped-demo",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .sections = &sections,
+    };
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkComponentGrouping(alloc, &block, &violations);
+    var hit = false;
+    for (violations.items) |v| {
+        if (v.kind == .components_not_grouped and v.severity == .@"error") hit = true;
+    }
+    try std.testing.expect(hit);
+}
+
+// spec: erc - Skips the grouping rule for a design below the block-count floor
+test "grouping check ignores a small design" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const sections = [_]env_mod.Section{
+        .{ .name = "Block A" },
+        .{ .name = "Block B" },
+        .{ .name = "Block C" },
+    };
+    const block = env_mod.DesignBlock{
+        .name = "small-demo",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .sections = &sections,
+    };
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkComponentGrouping(alloc, &block, &violations);
+    for (violations.items) |v| {
+        try std.testing.expect(v.kind != .components_not_grouped);
     }
 }

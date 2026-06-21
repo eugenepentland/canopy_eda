@@ -98,12 +98,15 @@ src/diagram/layout.zig::pw_pill_gap value
 src/diagram/layout.zig::pw_pill_h value
 src/diagram/layout.zig::v_gap value
 src/diagram/lod.zig::Entity struct_
+src/diagram/lod.zig::GroupCoverage struct_
 src/diagram/lod.zig::buildGlanceEntities fn
+src/diagram/lod.zig::groupCoverage fn
 src/diagram/lod.zig::nodeByKey fn
 src/diagram/lod.zig::writeBaseAggLinks fn
 src/diagram/lod.zig::writeGlanceLayer fn
 src/diagram/membership.zig::Membership struct_
 src/diagram/membership.zig::build fn
+src/diagram/membership.zig::computeSubBlockAttachments fn
 src/diagram/render.zig::CSS value
 src/diagram/render.zig::renderSystemStandalone fn
 src/diagram/render.zig::renderTabs fn
@@ -548,7 +551,6 @@ src/render_html.zig::RenderError value
 src/render_html.zig::SCHEMATIC_CSS value
 src/render_html.zig::SCHEMATIC_VIEWER_JS value
 src/render_html.zig::STATIC_SVG_CSS value
-src/render_html.zig::computeSubBlockAttachments fn
 src/render_html.zig::renderHubSvg fn
 src/render_html.zig::renderToHtml fn
 src/render_html.zig::setupRenderCtx fn

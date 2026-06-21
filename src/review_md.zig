@@ -15,6 +15,7 @@ const req_checks = @import("req_checks.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const block_diagram = @import("diagram/diagram.zig");
+const membership = @import("diagram/membership.zig");
 const render_html = @import("render_html.zig");
 
 const DesignBlock = env_mod.DesignBlock;
@@ -108,7 +109,7 @@ fn writeSummary(w: anytype, s: review.Summary) !void {
 
 fn writeSystemDiagram(allocator: Allocator, w: anytype, block: *const DesignBlock) !void {
     try w.writeAll("## System Block Diagram\n\n");
-    const sub_attachments = try render_html.computeSubBlockAttachments(allocator, block);
+    const sub_attachments = try membership.computeSubBlockAttachments(allocator, block);
     defer allocator.free(sub_attachments);
     // The engine renderer writes to a `*std.Io.Writer`; bridge to this module's
     // ArrayList writer through a scratch Allocating buffer.

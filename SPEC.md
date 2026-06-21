@@ -367,9 +367,8 @@ Public functions: worldShape, pointDist, shapeGap
 
 ## render_html
 
-Public functions: renderToHtml, setupRenderCtx, renderHubSvg, computeSubBlockAttachments
+Public functions: renderToHtml, setupRenderCtx, renderHubSvg
 
-- Excludes power-classified nets so a power-producer sub-block is not adopted into a consuming section
 - A passive bridging a single-hub-pin net and a multi-hub-pin net renders off its single-pin side
 - A passive bridging two single-hub-pin nets has no anchor and keeps default placement
 
@@ -379,7 +378,9 @@ Public functions: viewLabel, viewId, viewSlug, viewColor, viewOf
 
 ## diagram/membership
 
-Public functions: build
+Public functions: build, computeSubBlockAttachments
+
+- Excludes power-classified nets so a power-producer sub-block is not adopted into a consuming section
 
 ## diagram/classify
 
@@ -447,11 +448,12 @@ Public functions: computeLayout, hasSystemView, computeSystemLayout, computeChai
 
 ## diagram/lod
 
-Public functions: buildGlanceEntities, writeGlanceLayer, nodeByKey
+Public functions: buildGlanceEntities, writeGlanceLayer, nodeByKey, groupCoverage
 
 - Aggregates base edges into one glance connection per entity pair and class, summing fanouts
 - Renders a glance chip per group and per ungrouped block with member captions
 - Separates overlapping glance chips so chips never stack while keeping each chip's original zoom target
+- Reports the block count and which blocks no group cluster claims
 
 ## diagram/render
 
@@ -482,6 +484,8 @@ Public functions: renderSchematic
 
 ## erc
 
+- Flags a board with at least five blocks that leaves some outside every group cluster
+- Skips the grouping rule for a design below the block-count floor
 - Emits power_budget error when load max exceeds source max
 - Emits power_budget warning when typ load is above 80 percent of source typ
 - Emits no power_budget violation when load is well below source capacity
