@@ -92,6 +92,15 @@ fn htmlCachePut(
     gop.value_ptr.* = .{ .html = body, .files = files, .live_version = live_version };
 }
 
+/// True when `designSourcePath` resolved a *module-only* name to its
+/// `lib/modules/<name>.sexp` fallback (see `paths.designSiblingPath`) rather
+/// than a real `src/` design. That file existing must NOT be read as "a design
+/// source exists" — evaluating the `(defmodule …)` yields a module, not a
+/// design block, which 500s. Detecting it lets `/schematics/<module>` redirect.
+fn resolvesToModuleSource(board_path: []const u8) bool {
+    return std.mem.indexOf(u8, board_path, "/lib/modules/") != null;
+}
+
 /// When `name` has no design source but does exist under `lib/modules/`,
 /// answer a 302 to `/modules/<name>` and return true. Keeps a module name
 /// typed into `/schematics/…` from rendering as a build error.
@@ -101,7 +110,13 @@ fn redirectToModule(
     board_path: []const u8,
     res: *httpz.Response,
 ) HandlerError!bool {
-    if (infra_fs.cwd().access(board_path, .{})) |_| return false else |_| {}
+    // A real `src/` design renders normally. A module-only name resolves to its
+    // `lib/modules/<name>.sexp` file, which exists — so guard the existence
+    // check on it NOT being that module fallback, else the redirect is skipped
+    // and the defmodule evaluates into a "Not a design block" 500.
+    if (!resolvesToModuleSource(board_path)) {
+        if (infra_fs.cwd().access(board_path, .{})) |_| return false else |_| {}
+    }
     if (std.mem.indexOfScalar(u8, name, '/') != null) return false;
     if (std.mem.indexOf(u8, name, "..") != null) return false;
     const mod_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/modules/{s}.sexp", .{ ctx.project_dir, name });
