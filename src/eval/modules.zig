@@ -4,6 +4,8 @@ const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const env_mod = @import("env.zig");
 const electrical_mod = @import("electrical.zig");
+const design_block_mod = @import("design_block.zig");
+const forms_mod = @import("forms.zig");
 const Evaluator = @import("evaluator.zig").Evaluator;
 const EvalError = @import("evaluator.zig").EvalError;
 const ComponentData = Evaluator.ComponentData;
@@ -387,6 +389,38 @@ fn namedParamIndex(mod: BlockDef, arg: Node) ?usize {
     return null;
 }
 
+/// True if a module body holds a top-level wrapper block that materializes on
+/// its own: an inner `(design-block …)`, or a string-named `(block "…" …)`
+/// (which routes to `evalDesignBlock`). Such a body is run through `evalNodes`
+/// so the inner block (and any preceding setup forms) evaluate normally.
+fn bodyHasInnerBlock(body: []const Node) bool {
+    for (body) |node| {
+        const children = node.asList() orelse continue;
+        if (children.len == 0) continue;
+        const head = children[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "design-block")) return true;
+        if (std.mem.eql(u8, head, "block") and children.len > 1 and children[1].asString() != null) return true;
+    }
+    return false;
+}
+
+/// True if a module body carries any top-level design-scope (`ScopeForm`) form
+/// — `instance`/`port`/`section`/`sub-block`/`net`/`decouple`/… — i.e. it is a
+/// "raw" body that builds a design directly, with no inner block wrapper. A
+/// body that is only setup forms (`let`/`assert`/`import`) or a delegating
+/// expression (a call to another module) has no scope form and is NOT raw — it
+/// runs through `evalNodes` so its final expression's value flows out and any
+/// error inside it (e.g. an unbound name) propagates with the call stack.
+fn bodyHasScopeForm(body: []const Node) bool {
+    for (body) |node| {
+        const children = node.asList() orelse continue;
+        if (children.len == 0) continue;
+        const head = children[0].asAtom() orelse continue;
+        if (forms_mod.ScopeForm.fromAtom(head) != null) return true;
+    }
+    return false;
+}
+
 /// Call a module: bind each call-site argument — positional in declaration
 /// order, or named via `(param expr)` — into a fresh child scope rooted at
 /// the module file's import env, then run the module body. Positional args
@@ -445,7 +479,20 @@ pub fn callModule(self: *Evaluator, mod: BlockDef, call_args: []const Node, call
         }
     }
 
-    const result = try self.evalNodes(mod.body, &mod_env);
+    // A module body comes in two shapes. A "raw" body holds design-scope forms
+    // (instance/port/net/…) straight at the top level with no inner block — it
+    // is materialized in place, named after the module, reusing the identical
+    // scope-form walk. Every other body — the classic "wrapped" form ending in
+    // an inner `(design-block …)`/string-named `(block "…" …)`, a body that is
+    // only setup forms, or one that delegates to another module call — runs
+    // through `evalNodes` so its inner block / final expression evaluates and
+    // any error inside propagates with the module call stack. (An inner block
+    // is itself a wrapper, never a `ScopeForm`, so the two checks don't
+    // overlap; guarding on it explicitly keeps the wrapped path obvious.)
+    const result = if (!bodyHasInnerBlock(mod.body) and bodyHasScopeForm(mod.body))
+        try design_block_mod.materializeBlock(self, mod.name, mod.body, &mod_env)
+    else
+        try self.evalNodes(mod.body, &mod_env);
     // Mark the produced block as embedded (vs a top-level design root) so the
     // PCB placer engages role-based auto-placement for module roots only.
     // Propagates to sub-block instantiations, standalone previews, and zero-arg

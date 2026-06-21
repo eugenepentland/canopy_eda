@@ -246,6 +246,8 @@ Public functions: worldShape, pointDist, shapeGap
 - an error inside a module body appends the module call stack to the diagnostic
 - block with a string name evaluates as a design root
 - block with an atom name defines a callable module stamped embedded
+- block with an atom name and a raw design-scope body materializes in place
+- block with an atom name and a wrapped inner design-block still materializes the inner block
 - SI-suffixed literals evaluate to their scaled numeric value
 - SI-suffixed literals flow through module call arguments
 - Evaluates let bindings that define named values in scope

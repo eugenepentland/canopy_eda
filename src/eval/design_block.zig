@@ -119,7 +119,7 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
 /// the design validator. `evalDesignBlock` parses the name and delegates here;
 /// factoring it out lets the lazy `(block …)`/`(defmodule …)` body path reuse
 /// the identical routine instead of round-tripping through a wrapper form.
-fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const Node, env: *Env) EvalError!Value {
+pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const Node, env: *Env) EvalError!Value {
     var instances: std.ArrayListUnmanaged(Instance) = .empty;
     var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
     var ports: std.ArrayListUnmanaged(Port) = .empty;
@@ -194,6 +194,18 @@ fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const Node
         const form_children = form.asList() orelse continue;
         if (form_children.len == 0) continue;
         const form_name = form_children[0].asAtom() orelse continue;
+
+        // Setup special forms may appear inline in a raw `(block …)` body —
+        // evaluate `(let …)`/`(assert …)`/`(import …)`/`(id …)` for their
+        // binding/effect, then continue. (A `(design-block …)` body never holds
+        // these; in the wrapped form they precede the inner block.)
+        if (forms_mod.SpecialForm.fromAtom(form_name)) |special| switch (special) {
+            .let, .assert_, .assert_range, .import, .id_ => {
+                _ = try self.evalNode(form, env);
+                continue;
+            },
+            else => {},
+        };
 
         const sf = ScopeForm.fromAtom(form_name) orelse {
             if (!isInertFormHead(form_name))

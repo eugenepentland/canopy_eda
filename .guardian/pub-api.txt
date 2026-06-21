@@ -161,6 +161,7 @@ src/eval/builtins.zig::BuiltinError value
 src/eval/builtins.zig::evalBuiltinOp fn
 src/eval/design_block.zig::ParsedPlacementForm struct_
 src/eval/design_block.zig::evalDesignBlock fn
+src/eval/design_block.zig::materializeBlock fn
 src/eval/design_block.zig::parsePlacementText fn
 src/eval/electrical.zig::parse fn
 src/eval/electrical.zig::parseSubForms fn
