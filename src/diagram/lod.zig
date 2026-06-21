@@ -221,8 +221,13 @@ fn buildEntities(
             if (grouped[id]) continue;
             grouped[id] = true;
             count += 1;
-            if (labels.items.len < chip_caption_members)
-                try labels.append(arena, graph.nodes[id].label);
+            // Caption the cluster with its members' headline parts (the group
+            // label already says what the cluster does), falling back to the
+            // block label when a member has no part token.
+            if (labels.items.len < chip_caption_members) {
+                const nd = graph.nodes[id];
+                try labels.append(arena, if (nd.parts.len > 0) nd.parts[0] else nd.label);
+            }
         }
         if (count == 0) continue;
         try ents.append(arena, .{
@@ -295,8 +300,9 @@ fn entityByLabel(ents: []const Entity, label: []const u8) ?usize {
 }
 
 /// Same stable-key match `layout.zig` uses to resolve `(place …)`/`(group …)`
-/// names to graph nodes.
-fn nodeByKey(graph: *const Graph, name: []const u8) ?u32 {
+/// names to graph nodes. Pub so the block-reference builder resolves group
+/// members exactly as the diagram does (the two views agree by construction).
+pub fn nodeByKey(graph: *const Graph, name: []const u8) ?u32 {
     for (graph.nodes, 0..) |nd, i| {
         if (nd.key.len > 0 and std.mem.eql(u8, nd.key, name)) return @intCast(i);
     }

@@ -42,9 +42,21 @@ pub fn collectGraph(
     // — otherwise it vanishes as a producer node and a consumer gets mis-elected
     // as the rail's driver. So un-adopt power sub-blocks for the graph only; the
     // schematic-card adoption (render_html) is unaffected.
+    //
+    // Likewise un-adopt a sub-block hosted by a `(diagram hidden)` concept-
+    // section: that section has no diagram node to fold into, so the sub-block
+    // must keep its own chip (which `applyHiddenSectionText` then lends the
+    // section's description + card anchor). Without this it would vanish from
+    // the diagram entirely.
     const dg_attach = try scratch.dupe(?usize, sub_attachments);
     for (block.sub_blocks, 0..) |sb, i| {
-        if (i < dg_attach.len and dg_attach[i] != null and isPowerSubBlock(sb)) dg_attach[i] = null;
+        if (i >= dg_attach.len or dg_attach[i] == null) continue;
+        if (isPowerSubBlock(sb)) {
+            dg_attach[i] = null;
+            continue;
+        }
+        const sec_idx = dg_attach[i].?;
+        if (sec_idx < block.sections.len and block.sections[sec_idx].diagram_hidden) dg_attach[i] = null;
     }
 
     var nodes: std.ArrayListUnmanaged(Node) = .empty;
@@ -111,6 +123,10 @@ pub fn collectGraph(
     // MCU boards whose oscillator is sealed inside a module.
     try crystalPass(allocator, scratch, block, &mem, &nodes, &edge_list);
     try assignRails(allocator, scratch, flat, &mem, &port_map, nodes.items);
+    // A `(diagram hidden)` concept-section that names its representative chip via
+    // `(hosts …)` lends that chip its rich description + card anchor — otherwise
+    // the authored prose is orphaned when the section is suppressed.
+    try applyHiddenSectionText(allocator, block, nodes.items);
 
     return .{ .nodes = try nodes.toOwnedSlice(allocator), .edges = try edge_list.toOwnedSlice(allocator), .classes = registry, .layout = block.layout };
 }
@@ -191,6 +207,7 @@ fn buildSectionNodes(
         if (sec_to_sub[sec_idx]) |sb_idx| {
             try collectSubBlockRails(scratch, block.sub_blocks[sb_idx], sub_port_to_net, &input_buf, &output_buf);
         }
+        const mp = try mainParts(allocator, scratch, sec.instances, block.critical_ics);
         try nodes.append(allocator, .{
             .label = sec.name,
             .subtitle = sec.description,
@@ -199,6 +216,7 @@ fn buildSectionNodes(
             .key = sec.name,
             .inputs = try dupeRails(allocator, input_buf.items),
             .outputs = try dupeRails(allocator, output_buf.items),
+            .parts = mp.tokens,
         });
         sec_node[sec_idx] = @intCast(nodes.items.len - 1);
     }
@@ -224,14 +242,19 @@ fn buildSubBlockNodes(
         // for an untitled module. The slug stays keyed on the handle so the
         // node's `#sec-<slug>` link still resolves to the schematic card.
         const label = if (sb.block.name.len > 0) sb.block.name else sb.name;
+        // The module title (label) names the part family; `mp.role` adds a
+        // one-line "what it does" pulled from a matching top-level critical-IC
+        // (e.g. "VPWR_IN → 5 V system buck"), and `mp.tokens` the part numbers.
+        const mp = try mainParts(allocator, scratch, sb.block.instances, block.critical_ics);
         try nodes.append(allocator, .{
             .label = label,
-            .subtitle = "",
+            .subtitle = mp.role,
             .category = rb.classifyByName(sb.name, sb.block.instances),
             .slug = try review.slugify(allocator, sb.name),
             .key = sb.name,
             .inputs = try dupeRails(allocator, input_buf.items),
             .outputs = try dupeRails(allocator, output_buf.items),
+            .parts = mp.tokens,
         });
         sub_node[sb_idx] = @intCast(nodes.items.len - 1);
     }
@@ -250,15 +273,25 @@ fn buildStubNodes(
 ) Allocator.Error!void {
     for (block.parts, 0..) |p, i| {
         const label = if (p.role.len > 0) p.role else p.name;
+        // The part number moves from the subtitle to the dedicated part row; the
+        // subtitle is left open for `applyHiddenSectionText` to fill with the
+        // represented concept-section's description (e.g. the CM4 stub).
+        var stub_parts: []const []const u8 = &.{};
+        if (p.mpn.len > 0) {
+            const arr = try allocator.alloc([]const u8, 1);
+            arr[0] = try allocator.dupe(u8, p.mpn);
+            stub_parts = arr;
+        }
         try nodes.append(allocator, .{
             .label = label,
-            .subtitle = p.mpn,
+            .subtitle = "",
             .category = rb.classifyCategoryKey(p.category, p.name),
             .slug = "",
             .key = p.name,
             .stack = p.channels,
             .inputs = &.{},
             .outputs = &.{},
+            .parts = stub_parts,
         });
         stub_node[i] = @intCast(nodes.items.len - 1);
     }
@@ -281,6 +314,104 @@ fn freeNode(allocator: Allocator, n: Node) void {
     allocator.free(n.outputs);
     if (n.slug.len > 0) allocator.free(n.slug);
     if (n.is_boundary and n.label.len > 0) allocator.free(n.label);
+    for (n.parts) |p| allocator.free(p);
+    if (n.parts.len > 0) allocator.free(n.parts);
+}
+
+// ── headline-part extraction ───────────────────────────────────────────
+
+/// Cap on the number of distinct part tokens shown per block.
+const max_parts: usize = 3;
+
+const MainParts = struct {
+    /// Headline part tokens ("TPS62933DRLR", "3× LSF0108"), owned by the
+    /// caller's allocator (each entry + the slice freed by `Graph.deinit`).
+    tokens: []const []const u8 = &.{},
+    /// First matched critical-IC's role — a one-line "what it does" used as the
+    /// subtitle fallback for sub-blocks with no section description. Borrowed
+    /// from the source design (a `(critical-ic …)` role); never freed.
+    role: []const u8 = "",
+};
+
+/// ASCII-uppercase `s` into `scratch` (component basenames are lowercase; part
+/// numbers read as uppercase).
+fn upperDup(scratch: Allocator, s: []const u8) Allocator.Error![]const u8 {
+    const out = try scratch.alloc(u8, s.len);
+    for (s, 0..) |c, i| out[i] = std.ascii.toUpper(c);
+    return out;
+}
+
+/// Representative part number(s) for a block: walk its hub instances (skip
+/// passives), map each to a manufacturer part number — the matching top-level
+/// `(critical-ic …)` mpn when declared, else the uppercased component basename —
+/// then collapse duplicates into "N× TOKEN" and cap at `max_parts` distinct
+/// tokens in first-seen order. `role` is the first matched critical-IC's role.
+fn mainParts(
+    allocator: Allocator,
+    scratch: Allocator,
+    instances: []const env_mod.Instance,
+    critical_ics: []const env_mod.CriticalIc,
+) Allocator.Error!MainParts {
+    var order: std.ArrayListUnmanaged([]const u8) = .empty;
+    var counts: std.StringHashMapUnmanaged(usize) = .empty;
+    var role: []const u8 = "";
+    for (instances) |inst| {
+        if (!isHubRef(inst.ref_des)) continue;
+        if (inst.component.len == 0) continue;
+        var token: []const u8 = "";
+        for (critical_ics) |cic| {
+            if (!std.ascii.eqlIgnoreCase(cic.component, inst.component)) continue;
+            if (role.len == 0 and cic.role.len > 0) role = cic.role;
+            token = if (cic.mpn.len > 0) cic.mpn else cic.role;
+            break;
+        }
+        if (token.len == 0) token = try upperDup(scratch, inst.component);
+        if (token.len == 0) continue;
+        const gop = try counts.getOrPut(scratch, token);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = 0;
+            try order.append(scratch, token);
+        }
+        gop.value_ptr.* += 1;
+    }
+    var out: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (out.items) |t| allocator.free(t);
+        out.deinit(allocator);
+    }
+    for (order.items) |tok| {
+        if (out.items.len >= max_parts) break;
+        const n = counts.get(tok).?;
+        const rendered = if (n > 1)
+            try std.fmt.allocPrint(allocator, "{d}\u{00d7} {s}", .{ n, tok })
+        else
+            try allocator.dupe(u8, tok);
+        try out.append(allocator, rendered);
+    }
+    return .{ .tokens = try out.toOwnedSlice(allocator), .role = role };
+}
+
+/// Lend each `(diagram hidden)` concept-section's description + card anchor to
+/// the chip that represents it, named via `(hosts "<handle>")`. The hidden
+/// section emits no node of its own, so without this its authored prose is lost
+/// and the representative chip's `#sec-<handle>` link dangles (its schematic
+/// card was folded into the section's `#sec-<section>` card).
+fn applyHiddenSectionText(allocator: Allocator, block: *const DesignBlock, nodes: []Node) Allocator.Error!void {
+    for (block.sections) |sec| {
+        if (!sec.diagram_hidden) continue;
+        for (sec.hosts) |host| {
+            for (nodes) |*n| {
+                if (n.key.len == 0 or !std.mem.eql(u8, n.key, host)) continue;
+                if (sec.description.len > 0) n.subtitle = sec.description;
+                if (sec.name.len > 0) {
+                    const new_slug = try review.slugify(allocator, sec.name);
+                    if (n.slug.len > 0) allocator.free(n.slug);
+                    n.slug = new_slug;
+                }
+                break;
+            }
+        }
+    }
 }
 
 // ── rail collection (ported from the old hub diagram) ──────────────────
@@ -1057,4 +1188,52 @@ test "collectGraph adds an antenna node for a one-sided RF boundary net" {
     try testing.expectEqual(types.CLASS_RF, g.edges[0].class);
     // A chip *output* port drives the net, so the antenna is the sink.
     try testing.expectEqual(ant, g.edges[0].to);
+}
+
+// spec: diagram/collect - Resolves each block's headline part numbers from hub instances + critical-ICs
+test "mainParts maps hubs to critical-IC mpn with multiplicity" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const insts = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "tps62933drlr", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "U2", .component = "lsf0108rksr", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "U3", .component = "lsf0108rksr", .value = "", .footprint = "", .symbol = "" },
+        // A passive (C-prefix) is not a hub → excluded from the part list.
+        .{ .ref_des = "C1", .component = "cap-0402", .value = "100nF", .footprint = "", .symbol = "" },
+    };
+    const cics = [_]env_mod.CriticalIc{
+        .{ .component = "tps62933drlr", .role = "5 V \u{2192} 3.3 V buck", .mpn = "TPS62933DRLR" },
+    };
+    const mp = try mainParts(testing.allocator, arena.allocator(), &insts, &cics);
+    defer {
+        for (mp.tokens) |t| testing.allocator.free(t);
+        testing.allocator.free(mp.tokens);
+    }
+    try testing.expectEqual(@as(usize, 2), mp.tokens.len);
+    try testing.expectEqualStrings("TPS62933DRLR", mp.tokens[0]); // declared critical-IC mpn
+    try testing.expectEqualStrings("2\u{00d7} LSF0108RKSR", mp.tokens[1]); // upper fallback + ×2 multiplicity
+    try testing.expectEqualStrings("5 V \u{2192} 3.3 V buck", mp.role); // role for the subtitle fallback
+}
+
+// spec: diagram/collect - A (diagram hidden) host section lends its description + card anchor to the chip
+test "applyHiddenSectionText lends a hidden section's text to its hosted chip" {
+    var module = emptyBlock("3.3V Buck (TPS62933)");
+    const hosts = [_][]const u8{"buck"};
+    const secs = [_]Section{
+        .{ .name = "Core Rail", .description = "TPS62933 5V to 3.3V buck, 3A", .diagram_hidden = true, .hosts = &hosts },
+    };
+    const subs = [_]SubBlock{.{ .name = "buck", .block = &module }};
+    var block = emptyBlock("board");
+    block.sections = &secs;
+    block.sub_blocks = &subs;
+    // The card path adopts "buck" into the hidden section; the diagram must still
+    // give it a chip (the un-adoption), then lend it the section's text + anchor.
+    const attach = [_]?usize{0};
+    var g = try collectGraph(testing.allocator, &block, &attach);
+    defer g.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), g.nodes.len);
+    try testing.expectEqualStrings("TPS62933 5V to 3.3V buck, 3A", g.nodes[0].subtitle);
+    const want_slug = try review.slugify(testing.allocator, "Core Rail");
+    defer testing.allocator.free(want_slug);
+    try testing.expectEqualStrings(want_slug, g.nodes[0].slug);
 }
