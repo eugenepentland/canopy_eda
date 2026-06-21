@@ -1107,7 +1107,23 @@ fn analyzeHub(
             try gop.value_ptr.append(allocator, pp.pin);
         }
     }
-    if (!from_pin_groups) {
+    // No `(pins ref (group …))` declarations, but the instance is a multi-part
+    // symbol `(instance ref ic (part "X" (pin …)) …)`: bucket each part's pins
+    // under the part name so the hub renders one labelled box per part.
+    if (!from_pin_groups and hub_inst.parts.len > 0) {
+        for (hub_inst.parts) |part| {
+            const gop = try buckets.getOrPut(allocator, part.name);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            for (part.pins) |pp| {
+                if (seen.contains(pp.pin)) continue;
+                try seen.put(allocator, pp.pin, {});
+                try gop.value_ptr.append(allocator, pp.pin);
+            }
+        }
+    }
+    // Fall back to the synthesized spoke adjacency only when neither explicit
+    // pin-groups nor parts gave this hub any pins.
+    if (buckets.count() == 0) {
         if (ctx.adjacency.get(hub_ref)) |adj| {
             const gop = try buckets.getOrPut(allocator, "");
             if (!gop.found_existing) gop.value_ptr.* = .empty;

@@ -161,6 +161,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     //   (pin 3 4 5 6 7 "NET")       -- multiple pins on same net
     //   (connect FUNC "NET" ...)     -- connect by function name from pinout
     var pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var parts: std.ArrayListUnmanaged(env_mod.Part) = .empty;
     var inline_notes: std.ArrayListUnmanaged(Note) = .empty;
     var inline_props: std.ArrayListUnmanaged(env_mod.Property) = .empty;
     var dnp_flag = false;
@@ -168,7 +169,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     var decouple_pin: []const u8 = "";
     var decouple_rail = false;
 
-    const known_forms = [_][]const u8{ "pin", "note", "bus", "id", "as", "dnp", "decouples" };
+    const known_forms = [_][]const u8{ "pin", "part", "note", "bus", "id", "as", "dnp", "decouples" };
 
     for (args[2..]) |form| {
         if (form.isForm("note")) {
@@ -181,6 +182,12 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
             }
         } else if (form.isForm("pin")) {
             try parsePinForm(self, form, ref_des, env, &pin_nets, reverse_pinout);
+        } else if (form.isForm("part")) {
+            // Multi-part symbol: (part "Name" (row N) (col N) (pin …) …). Each
+            // inner (pin …) wires exactly like a top-level pin (so the IC is
+            // electrically connected), and the part is recorded on the instance
+            // so the schematic renders one labelled box per function group.
+            try parsePartForm(self, form, ref_des, env, &pin_nets, &parts, reverse_pinout);
         } else if (form.isForm("dnp")) {
             // (dnp) — mark Do Not Populate. Bare flag form (no value).
             dnp_flag = true;
@@ -256,6 +263,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     final_inst.decouple_ic = decouple_ic;
     final_inst.decouple_pin = decouple_pin;
     final_inst.decouple_rail = decouple_rail;
+    if (parts.items.len > 0) final_inst.parts = parts.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
 
     // Merge properties: start with component defaults, override with inline
     if (inline_props.items.len > 0) {
@@ -267,6 +275,42 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
         .pin_nets = pin_nets.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .inline_notes = inline_notes.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
     };
+}
+
+/// Parse a `(part "Name" (row N) (col N) (pin … "NET") …)` multi-part-symbol
+/// block on an instance. Each inner `(pin …)` is wired exactly like a
+/// top-level pin (appended to `pin_nets`, so the IC is electrically connected),
+/// and the resolved (pin, net) pairs are recorded as a `Part` tagged with the
+/// part name so the schematic renders one labelled box per part. `(row …)` /
+/// `(col …)` grid hints are layout-only and ignored here.
+fn parsePartForm(
+    self: *Evaluator,
+    form: Node,
+    ref_des: []const u8,
+    env: *Env,
+    pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
+    parts: *std.ArrayListUnmanaged(env_mod.Part),
+    pinout: ?*const std.StringHashMapUnmanaged([]const u8),
+) EvalError!void {
+    const children = form.asList() orelse return;
+    if (children.len < 2) return;
+    const name_val = try self.evalNode(children[1], env);
+    const name = name_val.asString() orelse (children[1].asAtom() orelse "");
+
+    // Wire the part's pins through the same parser top-level pins use, then snapshot
+    // the freshly-appended (pin, net) pairs into a Part (grouped by the part name).
+    const before = pin_nets.items.len;
+    for (children[2..]) |child| {
+        if (child.isForm("pin")) try parsePinForm(self, child, ref_des, env, pin_nets, pinout);
+    }
+    var part_pins: std.ArrayListUnmanaged(env_mod.PartPin) = .empty;
+    for (pin_nets.items[before..]) |pn| {
+        try part_pins.append(self.allocator, .{ .pin = pn.pin, .net = pn.net, .group = name });
+    }
+    try parts.append(self.allocator, .{
+        .name = name,
+        .pins = part_pins.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
+    });
 }
 
 /// Parse a single `(pin … "NET" [(i-typ X) (i-max Y) (as "FN")])` form on
@@ -695,4 +739,33 @@ test "decouples rail sets the rail opt-out flag" {
     const res = try buildInstance(&eval, nodes[0].asList().?, &env);
     try testing.expect(res.instance.decouple_rail);
     try testing.expectEqualStrings("", res.instance.decouple_pin);
+}
+
+// spec: eval/instance - (part …) on an instance wires its pins like top-level pins and records the part group
+test "part form wires pins and records the part" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    try eval.component_cache.put(alloc, "ic8", .{
+        .name = "ic8",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    const src = "(instance \"U1\" ic8 (part \"A\" (pin 1 \"NET1\") (pin 2 \"NET2\")) (part \"B\" (pin 3 \"NET3\")))";
+    const nodes = try parser_mod.parse(alloc, src);
+    const res = try buildInstance(&eval, nodes[0].asList().?, &env);
+    // Every part pin is wired exactly like a top-level pin (the IC connects).
+    try testing.expectEqual(@as(usize, 3), res.pin_nets.len);
+    // The instance records two parts, each tagged with its part name as group.
+    try testing.expectEqual(@as(usize, 2), res.instance.parts.len);
+    try testing.expectEqualStrings("A", res.instance.parts[0].name);
+    try testing.expectEqual(@as(usize, 2), res.instance.parts[0].pins.len);
+    try testing.expectEqualStrings("NET1", res.instance.parts[0].pins[0].net);
+    try testing.expectEqualStrings("A", res.instance.parts[0].pins[0].group);
+    try testing.expectEqualStrings("B", res.instance.parts[1].name);
+    try testing.expectEqual(@as(usize, 1), res.instance.parts[1].pins.len);
 }
