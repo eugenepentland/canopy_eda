@@ -930,10 +930,10 @@ fn runPlacement(
             }
             g_placement_diag.used_spec = false;
         }
-        // Role-based constructive placement (no explicit spec, recognized module
-        // class or `(auto)`): synthesized from detected roles, realized through the
-        // same `packSpec` + finish as an authored spec. `packSpec` returning false
-        // falls through to the zone-pack / force path.
+        // Role-based constructive placement (module root, `(placement (auto "REF"))`,
+        // no explicit spec): synthesized from the detected roles around the declared
+        // anchor, realized through the same `packSpec` + finish as an authored spec.
+        // `packSpec` returning false falls through to the zone-pack / force path.
         if (prep.role_placement) |rp| {
             if (try packSpec(arena, parts, &prep.idx_of, nets, built, rp)) {
                 try autofillUnlisted(arena, parts, &prep.idx_of, nets, built.loops);
@@ -1646,6 +1646,10 @@ fn resolvePlacement(
 ) std.mem.Allocator.Error!?ResolvedPlacement {
     const spec = block.placement;
     if (!spec.present) return null;
+    // An `(auto "REF")` form is NOT an explicit edge spec — it requests role-based
+    // placement, handled by `proposeRolePlacement` (the role branch in `prepare`).
+    // Returning null keeps it off the explicit `packSpec` path so the role ladder runs.
+    if (spec.auto_mode == .on) return null;
     const anchor = resolvePart(instances, spec.anchor) orelse return null;
 
     // Claim explicit refs + switches up front so a `(net …)` rule never grabs a
@@ -1697,17 +1701,18 @@ fn resolvePlacement(
     };
 }
 
-/// Build a `(placement …)`-equivalent `ResolvedPlacement` from the detected
-/// module-policy roles — the role-inferred twin of `resolvePlacement`, realizing
-/// the research priority ladder through the existing `packSpec`. Anchors on the
-/// largest recognized-class hub, then docks each recognized-role satellite (input/
+/// Build a `(placement …)`-equivalent `ResolvedPlacement` from the module's
+/// detected roles, anchored on the author-declared central IC (`anchor_ref`) — the
+/// role-inferred twin of `resolvePlacement`, realizing the research priority ladder
+/// through the existing `packSpec`. Docks each recognized-role satellite (input/
 /// decoupling/bulk cap, feedback divider, RF/matching element) on the anchor edge
 /// its non-ground net's pad sits on (`railDir`/`snapEdge` — exactly what the spec
 /// path uses), ordered by criticality (smallest HF cap nearest the pin, via
 /// `orderMembers`). Ordinary passives (role `other`) and parts with no anchor
 /// connection are left unclaimed for `autofillUnlisted` to pin-hug. Returns null —
-/// falling through to the force solve — for a `generic` block (unless `auto_on`),
-/// a block with no recognized hub, or one where no satellite resolves to an edge.
+/// falling through to the force solve — when the declared anchor can't be resolved,
+/// no satellite resolves to an edge, or the part count exceeds the polish bound. The
+/// caller gates this to module roots that name an anchor (`(placement (auto "REF"))`).
 fn proposeRolePlacement(
     arena: std.mem.Allocator,
     parts: []Part,
@@ -1715,7 +1720,7 @@ fn proposeRolePlacement(
     idx_of: *std.StringHashMap(usize),
     instances: []const export_kicad.FlatInstance,
     overrides: env.PolicyOverrides,
-    auto_on: bool,
+    anchor_ref: []const u8,
 ) std.mem.Allocator.Error!?ResolvedPlacement {
     if (parts.len < 2 or parts.len > POLISH_MAX_PARTS) return null;
 
@@ -1738,18 +1743,11 @@ fn proposeRolePlacement(
     };
     const policy = try module_policy.analyze(arena, view);
 
-    // Anchor = largest recognized-class hub (a generic hub only when (auto) forces it).
-    var anchor: ?usize = null;
-    var best_pads: usize = 0;
-    for (policy.modules) |m| {
-        if (m.class == .generic and !auto_on) continue;
-        const np = parts[m.hub].pads.len;
-        if (anchor == null or np > best_pads) {
-            anchor = m.hub;
-            best_pads = np;
-        }
-    }
-    const ic = anchor orelse return null;
+    // Anchor = the author-declared central IC (`(placement (auto "REF"))`),
+    // resolved like the explicit spec's anchor (ref-des / origin-key / leaf). The
+    // class detection above still drives per-satellite role bucketing — the anchor
+    // is named, not guessed, so this works for any module class incl. generic.
+    const ic = resolvePart(instances, anchor_ref) orelse return null;
 
     // Bucket each recognized-role satellite onto the anchor edge its non-ground net
     // lands on. Indexed by `@intFromEnum(Edge)` (left,right,top,bottom = 0..3).
@@ -5720,7 +5718,7 @@ fn prepare(
     // Active when a form was AUTHORED (even if its anchor failed to resolve),
     // so a broken spec surfaces as "fell back to auto", never silently.
     var unresolved0: []const []const u8 = if (placement) |pl| pl.unresolved else &.{};
-    if (block.placement.present and placement == null and block.placement.anchor.len > 0) {
+    if (block.placement.present and placement == null and block.placement.anchor.len > 0 and block.placement.auto_mode != .on) {
         const one = try arena.alloc([]const u8, 1);
         one[0] = block.placement.anchor;
         unresolved0 = one;
@@ -5729,15 +5727,18 @@ fn prepare(
         .active = block.placement.present or floorplan != null,
         .unresolved = unresolved0,
     };
-    // Role-based constructive placement — OPT-IN via `(placement (auto))`. Default-on
-    // for recognized module classes is gated off for now: the routed A/B regressed
-    // array-style boards (the ladder crams peers onto one anchor) and leaked past the
-    // size gate through composition's nested solves — revisit before flipping it on.
-    // The role-inferred twin of `resolvePlacement`; `runPlacement` realizes it via
+    // Role-based constructive placement — engages for a MODULE root that names its
+    // central IC via `(placement (auto "REF"))`. Designs never auto-place (a full
+    // board's overall arrangement stays the force solve, sidestepping the array-cram
+    // regression default-on detection hit); each module a design instantiates is laid
+    // out around its declared anchor and composed in (`composeModuleMacros`). The
+    // role-inferred twin of `resolvePlacement`; `runPlacement` realizes it via
     // `packSpec`, falling back to the force solve when it's null.
     var role_placement: ?ResolvedPlacement = null;
-    if (placement == null and floorplan == null and block.placement.auto_mode == .on) {
-        role_placement = try proposeRolePlacement(arena, parts, nets, &idx_of, instances, block.policy_overrides, true);
+    // Engage only for a module root that named its central IC (`(placement (auto "REF"))`).
+    const auto_module = block.from_module and block.placement.auto_mode == .on and block.placement.anchor.len > 0;
+    if (placement == null and floorplan == null and auto_module) {
+        role_placement = try proposeRolePlacement(arena, parts, nets, &idx_of, instances, block.policy_overrides, block.placement.anchor);
     }
     return .{
         .parts = parts,

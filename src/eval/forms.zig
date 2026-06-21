@@ -523,7 +523,8 @@ pub const scope_form_docs = blk: {
     } };
     t[@intFromEnum(ScopeForm.placement)] = .{ .scope = tl, .doc = .{
         .syntax = "(placement (anchor \"REF\") " ++
-            "(left|right|top|bottom \"REF\"… | (rot N \"REF\") | (net \"NAME\")…)… [(switch \"REF\" side)] [(no-refine)] [(centered)] | (auto) | (manual))",
+            "(left|right|top|bottom \"REF\"… | (rot N \"REF\") | (net \"NAME\")…)… " ++
+            "[(switch \"REF\" side)] [(no-refine)] [(centered)] | (auto \"REF\") | (manual))",
         .summary = "Agent-authored PCB floorplan: declare each part's side of the main IC, " ++
             "the order along that edge, and an optional rotation; the solver legalizes it to " ++
             "exact coordinates (the manual twin of the automatic switcher floorplan). " ++
@@ -532,10 +533,11 @@ pub const scope_form_docs = blk: {
             "Parts no side lists are pin-hug auto-filled beside their placed pads. " ++
             "(no-refine) shows the raw constructive pack (flush, symmetric); " ++
             "(centered) centers every side on the IC instead of opposite its rail pad. " ++
-            "(auto) places the block constructively from its detected roles (anchor IC, then " ++
-            "critical-loop caps docked at their supply pads smallest-first, then the rest) and " ++
-            "composes it into parent boards — opt-in, no sides needed; (manual) and the default " ++
-            "use the force solver.",
+            "(auto \"REF\") places the block constructively around the named central IC from " ++
+            "its detected roles (critical-loop caps docked at their supply pads smallest-first, " ++
+            "then the rest) and composes it into parent boards — engages for a MODULE body only " ++
+            "(a full design always force-solves its arrangement, laying out each module it " ++
+            "instantiates and composing them in); (manual) and the default use the force solver.",
     } };
     t[@intFromEnum(ScopeForm.floorplan)] = .{ .scope = tl, .doc = .{
         .syntax = "(floorplan (anchor \"SUB\") " ++

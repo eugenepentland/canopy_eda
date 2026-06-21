@@ -1122,11 +1122,13 @@ pub const SwitchPlacement = struct {
 };
 
 /// How role-based auto-placement engages for a block (`PlacementSpec.auto_mode`):
-/// `.on` (`(placement (auto))`) ⇒ place the block constructively from its detected
-/// roles (the research priority ladder) and compose the result into parent boards;
-/// `.unset` (no marker) and `.off` (`(placement (manual))`) ⇒ use the force solver.
-/// OPT-IN for now: default-on for recognized module classes is gated off pending
-/// routed-A/B work (it regressed array-style boards), so only `.on` engages it.
+/// `.on` (`(placement (auto "REF"))`) ⇒ place the block constructively from its
+/// detected roles (the research priority ladder) around the author-declared
+/// central IC `REF`, and compose the result into parent boards; `.unset` (no
+/// marker) and `.off` (`(placement (manual))`) ⇒ use the force solver. `.on`
+/// engages for MODULE roots only (`DesignBlock.from_module`) and only with a
+/// named anchor — a full design always force-solves its overall arrangement,
+/// sidestepping the array-cram regression that default-on detection hit.
 pub const PlacementAuto = enum { unset, on, off };
 
 /// Agent-authored PCB floorplan from a top-level `(placement …)` form: the
@@ -1151,8 +1153,9 @@ pub const PlacementSpec = struct {
     /// off the IC centerline. A `(centered)` marker in the form sets this true for a
     /// symmetric floorplan (every side mirrored about the anchor).
     centered: bool = false,
-    /// Role-based auto-placement mode (see `PlacementAuto`). `(auto)` ⇒ `.on`,
-    /// `(manual)` ⇒ `.off`, no marker ⇒ `.unset` (force solve; auto is opt-in).
+    /// Role-based auto-placement mode (see `PlacementAuto`). `(auto "REF")` ⇒
+    /// `.on` with `anchor` = REF (the declared central IC), `(manual)` ⇒ `.off`,
+    /// no marker ⇒ `.unset` (force solve). `.on` engages only for module roots.
     auto_mode: PlacementAuto = .unset,
 };
 
@@ -1247,6 +1250,14 @@ pub const DesignBlock = struct {
     groups: []const Group,
     sub_blocks: []const SubBlock,
     sections: []const Section = &.{},
+    /// True when this block is the body of a `(defmodule …)` application — a
+    /// `(sub-block …)` instantiation, a standalone module preview, or a zero-arg
+    /// resolve — rather than a top-level `(design-block …)`. Stamped by
+    /// `callModule`. Gates role-based auto-placement (`(placement (auto "REF"))`),
+    /// which engages for module roots only: a full design's overall arrangement
+    /// stays the force solve, while each module it instantiates is laid out around
+    /// its declared anchor and composed in.
+    from_module: bool = false,
     /// True when the design declared `(grouped-refdes)` — its ref-deses were
     /// re-stamped into value/footprint block ranges (`refdes_group`) and pinned
     /// to a `<design>.refdes.json` sidecar, so they survive insert/delete/reorder
