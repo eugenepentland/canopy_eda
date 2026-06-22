@@ -32,6 +32,7 @@ const FORM_LOCKED = "locked";
 const FORM_NET = "net";
 const FORM_PAD = "pad";
 const FORM_VIA = "via";
+const FORM_GROUP = "group";
 
 // Two vias within this distance (mm) are treated as the same via, so an
 // `add_via` at an already-stitched position is a no-op on re-sync.
@@ -84,6 +85,10 @@ pub const ApplyStats = struct {
     locked_changed: u32 = 0,
     /// Standalone board graphics written (section staging boxes + labels).
     board_items: u32 = 0,
+    /// KiCad `(group …)` forms created this sync (seeded off-board sub-circuits
+    /// bound into one draggable unit). De-duped against existing groups, so a
+    /// re-sync of the same parts adds none.
+    groups_added: u32 = 0,
     /// GND stitching vias inserted this sync (`add_via` ops). An add_via whose
     /// position already carries a via on the board is a no-op, so this counts
     /// only the genuinely new vias.
@@ -130,6 +135,14 @@ fn applyOps(arena: std.mem.Allocator, root_children: []const Node, ops: []const 
 /// (kicad_uuid → footprint index) lookup, the set of canopy_uuids already
 /// present (so a re-emitted `add` for an existing canopy is a no-op), and the
 /// centres of every existing via (so an `add_via` at one is a no-op).
+/// Existing-group bookkeeping for the `group` op: the uuids of groups already on
+/// the board (so a `group` op never duplicates one) and every footprint uuid
+/// already in some group (KiCad forbids a footprint in two groups).
+const GroupIndex = struct {
+    uuids: std.StringHashMap(void),
+    members: std.StringHashMap(void),
+};
+
 fn indexBoardChildren(
     arena: std.mem.Allocator,
     root_children: []const Node,
@@ -138,6 +151,7 @@ fn indexBoardChildren(
     net_id_by_name: *std.StringHashMap(i64),
     existing_canopy_uuids: *std.StringHashMap(void),
     existing_vias: *std.ArrayListUnmanaged(Vec2Mm),
+    groups: *GroupIndex,
 ) std.mem.Allocator.Error!void {
     for (root_children, 0..) |child, i| {
         if (child.isForm("net")) {
@@ -152,7 +166,58 @@ fn indexBoardChildren(
             if (footprintCanopyUuid(child)) |c| try existing_canopy_uuids.put(c, {});
         } else if (child.isForm(FORM_VIA)) {
             if (viaCenterMm(child)) |c| try existing_vias.append(arena, c);
+        } else if (child.isForm(FORM_GROUP)) {
+            try indexGroupChild(child, groups);
         }
+    }
+}
+
+/// Record an existing `(group …)`'s uuid + every member uuid into `groups`.
+fn indexGroupChild(child: Node, groups: *GroupIndex) std.mem.Allocator.Error!void {
+    const cl = child.asList() orelse return;
+    for (cl[1..]) |sub| {
+        const sl = sub.asList() orelse continue;
+        if (sl.len < 2) continue;
+        const head = sl[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "uuid")) {
+            if (sl[1].asString()) |u| try groups.uuids.put(u, {});
+        } else if (std.mem.eql(u8, head, "members")) {
+            for (sl[1..]) |m| {
+                if (m.asString()) |mu| try groups.members.put(mu, {});
+            }
+        }
+    }
+}
+
+/// Handle one `create_board_item` op: a standalone board graphic (section
+/// staging box / label) whose `item` is proto-canonical JSON; translate it into
+/// a top-level `(gr_rect …)` / `(gr_text …)` and append it. Skips a bad op.
+fn applyBoardItemOp(
+    arena: std.mem.Allocator,
+    op_obj: std.json.ObjectMap,
+    extra_graphics: *std.ArrayListUnmanaged(Node),
+    stats: *ApplyStats,
+) WriteError!void {
+    const item_v = op_obj.get("item") orelse return;
+    if (item_v != .object) return;
+    if (try buildBoardGraphic(arena, item_v.object)) |node| {
+        try extra_graphics.append(arena, node);
+        stats.board_items += 1;
+    }
+}
+
+/// Handle one `group` op: build the `(group …)` node (de-duped, member-claimed
+/// via `groups`) and, when non-null, append it + bump the stat.
+fn applyGroupOp(
+    arena: std.mem.Allocator,
+    op_obj: std.json.ObjectMap,
+    extra_groups: *std.ArrayListUnmanaged(Node),
+    groups: *GroupIndex,
+    stats: *ApplyStats,
+) WriteError!void {
+    if (try buildGroupNode(arena, op_obj, groups)) |gnode| {
+        try extra_groups.append(arena, gnode);
+        stats.groups_added += 1;
     }
 }
 
@@ -198,7 +263,8 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
     // existing position is a no-op — keeps a re-seed of the same board from
     // doubling its stitching vias.
     var existing_vias: std.ArrayListUnmanaged(Vec2Mm) = .empty;
-    try indexBoardChildren(arena, root_children, &max_net_id, &fp_by_uuid, &net_id_by_name, &existing_canopy_uuids, &existing_vias);
+    var groups = GroupIndex{ .uuids = std.StringHashMap(void).init(arena), .members = std.StringHashMap(void).init(arena) };
+    try indexBoardChildren(arena, root_children, &max_net_id, &fp_by_uuid, &net_id_by_name, &existing_canopy_uuids, &existing_vias, &groups);
 
     // Apply each op, accumulating:
     //  - mutated_fp[index] = replacement node for the footprint at that index
@@ -215,6 +281,7 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
     var extra_graphics: std.ArrayListUnmanaged(Node) = .empty;
     var extra_nets: std.ArrayListUnmanaged(Node) = .empty;
     var extra_vias: std.ArrayListUnmanaged(Node) = .empty;
+    var extra_groups: std.ArrayListUnmanaged(Node) = .empty;
     const had_top_level_nets = max_net_id >= 0;
 
     for (ops) |op_val| {
@@ -250,20 +317,17 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
         }
 
         if (std.mem.eql(u8, op_name, "create_board_item")) {
-            // Standalone board graphic (section staging box / label). The
-            // `item` is the proto-canonical JSON the IPC agent feeds to KiCad;
-            // here we translate it into a top-level `(gr_rect …)` / `(gr_text …)`.
-            const item_v = op_obj.get("item") orelse continue;
-            if (item_v != .object) continue;
-            if (try buildBoardGraphic(arena, item_v.object)) |node| {
-                try extra_graphics.append(arena, node);
-                stats.board_items += 1;
-            }
+            try applyBoardItemOp(arena, op_obj, &extra_graphics, stats);
             continue;
         }
 
         if (std.mem.eql(u8, op_name, "add_via")) {
             try applyAddViaOp(arena, op_obj, &existing_vias, &extra_vias, stats);
+            continue;
+        }
+
+        if (std.mem.eql(u8, op_name, "group")) {
+            try applyGroupOp(arena, op_obj, &extra_groups, &groups, stats);
             continue;
         }
 
@@ -374,6 +438,8 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
     for (extra_vias.items) |v| try new_children.append(arena, v);
     // Section staging boxes / labels (Dwgs.User graphics) go last.
     for (extra_graphics.items) |g| try new_children.append(arena, g);
+    // KiCad groups (reference the footprint uuids added above) go after them.
+    for (extra_groups.items) |g| try new_children.append(arena, g);
 
     return Node.list(Span.zero, try new_children.toOwnedSlice(arena));
 }
@@ -1444,6 +1510,51 @@ fn buildVia(arena: std.mem.Allocator, x: f64, y: f64, dia: f64, drill: f64, net:
     const seed = try std.fmt.allocPrint(arena, "via:{d}:{d}:{s}", .{ x, y, net });
     children[6] = try makeStringForm(arena, FORM_UUID, try boardItemUuid(arena, seed));
     return Node.list(Span.zero, children);
+}
+
+/// Build a `(group "name" (uuid …) (members "u1" "u2" …))` node from a `group`
+/// op, or null when there's nothing left to group. Members already in an
+/// existing group are dropped (KiCad forbids a footprint in two groups) and
+/// claimed in `grouped_member_uuids` so two ops in one batch can't double-group.
+/// The group uuid is derived deterministically from (label + members), so a
+/// re-sync of the same parts yields the same uuid and is skipped via
+/// `existing_group_uuids` — the op is idempotent.
+fn buildGroupNode(
+    arena: std.mem.Allocator,
+    op_obj: std.json.ObjectMap,
+    groups: *GroupIndex,
+) WriteError!?Node {
+    const name = jsonStr(op_obj.get("name"));
+    const members_v = op_obj.get("members") orelse return null;
+    if (members_v != .array) return null;
+
+    var members: std.ArrayListUnmanaged([]const u8) = .empty;
+    var seed: std.ArrayListUnmanaged(u8) = .empty;
+    try seed.appendSlice(arena, name);
+    for (members_v.array.items) |mv| {
+        if (mv != .string) continue;
+        const u = mv.string;
+        if (u.len == 0 or groups.members.contains(u)) continue;
+        try groups.members.put(u, {});
+        try members.append(arena, u);
+        try seed.append(arena, '|');
+        try seed.appendSlice(arena, u);
+    }
+    if (members.items.len == 0) return null;
+
+    const guuid = try boardItemUuid(arena, seed.items);
+    if (groups.uuids.contains(guuid)) return null;
+    try groups.uuids.put(guuid, {});
+
+    var children: std.ArrayListUnmanaged(Node) = .empty;
+    try children.append(arena, Node.atom(Span.zero, FORM_GROUP));
+    try children.append(arena, Node.string(Span.zero, name));
+    try children.append(arena, try makeStringForm(arena, FORM_UUID, guuid));
+    var mchildren: std.ArrayListUnmanaged(Node) = .empty;
+    try mchildren.append(arena, Node.atom(Span.zero, "members"));
+    for (members.items) |u| try mchildren.append(arena, Node.string(Span.zero, u));
+    try children.append(arena, Node.list(Span.zero, try mchildren.toOwnedSlice(arena)));
+    return Node.list(Span.zero, try children.toOwnedSlice(arena));
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
