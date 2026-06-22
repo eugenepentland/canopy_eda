@@ -3027,10 +3027,14 @@ fn groupSelected(d: *DiffContext, sec: []const u8) bool {
 /// One fresh add placed at an absolute board coordinate (mm) by the seeding
 /// planner. `emitStagedAdds` turns each into an `add` op (it owns the writer).
 const PositionedAdd = struct { pa: PendingAdd, x_mm: f64, y_mm: f64, rot: f64 };
-/// A group add paired with its saved-layout pose and its sub-circuit name (the
-/// `sectionForRef` key — the sub-block slug, e.g. `mcu`), used to bin the
-/// off-board parts into one box + group per sub-circuit.
-const NamedAdd = struct { pa: PendingAdd, pose: pcb_layout.SyncPose, sec: []const u8 };
+/// A group add with its already-resolved pre-offset board position (mm + rot)
+/// and its sub-circuit name (the `sectionForRef` key — the sub-block slug, e.g.
+/// `mcu`). The position is the part's source pose (module ★ layout for a
+/// sub-block, else the parent cache) re-anchored so the sub-circuit's IC lands
+/// at its parent-cache spot; `finishOffBoardBlock` then applies ONE shared
+/// off-board offset over the whole block and bins these into one box + group
+/// per sub-circuit.
+const NamedAdd = struct { pa: PendingAdd, bx: f64, by: f64, rot: f64, sec: []const u8 };
 /// One off-board labelled box (mm) bounding a single seeded sub-circuit whose IC
 /// is NOT already on the board, plus that sub-circuit's canopy_uuids so the
 /// writer binds them into their own draggable KiCad `(group …)`. `emitStagedAdds`
@@ -3044,25 +3048,44 @@ const SeedPlan = struct { placed: []const PositionedAdd, boxes: []const SeedBox 
 /// (top-level parts not inside a sub-block).
 const SEED_BOX_LABEL = "Seeded layout — drag onto board";
 
+/// The pose source for one selected sub-circuit. A sub-block with its OWN saved
+/// module layout (`lib/modules/<m>.layouts.json`, ★-default) reads THAT so the
+/// module reproduces exactly what the user starred for it: `is_module = true`,
+/// the map is keyed by stable `origin_key` (matched per part on
+/// `FlatInstance.origin_key`, which survives `(hierarchical-ids)` renumbering).
+/// Everything else (sections, sub-blocks with no module layout) falls back to
+/// the parent design cache: `is_module = false`, keyed by full flattened ref.
+const SubCircuitSrc = struct { map: std.StringHashMap(pcb_layout.SyncPose), is_module: bool };
+
+/// Resolve the pose source for sub-circuit `sec` (see `SubCircuitSrc`). Null when
+/// neither a module layout nor the parent cache can supply poses.
+fn subCircuitSource(d: *DiffContext, sec: []const u8) !?SubCircuitSrc {
+    if (subBlockNamed(d.sub_blocks, sec)) |sb| {
+        // Module ★ layout keyed by origin_key (survives the parent's ref-des
+        // renumbering), matched per part on FlatInstance.origin_key.
+        if (pcb_layout.subBlockPoseByOriginKey(d.spc.arena, d.spc.project_dir, sb)) |m|
+            return .{ .map = m, .is_module = true };
+    }
+    if (d.premade_layout) |cache| return .{ .map = cache, .is_module = false };
+    return null;
+}
+
 /// Plan placement for an explicit sub-circuit selection (the Push modal). Each
-/// selected sub-circuit's freshly-added parts are seeded from the design's saved
-/// whole-design layout (`premade_layout`, keyed by flattened ref-des):
-///   • its main IC already on the board ⇒ the parts flow in AROUND that IC's
-///     live position (the IC stays put), placed directly on the board;
-///   • otherwise ⇒ the parts join one shared OFF-BOARD block.
-/// The off-board block keeps the FULL saved geometry — ONE shared translation for
-/// the whole block, so every part keeps its saved position relative to every
-/// other and the block reproduces the starred layout exactly, just shifted clear
-/// of the board. Within that shared frame each sub-circuit then gets its OWN
-/// labelled box + draggable KiCad group (bounding only its parts), so the
-/// inter-block geometry is preserved AND each module drags as its own unit.
-/// (A *per-sub-circuit offset* — as opposed to per-sub-circuit boxing — would
-/// scatter the blocks into a row and lose the inter-block geometry; the shared
-/// offset is what avoids that.) Parts
-/// the layout doesn't name, and non-selected groups, go to `leftover` for the
-/// caller's staging grid. Only fresh adds get positions (existing footprints
-/// never move, so the placement guard never trips); no GND vias are planned.
-/// Result lives on `arena`.
+/// selected sub-circuit's freshly-added parts take their *source* poses — the
+/// sub-block's own starred module layout when it has one, else the parent design
+/// cache (`subCircuitSource`) — re-anchored so the sub-circuit's main IC lands on
+/// its target:
+///   • IC already on the board ⇒ parts flow in AROUND that IC's live position
+///     (the IC stays put), placed directly on the board;
+///   • otherwise ⇒ the IC lands at its parent-cache spot and the parts join one
+///     shared OFF-BOARD block.
+/// So the off-board block keeps the whole board's INTER-block geometry (every
+/// module sits where the design solve put it) while each module keeps its OWN
+/// starred INTERNAL arrangement — and within that shared frame each sub-circuit
+/// gets its own labelled box + draggable KiCad group. Parts no source names, and
+/// non-selected groups, go to `leftover` for the caller's staging grid. Only
+/// fresh adds get positions (existing footprints never move); no GND vias are
+/// planned. Result lives on `arena`.
 fn planSelectedGroups(
     d: *DiffContext,
     adds: []const PendingAdd,
@@ -3070,16 +3093,12 @@ fn planSelectedGroups(
 ) !SeedPlan {
     const arena = d.spc.arena;
     var placed: std.ArrayListUnmanaged(PositionedAdd) = .empty;
-    const layout = d.premade_layout orelse {
-        for (adds) |pa| try leftover.append(arena, pa);
-        return .{ .placed = placed.items, .boxes = &.{} };
-    };
     var buckets = std.StringHashMap(std.ArrayListUnmanaged(usize)).init(arena);
     var order: std.ArrayListUnmanaged([]const u8) = .empty;
     try groupAddsBySection(arena, adds, &buckets, &order);
 
-    // Non-anchored parts accumulate here and are placed with ONE shared offset
-    // so the off-board block reproduces the whole saved layout's geometry.
+    // Off-board parts accumulate here (pre-offset board coords); the whole block
+    // then shifts clear of the board with ONE shared offset.
     var block: std.ArrayListUnmanaged(NamedAdd) = .empty;
     for (order.items) |sec| {
         const idxs = (buckets.get(sec) orelse continue).items;
@@ -3087,49 +3106,79 @@ fn planSelectedGroups(
             for (idxs) |idx| try leftover.append(arena, adds[idx]);
             continue;
         }
-        const anchor = d.group_anchors.get(sec);
-        if (anchor != null and anchor.?.on_board and layout.get(anchor.?.ref) != null) {
-            try placeAroundAnchor(arena, idxs, adds, layout, anchor.?, leftover, &placed);
-            d.summary.blocks += 1;
-        } else {
-            for (idxs) |idx| {
-                const pa = adds[idx];
-                const pose = layout.get(pa.inst.ref_des) orelse {
-                    try leftover.append(arena, pa);
-                    continue;
-                };
-                try block.append(arena, .{ .pa = pa, .pose = pose, .sec = sec });
-            }
-        }
+        const src = (try subCircuitSource(d, sec)) orelse {
+            for (idxs) |idx| try leftover.append(arena, adds[idx]);
+            continue;
+        };
+        try placeOneSelected(d, sec, idxs, adds, src, d.group_anchors.get(sec), leftover, &placed, &block);
     }
     const boxes = try finishOffBoardBlock(arena, block.items, &placed);
     d.summary.blocks += @intCast(boxes.len);
     return .{ .placed = placed.items, .boxes = boxes };
 }
 
-/// Place an anchored sub-circuit's named adds around its main IC's live board
-/// position (saved offset from the anchor + the anchor's board coords). Parts the
-/// layout doesn't name go to `leftover`.
-fn placeAroundAnchor(
-    arena: std.mem.Allocator,
+/// Place one selected sub-circuit's parts from its `src` poses, re-anchored so
+/// the sub-circuit's IC lands on its target — its live board position when
+/// already placed (parts go straight to `placed`, on the board), else its
+/// parent-cache spot (parts go to `block` for the shared off-board offset). The
+/// re-anchor offset is `target − src_anchor`, so the module's own internal
+/// geometry is preserved exactly while the IC moves to where the board wants it.
+/// Parts the source doesn't name go to `leftover`.
+fn placeOneSelected(
+    d: *DiffContext,
+    sec: []const u8,
     idxs: []const usize,
     adds: []const PendingAdd,
-    layout: std.StringHashMap(pcb_layout.SyncPose),
-    anchor: GroupAnchor,
+    src: SubCircuitSrc,
+    anchor: ?GroupAnchor,
     leftover: *std.ArrayListUnmanaged(PendingAdd),
     placed: *std.ArrayListUnmanaged(PositionedAdd),
+    block: *std.ArrayListUnmanaged(NamedAdd),
 ) !void {
-    const ap = layout.get(anchor.ref).?;
-    const dx = anchor.board_x - ap.x;
-    const dy = anchor.board_y - ap.y;
+    const arena = d.spc.arena;
+    var offx: f64 = 0;
+    var offy: f64 = 0;
+    var on_board = false;
+    if (anchor) |a| {
+        // A module source is keyed by origin_key, so resolve the anchor's
+        // origin_key from its add (its flattened ref-des won't key the map).
+        const akey = if (src.is_module) anchorOriginKey(adds, idxs, a.ref) else a.ref;
+        if (src.map.get(akey)) |as_| {
+            if (a.on_board) {
+                on_board = true;
+                offx = a.board_x - as_.x;
+                offy = a.board_y - as_.y;
+            } else if (d.premade_layout) |cache| if (cache.get(a.ref)) |cp| {
+                offx = cp.x - as_.x;
+                offy = cp.y - as_.y;
+            };
+        }
+    }
     for (idxs) |idx| {
         const pa = adds[idx];
-        const pose = layout.get(pa.inst.ref_des) orelse {
+        const key = if (src.is_module) pa.inst.origin_key else pa.inst.ref_des;
+        const sp = src.map.get(key) orelse {
             try leftover.append(arena, pa);
             continue;
         };
-        try placed.append(arena, .{ .pa = pa, .x_mm = pose.x + dx, .y_mm = pose.y + dy, .rot = pose.rot });
+        const bx = sp.x + offx;
+        const by = sp.y + offy;
+        if (on_board)
+            try placed.append(arena, .{ .pa = pa, .x_mm = bx, .y_mm = by, .rot = sp.rot })
+        else
+            try block.append(arena, .{ .pa = pa, .bx = bx, .by = by, .rot = sp.rot, .sec = sec });
     }
+    if (on_board) d.summary.blocks += 1;
+}
+
+/// The `origin_key` of the add in `idxs` whose flattened ref-des is `ref` (the
+/// sub-circuit's anchor), or "" when not found — used to find the anchor inside
+/// an origin-key-keyed module layout.
+fn anchorOriginKey(adds: []const PendingAdd, idxs: []const usize, ref: []const u8) []const u8 {
+    for (idxs) |idx| {
+        if (std.mem.eql(u8, adds[idx].inst.ref_des, ref)) return adds[idx].inst.origin_key;
+    }
+    return "";
 }
 
 /// Translate the whole off-board `block` by ONE shared offset (its collective
@@ -3150,13 +3199,13 @@ fn finishOffBoardBlock(
     var minx: f64 = std.math.floatMax(f64);
     var miny: f64 = std.math.floatMax(f64);
     for (block) |n| {
-        minx = @min(minx, n.pose.x);
-        miny = @min(miny, n.pose.y);
+        minx = @min(minx, n.bx);
+        miny = @min(miny, n.by);
     }
     const dx = BLOCK_STAGE_ORIGIN_X_MM - minx;
     const dy = BLOCK_STAGE_ORIGIN_Y_MM - miny;
     for (block) |n| {
-        try placed.append(arena, .{ .pa = n.pa, .x_mm = n.pose.x + dx, .y_mm = n.pose.y + dy, .rot = n.pose.rot });
+        try placed.append(arena, .{ .pa = n.pa, .x_mm = n.bx + dx, .y_mm = n.by + dy, .rot = n.rot });
     }
     // One box + group per sub-circuit, in first-seen order.
     var boxes: std.ArrayListUnmanaged(SeedBox) = .empty;
@@ -3171,8 +3220,8 @@ fn finishOffBoardBlock(
         var members: std.ArrayListUnmanaged([]const u8) = .empty;
         for (block) |n| {
             if (!std.mem.eql(u8, n.sec, first.sec)) continue;
-            const x = n.pose.x + dx;
-            const y = n.pose.y + dy;
+            const x = n.bx + dx;
+            const y = n.by + dy;
             bx0 = @min(bx0, x);
             by0 = @min(by0, y);
             bx1 = @max(bx1, x);
