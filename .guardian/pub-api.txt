@@ -997,6 +997,7 @@ src/serve/pcb_layout_page.zig::saveNamedLayoutApi fn
 src/serve/pcb_layout_page.zig::savePcbCourtyardApi fn
 src/serve/pcb_layout_page.zig::setDefaultLayoutApi fn
 src/serve/pcb_layout_page.zig::solveForRequest fn
+src/serve/pcb_layout_page.zig::subBlockPoseByOriginKey fn
 src/serve/pcb_layout_page.zig::viasForPoses fn
 src/serve/pcb_layout_page.zig::writeJsonStr fn
 src/serve/pdf_viewer.zig::HandlerError value

@@ -2457,6 +2457,45 @@ pub fn loadSubBlockPoses(alloc: std.mem.Allocator, project_dir: []const u8, sub_
     return out.toOwnedSlice(alloc) catch layout;
 }
 
+/// The sub-block's saved module layout (★-default via `chooseSyncPoses` of
+/// `sub_block.source`) keyed by stable `origin_key`, so a caller can match each
+/// flattened part by its `FlatInstance.origin_key` — the module-local identity
+/// that survives the parent design's `(hierarchical-ids)` renumbering.
+///
+/// The layout is keyed by the *module-standalone* ref-des (`U1`, `R1`, `C1`…,
+/// as the `/pcb-layout/<module>` solve assigned them when the layout was saved),
+/// which is NOT the parent-renumbered ref (`buck_3v3d/U11`, `mcu/C57`). The
+/// missing link is `standalone-ref → origin_key`, and the ONLY way to reproduce
+/// the exact standalone ref-des is to re-flatten the module the same way the
+/// layout was made — `modules_mod.resolveModuleBlock` (real instantiation first,
+/// else zero-arg) — NOT the parent's already-renumbered `sub_block.block`, and
+/// NOT `poseByOriginKey` (which re-resolves the module *source path*, failing on
+/// a `lib/modules/` defmodule). With that bridge: layout ref `C1` → origin_key
+/// `100nF@3#0` → board part `mcu/C57` (same origin_key). Null when the module
+/// has no saved layout or nothing bridges.
+pub fn subBlockPoseByOriginKey(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    sub_block: env_mod.SubBlock,
+) ?std.StringHashMap(SyncPose) {
+    const layout = chooseSyncPoses(alloc, project_dir, sub_block.source) orelse return null;
+    const resolved = modules_mod.resolveModuleBlock(alloc, project_dir, sub_block.source) orelse return null;
+    // Standalone-flatten ref-des → origin_key (its refs key the saved layout).
+    var flat: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
+    netlist.collectInstances(alloc, resolved.block, "", &flat, .hierarchical) catch return null;
+    var ok_of = std.StringHashMap([]const u8).init(alloc);
+    for (flat.items) |fi| ok_of.put(fi.ref_des, fi.origin_key) catch return null;
+    // Layout ref → origin_key → pose.
+    var m = std.StringHashMap(SyncPose).init(alloc);
+    for (layout) |p| {
+        const ok = ok_of.get(p.ref) orelse continue;
+        if (ok.len == 0) continue;
+        m.put(ok, .{ .x = p.x, .y = p.y, .rot = p.rot }) catch return null;
+    }
+    if (m.count() == 0) return null;
+    return m;
+}
+
 /// The GND vias for a placement at exactly `poses` (built from `block`): run the
 /// router's ground-via pass — the same DRC-safe pass the layout page previews —
 /// in `block`'s local coordinate frame. Net names come from the placement's
