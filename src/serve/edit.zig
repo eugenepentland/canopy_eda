@@ -8,6 +8,7 @@ const render_json = @import("../render_json.zig");
 const bom = @import("../bom.zig");
 const bom_resolve = @import("../bom_resolve.zig");
 const env_mod = @import("../eval/env.zig");
+const eval_modules = @import("../eval/modules.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 const bom_html = @import("bom_html.zig");
@@ -1286,13 +1287,29 @@ pub fn rebuildDesign(
     };
     const block = switch (eval_result) {
         .design_block => |b| b,
-        else => {
-            return .{
-                .ok = false,
-                .version = serve_root.getLiveVersion(name),
-                .snapshot = snap_id,
-                .eval_ok = false,
-                .error_message = "not a design-block",
+        // Not a top-level design — `name` may be a bare `lib/modules/<name>`
+        // module file (where `evalFile` ran the `(defmodule …)` → .nil and
+        // registered it). Instantiate it standalone via its parameter
+        // defaults so a module rebuilds/pushes the same as a design.
+        else => blk: {
+            const mres = eval_modules.instantiateStandalone(&eval, name) catch {
+                return .{
+                    .ok = false,
+                    .version = serve_root.getLiveVersion(name),
+                    .snapshot = snap_id,
+                    .eval_ok = false,
+                    .error_message = "not a design-block",
+                };
+            };
+            break :blk switch (mres) {
+                .design_block => |b| b,
+                else => return .{
+                    .ok = false,
+                    .version = serve_root.getLiveVersion(name),
+                    .snapshot = snap_id,
+                    .eval_ok = false,
+                    .error_message = "not a design-block",
+                },
             };
         },
     };

@@ -518,6 +518,28 @@ fn checkMissingParams(self: *Evaluator, mod: BlockDef, bound: []const ?Value, ca
     return EvalError.ArityError;
 }
 
+/// Instantiate a `lib/modules/<name>.sexp` module standalone via its
+/// parameter defaults (zero args). Resolves the module file, then calls it
+/// with no arguments so every `(param default)` supplies its value
+/// (defaults-first). Returns the module's evaluated design block (stamped
+/// `origin = .embedded` by `callModule`), or an error when the module is
+/// missing or needs required args it has no defaults for. The returned
+/// block borrows `self`'s arena — keep the evaluator alive while using it.
+/// This is the single source of the "render a module standalone" logic
+/// shared by the MCP `evalNamedBlock` resolver and the CLI build/check/
+/// export paths.
+pub fn instantiateStandalone(self: *Evaluator, name: []const u8) EvalError!Value {
+    var env = Env.init(self.allocator, null);
+    defer env.deinit();
+    try resolveImport(self, name, &env);
+    const bound = env.get(name) orelse return EvalError.ImportError;
+    const bd = switch (bound) {
+        .block_def => |b| b,
+        else => return EvalError.ImportError,
+    };
+    return callModule(self, bd, &.{}, .{ .line = 1, .col = 1, .offset = 0 }, &env);
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 const testing = std.testing;

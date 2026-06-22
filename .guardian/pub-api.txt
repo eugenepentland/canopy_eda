@@ -316,6 +316,7 @@ src/eval/instance.zig::resolvePinName fn
 src/eval/modules.zig::callModule fn
 src/eval/modules.zig::evalDefmodule fn
 src/eval/modules.zig::evalImport fn
+src/eval/modules.zig::instantiateStandalone fn
 src/eval/modules.zig::loadComponent fn
 src/eval/modules.zig::loadComponentFamily fn
 src/eval/modules.zig::loadPassivesPrelude fn

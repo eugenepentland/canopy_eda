@@ -10,6 +10,7 @@ const id_insert = @import("id_insert.zig");
 const lint = @import("lint.zig");
 const erc_mod = @import("erc.zig");
 const env_mod = @import("eval/env.zig");
+const eval_modules = @import("eval/modules.zig");
 const import_kicad = @import("import_kicad.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -64,6 +65,31 @@ pub const CommandError = std.mem.Allocator.Error ||
         ServiceUnavailable,
     };
 
+/// Fallback for the `build`/`check`/`export-kicad` commands when `name`
+/// resolves to a `lib/modules/<name>.sexp` module rather than a top-level
+/// `src/<name>.sexp` design: instantiate the module standalone via its
+/// parameter defaults (zero args, defaults-first) and return its design
+/// block. `eval` must already have run the module file (so the defmodule is
+/// registered). Prints a diagnostic and exits non-zero if the name isn't a
+/// resolvable module or needs required args it has no defaults for. Lets a
+/// bare module name (e.g. `adp7118-ldo`) build the same as a design name.
+fn moduleBlock(eval: *Evaluator, name: []const u8) *env_mod.DesignBlock {
+    const result = eval_modules.instantiateStandalone(eval, name) catch |err| {
+        if (eval.last_error) |diag| {
+            std.debug.print(DIAG_ERROR_FMT, .{ name, diag.span.line, diag.span.col, diag.message });
+        }
+        std.debug.print("error: {s} is neither a design nor a buildable module ({s})\n", .{ name, @errorName(err) });
+        std.process.exit(1);
+    };
+    return switch (result) {
+        .design_block => |b| b,
+        else => {
+            std.debug.print("error: {s} did not evaluate to a design\n", .{name});
+            std.process.exit(1);
+        },
+    };
+}
+
 /// `netlisp check <name>` — run ERC on a design and print violations.
 pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
     var project_dir: []const u8 = ".";
@@ -97,10 +123,11 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     };
     const block = switch (result) {
         .design_block => |b| b,
-        else => {
-            std.debug.print("error: {s} did not evaluate to a design\n", .{design});
-            std.process.exit(1);
-        },
+        // Not a top-level design — try resolving `design` as a bare
+        // `lib/modules/<name>.sexp` module, instantiated standalone via its
+        // parameter defaults (defaults-first). `evalFile` already ran the
+        // `(defmodule …)` (→ .nil) and registered it, so this just calls it.
+        else => moduleBlock(&eval, design),
     };
 
     const violations = try erc_mod.runErc(allocator, block, project_dir);
@@ -215,6 +242,18 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
         std.process.exit(1);
     };
 
+    // Resolve the design block. A top-level `(design-block …)` is used as-is;
+    // a `lib/modules/<name>.sexp` file (where `evalFile` returned .nil after
+    // running the `(defmodule …)`) is instantiated standalone via its
+    // parameter defaults. `instantiateStandalone` runs `callModule`, which
+    // records this module's assertions and pending ids into `eval`, so the
+    // id-insertion / refdes-sidecar / warning / assertion handling below sees
+    // them just as it would for a design.
+    const block = switch (result) {
+        .design_block => |b| b,
+        else => moduleBlock(&eval, design),
+    };
+
     if (eval.pending_ids.items.len > 0 or eval.pending_child_ids.items.len > 0) {
         id_insert.insertPendingIds(allocator, board_path, eval.pending_ids.items, eval.pending_child_ids.items) catch |err| {
             std.debug.print("ID insertion error: {}\n", .{err});
@@ -259,8 +298,8 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
         std.process.exit(1);
     }
 
-    switch (result) {
-        .design_block => |block| {
+    {
+        {
             const design_name = push_name orelse "board";
             const ids_path = paths.designSiblingPath(allocator, project_dir, design_name, ".bom") catch {
                 std.debug.print(OUT_OF_MEMORY_MSG, .{});
@@ -315,11 +354,7 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
                 try file.writeAll(output);
                 try file.writeAll("\n");
             }
-        },
-        else => {
-            std.debug.print("Build did not produce a design block\n", .{});
-            std.process.exit(1);
-        },
+        }
     }
 }
 
@@ -371,6 +406,15 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
         std.process.exit(1);
     };
 
+    // A top-level design is used as-is; a bare `lib/modules/<name>.sexp`
+    // module (where `evalFile` returned .nil) is instantiated standalone via
+    // its parameter defaults. Resolved before the assertion sweep so a
+    // module's design math (recorded during `callModule`) surfaces here.
+    const block = switch (result) {
+        .design_block => |b| b,
+        else => moduleBlock(&eval, name),
+    };
+
     var has_failure = false;
     for (eval.assertions.items) |assertion| {
         if (assertion.passed) {
@@ -388,8 +432,8 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
         std.process.exit(1);
     }
 
-    switch (result) {
-        .design_block => |block| {
+    {
+        {
             const ids_path = paths.designSiblingPath(allocator, project_dir, name, ".bom") catch {
                 std.debug.print(OUT_OF_MEMORY_MSG, .{});
                 std.process.exit(1);
@@ -405,11 +449,7 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
                 std.process.exit(1);
             };
             std.debug.print("KiCad export complete: {s}/\n", .{out});
-        },
-        else => {
-            std.debug.print("Build did not produce a design block\n", .{});
-            std.process.exit(1);
-        },
+        }
     }
 }
 

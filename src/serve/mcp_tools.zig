@@ -808,12 +808,15 @@ fn writeModuleSummary(
     }
     try w.writeAll("],\"erc\":[");
     const violations = try erc_mod.runErc(allocator, block, project_dir);
+    // The preview root IS the module (a subcircuit unless it declares board
+    // intent), so "main IC should be sealed in a module" is satisfied by
+    // construction — reporting it would tell the agent to do what it already
+    // did. Suppress by role (same rule as `runErcForNamedBlock`); a module
+    // that declared `(board …)`/`(critical-ic …)` would keep the check.
+    const suppress_main_ic = !isBoardBlock(block);
     var first = true;
     for (violations) |v| {
-        // The preview root IS the module, so "main IC should be sealed in a
-        // module" is satisfied by construction — reporting it would tell the
-        // agent to do what it already did.
-        if (v.kind == .main_ic_in_design) continue;
+        if (suppress_main_ic and v.kind == .main_ic_in_design) continue;
         if (!first) try w.writeAll(",");
         first = false;
         try writeErcViolationJson(w, v);
@@ -2739,38 +2742,42 @@ pub fn evalNamedBlock(
     defer allocator.free(mod_path);
     infra_fs.cwd().access(mod_path, .{}) catch return error.FileNotFound;
     // Instantiate the module by name with zero arguments — its (param default)s
-    // supply the values (defaults-first). Call the block directly rather than
-    // splicing a synthetic `(sub-block …)` source string: under `evalSource`
-    // (no `top_design_path`) that wrapper-synth silently produced a
-    // sub-block-less design, so a direct `callModule` is both correct and
-    // cleaner. The returned block borrows `eval`'s arena — the caller keeps
-    // `eval` alive — and is stamped `.embedded` by `callModule`.
-    var env = env_mod.Env.init(allocator, null);
-    defer env.deinit();
-    try eval_modules.resolveImport(eval, name, &env);
-    const bound = env.get(name) orelse return error.NotADesign;
-    const bd = switch (bound) {
-        .block_def => |b| b,
-        else => return error.NotADesign,
-    };
-    const result = try eval_modules.callModule(eval, bd, &.{}, .{ .line = 1, .col = 1, .offset = 0 }, &env);
+    // supply the values (defaults-first), via the single shared helper. The
+    // returned block borrows `eval`'s arena — the caller keeps `eval` alive —
+    // and is stamped `.embedded` by `callModule`.
+    const result = try eval_modules.instantiateStandalone(eval, name);
     switch (result) {
         .design_block => |b| return .{ .block = b, .is_module = true },
         else => return error.NotADesign,
     }
 }
 
-/// Run ERC on a named block, dropping `main_ic_in_design` for standalone
-/// module renders — the module IS the design root there, so demanding the
-/// main IC be sealed in a module is satisfied by construction (same
-/// suppression `preview_module` applies).
+/// A block declares fabrication intent — i.e. it is a board, not a
+/// subcircuit — when it carries a `(board …)` outline, a `(kicad-pcb …)`
+/// handoff path, or any `(critical-ic …)` anchor. The `main_ic_in_design`
+/// ERC check (which demands the anchor IC be sealed in a module) only
+/// applies to boards; a subcircuit (a `lib/modules` module, or a flat
+/// design with none of those forms) is exempt. Mirrors
+/// `DesignSummary.is_board`.
+fn isBoardBlock(b: *const env_mod.DesignBlock) bool {
+    return b.board.present or b.kicad_pcb_path != null or b.critical_ics.len > 0;
+}
+
+/// Run ERC on a named block, dropping `main_ic_in_design` for any block that
+/// is NOT a board (a subcircuit). The check demands the anchor IC be sealed
+/// in a module and brought in as a sub-block; a board declares fab intent
+/// and keeps it, but a standalone module render — or a flat design with no
+/// board/kicad-pcb/critical-ics — IS the design root there, so the rule is
+/// satisfied by construction. Suppression keys on block content (the role
+/// `isBoardBlock` reports), never on how the name was resolved, so the same
+/// rule governs `preview_module`. This only ever removes violations.
 pub fn runErcForNamedBlock(
     allocator: std.mem.Allocator,
     nb: NamedBlock,
     project_dir: []const u8,
 ) std.mem.Allocator.Error![]const erc_mod.Violation {
     const violations = try erc_mod.runErc(allocator, nb.block, project_dir);
-    if (!nb.is_module) return violations;
+    if (isBoardBlock(nb.block)) return violations;
     var keep: std.ArrayListUnmanaged(erc_mod.Violation) = .empty;
     for (violations) |v| {
         if (v.kind == .main_ic_in_design) continue;
