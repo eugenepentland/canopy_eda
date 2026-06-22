@@ -52,6 +52,9 @@ const REF_OPEN = "{\"ref\":";
 const NAME_OPEN = "{\"name\":";
 /// JSON key + open bracket shared by the layout/cache/export part arrays.
 const PARTS_OPEN = "\"parts\":[";
+/// JSON `,"origin":` key shared by the part records that carry the renumber-
+/// stable origin key (saved-layout disk + page JSON, live PCB.parts).
+const ORIGIN_OPEN = ",\"origin\":";
 /// Error bodies shared across the layout handlers.
 const NO_BLOCK_MSG = "No design or module by that name";
 /// Returned when `?sub=<slug>` names a sub-block that doesn't exist in the design.
@@ -80,8 +83,15 @@ const KIND_AUTO = "auto";
 /// auto entries past this are pruned; manual snapshots are never auto-pruned.
 const MAX_AUTO_LAYOUTS: usize = 12;
 
-/// One placed part within a saved layout: ref-des + centre (mm) + rotation.
-const PartPose = struct { ref: []const u8, x: f64, y: f64, rot: f64 };
+/// One placed part within a saved layout: ref-des + centre (mm) + rotation,
+/// plus the renumber-stable `origin` (the part's module-local `origin_key`).
+/// The ref-des is volatile — it shifts when the part renumbers or when the
+/// same module is flattened from a different context (standalone vs as a
+/// sub-block of a parent board, which produces different counters). `origin`
+/// is the module-local source name, invariant across both, so a Load matches
+/// on it first and falls back to `ref` only for legacy entries saved before
+/// `origin` was recorded (empty string). See `rekeyPosesByOrigin`.
+const PartPose = struct { ref: []const u8, x: f64, y: f64, rot: f64, origin: []const u8 = "" };
 
 /// The weighted `objective` the optimizer minimizes plus its visible HPWL +
 /// decoupling-loop terms, stored with a layout so the list shows "better/worse"
@@ -216,7 +226,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // fresh solve so the spec — not a stale auto cache — places the board.
     const spec_drives = sub == null and refine_name == null and eff_block.placement.present;
     const cached = if (sub != null) null else if (refine_name) |rn|
-        readLayoutPoses(ctx.allocator, ctx.project_dir, name, rn)
+        readLayoutPosesFor(ctx.allocator, ctx.project_dir, name, rn, eff_block)
     else if (tune.regen or spec_drives) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
     // No layout to show and nothing asked for one: place the parts on a plain
     // grid instead of running the (potentially expensive) optimizer on page open.
@@ -456,7 +466,7 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     // saved/refine layout was asked for.
     const spec_drives = refine_name == null and block.placement.present;
     const cached = if (refine_name) |rn|
-        readLayoutPoses(ctx.allocator, ctx.project_dir, name, rn)
+        readLayoutPosesFor(ctx.allocator, ctx.project_dir, name, rn, block)
     else if (tune.regen or spec_drives) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
     const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place) catch {
         res.status = 500;
@@ -586,7 +596,7 @@ pub fn solveForRequest(
     const spec_drives = opts.sub == null and opts.layout == null and !opts.placement_off and
         (eff_block.placement.present or eff_block.floorplan.present);
     const cached = if (opts.sub != null) null else if (opts.layout) |ln|
-        readLayoutPoses(alloc, project_dir, name, ln)
+        readLayoutPosesFor(alloc, project_dir, name, ln, eff_block)
     else if (opts.regen or opts.rough or spec_drives) null else readAutoPoses(alloc, project_dir, name);
     const grid_only = opts.sub == null and opts.layout == null and !opts.regen and !opts.rough and !spec_drives and cached == null;
     var params = optimizer.Params{ .courtyard_overlap = opts.court_overlap, .route_gap = opts.route_gap };
@@ -662,7 +672,7 @@ pub fn renderDesignPng(
     // Optional compare layout for the diff overlay (ghost + movement arrows).
     var cmp_placement: ?optimizer.Placement = null;
     if (opts.compare) |cn| {
-        if (readLayoutPoses(alloc, project_dir, name, cn)) |cposes| {
+        if (readLayoutPosesFor(alloc, project_dir, name, cn, solved.block)) |cposes| {
             cmp_placement = optimizer.placeFromPoses(alloc, solved.block, project_dir, cposes, png_params) catch null;
         }
     }
@@ -861,7 +871,7 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
         try w.writeAll("{\"ref\":");
         try writeJsonStr(w, pt.ref_des);
         if (i < p.instances.len) {
-            try w.writeAll(",\"origin\":");
+            try w.writeAll(ORIGIN_OPEN);
             try writeJsonStr(w, p.instances[i].origin_key);
         }
         const bl = if (i < blame.len and bmax > 0) blame[i] / bmax else 0;
@@ -1311,7 +1321,7 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 }
 
 /// POST /api/pcb-layouts/:name — save a named layout snapshot (kind "manual").
-/// Body: `{"name","parts":[{ref,x,y,rot}, …]}`; the score is computed on the
+/// Body: `{"name","parts":[{ref,x,y,rot,origin?}, …]}`; the score is computed on the
 /// server (no client-side metric). Upserts by name (re-save overwrites in
 /// place); a new name is prepended so the newest sits at the top of the list.
 pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
@@ -1768,12 +1778,67 @@ fn jsonNum(v: ?std.json.Value) f64 {
     };
 }
 
-/// The poses of a single named saved layout (`?refine=<layout>`), as `RefPose`s
-/// ready to seed `solve`. Null when no layout by that name exists. Used to refine
-/// a specific hand layout with the routed tuck rather than re-placing from scratch.
-fn readLayoutPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, want: []const u8) ?[]const optimizer.RefPose {
+/// Saved-layout `PartPose`s from a solved placement, each stamped with its
+/// renumber-stable `origin_key` (the placement's `instances` run index-aligned
+/// with `parts`). Snapshots written through this can be re-loaded by origin
+/// after the parts renumber. Null on allocation failure.
+fn posesFromPlacement(alloc: std.mem.Allocator, p: optimizer.Placement) ?[]PartPose {
+    const parts = alloc.alloc(PartPose, p.parts.len) catch return null;
+    for (p.parts, 0..) |pt, i| parts[i] = .{
+        .ref = pt.ref_des,
+        .x = pt.x,
+        .y = pt.y,
+        .rot = pt.rot,
+        .origin = if (i < p.instances.len) p.instances[i].origin_key else "",
+    };
+    return parts;
+}
+
+/// Re-key a saved layout's poses onto `block`'s *current* ref-des via the
+/// renumber-stable `origin_key`. A pose whose `origin` matches an instance in
+/// `block` adopts that instance's present ref-des; one with no origin (a legacy
+/// entry saved before origin was recorded) or no match keeps its stored `ref`.
+/// This bridges a layout saved when the block flattened to different ref-des —
+/// e.g. a module previously rendered as a sub-block of a parent board (so its
+/// poses carry the parent's counters) but now rendered standalone — the same
+/// `origin_key` bridge the KiCad-sync / sub-block paths use (`poseByOriginKey`).
+/// Null only on a flatten/allocation failure (caller falls back to raw refs).
+fn rekeyPosesByOrigin(
+    alloc: std.mem.Allocator,
+    block: *env_mod.DesignBlock,
+    parts: []const PartPose,
+) ?[]const optimizer.RefPose {
+    var flat: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
+    netlist.collectInstances(alloc, block, "", &flat, block.refStyle()) catch return null;
+    var ref_of = std.StringHashMap([]const u8).init(alloc);
+    for (flat.items) |fi| {
+        if (fi.origin_key.len == 0) continue;
+        ref_of.put(fi.origin_key, fi.ref_des) catch return null;
+    }
+    const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
+    for (parts, 0..) |pp, i| {
+        const ref = if (pp.origin.len > 0) (ref_of.get(pp.origin) orelse pp.ref) else pp.ref;
+        out[i] = .{ .ref = ref, .x = pp.x, .y = pp.y, .rot = pp.rot };
+    }
+    return out;
+}
+
+/// The poses of a single named saved layout (`?refine=` / `?layout=`), as
+/// `RefPose`s ready to seed `solve` / `placeFromPoses` — re-keyed onto `block`'s
+/// current ref-des by `origin_key` (see `rekeyPosesByOrigin`) so a layout saved
+/// against a different flattening of the same block still lands on the right
+/// parts. Null when no layout by that name exists.
+fn readLayoutPosesFor(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    want: []const u8,
+    block: *env_mod.DesignBlock,
+) ?[]const optimizer.RefPose {
     for (readLayouts(alloc, project_dir, name)) |lay| {
         if (!std.mem.eql(u8, lay.name, want)) continue;
+        if (rekeyPosesByOrigin(alloc, block, lay.parts)) |poses| return poses;
+        // Re-key failed (flatten error) — fall back to the raw stored refs.
         var list: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
         for (lay.parts) |pp| {
             list.append(alloc, .{ .ref = pp.ref, .x = pp.x, .y = pp.y, .rot = pp.rot }) catch return null;
@@ -1854,11 +1919,16 @@ fn parsePartPoses(alloc: std.mem.Allocator, v: ?std.json.Value) ?[]const PartPos
         if (it != .object) continue;
         const ref = it.object.get("ref") orelse continue;
         if (ref != .string) continue;
+        const origin: []const u8 = blk: {
+            const ov = it.object.get("origin") orelse break :blk "";
+            break :blk if (ov == .string) ov.string else "";
+        };
         list.append(alloc, .{
             .ref = ref.string,
             .x = jsonNum(it.object.get("x")),
             .y = jsonNum(it.object.get("y")),
             .rot = jsonNum(it.object.get("rot")),
+            .origin = origin,
         }) catch return list.items;
     }
     return list.toOwnedSlice(alloc) catch null;
@@ -1986,7 +2056,12 @@ fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout, cache: 
             if (j > 0) try w.writeAll(",");
             try w.writeAll(REF_OPEN);
             try writeJsonStr(w, pt.ref);
-            try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d}}}", .{ pt.x, pt.y, pt.rot });
+            try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pt.x, pt.y, pt.rot });
+            if (pt.origin.len > 0) {
+                try w.writeAll(ORIGIN_OPEN);
+                try writeJsonStr(w, pt.origin);
+            }
+            try w.writeAll("}");
         }
         try w.writeAll("]}");
     }
@@ -2061,8 +2136,7 @@ fn displayLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
 fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, p: optimizer.Placement, params: optimizer.Params) void {
     const existing = readLayouts(alloc, project_dir, name);
     const score = LayoutScore{ .hpwl = p.score.hpwl_mm, .loop = p.score.loop_mm, .caps = p.score.loop_caps, .objective = p.breakdown.objective };
-    const parts = alloc.alloc(PartPose, p.parts.len) catch return;
-    for (p.parts, 0..) |pt, i| parts[i] = .{ .ref = pt.ref_des, .x = pt.x, .y = pt.y, .rot = pt.rot };
+    const parts = posesFromPlacement(alloc, p) orelse return;
     // Dedup against EVERY saved layout, not just the newest: a regen that
     // reproduces an arrangement already in the list (same objective + HPWL +
     // loop) adds nothing. If the match is the newest entry and predates the
@@ -2359,8 +2433,7 @@ pub fn loadSyncVias(
 /// standalone `.autolayout.json` so each design carries one layout sidecar.
 /// Best-effort: a write failure just means a regenerate.
 fn writeAutoCache(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, p: optimizer.Placement, params: optimizer.Params) void {
-    const parts = alloc.alloc(PartPose, p.parts.len) catch return;
-    for (p.parts, 0..) |pt, i| parts[i] = .{ .ref = pt.ref_des, .x = pt.x, .y = pt.y, .rot = pt.rot };
+    const parts = posesFromPlacement(alloc, p) orelse return;
     const layouts = readLayouts(alloc, project_dir, name);
     writeLayoutsFile(alloc, project_dir, name, layouts, .{ .params = params, .parts = parts });
     if (paths.designSiblingPath(alloc, project_dir, name, AUTO_EXT)) |legacy| {
@@ -3237,6 +3310,10 @@ fn writePcbData(
         if (i > 0) try w.writeAll(",");
         try w.writeAll(REF_OPEN);
         try writeJsonStr(w, pt.ref_des);
+        // Renumber-stable module-local key, so a saved-layout Load can match on
+        // it instead of the volatile ref-des (see PartPose.origin / bindLayLoad).
+        try w.writeAll(ORIGIN_OPEN);
+        try writeJsonStr(w, if (i < p.instances.len) p.instances[i].origin_key else "");
         try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"kind\":\"{s}\",\"fb\":{s},", .{
             pt.x,                                 pt.y,  pt.rot,
             pt.hw,                                pt.hh, if (pt.kind == .hub) "hub" else "passive",
@@ -3431,7 +3508,8 @@ fn drcKindStr(k: drc.Kind) []const u8 {
 
 /// Emit `"layouts":[ … ],` — the saved-layout history for the client. Each
 /// entry carries its name, kind, optional score, and `parts` as a ref → {x,y,
-/// rot} map so a Load just reads positions by ref. Trailing comma included.
+/// rot, origin?} map so a Load reads positions by the renumber-stable `origin`
+/// (falling back to the ref key for legacy entries). Trailing comma included.
 fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writer.Error!void {
     try w.writeAll("\"layouts\":[");
     for (layouts, 0..) |L, i| {
@@ -3447,7 +3525,12 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writ
         for (L.parts, 0..) |pt, j| {
             if (j > 0) try w.writeAll(",");
             try writeJsonStr(w, pt.ref);
-            try w.print(":{{\"x\":{d},\"y\":{d},\"rot\":{d}}}", .{ pt.x, pt.y, pt.rot });
+            try w.print(":{{\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pt.x, pt.y, pt.rot });
+            if (pt.origin.len > 0) {
+                try w.writeAll(ORIGIN_OPEN);
+                try writeJsonStr(w, pt.origin);
+            }
+            try w.writeAll("}");
         }
         try w.writeAll("}}");
     }
@@ -4309,7 +4392,11 @@ const BOARD_JS =
     \\ if(txt!=null)e.textContent=txt;return e;}
     \\function bindLayLoad(b){b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-load");
     \\ var L=layByName(nm);if(!L)return;recordUndo();
-    \\ P.forEach(function(p){var s=L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;}});applyAll();
+    \\ // Match each on-screen part to its saved pose by the renumber-stable origin
+    \\ // key first (falls back to ref-des for legacy layouts saved without one), so
+    \\ // a Load still lands after the parts renumber (e.g. module standalone vs nested).
+    \\ var byOrigin={};for(var k in L.parts){var v=L.parts[k];if(v&&v.origin)byOrigin[v.origin]=v;}
+    \\ P.forEach(function(p){var s=(p.origin&&byOrigin[p.origin])||L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;}});applyAll();
     \\ setActiveLayout(nm);});}
     \\function bindLayDel(b){b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-del");
     \\ if(!window.confirm("Delete layout \""+nm+"\"?"))return;
@@ -4376,13 +4463,13 @@ const BOARD_JS =
     \\// Persist the current poses to layout nm and update the panel IN PLACE — no
     \\// page reload, so the camera and view toggles you set while editing stay put.
     \\function persistLayout(nm,verb){var msg=document.getElementById("pcb-savemsg");
-    \\ var parts=P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};});
+    \\ var parts=P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,origin:p.origin||""};});
     \\ if(msg){msg.style.color="#8b949e";msg.textContent=verb+"\u{2026}";}
     \\ return fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name),{method:"POST",
     \\   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts})})
     \\  .then(function(r){if(!r.ok)throw 0;return r.json();})
     \\  .then(function(){
-    \\    var pmap={};parts.forEach(function(p){pmap[p.ref]={x:p.x,y:p.y,rot:p.rot};});
+    \\    var pmap={};parts.forEach(function(p){pmap[p.ref]={x:p.x,y:p.y,rot:p.rot,origin:p.origin||""};});
     \\    var Ls=PCB.layouts||(PCB.layouts=[]),found=null;
     \\    for(var i=0;i<Ls.length;i++)if(Ls[i].name===nm){found=Ls[i];break;}
     \\    if(found){found.parts=pmap;found.kind="manual";}
@@ -4811,4 +4898,29 @@ test "layouts sidecar round-trips rough flag" {
     try std.testing.expectEqual(@as(usize, 2), got.len);
     try std.testing.expect(got[0].rough);
     try std.testing.expect(!got[1].rough);
+}
+
+// spec: Web Server - A saved layout round-trips each part's renumber-stable origin key through the sidecar
+test "layouts sidecar round-trips part origin" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    // One part with an origin key, one legacy part without (empty origin).
+    const parts = [_]PartPose{
+        .{ .ref = "C1", .x = 1, .y = 2, .rot = 90, .origin = "C_VDDIN_BULK" },
+        .{ .ref = "U1", .x = 0, .y = 0, .rot = 0 },
+    };
+    const layouts = [_]SavedLayout{.{ .name = "hand", .kind = KIND_MANUAL, .ts = 1, .score = null, .parts = &parts }};
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeLayoutsFileJson(&aw.writer, &layouts, null);
+    const text = aw.written();
+    // The empty origin is omitted from the JSON; the populated one is present.
+    try std.testing.expect(std.mem.indexOf(u8, text, "\"origin\":\"C_VDDIN_BULK\"") != null);
+
+    const got = parseLayouts(alloc, text) orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(usize, 2), got[0].parts.len);
+    try std.testing.expectEqualStrings("C_VDDIN_BULK", got[0].parts[0].origin);
+    try std.testing.expectEqualStrings("", got[0].parts[1].origin);
 }
