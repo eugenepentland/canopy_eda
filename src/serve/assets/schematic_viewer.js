@@ -1609,15 +1609,15 @@
   // Build the "seed sub-circuits from saved layout" checkbox block from the
   // dry-run's sub_circuits[]. Each entry the saved layout can place gets a
   // checkbox (default OFF — a plain Confirm reproduces today's staging-grid
-  // behavior exactly); checking one keeps that sub-circuit's saved relative
-  // layout — anchored on its main IC when that IC is already on the board, else
-  // a labelled box just off the board that drags on as one KiCad group.
+  // behavior exactly); checked sub-circuits reproduce the saved layout —
+  // anchored on their IC when it is already on the board, else placed together
+  // in one off-board box (shared offset → full geometry preserved) as one group.
   function buildSeedSectionHtml(subs) {
     if (!subs || !subs.length) return '';
     var rows = subs.map(function (s, i) {
       var where = s.on_board && s.anchor
         ? 'around ' + escapeHtml(leafRef(s.anchor)) + ' (already on board)'
-        : 'in a draggable box off-board';
+        : 'off-board, in the shared layout box';
       return '<label class="kpv-seed-row">' +
         '<input type="checkbox" class="kpv-seed-cb" data-name="' + escapeAttr(s.name) + '">' +
         '<span class="kpv-seed-name">' + escapeHtml(s.name) + '</span>' +
@@ -1632,7 +1632,7 @@
           '<button type="button" class="kpv-seed-none">None</button>' +
         '</span>' +
       '</div>' +
-      '<div class="kpv-seed-note">Checked sub-circuits keep their saved relative layout: anchored on the IC if it is already on the board, otherwise generated as a labelled box just off the board that you drag on as one KiCad group. Unchecked parts go to the staging grid as before.</div>' +
+      '<div class="kpv-seed-note">Checked sub-circuits reproduce the saved PCB layout. Any whose IC is already on the board flow in around it; the rest are placed together in one labelled box just off the board — keeping their exact saved positions relative to each other — as a single draggable KiCad group. Unchecked parts go to the staging grid as before.</div>' +
       rows +
       '</div>';
   }

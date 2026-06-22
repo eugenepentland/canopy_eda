@@ -2883,9 +2883,11 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
             try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, mmToNm(p.x_mm), mmToNm(p.y_mm), p.rot, pa.canopy_net, pa.section);
             d.summary.added += 1;
         }
-        // Off-board boxes: a labelled rectangle around each group placed off the
-        // board, plus a KiCad `(group …)` op so its parts drag as one unit.
-        for (plan.boxes) |b| {
+        // The one off-board box (the whole un-placed layout): a labelled
+        // rectangle around it + a KiCad `(group …)` op so its parts drag as a
+        // single unit, referenced by their canopy_uuids (= the footprints' KiCad
+        // uuids for fresh adds).
+        if (plan.box) |b| {
             const items = [_][]const u8{
                 try boardRectItem(arena, b.x0, b.y0, b.x1, b.y1),
                 try boardLabelItem(arena, (b.x0 + b.x1) * STAGE_HALF, b.y0 + STAGE_LABEL_H_MM * STAGE_HALF, b.label),
@@ -2897,20 +2899,18 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
                 try w.*.writeAll(item_json);
                 try w.*.writeAll("}");
             }
-            if (b.members.len == 0) continue;
-            // `group` op (handled by the kicad writer): bind the box's parts into
-            // one draggable KiCad group, referenced by their canopy_uuids (which
-            // are the footprints' KiCad uuids for fresh adds).
-            if (!first.*) try w.*.writeAll(",");
-            first.* = false;
-            try w.*.writeAll("{\"op\":\"group\",\"name\":");
-            try json_writer.writeString(w.*, b.label);
-            try w.*.writeAll(",\"members\":[");
-            for (b.members, 0..) |m, i| {
-                if (i > 0) try w.*.writeAll(",");
-                try json_writer.writeString(w.*, m);
+            if (b.members.len > 0) {
+                if (!first.*) try w.*.writeAll(",");
+                first.* = false;
+                try w.*.writeAll("{\"op\":\"group\",\"name\":");
+                try json_writer.writeString(w.*, b.label);
+                try w.*.writeAll(",\"members\":[");
+                for (b.members, 0..) |m, i| {
+                    if (i > 0) try w.*.writeAll(",");
+                    try json_writer.writeString(w.*, m);
+                }
+                try w.*.writeAll("]}");
             }
-            try w.*.writeAll("]}");
         }
         return emitStagingGrid(d, w, first, leftover.items);
     }
@@ -3026,28 +3026,34 @@ fn groupSelected(d: *DiffContext, sec: []const u8) bool {
 /// One fresh add placed at an absolute board coordinate (mm) by the seeding
 /// planner. `emitStagedAdds` turns each into an `add` op (it owns the writer).
 const PositionedAdd = struct { pa: PendingAdd, x_mm: f64, y_mm: f64, rot: f64 };
-/// One off-board labelled box (mm) around a seeded group placed clear of the
-/// board, plus the canopy_uuids of its parts so the writer can bind them into a
-/// draggable KiCad `(group …)`. `emitStagedAdds` draws the rect/label + group op.
+/// A group add paired with its saved-layout pose.
+const NamedAdd = struct { pa: PendingAdd, pose: pcb_layout.SyncPose };
+/// The single off-board labelled box (mm) holding every seeded part whose IC is
+/// NOT already on the board, plus their canopy_uuids so the writer binds them
+/// into one draggable KiCad `(group …)`. `emitStagedAdds` draws the rect/label +
+/// group op. Null when nothing landed off-board (every selected group anchored).
 const SeedBox = struct { x0: f64, y0: f64, x1: f64, y1: f64, label: []const u8, members: []const []const u8 };
-/// The seeding planner's output: positioned adds + the off-board boxes to draw.
-const SeedPlan = struct { placed: []const PositionedAdd, boxes: []const SeedBox };
+/// The seeding planner's output: positioned adds + the optional off-board box.
+const SeedPlan = struct { placed: []const PositionedAdd, box: ?SeedBox };
 
-/// Plan placement for an explicit sub-circuit selection (the Push modal). For
-/// each SELECTED group, seed its freshly-added parts from the design's
-/// whole-design saved layout (`premade_layout`, keyed by flattened ref-des):
-///   • anchor already on the board ⇒ each add lands at its saved offset from the
-///     group anchor, re-centred on the anchor's live board position (the IC
-///     stays put, the rest of the sub-circuit flows in around it) — placed
-///     directly, no box;
-///   • anchor NOT on the board ⇒ the whole group is generated as one labelled
-///     box OFF the board (clear of the existing layout), preserving its saved
-///     internal arrangement exactly, and bound into a draggable KiCad group.
-/// Parts the layout doesn't name, and every non-selected group, are appended to
-/// `leftover` for the caller's staging grid. Only fresh adds get positions —
-/// existing footprints are never moved, so the placement guard never trips; no
-/// GND vias are planned (an off-board / partially-populated board can't carry a
-/// coherent via plan — same gate as `seedOneSubBlock`). Result lives on `arena`.
+const SEED_BOX_LABEL = "Seeded layout — drag onto board";
+
+/// Plan placement for an explicit sub-circuit selection (the Push modal). Each
+/// selected sub-circuit's freshly-added parts are seeded from the design's saved
+/// whole-design layout (`premade_layout`, keyed by flattened ref-des):
+///   • its main IC already on the board ⇒ the parts flow in AROUND that IC's
+///     live position (the IC stays put), placed directly on the board;
+///   • otherwise ⇒ the parts join one shared OFF-BOARD block.
+/// The off-board block keeps the FULL saved geometry — one shared translation for
+/// the whole block, so every part keeps its saved position relative to every
+/// other and the block reproduces the starred layout exactly, just shifted clear
+/// of the board — then it's wrapped in one labelled box + one draggable KiCad
+/// group. (Per-sub-circuit offsets would scatter the blocks into a row and lose
+/// the inter-block geometry — that is the bug this shared offset fixes.) Parts
+/// the layout doesn't name, and non-selected groups, go to `leftover` for the
+/// caller's staging grid. Only fresh adds get positions (existing footprints
+/// never move, so the placement guard never trips); no GND vias are planned.
+/// Result lives on `arena`.
 fn planSelectedGroups(
     d: *DiffContext,
     adds: []const PendingAdd,
@@ -3055,101 +3061,104 @@ fn planSelectedGroups(
 ) !SeedPlan {
     const arena = d.spc.arena;
     var placed: std.ArrayListUnmanaged(PositionedAdd) = .empty;
-    var boxes: std.ArrayListUnmanaged(SeedBox) = .empty;
     const layout = d.premade_layout orelse {
         for (adds) |pa| try leftover.append(arena, pa);
-        return .{ .placed = placed.items, .boxes = boxes.items };
+        return .{ .placed = placed.items, .box = null };
     };
     var buckets = std.StringHashMap(std.ArrayListUnmanaged(usize)).init(arena);
     var order: std.ArrayListUnmanaged([]const u8) = .empty;
     try groupAddsBySection(arena, adds, &buckets, &order);
 
-    var cursor_x = BLOCK_STAGE_ORIGIN_X_MM;
+    // Non-anchored parts accumulate here and are placed with ONE shared offset
+    // so the off-board block reproduces the whole saved layout's geometry.
+    var block: std.ArrayListUnmanaged(NamedAdd) = .empty;
     for (order.items) |sec| {
         const idxs = (buckets.get(sec) orelse continue).items;
         if (!groupSelected(d, sec)) {
             for (idxs) |idx| try leftover.append(arena, adds[idx]);
             continue;
         }
-        if (try planOneSelectedGroup(d, sec, adds, idxs, layout, cursor_x, leftover, &placed, &boxes)) |advance|
-            cursor_x += advance;
+        const anchor = d.group_anchors.get(sec);
+        if (anchor != null and anchor.?.on_board and layout.get(anchor.?.ref) != null) {
+            try placeAroundAnchor(arena, idxs, adds, layout, anchor.?, leftover, &placed);
+            d.summary.blocks += 1;
+        } else {
+            for (idxs) |idx| {
+                const pa = adds[idx];
+                const pose = layout.get(pa.inst.ref_des) orelse {
+                    try leftover.append(arena, pa);
+                    continue;
+                };
+                try block.append(arena, .{ .pa = pa, .pose = pose });
+            }
+        }
     }
-    return .{ .placed = placed.items, .boxes = boxes.items };
+    const box = try finishOffBoardBlock(arena, block.items, &placed);
+    if (box != null) d.summary.blocks += 1;
+    return .{ .placed = placed.items, .box = box };
 }
 
-/// Plan one selected group (see `planSelectedGroups`), appending its positioned
-/// adds to `placed`. Parts the layout doesn't name go to `leftover`. When the
-/// group's main IC is already on the board the parts are placed anchor-relative
-/// (returns null — no box). Otherwise the group is placed in an off-board box at
-/// `cursor_x`, a `SeedBox` (with member uuids) is appended, and the box's
-/// horizontal advance is returned so the caller can pack the next one.
-fn planOneSelectedGroup(
-    d: *DiffContext,
-    sec: []const u8,
-    adds: []const PendingAdd,
+/// Place an anchored sub-circuit's named adds around its main IC's live board
+/// position (saved offset from the anchor + the anchor's board coords). Parts the
+/// layout doesn't name go to `leftover`.
+fn placeAroundAnchor(
+    arena: std.mem.Allocator,
     idxs: []const usize,
+    adds: []const PendingAdd,
     layout: std.StringHashMap(pcb_layout.SyncPose),
-    cursor_x: f64,
+    anchor: GroupAnchor,
     leftover: *std.ArrayListUnmanaged(PendingAdd),
     placed: *std.ArrayListUnmanaged(PositionedAdd),
-    boxes: *std.ArrayListUnmanaged(SeedBox),
-) !?f64 {
-    const arena = d.spc.arena;
-    // Collect the group's named adds + their saved poses, tracking the bbox for
-    // the off-board box translation.
-    var named: std.ArrayListUnmanaged(NamedAdd) = .empty;
-    var minx: f64 = std.math.floatMax(f64);
-    var miny: f64 = std.math.floatMax(f64);
-    var maxx: f64 = -std.math.floatMax(f64);
-    var maxy: f64 = -std.math.floatMax(f64);
+) !void {
+    const ap = layout.get(anchor.ref).?;
+    const dx = anchor.board_x - ap.x;
+    const dy = anchor.board_y - ap.y;
     for (idxs) |idx| {
         const pa = adds[idx];
         const pose = layout.get(pa.inst.ref_des) orelse {
             try leftover.append(arena, pa);
             continue;
         };
-        try named.append(arena, .{ .pa = pa, .pose = pose });
-        minx = @min(minx, pose.x);
-        miny = @min(miny, pose.y);
-        maxx = @max(maxx, pose.x);
-        maxy = @max(maxy, pose.y);
+        try placed.append(arena, .{ .pa = pa, .x_mm = pose.x + dx, .y_mm = pose.y + dy, .rot = pose.rot });
     }
-    if (named.items.len == 0) return null;
-
-    // Anchor on the board ⇒ place around its live position; else ⇒ off-board box.
-    const anchor = d.group_anchors.get(sec);
-    const anchored = anchor != null and anchor.?.on_board and layout.get(anchor.?.ref) != null;
-    var dx: f64 = 0;
-    var dy: f64 = 0;
-    if (anchored) {
-        const ap = layout.get(anchor.?.ref).?;
-        dx = anchor.?.board_x - ap.x;
-        dy = anchor.?.board_y - ap.y;
-    } else {
-        dx = cursor_x - minx;
-        dy = BLOCK_STAGE_ORIGIN_Y_MM - miny;
-    }
-
-    var members: std.ArrayListUnmanaged([]const u8) = .empty;
-    for (named.items) |n| {
-        try placed.append(arena, .{ .pa = n.pa, .x_mm = n.pose.x + dx, .y_mm = n.pose.y + dy, .rot = n.pose.rot });
-        if (!anchored and n.pa.inst.uuid.len > 0) try members.append(arena, n.pa.inst.uuid);
-    }
-    // Mark per-block seeding so the whole-design via path stays off (it only
-    // runs when `summary.blocks == 0`); vias here would strand on a non-fresh board.
-    d.summary.blocks += 1;
-    if (anchored) return null;
-
-    const bx0 = cursor_x - STAGE_BOX_PAD_MM;
-    const by0 = BLOCK_STAGE_ORIGIN_Y_MM - STAGE_BOX_PAD_MM - STAGE_LABEL_H_MM;
-    const bx1 = cursor_x + (maxx - minx) + STAGE_BOX_PAD_MM;
-    const by1 = BLOCK_STAGE_ORIGIN_Y_MM + (maxy - miny) + STAGE_BOX_PAD_MM;
-    try boxes.append(arena, .{ .x0 = bx0, .y0 = by0, .x1 = bx1, .y1 = by1, .label = sec, .members = members.items });
-    return (bx1 - bx0) + BLOCK_STAGE_GAP_MM;
 }
 
-/// A group add paired with its saved-layout pose.
-const NamedAdd = struct { pa: PendingAdd, pose: pcb_layout.SyncPose };
+/// Translate the whole off-board `block` by ONE shared offset (its collective
+/// min-corner → the off-board staging origin), so it reproduces the saved
+/// layout's geometry exactly, appending the positioned parts to `placed`. Returns
+/// the one labelled box (with all member uuids) bounding it, or null when empty.
+fn finishOffBoardBlock(
+    arena: std.mem.Allocator,
+    block: []const NamedAdd,
+    placed: *std.ArrayListUnmanaged(PositionedAdd),
+) !?SeedBox {
+    if (block.len == 0) return null;
+    var minx: f64 = std.math.floatMax(f64);
+    var miny: f64 = std.math.floatMax(f64);
+    var maxx: f64 = -std.math.floatMax(f64);
+    var maxy: f64 = -std.math.floatMax(f64);
+    for (block) |n| {
+        minx = @min(minx, n.pose.x);
+        miny = @min(miny, n.pose.y);
+        maxx = @max(maxx, n.pose.x);
+        maxy = @max(maxy, n.pose.y);
+    }
+    const dx = BLOCK_STAGE_ORIGIN_X_MM - minx;
+    const dy = BLOCK_STAGE_ORIGIN_Y_MM - miny;
+    var members: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (block) |n| {
+        try placed.append(arena, .{ .pa = n.pa, .x_mm = n.pose.x + dx, .y_mm = n.pose.y + dy, .rot = n.pose.rot });
+        if (n.pa.inst.uuid.len > 0) try members.append(arena, n.pa.inst.uuid);
+    }
+    return .{
+        .x0 = BLOCK_STAGE_ORIGIN_X_MM - STAGE_BOX_PAD_MM,
+        .y0 = BLOCK_STAGE_ORIGIN_Y_MM - STAGE_BOX_PAD_MM - STAGE_LABEL_H_MM,
+        .x1 = BLOCK_STAGE_ORIGIN_X_MM + (maxx - minx) + STAGE_BOX_PAD_MM,
+        .y1 = BLOCK_STAGE_ORIGIN_Y_MM + (maxy - miny) + STAGE_BOX_PAD_MM,
+        .label = SEED_BOX_LABEL,
+        .members = members.items,
+    };
+}
 
 /// Build the `sub_circuits` JSON array advertised in the dry-run response: one
 /// entry per group that has at least one freshly-added part NAMED by the saved
