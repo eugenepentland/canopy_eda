@@ -88,6 +88,21 @@ fn notesSibling(scratch: std.mem.Allocator, project_dir: []const u8, name: []con
     return std.fmt.allocPrint(scratch, "{s}/{s}.notes.md", .{ dir, name });
 }
 
+/// For a loaded `lib/modules/<m>.sexp` path, the sibling `<m>.layouts.json` that
+/// `layout_status.read` consults for the ★ star — the input to the block-overview
+/// design-maturity dot and the module-layout panels. The evaluator never parses
+/// this file, so without an explicit stamp, starring (or unstarring) a module's
+/// layout would not invalidate a cached schematic page that shows the module's
+/// completion. Null for any non-module path: a `src/` design's own board layout
+/// is intentionally not tracked — it drives no maturity dot and would rewrite
+/// (and thus needlessly re-render the page) on every optimizer solve.
+fn moduleLayoutsSibling(scratch: std.mem.Allocator, sexp_path: []const u8) std.mem.Allocator.Error!?[]u8 {
+    if (!std.mem.endsWith(u8, sexp_path, ".sexp")) return null;
+    if (std.mem.indexOf(u8, sexp_path, "lib/modules/") == null) return null;
+    const stem = sexp_path[0 .. sexp_path.len - ".sexp".len];
+    return try std.fmt.allocPrint(scratch, "{s}.layouts.json", .{stem});
+}
+
 /// Capture the dependency set of a just-completed evaluation of design `name`:
 /// every file the evaluator read (`eval.loaded_files` — design, checks, and all
 /// transitively-imported lib files) plus the `.bom`/`.refdes.json`/`.checks`/
@@ -107,7 +122,16 @@ pub fn capture(
     }
 
     var it = eval.loaded_files.keyIterator();
-    while (it.next()) |k| try list.append(page, try stampOf(k.*));
+    while (it.next()) |k| {
+        try list.append(page, try stampOf(k.*));
+        // A module's ★ layout star lives in its `<module>.layouts.json`, which
+        // the evaluator never parses but the maturity dot / layout panels read.
+        // Stamp it so starring a layout invalidates pages showing its completion.
+        if (try moduleLayoutsSibling(scratch, k.*)) |lp| {
+            defer scratch.free(lp);
+            try list.append(page, try stampOf(lp));
+        }
+    }
 
     for (sibling_exts) |ext| {
         const p = paths.designSiblingPath(scratch, project_dir, name, ext) catch continue;
@@ -163,4 +187,19 @@ test "absent-then-present sibling invalidates" {
 
     try tmp.dir.writeFile(.{ .sub_path = "late.bom", .data = "x" });
     try testing.expect(!fs.isValid());
+}
+
+test "moduleLayoutsSibling maps a lib/modules sexp to its layouts sidecar" {
+    const testing = std.testing;
+    // A module source → its `.layouts.json` sibling (the ★ star file). The `.?`
+    // asserts non-null (the property under test); only this branch allocates.
+    const got = (try moduleLayoutsSibling(testing.allocator, "projects/designs/lib/modules/tpsm84338.sexp")).?;
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("projects/designs/lib/modules/tpsm84338.layouts.json", got);
+
+    // A `src/` design's own source is not a module → not tracked here (its board
+    // layout drives no maturity dot and would re-render the page on every solve).
+    try testing.expect((try moduleLayoutsSibling(testing.allocator, "projects/designs/src/barracuda/barracuda-base.sexp")) == null);
+    // A non-`.sexp` path is ignored outright.
+    try testing.expect((try moduleLayoutsSibling(testing.allocator, "projects/designs/lib/modules/tpsm84338.layouts.json")) == null);
 }
