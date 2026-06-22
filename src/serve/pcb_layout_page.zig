@@ -2569,7 +2569,7 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
     try w.writeAll("<button class=\"btn\" id=\"z-fit\" title=\"Reset zoom\">Fit</button></span>");
     try w.writeAll("<span class=\"savemsg\" id=\"pcb-savemsg\"></span>");
     try w.print("<span class=\"muted\" title=\"drag part to move · hover + R to rotate · Ctrl+Z undo · " ++
-        "two-finger drag / scroll to pan · pinch or Ctrl+scroll to zoom · snaps to {d} mm grid · press ? for all shortcuts\">" ++
+        "two-finger drag / middle-drag to pan · scroll wheel or pinch to zoom · snaps to {d} mm grid · press ? for all shortcuts\">" ++
         "drag · R rotate · Ctrl+Z undo · ? help</span>", .{optimizer.GRID_MM});
     try w.writeAll("</div>");
 }
@@ -4224,8 +4224,8 @@ const BOARD_JS =
     \\  '<div class="kbd-row"><span>Move all selected together</span><kbd>drag a selected part</kbd></div>'+
     \\  '<div class="kbd-row"><span>Clear selection</span><kbd>Esc / click empty</kbd></div>'+
     \\  '<div class="kbd-row"><span>Undo / redo move</span><kbd>Ctrl+Z / Ctrl+Shift+Z</kbd></div>'+
-    \\  '<div class="kbd-row"><span>Pan</span><kbd>two-finger drag &middot; scroll &middot; Space+drag &middot; middle-drag</kbd></div>'+
-    \\  '<div class="kbd-row"><span>Zoom</span><kbd>pinch &middot; Ctrl+scroll &middot; +/&minus;</kbd></div>'+
+    \\  '<div class="kbd-row"><span>Pan</span><kbd>two-finger drag &middot; Space+drag &middot; middle-drag</kbd></div>'+
+    \\  '<div class="kbd-row"><span>Zoom</span><kbd>scroll wheel &middot; pinch &middot; +/&minus;</kbd></div>'+
     \\  '<div class="kbd-row"><span>Toggle this help</span><kbd>?</kbd></div>'+
     \\  '<div class="kbd-hint">Esc or click anywhere to close</div></div>';
     \\ document.body.appendChild(kbdOv);kbdOv.addEventListener("click",kbdClose);
@@ -4426,14 +4426,21 @@ const BOARD_JS =
     \\ var r=svg.getBoundingClientRect();
     \\ var px=vb.x+(cx-r.left)*(vb.w/r.width),py=vb.y+(cy-r.top)*(vb.h/r.height);
     \\ vb.x=px-(px-vb.x)*f; vb.y=py-(py-vb.y)*f; vb.w*=f; vb.h*=f; setVB();}
-    \\// Figma-style wheel: a pinch gesture (or held Ctrl) arrives as a wheel event
-    \\// with ctrlKey set → zoom; a plain two-finger trackpad drag (or mouse wheel)
-    \\// → pan by its delta. deltaMode 1/2 (line/page) is normalised to pixels so a
-    \\// notched mouse wheel pans a sane distance too.
+    \\// Figma-style wheel routing. A trackpad two-finger PINCH (or held Ctrl)
+    \\// arrives as a wheel event with ctrlKey set → zoom at the cursor. A plain
+    \\// MOUSE wheel (no horizontal delta, big discrete vertical notch, or a
+    \\// line/page deltaMode) → zoom too — that's what bench mouse users expect.
+    \\// Only a two-finger trackpad DRAG (pixel-precise, usually carrying deltaX,
+    \\// small per-event steps) → pan by its delta.
+    \\function wheelIsMouse(ev){
+    \\ if(ev.deltaMode!==0)return true;            // Firefox line/page mode = real wheel
+    \\ if(ev.deltaX!==0)return false;              // horizontal component = trackpad pan
+    \\ return Math.abs(ev.deltaY)>=24;}            // big pure-vertical notch = wheel
     \\svg.addEventListener("wheel",function(ev){ev.preventDefault();
     \\ if(ev.ctrlKey){zoomAt(ev.clientX,ev.clientY,Math.exp(ev.deltaY*0.01));return;}
     \\ var r=svg.getBoundingClientRect(),dx=ev.deltaX,dy=ev.deltaY;
     \\ if(ev.deltaMode===1){dx*=16;dy*=16;}else if(ev.deltaMode===2){dx*=r.width;dy*=r.height;}
+    \\ if(wheelIsMouse(ev)){zoomAt(ev.clientX,ev.clientY,dy<0?0.85:1.18);return;}
     \\ vb.x+=dx*(vb.w/r.width);vb.y+=dy*(vb.h/r.height);setVB();},{passive:false});
     \\function zc(f){var r=svg.getBoundingClientRect();zoomAt(r.left+r.width/2,r.top+r.height/2,f);}
     \\var zi=document.getElementById("z-in");if(zi)zi.addEventListener("click",function(){zc(0.8);});
