@@ -14,6 +14,7 @@ unlinked tag: Web Server - Module-layout status reads rough and starred flags fr
 unlinked tag: Web Server - Module-layout status reports neither rough nor starred when none recorded in ./src/layout_status.zig
 unlinked tag: Web Server - Placement-spec export falls back to ref-des when origin names repeat in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - Placement-spec export rebuilds an editable (placement …) form from a solved layout in ./src/serve/placement_spec.zig
+unlinked tag: Web Server - The /pcb-layout page defaults to the design's starred (★) saved layout, below an explicit ?refine= snapshot and a (placement …) spec in ./src/serve/pcb_layout_page.zig
 unlinked tag: Web Server - The layouts sidecar round-trips snapshots and the optimizer cache slot through one file in ./src/serve/pcb_layout_page.zig
 unlinked tag: Web Server - layout-match counts a wrong-edge proportion as a partial area mismatch in ./src/serve/layout_match.zig
 unlinked tag: Web Server - layout-match credits interchangeable parts by per-edge count, ignoring which fungible part is where in ./src/serve/layout_match.zig
