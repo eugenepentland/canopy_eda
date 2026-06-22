@@ -1358,19 +1358,27 @@ fn writeSubBlockCard(
         try w.writeAll("<span class=\"pill pill-ok\">sub-block</span>");
     }
     // "Copy source" pulls the underlying module/file text via
-    // /api/module-source; "View" opens the standalone /modules viewer. Both
-    // need the sub-block's source provenance — skip them when it's unknown.
-    // The `/modules/:name` route can't carry a slashed path, so only
-    // module-name sources (no `/`) get the View link; path-based sub-blocks
-    // still get the copy button (the API takes the raw path via query).
+    // /api/module-source; the "Schematic"/"PCB Layout" links open the
+    // standalone module viewer (/modules/:name) and its whole-module PCB
+    // layout editor (/pcb-layout/:name) directly — so the module's board can
+    // be reached in one click instead of detouring through its schematic page.
+    // Both need the sub-block's source provenance — skip them when it's
+    // unknown. The `/modules/:name` + `/pcb-layout/:name` routes can't carry a
+    // slashed path, so only module-name sources (no `/`) get the links;
+    // path-based sub-blocks still get the copy button (the API takes the raw
+    // path via query). Open in a new tab so the parent design's schematic page
+    // stays put.
     if (sb.source.len > 0) {
         try w.writeAll("<button type=\"button\" class=\"copy-src-btn\" data-src=\"");
         try writeHtmlEscaped(w, sb.source);
         try w.writeAll("\">Copy source</button>");
         if (std.mem.indexOfScalar(u8, sb.source, '/') == null) {
-            try w.writeAll("<a class=\"view-src-link\" href=\"/modules/");
+            try w.writeAll("<a class=\"view-src-link\" target=\"_blank\" rel=\"noopener\" href=\"/modules/");
             try writeUrlEncoded(w, sb.source);
-            try w.writeAll("\">View \u{2197}</a>");
+            try w.writeAll("\">Schematic \u{2197}</a>");
+            try w.writeAll("<a class=\"view-src-link\" target=\"_blank\" rel=\"noopener\" href=\"/pcb-layout/");
+            try writeUrlEncoded(w, sb.source);
+            try w.writeAll("\">PCB Layout \u{2197}</a>");
         }
     }
     try w.writeAll("</div>");
