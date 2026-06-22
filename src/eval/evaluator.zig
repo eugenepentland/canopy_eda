@@ -27,7 +27,7 @@ const Port = env_mod.Port;
 const Note = env_mod.Note;
 const Group = env_mod.Group;
 const SubBlock = env_mod.SubBlock;
-const ModuleDef = env_mod.ModuleDef;
+const BlockDef = env_mod.BlockDef;
 const AssertionResult = env_mod.AssertionResult;
 
 /// Source-located explanation for the most recent `EvalError`. Zig
@@ -439,6 +439,14 @@ pub const Evaluator = struct {
             .import => modules.evalImport(self, args, env),
             .defmodule => modules.evalDefmodule(self, args, env),
             .design_block => design_block.evalDesignBlock(self, args, env),
+            // (block …) is the unified definition form: a string name is an
+            // eager design root (≡ design-block); a bare-atom name is a
+            // parameterized definition (≡ defmodule). The two legacy keywords
+            // above remain permanent aliases routed to the same handlers.
+            .block => if (args.len > 0 and args[0].asString() != null)
+                design_block.evalDesignBlock(self, args, env)
+            else
+                modules.evalDefmodule(self, args, env),
             .assert_ => special_forms.evalAssert(self, args, env),
             .assert_range => special_forms.evalAssertRange(self, args, env),
             .fmt_ => special_forms.evalFmt(self, args, env),
@@ -464,7 +472,7 @@ pub const Evaluator = struct {
         // Module or component-family invocation
         if (env.get(head_name)) |v| {
             switch (v) {
-                .module => |mod| return modules.callModule(self, mod, args, head.span, env),
+                .block_def => |mod| return modules.callModule(self, mod, args, head.span, env),
                 else => {},
             }
         }
@@ -647,6 +655,100 @@ test "eval si suffixed literal as module argument" {
 
     const result = try eval.evalNodes(nodes, &env);
     try std.testing.expectApproxEqAbs(@as(f64, 3.4085), result.asNumber().?, 0.001);
+}
+
+// spec: eval/evaluator - block with a string name evaluates as a design root
+test "block with string name evaluates as a design root" {
+    // page_allocator: the evaluated design block is intentionally never freed.
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    const nodes = try parser.parse(alloc, "(block \"B2 Design\" (note \"n1\" \"routing check\"))");
+
+    const result = try eval.evalNodes(nodes, &env);
+    try std.testing.expect(result == .design_block);
+    try std.testing.expectEqualStrings("B2 Design", result.design_block.name);
+    try std.testing.expectEqual(@as(usize, 1), result.design_block.notes.len);
+    // A top-level (block "x" …) is a design root, not an embedded module body.
+    try std.testing.expectEqual(env_mod.BlockOrigin.design_root, result.design_block.origin);
+}
+
+// spec: eval/evaluator - block with an atom name defines a callable module stamped embedded
+test "block with atom name defines a callable module" {
+    // page_allocator: the module's captured body + the design block it produces
+    // are intentionally never freed (AST slices reference the source buffer).
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    const nodes = try parser.parse(alloc,
+        \\(block leaf (v) (design-block "leaf" (port "OUT" out)))
+        \\(leaf 3.3)
+    );
+
+    const result = try eval.evalNodes(nodes, &env);
+    try std.testing.expect(result == .design_block);
+    try std.testing.expectEqualStrings("leaf", result.design_block.name);
+    try std.testing.expectEqual(@as(usize, 1), result.design_block.ports.len);
+    // A called block body is an embedded module root (gates auto-placement).
+    try std.testing.expectEqual(env_mod.BlockOrigin.embedded, result.design_block.origin);
+}
+
+// spec: eval/evaluator - block with an atom name and a raw design-scope body materializes in place
+test "block with atom name and raw body materializes in place" {
+    // page_allocator: the module's captured body + the design block it produces
+    // are intentionally never freed (AST slices reference the source buffer).
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    // No inner (design-block …): a `(let …)` setup form then a design-scope
+    // `(port …)` straight in the body — materialized in place, named after `leaf`.
+    const nodes = try parser.parse(alloc,
+        \\(block leaf (v) (let r (* 2 v)) (port "OUT" out))
+        \\(leaf 3)
+    );
+
+    const result = try eval.evalNodes(nodes, &env);
+    try std.testing.expect(result == .design_block);
+    try std.testing.expectEqualStrings("leaf", result.design_block.name);
+    try std.testing.expectEqual(@as(usize, 1), result.design_block.ports.len);
+    // A raw-body module root is embedded, like the wrapped form.
+    try std.testing.expectEqual(env_mod.BlockOrigin.embedded, result.design_block.origin);
+}
+
+// spec: eval/evaluator - block with an atom name and a wrapped inner design-block still materializes the inner block
+test "block with atom name and wrapped inner design-block still materializes the inner block" {
+    // page_allocator: the module's captured body + the design block it produces
+    // are intentionally never freed (AST slices reference the source buffer).
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    const nodes = try parser.parse(alloc,
+        \\(block leaf2 (v) (design-block "wrapped" (port "P" out)))
+        \\(leaf2 1)
+    );
+
+    const result = try eval.evalNodes(nodes, &env);
+    try std.testing.expect(result == .design_block);
+    // The inner block's name wins, not the module name.
+    try std.testing.expectEqualStrings("wrapped", result.design_block.name);
+    try std.testing.expectEqual(@as(usize, 1), result.design_block.ports.len);
+    try std.testing.expectEqual(env_mod.BlockOrigin.embedded, result.design_block.origin);
 }
 
 // spec: eval/evaluator - Evaluates if conditionals selecting a branch by predicate

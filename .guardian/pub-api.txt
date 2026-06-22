@@ -161,10 +161,13 @@ src/eval/builtins.zig::BuiltinError value
 src/eval/builtins.zig::evalBuiltinOp fn
 src/eval/design_block.zig::ParsedPlacementForm struct_
 src/eval/design_block.zig::evalDesignBlock fn
+src/eval/design_block.zig::materializeBlock fn
 src/eval/design_block.zig::parsePlacementText fn
 src/eval/electrical.zig::parse fn
 src/eval/electrical.zig::parseSubForms fn
 src/eval/env.zig::AssertionResult struct_
+src/eval/env.zig::BlockDef struct_
+src/eval/env.zig::BlockOrigin enum_
 src/eval/env.zig::BlockRole enum_
 src/eval/env.zig::BoardSpec struct_
 src/eval/env.zig::CalcBlock struct_
@@ -188,7 +191,6 @@ src/eval/env.zig::LayoutGroup struct_
 src/eval/env.zig::LayoutRow struct_
 src/eval/env.zig::LayoutSpec struct_
 src/eval/env.zig::ModuleClassOverride struct_
-src/eval/env.zig::ModuleDef struct_
 src/eval/env.zig::Net struct_
 src/eval/env.zig::NetClassOverride struct_
 src/eval/env.zig::NetLengthConstraint struct_
@@ -314,6 +316,7 @@ src/eval/instance.zig::resolvePinName fn
 src/eval/modules.zig::callModule fn
 src/eval/modules.zig::evalDefmodule fn
 src/eval/modules.zig::evalImport fn
+src/eval/modules.zig::instantiateStandalone fn
 src/eval/modules.zig::loadComponent fn
 src/eval/modules.zig::loadComponentFamily fn
 src/eval/modules.zig::loadPassivesPrelude fn
@@ -903,6 +906,7 @@ src/serve/modules.zig::collectModules fn
 src/serve/modules.zig::moduleSourceApi fn
 src/serve/modules.zig::moduleViewPage fn
 src/serve/modules.zig::modulesListPage fn
+src/serve/modules.zig::renderModulePage fn
 src/serve/modules.zig::resolveModuleBlock fn
 src/serve/notes.zig::HandlerError value
 src/serve/notes.zig::Note struct_

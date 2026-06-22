@@ -10,6 +10,7 @@ const serve_root = @import("../serve.zig");
 const render_json = @import("../render_json.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const env_mod = @import("../eval/env.zig");
+const eval_modules = @import("../eval/modules.zig");
 const erc_mod = @import("../erc.zig");
 const log = @import("../infra/log.zig");
 const bom = @import("../bom.zig");
@@ -807,12 +808,15 @@ fn writeModuleSummary(
     }
     try w.writeAll("],\"erc\":[");
     const violations = try erc_mod.runErc(allocator, block, project_dir);
+    // The preview root IS the module (a subcircuit unless it declares board
+    // intent), so "main IC should be sealed in a module" is satisfied by
+    // construction — reporting it would tell the agent to do what it already
+    // did. Suppress by role (same rule as `runErcForNamedBlock`); a module
+    // that declared `(board …)`/`(critical-ic …)` would keep the check.
+    const suppress_main_ic = !isBoardBlock(block);
     var first = true;
     for (violations) |v| {
-        // The preview root IS the module, so "main IC should be sealed in a
-        // module" is satisfied by construction — reporting it would tell the
-        // agent to do what it already did.
-        if (v.kind == .main_ic_in_design) continue;
+        if (suppress_main_ic and v.kind == .main_ic_in_design) continue;
         if (!first) try w.writeAll(",");
         first = false;
         try writeErcViolationJson(w, v);
@@ -2372,6 +2376,12 @@ pub const DesignSummary = struct {
     /// home page's "grouping" tag so the layout workflow (author grouping →
     /// rough → star) is visible at a glance.
     has_groups: bool = false,
+    /// True when the evaluated design declares fabrication intent — a
+    /// top-level `(board …)` outline, a `(kicad-pcb …)` target, or any
+    /// `(critical-ic …)`. Such a block is a fabricable *board*; otherwise it
+    /// is a reusable *subcircuit*. Drives the home page's Board/Subcircuit
+    /// role tag + filter (the role is content-derived, not folder-derived).
+    is_board: bool = false,
 };
 
 /// Count instances flattened across a design plus every sub-block. Does NOT
@@ -2436,6 +2446,8 @@ fn dupeSummary(alloc: std.mem.Allocator, s: DesignSummary) std.mem.Allocator.Err
         .modules_used = mods,
         .assert_fails = s.assert_fails,
         .open_notes = s.open_notes,
+        .has_groups = s.has_groups,
+        .is_board = s.is_board,
     };
 }
 
@@ -2575,6 +2587,13 @@ pub fn listDesignSummaries(
                 summary.net_count = countNets(block);
                 summary.build_ok = true;
                 summary.has_groups = block.groups.len > 0;
+                // Content-derived board/subcircuit role: a block is a fabricable
+                // *board* iff it declares fabrication intent (a (board …) outline,
+                // a (kicad-pcb …) target, or any (critical-ic …)); otherwise it is
+                // a reusable subcircuit. Folder is not consulted.
+                summary.is_board = block.board.present or
+                    block.kicad_pcb_path != null or
+                    block.critical_ics.len > 0;
 
                 // Traceability roll-up for the home dashboard. Run the same
                 // requirement checks the schematic page does so "placed +
@@ -2711,7 +2730,10 @@ pub fn evalNamedBlock(
         const result = try eval.evalFile(path);
         switch (result) {
             .design_block => |b| return .{ .block = b, .is_module = false },
-            else => return error.NotADesign,
+            // A defmodule file (returns .nil) means `name` resolved via the
+            // lib/modules fallback in designSourcePath — not a real src/ design.
+            // Fall through to instantiate it as a module below.
+            else => {},
         }
     }
 
@@ -2719,32 +2741,43 @@ pub fn evalNamedBlock(
     const mod_path = try std.fmt.allocPrint(allocator, "{s}/lib/modules/{s}.sexp", .{ project_dir, name });
     defer allocator.free(mod_path);
     infra_fs.cwd().access(mod_path, .{}) catch return error.FileNotFound;
-    const source = try std.fmt.allocPrint(
-        allocator,
-        "(import {s})\n(design-block \"{s}\" (sub-block \"{s}\" ({s})))",
-        .{ name, name, name, name },
-    );
-    const result = try eval.evalSource(source);
+    // Instantiate the module by name with zero arguments — its (param default)s
+    // supply the values (defaults-first), via the single shared helper. The
+    // returned block borrows `eval`'s arena — the caller keeps `eval` alive —
+    // and is stamped `.embedded` by `callModule`.
+    const result = try eval_modules.instantiateStandalone(eval, name);
     switch (result) {
-        .design_block => |b| {
-            if (b.sub_blocks.len == 0) return error.NotADesign;
-            return .{ .block = b.sub_blocks[0].block, .is_module = true };
-        },
+        .design_block => |b| return .{ .block = b, .is_module = true },
         else => return error.NotADesign,
     }
 }
 
-/// Run ERC on a named block, dropping `main_ic_in_design` for standalone
-/// module renders — the module IS the design root there, so demanding the
-/// main IC be sealed in a module is satisfied by construction (same
-/// suppression `preview_module` applies).
+/// A block declares fabrication intent — i.e. it is a board, not a
+/// subcircuit — when it carries a `(board …)` outline, a `(kicad-pcb …)`
+/// handoff path, or any `(critical-ic …)` anchor. The `main_ic_in_design`
+/// ERC check (which demands the anchor IC be sealed in a module) only
+/// applies to boards; a subcircuit (a `lib/modules` module, or a flat
+/// design with none of those forms) is exempt. Mirrors
+/// `DesignSummary.is_board`.
+fn isBoardBlock(b: *const env_mod.DesignBlock) bool {
+    return b.board.present or b.kicad_pcb_path != null or b.critical_ics.len > 0;
+}
+
+/// Run ERC on a named block, dropping `main_ic_in_design` for any block that
+/// is NOT a board (a subcircuit). The check demands the anchor IC be sealed
+/// in a module and brought in as a sub-block; a board declares fab intent
+/// and keeps it, but a standalone module render — or a flat design with no
+/// board/kicad-pcb/critical-ics — IS the design root there, so the rule is
+/// satisfied by construction. Suppression keys on block content (the role
+/// `isBoardBlock` reports), never on how the name was resolved, so the same
+/// rule governs `preview_module`. This only ever removes violations.
 pub fn runErcForNamedBlock(
     allocator: std.mem.Allocator,
     nb: NamedBlock,
     project_dir: []const u8,
 ) std.mem.Allocator.Error![]const erc_mod.Violation {
     const violations = try erc_mod.runErc(allocator, nb.block, project_dir);
-    if (!nb.is_module) return violations;
+    if (isBoardBlock(nb.block)) return violations;
     var keep: std.ArrayListUnmanaged(erc_mod.Violation) = .empty;
     for (violations) |v| {
         if (v.kind == .main_ic_in_design) continue;

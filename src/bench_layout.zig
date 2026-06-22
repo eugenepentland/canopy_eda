@@ -25,6 +25,7 @@ const std = @import("std");
 const paths = @import("paths.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 const env = @import("eval/env.zig");
+const eval_modules = @import("eval/modules.zig");
 const optimizer = @import("placement/optimizer.zig");
 const clock = @import("infra/clock.zig");
 const infra_fs = @import("infra/fs.zig");
@@ -75,6 +76,21 @@ fn poseChecksum(placement: optimizer.Placement) u64 {
     return h.final();
 }
 
+/// Resolve `name` to a design block: a top-level `(design-block …)` is used
+/// as-is; a bare `lib/modules/<name>.sexp` module (where `evalFile` returned
+/// .nil after running the `(defmodule …)`) is instantiated standalone via
+/// its parameter defaults. Lets every bench mode accept a module name the
+/// same way the CLI build/check/export paths do.
+fn resolveBlock(eval: *Evaluator, result: env.Value, name: []const u8) !*env.DesignBlock {
+    return switch (result) {
+        .design_block => |b| b,
+        else => switch (try eval_modules.instantiateStandalone(eval, name)) {
+            .design_block => |b| b,
+            else => error.NotADesignBlock,
+        },
+    };
+}
+
 /// Evaluate `name` under `project_dir`, then time `optimizer.solve` (full
 /// from-scratch placement: `cached = null`, `.place`) over `reps` reps after one
 /// warm-up that also fixes the checksum and part count. Each rep runs in an
@@ -95,10 +111,7 @@ fn benchOne(
     defer eval.deinit();
 
     const result = try eval.evalFile(path);
-    const block: *env.DesignBlock = switch (result) {
-        .design_block => |b| b,
-        else => return error.NotADesignBlock,
-    };
+    const block = try resolveBlock(&eval, result, name);
 
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -208,10 +221,7 @@ fn scoreOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u8, t
     var eval = Evaluator.init(gpa, project_dir);
     defer eval.deinit();
     const result = try eval.evalFile(path);
-    const block: *env.DesignBlock = switch (result) {
-        .design_block => |b| b,
-        else => return error.NotADesignBlock,
-    };
+    const block = try resolveBlock(&eval, result, name);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const bd = try optimizer.scorePoses(arena.allocator(), block, project_dir, poses, g_params);
@@ -231,10 +241,7 @@ fn seedOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u8, po
     defer gpa.free(path);
     var eval = Evaluator.init(gpa, project_dir);
     defer eval.deinit();
-    const block: *env.DesignBlock = switch (try eval.evalFile(path)) {
-        .design_block => |b| b,
-        else => return error.NotADesignBlock,
-    };
+    const block = try resolveBlock(&eval, try eval.evalFile(path), name);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const placed = try optimizer.solve(arena.allocator(), block, project_dir, poses, g_params, .place);
@@ -255,10 +262,7 @@ fn validateOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u8
     var eval = Evaluator.init(gpa, project_dir);
     defer eval.deinit();
     const result = try eval.evalFile(path);
-    const block: *env.DesignBlock = switch (result) {
-        .design_block => |b| b,
-        else => return error.NotADesignBlock,
-    };
+    const block = try resolveBlock(&eval, result, name);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const diags = try optimizer.validateConstraints(arena.allocator(), block, project_dir, .{});
@@ -278,10 +282,7 @@ fn breakdownOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u
     var eval = Evaluator.init(gpa, project_dir);
     defer eval.deinit();
     const result = try eval.evalFile(path);
-    const block: *env.DesignBlock = switch (result) {
-        .design_block => |b| b,
-        else => return error.NotADesignBlock,
-    };
+    const block = try resolveBlock(&eval, result, name);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const pl = try optimizer.solve(arena.allocator(), block, project_dir, null, g_params, .place);

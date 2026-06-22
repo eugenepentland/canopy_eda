@@ -3,13 +3,10 @@
 //! the `/api/module-source` endpoint that backs the "copy source" button on
 //! sub-block cards.
 //!
-//! A module is parameterized, so it can't be rendered in isolation without
-//! argument values. The viewer prefers a *real* instantiation: it scans the
-//! project's designs for a `(sub-block … (<module> …))` that already wired
-//! the module up with concrete args and renders that evaluated block. When
-//! no design uses the module it falls back to synthesizing a zero-arg
-//! instantiation (works for parameter-less modules); failing that it shows
-//! the raw source.
+//! A module is parameterized, so it renders standalone via its parameter
+//! defaults — the deterministic, defaults-first `evalNamedBlock` resolution
+//! every read surface uses. A module that declares a required parameter with
+//! no default can't be instantiated, so it shows the raw source instead.
 
 const std = @import("std");
 const httpz = @import("httpz");
@@ -396,85 +393,34 @@ pub fn modulesListPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) Han
 
 // ── GET /modules/:name ────────────────────────────────────────────────
 
-/// Recursively search a design's sub-block tree for one whose `source`
-/// matches `module_name`, returning its evaluated block.
-fn findSubBlockBlock(block: *const env_mod.DesignBlock, module_name: []const u8) ?*env_mod.DesignBlock {
-    for (block.sub_blocks) |sb| {
-        if (std.mem.eql(u8, sb.source, module_name)) return sb.block;
-        if (findSubBlockBlock(sb.block, module_name)) |found| return found;
-    }
-    return null;
-}
-
-/// Try to obtain a renderable, fully-evaluated block for `module_name`.
-/// First preference: a real instantiation found in one of the project's
-/// designs (concrete args, real wiring). Fallback: synthesize a zero-arg
-/// instantiation, which only succeeds for parameter-less modules. The
-/// `*Evaluator` that produced the block is returned alongside it because the
-/// block borrows the evaluator's arena — the caller must keep it alive until
-/// rendering is done.
+/// A module instantiated standalone for rendering, paired with the
+/// `*Evaluator` whose arena the block borrows — the caller must keep the
+/// evaluator alive until rendering is done.
 pub const ResolvedBlock = struct {
     block: *env_mod.DesignBlock,
     eval: *Evaluator,
 };
 
-/// Resolve `module_name` to a renderable block (real usage in a design first,
-/// else a zero-arg instantiation). The returned `eval` owns the block's arena
-/// — the caller must `deinit` + `destroy` it once done. Null if unresolvable.
+/// Resolve `module_name` to a renderable, fully-evaluated block via its
+/// parameter defaults — the deterministic, defaults-first instantiation
+/// `mcp_tools.evalNamedBlock` performs for every read surface (it is the single
+/// resolver; this wrapper only adapts the ownership: the returned `eval` owns
+/// the block's arena and the caller must `deinit` + `destroy` it once done).
+/// Null when the module is missing or declares a required parameter with no
+/// default (caller shows the source-only view).
 pub fn resolveModuleBlock(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     module_name: []const u8,
 ) ?ResolvedBlock {
-    // 1. Look for a real usage across the project's designs. `listDesignNames`
-    //    returns bare basenames; the files may sit in `src/<group>/` subdirs,
-    //    so resolve each through `paths.designSourcePath`.
-    const design_names = mcp_tools.listDesignNames(allocator, project_dir) catch &[_][]const u8{};
-    for (design_names) |dname| {
-        const path = paths.designSourcePath(allocator, project_dir, dname) catch continue;
-        const eval = allocator.create(Evaluator) catch continue;
-        eval.* = Evaluator.init(allocator, project_dir);
-        const result = eval.evalFile(path) catch {
-            eval.deinit();
-            allocator.destroy(eval);
-            continue;
-        };
-        switch (result) {
-            .design_block => |b| {
-                if (findSubBlockBlock(b, module_name)) |found| {
-                    return .{ .block = found, .eval = eval };
-                }
-            },
-            else => {},
-        }
-        eval.deinit();
-        allocator.destroy(eval);
-    }
-
-    // 2. Fallback: synthesize a zero-arg instantiation. Works only when the
-    //    module takes no parameters; parameterized modules raise an arity or
-    //    assert error here and fall through to the source-only view.
-    const synthetic = std.fmt.allocPrint(
-        allocator,
-        "(import {s})\n(design-block \"{s}\" (sub-block \"preview\" ({s})))",
-        .{ module_name, module_name, module_name },
-    ) catch return null;
     const eval = allocator.create(Evaluator) catch return null;
     eval.* = Evaluator.init(allocator, project_dir);
-    const result = eval.evalSource(synthetic) catch {
+    const nb = mcp_tools.evalNamedBlock(allocator, project_dir, module_name, eval) catch {
         eval.deinit();
         allocator.destroy(eval);
         return null;
     };
-    switch (result) {
-        .design_block => |b| {
-            if (b.sub_blocks.len > 0) return .{ .block = b.sub_blocks[0].block, .eval = eval };
-        },
-        else => {},
-    }
-    eval.deinit();
-    allocator.destroy(eval);
-    return null;
+    return .{ .block = nb.block, .eval = eval };
 }
 
 /// GET /modules/:name — render a module as a standalone schematic page. Falls
@@ -485,6 +431,17 @@ pub fn moduleViewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
         res.status = 404;
         return;
     };
+    return renderModulePage(ctx, res, name);
+}
+
+/// Render module `name` as a standalone schematic page (the body of
+/// `moduleViewPage`, factored out so `/schematics/<module>` can render a module
+/// in place rather than 302-redirecting). Validates the name, resolves the
+/// source path, and renders via the shared `render_html` renderer with the
+/// `/modules/` chrome — falling back to the raw-source view when the module
+/// can't be instantiated or the renderer errors. The `sourceIsSafe` guard is
+/// kept here so both entry points are protected.
+pub fn renderModulePage(ctx: *Handler, res: *httpz.Response, name: []const u8) HandlerError!void {
     if (!sourceIsSafe(name)) {
         res.status = 400;
         res.body = "bad module name";
@@ -498,8 +455,8 @@ pub fn moduleViewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     };
     defer ctx.allocator.free(src_path);
 
-    // Preferred path: a real (or synthesized) evaluated block → full
-    // schematic page via the shared renderer.
+    // Preferred path: the module instantiated via its parameter defaults →
+    // full schematic page via the shared renderer.
     if (resolveModuleBlock(ctx.allocator, ctx.project_dir, name)) |resolved| {
         var empty_checks: render_html.CheckResultMap = .empty;
         const html = render_html.renderToHtml(

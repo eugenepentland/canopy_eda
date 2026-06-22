@@ -22,6 +22,7 @@ Arguments are passed un-evaluated; each form decides what to evaluate.
 | `(import name…)` | 1+ | Load library components or modules by name. Searches `lib/components/` then `lib/modules/`. |
 | `(defmodule name (param \| (param default)…) ["docstring"] body…)` | 2+ | Define a parameterised module that closes over the surrounding env. A `(param default)` pair makes the argument optional — its default evaluates at call time when omitted, so a fully-defaulted module also renders standalone. |
 | `(design-block "name" form…)` | 1+ | The root container — every `.sexp` design file evaluates to one. |
+| `(block "name" form… \| name (param \| (param default)…) ["docstring"] body…)` | 1+ | The unified circuit definition. A string name is an eager design root (identical to `(design-block …)`); a bare-atom name with a parameter list is a parameterised, embeddable definition (identical to `(defmodule …)`). `(design-block …)` and `(defmodule …)` remain as permanent aliases. |
 | `(assert cond "message")` | 2 | Record a pass/fail entry. Failures surface in the review report, never aborts the build. |
 | `(assert-range value lo hi "label")` | 4 | Record an assertion that `value` is in `[lo, hi]`, with a formatted diagnostic. |
 | `(fmt "template" args…)` | 1+ | Format a string. See the “String formatting directives” table for the `~X` specifiers. |

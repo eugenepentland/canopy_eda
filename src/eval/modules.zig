@@ -4,6 +4,8 @@ const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const env_mod = @import("env.zig");
 const electrical_mod = @import("electrical.zig");
+const design_block_mod = @import("design_block.zig");
+const forms_mod = @import("forms.zig");
 const Evaluator = @import("evaluator.zig").Evaluator;
 const EvalError = @import("evaluator.zig").EvalError;
 const ComponentData = Evaluator.ComponentData;
@@ -12,7 +14,7 @@ const BusDef = Evaluator.BusDef;
 const Node = ast.Node;
 const Value = env_mod.Value;
 const Env = env_mod.Env;
-const ModuleDef = env_mod.ModuleDef;
+const BlockDef = env_mod.BlockDef;
 
 // ── Constants ─────────────────────────────────────────────────────
 const FOOTPRINT_FORM = "footprint";
@@ -311,7 +313,7 @@ pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalE
 }
 
 /// Evaluate `(defmodule name (params…) "doc?" body…)` and bind the resulting
-/// `ModuleDef` in the current env. The body nodes are stored verbatim for
+/// `BlockDef` in the current env. The body nodes are stored verbatim for
 /// later evaluation when the module is called; the param list is captured
 /// alongside the module file's import scope so calls resolve correctly.
 /// A parameter is either a bare atom (required) or a `(param default)` pair
@@ -360,7 +362,7 @@ pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!
 
     const param_slice = self.allocator.dupe([]const u8, params.items) catch return EvalError.OutOfMemory;
     const default_slice = self.allocator.dupe(?Node, defaults.items) catch return EvalError.OutOfMemory;
-    const mod = ModuleDef{
+    const mod = BlockDef{
         .name = name,
         .params = param_slice,
         .defaults = default_slice,
@@ -368,7 +370,7 @@ pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!
         .imports = env,
     };
 
-    try env.put(name, .{ .module = mod });
+    try env.put(name, .{ .block_def = mod });
     return .nil;
 }
 
@@ -377,7 +379,7 @@ pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!
 /// of the module's parameter names. Anything else (including 2-element lists
 /// like `(cap-0402 "100nF")` whose head is not a param) is a positional
 /// expression and returns null.
-fn namedParamIndex(mod: ModuleDef, arg: Node) ?usize {
+fn namedParamIndex(mod: BlockDef, arg: Node) ?usize {
     const pair = arg.asList() orelse return null;
     if (pair.len != 2) return null;
     const name = pair[0].asAtom() orelse return null;
@@ -387,13 +389,45 @@ fn namedParamIndex(mod: ModuleDef, arg: Node) ?usize {
     return null;
 }
 
+/// True if a module body holds a top-level wrapper block that materializes on
+/// its own: an inner `(design-block …)`, or a string-named `(block "…" …)`
+/// (which routes to `evalDesignBlock`). Such a body is run through `evalNodes`
+/// so the inner block (and any preceding setup forms) evaluate normally.
+fn bodyHasInnerBlock(body: []const Node) bool {
+    for (body) |node| {
+        const children = node.asList() orelse continue;
+        if (children.len == 0) continue;
+        const head = children[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "design-block")) return true;
+        if (std.mem.eql(u8, head, "block") and children.len > 1 and children[1].asString() != null) return true;
+    }
+    return false;
+}
+
+/// True if a module body carries any top-level design-scope (`ScopeForm`) form
+/// — `instance`/`port`/`section`/`sub-block`/`net`/`decouple`/… — i.e. it is a
+/// "raw" body that builds a design directly, with no inner block wrapper. A
+/// body that is only setup forms (`let`/`assert`/`import`) or a delegating
+/// expression (a call to another module) has no scope form and is NOT raw — it
+/// runs through `evalNodes` so its final expression's value flows out and any
+/// error inside it (e.g. an unbound name) propagates with the call stack.
+fn bodyHasScopeForm(body: []const Node) bool {
+    for (body) |node| {
+        const children = node.asList() orelse continue;
+        if (children.len == 0) continue;
+        const head = children[0].asAtom() orelse continue;
+        if (forms_mod.ScopeForm.fromAtom(head) != null) return true;
+    }
+    return false;
+}
+
 /// Call a module: bind each call-site argument — positional in declaration
 /// order, or named via `(param expr)` — into a fresh child scope rooted at
 /// the module file's import env, then run the module body. Positional args
 /// may not follow a named arg; duplicate and missing bindings are
 /// diagnosed with the parameter names. Returns the last body expression's
 /// value — typically a `(design-block …)`.
-pub fn callModule(self: *Evaluator, mod: ModuleDef, call_args: []const Node, call_span: ast.Span, caller_env: *Env) EvalError!Value {
+pub fn callModule(self: *Evaluator, mod: BlockDef, call_args: []const Node, call_span: ast.Span, caller_env: *Env) EvalError!Value {
     const bound = self.allocator.alloc(?Value, mod.params.len) catch return EvalError.OutOfMemory;
     defer self.allocator.free(bound);
     for (bound) |*b| b.* = null;
@@ -445,19 +479,32 @@ pub fn callModule(self: *Evaluator, mod: ModuleDef, call_args: []const Node, cal
         }
     }
 
-    const result = try self.evalNodes(mod.body, &mod_env);
-    // Mark the produced block as a module body (vs a top-level design) so the
-    // PCB placer engages role-based auto-placement for modules only. Propagates
-    // to sub-block instantiations, standalone previews, and zero-arg resolves —
-    // every module root flows through here.
-    if (result == .design_block) result.design_block.from_module = true;
+    // A module body comes in two shapes. A "raw" body holds design-scope forms
+    // (instance/port/net/…) straight at the top level with no inner block — it
+    // is materialized in place, named after the module, reusing the identical
+    // scope-form walk. Every other body — the classic "wrapped" form ending in
+    // an inner `(design-block …)`/string-named `(block "…" …)`, a body that is
+    // only setup forms, or one that delegates to another module call — runs
+    // through `evalNodes` so its inner block / final expression evaluates and
+    // any error inside propagates with the module call stack. (An inner block
+    // is itself a wrapper, never a `ScopeForm`, so the two checks don't
+    // overlap; guarding on it explicitly keeps the wrapped path obvious.)
+    const result = if (!bodyHasInnerBlock(mod.body) and bodyHasScopeForm(mod.body))
+        try design_block_mod.materializeBlock(self, mod.name, mod.body, &mod_env)
+    else
+        try self.evalNodes(mod.body, &mod_env);
+    // Mark the produced block as embedded (vs a top-level design root) so the
+    // PCB placer engages role-based auto-placement for module roots only.
+    // Propagates to sub-block instantiations, standalone previews, and zero-arg
+    // resolves — every module root flows through here.
+    if (result == .design_block) result.design_block.origin = .embedded;
     return result;
 }
 
 /// Diagnose any parameter left unbound after the call args are processed,
 /// excluding parameters that declare a default:
 /// `module 'tpsm84338' missing argument(s): rled`.
-fn checkMissingParams(self: *Evaluator, mod: ModuleDef, bound: []const ?Value, call_span: ast.Span) EvalError!void {
+fn checkMissingParams(self: *Evaluator, mod: BlockDef, bound: []const ?Value, call_span: ast.Span) EvalError!void {
     var missing: std.ArrayListUnmanaged(u8) = .empty;
     defer missing.deinit(self.allocator);
     for (mod.params, 0..) |param, i| {
@@ -469,6 +516,28 @@ fn checkMissingParams(self: *Evaluator, mod: ModuleDef, bound: []const ?Value, c
     if (missing.items.len == 0) return;
     self.setErrorFmt(call_span, "module '{s}' missing argument(s): {s}", .{ mod.name, missing.items });
     return EvalError.ArityError;
+}
+
+/// Instantiate a `lib/modules/<name>.sexp` module standalone via its
+/// parameter defaults (zero args). Resolves the module file, then calls it
+/// with no arguments so every `(param default)` supplies its value
+/// (defaults-first). Returns the module's evaluated design block (stamped
+/// `origin = .embedded` by `callModule`), or an error when the module is
+/// missing or needs required args it has no defaults for. The returned
+/// block borrows `self`'s arena — keep the evaluator alive while using it.
+/// This is the single source of the "render a module standalone" logic
+/// shared by the MCP `evalNamedBlock` resolver and the CLI build/check/
+/// export paths.
+pub fn instantiateStandalone(self: *Evaluator, name: []const u8) EvalError!Value {
+    var env = Env.init(self.allocator, null);
+    defer env.deinit();
+    try resolveImport(self, name, &env);
+    const bound = env.get(name) orelse return EvalError.ImportError;
+    const bd = switch (bound) {
+        .block_def => |b| b,
+        else => return EvalError.ImportError,
+    };
+    return callModule(self, bd, &.{}, .{ .line = 1, .col = 1, .offset = 0 }, &env);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
