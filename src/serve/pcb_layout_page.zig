@@ -121,8 +121,10 @@ pub const SavedLayout = struct {
 
 /// Which layout state the page is showing — the precedence ladder made
 /// visible in the scorebar chip: source **spec** > saved **snapshot**
-/// (`?refine=`) > **cache** slot > **fresh** solve > plain **grid**.
-const LayoutSource = enum { spec, snapshot, cache, fresh, grid };
+/// (`?refine=`) > **starred** default > **cache** slot > **fresh** solve >
+/// plain **grid**. `starred` is the design's ★-marked layout, loaded verbatim
+/// as the default page view when nothing more specific is asked for.
+const LayoutSource = enum { spec, snapshot, starred, cache, fresh, grid };
 
 /// One chip in the scorebar naming where the shown layout came from, so
 /// the precedence between the `(placement …)` spec, saved snapshots, and
@@ -137,6 +139,11 @@ fn writeSourceChip(w: *std.Io.Writer, src: LayoutSource) std.Io.Writer.Error!voi
         .snapshot => .{
             "from snapshot",                                                                         "snap",
             "Showing a saved layout snapshot (?refine=), refined in place. The cache is untouched.",
+        },
+        .starred => .{
+            "★ default", "star",
+            "Showing this design's starred (★) saved layout — the blessed reference, " ++
+                "loaded verbatim as the default view. Regenerate re-solves; the star is set in the Layouts panel.",
         },
         .cache => .{
             "from cache", "cache",
@@ -162,14 +169,62 @@ fn classifyLayoutSource(
     grid_only: bool,
     spec_drives: bool,
     refine_name: ?[]const u8,
+    starred_name: ?[]const u8,
     cached: ?[]const optimizer.RefPose,
 ) LayoutSource {
     if (sub != null) return .fresh;
     if (grid_only) return .grid;
     if (spec_drives) return .spec;
     if (refine_name != null and cached != null) return .snapshot;
+    if (starred_name != null and cached != null) return .starred;
     if (cached != null) return .cache;
     return .fresh;
+}
+
+/// The page's resolved placement source: the spec/starred flags the scorebar
+/// chip reads, plus the seed poses + grid fallback the solve uses.
+const LayoutChoice = struct {
+    spec_drives: bool,
+    starred_name: ?[]const u8,
+    cached: ?[]const optimizer.RefPose,
+    grid_only: bool,
+};
+
+/// Decide which placement `pcbLayoutPage` renders, walking the precedence ladder:
+/// explicit `?refine=` snapshot > `(placement …)` spec > the design's starred (★)
+/// default saved layout > the auto cache > a plain grid. A `?refine=` seed runs
+/// the routed-tuck refine; every other seed (starred / cache) renders verbatim
+/// via the `.place` mode. Sub-scoped previews never read a sidecar — they solve
+/// fresh and cheap, so all four flags collapse to "solve from scratch".
+fn chooseLayout(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    sub: ?[]const u8,
+    eff_block: *env_mod.DesignBlock,
+    refine_name: ?[]const u8,
+    tune: Tuning,
+) LayoutChoice {
+    // A `(placement …)` form is the source of truth: when the design carries one
+    // (and nothing more specific was asked for), drive a fresh solve from it.
+    const spec_drives = sub == null and refine_name == null and eff_block.placement.present;
+    // With no explicit ?refine=, no regen/tuning, no sub preview and no driving
+    // spec, default the page to the design's starred (★) layout if it has one —
+    // the user's blessed reference, shown verbatim as the seed below.
+    const want_default = !(refine_name != null or tune.regen or tune.tuned);
+    const starred_name: ?[]const u8 = if (sub == null and want_default and !spec_drives)
+        defaultLayoutName(alloc, project_dir, name)
+    else
+        null;
+    const cached = if (sub != null) null else if (refine_name) |rn|
+        readLayoutPosesFor(alloc, project_dir, name, rn, eff_block)
+    else if (starred_name) |sn|
+        readLayoutPosesFor(alloc, project_dir, name, sn, eff_block)
+    else if (tune.regen or spec_drives) null else readAutoPoses(alloc, project_dir, name);
+    // No layout to show and nothing asked for one: place the parts on a plain grid
+    // instead of running the (potentially expensive) optimizer on page open.
+    const grid_only = sub == null and refine_name == null and !tune.regen and !spec_drives and cached == null;
+    return .{ .spec_drives = spec_drives, .starred_name = starred_name, .cached = cached, .grid_only = grid_only };
 }
 
 /// GET /pcb-layout/:name — evaluate the design, run the optimizer, and return
@@ -221,19 +276,15 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // can't clobber the whole-design auto cache or its saved-layout history.
     const tune = parseTuning(req);
     const refine_name: ?[]const u8 = if (sub != null) null else if (req.query()) |q| q.get("refine") else |_| null;
-    // A `(placement …)` form is the source of truth: when the design carries one
-    // (and we're not loading a saved/refine layout or a sub-scoped preview), drive a
-    // fresh solve so the spec — not a stale auto cache — places the board.
-    const spec_drives = sub == null and refine_name == null and eff_block.placement.present;
-    const cached = if (sub != null) null else if (refine_name) |rn|
-        readLayoutPosesFor(ctx.allocator, ctx.project_dir, name, rn, eff_block)
-    else if (tune.regen or spec_drives) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
-    // No layout to show and nothing asked for one: place the parts on a plain
-    // grid instead of running the (potentially expensive) optimizer on page open.
-    // The optimizer still runs on demand — Regenerate / Apply tuning (?regen=/
-    // weights), seeding a saved layout (?refine=), and the small per-sub-block
-    // previews (which compute fresh and are cheap) all take the `solve` path.
-    const grid_only = sub == null and refine_name == null and !tune.regen and !spec_drives and cached == null;
+    // Resolve which placement the page renders, per the precedence ladder (see
+    // chooseLayout): explicit ?refine= snapshot > (placement …) spec > starred ★
+    // default > auto cache > plain grid. ?refine= seeds a routed-tuck refine;
+    // every other seed renders verbatim. Sub-scoped previews always solve fresh.
+    const choice = chooseLayout(ctx.allocator, ctx.project_dir, name, sub, eff_block, refine_name, tune);
+    const spec_drives = choice.spec_drives;
+    const starred_name = choice.starred_name;
+    const cached = choice.cached;
+    const grid_only = choice.grid_only;
     const placement = (if (grid_only)
         optimizer.gridPlace(ctx.allocator, eff_block, ctx.project_dir, tune.params)
     else
@@ -305,7 +356,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
             .{ schematic_path, name, name },
         );
         try w.writeAll("</div>");
-        try writeScorebar(w, placement, name, classifyLayoutSource(sub, grid_only, spec_drives, refine_name, cached));
+        try writeScorebar(w, placement, name, classifyLayoutSource(sub, grid_only, spec_drives, refine_name, starred_name, cached));
         // When showing the plain grid placeholder, say so — the score is the raw
         // grid's, not an optimized layout, and Regenerate computes the real one.
         if (grid_only) try w.writeAll(
@@ -465,8 +516,18 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     // A `(placement …)` form drives a fresh solve (see the page handler) unless a
     // saved/refine layout was asked for.
     const spec_drives = refine_name == null and block.placement.present;
+    // Match the page: with nothing more specific asked for, default to the design's
+    // starred (★) saved layout if it has one, so this JSON twin describes the same
+    // board the page shows.
+    const want_default = !(refine_name != null or tune.regen or tune.tuned);
+    const starred_name: ?[]const u8 = if (want_default and !spec_drives)
+        defaultLayoutName(ctx.allocator, ctx.project_dir, name)
+    else
+        null;
     const cached = if (refine_name) |rn|
         readLayoutPosesFor(ctx.allocator, ctx.project_dir, name, rn, block)
+    else if (starred_name) |sn|
+        readLayoutPosesFor(ctx.allocator, ctx.project_dir, name, sn, block)
     else if (tune.regen or spec_drives) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
     const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place) catch {
         res.status = 500;
@@ -1821,6 +1882,17 @@ fn rekeyPosesByOrigin(
         out[i] = .{ .ref = ref, .x = pp.x, .y = pp.y, .rot = pp.rot };
     }
     return out;
+}
+
+/// Name of the design's starred (★ default) saved layout — the one the Layouts
+/// panel marks with a filled star and the KiCad sync seeds first-insertion
+/// placement from — or null when nothing is starred (or the starred entry has
+/// no poses). Lets the `/pcb-layout` page default to that blessed layout on open.
+fn defaultLayoutName(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?[]const u8 {
+    for (readLayouts(alloc, project_dir, name)) |lay| {
+        if (lay.default and lay.parts.len > 0) return lay.name;
+    }
+    return null;
 }
 
 /// The poses of a single named saved layout (`?refine=` / `?layout=`), as
@@ -3672,6 +3744,7 @@ const PAGE_CSS =
     \\.src-chip{font-size:11px;padding:2px 9px;border-radius:10px;border:1px solid #30363d;color:#8b949e;cursor:help;white-space:nowrap}
     \\.src-chip.src-spec{color:#3fb950;border-color:#238636}
     \\.src-chip.src-snap{color:#58a6ff;border-color:#1f6feb}
+    \\.src-chip.src-star{color:#e3b341;border-color:#9e6a03}
     \\.src-chip.src-cache{color:#d29922;border-color:#9e6a03}
     \\.src-chip.src-grid{color:#f85149;border-color:#da3633}
     \\.pcb-bar .score{font-weight:600;color:#e6edf3;background:#161b22;border:1px solid #21262d;border-radius:4px;padding:2px 8px}
@@ -4898,6 +4971,20 @@ test "layouts sidecar round-trips rough flag" {
     try std.testing.expectEqual(@as(usize, 2), got.len);
     try std.testing.expect(got[0].rough);
     try std.testing.expect(!got[1].rough);
+}
+
+// spec: Web Server - The /pcb-layout page defaults to the design's starred (★) saved layout, below an explicit ?refine= snapshot and a (placement …) spec
+test "scorebar source classifies the starred default layout" {
+    const poses = [_]optimizer.RefPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
+    const cached: ?[]const optimizer.RefPose = &poses;
+    // Nothing more specific asked for + a starred layout loaded → starred default.
+    try std.testing.expectEqual(LayoutSource.starred, classifyLayoutSource(null, false, false, null, "best", cached));
+    // An explicit ?refine= snapshot still outranks the starred default.
+    try std.testing.expectEqual(LayoutSource.snapshot, classifyLayoutSource(null, false, false, "hand", "best", cached));
+    // A driving (placement …) spec outranks the starred default.
+    try std.testing.expectEqual(LayoutSource.spec, classifyLayoutSource(null, false, true, null, "best", cached));
+    // No starred layout, just the auto cache → cache.
+    try std.testing.expectEqual(LayoutSource.cache, classifyLayoutSource(null, false, false, null, null, cached));
 }
 
 // spec: Web Server - A saved layout round-trips each part's renumber-stable origin key through the sidecar
