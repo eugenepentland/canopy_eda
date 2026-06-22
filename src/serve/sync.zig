@@ -190,6 +190,22 @@ pub const ParsedSyncPlan = struct {
     /// every sync; deleting that sidecar is the user-facing escape
     /// hatch to force a full re-emit.
     applied_ops: std.StringHashMap(void),
+    /// Explicit per-sub-circuit layout-seeding selection (the Push modal's
+    /// checkboxes; body `{"seed":["mcu","Power Input", …]}`). When non-null,
+    /// each NAMED group's freshly-added parts are placed from the design's saved
+    /// whole-design layout instead of the off-board staging grid — anchored on
+    /// the group's main IC if it's already on the board, else generated as one
+    /// labelled box off-board (see `seedSelectedGroups`). Null ⇒ no selection,
+    /// the default staging flow runs unchanged. `seed_all` is the `"*"` / `"all"`
+    /// shorthand selecting every seedable group.
+    seed_groups: ?std.StringHashMap(void) = null,
+    seed_all: bool = false,
+    /// Live footprint positions on the target board (KiCad-uuid → placement),
+    /// from `collectPlacements`. Lets `computeGroupAnchors` find where a group's
+    /// anchor currently sits so `seedSelectedGroups` can place the rest around
+    /// it. Null/empty ⇒ no anchor is on the board (every selected group boxes
+    /// off-board).
+    board_positions: ?*const std.StringHashMap(FpPlacement) = null,
 };
 
 /// Compose the fingerprint string used as the key in
@@ -843,6 +859,12 @@ pub fn runSyncPlan(
         if (bfp.kicad_uuid.len > 0) try by_kicad_uuid.put(bfp.kicad_uuid, bfp);
     }
 
+    // Per-sub-circuit anchors for the explicit-seeding path (Push modal): which
+    // part anchors each group and whether it (and thus a live re-centre origin)
+    // is already on the board. Cheap regardless of selection; also feeds the
+    // dry-run's `sub_circuits` enumeration.
+    var group_anchors = try computeGroupAnchors(arena, instances.items, &by_uuid, &by_ref, parsed.board_positions, &ref_to_section);
+
     // Heuristic index for --migrate mode. Maps each design instance's
     // canopy uuid → the board footprint it should adopt placement from,
     // when both sides have the same count of footprints with the same
@@ -924,6 +946,9 @@ pub fn runSyncPlan(
         .emit_layout_vias = parsed.emit_layout_vias,
         .dot_nets = parsed.dot_nets,
         .board_fresh = parsed.board.len == 0,
+        .seed_groups = parsed.seed_groups,
+        .seed_all = parsed.seed_all,
+        .group_anchors = &group_anchors,
     };
     for (instances.items) |inst| try handleInstance(&diff_ctx, inst, &w, &first_op);
 
@@ -942,6 +967,10 @@ pub fn runSyncPlan(
 
     try w.writeAll("]");
 
+    // The seedable sub-circuits the Push modal renders as checkboxes (built from
+    // the still-populated pending_adds — emitStagedAdds reads, never clears it).
+    const sub_circuits_json = try buildSubCircuitsJson(arena, &diff_ctx);
+
     // Final response envelope.
     var resp_buf: std.ArrayListUnmanaged(u8) = .empty;
     const rw = resp_buf.writer(handler_alloc);
@@ -950,13 +979,15 @@ pub fn runSyncPlan(
         "{{\"design_version\":{d},\"summary\":{{" ++
             "\"updated\":{d},\"added\":{d},\"removed\":{d}," ++
             "\"swapped\":{d},\"flagged_stale\":{d},\"suppressed\":{d},\"vias\":{d}" ++
-            "}},\"ops\":",
+            "}},\"sub_circuits\":",
         .{
             version,            summary.updated, summary.added,
             summary.removed,    summary.swapped, summary.flagged_stale,
             summary.suppressed, summary.vias,
         },
     );
+    try rw.writeAll(sub_circuits_json);
+    try rw.writeAll(",\"ops\":");
     try rw.writeAll(ops_buf.items);
     try rw.writeAll("}");
 
@@ -1074,6 +1105,15 @@ fn runKicadPcbSync(
 
     const board = kicad_pcb_reader.readBoard(req.arena, src) catch return error.PcbParseFailed;
 
+    // Live footprint positions (KiCad-uuid → x/y/rot/layer), so a selected
+    // sub-circuit whose anchor is already on the board can be re-centred there.
+    const board_positions = try req.arena.create(std.StringHashMap(FpPlacement));
+    board_positions.* = try collectPlacements(req.arena, src);
+
+    // Explicit per-sub-circuit seeding selection from the POST body
+    // (`{"seed":["mcu", …]}` or `{"seed":"all"}`). Absent body ⇒ no selection.
+    const seed = parseSeedSelection(req.arena, req);
+
     // Run the diff. `migrate_heuristic` defaults off for the file-based
     // path; `prune_stale` is opt-in via `?prune=1` from the
     // "Push + Delete Stale" button — it flips every `flag_stale` op in
@@ -1087,6 +1127,9 @@ fn runKicadPcbSync(
         .refresh = refresh,
         .emit_layout_vias = !isQueryFlagSet(req, "no_layout_vias"),
         .applied_ops = std.StringHashMap(void).init(req.arena),
+        .seed_groups = seed.groups,
+        .seed_all = seed.all,
+        .board_positions = board_positions,
     };
     const run = try runSyncPlan(req.arena, ctx.allocator, ctx.project_dir, name, plan);
 
@@ -1212,6 +1255,49 @@ fn isQueryFlagSet(req: *httpz.Request, key: []const u8) bool {
     const q = req.query() catch return false;
     const v = q.get(key) orelse return false;
     return std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true");
+}
+
+/// Parsed per-sub-circuit seeding selection (the Push modal checkboxes).
+const SeedSelection = struct { groups: ?std.StringHashMap(void) = null, all: bool = false };
+
+/// True for the "seed every group" tokens.
+fn isSeedAllToken(s: []const u8) bool {
+    return std.mem.eql(u8, s, "*") or std.ascii.eqlIgnoreCase(s, "all");
+}
+
+/// Parse the optional `{"seed":["mcu","Power Input", …]}` (or `{"seed":"all"}`)
+/// JSON body the Push modal posts to drive per-sub-circuit layout seeding. No
+/// body, a body that isn't an object, or an absent / empty `seed` ⇒ no selection
+/// (the default staging flow runs). A `"*"` / `"all"` element selects every
+/// seedable group. Group names live on `arena` (request lifetime). Sent in the
+/// body, not the query, so section names with spaces / `&` need no encoding.
+fn parseSeedSelection(arena: std.mem.Allocator, req: *httpz.Request) SeedSelection {
+    const body = req.body() orelse return .{};
+    if (body.len == 0) return .{};
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch return .{};
+    if (root != .object) return .{};
+    const sv = root.object.get("seed") orelse return .{};
+    if (sv == .string) {
+        if (isSeedAllToken(sv.string)) return .{ .all = true };
+        return .{ .groups = seedNameSet(arena, &[_]std.json.Value{sv}) };
+    }
+    if (sv != .array) return .{};
+    for (sv.array.items) |it| {
+        if (it == .string and isSeedAllToken(it.string)) return .{ .all = true };
+    }
+    const set = seedNameSet(arena, sv.array.items);
+    return if (set != null and set.?.count() > 0) .{ .groups = set } else .{};
+}
+
+/// Build a name set from JSON string values (non-strings skipped). Null on OOM.
+fn seedNameSet(arena: std.mem.Allocator, items: []const std.json.Value) ?std.StringHashMap(void) {
+    var set = std.StringHashMap(void).init(arena);
+    for (items) |it| {
+        if (it != .string) continue;
+        const nm = arena.dupe(u8, it.string) catch return null;
+        set.put(nm, {}) catch return null;
+    }
+    return set;
 }
 
 /// Strip the `{design_version, summary, ops: [...]}` envelope and return
@@ -1795,6 +1881,15 @@ const DiffContext = struct {
     /// (per-section grid, or per-sub-block arranged unit) and no via is ever
     /// written.
     board_fresh: bool,
+    /// Explicit sub-circuit seeding selection + anchors (the Push modal). When
+    /// `seed_groups`/`seed_all` is set, `emitStagedAdds` routes each selected
+    /// group through `seedSelectedGroups` (saved-layout poses, anchored on the
+    /// group's `group_anchors` entry when it's already on the board, else an
+    /// off-board box) and everything else to the plain staging grid. Null/false
+    /// ⇒ the default staging flow runs unchanged. See `ParsedSyncPlan.seed_*`.
+    seed_groups: ?std.StringHashMap(void) = null,
+    seed_all: bool = false,
+    group_anchors: *const std.StringHashMap(GroupAnchor),
 };
 
 /// Walk every board fp that didn't match any design instance and emit the
@@ -2758,13 +2853,52 @@ fn groupAddsBySection(
 ///      layout names lands at that exact (x, y, rot).
 ///   3. **Section-staging grid** — anything left clusters in a staging box.
 /// Existing/matched footprints are never moved by any tier.
+///
+/// When the request carries an explicit sub-circuit selection (the Push modal's
+/// checkboxes — `seed_groups`/`seed_all`), that path takes over instead: the
+/// selected groups are seeded from the saved whole-design layout (anchored on
+/// their main IC if it's already on the board, else an off-board box, see
+/// `seedSelectedGroups`) and everything else falls straight to the staging
+/// grid. The default (no selection) flow above is left byte-for-byte unchanged.
 fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
     const arena = d.spc.arena;
     const adds = d.pending_adds.items;
     if (adds.len == 0) return;
 
-    // Tier 1: seed sub-blocks that aren't on the board from their module layouts.
     var leftover: std.ArrayListUnmanaged(PendingAdd) = .empty;
+
+    // Explicit selection: seed the chosen sub-circuits from the saved layout,
+    // send the rest (unselected groups + parts the layout doesn't name) to the
+    // plain staging grid. Bypasses the module-layout / board_fresh tiers — the
+    // user has asked for the whole-design layout regardless of board state.
+    // `planSelectedGroups` decides placements; the writing stays here (it owns
+    // the ops writer) so the helpers need no `anytype` writer param.
+    if (d.seed_groups != null or d.seed_all) {
+        const plan = try planSelectedGroups(d, adds, &leftover);
+        for (plan.placed) |p| {
+            const pa = p.pa;
+            const kmod = loadKicadMod(d.spc, pa.fp_name, pa.inst.component) orelse continue;
+            const fp_def = loadFootprintDefForInstance(d.spc, pa.fp_name, pa.inst, pa.canopy_net, pa.section);
+            try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, mmToNm(p.x_mm), mmToNm(p.y_mm), p.rot, pa.canopy_net, pa.section);
+            d.summary.added += 1;
+        }
+        for (plan.boxes) |b| {
+            const items = [_][]const u8{
+                try boardRectItem(arena, b.x0, b.y0, b.x1, b.y1),
+                try boardLabelItem(arena, (b.x0 + b.x1) * STAGE_HALF, b.y0 + STAGE_LABEL_H_MM * STAGE_HALF, b.label),
+            };
+            for (items) |item_json| {
+                if (!first.*) try w.*.writeAll(",");
+                first.* = false;
+                try w.*.writeAll(BOARD_ITEM_OP_OPEN);
+                try w.*.writeAll(item_json);
+                try w.*.writeAll("}");
+            }
+        }
+        return emitStagingGrid(d, w, first, leftover.items);
+    }
+
+    // Tier 1: seed sub-blocks that aren't on the board from their module layouts.
     try seedSubBlocks(d, w, first, adds, &leftover);
     const rest = leftover.items;
     if (rest.len == 0) return;
@@ -2788,6 +2922,253 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
     }
     // Tier 3: grid staging.
     return emitStagingGrid(d, w, first, grid_rest.items);
+}
+
+// ── Explicit per-sub-circuit layout seeding (Push modal checkboxes) ──────────
+
+/// The chosen anchor of a sub-circuit group plus whether it is already on the
+/// target board. The anchor is the group's "main part" (highest `anchorRank`,
+/// ties → lowest ref-des); when it's on the board its live position lets
+/// `seedSelectedGroups` re-centre the group's saved layout there (the IC stays
+/// put, the rest of the sub-circuit flows in around it). `ref` is the flattened
+/// ref-des used to look the anchor's saved pose up in the whole-design layout.
+const GroupAnchor = struct {
+    ref: []const u8,
+    on_board: bool = false,
+    board_x: f64 = 0,
+    board_y: f64 = 0,
+};
+
+/// Rank a flattened ref-des as a placement anchor by its prefix letter: an IC
+/// (`U`) outranks a connector / large hub (`J`/`P`/`X`/`Q`), which outranks any
+/// passive or other part. Classifies the leaf after the last `/` so a sub-block
+/// part (`mcu/U12`) is judged on `U12`, not the sub-block name.
+fn anchorRank(ref_des: []const u8) u8 {
+    const leaf = if (std.mem.lastIndexOfScalar(u8, ref_des, '/')) |i| ref_des[i + 1 ..] else ref_des;
+    if (leaf.len == 0) return 0;
+    return switch (leaf[0]) {
+        'U' => 3,
+        'J', 'P', 'X', 'Q' => 2,
+        else => 1,
+    };
+}
+
+/// Pick each sub-circuit group's anchor (see `GroupAnchor`) and resolve whether
+/// it's already on the board. Groups are the same keys `sectionForRef` returns
+/// (section name, or sub-block name for a `sub/Ux` ref). Board presence is the
+/// same canopy-uuid-then-ref-des match the diff loop uses; the live position
+/// comes from `board_positions` (KiCad-uuid keyed). Result lives on `arena`.
+fn computeGroupAnchors(
+    arena: std.mem.Allocator,
+    instances: []const export_kicad.FlatInstance,
+    by_uuid: *std.StringHashMap(BoardFp),
+    by_ref: *std.StringHashMap(BoardFp),
+    board_positions: ?*const std.StringHashMap(FpPlacement),
+    ref_to_section: *std.StringHashMap([]const u8),
+) !std.StringHashMap(GroupAnchor) {
+    var out = std.StringHashMap(GroupAnchor).init(arena);
+    var rank_of = std.StringHashMap(u8).init(arena);
+    for (instances) |inst| {
+        const sec = sectionForRef(inst.ref_des, ref_to_section);
+        if (sec.len == 0) continue;
+        const rank = anchorRank(inst.ref_des);
+        const better = blk: {
+            const prev = rank_of.get(sec) orelse break :blk true;
+            if (rank != prev) break :blk rank > prev;
+            // Equal rank → keep the lexicographically smaller ref (deterministic).
+            const cur = out.get(sec) orelse break :blk true;
+            break :blk std.mem.lessThan(u8, inst.ref_des, cur.ref);
+        };
+        if (!better) continue;
+        var ga = GroupAnchor{ .ref = inst.ref_des };
+        const bfp: ?BoardFp = by_uuid.get(inst.uuid) orelse by_ref.get(inst.ref_des);
+        if (bfp) |m| {
+            if (board_positions) |bp| {
+                if (m.kicad_uuid.len > 0) {
+                    if (bp.get(m.kicad_uuid)) |p| {
+                        ga.on_board = true;
+                        ga.board_x = p.x;
+                        ga.board_y = p.y;
+                    }
+                }
+            }
+        }
+        try rank_of.put(sec, rank);
+        try out.put(sec, ga);
+    }
+    return out;
+}
+
+/// Whether sub-circuit group `sec` was selected for layout seeding.
+fn groupSelected(d: *DiffContext, sec: []const u8) bool {
+    if (d.seed_all) return true;
+    const set = d.seed_groups orelse return false;
+    return set.contains(sec);
+}
+
+/// One fresh add placed at an absolute board coordinate (mm) by the seeding
+/// planner. `emitStagedAdds` turns each into an `add` op (it owns the writer).
+const PositionedAdd = struct { pa: PendingAdd, x_mm: f64, y_mm: f64, rot: f64 };
+/// One off-board staging box (mm) + its label, drawn by `emitStagedAdds`.
+const SeedBox = struct { x0: f64, y0: f64, x1: f64, y1: f64, label: []const u8 };
+/// The seeding planner's output: where each seeded part lands + the boxes to draw.
+const SeedPlan = struct { placed: []const PositionedAdd, boxes: []const SeedBox };
+
+/// Plan placement for an explicit sub-circuit selection (the Push modal). For
+/// each SELECTED group, seed its freshly-added parts from the design's
+/// whole-design saved layout (`premade_layout`, keyed by flattened ref-des):
+/// anchor on the board ⇒ each add lands at its saved offset from the group
+/// anchor, re-centred on the anchor's live board position (the IC stays put, the
+/// rest of the sub-circuit flows in around it); anchor absent ⇒ the whole group
+/// is generated as one labelled box in the off-board staging band, preserving
+/// its saved internal arrangement. Parts the layout doesn't name, and every
+/// non-selected group, are appended to `leftover` for the caller's staging grid.
+/// Only fresh adds get positions — existing footprints are never moved, so the
+/// placement guard never trips; no GND vias are planned (a partially-populated
+/// board can't carry a coherent via plan — same gate as `seedOneSubBlock`).
+fn planSelectedGroups(
+    d: *DiffContext,
+    adds: []const PendingAdd,
+    leftover: *std.ArrayListUnmanaged(PendingAdd),
+) !SeedPlan {
+    const arena = d.spc.arena;
+    var placed: std.ArrayListUnmanaged(PositionedAdd) = .empty;
+    var boxes: std.ArrayListUnmanaged(SeedBox) = .empty;
+    const empty = SeedPlan{ .placed = placed.items, .boxes = boxes.items };
+    const layout = d.premade_layout orelse {
+        for (adds) |pa| try leftover.append(arena, pa);
+        return empty;
+    };
+    var buckets = std.StringHashMap(std.ArrayListUnmanaged(usize)).init(arena);
+    var order: std.ArrayListUnmanaged([]const u8) = .empty;
+    try groupAddsBySection(arena, adds, &buckets, &order);
+
+    var cursor_x = BLOCK_STAGE_ORIGIN_X_MM;
+    for (order.items) |sec| {
+        const idxs = (buckets.get(sec) orelse continue).items;
+        if (!groupSelected(d, sec)) {
+            for (idxs) |idx| try leftover.append(arena, adds[idx]);
+            continue;
+        }
+        if (try planOneSelectedGroup(d, sec, adds, idxs, layout, cursor_x, leftover, &placed, &boxes)) |advance|
+            cursor_x += advance;
+    }
+    return .{ .placed = placed.items, .boxes = boxes.items };
+}
+
+/// A group add paired with its saved-layout pose.
+const NamedAdd = struct { pa: PendingAdd, pose: pcb_layout.SyncPose };
+
+/// Plan one selected group (see `planSelectedGroups`), appending its positioned
+/// adds to `placed` and an off-board box to `boxes`. Returns the horizontal
+/// advance to pack the next box, or null when the group was placed anchored on
+/// the board (no box) or nothing seeded.
+fn planOneSelectedGroup(
+    d: *DiffContext,
+    sec: []const u8,
+    adds: []const PendingAdd,
+    idxs: []const usize,
+    layout: std.StringHashMap(pcb_layout.SyncPose),
+    cursor_x: f64,
+    leftover: *std.ArrayListUnmanaged(PendingAdd),
+    placed: *std.ArrayListUnmanaged(PositionedAdd),
+    boxes: *std.ArrayListUnmanaged(SeedBox),
+) !?f64 {
+    const arena = d.spc.arena;
+    var named: std.ArrayListUnmanaged(NamedAdd) = .empty;
+    var minx: f64 = std.math.floatMax(f64);
+    var miny: f64 = std.math.floatMax(f64);
+    var maxx: f64 = -std.math.floatMax(f64);
+    var maxy: f64 = -std.math.floatMax(f64);
+    for (idxs) |idx| {
+        const pa = adds[idx];
+        const pose = layout.get(pa.inst.ref_des) orelse {
+            try leftover.append(arena, pa);
+            continue;
+        };
+        try named.append(arena, .{ .pa = pa, .pose = pose });
+        minx = @min(minx, pose.x);
+        miny = @min(miny, pose.y);
+        maxx = @max(maxx, pose.x);
+        maxy = @max(maxy, pose.y);
+    }
+    if (named.items.len == 0) return null;
+
+    // Translation: anchor-relative when the group's main IC is already on the
+    // board (re-centre saved poses on its live position), else off-board box
+    // (min-corner → staging band, preserving the saved internal arrangement).
+    const anchor = d.group_anchors.get(sec);
+    const anchored = anchor != null and anchor.?.on_board and layout.get(anchor.?.ref) != null;
+    var dx: f64 = undefined;
+    var dy: f64 = undefined;
+    if (anchored) {
+        const ap = layout.get(anchor.?.ref).?;
+        dx = anchor.?.board_x - ap.x;
+        dy = anchor.?.board_y - ap.y;
+    } else {
+        dx = cursor_x - minx;
+        dy = BLOCK_STAGE_ORIGIN_Y_MM - miny;
+    }
+
+    for (named.items) |n|
+        try placed.append(arena, .{ .pa = n.pa, .x_mm = n.pose.x + dx, .y_mm = n.pose.y + dy, .rot = n.pose.rot });
+    // Mark per-block seeding so the whole-design via path stays off (it only
+    // runs when `summary.blocks == 0`); vias here would strand on a non-fresh board.
+    d.summary.blocks += 1;
+    if (anchored) return null;
+
+    // Outline + label box around the off-board group's footprint extent.
+    const bx0 = cursor_x - STAGE_BOX_PAD_MM;
+    const by0 = BLOCK_STAGE_ORIGIN_Y_MM - STAGE_BOX_PAD_MM - STAGE_LABEL_H_MM;
+    const bx1 = cursor_x + (maxx - minx) + STAGE_BOX_PAD_MM;
+    const by1 = BLOCK_STAGE_ORIGIN_Y_MM + (maxy - miny) + STAGE_BOX_PAD_MM;
+    try boxes.append(arena, .{ .x0 = bx0, .y0 = by0, .x1 = bx1, .y1 = by1, .label = sec });
+    return (bx1 - bx0) + BLOCK_STAGE_GAP_MM;
+}
+
+/// Build the `sub_circuits` JSON array advertised in the dry-run response: one
+/// entry per group that has at least one freshly-added part NAMED by the saved
+/// whole-design layout (only those can be seeded, so only those get a checkbox).
+/// Each entry carries the group `name`, the seedable `parts` count, the chosen
+/// `anchor` ref (or null), and whether that anchor is already `on_board`. Empty
+/// array when there's no saved layout. Computed from the still-populated
+/// `pending_adds` after `emitStagedAdds`. Result lives on `arena`.
+fn buildSubCircuitsJson(arena: std.mem.Allocator, d: *DiffContext) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(arena);
+    try w.writeByte('[');
+    const layout = d.premade_layout orelse {
+        try w.writeByte(']');
+        return buf.items;
+    };
+    const adds = d.pending_adds.items;
+    var buckets = std.StringHashMap(std.ArrayListUnmanaged(usize)).init(arena);
+    var order: std.ArrayListUnmanaged([]const u8) = .empty;
+    try groupAddsBySection(arena, adds, &buckets, &order);
+    var emitted_first = true;
+    for (order.items) |sec| {
+        const idxs = (buckets.get(sec) orelse continue).items;
+        var named: usize = 0;
+        for (idxs) |idx| {
+            if (layout.get(adds[idx].inst.ref_des) != null) named += 1;
+        }
+        if (named == 0) continue;
+        const anchor = d.group_anchors.get(sec);
+        if (!emitted_first) try w.writeByte(',');
+        emitted_first = false;
+        try w.writeAll("{\"name\":");
+        try json_writer.writeString(w, sec);
+        try w.print(",\"parts\":{d},\"anchor\":", .{named});
+        if (anchor) |a| {
+            try json_writer.writeString(w, a.ref);
+            try w.print(",\"on_board\":{}", .{a.on_board});
+        } else {
+            try w.writeAll("null,\"on_board\":false");
+        }
+        try w.writeByte('}');
+    }
+    try w.writeByte(']');
+    return buf.items;
 }
 
 /// Staging band for whole-sub-block seeds: blocks are packed left-to-right at

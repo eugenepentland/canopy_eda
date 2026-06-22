@@ -1606,8 +1606,43 @@
   }
 
   // Build + show the dry-run preview modal. confirm() runs the real push.
+  // Build the "seed sub-circuits from saved layout" checkbox block from the
+  // dry-run's sub_circuits[]. Each entry the saved layout can place gets a
+  // checkbox (default OFF — a plain Confirm reproduces today's staging-grid
+  // behavior exactly); checking one places that sub-circuit's new parts at
+  // their saved-layout positions instead — anchored on its main IC when that IC
+  // is already on the board, else generated as one labelled box off-board.
+  function buildSeedSectionHtml(subs) {
+    if (!subs || !subs.length) return '';
+    var rows = subs.map(function (s, i) {
+      var where = s.on_board && s.anchor
+        ? 'around ' + escapeHtml(leafRef(s.anchor)) + ' (already on board)'
+        : 'as a box off-board';
+      return '<label class="kpv-seed-row">' +
+        '<input type="checkbox" class="kpv-seed-cb" data-name="' + escapeAttr(s.name) + '">' +
+        '<span class="kpv-seed-name">' + escapeHtml(s.name) + '</span>' +
+        '<span class="kpv-seed-hint">' + s.parts + ' part' + (s.parts === 1 ? '' : 's') + ' · ' + where + '</span>' +
+        '</label>';
+    }).join('');
+    return '<div class="kpv-seed">' +
+      '<div class="kpv-seed-head">' +
+        '<span>Seed sub-circuit layout from saved PCB layout</span>' +
+        '<span class="kpv-seed-actions">' +
+          '<button type="button" class="kpv-seed-all">All</button>' +
+          '<button type="button" class="kpv-seed-none">None</button>' +
+        '</span>' +
+      '</div>' +
+      '<div class="kpv-seed-note">Checked sub-circuits place their new parts at the saved layout (anchored on the IC if it is already on the board, else a draggable box off-board). Unchecked parts go to the staging grid as before.</div>' +
+      rows +
+      '</div>';
+  }
+  // Last path segment of a possibly sub-block-prefixed ref ("mcu/U12" → "U12").
+  function leafRef(r) { var i = r.lastIndexOf('/'); return i >= 0 ? r.slice(i + 1) : r; }
+  function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;'); }
+
   function showKicadPreview(title, dryJson, onConfirm) {
     var ops = (dryJson && dryJson.ops) || [];
+    var subs = (dryJson && dryJson.sub_circuits) || [];
     var overlay = document.createElement('div');
     overlay.className = 'kpv-overlay';
     var opsHtml = ops.length
@@ -1618,6 +1653,7 @@
         '<div class="kpv-head"><h3>' + escapeHtml(title) + ' — preview</h3>' +
           '<button class="kpv-x" title="Close">✕</button></div>' +
         '<div class="kpv-summary">' + kicadSummaryChips(dryJson && dryJson.summary) + '</div>' +
+        buildSeedSectionHtml(subs) +
         '<div class="kpv-ops">' + opsHtml + '</div>' +
         '<div class="kpv-foot">' +
           '<button class="kpv-btn kpv-cancel">Cancel</button>' +
@@ -1625,6 +1661,16 @@
         '</div>' +
       '</div>';
     document.body.appendChild(overlay);
+    // Seed checkbox All/None helpers.
+    var seedBox = overlay.querySelector('.kpv-seed');
+    if (seedBox) {
+      var setAll = function (on) {
+        var cbs = seedBox.querySelectorAll('.kpv-seed-cb');
+        for (var i = 0; i < cbs.length; i++) cbs[i].checked = on;
+      };
+      seedBox.querySelector('.kpv-seed-all').addEventListener('click', function () { setAll(true); });
+      seedBox.querySelector('.kpv-seed-none').addEventListener('click', function () { setAll(false); });
+    }
     // Swap rows expand an inline old-vs-new footprint comparison.
     overlay.querySelector('.kpv-ops').addEventListener('click', function (e) {
       var row = e.target.closest ? e.target.closest('.kpv-clickable') : null;
@@ -1638,10 +1684,16 @@
     confirmBtn.addEventListener('click', function () {
       confirmBtn.disabled = true;
       confirmBtn.textContent = 'Writing…';
+      // Collect the checked sub-circuits so the real write seeds their layout.
+      var seed = [];
+      var cbs = overlay.querySelectorAll('.kpv-seed-cb');
+      for (var i = 0; i < cbs.length; i++) {
+        if (cbs[i].checked) seed.push(cbs[i].dataset.name);
+      }
       onConfirm(close, function () {
         confirmBtn.disabled = false;
         confirmBtn.textContent = 'Confirm — write board';
-      });
+      }, seed);
     });
   }
 
@@ -1720,8 +1772,13 @@
         }
         var dry = {};
         try { dry = JSON.parse(resp.body); } catch (_e) {}
-        showKicadPreview(title, dry, function (closeModal, resetConfirm) {
-          fetch(realUrl, { method: 'POST' }).then(function (r) {
+        showKicadPreview(title, dry, function (closeModal, resetConfirm, seed) {
+          var opts = { method: 'POST' };
+          if (seed && seed.length) {
+            opts.headers = { 'Content-Type': 'application/json' };
+            opts.body = JSON.stringify({ seed: seed });
+          }
+          fetch(realUrl, opts).then(function (r) {
             return r.text().then(function (body) { return { ok: r.ok, body: body }; });
           }).then(function (resp2) {
             if (!resp2.ok) {
