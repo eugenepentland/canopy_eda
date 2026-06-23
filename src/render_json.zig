@@ -463,51 +463,10 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     var ctx = RenderCtx.init(allocator);
     ctx.project_dir = project_dir;
 
-    // Same pipeline as render_svg.zig
-    try ctx.collectFlat(block, "");
-
-    var flat_sec_idx: usize = 0;
-    for (block.sections) |sec| {
-        for (sec.instances) |inst| {
-            try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
-        }
-        // Top-level instances whose pins are declared in this section via
-        // `(pins ref ...)` should also count as "in" the section — this lets
-        // the cross-section detection work for multipart hubs like U3 (the
-        // STM32) whose body is top-level but whose pins live per-section.
-        for (sec.pin_groups) |pg| {
-            if (!ctx.section_map.contains(pg.ref_des)) {
-                try ctx.section_map.put(allocator, pg.ref_des, flat_sec_idx);
-            }
-        }
-        flat_sec_idx += 1;
-        for (sec.sub_sections) |sub| {
-            for (sub.instances) |inst| {
-                try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
-            }
-            for (sub.pin_groups) |pg| {
-                if (!ctx.section_map.contains(pg.ref_des)) {
-                    try ctx.section_map.put(allocator, pg.ref_des, flat_sec_idx);
-                }
-            }
-            flat_sec_idx += 1;
-        }
-    }
-    // Include sub-block instances in section map (each sub-block becomes its own section)
-    for (block.sub_blocks) |sb| {
-        for (sb.block.instances) |inst| {
-            try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
-        }
-        flat_sec_idx += 1;
-    }
-
-    try ctx.buildPinNetMap();
-    try ctx.classify();
-    try ctx.buildAdjacency();
-    try ctx.synthesizeSpokeConnections();
-    try ctx.buildNetIndex();
-    try ctx.buildSignificantNets(block);
-    try ctx.buildPinCanonicalNets();
+    // Shared flatten → classify → adjacency → net-index pipeline (the same one
+    // render_html.setupRenderCtx runs); the JSON path additionally validates
+    // net consistency afterward.
+    try ctx.setup(block);
     try ctx.validateNetConsistency();
 
     var scene = SceneGraph.init(allocator);

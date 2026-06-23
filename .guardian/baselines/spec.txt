@@ -1,5 +1,9 @@
 # guardian-snapshot v1
 add: // spec: eval/design_block - placement-group expands into a placement-order (pins) and a group (cohesion)
+add: // spec: lint - flags a duplicate id token within one design
+add: // spec: lint - flags a nested (id (id …)) residue form
+add: // spec: lint - flags a token that is not 8 hex chars starting a-f
+add: // spec: lint - flags an (id …) form attached to a note or net
 add: // spec: placement/module_policy - applies (module-policy …) author overrides over the heuristic detection
 add: // spec: placement/module_policy - exports the detected policy as an editable (module-policy …) block
 add: // spec: placement/optimizer - (centered) docks each side on the IC centerline, not its rail pad
@@ -7,6 +11,7 @@ add: // spec: placement/optimizer - (no-refine) packs courtyards flush (touching
 add: // spec: placement/optimizer - a long manual side wraps into multiple depth lanes
 add: // spec: placement/optimizer - the manual floorplan docks sides around the anchor IC and stages unlisted parts
 add: // spec: placement/optimizer - the manual placement block keeps authored order and resolves rotations
+add: // spec: review_md - emits markdown header for design name
 add: // spec: serve/notes - Reads and writes `<design>.notes.md` next to the design source file
 add: // spec: serve/notes - Rejects bodies larger than 1 MiB
 add: // spec: serve/notes - Returns an empty string when no notes file exists yet
@@ -58,6 +63,10 @@ unlinked tag: serve/diag_format - build extracts the offending source line from 
 unlinked tag: serve/diag_format - caretLine pads to the 1-based column (preserving tabs) and ends with a caret in ./src/serve/diag_format.zig
 unlinked tag: serve/users - The user/role store persists to and resolves from auth_dir, not the project dir (users.json lives at <auth_dir>/users.json) in ./src/serve/users.zig
 unverified: eval/design_block - placement-group expands into a placement-order (pins) and a group (cohesion)
+unverified: lint - flags a duplicate id token within one design
+unverified: lint - flags a nested (id (id …)) residue form
+unverified: lint - flags a token that is not 8 hex chars starting a-f
+unverified: lint - flags an (id …) form attached to a note or net
 unverified: placement/module_policy - applies (module-policy …) author overrides over the heuristic detection
 unverified: placement/module_policy - exports the detected policy as an editable (module-policy …) block
 unverified: placement/optimizer - (centered) docks each side on the IC centerline, not its rail pad
@@ -65,6 +74,7 @@ unverified: placement/optimizer - (no-refine) packs courtyards flush (touching) 
 unverified: placement/optimizer - a long manual side wraps into multiple depth lanes
 unverified: placement/optimizer - the manual floorplan docks sides around the anchor IC and stages unlisted parts
 unverified: placement/optimizer - the manual placement block keeps authored order and resolves rotations
+unverified: review_md - emits markdown header for design name
 unverified: serve/notes - Reads and writes `<design>.notes.md` next to the design source file
 unverified: serve/notes - Rejects bodies larger than 1 MiB
 unverified: serve/notes - Returns an empty string when no notes file exists yet

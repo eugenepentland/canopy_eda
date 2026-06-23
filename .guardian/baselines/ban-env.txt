@@ -1,2 +1,2 @@
 # guardian-snapshot v1
-src/main.zig:47: std.process.getEnvVarOwned reference outside allowed paths
+src/main.zig:46: std.process.getEnvVarOwned reference outside allowed paths

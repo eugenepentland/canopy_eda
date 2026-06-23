@@ -265,6 +265,47 @@ pub const RenderCtx = struct {
         return resolved;
     }
 
+    /// Run the full flatten → classify → adjacency → net-index pipeline that
+    /// every renderer needs before it can walk the scene. Shared verbatim by
+    /// `render_html.setupRenderCtx` and `render_json.renderSceneGraph` (the
+    /// latter also calls `validateNetConsistency` afterward). The section map
+    /// records each instance/pin-group's flat section index so cross-section
+    /// detection works for multipart hubs. `project_dir` is set by the caller
+    /// (before or after this call, matching each renderer's existing order).
+    pub fn setup(self: *RenderCtx, block: *const DesignBlock) std.mem.Allocator.Error!void {
+        try self.collectFlat(block, "");
+        var flat_sec_idx: usize = 0;
+        for (block.sections) |sec| {
+            for (sec.instances) |inst| try self.section_map.put(self.allocator, inst.ref_des, flat_sec_idx);
+            for (sec.pin_groups) |pg| {
+                if (!self.section_map.contains(pg.ref_des)) {
+                    try self.section_map.put(self.allocator, pg.ref_des, flat_sec_idx);
+                }
+            }
+            flat_sec_idx += 1;
+            for (sec.sub_sections) |sub| {
+                for (sub.instances) |inst| try self.section_map.put(self.allocator, inst.ref_des, flat_sec_idx);
+                for (sub.pin_groups) |pg| {
+                    if (!self.section_map.contains(pg.ref_des)) {
+                        try self.section_map.put(self.allocator, pg.ref_des, flat_sec_idx);
+                    }
+                }
+                flat_sec_idx += 1;
+            }
+        }
+        for (block.sub_blocks) |sb| {
+            for (sb.block.instances) |inst| try self.section_map.put(self.allocator, inst.ref_des, flat_sec_idx);
+            flat_sec_idx += 1;
+        }
+        try self.buildPinNetMap();
+        try self.classify();
+        try self.buildAdjacency();
+        try self.synthesizeSpokeConnections();
+        try self.buildNetIndex();
+        try self.buildSignificantNets(block);
+        try self.buildPinCanonicalNets();
+    }
+
     pub fn collectFlat(self: *RenderCtx, block: *const DesignBlock, prefix: []const u8) !void {
         try self.collectFlatWithRenames(block, prefix, &.{});
     }

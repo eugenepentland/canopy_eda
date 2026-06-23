@@ -41,7 +41,6 @@ pub templ Account(
                 <h1 style="margin-bottom:1.5rem">Account</h1>
 
                 @PasskeysCard()
-                @PasswordCard()
 
                 if (is_admin) {
                     @InviteCard()
@@ -62,15 +61,6 @@ pub templ PasskeysCard() {
         <p class="muted">Devices that can sign in to this account.</p>
         <div id="passkey-list"></div>
         <button class="btn-primary" id="add-passkey-btn" style="margin-top:8px">Add passkey on this device</button>
-    </div>
-}
-
-pub templ PasswordCard() {
-    <div class="card">
-        <h2>Password</h2>
-        <p class="muted" id="pw-help">Set a password as a fallback in case your passkey is lost.</p>
-        <input type="password" id="pw-input" placeholder="New password (min 8 chars)" minlength="8" autocomplete="new-password" />
-        <button class="btn-primary" id="pw-btn">Set password</button>
     </div>
 }
 

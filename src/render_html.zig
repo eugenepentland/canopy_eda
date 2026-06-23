@@ -581,37 +581,7 @@ fn writeTocChip(w: anytype, anchor_id: []const u8, label: []const u8) !void {
 /// can render the same per-hub SVGs the live page emits.
 pub fn setupRenderCtx(allocator: Allocator, block: *const DesignBlock) std.mem.Allocator.Error!RenderCtx {
     var ctx = RenderCtx.init(allocator);
-    try ctx.collectFlat(block, "");
-    var flat_sec_idx: usize = 0;
-    for (block.sections) |sec| {
-        for (sec.instances) |inst| try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
-        for (sec.pin_groups) |pg| {
-            if (!ctx.section_map.contains(pg.ref_des)) {
-                try ctx.section_map.put(allocator, pg.ref_des, flat_sec_idx);
-            }
-        }
-        flat_sec_idx += 1;
-        for (sec.sub_sections) |sub| {
-            for (sub.instances) |inst| try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
-            for (sub.pin_groups) |pg| {
-                if (!ctx.section_map.contains(pg.ref_des)) {
-                    try ctx.section_map.put(allocator, pg.ref_des, flat_sec_idx);
-                }
-            }
-            flat_sec_idx += 1;
-        }
-    }
-    for (block.sub_blocks) |sb| {
-        for (sb.block.instances) |inst| try ctx.section_map.put(allocator, inst.ref_des, flat_sec_idx);
-        flat_sec_idx += 1;
-    }
-    try ctx.buildPinNetMap();
-    try ctx.classify();
-    try ctx.buildAdjacency();
-    try ctx.synthesizeSpokeConnections();
-    try ctx.buildNetIndex();
-    try ctx.buildSignificantNets(block);
-    try ctx.buildPinCanonicalNets();
+    try ctx.setup(block);
     return ctx;
 }
 
