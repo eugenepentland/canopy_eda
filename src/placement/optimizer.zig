@@ -2238,6 +2238,17 @@ const ROUGH_PACK_LANES: f64 = 2;
 /// (a dense pile); a large-negative value lets them spread across the whole lane.
 const ALONG_PACK_SEQ: f64 = -1e9;
 
+/// Rough-output ring tightness, set per solve in `packPadAnchored` and consulted
+/// by `dockSidesByTier` (so the value need not thread through `refineSidesByPull`).
+/// The rough OUTPUT packs the ring flush against the IC — gaps at the legalize
+/// floor (`FINAL_CLEAR`), the way a hand layout tucks decoupling parts right at
+/// the pins (measured: median part→IC gap 1–5 mm → ~0.2 mm, loops ≈40 % shorter,
+/// side assignment unchanged). The force SEED keeps the looser default so its
+/// tuned solve is unchanged. Defaults equal the loose constants, so any path that
+/// doesn't set them behaves as before.
+threadlocal var g_rough_ic_gap: f64 = PAD_ANCHOR_IC_GAP_MM;
+threadlocal var g_rough_part_gap: f64 = PAD_ANCHOR_PART_GAP_MM;
+
 /// One part docked to a side of the anchor IC in `packPadAnchored`: its index,
 /// priority `tier` (lower = tighter to the IC), desired coordinate ALONG the edge
 /// (its IC pad's position), half-extent along the edge, and depth out from it.
@@ -2258,31 +2269,35 @@ fn dockSidesByTier(parts: []Part, sides: *[4]std.ArrayListUnmanaged(SidePart), h
             return a.along < b.along;
         }
     }.lt;
+    // Ring tightness (see `g_rough_ic_gap`): the rough output packs flush to the
+    // IC; the force seed keeps the looser tuned default.
+    const ic_gap = g_rough_ic_gap;
+    const part_gap = g_rough_part_gap;
     for (sides, 0..) |*list, s| {
         if (list.items.len == 0) continue;
         std.mem.sort(SidePart, list.items, {}, lessTierAlong);
         const vert = s < 2; // 0 left / 1 right run vertically; 2 top / 3 bottom horizontally
         const span = if (vert) hkb.hh else hkb.hw; // how far the IC edge reaches each way
         const base = if (vert) hkb.hw else hkb.hh; // IC half-extent out toward the parts
-        // Lane length = enough to spread the side's parts over ~ROUGH_PACK_LANES
-        // lanes, but never shorter than the IC edge. A crowded side gets longer
-        // lanes (tangential spread) instead of more lanes (radial stacking).
+        // Lane length = enough to spread the side's parts over ~`lanes` lanes,
+        // but never shorter than the IC edge. A crowded side gets longer lanes
+        // (tangential spread) instead of more lanes (radial stacking).
         var total: f64 = 0;
-        for (list.items) |a| total += 2 * a.half_along + PAD_ANCHOR_PART_GAP_MM;
+        for (list.items) |a| total += 2 * a.half_along + part_gap;
         const limit = @max(span, total / (2 * ROUGH_PACK_LANES));
-        var lane_inner: f64 = base + PAD_ANCHOR_IC_GAP_MM;
+        var lane_inner: f64 = base + ic_gap;
         var lane_maxd: f64 = 0;
         var cursor: f64 = -limit;
         for (list.items) |a| {
             var pos = @max(a.along, cursor + a.half_along);
             // Wrap to the next lane out only when this one runs past its length.
             if (pos + a.half_along > limit and cursor > -limit) {
-                lane_inner += 2 * lane_maxd + PAD_ANCHOR_PART_GAP_MM;
+                lane_inner += 2 * lane_maxd + part_gap;
                 lane_maxd = 0;
                 cursor = -limit;
                 pos = @max(a.along, cursor + a.half_along);
             }
-            cursor = pos + a.half_along + PAD_ANCHOR_PART_GAP_MM;
+            cursor = pos + a.half_along + part_gap;
             lane_maxd = @max(lane_maxd, a.depth);
             const off = lane_inner + a.depth;
             switch (s) {
@@ -3086,6 +3101,14 @@ fn packPadAnchored(
     parts[hi].rot = 0;
     const hkb = keepBoxOf(parts[hi]);
     const roles = pin_roles.load(arena, prep.project_dir, prep.instances[hi].component);
+
+    // Rough-output ring tightness: pack flush to the IC on the rough OUTPUT path
+    // (`cohere`); the force seed (`cohere=false`) keeps its looser tuned gap so its
+    // solve is unchanged. (Corpus A/B vs the starred hand layouts: this roughly
+    // halved the median part→IC gap and the decoupling-loop length with the side
+    // assignment unchanged — see `g_rough_ic_gap`.)
+    g_rough_ic_gap = if (cohere) FINAL_CLEAR else PAD_ANCHOR_IC_GAP_MM;
+    g_rough_part_gap = if (cohere) FINAL_CLEAR else PAD_ANCHOR_PART_GAP_MM;
 
     // Priority tier per part from the `(rough …)` groups: group index = tier
     // (index 0 placed tightest to the anchor). A part in no group gets the last
