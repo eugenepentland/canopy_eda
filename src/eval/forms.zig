@@ -8,7 +8,6 @@ const std = @import("std");
 pub const SpecialForm = enum {
     let,
     if_,
-    cond,
     import,
     defmodule,
     design_block,
@@ -36,7 +35,6 @@ pub const SpecialForm = enum {
 const atom_to_form = std.StaticStringMap(SpecialForm).initComptime(.{
     .{ "let", .let },
     .{ "if", .if_ },
-    .{ "cond", .cond },
     .{ "import", .import },
     .{ "defmodule", .defmodule },
     .{ "design-block", .design_block },
@@ -117,7 +115,6 @@ pub const ScopeForm = enum {
     protocol,
     calc,
     description,
-    status,
     role,
     diagram,
     hosts,
@@ -128,13 +125,11 @@ pub const ScopeForm = enum {
     verifies,
     design_doc,
     test_point,
-    power_config,
     decouple_defaults,
     kicad_pcb,
     stub,
     layout,
     board,
-    replicate,
     revision,
     rough,
 
@@ -158,7 +153,6 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "protocol", .protocol },
     .{ "calc", .calc },
     .{ "description", .description },
-    .{ "status", .status },
     .{ "role", .role },
     .{ "diagram", .diagram },
     .{ "hosts", .hosts },
@@ -168,7 +162,6 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "verifies", .verifies },
     .{ "design-doc", .design_doc },
     .{ "test-point", .test_point },
-    .{ "power-config", .power_config },
     .{ "decouple-defaults", .decouple_defaults },
     .{ "kicad-pcb", .kicad_pcb },
     .{ "stub", .stub },
@@ -176,7 +169,6 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     // block-diagram arrangement; the word "layout" alone means PCB placement.
     .{ "diagram-layout", .layout },
     .{ "board", .board },
-    .{ "replicate", .replicate },
     .{ "revision", .revision },
     .{ "rough", .rough },
 });
@@ -205,7 +197,6 @@ pub const special_form_schema = blk: {
     const pairs = [_]Pair{
         .{ .let, .{ .min_args = 2, .max_args = 2 } },
         .{ .if_, .{ .min_args = 3, .max_args = 3 } },
-        .{ .cond, .{ .min_args = 1, .max_args = null } },
         .{ .import, .{ .min_args = 1, .max_args = null } },
         .{ .defmodule, .{ .min_args = 2, .max_args = null } },
         .{ .design_block, .{ .min_args = 1, .max_args = null } },
@@ -288,10 +279,6 @@ pub const special_form_docs = blk: {
     t[@intFromEnum(SpecialForm.if_)] = .{
         .syntax = "(if cond then else)",
         .summary = "Short-circuit conditional. Only the matching branch is evaluated.",
-    };
-    t[@intFromEnum(SpecialForm.cond)] = .{
-        .syntax = "(cond (test1 expr1) … (else exprN))",
-        .summary = "Walk clauses in order, returning the first matching expression's value.",
     };
     t[@intFromEnum(SpecialForm.import)] = .{
         .syntax = "(import name…)",
@@ -439,10 +426,6 @@ pub const scope_form_docs = blk: {
         .syntax = "(description \"text\")",
         .summary = "One-line section description used in the review report and overview SVG.",
     } };
-    t[@intFromEnum(ScopeForm.status)] = .{ .scope = dsec, .doc = .{
-        .syntax = "(status concept|implemented|review)",
-        .summary = "Section completion status. Inferred when omitted.",
-    } };
 
     t[@intFromEnum(ScopeForm.role)] = .{ .scope = sec, .doc = .{
         .syntax = "(role input|output)",
@@ -483,10 +466,6 @@ pub const scope_form_docs = blk: {
         .syntax = "(test-point …)",
         .summary = "Declare a measurement / bring-up access point.",
     } };
-    t[@intFromEnum(ScopeForm.power_config)] = .{ .scope = tl, .doc = .{
-        .syntax = "(power-config (derating N))",
-        .summary = "Per-design power-budget configuration knobs.",
-    } };
     t[@intFromEnum(ScopeForm.decouple_defaults)] = .{ .scope = tl, .doc = .{
         .syntax = "(decouple-defaults (ic \"REF\") (bypass (comp)))",
         .summary = "Set per-design decouple defaults: a fallback IC ref and bypass cap so (decouple …) can omit both.",
@@ -517,12 +496,6 @@ pub const scope_form_docs = blk: {
             "mounting hardware at the four corners (TL, TR, BR, BL in authored order). " ++
             "The force-solved interior placement is centered in the outline; the rendered " ++
             "views draw the outline rectangle.",
-    } };
-    t[@intFromEnum(ScopeForm.replicate)] = .{ .scope = tl, .doc = .{
-        .syntax = "(replicate N \"name~D\" (module-call args…))",
-        .summary = "Instantiate N copies of a module as sub-blocks: ~D in the name template and " ++
-            "in bare call-arg atoms is replaced by the 1-based index. Requires (hierarchical-ids); " ++
-            "the form carries one auto-minted (id …) and each copy's sub-block uuid derives from it + the substituted name.",
     } };
     t[@intFromEnum(ScopeForm.rough)] = .{ .scope = tl, .doc = .{
         .syntax = "(rough [(anchor \"REF\")] (group \"name\" \"REF\"…)…)",

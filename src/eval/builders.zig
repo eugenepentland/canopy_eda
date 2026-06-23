@@ -346,51 +346,20 @@ pub fn processPinForm(
         const pin_children = pin_form.asList() orelse return;
         if (pin_children.len < 3) return;
 
-        // Trailing (i-typ …)/(i-max …) annotations sit after the net name.
-        var tail: usize = pin_children.len;
-        var i_typ: ?f64 = null;
-        var i_max: ?f64 = null;
-        var load_label: []const u8 = "";
-        while (tail > 0) {
-            const last = pin_children[tail - 1];
-            if (last.isForm("i-typ")) {
-                const cc = last.asList().?;
-                if (cc.len >= 2) i_typ = cc[1].asNumber();
-                tail -= 1;
-            } else if (last.isForm("i-max")) {
-                const cc = last.asList().?;
-                if (cc.len >= 2) i_max = cc[1].asNumber();
-                tail -= 1;
-            } else if (last.isForm("load")) {
-                const cc = last.asList().?;
-                if (cc.len >= 2) load_label = (try self.evalNode(cc[1], env)).asString() orelse (cc[1].asAtom() orelse "");
-                tail -= 1;
-            } else break;
-        }
+        // Trailing (i-typ …)/(i-max …)/(load …) annotations + (as …) assertions
+        // are parsed by the shared helpers so this `(pins …)` path and the inline
+        // `(instance … (pin …))` path can't drift.
+        const t = try instance_mod.parsePinTail(self, pin_children, env);
+        const tail = t.tail;
+        const i_typ = t.i_typ;
+        const i_max = t.i_max;
+        const load_label = t.load_label;
         if (tail < 3) return;
 
         const net_val = try self.evalNode(pin_children[tail - 1], env);
         const net_name = net_val.asString() orelse return;
 
-        var asserted_buf: std.ArrayListUnmanaged([]const u8) = .empty;
-        var pin_count: usize = 0;
-        for (pin_children[1 .. tail - 1]) |child| {
-            if (child.isForm("as")) {
-                const ac = child.asList().?;
-                for (ac[1..]) |arg| {
-                    const val = try self.evalNode(arg, env);
-                    const name = val.asString() orelse (arg.asAtom() orelse "");
-                    if (name.len == 0) continue;
-                    try asserted_buf.append(self.allocator, name);
-                }
-            } else {
-                pin_count += 1;
-            }
-        }
-        const asserted_fns: []const []const u8 = if (pin_count == 1)
-            (asserted_buf.toOwnedSlice(self.allocator) catch &.{})
-        else
-            &.{};
+        const asserted_fns = try instance_mod.scanAssertedFns(self, pin_children[1 .. tail - 1], env);
 
         var first_pin = true;
         for (pin_children[1 .. tail - 1]) |pin_node| {

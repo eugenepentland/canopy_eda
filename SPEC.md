@@ -565,9 +565,6 @@ Public functions: analyze
 - an unknown port option records a warning naming the option
 - a non-property sub-form in an instance body records a warning
 - inert id/ids/hierarchical-ids/row/col heads never draw warnings
-- replicate expands to N sub-blocks with the index substituted into names and call args
-- replicate child ids are stable across two evaluations of the same id-annotated source
-- replicate without hierarchical-ids is rejected with the opt-in message
 - the decouple-defaults bypass component cascades into sub-block modules that declare none
 - a sub-block module's own decouple-defaults bypass wins over the parent's
 - the bypass default cascades transitively through nested sub-blocks while the ic ref stays local
@@ -611,15 +608,6 @@ Public functions: parse, parseSubForms
 - parseSubForms fills the electrical sub-fields on a caller-supplied ElectricalDecl
 - parseSubForms is used by the port parser to read inline (electrical ...) clauses
 - Port-level electrical declarations describe the logic levels carried by a net at a board boundary
-
-## eval/power_config
-
-Public functions: parse
-
-- Parses (power-config (derating R)) into a fractional derating value
-- Returns null when the form has no derating sub-form
-- Clamps derating to the (0, 1] range
-- Ignores unknown sub-forms
 
 ## eval/rails
 

@@ -61,35 +61,6 @@ pub fn evalIf(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     }
 }
 
-/// Evaluate `(cond (test1 expr1) … (else exprN))`: walks each clause in
-/// order, returning the first matching expression's value. The `else`
-/// keyword on a clause head matches unconditionally, like Scheme's `cond`.
-pub fn evalCond(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
-    for (args) |clause| {
-        const clause_children = clause.asList() orelse {
-            self.setError(clause.span, "(cond …) clauses must be (test expr) lists");
-            return EvalError.InvalidForm;
-        };
-        if (clause_children.len != 2) {
-            self.setError(clause.span, "(cond …) clauses must be (test expr) lists");
-            return EvalError.InvalidForm;
-        }
-
-        // Check for (else ...)
-        if (clause_children[0].asAtom()) |name| {
-            if (std.mem.eql(u8, name, "else")) {
-                return self.evalNode(clause_children[1], env);
-            }
-        }
-
-        const cond = try self.evalNode(clause_children[0], env);
-        if (cond.isTruthy()) {
-            return self.evalNode(clause_children[1], env);
-        }
-    }
-    return .nil;
-}
-
 /// Evaluate `(fmt "template" args…)` and return the formatted string. The
 /// template uses the `~V` / `~R` / `~C` / `~A` / `~S` directives from
 /// `eval/fmt.zig` so module names can render computed voltages / resistances

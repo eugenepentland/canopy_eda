@@ -455,7 +455,6 @@ test {
     _ = @import("eval/pin_enrichment.zig");
     _ = @import("eval/rails.zig");
     _ = @import("eval/test_point.zig");
-    _ = @import("eval/power_config.zig");
     _ = @import("eval/electrical.zig");
     _ = @import("diagram/diagram.zig");
     _ = @import("render_html.zig");

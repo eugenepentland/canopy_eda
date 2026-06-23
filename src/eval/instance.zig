@@ -313,6 +313,60 @@ fn parsePartForm(
     });
 }
 
+/// Parsed trailing annotations of a `(pin …)` form: `tail` is the count of
+/// children before the annotations (the pin tokens + net name); the remaining
+/// fields carry the optional `(i-typ …)/(i-max …)/(load …)` values.
+pub const PinTail = struct { tail: usize, i_typ: ?f64 = null, i_max: ?f64 = null, load_label: []const u8 = "" };
+
+/// Walk the trailing `(i-typ …)/(i-max …)/(load …)` annotations off the end of
+/// a `(pin …)` form (they sit after the net name) into a `PinTail`. Shared by
+/// `parsePinForm` (inline `(instance … (pin …))`) and `builders.processPinForm`
+/// (`(pins …)` blocks) so the two parse paths can't drift.
+pub fn parsePinTail(self: *Evaluator, pin_children: []const Node, env: *Env) EvalError!PinTail {
+    var t = PinTail{ .tail = pin_children.len };
+    while (t.tail > 0) {
+        const last = pin_children[t.tail - 1];
+        if (last.isForm("i-typ")) {
+            const cc = last.asList().?;
+            if (cc.len >= 2) t.i_typ = cc[1].asNumber();
+            t.tail -= 1;
+        } else if (last.isForm("i-max")) {
+            const cc = last.asList().?;
+            if (cc.len >= 2) t.i_max = cc[1].asNumber();
+            t.tail -= 1;
+        } else if (last.isForm("load")) {
+            const cc = last.asList().?;
+            if (cc.len >= 2) t.load_label = (try self.evalNode(cc[1], env)).asString() orelse (cc[1].asAtom() orelse "");
+            t.tail -= 1;
+        } else break;
+    }
+    return t;
+}
+
+/// Scan a pin form's tokens (the slice between the `pin` head and the net) for
+/// `(as "FN" …)` assertions. `(as …)` only makes sense for a single-pin form,
+/// so the asserted names are returned only when exactly one pin token is
+/// present; otherwise an empty slice (the assertion is silently dropped).
+pub fn scanAssertedFns(self: *Evaluator, tokens: []const Node, env: *Env) EvalError![]const []const u8 {
+    var asserted_buf: std.ArrayListUnmanaged([]const u8) = .empty;
+    var pin_count: usize = 0;
+    for (tokens) |child| {
+        if (child.isForm("as")) {
+            const ac = child.asList().?;
+            for (ac[1..]) |arg| {
+                const val = try self.evalNode(arg, env);
+                const name = val.asString() orelse (arg.asAtom() orelse "");
+                if (name.len == 0) continue;
+                asserted_buf.append(self.allocator, name) catch return EvalError.OutOfMemory;
+            }
+        } else {
+            pin_count += 1;
+        }
+    }
+    if (pin_count == 1) return asserted_buf.toOwnedSlice(self.allocator) catch &.{};
+    return &.{};
+}
+
 /// Parse a single `(pin … "NET" [(i-typ X) (i-max Y) (as "FN")])` form on
 /// an instance, expanding multi-pin shorthand and resolving each pin token
 /// either as a physical pin ID or as a function name through the pinout
@@ -329,54 +383,17 @@ pub fn parsePinForm(
     const pin_children = form.asList() orelse return;
     if (pin_children.len < 3) return;
 
-    // The last child is the net name only if it's not an (i-typ …)/(i-max …)
-    // annotation form — those sit at the tail of the pin form after the net.
-    var tail: usize = pin_children.len;
-    var i_typ: ?f64 = null;
-    var i_max: ?f64 = null;
-    var load_label: []const u8 = "";
-    while (tail > 0) {
-        const last = pin_children[tail - 1];
-        if (last.isForm("i-typ")) {
-            const cc = last.asList().?;
-            if (cc.len >= 2) i_typ = cc[1].asNumber();
-            tail -= 1;
-        } else if (last.isForm("i-max")) {
-            const cc = last.asList().?;
-            if (cc.len >= 2) i_max = cc[1].asNumber();
-            tail -= 1;
-        } else if (last.isForm("load")) {
-            const cc = last.asList().?;
-            if (cc.len >= 2) load_label = (try self.evalNode(cc[1], env)).asString() orelse (cc[1].asAtom() orelse "");
-            tail -= 1;
-        } else break;
-    }
+    const t = try parsePinTail(self, pin_children, env);
+    const tail = t.tail;
+    const i_typ = t.i_typ;
+    const i_max = t.i_max;
+    const load_label = t.load_label;
     if (tail < 3) return;
 
     const net_val = try self.evalNode(pin_children[tail - 1], env);
     const net_name = net_val.asString() orelse return;
 
-    // Scan for `(as "FN1" "FN2" ...)` — one or more asserted functions per pin.
-    var asserted_buf: std.ArrayListUnmanaged([]const u8) = .empty;
-    var pin_count: usize = 0;
-    for (pin_children[1 .. tail - 1]) |child| {
-        if (child.isForm("as")) {
-            const ac = child.asList().?;
-            for (ac[1..]) |arg| {
-                const val = try self.evalNode(arg, env);
-                const name = val.asString() orelse (arg.asAtom() orelse "");
-                if (name.len == 0) continue;
-                asserted_buf.append(self.allocator, name) catch return EvalError.OutOfMemory;
-            }
-        } else {
-            pin_count += 1;
-        }
-    }
-    // (as "FN") only makes sense with a single pin; silently ignore the assertion otherwise.
-    const asserted_fns: []const []const u8 = if (pin_count == 1)
-        (asserted_buf.toOwnedSlice(self.allocator) catch &.{})
-    else
-        &.{};
+    const asserted_fns = try scanAssertedFns(self, pin_children[1 .. tail - 1], env);
 
     var first_pin = true;
     for (pin_children[1 .. tail - 1]) |pin_node| {

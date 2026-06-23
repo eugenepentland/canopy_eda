@@ -141,6 +141,18 @@ pub const Port = struct {
     /// (e.g. "this mezzanine pin is 3.3 V CMOS") show up in ERC even when the
     /// far-side device lives in a different design.
     electrical: ?ElectricalDecl = null,
+
+    /// True when this port carries supply-rail specs — a nominal voltage, a
+    /// rated range, a current capacity, or an efficiency. Declared once here
+    /// so `eval/rails` (rail-source detection) and `eval/power_sequencing`
+    /// (enable-graph power-port test) share one definition instead of two
+    /// hand-kept-in-sync copies.
+    pub fn isPowerSource(self: Port) bool {
+        return self.nominal != null or
+            self.rated_min != null or self.rated_max != null or
+            self.current_typ != null or self.current_max != null or
+            self.efficiency != null or self.efficiency_linear;
+    }
 };
 
 /// A note annotation.
@@ -869,7 +881,7 @@ pub const ElectricalDecl = struct {
     v_ol_typ: ?f64 = null,
     /// Absolute-maximum voltage rating for this pin.
     max_voltage: ?f64 = null,
-    /// Power-domain tag (matches `PowerDomain.name`). Empty when the part
+    /// Power-domain tag (e.g. "digital"/"analog"/"rf"). Empty when the part
     /// doesn't declare a domain — most parts are single-domain so this is
     /// usually omitted.
     domain: []const u8 = "",
@@ -895,24 +907,6 @@ pub const TestPoint = struct {
     net: []const u8,
     purpose: []const u8 = "",
     required_for: []const TestPointTag = &.{},
-};
-
-/// A named voltage domain — the partition a rail or pin belongs to from a
-/// noise / isolation / level-shifting perspective. Two pins in different
-/// domains can't drive each other electrically without explicit translation.
-///
-/// Phase 1A landed the type only; no consumer populates `PowerRail.domain`
-/// today. Phase 2A's voltage-domain compatibility ERC is the first consumer,
-/// and that's when attribution logic lands.
-pub const PowerDomain = struct {
-    /// Canonical domain name (e.g. `"digital"`, `"analog"`, `"rf"`, `"noisy"`).
-    name: []const u8,
-    /// When true, cross-domain connections to this domain require an
-    /// explicit level shifter or isolation barrier — flagged by ERC.
-    is_isolated: bool = false,
-    /// Parent domain when this is a sub-domain (e.g. `"analog_1v8"`'s parent
-    /// is `"analog"`). Null at the top of the hierarchy.
-    parent: ?[]const u8 = null,
 };
 
 /// A first-class power rail in the design, derived in a post-eval pass by
@@ -951,11 +945,6 @@ pub const PowerRail = struct {
     /// Net that gates this rail's bring-up (from `(enable …)` on the source
     /// port). Empty when the rail is always-on or driven by a PG signal.
     enable_net: []const u8 = "",
-    /// Upstream rail name when this rail's source's input rail is itself a
-    /// derived rail (e.g. 5V → 3V3 → 1V8). Always null in Phase 1A — the
-    /// field is reserved for Phase 2C's cascaded-budget propagation, which
-    /// is the first consumer that needs it.
-    upstream_rail: ?[]const u8 = null,
 };
 
 /// One direction a `(place …)` constraint offsets a block in: horizontal
@@ -1171,10 +1160,6 @@ pub const DesignBlock = struct {
     /// collected through the existing review pipeline; Phase 2E merges the
     /// two sources for the coverage check.
     test_points: []const TestPoint = &.{},
-    /// Configured power-budget derating from `(power-config (derating R))`.
-    /// Null → consumers use their built-in default (0.8 today). Applied by
-    /// `power_budget.analyze` to scale the tight-margin threshold.
-    derating: ?f64 = null,
     /// Absolute path to the `.kicad_pcb` this design pushes board updates
     /// to, declared via `(kicad-pcb "<path>")` in the design source. Null
     /// when the design has no PCB target — the file-based KiCad sync

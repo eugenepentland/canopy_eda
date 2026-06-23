@@ -36,13 +36,6 @@ pub fn evalBuiltinOp(op: Builtin, args: []const Value) BuiltinError!Value {
     };
 }
 
-/// Name-based dispatch — kept private for the tests in this file. The
-/// evaluator goes straight to `evalBuiltinOp` via `Builtin.fromAtom`.
-fn evalBuiltin(op: []const u8, args: []const Value) BuiltinError!Value {
-    const tag = Builtin.fromAtom(op) orelse return BuiltinError.TypeError;
-    return evalBuiltinOp(tag, args);
-}
-
 const ArithOp = enum { add, sub, mul, div, mod };
 
 fn arithmetic(args: []const Value, op: ArithOp) BuiltinError!Value {
@@ -164,22 +157,22 @@ fn eSeries(args: []const Value, series: []const f64) BuiltinError!Value {
 // spec: eval/builtins - Evaluates arithmetic operations on numeric values
 test "arithmetic operations" {
     const args2 = [_]Value{ .{ .number = 10.0 }, .{ .number = 3.0 } };
-    try std.testing.expectEqual(@as(f64, 13.0), (try evalBuiltin("+", &args2)).asNumber().?);
-    try std.testing.expectEqual(@as(f64, 7.0), (try evalBuiltin("-", &args2)).asNumber().?);
-    try std.testing.expectEqual(@as(f64, 30.0), (try evalBuiltin("*", &args2)).asNumber().?);
+    try std.testing.expectEqual(@as(f64, 13.0), (try evalBuiltinOp(.add, &args2)).asNumber().?);
+    try std.testing.expectEqual(@as(f64, 7.0), (try evalBuiltinOp(.sub, &args2)).asNumber().?);
+    try std.testing.expectEqual(@as(f64, 30.0), (try evalBuiltinOp(.mul, &args2)).asNumber().?);
 }
 
 // spec: eval/builtins - Evaluates a voltage divider formula combining arithmetic operators
 test "voltage divider formula" {
     // VOUT = 0.6 * (1 + 220k/47k) = 0.6 * (1 + 4.68085...) = 0.6 * 5.68085... = 3.4085...
     const div_args = [_]Value{ .{ .number = 220000.0 }, .{ .number = 47000.0 } };
-    const ratio = try evalBuiltin("/", &div_args);
+    const ratio = try evalBuiltinOp(.div, &div_args);
 
     const add_args = [_]Value{ .{ .number = 1.0 }, ratio };
-    const sum = try evalBuiltin("+", &add_args);
+    const sum = try evalBuiltinOp(.add, &add_args);
 
     const mul_args = [_]Value{ .{ .number = 0.6 }, sum };
-    const vout = try evalBuiltin("*", &mul_args);
+    const vout = try evalBuiltinOp(.mul, &mul_args);
 
     try std.testing.expectApproxEqAbs(@as(f64, 3.4085), vout.asNumber().?, 0.001);
 }
@@ -187,9 +180,9 @@ test "voltage divider formula" {
 // spec: eval/builtins - Evaluates comparison operations returning boolean results
 test "comparison operations" {
     const args = [_]Value{ .{ .number = 5.0 }, .{ .number = 3.0 } };
-    try std.testing.expectEqual(true, (try evalBuiltin(">", &args)).asBool().?);
-    try std.testing.expectEqual(false, (try evalBuiltin("<", &args)).asBool().?);
-    try std.testing.expectEqual(true, (try evalBuiltin(">=", &args)).asBool().?);
+    try std.testing.expectEqual(true, (try evalBuiltinOp(.gt, &args)).asBool().?);
+    try std.testing.expectEqual(false, (try evalBuiltinOp(.lt, &args)).asBool().?);
+    try std.testing.expectEqual(true, (try evalBuiltinOp(.gte, &args)).asBool().?);
 }
 
 // spec: eval/builtins - Evaluates logic operations on boolean values
@@ -197,19 +190,19 @@ test "logic operations" {
     const t = Value{ .boolean = true };
     const f = Value{ .boolean = false };
     const and_args = [_]Value{ t, f };
-    try std.testing.expectEqual(false, (try evalBuiltin("and", &and_args)).asBool().?);
+    try std.testing.expectEqual(false, (try evalBuiltinOp(.and_, &and_args)).asBool().?);
     const or_args = [_]Value{ t, f };
-    try std.testing.expectEqual(true, (try evalBuiltin("or", &or_args)).asBool().?);
+    try std.testing.expectEqual(true, (try evalBuiltinOp(.or_, &or_args)).asBool().?);
     const not_args = [_]Value{t};
-    try std.testing.expectEqual(false, (try evalBuiltin("not", &not_args)).asBool().?);
+    try std.testing.expectEqual(false, (try evalBuiltinOp(.not_, &not_args)).asBool().?);
 }
 
 // spec: eval/builtins - Snaps a value to the nearest standard E-series resistor value
 test "e-series snapping" {
     const a = [_]Value{.{ .number = 400000.0 }};
-    try std.testing.expectApproxEqAbs(@as(f64, 402000.0), (try evalBuiltin("e96", &a)).asNumber().?, 1.0);
+    try std.testing.expectApproxEqAbs(@as(f64, 402000.0), (try evalBuiltinOp(.e96, &a)).asNumber().?, 1.0);
     const c = [_]Value{.{ .number = 33000.0 }};
-    try std.testing.expectApproxEqAbs(@as(f64, 33000.0), (try evalBuiltin("e24", &c)).asNumber().?, 1.0);
+    try std.testing.expectApproxEqAbs(@as(f64, 33000.0), (try evalBuiltinOp(.e24, &c)).asNumber().?, 1.0);
     const z = [_]Value{.{ .number = 0.0 }};
-    try std.testing.expectEqual(@as(f64, 0.0), (try evalBuiltin("e96", &z)).asNumber().?);
+    try std.testing.expectEqual(@as(f64, 0.0), (try evalBuiltinOp(.e96, &z)).asNumber().?);
 }

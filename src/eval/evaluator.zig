@@ -435,7 +435,6 @@ pub const Evaluator = struct {
         if (SpecialForm.fromAtom(head_name)) |sf| return switch (sf) {
             .let => special_forms.evalLet(self, args, env),
             .if_ => special_forms.evalIf(self, args, env),
-            .cond => special_forms.evalCond(self, args, env),
             .import => modules.evalImport(self, args, env),
             .defmodule => modules.evalDefmodule(self, args, env),
             .design_block => design_block.evalDesignBlock(self, args, env),

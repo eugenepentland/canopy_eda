@@ -307,35 +307,12 @@ splices a `(placement …)` form into the defmodule body, so a module's
 layout is authored once in the module file and every design instantiating
 it picks the spec up.
 
-**Module layouts compose into parent boards by default.** When a parent
-design solves on the force path (no design-level `(placement …)` /
-`(floorplan …)`), every first-level sub-block whose module body carries a
-`(placement …)` spec is re-stamped as a RIGID macro centred where the
-force solve put its members (`composeModuleMacros` in
-`src/placement/optimizer.zig`): the solver chooses the global
-arrangement, the module author the internal one. Overlap legalization
-pushes *other* parts away; if it can't converge the pass reverts
-wholesale. `(sub-block "x" (mod …) (reflow))` opts one instantiation out.
-Design-level spec > floorplan > composed module specs > free force solve
-is the full precedence. Composed slugs land in `placementDiag().composed`.
-
 ### Numeric literals with SI suffixes
 
 Bare numbers accept SI scale suffixes and an optional unit letter:
 `220k` = 220000, `4.7k`, `1M`, `100n` = `100nF` = 1e-7, `10p`, `3.3V` = 3.3,
 `0.5A`, `100mV` = 0.1 (milli only with a unit letter — `mm`/`mil` stay
 dimension tokens). Unknown trailing text (`100kHz`) still parses as an atom.
-
-### Replication
-
-```scheme
-(design-block "ADC Array"
-  (hierarchical-ids)                      ;; required by replicate
-  (replicate 4 "adc~D" (ad7380-channel ~D)))  ;; sub-blocks adc1..adc4, ~D = index
-```
-
-One `(id …)` is auto-minted on the replicate form; each copy's uuid derives
-from it (`deriveChildId(replicate_uuid, name)`), so ids are renumber-proof.
 
 ### Decoupling shorthand
 
@@ -569,9 +546,6 @@ Local dev still uses `http://localhost:7050`.
 - **PCB layout PNG**: `GET /api/pcb-png/:name` — server-rendered PNG of the force-directed PCB layout, so an AI agent (or any HTTP client) can *see* the board, not just parse the placement JSON. Mirrors the browser viewer's colours/projection (`src/render_pcb_png.zig` rasterizes onto `src/raster.zig`'s software canvas, encoded by `src/png.zig` — pure-Zig, no image dependency). Query: `?nets=A,B` / `?refs=U1,C3` enter *focus mode* (spotlight those nets/components in amber, dim the rest — `refs` match the bare leaf of a sub-block-prefixed ref); `?route=1` overlays routed copper + DRC markers; `?names=ref|origin|both` picks part labels (default: `origin` — the module-local names a `(placement …)` spec is written in — whenever a spec drives the solve, `ref` otherwise); `?pins=U13,C5` (or `pins=hubs`) labels those parts' pads with net names; when a spec drives the solve, the header shows its coverage (`SPEC: ALL PLACED` / `N UNPLACED` / `FELL BACK TO AUTO`) and spec-unlisted parts are hatched red in the staging band; `?crop=U1&r=6` zooms on one part (matched by ref, leaf, or origin name — combine with `?pins=`); `?sheet=1` returns a contact sheet (whole board + per-hub pin-labeled closeups); `?critique=1` draws a numbered worst-problems overlay (hottest loops by nH, longest airwire, staged parts, DRC count); `?width=`, `?layout=<saved>`, `?regen=1`, `?sub=<slug>`. When the design declares a `(board (size W H) …)` form, the physical outline rectangle + dimensions are drawn under the parts (green). Read-only; reuses the design's auto-layout cache.
 - **PCB layout facts**: `GET /api/pcb-describe/:name` — structured spatial facts about the solved placement (`src/serve/pcb_describe.zig`), the textual twin of the PNG: built from the identical placement-selection logic and accepting the same query parameters, so the facts always describe the board the image shows. Returns JSON with the axes convention (y grows down; "top" = −y, matching `(placement …)` spec words), the anchor (largest hub IC), per-part `ref`/`origin`/side-of-anchor/`gap_mm`/nets/`unplaced`, per-decoupling-loop net + power-leg mm + nH + side, each hub's net→package-edge pad map, spec coverage (incl. `unresolved` spec names), per-part `want_side` (the part sits OPPOSITE the hub edge its net's pads are on), a `module_policy` block (Phase 0 of the module-placement ruleset — `src/placement/module_policy.zig`: the detected `ModuleClass` per hub IC (buck/ldo/mcu/rf_amp/generic, best-effort — integrated power modules with no discrete inductor read `generic`), the criticality `net_classes` (input_rail/switch_node/clock/rf/feedback/analog — the routing-order taxonomy), and the inferred passive `roles` (input_cap/decoupling_cap/bulk_cap/feedback_divider/matching_element)), a `lint` array (fell-back-to-auto / unresolved-name / unplaced errors; wrong-side / long-loop / outside-outline warns; plus the Phase-1 layout gates in `src/placement/layout_lint.zig` — `decap-far` (HF decap power-leg to its nearest supply pad >6 mm; bulk caps exempt), `hot-loop-not-tightest` (the switcher input loop is looser than a less-critical decoupling loop), `feedback-near-aggressor` (an FB/comp part within ~2 mm of a switch-node/clock/RF passive)), `board.outline` (the authored `(board (size W H) …)` rectangle when one exists), and (with `?route=1`) `routed:{trace_mm,tracks,vias,drc}`. The same facts flow through the MCP `describe_pcb_layout` tool. Agents should read measurements here and use the PNG for gestalt.
 - **Rough-vs-starred match**: `GET /api/layout-match/:name` — score how hand-like the `?rough=1` seed is versus the design's *starred* layout (the saved layout flagged `"default"`/★ in `/pcb-layout`, the user's blessed hand-finished reference; `src/serve/layout_match.zig`). The metric is per interchangeable class (kind+value+footprint+net set), per IC edge, COUNT agreement — credit `min(rough, starred)` parts per edge — so swapping which fungible 100 nF cap sits on an edge isn't penalized and looseness is tolerated (only the wrong edge/proportion costs). Returns `{name, starred, n, area_match_pct, classes[]}` (each class's rough/starred per-edge tallies show which subsystem the rough scattered differently), else `{starred:null, message}` when nothing is starred yet. Measures placement hand-likeness / how little dragging remains to finish — NOT the electrical score. MCP twin: `compare_layout_to_starred`.
-- **Placement-spec export**: `GET /api/placement-spec/:name` — reverse-engineer an editable `(placement …)` spec from any solved layout (`src/serve/placement_spec.zig`), closing the DSL loop: the optimizer (or a saved hand layout) finds an arrangement, this endpoint turns it back into the declarative form to paste into the design/module `.sexp`, tweak, and re-solve deterministically. Anchor = largest hub; each part listed on its side of the anchor, inner lane first then along the edge; `(rot …)` only where the actual rotation differs from the solver's default; origin names when unique, ref-des otherwise. Same placement-selection params as the PNG (`layout=`, `regen=1`, `sub=`); `?format=sexp` returns bare spec text, else JSON `{name,title,source,anchor,spec,skipped}`.
-- **Module-policy export**: `GET /api/module-policy/:name` — reverse-engineer an editable `(module-policy …)` block from the layout's detected policy (`src/serve/module_policy_spec.zig`), the inverse of the override consumption: the best-effort detector reads the solved board (one `ModuleClass` per hub IC, one criticality `NetClass` per net) and this endpoint emits one `(module "REF" class)` line per hub (origin name, renumber-proof) + one `(net-class "NAME" class)` line per criticality-bearing net (ground/power/signal skipped). Paste it, correct any net/hub the heuristics misread (e.g. an integrated buck that reads `generic`), and the corrected `(module-policy …)` form feeds the layout lint + placement/routing order. Same placement-selection params as the PNG (`layout=`, `regen=1`, `sub=`); `?format=sexp` returns the bare block, else JSON `{name,title,source,spec}`. MCP twin: `export_module_policy`.
-- **Placement dry-run**: `POST /api/propose-placement/:name` — body = a `(placement …)` or `(floorplan …)` form; solves it against a request-local copy of the design (nothing written) and returns the proposed-vs-current scoreboard `{proposed:{objective,hpwl,loop_nh,routed?},used_spec,unplaced,auto_filled,unresolved,current:{…},delta_objective}` — the A/B step before committing a spec to the `.sexp`. `?route=1` routes both layouts.
 - **Layout state**: one sidecar per design — `<design>.layouts.json` `{default, cache, layouts[]}`. `layouts[]` = named snapshots (manual saves + auto-recorded optimizer runs), `default` = the KiCad-sync seed, `cache` = the single-slot optimizer cache (tuning params + poses, overwritten each solve). Precedence the `/pcb-layout` viewer shows as a scorebar chip: source `(placement …)` spec > saved snapshot (`?refine=`) > cache > fresh solve > plain grid. Legacy standalone `<design>.autolayout.json` is still read as a fallback and deleted on the next solve; `.placement.json` migration was dropped (all designs migrated). Each saved-layout row has a `→spec` button that exports the snapshot into the spec panel for promotion into the source file.
 - **Live push**: `POST /api/push/:name` — rebuild and push update. On eval failure the JSON (and the schematic page, and the MCP `build` tool) carries a structured `diagnostic` `{file,line,col,message,source_line}` rendered compiler-style with a caret (`src/serve/diag_format.zig`).
 - **Version history + diff**: `GET /api/history/:name` — stored snapshot ids (file copies under `<project>/history/<name>/<timestamp>/`, written before every mutation); `GET /api/diff/:name?from=<id>&to=<id|current>` — request-local netlist diff (instances added/removed, value/footprint changes, net membership changes; `src/serve/design_diff.zig`). Schematic header's History panel renders it. Caveat: snapshots capture the design file only, so an old revision re-evaluates against today's lib/ modules.
@@ -643,15 +617,8 @@ Tools exposed (defined in `src/serve/mcp_tools.zig`):
   (args: `name`, optional `route`/`layout`/`sub`/`regen`). `compare_layout_to_starred`
   scores the `?rough=1` seed against the design's starred (default ★) layout —
   per-interchangeable-class, per-IC-edge area-match, the "is the rough in the
-  right general area to finish by hand" check (args: `name`). `export_placement_spec`
-  reverse-engineers an editable `(placement …)` spec from the solved layout
-  (the `/api/placement-spec` JSON; args: `name`, optional `layout`/`sub`/`regen`). `export_module_policy`
-  reverse-engineers an editable `(module-policy …)` block from the detected
-  layout policy — paste it to correct a misread hub/net (the `/api/module-policy`
-  JSON; args: `name`, optional `layout`/`sub`/`regen`). `propose_placement`
-  dry-runs a placement/floorplan form against a request-local design copy and
-  returns the proposed-vs-current scoreboard (args: `name`, `spec`, optional `route`);
-  the image tool also accepts `crop`/`r`/`sheet`/`critique` view modes.
+  right general area to finish by hand" check (args: `name`). The image tool
+  also accepts `crop`/`r`/`sheet`/`critique` view modes.
 - **Language / module authoring (read-only)**: `get_language_reference` —
   the auto-generated S-expression reference rendered live from the dispatch
   tables (same content as `docs/language-forms.md`; optional `section` arg
