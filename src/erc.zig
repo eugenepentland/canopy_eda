@@ -8,6 +8,7 @@ const parser_mod = @import("sexpr/parser.zig");
 const json_writer = @import("json_writer.zig");
 const checks = @import("checks.zig");
 const module_policy = @import("placement/module_policy.zig");
+const pin_roles = @import("placement/pin_roles.zig");
 const collect = @import("diagram/collect.zig");
 const lod = @import("diagram/lod.zig");
 const membership = @import("diagram/membership.zig");
@@ -40,6 +41,7 @@ pub const ViolationKind = enum {
     multiple_drivers,
     voltage_mismatch,
     missing_decoupling,
+    decoupling_unbound,
     power_no_cap,
     concept_remaining,
     pin_multi_net,
@@ -82,6 +84,7 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkMissingValues(allocator, block, &violations);
     try checkMissingFootprints(allocator, block, &violations);
     try checkMissingDecoupling(allocator, block, &violations);
+    if (project_dir.len > 0) try checkDecouplingBinding(allocator, block, project_dir, &violations);
     try checkVoltageMismatches(allocator, block, &violations);
     try checkUnconnectedPowerPins(allocator, block, &violations);
     try checkConceptSections(allocator, block, &violations);
@@ -848,6 +851,358 @@ fn checkMissingDecoupling(
             .message = msg,
             .net = base,
         });
+    }
+}
+
+/// Bulk-reservoir threshold: caps ≥ 4.7 µF serve the whole rail, not one pin, so
+/// they're exempt from the per-pin binding requirement. Mirrors
+/// `module_policy.BULK_FARADS` (kept local to avoid an eval→placement pub-API
+/// dependency; both are stable physical constants).
+const DECOUPLE_BULK_FARADS: f64 = 4.7e-6;
+
+/// Require every HF decoupling cap on a *multi-supply-pad* rail to declare which
+/// IC pin it serves — the netlist-level twin of the `decouple-unbound` layout
+/// lint (`src/placement/layout_lint.zig`), as an ERC **error** so the requirement
+/// gates `build`/`check`, the home-page health chips, the review doc, and the
+/// `run_checks` MCP tool.
+///
+/// A cap is flagged when it is an unbound HF bypass cap (prefix `C`, < 4.7 µF,
+/// with a ground leg + a single non-ground "power-leg" net) whose power-leg rail
+/// lands on ≥ 2 of some hub IC's *supply* pads (config straps tied to the rail —
+/// EN/PG/ILIM/… — are excluded via `pin_roles`, exactly as the placer's
+/// `hubTargets` does). With ≥ 2 candidate pads the binding is ambiguous, so the
+/// author must add `(decouples "IC" PIN)` / a `(decouple … per-pin)` form, or
+/// `(decouples rail)` if the cap genuinely serves the whole rail.
+///
+/// Runs **per block** and recurses sub-blocks: the cap and the IC it decouples
+/// live in the same module namespace, so a module's bypass cap is judged against
+/// *its own* IC's pad count — not against an unrelated IC that merely shares a
+/// board rail once the hierarchy is flattened (which would spuriously flag every
+/// module cap on a shared `VDD`). This is also why violation strings can safely
+/// point into the block (no flatten arena to outlive).
+///
+/// Exemptions (no error): bulk reservoirs (≥ 4.7 µF), single-supply-pad rails
+/// (the target is unambiguous), caps already bound via `(decouples …)` /
+/// `decouple_pin`, caps with a per-pin shorthand pad in their `origin_key`, and
+/// `(decouples rail)` opt-outs. Needs `project_dir` to read `lib/pinouts` +
+/// `lib/components` for the strap classification; skipped when the project
+/// layout is unavailable (caller guards `project_dir.len > 0`).
+fn checkDecouplingBinding(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    violations: *std.ArrayListUnmanaged(Violation),
+) !void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var roles_cache = std.StringHashMap(pin_roles.PartRoles).init(arena);
+    try checkBlockDecouplingBinding(allocator, arena, block, project_dir, &roles_cache, violations);
+}
+
+fn checkBlockDecouplingBinding(
+    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    roles_cache: *std.StringHashMap(pin_roles.PartRoles),
+    violations: *std.ArrayListUnmanaged(Violation),
+) !void {
+    for (block.instances) |cap| {
+        if (na.refDesLocalPrefix(cap.ref_des) != 'C') continue; // capacitors only
+        // Already bound? (decouples "IC" PIN) → decouple_pin; (decouples rail) →
+        // rail opt-out; a (decouple … per-pin) cap carries its pad in origin_key.
+        if (cap.decouple_pin.len > 0 or cap.decouple_rail) continue;
+        if (decouplePinFromOrigin(cap.origin_key) != null) continue;
+        // Bulk reservoirs serve the whole rail by nature → exempt.
+        if (capFarads(cap.value) >= DECOUPLE_BULK_FARADS) continue;
+
+        // Resolve the cap's legs: exactly one ground net + one non-ground
+        // "power-leg" net. Anything else (no ground leg, two distinct power
+        // legs, both pins shorted) is not a standard bypass cap → skip.
+        var has_gnd = false;
+        var pwr_net: ?[]const u8 = null;
+        var multi_pwr = false;
+        for (block.nets) |net| {
+            var on_net = false;
+            for (net.pins) |pn| {
+                if (std.mem.eql(u8, pn.ref_des, cap.ref_des)) {
+                    on_net = true;
+                    break;
+                }
+            }
+            if (!on_net) continue;
+            if (pin_roles.isGroundFn(na.baseNetName(net.name))) {
+                has_gnd = true;
+            } else if (pwr_net) |p| {
+                if (!std.mem.eql(u8, p, net.name)) multi_pwr = true;
+            } else {
+                pwr_net = net.name;
+            }
+        }
+        if (multi_pwr or !has_gnd) continue;
+        const rail = pwr_net orelse continue;
+
+        if (!railLandsOnMultipleSupplyPads(block, arena, project_dir, roles_cache, rail, cap.ref_des))
+            continue;
+
+        const msg = std.fmt.allocPrint(
+            allocator,
+            "Decoupling cap \"{s}\" on rail \"{s}\" must declare which IC pin it serves — " ++
+                "the rail lands on ≥2 supply pads, so the binding is ambiguous. Add " ++
+                "(decouples \"IC\" PIN) or a (decouple … per-pin) form, or (decouples rail) " ++
+                "if it serves the whole rail",
+            .{ cap.ref_des, na.baseNetName(rail) },
+        ) catch continue;
+        try violations.append(allocator, .{
+            .kind = .decoupling_unbound,
+            .severity = .@"error",
+            .message = msg,
+            .ref_des = cap.ref_des,
+            .net = na.baseNetName(rail),
+        });
+    }
+
+    // A cap and the IC it decouples live in the same block namespace, so recurse
+    // into each sub-block (module instantiation) and check it on its own terms.
+    for (block.sub_blocks) |sb| {
+        try checkBlockDecouplingBinding(allocator, arena, sb.block, project_dir, roles_cache, violations);
+    }
+}
+
+/// True when `rail` lands on ≥2 *supply* pads of some hub on `block` — i.e. the
+/// per-pin binding of a cap on that rail is ambiguous. Mirrors the placer's
+/// `hubTargets`: a hub's supply pads on the net are its pads there minus config
+/// straps (`pin_roles` `.strap`), keeping all if every pad is a strap so a rail
+/// is never left targetless. A 2-pin passive can hold at most one pad on a given
+/// net, so this naturally selects ICs/connectors. `cap_ref` (the cap under test)
+/// is skipped.
+fn railLandsOnMultipleSupplyPads(
+    block: *const DesignBlock,
+    arena: std.mem.Allocator,
+    project_dir: []const u8,
+    roles_cache: *std.StringHashMap(pin_roles.PartRoles),
+    rail: []const u8,
+    cap_ref: []const u8,
+) bool {
+    for (block.nets) |net| {
+        if (!std.mem.eql(u8, net.name, rail)) continue;
+        // Group this rail's pads by ref-des.
+        var by_ref = std.StringHashMap(std.ArrayListUnmanaged([]const u8)).init(arena);
+        for (net.pins) |pn| {
+            if (pn.ref_des.len == 0 or std.mem.eql(u8, pn.ref_des, cap_ref)) continue;
+            const gop = by_ref.getOrPut(pn.ref_des) catch continue;
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            gop.value_ptr.append(arena, pn.pin) catch continue;
+        }
+        var it = by_ref.iterator();
+        while (it.next()) |entry| {
+            const pads = entry.value_ptr.items;
+            if (pads.len < 2) continue; // a single pad is never ambiguous
+            const roles = rolesFor(arena, project_dir, roles_cache, componentOf(block, entry.key_ptr.*));
+            var non_strap: usize = 0;
+            for (pads) |pad| {
+                if (roles.classOf(pad) != .strap) non_strap += 1;
+            }
+            // hubTargets keeps every pad when they're all straps, else only the
+            // non-strap ones — so the supply count is one or the other.
+            const supply = if (non_strap > 0) non_strap else pads.len;
+            if (supply >= 2) return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+/// Component name for `ref_des` among `block`'s own instances ("" if not found).
+fn componentOf(block: *const DesignBlock, ref_des: []const u8) []const u8 {
+    for (block.instances) |inst| {
+        if (std.mem.eql(u8, inst.ref_des, ref_des)) return inst.component;
+    }
+    return "";
+}
+
+/// Cached `pin_roles.load` keyed by component name.
+fn rolesFor(
+    arena: std.mem.Allocator,
+    project_dir: []const u8,
+    cache: *std.StringHashMap(pin_roles.PartRoles),
+    component: []const u8,
+) pin_roles.PartRoles {
+    if (component.len == 0) return .{};
+    const gop = cache.getOrPut(component) catch return .{};
+    if (!gop.found_existing) gop.value_ptr.* = pin_roles.load(arena, project_dir, component);
+    return gop.value_ptr.*;
+}
+
+/// The per-pin pad encoded in a `(decouple … per-pin)` child's structural
+/// `origin_key` (`value@PAD#index`); null when there is none. Copy of
+/// `optimizer.decouplePinFromOrigin` (kept local to avoid pulling the optimizer
+/// into the ERC pass).
+fn decouplePinFromOrigin(origin_key: []const u8) ?[]const u8 {
+    const at = std.mem.indexOfScalar(u8, origin_key, '@') orelse return null;
+    const hash = std.mem.indexOfScalarPos(u8, origin_key, at + 1, '#') orelse return null;
+    const pin = origin_key[at + 1 .. hash];
+    return if (pin.len > 0) pin else null;
+}
+
+/// Parse a capacitance string ("100nF", "4.7uF") to farads; 0 if unrecognised.
+/// Copy of `module_policy.capValueFarads` (kept local to avoid an
+/// eval→placement pub-API dependency).
+fn capFarads(s: []const u8) f64 {
+    var i: usize = 0;
+    while (i < s.len and (std.ascii.isDigit(s[i]) or s[i] == '.')) i += 1;
+    if (i == 0) return 0;
+    const num = std.fmt.parseFloat(f64, s[0..i]) catch return 0;
+    if (i >= s.len) return 0;
+    const mult: f64 = switch (s[i]) {
+        'p', 'P' => 1e-12,
+        'n', 'N' => 1e-9,
+        'u', 'U' => 1e-6,
+        'm' => 1e-3,
+        else => return 0,
+    };
+    return num * mult;
+}
+
+// ── decoupling-binding requirement tests ─────────────────────────────
+
+const TEST_CAP = "cap-0402";
+
+fn dcInst(ref: []const u8, comp: []const u8, value: []const u8) Instance {
+    return .{ .ref_des = ref, .component = comp, .value = value, .footprint = "", .symbol = "" };
+}
+
+fn countKind(violations: []const Violation, kind: ViolationKind) usize {
+    var n: usize = 0;
+    for (violations) |v| if (v.kind == kind) {
+        n += 1;
+    };
+    return n;
+}
+
+// U1 is a hub with two pads (1,2) on VDD and one ground pad (3) on GND, plus one
+// decoupling cap per binding state, all on VDD/GND. No pinout file exists for the
+// dummy project dir the test uses, so pin_roles is empty (every pad `.other`,
+// i.e. non-strap) ⇒ VDD lands on two supply pads and the binding is ambiguous.
+fn makeDecoupleTestBlock(alloc: std.mem.Allocator) !DesignBlock {
+    const insts = try alloc.alloc(Instance, 6);
+    insts[0] = dcInst("U1", "somechip", "");
+    insts[1] = dcInst("C1", TEST_CAP, "100nF"); // unbound → FLAG
+    insts[2] = dcInst("C2", TEST_CAP, "100nF"); // bound via (decouples "U1" 1)
+    insts[2].decouple_pin = "1";
+    insts[3] = dcInst("C3", TEST_CAP, "10uF"); // bulk reservoir → exempt
+    insts[4] = dcInst("C4", TEST_CAP, "100nF"); // (decouples rail) → exempt
+    insts[4].decouple_rail = true;
+    insts[5] = dcInst("C5", TEST_CAP, "100nF"); // per-pin shorthand pad in origin_key → exempt
+    insts[5].origin_key = "100nF@2#0";
+
+    const caps = [_][]const u8{ "C1", "C2", "C3", "C4", "C5" };
+    var vdd: std.ArrayListUnmanaged(env_mod.PinRef) = .empty;
+    var gnd: std.ArrayListUnmanaged(env_mod.PinRef) = .empty;
+    try vdd.append(alloc, .{ .ref_des = "U1", .pin = "1" });
+    try vdd.append(alloc, .{ .ref_des = "U1", .pin = "2" });
+    try gnd.append(alloc, .{ .ref_des = "U1", .pin = "3" });
+    for (caps) |c| {
+        try vdd.append(alloc, .{ .ref_des = c, .pin = "1" });
+        try gnd.append(alloc, .{ .ref_des = c, .pin = "2" });
+    }
+    const nets = try alloc.alloc(env_mod.Net, 2);
+    nets[0] = .{ .name = "VDD", .pins = vdd.items };
+    nets[1] = .{ .name = "GND", .pins = gnd.items };
+
+    return .{
+        .name = "t",
+        .instances = insts,
+        .nets = nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .net_ties = &.{},
+    };
+}
+
+// spec: erc - an unbound HF decoupling cap on a multi-supply-pad rail is an error, with bound/bulk/rail-optout/per-pin caps exempt
+test "decoupling cap on a multi-supply-pad rail requires a pin binding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const block = try makeDecoupleTestBlock(alloc);
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkDecouplingBinding(alloc, &block, "/nonexistent-eda-test-dir", &violations);
+
+    try std.testing.expectEqual(@as(usize, 1), countKind(violations.items, .decoupling_unbound));
+    for (violations.items) |v| {
+        if (v.kind != .decoupling_unbound) continue;
+        try std.testing.expectEqual(Severity.@"error", v.severity);
+        try std.testing.expectEqualStrings("C1", v.ref_des);
+        try std.testing.expectEqualStrings("VDD", v.net);
+    }
+}
+
+// spec: erc - config straps tied to the rail are excluded from the supply-pad count, like the placer's hubTargets
+test "decoupling-binding excludes config straps from the supply-pad count" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // EN is a control strap tied to VIN; IN/VCC/VCC2 are real supply pins.
+    const reg1_comp = "(component reg1 (pinout \"reg1\") (electrical \"EN\" (type input)))";
+    const reg1_pinout =
+        \\(pinout "reg1"
+        \\  (pin 1 "IN") (pin 2 "EN") (pin 3 "GND") (pin 4 "VCC") (pin 5 "VCC2"))
+    ;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("lib/pinouts");
+    try tmp.dir.makePath("lib/components");
+    try tmp.dir.writeFile(.{ .sub_path = "lib/components/reg1.sexp", .data = reg1_comp });
+    try tmp.dir.writeFile(.{ .sub_path = "lib/pinouts/reg1.sexp", .data = reg1_pinout });
+    const path = try tmp.dir.realpathAlloc(alloc, ".");
+
+    const insts = try alloc.alloc(Instance, 3);
+    insts[0] = dcInst("U1", "reg1", "");
+    insts[1] = dcInst("C1", TEST_CAP, "100nF"); // on VIN: pad 2 is a strap ⇒ 1 supply pad ⇒ exempt
+    insts[2] = dcInst("C2", TEST_CAP, "100nF"); // on VCC: pads 4,5 real ⇒ 2 supply pads ⇒ FLAG
+
+    var vin: std.ArrayListUnmanaged(env_mod.PinRef) = .empty;
+    try vin.append(alloc, .{ .ref_des = "U1", .pin = "1" }); // IN
+    try vin.append(alloc, .{ .ref_des = "U1", .pin = "2" }); // EN (strap)
+    try vin.append(alloc, .{ .ref_des = "C1", .pin = "1" });
+    var vcc: std.ArrayListUnmanaged(env_mod.PinRef) = .empty;
+    try vcc.append(alloc, .{ .ref_des = "U1", .pin = "4" }); // VCC
+    try vcc.append(alloc, .{ .ref_des = "U1", .pin = "5" }); // VCC2
+    try vcc.append(alloc, .{ .ref_des = "C2", .pin = "1" });
+    var gnd: std.ArrayListUnmanaged(env_mod.PinRef) = .empty;
+    try gnd.append(alloc, .{ .ref_des = "U1", .pin = "3" });
+    try gnd.append(alloc, .{ .ref_des = "C1", .pin = "2" });
+    try gnd.append(alloc, .{ .ref_des = "C2", .pin = "2" });
+
+    const nets = try alloc.alloc(env_mod.Net, 3);
+    nets[0] = .{ .name = "VIN", .pins = vin.items };
+    nets[1] = .{ .name = "VCC", .pins = vcc.items };
+    nets[2] = .{ .name = "GND", .pins = gnd.items };
+
+    const block: DesignBlock = .{
+        .name = "t",
+        .instances = insts,
+        .nets = nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .net_ties = &.{},
+    };
+
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkDecouplingBinding(alloc, &block, path, &violations);
+
+    try std.testing.expectEqual(@as(usize, 1), countKind(violations.items, .decoupling_unbound));
+    for (violations.items) |v| {
+        if (v.kind != .decoupling_unbound) continue;
+        try std.testing.expectEqualStrings("C2", v.ref_des); // C1 exempt (strap), C2 flagged
     }
 }
 

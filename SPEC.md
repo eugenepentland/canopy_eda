@@ -525,6 +525,8 @@ Public functions: renderSchematic
 - Allows an IC declared as a critical-ic to be instantiated directly in the design
 - Allows a directly-instantiated critical-ic regardless of its role (e.g. a flat RF board's ICs)
 - Does not flag main ICs that are wrapped in sub-blocks
+- an unbound HF decoupling cap on a multi-supply-pad rail is an error, with bound/bulk/rail-optout/per-pin caps exempt
+- config straps tied to the rail are excluded from the supply-pad count, like the placer's hubTargets
 
 ## eval/power_budget
 

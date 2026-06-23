@@ -104,12 +104,20 @@ fn lintDecapDistance(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, ou
 
 /// `decouple-unbound`: a high-frequency decoupling cap on a rail that lands on
 /// ≥2 of the hub's *supply* pads (straps like EN/PG already excluded from that
-/// count), with no per-pin binding — so its loop + ratsnest collapse onto one
-/// (lowest-numbered) pad instead of declaring which pin it serves. The author
-/// should bind it with `(decouples "IC" PIN)` (or a `(decouple … per-pin)`
-/// form), or, if it genuinely serves the whole rail, mark `(decouples rail)`.
+/// count) whose per-pin binding did not resolve — its loop + ratsnest collapse
+/// onto one (lowest-numbered) pad instead of the intended pin. The author should
+/// bind it with `(decouples "IC" PIN)` (or a `(decouple … per-pin)` form), or, if
+/// it genuinely serves the whole rail, mark `(decouples rail)`.
 /// Exemptions: bulk reservoirs (rail-level by nature) and single-supply-pad
 /// rails (the target is unambiguous — e.g. a buck VIN, never the enable strap).
+///
+/// This is a **warning**, not an error, because it fires on `explicit_pin`
+/// (placement resolution): a cap can *declare* a pin (`decouple_pin` set) yet
+/// still land here when the solver pairs it to a different hub on a shared plane,
+/// which is a placement-quality smell, not a missing declaration. The hard
+/// "every decoupling cap must declare a pin" requirement is the netlist-level
+/// `decoupling_unbound` ERC check (`src/erc.zig`, error), which gates
+/// `build`/`check` and the design health chips.
 fn lintDecoupleUnbound(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, out: *std.ArrayListUnmanaged(Finding)) Allocator.Error!void {
     var refs: std.ArrayListUnmanaged([]const u8) = .empty;
     defer refs.deinit(alloc);
@@ -125,7 +133,8 @@ fn lintDecoupleUnbound(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, 
     errdefer alloc.free(refs_owned);
     try out.append(alloc, .{
         .rule = "decouple-unbound",
-        // Always a warning — a binding is best practice but not blocking.
+        // A warning: the hard "must declare a pin" requirement is the netlist-level
+        // `decoupling_unbound` ERC error; this fires on placement non-resolution.
         .severity = .warn,
         .refs = refs_owned,
         .msg = "HF decoupling cap on a multi-pin rail has no pin binding — its loop " ++
