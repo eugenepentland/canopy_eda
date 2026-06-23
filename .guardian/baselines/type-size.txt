@@ -1,5 +1,5 @@
 # guardian-snapshot v1
-src/erc.zig: pub const ViolationKind (enum_) has 22 fields (cap 16)
+src/erc.zig: pub const ViolationKind (enum_) has 23 fields (cap 16)
 src/eval/env.zig: pub const DesignBlock (struct_) has 23 fields (cap 16)
 src/eval/env.zig: pub const Instance (struct_) has 23 fields (cap 16)
 src/eval/evaluator.zig: pub const Evaluator (struct_) has 26 fields (cap 16)

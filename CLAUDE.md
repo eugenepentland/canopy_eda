@@ -371,14 +371,33 @@ The two `(decouple … per-pin …)` shorthands above already supply this bindin
 automatically (each generated cap carries its pad in its structural id); use
 `(decouples …)` when you keep hand-named cap instances (and their stable ids).
 
-The **`decouple-unbound` layout lint** (in `pcb-describe`'s `lint[]`, surfaced on
-`/pcb-layout`) makes per-pin binding a *requirement*: an HF decoupling cap on a
-rail that lands on ≥2 of a hub's **supply** pads (config straps like EN/PG are
-excluded from that count by `pin_roles`, so a cap never binds to the enable pin)
-with no `(decouples …)` / `(near …)` / per-pin binding is flagged. Exempt:
-bulk reservoirs (≥4.7 µF, rail-level by nature), single-supply-pad rails (a buck
-VIN/VOUT — the target is unambiguous), and `(decouples rail)` opt-outs. Value
-sets only placement tightness, never *whether* a cap must declare its pin.
+Declaring which pin a decoupling cap serves is a **hard requirement**: an HF
+decoupling cap on a rail that lands on ≥2 of a hub's **supply** pads (config
+straps like EN/PG are excluded from that count by `pin_roles`, so a cap never
+binds to the enable pin) **must** carry a binding.
+
+- The **`decoupling_unbound` ERC check** (`src/erc.zig`, **error**) is the gate:
+  it fails `netlisp build` / `netlisp check`, lights the home-page health chip
+  red, and shows in the review doc + the `run_checks` MCP tool. It enforces the
+  *requirement* — does the cap declare a pin at all? It runs **per block**
+  (recursing sub-blocks), so a module's bypass cap is judged against *its own*
+  IC's pad count, not an unrelated IC that merely shares a board rail once
+  flattened. Reads `lib/pinouts` + `lib/components` for the strap classification
+  (needs `--project-dir`).
+- The **`decouple-unbound` layout lint** (`src/placement/layout_lint.zig`,
+  **warning**) is the placement-time advisory, surfaced in `pcb-describe`'s
+  `lint[]` on `/pcb-layout` and the `describe_pcb_layout` MCP tool. It is a
+  *warning*, not an error, because it fires on `explicit_pin` resolution: a cap
+  can declare a pin (so the ERC requirement is met) yet still land here when the
+  solver pairs it to a different hub on a shared plane — a placement-quality
+  smell, not a missing declaration. Use `(decouples rail)` for a cap that
+  genuinely serves the whole plane.
+
+Both share the exemptions: bulk reservoirs (≥4.7 µF, rail-level by nature),
+single-supply-pad rails (a buck VIN/VOUT — the target is unambiguous), caps
+already bound via `(decouples …)` / `decouple_pin` / a `(decouple … per-pin)`
+shorthand pad, and `(decouples rail)` opt-outs. Value sets only placement
+tightness, never *whether* a cap must declare its pin.
 
 ### Schematic diagram layout: `(diagram-layout …)`
 
