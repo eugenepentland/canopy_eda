@@ -19,7 +19,6 @@ src/commands.zig::CommandError value
 src/commands.zig::cmdBuild fn
 src/commands.zig::cmdCheck fn
 src/commands.zig::cmdExportKicad fn
-src/commands.zig::cmdExportReview fn
 src/commands.zig::cmdImportKicad fn
 src/config.zig::cseConnectSid fn
 src/config.zig::cseMaxInFlight fn
@@ -654,7 +653,6 @@ src/review_html.zig::writeTestPoints fn
 src/review_html.zig::writeTraceability fn
 src/review_json.zig::renderToJson fn
 src/review_json.zig::writeTraceability fn
-src/review_md.zig::renderToMarkdown fn
 src/serve.zig::Handler struct_
 src/serve.zig::JobOutcome enum_
 src/serve.zig::PcbJob struct_
@@ -689,13 +687,11 @@ src/serve/api.zig::ercApi fn
 src/serve/api.zig::exportBomCsvApi fn
 src/serve/api.zig::exportKicadApi fn
 src/serve/api.zig::exportNetlistApi fn
-src/serve/api.zig::exportReviewPackageApi fn
 src/serve/api.zig::freePinsApi fn
 src/serve/api.zig::pinoutApi fn
 src/serve/api.zig::pushApi fn
 src/serve/api.zig::removeComponentDatasheetApi fn
 src/serve/api.zig::removeSectionNoteApi fn
-src/serve/api.zig::reviewJsonApi fn
 src/serve/api.zig::sceneGraphApi fn
 src/serve/api.zig::versionApi fn
 src/serve/assets_css.zig::INDEX_CSS value

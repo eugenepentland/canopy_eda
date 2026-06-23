@@ -1,2 +1,5 @@
 # guardian-snapshot v1
+src/diagram/diagram.zig::renderSystemSvg: unused public declaration
 src/eval/env.zig::PowerDomain: unused public declaration
+src/render_html.zig::STATIC_SVG_CSS: unused public declaration
+src/render_html.zig::renderHubSvg: unused public declaration

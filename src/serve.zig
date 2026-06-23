@@ -386,9 +386,7 @@ pub fn serve(
     // Phase 3).
     router.post("/api/sync-kicad-pcb/:name", sync.syncKicadPcbApi, .{});
     router.get("/api/export-bom/:name", api.exportBomCsvApi, .{});
-    router.get("/api/export-review/:name", api.exportReviewPackageApi, .{});
     router.get("/api/erc/:name", api.ercApi, .{});
-    router.get("/api/review/:name", api.reviewJsonApi, .{});
     // Version history: snapshot list + structured diff between two stored
     // revisions (or a revision and the current working file).
     router.get("/api/history/:name", design_diff.historyApi, .{});

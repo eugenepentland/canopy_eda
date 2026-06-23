@@ -135,8 +135,6 @@ pub fn main() !void {
         try commands.cmdImportKicad(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "export-kicad")) {
         try commands.cmdExportKicad(allocator, args[2..]);
-    } else if (std.mem.eql(u8, command, "export-review")) {
-        try commands.cmdExportReview(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "serve")) {
         const project_dir = optionalArg(args[2..], "--project-dir") orelse ".";
         const port: u16 = if (optionalArg(args[2..], "--port")) |p|
@@ -379,7 +377,6 @@ fn printUsage() !void {
         \\  netlisp mint-invite [--project-dir <d>] [--role <r>] [--auth-dir <d>]  Mint a single-use invite (7-day TTL)
         \\  netlisp import-kicad <board.kicad_pcb> [--project-dir <d>] [--name <n>] [--title <t>] [--dry-run]  Migrate a KiCad board into a netlisp design
         \\  netlisp export-kicad --project-dir <d> --output-dir <out> <name>  Export KiCad netlist + footprints
-        \\  netlisp export-review --project-dir <d> [--output-dir <out>] [--zip] <name>  Export design-review package (markdown + BOM CSV)
         \\  netlisp convert-footprint <file>        Convert KiCad .kicad_mod to .sexp
         \\  netlisp convert-symbol <file> [--filter <name>]  Convert KiCad .kicad_sym to .sexp
         \\  netlisp convert-pinout <file> [--filter <name>]  Generate pinout from KiCad .kicad_sym
