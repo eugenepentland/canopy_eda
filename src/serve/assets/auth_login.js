@@ -1,41 +1,6 @@
 const btn = document.getElementById('login-btn');
 const emailInput = document.getElementById('email');
-const passwordInput = document.getElementById('password');
-const toggle = document.getElementById('toggle-mode');
 const status = document.getElementById('status');
-let mode = 'passkey';
-toggle.addEventListener('click', (e) => {
-  e.preventDefault();
-  if (mode === 'passkey') {
-    mode = 'password';
-    passwordInput.style.display = '';
-    btn.textContent = 'Sign in with Password';
-    toggle.textContent = 'Use passkey instead';
-    passwordInput.focus();
-  } else {
-    mode = 'passkey';
-    passwordInput.style.display = 'none';
-    btn.textContent = 'Sign in with Passkey';
-    toggle.textContent = 'Use password instead';
-  }
-  status.textContent = '';
-});
-async function doPasswordLogin(email) {
-  status.textContent = 'Signing in...';
-  const r = await fetch('/auth/password/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: passwordInput.value })
-  });
-  const j = await r.json();
-  if (j.ok) {
-    status.className = 'status ok';
-    status.textContent = 'Authenticated!';
-    window.location.href = '/';
-  } else {
-    throw new Error(j.error || 'Sign-in failed');
-  }
-}
 btn.addEventListener('click', async () => {
   const email = emailInput.value.trim();
   if (!email || !email.includes('@')) {
@@ -46,15 +11,11 @@ btn.addEventListener('click', async () => {
   btn.disabled = true;
   status.className = 'status';
   try {
-    if (mode === 'password') {
-      await doPasswordLogin(email);
-      return;
-    }
     status.textContent = 'Requesting challenge...';
     const challengeRes = await fetch('/auth/login/challenge?email=' + encodeURIComponent(email));
     const opts = await challengeRes.json();
     if (!opts.allowCredentials || opts.allowCredentials.length === 0) {
-      throw new Error('No passkey registered for this email on this server. Try "Use password instead" or ask an admin for an invite link.');
+      throw new Error('No passkey registered for this email on this server. Ask an admin for an invite link.');
     }
     const publicKey = {
       challenge: b64urlToBytes(opts.challenge),

@@ -104,20 +104,12 @@ const CAP_W_MAX: f64 = 3.0; // max value-priority boost for the smallest cap on 
 // fixed full-route metric, 3.0 improved tpsm84338c −13.5% with every other suite
 // design byte-identical — a strictly-dominant move.
 const INPUT_LOOP_BOOST: f64 = 3.0;
-// Weight on the placement-regularizer term (`compactnessTerm`, default `.tidiness`).
-// 0.5 is the long-shipped tidiness weight: the row/column alignment reward keeps
-// large boards compact (aligned parts route shorter — load-bearing on 200+ part
-// designs) while staying a gentle nudge on small ones. The `.bbox` / `.protrusion`
-// area modes are opt-in alternatives; a 12-design sweep showed THEY raise hot-loop
-// inductance ~10-13% (up to +88% on a buck) by dragging caps off their IC power
-// pins and do nothing for large-board row alignment — so they are not the default.
+// Weight on the placement-regularizer term (`tidinessPenalty`). The row/column
+// alignment reward keeps large boards compact (aligned parts route shorter —
+// load-bearing on 200+ part designs) while staying a gentle nudge on small ones.
 const ALIGN_CLAMP_MM: f64 = 1.5; // only finish near-alignments within this offset (no long pulls)
-// Per-mode alignment-weight defaults. The three compactness terms live on
-// different scales (`tidiness` = size-normalized mean pairwise offset × n, mm;
-// `bbox`/`protrusion` = mm²), so a single shared weight silently changes meaning
-// when the mode dropdown switches — each mode carries its own default instead.
 // `Params.w_align = W_ALIGN_AUTO` (the shipping default) resolves through
-// `effAlignW`; an explicit query/sidecar value overrides for any mode.
+// `effAlignW` to `W_ALIGN_TIDINESS`; an explicit query/sidecar value overrides.
 // `tidinessPenalty` is normalized by pair count (× 2/(n−1), i.e. n × the mean
 // pairwise misalignment) so it grows ~linearly with part count like HPWL does —
 // the raw O(n²) sum made the effective alignment-vs-wirelength balance a
@@ -128,12 +120,7 @@ const ALIGN_CLAMP_MM: f64 = 1.5; // only finish near-alignments within this offs
 // unroutable nets across the suite, vs ≤+1% drift elsewhere. Alignment earns
 // less than assumed once real copper is the judge.
 const W_ALIGN_TIDINESS: f64 = 1.5;
-// Area modes (mm²): ~0.5/(typical module bbox mm² per mm of tidiness) — these
-// lost the 12-design sweep and are opt-in; weights sized so toggling the mode
-// keeps the term's magnitude in the objective comparable, not 1:1 identical.
-const W_ALIGN_BBOX: f64 = 0.10;
-const W_ALIGN_PROTRUSION: f64 = 0.02;
-const W_ALIGN_AUTO: f64 = -1.0; // sentinel: resolve per compact_mode (effAlignW)
+const W_ALIGN_AUTO: f64 = -1.0; // sentinel: w_align unset → resolve to W_ALIGN_TIDINESS (effAlignW)
 // Weight on the routing-congestion penalty (`congestionPenalty`). HPWL/RSMT alone
 // does not predict routability — local congestion must be traded off against it
 // (Spindler & Johannes RUDY; UCLA mPL). The penalty is ~0 until a region's
@@ -183,30 +170,14 @@ fn constraintWeight(p: env.ConstraintPriority) f64 {
     };
 }
 
-/// Which placement-regularizer `w_align` weights.
-///   • `tidiness` (default) — the long-shipped pairwise row/column alignment reward
-///     (`tidinessPenalty`): for each part pair, the smaller of their x/y offsets,
-///     clamped to `ALIGN_CLAMP_MM`. Driving it down lines parts into shared rows /
-///     columns, which keeps routing short — essential on large boards (a 301-part
-///     design's wirelength ~doubled with it removed) and a gentle nudge on small ones.
-///   • `bbox` — area of the whole-module courtyard bounding box (mm²). Only the
-///     *outermost* parts feel it, so it does nothing for large-board row alignment.
-///   • `protrusion` — Σ per-part squared reach from the cluster centroid to its
-///     courtyard's far corner (mm²). Tucks caps' GND inward but fights the hot loop
-///     (≈+10-13%, up to +88% on a buck), so it lost the small-board sweep.
-/// `bbox`/`protrusion` are opt-in alternatives via the "Compact" dropdown / `?compact=`.
-pub const CompactMode = enum { tidiness, bbox, protrusion };
-
 /// Runtime-tunable weights (the consts above are the defaults). Passed to
 /// `solve` so the UI can adjust placement without a rebuild. Only the steering
 /// weights are exposed; the structural tunables (iters, starts) stay fixed.
 pub const Params = struct {
     loop_w: f64 = LOOP_W,
     /// Alignment/compactness weight. Defaults to the `W_ALIGN_AUTO` sentinel,
-    /// which resolves to the active `compact_mode`'s own default via `effAlignW`
-    /// — the three modes live on different scales (mm vs mm²), so a shared
-    /// constant would silently change meaning when the mode switches. Set ≥0 to
-    /// override explicitly (query/sidecar values do).
+    /// which resolves to `W_ALIGN_TIDINESS` via `effAlignW`. Set ≥0 to override
+    /// explicitly (query/sidecar values do).
     w_align: f64 = W_ALIGN_AUTO,
     w_congest: f64 = W_CONGEST,
     /// Extra loop-inductance weight multiplier on a switching regulator's INPUT
@@ -215,7 +186,6 @@ pub const Params = struct {
     input_loop_boost: f64 = INPUT_LOOP_BOOST,
     cap_w_max: f64 = CAP_W_MAX,
     grid_courtyards: bool = GRID_COURTYARDS,
-    compact_mode: CompactMode = .tidiness,
     /// Extra clearance (mm) added to every part's courtyard half-extents (on top
     /// of its F.CrtYd / pad bbox). The optimizer's density floor: two parts can
     /// never sit closer than the sum of their margins. Defaults to the geometry
@@ -286,16 +256,12 @@ pub const Params = struct {
 };
 
 /// The effective alignment weight: an explicit `w_align` (≥0) wins; the
-/// `W_ALIGN_AUTO` sentinel resolves to the active compactness mode's own
-/// default. Every objective/score path multiplies the compactness term by this
-/// (never by `params.w_align` raw), so the UI and the search always agree.
+/// `W_ALIGN_AUTO` sentinel resolves to the shipped tidiness default. Every
+/// objective/score path multiplies the compactness term by this (never by
+/// `params.w_align` raw), so the UI and the search always agree.
 pub fn effAlignW(params: Params) f64 {
     if (params.w_align >= 0) return params.w_align;
-    return switch (params.compact_mode) {
-        .tidiness => W_ALIGN_TIDINESS,
-        .bbox => W_ALIGN_BBOX,
-        .protrusion => W_ALIGN_PROTRUSION,
-    };
+    return W_ALIGN_TIDINESS;
 }
 
 /// Which phase of the solve a progress frame came from — drives the label the
@@ -454,8 +420,8 @@ pub const Breakdown = struct {
     loop_weighted: f64, // value-priority-weighted loop-length sum (mm, display only)
     loop_nh: f64 = 0, // summed unweighted hot-loop connection inductance (nH)
     loop_nh_weighted: f64 = 0, // value-weighted loop inductance (nH) — the scored loop term
-    alignment: f64, // active compactness term (mm²): bbox area or per-part protrusion per compact_mode (field name kept for wire-compat)
-    footprint: f64 = 0, // courtyard bounding-box area (mm²) — always; the yardstick shown for comparing the two modes
+    alignment: f64, // tidiness penalty (mm): pairwise row/column misalignment (field name kept for wire-compat)
+    footprint: f64 = 0, // courtyard bounding-box area (mm²) — always reported as the compactness yardstick
     congestion: f64 = 0, // RUDY routing-congestion overflow penalty
     objective: f64, // the weighted total the multi-start/polish minimize
 };
@@ -3846,8 +3812,8 @@ pub fn solve(
     // minimises. The real maze-routed trace is deliberately NOT scored here: re-
     // routing from scratch per pose makes the score a jagged, bistable function of
     // position (a 0.05 mm nudge can flip a leg routable↔unroutable and swing the
-    // objective by tens of units — see `src/fuzz_layout.zig`). Routing is a
-    // separate explicit action that draws real copper, not the placement score.
+    // objective by tens of units). Routing is a separate explicit action that
+    // draws real copper, not the placement score.
     const score = scoreLayout(parts, &prep.idx_of, nets, built.loops);
     const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
@@ -4676,7 +4642,7 @@ fn breakdownWith(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: [
     // `al` is the *active* compactness term (what the objective minimizes);
     // `footprint` is always the courtyard bbox area — the universal yardstick the
     // UI shows so the two modes are comparable on the same scale.
-    const al = compactnessTerm(parts, params.compact_mode);
+    const al = tidinessPenalty(parts);
     const cong = congestionPenalty(parts, idx_of, nets);
     return .{
         .hpwl = score.hpwl_mm,
@@ -5202,7 +5168,7 @@ fn routedPolishCost(
     const focus_w = routedSubsetWeighted(scratch.allocator(), parts, idx_of, nets, loops, cap, true);
     const cong = if (params.w_congest != 0) params.w_congest * congestionPenalty(parts, idx_of, nets) else 0;
     return wireScore(parts, idx_of, nets) + params.loop_w * (others_w + focus_w) +
-        effAlignW(params) * compactnessTerm(parts, params.compact_mode) + cong;
+        effAlignW(params) * tidinessPenalty(parts) + cong;
 }
 
 /// Per-part routed tuck: pick the (position, rotation) over a small grid window
@@ -5586,7 +5552,7 @@ fn objectiveCost(
     // where it contributes nothing anyway.
     const cong = if (params.w_congest != 0) params.w_congest * congestionPenalty(parts, idx_of, nets) else 0;
     return hpwl + params.loop_w * weightedLoop(parts, loops) +
-        effAlignW(params) * compactnessTerm(parts, params.compact_mode) + cong +
+        effAlignW(params) * tidinessPenalty(parts) + cong +
         constraintCost(parts, idx_of, nets, loops, params);
 }
 
@@ -5725,7 +5691,7 @@ fn routedObjectiveCost(
     const hpwl = wireScore(parts, idx_of, nets);
     const loop_weighted = routedLoops(scratch, parts, idx_of, nets, loops).weighted_nh;
     const cong = if (params.w_congest != 0) params.w_congest * congestionPenalty(parts, idx_of, nets) else 0;
-    return hpwl + params.loop_w * loop_weighted + effAlignW(params) * compactnessTerm(parts, params.compact_mode) + cong;
+    return hpwl + params.loop_w * loop_weighted + effAlignW(params) * tidinessPenalty(parts) + cong;
 }
 
 /// One full-route verdict — what the estimate-based objectives can only proxy,
@@ -5804,7 +5770,7 @@ fn fullRouteCost(
         FULLROUTE_DRC_MM * @as(f64, @floatFromInt(viol.len)) +
         FULLROUTE_UNROUTED_MM * @as(f64, @floatFromInt(unrouted)) +
         params.loop_w * loop_nh_weighted +
-        effAlignW(params) * compactnessTerm(parts, params.compact_mode);
+        effAlignW(params) * tidinessPenalty(parts);
     return .{
         .cost = cost,
         .trace_mm = trace,
@@ -5817,11 +5783,8 @@ fn fullRouteCost(
 
 /// The whole sub-module's footprint area (mm²): the area of the axis-aligned
 /// bounding box over every part's rotation-aware courtyard (`effHw`/`effHh`).
-/// Replaces the old pairwise tidiness reward — minimising the envelope pulls
-/// parts in tight and, because a decoupling cap whose GND pad points *away*
-/// from its IC pushes the bounding box outward, biases each cap toward the
-/// orientation that keeps the whole circuit compact (GND tucked alongside the
-/// chip rather than sticking out into empty space).
+/// Reported in `Breakdown.footprint` as the compactness yardstick (it is not
+/// part of the scored objective — `tidinessPenalty` is the regularizer).
 fn compactnessArea(parts: []const Part) f64 {
     if (parts.len == 0) return 0;
     var minx: f64 = std.math.inf(f64);
@@ -5837,50 +5800,11 @@ fn compactnessArea(parts: []const Part) f64 {
     return (maxx - minx) * (maxy - miny);
 }
 
-/// Per-part protrusion (mm²): Σ over parts of the squared distance from the
-/// cluster centroid to that part's courtyard corner *facing away* from the
-/// centroid (`|Δx|+effHw`, `|Δy|+effHh`). Unlike the bounding box, *every* part
-/// contributes a gradient, so each cap is pulled toward the centre **and**
-/// rotated to present its short axis outward — a cap offset mostly in x prefers
-/// its long axis vertical (tangential), which tucks the GND pad alongside the IC
-/// instead of letting it jut into empty space. The whole-cluster spread the
-/// box metric can't see at the interior.
-fn compactnessProtrusion(parts: []const Part) f64 {
-    if (parts.len == 0) return 0;
-    var cx: f64 = 0;
-    var cy: f64 = 0;
-    for (parts) |p| {
-        cx += p.x;
-        cy += p.y;
-    }
-    const inv = 1.0 / @as(f64, @floatFromInt(parts.len));
-    cx *= inv;
-    cy *= inv;
-    var total: f64 = 0;
-    for (parts) |p| {
-        const rx = @abs(p.x - cx) + effHw(p);
-        const ry = @abs(p.y - cy) + effHh(p);
-        total += rx * rx + ry * ry;
-    }
-    return total;
-}
-
-/// The active compactness term `w_align` weights, selected by `mode`. Both are
-/// in mm² so the weight stays on a comparable scale across the two.
-fn compactnessTerm(parts: []const Part, mode: CompactMode) f64 {
-    return switch (mode) {
-        .tidiness => tidinessPenalty(parts),
-        .bbox => compactnessArea(parts),
-        .protrusion => compactnessProtrusion(parts),
-    };
-}
-
 /// Tidiness reward (as a penalty to minimize): for each part pair, the smaller of
 /// their x/y offsets, clamped to `ALIGN_CLAMP_MM`. Driving it down lines parts up
 /// into shared rows / columns; the clamp means only near-aligned pairs feel a pull,
 /// so distant parts aren't dragged together. The long-shipped default regularizer —
-/// cheap, and on large boards aligned rows route far shorter (the `.bbox`/
-/// `.protrusion` area modes do not align, so they can't substitute here).
+/// cheap, and on large boards aligned rows route far shorter.
 ///
 /// Normalized by pair count (× 2/(n−1) ⇒ n × the mean pairwise misalignment) so
 /// the term grows ~linearly with part count, the same as HPWL — the raw O(n²)

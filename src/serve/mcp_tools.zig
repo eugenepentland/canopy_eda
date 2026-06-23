@@ -16,7 +16,6 @@ const log = @import("../infra/log.zig");
 const bom = @import("../bom.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
 const ids = @import("../eval/ids.zig");
-const review_mod = @import("../review.zig");
 const review_json_mod = @import("../review_json.zig");
 const req_checks = @import("../req_checks.zig");
 const traceability_mod = @import("../traceability.zig");
@@ -99,7 +98,6 @@ const tools = [_]ToolEntry{
     .{ .name = "compare_layout_to_starred", .is_mutation = false },
     .{ .name = "get_version", .is_mutation = false },
     .{ .name = "run_checks", .is_mutation = false },
-    .{ .name = "generate_review", .is_mutation = false },
     // The auto-generated S-expression language reference, rendered live from
     // the evaluator's own dispatch tables (same content as docs/language-forms.md).
     .{ .name = "get_language_reference", .is_mutation = false },
@@ -258,7 +256,7 @@ fn dispatchProject(
 }
 
 /// Diagnostic / introspection tools that don't change project state:
-/// scene graph, version counter, run_checks, generate_review.
+/// scene graph, version counter, run_checks.
 fn dispatchInfo(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -272,7 +270,6 @@ fn dispatchInfo(
     if (std.mem.eql(u8, tool_name, "compare_layout_to_starred")) return try toolCompareLayoutToStarred(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "get_version")) return try toolGetVersion(args_val, out, allocator);
     if (std.mem.eql(u8, tool_name, "run_checks")) return try toolRunChecks(allocator, project_dir, args_val, out, w);
-    if (std.mem.eql(u8, tool_name, "generate_review")) return try toolGenerateReview(allocator, project_dir, args_val, w, out);
     if (std.mem.eql(u8, tool_name, "read_datasheet")) return try toolReadDatasheet(allocator, project_dir, args_val, out);
     return null;
 }
@@ -930,11 +927,6 @@ fn toolGetVersion(args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), a
 fn toolRunChecks(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), w: anytype) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     return runChecks(allocator, project_dir, name, optionalString(args_val, "severity"), optionalString(args_val, "changed_since"), w);
-}
-
-fn toolGenerateReview(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, w: anytype, out: *std.ArrayListUnmanaged(u8)) !bool {
-    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    return generateReview(allocator, project_dir, name, w);
 }
 
 fn toolRestoreVersion(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
@@ -1783,45 +1775,6 @@ fn runChecks(
     return true;
 }
 
-/// Build and serialize the review document for a design. Returns the JSON
-/// body directly; mirrors the HTTP handler so the browser and MCP tool
-/// consume the same shape.
-fn generateReview(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-    w: anytype,
-) !bool {
-    var eval = Evaluator.init(allocator, project_dir);
-    defer eval.deinit();
-    const nb = evalNamedBlock(allocator, project_dir, name, &eval) catch |e| switch (e) {
-        error.NotADesign => {
-            try w.writeAll(ERR_NOT_DESIGN);
-            return false;
-        },
-        else => {
-            try w.writeAll(ERR_BUILD_FAILED);
-            return false;
-        },
-    };
-    const block = nb.block;
-
-    if (!nb.is_module) {
-        const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
-        defer allocator.free(bom_path);
-        bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
-    }
-
-    const violations = try runErcForNamedBlock(allocator, nb, project_dir);
-    var check_results = req_checks.runChecks(allocator, &eval, block) catch
-        std.StringHashMapUnmanaged([]req_checks.Result).empty;
-    req_checks.applyVerifications(&check_results, block, block.instances);
-    const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, &check_results, project_dir);
-    const json = try review_json_mod.renderToJson(allocator, doc);
-    try w.writeAll(json);
-    return true;
-}
-
 fn diffSets(
     allocator: std.mem.Allocator,
     old_block: *const env_mod.DesignBlock,
@@ -2640,7 +2593,7 @@ pub const NamedBlock = struct {
 /// Evaluate `name` as a design, or — when no `src/<name>.sexp` exists and
 /// `lib/modules/<name>.sexp` does — as a standalone module instantiation.
 /// This is what lets the read-only by-name tools (get_schematic,
-/// run_checks, list_instances, generate_review, …) accept module names the
+/// run_checks, list_instances, …) accept module names the
 /// same way the PCB tools already do. The module path returns the module's
 /// own evaluated block (the wrapper's sole sub-block). `eval` is
 /// caller-owned and must outlive the returned block.

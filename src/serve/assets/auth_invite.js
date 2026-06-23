@@ -1,41 +1,7 @@
 const INVITE_TOKEN = document.body.dataset.inviteToken;
 const btn = document.getElementById('register-btn');
 const emailInput = document.getElementById('email');
-const passwordInput = document.getElementById('password');
-const toggle = document.getElementById('toggle-mode');
 const status = document.getElementById('status');
-let mode = 'passkey';
-toggle.addEventListener('click', (e) => {
-  e.preventDefault();
-  if (mode === 'passkey') {
-    mode = 'password';
-    passwordInput.style.display = '';
-    btn.textContent = 'Set Password';
-    toggle.textContent = 'Use a passkey instead';
-  } else {
-    mode = 'passkey';
-    passwordInput.style.display = 'none';
-    btn.textContent = 'Register Passkey';
-    toggle.textContent = 'Use a password instead';
-  }
-  status.textContent = '';
-});
-async function doPasswordSet(email) {
-  if (passwordInput.value.length < 8) {
-    throw new Error('Password must be at least 8 characters');
-  }
-  status.textContent = 'Saving password...';
-  const r = await fetch('/auth/password/set', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: passwordInput.value, invite: INVITE_TOKEN })
-  });
-  const j = await r.json();
-  if (!j.ok) throw new Error(j.error || 'Failed to set password');
-  status.className = 'status ok';
-  status.textContent = 'Password set!';
-  window.location.href = '/';
-}
 btn.addEventListener('click', async () => {
   const email = emailInput.value.trim();
   if (!email || !email.includes('@')) {
@@ -46,10 +12,6 @@ btn.addEventListener('click', async () => {
   btn.disabled = true;
   status.className = 'status';
   try {
-    if (mode === 'password') {
-      await doPasswordSet(email);
-      return;
-    }
     status.textContent = 'Requesting challenge...';
     const url = '/auth/register/challenge?invite=' + encodeURIComponent(INVITE_TOKEN) + '&email=' + encodeURIComponent(email);
     const challengeRes = await fetch(url);

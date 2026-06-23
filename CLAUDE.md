@@ -119,7 +119,7 @@ Source (.sexp files)
 
 **Export**: `emit.zig` (flattened .sexp), `export_kicad.zig` + `export_kicad_netlist.zig` + `export_kicad_footprint.zig` + `export_kicad_model.zig` (KiCad netlist + footprints + STEP models — the bridge for handing schematic edits off to KiCad's PCB editor).
 
-**Web server** (`src/serve.zig` + `src/serve/`): Serves the schematic viewer + review report. Live update via version polling. JSON scene graph state protected by mutex.
+**Web server** (`src/serve.zig` + `src/serve/`): Serves the schematic viewer (with design-review panels embedded inline in the schematic page). Live update via version polling. JSON scene graph state protected by mutex.
 
 **Docs generator** (`src/docgen.zig`): Renders `docs/language-forms.md` from the language's dispatch tables (forms registry, fmt directives, SI suffixes, classifier keywords). CLI: `netlisp gen-language-docs [--output <path>] [--check]`; build steps: `zig build docs` (regenerate), `--check` runs on every build/test.
 
@@ -297,9 +297,9 @@ the **subtitle** as the chip caption.
 **Modules are first-class on every read surface.** A `lib/modules/` name
 works wherever a design name does: `GET /` lists modules with their
 parameters and the designs using them, `/schematics/<m>` 302s to
-`/modules/<m>`, `/api/review/<m>` and the MCP read tools (`get_schematic`,
-`run_checks`, `list_instances`, `get_net`, `list_free_pins`,
-`generate_review`) resolve the module standalone via its parameter
+`/modules/<m>`, and the MCP read tools (`get_schematic`,
+`run_checks`, `list_instances`, `get_net`, `list_free_pins`)
+resolve the module standalone via its parameter
 defaults (the `main_ic_in_design` ERC check is suppressed there — the
 module IS the root). The PCB tools already resolved module names (real
 instantiation first, else zero-arg); `POST /api/spec-save/<m>` now also
@@ -560,11 +560,10 @@ The production EDA server runs at **https://co-circuit.eugenepentland.dev** —
 that's the canonical URL for the KiCad-sync agent and any remote MCP client.
 Local dev still uses `http://localhost:7050`.
 
-`netlisp serve` starts an HTTP server with the schematic viewer + review report:
+`netlisp serve` starts an HTTP server with the schematic viewer:
 
 - **Design list**: `GET /` — links to all .sexp designs, with per-card health chips (ERC errors/warnings, failed assertions, open notes, green PASS)
-- **Schematic viewer**: `GET /schematics/:name` — server-rendered HTML schematic with embedded SVG
-- **Review report**: `GET /review/:name` — HTML design-review doc (summary banner, power-budget table, per-section cards, BOM, assertions, unresolved issues). JSON form at `GET /api/review/:name` for programmatic use.
+- **Schematic viewer**: `GET /schematics/:name` — server-rendered HTML schematic with embedded SVG. The page also embeds the design-review panels inline (traceability table, power-budget table, power-sequence, test-points, per-section coverage). There is no standalone review-report endpoint.
 - **Scene graph**: `GET /api/scene-graph/:name` — JSON scene graph for schematic (used by the live-push pipeline)
 - **PCB layout PNG**: `GET /api/pcb-png/:name` — server-rendered PNG of the force-directed PCB layout, so an AI agent (or any HTTP client) can *see* the board, not just parse the placement JSON. Mirrors the browser viewer's colours/projection (`src/render_pcb_png.zig` rasterizes onto `src/raster.zig`'s software canvas, encoded by `src/png.zig` — pure-Zig, no image dependency). Query: `?nets=A,B` / `?refs=U1,C3` enter *focus mode* (spotlight those nets/components in amber, dim the rest — `refs` match the bare leaf of a sub-block-prefixed ref); `?route=1` overlays routed copper + DRC markers; `?names=ref|origin|both` picks part labels (default: `origin` — the module-local names a `(placement …)` spec is written in — whenever a spec drives the solve, `ref` otherwise); `?pins=U13,C5` (or `pins=hubs`) labels those parts' pads with net names; when a spec drives the solve, the header shows its coverage (`SPEC: ALL PLACED` / `N UNPLACED` / `FELL BACK TO AUTO`) and spec-unlisted parts are hatched red in the staging band; `?crop=U1&r=6` zooms on one part (matched by ref, leaf, or origin name — combine with `?pins=`); `?sheet=1` returns a contact sheet (whole board + per-hub pin-labeled closeups); `?critique=1` draws a numbered worst-problems overlay (hottest loops by nH, longest airwire, staged parts, DRC count); `?width=`, `?layout=<saved>`, `?regen=1`, `?sub=<slug>`. When the design declares a `(board (size W H) …)` form, the physical outline rectangle + dimensions are drawn under the parts (green). Read-only; reuses the design's auto-layout cache.
 - **PCB layout facts**: `GET /api/pcb-describe/:name` — structured spatial facts about the solved placement (`src/serve/pcb_describe.zig`), the textual twin of the PNG: built from the identical placement-selection logic and accepting the same query parameters, so the facts always describe the board the image shows. Returns JSON with the axes convention (y grows down; "top" = −y, matching `(placement …)` spec words), the anchor (largest hub IC), per-part `ref`/`origin`/side-of-anchor/`gap_mm`/nets/`unplaced`, per-decoupling-loop net + power-leg mm + nH + side, each hub's net→package-edge pad map, spec coverage (incl. `unresolved` spec names), per-part `want_side` (the part sits OPPOSITE the hub edge its net's pads are on), a `module_policy` block (Phase 0 of the module-placement ruleset — `src/placement/module_policy.zig`: the detected `ModuleClass` per hub IC (buck/ldo/mcu/rf_amp/generic, best-effort — integrated power modules with no discrete inductor read `generic`), the criticality `net_classes` (input_rail/switch_node/clock/rf/feedback/analog — the routing-order taxonomy), and the inferred passive `roles` (input_cap/decoupling_cap/bulk_cap/feedback_divider/matching_element)), a `lint` array (fell-back-to-auto / unresolved-name / unplaced errors; wrong-side / long-loop / outside-outline warns; plus the Phase-1 layout gates in `src/placement/layout_lint.zig` — `decap-far` (HF decap power-leg to its nearest supply pad >6 mm; bulk caps exempt), `hot-loop-not-tightest` (the switcher input loop is looser than a less-critical decoupling loop), `feedback-near-aggressor` (an FB/comp part within ~2 mm of a switch-node/clock/RF passive)), `board.outline` (the authored `(board (size W H) …)` rectangle when one exists), and (with `?route=1`) `routed:{trace_mm,tracks,vias,drc}`. The same facts flow through the MCP `describe_pcb_layout` tool. Agents should read measurements here and use the PNG for gestalt.
@@ -633,7 +632,7 @@ Tools exposed (defined in `src/serve/mcp_tools.zig`):
 - **Project / introspection (read-only)**: `list_designs`, `list_library`,
   `list_history`, `list_instances`, `list_free_pins`, `get_net`,
   `describe_component`, `get_schematic`, `get_pcb_layout_image`, `get_version`,
-  `run_checks`, `generate_review`. `get_pcb_layout_image` returns the PCB layout
+  `run_checks`. `get_pcb_layout_image` returns the PCB layout
   as a PNG **image content block** (same renderer as `GET /api/pcb-png/:name`) so
   an agent can visually inspect placement; args: `name`, optional `nets`/`refs`
   (arrays or comma-strings) to spotlight a subsystem, `route`, `width`, `layout`,
@@ -673,8 +672,7 @@ There is **no** granular `add_component` / `swap_component` / `edit_value` /
 then `build` to push the new version. There is no "requirements" concept;
 this MCP server only models S-expression schematic capture. Mutation tools
 return the new `live_version`, so the browser picks up changes via its
-existing 2 s poll of `/api/version/:name`. `generate_review` is read-only
-and returns the full review-doc JSON (matching `GET /api/review/:name`).
+existing 2 s poll of `/api/version/:name`.
 
 OAuth endpoints (implemented in `src/serve/oauth.zig`, store in
 `src/serve/oauth_store.zig`):

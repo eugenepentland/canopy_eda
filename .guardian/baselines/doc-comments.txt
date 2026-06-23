@@ -11,7 +11,6 @@ src/serve/templates/account.zig: pub const ClientRow (struct_) has no /// doc co
 src/serve/templates/account.zig: pub const InviteCard (struct_) has no /// doc comment
 src/serve/templates/account.zig: pub const OAuthClientsCard (struct_) has no /// doc comment
 src/serve/templates/account.zig: pub const PasskeysCard (struct_) has no /// doc comment
-src/serve/templates/account.zig: pub const PasswordCard (struct_) has no /// doc comment
 src/serve/templates/account.zig: pub const UserRow (struct_) has no /// doc comment
 src/serve/templates/account.zig: pub const UsersCard (struct_) has no /// doc comment
 src/serve/templates/auth.zig: pub const InviteAccept (struct_) has no /// doc comment

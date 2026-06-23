@@ -3,10 +3,10 @@ src/import_kicad.zig: string literal {s}/lib/components/{s}.sexp appears 3 times
 src/serve/bom_html.zig: string literal manufacturer appears 3 times — extract a const
 src/serve/edit.zig: string literal {{\"ok\":true,\"version\":{d}}} appears 3 times — extract a const
 src/serve/mcp_tools.zig: string literal component appears 4 times — extract a const
-src/serve/templates/account.zig: string literal </button> appears 7 times — extract a const
+src/serve/templates/account.zig: string literal </button> appears 6 times — extract a const
 src/serve/templates/account.zig: string literal </label> appears 3 times — extract a const
 src/serve/templates/account.zig: string literal </option> appears 4 times — extract a const
-src/serve/templates/account.zig: string literal <div class=\"card\"> appears 5 times — extract a const
+src/serve/templates/account.zig: string literal <div class=\"card\"> appears 4 times — extract a const
 src/serve/templates/account.zig: string literal <p class=\"muted\"> appears 5 times — extract a const
 src/serve/templates/auth.zig: string literal  id=\"email\" appears 3 times — extract a const
 src/serve/templates/auth.zig: string literal  placeholder=\"Email address\" appears 3 times — extract a const

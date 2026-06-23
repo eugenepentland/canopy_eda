@@ -69,23 +69,6 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench-layout", "Build the slim PCB-layout optimizer benchmark");
     bench_step.dependOn(&bench_install.step);
 
-    // Slim PCB-layout *scoring* sensitivity / fuzz harness. Same minimal module
-    // shape as bench-layout (optimizer + evaluator only, no Guardian/templates),
-    // but it sweeps a part through fine sub-grid x/y/rotation steps and re-scores
-    // via `optimizer.scorePoses` to map where the objective is non-smooth.
-    const fuzz_mod = b.createModule(.{
-        .root_source_file = b.path("src/fuzz_layout.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const fuzz_exe = b.addExecutable(.{
-        .name = "fuzz-layout",
-        .root_module = fuzz_mod,
-    });
-    const fuzz_install = b.addInstallArtifact(fuzz_exe, .{});
-    const fuzz_step = b.step("fuzz-layout", "Build the PCB-layout scoring sensitivity/fuzz harness");
-    fuzz_step.dependOn(&fuzz_install.step);
-
     // Tests
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),

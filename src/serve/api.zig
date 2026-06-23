@@ -8,16 +8,11 @@ const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const render_json = @import("../render_json.zig");
 const export_kicad = @import("../export_kicad.zig");
 const bom = @import("../bom.zig");
-const fp_mod = @import("../export_kicad_footprint.zig");
 const erc_mod = @import("../erc.zig");
 const env_mod = @import("../eval/env.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const bom_html = @import("bom_html.zig");
 const mcp_tools = @import("mcp_tools.zig");
-const review_mod = @import("../review.zig");
-const review_json_mod = @import("../review_json.zig");
-const review_md_mod = @import("../review_md.zig");
-const req_checks = @import("../req_checks.zig");
 const edit_mod = @import("edit.zig");
 const diag_format = @import("diag_format.zig");
 const serve_root = @import("../serve.zig");
@@ -483,97 +478,6 @@ pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     res.body = buf.items;
 }
 
-/// GET /api/export-review/:name — design-review package as a zip with two
-/// files: `<name>-review.md` (full markdown report including system block
-/// diagram, per-hub schematics, power tables, ERC, per-IC checklist, and
-/// the verbatim source) plus `<name>-bom.csv` (parts list as CSV).
-pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
-        return;
-    };
-
-    // Build a fully-populated ReviewDoc using the same path the live page
-    // uses — ensures the export reflects exactly what the reviewer sees.
-    const doc = buildDocForName(ctx.allocator, ctx.project_dir, name) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = ERR_BUILD;
-        return;
-    };
-
-    // Re-evaluate so we have access to the underlying block + check_results.
-    // This duplicates the work in buildDocForName but avoids leaking those
-    // intermediates through the function signature; the cost is one extra
-    // eval per export which is acceptable for a manual operation.
-    const board_path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        return;
-    };
-    defer ctx.allocator.free(board_path);
-
-    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
-    defer eval.deinit();
-    const result = eval.evalFile(board_path) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = ERR_BUILD;
-        return;
-    };
-    const block = switch (result) {
-        .design_block => |b| b,
-        else => {
-            res.status = HTTP_INTERNAL_ERROR;
-            return;
-        },
-    };
-    var check_results = req_checks.runChecks(ctx.allocator, &eval, block) catch
-        std.StringHashMapUnmanaged([]req_checks.Result).empty;
-    req_checks.applyVerifications(&check_results, block, block.instances);
-
-    // Read the source file verbatim for embedding.
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, board_path, 8 * 1024 * 1024) catch &[_]u8{};
-
-    // Render markdown.
-    const md = review_md_mod.renderToMarkdown(ctx.allocator, block, ctx.project_dir, name, doc, source, &check_results) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = "Markdown render error";
-        return;
-    };
-
-    // Render BOM CSV.
-    var csv_buf: std.ArrayListUnmanaged(u8) = .empty;
-    bom_html.writeBomCsv(ctx.allocator, csv_buf.writer(ctx.allocator), block) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = "BOM CSV error";
-        return;
-    };
-
-    // Filenames inside the zip include the design name so a reviewer who
-    // unzips into a shared directory doesn't collide with another design.
-    const md_name = std.fmt.allocPrint(ctx.allocator, "{s}-review.md", .{name}) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        return;
-    };
-    const csv_name = std.fmt.allocPrint(ctx.allocator, "{s}-bom.csv", .{name}) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        return;
-    };
-
-    const entries = [_]fp_mod.ZipEntry{
-        .{ .name = md_name, .data = md },
-        .{ .name = csv_name, .data = csv_buf.items },
-    };
-    const zip = fp_mod.buildZip(ctx.allocator, &entries) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = "Zip error";
-        return;
-    };
-
-    const disposition = try std.fmt.allocPrint(ctx.allocator, "attachment; filename=\"{s}-review.zip\"", .{name});
-    res.header(HEADER_CONTENT_TYPE, CONTENT_TYPE_ZIP);
-    res.header(HEADER_CONTENT_DISPOSITION, disposition);
-    res.body = zip;
-}
-
 /// GET /api/erc/:name — run electrical-rule checks (duplicate ref-des,
 /// floating nets, unconnected pins, voltage mismatches, missing decoupling)
 /// and return the violations as JSON for the schematic viewer's panel.
@@ -624,26 +528,6 @@ pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerE
     res.body = json;
 }
 
-/// Build the review document for a design and render it as JSON. Evaluates
-/// the design fresh each call (not live-layout cache) so assertions and ERC
-/// reflect the current source on disk. Returns 500 with a plain-text error
-/// body on build failures — the review page calls this on load and the MCP
-/// tool shares the same code path.
-pub fn reviewJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
-        return;
-    };
-    res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
-    const json = renderReviewJson(ctx.allocator, ctx.project_dir, name) catch |err| {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"error\":\"{s}\"}}", .{@errorName(err)});
-        return;
-    };
-    res.body = json;
-}
-
 /// Return all designs in the project as a JSON array. Same shape as the
 /// MCP `list_designs` tool: `[{name, title, sections, instance_count,
 /// net_count, mtime, build_ok}, ...]`.
@@ -676,46 +560,6 @@ pub fn designsApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handle
     }
     try w.writeAll("]");
     res.body = buf.items;
-}
-
-/// Shared build path: evaluate, resolve BOM identities, run ERC, package
-/// the ReviewDoc. Returns an opaque error on build failure.
-fn buildDocForName(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-) !review_mod.ReviewDoc {
-    var eval = Evaluator.init(allocator, project_dir);
-    defer eval.deinit();
-
-    // Designs and lib/modules resolve through the same helper, so the
-    // review report works for a standalone module too (defaults supply
-    // the module's arguments).
-    const nb = try mcp_tools.evalNamedBlock(allocator, project_dir, name, &eval);
-    const block = nb.block;
-
-    if (!nb.is_module) {
-        const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
-        defer allocator.free(bom_path);
-        try bom.resolveIdentities(allocator, block, bom_path, project_dir);
-    }
-
-    const violations = try mcp_tools.runErcForNamedBlock(allocator, nb, project_dir);
-
-    // Run requirement-attached (check ...) primitives + overlay (verifies …)
-    // sign-offs so the per-component review entries carry pass/fail/verified
-    // status alongside the prose.
-    var check_results = req_checks.runChecks(allocator, &eval, block) catch
-        std.StringHashMapUnmanaged([]req_checks.Result).empty;
-    req_checks.applyVerifications(&check_results, block, block.instances);
-
-    const doc = try review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, &check_results, project_dir);
-    return doc;
-}
-
-fn renderReviewJson(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]const u8 {
-    const doc = try buildDocForName(allocator, project_dir, name);
-    return try review_json_mod.renderToJson(allocator, doc);
 }
 
 /// List free (unassigned) pins on an instance. Thin wrapper over the MCP

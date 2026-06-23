@@ -19,9 +19,7 @@ src/commands.zig::CommandError value
 src/commands.zig::cmdBuild fn
 src/commands.zig::cmdCheck fn
 src/commands.zig::cmdExportKicad fn
-src/commands.zig::cmdExportReview fn
 src/commands.zig::cmdImportKicad fn
-src/commands.zig::cmdLint fn
 src/config.zig::cseConnectSid fn
 src/config.zig::cseMaxInFlight fn
 src/config.zig::cseMinIntervalMs fn
@@ -387,7 +385,6 @@ src/export_kicad_netlist.zig::writeNetlist fn
 src/font5x7.zig::GH value
 src/font5x7.zig::GW value
 src/font5x7.zig::cols fn
-src/fuzz_layout.zig::main fn
 src/id_insert.zig::IdInsertError value
 src/id_insert.zig::applyInserts fn
 src/id_insert.zig::insertPendingIds fn
@@ -439,8 +436,6 @@ src/kicad_pcb/writer.zig::applyOpsToSource fn
 src/kicad_pcb/writer.zig::applyOpsToSourceWithStats fn
 src/layout_status.zig::ModuleLayoutStatus struct_
 src/layout_status.zig::read fn
-src/lint.zig::LintError value
-src/lint.zig::lintFile fn
 src/main.zig::main fn
 src/parts.zig::PartEntry struct_
 src/parts.zig::PartsDb struct_
@@ -469,7 +464,6 @@ src/placement/module_policy.zig::classifyNetName fn
 src/placement/module_policy.zig::isInterestingClass fn
 src/placement/optimizer.zig::BoardRect struct_
 src/placement/optimizer.zig::Breakdown struct_
-src/placement/optimizer.zig::CompactMode enum_
 src/placement/optimizer.zig::Edge enum_
 src/placement/optimizer.zig::FullRouted struct_
 src/placement/optimizer.zig::GRID_MM value
@@ -658,7 +652,6 @@ src/review_html.zig::writeTestPoints fn
 src/review_html.zig::writeTraceability fn
 src/review_json.zig::renderToJson fn
 src/review_json.zig::writeTraceability fn
-src/review_md.zig::renderToMarkdown fn
 src/serve.zig::Handler struct_
 src/serve.zig::JobOutcome enum_
 src/serve.zig::PcbJob struct_
@@ -693,13 +686,11 @@ src/serve/api.zig::ercApi fn
 src/serve/api.zig::exportBomCsvApi fn
 src/serve/api.zig::exportKicadApi fn
 src/serve/api.zig::exportNetlistApi fn
-src/serve/api.zig::exportReviewPackageApi fn
 src/serve/api.zig::freePinsApi fn
 src/serve/api.zig::pinoutApi fn
 src/serve/api.zig::pushApi fn
 src/serve/api.zig::removeComponentDatasheetApi fn
 src/serve/api.zig::removeSectionNoteApi fn
-src/serve/api.zig::reviewJsonApi fn
 src/serve/api.zig::sceneGraphApi fn
 src/serve/api.zig::versionApi fn
 src/serve/assets_css.zig::INDEX_CSS value
@@ -723,9 +714,6 @@ src/serve/auth.zig::loginChallengePage fn
 src/serve/auth.zig::loginCompletePage fn
 src/serve/auth.zig::loginPage fn
 src/serve/auth.zig::logoutApi fn
-src/serve/auth.zig::passwordLoginApi fn
-src/serve/auth.zig::passwordSetApi fn
-src/serve/auth.zig::passwordStatusApi fn
 src/serve/auth.zig::purgeIdentity fn
 src/serve/auth.zig::registerChallengePage fn
 src/serve/auth.zig::registerCompletePage fn
@@ -941,10 +929,6 @@ src/serve/page_cache.zig::capture fn
 src/serve/pages.zig::HandlerError value
 src/serve/pages.zig::cssPage fn
 src/serve/pages.zig::indexPage fn
-src/serve/passwords.zig::isSet fn
-src/serve/passwords.zig::purge fn
-src/serve/passwords.zig::set fn
-src/serve/passwords.zig::verify fn
 src/serve/pcb_describe.zig::DescribeError value
 src/serve/pcb_describe.zig::Side enum_
 src/serve/pcb_describe.zig::aabbHalf fn
@@ -1013,7 +997,6 @@ src/serve/templates/account.zig::ClientRow struct_
 src/serve/templates/account.zig::InviteCard struct_
 src/serve/templates/account.zig::OAuthClientsCard struct_
 src/serve/templates/account.zig::PasskeysCard struct_
-src/serve/templates/account.zig::PasswordCard struct_
 src/serve/templates/account.zig::UserRow struct_
 src/serve/templates/account.zig::UsersCard struct_
 src/serve/templates/auth.zig::InviteAccept struct_

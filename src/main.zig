@@ -12,7 +12,6 @@ const query = @import("query.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
 const auth = @import("serve/auth.zig");
 const users = @import("serve/users.zig");
-const passwords = @import("serve/passwords.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const DEFAULT_SERVE_PORT: u16 = 7050;
@@ -49,7 +48,7 @@ fn readAuthDirEnv(allocator: std.mem.Allocator) ?[]const u8 {
 
 /// Resolve the auth directory from CLI args, env, or `<project_dir>/auth`.
 /// Returns the same answer the long-running `serve` flow uses, so CLI helpers
-/// (mint-invite, set-password) operate on the same files the server writes.
+/// (mint-invite) operate on the same files the server writes.
 fn resolveAuthDir(allocator: std.mem.Allocator, args: [][:0]u8) ![]const u8 {
     const project_dir = optionalArg(args, "--project-dir") orelse ".";
     if (optionalArg(args, "--auth-dir")) |d| return d;
@@ -82,8 +81,6 @@ pub fn main() !void {
         try cmdParse(allocator, args[2]);
     } else if (std.mem.eql(u8, command, "build")) {
         try commands.cmdBuild(allocator, args[2..]);
-    } else if (std.mem.eql(u8, command, "lint")) {
-        try commands.cmdLint(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "check")) {
         try commands.cmdCheck(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "designs")) {
@@ -138,8 +135,6 @@ pub fn main() !void {
         try commands.cmdImportKicad(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "export-kicad")) {
         try commands.cmdExportKicad(allocator, args[2..]);
-    } else if (std.mem.eql(u8, command, "export-review")) {
-        try commands.cmdExportReview(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "serve")) {
         const project_dir = optionalArg(args[2..], "--project-dir") orelse ".";
         const port: u16 = if (optionalArg(args[2..], "--port")) |p|
@@ -159,8 +154,6 @@ pub fn main() !void {
         try stdout.writeAll("Save this token — it will not be shown again.\n");
     } else if (std.mem.eql(u8, command, "mint-invite")) {
         try cmdMintInvite(allocator, args[2..]);
-    } else if (std.mem.eql(u8, command, "set-password")) {
-        try cmdSetPassword(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "gen-language-docs")) {
         const out_path = optionalArg(args[2..], "--output") orelse "docs/language-forms.md";
         const check_only = hasFlag(args[2..], "--check");
@@ -362,46 +355,6 @@ fn cmdMintInvite(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     try stdout.writeAll("\nValid for 7 days, single-use. Prepend your server's origin to form the full URL.\n");
 }
 
-fn cmdSetPassword(allocator: std.mem.Allocator, args: [][:0]u8) !void {
-    const auth_dir = try resolveAuthDir(allocator, args);
-
-    const email = optionalArg(args, "--email") orelse {
-        std.debug.print("Usage: netlisp set-password --email <addr> --password <pw> [--role admin] [--auth-dir <d>]\n", .{});
-        std.process.exit(1);
-    };
-    const password = optionalArg(args, "--password") orelse {
-        std.debug.print("Usage: netlisp set-password --email <addr> --password <pw> [--role admin] [--auth-dir <d>]\n", .{});
-        std.process.exit(1);
-    };
-    const role_str = optionalArg(args, "--role") orelse "writer";
-    const role = users.Role.fromString(role_str) orelse {
-        std.debug.print("Invalid --role {s}. Use: admin, writer, reader.\n", .{role_str});
-        std.process.exit(1);
-    };
-
-    passwords.set(allocator, auth_dir, email, password) catch |e| switch (e) {
-        error.PasswordTooShort => {
-            std.debug.print("Password must be at least 8 characters.\n", .{});
-            std.process.exit(1);
-        },
-        else => {
-            std.debug.print("Failed to set password: {s}\n", .{@errorName(e)});
-            std.process.exit(1);
-        },
-    };
-
-    _ = users.ensureUser(allocator, auth_dir, email, role) catch |e| {
-        std.debug.print("Warning: ensureUser failed: {s}\n", .{@errorName(e)});
-    };
-
-    const stdout = std.fs.File.stdout();
-    try stdout.writeAll("Password set for ");
-    try stdout.writeAll(email);
-    try stdout.writeAll(" (role ");
-    try stdout.writeAll(role.toString());
-    try stdout.writeAll("). Sign in via /auth/login → \"Use password instead\".\n");
-}
-
 fn printUsage() !void {
     const file = std.fs.File.stdout();
     try file.writeAll(
@@ -410,7 +363,6 @@ fn printUsage() !void {
         \\Usage:
         \\  netlisp parse <file>                   Parse and pretty-print an S-expression file
         \\  netlisp build [--project-dir <d>]       Evaluate and emit resolved design
-        \\  netlisp lint [--project-dir <d>] <name>  Report id-hygiene issues (legacy residue, bad/duplicate tokens)
         \\  netlisp check [--project-dir <d>] [--severity <s>] <name>  Run ERC on a design
         \\  netlisp designs [--project-dir <d>]     List designs (name + title) as JSON
         \\  netlisp instances [--project-dir <d>] <name>  List a design's parts as JSON
@@ -423,10 +375,8 @@ fn printUsage() !void {
         \\  netlisp serve [--project-dir <d>] [--port <n>]  Start web server (default port 7050)
         \\  netlisp mint-plugin-token [--project-dir <d>] [--label <l>]  Mint a bearer token for the KiCad plugin
         \\  netlisp mint-invite [--project-dir <d>] [--role <r>] [--auth-dir <d>]  Mint a single-use invite (7-day TTL)
-        \\  netlisp set-password --email <a> --password <p> [--role <r>] [--auth-dir <d>]  Set or reset a user's password
         \\  netlisp import-kicad <board.kicad_pcb> [--project-dir <d>] [--name <n>] [--title <t>] [--dry-run]  Migrate a KiCad board into a netlisp design
         \\  netlisp export-kicad --project-dir <d> --output-dir <out> <name>  Export KiCad netlist + footprints
-        \\  netlisp export-review --project-dir <d> [--output-dir <out>] [--zip] <name>  Export design-review package (markdown + BOM CSV)
         \\  netlisp convert-footprint <file>        Convert KiCad .kicad_mod to .sexp
         \\  netlisp convert-symbol <file> [--filter <name>]  Convert KiCad .kicad_sym to .sexp
         \\  netlisp convert-pinout <file> [--filter <name>]  Generate pinout from KiCad .kicad_sym
