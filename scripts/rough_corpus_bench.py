@@ -58,14 +58,6 @@ def starred_designs(project_dir):
     return out
 
 
-def saved_refs(sidecar):
-    name = sidecar["default"]
-    for layout in sidecar.get("layouts", []):
-        if layout["name"] == name:
-            return {p["ref"] for p in layout.get("parts", [])}
-    return set()
-
-
 def fetch(base, name, query):
     url = f"{base}/api/pcb-describe/{urllib.parse.quote(name)}?{query}"
     try:
@@ -104,8 +96,13 @@ def analyze(base, name, sidecar, regen):
             if s != "center":
                 nc_total += st
                 nc_matched += min(r, st)
-    stand_refs = {p.get("ref") for p in rough.get("parts", [])}
-    load_ok = len(saved_refs(sidecar) & stand_refs) >= max(1, len(stand_refs) // 2)
+    # A starred layout that failed to load collapses every part onto the anchor
+    # (origin) — detect it by zero coordinate spread rather than by ref overlap,
+    # so origin-keyed layouts (saved in a foreign ref-des namespace but bridged by
+    # `rekeyPosesByOrigin`) correctly count as loaded.
+    xs, ys = [p.get("x", 0) for p in sp], [p.get("y", 0) for p in sp]
+    spread = (max(xs) - min(xs) if xs else 0) + (max(ys) - min(ys) if ys else 0)
+    load_ok = spread > 0.5
     med = lambda ps: round(statistics.median([p.get("gap_mm", 0) for p in ps]), 2) if ps else 0
     return {
         "name": name,
