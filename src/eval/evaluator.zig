@@ -161,34 +161,6 @@ pub const Evaluator = struct {
     /// legacy `(ids …)` sidecar. Inherited into nested module evaluation and
     /// restored on exit, so a marked design propagates to its sub-modules.
     hierarchical_ids: bool = false,
-    /// Set while evaluating a design-block that declared `(grouped-refdes)`.
-    /// Switches the post-build ref-des pass to value/footprint block-range
-    /// grouping (`ids.applyGroupedRefDes` + `refdes_group`). Inherited into
-    /// nested module evaluation like `hierarchical_ids`.
-    grouped_refdes: bool = false,
-    /// Block width for grouped ref-des (`(grouped-refdes (block N))`); 0 ⇒ the
-    /// `refdes_group.DEFAULT_BLOCK_SIZE` of 100.
-    grouped_block_size: u32 = 0,
-    /// Grouped ref-des render format from `(grouped-refdes (format …))`: true ⇒
-    /// `.two_level` (`C2_5`, the default), false ⇒ `.block_range` (`C205`). Set
-    /// from the form by `evalDesignBlock`; stored as a bool so `evaluator.zig`
-    /// needn't import `refdes_group` (avoids a cycle); `ids.applyGroupedRefDes`
-    /// maps it to `refdes_group.Format`.
-    grouped_two_level: bool = false,
-    /// Nesting depth of `evalDesignBlock`. The grouped-ref-des re-stamp + sidecar
-    /// I/O run only at depth 1 (the top-level design, not a sub-block module
-    /// whose children the top-level pass re-stamps anyway).
-    design_block_depth: u32 = 0,
-    /// Absolute path of the outermost design file, captured on the first
-    /// `evalFile`, used to locate the `<design>.refdes.json` grouped-ref-des
-    /// sidecar by slug.
-    top_design_path: ?[]const u8 = null,
-    /// Staged grouped-ref-des sidecar write: the serialized registry JSON and its
-    /// destination path, set by `ids.applyGroupedRefDes` ONLY when the assignment
-    /// changed. The build command flushes it; read-only paths never do, so a
-    /// render or diff cannot mutate the sidecar.
-    refdes_sidecar_json: ?[]const u8 = null,
-    refdes_sidecar_path: ?[]const u8 = null,
     /// Per-design decouple defaults from `(decouple-defaults (ic …) (bypass …))`.
     /// Design-block-scoped: saved/restored across nested module evaluation in
     /// `evalDesignBlock` so a parent's defaults never leak into a sub-block module.
@@ -323,10 +295,6 @@ pub const Evaluator = struct {
     /// when present — has its forms spliced into the design-block body
     /// before evaluation.
     pub fn evalFile(self: *Evaluator, path: []const u8) EvalError!Value {
-        // First file evaluated is the design itself; remember it so the grouped
-        // ref-des pass can locate the `<design>.refdes.json` sidecar by slug.
-        // Imports/modules load later and must not overwrite this.
-        if (self.top_design_path == null) self.top_design_path = path;
         const nodes = builders.loadDesignFile(self, path) orelse return EvalError.ImportError;
         var env = Env.init(self.allocator, null);
         defer env.deinit();
@@ -435,7 +403,6 @@ pub const Evaluator = struct {
         if (SpecialForm.fromAtom(head_name)) |sf| return switch (sf) {
             .let => special_forms.evalLet(self, args, env),
             .if_ => special_forms.evalIf(self, args, env),
-            .cond => special_forms.evalCond(self, args, env),
             .import => modules.evalImport(self, args, env),
             .defmodule => modules.evalDefmodule(self, args, env),
             .design_block => design_block.evalDesignBlock(self, args, env),

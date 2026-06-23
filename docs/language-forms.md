@@ -18,7 +18,6 @@ Arguments are passed un-evaluated; each form decides what to evaluate.
 | --- | --- | --- |
 | `(let name expr)` | 2 | Bind `name` to the evaluated value of `expr` in the current scope. |
 | `(if cond then else)` | 3 | Short-circuit conditional. Only the matching branch is evaluated. |
-| `(cond (test1 expr1) … (else exprN))` | 1+ | Walk clauses in order, returning the first matching expression's value. |
 | `(import name…)` | 1+ | Load library components or modules by name. Searches `lib/components/` then `lib/modules/`. |
 | `(defmodule name (param \| (param default)…) ["docstring"] body…)` | 2+ | Define a parameterised module that closes over the surrounding env. A `(param default)` pair makes the argument optional — its default evaluates at call time when omitted, so a fully-defaulted module also renders standalone. |
 | `(design-block "name" form…)` | 1+ | The root container — every `.sexp` design file evaluates to one. |
@@ -49,7 +48,6 @@ Arithmetic, comparison, and logic operators. Arguments are evaluated left-to-rig
 | `(or a b)` | Boolean or (eager — both args evaluated). |
 | `(not a)` | Boolean negation. |
 | `(e96 r)` | Snap a resistance/number to the nearest E96 (1%) standard value. |
-| `(e24 r)` | Snap a resistance/number to the nearest E24 (5%) standard value. |
 
 ## String formatting directives
 
@@ -100,7 +98,7 @@ where each is accepted: **D** = design-block top level,
 | `(bus-port "prefix" width dir …)` | DSs | Declare a multi-bit boundary bus that expands to one port per lane. |
 | `(note "id" "text" [(ref …)])` | DSs | Attach a design-time note to the surrounding scope. |
 | `(section "name" ["subtitle"] form…)` | DSs | Functional subsystem card. Inside `(section …)` nests one level into a sub-section. |
-| `(decouple "NET" [(comp "val")] COUNT per-pin [REF\|auto] PIN…\|(pins-of "REF" "NET")…)` | DSs | Emit COUNT decoupling caps per listed host pin. Component and REF may come from (decouple-defaults …); (pins-of REF NET) / auto expand to the pins already declared on the net. |
+| `(decouple "NET" [(comp "val")] COUNT per-pin [REF\|auto] PIN…)` | DSs | Emit COUNT decoupling caps per listed host pin. Component and REF may come from (decouple-defaults …); a trailing `auto` expands to the pins already declared on the net. |
 | `(series …)` | DSs | Insert a series element (resistor / ferrite / etc.) between two nets. |
 | `(fanout "COMMON" (comp) "NET1" "NET2" … [(id …)])` | DSs | Place one component from a shared COMMON net to each listed net (star of series elements). |
 | `(net "A" "B" …)` | DSs | Tie one or more nets to a canonical name (net-merge). |
@@ -109,7 +107,6 @@ where each is accepted: **D** = design-block top level,
 | `(protocol atom)` | ·Ss | Tag a section with a protocol keyword (e.g. `usb`, `i2c`). |
 | `(calc …)` | ·Ss | Inline design math block, surfaced in the review report. |
 | `(description "text")` | ·Ss | One-line section description used in the review report and overview SVG. |
-| `(status concept\|implemented\|review)` | ·Ss | Section completion status. Inferred when omitted. |
 | `(role input\|output)` | ·S· | Tag a section as a block input or output for the overview diagram. |
 | `(diagram hidden)` | ·S· | Opt this section out of the block-diagram view (schematic card still renders). |
 | `(hosts "sub1" "sub2" …)` | ·S· | Fold the named sub-blocks into this section's block-diagram node (explicit attachment). |
@@ -119,13 +116,11 @@ where each is accepted: **D** = design-block top level,
 | `(verifies (req "REF" REQID) [rationale])` | D·· | Mark a requirement as satisfied by a specific instance. |
 | `(design-doc (critical-ic comp (role "…") (rationale "…") (mpn "…")) …)` | D·· | Up-front critical-IC lifecycle / traceability declaration for the design. |
 | `(test-point …)` | D·· | Declare a measurement / bring-up access point. |
-| `(power-config (derating N))` | D·· | Per-design power-budget configuration knobs. |
 | `(decouple-defaults (ic "REF") (bypass (comp)))` | D·· | Set per-design decouple defaults: a fallback IC ref and bypass cap so (decouple …) can omit both. |
 | `(kicad-pcb "absolute/path/to/board.kicad_pcb")` | D·· | Declare the PCB file the file-based KiCad sync writes board updates to. |
 | `(stub "name" [(role …)] [(mpn …)] [(category key)] [(size W H)] [(channels N)] [(ref "REF")] (signal "name" class "net")…)` | D·· | Declare a placeholder part — auto-placed, sized bounding box, signal-wired, optionally N stacked channels — for design-phase diagrams before a real component exists. |
 | `(diagram-layout (anchor "name") (place "name" (right-of\|left-of\|above\|below "ref"))…)` | D·· | Position blocks relative to one another on the SCHEMATIC block diagram (Mermaid-style, free-floating) — nothing to do with PCB placement, which is the force / rough solver on /pcb-layout. |
 | `(board (size W H) (left\|right\|top\|bottom "REF"… \| (rot N "REF")…)… [(corners "REF"…)])` | D·· | Physical board outline + edge hardware: (size W H) is the outline in mm (required — without it the form is inert). Each (left\|right\|top\|bottom …) list docks those parts flush INSIDE that board edge (the words name physical edges, not sides of an anchor), slid along the edge toward the pads they connect to; (rot N "REF") overrides the default pads-inward rotation. (corners …) pins mounting hardware at the four corners (TL, TR, BR, BL in authored order). The force-solved interior placement is centered in the outline; the rendered views draw the outline rectangle. |
-| `(replicate N "name~D" (module-call args…))` | D·· | Instantiate N copies of a module as sub-blocks: ~D in the name template and in bare call-arg atoms is replaced by the 1-based index. Requires (hierarchical-ids); the form carries one auto-minted (id …) and each copy's sub-block uuid derives from it + the substituted name. |
 | `(revision "ID" [(date "YYYY-MM-DD")] [(change "ID" "summary")…])` | D·· | Declare the design's canonical board revision: a human-meaningful spin id ("A", "F4", "1.2"), an optional date, and an optional newest-first in-file changelog. Shown on the schematic header and review doc so a recipient of the .sexp can tell which revision they hold; bump it by hand when cutting a new spin. Distinct from the per-edit snapshot history — tag the git commit to anchor the bump. |
 | `(rough [(anchor "REF")] (group "name" "REF"…)…)` | D·· | Author the rough-placement seed (the `?rough=1` / "Rough" button on /pcb-layout): (anchor …) names the IC everything centres on (default: the largest hub), and each (group …) is a priority TIER in descending order — the first group is placed first and packs tightest to the anchor, later groups fan outward. A group sets priority, not position: every member still lands on the IC side its pad connects to (GND ignored), so a bypass cap sits by its VDD pad and a pull resistor by its signal pad. Parts in no group are placed last. Refs match by ref-des or module-local origin name (exact or leaf). |
 

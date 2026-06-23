@@ -14,9 +14,8 @@ const ZERO_VOLTAGE: f64 = 0.0;
 const CURRENT_CONVERGENCE_A: f64 = 1e-9;
 const PERCENT_FULL: f64 = 100.0;
 const PERCENT_FRACTION_BASE: f64 = 1.0;
-/// Default derating fraction — typical-load threshold at which a rail
-/// flips to `.tight`. Overridable per-design via `(power-config (derating
-/// X))`, surfaced on `DesignBlock.derating`.
+/// Derating fraction — typical-load threshold at which a rail flips to
+/// `.tight` (a rail is "tight" once typical load exceeds 80% of its rating).
 const DEFAULT_DERATING: f64 = 0.8;
 const RATING_MIDPOINT: f64 = 0.5;
 const SENTINEL_CURRENT: f64 = 1.0;
@@ -310,7 +309,7 @@ pub fn analyze(
     var rails: std.ArrayListUnmanaged(Rail) = .empty;
     var emitted_roots: std.StringHashMapUnmanaged(void) = .empty;
 
-    const derating = block.derating orelse DEFAULT_DERATING;
+    const derating = DEFAULT_DERATING;
     var src_iter = sources.iterator();
     while (src_iter.next()) |entry| {
         const root = entry.key_ptr.*;

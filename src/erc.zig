@@ -430,7 +430,7 @@ fn checkSequencingCycles(
 /// are incomplete or inconsistent. Phase 2B covers two checks — the other
 /// two listed in the plan (orphan_rail and regulator_loop) require
 /// extensions to `eval/rails.build` (consumer-only rail emission and
-/// `upstream_rail` population) that land alongside Phase 2C.
+/// cascaded upstream-rail tracking) that land alongside Phase 2C.
 fn checkPowerTreeIntegrity(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,

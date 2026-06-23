@@ -32,15 +32,7 @@ pub fn evalBuiltinOp(op: Builtin, args: []const Value) BuiltinError!Value {
         .or_ => logicOr(args),
         .not_ => logicNot(args),
         .e96 => eSeries(args, &E96),
-        .e24 => eSeries(args, &E24),
     };
-}
-
-/// Name-based dispatch — kept private for the tests in this file. The
-/// evaluator goes straight to `evalBuiltinOp` via `Builtin.fromAtom`.
-fn evalBuiltin(op: []const u8, args: []const Value) BuiltinError!Value {
-    const tag = Builtin.fromAtom(op) orelse return BuiltinError.TypeError;
-    return evalBuiltinOp(tag, args);
 }
 
 const ArithOp = enum { add, sub, mul, div, mod };
@@ -113,7 +105,7 @@ fn logicNot(args: []const Value) BuiltinError!Value {
 
 // ── Standard resistor / capacitor E-series snapping ─────────────────────
 // Snap an arbitrary value (e.g. a feedback resistor computed from a target
-// voltage) to the nearest E96 (1%) or E24 (5%) decade value, so a module
+// voltage) to the nearest E96 (1%) decade value, so a module
 // parameterised by `(vout X)` emits a buildable BOM part instead of an
 // off-grid value like 400k. Decade is found by scaling into [1,10); the
 // 10.0 top edge (= 1.0 of the next decade) is considered so 9.9 → 10.
@@ -126,10 +118,6 @@ const E96 = [_]f64{
     4.22, 4.32, 4.42, 4.53, 4.64, 4.75, 4.87, 4.99, 5.11, 5.23, 5.36, 5.49,
     5.62, 5.76, 5.90, 6.04, 6.19, 6.34, 6.49, 6.65, 6.81, 6.98, 7.15, 7.32,
     7.50, 7.68, 7.87, 8.06, 8.25, 8.45, 8.66, 8.87, 9.09, 9.31, 9.53, 9.76,
-};
-const E24 = [_]f64{
-    1.0, 1.1, 1.2, 1.3, 1.5, 1.6, 1.8, 2.0, 2.2, 2.4, 2.7, 3.0,
-    3.3, 3.6, 3.9, 4.3, 4.7, 5.1, 5.6, 6.2, 6.8, 7.5, 8.2, 9.1,
 };
 
 fn eSeries(args: []const Value, series: []const f64) BuiltinError!Value {
@@ -164,22 +152,22 @@ fn eSeries(args: []const Value, series: []const f64) BuiltinError!Value {
 // spec: eval/builtins - Evaluates arithmetic operations on numeric values
 test "arithmetic operations" {
     const args2 = [_]Value{ .{ .number = 10.0 }, .{ .number = 3.0 } };
-    try std.testing.expectEqual(@as(f64, 13.0), (try evalBuiltin("+", &args2)).asNumber().?);
-    try std.testing.expectEqual(@as(f64, 7.0), (try evalBuiltin("-", &args2)).asNumber().?);
-    try std.testing.expectEqual(@as(f64, 30.0), (try evalBuiltin("*", &args2)).asNumber().?);
+    try std.testing.expectEqual(@as(f64, 13.0), (try evalBuiltinOp(.add, &args2)).asNumber().?);
+    try std.testing.expectEqual(@as(f64, 7.0), (try evalBuiltinOp(.sub, &args2)).asNumber().?);
+    try std.testing.expectEqual(@as(f64, 30.0), (try evalBuiltinOp(.mul, &args2)).asNumber().?);
 }
 
 // spec: eval/builtins - Evaluates a voltage divider formula combining arithmetic operators
 test "voltage divider formula" {
     // VOUT = 0.6 * (1 + 220k/47k) = 0.6 * (1 + 4.68085...) = 0.6 * 5.68085... = 3.4085...
     const div_args = [_]Value{ .{ .number = 220000.0 }, .{ .number = 47000.0 } };
-    const ratio = try evalBuiltin("/", &div_args);
+    const ratio = try evalBuiltinOp(.div, &div_args);
 
     const add_args = [_]Value{ .{ .number = 1.0 }, ratio };
-    const sum = try evalBuiltin("+", &add_args);
+    const sum = try evalBuiltinOp(.add, &add_args);
 
     const mul_args = [_]Value{ .{ .number = 0.6 }, sum };
-    const vout = try evalBuiltin("*", &mul_args);
+    const vout = try evalBuiltinOp(.mul, &mul_args);
 
     try std.testing.expectApproxEqAbs(@as(f64, 3.4085), vout.asNumber().?, 0.001);
 }
@@ -187,9 +175,9 @@ test "voltage divider formula" {
 // spec: eval/builtins - Evaluates comparison operations returning boolean results
 test "comparison operations" {
     const args = [_]Value{ .{ .number = 5.0 }, .{ .number = 3.0 } };
-    try std.testing.expectEqual(true, (try evalBuiltin(">", &args)).asBool().?);
-    try std.testing.expectEqual(false, (try evalBuiltin("<", &args)).asBool().?);
-    try std.testing.expectEqual(true, (try evalBuiltin(">=", &args)).asBool().?);
+    try std.testing.expectEqual(true, (try evalBuiltinOp(.gt, &args)).asBool().?);
+    try std.testing.expectEqual(false, (try evalBuiltinOp(.lt, &args)).asBool().?);
+    try std.testing.expectEqual(true, (try evalBuiltinOp(.gte, &args)).asBool().?);
 }
 
 // spec: eval/builtins - Evaluates logic operations on boolean values
@@ -197,19 +185,17 @@ test "logic operations" {
     const t = Value{ .boolean = true };
     const f = Value{ .boolean = false };
     const and_args = [_]Value{ t, f };
-    try std.testing.expectEqual(false, (try evalBuiltin("and", &and_args)).asBool().?);
+    try std.testing.expectEqual(false, (try evalBuiltinOp(.and_, &and_args)).asBool().?);
     const or_args = [_]Value{ t, f };
-    try std.testing.expectEqual(true, (try evalBuiltin("or", &or_args)).asBool().?);
+    try std.testing.expectEqual(true, (try evalBuiltinOp(.or_, &or_args)).asBool().?);
     const not_args = [_]Value{t};
-    try std.testing.expectEqual(false, (try evalBuiltin("not", &not_args)).asBool().?);
+    try std.testing.expectEqual(false, (try evalBuiltinOp(.not_, &not_args)).asBool().?);
 }
 
 // spec: eval/builtins - Snaps a value to the nearest standard E-series resistor value
 test "e-series snapping" {
     const a = [_]Value{.{ .number = 400000.0 }};
-    try std.testing.expectApproxEqAbs(@as(f64, 402000.0), (try evalBuiltin("e96", &a)).asNumber().?, 1.0);
-    const c = [_]Value{.{ .number = 33000.0 }};
-    try std.testing.expectApproxEqAbs(@as(f64, 33000.0), (try evalBuiltin("e24", &c)).asNumber().?, 1.0);
+    try std.testing.expectApproxEqAbs(@as(f64, 402000.0), (try evalBuiltinOp(.e96, &a)).asNumber().?, 1.0);
     const z = [_]Value{.{ .number = 0.0 }};
-    try std.testing.expectEqual(@as(f64, 0.0), (try evalBuiltin("e96", &z)).asNumber().?);
+    try std.testing.expectEqual(@as(f64, 0.0), (try evalBuiltinOp(.e96, &z)).asNumber().?);
 }

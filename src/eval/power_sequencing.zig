@@ -92,7 +92,7 @@ pub fn analyze(
             if (!std.mem.eql(u8, port.direction, "out")) continue;
             const out_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ sb.name, port.name }) catch continue;
             const rail = sub_to_rail.get(out_path) orelse continue;
-            if (isPowerPort(port)) {
+            if (port.isPowerSource()) {
                 if (!primary_rail_of.contains(sb.name)) {
                     try primary_rail_of.put(allocator, sb.name, rail);
                 }
@@ -107,7 +107,7 @@ pub fn analyze(
     for (block.sub_blocks) |sb| {
         for (sb.block.ports) |port| {
             if (!std.mem.eql(u8, port.direction, "out")) continue;
-            if (!isPowerPort(port)) continue;
+            if (!port.isPowerSource()) continue;
 
             const out_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ sb.name, port.name }) catch continue;
             const rail = sub_to_rail.get(out_path) orelse continue;
@@ -136,13 +136,6 @@ pub fn analyze(
     assignOrder(rows.items);
     std.mem.sort(SequenceRow, rows.items, {}, lessThanRow);
     return rows.items;
-}
-
-fn isPowerPort(port: env_mod.Port) bool {
-    return port.nominal != null or
-        port.rated_max != null or port.rated_min != null or
-        port.current_typ != null or port.current_max != null or
-        port.efficiency != null or port.efficiency_linear;
 }
 
 const Resolution = struct {

@@ -222,20 +222,6 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
         };
     }
 
-    // Freeze grouped ref-des assignments into the `<design>.refdes.json` sidecar.
-    // Set by `ids.applyGroupedRefDes` only when `(grouped-refdes)` changed the
-    // assignment, so a no-op rebuild rewrites nothing. Build is the canonical
-    // identity-freeze step (like the id write-back above); read-only paths skip it.
-    if (eval.refdes_sidecar_json) |json| {
-        if (eval.refdes_sidecar_path) |refdes_path| {
-            const file = infra_fs.cwd().createFile(refdes_path, .{}) catch null;
-            if (file) |f| {
-                defer f.close();
-                f.writeAll(json) catch |err| std.debug.print("refdes sidecar write error: {}\n", .{err});
-            }
-        }
-    }
-
     // Lint warnings (unknown sub-forms / enum words the evaluator skipped).
     // Spans from module files point into those files but are reported
     // against the board path — the message names the offending form either way.
