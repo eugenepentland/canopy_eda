@@ -205,14 +205,14 @@ fn chooseLayout(
     refine_name: ?[]const u8,
     tune: Tuning,
 ) LayoutChoice {
-    // A `(placement …)` form is the source of truth: when the design carries one
-    // (and nothing more specific was asked for), drive a fresh solve from it.
-    const spec_drives = sub == null and refine_name == null and eff_block.placement.present;
-    // With no explicit ?refine=, no regen/tuning, no sub preview and no driving
-    // spec, default the page to the design's starred (★) layout if it has one —
-    // the user's blessed reference, shown verbatim as the seed below.
+    // No authored PCB-placement spec exists any more — the board always solves
+    // via the force / starred-seed / cache ladder below.
+    const spec_drives = false;
+    // With no explicit ?refine=, no regen/tuning and no sub preview, default the
+    // page to the design's starred (★) layout if it has one — the user's blessed
+    // reference, shown verbatim as the seed below.
     const want_default = !(refine_name != null or tune.regen or tune.tuned);
-    const starred_name: ?[]const u8 = if (sub == null and want_default and !spec_drives)
+    const starred_name: ?[]const u8 = if (sub == null and want_default)
         defaultLayoutName(alloc, project_dir, name)
     else
         null;
@@ -220,10 +220,10 @@ fn chooseLayout(
         readLayoutPosesFor(alloc, project_dir, name, rn, eff_block)
     else if (starred_name) |sn|
         readLayoutPosesFor(alloc, project_dir, name, sn, eff_block)
-    else if (tune.regen or spec_drives) null else readAutoPoses(alloc, project_dir, name);
+    else if (tune.regen) null else readAutoPoses(alloc, project_dir, name);
     // No layout to show and nothing asked for one: place the parts on a plain grid
     // instead of running the (potentially expensive) optimizer on page open.
-    const grid_only = sub == null and refine_name == null and !tune.regen and !spec_drives and cached == null;
+    const grid_only = sub == null and refine_name == null and !tune.regen and cached == null;
     return .{ .spec_drives = spec_drives, .starred_name = starred_name, .cached = cached, .grid_only = grid_only };
 }
 
@@ -513,14 +513,11 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 
     const tune = parseTuning(req);
     const refine_name: ?[]const u8 = if (req.query()) |q| q.get("refine") else |_| null;
-    // A `(placement …)` form drives a fresh solve (see the page handler) unless a
-    // saved/refine layout was asked for.
-    const spec_drives = refine_name == null and block.placement.present;
     // Match the page: with nothing more specific asked for, default to the design's
     // starred (★) saved layout if it has one, so this JSON twin describes the same
     // board the page shows.
     const want_default = !(refine_name != null or tune.regen or tune.tuned);
-    const starred_name: ?[]const u8 = if (want_default and !spec_drives)
+    const starred_name: ?[]const u8 = if (want_default)
         defaultLayoutName(ctx.allocator, ctx.project_dir, name)
     else
         null;
@@ -528,7 +525,7 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         readLayoutPosesFor(ctx.allocator, ctx.project_dir, name, rn, block)
     else if (starred_name) |sn|
         readLayoutPosesFor(ctx.allocator, ctx.project_dir, name, sn, block)
-    else if (tune.regen or spec_drives) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
+    else if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
     const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place) catch {
         res.status = 500;
         res.body = PLACEMENT_ERR_MSG;
@@ -591,9 +588,6 @@ pub const PngRequest = struct {
     /// passive on the side of the pad it serves. A legible, module-intact start
     /// (the `Params.rough` path in the optimizer), deliberately not metric-optimal.
     rough: bool = false,
-    /// Bypass an authored `(placement …)` spec so the force / zone path renders
-    /// instead (the `?placement=off` A/B switch).
-    placement_off: bool = false,
     /// Diagnostic overlays (see render_pcb_png.Options).
     blame: bool = false,
     loop_labels: bool = false,
@@ -636,10 +630,10 @@ pub const SolvedRequest = struct {
 };
 
 /// Resolve `name` and apply the request's placement-selection rules: a named
-/// saved layout renders verbatim, `regen` or a `(placement …)` spec forces a
-/// fresh solve, otherwise the auto cache is reused — falling back to a plain
-/// grid when nothing is cached so an agent's first call stays cheap.
-/// `?placement=off` opts a spec design back into the automatic placer.
+/// saved layout renders verbatim, `regen` forces a fresh solve, otherwise the
+/// auto cache is reused — falling back to a plain grid when nothing is cached so
+/// an agent's first call stays cheap. A fresh solve uses the rough engine (the
+/// default top-level placer); the `?rough` flag is now redundant with that.
 pub fn solveForRequest(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
@@ -654,21 +648,18 @@ pub fn solveForRequest(
     else
         block;
 
-    const spec_drives = opts.sub == null and opts.layout == null and !opts.placement_off and
-        (eff_block.placement.present or eff_block.floorplan.present);
     const cached = if (opts.sub != null) null else if (opts.layout) |ln|
         readLayoutPosesFor(alloc, project_dir, name, ln, eff_block)
-    else if (opts.regen or opts.rough or spec_drives) null else readAutoPoses(alloc, project_dir, name);
-    const grid_only = opts.sub == null and opts.layout == null and !opts.regen and !opts.rough and !spec_drives and cached == null;
+    else if (opts.regen) null else readAutoPoses(alloc, project_dir, name);
+    const grid_only = opts.sub == null and opts.layout == null and !opts.regen and cached == null;
     var params = optimizer.Params{ .courtyard_overlap = opts.court_overlap, .route_gap = opts.route_gap };
     if (opts.group_w >= 0) params.group_w = opts.group_w;
     if (opts.group_zone_w >= 0) params.group_zone_w = opts.group_zone_w;
     if (opts.group_loop_relief >= 0) params.group_loop_relief = opts.group_loop_relief;
     if (opts.zone_pack) params.zone_pack = true;
-    // `?rough=1` forces the rough seed (runs before — and so bypasses — any
-    // authored `(placement …)` spec inside the solve). Fresh solve only.
-    if (opts.rough) params.rough = true;
-    if (opts.placement_off) params.ignore_placement = true;
+    // Rough is the default top-level engine — a fresh solve always seeds rough.
+    // (`?rough` is now redundant with this; left functional as a harmless alias.)
+    params.rough = true;
     // A named saved layout renders VERBATIM (placeFromPoses) — "show me this
     // layout" must display exactly what was saved, not a re-optimized version:
     // refine can drift a hand-tuned layout to a worse arrangement (e.g. a 70.8
@@ -680,22 +671,12 @@ pub fn solveForRequest(
     else
         optimizer.solve(alloc, eff_block, project_dir, cached, params, .place)) catch return error.BuildFailed;
 
-    // `(placement …)` spec coverage from the solve just above (same thread).
-    // Only meaningful on the spec-driven path — saved layouts / grid renders
-    // would read a stale or inert diag.
+    // Staging coverage from the solve just above (same thread): parts the
+    // `(board …)` edge-dock / force path left in the band and the ones autofill
+    // pulled back out. Reported so the image hatches staged parts in red.
     const diag = optimizer.placementDiag();
-    const spec_status: ?render_pcb_png.SpecStatus = if (spec_drives and diag.active)
-        .{
-            .used_spec = diag.used_spec,
-            .unplaced = diag.unplaced,
-            .auto_filled = diag.auto_filled,
-            .unresolved = diag.unresolved,
-            .composed = diag.composed,
-        }
-    else if (diag.composed.len > 0)
-        // Force-path board whose module specs composed: no design-level spec
-        // drives it, but report the composed macros so facts + image show them.
-        .{ .used_spec = false, .unplaced = &.{}, .composed = diag.composed }
+    const spec_status: ?render_pcb_png.SpecStatus = if (diag.unplaced.len > 0 or diag.auto_filled.len > 0)
+        .{ .unplaced = diag.unplaced, .auto_filled = diag.auto_filled }
     else
         null;
     return .{ .placement = placement, .spec_status = spec_status, .params = params, .title = eff_block.name, .block = eff_block };
@@ -794,11 +775,6 @@ pub fn pngRequestFromQuery(arena: std.mem.Allocator, req: *httpz.Request) PngReq
         .group_loop_relief = pngFloatOpt(req, "group_loop_relief"),
         .zone_pack = queryFlag(req, "zone_pack"),
         .rough = queryFlag(req, "rough"),
-        .placement_off = blk: {
-            const q = req.query() catch break :blk false;
-            const v = q.get("placement") orelse break :blk false;
-            break :blk std.mem.eql(u8, v, "off");
-        },
         .blame = queryFlag(req, "blame"),
         .loop_labels = queryFlag(req, "loops"),
         .dims = queryFlag(req, "dims"),
@@ -965,16 +941,12 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
     if (routed) |r| {
         try w.print(",\"routed\":{{\"trace_mm\":{d:.1},\"tracks\":{d},\"vias\":{d},\"drc\":{d}}}", .{ r.trace_mm, r.tracks, r.vias, r.drc });
     }
-    // When a `(placement …)` spec drove this solve, report coverage so the agent
-    // editing the spec can see whether it was honoured (`source`) and which parts it
-    // didn't list (`unplaced`, staged below the board). Read straight from the
-    // optimizer's per-solve thread-local — set during the `solve` just above.
+    // Report any parts the solve left staged below the board (the `(board …)`
+    // edge-dock / force path) and the ones autofill pulled back out. Read straight
+    // from the optimizer's per-solve thread-local — set during the `solve` above.
     const pl = optimizer.placementDiag();
-    if (pl.active) {
-        try w.print(",\"placement\":{{\"source\":\"{s}\",\"fell_back\":{s},\"unplaced\":[", .{
-            if (pl.used_spec) "spec" else "force",
-            if (pl.used_spec) "false" else "true",
-        });
+    if (pl.unplaced.len > 0 or pl.auto_filled.len > 0) {
+        try w.writeAll(",\"placement\":{\"unplaced\":[");
         for (pl.unplaced, 0..) |ref, i| {
             if (i > 0) try w.writeAll(",");
             try writeJsonStr(w, ref);
@@ -2609,14 +2581,6 @@ fn parseTuning(req: *httpz.Request) Tuning {
     if (q.get("rough")) |v| {
         p.rough = !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false"));
         if (p.rough) tuned = true;
-    }
-    // `?placement=off` bypasses an authored (placement …) spec so the force / zone
-    // path runs — for A/B-ing the manual floorplan against the automatic placer.
-    if (q.get("placement")) |v| {
-        if (std.mem.eql(u8, v, "off")) {
-            p.ignore_placement = true;
-            tuned = true;
-        }
     }
     return .{ .params = p, .tuned = tuned, .regen = regen or tuned };
 }

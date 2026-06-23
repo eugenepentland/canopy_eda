@@ -31,8 +31,6 @@ const upload = @import("upload.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const pcb_describe = @import("pcb_describe.zig");
 const layout_match = @import("layout_match.zig");
-const placement_spec = @import("placement_spec.zig");
-const module_policy_spec = @import("module_policy_spec.zig");
 const render_pcb_png = @import("../render_pcb_png.zig");
 const docgen = @import("../docgen.zig");
 const page_cache = @import("page_cache.zig");
@@ -99,9 +97,6 @@ const tools = [_]ToolEntry{
     .{ .name = "get_pcb_layout_image", .is_mutation = false },
     .{ .name = "describe_pcb_layout", .is_mutation = false },
     .{ .name = "compare_layout_to_starred", .is_mutation = false },
-    .{ .name = "export_placement_spec", .is_mutation = false },
-    .{ .name = "export_module_policy", .is_mutation = false },
-    .{ .name = "propose_placement", .is_mutation = false },
     .{ .name = "get_version", .is_mutation = false },
     .{ .name = "run_checks", .is_mutation = false },
     .{ .name = "generate_review", .is_mutation = false },
@@ -275,9 +270,6 @@ fn dispatchInfo(
     if (std.mem.eql(u8, tool_name, "get_schematic")) return try toolGetSchematic(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "describe_pcb_layout")) return try toolDescribePcbLayout(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "compare_layout_to_starred")) return try toolCompareLayoutToStarred(allocator, project_dir, args_val, out);
-    if (std.mem.eql(u8, tool_name, "export_placement_spec")) return try toolExportPlacementSpec(allocator, project_dir, args_val, out);
-    if (std.mem.eql(u8, tool_name, "export_module_policy")) return try toolExportModulePolicy(allocator, project_dir, args_val, out);
-    if (std.mem.eql(u8, tool_name, "propose_placement")) return try toolProposePlacement(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "get_version")) return try toolGetVersion(args_val, out, allocator);
     if (std.mem.eql(u8, tool_name, "run_checks")) return try toolRunChecks(allocator, project_dir, args_val, out, w);
     if (std.mem.eql(u8, tool_name, "generate_review")) return try toolGenerateReview(allocator, project_dir, args_val, w, out);
@@ -668,8 +660,8 @@ fn toolGetLanguageReference(allocator: std.mem.Allocator, args_val: ?std.json.Va
 /// `lib/modules/<m>.sexp` via the VFS tools, preview here (netlist summary +
 /// ERC + assertions, or the full scene graph), iterate — no host design
 /// needed. For module-level *layout*, pass the module name straight to
-/// `get_pcb_layout_image` / `describe_pcb_layout` / `export_placement_spec`,
-/// which resolve module names via a real instantiation (else a zero-arg call).
+/// `get_pcb_layout_image` / `describe_pcb_layout`, which resolve module names
+/// via a real instantiation (else a zero-arg call).
 fn toolPreviewModule(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
     const w = out.writer(allocator);
     const module = requireString(args_val, "module") orelse return missingArg(out, allocator, "module");
@@ -840,7 +832,7 @@ fn toolDescribePcbLayout(allocator: std.mem.Allocator, project_dir: []const u8, 
         .route = optionalBool(args_val, "route") orelse false,
         .layout = optionalString(args_val, "layout"),
         .regen = optionalBool(args_val, "regen") orelse false,
-        .rough = optionalBool(args_val, "rough") orelse false,
+        .rough = optionalBool(args_val, "rough") orelse true,
         .sub = optionalString(args_val, "sub"),
     };
     const body = pcb_describe.describeDesign(allocator, project_dir, name, opts) catch |e| {
@@ -861,68 +853,6 @@ fn toolCompareLayoutToStarred(allocator: std.mem.Allocator, project_dir: []const
         return false;
     };
     try out.appendSlice(allocator, body);
-    return true;
-}
-
-/// `export_placement_spec` — reverse-engineer an editable `(placement …)` spec
-/// from the solved layout (same selection rules as `get_pcb_layout_image`:
-/// `layout` picks a saved layout, `regen` a fresh solve, `sub` a module scope).
-fn toolExportPlacementSpec(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
-    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const opts = pcb_layout_page.PngRequest{
-        .layout = optionalString(args_val, "layout"),
-        .regen = optionalBool(args_val, "regen") orelse false,
-        .rough = optionalBool(args_val, "rough") orelse false,
-        .sub = optionalString(args_val, "sub"),
-    };
-    const result = placement_spec.exportSpec(allocator, project_dir, name, opts) catch |e| {
-        try out.writer(allocator).print("error exporting placement spec: {s}", .{@errorName(e)});
-        return false;
-    };
-    if (result.sexp.len == 0) {
-        try out.appendSlice(allocator, "error: no hub anchor - a (placement ...) spec needs an IC");
-        return false;
-    }
-    try out.appendSlice(allocator, result.json);
-    return true;
-}
-
-/// `export_module_policy` — reverse-engineer an editable `(module-policy …)` block
-/// from the solved layout's detected policy (same selection rules as
-/// `export_placement_spec`: `layout` / `regen` / `sub`). Read-only.
-fn toolExportModulePolicy(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
-    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const opts = pcb_layout_page.PngRequest{
-        .layout = optionalString(args_val, "layout"),
-        .regen = optionalBool(args_val, "regen") orelse false,
-        .rough = optionalBool(args_val, "rough") orelse false,
-        .sub = optionalString(args_val, "sub"),
-    };
-    const result = module_policy_spec.exportPolicy(allocator, project_dir, name, opts) catch |e| {
-        try out.writer(allocator).print("error exporting module policy: {s}", .{@errorName(e)});
-        return false;
-    };
-    try out.appendSlice(allocator, result.json);
-    return true;
-}
-
-/// `propose_placement` — dry-run a `(placement …)` / `(floorplan …)` form
-/// against a request-local copy of the design and return the proposed-vs-
-/// current scoreboard. Read-only: the agent A/B-tests a spec before writing
-/// it into the .sexp file.
-fn toolProposePlacement(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
-    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const spec_text = requireString(args_val, "spec") orelse return missingArg(out, allocator, "spec");
-    const route = optionalBool(args_val, "route") orelse false;
-    const result = placement_spec.proposePlacement(allocator, project_dir, name, spec_text, route) catch |e| {
-        try out.writer(allocator).print("error proposing placement: {s}", .{@errorName(e)});
-        return false;
-    };
-    if (result == null) {
-        try out.appendSlice(allocator, "error: no (placement ...) or (floorplan ...) form found in spec");
-        return false;
-    }
-    try out.appendSlice(allocator, result.?);
     return true;
 }
 
@@ -951,7 +881,7 @@ fn toolGetPcbImage(allocator: std.mem.Allocator, project_dir: []const u8, args_v
         .crop = optionalString(args_val, "crop"),
         .sheet = optionalBool(args_val, "sheet") orelse false,
         .critique = optionalBool(args_val, "critique") orelse false,
-        .rough = optionalBool(args_val, "rough") orelse false,
+        .rough = optionalBool(args_val, "rough") orelse true,
     };
     if (optionalU64(args_val, "width")) |w| opts.width = @intCast(@min(w, @as(u64, 4000)));
     if (optionalU64(args_val, "r")) |r| opts.crop_r = @floatFromInt(r);

@@ -104,7 +104,6 @@ Public functions: solve
 - rotation refine picks the orientation that shortens the decoupling loop
 - loop legs measure edge-to-edge to the nearest hub pad
 - reserves a breakout corridor only for single-component nets
-- pairs matched halves across an IN/OUT mirror
 - ground-return selection keeps real grounds over straps, with a never-empty fallback
 - relieves the loop pull of caps in a same-rail bank
 - pulls group members toward their centroid, anchoring the IC
@@ -124,8 +123,7 @@ Public functions: solve
 - series detection pairs a 2-pad part with two single-hub legs to one hub
 - series rotations are applied and pinned; authored spec rotations win
 - synthesizes an aggressor-avoidance keep-out for a feedback passive
-- past the multi-start band a single force start falls back to the pad-anchored ring when that scores better
-- the rough-seed safety net keeps the lower-objective arrangement
+- the surrogate objective ranks a tighter layout below a spread one
 
 ## placement/router
 

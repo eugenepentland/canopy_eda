@@ -61,24 +61,15 @@ const DIM_A: f32 = 0.20; // alpha for de-emphasised elements in focus mode
 /// or both (`C150=C_BOOT1`). Parts without an origin name fall back to ref.
 pub const NameMode = enum { ref, origin, both };
 
-/// Coverage of the `(placement …)` spec that drove this solve (from
-/// `optimizer.placementDiag()`): whether the constructive pack was used at all,
-/// and which parts the spec didn't list (staged in a band below the board).
-/// Rendered as a header status + red hatch so a fallback never silently passes
-/// for a real layout.
+/// Staging status of a solved layout (from `optimizer.placementDiag()`): which
+/// parts the force / `(board …)` edge-dock path left in the band below the board,
+/// and which the pin-hug auto-fill pulled back out. Rendered as a header status +
+/// red hatch so staged parts never silently pass for a finished layout.
 pub const SpecStatus = struct {
-    used_spec: bool,
     unplaced: []const []const u8,
-    /// Spec-unlisted parts the pin-hug auto-fill placed — usable positions the
-    /// spec doesn't pin (drawn with an amber outline, not the red hatch).
+    /// Parts the pin-hug auto-fill placed — usable positions (drawn with an amber
+    /// outline, not the red hatch).
     auto_filled: []const []const u8 = &.{},
-    /// Spec names that resolved to no part / sub-block (typos, renames) —
-    /// surfaced by the describe endpoint's lint, carried here so the facts and
-    /// the image are built from one status object.
-    unresolved: []const []const u8 = &.{},
-    /// Sub-block slugs whose module-level `(placement …)` was composed into
-    /// the force solve as a rigid macro (`composeModuleMacros`).
-    composed: []const []const u8 = &.{},
 };
 
 /// Render options: output size, focus-mode highlight sets, optional routed
@@ -967,16 +958,14 @@ const Ctx = struct {
             .{ b.objective, b.hpwl, b.loop_nh, b.alignment, b.congestion },
         ) catch "";
         self.cv.text(pad, self.pw(20), score, self.pw(9), TEXT_DIM, 1.0, .start);
-        // Top-right: `(placement …)` spec coverage, so a fallback or a half-
-        // covered spec is impossible to mistake for a finished layout. Auto-
+        // Top-right: staging status, so a board that left parts in the band (or
+        // auto-filled some) is impossible to mistake for a finished layout. Auto-
         // filled parts are usable but unpinned — amber, between red and green.
         if (self.opts.spec) |sp| {
             const xr = @as(f32, @floatFromInt(self.cv.w)) - pad;
-            if (!sp.used_spec) {
-                self.cv.text(xr, self.pw(3), "SPEC FELL BACK TO AUTO", self.pw(10), DRC_COL, 1.0, .end);
-            } else if (sp.unplaced.len > 0) {
+            if (sp.unplaced.len > 0) {
                 var buf3: [64]u8 = undefined;
-                const s3 = std.fmt.bufPrint(&buf3, "SPEC: {d} UNPLACED (staged)", .{sp.unplaced.len}) catch "";
+                const s3 = std.fmt.bufPrint(&buf3, "{d} UNPLACED (staged)", .{sp.unplaced.len}) catch "";
                 self.cv.text(xr, self.pw(3), s3, self.pw(10), DRC_COL, 1.0, .end);
                 if (sp.auto_filled.len > 0) {
                     var buf4: [48]u8 = undefined;
@@ -985,10 +974,8 @@ const Ctx = struct {
                 }
             } else if (sp.auto_filled.len > 0) {
                 var buf3: [64]u8 = undefined;
-                const s3 = std.fmt.bufPrint(&buf3, "SPEC + {d} AUTO-FILLED", .{sp.auto_filled.len}) catch "";
+                const s3 = std.fmt.bufPrint(&buf3, "{d} AUTO-FILLED", .{sp.auto_filled.len}) catch "";
                 self.cv.text(xr, self.pw(3), s3, self.pw(10), ACCENT, 1.0, .end);
-            } else {
-                self.cv.text(xr, self.pw(3), "SPEC: ALL PLACED", self.pw(10), GOOD_COL, 1.0, .end);
             }
         }
         // Third line: compare Δ if diffing, else the focus caption.
@@ -1204,7 +1191,7 @@ test "render with origin labels, pad net labels and spec status" {
         .title = "test",
         .names = .both,
         .pin_refs = &pin_refs,
-        .spec = .{ .used_spec = true, .unplaced = &unplaced },
+        .spec = .{ .unplaced = &unplaced },
     });
     defer alloc.free(png_bytes);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x89, 0x50, 0x4E, 0x47 }, png_bytes[0..4]);

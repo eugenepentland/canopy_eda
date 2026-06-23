@@ -231,77 +231,6 @@ pub const CriticalIc = struct {
     mpn: []const u8 = "",
 };
 
-/// One `(placement-order <hub> …)` declaration: the priority order in which the
-/// passives around `hub` should claim the space next to it (first listed =
-/// highest priority). Consumed by the PCB auto-placer to set each decoupling
-/// loop's tightness weight, the pinned IC pad its loop targets, and the final
-/// compaction docking order. Entries are either a bare ref-des (priority by
-/// position) or `(near <pin> <ref>)` (which *also* pins the exact hub pad).
-pub const PlacementOrder = struct {
-    /// Hub ref-des the passives are ordered around (e.g. "U1").
-    hub: []const u8,
-    /// Passives in priority order — index 0 is the highest priority.
-    entries: []const PlacementEntry,
-};
-
-/// One entry in a `(placement-order …)`: the passive's ref-des and, optionally,
-/// the specific hub pin its decoupling loop should target (from the
-/// `(near <pin> <ref>)` long form).
-pub const PlacementEntry = struct {
-    ref: []const u8,
-    /// Explicit hub pad number to pin the loop's power leg to; empty ⇒ the
-    /// placer defaults to the lowest-numbered true-supply pad on the rail.
-    pin: []const u8 = "",
-};
-
-/// One `(net-class "NAME" class)` override inside a `(module-policy …)` form:
-/// pin a net's routing-criticality `NetClass` (the bare enum token, e.g.
-/// `input_rail`) when the detector's name heuristics read it wrong. The class
-/// string is interpreted in `placement/module_policy.zig` (kept stringly here so
-/// the eval layer needn't depend on the placement taxonomy).
-pub const NetClassOverride = struct {
-    /// Net name to match — exact or by leaf segment (the part after the last `/`).
-    net: []const u8,
-    /// Bare `NetClass` token: ground|power|input_rail|switch_node|clock|rf|
-    /// feedback|analog|control|signal.
-    class: []const u8,
-};
-
-/// One `(module "REF" class)` override inside a `(module-policy …)` form: pin a
-/// hub IC's detected `ModuleClass` (e.g. an integrated buck with no discrete
-/// inductor that reads as `generic`). Matched by ref-des, exact or by leaf.
-pub const ModuleClassOverride = struct {
-    ref: []const u8,
-    /// Bare `ModuleClass` token: buck|ldo|mcu|rf_amp|analog_afe|generic.
-    class: []const u8,
-};
-
-/// One `(part-role "REF" role)` override inside a `(module-policy …)` form: pin a
-/// passive's detected `PartRole` (e.g. a decoupling cap the heuristics misread).
-/// Matched by ref-des or module-local origin name, exact or by leaf. Feeds the
-/// constructive role placer, the layout lint, and the describe facts.
-pub const PartRoleOverride = struct {
-    ref: []const u8,
-    /// Bare `PartRole` token: input_cap|decoupling_cap|bulk_cap|feedback_divider|
-    /// matching_element|anchor_ic|other.
-    role: []const u8,
-};
-
-/// Author overrides for the best-effort module-policy detector, from a top-level
-/// `(module-policy …)` form. Empty by default (detection stands alone). Applied
-/// in `placement/module_policy.zig` *after* the heuristics, so the author has the
-/// last word on a misread net or hub. Phase 4 of the module-placement ruleset.
-pub const PolicyOverrides = struct {
-    nets: []const NetClassOverride = &.{},
-    modules: []const ModuleClassOverride = &.{},
-    part_roles: []const PartRoleOverride = &.{},
-    /// `(module-policy (require-decouple-binding))` — opt this design into
-    /// treating the `decouple-unbound` layout lint as a hard error (every HF
-    /// decoupling cap on a multi-supply-pad rail MUST declare its pin). Default
-    /// false: the lint stays a warning until a design has finished migrating.
-    require_decouple_binding: bool = false,
-};
-
 /// A named virtual pin on a placeholder `(stub …)`. A stub declares its
 /// interface by *signal* (a logical name on a net) rather than by physical
 /// pin number — the placeholder has no real pinout yet. `class` is a diagram
@@ -1092,71 +1021,23 @@ pub const LayoutSpec = struct {
     edges: []const LayoutEdge = &.{},
 };
 
-/// Which side of the anchor IC a `(placement …)` directive docks a part to.
+/// Which physical board edge a `(board …)` `(left|right|top|bottom …)` list
+/// docks its parts to.
 pub const PlacementSide = enum { left, right, top, bottom };
 
-/// One part in a `(placement …)` side list: the ref-des and an optional
-/// rotation override (degrees CCW). `null` ⇒ the solver picks the rotation that
-/// turns the part's power pad toward the IC (the loop-shortening default).
-/// A `(net "VIN")` item instead sets `net` — a membership RULE that expands to
-/// every not-otherwise-claimed part with a pad on that net (small parts first),
-/// so a spec needn't enumerate refs and survives parts being added to the rail.
+/// One part in a `(board …)` edge or `(corners …)` list: the ref-des and an
+/// optional rotation override (degrees CCW). `null` ⇒ the solver picks the
+/// pads-inward default rotation.
 pub const PlacementItem = struct {
     ref: []const u8 = "",
     rot: ?f64 = null,
-    net: ?[]const u8 = null,
 };
 
-/// One `(left|right|top|bottom …)` side list of a `(placement …)` form: the
-/// parts docked to that side of the anchor IC, listed in IC-outward order.
+/// One `(left|right|top|bottom …)` edge list of a `(board …)` form: the parts
+/// docked flush inside that board edge, in authored order.
 pub const PlacementSideSpec = struct {
     side: PlacementSide,
     items: []const PlacementItem = &.{},
-};
-
-/// One `(switch "REF" side)` directive: a power inductor (a secondary hub on
-/// the SW net) straddling the switch node, biased toward `side` (the output).
-pub const SwitchPlacement = struct {
-    ref: []const u8,
-    side: PlacementSide,
-};
-
-/// How role-based auto-placement engages for a block (`PlacementSpec.auto_mode`):
-/// `.on` (`(placement (auto "REF"))`) ⇒ place the block constructively from its
-/// detected roles (the research priority ladder) around the author-declared
-/// central IC `REF`, and compose the result into parent boards; `.unset` (no
-/// marker) and `.off` (`(placement (manual))`) ⇒ use the force solver. `.on`
-/// engages for MODULE roots only (`DesignBlock.origin == .embedded`) and only with a
-/// named anchor — a full design always force-solves its overall arrangement,
-/// sidestepping the array-cram regression that default-on detection hit.
-pub const PlacementAuto = enum { unset, on, off };
-
-/// Agent-authored PCB floorplan from a top-level `(placement …)` form: the
-/// anchor IC plus, per part, its side of the IC, order along that edge, and an
-/// optional rotation. The optimizer's `packSpec` realizes it into coordinates
-/// (the manual twin of the automatic switcher floorplan). `present=false` ⇒
-/// none authored, so placement falls through to the force / zone-pack path.
-pub const PlacementSpec = struct {
-    anchor: []const u8 = "",
-    sides: []const PlacementSideSpec = &.{},
-    switches: []const SwitchPlacement = &.{},
-    present: bool = false,
-    /// True (default) ⇒ run the post-pack refinement (the surrogate `polish` +
-    /// priority-cap tuck) that fine-tunes positions. A `(no-refine)` marker in the
-    /// form sets this false, leaving the pure deterministic constructive pack — for
-    /// A/B-ing what the refinement actually changes (e.g. it can drift a symmetric
-    /// pair off-centre).
-    refine: bool = true,
-    /// True ⇒ center every side's lane on the IC centerline instead of opposite its
-    /// rail pad. By default each lane docks across from the supply pad it feeds
-    /// (`railPadCross`, shortest power loop), which pulls an off-centre rail's caps
-    /// off the IC centerline. A `(centered)` marker in the form sets this true for a
-    /// symmetric floorplan (every side mirrored about the anchor).
-    centered: bool = false,
-    /// Role-based auto-placement mode (see `PlacementAuto`). `(auto "REF")` ⇒
-    /// `.on` with `anchor` = REF (the declared central IC), `(manual)` ⇒ `.off`,
-    /// no marker ⇒ `.unset` (force solve). `.on` engages only for module roots.
-    auto_mode: PlacementAuto = .unset,
 };
 
 /// The physical board declared by a top-level `(board …)` form: the outline
@@ -1310,38 +1191,15 @@ pub const DesignBlock = struct {
     /// the diagram's `computeFreeLayout` resolves them into a free-floating view.
     /// Empty `placements` ⇒ no layout declared, so the category-column views stand.
     layout: LayoutSpec = .{},
-    /// Declared component placement priority from top-level `(placement-order …)`
-    /// forms — one per hub. Orders how passives claim the space next to each hub
-    /// and (via `(near <pin> …)`) pins which IC pad a decoupling loop targets.
-    /// Empty ⇒ the auto-placer uses value-based weighting + geometric pin choice.
-    placement_order: []const PlacementOrder = &.{},
-    /// Phase-A placement constraints from top-level `(constraints …)` / `(module …)`
-    /// forms (see docs/constraints_dsl.md). Circuit-intent the auto-placer cannot
-    /// infer — which rail is the switcher input, which parts form a feedback
-    /// divider, what to keep apart — lowered into extra objective terms / weights.
-    /// Symbolic refs/nets/pins are resolved against the flattened netlist (and
-    /// rejected if absent) by the optimizer before use. Empty ⇒ none authored.
+    /// Inert placement-constraints holder (always empty). The `(constraints …)`
+    /// form was removed, but the lowering infra (`resolveConstraints` →
+    /// `Lowered`) is fused into the kept force/zone solver and fast-exits when
+    /// this is empty, so the field stays as its always-default value.
     constraints: PlacementConstraints = .{},
-    /// Agent-authored manual floorplan from a top-level `(placement …)` form:
-    /// each part's side of the anchor IC + order + optional rotation. The
-    /// optimizer's `packSpec` realizes it into coordinates (force/zone-pack
-    /// fallback on failure). `present=false` ⇒ none authored.
-    placement: PlacementSpec = .{},
-    /// Design-level macro floorplan from a top-level `(floorplan …)` form: the
-    /// same grammar as `(placement …)` but the names are `(sub-block …)` slugs.
-    /// Each listed sub-block is solved as its own board (its module-level
-    /// `(placement …)` spec composes) and docked as a rigid macro on its side
-    /// of the anchor sub-block. `present=false` ⇒ none authored.
-    floorplan: PlacementSpec = .{},
     /// Physical board outline + edge-docked connectors + corner mounting
     /// hardware from a top-level `(board …)` form. `present=false` ⇒ none
     /// authored — the layout stays an unbounded part cluster.
     board: BoardSpec = .{},
-    /// Author overrides for the module-policy detector from a top-level
-    /// `(module-policy …)` form — pin a misread net's `NetClass` or a hub's
-    /// `ModuleClass`. Applied after detection in `placement/module_policy.zig`.
-    /// Empty ⇒ detection stands alone. Phase 4 of the module-placement ruleset.
-    policy_overrides: PolicyOverrides = .{},
     /// Declared board revision from a top-level `(revision …)` form — the
     /// canonical human-meaningful spin id (+ optional date + in-file
     /// changelog). `present=false` ⇒ the design declares no revision.
