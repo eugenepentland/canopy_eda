@@ -112,19 +112,25 @@ only sealed internal-net labels relabel). Design files live under the gitignored
 - **AD7380 ×3** (`ad7380-4` / `-channel` / `-channel-2ch`): NOT a voltage dup —
   these are 1/2/4-channel ADC variants. Left as-is.
 
-### Still open — the E96 builtin (fix #1's "optional polish")
+### Done — the E96 builtin (fix #1's polish), 2026-06-23
 
-For LDOs with a single SET resistor (LT3045) `vout × 10000` lands on E96 values
-exactly, so `(vout X)` is complete. For **divider**-based rails (TPS63806/62933/
-631000) the inverse only sometimes lands on a standard value — `(vout 2.5)` on
-TPS63806 gives 400k (non-E96; the author picked 402k for 2.51 V). The clean
-finish is an `(e96 x)` builtin (snap to nearest E96, then recompute the honest
-vout); it needs a small `src/eval/builtins.zig` addition since the DSL has no
-`round`/`log10`. Until then, divider rails take `(vout X)` but may emit a
-non-standard resistor at arbitrary voltages — pass rfbt/rfbb for an exact E96 pair.
+`(e96 r)` and `(e24 r)` builtins snap a value to the nearest standard resistor
+value (`src/eval/builtins.zig`; new `Builtin` enum variants + atom map + doc rows;
+spec-tagged test). The decade is found by scaling into [1,10) and the 10.0 top
+edge is considered (9.9k → 10k). Deployed to prod (merge `c7ecf8a`).
 
-## Recommended first step
+`tps63806-rail` now snaps its `(vout X)`-computed RFBT through `(e96 …)`, so
+`(tps63806-rail (vout 2.5))` → 400k → **402k** (the E96 part the author had
+hand-picked). cyclops-analog's buck25 was migrated from the cryptic
+`(tps63806-rail 402000 100000)` to `(tps63806-rail (vout 2.5))` — verified
+byte-identical netlist (R_FBT still 402k), 0 ERC errors.
 
-Implement #1 on the "generic" rail module as the worked pattern + add the
-authoring rule, then roll the `(vout …)` interface across the other rail modules.
-#2 (catalog) and #3 (lint) follow and reinforce it.
+**Important — only snap divider rails, never the LDO SET resistor.** The LT3045
+path is `R_SET = vout × 10000`, and the existing barracuda values (33k/50k) are
+*not* E96 (33k→33.2k, 50k→49.9k under e96) — snapping them would churn the board.
+The single-SET-resistor math already gives the author's round values, which are
+stocked in 1%. So `(e96 …)` is applied to the divider rails only.
+
+Remaining divider rails (`tps62933-rail`, `tps631000-rail`, etc.) can adopt the
+same one-line pattern — `(let rfbt-eff (if (> vout 0) (e96 (* rfbb …)) rfbt))` —
+when convenient; each just needs a before/after netlist check on its users.
