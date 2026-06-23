@@ -66,6 +66,8 @@ pub const Builtin = enum {
     and_,
     or_,
     not_,
+    e96,
+    e24,
 
     pub fn fromAtom(name: []const u8) ?Builtin {
         return atom_to_builtin.get(name);
@@ -87,6 +89,8 @@ const atom_to_builtin = std.StaticStringMap(Builtin).initComptime(.{
     .{ "and", .and_ },
     .{ "or", .or_ },
     .{ "not", .not_ },
+    .{ "e96", .e96 },
+    .{ "e24", .e24 },
 });
 
 /// Forms that may appear inside a `(design-block …)`, a `(section …)`,
@@ -352,6 +356,8 @@ pub const builtin_docs = blk: {
     t[@intFromEnum(Builtin.and_)] = .{ .syntax = "(and a b)", .summary = "Boolean and (eager — both args evaluated)." };
     t[@intFromEnum(Builtin.or_)] = .{ .syntax = "(or a b)", .summary = "Boolean or (eager — both args evaluated)." };
     t[@intFromEnum(Builtin.not_)] = .{ .syntax = "(not a)", .summary = "Boolean negation." };
+    t[@intFromEnum(Builtin.e96)] = .{ .syntax = "(e96 r)", .summary = "Snap a resistance/number to the nearest E96 (1%) standard value." };
+    t[@intFromEnum(Builtin.e24)] = .{ .syntax = "(e24 r)", .summary = "Snap a resistance/number to the nearest E24 (5%) standard value." };
     break :blk requireAllDocumented(Builtin, FormDoc, t);
 };
 

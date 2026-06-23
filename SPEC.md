@@ -183,6 +183,7 @@ Public functions: worldShape, pointDist, shapeGap
 - Evaluates a voltage divider formula combining arithmetic operators
 - Evaluates comparison operations returning boolean results
 - Evaluates logic operations on boolean values
+- Snaps a value to the nearest standard E-series resistor value
 
 ## eval/forms
 
