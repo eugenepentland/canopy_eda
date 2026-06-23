@@ -584,6 +584,11 @@ details li{margin:3px 0;font-size:0.88rem;color:#c9d1d9;line-height:1.45;}
 .kpv-cat:first-child{margin-top:0;padding-top:0;border-top:0;}
 .kpv-cat-title{font-weight:700;color:#f0f6fc;font-size:0.78rem;}
 .kpv-cat-hint{color:#6e7681;font-size:0.7rem;font-weight:400;font-family:system-ui,sans-serif;}
+.kpv-sec{display:flex;align-items:baseline;gap:10px;margin:12px 0 4px;padding:5px 9px;background:#161b22;border-left:3px solid #58a6ff;border-radius:4px;}
+.kpv-sec:first-child{margin-top:0;}
+.kpv-sec-title{font-weight:700;color:#f0f6fc;font-size:0.8rem;font-family:system-ui,sans-serif;}
+.kpv-sec-count{color:#8b949e;font-size:0.7rem;font-family:system-ui,sans-serif;margin-left:auto;}
+.kpv-house{color:#6e7681;font-size:0.72rem;font-family:system-ui,sans-serif;padding:6px 2px;margin-top:6px;border-top:1px dotted #21262d;}
 .kpv-fold{margin:8px 0 2px;}
 .kpv-fold summary{cursor:pointer;color:#8b949e;font-size:0.76rem;font-weight:600;padding:4px 0;}
 .kpv-fold summary:hover{color:#c9d1d9;}
