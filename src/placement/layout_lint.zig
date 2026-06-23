@@ -125,10 +125,8 @@ fn lintDecoupleUnbound(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, 
     errdefer alloc.free(refs_owned);
     try out.append(alloc, .{
         .rule = "decouple-unbound",
-        // A design opts into making this a hard requirement with
-        // `(module-policy (require-decouple-binding))`; until then it's a warning
-        // so an un-migrated board isn't blocked overnight.
-        .severity = if (p.policy_overrides.require_decouple_binding) .err else .warn,
+        // Always a warning — a binding is best practice but not blocking.
+        .severity = .warn,
         .refs = refs_owned,
         .msg = "HF decoupling cap on a multi-pin rail has no pin binding — its loop " ++
             "collapses onto one supply pad. Bind it with (decouples \"IC\" PIN) or a " ++
@@ -385,13 +383,13 @@ test "lint flags an unbound decoupling cap on a multi-pin rail" {
     };
     const n1 = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
     const nets = [_]export_kicad.FlatNet{.{ .name = "VDD", .pins = &n1 }};
-    var p = mkPlacement(&parts, &loops, &nets);
+    const p = mkPlacement(&parts, &loops, &nets);
 
     var ncs = [_]NetClass{.power};
     var prs = [_]PartRole{ .anchor_ic, .decoupling_cap, .decoupling_cap };
     const policy = mp.ModulePolicy{ .net_class = &ncs, .part_role = &prs, .modules = &.{} };
 
-    // Default: a warning naming only C1 (C2 opted out via (decouples rail)).
+    // A warning naming only C1 (C2 opted out via (decouples rail)).
     const findings = try lint(testing.allocator, p, policy);
     defer freeFindings(testing.allocator, findings);
     var found = false;
@@ -403,18 +401,6 @@ test "lint flags an unbound decoupling cap on a multi-pin rail" {
         try testing.expectEqual(Severity.warn, fdg.severity);
     }
     try testing.expect(found);
-
-    // With (module-policy (require-decouple-binding)), the same finding is a hard error.
-    p.policy_overrides.require_decouple_binding = true;
-    const strict = try lint(testing.allocator, p, policy);
-    defer freeFindings(testing.allocator, strict);
-    var strict_found = false;
-    for (strict) |fdg| {
-        if (!std.mem.eql(u8, fdg.rule, "decouple-unbound")) continue;
-        strict_found = true;
-        try testing.expectEqual(Severity.err, fdg.severity);
-    }
-    try testing.expect(strict_found);
 }
 
 fn mkPlacement(parts: []optimizer.Part, loops: []const optimizer.Loop, nets: []const export_kicad.FlatNet) Placement {

@@ -133,18 +133,10 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     var critical_ics: std.ArrayListUnmanaged(env_mod.CriticalIc) = .empty;
     var test_points: std.ArrayListUnmanaged(env_mod.TestPoint) = .empty;
     var parts: std.ArrayListUnmanaged(env_mod.PlaceholderPart) = .empty;
-    var placement_orders: std.ArrayListUnmanaged(env_mod.PlacementOrder) = .empty;
-    var constraint_acc: ConstraintAcc = .{};
     var layout_spec: env_mod.LayoutSpec = .{};
-    var placement_spec: env_mod.PlacementSpec = .{};
-    var floorplan_spec: env_mod.PlacementSpec = .{};
     var board_spec: env_mod.BoardSpec = .{};
     var revision_spec: env_mod.Revision = .{};
     var rough_spec: env_mod.RoughSpec = .{};
-    var policy_net_overrides: std.ArrayListUnmanaged(env_mod.NetClassOverride) = .empty;
-    var policy_module_overrides: std.ArrayListUnmanaged(env_mod.ModuleClassOverride) = .empty;
-    var policy_part_role_overrides: std.ArrayListUnmanaged(env_mod.PartRoleOverride) = .empty;
-    var require_decouple_binding = false;
     var derating: ?f64 = null;
     var kicad_pcb_path: ?[]const u8 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
@@ -265,24 +257,10 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
                 try parts.append(self.allocator, p.part);
             },
             .layout => layout_spec = try parseLayout(self, form_children),
-            .placement_order => try parsePlacementOrder(self, form_children, &placement_orders),
-            .placement_group => try parsePlacementGroup(self, form_children, &placement_orders, &groups),
-            .constraints => try parseConstraints(self, form_children, &constraint_acc),
-            .placement => placement_spec = try parsePlacement(self, form_children),
-            // Same grammar as (placement …); the items name sub-block slugs.
-            .floorplan => floorplan_spec = try parsePlacement(self, form_children),
             .board => board_spec = try parseBoard(self, form_children),
             .revision => revision_spec = try parseRevision(self, form_children),
             .rough => rough_spec = try parseRough(self, form_children),
             .replicate => try evalReplicate(self, form_children, env, &sub_blocks),
-            .module_policy => try parsePolicyOverrides(
-                self,
-                form_children,
-                &policy_net_overrides,
-                &policy_module_overrides,
-                &policy_part_role_overrides,
-                &require_decouple_binding,
-            ),
             // Section-only forms are ignored at the top level — a
             // design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract; the warning
@@ -324,17 +302,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .kicad_pcb_path = kicad_pcb_path,
         .parts = parts.toOwnedSlice(self.allocator) catch &.{},
         .layout = layout_spec,
-        .placement_order = placement_orders.toOwnedSlice(self.allocator) catch &.{},
-        .constraints = constraint_acc.build(self.allocator),
-        .placement = placement_spec,
-        .floorplan = floorplan_spec,
         .board = board_spec,
-        .policy_overrides = .{
-            .nets = policy_net_overrides.toOwnedSlice(self.allocator) catch &.{},
-            .modules = policy_module_overrides.toOwnedSlice(self.allocator) catch &.{},
-            .part_roles = policy_part_role_overrides.toOwnedSlice(self.allocator) catch &.{},
-            .require_decouple_binding = require_decouple_binding,
-        },
         .revision = revision_spec,
         .rough = rough_spec,
     };
@@ -1046,14 +1014,8 @@ fn evalSection(
             .kicad_pcb,
             .stub,
             .layout,
-            .placement_order,
-            .placement_group,
-            .constraints,
-            .placement,
-            .floorplan,
             .board,
             .replicate,
-            .module_policy,
             .revision,
             .rough,
             => {
@@ -1523,127 +1485,6 @@ fn parseDesignDoc(
     }
 }
 
-/// Parse a top-level `(placement-order <hub> …)` form into a `PlacementOrder`.
-/// `<hub>` is the IC the passives are ordered around; each following entry is
-/// either a bare ref-des (priority by list position) or a `(near <pin> <ref>)`
-/// long form that *also* pins the exact hub pad the cap's loop should target.
-/// Index 0 of `entries` is the highest priority.
-fn parsePlacementOrder(
-    self: *Evaluator,
-    form_children: []const Node,
-    out: *std.ArrayListUnmanaged(env_mod.PlacementOrder),
-) EvalError!void {
-    if (form_children.len < 2) return;
-    const hub = form_children[1].asString() orelse form_children[1].asAtom() orelse return;
-    var entries: std.ArrayListUnmanaged(env_mod.PlacementEntry) = .empty;
-    for (form_children[2..]) |child| {
-        if (child.asList()) |cl| {
-            // (near <pin> <ref>) — pin id may be a bare int (`(near 1 …)`), an
-            // atom, or a string; `tokenText` renders all three to the decimal
-            // string footprint pad numbers use.
-            if (cl.len < 3) continue;
-            const head = cl[0].asAtom() orelse continue;
-            if (!std.mem.eql(u8, head, "near")) continue;
-            const pin = cl[1].tokenText(self.allocator) orelse continue;
-            const ref = cl[2].asText() orelse continue;
-            entries.append(self.allocator, .{ .ref = ref, .pin = pin }) catch return EvalError.OutOfMemory;
-        } else {
-            // Bare ref-des: priority by position, geometric pin choice.
-            const ref = child.asString() orelse child.asAtom() orelse continue;
-            entries.append(self.allocator, .{ .ref = ref }) catch return EvalError.OutOfMemory;
-        }
-    }
-    out.append(self.allocator, .{
-        .hub = hub,
-        .entries = entries.toOwnedSlice(self.allocator) catch &.{},
-    }) catch return EvalError.OutOfMemory;
-}
-
-/// Parse `(placement-group "HUB" "NAME" entries…)` — a NAMED cluster of passives
-/// around a hub. It expands into BOTH existing mechanisms: a `PlacementOrder`
-/// (so the entries' priority + `(near <pin> …)` pin pinning behave exactly like
-/// `(placement-order …)`), and a `Group` (so the same members get cohesion +
-/// hub-side zoning and pack as one unit). `<NAME>` is the group label; entries
-/// share the `(placement-order …)` grammar (bare ref, or `(near <pin> <ref>)`).
-fn parsePlacementGroup(
-    self: *Evaluator,
-    form_children: []const Node,
-    order_out: *std.ArrayListUnmanaged(env_mod.PlacementOrder),
-    group_out: *std.ArrayListUnmanaged(env_mod.Group),
-) EvalError!void {
-    if (form_children.len < 3) return; // need at least (placement-group HUB NAME)
-    const hub = form_children[1].asString() orelse form_children[1].asAtom() orelse return;
-    const name = form_children[2].asText() orelse "";
-    var entries: std.ArrayListUnmanaged(env_mod.PlacementEntry) = .empty;
-    var members: std.ArrayListUnmanaged([]const u8) = .empty;
-    for (form_children[3..]) |child| {
-        if (child.asList()) |cl| {
-            // (near <pin> <ref>) — pins the cap's loop power leg, same as
-            // placement-order; pin token may be int/atom/string.
-            if (cl.len < 3) continue;
-            const head = cl[0].asAtom() orelse continue;
-            if (!std.mem.eql(u8, head, "near")) continue;
-            const pin = cl[1].tokenText(self.allocator) orelse continue;
-            const ref = cl[2].asText() orelse continue;
-            entries.append(self.allocator, .{ .ref = ref, .pin = pin }) catch return EvalError.OutOfMemory;
-            members.append(self.allocator, ref) catch return EvalError.OutOfMemory;
-        } else {
-            const ref = child.asString() orelse child.asAtom() orelse continue;
-            entries.append(self.allocator, .{ .ref = ref }) catch return EvalError.OutOfMemory;
-            members.append(self.allocator, ref) catch return EvalError.OutOfMemory;
-        }
-    }
-    if (entries.items.len == 0) return;
-    order_out.append(self.allocator, .{
-        .hub = hub,
-        .entries = entries.toOwnedSlice(self.allocator) catch &.{},
-    }) catch return EvalError.OutOfMemory;
-    group_out.append(self.allocator, .{
-        .name = name,
-        .members = members.toOwnedSlice(self.allocator) catch &.{},
-    }) catch return EvalError.OutOfMemory;
-}
-
-/// Parse a top-level `(module-policy …)` form into the design's policy-detector
-/// overrides. Two child shapes: `(module "REF" class)` pins a hub IC's
-/// `ModuleClass`; `(net-class "NAME" class)` pins a net's routing `NetClass`.
-/// The class token is left as raw text — `placement/module_policy.zig` parses it
-/// against its taxonomy (an unknown token is dropped there, not here). Several
-/// `(module-policy …)` forms accumulate. Phase 4 of the module-placement ruleset.
-fn parsePolicyOverrides(
-    self: *Evaluator,
-    form_children: []const Node,
-    nets: *std.ArrayListUnmanaged(env_mod.NetClassOverride),
-    modules: *std.ArrayListUnmanaged(env_mod.ModuleClassOverride),
-    part_roles: *std.ArrayListUnmanaged(env_mod.PartRoleOverride),
-    require_decouple_binding: *bool,
-) EvalError!void {
-    for (form_children[1..]) |child| {
-        const cl = child.asList() orelse continue;
-        if (cl.len == 0) continue;
-        const head = cl[0].asAtom() orelse continue;
-        // `(require-decouple-binding)` — a bare marker that flips the
-        // decouple-unbound layout lint to a hard error for this design.
-        if (std.mem.eql(u8, head, "require-decouple-binding")) {
-            require_decouple_binding.* = true;
-            continue;
-        }
-        if (cl.len < 3) continue;
-        const target = cl[1].asText() orelse continue;
-        const class = cl[2].asText() orelse continue;
-        if (std.mem.eql(u8, head, "module")) {
-            modules.append(self.allocator, .{ .ref = target, .class = class }) catch return EvalError.OutOfMemory;
-        } else if (std.mem.eql(u8, head, "net-class")) {
-            nets.append(self.allocator, .{ .net = target, .class = class }) catch return EvalError.OutOfMemory;
-        } else if (std.mem.eql(u8, head, "part-role")) {
-            part_roles.append(self.allocator, .{ .ref = target, .role = class }) catch return EvalError.OutOfMemory;
-        } else {
-            self.warnFmt(child.span, "unknown (module-policy …) item ({s} …) — expected " ++
-                "(module …), (net-class …), (part-role …), or (require-decouple-binding)", .{head});
-        }
-    }
-}
-
 /// Parse a top-level `(rough …)` form into the design's rough-placement seed:
 /// an optional `(anchor "REF")` and a list of `(group "name" "REF"…)` priority
 /// tiers in authored (descending-priority) order. Member tokens stay raw
@@ -1688,170 +1529,6 @@ fn parseRoughGroup(
         .name = name,
         .members = members.toOwnedSlice(self.allocator) catch &.{},
     }) catch return EvalError.OutOfMemory;
-}
-
-/// Accumulator the design-block evaluator threads through `parseConstraints` so
-/// several `(constraints …)`/`(module …)` forms merge into one set on the block.
-const ConstraintAcc = struct {
-    proximity: std.ArrayListUnmanaged(env_mod.ProximityConstraint) = .empty,
-    power_rails: std.ArrayListUnmanaged(env_mod.PowerRailConstraint) = .empty,
-    net_lengths: std.ArrayListUnmanaged(env_mod.NetLengthConstraint) = .empty,
-    deprioritize: std.ArrayListUnmanaged([]const u8) = .empty,
-    keep_outs: std.ArrayListUnmanaged(env_mod.KeepoutConstraint) = .empty,
-    groups: std.ArrayListUnmanaged(env_mod.GroupConstraint) = .empty,
-    present: bool = false,
-
-    /// Freeze the accumulated lists into the immutable struct stored on the block.
-    fn build(self: *ConstraintAcc, alloc: std.mem.Allocator) env_mod.PlacementConstraints {
-        return .{
-            .proximity = self.proximity.toOwnedSlice(alloc) catch &.{},
-            .power_rails = self.power_rails.toOwnedSlice(alloc) catch &.{},
-            .net_lengths = self.net_lengths.toOwnedSlice(alloc) catch &.{},
-            .deprioritize = self.deprioritize.toOwnedSlice(alloc) catch &.{},
-            .keep_outs = self.keep_outs.toOwnedSlice(alloc) catch &.{},
-            .groups = self.groups.toOwnedSlice(alloc) catch &.{},
-            .present = self.present,
-        };
-    }
-};
-
-/// Map a `(priority low|med|high)` atom to the enum (default `med`).
-fn parseConstraintPriority(s: []const u8) env_mod.ConstraintPriority {
-    if (std.mem.eql(u8, s, "high")) return .high;
-    if (std.mem.eql(u8, s, "low")) return .low;
-    return .med;
-}
-
-/// Find the first child list `(head <val> …)` under `body` and return its
-/// `<val>` as literal text (atom or string), or null. Used to read the small
-/// keyword sub-forms of a constraint (`(role …)`, `(net …)`, `(priority …)`).
-fn subText(body: []const Node, head: []const u8) ?[]const u8 {
-    for (body) |n| {
-        const l = n.asList() orelse continue;
-        if (l.len >= 2 and std.mem.eql(u8, l[0].asAtom() orelse "", head)) return l[1].asText();
-    }
-    return null;
-}
-
-/// Like `subText` but returns the `<val>` as a number (for `(max <n> mm)` etc.).
-fn subNum(body: []const Node, head: []const u8) ?f64 {
-    for (body) |n| {
-        const l = n.asList() orelse continue;
-        if (l.len >= 2 and std.mem.eql(u8, l[0].asAtom() orelse "", head)) return l[1].asNumber();
-    }
-    return null;
-}
-
-/// True if `body` contains a bare `(head)` marker form (e.g. `(minimize)`).
-fn hasMarker(body: []const Node, head: []const u8) bool {
-    for (body) |n| {
-        const l = n.asList() orelse continue;
-        if (l.len >= 1 and std.mem.eql(u8, l[0].asAtom() orelse "", head)) return true;
-    }
-    return false;
-}
-
-/// Parse a top-level `(constraints …)` or `(module "name" …)` Phase-A constraint
-/// form (see docs/constraints_dsl.md). Refs/nets/pins are kept symbolic here —
-/// the optimizer's validator resolves them against the flattened netlist and
-/// rejects anything that doesn't exist. Unknown sub-forms (anchor, feedback-
-/// divider — metadata whose teeth are the explicit proximity/keep-out forms) are
-/// skipped. Several forms merge into `acc`.
-fn parseConstraints(self: *Evaluator, form_children: []const Node, acc: *ConstraintAcc) EvalError!void {
-    acc.present = true;
-    // `(module <name> …)` carries a leading name token; `(constraints …)` does
-    // not. Body starts at the first child that is itself a list (a sub-form).
-    var start: usize = 1;
-    while (start < form_children.len and form_children[start].asList() == null) start += 1;
-
-    for (form_children[start..]) |sub_node| {
-        const sub = sub_node.asList() orelse continue;
-        if (sub.len == 0) continue;
-        const head = sub[0].asAtom() orelse continue;
-
-        if (std.mem.eql(u8, head, "power-rail")) {
-            if (sub.len < 2) continue;
-            const label = sub[1].asText() orelse "";
-            const role_s = subText(sub[2..], "role") orelse "aux";
-            const role: env_mod.RailRole = if (std.mem.eql(u8, role_s, "input"))
-                .input
-            else if (std.mem.eql(u8, role_s, "output")) .output else .aux;
-            const net = subText(sub[2..], "net") orelse label;
-            acc.power_rails.append(self.allocator, .{ .label = label, .role = role, .net = net }) catch return EvalError.OutOfMemory;
-        } else if (std.mem.eql(u8, head, "proximity")) {
-            if (sub.len < 3) continue;
-            const ref = sub[1].asText() orelse continue;
-            // (to-pin <hub> <pin>)
-            var hub: []const u8 = "";
-            var pin: []const u8 = "";
-            for (sub[2..]) |n| {
-                const l = n.asList() orelse continue;
-                if (l.len >= 3 and std.mem.eql(u8, l[0].asAtom() orelse "", "to-pin")) {
-                    hub = l[1].asText() orelse "";
-                    pin = l[2].tokenText(self.allocator) orelse "";
-                }
-            }
-            if (hub.len == 0) continue;
-            acc.proximity.append(self.allocator, .{
-                .ref = ref,
-                .hub = hub,
-                .pin = pin,
-                .max_mm = subNum(sub[2..], "max") orelse 0,
-                .priority = parseConstraintPriority(subText(sub[2..], "priority") orelse "med"),
-            }) catch return EvalError.OutOfMemory;
-        } else if (std.mem.eql(u8, head, "net-length")) {
-            const net = subText(sub[1..], "net") orelse continue;
-            acc.net_lengths.append(self.allocator, .{
-                .net = net,
-                .minimize = hasMarker(sub[1..], "minimize") or subNum(sub[1..], "max") == null,
-                .max_mm = subNum(sub[1..], "max") orelse 0,
-                .priority = parseConstraintPriority(subText(sub[1..], "priority") orelse "high"),
-            }) catch return EvalError.OutOfMemory;
-        } else if (std.mem.eql(u8, head, "deprioritize")) {
-            // Refs as a nested list `(deprioritize (R3 R4) …)` or flat
-            // `(deprioritize R3 R4)`; a `(reason …)` sub-form is skipped.
-            if (sub.len >= 2 and sub[1].asList() != null) {
-                for (sub[1].asList().?) |r| {
-                    if (r.asText()) |ref| acc.deprioritize.append(self.allocator, ref) catch return EvalError.OutOfMemory;
-                }
-            } else {
-                for (sub[1..]) |r| {
-                    if (r.asList() != null) continue;
-                    if (r.asText()) |ref| acc.deprioritize.append(self.allocator, ref) catch return EvalError.OutOfMemory;
-                }
-            }
-        } else if (std.mem.eql(u8, head, "keep-out")) {
-            var net: []const u8 = "";
-            var part: []const u8 = "";
-            const net_sub = subText(sub[1..], "net");
-            const part_sub = subText(sub[1..], "part");
-            if (net_sub) |n| net = n;
-            if (part_sub) |p| part = p;
-            const from = subText(sub[1..], "from") orelse continue;
-            acc.keep_outs.append(self.allocator, .{
-                .net = net,
-                .part = part,
-                .from = from,
-                .min_mm = subNum(sub[1..], "min") orelse 0,
-                .reason = subText(sub[1..], "reason") orelse "",
-            }) catch return EvalError.OutOfMemory;
-        } else if (std.mem.eql(u8, head, "group")) {
-            if (sub.len < 2) continue;
-            const ref_list = sub[1].asList() orelse continue;
-            var refs: std.ArrayListUnmanaged([]const u8) = .empty;
-            for (ref_list) |r| if (r.asText()) |ref| refs.append(self.allocator, ref) catch return EvalError.OutOfMemory;
-            const style_s = subText(sub[2..], "style") orelse "cluster";
-            const style: env_mod.GroupStyle = if (std.mem.eql(u8, style_s, "row"))
-                .row
-            else if (std.mem.eql(u8, style_s, "column")) .column else .cluster;
-            acc.groups.append(self.allocator, .{
-                .refs = refs.toOwnedSlice(self.allocator) catch &.{},
-                .style = style,
-            }) catch return EvalError.OutOfMemory;
-        }
-        // Other forms (anchor, feedback-divider, symmetry, orient, lock, side)
-        // are metadata or not yet lowered — skipped, not an error.
-    }
 }
 
 /// The product of evaluating one `(stub …)` form: the metadata record plus a
@@ -2069,9 +1746,9 @@ fn relFromAtom(atom: []const u8) ?env_mod.PlaceRel {
     return null;
 }
 
-/// Map a placement side keyword (`left`/`right`/`top`/`bottom`) to a
-/// `PlacementSide`. Returns null for anything else so `parsePlacement` can skip
-/// an unrecognised side or `(switch …)` direction.
+/// Map a board edge keyword (`left`/`right`/`top`/`bottom`) to a
+/// `PlacementSide`. Returns null for anything else so `parseBoardSides` can skip
+/// an unrecognised head (`size`, `corners`).
 fn placementSideFromAtom(atom: []const u8) ?env_mod.PlacementSide {
     if (std.mem.eql(u8, atom, "left")) return .left;
     if (std.mem.eql(u8, atom, "right")) return .right;
@@ -2080,101 +1757,28 @@ fn placementSideFromAtom(atom: []const u8) ?env_mod.PlacementSide {
     return null;
 }
 
-/// Parse a top-level `(placement (anchor "REF") (left|right|top|bottom item…)…
-/// [(switch "REF" side)])` floorplan form into a `PlacementSpec`. Each side
-/// lists its parts in IC-outward order; an item is a bare ref (`"C1"`) or a
-/// rotation override `(rot <deg> "C1")`. `(switch "L1" right)` marks a power
-/// inductor straddling the SW node toward `side`. `(no-refine)` skips the
-/// post-pack polish; `(centered)` centers every side on the IC. Malformed sub-forms and
-/// unknown side keywords are skipped so a typo can't abort the build — the
-/// optimizer's `packSpec` resolves refs against the netlist and falls back to
-/// A standalone placement/floorplan form parsed from bare text (not a design
-/// file) — the propose-placement dry-run's input.
-pub const ParsedPlacementForm = struct { spec: env_mod.PlacementSpec, floorplan: bool };
-
-/// Parse the first `(placement …)` or `(floorplan …)` form in `text` — the
-/// propose-placement dry-run entry: an agent sends spec text and the server
-/// solves it against a request-local design copy, no file written. Null when
-/// the text holds no such form (or doesn't parse at all).
-pub fn parsePlacementText(self: *Evaluator, text: []const u8) EvalError!?ParsedPlacementForm {
-    const nodes = sexpr_parser.parse(self.allocator, text) catch return null;
-    for (nodes) |node| {
-        const lst = node.asList() orelse continue;
-        if (lst.len < 1) continue;
-        const head = lst[0].asAtom() orelse continue;
-        if (std.mem.eql(u8, head, "placement")) {
-            return .{ .spec = try parsePlacement(self, lst), .floorplan = false };
-        }
-        if (std.mem.eql(u8, head, "floorplan")) {
-            return .{ .spec = try parsePlacement(self, lst), .floorplan = true };
-        }
-    }
-    return null;
-}
-
-/// the force placer on any failure.
-fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_mod.PlacementSpec {
-    var anchor: []const u8 = "";
-    var refine = true;
-    var centered = false;
-    var auto_mode: env_mod.PlacementAuto = .unset;
+/// Parse the `(left|right|top|bottom …)` edge lists of a `(board …)` form into
+/// `PlacementSideSpec`s. Each list names the parts docked to that physical board
+/// edge; an item is a bare ref (`"usbc"`) or a rotation override `(rot <deg>
+/// "REF")`. Heads that aren't edge keywords (`size`, `corners`) are skipped here
+/// — `parseBoard` reads them. Unknown side keywords / malformed items are skipped
+/// so a typo can't abort the build.
+fn parseBoardSides(self: *Evaluator, form_children: []const Node) EvalError![]const env_mod.PlacementSideSpec {
     var sides: std.ArrayListUnmanaged(env_mod.PlacementSideSpec) = .empty;
-    var switches: std.ArrayListUnmanaged(env_mod.SwitchPlacement) = .empty;
     for (form_children[1..]) |child| {
         const c = child.asList() orelse continue;
         if (c.len < 1) continue;
         const head = c[0].asAtom() orelse continue;
-        // (no-refine) — skip the post-pack polish, showing the raw constructive pack.
-        if (std.mem.eql(u8, head, "no-refine")) {
-            refine = false;
-            continue;
-        }
-        // (centered) — center every side's lane on the IC, not opposite its rail pad.
-        if (std.mem.eql(u8, head, "centered")) {
-            centered = true;
-            continue;
-        }
-        // (auto "REF") — role-based constructive placement around the named
-        // central IC (the detected-role ladder). The ref IS the declared anchor.
-        // Engages for a module root only (composed into parents); inert on a
-        // top-level design and when no ref is named.
-        if (std.mem.eql(u8, head, "auto")) {
-            auto_mode = .on;
-            if (c.len >= 2) anchor = c[1].asString() orelse c[1].asAtom() orelse anchor;
-            continue;
-        }
-        // (manual) — opt out of role auto-placement; always use the force solver.
-        if (std.mem.eql(u8, head, "manual")) {
-            auto_mode = .off;
-            continue;
-        }
-        if (std.mem.eql(u8, head, "anchor")) {
-            if (c.len >= 2) anchor = c[1].asString() orelse c[1].asAtom() orelse anchor;
-            continue;
-        }
-        // (switch "REF" side) — power inductor straddling the SW node.
-        if (std.mem.eql(u8, head, "switch")) {
-            if (c.len < 3) continue;
-            const ref = c[1].asString() orelse c[1].asAtom() orelse continue;
-            const side_atom = c[2].asAtom() orelse c[2].asString() orelse continue;
-            const side = placementSideFromAtom(side_atom) orelse continue;
-            switches.append(self.allocator, .{ .ref = ref, .side = side }) catch return EvalError.OutOfMemory;
-            continue;
-        }
         const side = placementSideFromAtom(head) orelse continue;
         var items: std.ArrayListUnmanaged(env_mod.PlacementItem) = .empty;
         for (c[1..]) |item_node| {
-            // (rot <deg> "REF") rotation override, (net "NAME") membership rule,
-            // or a bare ref string/atom.
+            // (rot <deg> "REF") rotation override, or a bare ref string/atom.
             if (item_node.asList()) |il| {
                 const ihead = il[0].asAtom() orelse "";
                 if (il.len >= 3 and std.mem.eql(u8, ihead, "rot")) {
                     const deg = il[1].asNumber() orelse continue;
                     const ref = il[2].asString() orelse il[2].asAtom() orelse continue;
                     items.append(self.allocator, .{ .ref = ref, .rot = deg }) catch return EvalError.OutOfMemory;
-                } else if (il.len >= 2 and std.mem.eql(u8, ihead, "net")) {
-                    const net = il[1].asString() orelse il[1].asAtom() orelse continue;
-                    items.append(self.allocator, .{ .net = net }) catch return EvalError.OutOfMemory;
                 }
                 continue;
             }
@@ -2186,24 +1790,15 @@ fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_m
             .items = items.toOwnedSlice(self.allocator) catch &.{},
         }) catch return EvalError.OutOfMemory;
     }
-    return .{
-        .anchor = anchor,
-        .sides = sides.toOwnedSlice(self.allocator) catch &.{},
-        .switches = switches.toOwnedSlice(self.allocator) catch &.{},
-        .present = true,
-        .refine = refine,
-        .centered = centered,
-        .auto_mode = auto_mode,
-    };
+    return sides.toOwnedSlice(self.allocator) catch &.{};
 }
 
-/// Parse a top-level `(board …)` form: `(size W H)` outline (mm) + the same
-/// per-edge item lists as `(placement …)` (here the words name physical board
-/// edges) + `(corners "REF" …)` mounting hardware. The side lists are parsed
-/// by `parsePlacement` (which skips the heads it doesn't know); this adds the
-/// size and corners on top.
+/// Parse a top-level `(board …)` form: `(size W H)` outline (mm) + per-edge item
+/// lists (`(left|right|top|bottom …)`, the words naming physical board edges) +
+/// `(corners "REF" …)` mounting hardware. The edge lists are parsed by
+/// `parseBoardSides`; this adds the size and corners on top.
 fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.BoardSpec {
-    const ps = try parsePlacement(self, form_children);
+    const board_sides = try parseBoardSides(self, form_children);
     var w: f64 = 0;
     var h: f64 = 0;
     var corners: std.ArrayListUnmanaged(env_mod.PlacementItem) = .empty;
@@ -2228,7 +1823,7 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
     return .{
         .w = w,
         .h = h,
-        .sides = ps.sides,
+        .sides = board_sides,
         .corners = corners.toOwnedSlice(self.allocator) catch &.{},
         .present = true,
     };
@@ -2290,36 +1885,6 @@ test "design-block parses a (board ...) form" {
     try testing.expectEqual(@as(f64, 90), block.board.sides[1].items[0].rot.?);
     try testing.expectEqual(@as(usize, 4), block.board.corners.len);
     try testing.expectEqualStrings("MK3", block.board.corners[2].ref);
-}
-
-// spec: eval/design_block - placement-group expands into a placement-order (pins) and a group (cohesion)
-test "design-block parses a (placement-group …) into an order and a group" {
-    const a = std.heap.page_allocator;
-    const src =
-        \\(design-block "test"
-        \\  (placement-group "U1" "Analog 3V3"
-        \\    (near 3 "C_AVDD1") "C_BULK"))
-    ;
-    const nodes = try sexpr_parser.parse(a, src);
-    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
-    var eval = Evaluator.init(a, "");
-    defer eval.deinit();
-    var env = env_mod.Env.init(a, null);
-    defer env.deinit();
-    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
-    // It feeds the placement-order machinery (priority + near-pin pinning)…
-    try testing.expectEqual(@as(usize, 1), block.placement_order.len);
-    try testing.expectEqualStrings("U1", block.placement_order[0].hub);
-    try testing.expectEqual(@as(usize, 2), block.placement_order[0].entries.len);
-    try testing.expectEqualStrings("C_AVDD1", block.placement_order[0].entries[0].ref);
-    try testing.expectEqualStrings("3", block.placement_order[0].entries[0].pin);
-    try testing.expectEqualStrings("", block.placement_order[0].entries[1].pin); // bare ref → no pin
-    // …AND the group-cohesion machinery (named member set).
-    try testing.expectEqual(@as(usize, 1), block.groups.len);
-    try testing.expectEqualStrings("Analog 3V3", block.groups[0].name);
-    try testing.expectEqual(@as(usize, 2), block.groups[0].members.len);
-    try testing.expectEqualStrings("C_AVDD1", block.groups[0].members[0]);
-    try testing.expectEqualStrings("C_BULK", block.groups[0].members[1]);
 }
 
 // spec: eval/design_block - revision form captures id, date, and newest-first changelog

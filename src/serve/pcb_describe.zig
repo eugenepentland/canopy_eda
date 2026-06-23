@@ -153,7 +153,9 @@ pub fn writeDescribeJson(
     const b = p.breakdown;
     try w.print(",\"score\":{{\"objective\":{d:.1},\"hpwl\":{d:.1},\"loop_nh\":{d:.1}}}", .{ b.objective, b.hpwl, b.loop_nh });
     if (spec) |sp| {
-        try w.print(",\"placement\":{{\"source\":\"{s}\",\"unplaced\":[", .{if (sp.used_spec) "spec" else "force"});
+        // Parts the force/board solve left staged below the board, and the ones
+        // `autofillUnlisted` pulled back out beside their pads.
+        try w.writeAll(",\"placement\":{\"unplaced\":[");
         for (sp.unplaced, 0..) |ref, i| {
             if (i > 0) try w.writeAll(",");
             try pcb_layout_page.writeJsonStr(w, ref);
@@ -162,16 +164,6 @@ pub fn writeDescribeJson(
         for (sp.auto_filled, 0..) |ref, i| {
             if (i > 0) try w.writeAll(",");
             try pcb_layout_page.writeJsonStr(w, ref);
-        }
-        try w.writeAll("],\"unresolved\":[");
-        for (sp.unresolved, 0..) |ref, i| {
-            if (i > 0) try w.writeAll(",");
-            try pcb_layout_page.writeJsonStr(w, ref);
-        }
-        try w.writeAll("],\"composed\":[");
-        for (sp.composed, 0..) |slug, i| {
-            if (i > 0) try w.writeAll(",");
-            try pcb_layout_page.writeJsonStr(w, slug);
         }
         try w.writeAll("]}");
     }
@@ -410,16 +402,8 @@ fn writeLint(
     const sev_err = "error";
     const sev_warn = "warn";
     if (spec) |sp| {
-        // `used_spec == false` with composed macros isn't a fallback — the
-        // board never had a design-level spec; its modules composed instead.
-        if (!sp.used_spec and sp.composed.len == 0) {
-            try lintItem(w, &first, "fell-back-to-auto", sev_err, &.{}, "a placement/floorplan form was authored but its constructive pack failed; the force placer arranged the board instead");
-        }
-        if (sp.unresolved.len > 0) {
-            try lintItem(w, &first, "unresolved-name", sev_err, sp.unresolved, "spec names that match no part or sub-block (typo, or renamed since the spec was written)");
-        }
         if (sp.unplaced.len > 0) {
-            try lintItem(w, &first, "unplaced", sev_err, sp.unplaced, "parts still in the staging band below the board; list them in the spec or free up room");
+            try lintItem(w, &first, "unplaced", sev_err, sp.unplaced, "parts still in the staging band below the board; free up room");
         }
     }
     if (wrong_side.len > 0) {
@@ -723,7 +707,7 @@ test "writeDescribeJson emits parts with sides, nets and hub pad map" {
         .generated = true,
     };
     var aw: std.Io.Writer.Allocating = .init(alloc);
-    try writeDescribeJson(&aw.writer, alloc, p, .{ .used_spec = true, .unplaced = &.{} }, null, "t", "Test");
+    try writeDescribeJson(&aw.writer, alloc, p, .{ .unplaced = &.{} }, null, "t", "Test");
     const out = aw.written();
     // The cap is left of the anchor IC, on VIN+GND, and the hub's VIN pad
     // resolves to the left package edge.
@@ -731,7 +715,6 @@ test "writeDescribeJson emits parts with sides, nets and hub pad map" {
     try std.testing.expect(std.mem.indexOf(u8, out, "\"side\":\"left\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"nets\":[\"VIN\",\"GND\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"VIN\",\"edges\":[\"left\"],\"pads\":1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"source\":\"spec\"") != null);
     // Module-policy facts: VIN reads as an input rail and C9 as the input cap.
     try std.testing.expect(std.mem.indexOf(u8, out, "\"module_policy\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"VIN\",\"class\":\"input_rail\"") != null);

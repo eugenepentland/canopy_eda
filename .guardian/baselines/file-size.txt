@@ -1,2 +1,1 @@
 # guardian-snapshot v1
-src/placement/optimizer.zig: 10666 lines (limit: 10000)

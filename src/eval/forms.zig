@@ -129,14 +129,8 @@ pub const ScopeForm = enum {
     kicad_pcb,
     stub,
     layout,
-    placement_order,
-    placement_group,
-    constraints,
-    placement,
-    floorplan,
     board,
     replicate,
-    module_policy,
     revision,
     rough,
 
@@ -177,14 +171,8 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     // `diagram-layout` is the canonical (and only) name for the schematic
     // block-diagram arrangement; the word "layout" alone means PCB placement.
     .{ "diagram-layout", .layout },
-    .{ "placement-order", .placement_order },
-    .{ "placement-group", .placement_group },
-    .{ "constraints", .constraints },
-    .{ "placement", .placement },
-    .{ "floorplan", .floorplan },
     .{ "board", .board },
     .{ "replicate", .replicate },
-    .{ "module-policy", .module_policy },
     .{ "revision", .revision },
     .{ "rough", .rough },
 });
@@ -472,10 +460,10 @@ pub const scope_form_docs = blk: {
         .summary = "Visual group annotation rendered in the schematic.",
     } };
     t[@intFromEnum(ScopeForm.sub_block)] = .{ .scope = tl, .doc = .{
-        .syntax = "(sub-block \"name\" (module-call args…) [(reflow)])",
-        .summary = "Instantiate a parameterised module inside the design. When the module's body " ++
-            "carries its own `(placement …)` spec the parent's PCB solve docks it as a rigid macro; " ++
-            "a `(reflow)` marker opts this instantiation out (parts re-flow freely).",
+        .syntax = "(sub-block \"name\" (module-call args…))",
+        .summary = "Instantiate a parameterised module inside the design. Its parts flatten into " ++
+            "the netlist under the sub-block path prefix and the PCB solver places them with the " ++
+            "rest of the board.",
     } };
     t[@intFromEnum(ScopeForm.verifies)] = .{ .scope = tl, .doc = .{
         .syntax = "(verifies (req \"REF\" REQID) [rationale])",
@@ -510,55 +498,7 @@ pub const scope_form_docs = blk: {
         .syntax = "(diagram-layout (anchor \"name\") (place \"name\" (right-of|left-of|above|below \"ref\"))…)",
         .summary = "Position blocks relative to one another on the SCHEMATIC block diagram " ++
             "(Mermaid-style, free-floating) — nothing to do with PCB placement, which is " ++
-            "`(placement …)` / `(floorplan …)`.",
-    } };
-    t[@intFromEnum(ScopeForm.placement_order)] = .{ .scope = tl, .doc = .{
-        .syntax = "(placement-order \"HUB\" \"REF\"… | (near <pin> \"REF\")…)",
-        .summary = "Order the passives around a hub for PCB auto-placement (first = highest priority); (near …) also pins which hub pad a cap's loop targets.",
-    } };
-    t[@intFromEnum(ScopeForm.placement_group)] = .{ .scope = tl, .doc = .{
-        .syntax = "(placement-group \"HUB\" \"NAME\" \"REF\"… | (near <pin> \"REF\")…)",
-        .summary = "A named cluster of passives around a hub: (placement-order …) priority + " ++
-            "(near …) pin pinning PLUS (group …) cohesion + hub-side zoning, so the members " ++
-            "pack as one unit beside the hub pins they serve.",
-    } };
-    t[@intFromEnum(ScopeForm.constraints)] = .{ .scope = tl, .doc = .{
-        .syntax = "(constraints \"name\" " ++
-            "(power-rail L (role input) (net N)) (proximity REF (to-pin HUB PIN) (max n mm) (priority …)) " ++
-            "(net-length (net N) (minimize) (priority …)) (deprioritize (REF…)) " ++
-            "(keep-out (net N)|(part REF) (from REF) (min n mm)) (group (REF…) (style …)) …)",
-        .summary = "Phase-A PCB placement constraints (circuit intent the auto-placer can't infer): " ++
-            "rail roles, proximity pulls, weighted nets, deprioritized straps, keep-outs, groups. " ++
-            "Refs/nets/pins validated against the netlist. See docs/constraints_dsl.md.",
-    } };
-    t[@intFromEnum(ScopeForm.placement)] = .{ .scope = tl, .doc = .{
-        .syntax = "(placement (anchor \"REF\") " ++
-            "(left|right|top|bottom \"REF\"… | (rot N \"REF\") | (net \"NAME\")…)… " ++
-            "[(switch \"REF\" side)] [(no-refine)] [(centered)] | (auto \"REF\") | (manual))",
-        .summary = "Agent-authored PCB floorplan: declare each part's side of the main IC, " ++
-            "the order along that edge, and an optional rotation; the solver legalizes it to " ++
-            "exact coordinates (the manual twin of the automatic switcher floorplan). " ++
-            "A (net \"VIN\") item is a membership rule: every not-otherwise-claimed part with " ++
-            "a pad on that net joins the side (smallest first) — survives part additions. " ++
-            "Parts no side lists are pin-hug auto-filled beside their placed pads. " ++
-            "(no-refine) shows the raw constructive pack (flush, symmetric); " ++
-            "(centered) centers every side on the IC instead of opposite its rail pad. " ++
-            "(auto \"REF\") places the block constructively around the named central IC from " ++
-            "its detected roles (critical-loop caps docked at their supply pads smallest-first, " ++
-            "then the rest) and composes it into parent boards — engages for a MODULE body only " ++
-            "(a full design always force-solves its arrangement, laying out each module it " ++
-            "instantiates and composing them in); (manual) and the default use the force solver.",
-    } };
-    t[@intFromEnum(ScopeForm.floorplan)] = .{ .scope = tl, .doc = .{
-        .syntax = "(floorplan (anchor \"SUB\") " ++
-            "(left|right|top|bottom \"SUB\"… | (rot N \"SUB\")…)…)",
-        .summary = "Design-level macro floorplan: the same side/order grammar as (placement …) " ++
-            "but the names are (sub-block …) slugs. Each listed sub-block is solved as its own " ++
-            "board (its module-level (placement …) spec composes) and docked as a RIGID macro " ++
-            "on its side of the anchor sub-block, in listed order; (rot N \"SUB\") turns the " ++
-            "whole macro in quarter steps. Top-level parts outside any sub-block are pin-hug " ++
-            "auto-filled beside their placed pads; sub-blocks the floorplan doesn't list stay " ++
-            "in the staging band and are reported unplaced.",
+            "the force / rough solver on /pcb-layout.",
     } };
     t[@intFromEnum(ScopeForm.board)] = .{ .scope = tl, .doc = .{
         .syntax = "(board (size W H) " ++
@@ -569,28 +509,14 @@ pub const scope_form_docs = blk: {
             "not sides of an anchor), slid along the edge toward the pads they connect to; " ++
             "(rot N \"REF\") overrides the default pads-inward rotation. (corners …) pins " ++
             "mounting hardware at the four corners (TL, TR, BR, BL in authored order). " ++
-            "The interior placement (force, (placement …), or (floorplan …)) is centered in " ++
-            "the outline; the rendered views draw the outline rectangle.",
+            "The force-solved interior placement is centered in the outline; the rendered " ++
+            "views draw the outline rectangle.",
     } };
     t[@intFromEnum(ScopeForm.replicate)] = .{ .scope = tl, .doc = .{
         .syntax = "(replicate N \"name~D\" (module-call args…))",
         .summary = "Instantiate N copies of a module as sub-blocks: ~D in the name template and " ++
             "in bare call-arg atoms is replaced by the 1-based index. Requires (hierarchical-ids); " ++
             "the form carries one auto-minted (id …) and each copy's sub-block uuid derives from it + the substituted name.",
-    } };
-    t[@intFromEnum(ScopeForm.module_policy)] = .{ .scope = tl, .doc = .{
-        .syntax = "(module-policy (module \"REF\" buck|ldo|mcu|rf_amp|analog_afe|generic)… " ++
-            "(net-class \"NAME\" ground|power|input_rail|switch_node|clock|rf|feedback|analog|control|signal)… " ++
-            "(part-role \"REF\" input_cap|decoupling_cap|bulk_cap|feedback_divider|matching_element|anchor_ic|other)… " ++
-            "(require-decouple-binding))",
-        .summary = "Override the best-effort module-policy detector (PCB layout): pin a hub IC's " ++
-            "ModuleClass, a net's routing-criticality NetClass, or a passive's PartRole when the " ++
-            "name heuristics read it wrong (e.g. an integrated buck with no discrete inductor that " ++
-            "reads as generic, or a decoupling cap miscategorised). " ++
-            "Applied after detection — the author has the last word. (require-decouple-binding) " ++
-            "promotes the decouple-unbound layout lint to a hard error for this design (every HF " ++
-            "decoupling cap on a multi-supply-pad rail must declare its pin via (decouples …)). " ++
-            "Surfaced in /api/pcb-describe; export the detected policy as a start with /api/module-policy.",
     } };
     t[@intFromEnum(ScopeForm.rough)] = .{ .scope = tl, .doc = .{
         .syntax = "(rough [(anchor \"REF\")] (group \"name\" \"REF\"…)…)",

@@ -1356,8 +1356,7 @@ fn readDesignSource(allocator: std.mem.Allocator, project_dir: []const u8, name:
 }
 
 /// Snapshot → write → re-evaluate → bump the live version. The canonical
-/// design-file mutation tail, shared by the granular edits here and the
-/// PCB page's placement-spec save (`placement_spec.specSaveApi`).
+/// design-file mutation tail, shared by the granular edits here.
 pub fn writeAndRebuild(
     allocator: std.mem.Allocator,
     project_dir: []const u8,

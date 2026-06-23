@@ -1,7 +1,7 @@
 //! Leak-regression tests for the PCB placement / router / DRC area.
 //!
 //! Strategy (per the audit brief):
-//!   • module_policy.analyze / .exportText and layout_lint.lint are honest
+//!   • module_policy.analyze and layout_lint.lint are honest
 //!     OWNED-RETURN functions — they allocate result slices the caller frees
 //!     (via `deinit` / `freeFindings` / `free`) and free all their own internal
 //!     scratch. They are driven here directly on `std.testing.allocator`, the
@@ -27,11 +27,9 @@ const module_policy = @import("../placement/module_policy.zig");
 const layout_lint = @import("../placement/layout_lint.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
-const placement_spec = @import("../serve/placement_spec.zig");
 const pcb_describe = @import("../serve/pcb_describe.zig");
 const geometry = @import("../placement/geometry.zig");
 const export_kicad = @import("../export_kicad.zig");
-const env = @import("../eval/env.zig");
 
 const NetClass = module_policy.NetClass;
 const PartRole = module_policy.PartRole;
@@ -95,54 +93,6 @@ test "leak: module_policy.analyze frees scratch and the result deinits clean" {
     try testing.expectEqual(@as(usize, 2), policy.net_class.len);
     try testing.expectEqual(@as(usize, 3), policy.part_role.len);
     try testing.expectEqual(@as(usize, 1), policy.modules.len);
-}
-
-// leak-audit: analyze() with author overrides walks the override slices and
-// re-tags in place — no extra allocation, but exercises that path under the
-// detector so an override-time leak would surface.
-test "leak: module_policy.analyze with overrides leaks nothing" {
-    var hub_pads = [_]geometry.Pad{pad1()};
-    var pas_pads = [_]geometry.Pad{pad1()};
-    var parts = [_]optimizer.Part{
-        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &hub_pads, .fallback = false },
-        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pas_pads, .fallback = false, .value = "100nF" },
-    };
-    const rail = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "C1", .pin = "1" } };
-    const nets = [_]export_kicad.FlatNet{.{ .name = "MY_RAIL", .pins = &rail }};
-    const overrides = env.PolicyOverrides{
-        .nets = &.{.{ .net = "MY_RAIL", .class = "input_rail" }},
-        .modules = &.{.{ .ref = "U1", .class = "ldo" }},
-    };
-    var p = mkPlacement(&parts, &nets, &.{}, &.{});
-    p.policy_overrides = overrides;
-
-    var policy = try module_policy.analyze(testing.allocator, p);
-    defer policy.deinit(testing.allocator);
-    try testing.expectEqual(NetClass.input_rail, policy.net_class[0]);
-}
-
-// leak-audit: exportText() allocates+deinits an internal ModulePolicy and builds
-// the text through a std.Io.Writer.Allocating (errdefer-guarded). The returned
-// bytes are owned by the caller; freeing them on testing.allocator catches any
-// leaked internal policy slice or writer buffer.
-test "leak: module_policy.exportText returns owned text, frees internals" {
-    var hub_pads = [_]geometry.Pad{pad1()};
-    var pas_pads = [_]geometry.Pad{pad1()};
-    var parts = [_]optimizer.Part{
-        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &hub_pads, .fallback = false },
-        .{ .ref_des = "L1", .kind = .passive, .hw = 1, .hh = 1, .pads = &pas_pads, .fallback = false },
-    };
-    const vin = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "L1", .pin = "1" } };
-    const sw = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "L1", .pin = "2" } };
-    const nets = [_]export_kicad.FlatNet{
-        .{ .name = "VIN", .pins = &vin },
-        .{ .name = "SW", .pins = &sw },
-    };
-    const p = mkPlacement(&parts, &nets, &.{}, &.{});
-
-    const text = (try module_policy.exportText(testing.allocator, p)).?;
-    defer testing.allocator.free(text);
-    try testing.expect(std.mem.indexOf(u8, text, "(module-policy") != null);
 }
 
 // ── layout_lint (owned-return, idiom 1) ──────────────────────────────────────
@@ -350,48 +300,6 @@ test "leak: pcb_describe.writeDescribeJson honors the arena contract" {
     const p = mkPlacement(&parts, &nets, &instances, &.{});
 
     var aw: std.Io.Writer.Allocating = .init(arena);
-    try pcb_describe.writeDescribeJson(&aw.writer, arena, p, .{ .used_spec = true, .unplaced = &.{} }, null, "t", "Test");
+    try pcb_describe.writeDescribeJson(&aw.writer, arena, p, .{ .unplaced = &.{} }, null, "t", "Test");
     try testing.expect(aw.written().len > 0);
-}
-
-// leak-audit: placement_spec.buildSpecSexp allocates a skip HashMap, a
-// use_origin bool slice, four per-side ArrayLists, and the output writer — all
-// on the passed allocator. The HashMap + lists are defer-freed; use_origin is
-// returned-and-freed by computeUseOrigin's caller. Drive on an arena to confirm
-// the path is escape-free.
-test "leak: placement_spec.buildSpecSexp stays within the arena" {
-    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_inst.deinit();
-    const arena = arena_inst.allocator();
-
-    var pads = [_]geometry.Pad{
-        .{ .number = "1", .x = -1.8, .y = 0, .w = 0.6, .h = 0.6 },
-        .{ .number = "2", .x = 1.8, .y = 0, .w = 0.6, .h = 0.6 },
-    };
-    var parts = [_]optimizer.Part{
-        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
-        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &pads, .fallback = false, .x = -3.3, .y = 0 },
-        .{ .ref_des = "C2", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &pads, .fallback = false, .x = -7.5, .y = 0 },
-    };
-    const instances = [_]export_kicad.FlatInstance{
-        .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "", .properties = &.{}, .uuid = "", .origin_key = "U1" },
-        .{ .ref_des = "C1", .component = "cap", .value = "", .footprint = "", .properties = &.{}, .uuid = "", .origin_key = "C_IN" },
-        .{ .ref_des = "C2", .component = "cap", .value = "", .footprint = "", .properties = &.{}, .uuid = "", .origin_key = "C_BULK" },
-    };
-    const p = optimizer.Placement{
-        .parts = &parts,
-        .links = &.{},
-        .loops = &.{},
-        .stubs = &.{},
-        .instances = &instances,
-        .nets = &.{},
-        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
-        .minx = -9,
-        .miny = -4,
-        .maxx = 4,
-        .maxy = 4,
-        .generated = true,
-    };
-    const sexp = (try placement_spec.buildSpecSexp(arena, p, null)).?;
-    try testing.expect(std.mem.indexOf(u8, sexp, "(anchor \"U1\")") != null);
 }

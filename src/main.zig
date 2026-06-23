@@ -502,7 +502,6 @@ test {
     _ = @import("serve/edit_assist.zig");
     _ = @import("serve/design_diff.zig");
     _ = @import("serve/datasheet_attach.zig");
-    _ = @import("serve/placement_spec.zig");
     _ = @import("serve/page_cache.zig");
     _ = @import("deflate.zig");
     _ = @import("png.zig");
