@@ -31,6 +31,8 @@ pub fn evalBuiltinOp(op: Builtin, args: []const Value) BuiltinError!Value {
         .and_ => logicAnd(args),
         .or_ => logicOr(args),
         .not_ => logicNot(args),
+        .e96 => eSeries(args, &E96),
+        .e24 => eSeries(args, &E24),
     };
 }
 
@@ -109,6 +111,54 @@ fn logicNot(args: []const Value) BuiltinError!Value {
     return .{ .boolean = !args[0].isTruthy() };
 }
 
+// ── Standard resistor / capacitor E-series snapping ─────────────────────
+// Snap an arbitrary value (e.g. a feedback resistor computed from a target
+// voltage) to the nearest E96 (1%) or E24 (5%) decade value, so a module
+// parameterised by `(vout X)` emits a buildable BOM part instead of an
+// off-grid value like 400k. Decade is found by scaling into [1,10); the
+// 10.0 top edge (= 1.0 of the next decade) is considered so 9.9 → 10.
+const E96 = [_]f64{
+    1.00, 1.02, 1.05, 1.07, 1.10, 1.13, 1.15, 1.18, 1.21, 1.24, 1.27, 1.30,
+    1.33, 1.37, 1.40, 1.43, 1.47, 1.50, 1.54, 1.58, 1.62, 1.65, 1.69, 1.74,
+    1.78, 1.82, 1.87, 1.91, 1.96, 2.00, 2.05, 2.10, 2.15, 2.21, 2.26, 2.32,
+    2.37, 2.43, 2.49, 2.55, 2.61, 2.67, 2.74, 2.80, 2.87, 2.94, 3.01, 3.09,
+    3.16, 3.24, 3.32, 3.40, 3.48, 3.57, 3.65, 3.74, 3.83, 3.92, 4.02, 4.12,
+    4.22, 4.32, 4.42, 4.53, 4.64, 4.75, 4.87, 4.99, 5.11, 5.23, 5.36, 5.49,
+    5.62, 5.76, 5.90, 6.04, 6.19, 6.34, 6.49, 6.65, 6.81, 6.98, 7.15, 7.32,
+    7.50, 7.68, 7.87, 8.06, 8.25, 8.45, 8.66, 8.87, 9.09, 9.31, 9.53, 9.76,
+};
+const E24 = [_]f64{
+    1.0, 1.1, 1.2, 1.3, 1.5, 1.6, 1.8, 2.0, 2.2, 2.4, 2.7, 3.0,
+    3.3, 3.6, 3.9, 4.3, 4.7, 5.1, 5.6, 6.2, 6.8, 7.5, 8.2, 9.1,
+};
+
+fn eSeries(args: []const Value, series: []const f64) BuiltinError!Value {
+    if (args.len != 1) return BuiltinError.ArityError;
+    const x = args[0].asNumber() orelse return BuiltinError.TypeError;
+    if (x <= 0) return .{ .number = x };
+    var m = x;
+    var decade: f64 = 1.0;
+    while (m >= 10.0) {
+        m /= 10.0;
+        decade *= 10.0;
+    }
+    while (m < 1.0) {
+        m *= 10.0;
+        decade /= 10.0;
+    }
+    var best = series[0];
+    var best_err = @abs(m - series[0]);
+    for (series) |v| {
+        const e = @abs(m - v);
+        if (e < best_err) {
+            best_err = e;
+            best = v;
+        }
+    }
+    if (@abs(m - 10.0) < best_err) return .{ .number = decade * 10.0 };
+    return .{ .number = decade * best };
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 // spec: eval/builtins - Evaluates arithmetic operations on numeric values
@@ -152,4 +202,14 @@ test "logic operations" {
     try std.testing.expectEqual(true, (try evalBuiltin("or", &or_args)).asBool().?);
     const not_args = [_]Value{t};
     try std.testing.expectEqual(false, (try evalBuiltin("not", &not_args)).asBool().?);
+}
+
+// spec: eval/builtins - Snaps a value to the nearest standard E-series resistor value
+test "e-series snapping" {
+    const a = [_]Value{.{ .number = 400000.0 }};
+    try std.testing.expectApproxEqAbs(@as(f64, 402000.0), (try evalBuiltin("e96", &a)).asNumber().?, 1.0);
+    const c = [_]Value{.{ .number = 33000.0 }};
+    try std.testing.expectApproxEqAbs(@as(f64, 33000.0), (try evalBuiltin("e24", &c)).asNumber().?, 1.0);
+    const z = [_]Value{.{ .number = 0.0 }};
+    try std.testing.expectEqual(@as(f64, 0.0), (try evalBuiltin("e96", &z)).asNumber().?);
 }

@@ -48,6 +48,8 @@ Arithmetic, comparison, and logic operators. Arguments are evaluated left-to-rig
 | `(and a b)` | Boolean and (eager — both args evaluated). |
 | `(or a b)` | Boolean or (eager — both args evaluated). |
 | `(not a)` | Boolean negation. |
+| `(e96 r)` | Snap a resistance/number to the nearest E96 (1%) standard value. |
+| `(e24 r)` | Snap a resistance/number to the nearest E24 (5%) standard value. |
 
 ## String formatting directives
 
