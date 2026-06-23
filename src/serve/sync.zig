@@ -3241,20 +3241,21 @@ fn finishOffBoardBlock(
 }
 
 /// Build the `sub_circuits` JSON array advertised in the dry-run response: one
-/// entry per group that has at least one freshly-added part NAMED by the saved
-/// whole-design layout (only those can be seeded, so only those get a checkbox).
+/// entry per group whose freshly-added parts a saved layout can seed — counted
+/// through the SAME source the Confirm path will use (`subCircuitSource`): a
+/// sub-block reads its OWN starred module layout (`lib/modules/<m>.layouts.json`,
+/// keyed by `origin_key`), a section reads the whole-design cache (keyed by
+/// ref-des). So a design whose sub-modules are starred lists them even when it
+/// has no whole-design layout of its own — previously this required a
+/// whole-design layout and silently dropped every module-seedable sub-block.
 /// Each entry carries the group `name`, the seedable `parts` count, the chosen
-/// `anchor` ref (or null), and whether that anchor is already `on_board`. Empty
-/// array when there's no saved layout. Computed from the still-populated
+/// `anchor` ref (or null), and whether that anchor is already `on_board`. A
+/// group with no seedable source is skipped. Computed from the still-populated
 /// `pending_adds` after `emitStagedAdds`. Result lives on `arena`.
 fn buildSubCircuitsJson(arena: std.mem.Allocator, d: *DiffContext) ![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(arena);
     try w.writeByte('[');
-    const layout = d.premade_layout orelse {
-        try w.writeByte(']');
-        return buf.items;
-    };
     const adds = d.pending_adds.items;
     var buckets = std.StringHashMap(std.ArrayListUnmanaged(usize)).init(arena);
     var order: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -3262,9 +3263,14 @@ fn buildSubCircuitsJson(arena: std.mem.Allocator, d: *DiffContext) ![]const u8 {
     var emitted_first = true;
     for (order.items) |sec| {
         const idxs = (buckets.get(sec) orelse continue).items;
+        // Resolve this group's pose source exactly as the seeder will, then
+        // count how many of its adds that source names. No source (no module
+        // layout and no whole-design cache) => nothing to seed => no checkbox.
+        const src = (try subCircuitSource(d, sec)) orelse continue;
         var named: usize = 0;
         for (idxs) |idx| {
-            if (layout.get(adds[idx].inst.ref_des) != null) named += 1;
+            const key = if (src.is_module) adds[idx].inst.origin_key else adds[idx].inst.ref_des;
+            if (src.map.get(key) != null) named += 1;
         }
         if (named == 0) continue;
         const anchor = d.group_anchors.get(sec);
