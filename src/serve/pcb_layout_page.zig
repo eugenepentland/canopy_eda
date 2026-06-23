@@ -896,9 +896,9 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
     try w.writeAll(NAME_OPEN);
     try writeJsonStr(w, name);
     try w.print(",\"generated\":{s},", .{if (p.generated) "true" else "false"});
-    try w.print("\"params\":{{\"loop_w\":{d},\"w_align\":{d},\"w_congest\":{d},\"cap_w_max\":{d},\"grid\":{s},\"compact\":\"{s}\"}},", .{
-        params.loop_w,                                   optimizer.effAlignW(params),   params.w_congest, params.cap_w_max,
-        if (params.grid_courtyards) "true" else "false", @tagName(params.compact_mode),
+    try w.print("\"params\":{{\"loop_w\":{d},\"w_align\":{d},\"w_congest\":{d},\"cap_w_max\":{d},\"grid\":{s}}},", .{
+        params.loop_w,                                   optimizer.effAlignW(params), params.w_congest, params.cap_w_max,
+        if (params.grid_courtyards) "true" else "false",
     });
     try w.print("\"score\":{{\"hpwl_mm\":{d},\"loop_mm\":{d},\"loop_caps\":{d}}},", .{ p.score.hpwl_mm, p.score.loop_mm, p.score.loop_caps });
     try w.writeAll("\"breakdown\":");
@@ -1069,7 +1069,7 @@ fn regenThread(job: *RegenJob) void {
 /// POST /api/pcb-regen-start/:name — kick off a live (background) optimizer run
 /// and return its generation id. The browser then polls /api/pcb-progress/:name
 /// to animate the board converging and reloads when the run finishes. Honours the
-/// same tuning query (?w_align / loop_w / w_congest / grid / compact) as ?regen=1.
+/// same tuning query (?w_align / loop_w / w_congest / grid) as ?regen=1.
 /// If a run for this design is already in flight, its generation is returned and
 /// no second solver is spawned (one per design at a time).
 pub fn pcbRegenStartApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
@@ -2007,18 +2007,14 @@ fn parseCacheParams(po: std.json.Value, p: *optimizer.Params) void {
     if (po.object.get("w_congest")) |v| p.w_congest = jsonNum(v);
     if (po.object.get("cap_w_max")) |v| p.cap_w_max = jsonNum(v);
     if (po.object.get("grid")) |v| p.grid_courtyards = v == .bool and v.bool;
-    if (po.object.get("compact")) |v| {
-        if (v == .string) p.compact_mode = parseCompactMode(v.string);
-    }
-    // Parsed after `compact` (it depends on the mode): a negative value is the
-    // auto sentinel current builds write; 0.5 under tidiness is the legacy
-    // shipped default — the tidiness term has since been pair-normalized (its
-    // weight scale moved to W_ALIGN_TIDINESS), so re-pinning the old number
+    // A negative `w_align` is the auto sentinel current builds write; 0.5 is the
+    // legacy shipped default — the tidiness term has since been pair-normalized
+    // (its weight scale moved to W_ALIGN_TIDINESS), so re-pinning the old number
     // would silently apply a ~5× weaker alignment than either era intended.
     // Both resolve to auto; anything else was a deliberate tuning override.
     if (po.object.get("w_align")) |v| {
         const a = jsonNum(v);
-        const legacy_default = p.compact_mode == .tidiness and a == 0.5;
+        const legacy_default = a == 0.5;
         if (a >= 0 and !legacy_default) p.w_align = a;
     }
 }
@@ -2535,9 +2531,9 @@ fn writeAutoCache(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
 /// the weights so the controls reflect what produced the layout, the parts
 /// for the cache.
 fn writeCacheSlotJson(w: *std.Io.Writer, c: CacheSlot) std.Io.Writer.Error!void {
-    try w.print("{{\"params\":{{\"loop_w\":{d},\"w_align\":{d},\"w_congest\":{d},\"cap_w_max\":{d},\"grid\":{s},\"compact\":\"{s}\"}},", .{
-        c.params.loop_w,                                   c.params.w_align,                c.params.w_congest, c.params.cap_w_max,
-        if (c.params.grid_courtyards) "true" else "false", @tagName(c.params.compact_mode),
+    try w.print("{{\"params\":{{\"loop_w\":{d},\"w_align\":{d},\"w_congest\":{d},\"cap_w_max\":{d},\"grid\":{s}}},", .{
+        c.params.loop_w,                                   c.params.w_align, c.params.w_congest, c.params.cap_w_max,
+        if (c.params.grid_courtyards) "true" else "false",
     });
     try w.writeAll(PARTS_OPEN);
     for (c.parts orelse &[_]PartPose{}, 0..) |pt, i| {
@@ -2586,10 +2582,6 @@ fn parseTuning(req: *httpz.Request) Tuning {
         p.grid_courtyards = !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false"));
         tuned = true;
     }
-    if (q.get("compact")) |v| {
-        p.compact_mode = parseCompactMode(v);
-        tuned = true;
-    }
     // Experimental: allow drawn courtyards to overlap their clearance bands by N mm
     // (default 0 = touch only, no overlap). See Params.courtyard_overlap.
     if (q.get("court_overlap")) |v| {
@@ -2624,13 +2616,6 @@ fn parseTuning(req: *httpz.Request) Tuning {
         if (p.rough) tuned = true;
     }
     return .{ .params = p, .tuned = tuned, .regen = regen or tuned };
-}
-
-/// Map the `compact` query/cache string to a `CompactMode` (default `.tidiness`).
-fn parseCompactMode(s: []const u8) optimizer.CompactMode {
-    if (std.mem.eql(u8, s, "bbox")) return .bbox;
-    if (std.mem.eql(u8, s, "protrusion")) return .protrusion;
-    return .tidiness;
 }
 
 fn parseF(s: []const u8, dflt: f64) f64 {
@@ -3007,20 +2992,8 @@ fn writeHeatLegend(w: *std.Io.Writer) std.Io.Writer.Error!void {
 /// Apply button (wired in BOARD_JS to reload with the values as query params,
 /// which forces a regenerate). Values reflect the weights behind the layout.
 fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!void {
-    const sel = struct {
-        fn s(active: bool) []const u8 {
-            return if (active) " selected" else "";
-        }
-    }.s;
-    const m = params.compact_mode;
     try w.writeAll("<div class=\"pcb-tune pcb-panel\" id=\"panel-tune\" hidden><span class=\"tune-h\">Tuning</span>");
-    try w.print("<label title=\"placement regularizer\">Compact <select id=\"t-compact\">" ++
-        "<option value=\"tidiness\"{s}>tidiness (row/col)</option>" ++
-        "<option value=\"bbox\"{s}>bbox area</option>" ++
-        "<option value=\"protrusion\"{s}>protrusion</option></select></label>", .{
-        sel(m == .tidiness), sel(m == .bbox), sel(m == .protrusion),
-    });
-    try w.print("<label>Compact w <input id=\"t-align\" type=\"number\" step=\"0.05\" min=\"0\" value=\"{d}\"></label>", .{optimizer.effAlignW(params)});
+    try w.print("<label title=\"placement regularizer\">Compact w <input id=\"t-align\" type=\"number\" step=\"0.05\" min=\"0\" value=\"{d}\"></label>", .{optimizer.effAlignW(params)});
     try w.print("<label>Loop <input id=\"t-loop\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.loop_w});
     try w.print("<label>Congest <input id=\"t-cong\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.w_congest});
     try w.writeAll("<label class=\"tune-chk\"><input id=\"t-grid\" type=\"checkbox\"");

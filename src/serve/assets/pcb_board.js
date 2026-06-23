@@ -392,7 +392,7 @@ document.getElementById("t-apply").addEventListener("click",function(ev){ev.prev
  var v=function(id){return encodeURIComponent(document.getElementById(id).value);};
  var g=document.getElementById("t-grid").checked?1:0;
  liveRegen("?w_align="+v("t-align")+"&loop_w="+v("t-loop")+"&w_congest="+v("t-cong")+
-  "&grid="+g+"&compact="+v("t-compact"));});
+  "&grid="+g);});
 // Score-view weights persist per design in localStorage ("pcb-sv:<name>"):
 // stored on every change, restored on load (before the first showScore so
 // the headline respects them), and cleared by Reset along with the inputs.

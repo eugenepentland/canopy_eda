@@ -192,7 +192,6 @@ fn fullEvalParams() optimizer.Params {
     p.bbox_margin = g_params.bbox_margin;
     p.grid_courtyards = g_params.grid_courtyards;
     p.courtyard_overlap = g_params.courtyard_overlap;
-    p.compact_mode = g_params.compact_mode;
     return p;
 }
 

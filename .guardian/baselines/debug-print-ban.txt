@@ -1,10 +1,10 @@
 # guardian-snapshot v1
 src/bench_layout.zig:178: std.debug.print reference outside allowed paths
-src/bench_layout.zig:205: std.debug.print reference outside allowed paths
-src/bench_layout.zig:210: std.debug.print reference outside allowed paths
-src/bench_layout.zig:248: std.debug.print reference outside allowed paths
-src/bench_layout.zig:270: std.debug.print reference outside allowed paths
-src/bench_layout.zig:272: std.debug.print reference outside allowed paths
+src/bench_layout.zig:204: std.debug.print reference outside allowed paths
+src/bench_layout.zig:209: std.debug.print reference outside allowed paths
+src/bench_layout.zig:247: std.debug.print reference outside allowed paths
+src/bench_layout.zig:269: std.debug.print reference outside allowed paths
+src/bench_layout.zig:271: std.debug.print reference outside allowed paths
 src/commands.zig:110: std.debug.print reference outside allowed paths
 src/commands.zig:120: std.debug.print reference outside allowed paths
 src/commands.zig:184: std.debug.print reference outside allowed paths
