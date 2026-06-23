@@ -86,6 +86,43 @@ A new rail becomes **one line, no math, reusing the existing module**:
   — "`rail_2v5` and `rail_3v3` are the same circuit; collapse into one
   `(vout …)`-parameterized module."
 
+## Implemented 2026-06-23
+
+Fix #1 (target-voltage interface) landed on the LT3045 and TPS63806 families;
+designs verified netlist-identical (same parts/values/footprints, rails intact,
+only sealed internal-net labels relabel). Design files live under the gitignored
+`projects/designs/` (served directly by prod — no rebuild).
+
+- **LT3045 (the 3 duplicate sub-circuits):**
+  - `bcuda-ldo5v` + `bcuda-ldo3v3-lmx` (structurally identical, differing only in
+    R_SET = voltage + net names) → consolidated into one parameterized
+    `bcuda-lt3045-ldo ((vout 3.3))`, `R_SET = vout × 10000` (LT3045 SET sources
+    100 µA). barracuda's two call sites now read
+    `(bcuda-lt3045-ldo (vout 5.0))` / `(vout 3.3)` via
+    `(bridge "" (rename VIN …) (rename VOUT …) GND)`. R_SET stays 50k/33k exactly;
+    0 component diffs, 0 net-topology changes. Old modules + `bcuda-ldo5v`'s
+    starred layout sidecar renamed to the consolidated module (so BOTH LDOs now
+    seed from it — `ldo_3v3_lmx` gained a layout it lacked).
+  - generic unused `lt3045` flipped to `((vout 6.0) (rilim 300))`.
+- **TPS63806:** deleted the dead `tps63806-buck-boost` (only referenced in a
+  comment); `tps63806-rail` gained a **backward-compatible** `(vout X)` override
+  (3rd param, `vout=0` ⇒ use explicit rfbt/rfbb), so cyclops-analog's
+  `(tps63806-rail 402000 100000)` is byte-unchanged while
+  `(tps63806-rail (vout 3.3))` now sizes R_FBT = 560k for new rails.
+- **AD7380 ×3** (`ad7380-4` / `-channel` / `-channel-2ch`): NOT a voltage dup —
+  these are 1/2/4-channel ADC variants. Left as-is.
+
+### Still open — the E96 builtin (fix #1's "optional polish")
+
+For LDOs with a single SET resistor (LT3045) `vout × 10000` lands on E96 values
+exactly, so `(vout X)` is complete. For **divider**-based rails (TPS63806/62933/
+631000) the inverse only sometimes lands on a standard value — `(vout 2.5)` on
+TPS63806 gives 400k (non-E96; the author picked 402k for 2.51 V). The clean
+finish is an `(e96 x)` builtin (snap to nearest E96, then recompute the honest
+vout); it needs a small `src/eval/builtins.zig` addition since the DSL has no
+`round`/`log10`. Until then, divider rails take `(vout X)` but may emit a
+non-standard resistor at arbitrary voltages — pass rfbt/rfbb for an exact E96 pair.
+
 ## Recommended first step
 
 Implement #1 on the "generic" rail module as the worked pattern + add the
