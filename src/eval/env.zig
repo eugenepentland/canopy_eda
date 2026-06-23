@@ -1136,11 +1136,6 @@ pub const DesignBlock = struct {
     /// solve, while each module it instantiates is laid out around its declared
     /// anchor and composed in.
     origin: BlockOrigin = .design_root,
-    /// True when the design declared `(grouped-refdes)` — its ref-deses were
-    /// re-stamped into value/footprint block ranges (`refdes_group`) and pinned
-    /// to a `<design>.refdes.json` sidecar, so they survive insert/delete/reorder
-    /// instead of drifting with the per-prefix source-order counter.
-    grouped_refdes: bool = false,
     /// Net ties for cross-block connections (sub-block port wiring).
     net_ties: []const NetTie = &.{},
     /// Design-side `(verifies …)` sign-offs that answer library requirements
@@ -1194,11 +1189,13 @@ pub const DesignBlock = struct {
     /// honours. `present=false` ⇒ the rougher uses its heuristic defaults.
     rough: RoughSpec = .{},
 
-    /// Ref-des flattening style for this design: `.flat` under grouped-refdes
-    /// (refs are globally unique → drop the sub-block path prefix), else
-    /// `.hierarchical`. Passed to the netlist/BOM/emit flatteners.
+    /// Ref-des flattening style for the netlist/BOM/emit flatteners: sub-block
+    /// parts keep their path prefix (`pwr/C1`). Always `.hierarchical` now that
+    /// grouped-refdes (the only `.flat` producer) has been removed; the enum and
+    /// the flattener `ref_style` params are retained for a future flat-ref mode.
     pub fn refStyle(self: DesignBlock) RefStyle {
-        return if (self.grouped_refdes) .flat else .hierarchical;
+        _ = self;
+        return .hierarchical;
     }
 };
 

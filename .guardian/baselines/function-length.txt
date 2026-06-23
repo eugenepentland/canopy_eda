@@ -1,5 +1,4 @@
 # guardian-snapshot v1
-src/eval/design_block.zig:121: fn materializeBlock is 214 lines (cap 200)
 src/eval/power_budget.zig:82: fn analyze is 267 lines (cap 200)
 src/render_json.zig:462: fn renderSceneGraph is 251 lines (cap 200)
 src/serve/auth.zig:1286: fn loginCompletePage is 230 lines (cap 200)

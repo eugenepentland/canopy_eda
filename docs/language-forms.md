@@ -48,7 +48,6 @@ Arithmetic, comparison, and logic operators. Arguments are evaluated left-to-rig
 | `(or a b)` | Boolean or (eager — both args evaluated). |
 | `(not a)` | Boolean negation. |
 | `(e96 r)` | Snap a resistance/number to the nearest E96 (1%) standard value. |
-| `(e24 r)` | Snap a resistance/number to the nearest E24 (5%) standard value. |
 
 ## String formatting directives
 
@@ -99,7 +98,7 @@ where each is accepted: **D** = design-block top level,
 | `(bus-port "prefix" width dir …)` | DSs | Declare a multi-bit boundary bus that expands to one port per lane. |
 | `(note "id" "text" [(ref …)])` | DSs | Attach a design-time note to the surrounding scope. |
 | `(section "name" ["subtitle"] form…)` | DSs | Functional subsystem card. Inside `(section …)` nests one level into a sub-section. |
-| `(decouple "NET" [(comp "val")] COUNT per-pin [REF\|auto] PIN…\|(pins-of "REF" "NET")…)` | DSs | Emit COUNT decoupling caps per listed host pin. Component and REF may come from (decouple-defaults …); (pins-of REF NET) / auto expand to the pins already declared on the net. |
+| `(decouple "NET" [(comp "val")] COUNT per-pin [REF\|auto] PIN…)` | DSs | Emit COUNT decoupling caps per listed host pin. Component and REF may come from (decouple-defaults …); a trailing `auto` expands to the pins already declared on the net. |
 | `(series …)` | DSs | Insert a series element (resistor / ferrite / etc.) between two nets. |
 | `(fanout "COMMON" (comp) "NET1" "NET2" … [(id …)])` | DSs | Place one component from a shared COMMON net to each listed net (star of series elements). |
 | `(net "A" "B" …)` | DSs | Tie one or more nets to a canonical name (net-merge). |

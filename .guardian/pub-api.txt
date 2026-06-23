@@ -265,7 +265,6 @@ src/eval/forms.zig::special_form_schema value
 src/eval/forms.zig::validateArity fn
 src/eval/ids.zig::ChildIdSidecar struct_
 src/eval/ids.zig::LoadedPinout struct_
-src/eval/ids.zig::applyGroupedRefDes fn
 src/eval/ids.zig::autoAssignRefDes fn
 src/eval/ids.zig::autoAssignSubBlockRefDes fn
 src/eval/ids.zig::categoryPrefix fn
@@ -325,14 +324,6 @@ src/eval/power_sequencing.zig::SequenceRow struct_
 src/eval/power_sequencing.zig::SequenceStatus enum_
 src/eval/power_sequencing.zig::analyze fn
 src/eval/rails.zig::build fn
-src/eval/refdes_group.zig::ClassDef struct_
-src/eval/refdes_group.zig::DEFAULT_BLOCK_SIZE value
-src/eval/refdes_group.zig::Format enum_
-src/eval/refdes_group.zig::Member struct_
-src/eval/refdes_group.zig::ParsedRef struct_
-src/eval/refdes_group.zig::Registry struct_
-src/eval/refdes_group.zig::load fn
-src/eval/refdes_group.zig::parseRef fn
 src/eval/special_forms.zig::evalAssert fn
 src/eval/special_forms.zig::evalAssertRange fn
 src/eval/special_forms.zig::evalFmt fn

@@ -42,48 +42,6 @@ fn hasHierarchicalMarker(forms: []const Node) bool {
     return false;
 }
 
-/// Settings parsed off a `(grouped-refdes …)` form.
-const GroupedCfg = struct {
-    /// Block width for `.block_range` (`(block N)`); 0 ⇒ default 100.
-    block_size: u32 = 0,
-    /// Render format. Defaults to two-level (`C1_5` — class 1, member 5);
-    /// `(format block-range)` opts into canonical `C105` instead.
-    two_level: bool = true,
-};
-
-/// Detect a bare `(grouped-refdes …)` form — opts the design into value/footprint
-/// ref-des grouping (`ids.applyGroupedRefDes`). Reads optional `(block N)` and
-/// `(format two-level|block-range)` children. The default format is two-level
-/// (`C1_5`). Returns the settings when present, else null when the marker is absent.
-fn groupedRefdesConfig(forms: []const Node) ?GroupedCfg {
-    for (forms) |form| {
-        const children = form.asList() orelse continue;
-        if (children.len == 0) continue;
-        const head = children[0].asAtom() orelse continue;
-        if (!std.mem.eql(u8, head, "grouped-refdes")) continue;
-        var cfg = GroupedCfg{};
-        for (children[1..]) |child| {
-            const sub = child.asList() orelse continue;
-            if (sub.len < 2) continue;
-            const key = sub[0].asAtom() orelse continue;
-            if (std.mem.eql(u8, key, "block")) {
-                if (sub[1].asNumber()) |n| {
-                    if (n > 0) cfg.block_size = @intFromFloat(n);
-                }
-            } else if (std.mem.eql(u8, key, "format")) {
-                const word = sub[1].asAtom() orelse (sub[1].asString() orelse "");
-                if (std.mem.eql(u8, word, "block-range")) {
-                    cfg.two_level = false;
-                } else if (std.mem.eql(u8, word, "two-level")) {
-                    cfg.two_level = true;
-                }
-            }
-        }
-        return cfg;
-    }
-    return null;
-}
-
 /// Form heads that are deliberately inert in scope-form dispatch and must
 /// not draw an unknown-sub-form warning: identity anchors consumed by the
 /// id machinery (`id`/`ids`), the `(hierarchical-ids)` marker read by
@@ -93,7 +51,6 @@ fn isInertFormHead(name: []const u8) bool {
     return std.mem.eql(u8, name, "id") or
         std.mem.eql(u8, name, "ids") or
         std.mem.eql(u8, name, "hierarchical-ids") or
-        std.mem.eql(u8, name, "grouped-refdes") or
         std.mem.eql(u8, name, "row") or
         std.mem.eql(u8, name, "col");
 }
@@ -150,24 +107,6 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     const saved_hierarchical = self.hierarchical_ids;
     self.hierarchical_ids = saved_hierarchical or hasHierarchicalMarker(body_forms);
     defer self.hierarchical_ids = saved_hierarchical;
-
-    // `(grouped-refdes)` opts into value/footprint block-range ref-des grouping.
-    // Track nesting depth so the re-stamp + sidecar I/O run once, at the
-    // top-level design, after its sub-blocks are fully built and numbered.
-    self.design_block_depth += 1;
-    defer self.design_block_depth -= 1;
-    const saved_grouped = self.grouped_refdes;
-    const saved_grouped_block = self.grouped_block_size;
-    const saved_grouped_two_level = self.grouped_two_level;
-    const grouped_cfg = groupedRefdesConfig(body_forms);
-    self.grouped_refdes = saved_grouped or (grouped_cfg != null);
-    defer self.grouped_refdes = saved_grouped;
-    defer self.grouped_block_size = saved_grouped_block;
-    defer self.grouped_two_level = saved_grouped_two_level;
-    if (grouped_cfg) |cfg| {
-        if (cfg.block_size != 0) self.grouped_block_size = cfg.block_size;
-        self.grouped_two_level = cfg.two_level;
-    }
 
     // Decouple defaults: the IC ref is design-block-local (a parent's
     // fallback host makes no sense inside a different module), but the
@@ -305,15 +244,6 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
 
     // Auto-assign global ref_des for sub-block instances
     try ids.autoAssignSubBlockRefDes(self, block);
-
-    // `(grouped-refdes)`: re-stamp the now-globally-numbered tree into stable
-    // value/footprint block ranges (C100…, C200…), pinned by each part's `id`
-    // in a `<design>.refdes.json` sidecar. Runs only at the top level — the
-    // pass walks the whole flattened tree, so a nested module mustn't re-run it.
-    if (self.grouped_refdes and self.design_block_depth == 1) {
-        block.grouped_refdes = true;
-        try ids.applyGroupedRefDes(self, block);
-    }
 
     // Resolve single-alt pin functions before validation so the renderer,
     // KiCad export, and ERC's own assertion check all see the auto-filled

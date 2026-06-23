@@ -282,17 +282,6 @@ Public functions: worldShape, pointDist, shapeGap
 - last_error records the source span of an unknown form so callers can report file:line:col
 - last_error records the source span of an arity mismatch in a special form
 
-## eval/refdes_group
-
-- parseRef splits a ref-des into prefix and number
-- a fresh registry assigns block-range refs grouped by class
-- two-level format renders class_member refs
-- resolve pins a part's ref by its id across builds
-- switching the format re-renders the same slots
-- changing a part's value re-classes it to a new block
-- a class exceeding block_size spills into a fresh block
-- toJson round-trips through load
-
 ## id_insert
 
 - findMatchingClose finds correct closing paren
@@ -554,11 +543,9 @@ Public functions: analyze
 - fanout places one component from COMMON to each listed net
 - decouple-defaults lets decouple omit its component and host ref
 - decouple with no defaults keeps its legacy explicit form
-- decouple per-pin (pins-of REF NET) expands to the same instances and nets as the hand-written pin list
 - decouple per-pin auto expands the decouple-defaults IC's pins on the decoupled net
 - decouple per-pin auto without a decouple-defaults ic is diagnosed
-- decouple pins-of with no matching declared pins is diagnosed with the declaration-order contract
-- decouple mixes (pins-of …) expansion with extra literal pins
+- decouple per-pin auto with no matching declared pins is diagnosed with the declaration-order contract
 - an unknown sub-form inside a section records a lint warning naming the form
 - a misspelled role word records a warning listing the expected values
 - an unknown design-block top-level form records a warning
