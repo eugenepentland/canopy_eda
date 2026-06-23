@@ -7,7 +7,6 @@ const emit = @import("emit.zig");
 const export_kicad = @import("export_kicad.zig");
 const bom = @import("bom.zig");
 const id_insert = @import("id_insert.zig");
-const lint = @import("lint.zig");
 const erc_mod = @import("erc.zig");
 const env_mod = @import("eval/env.zig");
 const eval_modules = @import("eval/modules.zig");
@@ -151,43 +150,6 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandE
 /// resolves identities into the `.bom`, and either prints the resolved design
 /// to stdout, writes it to `--output-dir`, or pushes it to a running server
 /// via `--push` so the browser viewer updates live.
-/// `netlisp lint [--project-dir <d>] <design>` — report id-hygiene issues in a
-/// design's `.sexp` (legacy residue, bad tokens, duplicates). Exits non-zero
-/// when any issue is found so it can gate CI.
-pub fn cmdLint(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
-    var project_dir: []const u8 = ".";
-    var positional_name: ?[]const u8 = null;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], PROJECT_DIR_FLAG) and i + 1 < args.len) {
-            project_dir = args[i + 1];
-            i += 1;
-        } else if (!std.mem.startsWith(u8, args[i], "--")) {
-            positional_name = args[i];
-        }
-    }
-    const design = positional_name orelse {
-        std.debug.print("Usage: netlisp lint [--project-dir <d>] <design-name>\n", .{});
-        std.process.exit(1);
-    };
-    const board_path = paths.designSourcePath(allocator, project_dir, design) catch {
-        std.debug.print(OUT_OF_MEMORY_MSG, .{});
-        std.process.exit(1);
-    };
-    defer allocator.free(board_path);
-
-    const issues = lint.lintFile(allocator, board_path) catch |err| {
-        std.debug.print("lint error: {}\n", .{err});
-        std.process.exit(1);
-    };
-    if (issues == 0) {
-        std.debug.print("lint: {s} — no id issues\n", .{design});
-    } else {
-        std.debug.print("lint: {s} — {d} id issue(s)\n", .{ design, issues });
-        std.process.exit(1);
-    }
-}
-
 /// `netlisp build [--project-dir <d>] [--output-dir <out>] [--push] <design>` —
 /// evaluate a design, persist any newly generated `(id …)`/`(ids …)` tokens
 /// back into source, and optionally push the rebuilt scene to a running server.

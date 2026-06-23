@@ -3846,8 +3846,8 @@ pub fn solve(
     // minimises. The real maze-routed trace is deliberately NOT scored here: re-
     // routing from scratch per pose makes the score a jagged, bistable function of
     // position (a 0.05 mm nudge can flip a leg routable↔unroutable and swing the
-    // objective by tens of units — see `src/fuzz_layout.zig`). Routing is a
-    // separate explicit action that draws real copper, not the placement score.
+    // objective by tens of units). Routing is a separate explicit action that
+    // draws real copper, not the placement score.
     const score = scoreLayout(parts, &prep.idx_of, nets, built.loops);
     const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);

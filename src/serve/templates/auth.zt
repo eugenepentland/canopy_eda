@@ -9,7 +9,6 @@ const B64URL_SCRIPT: []const u8 = "<script>" ++ auth_mod.B64URL_JS ++ "</script>
 
 const INPUT_DARK_STYLE: []const u8 = "width:100%;box-sizing:border-box;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none";
 const INPUT_MID_STYLE: []const u8 = "width:100%;box-sizing:border-box;padding:10px 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none";
-const PASSWORD_HIDDEN_STYLE: []const u8 = "display:none;width:100%;box-sizing:border-box;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none";
 
 pub templ Login() {
     <!DOCTYPE html>
@@ -25,9 +24,7 @@ pub templ Login() {
                 <h1>Sign In</h1>
                 <p>Enter your email and use your passkey to authenticate.</p>
                 <input type="email" id="email" placeholder="Email address" required style={INPUT_DARK_STYLE} />
-                <input type="password" id="password" placeholder="Password" minlength="8" style={PASSWORD_HIDDEN_STYLE} />
                 <button class="auth-btn" id="login-btn">Sign in with Passkey</button>
-                <a class="link" href="#" id="toggle-mode">Use password instead</a>
                 <div class="status" id="status"></div>
             </div>
             {!B64URL_SCRIPT}
@@ -67,11 +64,9 @@ pub templ InviteAccept(token: []const u8) {
             <div class="auth-card">
                 <span class="brand">Netlisp</span>
                 <h1>Accept Invite</h1>
-                <p>Pick how you'd like to sign in. Passkeys are recommended; passwords are a fallback if your device doesn't support passkeys.</p>
+                <p>Register a passkey to finish setting up your account.</p>
                 <input type="email" id="email" placeholder="Email address" required style={INPUT_DARK_STYLE} />
-                <input type="password" id="password" placeholder="Password" minlength="8" style={PASSWORD_HIDDEN_STYLE} />
                 <button class="auth-btn" id="register-btn">Register Passkey</button>
-                <a class="link" href="#" id="toggle-mode">Use a password instead</a>
                 <div class="status" id="status"></div>
             </div>
             {!B64URL_SCRIPT}

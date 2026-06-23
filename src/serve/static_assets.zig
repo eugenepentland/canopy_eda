@@ -15,8 +15,6 @@ const footprint_svg_js = @embedFile("assets/footprint_svg.js");
 const auth_login_js = @embedFile("assets/auth_login.js");
 const auth_setup_js = @embedFile("assets/auth_setup.js");
 const auth_invite_js = @embedFile("assets/auth_invite.js");
-const auth_manage_js = @embedFile("assets/auth_manage.js");
-const auth_manage_css = @embedFile("assets/auth_manage.css");
 const review_notes_js = @embedFile("assets/review_notes.js");
 
 // Vendored CodeMirror 5 (MIT) — core + scheme mode + matchbrackets/
@@ -72,8 +70,6 @@ const REGISTRY = [_]Asset{
     .{ .name = "auth_login.js", .body = auth_login_js, .content_type = .JS },
     .{ .name = "auth_setup.js", .body = auth_setup_js, .content_type = .JS },
     .{ .name = "auth_invite.js", .body = auth_invite_js, .content_type = .JS },
-    .{ .name = "auth_manage.js", .body = auth_manage_js, .content_type = .JS },
-    .{ .name = "auth_manage.css", .body = auth_manage_css, .content_type = .CSS },
     .{ .name = "review_notes.js", .body = review_notes_js, .content_type = .JS },
     .{ .name = "schematic_viewer.js", .body = schematic_viewer_js, .content_type = .JS },
     .{ .name = "schematic.css", .body = schematic_css, .content_type = .CSS },

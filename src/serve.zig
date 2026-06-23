@@ -349,9 +349,6 @@ pub fn serve(
     router.post("/auth/credentials/delete", auth.deleteCredentialApi, .{});
     router.post("/auth/invite/create", auth.createInviteApi, .{});
     router.get("/auth/invite/*", auth.invitePage, .{});
-    router.post("/auth/password/login", auth.passwordLoginApi, .{});
-    router.post("/auth/password/set", auth.passwordSetApi, .{});
-    router.get("/auth/password/status", auth.passwordStatusApi, .{});
 
     // Pages
     router.get("/", pages.indexPage, .{});
