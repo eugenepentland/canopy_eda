@@ -89,7 +89,7 @@ const POLISH_MAX_PARTS: usize = 64;
 // offset that shortens the actual trace — a surrogate-driven tuck optimises
 // a straight-gap proxy and can pick a different rotation/side than the router.
 const ROUTED_POLISH_SWEEPS: usize = 2;
-const ROUTED_POLISH_CELLS: i64 = 3; // ±0.6 mm window — local tuck/flip, not a re-place
+const ROUTED_POLISH_CELLS: i64 = 6; // ±0.6 mm window (6·GRID_MM) — local tuck/flip, not a re-place
 // Routed polish routes once per candidate cell, so its cost grows with
 // caps × window × loops. Keep it small so a mid-size module can't make an
 // on-demand regenerate take tens of seconds. Small power modules — the case this
@@ -195,7 +195,7 @@ pub const Params = struct {
     bbox_margin: f64 = geometry.BBOX_MARGIN_MM,
     /// How much (mm, total) two parts' *drawn* courtyards may overlap in the
     /// collision / legalization test. Default 0: courtyards may **touch** (their
-    /// edges land on the shared 0.2 mm grid line — grid-rounded extents +
+    /// edges land on the shared `GRID_MM` grid line — grid-rounded extents +
     /// `compactToContact` dock to exact contact) but never overlap. That is the
     /// densest packing with no courtyard intersection, which is what a board
     /// review expects (KiCad flags overlapping courtyards).
@@ -307,8 +307,12 @@ inline fn emitBest(parts: []const Part, score: f64, pass: ProgressPass) void {
 }
 
 /// Placement grid: final positions snap to this (mm). The interactive page
-/// drags on the same grid so manual edits and auto-placement stay aligned.
-pub const GRID_MM: f64 = 0.2;
+/// drags on the same grid so manual edits and auto-placement stay aligned, and
+/// courtyard half-extents round up to it (`ceilToGrid`). The cell-count search
+/// windows below (`RELOCATE_MAX_CELLS`, `COARSE_STRIDE`, `ROUTED_POLISH_CELLS`,
+/// `TIGHTEN_CELLS`) are sized in *cells*, so they're paired to this value to
+/// keep their physical millimetre spans constant when the grid changes.
+pub const GRID_MM: f64 = 0.1;
 
 /// Whether a part anchors the layout (ICs/connectors) or hangs off a hub
 /// pin (passives). Drives spring strength, mass, and rendering colour.
@@ -1409,10 +1413,14 @@ const AUTOFILL_VETO_MAX: usize = 48;
 /// Search window margin (mm) beyond the anchor targets' bounding box.
 const AUTOFILL_MARGIN_MM: f64 = 6.0;
 /// Window cap (grid cells per axis) — bounds the scan on pathological boards.
-const RELOCATE_MAX_CELLS: i64 = 120;
+/// 240·GRID_MM ≈ ±24 mm reach (the real bound is the board extent on normal
+/// boards); paired to GRID_MM so the millimetre cap holds across grid sizes.
+const RELOCATE_MAX_CELLS: i64 = 240;
 /// Coarse stride (grid cells) for the first scan pass: sample the window every
-/// N cells, then refine at full resolution around the coarse best.
-const COARSE_STRIDE: i64 = 2;
+/// N cells, then refine at full resolution around the coarse best. 4·GRID_MM ≈
+/// 0.4 mm physical stride — paired to GRID_MM so the coarse pass keeps both its
+/// stride and its iteration count when the grid changes.
+const COARSE_STRIDE: i64 = 4;
 /// Ground anchors pull weakly — the return is a via to the plane, not a trace
 /// to one specific pad, so any nearby GND pad serves.
 const AUTOFILL_GND_W: f64 = 0.25;
@@ -4784,7 +4792,7 @@ fn legalizeFinal(parts: []Part) void {
 /// Half-window (grid cells) the priority-cap tuck scans — wider than the polish
 /// window so a bypass cap can be pulled the full width of a small IC onto its
 /// pin (±`TIGHTEN_CELLS`·`GRID_MM` ≈ ±2.8 mm).
-const TIGHTEN_CELLS: i64 = 14;
+const TIGHTEN_CELLS: i64 = 28;
 
 /// Tuck every *declared-priority* decoupling cap onto its IC pin. For each loop
 /// whose cap was ranked in a `(placement-order …)` (priority > 0), greedily
@@ -8022,8 +8030,9 @@ test "packBoard docks edges and corners on the outline" {
     const rect = try packBoard(arena, &parts, &instances, &idx_of, &nets, spec);
     // The outline shifts left of the interior centre (U1 at the origin) so the
     // interior centres in the region the left edge's dock lane (2*hw(J1) +
-    // gap = 5mm) leaves free: minx = -10 - 5/2, grid-rounded.
-    try testing.expectApproxEqAbs(@as(f64, -12.6), rect.minx, 1e-9);
+    // gap = 5mm) leaves free: minx = -10 - 5/2, grid-rounded (lands exactly
+    // on the 0.1 mm grid).
+    try testing.expectApproxEqAbs(@as(f64, -12.5), rect.minx, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, -10), rect.miny, 1e-9);
     // J1 flush inside the left edge (keepout hw 2 -> centre at minx+2), pads
     // inward (rot 0), slid opposite its attachment (U1 at y 0).
