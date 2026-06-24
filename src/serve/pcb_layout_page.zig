@@ -2,7 +2,7 @@
 //!
 //! The server evaluates the design, runs the optimizer, and emits the result
 //! as JSON plus a small client renderer. The board is drawn client-side so
-//! parts can be **dragged** (snapping to the 0.2 mm grid) and the layout
+//! parts can be **dragged** (snapping to the 0.1 mm grid) and the layout
 //! **score** (HPWL + decoupling-loop length) recomputes live — letting you
 //! compare a hand placement against the auto one. A sidebar lists every
 //! component and the net on each pin; hovering cross-highlights, and hovering
@@ -3692,13 +3692,13 @@ const COURTYARD_MODAL =
     \\<label><input type="radio" name="court-mode" value="size" checked> Overall size</label>
     \\<label><input type="radio" name="court-mode" value="offset"> Pad offset</label></div>
     \\<div class="court-fields" id="court-fields-size">
-    \\<label>½-width <input id="court-hw" type="number" step="0.2" min="0"> mm</label>
-    \\<label>½-height <input id="court-hh" type="number" step="0.2" min="0"> mm</label></div>
+    \\<label>½-width <input id="court-hw" type="number" step="0.1" min="0"> mm</label>
+    \\<label>½-height <input id="court-hh" type="number" step="0.1" min="0"> mm</label></div>
     \\<div class="court-fields" id="court-fields-offset" hidden>
     \\<label>Offset from pads <input id="court-off" type="number" step="0.05" min="0"> mm</label></div>
     \\<div id="court-full" class="court-full"></div>
     \\<div class="court-note" id="court-note">Half-extents from the part centre;
-    \\ edges stay on the 0.2 mm grid. Saving rewrites the footprint file and applies to every design that uses it.</div>
+    \\ edges stay on the 0.1 mm grid. Saving rewrites the footprint file and applies to every design that uses it.</div>
     \\<div class="court-actions"><button id="court-save" class="btn">Save courtyard</button>
     \\<button id="court-cancel" class="btn">Cancel</button><span id="court-msg" class="savemsg"></span></div>
     \\</div></div>

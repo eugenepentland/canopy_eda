@@ -648,18 +648,18 @@ function courtSetMode(m){if(!courtState)return;courtState.mode=m;
  document.getElementById("court-fields-offset").hidden=(m!="offset");courtRefresh();}
 function openCourt(ref){var p=partByRef(ref);if(!p)return;var ext=padExt(p),cm=PCB.cmargin||0.15;
  var min={hw:gceil(ext.hw+cm),hh:gceil(ext.hh+cm)};
- courtState={p:p,fp:p.fp,mode:"size",hw:p.hw,hh:p.hh,offset:0.2,ext:ext,min:min};
+ courtState={p:p,fp:p.fp,mode:"size",hw:p.hw,hh:p.hh,offset:cm,ext:ext,min:min};
  document.getElementById("court-title").textContent=p.fp+"  ·  "+p.ref;
  var hwI=document.getElementById("court-hw"),hhI=document.getElementById("court-hh"),offI=document.getElementById("court-off");
  var sv=document.getElementById("court-save"),note=document.getElementById("court-note"),msg=document.getElementById("court-msg");
- msg.textContent="";hwI.value=p.hw.toFixed(1);hhI.value=p.hh.toFixed(1);hwI.min=min.hw;hhI.min=min.hh;offI.value=(0.2).toFixed(2);
+ msg.textContent="";hwI.value=p.hw.toFixed(1);hhI.value=p.hh.toFixed(1);hwI.min=min.hw;hhI.min=min.hh;offI.value=cm.toFixed(2);
  var fab=p.fb||!p.fp,noPads=!(ext.hw>0||ext.hh>0);
  sv.disabled=fab;hwI.disabled=fab;hhI.disabled=fab;offI.disabled=fab||noPads;
  document.querySelectorAll("input[name=court-mode]").forEach(function(r){r.checked=(r.value=="size");r.disabled=fab||(r.value=="offset"&&noPads);});
  courtSetMode("size");
  note.textContent=fab?"Synthesized placeholder box (no footprint file) — courtyard can't be edited.":
   "Overall size sets the half-extents directly; Pad offset puts the courtyard edge that gap "+
-  "outside the pad bounding box, snapped to the 0.2 mm grid. "+
+  "outside the pad bounding box, snapped to the "+G.toFixed(2)+" mm grid. "+
   "Saving rewrites lib/footprints/"+p.fp+".sexp and applies to every design using it.";
  document.getElementById("court-modal").hidden=false;}
 function courtClose(){document.getElementById("court-modal").hidden=true;courtState=null;}
