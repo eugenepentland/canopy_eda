@@ -247,10 +247,10 @@ pub fn renderToHtml(
     try writeSidebar(w, review_doc, block.sub_blocks.len > 0);
     try w.writeAll("</div>");
     try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns, check_results, review_doc, schematic_path);
-    // Per-sub-block PCB preview wiring — reuses the DESIGN_NAME global declared
-    // by writeScripts, so it must follow that call. Only emitted when there are
-    // sub-blocks (matching the global PCB-settings bar above).
-    if (block.sub_blocks.len > 0) try w.writeAll(SUB_PCB_SCRIPT);
+    // Per-sub-circuit Schematic ⇄ PCB toggle wiring — reuses the DESIGN_NAME
+    // global declared by writeScripts, so it must follow that call. Only emitted
+    // when there are sub circuits (matching the global PCB-settings bar above).
+    if (block.sub_blocks.len > 0) try w.writeAll(SUBC_TOGGLE_SCRIPT);
     if (review_doc != null) {
         // review_notes.js (design-note handlers) reuses DESIGN_NAME —
         // already declared as a global by writeScripts above.
@@ -354,9 +354,9 @@ fn writeHeader(
     }
     // For a full design the whole-design PCB layout is intentionally not linked
     // from here: it places every component at once, which is too slow to be
-    // useful. Instead each sub-block previews its own PCB layout on demand — see
-    // the global "PCB Layout settings" bar (writePcbGlobals) and the per-sub-
-    // block "PCB Layout" panels (writeSubBlockPcb).
+    // useful. Instead each sub circuit shows its own PCB layout on demand via the
+    // card's Schematic ⇄ PCB toggle — see the global "PCB Layout settings" bar
+    // (writePcbGlobals) and the per-sub-circuit PCB view (writeSubCircuitPcb).
     try w.writeAll(
         "<button class=\"head-link head-btn\" id=\"reload-btn\" type=\"button\" " ++
             "title=\"Re-read the .sexp source from disk and rebuild\">\u{21BB} Reload</button>",
@@ -1322,36 +1322,29 @@ fn writeSubBlockCard(
         .attached => "</h3>",
     });
     if (group) |g| {
-        try w.print("<span class=\"pill pill-ok\">sub-block &times;{d}</span>", .{g.copies});
+        try w.print("<span class=\"pill pill-ok\">sub circuit &times;{d}</span>", .{g.copies});
         try w.writeAll("<span class=\"pill\">identical copies — rendered once</span>");
     } else {
-        try w.writeAll("<span class=\"pill pill-ok\">sub-block</span>");
+        try w.writeAll("<span class=\"pill pill-ok\">sub circuit</span>");
     }
-    // "Copy source" pulls the underlying module/file text via
-    // /api/module-source; the "Schematic"/"PCB Layout" links open the
-    // standalone module viewer (/modules/:name) and its whole-module PCB
-    // layout editor (/pcb-layout/:name) directly — so the module's board can
-    // be reached in one click instead of detouring through its schematic page.
-    // Both need the sub-block's source provenance — skip them when it's
-    // unknown. The `/modules/:name` + `/pcb-layout/:name` routes can't carry a
-    // slashed path, so only module-name sources (no `/`) get the links;
-    // path-based sub-blocks still get the copy button (the API takes the raw
-    // path via query). Open in a new tab so the parent design's schematic page
-    // stays put.
+    // Right-side header actions: "Copy source" (pulls the underlying module/file
+    // text via /api/module-source) plus the Schematic ⇄ PCB Layout toggle. The
+    // toggle flips this card's body between the schematic hubs and an on-demand
+    // PCB-layout iframe (see writeSubCircuitPcb / SUBC_TOGGLE_SCRIPT) — replacing
+    // the old open-in-new-tab links so the layout can be viewed, edited, roughed
+    // and saved without leaving the schematic page.
+    try w.writeAll("<div class=\"subc-head-actions\">");
     if (sb.source.len > 0) {
         try w.writeAll("<button type=\"button\" class=\"copy-src-btn\" data-src=\"");
         try writeHtmlEscaped(w, sb.source);
         try w.writeAll("\">Copy source</button>");
-        if (std.mem.indexOfScalar(u8, sb.source, '/') == null) {
-            try w.writeAll("<a class=\"view-src-link\" target=\"_blank\" rel=\"noopener\" href=\"/modules/");
-            try writeUrlEncoded(w, sb.source);
-            try w.writeAll("\">Schematic \u{2197}</a>");
-            try w.writeAll("<a class=\"view-src-link\" target=\"_blank\" rel=\"noopener\" href=\"/pcb-layout/");
-            try writeUrlEncoded(w, sb.source);
-            try w.writeAll("\">PCB Layout \u{2197}</a>");
-        }
     }
-    try w.writeAll("</div>");
+    try w.writeAll("<div class=\"subc-toggle\" role=\"group\" aria-label=\"View\">");
+    try w.writeAll("<button type=\"button\" class=\"subc-tab active\" data-subc-view=\"sch\">Schematic</button>");
+    try w.writeAll("<button type=\"button\" class=\"subc-tab\" data-subc-view=\"pcb\">PCB Layout</button>");
+    try w.writeAll("</div>"); // .subc-toggle
+    try w.writeAll("</div>"); // .subc-head-actions
+    try w.writeAll("</div>"); // .sec-head
     try w.writeAll(secDescOpen);
     try writeHtmlEscaped(w, sb.block.name);
     try w.writeAll("</p>");
@@ -1388,13 +1381,19 @@ fn writeSubBlockCard(
         }
     }
 
+    // The card body is two stacked views the header toggle flips between. The
+    // schematic hubs are the default; the PCB view loads its iframe on demand.
+    try w.writeAll("<div class=\"subc-view subc-sch\">");
     try writeSectionHubs(ctx, w, allocator, sb_pin_groups.items, hub_refs.items, check_results);
+    try w.writeAll("</div>");
 
-    // Per-sub-block PCB layout preview (read-only, computed on demand). Scoped
-    // to this sub-block via ?sub=<slug> so the whole design is never placed; it
-    // uses the page's global PCB-settings bar for via/clearance/DRC. The iframe
-    // has no src until the user presses Generate, so nothing computes on load.
-    try writeSubBlockPcb(w, slug);
+    // PCB-layout view (hidden until the toggle selects it). A module sub circuit
+    // gets the *editable* embed of its own layout (?embed=1&edit=1 — drag, Rough,
+    // Save, ★ all write the module's lib/modules/<m>.layouts.json), so the user
+    // can lay it out / rough it right here. A path- or inline-sourced sub circuit
+    // has no reusable module layout, so it falls back to the read-only
+    // design-scoped preview (?sub=<slug>). Wired by SUBC_TOGGLE_SCRIPT.
+    try writeSubCircuitPcb(w, slug, sb);
 
     try w.writeAll(switch (mode) {
         .standalone => sectionClose,
@@ -1402,16 +1401,16 @@ fn writeSubBlockCard(
     });
 }
 
-/// Global PCB-layout controls shared by every sub-block's inline preview. The
+/// Global PCB-layout controls shared by every sub circuit's inline PCB view. The
 /// whole-design layout is intentionally not offered (it places every component
-/// at once, which is too slow to be useful); each `(sub-block …)` card computes
-/// its own scoped preview on demand using these via/clearance/DRC values. The
-/// number inputs mirror the standalone PCB page's Route panel defaults
-/// (router.RouteParams). Read by SUB_PCB_SCRIPT when building each iframe URL.
+/// at once, which is too slow to be useful); each `(sub-block …)` card loads its
+/// own PCB iframe on demand using these via/clearance/DRC values. The number
+/// inputs mirror the standalone PCB page's Route panel defaults
+/// (router.RouteParams). Read by SUBC_TOGGLE_SCRIPT when building each iframe URL.
 fn writePcbGlobals(w: *std.Io.Writer) !void {
     try w.writeAll(
         \\<details class="pcb-globals" id="page-pcb-globals">
-        \\<summary>PCB Layout settings <span class="sch-card-sub muted">via / trace / DRC — used by each sub-block preview</span></summary>
+        \\<summary>PCB Layout settings <span class="sch-card-sub muted">via / trace / DRC — used by each sub circuit's PCB view</span></summary>
         \\<div class="pcb-globals-body">
         \\<label>Track <input id="g-tw" type="number" step="0.05" min="0.05" value="0.127"></label>
         \\<label>Clearance <input id="g-cl" type="number" step="0.05" min="0.05" value="0.127"></label>
@@ -1419,29 +1418,44 @@ fn writePcbGlobals(w: *std.Io.Writer) !void {
         \\<label>Via &Oslash; <input id="g-va" type="number" step="0.05" min="0.2" value="0.4"></label>
         \\<label class="pcb-globals-chk"><input id="g-clr-show" type="checkbox"> show clearance</label>
         \\<label class="pcb-globals-chk"><input id="g-drc-show" type="checkbox" checked> show DRC</label>
-        \\<span class="pcb-globals-hint muted">Open a sub-block's &ldquo;PCB Layout&rdquo;
-        \\panel below and press Generate. Changing a value here applies on the next Generate.</span>
+        \\<span class="pcb-globals-hint muted">Switch a sub circuit to its &ldquo;PCB Layout&rdquo;
+        \\view to lay it out. Changing a value here applies the next time a PCB view loads.</span>
         \\</div>
         \\</details>
     );
 }
 
-/// The collapsible "PCB Layout" panel inside a sub-block card: a Generate /
-/// Regenerate button plus a lazily-loaded iframe scoped to this sub-block. The
-/// iframe src is filled in by SUB_PCB_SCRIPT from the global PCB-settings bar,
-/// so nothing is computed until the user opens the panel and presses the button.
-fn writeSubBlockPcb(w: *std.Io.Writer, slug: []const u8) !void {
+/// The PCB-layout view of a sub circuit card — the toggle's "PCB Layout" panel.
+/// A lazily-loaded iframe (no `src` until the toggle first selects PCB, so
+/// nothing is placed on page load) plus a one-line hint and an "open full editor"
+/// escape hatch. `data-mod` is the sub circuit's module name (empty for
+/// path-/inline-sourced ones) and `data-sub` its slug; SUBC_TOGGLE_SCRIPT reads
+/// both to build the editable-module vs. read-only-preview iframe URL.
+fn writeSubCircuitPcb(w: *std.Io.Writer, slug: []const u8, sb: env_mod.SubBlock) !void {
+    const mod_name = moduleSourceName(sb) orelse "";
     // `slug` is review.slugify output ([a-z0-9-]) — safe in an attribute and a
-    // URL component without further escaping (same value used for data-slug).
-    try w.writeAll("<details class=\"sub-pcb\"><summary>PCB Layout</summary>");
-    try w.writeAll("<div class=\"sub-pcb-body\" data-sub=\"");
+    // URL component without further escaping.
+    try w.writeAll("<div class=\"subc-view subc-pcb\" hidden data-sub=\"");
     try w.writeAll(slug);
-    try w.writeAll("\"><div class=\"sub-pcb-controls\">");
-    try w.writeAll("<button type=\"button\" class=\"sub-pcb-gen\">Generate layout</button>");
-    try w.writeAll("<span class=\"sub-pcb-status muted\">Not generated yet</span></div>");
-    try w.writeAll("<div class=\"sub-pcb-frame-wrap\" hidden>");
-    try w.writeAll("<iframe class=\"sub-pcb-frame\" title=\"PCB layout preview\" loading=\"lazy\"></iframe>");
-    try w.writeAll("</div></div></details>");
+    try w.writeAll("\" data-mod=\"");
+    try writeHtmlEscaped(w, mod_name);
+    try w.writeAll("\"><div class=\"subc-pcb-bar\">");
+    const hint_mid = " drag to arrange, <b>Rough</b> for a clustered start, " ++
+        "then ★ a saved layout to bless it. ";
+    if (mod_name.len > 0) {
+        try w.writeAll("<span class=\"subc-pcb-hint muted\">Editing <b>");
+        try writeHtmlEscaped(w, mod_name);
+        try w.writeAll("</b> —" ++ hint_mid ++
+            "Saved into the module, so every design using it picks it up.</span>");
+    } else {
+        try w.writeAll("<span class=\"subc-pcb-hint muted\">Lay it out:" ++ hint_mid ++
+            "Saved with this design.</span>");
+    }
+    try w.writeAll("<a class=\"subc-pcb-open view-src-link\" target=\"_blank\" rel=\"noopener\" href=\"#\">Open full editor \u{2197}</a>");
+    try w.writeAll("</div><div class=\"subc-pcb-frame-wrap\">");
+    try w.writeAll("<iframe class=\"subc-pcb-frame\" title=\"PCB layout\" loading=\"lazy\"></iframe>");
+    try w.writeAll("</div>"); // .subc-pcb-frame-wrap
+    try w.writeAll("</div>"); // .subc-pcb
 }
 
 /// "Module layouts" checklist panel — one row per top-level `(sub-block …)`,
@@ -1489,7 +1503,7 @@ fn writeModuleLayoutStatus(allocator: Allocator, project_dir: []const u8, w: *st
     );
     if (missing > 0) {
         try w.print(
-            "<span class=\"sch-card-sub muted\">{d} sub-module{s} still need a starred layout</span>",
+            "<span class=\"sch-card-sub muted\">{d} sub circuit{s} still need a starred layout</span>",
             .{ missing, if (missing == 1) "" else "s" },
         );
     }
@@ -1497,14 +1511,14 @@ fn writeModuleLayoutStatus(allocator: Allocator, project_dir: []const u8, w: *st
 
     try w.writeAll(
         "<p class=\"muted\" style=\"font-size:0.85rem;margin:6px 0 10px;\">" ++
-            "Workflow per <code>(sub-block …)</code>: author the placement grouping in the DSL, " ++
-            "seed a <b>Rough</b> placement on the module's PCB Layout view (the “Rough” button), " ++
+            "Workflow per sub circuit: author the placement grouping in the DSL, " ++
+            "seed a <b>Rough</b> placement on the sub circuit's PCB Layout view (the “Rough” button), " ++
             "hand-finish it, then <b>star</b> the saved layout (the ★) as its blessed reference — " ++
-            "do this for every sub-module before a KiCad hand-off. A <code>(reflow)</code> " ++
-            "sub-block is placed freely by the parent and needs none.</p>",
+            "do this for every sub circuit before a KiCad hand-off. A <code>(reflow)</code> " ++
+            "sub circuit is placed freely by the parent and needs none.</p>",
     );
 
-    try w.writeAll("<table><thead><tr><th>Sub-block</th><th>Module</th>" ++
+    try w.writeAll("<table><thead><tr><th>Sub circuit</th><th>Module</th>" ++
         "<th>Rough</th><th>Starred</th></tr></thead><tbody>");
     for (block.sub_blocks, statuses) |sb, st| {
         const mod_name = moduleSourceName(sb);
@@ -1577,33 +1591,44 @@ const ROUGH_TODO_CELL = "<span class=\"pill pill-todo\" title=\"No rough placeme
 const STARRED_TODO_CELL = "<span class=\"pill pill-todo\" title=\"No layout starred yet — " ++
     "finish the layout and star it (\u{2605}) on the module's PCB Layout view\">\u{2606} not yet</span>";
 
-/// Wires every sub-block "PCB Layout" panel: on Generate, build the scoped,
-/// routed embed URL from the global PCB-settings inputs and (re)load the
-/// iframe. Reuses the `DESIGN_NAME` global declared by writeScripts, so this
-/// must be emitted after it. Nothing runs until a button is pressed, so opening
-/// the schematic page never triggers a placement.
-const SUB_PCB_SCRIPT =
+/// Wires every sub circuit card's Schematic ⇄ PCB Layout toggle. Clicking "PCB
+/// Layout" hides the schematic hubs and reveals the PCB view, lazily setting the
+/// iframe `src` on first show (so opening the schematic page never triggers a
+/// placement). A module sub circuit (`data-mod` set) loads the *editable* embed
+/// of its own layout — drag / Rough / Save / ★ write the module's layout sidecar;
+/// others load the read-only design-scoped preview (`?sub=`). The iframe URL
+/// carries the global PCB-settings (via/track/clearance/DRC). Iterates `.subc-pcb`
+/// (one per card) and resolves each card via `closest`, so a section that adopts
+/// an attached sub circuit doesn't double-wire it. Reuses the `DESIGN_NAME`
+/// global declared by writeScripts, so this must be emitted after it.
+const SUBC_TOGGLE_SCRIPT =
     \\<script>(function(){
     \\function gv(id,dflt){var e=document.getElementById(id);var v=e?parseFloat(e.value):NaN;return (v>0)?v:dflt;}
     \\function gck(id){var e=document.getElementById(id);return (e&&e.checked)?1:0;}
-    \\function url(sub){
+    \\function settings(){return "track_width="+gv("g-tw",0.127)+"&clearance="+gv("g-cl",0.127)
+    \\ +"&via_drill="+gv("g-vd",0.2)+"&via_dia="+gv("g-va",0.4)
+    \\ +"&clr="+gck("g-clr-show")+"&drc="+gck("g-drc-show");}
+    \\function embedUrl(mod,sub){
+    \\ if(mod)return "/pcb-layout/"+encodeURIComponent(mod)+"?embed=1&edit=1&"+settings();
     \\ return "/pcb-layout/"+encodeURIComponent(DESIGN_NAME)+"?sub="+encodeURIComponent(sub)
-    \\  +"&embed=1&route=1&regen=1"
-    \\  +"&track_width="+gv("g-tw",0.127)+"&clearance="+gv("g-cl",0.127)
-    \\  +"&via_drill="+gv("g-vd",0.2)+"&via_dia="+gv("g-va",0.4)
-    \\  +"&clr="+gck("g-clr-show")+"&drc="+gck("g-drc-show");
-    \\}
-    \\document.querySelectorAll(".sub-pcb-body").forEach(function(body){
-    \\ var sub=body.getAttribute("data-sub");
-    \\ var btn=body.querySelector(".sub-pcb-gen");
-    \\ var st=body.querySelector(".sub-pcb-status");
-    \\ var wrap=body.querySelector(".sub-pcb-frame-wrap");
-    \\ var frame=body.querySelector(".sub-pcb-frame");
-    \\ if(!btn||!frame)return;
-    \\ frame.addEventListener("load",function(){if(frame.getAttribute("src"))st.textContent="Generated";});
-    \\ btn.addEventListener("click",function(){
-    \\  st.textContent="Generating…"; wrap.hidden=false;
-    \\  frame.setAttribute("src",url(sub)); btn.textContent="Regenerate";});
+    \\  +"&embed=1&edit=1&"+settings();}
+    \\function fullUrl(mod,sub){
+    \\ if(mod)return "/pcb-layout/"+encodeURIComponent(mod);
+    \\ return "/pcb-layout/"+encodeURIComponent(DESIGN_NAME)+"?sub="+encodeURIComponent(sub)+"&embed=1&edit=1";}
+    \\document.querySelectorAll(".subc-pcb").forEach(function(pcb){
+    \\ var card=pcb.closest(".sch-section,.sch-attached-sub"); if(!card)return;
+    \\ var tabs=card.querySelectorAll(".subc-tab");
+    \\ var sch=card.querySelector(".subc-sch");
+    \\ var frame=pcb.querySelector(".subc-pcb-frame");
+    \\ if(!tabs.length||!sch||!frame)return;
+    \\ var mod=pcb.getAttribute("data-mod")||""; var sub=pcb.getAttribute("data-sub")||"";
+    \\ var open=pcb.querySelector(".subc-pcb-open"); if(open)open.setAttribute("href",fullUrl(mod,sub));
+    \\ var loaded=false;
+    \\ function show(view){
+    \\  var isPcb=(view==="pcb"); sch.hidden=isPcb; pcb.hidden=!isPcb;
+    \\  tabs.forEach(function(t){t.classList.toggle("active",t.getAttribute("data-subc-view")===view);});
+    \\  if(isPcb&&!loaded){loaded=true; frame.setAttribute("src",embedUrl(mod,sub));}}
+    \\ tabs.forEach(function(t){t.addEventListener("click",function(){show(t.getAttribute("data-subc-view"));});});
     \\});
     \\})();</script>
 ;

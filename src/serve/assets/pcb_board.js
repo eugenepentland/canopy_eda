@@ -3,6 +3,10 @@ const NS="http://www.w3.org/2000/svg";
 const S=PCB.scale,MX=PCB.minx,MY=PCB.miny,M=PCB.margin,G=PCB.grid;
 const P=PCB.parts, orig=P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0};});
 var RO=!!PCB.ro;
+// `?sub=` query for a sub-circuit page so layout save/delete/star/rescore POST
+// to the per-sub sidecar (<design>.<sub>.layouts.json) instead of the design's.
+// Empty on a normal design/module page.
+function subq(){return (PCB.sub&&PCB.sub.length)?("?sub="+encodeURIComponent(PCB.sub)):"";}
 const X=function(mm){return (mm-MX+M)*S;}, Y=function(mm){return (mm-MY+M)*S;};
 const svg=document.getElementById("pcb-svg");
 const gP=document.createElementNS(NS,"g"), gR=document.createElementNS(NS,"g");
@@ -433,7 +437,7 @@ function bindLayLoad(b){b.addEventListener("click",function(){var nm=b.getAttrib
  setActiveLayout(nm);});}
 function bindLayDel(b){b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-del");
  if(!window.confirm("Delete layout \""+nm+"\"?"))return;
- fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+"/delete",{method:"POST",
+ fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+"/delete"+subq(),{method:"POST",
    headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm})})
   .then(function(r){if(!r.ok)throw 0;window.location.reload();}).catch(function(){});});}
 // ★ toggle: set this layout as the KiCad-sync default, or clear it if already
@@ -441,12 +445,12 @@ function bindLayDel(b){b.addEventListener("click",function(){var nm=b.getAttribu
 // vias from the default on the next sync.
 function bindLayDefault(b){b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-default");
  var send=b.classList.contains("on")?"":nm;
- fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+"/default",{method:"POST",
+ fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+"/default"+subq(),{method:"POST",
    headers:{"Content-Type":"application/json"},body:JSON.stringify({name:send})})
   .then(function(r){if(!r.ok)throw 0;window.location.reload();}).catch(function(){});});}
 function bindRescore(btn){btn.addEventListener("click",function(){
  btn.disabled=true;btn.textContent="Rescoring…";
- fetch("/api/pcb-rescore/"+encodeURIComponent(PCB.name),{method:"POST"})
+ fetch("/api/pcb-rescore/"+encodeURIComponent(PCB.name)+subq(),{method:"POST"})
   .then(function(r){if(!r.ok)throw 0;return r.json();})
   .then(function(){window.location.reload();})
   .catch(function(){btn.disabled=false;btn.textContent="\u{21bb} Rescore all";});}); }
@@ -489,7 +493,7 @@ function upsertLayoutPanel(nm){var saved=document.querySelector(".pcb-saved");if
 // scores/deltas track the Score-view weights alongside the live bar. Re-run
 // after a Save/Update so the affected row's score refreshes in place.
 function loadLayoutScores(){if(!((PCB.layouts||[]).length))return;
- fetch("/api/pcb-score-batch/"+encodeURIComponent(PCB.name),{method:"POST"})
+ fetch("/api/pcb-score-batch/"+encodeURIComponent(PCB.name)+subq(),{method:"POST"})
   .then(function(r){return r.json();})
   .then(function(j){(j.results||[]).forEach(function(it){layBreaks[it.name]=it.breakdown;});reweighLayouts();})
   .catch(function(){});}
@@ -498,7 +502,7 @@ function loadLayoutScores(){if(!((PCB.layouts||[]).length))return;
 function persistLayout(nm,verb){var msg=document.getElementById("pcb-savemsg");
  var parts=P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,origin:p.origin||""};});
  if(msg){msg.style.color="#8b949e";msg.textContent=verb+"\u{2026}";}
- return fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name),{method:"POST",
+ return fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",
    headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts})})
   .then(function(r){if(!r.ok)throw 0;return r.json();})
   .then(function(){
@@ -781,10 +785,16 @@ function livePoll(gen,lastSeq,misses){
    setTimeout(function(){livePoll(gen,lastSeq,0);},350);})
   .catch(function(){if(misses>20){liveHide();return;}
    setTimeout(function(){livePoll(gen,lastSeq,misses+1);},700);});}
+// A sub-circuit page's background regen job is keyed by the parent design, so
+// Rough/Regenerate re-solve via a plain reload (?regen=1 → a fresh, rough-seeded
+// solve of just this sub) instead of the design-level live animation.
+function subReload(){var u=window.location.href.split("#")[0];
+ window.location=u+(u.indexOf("?")>=0?"&":"?")+"regen=1";}
+var onSub=function(){return PCB.sub&&PCB.sub.length;};
 var rgl=document.getElementById("pcb-regen");
-if(rgl)rgl.addEventListener("click",function(ev){ev.preventDefault();liveRegen("");});
+if(rgl)rgl.addEventListener("click",function(ev){ev.preventDefault();if(onSub()){subReload();return;}liveRegen("");});
 var rgh=document.getElementById("pcb-rough");
-if(rgh)rgh.addEventListener("click",function(ev){ev.preventDefault();liveRegen("?rough=1");});
+if(rgh)rgh.addEventListener("click",function(ev){ev.preventDefault();if(onSub()){subReload();return;}liveRegen("?rough=1");});
 // ── Collapsible control deck (accordion) + board-view overlays ──────────
 (function(){
  var chips=Array.prototype.slice.call(document.querySelectorAll(".tab-chip"));

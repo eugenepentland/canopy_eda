@@ -525,19 +525,23 @@ details li{margin:3px 0;font-size:0.88rem;color:#c9d1d9;line-height:1.45;}
 .pcb-globals-chk{gap:5px!important;cursor:pointer;}
 .pcb-globals-hint{flex-basis:100%;font-size:0.72rem;color:#6e7681;}
 
-.sub-pcb{margin-top:10px;border-top:1px dashed #30363d;}
-.sub-pcb>summary{cursor:pointer;padding:8px 2px 6px;font-size:0.8rem;font-weight:600;color:#58a6ff;list-style:none;}
-.sub-pcb>summary::-webkit-details-marker{display:none;}
-.sub-pcb>summary::before{content:"\25B8  ";color:#8b949e;}
-.sub-pcb[open]>summary::before{content:"\25BE  ";}
-.sub-pcb-body{padding:4px 2px 8px;}
-.sub-pcb-controls{display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;}
-.sub-pcb-gen{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;padding:5px 12px;font-size:0.78rem;font-weight:600;cursor:pointer;font-family:inherit;}
-.sub-pcb-gen:hover{background:#30363d;border-color:#58a6ff;}
-.sub-pcb-status{font-size:0.74rem;color:#8b949e;}
-.sub-pcb-frame-wrap{border:1px solid #30363d;border-radius:8px;overflow:hidden;background:#010409;}
-.sub-pcb-frame-wrap[hidden]{display:none;}
-.sub-pcb-frame{width:100%;height:540px;border:0;display:block;}
+/* Sub circuit card: header actions (Copy source + the Schematic⇄PCB toggle)
+   cluster on the right; the toggle is a segmented control flipping the card
+   body between its .subc-sch (schematic hubs) and .subc-pcb (PCB layout) views. */
+.subc-head-actions{margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.subc-head-actions .copy-src-btn{margin-left:0;}
+.subc-toggle{display:inline-flex;border:1px solid #30363d;border-radius:6px;overflow:hidden;}
+.subc-tab{background:#0d1117;color:#8b949e;border:0;border-right:1px solid #30363d;padding:4px 12px;font-size:0.75rem;font-weight:600;cursor:pointer;font-family:inherit;}
+.subc-tab:last-child{border-right:0;}
+.subc-tab:hover{background:#161b22;color:#c9d1d9;}
+.subc-tab.active{background:#1f6feb;color:#fff;}
+.subc-view[hidden]{display:none;}
+.subc-pcb{margin-top:6px;}
+.subc-pcb-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px;}
+.subc-pcb-hint{font-size:0.74rem;}
+.subc-pcb-open{margin-left:auto;font-size:0.74rem;}
+.subc-pcb-frame-wrap{border:1px solid #30363d;border-radius:8px;overflow:hidden;background:#010409;}
+.subc-pcb-frame{width:100%;height:600px;border:0;display:block;}
 
 /* ── KiCad push preview modal + toast ─────────────────────────────────── */
 .kpv-overlay{position:fixed;inset:0;background:rgba(1,4,9,0.72);z-index:300;display:flex;align-items:center;justify-content:center;}
